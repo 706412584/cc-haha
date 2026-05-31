@@ -573,13 +573,13 @@ export function ActivitySettings() {
             }}
           />
         </div>
-        <div className="mt-6 flex max-w-full items-center justify-center gap-2">
+        <div className="group/activity-profile mt-6 flex max-w-full items-center justify-center gap-2">
           <h1 className="max-w-[min(720px,calc(100%-2.25rem))] truncate text-4xl font-semibold tracking-tight text-[var(--color-text-primary)] sm:text-[44px]">{profile.displayName}</h1>
           <button
             type="button"
             aria-label={t('settings.activity.editProfile')}
             title={t('settings.activity.editProfile')}
-            className="mt-1 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-[background-color,color,transform] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--color-brand)] focus:ring-offset-2 focus:ring-offset-[var(--color-surface)] active:translate-y-[1px] disabled:opacity-50"
+            className="mt-1 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--color-text-tertiary)] opacity-0 transition-[background-color,color,opacity,transform] group-hover/activity-profile:opacity-100 hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--color-brand)] focus:ring-offset-2 focus:ring-offset-[var(--color-surface)] focus-visible:opacity-100 active:translate-y-[1px] disabled:pointer-events-none disabled:opacity-0"
             onClick={() => {
               setIsEditingProfile(true)
               setDraftDisplayName(profile.displayName)

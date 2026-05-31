@@ -227,6 +227,18 @@ describe('ActivitySettings', () => {
     expect(screen.queryByText('Selected day')).not.toBeInTheDocument()
   })
 
+  it('keeps the profile edit control out of screenshots until hover or keyboard focus', async () => {
+    render(<ActivitySettings />)
+
+    await flushActivityLoad()
+
+    const editButton = screen.getByRole('button', { name: 'Edit profile' })
+    expect(editButton).toHaveClass('opacity-0')
+    expect(editButton).toHaveClass('group-hover/activity-profile:opacity-100')
+    expect(editButton).toHaveClass('focus-visible:opacity-100')
+    expect(editButton.closest('div')).toHaveClass('group/activity-profile')
+  })
+
   it('supports localized heatmap mode switches and persisted display name edits', async () => {
     useSettingsStore.setState({ locale: 'zh' })
     render(<ActivitySettings />)
