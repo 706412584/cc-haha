@@ -733,10 +733,10 @@ export class ConversationService {
 
   stopSession(sessionId: string): void {
     const session = this.sessions.get(sessionId)
-    if (session) {
-      session.proc.kill()
-      this.sessions.delete(sessionId)
-    }
+    if (!session) return
+
+    this.sessions.delete(sessionId)
+    this.killProcess(sessionId, session)
   }
 
   async stopSessionAndWait(sessionId: string, timeoutMs = 2_000): Promise<void> {
@@ -744,13 +744,62 @@ export class ConversationService {
     if (!session) return
 
     this.sessions.delete(sessionId)
-    session.proc.kill()
+    await this.stopProcessAndWait(sessionId, session, timeoutMs)
+  }
 
-    await Promise.race([
-      session.proc.exited.catch(() => undefined),
-      new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+  stopAllSessions(): void {
+    for (const sessionId of this.getActiveSessions()) {
+      this.stopSession(sessionId)
+    }
+  }
+
+  async stopAllSessionsAndWait(timeoutMs = 2_000): Promise<void> {
+    const activeSessions = Array.from(this.sessions.entries())
+    if (activeSessions.length === 0) return
+
+    this.sessions.clear()
+    await Promise.all(
+      activeSessions.map(([sessionId, session]) =>
+        this.stopProcessAndWait(sessionId, session, timeoutMs),
+      ),
+    )
+  }
+
+  private async stopProcessAndWait(
+    sessionId: string,
+    session: SessionProcess,
+    timeoutMs: number,
+  ): Promise<void> {
+    this.killProcess(sessionId, session, 'SIGTERM')
+
+    const exited = await Promise.race([
+      session.proc.exited.then(() => true, () => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
     ])
+    if (!exited) {
+      this.killProcess(sessionId, session, 'SIGKILL')
+      await Promise.race([
+        session.proc.exited.catch(() => undefined),
+        new Promise<void>((resolve) => setTimeout(resolve, 500)),
+      ])
+    }
     await this.waitForProcessOutputDrain(session, timeoutMs)
+  }
+
+  private killProcess(
+    sessionId: string,
+    session: SessionProcess,
+    signal?: NodeJS.Signals,
+  ): void {
+    try {
+      session.proc.kill(signal)
+    } catch (error) {
+      console.warn(
+        `[ConversationService] Failed to kill CLI subprocess for ${sessionId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      )
+    }
   }
 
   markSessionDeleted(sessionId: string): void {

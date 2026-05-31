@@ -599,6 +599,54 @@ describe('ConversationService', () => {
     expect(args).toContain('--worktree-base-ref')
     expect(args).toContain('feature/rail')
   })
+
+  test('stopAllSessionsAndWait kills every active CLI subprocess and waits for exits', async () => {
+    const service = new ConversationService() as any
+    const killed: string[] = []
+    const drained: string[] = []
+
+    const makeSession = (sessionId: string) => {
+      let resolveExit: (code: number) => void = () => {}
+      const exited = new Promise<number>((resolve) => {
+        resolveExit = resolve
+      })
+
+      return {
+        proc: {
+          kill: () => {
+            killed.push(sessionId)
+            resolveExit(0)
+          },
+          exited,
+        },
+        outputCallbacks: [],
+        workDir: tmpDir,
+        permissionMode: 'default',
+        sdkToken: `${sessionId}-token`,
+        sdkSocket: null,
+        pendingOutbound: [],
+        startupPending: false,
+        startupExitCode: null,
+        stdoutLines: [],
+        stderrLines: [],
+        outputDrain: Promise.resolve().then(() => {
+          drained.push(sessionId)
+        }),
+        sdkMessages: [],
+        initMessage: null,
+        pendingPermissionRequests: new Map(),
+      }
+    }
+
+    service.sessions.set('session-a', makeSession('session-a'))
+    service.sessions.set('session-b', makeSession('session-b'))
+
+    await service.stopAllSessionsAndWait(500)
+
+    expect(killed.sort()).toEqual(['session-a', 'session-b'])
+    expect(drained.sort()).toEqual(['session-a', 'session-b'])
+    expect(service.getActiveSessions()).toEqual([])
+  })
 })
 
 function sanitizeMemoryPath(value: string): string {

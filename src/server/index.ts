@@ -454,26 +454,46 @@ export function startServer(port = PORT, host = HOST) {
 
 // ─── Graceful shutdown: kill all CLI subprocesses on exit ────────────────────
 
+let shutdownInProgress: Promise<void> | null = null
+
 function cleanupAllSessions() {
   const active = conversationService.getActiveSessions()
   if (active.length > 0) {
     console.log(`[Server] Shutting down — killing ${active.length} CLI subprocess(es)`)
-    for (const sessionId of active) {
-        conversationService.stopSession(sessionId)
-    }
+    conversationService.stopAllSessions()
   }
 }
 
+async function cleanupAllSessionsAndWait() {
+  const active = conversationService.getActiveSessions()
+  if (active.length > 0) {
+    console.log(`[Server] Shutting down — killing ${active.length} CLI subprocess(es)`)
+    await conversationService.stopAllSessionsAndWait()
+  }
+}
+
+function shutdownAndExit(signal: 'SIGTERM' | 'SIGINT', exitCode: number) {
+  if (shutdownInProgress) return
+
+  shutdownInProgress = (async () => {
+    console.log(`[Server] Received ${signal}`)
+    await cleanupAllSessionsAndWait()
+    process.exit(exitCode)
+  })().catch((error) => {
+    console.error(
+      `[Server] ${signal} shutdown cleanup failed:`,
+      error instanceof Error ? error.message : error,
+    )
+    process.exit(1)
+  })
+}
+
 process.on('SIGTERM', () => {
-  console.log('[Server] Received SIGTERM')
-  cleanupAllSessions()
-  process.exit(0)
+  shutdownAndExit('SIGTERM', 0)
 })
 
 process.on('SIGINT', () => {
-  console.log('[Server] Received SIGINT')
-  cleanupAllSessions()
-  process.exit(0)
+  shutdownAndExit('SIGINT', 0)
 })
 
 process.on('exit', () => {

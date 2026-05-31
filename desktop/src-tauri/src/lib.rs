@@ -231,6 +231,7 @@ const APP_MODE_FILE: &str = "app-mode.json";
 const MIN_WINDOW_WIDTH: u32 = 960;
 const MIN_WINDOW_HEIGHT: u32 = 640;
 const MIN_VISIBLE_PIXELS: i64 = 64;
+const SIDECAR_GRACEFUL_TERMINATION_TIMEOUT: Duration = Duration::from_millis(3_000);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -1819,7 +1820,51 @@ fn kill_sidecar_child(child: CommandChild) {
         }
     }
 
+    #[cfg(unix)]
+    {
+        terminate_unix_sidecar_child(child);
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+}
+
+#[cfg(unix)]
+fn terminate_unix_sidecar_child(child: CommandChild) {
+    let pid = child.pid();
+    let pid_text = pid.to_string();
+
+    // tauri-plugin-shell's CommandChild::kill() maps to SIGKILL on Unix.
+    // Give bundled sidecars a SIGTERM window first so the server can stop
+    // CLI sessions it spawned before the native app exits.
+    let _ = StdCommand::new("kill")
+        .args(["-TERM", &pid_text])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    let deadline = Instant::now() + SIDECAR_GRACEFUL_TERMINATION_TIMEOUT;
+    while Instant::now() < deadline {
+        if !is_unix_process_running(pid) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
     let _ = child.kill();
+}
+
+#[cfg(unix)]
+fn is_unix_process_running(pid: u32) -> bool {
+    StdCommand::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 #[cfg(unix)]
