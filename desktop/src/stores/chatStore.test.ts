@@ -3941,15 +3941,20 @@ describe('chatStore message queue', () => {
     expect(findUserMessageSends()).toHaveLength(0)
   })
 
-  it('does not flush the queue on the idle produced by a user Stop, then resumes on the next idle', () => {
+  it('does not flush the queue on the idle(s) produced by a user Stop, then resumes after the next message', () => {
     useChatStore.setState({
       sessions: { [TEST_SESSION_ID]: makeSession({ chatState: 'streaming' }) },
     })
     useChatStore.getState().enqueueMessage(TEST_SESSION_ID, 'queued-1')
     useChatStore.getState().enqueueMessage(TEST_SESSION_ID, 'queued-2')
 
-    // User clicks Stop: the resulting idle must NOT drain the queue.
+    // User clicks Stop. A Stop can emit multiple idle-like events (result +
+    // status); NONE of them may drain the queue, or the turn would "resume".
     useChatStore.getState().stopGeneration(TEST_SESSION_ID)
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'message_complete',
+      usage: { input_tokens: 1, output_tokens: 1 },
+    })
     useChatStore.getState().handleServerMessage(TEST_SESSION_ID, { type: 'status', state: 'idle' })
     expect(findUserMessageSends()).toHaveLength(0)
     expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messageQueue).toHaveLength(2)
@@ -3959,7 +3964,6 @@ describe('chatStore message queue', () => {
     const afterPriority = findUserMessageSends()
     expect(afterPriority).toHaveLength(1)
     expect((afterPriority[0]![1] as { content: string }).content).toBe('priority now')
-    // Queue untouched by the priority send.
     expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messageQueue).toHaveLength(2)
 
     // When the priority turn completes, the queue resumes (one item drains).

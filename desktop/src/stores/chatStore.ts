@@ -341,11 +341,12 @@ const flushTimerBySession = new Map<string, ReturnType<typeof setTimeout>>()
 const pendingToolInputDeltaBySession = new Map<string, string>()
 const toolInputFlushTimerBySession = new Map<string, ReturnType<typeof setTimeout>>()
 
-// One-shot guard: when the user clicks Stop, skip exactly the next auto-drain
-// of the message queue so the queue does not immediately flush. This lets the
-// user send a priority message that fires right away (session is idle). After
-// that message finishes, the queue resumes on the next idle as usual.
-const skipNextQueueDrain = new Set<string>()
+// When the user clicks Stop, pause queue auto-draining until the user sends
+// their next message. Stop can produce multiple idle-like events (result +
+// status), so a one-shot skip is not enough — we stay paused and only clear it
+// when a fresh user message is sent (which then runs immediately, ahead of the
+// queue). The queue resumes on the idle after that message completes.
+const queueDrainPaused = new Set<string>()
 
 function consumePendingDelta(sessionId: string): string {
   const flushTimer = flushTimerBySession.get(sessionId)
@@ -904,7 +905,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     clearPendingToolInputDelta(sessionId)
     clearPendingTaskToolUseIds(sessionId)
     clearPendingToolParentUseIds(sessionId)
-    skipNextQueueDrain.delete(sessionId)
+    queueDrainPaused.delete(sessionId)
     wsManager.disconnect(sessionId)
     set((s) => {
       const { [sessionId]: _, ...rest } = s.sessions
@@ -913,6 +914,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   sendMessage: (sessionId, content, attachments, options) => {
+    // A fresh user send takes priority over any paused queue: clear the pause
+    // so this message fires now, and the queue resumes on the next idle.
+    queueDrainPaused.delete(sessionId)
     const isMemberSession = !!useTeamStore.getState().getMemberBySessionId(sessionId)
     const hideDisplayContent = !isMemberSession && options?.hideDisplayContent === true
     const userFacingContent =
@@ -1090,12 +1094,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   drainMessageQueue: (sessionId) => {
     const session = get().sessions[sessionId]
     if (!session) return
-    // A user-initiated Stop sets a one-shot skip so this idle does not flush
-    // the queue. Consume it and bail; the queue resumes on the next idle.
-    if (skipNextQueueDrain.has(sessionId)) {
-      skipNextQueueDrain.delete(sessionId)
-      return
-    }
+    // Paused by a user Stop: do not drain on any idle event. Stays paused (we
+    // do NOT clear it here) until the user sends their next message, which
+    // clears it. This survives the multiple idle events a Stop produces.
+    if (queueDrainPaused.has(sessionId)) return
     // Only drain on a true idle turn boundary — never mid-stream, while a tool
     // is running, or while a permission prompt is pending.
     if (session.chatState !== 'idle') return
@@ -1155,11 +1157,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   stopGeneration: (sessionId) => {
     wsManager.send(sessionId, { type: 'stop_generation' })
-    // Skip the auto-drain triggered by the idle that this Stop produces, so the
-    // queue is not flushed. The next message the user sends fires immediately
-    // (session is idle); the queue resumes draining after that turn completes.
+    // Pause queue draining until the user sends their next message. Stop emits
+    // multiple idle events (result + status); staying paused (rather than a
+    // one-shot skip) prevents any queued message from auto-firing, so the turn
+    // truly stops. The next user message clears this and fires immediately.
     if ((get().sessions[sessionId]?.messageQueue?.length ?? 0) > 0) {
-      skipNextQueueDrain.add(sessionId)
+      queueDrainPaused.add(sessionId)
     }
     if (pendingDeltaBySession.has(sessionId)) {
       const text = consumePendingDelta(sessionId)
