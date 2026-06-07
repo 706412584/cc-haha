@@ -87,6 +87,7 @@ export type SessionLaunchInfo = {
   runtimeProviderId?: string | null
   runtimeModelId?: string
   effortLevel?: string
+  thinkingEnabled?: boolean
 }
 
 export type TrimSessionResult = {
@@ -246,6 +247,7 @@ type SessionListSummary = {
   runtimeProviderId?: string | null
   runtimeModelId?: string
   effortLevel?: string
+  thinkingEnabled?: boolean
   repository?: PreparedSessionWorkspace['repository']
   worktreeSession?: PersistedWorktreeSession | null
 }
@@ -372,6 +374,7 @@ export class SessionService {
     let runtimeProviderId: string | null | undefined
     let runtimeModelId: string | undefined
     let effortLevel: string | undefined
+    let thinkingEnabled: boolean | undefined
     let repository: PreparedSessionWorkspace['repository'] | undefined
     let worktreeSession: PersistedWorktreeSession | null | undefined
 
@@ -431,6 +434,9 @@ export class SessionService {
             VALID_SESSION_EFFORT_LEVELS.has((entry as Record<string, unknown>).effortLevel as string)
           ) {
             effortLevel = (entry as Record<string, unknown>).effortLevel as string
+          }
+          if (typeof (entry as Record<string, unknown>).thinkingEnabled === 'boolean') {
+            thinkingEnabled = (entry as Record<string, unknown>).thinkingEnabled as boolean
           }
         }
 
@@ -496,6 +502,7 @@ export class SessionService {
       ...(runtimeProviderId !== undefined ? { runtimeProviderId } : {}),
       ...(runtimeModelId ? { runtimeModelId } : {}),
       ...(effortLevel ? { effortLevel } : {}),
+      ...(thinkingEnabled !== undefined ? { thinkingEnabled } : {}),
       ...(repository ? { repository } : {}),
       ...(worktreeSession !== undefined ? { worktreeSession } : {}),
     }
@@ -1948,6 +1955,7 @@ export class SessionService {
     let runtimeProviderId: string | null | undefined
     let runtimeModelId: string | undefined
     let effortLevel: string | undefined
+    let thinkingEnabled: boolean | undefined
 
     for (const entry of entries) {
       if (entry.type === 'custom-title' && typeof entry.customTitle === 'string') {
@@ -1967,6 +1975,9 @@ export class SessionService {
         ) {
           effortLevel = record.effortLevel
         }
+        if (typeof record.thinkingEnabled === 'boolean') {
+          thinkingEnabled = record.thinkingEnabled
+        }
       }
     }
     const transcriptMessageCount = this.countTranscriptMessages(entries)
@@ -1983,6 +1994,7 @@ export class SessionService {
       ...(runtimeProviderId !== undefined ? { runtimeProviderId } : {}),
       ...(runtimeModelId ? { runtimeModelId } : {}),
       ...(effortLevel ? { effortLevel } : {}),
+      ...(thinkingEnabled !== undefined ? { thinkingEnabled } : {}),
     }
   }
 
@@ -2051,6 +2063,7 @@ export class SessionService {
       runtimeProviderId?: string | null
       runtimeModelId?: string
       effortLevel?: string
+      thinkingEnabled?: boolean
     }
   ): Promise<void> {
     const matches = await this.findSessionFiles(sessionId)
@@ -2086,6 +2099,9 @@ export class SessionService {
       ...(metadata.runtimeModelId ? { runtimeModelId: metadata.runtimeModelId } : {}),
       ...(metadata.effortLevel && VALID_SESSION_EFFORT_LEVELS.has(metadata.effortLevel)
         ? { effortLevel: metadata.effortLevel }
+        : {}),
+      ...(metadata.thinkingEnabled !== undefined
+        ? { thinkingEnabled: metadata.thinkingEnabled }
         : {}),
       timestamp: new Date().toISOString(),
     })

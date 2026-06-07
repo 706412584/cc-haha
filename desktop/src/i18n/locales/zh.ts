@@ -410,6 +410,11 @@ export const zh: Record<TranslationKey, string> = {
   'settings.providers.autoCompactWindowNumberError': '请输入整数。',
   'settings.providers.autoCompactWindowRangeError': '范围必须在 16000 到 10000000 之间。',
   'settings.providers.testConnection': '测试连接',
+  'settings.providers.fetchModels': '获取模型',
+  'settings.providers.fetchModelsHint': '从服务商拉取可用模型列表',
+  'settings.providers.fetchModelsOk': '已获取 {count} 个模型',
+  'settings.providers.fetchModelsFailed': '获取失败：{error}',
+  'settings.providers.fetchModelsNeedKey': '请先填入 API Key',
   'settings.providers.settingsJson': '设置 JSON',
   'settings.providers.settingsJsonDesc': '~/.claude/cc-haha/settings.json — 直接编辑，保存时写入。',
   'settings.providers.jsonError': 'JSON 语法错误: {error}',
@@ -892,10 +897,11 @@ export const zh: Record<TranslationKey, string> = {
 
   // Settings > General
   'settings.general.appearanceTitle': '配色主题',
-  'settings.general.appearanceDescription': '在经典暖色、暗色与纯白工作区之间切换。',
+  'settings.general.appearanceDescription': '在经典暖色、暗色与纯白工作区之间切换，或跟随系统。',
   'settings.general.appearance.light': '经典暖色',
   'settings.general.appearance.dark': '暗色',
   'settings.general.appearance.white': '纯白',
+  'settings.general.appearance.system': '跟随系统',
   'settings.general.languageTitle': '语言',
   'settings.general.languageDescription': '选择应用程序的显示语言。',
   'settings.general.responseLangTitle': '回复语言',
@@ -1492,6 +1498,10 @@ export const zh: Record<TranslationKey, string> = {
   'model.selectModel': '选择模型',
   'model.configuration': '模型配置',
   'model.effort': '推理强度',
+  'model.thinking': '思考模式',
+  'model.thinkingOn': '开启',
+  'model.thinkingOff': '关闭',
+  'model.thinkingHint': '仅对当前会话生效',
 
   // ─── Directory Picker ──────────────────────────────────────
   'dirPicker.selectProject': '选择项目...',

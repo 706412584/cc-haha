@@ -485,6 +485,41 @@ const MODEL_CONTEXT_WINDOWS_ENV_KEY = 'CLAUDE_CODE_MODEL_CONTEXT_WINDOWS'
 const MODEL_CONTEXT_WINDOW_MIN = 16000
 const MODEL_CONTEXT_WINDOW_MAX = 10000000
 const MODEL_SLOTS = ['main', 'haiku', 'sonnet', 'opus'] as const
+
+// Pull `id` strings out of common /v1/models response shapes (OpenAI: { data: [{ id }] };
+// Anthropic: { data: [{ id }] }; some proxies wrap in { models: [...] } or return a bare array).
+function extractModelIds(payload: unknown): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  const visit = (item: unknown) => {
+    if (!item || typeof item !== 'object') return
+    const obj = item as Record<string, unknown>
+    const id = typeof obj.id === 'string'
+      ? obj.id
+      : typeof obj.name === 'string'
+        ? obj.name
+        : typeof obj.model === 'string'
+          ? obj.model
+          : null
+    if (id && !seen.has(id)) {
+      seen.add(id)
+      out.push(id)
+    }
+  }
+  if (Array.isArray(payload)) {
+    payload.forEach(visit)
+    return out
+  }
+  if (payload && typeof payload === 'object') {
+    const obj = payload as Record<string, unknown>
+    const lists = ['data', 'models', 'items', 'results']
+    for (const key of lists) {
+      const value = obj[key]
+      if (Array.isArray(value)) value.forEach(visit)
+    }
+  }
+  return out
+}
 const DEFAULT_PROVIDER_AUTH_STRATEGY: ProviderAuthStrategy = 'auth_token'
 const AUTH_ENV_KEYS = new Set(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'])
 type ModelSlot = typeof MODEL_SLOTS[number]
@@ -737,6 +772,51 @@ function openExternalUrl(url: string) {
     .catch(() => window.open(url, '_blank', 'noopener,noreferrer'))
 }
 
+// Combobox-style input for provider model IDs: free-text plus a native datalist dropdown
+// fed by the "Fetch Models" button. Keeps the same visual language as the Input component.
+function ModelComboInput({
+  label,
+  required,
+  value,
+  onChange,
+  placeholder,
+  listId,
+}: {
+  label: string
+  required?: boolean
+  value: string
+  onChange: (value: string) => void
+  placeholder?: string
+  listId: string
+}) {
+  const inputId = `${listId}-${label.toLowerCase().replace(/\s+/g, '-')}`
+  return (
+    <div className="flex flex-col gap-1">
+      <label htmlFor={inputId} className="text-sm font-medium text-[var(--color-text-primary)]">
+        {label}
+        {required && <span className="text-[var(--color-error)] ml-0.5">*</span>}
+      </label>
+      <input
+        id={inputId}
+        list={listId}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        autoComplete="off"
+        spellCheck={false}
+        className="
+          h-10 px-3 rounded-[var(--radius-md)] border text-sm
+          bg-[var(--color-surface)] text-[var(--color-text-primary)]
+          placeholder:text-[var(--color-text-tertiary)]
+          transition-colors duration-150
+          border-[var(--color-border)] focus:border-[var(--color-border-focus)] focus:shadow-[var(--shadow-focus-ring)]
+          outline-none
+        "
+      />
+    </div>
+  )
+}
+
 function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderFormProps) {
   const { createProvider, updateProvider, testConfig } = useProviderStore()
   const fetchSettings = useSettingsStore((s) => s.fetchAll)
@@ -779,6 +859,9 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [testResult, setTestResult] = useState<ProviderTestResult | null>(null)
   const [isTesting, setIsTesting] = useState(false)
+  const [fetchedModels, setFetchedModels] = useState<string[]>([])
+  const [isFetchingModels, setIsFetchingModels] = useState(false)
+  const [fetchModelsResult, setFetchModelsResult] = useState<{ kind: 'ok' | 'error'; message: string } | null>(null)
   const [settingsJson, setSettingsJson] = useState('')
   const [settingsJsonError, setSettingsJsonError] = useState<string | null>(null)
   const jsonPastedRef = useRef(false)
@@ -1056,6 +1139,54 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
     }
   }
 
+  const handleFetchModels = async () => {
+    const trimmedBase = baseUrl.trim()
+    if (!trimmedBase) return
+    // Reuse the saved key when editing without entering a new one.
+    const effectiveKey = apiKey.trim() || (mode === 'edit' && provider?.apiKey) || ''
+    if (requiresApiKey && !effectiveKey) {
+      setFetchModelsResult({ kind: 'error', message: t('settings.providers.fetchModelsNeedKey') })
+      return
+    }
+    setIsFetchingModels(true)
+    setFetchModelsResult(null)
+    try {
+      // OpenAI-compatible providers expose /v1/models with Bearer auth; Anthropic exposes
+      // /v1/models with x-api-key + anthropic-version. Fall back to OpenAI shape on unknown.
+      const trimmed = trimmedBase.replace(/\/+$/, '')
+      const url = trimmed.endsWith('/v1') ? `${trimmed}/models` : `${trimmed}/v1/models`
+      const headers: Record<string, string> = { Accept: 'application/json' }
+      if (apiFormat === 'anthropic') {
+        if (effectiveKey) headers['x-api-key'] = effectiveKey
+        headers['anthropic-version'] = '2023-06-01'
+      } else if (effectiveKey) {
+        headers['Authorization'] = `Bearer ${effectiveKey}`
+      }
+      const res = await fetch(url, { method: 'GET', headers })
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`)
+      }
+      const json: unknown = await res.json()
+      const ids = extractModelIds(json)
+      if (ids.length === 0) {
+        throw new Error('empty')
+      }
+      setFetchedModels(ids)
+      setFetchModelsResult({
+        kind: 'ok',
+        message: t('settings.providers.fetchModelsOk', { count: String(ids.length) }),
+      })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setFetchModelsResult({
+        kind: 'error',
+        message: t('settings.providers.fetchModelsFailed', { error: message }),
+      })
+    } finally {
+      setIsFetchingModels(false)
+    }
+  }
+
   return (
     <Modal
       open={open}
@@ -1209,12 +1340,59 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
 
         {/* Model Mapping */}
         <div>
-          <label className="text-sm font-medium text-[var(--color-text-primary)] mb-2 block">{t('settings.providers.modelMapping')}</label>
+          <div className="flex items-center justify-between mb-2">
+            <label className="text-sm font-medium text-[var(--color-text-primary)]">{t('settings.providers.modelMapping')}</label>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleFetchModels}
+              loading={isFetchingModels}
+              disabled={!baseUrl.trim() || (requiresApiKey && !apiKey.trim() && !(mode === 'edit' && provider?.apiKey))}
+              title={t('settings.providers.fetchModelsHint')}
+            >
+              {t('settings.providers.fetchModels')}
+            </Button>
+          </div>
+          {fetchModelsResult && (
+            <p className={`text-[11px] mb-2 ${fetchModelsResult.kind === 'ok' ? 'text-[var(--color-success)]' : 'text-[var(--color-error)]'}`}>
+              {fetchModelsResult.message}
+            </p>
+          )}
+          <datalist id="provider-fetched-models">
+            {fetchedModels.map((id) => (
+              <option key={id} value={id} />
+            ))}
+          </datalist>
           <div className="grid grid-cols-2 gap-2">
-            <Input label={t('settings.providers.mainModel')} required value={models.main} onChange={(e) => handleModelChange('main', e.target.value)} placeholder="Model ID" />
-            <Input label={t('settings.providers.haikuModel')} value={models.haiku} onChange={(e) => handleModelChange('haiku', e.target.value)} placeholder={t('settings.providers.sameAsMain')} />
-            <Input label={t('settings.providers.sonnetModel')} value={models.sonnet} onChange={(e) => handleModelChange('sonnet', e.target.value)} placeholder={t('settings.providers.sameAsMain')} />
-            <Input label={t('settings.providers.opusModel')} value={models.opus} onChange={(e) => handleModelChange('opus', e.target.value)} placeholder={t('settings.providers.sameAsMain')} />
+            <ModelComboInput
+              label={t('settings.providers.mainModel')}
+              required
+              value={models.main}
+              onChange={(value) => handleModelChange('main', value)}
+              placeholder="Model ID"
+              listId="provider-fetched-models"
+            />
+            <ModelComboInput
+              label={t('settings.providers.haikuModel')}
+              value={models.haiku}
+              onChange={(value) => handleModelChange('haiku', value)}
+              placeholder={t('settings.providers.sameAsMain')}
+              listId="provider-fetched-models"
+            />
+            <ModelComboInput
+              label={t('settings.providers.sonnetModel')}
+              value={models.sonnet}
+              onChange={(value) => handleModelChange('sonnet', value)}
+              placeholder={t('settings.providers.sameAsMain')}
+              listId="provider-fetched-models"
+            />
+            <ModelComboInput
+              label={t('settings.providers.opusModel')}
+              value={models.opus}
+              onChange={(value) => handleModelChange('opus', value)}
+              placeholder={t('settings.providers.sameAsMain')}
+              listId="provider-fetched-models"
+            />
           </div>
         </div>
 
@@ -1558,6 +1736,7 @@ function GeneralSettings() {
     { value: 'white', label: t('settings.general.appearance.white') },
     { value: 'light', label: t('settings.general.appearance.light') },
     { value: 'dark', label: t('settings.general.appearance.dark') },
+    { value: 'system', label: t('settings.general.appearance.system') },
   ]
 
   const WEB_SEARCH_MODES: Array<{ value: WebSearchMode; label: string }> = [

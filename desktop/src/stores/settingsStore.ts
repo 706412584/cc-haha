@@ -271,6 +271,9 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     const prev = get().theme
     set({ theme })
     useUIStore.getState().setTheme(theme)
+    // 'system' is a desktop-only logical mode (resolves to light/dark via OS preference).
+    // The server only persists concrete themes; skip the round-trip to avoid validation errors.
+    if (theme === 'system') return
     try {
       await settingsApi.updateUser({ theme })
     } catch {

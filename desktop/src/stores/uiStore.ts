@@ -11,14 +11,49 @@ function getStoredTheme(): ThemeMode {
   return 'white'
 }
 
+function getSystemPrefersDark(): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false
+  return window.matchMedia('(prefers-color-scheme: dark)').matches
+}
+
+// Resolve a logical theme to the concrete data-theme attribute applied to the DOM.
+// 'system' delegates to OS preference and toggles between 'dark' and 'light'.
+export function resolveAppliedTheme(theme: ThemeMode): Exclude<ThemeMode, 'system'> {
+  if (theme === 'system') return getSystemPrefersDark() ? 'dark' : 'light'
+  return theme
+}
+
 export function applyTheme(theme: ThemeMode) {
   if (typeof document === 'undefined') return
-  document.documentElement.setAttribute('data-theme', theme)
-  document.documentElement.style.colorScheme = theme === 'dark' ? 'dark' : 'light'
+  const applied = resolveAppliedTheme(theme)
+  document.documentElement.setAttribute('data-theme', applied)
+  document.documentElement.style.colorScheme = applied === 'dark' ? 'dark' : 'light'
+}
+
+let systemThemeMediaQuery: MediaQueryList | null = null
+let systemThemeListener: ((event: MediaQueryListEvent) => void) | null = null
+
+function ensureSystemThemeListener(theme: ThemeMode) {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
+  // Detach existing listener whenever theme changes; re-attach only for 'system'.
+  if (systemThemeMediaQuery && systemThemeListener) {
+    systemThemeMediaQuery.removeEventListener('change', systemThemeListener)
+    systemThemeMediaQuery = null
+    systemThemeListener = null
+  }
+  if (theme !== 'system') return
+  systemThemeMediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
+  systemThemeListener = () => {
+    // Re-resolve and re-apply when OS preference flips while 'system' is active.
+    applyTheme('system')
+  }
+  systemThemeMediaQuery.addEventListener('change', systemThemeListener)
 }
 
 export function initializeTheme() {
-  applyTheme(getStoredTheme())
+  const theme = getStoredTheme()
+  applyTheme(theme)
+  ensureSystemThemeListener(theme)
 }
 
 export type Toast = {
@@ -81,6 +116,7 @@ export const useUIStore = create<UIStore>((set) => ({
 
   setTheme: (theme) => {
     applyTheme(theme)
+    ensureSystemThemeListener(theme)
     try { localStorage.setItem(THEME_STORAGE_KEY, theme) } catch { /* noop */ }
     set({ theme })
   },
@@ -90,6 +126,7 @@ export const useUIStore = create<UIStore>((set) => ({
       const currentIndex = THEME_MODES.indexOf(state.theme)
       const next = THEME_MODES[(currentIndex + 1) % THEME_MODES.length] ?? 'white'
       applyTheme(next)
+      ensureSystemThemeListener(next)
       try { localStorage.setItem(THEME_STORAGE_KEY, next) } catch { /* noop */ }
       return { theme: next }
     })

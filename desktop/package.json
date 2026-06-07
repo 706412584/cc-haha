@@ -50,6 +50,16 @@
       "target": "nsis",
       "icon": "src-tauri/icons/icon.ico"
     },
+    "nsis": {
+      "oneClick": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "deleteAppDataOnUninstall": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "license": "build/license.txt"
+    },
     "linux": {
       "target": [
         "AppImage",

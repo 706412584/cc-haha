@@ -80,6 +80,7 @@ const runtimeOverrides = new Map<string, {
   providerId: string | null
   modelId: string
   effort?: string
+  thinkingEnabled?: boolean
 }>()
 
 const runtimeTransitionPromises = new Map<string, Promise<void>>()
@@ -599,18 +600,25 @@ async function handleSetRuntimeConfig(
     })
     return
   }
+  // Per-session thinking override. `undefined` means "inherit from global user setting"
+  // (which `resolveDesktopThinkingMode` reads in getRuntimeSettings); a concrete boolean
+  // wins over the global toggle.
+  const thinkingEnabled =
+    typeof message.thinkingEnabled === 'boolean' ? message.thinkingEnabled : undefined
 
   const nextOverride = {
     providerId: message.providerId ?? null,
     modelId,
     ...(effortLevel ? { effort: effortLevel } : {}),
+    ...(thinkingEnabled !== undefined ? { thinkingEnabled } : {}),
   }
   const prevOverride = runtimeOverrides.get(sessionId)
   if (
     prevOverride &&
     prevOverride.providerId === nextOverride.providerId &&
     prevOverride.modelId === nextOverride.modelId &&
-    prevOverride.effort === nextOverride.effort
+    prevOverride.effort === nextOverride.effort &&
+    prevOverride.thinkingEnabled === nextOverride.thinkingEnabled
   ) {
     return
   }
@@ -646,6 +654,7 @@ async function handleSetRuntimeConfig(
         currentOverride?.providerId !== nextOverride.providerId ||
         currentOverride.modelId !== nextOverride.modelId ||
         currentOverride.effort !== nextOverride.effort ||
+        currentOverride.thinkingEnabled !== nextOverride.thinkingEnabled ||
         !conversationService.hasSession(sessionId)
       ) {
         return
@@ -719,7 +728,7 @@ async function persistSessionPermissionMode(
 
 async function persistSessionRuntimeConfig(
   sessionId: string,
-  runtime: { providerId: string | null; modelId: string; effort?: string },
+  runtime: { providerId: string | null; modelId: string; effort?: string; thinkingEnabled?: boolean },
 ): Promise<void> {
   const workDir =
     conversationService.getSessionWorkDir(sessionId) ||
@@ -732,6 +741,7 @@ async function persistSessionRuntimeConfig(
     runtimeProviderId: runtime.providerId,
     runtimeModelId: runtime.modelId,
     ...(runtime.effort ? { effortLevel: runtime.effort } : {}),
+    ...(runtime.thinkingEnabled !== undefined ? { thinkingEnabled: runtime.thinkingEnabled } : {}),
   })
 }
 
@@ -2102,7 +2112,7 @@ type RuntimeSettings = {
   permissionMode?: string
   model?: string
   effort?: string
-  thinking?: 'disabled'
+  thinking?: 'enabled' | 'disabled'
   providerId?: string | null
 }
 
@@ -2129,6 +2139,9 @@ async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSettings> 
           providerId: launchInfo.runtimeProviderId ?? null,
           modelId: launchInfo.runtimeModelId,
           ...(launchInfo.effortLevel ? { effort: launchInfo.effortLevel } : {}),
+          ...(launchInfo.thinkingEnabled !== undefined
+            ? { thinkingEnabled: launchInfo.thinkingEnabled }
+            : {}),
         }
       : undefined
   const runtimeOverride = sessionId
@@ -2152,7 +2165,7 @@ async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSettings> 
     }
 
     const userSettings = await settingsService.getUserSettings()
-    const thinking = resolveDesktopThinkingMode(userSettings)
+    const thinking = resolveDesktopThinkingMode(userSettings, runtimeOverride.thinkingEnabled)
 
     return {
       permissionMode: sessionPermissionMode ?? await settingsService.getPermissionMode().catch(() => undefined),
@@ -2233,7 +2246,14 @@ async function getDefaultRuntimeSettings(): Promise<RuntimeSettings> {
 
 function resolveDesktopThinkingMode(
   settings: Record<string, unknown>,
-): 'disabled' | undefined {
+  override?: boolean,
+): 'enabled' | 'disabled' | undefined {
+  // Per-session override wins over the global toggle. true → 'enabled' (force on),
+  // false → 'disabled' (force off). Undefined falls back to user settings, where
+  // alwaysThinkingEnabled === false explicitly maps to 'disabled' and any other
+  // value (true / undefined / missing) lets the CLI default (adaptive) apply.
+  if (override === true) return 'enabled'
+  if (override === false) return 'disabled'
   return settings.alwaysThinkingEnabled === false ? 'disabled' : undefined
 }
 
