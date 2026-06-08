@@ -31,6 +31,12 @@ export async function handlePluginsApi(
       return Response.json(await pluginService.listPlugins(cwd))
     }
 
+    if (method === 'GET' && sub === 'catalog') {
+      return Response.json({
+        catalog: await pluginService.getCatalog(),
+      })
+    }
+
     if (method === 'GET' && sub === 'detail') {
       const pluginId = url.searchParams.get('id')
       if (!pluginId) {
@@ -52,6 +58,29 @@ export async function handlePluginsApi(
         ...response,
         session: await reloadSessionPlugins(sessionId),
       })
+    }
+
+    if (method === 'POST' && sub === 'install') {
+      const body = await parseJsonBody(req)
+      const id = asString(body.id)
+      const marketplace = asString(body.marketplace)
+      if (!id || !marketplace) {
+        throw ApiError.badRequest(
+          'Missing required fields: "id" and "marketplace"',
+        )
+      }
+      return Response.json(
+        await pluginService.installCatalogPlugin(id, marketplace),
+      )
+    }
+
+    if (method === 'POST' && sub === 'marketplace') {
+      const body = await parseJsonBody(req)
+      const input = asString(body.input)
+      if (!input) {
+        throw ApiError.badRequest('Missing required field: "input"')
+      }
+      return Response.json(await pluginService.addMarketplaceFromInput(input))
     }
 
     if (method === 'POST' && sub) {

@@ -17,6 +17,11 @@ import { clearPluginCache, loadAllPlugins, loadAllPluginsCacheOnly } from '../..
 import { getSkillDirCommands } from '../../skills/loadSkillsDir.js'
 import { resetSettingsCache } from '../../utils/settings/settingsCache.js'
 import type { LoadedPlugin } from '../../types/plugin.js'
+import {
+  SKILL_CATALOG,
+  getCatalogSkill,
+  type CatalogSkillMeta,
+} from '../../skills/skillCatalog.js'
 import { ApiError, errorResponse } from '../middleware/errorHandler.js'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -437,20 +442,31 @@ export async function handleSkillsApi(
   segments: string[],
 ): Promise<Response> {
   try {
-    if (req.method !== 'GET') {
-      throw new ApiError(405, `Method ${req.method} not allowed`, 'METHOD_NOT_ALLOWED')
-    }
-
     const sub = segments[2]
 
-    switch (sub) {
-      case undefined:
-        return await listSkills(url)
-      case 'detail':
-        return await getSkillDetail(url)
-      default:
-        throw ApiError.notFound(`Unknown skills endpoint: ${sub}`)
+    if (req.method === 'GET') {
+      switch (sub) {
+        case undefined:
+          return await listSkills(url)
+        case 'detail':
+          return await getSkillDetail(url)
+        case 'catalog':
+          return await getCatalog()
+        default:
+          throw ApiError.notFound(`Unknown skills endpoint: ${sub}`)
+      }
     }
+
+    if (req.method === 'POST') {
+      switch (sub) {
+        case 'install':
+          return await installCatalogSkill(req)
+        default:
+          throw ApiError.notFound(`Unknown skills endpoint: ${sub}`)
+      }
+    }
+
+    throw new ApiError(405, `Method ${req.method} not allowed`, 'METHOD_NOT_ALLOWED')
   } catch (error) {
     return errorResponse(error)
   }
@@ -510,4 +526,78 @@ async function getSkillDetail(url: URL): Promise<Response> {
   return Response.json({
     detail: { meta, tree, files, skillRoot: skillDir },
   })
+}
+
+// ─── Catalog (one-click install) ───────────────────────────────────────────────
+
+async function isInstalledUserSkill(name: string): Promise<boolean> {
+  try {
+    const stat = await fs.stat(path.join(getUserSkillsDir(), name))
+    return stat.isDirectory()
+  } catch {
+    return false
+  }
+}
+
+async function getCatalog(): Promise<Response> {
+  const catalog: CatalogSkillMeta[] = await Promise.all(
+    SKILL_CATALOG.map(async ({ files: _files, ...meta }) => ({
+      ...meta,
+      installed: await isInstalledUserSkill(meta.name),
+    })),
+  )
+  return Response.json({ catalog })
+}
+
+/**
+ * Write a catalog skill's files into a target directory, rejecting any path
+ * that escapes the directory. Mirrors the traversal guard used for bundled
+ * skill extraction.
+ */
+async function writeCatalogSkillFiles(
+  targetDir: string,
+  files: Record<string, string>,
+): Promise<void> {
+  for (const [relPath, content] of Object.entries(files)) {
+    const normalized = path.normalize(relPath)
+    if (
+      path.isAbsolute(normalized) ||
+      normalized.split(/[\\/]/).includes('..')
+    ) {
+      throw ApiError.badRequest(`Invalid file path in skill: ${relPath}`)
+    }
+    const dest = path.join(targetDir, normalized)
+    await fs.mkdir(path.dirname(dest), { recursive: true })
+    await fs.writeFile(dest, content, 'utf-8')
+  }
+}
+
+async function installCatalogSkill(req: Request): Promise<Response> {
+  let body: unknown
+  try {
+    body = await req.json()
+  } catch {
+    throw ApiError.badRequest('Invalid JSON body')
+  }
+
+  const name = (body as { name?: unknown })?.name
+  if (typeof name !== 'string' || name.length === 0) {
+    throw ApiError.badRequest('Missing required field: name')
+  }
+
+  const entry = getCatalogSkill(name)
+  if (!entry) {
+    throw ApiError.notFound(`Unknown catalog skill: ${name}`)
+  }
+
+  const targetDir = path.join(getUserSkillsDir(), entry.name)
+
+  // Idempotent: never overwrite an existing skill directory.
+  if (await isInstalledUserSkill(entry.name)) {
+    return Response.json({ ok: true, alreadyInstalled: true })
+  }
+
+  await writeCatalogSkillFiles(targetDir, entry.files)
+
+  return Response.json({ ok: true, installed: true })
 }

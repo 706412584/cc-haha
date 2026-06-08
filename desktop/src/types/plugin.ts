@@ -110,3 +110,31 @@ export type PluginSessionReloadSummary = {
   errors: number
   error?: string
 }
+
+export type CatalogPluginCategory =
+  | 'official'
+  | 'devops'
+  | 'codeReview'
+  | 'observability'
+  | 'database'
+  | 'frontend'
+  | 'payments'
+  | 'productivity'
+  | 'browser'
+
+export type CatalogPlugin = {
+  id: string
+  marketplace: string
+  marketplaceSource: unknown
+  displayName: string
+  description: string
+  category: CatalogPluginCategory
+  installed: boolean
+}
+
+export type AddMarketplaceResponse = {
+  ok: true
+  name: string
+  alreadyMaterialized: boolean
+  source: unknown
+}

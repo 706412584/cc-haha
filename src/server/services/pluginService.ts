@@ -5,9 +5,20 @@ import {
   disablePluginOp,
   enablePluginOp,
   type InstallableScope,
+  installPluginOp,
   uninstallPluginOp,
   updatePluginOp,
 } from '../../services/plugins/pluginOperations.js'
+import {
+  PLUGIN_CATALOG,
+  getCatalogEntry,
+  type CatalogPluginMeta,
+} from '../../utils/plugins/pluginCatalog.js'
+import {
+  addMarketplaceSource,
+} from '../../utils/plugins/marketplaceManager.js'
+import { parseMarketplaceInput } from '../../utils/plugins/parseMarketplaceInput.js'
+import type { MarketplaceSource } from '../../utils/plugins/schemas.js'
 import { getAgentDefinitionsWithOverrides } from '../../tools/AgentTool/loadAgentsDir.js'
 import type { LoadedPlugin, PluginError } from '../../types/plugin.js'
 import { getPluginErrorMessage } from '../../types/plugin.js'
@@ -269,6 +280,96 @@ export class PluginService {
         lspServers: lspCounts.reduce((sum, count) => sum + count, 0),
         errors: errors.length,
       },
+    }
+  }
+
+  /**
+   * List the curated plugin catalog with `installed` flags resolved against
+   * the V2 installed_plugins.json file. Used by the desktop "Recommended
+   * plugins" section in Settings → Plugins.
+   */
+  async getCatalog(): Promise<CatalogPluginMeta[]> {
+    const installedData = loadInstalledPluginsV2()
+    return PLUGIN_CATALOG.map((entry) => ({
+      ...entry,
+      installed:
+        (installedData.plugins[`${entry.id}@${entry.marketplace}`]?.length ?? 0) >
+        0,
+    }))
+  }
+
+  /**
+   * Install a curated catalog plugin: register the marketplace if needed,
+   * then enable the plugin at user scope. Idempotent — re-installing flips
+   * already-disabled entries back on.
+   */
+  async installCatalogPlugin(
+    id: string,
+    marketplace: string,
+  ): Promise<ApiPluginActionResponse & { marketplaceAdded: boolean }> {
+    const entry = getCatalogEntry(id, marketplace)
+    if (!entry) {
+      throw ApiError.notFound(
+        `Unknown catalog plugin: ${id}@${marketplace}`,
+      )
+    }
+
+    let marketplaceAdded = false
+    try {
+      const result = await addMarketplaceSource(entry.marketplaceSource)
+      marketplaceAdded = !result.alreadyMaterialized
+    } catch (err) {
+      throw ApiError.badRequest(
+        `Failed to register marketplace ${marketplace}: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+
+    const pluginId = `${entry.id}@${entry.marketplace}`
+    const installResult = await installPluginOp(pluginId, 'user')
+    if (!installResult.success) {
+      throw ApiError.badRequest(installResult.message)
+    }
+
+    return {
+      ok: true,
+      message: installResult.message,
+      marketplaceAdded,
+    }
+  }
+
+  /**
+   * Add a marketplace from a free-form user input (URL, github shorthand,
+   * git URL, or local path). Used by the "Install from URL" affordance.
+   */
+  async addMarketplaceFromInput(
+    input: string,
+  ): Promise<{ ok: true; name: string; alreadyMaterialized: boolean; source: MarketplaceSource }> {
+    if (typeof input !== 'string' || input.trim().length === 0) {
+      throw ApiError.badRequest('Marketplace input is required')
+    }
+
+    const parsed = await parseMarketplaceInput(input)
+    if (parsed === null) {
+      throw ApiError.badRequest(
+        `Unrecognized marketplace input: ${input}. Expected a github repo (owner/repo), https:// URL, git URL, or local path.`,
+      )
+    }
+    if ('error' in parsed) {
+      throw ApiError.badRequest(parsed.error)
+    }
+
+    try {
+      const result = await addMarketplaceSource(parsed)
+      return {
+        ok: true,
+        name: result.name,
+        alreadyMaterialized: result.alreadyMaterialized,
+        source: result.resolvedSource,
+      }
+    } catch (err) {
+      throw ApiError.badRequest(
+        err instanceof Error ? err.message : String(err),
+      )
     }
   }
 

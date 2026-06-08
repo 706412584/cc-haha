@@ -1,5 +1,7 @@
 import { api } from './client'
 import type {
+  AddMarketplaceResponse,
+  CatalogPlugin,
   PluginDetail,
   PluginListResponse,
   PluginReloadSummary,
@@ -52,4 +54,21 @@ export const pluginsApi = {
       { timeout: 120_000 },
     )
   },
+
+  catalog: () =>
+    api.get<{ catalog: CatalogPlugin[] }>(`/api/plugins/catalog`),
+
+  installCatalog: (payload: { id: string; marketplace: string }) =>
+    api.post<{ ok: true; message: string; marketplaceAdded: boolean }>(
+      `/api/plugins/install`,
+      payload,
+      { timeout: 120_000 },
+    ),
+
+  addMarketplace: (input: string) =>
+    api.post<AddMarketplaceResponse>(
+      `/api/plugins/marketplace`,
+      { input },
+      { timeout: 120_000 },
+    ),
 }

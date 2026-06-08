@@ -1,5 +1,5 @@
 import { api } from './client'
-import type { SkillMeta, SkillDetail } from '../types/skill'
+import type { SkillMeta, SkillDetail, CatalogSkill } from '../types/skill'
 
 export const skillsApi = {
   list: (cwd?: string) => {
@@ -19,4 +19,12 @@ export const skillsApi = {
       { timeout: 120_000 },
     )
   },
+
+  catalog: () => api.get<{ catalog: CatalogSkill[] }>(`/api/skills/catalog`),
+
+  install: (name: string) =>
+    api.post<{ ok: true; installed?: boolean; alreadyInstalled?: boolean }>(
+      `/api/skills/install`,
+      { name },
+    ),
 }
