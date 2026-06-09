@@ -29,6 +29,21 @@
 
 ## 快速启动（4 步）
 
+### 0. 一键脚本（推荐）
+
+如果服务和 Vite 已经在跑(分别在两个终端里),直接:
+
+```pwsh
+# repo root
+bun run mcp:test          # 配置 H5、生成 token、复制完整 URL 到剪贴板
+bun run mcp:test:open     # 同上,加自动开浏览器
+# 或直接调脚本
+.\scripts\dev-mcp-test.ps1
+.\scripts\dev-mcp-test.ps1 -Open
+```
+
+脚本做的事:健康检查 server (`:3456`) 和 vite (`:1420`),把 `http://localhost:1420` 加进 H5 `allowedOrigins`(如果还没有),重新生成 H5 token,拼出完整 `?serverUrl=...&forceH5=1&h5Token=...` URL,复制到剪贴板,可选自动开浏览器。脚本不会自己起 server / vite——那两个是常驻 dev 进程,需要你自己在两个终端里先起好(下面第 2、3 步)。
+
 ### 1. 在 `desktop/vite.config.ts` 加 dev-only proxy
 
 ```ts
