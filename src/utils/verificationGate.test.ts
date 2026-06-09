@@ -148,6 +148,47 @@ describe('getVerificationGateState', () => {
     expect(result.reminderAlreadyFired).toBe(false)
   })
 
+  // Regression for a context-bloat bug caught by an orchestrator-mode review:
+  // when a reminder fires AFTER a verification reset (i.e. the reminder is
+  // newer than the verify in transcript order), the early-return at the verify
+  // boundary used to hardcode reminderAlreadyFired=false, dropping the flag
+  // we'd already accumulated walking backwards from the tail. That made the
+  // gate inject a fresh reminder on every subsequent turn once the post-verify
+  // edit count stayed above the threshold, growing the prompt without bound.
+  // The fix: carry the accumulated reminderFired flag through the early
+  // return, since the reminder we saw is newer than this verify and is the
+  // valid signal that the model was already nudged.
+  test('preserves a reminder fired AFTER a verification reset (no spam loop)', () => {
+    const reminderMessage: Message = {
+      type: 'attachment',
+      attachment: {
+        type: 'verification_gate_reminder',
+        editCount: 3,
+        threshold: 3,
+      },
+      uuid: 'reminder-uuid',
+      timestamp: new Date().toISOString(),
+    } as unknown as Message
+    const messages: Message[] = [
+      assistantWithToolUse('Edit'),
+      assistantWithToolUse('Edit'),
+      // Verification ran — earlier edits are now verified
+      assistantWithToolUse('Agent', { subagent_type: 'verification' }),
+      // Post-verify edits accumulate and cross the threshold
+      assistantWithToolUse('Edit'),
+      assistantWithToolUse('Edit'),
+      assistantWithToolUse('Edit'),
+      // Reminder fired for those post-verify edits
+      reminderMessage,
+      // One more edit on the next turn — still over threshold
+      assistantWithToolUse('Edit'),
+    ]
+    const result = getVerificationGateState(messages)
+    expect(result.editsSinceVerification).toBe(4)
+    // Without the fix this was false, causing a duplicate reminder every turn.
+    expect(result.reminderAlreadyFired).toBe(true)
+  })
+
   test('handles assistant messages with multiple tool_use blocks in one turn', () => {
     const multi: Message = createAssistantMessage({
       content: [

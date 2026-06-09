@@ -3497,9 +3497,15 @@ export function getVerificationGateState(messages: Message[]): {
         (block.input as { subagent_type?: unknown }).subagent_type ===
           'verification'
       ) {
+        // Carry forward any reminder we already saw on the way back: the
+        // reminder lives at i+1..messages.length-1 (newer than this verify),
+        // so it was emitted for the post-verify edits. Resetting it to false
+        // here would cause a fresh reminder to be injected on every turn
+        // once the post-verify edit count crosses the threshold again,
+        // ballooning context. Preserve the accumulated flag instead.
         return {
           editsSinceVerification: edits,
-          reminderAlreadyFired: false,
+          reminderAlreadyFired: reminderFired,
         }
       }
 
