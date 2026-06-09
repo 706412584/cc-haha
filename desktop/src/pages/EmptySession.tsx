@@ -43,6 +43,7 @@ import type { AttachmentRef } from '../types/chat'
 import type { PermissionMode } from '../types/settings'
 import type { SlashCommandOption } from '../components/chat/composerUtils'
 import { WelcomeTaskCards, type WelcomeTaskCard } from '../components/welcome/WelcomeTaskCards'
+import { RecentActivityCard } from '../components/welcome/RecentActivityCard'
 
 type Attachment = ComposerAttachment
 
@@ -618,6 +619,26 @@ export function EmptySession() {
             {t('empty.subtitle')}
           </p>
         </div>
+        {!isMobileComposer && workDir && (
+          <RecentActivityCard
+            workDir={workDir}
+            onContinueSession={(sessionId) => {
+              setActiveView('code')
+              useTabStore.getState().openTab(sessionId, 'New Session')
+              connectToSession(sessionId)
+            }}
+            onApplyHandoff={(text) => {
+              setInput(text)
+              requestAnimationFrame(() => {
+                const el = textareaRef.current
+                if (!el) return
+                el.focus()
+                const len = el.value.length
+                el.setSelectionRange(len, len)
+              })
+            }}
+          />
+        )}
         {!isMobileComposer && (
           <WelcomeTaskCards onApplyTask={applyTaskCard} />
         )}

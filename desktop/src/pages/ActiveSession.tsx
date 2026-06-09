@@ -37,6 +37,7 @@ import {
   type ComposerPrefillDetail,
   type WelcomeTaskCard,
 } from '../components/welcome/WelcomeTaskCards'
+import { RecentActivityCard } from '../components/welcome/RecentActivityCard'
 
 const TASK_POLL_INTERVAL_MS = 1000
 const WORKSPACE_RESIZE_STEP = 32
@@ -444,6 +445,26 @@ export function ActiveSession() {
                   </>
                 )}
               </div>
+              {!isMemberSession && !isMobileLayout && activeTabId && session?.workDir && (
+                <RecentActivityCard
+                  workDir={session.workDir}
+                  excludeSessionId={activeTabId}
+                  hideContinueSessionButton
+                  onContinueSession={(sessionId) => {
+                    useTabStore.getState().openTab(sessionId, 'New Session')
+                    connectToSession(sessionId)
+                  }}
+                  onApplyHandoff={(text) => {
+                    const detail: ComposerPrefillDetail = {
+                      sessionId: activeTabId,
+                      text,
+                    }
+                    window.dispatchEvent(
+                      new CustomEvent(COMPOSER_PREFILL_EVENT, { detail }),
+                    )
+                  }}
+                />
+              )}
               {!isMemberSession && !isMobileLayout && activeTabId && (
                 <WelcomeTaskCards
                   onApplyTask={(card: WelcomeTaskCard, promptText: string) => {

@@ -1180,6 +1180,30 @@ export const en = {
   'empty.tasks.explainCode.title': 'Explain unfamiliar code',
   'empty.tasks.explainCode.prompt': 'Help me understand the structure and responsibilities of [file or module path here]. Summarize the public API, key data flow, and any non-obvious invariants.',
 
+  // Recent activity panel — read-only summary of the previous session in
+  // this project. Zero token cost on render. Only the "Apply hand-off"
+  // button transfers a short paragraph (~80 tokens) into the composer for
+  // the user to send. {count} placeholders use simple pluralization
+  // conventions that translate() already handles.
+  'empty.recentActivity.heading': 'Recent activity',
+  'empty.recentActivity.justNow': 'just now',
+  'empty.recentActivity.minutesAgo': '{count} min ago',
+  'empty.recentActivity.hoursAgo': '{count} h ago',
+  'empty.recentActivity.daysAgo': '{count} d ago',
+  'empty.recentActivity.messages': '{count} messages',
+  'empty.recentActivity.filesEdited': '{count} files edited',
+  'empty.recentActivity.commitsAhead': '{count} unpushed',
+  'empty.recentActivity.dirtyFiles': '{count} dirty',
+  'empty.recentActivity.continueSession': 'Open this session',
+  'empty.recentActivity.applyHandoff': 'Continue from here',
+  'empty.recentActivity.handoff.branchLine': 'Last session on {branch}: "{title}".',
+  'empty.recentActivity.handoff.titleLine': 'Last session: "{title}".',
+  'empty.recentActivity.handoff.filesLine': 'Files touched: {files}{more}.',
+  'empty.recentActivity.handoff.filesMore': ' (+{count} more)',
+  'empty.recentActivity.handoff.aheadLine': 'Local is ahead of upstream by {count} commit(s).',
+  'empty.recentActivity.handoff.dirtyLine': '{count} file(s) have uncommitted changes.',
+  'empty.recentActivity.handoff.continuePrompt': "Please continue from there. Pick up by ...(describe the next step here).",
+
   // ─── Repository Launch Controls ──────────────────────────────────────
   'repoLaunch.selectBranch': 'Select branch',
   'repoLaunch.searchBranch': 'Search branches',
