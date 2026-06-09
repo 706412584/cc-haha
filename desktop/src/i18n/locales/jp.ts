@@ -1167,6 +1167,17 @@ export const jp: Record<TranslationKey, string> = {
   'empty.createError.switchFailed': '現在のプロジェクトブランチを切り替えできませんでした。Git のエラーを確認し、変更を安全に保ってから、もう一度お試しください。詳細: {detail}',
   'empty.createError.contextFailed': 'この Git プロジェクトを検査できませんでした。リポジトリの状態を確認してもう一度お試しください。',
 
+  'empty.tasks.heading': 'タスクを試す',
+  'empty.tasks.orchestratedHint': 'オーケストレーションモードで専門サブエージェントに委譲されます。',
+  'empty.tasks.preMergeReview.title': 'マージ前コードレビュー',
+  'empty.tasks.preMergeReview.prompt': '現在のブランチを main と比較してレビューしてください。(1) 潜在的なバグとコードスメルを探す;(2) パフォーマンスやセキュリティのリスクを確認する;(3) PR の説明文ドラフトを書く。3 つすべて行ってください。',
+  'empty.tasks.investigateTest.title': '失敗しているテストを調査',
+  'empty.tasks.investigateTest.prompt': 'テストが fail しています。根本原因を特定して修正してください。まず再現し、本当の原因を突き止め、最小限のコード変更で通るようにし、最後に検証してください。失敗しているテスト: [テスト名またはパスをここに]。',
+  'empty.tasks.writeTests.title': 'ユニットテストを追加',
+  'empty.tasks.writeTests.prompt': '[ファイルパスをここに] のユニットテストを追加し、主要な分岐とエッジケースをカバーしてください。プロジェクトの既存テストスタイルに合わせてください。',
+  'empty.tasks.explainCode.title': '不慣れなコードを解説',
+  'empty.tasks.explainCode.prompt': '[ファイルまたはモジュールパスをここに] の構造と責務を理解するのを手伝ってください。公開 API、主要なデータフロー、および明示されていない不変条件を要約してください。',
+
   // ─── Repository Launch Controls ──────────────────────────────────────
   'repoLaunch.selectBranch': 'ブランチを選択',
   'repoLaunch.searchBranch': 'ブランチを検索',

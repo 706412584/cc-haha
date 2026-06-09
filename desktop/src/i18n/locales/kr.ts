@@ -1167,6 +1167,17 @@ export const kr: Record<TranslationKey, string> = {
   'empty.createError.switchFailed': '현재 프로젝트 브랜치를 전환할 수 없습니다. Git 오류를 확인하고 변경 사항을 안전하게 보관한 후 다시 시도하세요. 세부 정보: {detail}',
   'empty.createError.contextFailed': '이 Git 프로젝트를 검사할 수 없습니다. 저장소 상태를 확인하고 다시 시도하세요.',
 
+  'empty.tasks.heading': '작업 시작하기',
+  'empty.tasks.orchestratedHint': '오케스트레이션 모드로 전문 서브 에이전트에게 위임됩니다.',
+  'empty.tasks.preMergeReview.title': '병합 전 코드 리뷰',
+  'empty.tasks.preMergeReview.prompt': '현재 브랜치를 main과 비교하여 리뷰해 주세요. (1) 잠재적 버그와 코드 스멜 찾기; (2) 성능 또는 보안 리스크 확인; (3) PR 설명 초안 작성. 세 가지 모두 수행해 주세요.',
+  'empty.tasks.investigateTest.title': '실패한 테스트 조사',
+  'empty.tasks.investigateTest.prompt': '실패한 테스트가 있습니다. 근본 원인을 찾아서 고쳐 주세요. 먼저 재현하고, 실제 원인을 파악하고, 통과하도록 최소한의 코드 변경을 가한 후 검증해 주세요. 실패한 테스트: [테스트 이름 또는 경로 입력].',
+  'empty.tasks.writeTests.title': '유닛 테스트 추가',
+  'empty.tasks.writeTests.prompt': '[파일 경로 입력]에 유닛 테스트를 추가하여 주요 분기와 엣지 케이스를 커버하세요. 프로젝트의 기존 테스트 스타일을 따라 주세요.',
+  'empty.tasks.explainCode.title': '낯선 코드 설명',
+  'empty.tasks.explainCode.prompt': '[파일 또는 모듈 경로 입력]의 구조와 책임을 이해하도록 도와주세요. 공개 API, 주요 데이터 흐름, 그리고 드러나지 않은 불변 조건을 요약해 주세요.',
+
   // ─── Repository Launch Controls ──────────────────────────────────────
   'repoLaunch.selectBranch': '브랜치 선택',
   'repoLaunch.searchBranch': '브랜치 검색',

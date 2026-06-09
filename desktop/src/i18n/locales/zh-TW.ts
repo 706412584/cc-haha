@@ -1167,6 +1167,17 @@ export const zh: Record<TranslationKey, string> = {
   'empty.createError.switchFailed': '無法切換當前專案分支。請先確認 Git 錯誤並保護好本地改動後重試。詳情：{detail}',
   'empty.createError.contextFailed': '無法檢查這個 Git 專案。請確認倉庫狀態後重試。',
 
+  'empty.tasks.heading': '試試這些任務',
+  'empty.tasks.orchestratedHint': '將通過編排模式分派給專家子代理處理。',
+  'empty.tasks.preMergeReview.title': '程式碼預合併審查',
+  'empty.tasks.preMergeReview.prompt': '請審查我當前分支相對 main 的改動：(1) 找潛在 bug 和程式碼異味;(2) 看有沒有效能或安全風險;(3) 給一個 PR 描述草稿。三件事都要做完。',
+  'empty.tasks.investigateTest.title': '排查失敗的測試',
+  'empty.tasks.investigateTest.prompt': '我有一個測試在 fail,幫我找到根因並修好。先 reproduce,定位真正的原因,做最小程式碼改動讓它通過,最後驗證一遍。失敗的測試是：[此處填測試名或路徑]。',
+  'empty.tasks.writeTests.title': '補單元測試',
+  'empty.tasks.writeTests.prompt': '為 [此處填檔案路徑] 加單測,覆蓋主要分支和邊界條件。沿用專案現有的測試風格。',
+  'empty.tasks.explainCode.title': '解釋陌生程式碼',
+  'empty.tasks.explainCode.prompt': '幫我理解 [此處填檔案或模組路徑] 的結構和職責。總結對外介面、關鍵資料流,以及任何不顯眼的約束。',
+
   // ─── Repository Launch Controls ──────────────────────────────────────
   'repoLaunch.selectBranch': '選擇分支',
   'repoLaunch.searchBranch': '搜尋分支',

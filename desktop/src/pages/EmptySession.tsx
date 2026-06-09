@@ -42,6 +42,7 @@ import {
 import type { AttachmentRef } from '../types/chat'
 import type { PermissionMode } from '../types/settings'
 import type { SlashCommandOption } from '../components/chat/composerUtils'
+import { WelcomeTaskCards, type WelcomeTaskCard } from '../components/welcome/WelcomeTaskCards'
 
 type Attachment = ComposerAttachment
 
@@ -94,6 +95,10 @@ export function EmptySession() {
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [plusMenuOpen, setPlusMenuOpen] = useState(false)
   const [slashMenuOpen, setSlashMenuOpen] = useState(false)
+  // Tracks whether a welcome-screen task card requested orchestration mode for
+  // the not-yet-created session. Applied right after createSession() resolves
+  // and before connectToSession() so the WS replay carries it.
+  const [draftOrchestrate, setDraftOrchestrate] = useState(false)
   const [fileSearchOpen, setFileSearchOpen] = useState(false)
   const [localSlashPanel, setLocalSlashPanel] = useState<LocalSlashCommandName | null>(null)
   const [atFilter, setAtFilter] = useState('')
@@ -321,6 +326,12 @@ export function EmptySession() {
       }
       setActiveView('code')
       useTabStore.getState().openTab(sessionId, 'New Session')
+      // If a welcome-screen card requested orchestration, persist it for this
+      // sessionId before the WS connects. chatStore.connectToSession will
+      // replay the persisted flag as a `set_coordinator_mode` message.
+      if (draftOrchestrate) {
+        useChatStore.getState().setSessionCoordinatorMode(sessionId, true)
+      }
       connectToSession(sessionId)
       const attachmentPayload: AttachmentRef[] = attachments.map((attachment) => ({
         type: attachment.type,
@@ -334,6 +345,7 @@ export function EmptySession() {
       }
       setInput('')
       setAttachments([])
+      setDraftOrchestrate(false)
     } catch (error) {
       addToast({
         type: 'error',
@@ -561,6 +573,21 @@ export function EmptySession() {
     })
   }
 
+  const applyTaskCard = (card: WelcomeTaskCard, promptText: string) => {
+    setInput(promptText)
+    setDraftOrchestrate(card.orchestrate)
+    setSlashMenuOpen(false)
+    setFileSearchOpen(false)
+    setPlusMenuOpen(false)
+    requestAnimationFrame(() => {
+      const el = textareaRef.current
+      if (!el) return
+      el.focus()
+      const len = el.value.length
+      el.setSelectionRange(len, len)
+    })
+  }
+
   return (
     <div className="relative flex flex-1 flex-col overflow-hidden bg-[var(--color-surface)]">
       <div className={`flex flex-1 flex-col items-center justify-center ${
@@ -591,6 +618,9 @@ export function EmptySession() {
             {t('empty.subtitle')}
           </p>
         </div>
+        {!isMobileComposer && (
+          <WelcomeTaskCards onApplyTask={applyTaskCard} />
+        )}
       </div>
 
       <div

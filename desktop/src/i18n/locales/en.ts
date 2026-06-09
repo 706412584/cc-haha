@@ -1165,6 +1165,21 @@ export const en = {
   'empty.createError.switchFailed': 'Could not switch the current project branch. Check the Git error, keep your changes safe, then try again. Detail: {detail}',
   'empty.createError.contextFailed': 'Could not inspect this Git project. Check the repository state and try again.',
 
+  // Quick-start task cards on the empty session welcome screen. Each card
+  // pre-fills the composer with a starter prompt so a new user has a concrete
+  // entry point. Cards marked "needs-orchestration" auto-enable the
+  // Orchestration toggle so the user sees fan-out behavior on first contact.
+  'empty.tasks.heading': 'Try a task',
+  'empty.tasks.orchestratedHint': 'Will be dispatched to specialist sub-agents via Orchestration.',
+  'empty.tasks.preMergeReview.title': 'Pre-merge code review',
+  'empty.tasks.preMergeReview.prompt': 'Review my current branch against main. (1) Find potential bugs and code smells; (2) flag security or performance risks; (3) draft a PR description. Do all three.',
+  'empty.tasks.investigateTest.title': 'Investigate a failing test',
+  'empty.tasks.investigateTest.prompt': "I have a failing test — help me find the root cause and fix it. Reproduce it first, identify the actual cause, make the smallest code change that makes it pass, then verify. The failing test is: [name or path here].",
+  'empty.tasks.writeTests.title': 'Write unit tests',
+  'empty.tasks.writeTests.prompt': 'Add unit tests for [file path here] covering the main branches and edge cases. Match the project\'s existing test style.',
+  'empty.tasks.explainCode.title': 'Explain unfamiliar code',
+  'empty.tasks.explainCode.prompt': 'Help me understand the structure and responsibilities of [file or module path here]. Summarize the public API, key data flow, and any non-obvious invariants.',
+
   // ─── Repository Launch Controls ──────────────────────────────────────
   'repoLaunch.selectBranch': 'Select branch',
   'repoLaunch.searchBranch': 'Search branches',
