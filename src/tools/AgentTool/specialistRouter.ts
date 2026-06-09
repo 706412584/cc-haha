@@ -114,5 +114,30 @@ export function suggestSpecialist(
   return undefined
 }
 
+/**
+ * Build the error message shown when the general-purpose default is
+ * refused in favour of a specialist.
+ *
+ * IMPORTANT: this string is returned to the model as a tool error and
+ * becomes part of its context. It must NOT contain `key="value"`
+ * attribute-style fragments (e.g. `subagent_type="code-reviewer"`).
+ * Observed in live testing: when the error embedded that shape, the
+ * model copied it into a *textual* `<tool_use name="Agent">{...}` block
+ * instead of issuing a real tool call, and every subsequent Agent call
+ * in that session degraded to text. Phrase the guidance as prose that
+ * names the parameter and value without the assignment-and-quotes form.
+ */
+export function formatSpecialistRedirectMessage(
+  suggested: string,
+  agentToolName: string,
+): string {
+  return (
+    `This task looks like a job for the ${suggested} specialist rather than the general-purpose default. ` +
+    `Re-call ${agentToolName} with the subagent_type parameter set to ${suggested}. ` +
+    `If general-purpose really is the right choice, set the subagent_type parameter to general-purpose explicitly. ` +
+    `(Disable this guard by setting the env var CLAUDE_CODE_GP_DEFAULT_STRICT to 0.)`
+  )
+}
+
 /** Exported for tests. */
 export const _SPECIALIST_HINTS_FOR_TESTS = SPECIALIST_HINTS

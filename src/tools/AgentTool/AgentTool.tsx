@@ -54,7 +54,7 @@ import type { AgentDefinition } from './loadAgentsDir.js';
 import { filterAgentsByMcpRequirements, hasRequiredMcpServers, isBuiltInAgent } from './loadAgentsDir.js';
 import { getPrompt } from './prompt.js';
 import { runAgent } from './runAgent.js';
-import { suggestSpecialist } from './specialistRouter.js';
+import { suggestSpecialist, formatSpecialistRedirectMessage } from './specialistRouter.js';
 import { renderGroupedAgentToolUse, renderToolResultMessage, renderToolUseErrorMessage, renderToolUseMessage, renderToolUseProgressMessage, renderToolUseRejectedMessage, renderToolUseTag, userFacingName, userFacingNameBackgroundColor } from './UI.js';
 
 /* eslint-disable @typescript-eslint/no-require-imports */
@@ -337,12 +337,7 @@ export const AgentTool = buildTool({
       const availableTypes = new Set(allAgents.map(a => a.agentType));
       const suggested = suggestSpecialist(prompt, availableTypes);
       if (suggested) {
-        throw new Error(
-          `This task looks like it should go to subagent_type="${suggested}" rather than the general-purpose default. ` +
-          `Re-call ${AGENT_TOOL_NAME} with subagent_type="${suggested}". ` +
-          `If general-purpose really is the right choice, set subagent_type="general-purpose" explicitly. ` +
-          `(Disable this guard with CLAUDE_CODE_GP_DEFAULT_STRICT=0.)`
-        );
+        throw new Error(formatSpecialistRedirectMessage(suggested, AGENT_TOOL_NAME));
       }
     }
 

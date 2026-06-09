@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import { suggestSpecialist } from './specialistRouter.js'
+import {
+  formatSpecialistRedirectMessage,
+  suggestSpecialist,
+} from './specialistRouter.js'
 
 const ALL_AVAILABLE = new Set([
   'general-purpose',
@@ -176,5 +179,53 @@ describe('suggestSpecialist', () => {
     const text =
       'security review of the slow endpoint, also check for SQL injection'
     expect(suggestSpecialist(text, ALL_AVAILABLE)).toBe('security-reviewer')
+  })
+})
+
+
+describe('formatSpecialistRedirectMessage', () => {
+  test('mentions the suggested specialist by name', () => {
+    const msg = formatSpecialistRedirectMessage('code-reviewer', 'Agent')
+    expect(msg).toContain('code-reviewer')
+  })
+
+  test('mentions the agent tool name passed in', () => {
+    const msg = formatSpecialistRedirectMessage('debugger', 'Task')
+    expect(msg).toContain('Task')
+  })
+
+  test('points the user at the env-var escape hatch', () => {
+    const msg = formatSpecialistRedirectMessage('refactor', 'Agent')
+    expect(msg).toContain('CLAUDE_CODE_GP_DEFAULT_STRICT')
+  })
+
+  // Regression for an observed live failure: when this message embedded
+  // attribute-style fragments like `subagent_type="code-reviewer"`, the
+  // downstream model copied them verbatim into a textual
+  // `<tool_use name="Agent">{...}` block instead of issuing a real tool
+  // call, and every subsequent Agent call in that session degraded to
+  // text. The message must not contain any `key="value"` shapes that
+  // a model could mistake for a JSON property or XML attribute.
+  test('does not embed key="value" attribute-style fragments', () => {
+    for (const specialist of [
+      'code-reviewer',
+      'security-reviewer',
+      'debugger',
+      'refactor',
+      'migration',
+      'docs-writer',
+      'performance',
+      'commit-pr',
+      'test-author',
+      'verification',
+    ]) {
+      const msg = formatSpecialistRedirectMessage(specialist, 'Agent')
+      // No `something="something"` attribute pairs.
+      expect(msg).not.toMatch(/[a-z_][a-z0-9_]*\s*=\s*"/i)
+      // No XML-ish open tag.
+      expect(msg).not.toMatch(/<\s*[a-z_][a-z0-9_]*[^>]*>/i)
+      // No JSON-ish property fragment that names subagent_type.
+      expect(msg).not.toMatch(/"subagent_type"\s*:/i)
+    }
   })
 })
