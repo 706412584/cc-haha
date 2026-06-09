@@ -90,21 +90,21 @@ export function RecentActivityCard({
   return (
     <div
       data-testid="recent-activity-card"
-      className="mt-8 w-full max-w-3xl px-4"
+      className="mt-6 w-full max-w-3xl px-4"
     >
-      <h2 className="mb-3 text-center text-xs font-medium uppercase tracking-wider text-[var(--color-text-tertiary)]">
+      <h2 className="mb-2 text-center text-xs font-medium uppercase tracking-wider text-[var(--color-text-tertiary)]">
         {t('empty.recentActivity.heading')}
       </h2>
-      <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] p-4">
-        <div className="flex items-start gap-3">
+      <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] p-3">
+        <div className="flex items-center gap-3">
           <span
-            className="material-symbols-outlined mt-0.5 text-[20px] text-[var(--color-text-secondary)]"
+            className="material-symbols-outlined shrink-0 text-[20px] text-[var(--color-text-secondary)]"
             aria-hidden="true"
           >
             history
           </span>
-          <div className="flex min-w-0 flex-1 flex-col gap-2">
-            {/* Top row: session title + relative time */}
+          <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+            {/* Title row */}
             {lastSession && (
               <div className="flex items-baseline gap-2">
                 <span
@@ -120,7 +120,7 @@ export function RecentActivityCard({
               </div>
             )}
 
-            {/* Stat chips: messageCount, filesEdited, git */}
+            {/* Single chips row — dense, all the project state in one line */}
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[var(--color-text-tertiary)]">
               {lastSession && (
                 <span className="inline-flex items-center gap-1">
@@ -129,7 +129,11 @@ export function RecentActivityCard({
                 </span>
               )}
               {lastSession && lastSession.filesEditedCount > 0 && (
-                <span className="inline-flex items-center gap-1" data-testid="recent-activity-files">
+                <span
+                  className="inline-flex items-center gap-1"
+                  data-testid="recent-activity-files"
+                  title={lastSession.filesEditedSample.slice(0, 5).map(basename).join(', ')}
+                >
                   <span className="material-symbols-outlined text-[12px]" aria-hidden="true">draft</span>
                   {t('empty.recentActivity.filesEdited', { count: lastSession.filesEditedCount })}
                 </span>
@@ -153,58 +157,32 @@ export function RecentActivityCard({
                 </span>
               )}
             </div>
+          </div>
 
-            {/* Last user message excerpt for context */}
-            {lastSession?.lastUserMessageExcerpt && (
-              <p
-                className="line-clamp-2 text-xs italic text-[var(--color-text-secondary)]"
-                data-testid="recent-activity-excerpt"
-              >
-                "{lastSession.lastUserMessageExcerpt}"
-              </p>
-            )}
-
-            {/* File sample row, if any */}
-            {lastSession && lastSession.filesEditedSample.length > 0 && (
-              <div className="flex flex-wrap items-center gap-1 text-[10px] font-mono text-[var(--color-text-tertiary)]">
-                {lastSession.filesEditedSample.slice(0, 5).map((file) => (
-                  <span
-                    key={file}
-                    className="rounded border border-[var(--color-border-separator)] bg-[var(--color-surface-container-lowest)] px-1.5 py-0.5"
-                    title={file}
-                  >
-                    {basename(file)}
-                  </span>
-                ))}
-                {lastSession.filesEditedSample.length > 5 && (
-                  <span>+{lastSession.filesEditedSample.length - 5}</span>
-                )}
-              </div>
-            )}
-
-            {/* Action row */}
-            <div className="mt-1 flex flex-wrap items-center gap-2">
-              {!hideContinueSessionButton && lastSession && (
-                <button
-                  type="button"
-                  onClick={() => onContinueSession(lastSession.sessionId)}
-                  data-testid="recent-activity-continue-session"
-                  className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-2.5 py-1 text-xs text-[var(--color-text-primary)] transition-colors hover:border-[var(--color-primary)] hover:bg-[var(--color-surface-hover)]"
-                >
-                  <span className="material-symbols-outlined text-[14px]" aria-hidden="true">tab</span>
-                  {t('empty.recentActivity.continueSession')}
-                </button>
-              )}
+          {/* Action buttons — right side, vertical to keep card height short */}
+          <div className="flex shrink-0 items-center gap-1.5">
+            {!hideContinueSessionButton && lastSession && (
               <button
                 type="button"
-                onClick={() => onApplyHandoff(handoffText)}
-                data-testid="recent-activity-apply-handoff"
-                className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-2.5 py-1 text-xs text-[var(--color-text-primary)] transition-colors hover:border-[var(--color-primary)] hover:bg-[var(--color-surface-hover)]"
+                onClick={() => onContinueSession(lastSession.sessionId)}
+                data-testid="recent-activity-continue-session"
+                title={t('empty.recentActivity.continueSession')}
+                className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-2 py-1 text-xs text-[var(--color-text-primary)] transition-colors hover:border-[var(--color-primary)] hover:bg-[var(--color-surface-hover)]"
               >
-                <span className="material-symbols-outlined text-[14px]" aria-hidden="true">north_east</span>
-                {t('empty.recentActivity.applyHandoff')}
+                <span className="material-symbols-outlined text-[14px]" aria-hidden="true">tab</span>
+                <span className="hidden sm:inline">{t('empty.recentActivity.continueSession')}</span>
               </button>
-            </div>
+            )}
+            <button
+              type="button"
+              onClick={() => onApplyHandoff(handoffText)}
+              data-testid="recent-activity-apply-handoff"
+              title={t('empty.recentActivity.applyHandoff')}
+              className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-2 py-1 text-xs text-[var(--color-text-primary)] transition-colors hover:border-[var(--color-primary)] hover:bg-[var(--color-surface-hover)]"
+            >
+              <span className="material-symbols-outlined text-[14px]" aria-hidden="true">north_east</span>
+              <span className="hidden sm:inline">{t('empty.recentActivity.applyHandoff')}</span>
+            </button>
           </div>
         </div>
       </div>
