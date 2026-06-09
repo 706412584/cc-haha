@@ -35,5 +35,17 @@ export default defineConfig({
     watch: {
       ignored: ['**/src-tauri/**'],
     },
+    // Dev-only: proxy backend traffic so the renderer talks to the API
+    // server through the same Vite origin. This avoids CORS and the
+    // loopback-clears-H5-auth path that breaks the standalone-browser
+    // dev workflow. Electron production path is unaffected because
+    // Electron sets the base URL via IPC at runtime.
+    proxy: {
+      '/health': 'http://127.0.0.1:3456',
+      '/api': 'http://127.0.0.1:3456',
+      '/ws': { target: 'ws://127.0.0.1:3456', ws: true },
+      '/local-file': 'http://127.0.0.1:3456',
+      '/preview-fs': 'http://127.0.0.1:3456',
+    },
   },
 })

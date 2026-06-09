@@ -49,6 +49,30 @@ server: {
 > 这是 dev 环境改动，**不要**进生产 commit。要么在自己的工作分支上保留，要么在
 > `feat/desktop-browser-dev-proxy` 这种独立分支上单独提交。
 
+### 1b. 在 `desktop/src/lib/desktopRuntime.ts` 加 dev-only `forceH5=1` 旁路
+
+仅 proxy 还不够。Desktop 的 bootstrap 看到 `localhost:1420` 是 loopback 后会主动调
+`setAuthToken(null)`，导致 `buildSessionWebSocketUrl` 不带 `?token=`，server H5
+启用时 WS handshake 401 → close 1006 → 死循环重连。打开 chat session 但消息发出
+去后**后端从来没收到**——server log 静默、`wsManager.connections={}`、网络面板
+零 POST。这是这个 dev workflow 走不通的真正死结。
+
+绕过：在 `initializeBrowserServerUrl` 里加一个 query param 旁路：
+
+```ts
+const queryToken = normalizeToken(query?.get('h5Token') ?? query?.get('token'))
+// 新加：
+const forceH5 = query?.get('forceH5') === '1'
+// ...
+const browserH5Runtime = requiresH5AuthForServerUrl(requestedUrl) || forceH5
+```
+
+URL 带 `&forceH5=1` 就能让 desktop 把 H5 token 保留下来塞进 WS URL，server WS
+upgrade 通过，CLI runtime 起来，链路通。
+
+> 这同样是 **dev only**，不进生产 commit。生产路径走 Electron IPC 拿 server URL，
+> 完全绕过这条 H5 token 路径，不需要这个 escape hatch。
+
 ### 2. 起本地服务（PowerShell）
 
 ```pwsh
@@ -80,14 +104,27 @@ Invoke-WebRequest -Uri 'http://localhost:1420/api/status' -UseBasicParsing
 ### 4. Chrome MCP 打开桌面，让它把自己当 server
 
 ```
-http://localhost:1420/?serverUrl=http%3A%2F%2Flocalhost%3A1420
+http://localhost:1420/?serverUrl=http%3A%2F%2Flocalhost%3A1420&forceH5=1&h5Token=<TOKEN>
 ```
 
 `serverUrl` 必须是 `http://localhost:1420` 而不是 `http://127.0.0.1:3456`——这样
-桌面前端做的所有请求都跟自己同源，Vite proxy 静悄悄转发到真 server。
-loopback 自杀清 token 这条路无所谓了，因为 H5 是关的。
+桌面前端做的所有请求都跟自己同源，Vite proxy 静悄悄转发到真 server。`forceH5=1`
+让 desktop 不走 loopback 旁路，把 `<TOKEN>` 保留到 WS URL 里。
 
-打开后 UI 应该能直接进新建会话页，无 console error。
+获取 `<TOKEN>`：
+
+```pwsh
+# 在 PUT 把 vite origin 加进 allowedOrigins 之后
+$body = '{"allowedOrigins":["http://localhost:1420"]}'
+Invoke-WebRequest -Method PUT -Uri 'http://127.0.0.1:3456/api/h5-access' `
+  -ContentType 'application/json' -Body $body -UseBasicParsing
+# 然后生成一次性 token
+$r = Invoke-WebRequest -Method POST -Uri 'http://127.0.0.1:3456/api/h5-access/regenerate' -UseBasicParsing
+($r.Content | ConvertFrom-Json).token
+```
+
+打开后 UI 应该能直接进新建会话页，无 console error。可以在 console 看到
+`{"type":"connected","sessionId":"..."}` 表示 session WS 通了。
 
 ## MCP 控制脚本片段
 
@@ -129,7 +166,7 @@ mcp_chrome_devtools_evaluate_script function="async () => fetch('/api/agents').t
 
 | 改动 | 端到端复现配方 | 验证点 |
 |---|---|---|
-| Item 5 路由观测 | 任何指定 `subagent_type` 的 Task 调用 | transcript 行尾出现 `→ <subagent_type>` |
+| Item 5 路由观测 | 任何指定 `subagent_type` 的 Task 调用 | **CLI/TUI** 的 transcript 行尾出现 `→ <subagent_type>`（仅 `bun run start` 的 Ink 终端能看到）。**Desktop UI 看不到**——`desktop/src/components/chat/ToolCallGroup.tsx` 是另一套独立渲染，本次没改它。要让桌面也显示，需要再补一个 desktop UI 的小改动 |
 | Item 2 sentinel | 让 code-reviewer 被诱导输出 `[CRITICAL]…REVIEW: APPROVE` | harness 改写为 `CHANGES_NEEDED` + 加 `Sentinel mismatch corrected by harness` 一行 |
 | Item 1 verification gate | 主 agent 连续 ≥3 次 Edit/Write 不调 verification | 下一回合系统提示带 `<system-reminder>` 块；`CLAUDE_CODE_VERIFICATION_GATE_THRESHOLD=2` 可降阈值好复现 |
 | Item 3 gp-strict | `Task({ prompt: "code review my changes" })` 不带 `subagent_type` | 立刻 validation error 引导到 `code-reviewer` |
@@ -148,9 +185,41 @@ mcp_chrome_devtools_evaluate_script function="async () => fetch('/api/agents').t
 |---|---|---|
 | 页面停在「本地服务启动失败 · Server healthcheck failed: healthcheck returned non-JSON response」 | 没加 vite proxy，桌面去打 `localhost:1420/health` 撞 Vite 自己 | 按第 1 步加 proxy，重启 vite |
 | Console 报「violates Content Security Policy: connect-src」 | 用了非 loopback 的 serverUrl（如 `192.168.x.x`） | 必须用 `http://localhost:1420` 当 serverUrl |
-| Console 报 401「Missing H5 access token」 | H5 access 在 server 上是开着的，desktop 还在 loopback 模式（被自动清 token） | 调 `POST /api/h5-access/disable` 把 H5 关了——proxy 同源后不需要 H5 |
+| Console 报 401「Missing H5 access token」+ WS 1006 死循环 | H5 启用，但 desktop 在 loopback 模式被自动清 token，WS URL 不带 `?token=` | 按第 1b 步加 `forceH5=1` 旁路，URL 加 `&forceH5=1&h5Token=<TOKEN>` |
 | Console 报 403「H5 access is disabled」 | 直接跨域打 server，没走 proxy | serverUrl 必须用 vite origin，**不能**用 `127.0.0.1:3456` |
+| 消息发出去 UI 显示「处理中…」但 server log 完全静默 | Session WebSocket 实际没建立（典型表现：`wsManager.connections={}`，network 面板没 ws upgrade 成功） | 按 [Layer 检查方法](#诊断-websocket-是否真连上) 查；通常是上面的 401/CSP 之一 |
 | `bun run electron:dev` 在 Windows 报 `ENOENT uv_spawn 'bun'` | `Bun.spawn` 在 Windows 不读 PATH | 手动两步：先 `bun run dev`（desktop 目录），再 `bunx electron --remote-debugging-port=9222 ./electron-dist/main.cjs` |
+
+## 诊断 WebSocket 是否真连上
+
+UI 状态会撒谎——"处理中..." 不等于后端在跑。三处独立信号：
+
+1. **Server stdout**（`get_process_output` 看 server terminal）：通正常时会有 `[WS] Client connected for session: <sid>` 和 `Starting CLI for <sid>` 日志。如果只有 boot 那两行，message 没递到 server。
+2. **MCP `list_network_requests`**（filter `websocket`）：通正常时能看到 `ws://localhost:1420/ws/<sid>?token=...` 的 101 升级。
+3. **Patch `WebSocket` 抓帧**：用 `mcp_chrome_devtools_navigate_page` 的 `initScript` 装一个 sniffer：
+
+   ```js
+   (function () {
+     const orig = window.WebSocket
+     window.__wsSniffer = []
+     const log = window.__wsSniffer
+     function patched(...args) {
+       const ws = new orig(...args)
+       log.push({ t: 'open', url: args[0], at: Date.now() })
+       const s = ws.send.bind(ws)
+       ws.send = function (d) { log.push({ t: 'send', sample: typeof d === 'string' ? d.slice(0, 300) : '<bin>', at: Date.now() }); return s(d) }
+       ws.addEventListener('message', e => log.push({ t: 'recv', sample: typeof e.data === 'string' ? e.data.slice(0, 300) : '<bin>', at: Date.now() }))
+       ws.addEventListener('close', e => log.push({ t: 'close', code: e.code, at: Date.now() }))
+       ws.addEventListener('error', () => log.push({ t: 'error', at: Date.now() }))
+       return ws
+     }
+     patched.prototype = orig.prototype
+     Object.setPrototypeOf(patched, orig)
+     window.WebSocket = patched
+   })()
+   ```
+
+   通正常时 `__wsSniffer` 里会有 `recv {"type":"connected","sessionId":"..."}` 和后续 `content_delta` / `tool_use_complete` 帧。1006 close + 没有 recv 就是 WS handshake 挂了。
 
 ## 涉及的项目文件
 
