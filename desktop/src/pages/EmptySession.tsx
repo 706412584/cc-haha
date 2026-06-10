@@ -46,6 +46,7 @@ import type { PermissionMode } from '../types/settings'
 import type { SlashCommandOption } from '../components/chat/composerUtils'
 import { WelcomeTaskCards, type WelcomeTaskCard } from '../components/welcome/WelcomeTaskCards'
 import { RecentActivityCard } from '../components/welcome/RecentActivityCard'
+import { pickReusableEmptySession } from '../lib/sessionReuse'
 
 type Attachment = ComposerAttachment
 
@@ -669,14 +670,27 @@ export function EmptySession() {
 
               setStage('starting-session')
 
-              // 2. Create the new session and connect.
+              // 2. Resolve the target sessionId. Prefer reusing an
+              //    existing empty session in the same workDir (the
+              //    classic stray-tab case where the user clicked
+              //    "New session in X" earlier, closed the tab, then
+              //    landed back on this welcome screen). Falls back to
+              //    creating a fresh session.
               try {
-                const sessionId = await createSession(
-                  workDir || undefined,
-                  selectedBranch
-                    ? { repository: { branch: selectedBranch, worktree: useWorktree }, permissionMode: draftPermissionMode }
-                    : { permissionMode: draftPermissionMode },
-                )
+                const reuseSessionId = workDir
+                  ? pickReusableEmptySession(
+                      useSessionStore.getState().sessions,
+                      workDir,
+                      previousSessionId,
+                    )
+                  : null
+                const sessionId = reuseSessionId
+                  ?? (await createSession(
+                    workDir || undefined,
+                    selectedBranch
+                      ? { repository: { branch: selectedBranch, worktree: useWorktree }, permissionMode: draftPermissionMode }
+                      : { permissionMode: draftPermissionMode },
+                  ))
                 setActiveView('code')
                 useTabStore.getState().openTab(sessionId, 'New Session')
                 connectToSession(sessionId)

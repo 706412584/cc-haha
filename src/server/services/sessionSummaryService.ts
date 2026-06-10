@@ -48,6 +48,19 @@ export type SessionSummary = {
   /** ~600-1000 tok detailed summary of the most recent ~10 turns: what was
    *  decided, what was tried, what's pending right now. */
   recent: string
+  /**
+   * Raw (truncated) tail of the transcript — the LAST ~12 turns rendered
+   * as `USER: …` / `ASSISTANT: …` lines, each truncated to ~400 chars,
+   * total capped at ~8000 chars. Lets the next-session AI see the actual
+   * recent wording (what the user literally just asked, what was actually
+   * said about the failure mode) instead of relying solely on the LLM's
+   * abstracted `recent` summary, which tends to lose proper nouns,
+   * specific error messages, and the user's exact phrasing.
+   *
+   * Optional for backward compat: older cache files without this field
+   * still load — `formatHandoffSystemPrompt` just omits the raw section.
+   */
+  recentRaw?: string
   /** Best-effort token accounting for cost transparency. */
   tokensIn?: number
   tokensOut?: number
@@ -57,6 +70,17 @@ const SUMMARY_OUTPUT_MAX_TOKENS_DEFAULT = 1500
 const SUMMARY_INPUT_MAX_CHARS_DEFAULT = 80_000
 const SUMMARY_REQUEST_TIMEOUT_MS = 60_000
 const SUMMARY_FILE_SUFFIX = '.summary.json'
+
+/**
+ * How many trailing turns (USER+ASSISTANT lines) to keep verbatim in the
+ * `recentRaw` slice. 12 turns ≈ 6 user/AI exchange pairs, which is enough
+ * to give the next-session AI a sense of "what the user just literally
+ * said and what I just literally tried" without blowing system prompt
+ * budget. Override with CLAUDE_CODE_HANDOFF_RAW_TURNS.
+ */
+const SUMMARY_RAW_TAIL_TURNS_DEFAULT = 12
+const SUMMARY_RAW_TAIL_CHARS_PER_TURN_DEFAULT = 400
+const SUMMARY_RAW_TAIL_TOTAL_CHARS_DEFAULT = 8_000
 
 function getOutputCap(): number {
   const raw = process.env.CLAUDE_CODE_HANDOFF_MAX_TOKENS
@@ -72,6 +96,66 @@ function getInputCap(): number {
   const parsed = Number.parseInt(raw, 10)
   if (!Number.isFinite(parsed) || parsed < 5_000) return SUMMARY_INPUT_MAX_CHARS_DEFAULT
   return parsed
+}
+
+function getRawTailTurns(): number {
+  const raw = process.env.CLAUDE_CODE_HANDOFF_RAW_TURNS
+  if (!raw) return SUMMARY_RAW_TAIL_TURNS_DEFAULT
+  const parsed = Number.parseInt(raw, 10)
+  if (!Number.isFinite(parsed) || parsed < 0) return SUMMARY_RAW_TAIL_TURNS_DEFAULT
+  return Math.min(parsed, 50)
+}
+
+function getRawTailTotalChars(): number {
+  const raw = process.env.CLAUDE_CODE_HANDOFF_RAW_CHARS
+  if (!raw) return SUMMARY_RAW_TAIL_TOTAL_CHARS_DEFAULT
+  const parsed = Number.parseInt(raw, 10)
+  if (!Number.isFinite(parsed) || parsed < 500) return SUMMARY_RAW_TAIL_TOTAL_CHARS_DEFAULT
+  return Math.min(parsed, 30_000)
+}
+
+/** Truncate a single turn line preserving the role prefix. */
+function truncateTurnLine(line: string, maxChars: number): string {
+  if (line.length <= maxChars) return line
+  // Try to keep the `USER: ` / `ASSISTANT: ` prefix intact; only truncate
+  // the body. If the line is shorter than the prefix budget anyway, the
+  // outer length check already returned.
+  const colonIdx = line.indexOf(': ')
+  if (colonIdx > 0 && colonIdx < 16) {
+    const prefix = line.slice(0, colonIdx + 2)
+    const body = line.slice(colonIdx + 2)
+    const room = Math.max(0, maxChars - prefix.length - 1)
+    return prefix + body.slice(0, room).trimEnd() + '…'
+  }
+  return line.slice(0, maxChars - 1).trimEnd() + '…'
+}
+
+/**
+ * Build the verbatim-but-truncated tail slice of the transcript. Caller
+ * inserts this into the hand-off system prompt under "Most recent
+ * messages (verbatim, truncated)" so the next-session AI can see the
+ * actual user wording — not just the LLM-summarized abstract.
+ */
+function buildRecentRawSlice(turns: string[]): string {
+  const tailTurns = getRawTailTurns()
+  if (tailTurns === 0 || turns.length === 0) return ''
+  const totalCap = getRawTailTotalChars()
+  const perTurn = SUMMARY_RAW_TAIL_CHARS_PER_TURN_DEFAULT
+
+  const start = Math.max(0, turns.length - tailTurns)
+  const candidates = turns.slice(start).map((t) => truncateTurnLine(t, perTurn))
+
+  // Per-line cap may still bust totalCap on dense turns; tail-clip at the
+  // total cap, dropping older lines first, so the most recent stays.
+  let total = 0
+  const kept: string[] = []
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    const t = candidates[i]!
+    if (total + t.length + 2 > totalCap && kept.length > 0) break
+    kept.unshift(t)
+    total += t.length + 2
+  }
+  return kept.join('\n\n')
 }
 
 const SUMMARY_SYSTEM_PROMPT = `You are summarizing a coding-agent conversation between a developer and an AI assistant. The summary will be injected as system-level hand-off context into the developer's NEXT session in the same project, so the next-session AI knows what was already discussed without re-feeding the whole transcript.
@@ -101,6 +185,7 @@ const SUMMARY_USER_PROMPT_PREFIX =
 async function buildTranscriptText(filePath: string): Promise<{
   text: string
   messageCount: number
+  recentRaw: string
 }> {
   const inputCap = getInputCap()
   const stream = createReadStream(filePath, { encoding: 'utf8' })
@@ -167,9 +252,16 @@ async function buildTranscriptText(filePath: string): Promise<{
     total += t.length + 2
   }
 
+  // Independent of the LLM-summarization tail, also derive the verbatim
+  // (truncated) recent slice that ships with the summary into the next
+  // session's system prompt. Computed off the FULL `turns` so the per-turn
+  // truncation logic doesn't interact with the summarization input cap.
+  const recentRaw = buildRecentRawSlice(turns)
+
   return {
     text: kept.join('\n\n'),
     messageCount,
+    recentRaw,
   }
 }
 
@@ -424,7 +516,7 @@ export async function getSessionSummary(
   const target = await resolveSummarizationTarget()
   if (!target) return null
 
-  const { text, messageCount } = await buildTranscriptText(found.filePath)
+  const { text, messageCount, recentRaw } = await buildTranscriptText(found.filePath)
   if (!text || messageCount === 0) return null
 
   const result = await callSummarizer(target, text)
@@ -443,6 +535,7 @@ export async function getSessionSummary(
     modelUsed: modelLabel,
     main: parsed.main,
     recent: parsed.recent,
+    ...(recentRaw ? { recentRaw } : {}),
     ...(typeof result.tokensIn === 'number' ? { tokensIn: result.tokensIn } : {}),
     ...(typeof result.tokensOut === 'number' ? { tokensOut: result.tokensOut } : {}),
   }
@@ -485,6 +578,18 @@ export async function invalidateSessionSummary(sessionId: string): Promise<void>
  * stays in one place (tests assert on this exact preamble).
  */
 export function formatHandoffSystemPrompt(summary: SessionSummary): string {
+  const rawSection = summary.recentRaw
+    ? `
+
+## Most recent messages (verbatim, truncated)
+
+The block below is the literal tail of the previous conversation — the LLM-generated summary above abstracted these turns, but the raw wording matters when the user said something specific (a file path, an error message, a number) that an abstraction would smudge. Each turn is truncated to ~400 chars; older turns are dropped first.
+
+\`\`\`
+${summary.recentRaw}
+\`\`\`
+`
+    : ''
   return `# Hand-off context from the previous session
 
 The user just continued from a previous session in this project. You did not see that conversation. Below is a two-layer summary of what the previous AI worked on so you can resume meaningfully without making the user re-explain.
@@ -497,7 +602,7 @@ ${summary.main}
 
 ## Most recent decisions and state
 
-${summary.recent}
+${summary.recent}${rawSection}
 
 (Generated from session ${summary.sessionId}, ${summary.baseMessageCount} messages, model ${summary.modelUsed}, ${summary.generatedAt}.)`
 }
@@ -505,4 +610,12 @@ ${summary.recent}
 /** Test helper: exposed paths so tests can write fixtures without re-deriving. */
 export function _summaryFilePathForTest(jsonlPath: string): string {
   return summaryFilePathFor(jsonlPath)
+}
+
+/** Test helper: exposed so the trailing raw slice can be tested without
+ *  spinning up an LLM. The shape contract (per-turn truncation, tail
+ *  ordering, total cap) is locked in via tests; production callers go
+ *  through buildTranscriptText. */
+export function _buildRecentRawSliceForTest(turns: string[]): string {
+  return buildRecentRawSlice(turns)
 }
