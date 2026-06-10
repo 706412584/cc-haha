@@ -9,6 +9,8 @@ import {
 } from '../stores/tabStore'
 import { useSessionStore } from '../stores/sessionStore'
 import { useChatStore } from '../stores/chatStore'
+import { projectsApi } from '../api/projects'
+import { wsManager } from '../api/websocket'
 import { useCLITaskStore } from '../stores/cliTaskStore'
 import { useTeamStore } from '../stores/teamStore'
 import { useWorkspacePanelStore } from '../stores/workspacePanelStore'
@@ -454,13 +456,38 @@ export function ActiveSession() {
                     useTabStore.getState().openTab(sessionId, 'New Session')
                     connectToSession(sessionId)
                   }}
-                  onApplyHandoff={(text) => {
-                    const detail: ComposerPrefillDetail = {
-                      sessionId: activeTabId,
-                      text,
+                  onAutoHandoff={async (previousSessionId, fallbackText) => {
+                    // 1. Resolve summary (cached → generated → null). Any
+                    //    failure degrades silently to the zero-token
+                    //    textarea-prefill path.
+                    const summary = await projectsApi.resolveSessionSummaryForHandoff(previousSessionId)
+
+                    if (!summary) {
+                      // Zero-token fallback: write the static hand-off
+                      // paragraph into the composer via the existing
+                      // composer-prefill event.
+                      const detail: ComposerPrefillDetail = {
+                        sessionId: activeTabId,
+                        text: fallbackText,
+                      }
+                      window.dispatchEvent(
+                        new CustomEvent(COMPOSER_PREFILL_EVENT, { detail }),
+                      )
+                      return
                     }
-                    window.dispatchEvent(
-                      new CustomEvent(COMPOSER_PREFILL_EVENT, { detail }),
+
+                    // 2. Stage hand-off on the live session and auto-send a
+                    //    short trigger message. Server reads cached summary
+                    //    via WS message, restarts CLI with --append-system-
+                    //    prompt, and the next user_message kicks off the AI
+                    //    turn with full context already in system prompt.
+                    wsManager.send(activeTabId, {
+                      type: 'set_handoff_summary',
+                      previousSessionId,
+                    })
+                    useChatStore.getState().sendMessage(
+                      activeTabId,
+                      t('empty.recentActivity.continueTriggerMessage'),
                     )
                   }}
                 />

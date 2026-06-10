@@ -1189,6 +1189,7 @@ export const kr: Record<TranslationKey, string> = {
   'empty.recentActivity.dirtyFiles': '커밋되지 않은 파일 {count}개',
   'empty.recentActivity.continueSession': '이 세션 열기',
   'empty.recentActivity.applyHandoff': '여기서부터 계속',
+  'empty.recentActivity.handoffGenerating': '컨텍스트 준비 중...',
   'empty.recentActivity.handoff.branchLine': '지난 세션({branch}): "{title}".',
   'empty.recentActivity.handoff.titleLine': '지난 세션: "{title}".',
   'empty.recentActivity.handoff.filesLine': '수정한 파일: {files}{more}.',
@@ -1196,6 +1197,7 @@ export const kr: Record<TranslationKey, string> = {
   'empty.recentActivity.handoff.aheadLine': '로컬이 원격보다 커밋 {count}개 앞서 있습니다.',
   'empty.recentActivity.handoff.dirtyLine': '커밋되지 않은 파일이 {count}개 있습니다.',
   'empty.recentActivity.handoff.continuePrompt': '여기서부터 계속해 주세요: (다음 단계 설명).',
+  'empty.recentActivity.continueTriggerMessage': '이전 세션의 진행 상황에서 이어서 작업해 주세요. 위의 인계 컨텍스트를 사실로 받아들이고, 먼저 1-2문장으로 현재 상태를 요약한 뒤 다음 단계를 설명하고 작업을 시작해 주세요.',
 
   // ─── Repository Launch Controls ──────────────────────────────────────
   'repoLaunch.selectBranch': '브랜치 선택',

@@ -6,8 +6,19 @@ type Props = {
   workDir: string
   /** Open the most recent session in a tab. Card hides itself afterward. */
   onContinueSession: (sessionId: string) => void
-  /** Apply a "what was just happening" hand-off paragraph into the composer. */
-  onApplyHandoff: (text: string) => void
+  /**
+   * Auto-handoff: prefer a server-summarized two-layer hand-off context
+   * over the zero-token textarea prefill. The host implements:
+   *   1. Generate (or fetch cached) summary via projectsApi
+   *   2. Stage it on the target session via WS `set_handoff_summary`
+   *   3. Auto-send a "continue" first message
+   * If anything fails, host falls back to writing `fallbackText` into the
+   * composer textarea (the existing zero-token path).
+   *
+   * Returns a Promise so the card can show a spinner while the host is
+   * working. The card never knows or cares about provider details.
+   */
+  onAutoHandoff: (previousSessionId: string, fallbackText: string) => Promise<void>
   /**
    * If the parent already has a session live (ActiveSession path), the
    * "Continue this session" button is redundant — hide it.
@@ -38,7 +49,7 @@ const REFRESH_INTERVAL_MS = 60_000
 export function RecentActivityCard({
   workDir,
   onContinueSession,
-  onApplyHandoff,
+  onAutoHandoff,
   hideContinueSessionButton = false,
   excludeSessionId,
 }: Props) {
@@ -46,6 +57,7 @@ export function RecentActivityCard({
   const [data, setData] = useState<RecentActivityResult | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [handoffPending, setHandoffPending] = useState(false)
 
   useEffect(() => {
     if (!workDir) {
@@ -175,13 +187,35 @@ export function RecentActivityCard({
             )}
             <button
               type="button"
-              onClick={() => onApplyHandoff(handoffText)}
+              onClick={async () => {
+                if (handoffPending || !lastSession) return
+                setHandoffPending(true)
+                try {
+                  await onAutoHandoff(lastSession.sessionId, handoffText)
+                } finally {
+                  setHandoffPending(false)
+                }
+              }}
+              disabled={handoffPending || !lastSession}
               data-testid="recent-activity-apply-handoff"
-              title={t('empty.recentActivity.applyHandoff')}
-              className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-2 py-1 text-xs text-[var(--color-text-primary)] transition-colors hover:border-[var(--color-primary)] hover:bg-[var(--color-surface-hover)]"
+              title={
+                handoffPending
+                  ? t('empty.recentActivity.handoffGenerating')
+                  : t('empty.recentActivity.applyHandoff')
+              }
+              className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-2 py-1 text-xs text-[var(--color-text-primary)] transition-colors hover:border-[var(--color-primary)] hover:bg-[var(--color-surface-hover)] disabled:cursor-progress disabled:opacity-60"
             >
-              <span className="material-symbols-outlined text-[14px]" aria-hidden="true">north_east</span>
-              <span className="hidden sm:inline">{t('empty.recentActivity.applyHandoff')}</span>
+              <span
+                className={`material-symbols-outlined text-[14px] ${handoffPending ? 'animate-spin' : ''}`}
+                aria-hidden="true"
+              >
+                {handoffPending ? 'progress_activity' : 'north_east'}
+              </span>
+              <span className="hidden sm:inline">
+                {handoffPending
+                  ? t('empty.recentActivity.handoffGenerating')
+                  : t('empty.recentActivity.applyHandoff')}
+              </span>
             </button>
           </div>
         </div>

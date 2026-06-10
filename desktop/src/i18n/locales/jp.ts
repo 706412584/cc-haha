@@ -1189,6 +1189,7 @@ export const jp: Record<TranslationKey, string> = {
   'empty.recentActivity.dirtyFiles': '未コミット {count}ファイル',
   'empty.recentActivity.continueSession': 'このセッションを開く',
   'empty.recentActivity.applyHandoff': 'ここから続ける',
+  'empty.recentActivity.handoffGenerating': 'コンテキストを準備中...',
   'empty.recentActivity.handoff.branchLine': '前回のセッション ({branch}): 「{title}」。',
   'empty.recentActivity.handoff.titleLine': '前回のセッション:「{title}」。',
   'empty.recentActivity.handoff.filesLine': '触ったファイル: {files}{more}。',
@@ -1196,6 +1197,7 @@ export const jp: Record<TranslationKey, string> = {
   'empty.recentActivity.handoff.aheadLine': 'ローカルがリモートより {count} コミット先行しています。',
   'empty.recentActivity.handoff.dirtyLine': '未コミットのファイルが {count} 件あります。',
   'empty.recentActivity.handoff.continuePrompt': 'ここから続けてください: (次のステップを記述)。',
+  'empty.recentActivity.continueTriggerMessage': '前回のセッションの続きから進めてください。上の引き継ぎコンテキストを事実として扱い、まず 1-2 文で現在の状態を要約してから次のステップを述べ、それから着手してください。',
 
   // ─── Repository Launch Controls ──────────────────────────────────────
   'repoLaunch.selectBranch': 'ブランチを選択',

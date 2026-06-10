@@ -1196,6 +1196,7 @@ export const en = {
   'empty.recentActivity.dirtyFiles': '{count} dirty',
   'empty.recentActivity.continueSession': 'Open this session',
   'empty.recentActivity.applyHandoff': 'Continue from here',
+  'empty.recentActivity.handoffGenerating': 'Preparing context...',
   'empty.recentActivity.handoff.branchLine': 'Last session on {branch}: "{title}".',
   'empty.recentActivity.handoff.titleLine': 'Last session: "{title}".',
   'empty.recentActivity.handoff.filesLine': 'Files touched: {files}{more}.',
@@ -1203,6 +1204,10 @@ export const en = {
   'empty.recentActivity.handoff.aheadLine': 'Local is ahead of upstream by {count} commit(s).',
   'empty.recentActivity.handoff.dirtyLine': '{count} file(s) have uncommitted changes.',
   'empty.recentActivity.handoff.continuePrompt': "Please continue from there. Pick up by ...(describe the next step here).",
+  /** First user message auto-sent after a successful hand-off (which is
+   *  fully delivered as system prompt context). Kept short — the AI
+   *  reads the system prompt and resumes. */
+  'empty.recentActivity.continueTriggerMessage': "Please pick up where the previous session left off. Use the hand-off context above as ground truth, and start by stating in 1-2 sentences what you understand the current state to be and what you'll do next.",
 
   // ─── Repository Launch Controls ──────────────────────────────────────
   'repoLaunch.selectBranch': 'Select branch',

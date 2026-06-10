@@ -1189,6 +1189,7 @@ export const zh: Record<TranslationKey, string> = {
   'empty.recentActivity.dirtyFiles': '{count} 个文件未提交',
   'empty.recentActivity.continueSession': '打开这个会话',
   'empty.recentActivity.applyHandoff': '从这里继续',
+  'empty.recentActivity.handoffGenerating': '正在准备上下文...',
   'empty.recentActivity.handoff.branchLine': '上次在 {branch} 上做了:"{title}"。',
   'empty.recentActivity.handoff.titleLine': '上次会话:"{title}"。',
   'empty.recentActivity.handoff.filesLine': '动了这些文件:{files}{more}。',
@@ -1196,6 +1197,7 @@ export const zh: Record<TranslationKey, string> = {
   'empty.recentActivity.handoff.aheadLine': '本地领先远端 {count} 个 commit 没 push。',
   'empty.recentActivity.handoff.dirtyLine': '{count} 个文件还有未提交改动。',
   'empty.recentActivity.handoff.continuePrompt': '请接着往下:(此处描述要做的下一步)。',
+  'empty.recentActivity.continueTriggerMessage': '请接着上次会话的进度继续。把上面的接续上下文当作事实依据,先用 1-2 句话说明你理解的当前状态,然后说明下一步要做什么,再开始动手。',
 
   // ─── Repository Launch Controls ──────────────────────────────────────
   'repoLaunch.selectBranch': '选择分支',
