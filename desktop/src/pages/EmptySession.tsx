@@ -668,6 +668,13 @@ export function EmptySession() {
                 //    starts (or restarts) with --append-system-prompt
                 //    carrying the summary, so the AI begins with full
                 //    context without seeing a prefilled user message.
+                //
+                //    Race-condition note: wsManager.send tolerates a
+                //    not-yet-OPEN socket — it queues the message in
+                //    `pendingMessages` and flushes onopen. So this works
+                //    even when connectToSession() above hasn't completed
+                //    its WS upgrade yet. Don't change to gate on
+                //    isConnected() without re-checking that contract.
                 wsManager.send(sessionId, {
                   type: 'set_handoff_summary',
                   previousSessionId,

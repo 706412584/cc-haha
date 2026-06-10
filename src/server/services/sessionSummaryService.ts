@@ -452,6 +452,21 @@ export async function getSessionSummary(
 }
 
 /**
+ * Public: cache-only read. Returns null on miss without ever invoking
+ * the LLM. Intended for hot paths (e.g. the WS handoff staging handler)
+ * where the caller already arranged for generation via the HTTP API and
+ * doesn't want to block on an unexpected fresh LLM call. Treats missing
+ * file or parse failure both as "no cached summary".
+ */
+export async function getCachedSessionSummary(
+  sessionId: string,
+): Promise<SessionSummary | null> {
+  const found = await sessionService.findSessionFile(sessionId)
+  if (!found) return null
+  return readCachedSummary(summaryFilePathFor(found.filePath))
+}
+
+/**
  * Public: invalidate the on-disk cache for a session. Useful if the caller
  * detects the underlying transcript changed in a way that should force the
  * next read to regenerate. The next `getSessionSummary` call will lazily

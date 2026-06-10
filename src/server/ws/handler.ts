@@ -17,7 +17,7 @@ import { computerUseApprovalService } from '../services/computerUseApprovalServi
 import { sessionService } from '../services/sessionService.js'
 import {
   formatHandoffSystemPrompt,
-  getSessionSummary,
+  getCachedSessionSummary,
 } from '../services/sessionSummaryService.js'
 import { SettingsService } from '../services/settingsService.js'
 import { ProviderService } from '../services/providerService.js'
@@ -654,12 +654,16 @@ async function handleSetCoordinatorMode(
  * prompt addendum on this session's CLI launch. Frontend dispatches this
  * before the first user message after clicking "Continue from here".
  *
- * The summary is generated lazily server-side (cached on disk) — this
- * handler resolves the cached or freshly-generated summary, formats it as
- * a system prompt fragment, and stages it. If anything fails (no provider,
- * generation error, transcript empty), we silently no-op so the user still
- * gets the session, just without the hand-off context (the existing
- * zero-token textarea path remains the fallback).
+ * Cache-only: the frontend's "Continue from here" path always calls the
+ * HTTP `POST /api/sessions/:id/summary` endpoint first (which performs
+ * the LLM call if needed), and ONLY dispatches this WS message after the
+ * HTTP returned a successful summary. So we should always find a cached
+ * summary on disk here. If we somehow don't, fail fast and silently — the
+ * frontend has already committed to its auto-handoff path; injecting a
+ * silent retry through the LLM here would block the WS handler for tens
+ * of seconds and double-charge the user. Better to leave the new session
+ * without hand-off context (the trigger message will simply read as a
+ * normal "continue" prompt with no system-prompt addendum) than to hang.
  */
 async function handleSetHandoffSummary(
   ws: ServerWebSocket<WebSocketData>,
@@ -671,11 +675,19 @@ async function handleSetHandoffSummary(
 
   let summaryText: string | undefined
   try {
-    const summary = await getSessionSummary(previousSessionId)
-    if (summary) summaryText = formatHandoffSystemPrompt(summary)
+    const summary = await getCachedSessionSummary(previousSessionId)
+    if (summary) {
+      summaryText = formatHandoffSystemPrompt(summary)
+    } else {
+      console.warn(
+        `[WS] Hand-off staging: no cached summary for ${previousSessionId}; ` +
+          `the frontend should have generated it via HTTP before sending this WS message. ` +
+          `Skipping system-prompt staging — the new session will start without hand-off context.`,
+      )
+    }
   } catch (error) {
     console.warn(
-      `[WS] Hand-off summary generation failed for ${previousSessionId}; continuing without context. Error:`,
+      `[WS] Hand-off summary read failed for ${previousSessionId}; continuing without context. Error:`,
       error,
     )
   }
