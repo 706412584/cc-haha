@@ -579,6 +579,80 @@ describe('ProviderService', () => {
     })
   })
 
+  // ─── markThinkingIncompatible + auto-clear on update ─────────────────────
+
+  describe('markThinkingIncompatible', () => {
+    test('sets thinkingIncompatible flag on the provider record', async () => {
+      const svc = new ProviderService()
+      const added = await svc.addProvider(sampleInput())
+
+      const updated = await svc.markThinkingIncompatible(
+        added.id,
+        'API error 400: additionalModelRequestFields not supported',
+      )
+
+      expect(updated?.thinkingIncompatible).toBe(true)
+      expect(updated?.thinkingIncompatibleReason).toContain(
+        'additionalModelRequestFields',
+      )
+
+      // Persisted to disk so the next sidecar launch can pick it up.
+      const persisted = await readProvidersConfig()
+      const providerOnDisk = (persisted.providers as Array<Record<string, unknown>>)[0]
+      expect(providerOnDisk?.thinkingIncompatible).toBe(true)
+    })
+
+    test('truncates a chatty reason snippet so providers.json stays bounded', async () => {
+      const svc = new ProviderService()
+      const added = await svc.addProvider(sampleInput())
+      const longReason = 'x'.repeat(2000)
+
+      const updated = await svc.markThinkingIncompatible(added.id, longReason)
+      expect(updated?.thinkingIncompatibleReason?.length).toBeLessThanOrEqual(500)
+    })
+
+    test('is idempotent — re-marking the same provider with the same reason is a no-op', async () => {
+      const svc = new ProviderService()
+      const added = await svc.addProvider(sampleInput())
+      const reason = 'thinking is not supported by this model'
+
+      await svc.markThinkingIncompatible(added.id, reason)
+      const persistedFirst = await readProvidersConfig()
+      const firstWriteJson = JSON.stringify(persistedFirst)
+
+      // Re-mark — must not change disk state. Compare JSON strings since
+      // we don't have an easy mtime hook in the test setup.
+      await svc.markThinkingIncompatible(added.id, reason)
+      const persistedSecond = await readProvidersConfig()
+      expect(JSON.stringify(persistedSecond)).toBe(firstWriteJson)
+    })
+
+    test('returns null without writing for unknown provider ids', async () => {
+      const svc = new ProviderService()
+      const result = await svc.markThinkingIncompatible('non-existent', 'reason')
+      expect(result).toBeNull()
+    })
+
+    test('returns null for the openai-official provider (not user-editable)', async () => {
+      const svc = new ProviderService()
+      const result = await svc.markThinkingIncompatible('openai-official', 'reason')
+      expect(result).toBeNull()
+    })
+
+    test('updateProvider clears the thinkingIncompatible flag (re-arm on edit)', async () => {
+      const svc = new ProviderService()
+      const added = await svc.addProvider(sampleInput())
+      await svc.markThinkingIncompatible(added.id, 'rejected')
+
+      const flagged = await svc.getProvider(added.id)
+      expect(flagged.thinkingIncompatible).toBe(true)
+
+      const reedited = await svc.updateProvider(added.id, { name: 'Renamed' })
+      expect(reedited.thinkingIncompatible).toBeUndefined()
+      expect(reedited.thinkingIncompatibleReason).toBeUndefined()
+    })
+  })
+
   // ─── deleteProvider ──────────────────────────────────────────────────────
 
   describe('deleteProvider', () => {

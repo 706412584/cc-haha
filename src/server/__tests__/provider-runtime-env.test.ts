@@ -102,4 +102,60 @@ describe('providerRuntimeEnv', () => {
       DISABLE_AUTOUPDATER: '1',
     })
   })
+
+  test('injects CLAUDE_CODE_DISABLE_THINKING when the provider is flagged thinkingIncompatible', async () => {
+    await writeJson(path.join(tmpDir, 'cc-haha', 'providers.json'), {
+      activeId: 'provider-1',
+      providers: [
+        {
+          id: 'provider-1',
+          presetId: 'custom',
+          name: 'Bedrock Proxy',
+          apiKey: 'sk-active',
+          authStrategy: 'auth_token',
+          baseUrl: 'https://bedrock-proxy.example.com',
+          apiFormat: 'anthropic',
+          models: {
+            main: 'active-main',
+            haiku: 'active-haiku',
+            sonnet: 'active-sonnet',
+            opus: 'active-opus',
+          },
+          thinkingIncompatible: true,
+          thinkingIncompatibleReason: 'additionalModelRequestFields not supported',
+        },
+      ],
+    })
+
+    const env = readActiveProviderManagedEnv(tmpDir)
+    expect(env?.CLAUDE_CODE_DISABLE_THINKING).toBe('1')
+  })
+
+  test('does NOT inject CLAUDE_CODE_DISABLE_THINKING when the flag is absent (back-compat with v0.5.7 providers.json)', async () => {
+    await writeJson(path.join(tmpDir, 'cc-haha', 'providers.json'), {
+      activeId: 'provider-1',
+      providers: [
+        {
+          id: 'provider-1',
+          presetId: 'custom',
+          name: 'Healthy Provider',
+          apiKey: 'sk-active',
+          authStrategy: 'auth_token',
+          baseUrl: 'https://api.example.com',
+          apiFormat: 'anthropic',
+          models: {
+            main: 'active-main',
+            haiku: 'active-haiku',
+            sonnet: 'active-sonnet',
+            opus: 'active-opus',
+          },
+          // thinkingIncompatible intentionally absent to mirror legacy
+          // providers.json files written by older cc-haha versions.
+        },
+      ],
+    })
+
+    const env = readActiveProviderManagedEnv(tmpDir)
+    expect(env?.CLAUDE_CODE_DISABLE_THINKING).toBeUndefined()
+  })
 })

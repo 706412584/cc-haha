@@ -1242,6 +1242,16 @@ export const en = {
    *  crossed the warn threshold. */
   'providerCompat.badge.label': 'Tool call issues',
   'providerCompat.badge.tooltip': 'This provider emitted {count} fake tool_use blocks. It likely does not relay native tool_use — actions did not run.',
+  /** Toast fired the first time the server flags a provider as
+   *  thinking-incompatible (typical: Bedrock proxy returning
+   *  "additionalModelRequestFields not supported"). The thinking field
+   *  is auto-suppressed on subsequent sidecar launches; the user can
+   *  re-arm by editing the provider's config. {reason} is the upstream
+   *  error snippet (may be empty). */
+  'providerCompat.toast.thinkingIncompatible': 'The current provider rejected the `thinking` field. cc-haha will stop sending it on future calls (auto-fallback). To re-arm the warning, edit the provider config in Settings. {reason}',
+  /** Settings → Provider badge for thinking-incompatible providers. */
+  'providerCompat.thinkingBadge.label': 'Thinking incompatible',
+  'providerCompat.thinkingBadge.tooltip': 'This provider rejected the `thinking` field. cc-haha auto-disabled thinking for this provider. Edit the provider config to clear the warning.',
 
   // ─── Repository Launch Controls ──────────────────────────────────────
   'repoLaunch.selectBranch': 'Select branch',

@@ -97,6 +97,21 @@ export type ServerMessage =
   | { type: 'team_deleted'; teamName: string }
   | { type: 'task_update'; taskId: string; status: string; progress?: string }
   | { type: 'session_title_updated'; sessionId: string; title: string }
+  /**
+   * Provider-level compatibility event. Sent when the server-side WS
+   * handler observes a provider rejecting an Anthropic-protocol field
+   * with a 4xx — current detection: thinking-incompatible Bedrock
+   * proxies returning "additionalModelRequestFields not supported".
+   * The desktop providerCompatStore records this against the
+   * provider id and shows a "思考不兼容" badge in Settings; cleared
+   * on next provider edit.
+   */
+  | {
+      type: 'provider_compat_event'
+      providerId: string
+      kind: 'thinking_incompatible'
+      reason?: string
+    }
 
 export type TokenUsage = {
   input_tokens: number

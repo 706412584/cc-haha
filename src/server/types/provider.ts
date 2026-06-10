@@ -55,6 +55,26 @@ export const SavedProviderSchema = z.object({
   autoCompactWindow: AutoCompactWindowSchema.optional(),
   modelContextWindows: ModelContextWindowsSchema.optional(),
   notes: z.string().optional(),
+  /**
+   * Sticky compatibility marker: set to true when cc-haha observes this
+   * provider rejecting Anthropic's `thinking` field via a 4xx like
+   * "additionalModelRequestFields not supported" (typical for Bedrock
+   * proxies that wrap unknown Anthropic params into AWS's
+   * additionalModelRequestFields). When true, `buildProviderManagedEnv`
+   * injects `CLAUDE_CODE_DISABLE_THINKING=1` so subsequent sidecar
+   * launches stop sending thinking entirely. Cleared automatically on
+   * any updateProvider() so users get a fresh chance after editing
+   * config — matches the desktop providerCompatStore re-arm semantics
+   * for fake tool_use detection.
+   */
+  thinkingIncompatible: z.boolean().optional(),
+  /**
+   * Optional last-seen 4xx message from the provider, surfaced in the
+   * Settings tooltip so the user understands WHY the badge appeared.
+   * Truncated to 500 chars on persist so a chatty proxy can't blow the
+   * providers.json file.
+   */
+  thinkingIncompatibleReason: z.string().max(500).optional(),
 })
 
 export const ProvidersIndexSchema = z.object({

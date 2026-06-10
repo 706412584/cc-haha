@@ -3,6 +3,7 @@ import {
   PROVIDER_COMPAT_STORAGE_KEY,
   PROVIDER_COMPAT_WARN_THRESHOLD,
   hasProviderCompatWarning,
+  hasProviderThinkingIncompatible,
   useProviderCompatStore,
 } from './providerCompatStore'
 import { useUIStore } from './uiStore'
@@ -133,5 +134,83 @@ describe('providerCompatStore', () => {
     const mod = await import('./providerCompatStore')
     expect(mod.useProviderCompatStore.getState().events['provider-a']?.count).toBe(5)
     expect(mod.useProviderCompatStore.getState().warnedProviderIds.has('provider-a')).toBe(true)
+  })
+
+  describe('thinking-incompatible flag', () => {
+    it('records a thinking-incompatible provider id and fires a one-time toast', () => {
+      const { recordThinkingIncompatible } = useProviderCompatStore.getState()
+      recordThinkingIncompatible('provider-a', 'thinking is not supported')
+
+      expect(
+        useProviderCompatStore.getState().thinkingIncompatibleProviderIds.has('provider-a'),
+      ).toBe(true)
+      expect(useUIStore.getState().toasts).toHaveLength(1)
+      expect(useUIStore.getState().toasts[0]!.type).toBe('warning')
+
+      // Re-firing for the same provider must not double-toast (server may
+      // re-emit on subsequent sidecar restarts).
+      recordThinkingIncompatible('provider-a', 'thinking is not supported')
+      expect(useUIStore.getState().toasts).toHaveLength(1)
+    })
+
+    it('persists the thinking-incompatible set to localStorage', () => {
+      useProviderCompatStore.getState().recordThinkingIncompatible('provider-a', '')
+      const raw = window.localStorage.getItem(PROVIDER_COMPAT_STORAGE_KEY)
+      const parsed = JSON.parse(raw!)
+      expect(parsed.thinkingIncompatibleProviderIds).toContain('provider-a')
+    })
+
+    it('hydrates the thinking-incompatible set from localStorage', async () => {
+      window.localStorage.setItem(
+        PROVIDER_COMPAT_STORAGE_KEY,
+        JSON.stringify({
+          events: {},
+          warnedProviderIds: [],
+          thinkingIncompatibleProviderIds: ['provider-a'],
+        }),
+      )
+      vi.resetModules()
+      const mod = await import('./providerCompatStore')
+      expect(
+        mod.useProviderCompatStore.getState().thinkingIncompatibleProviderIds.has('provider-a'),
+      ).toBe(true)
+      expect(mod.hasProviderThinkingIncompatible('provider-a')).toBe(true)
+    })
+
+    it('clearProvider removes both the fake-tool_use counter AND the thinking flag (re-arm both)', () => {
+      const { recordFakeToolUse, recordThinkingIncompatible, clearProvider } =
+        useProviderCompatStore.getState()
+      for (let i = 0; i < PROVIDER_COMPAT_WARN_THRESHOLD; i++) {
+        recordFakeToolUse('provider-a', 'Bash')
+      }
+      recordThinkingIncompatible('provider-a', 'rejected')
+      expect(
+        useProviderCompatStore.getState().thinkingIncompatibleProviderIds.has('provider-a'),
+      ).toBe(true)
+      expect(useProviderCompatStore.getState().events['provider-a']).toBeDefined()
+
+      clearProvider('provider-a')
+      expect(
+        useProviderCompatStore.getState().thinkingIncompatibleProviderIds.has('provider-a'),
+      ).toBe(false)
+      expect(useProviderCompatStore.getState().events['provider-a']).toBeUndefined()
+    })
+
+    it('ignores empty / null / undefined providerId so a stray server event never miscredits', () => {
+      const { recordThinkingIncompatible } = useProviderCompatStore.getState()
+      recordThinkingIncompatible(null, 'rejected')
+      recordThinkingIncompatible(undefined, 'rejected')
+      recordThinkingIncompatible('', 'rejected')
+      expect(
+        useProviderCompatStore.getState().thinkingIncompatibleProviderIds.size,
+      ).toBe(0)
+    })
+
+    it('hasProviderThinkingIncompatible returns false until the provider is flagged', () => {
+      const { recordThinkingIncompatible } = useProviderCompatStore.getState()
+      expect(hasProviderThinkingIncompatible('provider-a')).toBe(false)
+      recordThinkingIncompatible('provider-a', '')
+      expect(hasProviderThinkingIncompatible('provider-a')).toBe(true)
+    })
   })
 })

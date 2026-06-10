@@ -6,6 +6,7 @@ import { useSessionStore } from './sessionStore'
 import { useCLITaskStore } from './cliTaskStore'
 import { useSessionRuntimeStore } from './sessionRuntimeStore'
 import { useTabStore } from './tabStore'
+import { useProviderCompatStore } from './providerCompatStore'
 import { randomSpinnerVerb } from '../config/spinnerVerbs'
 import { notifyDesktop } from '../lib/desktopNotifications'
 import { t } from '../i18n'
@@ -1982,6 +1983,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       case 'session_title_updated':
         useSessionStore.getState().updateSessionTitle(msg.sessionId, msg.title)
         useTabStore.getState().updateTabTitle(msg.sessionId, msg.title)
+        break
+      case 'provider_compat_event':
+        // Server-side observed a provider-level incompatibility. Today
+        // the only kind is 'thinking_incompatible'; route to the compat
+        // store which records it, fires a one-time toast, and surfaces
+        // the badge in Settings → Provider list.
+        if (msg.kind === 'thinking_incompatible') {
+          useProviderCompatStore.getState().recordThinkingIncompatible(
+            msg.providerId,
+            msg.reason ?? '',
+          )
+        }
         break
       case 'system_notification':
         if (msg.subtype === 'slash_commands' && Array.isArray(msg.data)) {

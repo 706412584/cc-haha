@@ -234,6 +234,9 @@ function ProviderSettings() {
   // toast-triggered count change re-renders the badge in the same Settings tab
   // the user is already looking at.
   const compatEvents = useProviderCompatStore((s) => s.events)
+  const thinkingIncompatibleProviderIds = useProviderCompatStore(
+    (s) => s.thinkingIncompatibleProviderIds,
+  )
   const t = useTranslation()
   const [editingProvider, setEditingProvider] = useState<SavedProvider | null>(null)
   const [showCreateModal, setShowCreateModal] = useState(false)
@@ -414,6 +417,16 @@ function ProviderSettings() {
                         </span>
                       )
                     })()}
+                    {thinkingIncompatibleProviderIds.has(provider.id) && (
+                      <span
+                        data-testid={`provider-thinking-badge-${provider.id}`}
+                        title={t('providerCompat.thinkingBadge.tooltip')}
+                        className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold rounded border border-[var(--color-warning)]/30 bg-[var(--color-warning)]/10 text-[var(--color-warning)] leading-none"
+                      >
+                        <span className="material-symbols-outlined text-[12px]" aria-hidden="true">psychology_alt</span>
+                        {t('providerCompat.thinkingBadge.label')}
+                      </span>
+                    )}
                     {isActive && (
                       <span className="px-1.5 py-0.5 text-[10px] font-bold rounded border border-[var(--color-brand)]/18 bg-[var(--color-brand)]/14 text-[var(--color-brand)] leading-none">{t('settings.providers.default')}</span>
                     )}

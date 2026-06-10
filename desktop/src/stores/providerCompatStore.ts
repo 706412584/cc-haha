@@ -37,12 +37,28 @@ export type ProviderCompatEvent = {
 type PersistedShape = {
   events: Record<string, ProviderCompatEvent>
   warnedProviderIds: string[]
+  /**
+   * Provider ids that the server side flagged as thinking-incompatible
+   * via a `provider_compat_event` WS message. Persisted so the badge
+   * survives a desktop reload; cleared by `clearProvider(id)` when the
+   * user edits the offending provider's config.
+   */
+  thinkingIncompatibleProviderIds: string[]
 }
 
 type ProviderCompatStore = {
   events: Record<string, ProviderCompatEvent>
   /** Providers we've already toasted about. Reset by `clearProvider`. */
   warnedProviderIds: Set<string>
+  /**
+   * Provider ids the server has marked as thinking-incompatible. The
+   * Settings page renders a "思考不兼容" badge against each. When the
+   * server emits a `provider_compat_event` with kind=
+   * 'thinking_incompatible', `recordThinkingIncompatible` adds the id
+   * here AND fires a one-time toast suggesting the user check the
+   * provider config.
+   */
+  thinkingIncompatibleProviderIds: Set<string>
 
   /**
    * Record one fake tool_use block. `providerId` may be null when the
@@ -54,6 +70,18 @@ type ProviderCompatStore = {
    */
   recordFakeToolUse: (providerId: string | null | undefined, toolName: string) => void
 
+  /**
+   * Record that the server flagged `providerId` as thinking-incompatible.
+   * Idempotent — re-firing for an already-flagged provider just refreshes
+   * the toast message without re-emitting the toast (one toast per
+   * provider until cleared). `reason` is the upstream error message
+   * snippet, surfaced in the badge tooltip.
+   */
+  recordThinkingIncompatible: (
+    providerId: string | null | undefined,
+    reason: string,
+  ) => void
+
   /** Clear counters for a provider — call this when the user edits its config. */
   clearProvider: (providerId: string) => void
 
@@ -63,29 +91,39 @@ type ProviderCompatStore = {
 
 function readPersisted(): PersistedShape {
   if (typeof localStorage === 'undefined') {
-    return { events: {}, warnedProviderIds: [] }
+    return { events: {}, warnedProviderIds: [], thinkingIncompatibleProviderIds: [] }
   }
   try {
     const raw = localStorage.getItem(PROVIDER_COMPAT_STORAGE_KEY)
-    if (!raw) return { events: {}, warnedProviderIds: [] }
+    if (!raw) return { events: {}, warnedProviderIds: [], thinkingIncompatibleProviderIds: [] }
     const parsed = JSON.parse(raw) as Partial<PersistedShape>
     return {
       events: parsed.events && typeof parsed.events === 'object' ? parsed.events : {},
       warnedProviderIds: Array.isArray(parsed.warnedProviderIds)
         ? parsed.warnedProviderIds.filter((id): id is string => typeof id === 'string')
         : [],
+      thinkingIncompatibleProviderIds: Array.isArray(parsed.thinkingIncompatibleProviderIds)
+        ? parsed.thinkingIncompatibleProviderIds.filter(
+            (id): id is string => typeof id === 'string',
+          )
+        : [],
     }
   } catch {
-    return { events: {}, warnedProviderIds: [] }
+    return { events: {}, warnedProviderIds: [], thinkingIncompatibleProviderIds: [] }
   }
 }
 
-function writePersisted(state: { events: Record<string, ProviderCompatEvent>; warnedProviderIds: Set<string> }) {
+function writePersisted(state: {
+  events: Record<string, ProviderCompatEvent>
+  warnedProviderIds: Set<string>
+  thinkingIncompatibleProviderIds: Set<string>
+}) {
   if (typeof localStorage === 'undefined') return
   try {
     const payload: PersistedShape = {
       events: state.events,
       warnedProviderIds: [...state.warnedProviderIds],
+      thinkingIncompatibleProviderIds: [...state.thinkingIncompatibleProviderIds],
     }
     localStorage.setItem(PROVIDER_COMPAT_STORAGE_KEY, JSON.stringify(payload))
   } catch {
@@ -98,6 +136,7 @@ const initial = readPersisted()
 export const useProviderCompatStore = create<ProviderCompatStore>((set, get) => ({
   events: initial.events,
   warnedProviderIds: new Set(initial.warnedProviderIds),
+  thinkingIncompatibleProviderIds: new Set(initial.thinkingIncompatibleProviderIds),
 
   recordFakeToolUse: (providerId, toolName) => {
     if (!providerId) return
@@ -134,7 +173,42 @@ export const useProviderCompatStore = create<ProviderCompatStore>((set, get) => 
     }
 
     set({ events, warnedProviderIds })
-    writePersisted({ events, warnedProviderIds })
+    writePersisted({
+      events,
+      warnedProviderIds,
+      thinkingIncompatibleProviderIds: get().thinkingIncompatibleProviderIds,
+    })
+  },
+
+  recordThinkingIncompatible: (providerId, reason) => {
+    if (!providerId) return
+    const current = get().thinkingIncompatibleProviderIds
+    if (current.has(providerId)) {
+      // Already flagged — server side may re-emit on subsequent
+      // restarts, but we don't re-toast and nothing on disk changes.
+      return
+    }
+    const thinkingIncompatibleProviderIds = new Set(current)
+    thinkingIncompatibleProviderIds.add(providerId)
+
+    try {
+      useUIStore.getState().addToast({
+        type: 'warning',
+        message: t('providerCompat.toast.thinkingIncompatible', {
+          reason: reason ? reason.slice(0, 200) : '',
+        }),
+        duration: 9000,
+      })
+    } catch {
+      // toast / i18n failure must not swallow the flag.
+    }
+
+    set({ thinkingIncompatibleProviderIds })
+    writePersisted({
+      events: get().events,
+      warnedProviderIds: get().warnedProviderIds,
+      thinkingIncompatibleProviderIds,
+    })
   },
 
   clearProvider: (providerId) => {
@@ -142,13 +216,20 @@ export const useProviderCompatStore = create<ProviderCompatStore>((set, get) => 
     delete events[providerId]
     const warnedProviderIds = new Set(get().warnedProviderIds)
     warnedProviderIds.delete(providerId)
-    set({ events, warnedProviderIds })
-    writePersisted({ events, warnedProviderIds })
+    const thinkingIncompatibleProviderIds = new Set(get().thinkingIncompatibleProviderIds)
+    thinkingIncompatibleProviderIds.delete(providerId)
+    set({ events, warnedProviderIds, thinkingIncompatibleProviderIds })
+    writePersisted({ events, warnedProviderIds, thinkingIncompatibleProviderIds })
   },
 
   reset: () => {
-    set({ events: {}, warnedProviderIds: new Set() })
-    writePersisted({ events: {}, warnedProviderIds: new Set() })
+    const empty = {
+      events: {},
+      warnedProviderIds: new Set<string>(),
+      thinkingIncompatibleProviderIds: new Set<string>(),
+    }
+    set(empty)
+    writePersisted(empty)
   },
 }))
 
@@ -160,4 +241,17 @@ export function hasProviderCompatWarning(providerId: string | null | undefined):
   if (!providerId) return false
   const event = useProviderCompatStore.getState().events[providerId]
   return !!event && event.count >= PROVIDER_COMPAT_WARN_THRESHOLD
+}
+
+/**
+ * Pure helper — true when the server has flagged the provider as
+ * thinking-incompatible. Drives a separate Settings badge from the
+ * fake-tool_use one so users can tell which compat issue they're
+ * looking at.
+ */
+export function hasProviderThinkingIncompatible(
+  providerId: string | null | undefined,
+): boolean {
+  if (!providerId) return false
+  return useProviderCompatStore.getState().thinkingIncompatibleProviderIds.has(providerId)
 }

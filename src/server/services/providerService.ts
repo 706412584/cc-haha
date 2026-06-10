@@ -189,6 +189,13 @@ export class ProviderService {
     if (input.modelContextWindows === null) {
       delete updated.modelContextWindows
     }
+    // Re-arm compatibility markers when the user edits anything about
+    // this provider. The presumption is "user is fixing it" — give the
+    // new config a fresh chance, even if the old one was flagged
+    // incompatible. Mirrors the desktop providerCompatStore behavior
+    // for fake tool_use detection (which clears on edit too).
+    delete updated.thinkingIncompatible
+    delete updated.thinkingIncompatibleReason
 
     index.providers[idx] = updated
     await this.writeIndex(index)
@@ -211,6 +218,58 @@ export class ProviderService {
 
     index.providers.splice(idx, 1)
     await this.writeIndex(index)
+  }
+
+  /**
+   * Sticky-mark this provider as incompatible with Anthropic's `thinking`
+   * field. Called from the WS handler when a 4xx like
+   * "additionalModelRequestFields not supported" is observed in the
+   * sidecar's stdout — that error pattern is the giveaway for Bedrock
+   * proxies that don't know how to relay `thinking`. The marker
+   * survives in providers.json so the next sidecar launch can inject
+   * `CLAUDE_CODE_DISABLE_THINKING=1` via buildProviderManagedEnv.
+   *
+   * Idempotent: marking an already-marked provider with the same reason
+   * is a no-op (returns the existing provider without writing). Returns
+   * null when the id is the OpenAI-OAuth official provider (those are
+   * not user-editable and don't go through Bedrock proxies).
+   *
+   * Cleared automatically by `updateProvider` so the user editing
+   * config gets a fresh chance.
+   */
+  async markThinkingIncompatible(
+    id: string,
+    reason: string,
+  ): Promise<SavedProvider | null> {
+    if (isOpenAIOfficialProviderId(id)) return null
+    const index = await this.readIndex()
+    const idx = index.providers.findIndex((p) => p.id === id)
+    if (idx === -1) return null
+
+    const existing = index.providers[idx]
+    const trimmedReason = reason.slice(0, 500)
+    if (
+      existing.thinkingIncompatible === true &&
+      existing.thinkingIncompatibleReason === trimmedReason
+    ) {
+      // No state change — skip the disk write so we don't thrash on a
+      // burst of identical errors from the same session.
+      return existing
+    }
+
+    const updated: SavedProvider = {
+      ...existing,
+      thinkingIncompatible: true,
+      thinkingIncompatibleReason: trimmedReason,
+    }
+    index.providers[idx] = updated
+    await this.writeIndex(index)
+
+    if (index.activeId === id) {
+      await this.syncToSettings(updated)
+    }
+
+    return updated
   }
 
   // --- Activation ---

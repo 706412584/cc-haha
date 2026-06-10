@@ -1224,6 +1224,9 @@ export const jp: Record<TranslationKey, string> = {
   'providerCompat.toast.fakeToolUse': '現在の provider は偽 tool_use を {count} 回出力しました（直近: {tool}）。ネイティブのツール呼び出しに対応していない可能性が高いため、「設定 → Provider」で切り替えることをおすすめします。',
   'providerCompat.badge.label': 'ツール呼び出しに問題',
   'providerCompat.badge.tooltip': 'この provider は偽 tool_use を {count} 回出力しています。ネイティブの tool_use を転送しない可能性が高く、ツールは実際には実行されませんでした。',
+  'providerCompat.toast.thinkingIncompatible': '現在の provider は `thinking` フィールドを拒否しました。cc-haha は今後の呼び出しで自動的に送信を停止します（自動フォールバック）。警告を再アームするには、「設定 → Provider」で該当 provider の設定を編集してください。{reason}',
+  'providerCompat.thinkingBadge.label': '思考が非対応',
+  'providerCompat.thinkingBadge.tooltip': 'この provider は `thinking` フィールドを拒否したため、cc-haha は思考を自動的に無効化しました。provider 設定を編集すると警告が解除されます。',
 
   // ─── Repository Launch Controls ──────────────────────────────────────
   'repoLaunch.selectBranch': 'ブランチを選択',

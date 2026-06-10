@@ -1224,6 +1224,9 @@ export const zh: Record<TranslationKey, string> = {
   'providerCompat.toast.fakeToolUse': '當前 provider 已累計 {count} 次偽 tool_use（最近一次：{tool}）。它很可能不支援原生工具呼叫，建議在「設定 → Provider」裡換一個。',
   'providerCompat.badge.label': '工具呼叫異常',
   'providerCompat.badge.tooltip': '此 provider 已累計 {count} 次偽 tool_use，大機率不轉發原生 tool_use —— 工具實際並未執行。',
+  'providerCompat.toast.thinkingIncompatible': '當前 provider 拒絕了 `thinking` 欄位。cc-haha 已自動停止傳送（自動回退）。要重新啟用警告，請在「設定 → Provider」編輯該 provider 設定。{reason}',
+  'providerCompat.thinkingBadge.label': '思考不相容',
+  'providerCompat.thinkingBadge.tooltip': '此 provider 拒絕了 `thinking` 欄位，cc-haha 已自動關閉思考。編輯該 provider 設定即可清除此提示。',
 
   // ─── Repository Launch Controls ──────────────────────────────────────
   'repoLaunch.selectBranch': '選擇分支',

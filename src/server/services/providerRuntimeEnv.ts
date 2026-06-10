@@ -219,6 +219,16 @@ export function buildProviderManagedEnv(
     ...(Object.keys(modelContextWindows).length > 0 && {
       [MODEL_CONTEXT_WINDOWS_ENV_KEY]: JSON.stringify(modelContextWindows),
     }),
+    // Sticky compatibility flag: when cc-haha previously observed this
+    // provider rejecting Anthropic's `thinking` field with a 4xx (e.g.
+    // Bedrock proxies returning "additionalModelRequestFields not
+    // supported"), force `CLAUDE_CODE_DISABLE_THINKING=1` so subsequent
+    // sidecar launches skip thinking entirely. Cleared automatically by
+    // updateProvider() so editing config gives the new setup a fresh
+    // chance.
+    ...(provider.thinkingIncompatible === true && {
+      CLAUDE_CODE_DISABLE_THINKING: '1',
+    }),
     ANTHROPIC_BASE_URL: baseUrl,
     ...buildProviderAuthEnv(provider, presetDefaultEnv, needsProxy),
     ANTHROPIC_MODEL: models.main,

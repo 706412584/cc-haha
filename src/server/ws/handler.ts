@@ -1329,6 +1329,105 @@ function isDuplicateOfLastApiError(
   )
 }
 
+/**
+ * True when the message looks like an API rejection caused by the
+ * provider not being able to relay Anthropic's `thinking` field. The
+ * canonical case is Bedrock proxies that wrap unknown Anthropic params
+ * into AWS's `additionalModelRequestFields`, which Bedrock then rejects
+ * for non-thinking-aware target models.
+ *
+ * We deliberately keep the patterns narrow — only fire on phrases that
+ * unambiguously point at thinking. False positives here would
+ * permanently disable thinking on the wrong provider until the user
+ * edits its config.
+ */
+const THINKING_INCOMPAT_PATTERNS = [
+  /additionalModelRequestFields/i,
+  /\bthinking\b[^.]*\b(not supported|unsupported|invalid|disabled|rejected)\b/i,
+  /unknown.{0,40}\bthinking\b/i,
+] as const
+
+export function detectThinkingIncompatMessage(message: string | undefined | null): boolean {
+  if (!message) return false
+  return THINKING_INCOMPAT_PATTERNS.some((rx) => rx.test(message))
+}
+
+/**
+ * One-shot guard so we don't spam markThinkingIncompatible / sidecar
+ * restart on a burst of identical errors from a single failed turn.
+ * Keyed by (sessionId, providerId) — clears when the session is
+ * destroyed or when an updateProvider re-arms the provider. Process-
+ * local only; persisted state lives in providers.json.
+ */
+const recentThinkingIncompatNotifications = new Set<string>()
+
+/**
+ * If any of the just-emitted server messages is an `error` whose body
+ * matches the thinking-incompat patterns, attribute it to the currently
+ * active provider, sticky-mark the provider in providers.json, and
+ * schedule a sidecar restart so the NEXT call goes out without the
+ * thinking field. Best-effort and idempotent — repeated calls within
+ * the same session for the same provider are de-duplicated by
+ * `recentThinkingIncompatNotifications`.
+ */
+async function notifyThinkingIncompatIfMatches(
+  ws: ServerWebSocket<WebSocketData>,
+  sessionId: string,
+  serverMsgs: ReadonlyArray<ServerMessage>,
+): Promise<void> {
+  const errorMsg = serverMsgs.find(
+    (msg): msg is Extract<ServerMessage, { type: 'error' }> => msg.type === 'error',
+  )
+  if (!errorMsg || !detectThinkingIncompatMessage(errorMsg.message)) return
+
+  // Resolve the active provider id. Prefer the runtime override (the
+  // session may be on a non-default provider via set_runtime_config);
+  // fall back to the global active id.
+  const runtimeOverride = runtimeOverrides.get(sessionId)
+  let providerId: string | null =
+    typeof runtimeOverride?.providerId === 'string'
+      ? runtimeOverride.providerId
+      : null
+  if (!providerId) {
+    const { activeId } = await providerService.listProviders()
+    providerId = activeId
+  }
+  if (!providerId || isOpenAIOfficialProviderId(providerId)) return
+
+  const dedupKey = `${sessionId}|${providerId}`
+  if (recentThinkingIncompatNotifications.has(dedupKey)) return
+  recentThinkingIncompatNotifications.add(dedupKey)
+
+  try {
+    const updated = await providerService.markThinkingIncompatible(
+      providerId,
+      errorMsg.message,
+    )
+    if (!updated) return
+
+    sendMessage(ws, {
+      type: 'provider_compat_event',
+      providerId,
+      kind: 'thinking_incompatible',
+      reason: errorMsg.message.slice(0, 500),
+    })
+
+    // Schedule a sidecar restart so the next launch picks up
+    // CLAUDE_CODE_DISABLE_THINKING=1. Uses the same enqueue path as
+    // set_runtime_config so we don't tear down a streaming response
+    // mid-flight; the restart applies on the next idle transition.
+    if (conversationService.hasSession(sessionId)) {
+      await enqueueRuntimeTransition(sessionId, () =>
+        scheduleRestartSessionWithRuntimeConfig(ws, sessionId),
+      )
+    }
+  } catch (err) {
+    // De-dup so we don't retry endlessly on a permanent failure (e.g.
+    // disk full). Operator can re-arm by editing the provider.
+    console.warn(`[WS] markThinkingIncompatible failed for ${providerId}: ${err}`)
+  }
+}
+
 function bindPrewarmMetadataCapture(sessionId: string) {
   for (const msg of conversationService.getRecentSdkMessages(sessionId)) {
     cacheSessionInitMetadata(sessionId, msg)
@@ -2284,6 +2383,17 @@ function bindClientSessionOutput(
       sendMessage(ws, msg)
     }
 
+    // Provider-level compatibility detection: if any of the messages
+    // we just translated is an `error` whose payload matches the
+    // thinking-incompat patterns, mark the active provider so the
+    // NEXT sidecar launch suppresses the `thinking` field. Fire the
+    // sidecar restart in the background so we don't kill the current
+    // error reporting flow — restart happens on the next idle.
+    void notifyThinkingIncompatIfMatches(ws, sessionId, serverMsgs).catch(
+      (err) => {
+        console.warn(`[WS] thinking-incompat notification failed: ${err}`)
+      },
+    )
   }
 
   clientOutputCallbacks.set(ws, { sessionId, callback })

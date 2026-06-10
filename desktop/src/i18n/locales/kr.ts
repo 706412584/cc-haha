@@ -1224,6 +1224,9 @@ export const kr: Record<TranslationKey, string> = {
   'providerCompat.toast.fakeToolUse': '현재 provider가 가짜 tool_use 를 {count} 회 출력했습니다(최근: {tool}). 네이티브 도구 호출을 지원하지 않을 가능성이 높으므로 "설정 → Provider" 에서 다른 provider 로 전환하는 것을 권장합니다.',
   'providerCompat.badge.label': '도구 호출 문제',
   'providerCompat.badge.tooltip': '이 provider는 가짜 tool_use 를 {count} 회 출력했습니다. 네이티브 tool_use 를 전달하지 않을 가능성이 높으며, 도구가 실제로 실행되지 않았습니다.',
+  'providerCompat.toast.thinkingIncompatible': '현재 provider 가 `thinking` 필드를 거부했습니다. cc-haha 는 향후 호출에서 자동으로 전송을 중단합니다(자동 폴백). 경고를 재무장하려면 "설정 → Provider" 에서 해당 provider 설정을 편집해 주세요. {reason}',
+  'providerCompat.thinkingBadge.label': '사고 비호환',
+  'providerCompat.thinkingBadge.tooltip': '이 provider 는 `thinking` 필드를 거부했고, cc-haha 가 자동으로 사고 모드를 비활성화했습니다. provider 설정을 편집하면 경고가 해제됩니다.',
 
   // ─── Repository Launch Controls ──────────────────────────────────────
   'repoLaunch.selectBranch': '브랜치 선택',
