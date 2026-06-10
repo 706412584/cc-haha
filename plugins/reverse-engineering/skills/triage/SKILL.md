@@ -95,7 +95,7 @@ Based on what step 1 said:
 | IPA / iOS Mach-O | `ios-analysis` |
 | **Raw binary blob, no recognised header (router firmware, Cortex-M flash, U-Boot uImage, console ROM, ECU dump, etc.)** | **`firmware-blob`** — covers MIPS / ARM / Cortex-M / PowerPC / 68k / SuperH / RISC-V / AVR / 6502 / Z80 |
 | Crackme (small PE/ELF asking for serial) | `crackme-keygen` |
-| Live process / instrumented session | `frida-dynamic` |
+| Live process / instrumented session / any runtime question | `dynamic-debug-overview` (it then picks frida-dynamic / gdb-debug / lldb-debug) |
 
 ### Step 4 — Write triage record
 

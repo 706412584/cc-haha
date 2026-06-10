@@ -1,8 +1,8 @@
 # reverse-engineering plugin
 
-Multi-platform reverse engineering toolkit for cc-haha. Bundles five MCP
-servers, one orchestration agent, six skills, and two slash commands behind a
-single plugin install.
+Multi-platform reverse engineering toolkit for cc-haha — static + dynamic
++ report — bundled as a single plugin install. Currently ships seven MCP
+servers, one orchestration agent, eleven skills, and two slash commands.
 
 ## What it gives you
 
@@ -70,19 +70,22 @@ loading into Ghidra/r2 with the right processor module.
 
 ## Install
 
+`<repo-root>` below is wherever you have cc-haha checked out (e.g.
+`C:\Users\you\cc-haha` on Windows, `~/cc-haha` on macOS/Linux).
+
 From the repo root, add the marketplace by directory:
 
 ```pwsh
-# inside cc-haha checkout
-$env:CC_HAHA_PLUGIN_MARKETPLACE='C:\Users\70641\cc-haha\plugins'
-# Then in the desktop UI: Settings → Plugins → Add marketplace → paste the path,
-# install "reverse-engineering", enable.
+# inside cc-haha checkout, in PowerShell:
+$marketplace = (Resolve-Path .\plugins).Path
+# Then in the desktop UI: Settings → Plugins → Add marketplace
+# → paste $marketplace, install "reverse-engineering", enable.
 ```
 
 Or via the CLI:
 
 ```pwsh
-./bin/claude-haha plugin marketplace add C:\Users\70641\cc-haha\plugins
+./bin/claude-haha plugin marketplace add (Resolve-Path .\plugins).Path
 ./bin/claude-haha plugin install reverse-engineering@cc-haha-builtin
 ```
 
@@ -204,6 +207,34 @@ static work) from the desktop **MCP** settings page (Settings → MCP) — the
 plugin's job is to bundle the configurations; per-server enable/disable is a
 runtime decision, not a manifest one.
 
+### LLDB MCP — fallback if uvx fetch fails
+
+The default `lldb` server entry runs the upstream `stass/lldb-mcp` script
+through `uvx --from git+...`. The upstream repo is a single-file script
+without a packaged entry point, so depending on `uv` version the
+auto-fetch may fail with `python: can't open file 'lldb_mcp.py'` on
+first start. If that happens, clone the repo manually and point the MCP
+config at the absolute path:
+
+```pwsh
+git clone https://github.com/stass/lldb-mcp $env:USERPROFILE\src\lldb-mcp
+pip install mcp
+```
+
+Then edit `plugins/reverse-engineering/mcp/servers.json` to use:
+
+```json
+"lldb": {
+  "type": "stdio",
+  "command": "python3",
+  "args": ["C:/Users/<you>/src/lldb-mcp/lldb_mcp.py"]
+}
+```
+
+Bump the plugin version and run the dev-link script, or
+`/api/plugins/update`, to materialise. This is upstream's packaging
+limitation, not a cc-haha-specific quirk.
+
 ## User-config knobs
 
 | Key | Default | Purpose |
@@ -225,6 +256,8 @@ runtime decision, not a manifest one.
 
 - Ghidra MCP — https://github.com/LaurieWired/GhidraMCP and https://github.com/clearbluejar/pyghidra-mcp
 - radare2 MCP — https://github.com/radareorg/radare2-mcp
+- GDB MCP — https://github.com/signal-slot/mcp-gdb (npm package `mcp-gdb`)
+- LLDB MCP — https://github.com/stass/lldb-mcp
 - JADX MCP — https://github.com/zinja-coder/jadx-mcp-server
 - apktool MCP — https://github.com/zinja-coder/apktool-mcp-server
 - Frida (kahlo) MCP — https://github.com/FuzzySecurity/kahlo-mcp
