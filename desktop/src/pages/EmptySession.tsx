@@ -629,7 +629,7 @@ export function EmptySession() {
               useTabStore.getState().openTab(sessionId, 'New Session')
               connectToSession(sessionId)
             }}
-            onAutoHandoff={async (previousSessionId, fallbackText, setStage) => {
+            onAutoHandoff={async (previousSessionId, previousSessionTitle, fallbackText, setStage) => {
               // 1. Resolve summary: tries cache first (fast), falls back to
               //    LLM generation on miss. Returns null on any failure so
               //    we can degrade to the zero-token textarea path without
@@ -680,6 +680,18 @@ export function EmptySession() {
                 setActiveView('code')
                 useTabStore.getState().openTab(sessionId, 'New Session')
                 connectToSession(sessionId)
+
+                // Stash hand-off info on this new session so the chat
+                // header can render a "↗ continued from..." chip and the
+                // user knows the AI started with prior context.
+                useSessionRuntimeStore.getState().setHandoffInfo(sessionId, {
+                  previousSessionId,
+                  previousSessionTitle,
+                  approxTokens: Math.ceil(
+                    (summary.main.length + summary.recent.length) / 4,
+                  ),
+                  generatedAt: summary.generatedAt,
+                })
 
                 // 3. Stage the hand-off summary on this new session and
                 //    auto-send a short "continue" trigger message. The CLI

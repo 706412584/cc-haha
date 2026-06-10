@@ -9,6 +9,7 @@ import {
 } from '../stores/tabStore'
 import { useSessionStore } from '../stores/sessionStore'
 import { useChatStore } from '../stores/chatStore'
+import { useSessionRuntimeStore } from '../stores/sessionRuntimeStore'
 import { projectsApi } from '../api/projects'
 import { wsManager } from '../api/websocket'
 import { useCLITaskStore } from '../stores/cliTaskStore'
@@ -272,6 +273,12 @@ export function ActiveSession() {
   const sessions = useSessionStore((s) => s.sessions)
   const connectToSession = useChatStore((s) => s.connectToSession)
   const sessionState = useChatStore((s) => activeTabId ? s.sessions[activeTabId] : undefined)
+  // Hand-off context attached to this session (if any). Drives a small chip
+  // in the header so the user remembers the AI started with summarized
+  // prior context. Set by the "Continue from here" flow on success.
+  const handoffInfoForActive = useSessionRuntimeStore((s) =>
+    activeTabId ? s.handoffInfo[activeTabId] : undefined,
+  )
   const pendingComputerUsePermission = sessionState?.pendingComputerUsePermission ?? null
   const fetchSessionTasks = useCLITaskStore((s) => s.fetchSessionTasks)
   const trackedTaskSessionId = useCLITaskStore((s) => s.sessionId)
@@ -456,7 +463,7 @@ export function ActiveSession() {
                     useTabStore.getState().openTab(sessionId, 'New Session')
                     connectToSession(sessionId)
                   }}
-                  onAutoHandoff={async (previousSessionId, fallbackText, setStage) => {
+                  onAutoHandoff={async (previousSessionId, previousSessionTitle, fallbackText, setStage) => {
                     // 1. Resolve summary (cached → generated → null). Any
                     //    failure degrades silently to the zero-token
                     //    textarea-prefill path.
@@ -493,6 +500,17 @@ export function ActiveSession() {
                     }
 
                     setStage('starting-session')
+
+                    // Stash hand-off info on the active session so the
+                    // chat header can render a "↗ continued from..." chip.
+                    useSessionRuntimeStore.getState().setHandoffInfo(activeTabId, {
+                      previousSessionId,
+                      previousSessionTitle,
+                      approxTokens: Math.ceil(
+                        (summary.main.length + summary.recent.length) / 4,
+                      ),
+                      generatedAt: summary.generatedAt,
+                    })
 
                     // 2. Stage hand-off on the live session and auto-send a
                     //    short trigger message. Server reads cached summary
@@ -581,6 +599,23 @@ export function ActiveSession() {
                         <>
                           <span className="text-[var(--color-outline)]">·</span>
                           <span>{t('session.messages', { count: visibleMessageCount })}</span>
+                        </>
+                      )}
+                      {handoffInfoForActive && (
+                        <>
+                          <span className="text-[var(--color-outline)]">·</span>
+                          <span
+                            data-testid="session-handoff-chip"
+                            title={t('session.handoffChipTooltip', {
+                              title: handoffInfoForActive.previousSessionTitle,
+                              tokens: handoffInfoForActive.approxTokens,
+                            })}
+                            className="inline-flex shrink-0 items-center gap-0.5 cursor-help text-[var(--color-primary)]"
+                          >
+                            {t('session.handoffChip', {
+                              tokens: handoffInfoForActive.approxTokens,
+                            })}
+                          </span>
                         </>
                       )}
                     </div>

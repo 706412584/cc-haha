@@ -36,11 +36,15 @@ type Props = {
    * is purely informational — the card never reacts to which stage is
    * active beyond rendering the corresponding label.
    *
+   * `previousSessionTitle` is forwarded so the host can stash it for the
+   * chat header chip ("↗ Continued from <title>") without re-fetching.
+   *
    * Returns a Promise so the card can show a spinner while the host is
    * working. The card never knows or cares about provider details.
    */
   onAutoHandoff: (
     previousSessionId: string,
+    previousSessionTitle: string,
     fallbackText: string,
     setStage: (stage: HandoffStage) => void,
   ) => Promise<void>
@@ -282,7 +286,12 @@ export function RecentActivityCard({
                 setHandoffPending(true)
                 setHandoffStage('preparing')
                 try {
-                  await onAutoHandoff(lastSession.sessionId, handoffText, setHandoffStage)
+                  await onAutoHandoff(
+                    lastSession.sessionId,
+                    lastSession.title,
+                    handoffText,
+                    setHandoffStage,
+                  )
                 } finally {
                   setHandoffPending(false)
                   setHandoffStage('preparing')

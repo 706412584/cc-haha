@@ -3,17 +3,43 @@ import type { RuntimeSelection } from '../types/runtime'
 
 const STORAGE_KEY = 'cc-haha-session-runtime'
 const COORDINATOR_STORAGE_KEY = 'cc-haha-session-coordinator'
+const HANDOFF_STORAGE_KEY = 'cc-haha-session-handoff'
 
 export const DRAFT_RUNTIME_SELECTION_KEY = '__draft__'
+
+/**
+ * Per-session record of where the hand-off context came from. Set by the
+ * "Continue from here" flow when it succeeds in attaching a previous
+ * session's summary to this session's CLI launch. Used to render a small
+ * "↗ continued from..." chip in the chat header so the user remembers
+ * (and trusts) that the AI has prior context.
+ *
+ * `approxTokens` is a frontend-side estimate (chars / 4) — not authoritative,
+ * but enough to give the user a feel for how big the hand-off addendum is.
+ * The exact tokens are also counted server-side as part of the system
+ * prompt category in ContextUsageIndicator.
+ */
+export type SessionHandoffInfo = {
+  previousSessionId: string
+  /** Title of the previous session at hand-off time (snapshotted, may drift). */
+  previousSessionTitle: string
+  approxTokens: number
+  /** ISO timestamp from the SessionSummary, for staleness display. */
+  generatedAt: string
+}
 
 type SessionRuntimeStore = {
   selections: Record<string, RuntimeSelection>
   /** Per-session orchestration ("协调") mode toggle. Absent/false = off. */
   coordinatorModes: Record<string, boolean>
+  /** Per-session hand-off context info. Absent = no hand-off attached. */
+  handoffInfo: Record<string, SessionHandoffInfo>
   setSelection: (key: string, selection: RuntimeSelection) => void
   clearSelection: (key: string) => void
   moveSelection: (fromKey: string, toKey: string) => void
   setCoordinatorMode: (key: string, enabled: boolean) => void
+  setHandoffInfo: (key: string, info: SessionHandoffInfo) => void
+  clearHandoffInfo: (key: string) => void
 }
 
 function loadSelections(): Record<string, RuntimeSelection> {
@@ -58,9 +84,31 @@ function persistCoordinatorModes(modes: Record<string, boolean>) {
   }
 }
 
+function loadHandoffInfo(): Record<string, SessionHandoffInfo> {
+  if (typeof localStorage === 'undefined') return {}
+  try {
+    const raw = localStorage.getItem(HANDOFF_STORAGE_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as Record<string, SessionHandoffInfo>
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function persistHandoffInfo(info: Record<string, SessionHandoffInfo>) {
+  if (typeof localStorage === 'undefined') return
+  try {
+    localStorage.setItem(HANDOFF_STORAGE_KEY, JSON.stringify(info))
+  } catch {
+    // noop
+  }
+}
+
 export const useSessionRuntimeStore = create<SessionRuntimeStore>((set) => ({
   selections: loadSelections(),
   coordinatorModes: loadCoordinatorModes(),
+  handoffInfo: loadHandoffInfo(),
 
   setSelection: (key, selection) =>
     set((state) => {
@@ -76,7 +124,8 @@ export const useSessionRuntimeStore = create<SessionRuntimeStore>((set) => ({
     set((state) => {
       const hadSelection = key in state.selections
       const hadCoordinator = key in state.coordinatorModes
-      if (!hadSelection && !hadCoordinator) return state
+      const hadHandoff = key in state.handoffInfo
+      if (!hadSelection && !hadCoordinator && !hadHandoff) return state
 
       const next: Partial<SessionRuntimeStore> = {}
       if (hadSelection) {
@@ -89,6 +138,11 @@ export const useSessionRuntimeStore = create<SessionRuntimeStore>((set) => ({
         persistCoordinatorModes(rest)
         next.coordinatorModes = rest
       }
+      if (hadHandoff) {
+        const { [key]: _removed, ...rest } = state.handoffInfo
+        persistHandoffInfo(rest)
+        next.handoffInfo = rest
+      }
       return next
     }),
 
@@ -96,7 +150,8 @@ export const useSessionRuntimeStore = create<SessionRuntimeStore>((set) => ({
     set((state) => {
       const selection = state.selections[fromKey]
       const coordinator = state.coordinatorModes[fromKey]
-      if (!selection && coordinator === undefined) return state
+      const handoff = state.handoffInfo[fromKey]
+      if (!selection && coordinator === undefined && !handoff) return state
 
       const next: Partial<SessionRuntimeStore> = {}
       if (selection) {
@@ -109,6 +164,11 @@ export const useSessionRuntimeStore = create<SessionRuntimeStore>((set) => ({
         next.coordinatorModes = { ...rest, [toKey]: coordinator }
         persistCoordinatorModes(next.coordinatorModes)
       }
+      if (handoff) {
+        const { [fromKey]: _removed, ...rest } = state.handoffInfo
+        next.handoffInfo = { ...rest, [toKey]: handoff }
+        persistHandoffInfo(next.handoffInfo)
+      }
       return next
     }),
 
@@ -118,5 +178,20 @@ export const useSessionRuntimeStore = create<SessionRuntimeStore>((set) => ({
       const coordinatorModes = { ...state.coordinatorModes, [key]: enabled }
       persistCoordinatorModes(coordinatorModes)
       return { coordinatorModes }
+    }),
+
+  setHandoffInfo: (key, info) =>
+    set((state) => {
+      const handoffInfo = { ...state.handoffInfo, [key]: info }
+      persistHandoffInfo(handoffInfo)
+      return { handoffInfo }
+    }),
+
+  clearHandoffInfo: (key) =>
+    set((state) => {
+      if (!(key in state.handoffInfo)) return state
+      const { [key]: _removed, ...handoffInfo } = state.handoffInfo
+      persistHandoffInfo(handoffInfo)
+      return { handoffInfo }
     }),
 }))
