@@ -3,6 +3,7 @@ import QRCode from 'qrcode'
 import { Copy, Eye, EyeOff, PowerOff, QrCode, RotateCw } from 'lucide-react'
 import { useSettingsStore, UI_ZOOM_DEFAULT, UI_ZOOM_MIN, UI_ZOOM_MAX, UI_ZOOM_STEP } from '../stores/settingsStore'
 import { useProviderStore } from '../stores/providerStore'
+import { useProviderCompatStore, PROVIDER_COMPAT_WARN_THRESHOLD } from '../stores/providerCompatStore'
 import { useTranslation } from '../i18n'
 import { Modal } from '../components/shared/Modal'
 import { ConfirmDialog } from '../components/shared/ConfirmDialog'
@@ -229,6 +230,10 @@ function ProviderSettings() {
     testProvider,
   } = useProviderStore()
   const fetchSettings = useSettingsStore((s) => s.fetchAll)
+  // Compatibility events keyed by provider id. Subscribed at this scope so a
+  // toast-triggered count change re-renders the badge in the same Settings tab
+  // the user is already looking at.
+  const compatEvents = useProviderCompatStore((s) => s.events)
   const t = useTranslation()
   const [editingProvider, setEditingProvider] = useState<SavedProvider | null>(null)
   const [showCreateModal, setShowCreateModal] = useState(false)
@@ -395,6 +400,20 @@ function ProviderSettings() {
                         {provider.apiFormat === 'openai_chat' ? 'OpenAI Chat' : 'OpenAI Responses'}
                       </span>
                     )}
+                    {(() => {
+                      const compat = compatEvents[provider.id]
+                      if (!compat || compat.count < PROVIDER_COMPAT_WARN_THRESHOLD) return null
+                      return (
+                        <span
+                          data-testid={`provider-compat-badge-${provider.id}`}
+                          title={t('providerCompat.badge.tooltip', { count: String(compat.count) })}
+                          className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold rounded border border-[var(--color-warning)]/30 bg-[var(--color-warning)]/10 text-[var(--color-warning)] leading-none"
+                        >
+                          <span className="material-symbols-outlined text-[12px]" aria-hidden="true">warning</span>
+                          {t('providerCompat.badge.label')}
+                        </span>
+                      )
+                    })()}
                     {isActive && (
                       <span className="px-1.5 py-0.5 text-[10px] font-bold rounded border border-[var(--color-brand)]/18 bg-[var(--color-brand)]/14 text-[var(--color-brand)] leading-none">{t('settings.providers.default')}</span>
                     )}
@@ -1247,6 +1266,11 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
         }
         if (apiKey.trim()) input.apiKey = apiKey.trim()
         await updateProvider(provider.id, input)
+        // The user just changed something about this provider (URL, key,
+        // model, etc.). Reset its fake-tool_use counter so a previous
+        // incompatibility warning doesn't stick around — if the new config
+        // is still broken, we'll re-warn after the next 3 leaks.
+        useProviderCompatStore.getState().clearProvider(provider.id)
       }
       await fetchSettings()
       onClose()

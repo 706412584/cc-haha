@@ -1227,6 +1227,22 @@ export const en = {
    *  reads the system prompt and resumes. */
   'empty.recentActivity.continueTriggerMessage': "Please pick up where the previous session left off. Use the hand-off context above as ground truth, and start by stating in 1-2 sentences what you understand the current state to be and what you'll do next.",
 
+  // ─── Provider Compatibility (fake tool_use detection) ─────────────────
+  /** Inline notice shown above the assistant message when the model emitted
+   *  an XML-style <tool_use> in plain text instead of a real structured
+   *  tool call. {tool} is the tool name from the fake block (e.g. "Bash"). */
+  'providerCompat.notice.title': 'Tool call ignored',
+  'providerCompat.notice.body': 'The model tried to call `{tool}` using an XML-style block in plain text. The current provider does not appear to relay native tool_use blocks, so nothing ran.',
+  'providerCompat.notice.bodyUnknown': 'The model tried to call a tool using an XML-style block in plain text. The current provider does not appear to relay native tool_use blocks, so nothing ran.',
+  /** Toast fired once per provider after enough fake tool_use leaks
+   *  accumulate. {count} is the running total, {tool} the most recent
+   *  fake tool name. */
+  'providerCompat.toast.fakeToolUse': 'The active provider has emitted {count} fake tool_use blocks (latest: {tool}). It probably does not support native tool_use — try switching providers in Settings.',
+  /** Badge text on the Settings → Provider list row when the provider has
+   *  crossed the warn threshold. */
+  'providerCompat.badge.label': 'Tool call issues',
+  'providerCompat.badge.tooltip': 'This provider emitted {count} fake tool_use blocks. It likely does not relay native tool_use — actions did not run.',
+
   // ─── Repository Launch Controls ──────────────────────────────────────
   'repoLaunch.selectBranch': 'Select branch',
   'repoLaunch.searchBranch': 'Search branches',

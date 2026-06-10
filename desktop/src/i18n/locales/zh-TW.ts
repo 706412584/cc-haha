@@ -1217,6 +1217,14 @@ export const zh: Record<TranslationKey, string> = {
   'empty.recentActivity.handoff.continuePrompt': '請接著往下：(此處描述要做的下一步)。',
   'empty.recentActivity.continueTriggerMessage': '請接著上次會話的進度繼續。把上面的接續上下文當作事實依據，先用 1-2 句話說明你理解的當前狀態，然後說明下一步要做什麼，再開始動手。',
 
+  // ─── Provider 相容性（偽 tool_use 偵測） ─────────────────
+  'providerCompat.notice.title': '工具呼叫已忽略',
+  'providerCompat.notice.body': '模型嘗試用 XML 文字區塊呼叫 `{tool}`，但當前 provider 似乎不轉發原生 tool_use，所以並未執行。',
+  'providerCompat.notice.bodyUnknown': '模型嘗試用 XML 文字區塊呼叫工具，但當前 provider 似乎不轉發原生 tool_use，所以並未執行。',
+  'providerCompat.toast.fakeToolUse': '當前 provider 已累計 {count} 次偽 tool_use（最近一次：{tool}）。它很可能不支援原生工具呼叫，建議在「設定 → Provider」裡換一個。',
+  'providerCompat.badge.label': '工具呼叫異常',
+  'providerCompat.badge.tooltip': '此 provider 已累計 {count} 次偽 tool_use，大機率不轉發原生 tool_use —— 工具實際並未執行。',
+
   // ─── Repository Launch Controls ──────────────────────────────────────
   'repoLaunch.selectBranch': '選擇分支',
   'repoLaunch.searchBranch': '搜尋分支',

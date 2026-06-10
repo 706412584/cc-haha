@@ -1217,6 +1217,14 @@ export const kr: Record<TranslationKey, string> = {
   'empty.recentActivity.handoff.continuePrompt': '여기서부터 계속해 주세요: (다음 단계 설명).',
   'empty.recentActivity.continueTriggerMessage': '이전 세션의 진행 상황에서 이어서 작업해 주세요. 위의 인계 컨텍스트를 사실로 받아들이고, 먼저 1-2문장으로 현재 상태를 요약한 뒤 다음 단계를 설명하고 작업을 시작해 주세요.',
 
+  // ─── Provider 호환성 (가짜 tool_use 감지) ─────────────────
+  'providerCompat.notice.title': '도구 호출이 무시되었습니다',
+  'providerCompat.notice.body': '모델이 XML 스타일 텍스트 블록으로 `{tool}` 도구를 호출하려 했지만, 현재 provider가 네이티브 tool_use를 전달하지 않는 것으로 보여 실행되지 않았습니다.',
+  'providerCompat.notice.bodyUnknown': '모델이 XML 스타일 텍스트 블록으로 도구를 호출하려 했지만, 현재 provider가 네이티브 tool_use를 전달하지 않는 것으로 보여 실행되지 않았습니다.',
+  'providerCompat.toast.fakeToolUse': '현재 provider가 가짜 tool_use 를 {count} 회 출력했습니다(최근: {tool}). 네이티브 도구 호출을 지원하지 않을 가능성이 높으므로 "설정 → Provider" 에서 다른 provider 로 전환하는 것을 권장합니다.',
+  'providerCompat.badge.label': '도구 호출 문제',
+  'providerCompat.badge.tooltip': '이 provider는 가짜 tool_use 를 {count} 회 출력했습니다. 네이티브 tool_use 를 전달하지 않을 가능성이 높으며, 도구가 실제로 실행되지 않았습니다.',
+
   // ─── Repository Launch Controls ──────────────────────────────────────
   'repoLaunch.selectBranch': '브랜치 선택',
   'repoLaunch.searchBranch': '브랜치 검색',
