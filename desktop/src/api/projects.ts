@@ -16,6 +16,8 @@ export type RecentGitActivity = {
   aheadCount: number
   behindCount: number
   dirtyCount: number
+  /** Up to ~20 repo-relative paths with uncommitted changes, most-recently-edited first. */
+  dirtyFiles: string[]
 }
 
 export type RecentActivityResult = {

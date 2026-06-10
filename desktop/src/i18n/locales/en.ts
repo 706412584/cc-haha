@@ -1175,14 +1175,17 @@ export const en = {
   // Orchestration toggle so the user sees fan-out behavior on first contact.
   'empty.tasks.heading': 'Try a task',
   'empty.tasks.orchestratedHint': 'Will be dispatched to specialist sub-agents via Orchestration.',
+  'empty.tasks.previewLabel': 'Click to send / hover to see the full prompt',
   'empty.tasks.preMergeReview.title': 'Pre-merge code review',
-  'empty.tasks.preMergeReview.prompt': 'Review my current branch against main. (1) Find potential bugs and code smells; (2) flag security or performance risks; (3) draft a PR description. Do all three.',
+  'empty.tasks.preMergeReview.prompt': "Help me with a pre-merge review of my current branch against {branch}: scan for potential bugs and code smells, glance at performance / security risks, and draft a PR description. Combining the three is fine — you can also decide which to do first based on the size of the change.",
   'empty.tasks.investigateTest.title': 'Investigate a failing test',
-  'empty.tasks.investigateTest.prompt': "I have a failing test — help me find the root cause and fix it. Reproduce it first, identify the actual cause, make the smallest code change that makes it pass, then verify. The failing test is: [name or path here].",
+  'empty.tasks.investigateTest.prompt': "I have a failing test — help me find the root cause and fix it. Reproduce it first, identify the actual cause, make the smallest code change that makes it pass, then verify. The failing test is: {testPath}.",
+  'empty.tasks.investigateTest.placeholder': '[name or path here]',
   'empty.tasks.writeTests.title': 'Write unit tests',
-  'empty.tasks.writeTests.prompt': 'Add unit tests for [file path here] covering the main branches and edge cases. Match the project\'s existing test style.',
-  'empty.tasks.explainCode.title': 'Explain unfamiliar code',
-  'empty.tasks.explainCode.prompt': 'Help me understand the structure and responsibilities of [file or module path here]. Summarize the public API, key data flow, and any non-obvious invariants.',
+  'empty.tasks.writeTests.prompt': "Add unit tests for {filePath} covering the main branches and edge cases. Match the project's existing test style.",
+  'empty.tasks.writeTests.placeholder': '[file path here]',
+  'empty.tasks.understandProject.title': 'Understand the project',
+  'empty.tasks.understandProject.prompt': "I'm new to this project — help me build a mental model: (1) read CLAUDE.md / AGENTS.md / README and surface the project's goals and conventions; (2) the main tech stack and entrypoint files; (3) the top-level directory layout, with one-line descriptions of the key modules / files; (4) what's currently in flight on branch {branch}. Wrap with a 2-3 paragraph overview I can drill into.",
 
   // Recent activity panel — read-only summary of the previous session in
   // this project. Zero token cost on render. Only the "Apply hand-off"

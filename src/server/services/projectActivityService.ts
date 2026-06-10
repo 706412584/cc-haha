@@ -14,6 +14,8 @@
 
 import { execFile } from 'node:child_process'
 import { createReadStream } from 'node:fs'
+import { promises as fsPromises } from 'node:fs'
+import path from 'node:path'
 import { createInterface } from 'node:readline'
 import { promisify } from 'node:util'
 import { sessionService } from './sessionService.js'
@@ -30,6 +32,13 @@ const FILE_MUTATING_TOOL_NAMES: ReadonlySet<string> = new Set([
 
 /** Cap on filesEdited list length returned to the client. */
 const FILES_EDITED_SAMPLE_LIMIT = 8
+
+/**
+ * Cap on git dirty-file path list returned. Keeps the response small even
+ * in repos with hundreds of uncommitted changes; the welcome-screen UI
+ * only needs the top few suggestions.
+ */
+const DIRTY_FILES_SAMPLE_LIMIT = 20
 
 /** Cap on the chars of the last user message excerpt returned. */
 const LAST_USER_MESSAGE_EXCERPT_MAX = 160
@@ -64,6 +73,14 @@ export type RecentGitActivity = {
   behindCount: number
   /** Number of files with uncommitted changes (any state). */
   dirtyCount: number
+  /**
+   * Up to ${DIRTY_FILES_SAMPLE_LIMIT} repo-relative paths with uncommitted
+   * changes, ordered with the most-recently-modified first. Used by the
+   * welcome-screen task cards to auto-fill placeholders ("write tests for
+   * X" defaults to a real changed file instead of "[fill in path]").
+   * Empty when the repo is clean.
+   */
+  dirtyFiles: string[]
 }
 
 export type RecentActivityResult = {
@@ -204,19 +221,63 @@ async function deriveGitActivity(workDir: string): Promise<RecentGitActivity | u
   }
 
   // Distinct dirty files. `git status --porcelain` emits one line per file.
+  // We also collect the actual paths and sort them by mtime so the welcome
+  // task cards can offer "the file you most-recently edited" as a default
+  // for the placeholder slots.
   let dirtyCount = 0
+  let dirtyFiles: string[] = []
   try {
+    // -z: NUL-separated, raw paths (handles spaces/quotes/non-ASCII safely).
     const { stdout } = await execFileAsync(
       'git',
-      ['--no-optional-locks', 'status', '--porcelain'],
+      ['--no-optional-locks', 'status', '--porcelain=v1', '-z'],
       { cwd: ctx.repoRoot, timeout: GIT_TIMEOUT_MS },
     )
     const text = String(stdout)
-    if (text.trim().length > 0) {
-      dirtyCount = text.split(/\r?\n/).filter((line) => line.length > 0).length
+    if (text.length > 0) {
+      const records = text.split('\0').filter((r) => r.length > 0)
+      // Each record begins with a 2-char status + 1 space + path. Rename
+      // entries (R/C) include a second NUL-terminated path which the
+      // split has already separated; we're looking at flat list of paths
+      // here so just take whatever's after the 3-char prefix.
+      const paths: string[] = []
+      let skipNext = false
+      for (const record of records) {
+        if (skipNext) {
+          // Previous record was an R/C with rename source on this line.
+          skipNext = false
+          continue
+        }
+        if (record.length < 4) continue
+        const xy = record.slice(0, 2)
+        const path = record.slice(3)
+        if (xy[0] === 'R' || xy[0] === 'C' || xy[1] === 'R' || xy[1] === 'C') {
+          // Rename/copy: next record is the source path; we want destination.
+          skipNext = true
+        }
+        paths.push(path)
+      }
+      dirtyCount = paths.length
+
+      // Sort by mtime DESC so most-recently-edited is first. Files that
+      // can't be stat'd (deleted from disk, new staged additions, etc.)
+      // get sorted to the bottom.
+      const withMtime = await Promise.all(
+        paths.map(async (rel) => {
+          try {
+            const abs = path.join(ctx.repoRoot!, rel)
+            const stat = await fsPromises.stat(abs)
+            return { path: rel, mtimeMs: stat.mtimeMs }
+          } catch {
+            return { path: rel, mtimeMs: 0 }
+          }
+        }),
+      )
+      withMtime.sort((a, b) => b.mtimeMs - a.mtimeMs)
+      dirtyFiles = withMtime.slice(0, DIRTY_FILES_SAMPLE_LIMIT).map((e) => e.path)
     }
   } catch {
-    // Fall through with dirtyCount=0.
+    // Fall through with dirtyCount=0, dirtyFiles=[].
   }
 
   return {
@@ -225,6 +286,7 @@ async function deriveGitActivity(workDir: string): Promise<RecentGitActivity | u
     aheadCount,
     behindCount,
     dirtyCount,
+    dirtyFiles,
   }
 }
 

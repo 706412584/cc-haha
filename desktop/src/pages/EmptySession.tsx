@@ -721,7 +721,7 @@ export function EmptySession() {
           />
         )}
         {!isMobileComposer && (
-          <WelcomeTaskCards onApplyTask={applyTaskCard} />
+          <WelcomeTaskCards workDir={workDir || undefined} onApplyTask={applyTaskCard} />
         )}
       </div>
 

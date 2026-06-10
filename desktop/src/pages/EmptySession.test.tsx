@@ -935,7 +935,7 @@ describe('EmptySession welcome-screen task cards', () => {
     expect(screen.getByTestId('welcome-task-card-preMergeReview')).toBeInTheDocument()
     expect(screen.getByTestId('welcome-task-card-investigateTest')).toBeInTheDocument()
     expect(screen.getByTestId('welcome-task-card-writeTests')).toBeInTheDocument()
-    expect(screen.getByTestId('welcome-task-card-explainCode')).toBeInTheDocument()
+    expect(screen.getByTestId('welcome-task-card-understandProject')).toBeInTheDocument()
   })
 
   it('hides the task cards on phone-sized H5 browsers (composer is dense enough already)', async () => {

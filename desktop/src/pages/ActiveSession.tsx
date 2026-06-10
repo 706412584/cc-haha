@@ -530,6 +530,8 @@ export function ActiveSession() {
               )}
               {!isMemberSession && !isMobileLayout && activeTabId && (
                 <WelcomeTaskCards
+                  workDir={session?.workDir || undefined}
+                  excludeSessionId={activeTabId}
                   onApplyTask={(card: WelcomeTaskCard, promptText: string) => {
                     // Push the starter prompt into ChatInput's draft via a
                     // window event — ChatInput listens for this and sets its
