@@ -1,6 +1,22 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from '../../i18n'
-import { projectsApi, type RecentActivityResult } from '../../api/projects'
+import {
+  projectsApi,
+  type RecentActivityResult,
+  type SessionSummary,
+} from '../../api/projects'
+
+/**
+ * Stages the host walks the card through during an auto-handoff. The card
+ * uses these to render a localized progress label inside the button so the
+ * user sees what's happening (reading the transcript vs. calling the AI vs.
+ * spawning the new session) instead of an opaque spinner.
+ */
+export type HandoffStage =
+  | 'preparing'
+  | 'reading-cache'
+  | 'generating-summary'
+  | 'starting-session'
 
 type Props = {
   workDir: string
@@ -15,10 +31,19 @@ type Props = {
    * If anything fails, host falls back to writing `fallbackText` into the
    * composer textarea (the existing zero-token path).
    *
+   * The host calls `setStage(...)` to advance the localized progress label
+   * inside the card's button. Setting it to anything other than 'preparing'
+   * is purely informational — the card never reacts to which stage is
+   * active beyond rendering the corresponding label.
+   *
    * Returns a Promise so the card can show a spinner while the host is
    * working. The card never knows or cares about provider details.
    */
-  onAutoHandoff: (previousSessionId: string, fallbackText: string) => Promise<void>
+  onAutoHandoff: (
+    previousSessionId: string,
+    fallbackText: string,
+    setStage: (stage: HandoffStage) => void,
+  ) => Promise<void>
   /**
    * If the parent already has a session live (ActiveSession path), the
    * "Continue this session" button is redundant — hide it.
@@ -58,6 +83,9 @@ export function RecentActivityCard({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [handoffPending, setHandoffPending] = useState(false)
+  const [handoffStage, setHandoffStage] = useState<HandoffStage>('preparing')
+  const [previewOpen, setPreviewOpen] = useState(false)
+  const [cachedSummary, setCachedSummary] = useState<SessionSummary | null>(null)
 
   useEffect(() => {
     if (!workDir) {
@@ -89,12 +117,53 @@ export function RecentActivityCard({
     }
   }, [workDir, excludeSessionId])
 
+  // Lazily fetch the cached summary for the resolved last session, so the
+  // preview button can render only when there's actually something to show.
+  // This is a cache-only GET — never triggers an LLM call. If no summary
+  // is cached yet, the user gets a "no preview yet" hint inside the panel
+  // when they click the preview toggle.
+  useEffect(() => {
+    if (!data?.lastSession?.sessionId) {
+      setCachedSummary(null)
+      return
+    }
+    let cancelled = false
+    void projectsApi
+      .getSessionSummary(data.lastSession.sessionId)
+      .then((res) => {
+        if (!cancelled) setCachedSummary(res.summary)
+      })
+      .catch(() => {
+        if (!cancelled) setCachedSummary(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [data?.lastSession?.sessionId])
+
   if (!workDir) return null
   if (loading && !data) return null
   if (error || !data) return null
   if (!data.hasActivity) return null
 
   const { lastSession, git } = data
+
+  // Localized progress label shown in the button while a hand-off is in
+  // flight. Defaults to a generic "preparing" if the host hasn't advanced
+  // the stage yet.
+  const stageLabel = (() => {
+    switch (handoffStage) {
+      case 'reading-cache':
+        return t('empty.recentActivity.handoffStage.readingCache')
+      case 'generating-summary':
+        return t('empty.recentActivity.handoffStage.generatingSummary')
+      case 'starting-session':
+        return t('empty.recentActivity.handoffStage.startingSession')
+      case 'preparing':
+      default:
+        return t('empty.recentActivity.handoffGenerating')
+    }
+  })()
 
   // Build the hand-off paragraph the "Apply hand-off" button will prefill.
   const handoffText = buildHandoffText({ data, t })
@@ -187,22 +256,41 @@ export function RecentActivityCard({
             )}
             <button
               type="button"
+              onClick={() => setPreviewOpen((v) => !v)}
+              data-testid="recent-activity-preview-toggle"
+              title={
+                previewOpen
+                  ? t('empty.recentActivity.previewClose')
+                  : t('empty.recentActivity.previewToggle')
+              }
+              aria-expanded={previewOpen}
+              className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-2 py-1 text-xs text-[var(--color-text-primary)] transition-colors hover:border-[var(--color-primary)] hover:bg-[var(--color-surface-hover)]"
+            >
+              <span className="material-symbols-outlined text-[14px]" aria-hidden="true">
+                {previewOpen ? 'visibility_off' : 'visibility'}
+              </span>
+              <span className="hidden sm:inline">
+                {previewOpen
+                  ? t('empty.recentActivity.previewClose')
+                  : t('empty.recentActivity.previewToggle')}
+              </span>
+            </button>
+            <button
+              type="button"
               onClick={async () => {
                 if (handoffPending || !lastSession) return
                 setHandoffPending(true)
+                setHandoffStage('preparing')
                 try {
-                  await onAutoHandoff(lastSession.sessionId, handoffText)
+                  await onAutoHandoff(lastSession.sessionId, handoffText, setHandoffStage)
                 } finally {
                   setHandoffPending(false)
+                  setHandoffStage('preparing')
                 }
               }}
               disabled={handoffPending || !lastSession}
               data-testid="recent-activity-apply-handoff"
-              title={
-                handoffPending
-                  ? t('empty.recentActivity.handoffGenerating')
-                  : t('empty.recentActivity.applyHandoff')
-              }
+              title={handoffPending ? stageLabel : t('empty.recentActivity.applyHandoff')}
               className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-2 py-1 text-xs text-[var(--color-text-primary)] transition-colors hover:border-[var(--color-primary)] hover:bg-[var(--color-surface-hover)] disabled:cursor-progress disabled:opacity-60"
             >
               <span
@@ -212,13 +300,47 @@ export function RecentActivityCard({
                 {handoffPending ? 'progress_activity' : 'north_east'}
               </span>
               <span className="hidden sm:inline">
-                {handoffPending
-                  ? t('empty.recentActivity.handoffGenerating')
-                  : t('empty.recentActivity.applyHandoff')}
+                {handoffPending ? stageLabel : t('empty.recentActivity.applyHandoff')}
               </span>
             </button>
           </div>
         </div>
+
+        {previewOpen && (
+          <div
+            data-testid="recent-activity-preview-panel"
+            className="mt-3 border-t border-[var(--color-border-separator)] pt-3 text-xs text-[var(--color-text-secondary)]"
+          >
+            {cachedSummary ? (
+              <div className="flex max-h-[280px] flex-col gap-3 overflow-y-auto pr-1">
+                <div>
+                  <h3 className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)]">
+                    {t('empty.recentActivity.previewMainTitle')}
+                  </h3>
+                  <p className="whitespace-pre-wrap leading-relaxed">{cachedSummary.main}</p>
+                </div>
+                <div>
+                  <h3 className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-tertiary)]">
+                    {t('empty.recentActivity.previewRecentTitle')}
+                  </h3>
+                  <p className="whitespace-pre-wrap leading-relaxed">{cachedSummary.recent}</p>
+                </div>
+                <p className="text-[10px] text-[var(--color-text-tertiary)]">
+                  {t('empty.recentActivity.previewMeta', {
+                    date: new Date(cachedSummary.generatedAt).toLocaleString(),
+                    model: cachedSummary.modelUsed,
+                    tokensIn: cachedSummary.tokensIn ?? '—',
+                    tokensOut: cachedSummary.tokensOut ?? '—',
+                  })}
+                </p>
+              </div>
+            ) : (
+              <p className="italic text-[var(--color-text-tertiary)]">
+                {t('empty.recentActivity.previewNotYet')}
+              </p>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )

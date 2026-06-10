@@ -629,12 +629,28 @@ export function EmptySession() {
               useTabStore.getState().openTab(sessionId, 'New Session')
               connectToSession(sessionId)
             }}
-            onAutoHandoff={async (previousSessionId, fallbackText) => {
+            onAutoHandoff={async (previousSessionId, fallbackText, setStage) => {
               // 1. Resolve summary: tries cache first (fast), falls back to
               //    LLM generation on miss. Returns null on any failure so
               //    we can degrade to the zero-token textarea path without
               //    surprising the user with errors.
-              const summary = await projectsApi.resolveSessionSummaryForHandoff(previousSessionId)
+              setStage('reading-cache')
+              let summary = null
+              try {
+                const cached = await projectsApi.getSessionSummary(previousSessionId)
+                summary = cached.summary
+              } catch {
+                // GET error → fall through to generation path below.
+              }
+              if (!summary) {
+                setStage('generating-summary')
+                try {
+                  const fresh = await projectsApi.generateSessionSummary(previousSessionId)
+                  summary = fresh.summary
+                } catch {
+                  summary = null
+                }
+              }
 
               if (!summary) {
                 // Provider down / generation failed → fall back to the old
@@ -650,6 +666,8 @@ export function EmptySession() {
                 })
                 return
               }
+
+              setStage('starting-session')
 
               // 2. Create the new session and connect.
               try {

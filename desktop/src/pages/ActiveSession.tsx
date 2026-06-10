@@ -456,11 +456,27 @@ export function ActiveSession() {
                     useTabStore.getState().openTab(sessionId, 'New Session')
                     connectToSession(sessionId)
                   }}
-                  onAutoHandoff={async (previousSessionId, fallbackText) => {
+                  onAutoHandoff={async (previousSessionId, fallbackText, setStage) => {
                     // 1. Resolve summary (cached → generated → null). Any
                     //    failure degrades silently to the zero-token
                     //    textarea-prefill path.
-                    const summary = await projectsApi.resolveSessionSummaryForHandoff(previousSessionId)
+                    setStage('reading-cache')
+                    let summary = null
+                    try {
+                      const cached = await projectsApi.getSessionSummary(previousSessionId)
+                      summary = cached.summary
+                    } catch {
+                      // GET error → fall through to generation path below.
+                    }
+                    if (!summary) {
+                      setStage('generating-summary')
+                      try {
+                        const fresh = await projectsApi.generateSessionSummary(previousSessionId)
+                        summary = fresh.summary
+                      } catch {
+                        summary = null
+                      }
+                    }
 
                     if (!summary) {
                       // Zero-token fallback: write the static hand-off
@@ -475,6 +491,8 @@ export function ActiveSession() {
                       )
                       return
                     }
+
+                    setStage('starting-session')
 
                     // 2. Stage hand-off on the live session and auto-send a
                     //    short trigger message. Server reads cached summary
