@@ -3817,7 +3817,16 @@ Read the team config to discover your teammates' names. Check the task list peri
       const message =
         `You have made ${attachment.editCount} file-mutating tool calls (Edit/Write/NotebookEdit) since the last verification subagent invocation, ` +
         `crossing the threshold of ${attachment.threshold}. ` +
-        `Before reporting this work as complete to the user, spawn the Agent tool with subagent_type="verification" and pass the original user request, all files changed, the approach taken, and the plan file path if applicable. ` +
+        // IMPORTANT: avoid `key="value"` attribute fragments here. See
+        // src/tools/AgentTool/specialistRouter.ts — when this kind of
+        // reminder embeds the attribute-and-quotes form for the
+        // subagent_type parameter, some non-Anthropic gateway models latch
+        // onto the shape and start emitting textual tool_use XML blocks
+        // instead of issuing real tool calls, breaking the rest of the
+        // session. Phrase the guidance as prose that names the parameter
+        // and value without the assignment-and-quotes form.
+        `Before reporting this work as complete to the user, spawn the Agent tool with the subagent_type parameter set to verification, ` +
+        `and pass the original user request, all files changed, the approach taken, and the plan file path if applicable. ` +
         `The verification subagent will independently exercise your changes (run build, tests, adversarial probes) and return a PASS/FAIL/PARTIAL verdict. ` +
         `Your own checks and a fork's self-checks do NOT substitute. ` +
         `On FAIL: fix the issues, then resume the verifier with SendMessage. ` +

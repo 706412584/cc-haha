@@ -1217,6 +1217,14 @@ export const jp: Record<TranslationKey, string> = {
   'empty.recentActivity.handoff.continuePrompt': 'ここから続けてください: (次のステップを記述)。',
   'empty.recentActivity.continueTriggerMessage': '前回のセッションの続きから進めてください。上の引き継ぎコンテキストを事実として扱い、まず 1-2 文で現在の状態を要約してから次のステップを述べ、それから着手してください。',
 
+  // ─── Provider 互換性（偽 tool_use の検出） ─────────────────
+  'providerCompat.notice.title': 'ツール呼び出しは無視されました',
+  'providerCompat.notice.body': 'モデルは XML スタイルのテキストブロックで `{tool}` を呼び出そうとしましたが、現在の provider はネイティブの tool_use を転送していないため、実行されませんでした。',
+  'providerCompat.notice.bodyUnknown': 'モデルは XML スタイルのテキストブロックでツールを呼び出そうとしましたが、現在の provider はネイティブの tool_use を転送していないため、実行されませんでした。',
+  'providerCompat.toast.fakeToolUse': '現在の provider は偽 tool_use を {count} 回出力しました（直近: {tool}）。ネイティブのツール呼び出しに対応していない可能性が高いため、「設定 → Provider」で切り替えることをおすすめします。',
+  'providerCompat.badge.label': 'ツール呼び出しに問題',
+  'providerCompat.badge.tooltip': 'この provider は偽 tool_use を {count} 回出力しています。ネイティブの tool_use を転送しない可能性が高く、ツールは実際には実行されませんでした。',
+
   // ─── Repository Launch Controls ──────────────────────────────────────
   'repoLaunch.selectBranch': 'ブランチを選択',
   'repoLaunch.searchBranch': 'ブランチを検索',

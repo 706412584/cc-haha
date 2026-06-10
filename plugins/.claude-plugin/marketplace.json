@@ -1,0 +1,36 @@
+{
+  "name": "cc-haha-builtin",
+  "metadata": {
+    "description": "Built-in marketplace for cc-haha. Currently ships the reverse-engineering plugin (multi-platform RE toolkit). Add more plugins to the plugins[] array as the team needs them."
+  },
+  "owner": {
+    "name": "cc-haha",
+    "url": "https://github.com/cc-haha"
+  },
+  "plugins": [
+    {
+      "name": "reverse-engineering",
+      "source": "./reverse-engineering",
+      "description": "Multi-platform reverse engineering toolkit. Static (Ghidra / radare2 / JADX / apktool) + dynamic (Frida instrumentation, GDB cross-arch single-step, LLDB Apple platforms) for binaries (PE/ELF/Mach-O), Android (APK), iOS, embedded firmware (MIPS/ARM/Cortex-M/PowerPC/68k/SuperH/RISC-V), and CTF.",
+      "category": "security",
+      "tags": [
+        "reverse-engineering",
+        "security",
+        "malware-analysis",
+        "binary-analysis",
+        "android",
+        "ios",
+        "ctf",
+        "embedded",
+        "firmware",
+        "frida",
+        "ghidra",
+        "radare2",
+        "gdb",
+        "lldb",
+        "debugger",
+        "single-step"
+      ]
+    }
+  ]
+}
