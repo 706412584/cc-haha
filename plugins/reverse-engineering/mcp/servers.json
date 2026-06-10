@@ -1,0 +1,61 @@
+{
+  "mcpServers": {
+    "ghidra": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["pyghidra-mcp>=0.2.0,<0.3.0"],
+      "env": {
+        "GHIDRA_INSTALL_DIR": "${user_config.GHIDRA_INSTALL_DIR}"
+      }
+    },
+    "radare2": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@radareorg/radare2-mcp@latest"]
+    },
+    "gdb": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "mcp-gdb@latest"]
+    },
+    "lldb": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--with",
+        "mcp",
+        "--from",
+        "git+https://github.com/stass/lldb-mcp@master",
+        "python",
+        "lldb_mcp.py"
+      ]
+    },
+    "jadx": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/zinja-coder/jadx-mcp-server@main",
+        "jadx-mcp-server"
+      ]
+    },
+    "apktool": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/zinja-coder/apktool-mcp-server@main",
+        "apktool-mcp-server"
+      ]
+    },
+    "frida": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/FuzzySecurity/kahlo-mcp@main",
+        "kahlo-mcp"
+      ]
+    }
+  }
+}
