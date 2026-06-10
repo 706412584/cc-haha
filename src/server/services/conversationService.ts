@@ -127,6 +127,13 @@ type SessionStartOptions = {
   thinking?: 'enabled' | 'adaptive' | 'disabled'
   providerId?: string | null
   coordinatorMode?: boolean
+  /**
+   * If set, append this exact text to the system prompt via
+   * `--append-system-prompt`. Used by the welcome-screen "Continue from
+   * here" flow to inject a hand-off summary of the previous session.
+   * Stored separately from coordinatorMode so both can be active at once.
+   */
+  handoffSystemPrompt?: string
 }
 
 export class ConversationStartupError extends Error {
@@ -1041,6 +1048,12 @@ export class ConversationService {
 
     if (options?.coordinatorMode) {
       args.push('--append-system-prompt', ORCHESTRATION_SYSTEM_PROMPT)
+    }
+
+    // Hand-off context from the previous session (welcome screen "Continue
+    // from here"). Independent of orchestration; both can be active.
+    if (options?.handoffSystemPrompt) {
+      args.push('--append-system-prompt', options.handoffSystemPrompt)
     }
 
     return args

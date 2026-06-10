@@ -15,6 +15,10 @@ import {
 } from '../services/conversationService.js'
 import { computerUseApprovalService } from '../services/computerUseApprovalService.js'
 import { sessionService } from '../services/sessionService.js'
+import {
+  formatHandoffSystemPrompt,
+  getSessionSummary,
+} from '../services/sessionSummaryService.js'
 import { SettingsService } from '../services/settingsService.js'
 import { ProviderService } from '../services/providerService.js'
 import { isOpenAIOfficialProviderId } from '../services/openaiOfficialProvider.js'
@@ -87,6 +91,13 @@ const runtimeOverrides = new Map<string, {
 // preference, not persisted across app restart / resume (v1). Read by
 // getRuntimeSettings and threaded into the CLI as --append-system-prompt.
 const coordinatorModeSessions = new Set<string>()
+
+// Per-session pending hand-off summary text. When set, the next CLI launch
+// (or restart) appends this text via --append-system-prompt so the new
+// session starts with context from the user's previous session in this
+// project. In-memory only — applied once at startup. The cleanup-on-stop
+// path drops it so a later restart for unrelated reasons doesn't re-attach.
+const handoffSummarySessions = new Map<string, string>()
 
 const runtimeTransitionPromises = new Map<string, Promise<void>>()
 const sessionStartupPromises = new Map<string, Promise<void>>()
@@ -229,6 +240,10 @@ export const handleWebSocket = {
 
         case 'set_coordinator_mode':
           void handleSetCoordinatorMode(ws, message)
+          break
+
+        case 'set_handoff_summary':
+          void handleSetHandoffSummary(ws, message)
           break
 
         case 'set_runtime_config':
@@ -629,6 +644,50 @@ async function handleSetCoordinatorMode(
     return
   }
 
+  await enqueueRuntimeTransition(sessionId, () =>
+    scheduleRestartSessionWithRuntimeConfig(ws, sessionId),
+  )
+}
+
+/**
+ * Stage a hand-off summary from the user's previous session as the system
+ * prompt addendum on this session's CLI launch. Frontend dispatches this
+ * before the first user message after clicking "Continue from here".
+ *
+ * The summary is generated lazily server-side (cached on disk) — this
+ * handler resolves the cached or freshly-generated summary, formats it as
+ * a system prompt fragment, and stages it. If anything fails (no provider,
+ * generation error, transcript empty), we silently no-op so the user still
+ * gets the session, just without the hand-off context (the existing
+ * zero-token textarea path remains the fallback).
+ */
+async function handleSetHandoffSummary(
+  ws: ServerWebSocket<WebSocketData>,
+  message: Extract<ClientMessage, { type: 'set_handoff_summary' }>,
+): Promise<void> {
+  const { sessionId } = ws.data
+  const previousSessionId = message.previousSessionId
+  if (!previousSessionId || previousSessionId === sessionId) return
+
+  let summaryText: string | undefined
+  try {
+    const summary = await getSessionSummary(previousSessionId)
+    if (summary) summaryText = formatHandoffSystemPrompt(summary)
+  } catch (error) {
+    console.warn(
+      `[WS] Hand-off summary generation failed for ${previousSessionId}; continuing without context. Error:`,
+      error,
+    )
+  }
+
+  if (!summaryText) return
+
+  // Stash it. The next CLI launch / restart will append it via
+  // --append-system-prompt. Restart only if a CLI is already live for this
+  // session (otherwise it'll be picked up on the upcoming first start).
+  handoffSummarySessions.set(sessionId, summaryText)
+
+  if (!conversationService.hasSession(sessionId)) return
   await enqueueRuntimeTransition(sessionId, () =>
     scheduleRestartSessionWithRuntimeConfig(ws, sessionId),
   )
@@ -1156,6 +1215,7 @@ function cleanupSessionRuntimeState(sessionId: string) {
   sessionTitleState.delete(sessionId)
   runtimeOverrides.delete(sessionId)
   coordinatorModeSessions.delete(sessionId)
+  handoffSummarySessions.delete(sessionId)
   runtimeTransitionPromises.delete(sessionId)
   sessionStartupPromises.delete(sessionId)
   lastResolvedStartupWorkDirs.delete(sessionId)
@@ -2225,6 +2285,14 @@ type RuntimeSettings = {
   thinking?: 'enabled' | 'disabled'
   providerId?: string | null
   coordinatorMode?: boolean
+  /**
+   * Hand-off summary system prompt addendum. When present, the CLI is
+   * launched (or restarted) with `--append-system-prompt` carrying this
+   * text. Set by handleSetHandoffSummary and consumed exactly once at the
+   * next CLI start; cleared after consumption to avoid re-attaching on
+   * unrelated restarts.
+   */
+  handoffSystemPrompt?: string
 }
 
 function isKnownRuntimeProviderId(
@@ -2239,6 +2307,12 @@ function isKnownRuntimeProviderId(
 
 async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSettings> {
   const coordinatorMode = sessionId ? coordinatorModeSessions.has(sessionId) : false
+  // Hand-off summary is one-shot: read AND remove. The next CLI start will
+  // pick it up; subsequent unrelated restarts won't re-attach a stale summary.
+  const handoffSystemPrompt = sessionId ? handoffSummarySessions.get(sessionId) : undefined
+  if (sessionId && handoffSystemPrompt) {
+    handoffSummarySessions.delete(sessionId)
+  }
   const launchInfo = sessionId
     ? await sessionService.getSessionLaunchInfo(sessionId).catch(() => null)
     : null
@@ -2273,6 +2347,7 @@ async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSettings> 
           ...defaults,
           permissionMode: sessionPermissionMode ?? defaults.permissionMode,
           coordinatorMode,
+          ...(handoffSystemPrompt ? { handoffSystemPrompt } : {}),
         }
       }
     }
@@ -2287,6 +2362,7 @@ async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSettings> 
       thinking,
       providerId: runtimeOverride.providerId,
       coordinatorMode,
+      ...(handoffSystemPrompt ? { handoffSystemPrompt } : {}),
     }
   }
 
@@ -2296,6 +2372,7 @@ async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSettings> 
     permissionMode: sessionPermissionMode ?? defaults.permissionMode,
     effort: launchInfo?.effortLevel ?? defaults.effort,
     coordinatorMode,
+    ...(handoffSystemPrompt ? { handoffSystemPrompt } : {}),
   }
 }
 

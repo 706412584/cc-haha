@@ -39,6 +39,11 @@ import {
   SessionBranchingError,
 } from '../../utils/sessionBranching.js'
 import { registerFilesystemAccessRoot } from '../services/filesystemAccessRoots.js'
+import {
+  getSessionSummary,
+  invalidateSessionSummary,
+  type SessionSummary,
+} from '../services/sessionSummaryService.js'
 
 const workspaceService = new WorkspaceService(
   async (sessionId) => (
@@ -182,6 +187,10 @@ export async function handleSessionsApi(
       return await handleSessionWorkspaceRoute(sessionId, url, segments[4])
     }
 
+    if (subResource === 'summary') {
+      return await handleSessionSummaryRoute(req, sessionId, url)
+    }
+
     // Route to conversations handler if sub-resource is 'chat'
     if (subResource === 'chat') {
       // This is handled by the conversations API, but in case the router
@@ -248,6 +257,49 @@ async function getSessionMessages(sessionId: string): Promise<Response> {
     sessionService.getSessionTaskNotifications(sessionId),
   ])
   return Response.json({ messages, taskNotifications })
+}
+
+async function handleSessionSummaryRoute(
+  req: Request,
+  sessionId: string,
+  url: URL,
+): Promise<Response> {
+  // GET /api/sessions/:id/summary?staleAt=<msgCount>  → cached or null
+  // POST /api/sessions/:id/summary?force=1            → force-regenerate
+  // DELETE /api/sessions/:id/summary                  → invalidate cache
+  if (req.method === 'GET') {
+    const staleAtRaw = url.searchParams.get('staleAt')
+    const staleAt = staleAtRaw ? Number.parseInt(staleAtRaw, 10) : undefined
+    const summary: SessionSummary | null = await getSessionSummary(sessionId, {
+      ...(typeof staleAt === 'number' && Number.isFinite(staleAt) ? { staleAt } : {}),
+    })
+    return Response.json({ summary })
+  }
+  if (req.method === 'POST') {
+    const force = url.searchParams.get('force') === '1'
+    const staleAtRaw = url.searchParams.get('staleAt')
+    const staleAt = staleAtRaw ? Number.parseInt(staleAtRaw, 10) : undefined
+    const summary: SessionSummary | null = await getSessionSummary(sessionId, {
+      ...(force ? { forceRefresh: true } : {}),
+      ...(typeof staleAt === 'number' && Number.isFinite(staleAt) ? { staleAt } : {}),
+    })
+    if (!summary) {
+      throw new ApiError(
+        503,
+        'Could not generate session summary (no provider configured, generation failed, or transcript empty).',
+        'SUMMARY_UNAVAILABLE',
+      )
+    }
+    return Response.json({ summary })
+  }
+  if (req.method === 'DELETE') {
+    await invalidateSessionSummary(sessionId)
+    return Response.json({ ok: true })
+  }
+  return Response.json(
+    { error: 'METHOD_NOT_ALLOWED', message: `Method ${req.method} not allowed` },
+    { status: 405 },
+  )
 }
 
 async function handleSessionWorkspaceRoute(
