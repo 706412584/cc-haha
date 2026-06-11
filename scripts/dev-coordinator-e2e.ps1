@@ -209,6 +209,11 @@ function assert(cond: unknown, msg: string): asserts cond {
   const banner = formatModeAdviceBanner('normal', adv1)
   assert(banner !== null, 'banner should be returned on mismatch')
   assert(/coordinator/i.test(banner!), 'banner mentions coordinator')
+  assert(
+    banner!.includes('CLAUDE_CODE_COORDINATOR_MODE'),
+    'banner references the real launch mechanism, not a fake slash command',
+  )
+  assert(!/\/coordinator\b/.test(banner!), 'banner must not reference a nonexistent /coordinator command')
   // banner: null when active mode matches
   assert(formatModeAdviceBanner('coordinator', adv1) === null, 'banner null on match')
   console.log('5. mode advice: OK')

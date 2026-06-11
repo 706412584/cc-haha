@@ -142,7 +142,8 @@ describe('formatModeAdviceBanner', () => {
     expect(msg).not.toBeNull()
     expect(msg!.toLowerCase()).toContain('coordinator')
     expect(msg!.toLowerCase()).toContain('normal')
-    expect(msg!.toLowerCase()).toMatch(/switch|toggle|\/coordinator/)
+    // References the real mechanism (env var), not a nonexistent slash command.
+    expect(msg!).toContain('CLAUDE_CODE_COORDINATOR_MODE')
   })
 
   test('produces an actionable message when coordinator is suggested but normal is active', () => {

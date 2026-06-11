@@ -246,16 +246,16 @@ export function formatModeAdviceBanner(
 
   if (advice.suggestedMode === 'normal') {
     return (
-      `Coordinator mode is active but this task looks small${reasonText}. ` +
-      `Coordinator mode adds delegation overhead — for small tasks, normal mode ` +
-      `is faster. Toggle with /coordinator off, or keep coordinator on if you'd ` +
-      `like the structured worker delegation.`
+      `This session is in coordinator mode but the task looks small${reasonText}. ` +
+      `Coordinator mode routes every change through a worker, which adds latency ` +
+      `for quick tasks. A normal session (launched without CLAUDE_CODE_COORDINATOR_MODE=1) ` +
+      `would be faster — or stay in coordinator mode if you want the structured worker delegation.`
     )
   }
   return (
-    `Normal mode is active but this task looks like multi-step work${reasonText}. ` +
-    `Coordinator mode runs research / implementation / verification in parallel ` +
-    `via specialists. Toggle with /coordinator on, or stay in normal mode if you'd ` +
-    `prefer to keep direct control.`
+    `This session is in normal mode but the task looks like multi-step work${reasonText}. ` +
+    `Coordinator mode (launched with CLAUDE_CODE_COORDINATOR_MODE=1) runs research, ` +
+    `implementation, and verification in parallel via specialist workers — or stay in ` +
+    `normal mode if you prefer to keep direct, single-agent control.`
   )
 }
