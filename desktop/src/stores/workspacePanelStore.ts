@@ -87,7 +87,7 @@ type WorkspacePanelStore = {
 
 const DEFAULT_PANEL_STATE: WorkspacePanelSessionState = {
   isOpen: false,
-  activeView: 'changed',
+  activeView: 'all',
 }
 
 const DEFAULT_WORKBENCH_MODE: WorkbenchMode = 'workspace'
@@ -294,17 +294,12 @@ export const useWorkspacePanelStore = create<WorkspacePanelStore>((set, get) => 
 
       set((state) => {
         const panel = getSessionPanelState(state.panelBySession, sessionId)
-        const nextActiveView =
-          !panel.hasUserSelectedView && result.state === 'ok'
-            ? result.changedFiles.length > 0 ? 'changed' : 'all'
-            : panel.activeView
 
         return {
           panelBySession: {
             ...state.panelBySession,
             [sessionId]: {
               ...panel,
-              activeView: nextActiveView,
             },
           },
           statusBySession: {
