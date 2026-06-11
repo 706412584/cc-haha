@@ -138,3 +138,39 @@ export type AddMarketplaceResponse = {
   alreadyMaterialized: boolean
   source: unknown
 }
+
+
+// ─── Prerequisites (host-command availability) ────────────────────────────
+
+export type PluginPrerequisiteInstallStep = {
+  /** Free-form label like "winget" / "scoop" / "brew" / "shell". */
+  manager: string
+  /** Exact shell command to run; the modal offers copy + open-in-terminal. */
+  cmd: string
+}
+
+/**
+ * Per-platform install step lists. Keys are the same `process.platform`
+ * values that the renderer compares against `navigator.userAgentData`
+ * + a fallback heuristic — `win32` / `darwin` / `linux`.
+ */
+export type PluginPrerequisiteInstallMap = {
+  win32?: PluginPrerequisiteInstallStep[]
+  darwin?: PluginPrerequisiteInstallStep[]
+  linux?: PluginPrerequisiteInstallStep[]
+}
+
+export type PluginPrerequisiteRow = {
+  command: string
+  label?: string
+  homepage?: string
+  installed: boolean
+  resolvedPath: string | null
+  install?: PluginPrerequisiteInstallMap
+  affectedServers: Array<{ name: string; displayName?: string }>
+}
+
+export type PluginPrerequisitesResponse = {
+  pluginId: string
+  prerequisites: PluginPrerequisiteRow[]
+}

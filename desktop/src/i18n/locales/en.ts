@@ -2089,6 +2089,24 @@ export const en = {
   'tabs.hideWorkspace': 'Hide Workspace',
   'tabs.showBrowser': 'Show Browser',
   'tabs.hideBrowser': 'Hide Browser',
+
+  // ─── Plugin Prerequisites Modal ─────────────────────────────────────
+  'pluginPrereq.title': 'Missing prerequisites for {name}',
+  'pluginPrereq.intro': 'Some host commands this plugin depends on are not on your PATH ({count} missing). Install them and click "I installed them, recheck".',
+  'pluginPrereq.affectedServers': 'Required by: {servers}',
+  'pluginPrereq.homepageLink': 'Docs ↗',
+  'pluginPrereq.copy': 'Copy',
+  'pluginPrereq.copied': 'Copied',
+  'pluginPrereq.copyTooltip': 'Copy command to clipboard',
+  'pluginPrereq.openInTerminal': 'Open in terminal',
+  'pluginPrereq.openInTerminalTooltip': 'Open a new terminal tab with the command on the clipboard. Paste with right-click or Ctrl+Shift+V, then press Enter to run.',
+  'pluginPrereq.openedTerminalToast': 'Opened a new terminal tab. The install command is on your clipboard — paste and press Enter to run.',
+  'pluginPrereq.copyFailed': 'Failed to copy to clipboard',
+  'pluginPrereq.recheck': 'I installed them, recheck',
+  'pluginPrereq.dismiss': 'Later',
+  'pluginPrereq.allInstalledToast': 'All prerequisites are now installed.',
+  'pluginPrereq.noPlatformInstall': 'No automated install command for {platform}. See the homepage link above.',
+  'pluginPrereq.safetyNote': 'cc-haha never runs install commands automatically. The "Open in terminal" button copies the command and opens a terminal — you press Enter to actually run it.',
 } as const
 
 export type TranslationKey = keyof typeof en

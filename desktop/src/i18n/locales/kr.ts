@@ -2064,4 +2064,22 @@ export const kr: Record<TranslationKey, string> = {
   'tabs.hideWorkspace': '작업 공간 숨기기',
   'tabs.showBrowser': '브라우저 표시',
   'tabs.hideBrowser': '브라우저 숨기기',
+
+  // ─── 플러그인 사전 요구 모달 ─────────────────────────────────────
+  'pluginPrereq.title': '{name} 사전 요구사항이 누락되었습니다',
+  'pluginPrereq.intro': '이 플러그인에 필요한 일부 호스트 명령이 PATH에 없습니다(총 {count}개 누락). 설치 후 "설치 완료, 다시 확인"을 클릭하세요.',
+  'pluginPrereq.affectedServers': '영향받는 server: {servers}',
+  'pluginPrereq.homepageLink': '문서 ↗',
+  'pluginPrereq.copy': '복사',
+  'pluginPrereq.copied': '복사됨',
+  'pluginPrereq.copyTooltip': '명령을 클립보드에 복사',
+  'pluginPrereq.openInTerminal': '터미널에서 열기',
+  'pluginPrereq.openInTerminalTooltip': '새 터미널 탭을 열고 명령을 클립보드에 넣습니다. 마우스 오른쪽 버튼 또는 Ctrl+Shift+V로 붙여넣고 Enter를 눌러 실행하세요.',
+  'pluginPrereq.openedTerminalToast': '새 터미널 탭을 열었습니다. 명령이 클립보드에 있습니다 —— 붙여넣고 Enter를 누르면 실행됩니다.',
+  'pluginPrereq.copyFailed': '클립보드 복사에 실패했습니다',
+  'pluginPrereq.recheck': '설치 완료, 다시 확인',
+  'pluginPrereq.dismiss': '나중에',
+  'pluginPrereq.allInstalledToast': '모든 사전 요구사항이 준비되었습니다.',
+  'pluginPrereq.noPlatformInstall': '현재 플랫폼 {platform}용 자동 설치 명령이 없습니다. 위의 문서 링크를 참조하세요.',
+  'pluginPrereq.safetyNote': 'cc-haha는 설치 명령을 자동으로 실행하지 않습니다. "터미널에서 열기"는 명령을 클립보드에 복사하고 새 터미널을 열기만 하며, 붙여넣고 Enter를 누르는 것은 사용자의 명시적 동작입니다.',
 }

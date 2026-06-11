@@ -4,6 +4,7 @@ import type {
   CatalogPlugin,
   PluginDetail,
   PluginListResponse,
+  PluginPrerequisitesResponse,
   PluginReloadSummary,
   PluginSessionReloadSummary,
   PluginScope,
@@ -25,6 +26,15 @@ export const pluginsApi = {
     const query = new URLSearchParams({ id })
     if (cwd) query.set('cwd', cwd)
     return api.get<{ detail: PluginDetail }>(`/api/plugins/detail?${query.toString()}`)
+  },
+
+  prerequisites: (id: string, cwd?: string) => {
+    const query = new URLSearchParams({ id })
+    if (cwd) query.set('cwd', cwd)
+    return api.get<PluginPrerequisitesResponse>(
+      `/api/plugins/prerequisites?${query.toString()}`,
+      { timeout: 15_000 },
+    )
   },
 
   enable: (payload: PluginActionPayload) =>

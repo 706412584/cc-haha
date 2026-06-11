@@ -47,6 +47,16 @@ export async function handlePluginsApi(
       })
     }
 
+    if (method === 'GET' && sub === 'prerequisites') {
+      const pluginId = url.searchParams.get('id')
+      if (!pluginId) {
+        throw ApiError.badRequest('Missing required "id" query parameter')
+      }
+      return Response.json(
+        await pluginService.checkPluginPrerequisites(pluginId, cwd),
+      )
+    }
+
     if (method === 'POST' && sub === 'reload') {
       const sessionId = url.searchParams.get('sessionId') || undefined
       const response = await pluginService.reloadPlugins(cwd)

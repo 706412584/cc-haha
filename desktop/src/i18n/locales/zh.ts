@@ -2064,4 +2064,22 @@ export const zh: Record<TranslationKey, string> = {
   'tabs.hideWorkspace': '隐藏工作区',
   'tabs.showBrowser': '显示浏览器',
   'tabs.hideBrowser': '隐藏浏览器',
+
+  // ─── 插件前置依赖弹窗 ─────────────────────────────────────
+  'pluginPrereq.title': '{name} 缺少前置依赖',
+  'pluginPrereq.intro': '此插件需要的部分主机命令未在 PATH 中(共 {count} 项缺失)。装好后点"已装好,重新检测"即可。',
+  'pluginPrereq.affectedServers': '受影响的 server:{servers}',
+  'pluginPrereq.homepageLink': '文档 ↗',
+  'pluginPrereq.copy': '复制',
+  'pluginPrereq.copied': '已复制',
+  'pluginPrereq.copyTooltip': '复制命令到剪贴板',
+  'pluginPrereq.openInTerminal': '在终端中打开',
+  'pluginPrereq.openInTerminalTooltip': '打开新终端 tab,命令已放进剪贴板。右键或 Ctrl+Shift+V 粘贴,回车执行。',
+  'pluginPrereq.openedTerminalToast': '已打开新终端 tab。命令已在剪贴板里 —— 粘贴 + 回车即可执行。',
+  'pluginPrereq.copyFailed': '复制到剪贴板失败',
+  'pluginPrereq.recheck': '已装好,重新检测',
+  'pluginPrereq.dismiss': '稍后再说',
+  'pluginPrereq.allInstalledToast': '所有前置依赖已就绪。',
+  'pluginPrereq.noPlatformInstall': '当前平台 {platform} 没有现成的安装命令,请查看上方文档链接。',
+  'pluginPrereq.safetyNote': 'cc-haha 不会自动执行任何安装命令。"在终端中打开"只把命令复制到剪贴板并新开一个终端 —— 你自己粘贴 + 回车才会真正执行。',
 }

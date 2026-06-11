@@ -7,7 +7,13 @@ import { useUIStore } from '../../stores/uiStore'
 import { Button } from '../shared/Button'
 import { ConfirmDialog } from '../shared/ConfirmDialog'
 import { ToggleSwitch } from '../shared/ToggleSwitch'
-import type { CatalogPlugin, PluginSummary } from '../../types/plugin'
+import type {
+  CatalogPlugin,
+  PluginPrerequisiteRow,
+  PluginSummary,
+} from '../../types/plugin'
+import { pluginsApi } from '../../api/plugins'
+import { PluginPrerequisitesModal } from './PluginPrerequisitesModal'
 
 type PluginBucket = 'attention' | 'enabled' | 'disabled'
 type BatchAction = 'enable' | 'disable'
@@ -79,6 +85,17 @@ export function PluginList() {
   // show its own spinner without blocking sibling rows.
   const [pendingActionKey, setPendingActionKey] = useState<string | null>(null)
   const [pendingUninstall, setPendingUninstall] = useState<PluginSummary | null>(null)
+  // Prerequisites modal state — populated after a successful enable when
+  // the plugin's MCP servers declared host-command prerequisites that
+  // aren't currently in PATH. Stays open while the user installs deps;
+  // user can click "I installed it, recheck" to re-probe without
+  // disabling/re-enabling the plugin.
+  const [prereqModal, setPrereqModal] = useState<{
+    pluginId: string
+    pluginName: string
+    rows: PluginPrerequisiteRow[]
+    isRechecking: boolean
+  } | null>(null)
 
   useEffect(() => {
     void fetchPlugins(currentWorkDir)
@@ -214,6 +231,30 @@ export function PluginList() {
         type: 'success',
         message,
       })
+
+      // Right after enabling, probe whether the plugin's MCP servers'
+      // declared host-command prerequisites are present. Skip on
+      // disable (nothing to install). Failures here are non-fatal —
+      // the toggle already succeeded; the modal is a best-effort
+      // helper. Don't block the user with errors if the probe fails.
+      if (!plugin.enabled) {
+        try {
+          const result = await pluginsApi.prerequisites(plugin.id, currentWorkDir)
+          const missing = result.prerequisites.filter((row) => !row.installed)
+          if (missing.length > 0) {
+            setPrereqModal({
+              pluginId: plugin.id,
+              pluginName: plugin.name,
+              rows: result.prerequisites,
+              isRechecking: false,
+            })
+          }
+        } catch {
+          // Probe failure is silent — host environment variability is
+          // wide and a CI runner without `where`/`command -v` should
+          // not break plugin enable.
+        }
+      }
     } catch (err) {
       addToast({
         type: 'error',
@@ -221,6 +262,40 @@ export function PluginList() {
       })
     } finally {
       setPendingActionKey(null)
+    }
+  }
+
+  const handlePrereqRecheck = async () => {
+    if (!prereqModal) return
+    setPrereqModal((prev) => (prev ? { ...prev, isRechecking: true } : prev))
+    try {
+      const result = await pluginsApi.prerequisites(
+        prereqModal.pluginId,
+        currentWorkDir,
+      )
+      const stillMissing = result.prerequisites.filter((row) => !row.installed)
+      if (stillMissing.length === 0) {
+        // Everything resolved — close the modal and confirm to the user
+        // that they're good to go.
+        setPrereqModal(null)
+        addToast({
+          type: 'success',
+          message: t('pluginPrereq.allInstalledToast'),
+        })
+        return
+      }
+      setPrereqModal({
+        pluginId: prereqModal.pluginId,
+        pluginName: prereqModal.pluginName,
+        rows: result.prerequisites,
+        isRechecking: false,
+      })
+    } catch (err) {
+      setPrereqModal((prev) => (prev ? { ...prev, isRechecking: false } : prev))
+      addToast({
+        type: 'error',
+        message: err instanceof Error ? err.message : String(err),
+      })
     }
   }
 
@@ -563,6 +638,17 @@ export function PluginList() {
         confirmVariant="danger"
         loading={isApplying && pendingActionKey?.endsWith(':uninstall') === true}
       />
+
+      {prereqModal && (
+        <PluginPrerequisitesModal
+          open={prereqModal !== null}
+          pluginName={prereqModal.pluginName}
+          rows={prereqModal.rows}
+          isRechecking={prereqModal.isRechecking}
+          onRecheck={handlePrereqRecheck}
+          onClose={() => setPrereqModal(null)}
+        />
+      )}
 
       <ConfirmDialog
         open={confirmBatchAction !== null}

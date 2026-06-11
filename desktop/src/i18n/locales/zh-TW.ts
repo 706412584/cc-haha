@@ -2064,4 +2064,22 @@ export const zh: Record<TranslationKey, string> = {
   'tabs.hideWorkspace': '隱藏工作區',
   'tabs.showBrowser': '顯示瀏覽器',
   'tabs.hideBrowser': '隱藏瀏覽器',
+
+  // ─── 外掛前置相依套件對話框 ─────────────────────────────────────
+  'pluginPrereq.title': '{name} 缺少前置相依套件',
+  'pluginPrereq.intro': '此外掛需要的部分主機指令不在 PATH 中（共 {count} 項缺失）。裝好後點選「已安裝，重新偵測」即可。',
+  'pluginPrereq.affectedServers': '受影響的 server：{servers}',
+  'pluginPrereq.homepageLink': '文件 ↗',
+  'pluginPrereq.copy': '複製',
+  'pluginPrereq.copied': '已複製',
+  'pluginPrereq.copyTooltip': '複製指令到剪貼簿',
+  'pluginPrereq.openInTerminal': '在終端機中開啟',
+  'pluginPrereq.openInTerminalTooltip': '開啟新終端機分頁，指令已放進剪貼簿。右鍵或 Ctrl+Shift+V 貼上，按 Enter 執行。',
+  'pluginPrereq.openedTerminalToast': '已開啟新終端機分頁。指令已在剪貼簿 —— 貼上後按 Enter 即可執行。',
+  'pluginPrereq.copyFailed': '複製到剪貼簿失敗',
+  'pluginPrereq.recheck': '已安裝，重新偵測',
+  'pluginPrereq.dismiss': '稍後再說',
+  'pluginPrereq.allInstalledToast': '所有前置相依套件皆已就緒。',
+  'pluginPrereq.noPlatformInstall': '目前平台 {platform} 沒有現成的安裝指令，請查看上方文件連結。',
+  'pluginPrereq.safetyNote': 'cc-haha 永遠不會自動執行安裝指令。「在終端機中開啟」只會把指令複製到剪貼簿並開啟新終端機 —— 你自己貼上 + 按 Enter 才會真正執行。',
 }
