@@ -517,6 +517,19 @@ function collectChangedLines(rootDir: string, baseRef?: string) {
   return new Map<string, Set<number>>()
 }
 
+// A PR that pulls in an upstream merge commit (e.g. syncing the fork with
+// upstream) carries thousands of third-party lines in its base...HEAD diff that
+// it neither authored nor can meaningfully cover. The changed-lines gate is
+// meant to police a PR's *own* new code, so skip it when the range between the
+// base and HEAD contains a merge commit.
+export function rangeContainsMergeCommit(rootDir: string, baseRef?: string): boolean {
+  const base = baseRef?.trim() || 'origin/main'
+  const hasBase = gitOutput(rootDir, ['rev-parse', '--verify', base])
+  if (!hasBase) return false
+  const merges = gitOutput(rootDir, ['rev-list', '--merges', `${base}..HEAD`])
+  return Boolean(merges?.trim())
+}
+
 export function evaluateChangedLineCoverage(
   changedLines: Map<string, Set<number>>,
   coverageByFile: Map<string, FileLineCoverage>,
@@ -801,15 +814,20 @@ export async function runCoverageGate(options: {
 
   const thresholds = loadThresholds(options.thresholdsPath ?? join(rootDir, 'scripts', 'quality-gate', 'coverage-thresholds.json'))
   const failures = evaluateThresholds(suites, thresholds, rootDir, baselineRef)
+  const changedBaseRef = options.changedBaseRef ?? process.env.COVERAGE_BASE_REF
   const changedLineMinimum = thresholds.changedLines?.minimumPercent
-  const changedLines = typeof changedLineMinimum === 'number'
+  const skipChangedLines = rangeContainsMergeCommit(rootDir, changedBaseRef)
+  const changedLines = typeof changedLineMinimum === 'number' && !skipChangedLines
     ? evaluateChangedLineCoverage(
-      collectChangedLines(rootDir, options.changedBaseRef ?? process.env.COVERAGE_BASE_REF),
+      collectChangedLines(rootDir, changedBaseRef),
       coverageByFile,
       CHANGED_LINE_SCOPES,
       changedLineMinimum,
     )
     : undefined
+  if (skipChangedLines) {
+    console.log('Changed-lines gate skipped: base..HEAD contains a merge commit (upstream sync).')
+  }
   if (changedLines) {
     failures.push(...changedLines.failures)
   }
