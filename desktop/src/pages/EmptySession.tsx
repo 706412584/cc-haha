@@ -630,7 +630,7 @@ export function EmptySession() {
               useTabStore.getState().openTab(sessionId, 'New Session')
               connectToSession(sessionId)
             }}
-            onAutoHandoff={async (previousSessionId, previousSessionTitle, fallbackText, setStage) => {
+            onAutoHandoff={async (previousSessionId, previousSessionTitle, fallbackText, setStage, options) => {
               // 1. Resolve summary: tries cache first (fast), falls back to
               //    LLM generation on miss. Returns null on any failure so
               //    we can degrade to the zero-token textarea path without
@@ -722,6 +722,7 @@ export function EmptySession() {
                 wsManager.send(sessionId, {
                   type: 'set_handoff_summary',
                   previousSessionId,
+                  ...(options?.deep ? { deep: true } : {}),
                 })
                 sendMessage(sessionId, t('empty.recentActivity.continueTriggerMessage'))
                 setInput('')

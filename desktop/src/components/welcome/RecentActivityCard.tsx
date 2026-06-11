@@ -47,6 +47,7 @@ type Props = {
     previousSessionTitle: string,
     fallbackText: string,
     setStage: (stage: HandoffStage) => void,
+    options?: { deep?: boolean },
   ) => Promise<void>
   /**
    * If the parent already has a session live (ActiveSession path), the
@@ -62,6 +63,7 @@ type Props = {
 }
 
 const REFRESH_INTERVAL_MS = 60_000
+const DEEP_HANDOFF_LS_KEY = 'cc-haha-handoff-deep-mode'
 
 /**
  * Welcome-screen "Recent activity" panel. Reads on-disk derivation from
@@ -90,6 +92,27 @@ export function RecentActivityCard({
   const [handoffStage, setHandoffStage] = useState<HandoffStage>('preparing')
   const [previewOpen, setPreviewOpen] = useState(false)
   const [cachedSummary, setCachedSummary] = useState<SessionSummary | null>(null)
+  // Deep handoff toggle — persists per-user via localStorage so a user
+  // who opted into the enlarged tail once doesn't have to re-click every
+  // session. Read once on mount; written on every flip.
+  const [deepHandoff, setDeepHandoff] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(DEEP_HANDOFF_LS_KEY) === '1'
+    } catch {
+      return false
+    }
+  })
+  const toggleDeepHandoff = () => {
+    setDeepHandoff((prev) => {
+      const next = !prev
+      try {
+        localStorage.setItem(DEEP_HANDOFF_LS_KEY, next ? '1' : '0')
+      } catch {
+        // Storage may be unavailable in some embed contexts — non-fatal.
+      }
+      return next
+    })
+  }
 
   useEffect(() => {
     if (!workDir) {
@@ -246,6 +269,35 @@ export function RecentActivityCard({
 
           {/* Action buttons — right side, vertical to keep card height short */}
           <div className="flex shrink-0 items-center gap-1.5">
+            {/* Deep-handoff toggle: when enabled, the next "Continue from
+                here" click ships an enlarged verbatim tail (~12k tokens
+                vs ~4k default) so the new-session AI sees more of the
+                most recent debugging detour. State persists in
+                localStorage. */}
+            <button
+              type="button"
+              onClick={toggleDeepHandoff}
+              data-testid="recent-activity-deep-handoff-toggle"
+              title={
+                deepHandoff
+                  ? t('empty.recentActivity.deepHandoffOnTooltip')
+                  : t('empty.recentActivity.deepHandoffOffTooltip')
+              }
+              aria-pressed={deepHandoff}
+              aria-label={t('empty.recentActivity.deepHandoffLabel')}
+              className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs transition-colors ${
+                deepHandoff
+                  ? 'border-[var(--color-primary)] bg-[var(--color-primary-container)] text-[var(--color-on-primary-container)]'
+                  : 'border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] text-[var(--color-text-primary)] hover:border-[var(--color-primary)] hover:bg-[var(--color-surface-hover)]'
+              }`}
+            >
+              <span className="material-symbols-outlined text-[14px]" aria-hidden="true">
+                history_edu
+              </span>
+              <span className="hidden sm:inline">
+                {t('empty.recentActivity.deepHandoffLabel')}
+              </span>
+            </button>
             {!hideContinueSessionButton && lastSession && (
               <button
                 type="button"
@@ -291,6 +343,7 @@ export function RecentActivityCard({
                     lastSession.title,
                     handoffText,
                     setHandoffStage,
+                    { deep: deepHandoff },
                   )
                 } finally {
                   setHandoffPending(false)

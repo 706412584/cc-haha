@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   type SessionSummary,
   _buildRecentRawSliceForTest,
+  _buildRecentRawSliceDeepForTest,
   formatHandoffSystemPrompt,
 } from './sessionSummaryService'
 
@@ -154,5 +155,43 @@ describe('buildRecentRawSlice', () => {
     expect(out).toContain('reply-29')
     // 24 lines × short bodies stays well under the 16k total cap.
     expect(out.length).toBeLessThan(16_000)
+  })
+})
+
+describe('buildRecentRawSliceWithSizes (deep handoff)', () => {
+  it('uses 60 turns / 800 chars / 50k cap regardless of env overrides', () => {
+    // Deep mode is hardcoded so the welcome-card toggle has predictable
+    // behavior. Even if a power user has set RAW_TURNS=10 via env, the
+    // toggle must still ship the enlarged tail when toggled on.
+    process.env.CLAUDE_CODE_HANDOFF_RAW_TURNS = '10'
+    process.env.CLAUDE_CODE_HANDOFF_RAW_CHARS = '5000'
+    const turns: string[] = []
+    for (let i = 0; i < 80; i++) {
+      turns.push(`USER: msg-${i}`)
+      turns.push(`ASSISTANT: reply-${i}`)
+    }
+    const out = _buildRecentRawSliceDeepForTest(turns)
+    // 60 trailing turns → starts at index 160 - 60 = 100.
+    // turns[100] = 'USER: msg-50', so 'msg-49' / 'reply-49' must drop.
+    expect(out).not.toContain('msg-49')
+    expect(out).toContain('msg-79')
+    expect(out).toContain('reply-79')
+    expect(out.length).toBeLessThan(50_000)
+    // Sanity: deep slice clearly bigger than the default-sized one on the
+    // same input — proves env overrides really were ignored.
+    delete process.env.CLAUDE_CODE_HANDOFF_RAW_TURNS
+    delete process.env.CLAUDE_CODE_HANDOFF_RAW_CHARS
+    const def = _buildRecentRawSliceForTest(turns)
+    expect(out.length).toBeGreaterThan(def.length)
+  })
+
+  it('respects per-turn 800-char cap on dense lines', () => {
+    const longBody = 'x'.repeat(2_000)
+    const out = _buildRecentRawSliceDeepForTest([`USER: ${longBody}`])
+    expect(out.startsWith('USER: ')).toBe(true)
+    // Per-turn cap is 800 chars in deep mode (vs 600 default).
+    expect(out.length).toBeLessThan(900)
+    expect(out.length).toBeGreaterThan(600)
+    expect(out.endsWith('…')).toBe(true)
   })
 })

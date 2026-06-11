@@ -155,17 +155,31 @@ function truncateTurnLine(line: string, maxChars: number): string {
  * messages (verbatim, truncated)" so the next-session AI can see the
  * actual user wording — not just the LLM-summarized abstract.
  */
-function buildRecentRawSlice(turns: string[]): string {
-  const tailTurns = getRawTailTurns()
-  if (tailTurns === 0 || turns.length === 0) return ''
-  const totalCap = getRawTailTotalChars()
-  const perTurn = SUMMARY_RAW_TAIL_CHARS_PER_TURN_DEFAULT
+/**
+ * Hard-coded "deep handoff" sizing used when the user explicitly toggles
+ * deep mode in the welcome card. Deliberately fixed (not env-driven) so
+ * the toggle has predictable behavior — a user picking deep gets the
+ * same enlarged tail regardless of any CLAUDE_CODE_HANDOFF_RAW_*
+ * overrides the env may carry. Deep mode adds ~12k tokens to the handoff
+ * system prompt; still ~6% of a 200k window.
+ */
+const SUMMARY_RAW_TAIL_DEEP_TURNS = 60
+const SUMMARY_RAW_TAIL_DEEP_CHARS_PER_TURN = 800
+const SUMMARY_RAW_TAIL_DEEP_TOTAL_CHARS = 50_000
 
+/**
+ * Pure slicing helper: produce the verbatim tail from a turns[] array
+ * given explicit sizing. Older turns drop first when the per-turn cap
+ * still busts the total cap.
+ */
+function buildRecentRawSliceWithSizes(
+  turns: string[],
+  sizes: { tailTurns: number; perTurn: number; totalCap: number },
+): string {
+  const { tailTurns, perTurn, totalCap } = sizes
+  if (tailTurns === 0 || turns.length === 0) return ''
   const start = Math.max(0, turns.length - tailTurns)
   const candidates = turns.slice(start).map((t) => truncateTurnLine(t, perTurn))
-
-  // Per-line cap may still bust totalCap on dense turns; tail-clip at the
-  // total cap, dropping older lines first, so the most recent stays.
   let total = 0
   const kept: string[] = []
   for (let i = candidates.length - 1; i >= 0; i--) {
@@ -175,6 +189,20 @@ function buildRecentRawSlice(turns: string[]): string {
     total += t.length + 2
   }
   return kept.join('\n\n')
+}
+
+/**
+ * Build the verbatim-but-truncated tail slice of the transcript. Caller
+ * inserts this into the hand-off system prompt under "Most recent
+ * messages (verbatim, truncated)" so the next-session AI can see the
+ * actual user wording — not just the LLM-summarized abstract.
+ */
+function buildRecentRawSlice(turns: string[]): string {
+  return buildRecentRawSliceWithSizes(turns, {
+    tailTurns: getRawTailTurns(),
+    perTurn: SUMMARY_RAW_TAIL_CHARS_PER_TURN_DEFAULT,
+    totalCap: getRawTailTotalChars(),
+  })
 }
 
 const SUMMARY_SYSTEM_PROMPT = `You are summarizing a coding-agent conversation between a developer and an AI assistant. The summary will be injected as system-level hand-off context into the developer's NEXT session in the same project, so the next-session AI knows what was already discussed without re-feeding the whole transcript.
@@ -207,58 +235,8 @@ async function buildTranscriptText(filePath: string): Promise<{
   recentRaw: string
 }> {
   const inputCap = getInputCap()
-  const stream = createReadStream(filePath, { encoding: 'utf8' })
-  const lines = createInterface({ input: stream, crlfDelay: Infinity })
-
-  const turns: string[] = []
-  let messageCount = 0
-
-  try {
-    for await (const line of lines) {
-      const trimmed = line.trim()
-      if (!trimmed) continue
-      let entry: Record<string, unknown>
-      try {
-        entry = JSON.parse(trimmed) as Record<string, unknown>
-      } catch {
-        continue
-      }
-      if (entry.isMeta === true) continue
-
-      if (entry.type === 'user') {
-        const message = entry.message as { content?: unknown } | undefined
-        const text = extractTextFromContent(message?.content)
-        if (text) {
-          turns.push(`USER: ${text}`)
-          messageCount++
-        }
-        continue
-      }
-
-      if (entry.type === 'assistant') {
-        const message = entry.message as { content?: unknown } | undefined
-        const blocks = Array.isArray(message?.content)
-          ? (message.content as Array<Record<string, unknown>>)
-          : []
-        const parts: string[] = []
-        for (const block of blocks) {
-          if (block.type === 'text' && typeof block.text === 'string') {
-            const t = block.text.trim()
-            if (t) parts.push(t)
-          } else if (block.type === 'tool_use') {
-            parts.push(formatToolUseSummary(block))
-          }
-        }
-        if (parts.length > 0) {
-          turns.push(`ASSISTANT: ${parts.join('\n')}`)
-          messageCount++
-        }
-      }
-    }
-  } finally {
-    lines.close()
-    stream.destroy()
-  }
+  const turns = await readTurnsFromTranscript(filePath)
+  const messageCount = turns.length
 
   // Tail-slice: keep the most recent turns until we're under cap. Recent
   // context dominates the hand-off value, so older turns are dropped first.
@@ -282,6 +260,59 @@ async function buildTranscriptText(filePath: string): Promise<{
     messageCount,
     recentRaw,
   }
+}
+
+/**
+ * Read JSONL transcript and produce the chronological `USER:` /
+ * `ASSISTANT:` lines used by both the LLM-summarization input and the
+ * verbatim recentRaw slice. Extracted so the deep-handoff rebuild path
+ * can reuse parsing without re-running the LLM summarization pipeline.
+ */
+async function readTurnsFromTranscript(filePath: string): Promise<string[]> {
+  const stream = createReadStream(filePath, { encoding: 'utf8' })
+  const lines = createInterface({ input: stream, crlfDelay: Infinity })
+  const turns: string[] = []
+  try {
+    for await (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      let entry: Record<string, unknown>
+      try {
+        entry = JSON.parse(trimmed) as Record<string, unknown>
+      } catch {
+        continue
+      }
+      if (entry.isMeta === true) continue
+
+      if (entry.type === 'user') {
+        const message = entry.message as { content?: unknown } | undefined
+        const text = extractTextFromContent(message?.content)
+        if (text) turns.push(`USER: ${text}`)
+        continue
+      }
+
+      if (entry.type === 'assistant') {
+        const message = entry.message as { content?: unknown } | undefined
+        const blocks = Array.isArray(message?.content)
+          ? (message.content as Array<Record<string, unknown>>)
+          : []
+        const parts: string[] = []
+        for (const block of blocks) {
+          if (block.type === 'text' && typeof block.text === 'string') {
+            const t = block.text.trim()
+            if (t) parts.push(t)
+          } else if (block.type === 'tool_use') {
+            parts.push(formatToolUseSummary(block))
+          }
+        }
+        if (parts.length > 0) turns.push(`ASSISTANT: ${parts.join('\n')}`)
+      }
+    }
+  } finally {
+    lines.close()
+    stream.destroy()
+  }
+  return turns
 }
 
 function extractTextFromContent(content: unknown): string {
@@ -637,4 +668,42 @@ export function _summaryFilePathForTest(jsonlPath: string): string {
  *  through buildTranscriptText. */
 export function _buildRecentRawSliceForTest(turns: string[]): string {
   return buildRecentRawSlice(turns)
+}
+
+/** Test helper: exposed deep-mode slicing so the deep-handoff path's
+ *  enlarged sizing can be locked in without spinning up an LLM. */
+export function _buildRecentRawSliceDeepForTest(turns: string[]): string {
+  return buildRecentRawSliceWithSizes(turns, {
+    tailTurns: SUMMARY_RAW_TAIL_DEEP_TURNS,
+    perTurn: SUMMARY_RAW_TAIL_DEEP_CHARS_PER_TURN,
+    totalCap: SUMMARY_RAW_TAIL_DEEP_TOTAL_CHARS,
+  })
+}
+
+/**
+ * Public: rebuild the verbatim recentRaw slice for an existing session
+ * using the hard-coded deep-mode sizing. Used by the WS handoff handler
+ * when the user toggled "deep handoff" on the welcome card — we keep the
+ * cached LLM-generated `main` / `recent` (no extra cost) and only
+ * regenerate the verbatim tail with bigger sizes from the live JSONL.
+ *
+ * Returns null on missing session or empty transcript so the caller can
+ * fall back to whatever recentRaw the cached summary already carries.
+ */
+export async function rebuildRecentRawForHandoff(
+  sessionId: string,
+): Promise<string | null> {
+  const found = await sessionService.findSessionFile(sessionId)
+  if (!found) return null
+  try {
+    const turns = await readTurnsFromTranscript(found.filePath)
+    if (turns.length === 0) return null
+    return buildRecentRawSliceWithSizes(turns, {
+      tailTurns: SUMMARY_RAW_TAIL_DEEP_TURNS,
+      perTurn: SUMMARY_RAW_TAIL_DEEP_CHARS_PER_TURN,
+      totalCap: SUMMARY_RAW_TAIL_DEEP_TOTAL_CHARS,
+    })
+  } catch {
+    return null
+  }
 }

@@ -465,7 +465,7 @@ export function ActiveSession() {
                     useTabStore.getState().openTab(sessionId, 'New Session')
                     connectToSession(sessionId)
                   }}
-                  onAutoHandoff={async (previousSessionId, previousSessionTitle, fallbackText, setStage) => {
+                  onAutoHandoff={async (previousSessionId, previousSessionTitle, fallbackText, setStage, options) => {
                     // 1. Resolve summary (cached → generated → null). Any
                     //    failure degrades silently to the zero-token
                     //    textarea-prefill path.
@@ -522,6 +522,7 @@ export function ActiveSession() {
                     wsManager.send(activeTabId, {
                       type: 'set_handoff_summary',
                       previousSessionId,
+                      ...(options?.deep ? { deep: true } : {}),
                     })
                     useChatStore.getState().sendMessage(
                       activeTabId,
