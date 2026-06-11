@@ -192,6 +192,16 @@ mismatch.
 The plugin doesn't ship the underlying tools. You need them on your machine
 (installable independently — none are required all at once):
 
+> **Auto-detect since cc-haha v0.5.10:** when you enable this plugin from
+> the desktop **Settings → Plugins** page, cc-haha probes whether each of
+> the host commands below is on PATH. Anything missing (e.g. `uvx`,
+> `radare2`, `java`) shows up in a one-click install modal with platform-
+> specific commands — winget/scoop on Windows, brew on macOS, apt/dnf on
+> Linux. The probe is a `where` / `command -v` lookup; it never executes
+> the underlying tool. Declarations live in
+> [`mcp/servers.json`](mcp/servers.json) under each server's
+> `prerequisites` key.
+
 | MCP | What you need | Install |
 |-----|---------------|---------|
 | `ghidra` | Ghidra (NSA), Java 17+, `uvx` (from `uv`) | https://ghidra-sre.org + set `GHIDRA_INSTALL_DIR` |
