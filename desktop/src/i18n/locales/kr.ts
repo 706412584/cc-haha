@@ -2082,4 +2082,8 @@ export const kr: Record<TranslationKey, string> = {
   'pluginPrereq.allInstalledToast': '모든 사전 요구사항이 준비되었습니다.',
   'pluginPrereq.noPlatformInstall': '현재 플랫폼 {platform}용 자동 설치 명령이 없습니다. 위의 문서 링크를 참조하세요.',
   'pluginPrereq.safetyNote': 'cc-haha는 설치 명령을 자동으로 실행하지 않습니다. "터미널에서 열기"는 명령을 클립보드에 복사하고 새 터미널을 열기만 하며, 붙여넣고 Enter를 누르는 것은 사용자의 명시적 동작입니다.',
+  'pluginPrereq.installAll': '원클릭 설치({count})',
+  'pluginPrereq.installAllTooltip': '새 터미널 탭을 열고 {count}개의 설치 명령을 순차적으로 주입하여 실행합니다. 각 명령의 에코와 실행은 터미널에서 직접 확인할 수 있습니다 —— cc-haha는 출력을 숨기지 않습니다.',
+  'pluginPrereq.installAllRunningToast': '{count}개의 설치 명령을 새 터미널 탭에 주입했습니다. 실행을 확인한 후 "다시 확인"을 클릭하세요.',
+  'pluginPrereq.installAllFailedToast': '원클릭 설치에 실패했습니다: {detail}. 개별 명령의 "복사"/"터미널에서 열기" 버튼을 사용하세요.',
 }

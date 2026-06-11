@@ -2082,4 +2082,8 @@ export const jp: Record<TranslationKey, string> = {
   'pluginPrereq.allInstalledToast': 'すべての前提条件が揃いました。',
   'pluginPrereq.noPlatformInstall': '現在のプラットフォーム {platform} 用の自動インストールコマンドはありません。上記のドキュメントリンクをご確認ください。',
   'pluginPrereq.safetyNote': 'cc-haha がインストールコマンドを自動実行することはありません。「ターミナルで開く」はコマンドをクリップボードにコピーしてターミナルを開くだけで、貼り付けと Enter を押すのは利用者の操作です。',
+  'pluginPrereq.installAll': 'ワンクリックインストール（{count}）',
+  'pluginPrereq.installAllTooltip': '新しいターミナルタブを開き、{count} 件のインストールコマンドを順に注入して実行します。各コマンドのエコーと実行はターミナル上で確認できます。cc-haha は出力を隠しません。',
+  'pluginPrereq.installAllRunningToast': '{count} 件のインストールコマンドを新しいターミナルタブに注入しました。実行を確認したら「再チェック」をクリックしてください。',
+  'pluginPrereq.installAllFailedToast': 'ワンクリックインストールに失敗しました: {detail}。各コマンドの「コピー」/「ターミナルで開く」ボタンをご利用ください。',
 }
