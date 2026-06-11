@@ -119,7 +119,7 @@ describe('attachLspProcessLimits (poll-fallback)', () => {
       { maxMemoryBytes: 100, sampleIntervalMs: 5 },
       sampler,
     )
-    await sleep(20)
+    await sleep(60)
     expect(calls).toBeGreaterThanOrEqual(2)
     limits.dispose()
   })

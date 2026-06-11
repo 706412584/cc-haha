@@ -25,6 +25,8 @@ import { closeSessionConnection, getSlashCommands } from '../ws/handler.js'
 import { listSkillSlashCommands, type SkillSlashCommand } from './skills.js'
 import { WorkspaceService } from '../services/workspaceService.js'
 import { WorkspaceFileService } from '../services/workspaceFileService.js'
+import { LspManager } from '../services/lspManager.js'
+import { isLspFeatureEnabled } from '../services/lspFeatureFlag.js'
 import {
   getRepositoryContext,
   type CreateSessionRepositoryOptions,
@@ -64,6 +66,8 @@ const workspaceFileService = new WorkspaceFileService(
     await sessionService.getSessionWorkDir(sessionId)
   ),
 )
+
+const lspManager = new LspManager()
 
 export async function handleSessionsApi(
   req: Request,
@@ -211,6 +215,16 @@ export async function handleSessionsApi(
         )
       }
       return await handleSessionWorkspaceRoute(sessionId, url, segments[4])
+    }
+
+    if (subResource === 'lsp') {
+      if (req.method !== 'GET') {
+        return Response.json(
+          { error: 'METHOD_NOT_ALLOWED', message: `Method ${req.method} not allowed` },
+          { status: 405 }
+        )
+      }
+      return await handleSessionLspRoute(sessionId, segments[4])
     }
 
     if (subResource === 'summary') {
@@ -387,6 +401,29 @@ async function handleSessionWorkspaceRoute(
     default:
       throw ApiError.notFound(`Unknown workspace resource: ${workspaceResource || 'workspace'}`)
   }
+}
+
+async function handleSessionLspRoute(
+  sessionId: string,
+  lspResource?: string,
+): Promise<Response> {
+  if (!isLspFeatureEnabled()) {
+    return Response.json(
+      { error: 'FEATURE_DISABLED', message: 'LSP feature is not enabled in this environment' },
+      { status: 404 },
+    )
+  }
+  if (lspResource !== 'state') {
+    return Response.json(
+      { error: 'NOT_FOUND', message: `Unknown lsp resource: ${lspResource ?? ''}` },
+      { status: 404 },
+    )
+  }
+  // sessionId is currently used as the workspace identity; if a future PR
+  // introduces a separate workspace concept (multiple sessions sharing one
+  // workspace), this is the seam where we'd map it.
+  const state = lspManager.getState(sessionId)
+  return Response.json({ state })
 }
 
 async function handleSessionWorkspacePost(
