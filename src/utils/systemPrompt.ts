@@ -56,6 +56,25 @@ export function buildEffectiveSystemPrompt({
   if (overrideSystemPrompt) {
     return asSystemPrompt([overrideSystemPrompt])
   }
+  // Solo Pipeline mode: 5-stage solo-agent workflow prompt. Checked BEFORE
+  // coordinator mode — Solo is exclusive (the WS handler clears coordinator
+  // when Solo is enabled), so if both env vars are somehow set Solo wins.
+  // This branch fires only when the CLI is launched manually with
+  // CLAUDE_CODE_SOLO_PIPELINE_MODE=1; the desktop wiring path uses
+  // `--append-system-prompt` via conversationService.getRuntimeArgs.
+  if (
+    feature('COORDINATOR_MODE') &&
+    isEnvTruthy(process.env.CLAUDE_CODE_SOLO_PIPELINE_MODE) &&
+    !mainThreadAgentDefinition
+  ) {
+    const { getSoloPipelineSystemPrompt } =
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      require('../coordinator/soloPipelinePrompt.js') as typeof import('../coordinator/soloPipelinePrompt.js')
+    return asSystemPrompt([
+      getSoloPipelineSystemPrompt(),
+      ...(appendSystemPrompt ? [appendSystemPrompt] : []),
+    ])
+  }
   // Coordinator mode: use coordinator prompt instead of default
   // Use inline env check instead of coordinatorModule to avoid circular
   // dependency issues during test module loading.

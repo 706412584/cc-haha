@@ -1375,6 +1375,7 @@ export const jp: Record<TranslationKey, string> = {
   'chat.openSkills': 'スキル',
   'chat.openPlugins': 'プラグイン',
   'chat.coordinatorMode': 'オーケストレーションモード',
+  'chat.soloPipelineMode': 'ソロパイプラインモード',
   'chat.questionDropped': 'AI が質問しようとしましたが、リクエストが無効か、回答する前にキャンセルされました。',
   'chat.contextExhausted': 'コンテキストがいっぱいで、圧縮を繰り返しても空きを作れません。新しいセッションを開始して続けることをおすすめします（これまでの要約はこのセッションに残っています）。',
   'chat.skillPicker.title': '挿入するスキルを選択',

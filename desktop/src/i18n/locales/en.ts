@@ -1404,6 +1404,7 @@ export const en = {
   'chat.openSkills': 'Skills',
   'chat.openPlugins': 'Plugins',
   'chat.coordinatorMode': 'Orchestration mode',
+  'chat.soloPipelineMode': 'Solo pipeline mode',
   'chat.questionDropped': 'Claude wanted to ask you a question, but the request was invalid or canceled before you could answer.',
   'chat.contextExhausted': 'The context is full and repeated compaction can no longer free space. Consider starting a new session to continue (the earlier summary is preserved in this one).',
   'chat.skillPicker.title': 'Pick a skill to insert',

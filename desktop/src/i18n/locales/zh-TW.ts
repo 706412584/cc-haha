@@ -1375,6 +1375,7 @@ export const zh: Record<TranslationKey, string> = {
   'chat.openSkills': '技能',
   'chat.openPlugins': '外掛',
   'chat.coordinatorMode': '編排模式',
+  'chat.soloPipelineMode': '獨立流水線模式',
   'chat.questionDropped': 'AI 想向你提問，但該請求無效或已取消（你還沒來得及作答）。',
   'chat.contextExhausted': '上下文已滿，且多次壓縮仍無法騰出空間。建議新建會話繼續（先前的摘要已保留在本會話）。',
   'chat.skillPicker.title': '選擇技能插入',
