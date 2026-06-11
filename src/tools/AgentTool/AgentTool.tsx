@@ -55,6 +55,11 @@ import {
   formatLazyDelegationError,
   isLazyDelegationCheckEnabled,
 } from './lazyDelegationCheck.js';
+import {
+  assessTaskSpec,
+  formatThinSpecError,
+  isTaskSpecStrictEnabled,
+} from './taskSpecQuality.js';
 import type { AgentDefinition } from './loadAgentsDir.js';
 import { filterAgentsByMcpRequirements, hasRequiredMcpServers, isBuiltInAgent } from './loadAgentsDir.js';
 import { getPrompt } from './prompt.js';
@@ -380,6 +385,23 @@ export const AgentTool = buildTool({
       // real specialist that's actually registered for this coordinator.
       if (suggested && suggested !== 'worker' && availableTypes.has(suggested)) {
         throw new Error(formatSpecialistRedirectMessage(suggested, AGENT_TOOL_NAME));
+      }
+    }
+
+    // Coordinator-mode task-spec strictness (OPT-IN, off by default). When
+    // enabled, reject a clearly under-specified worker brief — workers can't
+    // see this conversation, so a prompt with no action / file / criteria
+    // gives them nothing to execute. Skips the fork path (no subagent_type)
+    // since a fork inherits the parent's full context. Enable with
+    // CLAUDE_CODE_COORDINATOR_TASK_SPEC_STRICT=1.
+    if (
+      isCoordinatorMode() &&
+      !!subagent_type &&
+      isTaskSpecStrictEnabled()
+    ) {
+      const assessment = assessTaskSpec(prompt);
+      if (assessment.quality === 'underspecified') {
+        throw new Error(formatThinSpecError(assessment, AGENT_TOOL_NAME));
       }
     }
 

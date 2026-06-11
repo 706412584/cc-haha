@@ -1,6 +1,6 @@
 # -----------------------------------------------------------------------------
-# dev-coordinator-e2e.ps1 — local end-to-end smoke for the B1 coordinator
-# behavior changes.
+# dev-coordinator-e2e.ps1 — local end-to-end smoke for the coordinator
+# behavior changes (B1 + B2).
 #
 # What it covers (idempotent — safe to re-run):
 #   1. Lazy delegation lint (lazyDelegationCheck)
@@ -16,6 +16,9 @@
 #   5. Mode advice (modeAdvice)
 #      "Migrate the auth subsystem..." → coordinator; "Fix the typo..." →
 #      normal.
+#   6. Task-spec quality (taskSpecQuality, B2)
+#      Full brief → well-specified; "fix it" → underspecified with a
+#      missing-dimensions report; reasonable one-liner is NOT flagged.
 #
 # This script does NOT spin up the API server or a real LLM call. The five
 # B1 behaviors are all enforced inside the AgentTool boundary and are best
@@ -72,6 +75,7 @@ try {
       'src/tools/AgentTool/invocationLimiter.test.ts',
       'src/tools/AgentTool/specialistRouter.test.ts',
       'src/tools/AgentTool/agentStallDetector.test.ts',
+      'src/tools/AgentTool/taskSpecQuality.test.ts',
       'src/utils/modeAdvice.test.ts'
     )
     & bun test @tests
@@ -109,6 +113,10 @@ import {
   analyzeFirstMessageForMode,
   formatModeAdviceBanner,
 } from '../src/utils/modeAdvice.js'
+import {
+  assessTaskSpec,
+  formatThinSpecError,
+} from '../src/tools/AgentTool/taskSpecQuality.js'
 
 function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) {
@@ -217,6 +225,28 @@ function assert(cond: unknown, msg: string): asserts cond {
   // banner: null when active mode matches
   assert(formatModeAdviceBanner('coordinator', adv1) === null, 'banner null on match')
   console.log('5. mode advice: OK')
+}
+
+// 6. Task-spec quality (B2).
+{
+  const good = assessTaskSpec(
+    'Fix the null pointer in src/auth/validate.ts:42. Add a guard before user.id, run the auth tests, and report the result.',
+  )
+  assert(good.quality === 'well-specified', `full brief should be well-specified, got ${good.quality}`)
+
+  const thin = assessTaskSpec('fix it')
+  assert(thin.quality === 'underspecified', `"fix it" should be underspecified, got ${thin.quality}`)
+  const err = formatThinSpecError(thin, 'Agent')
+  assert(err.includes('Agent'), 'thin-spec error names the tool')
+  assert(
+    err.includes('CLAUDE_CODE_COORDINATOR_TASK_SPEC_STRICT'),
+    'thin-spec error names the opt-in flag',
+  )
+
+  // A reasonable one-liner must NOT be flagged (false-positive guard).
+  const ok = assessTaskSpec('Run the test suite and report which tests fail.')
+  assert(ok.quality !== 'underspecified', `reasonable one-liner should not be underspecified, got ${ok.quality}`)
+  console.log('6. task-spec quality: OK')
 }
 
 console.log('\nB1 end-to-end smoke: ALL PASS')
