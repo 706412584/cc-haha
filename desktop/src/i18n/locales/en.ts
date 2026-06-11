@@ -2107,6 +2107,10 @@ export const en = {
   'pluginPrereq.allInstalledToast': 'All prerequisites are now installed.',
   'pluginPrereq.noPlatformInstall': 'No automated install command for {platform}. See the homepage link above.',
   'pluginPrereq.safetyNote': 'cc-haha never runs install commands automatically. The "Open in terminal" button copies the command and opens a terminal — you press Enter to actually run it.',
+  'pluginPrereq.installAll': 'Install all ({count})',
+  'pluginPrereq.installAllTooltip': 'Open a new terminal tab and inject {count} install command(s) one at a time. You will see each command echo and run in the terminal — cc-haha never hides output.',
+  'pluginPrereq.installAllRunningToast': '{count} install command(s) injected into a new terminal tab. Watch them run, then click "Recheck" when done.',
+  'pluginPrereq.installAllFailedToast': 'Could not auto-install: {detail}. Try the per-command "Copy" / "Open in terminal" buttons instead.',
 } as const
 
 export type TranslationKey = keyof typeof en

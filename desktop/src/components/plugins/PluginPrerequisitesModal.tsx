@@ -5,6 +5,7 @@ import { useTranslation } from '../../i18n'
 import { useUIStore } from '../../stores/uiStore'
 import { useTabStore } from '../../stores/tabStore'
 import { copyTextToClipboard } from '../chat/clipboard'
+import { injectInstallScriptIntoNewTerminal } from '../../lib/terminalCommandInjection'
 import type {
   PluginPrerequisiteInstallStep,
   PluginPrerequisiteRow,
@@ -92,11 +93,34 @@ export function PluginPrerequisitesModal({
   // Optimistic copy-feedback state, keyed by `${rowIdx}:${stepIdx}`.
   // Reset on modal close so reopening the modal starts fresh.
   const [copiedKey, setCopiedKey] = useState<string | null>(null)
+  const [installAllRunning, setInstallAllRunning] = useState(false)
   useEffect(() => {
-    if (!open) setCopiedKey(null)
+    if (!open) {
+      setCopiedKey(null)
+      setInstallAllRunning(false)
+    }
   }, [open])
 
   const missingRows = rows.filter((r) => !r.installed)
+
+  // Build the "install all" command list for the current platform.
+  // Pick the FIRST install step per row — plugin authors put the most
+  // ergonomic option first (e.g. winget on Windows, brew on macOS).
+  // A row with no install step for this platform is silently dropped
+  // — the user still sees the row in the modal with the "no automated
+  // install for {platform}" hint.
+  const installAllCommands = useMemo(() => {
+    const cmds: string[] = []
+    for (const row of missingRows) {
+      const steps = row.install?.[platform] ?? []
+      if (steps.length > 0) {
+        cmds.push(steps[0]!.cmd)
+      }
+    }
+    return cmds
+  }, [missingRows, platform])
+
+  const canInstallAll = installAllCommands.length > 0
 
   const handleCopy = async (cmd: string, key: string) => {
     const ok = await copyTextToClipboard(cmd)
@@ -131,6 +155,30 @@ export function PluginPrerequisitesModal({
     })
   }
 
+  const handleInstallAll = async () => {
+    if (installAllRunning || !canInstallAll) return
+    setInstallAllRunning(true)
+    try {
+      const result = await injectInstallScriptIntoNewTerminal(installAllCommands)
+      addToast({
+        type: 'info',
+        message: t('pluginPrereq.installAllRunningToast', {
+          count: String(result.commands.length),
+        }),
+        duration: 8000,
+      })
+    } catch (err) {
+      addToast({
+        type: 'error',
+        message: t('pluginPrereq.installAllFailedToast', {
+          detail: err instanceof Error ? err.message : String(err),
+        }),
+      })
+    } finally {
+      setInstallAllRunning(false)
+    }
+  }
+
   return (
     <Modal
       open={open}
@@ -142,6 +190,23 @@ export function PluginPrerequisitesModal({
           <Button variant="ghost" size="sm" onClick={onClose}>
             {t('pluginPrereq.dismiss')}
           </Button>
+          {canInstallAll && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleInstallAll}
+              loading={installAllRunning}
+              data-testid="plugin-prereq-install-all"
+              title={t('pluginPrereq.installAllTooltip', {
+                count: String(installAllCommands.length),
+              })}
+            >
+              <span className="material-symbols-outlined text-[16px]">play_arrow</span>
+              {t('pluginPrereq.installAll', {
+                count: String(installAllCommands.length),
+              })}
+            </Button>
+          )}
           <Button size="sm" onClick={onRecheck} loading={isRechecking}>
             <span className="material-symbols-outlined text-[16px]">refresh</span>
             {t('pluginPrereq.recheck')}

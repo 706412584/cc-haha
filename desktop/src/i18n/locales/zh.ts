@@ -2082,4 +2082,8 @@ export const zh: Record<TranslationKey, string> = {
   'pluginPrereq.allInstalledToast': '所有前置依赖已就绪。',
   'pluginPrereq.noPlatformInstall': '当前平台 {platform} 没有现成的安装命令,请查看上方文档链接。',
   'pluginPrereq.safetyNote': 'cc-haha 不会自动执行任何安装命令。"在终端中打开"只把命令复制到剪贴板并新开一个终端 —— 你自己粘贴 + 回车才会真正执行。',
+  'pluginPrereq.installAll': '一键安装({count})',
+  'pluginPrereq.installAllTooltip': '新开一个终端 tab,把 {count} 条安装命令逐条注入并执行。你会在终端里看到每条命令回显和运行 —— cc-haha 不会隐藏任何输出。',
+  'pluginPrereq.installAllRunningToast': '已把 {count} 条安装命令注入到新终端 tab,看着它们跑完后点"重新检测"。',
+  'pluginPrereq.installAllFailedToast': '一键安装失败:{detail}。可以换用单条命令的"复制"/"在终端中打开"按钮。',
 }
