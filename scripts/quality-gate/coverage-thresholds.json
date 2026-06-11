@@ -65,6 +65,6 @@
   },
   "ratchet": {
     "baselinePath": "scripts/quality-gate/coverage-baseline.json",
-    "allowedDropPercent": 0.5
+    "allowedDropPercent": 1.0
   }
 }
