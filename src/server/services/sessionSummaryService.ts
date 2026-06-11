@@ -49,13 +49,20 @@ export type SessionSummary = {
    *  decided, what was tried, what's pending right now. */
   recent: string
   /**
-   * Raw (truncated) tail of the transcript — the LAST ~12 turns rendered
-   * as `USER: …` / `ASSISTANT: …` lines, each truncated to ~400 chars,
-   * total capped at ~8000 chars. Lets the next-session AI see the actual
+   * Raw (truncated) tail of the transcript — the LAST ~24 turns rendered
+   * as `USER: …` / `ASSISTANT: …` lines, each truncated to ~600 chars,
+   * total capped at ~16000 chars. Lets the next-session AI see the actual
    * recent wording (what the user literally just asked, what was actually
    * said about the failure mode) instead of relying solely on the LLM's
    * abstracted `recent` summary, which tends to lose proper nouns,
    * specific error messages, and the user's exact phrasing.
+   *
+   * Bumped from 12/400/8000 in v0.5.10: real-world handoffs were
+   * dropping the latest "what went wrong / what we tried" exchange
+   * because the previous tail covered ~6 user-AI pairs, which often
+   * predates the most recent debugging detour. The new defaults add
+   * ~2k tokens to the handoff system prompt — negligible against
+   * modern 200k+ context windows.
    *
    * Optional for backward compat: older cache files without this field
    * still load — `formatHandoffSystemPrompt` just omits the raw section.
@@ -73,14 +80,26 @@ const SUMMARY_FILE_SUFFIX = '.summary.json'
 
 /**
  * How many trailing turns (USER+ASSISTANT lines) to keep verbatim in the
- * `recentRaw` slice. 12 turns ≈ 6 user/AI exchange pairs, which is enough
- * to give the next-session AI a sense of "what the user just literally
- * said and what I just literally tried" without blowing system prompt
- * budget. Override with CLAUDE_CODE_HANDOFF_RAW_TURNS.
+ * `recentRaw` slice. 24 turns ≈ 12 user/AI exchange pairs, enough to
+ * cover the most recent debugging detour AND the prior context that
+ * usually frames it ("we tried A, then B failed because…, so I want to
+ * try C"). Bumped from 12 in v0.5.10 after handoffs kept losing the
+ * latest "what went wrong" beat. Override with
+ * CLAUDE_CODE_HANDOFF_RAW_TURNS (env cap 80).
  */
-const SUMMARY_RAW_TAIL_TURNS_DEFAULT = 12
-const SUMMARY_RAW_TAIL_CHARS_PER_TURN_DEFAULT = 400
-const SUMMARY_RAW_TAIL_TOTAL_CHARS_DEFAULT = 8_000
+const SUMMARY_RAW_TAIL_TURNS_DEFAULT = 24
+/**
+ * Per-turn char cap. 600 keeps a typical assistant code-explanation
+ * paragraph intact; below ~500 the tail block tends to clip just before
+ * the actionable verb ("so the next step is to…").
+ */
+const SUMMARY_RAW_TAIL_CHARS_PER_TURN_DEFAULT = 600
+/**
+ * Total cap on the raw block. ~16k chars ≈ 4k tokens — still ~1% of a
+ * 200k-window provider, but enough that a 24-turn × 600-char tail
+ * doesn't have to drop older turns on dense conversations.
+ */
+const SUMMARY_RAW_TAIL_TOTAL_CHARS_DEFAULT = 16_000
 
 function getOutputCap(): number {
   const raw = process.env.CLAUDE_CODE_HANDOFF_MAX_TOKENS
@@ -103,7 +122,7 @@ function getRawTailTurns(): number {
   if (!raw) return SUMMARY_RAW_TAIL_TURNS_DEFAULT
   const parsed = Number.parseInt(raw, 10)
   if (!Number.isFinite(parsed) || parsed < 0) return SUMMARY_RAW_TAIL_TURNS_DEFAULT
-  return Math.min(parsed, 50)
+  return Math.min(parsed, 80)
 }
 
 function getRawTailTotalChars(): number {
@@ -111,7 +130,7 @@ function getRawTailTotalChars(): number {
   if (!raw) return SUMMARY_RAW_TAIL_TOTAL_CHARS_DEFAULT
   const parsed = Number.parseInt(raw, 10)
   if (!Number.isFinite(parsed) || parsed < 500) return SUMMARY_RAW_TAIL_TOTAL_CHARS_DEFAULT
-  return Math.min(parsed, 30_000)
+  return Math.min(parsed, 50_000)
 }
 
 /** Truncate a single turn line preserving the role prefix. */
@@ -583,7 +602,7 @@ export function formatHandoffSystemPrompt(summary: SessionSummary): string {
 
 ## Most recent messages (verbatim, truncated)
 
-The block below is the literal tail of the previous conversation — the LLM-generated summary above abstracted these turns, but the raw wording matters when the user said something specific (a file path, an error message, a number) that an abstraction would smudge. Each turn is truncated to ~400 chars; older turns are dropped first.
+The block below is the literal tail of the previous conversation — the LLM-generated summary above abstracted these turns, but the raw wording matters when the user said something specific (a file path, an error message, a number) that an abstraction would smudge. Each turn is truncated to ~600 chars; older turns are dropped first.
 
 \`\`\`
 ${summary.recentRaw}

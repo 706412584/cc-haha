@@ -93,12 +93,17 @@ describe('buildRecentRawSlice', () => {
 
   it('truncates a long single turn and preserves the role prefix', () => {
     process.env.CLAUDE_CODE_HANDOFF_RAW_TURNS = '1'
+    delete process.env.CLAUDE_CODE_HANDOFF_RAW_CHARS
     const longBody = 'x'.repeat(5_000)
     const out = _buildRecentRawSliceForTest([`USER: ${longBody}`])
+
     expect(out.startsWith('USER: ')).toBe(true)
-    // Per-turn cap is 400 chars in the implementation. After cap we expect
-    // an ellipsis, and the body should be much shorter than the input.
-    expect(out.length).toBeLessThan(500)
+    // Per-turn cap is 600 chars in the implementation (bumped from 400 in
+    // v0.5.10 so dense assistant explanations don't clip mid-thought).
+    // After cap we expect an ellipsis, and the body should be much shorter
+    // than the input.
+    expect(out.length).toBeLessThan(700)
+    expect(out.length).toBeGreaterThan(400)
     expect(out.endsWith('…')).toBe(true)
   })
 
@@ -124,5 +129,30 @@ describe('buildRecentRawSlice', () => {
     expect(_buildRecentRawSliceForTest([])).toBe('')
     process.env.CLAUDE_CODE_HANDOFF_RAW_TURNS = '0'
     expect(_buildRecentRawSliceForTest(['USER: x', 'ASSISTANT: y'])).toBe('')
+  })
+
+  it('keeps the v0.5.10 defaults: 24 turns × 600 chars (≈ doubled vs v0.5.9)', () => {
+    // Locks the bumped defaults so future agents who edit
+    // SUMMARY_RAW_TAIL_*_DEFAULT have to also touch this test, making
+    // the change deliberate. The v0.5.9 tail was 12 turns / 400 chars /
+    // 8000 total — handoffs kept losing the "what went wrong" beat
+    // because 12 turns covers ~6 user-AI pairs and the latest debugging
+    // detour usually pushes the prior context out of frame.
+    delete process.env.CLAUDE_CODE_HANDOFF_RAW_TURNS
+    delete process.env.CLAUDE_CODE_HANDOFF_RAW_CHARS
+    const turns: string[] = []
+    for (let i = 0; i < 30; i++) {
+      turns.push(`USER: msg-${i}`)
+      turns.push(`ASSISTANT: reply-${i}`)
+    }
+    const out = _buildRecentRawSliceForTest(turns)
+    // 24 trailing turns kept → starts at index 60 - 24 = 36.
+    // turns[36] = 'ASSISTANT: reply-18', so 'msg-17' / 'reply-17' must drop.
+    expect(out).not.toContain('msg-17')
+    expect(out).not.toContain('reply-17')
+    expect(out).toContain('msg-29')
+    expect(out).toContain('reply-29')
+    // 24 lines × short bodies stays well under the 16k total cap.
+    expect(out.length).toBeLessThan(16_000)
   })
 })
