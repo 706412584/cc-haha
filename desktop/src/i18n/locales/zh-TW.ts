@@ -2082,4 +2082,8 @@ export const zh: Record<TranslationKey, string> = {
   'pluginPrereq.allInstalledToast': '所有前置相依套件皆已就緒。',
   'pluginPrereq.noPlatformInstall': '目前平台 {platform} 沒有現成的安裝指令，請查看上方文件連結。',
   'pluginPrereq.safetyNote': 'cc-haha 永遠不會自動執行安裝指令。「在終端機中開啟」只會把指令複製到剪貼簿並開啟新終端機 —— 你自己貼上 + 按 Enter 才會真正執行。',
+  'pluginPrereq.installAll': '一鍵安裝（{count}）',
+  'pluginPrereq.installAllTooltip': '開啟新終端機分頁，將 {count} 條安裝指令逐條注入並執行。你會在終端機裡看到每條指令回顯和執行 —— cc-haha 不會隱藏任何輸出。',
+  'pluginPrereq.installAllRunningToast': '已將 {count} 條安裝指令注入新終端機分頁，看著它們跑完後點「重新偵測」。',
+  'pluginPrereq.installAllFailedToast': '一鍵安裝失敗：{detail}。可改用單條指令的「複製」/「在終端機中開啟」按鈕。',
 }
