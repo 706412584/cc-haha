@@ -4,6 +4,8 @@ import { useSessionStore } from '../../stores/sessionStore'
 import { useUIStore } from '../../stores/uiStore'
 import { useTranslation, type TranslationKey } from '../../i18n'
 import { ConfirmDialog } from '../shared/ConfirmDialog'
+import { Skeleton } from '../shared/Skeleton'
+import { Tooltip } from '../shared/Tooltip'
 import type { SessionListItem } from '../../types/session'
 import { useTabStore, SETTINGS_TAB_ID, SCHEDULED_TAB_ID } from '../../stores/tabStore'
 import { useChatStore } from '../../stores/chatStore'
@@ -655,22 +657,24 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
       </div>
 
       <div className={`px-3 pb-3 flex flex-col ${expanded ? 'gap-0.5' : 'items-center gap-2'}`}>
-        <NavItem
-          active={false}
-          collapsed={!expanded}
-          label={t('sidebar.newSession')}
-          touchFriendly={isMobile}
-          onClick={() => {
-            const currentTabId = useTabStore.getState().activeTabId
-            const currentSession = currentTabId
-              ? useSessionStore.getState().sessions.find((s) => s.id === currentTabId)
-              : null
-            void createSessionForWorkDir(currentSession?.workDir || currentSession?.projectRoot || undefined)
-          }}
-          icon={<PlusIcon />}
-        >
-          {t('sidebar.newSession')}
-        </NavItem>
+        <Tooltip content={t('sidebar.newSession')} shortcut="⌘N">
+          <NavItem
+            active={false}
+            collapsed={!expanded}
+            label={t('sidebar.newSession')}
+            touchFriendly={isMobile}
+            onClick={() => {
+              const currentTabId = useTabStore.getState().activeTabId
+              const currentSession = currentTabId
+                ? useSessionStore.getState().sessions.find((s) => s.id === currentTabId)
+                : null
+              void createSessionForWorkDir(currentSession?.workDir || currentSession?.projectRoot || undefined)
+            }}
+            icon={<PlusIcon />}
+          >
+            {t('sidebar.newSession')}
+          </NavItem>
+        </Tooltip>
         {!isMobile && (
           <NavItem
             active={activeTabId === SCHEDULED_TAB_ID}
@@ -799,8 +803,13 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                 </div>
               )}
               {showInitialLoading ? (
-                <div className="px-3 py-4 text-center text-xs text-[var(--color-text-tertiary)]">
-                  {t('common.loading')}
+                <div className="px-1 py-2 space-y-1">
+                  {Array.from({ length: 6 }, (_, i) => (
+                    <div key={i} className="flex items-center gap-2.5 rounded-lg px-2.5 py-2">
+                      <Skeleton variant="rect" width={18} height={18} className="shrink-0" />
+                      <Skeleton variant="text" height={13} className="flex-1" />
+                    </div>
+                  ))}
                 </div>
               ) : filteredSessions.length === 0 && (
                 <div className="px-3 py-4 text-center text-xs text-[var(--color-text-tertiary)]">
