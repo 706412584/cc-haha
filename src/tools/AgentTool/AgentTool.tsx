@@ -49,7 +49,7 @@ import { setAgentColor } from './agentColorManager.js';
 import { agentToolResultSchema, classifyHandoffIfNeeded, emitTaskProgress, extractPartialResult, finalizeAgentTool, getLastToolUseName, runAsyncAgentLifecycle } from './agentToolUtils.js';
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js';
 import { AGENT_TOOL_NAME, LEGACY_AGENT_TOOL_NAME, ONE_SHOT_BUILTIN_AGENT_TYPES } from './constants.js';
-import { buildForkedMessages, buildWorktreeNotice, FORK_AGENT, isForkSubagentEnabled, isInForkChild } from './forkSubagent.js';
+import { buildForkedMessages, buildWorktreeNotice, COORDINATOR_RESEARCH_FORK_SUBAGENT_TYPE, FORK_AGENT, type ForkMode, isCoordinatorResearchForkEnabled, isForkSubagentEnabled, isInForkChild } from './forkSubagent.js';
 import { formatLimitExceededMessage, formatNearLimitWarning, isLimiterDisabled, noteInvocation } from './invocationLimiter.js';
 import {
   detectLazyDelegation,
@@ -463,7 +463,15 @@ export const AgentTool = buildTool({
     }
 
     const effectiveType = subagent_type ?? (isForkSubagentEnabled() ? undefined : GENERAL_PURPOSE_AGENT.agentType);
-    const isForkPath = effectiveType === undefined;
+    // Coordinator-research-fork: an explicit `subagent_type: 'fork'` in
+    // coordinator mode (with the opt-in env flag) routes through the same
+    // fork path as an omitted subagent_type. The boilerplate framing tag
+    // is unchanged so isInForkChild's recursive-fork guard still fires.
+    const isCoordinatorResearchFork =
+      subagent_type === COORDINATOR_RESEARCH_FORK_SUBAGENT_TYPE &&
+      isCoordinatorResearchForkEnabled();
+    const isForkPath = effectiveType === undefined || isCoordinatorResearchFork;
+    const forkMode: ForkMode = isCoordinatorResearchFork ? 'coordinator-research' : 'normal';
     let selectedAgent: AgentDefinition;
     if (isForkPath) {
       // Recursive fork guard: fork children keep the Agent tool in their
@@ -696,7 +704,7 @@ export const AgentTool = buildTool({
           appendSystemPrompt: toolUseContext.options.appendSystemPrompt
         });
       }
-      promptMessages = buildForkedMessages(prompt, assistantMessage);
+      promptMessages = buildForkedMessages(prompt, assistantMessage, forkMode);
     } else {
       try {
         const additionalWorkingDirectories = Array.from(appState.toolPermissionContext.additionalWorkingDirectories.keys());

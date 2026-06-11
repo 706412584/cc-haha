@@ -26,6 +26,10 @@ describe('invocationLimiter', () => {
     expect(getLimitFor('verification')).toBe(5)
   })
 
+  test('default cap for fork is 10', () => {
+    expect(getLimitFor('fork')).toBe(10)
+  })
+
   test('default cap for unknown specialist is 8', () => {
     expect(getLimitFor('code-reviewer')).toBe(8)
     expect(getLimitFor('debugger')).toBe(8)

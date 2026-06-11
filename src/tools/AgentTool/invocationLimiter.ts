@@ -31,10 +31,16 @@ const FALLBACK_LIMIT = 8
 /**
  * Per-agent default caps. Tighter for `verification` because the
  * verifier-loop pattern is the primary failure mode this gate exists
- * to catch. Anything not listed falls back to FALLBACK_LIMIT.
+ * to catch. `fork` is also tightened (vs FALLBACK_LIMIT) because a
+ * coordinator-research-fork-on session that fails to converge could
+ * burn through dozens of cache-shared forks before the budget runs out;
+ * 10 is generous for legitimate parallel research while making
+ * pathological loops obvious. Anything not listed falls back to
+ * FALLBACK_LIMIT.
  */
 const DEFAULT_LIMITS: Readonly<Record<string, number>> = {
   verification: 5,
+  fork: 10,
 }
 
 function envLimitFor(agentType: string): number | undefined {

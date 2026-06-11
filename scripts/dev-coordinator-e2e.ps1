@@ -24,6 +24,11 @@
 #      surfaced as a continuation candidate; type mismatch and
 #      file-free prompts are not flagged; error message contract
 #      preserved (agentId, SendMessage, env flag named).
+#   8. Coordinator research fork (forkSubagent, B4)
+#      Coord-research mode injects the read-only research rule into the
+#      fork boilerplate while keeping the framing tag intact so the
+#      recursive-fork guard still fires; subagent_type constant matches
+#      the literal "fork" callers spell.
 #
 # This script does NOT spin up the API server or a real LLM call. The five
 # B1 behaviors are all enforced inside the AgentTool boundary and are best
@@ -82,6 +87,7 @@ try {
       'src/tools/AgentTool/agentStallDetector.test.ts',
       'src/tools/AgentTool/taskSpecQuality.test.ts',
       'src/tools/AgentTool/workerContinueAdvisor.test.ts',
+      'src/tools/AgentTool/forkSubagent.test.ts',
       'src/utils/modeAdvice.test.ts'
     )
     & bun test @tests
@@ -128,6 +134,12 @@ import {
   formatContinueHintError,
   type ContinueCandidateTask,
 } from '../src/tools/AgentTool/workerContinueAdvisor.js'
+import {
+  buildChildMessage,
+  COORDINATOR_RESEARCH_FORK_SUBAGENT_TYPE,
+  isCoordinatorResearchForkEnabled,
+  isInForkChild,
+} from '../src/tools/AgentTool/forkSubagent.js'
 
 function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) {
@@ -317,6 +329,55 @@ function assert(cond: unknown, msg: string): asserts cond {
   assert(err.includes('SendMessage'), 'error names SendMessage tool')
   assert(err.includes('CLAUDE_CODE_COORDINATOR_CONTINUE_HINT'), 'error names env flag')
   console.log('7. worker-continue advisor: OK')
+}
+
+// 8. Coordinator research fork (B4).
+{
+  // Subagent type the coordinator spells.
+  assert(
+    COORDINATOR_RESEARCH_FORK_SUBAGENT_TYPE === 'fork',
+    `coord research fork type should be 'fork', got ${COORDINATOR_RESEARCH_FORK_SUBAGENT_TYPE}`,
+  )
+
+  // Default mode boilerplate has 10 rules, no research-only rule.
+  const normal = buildChildMessage('directive')
+  assert(normal.includes('10. REPORT'), 'default boilerplate has rule 10')
+  assert(!normal.includes('11.'), 'default boilerplate has no rule 11')
+  assert(!normal.includes('RESEARCH FORK'), 'default boilerplate has no RESEARCH FORK marker')
+
+  // Coordinator-research mode adds rule 11 about read-only investigation.
+  const research = buildChildMessage('investigate src/auth', 'coordinator-research')
+  assert(research.includes('11. RESEARCH FORK'), 'research mode adds rule 11')
+  assert(research.includes('Do NOT modify files'), 'research mode forbids modifications')
+
+  // Recursive-fork guard fires for both modes (boilerplate framing tag preserved).
+  const wrap = (text) => [{ type: 'user', message: { content: [{ type: 'text', text }] } }]
+  assert(isInForkChild(wrap(normal)), 'guard catches normal fork child')
+  assert(isInForkChild(wrap(research)), 'guard catches coord-research fork child')
+  assert(!isInForkChild(wrap('plain user prompt with no fork tag')), 'guard ignores plain user text')
+
+  // Env flag gate: requires both coord mode AND the opt-in flag.
+  const prevCoord = process.env.CLAUDE_CODE_COORDINATOR_MODE
+  const prevFlag = process.env.CLAUDE_CODE_COORDINATOR_RESEARCH_FORK
+  try {
+    delete process.env.CLAUDE_CODE_COORDINATOR_MODE
+    process.env.CLAUDE_CODE_COORDINATOR_RESEARCH_FORK = '1'
+    assert(!isCoordinatorResearchForkEnabled(), 'gate off without coord mode')
+
+    process.env.CLAUDE_CODE_COORDINATOR_MODE = '1'
+    delete process.env.CLAUDE_CODE_COORDINATOR_RESEARCH_FORK
+    assert(!isCoordinatorResearchForkEnabled(), 'gate off without env flag')
+
+    process.env.CLAUDE_CODE_COORDINATOR_MODE = '1'
+    process.env.CLAUDE_CODE_COORDINATOR_RESEARCH_FORK = 'true'
+    assert(!isCoordinatorResearchForkEnabled(), 'gate requires exact "1"')
+  } finally {
+    if (prevCoord === undefined) delete process.env.CLAUDE_CODE_COORDINATOR_MODE
+    else process.env.CLAUDE_CODE_COORDINATOR_MODE = prevCoord
+    if (prevFlag === undefined) delete process.env.CLAUDE_CODE_COORDINATOR_RESEARCH_FORK
+    else process.env.CLAUDE_CODE_COORDINATOR_RESEARCH_FORK = prevFlag
+  }
+  console.log('8. coordinator research fork: OK')
 }
 
 console.log('\nB1 end-to-end smoke: ALL PASS')
