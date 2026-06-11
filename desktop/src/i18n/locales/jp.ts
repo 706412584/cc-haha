@@ -2064,4 +2064,22 @@ export const jp: Record<TranslationKey, string> = {
   'tabs.hideWorkspace': 'ワークスペースを非表示',
   'tabs.showBrowser': 'ブラウザを表示',
   'tabs.hideBrowser': 'ブラウザを非表示',
+
+  // ─── プラグイン前提条件モーダル ─────────────────────────────────────
+  'pluginPrereq.title': '{name} に必要な前提条件が不足しています',
+  'pluginPrereq.intro': 'このプラグインが必要とするホストコマンドの一部が PATH に存在しません（{count} 件不足）。インストール後に「インストール済み、再チェック」をクリックしてください。',
+  'pluginPrereq.affectedServers': '影響を受ける server: {servers}',
+  'pluginPrereq.homepageLink': 'ドキュメント ↗',
+  'pluginPrereq.copy': 'コピー',
+  'pluginPrereq.copied': 'コピーしました',
+  'pluginPrereq.copyTooltip': 'コマンドをクリップボードへコピー',
+  'pluginPrereq.openInTerminal': 'ターミナルで開く',
+  'pluginPrereq.openInTerminalTooltip': '新しいターミナルタブを開き、コマンドをクリップボードに置きます。右クリックまたは Ctrl+Shift+V で貼り付け、Enter で実行します。',
+  'pluginPrereq.openedTerminalToast': '新しいターミナルタブを開きました。コマンドはクリップボードにあります。貼り付けて Enter を押すと実行されます。',
+  'pluginPrereq.copyFailed': 'クリップボードへのコピーに失敗しました',
+  'pluginPrereq.recheck': 'インストール済み、再チェック',
+  'pluginPrereq.dismiss': '後で',
+  'pluginPrereq.allInstalledToast': 'すべての前提条件が揃いました。',
+  'pluginPrereq.noPlatformInstall': '現在のプラットフォーム {platform} 用の自動インストールコマンドはありません。上記のドキュメントリンクをご確認ください。',
+  'pluginPrereq.safetyNote': 'cc-haha がインストールコマンドを自動実行することはありません。「ターミナルで開く」はコマンドをクリップボードにコピーしてターミナルを開くだけで、貼り付けと Enter を押すのは利用者の操作です。',
 }

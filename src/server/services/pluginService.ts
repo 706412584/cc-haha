@@ -1,6 +1,8 @@
 import { basename, join, sep } from 'node:path'
 import { getBuiltinPluginDefinition } from '../../plugins/builtinPlugins.js'
 import type { McpServerConfig } from '../../services/mcp/types.js'
+import type { McpPrerequisite } from '../../services/mcp/types.js'
+import { probeHostCommands } from './prerequisitesService.js'
 import {
   disablePluginOp,
   enablePluginOp,
@@ -104,6 +106,35 @@ export type ApiPluginMcpServerEntry = {
   displayName?: string
   transport: string
   summary: string
+  /**
+   * The raw McpServerConfig parsed from the plugin's mcp servers
+   * source. Carried so prerequisites checking can read declared
+   * `prerequisites` without re-parsing the file. Internal — desktop
+   * does not need this; serialize-friendly only insofar as zod's
+   * inferred McpServerConfig is JSON-friendly.
+   */
+  rawConfig?: McpServerConfig
+}
+
+/**
+ * Per-prerequisite probe result for a plugin enable / recheck flow.
+ * One row per *unique command name*, deduped across the plugin's
+ * MCP servers (e.g. `uvx` referenced by 5 servers becomes a single
+ * row with a 5-server affectedServers list).
+ */
+export type ApiPluginPrerequisiteRow = {
+  command: string
+  label?: string
+  homepage?: string
+  installed: boolean
+  resolvedPath: string | null
+  install?: McpPrerequisite['install']
+  affectedServers: Array<{ name: string; displayName?: string }>
+}
+
+export type ApiPluginPrerequisitesResponse = {
+  pluginId: string
+  prerequisites: ApiPluginPrerequisiteRow[]
 }
 
 export type ApiPluginDetail = ApiPluginSummary & {
@@ -186,6 +217,109 @@ export class PluginService {
     }
 
     return detail
+  }
+
+  /**
+   * Probe whether the plugin's MCP servers' declared `prerequisites`
+   * commands resolve in PATH on this host. Returns the per-server
+   * breakdown so the desktop can show "missing dep X affects servers
+   * Y, Z" with an install affordance. Best-effort — never throws on
+   * probe errors.
+   *
+   * Plugin authors declare prerequisites in `mcp/servers.json` (see
+   * `McpPrerequisiteSchema`). When a plugin has no prerequisites
+   * declared (or no MCP servers at all), this returns an empty
+   * structure and the desktop modal is skipped.
+   */
+  async checkPluginPrerequisites(
+    pluginId: string,
+    cwd?: string,
+  ): Promise<ApiPluginPrerequisitesResponse> {
+    const { detailById } = await this.collectPluginState(cwd)
+    const detail = detailById.get(pluginId)
+    if (!detail) {
+      throw ApiError.notFound(`Plugin not found: ${pluginId}`)
+    }
+
+    // Collect every (serverName, prerequisite) pair declared by this
+    // plugin's stdio MCP servers. We only inspect stdio servers
+    // because http / sse / ws servers don't spawn host commands —
+    // their prerequisites field, if present, would be ignored anyway.
+    const declarations: Array<{
+      serverName: string
+      serverDisplayName?: string
+      prerequisite: McpPrerequisite
+    }> = []
+
+    for (const entry of detail.mcpServerEntries) {
+      const cfg = entry.rawConfig
+      if (!cfg) continue
+      if (cfg.type && cfg.type !== 'stdio') continue
+      const prereqs = (cfg as { prerequisites?: McpPrerequisite[] })
+        .prerequisites
+      if (!Array.isArray(prereqs) || prereqs.length === 0) continue
+      for (const prereq of prereqs) {
+        declarations.push({
+          serverName: entry.name,
+          ...(entry.displayName ? { serverDisplayName: entry.displayName } : {}),
+          prerequisite: prereq,
+        })
+      }
+    }
+
+    if (declarations.length === 0) {
+      return { pluginId, prerequisites: [] }
+    }
+
+    const probeResults = await probeHostCommands(
+      declarations.map((d) => d.prerequisite.command),
+    )
+
+    // Group by command so the desktop can render "uvx is missing —
+    // affects: apktool, jadx, frida, lldb" instead of 4 separate
+    // rows for the same uvx.
+    const byCommand = new Map<string, ApiPluginPrerequisiteRow>()
+
+    for (const decl of declarations) {
+      const probe = probeResults.get(decl.prerequisite.command.trim())
+      const existing = byCommand.get(decl.prerequisite.command)
+      if (existing) {
+        if (!existing.affectedServers.some((s) => s.name === decl.serverName)) {
+          existing.affectedServers.push({
+            name: decl.serverName,
+            ...(decl.serverDisplayName
+              ? { displayName: decl.serverDisplayName }
+              : {}),
+          })
+        }
+        continue
+      }
+      byCommand.set(decl.prerequisite.command, {
+        command: decl.prerequisite.command,
+        ...(decl.prerequisite.label ? { label: decl.prerequisite.label } : {}),
+        ...(decl.prerequisite.homepage
+          ? { homepage: decl.prerequisite.homepage }
+          : {}),
+        installed: probe?.installed ?? false,
+        resolvedPath: probe?.resolvedPath ?? null,
+        ...(decl.prerequisite.install
+          ? { install: decl.prerequisite.install }
+          : {}),
+        affectedServers: [
+          {
+            name: decl.serverName,
+            ...(decl.serverDisplayName
+              ? { displayName: decl.serverDisplayName }
+              : {}),
+          },
+        ],
+      })
+    }
+
+    return {
+      pluginId,
+      prerequisites: [...byCommand.values()],
+    }
   }
 
   async enablePlugin(
@@ -527,6 +661,7 @@ export class PluginService {
         displayName: serverName,
         transport: this.getPluginMcpTransport(config),
         summary: this.getPluginMcpSummary(config),
+        rawConfig: config,
       }))
 
       return {
@@ -760,6 +895,7 @@ export class PluginService {
         displayName: name,
         transport: this.getPluginMcpTransport(config),
         summary: this.getPluginMcpSummary(config),
+        rawConfig: config,
       }))
       .sort((a, b) => a.name.localeCompare(b.name))
   }
