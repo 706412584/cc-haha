@@ -23,7 +23,7 @@ export type ClientMessage =
   | { type: 'set_permission_mode'; mode: PermissionMode }
   | ({ type: 'set_runtime_config' } & RuntimeSelection)
   | { type: 'set_coordinator_mode'; enabled: boolean }
-  | { type: 'set_handoff_summary'; previousSessionId: string }
+  | { type: 'set_handoff_summary'; previousSessionId: string; deep?: boolean }
   | { type: 'stop_generation' }
   | { type: 'ping' }
 

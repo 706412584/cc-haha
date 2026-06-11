@@ -18,6 +18,7 @@ import { sessionService } from '../services/sessionService.js'
 import {
   formatHandoffSystemPrompt,
   getCachedSessionSummary,
+  rebuildRecentRawForHandoff,
 } from '../services/sessionSummaryService.js'
 import { SettingsService } from '../services/settingsService.js'
 import { ProviderService } from '../services/providerService.js'
@@ -755,7 +756,18 @@ async function handleSetHandoffSummary(
   try {
     const summary = await getCachedSessionSummary(previousSessionId)
     if (summary) {
-      summaryText = formatHandoffSystemPrompt(summary)
+      // Deep handoff: rebuild the verbatim tail with enlarged sizing
+      // (~12k tokens vs ~4k default) from the live JSONL. Keeps the
+      // cached LLM-generated main/recent so there's no extra LLM cost —
+      // we only enlarge the verbatim slice, which is pure text slicing.
+      let formattedSummary = summary
+      if (message.deep === true) {
+        const deepRaw = await rebuildRecentRawForHandoff(previousSessionId)
+        if (deepRaw) {
+          formattedSummary = { ...summary, recentRaw: deepRaw }
+        }
+      }
+      summaryText = formatHandoffSystemPrompt(formattedSummary)
     } else {
       console.warn(
         `[WS] Hand-off staging: no cached summary for ${previousSessionId}; ` +
