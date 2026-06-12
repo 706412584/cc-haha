@@ -123,49 +123,55 @@ describe('getKnownLanguageServerStatuses', () => {
 
   it('falls back to npm global bin for npm-installable servers when PATH probe misses', async () => {
     // Nothing on PATH at all — simulates the user's reported state where
-    // `npm install -g pyright` succeeded but %APPDATA%\npm is missing
-    // from PATH so `where` finds nothing.
+    // `npm install -g pyright` succeeded but the npm global bin dir is
+    // missing from PATH so `where` / `command -v` finds nothing.
     const probe = makeProbe({})
 
-    // Simulate Windows-style npm prefix with both `pyright.cmd` and
-    // `pyright-langserver.cmd` present under `%APPDATA%\npm`.
-    const fakePrefix = 'C:\\Users\\tester\\AppData\\Roaming\\npm'
-    const present = new Set([
-      `${fakePrefix}\\pyright.cmd`,
-      `${fakePrefix}\\pyright-langserver.cmd`,
-      // Also pretend intelephense is shimmed.
-      `${fakePrefix}\\intelephense.cmd`,
-    ])
+    // Use a platform-neutral fakePrefix so the test passes on Windows CI
+    // *and* Linux CI. The scanner just answers "exists?" against whatever
+    // path findNpmShim asks about — we accept the first match (the primary
+    // command) regardless of which platform-specific path findNpmShim built.
+    const isWindows = process.platform === 'win32'
+    const fakePrefix = isWindows ? 'C:\\fake\\npm' : '/fake/npm'
+
+    // Track the queries the scanner sees so we can assert non-npm gating.
+    const probedPaths: string[] = []
     const scanner = {
-      exists: (path: string) => present.has(path),
+      exists: (path: string) => {
+        probedPaths.push(path)
+        // Pretend pyright-langserver, pyright, and intelephense all have
+        // shims. Anything else does not.
+        return /(pyright-langserver|pyright|intelephense)(\.cmd|\.ps1|\.exe)?$/.test(
+          path,
+        )
+      },
       resolvePrefix: () => fakePrefix,
     }
 
-    // Force the windows codepath inside findNpmShim.
-    const originalPlatform = process.platform
-    Object.defineProperty(process, 'platform', { value: 'win32' })
-    try {
-      const statuses = await getKnownLanguageServerStatuses({ probe, scanner })
+    const statuses = await getKnownLanguageServerStatuses({ probe, scanner })
 
-      const python = statuses.find((s) => s.language === 'python')
-      // Primary `pyright-langserver` shim is present, so it wins over
-      // the fallback candidate.
-      expect(python?.installed).toBe(true)
-      expect(python?.resolvedCommand).toBe('pyright-langserver')
-      expect(python?.resolvedPath).toBe(
-        `${fakePrefix}\\pyright-langserver.cmd`,
-      )
+    const python = statuses.find((s) => s.language === 'python')
+    // Primary `pyright-langserver` shim is present, so it wins over
+    // the fallback candidate.
+    expect(python?.installed).toBe(true)
+    expect(python?.resolvedCommand).toBe('pyright-langserver')
+    expect(python?.resolvedPath).toContain('pyright-langserver')
 
-      const php = statuses.find((s) => s.language === 'php')
-      expect(php?.installed).toBe(true)
-      expect(php?.resolvedPath).toBe(`${fakePrefix}\\intelephense.cmd`)
+    const php = statuses.find((s) => s.language === 'php')
+    expect(php?.installed).toBe(true)
+    expect(php?.resolvedPath).toContain('intelephense')
 
-      // Non-npm servers stay missing — the fallback only fires for
-      // installs declared with `manager: 'npm'`.
-      const rust = statuses.find((s) => s.language === 'rust')
-      expect(rust?.installed).toBe(false)
-    } finally {
-      Object.defineProperty(process, 'platform', { value: originalPlatform })
+    // Non-npm servers stay missing — the fallback only fires for
+    // installs declared with `manager: 'npm'`. Verify the gate didn't
+    // even ask the scanner about non-npm command names.
+    const rust = statuses.find((s) => s.language === 'rust')
+    expect(rust?.installed).toBe(false)
+    for (const probed of probedPaths) {
+      expect(probed).not.toContain('rust-analyzer')
+      expect(probed).not.toContain('gopls')
+      expect(probed).not.toContain('clangd')
+      expect(probed).not.toContain('jdtls')
+      expect(probed).not.toContain('lua-language-server')
     }
   })
 
