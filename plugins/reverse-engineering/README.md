@@ -11,7 +11,7 @@ slash commands.
 | Surface | Item |
 |---|---|
 | Agent | `reverse-engineer` — orchestrates triage → static → optional dynamic → report |
-| Skills | `triage`, `pe-elf-macho`, `firmware-blob`, `apk-analysis`, `ios-analysis`, `dynamic-debug-overview`, `frida-dynamic`, `gdb-debug`, `lldb-debug`, `crackme-keygen`, `re-report` |
+| Skills | `triage`, `pe-elf-macho`, `firmware-blob`, `apk-analysis`, **`apk-hardening`** (new in 0.4.6), `ios-analysis`, `dynamic-debug-overview`, `frida-dynamic`, `gdb-debug`, `lldb-debug`, `crackme-keygen`, `re-report` |
 | Commands | `/reverse-engineering:triage <path>`, `/reverse-engineering:report <sample-id>` |
 | MCP servers | `ghidra` (pyghidra-mcp), `gdb` (mcp-gdb), `frida` (frida-mcp on PyPI) — verified end-to-end as of v0.4.5 |
 | Hooks | placeholder (add a fileCreated hook locally if you want SOC-style auto-triage) |
@@ -250,6 +250,68 @@ To use these locally without waiting for upstream:
 
 If a packaged alternative shows up on PyPI / npm, please open an issue
 and we'll re-add the server to `mcp/servers.json`.
+
+## External CLI tools (Bash-driven, not MCP)
+
+Several skills reach for command-line tools that **aren't** wrapped as MCP
+servers — either because they're already mature and stable as CLIs (jadx,
+apktool, lldb), or because their value is one-shot identification rather
+than long-running structured tool surface (APKiD), or because their
+upstream MCP packaging is currently broken.
+
+These are user-installed prerequisites — cc-haha never auto-runs the install
+commands. Install once and the agent skills work via Bash.
+
+### Static analysis CLI tools
+
+| Tool | Used by skill | Install (Win) | Install (mac) | Install (linux) |
+|---|---|---|---|---|
+| **jadx** | `apk-analysis` | `scoop install jadx` | `brew install jadx` | `apt install jadx` / `snap install jadx` |
+| **apktool** | `apk-analysis` | `scoop install apktool` | `brew install apktool` | `apt install apktool` / `snap install apktool` |
+| **APKiD** | `triage`, `apk-hardening` | `pipx install apkid` | `pipx install apkid` | `pipx install apkid` |
+| **lldb** | `lldb-debug` | LLVM installer (winget / scoop) | `xcode-select --install` (built-in) | `apt install lldb` / `dnf install lldb` |
+| **java** (JDK 17+) | jadx + apktool | `winget install EclipseAdoptium.Temurin.17.JDK` | `brew install --cask temurin@17` | `apt install openjdk-17-jdk` |
+
+### Dynamic / unpacking CLI tools (for hardened APKs)
+
+The `apk-hardening` and `frida-dynamic` skills walk the agent through
+the workflows below; the tools are user-installed once.
+
+| Tool | Used by skill | Purpose | Install |
+|---|---|---|---|
+| **objection** | `frida-dynamic` (anti-anti-frida prep) | Anti-root + SSL-pinning bypasses, frida-gadget injection on unrooted devices | `pipx install objection` |
+| **frida_dump (lasting-yang)** | `apk-hardening` | Memory-scan dex unpacker for class-extraction shells | `git clone https://github.com/lasting-yang/frida_dump` (Python script, no install) |
+| **FART** | `apk-hardening` | Full ART-runtime dex dumper for class-call-recompile shells | Pre-built ROM image; out-of-band setup, see [`hanbinglengyue/FART`](https://github.com/hanbinglengyue/FART) |
+| **Unidbg** | `apk-hardening` | Java-based Android native lib emulator (offline SO decryption, key recovery) | `git clone https://github.com/zhkl0228/unidbg && ./gradlew build` |
+| **Blutter** | `apk-hardening` (Flutter) | Flutter Dart AOT snapshot reverse engineering | `git clone https://github.com/worawit/blutter && ./scripts/build.sh` |
+
+The agent picks the right tool from the routing matrix in `apk-hardening/SKILL.md`
+based on what APKiD / manual signatures identify as the packer family.
+
+### Quick-install for a typical Android RE workflow
+
+If you'll be doing Android RE often, install the static + bypass chunk in one go:
+
+```pwsh
+# Windows (PowerShell — needs scoop + pipx already set up)
+scoop install jadx apktool gdb
+pipx install apkid objection
+winget install EclipseAdoptium.Temurin.17.JDK
+
+# macOS
+brew install jadx apktool gdb
+pipx install apkid objection
+brew install --cask temurin@17
+
+# Linux (Debian / Ubuntu)
+sudo apt install -y jadx apktool gdb gdb-multiarch lldb openjdk-17-jdk
+pipx install apkid objection
+```
+
+Once those are on PATH, `apk-analysis` and `apk-hardening` work end-to-end
+on non-hardened APKs and on common class-extraction shells. For tougher
+unpacking (FART / Unidbg / Blutter) follow the per-tool clone-and-build
+steps when the agent reaches that branch in the hardening routing matrix.
 
 ## User-config knobs
 

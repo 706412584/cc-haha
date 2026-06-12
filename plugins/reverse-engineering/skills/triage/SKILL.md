@@ -75,6 +75,22 @@ which upx && upx -t "$SAMPLE" || true
 strings "$SAMPLE" | wc -l
 ```
 
+When the sample is an APK (zip with `AndroidManifest.xml`), also run
+[APKiD](https://github.com/rednaga/APKiD) — the canonical Android packer
+fingerprinter. It pattern-matches against ~30 commercial/open packers
+(360 加固, Tencent Legu, Bangcle, Naga, Ijiami, ApkProtect, etc.) plus
+common obfuscators and anti-analysis indicators.
+
+```bash
+# Install once: pipx install apkid   OR   uv tool install apkid
+which apkid && apkid -j "$SAMPLE" > "$ARTIFACT_DIR/$SAMPLE_ID/apkid.json"
+which apkid && cat "$ARTIFACT_DIR/$SAMPLE_ID/apkid.json" | python -m json.tool | head -40
+```
+
+If APKiD reports a packer / protector match, **route the sample to the
+`apk-hardening` skill, not `apk-analysis`** — the latter assumes a
+non-hardened APK and will hand back gibberish on a packed one.
+
 Heuristics:
 
 - Overall entropy ≥ 7.5 + low string count → packed or encrypted.
@@ -91,7 +107,8 @@ Based on what step 1 said:
 | Detected | Next skill |
 |---|---|
 | PE / ELF / Mach-O (standalone) | `pe-elf-macho` |
-| APK | `apk-analysis` (and recurse into `pe-elf-macho` for embedded `.so`) |
+| **APK with packer detected by APKiD or manual signature** | **`apk-hardening`** — covers 360 加固 / Tencent Legu / Bangcle / Naga / Ijiami / Flutter / etc. |
+| APK (no packer detected) | `apk-analysis` (and recurse into `pe-elf-macho` for embedded `.so`) |
 | IPA / iOS Mach-O | `ios-analysis` |
 | **Raw binary blob, no recognised header (router firmware, Cortex-M flash, U-Boot uImage, console ROM, ECU dump, etc.)** | **`firmware-blob`** — covers MIPS / ARM / Cortex-M / PowerPC / 68k / SuperH / RISC-V / AVR / 6502 / Z80 |
 | Crackme (small PE/ELF asking for serial) | `crackme-keygen` |

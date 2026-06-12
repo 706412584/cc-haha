@@ -1,6 +1,6 @@
 ---
 name: lldb-debug
-description: Real single-step debugging via LLDB MCP. macOS / iOS (debugserver) / Linux. Set breakpoints, step, read/write registers and memory, walk the call stack, watchpoints, disassemble. Stronger than GDB for ObjC/Swift symbol handling, dyld shared cache, and Apple platform internals.
+description: Real single-step debugging via LLDB CLI directly. macOS / iOS (debugserver) / Linux. Set breakpoints, step, read/write registers and memory, walk the call stack, watchpoints, disassemble. Stronger than GDB for ObjC/Swift symbol handling, dyld shared cache, and Apple platform internals. Note — the `lldb-mcp` server was removed in v0.4.5 due to upstream packaging issues; the agent drives `lldb` directly via Bash.
 whenToUse: When the target is on macOS or an iOS device (jailbroken or developer-signed), or when you need LLDB's superior ObjC/Swift handling on Linux. Particularly important for analysing iOS apps post-FairPlay-decryption.
 allowedTools: Bash, Read
 ---
@@ -9,6 +9,62 @@ allowedTools: Bash, Read
 
 Goal: same goal as `gdb-debug` — single-step, set breakpoints, read state —
 but on Apple platforms or wherever LLDB's symbol handling beats GDB.
+
+## Tool surface — direct CLI, not MCP
+
+This plugin's `lldb-mcp` server was removed in v0.4.5 because the upstream
+(`stass/lldb-mcp` and `stableversion/lldb_mcp`) ships as a single Python
+script with no `pyproject.toml` packaging — `uvx --from git+...` cannot
+install it. See the README's "Currently unbundled MCP servers" section.
+
+The agent drives LLDB **directly via the `lldb` CLI through Bash**.
+Every workflow that used to look like `lldb: lldb_set_breakpoint
+location=main` now reads as a real LLDB command issued to a session
+spawned with `lldb -- /path/to/binary` or attached with `lldb -p <pid>`.
+
+Two practical patterns:
+
+### Pattern 1 — Interactive subprocess with batched commands
+
+```bash
+# Drive lldb non-interactively with -o (one-shot commands) or -s <file>
+lldb -b -o "target create /path/to/binary" \
+        -o "breakpoint set --name main" \
+        -o "process launch -- arg1 arg2" \
+        -o "register read x0 x1" \
+        -o "thread backtrace 5" \
+        -o "quit"
+```
+
+`-b` (`--batch`) means "exit on errors instead of dropping to prompt"
+— good for scripted runs.
+
+### Pattern 2 — Persistent session via fifo
+
+When you need stateful interaction (set breakpoint, run, hit, inspect,
+continue), drive LLDB through a named pipe so the agent's Bash tool
+can issue commands across multiple turns:
+
+```bash
+mkfifo /tmp/lldb-in
+lldb < /tmp/lldb-in &
+LLDB_PID=$!
+
+# Issue commands:
+echo "target create /path/to/binary" > /tmp/lldb-in
+echo "breakpoint set --name main" > /tmp/lldb-in
+echo "run" > /tmp/lldb-in
+# ...
+
+# Cleanup
+echo "quit" > /tmp/lldb-in
+wait $LLDB_PID
+rm /tmp/lldb-in
+```
+
+The simplest case (small batch of commands) is Pattern 1. Switch to
+Pattern 2 only when you need to alternate between long inspection
+turns and a single live process.
 
 ## When this skill is the right pick
 
@@ -22,40 +78,34 @@ but on Apple platforms or wherever LLDB's symbol handling beats GDB.
 | "PowerPC e200 ECU dump" | ❌ — use gdb-debug | LLDB doesn't ship PPC32 by default |
 | "Hook every NSURLSession on iOS for an hour" | ❌ — use frida-dynamic | LLDB single-step is too slow for broad surveys |
 
-## Tool selection
-
-- **`lldb` MCP** (`lldb` server in this plugin) — wraps `stass/lldb-mcp`
-  via uvx. Provides `lldb_start`, `lldb_load`, `lldb_attach`, `lldb_run`,
-  `lldb_continue`, `lldb_step`, `lldb_next`, `lldb_finish`, `lldb_kill`,
-  `lldb_set_breakpoint`, `lldb_breakpoint_list`, `lldb_breakpoint_delete`,
-  `lldb_watchpoint`, `lldb_backtrace`, `lldb_print`, `lldb_examine`,
-  `lldb_info_registers`, `lldb_frame_info`, `lldb_disassemble`,
-  `lldb_thread_list`, `lldb_thread_select`, plus `lldb_command` for
-  arbitrary LLDB commands.
-
-The MCP just wraps a real LLDB. If a workflow is documented for LLDB
-proper, it works here through `lldb_command`.
-
 ## Setup paths
 
 ### Path A — local macOS or Linux binary
 
-Easiest case. LLDB is on PATH (`xcrun lldb` on macOS, `apt install lldb` on
-Debian, `dnf install lldb` on Fedora).
+Easiest case. LLDB is on PATH (`xcrun lldb` on macOS, `apt install lldb`
+on Debian, `dnf install lldb` on Fedora, `brew install llvm` for the
+LLVM-bundled lldb).
 
-```text
-lldb: lldb_start                                          # spawn session, returns sessionId
-lldb: lldb_load path=/path/to/binary sessionId=<id>
-lldb: lldb_set_breakpoint location=main sessionId=<id>
-lldb: lldb_run sessionId=<id>
+```bash
+# One-shot inspection
+lldb -b -o "target create /path/to/binary" \
+        -o "breakpoint set --name main" \
+        -o "process launch" \
+        -o "register read --all" \
+        -o "thread backtrace" \
+        -o "quit"
 ```
 
 ### Path B — attach to a running PID
 
-macOS / Linux:
-
-```text
-lldb: lldb_attach sessionId=<id> pid=12345
+```bash
+# Attach to a running process
+sudo lldb -p 12345 -b \
+  -o "process status" \
+  -o "thread backtrace all" \
+  -o "register read x0 x1 x2" \
+  -o "detach" \
+  -o "quit"
 ```
 
 macOS requires either Apple developer signing on your `lldb` binary, or
@@ -75,10 +125,12 @@ debugserver *:1234 /Applications/Foo.app/Foo   # spawn mode
 
 On your Mac:
 
-```text
-lldb: lldb_start
-lldb: lldb_command command="platform select remote-ios"
-lldb: lldb_command command="process connect connect://<device-ip>:1234"
+```bash
+lldb -b \
+  -o "platform select remote-ios" \
+  -o "process connect connect://<device-ip>:1234" \
+  -o "image list" \
+  -o "process status"
 ```
 
 Note iOS apps from the App Store arrive **FairPlay-encrypted** — the
@@ -99,10 +151,11 @@ lldb-server gdbserver *:1234 -- ./binary
 
 On your host:
 
-```text
-lldb: lldb_command command="platform select remote-linux"
-lldb: lldb_command command="platform connect connect://<ip>:1234"
-lldb: lldb_load path=/local/path/to/binary
+```bash
+lldb -b \
+  -o "platform select remote-linux" \
+  -o "platform connect connect://<ip>:1234" \
+  -o "target create /local/path/to/binary"
 ```
 
 ## Procedure — once you're connected
@@ -112,101 +165,106 @@ lldb: lldb_load path=/local/path/to/binary
 LLDB picks up symbols automatically if dSYM bundles are next to the
 binary or in the dyld shared cache. For stripped binaries:
 
-```text
-lldb: lldb_command command="image list"                   # what's loaded
-lldb: lldb_command command="add-dsym /path/to/Foo.app.dSYM"
-lldb: lldb_command command="image lookup -n <SymbolName>"
+```bash
+lldb -b -o "target create /path/to/binary" \
+        -o "image list" \
+        -o "add-dsym /path/to/Foo.app.dSYM" \
+        -o "image lookup -n SymbolName" \
+        -o "quit"
 ```
 
 For ObjC, classes/methods come from the `__objc_*` sections in the binary
-itself — no separate `.dSYM` needed. `lldb_command command="image lookup
--n -[NSString componentsSeparatedByString:]"` works on stripped binaries.
+itself — no separate `.dSYM` needed. `image lookup -n -[NSString
+componentsSeparatedByString:]` works on stripped binaries.
 
 ### Step 2 — Set breakpoints
 
-```text
-lldb: lldb_set_breakpoint location=main
-lldb: lldb_set_breakpoint location="-[ViewController viewDidAppear:]"
-lldb: lldb_set_breakpoint location="0x100001a30"           # by address
-lldb: lldb_command command="breakpoint set --regex '^cleartext_.*'"
-                                                           # all funcs starting with cleartext_
+LLDB breakpoint syntax:
 
-# Conditional + commands on hit:
-lldb: lldb_command command="breakpoint set -n send -c '$arg2 != 0'"
-lldb: lldb_command command="breakpoint command add 1
+```text
+breakpoint set --name main                          # by symbol
+breakpoint set --name "-[ViewController viewDidAppear:]"
+breakpoint set --address 0x100001a30                # by absolute address
+breakpoint set --regex "^cleartext_.*"              # all funcs starting with cleartext_
+
+# Conditional:
+breakpoint set -n send -c '$arg2 != 0'
+
+# Commands to run on hit (use breakpoint command add):
+breakpoint command add 1
 > bt 5
 > register read x0 x1
 > continue
-> DONE"
+> DONE
 ```
 
-Watchpoints (break on memory access):
+Watchpoints:
 
 ```text
-lldb: lldb_watchpoint variable="g_state" type=write
-lldb: lldb_command command="watchpoint set expression -- 0x100008020"
-lldb: lldb_command command="watchpoint modify -c '*((int*)0x100008020) > 0'"
+watchpoint set variable g_state
+watchpoint set expression -- 0x100008020
+watchpoint modify -c '*((int*)0x100008020) > 0'
 ```
 
 ### Step 3 — Step / continue
 
 ```text
-lldb: lldb_continue
-lldb: lldb_step                                            # step into (source-line if symbols, instruction otherwise)
-lldb: lldb_next                                            # step over
-lldb: lldb_finish                                          # run to current function return
-
-# Single-instruction stepping:
-lldb: lldb_command command="thread step-inst"              # stepi equiv
-lldb: lldb_command command="thread step-inst-over"         # nexti equiv
-lldb: lldb_disassemble count=10                            # disasm at PC
+continue                            # resume to next breakpoint
+step                                # step into (source line if symbols, else instruction)
+next                                # step over
+finish                              # run to current function return
+thread step-inst                    # single-instruction step (stepi)
+thread step-inst-over               # nexti
+disassemble                         # disasm at PC
+disassemble -c 10                   # 10 instructions
 ```
 
 ### Step 4 — Read state
 
 ```text
-lldb: lldb_info_registers                                  # all GP regs
-lldb: lldb_command command="register read --all"           # incl. FP/NEON/SVE
-lldb: lldb_print expression="argv[1]"
-lldb: lldb_print expression="*(unsigned int*)0x100008020"
-lldb: lldb_examine expression="0x100008000" format="x" size="word" count=64
-lldb: lldb_backtrace
-lldb: lldb_thread_list
-lldb: lldb_thread_select id=2
+register read --all                 # all GP/FP/SIMD regs
+register read x0 x1 x2 x3
+print argv[1]
+print *(unsigned int*)0x100008020
+memory read --size 4 --format x --count 64 0x100008000
+memory read -s 4 -fx -c 64 0x100008000   # short form
+thread backtrace                    # bt
+thread backtrace all
+thread list
+thread select 2
 
 # ObjC-specific:
-lldb: lldb_command command="po self"                      # describe current ObjC instance
-lldb: lldb_command command="po (id)$x0"                   # treat register as ObjC id
-lldb: lldb_command command="expression -l objc -- (id)NSStringFromClass([self class])"
+po self                             # describe current ObjC instance
+po (id)$x0                          # treat register as ObjC id
+expression -l objc -- (id)NSStringFromClass([self class])
 
 # Swift-specific (when LLDB is Swift-aware):
-lldb: lldb_command command="frame variable"
-lldb: lldb_command command="expression -l swift -- self.someProperty"
+frame variable
+expression -l swift -- self.someProperty
 ```
 
 ### Step 5 — Modify state
 
 ```text
-lldb: lldb_command command="register write x0 0x0"
-lldb: lldb_command command="memory write -s 4 0x100008020 0x0000dead"
-lldb: lldb_command command="thread jump --by 8"            # skip 8 bytes ahead
+register write x0 0x0
+memory write --size 4 0x100008020 0x0000dead
+thread jump --by 8                  # skip 8 bytes ahead
 ```
 
-Same caveat as in `gdb-debug`: in-memory patches don't change the
-binary on disk, but they DO change what the process sees. Document.
+Same caveat as in `gdb-debug`: in-memory patches don't change the binary
+on disk, but they DO change what the process sees. Document.
 
 ### Step 6 — Disassemble around a stuck point
 
 ```text
-lldb: lldb_disassemble                                     # disasm current frame
-lldb: lldb_command command="disassemble -a 0x100001a30 -c 32"
-lldb: lldb_command command="disassemble -n -[NSString length]"
-                                                           # by symbol name
+disassemble                         # current frame
+disassemble --address 0x100001a30 --count 32
+disassemble --name "-[NSString length]"
 ```
 
 ## Outputs
 
-Write to `ARTIFACT_DIR/<sample-id>/dynamic-lldb.md`:
+Write to `$ARTIFACT_DIR/$SAMPLE_ID/dynamic-lldb.md`:
 
 ```markdown
 # Dynamic (LLDB) — <sample-id>
