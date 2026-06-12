@@ -1340,23 +1340,20 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
     setIsFetchingModels(true)
     setFetchModelsResult(null)
     try {
-      // OpenAI-compatible providers expose /v1/models with Bearer auth; Anthropic exposes
-      // /v1/models with x-api-key + anthropic-version. Fall back to OpenAI shape on unknown.
-      const trimmed = trimmedBase.replace(/\/+$/, '')
-      const url = trimmed.endsWith('/v1') ? `${trimmed}/models` : `${trimmed}/v1/models`
-      const headers: Record<string, string> = { Accept: 'application/json' }
-      if (apiFormat === 'anthropic') {
-        if (effectiveKey) headers['x-api-key'] = effectiveKey
-        headers['anthropic-version'] = '2023-06-01'
-      } else if (effectiveKey) {
-        headers['Authorization'] = `Bearer ${effectiveKey}`
-      }
-      const res = await fetch(url, { method: 'GET', headers })
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`)
-      }
-      const json: unknown = await res.json()
-      const entries = extractModelEntries(json)
+      // Route through the local server. The previous implementation called
+      // `fetch(url)` directly here, which broke for any provider whose URL
+      // is plain `http://` (mixed-content blocked from the secure-context
+      // webview) or whose `/v1/models` returned no permissive CORS header.
+      // The server has neither restriction; it responds with the upstream
+      // JSON verbatim, which `extractModelEntries` already knows how to
+      // parse across OpenAI / Anthropic / OpenAI-compatible shapes.
+      const { providersApi } = await import('../api/providers')
+      const { data } = await providersApi.fetchModels({
+        baseUrl: trimmedBase,
+        apiKey: effectiveKey,
+        apiFormat,
+      })
+      const entries = extractModelEntries(data)
       if (entries.length === 0) {
         throw new Error('empty')
       }

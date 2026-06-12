@@ -18,6 +18,7 @@ import { sessionService } from '../services/sessionService.js'
 import {
   formatHandoffSystemPrompt,
   getCachedSessionSummary,
+  rebuildRecentRawForHandoff,
 } from '../services/sessionSummaryService.js'
 import { SettingsService } from '../services/settingsService.js'
 import { ProviderService } from '../services/providerService.js'
@@ -100,6 +101,14 @@ const deferredPermissionModes = new Map<string, string>()
 // preference, not persisted across app restart / resume (v1). Read by
 // getRuntimeSettings and threaded into the CLI as --append-system-prompt.
 const coordinatorModeSessions = new Set<string>()
+
+// Per-session Solo Pipeline mode. Same semantics as coordinatorModeSessions but
+// drives a different prompt: a 5-stage solo-agent pipeline (planner → builder →
+// tester → reviewer → integrator) instead of the multi-worker coordinator
+// directive. Mutually exclusive with coordinator mode at the WS handler level
+// (handleSetPipelineMode clears the coordinator flag, and vice versa) so the
+// CLI subprocess never sees both --append-system-prompt addenda at once.
+const soloPipelineModeSessions = new Set<string>()
 
 // Per-session pending hand-off summary text. When set, the next CLI launch
 // (or restart) appends this text via --append-system-prompt so the new
@@ -236,6 +245,10 @@ export const handleWebSocket = {
 
         case 'set_coordinator_mode':
           void handleSetCoordinatorMode(ws, message)
+          break
+
+        case 'set_pipeline_mode':
+          void handleSetPipelineMode(ws, message)
           break
 
         case 'set_handoff_summary':
@@ -728,6 +741,63 @@ async function handleSetCoordinatorMode(
 }
 
 /**
+ * Solo Pipeline mode toggle. Sibling of `handleSetCoordinatorMode` —
+ * the two modes are mutually exclusive (enabling Solo clears the
+ * coordinator flag for the same session), so a single CLI subprocess
+ * launches with at most one mode-specific `--append-system-prompt`.
+ *
+ * `flavor: 'solo'` enables the Solo pipeline; `flavor: 'normal'` clears
+ * it. Like coordinator mode, this is an in-memory per-session preference
+ * applied at next CLI launch (or via deferred restart of an active
+ * session).
+ */
+async function handleSetPipelineMode(
+  ws: ServerWebSocket<WebSocketData>,
+  message: Extract<ClientMessage, { type: 'set_pipeline_mode' }>,
+): Promise<void> {
+  const { sessionId } = ws.data
+  const enabled = message.flavor === 'solo'
+  const was = soloPipelineModeSessions.has(sessionId)
+  // Mutual exclusion: enabling Solo clears any coordinator flag for the
+  // same session. The two modes ship different system-prompt addenda and
+  // assume distinct top-of-loop semantics; running them simultaneously
+  // would feed contradictory directives to the same CLI subprocess.
+  const willClearCoordinator =
+    enabled && coordinatorModeSessions.has(sessionId)
+  if (was === enabled && !willClearCoordinator) return
+
+  if (enabled) {
+    soloPipelineModeSessions.add(sessionId)
+    coordinatorModeSessions.delete(sessionId)
+  } else {
+    soloPipelineModeSessions.delete(sessionId)
+  }
+
+  // Same restart geometry as handleSetCoordinatorMode — the addendum is
+  // applied via --append-system-prompt at CLI launch, so an active session
+  // must restart to pick up (or drop) the directive. Defer until idle so
+  // we never interrupt an in-progress turn.
+  const pendingStartup = sessionStartupPromises.get(sessionId)
+  if (pendingStartup) {
+    await enqueueRuntimeTransition(sessionId, async () => {
+      await pendingStartup.catch(() => undefined)
+      if (!conversationService.hasSession(sessionId)) return
+      await scheduleRestartSessionWithRuntimeConfig(ws, sessionId)
+    })
+    return
+  }
+
+  if (!conversationService.hasSession(sessionId)) {
+    // No live process yet — the flag is recorded and applied on next start.
+    return
+  }
+
+  await enqueueRuntimeTransition(sessionId, () =>
+    scheduleRestartSessionWithRuntimeConfig(ws, sessionId),
+  )
+}
+
+/**
  * Stage a hand-off summary from the user's previous session as the system
  * prompt addendum on this session's CLI launch. Frontend dispatches this
  * before the first user message after clicking "Continue from here".
@@ -755,7 +825,18 @@ async function handleSetHandoffSummary(
   try {
     const summary = await getCachedSessionSummary(previousSessionId)
     if (summary) {
-      summaryText = formatHandoffSystemPrompt(summary)
+      // Deep handoff: rebuild the verbatim tail with enlarged sizing
+      // (~12k tokens vs ~4k default) from the live JSONL. Keeps the
+      // cached LLM-generated main/recent so there's no extra LLM cost —
+      // we only enlarge the verbatim slice, which is pure text slicing.
+      let formattedSummary = summary
+      if (message.deep === true) {
+        const deepRaw = await rebuildRecentRawForHandoff(previousSessionId)
+        if (deepRaw) {
+          formattedSummary = { ...summary, recentRaw: deepRaw }
+        }
+      }
+      summaryText = formatHandoffSystemPrompt(formattedSummary)
     } else {
       console.warn(
         `[WS] Hand-off staging: no cached summary for ${previousSessionId}; ` +
@@ -1311,6 +1392,7 @@ function cleanupSessionRuntimeState(sessionId: string) {
   sessionTitleState.delete(sessionId)
   runtimeOverrides.delete(sessionId)
   coordinatorModeSessions.delete(sessionId)
+  soloPipelineModeSessions.delete(sessionId)
   handoffSummarySessions.delete(sessionId)
   activeUserTurns.delete(sessionId)
   deferredRuntimeRestarts.delete(sessionId)
@@ -2468,6 +2550,13 @@ type RuntimeSettings = {
   providerId?: string | null
   coordinatorMode?: boolean
   /**
+   * Solo Pipeline mode toggle. When true, the CLI is launched (or
+   * restarted) with `--append-system-prompt` carrying the 5-stage Solo
+   * prompt instead of the coordinator orchestration directive. Mutually
+   * exclusive with `coordinatorMode` (handleSetPipelineMode enforces this).
+   */
+  soloPipelineMode?: boolean
+  /**
    * Hand-off summary system prompt addendum. When present, the CLI is
    * launched (or restarted) with `--append-system-prompt` carrying this
    * text. Set by handleSetHandoffSummary and consumed exactly once at the
@@ -2489,6 +2578,7 @@ function isKnownRuntimeProviderId(
 
 async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSettings> {
   const coordinatorMode = sessionId ? coordinatorModeSessions.has(sessionId) : false
+  const soloPipelineMode = sessionId ? soloPipelineModeSessions.has(sessionId) : false
   // Hand-off summary is one-shot: read AND remove. The next CLI start will
   // pick it up; subsequent unrelated restarts won't re-attach a stale summary.
   const handoffSystemPrompt = sessionId ? handoffSummarySessions.get(sessionId) : undefined
@@ -2529,6 +2619,7 @@ async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSettings> 
           ...defaults,
           permissionMode: sessionPermissionMode ?? defaults.permissionMode,
           coordinatorMode,
+          soloPipelineMode,
           ...(handoffSystemPrompt ? { handoffSystemPrompt } : {}),
         }
       }
@@ -2544,6 +2635,7 @@ async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSettings> 
       thinking,
       providerId: runtimeOverride.providerId,
       coordinatorMode,
+      soloPipelineMode,
       ...(handoffSystemPrompt ? { handoffSystemPrompt } : {}),
     }
   }
@@ -2554,6 +2646,7 @@ async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSettings> 
     permissionMode: sessionPermissionMode ?? defaults.permissionMode,
     effort: launchInfo?.effortLevel ?? defaults.effort,
     coordinatorMode,
+    soloPipelineMode,
     ...(handoffSystemPrompt ? { handoffSystemPrompt } : {}),
   }
 }

@@ -83,6 +83,19 @@ export type TestProviderConfigInput = {
   apiFormat?: ApiFormat
 }
 
+/** Input for the server-side `/api/providers/fetch-models` proxy. */
+export type FetchModelsInput = {
+  baseUrl: string
+  apiKey: string
+  apiFormat?: ApiFormat
+}
+
+/** Response from `/api/providers/fetch-models`. `data` is the upstream JSON body verbatim. */
+export type FetchModelsResponse = {
+  status: number
+  data: unknown
+}
+
 export type ProviderTestStepResult = {
   success: boolean
   latencyMs: number

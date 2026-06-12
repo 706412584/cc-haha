@@ -49,13 +49,20 @@ export type SessionSummary = {
    *  decided, what was tried, what's pending right now. */
   recent: string
   /**
-   * Raw (truncated) tail of the transcript — the LAST ~12 turns rendered
-   * as `USER: …` / `ASSISTANT: …` lines, each truncated to ~400 chars,
-   * total capped at ~8000 chars. Lets the next-session AI see the actual
+   * Raw (truncated) tail of the transcript — the LAST ~24 turns rendered
+   * as `USER: …` / `ASSISTANT: …` lines, each truncated to ~600 chars,
+   * total capped at ~16000 chars. Lets the next-session AI see the actual
    * recent wording (what the user literally just asked, what was actually
    * said about the failure mode) instead of relying solely on the LLM's
    * abstracted `recent` summary, which tends to lose proper nouns,
    * specific error messages, and the user's exact phrasing.
+   *
+   * Bumped from 12/400/8000 in v0.5.10: real-world handoffs were
+   * dropping the latest "what went wrong / what we tried" exchange
+   * because the previous tail covered ~6 user-AI pairs, which often
+   * predates the most recent debugging detour. The new defaults add
+   * ~2k tokens to the handoff system prompt — negligible against
+   * modern 200k+ context windows.
    *
    * Optional for backward compat: older cache files without this field
    * still load — `formatHandoffSystemPrompt` just omits the raw section.
@@ -73,14 +80,26 @@ const SUMMARY_FILE_SUFFIX = '.summary.json'
 
 /**
  * How many trailing turns (USER+ASSISTANT lines) to keep verbatim in the
- * `recentRaw` slice. 12 turns ≈ 6 user/AI exchange pairs, which is enough
- * to give the next-session AI a sense of "what the user just literally
- * said and what I just literally tried" without blowing system prompt
- * budget. Override with CLAUDE_CODE_HANDOFF_RAW_TURNS.
+ * `recentRaw` slice. 24 turns ≈ 12 user/AI exchange pairs, enough to
+ * cover the most recent debugging detour AND the prior context that
+ * usually frames it ("we tried A, then B failed because…, so I want to
+ * try C"). Bumped from 12 in v0.5.10 after handoffs kept losing the
+ * latest "what went wrong" beat. Override with
+ * CLAUDE_CODE_HANDOFF_RAW_TURNS (env cap 80).
  */
-const SUMMARY_RAW_TAIL_TURNS_DEFAULT = 12
-const SUMMARY_RAW_TAIL_CHARS_PER_TURN_DEFAULT = 400
-const SUMMARY_RAW_TAIL_TOTAL_CHARS_DEFAULT = 8_000
+const SUMMARY_RAW_TAIL_TURNS_DEFAULT = 24
+/**
+ * Per-turn char cap. 600 keeps a typical assistant code-explanation
+ * paragraph intact; below ~500 the tail block tends to clip just before
+ * the actionable verb ("so the next step is to…").
+ */
+const SUMMARY_RAW_TAIL_CHARS_PER_TURN_DEFAULT = 600
+/**
+ * Total cap on the raw block. ~16k chars ≈ 4k tokens — still ~1% of a
+ * 200k-window provider, but enough that a 24-turn × 600-char tail
+ * doesn't have to drop older turns on dense conversations.
+ */
+const SUMMARY_RAW_TAIL_TOTAL_CHARS_DEFAULT = 16_000
 
 function getOutputCap(): number {
   const raw = process.env.CLAUDE_CODE_HANDOFF_MAX_TOKENS
@@ -103,7 +122,7 @@ function getRawTailTurns(): number {
   if (!raw) return SUMMARY_RAW_TAIL_TURNS_DEFAULT
   const parsed = Number.parseInt(raw, 10)
   if (!Number.isFinite(parsed) || parsed < 0) return SUMMARY_RAW_TAIL_TURNS_DEFAULT
-  return Math.min(parsed, 50)
+  return Math.min(parsed, 80)
 }
 
 function getRawTailTotalChars(): number {
@@ -111,7 +130,7 @@ function getRawTailTotalChars(): number {
   if (!raw) return SUMMARY_RAW_TAIL_TOTAL_CHARS_DEFAULT
   const parsed = Number.parseInt(raw, 10)
   if (!Number.isFinite(parsed) || parsed < 500) return SUMMARY_RAW_TAIL_TOTAL_CHARS_DEFAULT
-  return Math.min(parsed, 30_000)
+  return Math.min(parsed, 50_000)
 }
 
 /** Truncate a single turn line preserving the role prefix. */
@@ -136,17 +155,31 @@ function truncateTurnLine(line: string, maxChars: number): string {
  * messages (verbatim, truncated)" so the next-session AI can see the
  * actual user wording — not just the LLM-summarized abstract.
  */
-function buildRecentRawSlice(turns: string[]): string {
-  const tailTurns = getRawTailTurns()
-  if (tailTurns === 0 || turns.length === 0) return ''
-  const totalCap = getRawTailTotalChars()
-  const perTurn = SUMMARY_RAW_TAIL_CHARS_PER_TURN_DEFAULT
+/**
+ * Hard-coded "deep handoff" sizing used when the user explicitly toggles
+ * deep mode in the welcome card. Deliberately fixed (not env-driven) so
+ * the toggle has predictable behavior — a user picking deep gets the
+ * same enlarged tail regardless of any CLAUDE_CODE_HANDOFF_RAW_*
+ * overrides the env may carry. Deep mode adds ~12k tokens to the handoff
+ * system prompt; still ~6% of a 200k window.
+ */
+const SUMMARY_RAW_TAIL_DEEP_TURNS = 60
+const SUMMARY_RAW_TAIL_DEEP_CHARS_PER_TURN = 800
+const SUMMARY_RAW_TAIL_DEEP_TOTAL_CHARS = 50_000
 
+/**
+ * Pure slicing helper: produce the verbatim tail from a turns[] array
+ * given explicit sizing. Older turns drop first when the per-turn cap
+ * still busts the total cap.
+ */
+function buildRecentRawSliceWithSizes(
+  turns: string[],
+  sizes: { tailTurns: number; perTurn: number; totalCap: number },
+): string {
+  const { tailTurns, perTurn, totalCap } = sizes
+  if (tailTurns === 0 || turns.length === 0) return ''
   const start = Math.max(0, turns.length - tailTurns)
   const candidates = turns.slice(start).map((t) => truncateTurnLine(t, perTurn))
-
-  // Per-line cap may still bust totalCap on dense turns; tail-clip at the
-  // total cap, dropping older lines first, so the most recent stays.
   let total = 0
   const kept: string[] = []
   for (let i = candidates.length - 1; i >= 0; i--) {
@@ -156,6 +189,20 @@ function buildRecentRawSlice(turns: string[]): string {
     total += t.length + 2
   }
   return kept.join('\n\n')
+}
+
+/**
+ * Build the verbatim-but-truncated tail slice of the transcript. Caller
+ * inserts this into the hand-off system prompt under "Most recent
+ * messages (verbatim, truncated)" so the next-session AI can see the
+ * actual user wording — not just the LLM-summarized abstract.
+ */
+function buildRecentRawSlice(turns: string[]): string {
+  return buildRecentRawSliceWithSizes(turns, {
+    tailTurns: getRawTailTurns(),
+    perTurn: SUMMARY_RAW_TAIL_CHARS_PER_TURN_DEFAULT,
+    totalCap: getRawTailTotalChars(),
+  })
 }
 
 const SUMMARY_SYSTEM_PROMPT = `You are summarizing a coding-agent conversation between a developer and an AI assistant. The summary will be injected as system-level hand-off context into the developer's NEXT session in the same project, so the next-session AI knows what was already discussed without re-feeding the whole transcript.
@@ -188,58 +235,8 @@ async function buildTranscriptText(filePath: string): Promise<{
   recentRaw: string
 }> {
   const inputCap = getInputCap()
-  const stream = createReadStream(filePath, { encoding: 'utf8' })
-  const lines = createInterface({ input: stream, crlfDelay: Infinity })
-
-  const turns: string[] = []
-  let messageCount = 0
-
-  try {
-    for await (const line of lines) {
-      const trimmed = line.trim()
-      if (!trimmed) continue
-      let entry: Record<string, unknown>
-      try {
-        entry = JSON.parse(trimmed) as Record<string, unknown>
-      } catch {
-        continue
-      }
-      if (entry.isMeta === true) continue
-
-      if (entry.type === 'user') {
-        const message = entry.message as { content?: unknown } | undefined
-        const text = extractTextFromContent(message?.content)
-        if (text) {
-          turns.push(`USER: ${text}`)
-          messageCount++
-        }
-        continue
-      }
-
-      if (entry.type === 'assistant') {
-        const message = entry.message as { content?: unknown } | undefined
-        const blocks = Array.isArray(message?.content)
-          ? (message.content as Array<Record<string, unknown>>)
-          : []
-        const parts: string[] = []
-        for (const block of blocks) {
-          if (block.type === 'text' && typeof block.text === 'string') {
-            const t = block.text.trim()
-            if (t) parts.push(t)
-          } else if (block.type === 'tool_use') {
-            parts.push(formatToolUseSummary(block))
-          }
-        }
-        if (parts.length > 0) {
-          turns.push(`ASSISTANT: ${parts.join('\n')}`)
-          messageCount++
-        }
-      }
-    }
-  } finally {
-    lines.close()
-    stream.destroy()
-  }
+  const turns = await readTurnsFromTranscript(filePath)
+  const messageCount = turns.length
 
   // Tail-slice: keep the most recent turns until we're under cap. Recent
   // context dominates the hand-off value, so older turns are dropped first.
@@ -263,6 +260,59 @@ async function buildTranscriptText(filePath: string): Promise<{
     messageCount,
     recentRaw,
   }
+}
+
+/**
+ * Read JSONL transcript and produce the chronological `USER:` /
+ * `ASSISTANT:` lines used by both the LLM-summarization input and the
+ * verbatim recentRaw slice. Extracted so the deep-handoff rebuild path
+ * can reuse parsing without re-running the LLM summarization pipeline.
+ */
+async function readTurnsFromTranscript(filePath: string): Promise<string[]> {
+  const stream = createReadStream(filePath, { encoding: 'utf8' })
+  const lines = createInterface({ input: stream, crlfDelay: Infinity })
+  const turns: string[] = []
+  try {
+    for await (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      let entry: Record<string, unknown>
+      try {
+        entry = JSON.parse(trimmed) as Record<string, unknown>
+      } catch {
+        continue
+      }
+      if (entry.isMeta === true) continue
+
+      if (entry.type === 'user') {
+        const message = entry.message as { content?: unknown } | undefined
+        const text = extractTextFromContent(message?.content)
+        if (text) turns.push(`USER: ${text}`)
+        continue
+      }
+
+      if (entry.type === 'assistant') {
+        const message = entry.message as { content?: unknown } | undefined
+        const blocks = Array.isArray(message?.content)
+          ? (message.content as Array<Record<string, unknown>>)
+          : []
+        const parts: string[] = []
+        for (const block of blocks) {
+          if (block.type === 'text' && typeof block.text === 'string') {
+            const t = block.text.trim()
+            if (t) parts.push(t)
+          } else if (block.type === 'tool_use') {
+            parts.push(formatToolUseSummary(block))
+          }
+        }
+        if (parts.length > 0) turns.push(`ASSISTANT: ${parts.join('\n')}`)
+      }
+    }
+  } finally {
+    lines.close()
+    stream.destroy()
+  }
+  return turns
 }
 
 function extractTextFromContent(content: unknown): string {
@@ -583,7 +633,7 @@ export function formatHandoffSystemPrompt(summary: SessionSummary): string {
 
 ## Most recent messages (verbatim, truncated)
 
-The block below is the literal tail of the previous conversation — the LLM-generated summary above abstracted these turns, but the raw wording matters when the user said something specific (a file path, an error message, a number) that an abstraction would smudge. Each turn is truncated to ~400 chars; older turns are dropped first.
+The block below is the literal tail of the previous conversation — the LLM-generated summary above abstracted these turns, but the raw wording matters when the user said something specific (a file path, an error message, a number) that an abstraction would smudge. Each turn is truncated to ~600 chars; older turns are dropped first.
 
 \`\`\`
 ${summary.recentRaw}
@@ -618,4 +668,42 @@ export function _summaryFilePathForTest(jsonlPath: string): string {
  *  through buildTranscriptText. */
 export function _buildRecentRawSliceForTest(turns: string[]): string {
   return buildRecentRawSlice(turns)
+}
+
+/** Test helper: exposed deep-mode slicing so the deep-handoff path's
+ *  enlarged sizing can be locked in without spinning up an LLM. */
+export function _buildRecentRawSliceDeepForTest(turns: string[]): string {
+  return buildRecentRawSliceWithSizes(turns, {
+    tailTurns: SUMMARY_RAW_TAIL_DEEP_TURNS,
+    perTurn: SUMMARY_RAW_TAIL_DEEP_CHARS_PER_TURN,
+    totalCap: SUMMARY_RAW_TAIL_DEEP_TOTAL_CHARS,
+  })
+}
+
+/**
+ * Public: rebuild the verbatim recentRaw slice for an existing session
+ * using the hard-coded deep-mode sizing. Used by the WS handoff handler
+ * when the user toggled "deep handoff" on the welcome card — we keep the
+ * cached LLM-generated `main` / `recent` (no extra cost) and only
+ * regenerate the verbatim tail with bigger sizes from the live JSONL.
+ *
+ * Returns null on missing session or empty transcript so the caller can
+ * fall back to whatever recentRaw the cached summary already carries.
+ */
+export async function rebuildRecentRawForHandoff(
+  sessionId: string,
+): Promise<string | null> {
+  const found = await sessionService.findSessionFile(sessionId)
+  if (!found) return null
+  try {
+    const turns = await readTurnsFromTranscript(found.filePath)
+    if (turns.length === 0) return null
+    return buildRecentRawSliceWithSizes(turns, {
+      tailTurns: SUMMARY_RAW_TAIL_DEEP_TURNS,
+      perTurn: SUMMARY_RAW_TAIL_DEEP_CHARS_PER_TURN,
+      totalCap: SUMMARY_RAW_TAIL_DEEP_TOTAL_CHARS,
+    })
+  } catch {
+    return null
+  }
 }

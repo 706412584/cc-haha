@@ -67,16 +67,16 @@ describe('workspacePanelStore', () => {
     const store = useWorkspacePanelStore.getState()
 
     expect(store.isPanelOpen('session-a')).toBe(false)
-    expect(store.getActiveView('session-a')).toBe('changed')
+    expect(store.getActiveView('session-a')).toBe('all')
     expect(store.width).toBe(WORKSPACE_PANEL_DEFAULT_WIDTH)
 
     store.openPanel('session-a')
-    store.setActiveView('session-a', 'all')
+    store.setActiveView('session-a', 'changed')
 
     expect(useWorkspacePanelStore.getState().isPanelOpen('session-a')).toBe(true)
-    expect(useWorkspacePanelStore.getState().getActiveView('session-a')).toBe('all')
+    expect(useWorkspacePanelStore.getState().getActiveView('session-a')).toBe('changed')
     expect(useWorkspacePanelStore.getState().isPanelOpen('session-b')).toBe(false)
-    expect(useWorkspacePanelStore.getState().getActiveView('session-b')).toBe('changed')
+    expect(useWorkspacePanelStore.getState().getActiveView('session-b')).toBe('all')
 
     store.togglePanel('session-b')
     expect(useWorkspacePanelStore.getState().isPanelOpen('session-b')).toBe(true)
@@ -84,7 +84,7 @@ describe('workspacePanelStore', () => {
 
     store.closePanel('session-a')
     expect(useWorkspacePanelStore.getState().isPanelOpen('session-a')).toBe(false)
-    expect(useWorkspacePanelStore.getState().getActiveView('session-a')).toBe('all')
+    expect(useWorkspacePanelStore.getState().getActiveView('session-a')).toBe('changed')
 
     store.setWidth(120)
     expect(useWorkspacePanelStore.getState().width).toBe(WORKSPACE_PANEL_MIN_WIDTH)
@@ -120,7 +120,11 @@ describe('workspacePanelStore', () => {
     expect(useWorkspacePanelStore.getState().errors.statusBySession['session-1']).toBeNull()
   })
 
-  it('defaults an empty changed-files status to the all-files view', async () => {
+  it('R5: defaults activeView to "all" for a fresh session', () => {
+    expect(useWorkspacePanelStore.getState().getActiveView('session-fresh')).toBe('all')
+  })
+
+  it('R5: loadStatus does not flip activeView when status is empty', async () => {
     mocks.getWorkspaceStatusMock.mockResolvedValue({
       state: 'ok',
       workDir: '/repo',
@@ -131,7 +135,7 @@ describe('workspacePanelStore', () => {
     })
 
     useWorkspacePanelStore.getState().openPanel('session-empty-changes')
-    expect(useWorkspacePanelStore.getState().getActiveView('session-empty-changes')).toBe('changed')
+    expect(useWorkspacePanelStore.getState().getActiveView('session-empty-changes')).toBe('all')
 
     await useWorkspacePanelStore.getState().loadStatus('session-empty-changes')
 
@@ -139,7 +143,7 @@ describe('workspacePanelStore', () => {
     expect(useWorkspacePanelStore.getState().getActiveView('session-empty-changes')).toBe('all')
   })
 
-  it('keeps the changed-files view when status contains changes', async () => {
+  it('R5: loadStatus does not flip activeView when status has changes', async () => {
     mocks.getWorkspaceStatusMock.mockResolvedValue({
       state: 'ok',
       workDir: '/repo',
@@ -157,44 +161,31 @@ describe('workspacePanelStore', () => {
     })
 
     useWorkspacePanelStore.getState().openPanel('session-has-changes')
+    expect(useWorkspacePanelStore.getState().getActiveView('session-has-changes')).toBe('all')
+
     await useWorkspacePanelStore.getState().loadStatus('session-has-changes')
 
-    expect(useWorkspacePanelStore.getState().getActiveView('session-has-changes')).toBe('changed')
+    expect(useWorkspacePanelStore.getState().getActiveView('session-has-changes')).toBe('all')
   })
 
-  it('returns to changed-files when a refreshed default all-files view now has changes', async () => {
-    mocks.getWorkspaceStatusMock
-      .mockResolvedValueOnce({
-        state: 'ok',
-        workDir: '/repo',
-        repoName: 'repo',
-        branch: 'main',
-        isGitRepo: true,
-        changedFiles: [],
-      })
-      .mockResolvedValueOnce({
-        state: 'ok',
-        workDir: '/repo',
-        repoName: 'repo',
-        branch: 'main',
-        isGitRepo: true,
-        changedFiles: [
-          {
-            path: 'src/app.ts',
-            status: 'modified',
-            additions: 2,
-            deletions: 1,
-          },
-        ],
-      })
+  it('R5: setActiveView marks hasUserSelectedView and is preserved across loadStatus', async () => {
+    mocks.getWorkspaceStatusMock.mockResolvedValue({
+      state: 'ok',
+      workDir: '/repo',
+      repoName: 'repo',
+      branch: 'main',
+      isGitRepo: true,
+      changedFiles: [],
+    })
 
-    useWorkspacePanelStore.getState().openPanel('session-refresh-changes')
-    await useWorkspacePanelStore.getState().loadStatus('session-refresh-changes')
-    expect(useWorkspacePanelStore.getState().getActiveView('session-refresh-changes')).toBe('all')
+    useWorkspacePanelStore.getState().openPanel('session-explicit')
+    expect(useWorkspacePanelStore.getState().panelBySession['session-explicit']?.hasUserSelectedView).toBeFalsy()
 
-    await useWorkspacePanelStore.getState().loadStatus('session-refresh-changes')
+    useWorkspacePanelStore.getState().setActiveView('session-explicit', 'changed')
+    expect(useWorkspacePanelStore.getState().panelBySession['session-explicit']?.hasUserSelectedView).toBe(true)
 
-    expect(useWorkspacePanelStore.getState().getActiveView('session-refresh-changes')).toBe('changed')
+    await useWorkspacePanelStore.getState().loadStatus('session-explicit')
+    expect(useWorkspacePanelStore.getState().getActiveView('session-explicit')).toBe('changed')
   })
 
   it('does not override an explicit all-files selection when refreshed status has changes', async () => {
@@ -734,5 +725,161 @@ describe('workspacePanelStore', () => {
     expect(state.errors.treeBySessionPath['session-reset::src']).toBeUndefined()
     expect(state.errors.previewByTabId['session-clear::file:src/a.ts']).toBeUndefined()
     expect(state.errors.previewByTabId['session-reset::file:src/b.ts']).toBeUndefined()
+  })
+
+  describe('notifyAgentFileEdit (Phase 4)', () => {
+    it('flags an open buffer with an agent-source conflict when paths match by suffix', () => {
+      const tabId = 'file:src/app.ts'
+      useWorkspacePanelStore.setState((state) => ({
+        ...state,
+        bufferStateByTabId: {
+          ...state.bufferStateByTabId,
+          [tabId]: {
+            tabId,
+            path: 'src/app.ts',
+            baseHash: 'a'.repeat(64),
+            baseContent: 'old',
+            currentContent: 'old',
+            isDirty: false,
+            encoding: 'utf-8',
+            lineEnding: 'LF',
+            conflict: null,
+          },
+        },
+      }))
+
+      useWorkspacePanelStore.getState().notifyAgentFileEdit(
+        'session-agent',
+        'C:/Users/me/repo/src/app.ts',
+      )
+
+      const buffer = useWorkspacePanelStore.getState().bufferStateByTabId[tabId]!
+      expect(buffer.conflict).toMatchObject({ source: 'agent' })
+      expect(buffer.conflict!.hash).toBe('agent-edit')
+    })
+
+    it('also matches Windows backslash absolute paths', () => {
+      const tabId = 'file:src/app.ts'
+      useWorkspacePanelStore.setState((state) => ({
+        ...state,
+        bufferStateByTabId: {
+          ...state.bufferStateByTabId,
+          [tabId]: {
+            tabId,
+            path: 'src/app.ts',
+            baseHash: 'a'.repeat(64),
+            baseContent: 'old',
+            currentContent: 'old',
+            isDirty: false,
+            encoding: 'utf-8',
+            lineEnding: 'LF',
+            conflict: null,
+          },
+        },
+      }))
+
+      useWorkspacePanelStore.getState().notifyAgentFileEdit(
+        'session-agent',
+        'C:\\Users\\me\\repo\\src\\app.ts',
+      )
+
+      const buffer = useWorkspacePanelStore.getState().bufferStateByTabId[tabId]!
+      expect(buffer.conflict?.source).toBe('agent')
+    })
+
+    it('does not flag a buffer whose path is a non-suffix substring of the agent edit path', () => {
+      const tabId = 'file:bar.ts'
+      useWorkspacePanelStore.setState((state) => ({
+        ...state,
+        bufferStateByTabId: {
+          ...state.bufferStateByTabId,
+          [tabId]: {
+            tabId,
+            path: 'bar.ts',
+            baseHash: 'a'.repeat(64),
+            baseContent: 'x',
+            currentContent: 'x',
+            isDirty: false,
+            encoding: 'utf-8',
+            lineEnding: 'LF',
+            conflict: null,
+          },
+        },
+      }))
+
+      // foobar.ts ends with "bar.ts" but NOT with "/bar.ts" — must not match.
+      useWorkspacePanelStore.getState().notifyAgentFileEdit(
+        'session-agent',
+        '/repo/foobar.ts',
+      )
+
+      const buffer = useWorkspacePanelStore.getState().bufferStateByTabId[tabId]!
+      expect(buffer.conflict).toBeNull()
+    })
+
+    it('does not clobber an existing conflict on the same buffer', () => {
+      const tabId = 'file:src/app.ts'
+      const existingConflict = {
+        source: 'user' as const,
+        hash: 'b'.repeat(64),
+        timestamp: 100,
+      }
+      useWorkspacePanelStore.setState((state) => ({
+        ...state,
+        bufferStateByTabId: {
+          ...state.bufferStateByTabId,
+          [tabId]: {
+            tabId,
+            path: 'src/app.ts',
+            baseHash: 'a'.repeat(64),
+            baseContent: 'x',
+            currentContent: 'x',
+            isDirty: false,
+            encoding: 'utf-8',
+            lineEnding: 'LF',
+            conflict: existingConflict,
+          },
+        },
+      }))
+
+      useWorkspacePanelStore.getState().notifyAgentFileEdit(
+        'session-agent',
+        '/repo/src/app.ts',
+      )
+
+      const buffer = useWorkspacePanelStore.getState().bufferStateByTabId[tabId]!
+      expect(buffer.conflict).toBe(existingConflict)
+    })
+
+    it('triggers loadStatus when the panel is open for the session', async () => {
+      mocks.getWorkspaceStatusMock.mockResolvedValue({
+        state: 'ok',
+        workDir: '/repo',
+        repoName: 'repo',
+        branch: 'main',
+        isGitRepo: true,
+        changedFiles: [],
+      })
+      useWorkspacePanelStore.getState().openPanel('session-loaded')
+
+      useWorkspacePanelStore.getState().notifyAgentFileEdit(
+        'session-loaded',
+        '/repo/src/whatever.ts',
+      )
+
+      // Drain any pending microtasks scheduled by void loadStatus(...)
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(mocks.getWorkspaceStatusMock).toHaveBeenCalledWith('session-loaded')
+    })
+
+    it('skips loadStatus when the panel is closed for the session', () => {
+      // Panel default-state isOpen is false — never opened.
+      useWorkspacePanelStore.getState().notifyAgentFileEdit(
+        'session-closed',
+        '/repo/src/whatever.ts',
+      )
+      expect(mocks.getWorkspaceStatusMock).not.toHaveBeenCalled()
+    })
   })
 })

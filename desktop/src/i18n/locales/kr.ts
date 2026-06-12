@@ -1251,6 +1251,9 @@ export const kr: Record<TranslationKey, string> = {
   'empty.recentActivity.dirtyFiles': '커밋되지 않은 파일 {count}개',
   'empty.recentActivity.continueSession': '이 세션 열기',
   'empty.recentActivity.applyHandoff': '여기서부터 계속',
+  'empty.recentActivity.deepHandoffLabel': '심층',
+  'empty.recentActivity.deepHandoffOffTooltip': '심층 이어가기(꺼짐) — 다음 "여기서부터 계속" 클릭 시 표준 약 4k 토큰 분량의 대화 원문 끝부분을 전달합니다. 클릭하면 켜짐.',
+  'empty.recentActivity.deepHandoffOnTooltip': '심층 이어가기(켜짐) — 다음 "여기서부터 계속" 클릭 시 확장된 약 12k 토큰(60턴/턴당 800자/총 50k)을 전달합니다. 클릭하면 꺼짐.',
   'empty.recentActivity.handoffGenerating': '컨텍스트 준비 중...',
   'empty.recentActivity.handoffStage.readingCache': '대화 기록 읽는 중...',
   'empty.recentActivity.handoffStage.generatingSummary': '요약 생성 중 (AI 호출 중)...',
@@ -1263,6 +1266,10 @@ export const kr: Record<TranslationKey, string> = {
   'empty.recentActivity.previewNotYet': '아직 요약이 없습니다. "여기서부터 계속"을 처음 클릭할 때 생성됩니다.',
   'session.handoffChip': '↗ 이어서 ({tokens} t)',
   'session.handoffChipTooltip': '"{title}"에서 이어짐. AI는 {tokens} 토큰의 이전 세션 요약을 시스템 프롬프트에 포함해 시작했습니다.',
+  'session.coordinatorChip': '오케스트레이션',
+  'session.coordinatorChipTooltip': '이 세션은 오케스트레이션 모드입니다. 작업은 전문 worker 에이전트로 분산되고 메인 스레드가 조정합니다. 컴포저의 + 메뉴에서 전환할 수 있습니다.',
+  'session.soloPipelineChip': '솔로 파이프라인',
+  'session.soloPipelineChipTooltip': '이 세션은 솔로 파이프라인 모드입니다. 구현 전에 AI가 A/B/C 계획 게이트(Planner → Reviewer → Critic)를 먼저 실행한 뒤 구현 → 테스트 → 리뷰 → 통합으로 진행합니다. 컴포저의 + 메뉴에서 전환할 수 있습니다.',
   'empty.recentActivity.handoff.branchLine': '지난 세션({branch}): "{title}".',
   'empty.recentActivity.handoff.titleLine': '지난 세션: "{title}".',
   'empty.recentActivity.handoff.filesLine': '수정한 파일: {files}{more}.',
@@ -1271,6 +1278,64 @@ export const kr: Record<TranslationKey, string> = {
   'empty.recentActivity.handoff.dirtyLine': '커밋되지 않은 파일이 {count}개 있습니다.',
   'empty.recentActivity.handoff.continuePrompt': '여기서부터 계속해 주세요: (다음 단계 설명).',
   'empty.recentActivity.continueTriggerMessage': '이전 세션의 진행 상황에서 이어서 작업해 주세요. 위의 인계 컨텍스트를 사실로 받아들이고, 먼저 1-2문장으로 현재 상태를 요약한 뒤 다음 단계를 설명하고 작업을 시작해 주세요.',
+
+  // ─── Solo 파이프라인 모드 — 제안 엔진 (환영 인사) ─────────────────
+  'solo.suggest.finishWip.title': '{count}개의 미커밋 변경 마무리',
+  'solo.suggest.finishWip.detail': '미커밋: {sample}',
+  'solo.suggest.finishWip.detailForeign': '미커밋 (다른 에이전트의 작업 포함 가능): {sample}',
+  'solo.suggest.finishWip.taskPrompt': '현재 worktree의 {count}개 미커밋 변경({files})을 마무리해 주세요. 먼저 A/B/C 계획 게이트를 거친 뒤 구현 → 테스트 → 리뷰 → 통합을 진행합니다.',
+
+  'solo.suggest.shipAhead.title': '{branch} 출시 ({count}개 커밋 앞섬)',
+  'solo.suggest.shipAhead.detail': '로컬이 업스트림보다 {count}개 앞서 있고 작업은 이미 완료됨 — 리뷰 + 출시.',
+  'solo.suggest.shipAhead.taskPrompt': '브랜치 {branch}이(가) 업스트림보다 {count}개 커밋 앞서 있습니다. 업스트림 대비 diff를 리뷰하고 PR / push / 릴리스 노트 작성으로 출시해 주세요.',
+
+  'solo.suggest.testGap.title': '{file}에 테스트 추가',
+  'solo.suggest.testGap.detail': '{count}개의 dirty 소스 파일에 형제 테스트가 없음',
+  'solo.suggest.testGap.taskPrompt': '{file}(및 다른 {count}개의 dirty 소스 파일)에 디스크상 형제 테스트가 없습니다. 누락된 테스트를 계획하여 추가하고, 검증 후 출시해 주세요.',
+
+  'solo.suggest.todoMarker.title': '{file}의 TODO 처리',
+  'solo.suggest.todoMarker.detail': '{excerpt} (dirty 파일 내 총 {count}개의 마커)',
+  'solo.suggest.todoMarker.taskPrompt': 'dirty 파일 세트에 {count}개의 TODO/FIXME 마커가 있습니다. {file}부터 시작: "{excerpt}". 해결 방안을 계획, 구현, 검증, 출시해 주세요.',
+
+  'solo.suggest.releaseMismatch.notes-missing.title': 'v{desktopVersion} 릴리스 노트 추가',
+  'solo.suggest.releaseMismatch.notes-missing.detail': 'desktop/package.json은 {desktopVersion}이지만 최신 릴리스 노트는 v{latestNotes}',
+  'solo.suggest.releaseMismatch.notes-missing.taskPrompt': 'desktop/package.json은 v{desktopVersion}이지만 release-notes/v{desktopVersion}.md가 존재하지 않습니다. v{latestNotes} 이후 변경사항을 기술한 노트를 작성하고 출시(commit + tag + 단일 tag push)해 주세요.',
+
+  'solo.suggest.releaseMismatch.version-not-bumped.title': 'desktop 버전을 v{latestNotes}로 bump',
+  'solo.suggest.releaseMismatch.version-not-bumped.detail': 'release-notes/v{latestNotes}.md는 있지만 desktop/package.json은 여전히 {desktopVersion}',
+  'solo.suggest.releaseMismatch.version-not-bumped.taskPrompt': 'release-notes/v{latestNotes}.md는 작성되어 있지만 desktop/package.json은 여전히 v{desktopVersion}입니다. scripts/release.ts {latestNotes}로 bump + commit + tag을 실행하고 단일 tag을 push해 주세요(--tags가 아님).',
+
+  'solo.suggest.releaseMismatch.tag-not-pushed.title': 'v{desktopVersion} tag push',
+  'solo.suggest.releaseMismatch.tag-not-pushed.detail': 'v{desktopVersion}은 노트와 일치하지만 tag가 origin에 없음',
+  'solo.suggest.releaseMismatch.tag-not-pushed.taskPrompt': '버전은 일치(v{desktopVersion})하지만 v{desktopVersion} tag이 origin에 없습니다. 단일 tag(git push origin v{desktopVersion}, --tags 아님)을 push하여 release-desktop workflow를 트리거해 주세요.',
+
+  'solo.suggest.stashRecover.title': '{count}개의 stash 복구',
+  'solo.suggest.stashRecover.detail': '대기 중인 stash 작업이 있습니다',
+  'solo.suggest.stashRecover.taskPrompt': '{count}개의 stash이 대기 중입니다. 복구 방법(어느 것을 pop하고 어느 것을 drop할지)을 계획하고 구현하여 검증해 주세요.',
+
+  'solo.suggest.syncUpstream.title': '업스트림 {count}개 커밋 동기화',
+  'solo.suggest.syncUpstream.detail': '로컬이 origin보다 뒤처져 있음',
+  'solo.suggest.syncUpstream.taskPrompt': '로컬이 업스트림보다 {count}개 커밋 뒤처져 있습니다. pull / rebase 전략을 계획, 실행, 결과를 검증해 주세요.',
+
+  'solo.suggest.lspError.title': '{count}개 타입 오류 정리',
+  'solo.suggest.lspError.detail': '언어 서버가 이 워크스페이스에서 오류를 보고하고 있습니다',
+  'solo.suggest.lspError.taskPrompt': '이 워크스페이스에서 언어 서버가 {count}개의 타입 오류를 보고합니다. 정리 방법을 계획하고 심각도 순으로 수정한 다음, 워크스페이스가 깨끗한지 검증해 주세요.',
+
+  'solo.suggest.resolveConflict.merge.title': '진행 중인 merge 해결',
+  'solo.suggest.resolveConflict.merge.detail': 'merge가 진행 중입니다 (.git/MERGE_HEAD 존재)',
+  'solo.suggest.resolveConflict.merge.taskPrompt': 'merge가 진행 중입니다 (.git/MERGE_HEAD 존재). 충돌 파일을 확인하고 해결 전략을 정한 뒤 빌드를 검증하고 merge를 commit해 주세요.',
+
+  'solo.suggest.resolveConflict.rebase.title': '진행 중인 rebase 해결',
+  'solo.suggest.resolveConflict.rebase.detail': 'rebase가 진행 중입니다 (.git/rebase-{merge,apply} 존재)',
+  'solo.suggest.resolveConflict.rebase.taskPrompt': 'rebase가 진행 중입니다 (.git/rebase-{merge,apply} 존재). 각 충돌 커밋을 해결하고 git rebase --continue, 최종 트리를 검증한 뒤 진행해 주세요.',
+
+  'solo.suggest.resolveConflict.cherry-pick.title': '진행 중인 cherry-pick 해결',
+  'solo.suggest.resolveConflict.cherry-pick.detail': 'cherry-pick이 진행 중입니다 (.git/CHERRY_PICK_HEAD 존재)',
+  'solo.suggest.resolveConflict.cherry-pick.taskPrompt': 'cherry-pick이 진행 중입니다 (.git/CHERRY_PICK_HEAD 존재). 충돌 파일을 해결하고 git cherry-pick --continue 후 검증해 주세요.',
+
+  'solo.suggest.generic.title': '기능 또는 수정 사항을 설명',
+  'solo.suggest.generic.detail': '구체적인 작업을 알려주시면 전체 파이프라인을 실행합니다',
+  'solo.suggest.generic.taskPrompt': '',
 
   // ─── Provider 호환성 (가짜 tool_use 감지) ─────────────────
   'providerCompat.notice.title': '도구 호출이 무시되었습니다',
@@ -1318,6 +1383,7 @@ export const kr: Record<TranslationKey, string> = {
   'chat.openSkills': '스킬',
   'chat.openPlugins': '플러그인',
   'chat.coordinatorMode': '오케스트레이션 모드',
+  'chat.soloPipelineMode': '솔로 파이프라인 모드',
   'chat.questionDropped': 'AI가 질문하려 했지만 요청이 유효하지 않거나 답변하기 전에 취소되었습니다.',
   'chat.contextExhausted': '컨텍스트가 가득 찼고 여러 번 압축해도 공간을 확보할 수 없습니다. 새 세션을 시작해 계속하는 것을 권장합니다(이전 요약은 이 세션에 남아 있습니다).',
   'chat.skillPicker.title': '삽입할 스킬 선택',
@@ -2094,4 +2160,8 @@ export const kr: Record<TranslationKey, string> = {
   'pluginPrereq.allInstalledToast': '모든 사전 요구사항이 준비되었습니다.',
   'pluginPrereq.noPlatformInstall': '현재 플랫폼 {platform}용 자동 설치 명령이 없습니다. 위의 문서 링크를 참조하세요.',
   'pluginPrereq.safetyNote': 'cc-haha는 설치 명령을 자동으로 실행하지 않습니다. "터미널에서 열기"는 명령을 클립보드에 복사하고 새 터미널을 열기만 하며, 붙여넣고 Enter를 누르는 것은 사용자의 명시적 동작입니다.',
+  'pluginPrereq.installAll': '원클릭 설치({count})',
+  'pluginPrereq.installAllTooltip': '새 터미널 탭을 열고 {count}개의 설치 명령을 순차적으로 주입하여 실행합니다. 각 명령의 에코와 실행은 터미널에서 직접 확인할 수 있습니다 —— cc-haha는 출력을 숨기지 않습니다.',
+  'pluginPrereq.installAllRunningToast': '{count}개의 설치 명령을 새 터미널 탭에 주입했습니다. 실행을 확인한 후 "다시 확인"을 클릭하세요.',
+  'pluginPrereq.installAllFailedToast': '원클릭 설치에 실패했습니다: {detail}. 개별 명령의 "복사"/"터미널에서 열기" 버튼을 사용하세요.',
 }

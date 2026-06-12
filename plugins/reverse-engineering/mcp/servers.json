@@ -6,55 +6,97 @@
       "args": ["pyghidra-mcp>=0.2.0,<0.3.0"],
       "env": {
         "GHIDRA_INSTALL_DIR": "${user_config.GHIDRA_INSTALL_DIR}"
-      }
-    },
-    "radare2": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@radareorg/radare2-mcp@latest"]
+      },
+      "prerequisites": [
+        {
+          "command": "uvx",
+          "label": "uv (Python tool runner — provides uvx)",
+          "homepage": "https://docs.astral.sh/uv/",
+          "install": {
+            "win32": [
+              { "manager": "winget", "cmd": "winget install --id=astral-sh.uv -e" },
+              { "manager": "scoop", "cmd": "scoop install uv" },
+              { "manager": "powershell", "cmd": "powershell -ExecutionPolicy ByPass -c \"irm https://astral.sh/uv/install.ps1 | iex\"" }
+            ],
+            "darwin": [
+              { "manager": "brew", "cmd": "brew install uv" },
+              { "manager": "shell", "cmd": "curl -LsSf https://astral.sh/uv/install.sh | sh" }
+            ],
+            "linux": [
+              { "manager": "shell", "cmd": "curl -LsSf https://astral.sh/uv/install.sh | sh" },
+              { "manager": "pipx", "cmd": "pipx install uv" }
+            ]
+          }
+        }
+      ]
     },
     "gdb": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "mcp-gdb@latest"]
-    },
-    "lldb": {
-      "type": "stdio",
-      "command": "uvx",
-      "args": [
-        "--with",
-        "mcp",
-        "--from",
-        "git+https://github.com/stass/lldb-mcp@master",
-        "python",
-        "lldb_mcp.py"
-      ]
-    },
-    "jadx": {
-      "type": "stdio",
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/zinja-coder/jadx-mcp-server@main",
-        "jadx-mcp-server"
-      ]
-    },
-    "apktool": {
-      "type": "stdio",
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/zinja-coder/apktool-mcp-server@main",
-        "apktool-mcp-server"
+      "args": ["-y", "mcp-gdb@latest"],
+      "prerequisites": [
+        {
+          "command": "npx",
+          "label": "Node.js (provides npx)",
+          "homepage": "https://nodejs.org/",
+          "install": {
+            "win32": [
+              { "manager": "winget", "cmd": "winget install --id=OpenJS.NodeJS.LTS -e" },
+              { "manager": "scoop", "cmd": "scoop install nodejs-lts" }
+            ],
+            "darwin": [
+              { "manager": "brew", "cmd": "brew install node" }
+            ],
+            "linux": [
+              { "manager": "apt", "cmd": "sudo apt-get install -y nodejs npm" }
+            ]
+          }
+        },
+        {
+          "command": "gdb",
+          "label": "GDB (GNU debugger)",
+          "homepage": "https://www.gnu.org/software/gdb/",
+          "install": {
+            "win32": [
+              { "manager": "scoop", "cmd": "scoop install gdb" },
+              { "manager": "msys2", "cmd": "pacman -S mingw-w64-x86_64-gdb" }
+            ],
+            "darwin": [
+              { "manager": "brew", "cmd": "brew install gdb" }
+            ],
+            "linux": [
+              { "manager": "apt", "cmd": "sudo apt-get install -y gdb" },
+              { "manager": "dnf", "cmd": "sudo dnf install -y gdb" }
+            ]
+          }
+        }
       ]
     },
     "frida": {
       "type": "stdio",
       "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/FuzzySecurity/kahlo-mcp@main",
-        "kahlo-mcp"
+      "args": ["frida-mcp"],
+      "prerequisites": [
+        {
+          "command": "uvx",
+          "label": "uv (Python tool runner — provides uvx)",
+          "homepage": "https://docs.astral.sh/uv/",
+          "install": {
+            "win32": [
+              { "manager": "winget", "cmd": "winget install --id=astral-sh.uv -e" },
+              { "manager": "scoop", "cmd": "scoop install uv" },
+              { "manager": "powershell", "cmd": "powershell -ExecutionPolicy ByPass -c \"irm https://astral.sh/uv/install.ps1 | iex\"" }
+            ],
+            "darwin": [
+              { "manager": "brew", "cmd": "brew install uv" },
+              { "manager": "shell", "cmd": "curl -LsSf https://astral.sh/uv/install.sh | sh" }
+            ],
+            "linux": [
+              { "manager": "shell", "cmd": "curl -LsSf https://astral.sh/uv/install.sh | sh" },
+              { "manager": "pipx", "cmd": "pipx install uv" }
+            ]
+          }
+        }
       ]
     }
   }

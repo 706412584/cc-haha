@@ -11,7 +11,7 @@ import { startAgentSummarization } from '../../services/AgentSummary/agentSummar
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js';
 import { type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS, logEvent } from '../../services/analytics/index.js';
 import { clearDumpState } from '../../services/api/dumpPrompts.js';
-import { completeAgentTask as completeAsyncAgent, createActivityDescriptionResolver, createProgressTracker, enqueueAgentNotification, failAgentTask as failAsyncAgent, getProgressUpdate, getTokenCountFromTracker, isLocalAgentTask, killAsyncAgent, registerAgentForeground, registerAsyncAgent, unregisterAgentForeground, updateAgentProgress as updateAsyncAgentProgress, updateProgressFromMessage } from '../../tasks/LocalAgentTask/LocalAgentTask.js';
+import { completeAgentTask as completeAsyncAgent, createActivityDescriptionResolver, createProgressTracker, enqueueAgentNotification, failAgentTask as failAsyncAgent, getProgressUpdate, getTokenCountFromTracker, isLocalAgentTask, isPanelAgentTask, killAsyncAgent, registerAgentForeground, registerAsyncAgent, unregisterAgentForeground, updateAgentProgress as updateAsyncAgentProgress, updateProgressFromMessage, applyAgentStallStatus } from '../../tasks/LocalAgentTask/LocalAgentTask.js';
 import { checkRemoteAgentEligibility, formatPreconditionError, getRemoteTaskSessionUrl, registerRemoteAgentTask } from '../../tasks/RemoteAgentTask/RemoteAgentTask.js';
 import { assembleToolPool } from '../../tools.js';
 import { asAgentId } from '../../types/ids.js';
@@ -43,13 +43,31 @@ import { createAgentWorktree, hasWorktreeChanges, removeAgentWorktree } from '..
 import { BASH_TOOL_NAME } from '../BashTool/toolName.js';
 import { BackgroundHint } from '../BashTool/UI.js';
 import { FILE_READ_TOOL_NAME } from '../FileReadTool/prompt.js';
+import { SEND_MESSAGE_TOOL_NAME } from '../SendMessageTool/constants.js';
 import { spawnTeammate } from '../shared/spawnMultiAgent.js';
 import { setAgentColor } from './agentColorManager.js';
 import { agentToolResultSchema, classifyHandoffIfNeeded, emitTaskProgress, extractPartialResult, finalizeAgentTool, getLastToolUseName, runAsyncAgentLifecycle } from './agentToolUtils.js';
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js';
 import { AGENT_TOOL_NAME, LEGACY_AGENT_TOOL_NAME, ONE_SHOT_BUILTIN_AGENT_TYPES } from './constants.js';
-import { buildForkedMessages, buildWorktreeNotice, FORK_AGENT, isForkSubagentEnabled, isInForkChild } from './forkSubagent.js';
-import { formatLimitExceededMessage, isLimiterDisabled, noteInvocation } from './invocationLimiter.js';
+import { buildForkedMessages, buildWorktreeNotice, COORDINATOR_RESEARCH_FORK_SUBAGENT_TYPE, FORK_AGENT, type ForkMode, isCoordinatorResearchForkEnabled, isForkSubagentEnabled, isInForkChild } from './forkSubagent.js';
+import { formatLimitExceededMessage, formatNearLimitWarning, isLimiterDisabled, noteInvocation } from './invocationLimiter.js';
+import {
+  detectLazyDelegation,
+  formatLazyDelegationError,
+  isLazyDelegationCheckEnabled,
+} from './lazyDelegationCheck.js';
+import {
+  assessTaskSpec,
+  formatThinSpecError,
+  isTaskSpecStrictEnabled,
+} from './taskSpecQuality.js';
+import {
+  type ContinueCandidateTask,
+  extractTouchedFilesFromActivities,
+  findContinueCandidate,
+  formatContinueHintError,
+  isContinueHintEnabled,
+} from './workerContinueAdvisor.js';
 import type { AgentDefinition } from './loadAgentsDir.js';
 import { filterAgentsByMcpRequirements, hasRequiredMcpServers, isBuiltInAgent } from './loadAgentsDir.js';
 import { getPrompt } from './prompt.js';
@@ -322,6 +340,21 @@ export const AgentTool = buildTool({
     // - subagent_type omitted, gate on: fork path (undefined)
     // - subagent_type omitted, gate off: default general-purpose
 
+    // Lazy-delegation lint: reject prompts that forward a previous
+    // worker's report instead of synthesizing it (e.g. "based on the
+    // findings, fix the bug"). Workers can't see the conversation, so
+    // such prompts give them nothing to act on. This sits BEFORE the
+    // specialist redirect so a lazy prompt is rejected for the right
+    // reason (re-write the prompt) rather than redirected to a
+    // specialist that will also be unable to act on it. Disabled with
+    // CLAUDE_CODE_LAZY_DELEGATION_CHECK=0.
+    if (isLazyDelegationCheckEnabled()) {
+      const lazy = detectLazyDelegation(prompt);
+      if (lazy) {
+        throw new Error(formatLazyDelegationError(lazy, AGENT_TOOL_NAME));
+      }
+    }
+
     // General-purpose default-strict gate: when subagent_type is omitted
     // and the prompt contains a strong specialist signal (e.g. "code
     // review", "security audit", "root cause"), refuse to fall back to
@@ -341,8 +374,104 @@ export const AgentTool = buildTool({
       }
     }
 
+    // Coordinator-mode specialist redirect: in coordinator mode the
+    // model must pick `worker` or a specialist explicitly (general-purpose
+    // is excluded from the registry). The model often picks `worker` for
+    // tasks that clearly fit a specialist (code review, security audit,
+    // verification). Run the same suggestSpecialist() rules and redirect
+    // when a strong specialist signal is present. Disabled with
+    // CLAUDE_CODE_COORDINATOR_SPECIALIST_ROUTER=0.
+    if (
+      isCoordinatorMode() &&
+      subagent_type === 'worker' &&
+      process.env.CLAUDE_CODE_COORDINATOR_SPECIALIST_ROUTER !== '0'
+    ) {
+      const allAgents = toolUseContext.options.agentDefinitions.activeAgents;
+      const availableTypes = new Set(allAgents.map(a => a.agentType));
+      const suggested = suggestSpecialist(prompt, availableTypes);
+      // 'worker' is generic — only redirect if the suggested type is a
+      // real specialist that's actually registered for this coordinator.
+      if (suggested && suggested !== 'worker' && availableTypes.has(suggested)) {
+        throw new Error(formatSpecialistRedirectMessage(suggested, AGENT_TOOL_NAME));
+      }
+    }
+
+    // Coordinator-mode task-spec strictness (OPT-IN, off by default). When
+    // enabled, reject a clearly under-specified worker brief — workers can't
+    // see this conversation, so a prompt with no action / file / criteria
+    // gives them nothing to execute. Skips the fork path (no subagent_type)
+    // since a fork inherits the parent's full context. Enable with
+    // CLAUDE_CODE_COORDINATOR_TASK_SPEC_STRICT=1.
+    if (
+      isCoordinatorMode() &&
+      !!subagent_type &&
+      isTaskSpecStrictEnabled()
+    ) {
+      const assessment = assessTaskSpec(prompt);
+      if (assessment.quality === 'underspecified') {
+        throw new Error(formatThinSpecError(assessment, AGENT_TOOL_NAME));
+      }
+    }
+
+    // Coordinator-mode worker-continue advisor (OPT-IN, off by default). When
+    // a recently-completed panel worker of the SAME subagent_type already
+    // touched files this prompt mentions, recommend SendMessage instead of
+    // a fresh spawn. Reuses the prior worker's prompt cache + loaded context
+    // (typically 10-50k tokens of saved prefill). Skips fork (no
+    // subagent_type) since fork inherits parent context anyway. Enable with
+    // CLAUDE_CODE_COORDINATOR_CONTINUE_HINT=1.
+    if (
+      isCoordinatorMode() &&
+      !!subagent_type &&
+      isContinueHintEnabled()
+    ) {
+      const tasks = appState.tasks;
+      const candidates: ContinueCandidateTask[] = [];
+      for (const t of Object.values(tasks)) {
+        // Only panel-tracked agent tasks (excludes main-session); only
+        // completed (running -> address via SendMessage anyway, failed/killed
+        // -> don't revive blindly); only those still visible (evictAfter !== 0
+        // means a user x-key dismissal, no longer a continue candidate).
+        if (!isPanelAgentTask(t)) continue;
+        if (t.status !== 'completed') continue;
+        if (t.evictAfter === 0) continue;
+        const recent = t.progress?.recentActivities ?? [];
+        candidates.push({
+          agentId: t.agentId,
+          agentType: t.agentType,
+          description: t.description,
+          startTime: t.startTime,
+          touchedFiles: extractTouchedFilesFromActivities(recent),
+          isCompleted: true,
+        });
+      }
+      const winner = findContinueCandidate({
+        prompt,
+        subagentType: subagent_type,
+        candidates,
+      });
+      if (winner) {
+        logEvent('tengu_agent_continue_hint', {
+          agent_type: subagent_type as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+          shared_files: String(winner.sharedFiles.length) as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+          candidate_age_ms: String(winner.candidateAgeMs) as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+        });
+        throw new Error(
+          formatContinueHintError(winner, AGENT_TOOL_NAME, SEND_MESSAGE_TOOL_NAME),
+        );
+      }
+    }
+
     const effectiveType = subagent_type ?? (isForkSubagentEnabled() ? undefined : GENERAL_PURPOSE_AGENT.agentType);
-    const isForkPath = effectiveType === undefined;
+    // Coordinator-research-fork: an explicit `subagent_type: 'fork'` in
+    // coordinator mode (with the opt-in env flag) routes through the same
+    // fork path as an omitted subagent_type. The boilerplate framing tag
+    // is unchanged so isInForkChild's recursive-fork guard still fires.
+    const isCoordinatorResearchFork =
+      subagent_type === COORDINATOR_RESEARCH_FORK_SUBAGENT_TYPE &&
+      isCoordinatorResearchForkEnabled();
+    const isForkPath = effectiveType === undefined || isCoordinatorResearchFork;
+    const forkMode: ForkMode = isCoordinatorResearchFork ? 'coordinator-research' : 'normal';
     let selectedAgent: AgentDefinition;
     if (isForkPath) {
       // Recursive fork guard: fork children keep the Agent tool in their
@@ -404,6 +533,7 @@ export const AgentTool = buildTool({
     // chains (e.g. an in-process teammate spawning a helper) don't pile
     // up against the same cap. The user can raise the cap per type or
     // disable the gate entirely via env.
+    let pendingNearLimitWarning: string | undefined;
     if (
       !toolUseContext.agentId &&
       isBuiltInAgent(selectedAgent) &&
@@ -412,6 +542,18 @@ export const AgentTool = buildTool({
       const limit = noteInvocation(selectedAgent.agentType);
       if (limit.capped) {
         throw new Error(formatLimitExceededMessage(selectedAgent.agentType, limit));
+      }
+      // One-shot reminder on the LAST allowed invocation. Prepended to the
+      // subagent's result content below so the model reads "you're at the
+      // cap" alongside the worker's report and can change tack before the
+      // next call is hard-blocked.
+      if (limit.nearLimit) {
+        pendingNearLimitWarning = formatNearLimitWarning(selectedAgent.agentType, limit);
+        logEvent('tengu_agent_invocation_near_limit', {
+          agent_type: selectedAgent.agentType as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+          count: limit.count as unknown as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+          limit: limit.limit as unknown as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+        });
       }
     }
 
@@ -562,7 +704,7 @@ export const AgentTool = buildTool({
           appendSystemPrompt: toolUseContext.options.appendSystemPrompt
         });
       }
-      promptMessages = buildForkedMessages(prompt, assistantMessage);
+      promptMessages = buildForkedMessages(prompt, assistantMessage, forkMode);
     } else {
       try {
         const additionalWorkingDirectories = Array.from(appState.toolPermissionContext.additionalWorkingDirectories.keys());
@@ -984,6 +1126,12 @@ export const AgentTool = buildTool({
                         agentId: asAgentId(backgroundedTaskId),
                         abortController: task.abortController
                       },
+                      // Stall watchdog: when the worker stops yielding for
+                      // STALL_THRESHOLD_MS (default 90s), surface a
+                      // `(stalled NNs) ...` prefix on progress.summary so the
+                      // panel row visibly shows the wedge. Cleared when the
+                      // worker yields again.
+                      onStallTransition: status => applyAgentStallStatus(backgroundedTaskId, status, rootSetAppState),
                       onCacheSafeParams: getSdkAgentProgressSummariesEnabled() ? (params: CacheSafeParams) => {
                         const {
                           stop
@@ -1002,6 +1150,19 @@ export const AgentTool = buildTool({
                       }
                     }
                     const agentResult = finalizeAgentTool(agentMessages, backgroundedTaskId, metadata);
+
+                    // Prepend the near-limit reminder so the coordinator reads
+                    // it alongside the worker's final report. Done before
+                    // completeAsyncAgent / enqueueAgentNotification so the
+                    // notification's finalMessage (extractTextContent of the
+                    // same content array) carries the reminder too.
+                    if (pendingNearLimitWarning) {
+                      agentResult.content = [
+                        { type: 'text' as const, text: pendingNearLimitWarning },
+                        ...agentResult.content,
+                      ];
+                      pendingNearLimitWarning = undefined;
+                    }
 
                     // Mark task completed FIRST so TaskOutput(block=true)
                     // unblocks immediately, then notify the parent before
@@ -1282,6 +1443,17 @@ export const AgentTool = buildTool({
           logForDebugging(`Sync agent recovering from error with ${agentMessages.length} messages`);
         }
         const agentResult = finalizeAgentTool(agentMessages, syncAgentId, metadata);
+
+        // Prepend the near-limit reminder to the subagent's content so the
+        // coordinator reads it as part of the result block. Mutates in
+        // place — agentResult is owned by this call site, no aliasing.
+        if (pendingNearLimitWarning) {
+          agentResult.content = [
+            { type: 'text' as const, text: pendingNearLimitWarning },
+            ...agentResult.content,
+          ];
+          pendingNearLimitWarning = undefined;
+        }
         if (feature('TRANSCRIPT_CLASSIFIER')) {
           const currentAppState = toolUseContext.getAppState();
           const handoffWarning = await classifyHandoffIfNeeded({

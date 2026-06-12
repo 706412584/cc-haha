@@ -48,6 +48,7 @@ import type {
   CreateProviderInput,
   UpdateProviderInput,
   TestProviderInput,
+  FetchModelsInput,
   ProviderTestResult,
   ProviderTestStepResult,
   ApiFormat,
@@ -533,6 +534,82 @@ export class ProviderService {
     const step2 = await this.testProxyPipeline(base, input.apiKey, modelId, format, networkSettings)
 
     return { connectivity: step1, proxy: step2 }
+  }
+
+  /**
+   * Server-side fetch of an upstream provider's `/v1/models` endpoint.
+   *
+   * The desktop "获取模型" button used to do this directly from the
+   * renderer via `fetch()`. That breaks for any provider whose URL is
+   * plain `http://` (mixed-content block in the secure-context webview)
+   * or whose `/v1/models` doesn't return permissive CORS headers — both
+   * are common with self-hosted relay endpoints. Routing through the
+   * server has neither restriction.
+   *
+   * Returns the upstream JSON response as-is. The desktop's
+   * `extractModelEntries` walks `data` / `models` / `items` / `results`
+   * arrays and pulls `{ id, contextWindow }`, so any of the common
+   * shapes (OpenAI, Anthropic, OpenAI-compatible) works untransformed.
+   */
+  async fetchUpstreamModels(
+    input: FetchModelsInput,
+  ): Promise<{ status: number; data: unknown }> {
+    const format: ApiFormat = input.apiFormat ?? 'anthropic'
+    const networkSettings = await loadNetworkSettings()
+    // Strip trailing slashes; if the user already wrote `…/v1`, append
+    // only `/models` (mirrors the previous client-side logic so existing
+    // baseUrl shapes continue to work).
+    const trimmed = input.baseUrl.replace(/\/+$/, '')
+    const url = trimmed.endsWith('/v1') ? `${trimmed}/models` : `${trimmed}/v1/models`
+
+    const headers: Record<string, string> = { Accept: 'application/json' }
+    if (format === 'anthropic') {
+      headers['x-api-key'] = input.apiKey
+      headers['anthropic-version'] = '2023-06-01'
+    } else {
+      headers['Authorization'] = `Bearer ${input.apiKey}`
+    }
+
+    const proxyOptions = getProxyFetchOptions({
+      proxyUrl: getManualNetworkProxyUrl(networkSettings),
+    })
+    let response: Response
+    try {
+      response = await fetch(url, {
+        method: 'GET',
+        headers,
+        signal: AbortSignal.timeout(networkSettings.aiRequestTimeoutMs),
+        ...proxyOptions,
+      })
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'TimeoutError') {
+        throw ApiError.badGateway(
+          `Upstream timed out after ${Math.round(
+            networkSettings.aiRequestTimeoutMs / 1000,
+          )}s`,
+        )
+      }
+      throw ApiError.badGateway(
+        `Upstream fetch failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+
+    const data: unknown = await response.json().catch(() => null)
+    if (!response.ok) {
+      // Surface the upstream's status verbatim so the user can see whether
+      // it was 401 (bad key), 403 (key has no list-models scope), 404
+      // (relay doesn't expose /v1/models at all), or 5xx (upstream sick).
+      const upstreamErrorMessage =
+        data && typeof data === 'object' && 'error' in data && data.error
+          ? typeof (data.error as { message?: unknown }).message === 'string'
+            ? (data.error as { message: string }).message
+            : null
+          : null
+      throw ApiError.badGateway(
+        `Upstream returned HTTP ${response.status}${upstreamErrorMessage ? `: ${upstreamErrorMessage}` : ''}`,
+      )
+    }
+    return { status: response.status, data }
   }
 
   /** Step 1: Direct upstream call to verify connectivity, auth, and model. */
