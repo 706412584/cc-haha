@@ -726,4 +726,160 @@ describe('workspacePanelStore', () => {
     expect(state.errors.previewByTabId['session-clear::file:src/a.ts']).toBeUndefined()
     expect(state.errors.previewByTabId['session-reset::file:src/b.ts']).toBeUndefined()
   })
+
+  describe('notifyAgentFileEdit (Phase 4)', () => {
+    it('flags an open buffer with an agent-source conflict when paths match by suffix', () => {
+      const tabId = 'file:src/app.ts'
+      useWorkspacePanelStore.setState((state) => ({
+        ...state,
+        bufferStateByTabId: {
+          ...state.bufferStateByTabId,
+          [tabId]: {
+            tabId,
+            path: 'src/app.ts',
+            baseHash: 'a'.repeat(64),
+            baseContent: 'old',
+            currentContent: 'old',
+            isDirty: false,
+            encoding: 'utf-8',
+            lineEnding: 'LF',
+            conflict: null,
+          },
+        },
+      }))
+
+      useWorkspacePanelStore.getState().notifyAgentFileEdit(
+        'session-agent',
+        'C:/Users/me/repo/src/app.ts',
+      )
+
+      const buffer = useWorkspacePanelStore.getState().bufferStateByTabId[tabId]!
+      expect(buffer.conflict).toMatchObject({ source: 'agent' })
+      expect(buffer.conflict!.hash).toBe('agent-edit')
+    })
+
+    it('also matches Windows backslash absolute paths', () => {
+      const tabId = 'file:src/app.ts'
+      useWorkspacePanelStore.setState((state) => ({
+        ...state,
+        bufferStateByTabId: {
+          ...state.bufferStateByTabId,
+          [tabId]: {
+            tabId,
+            path: 'src/app.ts',
+            baseHash: 'a'.repeat(64),
+            baseContent: 'old',
+            currentContent: 'old',
+            isDirty: false,
+            encoding: 'utf-8',
+            lineEnding: 'LF',
+            conflict: null,
+          },
+        },
+      }))
+
+      useWorkspacePanelStore.getState().notifyAgentFileEdit(
+        'session-agent',
+        'C:\\Users\\me\\repo\\src\\app.ts',
+      )
+
+      const buffer = useWorkspacePanelStore.getState().bufferStateByTabId[tabId]!
+      expect(buffer.conflict?.source).toBe('agent')
+    })
+
+    it('does not flag a buffer whose path is a non-suffix substring of the agent edit path', () => {
+      const tabId = 'file:bar.ts'
+      useWorkspacePanelStore.setState((state) => ({
+        ...state,
+        bufferStateByTabId: {
+          ...state.bufferStateByTabId,
+          [tabId]: {
+            tabId,
+            path: 'bar.ts',
+            baseHash: 'a'.repeat(64),
+            baseContent: 'x',
+            currentContent: 'x',
+            isDirty: false,
+            encoding: 'utf-8',
+            lineEnding: 'LF',
+            conflict: null,
+          },
+        },
+      }))
+
+      // foobar.ts ends with "bar.ts" but NOT with "/bar.ts" — must not match.
+      useWorkspacePanelStore.getState().notifyAgentFileEdit(
+        'session-agent',
+        '/repo/foobar.ts',
+      )
+
+      const buffer = useWorkspacePanelStore.getState().bufferStateByTabId[tabId]!
+      expect(buffer.conflict).toBeNull()
+    })
+
+    it('does not clobber an existing conflict on the same buffer', () => {
+      const tabId = 'file:src/app.ts'
+      const existingConflict = {
+        source: 'user' as const,
+        hash: 'b'.repeat(64),
+        timestamp: 100,
+      }
+      useWorkspacePanelStore.setState((state) => ({
+        ...state,
+        bufferStateByTabId: {
+          ...state.bufferStateByTabId,
+          [tabId]: {
+            tabId,
+            path: 'src/app.ts',
+            baseHash: 'a'.repeat(64),
+            baseContent: 'x',
+            currentContent: 'x',
+            isDirty: false,
+            encoding: 'utf-8',
+            lineEnding: 'LF',
+            conflict: existingConflict,
+          },
+        },
+      }))
+
+      useWorkspacePanelStore.getState().notifyAgentFileEdit(
+        'session-agent',
+        '/repo/src/app.ts',
+      )
+
+      const buffer = useWorkspacePanelStore.getState().bufferStateByTabId[tabId]!
+      expect(buffer.conflict).toBe(existingConflict)
+    })
+
+    it('triggers loadStatus when the panel is open for the session', async () => {
+      mocks.getWorkspaceStatusMock.mockResolvedValue({
+        state: 'ok',
+        workDir: '/repo',
+        repoName: 'repo',
+        branch: 'main',
+        isGitRepo: true,
+        changedFiles: [],
+      })
+      useWorkspacePanelStore.getState().openPanel('session-loaded')
+
+      useWorkspacePanelStore.getState().notifyAgentFileEdit(
+        'session-loaded',
+        '/repo/src/whatever.ts',
+      )
+
+      // Drain any pending microtasks scheduled by void loadStatus(...)
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(mocks.getWorkspaceStatusMock).toHaveBeenCalledWith('session-loaded')
+    })
+
+    it('skips loadStatus when the panel is closed for the session', () => {
+      // Panel default-state isOpen is false — never opened.
+      useWorkspacePanelStore.getState().notifyAgentFileEdit(
+        'session-closed',
+        '/repo/src/whatever.ts',
+      )
+      expect(mocks.getWorkspaceStatusMock).not.toHaveBeenCalled()
+    })
+  })
 })
