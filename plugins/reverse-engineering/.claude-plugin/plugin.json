@@ -1,6 +1,6 @@
 {
   "name": "reverse-engineering",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Multi-platform reverse engineering toolkit. Bundles Ghidra / radare2 / JADX / apktool / Frida / GDB / LLDB MCP servers, an orchestration agent, and per-target skills (PE/ELF/Mach-O, raw firmware blobs incl. MIPS/ARM/Cortex-M/PowerPC/68k/SuperH/RISC-V, APK, iOS, Frida instrumentation, GDB/LLDB single-step debugging, crackme).",
   "author": {
     "name": "cc-haha"

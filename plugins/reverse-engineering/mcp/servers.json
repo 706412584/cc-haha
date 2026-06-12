@@ -134,7 +134,8 @@
           "install": {
             "win32": [
               { "manager": "winget", "cmd": "winget install --id=astral-sh.uv -e" },
-              { "manager": "scoop", "cmd": "scoop install uv" }
+              { "manager": "scoop", "cmd": "scoop install uv" },
+              { "manager": "powershell", "cmd": "powershell -ExecutionPolicy ByPass -c \"irm https://astral.sh/uv/install.ps1 | iex\"" }
             ],
             "darwin": [
               { "manager": "brew", "cmd": "brew install uv" },
@@ -143,6 +144,25 @@
             "linux": [
               { "manager": "shell", "cmd": "curl -LsSf https://astral.sh/uv/install.sh | sh" },
               { "manager": "pipx", "cmd": "pipx install uv" }
+            ]
+          }
+        },
+        {
+          "command": "lldb",
+          "label": "LLDB (LLVM debugger)",
+          "homepage": "https://lldb.llvm.org/",
+          "install": {
+            "win32": [
+              { "manager": "winget", "cmd": "winget install --id=LLVM.LLVM -e" },
+              { "manager": "scoop", "cmd": "scoop install llvm" }
+            ],
+            "darwin": [
+              { "manager": "shell", "cmd": "xcode-select --install" },
+              { "manager": "brew", "cmd": "brew install llvm" }
+            ],
+            "linux": [
+              { "manager": "apt", "cmd": "sudo apt-get install -y lldb" },
+              { "manager": "dnf", "cmd": "sudo dnf install -y lldb" }
             ]
           }
         }
@@ -193,6 +213,23 @@
               { "manager": "dnf", "cmd": "sudo dnf install -y java-17-openjdk-devel" }
             ]
           }
+        },
+        {
+          "command": "jadx",
+          "label": "JADX (Java/Android decompiler)",
+          "homepage": "https://github.com/skylot/jadx",
+          "install": {
+            "win32": [
+              { "manager": "scoop", "cmd": "scoop install jadx" }
+            ],
+            "darwin": [
+              { "manager": "brew", "cmd": "brew install jadx" }
+            ],
+            "linux": [
+              { "manager": "apt", "cmd": "sudo apt-get install -y jadx" },
+              { "manager": "snap", "cmd": "sudo snap install jadx" }
+            ]
+          }
         }
       ]
     },
@@ -241,6 +278,23 @@
               { "manager": "dnf", "cmd": "sudo dnf install -y java-17-openjdk-devel" }
             ]
           }
+        },
+        {
+          "command": "apktool",
+          "label": "Apktool (Android APK reverse engineering)",
+          "homepage": "https://apktool.org/",
+          "install": {
+            "win32": [
+              { "manager": "scoop", "cmd": "scoop install apktool" }
+            ],
+            "darwin": [
+              { "manager": "brew", "cmd": "brew install apktool" }
+            ],
+            "linux": [
+              { "manager": "apt", "cmd": "sudo apt-get install -y apktool" },
+              { "manager": "snap", "cmd": "sudo snap install apktool" }
+            ]
+          }
         }
       ]
     },
@@ -269,6 +323,27 @@
             "linux": [
               { "manager": "shell", "cmd": "curl -LsSf https://astral.sh/uv/install.sh | sh" },
               { "manager": "pipx", "cmd": "pipx install uv" }
+            ]
+          }
+        },
+        {
+          "command": "frida",
+          "label": "Frida (dynamic instrumentation toolkit — provides frida CLI)",
+          "homepage": "https://frida.re/",
+          "install": {
+            "win32": [
+              { "manager": "uv", "cmd": "uv tool install frida-tools" },
+              { "manager": "pipx", "cmd": "pipx install frida-tools" },
+              { "manager": "pip", "cmd": "pip install frida-tools" }
+            ],
+            "darwin": [
+              { "manager": "uv", "cmd": "uv tool install frida-tools" },
+              { "manager": "brew", "cmd": "brew install frida" },
+              { "manager": "pipx", "cmd": "pipx install frida-tools" }
+            ],
+            "linux": [
+              { "manager": "uv", "cmd": "uv tool install frida-tools" },
+              { "manager": "pipx", "cmd": "pipx install frida-tools" }
             ]
           }
         }
