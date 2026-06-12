@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { MessageEntry } from '../types/session'
+import type { BackgroundAgentTask } from '../types/chat'
 import { useSessionRuntimeStore } from './sessionRuntimeStore'
 
 const {
@@ -823,6 +824,248 @@ describe('chatStore history mapping', () => {
       status: 'completed',
       description: 'Review app',
       summary: 'Agent completed',
+    })
+  })
+
+  it('loadHistory restores terminal background_task UI messages when notifications are absent', async () => {
+    vi.mocked(sessionsApi.getMessages).mockResolvedValueOnce({
+      messages: [
+        {
+          id: 'bg-message-1',
+          type: 'background_task',
+          timestamp: '2026-04-06T00:00:10.000Z',
+          task: {
+            taskId: 'critic-task-1',
+            toolUseId: 'critic-tool-1',
+            status: 'completed',
+            description: 'Review the implementation',
+            taskType: 'local_agent',
+            workflowName: 'solo-council',
+            prompt: 'Check the diff',
+            summary: 'Review passed',
+            lastToolName: 'Read',
+            outputFile: '/tmp/critic.txt',
+            usage: { totalTokens: 321, toolUses: 4, durationMs: 12345 },
+            startedAt: 1000,
+            updatedAt: 2000,
+          } satisfies BackgroundAgentTask,
+        } as unknown as MessageEntry,
+      ],
+    })
+
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({ messages: [] }),
+      },
+    })
+
+    await useChatStore.getState().loadHistory(TEST_SESSION_ID)
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.backgroundAgentTasks?.['critic-task-1']).toMatchObject({
+      taskId: 'critic-task-1',
+      toolUseId: 'critic-tool-1',
+      status: 'completed',
+      description: 'Review the implementation',
+      taskType: 'local_agent',
+      workflowName: 'solo-council',
+      prompt: 'Check the diff',
+      summary: 'Review passed',
+      lastToolName: 'Read',
+      outputFile: '/tmp/critic.txt',
+      usage: { totalTokens: 321, toolUses: 4, durationMs: 12345 },
+      startedAt: 1000,
+      updatedAt: 2000,
+    })
+  })
+
+  it('reloadHistory restores terminal background_task UI messages when notifications are empty', async () => {
+    vi.mocked(sessionsApi.getMessages).mockResolvedValueOnce({
+      messages: [
+        {
+          id: 'bg-message-1',
+          type: 'background_task',
+          timestamp: '2026-04-06T00:00:10.000Z',
+          task: {
+            taskId: 'critic-task-1',
+            toolUseId: 'critic-tool-1',
+            status: 'failed',
+            description: 'Review the implementation',
+            taskType: 'local_agent',
+            workflowName: 'solo-council',
+            prompt: 'Check the diff',
+            summary: 'Review failed',
+            startedAt: 1000,
+            updatedAt: 2000,
+          } satisfies BackgroundAgentTask,
+        } as unknown as MessageEntry,
+      ],
+      taskNotifications: [],
+    })
+
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          messages: [{ id: 'old', type: 'assistant_text', content: 'old', timestamp: 1 }],
+          backgroundAgentTasks: {},
+        }),
+      },
+    })
+
+    await useChatStore.getState().reloadHistory(TEST_SESSION_ID)
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.backgroundAgentTasks?.['critic-task-1']).toMatchObject({
+      taskId: 'critic-task-1',
+      toolUseId: 'critic-tool-1',
+      status: 'failed',
+      description: 'Review the implementation',
+      taskType: 'local_agent',
+      workflowName: 'solo-council',
+      prompt: 'Check the diff',
+      summary: 'Review failed',
+      startedAt: 1000,
+      updatedAt: 2000,
+    })
+  })
+
+  it('does not restore message-only running background_task entries after history restore', async () => {
+    vi.mocked(sessionsApi.getMessages).mockResolvedValueOnce({
+      messages: [
+        {
+          id: 'bg-running-message',
+          type: 'background_task',
+          timestamp: '2026-04-06T00:00:10.000Z',
+          task: {
+            taskId: 'stale-running-task',
+            toolUseId: 'stale-running-tool',
+            status: 'running',
+            description: 'Old running task',
+            taskType: 'local_agent',
+            startedAt: 1000,
+            updatedAt: 2000,
+          } satisfies BackgroundAgentTask,
+        } as unknown as MessageEntry,
+      ],
+    })
+
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({ messages: [] }),
+      },
+    })
+
+    await useChatStore.getState().loadHistory(TEST_SESSION_ID)
+
+    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.backgroundAgentTasks?.['stale-running-task']).toBeUndefined()
+    expect(session?.messages.some((message) => message.type === 'background_task')).toBe(false)
+  })
+
+  it('merges message-derived metadata with notification-derived terminal fields', async () => {
+    vi.mocked(sessionsApi.getMessages).mockResolvedValueOnce({
+      messages: [
+        {
+          id: 'bg-message-1',
+          type: 'background_task',
+          timestamp: '2026-04-06T00:00:10.000Z',
+          task: {
+            taskId: 'message-task-id',
+            toolUseId: 'shared-tool-id',
+            status: 'completed',
+            description: 'Review the implementation',
+            taskType: 'local_agent',
+            workflowName: 'solo-council',
+            prompt: 'Check the diff',
+            summary: 'Message summary',
+            outputFile: '/tmp/message-output.txt',
+            usage: { totalTokens: 100, toolUses: 2, durationMs: 3000 },
+            startedAt: 1000,
+            updatedAt: 2000,
+          } satisfies BackgroundAgentTask,
+        } as unknown as MessageEntry,
+      ],
+      taskNotifications: [
+        {
+          taskId: 'notification-task-id',
+          toolUseId: 'shared-tool-id',
+          status: 'failed',
+          summary: 'Notification summary',
+          outputFile: '/tmp/notification-output.txt',
+          usage: { totalTokens: 200, toolUses: 5, durationMs: 6000 },
+          timestamp: '2026-04-06T00:00:20.000Z',
+        },
+      ],
+    })
+
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({ messages: [] }),
+      },
+    })
+
+    await useChatStore.getState().loadHistory(TEST_SESSION_ID)
+
+    const task = useChatStore.getState().sessions[TEST_SESSION_ID]?.backgroundAgentTasks?.['notification-task-id']
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.backgroundAgentTasks?.['message-task-id']).toBeUndefined()
+    expect(task).toMatchObject({
+      taskId: 'notification-task-id',
+      toolUseId: 'shared-tool-id',
+      status: 'failed',
+      description: 'Review the implementation',
+      taskType: 'local_agent',
+      workflowName: 'solo-council',
+      prompt: 'Check the diff',
+      summary: 'Notification summary',
+      outputFile: '/tmp/notification-output.txt',
+      usage: { totalTokens: 200, toolUses: 5, durationMs: 6000 },
+      startedAt: 1000,
+      updatedAt: new Date('2026-04-06T00:00:20.000Z').getTime(),
+    })
+  })
+
+  it('preserves persisted background_task timestamps and falls back to the message timestamp', async () => {
+    const fallbackTimestamp = new Date('2026-04-06T00:00:30.000Z').getTime()
+    vi.mocked(sessionsApi.getMessages).mockResolvedValueOnce({
+      messages: [
+        {
+          id: 'bg-preserved-times',
+          type: 'background_task',
+          timestamp: '2026-04-06T00:00:10.000Z',
+          task: {
+            taskId: 'preserved-times-task',
+            status: 'completed',
+            startedAt: 111,
+            updatedAt: 222,
+          } satisfies BackgroundAgentTask,
+        } as unknown as MessageEntry,
+        {
+          id: 'bg-fallback-times',
+          type: 'background_task',
+          timestamp: '2026-04-06T00:00:30.000Z',
+          task: {
+            taskId: 'fallback-times-task',
+            status: 'stopped',
+            startedAt: Number.NaN,
+          } as BackgroundAgentTask,
+        } as unknown as MessageEntry,
+      ],
+    })
+
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({ messages: [] }),
+      },
+    })
+
+    await useChatStore.getState().loadHistory(TEST_SESSION_ID)
+
+    const tasks = useChatStore.getState().sessions[TEST_SESSION_ID]?.backgroundAgentTasks
+    expect(tasks?.['preserved-times-task']).toMatchObject({
+      startedAt: 111,
+      updatedAt: 222,
+    })
+    expect(tasks?.['fallback-times-task']).toMatchObject({
+      startedAt: fallbackTimestamp,
+      updatedAt: fallbackTimestamp,
     })
   })
 

@@ -942,12 +942,17 @@ async function fetchAndMapSessionHistory(sessionId: string) {
     ...reconstructAgentNotifications(messages),
     ...agentNotificationRecordFromList(taskNotifications ?? []),
   }
+  const restoredMessageBackgroundTasks = backgroundTaskRecordFromMessages(uiMessages)
+  const restoredNotificationBackgroundTasks = backgroundTaskRecordFromNotifications(Object.values(restoredNotifications))
   return {
     rawMessages: messages,
     uiMessages,
     activeGoal: deriveActiveGoalFromMessages(uiMessages),
     restoredNotifications,
-    restoredBackgroundTasks: backgroundTaskRecordFromNotifications(Object.values(restoredNotifications)),
+    restoredBackgroundTasks: mergeBackgroundAgentTaskRecords(
+      restoredMessageBackgroundTasks,
+      restoredNotificationBackgroundTasks,
+    ),
     lastTodos: extractLastTodoWriteFromHistory(messages),
     hasMessagesAfterTaskCompletion: hasUserMessagesAfterTaskCompletion(messages),
   }
@@ -2595,6 +2600,8 @@ function upsertBackgroundAgentTask(
   if (existingKey && existingKey !== event.taskId) {
     delete next[existingKey]
   }
+  const eventStartedAt = Number.isFinite(event.startedAt) ? event.startedAt : undefined
+  const eventUpdatedAt = Number.isFinite(event.updatedAt) ? event.updatedAt : undefined
   return {
     ...next,
     [event.taskId]: {
@@ -2609,8 +2616,8 @@ function upsertBackgroundAgentTask(
       lastToolName: event.lastToolName ?? existing?.lastToolName,
       outputFile: event.outputFile ?? existing?.outputFile,
       usage: event.usage ?? existing?.usage,
-      startedAt: existing?.startedAt ?? now,
-      updatedAt: now,
+      startedAt: existing?.startedAt ?? eventStartedAt ?? now,
+      updatedAt: eventUpdatedAt ?? now,
     },
   }
 }
@@ -2769,6 +2776,34 @@ function agentNotificationRecordFromList(
   return Object.fromEntries(
     notifications.map((notification) => [notification.toolUseId, notification]),
   )
+}
+
+function backgroundTaskRecordFromMessages(messages: UIMessage[]): Record<string, BackgroundAgentTask> {
+  return messages.reduce<Record<string, BackgroundAgentTask>>((tasks, message) => {
+    if (message.type !== 'background_task' || message.task.status === 'running') return tasks
+    const messageTimestamp = Number.isFinite(message.timestamp) ? message.timestamp : Date.now()
+    const startedAt = Number.isFinite(message.task.startedAt)
+      ? message.task.startedAt
+      : messageTimestamp
+    const updatedAt = Number.isFinite(message.task.updatedAt)
+      ? message.task.updatedAt
+      : messageTimestamp
+    return upsertBackgroundAgentTask(tasks, {
+      taskId: message.task.taskId,
+      toolUseId: message.task.toolUseId,
+      status: message.task.status,
+      description: message.task.description,
+      taskType: message.task.taskType,
+      workflowName: message.task.workflowName,
+      prompt: message.task.prompt,
+      summary: message.task.summary,
+      lastToolName: message.task.lastToolName,
+      outputFile: message.task.outputFile,
+      usage: message.task.usage,
+      startedAt,
+      updatedAt,
+    }, updatedAt)
+  }, {})
 }
 
 function backgroundTaskRecordFromNotifications(
@@ -3017,6 +3052,19 @@ export function mapHistoryMessagesToUiMessages(
     }
 
     const timestamp = new Date(msg.timestamp).getTime()
+    const backgroundTaskMessage = msg as unknown as { id?: string; type?: string; task?: BackgroundAgentTask }
+    if (backgroundTaskMessage.type === 'background_task') {
+      const task = backgroundTaskMessage.task
+      if (task && task.status !== 'running') {
+        uiMessages.push({
+          id: backgroundTaskMessage.id || nextId(),
+          type: 'background_task',
+          task,
+          timestamp: Number.isFinite(timestamp) ? timestamp : Date.now(),
+        })
+      }
+      continue
+    }
     if (msg.type === 'system' && typeof msg.content === 'string') {
       if (msg.content.trim() === 'Conversation compacted' || msg.content.trim() === 'Context compacted') {
         const compactMessages = appendOrUpdateTailCompactSummary(
