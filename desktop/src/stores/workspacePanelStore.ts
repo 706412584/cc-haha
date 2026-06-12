@@ -132,6 +132,15 @@ type WorkspacePanelStore = {
   setBufferState: (tabId: string, content: string) => void
   applyExternalSave: (tabId: string, event: WorkspaceExternalSavePayload) => void
   acknowledgeConflict: (tabId: string, action: 'reload' | 'keepMine' | 'openConflict') => void
+  /**
+   * React to an agent (CLI) file edit observed via the chat tool stream.
+   * Unlike `applyExternalSave`, no content hash is available — the agent
+   * edit is surfaced through the tool_result event, not a workspace save
+   * round-trip. So we (a) refresh the workspace status/diagnostics and
+   * (b) flag any open buffer for the same path with an agent-source
+   * conflict so the editor offers a reload.
+   */
+  notifyAgentFileEdit: (sessionId: string, absolutePath: string) => void
   clearBuffer: (tabId: string) => void
   clearSession: (sessionId: string) => void
   resetSessionUi: (sessionId: string) => void
@@ -181,6 +190,33 @@ function makeTreeKey(sessionId: string, path: string) {
 
 export function getWorkspacePreviewTabId(path: string, kind: WorkspacePreviewKind) {
   return `${kind}:${path}`
+}
+
+/**
+ * Sentinel hash for agent-originated edits. Agent edits are observed through
+ * the chat tool stream (tool_result), which carries no file content hash, so
+ * we can't compare against a buffer's baseHash. This sentinel is chosen to
+ * never collide with a real sha-256 hex digest, guaranteeing the conflict
+ * banner surfaces for an open buffer.
+ */
+export const AGENT_EDIT_SENTINEL_HASH = 'agent-edit'
+
+/** Normalize a path for agent-edit suffix matching: forward slashes, no trailing slash. */
+function normalizeAgentEditPath(p: string): string {
+  return p.replace(/\\/g, '/').replace(/\/+$/, '')
+}
+
+/**
+ * Whether an agent's (absolute) edited path refers to the same file as an
+ * open buffer's (workspace-relative) path. The agent reports an absolute
+ * path while buffers store workspace-relative paths, so we match by suffix
+ * on a normalized segment boundary to avoid `foo/bar.ts` matching
+ * `otherbar.ts`.
+ */
+function agentEditMatchesBufferPath(normalizedAbs: string, bufferPath: string): boolean {
+  const normalizedBuffer = normalizeAgentEditPath(bufferPath)
+  if (normalizedAbs === normalizedBuffer) return true
+  return normalizedAbs.endsWith(`/${normalizedBuffer}`)
 }
 
 function makePreviewKey(sessionId: string, tabId: string) {
@@ -862,6 +898,42 @@ export const useWorkspacePanelStore = create<WorkspacePanelStore>((set, get) => 
         },
       }
     }),
+
+  notifyAgentFileEdit: (sessionId, absolutePath) => {
+    // Refresh status/diagnostics for the session regardless of whether the
+    // edited file is open — the file tree + changed set may have moved.
+    if (get().isPanelOpen(sessionId)) {
+      void get().loadStatus(sessionId)
+    }
+
+    // Flag any open buffer for the same path with an agent-source conflict.
+    // Agent edits arrive without a content hash (they come from the chat
+    // tool stream, not a workspace save), so we use a sentinel hash that can
+    // never equal a real base hash — guaranteeing the conflict surfaces.
+    const normalizedAbs = normalizeAgentEditPath(absolutePath)
+    set((state) => {
+      let changed = false
+      const nextBuffers: Record<string, WorkspaceBufferState | undefined> = {
+        ...state.bufferStateByTabId,
+      }
+      for (const [tabId, buffer] of Object.entries(state.bufferStateByTabId)) {
+        if (!buffer) continue
+        if (!agentEditMatchesBufferPath(normalizedAbs, buffer.path)) continue
+        // Already showing a conflict — don't clobber the existing one.
+        if (buffer.conflict) continue
+        changed = true
+        nextBuffers[tabId] = {
+          ...buffer,
+          conflict: {
+            source: 'agent',
+            hash: AGENT_EDIT_SENTINEL_HASH,
+            timestamp: Date.now(),
+          },
+        }
+      }
+      return changed ? { bufferStateByTabId: nextBuffers } : state
+    })
+  },
 
   clearBuffer: (tabId) =>
     set((state) => ({
