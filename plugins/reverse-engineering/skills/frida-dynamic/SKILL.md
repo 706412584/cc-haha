@@ -1,6 +1,6 @@
 ---
 name: frida-dynamic
-description: Dynamic instrumentation via Frida (kahlo-mcp). Function and address-level hooks, memory read/write, register inspection inside hooks, call stacks, instruction-level tracing via Stalker, watchpoints via MemoryAccessMonitor. Best for mobile (Android/iOS) and broad behavioural surveys; not a single-step debugger — for that use gdb-debug or lldb-debug.
+description: Dynamic instrumentation via Frida (frida-mcp PyPI package). Function and address-level hooks, memory read/write, register inspection inside hooks, call stacks, instruction-level tracing via Stalker, watchpoints via MemoryAccessMonitor. Best for mobile (Android/iOS) and broad behavioural surveys; not a single-step debugger — for that use gdb-debug or lldb-debug. Includes anti-anti-frida prep for hardened mobile apps with RASP detection.
 whenToUse: When you need runtime behaviour from a process you can attach to (Android via frida-server, iOS via frida-server on jailbroken device, Linux/macOS/Windows desktop via Frida CLI). Pick this over gdb-debug when the question is "what does this app do at runtime broadly" or "hook every Java method"; pick gdb-debug instead when the question is "single-step through unpacker" or "watch register r3 at address X".
 allowedTools: Bash, Read, Glob
 ---
@@ -20,12 +20,15 @@ Before any hook fires:
 1. **Authorisation** — confirm with the user that the target device or
    VM is theirs and they want it instrumented. If they didn't explicitly
    say yes, stop and ask.
-2. **Frida server reachable** — kahlo MCP needs a `frida-server`
+2. **Frida server reachable** — `frida-mcp` (PyPI) needs a `frida-server`
    process on the target (Android emulator, jailbroken iPhone) or
    `frida` on the local host (desktop). Verify with
    `frida: list_devices` and `frida: list_processes`.
 3. **Target launched** (or attachable) — note the package name (Android),
    bundle id (iOS), or PID.
+4. **RASP / anti-frida present?** — if the target is a hardened
+   mobile app (per `apk-hardening` triage), assume frida will be
+   detected. See "Anti-anti-frida prep" section below before attaching.
 
 ## Anatomy of a Frida session
 
@@ -301,6 +304,106 @@ Process.attachExceptionHandler(...)  // for SIGSEGV / illegal instr handling
 
 For tracking `dlopen`/`LoadLibrary` calls (so you don't miss
 runtime-loaded modules), hook those APIs and re-scan.
+
+## Anti-anti-frida prep
+
+Hardened mobile apps (anything triaged by `apk-hardening` as packed,
+plus most banking / payment / DRM apps) ship RASP (runtime application
+self-protection) checks that detect frida and either crash on attach,
+quietly disable functionality, or bail with a generic error. Before
+spending time on the actual hooks, walk through the bypass.
+
+### Common anti-frida defences observed in 2025-2026
+
+| Detection | What the target looks for | Bypass |
+|---|---|---|
+| Process scan | `frida-server`, `frida-agent` strings in `/proc/*/maps`, `/proc/*/cmdline` | Rename frida-server to a random binary; objection's `android root disable` patches `/proc` reads |
+| Port scan | TCP `0.0.0.0:27042` (default) listening | Run frida-server on a random port + `adb forward` |
+| Self-attach | `ptrace(PTRACE_TRACEME)` returns -1 if a debugger / frida is attached | objection's `android root disable` covers this; or LSPosed Zygisk module |
+| Tracer probe | `/proc/self/status` `TracerPid:` non-zero | Same as above |
+| Marker file | Looks for `/data/local/tmp/re.frida.server` etc. | Don't drop the canonical paths; use `/data/local/tmp/<random>` |
+| Library scan | `dlopen`-walks loaded modules for `libfrida-*.so` | Use frida-gadget injected into the APK rather than frida-server, with renamed gadget |
+
+### Path A — objection (recommended starting point)
+
+[`sensepost/objection`](https://github.com/sensepost/objection) is a
+pip-installable frida CLI wrapper that ships pre-built bypasses for
+the common detections plus a usable interactive REPL.
+
+```bash
+# Install once: pipx install objection   OR   uv tool install objection
+which objection || echo "objection not on PATH — see README External CLI tools"
+
+# Spawn the target with frida-gadget already injected (works even on
+# unrooted devices because objection patches the APK to load gadget):
+objection -g <package_name> explore
+
+# Inside the REPL, run the standard bypasses BEFORE any hook:
+android root disable               # patches isRooted(), Magisk, su detection
+android sslpinning disable         # bypasses pinning for HTTPS interception
+android hooking watch class <fqn>  # monitor a class without writing JS
+android hooking generate simple <fqn>   # emit a starter Frida JS snippet
+
+# Then either drive everything from objection, or attach a separate
+# frida session to the same gadget for advanced JS hooks.
+```
+
+### Path B — rename frida-server, run on non-default port
+
+For rooted devices where you want the full frida toolkit (not just
+objection's REPL), evade name-based detection:
+
+```bash
+# On the target device:
+adb push frida-server-16.x.x-android-arm64 /data/local/tmp/fs2024
+adb shell "chmod +x /data/local/tmp/fs2024"
+adb shell "/data/local/tmp/fs2024 -l 0.0.0.0:23456 &"
+# Forward to host:
+adb forward tcp:23456 tcp:23456
+
+# Host frida CLI with explicit host:port:
+frida -H 127.0.0.1:23456 -F            # foreground all
+frida -H 127.0.0.1:23456 -n com.example.app -l hook.js   # spawn + load script
+```
+
+### Path C — LSPosed + frida-hider Zygisk module
+
+When even renamed frida-server is detected (kernel-level RASP that
+checks process metadata or scans memory for frida agent regions), the
+remaining open-source path is a Zygisk module that hides frida from
+the target's view of the system. This is a one-time device setup:
+
+1. Root the test device with Magisk
+2. Install Zygisk + LSPosed
+3. Install a frida-hider Zygisk module (community-maintained; search
+   your usual Magisk module repo)
+4. Whitelist the target package in the module's scope
+
+This is outside this skill's scope (it's device prep, not skill
+content), but the agent should mention it as the escalation path when
+A and B both fail.
+
+### Verifying the bypass actually worked
+
+After applying any bypass, run a quick smoke before committing to a
+real session:
+
+```bash
+# 1. Can the target be spawned/attached without immediate exit?
+frida -H 127.0.0.1:23456 -f <pkg> -l /dev/null --no-pause
+
+# 2. Does it survive the first second?
+sleep 2
+adb shell "pidof <pkg>"
+# Should still be alive. If the PID changed or vanished, the app's
+# anti-debug killed itself — escalate to Path B/C or report the
+# failure mode.
+```
+
+If the target actively monitors anti-tampering after the bypass (some
+apps re-check periodically), instrument that check and bypass it too —
+but document what you bypassed, since silenced anti-tamper is itself
+a finding the user should know about.
 
 ## Procedure — driving a session
 
