@@ -86,24 +86,29 @@ function probeCommand(command: string): Promise<ProbeResult> {
 }
 
 function frameJsonRpc(payload: unknown): string {
-  const body = JSON.stringify(payload)
-  const len = Buffer.byteLength(body, 'utf8')
-  return `Content-Length: ${len}\r\n\r\n${body}`
+  // MCP stdio transport is newline-delimited JSON, NOT LSP-style
+  // Content-Length framing. Each JSON-RPC message is one line on stdin/
+  // stdout. Earlier drafts of this script used Content-Length framing,
+  // which servers like frida-mcp would log as a JSON parse error
+  // (`Invalid JSON: EOF while parsing` — the server saw "Content-Length:..."
+  // as the first line and tried to JSON.parse it).
+  return JSON.stringify(payload) + '\n'
 }
 
 function parseFramedResponse(buf: Buffer): { id: unknown; result?: unknown; error?: unknown } | null {
   const text = buf.toString('utf8')
-  const headerMatch = text.match(/Content-Length:\s*(\d+)\s*\r?\n\r?\n/i)
-  if (!headerMatch) return null
-  const headerEnd = headerMatch.index! + headerMatch[0].length
-  const len = Number(headerMatch[1])
-  if (buf.length < headerEnd + len) return null
-  const body = buf.subarray(headerEnd, headerEnd + len).toString('utf8')
-  try {
-    return JSON.parse(body)
-  } catch {
-    return null
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue
+    try {
+      const obj = JSON.parse(line) as { id?: unknown; result?: unknown; error?: unknown }
+      if (obj.id !== undefined && (obj.result !== undefined || obj.error !== undefined)) {
+        return obj as { id: unknown; result?: unknown; error?: unknown }
+      }
+    } catch {
+      // incomplete line, keep accumulating
+    }
   }
+  return null
 }
 
 async function smokeServer(name: string, def: ServerDef): Promise<{
@@ -158,10 +163,7 @@ async function smokeServer(name: string, def: ServerDef): Promise<{
       const parsed = parseFramedResponse(stdoutBuf)
       if (parsed) {
         finish({ kind: 'initialize-ok', ms: Date.now() - start })
-      } else if (stdoutBuf.length > 0 && stdoutBuf.length < 200 && !stdoutBuf.includes(0x0a)) {
-        // Heuristic: tiny non-newline output that doesn't look framed.
-        // Don't finish yet — wait for more.
-      } else if (stdoutBuf.length > 8192) {
+      } else if (stdoutBuf.length > 32 * 1024) {
         finish({
           kind: 'parse-failed',
           raw: stdoutBuf.toString('utf8', 0, 200),
@@ -328,13 +330,23 @@ async function main() {
 
   // ── Schema-gap warnings ───────────────────────────────────────────────
   // Heuristic: an MCP server whose name implies a tool (jadx, apktool,
-  // frida, lldb, gdb, radare2) should have that tool listed in its
-  // prerequisites. If not, the desktop "one-click install" never knows
-  // to install it, and the server crashes at first run instead.
+  // gdb, radare2, lldb) should have that tool listed in its prerequisites
+  // — otherwise the desktop "one-click install" never knows to install
+  // it, and the server crashes at first run.
+  //
+  // Note: `ghidra` is intentionally excluded — Ghidra is a GUI binary
+  // configured via the `GHIDRA_INSTALL_DIR` env var, not a PATH command,
+  // so probing for it via `where ghidra` would always fail.
+  //
+  // Note: `frida` is intentionally excluded — the `frida-mcp` PyPI
+  // package bundles its own Python `frida` client as a transitive
+  // dependency, so the server starts fine without the standalone
+  // `frida` CLI on PATH. Connecting to a target device may still need
+  // a frida-server installed on the target itself, which is out of
+  // scope for prereq probing.
   const expectedToolByServer: Record<string, string> = {
     jadx: 'jadx',
     apktool: 'apktool',
-    frida: 'frida',
     lldb: 'lldb',
     gdb: 'gdb',
     radare2: 'radare2',
