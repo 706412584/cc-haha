@@ -78,6 +78,15 @@ export type SoloSignalsTier1 = {
   }
   /** True when `.git/MERGE_HEAD` / `REBASE_HEAD` / `CHERRY_PICK_HEAD` exists. */
   gitInProgress?: 'merge' | 'rebase' | 'cherry-pick'
+  /**
+   * Total LSP error count across the workspace (any positive integer
+   * triggers the cleanup suggestion). Sourced from
+   * `LspManager.getErrorCount(workspaceId)`. Undefined when LSP is
+   * unavailable, the prereq is missing, or the gather call threw —
+   * the suggestion silently sits this round out rather than nagging
+   * the user about a setup problem they didn't ask about.
+   */
+  lspErrorCount?: number
 }
 
 export type SoloSuggestionCategory =
@@ -465,7 +474,9 @@ const ruleStashRecover: RuleEmitter = ({ tier1 }) => {
   ]
 }
 
-/** R8 — sync upstream. Lowest priority; only when truly nothing else. */
+/**
+ * R8 — sync upstream. Lowest priority; only when truly nothing else.
+ */
 const ruleSyncUpstream: RuleEmitter = ({ activity }) => {
   const behind = activity.git?.behindCount ?? 0
   if (behind <= 0) return []
@@ -481,6 +492,36 @@ const ruleSyncUpstream: RuleEmitter = ({ activity }) => {
         params: { count: behind },
       },
       score: BASE_SCORE.cleanup - 12,
+    },
+  ]
+}
+
+/**
+ * R10 — LSP error cleanup. Phase 5 of editor-lsp-foundation.
+ *
+ * Fires whenever `tier1.lspErrorCount` is a positive integer. Within
+ * the cleanup category this entry needs to outrank R7 (todo marker)
+ * and R8 (sync upstream) — the user being told to clear N type errors
+ * is the most actionable cleanup we can recommend, and the dedup pass
+ * keeps the highest-scoring cleanup entry. Score 80 is also above
+ * test-gap/ship/finish-wip/release base scores so it wins outright
+ * when LSP errors exist.
+ */
+const ruleLspError: RuleEmitter = ({ tier1 }) => {
+  const count = tier1.lspErrorCount
+  if (typeof count !== 'number' || !Number.isInteger(count) || count <= 0) return []
+  return [
+    {
+      id: 'lsp-error',
+      category: 'cleanup',
+      icon: 'error',
+      title: { key: 'solo.suggest.lspError.title', params: { count } },
+      detail: { key: 'solo.suggest.lspError.detail' },
+      taskPrompt: {
+        key: 'solo.suggest.lspError.taskPrompt',
+        params: { count },
+      },
+      score: 80,
     },
   ]
 }
@@ -513,6 +554,7 @@ const RULES: ReadonlyArray<RuleEmitter> = [
   ruleReleaseMismatch,
   ruleStashRecover,
   ruleSyncUpstream,
+  ruleLspError,
   ruleGeneric,
 ]
 

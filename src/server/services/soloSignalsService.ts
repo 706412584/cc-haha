@@ -417,9 +417,23 @@ function compareSemver(a: string, b: string): number {
  * parameter so callers don't double-fetch (the welcome flow already
  * has it from `getRecentActivity`).
  */
+export type GatherSoloSignalsTier1Options = {
+  /**
+   * Optional LSP error-count provider. Phase 5 of editor-lsp-foundation
+   * adds an `lspErrorCount` Tier-1 signal so the suggestion engine can
+   * recommend `cleanup` work when the workspace has type errors.
+   *
+   * The provider is invoked inside try/catch — any error (LSP not
+   * ready, prereq missing, manager not attached) silently leaves
+   * `lspErrorCount` undefined; the rule then sits this round out.
+   */
+  getLspErrorCount?: () => Promise<number | undefined>
+}
+
 export async function gatherSoloSignalsTier1(
   workDir: string,
   recent: RecentActivityResult,
+  options: GatherSoloSignalsTier1Options = {},
 ): Promise<SoloSignalsTier1> {
   if (!workDir) return {}
   const dirtyFiles = recent.git?.dirtyFiles ?? []
@@ -430,12 +444,14 @@ export async function gatherSoloSignalsTier1(
     todoRes,
     releaseRes,
     inProgressRes,
+    lspErrorRes,
   ] = await Promise.allSettled([
     detectStashCount(workDir),
     detectMissingTests(workDir, dirtyFiles),
     detectTodoMarkers(workDir, dirtyFiles),
     detectReleaseMismatch(workDir),
     detectGitInProgress(workDir),
+    options.getLspErrorCount ? options.getLspErrorCount() : Promise.resolve(undefined),
   ])
 
   const out: SoloSignalsTier1 = {}
@@ -454,6 +470,14 @@ export async function gatherSoloSignalsTier1(
   }
   if (inProgressRes.status === 'fulfilled' && inProgressRes.value) {
     out.gitInProgress = inProgressRes.value
+  }
+  if (
+    lspErrorRes.status === 'fulfilled' &&
+    typeof lspErrorRes.value === 'number' &&
+    Number.isInteger(lspErrorRes.value) &&
+    lspErrorRes.value > 0
+  ) {
+    out.lspErrorCount = lspErrorRes.value
   }
 
   return out

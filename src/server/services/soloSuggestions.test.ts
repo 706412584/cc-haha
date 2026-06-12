@@ -381,3 +381,79 @@ describe('isCodeSource', () => {
     expect(isCodeSource('')).toBe(false)
   })
 })
+
+describe('buildSoloSuggestions — rule: lsp-error (Phase 5)', () => {
+  it('does NOT fire when lspErrorCount is undefined', () => {
+    const out = buildSoloSuggestions(quietActivity(), {}, { now: FROZEN_NOW })
+    expect(out.find((s) => s.id === 'lsp-error')).toBeUndefined()
+  })
+
+  it('does NOT fire when lspErrorCount is 0', () => {
+    const out = buildSoloSuggestions(
+      quietActivity(),
+      { lspErrorCount: 0 },
+      { now: FROZEN_NOW },
+    )
+    expect(out.find((s) => s.id === 'lsp-error')).toBeUndefined()
+  })
+
+  it('does NOT fire when lspErrorCount is a non-integer', () => {
+    const out = buildSoloSuggestions(
+      quietActivity(),
+      { lspErrorCount: 1.5 as unknown as number },
+      { now: FROZEN_NOW },
+    )
+    expect(out.find((s) => s.id === 'lsp-error')).toBeUndefined()
+  })
+
+  it('does NOT fire when lspErrorCount is negative (defensive)', () => {
+    const out = buildSoloSuggestions(
+      quietActivity(),
+      { lspErrorCount: -3 },
+      { now: FROZEN_NOW },
+    )
+    expect(out.find((s) => s.id === 'lsp-error')).toBeUndefined()
+  })
+
+  it('fires a single cleanup-category suggestion when lspErrorCount > 0', () => {
+    const out = buildSoloSuggestions(
+      quietActivity(),
+      { lspErrorCount: 7 },
+      { now: FROZEN_NOW },
+    )
+    const lsp = out.find((s) => s.id === 'lsp-error')
+    expect(lsp).toBeDefined()
+    expect(lsp!.category).toBe('cleanup')
+    expect(lsp!.score).toBe(80)
+    expect(lsp!.title.params!.count).toBe(7)
+    expect(lsp!.taskPrompt.params!.count).toBe(7)
+    expect(lsp!.title.key).toBe('solo.suggest.lspError.title')
+    expect(lsp!.detail!.key).toBe('solo.suggest.lspError.detail')
+    expect(lsp!.taskPrompt.key).toBe('solo.suggest.lspError.taskPrompt')
+  })
+
+  it('outranks the other cleanup rules (todo / sync-upstream) via per-category dedup', () => {
+    const activity = quietActivity({
+      git: {
+        branch: 'feat/x',
+        defaultBranch: 'main',
+        aheadCount: 0,
+        behindCount: 5, // would otherwise fire sync-upstream
+        dirtyCount: 0,
+        dirtyFiles: [],
+      },
+    })
+    const out = buildSoloSuggestions(
+      activity,
+      {
+        lspErrorCount: 3,
+        todoHits: [{ path: 'src/foo.ts', excerpt: 'TODO: x' }],
+      },
+      { now: FROZEN_NOW },
+    )
+    const cleanup = out.filter((s) => s.category === 'cleanup')
+    expect(cleanup.length).toBe(1)
+    expect(cleanup[0]!.id).toBe('lsp-error')
+  })
+})
+
