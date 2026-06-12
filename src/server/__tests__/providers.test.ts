@@ -1477,6 +1477,172 @@ describe('ProviderService', () => {
       }
     })
   })
+
+  // ─── fetchUpstreamModels ────────────────────────────────────────────────
+
+  describe('fetchUpstreamModels', () => {
+    test('uses Bearer auth + GET /v1/models for OpenAI-compatible providers', async () => {
+      const originalFetch = globalThis.fetch
+      const calls: Array<{ url: string; method?: string; headers: Record<string, string> }> = []
+      globalThis.fetch = mock(async (url: string | URL | Request, init?: RequestInit) => {
+        calls.push({
+          url: String(url),
+          method: init?.method,
+          headers: (init?.headers as Record<string, string>) || {},
+        })
+        return new Response(
+          JSON.stringify({
+            data: [
+              { id: 'gpt-4o', context_length: 128000 },
+              { id: 'gpt-4o-mini' },
+            ],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        )
+      }) as typeof fetch
+
+      try {
+        const svc = new ProviderService()
+        const { status, data } = await svc.fetchUpstreamModels({
+          baseUrl: 'http://47.116.22.0:3000',
+          apiKey: 'sk-relay',
+          apiFormat: 'openai_chat',
+        })
+
+        expect(status).toBe(200)
+        expect(calls).toHaveLength(1)
+        expect(calls[0]!.url).toBe('http://47.116.22.0:3000/v1/models')
+        expect(calls[0]!.method).toBe('GET')
+        expect(calls[0]!.headers['Authorization']).toBe('Bearer sk-relay')
+        // x-api-key must not appear when format is openai_chat
+        expect(calls[0]!.headers['x-api-key']).toBeUndefined()
+        expect(data).toEqual({
+          data: [
+            { id: 'gpt-4o', context_length: 128000 },
+            { id: 'gpt-4o-mini' },
+          ],
+        })
+      } finally {
+        globalThis.fetch = originalFetch
+      }
+    })
+
+    test('uses x-api-key + anthropic-version for Anthropic-format providers', async () => {
+      const originalFetch = globalThis.fetch
+      const calls: Array<{ url: string; headers: Record<string, string> }> = []
+      globalThis.fetch = mock(async (url: string | URL | Request, init?: RequestInit) => {
+        calls.push({
+          url: String(url),
+          headers: (init?.headers as Record<string, string>) || {},
+        })
+        return new Response(
+          JSON.stringify({ data: [{ id: 'claude-opus-4' }] }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        )
+      }) as typeof fetch
+
+      try {
+        const svc = new ProviderService()
+        await svc.fetchUpstreamModels({
+          baseUrl: 'https://api.anthropic.com',
+          apiKey: 'sk-ant-key',
+          apiFormat: 'anthropic',
+        })
+
+        expect(calls[0]!.url).toBe('https://api.anthropic.com/v1/models')
+        expect(calls[0]!.headers['x-api-key']).toBe('sk-ant-key')
+        expect(calls[0]!.headers['anthropic-version']).toBe('2023-06-01')
+        // Bearer must not appear when format is anthropic
+        expect(calls[0]!.headers['Authorization']).toBeUndefined()
+      } finally {
+        globalThis.fetch = originalFetch
+      }
+    })
+
+    test('strips trailing slashes and avoids /v1 duplication when baseUrl already ends in /v1', async () => {
+      const originalFetch = globalThis.fetch
+      const calls: Array<{ url: string }> = []
+      globalThis.fetch = mock(async (url: string | URL | Request) => {
+        calls.push({ url: String(url) })
+        return new Response(JSON.stringify({ data: [] }), { status: 200 })
+      }) as typeof fetch
+
+      try {
+        const svc = new ProviderService()
+        await svc.fetchUpstreamModels({
+          baseUrl: 'https://api.example.com/v1/',
+          apiKey: 'sk',
+          apiFormat: 'openai_chat',
+        })
+        await svc.fetchUpstreamModels({
+          baseUrl: 'https://api.example.com////',
+          apiKey: 'sk',
+          apiFormat: 'openai_chat',
+        })
+
+        expect(calls[0]!.url).toBe('https://api.example.com/v1/models')
+        expect(calls[1]!.url).toBe('https://api.example.com/v1/models')
+      } finally {
+        globalThis.fetch = originalFetch
+      }
+    })
+
+    test('throws ApiError 502 with upstream message when /v1/models returns non-200', async () => {
+      const originalFetch = globalThis.fetch
+      globalThis.fetch = mock(async () => {
+        return new Response(
+          JSON.stringify({ error: { message: 'invalid_api_key' } }),
+          { status: 401, headers: { 'Content-Type': 'application/json' } },
+        )
+      }) as typeof fetch
+
+      try {
+        const svc = new ProviderService()
+        let caught: unknown
+        try {
+          await svc.fetchUpstreamModels({
+            baseUrl: 'https://api.example.com',
+            apiKey: 'sk-bad',
+            apiFormat: 'openai_chat',
+          })
+        } catch (err) {
+          caught = err
+        }
+        expect(caught).toBeInstanceOf(Error)
+        const message = caught instanceof Error ? caught.message : String(caught)
+        expect(message).toContain('401')
+        expect(message).toContain('invalid_api_key')
+      } finally {
+        globalThis.fetch = originalFetch
+      }
+    })
+
+    test('wraps network errors as ApiError 502', async () => {
+      const originalFetch = globalThis.fetch
+      globalThis.fetch = mock(async () => {
+        throw new Error('ECONNREFUSED')
+      }) as typeof fetch
+
+      try {
+        const svc = new ProviderService()
+        let caught: unknown
+        try {
+          await svc.fetchUpstreamModels({
+            baseUrl: 'http://127.0.0.1:9',
+            apiKey: 'sk',
+            apiFormat: 'openai_chat',
+          })
+        } catch (err) {
+          caught = err
+        }
+        const message = caught instanceof Error ? caught.message : String(caught)
+        expect(message).toContain('Upstream fetch failed')
+        expect(message).toContain('ECONNREFUSED')
+      } finally {
+        globalThis.fetch = originalFetch
+      }
+    })
+  })
 })
 
 // =============================================================================
