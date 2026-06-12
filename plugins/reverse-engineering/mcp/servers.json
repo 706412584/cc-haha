@@ -30,49 +30,6 @@
         }
       ]
     },
-    "radare2": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@radareorg/radare2-mcp@latest"],
-      "prerequisites": [
-        {
-          "command": "npx",
-          "label": "Node.js (provides npx)",
-          "homepage": "https://nodejs.org/",
-          "install": {
-            "win32": [
-              { "manager": "winget", "cmd": "winget install --id=OpenJS.NodeJS.LTS -e" },
-              { "manager": "scoop", "cmd": "scoop install nodejs-lts" }
-            ],
-            "darwin": [
-              { "manager": "brew", "cmd": "brew install node" }
-            ],
-            "linux": [
-              { "manager": "apt", "cmd": "sudo apt-get install -y nodejs npm" },
-              { "manager": "shell", "cmd": "curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - && sudo apt-get install -y nodejs" }
-            ]
-          }
-        },
-        {
-          "command": "radare2",
-          "label": "radare2 (binary analysis framework)",
-          "homepage": "https://github.com/radareorg/radare2",
-          "install": {
-            "win32": [
-              { "manager": "winget", "cmd": "winget install --id=radareorg.radare2 -e" },
-              { "manager": "scoop", "cmd": "scoop install radare2" }
-            ],
-            "darwin": [
-              { "manager": "brew", "cmd": "brew install radare2" }
-            ],
-            "linux": [
-              { "manager": "apt", "cmd": "sudo apt-get install -y radare2" },
-              { "manager": "shell", "cmd": "git clone https://github.com/radareorg/radare2 && radare2/sys/install.sh" }
-            ]
-          }
-        }
-      ]
-    },
     "gdb": {
       "type": "stdio",
       "command": "npx",
@@ -115,143 +72,10 @@
         }
       ]
     },
-    "lldb": {
-      "type": "stdio",
-      "command": "uvx",
-      "args": [
-        "--with",
-        "mcp",
-        "--from",
-        "git+https://github.com/stass/lldb-mcp@master",
-        "python",
-        "lldb_mcp.py"
-      ],
-      "prerequisites": [
-        {
-          "command": "uvx",
-          "label": "uv (Python tool runner — provides uvx)",
-          "homepage": "https://docs.astral.sh/uv/",
-          "install": {
-            "win32": [
-              { "manager": "winget", "cmd": "winget install --id=astral-sh.uv -e" },
-              { "manager": "scoop", "cmd": "scoop install uv" }
-            ],
-            "darwin": [
-              { "manager": "brew", "cmd": "brew install uv" },
-              { "manager": "shell", "cmd": "curl -LsSf https://astral.sh/uv/install.sh | sh" }
-            ],
-            "linux": [
-              { "manager": "shell", "cmd": "curl -LsSf https://astral.sh/uv/install.sh | sh" },
-              { "manager": "pipx", "cmd": "pipx install uv" }
-            ]
-          }
-        }
-      ]
-    },
-    "jadx": {
-      "type": "stdio",
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/zinja-coder/jadx-mcp-server@main",
-        "jadx-mcp-server"
-      ],
-      "prerequisites": [
-        {
-          "command": "uvx",
-          "label": "uv (Python tool runner — provides uvx)",
-          "homepage": "https://docs.astral.sh/uv/",
-          "install": {
-            "win32": [
-              { "manager": "winget", "cmd": "winget install --id=astral-sh.uv -e" },
-              { "manager": "scoop", "cmd": "scoop install uv" }
-            ],
-            "darwin": [
-              { "manager": "brew", "cmd": "brew install uv" },
-              { "manager": "shell", "cmd": "curl -LsSf https://astral.sh/uv/install.sh | sh" }
-            ],
-            "linux": [
-              { "manager": "shell", "cmd": "curl -LsSf https://astral.sh/uv/install.sh | sh" },
-              { "manager": "pipx", "cmd": "pipx install uv" }
-            ]
-          }
-        },
-        {
-          "command": "java",
-          "label": "Java JDK 17+ (required by jadx)",
-          "homepage": "https://adoptium.net/temurin/releases/?version=17",
-          "install": {
-            "win32": [
-              { "manager": "winget", "cmd": "winget install --id=EclipseAdoptium.Temurin.17.JDK -e" },
-              { "manager": "scoop", "cmd": "scoop bucket add java && scoop install temurin17-jdk" }
-            ],
-            "darwin": [
-              { "manager": "brew", "cmd": "brew install --cask temurin@17" }
-            ],
-            "linux": [
-              { "manager": "apt", "cmd": "sudo apt-get install -y openjdk-17-jdk" },
-              { "manager": "dnf", "cmd": "sudo dnf install -y java-17-openjdk-devel" }
-            ]
-          }
-        }
-      ]
-    },
-    "apktool": {
-      "type": "stdio",
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/zinja-coder/apktool-mcp-server@main",
-        "apktool-mcp-server"
-      ],
-      "prerequisites": [
-        {
-          "command": "uvx",
-          "label": "uv (Python tool runner — provides uvx)",
-          "homepage": "https://docs.astral.sh/uv/",
-          "install": {
-            "win32": [
-              { "manager": "winget", "cmd": "winget install --id=astral-sh.uv -e" },
-              { "manager": "scoop", "cmd": "scoop install uv" }
-            ],
-            "darwin": [
-              { "manager": "brew", "cmd": "brew install uv" },
-              { "manager": "shell", "cmd": "curl -LsSf https://astral.sh/uv/install.sh | sh" }
-            ],
-            "linux": [
-              { "manager": "shell", "cmd": "curl -LsSf https://astral.sh/uv/install.sh | sh" },
-              { "manager": "pipx", "cmd": "pipx install uv" }
-            ]
-          }
-        },
-        {
-          "command": "java",
-          "label": "Java JDK 17+ (required by apktool)",
-          "homepage": "https://adoptium.net/temurin/releases/?version=17",
-          "install": {
-            "win32": [
-              { "manager": "winget", "cmd": "winget install --id=EclipseAdoptium.Temurin.17.JDK -e" },
-              { "manager": "scoop", "cmd": "scoop bucket add java && scoop install temurin17-jdk" }
-            ],
-            "darwin": [
-              { "manager": "brew", "cmd": "brew install --cask temurin@17" }
-            ],
-            "linux": [
-              { "manager": "apt", "cmd": "sudo apt-get install -y openjdk-17-jdk" },
-              { "manager": "dnf", "cmd": "sudo dnf install -y java-17-openjdk-devel" }
-            ]
-          }
-        }
-      ]
-    },
     "frida": {
       "type": "stdio",
       "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/FuzzySecurity/kahlo-mcp@main",
-        "kahlo-mcp"
-      ],
+      "args": ["frida-mcp"],
       "prerequisites": [
         {
           "command": "uvx",
@@ -260,7 +84,8 @@
           "install": {
             "win32": [
               { "manager": "winget", "cmd": "winget install --id=astral-sh.uv -e" },
-              { "manager": "scoop", "cmd": "scoop install uv" }
+              { "manager": "scoop", "cmd": "scoop install uv" },
+              { "manager": "powershell", "cmd": "powershell -ExecutionPolicy ByPass -c \"irm https://astral.sh/uv/install.ps1 | iex\"" }
             ],
             "darwin": [
               { "manager": "brew", "cmd": "brew install uv" },

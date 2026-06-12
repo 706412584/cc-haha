@@ -1,8 +1,10 @@
 # reverse-engineering plugin
 
 Multi-platform reverse engineering toolkit for cc-haha — static + dynamic
-+ report — bundled as a single plugin install. Currently ships seven MCP
-servers, one orchestration agent, eleven skills, and two slash commands.
++ report — bundled as a single plugin install. Currently ships **three
+MCP servers** (down from seven in v0.4.3 — see "Currently unbundled MCP
+servers" below for why), one orchestration agent, eleven skills, and two
+slash commands.
 
 ## What it gives you
 
@@ -11,8 +13,13 @@ servers, one orchestration agent, eleven skills, and two slash commands.
 | Agent | `reverse-engineer` — orchestrates triage → static → optional dynamic → report |
 | Skills | `triage`, `pe-elf-macho`, `firmware-blob`, `apk-analysis`, `ios-analysis`, `dynamic-debug-overview`, `frida-dynamic`, `gdb-debug`, `lldb-debug`, `crackme-keygen`, `re-report` |
 | Commands | `/reverse-engineering:triage <path>`, `/reverse-engineering:report <sample-id>` |
-| MCP servers | `ghidra` (pyghidra-mcp), `radare2` (radareorg/radare2-mcp), `gdb` (mcp-gdb), `lldb` (stass/lldb-mcp), `jadx` (zinja-coder/jadx-mcp-server), `apktool` (zinja-coder/apktool-mcp-server), `frida` (FuzzySecurity/kahlo-mcp) |
+| MCP servers | `ghidra` (pyghidra-mcp), `gdb` (mcp-gdb), `frida` (frida-mcp on PyPI) — verified end-to-end as of v0.4.5 |
 | Hooks | placeholder (add a fileCreated hook locally if you want SOC-style auto-triage) |
+
+> **Skills still cover the unbundled lanes.** `lldb-debug` / `apk-analysis`
+> still teach the agent how to drive LLDB / apktool / jadx / radare2 via
+> the shell — the loss of MCP wrapping just means there's no JSON-RPC tool
+> surface for them; the agent can still invoke them as subprocess tools.
 
 ## Dynamic capabilities (what AI can actually drive)
 
@@ -205,45 +212,44 @@ The plugin doesn't ship the underlying tools. You need them on your machine
 | MCP | What you need | Install |
 |-----|---------------|---------|
 | `ghidra` | Ghidra (NSA), Java 17+, `uvx` (from `uv`) | https://ghidra-sre.org + set `GHIDRA_INSTALL_DIR` |
-| `radare2` | r2 on PATH, Node | https://rada.re |
-| `gdb` | GDB on PATH (`gdb-multiarch` for cross-arch), Node | `apt install gdb gdb-multiarch` / `brew install gdb` |
-| `lldb` | LLDB on PATH, `uvx` | macOS: built-in via Xcode CLT; Linux: `apt install lldb`; Windows: LLVM installer |
-| `jadx` | Java 17+, `uvx` | jadx-mcp-server pulls JADX itself |
-| `apktool` | Java 17+, `uvx`, apktool jar | https://ibotpeaches.github.io/Apktool/ |
-| `frida` | frida-tools, frida-server on the target device, `uvx` | `pip install frida-tools` |
+| `gdb` | GDB on PATH (`gdb-multiarch` for cross-arch), Node | `apt install gdb gdb-multiarch` / `brew install gdb` / `scoop install gdb` |
+| `frida` | `uvx` (the `frida-mcp` PyPI pkg bundles a Python frida client; only needs frida-server on the target device) | uvx auto-installs frida-mcp; deploy frida-server to your authorised target separately |
 
 You can disable individual MCP servers (e.g., turn off Frida if you only do
 static work) from the desktop **MCP** settings page (Settings → MCP) — the
 plugin's job is to bundle the configurations; per-server enable/disable is a
 runtime decision, not a manifest one.
 
-### LLDB MCP — fallback if uvx fetch fails
+## Currently unbundled MCP servers
 
-The default `lldb` server entry runs the upstream `stass/lldb-mcp` script
-through `uvx --from git+...`. The upstream repo is a single-file script
-without a packaged entry point, so depending on `uv` version the
-auto-fetch may fail with `python: can't open file 'lldb_mcp.py'` on
-first start. If that happens, clone the repo manually and point the MCP
-config at the absolute path:
+The v0.5.10 release of cc-haha shipped this plugin with seven MCP servers,
+but four of them turned out to have upstream packaging or runtime issues
+that no manifest-level fix can paper over. They have been removed from
+`mcp/servers.json` for v0.4.5 (cc-haha v0.5.12+) so users don't see four
+permanently-red "Unavailable" cards in the MCP page. Each entry below
+records the failure mode discovered during end-to-end smoke; if the
+upstream lands a fix, the server can be re-added in a future patch.
 
-```pwsh
-git clone https://github.com/stass/lldb-mcp $env:USERPROFILE\src\lldb-mcp
-pip install mcp
-```
+| Server | Upstream tried | Failure mode |
+|---|---|---|
+| `radare2` | npm `@radareorg/radare2-mcp` | npm registry returns **404 — package unpublished**. The official GitHub repo `radareorg/radare2-mcp` is a C/Meson project that requires compilation, not direct `npx`/`uvx` install. Fork `drvcvt/radare2-mcp` is a TypeScript project but ships no `dist/` and no `prepare` build hook, so `npx --package=git+...` fails to find the entry binary. |
+| `lldb` | `stass/lldb-mcp` (and the `stableversion/lldb_mcp` fork) | Repo is a single-file `lldb_mcp.py` script with no `pyproject.toml` / `setup.py` packaging, so `uvx --from git+...` errors with `does not appear to be a Python project`. |
+| `jadx` | `zinja-coder/jadx-mcp-server` (and `mseep-jadx-mcp-server` PyPI republish) | Original repo packages but crashes at startup with `ModuleNotFoundError: No module named 'src'` (upstream packaging bug). The PyPI republish under `mseep-jadx-mcp-server` is a 0-byte placeholder that contains only `dist-info` metadata with no actual code. |
+| `apktool` | `zinja-coder/apktool-mcp-server` (and `SecFathy/APktool-MCP`) | uv git fetch consistently fails with `Git operation failed`, persisting after `uv cache clean`. The SecFathy alternative is also unpackaged (single `APktool.py` file). |
 
-Then edit `plugins/reverse-engineering/mcp/servers.json` to use:
+To use these locally without waiting for upstream:
 
-```json
-"lldb": {
-  "type": "stdio",
-  "command": "python3",
-  "args": ["C:/Users/<you>/src/lldb-mcp/lldb_mcp.py"]
-}
-```
+1. Clone the upstream repo to a fixed path under your home directory.
+2. Add a custom MCP server entry pointing at the local script in your
+   user-level `~/.claude/mcp.json` (not the plugin manifest — that gets
+   overwritten on plugin update).
+3. The agent skills (`lldb-debug`, `gdb-debug`, etc.) still teach the
+   agent how to drive these tools via shell, so even without the JSON-RPC
+   wrapping you can still get a working dynamic-analysis workflow as long
+   as the binaries are on PATH.
 
-Bump the plugin version and run the dev-link script, or
-`/api/plugins/update`, to materialise. This is upstream's packaging
-limitation, not a cc-haha-specific quirk.
+If a packaged alternative shows up on PyPI / npm, please open an issue
+and we'll re-add the server to `mcp/servers.json`.
 
 ## User-config knobs
 
@@ -265,12 +271,12 @@ limitation, not a cc-haha-specific quirk.
 ## References
 
 - Ghidra MCP — https://github.com/LaurieWired/GhidraMCP and https://github.com/clearbluejar/pyghidra-mcp
-- radare2 MCP — https://github.com/radareorg/radare2-mcp
 - GDB MCP — https://github.com/signal-slot/mcp-gdb (npm package `mcp-gdb`)
-- LLDB MCP — https://github.com/stass/lldb-mcp
-- JADX MCP — https://github.com/zinja-coder/jadx-mcp-server
-- apktool MCP — https://github.com/zinja-coder/apktool-mcp-server
-- Frida (kahlo) MCP — https://github.com/FuzzySecurity/kahlo-mcp
+- Frida MCP — https://pypi.org/project/frida-mcp/ (PyPI `frida-mcp`)
+- (deferred) radare2 MCP — https://github.com/radareorg/radare2-mcp — C project, requires compile; npm pkg unpublished
+- (deferred) LLDB MCP — https://github.com/stass/lldb-mcp — upstream not Python-packaged
+- (deferred) JADX MCP — https://github.com/zinja-coder/jadx-mcp-server — upstream `ModuleNotFoundError: 'src'` bug
+- (deferred) apktool MCP — https://github.com/zinja-coder/apktool-mcp-server — `uv` git fetch fails; no working alternative
 - Multi-agent macOS malware triage prior art — https://www.sentinelone.com/labs/building-an-adversarial-consensus-engine-multi-agent-llms-for-automated-malware-analysis/
 - Binary RE for Agents (eval framing) — https://arxiv.org/html/2605.10597v1
 - STRIATUM-CTF (protocol-driven CTF agents) — https://arxiv.org/html/2603.22577v1
