@@ -129,18 +129,20 @@ line "▸ Stage N/5: <name> — <one-line goal>".
 
 ## The five stages
 
-1. **PLAN GATE — Solo Council** (prompt-level A/B/C; no implementation yet)
+1. **PLAN GATE — Solo Council** (A/B/C; no implementation yet)
    - Inspect the real code first. Read enough to ground the plan in actual
      files, commands, constraints, and existing patterns.
-   - **A = Planner**: propose the concrete implementation plan — changed
-     surface, candidate files, approach, acceptance criteria, verification
-     commands, and known risks.
+   - **A = Planner**: use the \`Plan\` specialist when available. Produce the
+     concrete implementation plan — changed surface, candidate files,
+     approach, acceptance criteria, verification commands, and known risks.
    - **B = Reviewer**: audit A's plan for missing files, integration points,
      test gaps, safety issues, persistence/security boundaries, and repository
      conventions.
-   - **C = Critic**: challenge assumptions, look for a smaller / safer / more
-     verifiable alternative, identify overreach, and name what would make the
-     plan fail. The Critic must not merely agree.
+   - **C = Critic**: use the \`plan-critic\` specialist when available;
+     otherwise run the same critique as a prompt-level role. Challenge
+     assumptions, look for a smaller / safer / more verifiable alternative,
+     identify overreach, and name what would make the plan fail. The Critic
+     must not merely agree.
    - **Synthesis**: merge A/B/C into one **final execution plan**. Treat that
      final execution plan as the source of truth for Stage 2.
    - Hand-off artifact: \`final execution plan\` with concrete files,

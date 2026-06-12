@@ -87,7 +87,9 @@ describe('getSoloPipelineSystemPrompt — invariants', () => {
     expect(prompt).toContain('B = Reviewer')
     expect(prompt).toContain('C = Critic')
     expect(prompt).toContain('final execution plan')
-    expect(prompt).toContain('prompt-level roles, not separate workers')
+    expect(prompt).toContain('use the `Plan` specialist when available')
+    expect(prompt).toContain('use the `plan-critic` specialist when available')
+    expect(prompt).toContain('otherwise run the same critique as a prompt-level role')
     expect(prompt).toContain('Do not enter Stage 2')
   })
 
