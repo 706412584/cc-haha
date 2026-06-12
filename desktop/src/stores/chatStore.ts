@@ -7,6 +7,7 @@ import { useCLITaskStore } from './cliTaskStore'
 import { useSessionRuntimeStore } from './sessionRuntimeStore'
 import { useTabStore } from './tabStore'
 import { useProviderCompatStore } from './providerCompatStore'
+import { useWorkspacePanelStore } from './workspacePanelStore'
 import { randomSpinnerVerb } from '../config/spinnerVerbs'
 import { notifyDesktop } from '../lib/desktopNotifications'
 import { t } from '../i18n'
@@ -170,6 +171,7 @@ type ChatStore = {
   setSessionRuntime: (sessionId: string, selection: RuntimeSelection) => void
   setSessionPermissionMode: (sessionId: string, mode: PermissionMode) => void
   setSessionCoordinatorMode: (sessionId: string, enabled: boolean) => void
+  setSessionSoloPipelineMode: (sessionId: string, enabled: boolean) => void
   stopGeneration: (sessionId: string) => void
   loadHistory: (sessionId: string) => Promise<void>
   reloadHistory: (sessionId: string) => Promise<void>
@@ -203,8 +205,10 @@ type ChatStore = {
 
 const TASK_TOOL_NAMES = new Set(['TaskCreate', 'TaskUpdate', 'TaskGet', 'TaskList', 'TodoWrite'])
 const TASK_STOP_TOOL_NAMES = new Set(['TaskStop', 'KillShell'])
+const FILE_EDIT_TOOL_NAMES = new Set(['Edit', 'Write', 'NotebookEdit', 'MultiEdit'])
 const pendingTaskToolUseIdsBySession = new Map<string, Set<string>>()
 const pendingToolParentUseIdsBySession = new Map<string, Map<string, string>>()
+const pendingFileEditPathsBySession = new Map<string, Map<string, string>>()
 
 function addPendingTaskToolUseId(sessionId: string, toolUseId: string): void {
   const ids = pendingTaskToolUseIdsBySession.get(sessionId) ?? new Set<string>()
@@ -246,6 +250,42 @@ function consumePendingToolParentUseId(sessionId: string, toolUseId: string): st
   parentUseIds.delete(toolUseId)
   if (parentUseIds.size === 0) pendingToolParentUseIdsBySession.delete(sessionId)
   return parentToolUseId
+}
+
+/**
+ * Extract the absolute file path from a file-mutating tool's input.
+ * Edit / Write / MultiEdit use `file_path`; NotebookEdit uses `notebook_path`.
+ */
+function extractEditedFilePath(input: unknown): string | null {
+  if (!input || typeof input !== 'object') return null
+  const obj = input as { file_path?: unknown; notebook_path?: unknown }
+  const candidate =
+    typeof obj.file_path === 'string' && obj.file_path.length > 0
+      ? obj.file_path
+      : typeof obj.notebook_path === 'string' && obj.notebook_path.length > 0
+        ? obj.notebook_path
+        : null
+  return candidate
+}
+
+function rememberPendingFileEdit(sessionId: string, toolUseId: string, filePath: string): void {
+  if (!toolUseId) return
+  const paths = pendingFileEditPathsBySession.get(sessionId) ?? new Map<string, string>()
+  paths.set(toolUseId, filePath)
+  pendingFileEditPathsBySession.set(sessionId, paths)
+}
+
+function consumePendingFileEdit(sessionId: string, toolUseId: string): string | null {
+  const paths = pendingFileEditPathsBySession.get(sessionId)
+  const filePath = paths?.get(toolUseId)
+  if (!filePath) return null
+  paths!.delete(toolUseId)
+  if (paths!.size === 0) pendingFileEditPathsBySession.delete(sessionId)
+  return filePath
+}
+
+function clearPendingFileEdits(sessionId: string): void {
+  pendingFileEditPathsBySession.delete(sessionId)
 }
 
 function clearPendingToolParentUseIds(sessionId: string): void {
@@ -966,6 +1006,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (useSessionRuntimeStore.getState().coordinatorModes[sessionId]) {
       wsManager.send(sessionId, { type: 'set_coordinator_mode', enabled: true })
     }
+    // Same replay for the Solo Pipeline mode toggle. Mutually exclusive with
+    // coordinator mode at the action layer (setSessionSoloPipelineMode), so
+    // both replay branches will never both fire in the same connect.
+    if (useSessionRuntimeStore.getState().soloPipelineModes[sessionId]) {
+      wsManager.send(sessionId, { type: 'set_pipeline_mode', flavor: 'solo' })
+    }
     if (!sessionId.startsWith('__') && !useTeamStore.getState().getMemberBySessionId(sessionId)) {
       wsManager.send(sessionId, { type: 'prewarm_session' })
     }
@@ -994,6 +1040,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     clearPendingToolInputDelta(sessionId)
     clearPendingTaskToolUseIds(sessionId)
     clearPendingToolParentUseIds(sessionId)
+    clearPendingFileEdits(sessionId)
     queueDrainPaused.delete(sessionId)
     wsManager.disconnect(sessionId)
     set((s) => {
@@ -1270,8 +1317,38 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // is replayed on connect). Only push to a live session; otherwise the
     // replay on next connect carries it.
     useSessionRuntimeStore.getState().setCoordinatorMode(sessionId, enabled)
+    // Mutual exclusion: enabling coordinator clears any Solo Pipeline flag
+    // for the same session. The server side enforces the same exclusion in
+    // handleSetCoordinatorMode / handleSetPipelineMode, but doing it here
+    // keeps the desktop runtime store and the wire payload symmetric so the
+    // replay-on-connect path never sends both.
+    if (enabled && useSessionRuntimeStore.getState().soloPipelineModes[sessionId]) {
+      useSessionRuntimeStore.getState().setSoloPipelineMode(sessionId, false)
+      if (get().sessions[sessionId]) {
+        wsManager.send(sessionId, { type: 'set_pipeline_mode', flavor: 'normal' })
+      }
+    }
     if (get().sessions[sessionId]) {
       wsManager.send(sessionId, { type: 'set_coordinator_mode', enabled })
+    }
+  },
+
+  setSessionSoloPipelineMode: (sessionId, enabled) => {
+    // Sibling of setSessionCoordinatorMode. Persists the preference, enforces
+    // mutual exclusion with coordinator mode (clears it locally + on the
+    // wire when Solo turns on), and pushes to a live session.
+    useSessionRuntimeStore.getState().setSoloPipelineMode(sessionId, enabled)
+    if (enabled && useSessionRuntimeStore.getState().coordinatorModes[sessionId]) {
+      useSessionRuntimeStore.getState().setCoordinatorMode(sessionId, false)
+      if (get().sessions[sessionId]) {
+        wsManager.send(sessionId, { type: 'set_coordinator_mode', enabled: false })
+      }
+    }
+    if (get().sessions[sessionId]) {
+      wsManager.send(sessionId, {
+        type: 'set_pipeline_mode',
+        flavor: enabled ? 'solo' : 'normal',
+      })
     }
   },
 
@@ -1516,6 +1593,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   clearMessages: (sessionId) => {
     clearPendingTaskToolUseIds(sessionId)
     clearPendingToolParentUseIds(sessionId)
+    clearPendingFileEdits(sessionId)
     clearPendingToolInputDelta(sessionId)
     resetCompactionThrash(sessionId)
     set((s) => ({ sessions: updateSessionIn(s.sessions, sessionId, () => ({
@@ -1779,6 +1857,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         } else if (TASK_TOOL_NAMES.has(toolName)) {
           const useId = msg.toolUseId || session?.activeToolUseId
           if (useId) addPendingTaskToolUseId(sessionId, useId)
+        } else if (FILE_EDIT_TOOL_NAMES.has(toolName)) {
+          const useId = msg.toolUseId || session?.activeToolUseId
+          const editedPath = extractEditedFilePath(msg.input)
+          if (useId && editedPath) rememberPendingFileEdit(sessionId, useId, editedPath)
         }
         break
       }
@@ -1812,6 +1894,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         })
         if (consumePendingTaskToolUseId(sessionId, msg.toolUseId)) {
           useCLITaskStore.getState().refreshTasks(sessionId)
+        }
+        const editedPath = consumePendingFileEdit(sessionId, msg.toolUseId)
+        if (editedPath && !msg.isError) {
+          useWorkspacePanelStore.getState().notifyAgentFileEdit(sessionId, editedPath)
         }
         break
       }
@@ -2041,6 +2127,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           clearPendingDelta(sessionId)
           clearPendingTaskToolUseIds(sessionId)
           clearPendingToolParentUseIds(sessionId)
+          clearPendingFileEdits(sessionId)
           useCLITaskStore.getState().clearTasks(sessionId)
           useSessionStore.getState().updateSessionTitle(sessionId, 'New Session')
           useTabStore.getState().updateTabTitle(sessionId, 'New Session')

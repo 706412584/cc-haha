@@ -1251,6 +1251,9 @@ export const zh: Record<TranslationKey, string> = {
   'empty.recentActivity.dirtyFiles': '{count} 個檔案未提交',
   'empty.recentActivity.continueSession': '開啟這個會話',
   'empty.recentActivity.applyHandoff': '從這裡繼續',
+  'empty.recentActivity.deepHandoffLabel': '深度',
+  'empty.recentActivity.deepHandoffOffTooltip': '深度接續(關)——下次「從這裡繼續」傳標準約 4k token 的對話原文尾部。點擊開啟。',
+  'empty.recentActivity.deepHandoffOnTooltip': '深度接續(開)——下次「從這裡繼續」傳約 12k token 的擴展尾部(60 輪/每輪 800 字/總額 50k)。點擊關閉。',
   'empty.recentActivity.handoffGenerating': '正在準備上下文...',
   'empty.recentActivity.handoffStage.readingCache': '正在讀取對話記錄...',
   'empty.recentActivity.handoffStage.generatingSummary': '正在生成摘要(調用 AI)...',
@@ -1263,6 +1266,10 @@ export const zh: Record<TranslationKey, string> = {
   'empty.recentActivity.previewNotYet': '尚未生成摘要。首次點擊「從這裡繼續」時會生成。',
   'session.handoffChip': '↗ 接續上次 ({tokens} t)',
   'session.handoffChipTooltip': '接續自「{title}」。AI 啟動時已帶上 {tokens} tokens 的上次會話摘要作為系統提示。',
+  'session.coordinatorChip': '編排模式',
+  'session.coordinatorChipTooltip': '該會話已開啟編排模式。任務會扇出到專家 worker 代理執行，主執行緒負責協調。在輸入框 + 選單裡切換。',
+  'session.soloPipelineChip': '獨立流水線',
+  'session.soloPipelineChipTooltip': '該會話已開啟獨立流水線模式。實作前 AI 會先走 A/B/C 計畫閘門（Planner → Reviewer → Critic），再繼續實作 → 測試 → 審查 → 落地。在輸入框 + 選單裡切換。',
   'empty.recentActivity.handoff.branchLine': '上次在 {branch} 上做了：「{title}」。',
   'empty.recentActivity.handoff.titleLine': '上次會話：「{title}」。',
   'empty.recentActivity.handoff.filesLine': '動了這些檔案：{files}{more}。',
@@ -1271,6 +1278,64 @@ export const zh: Record<TranslationKey, string> = {
   'empty.recentActivity.handoff.dirtyLine': '{count} 個檔案還有未提交改動。',
   'empty.recentActivity.handoff.continuePrompt': '請接著往下：(此處描述要做的下一步)。',
   'empty.recentActivity.continueTriggerMessage': '請接著上次會話的進度繼續。把上面的接續上下文當作事實依據，先用 1-2 句話說明你理解的當前狀態，然後說明下一步要做什麼，再開始動手。',
+
+  // ─── Solo 流水線模式 — 建議引擎（歡迎頁招呼） ─────────────────
+  'solo.suggest.finishWip.title': '收尾 {count} 個未提交改動',
+  'solo.suggest.finishWip.detail': '未提交：{sample}',
+  'solo.suggest.finishWip.detailForeign': '未提交（可能含其他 agent 的改動）：{sample}',
+  'solo.suggest.finishWip.taskPrompt': '把當前 worktree 裡 {count} 個未提交改動（{files}）收尾。先走 A/B/C 計畫閘門，再實作 → 測試 → 審查 → 落地。',
+
+  'solo.suggest.shipAhead.title': '把 {branch} 落地（{count} 個領先提交）',
+  'solo.suggest.shipAhead.detail': '本地領先上游 {count} 個提交，工作已經做完——評審 + 落地。',
+  'solo.suggest.shipAhead.taskPrompt': '分支 {branch} 領先上游 {count} 個提交。對照上游評審 diff，然後落地（開 PR / push / 寫 release notes 看情況）。',
+
+  'solo.suggest.testGap.title': '給 {file} 補測試',
+  'solo.suggest.testGap.detail': '{count} 個 dirty 源文件沒有同名 test',
+  'solo.suggest.testGap.taskPrompt': '{file}（以及其他 {count} 個 dirty 源文件）在磁碟上沒有同名 test。規劃並補上缺失的測試，然後驗證 + 落地。',
+
+  'solo.suggest.todoMarker.title': '處理 {file} 裡的 TODO',
+  'solo.suggest.todoMarker.detail': '{excerpt}（dirty 文件裡共 {count} 處標記）',
+  'solo.suggest.todoMarker.taskPrompt': 'dirty 文件集裡有 {count} 處 TODO/FIXME 標記。先從 {file} 開始：「{excerpt}」。規劃解決方案、實現、驗證、落地。',
+
+  'solo.suggest.releaseMismatch.notes-missing.title': '補 v{desktopVersion} 的 release-notes',
+  'solo.suggest.releaseMismatch.notes-missing.detail': 'desktop/package.json 已是 {desktopVersion}，但 release-notes 最新只有 v{latestNotes}',
+  'solo.suggest.releaseMismatch.notes-missing.taskPrompt': 'desktop/package.json 已經是 v{desktopVersion}，但 release-notes/v{desktopVersion}.md 不存在。寫 notes 描述自 v{latestNotes} 以來發的內容，然後落地（commit + tag + push 單 tag）。',
+
+  'solo.suggest.releaseMismatch.version-not-bumped.title': 'desktop 版本 bump 到 v{latestNotes}',
+  'solo.suggest.releaseMismatch.version-not-bumped.detail': 'release-notes/v{latestNotes}.md 已存在，但 desktop/package.json 還是 {desktopVersion}',
+  'solo.suggest.releaseMismatch.version-not-bumped.taskPrompt': 'release-notes/v{latestNotes}.md 已經寫了，但 desktop/package.json 還是 v{desktopVersion}。跑 scripts/release.ts {latestNotes} 完成 bump + commit + tag，然後單 tag push（不是 --tags）。',
+
+  'solo.suggest.releaseMismatch.tag-not-pushed.title': 'push v{desktopVersion} tag',
+  'solo.suggest.releaseMismatch.tag-not-pushed.detail': 'v{desktopVersion} 已對齊 notes，但 tag 還沒在 origin 上',
+  'solo.suggest.releaseMismatch.tag-not-pushed.taskPrompt': '版本對齊了（v{desktopVersion}），但 v{desktopVersion} tag 沒在 origin 上。push 單個 tag（git push origin v{desktopVersion}，不是 --tags）觸發 release-desktop workflow。',
+
+  'solo.suggest.stashRecover.title': '恢復 {count} 個 stash',
+  'solo.suggest.stashRecover.detail': '你還有 stash 著的工作沒處理',
+  'solo.suggest.stashRecover.taskPrompt': '你有 {count} 個 stash 在等。規劃怎麼恢復（哪些 pop、哪些 drop），然後實現並驗證。',
+
+  'solo.suggest.syncUpstream.title': '同步上游 {count} 個提交',
+  'solo.suggest.syncUpstream.detail': '本地落後於 origin',
+  'solo.suggest.syncUpstream.taskPrompt': '本地落後上游 {count} 個提交。規劃 pull / rebase 策略，執行，然後驗證結果。',
+
+  'solo.suggest.lspError.title': '清理 {count} 個型別錯誤',
+  'solo.suggest.lspError.detail': '語言伺服器回報該工作區存在錯誤',
+  'solo.suggest.lspError.taskPrompt': '該工作區存在 {count} 個由語言伺服器回報的型別錯誤。規劃清理方案，依嚴重程度依序修復，然後驗證工作區狀態乾淨。',
+
+  'solo.suggest.resolveConflict.merge.title': '處理進行中的 merge',
+  'solo.suggest.resolveConflict.merge.detail': '有一個 merge 在中途（.git/MERGE_HEAD 存在）',
+  'solo.suggest.resolveConflict.merge.taskPrompt': '有 merge 在進行（.git/MERGE_HEAD 存在）。檢查衝突文件，定解決策略，處理完跑構建驗證，然後 commit 這個 merge。',
+
+  'solo.suggest.resolveConflict.rebase.title': '處理進行中的 rebase',
+  'solo.suggest.resolveConflict.rebase.detail': '有一個 rebase 在中途（.git/rebase-{merge,apply} 存在）',
+  'solo.suggest.resolveConflict.rebase.taskPrompt': '有 rebase 在進行（.git/rebase-{merge,apply} 存在）。逐個解決衝突 commit，git rebase --continue，驗證最終樹，然後繼續。',
+
+  'solo.suggest.resolveConflict.cherry-pick.title': '處理進行中的 cherry-pick',
+  'solo.suggest.resolveConflict.cherry-pick.detail': '有一個 cherry-pick 在中途（.git/CHERRY_PICK_HEAD 存在）',
+  'solo.suggest.resolveConflict.cherry-pick.taskPrompt': '有 cherry-pick 在進行（.git/CHERRY_PICK_HEAD 存在）。處理衝突文件，git cherry-pick --continue，然後驗證。',
+
+  'solo.suggest.generic.title': '描述一個功能或修復',
+  'solo.suggest.generic.detail': '說一個具體任務，我跑完整條流水線',
+  'solo.suggest.generic.taskPrompt': '',
 
   // ─── Provider 相容性（偽 tool_use 偵測） ─────────────────
   'providerCompat.notice.title': '工具呼叫已忽略',
@@ -1300,6 +1365,7 @@ export const zh: Record<TranslationKey, string> = {
   'repoLaunch.checkedOutWarning': '選中的分支已在其他工作樹中檢出。直接啟動可能會被 Git 阻止；使用“獨立工作樹”可以避免切換當前目錄。',
 
   // ─── Chat Input ──────────────────────────────────────
+  'chat.messageLog': '聊天訊息',
   'chat.placeholder': '讓 Claude 編輯、除錯或解釋程式碼...',
   'chat.placeholderMissing': '此會話指向的工作目錄缺失。請新建會話或選擇其他專案。',
   'chat.addFiles': '新增檔案或圖片',
@@ -1317,6 +1383,7 @@ export const zh: Record<TranslationKey, string> = {
   'chat.openSkills': '技能',
   'chat.openPlugins': '外掛',
   'chat.coordinatorMode': '編排模式',
+  'chat.soloPipelineMode': '獨立流水線模式',
   'chat.questionDropped': 'AI 想向你提問，但該請求無效或已取消（你還沒來得及作答）。',
   'chat.contextExhausted': '上下文已滿，且多次壓縮仍無法騰出空間。建議新建會話繼續（先前的摘要已保留在本會話）。',
   'chat.skillPicker.title': '選擇技能插入',
@@ -2064,6 +2131,17 @@ export const zh: Record<TranslationKey, string> = {
   'tabs.hideWorkspace': '隱藏工作區',
   'tabs.showBrowser': '顯示瀏覽器',
   'tabs.hideBrowser': '隱藏瀏覽器',
+  'tabs.scrollLeft': '向左滾動標籤頁',
+  'tabs.scrollRight': '向右滾動標籤頁',
+
+  // ─── Browser ──────────────────────────────────────
+  'browser.back': '返回',
+  'browser.forward': '前進',
+  'browser.refresh': '重新整理',
+  'browser.enterUrl': '輸入網址...',
+  'browser.loading': '載入中',
+  'browser.screenshot': '截圖',
+  'browser.selectElement': '選擇元素',
 
   // ─── 外掛前置相依套件對話框 ─────────────────────────────────────
   'pluginPrereq.title': '{name} 缺少前置相依套件',
@@ -2082,4 +2160,8 @@ export const zh: Record<TranslationKey, string> = {
   'pluginPrereq.allInstalledToast': '所有前置相依套件皆已就緒。',
   'pluginPrereq.noPlatformInstall': '目前平台 {platform} 沒有現成的安裝指令，請查看上方文件連結。',
   'pluginPrereq.safetyNote': 'cc-haha 永遠不會自動執行安裝指令。「在終端機中開啟」只會把指令複製到剪貼簿並開啟新終端機 —— 你自己貼上 + 按 Enter 才會真正執行。',
+  'pluginPrereq.installAll': '一鍵安裝（{count}）',
+  'pluginPrereq.installAllTooltip': '開啟新終端機分頁，將 {count} 條安裝指令逐條注入並執行。你會在終端機裡看到每條指令回顯和執行 —— cc-haha 不會隱藏任何輸出。',
+  'pluginPrereq.installAllRunningToast': '已將 {count} 條安裝指令注入新終端機分頁，看著它們跑完後點「重新偵測」。',
+  'pluginPrereq.installAllFailedToast': '一鍵安裝失敗：{detail}。可改用單條指令的「複製」/「在終端機中開啟」按鈕。',
 }

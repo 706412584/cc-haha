@@ -118,6 +118,21 @@ export const TestProviderSchema = z.object({
   apiFormat: ApiFormatSchema.default('anthropic'),
 })
 
+/**
+ * Input for `POST /api/providers/fetch-models`. The model list is fetched
+ * server-side to bypass the renderer's secure-context restrictions — most
+ * webviews block plain `http://` requests as mixed content (the desktop
+ * UI runs at `tauri://localhost` / `https://...`), and many self-hosted
+ * relay providers also do not return `Access-Control-Allow-Origin` for
+ * `/v1/models`. Either failure mode kills the previous browser-side
+ * `fetch()`. Server-side has neither restriction.
+ */
+export const FetchModelsSchema = z.object({
+  baseUrl: z.string().url(),
+  apiKey: z.string().min(1),
+  apiFormat: ApiFormatSchema.default('anthropic'),
+})
+
 // TypeScript types
 export type ModelMapping = z.infer<typeof ModelMappingSchema>
 export type SavedProvider = z.infer<typeof SavedProviderSchema>
@@ -125,6 +140,7 @@ export type ProvidersIndex = z.infer<typeof ProvidersIndexSchema>
 export type CreateProviderInput = z.infer<typeof CreateProviderSchema>
 export type UpdateProviderInput = z.infer<typeof UpdateProviderSchema>
 export type TestProviderInput = z.infer<typeof TestProviderSchema>
+export type FetchModelsInput = z.infer<typeof FetchModelsSchema>
 
 export interface ProviderTestStepResult {
   success: boolean

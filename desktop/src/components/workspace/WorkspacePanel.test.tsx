@@ -329,6 +329,7 @@ describe('WorkspacePanel', () => {
 
     await act(() => {
       useWorkspacePanelStore.getState().openPanel('session-changed')
+      useWorkspacePanelStore.getState().setActiveView('session-changed', 'changed')
     })
 
     const view = await renderPanel('session-changed')
@@ -388,7 +389,7 @@ describe('WorkspacePanel', () => {
     expect(view.getAllByText('Diff').length).toBeGreaterThan(0)
   })
 
-  it('refreshes status on open and switches back to changed files when new changes exist', async () => {
+  it('R5: refreshes status on open without overriding the all-files view when new changes exist', async () => {
     getMocks().getWorkspaceStatusMock.mockResolvedValue({
       state: 'ok',
       workDir: '/repo',
@@ -437,10 +438,14 @@ describe('WorkspacePanel', () => {
     await waitFor(() => {
       expect(getMocks().getWorkspaceStatusMock).toHaveBeenCalledWith('session-stale-all')
     })
+    // R5: even when refreshed status reports new changed files, the active view stays on 'all'.
     await waitFor(() => {
-      expect(view.getByRole('button', { name: 'Changed files' })).toBeTruthy()
+      expect(useWorkspacePanelStore.getState().statusBySession['session-stale-all']?.changedFiles).toEqual([
+        expect.objectContaining({ path: 'src/Fresh.ts' }),
+      ])
     })
-    expect(view.getByText('src/Fresh.ts')).toBeTruthy()
+    expect(useWorkspacePanelStore.getState().getActiveView('session-stale-all')).toBe('all')
+    expect(view.getByRole('button', { name: 'All files' })).toBeTruthy()
   })
 
   it('loads workspace status when opened while the chat is running', async () => {
@@ -470,6 +475,7 @@ describe('WorkspacePanel', () => {
 
     await act(() => {
       useWorkspacePanelStore.getState().openPanel('session-running-open')
+      useWorkspacePanelStore.getState().setActiveView('session-running-open', 'changed')
     })
 
     const view = await renderPanel('session-running-open')
@@ -507,6 +513,7 @@ describe('WorkspacePanel', () => {
 
     await act(() => {
       useWorkspacePanelStore.getState().openPanel('session-non-git')
+      useWorkspacePanelStore.getState().setActiveView('session-non-git', 'changed')
     })
 
     const view = await renderPanel('session-non-git')
@@ -526,7 +533,7 @@ describe('WorkspacePanel', () => {
     })
   })
 
-  it('opens to all files when the current turn has no changed files', async () => {
+  it('R5: opens to all files by default regardless of changed-file count', async () => {
     const statusRequest = deferred<{
       state: 'ok'
       workDir: string
@@ -549,7 +556,8 @@ describe('WorkspacePanel', () => {
     })
 
     const view = await renderPanel('session-empty-tree')
-    expect(view.getByRole('button', { name: 'Changed files' })).toBeTruthy()
+    // R5: default view is 'all' — the toggle button should reflect that immediately.
+    expect(view.getByRole('button', { name: 'All files' })).toBeTruthy()
 
     await act(async () => {
       statusRequest.resolve({
@@ -625,10 +633,8 @@ describe('WorkspacePanel', () => {
 
     const view = await renderPanel('session-tree')
 
-    expect(view.getByRole('button', { name: 'Changed files' })).toBeTruthy()
-
-    await clickElement(view.getByRole('button', { name: 'Changed files' }))
-    await clickElement(view.getByRole('menuitem', { name: 'All files' }))
+    // R5: default view is 'all', so the all-files tree loads without a manual toggle.
+    expect(view.getByRole('button', { name: 'All files' })).toBeTruthy()
 
     await waitFor(() => {
       expect(getMocks().getWorkspaceTreeMock).toHaveBeenCalledWith('session-tree', '')

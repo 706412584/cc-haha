@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { MessageEntry } from '../types/session'
 import { useSessionRuntimeStore } from './sessionRuntimeStore'
 
@@ -132,6 +132,7 @@ import {
   type PerSessionState,
   useChatStore,
 } from './chatStore'
+import { useWorkspacePanelStore } from './workspacePanelStore'
 
 const TEST_SESSION_ID = 'test-session-1'
 const initialState = useChatStore.getState()
@@ -2189,6 +2190,135 @@ describe('chatStore history mapping', () => {
     expect(sendMock).toHaveBeenCalledWith('coord-session', {
       type: 'set_coordinator_mode',
       enabled: false,
+    })
+  })
+
+  it('persists Solo Pipeline mode and only sends it to a live session', () => {
+    useSessionRuntimeStore.setState({ coordinatorModes: {}, soloPipelineModes: {} })
+    sendMock.mockReset()
+
+    // No live session: persisted, not pushed.
+    useChatStore.getState().setSessionSoloPipelineMode('solo-session', true)
+    expect(useSessionRuntimeStore.getState().soloPipelineModes['solo-session']).toBe(true)
+    expect(sendMock).not.toHaveBeenCalled()
+
+    useChatStore.setState({
+      sessions: {
+        'solo-session': {
+          messages: [],
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+    useChatStore.getState().setSessionSoloPipelineMode('solo-session', false)
+
+    expect(useSessionRuntimeStore.getState().soloPipelineModes['solo-session']).toBe(false)
+    expect(sendMock).toHaveBeenCalledWith('solo-session', {
+      type: 'set_pipeline_mode',
+      flavor: 'normal',
+    })
+  })
+
+  it('enabling Solo Pipeline mode clears coordinator mode for the same session', () => {
+    useSessionRuntimeStore.setState({
+      coordinatorModes: { 'mut-session': true },
+      soloPipelineModes: {},
+    })
+    sendMock.mockReset()
+    useChatStore.setState({
+      sessions: {
+        'mut-session': {
+          messages: [],
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    useChatStore.getState().setSessionSoloPipelineMode('mut-session', true)
+
+    // Local store: Solo on, coordinator off.
+    expect(useSessionRuntimeStore.getState().soloPipelineModes['mut-session']).toBe(true)
+    expect(useSessionRuntimeStore.getState().coordinatorModes['mut-session']).toBe(false)
+    // Wire: must broadcast both transitions so the server clears the
+    // previously-active coordinator flag and arms the Solo flag in lockstep.
+    expect(sendMock).toHaveBeenCalledWith('mut-session', {
+      type: 'set_coordinator_mode',
+      enabled: false,
+    })
+    expect(sendMock).toHaveBeenCalledWith('mut-session', {
+      type: 'set_pipeline_mode',
+      flavor: 'solo',
+    })
+  })
+
+  it('enabling coordinator mode clears Solo Pipeline mode for the same session', () => {
+    useSessionRuntimeStore.setState({
+      coordinatorModes: {},
+      soloPipelineModes: { 'mut-session2': true },
+    })
+    sendMock.mockReset()
+    useChatStore.setState({
+      sessions: {
+        'mut-session2': {
+          messages: [],
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    useChatStore.getState().setSessionCoordinatorMode('mut-session2', true)
+
+    expect(useSessionRuntimeStore.getState().coordinatorModes['mut-session2']).toBe(true)
+    expect(useSessionRuntimeStore.getState().soloPipelineModes['mut-session2']).toBe(false)
+    expect(sendMock).toHaveBeenCalledWith('mut-session2', {
+      type: 'set_pipeline_mode',
+      flavor: 'normal',
+    })
+    expect(sendMock).toHaveBeenCalledWith('mut-session2', {
+      type: 'set_coordinator_mode',
+      enabled: true,
     })
   })
 
@@ -4260,5 +4390,132 @@ describe('chatStore message queue', () => {
     expect(afterResume).toHaveLength(2)
     expect((afterResume[1]![1] as { content: string }).content).toBe('queued-1')
     expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messageQueue).toHaveLength(1)
+  })
+})
+
+describe('chatStore — agent file-edit bridge to workspace panel (Phase 4)', () => {
+  let notifySpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    // The store is a real Zustand instance; spy on the method we forward to.
+    notifySpy = vi.spyOn(useWorkspacePanelStore.getState(), 'notifyAgentFileEdit')
+    notifySpy.mockImplementation(() => {})
+    // Reset chat store to a clean slate per test.
+    useChatStore.setState({ sessions: {} })
+  })
+
+  afterEach(() => {
+    notifySpy.mockRestore()
+  })
+
+  it('forwards Edit tool success to notifyAgentFileEdit with the absolute path', () => {
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'tool_use_complete',
+      toolName: 'Edit',
+      toolUseId: 'tu-edit-1',
+      input: { file_path: '/repo/src/app.ts', old_string: 'a', new_string: 'b' },
+    })
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'tool_result',
+      toolUseId: 'tu-edit-1',
+      content: 'ok',
+      isError: false,
+    })
+
+    expect(notifySpy).toHaveBeenCalledWith(TEST_SESSION_ID, '/repo/src/app.ts')
+  })
+
+  it('forwards Write tool success too', () => {
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'tool_use_complete',
+      toolName: 'Write',
+      toolUseId: 'tu-write-1',
+      input: { file_path: '/repo/src/new.ts', content: 'export {}' },
+    })
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'tool_result',
+      toolUseId: 'tu-write-1',
+      content: 'ok',
+      isError: false,
+    })
+
+    expect(notifySpy).toHaveBeenCalledWith(TEST_SESSION_ID, '/repo/src/new.ts')
+  })
+
+  it('forwards NotebookEdit using notebook_path instead of file_path', () => {
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'tool_use_complete',
+      toolName: 'NotebookEdit',
+      toolUseId: 'tu-nb-1',
+      input: { notebook_path: '/repo/notebook.ipynb', new_source: 'print(1)' },
+    })
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'tool_result',
+      toolUseId: 'tu-nb-1',
+      content: 'ok',
+      isError: false,
+    })
+
+    expect(notifySpy).toHaveBeenCalledWith(TEST_SESSION_ID, '/repo/notebook.ipynb')
+  })
+
+  it('does NOT fire when the tool result reports an error', () => {
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'tool_use_complete',
+      toolName: 'Edit',
+      toolUseId: 'tu-edit-fail',
+      input: { file_path: '/repo/src/app.ts', old_string: 'a', new_string: 'b' },
+    })
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'tool_result',
+      toolUseId: 'tu-edit-fail',
+      content: 'permission denied',
+      isError: true,
+    })
+
+    expect(notifySpy).not.toHaveBeenCalled()
+  })
+
+  it('does NOT fire for non-file-editing tools (e.g. Bash)', () => {
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'tool_use_complete',
+      toolName: 'Bash',
+      toolUseId: 'tu-bash-1',
+      input: { command: 'echo hi' },
+    })
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'tool_result',
+      toolUseId: 'tu-bash-1',
+      content: 'hi',
+      isError: false,
+    })
+
+    expect(notifySpy).not.toHaveBeenCalled()
+  })
+
+  it('drops the pending entry on consume so the same toolUseId only fires once', () => {
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'tool_use_complete',
+      toolName: 'Edit',
+      toolUseId: 'tu-edit-once',
+      input: { file_path: '/repo/a.ts', old_string: 'x', new_string: 'y' },
+    })
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'tool_result',
+      toolUseId: 'tu-edit-once',
+      content: 'ok',
+      isError: false,
+    })
+    expect(notifySpy).toHaveBeenCalledTimes(1)
+
+    // A duplicate tool_result for the same id (defensive — should not happen
+    // on a healthy stream) must not double-fire.
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'tool_result',
+      toolUseId: 'tu-edit-once',
+      content: 'ok',
+      isError: false,
+    })
+    expect(notifySpy).toHaveBeenCalledTimes(1)
   })
 })

@@ -1258,6 +1258,9 @@ export const en = {
   'empty.recentActivity.dirtyFiles': '{count} dirty',
   'empty.recentActivity.continueSession': 'Open this session',
   'empty.recentActivity.applyHandoff': 'Continue from here',
+  'empty.recentActivity.deepHandoffLabel': 'Deep',
+  'empty.recentActivity.deepHandoffOffTooltip': 'Deep handoff (off) — pass the standard ~4k-token verbatim tail to the next session. Click to enable.',
+  'empty.recentActivity.deepHandoffOnTooltip': 'Deep handoff (on) — pass an enlarged ~12k-token verbatim tail (60 turns / 800 chars/turn / 50k cap). Click to disable.',
   'empty.recentActivity.handoffGenerating': 'Preparing context...',
   'empty.recentActivity.handoffStage.readingCache': 'Reading conversation log...',
   'empty.recentActivity.handoffStage.generatingSummary': 'Generating summary (calling AI)...',
@@ -1270,6 +1273,10 @@ export const en = {
   'empty.recentActivity.previewNotYet': 'No summary yet. The first "Continue from here" click will generate one.',
   'session.handoffChip': '↗ Continued ({tokens} t)',
   'session.handoffChipTooltip': 'Continued from "{title}". The AI started with a {tokens}-token summary of that session in its system prompt.',
+  'session.coordinatorChip': 'Orchestration',
+  'session.coordinatorChipTooltip': 'Orchestration mode is on for this session. Tasks fan out to specialist worker agents and the main thread coordinates them. Toggle it from the + menu in the composer.',
+  'session.soloPipelineChip': 'Solo pipeline',
+  'session.soloPipelineChipTooltip': 'Solo Pipeline mode is on for this session. Before implementation, the AI runs an A/B/C plan gate (Planner → Reviewer → Critic), then continues through implement → test → review → land. Toggle it from the + menu in the composer.',
   'empty.recentActivity.handoff.branchLine': 'Last session on {branch}: "{title}".',
   'empty.recentActivity.handoff.titleLine': 'Last session: "{title}".',
   'empty.recentActivity.handoff.filesLine': 'Files touched: {files}{more}.',
@@ -1281,6 +1288,68 @@ export const en = {
    *  fully delivered as system prompt context). Kept short — the AI
    *  reads the system prompt and resumes. */
   'empty.recentActivity.continueTriggerMessage': "Please pick up where the previous session left off. Use the hand-off context above as ground truth, and start by stating in 1-2 sentences what you understand the current state to be and what you'll do next.",
+
+  // ─── Solo Pipeline mode — suggestion engine (welcome greeting) ───────
+  // Each suggestion has a title, optional detail, and a taskPrompt the
+  // AI receives as the seed for Stage 1 (or a later stage when entryStage
+  // is 'review' / 'land'). Keep titles SHORT (chip-sized); details and
+  // task prompts can be longer.
+  'solo.suggest.finishWip.title': 'Finish {count} pending change(s)',
+  'solo.suggest.finishWip.detail': 'Uncommitted: {sample}',
+  'solo.suggest.finishWip.detailForeign': 'Uncommitted (some may be from another agent): {sample}',
+  'solo.suggest.finishWip.taskPrompt': 'Wrap up the {count} uncommitted change(s) in this worktree ({files}). Run the A/B/C plan gate first, then implement → test → review → land.',
+
+  'solo.suggest.shipAhead.title': 'Ship {branch} ({count} commit(s) ahead)',
+  'solo.suggest.shipAhead.detail': 'Local is {count} commit(s) ahead of upstream. The work is done — review and land.',
+  'solo.suggest.shipAhead.taskPrompt': 'Branch {branch} has {count} commit(s) ahead of upstream. Review the diff against upstream, then land it (PR / push / release notes as appropriate).',
+
+  'solo.suggest.testGap.title': 'Add tests for {file}',
+  'solo.suggest.testGap.detail': '{count} dirty source file(s) have no sibling test',
+  'solo.suggest.testGap.taskPrompt': '{file} (and {count} other dirty source file(s)) lack a sibling test on disk. Plan and add the missing tests; then verify and land.',
+
+  'solo.suggest.todoMarker.title': 'Resolve TODO in {file}',
+  'solo.suggest.todoMarker.detail': '{excerpt} ({count} marker(s) total in dirty files)',
+  'solo.suggest.todoMarker.taskPrompt': 'There are {count} TODO/FIXME marker(s) in the dirty file set. Start with {file}: "{excerpt}". Plan the resolution, implement, verify, and land.',
+
+  'solo.suggest.releaseMismatch.notes-missing.title': 'Add release-notes for v{desktopVersion}',
+  'solo.suggest.releaseMismatch.notes-missing.detail': 'desktop/package.json is at {desktopVersion} but the latest release-notes file is v{latestNotes}',
+  'solo.suggest.releaseMismatch.notes-missing.taskPrompt': 'desktop/package.json is at v{desktopVersion} but release-notes/v{desktopVersion}.md does not exist. Write the notes describing what shipped since v{latestNotes}, then land (commit, tag, push tag).',
+
+  'solo.suggest.releaseMismatch.version-not-bumped.title': 'Bump desktop to v{latestNotes}',
+  'solo.suggest.releaseMismatch.version-not-bumped.detail': 'release-notes/v{latestNotes}.md exists but desktop/package.json is still at {desktopVersion}',
+  'solo.suggest.releaseMismatch.version-not-bumped.taskPrompt': 'release-notes/v{latestNotes}.md exists but desktop/package.json is still at v{desktopVersion}. Run scripts/release.ts {latestNotes} to bump the version + commit + tag, then push the single tag (not --tags).',
+
+  'solo.suggest.releaseMismatch.tag-not-pushed.title': 'Push v{desktopVersion} tag',
+  'solo.suggest.releaseMismatch.tag-not-pushed.detail': 'v{desktopVersion} matches release-notes but the tag is not on origin',
+  'solo.suggest.releaseMismatch.tag-not-pushed.taskPrompt': 'Versions are aligned (v{desktopVersion}) but the v{desktopVersion} tag is not on origin. Push the single tag (git push origin v{desktopVersion}, NOT --tags) to trigger the release-desktop workflow.',
+
+  'solo.suggest.stashRecover.title': 'Recover {count} stash(es)',
+  'solo.suggest.stashRecover.detail': 'You have stashed work waiting',
+  'solo.suggest.stashRecover.taskPrompt': 'You have {count} stash(es) waiting. Plan how to recover them (which to pop, which to drop), then implement and verify.',
+
+  'solo.suggest.syncUpstream.title': 'Sync {count} upstream commit(s)',
+  'solo.suggest.syncUpstream.detail': 'Local is behind origin',
+  'solo.suggest.syncUpstream.taskPrompt': 'Local is {count} commit(s) behind upstream. Plan a pull / rebase strategy, run it, and verify the result.',
+
+  'solo.suggest.lspError.title': 'Clear {count} type error(s)',
+  'solo.suggest.lspError.detail': 'Language server is reporting errors in this workspace',
+  'solo.suggest.lspError.taskPrompt': 'The workspace has {count} type error(s) reported by the language server. Plan how to clear them, fix them in order of severity, then verify the workspace is green.',
+
+  'solo.suggest.resolveConflict.merge.title': 'Resolve in-progress merge',
+  'solo.suggest.resolveConflict.merge.detail': 'A merge is mid-flight (.git/MERGE_HEAD exists)',
+  'solo.suggest.resolveConflict.merge.taskPrompt': 'A merge is in progress (.git/MERGE_HEAD exists). Inspect the conflicted files, decide on the resolution strategy, resolve, verify the build, then commit the merge.',
+
+  'solo.suggest.resolveConflict.rebase.title': 'Resolve in-progress rebase',
+  'solo.suggest.resolveConflict.rebase.detail': 'A rebase is mid-flight (.git/rebase-{merge,apply} exists)',
+  'solo.suggest.resolveConflict.rebase.taskPrompt': 'A rebase is in progress (.git/rebase-{merge,apply} exists). Inspect each conflicted commit, resolve, git rebase --continue, verify the final tree, then proceed.',
+
+  'solo.suggest.resolveConflict.cherry-pick.title': 'Resolve in-progress cherry-pick',
+  'solo.suggest.resolveConflict.cherry-pick.detail': 'A cherry-pick is mid-flight (.git/CHERRY_PICK_HEAD exists)',
+  'solo.suggest.resolveConflict.cherry-pick.taskPrompt': 'A cherry-pick is in progress (.git/CHERRY_PICK_HEAD exists). Resolve the conflicted files, git cherry-pick --continue, then verify.',
+
+  'solo.suggest.generic.title': 'Describe a feature or fix',
+  'solo.suggest.generic.detail': 'Tell me a concrete task and I will run the full pipeline',
+  'solo.suggest.generic.taskPrompt': '',
 
   // ─── Provider Compatibility (fake tool_use detection) ─────────────────
   /** Inline notice shown above the assistant message when the model emitted
@@ -1325,6 +1394,7 @@ export const en = {
   'repoLaunch.checkedOutWarning': 'Selected branch is already checked out in another worktree. Direct launch may be blocked by Git; use "Isolated worktree" to avoid changing directories.',
 
   // ─── Chat Input ──────────────────────────────────────
+  'chat.messageLog': 'Chat messages',
   'chat.placeholder': 'Ask Claude to edit, debug or explain...',
   'chat.placeholderMissing': 'This session points to a missing workspace. Create a new session or pick another project.',
   'chat.addFiles': 'Add files or photos',
@@ -1342,6 +1412,7 @@ export const en = {
   'chat.openSkills': 'Skills',
   'chat.openPlugins': 'Plugins',
   'chat.coordinatorMode': 'Orchestration mode',
+  'chat.soloPipelineMode': 'Solo pipeline mode',
   'chat.questionDropped': 'Claude wanted to ask you a question, but the request was invalid or canceled before you could answer.',
   'chat.contextExhausted': 'The context is full and repeated compaction can no longer free space. Consider starting a new session to continue (the earlier summary is preserved in this one).',
   'chat.skillPicker.title': 'Pick a skill to insert',
@@ -2089,6 +2160,17 @@ export const en = {
   'tabs.hideWorkspace': 'Hide Workspace',
   'tabs.showBrowser': 'Show Browser',
   'tabs.hideBrowser': 'Hide Browser',
+  'tabs.scrollLeft': 'Scroll tabs left',
+  'tabs.scrollRight': 'Scroll tabs right',
+
+  // ─── Browser ──────────────────────────────────────
+  'browser.back': 'Back',
+  'browser.forward': 'Forward',
+  'browser.refresh': 'Refresh',
+  'browser.enterUrl': 'Enter URL...',
+  'browser.loading': 'Loading',
+  'browser.screenshot': 'Screenshot',
+  'browser.selectElement': 'Select element',
 
   // ─── Plugin Prerequisites Modal ─────────────────────────────────────
   'pluginPrereq.title': 'Missing prerequisites for {name}',
@@ -2107,6 +2189,10 @@ export const en = {
   'pluginPrereq.allInstalledToast': 'All prerequisites are now installed.',
   'pluginPrereq.noPlatformInstall': 'No automated install command for {platform}. See the homepage link above.',
   'pluginPrereq.safetyNote': 'cc-haha never runs install commands automatically. The "Open in terminal" button copies the command and opens a terminal — you press Enter to actually run it.',
+  'pluginPrereq.installAll': 'Install all ({count})',
+  'pluginPrereq.installAllTooltip': 'Open a new terminal tab and inject {count} install command(s) one at a time. You will see each command echo and run in the terminal — cc-haha never hides output.',
+  'pluginPrereq.installAllRunningToast': '{count} install command(s) injected into a new terminal tab. Watch them run, then click "Recheck" when done.',
+  'pluginPrereq.installAllFailedToast': 'Could not auto-install: {detail}. Try the per-command "Copy" / "Open in terminal" buttons instead.',
 } as const
 
 export type TranslationKey = keyof typeof en
