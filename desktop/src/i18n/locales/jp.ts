@@ -1317,6 +1317,10 @@ export const jp: Record<TranslationKey, string> = {
   'solo.suggest.syncUpstream.detail': 'ローカルが origin より遅れています',
   'solo.suggest.syncUpstream.taskPrompt': 'ローカルは上流より {count} 件遅れています。pull / rebase 戦略を計画、実行、結果を検証してください。',
 
+  'solo.suggest.lspError.title': '{count} 件の型エラーを解消',
+  'solo.suggest.lspError.detail': '言語サーバーがこのワークスペースのエラーを報告しています',
+  'solo.suggest.lspError.taskPrompt': 'このワークスペースで言語サーバーが {count} 件の型エラーを報告しています。解消方法を計画し、深刻度の高い順に修正し、ワークスペースがクリーンであることを検証してください。',
+
   'solo.suggest.resolveConflict.merge.title': '進行中の merge を解決',
   'solo.suggest.resolveConflict.merge.detail': 'merge が進行中です（.git/MERGE_HEAD あり）',
   'solo.suggest.resolveConflict.merge.taskPrompt': 'merge が進行中です（.git/MERGE_HEAD あり）。コンフリクトファイルを確認、解決方針を決定、解決後にビルドを検証してから merge を commit してください。',

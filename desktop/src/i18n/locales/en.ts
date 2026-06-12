@@ -1331,6 +1331,10 @@ export const en = {
   'solo.suggest.syncUpstream.detail': 'Local is behind origin',
   'solo.suggest.syncUpstream.taskPrompt': 'Local is {count} commit(s) behind upstream. Plan a pull / rebase strategy, run it, and verify the result.',
 
+  'solo.suggest.lspError.title': 'Clear {count} type error(s)',
+  'solo.suggest.lspError.detail': 'Language server is reporting errors in this workspace',
+  'solo.suggest.lspError.taskPrompt': 'The workspace has {count} type error(s) reported by the language server. Plan how to clear them, fix them in order of severity, then verify the workspace is green.',
+
   'solo.suggest.resolveConflict.merge.title': 'Resolve in-progress merge',
   'solo.suggest.resolveConflict.merge.detail': 'A merge is mid-flight (.git/MERGE_HEAD exists)',
   'solo.suggest.resolveConflict.merge.taskPrompt': 'A merge is in progress (.git/MERGE_HEAD exists). Inspect the conflicted files, decide on the resolution strategy, resolve, verify the build, then commit the merge.',

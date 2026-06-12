@@ -1317,6 +1317,10 @@ export const zh: Record<TranslationKey, string> = {
   'solo.suggest.syncUpstream.detail': '本地落后于 origin',
   'solo.suggest.syncUpstream.taskPrompt': '本地落后上游 {count} 个提交。规划 pull / rebase 策略,执行,然后验证结果。',
 
+  'solo.suggest.lspError.title': '清理 {count} 个类型错误',
+  'solo.suggest.lspError.detail': '语言服务器报告该工作区存在错误',
+  'solo.suggest.lspError.taskPrompt': '该工作区存在 {count} 个由语言服务器报告的类型错误。规划清理方案，按严重程度依次修复，然后验证工作区状态干净。',
+
   'solo.suggest.resolveConflict.merge.title': '处理进行中的 merge',
   'solo.suggest.resolveConflict.merge.detail': '有一个 merge 在中途(.git/MERGE_HEAD 存在)',
   'solo.suggest.resolveConflict.merge.taskPrompt': '有 merge 在进行(.git/MERGE_HEAD 存在)。检查冲突文件,定解决策略,处理完跑构建验证,然后 commit 这个 merge。',

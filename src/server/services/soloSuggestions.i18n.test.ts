@@ -69,6 +69,7 @@ function fixtureWithEverySignal(): {
         latestNotes: '0.5.9',
         kind: 'notes-missing',
       },
+      lspErrorCount: 4,
       // gitInProgress would dominate scoring; we cycle the three
       // variants in the loop below to make sure all locales are
       // checked against all three rendering paths.

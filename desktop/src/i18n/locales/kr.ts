@@ -1317,6 +1317,10 @@ export const kr: Record<TranslationKey, string> = {
   'solo.suggest.syncUpstream.detail': '로컬이 origin보다 뒤처져 있음',
   'solo.suggest.syncUpstream.taskPrompt': '로컬이 업스트림보다 {count}개 커밋 뒤처져 있습니다. pull / rebase 전략을 계획, 실행, 결과를 검증해 주세요.',
 
+  'solo.suggest.lspError.title': '{count}개 타입 오류 정리',
+  'solo.suggest.lspError.detail': '언어 서버가 이 워크스페이스에서 오류를 보고하고 있습니다',
+  'solo.suggest.lspError.taskPrompt': '이 워크스페이스에서 언어 서버가 {count}개의 타입 오류를 보고합니다. 정리 방법을 계획하고 심각도 순으로 수정한 다음, 워크스페이스가 깨끗한지 검증해 주세요.',
+
   'solo.suggest.resolveConflict.merge.title': '진행 중인 merge 해결',
   'solo.suggest.resolveConflict.merge.detail': 'merge가 진행 중입니다 (.git/MERGE_HEAD 존재)',
   'solo.suggest.resolveConflict.merge.taskPrompt': 'merge가 진행 중입니다 (.git/MERGE_HEAD 존재). 충돌 파일을 확인하고 해결 전략을 정한 뒤 빌드를 검증하고 merge를 commit해 주세요.',
