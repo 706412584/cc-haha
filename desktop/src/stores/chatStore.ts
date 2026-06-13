@@ -1176,6 +1176,23 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // 方案3: count this as a real user turn so rapid re-compaction (thrash)
     // can be told apart from compactions spread across genuine work.
     noteUserTurnForCompactionThrash(sessionId)
+
+    // 每次真实用户回合前都把服务端运行模式对齐一次。
+    // 这样即使 renderer 重连或服务端清理了内存标记，UI 里仍开启的
+    // Solo/协调模式也会在本轮消息前重新生效。
+    const runtimeModes = useSessionRuntimeStore.getState()
+    const coordinatorEnabled = runtimeModes.coordinatorModes[sessionId] ?? false
+    const soloPipelineEnabled = runtimeModes.soloPipelineModes[sessionId] ?? false
+    if (soloPipelineEnabled) {
+      wsManager.send(sessionId, { type: 'set_coordinator_mode', enabled: false })
+      wsManager.send(sessionId, { type: 'set_pipeline_mode', flavor: 'solo' })
+    } else if (coordinatorEnabled) {
+      wsManager.send(sessionId, { type: 'set_pipeline_mode', flavor: 'normal' })
+      wsManager.send(sessionId, { type: 'set_coordinator_mode', enabled: true })
+    } else {
+      wsManager.send(sessionId, { type: 'set_coordinator_mode', enabled: false })
+      wsManager.send(sessionId, { type: 'set_pipeline_mode', flavor: 'normal' })
+    }
     wsManager.send(sessionId, { type: 'user_message', content, attachments: serverAttachments })
   },
 

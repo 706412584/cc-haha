@@ -186,7 +186,7 @@ describe('chatStore history mapping', () => {
     sessionStoreSnapshot.sessions = []
     cliTaskStoreSnapshot.tasks = []
     cliTaskStoreSnapshot.sessionId = null
-    useSessionRuntimeStore.setState({ selections: {} })
+    useSessionRuntimeStore.setState({ selections: {}, coordinatorModes: {}, soloPipelineModes: {} })
     localStorage.clear()
     useChatStore.setState({
       ...initialState,
@@ -1604,6 +1604,31 @@ describe('chatStore history mapping', () => {
         }],
       },
     )
+  })
+
+  it('replays Solo Pipeline mode immediately before sending a user turn', () => {
+    useSessionRuntimeStore.setState({ coordinatorModes: {}, soloPipelineModes: { [TEST_SESSION_ID]: true } })
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
+      },
+    })
+
+    useChatStore.getState().sendMessage(TEST_SESSION_ID, '继续 solo')
+
+    expect(sendMock).toHaveBeenNthCalledWith(1, TEST_SESSION_ID, {
+      type: 'set_coordinator_mode',
+      enabled: false,
+    })
+    expect(sendMock).toHaveBeenNthCalledWith(2, TEST_SESSION_ID, {
+      type: 'set_pipeline_mode',
+      flavor: 'solo',
+    })
+    expect(sendMock).toHaveBeenNthCalledWith(3, TEST_SESSION_ID, {
+      type: 'user_message',
+      content: '继续 solo',
+      attachments: undefined,
+    })
   })
 
   it('can send a visual selection turn without rendering the full model prompt as user text', () => {
@@ -4460,7 +4485,7 @@ describe('chatStore context-exhausted suggestion (方案3)', () => {
     sendMock.mockReset()
     getMemberBySessionIdMock.mockReset()
     getMemberBySessionIdMock.mockReturnValue(null)
-    useSessionRuntimeStore.setState({ selections: {} })
+    useSessionRuntimeStore.setState({ selections: {}, coordinatorModes: {}, soloPipelineModes: {} })
     useChatStore.setState({ ...initialState, sessions: {} })
     // Reset the module-level compaction-thrash tracking for this session id.
     useChatStore.getState().clearMessages(SID)
@@ -4521,7 +4546,7 @@ describe('chatStore message queue', () => {
     sendMock.mockReset()
     getMemberBySessionIdMock.mockReset()
     getMemberBySessionIdMock.mockReturnValue(null)
-    useSessionRuntimeStore.setState({ selections: {} })
+    useSessionRuntimeStore.setState({ selections: {}, coordinatorModes: {}, soloPipelineModes: {} })
     useChatStore.setState({ ...initialState, sessions: {} })
   })
 
