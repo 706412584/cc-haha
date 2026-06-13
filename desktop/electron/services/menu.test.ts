@@ -15,7 +15,7 @@ describe('Electron application menu service', () => {
 
   it('emits native navigation destinations from macOS app menu items', () => {
     const onNavigate = vi.fn()
-    const template = buildApplicationMenuTemplate('Claude Code Haha', onNavigate, 'darwin')
+    const template = buildApplicationMenuTemplate('Code Council', onNavigate, 'darwin')
     const appMenu = template[0]
     expect(appMenu).toBeDefined()
     const submenu = appMenu!.submenu as MenuItemConstructorOptions[]
@@ -33,10 +33,10 @@ describe('Electron application menu service', () => {
 
   it('routes macOS Hide through the provided safe hide action', () => {
     const hide = vi.fn()
-    const template = buildApplicationMenuTemplate('Claude Code Haha', vi.fn(), 'darwin', { hide })
+    const template = buildApplicationMenuTemplate('Code Council', vi.fn(), 'darwin', { hide })
     const appMenu = template[0]
     const submenu = appMenu!.submenu as MenuItemConstructorOptions[]
-    const hideItem = submenu.find(item => item.label === 'Hide Claude Code Haha')
+    const hideItem = submenu.find(item => item.label === 'Hide Code Council')
 
     expect(hideItem).toBeDefined()
     expect(hideItem?.accelerator).toBe('Command+H')
@@ -47,7 +47,7 @@ describe('Electron application menu service', () => {
 
   it('routes the Window close accelerator through the provided close action', () => {
     const close = vi.fn()
-    const template = buildApplicationMenuTemplate('Claude Code Haha', vi.fn(), 'darwin', { close })
+    const template = buildApplicationMenuTemplate('Code Council', vi.fn(), 'darwin', { close })
     const closeItem = template
       .flatMap(item => (item.submenu as MenuItemConstructorOptions[] | undefined) ?? [])
       .find(item => item.label === 'Close Window')
@@ -61,7 +61,7 @@ describe('Electron application menu service', () => {
 
   it('routes the View fullscreen accelerator through the provided fullscreen action', () => {
     const toggleFullScreen = vi.fn()
-    const template = buildApplicationMenuTemplate('Claude Code Haha', vi.fn(), 'darwin', { toggleFullScreen })
+    const template = buildApplicationMenuTemplate('Code Council', vi.fn(), 'darwin', { toggleFullScreen })
     const fullScreenItem = template
       .flatMap(item => (item.submenu as MenuItemConstructorOptions[] | undefined) ?? [])
       .find(item => item.label === 'Toggle Full Screen')
@@ -74,7 +74,7 @@ describe('Electron application menu service', () => {
   })
 
   it('uses F11 for custom fullscreen on non-macOS platforms', () => {
-    const template = buildApplicationMenuTemplate('Claude Code Haha', vi.fn(), 'linux', {})
+    const template = buildApplicationMenuTemplate('Code Council', vi.fn(), 'linux', {})
     const fullScreenItem = template
       .flatMap(item => (item.submenu as MenuItemConstructorOptions[] | undefined) ?? [])
       .find(item => item.label === 'Toggle Full Screen')
@@ -83,7 +83,7 @@ describe('Electron application menu service', () => {
   })
 
   it('keeps a settings entry available on non-macOS platforms', () => {
-    const template = buildApplicationMenuTemplate('Claude Code Haha', vi.fn(), 'win32')
+    const template = buildApplicationMenuTemplate('Code Council', vi.fn(), 'win32')
     const fileMenu = template[0]
     expect(fileMenu).toBeDefined()
     const fileSubmenu = fileMenu!.submenu as MenuItemConstructorOptions[]
@@ -98,7 +98,7 @@ describe('Electron application menu service', () => {
     const send = vi.fn()
 
     await installApplicationMenu(
-      { name: 'Claude Code Haha' } as never,
+      { name: 'Code Council' } as never,
       () => ({ webContents: { send } }) as never,
       'darwin',
     )
@@ -124,7 +124,7 @@ describe('Electron application menu service', () => {
     menuMocks.setApplicationMenu.mockClear()
 
     await installApplicationMenu(
-      { name: 'Claude Code Haha' } as never,
+      { name: 'Code Council' } as never,
       () => ({ webContents: { send: vi.fn() } }) as never,
       'win32',
     )
@@ -140,7 +140,7 @@ describe('Electron application menu service', () => {
     const send = vi.fn()
 
     await installApplicationMenu(
-      { name: 'Claude Code Haha' } as never,
+      { name: 'Code Council' } as never,
       () => ({ webContents: { send } }) as never,
       'linux',
     )
@@ -168,7 +168,7 @@ describe('Electron application menu service', () => {
     const menuMocks = getElectronMenuMocks()
 
     await installApplicationMenu(
-      { name: 'Claude Code Haha', hide: appHide } as never,
+      { name: 'Code Council', hide: appHide } as never,
       () => window as never,
       'darwin',
     )
@@ -176,7 +176,7 @@ describe('Electron application menu service', () => {
     const template = menuMocks.buildFromTemplate.mock.calls[0]?.[0] as MenuItemConstructorOptions[]
     const hideItem = template
       .flatMap(item => (item.submenu as MenuItemConstructorOptions[] | undefined) ?? [])
-      .find(item => item.label === 'Hide Claude Code Haha')
+      .find(item => item.label === 'Hide Code Council')
 
     hideItem?.click?.({} as never, {} as never, {} as never)
     expect(window.setFullScreen).toHaveBeenCalledWith(false)
@@ -199,7 +199,7 @@ describe('Electron application menu service', () => {
     const menuMocks = getElectronMenuMocks()
 
     await installApplicationMenu(
-      { name: 'Claude Code Haha' } as never,
+      { name: 'Code Council' } as never,
       () => window as never,
       'darwin',
     )

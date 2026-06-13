@@ -636,7 +636,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
               className={`sidebar-copy ${expanded ? 'sidebar-copy--visible' : 'sidebar-copy--hidden'} text-[13px] font-semibold tracking-tight text-[var(--color-text-primary)]`}
               style={{ fontFamily: 'var(--font-headline)' }}
             >
-              Claude Code <span className="text-[var(--color-primary-container)]">Haha</span>
+              Code <span className="text-[var(--color-primary-container)]">Council</span>
             </span>
           </div>
           <div className={`flex items-center ${expanded ? 'gap-1.5' : 'flex-col gap-2'}`}>

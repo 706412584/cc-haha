@@ -254,6 +254,7 @@ describe('Sidebar', () => {
       { sessionId: 'session-new-1', title: 'New Session', type: 'session', status: 'idle' },
     ])
     expect(useTabStore.getState().activeTabId).toBe('session-new-1')
+    expect(screen.getByText(/Code/)).toHaveTextContent('Code Council')
     expect(screen.getByRole('complementary')).not.toHaveAttribute('data-desktop-drag-region')
     expect(screen.getByTestId('sidebar-title-region')).toHaveAttribute('data-desktop-drag-region')
   })
