@@ -19,6 +19,42 @@ function isUnset(val) {
   return !val || val.trim() === '' || val.startsWith('${user_config.')
 }
 
+function isPrivateHostname(hostname) {
+  // Strip IPv6 brackets: new URL() returns "[::1]" but we compare against "::1"
+  const h = hostname.replace(/^\[|\]$/g, '')
+  // IPv4-mapped IPv6: ::ffff:127.0.0.1 → extract trailing IPv4
+  const v4Mapped = h.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)
+  if (v4Mapped) return isPrivateHostname(v4Mapped[1])
+  // IPv4 private ranges
+  if (
+    h === 'localhost' ||
+    h === '127.0.0.1' ||
+    h === '0.0.0.0' ||
+    h.startsWith('169.254.') ||
+    h.startsWith('10.') ||
+    h.startsWith('192.168.') ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(h)
+  ) return true
+  // IPv6 loopback / link-local / private
+  if (
+    h === '::1' ||
+    h.startsWith('fe80:') ||           // link-local
+    h.startsWith('fc00:') ||           // unique local (fc00::/7)
+    h.startsWith('fd')                 // unique local (fd00::/8)
+  ) return true
+  return false
+}
+
+function validateUrlSafety(urlString, label) {
+  const parsed = new URL(urlString)
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error(`${label}: 不允许的协议 ${parsed.protocol}。仅支持 http/https。`)
+  }
+  if (isPrivateHostname(parsed.hostname)) {
+    throw new Error(`${label}: 不允许访问内网地址 ${parsed.hostname.replace(/^\[|\]$/g, '')}`)
+  }
+}
+
 const MODEL_CAPABILITIES = {
   // Agnes image models
   'agnes-image-2.1-flash': { sizes: ['512x512', '768x768', '1024x1024'], edit: false, transparent: false, maxN: 4, format: 'url' },
@@ -40,14 +76,18 @@ const MODEL_CAPABILITIES = {
 }
 
 function getModelCapabilities(model) {
-  // Exact match
+  // 1. Exact match
   if (MODEL_CAPABILITIES[model]) return MODEL_CAPABILITIES[model]
-  // Partial match
+  // 2. Prefix match: known model name is prefix of user's model (e.g. "gpt-image-2-turbo" starts with "gpt-image-2")
   const lower = model.toLowerCase()
   for (const [key, caps] of Object.entries(MODEL_CAPABILITIES)) {
-    if (lower.includes(key) || key.includes(lower)) return caps
+    if (lower.startsWith(key)) return caps
   }
-  // Pattern-based defaults
+  // 3. Contains match: user's model contains known name (e.g. "my-gpt-image-2-fork" contains "gpt-image-2")
+  for (const [key, caps] of Object.entries(MODEL_CAPABILITIES)) {
+    if (lower.includes(key)) return caps
+  }
+  // 4. Pattern-based defaults
   if (/image/i.test(lower)) return { sizes: ['512x512', '1024x1024'], edit: false, transparent: false, maxN: 4, format: 'url' }
   // Unknown
   return null
@@ -61,9 +101,19 @@ function loadProviderFromEnv(prefix) {
 
   if (isUnset(baseUrl) || isUnset(apiKey) || isUnset(model)) return null
 
+  const cleanedUrl = baseUrl.replace(/\/+$/, '')
+
+  // Validate provider baseUrl is not a private/internal address
+  try {
+    validateUrlSafety(cleanedUrl, `${prefix}_BASE_URL`)
+  } catch (err) {
+    console.error(`[image-gen] Skipping ${prefix}: ${err.message}`)
+    return null
+  }
+
   return {
     name: (!isUnset(name) && name) || model,
-    baseUrl: baseUrl.replace(/\/+$/, ''),
+    baseUrl: cleanedUrl,
     apiKey,
     model,
     enabled: true,
@@ -229,24 +279,7 @@ async function editWithFallback(prompt, imageUrl, size, n, transparent, provider
         const buf = Buffer.from(b64, 'base64')
         imageBlob = new Blob([buf], { type: mime })
       } else {
-        const parsed = new URL(imageUrl)
-        if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-          throw new Error(`不允许的 URL 协议: ${parsed.protocol}。仅支持 http/https/data URL。`)
-        }
-        // Block private/link-local IP ranges
-        // new URL() returns IPv6 with brackets like "[::1]", strip them
-        const hostname = parsed.hostname.replace(/^\[|\]$/g, '')
-        if (
-          hostname === 'localhost' ||
-          hostname === '127.0.0.1' ||
-          hostname === '::1' ||
-          hostname.startsWith('169.254.') ||
-          hostname.startsWith('10.') ||
-          hostname.startsWith('192.168.') ||
-          /^172\.(1[6-9]|2\d|3[01])\./.test(hostname)
-        ) {
-          throw new Error(`不允许访问内网地址: ${hostname}`)
-        }
+        validateUrlSafety(imageUrl, 'image_url')
         const imgRes = await fetchWithTimeout(imageUrl, { method: 'GET' }, 30_000)
         if (!imgRes.ok) throw new Error(`下载参考图失败: HTTP ${imgRes.status}`)
         imageBlob = await imgRes.blob()
@@ -456,8 +489,11 @@ function formatResult(result) {
   return { content: parts, isError: false }
 }
 
+// Cache providers at startup (env vars don't change during process lifetime)
+const cachedProviders = loadProviders()
+
 async function handleToolCall(name, args) {
-  const providers = loadProviders()
+  const providers = cachedProviders
 
   if (providers.length === 0) {
     return {

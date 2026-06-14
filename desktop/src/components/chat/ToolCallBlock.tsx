@@ -499,7 +499,7 @@ function extractImageBlocks(content: unknown): ImageBlock[] {
     // Handle OpenAI-style image_url blocks (from MCP proxy transforms)
     if (typed.type === 'image_url' && typed.image_url && typeof typed.image_url === 'object') {
       const url = (typed.image_url as Record<string, unknown>).url
-      if (typeof url === 'string') {
+      if (typeof url === 'string' && /^(https?:|data:)/i.test(url)) {
         images.push({ src: url, mimeType: 'image/png' })
       }
     }

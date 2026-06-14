@@ -106,7 +106,14 @@ export async function handlePluginsApi(
       if (!userConfig || Object.keys(userConfig).length === 0) {
         throw ApiError.badRequest('Plugin has no userConfig options')
       }
-      savePluginOptions(pluginId, values, userConfig)
+      // Filter to only schema-declared keys (prevent injection of arbitrary keys)
+      const filtered: Record<string, unknown> = {}
+      for (const key of Object.keys(userConfig)) {
+        if (key in values) {
+          filtered[key] = values[key]
+        }
+      }
+      savePluginOptions(pluginId, filtered, userConfig)
       clearPluginOptionsCache()
       return Response.json({ ok: true, pluginId })
     }

@@ -45,11 +45,16 @@ export function PluginConfigModal({
       .getOptions(pluginId)
       .then((res) => {
         const merged: Record<string, string> = {}
+        const masked = new Set<string>()
         for (const key of Object.keys(schema)) {
           const existing = res.values[key]
+          if (schema[key]?.sensitive && existing === '********') {
+            masked.add(key)
+          }
           merged[key] = existing != null ? String(existing) : ''
         }
         setValues(merged)
+        setMaskedKeys(masked)
       })
       .catch(() => {
         const empty: Record<string, string> = {}
@@ -68,10 +73,21 @@ export function PluginConfigModal({
     }
   }, [open, wasOpen])
 
+  // Track which values came from the server as masked '********' so we can skip them on save
+  const [maskedKeys, setMaskedKeys] = useState<Set<string>>(new Set())
+
   const handleSave = async () => {
     setLoading(true)
     try {
-      await pluginsApi.saveOptions(pluginId, values)
+      // Filter out sensitive fields that user didn't modify (still contain mask value)
+      const toSave: Record<string, string> = {}
+      for (const [key, value] of Object.entries(values)) {
+        if (maskedKeys.has(key) && value === '********') {
+          continue // Don't overwrite real API key with mask string
+        }
+        toSave[key] = value
+      }
+      await pluginsApi.saveOptions(pluginId, toSave)
       addToast({ type: 'success', message: `${pluginName} configuration saved` })
       onSaved?.()
       onClose()
