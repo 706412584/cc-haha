@@ -126,8 +126,7 @@ export type CatalogPluginCategory =
 export type CatalogPlugin = {
   id: string
   marketplace: string
-  /** Optional — built-in marketplaces don't need a source spec on the wire. */
-  marketplaceSource?: unknown
+  marketplaceSource: unknown
   displayName: string
   description: string
   category: CatalogPluginCategory
