@@ -229,7 +229,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         loadH5AccessSettings(previousH5Access),
         loadTraceCaptureSettings(),
       ])
-      const serverTheme = isThemeMode(userSettings.theme) ? userSettings.theme : 'white'
+      const serverTheme = isThemeMode(userSettings.theme) ? userSettings.theme : 'dark'
       // 'system' is a desktop-only logical mode that never gets persisted to the
       // server (the server rejects it). If the user previously chose 'system' and
       // it was stored locally, honour the local value instead of overwriting it

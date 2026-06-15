@@ -8,7 +8,9 @@ function getStoredTheme(): ThemeMode {
     const stored = localStorage.getItem(THEME_STORAGE_KEY)
     if (isThemeMode(stored)) return stored
   } catch { /* localStorage unavailable */ }
-  return 'white'
+  // New installs default to dark — easier on the eyes for a coding workbench.
+  // Existing users with a stored preference (including 'white') keep theirs.
+  return 'dark'
 }
 
 function getSystemPrefersDark(): boolean {

@@ -1008,7 +1008,7 @@ describe('settingsStore theme persistence', () => {
     document.documentElement.style.colorScheme = ''
   })
 
-  it('falls back to the pure white theme when user settings have no theme', async () => {
+  it('falls back to dark when user settings have no theme', async () => {
     vi.doMock('../api/settings', () => ({
       settingsApi: {
         getUser: vi.fn().mockResolvedValue({}),
@@ -1049,10 +1049,10 @@ describe('settingsStore theme persistence', () => {
 
     await useSettingsStore.getState().fetchAll()
 
-    expect(useSettingsStore.getState().theme).toBe('white')
-    expect(useUIStore.getState().theme).toBe('white')
-    expect(document.documentElement.getAttribute('data-theme')).toBe('white')
-    expect(document.documentElement.style.colorScheme).toBe('light')
+    expect(useSettingsStore.getState().theme).toBe('dark')
+    expect(useUIStore.getState().theme).toBe('dark')
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
+    expect(document.documentElement.style.colorScheme).toBe('dark')
   })
 
   it('hydrates the pure white theme from user settings', async () => {
