@@ -162,11 +162,12 @@ export function windowsPowerShellOverride(
   return base === 'pwsh' || base === 'powershell' ? trimmed : null
 }
 
-export function buildSidecarEnv(baseEnv: NodeJS.ProcessEnv, h5DistDir: string): NodeJS.ProcessEnv {
+export function buildSidecarEnv(baseEnv: NodeJS.ProcessEnv, h5DistDir: string, desktopRoot: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     ...baseEnv,
     CLAUDE_H5_AUTO_PUBLIC_URL: '1',
     CLAUDE_H5_DIST_DIR: h5DistDir,
+    CLAUDE_CODE_PLUGIN_SEED_DIR: path.join(desktopRoot, 'plugin-seed'),
   }
   const configDir = baseEnv.CLAUDE_CONFIG_DIR
   if (configDir) {
@@ -196,7 +197,7 @@ export function createServerPlan({
   return {
     command: resolveSidecarExecutable(desktopRoot),
     args: ['server', '--app-root', appRoot, '--host', bindHost, '--port', String(port)],
-    env: buildSidecarEnv(env, h5DistDir),
+    env: buildSidecarEnv(env, h5DistDir, desktopRoot),
   }
 }
 
@@ -219,7 +220,7 @@ export function createAdapterPlan({
     command: resolveSidecarExecutable(desktopRoot),
     args: ['adapters', '--app-root', appRoot, flag],
     env: {
-      ...buildSidecarEnv(env, h5DistDir),
+      ...buildSidecarEnv(env, h5DistDir, desktopRoot),
       ADAPTER_SERVER_URL: httpToWebSocketUrl(serverUrl),
     },
   }

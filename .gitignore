@@ -94,3 +94,6 @@ CLAUDE.md
 .opencode/
 graphify-out/
 .gitignore
+
+# desktop/scripts/build-plugin-seed.ts output
+desktop/plugin-seed/
