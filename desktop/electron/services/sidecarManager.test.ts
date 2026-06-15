@@ -66,9 +66,10 @@ describe('Electron sidecar manager', () => {
   it('passes portable config and adapter server URL through the sidecar env', () => {
     const configDir = mkdtempSync(path.join(tmpdir(), 'cc-haha-config-'))
     try {
-      const env = buildSidecarEnv({ CLAUDE_CONFIG_DIR: configDir }, '/app/dist')
+      const env = buildSidecarEnv({ CLAUDE_CONFIG_DIR: configDir }, '/app/dist', '/app/desktop')
       expect(env.CLAUDE_CONFIG_DIR).toBe(configDir)
       expect(env.XDG_CACHE_HOME).toBe(path.join(configDir, 'Cache'))
+      expect(env.CLAUDE_CODE_PLUGIN_SEED_DIR).toBe(path.join('/app/desktop', 'plugin-seed'))
 
       const adapter = createAdapterPlan({
         desktopRoot: '/app/desktop',
