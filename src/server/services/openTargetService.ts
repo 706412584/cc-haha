@@ -275,10 +275,17 @@ async function defaultLaunch(command: string, args: string[]): Promise<OpenTarge
     }
 
     try {
+      // NOTE: do NOT set `windowsHide: true` on Windows. For console subsystem
+      // commands like `cmd.exe /c start ...` it would hide the console flash,
+      // but for GUI subsystem executables (VS Code's Code.exe, Cursor.exe,
+      // explorer.exe, etc.) Windows treats the STARTUPINFO.wShowWindow=SW_HIDE
+      // as the initial nCmdShow handed to the app's ShowWindow() call. The
+      // process starts, the main window is created, and then it stays hidden —
+      // matching the bug report "VS Code is in Task Manager but no window".
+      // The brief cmd flash from the file-manager fallback is acceptable.
       const child = spawn(command, args, {
         detached: true,
         stdio: 'ignore',
-        windowsHide: true,
       })
 
       child.once('error', (error) => {
