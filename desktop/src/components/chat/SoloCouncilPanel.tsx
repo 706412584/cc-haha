@@ -214,6 +214,35 @@ export function buildSoloCouncilRows(
     })
   }
 
+  // Fallback: detect pending Agent tool_use messages with Solo Council prefixes.
+  // When an agent is dispatched but backgroundAgentTasks hasn't received the task
+  // event yet, the tool_use message is the only signal that the role is running.
+  // Only promote to "running" if the role has no row from a higher-priority source.
+  const resultToolUseIds = new Set<string>()
+  for (const message of messages) {
+    if (message.type === 'tool_result') resultToolUseIds.add(message.toolUseId)
+  }
+  for (const message of messages) {
+    if (message.type !== 'tool_use' || message.toolName !== 'Agent') continue
+    const input = message.input as { description?: string } | undefined
+    const role = getSoloCouncilRole(input?.description ?? undefined)
+    if (!role) continue
+    // Already have a canonical row from live tasks or background_task messages
+    if (latestByRole.has(role)) continue
+    // If a tool_result already exists for this tool_use, the agent has finished —
+    // don't override with a synthetic running row.
+    if (resultToolUseIds.has(message.toolUseId)) continue
+    latestByRole.set(role, {
+      role,
+      displayStatus: 'running',
+      origin: 'live',
+      verdict: 'pending',
+      text: '',
+      standbyTextKey: `soloCouncil.output.standby.${role}` as const,
+      sortTime: message.timestamp,
+    })
+  }
+
   return ROLE_ORDER.flatMap((role) => {
     const row = latestByRole.get(role)
     if (row) return [row]

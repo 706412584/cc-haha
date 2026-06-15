@@ -709,4 +709,115 @@ describe('SoloCouncilPanel', () => {
     expect(screen.getByTestId('solo-council-output-planner')).not.toHaveClass('line-clamp-3')
     expect(screen.queryByTestId('solo-council-toggle-planner')).not.toBeInTheDocument()
   })
+
+  it('shows running status from pending Agent tool_use when no backgroundAgentTask exists yet', () => {
+    useChatStore.setState({
+      sessions: {
+        s1: {
+          ...useChatStore.getState().getSession('s1'),
+          backgroundAgentTasks: {},
+          messages: [
+            {
+              id: 'tool-reviewer',
+              type: 'tool_use',
+              toolName: 'Agent',
+              toolUseId: 'agent-reviewer-1',
+              input: { description: '[Solo Council: Reviewer] audit health plan' },
+              timestamp: 100,
+            },
+            {
+              id: 'tool-critic',
+              type: 'tool_use',
+              toolName: 'Agent',
+              toolUseId: 'agent-critic-1',
+              input: { description: '[Solo Council: Critic] challenge health plan' },
+              timestamp: 101,
+            },
+          ],
+        },
+      },
+    })
+
+    render(<SoloCouncilPanel sessionId="s1" />)
+
+    // Panel should be expanded (hasActivity = true due to running rows)
+    expect(screen.getByTestId('solo-council-panel-body')).toBeInTheDocument()
+    // Reviewer and Critic should show running, not standby
+    expect(screen.getByTestId('solo-council-card-reviewer')).toHaveTextContent('Running')
+    expect(screen.getByTestId('solo-council-card-reviewer')).not.toHaveTextContent('Standby')
+    expect(screen.getByTestId('solo-council-card-critic')).toHaveTextContent('Running')
+    expect(screen.getByTestId('solo-council-card-critic')).not.toHaveTextContent('Standby')
+    // Planner with no signal should remain standby
+    expect(screen.getByTestId('solo-council-card-planner')).toHaveTextContent('Standby')
+  })
+
+  it('does not show running from Agent tool_use if a tool_result already exists', () => {
+    useChatStore.setState({
+      sessions: {
+        s1: {
+          ...useChatStore.getState().getSession('s1'),
+          backgroundAgentTasks: {},
+          messages: [
+            {
+              id: 'tool-reviewer',
+              type: 'tool_use',
+              toolName: 'Agent',
+              toolUseId: 'agent-reviewer-1',
+              input: { description: '[Solo Council: Reviewer] audit health plan' },
+              timestamp: 100,
+            },
+            {
+              id: 'result-reviewer',
+              type: 'tool_result',
+              toolUseId: 'agent-reviewer-1',
+              content: 'done',
+              isError: false,
+              timestamp: 200,
+            },
+          ],
+        },
+      },
+    })
+
+    render(<SoloCouncilPanel sessionId="s1" />)
+    fireEvent.click(screen.getByTestId('solo-council-panel-toggle'))
+
+    // Reviewer should be standby since the agent already finished (tool_result exists)
+    expect(screen.getByTestId('solo-council-card-reviewer')).toHaveTextContent('Standby')
+  })
+
+  it('live backgroundAgentTask takes priority over pending Agent tool_use', () => {
+    useChatStore.setState({
+      sessions: {
+        s1: {
+          ...useChatStore.getState().getSession('s1'),
+          backgroundAgentTasks: {
+            reviewer: baseTask({
+              taskId: 'reviewer',
+              toolUseId: 'reviewerTool',
+              status: 'completed',
+              description: '[Solo Council: Reviewer] audit',
+              summary: 'Review complete',
+            }),
+          },
+          messages: [
+            {
+              id: 'tool-reviewer',
+              type: 'tool_use',
+              toolName: 'Agent',
+              toolUseId: 'agent-reviewer-1',
+              input: { description: '[Solo Council: Reviewer] audit health plan' },
+              timestamp: 100,
+            },
+          ],
+        },
+      },
+    })
+
+    render(<SoloCouncilPanel sessionId="s1" />)
+
+    // Should use the live backgroundAgentTask, not the tool_use fallback
+    expect(screen.getByTestId('solo-council-card-reviewer')).toHaveTextContent('Review complete')
+    expect(screen.getByTestId('solo-council-card-reviewer')).toHaveTextContent('Done')
+  })
 })
