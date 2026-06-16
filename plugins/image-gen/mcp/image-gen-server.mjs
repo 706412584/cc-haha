@@ -204,6 +204,11 @@ async function resolveImageResult(data) {
 
 // ─── Core: generate with provider fallback ────────────────────────────────────
 
+function shouldRetryWithV1Prefix(baseUrl, error) {
+  const msg = error instanceof Error ? error.message : String(error || '')
+  return /HTTP (403|404)/.test(msg) && !/\/v1(\/|$)/.test(baseUrl)
+}
+
 async function generateWithFallback(prompt, size, n, transparent, providers) {
   const errors = []
 
@@ -226,7 +231,50 @@ async function generateWithFallback(prompt, size, n, transparent, providers) {
       const result = await resolveImageResult(data)
       return { ...result, provider: provider.name, model: provider.model, warnings: [] }
     } catch (err1) {
-      // Attempt 2: minimal params (compatibility fallback)
+      // Attempt 2: retry with /v1 prefix if base URL is missing it (common misconfiguration)
+      if (shouldRetryWithV1Prefix(baseUrl, err1)) {
+        const v1Url = `${baseUrl}/v1/images/generations`
+        // Try /v1 with full params first
+        try {
+          const body = buildImageBody(provider.model, prompt, size, n, transparent, false)
+          const res = await fetchWithTimeout(v1Url, {
+            method: 'POST',
+            headers: jsonHeaders(provider.apiKey),
+            body: JSON.stringify(body),
+          }, timeoutMs)
+          const data = await readJson(res)
+          if (!res.ok) throw new Error(pickError(data, `HTTP ${res.status}`))
+          const result = await resolveImageResult(data)
+          return {
+            ...result,
+            provider: provider.name,
+            model: provider.model,
+            warnings: [`[${provider.name}] 自动添加 /v1 前缀重试成功（建议更新 BASE_URL 为 ${baseUrl}/v1）`],
+          }
+        } catch (err1v1) {
+          // Try /v1 with minimal params (some providers reject response_format etc.)
+          try {
+            const body = buildImageBody(provider.model, prompt, size, n, transparent, true)
+            const res = await fetchWithTimeout(v1Url, {
+              method: 'POST',
+              headers: jsonHeaders(provider.apiKey),
+              body: JSON.stringify(body),
+            }, timeoutMs)
+            const data = await readJson(res)
+            if (!res.ok) throw new Error(pickError(data, `HTTP ${res.status}`))
+            const result = await resolveImageResult(data)
+            return {
+              ...result,
+              provider: provider.name,
+              model: provider.model,
+              warnings: [`[${provider.name}] 自动添加 /v1 前缀 + 兼容模式重试成功（建议更新 BASE_URL 为 ${baseUrl}/v1）`],
+            }
+          } catch {
+            // Fall through to other retry strategies
+          }
+        }
+      }
+      // Attempt 3: minimal params (compatibility fallback)
       if (shouldRetryWithMinimalPayload(err1)) {
         try {
           const body = buildImageBody(provider.model, prompt, size, n, transparent, true)
@@ -289,8 +337,18 @@ async function editWithFallback(prompt, imageUrl, size, n, transparent, provider
       continue
     }
 
-    // Attempt 1: full params
-    try {
+    async function attemptEdit(editUrl, form) {
+      const res = await fetchWithTimeout(editUrl, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${provider.apiKey}` },
+        body: form,
+      }, timeoutMs)
+      const data = await readJson(res)
+      if (!res.ok) throw new Error(pickError(data, `HTTP ${res.status}`))
+      return resolveImageResult(data)
+    }
+
+    function buildFullForm() {
       const form = new FormData()
       form.set('model', provider.model)
       form.set('prompt', prompt)
@@ -299,35 +357,43 @@ async function editWithFallback(prompt, imageUrl, size, n, transparent, provider
       form.set('response_format', 'b64_json')
       if (transparent) form.set('background', 'transparent')
       form.append('image', imageBlob, 'reference.png')
+      return form
+    }
 
-      const res = await fetchWithTimeout(url, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${provider.apiKey}` },
-        body: form,
-      }, timeoutMs)
-      const data = await readJson(res)
-      if (!res.ok) throw new Error(pickError(data, `HTTP ${res.status}`))
-      const result = await resolveImageResult(data)
+    function buildMinimalForm() {
+      const form = new FormData()
+      form.set('model', provider.model)
+      form.set('prompt', prompt)
+      form.set('n', String(n || 1))
+      form.set('size', size || '1024x1024')
+      form.append('image', imageBlob, 'reference.png')
+      return form
+    }
+
+    // Attempt 1: full params
+    try {
+      const result = await attemptEdit(url, buildFullForm())
       return { ...result, provider: provider.name, model: provider.model, warnings: [] }
     } catch (err1) {
-      // Attempt 2: minimal params
+      // Attempt 2: retry with /v1 prefix if base URL is missing it
+      if (shouldRetryWithV1Prefix(baseUrl, err1)) {
+        try {
+          const v1Url = `${baseUrl}/v1/images/edits`
+          const result = await attemptEdit(v1Url, buildFullForm())
+          return {
+            ...result,
+            provider: provider.name,
+            model: provider.model,
+            warnings: [`[${provider.name}] 自动添加 /v1 前缀重试成功（建议更新 BASE_URL 为 ${baseUrl}/v1）`],
+          }
+        } catch (err1v1) {
+          // Fall through to minimal payload attempt
+        }
+      }
+      // Attempt 3: minimal params
       if (shouldRetryWithMinimalPayload(err1)) {
         try {
-          const form = new FormData()
-          form.set('model', provider.model)
-          form.set('prompt', prompt)
-          form.set('n', String(n || 1))
-          form.set('size', size || '1024x1024')
-          form.append('image', imageBlob, 'reference.png')
-
-          const res = await fetchWithTimeout(url, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${provider.apiKey}` },
-            body: form,
-          }, timeoutMs)
-          const data = await readJson(res)
-          if (!res.ok) throw new Error(pickError(data, `HTTP ${res.status}`))
-          const result = await resolveImageResult(data)
+          const result = await attemptEdit(url, buildMinimalForm())
           return {
             ...result,
             provider: provider.name,
@@ -353,10 +419,10 @@ async function editWithFallback(prompt, imageUrl, size, n, transparent, provider
 
 async function listModelsForProvider(provider) {
   const baseUrl = trimSlash(provider.baseUrl)
-  const url = `${baseUrl}/models`
   const timeoutMs = Math.min(60_000, provider.timeoutMs || 60_000)
-  try {
-    const res = await fetchWithTimeout(url, {
+
+  async function tryFetchModels(modelsUrl) {
+    const res = await fetchWithTimeout(modelsUrl, {
       method: 'GET',
       headers: { Authorization: `Bearer ${provider.apiKey}` },
     }, timeoutMs)
@@ -366,7 +432,19 @@ async function listModelsForProvider(provider) {
       ? data.data.map(m => typeof m === 'string' ? m : m?.id).filter(Boolean)
       : []
     return { success: true, models: ids }
+  }
+
+  try {
+    return await tryFetchModels(`${baseUrl}/models`)
   } catch (err) {
+    // Retry with /v1 prefix if missing
+    if (shouldRetryWithV1Prefix(baseUrl, err)) {
+      try {
+        return await tryFetchModels(`${baseUrl}/v1/models`)
+      } catch {
+        // fall through
+      }
+    }
     return { success: false, error: err.message, models: [] }
   }
 }
@@ -476,6 +554,14 @@ function formatResult(result) {
       type: 'image',
       data: result.data,
       mimeType: 'image/png',
+    })
+  }
+
+  if (result.type === 'url') {
+    // Return image_url block so Desktop IDE renders the image inline
+    parts.push({
+      type: 'image_url',
+      image_url: { url: result.data },
     })
   }
 
