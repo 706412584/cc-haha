@@ -41,6 +41,7 @@ const providerStoreState = {
   presets: [] as ProviderPreset[],
   isLoading: false,
   isPresetsLoading: false,
+  presetsError: null as string | null,
   fetchProviders: vi.fn(),
   fetchPresets: vi.fn(),
   deleteProvider: MOCK_DELETE_PROVIDER,
