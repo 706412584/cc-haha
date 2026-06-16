@@ -276,7 +276,7 @@ function getVisibleResultText(
 }
 
 /** Renders extracted image blocks in a grid with click-to-fullscreen gallery. */
-function ImageBlockGallery({ imageBlocks }: { imageBlocks: ImageBlock[] }) {
+export function ImageBlockGallery({ imageBlocks }: { imageBlocks: ImageBlock[] }) {
   const [activeIndex, setActiveIndex] = useState<number | null>(null)
   const galleryImages = useMemo(
     () => imageBlocks.map((img, i) => ({ src: img.src, name: `Image ${i + 1}` })),
@@ -602,7 +602,7 @@ function extractTextContent(content: unknown): string | null {
   return null
 }
 
-type ImageBlock = { src: string; mimeType: string }
+export type ImageBlock = { src: string; mimeType: string }
 
 function extractImageBlocks(content: unknown): ImageBlock[] {
   if (!Array.isArray(content)) return []
