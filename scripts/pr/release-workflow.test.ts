@@ -43,6 +43,12 @@ describe('release desktop workflow', () => {
 
       expect(workflow).toContain('Build Electron')
       expect(workflow).toContain('smoke_platform')
+      // The packaged app must ship the cc-haha-builtin plugin seed. The
+      // release build inlines electron:build's steps rather than calling the
+      // script, so build:plugin-seed has to be listed explicitly here — a
+      // prior drift dropped it and shipped seedless v0.5.12/v0.5.13 packages
+      // (reverse-engineering / image-gen "not found in marketplace").
+      expect(workflow).toContain('bun run build:plugin-seed')
       expect(workflow).toContain('bun run test:package-smoke --platform ${{ matrix.smoke_platform }} --package-kind release --artifacts-dir desktop/build-artifacts/electron')
       expect(workflow).not.toContain('tauri-apps/tauri-action@v0')
     }
