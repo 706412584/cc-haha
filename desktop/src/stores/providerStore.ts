@@ -29,6 +29,7 @@ type ProviderStore = {
   presets: ProviderPreset[]
   isLoading: boolean
   isPresetsLoading: boolean
+  presetsError: string | null
   error: string | null
 
   fetchProviders: () => Promise<void>
@@ -163,6 +164,7 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
   presets: [],
   isLoading: false,
   isPresetsLoading: false,
+  presetsError: null,
   error: null,
 
   fetchProviders: async () => {
@@ -185,12 +187,12 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
   },
 
   fetchPresets: async () => {
-    set({ isPresetsLoading: true, error: null })
+    set({ isPresetsLoading: true, presetsError: null })
     try {
       const { presets } = await providersApi.presets()
-      set({ presets, isPresetsLoading: false })
+      set({ presets, isPresetsLoading: false, presetsError: null })
     } catch (err) {
-      set({ isPresetsLoading: false, error: err instanceof Error ? err.message : String(err) })
+      set({ isPresetsLoading: false, presetsError: err instanceof Error ? err.message : String(err) })
     }
   },
 

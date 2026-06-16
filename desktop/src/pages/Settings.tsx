@@ -336,6 +336,7 @@ function ProviderSettings() {
     presets,
     isLoading,
     isPresetsLoading,
+    presetsError,
     fetchProviders,
     fetchPresets,
     deleteProvider,
@@ -435,6 +436,8 @@ function ProviderSettings() {
   const isClaudeOfficialActive = hasLoadedProviders && activeId === null
   const isOpenAIOfficialActive = hasLoadedProviders && activeId === OPENAI_OFFICIAL_PROVIDER_ID
 
+  const presetsLoadFailed = !isPresetsLoading && presets.length === 0 && presetsError !== null
+
   return (
     <div className="max-w-2xl">
       <div className="flex items-center justify-between mb-4">
@@ -442,10 +445,17 @@ function ProviderSettings() {
           <h2 className="text-base font-semibold text-[var(--color-text-primary)]">{t('settings.providers.title')}</h2>
           <p className="text-sm text-[var(--color-text-tertiary)] mt-0.5">{t('settings.providers.description')}</p>
         </div>
-        <Button size="sm" onClick={() => setShowCreateModal(true)} disabled={isPresetsLoading || presets.length === 0}>
-          <span className="material-symbols-outlined text-[16px]">add</span>
-          {t('settings.providers.addProvider')}
-        </Button>
+        <div className="flex items-center gap-2">
+          {presetsLoadFailed && (
+            <Button size="sm" variant="ghost" onClick={() => void fetchPresets()}>
+              {t('common.retry')}
+            </Button>
+          )}
+          <Button size="sm" onClick={() => setShowCreateModal(true)} disabled={isPresetsLoading || presets.length === 0}>
+            <span className="material-symbols-outlined text-[16px]">add</span>
+            {t('settings.providers.addProvider')}
+          </Button>
+        </div>
       </div>
 
       <DndContext
