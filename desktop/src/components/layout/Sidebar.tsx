@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
-import { Folder, FolderOpen, MoreHorizontal, Pin, PinOff, RefreshCw, RotateCcw, SquarePen, X } from 'lucide-react'
+import { Folder, FolderOpen, MoreHorizontal, Pin, PinOff, RefreshCw, RotateCcw, SquarePen, Trash2, X } from 'lucide-react'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useUIStore } from '../../stores/uiStore'
 import { useTranslation } from '../../i18n'
@@ -39,6 +39,7 @@ import {
   positionProjectMenu,
   isDocumentVisible,
 } from './sidebarUtils'
+import { projectsApi } from '../../api/projects'
 import {
   GitHubIcon,
   PlusIcon,
@@ -98,6 +99,8 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
   const [pendingDeleteSessionId, setPendingDeleteSessionId] = useState<string | null>(null)
   const [pendingBatchDeleteSessionIds, setPendingBatchDeleteSessionIds] = useState<string[] | null>(null)
   const [isBatchDeleting, setIsBatchDeleting] = useState(false)
+  const [pendingClearProjectKey, setPendingClearProjectKey] = useState<string | null>(null)
+  const [isClearingProject, setIsClearingProject] = useState(false)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const [lastSelectedSessionId, setLastSelectedSessionId] = useState<string | null>(null)
@@ -447,6 +450,61 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
       })
     }
   }, [addToast, hiddenProjectKeys, persistSidebarProjectPreferences, pinnedProjectKeys, projectOrder, projectOrganization, projectSortBy, t])
+
+  const requestClearProjectSessions = useCallback((project: ProjectGroup) => {
+    setProjectContextMenu(null)
+    setPendingClearProjectKey(project.key)
+  }, [])
+
+  const confirmClearProjectSessions = useCallback(async () => {
+    if (!pendingClearProjectKey) return
+    const project = orderedProjectGroups.find((g) => g.key === pendingClearProjectKey)
+    if (!project) {
+      setPendingClearProjectKey(null)
+      return
+    }
+    const workDir = project.workDir
+    if (!workDir) {
+      addToast({
+        type: 'error',
+        message: t('sidebar.clearProjectSessionsNoWorkDir', { project: project.title }),
+      })
+      setPendingClearProjectKey(null)
+      return
+    }
+    setIsClearingProject(true)
+    try {
+      // Disconnect any open sessions for this project so the websocket
+      // server-side handles don't keep referencing files we're about to
+      // delete. closeTab handles missing tabs gracefully.
+      for (const session of project.sessions) {
+        try { closeTab(session.id) } catch { /* ignore */ }
+        try { disconnectSession(session.id) } catch { /* ignore */ }
+      }
+      const result = await projectsApi.clearSessions(workDir)
+      // Re-fetch sessions so the project either disappears (if dir removed)
+      // or shows up empty (preserved memory/ etc.).
+      await fetchSessions()
+      addToast({
+        type: 'success',
+        message: t('sidebar.clearProjectSessionsSuccess', {
+          project: project.title,
+          count: result.deletedSessions,
+        }),
+      })
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: t('sidebar.clearProjectSessionsFailure', {
+          project: project.title,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      })
+    } finally {
+      setIsClearingProject(false)
+      setPendingClearProjectKey(null)
+    }
+  }, [addToast, closeTab, disconnectSession, fetchSessions, orderedProjectGroups, pendingClearProjectKey, t])
 
   const openProjectInFinder = useCallback(async (project: ProjectGroup) => {
     setProjectContextMenu(null)
@@ -1149,6 +1207,13 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
             >
               {t(hidden ? 'sidebar.restoreProjectToSidebar' : 'sidebar.hideProjectFromSidebar')}
             </ProjectMenuItem>
+            <ProjectMenuItem
+              icon={<Trash2 size={18} aria-hidden="true" />}
+              onClick={() => requestClearProjectSessions(project)}
+              danger
+            >
+              {t('sidebar.clearProjectSessions')}
+            </ProjectMenuItem>
           </div>
         )
       })()}
@@ -1234,6 +1299,32 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
         cancelLabel={t('common.cancel')}
         confirmVariant="danger"
         loading={isBatchDeleting}
+      />
+      <ConfirmDialog
+        open={pendingClearProjectKey !== null}
+        onClose={() => {
+          if (!isClearingProject) setPendingClearProjectKey(null)
+        }}
+        onConfirm={confirmClearProjectSessions}
+        title={t('sidebar.clearProjectSessions')}
+        body={(() => {
+          const project = pendingClearProjectKey
+            ? orderedProjectGroups.find((g) => g.key === pendingClearProjectKey)
+            : null
+          if (!project) return ''
+          return (
+            <p className="text-sm leading-6 text-[var(--color-text-secondary)]">
+              {t('sidebar.clearProjectSessionsConfirm', {
+                project: project.title,
+                count: project.sessions.length,
+              })}
+            </p>
+          )
+        })()}
+        confirmLabel={t('common.delete')}
+        cancelLabel={t('common.cancel')}
+        confirmVariant="danger"
+        loading={isClearingProject}
       />
     </aside>
   )

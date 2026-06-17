@@ -121,4 +121,18 @@ export const projectsApi = {
       return null
     }
   },
+
+  /**
+   * Permanently delete every .jsonl session file under the given project.
+   * Pass an absolute workDir (the desktop sidebar's project key) — the
+   * backend sanitizes it. If the project directory becomes empty, it is
+   * removed so the project drops off the sidebar entirely. Non-.jsonl files
+   * (memory/, user notes) are preserved.
+   */
+  clearSessions(workDir: string): Promise<{ ok: true; deletedSessions: number; projectDirRemoved: boolean }> {
+    return api.post<{ ok: true; deletedSessions: number; projectDirRemoved: boolean }>(
+      '/api/projects/sessions/clear',
+      { workDir },
+    )
+  },
 }
