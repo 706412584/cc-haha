@@ -125,11 +125,13 @@ async function getProjectRules(url: URL): Promise<Response> {
     return a.label.localeCompare(b.label)
   })
 
-  // Keep: current project, or any project that resolved to a real path AND has
-  // at least one existing rules file. This avoids listing dozens of stale
-  // project entries with no rules.
+  // Keep: current project, or any project we can resolve to a real directory.
+  // The UI surfaces existence per-file, so projects without any rules yet are
+  // still useful entries (the user creates rules from there). Projects whose
+  // sanitized id no longer maps to a real path (deleted folders, stale ids)
+  // are filtered out.
   const filtered = projects.filter(
-    p => p.isCurrent || (p.projectPath !== null && p.files.some(f => f.exists)),
+    p => p.isCurrent || p.projectPath !== null,
   )
 
   return Response.json({ projects: filtered, userFiles, cwd })

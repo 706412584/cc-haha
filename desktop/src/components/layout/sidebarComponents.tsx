@@ -80,12 +80,12 @@ export function ProjectHeaderActions({
       <div className="text-[12px] font-semibold tracking-normal text-[var(--color-text-primary)]">
         {title}
       </div>
-      <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover/sidebar-projects:opacity-100 focus-within:opacity-100">
+      <div className="flex items-center gap-1">
         <button
           type="button"
           onClick={onOpenMenu}
           aria-label={menuLabel}
-          className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+          className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
         >
           <MoreHorizontal size={16} />
         </button>
@@ -93,7 +93,7 @@ export function ProjectHeaderActions({
           type="button"
           onClick={onOpenCreate}
           aria-label={createLabel}
-          className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+          className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
         >
           <FolderPlus size={16} />
         </button>

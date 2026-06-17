@@ -184,4 +184,19 @@ describe('project-rules API', () => {
     expect(data.ok).toBe(true)
     expect(data.created).toBe(false)
   })
+
+  it('GET /api/project-rules lists projects without any rules files (regression: previously filtered)', async () => {
+    // Current project has no rules at all (no CLAUDE.md anywhere).
+    // It must still appear so the user can create rules from there.
+    const url = new URL(`http://localhost/api/project-rules?cwd=${encodeURIComponent(MOCK_PROJECT)}`)
+    const req = new Request(url, { method: 'GET' })
+    const res = await handleProjectRulesApi(req, url, ['api', 'project-rules'])
+    const data = await res.json() as { projects: Array<{ isCurrent: boolean; files: Array<{ exists: boolean }> }> }
+
+    expect(data.projects).toHaveLength(1)
+    const project = data.projects[0]!
+    expect(project.isCurrent).toBe(true)
+    // Confirm the test setup: no rules file actually exists.
+    expect(project.files.some(f => f.exists)).toBe(false)
+  })
 })
