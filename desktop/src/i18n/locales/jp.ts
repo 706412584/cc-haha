@@ -843,6 +843,7 @@ export const jp: Record<TranslationKey, string> = {
   'settings.skills.activation.projectDesc': '現在のプロジェクトの会話でのみ自動読み込み',
   'settings.skills.activation.appliesTo': '適用先：',
   'settings.skills.activation.active': '有効',
+  'settings.skills.activation.currentProject': '現在のプロジェクト',
 
   // Settings > Memory
   'settings.tab.memory': 'メモリ',

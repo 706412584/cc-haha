@@ -845,6 +845,7 @@ export const zh: Record<TranslationKey, string> = {
   'settings.skills.activation.projectDesc': '仅当前项目的对话自动加载',
   'settings.skills.activation.appliesTo': '应用到：',
   'settings.skills.activation.active': '已激活',
+  'settings.skills.activation.currentProject': '当前项目',
 
   // Settings > Memory
   'settings.tab.memory': '记忆',

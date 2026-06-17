@@ -843,6 +843,7 @@ export const en = {
   'settings.skills.activation.projectDesc': 'Auto-loaded only in conversations for the current project',
   'settings.skills.activation.appliesTo': 'Applies to:',
   'settings.skills.activation.active': 'Active',
+  'settings.skills.activation.currentProject': 'Current project',
 
   // Settings > Memory
   'settings.tab.memory': 'Memory',

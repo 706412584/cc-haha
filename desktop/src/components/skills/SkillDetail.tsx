@@ -8,6 +8,7 @@ import { useUIStore } from '../../stores/uiStore'
 import { skillsApi } from '../../api/skills'
 import { api } from '../../api/client'
 import { useSessionStore } from '../../stores/sessionStore'
+import { Dropdown } from '../shared/Dropdown'
 
 const META_PRIORITY = [
   'description',
@@ -360,22 +361,25 @@ function SkillActivationScope({ skillName }: { skillName: string }) {
         {t('settings.skills.activation.description')}
       </p>
       <div className="flex gap-2 flex-wrap">
-        {options.map(opt => (
-          <button
-            key={opt.value}
-            onClick={() => handleChange(opt.value)}
-            disabled={saving}
-            className={`flex items-center justify-center gap-2 rounded-xl border px-4 py-2 text-sm min-w-[88px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)] ${
-              currentScope === opt.value
-                ? 'border-[var(--color-brand)] bg-[var(--color-primary-fixed)] text-[var(--color-text-primary)] font-medium'
-                : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
-            } disabled:opacity-50`}
-            title={opt.desc}
-          >
-            <span className={`w-2 h-2 rounded-full flex-shrink-0 ${currentScope === opt.value ? 'bg-[var(--color-brand)]' : 'bg-[var(--color-text-muted)]'}`} />
-            {opt.label}
-          </button>
-        ))}
+        {options.map(opt => {
+          const selected = currentScope === opt.value
+          return (
+            <button
+              key={opt.value}
+              onClick={() => handleChange(opt.value)}
+              disabled={saving}
+              className={`flex items-center justify-center gap-2 rounded-xl border px-4 py-2 text-sm min-w-[88px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--color-surface)] ${
+                selected
+                  ? 'border-[var(--color-brand)] bg-[var(--color-brand)] text-[var(--color-btn-primary-fg)] font-medium shadow-[var(--shadow-button-primary)]'
+                  : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
+              } disabled:opacity-50`}
+              title={opt.desc}
+            >
+              <span className={`w-2 h-2 rounded-full flex-shrink-0 ${selected ? 'bg-[var(--color-btn-primary-fg)]' : 'bg-[var(--color-text-muted)]'}`} />
+              {opt.label}
+            </button>
+          )
+        })}
       </div>
 
       {/* Project selector — only relevant when applying at 'project' scope. */}
@@ -384,18 +388,25 @@ function SkillActivationScope({ skillName }: { skillName: string }) {
           <span className="text-xs text-[var(--color-text-tertiary)]">
             {t('settings.skills.activation.appliesTo')}
           </span>
-          <select
+          <Dropdown
             value={selectedProjectPath ?? ''}
-            onChange={(e) => handleProjectSwitch(e.target.value)}
-            disabled={saving}
-            className="text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 max-w-[70%] text-[var(--color-text-primary)]"
-          >
-            {projects.map((p) => (
-              <option key={p.id} value={p.projectPath ?? ''}>
-                {p.isCurrent ? '★ ' : ''}{shortenProjectPath(p.label)}
-              </option>
-            ))}
-          </select>
+            onChange={(v) => handleProjectSwitch(v)}
+            items={projects.map((p) => ({
+              value: p.projectPath ?? '',
+              label: shortenProjectPath(p.label),
+              description: p.isCurrent ? t('settings.skills.activation.currentProject') : undefined,
+            }))}
+            width={300}
+            maxHeight={280}
+            trigger={
+              <div className="inline-flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)] transition-colors max-w-[260px]">
+                <span className="truncate">
+                  {shortenProjectPath(projects.find((p) => p.projectPath === selectedProjectPath)?.label ?? selectedProjectPath ?? '')}
+                </span>
+                <span className="material-symbols-outlined text-[16px] text-[var(--color-text-tertiary)] flex-shrink-0">expand_more</span>
+              </div>
+            }
+          />
           <span className="inline-flex items-center gap-1 text-xs text-[var(--color-brand)]">
             <span className="material-symbols-outlined text-[14px]" style={{ fontVariationSettings: "'FILL' 1" }}>check_circle</span>
             {t('settings.skills.activation.active')}
