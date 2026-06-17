@@ -1,3 +1,4 @@
+import { join } from 'node:path'
 import {
   clearMcpClientConfig,
   clearServerTokensFromLocalStorage,
@@ -39,6 +40,7 @@ import type {
   ScopedMcpServerConfig,
 } from '../../services/mcp/types.js'
 import { describeMcpConfigFilePath, ensureConfigScope } from '../../services/mcp/utils.js'
+import { getGlobalClaudeFile } from '../../utils/env.js'
 import { enableConfigs, getGlobalConfig } from '../../utils/config.js'
 import { getCwd, runWithCwdOverride } from '../../utils/cwd.js'
 import { ApiError, errorResponse } from '../middleware/errorHandler.js'
@@ -502,6 +504,17 @@ function listProjectPathsWithPrivateMcp(): Response {
   return Response.json({ projectPaths })
 }
 
+function getConfigFilePaths(): Response {
+  const userConfig = getGlobalClaudeFile()
+  const projectConfig = join(getCwd(), '.mcp.json')
+  return Response.json({
+    files: [
+      { scope: 'user', path: userConfig, label: 'User (~/.claude.json)' },
+      { scope: 'project', path: projectConfig, label: 'Project (.mcp.json)' },
+    ],
+  })
+}
+
 async function getServerStatus(name: string): Promise<Response> {
   const existing = await resolveServerForRuntimeAction(name)
   if (!existing) {
@@ -852,6 +865,10 @@ export async function handleMcpApi(
 
       if (req.method === 'GET' && serverName === 'project-paths' && !action) {
         return listProjectPathsWithPrivateMcp()
+      }
+
+      if (req.method === 'GET' && serverName === 'config-files' && !action) {
+        return getConfigFilePaths()
       }
 
       if (req.method === 'GET' && !serverName) {

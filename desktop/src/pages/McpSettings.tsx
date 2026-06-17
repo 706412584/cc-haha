@@ -10,6 +10,7 @@ import { useMcpStore } from '../stores/mcpStore'
 import { useSessionStore } from '../stores/sessionStore'
 import { sessionsApi } from '../api/sessions'
 import { mcpApi } from '../api/mcp'
+import { getDesktopHost } from '../lib/desktopHost'
 import { MarketplacePage } from './McpMarketplace'
 import type { McpServerRecord, McpToolInfo, McpToolsResult, McpUpsertPayload, McpWritableScope } from '../types/mcp'
 
@@ -1547,6 +1548,22 @@ export function McpSettings() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <Button
+            variant="secondary"
+            size="lg"
+            onClick={() => {
+              void mcpApi.configFiles(currentWorkDir).then(({ files }) => {
+                const userFile = files.find((f) => f.scope === 'user')
+                if (userFile) {
+                  void getDesktopHost().shell.openPath(userFile.path)
+                }
+              })
+            }}
+            title={t('settings.mcp.editConfigTooltip')}
+          >
+            <span className="material-symbols-outlined text-[18px]">edit_document</span>
+            {t('settings.mcp.editConfig')}
+          </Button>
           <Button
             variant="secondary"
             size="lg"
