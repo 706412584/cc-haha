@@ -3,6 +3,7 @@ import { describe, it, expect, mock, beforeEach } from 'bun:test'
 // Mock config module
 const mockGlobalConfig = { activeSkills: undefined as string[] | undefined }
 const mockProjectConfig = { activeSkills: undefined as string[] | undefined }
+let lastSaveCurrentProjectCwd: string | undefined
 
 mock.module('../../utils/config.js', () => ({
   getGlobalConfig: () => mockGlobalConfig,
@@ -10,7 +11,8 @@ mock.module('../../utils/config.js', () => ({
   saveGlobalConfig: (updater: (c: typeof mockGlobalConfig) => typeof mockGlobalConfig) => {
     Object.assign(mockGlobalConfig, updater(mockGlobalConfig))
   },
-  saveCurrentProjectConfig: (updater: (c: typeof mockProjectConfig) => typeof mockProjectConfig) => {
+  saveCurrentProjectConfig: (updater: (c: typeof mockProjectConfig) => typeof mockProjectConfig, cwd?: string) => {
+    lastSaveCurrentProjectCwd = cwd
     Object.assign(mockProjectConfig, updater(mockProjectConfig))
   },
 }))
@@ -45,6 +47,7 @@ describe('skills API active skills endpoints', () => {
   beforeEach(() => {
     mockGlobalConfig.activeSkills = undefined
     mockProjectConfig.activeSkills = undefined
+    lastSaveCurrentProjectCwd = undefined
   })
 
   it('GET /api/skills/active returns merged active skills', async () => {
@@ -107,5 +110,55 @@ describe('skills API active skills endpoints', () => {
     const res = await handleSkillsApi(req, url, ['api', 'skills', 'active'])
 
     expect(res.status).toBe(400)
+  })
+
+  it('POST /api/skills/active sets project active skills and forwards cwd to saveCurrentProjectConfig', async () => {
+    // The "applies to" project picker in the UI must reach the right project
+    // config on disk — verify the cwd from the request body is what
+    // saveCurrentProjectConfig receives.
+    const targetCwd = '/mock/work/alpha'
+    const url = new URL('http://localhost/api/skills/active')
+    const req = new Request(url, {
+      method: 'POST',
+      body: JSON.stringify({ scope: 'project', skills: ['my-skill'], cwd: targetCwd }),
+    })
+    const res = await handleSkillsApi(req, url, ['api', 'skills', 'active'])
+    const data = await res.json() as { ok: boolean; scope: string; activeSkills: string[] }
+
+    expect(data.ok).toBe(true)
+    expect(data.scope).toBe('project')
+    expect(data.activeSkills).toEqual(['my-skill'])
+    expect(lastSaveCurrentProjectCwd).toBe(targetCwd)
+    expect(mockProjectConfig.activeSkills).toEqual(['my-skill'])
+  })
+
+  it('POST /api/skills/active project scope without cwd falls back to current project (cwd undefined)', async () => {
+    const url = new URL('http://localhost/api/skills/active')
+    const req = new Request(url, {
+      method: 'POST',
+      body: JSON.stringify({ scope: 'project', skills: ['x'] }),
+    })
+    const res = await handleSkillsApi(req, url, ['api', 'skills', 'active'])
+    expect(res.status).toBe(200)
+    expect(lastSaveCurrentProjectCwd).toBeUndefined()
+    expect(mockProjectConfig.activeSkills).toEqual(['x'])
+  })
+
+  it('POST then GET round-trip: a checked project skill appears in the project scope read', async () => {
+    // Step 1: user "checks" a skill at project scope.
+    const postUrl = new URL('http://localhost/api/skills/active')
+    const postReq = new Request(postUrl, {
+      method: 'POST',
+      body: JSON.stringify({ scope: 'project', skills: ['confirmed'], cwd: '/mock/work/beta' }),
+    })
+    await handleSkillsApi(postReq, postUrl, ['api', 'skills', 'active'])
+
+    // Step 2: GET the project scope and verify the same skill comes back.
+    const getUrl = new URL('http://localhost/api/skills/active?scope=project')
+    const getReq = new Request(getUrl, { method: 'GET' })
+    const getRes = await handleSkillsApi(getReq, getUrl, ['api', 'skills', 'active'])
+    const data = await getRes.json() as { activeSkills: string[] }
+
+    expect(data.activeSkills).toEqual(['confirmed'])
   })
 })
