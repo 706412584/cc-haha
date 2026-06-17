@@ -44,6 +44,43 @@ import { getCwd, runWithCwdOverride } from '../../utils/cwd.js'
 import { ApiError, errorResponse } from '../middleware/errorHandler.js'
 import { conversationService } from '../services/conversationService.js'
 
+/**
+ * In-memory cache for MCP server status results. Avoids re-probing servers
+ * every time the settings page is opened (probes are expensive for stdio
+ * servers that use npx/uvx — first-run downloads can take 30-60s).
+ *
+ * Cache entries are stored with a timestamp and expire after STATUS_CACHE_TTL_MS.
+ * Cleared on explicit reconnect or toggle so UI stays fresh after user actions.
+ */
+const STATUS_CACHE_TTL_MS = 5 * 60 * 1000 // 5 minutes
+type StatusCacheEntry = {
+  status: Pick<McpServerDto, 'status' | 'statusDetail' | 'statusLabel'>
+  timestamp: number
+}
+const statusCache = new Map<string, StatusCacheEntry>()
+
+function getCachedStatus(name: string): Pick<McpServerDto, 'status' | 'statusDetail' | 'statusLabel'> | null {
+  const entry = statusCache.get(name)
+  if (!entry) return null
+  if (Date.now() - entry.timestamp > STATUS_CACHE_TTL_MS) {
+    statusCache.delete(name)
+    return null
+  }
+  return entry.status
+}
+
+function setCachedStatus(name: string, status: Pick<McpServerDto, 'status' | 'statusDetail' | 'statusLabel'>): void {
+  statusCache.set(name, { status, timestamp: Date.now() })
+}
+
+export function clearStatusCache(name?: string): void {
+  if (name) {
+    statusCache.delete(name)
+  } else {
+    statusCache.clear()
+  }
+}
+
 type McpEditableConfigDto =
   | {
       type: 'stdio'
@@ -274,6 +311,7 @@ async function inspectServerStatus(
 
   const hostPreflightStatus = await getHostPreflightStatus(config, enabled)
   if (hostPreflightStatus) {
+    setCachedStatus(name, hostPreflightStatus)
     return hostPreflightStatus
   }
 
@@ -288,18 +326,22 @@ async function inspectServerStatus(
           ? 'needs-auth'
           : 'failed'
 
-    return {
+    const result = {
       status,
       statusLabel: getStatusLabel(status),
       statusDetail: 'error' in client ? client.error : undefined,
     }
+    setCachedStatus(name, result)
+    return result
   } catch (error) {
     await clearServerCache(name, config).catch(() => {})
-    return {
-      status: 'failed',
+    const result = {
+      status: 'failed' as const,
       statusLabel: getStatusLabel('failed'),
       statusDetail: error instanceof Error ? error.message : String(error),
     }
+    setCachedStatus(name, result)
+    return result
   }
 }
 
@@ -334,7 +376,9 @@ function serializeServerSnapshot(
   name: string,
   config: ScopedMcpServerConfig,
 ): McpServerDto {
-  return buildServerDto(name, config, getInitialStatus(!isMcpServerDisabled(name)))
+  const enabled = !isMcpServerDisabled(name)
+  const cached = enabled ? getCachedStatus(name) : null
+  return buildServerDto(name, config, cached ?? getInitialStatus(enabled))
 }
 
 async function serializeServerWithLiveStatus(
@@ -702,6 +746,7 @@ async function toggleServer(name: string, sessionId?: string): Promise<Response>
     throw ApiError.notFound(`MCP server not found: ${name}`)
   }
 
+  clearStatusCache(name)
   const enabled = isMcpServerDisabled(name)
   setMcpServerEnabled(name, enabled)
   const sessionSync = await syncMcpToggleToSession(sessionId, name, enabled)
@@ -742,6 +787,7 @@ async function reconnectServer(name: string): Promise<Response> {
     throw ApiError.notFound(`MCP server not found: ${name}`)
   }
 
+  clearStatusCache(name)
   const hostPreflightStatus = await getHostPreflightStatus(existing, !isMcpServerDisabled(name))
   if (hostPreflightStatus) {
     await clearServerCache(name, existing).catch(() => {})
