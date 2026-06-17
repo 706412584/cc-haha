@@ -183,6 +183,16 @@ export const jp: Record<TranslationKey, string> = {
   'settings.tab.mcp': 'MCP',
   'settings.tab.plugins': 'プラグイン',
   'settings.tab.diagnostics': '診断',
+  'settings.tab.projectRules': 'プロジェクトルール',
+  'settings.projectRules.title': 'プロジェクトルール (CLAUDE.md)',
+  'settings.projectRules.description': 'CLAUDE.mdファイルはプロジェクト固有の指示を定義し、会話開始時に自動的に読み込まれます。コーディングスタイル、ツール設定、プロジェクト規約を制御します。',
+  'settings.projectRules.projectFile': 'プロジェクトルール',
+  'settings.projectRules.projectFileDesc': '現在のプロジェクトディレクトリのルール (.claude/CLAUDE.md)',
+  'settings.projectRules.userFile': 'ユーザールール',
+  'settings.projectRules.userFileDesc': 'すべてのプロジェクトに適用されるグローバルルール (~/.claude/CLAUDE.md)',
+  'settings.projectRules.open': '開く',
+  'settings.projectRules.create': '作成',
+  'settings.projectRules.notFound': 'ファイルがまだ存在しません',
 
   // Settings > Usage
   'settings.activity.title': 'トークン使用量',

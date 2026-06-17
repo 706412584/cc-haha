@@ -80,6 +80,7 @@ export type SettingsTab =
   | 'computerUse'
   | 'trace'
   | 'diagnostics'
+  | 'projectRules'
   | 'about'
 
 type ActiveView = 'code' | 'scheduled' | 'terminal' | 'history' | 'settings'

@@ -181,6 +181,18 @@ export const en = {
   'settings.tab.mcp': 'MCP',
   'settings.tab.plugins': 'Plugins',
   'settings.tab.diagnostics': 'Diagnostics',
+  'settings.tab.projectRules': 'Project Rules',
+
+  // Settings > Project Rules
+  'settings.projectRules.title': 'Project Rules (CLAUDE.md)',
+  'settings.projectRules.description': 'CLAUDE.md files define project-specific instructions that are automatically loaded into every conversation. They control coding style, tool preferences, and project conventions.',
+  'settings.projectRules.projectFile': 'Project rules',
+  'settings.projectRules.projectFileDesc': 'Rules for the current project directory (.claude/CLAUDE.md)',
+  'settings.projectRules.userFile': 'User rules',
+  'settings.projectRules.userFileDesc': 'Global rules applied to all projects (~/.claude/CLAUDE.md)',
+  'settings.projectRules.open': 'Open',
+  'settings.projectRules.create': 'Create',
+  'settings.projectRules.notFound': 'File does not exist yet',
 
   // Settings > Usage
   'settings.activity.title': 'Token usage',

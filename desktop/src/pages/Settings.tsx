@@ -49,6 +49,7 @@ import { DiagnosticsSettings } from './DiagnosticsSettings'
 import { TraceList } from './TraceList'
 import { ActivitySettings } from './ActivitySettings'
 import { MemorySettings } from './MemorySettings'
+import { ProjectRulesSettings } from './ProjectRulesSettings'
 import { useUIStore, type SettingsTab } from '../stores/uiStore'
 import { ClaudeOfficialLogin } from '../components/settings/ClaudeOfficialLogin'
 import { ChatGPTOfficialLogin } from '../components/settings/ChatGPTOfficialLogin'
@@ -207,6 +208,7 @@ export function Settings() {
             <TabButton icon="smart_toy" label={t('settings.tab.agents')} active={activeTab === 'agents'} onClick={() => setActiveTab('agents')} />
             <TabButton icon="auto_awesome" label={t('settings.tab.skills')} active={activeTab === 'skills'} onClick={() => setActiveTab('skills')} />
             <TabButton icon="history_edu" label={t('settings.tab.memory')} active={activeTab === 'memory'} onClick={() => setActiveTab('memory')} />
+            <TabButton icon="description" label={t('settings.tab.projectRules')} active={activeTab === 'projectRules'} onClick={() => setActiveTab('projectRules')} />
             <TabButton icon="extension" label={t('settings.tab.plugins')} active={activeTab === 'plugins'} onClick={() => setActiveTab('plugins')} />
             <TabButton icon="mouse" label={t('settings.tab.computerUse')} active={activeTab === 'computerUse'} onClick={() => setActiveTab('computerUse')} />
             <TabButton icon="monitoring" label={t('settings.tab.activity')} active={activeTab === 'activity'} onClick={() => setActiveTab('activity')} />
@@ -230,6 +232,7 @@ export function Settings() {
           {activeTab === 'agents' && <AgentsSettings />}
           {activeTab === 'skills' && <SkillSettings />}
           {activeTab === 'memory' && <MemorySettings />}
+          {activeTab === 'projectRules' && <ProjectRulesSettings />}
           {activeTab === 'plugins' && <PluginSettings />}
           {activeTab === 'computerUse' && <ComputerUseSettings />}
           {activeTab === 'trace' && <TraceList />}

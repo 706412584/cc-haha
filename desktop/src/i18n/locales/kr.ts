@@ -183,6 +183,16 @@ export const kr: Record<TranslationKey, string> = {
   'settings.tab.mcp': 'MCP',
   'settings.tab.plugins': '플러그인',
   'settings.tab.diagnostics': '진단',
+  'settings.tab.projectRules': '프로젝트 규칙',
+  'settings.projectRules.title': '프로젝트 규칙 (CLAUDE.md)',
+  'settings.projectRules.description': 'CLAUDE.md 파일은 프로젝트별 지침을 정의하며, 대화 시작 시 자동으로 로드됩니다. 코딩 스타일, 도구 설정 및 프로젝트 규약을 제어합니다.',
+  'settings.projectRules.projectFile': '프로젝트 규칙',
+  'settings.projectRules.projectFileDesc': '현재 프로젝트 디렉토리의 규칙 (.claude/CLAUDE.md)',
+  'settings.projectRules.userFile': '사용자 규칙',
+  'settings.projectRules.userFileDesc': '모든 프로젝트에 적용되는 전역 규칙 (~/.claude/CLAUDE.md)',
+  'settings.projectRules.open': '열기',
+  'settings.projectRules.create': '생성',
+  'settings.projectRules.notFound': '파일이 아직 존재하지 않습니다',
 
   // Settings > Usage
   'settings.activity.title': '토큰 사용량',

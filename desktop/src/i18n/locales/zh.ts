@@ -183,6 +183,18 @@ export const zh: Record<TranslationKey, string> = {
   'settings.tab.mcp': 'MCP',
   'settings.tab.plugins': '插件',
   'settings.tab.diagnostics': '诊断',
+  'settings.tab.projectRules': '项目规则',
+
+  // Settings > Project Rules
+  'settings.projectRules.title': '项目规则 (CLAUDE.md)',
+  'settings.projectRules.description': 'CLAUDE.md 文件定义了项目特定的指令，每次对话开始时自动加载。它们控制编码风格、工具偏好和项目约定。',
+  'settings.projectRules.projectFile': '项目规则',
+  'settings.projectRules.projectFileDesc': '当前项目目录的规则 (.claude/CLAUDE.md)',
+  'settings.projectRules.userFile': '用户规则',
+  'settings.projectRules.userFileDesc': '应用于所有项目的全局规则 (~/.claude/CLAUDE.md)',
+  'settings.projectRules.open': '打开',
+  'settings.projectRules.create': '创建',
+  'settings.projectRules.notFound': '文件尚不存在',
 
   // Settings > Usage
   'settings.activity.title': 'Token 用量',
