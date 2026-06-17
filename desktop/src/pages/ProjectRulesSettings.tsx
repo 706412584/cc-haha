@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useTranslation } from '../i18n'
+import { useTranslation, type TranslationKey } from '../i18n'
 import { Button } from '../components/shared/Button'
 import { useSessionStore } from '../stores/sessionStore'
 import { getDesktopHost } from '../lib/desktopHost'
@@ -51,7 +51,6 @@ export function ProjectRulesSettings() {
 
   const handleCreate = async (scope: 'project' | 'user') => {
     try {
-      const query = cwd ? `?cwd=${encodeURIComponent(cwd)}` : ''
       await api.post(`/api/project-rules/create`, { scope, cwd })
       await fetchRules()
     } catch {
@@ -118,7 +117,7 @@ function RuleFileCard({
   exists: boolean
   onOpen: () => void
   onCreate: () => void
-  t: (key: string) => string
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string
 }) {
   return (
     <div className="border border-[var(--color-border)] rounded-lg p-4">
