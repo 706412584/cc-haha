@@ -50,7 +50,7 @@ import { agentToolResultSchema, classifyHandoffIfNeeded, emitTaskProgress, extra
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js';
 import { AGENT_TOOL_NAME, LEGACY_AGENT_TOOL_NAME, ONE_SHOT_BUILTIN_AGENT_TYPES } from './constants.js';
 import { buildForkedMessages, buildWorktreeNotice, COORDINATOR_RESEARCH_FORK_SUBAGENT_TYPE, FORK_AGENT, type ForkMode, isCoordinatorResearchForkEnabled, isForkSubagentEnabled, isInForkChild } from './forkSubagent.js';
-import { formatLimitExceededMessage, formatNearLimitWarning, isLimiterDisabled, noteInvocation } from './invocationLimiter.js';
+import { formatLimitExceededMessage, formatNearLimitWarning, isLimiterDisabled, noteInvocation, noteOutcome, parseVerdict } from './invocationLimiter.js';
 import {
   detectLazyDelegation,
   formatLazyDelegationError,
@@ -1474,6 +1474,22 @@ export const AgentTool = buildTool({
               text: handoffWarning
             }, ...agentResult.content];
           }
+        }
+        // Record the subagent's verdict so the streak gate in the
+        // limiter can fast-fail on consecutive FAILs without punishing
+        // legitimate multi-step work where verifications PASS. The
+        // guard mirrors the one around `noteInvocation` above — both
+        // sides must be symmetric or the streak count drifts away
+        // from reality.
+        if (
+          !toolUseContext.agentId &&
+          isBuiltInAgent(selectedAgent) &&
+          !isLimiterDisabled()
+        ) {
+          const combined = agentResult.content
+            .map(block => (block.type === 'text' ? block.text : ''))
+            .join('\n');
+          noteOutcome(selectedAgent.agentType, parseVerdict(combined));
         }
         return {
           data: {
