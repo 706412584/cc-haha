@@ -497,6 +497,36 @@ describe('SessionService', () => {
     expect(session.projectRoot).toBe('/tmp/test')
   })
 
+  it('treats a sub-directory of a git repo as its own project when it has its own projects/ entry', async () => {
+    // Regression for "subproject not appearing in sidebar": opening
+    // <repo>/tools/sub as a project must keep it as its own sidebar group
+    // and not collapse into the parent git root.
+    const repoRoot = await createCleanGitRepo(tmpDir)
+    const subDir = path.join(repoRoot, 'tools', 'sub')
+    await fs.mkdir(subDir, { recursive: true })
+    const realSubDir = await fs.realpath(subDir)
+
+    const sessionId = 'cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee'
+    // Place the session under projects/<sanitize(sub)>/, mirroring what
+    // SessionService.createSession does when the user opens this folder.
+    await writeSessionFile(sanitizePath(realSubDir), sessionId, [
+      makeSnapshotEntry(),
+      makeSessionMetaEntry(realSubDir),
+      makeUserEntry('Hello from sub'),
+    ])
+
+    const result = await service.listSessions()
+
+    expect(result.sessions).toHaveLength(1)
+    expect(result.sessions[0]).toMatchObject({
+      id: sessionId,
+      // The fix: projectRoot stays at the sub-dir the user opened, not the
+      // parent git root that findCanonicalGitRoot would otherwise return.
+      projectRoot: realSubDir,
+      workDir: realSubDir,
+    })
+  })
+
   it('should expose the source project root for persisted worktree sessions', async () => {
     const sourceWorkDir = path.join(tmpDir, 'source-repo')
     const worktreePath = path.join(sourceWorkDir, '.claude', 'worktrees', 'desktop-main-12345678')

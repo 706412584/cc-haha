@@ -612,6 +612,18 @@ export class SessionService {
     if (!candidate) return null
 
     const canonicalCandidate = await this.canonicalizeProjectPath(candidate)
+
+    // If the user explicitly opened this exact directory as a project (the
+    // desktop "Use existing folder" flow stores a session under
+    // ~/.claude/projects/<sanitize(workDir)>/), respect their choice rather
+    // than escalating to a parent git root. Without this, opening a
+    // sub-directory of an existing repo (e.g. `repo/tools/layout-editor`)
+    // collapses into the parent project group and the sub-project disappears
+    // from the sidebar — see GH issue, "subproject not appearing in list".
+    if (await this.candidateHasOwnProjectDir(canonicalCandidate)) {
+      return canonicalCandidate
+    }
+
     const gitRoot = findCanonicalGitRoot(canonicalCandidate)
     if (gitRoot) return gitRoot
 
@@ -622,6 +634,23 @@ export class SessionService {
     }
 
     return canonicalCandidate
+  }
+
+  /**
+   * Does ~/.claude/projects/<sanitize(candidate)>/ exist as a real directory?
+   * Used as a "user explicitly treats this path as a project" signal so a
+   * sub-directory of a git repo is allowed to be its own sidebar entry.
+   */
+  private async candidateHasOwnProjectDir(candidatePath: string): Promise<boolean> {
+    try {
+      const sanitizedId = this.sanitizePath(candidatePath)
+      if (!sanitizedId) return false
+      const projectDir = path.join(this.getProjectsDir(), sanitizedId)
+      const stat = await fs.stat(projectDir)
+      return stat.isDirectory()
+    } catch {
+      return false
+    }
   }
 
   private async canonicalizeProjectPath(projectPath: string): Promise<string> {
