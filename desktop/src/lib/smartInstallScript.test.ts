@@ -113,13 +113,47 @@ describe('buildSmartInstallScript', () => {
     expect(script).toContain("it''s-tricky.ps1")
   })
 
-  it('embeds the verifier helpers (Test-Cmd, Update-PathFromRegistry) so the runtime path-refresh logic is present', () => {
-    const plan = buildSmartInstallPlan([uvxRow], 'win32')
-    const script = buildSmartInstallScript(plan)
-    expect(script).toContain('function Update-PathFromRegistry')
-    expect(script).toContain('function Test-Cmd')
-    expect(script).toContain('function Try-OneOption')
-    expect(script).toContain("[System.Environment]::GetEnvironmentVariable('Path', 'Machine')")
+  it('checks non-package-manager tool prerequisites before running dependent commands', () => {
+    const rows: PluginPrerequisiteRow[] = [
+      {
+        command: 'rust-analyzer',
+        installed: false,
+        resolvedPath: null,
+        install: { win32: [{ manager: 'rustup', cmd: 'rustup component add rust-analyzer' }] },
+        affectedServers: [{ name: 'rust' }],
+      },
+      {
+        command: 'pyright-langserver',
+        installed: false,
+        resolvedPath: null,
+        install: { win32: [{ manager: 'npm', cmd: 'npm install -g pyright' }] },
+        affectedServers: [{ name: 'python' }],
+      },
+      {
+        command: 'gopls',
+        installed: false,
+        resolvedPath: null,
+        install: { win32: [{ manager: 'go', cmd: 'go install golang.org/x/tools/gopls@latest' }] },
+        affectedServers: [{ name: 'go' }],
+      },
+      {
+        command: 'csharp-ls',
+        installed: false,
+        resolvedPath: null,
+        install: { win32: [{ manager: 'dotnet', cmd: 'dotnet tool install -g csharp-ls' }] },
+        affectedServers: [{ name: 'csharp' }],
+      },
+    ]
+    const script = buildSmartInstallScript(buildSmartInstallPlan(rows, 'win32'))
+
+    expect(script).toContain("Test-Cmd 'rustup'")
+    expect(script).toContain("Test-Cmd 'npm'")
+    expect(script).toContain("Test-Cmd 'go'")
+    expect(script).toContain("Test-Cmd 'dotnet'")
+    expect(script).toContain('skipped: rustup not on PATH')
+    expect(script).toContain('skipped: npm not on PATH')
+    expect(script).toContain('skipped: go not on PATH')
+    expect(script).toContain('skipped: dotnet not on PATH')
   })
 })
 

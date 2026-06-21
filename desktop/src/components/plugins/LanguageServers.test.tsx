@@ -6,6 +6,7 @@ import { KnownLanguageServersPanel } from './PluginList'
 import { useTranslation } from '../../i18n'
 import { pluginsApi } from '../../api/plugins'
 import { injectInstallScriptIntoNewTerminal } from '../../lib/terminalCommandInjection'
+import { detectPlatform } from '../../lib/detectPlatform'
 import { useUIStore } from '../../stores/uiStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import type { KnownLanguageServerRow } from '../../types/plugin'
@@ -25,7 +26,7 @@ vi.mock('../../lib/terminalCommandInjection', () => ({
 
 // Force a deterministic platform so install-step selection is stable.
 vi.mock('../../lib/detectPlatform', () => ({
-  detectPlatform: () => 'linux',
+  detectPlatform: vi.fn(() => 'linux'),
 }))
 
 const goInstalled: KnownLanguageServerRow = {
@@ -85,6 +86,7 @@ describe('KnownLanguageServersPanel', () => {
   })
 
   it('injects the platform install command into a new terminal when clicking Install', async () => {
+    ;(detectPlatform as ReturnType<typeof vi.fn>).mockReturnValue('linux')
     render(<Harness />)
 
     await waitFor(() => {
@@ -100,6 +102,40 @@ describe('KnownLanguageServersPanel', () => {
     expect(injectInstallScriptIntoNewTerminal).toHaveBeenCalledWith([
       'npm install -g pyright',
     ])
+  })
+
+  it('uses the Windows smart installer instead of injecting a bare winget command', async () => {
+    ;(detectPlatform as ReturnType<typeof vi.fn>).mockReturnValue('win32')
+    ;(pluginsApi.languageServers as ReturnType<typeof vi.fn>).mockResolvedValue({
+      servers: [{
+        language: 'lua',
+        label: 'Lua (lua-language-server)',
+        command: 'lua-language-server',
+        homepage: 'https://github.com/LuaLS/lua-language-server',
+        install: {
+          win32: [{ manager: 'winget', cmd: 'winget install LuaLS.lua-language-server' }],
+        },
+        installed: false,
+        resolvedPath: null,
+        resolvedCommand: null,
+      } satisfies KnownLanguageServerRow],
+    })
+
+    render(<Harness />)
+
+    await waitFor(() => {
+      expect(screen.getByText('Lua (lua-language-server)')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /download\s*Install/i }))
+
+    await waitFor(() => {
+      expect(injectInstallScriptIntoNewTerminal).toHaveBeenCalledTimes(1)
+    })
+    const commands = (injectInstallScriptIntoNewTerminal as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as string[]
+    expect(commands).toHaveLength(1)
+    expect(commands[0]).toMatch(/^powershell\.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand /)
+    expect(commands[0]).not.toBe('winget install LuaLS.lua-language-server')
   })
 
   it('rechecks with refresh=true', async () => {
