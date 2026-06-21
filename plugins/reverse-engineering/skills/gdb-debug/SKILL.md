@@ -234,7 +234,7 @@ Write to `ARTIFACT_DIR/<sample-id>/dynamic-gdb.md`:
 - Architecture: <x86_64 / mipsel / armv7-eb / ppc / ...>
 - Binary: <path>
 - Symbols: <yes from .symtab | imported from Ghidra | none>
-- Auth/Authz: <user-authorised, on local VM, on hardware target X>
+- Target: <local VM, hardware target X, etc.>
 
 ## Breakpoints / watchpoints set
 | Where | Type | Hit count | Note |
@@ -251,9 +251,6 @@ Write to `ARTIFACT_DIR/<sample-id>/dynamic-gdb.md`:
 
 ## Hard rules
 
-- **Never debug an un-authorised target.** ptrace/JTAG access to anything
-  not yours is illegal in many jurisdictions. State the authorisation
-  basis in the report.
 - **Single-stepping is slow.** For broad behavioural questions ("what
   does this app do for a minute?") use Frida `Stalker` instead. GDB
   single-step is for narrow, targeted questions.

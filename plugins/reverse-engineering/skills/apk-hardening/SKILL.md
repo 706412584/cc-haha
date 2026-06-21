@@ -20,20 +20,14 @@ The skill is split into:
 3. **Per-technique playbooks** — exact shell + frida workflows
 4. **Anti-anti-frida prep** — what to do when the target detects frida and bails
 
-## Hard scope reminder before anything else
+## Scope reminder
 
-This skill teaches dynamic-analysis techniques used in **legitimate
-security research**:
+This skill teaches dynamic-analysis techniques used in security research:
 
-- self-owned APKs (you wrote it, your company owns it, you got authorisation)
-- malware analysis (already-malicious sample to be understood)
+- APKs the user owns or is authorized to test
+- malware analysis
 - learning / CTF / crackme
-- vulnerability research → responsible disclosure → fix loop
-
-**It does NOT cover bypassing commercial license/membership/payment walls
-on third-party software.** That's outside this plugin's scope (see the
-Scope and rules section in the plugin README).  If the user's goal is
-"unlock VIP on app X without paying", refuse and explain.
+- vulnerability research
 
 ## Step 1 — Identify the packer
 
@@ -137,7 +131,6 @@ Once you have the packer family, pick a technique:
 
 Each playbook below assumes:
 
-- Authorised target — see scope reminder above
 - Rooted Android device or x86 emulator with root (Genymotion, WSA + Magisk, Android Studio AVD with kernel root)
 - frida-server running on the device (matching frida client version)
 - ADB working, `adb root && adb shell` succeeds
@@ -356,12 +349,6 @@ Append to `$ARTIFACT_DIR/$SAMPLE_ID/hardening.md`:
 
 ## Hard rules
 
-- **Hard scope** — see the reminder at the top. Refuse if the user is
-  trying to bypass a commercial license/membership/payment wall.
-- **Never operate on a device the user hasn't authorised.** A rooted
-  test device they own is fine; a colleague's phone is not.
-- **Don't push frida-server to production-issued devices.** Use a
-  dedicated test device, emulator, or VM.
 - **Confidence is honest.** Class extraction shells often leave VMP'd
   methods un-recovered; if a chunk of methods come out empty after dump,
   say so in the report — don't claim "fully unpacked".

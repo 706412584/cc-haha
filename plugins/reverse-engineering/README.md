@@ -3,7 +3,7 @@
 Multi-platform reverse engineering toolkit for cc-haha — static + dynamic
 + report — bundled as a single plugin install. Currently ships **three
 MCP servers** (down from seven in v0.4.3 — see "Currently unbundled MCP
-servers" below for why), one orchestration agent, eleven skills, and two
+servers" below for why), one orchestration agent, fourteen skills, and two
 slash commands.
 
 ## What it gives you
@@ -11,7 +11,7 @@ slash commands.
 | Surface | Item |
 |---|---|
 | Agent | `reverse-engineer` — orchestrates triage → static → optional dynamic → report |
-| Skills | `triage`, `pe-elf-macho`, `firmware-blob`, `apk-analysis`, **`apk-hardening`** (new in 0.4.6), `ios-analysis`, `dynamic-debug-overview`, `frida-dynamic`, `gdb-debug`, `lldb-debug`, `crackme-keygen`, `re-report` |
+| Skills | `triage`, `pe-elf-macho`, `firmware-blob`, `apk-analysis`, **`apk-hardening`**, `ios-analysis`, `dynamic-debug-overview`, `frida-dynamic`, `gdb-debug`, `lldb-debug`, `crackme-keygen`, **`web-api-recovery`** (new in 0.4.7), **`js-bundle-analysis`** (new in 0.4.8), `re-report` |
 | Commands | `/reverse-engineering:triage <path>`, `/reverse-engineering:report <sample-id>` |
 | MCP servers | `ghidra` (pyghidra-mcp), `gdb` (mcp-gdb), `frida` (frida-mcp on PyPI) — verified end-to-end as of v0.4.5 |
 | Hooks | placeholder (add a fileCreated hook locally if you want SOC-style auto-triage) |
@@ -48,7 +48,7 @@ lanes that don't overlap:
 The agent reads `dynamic-debug-overview` first to pick the right lane.
 For "single-step through MIPS router firmware" → GDB. For "what URL does
 this Android app POST to" → Frida. For "step into ObjC method on iOS" →
-LLDB.
+LLDB. Frida runs only on targets the user specifies.
 
 ## Architecture coverage
 
@@ -74,6 +74,39 @@ The `firmware-blob` skill specifically handles raw blobs (no PE/ELF/Mach-O
 header) — router firmware, Cortex-M flash dumps, U-Boot uImages, console
 ROMs, ECU dumps — by identifying the ISA + endianness + base address before
 loading into Ghidra/r2 with the right processor module.
+
+## Web API and JavaScript bundle recovery
+
+The `web-api-recovery` and `js-bundle-analysis` skills extend the plugin from
+native/mobile/firmware RE into web application analysis.
+
+Use `web-api-recovery` for:
+
+- copied DevTools requests, cURL, HAR, or browser MCP captures
+- internal REST / GraphQL / Google `batchexecute` / gRPC-web API recovery
+- browser-observed request signing/encryption hypotheses
+- server-side authorisation checks for IDOR/BOLA and multi-tenant boundaries
+- generating small `curl`, Python `httpx`, or TypeScript `fetch` repros
+
+Use `js-bundle-analysis` for:
+
+- local JavaScript bundles, source maps, Webpack/Browserify/Next.js chunks
+- locating endpoint builders, request headers, tokens, and storage dependencies
+- tracing tenant/object identifiers such as `project_id`, `hid`, `secret`, `user_id`, and role/VIP flags
+- mapping signing/encryption candidate functions back to modules
+- identifying WASM-assisted frontend logic before handing off to deeper RE
+
+
+Optional tools, not bundled dependencies:
+
+| Tool | Use | Notes |
+|---|---|---|
+| `webcrack` | Unpack Webpack/Browserify bundles, unminify, deobfuscate common patterns | Best first choice for large frontend bundles; primarily used by `js-bundle-analysis` |
+| `kuizuo/js-deobfuscator` (`deob`) | Babel-AST cleanup for heavily obfuscated single-file JS | Use after/beside `webcrack` when obfuscation is the blocker |
+| Chrome DevTools / Playwright MCP | Observe browser flows and capture XHR/fetch traffic | Prefer existing MCP servers already available in the environment |
+| `playwright-devtools-mcp` | All-in-one reference for flow capture/API spec/curl generation | Useful reference or optional external server; not required |
+| Node.js `crypto` / `crypto-js` / `qs` | Validate signatures, HMAC/hash/AES hypotheses, query ordering, and body canonicalisation | Optional local helpers; prefer small throwaway scripts over app dependencies |
+| `mitmproxy` / HAR parser | Offline diffing of requests and server-side ownership probes | Keep probes narrow and redact sensitive response data |
 
 ## Install
 
@@ -102,7 +135,33 @@ Validate the manifest at any time:
 ./bin/claude-haha plugin validate plugins/reverse-engineering
 ```
 
-## Quickstart — first real run
+## Quickstart — web API recovery
+
+For web apps, start from an existing capture whenever possible:
+
+```text
+(in chat) Use reverse-engineering:web-api-recovery on this copied DevTools cURL.
+Goal: document the search endpoint and generate a Python httpx method.
+```
+
+Expected products in the answer or under `${ARTIFACT_DIR}/<target-id>/` if the
+agent writes files:
+
+```text
+web-api-recovery.md  — scope, endpoints, auth/session model, signing notes
+client.py            — optional httpx repro using user-supplied test tokens
+api_reference.md     — optional endpoint table and response shapes
+```
+
+For JS bundle questions, provide a local bundle path, source map, chunk directory,
+or captured script URL and use `js-bundle-analysis`.
+For server-authorization questions, provide a capture with two
+known tenant/object ids and use `web-api-recovery` to test whether the server
+enforces ownership. The skills may suggest `webcrack`, `deob`, Node `crypto`,
+`qs`, or request-diff commands, but they will not install or run optional tools
+without user approval.
+
+## Quickstart — first real binary run
 
 Once the plugin is enabled and at least one of the underlying tools is on
 your PATH (Ghidra or radare2 covers most native cases), pick a small,
@@ -136,8 +195,7 @@ report.md            — verdict + findings table + IOCs + open questions
 ```
 
 Confidence is honest: static-only conclusions about runtime behaviour cap
-at medium. To upgrade to high you have to run `frida-dynamic` against a
-target you've authorised.
+at medium. To upgrade to high you have to run `frida-dynamic`.
 
 ## Development workflow (changing skills / agent prompts)
 
@@ -213,7 +271,7 @@ The plugin doesn't ship the underlying tools. You need them on your machine
 |-----|---------------|---------|
 | `ghidra` | Ghidra (NSA), Java 17+, `uvx` (from `uv`) | https://ghidra-sre.org + set `GHIDRA_INSTALL_DIR` |
 | `gdb` | GDB on PATH (`gdb-multiarch` for cross-arch), Node | `apt install gdb gdb-multiarch` / `brew install gdb` / `scoop install gdb` |
-| `frida` | `uvx` (the `frida-mcp` PyPI pkg bundles a Python frida client; only needs frida-server on the target device) | uvx auto-installs frida-mcp; deploy frida-server to your authorised target separately |
+| `frida` | `uvx` (the `frida-mcp` PyPI pkg bundles a Python frida client; only needs frida-server on the target device) | uvx auto-installs frida-mcp; deploy frida-server to your target separately |
 
 You can disable individual MCP servers (e.g., turn off Frida if you only do
 static work) from the desktop **MCP** settings page (Settings → MCP) — the
@@ -255,7 +313,7 @@ and we'll re-add the server to `mcp/servers.json`.
 
 Several skills reach for command-line tools that **aren't** wrapped as MCP
 servers — either because they're already mature and stable as CLIs (jadx,
-apktool, lldb), or because their value is one-shot identification rather
+apktool, lldb, webcrack), or because their value is one-shot identification rather
 than long-running structured tool surface (APKiD), or because their
 upstream MCP packaging is currently broken.
 
@@ -271,6 +329,12 @@ commands. Install once and the agent skills work via Bash.
 | **APKiD** | `triage`, `apk-hardening` | `pipx install apkid` | `pipx install apkid` | `pipx install apkid` |
 | **lldb** | `lldb-debug` | LLVM installer (winget / scoop) | `xcode-select --install` (built-in) | `apt install lldb` / `dnf install lldb` |
 | **java** (JDK 17+) | jadx + apktool | `winget install EclipseAdoptium.Temurin.17.JDK` | `brew install --cask temurin@17` | `apt install openjdk-17-jdk` |
+| **webcrack** | `js-bundle-analysis`, `web-api-recovery` | `npx --yes webcrack@latest` | `npx --yes webcrack@latest` | `npx --yes webcrack@latest` |
+| **deob** (`kuizuo/js-deobfuscator`) | `js-bundle-analysis`, `web-api-recovery` | `npx --yes deob input.js -o out` | `npx --yes deob input.js -o out` | `npx --yes deob input.js -o out` |
+
+Web tools are optional and run only on user-provided JavaScript
+assets. Prefer `webcrack` for bundled Webpack/Browserify output; use `deob` for
+heavily obfuscated standalone scripts.
 
 ### Dynamic / unpacking CLI tools (for hardened APKs)
 
@@ -322,11 +386,6 @@ steps when the agent reaches that branch in the hardening routing matrix.
 
 ## Scope and rules
 
-- **Read-only on samples.** No skill in this plugin will execute a sample on
-  the host. Frida runs only on user-authorised targets (sandboxed device or VM).
-- **No public uploads.** No VirusTotal, no malware-bazaar pushes.
-- **No commercial license cracking.** The `crackme-keygen` skill is for CTFs
-  and self-owned binaries.
 - **Confidence is honest.** Static-only conclusions about runtime behaviour cap
   at medium; high requires confirmation by another channel.
 

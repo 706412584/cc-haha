@@ -19,7 +19,7 @@ Read whichever of these exist under `ARTIFACT_DIR/<sample-id>/`:
 - `static-android.md` — from apk-analysis.
 - `static-ios.md` — from ios-analysis.
 - `dynamic.md` — from frida-dynamic, only if dynamic was run.
-- `crackme.md` + `keygen.py` — from crackme-keygen, only for CTF tasks.
+- `crackme.md` + `keygen.py` — from crackme-keygen.
 
 ## Output structure
 

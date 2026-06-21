@@ -1,7 +1,7 @@
 ---
 name: crackme-keygen
-description: For CTF / crackme challenges where the deliverable is a serial, key, or input that the binary accepts. Recovers the validation logic, then either reverses it (keygen) or supplies a witness input.
-whenToUse: When triage shows a small standalone binary (PE/ELF/Mach-O) that prompts for a license/serial/key and the user's goal is to satisfy the check. Not for malware analysis.
+description: For crackme challenges where the deliverable is a serial, key, or input that the binary accepts. Recovers the validation logic, then either reverses it (keygen) or supplies a witness input.
+whenToUse: When triage shows a small standalone binary (PE/ELF/Mach-O) that prompts for a license/serial/key and the user's goal is to satisfy the check.
 allowedTools: Bash, Read, Grep
 ---
 
@@ -11,9 +11,7 @@ Goal: produce either (a) a single accepted input, or (b) a small program /
 script (a "keygen") that produces accepted inputs on demand.
 
 This skill is built around the public framing in
-[Binary Reverse Engineering for Agents (arxiv 2605.10597)](https://arxiv.org/html/2605.10597v1)
-— and follows the spirit of CTF / crackme-style challenges, not real-world
-license cracking. **Do not use this on commercial software you don't own.**
+[Binary Reverse Engineering for Agents (arxiv 2605.10597)](https://arxiv.org/html/2605.10597v1).
 
 ## Procedure
 
@@ -21,12 +19,8 @@ license cracking. **Do not use this on commercial software you don't own.**
 
 Before doing anything, get clarity on:
 
-- Is this a CTF challenge, your own crackme, or your own software?
 - What does the program accept as input — stdin? command-line argument? file?
 - What's the success indicator — exit code 0? a "Correct!" string? a flag?
-
-If the answer involves third-party commercial software, **stop**. This skill is
-for CTF and self-owned binaries only.
 
 ### Step 2 — Reach the validation function
 
@@ -112,8 +106,6 @@ Verified accepted by binary: yes (exit code 0, prints "Correct!")
 
 ## Hard rules
 
-- **No commercial license cracking.** This skill is for CTFs, crackmes, and
-  your own software. If asked to crack non-trivial commercial DRM, refuse.
 - **The keygen is the deliverable, not the patched binary.** Don't byte-patch
   the comparison — that defeats the point.
 - **Always confirm against the real binary.** A keygen that works in Python
