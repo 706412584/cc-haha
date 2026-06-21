@@ -321,6 +321,24 @@ export class SessionService {
     result: { sessions: SessionListItem[]; total: number }
   }>()
 
+  // readJsonlFile parse cache. Keyed by absolute filePath, invalidated by
+  // mtimeMs+size mismatch on each access (append-only JSONL means size alone
+  // catches almost every change; mtimeMs covers truncate/rewrite). Bounded by
+  // total cached bytes (insertion-order LRU). Files larger than
+  // READ_CACHE_MAX_FILE_BYTES skip the cache to avoid heap blowup on huge
+  // transcripts. In-flight reads are de-duped so concurrent callers of the
+  // same file (e.g. getSessionMessages + getSessionTaskNotifications in one
+  // request) share a single read+parse.
+  private readonly readCacheMaxFileBytes = 16 * 1024 * 1024
+  private readonly readCacheMaxTotalBytes = 64 * 1024 * 1024
+  private readCacheTotalBytes = 0
+  private readonly readJsonlCache = new Map<string, {
+    mtimeMs: number
+    size: number
+    entries: RawEntry[]
+  }>()
+  private readonly readJsonlInFlight = new Map<string, Promise<RawEntry[]>>()
+
   private sessionListCacheKey(options?: {
     project?: string
     limit?: number
@@ -342,6 +360,38 @@ export class SessionService {
 
   private invalidateSessionListCache(): void {
     this.sessionListCache.clear()
+  }
+
+  /**
+   * Drop a single file from the readJsonlFile parse cache. Called from every
+   * server-side write path so a subsequent read never returns stale entries,
+   * even in the rare case where mtimeMs+size happen to match after a rewrite.
+   */
+  private invalidateReadCache(filePath: string): void {
+    const existing = this.readJsonlCache.get(filePath)
+    if (existing) {
+      this.readCacheTotalBytes -= existing.size
+      this.readJsonlCache.delete(filePath)
+    }
+  }
+
+  /** Insert/refresh a cache entry and evict oldest entries beyond the byte budget. */
+  private storeReadCache(filePath: string, mtimeMs: number, size: number, entries: RawEntry[]): void {
+    const previous = this.readJsonlCache.get(filePath)
+    if (previous) {
+      this.readCacheTotalBytes -= previous.size
+      // Delete so the re-insert moves this key to the LRU tail (insertion order).
+      this.readJsonlCache.delete(filePath)
+    }
+    this.readJsonlCache.set(filePath, { mtimeMs, size, entries })
+    this.readCacheTotalBytes += size
+    while (this.readCacheTotalBytes > this.readCacheMaxTotalBytes) {
+      const oldest = this.readJsonlCache.keys().next().value
+      if (typeof oldest !== 'string') break
+      const evicted = this.readJsonlCache.get(oldest)
+      this.readJsonlCache.delete(oldest)
+      if (evicted) this.readCacheTotalBytes -= evicted.size
+    }
   }
 
   // --------------------------------------------------------------------------
@@ -369,16 +419,70 @@ export class SessionService {
   // --------------------------------------------------------------------------
 
   private async readJsonlFile(filePath: string): Promise<RawEntry[]> {
-    let content: string
+    let stat: { mtimeMs: number; size: number }
     try {
-      content = await fs.readFile(filePath, 'utf-8')
+      stat = await fs.stat(filePath)
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        // Do not cache: the file may be created shortly after.
+        this.invalidateReadCache(filePath)
         return []
       }
       throw err
     }
 
+    const cached = this.readJsonlCache.get(filePath)
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+      // Return a shallow copy so callers can't mutate the cached array's
+      // length/order. Entry objects are shared — verified that no caller
+      // mutates entries in place.
+      return cached.entries.slice()
+    }
+
+    const inFlight = this.readJsonlInFlight.get(filePath)
+    if (inFlight) {
+      return (await inFlight).slice()
+    }
+
+    const readPromise = this.readAndParseJsonl(filePath, stat)
+    this.readJsonlInFlight.set(filePath, readPromise)
+    try {
+      const entries = await readPromise
+      return entries.slice()
+    } finally {
+      this.readJsonlInFlight.delete(filePath)
+    }
+  }
+
+  /** Read + parse a JSONL file from disk and populate the parse cache. */
+  private async readAndParseJsonl(
+    filePath: string,
+    stat: { mtimeMs: number; size: number },
+  ): Promise<RawEntry[]> {
+    let content: string
+    try {
+      content = await fs.readFile(filePath, 'utf-8')
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        this.invalidateReadCache(filePath)
+        return []
+      }
+      throw err
+    }
+
+    const entries = this.parseJsonlContent(content)
+
+    // Skip caching very large transcripts to keep heap bounded.
+    if (stat.size <= this.readCacheMaxFileBytes) {
+      this.storeReadCache(filePath, stat.mtimeMs, stat.size, entries)
+    } else {
+      this.invalidateReadCache(filePath)
+    }
+
+    return entries
+  }
+
+  private parseJsonlContent(content: string): RawEntry[] {
     const entries: RawEntry[] = []
     for (const line of content.split('\n')) {
       const trimmed = line.trim()
@@ -571,6 +675,7 @@ export class SessionService {
   private async appendJsonlEntry(filePath: string, entry: Record<string, unknown>): Promise<void> {
     const line = JSON.stringify(entry) + '\n'
     await fs.appendFile(filePath, line, 'utf-8')
+    this.invalidateReadCache(filePath)
   }
 
   private resolveWorkDirFromEntries(
@@ -1986,6 +2091,7 @@ export class SessionService {
     }
 
     await fs.writeFile(filePath, JSON.stringify(initialEntry) + '\n' + JSON.stringify(metaEntry) + '\n', 'utf-8')
+    this.invalidateReadCache(filePath)
     this.invalidateSessionListCache()
 
     return { sessionId, workDir: absWorkDir }
@@ -2001,6 +2107,7 @@ export class SessionService {
     }
 
     await fs.unlink(found.filePath)
+    this.invalidateReadCache(found.filePath)
     this.invalidateSessionListCache()
   }
 
@@ -2177,6 +2284,7 @@ export class SessionService {
     const found = await this.findSessionFile(sessionId)
     if (!found) return
     await fs.unlink(found.filePath)
+    this.invalidateReadCache(found.filePath)
     this.invalidateSessionListCache()
   }
 
@@ -2225,6 +2333,7 @@ export class SessionService {
       `${JSON.stringify(initialEntry)}\n${JSON.stringify(metaEntry)}\n`,
       'utf-8',
     )
+    this.invalidateReadCache(found.filePath)
     this.invalidateSessionListCache()
   }
 
@@ -2318,6 +2427,7 @@ export class SessionService {
       if (this.countTranscriptMessages(entries) > 0) continue
 
       await fs.rm(filePath, { force: true })
+      this.invalidateReadCache(filePath)
       removed += 1
     }
     if (removed > 0) this.invalidateSessionListCache()
@@ -2374,6 +2484,7 @@ export class SessionService {
         ? filteredEntries.map((entry) => JSON.stringify(entry)).join('\n') + '\n'
         : ''
     await fs.writeFile(found.filePath, content, 'utf-8')
+    this.invalidateReadCache(found.filePath)
     this.invalidateSessionListCache()
 
     return {
