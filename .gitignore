@@ -44,6 +44,10 @@ desktop/brand-assets/
 # should be shared with other contributors. Whitelist them explicitly.
 !.claude/agents/
 !.claude/agents/**
+# Project-level rules (codegraph, agent behavior, plugin development) are
+# shared conventions — whitelist them too.
+!.claude/rules/
+!.claude/rules/**
 
 # Kiro IDE local config (steering, specs, hooks) — local only
 .kiro/
