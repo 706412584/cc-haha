@@ -278,7 +278,7 @@ Write to `$ARTIFACT_DIR/$SAMPLE_ID/dynamic-lldb.md`:
 - Binary: <path>
 - FairPlay status (iOS only): encrypted / decrypted dump
 - LLDB version: <output of `lldb --version`>
-- Auth: <user-authorised, device X owned by user, etc.>
+- Auth: <device X, etc.>
 
 ## Breakpoints / watchpoints
 | Where | Type | Hit count | Note |
@@ -302,8 +302,6 @@ Write to `$ARTIFACT_DIR/$SAMPLE_ID/dynamic-lldb.md`:
   debugged even by root without disabling SIP or signing your `lldb`
   with the right entitlements (`com.apple.security.cs.debugger`).
   Don't disable SIP on a production machine.
-- **Don't reverse-engineer commercial DRM via LLDB on a target you
-  don't own.** Same rule as gdb-debug.
 - **Don't dump the dyld shared cache** to the report. It's huge and
   sample-specific. Excerpt the symbol/section you need.
 - **Confidence is high** for direct LLDB observations.

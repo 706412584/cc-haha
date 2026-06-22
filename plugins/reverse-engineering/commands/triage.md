@@ -14,5 +14,3 @@ Steps:
    to the current working directory.
 4. Write the triage record to `<artefact-dir>/<sample-id>/triage.md`.
 5. Output a one-line verdict and the recommended next skill.
-
-Do NOT run the sample. Do NOT upload it anywhere.

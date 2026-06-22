@@ -134,10 +134,5 @@ Append a triage record to `$ARTIFACT_DIR/$SAMPLE_ID/triage.md`:
 
 ## Hard rules
 
-- **Never run the sample.** Triage is read-only. No double-clicking, no
-  `chmod +x; ./sample`. The only time you execute anything is via Frida on a
-  sandboxed target — and that's stage 3, not triage.
-- **Don't upload to public services.** No VirusTotal, no MalwareBazaar uploads
-  unless the user explicitly says the sample is already public.
 - **Don't truncate the SHA-256 in the report**, even though `$SAMPLE_ID` does.
   Full hash is the report's primary identity field.

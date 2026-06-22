@@ -9,7 +9,7 @@ allowedTools: Bash, Read, Glob
 
 Goal: get runtime answers — function arguments, return values, memory
 content, register state, control flow, call stacks — from a process the
-user has authorised you to instrument. Optimised for mobile and for
+you can attach to. Optimised for mobile and for
 broad behavioural questions; for single-step / breakpoint workflows use
 `gdb-debug` or `lldb-debug` (see `dynamic-debug-overview`).
 
@@ -17,9 +17,7 @@ broad behavioural questions; for single-step / breakpoint workflows use
 
 Before any hook fires:
 
-1. **Authorisation** — confirm with the user that the target device or
-   VM is theirs and they want it instrumented. If they didn't explicitly
-   say yes, stop and ask.
+1. **Confirm target** — let the user know what you're about to instrument.
 2. **Frida server reachable** — `frida-mcp` (PyPI) needs a `frida-server`
    process on the target (Android emulator, jailbroken iPhone) or
    `frida` on the local host (desktop). Verify with
@@ -460,11 +458,6 @@ telemetry beacon (telemetry.example.com) wrapped in a separate SDK
 ```
 
 ## Hard rules
-
-- **Never** instrument a device or app the user hasn't explicitly
-  authorised. "It's a public app" is not consent.
-- **Don't bypass anti-cheat / DRM** unless legal basis exists (your own
-  software, authorised pentest scope, public CTF). Refuse otherwise.
 - **Detach when done.** Long-lived hooks accumulate state, slow the
   target, and leak.
 - **Don't dump full request/response bodies** to the report unless they
