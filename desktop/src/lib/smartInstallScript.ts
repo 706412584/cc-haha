@@ -148,6 +148,10 @@ function Try-OneOption($cmd, $manager, $shellCmd) {
     '^winget$'   { if (-not (Test-Cmd 'winget'))   { Write-Host '     skipped: winget not on PATH (install App Installer from Microsoft Store)' -ForegroundColor Yellow; return $false } ; break }
     '^scoop$'    { if (-not (Test-Cmd 'scoop'))    { Write-Host '     skipped: scoop not on PATH (https://scoop.sh)' -ForegroundColor Yellow; return $false } ; break }
     '^choco$'    { if (-not (Test-Cmd 'choco'))    { Write-Host '     skipped: chocolatey not on PATH (https://chocolatey.org)' -ForegroundColor Yellow; return $false } ; break }
+    '^rustup$'   { if (-not (Test-Cmd 'rustup'))   { Write-Host '     skipped: rustup not on PATH (https://rustup.rs)' -ForegroundColor Yellow; return $false } ; break }
+    '^npm$'      { if (-not (Test-Cmd 'npm'))      { Write-Host '     skipped: npm not on PATH (install Node.js from https://nodejs.org)' -ForegroundColor Yellow; return $false } ; break }
+    '^go$'       { if (-not (Test-Cmd 'go'))       { Write-Host '     skipped: go not on PATH (https://go.dev/dl/)' -ForegroundColor Yellow; return $false } ; break }
+    '^dotnet$'   { if (-not (Test-Cmd 'dotnet'))   { Write-Host '     skipped: dotnet not on PATH (https://dotnet.microsoft.com/download)' -ForegroundColor Yellow; return $false } ; break }
     '^msys2?$'   { if (-not (Test-Cmd 'pacman'))   { Write-Host '     skipped: msys2/pacman not on PATH (https://www.msys2.org)' -ForegroundColor Yellow; return $false } ; break }
   }
 

@@ -17,6 +17,10 @@ import { pluginsApi } from '../../api/plugins'
 import { PluginPrerequisitesModal } from './PluginPrerequisitesModal'
 import { detectPlatform } from '../../lib/detectPlatform'
 import { injectInstallScriptIntoNewTerminal } from '../../lib/terminalCommandInjection'
+import {
+  buildSmartInstallPlan,
+  buildSmartInstallCommandLine,
+} from '../../lib/smartInstallScript'
 
 type PluginBucket = 'attention' | 'enabled' | 'disabled'
 type BatchAction = 'enable' | 'disable'
@@ -992,6 +996,7 @@ export function KnownLanguageServersPanel({
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [installingLanguage, setInstallingLanguage] = useState<string | null>(null)
+  const platform = useMemo(detectPlatform, [])
 
   const load = async (refresh?: boolean) => {
     setLoading(true)
@@ -1013,18 +1018,29 @@ export function KnownLanguageServersPanel({
   }, [])
 
   const handleInstall = async (server: KnownLanguageServerRow) => {
-    const platform = detectPlatform()
     const steps = server.install[platform] ?? []
-    const step = steps[0]
-    if (!step) {
+    if (steps.length === 0) {
       if (server.homepage) {
         window.open(server.homepage, '_blank', 'noopener,noreferrer')
       }
       return
     }
+
+    const commands = platform === 'win32'
+      ? [buildSmartInstallCommandLine(buildSmartInstallPlan([
+          {
+            command: server.command,
+            installed: server.installed,
+            resolvedPath: server.resolvedPath,
+            install: server.install,
+            affectedServers: [{ name: server.language, displayName: server.label }],
+          },
+        ], 'win32'))]
+      : [steps[0]!.cmd]
+
     setInstallingLanguage(server.language)
     try {
-      await injectInstallScriptIntoNewTerminal([step.cmd])
+      await injectInstallScriptIntoNewTerminal(commands)
       addToast({
         type: 'success',
         message: t('settings.plugins.languageServers.known.injectedToast', {
