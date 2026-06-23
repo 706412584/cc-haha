@@ -1475,7 +1475,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if ((get().sessions[sessionId]?.messageQueue?.length ?? 0) > 0) {
       queueDrainPaused.add(sessionId)
     }
-    consumePendingDelta(sessionId)
+    // Flush any throttled content_delta buffered for THIS session into its
+    // streamingText before going idle — otherwise the partial answer that
+    // arrived between the last flush tick and the stop is silently dropped.
+    // Must append to streamingText (not discard) and must be scoped to this
+    // sessionId so a concurrent session's buffer is never touched. Regressed
+    // when an earlier refactor reduced this to a bare consume; see
+    // chatStore.test.ts "flushes throttled deltas only for the stopped
+    // session".
+    const stoppedDelta = consumePendingDelta(sessionId)
     clearPendingToolInputDelta(sessionId)
     set((s) => {
       const session = s.sessions[sessionId]
@@ -1486,6 +1494,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           ...s.sessions,
           [sessionId]: {
             ...session,
+            streamingText: `${session.streamingText}${stoppedDelta}`,
             chatState: 'idle',
             pendingPermission: null,
             pendingComputerUsePermission: null,

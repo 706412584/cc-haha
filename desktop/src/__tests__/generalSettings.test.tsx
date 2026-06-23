@@ -1670,7 +1670,13 @@ describe('Settings > Providers tab', () => {
     })
   })
 
-  it('defaults Tool Search on and persists an explicit disable from the provider form', async () => {
+  // The provider-form Tool Search toggle is intentionally hidden (see Settings.tsx
+  // "ToolSearch toggle hidden": third-party proxies don't support the beta header,
+  // and the CLI auto-detects first-party hosts via toolSearch.ts). The toggle UI is
+  // gone, but Anthropic-format providers still persist the default-on value so
+  // first-party hosts keep Tool Search. This guards that contract after the toggle
+  // was removed.
+  it('hides the Tool Search toggle and persists default-on for Anthropic providers', async () => {
     MOCK_GET_SETTINGS.mockResolvedValue({ env: { EXISTING_ENV: '1' } })
     providerStoreState.createProvider = vi.fn().mockResolvedValue({
       id: 'provider-new',
@@ -1679,7 +1685,7 @@ describe('Settings > Providers tab', () => {
       apiKey: 'sk-test',
       baseUrl: 'https://api.example.com/anthropic',
       apiFormat: 'anthropic',
-      toolSearchEnabled: false,
+      toolSearchEnabled: true,
       models: {
         main: 'custom-main',
         haiku: 'custom-main',
@@ -1708,37 +1714,18 @@ describe('Settings > Providers tab', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Add Provider/i }))
     const dialog = screen.getByRole('dialog')
-    const toolSearchCheckbox = within(dialog).getByRole('checkbox', { name: 'Enable Tool Search' })
 
-    expect(toolSearchCheckbox).toBeChecked()
-    await waitFor(() => {
-      expect(within(dialog).getByDisplayValue((value) => (
-        typeof value === 'string' && value.includes('"ENABLE_TOOL_SEARCH": "true"')
-      ))).toBeInTheDocument()
-    })
-
-    fireEvent.click(toolSearchCheckbox)
-    expect(toolSearchCheckbox).not.toBeChecked()
-    await waitFor(() => {
-      expect(within(dialog).getByDisplayValue((value) => (
-        typeof value === 'string' && value.includes('"ENABLE_TOOL_SEARCH": "false"')
-      ))).toBeInTheDocument()
-    })
+    // Toggle is hidden — it must not be reachable from the provider form.
+    expect(within(dialog).queryByRole('checkbox', { name: 'Enable Tool Search' })).toBeNull()
 
     fireEvent.change(within(dialog).getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } })
     fireEvent.click(within(dialog).getByRole('button', { name: /Save|Add/i }))
 
     await waitFor(() => {
       expect(providerStoreState.createProvider).toHaveBeenCalledWith(expect.objectContaining({
-        toolSearchEnabled: false,
+        toolSearchEnabled: true,
       }))
     })
-    expect(MOCK_UPDATE_SETTINGS).toHaveBeenCalledWith(expect.objectContaining({
-      env: expect.objectContaining({
-        EXISTING_ENV: '1',
-        ENABLE_TOOL_SEARCH: 'false',
-      }),
-    }))
   })
 
   it('saves 1M model declarations for the main and role mappings', async () => {
