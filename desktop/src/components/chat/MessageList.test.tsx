@@ -2361,7 +2361,7 @@ describe('MessageList nested tool calls', () => {
     })
 
     await waitFor(() => {
-      expect(screen.getByText('2 lines · 36 chars')).toBeTruthy()
+      expect(screen.getByText('app.vue')).toBeTruthy()
     })
     expect(scrollIntoView).not.toHaveBeenCalled()
     expect(scrollTop).toBe(600)
