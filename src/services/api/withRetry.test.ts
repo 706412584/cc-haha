@@ -216,9 +216,9 @@ describe('isRetryableStreamError', () => {
 describe('getMaxStreamTransientRetries', () => {
   const ENV = 'CLAUDE_STREAM_TRANSIENT_RETRY_MAX'
 
-  test('defaults to 0 when unset (disabled for third-party provider safety)', () => {
+  test('defaults to 1 when unset (one retry is cheap and almost always clears a transient blip)', () => {
     delete process.env[ENV]
-    expect(getMaxStreamTransientRetries()).toBe(0)
+    expect(getMaxStreamTransientRetries()).toBe(1)
   })
 
   test('honors a numeric override (including 0 to disable)', () => {
@@ -229,9 +229,9 @@ describe('getMaxStreamTransientRetries', () => {
     delete process.env[ENV]
   })
 
-  test('falls back to 0 on non-numeric input', () => {
+  test('falls back to default 1 on non-numeric input', () => {
     process.env[ENV] = 'abc'
-    expect(getMaxStreamTransientRetries()).toBe(0)
+    expect(getMaxStreamTransientRetries()).toBe(1)
     delete process.env[ENV]
   })
 })
