@@ -38,6 +38,10 @@ const CATALOG_DESC_KEY: Record<string, TranslationKey> = {
   'stripe-best-practices': 'settings.skills.catalog.stripe-best-practices.desc',
   'supabase-best-practices': 'settings.skills.catalog.supabase-best-practices.desc',
   'temporal-developer': 'settings.skills.catalog.temporal-developer.desc',
+  'karpathy-guidelines': 'settings.skills.catalog.karpathy-guidelines.desc',
+  'mattpocock-grilling': 'settings.skills.catalog.mattpocock-grilling.desc',
+  'mattpocock-tdd': 'settings.skills.catalog.mattpocock-tdd.desc',
+  'mattpocock-diagnosing-bugs': 'settings.skills.catalog.mattpocock-diagnosing-bugs.desc',
 }
 
 const CATEGORY_LABEL_KEY: Record<string, TranslationKey> = {
@@ -47,6 +51,9 @@ const CATEGORY_LABEL_KEY: Record<string, TranslationKey> = {
   Payments: 'settings.skills.category.payments',
   Database: 'settings.skills.category.database',
   Workflows: 'settings.skills.category.workflows',
+  Workflow: 'settings.skills.category.workflow',
+  Productivity: 'settings.skills.category.productivity',
+  Engineering: 'settings.skills.category.engineering',
 }
 
 export function SkillList() {

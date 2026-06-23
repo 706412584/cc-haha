@@ -253,6 +253,211 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
 `
 
+const MATTPOCOCK_UPSTREAM =
+  'mattpocock/skills (MIT) — https://github.com/mattpocock/skills'
+
+const MATTPOCOCK_GRILLING_SKILL = `---
+name: grilling
+description: Interview the user relentlessly about a plan or design. Use when the user wants to stress-test a plan before building, or uses any 'grill' trigger phrases.
+---
+
+Interview me relentlessly about every aspect of this plan until we reach a shared understanding. Walk down each branch of the design tree, resolving dependencies between decisions one-by-one. For each question, provide your recommended answer.
+
+Ask the questions one at a time, waiting for feedback on each question before continuing. Asking multiple questions at once is bewildering.
+
+If a question can be answered by exploring the codebase, explore the codebase instead.
+`
+
+const MATTPOCOCK_TDD_SKILL = `---
+name: tdd
+description: Test-driven development. Use when the user wants to build features or fix bugs test-first, mentions "red-green-refactor", or wants integration tests.
+---
+
+# Test-Driven Development
+
+## Philosophy
+
+**Core principle**: Tests should verify behavior through public interfaces, not implementation details. Code can change entirely; tests shouldn't.
+
+**Good tests** are integration-style: they exercise real code paths through public APIs. They describe _what_ the system does, not _how_ it does it. A good test reads like a specification — "user can checkout with valid cart" tells you exactly what capability exists. These tests survive refactors because they don't care about internal structure.
+
+**Bad tests** are coupled to implementation. They mock internal collaborators, test private methods, or verify through external means (like querying a database directly instead of using the interface). The warning sign: your test breaks when you refactor, but behavior hasn't changed.
+
+## Anti-Pattern: Horizontal Slices
+
+**DO NOT write all tests first, then all implementation.** This is "horizontal slicing" — treating RED as "write all tests" and GREEN as "write all code."
+
+This produces **crap tests**: tests written in bulk test _imagined_ behavior, not _actual_ behavior. Tests become insensitive to real changes — they pass when behavior breaks, fail when behavior is fine.
+
+**Correct approach**: Vertical slices via tracer bullets. One test → one implementation → repeat. Each test responds to what you learned from the previous cycle.
+
+\`\`\`
+WRONG (horizontal):
+  RED:   test1, test2, test3, test4, test5
+  GREEN: impl1, impl2, impl3, impl4, impl5
+
+RIGHT (vertical):
+  RED→GREEN: test1→impl1
+  RED→GREEN: test2→impl2
+\`\`\`
+
+## Workflow
+
+### 1. Planning
+
+Before writing any code:
+
+- [ ] Confirm with user what interface changes are needed
+- [ ] Confirm with user which behaviors to test (prioritize)
+- [ ] List the behaviors to test (not implementation steps)
+- [ ] Get user approval on the plan
+
+**You can't test everything.** Confirm with the user exactly which behaviors matter most. Focus testing effort on critical paths and complex logic, not every possible edge case.
+
+### 2. Tracer Bullet
+
+Write ONE test that confirms ONE thing about the system:
+
+\`\`\`
+RED:   Write test for first behavior → test fails
+GREEN: Write minimal code to pass → test passes
+\`\`\`
+
+This is your tracer bullet — proves the path works end-to-end.
+
+### 3. Incremental Loop
+
+For each remaining behavior:
+
+\`\`\`
+RED:   Write next test → fails
+GREEN: Minimal code to pass → passes
+\`\`\`
+
+Rules:
+
+- One test at a time
+- Only enough code to pass current test
+- Don't anticipate future tests
+- Keep tests focused on observable behavior
+
+### 4. Refactor
+
+After all tests pass, look for refactor candidates: extract duplication, deepen modules, apply SOLID where natural, run tests after each refactor step.
+
+**Never refactor while RED.** Get to GREEN first.
+
+## Checklist Per Cycle
+
+- [ ] Test describes behavior, not implementation
+- [ ] Test uses public interface only
+- [ ] Test would survive internal refactor
+- [ ] Code is minimal for this test
+- [ ] No speculative features added
+`
+
+const MATTPOCOCK_DIAGNOSING_BUGS_SKILL = `---
+name: diagnosing-bugs
+description: Diagnosis loop for hard bugs and performance regressions. Use when the user says "diagnose"/"debug this", or reports something broken/throwing/failing/slow.
+---
+
+# Diagnosing Bugs
+
+A discipline for hard bugs. Skip phases only when explicitly justified.
+
+## Phase 1 — Build a feedback loop
+
+**This is the skill.** Everything else is mechanical. If you have a **tight** pass/fail signal for the bug — one that goes red on _this_ bug — you will find the cause; bisection, hypothesis-testing, and instrumentation all just consume it. If you don't have one, no amount of staring at code will save you.
+
+Spend disproportionate effort here. **Be aggressive. Be creative. Refuse to give up.**
+
+### Ways to construct one — try them in roughly this order
+
+1. **Failing test** at whatever seam reaches the bug — unit, integration, e2e.
+2. **Curl / HTTP script** against a running dev server.
+3. **CLI invocation** with a fixture input, diffing stdout against a known-good snapshot.
+4. **Headless browser script** (Playwright / Puppeteer) — drives the UI, asserts on DOM/console/network.
+5. **Replay a captured trace.** Save a real network request / payload / event log to disk; replay it through the code path in isolation.
+6. **Throwaway harness.** Spin up a minimal subset of the system that exercises the bug code path with a single function call.
+7. **Property / fuzz loop.** If the bug is "sometimes wrong output", run 1000 random inputs and look for the failure mode.
+8. **Bisection harness.** Automate "boot at state X, check, repeat" so you can git bisect run it.
+9. **Differential loop.** Run the same input through old-version vs new-version and diff outputs.
+
+Build the right feedback loop, and the bug is 90% fixed.
+
+### Tighten the loop
+
+Treat the loop as a product. Once you have _a_ loop, **tighten** it: faster, sharper signal, more deterministic. A 30-second flaky loop is barely better than no loop; a 2-second deterministic one is a debugging superpower.
+
+### Completion criterion — a tight loop that goes red
+
+Phase 1 is done when the loop is **tight** and **red-capable**: one command you have **already run at least once** that is:
+
+- [ ] **Red-capable** — drives the actual bug code path and asserts the **user's exact symptom**.
+- [ ] **Deterministic** — same verdict every run.
+- [ ] **Fast** — seconds, not minutes.
+- [ ] **Agent-runnable** — you can run it unattended.
+
+If you catch yourself reading code to build a theory before this command exists, **stop — jumping straight to a hypothesis is the exact failure this skill prevents.**
+
+## Phase 2 — Reproduce + minimise
+
+Run the loop. Watch it go red. Confirm the loop produces the user's described failure (not a different nearby one), reproduces across runs, and captures the exact symptom.
+
+### Minimise
+
+Once it's red, shrink the repro to the **smallest scenario that still goes red**. Cut inputs, callers, config, data, and steps **one at a time** — keep only what's load-bearing for the failure.
+
+Done when **every remaining element is load-bearing** — removing any one of them makes the loop go green.
+
+## Phase 3 — Hypothesise
+
+Generate **3–5 ranked hypotheses** before testing any of them. Single-hypothesis generation anchors on the first plausible idea.
+
+Each hypothesis must be **falsifiable**: state the prediction it makes.
+
+> Format: "If <X> is the cause, then <changing Y> will make the bug disappear."
+
+If you cannot state the prediction, the hypothesis is a vibe — discard or sharpen it.
+
+**Show the ranked list to the user before testing.** Cheap checkpoint, big time saver.
+
+## Phase 4 — Instrument
+
+Each probe must map to a specific prediction from Phase 3. **Change one variable at a time.**
+
+Tool preference:
+
+1. **Debugger / REPL inspection** if the env supports it. One breakpoint beats ten logs.
+2. **Targeted logs** at the boundaries that distinguish hypotheses.
+3. Never "log everything and grep".
+
+**Tag every debug log** with a unique prefix, e.g. \`[DEBUG-a4f2]\`. Cleanup at the end becomes a single grep.
+
+**Perf branch.** For performance regressions, logs are usually wrong. Establish a baseline measurement, then bisect. Measure first, fix second.
+
+## Phase 5 — Fix + regression test
+
+Write the regression test **before the fix** — but only if there is a **correct seam** for it.
+
+If a correct seam exists:
+
+1. Turn the minimised repro into a failing test at that seam.
+2. Watch it fail.
+3. Apply the fix.
+4. Watch it pass.
+5. Re-run the Phase 1 feedback loop against the original (un-minimised) scenario.
+
+## Phase 6 — Cleanup + post-mortem
+
+- [ ] Original repro no longer reproduces (re-run the Phase 1 loop)
+- [ ] Regression test passes (or absence of seam is documented)
+- [ ] All \`[DEBUG-...]\` instrumentation removed
+- [ ] The hypothesis that turned out correct is stated in the commit / PR message
+
+**Then ask: what would have prevented this bug?** If the answer involves architectural change, hand off accordingly.
+`
+
 import { SUPABASE_REFERENCE_FILES } from './supabaseReferences.js'
 import {
   REACT_BEST_PRACTICES_SKILL,
@@ -349,6 +554,33 @@ export const SKILL_CATALOG: CatalogSkill[] = [
     category: 'Workflow',
     source: 'multica-ai/andrej-karpathy-skills (MIT) — https://github.com/multica-ai/andrej-karpathy-skills',
     files: { 'SKILL.md': KARPATHY_GUIDELINES_SKILL },
+  },
+  {
+    name: 'mattpocock-grilling',
+    displayName: 'Grilling (Matt Pocock)',
+    description:
+      'Relentless interview to sharpen a plan or design before building. Walks down each branch of the decision tree, one question at a time, with recommended answers.',
+    category: 'Productivity',
+    source: MATTPOCOCK_UPSTREAM,
+    files: { 'SKILL.md': MATTPOCOCK_GRILLING_SKILL },
+  },
+  {
+    name: 'mattpocock-tdd',
+    displayName: 'TDD (Matt Pocock)',
+    description:
+      'Test-driven development with a red-green-refactor loop. Vertical slices via tracer bullets — one test, one implementation, repeat. Avoids horizontal slicing anti-pattern.',
+    category: 'Engineering',
+    source: MATTPOCOCK_UPSTREAM,
+    files: { 'SKILL.md': MATTPOCOCK_TDD_SKILL },
+  },
+  {
+    name: 'mattpocock-diagnosing-bugs',
+    displayName: 'Diagnosing Bugs (Matt Pocock)',
+    description:
+      'Six-phase debugging discipline: build a tight red-capable feedback loop, reproduce + minimise, generate ranked hypotheses, instrument one variable at a time, write regression test, post-mortem.',
+    category: 'Engineering',
+    source: MATTPOCOCK_UPSTREAM,
+    files: { 'SKILL.md': MATTPOCOCK_DIAGNOSING_BUGS_SKILL },
   },
 ]
 
