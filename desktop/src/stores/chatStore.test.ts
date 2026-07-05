@@ -313,6 +313,43 @@ describe('chatStore history mapping', () => {
     })
   })
 
+  it('drops trailing thinking when compact history is mapped', () => {
+    const messages: MessageEntry[] = [
+      {
+        id: 'assistant-thinking',
+        type: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'Modifying layout elements' },
+        ],
+        timestamp: '2026-05-19T09:59:59.000Z',
+      },
+      {
+        id: 'compact-boundary',
+        type: 'system',
+        content: 'Conversation compacted',
+        timestamp: '2026-05-19T10:00:00.000Z',
+      },
+      {
+        id: 'compact-summary',
+        type: 'user',
+        content: [
+          'This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.',
+          '',
+          'Kept the layout changes and verification notes.',
+        ].join('\n'),
+        timestamp: '2026-05-19T10:00:01.000Z',
+      },
+    ]
+
+    const mapped = mapHistoryMessagesToUiMessages(messages)
+
+    expect(mapped.map((message) => message.type)).toEqual(['compact_summary'])
+    expect(mapped[0]).toMatchObject({
+      type: 'compact_summary',
+      summary: 'Kept the layout changes and verification notes.',
+    })
+  })
+
   it('maps compact boundary and summary history without hiding pre-compact messages', () => {
     const messages: MessageEntry[] = [
       {

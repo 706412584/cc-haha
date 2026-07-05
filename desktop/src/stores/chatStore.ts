@@ -672,13 +672,22 @@ function compactMetadataFromUnknown(data: unknown): Pick<CompactSummaryMessage, 
   }
 }
 
+function dropTailThinkingMessages(messages: UIMessage[]): UIMessage[] {
+  let end = messages.length
+  while (end > 0 && messages[end - 1]?.type === 'thinking') {
+    end -= 1
+  }
+  return end === messages.length ? messages : messages.slice(0, end)
+}
+
 function appendOrUpdateTailCompactSummary(
   messages: UIMessage[],
   update: Partial<Omit<CompactSummaryMessage, 'id' | 'type' | 'timestamp'>>,
   timestamp: number,
 ): UIMessage[] {
-  const existingIndex = messages.length - 1
-  const existingMessage = messages[existingIndex]
+  const compactMessages = dropTailThinkingMessages(messages)
+  const existingIndex = compactMessages.length - 1
+  const existingMessage = compactMessages[existingIndex]
   if (existingMessage?.type === 'compact_summary') {
     const existing = existingMessage
     const next: CompactSummaryMessage = {
@@ -688,14 +697,14 @@ function appendOrUpdateTailCompactSummary(
       timestamp: existing.timestamp,
     }
     return [
-      ...messages.slice(0, existingIndex),
+      ...compactMessages.slice(0, existingIndex),
       next,
-      ...messages.slice(existingIndex + 1),
+      ...compactMessages.slice(existingIndex + 1),
     ]
   }
 
   return [
-    ...messages,
+    ...compactMessages,
     {
       id: nextId(),
       type: 'compact_summary',
