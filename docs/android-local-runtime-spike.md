@@ -103,6 +103,14 @@ Expected shape:
 {"status":"ok","timestamp":"..."}
 ```
 
+Run the transport probe after the server is listening. It is expected to fail with a connection error until the server finishes startup:
+
+```bash
+bun run scripts/android-local-runtime/check-server.ts http://127.0.0.1:3456
+```
+
+The probe verifies both `GET /health` and WebSocket `ping`/`pong` on `/ws/:sessionId`. If you pass a custom session id, it must match the server route constraint: `/^[0-9a-zA-Z_-]{1,64}$/`.
+
 ## H5/WebView target
 
 Open the UI at:
