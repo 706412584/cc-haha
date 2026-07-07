@@ -51,6 +51,8 @@ Out of scope:
 
 ## Environment probe
 
+For each real device, copy `docs/android-local-runtime-devices/template.md` into a device-specific report and fill it as you test.
+
 Run this first in the Android userland:
 
 ```bash
