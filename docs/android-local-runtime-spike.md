@@ -113,6 +113,17 @@ bun run scripts/android-local-runtime/check-server.ts http://127.0.0.1:3456
 
 The probe verifies both `GET /health` and WebSocket `ping`/`pong` on `/ws/:sessionId`. If you pass a custom session id, it must match the server route constraint: `/^[0-9a-zA-Z_-]{1,64}$/`.
 
+## Node fallback transport smoke
+
+The official Bun Linux aarch64 binary may not run on Android/Termux because it expects the glibc loader `/lib/ld-linux-aarch64.so.1`. If Bun is blocked, validate the Node transport layer first:
+
+```bash
+node scripts/android-local-runtime/node-transport-smoke-server.mjs --host 127.0.0.1 --port 3456
+node scripts/android-local-runtime/node-transport-smoke-client.mjs http://127.0.0.1:3456
+```
+
+This smoke path is intentionally tiny and dependency-free. It proves whether Termux Node can serve `GET /health` and WebSocket `ping`/`pong` before adapting the full Bun-based server.
+
 ## H5/WebView target
 
 Open the UI at:

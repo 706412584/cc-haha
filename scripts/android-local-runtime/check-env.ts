@@ -15,7 +15,7 @@ const commands: CommandSpec[] = [
   ['bun', ['--version']],
   ['git', ['--version']],
   ['python', ['--version']],
-  ['pkg', ['--version']],
+  ['pkg', ['list-installed']],
 ]
 
 // Android-specific properties. These only exist on real Android/Termux, so
