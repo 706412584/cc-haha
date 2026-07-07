@@ -173,6 +173,9 @@ export type SlashUiAction =
       type: 'settings'
       tab: SettingsTab
     }
+  | {
+      type: 'model'
+    }
 
 export function resolveSlashUiAction(value: string): SlashUiAction | null {
   const normalizedValue = SLASH_COMMAND_ALIASES.find((alias) => alias.name === value)?.target ?? value
@@ -184,6 +187,10 @@ export function resolveSlashUiAction(value: string): SlashUiAction | null {
   const settingsCommand = SETTINGS_SLASH_COMMANDS.find((command) => command.name === normalizedValue)
   if (settingsCommand) {
     return { type: 'settings', tab: settingsCommand.tab }
+  }
+
+  if (normalizedValue === 'model') {
+    return { type: 'model' }
   }
 
   return null

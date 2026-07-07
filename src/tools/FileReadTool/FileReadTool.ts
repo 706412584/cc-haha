@@ -485,8 +485,15 @@ export const FileReadTool = buildTool({
   },
   renderToolUseErrorMessage,
   async validateInput({ file_path, pages }, toolUseContext: ToolUseContext) {
-    // Validate pages parameter (pure string parsing, no I/O)
-    if (pages !== undefined && pages !== '') {
+    // Path expansion + extension checks are string-only and avoid I/O before
+    // permission evaluation.
+    const fullFilePath = expandPath(file_path)
+    const ext = path.extname(fullFilePath).toLowerCase()
+
+    // Validate pages parameter only for PDF files. Models sometimes send
+    // PDF-only pages values when reading images or text files; those should
+    // not block the read path.
+    if (pages !== undefined && isPDFExtension(ext)) {
       const parsed = parsePDFPageRange(pages)
       if (!parsed) {
         return {
@@ -507,9 +514,6 @@ export const FileReadTool = buildTool({
         }
       }
     }
-
-    // Path expansion + deny rule check (no I/O)
-    const fullFilePath = expandPath(file_path)
 
     const appState = toolUseContext.getAppState()
     const denyRule = matchingRuleForInput(
@@ -537,7 +541,6 @@ export const FileReadTool = buildTool({
 
     // Binary extension check (string check on extension only, no I/O).
     // PDF, images, and SVG are excluded - this tool renders them natively.
-    const ext = path.extname(fullFilePath).toLowerCase()
     if (
       hasBinaryExtension(fullFilePath) &&
       !isPDFExtension(ext) &&
@@ -585,6 +588,7 @@ export const FileReadTool = buildTool({
     }
 
     const ext = path.extname(file_path).toLowerCase().slice(1)
+    const effectivePages = isPDFExtension(ext) ? pages : undefined
     // Use expandPath for consistent path normalization with FileEditTool/FileWriteTool
     // (especially handles whitespace trimming and Windows path separators)
     const fullFilePath = expandPath(file_path)
@@ -667,7 +671,7 @@ export const FileReadTool = buildTool({
         ext,
         offset,
         limit,
-        pages,
+        effectivePages,
         maxSizeBytes,
         maxTokens,
         readFileState,
@@ -690,7 +694,7 @@ export const FileReadTool = buildTool({
               ext,
               offset,
               limit,
-              pages,
+              effectivePages,
               maxSizeBytes,
               maxTokens,
               readFileState,

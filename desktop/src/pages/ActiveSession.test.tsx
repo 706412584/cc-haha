@@ -72,6 +72,7 @@ import { ActiveSession } from './ActiveSession'
 import { useChatStore } from '../stores/chatStore'
 import { useCLITaskStore } from '../stores/cliTaskStore'
 import { useSessionStore } from '../stores/sessionStore'
+import { useSettingsStore } from '../stores/settingsStore'
 import { useTabStore } from '../stores/tabStore'
 import { useTeamStore } from '../stores/teamStore'
 import { useWorkspacePanelStore } from '../stores/workspacePanelStore'
@@ -90,10 +91,90 @@ afterEach(() => {
   useTabStore.setState({ tabs: [], activeTabId: null })
   useSessionStore.setState({ sessions: [], activeSessionId: null, isLoading: false, error: null })
   useChatStore.setState({ sessions: {} })
+  useSettingsStore.setState({ locale: 'en' })
   useTeamStore.setState({ teams: [], activeTeam: null, memberColors: new Map(), error: null })
   useWorkspacePanelStore.setState(useWorkspacePanelStore.getInitialState(), true)
   useTerminalPanelStore.setState(useTerminalPanelStore.getInitialState(), true)
 })
+
+function renderBackgroundTaskDrawerForLocale(locale: 'jp' | 'kr', sessionId: string) {
+  useSettingsStore.setState({ locale })
+  useSessionStore.setState({
+    sessions: [{
+      id: sessionId,
+      title: 'Localized Background Session',
+      createdAt: '2026-05-07T00:00:00.000Z',
+      modifiedAt: '2026-05-07T00:00:00.000Z',
+      messageCount: 1,
+      projectPath: '/workspace/project',
+      workDir: '/workspace/project',
+      workDirExists: true,
+    }],
+    activeSessionId: sessionId,
+    isLoading: false,
+    error: null,
+  })
+  useTabStore.setState({
+    tabs: [{ sessionId, title: 'Localized Background Session', type: 'session', status: 'idle' }],
+    activeTabId: sessionId,
+  })
+  useChatStore.setState({
+    sessions: {
+      [sessionId]: {
+        messages: [{ id: 'msg-1', type: 'assistant_text', content: 'tasks finished', timestamp: 1 }],
+        backgroundAgentTasks: {
+          'agent-task-1': {
+            taskId: 'agent-task-1',
+            toolUseId: 'agent-tool-1',
+            status: 'completed',
+            taskType: 'local_agent',
+            description: 'Review agent output',
+            startedAt: 1,
+            updatedAt: 2,
+          },
+          'workflow-task-1': {
+            taskId: 'workflow-task-1',
+            toolUseId: 'workflow-tool-1',
+            status: 'completed',
+            taskType: 'local_workflow',
+            description: 'Run workflow',
+            startedAt: 1,
+            updatedAt: 3,
+          },
+          'task-1': {
+            taskId: 'task-1',
+            toolUseId: 'task-tool-1',
+            status: 'completed',
+            taskType: 'other',
+            description: 'Generic task',
+            startedAt: 1,
+            updatedAt: 4,
+          },
+        },
+        chatState: 'idle',
+        connectionState: 'connected',
+        streamingText: '',
+        streamingToolInput: '',
+        activeToolUseId: null,
+        activeToolName: null,
+        activeThinkingId: null,
+        pendingPermission: null,
+        pendingComputerUsePermission: null,
+        tokenUsage: { input_tokens: 0, output_tokens: 0 },
+        streamingResponseChars: 0,
+        elapsedSeconds: 0,
+        statusVerb: '',
+        slashCommands: [],
+        agentTaskNotifications: {},
+        elapsedTimer: null,
+      },
+    },
+  })
+
+  render(<ActiveSession />)
+  fireEvent.click(screen.getByTestId('background-tasks-button'))
+  return screen.getByTestId('background-tasks-drawer')
+}
 
 describe('ActiveSession task polling', () => {
   it('treats a persisted historical session as non-empty before messages finish loading', () => {
@@ -146,6 +227,63 @@ describe('ActiveSession task polling', () => {
 
     expect(screen.getByTestId('message-list')).toBeInTheDocument()
     expect(screen.getByTestId('chat-input')).toHaveAttribute('data-variant', 'default')
+  })
+
+  it('shows the session token badge when usage is cache-only', () => {
+    const sessionId = 'cache-only-token-session'
+
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'Cache Only Token Session',
+        createdAt: '2026-05-07T00:00:00.000Z',
+        modifiedAt: '2026-05-07T00:00:00.000Z',
+        messageCount: 1,
+        projectPath: '/workspace/project',
+        workDir: '/workspace/project',
+        workDirExists: true,
+      }],
+      activeSessionId: sessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Cache Only Token Session', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          messages: [],
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 1200,
+            cache_creation_tokens: 300,
+          },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    render(<ActiveSession />)
+
+    const tokenBadge = screen.getByTitle(/1,500/)
+    expect(tokenBadge).toHaveTextContent('1.5k')
   })
 
   it('shows a loading state for historical sessions while messages are loading', () => {
@@ -323,8 +461,9 @@ describe('ActiveSession task polling', () => {
     expect(screen.getByTestId('message-list')).toBeInTheDocument()
   })
 
-  it('does not render background agent progress as a page-level panel', () => {
+  it('renders an official-style background task entry point and drawer', () => {
     const sessionId = 'background-agent-visible-session'
+    useSettingsStore.setState({ locale: 'en' })
 
     useSessionStore.setState({
       sessions: [{
@@ -371,6 +510,19 @@ describe('ActiveSession task polling', () => {
               startedAt: 1,
               updatedAt: 2,
             },
+            'bash-task-1': {
+              taskId: 'bash-task-1',
+              toolUseId: 'bash-tool-1',
+              status: 'completed',
+              taskType: 'local_bash',
+              description: 'Capture final screenshots',
+              summary: 'Captured 36 screenshots',
+              usage: {
+                durationMs: 120000,
+              },
+              startedAt: 1,
+              updatedAt: 3,
+            },
           },
           chatState: 'tool_executing',
           connectionState: 'connected',
@@ -394,8 +546,686 @@ describe('ActiveSession task polling', () => {
 
     render(<ActiveSession />)
 
-    expect(screen.queryByTestId('background-agent-panel')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Completed in/i)).not.toBeInTheDocument()
+    const taskButton = screen.getByRole('button', { name: '1 running task' })
+    expect(taskButton).toBeInTheDocument()
+    expect(taskButton).toHaveAttribute('aria-expanded', 'false')
     expect(screen.getByTestId('message-list')).toBeInTheDocument()
+
+    fireEvent.click(taskButton)
+
+    expect(taskButton).toHaveAttribute('aria-expanded', 'true')
+    const drawer = screen.getByTestId('background-tasks-drawer')
+    expect(drawer).toHaveAttribute('role', 'dialog')
+    expect(within(drawer).getByRole('heading', { name: 'Background tasks' })).toBeInTheDocument()
+    expect(within(drawer).getByText('Running')).toBeInTheDocument()
+    expect(within(drawer).getByText('Verify the todo app')).toBeInTheDocument()
+    expect(within(drawer).getByText('Agent')).toBeInTheDocument()
+    expect(within(drawer).getByText('Finished')).toBeInTheDocument()
+    expect(within(drawer).getByText('Capture final screenshots')).toBeInTheDocument()
+    expect(within(drawer).getByText('Bash')).toBeInTheDocument()
+    expect(within(drawer).getByRole('button', { name: 'Stop background task: Verify the todo app' })).toBeInTheDocument()
+  })
+
+  it('stops a running background task from the drawer', () => {
+    const sessionId = 'background-agent-stop-session'
+    const stopBackgroundTask = vi.fn()
+    useSettingsStore.setState({ locale: 'en' })
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'Background Agent Session',
+        createdAt: '2026-05-07T00:00:00.000Z',
+        modifiedAt: '2026-05-07T00:00:00.000Z',
+        messageCount: 1,
+        projectPath: '/workspace/project',
+        workDir: '/workspace/project',
+        workDirExists: true,
+      }],
+      activeSessionId: sessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Background Agent Session', type: 'session', status: 'running' }],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          messages: [{ id: 'msg-1', type: 'assistant_text', content: 'task started', timestamp: 1 }],
+          backgroundAgentTasks: {
+            'agent-task-1': {
+              taskId: 'agent-task-1',
+              toolUseId: 'agent-tool-1',
+              status: 'running',
+              taskType: 'local_agent',
+              description: 'Verify the todo app',
+              startedAt: 1,
+              updatedAt: 2,
+            },
+          },
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+      stopBackgroundTask,
+    })
+
+    render(<ActiveSession />)
+    fireEvent.click(screen.getByRole('button', { name: '1 running task' }))
+    fireEvent.click(within(screen.getByTestId('background-tasks-drawer')).getByRole('button', { name: 'Stop background task: Verify the todo app' }))
+
+    expect(stopBackgroundTask).toHaveBeenCalledWith(sessionId, 'agent-task-1')
+  })
+
+  it('localizes the background task entry point', () => {
+    const sessionId = 'background-agent-zh-session'
+    useSettingsStore.setState({ locale: 'zh' })
+
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'Background Agent Session',
+        createdAt: '2026-05-07T00:00:00.000Z',
+        modifiedAt: '2026-05-07T00:00:00.000Z',
+        messageCount: 1,
+        projectPath: '/workspace/project',
+        workDir: '/workspace/project',
+        workDirExists: true,
+      }],
+      activeSessionId: sessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Background Agent Session', type: 'session', status: 'running' }],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          messages: [{ id: 'msg-1', type: 'assistant_text', content: 'task started', timestamp: 1 }],
+          backgroundAgentTasks: {
+            'agent-task-1': {
+              taskId: 'agent-task-1',
+              toolUseId: 'agent-tool-1',
+              status: 'running',
+              taskType: 'local_agent',
+              description: 'Verify the todo app',
+              startedAt: 1,
+              updatedAt: 2,
+            },
+            'agent-task-2': {
+              taskId: 'agent-task-2',
+              toolUseId: 'agent-tool-2',
+              status: 'running',
+              taskType: 'remote_agent',
+              description: 'Review screenshots',
+              startedAt: 1,
+              updatedAt: 2,
+            },
+          },
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    render(<ActiveSession />)
+
+    expect(screen.getByRole('button', { name: '2 个运行中任务' })).toBeInTheDocument()
+  })
+
+  it('localizes background task duration units', () => {
+    const sessionId = 'background-agent-duration-zh-session'
+    useSettingsStore.setState({ locale: 'zh' })
+
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'Background Agent Duration Session',
+        createdAt: '2026-05-07T00:00:00.000Z',
+        modifiedAt: '2026-05-07T00:00:00.000Z',
+        messageCount: 1,
+        projectPath: '/workspace/project',
+        workDir: '/workspace/project',
+        workDirExists: true,
+      }],
+      activeSessionId: sessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Background Agent Duration Session', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          messages: [{ id: 'msg-1', type: 'assistant_text', content: 'task finished', timestamp: 1 }],
+          backgroundAgentTasks: {
+            'agent-task-1': {
+              taskId: 'agent-task-1',
+              toolUseId: 'agent-tool-1',
+              status: 'completed',
+              taskType: 'local_agent',
+              description: 'Review screenshots',
+              usage: {
+                totalTokens: 94300,
+                toolUses: 76,
+                durationMs: 671000,
+              },
+              startedAt: 1,
+              updatedAt: 2,
+            },
+          },
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    render(<ActiveSession />)
+
+    fireEvent.click(screen.getByRole('button', { name: '1 个已完成任务' }))
+
+    expect(within(screen.getByTestId('background-tasks-drawer')).getByText('11 分 11 秒')).toBeInTheDocument()
+  })
+
+  it('renders Japanese background task type labels in the drawer', () => {
+    const drawer = renderBackgroundTaskDrawerForLocale('jp', 'background-agent-jp-label-session')
+
+    expect(within(drawer).getByText('エージェント')).toBeInTheDocument()
+    expect(within(drawer).getByText('ワークフロー')).toBeInTheDocument()
+    expect(within(drawer).getByText('タスク')).toBeInTheDocument()
+  })
+
+  it('renders Korean background task type labels in the drawer', () => {
+    const drawer = renderBackgroundTaskDrawerForLocale('kr', 'background-agent-kr-label-session')
+
+    expect(within(drawer).getByText('에이전트')).toBeInTheDocument()
+    expect(within(drawer).getByText('워크플로')).toBeInTheDocument()
+    expect(within(drawer).getByText('작업')).toBeInTheDocument()
+  })
+
+  it('keeps finished background tasks reachable until cleared', () => {
+    const sessionId = 'background-agent-finished-session'
+    useSettingsStore.setState({ locale: 'en' })
+
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'Finished Background Session',
+        createdAt: '2026-05-07T00:00:00.000Z',
+        modifiedAt: '2026-05-07T00:00:00.000Z',
+        messageCount: 1,
+        projectPath: '/workspace/project',
+        workDir: '/workspace/project',
+        workDirExists: true,
+      }],
+      activeSessionId: sessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Finished Background Session', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          messages: [{ id: 'msg-1', type: 'assistant_text', content: 'task started', timestamp: 1 }],
+          backgroundAgentTasks: {
+            'agent-task-1': {
+              taskId: 'agent-task-1',
+              toolUseId: 'agent-tool-1',
+              status: 'completed',
+              taskType: 'local_agent',
+              description: 'Review screenshots',
+              usage: {
+                totalTokens: 94300,
+                toolUses: 76,
+                durationMs: 671000,
+              },
+              startedAt: 1,
+              updatedAt: 2,
+            },
+          },
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    render(<ActiveSession />)
+
+    const taskButton = screen.getByRole('button', { name: '1 finished task' })
+    fireEvent.click(taskButton)
+
+    const drawer = screen.getByTestId('background-tasks-drawer')
+    expect(within(drawer).getByText('Finished')).toBeInTheDocument()
+    expect(within(drawer).getByText('1')).toBeInTheDocument()
+    expect(within(drawer).getByText('Review screenshots')).toBeInTheDocument()
+
+    fireEvent.click(within(drawer).getByRole('button', { name: 'Clear' }))
+
+    expect(screen.queryByTestId('background-tasks-drawer')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '1 finished task' })).not.toBeInTheDocument()
+  })
+
+  it('does not carry an open background task drawer across sessions', () => {
+    const firstSessionId = 'background-agent-first-session'
+    const secondSessionId = 'background-agent-second-session'
+    useSettingsStore.setState({ locale: 'en' })
+
+    useSessionStore.setState({
+      sessions: [
+        {
+          id: firstSessionId,
+          title: 'First Background Session',
+          createdAt: '2026-05-07T00:00:00.000Z',
+          modifiedAt: '2026-05-07T00:00:00.000Z',
+          messageCount: 1,
+          projectPath: '/workspace/project',
+          workDir: '/workspace/project',
+          workDirExists: true,
+        },
+        {
+          id: secondSessionId,
+          title: 'Second Background Session',
+          createdAt: '2026-05-07T00:00:00.000Z',
+          modifiedAt: '2026-05-07T00:00:00.000Z',
+          messageCount: 1,
+          projectPath: '/workspace/project',
+          workDir: '/workspace/project',
+          workDirExists: true,
+        },
+      ],
+      activeSessionId: firstSessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [
+        { sessionId: firstSessionId, title: 'First Background Session', type: 'session', status: 'running' },
+        { sessionId: secondSessionId, title: 'Second Background Session', type: 'session', status: 'running' },
+      ],
+      activeTabId: firstSessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [firstSessionId]: {
+          messages: [{ id: 'msg-1', type: 'assistant_text', content: 'first', timestamp: 1 }],
+          backgroundAgentTasks: {
+            'agent-task-1': {
+              taskId: 'agent-task-1',
+              status: 'running',
+              taskType: 'local_agent',
+              description: 'First session task',
+              startedAt: 1,
+              updatedAt: 2,
+            },
+          },
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+        [secondSessionId]: {
+          messages: [{ id: 'msg-2', type: 'assistant_text', content: 'second', timestamp: 1 }],
+          backgroundAgentTasks: {
+            'agent-task-2': {
+              taskId: 'agent-task-2',
+              status: 'running',
+              taskType: 'local_agent',
+              description: 'Second session task',
+              startedAt: 1,
+              updatedAt: 2,
+            },
+          },
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    render(<ActiveSession />)
+
+    fireEvent.click(screen.getByRole('button', { name: '1 running task' }))
+    expect(screen.getByTestId('background-tasks-drawer')).toBeInTheDocument()
+
+    act(() => {
+      useTabStore.setState({ activeTabId: secondSessionId })
+    })
+
+    expect(screen.queryByTestId('background-tasks-drawer')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '1 running task' })).toBeInTheDocument()
+  })
+
+  it('keeps cleared finished background tasks dismissed when returning to the same session', () => {
+    const firstSessionId = 'background-finished-first-session'
+    const secondSessionId = 'background-finished-second-session'
+    useSettingsStore.setState({ locale: 'en' })
+
+    useSessionStore.setState({
+      sessions: [
+        {
+          id: firstSessionId,
+          title: 'Finished First Session',
+          createdAt: '2026-05-07T00:00:00.000Z',
+          modifiedAt: '2026-05-07T00:00:00.000Z',
+          messageCount: 1,
+          projectPath: '/workspace/project',
+          workDir: '/workspace/project',
+          workDirExists: true,
+        },
+        {
+          id: secondSessionId,
+          title: 'Second Session',
+          createdAt: '2026-05-07T00:00:00.000Z',
+          modifiedAt: '2026-05-07T00:00:00.000Z',
+          messageCount: 1,
+          projectPath: '/workspace/project',
+          workDir: '/workspace/project',
+          workDirExists: true,
+        },
+      ],
+      activeSessionId: firstSessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [
+        { sessionId: firstSessionId, title: 'Finished First Session', type: 'session', status: 'idle' },
+        { sessionId: secondSessionId, title: 'Second Session', type: 'session', status: 'idle' },
+      ],
+      activeTabId: firstSessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [firstSessionId]: {
+          messages: [{ id: 'msg-1', type: 'assistant_text', content: 'first', timestamp: 1 }],
+          backgroundAgentTasks: {
+            'finished-agent-task': {
+              taskId: 'finished-agent-task',
+              status: 'completed',
+              taskType: 'local_agent',
+              description: 'Finished review',
+              startedAt: 1,
+              updatedAt: 2,
+            },
+          },
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+        [secondSessionId]: {
+          messages: [{ id: 'msg-2', type: 'assistant_text', content: 'second', timestamp: 1 }],
+          backgroundAgentTasks: {},
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    render(<ActiveSession />)
+
+    fireEvent.click(screen.getByRole('button', { name: '1 finished task' }))
+    fireEvent.click(within(screen.getByTestId('background-tasks-drawer')).getByRole('button', { name: 'Clear' }))
+
+    act(() => {
+      useTabStore.setState({ activeTabId: secondSessionId })
+    })
+    act(() => {
+      useTabStore.setState({ activeTabId: firstSessionId })
+    })
+
+    expect(screen.queryByRole('button', { name: '1 finished task' })).not.toBeInTheDocument()
+  })
+
+  it('shows a resumed background task after clearing an earlier finish for the same task id', () => {
+    const sessionId = 'background-finished-resume-session'
+    useSettingsStore.setState({ locale: 'en' })
+
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'Finished Resume Session',
+        createdAt: '2026-05-07T00:00:00.000Z',
+        modifiedAt: '2026-05-07T00:00:00.000Z',
+        messageCount: 1,
+        projectPath: '/workspace/project',
+        workDir: '/workspace/project',
+        workDirExists: true,
+      }],
+      activeSessionId: sessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Finished Resume Session', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          messages: [{ id: 'msg-1', type: 'assistant_text', content: 'first', timestamp: 1 }],
+          backgroundAgentTasks: {
+            'reused-agent-task': {
+              taskId: 'reused-agent-task',
+              status: 'completed',
+              taskType: 'local_agent',
+              description: 'First finished review',
+              startedAt: 1,
+              updatedAt: 2,
+            },
+          },
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    render(<ActiveSession />)
+
+    fireEvent.click(screen.getByRole('button', { name: '1 finished task' }))
+    fireEvent.click(within(screen.getByTestId('background-tasks-drawer')).getByRole('button', { name: 'Clear' }))
+    expect(screen.queryByRole('button', { name: '1 finished task' })).not.toBeInTheDocument()
+
+    act(() => {
+      useChatStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [sessionId]: {
+            ...state.sessions[sessionId]!,
+            backgroundAgentTasks: {
+              'reused-agent-task': {
+                taskId: 'reused-agent-task',
+                status: 'completed',
+                taskType: 'local_agent',
+                description: 'Duplicate finished review',
+                startedAt: 1,
+                updatedAt: 3,
+              },
+            },
+          },
+        },
+      }))
+    })
+
+    expect(screen.queryByRole('button', { name: '1 finished task' })).not.toBeInTheDocument()
+
+    act(() => {
+      useChatStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [sessionId]: {
+            ...state.sessions[sessionId]!,
+            backgroundAgentTasks: {
+              'reused-agent-task': {
+                taskId: 'reused-agent-task',
+                status: 'running',
+                taskType: 'local_agent',
+                description: 'Resumed review',
+                startedAt: 4,
+                updatedAt: 4,
+              },
+            },
+          },
+        },
+      }))
+    })
+
+    expect(screen.getByRole('button', { name: '1 running task' })).toBeInTheDocument()
+
+    act(() => {
+      useChatStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [sessionId]: {
+            ...state.sessions[sessionId]!,
+            backgroundAgentTasks: {
+              'reused-agent-task': {
+                taskId: 'reused-agent-task',
+                status: 'completed',
+                taskType: 'local_agent',
+                description: 'Second finished review',
+                startedAt: 4,
+                updatedAt: 5,
+              },
+            },
+          },
+        },
+      }))
+    })
+
+    expect(screen.getByRole('button', { name: '1 finished task' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '1 finished task' }))
+    expect(within(screen.getByTestId('background-tasks-drawer')).getByText('Second finished review')).toBeInTheDocument()
   })
 
   it('keeps the session header active while a background task is still running after the turn completes', () => {
@@ -678,6 +1508,34 @@ describe('ActiveSession task polling', () => {
     })
 
     expect(useWorkspacePanelStore.getState().width).toBe(WORKSPACE_PANEL_DEFAULT_WIDTH + 32)
+
+    vi.spyOn(workbenchPanel, 'getBoundingClientRect').mockReturnValue({
+      x: 0,
+      y: 0,
+      width: 558,
+      height: 720,
+      top: 0,
+      right: 558,
+      bottom: 720,
+      left: 0,
+      toJSON: () => ({}),
+    })
+
+    act(() => {
+      const pointerDown = createEvent.pointerDown(resizeHandle)
+      Object.defineProperty(pointerDown, 'button', { value: 0 })
+      Object.defineProperty(pointerDown, 'clientX', { value: 100 })
+      fireEvent(resizeHandle, pointerDown)
+    })
+
+    act(() => {
+      const pointerMove = new Event('pointermove')
+      Object.defineProperty(pointerMove, 'clientX', { value: 132 })
+      window.dispatchEvent(pointerMove)
+      window.dispatchEvent(new Event('pointerup'))
+    })
+
+    expect(useWorkspacePanelStore.getState().width).toBe(526)
   })
 
   it('does not render the workspace panel when closed or for member sessions', () => {

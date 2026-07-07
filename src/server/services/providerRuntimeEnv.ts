@@ -27,6 +27,8 @@ export const MANAGED_PROVIDER_ENV_KEYS = [
   'ANTHROPIC_BASE_URL',
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
+  'ENABLE_TOOL_SEARCH',
+  'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS',
   'ANTHROPIC_MODEL',
   'ANTHROPIC_DEFAULT_HAIKU_MODEL',
   'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES',
@@ -86,6 +88,31 @@ function isSavedProvider(value: unknown): value is SavedProvider {
   )
 }
 
+
+function normalizeToolSearchEnabled(value: unknown): boolean {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return value !== 0
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (['0', 'false', 'off', 'no'].includes(normalized)) return false
+    if (['1', 'true', 'on', 'yes', 'auto'].includes(normalized) || normalized.startsWith('auto:')) {
+      return true
+    }
+  }
+  return true
+}
+
+function normalizeDisableExperimentalBetas(value: unknown): boolean {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return value !== 0
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (['0', 'false', 'off', 'no'].includes(normalized)) return false
+    if (['1', 'true', 'on', 'yes'].includes(normalized)) return true
+  }
+  return false
+}
+
 export function normalizeModelMapping(models: SavedProvider['models']): SavedProvider['models'] {
   const main = models.main.trim()
   return {
@@ -128,7 +155,11 @@ function applyModel1mSupportMapping(
 }
 
 export function normalizeSavedProvider(provider: SavedProvider): SavedProvider {
-  const { model1mSupport: rawModel1mSupport, ...rest } = provider
+  const {
+    disableExperimentalBetas: rawDisableExperimentalBetas,
+    model1mSupport: rawModel1mSupport,
+    ...rest
+  } = provider
   const rawProvider = provider as SavedProvider & Record<string, unknown>
   const model1mSupport = normalizeModel1mSupport(rawModel1mSupport)
   return {
@@ -136,6 +167,8 @@ export function normalizeSavedProvider(provider: SavedProvider): SavedProvider {
     apiFormat: provider.apiFormat ?? 'anthropic',
     runtimeKind: provider.runtimeKind ?? 'anthropic_compatible',
     models: normalizeModelMapping(provider.models),
+    toolSearchEnabled: normalizeToolSearchEnabled(rawProvider.toolSearchEnabled),
+    ...(normalizeDisableExperimentalBetas(rawDisableExperimentalBetas) ? { disableExperimentalBetas: true } : {}),
     ...(model1mSupport !== undefined ? { model1mSupport } : {}),
   }
 }
@@ -338,6 +371,9 @@ export function buildProviderManagedEnv(
     ...(provider.thinkingIncompatible === true && {
       CLAUDE_CODE_DISABLE_THINKING: '1',
     }),
+    ...(provider.disableExperimentalBetas === true && {
+      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
+    }),
     ANTHROPIC_BASE_URL: baseUrl,
     ...buildProviderAuthEnv(provider, presetDefaultEnv, needsProxy),
     ANTHROPIC_MODEL: runtimeModels.main,
@@ -369,6 +405,23 @@ export function readActiveProviderManagedEnv(
     })
   } catch {
     return null
+  }
+}
+
+export function activeProviderNeedsProxy(configDir: string): boolean {
+  try {
+    const raw = fs.readFileSync(path.join(configDir, 'cc-haha', 'providers.json'), 'utf-8')
+    const index = normalizeProvidersIndex(JSON.parse(raw))
+    if (!index?.activeId || isOpenAIOfficialProviderId(index.activeId)) {
+      return false
+    }
+
+    const provider = index.providers.find((entry) => entry.id === index.activeId)
+    if (!provider) return false
+
+    return (provider.apiFormat ?? 'anthropic') !== 'anthropic'
+  } catch {
+    return false
   }
 }
 

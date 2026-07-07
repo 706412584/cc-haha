@@ -5,6 +5,11 @@ import { filesystemApi } from '../../api/filesystem'
 import { useTranslation } from '../../i18n'
 import { useMobileViewport } from '../../hooks/useMobileViewport'
 import { getDesktopHost } from '../../lib/desktopHost'
+import {
+  getCachedRecentProjects,
+  invalidateRecentProjectsCache,
+  setCachedRecentProjects,
+} from '../../lib/recentProjectsCache'
 import { MobileBottomSheet } from './MobileBottomSheet'
 
 type Props = {
@@ -16,10 +21,6 @@ type Props = {
 
 type DirEntry = { name: string; path: string; isDirectory: boolean }
 
-// Module-level cache for recent projects (shared across instances, survives re-renders)
-let cachedProjects: RecentProject[] | null = null
-let cacheTimestamp = 0
-const CACHE_TTL = 30_000 // 30s
 const DESKTOP_WORKTREE_MARKER = '/.claude/worktrees/'
 const DROPDOWN_WIDTH = 400
 const DROPDOWN_VIEWPORT_MARGIN = 12
@@ -98,15 +99,15 @@ export function DirectoryPicker({ value, onChange, variant = 'chip', isGitProjec
   useEffect(() => {
     if (!isOpen || mode !== 'recent') return
     // Use cache if fresh
-    if (cachedProjects && Date.now() - cacheTimestamp < CACHE_TTL) {
+    const cachedProjects = getCachedRecentProjects()
+    if (cachedProjects) {
       setProjects(cachedProjects)
       return
     }
     setLoading(true)
     sessionsApi.getRecentProjects()
       .then(({ projects: p }) => {
-        cachedProjects = p
-        cacheTimestamp = Date.now()
+        setCachedRecentProjects(p)
         setProjects(p)
       })
       .catch(() => setProjects([]))
@@ -129,7 +130,7 @@ export function DirectoryPicker({ value, onChange, variant = 'chip', isGitProjec
     setIsOpen(false)
     setMode('recent')
     // Invalidate cache so next open reflects the new selection
-    cachedProjects = null
+    invalidateRecentProjectsCache()
   }
 
   const handleChooseFolder = async () => {

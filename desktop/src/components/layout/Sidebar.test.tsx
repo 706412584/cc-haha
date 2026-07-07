@@ -121,6 +121,7 @@ import { useSessionStore } from '../../stores/sessionStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useUIStore } from '../../stores/uiStore'
 import type { SessionListItem } from '../../types/session'
+import type { PerSessionState } from '../../stores/chatStore'
 
 const PROJECT_ORDER_STORAGE_KEY = 'cc-haha-sidebar-project-order'
 const PROJECT_PINNED_STORAGE_KEY = 'cc-haha-sidebar-pinned-projects'
@@ -144,6 +145,33 @@ function makeSession(
     projectRoot,
     workDir: projectRoot,
     workDirExists: true,
+  }
+}
+
+function makeChatSessionState(overrides: Partial<PerSessionState> = {}): PerSessionState {
+  return {
+    messages: [],
+    chatState: 'idle',
+    connectionState: 'connected',
+    streamingText: '',
+    streamingToolInput: '',
+    activeToolUseId: null,
+    activeToolName: null,
+    activeThinkingId: null,
+    pendingPermission: null,
+    pendingComputerUsePermission: null,
+    tokenUsage: { input_tokens: 0, output_tokens: 0 },
+    streamingResponseChars: 0,
+    elapsedSeconds: 0,
+    statusVerb: '',
+    slashCommands: [],
+    agentTaskNotifications: {},
+    backgroundAgentTasks: {},
+    activeGoal: null,
+    elapsedTimer: null,
+    composerPrefill: null,
+    composerDraft: null,
+    ...overrides,
   }
 }
 
@@ -300,6 +328,48 @@ describe('Sidebar', () => {
 
     expect(screen.getByRole('button', { name: /Alpha hidden/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Collapse display' })).toBeInTheDocument()
+  })
+
+  it('lets a manual session refresh supersede a stuck automatic refresh', async () => {
+    fetchSessions.mockReturnValue(new Promise(() => {}))
+
+    render(<Sidebar />)
+
+    await waitFor(() => expect(fetchSessions).toHaveBeenCalledTimes(1))
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh sessions' }))
+
+    await waitFor(() => expect(fetchSessions).toHaveBeenCalledTimes(2))
+  })
+
+  it('keeps the session refresh control usable when a background refresh is still loading existing sessions', async () => {
+    useSessionStore.setState({
+      sessions: [
+        makeSession('session-loaded', 'Loaded session', '/workspace/alpha', '2026-05-15T10:00:00.000Z'),
+      ],
+      isLoading: true,
+    })
+
+    render(<Sidebar />)
+
+    const refreshButton = screen.getByRole('button', { name: 'Refresh sessions' })
+    expect(refreshButton).not.toBeDisabled()
+    expect(refreshButton.querySelector('svg')).not.toHaveClass('animate-spin')
+
+    fireEvent.click(refreshButton)
+    await waitFor(() => expect(fetchSessions).toHaveBeenCalled())
+  })
+
+  it('exposes the full session title as a row tooltip when the label is truncated', () => {
+    const longTitle = '这是一个非常非常长的会话标题，用来验证侧边栏截断后仍然可以通过气泡查看完整内容'
+    useSessionStore.setState({
+      sessions: [
+        makeSession('session-long-title', longTitle, '/workspace/alpha', '2026-05-15T10:00:00.000Z'),
+      ],
+    })
+
+    render(<Sidebar />)
+
+    expect(screen.getByRole('button', { name: new RegExp(longTitle) })).toHaveAttribute('title', longTitle)
   })
 
   it('reorders project groups by dragging project headers while preserving expanded state', async () => {
@@ -851,15 +921,34 @@ describe('Sidebar', () => {
           ...makeSession('running-worktree', 'Running Worktree', '/workspace/repo/.claude/worktrees/desktop-main-12345678', '2026-05-19T07:00:00.000Z'),
           projectRoot: '/workspace/repo',
         },
+        makeSession('background-running', 'Background Running', '/workspace/repo', '2026-05-19T10:30:00.000Z'),
         makeSession('idle-source', 'Idle Source', '/workspace/repo', '2026-05-19T11:40:00.000Z'),
       ],
     })
     useTabStore.setState({
       tabs: [
         { sessionId: 'running-worktree', title: 'Running Worktree', type: 'session', status: 'running' },
+        { sessionId: 'background-running', title: 'Background Running', type: 'session', status: 'idle' },
         { sessionId: 'idle-source', title: 'Idle Source', type: 'session', status: 'idle' },
       ],
       activeTabId: 'running-worktree',
+    })
+    useChatStore.setState({
+      sessions: {
+        'background-running': makeChatSessionState({
+          backgroundAgentTasks: {
+            'agent-task-1': {
+              taskId: 'agent-task-1',
+              toolUseId: 'agent-tool-1',
+              status: 'running',
+              taskType: 'local_agent',
+              description: 'Review screenshots',
+              startedAt: 1,
+              updatedAt: 2,
+            },
+          },
+        }),
+      },
     })
 
     render(<Sidebar />)
@@ -868,6 +957,9 @@ describe('Sidebar', () => {
     expect(within(runningRow).getByLabelText('Session running')).toBeInTheDocument()
     expect(within(runningRow).getByText('worktree')).toHaveClass('sr-only')
     expect(within(runningRow).getByText('5h ago')).toBeInTheDocument()
+
+    const backgroundRunningRow = screen.getByRole('button', { name: /Background Running/ })
+    expect(within(backgroundRunningRow).getByLabelText('Session running')).toBeInTheDocument()
 
     const idleRow = screen.getByRole('button', { name: /Idle Source/ })
     expect(within(idleRow).queryByLabelText('Session running')).not.toBeInTheDocument()

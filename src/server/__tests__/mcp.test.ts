@@ -199,6 +199,47 @@ describe('MCP API', () => {
     expect(connectSpy).not.toHaveBeenCalled()
   })
 
+  it('allows unicode letters and numbers in MCP server names while rejecting separators', async () => {
+    for (const name of ['某某服务器', 'context七', 'テストサーバー', '서버1', 'café-tools']) {
+      const create = makeRequest('POST', '/api/mcp', {
+        cwd: projectRoot,
+        name,
+        scope: 'local',
+        config: {
+          type: 'stdio',
+          command: 'npx',
+          args: [`${name}-mcp`],
+          env: {},
+        },
+      })
+
+      const createRes = await handleMcpApi(create.req, create.url, create.segments)
+      expect(createRes.status).toBe(201)
+      const body = await createRes.json()
+      expect(body.server.name).toBe(name)
+    }
+
+    for (const name of ['bad name', 'bad/name', 'bad.name']) {
+      const create = makeRequest('POST', '/api/mcp', {
+        cwd: projectRoot,
+        name,
+        scope: 'local',
+        config: {
+          type: 'stdio',
+          command: 'npx',
+          args: ['bad-mcp'],
+          env: {},
+        },
+      })
+
+      const createRes = await handleMcpApi(create.req, create.url, create.segments)
+      expect(createRes.status).toBe(400)
+      await expect(createRes.json()).resolves.toMatchObject({
+        message: expect.stringContaining(`Invalid name ${name}`),
+      })
+    }
+  })
+
   it('lists project paths that contain user-private MCP servers', async () => {
     const previousNodeEnv = process.env.NODE_ENV
     const projectB = path.join(tmpDir, 'project-b')

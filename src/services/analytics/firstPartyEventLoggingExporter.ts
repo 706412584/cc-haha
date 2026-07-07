@@ -439,7 +439,15 @@ export class FirstPartyEventLoggingExporter implements LogRecordExporter {
       ? ` (${this.lastExportErrorContext})`
       : ''
     const message = `1P event logging: ${events.length} events failed to export${context}`
+    if (this.lastExportErrorContext && this.isPermanentAuthFailureContext(this.lastExportErrorContext)) {
+      logForDebugging(message)
+      return
+    }
     logError(new Error(message))
+  }
+
+  private isPermanentAuthFailureContext(context: string): boolean {
+    return /(?:^|, )status=(?:401|403)(?:,|$)/.test(context)
   }
 
   private scheduleBackoffRetry(): void {

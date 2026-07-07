@@ -444,6 +444,17 @@ export function extractAgentToolActivities(
   return []
 }
 
+export function emitAgentToolActivitiesForMessage(
+  message: MessageType,
+  taskId: string,
+  parentToolUseId: string | undefined,
+): void {
+  if (!parentToolUseId) return
+  for (const activity of extractAgentToolActivities(message)) {
+    emitAgentToolActivity(taskId, parentToolUseId, activity)
+  }
+}
+
 export function emitTaskProgress(
   tracker: ProgressTracker,
   taskId: string,
@@ -665,12 +676,11 @@ export async function runAsyncAgentLifecycle({
       // agents are detached (void runAsyncAgentLifecycle), so we route through
       // the SDK event queue → stdout → ws handler, tagged with the parent
       // Agent tool_use_id so the UI groups it under the right card.
-      const parentToolUseId = toolUseContext.toolUseId
-      if (parentToolUseId) {
-        for (const activity of extractAgentToolActivities(message)) {
-          emitAgentToolActivity(taskId, parentToolUseId, activity)
-        }
-      }
+      emitAgentToolActivitiesForMessage(
+        message,
+        taskId,
+        toolUseContext.toolUseId,
+      )
       const lastToolName = getLastToolUseName(message)
       if (message.type === 'assistant') {
         emitTaskProgress(

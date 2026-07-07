@@ -266,6 +266,15 @@ export function createDumpPromptsFetch(
           })(),
         }
       : init
+    const traceRequest = timestamp
+      ? new Request(input, requestInit)
+      : undefined
+    const traceRequestUrl = traceRequest?.url ?? requestUrl
+    const traceRequestMethod = traceRequest?.method ?? init?.method ?? 'POST'
+    const traceRequestHeaders = (traceRequest?.headers ?? requestInit?.headers) as
+      | Headers
+      | Record<string, string>
+      | undefined
 
     const traceModel = extractModelFromRequestBody(traceRequestBody)
     const traceCallId = timestamp && traceEnabled && !isProviderProxyTrace
@@ -283,9 +292,9 @@ export function createDumpPromptsFetch(
         status: 'pending',
         startedAt: timestamp,
         request: {
-          method: init?.method ?? 'POST',
-          url: requestUrl,
-          headers: requestInit?.headers as Headers | Record<string, string> | undefined,
+          method: traceRequestMethod,
+          url: traceRequestUrl,
+          headers: traceRequestHeaders,
           bodySnapshot: createRequestPendingSnapshot(traceRequestBody),
         },
         metadata: {
@@ -303,7 +312,7 @@ export function createDumpPromptsFetch(
         severity: 'info',
         title: 'API call started',
         metadata: {
-          url: requestUrl,
+          url: traceRequestUrl,
         },
       })
     }
@@ -328,9 +337,9 @@ export function createDumpPromptsFetch(
           completedAt,
           durationMs: Date.now() - traceStartedAtMs,
           request: {
-            method: init?.method ?? 'POST',
-            url: requestUrl,
-            headers: requestInit?.headers as Headers | Record<string, string> | undefined,
+            method: traceRequestMethod,
+            url: traceRequestUrl,
+            headers: traceRequestHeaders,
             bodySnapshot: createRequestPendingSnapshot(traceRequestBody),
           },
           error: err,
@@ -351,7 +360,7 @@ export function createDumpPromptsFetch(
           title: 'API call failed',
           message: err instanceof Error ? err.message : String(err),
           metadata: {
-            url: requestUrl,
+            url: traceRequestUrl,
             ...(aborted ? { aborted: true } : {}),
           },
         })
@@ -372,9 +381,9 @@ export function createDumpPromptsFetch(
           model: traceModel,
           startedAt: timestamp,
           request: {
-            method: init?.method ?? 'POST',
-            url: requestUrl,
-            headers: requestInit?.headers as Headers | Record<string, string> | undefined,
+            method: traceRequestMethod,
+            url: traceRequestUrl,
+            headers: traceRequestHeaders,
             body: traceRequestBody,
           },
         }
@@ -420,7 +429,7 @@ export function createDumpPromptsFetch(
             title: 'API call completed',
             metadata: {
               status: response.status,
-              url: requestUrl,
+              url: traceRequestUrl,
             },
           })
           return
@@ -455,7 +464,7 @@ export function createDumpPromptsFetch(
             message: abortError.message,
             metadata: {
               status: response.status,
-              url: requestUrl,
+              url: traceRequestUrl,
               durationMs,
               aborted: true,
             },
@@ -472,7 +481,7 @@ export function createDumpPromptsFetch(
           message: captureFailure instanceof Error ? captureFailure.message : String(captureFailure),
           metadata: {
             status: response.status,
-            url: requestUrl,
+            url: traceRequestUrl,
           },
         })
         // The clone shares the upstream source with the SDK's branch, so a

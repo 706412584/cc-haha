@@ -2769,6 +2769,7 @@ async function* executeHooks({
       )
       yield {
         preventContinuation: true,
+        blockingError: result.blockingError,
         stopReason: result.stopReason,
       }
     }

@@ -20,6 +20,7 @@ describe('initTaskOutputAsSymlink', () => {
       import { mock } from 'bun:test'
 
       let unlinkCalled = false
+      let logErrorCalled = false
 
       mock.module('fs/promises', () => ({
         mkdir: async () => {},
@@ -46,8 +47,14 @@ describe('initTaskOutputAsSymlink', () => {
         tailFile: async () => '',
       }))
 
+      mock.module('./src/utils/debug.js', () => ({
+        logForDebugging: () => {},
+      }))
+
       mock.module('./src/utils/log.js', () => ({
-        logError: () => {},
+        logError: () => {
+          logErrorCalled = true
+        },
       }))
 
       mock.module('./src/utils/permissions/filesystem.js', () => ({
@@ -62,6 +69,9 @@ describe('initTaskOutputAsSymlink', () => {
 
       if (unlinkCalled) {
         throw new Error('unlink was called for non-EEXIST symlink failure')
+      }
+      if (logErrorCalled) {
+        throw new Error('expected EPERM symlink fallback not to call logError')
       }
     `)
 

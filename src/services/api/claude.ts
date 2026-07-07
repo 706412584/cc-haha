@@ -214,6 +214,7 @@ import {
   startSessionActivity,
   stopSessionActivity,
 } from "../../utils/sessionActivity.js";
+import { shouldTriggerNonStreamingFallbackForEmptyStream } from "./streamFallback.js";
 import { jsonStringify } from "../../utils/slowOperations.js";
 import {
   isBetaTracingEnabled,
@@ -448,31 +449,57 @@ function should1hCacheTTL(querySource?: QuerySource): boolean {
  * Configure effort parameters for API request.
  *
  */
-function configureEffortParams(
+export function configureEffortParams(
   effortValue: EffortValue | undefined,
   outputConfig: BetaOutputConfig,
   extraBodyParams: Record<string, unknown>,
   betas: string[],
   model: string,
 ): void {
-  if (!modelSupportsEffort(model) || "effort" in outputConfig) {
-    return;
+  if (
+    !modelSupportsEffort(model) ||
+    'effort' in outputConfig ||
+    shouldSuppressEffortOutputConfig()
+  ) {
+    return
   }
 
   if (effortValue === undefined) {
-    betas.push(EFFORT_BETA_HEADER);
-  } else if (typeof effortValue === "string") {
+    outputConfig.effort = 'high'
+    betas.push(EFFORT_BETA_HEADER)
+  } else if (typeof effortValue === 'string') {
     // Send string effort level as is
-    outputConfig.effort = effortValue;
-    betas.push(EFFORT_BETA_HEADER);
-  } else if (process.env.USER_TYPE === "ant") {
+    outputConfig.effort = effortValue
+    betas.push(EFFORT_BETA_HEADER)
+  } else if (process.env.USER_TYPE === 'ant') {
     // Numeric effort override - ant-only (uses anthropic_internal)
     const existingInternal =
-      (extraBodyParams.anthropic_internal as Record<string, unknown>) || {};
+      (extraBodyParams.anthropic_internal as Record<string, unknown>) || {}
     extraBodyParams.anthropic_internal = {
       ...existingInternal,
       effort_override: effortValue,
-    };
+    }
+  }
+}
+
+function shouldSuppressEffortOutputConfig(): boolean {
+  if (!isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS)) {
+    return false
+  }
+
+  const baseUrl = process.env.ANTHROPIC_BASE_URL ?? ''
+  try {
+    const url = new URL(baseUrl)
+    const proxyPath = url.pathname.replace(/\/+$/, '')
+    const isLocalProxy =
+      (url.hostname === '127.0.0.1' || url.hostname === 'localhost') &&
+      (
+        proxyPath === '/proxy' ||
+        proxyPath.startsWith('/proxy/providers/')
+      )
+    return !isLocalProxy
+  } catch {
+    return true
   }
 }
 
@@ -2655,11 +2682,22 @@ async function* queryModel(
       // Note: We must check stopReason to avoid false positives. For example, with
       // structured output (--json-schema), the model calls a StructuredOutput tool
       // on turn 1, then on turn 2 responds with end_turn and no content blocks.
-      // That's a legitimate empty response, not an incomplete stream.
-      if (!partialMessage || (newMessages.length === 0 && !stopReason)) {
+      // That's a legitimate empty response, not an incomplete stream. However,
+      // stop_reason=tool_use with no completed tool block is incomplete: some
+      // OpenAI-compatible streams send only finish_reason=tool_calls, and we
+      // need the non-streaming fallback to recover the full tool call.
+      if (
+        shouldTriggerNonStreamingFallbackForEmptyStream({
+          hasMessageStart: partialMessage !== undefined,
+          assistantMessageCount: newMessages.length,
+          stopReason,
+        })
+      ) {
         logForDebugging(
           !partialMessage
             ? "Stream completed without receiving message_start event - triggering non-streaming fallback"
+            : stopReason === "tool_use"
+              ? "Stream completed with tool_use stop but no completed tool block - triggering non-streaming fallback"
             : "Stream completed with message_start but no content blocks completed - triggering non-streaming fallback",
           { level: "error" },
         );

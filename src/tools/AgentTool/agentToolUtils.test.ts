@@ -16,7 +16,11 @@ import {
   resetCommandQueue,
 } from '../../utils/messageQueueManager.js'
 import { createAssistantMessage, createUserMessage } from '../../utils/messages.js'
-import { extractAgentToolActivities, runAsyncAgentLifecycle } from './agentToolUtils.js'
+import {
+  emitAgentToolActivitiesForMessage,
+  extractAgentToolActivities,
+  runAsyncAgentLifecycle,
+} from './agentToolUtils.js'
 import { SYNTHETIC_OUTPUT_TOOL_NAME } from '../SyntheticOutputTool/SyntheticOutputTool.js'
 
 describe('runAsyncAgentLifecycle', () => {
@@ -169,6 +173,9 @@ describe('runAsyncAgentLifecycle', () => {
     expect(String(getCommandQueue()[0]?.value)).toContain(
       '<status>completed</status>',
     )
+    expect(String(getCommandQueue()[0]?.value)).toContain(
+      '<task-type>local_agent</task-type>',
+    )
     expect(String(getCommandQueue()[0]?.value)).toContain('Review complete.')
   })
 
@@ -317,5 +324,51 @@ describe('extractAgentToolActivities', () => {
       content: [{ type: 'text', text: 'no tools here' }],
     }) as Message
     expect(extractAgentToolActivities(message)).toEqual([])
+  })
+})
+
+describe('emitAgentToolActivitiesForMessage', () => {
+  test('emits child tool activity for backgrounded sync agents', () => {
+    const emitSpy = spyOn(sdkEventQueue, 'emitAgentToolActivity').mockImplementation(
+      () => {},
+    )
+    try {
+      const message = createAssistantMessage({
+        content: [
+          { type: 'tool_use', id: 'toolu_child', name: 'Bash', input: { command: 'pwd' } },
+        ],
+      }) as Message
+
+      emitAgentToolActivitiesForMessage(message, 'agent-foregrounded', 'toolu_parent')
+
+      expect(emitSpy.mock.calls).toEqual([
+        [
+          'agent-foregrounded',
+          'toolu_parent',
+          { kind: 'tool_use', tool_name: 'Bash', tool_use_id: 'toolu_child', input: { command: 'pwd' } },
+        ],
+      ])
+    } finally {
+      emitSpy.mockRestore()
+    }
+  })
+
+  test('does nothing without a parent tool use id', () => {
+    const emitSpy = spyOn(sdkEventQueue, 'emitAgentToolActivity').mockImplementation(
+      () => {},
+    )
+    try {
+      const message = createAssistantMessage({
+        content: [
+          { type: 'tool_use', id: 'toolu_child', name: 'Bash', input: { command: 'pwd' } },
+        ],
+      }) as Message
+
+      emitAgentToolActivitiesForMessage(message, 'agent-foregrounded', undefined)
+
+      expect(emitSpy).not.toHaveBeenCalled()
+    } finally {
+      emitSpy.mockRestore()
+    }
   })
 })

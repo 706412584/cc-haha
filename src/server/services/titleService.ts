@@ -7,6 +7,7 @@
  */
 
 import { ProviderService } from './providerService.js'
+import { getPresetAuthStrategy } from './providerRuntimeEnv.js'
 import { sessionService } from './sessionService.js'
 import { hahaOpenAIOAuthService } from './hahaOpenAIOAuthService.js'
 import { isOpenAIOfficialProviderId } from './openaiOfficialProvider.js'
@@ -16,6 +17,7 @@ import { anthropicToOpenaiResponses } from '../proxy/transform/anthropicToOpenai
 import { openaiResponsesStreamToAnthropicResponse } from '../proxy/streaming/openaiResponsesStreamToAnthropicResponse.js'
 import { cleanSessionTitleSource, hasSessionTitleMarkup } from '../../utils/sessionTitleText.js'
 import { extractConversationText, SESSION_TITLE_PROMPT } from '../../utils/sessionTitle.js'
+import type { ProviderAuthStrategy } from '../types/provider.js'
 
 const TITLE_MAX_LEN = 50
 const TITLE_MAX_OUTPUT_TOKENS = 100
@@ -102,6 +104,36 @@ function buildTitleUserPrompt(
   ].join('\n')
 }
 
+function buildAnthropicTitleRequestHeaders(
+  apiKey: string,
+  authStrategy: ProviderAuthStrategy,
+): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'anthropic-version': '2023-06-01',
+  }
+
+  switch (authStrategy) {
+    case 'api_key':
+      headers['x-api-key'] = apiKey
+      break
+    case 'auth_token':
+    case 'auth_token_empty_api_key':
+      headers.Authorization = `Bearer ${apiKey}`
+      break
+    case 'dual_same_token':
+      headers['x-api-key'] = apiKey
+      headers.Authorization = `Bearer ${apiKey}`
+      break
+    case 'dual_dummy':
+      headers['x-api-key'] = 'dummy'
+      headers.Authorization = 'Bearer dummy'
+      break
+  }
+
+  return headers
+}
+
 /**
  * Quick placeholder title derived from user message text.
  * Returns first sentence, collapsed to single line, max 50 chars.
@@ -157,11 +189,8 @@ export async function generateTitle(
 
     const model = resolvedProvider.models.haiku || resolvedProvider.models.main
     const url = `${resolvedProvider.baseUrl.replace(/\/+$/, '')}/v1/messages`
-    const requestHeaders = {
-      'Content-Type': 'application/json',
-      'x-api-key': resolvedProvider.apiKey,
-      'anthropic-version': '2023-06-01',
-    }
+    const authStrategy = resolvedProvider.authStrategy ?? getPresetAuthStrategy(resolvedProvider.presetId)
+    const requestHeaders = buildAnthropicTitleRequestHeaders(resolvedProvider.apiKey, authStrategy)
     const requestBody = {
       model,
       max_tokens: TITLE_MAX_OUTPUT_TOKENS,

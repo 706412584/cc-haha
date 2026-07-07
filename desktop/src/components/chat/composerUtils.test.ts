@@ -180,6 +180,10 @@ describe('composerUtils', () => {
     expect(resolveSlashUiAction('status')).toEqual({ type: 'panel', command: 'status' })
   })
 
+  it('routes /model to the local model selector action', () => {
+    expect(resolveSlashUiAction('model')).toEqual({ type: 'model' })
+  })
+
   it('falls back to the static English description when a translation key is missing', () => {
     // Simulate an i18n t() function that returns the raw key for missing entries
     // (this is what the real translate() does via zh[key] ?? en[key] ?? key).

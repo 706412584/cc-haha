@@ -2,7 +2,7 @@
  * Unit tests for TaskService and Tasks API
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test'
+import { describe, it, expect, beforeEach, afterEach, spyOn } from 'bun:test'
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import * as os from 'os'
@@ -112,6 +112,38 @@ describe('TaskService', () => {
     const svc = new TaskService()
     const tasks = await svc.listTasks()
     expect(tasks).toEqual([])
+  })
+
+  it('should list all tasks without reading task lists twice', async () => {
+    const firstListDir = path.join(tmpDir, 'tasks', 'first-list')
+    const secondListDir = path.join(tmpDir, 'tasks', 'second-list')
+    await fs.mkdir(firstListDir, { recursive: true })
+    await fs.mkdir(secondListDir, { recursive: true })
+
+    await fs.writeFile(path.join(firstListDir, '1.json'), JSON.stringify(taskFixture({
+      id: '1',
+      subject: 'first task',
+    })))
+    await fs.writeFile(path.join(secondListDir, '2.json'), JSON.stringify(taskFixture({
+      id: '2',
+      subject: 'second task',
+    })))
+
+    const originalReadFile = fs.readFile
+    let readCount = 0
+    const readFileSpy = spyOn(fs, 'readFile').mockImplementation((...args) => {
+      readCount++
+      return originalReadFile(...args)
+    })
+
+    try {
+      const svc = new TaskService()
+      const tasks = await svc.listTasks()
+      expect(tasks.map((task) => task.id)).toEqual(['1', '2'])
+      expect(readCount).toBe(2)
+    } finally {
+      readFileSpy.mockRestore()
+    }
   })
 })
 

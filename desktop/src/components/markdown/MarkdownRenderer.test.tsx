@@ -263,6 +263,45 @@ describe('MarkdownRenderer', () => {
     expect(link).toHaveAttribute('rel', expect.stringContaining('noopener'))
   })
 
+  it('strips style tags from assistant text before injecting markdown html', () => {
+    const { container } = render(
+      <MarkdownRenderer
+        content={[
+          '开始构建完整的 Web Linux 桌面环境。',
+          '<function=Write>',
+          '<parameter=content>',
+          '<!DOCTYPE html>',
+          '<html lang="zh-CN">',
+          '<head>',
+          '<style>',
+          '* { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }',
+          'html, body { width: 100%; height: 100%; overflow: hidden; }',
+          '</style>',
+          '</head>',
+          '<body>unsafe preview content</body>',
+          '</html>',
+        ].join('\n')}
+      />,
+    )
+
+    expect(container.querySelector('style')).not.toBeInTheDocument()
+    expect(container).not.toHaveTextContent('overflow: hidden')
+    expect(screen.getByText(/开始构建完整的 Web Linux 桌面环境/)).toBeInTheDocument()
+  })
+
+  it('strips inline style attributes from assistant markdown html', () => {
+    const { container } = render(
+      <MarkdownRenderer
+        content={'<div style="position: fixed; inset: 0; z-index: 999999">assistant text</div>'}
+      />,
+    )
+
+    const injectedDiv = screen.getByText('assistant text')
+    expect(injectedDiv).toBeInTheDocument()
+    expect(injectedDiv).not.toHaveAttribute('style')
+    expect(container.innerHTML).not.toContain('position: fixed')
+  })
+
   it('lets callers intercept markdown link clicks', () => {
     const onLinkClick = vi.fn().mockReturnValue(true)
     render(

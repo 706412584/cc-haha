@@ -13,7 +13,7 @@ export type TraceSessionListApiItem = TraceSessionListItem & {
     id: string
     title: string
     projectPath: string
-    workDir: string
+    workDir: string | null
   } | null
 }
 
@@ -60,11 +60,21 @@ export async function handleTracesApi(
         throw methodNotAllowed(req.method, '/api/traces/settings')
 
       default:
+        if (req.method === 'DELETE' && segments.length === 3) {
+          return await deleteTraceSession(sub)
+        }
         throw ApiError.notFound(`Unknown traces endpoint: ${sub}`)
     }
   } catch (error) {
     return errorResponse(error)
   }
+}
+
+async function deleteTraceSession(segment: string): Promise<Response> {
+  const sessionId = decodePathSegment(segment).trim()
+  if (!sessionId) throw ApiError.badRequest('Trace session id is required')
+  const result = await traceCaptureService.deleteSessionTrace(sessionId)
+  return Response.json(result)
 }
 
 async function listTraces(url: URL): Promise<Response> {
@@ -125,12 +135,12 @@ async function listSearchedTraces(query: string, limit: number, offset: number):
 }
 
 async function decorateTraceListItem(item: TraceSessionListItem): Promise<TraceSessionListApiItem> {
-  const session = await sessionService.getSession(item.sessionId).catch(() => null)
+  const session = await getTraceSessionMeta(item.sessionId)
   return {
     ...item,
     session: session
       ? {
-          id: session.id,
+          id: item.sessionId,
           title: session.title,
           projectPath: session.projectPath,
           workDir: session.workDir,
@@ -140,17 +150,32 @@ async function decorateTraceListItem(item: TraceSessionListItem): Promise<TraceS
 }
 
 async function decorateTraceFileCandidate(item: TraceSessionFileItem): Promise<Pick<TraceSessionListApiItem, 'sessionId' | 'session'>> {
-  const session = await sessionService.getSession(item.sessionId).catch(() => null)
+  const session = await getTraceSessionMeta(item.sessionId)
   return {
     sessionId: item.sessionId,
     session: session
       ? {
-          id: session.id,
+          id: item.sessionId,
           title: session.title,
           projectPath: session.projectPath,
           workDir: session.workDir,
         }
       : null,
+  }
+}
+
+async function getTraceSessionMeta(sessionId: string): Promise<{
+  title: string
+  projectPath: string
+  workDir: string | null
+} | null> {
+  const found = await sessionService.findSessionFile(sessionId)
+  if (!found) return null
+  const meta = await sessionService.getSessionTitleAndMeta(found.filePath)
+  return {
+    title: meta.title,
+    projectPath: meta.projectPath,
+    workDir: meta.workDir,
   }
 }
 
@@ -167,6 +192,14 @@ function traceListItemMatchesQuery(item: Pick<TraceSessionListApiItem, 'sessionI
     .join('\n')
     .toLowerCase()
   return terms.every((term) => haystack.includes(term))
+}
+
+function decodePathSegment(value: string): string {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    throw ApiError.badRequest('Invalid trace session id')
+  }
 }
 
 function parseTraceListLimit(value: string | null): number {

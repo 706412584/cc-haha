@@ -82,6 +82,56 @@ const STATUS_TONE: Record<McpServerRecord['status'], string> = {
   disabled: 'bg-[var(--color-surface-hover)] text-[var(--color-text-secondary)] border-[var(--color-border)]',
 }
 
+const SENSITIVE_MCP_FIELD = /(?:api[_-]?key|auth[_-]?token|authorization|bearer|token|secret|password|credential)/i
+const SENSITIVE_CLI_FLAG = /^--(?:api-key|api_key|auth-token|auth_token|authorization|bearer|token|secret|password|credential)$/i
+const REDACTED_INPUT_VALUE = '[redacted]'
+
+function isMcpServerNameValid(name: string): boolean {
+  const trimmed = name.trim()
+  return trimmed.length > 0 && !/[^\p{L}\p{N}_-]/u.test(trimmed)
+}
+
+function redactSensitiveText(value: string): string {
+  return value
+    .replace(/(bearer\s+)(?:"[^"]+"|'[^']+'|[^\s"',}]+)/gi, '$1[redacted]')
+    .replace(/(--(?:api-key|api_key|auth-token|auth_token|authorization|bearer|token|secret|password|credential)(?:=|\s+))(?:"[^"]+"|'[^']+'|[^\s"',}]+)/gi, '$1[redacted]')
+    .replace(/((?:api[_-]?key|auth[_-]?token|authorization|bearer|token|secret|password|credential)(?:["']?\s*[:=]\s*["']?))([^"',\s}]+)/gi, '$1[redacted]')
+    .replace(/\bsk-[A-Za-z0-9][A-Za-z0-9_-]{5,}\b/g, '[redacted]')
+}
+
+function redactMcpDisplayValue(value: unknown): unknown {
+  if (typeof value === 'string') return redactSensitiveText(value)
+  if (Array.isArray(value)) {
+    return value.map((item, index) => {
+      const previous = value[index - 1]
+      if (typeof previous === 'string' && SENSITIVE_CLI_FLAG.test(previous)) return '[redacted]'
+      return redactMcpDisplayValue(item)
+    })
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, nested]) => [
+        key,
+        SENSITIVE_MCP_FIELD.test(key) ? '[redacted]' : redactMcpDisplayValue(nested),
+      ]),
+    )
+  }
+  return value
+}
+
+function displayMcpArgumentValue(rows: StringRow[], index: number): string {
+  const row = rows[index]
+  if (!row) return ''
+  const previous = rows[index - 1]?.value
+  if (row.value && previous && SENSITIVE_CLI_FLAG.test(previous.trim())) return REDACTED_INPUT_VALUE
+  return redactSensitiveText(row.value)
+}
+
+function displayMcpKeyValueRowValue(row: KeyValueRow): string {
+  if (row.value && SENSITIVE_MCP_FIELD.test(row.key)) return REDACTED_INPUT_VALUE
+  return redactSensitiveText(row.value)
+}
+
 function createId() {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`
@@ -218,7 +268,7 @@ function buildPayload(draft: McpDraft): McpUpsertPayload {
 }
 
 function isDraftValid(draft: McpDraft) {
-  if (!draft.name.trim()) return false
+  if (!isMcpServerNameValid(draft.name)) return false
   if (scopeRequiresProject(draft.scope) && !draft.projectPath.trim()) return false
   if (draft.transport === 'stdio') return draft.command.trim().length > 0
   return draft.url.trim().length > 0
@@ -285,6 +335,7 @@ function ArraySection({
   valuePlaceholder,
   singleValue = false,
   addLabel,
+  displayValue,
 }: {
   title: string
   rows: KeyValueRow[] | StringRow[]
@@ -295,12 +346,13 @@ function ArraySection({
   valuePlaceholder: string
   singleValue?: boolean
   addLabel: string
+  displayValue?: (row: KeyValueRow | StringRow, index: number) => string
 }) {
   return (
     <section className="rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface)] p-5">
       <div className="text-sm font-semibold text-[var(--color-text-primary)] mb-4">{title}</div>
       <div className="space-y-3">
-        {rows.map((row) => (
+        {rows.map((row, index) => (
           <div key={row.id} className={`grid gap-3 ${singleValue ? 'grid-cols-[minmax(0,1fr)_32px]' : 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_32px]'}`}>
             {!singleValue && 'key' in row && (
               <Input
@@ -310,7 +362,7 @@ function ArraySection({
               />
             )}
             <Input
-              value={row.value}
+              value={displayValue ? displayValue(row, index) : row.value}
               onChange={(event) => onChange(row.id, 'value', event.target.value)}
               placeholder={valuePlaceholder}
             />
@@ -399,7 +451,7 @@ function ServerRow({
               {server.projectPath}
             </span>
           )}
-          <span className="truncate">{server.summary}</span>
+          <span className="truncate">{redactSensitiveText(server.summary)}</span>
         </div>
         {server.statusDetail && (
           <div className="mt-2 text-xs text-[var(--color-text-tertiary)] truncate">{server.statusDetail}</div>
@@ -1136,7 +1188,7 @@ export function McpSettings() {
           <div className="flex items-start justify-between gap-4 mb-6">
             <div>
               <h2 className="text-[2.2rem] font-semibold tracking-[-0.03em] text-[var(--color-text-primary)]">{server.name}</h2>
-              <p className="mt-3 text-base text-[var(--color-text-secondary)]">{server.summary}</p>
+              <p className="mt-3 text-base text-[var(--color-text-secondary)]">{redactSensitiveText(server.summary)}</p>
               <div className="mt-4 flex flex-wrap items-center gap-3">
                 <StatusBadge server={server} />
                 {server.statusDetail && (
@@ -1191,7 +1243,7 @@ export function McpSettings() {
               <div className="mt-5">
                 <div className="text-sm font-semibold text-[var(--color-text-primary)] mb-2">{t('settings.mcp.form.rawConfig')}</div>
                 <pre className="overflow-x-auto rounded-[var(--radius-lg)] bg-[var(--color-surface-hover)] p-4 text-xs text-[var(--color-text-secondary)]">
-                  {JSON.stringify(server.config, null, 2)}
+                  {JSON.stringify(redactMcpDisplayValue(server.config), null, 2)}
                 </pre>
               </div>
             </section>
@@ -1458,6 +1510,7 @@ export function McpSettings() {
                 onAdd={() => addRow('args')}
                 onRemove={(id) => removeRow('args', id)}
                 singleValue
+                displayValue={(_row, index) => displayMcpArgumentValue(draft.args, index)}
                 valuePlaceholder={t('settings.mcp.form.argumentPlaceholder')}
                 addLabel={t('settings.mcp.form.addArgument')}
               />
@@ -1468,6 +1521,7 @@ export function McpSettings() {
                 onChange={(id, field, value) => updateKeyValueRows('env', id, field, value)}
                 onAdd={() => addRow('env')}
                 onRemove={(id) => removeRow('env', id)}
+                displayValue={(row) => ('key' in row ? displayMcpKeyValueRowValue(row) : row.value)}
                 keyPlaceholder={t('settings.mcp.form.keyPlaceholder')}
                 valuePlaceholder={t('settings.mcp.form.valuePlaceholder')}
                 addLabel={t('settings.mcp.form.addEnv')}
@@ -1491,6 +1545,7 @@ export function McpSettings() {
                 onChange={(id, field, value) => updateKeyValueRows('headers', id, field, value)}
                 onAdd={() => addRow('headers')}
                 onRemove={(id) => removeRow('headers', id)}
+                displayValue={(row) => ('key' in row ? displayMcpKeyValueRowValue(row) : row.value)}
                 keyPlaceholder={t('settings.mcp.form.keyPlaceholder')}
                 valuePlaceholder={t('settings.mcp.form.valuePlaceholder')}
                 addLabel={t('settings.mcp.form.addHeader')}

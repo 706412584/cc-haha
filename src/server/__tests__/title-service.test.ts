@@ -367,6 +367,58 @@ describe('titleService', () => {
     expect(upstreamCalls[0].body.stream).toBe(true)
   })
 
+  test('honors the configured provider auth strategy for title generation', async () => {
+    const upstreamCalls: Array<{ headers: Record<string, string> }> = []
+    const server = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      async fetch(req) {
+        upstreamCalls.push({
+          headers: Object.fromEntries(req.headers.entries()),
+        })
+        return Response.json({
+          content: [{ type: 'text', text: '{"title":"Trace ok"}' }],
+        })
+      },
+    })
+
+    try {
+      const providerId = 'auth-token-title-test'
+      await fs.mkdir(path.join(tmpDir, 'cc-haha'), { recursive: true })
+      await fs.writeFile(
+        path.join(tmpDir, 'cc-haha', 'providers.json'),
+        JSON.stringify({
+          activeId: providerId,
+          providers: [
+            {
+              id: providerId,
+              presetId: 'custom',
+              name: 'Bearer Provider',
+              apiKey: 'bearer-title-key',
+              authStrategy: 'auth_token',
+              baseUrl: `http://127.0.0.1:${server.port}/anthropic`,
+              apiFormat: 'anthropic',
+              models: {
+                main: 'bearer-main',
+                haiku: 'bearer-haiku',
+                sonnet: 'bearer-main',
+                opus: 'bearer-main',
+              },
+            },
+          ],
+        }, null, 2),
+      )
+
+      await expect(generateTitle('请只回复 trace-ok')).resolves.toBe('Trace ok')
+
+      expect(upstreamCalls).toHaveLength(1)
+      expect(upstreamCalls[0].headers.authorization).toBe('Bearer bearer-title-key')
+      expect(upstreamCalls[0].headers['x-api-key']).toBeUndefined()
+    } finally {
+      server.stop(true)
+    }
+  })
+
   test('parses JSON title responses wrapped in markdown fences', () => {
     expect(parseGeneratedTitleText('```json\n{"title":"Write bash script"}\n```'))
       .toBe('Write bash script')

@@ -938,6 +938,36 @@ describe('ProviderService', () => {
       expect(runtimeEnv.ENABLE_TOOL_SEARCH).toBe('false')
     })
 
+    test('should persist disabled experimental betas on activation and runtime env', async () => {
+      const svc = new ProviderService()
+      const provider = await svc.addProvider(sampleInput({
+        disableExperimentalBetas: true,
+      }))
+
+      expect(provider.disableExperimentalBetas).toBe(true)
+      const config = await readProvidersConfig()
+      expect((config.providers as Array<Record<string, unknown>>)[0]?.disableExperimentalBetas).toBe(true)
+
+      await svc.activateProvider(provider.id)
+
+      const settings = await readSettings()
+      const env = settings.env as Record<string, string>
+      expect(env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS).toBe('1')
+
+      const runtimeEnv = await svc.getProviderRuntimeEnv(provider.id)
+      expect(runtimeEnv.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS).toBe('1')
+
+      const updated = await svc.updateProvider(provider.id, { disableExperimentalBetas: false })
+      expect(updated.disableExperimentalBetas).toBeUndefined()
+
+      const clearedSettings = await readSettings()
+      const clearedEnv = clearedSettings.env as Record<string, string>
+      expect(clearedEnv.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS).toBeUndefined()
+
+      const clearedRuntimeEnv = await svc.getProviderRuntimeEnv(provider.id)
+      expect(clearedRuntimeEnv.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS).toBeUndefined()
+    })
+
     test('should preserve attribution header for Claude-prefixed provider models', async () => {
       const svc = new ProviderService()
       const provider = await svc.addProvider(sampleInput({
@@ -1666,6 +1696,126 @@ describe('ProviderService', () => {
       }
     })
 
+    test('bypasses manual proxy options when testing loopback provider endpoints', async () => {
+      await fs.writeFile(
+        path.join(tmpDir, 'settings.json'),
+        JSON.stringify({
+          network: {
+            proxy: { mode: 'manual', url: 'http://127.0.0.1:1181' },
+          },
+        }),
+        'utf-8',
+      )
+      const originalFetch = globalThis.fetch
+      const calls: Array<{ url: string; proxy?: string }> = []
+      globalThis.fetch = mock(async (url: string | URL | Request, init?: RequestInit) => {
+        calls.push({
+          url: String(url),
+          proxy: (init as RequestInit & { proxy?: string } | undefined)?.proxy,
+        })
+        return new Response(JSON.stringify({
+          id: 'chatcmpl-1',
+          object: 'chat.completion',
+          created: 0,
+          model: 'local-model',
+          choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }) as typeof fetch
+
+      try {
+        const svc = new ProviderService()
+        const result = await svc.testProviderConfig({
+          baseUrl: 'http://127.0.0.1:11434',
+          apiKey: 'local-key',
+          modelId: 'local-model',
+          authStrategy: 'api_key',
+          apiFormat: 'openai_chat',
+        })
+
+        expect(result.connectivity.success).toBe(true)
+        expect(result.proxy?.success).toBe(true)
+        expect(calls.map((call) => call.url)).toEqual([
+          'http://127.0.0.1:11434/v1/chat/completions',
+          'http://127.0.0.1:11434/v1/chat/completions',
+        ])
+        expect(calls.map((call) => call.proxy)).toEqual([undefined, undefined])
+      } finally {
+        globalThis.fetch = originalFetch
+      }
+    })
+
+    test('bypasses inherited system proxy when testing direct provider endpoints', async () => {
+      await fs.writeFile(
+        path.join(tmpDir, 'settings.json'),
+        JSON.stringify({
+          network: {
+            proxy: { mode: 'direct', url: '' },
+          },
+        }),
+        'utf-8',
+      )
+      const originalFetch = globalThis.fetch
+      const originalHttpProxy = process.env.HTTP_PROXY
+      const originalHttpsProxy = process.env.HTTPS_PROXY
+      const originalLowerHttpProxy = process.env.http_proxy
+      const originalLowerHttpsProxy = process.env.https_proxy
+      const calls: Array<{ url: string; proxy?: string }> = []
+      process.env.HTTP_PROXY = 'http://127.0.0.1:1181'
+      process.env.HTTPS_PROXY = 'http://127.0.0.1:1181'
+      delete process.env.http_proxy
+      delete process.env.https_proxy
+      globalThis.fetch = mock(async (url: string | URL | Request, init?: RequestInit) => {
+        calls.push({
+          url: String(url),
+          proxy: (init as RequestInit & { proxy?: string } | undefined)?.proxy,
+        })
+        return new Response(JSON.stringify({
+          id: 'chatcmpl-direct',
+          object: 'chat.completion',
+          created: 0,
+          model: 'remote-model',
+          choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }) as typeof fetch
+
+      try {
+        const svc = new ProviderService()
+        const result = await svc.testProviderConfig({
+          baseUrl: 'https://api.example.com',
+          apiKey: 'remote-key',
+          modelId: 'remote-model',
+          authStrategy: 'api_key',
+          apiFormat: 'openai_chat',
+        })
+
+        expect(result.connectivity.success).toBe(true)
+        expect(result.proxy?.success).toBe(true)
+        expect(calls.map((call) => call.url)).toEqual([
+          'https://api.example.com/v1/chat/completions',
+          'https://api.example.com/v1/chat/completions',
+        ])
+        expect(calls.map((call) => call.proxy)).toEqual([undefined, undefined])
+      } finally {
+        globalThis.fetch = originalFetch
+        if (originalHttpProxy === undefined) delete process.env.HTTP_PROXY
+        else process.env.HTTP_PROXY = originalHttpProxy
+        if (originalHttpsProxy === undefined) delete process.env.HTTPS_PROXY
+        else process.env.HTTPS_PROXY = originalHttpsProxy
+        if (originalLowerHttpProxy === undefined) delete process.env.http_proxy
+        else process.env.http_proxy = originalLowerHttpProxy
+        if (originalLowerHttpsProxy === undefined) delete process.env.https_proxy
+        else process.env.https_proxy = originalLowerHttpsProxy
+      }
+    })
+
     test('should use configured network timeout for provider tests', async () => {
       await fs.writeFile(
         path.join(tmpDir, 'settings.json'),
@@ -1924,6 +2074,7 @@ describe('Providers API', () => {
       apiKey: 'sk-test',
       apiFormat: 'anthropic',
       autoCompactWindow: 64000,
+      disableExperimentalBetas: true,
       models: {
         main: 'gpt-4',
         haiku: 'gpt-4-haiku',
@@ -1934,10 +2085,11 @@ describe('Providers API', () => {
     const res = await handleProvidersApi(req, url, segments)
 
     expect(res.status).toBe(201)
-    const body = (await res.json()) as { provider: { name: string; models: { main: string }; autoCompactWindow: number } }
+    const body = (await res.json()) as { provider: { name: string; models: { main: string }; autoCompactWindow: number; disableExperimentalBetas?: boolean } }
     expect(body.provider.name).toBe('New Provider')
     expect(body.provider.models.main).toBe('gpt-4')
     expect(body.provider.autoCompactWindow).toBe(64000)
+    expect(body.provider.disableExperimentalBetas).toBe(true)
   })
 
   test('POST /api/providers should return 400 for invalid input', async () => {
@@ -2047,12 +2199,14 @@ describe('Providers API', () => {
 
     const { req, url, segments } = makeRequest('PUT', `/api/providers/${added.id}`, {
       name: 'Renamed Provider',
+      disableExperimentalBetas: true,
     })
     const res = await handleProvidersApi(req, url, segments)
 
     expect(res.status).toBe(200)
-    const body = (await res.json()) as { provider: { name: string } }
+    const body = (await res.json()) as { provider: { name: string; disableExperimentalBetas?: boolean } }
     expect(body.provider.name).toBe('Renamed Provider')
+    expect(body.provider.disableExperimentalBetas).toBe(true)
   })
 
   // ─── DELETE /api/providers/:id ───────────────────────────────────────────

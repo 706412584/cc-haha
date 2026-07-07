@@ -220,6 +220,9 @@ export const browserHost: DesktopHost = {
     async setVisible() {
       unsupported('Native preview webview')
     },
+    async setZoom() {
+      unsupported('Native preview webview')
+    },
     async close() {
       unsupported('Native preview webview')
     },

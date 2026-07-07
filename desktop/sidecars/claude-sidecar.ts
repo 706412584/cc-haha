@@ -40,6 +40,7 @@ if (mode === 'adapters') {
   await import('../../preload.ts')
 
   if (mode === 'server') {
+    console.log(`[claude-sidecar] starting server mode (${process.platform}/${process.arch})`)
     const { startServer } = await import('../../src/server/index.ts')
     startServer()
   } else if (mode === 'cli') {

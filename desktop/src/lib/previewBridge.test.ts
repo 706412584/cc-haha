@@ -7,6 +7,7 @@ const invoke = vi.fn()
 function installElectronPreviewHost() {
   const open = vi.fn().mockResolvedValue(undefined)
   const setBounds = vi.fn().mockResolvedValue(undefined)
+  const setZoom = vi.fn().mockResolvedValue(undefined)
   const message = vi.fn().mockResolvedValue(undefined)
 
   window.desktopHost = {
@@ -21,11 +22,12 @@ function installElectronPreviewHost() {
       ...browserHost.preview,
       open,
       setBounds,
+      setZoom,
       message,
     },
   }
 
-  return { open, setBounds, message }
+  return { open, setBounds, setZoom, message }
 }
 
 beforeEach(() => {
@@ -59,6 +61,14 @@ describe('previewBridge', () => {
     expect(invoke).not.toHaveBeenCalled()
   })
 
+  it('setZoom forwards to the Electron preview host', async () => {
+    const { setZoom } = installElectronPreviewHost()
+    const { previewBridge } = await import('./previewBridge')
+    await previewBridge.setZoom(0.8)
+    expect(setZoom).toHaveBeenCalledWith(0.8)
+    expect(invoke).not.toHaveBeenCalled()
+  })
+
   it('message forwards structured host messages to the Electron preview host', async () => {
     const { message } = installElectronPreviewHost()
     const { previewBridge } = await import('./previewBridge')
@@ -81,6 +91,7 @@ describe('previewBridge', () => {
     Reflect.deleteProperty(window, '__TAURI_INTERNALS__')
     const open = vi.fn().mockResolvedValue(undefined)
     const setBounds = vi.fn().mockResolvedValue(undefined)
+    const setZoom = vi.fn().mockResolvedValue(undefined)
     const message = vi.fn().mockResolvedValue(undefined)
 
     window.desktopHost = {
@@ -95,6 +106,7 @@ describe('previewBridge', () => {
         ...browserHost.preview,
         open,
         setBounds,
+        setZoom,
         message,
       },
     }
@@ -104,10 +116,12 @@ describe('previewBridge', () => {
 
     await previewBridge.open('http://localhost/a', bounds)
     await previewBridge.setBounds(bounds)
+    await previewBridge.setZoom(0.75)
     await previewBridge.message({ v: 1, type: 'enter-picker' })
 
     expect(open).toHaveBeenCalledWith('http://localhost/a', bounds)
     expect(setBounds).toHaveBeenCalledWith(bounds)
+    expect(setZoom).toHaveBeenCalledWith(0.75)
     expect(message).toHaveBeenCalledWith({ v: 1, type: 'enter-picker' })
     expect(invoke).not.toHaveBeenCalled()
   })

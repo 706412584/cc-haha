@@ -181,6 +181,15 @@ describe('release update metadata merge', () => {
       path: Claude-Code-Haha-0.3.2-win-x64.exe
       sha512: win-checksum
     `)
+    writeYaml(join(inputDir, 'latest-Windows-ARM64.yml'), `
+      version: 0.3.2
+      files:
+        - url: Claude-Code-Haha-0.3.2-win-arm64.exe
+          sha512: win-arm64-checksum
+          size: 222
+      path: Claude-Code-Haha-0.3.2-win-arm64.exe
+      sha512: win-arm64-checksum
+    `)
 
     mergeUpdateMetadataArtifacts({ metadataDir: inputDir, outDir: outputDir })
 
@@ -189,7 +198,10 @@ describe('release update metadata merge', () => {
       path: string
       sha512: string
     }
-    expect(windows.files.map(file => file.url)).toEqual(['Claude-Code-Haha-0.3.2-win-x64.exe'])
+    expect(windows.files.map(file => file.url)).toEqual([
+      'Claude-Code-Haha-0.3.2-win-x64.exe',
+      'Claude-Code-Haha-0.3.2-win-arm64.exe',
+    ])
     expect(windows.path).toBe('Claude-Code-Haha-0.3.2-win-x64.exe')
     expect(windows.sha512).toBe('win-checksum')
   })

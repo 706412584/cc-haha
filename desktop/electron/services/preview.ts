@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { ELECTRON_EVENT_CHANNELS } from '../ipc/channels'
 import { parsePreviewAgentMessage, type PreviewAgentMessage } from '../ipc/previewMessage'
+import { normalizeZoomFactor } from './zoom'
 export { parsePreviewAgentMessage, shouldForwardPreviewMessage } from '../ipc/previewMessage'
 
 export type PreviewBounds = {
@@ -17,6 +18,7 @@ export type PreviewWebContentsLike = {
   close?(): void
   isDestroyed?(): boolean
   capturePage?(): Promise<{ toDataURL(): string }>
+  setZoomFactor?(factor: number): void
   send(channel: string, payload: unknown): void
 }
 
@@ -89,6 +91,7 @@ export class ElectronPreviewService {
   private readonly previewScriptPath: string
   private view: PreviewViewLike | null = null
   private parent: PreviewParentWindowLike | null = null
+  private zoomFactor = 1
 
   constructor(options: ElectronPreviewServiceOptions) {
     this.createView = options.createView
@@ -114,6 +117,11 @@ export class ElectronPreviewService {
 
   setVisible(visible: boolean): void {
     this.view?.setVisible?.(visible)
+  }
+
+  setZoomFactor(value: unknown): void {
+    this.zoomFactor = normalizeZoomFactor(value)
+    this.applyZoomFactor(this.view)
   }
 
   close(): void {
@@ -155,6 +163,7 @@ export class ElectronPreviewService {
     view.webContents.on('did-finish-load', () => {
       void this.injectPreviewAgent(view)
     })
+    this.applyZoomFactor(view)
     this.view = view
     this.parent = parent
     return view
@@ -176,6 +185,10 @@ export class ElectronPreviewService {
     if (!webContents.capturePage) throw new Error('native preview capture unavailable')
     const image = await webContents.capturePage()
     return image.toDataURL()
+  }
+
+  private applyZoomFactor(view: PreviewViewLike | null): void {
+    view?.webContents.setZoomFactor?.(this.zoomFactor)
   }
 
   private async captureScreenshotToRenderer(kind: PreviewHostCaptureMessage['kind'], renderer: PreviewWebContentsLike): Promise<void> {

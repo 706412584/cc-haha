@@ -236,6 +236,7 @@ export type DesktopHost = {
     navigate(url: string): Promise<void>
     setBounds(bounds: PreviewBounds): Promise<void>
     setVisible(visible: boolean): Promise<void>
+    setZoom(level: number): Promise<void>
     close(): Promise<void>
     message(payload: PreviewHostMessage): Promise<void>
     onEvent(handler: (event: unknown) => void): Promise<DesktopHostUnlisten>

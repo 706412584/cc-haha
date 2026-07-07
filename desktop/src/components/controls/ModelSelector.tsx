@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { OFFICIAL_DEFAULT_MODEL_ID, OFFICIAL_MODELS } from '../../constants/modelCatalog'
+import { OFFICIAL_MODELS } from '../../constants/modelCatalog'
 import {
-  OPENAI_OFFICIAL_DEFAULT_MODEL_ID,
   OPENAI_OFFICIAL_MODELS,
   OPENAI_OFFICIAL_PROVIDER_ID,
 } from '../../constants/openaiOfficialProvider'
@@ -16,6 +15,7 @@ import type { RuntimeSelection } from '../../types/runtime'
 import type { EffortLevel, ModelInfo } from '../../types/settings'
 import { useMobileViewport } from '../../hooks/useMobileViewport'
 import { isDesktopRuntime } from '../../lib/desktopRuntime'
+import { resolveDefaultRuntimeSelection } from '../../lib/runtimeSelection'
 import { useHahaOAuthStore } from '../../stores/hahaOAuthStore'
 import { useHahaOpenAIOAuthStore } from '../../stores/hahaOpenAIOAuthStore'
 import { MobileBottomSheet } from '../shared/MobileBottomSheet'
@@ -35,6 +35,10 @@ type Props = {
   runtimeKey?: string
   disabled?: boolean
   compact?: boolean
+}
+
+export type ModelSelectorHandle = {
+  open: () => void
 }
 
 type DropdownPosition = {
@@ -140,31 +144,7 @@ function buildProviderChoices(
   return choices
 }
 
-function resolveDefaultRuntimeSelection(
-  activeId: string | null,
-  activeProviderName: string | null,
-  providers: SavedProvider[],
-  currentModelId: string | undefined,
-): RuntimeSelection {
-  const activeProvider = activeId
-    ? providers.find((provider) => provider.id === activeId)
-    : activeProviderName
-      ? providers.find((provider) => provider.name === activeProviderName)
-      : undefined
-  const inferredProviderId = activeId ?? activeProvider?.id ?? null
-  const providerMainModelId = activeProvider?.models.main.trim()
-
-  return {
-    providerId: inferredProviderId,
-    modelId: providerMainModelId || currentModelId || (
-      inferredProviderId === OPENAI_OFFICIAL_PROVIDER_ID
-        ? OPENAI_OFFICIAL_DEFAULT_MODEL_ID
-        : OFFICIAL_DEFAULT_MODEL_ID
-    ),
-  }
-}
-
-export function ModelSelector({
+export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function ModelSelector({
   value,
   onChange,
   runtimeSelection: controlledRuntimeSelection,
@@ -172,7 +152,7 @@ export function ModelSelector({
   runtimeKey,
   disabled = false,
   compact = false,
-}: Props = {}) {
+}: Props = {}, selectorRef) {
   const t = useTranslation()
   const isMobileBrowser = useMobileViewport() && !isDesktopRuntime()
   const {
@@ -228,6 +208,14 @@ export function ModelSelector({
     void fetchClaudeOAuthStatus()
     void fetchOpenAIOAuthStatus()
   }, [fetchClaudeOAuthStatus, fetchOpenAIOAuthStatus, isRuntimeScoped, open])
+
+  const openSelector = useCallback(() => {
+    if (!disabled) setOpen(true)
+  }, [disabled])
+
+  useImperativeHandle(selectorRef, () => ({
+    open: openSelector,
+  }), [openSelector])
 
   useEffect(() => {
     if (!open) return
@@ -637,4 +625,4 @@ export function ModelSelector({
       {dropdown}
     </div>
   )
-}
+})

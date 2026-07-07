@@ -5,7 +5,7 @@
  * WebSocket 集成测试验证消息从客户端经过服务端到达 CLI 的完整流转。
  */
 
-import { afterEach, describe, it, expect, beforeAll, afterAll } from 'bun:test'
+import { afterEach, describe, it, expect, beforeAll, afterAll, spyOn } from 'bun:test'
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import * as os from 'os'
@@ -805,6 +805,197 @@ describe('ConversationService', () => {
     }
   })
 
+  it('should prefer the persisted runtime model when provider responses use aliased model names', async () => {
+    const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
+    const previousNodeEnv = process.env.NODE_ENV
+    const previousModelContextWindows = process.env.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS
+    const tmpConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-transcript-runtime-model-'))
+    const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-workdir-runtime-model-'))
+    process.env.CLAUDE_CONFIG_DIR = tmpConfigDir
+    process.env.NODE_ENV = 'development'
+    delete process.env.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS
+
+    try {
+      const providerService = new ProviderService()
+      const provider = await providerService.addProvider({
+        presetId: 'custom',
+        name: 'Aliased Runtime Provider',
+        apiKey: 'provider-key',
+        authStrategy: 'auth_token',
+        baseUrl: 'https://api.example.com/anthropic',
+        apiFormat: 'anthropic',
+        models: {
+          main: 'provider-main',
+          haiku: 'provider-fast',
+          sonnet: 'provider-sonnet',
+          opus: 'provider-opus',
+        },
+        modelContextWindows: {
+          'provider-main': 200_000,
+          'provider-fast': 64_000,
+        },
+      })
+      await providerService.activateProvider(provider.id)
+
+      const svc = new SessionService()
+      const { sessionId } = await svc.createSession(workDir)
+      await svc.appendSessionMetadata(sessionId, {
+        workDir,
+        runtimeProviderId: provider.id,
+        runtimeModelId: 'provider-fast',
+      })
+      const found = await svc.findSessionFile(sessionId)
+      expect(found).not.toBeNull()
+
+      await fs.appendFile(found!.filePath, JSON.stringify({
+        type: 'assistant',
+        uuid: crypto.randomUUID(),
+        timestamp: '2026-06-15T12:00:00.000Z',
+        cwd: workDir,
+        version: '999.0.0-test',
+        message: {
+          role: 'assistant',
+          model: 'provider-returned-fast-alias',
+          content: [{ type: 'text', text: 'hello' }],
+          usage: {
+            input_tokens: 100,
+            output_tokens: 20,
+          },
+        },
+      }) + '\n')
+
+      const contextEstimate = await svc.getTranscriptContextEstimate(sessionId)
+      const usage = await svc.getTranscriptUsage(sessionId)
+
+      expect(contextEstimate?.model).toBe('provider-returned-fast-alias')
+      expect(contextEstimate?.rawMaxTokens).toBe(64_000)
+      expect(usage?.models[0]?.contextWindow).toBe(64_000)
+    } finally {
+      if (previousConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = previousConfigDir
+      }
+      if (previousNodeEnv === undefined) {
+        delete process.env.NODE_ENV
+      } else {
+        process.env.NODE_ENV = previousNodeEnv
+      }
+      if (previousModelContextWindows === undefined) {
+        delete process.env.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS
+      } else {
+        process.env.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS = previousModelContextWindows
+      }
+      await fs.rm(tmpConfigDir, { recursive: true, force: true })
+      await fs.rm(workDir, { recursive: true, force: true })
+    }
+  })
+
+  it('should keep transcript usage context windows tied to runtime metadata order', async () => {
+    const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
+    const previousNodeEnv = process.env.NODE_ENV
+    const previousModelContextWindows = process.env.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS
+    const tmpConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-transcript-runtime-switch-'))
+    const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-workdir-runtime-switch-'))
+    process.env.CLAUDE_CONFIG_DIR = tmpConfigDir
+    process.env.NODE_ENV = 'development'
+    delete process.env.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS
+
+    try {
+      const providerService = new ProviderService()
+      const provider = await providerService.addProvider({
+        presetId: 'custom',
+        name: 'Runtime Switch Provider',
+        apiKey: 'provider-key',
+        authStrategy: 'auth_token',
+        baseUrl: 'https://api.example.com/anthropic',
+        apiFormat: 'anthropic',
+        models: {
+          main: 'provider-big',
+          haiku: 'provider-fast',
+          sonnet: 'provider-big',
+          opus: 'provider-big',
+        },
+        modelContextWindows: {
+          'provider-big': 1_000_000,
+          'provider-fast': 64_000,
+        },
+      })
+      await providerService.activateProvider(provider.id)
+
+      const svc = new SessionService()
+      const { sessionId, workDir: sessionWorkDir } = await svc.createSession(workDir)
+      await svc.appendSessionMetadata(sessionId, {
+        workDir: sessionWorkDir,
+        runtimeProviderId: provider.id,
+        runtimeModelId: 'provider-fast',
+      })
+      const found = await svc.findSessionFile(sessionId)
+      expect(found).not.toBeNull()
+      await fs.appendFile(found!.filePath, JSON.stringify({
+        type: 'assistant',
+        uuid: crypto.randomUUID(),
+        timestamp: '2026-06-15T12:00:00.000Z',
+        cwd: sessionWorkDir,
+        version: '999.0.0-test',
+        message: {
+          role: 'assistant',
+          model: 'provider-returned-fast-alias',
+          content: [{ type: 'text', text: 'fast' }],
+          usage: {
+            input_tokens: 100,
+            output_tokens: 20,
+          },
+        },
+      }) + '\n')
+      await svc.appendSessionMetadata(sessionId, {
+        workDir: sessionWorkDir,
+        runtimeProviderId: provider.id,
+        runtimeModelId: 'provider-big',
+      })
+      await fs.appendFile(found!.filePath, JSON.stringify({
+        type: 'assistant',
+        uuid: crypto.randomUUID(),
+        timestamp: '2026-06-15T12:01:00.000Z',
+        cwd: sessionWorkDir,
+        version: '999.0.0-test',
+        message: {
+          role: 'assistant',
+          model: 'provider-returned-big-alias',
+          content: [{ type: 'text', text: 'big' }],
+          usage: {
+            input_tokens: 100,
+            output_tokens: 20,
+          },
+        },
+      }) + '\n')
+
+      const usage = await svc.getTranscriptUsage(sessionId)
+      const windows = new Map(usage?.models.map((model) => [model.model, model.contextWindow]))
+
+      expect(windows.get('provider-returned-fast-alias')).toBe(64_000)
+      expect(windows.get('provider-returned-big-alias')).toBe(1_000_000)
+    } finally {
+      if (previousConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = previousConfigDir
+      }
+      if (previousNodeEnv === undefined) {
+        delete process.env.NODE_ENV
+      } else {
+        process.env.NODE_ENV = previousNodeEnv
+      }
+      if (previousModelContextWindows === undefined) {
+        delete process.env.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS
+      } else {
+        process.env.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS = previousModelContextWindows
+      }
+      await fs.rm(tmpConfigDir, { recursive: true, force: true })
+      await fs.rm(workDir, { recursive: true, force: true })
+    }
+  })
+
   it('should infer a unique saved provider context window for sessions missing runtime metadata', async () => {
     const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
     const previousNodeEnv = process.env.NODE_ENV
@@ -879,6 +1070,83 @@ describe('ConversationService', () => {
 
       expect(contextEstimate?.model).toBe('mimo-v2.5-pro')
       expect(contextEstimate?.rawMaxTokens).toBe(1_000_000)
+    } finally {
+      if (previousConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = previousConfigDir
+      }
+      if (previousNodeEnv === undefined) {
+        delete process.env.NODE_ENV
+      } else {
+        process.env.NODE_ENV = previousNodeEnv
+      }
+      if (previousModelContextWindows === undefined) {
+        delete process.env.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS
+      } else {
+        process.env.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS = previousModelContextWindows
+      }
+      await fs.rm(tmpConfigDir, { recursive: true, force: true })
+      await fs.rm(workDir, { recursive: true, force: true })
+    }
+  })
+
+  it('should not infer saved provider context windows for unrelated response model names', async () => {
+    const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
+    const previousNodeEnv = process.env.NODE_ENV
+    const previousModelContextWindows = process.env.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS
+    const tmpConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-transcript-provider-unrelated-'))
+    const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-workdir-provider-unrelated-'))
+    process.env.CLAUDE_CONFIG_DIR = tmpConfigDir
+    process.env.NODE_ENV = 'development'
+    delete process.env.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS
+
+    try {
+      const providerService = new ProviderService()
+      await providerService.addProvider({
+        presetId: 'custom',
+        name: 'Only Saved Provider',
+        apiKey: 'provider-key',
+        authStrategy: 'auth_token',
+        baseUrl: 'https://api.example.com/anthropic',
+        apiFormat: 'anthropic',
+        models: {
+          main: 'configured-provider-main',
+          haiku: 'configured-provider-main',
+          sonnet: 'configured-provider-main',
+          opus: 'configured-provider-main',
+        },
+        modelContextWindows: {
+          'configured-provider-main': 1_000_000,
+        },
+      })
+
+      const svc = new SessionService()
+      const { sessionId } = await svc.createSession(workDir)
+      const found = await svc.findSessionFile(sessionId)
+      expect(found).not.toBeNull()
+
+      await fs.appendFile(found!.filePath, JSON.stringify({
+        type: 'assistant',
+        uuid: crypto.randomUUID(),
+        timestamp: '2026-06-15T12:00:00.000Z',
+        cwd: workDir,
+        version: '999.0.0-test',
+        message: {
+          role: 'assistant',
+          model: 'unrelated-response-model',
+          content: [{ type: 'text', text: 'hello' }],
+          usage: {
+            input_tokens: 100,
+            output_tokens: 20,
+          },
+        },
+      }) + '\n')
+
+      const contextEstimate = await svc.getTranscriptContextEstimate(sessionId)
+
+      expect(contextEstimate?.model).toBe('unrelated-response-model')
+      expect(contextEstimate?.rawMaxTokens).toBe(200_000)
     } finally {
       if (previousConfigDir === undefined) {
         delete process.env.CLAUDE_CONFIG_DIR
@@ -1435,6 +1703,90 @@ describe('WebSocket Chat Integration', () => {
     }, 'runtime config failure diagnostic event')
   })
 
+  it('should forward stop_background_task to the CLI control channel', async () => {
+    const controlRequests: Array<{ sessionId: string; request: Record<string, unknown> }> = []
+    const originalRequestControl = conversationService.requestControl.bind(conversationService)
+    conversationService.requestControl = async (sessionId, request) => {
+      controlRequests.push({ sessionId, request })
+      return {}
+    }
+
+    try {
+      const ws = new WebSocket(`${wsUrl}/ws/chat-test-stop-background-task`)
+
+      await new Promise<void>((resolve) => {
+        ws.onmessage = (e) => {
+          const msg = JSON.parse(e.data as string)
+          if (msg.type === 'connected') {
+            ws.send(JSON.stringify({ type: 'stop_background_task', taskId: 'agent-task-1' }))
+            setTimeout(() => {
+              ws.close()
+              resolve()
+            }, 25)
+          }
+        }
+        ws.onerror = () => {
+          ws.close()
+          resolve()
+        }
+        setTimeout(() => {
+          ws.close()
+          resolve()
+        }, 3000)
+      })
+    } finally {
+      conversationService.requestControl = originalRequestControl
+    }
+
+    expect(controlRequests).toEqual([
+      {
+        sessionId: 'chat-test-stop-background-task',
+        request: { subtype: 'stop_task', task_id: 'agent-task-1' },
+      },
+    ])
+  })
+
+  it('should ignore stale stop_background_task failures for already-finished tasks', async () => {
+    const messages: any[] = []
+    const originalRequestControl = conversationService.requestControl.bind(conversationService)
+    conversationService.requestControl = async () => {
+      throw new Error('Task old-task-1 is not running (status: killed)')
+    }
+
+    try {
+      const ws = new WebSocket(`${wsUrl}/ws/chat-test-stale-stop-background-task`)
+
+      await new Promise<void>((resolve) => {
+        ws.onmessage = (e) => {
+          const msg = JSON.parse(e.data as string)
+          messages.push(msg)
+          if (msg.type === 'connected') {
+            ws.send(JSON.stringify({ type: 'stop_background_task', taskId: 'old-task-1' }))
+            setTimeout(() => {
+              ws.close()
+              resolve()
+            }, 25)
+          }
+        }
+        ws.onerror = () => {
+          ws.close()
+          resolve()
+        }
+        setTimeout(() => {
+          ws.close()
+          resolve()
+        }, 3000)
+      })
+    } finally {
+      conversationService.requestControl = originalRequestControl
+    }
+
+    expect(messages).not.toContainEqual(expect.objectContaining({
+      type: 'error',
+      code: 'BACKGROUND_TASK_STOP_FAILED',
+    }))
+  })
+
   it('should handle stop_generation and return idle status', async () => {
     const messages: any[] = []
     const ws = new WebSocket(`${wsUrl}/ws/chat-test-2`)
@@ -1950,6 +2302,28 @@ describe('WebSocket Chat Integration', () => {
     })
   })
 
+  it('should avoid transcript scans for active context-only inspection', async () => {
+    const usageSpy = spyOn(sessionService, 'getTranscriptUsage')
+    const estimateSpy = spyOn(sessionService, 'getTranscriptContextEstimate')
+    try {
+      const sessionId = `chat-context-only-fast-${crypto.randomUUID()}`
+      await runTurn(sessionId, 'hello before fast context-only inspection')
+
+      const res = await fetch(`${baseUrl}/api/sessions/${sessionId}/inspection?includeContext=1&contextOnly=1`)
+      expect(res.status).toBe(200)
+      const body = await res.json() as any
+
+      expect(body.context.model).toBe('mock-opus')
+      expect(body.contextEstimate).toBeUndefined()
+      expect(body.usage).toBeUndefined()
+      expect(usageSpy).not.toHaveBeenCalled()
+      expect(estimateSpy).not.toHaveBeenCalled()
+    } finally {
+      usageSpy.mockRestore()
+      estimateSpy.mockRestore()
+    }
+  })
+
   it('should return initial context for a prewarmed empty session on the first inspection request', async () => {
     await withMockInitDelay(500, async () => {
       const createRes = await fetch(`${baseUrl}/api/sessions`, {
@@ -2194,7 +2568,7 @@ describe('WebSocket Chat Integration', () => {
     const createRes = await fetch(`${baseUrl}/api/sessions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workDir: process.cwd() }),
+      body: JSON.stringify({ workDir: process.cwd(), permissionMode: 'acceptEdits' }),
     })
     expect(createRes.status).toBe(201)
     const { sessionId } = await createRes.json() as { sessionId: string }
@@ -2214,6 +2588,35 @@ describe('WebSocket Chat Integration', () => {
     expect(messagesRes.status).toBe(200)
     const body = await messagesRes.json() as { messages: unknown[] }
     expect(body.messages).toEqual([])
+
+    const inspectionRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/inspection?includeContext=0`)
+    expect(inspectionRes.status).toBe(200)
+    const inspection = await inspectionRes.json() as { status?: { permissionMode?: string } }
+    expect(inspection.status?.permissionMode).toBe('acceptEdits')
+  })
+
+  it('should preserve permission mode when clearing an inactive desktop session', async () => {
+    const createRes = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workDir: process.cwd(), permissionMode: 'acceptEdits' }),
+    })
+    expect(createRes.status).toBe(201)
+    const { sessionId } = await createRes.json() as { sessionId: string }
+    expect(conversationService.hasSession(sessionId)).toBe(false)
+
+    const clearTurn = await runTurn(sessionId, '/clear')
+    expect(
+      clearTurn.some(
+        (m) => m.type === 'system_notification' && m.subtype === 'session_cleared',
+      ),
+    ).toBe(true)
+    expect(clearTurn.some((m) => m.type === 'content_delta')).toBe(false)
+
+    const inspectionRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/inspection?includeContext=0`)
+    expect(inspectionRes.status).toBe(200)
+    const inspection = await inspectionRes.json() as { status?: { permissionMode?: string } }
+    expect(inspection.status?.permissionMode).toBe('acceptEdits')
   })
 
   it('should reject /clear arguments without clearing the desktop session', async () => {
@@ -2398,6 +2801,111 @@ describe('WebSocket Chat Integration', () => {
       expect(startCalls).toHaveLength(1)
       expect(startCalls[0]!.sessionId).toBe(sessionId)
       expect(startCalls[0]!.options?.resumeInterruptedTurn).toBe(false)
+      expect(messages.some((msg) => msg.type === 'content_delta')).toBe(true)
+      expect(messages.some((msg) => msg.type === 'message_complete')).toBe(true)
+      expect(messages.some((msg) => msg.type === 'error')).toBe(false)
+    } finally {
+      ws.close()
+      conversationService.startSession = originalStartSession
+      conversationService.stopSession(sessionId)
+    }
+  }, 20_000)
+
+  it('does not strand the first MiniMax provider turn when prewarm and user message flush together (#844)', async () => {
+    const providerService = new ProviderService()
+    const provider = await providerService.addProvider({
+      presetId: 'minimax',
+      name: 'MiniMax first-turn race',
+      apiKey: 'key-minimax-first-turn-race',
+      baseUrl: 'https://api.minimaxi.com/anthropic',
+      apiFormat: 'anthropic',
+      models: {
+        main: 'MiniMax-M3',
+        haiku: 'MiniMax-M3',
+        sonnet: 'MiniMax-M3',
+        opus: 'MiniMax-M3',
+      },
+      model1mSupport: {
+        main: true,
+        haiku: true,
+        sonnet: true,
+        opus: true,
+      },
+    })
+    await providerService.activateProvider(provider.id)
+
+    const createRes = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workDir: process.cwd() }),
+    })
+    expect(createRes.status).toBe(201)
+    const { sessionId } = await createRes.json() as { sessionId: string }
+
+    const originalStartSession = conversationService.startSession.bind(conversationService)
+    const startCalls: Array<{
+      sessionId: string
+      options: { providerId?: string | null } | undefined
+    }> = []
+
+    conversationService.startSession = (async function patchedStartSession(
+      sid: string,
+      workDir: string,
+      sdkUrl: string,
+      options?: { permissionMode?: string; model?: string; effort?: string; thinking?: 'enabled' | 'adaptive' | 'disabled'; providerId?: string | null },
+    ) {
+      startCalls.push({ sessionId: sid, options })
+      return originalStartSession(sid, workDir, sdkUrl, options)
+    }) as typeof conversationService.startSession
+
+    const messages: any[] = []
+    const ws = new WebSocket(`${wsUrl}/ws/${sessionId}`)
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          ws.close()
+          reject(new Error(`Timed out waiting for first MiniMax provider turn for session ${sessionId}`))
+        }, 10_000)
+
+        ws.onmessage = (event) => {
+          const msg = JSON.parse(event.data as string)
+          messages.push(msg)
+
+          if (msg.type === 'connected') {
+            ws.send(JSON.stringify({ type: 'prewarm_session' }))
+            ws.send(JSON.stringify({ type: 'user_message', content: 'first turn without provider test' }))
+            return
+          }
+
+          if (msg.type === 'error') {
+            clearTimeout(timeout)
+            ws.close()
+            reject(new Error(msg.message))
+            return
+          }
+
+          if (msg.type === 'message_complete') {
+            clearTimeout(timeout)
+            ws.close()
+            resolve()
+          }
+        }
+
+        ws.onerror = () => {
+          clearTimeout(timeout)
+          ws.close()
+          reject(new Error(`WebSocket error for first MiniMax provider turn ${sessionId}`))
+        }
+      })
+
+      expect(startCalls).toHaveLength(1)
+      expect(startCalls[0]).toMatchObject({
+        sessionId,
+        options: {
+          providerId: provider.id,
+        },
+      })
       expect(messages.some((msg) => msg.type === 'content_delta')).toBe(true)
       expect(messages.some((msg) => msg.type === 'message_complete')).toBe(true)
       expect(messages.some((msg) => msg.type === 'error')).toBe(false)
@@ -3461,6 +3969,8 @@ describe('WebSocket Chat Integration', () => {
       const ws = new WebSocket(`${wsUrl}/ws/${sessionId}`)
       let switchTriggered = false
       let turnComplete = false
+      let modeConfirmedBeforeTurnComplete = false
+      let deferredInspectionChecked = false
       try {
         await new Promise<void>((resolve, reject) => {
           const timeout = setTimeout(() => {
@@ -3468,7 +3978,7 @@ describe('WebSocket Chat Integration', () => {
             reject(new Error(`Timed out waiting for active-turn permission switch for session ${sessionId}`))
           }, 10_000)
 
-          ws.onmessage = (event) => {
+          ws.onmessage = async (event) => {
             const msg = JSON.parse(event.data as string)
 
             if (msg.type === 'connected') {
@@ -3494,7 +4004,27 @@ describe('WebSocket Chat Integration', () => {
                 type: 'set_permission_mode',
                 mode: 'bypassPermissions',
               }))
+              await new Promise((resolve) => setTimeout(resolve, 25))
+              const inspectionRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/inspection?includeContext=0`)
+              if (!inspectionRes.ok) {
+                clearTimeout(timeout)
+                ws.close()
+                reject(new Error(`Inspection failed while permission switch was deferred: ${inspectionRes.status}`))
+                return
+              }
+              const inspectionBody = await inspectionRes.json() as { status?: { permissionMode?: string } }
+              deferredInspectionChecked = true
+              if (inspectionBody.status?.permissionMode !== 'default') {
+                clearTimeout(timeout)
+                ws.close()
+                reject(new Error(`Deferred permission switch was exposed before restart: ${inspectionBody.status?.permissionMode}`))
+                return
+              }
               return
+            }
+
+            if (msg.type === 'permission_mode_changed' && !turnComplete) {
+              modeConfirmedBeforeTurnComplete = true
             }
 
             if (
@@ -3531,6 +4061,8 @@ describe('WebSocket Chat Integration', () => {
 
         expect(switchTriggered).toBe(true)
         expect(turnComplete).toBe(true)
+        expect(deferredInspectionChecked).toBe(true)
+        expect(modeConfirmedBeforeTurnComplete).toBe(false)
         expect(startCalls).toHaveLength(2)
         expect(startCalls[0]).toMatchObject({
           sessionId,
@@ -3649,6 +4181,11 @@ describe('WebSocket Chat Integration', () => {
           .filter((msg) => msg.type === 'status')
           .map((msg) => msg.state),
       ).toEqual(['idle'])
+      expect(
+        messages
+          .slice(switchStartIndex)
+          .some((msg) => msg.type === 'permission_mode_changed' && msg.mode === 'bypassPermissions'),
+      ).toBe(true)
       expect(messages.slice(switchStartIndex).some((msg) => msg.type === 'error')).toBe(false)
     } finally {
       ws.close()
@@ -3694,6 +4231,7 @@ describe('WebSocket Chat Integration', () => {
     }) as typeof conversationService.startSession
 
     const ws = new WebSocket(`${wsUrl}/ws/${sessionId}`)
+    const messages: any[] = []
     try {
       await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => {
@@ -3701,6 +4239,7 @@ describe('WebSocket Chat Integration', () => {
         }, 5000)
         ws.onmessage = (event) => {
           const msg = JSON.parse(event.data as string)
+          messages.push(msg)
           if (msg.type === 'connected') {
             clearTimeout(timeout)
             ws.send(JSON.stringify({
@@ -3726,6 +4265,10 @@ describe('WebSocket Chat Integration', () => {
         const body = await res.json() as { status?: { permissionMode?: string } }
         return body.status?.permissionMode === 'acceptEdits'
       }, `persisted inactive permission switch for ${sessionId}`)
+      expect(messages.some((msg) =>
+        msg.type === 'permission_mode_changed' &&
+        msg.mode === 'acceptEdits'
+      )).toBe(true)
 
       await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => {
@@ -3844,6 +4387,72 @@ describe('WebSocket Chat Integration', () => {
     } finally {
       ws.close()
       conversationService.startSession = originalStartSession
+      conversationService.stopSession(sessionId)
+    }
+  }, 20_000)
+
+  it('should persist CLI-originated permission-mode broadcasts', async () => {
+    const createRes = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workDir: process.cwd(), permissionMode: 'default' }),
+    })
+    expect(createRes.status).toBe(201)
+    const { sessionId } = await createRes.json() as { sessionId: string }
+
+    const ws = new WebSocket(`${wsUrl}/ws/${sessionId}`)
+    const messages: any[] = []
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error(`Timed out waiting for CLI permission broadcast turn for session ${sessionId}`))
+        }, 10_000)
+        ws.onmessage = (event) => {
+          const msg = JSON.parse(event.data as string)
+          messages.push(msg)
+          if (msg.type === 'connected') {
+            ws.send(JSON.stringify({ type: 'user_message', content: 'turn before CLI permission broadcast' }))
+            return
+          }
+          if (msg.type === 'message_complete') {
+            clearTimeout(timeout)
+            resolve()
+          }
+          if (msg.type === 'error') {
+            clearTimeout(timeout)
+            reject(new Error(msg.message))
+          }
+        }
+        ws.onerror = () => {
+          clearTimeout(timeout)
+          reject(new Error(`WebSocket error for CLI permission broadcast session ${sessionId}`))
+        }
+      })
+      expect(conversationService.hasSession(sessionId)).toBe(true)
+
+      conversationService.handleSdkPayload(sessionId, `${JSON.stringify({
+        type: 'system',
+        subtype: 'status',
+        status: null,
+        permissionMode: 'acceptEdits',
+      })}\n`)
+
+      await waitUntil(
+        () => messages.some((msg) =>
+          msg.type === 'permission_mode_changed' &&
+          msg.mode === 'acceptEdits'
+        ),
+        `forwarded CLI permission broadcast for ${sessionId}`,
+      )
+      expect(conversationService.getSessionPermissionMode(sessionId)).toBe('acceptEdits')
+      await waitUntil(async () => {
+        const res = await fetch(`${baseUrl}/api/sessions/${sessionId}/inspection?includeContext=0`)
+        if (!res.ok) return false
+        const body = await res.json() as { status?: { permissionMode?: string } }
+        return body.status?.permissionMode === 'acceptEdits'
+      }, `persisted CLI permission broadcast for ${sessionId}`)
+    } finally {
+      ws.close()
       conversationService.stopSession(sessionId)
     }
   }, 20_000)

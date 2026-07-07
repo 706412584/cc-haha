@@ -9,10 +9,12 @@ import { DiagnosticsService, diagnosticsService } from '../services/diagnosticsS
 
 let tmpDir: string
 let originalConfigDir: string | undefined
+let originalAppVersion: string | undefined
 
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-haha-diagnostics-test-'))
   originalConfigDir = process.env.CLAUDE_CONFIG_DIR
+  originalAppVersion = process.env.APP_VERSION
   process.env.CLAUDE_CONFIG_DIR = tmpDir
 })
 
@@ -20,6 +22,8 @@ afterEach(async () => {
   diagnosticsService.restoreConsoleCaptureForTests()
   if (originalConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
   else process.env.CLAUDE_CONFIG_DIR = originalConfigDir
+  if (originalAppVersion === undefined) delete process.env.APP_VERSION
+  else process.env.APP_VERSION = originalAppVersion
   await fs.rm(tmpDir, { recursive: true, force: true })
 })
 
@@ -167,6 +171,18 @@ describe('DiagnosticsService', () => {
     expect(archiveText).toContain('api.example.com')
     expect(archiveText).not.toContain('sk-provider-secret')
     expect(archiveText).not.toContain('provider-secret')
+  })
+
+  test('exports the injected desktop app version in app-info', async () => {
+    process.env.APP_VERSION = '0.5.32'
+    const service = new DiagnosticsService()
+
+    const bundle = await service.exportBundle()
+    const archiveText = gunzipSync(await fs.readFile(bundle.path)).toString('utf-8')
+
+    expect(archiveText).toContain('app-info.json')
+    expect(archiveText).toContain('"appVersion": "0.5.32"')
+    expect(archiveText).not.toContain('"appVersion": "999.0.0-local"')
   })
 
   test('keeps fatal startup errors visible on stderr while recording diagnostics', async () => {

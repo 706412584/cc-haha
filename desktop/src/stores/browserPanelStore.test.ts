@@ -63,6 +63,35 @@ describe('browserPanelStore', () => {
     expect(useBrowserPanelStore.getState().bySession['s1']!.pickerActive).toBe(true)
   })
 
+  it('tracks preview zoom per session and clamps to supported bounds', () => {
+    const st = useBrowserPanelStore.getState()
+    st.open('s1', 'http://localhost/a')
+    st.open('s2', 'http://localhost/b')
+
+    expect(useBrowserPanelStore.getState().bySession['s1']!.zoom).toBe(1)
+
+    st.setZoom('s1', 0.8)
+    expect(useBrowserPanelStore.getState().bySession['s1']!.zoom).toBe(0.8)
+    expect(useBrowserPanelStore.getState().bySession['s2']!.zoom).toBe(1)
+
+    st.setZoom('s1', 0.1)
+    expect(useBrowserPanelStore.getState().bySession['s1']!.zoom).toBe(0.5)
+
+    st.setZoom('s1', 2)
+    expect(useBrowserPanelStore.getState().bySession['s1']!.zoom).toBe(1.5)
+  })
+
+  it('preserves browser zoom when the same session opens another target', () => {
+    const st = useBrowserPanelStore.getState()
+    st.open('s1', 'http://localhost/a')
+    st.setZoom('s1', 0.8)
+
+    st.open('s1', 'http://localhost/b')
+
+    expect(useBrowserPanelStore.getState().bySession['s1']!.url).toBe('http://localhost/b')
+    expect(useBrowserPanelStore.getState().bySession['s1']!.zoom).toBe(0.8)
+  })
+
   it('open starts a session in the loading state', () => {
     useBrowserPanelStore.getState().open('s1', 'http://localhost/a')
     expect(useBrowserPanelStore.getState().bySession['s1']!.loading).toBe(true)

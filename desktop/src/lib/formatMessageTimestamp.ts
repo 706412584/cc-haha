@@ -46,6 +46,18 @@ export function formatExactMessageTimestamp(value: number | string | Date, local
   }).format(date)
 }
 
+export function formatMessageHoverTime(
+  value: number | string | Date,
+  locale: Locale,
+  now = Date.now(),
+): string {
+  const date = coerceDate(value)
+  if (!date) return ''
+  return isSameLocalYear(date, new Date(now))
+    ? formatMonthDayTime(date, locale)
+    : formatYearMonthDayTime(date, locale)
+}
+
 function coerceDate(value: number | string | Date): Date | null {
   const date = value instanceof Date ? value : new Date(value)
   return Number.isFinite(date.getTime()) ? date : null

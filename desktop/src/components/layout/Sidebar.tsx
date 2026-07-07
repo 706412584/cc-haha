@@ -173,7 +173,9 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
       if (tab.type === 'session' && tab.status === 'running') ids.add(tab.sessionId)
     }
     for (const [sessionId, sessionState] of Object.entries(chatSessions)) {
-      if (sessionState.chatState !== 'idle') ids.add(sessionId)
+      const hasRunningBackgroundTask = Object.values(sessionState.backgroundAgentTasks ?? {})
+        .some((task) => task.status === 'running')
+      if (sessionState.chatState !== 'idle' || hasRunningBackgroundTask) ids.add(sessionId)
     }
     return ids
   }, [chatSessions, tabs])
@@ -978,12 +980,12 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
               <button
                 type="button"
                 onClick={() => void refreshSessionsNow()}
-                disabled={isLoading}
+                disabled={showInitialLoading}
                 className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-[12px] border border-[var(--color-sidebar-search-border)] bg-[var(--color-sidebar-search-bg)] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-sidebar-item-hover)] hover:text-[var(--color-text-primary)] disabled:cursor-default disabled:opacity-65 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
                 aria-label={t('sidebar.refreshSessions')}
                 title={t('sidebar.refreshSessions')}
               >
-                <RefreshCw className={`h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} strokeWidth={1.9} aria-hidden="true" />
+                <RefreshCw className={`h-4 w-4 ${showInitialLoading ? 'animate-spin' : ''}`} strokeWidth={1.9} aria-hidden="true" />
               </button>
               <button
                 type="button"
@@ -1257,6 +1259,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                                     }
                                   `}
                                   aria-pressed={isBatchMode ? selectedSessionIds.has(session.id) : undefined}
+                                  title={session.title || 'Untitled'}
                                 >
                                   <span className="flex min-w-0 items-center gap-2">
                                     {isBatchMode ? (
@@ -1572,8 +1575,8 @@ function useSessionListAutoRefresh(fetchSessions: () => Promise<void>): () => Pr
   const inFlightRef = useRef<Promise<void> | null>(null)
   const lastStartedAtRef = useRef(0)
 
-  const refreshSessions = useCallback((force = false) => {
-    if (inFlightRef.current) return inFlightRef.current
+  const refreshSessions = useCallback((force = false, replaceInFlight = false) => {
+    if (inFlightRef.current && !replaceInFlight) return inFlightRef.current
 
     const now = Date.now()
     if (!force && now - lastStartedAtRef.current < SESSION_LIST_FOCUS_REFRESH_MIN_MS) {
@@ -1615,5 +1618,5 @@ function useSessionListAutoRefresh(fetchSessions: () => Promise<void>): () => Pr
     }
   }, [refreshSessions])
 
-  return useCallback(() => refreshSessions(true), [refreshSessions])
+  return useCallback(() => refreshSessions(true, true), [refreshSessions])
 }

@@ -15,12 +15,14 @@ import type {
   OpenAITool,
 } from './types.js'
 import { stripLeadingBillingHeader } from './billingHeader.js'
+import { normalizeOpenAIReasoningEffort } from './effort.js'
 
 type OpenAIChatImageContentMode = 'vision' | 'text_only'
 
 type OpenAIChatTransformOptions = {
   roundTripReasoningContent?: boolean
   passThinkingToggle?: boolean
+  passSamplingParams?: boolean
   imageContentMode?: OpenAIChatImageContentMode
 }
 
@@ -68,9 +70,12 @@ export function anthropicToOpenaiChat(
   // Claude Code sends very large values (e.g. 128K) that exceed many
   // providers' limits (DeepSeek: 8192, etc.).
 
-  // temperature & top_p
-  if (body.temperature !== undefined) result.temperature = body.temperature
-  if (body.top_p !== undefined) result.top_p = body.top_p
+  // Claude Code sends Anthropic sampling params that some compatible
+  // providers reject. Keep them opt-in for providers known to accept them.
+  if (options.passSamplingParams) {
+    if (body.temperature !== undefined) result.temperature = body.temperature
+    if (body.top_p !== undefined) result.top_p = body.top_p
+  }
 
   // stop_sequences → stop
   if (body.stop_sequences && body.stop_sequences.length > 0) {
@@ -109,6 +114,10 @@ export function anthropicToOpenaiChat(
     if (options.passThinkingToggle) {
       result.thinking = { type: body.thinking.type }
     }
+  }
+  const outputConfigEffort = normalizeOpenAIReasoningEffort(body.output_config?.effort)
+  if (outputConfigEffort !== undefined) {
+    result.reasoning_effort = outputConfigEffort
   }
 
   return result

@@ -31,6 +31,7 @@ export type ClientMessage =
   | { type: 'set_pipeline_mode'; flavor: 'solo' | 'normal' }
   | { type: 'set_handoff_summary'; previousSessionId: string; deep?: boolean }
   | { type: 'stop_generation' }
+  | { type: 'stop_background_task'; taskId: string }
   | { type: 'ping' }
 
 export type AttachmentRef = {

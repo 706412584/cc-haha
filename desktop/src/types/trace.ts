@@ -82,6 +82,7 @@ export type TraceSessionSummary = {
 
 export type TraceSession = {
   sessionId: string
+  messageSignature?: string | null
   session?: {
     id: string
     title: string
@@ -116,4 +117,9 @@ export type TraceSessionList = {
   total: number
   storageDir: string
   settings: TraceCaptureSettings
+}
+
+export type TraceSessionDeleteResult = {
+  sessionId: string
+  deleted: boolean
 }

@@ -64,16 +64,15 @@ export function TraceSession({
       if (!silent) setState({ status: 'loading' })
       if (silent) setRefreshing(true)
       try {
-        const [trace, messageResponse] = await Promise.all([
-          sessionsApi.getTrace(sessionId),
-          sessionsApi.getMessages(sessionId).catch(() => ({ messages: [] })),
-        ])
+        const trace = await sessionsApi.getTrace(sessionId)
         if (!isTraceSessionData(trace)) {
           throw new Error(t('trace.snapshotEmpty'))
         }
         if (cancelled) return
-        const signature = traceSnapshotSignature(trace, messageResponse.messages)
+        const signature = traceSnapshotSignature(trace)
         if (silent && snapshotSignatureRef.current === signature) return
+        const messageResponse = await sessionsApi.getMessages(sessionId).catch(() => ({ messages: [] }))
+        if (cancelled) return
         snapshotSignatureRef.current = signature
         setState({ status: 'ready', trace, messages: messageResponse.messages })
         setClockNowMs(Date.now())
@@ -456,9 +455,10 @@ function TraceEmpty() {
   )
 }
 
-function traceSnapshotSignature(trace: TraceSessionData, messages: MessageEntry[]): string {
+function traceSnapshotSignature(trace: TraceSessionData): string {
   return JSON.stringify({
     summary: trace.summary,
+    messageSignature: trace.messageSignature ?? null,
     calls: trace.calls.map((call) => ({
       id: call.id,
       status: call.status,
@@ -477,12 +477,6 @@ function traceSnapshotSignature(trace: TraceSessionData, messages: MessageEntry[
       severity: event.severity,
       callId: event.callId,
       message: event.message,
-    })),
-    messages: messages.map((message) => ({
-      id: message.id,
-      type: message.type,
-      timestamp: message.timestamp,
-      content: message.content,
     })),
   })
 }

@@ -13,10 +13,12 @@ import type {
   OpenAIChatContentPart,
 } from './types.js'
 import { stripLeadingBillingHeader } from './billingHeader.js'
+import { normalizeOpenAIReasoningEffort } from './effort.js'
 
 export type OpenAIResponsesTransformOptions = {
   /** Stable cache routing key, forwarded as `prompt_cache_key`. */
   cacheKey?: string
+  passSamplingParams?: boolean
 }
 
 /**
@@ -59,9 +61,12 @@ export function anthropicToOpenaiResponses(
   // max_tokens — omit to let upstream provider use its own default/max.
   // Claude Code sends very large values that exceed many providers' limits.
 
-  // temperature & top_p
-  if (body.temperature !== undefined) result.temperature = body.temperature
-  if (body.top_p !== undefined) result.top_p = body.top_p
+  // Claude Code sends Anthropic sampling params that some compatible
+  // providers reject. Keep them opt-in for providers known to accept them.
+  if (options.passSamplingParams) {
+    if (body.temperature !== undefined) result.temperature = body.temperature
+    if (body.top_p !== undefined) result.top_p = body.top_p
+  }
 
   // tools
   if (body.tools && body.tools.length > 0) {
@@ -90,6 +95,10 @@ export function anthropicToOpenaiResponses(
     } else if (body.thinking.type === 'enabled') {
       result.reasoning = { effort: 'high' }
     }
+  }
+  const outputConfigEffort = normalizeOpenAIReasoningEffort(body.output_config?.effort)
+  if (outputConfigEffort !== undefined) {
+    result.reasoning = { ...(result.reasoning ?? {}), effort: outputConfigEffort }
   }
 
   // stop_sequences not supported in Responses API, dropped

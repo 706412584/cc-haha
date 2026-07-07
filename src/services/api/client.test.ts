@@ -114,4 +114,68 @@ describe('getAnthropicClient', () => {
       else process.env.CLAUDE_CODE_SIMPLE = originalSimple
     }
   })
+
+  test('bypasses system proxy for local desktop provider proxy base URLs', async () => {
+    const { getAnthropicClient } = await import('./client.js')
+    const originalAuthToken = process.env.ANTHROPIC_AUTH_TOKEN
+    const originalApiKey = process.env.ANTHROPIC_API_KEY
+    const originalBaseUrl = process.env.ANTHROPIC_BASE_URL
+    const originalHttpProxy = process.env.HTTP_PROXY
+    const originalHttpsProxy = process.env.HTTPS_PROXY
+    const originalNoProxy = process.env.NO_PROXY
+    const originalLowerHttpProxy = process.env.http_proxy
+    const originalLowerHttpsProxy = process.env.https_proxy
+    const originalLowerNoProxy = process.env.no_proxy
+    const originalSimple = process.env.CLAUDE_CODE_SIMPLE
+
+    process.env.ANTHROPIC_AUTH_TOKEN = 'provider-bearer-token'
+    process.env.ANTHROPIC_BASE_URL = 'http://127.0.0.1:3456/proxy/providers/provider-1'
+    process.env.HTTP_PROXY = 'http://127.0.0.1:1181'
+    process.env.HTTPS_PROXY = 'http://127.0.0.1:1181'
+    process.env.NO_PROXY = 'localhost,127.0.0.1,::1'
+    process.env.CLAUDE_CODE_SIMPLE = '1'
+    delete process.env.ANTHROPIC_API_KEY
+    delete process.env.http_proxy
+    delete process.env.https_proxy
+    delete process.env.no_proxy
+
+    try {
+      const client = await getAnthropicClient({
+        maxRetries: 0,
+        model: 'deepseek-v4-pro',
+      })
+
+      expect(client._options.fetchOptions?.proxy).toBeUndefined()
+    } finally {
+      if (originalAuthToken === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN
+      else process.env.ANTHROPIC_AUTH_TOKEN = originalAuthToken
+
+      if (originalApiKey === undefined) delete process.env.ANTHROPIC_API_KEY
+      else process.env.ANTHROPIC_API_KEY = originalApiKey
+
+      if (originalBaseUrl === undefined) delete process.env.ANTHROPIC_BASE_URL
+      else process.env.ANTHROPIC_BASE_URL = originalBaseUrl
+
+      if (originalHttpProxy === undefined) delete process.env.HTTP_PROXY
+      else process.env.HTTP_PROXY = originalHttpProxy
+
+      if (originalHttpsProxy === undefined) delete process.env.HTTPS_PROXY
+      else process.env.HTTPS_PROXY = originalHttpsProxy
+
+      if (originalNoProxy === undefined) delete process.env.NO_PROXY
+      else process.env.NO_PROXY = originalNoProxy
+
+      if (originalLowerHttpProxy === undefined) delete process.env.http_proxy
+      else process.env.http_proxy = originalLowerHttpProxy
+
+      if (originalLowerHttpsProxy === undefined) delete process.env.https_proxy
+      else process.env.https_proxy = originalLowerHttpsProxy
+
+      if (originalLowerNoProxy === undefined) delete process.env.no_proxy
+      else process.env.no_proxy = originalLowerNoProxy
+
+      if (originalSimple === undefined) delete process.env.CLAUDE_CODE_SIMPLE
+      else process.env.CLAUDE_CODE_SIMPLE = originalSimple
+    }
+  })
 })

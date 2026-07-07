@@ -32,6 +32,11 @@ export type TaskListSummary = {
   pendingCount: number
 }
 
+type TaskListWithTasks = {
+  summary: TaskListSummary
+  tasks: TaskInfo[]
+}
+
 export class TaskService {
   private getConfigDir(): string {
     return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude')
@@ -43,30 +48,8 @@ export class TaskService {
 
   /** 列出所有 task list (目录) */
   async listTaskLists(): Promise<TaskListSummary[]> {
-    const tasksDir = this.getTasksDir()
-    try {
-      const entries = await fs.readdir(tasksDir, { withFileTypes: true })
-      const results: TaskListSummary[] = []
-
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue
-        const tasks = await this.getTasksForList(entry.name)
-        if (tasks.length === 0) continue
-
-        results.push({
-          id: entry.name,
-          taskCount: tasks.length,
-          completedCount: tasks.filter((t) => t.status === 'completed').length,
-          inProgressCount: tasks.filter((t) => t.status === 'in_progress').length,
-          pendingCount: tasks.filter((t) => t.status === 'pending').length,
-        })
-      }
-
-      return results
-    } catch (err: any) {
-      if (err.code === 'ENOENT') return []
-      throw err
-    }
+    const lists = await this.readTaskListsWithTasks()
+    return lists.map((list) => list.summary)
   }
 
   /** 获取指定 task list 的所有任务 */
@@ -103,19 +86,56 @@ export class TaskService {
 
   /** 列出所有任务（跨所有 task list） */
   async listTasks(): Promise<TaskInfo[]> {
-    const taskLists = await this.listTaskLists()
-    const allTasks: TaskInfo[] = []
-    for (const list of taskLists) {
-      const tasks = await this.getTasksForList(list.id)
-      allTasks.push(...tasks)
-    }
-    return allTasks
+    const taskLists = await this.readTaskListsWithTasks()
+    return taskLists.flatMap((list) => list.tasks)
   }
 
   /** 获取单个任务详情 */
   async getTask(taskListId: string, taskId: string): Promise<TaskInfo | null> {
     const tasks = await this.getTasksForList(taskListId)
     return tasks.find((t) => t.id === taskId) || null
+  }
+
+  private async readTaskListsWithTasks(): Promise<TaskListWithTasks[]> {
+    const tasksDir = this.getTasksDir()
+    try {
+      const entries = await fs.readdir(tasksDir, { withFileTypes: true })
+      const lists = await Promise.all(entries
+        .filter((entry) => entry.isDirectory())
+        .map(async (entry) => {
+          const tasks = await this.getTasksForList(entry.name)
+          if (tasks.length === 0) return null
+          return {
+            summary: this.summarizeTaskList(entry.name, tasks),
+            tasks,
+          }
+        }))
+
+      return lists.filter((list): list is TaskListWithTasks => list !== null)
+    } catch (err: any) {
+      if (err.code === 'ENOENT') return []
+      throw err
+    }
+  }
+
+  private summarizeTaskList(taskListId: string, tasks: TaskInfo[]): TaskListSummary {
+    let completedCount = 0
+    let inProgressCount = 0
+    let pendingCount = 0
+
+    for (const task of tasks) {
+      if (task.status === 'completed') completedCount++
+      else if (task.status === 'in_progress') inProgressCount++
+      else pendingCount++
+    }
+
+    return {
+      id: taskListId,
+      taskCount: tasks.length,
+      completedCount,
+      inProgressCount,
+      pendingCount,
+    }
   }
 
   /** 解析单个任务文件 — 匹配 CLI V2 Task 格式 */

@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import { shouldLetGoalPromptHookContinue } from './stopHooks.js'
+import {
+  formatGoalContinuationStatusOutput,
+  shouldLetGoalPromptHookContinue,
+} from './stopHooks.js'
 
 describe('stop hook goal continuation', () => {
   test('converts unmet managed /goal prompt hooks into normal blocking continuation', () => {
@@ -34,5 +37,13 @@ describe('stop hook goal continuation', () => {
         },
       }),
     ).toBe(false)
+  })
+
+  test('formats goal continuation status output for visible transcript separators', () => {
+    expect(
+      formatGoalContinuationStatusOutput(
+        'Prompt hook condition was not met: finish <release> & verify',
+      ),
+    ).toBe('Goal continuing: finish release verify')
   })
 })

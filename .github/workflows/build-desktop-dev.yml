@@ -13,6 +13,7 @@ on:
           - macos-arm64
           - macos-x64
           - windows-x64
+          - windows-arm64
           - linux-x64
           - linux-arm64
 
@@ -31,7 +32,7 @@ jobs:
     steps:
       - id: set-matrix
         run: |
-          ALL='[{"platform":"macos-latest","target_triple":"aarch64-apple-darwin","builder_args":"--mac dmg zip --arm64","label":"macOS-ARM64","artifact_name":"macos-arm64","smoke_platform":"macos"},{"platform":"macos-latest","target_triple":"x86_64-apple-darwin","builder_args":"--mac dmg zip --x64","label":"macOS-x64","artifact_name":"macos-x64","smoke_platform":"macos"},{"platform":"windows-latest","target_triple":"x86_64-pc-windows-msvc","builder_args":"--win nsis --x64","label":"Windows-x64","artifact_name":"windows-x64","smoke_platform":"windows"},{"platform":"ubuntu-22.04","target_triple":"x86_64-unknown-linux-gnu","builder_args":"--linux AppImage deb --x64","label":"Linux-x64","artifact_name":"linux-x64","smoke_platform":"linux"},{"platform":"ubuntu-22.04-arm","target_triple":"aarch64-unknown-linux-gnu","builder_args":"--linux AppImage deb --arm64","label":"Linux-ARM64","artifact_name":"linux-arm64","smoke_platform":"linux"}]'
+          ALL='[{"platform":"macos-latest","target_triple":"aarch64-apple-darwin","builder_args":"--mac dmg zip --arm64","label":"macOS-ARM64","artifact_name":"macos-arm64","smoke_platform":"macos","arch":"arm64"},{"platform":"macos-latest","target_triple":"x86_64-apple-darwin","builder_args":"--mac dmg zip --x64","label":"macOS-x64","artifact_name":"macos-x64","smoke_platform":"macos","arch":"x64"},{"platform":"windows-latest","target_triple":"x86_64-pc-windows-msvc","builder_args":"--win nsis --x64","label":"Windows-x64","artifact_name":"windows-x64","smoke_platform":"windows","arch":"x64"},{"platform":"windows-latest","target_triple":"aarch64-pc-windows-msvc","builder_args":"--win nsis --arm64","label":"Windows-ARM64","artifact_name":"windows-arm64","smoke_platform":"windows","arch":"arm64"},{"platform":"ubuntu-22.04","target_triple":"x86_64-unknown-linux-gnu","builder_args":"--linux AppImage deb --x64","label":"Linux-x64","artifact_name":"linux-x64","smoke_platform":"linux","arch":"x64"},{"platform":"ubuntu-22.04-arm","target_triple":"aarch64-unknown-linux-gnu","builder_args":"--linux AppImage deb --arm64","label":"Linux-ARM64","artifact_name":"linux-arm64","smoke_platform":"linux","arch":"arm64"}]'
           SELECTED="${{ inputs.platforms }}"
           if [ "$SELECTED" = "all" ]; then
             MATRIX=$(echo "$ALL" | jq -c '{include: .}')
@@ -40,6 +41,7 @@ jobs:
               ($sel == "macos-arm64" and .label == "macOS-ARM64") or
               ($sel == "macos-x64" and .label == "macOS-x64") or
               ($sel == "windows-x64" and .label == "Windows-x64") or
+              ($sel == "windows-arm64" and .label == "Windows-ARM64") or
               ($sel == "linux-x64" and .label == "Linux-x64") or
               ($sel == "linux-arm64" and .label == "Linux-ARM64")
             )]}')
@@ -114,7 +116,7 @@ jobs:
         run: node ./node_modules/electron-builder/out/cli/cli.js ${{ matrix.builder_args }} --publish never
 
       - name: Verify packaged app structure
-        run: bun run test:package-smoke --platform ${{ matrix.smoke_platform }} --package-kind release --artifacts-dir desktop/build-artifacts/electron
+        run: bun run test:package-smoke --platform ${{ matrix.smoke_platform }} --arch ${{ matrix.arch }} --package-kind release --artifacts-dir desktop/build-artifacts/electron
 
       - name: Collect artifacts
         id: collect

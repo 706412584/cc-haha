@@ -4,6 +4,12 @@ export type EditableSnapshot = { text: string; color: string; background: string
 export type EditBubbleChange = EditDiff & { description?: string }
 type Deps = { onConfirm: (change: EditBubbleChange) => void; onCancel: () => void }
 
+const VIEWPORT_MARGIN = 8
+const BUBBLE_GAP = 8
+const BUBBLE_WIDTH = 340
+const BUBBLE_ESTIMATED_HEIGHT = 380
+const BUBBLE_MIN_HEIGHT = 160
+
 const FIELDS: Array<{ key: keyof EditableSnapshot; label: string }> = [
   { key: 'text', label: '文本' },
   { key: 'color', label: '文字颜色' },
@@ -43,6 +49,35 @@ function buildPatch(key: keyof EditableSnapshot, value: string): EditInput {
   return patch
 }
 
+function computeBubbleLayout(rect: DOMRect, contentHeight: number) {
+  const viewportWidth = Math.max(window.innerWidth || 0, BUBBLE_WIDTH + VIEWPORT_MARGIN * 2)
+  const viewportHeight = Math.max(window.innerHeight || 0, BUBBLE_MIN_HEIGHT + VIEWPORT_MARGIN * 2)
+  const desiredHeight = Math.min(
+    Math.max(Math.ceil(contentHeight) || BUBBLE_ESTIMATED_HEIGHT, BUBBLE_MIN_HEIGHT),
+    Math.max(BUBBLE_MIN_HEIGHT, viewportHeight - VIEWPORT_MARGIN * 2),
+  )
+  const belowTop = rect.bottom + BUBBLE_GAP
+  const spaceBelow = viewportHeight - VIEWPORT_MARGIN - belowTop
+  const spaceAbove = rect.top - BUBBLE_GAP - VIEWPORT_MARGIN
+  let top: number
+
+  if (spaceBelow >= desiredHeight) {
+    top = belowTop
+  } else if (spaceAbove >= desiredHeight) {
+    top = rect.top - BUBBLE_GAP - desiredHeight
+  } else if (spaceAbove > spaceBelow) {
+    top = VIEWPORT_MARGIN
+  } else {
+    top = Math.min(Math.max(belowTop, VIEWPORT_MARGIN), viewportHeight - VIEWPORT_MARGIN - BUBBLE_MIN_HEIGHT)
+  }
+
+  top = Math.max(VIEWPORT_MARGIN, Math.round(top))
+  const maxLeft = Math.max(VIEWPORT_MARGIN, viewportWidth - BUBBLE_WIDTH - VIEWPORT_MARGIN)
+  const left = Math.max(VIEWPORT_MARGIN, Math.min(Math.round(rect.left), maxLeft))
+  const maxHeight = Math.max(BUBBLE_MIN_HEIGHT, viewportHeight - VIEWPORT_MARGIN - top)
+  return { top, left, maxHeight }
+}
+
 export function createEditBubble(el: HTMLElement, deps: Deps): { host: HTMLElement; destroy: () => void } {
   const original = snapshotEditableStyles(el)
   const current: EditableSnapshot = { ...original }
@@ -50,25 +85,26 @@ export function createEditBubble(el: HTMLElement, deps: Deps): { host: HTMLEleme
 
   const host = document.createElement('div')
   const rect = el.getBoundingClientRect()
-  const top = Math.max(8, Math.min(rect.bottom + 8, window.innerHeight - 380))
-  const left = Math.max(8, Math.min(rect.left, window.innerWidth - 356))
-  host.style.cssText = `position:fixed;top:${top}px;left:${left}px;z-index:2147483647`
+  host.style.cssText = 'position:fixed;top:0;left:0;z-index:2147483647;visibility:hidden'
   const shadow = host.attachShadow({ mode: 'open' })
 
   const wrap = document.createElement('div')
-  wrap.setAttribute('style', 'width:340px;box-sizing:border-box;background:#fff;border-radius:14px;box-shadow:0 10px 34px rgba(0,0,0,.2);padding:12px;font:13px/1.45 -apple-system,system-ui,sans-serif;color:#111')
+  wrap.setAttribute('style', 'width:340px;box-sizing:border-box;background:#fff;border-radius:14px;box-shadow:0 10px 34px rgba(0,0,0,.2);padding:12px;font:13px/1.45 -apple-system,system-ui,sans-serif;color:#111;display:flex;flex-direction:column;overflow:hidden')
+
+  const body = document.createElement('div')
+  body.setAttribute('style', 'min-height:0;overflow:auto')
 
   const desc = document.createElement('input')
   desc.setAttribute('data-field', 'description')
   desc.placeholder = '描述这些更改…'
   desc.setAttribute('style', 'width:100%;box-sizing:border-box;border:none;outline:none;font-size:14px;padding:6px 4px')
   desc.addEventListener('input', () => { description = desc.value })
-  wrap.appendChild(desc)
+  body.appendChild(desc)
 
   const tag = document.createElement('div')
   tag.textContent = el.tagName.toLowerCase()
   tag.setAttribute('style', 'color:#8a8a8a;border-top:1px solid #eee;margin-top:6px;padding:8px 4px 4px;font-weight:600')
-  wrap.appendChild(tag)
+  body.appendChild(tag)
 
   for (const f of FIELDS) {
     const row = document.createElement('label')
@@ -87,10 +123,11 @@ export function createEditBubble(el: HTMLElement, deps: Deps): { host: HTMLEleme
     })
     row.appendChild(lab)
     row.appendChild(inp)
-    wrap.appendChild(row)
+    body.appendChild(row)
   }
 
   const footer = document.createElement('div')
+  footer.setAttribute('data-region', 'footer')
   footer.setAttribute('style', 'display:flex;justify-content:space-between;align-items:center;margin-top:12px')
   const cancelBtn = document.createElement('button')
   cancelBtn.setAttribute('data-action', 'cancel')
@@ -111,9 +148,16 @@ export function createEditBubble(el: HTMLElement, deps: Deps): { host: HTMLEleme
 
   footer.appendChild(cancelBtn)
   footer.appendChild(confirmBtn)
+  wrap.appendChild(body)
   wrap.appendChild(footer)
   shadow.appendChild(wrap)
   document.documentElement.appendChild(host)
+  const measuredHeight = wrap.getBoundingClientRect().height || wrap.scrollHeight || BUBBLE_ESTIMATED_HEIGHT
+  const layout = computeBubbleLayout(rect, measuredHeight)
+  host.style.top = `${layout.top}px`
+  host.style.left = `${layout.left}px`
+  host.style.visibility = 'visible'
+  wrap.style.maxHeight = `${layout.maxHeight}px`
 
   return { host, destroy: () => { host.remove() } }
 }

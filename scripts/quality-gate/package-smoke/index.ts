@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process'
 import { dirname, join, relative, resolve } from 'node:path'
 
 export type PackageSmokePlatform = 'macos' | 'windows' | 'linux'
+export type PackageSmokeArch = 'x64' | 'arm64'
 export type VerificationMode = 'bundle-structure' | 'static-artifact'
 export type PackageKind = 'auto' | 'dir' | 'release'
 
@@ -15,6 +16,7 @@ type CheckRecord = {
 
 type InspectOptions = {
   platform: PackageSmokePlatform
+  arch?: PackageSmokeArch
   artifactsDir?: string
   requireMacosGatekeeper?: boolean
   packageKind?: PackageKind
@@ -24,6 +26,7 @@ type InspectOptions = {
 
 export type PackageSmokeArgs = {
   platform: PackageSmokePlatform
+  arch?: PackageSmokeArch
   artifactsDir?: string
   requireMacosGatekeeper?: boolean
   packageKind?: PackageKind
@@ -34,6 +37,7 @@ export type PackageSmokeReport = {
   hostPlatform: string
   productName: string
   version: string
+  arch?: PackageSmokeArch
   verificationMode: VerificationMode
   packageKind: PackageKind
   artifactsDir: string
@@ -59,7 +63,7 @@ type PackageSmokeCommandResult = {
 type PackageSmokeCommandRunner = (command: string, args: string[]) => PackageSmokeCommandResult
 
 function usage() {
-  return 'Usage: bun run test:package-smoke --platform <macos|windows|linux> [--package-kind <auto|dir|release>] [--artifacts-dir <path>] [--require-macos-gatekeeper]'
+  return 'Usage: bun run test:package-smoke --platform <macos|windows|linux> [--arch <x64|arm64>] [--package-kind <auto|dir|release>] [--artifacts-dir <path>] [--require-macos-gatekeeper]'
 }
 
 function readArgValue(argv: string[], index: number, flag: string) {
@@ -72,6 +76,7 @@ function readArgValue(argv: string[], index: number, flag: string) {
 
 export function parsePackageSmokeArgs(argv: string[]): PackageSmokeArgs {
   let platform: PackageSmokePlatform | undefined
+  let arch: PackageSmokeArch | undefined
   let artifactsDir: string | undefined
   let requireMacosGatekeeper = false
   let packageKind: PackageKind = 'auto'
@@ -84,6 +89,17 @@ export function parsePackageSmokeArgs(argv: string[]): PackageSmokeArgs {
         platform = value
       } else {
         throw new Error(`Unsupported --platform value: ${value}. Expected macos|windows|linux.\n${usage()}`)
+      }
+      index += 1
+      continue
+    }
+
+    if (arg === '--arch') {
+      const value = readArgValue(argv, index, arg)
+      if (value === 'x64' || value === 'arm64') {
+        arch = value
+      } else {
+        throw new Error(`Unsupported --arch value: ${value}. Expected x64|arm64.\n${usage()}`)
       }
       index += 1
       continue
@@ -118,6 +134,7 @@ export function parsePackageSmokeArgs(argv: string[]): PackageSmokeArgs {
 
   return {
     platform,
+    arch,
     artifactsDir,
     requireMacosGatekeeper,
     packageKind,
@@ -429,6 +446,7 @@ function addInstalledUpdateMetadataCheck(
 function createReport(
   rootDir: string,
   platform: PackageSmokePlatform,
+  arch: PackageSmokeArch | undefined,
   metadata: DesktopMetadata,
   artifactsDir: string,
   verificationMode: VerificationMode,
@@ -440,6 +458,7 @@ function createReport(
     hostPlatform,
     productName: metadata.productName,
     version: metadata.version,
+    arch,
     verificationMode,
     packageKind,
     artifactsDir,
@@ -560,9 +579,9 @@ function inspectMacosArtifacts(rootDir: string, report: PackageSmokeReport, opti
 function inspectWindowsArtifacts(rootDir: string, report: PackageSmokeReport) {
   const installers = findMatches(report.artifactsDir, (candidate) => {
     const normalized = normalizePath(candidate)
-    return normalized.endsWith('.exe') && !normalized.includes('/win-unpacked/')
+    return normalized.endsWith('.exe') && !isInsideWindowsUnpackedDir(normalized)
   })
-  const unpackedDir = findMatches(report.artifactsDir, (candidate) => normalizePath(candidate).endsWith('/win-unpacked'), { directoriesOnly: true })[0]
+  const unpackedDir = findWindowsUnpackedDir(report.artifactsDir, report.arch)
   const electronDir = join(report.artifactsDir, 'electron')
   const updateMetadata = findMatches(report.artifactsDir, (candidate) => candidate.endsWith('latest.yml'))
   const releaseMode = report.packageKind === 'release' || (report.packageKind === 'auto' && (installers.length > 0 || updateMetadata.length > 0))
@@ -589,6 +608,17 @@ function inspectWindowsArtifacts(rootDir: string, report: PackageSmokeReport) {
     const resourcesDir = join(unpackedDir, 'resources')
     const unpackedResourcesDir = join(resourcesDir, 'app.asar.unpacked')
     const nodePtyDir = join(unpackedResourcesDir, 'node_modules', 'node-pty')
+    const sidecarDir = join(unpackedResourcesDir, 'src-tauri', 'binaries')
+    const sidecarNeedle = report.arch === 'arm64'
+      ? '/claude-sidecar-aarch64-pc-windows-msvc.exe'
+      : report.arch === 'x64'
+        ? '/claude-sidecar-x86_64-pc-windows-msvc.exe'
+        : '/claude-sidecar-'
+    const nodePtyNeedle = report.arch === 'arm64'
+      ? '/win32-arm64/'
+      : report.arch === 'x64'
+        ? '/win32-x64/'
+        : '/win32-'
     addPresenceCheck(report, rootDir, 'Windows app.asar', join(resourcesDir, 'app.asar'))
     addInstalledUpdateMetadataCheck(
       report,
@@ -607,21 +637,23 @@ function inspectWindowsArtifacts(rootDir: string, report: PackageSmokeReport) {
     addMatchCheck(
       report,
       rootDir,
-      'Windows unpacked sidecar binary',
-      findMatches(join(unpackedResourcesDir, 'src-tauri', 'binaries'), (candidate) => normalizePath(candidate).includes('/claude-sidecar-')),
-      join(unpackedResourcesDir, 'src-tauri', 'binaries'),
+      report.arch ? `Windows ${report.arch} unpacked sidecar binary` : 'Windows unpacked sidecar binary',
+      findMatches(sidecarDir, (candidate) => normalizePath(candidate).includes(sidecarNeedle)),
+      report.arch
+        ? join(sidecarDir, sidecarNeedle.slice(1))
+        : sidecarDir,
     )
     addMatchCheck(
       report,
       rootDir,
-      'Windows node-pty native module',
-      findMatches(join(nodePtyDir, 'prebuilds'), (candidate) => normalizePath(candidate).includes('/win32-') && normalizePath(candidate).endsWith('/pty.node')),
+      report.arch ? `Windows ${report.arch} node-pty native module` : 'Windows node-pty native module',
+      findMatches(join(nodePtyDir, 'prebuilds'), (candidate) => normalizePath(candidate).includes(nodePtyNeedle) && normalizePath(candidate).endsWith('/pty.node')),
       join(nodePtyDir, 'prebuilds'),
     )
   } else {
     report.missingChecks.push({
-      label: 'Windows unpacked directory (win-unpacked) for static resource inspection',
-      path: toRelative(rootDir, join(electronDir, 'win-unpacked')),
+      label: 'Windows unpacked directory for static resource inspection',
+      path: toRelative(rootDir, join(electronDir, report.arch === 'arm64' ? 'win-arm64-unpacked' : 'win-unpacked')),
     })
   }
 
@@ -635,6 +667,29 @@ function inspectWindowsArtifacts(rootDir: string, report: PackageSmokeReport) {
   if (report.hostPlatform !== 'windows') {
     report.notes.push(`Host platform is ${report.hostPlatform}, so Windows verification stayed artifact-only.`)
   }
+}
+
+function isWindowsUnpackedDirPath(candidate: string): boolean {
+  return /\/win(?:-[a-z0-9_]+)?-unpacked$/.test(normalizePath(candidate))
+}
+
+function isInsideWindowsUnpackedDir(candidate: string): boolean {
+  return /\/win(?:-[a-z0-9_]+)?-unpacked\//.test(normalizePath(candidate))
+}
+
+function findWindowsUnpackedDir(artifactsDir: string, arch?: 'x64' | 'arm64'): string | undefined {
+  const unpackedDirs = findMatches(
+    artifactsDir,
+    isWindowsUnpackedDirPath,
+    { directoriesOnly: true },
+  )
+  if (arch === 'arm64') {
+    return unpackedDirs.find((candidate) => normalizePath(candidate).endsWith('/win-arm64-unpacked')) ?? unpackedDirs[0]
+  }
+  if (arch === 'x64') {
+    return unpackedDirs.find((candidate) => normalizePath(candidate).endsWith('/win-unpacked')) ?? unpackedDirs[0]
+  }
+  return unpackedDirs[0]
 }
 
 function inspectLinuxArtifacts(rootDir: string, report: PackageSmokeReport) {
@@ -746,6 +801,7 @@ export async function inspectPackagedArtifacts(rootDir: string, options: Inspect
   const report = createReport(
     resolvedRootDir,
     options.platform,
+    options.arch,
     metadata,
     artifactsDir,
     verificationMode,
@@ -771,6 +827,9 @@ function printRecord(prefix: string, record: CheckRecord) {
 
 function printReport(report: PackageSmokeReport) {
   console.log(`[package-smoke] platform=${report.platform} host=${report.hostPlatform} mode=${report.verificationMode}`)
+  if (report.arch) {
+    console.log(`[package-smoke] arch=${report.arch}`)
+  }
   console.log(`[package-smoke] packageKind=${report.packageKind}`)
   console.log(`[package-smoke] product=${report.productName} version=${report.version}`)
   console.log(`[package-smoke] artifactsDir=${report.artifactsDir}`)

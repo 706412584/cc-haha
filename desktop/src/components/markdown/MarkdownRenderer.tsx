@@ -39,6 +39,12 @@ const MERMAID_DIAGRAM_START = /^(graph|flowchart|sequenceDiagram|classDiagram|st
 const CODE_FENCE_START = /^ {0,3}(`{3,}|~{3,})/
 const MATH_RENDER_CACHE_LIMIT = 200
 const mathRenderCache = new Map<string, string>()
+const MARKDOWN_SANITIZE_CONFIG = {
+  ADD_TAGS: ['use'],
+  ADD_ATTR: ['xlink:href'],
+  FORBID_TAGS: ['style'],
+  FORBID_ATTR: ['style'],
+}
 
 function normalizeCodeLanguage(language: string | undefined): string | undefined {
   const normalized = language?.trim().split(/\s+/)[0]?.toLowerCase()
@@ -267,10 +273,7 @@ function renderMath(block: MathBlock): string {
 }
 
 function enhanceMarkdownHtml(html: string, mathBlocks: MathBlock[]): string {
-  const cleanHtml = DOMPurify.sanitize(html, {
-    ADD_TAGS: ['use'],
-    ADD_ATTR: ['xlink:href'],
-  })
+  const cleanHtml = DOMPurify.sanitize(html, MARKDOWN_SANITIZE_CONFIG)
 
   const needsDomEnhancement = mathBlocks.length > 0 || /<(?:a|table)\b/i.test(cleanHtml)
   if (!needsDomEnhancement) {

@@ -28,6 +28,7 @@ export type {
   TraceProviderInfo,
   TraceResponseCapture,
   TraceSession,
+  TraceSessionDeleteResult,
   TraceSessionFileItem,
   TraceSessionFileList,
   TraceSessionList,

@@ -637,7 +637,7 @@ export async function addMcpConfig(
   config: unknown,
   scope: ConfigScope,
 ): Promise<void> {
-  if (name.match(/[^a-zA-Z0-9_-]/)) {
+  if (name.match(/[^\p{L}\p{N}_-]/u)) {
     throw new Error(
       `Invalid name ${name}. Names can only contain letters, numbers, hyphens, and underscores.`,
     )

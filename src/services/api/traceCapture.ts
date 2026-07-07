@@ -135,6 +135,11 @@ export type TraceSessionList = {
   settings: TraceCaptureSettings
 }
 
+export type TraceSessionDeleteResult = {
+  sessionId: string
+  deleted: boolean
+}
+
 export type RecordTraceCallInput = {
   id?: string
   sessionId: string
@@ -207,7 +212,7 @@ export function isTraceCaptureEnabled(): boolean {
 }
 
 export function getTraceStorageDir(): string {
-  return join(getClaudeConfigHomeDir(), 'cc-haha', 'traces')
+  return join(process.env.CLAUDE_CONFIG_DIR ?? getClaudeConfigHomeDir(), 'cc-haha', 'traces')
 }
 
 export function readTraceCaptureSettingsSync(): TraceCaptureSettings {
@@ -371,6 +376,27 @@ class TraceCaptureService {
   async getSessionTraceCall(sessionId: string, callId: string): Promise<TraceCallRecord | null> {
     const { calls } = await readTraceEntries(sessionId)
     return calls.find((call) => call.id === callId) ?? null
+  }
+
+  async deleteSessionTrace(sessionId: string): Promise<TraceSessionDeleteResult> {
+    const normalizedSessionId = sanitizeTraceFileName(sessionId)
+    if (!normalizedSessionId) return { sessionId: normalizedSessionId, deleted: false }
+
+    const pendingWrite = traceWriteQueues.get(sessionId) ?? traceWriteQueues.get(normalizedSessionId)
+    if (pendingWrite) await pendingWrite.catch(() => {})
+
+    const filePath = getTraceFilePath(normalizedSessionId)
+    try {
+      await fs.unlink(filePath)
+      traceReadCache.delete(filePath)
+      return { sessionId: normalizedSessionId, deleted: true }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        traceReadCache.delete(filePath)
+        return { sessionId: normalizedSessionId, deleted: false }
+      }
+      throw error
+    }
   }
 
   async listSessionTraces(options?: {

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import net from 'node:net'
+import http from 'node:http'
 import path from 'node:path'
 import { EventEmitter } from 'node:events'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -23,6 +24,7 @@ import {
   resolveCloudflaredPath,
   resolveHostTriple,
   spawnSidecar,
+  waitForServer,
   waitForTunnelUrl,
   windowsPowerShellOverride,
   writeLastServerPort,
@@ -33,11 +35,30 @@ function fakeChild(pid = 4321) {
   return { pid, kill: vi.fn() } as unknown as SidecarChild & { kill: ReturnType<typeof vi.fn> }
 }
 
+function listen(server: http.Server, host = '127.0.0.1'): Promise<number> {
+  return new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, host, () => {
+      const address = server.address()
+      if (!address || typeof address === 'string') {
+        reject(new Error('Could not resolve HTTP test port'))
+        return
+      }
+      resolve(address.port)
+    })
+  })
+}
+
+function close(server: http.Server): Promise<void> {
+  return new Promise(resolve => server.close(() => resolve()))
+}
+
 describe('Electron sidecar manager', () => {
   it('maps host platform to existing sidecar target triples', () => {
     expect(resolveHostTriple('darwin', 'arm64')).toBe('aarch64-apple-darwin')
     expect(resolveHostTriple('darwin', 'x64')).toBe('x86_64-apple-darwin')
     expect(resolveHostTriple('win32', 'x64')).toBe('x86_64-pc-windows-msvc')
+    expect(resolveHostTriple('win32', 'arm64')).toBe('aarch64-pc-windows-msvc')
     expect(resolveHostTriple('linux', 'arm64')).toBe('aarch64-unknown-linux-gnu')
   })
 
@@ -119,15 +140,19 @@ describe('Electron sidecar manager', () => {
     expect(env.http_proxy).toBe('http://127.0.0.1:7897')
     expect(env.https_proxy).toBe('http://127.0.0.1:7897')
     expect(env.NO_PROXY).toContain('127.0.0.1')
+    expect(env.no_proxy).toContain('localhost')
   })
 
-  it('does not override explicit sidecar proxy environment', () => {
+  it('does not override explicit sidecar proxy environment and still preserves loopback bypasses', () => {
     const env = mergeProxyEnv(
-      { HTTPS_PROXY: 'http://manual.example:8080' },
+      { HTTPS_PROXY: 'http://manual.example:8080', NO_PROXY: '.corp.local' },
       'http://system.example:8080',
     )
 
-    expect(env).toEqual({ HTTPS_PROXY: 'http://manual.example:8080' })
+    expect(env.HTTPS_PROXY).toBe('http://manual.example:8080')
+    expect(env.HTTP_PROXY).toBeUndefined()
+    expect(env.NO_PROXY).toBe('.corp.local,localhost,127.0.0.1,::1')
+    expect(env.no_proxy).toBe('.corp.local,localhost,127.0.0.1,::1')
   })
 
   it('keeps startup logs bounded', () => {
@@ -359,5 +384,21 @@ describe('Electron sidecar manager', () => {
       stderr: new EventEmitter(),
     }) as unknown as SidecarChild
     await expect(waitForTunnelUrl(child, { timeoutMs: 20 })).rejects.toThrow(/Timed out/i)
+  })
+
+  it('does not treat a raw TCP accept as server readiness without healthy /health', async () => {
+    const server = http.createServer((_request, response) => {
+      response.writeHead(503, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ status: 'starting' }))
+    })
+    const port = await listen(server)
+
+    try {
+      await expect(waitForServer('127.0.0.1', port, 300)).rejects.toThrow(
+        /desktop server did not report healthy at http:\/\/127\.0\.0\.1:\d+\/health/,
+      )
+    } finally {
+      await close(server)
+    }
   })
 })

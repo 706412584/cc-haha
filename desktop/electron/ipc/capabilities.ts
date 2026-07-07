@@ -114,6 +114,7 @@ export const ELECTRON_IPC_VALIDATORS = {
   [ELECTRON_IPC_CHANNELS.previewNavigate]: stringPayload,
   [ELECTRON_IPC_CHANNELS.previewSetBounds]: boundsPayload,
   [ELECTRON_IPC_CHANNELS.previewSetVisible]: booleanPayload,
+  [ELECTRON_IPC_CHANNELS.previewSetZoom]: zoomPayload,
   [ELECTRON_IPC_CHANNELS.previewClose]: noPayload,
   [ELECTRON_IPC_CHANNELS.previewMessage]: () => true,
   [ELECTRON_IPC_CHANNELS.appModeGet]: noPayload,

@@ -174,7 +174,7 @@ describe('settingsStore network persistence', () => {
     window.localStorage.clear()
   })
 
-  it('defaults old user settings to 600s system network settings', async () => {
+  it('defaults old user settings to 600s direct network settings', async () => {
     vi.doMock('../api/settings', () => ({
       settingsApi: {
         getUser: vi.fn().mockResolvedValue({}),
@@ -217,8 +217,66 @@ describe('settingsStore network persistence', () => {
     expect(useSettingsStore.getState().network).toEqual({
       aiRequestTimeoutMs: 600_000,
       proxy: {
-        mode: 'system',
+        mode: 'direct',
         url: '',
+      },
+    })
+  })
+
+  it('persists direct network proxy mode without keeping stale proxy URLs active', async () => {
+    const updateUser = vi.fn().mockResolvedValue({})
+    vi.doMock('../api/settings', () => ({
+      settingsApi: {
+        getUser: vi.fn(),
+        updateUser,
+        getPermissionMode: vi.fn(),
+        setPermissionMode: vi.fn(),
+        getCliLauncherStatus: vi.fn(),
+      },
+    }))
+    vi.doMock('../api/models', () => ({
+      modelsApi: {
+        list: vi.fn(),
+        getCurrent: vi.fn(),
+        setCurrent: vi.fn(),
+        getEffort: vi.fn(),
+        setEffort: vi.fn(),
+      },
+    }))
+    vi.doMock('../api/h5Access', () => ({
+      h5AccessApi: {
+        get: vi.fn(),
+        enable: vi.fn(),
+        disable: vi.fn(),
+        regenerate: vi.fn(),
+        update: vi.fn(),
+      },
+    }))
+
+    const { useSettingsStore } = await import('./settingsStore')
+
+    await useSettingsStore.getState().setNetwork({
+      aiRequestTimeoutMs: 600_000,
+      proxy: {
+        mode: 'direct',
+        url: '  http://127.0.0.1:7890  ',
+      },
+    })
+
+    expect(useSettingsStore.getState().network).toEqual({
+      aiRequestTimeoutMs: 600_000,
+      proxy: {
+        mode: 'direct',
+        url: '',
+      },
+    })
+    expect(updateUser).toHaveBeenCalledWith({
+      network: {
+        aiRequestTimeoutMs: 600_000,
+        proxy: {
+          mode: 'direct',
+          url: '',
+        },
       },
     })
   })

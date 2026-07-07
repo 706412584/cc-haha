@@ -322,7 +322,8 @@ export async function* runPostToolUseFailureHooks<Input extends AnyObject>(
  * Resolve a PreToolUse hook's permission result into a final PermissionDecision.
  *
  * Encapsulates the invariant that hook 'allow' does NOT bypass settings.json
- * deny/ask rules — checkRuleBasedPermissions still applies (inc-4788 analog).
+ * deny rules or non-bypass ask rules — checkRuleBasedPermissions still applies
+ * (inc-4788 analog).
  * Also handles the requiresUserInteraction/requireCanUseTool guards and the
  * 'ask' forceDecision passthrough.
  *
@@ -369,7 +370,8 @@ export async function resolveHookPermissionDecision(
       }
     }
 
-    // Hook allow skips the interactive prompt, but deny/ask rules still apply.
+    // Hook allow skips the interactive prompt, but deny rules and non-bypass
+    // ask rules still apply.
     const ruleCheck = await checkRuleBasedPermissions(
       tool,
       hookInput,

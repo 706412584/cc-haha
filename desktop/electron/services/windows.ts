@@ -214,6 +214,31 @@ export function showMainWindow(window: BrowserWindow | null, app?: MacOsWindowVi
   window.focus()
 }
 
+export function refreshWindowsDragHitTest(
+  window: BrowserWindow,
+  platform: NodeJS.Platform = process.platform,
+  delayMs = 100,
+): (() => void) | undefined {
+  if (platform !== 'win32') return undefined
+
+  const timer = setTimeout(() => {
+    if (
+      window.isDestroyed()
+      || window.isMinimized()
+      || window.isMaximized()
+      || window.isFullScreen()
+    ) {
+      return
+    }
+
+    const bounds = window.getBounds()
+    window.setBounds({ ...bounds, height: bounds.height + 1 })
+    window.setBounds(bounds)
+  }, delayMs)
+
+  return () => clearTimeout(timer)
+}
+
 export function installWindowLifecycle({
   app,
   window,

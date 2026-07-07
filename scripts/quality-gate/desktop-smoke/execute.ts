@@ -2,7 +2,7 @@ import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, wr
 import { mkdtemp } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import treeKill from 'tree-kill'
 import { changedFiles, writeDiffPatch } from '../baseline/execute'
 import type { BaselineTarget, LaneResult } from '../types'
@@ -16,7 +16,7 @@ const PROMPT = [
   'When the tests pass, briefly say done.',
 ].join(' ')
 
-type DesktopSmokeStage = 'open' | 'eval' | 'reload' | 'wait' | 'screenshot' | 'fill' | 'press' | 'verify'
+type DesktopSmokeStage = 'open' | 'eval' | 'reload' | 'wait' | 'session-ready' | 'screenshot' | 'fill' | 'press' | 'verify'
 
 type DesktopSmokeFailureContext = {
   stage: DesktopSmokeStage
@@ -334,6 +334,40 @@ async function waitForVerifiedProject(
   throw new Error(`Timed out waiting for desktop project verification: ${lastVerificationError}`)
 }
 
+export function desktopSmokeTextShowsProject(text: string, projectName: string) {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+  return lines.includes(projectName)
+}
+
+async function waitForDesktopSmokeSessionReady(
+  browserEnv: Record<string, string>,
+  browserLogPath: string,
+  rootDir: string,
+  projectDir: string,
+  timeoutMs: number,
+) {
+  const projectName = basename(projectDir)
+  const deadline = Date.now() + timeoutMs
+  let lastText = ''
+  while (Date.now() < deadline) {
+    const body = await runLoggedCommand(agentBrowserCommand(['get', 'text', '#content-area']), {
+      cwd: rootDir,
+      env: browserEnv,
+      logPath: browserLogPath,
+      timeoutMs: 15_000,
+      allowFailure: true,
+      maxLogChars: 4_000,
+    })
+    lastText = `${body.stdout}\n${body.stderr}`
+    if (desktopSmokeTextShowsProject(lastText, projectName)) return
+    await Bun.sleep(1_000)
+  }
+  throw new Error(`Timed out waiting for desktop smoke session to restore project "${projectName}". Last content text: ${lastText.slice(0, 500)}`)
+}
+
 async function verifyProject(originalDir: string, projectDir: string, artifactDir: string) {
   await writeDiffPatch(originalDir, projectDir, join(artifactDir, 'diff.patch'))
   const changed = changedFiles(originalDir, projectDir)
@@ -484,6 +518,21 @@ export async function executeDesktopSmoke(
       logPath: browserLogPath,
       timeoutMs: 30_000,
     }, browserStepContext)
+    await runBrowserStep('session-ready', ['get', 'text', '#content-area'], {
+      cwd: rootDir,
+      env: browserEnv,
+      logPath: browserLogPath,
+      timeoutMs: 15_000,
+      allowFailure: true,
+      maxLogChars: 4_000,
+    }, browserStepContext)
+    await waitForDesktopSmokeSessionReady(
+      browserEnv,
+      browserLogPath,
+      rootDir,
+      projectDir,
+      30_000,
+    )
     await runBrowserStep('screenshot', ['screenshot', join(artifactDir, 'initial.png')], {
       cwd: rootDir,
       env: browserEnv,

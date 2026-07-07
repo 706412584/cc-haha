@@ -26,6 +26,28 @@ describe('snapshotEditableStyles', () => {
 })
 
 describe('createEditBubble', () => {
+  it('positions controls inside the viewport when selecting a low element', () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 })
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 720 })
+    const el = document.getElementById('t')!
+    vi.spyOn(el, 'getBoundingClientRect').mockReturnValue({
+      x: 420,
+      y: 650,
+      top: 650,
+      right: 500,
+      bottom: 670,
+      left: 420,
+      width: 80,
+      height: 20,
+      toJSON: () => ({}),
+    })
+
+    const bubble = createEditBubble(el, { onConfirm: vi.fn(), onCancel: vi.fn() })
+
+    expect(bubble.host.style.top).toBe('262px')
+    bubble.destroy()
+  })
+
   it('prefills the text field and live-applies edits to the element', () => {
     const el = document.getElementById('t')!
     const bubble = createEditBubble(el, { onConfirm: vi.fn(), onCancel: vi.fn() })

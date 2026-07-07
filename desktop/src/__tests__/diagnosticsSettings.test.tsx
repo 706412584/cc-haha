@@ -140,7 +140,7 @@ describe('Settings > Diagnostics tab', () => {
     })
 
     useSettingsStore.setState({ locale: 'en' })
-    useUIStore.setState({ pendingSettingsTab: null, toasts: [] })
+    useUIStore.setState({ activeSettingsTab: 'providers', pendingSettingsTab: null, toasts: [] })
   })
 
   it('shows diagnostics status, actions, and recent events', async () => {

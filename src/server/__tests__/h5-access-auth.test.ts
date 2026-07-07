@@ -19,6 +19,7 @@ let originalH5DistDir: string | undefined
 let originalClaudeAppRoot: string | undefined
 let originalServerAuthRequired: string | undefined
 let originalH5TunnelUrl: string | undefined
+let lanReachable = false
 let originalServerPort = 3456
 const PHONE_ORIGIN = 'https://phone.example'
 const TUNNEL_ORIGIN = 'https://abcd-1234.ngrok-free.app'
@@ -36,6 +37,15 @@ async function waitForServer(url: string): Promise<void> {
   }
 
   throw new Error(`Timed out waiting for server at ${url}`)
+}
+
+async function isServerReachable(url: string): Promise<boolean> {
+  try {
+    const response = await fetch(url)
+    return response.ok
+  } catch {
+    return false
+  }
 }
 
 async function availablePort(): Promise<number> {
@@ -88,6 +98,7 @@ async function startRemoteServer(options: { authRequired?: boolean } = {}): Prom
   lanBaseUrl = resolvePrivateLanBaseUrl(port) ?? ''
   lanWsBaseUrl = lanBaseUrl.replace(/^http/, 'ws')
   await waitForServer(`${baseUrl}/health`)
+  lanReachable = lanBaseUrl ? await isServerReachable(`${lanBaseUrl}/health`) : false
 }
 
 async function restartRemoteServer(options: { authRequired?: boolean } = {}): Promise<void> {
@@ -412,7 +423,7 @@ describe('remote H5 auth and CORS integration', () => {
   })
 
   test('blocks same-origin LAN capability requests while H5 access is disabled when a LAN interface is available', async () => {
-    if (!lanBaseUrl) {
+    if (!lanBaseUrl || !lanReachable) {
       return
     }
 
@@ -448,7 +459,7 @@ describe('remote H5 auth and CORS integration', () => {
   })
 
   test('does not trust spoofed localhost Host and Origin headers from LAN clients while H5 access is disabled', async () => {
-    if (!lanBaseUrl) {
+    if (!lanBaseUrl || !lanReachable) {
       return
     }
 

@@ -41,6 +41,7 @@ export type SavedProvider = {
   autoCompactWindow?: number
   modelContextWindows?: ModelContextWindows
   toolSearchEnabled?: boolean
+  disableExperimentalBetas?: boolean
   notes?: string
   /**
    * Sticky compatibility marker — server sets this when it observes the
@@ -70,6 +71,7 @@ export type CreateProviderInput = {
   autoCompactWindow?: number
   modelContextWindows?: ModelContextWindows
   toolSearchEnabled?: boolean
+  disableExperimentalBetas?: boolean
   notes?: string
 }
 
@@ -85,6 +87,7 @@ export type UpdateProviderInput = {
   autoCompactWindow?: number | null
   modelContextWindows?: ModelContextWindows | null
   toolSearchEnabled?: boolean
+  disableExperimentalBetas?: boolean
   notes?: string
 }
 

@@ -12,10 +12,12 @@ import {
 } from '../../stores/tabStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useSessionStore } from '../../stores/sessionStore'
+import { isPlaceholderSessionTitle } from '../../lib/sessionTitle'
 import { useWorkspacePanelStore } from '../../stores/workspacePanelStore'
 import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
 import { useTranslation } from '../../i18n'
 import { getDesktopHost } from '../../lib/desktopHost'
+import { hasRunningBackgroundTasks } from '../../lib/backgroundTasks'
 import { WindowControls, showWindowControls } from './WindowControls'
 import { OpenProjectMenu } from './OpenProjectMenu'
 import { Folder, FolderOpen, SquareTerminal } from 'lucide-react'
@@ -59,7 +61,11 @@ export function TabBar() {
     [tabs],
   )
   const activeChatSessionIds = useChatStore(useShallow((s) =>
-    sessionTabIds.filter((sessionId) => s.sessions[sessionId]?.chatState !== 'idle')
+    sessionTabIds.filter((sessionId) => {
+      const sessionState = s.sessions[sessionId]
+      return !!sessionState &&
+        (sessionState.chatState !== 'idle' || hasRunningBackgroundTasks(sessionState.backgroundAgentTasks))
+    })
   ))
   const disconnectSession = useChatStore((s) => s.disconnectSession)
   const activeTab = tabs.find((tab) => tab.sessionId === activeTabId) ?? null
@@ -208,7 +214,8 @@ export function TabBar() {
       .filter((tab) => isSessionTab(tab))
       .filter((tab) => {
         const sessionState = chatSessions[tab.sessionId]
-        return !!sessionState && sessionState.chatState !== 'idle'
+        return !!sessionState &&
+          (sessionState.chatState !== 'idle' || hasRunningBackgroundTasks(sessionState.backgroundAgentTasks))
       })
       .map((tab) => tab.sessionId)
   }, [])
@@ -223,6 +230,12 @@ export function TabBar() {
           useChatStore.getState().stopGeneration(tab.sessionId)
         }
         if (!isRunning || stopRunning) {
+          // Auto-delete empty sessions (placeholder title, no messages sent)
+          const sessionEntry = useSessionStore.getState().sessions.find((s) => s.id === tab.sessionId)
+          const chatEntry = useChatStore.getState().sessions[tab.sessionId]
+          if (isPlaceholderSessionTitle(sessionEntry?.title) && (!chatEntry || chatEntry.messages.length === 0)) {
+            void useSessionStore.getState().deleteSession(tab.sessionId)
+          }
           disconnectSession(tab.sessionId)
         }
       }

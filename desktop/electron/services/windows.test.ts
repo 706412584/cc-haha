@@ -11,6 +11,7 @@ import {
   isPersistableWindowState,
   isWindowStateVisibleOnAnyDisplay,
   readWindowState,
+  refreshWindowsDragHitTest,
   restoreWindowMaximized,
   showMainWindow,
   toggleWindowFullScreen,
@@ -141,6 +142,71 @@ describe('Electron window service', () => {
       titleBarStyle: 'default',
       fullscreenable: true,
     })
+  })
+
+  it('refreshes Windows drag hit testing after the first frameless show', () => {
+    vi.useFakeTimers()
+    try {
+      const bounds = { x: 20, y: 30, width: 1280, height: 820 }
+      const window = {
+        isDestroyed: () => false,
+        isMinimized: () => false,
+        isMaximized: () => false,
+        isFullScreen: () => false,
+        getBounds: vi.fn(() => bounds),
+        setBounds: vi.fn(),
+      }
+
+      const cancel = refreshWindowsDragHitTest(window as never, 'win32', 100)
+
+      expect(cancel).toEqual(expect.any(Function))
+      expect(window.setBounds).not.toHaveBeenCalled()
+
+      vi.advanceTimersByTime(100)
+
+      expect(window.getBounds).toHaveBeenCalledTimes(1)
+      expect(window.setBounds).toHaveBeenNthCalledWith(1, { ...bounds, height: bounds.height + 1 })
+      expect(window.setBounds).toHaveBeenNthCalledWith(2, bounds)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not refresh drag hit testing outside Windows', () => {
+    vi.useFakeTimers()
+    try {
+      const window = {
+        setBounds: vi.fn(),
+      }
+
+      expect(refreshWindowsDragHitTest(window as never, 'darwin', 100)).toBeUndefined()
+      vi.advanceTimersByTime(100)
+      expect(window.setBounds).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('skips the Windows drag hit-test refresh after the window is destroyed', () => {
+    vi.useFakeTimers()
+    try {
+      const window = {
+        isDestroyed: () => true,
+        isMinimized: () => false,
+        isMaximized: () => false,
+        isFullScreen: () => false,
+        getBounds: vi.fn(() => ({ x: 20, y: 30, width: 1280, height: 820 })),
+        setBounds: vi.fn(),
+      }
+
+      refreshWindowsDragHitTest(window as never, 'win32', 100)
+      vi.advanceTimersByTime(100)
+
+      expect(window.getBounds).not.toHaveBeenCalled()
+      expect(window.setBounds).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('shows, restores, and focuses the hidden main window when a tray or notification action reopens it', () => {

@@ -8,13 +8,14 @@ import { useTranslation } from '../i18n'
 import { useSessionStore } from '../stores/sessionStore'
 import { useChatStore } from '../stores/chatStore'
 import { usePluginStore } from '../stores/pluginStore'
+import { useProviderStore } from '../stores/providerStore'
 import { useSessionRuntimeStore, DRAFT_RUNTIME_SELECTION_KEY } from '../stores/sessionRuntimeStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import { useUIStore } from '../stores/uiStore'
 import { SETTINGS_TAB_ID, useTabStore } from '../stores/tabStore'
 import { RepositoryLaunchControls } from '../components/shared/RepositoryLaunchControls'
 import { PermissionModeSelector } from '../components/controls/PermissionModeSelector'
-import { ModelSelector } from '../components/controls/ModelSelector'
+import { ModelSelector, type ModelSelectorHandle } from '../components/controls/ModelSelector'
 import { AttachmentGallery } from '../components/chat/AttachmentGallery'
 import { ComposerDropOverlay } from '../components/chat/ComposerDropOverlay'
 import { ContextUsageIndicator } from '../components/chat/ContextUsageIndicator'
@@ -23,6 +24,7 @@ import { LocalSlashCommandPanel, type LocalSlashCommandName } from '../component
 import { useMobileViewport } from '../hooks/useMobileViewport'
 import { isDesktopRuntime } from '../lib/desktopRuntime'
 import { publicAssetPath } from '../lib/publicAsset'
+import { resolveActiveProviderRuntimeSelection } from '../lib/runtimeSelection'
 import {
   filesToComposerAttachments,
   selectNativeFileAttachments,
@@ -114,6 +116,7 @@ export function EmptySession() {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const modelSelectorRef = useRef<ModelSelectorHandle>(null)
   const plusMenuRef = useRef<HTMLDivElement>(null)
   const slashMenuRef = useRef<HTMLDivElement>(null)
   const fileSearchRef = useRef<FileSearchMenuHandle>(null)
@@ -124,8 +127,11 @@ export function EmptySession() {
   const setActiveView = useUIStore((state) => state.setActiveView)
   const addToast = useUIStore((state) => state.addToast)
   const currentModel = useSettingsStore((state) => state.currentModel)
+  const activeProviderName = useSettingsStore((state) => state.activeProviderName)
   const chatSendBehavior = useSettingsStore((state) => state.chatSendBehavior)
   const defaultPermissionMode = useSettingsStore((state) => state.permissionMode)
+  const providers = useProviderStore((state) => state.providers)
+  const activeProviderId = useProviderStore((state) => state.activeId)
   const [draftPermissionMode, setDraftPermissionMode] = useState<PermissionMode>(defaultPermissionMode)
   const lastPluginReloadSummary = usePluginStore((state) => state.lastReloadSummary)
   const draftRuntimeSelection = useSessionRuntimeStore((state) => state.selections[DRAFT_RUNTIME_SELECTION_KEY])
@@ -312,9 +318,28 @@ export function EmptySession() {
       return
     }
 
+    if (slashUiAction?.type === 'model') {
+      modelSelectorRef.current?.open()
+      setInput('')
+      setSlashMenuOpen(false)
+      setFileSearchOpen(false)
+      setPlusMenuOpen(false)
+      return
+    }
+
     setIsSubmitting(true)
     try {
-      const explicitDraftSelection = useSessionRuntimeStore.getState().selections[DRAFT_RUNTIME_SELECTION_KEY]
+      const runtimeStore = useSessionRuntimeStore.getState()
+      const explicitDraftSelection = runtimeStore.selections[DRAFT_RUNTIME_SELECTION_KEY]
+      const defaultActiveProviderSelection = explicitDraftSelection
+        ? null
+        : resolveActiveProviderRuntimeSelection(
+          activeProviderId,
+          activeProviderName,
+          providers,
+          currentModel?.id,
+        )
+      const runtimeSelection = explicitDraftSelection ?? defaultActiveProviderSelection ?? undefined
       const sessionId = await createSession(
         workDir || undefined,
         {
@@ -324,9 +349,11 @@ export function EmptySession() {
           permissionMode: draftPermissionMode,
         },
       )
-      if (explicitDraftSelection) {
-        useSessionRuntimeStore.getState().setSelection(sessionId, explicitDraftSelection)
-        useSessionRuntimeStore.getState().clearSelection(DRAFT_RUNTIME_SELECTION_KEY)
+      if (runtimeSelection) {
+        runtimeStore.setSelection(sessionId, runtimeSelection)
+        if (explicitDraftSelection) {
+          runtimeStore.clearSelection(DRAFT_RUNTIME_SELECTION_KEY)
+        }
       }
       setActiveView('code')
       useTabStore.getState().openTab(sessionId, 'New Session')
@@ -939,7 +966,7 @@ export function EmptySession() {
                     draft
                     compact={isMobileComposer}
                   />
-                  <ModelSelector runtimeKey={DRAFT_RUNTIME_SELECTION_KEY} disabled={isSubmitting} compact={isMobileComposer} />
+                  <ModelSelector ref={modelSelectorRef} runtimeKey={DRAFT_RUNTIME_SELECTION_KEY} disabled={isSubmitting} compact={isMobileComposer} />
                   <button
                     onClick={handleSubmit}
                     disabled={!canSubmit}

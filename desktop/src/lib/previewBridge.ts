@@ -12,6 +12,7 @@ export const previewBridge = {
   navigate: (url: string) => getPreviewHost()?.navigate(url) ?? Promise.resolve(),
   setBounds: (bounds: WebviewBounds) => getPreviewHost()?.setBounds(bounds) ?? Promise.resolve(),
   setVisible: (visible: boolean) => getPreviewHost()?.setVisible(visible) ?? Promise.resolve(),
+  setZoom: (level: number) => getPreviewHost()?.setZoom(level) ?? Promise.resolve(),
   close: () => getPreviewHost()?.close() ?? Promise.resolve(),
   message: (payload: PreviewHostMessage) => getPreviewHost()?.message(payload) ?? Promise.resolve(),
 }

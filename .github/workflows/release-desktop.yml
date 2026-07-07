@@ -79,27 +79,38 @@ jobs:
             app_bundle_dir: mac-arm64
             label: macOS-ARM64
             smoke_platform: macos
+            arch: arm64
           - platform: macos-latest
             target_triple: x86_64-apple-darwin
             builder_args: --mac dmg zip --x64
             app_bundle_dir: mac
             label: macOS-x64
             smoke_platform: macos
+            arch: x64
           - platform: ubuntu-22.04
             target_triple: x86_64-unknown-linux-gnu
             builder_args: --linux AppImage deb --x64
             label: Linux-x64
             smoke_platform: linux
+            arch: x64
           - platform: ubuntu-22.04-arm
             target_triple: aarch64-unknown-linux-gnu
             builder_args: --linux AppImage deb --arm64
             label: Linux-ARM64
             smoke_platform: linux
+            arch: arm64
           - platform: windows-latest
             target_triple: x86_64-pc-windows-msvc
             builder_args: --win nsis --x64
             label: Windows-x64
             smoke_platform: windows
+            arch: x64
+          - platform: windows-latest
+            target_triple: aarch64-pc-windows-msvc
+            builder_args: --win nsis --arm64
+            label: Windows-ARM64
+            smoke_platform: windows
+            arch: arm64
 
     runs-on: ${{ matrix.platform }}
     name: Build (${{ matrix.label }})
@@ -362,11 +373,11 @@ jobs:
         run: node ./node_modules/electron-builder/out/cli/cli.js ${{ matrix.builder_args }} --publish never
 
       - name: Verify packaged app structure
-        run: bun run test:package-smoke --platform ${{ matrix.smoke_platform }} --package-kind release --artifacts-dir desktop/build-artifacts/electron
+        run: bun run test:package-smoke --platform ${{ matrix.smoke_platform }} --arch ${{ matrix.arch }} --package-kind release --artifacts-dir desktop/build-artifacts/electron
 
       - name: Verify macOS launch policy
         if: matrix.smoke_platform == 'macos' && needs.signing-preflight.outputs.macos_signed == 'true' && (github.event_name != 'workflow_dispatch' || inputs.notarize_macos == true)
-        run: bun run test:package-smoke --platform macos --package-kind release --artifacts-dir desktop/build-artifacts/electron --require-macos-gatekeeper
+        run: bun run test:package-smoke --platform macos --arch ${{ matrix.arch }} --package-kind release --artifacts-dir desktop/build-artifacts/electron --require-macos-gatekeeper
 
       - name: Warn macOS notarization skipped
         if: matrix.smoke_platform == 'macos' && needs.signing-preflight.outputs.macos_signed == 'true' && github.event_name == 'workflow_dispatch' && inputs.notarize_macos == false
@@ -419,6 +430,13 @@ jobs:
               expected=(
                 "Claude-Code-Haha-${APP_VERSION}-win-x64.exe"
                 "Claude-Code-Haha-${APP_VERSION}-win-x64.exe.blockmap"
+                "latest.yml"
+              )
+              ;;
+            Windows-ARM64)
+              expected=(
+                "Claude-Code-Haha-${APP_VERSION}-win-arm64.exe"
+                "Claude-Code-Haha-${APP_VERSION}-win-arm64.exe.blockmap"
                 "latest.yml"
               )
               ;;
@@ -543,6 +561,8 @@ jobs:
             "Claude-Code-Haha-${APP_VERSION}-linux-arm64.deb"
             "Claude-Code-Haha-${APP_VERSION}-win-x64.exe"
             "Claude-Code-Haha-${APP_VERSION}-win-x64.exe.blockmap"
+            "Claude-Code-Haha-${APP_VERSION}-win-arm64.exe"
+            "Claude-Code-Haha-${APP_VERSION}-win-arm64.exe.blockmap"
           )
 
           missing=()

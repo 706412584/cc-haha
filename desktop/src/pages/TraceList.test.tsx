@@ -10,6 +10,7 @@ import type { TraceSessionList } from '../types/trace'
 vi.mock('../api/traces', () => ({
   tracesApi: {
     list: vi.fn(),
+    deleteSession: vi.fn(),
   },
 }))
 
@@ -90,6 +91,7 @@ describe('TraceList', () => {
     useSettingsStore.setState({ locale: 'en' })
     useTabStore.setState({ tabs: [], activeTabId: null })
     vi.mocked(tracesApi.list).mockResolvedValue(traceList)
+    vi.mocked(tracesApi.deleteSession).mockResolvedValue({ sessionId: 'session-trace-list', deleted: true })
   })
 
   afterEach(() => {
@@ -157,6 +159,31 @@ describe('TraceList', () => {
     fireEvent.click(within(row).getByRole('button', { name: 'Trace' }))
 
     expect(useTabStore.getState().activeTabId).toBe('__trace__session-trace-list')
+  })
+
+  it('requires confirmation before deleting a trace session', async () => {
+    vi.mocked(tracesApi.list)
+      .mockResolvedValueOnce(traceList)
+      .mockResolvedValueOnce({ ...traceList, traces: [], total: 0 })
+
+    render(<TraceList />)
+
+    const row = await findTraceRow(/Debug stuck agent/)
+    fireEvent.click(within(row).getByRole('button', { name: 'Delete trace' }))
+
+    expect(tracesApi.deleteSession).not.toHaveBeenCalled()
+    expect(screen.getByText('Delete trace data for "Debug stuck agent"? Chat history is not deleted.')).toBeInTheDocument()
+
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Delete trace session' })).getByRole('button', { name: 'Delete' }))
+
+    await waitFor(() => {
+      expect(tracesApi.deleteSession).toHaveBeenCalledWith('session-trace-list')
+    })
+    await waitFor(() => {
+      expect(screen.queryByText('Debug stuck agent')).not.toBeInTheDocument()
+    })
+    expect(tracesApi.list).toHaveBeenNthCalledWith(2, { limit: 50, offset: 0, query: '' })
+    expect(useTabStore.getState().activeTabId).toBeNull()
   })
 
   it('opens General settings from the trace settings button', async () => {

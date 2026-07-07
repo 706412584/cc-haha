@@ -78,7 +78,7 @@ describe('MemorySettings', () => {
       error: null,
       lastSavedAt: null,
     })
-    useUIStore.setState({ pendingMemoryPath: null, pendingSettingsTab: null })
+    useUIStore.setState({ activeSettingsTab: 'providers', pendingMemoryPath: null, pendingSettingsTab: null })
 
     memoryApiMock.listProjects.mockResolvedValue({
       projects: [

@@ -3,6 +3,7 @@ import type { HookEvent } from 'src/entrypoints/agentSdkTypes.js'
 import { queryModelWithoutStreaming } from '../../services/api/claude.js'
 import type { ToolUseContext } from '../../Tool.js'
 import type { Message } from '../../types/message.js'
+import { isGoalPromptHookCommand } from '../../goals/goalState.js'
 import { createAttachmentMessage } from '../attachments.js'
 import { createCombinedAbortSignal } from '../combinedAbortSignal.js'
 import { logForDebugging } from '../debug.js'
@@ -14,6 +15,25 @@ import { getSmallFastModel } from '../model/model.js'
 import type { PromptHook } from '../settings/types.js'
 import { asSystemPrompt } from '../systemPromptType.js'
 import { addArgumentsToPrompt, hookResponseSchema } from './hookHelpers.js'
+
+function goalHookFailureResult(
+  hook: PromptHook,
+  reason: string,
+): HookResult | null {
+  if (!isGoalPromptHookCommand(hook.prompt)) return null
+
+  const blockingError = `Goal evaluator failed: ${reason}. Treat the goal as incomplete and continue working toward it.`
+  return {
+    hook,
+    outcome: 'blocking',
+    blockingError: {
+      blockingError,
+      command: hook.prompt,
+    },
+    preventContinuation: true,
+    stopReason: blockingError,
+  }
+}
 
 /**
  * Execute a prompt-based hook using an LLM
@@ -115,6 +135,12 @@ Your response must be a JSON object matching one of the following schemas:
         logForDebugging(
           `Hooks: error parsing response as JSON: ${fullResponse}`,
         )
+        const goalFailure = goalHookFailureResult(
+          hook,
+          'response was not valid JSON',
+        )
+        if (goalFailure) return goalFailure
+
         return {
           hook,
           outcome: 'non_blocking_error',
@@ -135,6 +161,12 @@ Your response must be a JSON object matching one of the following schemas:
         logForDebugging(
           `Hooks: model response does not conform to expected schema: ${parsed.error.message}`,
         )
+        const goalFailure = goalHookFailureResult(
+          hook,
+          `response did not match the expected schema (${parsed.error.message})`,
+        )
+        if (goalFailure) return goalFailure
+
         return {
           hook,
           outcome: 'non_blocking_error',
@@ -184,6 +216,11 @@ Your response must be a JSON object matching one of the following schemas:
       cleanupSignal()
 
       if (combinedSignal.aborted) {
+        const goalFailure = signal.aborted
+          ? null
+          : goalHookFailureResult(hook, 'evaluation timed out')
+        if (goalFailure) return goalFailure
+
         return {
           hook,
           outcome: 'cancelled',
@@ -194,6 +231,12 @@ Your response must be a JSON object matching one of the following schemas:
   } catch (error) {
     const errorMsg = errorMessage(error)
     logForDebugging(`Hooks: Prompt hook error: ${errorMsg}`)
+    const goalFailure = goalHookFailureResult(
+      hook,
+      errorMsg || 'evaluation failed',
+    )
+    if (goalFailure) return goalFailure
+
     return {
       hook,
       outcome: 'non_blocking_error',

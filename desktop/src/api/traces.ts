@@ -1,5 +1,5 @@
 import { api } from './client'
-import type { TraceCaptureSettings, TraceSessionList } from '../types/trace'
+import type { TraceCaptureSettings, TraceSessionDeleteResult, TraceSessionList } from '../types/trace'
 
 export const tracesApi = {
   list(options?: { limit?: number; offset?: number; query?: string }) {
@@ -17,5 +17,9 @@ export const tracesApi = {
 
   updateSettings(settings: Partial<Pick<TraceCaptureSettings, 'enabled'>>) {
     return api.put<TraceCaptureSettings>('/api/traces/settings', settings)
+  },
+
+  deleteSession(sessionId: string) {
+    return api.delete<TraceSessionDeleteResult>(`/api/traces/${encodeURIComponent(sessionId)}`)
   },
 }

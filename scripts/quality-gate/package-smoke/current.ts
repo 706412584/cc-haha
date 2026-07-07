@@ -9,6 +9,10 @@ export function currentPackageSmokePlatform(platform: NodeJS.Platform = process.
   return null
 }
 
+export function currentPackageSmokeArch(arch: NodeJS.Architecture = process.arch) {
+  return arch === 'arm64' || arch === 'x64' ? arch : null
+}
+
 if (import.meta.main) {
   const platform = currentPackageSmokePlatform()
   if (!platform) {
@@ -16,7 +20,7 @@ if (import.meta.main) {
     process.exit(0)
   }
 
-  const result = spawnSync('bun', [
+  const args = [
     'run',
     'test:package-smoke',
     '--platform',
@@ -25,7 +29,13 @@ if (import.meta.main) {
     'dir',
     '--artifacts-dir',
     'desktop/build-artifacts/electron',
-  ], {
+  ]
+  const arch = currentPackageSmokeArch()
+  if (arch) {
+    args.push('--arch', arch)
+  }
+
+  const result = spawnSync('bun', args, {
     stdio: 'inherit',
   })
   process.exit(result.status ?? 1)

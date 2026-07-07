@@ -17,6 +17,7 @@ import {
 class FakeWebContents implements PreviewWebContentsLike {
   loadedUrls: string[] = []
   scripts: string[] = []
+  zoomFactors: number[] = []
   sent: Array<{ channel: string, payload: unknown }> = []
   close = vi.fn()
   capturePage = vi.fn(async () => ({ toDataURL: () => 'data:image/png;base64,NATIVE' }))
@@ -38,6 +39,10 @@ class FakeWebContents implements PreviewWebContentsLike {
 
   isDestroyed() {
     return false
+  }
+
+  setZoomFactor(factor: number) {
+    this.zoomFactors.push(factor)
   }
 
   send(channel: string, payload: unknown) {
@@ -201,6 +206,31 @@ describe('Electron preview service', () => {
         payload: { v: 1, type: 'screenshot', dataUrl: 'data:image/png;base64,NATIVE', kind: 'full' },
       },
     ])
+  })
+
+  it('applies preview zoom to the native WebContentsView before screenshot capture', async () => {
+    const view = new FakeView()
+    const renderer = new FakeWebContents()
+    const service = new ElectronPreviewService({
+      createView: () => view,
+      previewScriptPath: previewScript(),
+    })
+    await service.open({ contentView: { addChildView: vi.fn(), removeChildView: vi.fn() } }, 'https://example.com', {
+      x: 0,
+      y: 0,
+      width: 100,
+      height: 100,
+    })
+
+    service.setZoomFactor(0.8)
+    await service.message({ v: 1, type: 'capture', kind: 'full' }, renderer)
+
+    expect(view.webContents.zoomFactors.at(-1)).toBe(0.8)
+    expect(view.webContents.capturePage).toHaveBeenCalledTimes(1)
+    expect(renderer.sent.at(-1)).toEqual({
+      channel: ELECTRON_EVENT_CHANNELS.previewEvent,
+      payload: { v: 1, type: 'screenshot', dataUrl: 'data:image/png;base64,NATIVE', kind: 'full' },
+    })
   })
 
   it('forwards picker host messages into the injected preview bridge', async () => {

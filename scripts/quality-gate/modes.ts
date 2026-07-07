@@ -8,6 +8,10 @@ export function currentPackageSmokePlatform(platform: NodeJS.Platform = process.
   return null
 }
 
+export function currentPackageSmokeArch(arch: NodeJS.Architecture = process.arch) {
+  return arch === 'arm64' || arch === 'x64' ? arch : null
+}
+
 export function currentReleaseArtifactsDir(
   platform: NodeJS.Platform = process.platform,
   arch: NodeJS.Architecture = process.arch,
@@ -20,6 +24,7 @@ export function currentReleaseArtifactsDir(
 
 export function lanesForMode(mode: QualityGateMode, baselineTargets: BaselineTarget[] = []): LaneDefinition[] {
   const packageSmokePlatform = currentPackageSmokePlatform()
+  const packageSmokeArch = currentPackageSmokeArch()
   const releaseArtifactsDir = currentReleaseArtifactsDir()
   const lanes: LaneDefinition[] = [
     {
@@ -131,6 +136,9 @@ export function lanesForMode(mode: QualityGateMode, baselineTargets: BaselineTar
 
   if (packageSmokePlatform && releaseArtifactsDir) {
     const packageSmokeCommand = ['bun', 'run', 'test:package-smoke', '--platform', packageSmokePlatform, '--package-kind', 'release', '--artifacts-dir', releaseArtifactsDir]
+    if (packageSmokeArch) {
+      packageSmokeCommand.push('--arch', packageSmokeArch)
+    }
     if (packageSmokePlatform === 'macos') {
       packageSmokeCommand.push('--require-macos-gatekeeper')
     }

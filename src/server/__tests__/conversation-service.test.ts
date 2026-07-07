@@ -24,6 +24,7 @@ describe('ConversationService', () => {
   let originalProviderManagedByHost: string | undefined
   let originalDiagnosticsFile: string | undefined
   let originalAttributionHeader: string | undefined
+  let originalDisableExperimentalBetas: string | undefined
   let originalResumeInterruptedTurn: string | undefined
   let originalTraceApiCalls: string | undefined
   let originalTraceProviderId: string | undefined
@@ -56,6 +57,7 @@ describe('ConversationService', () => {
     originalProviderManagedByHost = process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST
     originalDiagnosticsFile = process.env.CLAUDE_CODE_DIAGNOSTICS_FILE
     originalAttributionHeader = process.env.CLAUDE_CODE_ATTRIBUTION_HEADER
+    originalDisableExperimentalBetas = process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
     originalResumeInterruptedTurn = process.env.CLAUDE_CODE_RESUME_INTERRUPTED_TURN
     originalTraceApiCalls = process.env.CC_HAHA_TRACE_API_CALLS
     originalTraceProviderId = process.env.CC_HAHA_TRACE_PROVIDER_ID
@@ -80,6 +82,7 @@ describe('ConversationService', () => {
     delete process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST
     delete process.env.CLAUDE_CODE_DIAGNOSTICS_FILE
     delete process.env.CLAUDE_CODE_ATTRIBUTION_HEADER
+    delete process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
     delete process.env.CLAUDE_CODE_RESUME_INTERRUPTED_TURN
     delete process.env.CC_HAHA_TRACE_API_CALLS
     delete process.env.CC_HAHA_TRACE_PROVIDER_ID
@@ -124,6 +127,9 @@ describe('ConversationService', () => {
 
     if (originalAttributionHeader === undefined) delete process.env.CLAUDE_CODE_ATTRIBUTION_HEADER
     else process.env.CLAUDE_CODE_ATTRIBUTION_HEADER = originalAttributionHeader
+
+    if (originalDisableExperimentalBetas === undefined) delete process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
+    else process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = originalDisableExperimentalBetas
 
     if (originalResumeInterruptedTurn === undefined) delete process.env.CLAUDE_CODE_RESUME_INTERRUPTED_TURN
     else process.env.CLAUDE_CODE_RESUME_INTERRUPTED_TURN = originalResumeInterruptedTurn
@@ -334,6 +340,8 @@ describe('ConversationService', () => {
     expect(env.API_TIMEOUT_MS).toBe('180000')
     expect(env.HTTP_PROXY).toBe('http://127.0.0.1:7890')
     expect(env.HTTPS_PROXY).toBe('http://127.0.0.1:7890')
+    expect(env.NO_PROXY).toContain('127.0.0.1')
+    expect(env.no_proxy).toContain('localhost')
   })
 
   test('buildChildEnv ties the first-token watchdog to the user request timeout so slow prefill is not killed early (#826)', async () => {
@@ -502,6 +510,38 @@ describe('ConversationService', () => {
     expect(env.CC_HAHA_TRACE_PROVIDER_ID).toBeUndefined()
     expect(env.CC_HAHA_TRACE_PROVIDER_NAME).toBeUndefined()
     expect(env.CC_HAHA_TRACE_PROVIDER_FORMAT).toBeUndefined()
+  })
+
+  test('buildChildEnv isolates experimental beta kill switch for session-scoped providers', async () => {
+    process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = '1'
+    const providerService = new ProviderService()
+    const provider = await providerService.addProvider({
+      presetId: 'custom',
+      name: 'Betas Managed',
+      apiKey: 'provider-key',
+      baseUrl: 'https://api.betas.example',
+      apiFormat: 'anthropic',
+      models: {
+        main: 'claude-sonnet-4-6',
+        haiku: '',
+        sonnet: '',
+        opus: '',
+      },
+    })
+
+    const service = new ConversationService() as any
+    const defaultEnv = (await service.buildChildEnv('/tmp', undefined, {
+      providerId: provider.id,
+    })) as Record<string, string>
+
+    expect(defaultEnv.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS).toBeUndefined()
+
+    await providerService.updateProvider(provider.id, { disableExperimentalBetas: true })
+    const disabledEnv = (await service.buildChildEnv('/tmp', undefined, {
+      providerId: provider.id,
+    })) as Record<string, string>
+
+    expect(disabledEnv.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS).toBe('1')
   })
 
   test('buildChildEnv injects trace provider metadata for desktop sdk session-scoped providers', async () => {

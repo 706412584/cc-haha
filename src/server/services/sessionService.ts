@@ -5,7 +5,7 @@
  * 确保 Desktop App 与 CLI 的数据完全互通。
  */
 
-import { createReadStream } from 'node:fs'
+import { createReadStream, type Stats } from 'node:fs'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import * as os from 'node:os'
@@ -40,8 +40,11 @@ import {
 import { registerFilesystemAccessRoot } from './filesystemAccessRoots.js'
 import { normalizeDriveRootPathForPlatform } from './windowsDrivePath.js'
 import { cleanSessionTitleSource } from '../../utils/sessionTitleText.js'
-import { roughTokenCountEstimationForMessages } from '../../services/tokenEstimation.js'
+import {
+  roughTokenCountEstimationForMessage,
+} from '../../services/tokenEstimation.js'
 import { ProviderService } from './providerService.js'
+import { shouldHideCommandMetadataContent } from '../../utils/commandMetadata.js'
 
 // ============================================================================
 // Types
@@ -94,6 +97,15 @@ export type SessionLaunchInfo = {
   runtimeModelId?: string
   effortLevel?: string
   thinkingEnabled?: boolean
+}
+
+type ProviderContextWindowHint = Pick<SessionLaunchInfo, 'runtimeProviderId' | 'runtimeModelId'>
+
+export type SessionInspectionTranscriptSnapshot = {
+  launchInfo: SessionLaunchInfo
+  metadata: TranscriptMetadataSnapshot
+  usage: TranscriptUsageSnapshot | null
+  contextEstimate: TranscriptContextEstimate | null
 }
 
 export type TrimSessionResult = {
@@ -283,6 +295,7 @@ type PersistedWorktreeSession = {
 type SessionListSummary = {
   title: string
   createdAt: string
+  modifiedAt: string
   messageCount: number
   workDir: string | null
   permissionMode?: string
@@ -292,6 +305,12 @@ type SessionListSummary = {
   thinkingEnabled?: boolean
   repository?: PreparedSessionWorkspace['repository']
   worktreeSession?: PersistedWorktreeSession | null
+}
+
+type SessionListSummaryCacheEntry = {
+  mtimeMs: number
+  size: number
+  summary: SessionListSummary
 }
 
 const VALID_SESSION_PERMISSION_MODES = new Set([
@@ -313,6 +332,43 @@ const USER_INTERRUPTION_TEXTS = new Set([
 const NO_RESPONSE_REQUESTED_TEXT = 'No response requested.'
 const TASK_NOTIFICATION_RE = /^<task-notification>\s*[\s\S]*<\/task-notification>$/i
 const TASK_NOTIFICATION_BLOCK_RE = /<task-notification>\s*[\s\S]*?<\/task-notification>/i
+const PROVIDER_MODEL_ALIAS_SEPARATORS = ['-', '_', ':', '/', '.', ' ']
+
+function normalizeProviderModelAlias(model: string): string {
+  return model
+    .trim()
+    .toLowerCase()
+    .replace(/\[1m\]$/i, '')
+    .replace(/:1m$/i, '')
+    .trim()
+}
+
+function providerModelLooksRelated(
+  transcriptModel: string,
+  configuredModel: string,
+): boolean {
+  const transcript = normalizeProviderModelAlias(transcriptModel)
+  const configured = normalizeProviderModelAlias(configuredModel)
+  if (!transcript || !configured) return false
+  if (transcript === configured) return true
+
+  const shorter = Math.min(transcript.length, configured.length)
+  if (shorter < 6) return false
+
+  return PROVIDER_MODEL_ALIAS_SEPARATORS.some((separator) => (
+    transcript.startsWith(`${configured}${separator}`) ||
+    configured.startsWith(`${transcript}${separator}`)
+  ))
+}
+
+function safeJsonLength(value: unknown): number {
+  if (value === undefined) return 0
+  try {
+    return JSON.stringify(value)?.length ?? 0
+  } catch {
+    return 0
+  }
+}
 
 // ============================================================================
 // Service
@@ -326,6 +382,7 @@ export class SessionService {
     expiresAt: number
     result: { sessions: SessionListItem[]; total: number }
   }>()
+  private readonly sessionListSummaryCache = new Map<string, SessionListSummaryCacheEntry>()
 
   // readJsonlFile parse cache. Keyed by absolute filePath, invalidated by
   // mtimeMs+size mismatch on each access (append-only JSONL means size alone
@@ -398,6 +455,93 @@ export class SessionService {
       this.readJsonlCache.delete(oldest)
       if (evicted) this.readCacheTotalBytes -= evicted.size
     }
+  }
+
+  private cloneSessionListSummary(summary: SessionListSummary): SessionListSummary {
+    return {
+      ...summary,
+      repository: summary.repository ? { ...summary.repository } : undefined,
+      worktreeSession: summary.worktreeSession
+        ? { ...summary.worktreeSession }
+        : summary.worktreeSession,
+    }
+  }
+
+  private latestTimestamp(current: string | null, candidate: unknown): string | null {
+    if (typeof candidate !== 'string') return current
+    const candidateTime = Date.parse(candidate)
+    if (!Number.isFinite(candidateTime)) return current
+    if (!current) return candidate
+    const currentTime = Date.parse(current)
+    return !Number.isFinite(currentTime) || candidateTime > currentTime
+      ? candidate
+      : current
+  }
+
+  private metadataMatchesLaunchInfo(
+    launchInfo: SessionLaunchInfo | null,
+    metadata: {
+      workDir: string
+      repository?: PreparedSessionWorkspace['repository']
+      permissionMode?: string
+      runtimeProviderId?: string | null
+      runtimeModelId?: string
+      effortLevel?: string
+    },
+  ): boolean {
+    if (!launchInfo) return false
+    if (normalizeDriveRootPathForPlatform(launchInfo.workDir) !== metadata.workDir) {
+      return false
+    }
+    if (
+      JSON.stringify(launchInfo.repository ?? null) !==
+      JSON.stringify(metadata.repository ?? null)
+    ) {
+      return false
+    }
+    if (
+      metadata.permissionMode &&
+      VALID_SESSION_PERMISSION_MODES.has(metadata.permissionMode) &&
+      launchInfo.permissionMode !== metadata.permissionMode
+    ) {
+      return false
+    }
+    if (
+      metadata.runtimeProviderId !== undefined &&
+      launchInfo.runtimeProviderId !== metadata.runtimeProviderId
+    ) {
+      return false
+    }
+    if (metadata.runtimeModelId && launchInfo.runtimeModelId !== metadata.runtimeModelId) {
+      return false
+    }
+    if (
+      metadata.effortLevel &&
+      VALID_SESSION_EFFORT_LEVELS.has(metadata.effortLevel) &&
+      launchInfo.effortLevel !== metadata.effortLevel
+    ) {
+      return false
+    }
+    return true
+  }
+
+  private async getCachedSessionListSummary(
+    filePath: string,
+    projectDir: string,
+    stat: Stats,
+  ): Promise<SessionListSummary> {
+    const cached = this.sessionListSummaryCache.get(filePath)
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+      return this.cloneSessionListSummary(cached.summary)
+    }
+
+    const summary = await this.scanSessionListSummary(filePath, projectDir, stat)
+    this.sessionListSummaryCache.set(filePath, {
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      summary: this.cloneSessionListSummary(summary),
+    })
+    return summary
   }
 
   // --------------------------------------------------------------------------
@@ -502,13 +646,44 @@ export class SessionService {
     return entries
   }
 
+  private async streamJsonlFile(
+    filePath: string,
+    onEntry: (entry: RawEntry) => void,
+  ): Promise<void> {
+    const stream = createReadStream(filePath, { encoding: 'utf8' })
+    const lines = createInterface({
+      input: stream,
+      crlfDelay: Infinity,
+    })
+
+    try {
+      for await (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        try {
+          onEntry(JSON.parse(trimmed) as RawEntry)
+        } catch {
+          // skip malformed lines
+        }
+      }
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw err
+      }
+    } finally {
+      lines.close()
+      stream.destroy()
+    }
+  }
+
   private async scanSessionListSummary(
     filePath: string,
     projectDir: string,
-    stat: { birthtime: Date },
+    stat: { birthtime: Date; mtime: Date },
   ): Promise<SessionListSummary> {
     let createdAt = stat.birthtime.toISOString()
     let hasCreatedAt = false
+    let modifiedAt: string | null = null
     let messageCount = 0
     let firstUserTitle: string | null = null
     let goalTitle: string | null = null
@@ -552,6 +727,9 @@ export class SessionService {
           entry.message?.role
         ) {
           messageCount += 1
+          if (!entry.isMeta) {
+            modifiedAt = this.latestTimestamp(modifiedAt, entry.timestamp)
+          }
         }
 
         if (entry.type === 'session-meta') {
@@ -642,6 +820,7 @@ export class SessionService {
         firstUserTitle ||
         'Untitled Session',
       createdAt,
+      modifiedAt: modifiedAt ?? stat.mtime.toISOString(),
       messageCount,
       workDir: latestWorkDir || latestCwd || this.desanitizePath(projectDir),
       ...(permissionMode ? { permissionMode } : {}),
@@ -672,7 +851,7 @@ export class SessionService {
     const summary = await this.scanSessionListSummary(filePath, projectPath, stat)
     return {
       title: summary.title,
-      modifiedAt: stat.mtime.toISOString(),
+      modifiedAt: summary.modifiedAt,
       workDir: summary.workDir ?? null,
       projectPath,
     }
@@ -728,6 +907,58 @@ export class SessionService {
       }
     }
     return undefined
+  }
+
+  private resolveTranscriptModifiedAtFromEntries(entries: RawEntry[]): string | null {
+    let modifiedAt: string | null = null
+    for (const entry of entries) {
+      if (
+        !entry.isMeta &&
+        (entry.type === 'user' || entry.type === 'assistant') &&
+        entry.message?.role
+      ) {
+        modifiedAt = this.latestTimestamp(modifiedAt, entry.timestamp)
+      }
+    }
+    return modifiedAt
+  }
+
+  private resolveRuntimeContextMetadataFromEntries(entries: RawEntry[]): ProviderContextWindowHint {
+    let runtimeProviderId: string | null | undefined
+    let runtimeModelId: string | undefined
+
+    for (const entry of entries) {
+      if (entry.type !== 'session-meta') continue
+      const record = entry as Record<string, unknown>
+      if (record.runtimeProviderId === null || typeof record.runtimeProviderId === 'string') {
+        runtimeProviderId = record.runtimeProviderId as string | null
+      }
+      if (typeof record.runtimeModelId === 'string') {
+        runtimeModelId = record.runtimeModelId
+      }
+    }
+
+    return {
+      ...(runtimeProviderId !== undefined ? { runtimeProviderId } : {}),
+      ...(runtimeModelId ? { runtimeModelId } : {}),
+    }
+  }
+
+  private applyRuntimeContextMetadata(
+    hint: ProviderContextWindowHint,
+    entry: RawEntry,
+  ): ProviderContextWindowHint {
+    if (entry.type !== 'session-meta') return hint
+
+    const record = entry as Record<string, unknown>
+    const nextHint: ProviderContextWindowHint = { ...hint }
+    if (record.runtimeProviderId === null || typeof record.runtimeProviderId === 'string') {
+      nextHint.runtimeProviderId = record.runtimeProviderId as string | null
+    }
+    if (typeof record.runtimeModelId === 'string') {
+      nextHint.runtimeModelId = record.runtimeModelId
+    }
+    return nextHint
   }
 
   private resolveWorktreeSessionFromEntries(entries: RawEntry[]): PersistedWorktreeSession | null | undefined {
@@ -915,19 +1146,6 @@ export class SessionService {
       .filter(Boolean)
   }
 
-  private isInternalCommandBreadcrumb(content: unknown): boolean {
-    const textBlocks = this.extractTextBlocks(content)
-    return (
-      textBlocks.length > 0 &&
-      textBlocks.every((text) =>
-        text.includes('<command-name>') ||
-        text.includes('<command-message>') ||
-        text.includes('<command-args>') ||
-        text.includes('<local-command-caveat>')
-      )
-    )
-  }
-
   private isSyntheticUserInterruption(content: unknown): boolean {
     const textBlocks = this.extractTextBlocks(content)
     return (
@@ -1022,7 +1240,7 @@ export class SessionService {
 
     if (role === 'user') {
       return (
-        this.isInternalCommandBreadcrumb(content) ||
+        shouldHideCommandMetadataContent(content) ||
         this.isSyntheticUserInterruption(content) ||
         this.isTaskNotificationContent(content)
       )
@@ -1035,10 +1253,23 @@ export class SessionService {
     return false
   }
 
+  private isVisibleTranscriptMessageEntry(entry: RawEntry): boolean {
+    if (!entry.message?.role || entry.isMeta) return false
+    if (
+      entry.type !== 'user' &&
+      entry.type !== 'assistant' &&
+      entry.type !== 'system'
+    ) {
+      return false
+    }
+    return !this.shouldHideTranscriptEntry(entry)
+  }
+
   private isGoalLocalCommandOutput(output: string): boolean {
     const trimmed = output.trim()
     return (
       trimmed.startsWith('Goal set:') ||
+      trimmed.startsWith('Goal continuing:') ||
       trimmed.startsWith('Goal cleared:') ||
       trimmed === 'Goal cleared.' ||
       trimmed === 'Goal marked complete.' ||
@@ -1511,8 +1742,9 @@ export class SessionService {
   private async getProviderContextWindowForSession(
     sessionId: string,
     model: string,
+    launchInfoOverride?: ProviderContextWindowHint | null,
   ): Promise<number | undefined> {
-    const launchInfo = await this.getSessionLaunchInfo(sessionId).catch(() => null)
+    const launchInfo = launchInfoOverride ?? await this.getSessionLaunchInfo(sessionId).catch(() => null)
     const providerIds: string[] = []
     const allowSavedProviderInference = launchInfo?.runtimeProviderId === undefined
 
@@ -1523,17 +1755,70 @@ export class SessionService {
       if (activeId) providerIds.push(activeId)
     }
 
+    // Provider env model keys — these are the configured model names that
+    // should be used as fallback matching keys when the transcript model name
+    // (from the API response) doesn't match the modelContextWindows keys.
+    // Third-party APIs may return model names with provider-specific suffixes
+    // (e.g. "LongCat-2.0-Preview-LongCatAI" instead of "LongCat-2.0-Preview").
+    const providerEnvModelKeys = [
+      'ANTHROPIC_MODEL',
+      'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+      'ANTHROPIC_DEFAULT_SONNET_MODEL',
+      'ANTHROPIC_DEFAULT_OPUS_MODEL',
+    ] as const
+
     for (const providerId of providerIds) {
       const env = await this.providerService.getProviderRuntimeEnv(providerId).catch(() => null)
+      const rawContextWindows = env?.[MODEL_CONTEXT_WINDOWS_ENV_KEY] ?? null
+      // Step 1: Try matching the transcript model name directly (current behavior)
       const contextWindow = getModelContextWindowFromEnvValue(
         model,
-        env?.[MODEL_CONTEXT_WINDOWS_ENV_KEY],
+        rawContextWindows,
       )
       if (contextWindow !== undefined) {
         if (contextWindow > MODEL_CONTEXT_WINDOW_DEFAULT && is1mContextDisabled()) {
           return MODEL_CONTEXT_WINDOW_DEFAULT
         }
         return contextWindow
+      }
+
+      // Step 2: Prefer the model this session actually launched with. Some
+      // third-party APIs return provider-specific aliases, but Desktop persists
+      // the requested runtime model in session metadata.
+      if (launchInfo?.runtimeModelId) {
+        const runtimeModelWindow = getModelContextWindowFromEnvValue(
+          launchInfo.runtimeModelId,
+          rawContextWindows,
+        )
+        if (runtimeModelWindow !== undefined) {
+          if (runtimeModelWindow > MODEL_CONTEXT_WINDOW_DEFAULT && is1mContextDisabled()) {
+            return MODEL_CONTEXT_WINDOW_DEFAULT
+          }
+          return runtimeModelWindow
+        }
+      }
+
+      // Step 3: If transcript model name didn't match, try matching with
+      // the provider's configured model names as fallback keys.
+      // This handles the case where the API response returns a model name
+      // that differs from the user-configured model name (e.g. provider
+      // appends its own suffix like "-LongCatAI").
+      if (env && rawContextWindows) {
+        for (const envKey of providerEnvModelKeys) {
+          const configuredModel = env[envKey]
+          if (!configuredModel) continue
+          if (!providerModelLooksRelated(model, configuredModel)) continue
+          const fallbackWindow = getModelContextWindowFromEnvValue(
+            configuredModel,
+            rawContextWindows,
+          )
+          if (fallbackWindow !== undefined) {
+            if (fallbackWindow > MODEL_CONTEXT_WINDOW_DEFAULT && is1mContextDisabled()) {
+              return MODEL_CONTEXT_WINDOW_DEFAULT
+            }
+            return fallbackWindow
+          }
+        }
       }
     }
 
@@ -1547,15 +1832,41 @@ export class SessionService {
   private async getUniqueSavedProviderContextWindow(model: string): Promise<number | undefined> {
     const { providers } = await this.providerService.listProviders().catch(() => ({ providers: [] }))
     const matches: number[] = []
+    const providerEnvModelKeys = [
+      'ANTHROPIC_MODEL',
+      'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+      'ANTHROPIC_DEFAULT_SONNET_MODEL',
+      'ANTHROPIC_DEFAULT_OPUS_MODEL',
+    ] as const
 
     for (const provider of providers) {
       const env = await this.providerService.getProviderRuntimeEnv(provider.id).catch(() => null)
+      const rawContextWindows = env?.[MODEL_CONTEXT_WINDOWS_ENV_KEY] ?? null
+      // Step 1: Try matching the transcript model name directly
       const contextWindow = getModelContextWindowFromEnvValue(
         model,
-        env?.[MODEL_CONTEXT_WINDOWS_ENV_KEY],
+        rawContextWindows,
       )
       if (contextWindow !== undefined) {
         matches.push(contextWindow)
+        continue
+      }
+
+      // Step 2: Fallback to provider configured model names.
+      if (env && rawContextWindows) {
+        for (const envKey of providerEnvModelKeys) {
+          const configuredModel = env[envKey]
+          if (!configuredModel) continue
+          if (!providerModelLooksRelated(model, configuredModel)) continue
+          const fallbackWindow = getModelContextWindowFromEnvValue(
+            configuredModel,
+            rawContextWindows,
+          )
+          if (fallbackWindow !== undefined) {
+            matches.push(fallbackWindow)
+            break // One match per provider is enough
+          }
+        }
       }
     }
 
@@ -1568,7 +1879,7 @@ export class SessionService {
       return undefined
     }
 
-    const [contextWindow] = uniqueWindows
+    const contextWindow = [...uniqueWindows][0]!
     if (
       contextWindow > MODEL_CONTEXT_WINDOW_DEFAULT &&
       is1mContextDisabled()
@@ -1578,8 +1889,31 @@ export class SessionService {
     return contextWindow
   }
 
-  private async getTranscriptContextWindow(sessionId: string, model: string): Promise<number> {
-    const providerContextWindow = await this.getProviderContextWindowForSession(sessionId, model)
+  private calculateTranscriptCost(model: string, usage: Parameters<typeof calculateUSDCost>[1]): number {
+    try {
+      return calculateUSDCost(model, usage)
+    } catch (err) {
+      if (
+        err instanceof Error &&
+        (err.message.includes('Config accessed before allowed') ||
+          err.message.includes('ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN env var is required'))
+      ) {
+        return 0
+      }
+      throw err
+    }
+  }
+
+  private async getTranscriptContextWindow(
+    sessionId: string,
+    model: string,
+    launchInfo?: ProviderContextWindowHint | null,
+  ): Promise<number> {
+    const providerContextWindow = await this.getProviderContextWindowForSession(
+      sessionId,
+      model,
+      launchInfo,
+    )
     if (providerContextWindow !== undefined) {
       return providerContextWindow
     }
@@ -1621,92 +1955,31 @@ export class SessionService {
     return metadata
   }
 
-  async getTranscriptContextEstimate(sessionId: string): Promise<TranscriptContextEstimate | null> {
-    const found = await this.findSessionFile(sessionId)
-    if (!found) return null
-
-    const entries = await this.readJsonlFile(found.filePath)
-
-    // After a compaction the transcript still holds the full pre-compact
-    // history, but the live context only contains messages after the latest
-    // compact boundary. Scope the estimate to post-boundary entries so the
-    // indicator doesn't report a stale ~100% — both the whole-transcript token
-    // estimate AND the summarization call's huge input_tokens would otherwise
-    // keep it pinned near full until the next real turn lands.
-    let boundaryIndex = -1
-    for (let i = entries.length - 1; i >= 0; i--) {
-      const entry = entries[i]!
-      if (entry.type === 'system' && entry.subtype === 'compact_boundary') {
-        boundaryIndex = i
-        break
-      }
-    }
-    const scopedEntries =
-      boundaryIndex >= 0 ? entries.slice(boundaryIndex + 1) : entries
-
-    let latest: {
-      model: string
+  private async buildTranscriptContextEstimate(
+    sessionId: string,
+    model: string,
+    latest: {
       inputTokens: number
       outputTokens: number
       cacheReadInputTokens: number
       cacheCreationInputTokens: number
-    } | null = null
-
-    for (const entry of scopedEntries) {
-      const usage = entry.message?.usage
-      const model = entry.message?.model
-      if (!usage || typeof model !== 'string') continue
-
-      const inputTokens = typeof usage.input_tokens === 'number' ? usage.input_tokens : 0
-      const outputTokens = typeof usage.output_tokens === 'number' ? usage.output_tokens : 0
-      const cacheReadInputTokens = typeof usage.cache_read_input_tokens === 'number' ? usage.cache_read_input_tokens : 0
-      const cacheCreationInputTokens = typeof usage.cache_creation_input_tokens === 'number' ? usage.cache_creation_input_tokens : 0
-      const promptTokens = inputTokens + cacheReadInputTokens + cacheCreationInputTokens
-      if (promptTokens === 0 && outputTokens === 0) continue
-
-      latest = {
-        model,
-        inputTokens,
-        outputTokens,
-        cacheReadInputTokens,
-        cacheCreationInputTokens,
-      }
-    }
-
-    // Resolve the model even when the post-compact segment has no usage yet
-    // (compaction just happened, no real turn since): we still want a valid
-    // post-compact estimate rather than null.
-    let model = latest?.model
-    if (!model) {
-      for (let i = entries.length - 1; i >= 0; i--) {
-        const candidate = entries[i]?.message?.model
-        if (typeof candidate === 'string') {
-          model = candidate
-          break
-        }
-      }
-    }
-    if (!model) return null
-
+    } | null,
+    estimatedTokensFromMessages: number,
+    transcriptHasMediaInput: boolean,
+    launchInfo?: ProviderContextWindowHint | null,
+  ): Promise<TranscriptContextEstimate> {
     const usage = latest ?? {
       inputTokens: 0,
       outputTokens: 0,
       cacheReadInputTokens: 0,
       cacheCreationInputTokens: 0,
     }
-
-    const rawMaxTokens = await this.getTranscriptContextWindow(sessionId, model)
+    const rawMaxTokens = await this.getTranscriptContextWindow(sessionId, model, launchInfo)
     const promptTokens = usage.inputTokens + usage.cacheReadInputTokens + usage.cacheCreationInputTokens
-    const transcriptMessages = scopedEntries.filter(entry =>
-      entry.type === 'user' || entry.type === 'assistant' || entry.type === 'attachment',
-    ) as Parameters<typeof roughTokenCountEstimationForMessages>[0]
-    const estimatedTokens =
-      roughTokenCountEstimationForMessages(transcriptMessages) || promptTokens
+    const estimatedTokens = estimatedTokensFromMessages || promptTokens
     const contextBudget = calculateContextBudget({
       estimatedTokens,
       contextWindow: rawMaxTokens,
-      // Without a post-compact API turn yet, there's no trustworthy provider
-      // usage to anchor to — fall back to the pure message-token estimate.
       currentUsage: latest
         ? {
             input_tokens: latest.inputTokens,
@@ -1718,7 +1991,7 @@ export class SessionService {
       usageTrust: getProviderUsageTrust({
         isFirstPartyAnthropic: isFirstPartyAnthropicBaseUrl(),
       }),
-      hasMediaInput: hasMediaInput(transcriptMessages),
+      hasMediaInput: transcriptHasMediaInput,
     })
     const totalTokens = contextBudget.usedTokens
     const percentage = rawMaxTokens > 0 ? Math.round((totalTokens / rawMaxTokens) * 100) : 0
@@ -1773,11 +2046,91 @@ export class SessionService {
     }
   }
 
+  async getTranscriptContextEstimate(sessionId: string): Promise<TranscriptContextEstimate | null> {
+    const found = await this.findSessionFile(sessionId)
+    if (!found) return null
+
+    const entries = await this.readJsonlFile(found.filePath)
+    let boundaryIndex = -1
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i]!
+      if (entry.type === 'system' && entry.subtype === 'compact_boundary') {
+        boundaryIndex = i
+        break
+      }
+    }
+    const scopedEntries = boundaryIndex >= 0 ? entries.slice(boundaryIndex + 1) : entries
+
+    let latest: {
+      model: string
+      inputTokens: number
+      outputTokens: number
+      cacheReadInputTokens: number
+      cacheCreationInputTokens: number
+    } | null = null
+    let estimatedTokensFromMessages = 0
+    let transcriptHasMediaInput = false
+
+    for (const entry of scopedEntries) {
+      if (
+        entry.type === 'user' ||
+        entry.type === 'assistant' ||
+        entry.type === 'attachment'
+      ) {
+        estimatedTokensFromMessages += roughTokenCountEstimationForMessage(entry)
+        if (!transcriptHasMediaInput && hasMediaInput([entry])) {
+          transcriptHasMediaInput = true
+        }
+      }
+
+      const usage = entry.message?.usage
+      const model = entry.message?.model
+      if (!usage || typeof model !== 'string') continue
+
+      const inputTokens = typeof usage.input_tokens === 'number' ? usage.input_tokens : 0
+      const outputTokens = typeof usage.output_tokens === 'number' ? usage.output_tokens : 0
+      const cacheReadInputTokens = typeof usage.cache_read_input_tokens === 'number' ? usage.cache_read_input_tokens : 0
+      const cacheCreationInputTokens = typeof usage.cache_creation_input_tokens === 'number' ? usage.cache_creation_input_tokens : 0
+      const promptTokens = inputTokens + cacheReadInputTokens + cacheCreationInputTokens
+      if (promptTokens === 0 && outputTokens === 0) continue
+
+      latest = {
+        model,
+        inputTokens,
+        outputTokens,
+        cacheReadInputTokens,
+        cacheCreationInputTokens,
+      }
+    }
+
+    let model = latest?.model
+    if (!model) {
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const candidate = entries[i]?.message?.model
+        if (typeof candidate === 'string') {
+          model = candidate
+          break
+        }
+      }
+    }
+    if (!model) return null
+
+    return await this.buildTranscriptContextEstimate(
+      sessionId,
+      model,
+      latest,
+      estimatedTokensFromMessages,
+      transcriptHasMediaInput,
+      this.resolveRuntimeContextMetadataFromEntries(entries),
+    )
+  }
+
   async getTranscriptUsage(sessionId: string): Promise<TranscriptUsageSnapshot | null> {
     const found = await this.findSessionFile(sessionId)
     if (!found) return null
 
     const entries = await this.readJsonlFile(found.filePath)
+    let currentRuntimeHint: ProviderContextWindowHint = {}
     const models = new Map<string, TranscriptUsageSnapshot['models'][number]>()
     let totalCostUSD = 0
     let totalInputTokens = 0
@@ -1790,6 +2143,7 @@ export class SessionService {
     let lastUsageAt: number | null = null
 
     for (const entry of entries) {
+      currentRuntimeHint = this.applyRuntimeContextMetadata(currentRuntimeHint, entry)
       const usage = entry.message?.usage
       const model = entry.message?.model
       if (!usage || typeof model !== 'string') continue
@@ -1825,7 +2179,7 @@ export class SessionService {
         server_tool_use: { web_search_requests: webSearchRequests },
         speed: usage.speed,
       } as Parameters<typeof calculateUSDCost>[1]
-      const costUSD = calculateUSDCost(model, costUsage)
+      const costUSD = this.calculateTranscriptCost(model, costUsage)
 
       let modelUsage = models.get(model)
       if (!modelUsage) {
@@ -1839,7 +2193,7 @@ export class SessionService {
           webSearchRequests: 0,
           costUSD: 0,
           costDisplay: '$0.0000',
-          contextWindow: await this.getTranscriptContextWindow(sessionId, model),
+          contextWindow: await this.getTranscriptContextWindow(sessionId, model, currentRuntimeHint),
           maxOutputTokens: getModelMaxOutputTokens(model).default,
         }
         models.set(model, modelUsage)
@@ -1892,6 +2246,274 @@ export class SessionService {
     }
   }
 
+  async getInspectionTranscriptSnapshot(sessionId: string): Promise<SessionInspectionTranscriptSnapshot | null> {
+    const found = await this.findSessionFile(sessionId)
+    if (!found) return null
+
+    let latestWorkDir: string | null = null
+    let latestCwd: string | null = null
+    let repository: PreparedSessionWorkspace['repository'] | undefined
+    let worktreeSession: PersistedWorktreeSession | null | undefined
+    let permissionMode: string | undefined
+    let runtimeProviderId: string | null | undefined
+    let runtimeModelId: string | undefined
+    let effortLevel: string | undefined
+    let customTitle: string | null = null
+    let transcriptMessageCount = 0
+    const metadata: TranscriptMetadataSnapshot = {}
+
+    const models = new Map<string, TranscriptUsageSnapshot['models'][number]>()
+    let totalCostUSD = 0
+    let totalInputTokens = 0
+    let totalOutputTokens = 0
+    let totalCacheReadInputTokens = 0
+    let totalCacheCreationInputTokens = 0
+    let totalWebSearchRequests = 0
+    let hasUnknownModelCost = false
+    let firstUsageAt: number | null = null
+    let lastUsageAt: number | null = null
+
+    let latestContextUsage: {
+      model: string
+      inputTokens: number
+      outputTokens: number
+      cacheReadInputTokens: number
+      cacheCreationInputTokens: number
+    } | null = null
+    let estimatedTokensFromMessages = 0
+    let transcriptHasMediaInput = false
+
+    await this.streamJsonlFile(found.filePath, (entry) => {
+      if (typeof entry.message?.model === 'string') {
+        metadata.model = entry.message.model
+      }
+      if (typeof entry.cwd === 'string') {
+        metadata.cwd = entry.cwd
+        latestCwd = normalizeDriveRootPathForPlatform(entry.cwd)
+      }
+      if (typeof entry.version === 'string') {
+        metadata.version = entry.version
+      }
+
+      if (entry.type === 'session-meta') {
+        const record = entry as Record<string, unknown>
+        if (typeof record.workDir === 'string') {
+          latestWorkDir = normalizeDriveRootPathForPlatform(record.workDir)
+        }
+        if (
+          typeof entry.permissionMode === 'string' &&
+          VALID_SESSION_PERMISSION_MODES.has(entry.permissionMode)
+        ) {
+          permissionMode = entry.permissionMode
+        }
+        if (record.runtimeProviderId === null || typeof record.runtimeProviderId === 'string') {
+          runtimeProviderId = record.runtimeProviderId as string | null
+        }
+        if (typeof record.runtimeModelId === 'string') {
+          runtimeModelId = record.runtimeModelId
+        }
+        if (
+          typeof record.effortLevel === 'string' &&
+          VALID_SESSION_EFFORT_LEVELS.has(record.effortLevel)
+        ) {
+          effortLevel = record.effortLevel
+        }
+      }
+
+      const candidateRepository = (entry as Record<string, unknown>)?.repository
+      if (candidateRepository && typeof candidateRepository === 'object') {
+        repository = candidateRepository as PreparedSessionWorkspace['repository']
+      }
+
+      if (entry.type === 'worktree-state') {
+        if (entry.worktreeSession === null) {
+          worktreeSession = null
+        } else if (
+          entry.worktreeSession &&
+          typeof entry.worktreeSession === 'object' &&
+          typeof entry.worktreeSession.worktreePath === 'string' &&
+          typeof entry.worktreeSession.worktreeName === 'string'
+        ) {
+          worktreeSession = entry.worktreeSession
+        }
+      }
+
+      if (entry.type === 'custom-title' && typeof entry.customTitle === 'string') {
+        customTitle = entry.customTitle
+      }
+
+      if (
+        !entry.isMeta &&
+        !!entry.message?.role &&
+        (entry.type === 'user' || entry.type === 'assistant' || entry.type === 'system')
+      ) {
+        transcriptMessageCount += 1
+      }
+
+      if (
+        entry.type === 'user' ||
+        entry.type === 'assistant' ||
+        entry.type === 'attachment'
+      ) {
+        estimatedTokensFromMessages += roughTokenCountEstimationForMessage(entry)
+        if (!transcriptHasMediaInput && hasMediaInput([entry])) {
+          transcriptHasMediaInput = true
+        }
+      }
+
+      const usage = entry.message?.usage
+      const model = entry.message?.model
+      if (!usage || typeof model !== 'string') return
+
+      const inputTokens = typeof usage.input_tokens === 'number' ? usage.input_tokens : 0
+      const outputTokens = typeof usage.output_tokens === 'number' ? usage.output_tokens : 0
+      const cacheReadInputTokens = typeof usage.cache_read_input_tokens === 'number' ? usage.cache_read_input_tokens : 0
+      const cacheCreationInputTokens = typeof usage.cache_creation_input_tokens === 'number' ? usage.cache_creation_input_tokens : 0
+      const webSearchRequests = typeof usage.server_tool_use?.web_search_requests === 'number'
+        ? usage.server_tool_use.web_search_requests
+        : 0
+      const promptTokens = inputTokens + cacheReadInputTokens + cacheCreationInputTokens
+
+      if (promptTokens !== 0 || outputTokens !== 0) {
+        latestContextUsage = {
+          model,
+          inputTokens,
+          outputTokens,
+          cacheReadInputTokens,
+          cacheCreationInputTokens,
+        }
+      }
+
+      if (
+        inputTokens === 0 &&
+        outputTokens === 0 &&
+        cacheReadInputTokens === 0 &&
+        cacheCreationInputTokens === 0 &&
+        webSearchRequests === 0
+      ) {
+        return
+      }
+
+      const canonical = getCanonicalName(model)
+      if (!Object.prototype.hasOwnProperty.call(MODEL_COSTS, canonical)) {
+        hasUnknownModelCost = true
+      }
+
+      const costUsage = {
+        input_tokens: inputTokens,
+        output_tokens: outputTokens,
+        cache_read_input_tokens: cacheReadInputTokens,
+        cache_creation_input_tokens: cacheCreationInputTokens,
+        server_tool_use: { web_search_requests: webSearchRequests },
+        speed: usage.speed,
+      } as Parameters<typeof calculateUSDCost>[1]
+      const costUSD = this.calculateTranscriptCost(model, costUsage)
+
+      let modelUsage = models.get(model)
+      if (!modelUsage) {
+        modelUsage = {
+          model,
+          displayName: canonical,
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
+          webSearchRequests: 0,
+          costUSD: 0,
+          costDisplay: '$0.0000',
+          contextWindow: 0,
+          maxOutputTokens: getModelMaxOutputTokens(model).default,
+        }
+        models.set(model, modelUsage)
+      }
+
+      modelUsage.inputTokens += inputTokens
+      modelUsage.outputTokens += outputTokens
+      modelUsage.cacheReadInputTokens += cacheReadInputTokens
+      modelUsage.cacheCreationInputTokens += cacheCreationInputTokens
+      modelUsage.webSearchRequests += webSearchRequests
+      modelUsage.costUSD += costUSD
+      modelUsage.costDisplay = this.formatCost(modelUsage.costUSD)
+
+      totalCostUSD += costUSD
+      totalInputTokens += inputTokens
+      totalOutputTokens += outputTokens
+      totalCacheReadInputTokens += cacheReadInputTokens
+      totalCacheCreationInputTokens += cacheCreationInputTokens
+      totalWebSearchRequests += webSearchRequests
+
+      if (entry.timestamp) {
+        const time = Date.parse(entry.timestamp)
+        if (!Number.isNaN(time)) {
+          firstUsageAt = firstUsageAt === null ? time : Math.min(firstUsageAt, time)
+          lastUsageAt = lastUsageAt === null ? time : Math.max(lastUsageAt, time)
+        }
+      }
+    })
+
+    const workDir = latestWorkDir || latestCwd || this.desanitizePath(found.projectDir) || process.cwd()
+    const launchInfo: SessionLaunchInfo = {
+      filePath: found.filePath,
+      projectDir: found.projectDir,
+      workDir,
+      repository,
+      worktreeSession,
+      transcriptMessageCount,
+      customTitle,
+      permissionMode,
+      ...(runtimeProviderId !== undefined ? { runtimeProviderId } : {}),
+      ...(runtimeModelId ? { runtimeModelId } : {}),
+      ...(effortLevel ? { effortLevel } : {}),
+    }
+
+    for (const modelUsage of models.values()) {
+      modelUsage.contextWindow = await this.getTranscriptContextWindow(
+        sessionId,
+        modelUsage.model,
+        launchInfo,
+      )
+    }
+
+    const usage = models.size === 0
+      ? null
+      : {
+          source: 'transcript' as const,
+          totalCostUSD,
+          costDisplay: this.formatCost(totalCostUSD),
+          hasUnknownModelCost,
+          totalAPIDuration: 0,
+          totalDuration:
+            firstUsageAt !== null && lastUsageAt !== null
+              ? Math.max(0, Math.round((lastUsageAt - firstUsageAt) / 1000))
+              : 0,
+          totalLinesAdded: 0,
+          totalLinesRemoved: 0,
+          totalInputTokens,
+          totalOutputTokens,
+          totalCacheReadInputTokens,
+          totalCacheCreationInputTokens,
+          totalWebSearchRequests,
+          models: Array.from(models.values()),
+        }
+    const contextEstimate = latestContextUsage
+      ? await this.buildTranscriptContextEstimate(
+          sessionId,
+          latestContextUsage.model,
+          latestContextUsage,
+          estimatedTokensFromMessages,
+          transcriptHasMediaInput,
+          launchInfo,
+        )
+      : null
+
+    return {
+      launchInfo,
+      metadata,
+      usage,
+      contextEstimate,
+    }
+  }
+
   // --------------------------------------------------------------------------
   // Public API
   // --------------------------------------------------------------------------
@@ -1922,20 +2544,44 @@ export class SessionService {
       }
     }))).filter((item): item is NonNullable<typeof item> => item !== null)
 
-    filesWithStats.sort((a, b) => b.stat.mtime.getTime() - a.stat.mtime.getTime())
+    const summarizedFiles: Array<{
+      filePath: string
+      projectDir: string
+      sessionId: string
+      stat: Stats
+      summary: SessionListSummary
+    }> = []
+    for (const item of filesWithStats) {
+      try {
+        summarizedFiles.push({
+          ...item,
+          summary: await this.getCachedSessionListSummary(
+            item.filePath,
+            item.projectDir,
+            item.stat,
+          ),
+        })
+      } catch {
+        // Skip unreadable files
+      }
+    }
 
-    const total = filesWithStats.length
+    summarizedFiles.sort(
+      (a, b) =>
+        Date.parse(b.summary.modifiedAt) - Date.parse(a.summary.modifiedAt),
+    )
+
+    const total = summarizedFiles.length
     const offset = options?.offset ?? 0
     const limit = options?.limit ?? 50
-    const paginatedFiles = filesWithStats.slice(offset, offset + limit)
+    const paginatedFiles = summarizedFiles.slice(offset, offset + limit)
 
     // Build session list items with metadata from file stats & a streaming
     // transcript summary. Keep this sequential so large JSONL files are not
     // loaded into memory concurrently by the sidebar's frequent refresh.
     const items: SessionListItem[] = []
-    for (const { filePath, projectDir, sessionId, stat } of paginatedFiles) {
+    for (const { filePath, projectDir, sessionId, summary } of paginatedFiles) {
       try {
-        const summary = await this.scanSessionListSummary(filePath, projectDir, stat)
         const workDir = summary.workDir
         const projectRoot = await this.resolveProjectRootFromSessionMetadata({
           worktreeSession: summary.worktreeSession,
@@ -1949,7 +2595,7 @@ export class SessionService {
           id: sessionId,
           title: summary.title,
           createdAt: summary.createdAt,
-          modifiedAt: stat.mtime.toISOString(),
+          modifiedAt: summary.modifiedAt,
           messageCount: summary.messageCount,
           projectPath: projectDir,
           projectRoot,
@@ -2005,7 +2651,7 @@ export class SessionService {
       id: sessionId,
       title,
       createdAt,
-      modifiedAt: stat.mtime.toISOString(),
+      modifiedAt: this.resolveTranscriptModifiedAtFromEntries(entries) ?? stat.mtime.toISOString(),
       messageCount: messages.length,
       projectPath: projectDir,
       projectRoot,
@@ -2032,6 +2678,75 @@ export class SessionService {
       sessionId,
       this.entriesToMessages(entries),
     )
+  }
+
+  async getSessionMessagesSignature(sessionId: string): Promise<string | null> {
+    const found = await this.findSessionFile(sessionId)
+    if (!found) return null
+
+    let count = 0
+    let last = ''
+    const agentToolUseIds = new Set<string>()
+    const resultLinks = new Map<string, string>()
+    await this.streamJsonlFile(found.filePath, (entry) => {
+      const agentToolUseId = this.extractAgentToolUseId(entry)
+      if (agentToolUseId) {
+        agentToolUseIds.add(agentToolUseId)
+      }
+      if (entry.message?.role === 'user' && Array.isArray(entry.message.content)) {
+        for (const block of entry.message.content as ContentBlock[]) {
+          if (
+            block.type !== 'tool_result' ||
+            typeof block.tool_use_id !== 'string' ||
+            !agentToolUseIds.has(block.tool_use_id)
+          ) {
+            continue
+          }
+          const agentId = this.extractAgentIdFromResultText(
+            this.extractTextFromContent(block.content),
+          )
+          if (agentId) {
+            resultLinks.set(block.tool_use_id, agentId)
+          }
+        }
+      }
+      if (!this.isVisibleTranscriptMessageEntry(entry)) return
+      count += 1
+      const contentLength = safeJsonLength(entry.content) + safeJsonLength(entry.message?.content)
+      last = [
+        entry.uuid ?? entry.messageId ?? '',
+        entry.type ?? '',
+        entry.timestamp ?? '',
+        entry.parentUuid ?? '',
+        entry.parent_tool_use_id ?? '',
+        contentLength,
+      ].join(':')
+    })
+
+    const subagentSignatures = await Promise.all(
+      [...resultLinks.entries()].map(async ([parentToolUseId, agentId]) => {
+        let childCount = 0
+        let childLast = ''
+        await this.streamJsonlFile(this.subagentTranscriptPath(found.projectDir, sessionId, agentId), (entry) => {
+          if (!this.isVisibleTranscriptMessageEntry(entry)) return
+          childCount += 1
+          const contentLength = safeJsonLength(entry.content) + safeJsonLength(entry.message?.content)
+          childLast = [
+            parentToolUseId,
+            agentId,
+            entry.uuid ?? entry.messageId ?? '',
+            entry.type ?? '',
+            entry.timestamp ?? '',
+            entry.parentUuid ?? '',
+            entry.parent_tool_use_id ?? '',
+            contentLength,
+          ].join(':')
+        })
+        return `${parentToolUseId}:${agentId}:${childCount}:${childLast}`
+      }),
+    )
+
+    return `${count}:${last}:${subagentSignatures.join('|')}`
   }
 
   /**
@@ -2296,7 +3011,11 @@ export class SessionService {
     this.invalidateSessionListCache()
   }
 
-  async clearSessionTranscript(sessionId: string, fallbackWorkDir?: string): Promise<void> {
+  async clearSessionTranscript(
+    sessionId: string,
+    fallbackWorkDir?: string,
+    preservedPermissionMode?: string,
+  ): Promise<void> {
     let found = await this.findSessionFile(sessionId)
     if (!found && fallbackWorkDir) {
       const resolvedPath = path.resolve(normalizeDriveRootPathForPlatform(fallbackWorkDir))
@@ -2315,6 +3034,12 @@ export class SessionService {
     const entries = await this.readJsonlFile(found.filePath)
     const workDir = this.resolveWorkDirFromEntries(entries, found.projectDir) || fallbackWorkDir || process.cwd()
     const repository = this.resolveRepositoryFromEntries(entries)
+    const permissionMode = (
+      preservedPermissionMode &&
+      VALID_SESSION_PERMISSION_MODES.has(preservedPermissionMode)
+    )
+      ? preservedPermissionMode
+      : this.resolvePermissionModeFromEntries(entries)
     const now = new Date().toISOString()
 
     const initialEntry = {
@@ -2333,6 +3058,7 @@ export class SessionService {
       isMeta: true,
       workDir,
       repository,
+      ...(permissionMode ? { permissionMode } : {}),
       timestamp: now,
     }
 
@@ -2375,6 +3101,18 @@ export class SessionService {
     const normalizedWorkDir = normalizeDriveRootPathForPlatform(metadata.workDir)
     const targetProjectDir = this.sanitizePath(normalizedWorkDir)
     const targetFilePath = path.join(this.getProjectsDir(), targetProjectDir, `${sessionId}.jsonl`)
+
+    if (!metadata.customTitle) {
+      const launchInfo = await this.getSessionLaunchInfo(sessionId)
+      if (this.metadataMatchesLaunchInfo(launchInfo, {
+        ...metadata,
+        workDir: normalizedWorkDir,
+        repository,
+      })) {
+        return
+      }
+    }
+
     await fs.mkdir(path.dirname(targetFilePath), { recursive: true })
 
     await this.appendJsonlEntry(targetFilePath, {

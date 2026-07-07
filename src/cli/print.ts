@@ -239,6 +239,10 @@ import {
 } from 'src/services/mcp/elicitationHandler.js'
 import { executeNotificationHooks } from 'src/utils/hooks.js'
 import {
+  parseTaskNotificationXml,
+  shouldForwardTaskNotificationToModel,
+} from 'src/utils/taskNotificationPolicy.js'
+import {
   ElicitRequestSchema,
   ElicitationCompleteNotificationSchema,
 } from '@modelcontextprotocol/sdk/types.js'
@@ -1005,6 +1009,7 @@ function runHeadlessStreaming(
     setSDKStatus?: (status: SDKStatus) => void
     promptSuggestions?: boolean | undefined
     workload?: string | undefined
+    outputFormat: string | undefined
   },
   turnInterruptionState?: TurnInterruptionState,
 ): AsyncIterable<StdoutMessage> {
@@ -2008,61 +2013,14 @@ function runHeadlessStreaming(
             notifyCommandLifecycle(uuid, 'started')
           }
 
-          // Task notifications arrive when background agents complete.
-          // Emit an SDK system event for SDK consumers, then fall through
-          // to ask() so the model sees the agent result and can act on it.
-          // This matches TUI behavior where useQueueProcessor always feeds
-          // notifications to the model regardless of coordinator mode.
+          // Task notifications arrive when background tasks complete.
+          // Emit SDK system events for structured consumers, then only feed
+          // notifications back to the model for task types that still need a
+          // model follow-up (for example background shell commands).
           if (command.mode === 'task-notification') {
             const notificationText =
               typeof command.value === 'string' ? command.value : ''
-            // Parse the XML-formatted notification
-            const taskIdMatch = notificationText.match(
-              /<task-id>([^<]+)<\/task-id>/,
-            )
-            const toolUseIdMatch = notificationText.match(
-              /<tool-use-id>([^<]+)<\/tool-use-id>/,
-            )
-            const outputFileMatch = notificationText.match(
-              /<output-file>([^<]+)<\/output-file>/,
-            )
-            const statusMatch = notificationText.match(
-              /<status>([^<]+)<\/status>/,
-            )
-            const summaryMatch = notificationText.match(
-              /<summary>([^<]+)<\/summary>/,
-            )
-            const resultMatch = notificationText.match(
-              /<result>([\s\S]*?)<\/result>/,
-            )
-
-            const isValidStatus = (
-              s: string | undefined,
-            ): s is 'completed' | 'failed' | 'stopped' | 'killed' =>
-              s === 'completed' ||
-              s === 'failed' ||
-              s === 'stopped' ||
-              s === 'killed'
-            const rawStatus = statusMatch?.[1]
-            const status = isValidStatus(rawStatus)
-              ? rawStatus === 'killed'
-                ? 'stopped'
-                : rawStatus
-              : 'completed'
-
-            const usageMatch = notificationText.match(
-              /<usage>([\s\S]*?)<\/usage>/,
-            )
-            const usageContent = usageMatch?.[1] ?? ''
-            const totalTokensMatch = usageContent.match(
-              /<total_tokens>(\d+)<\/total_tokens>/,
-            )
-            const toolUsesMatch = usageContent.match(
-              /<tool_uses>(\d+)<\/tool_uses>/,
-            )
-            const durationMsMatch = usageContent.match(
-              /<duration_ms>(\d+)<\/duration_ms>/,
-            )
+            const notification = parseTaskNotificationXml(notificationText)
 
             // Only emit a task_notification SDK event when a <status> tag is
             // present — that means this is a terminal notification (completed/
@@ -2071,31 +2029,31 @@ function runHeadlessStreaming(
             // default to 'completed' and falsely close the task for SDK
             // consumers. Terminal bookends are now emitted directly via
             // emitTaskTerminatedSdk, so skipping statusless events is safe.
-            if (statusMatch) {
+            if (notification.status) {
               output.enqueue({
                 type: 'system',
                 subtype: 'task_notification',
-                task_id: taskIdMatch?.[1] ?? '',
-                tool_use_id: toolUseIdMatch?.[1],
-                status,
-                output_file: outputFileMatch?.[1] ?? '',
-                summary: summaryMatch?.[1] ?? '',
-                result: resultMatch?.[1],
-                usage:
-                  totalTokensMatch && toolUsesMatch
-                    ? {
-                        total_tokens: parseInt(totalTokensMatch[1]!, 10),
-                        tool_uses: parseInt(toolUsesMatch[1]!, 10),
-                        duration_ms: durationMsMatch
-                          ? parseInt(durationMsMatch[1]!, 10)
-                          : 0,
-                      }
-                    : undefined,
+                task_id: notification.taskId,
+                tool_use_id: notification.toolUseId,
+                status: notification.status,
+                output_file: notification.outputFile,
+                summary: notification.summary,
+                result: notification.result,
+                usage: notification.usage,
                 session_id: getSessionId(),
                 uuid: randomUUID(),
               })
             }
-            // No continue -- fall through to ask() so the model processes the result
+            if (
+              !shouldForwardTaskNotificationToModel(notification, {
+                structuredOutput: options.outputFormat === 'stream-json',
+              })
+            ) {
+              for (const uuid of batchUuids) {
+                notifyCommandLifecycle(uuid, 'completed')
+              }
+              continue
+            }
           }
 
           const input = command.value

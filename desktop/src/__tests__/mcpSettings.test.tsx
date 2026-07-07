@@ -214,6 +214,138 @@ describe('McpSettings', () => {
     expect(screen.getByText('global-user')).toBeInTheDocument()
   })
 
+  it('redacts sensitive MCP command details from the list and details views', async () => {
+    const server = {
+      name: 'context7',
+      scope: 'local',
+      transport: 'stdio',
+      enabled: true,
+      status: 'connected',
+      statusLabel: 'Connected',
+      configLocation: '/workspace/project/.mcp.json',
+      summary: 'npx context7 --api-key sk-summary-secret',
+      canEdit: false,
+      canRemove: false,
+      canReconnect: true,
+      canToggle: true,
+      projectPath: '/workspace/project',
+      config: {
+        type: 'stdio',
+        command: 'npx',
+        args: ['context7', '--api-key', 'sk-argument-secret'],
+        env: { CONTEXT7_API_KEY: 'sk-env-secret' },
+      },
+    } as const
+
+    useMcpStore.setState({ servers: [server] })
+
+    await renderLoadedMcpSettings()
+
+    expect(document.body.textContent).not.toContain('sk-summary-secret')
+    expect(document.body.textContent).not.toContain('sk-argument-secret')
+    expect(document.body.textContent).not.toContain('sk-env-secret')
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Open context7' }))
+    })
+
+    expect(document.body.textContent).not.toContain('sk-summary-secret')
+    expect(document.body.textContent).not.toContain('sk-argument-secret')
+    expect(document.body.textContent).not.toContain('sk-env-secret')
+  })
+
+  it('redacts editable MCP secrets without replacing unchanged values on save', async () => {
+    const server = {
+      name: 'context7',
+      scope: 'local',
+      transport: 'stdio',
+      enabled: true,
+      status: 'connected',
+      statusLabel: 'Connected',
+      configLocation: '/workspace/project/.mcp.json',
+      summary: 'npx context7 --api-key sk-summary-edit-secret',
+      canEdit: true,
+      canRemove: true,
+      canReconnect: true,
+      canToggle: true,
+      projectPath: '/workspace/project',
+      config: {
+        type: 'stdio',
+        command: 'npx',
+        args: ['context7', '--api-key', 'sk-argument-edit-secret'],
+        env: {
+          CONTEXT7_API_KEY: 'sk-env-edit-secret',
+          LOG_LEVEL: 'debug',
+        },
+      },
+    } as const
+    const updateServer = vi.fn().mockResolvedValue(server)
+
+    useMcpStore.setState({ servers: [server], updateServer })
+
+    await renderLoadedMcpSettings()
+
+    expect(document.body.textContent).not.toContain('sk-summary-edit-secret')
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Open context7' }))
+    })
+
+    expect(document.body.textContent).not.toContain('sk-summary-edit-secret')
+    expect(document.body.textContent).not.toContain('sk-argument-edit-secret')
+    expect(document.body.textContent).not.toContain('sk-env-edit-secret')
+    expect(screen.queryByDisplayValue('sk-argument-edit-secret')).not.toBeInTheDocument()
+    expect(screen.queryByDisplayValue('sk-env-edit-secret')).not.toBeInTheDocument()
+    expect(screen.getByDisplayValue('debug')).toBeInTheDocument()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    })
+
+    expect(updateServer).toHaveBeenCalledWith(
+      server,
+      {
+        scope: 'local',
+        config: {
+          type: 'stdio',
+          command: 'npx',
+          args: ['context7', '--api-key', 'sk-argument-edit-secret'],
+          env: {
+            CONTEXT7_API_KEY: 'sk-env-edit-secret',
+            LOG_LEVEL: 'debug',
+          },
+        },
+      },
+      '/workspace/project',
+    )
+  })
+
+  it('uses the server MCP name rules before enabling Save', async () => {
+    await renderLoadedMcpSettings()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /add server/i }))
+    })
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^User/i }))
+    })
+
+    fireEvent.change(screen.getByLabelText(/Name/), { target: { value: 'bad name' } })
+    fireEvent.change(screen.getByLabelText(/Command to launch/), { target: { value: 'echo' } })
+
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+
+    fireEvent.change(screen.getByLabelText(/Name/), { target: { value: 'bad/name' } })
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+
+    fireEvent.change(screen.getByLabelText(/Name/), { target: { value: 'bad.name' } })
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+
+    fireEvent.change(screen.getByLabelText(/Name/), { target: { value: '某某服务器' } })
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled()
+  })
+
   it('keeps same-name project MCP servers distinct by project path', async () => {
     useMcpStore.setState({
       servers: [

@@ -24,6 +24,7 @@ import { InlineTaskSummary } from './InlineTaskSummary'
 import { CurrentTurnChangeCard } from './CurrentTurnChangeCard'
 import type { AgentTaskNotification, UIMessage } from '../../types/chat'
 import { formatTokenCount } from '../../lib/formatTokenCount'
+import { formatDurationMs, hasRunningBackgroundTasks as hasAnyRunningBackgroundTasks } from '../../lib/backgroundTasks'
 import { isTouchH5Document } from '../../lib/touchH5'
 import { ConfirmDialog } from '../shared/ConfirmDialog'
 import { clearWindowSelection, getSelectionPopoverPosition, useSelectionPopoverDismiss } from '../../hooks/useSelectionPopoverDismiss'
@@ -69,6 +70,8 @@ type TurnChangeCardModel = {
   workDir: string | null
   isLatest: boolean
 }
+
+const EMPTY_TURN_CHANGE_CARDS: TurnChangeCardModel[] = []
 
 type ChatMessageRole = 'user' | 'assistant'
 
@@ -300,12 +303,29 @@ function GoalEventCard({ message }: { message: GoalEvent }) {
   )
 }
 
-function formatBackgroundTaskDuration(durationMs?: number) {
-  if (typeof durationMs !== 'number' || durationMs < 0) return null
-  const seconds = Math.round(durationMs / 1000)
-  if (seconds < 60) return `${seconds}s`
-  const minutes = Math.floor(seconds / 60)
-  return `${minutes}m ${seconds % 60}s`
+function GoalContinuationDivider({ message }: { message: GoalEvent }) {
+  const t = useTranslation()
+  const reason = message.message?.replace(/^Goal continuing:\s*/i, '').trim()
+
+  return (
+    <section data-testid="goal-continuation-divider" className="my-4 w-full px-1">
+      <div className="flex w-full items-center gap-3">
+        <div className="h-px flex-1 bg-[var(--color-border)]" aria-hidden="true" />
+        <div className="inline-flex min-h-8 max-w-[min(78vw,620px)] items-center gap-2 rounded-md px-2.5 py-1 text-[13px] font-medium text-[var(--color-text-secondary)]">
+          <Target size={16} strokeWidth={2.1} className="shrink-0 text-[var(--color-memory-accent)]" aria-hidden="true" />
+          <span className="shrink-0 font-semibold text-[var(--color-text-primary)]">
+            {t('chat.goalEvent.continuing')}
+          </span>
+          {reason ? (
+            <span className="min-w-0 truncate text-[12px] text-[var(--color-text-tertiary)]" title={reason}>
+              {reason}
+            </span>
+          ) : null}
+        </div>
+        <div className="h-px flex-1 bg-[var(--color-border)]" aria-hidden="true" />
+      </div>
+    </section>
+  )
 }
 
 function BackgroundTaskEventCard({ message }: { message: BackgroundTaskEvent }) {
@@ -314,7 +334,7 @@ function BackgroundTaskEventCard({ message }: { message: BackgroundTaskEvent }) 
   const isRunning = task.status === 'running'
   const isFailed = task.status === 'failed'
   const isStopped = task.status === 'stopped'
-  const duration = formatBackgroundTaskDuration(task.usage?.durationMs)
+  const duration = formatDurationMs(task.usage?.durationMs, t)
   const detail = task.summary || task.lastToolName || task.description || task.outputFile || task.taskId
   const label = getBackgroundTaskLabel(task.taskType, t)
 
@@ -367,8 +387,11 @@ function BackgroundTaskEventCard({ message }: { message: BackgroundTaskEvent }) 
 
 function isAgentBackgroundTaskMessage(message: UIMessage): boolean {
   if (message.type !== 'background_task') return false
-  if (message.task.taskType === 'dream') return true
-  if (message.task.taskType === 'local_agent' || message.task.taskType === 'remote_agent') {
+  if (
+    message.task.taskType === 'local_agent' ||
+    message.task.taskType === 'remote_agent' ||
+    message.task.taskType === 'dream'
+  ) {
     return true
   }
   return /^Agent (?:(?:"[^"]+" )?(completed|was stopped)|(?:"[^"]+" )?failed(?::|$))/.test(
@@ -1353,6 +1376,7 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
   const streamingToolInput = sessionState?.streamingToolInput ?? ''
   const activeThinkingId = sessionState?.activeThinkingId ?? null
   const agentTaskNotifications = sessionState?.agentTaskNotifications ?? EMPTY_AGENT_TASK_NOTIFICATIONS
+  const hasRunningBackgroundTasks = hasAnyRunningBackgroundTasks(sessionState?.backgroundAgentTasks)
   const activeAskUserQuestionToolUseId =
     sessionState?.pendingPermission?.toolName === 'AskUserQuestion'
       ? sessionState.pendingPermission.toolUseId
@@ -1398,6 +1422,7 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
   const branchActionsDisabled =
     isMemberSession ||
     chatState !== 'idle' ||
+    hasRunningBackgroundTasks ||
     streamingText.trim().length > 0 ||
     Boolean(activeThinkingId) ||
     Boolean(sessionState?.activeToolUseId) ||
@@ -1682,13 +1707,14 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
     completedTurnTargets.length > 0
       ? completedTurnTargets[completedTurnTargets.length - 1]?.messageId ?? null
       : null
+  const visibleTurnChangeCards = hasRunningBackgroundTasks ? EMPTY_TURN_CHANGE_CARDS : turnChangeCards
   const turnCardsByRenderIndex = useMemo(
-    () => buildTurnCardInsertionMap(renderItems, turnChangeCards),
-    [renderItems, turnChangeCards],
+    () => buildTurnCardInsertionMap(renderItems, visibleTurnChangeCards),
+    [renderItems, visibleTurnChangeCards],
   )
   const changedFilesByRenderIndex = useMemo(
-    () => buildChangedFilesByRenderIndex(renderItems, turnChangeCards),
-    [renderItems, turnChangeCards],
+    () => buildChangedFilesByRenderIndex(renderItems, visibleTurnChangeCards),
+    [renderItems, visibleTurnChangeCards],
   )
   const renderItemKeys = useMemo(
     () => renderItems.map(getRenderItemKey),
@@ -1723,8 +1749,8 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
     [measuredItemsVersion, renderItemKeys, renderItemMetrics, renderItems, virtualViewport],
   )
   const confirmTurnCard = useMemo(
-    () => turnChangeCards.find((card) => card.target.messageId === turnUndoConfirmTargetId) ?? null,
-    [turnChangeCards, turnUndoConfirmTargetId],
+    () => visibleTurnChangeCards.find((card) => card.target.messageId === turnUndoConfirmTargetId) ?? null,
+    [turnUndoConfirmTargetId, visibleTurnChangeCards],
   )
 
   useEffect(() => {
@@ -1747,6 +1773,12 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
   useEffect(() => {
     if (!resolvedSessionId || completedTurnTargets.length === 0 || isMemberSession) {
       setTurnChangeCards([])
+      setTurnChangeLoadError(null)
+      setIsLoadingTurnChangeCards(false)
+      return
+    }
+
+    if (hasRunningBackgroundTasks) {
       setTurnChangeLoadError(null)
       setIsLoadingTurnChangeCards(false)
       return
@@ -1806,10 +1838,10 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
     return () => {
       cancelled = true
     }
-  }, [chatState, completedTurnTargets, isMemberSession, latestCompletedTurnId, resolvedSessionId])
+  }, [chatState, completedTurnTargets, hasRunningBackgroundTasks, isMemberSession, latestCompletedTurnId, resolvedSessionId])
 
   const handleUndoCurrentTurn = useCallback(async () => {
-    if (!resolvedSessionId || !confirmTurnCard || rewindingTurnId) return
+    if (!resolvedSessionId || !confirmTurnCard || rewindingTurnId || hasRunningBackgroundTasks) return
 
     const target = confirmTurnCard.target
     setRewindingTurnId(target.messageId)
@@ -1862,6 +1894,7 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
     addToast,
     chatState,
     confirmTurnCard,
+    hasRunningBackgroundTasks,
     queueComposerPrefill,
     reloadHistory,
     resolvedSessionId,
@@ -2029,7 +2062,7 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
             <StreamingIndicator />
           )}
 
-          {!isLoadingTurnChangeCards && turnChangeCards.length === 0 && turnChangeLoadError && (
+          {!isLoadingTurnChangeCards && visibleTurnChangeCards.length === 0 && turnChangeLoadError && (
             <div className="mx-auto mb-5 w-full max-w-[860px] rounded-[var(--radius-lg)] border border-[var(--color-error)]/25 bg-[var(--color-error-container)]/18 px-4 py-3 text-xs text-[var(--color-error)]">
               {turnChangeLoadError}
             </div>
@@ -2215,7 +2248,9 @@ export const MessageBlock = memo(function MessageBlock({
     case 'compact_summary':
       return <CompactStatusDivider message={message} state={message.phase === 'compacting' ? 'compacting' : 'complete'} />
     case 'goal_event':
-      return <GoalEventCard message={message} />
+      return message.action === 'status' && message.status === 'continuing'
+        ? <GoalContinuationDivider message={message} />
+        : <GoalEventCard message={message} />
     case 'background_task':
       return <BackgroundTaskEventCard message={message} />
     case 'system':

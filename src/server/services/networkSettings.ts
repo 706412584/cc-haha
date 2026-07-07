@@ -1,6 +1,7 @@
 import { SettingsService } from './settingsService.js'
+import { getProxyFetchOptions } from '../../utils/proxy.js'
 
-export type NetworkProxyMode = 'system' | 'manual'
+export type NetworkProxyMode = 'direct' | 'system' | 'manual'
 
 export type NetworkSettings = {
   aiRequestTimeoutMs: number
@@ -30,13 +31,14 @@ export const MAX_AI_REQUEST_TIMEOUT_MS = 1_800_000
 const DEFAULT_NETWORK_SETTINGS: NetworkSettings = {
   aiRequestTimeoutMs: DEFAULT_AI_REQUEST_TIMEOUT_MS,
   proxy: {
-    mode: 'system',
+    mode: 'direct',
     url: '',
   },
 }
+const LOOPBACK_NO_PROXY_ENTRIES = ['localhost', '127.0.0.1', '::1'] as const
 
 function isNetworkProxyMode(value: unknown): value is NetworkProxyMode {
-  return value === 'system' || value === 'manual'
+  return value === 'direct' || value === 'system' || value === 'manual'
 }
 
 function clampTimeoutMs(value: number): number {
@@ -85,20 +87,67 @@ export function getManualNetworkProxyUrl(settings: NetworkSettings): string | un
   return url || undefined
 }
 
-export function buildNetworkEnvironment(settings: NetworkSettings): Record<string, string> {
+export function mergeLoopbackNoProxy(existing: string | undefined): string {
+  const entries = (existing ?? '')
+    .split(/[,\s]+/)
+    .map(entry => entry.trim())
+    .filter(Boolean)
+  const lowerEntries = new Set(entries.map(entry => entry.toLowerCase()))
+
+  for (const entry of LOOPBACK_NO_PROXY_ENTRIES) {
+    if (!lowerEntries.has(entry.toLowerCase())) entries.push(entry)
+  }
+
+  return entries.join(',')
+}
+
+export function buildNetworkEnvironment(
+  settings: NetworkSettings,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
   const env: Record<string, string> = {
     API_TIMEOUT_MS: String(settings.aiRequestTimeoutMs),
   }
+
+  if (settings.proxy.mode === 'direct') {
+    env.HTTP_PROXY = ''
+    env.HTTPS_PROXY = ''
+    env.http_proxy = ''
+    env.https_proxy = ''
+    return env
+  }
+
   const proxyUrl = getManualNetworkProxyUrl(settings)
 
   if (proxyUrl) {
+    const noProxy = mergeLoopbackNoProxy(baseEnv.no_proxy || baseEnv.NO_PROXY)
     env.HTTP_PROXY = proxyUrl
     env.HTTPS_PROXY = proxyUrl
     env.http_proxy = proxyUrl
     env.https_proxy = proxyUrl
+    env.NO_PROXY = noProxy
+    env.no_proxy = noProxy
   }
 
   return env
+}
+
+export function getNetworkProxyFetchOptions(
+  settings: NetworkSettings,
+  targetUrl: string | URL,
+): ReturnType<typeof getProxyFetchOptions> {
+  const noProxy = mergeLoopbackNoProxy(process.env.no_proxy || process.env.NO_PROXY)
+  if (settings.proxy.mode === 'system') {
+    return getProxyFetchOptions({ targetUrl, noProxy })
+  }
+
+  return getProxyFetchOptions({
+    proxyUrl: settings.proxy.mode === 'manual'
+      ? getManualNetworkProxyUrl(settings) ?? null
+      : null,
+    targetUrl,
+    noProxy,
+  })
 }
 
 export async function loadNetworkSettings(): Promise<NetworkSettings> {

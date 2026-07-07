@@ -148,7 +148,7 @@ describe('Settings > Agents tab', () => {
       activeTabId: 'session-1',
       tabs: [{ sessionId: 'session-1', title: 'Test', type: 'session', status: 'idle' }],
     })
-    useUIStore.setState({ pendingSettingsTab: null })
+    useUIStore.setState({ activeSettingsTab: 'providers', pendingSettingsTab: null })
     useSessionStore.setState({
       sessions: [
         {

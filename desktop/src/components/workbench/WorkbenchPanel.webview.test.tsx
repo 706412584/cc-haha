@@ -2,7 +2,7 @@
 // the unified workbench switches from browser mode to file mode. Uses the REAL
 // BrowserSurface so the unmount-cleanup path that closes the webview is exercised.
 import '@testing-library/jest-dom'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 beforeAll(() => {
@@ -19,6 +19,7 @@ const { bridge } = vi.hoisted(() => ({
     navigate: vi.fn(),
     setBounds: vi.fn(),
     setVisible: vi.fn(),
+    setZoom: vi.fn(),
     close: vi.fn(),
     eval: vi.fn(),
   },
@@ -56,15 +57,17 @@ afterEach(() => {
 })
 
 describe('WorkbenchPanel native webview lifecycle', () => {
-  it('shows the webview in browser mode and hides it when switching to file mode', () => {
+  it('shows the webview in browser mode and hides it when switching to file mode', async () => {
     render(<WorkbenchPanel sessionId={SESSION_ID} />)
 
     // Browser mode mounts BrowserSurface, which opens + shows the native webview.
     expect(screen.getByTestId('preview-host')).toBeInTheDocument()
-    expect(bridge.open).toHaveBeenCalledWith(
-      'http://localhost:5173/',
-      expect.objectContaining({ width: expect.any(Number) }),
-    )
+    await waitFor(() => {
+      expect(bridge.open).toHaveBeenCalledWith(
+        'http://localhost:5173/',
+        expect.objectContaining({ width: expect.any(Number) }),
+      )
+    })
     expect(bridge.setVisible).toHaveBeenCalledWith(true)
 
     bridge.close.mockClear()

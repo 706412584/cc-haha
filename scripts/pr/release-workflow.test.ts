@@ -63,7 +63,7 @@ describe('release desktop workflow', () => {
       // prior drift dropped it and shipped seedless v0.5.12/v0.5.13 packages
       // (reverse-engineering / image-gen "not found in marketplace").
       expect(workflow).toContain('bun run build:plugin-seed')
-      expect(workflow).toContain('bun run test:package-smoke --platform ${{ matrix.smoke_platform }} --package-kind release --artifacts-dir desktop/build-artifacts/electron')
+      expect(workflow).toContain('bun run test:package-smoke --platform ${{ matrix.smoke_platform }} --arch ${{ matrix.arch }} --package-kind release --artifacts-dir desktop/build-artifacts/electron')
       expect(workflow).not.toContain('tauri-apps/tauri-action@v0')
     }
   })
@@ -126,7 +126,7 @@ describe('release desktop workflow', () => {
     expect(workflow).toContain('notarize_macos:')
     expect(workflow).toContain("description: 'Notarize macOS artifacts'")
     expect(gatekeeperStep).toContain("if: matrix.smoke_platform == 'macos' && needs.signing-preflight.outputs.macos_signed == 'true' && (github.event_name != 'workflow_dispatch' || inputs.notarize_macos == true)")
-    expect(gatekeeperStep).toContain('bun run test:package-smoke --platform macos --package-kind release --artifacts-dir desktop/build-artifacts/electron --require-macos-gatekeeper')
+    expect(gatekeeperStep).toContain('bun run test:package-smoke --platform macos --arch ${{ matrix.arch }} --package-kind release --artifacts-dir desktop/build-artifacts/electron --require-macos-gatekeeper')
     expect(notarizationWarningStep).toContain("if: matrix.smoke_platform == 'macos' && needs.signing-preflight.outputs.macos_signed == 'true' && github.event_name == 'workflow_dispatch' && inputs.notarize_macos == false")
     expect(notarizationWarningStep).toContain('Developer ID signed but not notarized')
     expect(unsignedWarningStep).toContain("if: matrix.smoke_platform == 'macos' && needs.signing-preflight.outputs.macos_signed != 'true'")
@@ -237,7 +237,7 @@ describe('release desktop workflow', () => {
       /missing=\(\)[\s\S]*?# Windows signing is optional:/,
     )?.[0]
     const windowsOptionalBlock = signingJob?.match(
-      /win_missing=\(\)[\s\S]*?fi\n/,
+      /win_missing=\(\)[\s\S]*?(?:\n\s{2}build:|$)/,
     )?.[0]
     expect(macRequiredBlock).not.toContain('exit 1')
     expect(windowsOptionalBlock).toContain('::warning::')
@@ -263,9 +263,12 @@ describe('release desktop workflow', () => {
     const buildJob = extractJob(workflow, 'build')
 
     expect(buildJob).toContain('Validate matrix release asset set')
-    for (const label of ['macOS-ARM64', 'macOS-x64', 'Linux-x64', 'Linux-ARM64', 'Windows-x64']) {
+    for (const label of ['macOS-ARM64', 'macOS-x64', 'Linux-x64', 'Linux-ARM64', 'Windows-x64', 'Windows-ARM64']) {
       expect(buildJob).toContain(`${label})`)
     }
+    expect(buildJob).toContain('target_triple: aarch64-pc-windows-msvc')
+    expect(buildJob).toContain('builder_args: --win nsis --arm64')
+    expect(buildJob).toContain('Claude-Code-Haha-${APP_VERSION}-win-arm64.exe')
     expect(buildJob).toContain('Upload release artifacts for final publish')
     expect(buildJob).toContain('actions/upload-artifact@v4')
     expect(buildJob).toContain('name: desktop-release-artifacts-${{ matrix.label }}')

@@ -10,6 +10,7 @@ import {
 import { join } from 'path'
 import { getSessionId } from '../../bootstrap/state.js'
 import { getErrnoCode } from '../errors.js'
+import { logForDebugging } from '../debug.js'
 import { readFileRange, tailFile } from '../fsOperations.js'
 import { logError } from '../log.js'
 import { getProjectTempDir } from '../permissions/filesystem.js'
@@ -446,7 +447,14 @@ export function initTaskOutputAsSymlink(
 
         return outputPath
       } catch (error) {
-        logError(error)
+        const code = getErrnoCode(error)
+        if (code === 'EPERM' || code === 'EACCES') {
+          logForDebugging(
+            `[TaskOutput] Agent transcript symlink unavailable (${code}); falling back to pointer file`,
+          )
+        } else {
+          logError(error)
+        }
         const output = getOrCreateOutput(taskId)
         output.append(
           `[Agent transcript symlink unavailable. Read the agent transcript directly: ${targetPath}]\n`,

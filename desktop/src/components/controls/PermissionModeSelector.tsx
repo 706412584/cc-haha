@@ -22,13 +22,14 @@ const MODE_ICONS: Record<PermissionMode, string> = {
 type Props = {
   workDir?: string
   compact?: boolean
+  menuPlacement?: 'top' | 'bottom'
   /** Controlled mode: override current value */
   value?: PermissionMode
   /** Controlled mode: called on change instead of updating global store */
   onChange?: (mode: PermissionMode) => void
 }
 
-export function PermissionModeSelector({ workDir: workDirProp, compact = false, value, onChange }: Props = {}) {
+export function PermissionModeSelector({ workDir: workDirProp, compact = false, menuPlacement = 'top', value, onChange }: Props = {}) {
   const t = useTranslation()
   const isMobile = useMobileViewport() && !isDesktopRuntime()
   const { permissionMode: storeMode } = useSettingsStore()
@@ -96,6 +97,9 @@ export function PermissionModeSelector({ workDir: workDirProp, compact = false, 
       ? 'h-11 w-11 justify-center rounded-xl p-0'
       : 'h-8 w-8 justify-center rounded-full p-0'
     : 'gap-1.5 rounded-full px-2.5 py-1.5 text-xs'
+  const menuPlacementClass = menuPlacement === 'bottom'
+    ? 'top-full mt-2'
+    : 'bottom-full mb-2'
   const menuId = 'permission-mode-menu'
 
   useEffect(() => {
@@ -207,7 +211,7 @@ export function PermissionModeSelector({ workDir: workDirProp, compact = false, 
             {permissionOptions}
           </MobileBottomSheet>
         ) : (
-          <div id={menuId} ref={menuRef} role="menu" className="absolute left-0 bottom-full mb-2 w-[320px] rounded-xl bg-[var(--color-surface-container-lowest)] border border-[var(--color-border)] shadow-[var(--shadow-dropdown)] z-50 py-2">
+          <div id={menuId} ref={menuRef} role="menu" className={`absolute left-0 ${menuPlacementClass} w-[320px] rounded-xl bg-[var(--color-surface-container-lowest)] border border-[var(--color-border)] shadow-[var(--shadow-dropdown)] z-50 py-2`}>
             {menuContent}
           </div>
         )

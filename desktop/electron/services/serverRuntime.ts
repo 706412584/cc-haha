@@ -14,6 +14,7 @@ import {
   resolveCloudflaredPath,
   SERVER_BIND_HOST,
   SERVER_CONTROL_HOST,
+  SERVER_STARTUP_TIMEOUT_MS,
   spawnSidecar,
   spawnTunnel,
   waitForServer,
@@ -43,6 +44,7 @@ type ServerRuntimeOptions = {
   desktopRoot: string
   appRoot?: string
   h5DistDir?: string
+  appVersion?: string
   resolveSystemProxy?: (url: string) => Promise<string>
 }
 
@@ -50,6 +52,7 @@ export class ElectronServerRuntime {
   private readonly desktopRoot: string
   private readonly appRoot: string
   private readonly h5DistDir: string
+  private readonly appVersion?: string
   private readonly resolveSystemProxy?: (url: string) => Promise<string>
   private sidecarEnvPromise: Promise<NodeJS.ProcessEnv> | null = null
   private server: { url: string, child: SidecarChild } | null = null
@@ -63,6 +66,7 @@ export class ElectronServerRuntime {
     this.desktopRoot = options.desktopRoot
     this.appRoot = options.appRoot ?? options.desktopRoot
     this.h5DistDir = options.h5DistDir ?? path.join(options.desktopRoot, 'dist')
+    this.appVersion = options.appVersion
     this.resolveSystemProxy = options.resolveSystemProxy
   }
 
@@ -241,7 +245,7 @@ export class ElectronServerRuntime {
     try {
       const child = spawnSidecar(plan)
       this.captureLogs(child, 'claude-server', logs)
-      await waitForServer(SERVER_CONTROL_HOST, port)
+      await waitForServer(SERVER_CONTROL_HOST, port, SERVER_STARTUP_TIMEOUT_MS)
       writeLastServerPort(port)
       this.server = { url, child }
       this.startupError = null
@@ -312,17 +316,26 @@ export class ElectronServerRuntime {
   }
 
   private async resolveSidecarBaseEnvOnce(): Promise<NodeJS.ProcessEnv> {
-    if (!this.resolveSystemProxy) return this.applyPowerShellOverride(process.env)
+    if (!this.resolveSystemProxy) return this.applyDesktopRuntimeEnv(this.applyPowerShellOverride(process.env))
 
     try {
       const rules = await this.resolveSystemProxy('https://auth.openai.com/')
-      return this.applyPowerShellOverride(mergeProxyEnv(
+      return this.applyDesktopRuntimeEnv(this.applyPowerShellOverride(mergeProxyEnv(
         process.env,
         proxyUrlFromElectronProxyRules(rules),
-      ))
+      )))
     } catch (error) {
       console.error('[desktop] failed to resolve system proxy for sidecars', error)
-      return this.applyPowerShellOverride(process.env)
+      return this.applyDesktopRuntimeEnv(this.applyPowerShellOverride(process.env))
+    }
+  }
+
+  private applyDesktopRuntimeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+    if (!this.appVersion) return env
+    return {
+      ...env,
+      APP_VERSION: this.appVersion,
+      CC_HAHA_DESKTOP_VERSION: this.appVersion,
     }
   }
 

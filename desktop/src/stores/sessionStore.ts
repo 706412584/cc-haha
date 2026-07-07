@@ -6,10 +6,12 @@ import {
   type CreateSessionRepositoryOptions,
 } from '../api/sessions'
 import { useSessionRuntimeStore } from './sessionRuntimeStore'
+import { useSettingsStore } from './settingsStore'
 import { useTabStore } from './tabStore'
 import type { SessionListItem } from '../types/session'
 import type { PermissionMode } from '../types/settings'
 import { isPlaceholderSessionTitle } from '../lib/sessionTitle'
+import { invalidateRecentProjectsCache } from '../lib/recentProjectsCache'
 
 const SESSION_LIST_LIMIT = 400
 
@@ -45,6 +47,7 @@ type SessionStore = {
   clearSessionSelection: () => void
   renameSession: (id: string, title: string) => Promise<void>
   updateSessionTitle: (id: string, title: string) => void
+  updateSessionMessageCount: (id: string, messageCount: number) => void
   updateSessionPermissionMode: (id: string, mode: PermissionMode) => void
   setActiveSession: (id: string | null) => void
 }
@@ -79,11 +82,13 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   },
 
   createSession: async (workDir?: string, options?: CreateSessionOptions) => {
+    const requestedPermissionMode = options?.permissionMode ?? getDefaultSessionPermissionMode()
     const { sessionId: id, workDir: resolvedWorkDir } = await sessionsApi.create({
       ...(workDir ? { workDir } : {}),
       ...(options?.repository ? { repository: options.repository } : {}),
-      ...(options?.permissionMode ? { permissionMode: options.permissionMode } : {}),
+      ...(requestedPermissionMode ? { permissionMode: requestedPermissionMode } : {}),
     })
+    invalidateRecentProjectsCache()
     const now = new Date().toISOString()
     const optimisticSession: SessionListItem = {
       id,
@@ -95,7 +100,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       workDir: resolvedWorkDir ?? workDir ?? null,
       projectRoot: resolvedWorkDir ?? workDir ?? null,
       workDirExists: true,
-      permissionMode: options?.permissionMode,
+      permissionMode: requestedPermissionMode,
     }
 
     set((state) => ({
@@ -114,6 +119,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       targetMessageId,
       ...(options?.title ? { title: options.title } : {}),
     })
+    invalidateRecentProjectsCache()
     const sourceSession = get().sessions.find((session) => session.id === sourceSessionId)
     const now = new Date().toISOString()
     const optimisticSession: SessionListItem = {
@@ -148,6 +154,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
 
   deleteSession: async (id: string) => {
     await sessionsApi.delete(id)
+    invalidateRecentProjectsCache()
     useSessionRuntimeStore.getState().clearSelection(id)
     set((s) => ({
       sessions: s.sessions.filter((session) => session.id !== id),
@@ -159,6 +166,9 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   deleteSessions: async (ids: string[]) => {
     const sessionIds = [...new Set(ids)].filter(Boolean)
     const result = await sessionsApi.batchDelete(sessionIds)
+    if (result.successes.length > 0) {
+      invalidateRecentProjectsCache()
+    }
     for (const id of result.successes) {
       useSessionRuntimeStore.getState().clearSelection(id)
     }
@@ -210,6 +220,14 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     }))
   },
 
+  updateSessionMessageCount: (id, messageCount) => {
+    set((s) => ({
+      sessions: s.sessions.map((session) =>
+        session.id === id ? { ...session, messageCount } : session,
+      ),
+    }))
+  },
+
   updateSessionPermissionMode: (id, mode) => {
     set((s) => ({
       sessions: s.sessions.map((session) =>
@@ -232,6 +250,11 @@ function buildSessionListParams(project: string | undefined) {
   return project
     ? { project, limit: SESSION_LIST_LIMIT }
     : { limit: SESSION_LIST_LIMIT }
+}
+
+function getDefaultSessionPermissionMode(): PermissionMode | undefined {
+  const mode = useSettingsStore.getState().permissionMode
+  return mode === 'default' ? undefined : mode
 }
 
 function mergeSessionList(

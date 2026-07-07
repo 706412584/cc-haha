@@ -1,7 +1,6 @@
 import { Check, Copy, GitFork } from 'lucide-react'
-import { useTranslation } from '../../i18n'
 import { useSettingsStore } from '../../stores/settingsStore'
-import { formatExactMessageTimestamp, formatMessageTimestamp } from '../../lib/formatMessageTimestamp'
+import { formatExactMessageTimestamp, formatMessageHoverTime } from '../../lib/formatMessageTimestamp'
 import { CopyButton } from '../shared/CopyButton'
 
 export type MessageBranchAction = {
@@ -25,11 +24,10 @@ export function MessageActionBar({
   align = 'start',
   timestamp,
 }: Props) {
-  const t = useTranslation()
   const locale = useSettingsStore((state) => state.locale)
   const hasCopy = Boolean(copyText?.trim())
-  const timeLabel = typeof timestamp === 'number'
-    ? formatMessageTimestamp(timestamp, t, locale)
+  const hoverTimeLabel = typeof timestamp === 'number'
+    ? formatMessageHoverTime(timestamp, locale)
     : ''
   const exactTimeLabel = typeof timestamp === 'number'
     ? formatExactMessageTimestamp(timestamp, locale)
@@ -69,12 +67,12 @@ export function MessageActionBar({
             <GitFork size={13} strokeWidth={2.2} aria-hidden="true" />
           </button>
         ) : null}
-        {timeLabel ? (
+        {hoverTimeLabel ? (
           <span
             className="ml-1 inline-flex items-center text-[11px] font-medium tabular-nums text-[var(--color-text-tertiary)]"
-            title={exactTimeLabel || timeLabel}
+            title={exactTimeLabel || hoverTimeLabel}
           >
-            {timeLabel}
+            {hoverTimeLabel}
           </span>
         ) : null}
       </div>

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { createHash } from 'crypto'
 import * as fs from 'fs/promises'
 import * as os from 'os'
@@ -565,6 +565,52 @@ describe('trace capture service', () => {
     }
   })
 
+  test('captures direct provider headers when fetch input is a Request', async () => {
+    const originalFetch = globalThis.fetch
+    const originalTraceEnv = process.env.CC_HAHA_TRACE_API_CALLS
+    process.env.CC_HAHA_TRACE_API_CALLS = '1'
+    try {
+      globalThis.fetch = (async () => new Response(
+        JSON.stringify({ id: 'msg-request-input', content: [{ type: 'text', text: 'ok' }] }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        },
+      )) as typeof fetch
+
+      const traceFetch = createDumpPromptsFetch('agent-direct-request-input', {
+        traceSessionId: 'session-direct-request-input',
+        querySource: 'test_query',
+      })
+      const requestInput = new Request('https://sub2api.example.test/v1/messages', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer sk-direct-header-secret',
+          'Content-Type': 'application/json',
+        },
+      })
+
+      await traceFetch(requestInput, {
+        method: 'POST',
+        body: JSON.stringify({ model: 'gpt-5.5', messages: [{ role: 'user', content: 'request input' }] }),
+      })
+
+      const trace = await waitForTrace(
+        'session-direct-request-input',
+        (snapshot) => Boolean(snapshot.calls[0]?.response) && snapshot.events.length >= 2,
+      )
+      expect(trace.summary.apiCalls).toBe(1)
+      expect(trace.calls[0].request.headers.authorization).toBe('[redacted]')
+      expect(trace.calls[0].request.headers['content-type']).toBe('application/json')
+      expect(trace.calls[0].request.body.preview).toContain('request input')
+      expect(trace.calls[0].response.body.preview).toContain('msg-request-input')
+    } finally {
+      globalThis.fetch = originalFetch
+      if (originalTraceEnv === undefined) delete process.env.CC_HAHA_TRACE_API_CALLS
+      else process.env.CC_HAHA_TRACE_API_CALLS = originalTraceEnv
+    }
+  })
+
   test('captures direct provider fetch failures without changing thrown behavior', async () => {
     const originalFetch = globalThis.fetch
     const originalTraceEnv = process.env.CC_HAHA_TRACE_API_CALLS
@@ -1102,9 +1148,96 @@ describe('session trace API', () => {
     })
   })
 
-  test('searches trace sessions by session title and project path before paginating', async () => {
+  test('lists trace sessions without loading full session messages', async () => {
     await traceCaptureService.recordCall({
-      sessionId: 'session-title-alpha',
+      sessionId: 'session-list-lightweight',
+      source: 'proxy',
+      model: 'gpt-5.5',
+      startedAt: '2026-06-09T08:00:00.000Z',
+      completedAt: '2026-06-09T08:00:00.015Z',
+      durationMs: 15,
+      request: {
+        method: 'POST',
+        url: 'https://api.example.test/v1/messages',
+        body: { model: 'gpt-5.5' },
+      },
+      response: {
+        status: 200,
+        body: { ok: true },
+      },
+    })
+
+    const getSessionSpy = spyOn(sessionService, 'getSession')
+    try {
+      const req = new Request('http://localhost:3456/api/traces')
+      const res = await handleApiRequest(req, new URL(req.url))
+      const body = await res.json() as {
+        traces: Array<{ sessionId: string; session: unknown }>
+      }
+
+      expect(res.status).toBe(200)
+      expect(body.traces[0].sessionId).toBe('session-list-lightweight')
+      expect(getSessionSpy).not.toHaveBeenCalled()
+    } finally {
+      getSessionSpy.mockRestore()
+    }
+  })
+
+  test('deletes a trace session file and invalidates cached reads', async () => {
+    await traceCaptureService.recordCall({
+      sessionId: 'session-delete-trace',
+      source: 'proxy',
+      model: 'gpt-5.5',
+      startedAt: '2026-06-09T08:00:00.000Z',
+      completedAt: '2026-06-09T08:00:00.015Z',
+      durationMs: 15,
+      request: {
+        method: 'POST',
+        url: 'https://api.example.test/v1/messages',
+        body: { model: 'gpt-5.5' },
+      },
+      response: {
+        status: 200,
+        body: { ok: true },
+      },
+    })
+
+    const cached = await traceCaptureService.getSessionTrace('session-delete-trace')
+    expect(cached.calls).toHaveLength(1)
+
+    const req = new Request('http://localhost:3456/api/traces/session-delete-trace', { method: 'DELETE' })
+    const res = await handleApiRequest(req, new URL(req.url))
+    const body = await res.json() as { sessionId: string; deleted: boolean }
+
+    expect(res.status).toBe(200)
+    expect(body).toEqual({ sessionId: 'session-delete-trace', deleted: true })
+    await expect(fs.stat(path.join(tmpDir, 'cc-haha', 'traces', 'session-delete-trace.jsonl'))).rejects.toThrow()
+
+    const afterDelete = await traceCaptureService.getSessionTrace('session-delete-trace')
+    expect(afterDelete.calls).toEqual([])
+    expect(afterDelete.events).toEqual([])
+
+    const secondReq = new Request('http://localhost:3456/api/traces/session-delete-trace', { method: 'DELETE' })
+    const secondRes = await handleApiRequest(secondReq, new URL(secondReq.url))
+    const secondBody = await secondRes.json() as { sessionId: string; deleted: boolean }
+
+    expect(secondRes.status).toBe(200)
+    expect(secondBody).toEqual({ sessionId: 'session-delete-trace', deleted: false })
+  })
+
+  test('searches trace sessions by session title and project path before paginating', async () => {
+    const checkoutDir = path.join(tmpDir, 'checkout')
+    const otherDir = path.join(tmpDir, 'other')
+    await fs.mkdir(checkoutDir, { recursive: true })
+    await fs.mkdir(otherDir, { recursive: true })
+    const resolvedCheckoutDir = await fs.realpath(checkoutDir)
+    const alpha = await sessionService.createSession(checkoutDir)
+    await sessionService.renameSession(alpha.sessionId, 'Debug stuck checkout agent')
+    const beta = await sessionService.createSession(otherDir)
+    await sessionService.renameSession(beta.sessionId, 'Unrelated model run')
+
+    await traceCaptureService.recordCall({
+      sessionId: alpha.sessionId,
       source: 'proxy',
       model: 'gpt-5.5',
       startedAt: '2026-06-09T08:00:00.000Z',
@@ -1121,7 +1254,7 @@ describe('session trace API', () => {
       },
     })
     await traceCaptureService.recordCall({
-      sessionId: 'session-title-beta',
+      sessionId: beta.sessionId,
       source: 'proxy',
       model: 'gpt-5.5',
       startedAt: '2026-06-09T08:00:01.000Z',
@@ -1138,77 +1271,40 @@ describe('session trace API', () => {
       },
     })
 
-    const originalGetSession = sessionService.getSession
-    sessionService.getSession = (async (sessionId: string) => {
-      if (sessionId === 'session-title-alpha') {
-        return {
-          id: sessionId,
-          title: 'Debug stuck checkout agent',
-          createdAt: '2026-06-09T08:00:00.000Z',
-          modifiedAt: '2026-06-09T08:00:00.015Z',
-          messageCount: 2,
-          projectPath: '/tmp/checkout',
-          projectRoot: '/tmp/checkout',
-          workDir: '/tmp/checkout',
-          workDirExists: true,
-          messages: [],
-        }
-      }
-      if (sessionId === 'session-title-beta') {
-        return {
-          id: sessionId,
-          title: 'Unrelated model run',
-          createdAt: '2026-06-09T08:00:01.000Z',
-          modifiedAt: '2026-06-09T08:00:01.015Z',
-          messageCount: 2,
-          projectPath: '/tmp/other',
-          projectRoot: '/tmp/other',
-          workDir: '/tmp/other',
-          workDirExists: true,
-          messages: [],
-        }
-      }
-      return null
-    }) as typeof sessionService.getSession
-
-    try {
-      const titleReq = new Request('http://localhost:3456/api/traces?q=stuck%20agent&limit=10&offset=0')
-      const titleRes = await handleApiRequest(titleReq, new URL(titleReq.url))
-      const titleBody = await titleRes.json() as {
-        traces: Array<{ sessionId: string; session: { title: string; projectPath: string } | null }>
-        total: number
-      }
-
-      expect(titleRes.status).toBe(200)
-      expect(titleBody.total).toBe(1)
-      expect(titleBody.traces.map((trace) => trace.sessionId)).toEqual(['session-title-alpha'])
-      expect(titleBody.traces[0].session?.title).toBe('Debug stuck checkout agent')
-
-      const pathReq = new Request('http://localhost:3456/api/traces?q=checkout&limit=10&offset=0')
-      const pathRes = await handleApiRequest(pathReq, new URL(pathReq.url))
-      const pathBody = await pathRes.json() as {
-        traces: Array<{ sessionId: string; session: { projectPath: string } | null }>
-        total: number
-      }
-
-      expect(pathRes.status).toBe(200)
-      expect(pathBody.total).toBe(1)
-      expect(pathBody.traces.map((trace) => trace.sessionId)).toEqual(['session-title-alpha'])
-      expect(pathBody.traces[0].session?.projectPath).toBe('/tmp/checkout')
-
-      const missReq = new Request('http://localhost:3456/api/traces?q=missing-title&limit=10&offset=0')
-      const missRes = await handleApiRequest(missReq, new URL(missReq.url))
-      const missBody = await missRes.json() as {
-        traces: Array<{ sessionId: string }>
-        total: number
-      }
-
-      expect(missRes.status).toBe(200)
-      expect(missBody.total).toBe(0)
-      expect(missBody.traces).toEqual([])
-    } finally {
-      sessionService.getSession = originalGetSession
+    const titleReq = new Request('http://localhost:3456/api/traces?q=stuck%20agent&limit=10&offset=0')
+    const titleRes = await handleApiRequest(titleReq, new URL(titleReq.url))
+    const titleBody = await titleRes.json() as {
+      traces: Array<{ sessionId: string; session: { title: string; projectPath: string } | null }>
+      total: number
     }
+
+    expect(titleRes.status).toBe(200)
+    expect(titleBody.total).toBe(1)
+    expect(titleBody.traces.map((trace) => trace.sessionId)).toEqual([alpha.sessionId])
+    expect(titleBody.traces[0].session?.title).toBe('Debug stuck checkout agent')
+
+    const pathReq = new Request('http://localhost:3456/api/traces?q=checkout&limit=10&offset=0')
+    const pathRes = await handleApiRequest(pathReq, new URL(pathReq.url))
+    const pathBody = await pathRes.json() as {
+      traces: Array<{ sessionId: string; session: { projectPath: string; workDir: string | null } | null }>
+      total: number
+    }
+
+    expect(pathRes.status).toBe(200)
+    expect(pathBody.total).toBe(1)
+    expect(pathBody.traces.map((trace) => trace.sessionId)).toEqual([alpha.sessionId])
+    expect(pathBody.traces[0].session?.workDir).toBe(resolvedCheckoutDir)
+
+    const missReq = new Request('http://localhost:3456/api/traces?q=missing-title&limit=10&offset=0')
+    const missRes = await handleApiRequest(missReq, new URL(missReq.url))
+    const missBody = await missRes.json() as {
+      traces: Array<{ sessionId: string }>
+      total: number
+    }
+
+    expect(missRes.status).toBe(200)
+    expect(missBody.total).toBe(0)
+    expect(missBody.traces).toEqual([])
   })
 })
 

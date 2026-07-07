@@ -1,6 +1,18 @@
 import { create } from 'zustand'
 import { useWorkspacePanelStore } from './workspacePanelStore'
 
+export const MIN_BROWSER_ZOOM = 0.5
+export const MAX_BROWSER_ZOOM = 1.5
+export const DEFAULT_BROWSER_ZOOM = 1
+export const BROWSER_ZOOM_STEP = 0.1
+
+export function normalizeBrowserZoom(value: unknown): number {
+  const numeric = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(numeric)) return DEFAULT_BROWSER_ZOOM
+  const clamped = Math.min(Math.max(numeric, MIN_BROWSER_ZOOM), MAX_BROWSER_ZOOM)
+  return Math.round(clamped * 10) / 10
+}
+
 export type BrowserSessionState = {
   isOpen: boolean
   url: string
@@ -11,6 +23,7 @@ export type BrowserSessionState = {
   pickerActive: boolean
   canGoBack: boolean
   canGoForward: boolean
+  zoom: number
 }
 
 type BrowserPanelState = {
@@ -22,6 +35,7 @@ type BrowserPanelState = {
   goForward: (sessionId: string) => void
   setLoading: (sessionId: string, loading: boolean) => void
   setPicker: (sessionId: string, active: boolean) => void
+  setZoom: (sessionId: string, zoom: number) => void
   close: (sessionId: string) => void
   setNavigated: (sessionId: string, url: string, title: string) => void
   setReady: (sessionId: string) => void
@@ -37,6 +51,7 @@ const empty = (url = ''): BrowserSessionState => ({
   pickerActive: false,
   canGoBack: false,
   canGoForward: false,
+  zoom: DEFAULT_BROWSER_ZOOM,
 })
 
 const withNav = (s: BrowserSessionState): BrowserSessionState => ({
@@ -49,9 +64,12 @@ const withNav = (s: BrowserSessionState): BrowserSessionState => ({
 export const useBrowserPanelStore = create<BrowserPanelState>((set) => ({
   bySession: {},
   open: (sessionId, url) => {
-    set((st) => ({
-      bySession: { ...st.bySession, [sessionId]: { ...empty(url), loading: true } },
-    }))
+    set((st) => {
+      const zoom = st.bySession[sessionId]?.zoom ?? DEFAULT_BROWSER_ZOOM
+      return {
+        bySession: { ...st.bySession, [sessionId]: { ...empty(url), zoom, loading: true } },
+      }
+    })
     // The browser is one mode of the unified workbench: opening a previewable
     // link / localhost url surfaces the workbench in BROWSER mode. Import is
     // one-directional (workspacePanelStore never imports this store), so no cycle.
@@ -86,6 +104,10 @@ export const useBrowserPanelStore = create<BrowserPanelState>((set) => ({
   setPicker: (sessionId, active) => set((st) => {
     const cur = st.bySession[sessionId]; if (!cur) return st
     return { bySession: { ...st.bySession, [sessionId]: { ...cur, pickerActive: active } } }
+  }),
+  setZoom: (sessionId, zoom) => set((st) => {
+    const cur = st.bySession[sessionId]; if (!cur) return st
+    return { bySession: { ...st.bySession, [sessionId]: { ...cur, zoom: normalizeBrowserZoom(zoom) } } }
   }),
   close: (sessionId) => set((st) => {
     const cur = st.bySession[sessionId]; if (!cur) return st

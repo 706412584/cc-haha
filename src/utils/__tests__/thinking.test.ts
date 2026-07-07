@@ -93,16 +93,29 @@ describe('provider-aware thinking support', () => {
     expect(shouldSendExplicitDisabledThinking()).toBe(false)
   })
 
-  test('MiniMax preset models declare thinking support without effort passthrough', () => {
+  test('MiniMax preset models declare adaptive thinking without effort passthrough', () => {
     process.env.ANTHROPIC_BASE_URL = 'https://api.minimaxi.com/anthropic'
-    process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'MiniMax-M3'
-    delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES
+    process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'MiniMax-M3[1m]'
+    process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES =
+      'thinking,adaptive_thinking'
     clearCapabilityCache()
 
-    expect(modelSupportsThinking('MiniMax-M3')).toBe(true)
-    expect(modelSupportsAdaptiveThinking('MiniMax-M3')).toBe(false)
-    expect(modelSupportsEffort('MiniMax-M3')).toBe(false)
-    expect(modelSupportsMaxEffort('MiniMax-M3')).toBe(false)
+    expect(modelSupportsThinking('MiniMax-M3[1m]')).toBe(true)
+    expect(modelSupportsAdaptiveThinking('MiniMax-M3[1m]')).toBe(true)
+    expect(modelSupportsEffort('MiniMax-M3[1m]')).toBe(false)
+    expect(modelSupportsMaxEffort('MiniMax-M3[1m]')).toBe(false)
+  })
+
+  test('Kimi preset models declare thinking without effort passthrough', () => {
+    process.env.ANTHROPIC_BASE_URL = 'https://api.moonshot.cn/anthropic'
+    process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'kimi-k2.7-code'
+    process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES = 'thinking'
+    clearCapabilityCache()
+
+    expect(modelSupportsThinking('kimi-k2.7-code')).toBe(true)
+    expect(modelSupportsAdaptiveThinking('kimi-k2.7-code')).toBe(false)
+    expect(modelSupportsEffort('kimi-k2.7-code')).toBe(false)
+    expect(modelSupportsMaxEffort('kimi-k2.7-code')).toBe(false)
   })
 
   test('any Anthropic-compatible third-party proxy defaults to thinking-capable for unknown model names', () => {

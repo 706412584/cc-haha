@@ -13,8 +13,12 @@ const windowControlsMock = vi.hoisted(() => ({
   show: true,
 }))
 const scrollIntoViewMock = vi.hoisted(() => vi.fn())
+const deleteSessionMock = vi.hoisted(() => vi.fn())
 const openProjectMenuMock = vi.hoisted(() => ({
   paths: [] as Array<string | null | undefined>,
+}))
+const sessionsApiMock = vi.hoisted(() => ({
+  delete: vi.fn(() => Promise.resolve()),
 }))
 
 function makeChatSession(chatState: ChatState): PerSessionState {
@@ -45,6 +49,17 @@ function makeChatSession(chatState: ChatState): PerSessionState {
 
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: getCurrentWindowMock,
+}))
+
+vi.mock('../../api/sessions', () => ({
+  sessionsApi: {
+    batchDelete: vi.fn(),
+    branch: vi.fn(),
+    create: vi.fn(),
+    delete: deleteSessionMock,
+    list: vi.fn(),
+    rename: vi.fn(),
+  },
 }))
 
 vi.mock('../../i18n', () => ({
@@ -82,6 +97,10 @@ vi.mock('../../i18n', () => ({
     }
     return text
   },
+}))
+
+vi.mock('../../api/sessions', () => ({
+  sessionsApi: sessionsApiMock,
 }))
 
 vi.mock('./OpenProjectMenu', () => ({
@@ -142,7 +161,11 @@ describe('TabBar', () => {
     startDraggingMock.mockClear()
     getCurrentWindowMock.mockClear()
     scrollIntoViewMock.mockClear()
+    deleteSessionMock.mockReset()
+    deleteSessionMock.mockResolvedValue(undefined)
     openProjectMenuMock.paths = []
+    sessionsApiMock.delete.mockClear()
+    sessionsApiMock.delete.mockResolvedValue(undefined)
     windowControlsMock.show = true
     vi.resetModules()
   })
@@ -1064,15 +1087,28 @@ describe('TabBar', () => {
     expect(useTabStore.getState().tabs).toEqual([])
   })
 
-  it('shows a running marker on tabs from tab status or live chat state', async () => {
+  it('shows a running marker on tabs from tab status, live chat state, or background tasks', async () => {
     const { TabBar } = await import('./TabBar')
     const { useTabStore } = await import('../../stores/tabStore')
     const { useChatStore } = await import('../../stores/chatStore')
+    const backgroundRunningSession = makeChatSession('idle')
+    backgroundRunningSession.backgroundAgentTasks = {
+      'agent-task-1': {
+        taskId: 'agent-task-1',
+        toolUseId: 'agent-tool-1',
+        status: 'running',
+        taskType: 'local_agent',
+        description: 'Review screenshots',
+        startedAt: 1,
+        updatedAt: 2,
+      },
+    }
 
     useTabStore.setState({
       tabs: [
         { sessionId: 'tab-status-running', title: 'Status Running', type: 'session', status: 'running' },
         { sessionId: 'tab-chat-running', title: 'Chat Running', type: 'session', status: 'idle' },
+        { sessionId: 'tab-background-running', title: 'Background Running', type: 'session', status: 'idle' },
         { sessionId: 'tab-idle', title: 'Idle', type: 'session', status: 'idle' },
       ],
       activeTabId: 'tab-status-running',
@@ -1081,6 +1117,7 @@ describe('TabBar', () => {
       sessions: {
         'tab-status-running': makeChatSession('idle'),
         'tab-chat-running': makeChatSession('thinking'),
+        'tab-background-running': backgroundRunningSession,
         'tab-idle': makeChatSession('idle'),
       },
       disconnectSession: vi.fn(),
@@ -1090,7 +1127,7 @@ describe('TabBar', () => {
       render(<TabBar />)
     })
 
-    expect(screen.getAllByLabelText('Session running')).toHaveLength(2)
+    expect(screen.getAllByLabelText('Session running')).toHaveLength(3)
     expect(screen.getByText('Idle').closest('[data-dragging]')?.querySelector('[aria-label="Session running"]')).toBeNull()
   })
 })

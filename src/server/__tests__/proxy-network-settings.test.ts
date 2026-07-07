@@ -4,6 +4,10 @@ import * as os from 'os'
 import * as path from 'path'
 import { handleProxyRequest, withStreamIdleTimeout } from '../proxy/handler.js'
 import { ProviderService } from '../services/providerService.js'
+import {
+  clearTraceCaptureStateForTests,
+  traceCaptureService,
+} from '../services/traceCaptureService.js'
 import { resetSettingsCache } from '../../utils/settings/settingsCache.js'
 
 let tmpDir: string
@@ -14,6 +18,7 @@ async function setup() {
   originalConfigDir = process.env.CLAUDE_CONFIG_DIR
   process.env.CLAUDE_CONFIG_DIR = tmpDir
   resetSettingsCache()
+  clearTraceCaptureStateForTests()
 }
 
 async function teardown() {
@@ -23,7 +28,17 @@ async function teardown() {
     delete process.env.CLAUDE_CONFIG_DIR
   }
   resetSettingsCache()
+  clearTraceCaptureStateForTests()
   await fs.rm(tmpDir, { recursive: true, force: true })
+}
+
+async function waitForTraceCall(sessionId: string) {
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const trace = await traceCaptureService.getSessionTrace(sessionId)
+    if (trace.calls.length > 0 && trace.calls[0]?.response) return trace
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  return traceCaptureService.getSessionTrace(sessionId)
 }
 
 describe('proxy network settings', () => {
@@ -176,6 +191,234 @@ describe('proxy network settings', () => {
       expect(timeoutCalls).toEqual([45_000])
     } finally {
       AbortSignal.timeout = originalTimeout
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  test('bypasses inherited system proxy for direct OpenAI-compatible upstream requests', async () => {
+    await fs.writeFile(
+      path.join(tmpDir, 'settings.json'),
+      JSON.stringify({
+        network: {
+          proxy: { mode: 'direct', url: '' },
+        },
+      }),
+      'utf-8',
+    )
+
+    const svc = new ProviderService()
+    const provider = await svc.addProvider({
+      presetId: 'custom',
+      name: 'Direct OpenAI Proxy',
+      baseUrl: 'https://api.example.com',
+      apiKey: 'sk-test',
+      apiFormat: 'openai_chat',
+      models: {
+        main: 'model-main',
+        haiku: 'model-main',
+        sonnet: 'model-main',
+        opus: 'model-main',
+      },
+    })
+
+    const originalFetch = globalThis.fetch
+    const originalHttpProxy = process.env.HTTP_PROXY
+    const originalHttpsProxy = process.env.HTTPS_PROXY
+    const originalLowerHttpProxy = process.env.http_proxy
+    const originalLowerHttpsProxy = process.env.https_proxy
+    const calls: Array<{ url: string; proxy?: string }> = []
+    process.env.HTTP_PROXY = 'http://127.0.0.1:1181'
+    process.env.HTTPS_PROXY = 'http://127.0.0.1:1181'
+    delete process.env.http_proxy
+    delete process.env.https_proxy
+    globalThis.fetch = mock(async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({
+        url: String(url),
+        proxy: (init as RequestInit & { proxy?: string } | undefined)?.proxy,
+      })
+      return new Response(JSON.stringify({
+        id: 'chatcmpl-direct-runtime',
+        object: 'chat.completion',
+        created: 0,
+        model: 'model-main',
+        choices: [{
+          index: 0,
+          message: { role: 'assistant', content: 'ok' },
+          finish_reason: 'stop',
+        }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }) as typeof fetch
+
+    try {
+      const body = {
+        model: 'model-main',
+        max_tokens: 64,
+        messages: [{ role: 'user', content: 'hello' }],
+      }
+      const req = new Request(
+        `http://localhost:3456/proxy/providers/${provider.id}/v1/messages`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+      )
+      const res = await handleProxyRequest(req, new URL(req.url))
+
+      expect(res.status).toBe(200)
+      expect(calls.map((call) => call.url)).toEqual(['https://api.example.com/v1/chat/completions'])
+      expect(calls.map((call) => call.proxy)).toEqual([undefined])
+    } finally {
+      globalThis.fetch = originalFetch
+      if (originalHttpProxy === undefined) delete process.env.HTTP_PROXY
+      else process.env.HTTP_PROXY = originalHttpProxy
+      if (originalHttpsProxy === undefined) delete process.env.HTTPS_PROXY
+      else process.env.HTTPS_PROXY = originalHttpsProxy
+      if (originalLowerHttpProxy === undefined) delete process.env.http_proxy
+      else process.env.http_proxy = originalLowerHttpProxy
+      if (originalLowerHttpsProxy === undefined) delete process.env.https_proxy
+      else process.env.https_proxy = originalLowerHttpsProxy
+    }
+  })
+
+  test('bypasses manual proxy for loopback OpenAI-compatible upstream requests', async () => {
+    await fs.writeFile(
+      path.join(tmpDir, 'settings.json'),
+      JSON.stringify({
+        network: {
+          proxy: { mode: 'manual', url: 'http://127.0.0.1:1181' },
+        },
+      }),
+      'utf-8',
+    )
+
+    const svc = new ProviderService()
+    const provider = await svc.addProvider({
+      presetId: 'custom',
+      name: 'Local OpenAI Proxy',
+      baseUrl: 'http://127.0.0.1:11434',
+      apiKey: 'sk-test',
+      apiFormat: 'openai_chat',
+      models: {
+        main: 'model-main',
+        haiku: 'model-main',
+        sonnet: 'model-main',
+        opus: 'model-main',
+      },
+    })
+
+    const originalFetch = globalThis.fetch
+    const calls: Array<{ url: string; proxy?: string }> = []
+    globalThis.fetch = mock(async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({
+        url: String(url),
+        proxy: (init as RequestInit & { proxy?: string } | undefined)?.proxy,
+      })
+      return new Response(JSON.stringify({
+        id: 'chatcmpl-local-runtime',
+        object: 'chat.completion',
+        created: 0,
+        model: 'model-main',
+        choices: [{
+          index: 0,
+          message: { role: 'assistant', content: 'ok' },
+          finish_reason: 'stop',
+        }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }) as typeof fetch
+
+    try {
+      const body = {
+        model: 'model-main',
+        max_tokens: 64,
+        messages: [{ role: 'user', content: 'hello' }],
+      }
+      const req = new Request(
+        `http://localhost:3456/proxy/providers/${provider.id}/v1/messages`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+      )
+      const res = await handleProxyRequest(req, new URL(req.url))
+
+      expect(res.status).toBe(200)
+      expect(calls.map((call) => call.url)).toEqual(['http://127.0.0.1:11434/v1/chat/completions'])
+      expect(calls.map((call) => call.proxy)).toEqual([undefined])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  test('records redacted OpenAI proxy request headers in trace capture', async () => {
+    const svc = new ProviderService()
+    const provider = await svc.addProvider({
+      presetId: 'custom',
+      name: 'OpenAI Trace Proxy',
+      baseUrl: 'https://api.example.com',
+      apiKey: 'sk-trace-secret',
+      apiFormat: 'openai_chat',
+      models: {
+        main: 'model-main',
+        haiku: 'model-main',
+        sonnet: 'model-main',
+        opus: 'model-main',
+      },
+    })
+
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = mock(async (_url: string | URL | Request, _init?: RequestInit) => {
+      return new Response(JSON.stringify({
+        id: 'chatcmpl-trace-headers',
+        object: 'chat.completion',
+        created: 0,
+        model: 'model-main',
+        choices: [{
+          index: 0,
+          message: { role: 'assistant', content: 'ok' },
+          finish_reason: 'stop',
+        }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }) as typeof fetch
+
+    try {
+      const req = new Request(
+        `http://localhost:3456/proxy/providers/${provider.id}/v1/messages`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-claude-code-session-id': 'session-proxy-trace-headers',
+          },
+          body: JSON.stringify({
+            model: 'model-main',
+            max_tokens: 64,
+            messages: [{ role: 'user', content: 'hello' }],
+          }),
+        },
+      )
+
+      const res = await handleProxyRequest(req, new URL(req.url))
+      expect(res.status).toBe(200)
+
+      const trace = await waitForTraceCall('session-proxy-trace-headers')
+      expect(trace.calls).toHaveLength(1)
+      expect(trace.calls[0].request.headers.Authorization).toBe('[redacted]')
+      expect(trace.calls[0].request.headers['Content-Type']).toBe('application/json')
+    } finally {
       globalThis.fetch = originalFetch
     }
   })

@@ -84,7 +84,7 @@ describe('Settings > Skills tab', () => {
       error: null,
     })
     useTabStore.setState({ tabs: [], activeTabId: null })
-    useUIStore.setState({ pendingSettingsTab: null })
+    useUIStore.setState({ activeSettingsTab: 'providers', pendingSettingsTab: null })
     useSkillStore.setState({
       skills: [],
       selectedSkill: null,

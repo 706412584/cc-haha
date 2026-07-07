@@ -151,6 +151,7 @@ export function createElectronHost(bridge: ElectronHostBridge): DesktopHost {
       navigate: url => invoke(ELECTRON_IPC_CHANNELS.previewNavigate, url),
       setBounds: bounds => invoke(ELECTRON_IPC_CHANNELS.previewSetBounds, bounds),
       setVisible: visible => invoke(ELECTRON_IPC_CHANNELS.previewSetVisible, visible),
+      setZoom: level => invoke(ELECTRON_IPC_CHANNELS.previewSetZoom, level),
       close: () => invoke(ELECTRON_IPC_CHANNELS.previewClose),
       message: payload => invoke(ELECTRON_IPC_CHANNELS.previewMessage, payload),
       onEvent: handler => subscribe(ELECTRON_EVENT_CHANNELS.previewEvent, handler),

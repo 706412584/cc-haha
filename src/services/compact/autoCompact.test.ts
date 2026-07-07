@@ -40,6 +40,7 @@ describe('model context window resolution', () => {
     expect(getContextWindowForModel('deepseek-v4-pro')).toBe(1_000_000)
     expect(getContextWindowForModel('MiniMax-M2.7')).toBe(204_800)
     expect(getContextWindowForModel('kimi-k2.6')).toBe(262_144)
+    expect(getContextWindowForModel('zai-org/GLM-5.2')).toBe(200_000)
     expect(getContextWindowForModel('glm-5.1')).toBe(200_000)
     expect(getContextWindowForModel('glm-4.5-air')).toBe(128_000)
   })
@@ -69,6 +70,7 @@ describe('model context window resolution', () => {
 
   test('derives auto-compact thresholds from provider context windows', () => {
     expect(getAutoCompactThreshold('deepseek-v4-pro')).toBe(967_000)
+    expect(getAutoCompactThreshold('zai-org/GLM-5.2')).toBe(167_000)
     expect(getAutoCompactThreshold('glm-5.1')).toBe(167_000)
     expect(getAutoCompactThreshold('glm-4.5-air')).toBe(95_000)
     expect(getAutoCompactThreshold('kimi-k2.6')).toBe(229_144)

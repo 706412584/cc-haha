@@ -45,6 +45,7 @@ const harness = String.raw`
     serverChild: null,
     tunnelChildren: [],
     reportPayloads: [],
+    serverPlans: [],
     fetchMock: null,
   }
 
@@ -68,8 +69,12 @@ const harness = String.raw`
   mock.module('./electron/services/sidecarManager.ts', () => ({
     SERVER_BIND_HOST: '0.0.0.0',
     SERVER_CONTROL_HOST: '127.0.0.1',
+    SERVER_STARTUP_TIMEOUT_MS: 30_000,
     createAdapterPlan: () => ({ command: '/fake', args: [], env: {} }),
-    createServerPlan: () => ({ command: '/fake', args: [], env: {} }),
+    createServerPlan: (plan) => {
+      state.serverPlans.push(plan)
+      return { command: '/fake', args: [], env: plan.env ?? {} }
+    },
     createTunnelPlan: ({ mode }) => ({
       command: '/fake/cloudflared',
       args: ['--mode', mode],
@@ -121,10 +126,11 @@ const harness = String.raw`
 
   const originalFetch = globalThis.fetch
 
-  async function withRuntime(fn) {
+  async function withRuntime(fn, options = {}) {
     state.serverChild = null
     state.tunnelChildren = []
     state.reportPayloads = []
+    state.serverPlans = []
     state.fetchMock = async (_url, init) => {
       if (init?.body && typeof init.body === 'string') {
         state.reportPayloads.push(JSON.parse(init.body))
@@ -134,7 +140,7 @@ const harness = String.raw`
     globalThis.fetch = state.fetchMock
     try {
       const { ElectronServerRuntime } = await import('./electron/services/serverRuntime.ts')
-      const runtime = new ElectronServerRuntime({ desktopRoot: '/fake/desktop' })
+      const runtime = new ElectronServerRuntime({ desktopRoot: '/fake/desktop', ...options })
       await runtime.startServer()
       await fn(runtime)
     } finally {
@@ -149,6 +155,15 @@ async function expectIsolatedPass(script: string) {
 }
 
 describe('ElectronServerRuntime tunnel lifecycle', () => {
+  it('passes the packaged app version to the sidecar environment', async () => {
+    await expectIsolatedPass(String.raw`
+      await withRuntime(async () => {
+        assertEqual(state.serverPlans[0].env.APP_VERSION, '0.5.32', 'APP_VERSION should match Electron app version')
+        assertEqual(state.serverPlans[0].env.CC_HAHA_DESKTOP_VERSION, '0.5.32', 'desktop version should be available separately')
+      }, { appVersion: '0.5.32' })
+    `)
+  })
+
   it('restarts the tunnel cleanly: stop -> start yields a fresh URL, not the stale one', async () => {
     await expectIsolatedPass(String.raw`
       await withRuntime(async (runtime) => {

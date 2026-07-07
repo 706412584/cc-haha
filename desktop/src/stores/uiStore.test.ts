@@ -55,3 +55,31 @@ describe('uiStore theme handling', () => {
     expect(document.documentElement.style.colorScheme).toBe('light')
   })
 })
+
+describe('uiStore settings tab persistence', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    window.localStorage.clear()
+  })
+
+  it('hydrates the last selected Settings tab after the renderer store is recreated', async () => {
+    const first = await import('./uiStore')
+
+    first.useUIStore.getState().setActiveSettingsTab('general')
+
+    expect(window.localStorage.getItem('cc-haha-active-settings-tab')).toBe('general')
+
+    vi.resetModules()
+    const recreated = await import('./uiStore')
+
+    expect(recreated.useUIStore.getState().activeSettingsTab).toBe('general')
+  })
+
+  it('ignores an invalid persisted Settings tab', async () => {
+    window.localStorage.setItem('cc-haha-active-settings-tab', 'not-a-settings-tab')
+
+    const { useUIStore } = await import('./uiStore')
+
+    expect(useUIStore.getState().activeSettingsTab).toBe('providers')
+  })
+})

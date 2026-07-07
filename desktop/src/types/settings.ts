@@ -49,7 +49,7 @@ export type UpdateProxySettings = {
   url: string
 }
 
-export type NetworkProxyMode = 'system' | 'manual'
+export type NetworkProxyMode = 'direct' | 'system' | 'manual'
 
 export type NetworkProxySettings = {
   mode: NetworkProxyMode

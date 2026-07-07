@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { currentPackageSmokePlatform, currentReleaseArtifactsDir, lanesForMode } from './modes'
+import { currentPackageSmokeArch, currentPackageSmokePlatform, currentReleaseArtifactsDir, lanesForMode } from './modes'
 import { renderJUnitReport, renderMarkdownReport } from './reporter'
 import { runQualityGate, runQualityGateLanes } from './runner'
 import type { LaneDefinition, QualityGateReport } from './types'
@@ -39,6 +39,7 @@ describe('quality gate modes', () => {
     const laneDefinitions = lanesForMode('release')
     const lanes = laneDefinitions.map((lane) => lane.id)
     const packageSmokePlatform = currentPackageSmokePlatform()
+    const packageSmokeArch = currentPackageSmokeArch()
     expect(lanes).toContain('policy-checks')
     expect(lanes).toContain('desktop-checks')
     expect(lanes).toContain('server-checks')
@@ -56,6 +57,10 @@ describe('quality gate modes', () => {
       expect(packageSmokeLane?.command).toContain('--package-kind')
       expect(packageSmokeLane?.command).toContain('release')
       expect(packageSmokeLane?.command).toContain('--artifacts-dir')
+      if (packageSmokeArch) {
+        expect(packageSmokeLane?.command).toContain('--arch')
+        expect(packageSmokeLane?.command).toContain(packageSmokeArch)
+      }
       if (packageSmokePlatform === 'macos') {
         expect(packageSmokeLane?.command).toContain('--require-macos-gatekeeper')
       }
@@ -68,6 +73,9 @@ describe('quality gate modes', () => {
     expect(currentPackageSmokePlatform('win32')).toBe('windows')
     expect(currentPackageSmokePlatform('linux')).toBe('linux')
     expect(currentPackageSmokePlatform('freebsd')).toBeNull()
+    expect(currentPackageSmokeArch('arm64')).toBe('arm64')
+    expect(currentPackageSmokeArch('x64')).toBe('x64')
+    expect(currentPackageSmokeArch('ia32')).toBeNull()
     expect(currentReleaseArtifactsDir('darwin', 'arm64')).toBe('desktop/build-artifacts/macos-arm64')
     expect(currentReleaseArtifactsDir('darwin', 'x64')).toBe('desktop/build-artifacts/macos-x64')
     expect(currentReleaseArtifactsDir('win32', 'x64')).toBe('desktop/build-artifacts/windows-x64')

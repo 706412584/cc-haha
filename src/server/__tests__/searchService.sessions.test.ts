@@ -163,6 +163,26 @@ describe('SearchService.searchSessions', () => {
     expect(results).toHaveLength(0)
   })
 
+  it('indexes readable command metadata entries', async () => {
+    await writeSessionFile('proj-a', 'session-7', [
+      {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [
+            '<command-message>frontend-design</command-message>',
+            '<command-name>/frontend-design</command-name>',
+            '<command-args>redesign settings page</command-args>',
+          ].join('\n'),
+        },
+      },
+    ])
+
+    const { results } = await service.searchSessions('redesign')
+    expect(results).toHaveLength(1)
+    expect(results[0]!.matches[0]!.snippet).toContain('/frontend-design redesign settings page')
+  })
+
   it('resolves the real session title (custom-title wins) instead of the UUID', async () => {
     await writeSessionFile('proj-a', 'titled-session', [
       { type: 'user', uuid: 'u1', message: { role: 'user', content: 'discuss searchword topic' } },

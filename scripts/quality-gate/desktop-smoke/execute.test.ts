@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import { buildDesktopSmokeBrowserEnv, resolveDesktopSmokeRuntimeSelection } from './execute'
+import {
+  buildDesktopSmokeBrowserEnv,
+  desktopSmokeTextShowsProject,
+  resolveDesktopSmokeRuntimeSelection,
+} from './execute'
 
 describe('desktop smoke runtime selection', () => {
   test('lets current-runtime use the desktop default active provider', () => {
@@ -52,5 +56,22 @@ describe('desktop smoke browser environment', () => {
       NO_PROXY: 'localhost,127.0.0.1,::1,[::1]',
       no_proxy: 'localhost,127.0.0.1,::1,[::1]',
     })
+  })
+})
+
+describe('desktop smoke restored session detection', () => {
+  test('waits for the target project chip instead of the first empty-session textarea', () => {
+    expect(desktopSmokeTextShowsProject([
+      '新建会话',
+      '随便问点什么...',
+      'folder_open 选择项目...',
+    ].join('\n'), 'project')).toBe(false)
+
+    expect(desktopSmokeTextShowsProject([
+      'Untitled Session',
+      '让 Claude 编辑、调试或解释代码...',
+      'folder',
+      'project',
+    ].join('\n'), 'project')).toBe(true)
   })
 })

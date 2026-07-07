@@ -80,4 +80,4 @@ All illustrations use a dark background (#1a1a2e) with Claude Code Haha orange-b
 - [Claude Code Haha Home](/en/)
 - [Agent Framework Deep Dive](/en/agent/03-agent-framework)
 - [Skills System Documentation](/en/skills/01-usage-guide)
-- [GitHub Issues](https://github.com/NanmiCoder/cc-haha/issues)
+- [GitHub Issues](https://github.com/706412584/cc-haha/issues)

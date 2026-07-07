@@ -37,6 +37,7 @@ export const ELECTRON_IPC_CHANNELS = {
   previewNavigate: 'desktop:preview:navigate',
   previewSetBounds: 'desktop:preview:set-bounds',
   previewSetVisible: 'desktop:preview:set-visible',
+  previewSetZoom: 'desktop:preview:set-zoom',
   previewClose: 'desktop:preview:close',
   previewMessage: 'desktop:preview:message',
   appModeGet: 'desktop:app-mode:get',

@@ -15,7 +15,7 @@ import {
 import { sessionsApi, type SessionGitInfo } from '../../api/sessions'
 import { agentsApi } from '../../api/agents'
 import { PermissionModeSelector } from '../controls/PermissionModeSelector'
-import { ModelSelector } from '../controls/ModelSelector'
+import { ModelSelector, type ModelSelectorHandle } from '../controls/ModelSelector'
 import type { AttachmentRef, DisplayAttachmentRef } from '../../types/chat'
 import { AttachmentGallery } from './AttachmentGallery'
 import { ImageAnnotationModal } from './ImageAnnotationModal'
@@ -50,6 +50,7 @@ import {
   COMPOSER_PREFILL_EVENT,
   type ComposerPrefillDetail,
 } from '../welcome/WelcomeTaskCards'
+import type { PermissionMode } from '../../types/settings'
 
 type GitInfo = SessionGitInfo
 
@@ -122,6 +123,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const modelSelectorRef = useRef<ModelSelectorHandle>(null)
   const plusMenuRef = useRef<HTMLDivElement>(null)
   const slashMenuRef = useRef<HTMLDivElement>(null)
   const fileSearchRef = useRef<FileSearchMenuHandle>(null)
@@ -130,6 +132,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   const previousActiveTabIdRef = useRef<string | null>(null)
   const inputRef = useRef(input)
   const attachmentsRef = useRef(attachments)
+  const pasteGenerationRef = useRef(0)
   const setComposerInput = useCallback((value: string) => {
     inputRef.current = value
     setInput(value)
@@ -201,6 +204,9 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     }
     chatStore.setComposerDraft(sessionId, draft)
   }, [])
+  const invalidatePendingPastes = useCallback(() => {
+    pasteGenerationRef.current += 1
+  }, [])
 
   const isMemberSession = !!memberInfo
   const isActive = chatState !== 'idle'
@@ -247,6 +253,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     }
 
     const nextDraft = activeTabId ? useChatStore.getState().sessions[activeTabId]?.composerDraft : undefined
+    invalidatePendingPastes()
     setComposerInput(nextDraft?.input ?? '')
     setComposerAttachments(nextDraft?.attachments ?? [])
     setPlusMenuOpen(false)
@@ -259,7 +266,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     setEditingQueuedMessageId(null)
     setEditingQueuedMessageText('')
     previousActiveTabIdRef.current = activeTabId
-  }, [activeTabId, saveComposerDraft, setComposerAttachments, setComposerInput])
+  }, [activeTabId, invalidatePendingPastes, saveComposerDraft, setComposerAttachments, setComposerInput])
 
   useEffect(() => {
     return () => {
@@ -623,13 +630,28 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   ) => {
     if (!activeTabId) return null
     const oldId = activeTabId
-    const { createSession, deleteSession } = useSessionStore.getState()
+    const sessionStore = useSessionStore.getState()
+    const { createSession, deleteSession } = sessionStore
     const { replaceTabSession } = useTabStore.getState()
-    const { disconnectSession, connectToSession } = useChatStore.getState()
+    const { disconnectSession, connectToSession, setComposerDraft } = useChatStore.getState()
+    const permissionMode = sessionStore.sessions.find((session) => session.id === oldId)
+      ?.permissionMode as PermissionMode | undefined
+    const createOptions = repository || permissionMode
+      ? {
+          ...(repository ? { repository } : {}),
+          ...(permissionMode ? { permissionMode } : {}),
+        }
+      : undefined
     const newId = await createSession(
       workDir || undefined,
-      repository ? { repository } : undefined,
+      createOptions,
     )
+    if (inputRef.current.length > 0 || attachmentsRef.current.length > 0) {
+      setComposerDraft(newId, {
+        input: inputRef.current,
+        attachments: attachmentsRef.current,
+      })
+    }
     useSessionRuntimeStore.getState().moveSelection(oldId, newId)
     disconnectSession(oldId)
     replaceTabSession(oldId, newId)
@@ -674,6 +696,15 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     if (pendingSlashUiAction?.type === 'settings') {
       useUIStore.getState().setPendingSettingsTab(pendingSlashUiAction.tab)
       useTabStore.getState().openTab(SETTINGS_TAB_ID, 'Settings', 'settings')
+      setComposerInput('')
+      setSlashMenuOpen(false)
+      setFileSearchOpen(false)
+      setPlusMenuOpen(false)
+      return
+    }
+
+    if (pendingSlashUiAction?.type === 'model') {
+      modelSelectorRef.current?.open()
       setComposerInput('')
       setSlashMenuOpen(false)
       setFileSearchOpen(false)
@@ -781,6 +812,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
         displayAttachments: visibleAttachmentPayload,
       })
     }
+    invalidatePendingPastes()
     setComposerInput('')
     setComposerAttachments([])
     useChatStore.getState().clearComposerDraft(activeTabId!)
@@ -904,10 +936,16 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
       if (!file) continue
 
       const id = `att-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      const pasteGeneration = pasteGenerationRef.current
+      const pastedSessionId = activeTabId
       const reader = new FileReader()
       reader.onload = () => {
+        if (pasteGeneration !== pasteGenerationRef.current) return
+        if (pastedSessionId !== useTabStore.getState().activeTabId) return
         const rawDataUrl = reader.result as string
         void compressDataUrl(rawDataUrl).then((compressed) => {
+          if (pasteGeneration !== pasteGenerationRef.current) return
+          if (pastedSessionId !== useTabStore.getState().activeTabId) return
           setComposerAttachments((prev) => [
             ...prev,
             {
@@ -1616,7 +1654,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
                 />
               )}
               {!isMemberSession && activeTabId && (
-                <ModelSelector runtimeKey={activeTabId} disabled={isActive} compact={useCompactControls} />
+                <ModelSelector ref={modelSelectorRef} runtimeKey={activeTabId} disabled={isActive} compact={useCompactControls} />
               )}
               <button
                 onClick={!isMemberSession && isActive ? () => stopGeneration(activeTabId!) : handleSubmit}

@@ -3,6 +3,7 @@ import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
 import type { PermissionUpdate } from '../../types/chat'
 
 export const EXIT_PLAN_MODE_TOOL_NAME = 'ExitPlanMode'
+export const ENTER_PLAN_MODE_TOOL_NAME = 'EnterPlanMode'
 
 export type AllowedPrompt = {
   tool: string
@@ -26,6 +27,10 @@ type Props = {
 
 export function isExitPlanModeTool(toolName: string): boolean {
   return toolName === EXIT_PLAN_MODE_TOOL_NAME
+}
+
+export function isEnterPlanModeTool(toolName: string): boolean {
+  return toolName === ENTER_PLAN_MODE_TOOL_NAME
 }
 
 export function PlanPreviewCard({

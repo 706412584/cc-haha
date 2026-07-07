@@ -6,6 +6,8 @@
 
 // ─── OpenAI Chat Completions ────────────────────────────────
 
+export type OpenAIReasoningEffort = 'low' | 'medium' | 'high'
+
 export type OpenAIChatMessage = {
   role: 'system' | 'user' | 'assistant' | 'tool'
   content?: string | OpenAIChatContentPart[] | null
@@ -49,7 +51,7 @@ export type OpenAIChatRequest = {
   stream_options?: { include_usage: boolean }
   tools?: OpenAITool[]
   tool_choice?: unknown
-  reasoning_effort?: 'low' | 'medium' | 'high'
+  reasoning_effort?: OpenAIReasoningEffort
   thinking?: { type: string }
 }
 
@@ -136,7 +138,7 @@ export type OpenAIResponsesRequest = {
     parameters?: Record<string, unknown>
   }>
   tool_choice?: unknown
-  reasoning?: { effort?: 'low' | 'medium' | 'high' }
+  reasoning?: { effort?: OpenAIReasoningEffort }
   prompt_cache_key?: string
 }
 
@@ -189,6 +191,10 @@ export type AnthropicRequest = {
   thinking?: {
     type: string
     budget_tokens?: number
+  }
+  output_config?: {
+    effort?: unknown
+    [key: string]: unknown
   }
 }
 
