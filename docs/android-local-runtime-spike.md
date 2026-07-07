@@ -124,6 +124,19 @@ node scripts/android-local-runtime/node-transport-smoke-client.mjs http://127.0.
 
 This smoke path is intentionally tiny and dependency-free. It proves whether Termux Node can serve `GET /health` and WebSocket `ping`/`pong` before adapting the full Bun-based server.
 
+## Node-compatible server slice
+
+After the transport smoke passes, validate a slightly larger Node-only slice:
+
+```bash
+node scripts/android-local-runtime/node-server-slice.mjs --host 127.0.0.1 --port 3456 --h5-dist /path/to/desktop/dist
+node scripts/android-local-runtime/node-server-slice-client.mjs http://127.0.0.1:3456
+```
+
+The slice covers `GET /health`, static H5 serving, `GET /api/sessions`, `POST /api/sessions`, `GET /api/sessions/:id/messages`, and WebSocket `ping`/`pong`.
+
+When running through `adb shell run-as com.termux`, do not rely on `$HOME` matching the interactive Termux shell. Prefer explicit paths such as `/data/data/com.termux/files/home/...`.
+
 ## H5/WebView target
 
 Open the UI at:

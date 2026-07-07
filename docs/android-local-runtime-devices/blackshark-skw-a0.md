@@ -93,11 +93,14 @@ Result:
 - [ ] Failed after listening
 - [x] Bun server not attempted because Bun is not runnable on Termux/Android
 - [x] Node smoke server started successfully
+- [x] Node-compatible server slice started successfully
 
 Paste server log excerpt:
 
 ```text
 [android-node-smoke] listening at http://127.0.0.1:3456
+[android-node-slice] listening at http://127.0.0.1:3459
+[android-node-slice] h5 dist: /data/data/com.termux/files/home/cc-haha-probe/h5-dist
 ```
 
 ## Transport probe
@@ -125,6 +128,18 @@ Session: android-node-1783429849657
 
 [OK] GET /health -> {"status":"ok","timestamp":"2026-07-07T13:10:49.690Z"}
 [OK] WebSocket ping -> {"type":"pong"}
+
+Android Node server slice client probe
+======================================
+Base URL: http://127.0.0.1:3459
+
+[OK] GET /health -> {"status":"ok","timestamp":"2026-07-07T14:29:24.442Z"}
+[OK] GET /api/sessions -> 0
+[OK] POST /api/sessions -> 655fe716-06d9-4b5c-b21f-d30f089d1341
+[OK] created session appears in list
+[OK] GET /api/sessions/:id/messages -> 0
+[OK] WebSocket ping -> {"type":"pong"}
+[INFO] GET / -> HTTP 200
 ```
 
 ## H5 browser check
