@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 
-import { buildPostCompactMessages, type CompactionResult } from './compact.js'
+import {
+  buildPostCompactMessages,
+  prepareCompactMessagesForSummary,
+  type CompactionResult,
+} from './compact.js'
 import { getCurrentUsage } from '../../utils/tokens.js'
 import type { Message } from '../../types/message.js'
 
@@ -69,6 +73,79 @@ function makeResult(messagesToKeep?: Message[]): CompactionResult {
     ...(messagesToKeep ? { messagesToKeep } : {}),
   }
 }
+
+function makeUserWithMedia(): Message {
+  return {
+    type: 'user',
+    uuid: '00000000-0000-0000-0000-000000000005',
+    timestamp: new Date().toISOString(),
+    message: {
+      role: 'user',
+      content: [
+        { type: 'text', text: 'please inspect this' },
+        {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: 'image/png',
+            data: 'not-a-valid-image',
+          },
+        },
+        {
+          type: 'tool_result',
+          tool_use_id: 'toolu_1',
+          content: [
+            { type: 'text', text: 'tool text' },
+            {
+              type: 'image',
+              source: {
+                type: 'base64',
+                media_type: 'image/png',
+                data: 'also-not-a-valid-image',
+              },
+            },
+          ],
+        },
+      ],
+    },
+  } as unknown as Message
+}
+
+describe('prepareCompactMessagesForSummary', () => {
+  test('strips direct and nested image blocks before compact summary requests', () => {
+    const result = prepareCompactMessagesForSummary([makeUserWithMedia()])
+    const content = (result[0] as Extract<Message, { type: 'user' }>).message.content
+
+    expect(content).toEqual([
+      { type: 'text', text: 'please inspect this' },
+      { type: 'text', text: '[image]' },
+      {
+        type: 'tool_result',
+        tool_use_id: 'toolu_1',
+        content: [
+          { type: 'text', text: 'tool text' },
+          { type: 'text', text: '[image]' },
+        ],
+      },
+    ])
+  })
+
+  test('drops messages before the latest compact boundary', () => {
+    const beforeBoundary = makePreservedUser()
+    const boundary = makeBoundary()
+    const afterBoundary = makeUserWithMedia()
+
+    const result = prepareCompactMessagesForSummary([
+      beforeBoundary,
+      boundary,
+      afterBoundary,
+    ])
+
+    expect(result).toHaveLength(2)
+    expect(result[0]?.uuid).toBe(boundary.uuid)
+    expect(result[1]?.uuid).toBe(afterBoundary.uuid)
+  })
+})
 
 describe('buildPostCompactMessages stale-usage stripping (#743)', () => {
   test('zeroes provider usage on preserved assistant messages', () => {

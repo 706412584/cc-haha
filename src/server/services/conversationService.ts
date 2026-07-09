@@ -9,6 +9,7 @@
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { spawn, spawnSync } from 'node:child_process'
 import { ProviderService } from './providerService.js'
 import {
   OPENAI_CODEX_OAUTH_FILE_ENV_KEY,
@@ -75,6 +76,29 @@ export function buildConversationCliSpawnOptions(
     stderr: 'pipe',
     windowsHide: true,
   } as const
+}
+
+type KillConversationProcessDeps = {
+  platform?: NodeJS.Platform
+  spawnAsync?: typeof spawn
+  spawnSyncFn?: typeof spawnSync
+}
+
+export function killConversationProcessTree(
+  proc: { pid?: number; kill(signal?: NodeJS.Signals): unknown },
+  signal?: NodeJS.Signals,
+  sync = false,
+  deps: KillConversationProcessDeps = {},
+): void {
+  const platform = deps.platform ?? process.platform
+  if (platform === 'win32' && proc.pid) {
+    const args = ['/F', '/T', '/PID', String(proc.pid)]
+    const options = { stdio: 'ignore', windowsHide: true } as const
+    if (sync) (deps.spawnSyncFn ?? spawnSync)('taskkill', args, options)
+    else (deps.spawnAsync ?? spawn)('taskkill', args, options)
+    return
+  }
+  proc.kill(signal)
 }
 
 type AttachmentRef = {
@@ -878,14 +902,14 @@ export class ConversationService {
     session: SessionProcess,
     timeoutMs: number,
   ): Promise<void> {
-    this.killProcess(sessionId, session, 'SIGTERM')
+    this.killProcess(sessionId, session, 'SIGTERM', true)
 
     const exited = await Promise.race([
       session.proc.exited.then(() => true, () => true),
       new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
     ])
     if (!exited) {
-      this.killProcess(sessionId, session, 'SIGKILL')
+      this.killProcess(sessionId, session, 'SIGKILL', true)
       await Promise.race([
         session.proc.exited.catch(() => undefined),
         new Promise<void>((resolve) => setTimeout(resolve, 500)),
@@ -898,9 +922,10 @@ export class ConversationService {
     sessionId: string,
     session: SessionProcess,
     signal?: NodeJS.Signals,
+    sync = false,
   ): void {
     try {
-      session.proc.kill(signal)
+      killConversationProcessTree(session.proc, signal, sync)
     } catch (error) {
       console.warn(
         `[ConversationService] Failed to kill CLI subprocess for ${sessionId}: ${

@@ -369,6 +369,12 @@ export function buildPostCompactMessages(result: CompactionResult): Message[] {
   ]
 }
 
+export function prepareCompactMessagesForSummary(messages: Message[]): Message[] {
+  return stripImagesFromMessages(
+    stripReinjectedAttachments(getMessagesAfterCompactBoundary(messages)),
+  )
+}
+
 /**
  * Annotate a compact boundary with relink metadata for messagesToKeep.
  * Preserved messages keep their original parentUuids on disk (dedup-skipped);
@@ -1208,6 +1214,8 @@ async function streamCompactSummary({
     : undefined
 
   try {
+    const compactSummaryContext = prepareCompactMessagesForSummary(messages)
+
     if (promptCacheSharingEnabled) {
       try {
         // DO NOT set maxOutputTokens here. The fork piggybacks on the main thread's
@@ -1219,7 +1227,10 @@ async function streamCompactSummary({
         // since it doesn't share cache with the main thread.
         const result = await runForkedAgent({
           promptMessages: [summaryRequest],
-          cacheSafeParams,
+          cacheSafeParams: {
+            ...cacheSafeParams,
+            forkContextMessages: compactSummaryContext,
+          },
           canUseTool: createCompactCanUseTool(),
           querySource: 'compact',
           forkLabel: 'compact',
@@ -1323,12 +1334,7 @@ async function streamCompactSummary({
 
       const streamingGen = queryModelWithStreaming({
         messages: normalizeMessagesForAPI(
-          stripImagesFromMessages(
-            stripReinjectedAttachments([
-              ...getMessagesAfterCompactBoundary(messages),
-              summaryRequest,
-            ]),
-          ),
+          [...compactSummaryContext, summaryRequest],
           context.options.tools,
         ),
         systemPrompt: asSystemPrompt([
