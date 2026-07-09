@@ -2461,6 +2461,70 @@ describe('MessageList nested tool calls', () => {
     expect(scrollIntoView).not.toHaveBeenCalled()
   })
 
+  it('resumes auto-scrolling after a light review near the bottom', async () => {
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          chatState: 'streaming',
+          messages: [
+            {
+              id: 'user-1',
+              type: 'user_text',
+              content: '最新消息',
+              timestamp: 1,
+            },
+          ],
+          streamingText: 'streaming',
+        }),
+      },
+    })
+
+    const { container } = render(<MessageList />)
+    const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement
+    let scrollTop = 600
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 1000 })
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
+    Object.defineProperty(scroller, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value) => {
+        scrollTop = value >= 1_000_000_000 ? 600 : value
+      },
+    })
+    Object.defineProperty(scroller, 'scrollTo', {
+      configurable: true,
+      value: vi.fn((options: ScrollToOptions | number, y?: number) => {
+        scroller.scrollTop = typeof options === 'number' ? y ?? 0 : options.top ?? 0
+      }),
+    })
+
+    await waitForProgrammaticScrollReset()
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300))
+    })
+    fireEvent.scroll(scroller)
+
+    scrollTop = 420
+    fireEvent.scroll(scroller)
+
+    act(() => {
+      useChatStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ACTIVE_TAB]: {
+            ...state.sessions[ACTIVE_TAB]!,
+            streamingText: 'streaming after light review',
+          },
+        },
+      }))
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('streaming after light review')).toBeTruthy()
+    })
+    expect(scrollTop).toBe(420)
+  })
+
   it('keeps auto-scrolling when new output arrives while already near the bottom', async () => {
     const scrollIntoView = vi.fn()
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
@@ -2518,6 +2582,132 @@ describe('MessageList nested tool calls', () => {
       expect(screen.getByText('streaming next token')).toBeTruthy()
     })
     expect(scrollIntoView).not.toHaveBeenCalled()
+    expect(scrollTop).toBe(600)
+  })
+
+  it('does not auto-scroll tail message updates while the session is idle', async () => {
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          chatState: 'idle',
+          messages: [
+            {
+              id: 'user-1',
+              type: 'user_text',
+              content: '历史消息',
+              timestamp: 1,
+            },
+            {
+              id: 'assistant-1',
+              type: 'assistant_text',
+              content: 'final answer',
+              timestamp: 2,
+            },
+          ],
+        }),
+      },
+    })
+
+    const { container } = render(<MessageList />)
+    const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement
+    let scrollTop = 552
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 1000 })
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
+    Object.defineProperty(scroller, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value) => {
+        scrollTop = value
+      },
+    })
+
+    await waitForProgrammaticScrollReset()
+    fireEvent.scroll(scroller)
+
+    act(() => {
+      useChatStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ACTIVE_TAB]: {
+            ...state.sessions[ACTIVE_TAB]!,
+            messages: [
+              state.sessions[ACTIVE_TAB]!.messages[0]!,
+              {
+                ...state.sessions[ACTIVE_TAB]!.messages[1] as Extract<UIMessage, { type: 'assistant_text' }>,
+                content: 'final answer\nlate metadata update',
+              },
+            ],
+          },
+        },
+      }))
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText(/late metadata update/)).toBeTruthy()
+    })
+    expect(scrollTop).toBe(552)
+  })
+
+  it('keeps auto-scrolling when the tail assistant message grows in place', async () => {
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          chatState: 'streaming',
+          messages: [
+            {
+              id: 'user-1',
+              type: 'user_text',
+              content: '最新消息',
+              timestamp: 1,
+            },
+            {
+              id: 'assistant-1',
+              type: 'assistant_text',
+              content: 'first token',
+              timestamp: 2,
+            },
+          ],
+        }),
+      },
+    })
+
+    const { container } = render(<MessageList />)
+    const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement
+    let scrollTop = 552
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 1000 })
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
+    Object.defineProperty(scroller, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value) => {
+        scrollTop = value
+      },
+    })
+
+    await waitForProgrammaticScrollReset()
+    fireEvent.scroll(scroller)
+
+    act(() => {
+      useChatStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ACTIVE_TAB]: {
+            ...state.sessions[ACTIVE_TAB]!,
+            messages: [
+              state.sessions[ACTIVE_TAB]!.messages[0]!,
+              {
+                ...state.sessions[ACTIVE_TAB]!.messages[1] as Extract<UIMessage, { type: 'assistant_text' }>,
+                content: 'first token\nsecond token from the same assistant message',
+              },
+            ],
+          },
+        },
+      }))
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText(/second token from the same assistant message/)).toBeTruthy()
+    })
     expect(scrollTop).toBe(600)
   })
 
@@ -3286,7 +3476,7 @@ describe('MessageList nested tool calls', () => {
 
     const { container } = render(<MessageList />)
     const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement
-    let scrollTop = 120
+    let scrollTop = 600
     Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 1000 })
     Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
     Object.defineProperty(scroller, 'scrollTop', {
@@ -3299,7 +3489,17 @@ describe('MessageList nested tool calls', () => {
 
     scrollIntoView.mockClear()
     await waitForProgrammaticScrollReset()
-    fireEvent.scroll(scroller)
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    })
+    scrollTop = 80
+    await act(async () => {
+      fireEvent.scroll(scroller)
+    })
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Latest' })).toBeTruthy()
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Latest' }))
 
     expect(scrollIntoView).not.toHaveBeenCalled()
