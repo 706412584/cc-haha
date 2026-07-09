@@ -870,17 +870,19 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
             </span>
           </div>
           <div className={`flex items-center ${expanded ? 'gap-1.5' : 'flex-col gap-2'}`}>
-            <a
-              href="https://github.com/706412584/cc-haha"
-              target="_blank"
-              rel="noopener noreferrer"
-              className={`sidebar-copy ${expanded ? 'sidebar-copy--visible' : 'sidebar-copy--hidden'} inline-flex items-center justify-center rounded-md p-1 text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]`}
-              title="GitHub"
-              tabIndex={expanded ? undefined : -1}
-              aria-hidden={!expanded}
-            >
-              <GitHubIcon />
-            </a>
+            {!isMobile ? (
+              <a
+                href="https://github.com/706412584/cc-haha"
+                target="_blank"
+                rel="noopener noreferrer"
+                className={`sidebar-copy ${expanded ? 'sidebar-copy--visible' : 'sidebar-copy--hidden'} inline-flex items-center justify-center rounded-md p-1 text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]`}
+                title="GitHub"
+                tabIndex={expanded ? undefined : -1}
+                aria-hidden={!expanded}
+              >
+                <GitHubIcon />
+              </a>
+            ) : null}
             {isMobile ? (
               <button
                 type="button"
@@ -950,19 +952,21 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
             className="sidebar-section sidebar-section--visible relative z-20 flex-none px-3 pb-2"
             style={{ overflow: 'visible' }}
           >
-            <button
-              type="button"
-              onClick={() => openModal('globalSearch')}
-              className="mb-1.5 flex h-9 w-full min-w-0 items-center gap-2 rounded-[14px] border border-[var(--color-sidebar-search-border)] bg-[var(--color-sidebar-search-bg)] pl-3 pr-2 text-left text-[13px] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-sidebar-item-hover)] focus-visible:border-[var(--color-border-focus)] focus-visible:outline-none"
-              aria-label={t('search.global.trigger')}
-              title={t('search.global.trigger')}
-            >
-              <span className="pointer-events-none flex shrink-0 items-center text-[var(--color-text-tertiary)]">
-                <SearchIcon />
-              </span>
-              <span className="min-w-0 flex-1 truncate pl-2">{t('search.global.trigger')}</span>
-              <kbd className="pointer-events-none shrink-0 rounded border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-1 font-mono text-[10px] leading-tight text-[var(--color-text-tertiary)]">⌘K</kbd>
-            </button>
+            {!isMobile ? (
+              <button
+                type="button"
+                onClick={() => openModal('globalSearch')}
+                className="mb-1.5 flex h-9 w-full min-w-0 items-center gap-2 rounded-[14px] border border-[var(--color-sidebar-search-border)] bg-[var(--color-sidebar-search-bg)] pl-3 pr-2 text-left text-[13px] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-sidebar-item-hover)] focus-visible:border-[var(--color-border-focus)] focus-visible:outline-none"
+                aria-label={t('search.global.trigger')}
+                title={t('search.global.trigger')}
+              >
+                <span className="pointer-events-none flex shrink-0 items-center text-[var(--color-text-tertiary)]">
+                  <SearchIcon />
+                </span>
+                <span className="min-w-0 flex-1 truncate pl-2">{t('search.global.trigger')}</span>
+                <kbd className="pointer-events-none shrink-0 rounded border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-1 font-mono text-[10px] leading-tight text-[var(--color-text-tertiary)]">⌘K</kbd>
+              </button>
+            ) : null}
             <div className="flex items-center gap-1.5">
               <div className="flex h-9 min-w-0 flex-1 items-center rounded-[14px] border border-[var(--color-sidebar-search-border)] bg-[var(--color-sidebar-search-bg)] pl-3 pr-3 transition-colors focus-within:border-[var(--color-border-focus)]">
                 <span className="pointer-events-none flex shrink-0 items-center text-[var(--color-text-tertiary)]">
@@ -987,21 +991,23 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
               >
                 <RefreshCw className={`h-4 w-4 ${showInitialLoading ? 'animate-spin' : ''}`} strokeWidth={1.9} aria-hidden="true" />
               </button>
-              <button
-                type="button"
-                onClick={isBatchMode ? handleExitBatchMode : enterBatchMode}
-                className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-[12px] border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] ${
-                  isBatchMode
-                    ? 'border-[var(--color-brand)] bg-[var(--color-sidebar-item-active)] text-[var(--color-brand)]'
-                    : 'border-[var(--color-sidebar-search-border)] bg-[var(--color-sidebar-search-bg)] text-[var(--color-text-secondary)] hover:bg-[var(--color-sidebar-item-hover)] hover:text-[var(--color-text-primary)]'
-                }`}
-                aria-label={isBatchMode ? t('sidebar.batchExit') : t('sidebar.batchManage')}
-                title={isBatchMode ? t('sidebar.batchExit') : t('sidebar.batchManage')}
-              >
-                <span className="material-symbols-outlined text-[18px]">
-                  {isBatchMode ? 'close' : 'delete_sweep'}
-                </span>
-              </button>
+              {!isMobile ? (
+                <button
+                  type="button"
+                  onClick={isBatchMode ? handleExitBatchMode : enterBatchMode}
+                  className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-[12px] border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] ${
+                    isBatchMode
+                      ? 'border-[var(--color-brand)] bg-[var(--color-sidebar-item-active)] text-[var(--color-brand)]'
+                      : 'border-[var(--color-sidebar-search-border)] bg-[var(--color-sidebar-search-bg)] text-[var(--color-text-secondary)] hover:bg-[var(--color-sidebar-item-hover)] hover:text-[var(--color-text-primary)]'
+                  }`}
+                  aria-label={isBatchMode ? t('sidebar.batchExit') : t('sidebar.batchManage')}
+                  title={isBatchMode ? t('sidebar.batchExit') : t('sidebar.batchManage')}
+                >
+                  <span className="material-symbols-outlined text-[18px]">
+                    {isBatchMode ? 'close' : 'delete_sweep'}
+                  </span>
+                </button>
+              ) : null}
             </div>
           </div>
 
@@ -1088,7 +1094,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                   {searchQuery ? t('sidebar.noMatching') : t('sidebar.noSessions')}
                 </div>
               )}
-              {orderedProjectGroups.length > 0 && (
+              {orderedProjectGroups.length > 0 && !isMobile && (
                 <ProjectHeaderActions
                   title={t('sidebar.projects')}
                   menuLabel={t('sidebar.projectMenu')}
@@ -1183,7 +1189,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                               : t('sidebar.batchSelectAll')}
                           </button>
                         )}
-                        {!isBatchMode && (
+                        {!isBatchMode && !isMobile && (
                           <div className="pointer-events-none flex items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover/project:pointer-events-auto group-hover/project:opacity-100 group-focus-within/project:pointer-events-auto group-focus-within/project:opacity-100">
                             <button
                               type="button"
@@ -1215,7 +1221,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                       </div>
                     </div>
                     {!projectCollapsed && (
-                      <div className="mt-0.5 pl-6">
+                      <div className={`mt-0.5 ${isMobile ? 'pl-2' : 'pl-6'}`}>
                         <div
                           className={hasInternalScroll ? 'max-h-[420px] overflow-y-auto pr-1' : undefined}
                           data-testid={`sidebar-project-session-list-${domSafeProjectKey(project.key)}`}
@@ -1289,6 +1295,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                                       isRunning={runningSessionIds.has(session.id)}
                                       isWorktree={isWorktreeSession(session)}
                                       modifiedAt={session.modifiedAt}
+                                      compact={isMobile}
                                       t={t}
                                     />
                                   </span>

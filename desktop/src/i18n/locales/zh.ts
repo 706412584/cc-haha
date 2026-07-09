@@ -1157,8 +1157,9 @@ export const zh: Record<TranslationKey, string> = {
 
   // Settings > General
   'settings.general.appearanceTitle': '配色主题',
-  'settings.general.appearanceDescription': '在经典暖色、暗色与纯白工作区之间切换，或跟随系统。',
+  'settings.general.appearanceDescription': '在经典暖色、护眼浅绿、暗色与纯白工作区之间切换，或跟随系统。',
   'settings.general.appearance.light': '经典暖色',
+  'settings.general.appearance.eyeCare': '护眼浅绿',
   'settings.general.appearance.dark': '暗色',
   'settings.general.appearance.white': '纯白',
   'settings.general.appearance.system': '跟随系统',

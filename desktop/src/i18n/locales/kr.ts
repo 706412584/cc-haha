@@ -1155,8 +1155,9 @@ export const kr: Record<TranslationKey, string> = {
 
   // Settings > General
   'settings.general.appearanceTitle': '모양',
-  'settings.general.appearanceDescription': '따뜻한 클래식 작업 공간, 어두운 작업 공간, 순백색 작업 공간 사이를 전환합니다.',
+  'settings.general.appearanceDescription': '따뜻한 클래식, 눈이 편한 그린, 어두운 작업 공간, 순백색 작업 공간 사이를 전환합니다.',
   'settings.general.appearance.light': '따뜻한 클래식',
+  'settings.general.appearance.eyeCare': '아이 케어 그린',
   'settings.general.appearance.dark': '어둡게',
   'settings.general.appearance.white': '순백색',
   'settings.general.appearance.system': '시스템 따라가기',

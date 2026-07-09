@@ -39,7 +39,12 @@ describe('uiStore theme handling', () => {
     expect(useUIStore.getState().theme).toBe('light')
     expect(document.documentElement.style.colorScheme).toBe('light')
 
-    // light → dark
+    // light → eyeCare
+    useUIStore.getState().toggleTheme()
+    expect(useUIStore.getState().theme).toBe('eyeCare')
+    expect(document.documentElement.style.colorScheme).toBe('light')
+
+    // eyeCare → dark
     useUIStore.getState().toggleTheme()
     expect(useUIStore.getState().theme).toBe('dark')
     expect(document.documentElement.style.colorScheme).toBe('dark')
@@ -73,6 +78,14 @@ describe('uiStore settings tab persistence', () => {
     const recreated = await import('./uiStore')
 
     expect(recreated.useUIStore.getState().activeSettingsTab).toBe('general')
+  })
+
+  it('hydrates the Project Rules settings tab when it was persisted', async () => {
+    window.localStorage.setItem('cc-haha-active-settings-tab', 'projectRules')
+
+    const { useUIStore } = await import('./uiStore')
+
+    expect(useUIStore.getState().activeSettingsTab).toBe('projectRules')
   })
 
   it('ignores an invalid persisted Settings tab', async () => {

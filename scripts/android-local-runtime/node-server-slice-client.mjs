@@ -119,13 +119,21 @@ function checkWebSocket(sessionId) {
           return
         }
         upgraded = true
-        socket.write(clientTextFrame(JSON.stringify({ type: 'ping' })))
-        return
+        const remaining = chunk.subarray(end + 4)
+        if (remaining.length === 0) return
+        chunk = remaining
       }
       const text = parseServerFrame(chunk)
       if (!text) return
       const message = JSON.parse(text)
-      if (message.type === 'connected') return
+      if (message.type === 'connected') {
+        socket.write(clientTextFrame(JSON.stringify({ type: 'prewarm_session' })))
+        return
+      }
+      if (message.type === 'prewarm_ready') {
+        socket.write(clientTextFrame(JSON.stringify({ type: 'ping' })))
+        return
+      }
       if (message.type !== 'pong') {
         reject(new Error(`unexpected websocket message: ${text}`))
         socket.destroy()
@@ -145,6 +153,40 @@ console.log(`Base URL: ${baseUrl}`)
 const health = await httpJson('GET', '/health')
 if (health.status !== 'ok') throw new Error(`unexpected health: ${JSON.stringify(health)}`)
 console.log(`\n[OK] GET /health -> ${JSON.stringify(health)}`)
+
+const status = await httpJson('GET', '/api/status')
+if (status.status !== 'ok' || status.runtime !== 'android-node-slice') {
+  throw new Error(`unexpected status: ${JSON.stringify(status)}`)
+}
+console.log(`[OK] GET /api/status -> ${JSON.stringify(status)}`)
+
+const permissionMode = await httpJson('GET', '/api/permissions/mode')
+if (permissionMode.mode !== 'default') throw new Error(`unexpected permission mode: ${JSON.stringify(permissionMode)}`)
+console.log(`[OK] GET /api/permissions/mode -> ${permissionMode.mode}`)
+
+const models = await httpJson('GET', '/api/models')
+if (!Array.isArray(models.models)) throw new Error(`unexpected models: ${JSON.stringify(models)}`)
+console.log(`[OK] GET /api/models -> ${models.models.length}`)
+
+const currentModel = await httpJson('GET', '/api/models/current')
+if (!currentModel.model?.id) throw new Error(`unexpected current model: ${JSON.stringify(currentModel)}`)
+console.log(`[OK] GET /api/models/current -> ${currentModel.model.id}`)
+
+const effort = await httpJson('GET', '/api/effort')
+if (!Array.isArray(effort.available)) throw new Error(`unexpected effort: ${JSON.stringify(effort)}`)
+console.log(`[OK] GET /api/effort -> ${effort.level}`)
+
+const userSettings = await httpJson('GET', '/api/settings/user')
+if (!userSettings || typeof userSettings !== 'object') throw new Error(`unexpected user settings: ${JSON.stringify(userSettings)}`)
+console.log(`[OK] GET /api/settings/user`)
+
+const h5Access = await httpJson('GET', '/api/h5-access')
+if (typeof h5Access.settings?.enabled !== 'boolean') throw new Error(`unexpected h5 access: ${JSON.stringify(h5Access)}`)
+console.log(`[OK] GET /api/h5-access -> enabled=${h5Access.settings.enabled}`)
+
+const traceSettings = await httpJson('GET', '/api/traces/settings')
+if (typeof traceSettings.enabled !== 'boolean') throw new Error(`unexpected trace settings: ${JSON.stringify(traceSettings)}`)
+console.log(`[OK] GET /api/traces/settings -> enabled=${traceSettings.enabled}`)
 
 const before = await httpJson('GET', '/api/sessions')
 if (!Array.isArray(before.sessions) || typeof before.total !== 'number') {

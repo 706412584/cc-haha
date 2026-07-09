@@ -1155,8 +1155,9 @@ export const jp: Record<TranslationKey, string> = {
 
   // Settings > General
   'settings.general.appearanceTitle': '外観',
-  'settings.general.appearanceDescription': '暖かみのあるクラシックワークスペース、ダークワークスペース、純白ワークスペースを切り替えます。',
+  'settings.general.appearanceDescription': '暖色クラシック、目に優しいグリーン、ダーク、純白ワークスペースを切り替えます。',
   'settings.general.appearance.light': '暖色クラシック',
+  'settings.general.appearance.eyeCare': 'アイケアグリーン',
   'settings.general.appearance.dark': 'ダーク',
   'settings.general.appearance.white': '純白',
   'settings.general.appearance.system': 'システムに従う',

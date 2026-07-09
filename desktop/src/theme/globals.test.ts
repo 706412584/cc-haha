@@ -4,7 +4,7 @@ import css from './globals.css?raw'
 
 const normalizedCss = css.replace(/\r\n/g, '\n')
 
-function getThemeBlock(selector: ':root,\n[data-theme="light"]' | '[data-theme="white"]' | '[data-theme="dark"]') {
+function getThemeBlock(selector: ':root,\n[data-theme="light"]' | '[data-theme="white"]' | '[data-theme="eyeCare"]' | '[data-theme="dark"]') {
   const start = normalizedCss.indexOf(`${selector} {`)
   expect(start).toBeGreaterThanOrEqual(0)
 
@@ -33,7 +33,7 @@ function getCssBetween(startMarker: string, endMarker: string) {
 }
 
 describe('desktop theme tokens', () => {
-  const themes = [':root,\n[data-theme="light"]', '[data-theme="white"]', '[data-theme="dark"]'] as const
+  const themes = [':root,\n[data-theme="light"]', '[data-theme="white"]', '[data-theme="eyeCare"]', '[data-theme="dark"]'] as const
   const requiredTokens = [
     '--color-activity-heat-0',
     '--color-activity-heat-1',

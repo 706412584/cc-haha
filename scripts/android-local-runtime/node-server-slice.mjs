@@ -11,6 +11,22 @@ const port = Number.parseInt(readArg('--port') ?? process.env.CC_HAHA_ANDROID_NO
 const h5DistDir = resolve(readArg('--h5-dist') ?? process.env.CLAUDE_H5_DIST_DIR ?? join(process.cwd(), 'desktop', 'dist'))
 const sessions = new Map()
 
+const defaultModel = {
+  id: 'android-node-slice-placeholder',
+  name: 'Android Node slice placeholder',
+  provider: 'android-node-slice',
+}
+
+const defaultH5AccessSettings = {
+  enabled: false,
+  token: null,
+  tokenPreview: null,
+  allowedOrigins: [],
+  publicBaseUrl: null,
+  fixedPort: null,
+  disconnectGraceSeconds: null,
+}
+
 const MIME_TYPES = {
   '.css': 'text/css; charset=utf-8',
   '.gif': 'image/gif',
@@ -97,6 +113,51 @@ function sessionListItem(session) {
 async function handleApi(req, res, url) {
   if (req.method === 'GET' && url.pathname === '/health') {
     json(res, 200, { status: 'ok', timestamp: new Date().toISOString() })
+    return true
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/status') {
+    json(res, 200, {
+      status: 'ok',
+      runtime: 'android-node-slice',
+      h5DistFound: existsSync(join(h5DistDir, 'index.html')),
+      timestamp: new Date().toISOString(),
+    })
+    return true
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/permissions/mode') {
+    json(res, 200, { mode: 'default' })
+    return true
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/models') {
+    json(res, 200, { models: [defaultModel], provider: { id: 'android-node-slice', name: 'Android Node slice' } })
+    return true
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/models/current') {
+    json(res, 200, { model: defaultModel })
+    return true
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/effort') {
+    json(res, 200, { level: 'max', available: ['min', 'medium', 'max'] })
+    return true
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/settings/user') {
+    json(res, 200, {})
+    return true
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/h5-access') {
+    json(res, 200, { settings: defaultH5AccessSettings })
+    return true
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/traces/settings') {
+    json(res, 200, { enabled: false, storageDir: '' })
     return true
   }
 
@@ -262,6 +323,8 @@ server.on('upgrade', (req, socket) => {
       const message = JSON.parse(text)
       if (message.type === 'ping') {
         socket.write(textFrame(JSON.stringify({ type: 'pong' })))
+      } else if (message.type === 'prewarm_session') {
+        socket.write(textFrame(JSON.stringify({ type: 'prewarm_ready', sessionId })))
       } else {
         socket.write(textFrame(JSON.stringify({ type: 'error', message: `Unknown message type: ${message.type}` })))
       }

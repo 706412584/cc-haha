@@ -279,15 +279,47 @@ export function SessionRowMeta({
   isRunning,
   isWorktree,
   modifiedAt,
+  compact = false,
   t,
 }: {
   isRunning: boolean
   isWorktree: boolean
   modifiedAt: string
+  compact?: boolean
   t: (key: TranslationKey, params?: Record<string, string | number>) => string
 }) {
   const relativeTime = formatRelativeTime(modifiedAt, t)
   const updatedLabel = t('session.lastUpdated', { time: relativeTime })
+
+  if (compact) {
+    if (!isRunning && !isWorktree) return null
+
+    return (
+      <span
+        className="ml-auto flex h-5 flex-shrink-0 items-center justify-end gap-1 text-[10px] font-medium text-[var(--color-text-tertiary)]"
+        title={updatedLabel}
+      >
+        {isRunning ? (
+          <span
+            className="inline-flex h-4 w-4 flex-shrink-0 items-center justify-center text-[var(--color-success)]"
+            aria-label={t('sidebar.sessionRunning')}
+            title={t('sidebar.sessionRunning')}
+          >
+            <LoaderCircle className="h-3.5 w-3.5 animate-spin" strokeWidth={2.2} aria-hidden="true" />
+          </span>
+        ) : null}
+        {isWorktree ? (
+          <span
+            className="inline-flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-[5px] text-[var(--color-text-tertiary)]"
+            title={t('sidebar.worktree')}
+          >
+            <GitBranch className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+            <span className="sr-only">{t('sidebar.worktree')}</span>
+          </span>
+        ) : null}
+      </span>
+    )
+  }
 
   return (
     <span

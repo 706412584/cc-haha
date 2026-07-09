@@ -42,7 +42,13 @@ type BackgroundTaskEvent = Extract<UIMessage, { type: 'background_task' }>
 type CompactSummaryEvent = Extract<UIMessage, { type: 'compact_summary' }>
 
 type RenderItem =
-  | { kind: 'tool_group'; toolCalls: ToolCall[]; id: string }
+  | {
+      kind: 'tool_group'
+      toolCalls: ToolCall[]
+      id: string
+      resultContentWeight: number
+      resultMetricSignature: string
+    }
   | { kind: 'message'; message: UIMessage }
 
 type RenderModel = {
@@ -570,10 +576,18 @@ export function buildRenderModel(messages: UIMessage[], activeAskUserQuestionToo
 
   const flushGroup = () => {
     if (pendingToolCalls.length > 0) {
+      const resultMessages = pendingToolCalls
+        .map((toolCall) => toolResultMap.get(toolCall.toolUseId))
+        .filter((result): result is ToolResult => Boolean(result))
       items.push({
         kind: 'tool_group',
         toolCalls: [...pendingToolCalls],
         id: `group-${pendingToolCalls[0]!.id}`,
+        resultContentWeight: resultMessages.reduce(
+          (total, result) => total + getMessageContentWeight(result),
+          0,
+        ),
+        resultMetricSignature: resultMessages.map(getMessageMetricSignature).join('|'),
       })
       pendingToolCalls = []
     }
@@ -1093,7 +1107,10 @@ function getMessageContentWeight(message: UIMessage): number {
 
 function getRenderItemContentWeight(item: RenderItem): number {
   if (item.kind === 'message') return getMessageContentWeight(item.message)
-  return item.toolCalls.reduce((total, toolCall) => total + getMessageContentWeight(toolCall), 0)
+  return item.toolCalls.reduce(
+    (total, toolCall) => total + getMessageContentWeight(toolCall),
+    item.resultContentWeight,
+  )
 }
 
 export function shouldVirtualizeRenderItems(
@@ -1177,7 +1194,7 @@ function getMessageMetricSignature(message: UIMessage): string {
     case 'tool_use':
       return `${message.type}:${message.toolName}:${message.toolUseId}:${message.partialInput?.length ?? 0}:${message.isPending ? 1 : 0}`
     case 'tool_result':
-      return `${message.type}:${message.toolUseId}:${message.isError ? 1 : 0}`
+      return `${message.type}:${message.toolUseId}:${message.isError ? 1 : 0}:${getMessageContentWeight(message)}`
     case 'compact_summary':
       return `${message.type}:${message.phase ?? ''}:${message.title.length}:${message.summary?.length ?? 0}`
     case 'goal_event':
@@ -1197,7 +1214,10 @@ function getMessageMetricSignature(message: UIMessage): string {
 
 function getRenderItemMetricSignature(item: RenderItem): string {
   if (item.kind === 'message') return getMessageMetricSignature(item.message)
-  return item.toolCalls.map(getMessageMetricSignature).join('|')
+  return [
+    item.toolCalls.map(getMessageMetricSignature).join('|'),
+    item.resultMetricSignature,
+  ].filter(Boolean).join('|')
 }
 
 function findVirtualStartIndex(offsets: number[], target: number) {

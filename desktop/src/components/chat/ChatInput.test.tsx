@@ -1347,10 +1347,12 @@ describe('ChatInput file mentions', () => {
     expect(screen.getByRole('button', { name: 'Open composer tools' })).toHaveClass('h-11', 'w-11')
     expect(screen.getByRole('button', { name: 'Run' })).toHaveClass('h-11', 'w-11')
     expect(screen.queryByText('Run')).not.toBeInTheDocument()
-    expect(screen.getByTestId('chat-input-shell')).toHaveClass('px-3')
+    expect(screen.getByTestId('chat-input-shell')).toHaveClass('mobile-composer-shell', 'px-3')
     expect(screen.getByTestId('chat-input-shell').className).toContain('safe-area-inset-bottom')
-    expect(screen.getByTestId('chat-input-panel')).toHaveClass('rounded-2xl')
+    expect(screen.getByTestId('chat-input-panel')).toHaveClass('mobile-composer-panel', 'rounded-2xl')
     expect(screen.getByTestId('chat-input-panel')).not.toHaveClass('rounded-b-none')
+    expect(screen.getByRole('textbox')).toHaveClass('mobile-composer-textarea', 'min-h-[44px]')
+    expect(screen.getByTestId('chat-input-toolbar')).toHaveClass('mobile-composer-toolbar')
 
     fireEvent.change(screen.getByRole('textbox'), {
       target: { value: '@cond', selectionStart: 5 },
@@ -1375,8 +1377,12 @@ describe('ChatInput file mentions', () => {
 
     expect(toolbar).not.toHaveClass('absolute')
     expect(toolbar).toHaveClass('mt-2')
+    expect(toolbar).not.toHaveClass('mobile-composer-toolbar')
+    expect(input).not.toHaveClass('mobile-composer-textarea')
     expect(input).not.toHaveClass('pb-12')
     expect(input).not.toHaveClass('pb-14')
+    expect(screen.getByTestId('chat-input-shell')).not.toHaveClass('mobile-composer-shell')
+    expect(screen.getByTestId('chat-input-panel')).not.toHaveClass('mobile-composer-panel')
   })
 
   it('uses Ctrl or Command Enter to send when that composer preference is selected', async () => {
