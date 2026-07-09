@@ -1433,6 +1433,7 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
   const ignoreProgrammaticScrollTopRef = useRef<number | null>(null)
   const lastSessionIdRef = useRef<string | null | undefined>(resolvedSessionId)
   const lastTailMessageIdBySessionRef = useRef(new Map<string, string | null>())
+  const lastAutoScrollMessageCountBySessionRef = useRef(new Map<string, number>())
   const t = useTranslation()
   const [turnChangeCards, setTurnChangeCards] = useState<TurnChangeCardModel[]>([])
   const [turnChangeLoadError, setTurnChangeLoadError] = useState<string | null>(null)
@@ -1703,7 +1704,13 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
   }, [resolvedSessionId, scrollToBottom, tailMessageId, tailMessageType])
 
   useEffect(() => {
-    if (!isSessionRunning) return
+    if (!resolvedSessionId) return
+
+    const previousMessageCount = lastAutoScrollMessageCountBySessionRef.current.get(resolvedSessionId)
+    lastAutoScrollMessageCountBySessionRef.current.set(resolvedSessionId, messages.length)
+    const messageCountChanged = previousMessageCount === undefined || previousMessageCount !== messages.length
+    if (!isSessionRunning && !messageCountChanged) return
+
     if (!shouldAutoScrollRef.current) {
       setShowJumpToLatest(true)
       return

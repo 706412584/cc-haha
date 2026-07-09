@@ -3450,6 +3450,56 @@ describe('MessageList nested tool calls', () => {
     expect(scroller.scrollTop).toBe(800)
   })
 
+  it('scrolls an idle session to the latest message after its history loads', async () => {
+    useTabStore.setState({
+      activeTabId: 'session-loading',
+      tabs: [
+        { sessionId: 'session-loading', title: 'Loading', type: 'session' as const, status: 'idle' },
+      ],
+    })
+    useChatStore.setState({
+      sessions: {
+        'session-loading': makeSessionState({ messages: [] }),
+      },
+    })
+
+    const { container } = render(<MessageList />)
+    const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement
+    let scrollTop = 0
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 2400 })
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
+    Object.defineProperty(scroller, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value) => {
+        scrollTop = value >= 1_000_000_000 ? 2000 : value
+      },
+    })
+
+    await waitForProgrammaticScrollReset()
+
+    act(() => {
+      useChatStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          'session-loading': makeSessionState({
+            messages: Array.from({ length: 220 }, (_, index) => ({
+              id: `loaded-${index}`,
+              type: 'assistant_text',
+              content: `loaded transcript line ${index}`,
+              timestamp: index,
+            })),
+          }),
+        },
+      }))
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('loaded transcript line 219')).toBeTruthy()
+    })
+    expect(scrollTop).toBe(2000)
+  })
+
   it('shows a latest button when reading history and resumes following after clicking it', async () => {
     const scrollIntoView = vi.fn()
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
