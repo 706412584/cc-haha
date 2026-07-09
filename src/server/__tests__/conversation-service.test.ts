@@ -6,6 +6,7 @@ import {
   buildConversationCliSpawnOptions,
   ConversationService,
   DESKTOP_CLI_GRACEFUL_SHUTDOWN_TIMEOUT_MS,
+  killConversationProcessTree,
 } from '../services/conversationService.js'
 import { ProviderService } from '../services/providerService.js'
 import { updateTraceCaptureSettings } from '../services/traceCaptureService.js'
@@ -994,6 +995,60 @@ describe('ConversationService', () => {
     expect(killed.sort()).toEqual(['session-a', 'session-b'])
     expect(drained.sort()).toEqual(['session-a', 'session-b'])
     expect(service.getActiveSessions()).toEqual([])
+  })
+
+  test('kills the full CLI process tree on Windows', () => {
+    const calls: Array<{ command: string; args: string[] }> = []
+    let directKillCalled = false
+
+    killConversationProcessTree(
+      {
+        pid: 1234,
+        kill: () => {
+          directKillCalled = true
+        },
+      },
+      'SIGTERM',
+      false,
+      {
+        platform: 'win32',
+        spawnAsync: ((command: string, args: string[]) => {
+          calls.push({ command, args })
+          return {} as never
+        }) as never,
+      },
+    )
+
+    expect(directKillCalled).toBe(false)
+    expect(calls).toEqual([
+      { command: 'taskkill', args: ['/F', '/T', '/PID', '1234'] },
+    ])
+  })
+
+  test('uses synchronous tree kill when waiting for Windows CLI shutdown', () => {
+    const calls: Array<{ command: string; args: string[] }> = []
+
+    killConversationProcessTree(
+      {
+        pid: 5678,
+        kill: () => {
+          throw new Error('should not directly kill on Windows')
+        },
+      },
+      'SIGTERM',
+      true,
+      {
+        platform: 'win32',
+        spawnSyncFn: ((command: string, args: string[]) => {
+          calls.push({ command, args })
+          return {} as never
+        }) as never,
+      },
+    )
+
+    expect(calls).toEqual([
+      { command: 'taskkill', args: ['/F', '/T', '/PID', '5678'] },
+    ])
   })
 
   test('default CLI shutdown wait covers the CLI graceful cleanup budget', () => {

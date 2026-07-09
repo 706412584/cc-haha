@@ -388,6 +388,39 @@ describe('MessageList nested tool calls', () => {
     })
   })
 
+  it('includes inline tool results in tool group virtualization metrics', () => {
+    const resultContent = 'server output line\n'.repeat(500)
+    const toolResult: Extract<UIMessage, { type: 'tool_result' }> = {
+      id: 'tool-bash-result',
+      type: 'tool_result',
+      toolUseId: 'bash-1',
+      content: resultContent,
+      isError: false,
+      timestamp: 2,
+    }
+    const messages: UIMessage[] = [
+      {
+        id: 'tool-bash',
+        type: 'tool_use',
+        toolName: 'Bash',
+        toolUseId: 'bash-1',
+        input: { command: 'npm run dev' },
+        timestamp: 1,
+      },
+      toolResult,
+    ]
+
+    const { renderItems } = buildRenderModel(messages, null)
+
+    expect(renderItems).toHaveLength(1)
+    expect(renderItems[0]).toMatchObject({
+      kind: 'tool_group',
+      resultContentWeight: resultContent.length,
+    })
+    expect((renderItems[0] as any).resultMetricSignature).toContain('tool_result:bash-1:0')
+    expect((renderItems[0] as any).resultMetricSignature).toContain(String(resultContent.length))
+  })
+
   it('keeps resolved AskUserQuestion history visible when filtering active duplicates', () => {
     const messages: UIMessage[] = [
       {
@@ -786,6 +819,100 @@ describe('MessageList nested tool calls', () => {
 
     expect(screen.queryByTestId('background-task-event-card')).toBeNull()
     expect(screen.queryByText('dreaming')).toBeNull()
+  })
+
+  it('keeps newly appended messages mounted while auto-scrolling a virtualized transcript', async () => {
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: Array.from({ length: 220 }, (_, index) => ({
+            id: `assistant-${index}`,
+            type: 'assistant_text',
+            content: `assistant transcript line ${index}`,
+            timestamp: index,
+          })),
+        }),
+      },
+    })
+
+    const { container } = render(<MessageList />)
+    const scrollArea = container.querySelector('.chat-scroll-area') as HTMLElement
+    Object.defineProperty(scrollArea, 'clientHeight', { configurable: true, value: 500 })
+    Object.defineProperty(scrollArea, 'scrollHeight', { configurable: true, value: 220 * 112 })
+    await waitForProgrammaticScrollReset()
+
+    act(() => {
+      useChatStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ACTIVE_TAB]: {
+            ...state.sessions[ACTIVE_TAB]!,
+            messages: [
+              ...state.sessions[ACTIVE_TAB]!.messages,
+              {
+                id: 'assistant-new-tail',
+                type: 'assistant_text',
+                content: 'new assistant tail should stay visible',
+                timestamp: 221,
+              },
+            ],
+          },
+        },
+      }))
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('new assistant tail should stay visible')).toBeTruthy()
+    })
+  })
+
+  it('keeps newly appended tool calls mounted while auto-scrolling a virtualized transcript', async () => {
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: Array.from({ length: 220 }, (_, index) => ({
+            id: `assistant-${index}`,
+            type: 'assistant_text',
+            content: `assistant transcript line ${index}`,
+            timestamp: index,
+          })),
+        }),
+      },
+    })
+
+    const { container } = render(<MessageList />)
+    const scrollArea = container.querySelector('.chat-scroll-area') as HTMLElement
+    Object.defineProperty(scrollArea, 'clientHeight', { configurable: true, value: 500 })
+    Object.defineProperty(scrollArea, 'scrollHeight', { configurable: true, value: 220 * 112 })
+    await waitForProgrammaticScrollReset()
+
+    act(() => {
+      useChatStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ACTIVE_TAB]: {
+            ...state.sessions[ACTIVE_TAB]!,
+            chatState: 'tool_executing',
+            messages: [
+              ...state.sessions[ACTIVE_TAB]!.messages,
+              {
+                id: 'tool-bash-tail',
+                type: 'tool_use',
+                toolName: 'Bash',
+                toolUseId: 'bash-tail',
+                input: { command: 'npm run dev' },
+                timestamp: 221,
+                isPending: true,
+              },
+            ],
+          },
+        },
+      }))
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('Bash')).toBeTruthy()
+    })
   })
 
   it('renders the historical window when scrolling away from latest', async () => {
