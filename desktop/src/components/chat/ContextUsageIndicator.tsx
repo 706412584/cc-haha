@@ -27,6 +27,8 @@ const AUTO_REFRESH_MIN_INTERVAL_MS = 10_000
 // the forced refresh can time out — retry once instead of keeping the stale
 // pre-compact percentage on screen.
 const FORCED_REFRESH_RETRY_MS = 5_000
+const FORCED_REFRESH_MAX_ATTEMPTS = 3
+const IDLE_RECOVERY_REFRESH_MS = 3_000
 
 function formatNumber(value: number | undefined) {
   return new Intl.NumberFormat().format(value ?? 0)
@@ -92,6 +94,8 @@ export function ContextUsageIndicator({
   const inFlightRequestRef = useRef<Promise<boolean> | null>(null)
   const inFlightIdentityRef = useRef<string | null>(null)
   const lastAutoRefreshAtRef = useRef(0)
+  const lastRefreshNonceRef = useRef(refreshNonce)
+  const lastNonIdleChatStateRef = useRef<ChatState>(chatState)
 
   const refresh = useCallback(async (mode: 'auto' | 'manual' | 'force' = 'manual'): Promise<boolean> => {
     if (!sessionId || draft) {
@@ -164,19 +168,26 @@ export function ContextUsageIndicator({
   // After a compaction the context shrinks server-side but nothing else
   // re-reads it promptly (auto refreshes are throttled and stop once the
   // session goes idle), leaving the pre-compact percentage on screen (#743).
-  // Force a fresh request, and retry once if the CLI was still busy.
-  const lastRefreshNonceRef = useRef(refreshNonce)
+  // Force a fresh request, and retry a bounded number of times if the CLI is
+  // still busy or the inspection request times out.
   useEffect(() => {
     if (refreshNonce === lastRefreshNonceRef.current) return
     lastRefreshNonceRef.current = refreshNonce
     let cancelled = false
     let retryTimer: ReturnType<typeof setTimeout> | null = null
-    void refresh('force').then((ok) => {
-      if (ok || cancelled) return
-      retryTimer = setTimeout(() => {
-        void refresh('force')
-      }, FORCED_REFRESH_RETRY_MS)
-    })
+    let attempts = 0
+
+    const attemptRefresh = () => {
+      attempts += 1
+      void refresh('force').then((ok) => {
+        if (ok || cancelled || attempts >= FORCED_REFRESH_MAX_ATTEMPTS) return
+        retryTimer = setTimeout(() => {
+          attemptRefresh()
+        }, FORCED_REFRESH_RETRY_MS * attempts)
+      })
+    }
+
+    attemptRefresh()
     return () => {
       cancelled = true
       if (retryTimer) clearTimeout(retryTimer)
@@ -210,7 +221,19 @@ export function ContextUsageIndicator({
   }, [refresh])
 
   useEffect(() => {
-    if (chatState === 'idle') return
+    const previousState = lastNonIdleChatStateRef.current
+    lastNonIdleChatStateRef.current = chatState
+
+    if (chatState === 'idle') {
+      if (previousState !== 'idle') {
+        const timer = setTimeout(() => {
+          void refresh('force')
+        }, IDLE_RECOVERY_REFRESH_MS)
+        return () => clearTimeout(timer)
+      }
+      return
+    }
+
     const timer = setInterval(() => {
       void refresh('auto')
     }, ACTIVE_REFRESH_MS)

@@ -1496,6 +1496,42 @@ describe('chatStore history mapping', () => {
     expect(notifyDesktopMock).not.toHaveBeenCalled()
   })
 
+  it('appends replayed assistant suffix text even when it is contained in the hydrated tail', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          messages: [
+            {
+              id: 'assistant-hydrated',
+              type: 'assistant_text',
+              content: 'Implemented the billing report and verified export behavior.',
+              transcriptMessageId: 'assistant-1',
+              timestamp: 1,
+            },
+          ],
+          chatState: 'streaming',
+          streamingText: 'verified export behavior.',
+        }),
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'status',
+      state: 'idle',
+    })
+
+    const messages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages ?? []
+    expect(messages.filter((message) => message.type === 'assistant_text')).toMatchObject([
+      {
+        transcriptMessageId: 'assistant-1',
+        content: 'Implemented the billing report and verified export behavior.',
+      },
+      {
+        content: 'verified export behavior.',
+      },
+    ])
+  })
+
   it('collapses duplicate assistant replies after transcript id hydration', async () => {
     vi.mocked(sessionsApi.getMessages).mockResolvedValueOnce({
       messages: [

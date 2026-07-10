@@ -619,12 +619,13 @@ function appendAssistantTextMessage(
 
   const last = messages[messages.length - 1]
   // Wake/reconnect replay can resend persisted assistant text without a
-  // transcript id. Ignore chunks that are already present in the hydrated tail.
+  // transcript id. Only drop exact duplicates from the hydrated tail — a
+  // contained substring may still be a legitimate new suffix chunk.
   if (
     last?.type === 'assistant_text' &&
     last.transcriptMessageId &&
     !transcriptMessageId &&
-    last.content.trim().includes(trimmedContent)
+    last.content.trim() === trimmedContent
   ) {
     return messages
   }
