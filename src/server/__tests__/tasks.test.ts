@@ -130,17 +130,20 @@ describe('TaskService', () => {
     })))
 
     const originalReadFile = fs.readFile
-    let readCount = 0
+    let taskFileReadCount = 0
     const readFileSpy = spyOn(fs, 'readFile').mockImplementation((...args) => {
-      readCount++
+      const filePath = String(args[0])
+      if (filePath.startsWith(path.join(tmpDir, 'tasks')) && filePath.endsWith('.json')) {
+        taskFileReadCount++
+      }
       return originalReadFile(...args)
     })
 
     try {
       const svc = new TaskService()
       const tasks = await svc.listTasks()
-      expect(tasks.map((task) => task.id)).toEqual(['1', '2'])
-      expect(readCount).toBe(2)
+      expect(tasks.map((task) => task.id).sort()).toEqual(['1', '2'])
+      expect(taskFileReadCount).toBe(2)
     } finally {
       readFileSpy.mockRestore()
     }

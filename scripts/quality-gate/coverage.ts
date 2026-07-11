@@ -589,6 +589,24 @@ function collectChangedLines(rootDir: string, baseRef?: string) {
   return new Map<string, Set<number>>()
 }
 
+// A PR that pulls in an upstream merge commit (e.g. syncing the fork with
+// upstream) carries thousands of third-party lines in its base...HEAD diff that
+// it neither authored nor can meaningfully cover. The changed-lines gate is
+// meant to police a PR's *own* new code, so skip it when the PR branch contains
+// a merge commit. GitHub Actions often checks out a synthetic pull-request merge
+// commit whose first parent is the base ref; inspect HEAD^2 (the PR head) in
+// that case so the synthetic merge itself does not trigger the exemption.
+export function rangeContainsMergeCommit(rootDir: string, baseRef?: string): boolean {
+  const base = baseRef?.trim() || 'origin/main'
+  const baseSha = gitOutput(rootDir, ['rev-parse', '--verify', base])?.trim()
+  if (!baseSha) return false
+  const firstParent = gitOutput(rootDir, ['rev-parse', '--verify', 'HEAD^1'])?.trim()
+  const secondParent = gitOutput(rootDir, ['rev-parse', '--verify', 'HEAD^2'])?.trim()
+  const rangeHead = firstParent === baseSha && secondParent ? secondParent : 'HEAD'
+  const merges = gitOutput(rootDir, ['rev-list', '--merges', `${base}..${rangeHead}`])
+  return Boolean(merges?.trim())
+}
+
 export function evaluateChangedLineCoverage(
   changedLines: Map<string, Set<number>>,
   coverageByFile: Map<string, FileLineCoverage>,
