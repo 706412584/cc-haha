@@ -8,6 +8,7 @@ import {
   evaluateThresholds,
   hasUsableCoverageSummary,
   hasUsableLcov,
+  parseBunJunitTestFileCount,
   parseBunTestFileCount,
   parseChangedLinesFromDiff,
   parseLcov,
@@ -105,6 +106,20 @@ describe('coverage gate helpers', () => {
     expect(parseBunTestFileCount('Ran 1605 tests across 141 files. [187.20s]')).toBe(141)
     expect(parseBunTestFileCount('Ran 1 test across 1 file. [10.00ms]')).toBe(1)
     expect(parseBunTestFileCount('process terminated before summary')).toBeNull()
+  })
+
+  test('counts top-level test files from Bun JUnit output', () => {
+    expect(parseBunJunitTestFileCount([
+      '<testsuites name="bun test" tests="3">',
+      '  <testsuite name="src/a.test.ts" file="src/a.test.ts" tests="2">',
+      '    <testsuite name="nested describe" file="src/a.test.ts" tests="2">',
+      '    </testsuite>',
+      '  </testsuite>',
+      '  <testsuite name="src/b.test.ts" file="src/b.test.ts" tests="1">',
+      '  </testsuite>',
+      '</testsuites>',
+    ].join('\n'))).toBe(2)
+    expect(parseBunJunitTestFileCount('')).toBe(0)
   })
 
   test('rejects empty aggregate coverage summaries', () => {

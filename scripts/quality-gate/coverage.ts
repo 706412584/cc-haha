@@ -346,6 +346,10 @@ export function parseBunTestFileCount(output: string) {
   return match ? Number(match[1]) : null
 }
 
+export function parseBunJunitTestFileCount(output: string) {
+  return output.match(/^  <testsuite name="[^"]+" file="[^"]+"/gm)?.length ?? 0
+}
+
 function summarizeLcovRecords(records: LcovRecord[]): CoverageSummary {
   let linesTotal = 0
   let linesCovered = 0
@@ -824,7 +828,8 @@ export async function runCoverageGate(options: {
   const coverageByFile = new Map<string, FileLineCoverage>()
 
   mkdirSync(join(outputDir, 'root-server'), { recursive: true })
-  const rootCommand = ['bun', '--no-env-file', 'test', '--timeout=20000', '--coverage', '--coverage-reporter=lcov', '--coverage-reporter=text', '--coverage-dir', join(outputDir, 'root-server'), ...serverFiles.map(rootBunTestFilter)]
+  const rootJunitPath = join(outputDir, 'root-server', 'junit.xml')
+  const rootCommand = ['bun', '--no-env-file', 'test', '--timeout=20000', '--coverage', '--coverage-reporter=lcov', '--coverage-reporter=text', '--coverage-dir', join(outputDir, 'root-server'), '--reporter=junit', `--reporter-outfile=${rootJunitPath}`, ...serverFiles.map(rootBunTestFilter)]
   const rootLogPath = join(outputDir, 'root-server', 'coverage.log')
   const rootResult = await runCommand(rootCommand, rootDir, rootLogPath)
   const rootLcovPath = join(outputDir, 'root-server', 'lcov.info')
@@ -832,7 +837,9 @@ export async function runCoverageGate(options: {
     ? readFileSync(rootLcovPath, 'utf8')
     : ''
   const rootRecords = parseLcovRecords(rootLcov, { rootDir }).filter(isUsableLcovRecord)
-  const rootTestFileCount = parseBunTestFileCount(rootResult.output)
+  const rootTestFileCount = existsSync(rootJunitPath)
+    ? parseBunJunitTestFileCount(readFileSync(rootJunitPath, 'utf8'))
+    : parseBunTestFileCount(rootResult.output)
   const rootTestDiscoveryComplete = rootTestFileCount === serverFiles.length
   const rootCoverageAvailable = hasUsableLcov(rootLcov, { rootDir }) && rootTestDiscoveryComplete
 
