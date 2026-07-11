@@ -2167,6 +2167,35 @@ describe('Settings > Providers tab', () => {
     }))
   })
 
+  it('shows only the API key link for a provider preset with promotional copy', () => {
+    providerStoreState.presets = [
+      {
+        id: 'minimax',
+        name: 'MiniMax',
+        baseUrl: 'https://api.minimaxi.com/anthropic',
+        apiFormat: 'anthropic',
+        defaultModels: {
+          main: 'MiniMax-M2.7',
+          haiku: '',
+          sonnet: '',
+          opus: '',
+        },
+        needsApiKey: true,
+        websiteUrl: 'https://www.minimaxi.com',
+        apiKeyUrl: 'https://platform.minimaxi.com/user-center/basic-information/interface-key',
+        promoText: 'Sign up with this promotional offer',
+      },
+    ]
+
+    render(<Settings />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Add Provider/i }))
+    const dialog = screen.getByRole('dialog')
+
+    expect(within(dialog).getByRole('button', { name: /Get API Key/ })).toBeInTheDocument()
+    expect(within(dialog).queryByText('Sign up with this promotional offer')).not.toBeInTheDocument()
+  })
+
   it('hides the API key by default and reveals it from the eye button', () => {
     providerStoreState.presets = [
       {

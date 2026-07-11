@@ -8,7 +8,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { copyFile, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -16,9 +16,9 @@ import { dirname, join } from 'node:path'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const SERVER_PATH = join(__dirname, 'media-gen-server.mjs')
 
-function callServer(messages, env = {}) {
+function callServer(messages, env = {}, serverPath = SERVER_PATH) {
   return new Promise((resolve, reject) => {
-    const child = spawn('node', [SERVER_PATH], {
+    const child = spawn(process.execPath, [serverPath], {
       env: { ...process.env, ...env },
       stdio: ['pipe', 'pipe', 'pipe'],
     })
@@ -96,6 +96,23 @@ describe('media-gen MCP server', () => {
     assert.equal(results[0].id, 1)
     assert.equal(results[0].result.protocolVersion, '2024-11-05')
     assert.equal(results[0].result.serverInfo.name, 'media-gen')
+  })
+
+  it('runs from a standalone directory without package dependencies', async () => {
+    const standaloneDir = await mkdtemp(join(tmpdir(), 'media-gen-standalone-'))
+    const standaloneServer = join(standaloneDir, 'media-gen-server.mjs')
+    try {
+      await copyFile(SERVER_PATH, standaloneServer)
+      const results = await callServer([INIT, NOTIFY, listTools()], {}, standaloneServer)
+
+      assert.equal(results[0].result.serverInfo.name, 'media-gen')
+      assert.deepEqual(results[1].result.tools.map(tool => tool.name), [
+        'generate_image', 'edit_image', 'generate_video', 'edit_video',
+        'extend_video', 'list_providers', 'list_models',
+      ])
+    } finally {
+      await rm(standaloneDir, { recursive: true, force: true })
+    }
   })
 
   it('returns 7 tools on tools/list', async () => {
