@@ -21,11 +21,11 @@ async function setup() {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'provider-test-'))
   originalConfigDir = process.env.CLAUDE_CONFIG_DIR
   process.env.CLAUDE_CONFIG_DIR = tmpDir
-  clearTraceCaptureStateForTests()
+  await clearTraceCaptureStateForTests()
 }
 
 async function teardown() {
-  clearTraceCaptureStateForTests()
+  await clearTraceCaptureStateForTests()
   if (originalConfigDir !== undefined) {
     process.env.CLAUDE_CONFIG_DIR = originalConfigDir
   } else {
