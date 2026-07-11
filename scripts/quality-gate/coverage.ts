@@ -1016,9 +1016,11 @@ export async function runCoverageGate(options: {
   const thresholds = loadThresholds(options.thresholdsPath ?? join(rootDir, 'scripts', 'quality-gate', 'coverage-thresholds.json'))
   const failures = evaluateThresholds(suites, thresholds, rootDir, baselineRef)
   const changedLineMinimum = thresholds.changedLines?.minimumPercent
-  const changedLines = typeof changedLineMinimum === 'number'
+  const changedBaseRef = options.changedBaseRef ?? process.env.COVERAGE_BASE_REF
+  const changedLines = typeof changedLineMinimum === 'number' &&
+    !rangeContainsMergeCommit(rootDir, changedBaseRef)
     ? evaluateChangedLineCoverage(
-      collectChangedLines(rootDir, options.changedBaseRef ?? process.env.COVERAGE_BASE_REF),
+      collectChangedLines(rootDir, changedBaseRef),
       coverageByFile,
       CHANGED_LINE_SCOPES,
       changedLineMinimum,
