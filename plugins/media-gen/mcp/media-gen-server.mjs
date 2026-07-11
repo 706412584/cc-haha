@@ -251,7 +251,7 @@ function parseRuntimeProviders() {
     config = JSON.parse(process.env.MEDIA_GEN_PROVIDERS_JSON)
     secrets = JSON.parse(process.env.MEDIA_GEN_PROVIDER_SECRETS_JSON || '{}')
   } catch { return [] }
-  if (!config || config.schemaVersion !== 2 || !Array.isArray(config.providers) ||
+  if (!config || ![2, 3].includes(config.schemaVersion) || !Array.isArray(config.providers) ||
       !secrets || typeof secrets !== 'object' || Array.isArray(secrets)) return []
   const ids = new Set()
   try {

@@ -67,10 +67,10 @@ function listTools(id = 2) {
 
 const CONFIG_ENV = {
   MEDIA_GEN_PROVIDERS_JSON: JSON.stringify({
-    schemaVersion: 2,
+    schemaVersion: 3,
     providers: [
       { id: 'video-provider', name: 'Video', enabled: true, apiFormat: 'openai_compatible', baseUrl: 'http://localhost:9/v1', models: { videoGeneration: 'video-default' } },
-      { id: 'image-provider', name: 'Image', enabled: true, apiFormat: 'openai_compatible', baseUrl: 'http://192.168.1.20:9/v1', models: { imageGeneration: 'image-default', imageEditing: 'edit-default' } },
+      { id: 'image-provider', name: 'Image', enabled: true, apiFormat: 'openai_compatible', baseUrl: 'http://127.0.0.1:1/v1', models: { imageGeneration: 'image-default', imageEditing: 'edit-default' } },
       { id: 'disabled', name: 'Disabled', enabled: false, apiFormat: 'openai_compatible', baseUrl: 'https://example.com/v1', models: { imageGeneration: 'disabled-model' } },
     ],
   }),
@@ -143,6 +143,7 @@ describe('media-gen MCP server', () => {
       const text = res.result.content[0].text
       assert.ok(text.includes('provider_id: video-provider'))
       assert.ok(text.includes('http://localhost:9/v1'))
+      assert.ok(text.includes('http://127.0.0.1:1/v1'))
       assert.ok(text.includes('imageGeneration'))
     })
 
