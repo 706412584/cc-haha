@@ -1,7 +1,7 @@
 /**
- * Tests for image-gen MCP server
+ * Tests for media-gen MCP server
  *
- * Run with: node --test plugins/image-gen/mcp/image-gen-server.test.mjs
+ * Run with: node --test plugins/media-gen/mcp/media-gen-server.test.mjs
  */
 
 import { describe, it } from 'node:test'
@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const SERVER_PATH = join(__dirname, 'image-gen-server.mjs')
+const SERVER_PATH = join(__dirname, 'media-gen-server.mjs')
 
 function callServer(messages, env = {}) {
   return new Promise((resolve, reject) => {
@@ -63,10 +63,10 @@ function listTools(id = 2) {
 }
 
 const P1_ENV = {
-  IMAGE_GEN_P1_NAME: 'TestProvider',
-  IMAGE_GEN_P1_BASE_URL: 'https://example.com/v1',
-  IMAGE_GEN_P1_API_KEY: 'sk-test',
-  IMAGE_GEN_P1_MODEL: 'test-model',
+  MEDIA_GEN_P1_NAME: 'TestProvider',
+  MEDIA_GEN_P1_BASE_URL: 'https://example.com/v1',
+  MEDIA_GEN_P1_API_KEY: 'sk-test',
+  MEDIA_GEN_P1_MODEL: 'test-model',
 }
 
 // Helper: send messages and return only the last response (the test target)
@@ -75,18 +75,28 @@ async function callAndGetResult(messages, env) {
   return results[results.length - 1]
 }
 
-describe('image-gen MCP server', () => {
+describe('media-gen MCP server', () => {
   it('responds to initialize', async () => {
     const results = await callServer([INIT])
     assert.equal(results[0].id, 1)
     assert.equal(results[0].result.protocolVersion, '2024-11-05')
-    assert.equal(results[0].result.serverInfo.name, 'image-gen')
+    assert.equal(results[0].result.serverInfo.name, 'media-gen')
   })
 
-  it('returns 4 tools on tools/list', async () => {
+  it('returns 7 tools on tools/list', async () => {
     const res = await callAndGetResult([INIT, NOTIFY, listTools()])
     const toolNames = res.result.tools.map(t => t.name)
-    assert.deepEqual(toolNames, ['generate_image', 'edit_image', 'list_providers', 'list_models'])
+    assert.deepEqual(toolNames, ['generate_image', 'edit_image', 'generate_video', 'edit_video', 'extend_video', 'list_providers', 'list_models'])
+  })
+
+  it('exposes provider and model selection for image tools', async () => {
+    const res = await callAndGetResult([INIT, NOTIFY, listTools()])
+    for (const name of ['generate_image', 'edit_image']) {
+      const imageTool = res.result.tools.find(t => t.name === name)
+      assert.equal(imageTool.inputSchema.properties.provider_index.type, 'integer')
+      assert.equal(imageTool.inputSchema.properties.provider_index.minimum, 0)
+      assert.equal(imageTool.inputSchema.properties.model.type, 'string')
+    }
   })
 
   describe('list_providers', () => {
@@ -106,10 +116,10 @@ describe('image-gen MCP server', () => {
 
     it('shows multiple providers in priority order', async () => {
       const env = {
-        IMAGE_GEN_P1_NAME: 'P1', IMAGE_GEN_P1_BASE_URL: 'https://p1.example.com/v1',
-        IMAGE_GEN_P1_API_KEY: 'sk-1', IMAGE_GEN_P1_MODEL: 'model-1',
-        IMAGE_GEN_P2_NAME: 'P2', IMAGE_GEN_P2_BASE_URL: 'https://p2.example.com/v1',
-        IMAGE_GEN_P2_API_KEY: 'sk-2', IMAGE_GEN_P2_MODEL: 'model-2',
+        MEDIA_GEN_P1_NAME: 'P1', MEDIA_GEN_P1_BASE_URL: 'https://p1.example.com/v1',
+        MEDIA_GEN_P1_API_KEY: 'sk-1', MEDIA_GEN_P1_MODEL: 'model-1',
+        MEDIA_GEN_P2_NAME: 'P2', MEDIA_GEN_P2_BASE_URL: 'https://p2.example.com/v1',
+        MEDIA_GEN_P2_API_KEY: 'sk-2', MEDIA_GEN_P2_MODEL: 'model-2',
       }
       const res = await callAndGetResult([INIT, NOTIFY, tool('list_providers', {})], env)
       const text = res.result.content[0].text
@@ -119,6 +129,25 @@ describe('image-gen MCP server', () => {
   })
 
   describe('generate_image', () => {
+    it('exposes Grok image aspect ratio and resolution parameters', async () => {
+      const res = await callAndGetResult([INIT, NOTIFY, listTools()])
+      const imageTool = res.result.tools.find(t => t.name === 'generate_image')
+      assert.ok(imageTool.inputSchema.properties.aspect_ratio.enum.includes('16:9'))
+      assert.deepEqual(imageTool.inputSchema.properties.resolution.enum, ['1k', '2k'])
+    })
+
+    it('rejects model override without a provider index', async () => {
+      const res = await callAndGetResult([INIT, NOTIFY, tool('generate_image', { prompt: 'cat', model: 'other-model' })], P1_ENV)
+      assert.equal(res.result.isError, true)
+      assert.ok(res.result.content[0].text.includes('provider_index'))
+    })
+
+    it('rejects an invalid provider index before making a request', async () => {
+      const res = await callAndGetResult([INIT, NOTIFY, tool('generate_image', { prompt: 'cat', provider_index: 9 })], P1_ENV)
+      assert.equal(res.result.isError, true)
+      assert.ok(res.result.content[0].text.includes('Invalid provider_index'))
+    })
+
     it('rejects empty prompt', async () => {
       const res = await callAndGetResult([INIT, NOTIFY, tool('generate_image', { prompt: '' })], P1_ENV)
       assert.equal(res.result.isError, true)
@@ -142,13 +171,71 @@ describe('image-gen MCP server', () => {
     })
   })
 
+  describe('generate_video', () => {
+    it('requires an explicit provider index', async () => {
+      const res = await callAndGetResult([INIT, NOTIFY, tool('generate_video', { prompt: 'cat' })], P1_ENV)
+      assert.equal(res.result.isError, true)
+      assert.ok(res.result.content[0].text.includes('provider_index'))
+    })
+
+    it('rejects empty prompt', async () => {
+      const res = await callAndGetResult([INIT, NOTIFY, tool('generate_video', { prompt: '', provider_index: 0 })], P1_ENV)
+      assert.equal(res.result.isError, true)
+      assert.ok(res.result.content[0].text.includes('prompt'))
+    })
+
+    it('exposes separate Grok and Agnes image-to-video parameters', async () => {
+      const res = await callAndGetResult([INIT, NOTIFY, listTools()])
+      const videoTool = res.result.tools.find(t => t.name === 'generate_video')
+      assert.equal(videoTool.inputSchema.properties.image_url.type, 'string')
+      assert.equal(videoTool.inputSchema.properties.image.type, 'string')
+    })
+
+    it('declares Grok duration bounds in the tool schema', async () => {
+      const res = await callAndGetResult([INIT, NOTIFY, listTools()])
+      const videoTool = res.result.tools.find(t => t.name === 'generate_video')
+      assert.equal(videoTool.inputSchema.properties.duration.minimum, 1)
+      assert.equal(videoTool.inputSchema.properties.duration.maximum, 15)
+    })
+  })
+
+  describe('edit_video', () => {
+    it('requires prompt, video_url, and provider_index', async () => {
+      const res = await callAndGetResult([INIT, NOTIFY, tool('edit_video', {})], P1_ENV)
+      assert.equal(res.result.isError, true)
+      assert.ok(res.result.content[0].text.includes('prompt'))
+    })
+
+    it('exposes provider and model selection', async () => {
+      const res = await callAndGetResult([INIT, NOTIFY, listTools()])
+      const editTool = res.result.tools.find(t => t.name === 'edit_video')
+      assert.equal(editTool.inputSchema.properties.provider_index.type, 'integer')
+      assert.equal(editTool.inputSchema.properties.model.type, 'string')
+    })
+  })
+
+  describe('extend_video', () => {
+    it('requires prompt, video_url, and provider_index', async () => {
+      const res = await callAndGetResult([INIT, NOTIFY, tool('extend_video', {})], P1_ENV)
+      assert.equal(res.result.isError, true)
+      assert.ok(res.result.content[0].text.includes('prompt'))
+    })
+
+    it('declares extension duration bounds', async () => {
+      const res = await callAndGetResult([INIT, NOTIFY, listTools()])
+      const extendTool = res.result.tools.find(t => t.name === 'extend_video')
+      assert.equal(extendTool.inputSchema.properties.duration.minimum, 1)
+      assert.equal(extendTool.inputSchema.properties.duration.maximum, 10)
+    })
+  })
+
   describe('edit_image', () => {
     it('rejects when no provider supports editing', async () => {
       // Use a model not in capabilities DB and without 'image' in name to get edit: undefined (not explicitly false)
       // gpt-image-2 has edit: true, so use a text-only model
       const env = {
-        IMAGE_GEN_P1_NAME: 'Text', IMAGE_GEN_P1_BASE_URL: 'https://example.com/v1',
-        IMAGE_GEN_P1_API_KEY: 'sk-test', IMAGE_GEN_P1_MODEL: 'text-only-model',
+        MEDIA_GEN_P1_NAME: 'Text', MEDIA_GEN_P1_BASE_URL: 'https://example.com/v1',
+        MEDIA_GEN_P1_API_KEY: 'sk-test', MEDIA_GEN_P1_MODEL: 'text-only-model',
       }
       const res = await callAndGetResult([INIT, NOTIFY, tool('edit_image', { prompt: 'test', image_url: 'https://example.com/img.png' })], env)
       // text-only-model has no capabilities (null), so capabilities.edit !== false is true
@@ -170,8 +257,8 @@ describe('image-gen MCP server', () => {
 
   describe('SSRF protection', () => {
     const GPT_ENV = {
-      IMAGE_GEN_P1_NAME: 'GPT', IMAGE_GEN_P1_BASE_URL: 'https://api.openai.com/v1',
-      IMAGE_GEN_P1_API_KEY: 'sk-test', IMAGE_GEN_P1_MODEL: 'gpt-image-2',
+      MEDIA_GEN_P1_NAME: 'GPT', MEDIA_GEN_P1_BASE_URL: 'https://api.openai.com/v1',
+      MEDIA_GEN_P1_API_KEY: 'sk-test', MEDIA_GEN_P1_MODEL: 'gpt-image-2',
     }
 
     it('blocks IPv4 private 169.254.x.x', async () => {
@@ -182,6 +269,36 @@ describe('image-gen MCP server', () => {
 
     it('blocks IPv6 [::1]', async () => {
       const res = await callAndGetResult([INIT, NOTIFY, tool('edit_image', { prompt: 'test', image_url: 'http://[::1]:8080/internal' })], GPT_ENV)
+      assert.equal(res.result.isError, true)
+      assert.ok(res.result.content[0].text.includes('不允许访问内网地址'))
+    })
+
+    it('blocks the unspecified IPv6 address', async () => {
+      const res = await callAndGetResult([INIT, NOTIFY, tool('edit_image', { prompt: 'test', image_url: 'http://[::]:8080/internal' })], GPT_ENV)
+      assert.equal(res.result.isError, true)
+      assert.ok(res.result.content[0].text.includes('不允许访问内网地址'))
+    })
+
+    it('blocks hexadecimal IPv4-mapped IPv6 loopback', async () => {
+      const res = await callAndGetResult([INIT, NOTIFY, tool('edit_image', { prompt: 'test', image_url: 'http://[::ffff:7f00:1]:8080/internal' })], GPT_ENV)
+      assert.equal(res.result.isError, true)
+      assert.ok(res.result.content[0].text.includes('不允许访问内网地址'))
+    })
+
+    it('blocks hexadecimal IPv4-mapped IPv6 private ranges', async () => {
+      const res = await callAndGetResult([INIT, NOTIFY, tool('edit_image', { prompt: 'test', image_url: 'http://[::ffff:a00:1]:8080/internal' })], GPT_ENV)
+      assert.equal(res.result.isError, true)
+      assert.ok(res.result.content[0].text.includes('不允许访问内网地址'))
+    })
+
+    it('blocks fully expanded IPv4-mapped IPv6 loopback', async () => {
+      const res = await callAndGetResult([INIT, NOTIFY, tool('edit_image', { prompt: 'test', image_url: 'http://[0:0:0:0:0:ffff:7f00:1]:8080/internal' })], GPT_ENV)
+      assert.equal(res.result.isError, true)
+      assert.ok(res.result.content[0].text.includes('不允许访问内网地址'))
+    })
+
+    it('blocks fully expanded IPv4-mapped metadata addresses', async () => {
+      const res = await callAndGetResult([INIT, NOTIFY, tool('edit_image', { prompt: 'test', image_url: 'http://[0:0:0:0:0:ffff:a9fe:a9fe]/latest/meta-data/' })], GPT_ENV)
       assert.equal(res.result.isError, true)
       assert.ok(res.result.content[0].text.includes('不允许访问内网地址'))
     })
@@ -198,10 +315,19 @@ describe('image-gen MCP server', () => {
       assert.ok(res.result.content[0].text.includes('不允许访问内网地址'))
     })
 
+    it('blocks the full IPv4 loopback range', async () => {
+      const env = {
+        MEDIA_GEN_P1_NAME: 'Loopback', MEDIA_GEN_P1_BASE_URL: 'http://127.0.0.2:8080/v1',
+        MEDIA_GEN_P1_API_KEY: 'sk-test', MEDIA_GEN_P1_MODEL: 'test-model',
+      }
+      const res = await callAndGetResult([INIT, NOTIFY, tool('list_providers', {})], env)
+      assert.ok(res.result.content[0].text.includes('没有可用的 provider'))
+    })
+
     it('blocks provider baseUrl with private IP', async () => {
       const env = {
-        IMAGE_GEN_P1_NAME: 'Evil', IMAGE_GEN_P1_BASE_URL: 'http://127.0.0.1:8080/v1',
-        IMAGE_GEN_P1_API_KEY: 'sk-test', IMAGE_GEN_P1_MODEL: 'test-model',
+        MEDIA_GEN_P1_NAME: 'Evil', MEDIA_GEN_P1_BASE_URL: 'http://127.0.0.1:8080/v1',
+        MEDIA_GEN_P1_API_KEY: 'sk-test', MEDIA_GEN_P1_MODEL: 'test-model',
       }
       const res = await callAndGetResult([INIT, NOTIFY, tool('list_providers', {})], env)
       const text = res.result.content[0].text
@@ -211,10 +337,19 @@ describe('image-gen MCP server', () => {
   })
 
   describe('model capabilities', () => {
+    it('recognizes Grok image and edit models', async () => {
+      const env = {
+        MEDIA_GEN_P1_NAME: 'Grok Edit', MEDIA_GEN_P1_BASE_URL: 'https://example.com/v1',
+        MEDIA_GEN_P1_API_KEY: 'sk-test', MEDIA_GEN_P1_MODEL: 'grok-imagine-edit',
+      }
+      const res = await callAndGetResult([INIT, NOTIFY, tool('list_providers', {})], env)
+      assert.ok(res.result.content[0].text.includes('supports edit'))
+    })
+
     it('matches exact model name', async () => {
       const env = {
-        IMAGE_GEN_P1_NAME: 'GPT', IMAGE_GEN_P1_BASE_URL: 'https://api.openai.com/v1',
-        IMAGE_GEN_P1_API_KEY: 'sk-test', IMAGE_GEN_P1_MODEL: 'gpt-image-2',
+        MEDIA_GEN_P1_NAME: 'GPT', MEDIA_GEN_P1_BASE_URL: 'https://api.openai.com/v1',
+        MEDIA_GEN_P1_API_KEY: 'sk-test', MEDIA_GEN_P1_MODEL: 'gpt-image-2',
       }
       const res = await callAndGetResult([INIT, NOTIFY, tool('list_providers', {})], env)
       const text = res.result.content[0].text
@@ -225,8 +360,8 @@ describe('image-gen MCP server', () => {
 
     it('matches prefix for extended model names', async () => {
       const env = {
-        IMAGE_GEN_P1_NAME: 'GPT', IMAGE_GEN_P1_BASE_URL: 'https://api.openai.com/v1',
-        IMAGE_GEN_P1_API_KEY: 'sk-test', IMAGE_GEN_P1_MODEL: 'gpt-image-2-turbo',
+        MEDIA_GEN_P1_NAME: 'GPT', MEDIA_GEN_P1_BASE_URL: 'https://api.openai.com/v1',
+        MEDIA_GEN_P1_API_KEY: 'sk-test', MEDIA_GEN_P1_MODEL: 'gpt-image-2-turbo',
       }
       const res = await callAndGetResult([INIT, NOTIFY, tool('list_providers', {})], env)
       const text = res.result.content[0].text
@@ -235,8 +370,8 @@ describe('image-gen MCP server', () => {
 
     it('returns unknown for unrecognized models', async () => {
       const env = {
-        IMAGE_GEN_P1_NAME: 'Custom', IMAGE_GEN_P1_BASE_URL: 'https://example.com/v1',
-        IMAGE_GEN_P1_API_KEY: 'sk-test', IMAGE_GEN_P1_MODEL: 'my-custom-model',
+        MEDIA_GEN_P1_NAME: 'Custom', MEDIA_GEN_P1_BASE_URL: 'https://example.com/v1',
+        MEDIA_GEN_P1_API_KEY: 'sk-test', MEDIA_GEN_P1_MODEL: 'my-custom-model',
       }
       const res = await callAndGetResult([INIT, NOTIFY, tool('list_providers', {})], env)
       const text = res.result.content[0].text

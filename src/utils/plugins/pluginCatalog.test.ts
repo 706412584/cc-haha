@@ -48,12 +48,12 @@ describe('PLUGIN_CATALOG shape', () => {
     }
   })
 
-  it('image-gen, reverse-engineering, and spark2-gamedev are present under cc-haha-builtin', () => {
+  it('media-gen, reverse-engineering, and spark2-gamedev are present under cc-haha-builtin', () => {
     const imageGen = PLUGIN_CATALOG.find(
-      (e) => e.id === 'image-gen' && e.marketplace === 'cc-haha-builtin',
+      (e) => e.id === 'media-gen' && e.marketplace === 'cc-haha-builtin',
     )
     expect(imageGen).toBeDefined()
-    expect(imageGen?.displayName).toBe('Image Generation')
+    expect(imageGen?.displayName).toBe('Media Generation')
 
     const re = PLUGIN_CATALOG.find(
       (e) => e.id === 'reverse-engineering' && e.marketplace === 'cc-haha-builtin',
@@ -71,13 +71,13 @@ describe('PLUGIN_CATALOG shape', () => {
 
 describe('getCatalogEntry', () => {
   it('finds an entry by (id, marketplace)', () => {
-    const entry = getCatalogEntry('image-gen', 'cc-haha-builtin')
+    const entry = getCatalogEntry('media-gen', 'cc-haha-builtin')
     expect(entry).toBeDefined()
-    expect(entry?.id).toBe('image-gen')
+    expect(entry?.id).toBe('media-gen')
   })
 
   it('returns undefined when the marketplace does not match', () => {
-    const entry = getCatalogEntry('image-gen', 'claude-plugins-official')
+    const entry = getCatalogEntry('media-gen', 'claude-plugins-official')
     expect(entry).toBeUndefined()
   })
 

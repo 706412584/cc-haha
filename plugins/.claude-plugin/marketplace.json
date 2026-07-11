@@ -33,9 +33,9 @@
       ]
     },
     {
-      "name": "image-gen",
-      "source": "./image-gen",
-      "description": "Multi-provider image generation with automatic fallback. Supports OpenAI-compatible APIs (Agnes, GPT-image-2, Gemini image, nano-banana, DALL-E, Flux, Stable Diffusion). Configurable provider priority with compatibility fallback.",
+      "name": "media-gen",
+      "source": "./media-gen",
+      "description": "Multi-provider image and video generation, image editing, image-to-video, and video extension with explicit model selection and protocol-aware routing.",
       "category": "creative",
       "tags": [
         "image-generation",

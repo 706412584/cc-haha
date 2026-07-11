@@ -171,11 +171,11 @@ export const PLUGIN_CATALOG: CatalogPlugin[] = [
   // omitted because the marketplace is registered out-of-band — the install
   // path checks the marketplace exists in known_marketplaces.json instead.
   {
-    id: 'image-gen',
+    id: 'media-gen',
     marketplace: 'cc-haha-builtin',
-    displayName: 'Image Generation',
+    displayName: 'Media Generation',
     description:
-      'Multi-provider image generation MCP with automatic fallback. Supports OpenAI-compatible APIs (Agnes, GPT-image-2, DALL-E, Gemini image, nano-banana, Flux, Stable Diffusion). Configure 3 priority slots; failed providers fall through.',
+      'Multi-provider image and video generation, image editing, image-to-video, and video extension with explicit model selection and protocol-aware routing.',
     category: 'productivity',
   },
   {
