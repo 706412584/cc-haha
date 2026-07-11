@@ -99,20 +99,23 @@ async function resolvePublicAddresses(urlString, label) {
 }
 
 function createPinnedDispatcher(hostname, addresses) {
-  const allowed = new Map(addresses.map(({ address, family }) => [address.toLowerCase(), family]))
+  const allowed = addresses.map(({ address, family }) => ({ address, family }))
   return new Agent({
     connect: {
-      lookup(requestedHostname, _options, callback) {
+      lookup(requestedHostname, options, callback) {
         if (requestedHostname.toLowerCase() !== hostname.toLowerCase()) {
           callback(new Error('DNS hostname changed after validation'))
           return
         }
-        const [address, family] = allowed.entries().next().value || []
-        if (!address) {
+        if (allowed.length === 0) {
           callback(new Error('No validated address available'))
           return
         }
-        callback(null, address, family)
+        if (options?.all) {
+          callback(null, allowed)
+          return
+        }
+        callback(null, allowed[0].address, allowed[0].family)
       },
     },
   })
@@ -262,20 +265,29 @@ const MAX_JSON_BYTES = 35 * 1024 * 1024
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024
 
 async function readBodyWithLimit(res, maxBytes, label) {
+  const limitError = () => new Error(`${label}: 响应超过 ${Math.floor(maxBytes / 1024 / 1024)} MB 限制`)
   const contentLength = Number(res.headers.get('content-length'))
   if (Number.isFinite(contentLength) && contentLength > maxBytes) {
-    throw new Error(`${label}: 响应超过 ${Math.floor(maxBytes / 1024 / 1024)} MB 限制`)
+    await res.body?.cancel()
+    throw limitError()
   }
   if (!res.body) return Buffer.alloc(0)
+  const reader = res.body.getReader()
   const chunks = []
   let total = 0
-  for await (const chunk of res.body) {
-    total += chunk.byteLength
-    if (total > maxBytes) {
-      await res.body.cancel()
-      throw new Error(`${label}: 响应超过 ${Math.floor(maxBytes / 1024 / 1024)} MB 限制`)
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > maxBytes) {
+        await reader.cancel()
+        throw limitError()
+      }
+      chunks.push(Buffer.from(value))
     }
-    chunks.push(Buffer.from(chunk))
+  } finally {
+    reader.releaseLock()
   }
   return Buffer.concat(chunks, total)
 }
