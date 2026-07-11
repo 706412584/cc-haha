@@ -447,6 +447,36 @@ describe('buildSessionActivityModel', () => {
         { id: 'bash-1', toolName: 'Bash', description: 'Run focused tests', timestamp: 140 },
       ],
     }))
+
+    const outOfOrder = buildSessionActivityModel({
+      sessionId: 'session-1',
+      messages: [
+        {
+          id: 'agent-live', type: 'tool_use', toolName: 'Agent', toolUseId: 'agent-live',
+          input: { description: '实时审查' }, timestamp: 100,
+        },
+        {
+          id: 'newer', type: 'tool_use', toolName: 'Bash', toolUseId: 'newer',
+          parentToolUseId: 'agent-live', input: { description: 'newer' }, timestamp: 250,
+        },
+        {
+          id: 'older', type: 'tool_use', toolName: 'Grep', toolUseId: 'older',
+          parentToolUseId: 'agent-live', input: { pattern: 'older' }, timestamp: 150,
+        },
+      ],
+      tasks: [],
+      completedAndDismissed: false,
+      backgroundTasks: [],
+      agentNotifications: [],
+    })
+
+    expect(outOfOrder.sections.subagents.rows[0]).toEqual(expect.objectContaining({
+      updatedAt: 250,
+      recentEvents: [
+        { id: 'older', toolName: 'Grep', description: 'older', timestamp: 150 },
+        { id: 'newer', toolName: 'Bash', description: 'newer', timestamp: 250 },
+      ],
+    }))
   })
 
   it('restores task rows from the latest TodoWrite message', () => {

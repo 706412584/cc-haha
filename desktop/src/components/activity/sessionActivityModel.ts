@@ -414,13 +414,15 @@ function buildAgentRowsFromMessages(messages: UIMessage[]): ActivityRow[] {
     }
     if (message.type !== 'tool_use' || !message.parentToolUseId || message.toolName === 'Agent') continue
     const events = childEventsByAgentId.get(message.parentToolUseId) ?? []
-    events.push({
+    const nextEvents = [...events, {
       id: message.toolUseId,
       toolName: message.toolName,
       description: toolEventDescription(message),
       timestamp: message.timestamp,
-    })
-    childEventsByAgentId.set(message.parentToolUseId, events.slice(-3))
+    }]
+      .sort((first, second) => first.timestamp - second.timestamp)
+      .slice(-3)
+    childEventsByAgentId.set(message.parentToolUseId, nextEvents)
   }
 
   const rows: ActivityRow[] = []
