@@ -1,0 +1,20 @@
+{
+  "media-gen": {
+    "command": "node",
+    "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/media-gen-server.mjs"],
+    "env": {
+      "MEDIA_GEN_P1_NAME": "${user_config.PROVIDER_1_NAME}",
+      "MEDIA_GEN_P1_BASE_URL": "${user_config.PROVIDER_1_BASE_URL}",
+      "MEDIA_GEN_P1_API_KEY": "${user_config.PROVIDER_1_API_KEY}",
+      "MEDIA_GEN_P1_MODEL": "${user_config.PROVIDER_1_MODEL}",
+      "MEDIA_GEN_P2_NAME": "${user_config.PROVIDER_2_NAME}",
+      "MEDIA_GEN_P2_BASE_URL": "${user_config.PROVIDER_2_BASE_URL}",
+      "MEDIA_GEN_P2_API_KEY": "${user_config.PROVIDER_2_API_KEY}",
+      "MEDIA_GEN_P2_MODEL": "${user_config.PROVIDER_2_MODEL}",
+      "MEDIA_GEN_P3_NAME": "${user_config.PROVIDER_3_NAME}",
+      "MEDIA_GEN_P3_BASE_URL": "${user_config.PROVIDER_3_BASE_URL}",
+      "MEDIA_GEN_P3_API_KEY": "${user_config.PROVIDER_3_API_KEY}",
+      "MEDIA_GEN_P3_MODEL": "${user_config.PROVIDER_3_MODEL}"
+    }
+  }
+}

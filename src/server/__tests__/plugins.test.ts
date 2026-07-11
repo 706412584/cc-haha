@@ -418,7 +418,7 @@ describe('Plugins catalog & install API', () => {
     expect(sp?.installed).toBe(false)
   })
 
-  it('GET /api/plugins/catalog includes the cc-haha-builtin plugins (image-gen, reverse-engineering)', async () => {
+  it('GET /api/plugins/catalog includes the cc-haha-builtin plugins (media-gen, reverse-engineering)', async () => {
     const { req, url, segments } = makeRequest('GET', '/api/plugins/catalog')
     const res = await handlePluginsApi(req, url, segments)
     expect(res.status).toBe(200)
@@ -426,7 +426,7 @@ describe('Plugins catalog & install API', () => {
       catalog: Array<{ id: string; marketplace: string; installed: boolean }>
     }
 
-    const imageGen = body.catalog.find((e) => e.id === 'image-gen')
+    const imageGen = body.catalog.find((e) => e.id === 'media-gen')
     expect(imageGen).toBeDefined()
     expect(imageGen?.marketplace).toBe('cc-haha-builtin')
     expect(imageGen?.installed).toBe(false)
@@ -442,7 +442,7 @@ describe('Plugins catalog & install API', () => {
     // The catalog entry has no marketplaceSource, so the install path must
     // refuse with a clear message instead of trying to clone a placeholder.
     const { req, url, segments } = makeRequest('POST', '/api/plugins/install', {
-      id: 'image-gen',
+      id: 'media-gen',
       marketplace: 'cc-haha-builtin',
     })
     const res = await handlePluginsApi(req, url, segments)
