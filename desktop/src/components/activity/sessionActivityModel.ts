@@ -23,6 +23,12 @@ export type ActivityRow = {
   outputFile?: string
   usage?: BackgroundAgentTaskUsage
   updatedAt?: number | string
+  recentEvents?: Array<{
+    id: string
+    toolName: string
+    description?: string
+    timestamp: number
+  }>
   member?: TeamMember
   taskHistory?: {
     completed: number
@@ -385,12 +391,36 @@ function agentToolLabel(toolCall: Extract<UIMessage, { type: 'tool_use' }>): str
   )
 }
 
+function toolEventDescription(message: Extract<UIMessage, { type: 'tool_use' }>): string | undefined {
+  const input = isRecordValue(message.input) ? message.input : {}
+  const description = compactText(
+    stringField(input, 'description') ||
+      stringField(input, 'command') ||
+      stringField(input, 'file_path') ||
+      stringField(input, 'query') ||
+      stringField(input, 'pattern'),
+    120,
+  )
+  return description || undefined
+}
+
 function buildAgentRowsFromMessages(messages: UIMessage[]): ActivityRow[] {
   const resultsByToolUseId = new Map<string, Extract<UIMessage, { type: 'tool_result' }>>()
+  const childEventsByAgentId = new Map<string, ActivityRow['recentEvents']>()
   for (const message of messages) {
     if (message.type === 'tool_result') {
       resultsByToolUseId.set(message.toolUseId, message)
+      continue
     }
+    if (message.type !== 'tool_use' || !message.parentToolUseId || message.toolName === 'Agent') continue
+    const events = childEventsByAgentId.get(message.parentToolUseId) ?? []
+    events.push({
+      id: message.toolUseId,
+      toolName: message.toolName,
+      description: toolEventDescription(message),
+      timestamp: message.timestamp,
+    })
+    childEventsByAgentId.set(message.parentToolUseId, events.slice(-3))
   }
 
   const rows: ActivityRow[] = []
@@ -399,6 +429,7 @@ function buildAgentRowsFromMessages(messages: UIMessage[]): ActivityRow[] {
 
     const result = resultsByToolUseId.get(message.toolUseId)
     const resultText = result ? stripAgentMetadata(extractTextContent(result.content)) : ''
+    const recentEvents = childEventsByAgentId.get(message.toolUseId)
     rows.push({
       id: message.toolUseId,
       section: 'subagents',
@@ -413,7 +444,8 @@ function buildAgentRowsFromMessages(messages: UIMessage[]): ActivityRow[] {
       summary: resultText ? compactText(resultText) : undefined,
       toolUseId: message.toolUseId,
       taskType: 'local_agent',
-      updatedAt: result?.timestamp ?? message.timestamp,
+      updatedAt: result?.timestamp ?? recentEvents?.at(-1)?.timestamp ?? message.timestamp,
+      recentEvents,
       openable: true,
     })
   }
@@ -567,6 +599,19 @@ function buildTaskRowsFromMessages(messages: UIMessage[], liveTasks: CLITask[]):
   return historicalRow ? [...currentRows, historicalRow] : currentRows
 }
 
+function latestActivityTimestamp(
+  first: ActivityRow['updatedAt'],
+  second: ActivityRow['updatedAt'],
+): ActivityRow['updatedAt'] {
+  const toMillis = (value: ActivityRow['updatedAt']) =>
+    typeof value === 'number' ? value : Date.parse(value ?? '')
+  const firstMillis = toMillis(first)
+  const secondMillis = toMillis(second)
+  if (!Number.isFinite(firstMillis)) return second
+  if (!Number.isFinite(secondMillis)) return first
+  return secondMillis > firstMillis ? second : first
+}
+
 function mergeSubagentRow(existing: ActivityRow | undefined, row: ActivityRow): ActivityRow {
   if (!existing) return row
 
@@ -585,7 +630,8 @@ function mergeSubagentRow(existing: ActivityRow | undefined, row: ActivityRow): 
     dismissKey: existing.dismissKey ?? row.dismissKey,
     outputFile: existing.outputFile ?? row.outputFile,
     usage: existing.usage ?? row.usage,
-    updatedAt: row.updatedAt ?? existing.updatedAt,
+    updatedAt: latestActivityTimestamp(existing.updatedAt, row.updatedAt),
+    recentEvents: row.recentEvents ?? existing.recentEvents,
     member: existing.member ?? row.member,
     openable: existing.openable || row.openable,
   }

@@ -376,6 +376,79 @@ describe('buildSessionActivityModel', () => {
     expect(model.badgeCount).toBe(1)
   })
 
+  it('captures the latest three child tool calls for a running SubAgent', () => {
+    const model = buildSessionActivityModel({
+      sessionId: 'session-1',
+      messages: [
+        {
+          id: 'agent-live', type: 'tool_use', toolName: 'Agent', toolUseId: 'agent-live',
+          input: { description: '实时审查' }, timestamp: 100,
+        },
+        {
+          id: 'read-1', type: 'tool_use', toolName: 'Read', toolUseId: 'read-1',
+          parentToolUseId: 'agent-live', input: { file_path: '/tmp/a.ts' }, timestamp: 110,
+        },
+        {
+          id: 'edit-1', type: 'tool_use', toolName: 'Edit', toolUseId: 'edit-1',
+          parentToolUseId: 'agent-live', input: { file_path: '/tmp/a.ts' }, timestamp: 120,
+        },
+        {
+          id: 'grep-1', type: 'tool_use', toolName: 'Grep', toolUseId: 'grep-1',
+          parentToolUseId: 'agent-live', input: { pattern: 'TODO' }, timestamp: 130,
+        },
+        {
+          id: 'bash-1', type: 'tool_use', toolName: 'Bash', toolUseId: 'bash-1',
+          parentToolUseId: 'agent-live', input: { description: 'Run focused tests' }, timestamp: 140,
+        },
+      ],
+      tasks: [],
+      completedAndDismissed: false,
+      backgroundTasks: [],
+      agentNotifications: [],
+    })
+
+    expect(model.sections.subagents.rows).toEqual([
+      expect.objectContaining({
+        id: 'agent-live',
+        status: 'running',
+        updatedAt: 140,
+        recentEvents: [
+          { id: 'edit-1', toolName: 'Edit', description: '/tmp/a.ts', timestamp: 120 },
+          { id: 'grep-1', toolName: 'Grep', description: 'TODO', timestamp: 130 },
+          { id: 'bash-1', toolName: 'Bash', description: 'Run focused tests', timestamp: 140 },
+        ],
+      }),
+    ])
+
+    const merged = buildSessionActivityModel({
+      sessionId: 'session-1',
+      messages: [
+        {
+          id: 'agent-live', type: 'tool_use', toolName: 'Agent', toolUseId: 'agent-live',
+          input: { description: '实时审查' }, timestamp: 100,
+        },
+        {
+          id: 'bash-1', type: 'tool_use', toolName: 'Bash', toolUseId: 'bash-1',
+          parentToolUseId: 'agent-live', input: { description: 'Run focused tests' }, timestamp: 140,
+        },
+      ],
+      tasks: [],
+      completedAndDismissed: false,
+      backgroundTasks: [{
+        taskId: 'task-live', toolUseId: 'agent-live', status: 'running', description: '实时审查',
+        taskType: 'local_agent', startedAt: 90, updatedAt: 120,
+      }],
+      agentNotifications: [],
+    })
+
+    expect(merged.sections.subagents.rows[0]).toEqual(expect.objectContaining({
+      updatedAt: 140,
+      recentEvents: [
+        { id: 'bash-1', toolName: 'Bash', description: 'Run focused tests', timestamp: 140 },
+      ],
+    }))
+  })
+
   it('restores task rows from the latest TodoWrite message', () => {
     const model = buildSessionActivityModel({
       sessionId: 'session-1',

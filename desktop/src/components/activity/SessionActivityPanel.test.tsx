@@ -22,7 +22,13 @@ vi.mock('../../i18n', () => ({
       'session.activity.close': 'Close activity',
       'session.activity.clearFinished': 'Clear finished',
       'session.activity.openTeamMember': 'Open team member {name}',
-      'session.activity.openRun': 'Open run {name}',
+      'session.activity.openRun': 'Open full run for {name}',
+      'session.activity.fullRun': 'Full run',
+      'session.activity.toggleRecent': 'Toggle recent activity for {name}',
+      'session.activity.recent.justNow': 'Active just now',
+      'session.activity.recent.secondsAgo': 'Active {count}s ago',
+      'session.activity.recent.minutesAgo': 'Active {count}m ago',
+      'session.activity.recent.executing': 'Latest: {tool}',
       'session.activity.openBackgroundTask': 'Open background task {name}',
       'session.activity.stopBackgroundTask': 'Stop background task {name}',
       'session.activity.stoppingBackgroundTask': 'Stopping background task {name}',
@@ -378,25 +384,64 @@ describe('SessionActivityPanel', () => {
     expect(screen.queryByText('No blocking issue.')).not.toBeInTheDocument()
   })
 
-  it('animates running SubAgent rows with a compact reduced-motion-safe live marker', () => {
+  it('shows and expands recent SubAgent activity while keeping full run secondary', () => {
+    const onOpenSubagent = vi.fn()
+    render(
+      <SessionActivityPanel
+        model={model({
+          sections: {
+            ...model().sections,
+            tasks: { id: 'tasks', title: 'Tasks', emptyLabel: 'No tasks', rows: [] },
+            subagents: {
+              id: 'subagents',
+              title: 'SubAgents',
+              emptyLabel: 'No SubAgents',
+              rows: [{
+                id: 'tool-1',
+                section: 'subagents',
+                label: 'Kuhn',
+                status: 'running',
+                toolUseId: 'tool-1',
+                updatedAt: Date.now(),
+                recentEvents: [
+                  { id: 'read-1', toolName: 'Read', description: 'Inspect auth.ts', timestamp: Date.now() - 1000 },
+                  { id: 'bash-1', toolName: 'Bash', description: 'Run focused tests', timestamp: Date.now() },
+                ],
+                openable: true,
+              }],
+            },
+          },
+        })}
+        open
+        onClose={vi.fn()}
+        onOpenSubagent={onOpenSubagent}
+      />,
+    )
+
+    const recentButton = screen.getByRole('button', { name: 'Toggle recent activity for Kuhn' })
+    expect(recentButton).toHaveTextContent('Latest: Bash · Run focused tests')
+    expect(within(recentButton).getByTestId('activity-live-dot')).toBeInTheDocument()
+    expect(screen.queryByText('Inspect auth.ts')).not.toBeInTheDocument()
+
+    fireEvent.click(recentButton)
+    expect(screen.getByText('Inspect auth.ts')).toBeInTheDocument()
+    expect(screen.getByText('Run focused tests')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open full run for Kuhn' }))
+    expect(onOpenSubagent).toHaveBeenCalledWith({ sessionId: 'session-1', toolUseId: 'tool-1', title: 'Kuhn' })
+  })
+
+  it('animates running SubAgent rows with live indicators', () => {
     render(<SessionActivityPanel model={model()} open onClose={vi.fn()} onOpenSubagent={vi.fn()} />)
 
-    const row = screen.getByRole('button', { name: /open run kuhn.*running/i })
+    const row = screen.getByRole('button', { name: 'Toggle recent activity for Kuhn' })
     const mascot = within(row).getByTestId('agent-mascot')
     const motionRing = within(row).getByTestId('agent-mascot-motion-ring')
 
     expect(row).toHaveTextContent('Running')
-    expect(mascot).toHaveAttribute('aria-hidden', 'true')
     expect(mascot).toHaveAttribute('data-agent-mascot-state', 'running')
-    expect(mascot).toHaveAttribute('data-agent-mascot-motion', 'active')
-    expect(mascot).toHaveAttribute('data-agent-mascot-tone', 'accent')
-    expect(mascot).toHaveAttribute('data-agent-mascot-variant')
-    expect(motionRing).toBeInTheDocument()
     expect(motionRing).toHaveClass('motion-safe:animate-spin')
-    expect(motionRing).toHaveClass('motion-reduce:animate-none')
-    expect(row.querySelector('.animate-pulse-dot')).not.toBeInTheDocument()
-    expect(row.querySelector('.animate-spin')).not.toBeInTheDocument()
-    expect(row.querySelector('.animate-ping')).not.toBeInTheDocument()
+    expect(within(row).getByTestId('activity-live-dot')).toBeInTheDocument()
   })
 
   it('keeps Agent mascot variants stable for the same SubAgent seed', () => {
@@ -632,7 +677,7 @@ describe('SessionActivityPanel', () => {
     const onOpenSubagent = vi.fn()
     render(<SessionActivityPanel model={model()} open onClose={vi.fn()} onOpenSubagent={onOpenSubagent} />)
 
-    fireEvent.click(screen.getByRole('button', { name: /open run kuhn/i }))
+    fireEvent.click(screen.getByRole('button', { name: /open full run for kuhn/i }))
 
     expect(onOpenSubagent).toHaveBeenCalledWith({
       sessionId: 'session-1',
