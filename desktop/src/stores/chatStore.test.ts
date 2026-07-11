@@ -3805,6 +3805,64 @@ describe('chatStore history mapping', () => {
     ])
   })
 
+  it('bumps compactCount when compact summary completes a compaction without a boundary', () => {
+    __resetCompactionThrashForTesting()
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: {
+          messages: [
+            { id: 'old-user', type: 'user_text', content: 'old context', timestamp: 1 },
+            { id: 'compact-card', type: 'compact_summary', title: 'Context compacted', phase: 'compacting', timestamp: 2 },
+          ],
+          compactCount: 0,
+          chatState: 'compacting',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          streamingResponseChars: 0,
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          elapsedSeconds: 0,
+          statusVerb: 'Compacting conversation',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'system_notification',
+      subtype: 'compact_summary',
+      message: [
+        'This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.',
+        '',
+        'Implemented the billing report and verified export behavior.',
+      ].join('\n'),
+    })
+
+    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.compactCount).toBe(1)
+    expect(session?.chatState).toBe('thinking')
+    expect(session?.statusVerb).toBe('')
+    expect(session?.messages).toMatchObject([
+      {
+        id: 'old-user',
+        type: 'user_text',
+        content: 'old context',
+      },
+      {
+        type: 'compact_summary',
+        phase: 'complete',
+        summary: 'Implemented the billing report and verified export behavior.',
+      },
+    ])
+  })
+
   it('tracks compacting status as an active chat state', () => {
     useChatStore.setState({
       sessions: {

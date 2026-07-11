@@ -2636,18 +2636,27 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         if (msg.subtype === 'compact_summary') {
           const summary = extractCompactSummaryContent(msg.message)
           if (summary) {
-            update((session) => ({
-              messages: appendOrUpdateTailCompactSummary(
-                session.messages,
-                {
-                  title: 'Context compacted',
-                  phase: 'complete',
-                  summary,
-                  ...compactMetadataFromUnknown(msg.data),
-                },
-                Date.now(),
-              ),
-            }))
+            update((session) => {
+              const hadCompletedTailSummary = (() => {
+                const tail = session.messages[session.messages.length - 1]
+                return tail?.type === 'compact_summary' && tail.phase === 'complete'
+              })()
+              return {
+                chatState: session.chatState === 'compacting' ? 'thinking' : session.chatState,
+                statusVerb: session.chatState === 'compacting' ? '' : session.statusVerb,
+                ...(hadCompletedTailSummary ? {} : { compactCount: (session.compactCount ?? 0) + 1 }),
+                messages: appendOrUpdateTailCompactSummary(
+                  session.messages,
+                  {
+                    title: 'Context compacted',
+                    phase: 'complete',
+                    summary,
+                    ...compactMetadataFromUnknown(msg.data),
+                  },
+                  Date.now(),
+                ),
+              }
+            })
           }
         }
         if (msg.subtype === 'memory_saved') {
