@@ -35,7 +35,7 @@
     {
       "name": "media-gen",
       "source": "./media-gen",
-      "description": "Multi-provider image and video generation, image editing, image-to-video, and video extension with explicit model selection and protocol-aware routing.",
+      "description": "多 Provider 图片与视频生成插件，支持图片生成与编辑、文生视频、图生视频、视频编辑和视频扩展，并提供显式模型选择与协议适配。",
       "category": "creative",
       "tags": [
         "image-generation",

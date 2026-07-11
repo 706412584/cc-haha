@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'bun:test'
+import mediaGenManifest from '../../../plugins/media-gen/.claude-plugin/plugin.json'
+import { PluginManifestSchema } from './schemas.js'
 import { PLUGIN_CATALOG, getCatalogEntry } from './pluginCatalog.js'
 
 describe('PLUGIN_CATALOG shape', () => {
+  it('ships a media-gen manifest accepted by the runtime schema', () => {
+    expect(() => PluginManifestSchema().parse(mediaGenManifest)).not.toThrow()
+  })
   it('every entry has the required identity fields', () => {
     for (const entry of PLUGIN_CATALOG) {
       expect(typeof entry.id).toBe('string')
@@ -53,7 +58,8 @@ describe('PLUGIN_CATALOG shape', () => {
       (e) => e.id === 'media-gen' && e.marketplace === 'cc-haha-builtin',
     )
     expect(imageGen).toBeDefined()
-    expect(imageGen?.displayName).toBe('Media Generation')
+    expect(imageGen?.displayName).toBe('媒体生成')
+    expect(imageGen?.description).toContain('图片与视频生成')
 
     const re = PLUGIN_CATALOG.find(
       (e) => e.id === 'reverse-engineering' && e.marketplace === 'cc-haha-builtin',

@@ -696,6 +696,8 @@ export class ProviderService {
         method: 'GET',
         headers,
         signal: AbortSignal.timeout(networkSettings.aiRequestTimeoutMs),
+        // Never forward credentials across an automatic cross-origin redirect.
+        redirect: 'manual',
         ...proxyOptions,
       })
     } catch (err) {

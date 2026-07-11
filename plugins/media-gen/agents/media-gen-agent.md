@@ -10,9 +10,9 @@ requiredMcpServers:
   - media-gen
 ---
 
-# Media Generation Orchestrator
+# 媒体生成编排器
 
-## Role
+## 角色
 
 你是媒体生成工具的客观编排器，不是创意导演或 prompt 作者。
 

@@ -28,7 +28,15 @@ import { clearAllCaches } from '../../utils/plugins/cacheUtils.js'
 import {
   getMarketplaceSourceDisplay,
 } from '../../utils/plugins/marketplaceHelpers.js'
-import { loadInstalledPluginsV2 } from '../../utils/plugins/installedPluginsManager.js'
+import {
+  loadInstalledPluginsV2,
+  removePluginInstallation,
+  saveInstalledPluginsV2,
+} from '../../utils/plugins/installedPluginsManager.js'
+import {
+  getSettingsForSource,
+  updateSettingsForSource,
+} from '../../utils/settings/settings.js'
 import {
   loadKnownMarketplacesConfig,
 } from '../../utils/plugins/marketplaceManager.js'
@@ -536,15 +544,86 @@ export class PluginService {
     }
 
     const pluginId = `${entry.id}@${entry.marketplace}`
-    const installResult = await installPluginOp(pluginId, 'user')
-    if (!installResult.success) {
-      throw ApiError.badRequest(installResult.message)
-    }
+    const settingsSnapshot = structuredClone(
+      getSettingsForSource('userSettings') ?? {},
+    )
+    const registrySnapshot = structuredClone(loadInstalledPluginsV2())
+    const legacyPluginId = 'image-gen@cc-haha-builtin'
+    let migratedEnabled: unknown
 
-    return {
-      ok: true,
-      message: installResult.message,
-      marketplaceAdded,
+    try {
+      if (pluginId === 'media-gen@cc-haha-builtin') {
+        const enabledPlugins = { ...settingsSnapshot.enabledPlugins }
+        const pluginConfigs = { ...settingsSnapshot.pluginConfigs }
+        migratedEnabled = enabledPlugins[pluginId] ?? enabledPlugins[legacyPluginId]
+        const migratedConfig = pluginConfigs[pluginId] ?? pluginConfigs[legacyPluginId]
+
+        if (migratedEnabled !== undefined) enabledPlugins[pluginId] = migratedEnabled
+        if (migratedConfig !== undefined) pluginConfigs[pluginId] = migratedConfig
+        enabledPlugins[legacyPluginId] = undefined
+        pluginConfigs[legacyPluginId] = undefined
+
+        const { error } = updateSettingsForSource('userSettings', {
+          enabledPlugins,
+          pluginConfigs,
+        })
+        if (error) throw error
+      }
+
+      const installResult = await installPluginOp(pluginId, 'user')
+      if (!installResult.success) throw new Error(installResult.message)
+
+      if (pluginId === 'media-gen@cc-haha-builtin') {
+        // Installation enables the plugin, so restore an explicitly migrated
+        // enabled value afterwards. New-plugin values take precedence above.
+        if (migratedEnabled !== undefined) {
+          const current = getSettingsForSource('userSettings')
+          const enabledPlugins = {
+            ...current?.enabledPlugins,
+            [pluginId]: migratedEnabled,
+          }
+          enabledPlugins[legacyPluginId] = undefined
+          const { error } = updateSettingsForSource('userSettings', {
+            enabledPlugins,
+          })
+          if (error) throw error
+        }
+        // Registry removal is synchronous; retain caches/user data and remove
+        // the superseded card only after every migration/install write succeeds.
+        removePluginInstallation(legacyPluginId, 'user')
+        clearAllCaches()
+      }
+
+      return {
+        ok: true,
+        message: installResult.message,
+        marketplaceAdded,
+      }
+    } catch (err) {
+      saveInstalledPluginsV2(registrySnapshot)
+      const currentSettings = getSettingsForSource('userSettings')
+      const restoredEnabledPlugins = { ...settingsSnapshot.enabledPlugins }
+      const restoredPluginConfigs = { ...settingsSnapshot.pluginConfigs }
+      for (const key of Object.keys(currentSettings?.enabledPlugins ?? {})) {
+        if (!(key in restoredEnabledPlugins)) restoredEnabledPlugins[key] = undefined
+      }
+      for (const key of Object.keys(currentSettings?.pluginConfigs ?? {})) {
+        if (!(key in restoredPluginConfigs)) restoredPluginConfigs[key] = undefined
+      }
+      const { error: restoreError } = updateSettingsForSource(
+        'userSettings',
+        {
+          ...settingsSnapshot,
+          enabledPlugins: restoredEnabledPlugins,
+          pluginConfigs: restoredPluginConfigs,
+        },
+      )
+      if (restoreError) {
+        throw ApiError.badRequest(
+          `Plugin installation failed and settings rollback failed: ${restoreError.message}`,
+        )
+      }
+      throw ApiError.badRequest(err instanceof Error ? err.message : String(err))
     }
   }
 

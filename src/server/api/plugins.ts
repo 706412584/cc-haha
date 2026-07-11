@@ -13,8 +13,11 @@ import {
   clearPluginOptionsCache,
 } from '../../utils/plugins/pluginOptionsStorage.js'
 import type { PluginManifest } from '../../utils/plugins/schemas.js'
+import { getMediaGenConfig, getMediaGenProviderCredentials, saveMediaGenConfig } from '../services/mediaGenConfigService.js'
+import { ProviderService } from '../services/providerService.js'
 
 const pluginService = new PluginService()
+const providerService = new ProviderService()
 
 type PluginSessionReloadSummary = {
   applied: boolean
@@ -39,6 +42,18 @@ export async function handlePluginsApi(
 
     if (method === 'GET' && !sub) {
       return Response.json(await pluginService.listPlugins(cwd))
+    }
+
+    if (sub === 'media-gen' && segments[3] === 'config') {
+      if (method === 'GET') return Response.json(getMediaGenConfig())
+      if (method === 'PUT') return Response.json(saveMediaGenConfig(await parseJsonBody(req)))
+    }
+    if (method === 'POST' && sub === 'media-gen' && segments[3] === 'fetch-models') {
+      const body = await parseJsonBody(req)
+      const providerId = asString(body.providerId)
+      if (!providerId || 'apiKey' in body) throw ApiError.badRequest('Expected providerId only')
+      const input = getMediaGenProviderCredentials(providerId)
+      return Response.json(await providerService.fetchUpstreamModels(input))
     }
 
     if (method === 'GET' && sub === 'catalog') {

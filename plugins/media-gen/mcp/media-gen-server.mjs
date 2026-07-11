@@ -126,14 +126,17 @@ function hasSensitiveHeaders(headers) {
   return normalized.has('authorization') || normalized.has('cookie') || normalized.has('proxy-authorization')
 }
 
-async function fetchSafeUrl(urlString, init, timeoutMs, label = 'provider_url') {
+async function fetchWithSafeRedirects(urlString, init, timeoutMs, label, prepareRequest) {
   let currentUrl = urlString
   const authenticated = hasSensitiveHeaders(init?.headers)
   for (let redirects = 0; redirects <= 5; redirects++) {
-    const { parsed, hostname, addresses } = await resolvePublicAddresses(currentUrl, label)
-    const dispatcher = createPinnedDispatcher(hostname, addresses)
-    const res = await fetchWithTimeout(currentUrl, { ...init, redirect: 'manual', dispatcher }, timeoutMs)
-    void dispatcher.close()
+    const parsed = new URL(currentUrl)
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      throw new Error(`${label}: 不允许的协议 ${parsed.protocol}。仅支持 http/https。`)
+    }
+    const { requestInit, cleanup } = await prepareRequest(currentUrl, init)
+    const res = await fetchWithTimeout(currentUrl, { ...requestInit, redirect: 'manual' }, timeoutMs)
+    cleanup?.()
     if (![301, 302, 303, 307, 308].includes(res.status)) return res
     const location = res.headers.get('location')
     if (!location) throw new Error(`${label}: 重定向响应缺少 Location`)
@@ -147,6 +150,18 @@ async function fetchSafeUrl(urlString, init, timeoutMs, label = 'provider_url') 
     currentUrl = nextUrl.href
   }
   throw new Error(`${label}: 重定向次数超过限制`)
+}
+
+async function fetchSafeUrl(urlString, init, timeoutMs, label = 'provider_url') {
+  return fetchWithSafeRedirects(urlString, init, timeoutMs, label, async (currentUrl, requestInit) => {
+    const { hostname, addresses } = await resolvePublicAddresses(currentUrl, label)
+    const dispatcher = createPinnedDispatcher(hostname, addresses)
+    return { requestInit: { ...requestInit, dispatcher }, cleanup: () => { void dispatcher.close() } }
+  })
+}
+
+async function fetchProviderApiUrl(urlString, init, timeoutMs) {
+  return fetchWithSafeRedirects(urlString, init, timeoutMs, 'provider_url', async (_currentUrl, requestInit) => ({ requestInit }))
 }
 
 const MODEL_CAPABILITIES = {
@@ -191,51 +206,63 @@ function getModelCapabilities(model) {
   return null
 }
 
-function loadProviderFromEnv(prefix) {
+function validateProviderUrl(baseUrl) {
+  const cleanedUrl = baseUrl.replace(/\/+$/, '')
+  const parsed = new URL(cleanedUrl)
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('不允许的 provider URL')
+  return cleanedUrl
+}
+
+function loadProviderFromEnv(prefix, index) {
   const name = process.env[`${prefix}_NAME`]
   const baseUrl = process.env[`${prefix}_BASE_URL`]
   const apiKey = process.env[`${prefix}_API_KEY`]
   const model = process.env[`${prefix}_MODEL`]
-
   if (isUnset(baseUrl) || isUnset(apiKey) || isUnset(model)) return null
-
-  const cleanedUrl = baseUrl.replace(/\/+$/, '')
-
-  // Validate provider baseUrl is not a private/internal address
   try {
-    const parsed = new URL(cleanedUrl)
-    if (!['http:', 'https:'].includes(parsed.protocol) || isPrivateHostname(parsed.hostname)) {
-      throw new Error('不允许的 provider URL')
-    }
+    const cleanedUrl = validateProviderUrl(baseUrl)
+    if (isPrivateHostname(new URL(cleanedUrl).hostname)) throw new Error('不允许的 provider URL')
+    return { id: `legacy-${index}`, name: (!isUnset(name) && name) || model,
+      baseUrl: cleanedUrl, apiKey, model,
+      models: { imageGeneration: model, imageEditing: model, videoGeneration: model, videoEditing: model, videoExtension: model },
+      enabled: true, timeoutMs: 300_000, capabilities: getModelCapabilities(model) }
   } catch (err) {
     console.error(`[media-gen] Skipping ${prefix}: ${err.message}`)
     return null
   }
+}
 
-  return {
-    name: (!isUnset(name) && name) || model,
-    baseUrl: cleanedUrl,
-    apiKey,
-    model,
-    enabled: true,
-    timeoutMs: 300_000,
-    capabilities: getModelCapabilities(model),
-  }
+function parseRuntimeProviders() {
+  if (process.env.MEDIA_GEN_PROVIDERS_JSON === undefined) return null
+  let config, secrets
+  try {
+    config = JSON.parse(process.env.MEDIA_GEN_PROVIDERS_JSON)
+    secrets = JSON.parse(process.env.MEDIA_GEN_PROVIDER_SECRETS_JSON || '{}')
+  } catch { return [] }
+  if (!config || config.schemaVersion !== 2 || !Array.isArray(config.providers) ||
+      !secrets || typeof secrets !== 'object' || Array.isArray(secrets)) return []
+  const ids = new Set()
+  try {
+    return config.providers.map((p) => {
+      if (!p || typeof p.id !== 'string' || ids.has(p.id) || typeof p.name !== 'string' ||
+          typeof p.enabled !== 'boolean' || p.apiFormat !== 'openai_compatible' ||
+          !p.models || typeof p.models !== 'object' || Array.isArray(p.models)) throw new Error('invalid')
+      ids.add(p.id)
+      const models = {}
+      for (const key of ['imageGeneration', 'imageEditing', 'videoGeneration', 'videoEditing', 'videoExtension']) {
+        if (p.models[key] !== undefined && (typeof p.models[key] !== 'string' || !p.models[key])) throw new Error('invalid')
+        if (p.models[key]) models[key] = p.models[key]
+      }
+      return { id: p.id, name: p.name, enabled: p.enabled, baseUrl: validateProviderUrl(p.baseUrl),
+        apiKey: typeof secrets[p.id] === 'string' ? secrets[p.id] : '', models, timeoutMs: 300_000 }
+    })
+  } catch { return [] }
 }
 
 function loadProviders() {
-  const providers = []
-
-  for (let i = 1; i <= 3; i++) {
-    const p = loadProviderFromEnv(`MEDIA_GEN_P${i}`)
-    if (p) providers.push(p)
-  }
-
-  if (providers.length === 0) {
-    return []
-  }
-
-  return providers
+  const configured = parseRuntimeProviders()
+  if (configured !== null) return configured
+  return [1, 2, 3].map(i => loadProviderFromEnv(`MEDIA_GEN_P${i}`, i)).filter(Boolean)
 }
 
 // ─── HTTP helpers ─────────────────────────────────────────────────────────────
@@ -396,7 +423,7 @@ async function generateWithFallback(prompt, size, n, transparent, providers, asp
     // Attempt 1: full params
     try {
       const body = buildImageBody(provider.model, prompt, size, n, transparent, false, aspectRatio, resolution)
-      const res = await fetchSafeUrl(url, {
+      const res = await fetchProviderApiUrl(url, {
         method: 'POST',
         headers: jsonHeaders(provider.apiKey),
         body: JSON.stringify(body),
@@ -412,7 +439,7 @@ async function generateWithFallback(prompt, size, n, transparent, providers, asp
         // Try /v1 with full params first
         try {
           const body = buildImageBody(provider.model, prompt, size, n, transparent, false, aspectRatio, resolution)
-          const res = await fetchSafeUrl(v1Url, {
+          const res = await fetchProviderApiUrl(v1Url, {
             method: 'POST',
             headers: jsonHeaders(provider.apiKey),
             body: JSON.stringify(body),
@@ -430,7 +457,7 @@ async function generateWithFallback(prompt, size, n, transparent, providers, asp
           // Try /v1 with minimal params (some providers reject response_format etc.)
           try {
             const body = buildImageBody(provider.model, prompt, size, n, transparent, true, aspectRatio, resolution)
-            const res = await fetchSafeUrl(v1Url, {
+            const res = await fetchProviderApiUrl(v1Url, {
               method: 'POST',
               headers: jsonHeaders(provider.apiKey),
               body: JSON.stringify(body),
@@ -453,7 +480,7 @@ async function generateWithFallback(prompt, size, n, transparent, providers, asp
       if (shouldRetryWithMinimalPayload(err1)) {
         try {
           const body = buildImageBody(provider.model, prompt, size, n, transparent, true, aspectRatio, resolution)
-          const res = await fetchSafeUrl(url, {
+          const res = await fetchProviderApiUrl(url, {
             method: 'POST',
             headers: jsonHeaders(provider.apiKey),
             body: JSON.stringify(body),
@@ -515,7 +542,7 @@ async function editWithFallback(prompt, imageUrl, size, n, transparent, provider
     }
 
     async function attemptEdit(editUrl, form) {
-      const res = await fetchSafeUrl(editUrl, {
+      const res = await fetchProviderApiUrl(editUrl, {
         method: 'POST',
         headers: { Authorization: `Bearer ${provider.apiKey}` },
         body: form,
@@ -600,7 +627,7 @@ async function pollGrokVideo(provider, baseUrl, requestId, timeoutSeconds) {
   const deadline = Date.now() + Math.min(Math.max(Number(timeoutSeconds) || 600, 1), 1800) * 1000
   let lastState = 'unknown'
   while (Date.now() < deadline) {
-    const statusRes = await fetchSafeUrl(statusUrl, {
+    const statusRes = await fetchProviderApiUrl(statusUrl, {
       method: 'GET', headers: { Authorization: `Bearer ${provider.apiKey}` },
     }, Math.min(provider.timeoutMs || 60_000, 60_000))
     const status = await readJson(statusRes)
@@ -627,7 +654,7 @@ async function generateGrokVideo(prompt, provider, args, baseUrl) {
   if (args.resolution !== undefined) body.resolution = args.resolution
   if (args.image_url !== undefined) body.image_url = args.image_url
 
-  const createRes = await fetchSafeUrl(`${baseUrl}/videos/generations`, {
+  const createRes = await fetchProviderApiUrl(`${baseUrl}/videos/generations`, {
     method: 'POST',
     headers: jsonHeaders(provider.apiKey),
     body: JSON.stringify(body),
@@ -642,7 +669,7 @@ async function generateGrokVideo(prompt, provider, args, baseUrl) {
 
 async function editGrokVideo(prompt, videoUrl, provider, args) {
   const baseUrl = trimSlash(provider.baseUrl)
-  const createRes = await fetchSafeUrl(`${baseUrl}/videos/edits`, {
+  const createRes = await fetchProviderApiUrl(`${baseUrl}/videos/edits`, {
     method: 'POST',
     headers: jsonHeaders(provider.apiKey),
     body: JSON.stringify({ model: provider.model, prompt, video: { url: videoUrl } }),
@@ -659,7 +686,7 @@ async function extendGrokVideo(prompt, videoUrl, provider, args) {
   const duration = Math.min(Math.max(Math.floor(requestedDuration), 1), 10)
   const body = { model: provider.model, prompt, video: { url: videoUrl }, duration }
   if (args.output_upload_url !== undefined) body.output = { upload_url: args.output_upload_url }
-  const createRes = await fetchSafeUrl(`${baseUrl}/videos/extensions`, {
+  const createRes = await fetchProviderApiUrl(`${baseUrl}/videos/extensions`, {
     method: 'POST', headers: jsonHeaders(provider.apiKey), body: JSON.stringify(body),
   }, provider.timeoutMs || 300_000)
   const created = await readJson(createRes)
@@ -679,7 +706,7 @@ async function generateVideo(prompt, provider, args) {
     if (args[key] !== undefined) body[key] = args[key]
   }
 
-  const createRes = await fetchSafeUrl(createUrl, {
+  const createRes = await fetchProviderApiUrl(createUrl, {
     method: 'POST',
     headers: jsonHeaders(provider.apiKey),
     body: JSON.stringify(body),
@@ -699,7 +726,7 @@ async function generateVideo(prompt, provider, args) {
   let lastState = 'unknown'
   while (Date.now() < deadline) {
     try {
-      const statusRes = await fetchSafeUrl(pollUrl.href, {
+      const statusRes = await fetchProviderApiUrl(pollUrl.href, {
         method: 'GET',
         headers: { Authorization: `Bearer ${provider.apiKey}` },
       }, Math.min(provider.timeoutMs || 60_000, 60_000))
@@ -741,7 +768,7 @@ async function listModelsForProvider(provider) {
   const timeoutMs = Math.min(60_000, provider.timeoutMs || 60_000)
 
   async function tryFetchModels(modelsUrl) {
-    const res = await fetchSafeUrl(modelsUrl, {
+    const res = await fetchProviderApiUrl(modelsUrl, {
       method: 'GET',
       headers: { Authorization: `Bearer ${provider.apiKey}` },
     }, timeoutMs)
@@ -815,6 +842,7 @@ const TOOLS = [
           minimum: 0,
           description: 'Use only this configured provider (0-based). Omit for priority-order fallback.',
         },
+        provider_id: { type: 'string', description: 'Use the provider with this stable ID.' },
         model: {
           type: 'string',
           description: 'Override the selected provider model. Requires provider_index.',
@@ -861,6 +889,7 @@ const TOOLS = [
           minimum: 0,
           description: 'Use only this configured provider (0-based). Omit for priority-order fallback.',
         },
+        provider_id: { type: 'string', description: 'Use the provider with this stable ID.' },
         model: {
           type: 'string',
           description: 'Override the selected provider model. Requires provider_index.',
@@ -877,6 +906,7 @@ const TOOLS = [
       properties: {
         prompt: { type: 'string', description: 'Text description of the video to generate' },
         provider_index: { type: 'integer', minimum: 0, description: 'Configured video provider index (0-based)' },
+        provider_id: { type: 'string', description: 'Configured provider stable ID' },
         model: { type: 'string', description: 'Optional video model override for the selected provider' },
         image_url: { type: 'string', description: 'Grok image-to-video reference image as an HTTPS URL or data URL.' },
         image: { type: 'string', description: 'Agnes image-to-video reference image.' },
@@ -893,7 +923,7 @@ const TOOLS = [
         resolution: { type: 'string', enum: ['480p', '720p'], description: 'Grok video resolution. Default: 480p.' },
         timeout_seconds: { type: 'number', description: 'Maximum polling time in seconds. Default: 600; maximum: 1800.', default: 600 },
       },
-      required: ['prompt', 'provider_index'],
+      required: ['prompt'],
     },
   },
   {
@@ -905,10 +935,11 @@ const TOOLS = [
         prompt: { type: 'string', description: 'Requested edit; sent to the provider without rewriting' },
         video_url: { type: 'string', description: 'Source MP4 as a public URL or video/mp4 data URL' },
         provider_index: { type: 'integer', minimum: 0, description: 'Configured Grok provider index (0-based)' },
+        provider_id: { type: 'string', description: 'Configured provider stable ID' },
         model: { type: 'string', description: 'Optional Grok video model override' },
         timeout_seconds: { type: 'number', default: 600, description: 'Maximum polling time in seconds' },
       },
-      required: ['prompt', 'video_url', 'provider_index'],
+      required: ['prompt', 'video_url'],
     },
   },
   {
@@ -920,12 +951,13 @@ const TOOLS = [
         prompt: { type: 'string', description: 'Description of how the video should continue' },
         video_url: { type: 'string', description: 'Source MP4 as a public URL or video/mp4 data URL (2-30 seconds)' },
         provider_index: { type: 'integer', minimum: 0, description: 'Configured Grok provider index (0-based)' },
+        provider_id: { type: 'string', description: 'Configured provider stable ID' },
         model: { type: 'string', description: 'Optional Grok video model override' },
         duration: { type: 'integer', minimum: 1, maximum: 10, default: 6, description: 'Seconds to extend. Default: 6; maximum: 10.' },
         output_upload_url: { type: 'string', description: 'Optional provider upload URL for the completed output' },
         timeout_seconds: { type: 'number', default: 600, description: 'Maximum polling time in seconds' },
       },
-      required: ['prompt', 'video_url', 'provider_index'],
+      required: ['prompt', 'video_url'],
     },
   },
   {
@@ -1021,29 +1053,29 @@ async function formatResult(result, outputDir) {
 // Cache providers at startup (env vars don't change during process lifetime)
 const cachedProviders = loadProviders()
 
-function selectProviders(providers, args) {
-  if (args.model !== undefined && args.provider_index === undefined) {
-    return { error: 'Error: model requires provider_index so the target provider is unambiguous.' }
+function selectProviders(providers, args, modelKey, requireExplicit = false) {
+  const hasIndex = args.provider_index !== undefined
+  const hasId = args.provider_id !== undefined
+  if (requireExplicit && !hasIndex && !hasId) return { error: 'Error: this video tool requires provider_index or provider_id.' }
+  if (args.model !== undefined && !hasIndex && !hasId) return { error: 'Error: model requires provider_index or provider_id.' }
+  let selected = providers
+  if (hasIndex) {
+    const index = Number(args.provider_index)
+    if (!Number.isInteger(index) || index < 0 || index >= providers.length) return { error: `Invalid provider_index: ${args.provider_index}. Available range: 0-${providers.length - 1}.` }
+    selected = [providers[index]]
   }
-  if (args.provider_index === undefined) return { providers }
-
-  const index = Number(args.provider_index)
-  if (!Number.isInteger(index) || index < 0 || index >= providers.length) {
-    return { error: `Invalid provider_index: ${args.provider_index}. Available range: 0-${providers.length - 1}.` }
+  if (hasId) {
+    const byId = providers.find(p => p.id === args.provider_id)
+    if (!byId) return { error: `Invalid provider_id: ${args.provider_id}.` }
+    if (hasIndex && selected[0].id !== byId.id) return { error: 'provider_index and provider_id must identify the same provider.' }
+    selected = [byId]
   }
-
-  const provider = providers[index]
-  const model = typeof args.model === 'string' ? args.model.trim() : ''
-  if (args.model !== undefined && model === '') {
-    return { error: 'Error: model must be a non-empty string.' }
-  }
-
-  return {
-    providers: [{
-      ...provider,
-      ...(model ? { model, capabilities: getModelCapabilities(model) } : {}),
-    }],
-  }
+  const override = typeof args.model === 'string' ? args.model.trim() : ''
+  if (args.model !== undefined && !override) return { error: 'Error: model must be a non-empty string.' }
+  selected = selected.filter(p => p.enabled !== false && p.apiKey && (override || p.models?.[modelKey]))
+    .map(p => { const model = override || p.models?.[modelKey]; return { ...p, model, capabilities: getModelCapabilities(model) } })
+  if (!selected.length) return { error: `No enabled provider has a configured ${modelKey} model and API key.` }
+  return { providers: selected }
 }
 
 async function handleToolCall(name, args) {
@@ -1061,7 +1093,7 @@ async function handleToolCall(name, args) {
       if (!args.prompt || typeof args.prompt !== 'string' || args.prompt.trim() === '') {
         return { content: [{ type: 'text', text: 'Error: prompt is required and must be a non-empty string.' }], isError: true }
       }
-      const selection = selectProviders(providers, args)
+      const selection = selectProviders(providers, args, 'imageGeneration')
       if (selection.error) {
         return { content: [{ type: 'text', text: selection.error }], isError: true }
       }
@@ -1093,7 +1125,7 @@ async function handleToolCall(name, args) {
       if (!args.image_url || typeof args.image_url !== 'string') {
         return { content: [{ type: 'text', text: 'Error: image_url is required.' }], isError: true }
       }
-      const selection = selectProviders(providers, args)
+      const selection = selectProviders(providers, args, 'imageEditing')
       if (selection.error) {
         return { content: [{ type: 'text', text: selection.error }], isError: true }
       }
@@ -1119,10 +1151,7 @@ async function handleToolCall(name, args) {
       if (!args.prompt || typeof args.prompt !== 'string' || args.prompt.trim() === '') {
         return { content: [{ type: 'text', text: 'Error: prompt is required and must be a non-empty string.' }], isError: true }
       }
-      if (args.provider_index === undefined) {
-        return { content: [{ type: 'text', text: 'Error: generate_video requires provider_index.' }], isError: true }
-      }
-      const selection = selectProviders(providers, args)
+            const selection = selectProviders(providers, args, 'videoGeneration', true)
       if (selection.error) {
         return { content: [{ type: 'text', text: selection.error }], isError: true }
       }
@@ -1145,10 +1174,7 @@ async function handleToolCall(name, args) {
       if (!args.video_url || typeof args.video_url !== 'string') {
         return { content: [{ type: 'text', text: 'Error: video_url is required.' }], isError: true }
       }
-      if (args.provider_index === undefined) {
-        return { content: [{ type: 'text', text: 'Error: edit_video requires provider_index.' }], isError: true }
-      }
-      const selection = selectProviders(providers, args)
+            const selection = selectProviders(providers, args, 'videoEditing', true)
       if (selection.error) return { content: [{ type: 'text', text: selection.error }], isError: true }
       const provider = selection.providers[0]
       if (!/^grok-imagine-video(?:-|$)/i.test(provider.model)) {
@@ -1172,10 +1198,7 @@ async function handleToolCall(name, args) {
       if (!args.video_url || typeof args.video_url !== 'string') {
         return { content: [{ type: 'text', text: 'Error: video_url is required.' }], isError: true }
       }
-      if (args.provider_index === undefined) {
-        return { content: [{ type: 'text', text: 'Error: extend_video requires provider_index.' }], isError: true }
-      }
-      const selection = selectProviders(providers, args)
+            const selection = selectProviders(providers, args, 'videoExtension', true)
       if (selection.error) return { content: [{ type: 'text', text: selection.error }], isError: true }
       const provider = selection.providers[0]
       if (!/^grok-imagine-video(?:-|$)/i.test(provider.model)) {
@@ -1209,7 +1232,7 @@ async function handleToolCall(name, args) {
         } else {
           capStr = '\n   capabilities: unknown (will try all params, fallback on error)'
         }
-        return `${i}. ${p.name}${status}\n   baseUrl: ${p.baseUrl}\n   model: ${p.model}${capStr}`
+        return `${i}. ${p.name}${status}\n   provider_id: ${p.id}\n   baseUrl: ${p.baseUrl}\n   models: ${JSON.stringify(p.models)}${capStr}`
       })
       return {
         content: [{ type: 'text', text: `Configured providers (${providers.length}):\n\n${lines.join('\n\n')}` }],
@@ -1218,9 +1241,9 @@ async function handleToolCall(name, args) {
     }
 
     case 'list_models': {
-      const indices = args?.provider_index !== undefined
-        ? [args.provider_index]
-        : providers.map((_, i) => i)
+      const indices = args?.provider_id !== undefined
+        ? [providers.findIndex(p => p.id === args.provider_id)]
+        : args?.provider_index !== undefined ? [args.provider_index] : providers.map((_, i) => i)
 
       const results = []
       for (const idx of indices) {
@@ -1234,7 +1257,7 @@ async function handleToolCall(name, args) {
           const imageModels = r.models.filter(m =>
             /image|img|vision|dall|flux|stable|banana|gemini.*image|gpt-image|agnes-image/i.test(m)
           )
-          results.push(`${p.name} (${r.models.length} models, ${imageModels.length} image models):\n  Image models: ${imageModels.join(', ') || '(none matched)'}\n  All: ${r.models.join(', ')}`)
+          results.push(`${p.name} [provider_id: ${p.id}] (${r.models.length} models, ${imageModels.length} image models):\n  Image models: ${imageModels.join(', ') || '(none matched)'}\n  All: ${r.models.join(', ')}`)
         } else {
           results.push(`${p.name}: ERROR - ${r.error}`)
         }

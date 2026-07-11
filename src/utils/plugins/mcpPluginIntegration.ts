@@ -1,6 +1,11 @@
 import { join } from 'path'
 import { expandEnvVarsInString } from '../../services/mcp/envExpansion.js'
 import {
+  getMediaGenConfig,
+  getMediaGenProviderCredentials,
+  MEDIA_GEN_PLUGIN_ID,
+} from '../../server/services/mediaGenConfigService.js'
+import {
   type McpServerConfig,
   McpServerConfigSchema,
   type ScopedMcpServerConfig,
@@ -385,7 +390,7 @@ export async function extractMcpServersFromPlugins(
       for (const [name, config] of Object.entries(servers)) {
         const userConfig = buildMcpUserConfig(plugin, name)
         try {
-          resolvedServers[name] = resolvePluginMcpEnvironment(
+          const resolved = resolvePluginMcpEnvironment(
             config,
             plugin,
             userConfig,
@@ -393,6 +398,13 @@ export async function extractMcpServersFromPlugins(
             plugin.name,
             name,
           )
+          if (!resolved.type || resolved.type === 'stdio') {
+            resolved.env = {
+              ...resolved.env,
+              ...buildMediaGenRuntimeEnv(plugin, name, config),
+            }
+          }
+          resolvedServers[name] = resolved
         } catch (err) {
           errors?.push({
             type: 'generic-error',
@@ -437,6 +449,40 @@ export async function extractMcpServersFromPlugins(
  * Returns undefined when neither source has anything — resolvePluginMcpEnvironment
  * skips substituteUserConfigVariables in that case.
  */
+function buildMediaGenRuntimeEnv(
+  plugin: LoadedPlugin,
+  serverName: string,
+  config: McpServerConfig,
+): Record<string, string> {
+  if (
+    plugin.repository !== MEDIA_GEN_PLUGIN_ID ||
+    serverName !== 'media-gen' ||
+    (config.type !== undefined && config.type !== 'stdio')
+  ) {
+    return {}
+  }
+
+  const mediaConfig = getMediaGenConfig()
+  const providers = mediaConfig.providers.map(({ apiKeyConfigured: _, ...provider }) => provider)
+  const secrets = Object.fromEntries(
+    mediaConfig.providers.flatMap(provider => {
+      if (!provider.apiKeyConfigured) return []
+      try {
+        return [[provider.id, getMediaGenProviderCredentials(provider.id).apiKey]]
+      } catch {
+        return []
+      }
+    }),
+  )
+  return {
+    MEDIA_GEN_PROVIDERS_JSON: JSON.stringify({
+      schemaVersion: mediaConfig.schemaVersion,
+      providers,
+    }),
+    MEDIA_GEN_PROVIDER_SECRETS_JSON: JSON.stringify(secrets),
+  }
+}
+
 function buildMcpUserConfig(
   plugin: LoadedPlugin,
   serverName: string,
@@ -611,7 +657,7 @@ export async function getPluginMcpServers(
   for (const [name, config] of Object.entries(servers)) {
     const userConfig = buildMcpUserConfig(plugin, name)
     try {
-      resolvedServers[name] = resolvePluginMcpEnvironment(
+      const resolved = resolvePluginMcpEnvironment(
         config,
         plugin,
         userConfig,
@@ -619,6 +665,13 @@ export async function getPluginMcpServers(
         plugin.name,
         name,
       )
+      if (!resolved.type || resolved.type === 'stdio') {
+        resolved.env = {
+          ...resolved.env,
+          ...buildMediaGenRuntimeEnv(plugin, name, config),
+        }
+      }
+      resolvedServers[name] = resolved
     } catch (err) {
       errors?.push({
         type: 'generic-error',

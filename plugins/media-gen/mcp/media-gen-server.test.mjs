@@ -7,6 +7,9 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { createServer } from 'node:http'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
@@ -62,6 +65,18 @@ function listTools(id = 2) {
   return { jsonrpc: '2.0', id, method: 'tools/list', params: {} }
 }
 
+const CONFIG_ENV = {
+  MEDIA_GEN_PROVIDERS_JSON: JSON.stringify({
+    schemaVersion: 2,
+    providers: [
+      { id: 'video-provider', name: 'Video', enabled: true, apiFormat: 'openai_compatible', baseUrl: 'http://localhost:9/v1', models: { videoGeneration: 'video-default' } },
+      { id: 'image-provider', name: 'Image', enabled: true, apiFormat: 'openai_compatible', baseUrl: 'http://192.168.1.20:9/v1', models: { imageGeneration: 'image-default', imageEditing: 'edit-default' } },
+      { id: 'disabled', name: 'Disabled', enabled: false, apiFormat: 'openai_compatible', baseUrl: 'https://example.com/v1', models: { imageGeneration: 'disabled-model' } },
+    ],
+  }),
+  MEDIA_GEN_PROVIDER_SECRETS_JSON: JSON.stringify({ 'video-provider': 'video-key', 'image-provider': 'image-key', disabled: 'disabled-key' }),
+}
+
 const P1_ENV = {
   MEDIA_GEN_P1_NAME: 'TestProvider',
   MEDIA_GEN_P1_BASE_URL: 'https://example.com/v1',
@@ -97,6 +112,42 @@ describe('media-gen MCP server', () => {
       assert.equal(imageTool.inputSchema.properties.provider_index.minimum, 0)
       assert.equal(imageTool.inputSchema.properties.model.type, 'string')
     }
+  })
+
+  describe('dynamic provider configuration', () => {
+    it('fails closed when the new provider JSON exists but is invalid', async () => {
+      const res = await callAndGetResult([INIT, NOTIFY, tool('list_providers')], { ...P1_ENV, MEDIA_GEN_PROVIDERS_JSON: '{' })
+      assert.equal(res.result.isError, true)
+      assert.ok(res.result.content[0].text.includes('没有可用的 provider'))
+    })
+
+    it('accepts configured localhost/private provider URLs and reports stable IDs and per-tool models', async () => {
+      const res = await callAndGetResult([INIT, NOTIFY, tool('list_providers')], CONFIG_ENV)
+      const text = res.result.content[0].text
+      assert.ok(text.includes('provider_id: video-provider'))
+      assert.ok(text.includes('http://localhost:9/v1'))
+      assert.ok(text.includes('imageGeneration'))
+    })
+
+    it('keeps indexes order-dependent while provider_id remains stable and validates both selectors', async () => {
+      const res = await callAndGetResult([INIT, NOTIFY, tool('generate_image', { prompt: 'cat', provider_index: 0, provider_id: 'image-provider' })], CONFIG_ENV)
+      assert.equal(res.result.isError, true)
+      assert.ok(res.result.content[0].text.includes('same provider'))
+    })
+
+    it('image fallback only considers enabled providers with the corresponding model', async () => {
+      const res = await callAndGetResult([INIT, NOTIFY, tool('generate_image', { prompt: 'cat' })], CONFIG_ENV)
+      const text = res.result.content[0].text
+      assert.ok(text.includes('Image'))
+      assert.ok(!text.includes('Video:'))
+      assert.ok(!text.includes('Disabled'))
+    })
+
+    it('video accepts provider_id and uses its video-generation model', async () => {
+      const res = await callAndGetResult([INIT, NOTIFY, tool('generate_video', { prompt: 'cat', provider_id: 'video-provider' })], CONFIG_ENV)
+      assert.equal(res.result.isError, true)
+      assert.ok(!res.result.content[0].text.includes('requires provider_index'))
+    })
   })
 
   describe('list_providers', () => {
@@ -324,15 +375,42 @@ describe('media-gen MCP server', () => {
       assert.ok(res.result.content[0].text.includes('没有可用的 provider'))
     })
 
-    it('blocks provider baseUrl with private IP', async () => {
-      const env = {
-        MEDIA_GEN_P1_NAME: 'Evil', MEDIA_GEN_P1_BASE_URL: 'http://127.0.0.1:8080/v1',
-        MEDIA_GEN_P1_API_KEY: 'sk-test', MEDIA_GEN_P1_MODEL: 'test-model',
+    it('allows a dynamic private provider API while keeping returned media URLs protected', async () => {
+      let receivedRequest
+      const providerServer = createServer((req, res) => {
+        let body = ''
+        req.setEncoding('utf8')
+        req.on('data', chunk => { body += chunk })
+        req.on('end', () => {
+          receivedRequest = { url: req.url, authorization: req.headers.authorization, body: JSON.parse(body) }
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ data: [{ url: 'http://127.0.0.1/private-output.png' }] }))
+        })
+      })
+      await new Promise((resolve, reject) => {
+        providerServer.once('error', reject)
+        providerServer.listen(0, '127.0.0.1', resolve)
+      })
+      const outputDir = await mkdtemp(join(tmpdir(), 'media-gen-private-output-'))
+      try {
+        const { port } = providerServer.address()
+        const env = {
+          MEDIA_GEN_PROVIDERS_JSON: JSON.stringify({ schemaVersion: 2, providers: [{
+            id: 'local', name: 'Local', enabled: true, apiFormat: 'openai_compatible',
+            baseUrl: `http://127.0.0.1:${port}/v1`, models: { imageGeneration: 'local-image' },
+          }] }),
+          MEDIA_GEN_PROVIDER_SECRETS_JSON: JSON.stringify({ local: 'local-key' }),
+        }
+        const res = await callAndGetResult([INIT, NOTIFY, tool('generate_image', { prompt: 'cat', provider_id: 'local', output_dir: outputDir })], env)
+        assert.equal(receivedRequest.url, '/v1/images/generations')
+        assert.equal(receivedRequest.authorization, 'Bearer local-key')
+        assert.equal(receivedRequest.body.prompt, 'cat')
+        assert.equal(res.result.isError, true)
+        assert.ok(res.result.content[0].text.includes('不允许访问内网地址'))
+      } finally {
+        await new Promise(resolve => providerServer.close(resolve))
+        await rm(outputDir, { recursive: true, force: true })
       }
-      const res = await callAndGetResult([INIT, NOTIFY, tool('list_providers', {})], env)
-      const text = res.result.content[0].text
-      // Provider should be skipped — no providers available
-      assert.ok(text.includes('没有可用的 provider') || !text.includes('Evil'))
     })
   })
 

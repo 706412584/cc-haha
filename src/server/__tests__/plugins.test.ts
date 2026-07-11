@@ -7,6 +7,7 @@ import { isEnabledPluginSettingValue } from '../../utils/plugins/dependencyResol
 import { clearInstalledPluginsCache } from '../../utils/plugins/installedPluginsManager.js'
 import { clearPluginCache, loadAllPluginsCacheOnly } from '../../utils/plugins/pluginLoader.js'
 import { refreshActivePlugins } from '../../utils/plugins/refresh.js'
+import { plainTextStorage } from '../../utils/secureStorage/plainTextStorage.js'
 import { resetSettingsCache } from '../../utils/settings/settingsCache.js'
 import { handlePluginsApi } from '../api/plugins.js'
 import { conversationService } from '../services/conversationService.js'
@@ -582,6 +583,199 @@ describe('Plugins catalog & install API', () => {
     ).toBe(true)
   })
 
+  it('POST /api/plugins/install migrates image-gen settings to media-gen', async () => {
+    const marketplaceRoot = path.join(tmpDir, 'builtin-marketplace')
+    const pluginRoot = path.join(marketplaceRoot, 'plugins', 'media-gen')
+    const pluginsDir = path.join(tmpDir, 'plugins')
+    const oldPluginId = 'image-gen@cc-haha-builtin'
+    const newPluginId = 'media-gen@cc-haha-builtin'
+
+    await fs.mkdir(path.join(pluginRoot, '.claude-plugin'), { recursive: true })
+    await fs.mkdir(path.join(marketplaceRoot, '.claude-plugin'), { recursive: true })
+    await fs.mkdir(pluginsDir, { recursive: true })
+    await fs.writeFile(
+      path.join(pluginRoot, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'media-gen', version: '0.0.0', description: 'test' }),
+      'utf-8',
+    )
+    await fs.writeFile(
+      path.join(marketplaceRoot, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'cc-haha-builtin',
+        owner: { name: 'cc-haha' },
+        plugins: [
+          { name: 'media-gen', source: './plugins/media-gen', version: '0.0.0' },
+        ],
+      }),
+      'utf-8',
+    )
+    await fs.writeFile(
+      path.join(pluginsDir, 'known_marketplaces.json'),
+      JSON.stringify({
+        'cc-haha-builtin': {
+          source: { source: 'directory', path: marketplaceRoot },
+          installLocation: marketplaceRoot,
+          lastUpdated: new Date(0).toISOString(),
+        },
+      }),
+      'utf-8',
+    )
+    await fs.writeFile(
+      path.join(tmpDir, 'settings.json'),
+      JSON.stringify({
+        enabledPlugins: { [oldPluginId]: true, [newPluginId]: false },
+        pluginConfigs: {
+          [oldPluginId]: {
+            options: { outputDirectory: '/legacy-fake-output', apiToken: 'legacy-fake-token' },
+          },
+          [newPluginId]: {
+            options: { outputDirectory: '/new-fake-output', apiToken: 'new-fake-token' },
+          },
+        },
+      }),
+      'utf-8',
+    )
+    await fs.writeFile(
+      path.join(pluginsDir, 'installed_plugins.json'),
+      JSON.stringify({
+        version: 2,
+        plugins: {
+          [oldPluginId]: [
+            {
+              scope: 'user',
+              installPath: path.join(tmpDir, 'legacy-image-gen'),
+              version: '1.2.3',
+              installedAt: '2024-01-02T03:04:05.000Z',
+              lastUpdated: '2024-06-07T08:09:10.000Z',
+            },
+          ],
+        },
+      }),
+      'utf-8',
+    )
+    clearInstalledPluginsCache()
+    resetSettingsCache()
+
+    const install = makeRequest('POST', '/api/plugins/install', {
+      id: 'media-gen',
+      marketplace: 'cc-haha-builtin',
+    })
+    const response = await handlePluginsApi(install.req, install.url, install.segments)
+    expect(response.status).toBe(200)
+
+    const settings = JSON.parse(
+      await fs.readFile(path.join(tmpDir, 'settings.json'), 'utf-8'),
+    ) as {
+      enabledPlugins: Record<string, unknown>
+      pluginConfigs: Record<string, unknown>
+    }
+    expect(settings.enabledPlugins).toEqual({ [newPluginId]: false })
+    expect(settings.pluginConfigs).toEqual({
+      [newPluginId]: {
+        options: { outputDirectory: '/new-fake-output', apiToken: 'new-fake-token' },
+      },
+    })
+    const registry = JSON.parse(
+      await fs.readFile(path.join(pluginsDir, 'installed_plugins.json'), 'utf-8'),
+    ) as { plugins: Record<string, unknown> }
+    expect(registry.plugins[oldPluginId]).toBeUndefined()
+    expect(registry.plugins[newPluginId]).toBeDefined()
+  })
+
+  it('POST /api/plugins/install restores media-gen migration settings and registry when installation fails', async () => {
+    const marketplaceRoot = path.join(tmpDir, 'builtin-marketplace')
+    const pluginRoot = path.join(marketplaceRoot, 'plugins', 'media-gen')
+    const pluginsDir = path.join(tmpDir, 'plugins')
+    const oldPluginId = 'image-gen@cc-haha-builtin'
+    const newPluginId = 'media-gen@cc-haha-builtin'
+
+    await fs.mkdir(path.join(pluginRoot, '.claude-plugin'), { recursive: true })
+    await fs.mkdir(path.join(marketplaceRoot, '.claude-plugin'), { recursive: true })
+    await fs.mkdir(pluginsDir, { recursive: true })
+    await fs.writeFile(
+      path.join(pluginRoot, '.claude-plugin', 'plugin.json'),
+      '{ invalid json',
+      'utf-8',
+    )
+    await fs.writeFile(
+      path.join(marketplaceRoot, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'cc-haha-builtin',
+        owner: { name: 'cc-haha' },
+        plugins: [
+          { name: 'media-gen', source: './plugins/media-gen', version: '0.0.0' },
+        ],
+      }),
+      'utf-8',
+    )
+    await fs.writeFile(
+      path.join(pluginsDir, 'known_marketplaces.json'),
+      JSON.stringify({
+        'cc-haha-builtin': {
+          source: { source: 'directory', path: marketplaceRoot },
+          installLocation: marketplaceRoot,
+          lastUpdated: new Date(0).toISOString(),
+        },
+      }),
+      'utf-8',
+    )
+    const settingsSnapshot = {
+      enabledPlugins: { [oldPluginId]: false, 'unrelated@test': true },
+      pluginConfigs: {
+        [oldPluginId]: { options: { apiToken: 'rollback-fake-token' } },
+        'unrelated@test': { options: { keep: false } },
+      },
+      customSetting: 'preserve-me',
+    }
+    const registrySnapshot = {
+      version: 2,
+      plugins: {
+        [oldPluginId]: [
+          {
+            scope: 'user',
+            installPath: path.join(tmpDir, 'legacy-image-gen'),
+            version: '1.2.3',
+            installedAt: '2024-01-02T03:04:05.000Z',
+            lastUpdated: '2024-06-07T08:09:10.000Z',
+          },
+        ],
+        'unrelated@test': [
+          {
+            scope: 'project',
+            projectPath: path.join(tmpDir, 'project'),
+            installPath: path.join(tmpDir, 'unrelated'),
+            version: '9.9.9',
+            installedAt: '2023-01-02T03:04:05.000Z',
+            lastUpdated: '2023-06-07T08:09:10.000Z',
+          },
+        ],
+      },
+    }
+    await fs.writeFile(
+      path.join(tmpDir, 'settings.json'),
+      JSON.stringify(settingsSnapshot),
+      'utf-8',
+    )
+    const registryPath = path.join(pluginsDir, 'installed_plugins.json')
+    await fs.writeFile(registryPath, JSON.stringify(registrySnapshot), 'utf-8')
+    clearInstalledPluginsCache()
+    resetSettingsCache()
+
+    const install = makeRequest('POST', '/api/plugins/install', {
+      id: 'media-gen',
+      marketplace: 'cc-haha-builtin',
+    })
+    const response = await handlePluginsApi(install.req, install.url, install.segments)
+
+    expect(response.status).toBe(400)
+    expect(JSON.parse(await fs.readFile(path.join(tmpDir, 'settings.json'), 'utf-8'))).toEqual(
+      settingsSnapshot,
+    )
+    expect(JSON.parse(await fs.readFile(registryPath, 'utf-8'))).toEqual(
+      registrySnapshot,
+    )
+  })
+
   it('POST /api/plugins/install rejects unknown catalog entries', async () => {
     const { req, url, segments } = makeRequest('POST', '/api/plugins/install', {
       id: 'does-not-exist',
@@ -589,6 +783,182 @@ describe('Plugins catalog & install API', () => {
     })
     const res = await handlePluginsApi(req, url, segments)
     expect(res.status).toBe(404)
+  })
+})
+
+describe('Media-gen provider config API', () => {
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-media-gen-api-'))
+    originalConfigDir = process.env.CLAUDE_CONFIG_DIR
+    process.env.CLAUDE_CONFIG_DIR = tmpDir
+    resetSettingsCache()
+  })
+
+  afterEach(async () => {
+    resetSettingsCache()
+    if (originalConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
+    else process.env.CLAUDE_CONFIG_DIR = originalConfigDir
+    await fs.rm(tmpDir, { recursive: true, force: true })
+  })
+
+  it('GET returns schema v2 providers with key status and never returns secrets', async () => {
+    await fs.writeFile(path.join(tmpDir, 'settings.json'), JSON.stringify({
+      pluginConfigs: { 'media-gen@cc-haha-builtin': { options: { mediaProviderConfig: JSON.stringify({
+        schemaVersion: 2,
+        providers: [{ id: 'stable-id', name: 'Local', enabled: false, apiFormat: 'openai_compatible', baseUrl: 'http://127.0.0.1:8080/v1', models: { imageGeneration: 'flux' } }],
+      }) } } },
+    }))
+    await fs.writeFile(path.join(tmpDir, '.credentials.json'), JSON.stringify({
+      pluginSecrets: { 'media-gen@cc-haha-builtin': { mediaProviderApiKeys: JSON.stringify({ 'stable-id': 'super-secret' }) } },
+    }))
+
+    const request = makeRequest('GET', '/api/plugins/media-gen/config')
+    const response = await handlePluginsApi(request.req, request.url, request.segments)
+    const body = await response.json() as Record<string, unknown>
+
+    expect(response.status).toBe(200)
+    expect(body).toEqual({ schemaVersion: 2, providers: [{
+      id: 'stable-id', name: 'Local', enabled: false, apiFormat: 'openai_compatible', baseUrl: 'http://127.0.0.1:8080/v1',
+      models: { imageGeneration: 'flux' },
+      apiKeyConfigured: true,
+    }] })
+    expect(JSON.stringify(body)).not.toContain('super-secret')
+  })
+
+  it('GET migrates legacy media-gen and renamed image-gen P1-P3 options while preferring v2', async () => {
+    await fs.writeFile(path.join(tmpDir, 'settings.json'), JSON.stringify({ pluginConfigs: {
+      'image-gen@cc-haha-builtin': { options: { PROVIDER_1_NAME: 'Old', PROVIDER_1_BASE_URL: 'https://old.example/v1', PROVIDER_1_MODEL: 'old-model' } },
+      'media-gen@cc-haha-builtin': { options: { PROVIDER_2_NAME: 'New', PROVIDER_2_BASE_URL: 'https://new.example/v1', PROVIDER_2_MODEL: 'new-model' } },
+    } }))
+    await fs.writeFile(path.join(tmpDir, '.credentials.json'), JSON.stringify({ pluginSecrets: {
+      'image-gen@cc-haha-builtin': { PROVIDER_1_API_KEY: 'old-secret' },
+      'media-gen@cc-haha-builtin': { PROVIDER_2_API_KEY: 'new-secret' },
+    } }))
+
+    const request = makeRequest('GET', '/api/plugins/media-gen/config')
+    const body = await (await handlePluginsApi(request.req, request.url, request.segments)).json() as {
+      providers: Array<{ name: string; enabled: boolean; apiFormat: string; models: { imageGeneration?: string }; apiKeyConfigured: boolean }>
+    }
+    expect(body.providers.map(p => p.name)).toEqual(['Old', 'New'])
+    expect(body.providers[0]?.models.imageGeneration).toBe('old-model')
+    expect(body.providers[0]?.enabled).toBe(true)
+    expect(body.providers[0]?.apiFormat).toBe('openai_compatible')
+    expect(body.providers.every(p => p.apiKeyConfigured)).toBe(true)
+
+    const saved = JSON.parse(await fs.readFile(path.join(tmpDir, 'settings.json'), 'utf-8'))
+    expect(JSON.parse(saved.pluginConfigs['media-gen@cc-haha-builtin'].options.mediaProviderConfig).schemaVersion).toBe(2)
+    const credentials = JSON.parse(await fs.readFile(path.join(tmpDir, '.credentials.json'), 'utf-8')) as {
+      pluginSecrets: Record<string, Record<string, string>>
+    }
+    expect(credentials.pluginSecrets['image-gen@cc-haha-builtin']?.PROVIDER_1_API_KEY).toBeUndefined()
+    expect(credentials.pluginSecrets['media-gen@cc-haha-builtin']?.PROVIDER_2_API_KEY).toBeUndefined()
+  })
+
+  it('GET rolls back settings and secrets when legacy secret cleanup fails, then retries migration', async () => {
+    await fs.writeFile(path.join(tmpDir, 'settings.json'), JSON.stringify({ pluginConfigs: {
+      'image-gen@cc-haha-builtin': { options: { PROVIDER_1_NAME: 'Old', PROVIDER_1_BASE_URL: 'https://old.example/v1' } },
+    } }))
+    await fs.writeFile(path.join(tmpDir, '.credentials.json'), JSON.stringify({ pluginSecrets: {
+      'image-gen@cc-haha-builtin': { PROVIDER_1_API_KEY: 'old-secret' },
+    } }))
+
+    const originalUpdate = plainTextStorage.update
+    let updateCount = 0
+    plainTextStorage.update = data => {
+      updateCount++
+      if (updateCount === 2) return { success: false }
+      return originalUpdate(data)
+    }
+    try {
+      const first = makeRequest('GET', '/api/plugins/media-gen/config')
+      expect((await handlePluginsApi(first.req, first.url, first.segments)).status).toBe(500)
+    } finally {
+      plainTextStorage.update = originalUpdate
+    }
+
+    const afterFailure = JSON.parse(await fs.readFile(path.join(tmpDir, 'settings.json'), 'utf-8'))
+    expect(afterFailure.pluginConfigs['media-gen@cc-haha-builtin']?.options?.mediaProviderConfig).toBeUndefined()
+    const second = makeRequest('GET', '/api/plugins/media-gen/config')
+    const response = await handlePluginsApi(second.req, second.url, second.segments)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ providers: [{ name: 'Old', apiKeyConfigured: true }] })
+  })
+
+  it('GET fails closed when stored schema v2 JSON is damaged', async () => {
+    await fs.writeFile(path.join(tmpDir, 'settings.json'), JSON.stringify({
+      pluginConfigs: { 'media-gen@cc-haha-builtin': { options: { mediaProviderConfig: '{broken' } } },
+    }))
+    const request = makeRequest('GET', '/api/plugins/media-gen/config')
+    expect((await handlePluginsApi(request.req, request.url, request.segments)).status).toBe(500)
+  })
+
+  it('POST fetch-models uses the saved provider key without accepting a secret in the request', async () => {
+    const originalFetch = globalThis.fetch
+    let authorization = ''
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      authorization = new Headers(init?.headers).get('Authorization') ?? ''
+      return new Response(JSON.stringify({ data: [{ id: 'flux' }] }), { status: 200 })
+    }) as typeof fetch
+    try {
+      const config = makeRequest('PUT', '/api/plugins/media-gen/config', { schemaVersion: 2, providers: [{
+        id: 'local', name: 'Local', enabled: true, apiFormat: 'openai_compatible', baseUrl: 'http://127.0.0.1:8080', models: {},
+        apiKey: { action: 'replace', value: 'saved-secret' },
+      }] })
+      expect((await handlePluginsApi(config.req, config.url, config.segments)).status).toBe(200)
+      const request = makeRequest('POST', '/api/plugins/media-gen/fetch-models', { providerId: 'local' })
+      const response = await handlePluginsApi(request.req, request.url, request.segments)
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual({ status: 200, data: { data: [{ id: 'flux' }] } })
+      expect(authorization).toBe('Bearer saved-secret')
+      const secretRequest = makeRequest('POST', '/api/plugins/media-gen/fetch-models', { providerId: 'local', apiKey: 'request-secret' })
+      expect((await handlePluginsApi(secretRequest.req, secretRequest.url, secretRequest.segments)).status).toBe(400)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('PUT validates providers and supports API key replace, keep, clear, and deletion cleanup', async () => {
+    const put = async (providers: unknown[]) => {
+      const request = makeRequest('PUT', '/api/plugins/media-gen/config', { schemaVersion: 2, providers })
+      return handlePluginsApi(request.req, request.url, request.segments)
+    }
+    const provider = { id: 'provider-one', name: 'One', enabled: false, apiFormat: 'openai_compatible', baseUrl: 'http://127.0.0.1:8080/v1', models: { imageGeneration: 'flux' } }
+    expect((await put([{ ...provider, apiKey: { action: 'replace', value: 'secret-one' } }])).status).toBe(200)
+    expect((await put([{ ...provider, name: 'Renamed', apiKey: { action: 'keep' } }])).status).toBe(200)
+    let credentials = JSON.parse(await fs.readFile(path.join(tmpDir, '.credentials.json'), 'utf-8'))
+    expect(JSON.parse(credentials.pluginSecrets['media-gen@cc-haha-builtin'].mediaProviderApiKeys)).toEqual({ 'provider-one': 'secret-one' })
+
+    expect((await put([{ ...provider, apiKey: { action: 'clear' } }])).status).toBe(200)
+    credentials = JSON.parse(await fs.readFile(path.join(tmpDir, '.credentials.json'), 'utf-8'))
+    expect(JSON.parse(credentials.pluginSecrets['media-gen@cc-haha-builtin'].mediaProviderApiKeys)).toEqual({})
+
+    expect((await put([{ ...provider, apiKey: { action: 'replace', value: 'again' } }])).status).toBe(200)
+    expect((await put([])).status).toBe(200)
+    credentials = JSON.parse(await fs.readFile(path.join(tmpDir, '.credentials.json'), 'utf-8'))
+    expect(JSON.parse(credentials.pluginSecrets['media-gen@cc-haha-builtin'].mediaProviderApiKeys)).toEqual({})
+
+    expect((await put(Array.from({ length: 17 }, (_, i) => ({ ...provider, id: `p-${i}` })))).status).toBe(400)
+    expect((await put([provider, provider])).status).toBe(400)
+    expect((await put([{ ...provider, models: { unsupported: 'x' } }])).status).toBe(400)
+    expect((await put([{ ...provider, models: { imageGeneration: ['flux'] } }])).status).toBe(400)
+    expect((await put([{ ...provider, baseUrl: 'file:///tmp/models' }])).status).toBe(400)
+    expect((await put([{ ...provider, baseUrl: 'not a URL' }])).status).toBe(400)
+  })
+
+  it('PUT enforces per-key and serialized API key UTF-8 byte limits', async () => {
+    const put = async (providers: unknown[]) => {
+      const request = makeRequest('PUT', '/api/plugins/media-gen/config', { schemaVersion: 2, providers })
+      return handlePluginsApi(request.req, request.url, request.segments)
+    }
+    const provider = { name: 'One', enabled: true, apiFormat: 'openai_compatible', baseUrl: 'https://example.com/v1', models: {} }
+    expect((await put([{ ...provider, id: 'boundary', apiKey: { action: 'replace', value: '四'.repeat(5461) + 'a' } }])).status).toBe(200)
+    expect((await put([{ ...provider, id: 'too-large', apiKey: { action: 'replace', value: '四'.repeat(5462) } }])).status).toBe(400)
+    const maximumKeys = Array.from({ length: 16 }, (_, index) => ({
+      ...provider,
+      id: `provider-${index}`,
+      apiKey: { action: 'replace', value: 'x'.repeat(16 * 1024) },
+    }))
+    expect((await put(maximumKeys)).status).toBe(400)
   })
 })
 

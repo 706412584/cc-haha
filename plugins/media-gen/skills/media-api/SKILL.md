@@ -4,7 +4,7 @@ description: >-
   media-gen 工具协议参考。用于客观选择工具并映射 provider、模型、图片尺寸、视频时长、图生视频和视频扩展参数；不修改用户 prompt 或补充创意内容。
 ---
 
-# Media API Protocol
+# Media API 协议参考
 
 本 skill 只提供协议事实和确定性参数映射。不得扩写、翻译或优化用户 prompt，除非用户明确要求。
 
@@ -18,7 +18,9 @@ description: >-
 - `list_providers`：查看 provider 索引、默认模型与能力。
 - `list_models`：从 provider `/models` 查询模型。
 
-`model` 覆盖必须与 `provider_index` 同时使用。显式选择 provider 后不跨 provider fallback。
+`provider_index` 是当前排序下的 0-based 索引；`provider_id` 是不受排序影响的稳定 ID。两者同时提供时必须指向同一 provider。`model` 覆盖必须与其中一个 provider 选择器同时使用。显式选择 provider 后不跨 provider fallback；未显式选择时，图片工具只在已启用且配置了对应图片模型的 provider 间 fallback，视频工具始终要求显式 provider。
+
+每类工具使用独立默认模型：`generate_image` → `imageGeneration`、`edit_image` → `imageEditing`、`generate_video` → `videoGeneration`、`edit_video` → `videoEditing`、`extend_video` → `videoExtension`。显式 `model` 优先。
 
 ## 图片生成
 

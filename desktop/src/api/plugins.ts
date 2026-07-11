@@ -11,6 +11,12 @@ import type {
   PluginScope,
 } from '../types/plugin'
 
+export type MediaGenModelType = 'imageGeneration' | 'imageEditing' | 'videoGeneration' | 'videoEditing' | 'videoExtension'
+export type MediaGenProvider = { id: string; name: string; enabled: boolean; apiFormat: 'openai_compatible'; baseUrl: string; models: Partial<Record<MediaGenModelType, string>>; apiKeyConfigured: boolean }
+export type MediaGenConfig = { schemaVersion: 2; providers: MediaGenProvider[] }
+export type MediaGenApiKeyUpdate = { action: 'keep' } | { action: 'replace'; value: string } | { action: 'clear' }
+export type MediaGenProviderUpdate = Omit<MediaGenProvider, 'apiKeyConfigured'> & { apiKey: MediaGenApiKeyUpdate }
+
 type PluginActionPayload = {
   id: string
   scope?: PluginScope
@@ -100,4 +106,10 @@ export const pluginsApi = {
 
   saveOptions: (id: string, values: Record<string, unknown>) =>
     api.post<{ ok: true; pluginId: string }>('/api/plugins/options', { id, values }),
+
+  getMediaGenConfig: () => api.get<MediaGenConfig>('/api/plugins/media-gen/config'),
+  saveMediaGenConfig: (providers: MediaGenProviderUpdate[]) =>
+    api.put<MediaGenConfig>('/api/plugins/media-gen/config', { schemaVersion: 2, providers }),
+  fetchMediaGenModels: (providerId: string) =>
+    api.post<unknown>('/api/plugins/media-gen/fetch-models', { providerId }),
 }

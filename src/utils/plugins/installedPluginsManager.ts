@@ -403,7 +403,7 @@ export function loadInstalledPluginsV2(): InstalledPluginsFileV2 {
  * Save installed plugins in V2 format to installed_plugins.json.
  * This is the single source of truth after V1/V2 consolidation.
  */
-function saveInstalledPluginsV2(data: InstalledPluginsFileV2): void {
+export function saveInstalledPluginsV2(data: InstalledPluginsFileV2): void {
   const fs = getFsImplementation()
   const filePath = getInstalledPluginsFilePath()
 

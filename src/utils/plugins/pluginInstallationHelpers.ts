@@ -32,6 +32,8 @@ import {
 import {
   addInstalledPlugin,
   getGitCommitSha,
+  loadInstalledPluginsV2,
+  saveInstalledPluginsV2,
 } from './installedPluginsManager.js'
 import { getManagedPluginNames } from './managedPlugins.js'
 import { getMarketplaceCacheOnly, getPluginById } from './marketplaceManager.js'
@@ -426,7 +428,47 @@ export async function installResolvedPlugin({
     }
   }
 
-  // ── ACTION: write entire closure to settings in one call ──
+  // ── Materialize the entire closure before exposing it in settings ──
+  const projectPath = scope !== 'user' ? getCwd() : undefined
+  // Registry entries may be updated as well as added while materializing. Keep
+  // a deep snapshot so any failure restores the complete pre-install metadata.
+  // Versioned/content-addressed cache directories may safely remain unreachable.
+  const installedPluginsSnapshot = structuredClone(loadInstalledPluginsV2())
+  try {
+    for (const id of resolution.closure) {
+      let info = depInfo.get(id)
+      // Root wasn't pre-seeded (caller didn't pass marketplaceInstallLocation
+      // for a non-local source). Fetch now; it's needed for the cache write.
+      if (!info && id === pluginId) {
+        const mktLocation = (await getPluginById(id))?.marketplaceInstallLocation
+        if (mktLocation) info = { entry, marketplaceInstallLocation: mktLocation }
+      }
+      if (!info) {
+        throw new Error(`Missing marketplace information for dependency ${id}`)
+      }
+
+      let localSourcePath: string | undefined
+      const { source } = info.entry
+      if (isLocalPluginSource(source)) {
+        localSourcePath = validatePathWithinBase(
+          info.marketplaceInstallLocation,
+          source,
+        )
+      }
+      await cacheAndRegisterPlugin(
+        id,
+        info.entry,
+        scope,
+        projectPath,
+        localSourcePath,
+      )
+    }
+  } catch (error) {
+    saveInstalledPluginsV2(installedPluginsSnapshot)
+    throw error
+  }
+
+  // ── ACTION: expose the complete closure in one settings write ──
   const closureEnabled: Record<string, true> = {}
   for (const id of resolution.closure) closureEnabled[id] = true
   const { error } = updateSettingsForSource(settingSource, {
@@ -436,40 +478,12 @@ export async function installResolvedPlugin({
     },
   })
   if (error) {
+    saveInstalledPluginsV2(installedPluginsSnapshot)
     return {
       ok: false,
       reason: 'settings-write-failed',
       message: error.message,
     }
-  }
-
-  // ── Materialize: cache each closure member ──
-  const projectPath = scope !== 'user' ? getCwd() : undefined
-  for (const id of resolution.closure) {
-    let info = depInfo.get(id)
-    // Root wasn't pre-seeded (caller didn't pass marketplaceInstallLocation
-    // for a non-local source). Fetch now; it's needed for the cache write.
-    if (!info && id === pluginId) {
-      const mktLocation = (await getPluginById(id))?.marketplaceInstallLocation
-      if (mktLocation) info = { entry, marketplaceInstallLocation: mktLocation }
-    }
-    if (!info) continue
-
-    let localSourcePath: string | undefined
-    const { source } = info.entry
-    if (isLocalPluginSource(source)) {
-      localSourcePath = validatePathWithinBase(
-        info.marketplaceInstallLocation,
-        source,
-      )
-    }
-    await cacheAndRegisterPlugin(
-      id,
-      info.entry,
-      scope,
-      projectPath,
-      localSourcePath,
-    )
   }
 
   clearAllCaches()

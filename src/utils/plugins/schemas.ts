@@ -614,6 +614,14 @@ const PluginUserConfigOptionSchema = lazySchema(() =>
         .describe(
           'If true, masks dialog input and stores value in secure storage (keychain/credentials file) instead of settings.json',
         ),
+      group: z
+        .string()
+        .optional()
+        .describe('Optional section label used to group related fields in the config dialog'),
+      groupDescription: z
+        .string()
+        .optional()
+        .describe('Optional help text shown beneath the configuration group label'),
       min: z.number().optional().describe('Minimum value (number type only)'),
       max: z.number().optional().describe('Maximum value (number type only)'),
     })

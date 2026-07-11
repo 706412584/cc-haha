@@ -2569,4 +2569,7 @@ export const zh: Record<TranslationKey, string> = {
   'subagentRun.result.stoppedFallback': 'SubAgent 已停止，但没有结果内容。',
   'subagentRun.result.noneFallback': '暂无结果。',
   'tool.stopped': '已停止',
+  'plugins.config.title': '配置 {name}', 'plugins.config.loading': '正在加载配置...', 'plugins.config.loadFailed': '加载配置失败', 'plugins.config.saveFailed': '保存配置失败', 'plugins.config.saved': '{name} 配置已保存',
+  'plugins.mediaGen.description': 'Provider 按从上到下的顺序尝试，五种模型用途相互独立。', 'plugins.mediaGen.add': '添加 Provider', 'plugins.mediaGen.remove': '删除 Provider', 'plugins.mediaGen.expand': '展开 Provider', 'plugins.mediaGen.collapse': '折叠 Provider', 'plugins.mediaGen.enabled': '启用', 'plugins.mediaGen.moveUp': '上移 Provider', 'plugins.mediaGen.moveDown': '下移 Provider', 'plugins.mediaGen.unnamed': 'Provider {number}', 'plugins.mediaGen.name': '名称', 'plugins.mediaGen.baseUrl': 'Base URL', 'plugins.mediaGen.apiKey': 'API Key', 'plugins.mediaGen.keyConfigured': '已配置（留空则保留）', 'plugins.mediaGen.clearKey': '清除密钥', 'plugins.mediaGen.fetchModels': '拉取模型', 'plugins.mediaGen.fetchFailed': '拉取模型失败', 'plugins.mediaGen.toggleModels': '切换模型列表',
+  'plugins.mediaGen.model.imageGeneration': '图片生成模型', 'plugins.mediaGen.model.imageEditing': '图片编辑模型', 'plugins.mediaGen.model.videoGeneration': '视频生成模型', 'plugins.mediaGen.model.videoEditing': '视频编辑模型', 'plugins.mediaGen.model.videoExtension': '视频扩展模型',
 }
