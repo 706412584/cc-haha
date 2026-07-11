@@ -297,7 +297,7 @@ export function PluginDetail() {
               onClick={() => setShowConfigModal(true)}
             >
               <span className="material-symbols-outlined text-[16px]">settings</span>
-              Configure
+              {t('settings.plugins.configure')}
             </Button>
           )}
 

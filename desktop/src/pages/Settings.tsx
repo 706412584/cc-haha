@@ -1371,7 +1371,6 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
   const modelContextWindowErrorSlots = MODEL_SLOTS.filter((slot) => getModelContextWindowErrorKey(modelContextInputs[slot]))
   const canSubmit = name.trim() && baseUrl.trim() && (mode === 'edit' || !requiresApiKey || apiKey.trim()) && models.main.trim() && !settingsJsonError && !autoCompactWindowErrorKey && modelContextWindowErrorSlots.length === 0
   const apiKeyUrl = selectedPreset.apiKeyUrl?.trim()
-  const promoText = selectedPreset.promoText?.trim()
   const displayedSettingsJson = showApiKey
     ? settingsJson
     : maskSettingsJsonSecrets(settingsJson)
@@ -1866,33 +1865,17 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
           </div>
         </div>
 
-        {(apiKeyUrl || promoText) && (
-          <div className="-mt-2 flex flex-col gap-1.5">
-            {apiKeyUrl && (
-              <button
-                type="button"
-                onClick={() => openExternalUrl(apiKeyUrl)}
-                className="group inline-flex h-6 w-fit cursor-pointer items-center gap-1 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-1.5 text-[11px] font-medium leading-none text-[var(--color-brand)] transition-colors hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)] focus:outline-none focus:shadow-[var(--shadow-focus-ring)]"
-              >
-                <span className="material-symbols-outlined text-[13px]">key</span>
-                {t('settings.providers.getApiKey')}
-                <span className="material-symbols-outlined text-[9px] opacity-60 transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5">arrow_outward</span>
-              </button>
-            )}
-            {promoText && (
-              <button
-                type="button"
-                onClick={() => apiKeyUrl && openExternalUrl(apiKeyUrl)}
-                disabled={!apiKeyUrl}
-                className="group flex w-full cursor-pointer items-start gap-1.5 rounded-[var(--radius-sm)] border border-[var(--color-brand)]/25 bg-[var(--color-brand)]/8 px-2.5 py-1.5 text-left text-[11px] leading-5 text-[var(--color-text-primary)] transition-colors hover:border-[var(--color-brand)]/45 hover:bg-[var(--color-brand)]/12 focus:outline-none focus:shadow-[var(--shadow-focus-ring)] disabled:cursor-default disabled:hover:border-[var(--color-brand)]/25 disabled:hover:bg-[var(--color-brand)]/8"
-              >
-                <span className="material-symbols-outlined mt-0.5 text-[13px] text-[var(--color-brand)]">tips_and_updates</span>
-                <span>{promoText}</span>
-                {apiKeyUrl && (
-                  <span className="material-symbols-outlined ml-auto mt-1 text-[10px] text-[var(--color-brand)] opacity-45 transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5">arrow_outward</span>
-                )}
-              </button>
-            )}
+        {apiKeyUrl && (
+          <div className="-mt-2">
+            <button
+              type="button"
+              onClick={() => openExternalUrl(apiKeyUrl)}
+              className="group inline-flex h-6 w-fit cursor-pointer items-center gap-1 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-1.5 text-[11px] font-medium leading-none text-[var(--color-brand)] transition-colors hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)] focus:outline-none focus:shadow-[var(--shadow-focus-ring)]"
+            >
+              <span className="material-symbols-outlined text-[13px]">key</span>
+              {t('settings.providers.getApiKey')}
+              <span className="material-symbols-outlined text-[9px] opacity-60 transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5">arrow_outward</span>
+            </button>
           </div>
         )}
 

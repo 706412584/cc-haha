@@ -979,6 +979,7 @@ export const zh: Record<TranslationKey, string> = {
   'settings.plugins.enable': '启用',
   'settings.plugins.disable': '禁用',
   'settings.plugins.update': '更新',
+  'settings.plugins.configure': '配置',
   'settings.plugins.uninstall': '卸载',
   'settings.plugins.confirmUninstall': '确定卸载插件“{name}”吗？会删除当前 scope 下的安装副本。',
   'settings.plugins.selectionCount': '已选择 {count} 个',
@@ -2570,6 +2571,6 @@ export const zh: Record<TranslationKey, string> = {
   'subagentRun.result.noneFallback': '暂无结果。',
   'tool.stopped': '已停止',
   'plugins.config.title': '配置 {name}', 'plugins.config.loading': '正在加载配置...', 'plugins.config.loadFailed': '加载配置失败', 'plugins.config.saveFailed': '保存配置失败', 'plugins.config.saved': '{name} 配置已保存',
-  'plugins.mediaGen.description': 'Provider 按从上到下的顺序尝试，五种模型用途相互独立。', 'plugins.mediaGen.add': '添加 Provider', 'plugins.mediaGen.remove': '删除 Provider', 'plugins.mediaGen.expand': '展开 Provider', 'plugins.mediaGen.collapse': '折叠 Provider', 'plugins.mediaGen.enabled': '启用', 'plugins.mediaGen.moveUp': '上移 Provider', 'plugins.mediaGen.moveDown': '下移 Provider', 'plugins.mediaGen.unnamed': 'Provider {number}', 'plugins.mediaGen.name': '名称', 'plugins.mediaGen.baseUrl': 'Base URL', 'plugins.mediaGen.apiKey': 'API Key', 'plugins.mediaGen.keyConfigured': '已配置（留空则保留）', 'plugins.mediaGen.clearKey': '清除密钥', 'plugins.mediaGen.fetchModels': '拉取模型', 'plugins.mediaGen.fetchFailed': '拉取模型失败', 'plugins.mediaGen.toggleModels': '切换模型列表',
+  'plugins.mediaGen.description': '配置连接信息，并为各类媒体任务指定模型。', 'plugins.mediaGen.providerCount': '{count} 个 Provider', 'plugins.mediaGen.enabledCount': '已启用 {count} 个', 'plugins.mediaGen.fallbackHint': '按 P1 → P16 顺序 fallback', 'plugins.mediaGen.connection': '连接配置', 'plugins.mediaGen.savedProvider': '已保存的服务商', 'plugins.mediaGen.chooseSavedProvider': '选择已保存的服务商', 'plugins.mediaGen.modelRouting': '模型路由', 'plugins.mediaGen.status.ready': '就绪', 'plugins.mediaGen.status.partial': '待完善', 'plugins.mediaGen.status.disabled': '已停用', 'plugins.mediaGen.keyStatus.configured': '将保留已配置密钥', 'plugins.mediaGen.keyStatus.new': '新密钥将替换现有密钥', 'plugins.mediaGen.keyStatus.clear': '保存后将清除密钥', 'plugins.mediaGen.candidateCount': '{count} 个候选模型', 'plugins.mediaGen.noModels': '未返回模型', 'plugins.mediaGen.add': '添加 Provider', 'plugins.mediaGen.remove': '删除 Provider', 'plugins.mediaGen.expand': '展开 Provider', 'plugins.mediaGen.collapse': '折叠 Provider', 'plugins.mediaGen.enabled': '启用', 'plugins.mediaGen.moveUp': '上移 Provider', 'plugins.mediaGen.moveDown': '下移 Provider', 'plugins.mediaGen.unnamed': 'Provider {number}', 'plugins.mediaGen.name': '名称', 'plugins.mediaGen.baseUrl': 'Base URL', 'plugins.mediaGen.apiKey': 'API Key', 'plugins.mediaGen.keyConfigured': '已配置（留空则保留）', 'plugins.mediaGen.clearKey': '清除密钥', 'plugins.mediaGen.fetchModels': '拉取模型', 'plugins.mediaGen.fetchFailed': '拉取模型失败', 'plugins.mediaGen.toggleModels': '切换模型列表',
   'plugins.mediaGen.model.imageGeneration': '图片生成模型', 'plugins.mediaGen.model.imageEditing': '图片编辑模型', 'plugins.mediaGen.model.videoGeneration': '视频生成模型', 'plugins.mediaGen.model.videoEditing': '视频编辑模型', 'plugins.mediaGen.model.videoExtension': '视频扩展模型',
 }

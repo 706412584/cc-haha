@@ -420,6 +420,8 @@ describe('SessionActivityPanel', () => {
 
     const recentButton = screen.getByRole('button', { name: 'Toggle recent activity for Kuhn' })
     expect(recentButton).toHaveTextContent('Latest: Bash · Run focused tests')
+    expect(within(recentButton).queryByText('Running')).not.toBeInTheDocument()
+    expect(within(recentButton).getByTestId('agent-mascot')).toBeInTheDocument()
     expect(within(recentButton).getByTestId('activity-live-dot')).toBeInTheDocument()
     expect(screen.queryByText('Inspect auth.ts')).not.toBeInTheDocument()
 
@@ -431,7 +433,41 @@ describe('SessionActivityPanel', () => {
     expect(onOpenSubagent).toHaveBeenCalledWith({ sessionId: 'session-1', toolUseId: 'tool-1', title: 'Kuhn' })
   })
 
-  it('animates running SubAgent rows with live indicators', () => {
+  it('shows relative activity without a duplicate Running label for a running SubAgent', () => {
+    render(
+      <SessionActivityPanel
+        model={model({
+          sections: {
+            ...model().sections,
+            subagents: {
+              id: 'subagents',
+              title: 'SubAgents',
+              emptyLabel: 'No SubAgents',
+              rows: [{
+                id: 'tool-1',
+                section: 'subagents',
+                label: 'Kuhn',
+                status: 'running',
+                toolUseId: 'tool-1',
+                updatedAt: Date.now(),
+                openable: true,
+              }],
+            },
+          },
+        })}
+        open
+        onClose={vi.fn()}
+        onOpenSubagent={vi.fn()}
+      />,
+    )
+
+    const row = screen.getByRole('button', { name: 'Toggle recent activity for Kuhn' })
+    expect(row).toHaveTextContent('Active just now')
+    expect(row).not.toHaveTextContent('Running')
+    expect(within(row).getByTestId('activity-live-dot')).toBeInTheDocument()
+  })
+
+  it('falls back to Running and keeps live indicators without recent SubAgent activity', () => {
     render(<SessionActivityPanel model={model()} open onClose={vi.fn()} onOpenSubagent={vi.fn()} />)
 
     const row = screen.getByRole('button', { name: 'Toggle recent activity for Kuhn' })
@@ -442,6 +478,70 @@ describe('SessionActivityPanel', () => {
     expect(mascot).toHaveAttribute('data-agent-mascot-state', 'running')
     expect(motionRing).toHaveClass('motion-safe:animate-spin')
     expect(within(row).getByTestId('activity-live-dot')).toBeInTheDocument()
+  })
+
+  it.each(['completed', 'failed', 'stopped'] as const)('keeps the %s terminal status when SubAgent activity exists', (status) => {
+    render(
+      <SessionActivityPanel
+        model={model({
+          sections: {
+            ...model().sections,
+            subagents: {
+              id: 'subagents',
+              title: 'SubAgents',
+              emptyLabel: 'No SubAgents',
+              rows: [{
+                id: `tool-${status}`,
+                section: 'subagents',
+                label: `${status} reviewer`,
+                status,
+                toolUseId: `tool-${status}`,
+                updatedAt: Date.now(),
+                recentEvents: [{ id: 'read-1', toolName: 'Read', timestamp: Date.now() }],
+                openable: true,
+              }],
+            },
+          },
+        })}
+        open
+        onClose={vi.fn()}
+        onOpenSubagent={vi.fn()}
+      />,
+    )
+
+    const row = screen.getByRole('button', { name: `Toggle recent activity for ${status} reviewer` })
+    expect(row).toHaveTextContent(status === 'completed' ? 'Completed' : status === 'failed' ? 'Failed' : 'Stopped')
+    expect(within(row).queryByTestId('activity-live-dot')).not.toBeInTheDocument()
+  })
+
+  it('does not hide running status labels for background tasks or team members', () => {
+    const member = { agentId: 'reviewer@team', role: 'reviewer', status: 'running' as const }
+    render(
+      <SessionActivityPanel
+        model={model({
+          sections: {
+            ...model().sections,
+            tasks: { id: 'tasks', title: 'Tasks', emptyLabel: 'No tasks', rows: [] },
+            subagents: { id: 'subagents', title: 'SubAgents', emptyLabel: 'No SubAgents', rows: [] },
+            team: {
+              id: 'team', title: 'Team', emptyLabel: 'No team members',
+              rows: [{ id: member.agentId, section: 'team', label: member.role, status: 'running', updatedAt: Date.now(), member, openable: true }],
+            },
+            backgroundTasks: {
+              id: 'backgroundTasks', title: 'Background Tasks', emptyLabel: 'No background tasks',
+              rows: [{ id: 'background-1', section: 'backgroundTasks', label: 'Background check', status: 'running', updatedAt: Date.now(), openable: false }],
+            },
+          },
+        })}
+        open
+        onClose={vi.fn()}
+        onOpenSubagent={vi.fn()}
+        onOpenMember={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByRole('button', { name: 'Open team member reviewer' })).toHaveTextContent('Running')
+    expect(screen.getByText('Background check').closest('div')).toHaveTextContent('Running')
   })
 
   it('keeps Agent mascot variants stable for the same SubAgent seed', () => {

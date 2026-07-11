@@ -12,10 +12,14 @@ import type {
 } from '../types/plugin'
 
 export type MediaGenModelType = 'imageGeneration' | 'imageEditing' | 'videoGeneration' | 'videoEditing' | 'videoExtension'
-export type MediaGenProvider = { id: string; name: string; enabled: boolean; apiFormat: 'openai_compatible'; baseUrl: string; models: Partial<Record<MediaGenModelType, string>>; apiKeyConfigured: boolean }
-export type MediaGenConfig = { schemaVersion: 2; providers: MediaGenProvider[] }
-export type MediaGenApiKeyUpdate = { action: 'keep' } | { action: 'replace'; value: string } | { action: 'clear' }
+export type MediaGenCredentialRef = { kind: 'saved_provider'; providerId: string }
+export type MediaGenProvider = { id: string; name: string; enabled: boolean; apiFormat: 'openai_compatible'; baseUrl: string; models: Partial<Record<MediaGenModelType, string>>; apiKeyConfigured: boolean; credentialRef?: MediaGenCredentialRef }
+export type MediaGenConfig = { schemaVersion: 3; providers: MediaGenProvider[] }
+export type MediaGenApiKeyUpdate = { action: 'keep' } | { action: 'replace'; value: string } | { action: 'clear' } | { action: 'reference'; credentialRef: MediaGenCredentialRef }
+export type MediaGenProviderChoice = { id: string; name: string; baseUrl: string; credentialConfigured: boolean; compatible: boolean }
 export type MediaGenProviderUpdate = Omit<MediaGenProvider, 'apiKeyConfigured'> & { apiKey: MediaGenApiKeyUpdate }
+export type MediaGenFetchModelsRequest = Pick<MediaGenProvider, 'baseUrl' | 'apiFormat'> & { providerId: string; apiKey: MediaGenApiKeyUpdate }
+export type MediaGenModelsPayload = unknown
 
 type PluginActionPayload = {
   id: string
@@ -109,7 +113,8 @@ export const pluginsApi = {
 
   getMediaGenConfig: () => api.get<MediaGenConfig>('/api/plugins/media-gen/config'),
   saveMediaGenConfig: (providers: MediaGenProviderUpdate[]) =>
-    api.put<MediaGenConfig>('/api/plugins/media-gen/config', { schemaVersion: 2, providers }),
-  fetchMediaGenModels: (providerId: string) =>
-    api.post<unknown>('/api/plugins/media-gen/fetch-models', { providerId }),
+    api.put<MediaGenConfig>('/api/plugins/media-gen/config', { schemaVersion: 3, providers }),
+  getMediaGenProviderChoices: () => api.get<{ providers: MediaGenProviderChoice[] }>('/api/plugins/media-gen/provider-choices'),
+  fetchMediaGenModels: (input: MediaGenFetchModelsRequest) =>
+    api.post<MediaGenModelsPayload>('/api/plugins/media-gen/fetch-models', input),
 }

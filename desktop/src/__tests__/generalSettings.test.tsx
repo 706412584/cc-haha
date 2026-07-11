@@ -1707,7 +1707,6 @@ describe('Settings > Providers tab', () => {
     fireEvent.click(screen.getByRole('button', { name: /Add Provider/i }))
 
     const dialog = screen.getByRole('dialog')
-    expect(within(dialog).queryByRole('combobox')).not.toBeInTheDocument()
 
     fireEvent.click(within(dialog).getByRole('button', { name: /Anthropic Messages \(native\)/i }))
     fireEvent.click(within(dialog).getByRole('button', { name: /OpenAI Responses API \(proxy\)/i }))
