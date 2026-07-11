@@ -86,10 +86,10 @@ describe('network settings', () => {
     const originalHttpsProxy = process.env.HTTPS_PROXY
     const originalLowerHttpProxy = process.env.http_proxy
     const originalLowerHttpsProxy = process.env.https_proxy
-    process.env.HTTP_PROXY = 'http://127.0.0.1:1181'
-    process.env.HTTPS_PROXY = 'http://127.0.0.1:1181'
     delete process.env.http_proxy
     delete process.env.https_proxy
+    process.env.HTTP_PROXY = 'http://127.0.0.1:1181'
+    process.env.HTTPS_PROXY = 'http://127.0.0.1:1181'
     try {
       expect(buildNetworkEnvironment(settings)).toEqual({
         API_TIMEOUT_MS: String(DEFAULT_AI_REQUEST_TIMEOUT_MS),

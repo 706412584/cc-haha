@@ -9,6 +9,7 @@ const terminalMocks = vi.hoisted(() => {
   const terminalInstance = {
     cols: 80,
     rows: 24,
+    element: null as HTMLElement | null,
     loadAddon: vi.fn(),
     open: vi.fn(),
     dispose: vi.fn(),
@@ -86,6 +87,7 @@ describe('TerminalSettings', () => {
     terminalMocks.getBashPath.mockReset()
     terminalMocks.setBashPath.mockReset()
     terminalMocks.terminalInstance.loadAddon.mockClear()
+    terminalMocks.terminalInstance.element = null
     terminalMocks.terminalInstance.open.mockClear()
     terminalMocks.terminalInstance.dispose.mockClear()
     terminalMocks.terminalInstance.onData.mockClear()
@@ -139,6 +141,32 @@ describe('TerminalSettings', () => {
     expect(screen.getByText('/Users/test')).toBeInTheDocument()
     expect(terminalMocks.terminalInstance.open).toHaveBeenCalled()
     expect(terminalMocks.fitInstance.fit).toHaveBeenCalled()
+  })
+
+  it('does not start duplicate xterm surfaces for one runtime', async () => {
+    terminalMocks.available = true
+    terminalMocks.terminalInstance.open.mockImplementation((host: HTMLElement) => {
+      const element = document.createElement('div')
+      element.className = 'xterm'
+      terminalMocks.terminalInstance.element = element
+      host.appendChild(element)
+    })
+
+    render(
+      <>
+        <TerminalSettings runtimeId="shared-terminal-runtime" preserveOnUnmount />
+        <TerminalSettings runtimeId="shared-terminal-runtime" preserveOnUnmount testId="settings-terminal-host-secondary" />
+      </>,
+    )
+
+    await waitFor(() => expect(terminalMocks.spawn).toHaveBeenCalled())
+    await vi.dynamicImportSettled()
+
+    expect(terminalMocks.spawn).toHaveBeenCalledTimes(1)
+    expect(terminalMocks.terminalInstance.open).toHaveBeenCalledTimes(1)
+    expect(document.body.querySelectorAll('.settings-terminal-host .xterm')).toHaveLength(1)
+
+    destroyTerminalRuntime('shared-terminal-runtime')
   })
 
   it('uses one compact toolbar instead of a nested terminal title bar', async () => {

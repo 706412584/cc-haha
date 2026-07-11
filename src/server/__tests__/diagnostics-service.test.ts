@@ -6,6 +6,7 @@ import * as path from 'node:path'
 import { gunzipSync } from 'node:zlib'
 import { handleDiagnosticsApi } from '../api/diagnostics.js'
 import { DiagnosticsService, diagnosticsService } from '../services/diagnosticsService.js'
+import { createSandboxedTestEnvironment } from '../../../scripts/pr/test-environment.js'
 
 let tmpDir: string
 let originalConfigDir: string | undefined
@@ -187,15 +188,14 @@ describe('DiagnosticsService', () => {
 
   test('keeps fatal startup errors visible on stderr while recording diagnostics', async () => {
     const port = await getPort()
-    const serverArgs = ['bun', 'run', 'src/server/index.ts', '--host', '127.0.0.1', '--port', String(port)]
+    const serverArgs = ['bun', '--no-env-file', 'run', 'src/server/index.ts', '--host', '127.0.0.1', '--port', String(port)]
     // This spawns a *real* server, not the in-process test runner. Strip the
     // inherited NODE_ENV=test so it installs console/process capture the way a
     // production server does (capture is intentionally skipped under test).
-    const env = {
-      ...process.env,
+    const env = createSandboxedTestEnvironment(tmpDir, {
       CLAUDE_CONFIG_DIR: tmpDir,
-    }
-    delete (env as Record<string, string | undefined>).NODE_ENV
+    })
+    delete env.NODE_ENV
     const server = Bun.spawn(serverArgs, {
       cwd: process.cwd(),
       env,

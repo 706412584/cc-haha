@@ -152,6 +152,18 @@ describe('AppShell boot flow', () => {
     expect(screen.getByText('updates loaded')).toBeInTheDocument()
   })
 
+  it('uses the mobile shell when browser validation forces mobile mode', async () => {
+    window.history.pushState({}, '', '/?forceMobile=1')
+
+    render(<AppShell />)
+
+    await screen.findByText('content loaded')
+    expect(screen.queryByText('tabs loaded')).not.toBeInTheDocument()
+    expect(screen.getByTestId('mobile-settings-button')).toBeInTheDocument()
+    expect(screen.getByTestId('mobile-session-header')).toHaveTextContent('empty.title')
+    expect(screen.getByTestId('mobile-session-header')).not.toHaveTextContent('settings.title')
+  })
+
   it('shows startup diagnostics instead of a blank shell when bootstrap fails', async () => {
     mocks.fetchAll.mockRejectedValueOnce(new Error('settings file could not be read'))
 
@@ -373,9 +385,28 @@ describe('AppShell boot flow', () => {
     expect(header).toHaveTextContent('session.active')
     expect(header).toHaveTextContent('session.messages')
     expect(screen.getByTestId('mobile-sidebar-toggle')).toHaveClass('h-10', 'w-10')
+    expect(screen.getByTestId('mobile-settings-button')).toBeInTheDocument()
   })
 
-  it('keeps browser H5 mobile on chat tabs when settings was restored as active', async () => {
+  it('opens settings from the mobile app header without rendering desktop tabs', async () => {
+    mocks.isMobile = true
+    mocks.tabState.activeTabId = 'session-mobile'
+    mocks.tabState.tabs = [
+      { sessionId: 'session-mobile', title: 'Existing session', type: 'session', status: 'idle' },
+    ]
+
+    render(<AppShell />)
+
+    await screen.findByText('content loaded')
+    expect(screen.queryByText('tabs loaded')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('mobile-settings-button'))
+
+    expect(mocks.openTab).toHaveBeenCalledWith('__settings__', 'settings.title', 'settings')
+    expect(useUIStore.getState().sidebarOpen).toBe(false)
+  })
+
+  it('allows browser H5 mobile to stay on the settings tab', async () => {
     mocks.isMobile = true
     mocks.tabState.activeTabId = '__settings__'
     mocks.tabState.tabs = [
@@ -387,8 +418,7 @@ describe('AppShell boot flow', () => {
 
     await screen.findByText('content loaded')
     expect(screen.queryByText('tabs loaded')).not.toBeInTheDocument()
-    await waitFor(() => {
-      expect(mocks.setActiveTab).toHaveBeenCalledWith('session-1')
-    })
+    expect(screen.getByTestId('mobile-session-header')).toHaveTextContent('Settings')
+    expect(mocks.setActiveTab).not.toHaveBeenCalled()
   })
 })

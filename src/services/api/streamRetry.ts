@@ -7,6 +7,7 @@ import type {
 } from "../../types/message.js";
 import { logForDebugging } from "../../utils/debug.js";
 import { errorMessage } from "../../utils/errors.js";
+import { createSystemStreamingFallbackMessage } from "../../utils/messages.js";
 import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
@@ -36,14 +37,12 @@ type StreamQueryMessage =
  * every per-request value is a fresh local, so there is nothing to reset by hand.
  *
  * Safe against the double-tool-execution hazard (#766 / inc-4258): queryModel
- * only throws RetriableStreamError when the failed attempt produced zero
- * assistant messages (no content_block_stop completed), so query.ts never handed
- * a tool_use to the StreamingToolExecutor and no tool ran.
+ * buffers completed thinking/text and only throws RetriableStreamError before a
+ * local tool block completes or server-side tool activity starts.
  *
- * A failed attempt may already have yielded raw stream_event partials; the retry
- * re-emits message_start etc. queryModelWithoutStreaming ignores stream_event
- * entirely, and the streaming UI resets its in-flight partial on the next
- * message_start, so a re-emit at most causes a brief redraw.
+ * A failed attempt may already have yielded raw stream_event partials. Before
+ * retrying, emit a bounded recovery signal so streaming consumers discard that
+ * attempt instead of appending the next attempt to stale text/tool JSON.
  */
 export async function* withStreamRetry(
   attempt: () => AsyncGenerator<StreamQueryMessage, void>,
@@ -89,6 +88,9 @@ export async function* withStreamRetry(
         model:
           model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
       });
+      // Raw deltas from the failed attempt may already be visible. Consumers
+      // use this bounded retry signal to discard only that in-flight attempt.
+      yield createSystemStreamingFallbackMessage("stream_retry");
     }
   }
 }

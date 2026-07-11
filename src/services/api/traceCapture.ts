@@ -290,7 +290,8 @@ function trimBodySnapshotPreview(body: TraceBodySnapshot, maxPreviewChars: numbe
   }
 }
 
-export function clearTraceCaptureStateForTests(): void {
+export async function clearTraceCaptureStateForTests(): Promise<void> {
+  await Promise.allSettled([...traceWriteQueues.values()])
   traceWriteQueues.clear()
   traceReadCache.clear()
 }

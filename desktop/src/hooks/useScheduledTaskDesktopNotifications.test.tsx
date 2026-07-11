@@ -60,8 +60,94 @@ describe('useScheduledTaskDesktopNotifications', () => {
     expect(getRecentRunsMock).not.toHaveBeenCalled()
 
     resolveReady()
-    await vi.waitFor(() => expect(getRecentRunsMock).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() => expect(listMock).toHaveBeenCalledTimes(1))
+    expect(getRecentRunsMock).not.toHaveBeenCalled()
+  })
+
+  it('does not overlap scheduled-task polls while the previous task request is pending', async () => {
+    let resolveTasks: (value: { tasks: [] }) => void = () => {}
+    listMock.mockReturnValue(new Promise<{ tasks: [] }>((resolve) => {
+      resolveTasks = resolve
+    }))
+
+    render(<Harness />)
+    await vi.waitFor(() => expect(listMock).toHaveBeenCalledTimes(1))
+
+    await vi.advanceTimersByTimeAsync(90_000)
     expect(listMock).toHaveBeenCalledTimes(1)
+    expect(getRecentRunsMock).not.toHaveBeenCalled()
+
+    resolveTasks({ tasks: [] })
+    await vi.runAllTicks()
+  })
+
+  it('does not overlap recent-run requests while the previous run poll is pending', async () => {
+    listMock.mockResolvedValue({
+      tasks: [{
+        id: 'task-1',
+        name: 'Daily review',
+        cron: '* * * * *',
+        prompt: 'review',
+        enabled: true,
+        createdAt: 1,
+        notification: { enabled: true, channels: ['desktop'] },
+      }],
+    })
+    let resolveRuns: (value: { runs: [] }) => void = () => {}
+    getRecentRunsMock.mockReturnValue(new Promise<{ runs: [] }>((resolve) => {
+      resolveRuns = resolve
+    }))
+
+    render(<Harness />)
+    await vi.waitFor(() => expect(getRecentRunsMock).toHaveBeenCalledTimes(1))
+
+    await vi.advanceTimersByTimeAsync(90_000)
+    expect(listMock).toHaveBeenCalledTimes(1)
+    expect(getRecentRunsMock).toHaveBeenCalledTimes(1)
+
+    resolveRuns({ runs: [] })
+    await vi.runAllTicks()
+  })
+
+  it('notifies the first completed desktop task created after an empty initial poll', async () => {
+    const desktopTask = {
+      id: 'task-new',
+      name: 'New task',
+      cron: '* * * * *',
+      prompt: 'review',
+      enabled: true,
+      createdAt: 1,
+      notification: { enabled: true, channels: ['desktop'] },
+    }
+    listMock
+      .mockResolvedValueOnce({ tasks: [] })
+      .mockResolvedValue({ tasks: [desktopTask] })
+    getRecentRunsMock.mockResolvedValue({
+      runs: [{
+        id: 'run-new-task',
+        taskId: 'task-new',
+        taskName: 'New task',
+        startedAt: '2026-05-03T00:01:00.000Z',
+        completedAt: '2026-05-03T00:01:01.000Z',
+        status: 'completed',
+        prompt: 'review',
+        output: 'done',
+      }],
+    })
+
+    render(<Harness />)
+    await vi.waitFor(() => expect(listMock).toHaveBeenCalledTimes(1))
+    expect(getRecentRunsMock).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(30_000)
+    await vi.waitFor(() => expect(notifyDesktopMock).toHaveBeenCalledTimes(1))
+
+    expect(notifyDesktopMock).toHaveBeenCalledWith({
+      dedupeKey: 'scheduled-task:run-new-task',
+      title: '定时任务 New task',
+      body: '完成: done',
+      target: { type: 'scheduled' },
+    })
   })
 
   it('does not notify old runs on first poll and notifies new desktop-enabled task runs later', async () => {
@@ -198,9 +284,10 @@ describe('useScheduledTaskDesktopNotifications', () => {
     })
 
     render(<Harness />)
-    await vi.waitFor(() => expect(getRecentRunsMock).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() => expect(listMock).toHaveBeenCalledTimes(1))
     await vi.advanceTimersByTimeAsync(30_000)
 
+    expect(getRecentRunsMock).not.toHaveBeenCalled()
     expect(notifyDesktopMock).not.toHaveBeenCalled()
   })
 

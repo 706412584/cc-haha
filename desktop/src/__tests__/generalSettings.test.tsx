@@ -34,6 +34,9 @@ const tauriDialogMock = vi.hoisted(() => ({
 const tauriProcessMock = vi.hoisted(() => ({
   relaunch: vi.fn(),
 }))
+const viewportMock = vi.hoisted(() => ({
+  isMobile: false,
+}))
 const providerStoreState = {
   providers: [] as SavedProvider[],
   providerOrder: [] as string[],
@@ -72,6 +75,9 @@ vi.mock('../api/providers', () => ({
 
 vi.mock('../lib/desktopNotifications', () => desktopNotificationsMock)
 vi.mock('../components/chat/clipboard', () => clipboardMock)
+vi.mock('../hooks/useMobileViewport', () => ({
+  useMobileViewport: () => viewportMock.isMobile,
+}))
 vi.mock('@tauri-apps/api/core', () => tauriCoreMock)
 vi.mock('@tauri-apps/plugin-dialog', () => tauriDialogMock)
 vi.mock('@tauri-apps/plugin-process', () => tauriProcessMock)
@@ -130,6 +136,10 @@ vi.mock('../components/chat/CodeViewer', () => ({
   CodeViewer: ({ code }: { code: string }) => <pre data-testid="code-viewer">{code}</pre>,
 }))
 
+function installBrowserHost() {
+  window.desktopHost = browserHost
+}
+
 function installElectronDesktopHost() {
   window.desktopHost = {
     ...browserHost,
@@ -167,6 +177,7 @@ describe('Settings > General tab', () => {
   beforeEach(() => {
     vi.useRealTimers()
     MOCK_DELETE_PROVIDER.mockReset()
+    viewportMock.isMobile = false
     desktopNotificationsMock.getDesktopNotificationPermission.mockReset()
     desktopNotificationsMock.getDesktopNotificationPlatform.mockReset()
     desktopNotificationsMock.notifyDesktop.mockReset()
@@ -374,6 +385,30 @@ describe('Settings > General tab', () => {
     expect(toggle).toBeChecked()
   })
 
+  it('keeps the desktop settings layout on desktop runtime', () => {
+    render(<Settings />)
+
+    const page = screen.getByTestId('settings-page')
+    expect(page).not.toHaveClass('settings-page--mobile')
+    expect(page.querySelector('.settings-page__tabs')).toHaveClass('w-[180px]', 'border-r')
+  })
+
+  it('uses a single-column settings layout on mobile H5', () => {
+    viewportMock.isMobile = true
+    installBrowserHost()
+
+    render(<Settings />)
+
+    const page = screen.getByTestId('settings-page')
+    expect(page).toHaveClass('settings-page--mobile')
+    expect(page.querySelector('.settings-page__layout')).toHaveClass('flex')
+    expect(page.querySelector('.settings-page__tabs')).toHaveClass('settings-page__tabs')
+
+    fireEvent.click(screen.getByText('General'))
+
+    expect(screen.getByLabelText('Skip WebFetch domain preflight')).toBeInTheDocument()
+  })
+
   it('keeps the selected settings tab when returning to Settings', () => {
     const { unmount } = render(<Settings />)
 
@@ -386,19 +421,21 @@ describe('Settings > General tab', () => {
     expect(screen.getByLabelText('Skip WebFetch domain preflight')).toBeInTheDocument()
   })
 
-  it('offers the pure white appearance theme', () => {
+  it('offers the light appearance themes', () => {
     render(<Settings />)
 
     fireEvent.click(screen.getByText('General'))
     const pureWhite = screen.getByRole('button', { name: 'Pure White' })
     const warmClassic = screen.getByRole('button', { name: 'Warm Classic' })
+    const eyeCareGreen = screen.getByRole('button', { name: 'Eye-care Green' })
     const dark = screen.getByRole('button', { name: 'Dark' })
 
     expect((pureWhite.compareDocumentPosition(warmClassic) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0).toBe(true)
-    expect((warmClassic.compareDocumentPosition(dark) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0).toBe(true)
-    fireEvent.click(screen.getByRole('button', { name: 'Pure White' }))
+    expect((warmClassic.compareDocumentPosition(eyeCareGreen) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0).toBe(true)
+    expect((eyeCareGreen.compareDocumentPosition(dark) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0).toBe(true)
+    fireEvent.click(eyeCareGreen)
 
-    expect(useSettingsStore.getState().setTheme).toHaveBeenCalledWith('white')
+    expect(useSettingsStore.getState().setTheme).toHaveBeenCalledWith('eyeCare')
   })
 
   it('marks the pure white appearance theme as selected', () => {
@@ -1677,6 +1714,34 @@ describe('Settings > Providers tab', () => {
 
     expect(within(dialog).getByRole('button', { name: /OpenAI Responses API \(proxy\)/i })).toBeInTheDocument()
     expect(within(dialog).getByText('Requests will be translated via the local proxy')).toBeInTheDocument()
+  })
+
+  it('localizes the main model placeholder in the provider form', () => {
+    useSettingsStore.setState({ locale: 'zh' })
+    providerStoreState.presets = [
+      {
+        id: 'custom',
+        name: 'Custom',
+        baseUrl: 'https://api.example.com/anthropic',
+        apiFormat: 'anthropic',
+        defaultModels: {
+          main: '',
+          haiku: '',
+          sonnet: '',
+          opus: '',
+        },
+        needsApiKey: true,
+        websiteUrl: '',
+      },
+    ]
+
+    render(<Settings />)
+
+    fireEvent.click(screen.getByRole('button', { name: /添加服务商/i }))
+
+    const dialog = screen.getByRole('dialog')
+    expect(within(dialog).getByPlaceholderText('模型 ID')).toBeInTheDocument()
+    expect(within(dialog).queryByPlaceholderText('Model ID')).not.toBeInTheDocument()
   })
 
   it('normalizes blank model mappings to the main model when saving a provider', async () => {

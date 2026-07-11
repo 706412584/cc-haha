@@ -134,6 +134,47 @@ describe('ConversationService', () => {
     await expect(request).resolves.toEqual({ ok: true })
   })
 
+  it('should keep the replacement SDK socket attached when the old socket closes late', async () => {
+    const svc = new ConversationService()
+    const sid = crypto.randomUUID()
+    const oldSent: string[] = []
+    const newSent: string[] = []
+    const oldSocket = { send(data: string) { oldSent.push(data) } }
+    const newSocket = { send(data: string) { newSent.push(data) } }
+
+    ;(svc as any).sessions.set(sid, {
+      proc: { kill() {}, exited: Promise.resolve(0) },
+      outputCallbacks: [],
+      workDir: process.cwd(),
+      permissionMode: 'default',
+      sdkToken: 'token',
+      sdkSocket: null,
+      pendingOutbound: [],
+      startupPending: false,
+      startupExitCode: null,
+      stdoutLines: [],
+      stderrLines: [],
+      outputDrain: Promise.resolve(),
+      sdkMessages: [],
+      initMessage: null,
+      pendingPermissionRequests: new Map(),
+    })
+
+    expect(svc.attachSdkConnection(sid, oldSocket)).toBe(true)
+    expect(svc.attachSdkConnection(sid, newSocket)).toBe(true)
+    svc.detachSdkConnection(sid, oldSocket)
+
+    expect(await svc.sendMessage(sid, 'still connected')).toBe(true)
+    expect(oldSent).toHaveLength(0)
+    expect(newSent).toHaveLength(1)
+    expect(JSON.parse(newSent[0])).toMatchObject({
+      type: 'user',
+      message: {
+        content: [{ type: 'text', text: 'still connected' }],
+      },
+    })
+  })
+
   it('should forward suggested permission updates for allow-for-session decisions', () => {
     const svc = new ConversationService()
     const sent: unknown[] = []

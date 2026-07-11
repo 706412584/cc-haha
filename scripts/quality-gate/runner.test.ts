@@ -14,11 +14,13 @@ describe('quality gate modes', () => {
     expect(lanes).toContain('policy-checks')
     expect(lanes).toContain('desktop-checks')
     expect(lanes).toContain('server-checks')
+    expect(lanes).toContain('provider-contract-checks')
+    expect(lanes).toContain('chat-contract-checks')
     expect(lanes).toContain('adapter-checks')
     expect(lanes).toContain('native-checks')
     expect(lanes).toContain('docs-checks')
     expect(lanes).toContain('persistence-upgrade')
-    expect(lanes).toContain('quarantine')
+    expect(lanes).not.toContain('quarantine')
     expect(lanes).toContain('coverage')
     expect(lanes.some((lane) => lane.startsWith('baseline:'))).toBe(false)
   })
@@ -43,6 +45,8 @@ describe('quality gate modes', () => {
     expect(lanes).toContain('policy-checks')
     expect(lanes).toContain('desktop-checks')
     expect(lanes).toContain('server-checks')
+    expect(lanes).toContain('provider-contract-checks')
+    expect(lanes).toContain('chat-contract-checks')
     expect(lanes).toContain('adapter-checks')
     expect(lanes).toContain('docs-checks')
     expect(lanes).toContain('persistence-upgrade')
@@ -424,6 +428,52 @@ describe('runQualityGate', () => {
       expect(report.impact?.requiredChecks).toEqual(['`bun run check:desktop`'])
       expect(report.coverage?.suites[0].lines?.pct).toBe(88)
       expect(report.artifacts.map((artifact) => artifact.path)).toContain(join(coverageDir, 'coverage-report.md'))
+    } finally {
+      rmSync(artifactsDir, { recursive: true, force: true })
+    }
+  })
+
+  test('fails PR mode when the impact report is blocked by policy', async () => {
+    const artifactsDir = mkdtempSync(join(tmpdir(), 'quality-gate-test-'))
+    const lanes: LaneDefinition[] = [
+      {
+        id: 'impact-report',
+        title: 'Impact report',
+        description: 'Writes a blocked policy decision',
+        kind: 'command',
+        command: ['bash', '-lc', [
+          'printf "%s\\n"',
+          '"# PR impact report"',
+          '""',
+          '"Changed files: 1"',
+          '"Areas: cli-core"',
+          '"Labels: none"',
+          '"Blocked: yes"',
+          '"Blocking reasons:"',
+          '"- CLI core changes require maintainer approval."',
+          '""',
+          '"## Required local checks"',
+          '"- bun run check:server"',
+        ].join(' ')],
+        requiredForModes: ['pr'],
+      },
+    ]
+
+    try {
+      const { report } = await runQualityGateLanes({
+        mode: 'pr',
+        dryRun: false,
+        allowLive: false,
+        baselineTargets: [],
+        rootDir: process.cwd(),
+        artifactsDir,
+        runId: 'blocked-impact-test',
+      }, lanes)
+
+      expect(report.impact?.blocked).toBe(true)
+      expect(report.results[0].status).toBe('failed')
+      expect(report.results[0].error).toContain('change policy blocked')
+      expect(report.summary.failed).toBe(1)
     } finally {
       rmSync(artifactsDir, { recursive: true, force: true })
     }

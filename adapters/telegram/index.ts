@@ -42,7 +42,7 @@ import { ImageBlockWatcher } from '../common/attachment/image-block-watcher.js'
 import type { PendingUpload } from '../common/attachment/attachment-types.js'
 import * as fs from 'node:fs/promises'
 import { syncTelegramBotCommands } from './menu.js'
-import { createTelegramRuntimeCommandController, registerTelegramExtendedCommands, tryHandleTelegramSelectionCallback } from './commands.js'
+import { createTelegramRuntimeCommandController, registerAuthorizedTelegramCommand, registerTelegramExtendedCommands, tryHandleTelegramSelectionCallback } from './commands.js'
 
 const TELEGRAM_TEXT_LIMIT = 4000 // leave margin below 4096
 const TELEGRAM_STREAMING_TEXT_LIMIT = TELEGRAM_TEXT_LIMIT - 2 // reserve room for cursor
@@ -613,17 +613,20 @@ async function startNewSession(chatId: string, query?: string): Promise<void> {
   }
 }
 
-bot.command('new', async (ctx) => {
+const isAuthorizedTelegramUser = (userId: number) => isAllowedUser('telegram', userId)
+
+registerAuthorizedTelegramCommand(bot, 'new', isAuthorizedTelegramUser, async (ctx) => {
   const chatId = String(ctx.chat.id)
-  await startNewSession(chatId, ctx.match?.trim() || undefined)
+  const query = typeof ctx.match === 'string' ? ctx.match.trim() : undefined
+  await startNewSession(chatId, query || undefined)
 })
 
-bot.command('projects', async (ctx) => {
+registerAuthorizedTelegramCommand(bot, 'projects', isAuthorizedTelegramUser, async (ctx) => {
   const chatId = String(ctx.chat.id)
   await showProjectPicker(chatId)
 })
 
-bot.command('stop', (ctx) => {
+registerAuthorizedTelegramCommand(bot, 'stop', isAuthorizedTelegramUser, (ctx) => {
   const chatId = String(ctx.chat.id)
   void (async () => {
     const stored = await ensureExistingSession(chatId)
@@ -636,12 +639,12 @@ bot.command('stop', (ctx) => {
   })()
 })
 
-bot.command('status', async (ctx) => {
+registerAuthorizedTelegramCommand(bot, 'status', isAuthorizedTelegramUser, async (ctx) => {
   const chatId = String(ctx.chat.id)
   await ctx.reply(await buildStatusText(chatId))
 })
 
-bot.command('clear', (ctx) => {
+registerAuthorizedTelegramCommand(bot, 'clear', isAuthorizedTelegramUser, (ctx) => {
   const chatId = String(ctx.chat.id)
   void (async () => {
     const stored = await ensureExistingSession(chatId)

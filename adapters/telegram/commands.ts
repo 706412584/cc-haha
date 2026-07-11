@@ -31,7 +31,7 @@ type TelegramInlineKeyboardMarkup = {
   inline_keyboard: Array<Array<{ text: string; callback_data: string }>>
 }
 
-type TelegramCommandContext = {
+export type TelegramCommandContext = {
   chat?: { id: string | number; type?: string }
   from?: { id: number }
   match?: string | RegExpMatchArray
@@ -78,6 +78,28 @@ export type TelegramCommandController = ReturnType<typeof createTelegramCommandC
 
 export type TelegramCommandRegistrar = {
   command: (command: string, handler: (ctx: TelegramCommandContext) => unknown) => unknown
+}
+
+export async function ensureAuthorizedTelegramPrivateChat(
+  ctx: TelegramCommandContext,
+  isAllowedUser: (userId: number) => boolean,
+): Promise<boolean> {
+  if (!ctx.from || ctx.chat?.type !== 'private') return false
+  if (isAllowedUser(ctx.from.id)) return true
+  await ctx.reply('🔒 未授权。请在 Claude Code 桌面端生成配对码后发送给我。')
+  return false
+}
+
+export function registerAuthorizedTelegramCommand(
+  bot: TelegramCommandRegistrar,
+  command: string,
+  isAllowedUser: (userId: number) => boolean,
+  handler: (ctx: TelegramCommandContext) => unknown | Promise<unknown>,
+): void {
+  bot.command(command, (ctx) => void (async () => {
+    if (!await ensureAuthorizedTelegramPrivateChat(ctx, isAllowedUser)) return
+    await handler(ctx)
+  })())
 }
 
 export type TelegramRuntimeCommandControllerDeps = {
@@ -168,13 +190,6 @@ export function createTelegramCommandController(deps: TelegramCommandControllerD
     }
   }
 
-  const ensureAuthorizedPrivateChat = async (ctx: TelegramCommandContext): Promise<boolean> => {
-    if (!ctx.from || ctx.chat?.type !== 'private') return false
-    if (deps.isAllowedUser(ctx.from.id)) return true
-    await ctx.reply('🔒 未授权。请在 Claude Code 桌面端生成配对码后发送给我。')
-    return false
-  }
-
   const showProviderPicker = async (chatId: string): Promise<void> => {
     try {
       const { providers, activeId } = await deps.httpClient.listProviders()
@@ -222,7 +237,7 @@ export function createTelegramCommandController(deps: TelegramCommandControllerD
   }
 
   const handleProviderCommand = async (ctx: TelegramCommandContext): Promise<void> => {
-    if (!await ensureAuthorizedPrivateChat(ctx)) return
+    if (!await ensureAuthorizedTelegramPrivateChat(ctx, deps.isAllowedUser)) return
     const chatId = String(ctx.chat!.id)
     const query = getCommandMatchText(ctx)
     if (!query) {
@@ -290,7 +305,7 @@ export function createTelegramCommandController(deps: TelegramCommandControllerD
   }
 
   const handleModelCommand = async (ctx: TelegramCommandContext): Promise<void> => {
-    if (!await ensureAuthorizedPrivateChat(ctx)) return
+    if (!await ensureAuthorizedTelegramPrivateChat(ctx, deps.isAllowedUser)) return
     const chatId = String(ctx.chat!.id)
     const modelId = getCommandMatchText(ctx)
     if (modelId) {
@@ -349,7 +364,7 @@ export function createTelegramCommandController(deps: TelegramCommandControllerD
   }
 
   const handleSkillsCommand = async (ctx: TelegramCommandContext): Promise<void> => {
-    if (!await ensureAuthorizedPrivateChat(ctx)) return
+    if (!await ensureAuthorizedTelegramPrivateChat(ctx, deps.isAllowedUser)) return
     await showSkills(String(ctx.chat!.id))
   }
 
@@ -392,7 +407,7 @@ export function createTelegramCommandController(deps: TelegramCommandControllerD
   }
 
   const handleResumeCommand = async (ctx: TelegramCommandContext): Promise<void> => {
-    if (!await ensureAuthorizedPrivateChat(ctx)) return
+    if (!await ensureAuthorizedTelegramPrivateChat(ctx, deps.isAllowedUser)) return
     await showResumeProjectPicker(String(ctx.chat!.id))
   }
 

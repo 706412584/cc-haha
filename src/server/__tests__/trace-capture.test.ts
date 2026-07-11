@@ -35,11 +35,11 @@ beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'trace-capture-'))
   originalConfigDir = process.env.CLAUDE_CONFIG_DIR
   process.env.CLAUDE_CONFIG_DIR = tmpDir
-  clearTraceCaptureStateForTests()
+  await clearTraceCaptureStateForTests()
 })
 
 afterEach(async () => {
-  clearTraceCaptureStateForTests()
+  await clearTraceCaptureStateForTests()
   if (originalConfigDir === undefined) {
     delete process.env.CLAUDE_CONFIG_DIR
   } else {

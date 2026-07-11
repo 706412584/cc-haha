@@ -1148,8 +1148,8 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
         isHeroComposer
           ? `bg-[var(--color-surface)] ${isMobileComposer ? 'px-4 pb-3' : 'px-8 pb-4'}`
           : compact
-            ? `border-t border-[var(--color-border)]/70 bg-[var(--color-surface)] ${isMobileComposer ? 'px-3 pb-[calc(env(safe-area-inset-bottom)+10px)] pt-2' : 'px-3 py-3'}`
-            : `bg-[var(--color-surface)] ${isMobileComposer ? 'px-3 pb-[calc(env(safe-area-inset-bottom)+10px)] pt-2' : 'px-4 py-4'}`
+            ? `border-t border-[var(--color-border)]/70 bg-[var(--color-surface)] ${isMobileComposer ? 'mobile-composer-shell px-3 pb-[calc(env(safe-area-inset-bottom)+10px)] pt-2' : 'px-3 py-3'}`
+            : `bg-[var(--color-surface)] ${isMobileComposer ? 'mobile-composer-shell px-3 pb-[calc(env(safe-area-inset-bottom)+10px)] pt-2' : 'px-4 py-4'}`
       }
     >
       <div
@@ -1272,8 +1272,8 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
           className={isHeroComposer
             ? `glass-panel relative flex flex-col gap-3 overflow-visible ${embedLaunchControlsInHero ? 'rounded-xl' : 'rounded-t-xl rounded-b-none'} p-4 transition-colors ${isDragActive ? 'composer-drop-target-active' : ''}`
             : compact
-              ? `glass-panel relative overflow-visible p-3 transition-colors ${isMobileComposer ? 'rounded-2xl shadow-[0_-12px_36px_rgba(54,35,28,0.12)]' : 'rounded-xl'} ${isDragActive ? 'composer-drop-target-active' : ''}`
-              : `glass-panel relative overflow-visible transition-colors ${isMobileComposer ? 'rounded-2xl p-3 shadow-[0_-12px_36px_rgba(54,35,28,0.12)]' : 'rounded-xl p-4'} ${isDragActive ? 'composer-drop-target-active' : ''}`}
+              ? `glass-panel relative overflow-visible p-3 transition-colors ${isMobileComposer ? 'mobile-composer-panel rounded-2xl shadow-[0_-12px_36px_rgba(54,35,28,0.12)]' : 'rounded-xl'} ${isDragActive ? 'composer-drop-target-active' : ''}`
+              : `glass-panel relative overflow-visible transition-colors ${isMobileComposer ? 'mobile-composer-panel rounded-2xl p-3 shadow-[0_-12px_36px_rgba(54,35,28,0.12)]' : 'rounded-xl p-4'} ${isDragActive ? 'composer-drop-target-active' : ''}`}
           {...dragHandlers}
         >
           {isDragActive && (
@@ -1550,17 +1550,17 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
               disabled={isWorkspaceMissing}
               rows={1}
               className={`w-full resize-none bg-transparent text-sm leading-relaxed text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] disabled:opacity-50 ${
-                useCompactControls ? 'py-1.5' : 'py-2'
+                isMobileComposer ? 'mobile-composer-textarea min-h-[44px] py-2.5' : useCompactControls ? 'py-1.5' : 'py-2'
               }`}
             />
           )}
 
           <div data-testid="chat-input-toolbar" className={isHeroComposer
             ? 'flex items-center justify-between border-t border-[var(--color-border-separator)] pt-3'
-            : `mt-2 flex items-center justify-between border-t border-[var(--color-border-separator)] ${
+            : `mt-2 flex items-center justify-between border-t border-[var(--color-border-separator)] ${isMobileComposer ? 'mobile-composer-toolbar' : ''} ${
               useCompactControls ? '-mx-3 -mb-3 gap-2 px-2.5 py-2' : '-mx-4 -mb-4 px-3 py-3'
             }`}>
-            <div className="flex min-w-0 items-center gap-2">
+            <div className={`flex min-w-0 items-center gap-2 ${isMobileComposer ? 'mobile-composer-toolbar__tools' : ''}`}>
               {!isMemberSession && (
                 <>
                   <div ref={plusMenuRef} className="relative">
@@ -1641,7 +1641,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
               )}
             </div>
 
-            <div className="flex min-w-0 items-center gap-2">
+            <div className={`flex min-w-0 items-center gap-2 ${isMobileComposer ? 'mobile-composer-toolbar__actions' : ''}`}>
               {!isMemberSession && activeTabId && (
                 <ContextUsageIndicator
                   sessionId={activeTabId}

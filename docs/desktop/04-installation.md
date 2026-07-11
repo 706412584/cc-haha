@@ -11,6 +11,7 @@
 | macOS (Apple Silicon / M 系列) | `Claude-Code-Haha-<版本>-mac-arm64.dmg` |
 | macOS (Intel) | `Claude-Code-Haha-<版本>-mac-x64.dmg` |
 | Windows (x64) | `Claude-Code-Haha-<版本>-win-x64.exe` |
+| Windows (ARM64) | `Claude-Code-Haha-<版本>-win-arm64.exe` |
 | Linux (x64) | `Claude-Code-Haha-<版本>-linux-x86_64.AppImage` 或 `...-linux-amd64.deb` |
 | Linux (ARM64) | `Claude-Code-Haha-<版本>-linux-arm64.AppImage` 或 `...-linux-arm64.deb` |
 
@@ -68,4 +69,6 @@ bun run dev --host 127.0.0.1 --port 2024
 
 **Q: 这个版本会自动更新吗？**
 
-`v0.4.3` 起的正式 Release 会通过 GitHub Releases 检查更新，并下载对应平台的更新包。首次迁移到 signed/notarized macOS 版本时，建议先手动下载安装 `v0.4.3`；后续版本可以走应用内更新。覆盖安装不会删除本地配置和会话数据（`~/.claude`）。
+`v0.4.3` 起的正式 Release 会通过 GitHub Releases 检查更新，并下载对应平台的更新包。覆盖安装或应用内更新不会删除本地配置和会话数据（`~/.claude`）。
+
+正式公开的 macOS Release 需要签名和公证；draft/unsigned 临时包仍可能需要手动放行。Windows 签名不是发布阻塞项，未签名安装包仍可更新，但可能出现 SmartScreen 提示。

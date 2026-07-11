@@ -13,6 +13,9 @@ import { handleModelsApi } from '../api/models.js'
 import { handleStatusApi, resetUsage, addUsage } from '../api/status.js'
 import { ProviderService } from '../services/providerService.js'
 import {
+  clearOpenAICodexModelCatalogCache,
+} from '../../services/openaiAuth/modelCatalog.js'
+import {
   clearOpenAIOAuthTokenCache,
 } from '../../services/openaiAuth/storage.js'
 import { plainTextStorage } from '../../utils/secureStorage/plainTextStorage.js'
@@ -630,8 +633,14 @@ describe('Models API', () => {
       expiresAt: Date.now() + 60_000,
     })
 
+    const originalFetch = globalThis.fetch
+    clearOpenAICodexModelCatalogCache()
+    globalThis.fetch = async () => new Response('offline', { status: 503 })
     const { req, url, segments } = makeRequest('GET', '/api/models')
-    const res = await handleModelsApi(req, url, segments)
+    const res = await handleModelsApi(req, url, segments).finally(() => {
+      globalThis.fetch = originalFetch
+      clearOpenAICodexModelCatalogCache()
+    })
 
     expect(res.status).toBe(200)
     const body = await res.json()
@@ -639,6 +648,7 @@ describe('Models API', () => {
 
     expect(ids).toContain('deepseek-v4-pro')
     expect(ids).toContain('deepseek-v4-flash')
+    expect(ids).toContain('gpt-5.6-sol')
     expect(ids).toContain('gpt-5.3-codex')
     expect(ids).toContain('gpt-5.4')
     expect(ids).toContain('gpt-5.4-mini')
@@ -767,11 +777,19 @@ describe('Models API', () => {
       name: 'ChatGPT Official',
     })
     expect(body.models.map((model) => model.id)).toEqual([
+      'gpt-5.6-sol',
+      'gpt-5.6-terra',
+      'gpt-5.6-luna',
       'gpt-5.3-codex',
       'gpt-5.4',
       'gpt-5.5',
       'gpt-5.4-mini',
     ])
+    expect(body.models[0]).toMatchObject({
+      id: 'gpt-5.6-sol',
+      defaultReasoningEffort: 'low',
+      supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    })
   })
 
   it('PUT /api/models/current should persist GPT model to managed settings when ChatGPT Official is active', async () => {
@@ -879,6 +897,9 @@ describe('Model Options', () => {
     const labels = options.map(option => option.label)
 
     expect(values).toContain('gpt-5.3-codex')
+    expect(values).toContain('gpt-5.6-sol')
+    expect(values).toContain('gpt-5.6-terra')
+    expect(values).toContain('gpt-5.6-luna')
     expect(values).toContain('gpt-5.4')
     expect(values).toContain('gpt-5.4-mini')
     expect(labels).toContain('deepseek-v4-pro')

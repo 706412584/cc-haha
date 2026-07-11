@@ -61,6 +61,11 @@ describe('withStreamRetry', () => {
     const out = await collect(withStreamRetry(attempt, 'test-model', []))
 
     expect(calls).toBe(2)
+    expect(out).toContainEqual(expect.objectContaining({
+      type: 'system',
+      subtype: 'streaming_fallback',
+      cause: 'stream_retry',
+    }))
     const assistants = out.filter(m => m.type === 'assistant')
     expect(assistants).toHaveLength(1)
     expect(assistants[0].uuid).toBe('ok')
@@ -82,6 +87,9 @@ describe('withStreamRetry', () => {
     const out = await collect(withStreamRetry(attempt, 'test-model', []))
 
     expect(calls).toBe(3) // 1 initial attempt + 2 retries
+    expect(out.filter(
+      m => m.type === 'system' && m.subtype === 'streaming_fallback' && m.cause === 'stream_retry',
+    )).toHaveLength(2)
     const last = out.at(-1)
     expect(last?.type).toBe('assistant')
     expect(last?.isApiErrorMessage).toBe(true)

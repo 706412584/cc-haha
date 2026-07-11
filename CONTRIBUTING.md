@@ -1,14 +1,20 @@
 # 贡献指南
 
-提交 PR 前需要完成以下三步。
+提交 PR 前请先确认改动影响面，再运行对应的确定性检查。外部贡献者不需要提供真实模型账号或额度。
 
-## 1. 运行本地门禁
+## 1. 按影响面运行本地检查
+
+```bash
+bun run check:impact
+```
+
+`check:impact` 会列出这次改动选中的检查。先运行对应的窄命令；准备声明 PR-ready、改动风险较高，或维护者需要复现完整 CI 时，再运行统一入口：
 
 ```bash
 bun run verify
 ```
 
-`bun run verify` 会一键检查 policy、desktop、server、adapters、native、docs、quarantine 和 coverage。非 0 退出就说明当前分支还不能提交 PR。
+`bun run verify` 会按改动路径执行被选中的 policy、产品、契约、持久化和 coverage lane，但不会调用真实模型。小范围贡献无需在本机重复所有无关模块；GitHub PR gate 会再次执行并严格核对 selected / skipped 状态。
 
 `git push` 不再自动运行本地质量门禁。需要质量检查时请手动运行 `bun run quality:push` 或 `bun run verify`；完整覆盖率仍以 `bun run verify` 为准。
 
@@ -20,6 +26,9 @@ bun run verify
 | 桌面端 | `bun run check:desktop` |
 | IM Adapter | `bun run check:adapters` |
 | 桌面 Electron / 原生打包 | `bun run check:native` |
+| Provider / runtime / proxy | `bun run check:provider-contract` |
+| 桌面聊天 / WebSocket / 会话 | `bun run check:chat-contract` |
+| 持久化格式与迁移 | `bun run check:persistence-upgrade` |
 | 文档 | `bun run check:docs` |
 
 门禁失败时，查看最新质量报告和对应 lane 日志定位问题：
@@ -29,9 +38,9 @@ artifacts/quality-runs/<timestamp>/report.md
 artifacts/quality-runs/<timestamp>/logs/<lane>.log
 ```
 
-## 2. 桌面端功能必须手工测试
+## 2. 用户可见或跨进程桌面改动需要手工测试
 
-改动涉及 `desktop/` 的 UI、store、API、Electron host 或 native/packaging 层时，除了自动门禁外，还必须在真机上做手工测试：
+改动涉及用户可见 UI、跨 WebSocket/进程流程、Electron host 或 native/packaging 时，除了自动门禁外，还应在真机上验证相关流程。纯样式、纯工具或已有组件单元测试能够完整证明的改动，不要求重复无关流程：
 
 - 起本地服务 `SERVER_PORT=3456 bun run src/server/index.ts`
 - 起桌面端 `cd desktop && bun run dev`
@@ -43,16 +52,18 @@ artifacts/quality-runs/<timestamp>/logs/<lane>.log
 每个 PR 的描述里必须包含：
 
 - **影响范围**：改了哪些模块（desktop / server / adapter / native / docs / provider / agent-loop）
-- **测试说明**：跑了哪些测试、覆盖率情况、手工测试了哪些流程（桌面端改动必须有真机测试记录）
+- **测试说明**：跑了哪些测试、覆盖率情况、手工测试了哪些流程（用户可见或跨进程桌面改动需有真机记录）
 - **剩余风险**：已知未覆盖的边界或需要后续跟进的点
 
-如果改动了 provider/runtime、agent-loop、文件编辑、权限、session 等核心路径，还需要跑真实模型验证：
+provider/runtime、agent-loop、文件编辑、权限、session 等核心路径必须先通过离线 mock/fixture/contract 测试。真实模型验证只由拥有可信 secrets 和额度的维护者在高风险合并或发版前运行：
 
 ```bash
 bun run quality:providers
 bun run quality:smoke --provider-model <provider:model>
 ```
 
+来自 fork 的 PR 不会获得仓库 secrets，也不应被要求运行真实模型。贡献者只需在 PR 中明确写 `live model: not run (untrusted fork / no provider)`；这不是确定性 PR gate 的失败理由。
+
 ## 更多
 
-完整质量门禁和覆盖率说明见 [AGENTS.md](AGENTS.md)。
+完整质量门禁和覆盖率说明见 [贡献指南](docs/guide/contributing.md)；`AGENTS.md` 仅保留 Agent 的高信号入口与路由。

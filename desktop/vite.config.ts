@@ -18,7 +18,9 @@ export default defineConfig({
   build: {
     // Vite 8 defaults to baseline-widely-available (safari16.4+), which
     // requires macOS 13+. Tauri on macOS 12 uses Safari 15 WebView.
-    target: ['es2021', 'safari15'],
+    // Android H5 validation also runs on Chrome 81, which cannot parse ES2021
+    // logical assignment operators such as ??= and ||=.
+    target: ['es2020', 'chrome81', 'safari15'],
     chunkSizeWarningLimit: 2200,
     rollupOptions: {
       onwarn(warning, warn) {

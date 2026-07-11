@@ -15,6 +15,7 @@ const SETTINGS_TABS = [
   'agents',
   'skills',
   'memory',
+  'projectRules',
   'plugins',
   'computerUse',
   'trace',

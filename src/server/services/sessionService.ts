@@ -320,7 +320,7 @@ const VALID_SESSION_PERMISSION_MODES = new Set([
   'bypassPermissions',
   'dontAsk',
 ])
-const VALID_SESSION_EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'max'])
+const VALID_SESSION_EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
 
 type ContentBlock = Record<string, unknown>
 
@@ -382,7 +382,13 @@ export class SessionService {
     expiresAt: number
     result: { sessions: SessionListItem[]; total: number }
   }>()
+  private readonly sessionListRequests = new Map<
+    string,
+    Promise<{ sessions: SessionListItem[]; total: number }>
+  >()
+  private sessionListCacheGeneration = 0
   private readonly sessionListSummaryCache = new Map<string, SessionListSummaryCacheEntry>()
+  private readonly sessionListSummaryRequests = new Map<string, Promise<SessionListSummary>>()
 
   // readJsonlFile parse cache. Keyed by absolute filePath, invalidated by
   // mtimeMs+size mismatch on each access (append-only JSONL means size alone
@@ -423,6 +429,7 @@ export class SessionService {
 
   private invalidateSessionListCache(): void {
     this.sessionListCache.clear()
+    this.sessionListCacheGeneration += 1
   }
 
   /**
@@ -535,13 +542,27 @@ export class SessionService {
       return this.cloneSessionListSummary(cached.summary)
     }
 
-    const summary = await this.scanSessionListSummary(filePath, projectDir, stat)
-    this.sessionListSummaryCache.set(filePath, {
-      mtimeMs: stat.mtimeMs,
-      size: stat.size,
-      summary: this.cloneSessionListSummary(summary),
-    })
-    return summary
+    const requestKey = `${filePath}:${stat.mtimeMs}:${stat.size}`
+    const inFlight = this.sessionListSummaryRequests.get(requestKey)
+    if (inFlight) {
+      return this.cloneSessionListSummary(await inFlight)
+    }
+
+    const request = this.scanSessionListSummary(filePath, projectDir, stat)
+    this.sessionListSummaryRequests.set(requestKey, request)
+    try {
+      const summary = await request
+      this.sessionListSummaryCache.set(filePath, {
+        mtimeMs: stat.mtimeMs,
+        size: stat.size,
+        summary: this.cloneSessionListSummary(summary),
+      })
+      return this.cloneSessionListSummary(summary)
+    } finally {
+      if (this.sessionListSummaryRequests.get(requestKey) === request) {
+        this.sessionListSummaryRequests.delete(requestKey)
+      }
+    }
   }
 
   // --------------------------------------------------------------------------
@@ -2532,6 +2553,33 @@ export class SessionService {
       return this.cloneSessionListResult(cached.result)
     }
 
+    const cacheGeneration = this.sessionListCacheGeneration
+    const requestKey = `${cacheGeneration}:${cacheKey}`
+    const inFlight = this.sessionListRequests.get(requestKey)
+    if (inFlight) {
+      return this.cloneSessionListResult(await inFlight)
+    }
+
+    const request = this.loadSessionList(options, cacheKey, cacheGeneration)
+    this.sessionListRequests.set(requestKey, request)
+    try {
+      return this.cloneSessionListResult(await request)
+    } finally {
+      if (this.sessionListRequests.get(requestKey) === request) {
+        this.sessionListRequests.delete(requestKey)
+      }
+    }
+  }
+
+  private async loadSessionList(
+    options: {
+      project?: string
+      limit?: number
+      offset?: number
+    } | undefined,
+    cacheKey: string,
+    cacheGeneration: number,
+  ): Promise<{ sessions: SessionListItem[]; total: number }> {
     const sessionFiles = await this.discoverSessionFiles(options?.project)
     const filesWithStats = (await Promise.all(sessionFiles.map(async (sessionFile) => {
       try {
@@ -2610,10 +2658,12 @@ export class SessionService {
     }
 
     const result = { sessions: items, total }
-    this.sessionListCache.set(cacheKey, {
-      expiresAt: Date.now() + this.sessionListCacheTtlMs,
-      result: this.cloneSessionListResult(result),
-    })
+    if (cacheGeneration === this.sessionListCacheGeneration) {
+      this.sessionListCache.set(cacheKey, {
+        expiresAt: Date.now() + this.sessionListCacheTtlMs,
+        result: this.cloneSessionListResult(result),
+      })
+    }
     return result
   }
 
@@ -2678,6 +2728,21 @@ export class SessionService {
       sessionId,
       this.entriesToMessages(entries),
     )
+  }
+
+  async getSubagentTranscriptMessages(
+    sessionId: string,
+    agentId: string,
+  ): Promise<MessageEntry[]> {
+    const found = await this.findSessionFile(sessionId)
+    if (!found) {
+      throw ApiError.notFound(`Session not found: ${sessionId}`)
+    }
+
+    const entries = await this.readJsonlFile(
+      this.subagentTranscriptPath(found.projectDir, sessionId, agentId),
+    )
+    return this.entriesToMessages(entries)
   }
 
   async getSessionMessagesSignature(sessionId: string): Promise<string | null> {

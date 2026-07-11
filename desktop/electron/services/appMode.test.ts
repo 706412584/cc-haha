@@ -117,6 +117,18 @@ describe('Electron app mode service', () => {
     })
   })
 
+  it('does not point existing config at a portable dir that cannot persist app-mode.json', () => {
+    const fakeApp = app()
+    const active = tempDir()
+    const selected = path.join(tempDir(), 'portable')
+    fs.mkdirSync(path.join(selected, 'app-mode.json'), { recursive: true })
+
+    expect(() => setAppMode(fakeApp, { mode: 'portable', portableDir: selected }, { CLAUDE_CONFIG_DIR: active }))
+      .toThrow()
+    expect(fs.existsSync(path.join(active, 'app-mode.json'))).toBe(false)
+    expect(fs.existsSync(path.join(fakeApp.getPath('userData'), 'app-mode.json'))).toBe(false)
+  })
+
   it('reports whether the default portable dir already has data', () => {
     const fakeApp = app()
     expect(detectPortableDir(fakeApp)).toEqual({

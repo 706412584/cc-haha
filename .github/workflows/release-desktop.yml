@@ -40,10 +40,11 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           WIN_CSC_LINK: ${{ secrets.WINDOWS_CERTIFICATE }}
           WIN_CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          RELEASE_DRAFT: ${{ github.event_name == 'workflow_dispatch' && inputs.draft == true }}
         run: |
           # macOS signing + notarization is preferred: Squirrel.Mac auto-update and
           # first-launch Gatekeeper approval work best with a notarized Developer ID build.
-          # A migration release may still ship unsigned while Apple Developer ID setup is pending.
+          # Drafts may still build unsigned while Apple Developer ID setup is being tested.
           missing=()
           [ -n "$CSC_LINK" ] || missing+=("MACOS_CERTIFICATE")
           [ -n "$CSC_KEY_PASSWORD" ] || missing+=("MACOS_CERTIFICATE_PASSWORD")
@@ -53,6 +54,10 @@ jobs:
           if [ "${#missing[@]}" -gt 0 ]; then
             printf '::warning::Missing macOS signing/notarization secrets (%s): macOS artifacts will be unsigned and users must use install-macos-unsigned.sh.\n' "${missing[*]}"
             echo "macos_signed=false" >> "$GITHUB_OUTPUT"
+            if [ "$RELEASE_DRAFT" != "true" ]; then
+              echo "::error::Refusing to publish a non-draft desktop release without macOS signing/notarization secrets."
+              exit 1
+            fi
           else
             echo "macos_signed=true" >> "$GITHUB_OUTPUT"
           fi
@@ -608,7 +613,7 @@ jobs:
           tag_name: v${{ steps.version.outputs.value }}
           name: Claude Code Haha v${{ steps.version.outputs.value }}
           body: ${{ steps.release_notes.outputs.body }}
-          draft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft == true }}
+          draft: true
           prerelease: false
           fail_on_unmatched_files: true
           files: |
@@ -621,8 +626,14 @@ jobs:
             artifacts/update-metadata-standard/*.yml
             desktop/scripts/install-macos-unsigned.sh
 
-      - name: Ensure workflow-dispatch release remains draft
+      - name: Publish GitHub release after complete upload
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.draft == false)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "v${{ steps.version.outputs.value }}" --draft=false --repo "${{ github.repository }}"
+
+      - name: Keep workflow-dispatch release as draft
         if: github.event_name == 'workflow_dispatch' && inputs.draft == true
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release edit "v${{ steps.version.outputs.value }}" --draft --repo "${{ github.repository }}"
+        run: gh release view "v${{ steps.version.outputs.value }}" --json isDraft --jq 'if .isDraft then "release remains draft" else error("workflow-dispatch release was published unexpectedly") end' --repo "${{ github.repository }}"

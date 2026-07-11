@@ -44,7 +44,8 @@ export function AppShell() {
   const t = useTranslation()
   const traceLaunch = useMemo(() => getTraceLaunchRequest(), [])
   const desktopRuntime = isDesktopRuntime()
-  const isMobileShell = useMobileViewport() && !desktopRuntime
+  const forceMobileShell = !desktopRuntime && typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('forceMobile') === '1'
+  const isMobileShell = (useMobileViewport() || forceMobileShell) && !desktopRuntime
   const tabs = useTabStore((s) => s.tabs)
   const activeTabId = useTabStore((s) => s.activeTabId)
   const setActiveTab = useTabStore((s) => s.setActiveTab)
@@ -56,6 +57,9 @@ export function AppShell() {
   const activeTab = tabs.find((tab) => tab.sessionId === activeTabId)
   const isActiveChatTab = isChatTab(activeTab)
   const mobileSessionTitle = activeSession?.title || activeTab?.title || t('session.untitled')
+  const mobilePageTitle = isActiveChatTab
+    ? mobileSessionTitle
+    : activeTab?.title || t('empty.title')
   const mobileSessionUpdated = (() => {
     if (!activeSession?.modifiedAt) return ''
     const diff = Date.now() - new Date(activeSession.modifiedAt).getTime()
@@ -159,7 +163,7 @@ export function AppShell() {
 
   useEffect(() => {
     if (!ready || !isMobileShell) return
-    if (isChatTab(activeTab) || (!activeTab && !activeTabId)) return
+    if (isChatTab(activeTab) || activeTab?.type === 'settings' || (!activeTab && !activeTabId)) return
     const nextChatTab = tabs.find(isChatTab)
     if (nextChatTab) {
       setActiveTab(nextChatTab.sessionId)
@@ -183,6 +187,11 @@ export function AppShell() {
       return
     }
     toggleSidebar()
+  }
+
+  const openMobileSettings = () => {
+    useTabStore.getState().openTab(SETTINGS_TAB_ID, t('settings.title'), 'settings')
+    setEffectiveSidebarOpen(false)
   }
 
   if (!desktopRuntime && h5StartupError) {
@@ -251,7 +260,7 @@ export function AppShell() {
         {isMobileShell ? (
           <div
             data-testid="mobile-session-header"
-            className="flex shrink-0 items-center gap-3 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2"
+            className="mobile-app-header flex shrink-0 items-center gap-3 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2"
           >
             <button
               type="button"
@@ -260,17 +269,17 @@ export function AppShell() {
               aria-expanded={effectiveSidebarOpen}
               aria-label={effectiveSidebarOpen ? t('sidebar.collapse') : t('sidebar.expand')}
               onClick={toggleEffectiveSidebar}
-              className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
+              className="mobile-app-header__button inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
             >
               <span className="material-symbols-outlined text-[20px]">
                 {effectiveSidebarOpen ? 'close' : 'menu'}
               </span>
             </button>
-            {isActiveChatTab ? (
-              <div className="min-w-0 flex-1">
-                <h1 className="truncate text-[15px] font-bold leading-tight text-[var(--color-text-primary)]">
-                  {mobileSessionTitle}
-                </h1>
+            <div className="min-w-0 flex-1">
+              <h1 className="truncate text-[15px] font-bold leading-tight text-[var(--color-text-primary)]">
+                {mobilePageTitle}
+              </h1>
+              {isActiveChatTab ? (
                 <div className="mt-0.5 flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap text-[10px] font-medium text-[var(--color-text-tertiary)]">
                   {activeTab?.status === 'running' ? (
                     <span className="flex shrink-0 items-center gap-1 text-[var(--color-text-secondary)]">
@@ -291,8 +300,21 @@ export function AppShell() {
                     </>
                   ) : null}
                 </div>
-              </div>
-            ) : null}
+              ) : (
+                <div className="mt-0.5 truncate text-[10px] font-medium text-[var(--color-text-tertiary)]">
+                  Code Council
+                </div>
+              )}
+            </div>
+            <button
+              type="button"
+              data-testid="mobile-settings-button"
+              aria-label={t('settings.title')}
+              onClick={openMobileSettings}
+              className="mobile-app-header__button inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
+            >
+              <span className="material-symbols-outlined text-[20px]">settings</span>
+            </button>
           </div>
         ) : null}
         {!isMobileShell ? <TabBar /> : null}

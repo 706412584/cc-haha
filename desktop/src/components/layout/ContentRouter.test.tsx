@@ -26,6 +26,10 @@ vi.mock('../../pages/Settings', () => ({
   Settings: () => <div data-testid="settings-page" />,
 }))
 
+vi.mock('../../pages/Market', () => ({
+  Market: () => <div data-testid="market-page" />,
+}))
+
 vi.mock('../../pages/TerminalSettings', () => ({
   TerminalSettings: ({ active, cwd, onNewTerminal, runtimeId, testId }: { active: boolean; cwd?: string; onNewTerminal: () => void; runtimeId?: string; testId: string }) => (
     <div data-active={active ? 'true' : 'false'} data-cwd={cwd ?? ''} data-runtime-id={runtimeId ?? ''} data-testid={testId}>
@@ -42,6 +46,12 @@ vi.mock('../../pages/TraceList', () => ({
   TraceList: () => <div data-testid="trace-list" />,
 }))
 
+vi.mock('../../pages/SubagentRunPage', () => ({
+  SubagentRunPage: ({ sourceSessionId, toolUseId, title }: { sourceSessionId: string; toolUseId: string; title: string }) => (
+    <div data-testid="subagent-run-page">{sourceSessionId}:{toolUseId}:{title}</div>
+  ),
+}))
+
 vi.mock('../workbench/WorkbenchTab', () => ({
   WorkbenchTab: ({ sessionId, tabId }: { sessionId: string; tabId: string }) => (
     <div data-testid="workbench-tab">workbench:{sessionId}:{tabId}</div>
@@ -49,7 +59,7 @@ vi.mock('../workbench/WorkbenchTab', () => ({
 }))
 
 import { ContentRouter } from './ContentRouter'
-import { useTabStore } from '../../stores/tabStore'
+import { MARKET_TAB_ID, useTabStore } from '../../stores/tabStore'
 
 describe('ContentRouter tab surfaces', () => {
   afterEach(() => {
@@ -151,6 +161,59 @@ describe('ContentRouter tab surfaces', () => {
     render(<ContentRouter />)
 
     expect(screen.getByTestId('trace-list')).toBeInTheDocument()
+    expect(screen.queryByTestId('active-session')).not.toBeInTheDocument()
+  })
+
+  it('renders SubAgent run tabs', () => {
+    useTabStore.setState({
+      tabs: [{
+        sessionId: '__subagent__session-1__tool-1',
+        title: 'Kuhn',
+        type: 'subagent',
+        status: 'idle',
+        sourceSessionId: 'session-1',
+        subagentToolUseId: 'tool-1',
+      }],
+      activeTabId: '__subagent__session-1__tool-1',
+    })
+
+    render(<ContentRouter />)
+
+    expect(screen.getByTestId('subagent-run-page')).toHaveTextContent('session-1:tool-1:Kuhn')
+    expect(screen.queryByTestId('active-session')).not.toBeInTheDocument()
+  })
+
+  it('falls back to the empty session for malformed SubAgent tab metadata', () => {
+    useTabStore.setState({
+      tabs: [{
+        sessionId: '__subagent__session-1__tool-1',
+        title: 'Kuhn',
+        type: 'subagent',
+        status: 'idle',
+      }],
+      activeTabId: '__subagent__session-1__tool-1',
+    })
+
+    render(<ContentRouter />)
+
+    expect(screen.getByTestId('empty-session')).toBeInTheDocument()
+    expect(screen.queryByTestId('subagent-run-page')).not.toBeInTheDocument()
+  })
+
+  it('renders the market tab without mounting the chat session surface', () => {
+    useTabStore.setState({
+      tabs: [{
+        sessionId: MARKET_TAB_ID,
+        title: 'Market',
+        type: 'market',
+        status: 'idle',
+      }],
+      activeTabId: MARKET_TAB_ID,
+    })
+
+    render(<ContentRouter />)
+
+    expect(screen.getByTestId('market-page')).toBeInTheDocument()
     expect(screen.queryByTestId('active-session')).not.toBeInTheDocument()
   })
 

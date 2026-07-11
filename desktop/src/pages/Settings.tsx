@@ -51,7 +51,7 @@ import { TraceList } from './TraceList'
 import { ActivitySettings } from './ActivitySettings'
 import { MemorySettings } from './MemorySettings'
 import { ProjectRulesSettings } from './ProjectRulesSettings'
-import { useUIStore } from '../stores/uiStore'
+import { useUIStore, type SettingsTab } from '../stores/uiStore'
 import { ClaudeOfficialLogin } from '../components/settings/ClaudeOfficialLogin'
 import { ChatGPTOfficialLogin } from '../components/settings/ChatGPTOfficialLogin'
 import {
@@ -81,11 +81,53 @@ import {
   stripProviderSettingsJsonEnv,
 } from '../lib/providerSettingsJson'
 import { copyTextToClipboard } from '../components/chat/clipboard'
+import { useMobileViewport } from '../hooks/useMobileViewport'
 
 const NETWORK_TIMEOUT_MIN_SECONDS = 30
 const NETWORK_TIMEOUT_MAX_SECONDS = 1800
 const NETWORK_TIMEOUT_STEP_SECONDS = 30
 const SETTINGS_CHECKBOX_INPUT_CLASS = 'settings-checkbox-input peer'
+
+const BUILT_IN_OUTPUT_STYLE_TRANSLATION_KEYS = {
+  default: {
+    label: 'settings.general.outputStyleBuiltin.default.label',
+    description: 'settings.general.outputStyleBuiltin.default.description',
+  },
+  Explanatory: {
+    label: 'settings.general.outputStyleBuiltin.explanatory.label',
+    description: 'settings.general.outputStyleBuiltin.explanatory.description',
+  },
+  Learning: {
+    label: 'settings.general.outputStyleBuiltin.learning.label',
+    description: 'settings.general.outputStyleBuiltin.learning.description',
+  },
+} satisfies Record<string, { label: TranslationKey; description: TranslationKey }>
+
+type SettingsTabItem = {
+  id: SettingsTab
+  icon: string
+  label: TranslationKey
+}
+
+const SETTINGS_TAB_ITEMS: SettingsTabItem[] = [
+  { id: 'providers', icon: 'dns', label: 'settings.tab.providers' },
+  { id: 'general', icon: 'tune', label: 'settings.tab.general' },
+  { id: 'h5Access', icon: 'qr_code_2', label: 'settings.tab.h5Access' },
+  { id: 'adapters', icon: 'chat', label: 'settings.tab.adapters' },
+  { id: 'terminal', icon: 'terminal', label: 'settings.tab.terminal' },
+  { id: 'mcp', icon: 'dns', label: 'settings.tab.mcp' },
+  { id: 'agents', icon: 'smart_toy', label: 'settings.tab.agents' },
+  { id: 'skills', icon: 'auto_awesome', label: 'settings.tab.skills' },
+  { id: 'memory', icon: 'history_edu', label: 'settings.tab.memory' },
+  { id: 'projectRules', icon: 'description', label: 'settings.tab.projectRules' },
+  { id: 'plugins', icon: 'extension', label: 'settings.tab.plugins' },
+  { id: 'computerUse', icon: 'mouse', label: 'settings.tab.computerUse' },
+  { id: 'activity', icon: 'monitoring', label: 'settings.tab.activity' },
+  { id: 'trace', icon: 'account_tree', label: 'settings.tab.trace' },
+  { id: 'diagnostics', icon: 'monitor_heart', label: 'settings.tab.diagnostics' },
+]
+
+const SETTINGS_ABOUT_TAB: SettingsTabItem = { id: 'about', icon: 'info', label: 'settings.tab.about' }
 
 function buildH5LaunchUrl(baseUrl: string | null, token: string | null): string | null {
   if (!baseUrl) return null
@@ -189,6 +231,7 @@ export function Settings() {
   const setActiveTab = useUIStore((s) => s.setActiveSettingsTab)
   const pendingSettingsTab = useUIStore((s) => s.pendingSettingsTab)
   const t = useTranslation()
+  const isMobileSettings = useMobileViewport() && !isDesktopRuntime()
 
   useEffect(() => {
     if (!pendingSettingsTab) return
@@ -197,34 +240,33 @@ export function Settings() {
   }, [pendingSettingsTab, setActiveTab])
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden bg-[var(--color-surface)]">
-      <div className="flex-1 flex overflow-hidden">
+    <div data-testid="settings-page" className={`settings-page flex-1 flex flex-col overflow-hidden bg-[var(--color-surface)]${isMobileSettings ? ' settings-page--mobile' : ''}`}>
+      <div className="settings-page__layout flex-1 flex overflow-hidden">
         {/* Tab navigation */}
-        <div className="w-[180px] border-r border-[var(--color-border)] py-3 flex-shrink-0 flex flex-col">
-          <div className="flex-1">
-            <TabButton icon="dns" label={t('settings.tab.providers')} active={activeTab === 'providers'} onClick={() => setActiveTab('providers')} />
-            <TabButton icon="tune" label={t('settings.tab.general')} active={activeTab === 'general'} onClick={() => setActiveTab('general')} />
-            <TabButton icon="qr_code_2" label={t('settings.tab.h5Access')} active={activeTab === 'h5Access'} onClick={() => setActiveTab('h5Access')} />
-            <TabButton icon="chat" label={t('settings.tab.adapters')} active={activeTab === 'adapters'} onClick={() => setActiveTab('adapters')} />
-            <TabButton icon="terminal" label={t('settings.tab.terminal')} active={activeTab === 'terminal'} onClick={() => setActiveTab('terminal')} />
-            <TabButton icon="dns" label={t('settings.tab.mcp')} active={activeTab === 'mcp'} onClick={() => setActiveTab('mcp')} />
-            <TabButton icon="smart_toy" label={t('settings.tab.agents')} active={activeTab === 'agents'} onClick={() => setActiveTab('agents')} />
-            <TabButton icon="auto_awesome" label={t('settings.tab.skills')} active={activeTab === 'skills'} onClick={() => setActiveTab('skills')} />
-            <TabButton icon="history_edu" label={t('settings.tab.memory')} active={activeTab === 'memory'} onClick={() => setActiveTab('memory')} />
-            <TabButton icon="description" label={t('settings.tab.projectRules')} active={activeTab === 'projectRules'} onClick={() => setActiveTab('projectRules')} />
-            <TabButton icon="extension" label={t('settings.tab.plugins')} active={activeTab === 'plugins'} onClick={() => setActiveTab('plugins')} />
-            <TabButton icon="mouse" label={t('settings.tab.computerUse')} active={activeTab === 'computerUse'} onClick={() => setActiveTab('computerUse')} />
-            <TabButton icon="monitoring" label={t('settings.tab.activity')} active={activeTab === 'activity'} onClick={() => setActiveTab('activity')} />
-            <TabButton icon="account_tree" label={t('settings.tab.trace')} active={activeTab === 'trace'} onClick={() => setActiveTab('trace')} />
-            <TabButton icon="monitor_heart" label={t('settings.tab.diagnostics')} active={activeTab === 'diagnostics'} onClick={() => setActiveTab('diagnostics')} />
+        <div className="settings-page__tabs w-[180px] border-r border-[var(--color-border)] py-3 flex-shrink-0 flex flex-col">
+          <div className="settings-page__tabs-primary flex-1">
+            {SETTINGS_TAB_ITEMS.map((tab) => (
+              <TabButton
+                key={tab.id}
+                icon={tab.icon}
+                label={t(tab.label)}
+                active={activeTab === tab.id}
+                onClick={() => setActiveTab(tab.id)}
+              />
+            ))}
           </div>
-          <div className="border-t border-[var(--color-border)]/40 pt-1">
-            <TabButton icon="info" label={t('settings.tab.about')} active={activeTab === 'about'} onClick={() => setActiveTab('about')} />
+          <div className="settings-page__tabs-secondary border-t border-[var(--color-border)]/40 pt-1">
+            <TabButton
+              icon={SETTINGS_ABOUT_TAB.icon}
+              label={t(SETTINGS_ABOUT_TAB.label)}
+              active={activeTab === SETTINGS_ABOUT_TAB.id}
+              onClick={() => setActiveTab(SETTINGS_ABOUT_TAB.id)}
+            />
           </div>
         </div>
 
         {/* Tab content; trace embeds a full-bleed page that manages its own scroll */}
-        <div className={activeTab === 'trace' ? 'flex-1 flex min-h-0 flex-col overflow-hidden' : 'flex-1 overflow-y-auto px-8 py-6'}>
+        <div className={activeTab === 'trace' ? 'settings-page__content flex-1 flex min-h-0 flex-col overflow-hidden' : 'settings-page__content flex-1 overflow-y-auto px-8 py-6'}>
           {activeTab === 'providers' && <ProviderSettings />}
           {activeTab === 'activity' && <ActivitySettings />}
           {activeTab === 'general' && <GeneralSettings />}
@@ -251,7 +293,7 @@ function TabButton({ icon, label, active, onClick }: { icon: string; label: stri
   return (
     <button
       onClick={onClick}
-      className={`w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-left transition-colors ${
+      className={`settings-tab-button w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-left transition-colors ${
         active
           ? 'bg-[var(--color-surface-selected)] text-[var(--color-text-primary)] font-medium'
           : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
@@ -2119,7 +2161,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
                     required={slot === 'main'}
                     value={models[slot]}
                     onChange={(value) => handleModelChange(slot, value)}
-                    placeholder={slot === 'main' ? 'Model ID' : t('settings.providers.sameAsMain')}
+                    placeholder={slot === 'main' ? t('settings.providers.modelIdPlaceholder') : t('settings.providers.sameAsMain')}
                     options={fetchedModels}
                   />
                   <label className="mt-1 inline-flex h-6 w-fit cursor-pointer items-center gap-1.5 rounded-[var(--radius-sm)] px-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]">
@@ -2515,8 +2557,8 @@ export function GeneralSettings() {
     RESPONSE_LANGUAGES.find(({ value }) => value === responseLanguage)?.label ?? RESPONSE_LANGUAGES[0]!.label
   const outputStyleItems = outputStyles.map((style) => ({
     value: style.value,
-    label: style.label,
-    description: `${style.description} · ${getOutputStyleSourceLabel(style.source, t)}`,
+    label: getOutputStyleLabel(style, t),
+    description: `${getOutputStyleDescription(style, t)} · ${getOutputStyleSourceLabel(style.source, t)}`,
   }))
   const selectedOutputStyle =
     outputStyles.find((style) => style.value === outputStyle) ?? outputStyles[0]
@@ -2530,6 +2572,7 @@ export function GeneralSettings() {
   const THEMES: Array<{ value: ThemeMode; label: string }> = [
     { value: 'white', label: t('settings.general.appearance.white') },
     { value: 'light', label: t('settings.general.appearance.light') },
+    { value: 'eyeCare', label: t('settings.general.appearance.eyeCare') },
     { value: 'dark', label: t('settings.general.appearance.dark') },
     { value: 'system', label: t('settings.general.appearance.system') },
   ]
@@ -2997,7 +3040,7 @@ export function GeneralSettings() {
                 </span>
                 {selectedOutputStyle?.description && (
                   <span className="mt-0.5 block truncate text-xs text-[var(--color-text-tertiary)]">
-                    {selectedOutputStyle.description}
+                    {getOutputStyleDescription(selectedOutputStyle, t)}
                   </span>
                 )}
               </span>
@@ -3653,6 +3696,32 @@ export function GeneralSettings() {
       />
     </div>
   )
+}
+
+function getBuiltInOutputStyleTranslationKeys(style: {
+  value: string
+  source: OutputStyleSource
+}) {
+  if (style.source !== 'built-in') return null
+  return BUILT_IN_OUTPUT_STYLE_TRANSLATION_KEYS[
+    style.value as keyof typeof BUILT_IN_OUTPUT_STYLE_TRANSLATION_KEYS
+  ] ?? null
+}
+
+function getOutputStyleLabel(
+  style: { value: string; label: string; source: OutputStyleSource },
+  t: (key: TranslationKey) => string,
+) {
+  const keys = getBuiltInOutputStyleTranslationKeys(style)
+  return keys ? t(keys.label) : style.label
+}
+
+function getOutputStyleDescription(
+  style: { value: string; description: string; source: OutputStyleSource },
+  t: (key: TranslationKey) => string,
+) {
+  const keys = getBuiltInOutputStyleTranslationKeys(style)
+  return keys ? t(keys.description) : style.description
 }
 
 function getOutputStyleSourceLabel(

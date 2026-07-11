@@ -97,6 +97,7 @@ jobs:
             )
             const changedProduct = (predicate) => filenames.filter((file) =>
               predicate(file) &&
+              /\.[cm]?[jt]sx?$/.test(file) &&
               !/\.test\.[cm]?[jt]sx?$/.test(file) &&
               !file.includes('/__tests__/') &&
               !file.includes('/fixtures/')
@@ -105,10 +106,14 @@ jobs:
             const serverProduct = changedProduct((file) => file.startsWith('src/server/'))
             const adapterProduct = changedProduct((file) => file.startsWith('adapters/'))
             const agentRuntimeProduct = changedProduct((file) =>
-              file.startsWith('src/server/ws/') ||
-              file.startsWith('src/server/services/conversation') ||
               file.startsWith('src/tools/') ||
               file.startsWith('src/utils/')
+            )
+            const rootRuntimeProduct = changedProduct((file) =>
+              file.startsWith('src/') &&
+              !file.startsWith('src/server/') &&
+              !file.startsWith('src/tools/') &&
+              !file.startsWith('src/utils/')
             )
             const missingTestSignals = []
             if (desktopProduct.length > 0 && !hasTest('desktop/src/')) {
@@ -126,6 +131,15 @@ jobs:
             )) {
               missingTestSignals.push('Agent/runtime product files changed without a tools/utils test file in the PR.')
             }
+            if (rootRuntimeProduct.length > 0 && !filenames.some((file) =>
+              file.startsWith('src/') &&
+              !file.startsWith('src/server/') &&
+              !file.startsWith('src/tools/') &&
+              !file.startsWith('src/utils/') &&
+              (/\.test\.[cm]?[jt]sx?$/.test(file) || file.includes('/__tests__/'))
+            )) {
+              missingTestSignals.push('Root runtime product files changed without a matching root runtime test file in the PR.')
+            }
             if (missingTestSignals.length > 0 && !currentLabels.has('allow-missing-tests')) {
               areas.add('needs-maintainer-approval')
             }
@@ -136,31 +150,6 @@ jobs:
             if (coveragePolicyFiles.length > 0 && !currentLabels.has('allow-coverage-baseline-change')) {
               areas.add('needs-maintainer-approval')
             }
-
-            const requiredChecks = ['change-policy']
-            if (areas.has('area:desktop') || areas.has('area:server')) requiredChecks.push('desktop-checks')
-            if (areas.has('area:server') || filenames.some((file) => file.startsWith('src/tools/') || file.startsWith('src/utils/'))) requiredChecks.push('server-checks')
-            if (areas.has('area:adapters')) requiredChecks.push('adapter-checks')
-            if (
-              filenames.some((file) =>
-                file.startsWith('desktop/') ||
-                file.startsWith('adapters/') ||
-                file.startsWith('src/server/') ||
-                ['bun.lock', 'package.json', 'desktop/bun.lock', 'desktop/package.json', 'desktop/package-lock.json', 'desktop/electron/tsconfig.json', 'desktop/scripts/build-linux.sh', 'desktop/scripts/build-macos-arm64.sh', 'desktop/scripts/build-windows-x64.ps1'].includes(file)
-              )
-            ) requiredChecks.push('desktop-native-checks')
-            if (areas.has('area:docs')) requiredChecks.push('docs-checks')
-            if (
-              filenames.some((file) =>
-                file.startsWith('desktop/src/') ||
-                file.startsWith('src/server/') ||
-                file.startsWith('src/tools/') ||
-                file.startsWith('src/utils/') ||
-                file.startsWith('adapters/') ||
-                file.startsWith('scripts/quality-gate/') ||
-                ['package.json', 'desktop/package.json', 'desktop/bun.lock'].includes(file)
-              )
-            ) requiredChecks.push('coverage-checks')
 
             const testSignals = []
             testSignals.push(...missingTestSignals.map((signal) => `BLOCKING unless \`allow-missing-tests\` is applied: ${signal}`))
@@ -266,8 +255,8 @@ jobs:
               '**Coverage policy files:**',
               coveragePolicyFilesText,
               '',
-              '**Expected checks:**',
-              requiredChecks.map((check) => `- \`${check}\``).join('\n'),
+              '**Required check plan:**',
+              '- See `PR Quality / scope-plan`; it is the single source of truth for selected jobs.',
               '',
               '**Test coverage signals:**',
               testSignals.map((signal) => `- ${signal}`).join('\n'),
@@ -275,11 +264,7 @@ jobs:
               '**Risk notes:**',
               riskNotes.map((note) => `- ${note}`).join('\n'),
               '',
-              'Hard merge gates still come from GitHub Actions, not AI review.',
-              '',
-              '**Dosu handoff:** Dosu can be used as the AI reviewer for risk explanation, missing-test prompts, and maintainer Q&A. If it does not comment automatically from the PR template, ask:',
-              '',
-              '@dosubot review this PR for changed-area risk, missing tests, docs impact, desktop startup risk, and CLI core impact.',
+              'Hard merge gates come from the deterministic GitHub Actions contract lanes above.',
             ].join('\n')
 
             const comments = await github.paginate(github.rest.issues.listComments, {

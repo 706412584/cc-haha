@@ -388,6 +388,39 @@ describe('MessageList nested tool calls', () => {
     })
   })
 
+  it('includes inline tool results in tool group virtualization metrics', () => {
+    const resultContent = 'server output line\n'.repeat(500)
+    const toolResult: Extract<UIMessage, { type: 'tool_result' }> = {
+      id: 'tool-bash-result',
+      type: 'tool_result',
+      toolUseId: 'bash-1',
+      content: resultContent,
+      isError: false,
+      timestamp: 2,
+    }
+    const messages: UIMessage[] = [
+      {
+        id: 'tool-bash',
+        type: 'tool_use',
+        toolName: 'Bash',
+        toolUseId: 'bash-1',
+        input: { command: 'npm run dev' },
+        timestamp: 1,
+      },
+      toolResult,
+    ]
+
+    const { renderItems } = buildRenderModel(messages, null)
+
+    expect(renderItems).toHaveLength(1)
+    expect(renderItems[0]).toMatchObject({
+      kind: 'tool_group',
+      resultContentWeight: resultContent.length,
+    })
+    expect((renderItems[0] as any).resultMetricSignature).toContain('tool_result:bash-1:0')
+    expect((renderItems[0] as any).resultMetricSignature).toContain(String(resultContent.length))
+  })
+
   it('keeps resolved AskUserQuestion history visible when filtering active duplicates', () => {
     const messages: UIMessage[] = [
       {
@@ -788,6 +821,100 @@ describe('MessageList nested tool calls', () => {
     expect(screen.queryByText('dreaming')).toBeNull()
   })
 
+  it('keeps newly appended messages mounted while auto-scrolling a virtualized transcript', async () => {
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: Array.from({ length: 220 }, (_, index) => ({
+            id: `assistant-${index}`,
+            type: 'assistant_text',
+            content: `assistant transcript line ${index}`,
+            timestamp: index,
+          })),
+        }),
+      },
+    })
+
+    const { container } = render(<MessageList />)
+    const scrollArea = container.querySelector('.chat-scroll-area') as HTMLElement
+    Object.defineProperty(scrollArea, 'clientHeight', { configurable: true, value: 500 })
+    Object.defineProperty(scrollArea, 'scrollHeight', { configurable: true, value: 220 * 112 })
+    await waitForProgrammaticScrollReset()
+
+    act(() => {
+      useChatStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ACTIVE_TAB]: {
+            ...state.sessions[ACTIVE_TAB]!,
+            messages: [
+              ...state.sessions[ACTIVE_TAB]!.messages,
+              {
+                id: 'assistant-new-tail',
+                type: 'assistant_text',
+                content: 'new assistant tail should stay visible',
+                timestamp: 221,
+              },
+            ],
+          },
+        },
+      }))
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('new assistant tail should stay visible')).toBeTruthy()
+    })
+  })
+
+  it('keeps newly appended tool calls mounted while auto-scrolling a virtualized transcript', async () => {
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: Array.from({ length: 220 }, (_, index) => ({
+            id: `assistant-${index}`,
+            type: 'assistant_text',
+            content: `assistant transcript line ${index}`,
+            timestamp: index,
+          })),
+        }),
+      },
+    })
+
+    const { container } = render(<MessageList />)
+    const scrollArea = container.querySelector('.chat-scroll-area') as HTMLElement
+    Object.defineProperty(scrollArea, 'clientHeight', { configurable: true, value: 500 })
+    Object.defineProperty(scrollArea, 'scrollHeight', { configurable: true, value: 220 * 112 })
+    await waitForProgrammaticScrollReset()
+
+    act(() => {
+      useChatStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ACTIVE_TAB]: {
+            ...state.sessions[ACTIVE_TAB]!,
+            chatState: 'tool_executing',
+            messages: [
+              ...state.sessions[ACTIVE_TAB]!.messages,
+              {
+                id: 'tool-bash-tail',
+                type: 'tool_use',
+                toolName: 'Bash',
+                toolUseId: 'bash-tail',
+                input: { command: 'npm run dev' },
+                timestamp: 221,
+                isPending: true,
+              },
+            ],
+          },
+        },
+      }))
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('Bash')).toBeTruthy()
+    })
+  })
+
   it('renders the historical window when scrolling away from latest', async () => {
     useChatStore.setState({
       sessions: {
@@ -951,6 +1078,8 @@ describe('MessageList nested tool calls', () => {
     const { container } = render(<MessageList />)
 
     expect(screen.getAllByText('Running').length).toBeGreaterThan(0)
+    expect(screen.queryByText(/Read .*example\.ts.*done/i)).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: /dispatched an agent/i }))
     expect(screen.getByText(/Read .*example\.ts.*done/i)).toBeTruthy()
     expect(container.textContent).toContain('Agent')
   })
@@ -1107,6 +1236,9 @@ describe('MessageList nested tool calls', () => {
     const groupSummary = screen.getByText('TaskUpdate (1), ran a command')
     const groupButton = groupSummary.closest('button')
     expect(groupButton?.textContent).not.toContain('check_circle')
+    expect(screen.queryByText('local_bash')).toBeNull()
+
+    fireEvent.click(groupButton!)
     expect(screen.getByText('local_bash')).toBeTruthy()
   })
 
@@ -1210,6 +1342,11 @@ describe('MessageList nested tool calls', () => {
     render(<MessageList sessionId={ACTIVE_TAB} />)
 
     expect(screen.getByText('Saved 1 memory item(s)')).toBeTruthy()
+    expect(screen.queryByText('preferences.md')).toBeNull()
+    expect(screen.queryByText('Tool details')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: /Saved 1 memory item/i }))
+
     expect(screen.getByText('preferences.md')).toBeTruthy()
     expect(screen.getByText('Tool details')).toBeTruthy()
     const memoryCardClassName = screen.getByTestId('memory-tool-activity-card').className
@@ -1407,6 +1544,218 @@ describe('MessageList nested tool calls', () => {
     ])
   })
 
+  it('honors a manual collapse of an agent group while more SubAgents stream in', async () => {
+    const initialMessages: UIMessage[] = [
+      {
+        id: 'tool-agent-a',
+        type: 'tool_use',
+        toolName: 'Agent',
+        toolUseId: 'agent-a',
+        input: { description: 'Review renderer' },
+        timestamp: 1,
+      },
+      {
+        id: 'result-agent-a',
+        type: 'tool_result',
+        toolUseId: 'agent-a',
+        content: 'Async agent launched successfully.',
+        isError: false,
+        timestamp: 2,
+      },
+      {
+        id: 'tool-agent-b',
+        type: 'tool_use',
+        toolName: 'Agent',
+        toolUseId: 'agent-b',
+        input: { description: 'Review stores' },
+        timestamp: 3,
+      },
+      {
+        id: 'result-agent-b',
+        type: 'tool_result',
+        toolUseId: 'agent-b',
+        content: 'Async agent launched successfully.',
+        isError: false,
+        timestamp: 4,
+      },
+    ]
+
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({ messages: initialMessages }),
+      },
+    })
+
+    render(<MessageList />)
+
+    const agentGroupButton = screen.getByRole('button', { name: /dispatched 2 agents/i })
+    expect(screen.queryByText('Review renderer')).toBeNull()
+    fireEvent.click(agentGroupButton)
+    expect(screen.getByText('Review renderer')).toBeTruthy()
+    fireEvent.click(agentGroupButton)
+    expect(screen.queryByText('Review renderer')).toBeNull()
+
+    act(() => {
+      useChatStore.setState({
+        sessions: {
+          [ACTIVE_TAB]: makeSessionState({
+            chatState: 'tool_executing',
+            messages: [
+              ...initialMessages,
+              {
+                id: 'tool-agent-c',
+                type: 'tool_use',
+                toolName: 'Agent',
+                toolUseId: 'agent-c',
+                input: { description: 'Review coverage' },
+                timestamp: 5,
+              },
+            ],
+          }),
+        },
+      })
+    })
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /dispatched 3 agents/i })).toBeTruthy()
+    })
+    expect(screen.queryByText('Review renderer')).toBeNull()
+    expect(screen.queryByText('Review coverage')).toBeNull()
+  })
+
+  it('honors a manual collapse of mixed tool groups when nested tool calls arrive', async () => {
+    const initialMessages: UIMessage[] = [
+      {
+        id: 'tool-task-update',
+        type: 'tool_use',
+        toolName: 'TaskUpdate',
+        toolUseId: 'task-update-1',
+        input: { id: '1', status: 'in_progress' },
+        timestamp: 1,
+      },
+      {
+        id: 'tool-bash',
+        type: 'tool_use',
+        toolName: 'Bash',
+        toolUseId: 'bash-1',
+        input: { command: 'git status --short' },
+        timestamp: 2,
+      },
+    ]
+
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          chatState: 'tool_executing',
+          messages: initialMessages,
+        }),
+      },
+    })
+
+    render(<MessageList />)
+
+    const mixedGroupButton = screen.getByRole('button', { name: /TaskUpdate \(1\), ran a command/i })
+    expect(screen.queryByText('git status --short')).toBeNull()
+    fireEvent.click(mixedGroupButton)
+    expect(screen.getByText('git status --short')).toBeTruthy()
+    fireEvent.click(mixedGroupButton)
+    expect(screen.queryByText('git status --short')).toBeNull()
+
+    act(() => {
+      useChatStore.setState({
+        sessions: {
+          [ACTIVE_TAB]: makeSessionState({
+            chatState: 'tool_executing',
+            messages: [
+              ...initialMessages,
+              {
+                id: 'tool-child-read',
+                type: 'tool_use',
+                toolName: 'Read',
+                toolUseId: 'read-1',
+                input: { file_path: '/workspace/package.json' },
+                timestamp: 3,
+                parentToolUseId: 'task-update-1',
+              },
+            ],
+          }),
+        },
+      })
+    })
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /TaskUpdate \(1\), ran a command/i })).toBeTruthy()
+    })
+    expect(screen.queryByText('git status --short')).toBeNull()
+    expect(screen.queryByText('package.json')).toBeNull()
+  })
+
+  it('honors a manual collapse of memory activity when regular tools join the group', async () => {
+    const initialMessages: UIMessage[] = [
+      {
+        id: 'tool-memory-write',
+        type: 'tool_use',
+        toolName: 'Write',
+        toolUseId: 'memory-write-1',
+        input: {
+          file_path: '/Users/test/.codex/memory/project-notes.md',
+          content: 'Persisted context',
+        },
+        timestamp: 1,
+      },
+      {
+        id: 'result-memory-write',
+        type: 'tool_result',
+        toolUseId: 'memory-write-1',
+        content: 'Wrote 1 line to /Users/test/.codex/memory/project-notes.md',
+        isError: false,
+        timestamp: 2,
+      },
+    ]
+
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({ messages: initialMessages }),
+      },
+    })
+
+    render(<MessageList />)
+
+    expect(screen.getByText('Saved 1 memory item(s)')).toBeTruthy()
+    const memoryActivityButton = screen.getByRole('button', { name: /Saved 1 memory item/i })
+    expect(screen.queryByText('project-notes.md')).toBeNull()
+    fireEvent.click(memoryActivityButton)
+    expect(screen.getByText('project-notes.md')).toBeTruthy()
+    fireEvent.click(memoryActivityButton)
+    expect(screen.queryByText('project-notes.md')).toBeNull()
+
+    act(() => {
+      useChatStore.setState({
+        sessions: {
+          [ACTIVE_TAB]: makeSessionState({
+            chatState: 'tool_executing',
+            messages: [
+              ...initialMessages,
+              {
+                id: 'tool-bash',
+                type: 'tool_use',
+                toolName: 'Bash',
+                toolUseId: 'bash-1',
+                input: { command: 'bun test memory.test.ts' },
+                timestamp: 3,
+              },
+            ],
+          }),
+        },
+      })
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('bun test memory.test.ts')).toBeTruthy()
+    })
+    expect(screen.queryByText('project-notes.md')).toBeNull()
+  })
+
   it('keeps later nested tool calls under their parent after an interleaved user message', () => {
     const messages: UIMessage[] = [
       {
@@ -1514,6 +1863,7 @@ describe('MessageList nested tool calls', () => {
 
     render(<MessageList />)
 
+    fireEvent.click(screen.getByRole('button', { name: /dispatched an agent/i }))
     expect(screen.getByText('Failed')).toBeTruthy()
     expect(screen.getByText('Explore agent unavailable in this session')).toBeTruthy()
   })
@@ -1608,6 +1958,7 @@ describe('MessageList nested tool calls', () => {
 
     render(<MessageList />)
 
+    fireEvent.click(screen.getByRole('button', { name: /dispatched an agent/i }))
     expect(screen.getByText('Done')).toBeTruthy()
     expect(screen.getByRole('button', { name: 'View result' })).toBeTruthy()
 
@@ -1618,6 +1969,39 @@ describe('MessageList nested tool calls', () => {
     expect(within(dialog).queryByText(/agentId:/)).toBeNull()
     expect(within(dialog).queryByText(/total_tokens/)).toBeNull()
     expect(screen.getByRole('button', { name: 'Close dialog' })).toBeTruthy()
+  })
+
+  it('opens the SubAgent run tab from an agent tool card', () => {
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: [
+            {
+              id: 'tool-agent',
+              type: 'tool_use',
+              toolName: 'Agent',
+              toolUseId: 'agent-1',
+              input: { description: 'Inspect src/components' },
+              timestamp: 1,
+            },
+          ],
+        }),
+      },
+    })
+
+    render(<MessageList />)
+
+    fireEvent.click(screen.getByRole('button', { name: /dispatched an agent/i }))
+    fireEvent.click(screen.getByRole('button', { name: 'Open run Inspect src/components' }))
+
+    const expectedTabId = '__subagent__active-tab__agent-1'
+    expect(useTabStore.getState().activeTabId).toBe(expectedTabId)
+    expect(useTabStore.getState().tabs.find((tab) => tab.sessionId === expectedTabId)).toMatchObject({
+      title: 'Inspect src/components',
+      type: 'subagent',
+      sourceSessionId: ACTIVE_TAB,
+      subagentToolUseId: 'agent-1',
+    })
   })
 
   it('keeps async launched agents in running state until a terminal notification arrives', () => {
@@ -1694,6 +2078,7 @@ describe('MessageList nested tool calls', () => {
 
     render(<MessageList />)
 
+    fireEvent.click(screen.getByRole('button', { name: /dispatched an agent/i }))
     expect(screen.getByText('Done')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'View result' }))
 
@@ -1748,6 +2133,7 @@ describe('MessageList nested tool calls', () => {
 
     render(<MessageList />)
 
+    fireEvent.click(screen.getByRole('button', { name: /dispatched an agent/i }))
     expect(screen.getByText(/最终报告应该按 Markdown 展示。/)).toBeTruthy()
     expect(screen.queryByText(/raw structured JSON should not be shown/)).toBeNull()
 
@@ -1811,6 +2197,7 @@ describe('MessageList nested tool calls', () => {
 
     render(<MessageList />)
 
+    fireEvent.click(screen.getByRole('button', { name: /dispatched an agent/i }))
     expect(screen.getByText(/git:v0\.2\.6\.\.v0\.2\.7:0/)).toBeTruthy()
     expect(screen.queryByText(/\{"results"/)).toBeNull()
 
@@ -2314,9 +2701,6 @@ describe('MessageList nested tool calls', () => {
 
     scrollIntoView.mockClear()
     await waitForProgrammaticScrollReset()
-    scrollTop = 600
-    fireEvent.scroll(scroller)
-    scrollTop = 120
     fireEvent.scroll(scroller)
 
     act(() => {
@@ -2335,6 +2719,70 @@ describe('MessageList nested tool calls', () => {
       expect(screen.getByText('streaming new token')).toBeTruthy()
     })
     expect(scrollIntoView).not.toHaveBeenCalled()
+  })
+
+  it('resumes auto-scrolling after a light review near the bottom', async () => {
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          chatState: 'streaming',
+          messages: [
+            {
+              id: 'user-1',
+              type: 'user_text',
+              content: '最新消息',
+              timestamp: 1,
+            },
+          ],
+          streamingText: 'streaming',
+        }),
+      },
+    })
+
+    const { container } = render(<MessageList />)
+    const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement
+    let scrollTop = 600
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 1000 })
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
+    Object.defineProperty(scroller, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value) => {
+        scrollTop = value >= 1_000_000_000 ? 600 : value
+      },
+    })
+    Object.defineProperty(scroller, 'scrollTo', {
+      configurable: true,
+      value: vi.fn((options: ScrollToOptions | number, y?: number) => {
+        scroller.scrollTop = typeof options === 'number' ? y ?? 0 : options.top ?? 0
+      }),
+    })
+
+    await waitForProgrammaticScrollReset()
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300))
+    })
+    fireEvent.scroll(scroller)
+
+    scrollTop = 420
+    fireEvent.scroll(scroller)
+
+    act(() => {
+      useChatStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ACTIVE_TAB]: {
+            ...state.sessions[ACTIVE_TAB]!,
+            streamingText: 'streaming after light review',
+          },
+        },
+      }))
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('streaming after light review')).toBeTruthy()
+    })
+    expect(scrollTop).toBe(420)
   })
 
   it('keeps following latest when layout growth moves the viewport away from bottom without user scrollback', async () => {
@@ -2615,6 +3063,132 @@ describe('MessageList nested tool calls', () => {
       expect(screen.getByText('streaming next token')).toBeTruthy()
     })
     expect(scrollIntoView).not.toHaveBeenCalled()
+    expect(scrollTop).toBe(600)
+  })
+
+  it('does not auto-scroll tail message updates while the session is idle', async () => {
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          chatState: 'idle',
+          messages: [
+            {
+              id: 'user-1',
+              type: 'user_text',
+              content: '历史消息',
+              timestamp: 1,
+            },
+            {
+              id: 'assistant-1',
+              type: 'assistant_text',
+              content: 'final answer',
+              timestamp: 2,
+            },
+          ],
+        }),
+      },
+    })
+
+    const { container } = render(<MessageList />)
+    const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement
+    let scrollTop = 552
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 1000 })
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
+    Object.defineProperty(scroller, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value) => {
+        scrollTop = value
+      },
+    })
+
+    await waitForProgrammaticScrollReset()
+    fireEvent.scroll(scroller)
+
+    act(() => {
+      useChatStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ACTIVE_TAB]: {
+            ...state.sessions[ACTIVE_TAB]!,
+            messages: [
+              state.sessions[ACTIVE_TAB]!.messages[0]!,
+              {
+                ...state.sessions[ACTIVE_TAB]!.messages[1] as Extract<UIMessage, { type: 'assistant_text' }>,
+                content: 'final answer\nlate metadata update',
+              },
+            ],
+          },
+        },
+      }))
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText(/late metadata update/)).toBeTruthy()
+    })
+    expect(scrollTop).toBe(552)
+  })
+
+  it('keeps auto-scrolling when the tail assistant message grows in place', async () => {
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          chatState: 'streaming',
+          messages: [
+            {
+              id: 'user-1',
+              type: 'user_text',
+              content: '最新消息',
+              timestamp: 1,
+            },
+            {
+              id: 'assistant-1',
+              type: 'assistant_text',
+              content: 'first token',
+              timestamp: 2,
+            },
+          ],
+        }),
+      },
+    })
+
+    const { container } = render(<MessageList />)
+    const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement
+    let scrollTop = 552
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 1000 })
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
+    Object.defineProperty(scroller, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value) => {
+        scrollTop = value
+      },
+    })
+
+    await waitForProgrammaticScrollReset()
+    fireEvent.scroll(scroller)
+
+    act(() => {
+      useChatStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ACTIVE_TAB]: {
+            ...state.sessions[ACTIVE_TAB]!,
+            messages: [
+              state.sessions[ACTIVE_TAB]!.messages[0]!,
+              {
+                ...state.sessions[ACTIVE_TAB]!.messages[1] as Extract<UIMessage, { type: 'assistant_text' }>,
+                content: 'first token\nsecond token from the same assistant message',
+              },
+            ],
+          },
+        },
+      }))
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText(/second token from the same assistant message/)).toBeTruthy()
+    })
     expect(scrollTop).toBe(600)
   })
 
@@ -3265,7 +3839,7 @@ describe('MessageList nested tool calls', () => {
 
     const { container } = render(<MessageList />)
     const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement
-    let scrollTop = 800
+    let scrollTop = 180
     Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 1200 })
     Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
     Object.defineProperty(scroller, 'scrollTop', {
@@ -3277,6 +3851,7 @@ describe('MessageList nested tool calls', () => {
     })
 
     await waitForProgrammaticScrollReset()
+    scrollTop = 800
     fireEvent.scroll(scroller)
     scrollTop = 180
     fireEvent.scroll(scroller)
@@ -3359,6 +3934,56 @@ describe('MessageList nested tool calls', () => {
     expect(scroller.scrollTop).toBe(800)
   })
 
+  it('scrolls an idle session to the latest message after its history loads', async () => {
+    useTabStore.setState({
+      activeTabId: 'session-loading',
+      tabs: [
+        { sessionId: 'session-loading', title: 'Loading', type: 'session' as const, status: 'idle' },
+      ],
+    })
+    useChatStore.setState({
+      sessions: {
+        'session-loading': makeSessionState({ messages: [] }),
+      },
+    })
+
+    const { container } = render(<MessageList />)
+    const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement
+    let scrollTop = 0
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 2400 })
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
+    Object.defineProperty(scroller, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value) => {
+        scrollTop = value >= 1_000_000_000 ? 2000 : value
+      },
+    })
+
+    await waitForProgrammaticScrollReset()
+
+    act(() => {
+      useChatStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          'session-loading': makeSessionState({
+            messages: Array.from({ length: 220 }, (_, index) => ({
+              id: `loaded-${index}`,
+              type: 'assistant_text',
+              content: `loaded transcript line ${index}`,
+              timestamp: index,
+            })),
+          }),
+        },
+      }))
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('loaded transcript line 219')).toBeTruthy()
+    })
+    expect(scrollTop).toBe(2000)
+  })
+
   it('shows a latest button when reading history and resumes following after clicking it', async () => {
     const scrollIntoView = vi.fn()
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
@@ -3398,9 +4023,18 @@ describe('MessageList nested tool calls', () => {
 
     scrollIntoView.mockClear()
     await waitForProgrammaticScrollReset()
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    })
     fireEvent.scroll(scroller)
-    scrollTop = 120
-    fireEvent.scroll(scroller)
+    scrollTop = 80
+    await act(async () => {
+      fireEvent.scroll(scroller)
+    })
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Latest' })).toBeTruthy()
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Latest' }))
 
     expect(scrollIntoView).not.toHaveBeenCalled()
@@ -3457,7 +4091,7 @@ describe('MessageList nested tool calls', () => {
 
     const { container } = render(<MessageList />)
     const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement
-    let scrollTop = 600
+    let scrollTop = 120
     Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 1000 })
     Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
     Object.defineProperty(scroller, 'scrollTop', {
@@ -3470,6 +4104,7 @@ describe('MessageList nested tool calls', () => {
 
     scrollIntoView.mockClear()
     await waitForProgrammaticScrollReset()
+    scrollTop = 600
     fireEvent.scroll(scroller)
     scrollTop = 120
     fireEvent.scroll(scroller)
@@ -3534,7 +4169,7 @@ describe('MessageList nested tool calls', () => {
 
     const { container } = render(<MessageList />)
     const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement
-    let scrollTop = 600
+    let scrollTop = 120
     Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 1000 })
     Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
     Object.defineProperty(scroller, 'scrollTop', {
@@ -3547,6 +4182,7 @@ describe('MessageList nested tool calls', () => {
 
     scrollIntoView.mockClear()
     await waitForProgrammaticScrollReset()
+    scrollTop = 600
     fireEvent.scroll(scroller)
     scrollTop = 120
     fireEvent.scroll(scroller)

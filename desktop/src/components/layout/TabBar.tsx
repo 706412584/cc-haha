@@ -3,6 +3,8 @@ import { useShallow } from 'zustand/react/shallow'
 import {
   SCHEDULED_TAB_ID,
   SETTINGS_TAB_ID,
+  MARKET_TAB_ID,
+  SUBAGENT_TAB_PREFIX,
   TERMINAL_TAB_PREFIX,
   TRACE_LIST_TAB_ID,
   TRACE_TAB_PREFIX,
@@ -15,6 +17,8 @@ import { useSessionStore } from '../../stores/sessionStore'
 import { isPlaceholderSessionTitle } from '../../lib/sessionTitle'
 import { useWorkspacePanelStore } from '../../stores/workspacePanelStore'
 import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
+import { useCLITaskStore } from '../../stores/cliTaskStore'
+import { useTeamStore } from '../../stores/teamStore'
 import { useTranslation } from '../../i18n'
 import { getDesktopHost } from '../../lib/desktopHost'
 import { hasRunningBackgroundTasks } from '../../lib/backgroundTasks'
@@ -22,11 +26,15 @@ import { WindowControls, showWindowControls } from './WindowControls'
 import { OpenProjectMenu } from './OpenProjectMenu'
 import { Folder, FolderOpen, SquareTerminal } from 'lucide-react'
 import { ActionDialog } from '../shared/ActionDialog'
+import { buildSessionActivityModel, hasVisibleSessionActivity } from '../activity/sessionActivityModel'
+import { SessionActivityButton } from '../activity/SessionActivityButton'
+import { useActivityPanelStore } from '../../stores/activityPanelStore'
 
 const TAB_WIDTH = 180
 const DRAG_START_THRESHOLD = 4
 const desktopHost = getDesktopHost()
 const isDesktopRuntime = desktopHost.isDesktop
+const EMPTY_DISMISSED_BACKGROUND_TASK_KEYS: readonly string[] = []
 
 type PendingCloseRequest = {
   tabs: Tab[]
@@ -45,10 +53,12 @@ function isSessionTabId(tabId: string | null) {
   if (!tabId) return false
   return tabId !== SETTINGS_TAB_ID &&
     tabId !== SCHEDULED_TAB_ID &&
+    tabId !== MARKET_TAB_ID &&
     tabId !== TRACE_LIST_TAB_ID &&
     !tabId.startsWith(TERMINAL_TAB_PREFIX) &&
     !tabId.startsWith(TRACE_TAB_PREFIX) &&
-    !tabId.startsWith(WORKBENCH_TAB_PREFIX)
+    !tabId.startsWith(WORKBENCH_TAB_PREFIX) &&
+    !tabId.startsWith(SUBAGENT_TAB_PREFIX)
 }
 
 export function TabBar() {
@@ -89,6 +99,49 @@ export function TabBar() {
   const isTerminalPanelOpen = useTerminalPanelStore((state) =>
     activeTabId && isActiveSessionTab ? state.isPanelOpen(activeTabId) : false,
   )
+  const cliTasks = useCLITaskStore((state) => state.tasks)
+  const cliTasksSessionId = useCLITaskStore((state) => state.sessionId)
+  const cliTasksCompletedAndDismissed = useCLITaskStore((state) => state.completedAndDismissed)
+  const dismissedBackgroundTaskKeyList = useActivityPanelStore((state) =>
+    activeTabId
+      ? state.dismissedBackgroundTaskKeysBySession[activeTabId] ?? EMPTY_DISMISSED_BACKGROUND_TASK_KEYS
+      : EMPTY_DISMISSED_BACKGROUND_TASK_KEYS,
+  )
+  const dismissedBackgroundTaskKeys = useMemo(
+    () => new Set(dismissedBackgroundTaskKeyList),
+    [dismissedBackgroundTaskKeyList],
+  )
+  const activityTeamMembers = useTeamStore(useShallow((state) => {
+    const activeTeam = state.activeTeam
+    if (!activeTabId || !activeTeam || activeTeam.leadSessionId !== activeTabId) {
+      return []
+    }
+    return activeTeam.members.filter((member) =>
+      !activeTeam.leadAgentId || member.agentId !== activeTeam.leadAgentId
+    )
+  }))
+  const activityState = useChatStore(useShallow((state) => {
+    if (!activeTabId || !isActiveSessionTab) {
+      return { hasVisibleActivity: false }
+    }
+    const sessionState = state.sessions[activeTabId]
+    const includeCliTasks = cliTasksSessionId === activeTabId
+
+    const model = buildSessionActivityModel({
+      sessionId: activeTabId,
+      messages: sessionState?.messages ?? [],
+      tasks: includeCliTasks ? cliTasks : [],
+      completedAndDismissed: includeCliTasks ? cliTasksCompletedAndDismissed : false,
+      backgroundTasks: Object.values(sessionState?.backgroundAgentTasks ?? {}),
+      dismissedBackgroundTaskKeys,
+      agentNotifications: Object.values(sessionState?.agentTaskNotifications ?? {}),
+      teamMembers: activityTeamMembers,
+    })
+    return {
+      hasVisibleActivity: hasVisibleSessionActivity(model),
+    }
+  }))
+  const showActivityButton = activeTabId && activityState.hasVisibleActivity
 
   const moveTab = useTabStore((s) => s.moveTab)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -204,6 +257,7 @@ export function TabBar() {
     if (isSessionTab(tab)) {
       useWorkspacePanelStore.getState().clearSession(tab.sessionId)
       useTerminalPanelStore.getState().clearSession(tab.sessionId)
+      useActivityPanelStore.getState().close(tab.sessionId)
     }
     closeTab(tab.sessionId)
   }, [closeTab])
@@ -419,6 +473,9 @@ export function TabBar() {
       </div>
 
       <div className="flex shrink-0 items-center gap-1 border-l border-[var(--color-border)]/70 px-2">
+        {showActivityButton && activeTabId && (
+          <SessionActivityButton sessionId={activeTabId} />
+        )}
         {isDesktopRuntime && isActiveSessionTab && (
           <OpenProjectMenu path={openProjectPath} />
         )}
@@ -634,9 +691,9 @@ const TabItem = forwardRef<HTMLDivElement, {
         aria-label={`Close ${displayTitle}`}
         onMouseDown={(e) => { e.stopPropagation() }}
         onClick={(e) => { e.stopPropagation(); onClose() }}
-        className="flex-shrink-0 -mr-0.5 inline-flex h-3 w-3 items-center justify-center bg-transparent p-0 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-[opacity,color] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] focus-visible:outline-none"
+        className="flex-shrink-0 -mr-1 inline-flex h-6 w-6 items-center justify-center rounded-md bg-transparent p-0 opacity-0 transition-[background-color,opacity,color] text-[var(--color-text-tertiary)] group-hover:opacity-100 hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-secondary)] focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
       >
-        <span className="material-symbols-outlined text-[11px] leading-none">close</span>
+        <span className="material-symbols-outlined text-[13px] leading-none">close</span>
       </button>
     </div>
   )

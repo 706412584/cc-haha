@@ -164,7 +164,7 @@ describe('providerStore runtime refresh', () => {
     const { useProviderStore } = await import('./providerStore')
     await useProviderStore.getState().activateProvider('openai-official')
 
-    expect(settingsSetModelMock).toHaveBeenCalledWith('gpt-5.3-codex')
+    expect(settingsSetModelMock).toHaveBeenCalledWith('gpt-5.6-sol')
     expect(settingsFetchAllMock).toHaveBeenCalled()
   })
 

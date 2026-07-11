@@ -14,7 +14,7 @@ import {
 import { installApplicationMenu } from './services/menu'
 import { acquireSingleInstanceLock } from './services/singleInstance'
 import { installTray, shouldInstallTray, type TrayController } from './services/tray'
-import { ElectronUpdaterService } from './services/updater'
+import { ElectronUpdaterService, updaterSessionProxyConfig } from './services/updater'
 import { createUpdateSmokeUpdaterFromEnv } from './services/updateSmoke'
 import { ElectronTerminalService, type TerminalSpawnInput } from './services/terminal'
 import { ElectronPreviewService, type PreviewBounds } from './services/preview'
@@ -151,14 +151,9 @@ function getUpdaterService() {
   const smokeUpdater = createUpdateSmokeUpdaterFromEnv(process.env)
   updaterService ??= new ElectronUpdaterService(smokeUpdater ?? autoUpdater, {
     async apply(proxy) {
-      const config = proxy
-        ? { proxyRules: proxy, proxyBypassRules: '<local>' }
-        : {}
-      await Promise.all([
-        app.setProxy(config),
-        session.defaultSession.setProxy(config),
-      ])
-      await session.defaultSession.forceReloadProxyConfig()
+      // Update traffic runs on electron-updater's own session partition;
+      // configuring app/defaultSession proxies never reaches it.
+      await autoUpdater.netSession.setProxy(updaterSessionProxyConfig(proxy))
     },
   }, {
     updateConfigPath: !smokeUpdater && app.isPackaged ? path.join(process.resourcesPath, 'app-update.yml') : undefined,
@@ -184,6 +179,10 @@ function getTerminalService() {
 function getPreviewService() {
   previewService ??= new ElectronPreviewService({
     previewScriptPath: previewAgentPath(),
+    resolveScaleFactor: parent => {
+      const bounds = parent.getBounds?.()
+      return bounds ? screen.getDisplayMatching(bounds).scaleFactor : 1
+    },
     createView: () => {
       const view = new WebContentsView({
         webPreferences: {
@@ -378,7 +377,8 @@ async function createMainWindow() {
   })
 
   mainWindow.on('resize', () => {
-    mainWindow?.webContents.send(ELECTRON_EVENT_CHANNELS.windowResized)
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    mainWindow.webContents.send(ELECTRON_EVENT_CHANNELS.windowResized)
   })
   mainWindow.webContents.on('did-finish-load', () => {
     writeWindowSmokeSnapshot(mainWindow, 'did-finish-load')
@@ -406,6 +406,11 @@ registerIpcHandlers()
 app.whenReady().then(async () => {
   applyWindowsAppUserModelId(app)
   applyStartupPortableMode(app)
+  screen.on('display-metrics-changed', (_event, _display, changedMetrics) => {
+    if (changedMetrics.includes('scaleFactor') || changedMetrics.includes('bounds')) {
+      previewService?.refreshBounds()
+    }
+  })
   await getServerRuntime().startServer().catch(error => {
     console.error('[desktop] failed to start Electron server sidecar', error)
   })

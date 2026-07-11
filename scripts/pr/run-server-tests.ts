@@ -1,12 +1,21 @@
 #!/usr/bin/env bun
 
-import { readdirSync, statSync } from 'node:fs'
+import { mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join, relative, sep } from 'node:path'
 import { loadQuarantineManifest, quarantinedPathSet } from '../quality-gate/quarantine'
+import { rootBunTestFilter } from './bun-test-filter'
+import { createSandboxedTestEnvironment } from './test-environment'
 
 const root = process.cwd()
-const roots = ['src/server', 'src/tools', 'src/utils']
+// The root runtime is wider than src/server: CLI commands, query handling,
+// shared services, tools, and utils all ship in the same Bun product. Keeping a
+// single src root prevents approved CLI/core changes from receiving a green
+// server check without their existing tests ever being discovered.
+const roots = ['src']
 const excludedFiles = quarantinedPathSet(loadQuarantineManifest())
+const TEST_PROCESS_CONCURRENCY = 4
+const TEST_FILE_PATTERN = /\.test\.[cm]?[jt]sx?$/
 
 function normalize(path: string) {
   return relative(root, path).split(sep).join('/')
@@ -27,7 +36,7 @@ function walk(path: string, files: string[]) {
   }
 
   const normalized = normalize(path)
-  if (normalized.endsWith('.test.ts') && !excludedFiles.has(normalized)) {
+  if (TEST_FILE_PATTERN.test(normalized) && !excludedFiles.has(normalized)) {
     files.push(normalized)
   }
 }
@@ -44,53 +53,90 @@ if (testFiles.length === 0) {
   process.exit(0)
 }
 
-async function runTests(label: string, files: string[]): Promise<number> {
-  if (files.length === 0) return 0
-
-  console.log(`\n[server-tests] ${label}`)
-  const proc = Bun.spawn(['bun', 'test', ...files], {
-    cwd: root,
-    stdout: 'inherit',
-    stderr: 'inherit',
-  })
-  return await proc.exited
+type TestFileResult = {
+  file: string
+  exitCode: number
+  passedTests: number
+  failedTests: number
+  evidenceComplete: boolean
 }
 
-const isolatedFiles = new Set([
-  'src/server/__tests__/conversations.test.ts',
-  'src/server/__tests__/project-rules.test.ts',
-  'src/server/__tests__/projects.test.ts',
-  'src/server/__tests__/projects-export-import.test.ts',
-  'src/server/__tests__/providers.test.ts',
-  'src/server/__tests__/skills.test.ts',
-  'src/server/__tests__/teams.test.ts',
-  'src/server/__tests__/trace-capture.test.ts',
-  'src/server/__tests__/websocket-handler.test.ts',
-  'src/server/api/__tests__/localFile.test.ts',
-  'src/server/__tests__/e2e/business-flow.test.ts',
-  'src/server/__tests__/e2e/full-flow.test.ts',
-  'src/server/__tests__/workspace-service.test.ts',
-  'src/tools/AgentTool/loadAgentsDir.cache.test.ts',
-  'src/utils/__tests__/stats.test.ts',
-  'src/utils/__tests__/worktree.test.ts',
-  'src/utils/plugins/installedPluginsManager.test.ts',
-  'src/utils/plugins/marketplaceManager.test.ts',
-  'src/utils/processUserInput/processSlashCommand.test.ts',
-  'src/utils/task/diskOutput.symlink.test.ts',
-])
-const isolatedTestFiles = testFiles.filter(file => isolatedFiles.has(file))
-const batchTestFiles = testFiles.filter(file => !isolatedFiles.has(file))
+function summaryCount(output: string, label: 'pass' | 'fail') {
+  const match = output.match(new RegExp(`^\\s*(\\d+) ${label}$`, 'm'))
+  return match ? Number(match[1]) : 0
+}
 
-let failed = false
-
-for (const testFile of isolatedTestFiles) {
-  if (await runTests(`isolated ${testFile}`, [testFile]) !== 0) {
-    failed = true
+async function runTestFile(file: string): Promise<TestFileResult> {
+  const sandboxHome = mkdtempSync(join(tmpdir(), 'cc-haha-server-test-'))
+  try {
+    const proc = Bun.spawn(
+      [
+        'bun',
+        '--no-env-file',
+        'test',
+        '--max-concurrency=1',
+        '--timeout=20000',
+        rootBunTestFilter(file),
+      ],
+      {
+        cwd: root,
+        env: createSandboxedTestEnvironment(sandboxHome),
+        stdout: 'pipe',
+        stderr: 'pipe',
+      },
+    )
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ])
+    const output = `${stdout}${stderr}`
+    const passedTests = summaryCount(output, 'pass')
+    const failedTests = summaryCount(output, 'fail')
+    const reportedFiles = Number(
+      output.match(/Ran\s+\d+\s+tests?\s+across\s+(\d+)\s+files?\./)?.[1] ?? 0,
+    )
+    const evidenceComplete =
+      exitCode === 0 &&
+      reportedFiles === 1 &&
+      passedTests + failedTests > 0
+    if (!evidenceComplete) {
+      process.stderr.write(output)
+    }
+    console.log(
+      `[server-tests] ${file}: ${evidenceComplete ? 'passed' : `failed or incomplete (${exitCode})`}`,
+    )
+    return {
+      file,
+      exitCode,
+      passedTests,
+      failedTests,
+      evidenceComplete,
+    }
+  } finally {
+    rmSync(sandboxHome, { recursive: true, force: true })
   }
 }
 
-if (await runTests('remaining server-side tests', batchTestFiles) !== 0) {
-  failed = true
+let nextFile = 0
+const results: TestFileResult[] = []
+async function runWorker() {
+  while (nextFile < testFiles.length) {
+    const file = testFiles[nextFile]
+    nextFile += 1
+    results.push(await runTestFile(file))
+  }
 }
 
-process.exit(failed ? 1 : 0)
+await Promise.all(
+  Array.from(
+    { length: Math.min(TEST_PROCESS_CONCURRENCY, testFiles.length) },
+    () => runWorker(),
+  ),
+)
+
+const failedFiles = results.filter((result) => !result.evidenceComplete)
+console.log(
+  `[server-tests] summary: files=${results.length} passed-tests=${results.reduce((total, result) => total + result.passedTests, 0)} failed-tests=${results.reduce((total, result) => total + result.failedTests, 0)} failed-files=${failedFiles.length}`,
+)
+process.exit(failedFiles.length === 0 ? 0 : 1)

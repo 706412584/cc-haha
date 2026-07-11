@@ -62,10 +62,24 @@ describe('installMainWindowNavigationGuards', () => {
     expect(openExternal).not.toHaveBeenCalled()
   })
 
-  it('does not install a will-navigate guard so dev reloads keep working', () => {
+  it('blocks top-level navigation to remote documents', () => {
+    const openExternal = vi.fn()
+    const wc = fakeWebContents()
+    installMainWindowNavigationGuards(wc.contents, { openExternal })
+
+    const preventDefault = wc.navigate('https://evil.example/page')
+
+    expect(preventDefault).toHaveBeenCalledTimes(1)
+    expect(openExternal).toHaveBeenCalledWith('https://evil.example/page')
+  })
+
+  it('keeps local renderer navigations working', () => {
     const wc = fakeWebContents()
     installMainWindowNavigationGuards(wc.contents, { openExternal: vi.fn() })
-    expect(wc.hasWillNavigate()).toBe(false)
+
+    expect(wc.hasWillNavigate()).toBe(true)
+    expect(wc.navigate('http://localhost:5173')).not.toHaveBeenCalled()
+    expect(wc.navigate('file:///Applications/cc-haha/index.html')).not.toHaveBeenCalled()
   })
 })
 

@@ -18,7 +18,7 @@ async function setup() {
   originalConfigDir = process.env.CLAUDE_CONFIG_DIR
   process.env.CLAUDE_CONFIG_DIR = tmpDir
   resetSettingsCache()
-  clearTraceCaptureStateForTests()
+  await clearTraceCaptureStateForTests()
 }
 
 async function teardown() {
@@ -28,7 +28,7 @@ async function teardown() {
     delete process.env.CLAUDE_CONFIG_DIR
   }
   resetSettingsCache()
-  clearTraceCaptureStateForTests()
+  await clearTraceCaptureStateForTests()
   await fs.rm(tmpDir, { recursive: true, force: true })
 }
 

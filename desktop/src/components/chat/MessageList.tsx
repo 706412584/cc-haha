@@ -42,7 +42,13 @@ type BackgroundTaskEvent = Extract<UIMessage, { type: 'background_task' }>
 type CompactSummaryEvent = Extract<UIMessage, { type: 'compact_summary' }>
 
 type RenderItem =
-  | { kind: 'tool_group'; toolCalls: ToolCall[]; id: string }
+  | {
+      kind: 'tool_group'
+      toolCalls: ToolCall[]
+      id: string
+      resultContentWeight: number
+      resultMetricSignature: string
+    }
   | { kind: 'message'; message: UIMessage }
 
 type RenderModel = {
@@ -570,10 +576,18 @@ export function buildRenderModel(messages: UIMessage[], activeAskUserQuestionToo
 
   const flushGroup = () => {
     if (pendingToolCalls.length > 0) {
+      const resultMessages = pendingToolCalls
+        .map((toolCall) => toolResultMap.get(toolCall.toolUseId))
+        .filter((result): result is ToolResult => Boolean(result))
       items.push({
         kind: 'tool_group',
         toolCalls: [...pendingToolCalls],
         id: `group-${pendingToolCalls[0]!.id}`,
+        resultContentWeight: resultMessages.reduce(
+          (total, result) => total + getMessageContentWeight(result),
+          0,
+        ),
+        resultMetricSignature: resultMessages.map(getMessageMetricSignature).join('|'),
       })
       pendingToolCalls = []
     }
@@ -1095,7 +1109,10 @@ function getMessageContentWeight(message: UIMessage): number {
 
 function getRenderItemContentWeight(item: RenderItem): number {
   if (item.kind === 'message') return getMessageContentWeight(item.message)
-  return item.toolCalls.reduce((total, toolCall) => total + getMessageContentWeight(toolCall), 0)
+  return item.toolCalls.reduce(
+    (total, toolCall) => total + getMessageContentWeight(toolCall),
+    item.resultContentWeight,
+  )
 }
 
 export function shouldVirtualizeRenderItems(
@@ -1179,7 +1196,7 @@ function getMessageMetricSignature(message: UIMessage): string {
     case 'tool_use':
       return `${message.type}:${message.toolName}:${message.toolUseId}:${message.partialInput?.length ?? 0}:${message.isPending ? 1 : 0}`
     case 'tool_result':
-      return `${message.type}:${message.toolUseId}:${message.isError ? 1 : 0}`
+      return `${message.type}:${message.toolUseId}:${message.isError ? 1 : 0}:${getMessageContentWeight(message)}`
     case 'compact_summary':
       return `${message.type}:${message.phase ?? ''}:${message.title.length}:${message.summary?.length ?? 0}`
     case 'goal_event':
@@ -1199,7 +1216,10 @@ function getMessageMetricSignature(message: UIMessage): string {
 
 function getRenderItemMetricSignature(item: RenderItem): string {
   if (item.kind === 'message') return getMessageMetricSignature(item.message)
-  return item.toolCalls.map(getMessageMetricSignature).join('|')
+  return [
+    item.toolCalls.map(getMessageMetricSignature).join('|'),
+    item.resultMetricSignature,
+  ].filter(Boolean).join('|')
 }
 
 function findVirtualStartIndex(offsets: number[], target: number) {
@@ -1383,12 +1403,15 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
     sessionState?.pendingPermission?.toolName === 'AskUserQuestion'
       ? sessionState.pendingPermission.toolUseId
       : null
+  const isSessionRunning = chatState !== 'idle'
   const shouldFollowContentResize =
-    streamingText.trim().length > 0 ||
-    chatState === 'streaming' ||
-    chatState === 'compacting' ||
-    chatState === 'tool_executing' ||
-    (chatState === 'thinking' && Boolean(activeThinkingId))
+    isSessionRunning && (
+      streamingText.trim().length > 0 ||
+      chatState === 'streaming' ||
+      chatState === 'compacting' ||
+      chatState === 'tool_executing' ||
+      (chatState === 'thinking' && Boolean(activeThinkingId))
+    )
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const scrollContentRef = useRef<HTMLDivElement>(null)
   const virtualItemHeightsRef = useRef<Map<string, number>>(
@@ -1410,6 +1433,7 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
   const ignoreProgrammaticScrollTopRef = useRef<number | null>(null)
   const lastSessionIdRef = useRef<string | null | undefined>(resolvedSessionId)
   const lastTailMessageIdBySessionRef = useRef(new Map<string, string | null>())
+  const lastAutoScrollMessageCountBySessionRef = useRef(new Map<string, number>())
   const t = useTranslation()
   const [turnChangeCards, setTurnChangeCards] = useState<TurnChangeCardModel[]>([])
   const [turnChangeLoadError, setTurnChangeLoadError] = useState<string | null>(null)
@@ -1573,7 +1597,7 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
         lastUserInteractionAtRef.current = performance.now()
         setShowJumpToLatest(true)
         const distanceFromBottom = container.scrollHeight - currentScrollTop - container.clientHeight
-        if (distanceFromBottom <= LIGHT_REVIEW_DISTANCE_PX) {
+        if (isSessionRunning && distanceFromBottom <= LIGHT_REVIEW_DISTANCE_PX) {
           if (lightReviewResumeTimerRef.current !== null) {
             clearTimeout(lightReviewResumeTimerRef.current)
           }
@@ -1604,7 +1628,7 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
     if (resolvedSessionId) {
       rememberSessionScroll(resolvedSessionId, container)
     }
-  }, [resolvedSessionId, scrollToBottom, syncVirtualViewportFromContainer])
+  }, [isSessionRunning, resolvedSessionId, scrollToBottom, syncVirtualViewportFromContainer])
 
   useLayoutEffect(() => {
     if (lastSessionIdRef.current !== resolvedSessionId) {
@@ -1673,6 +1697,7 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
   const tailMessage = messages[messages.length - 1] ?? null
   const tailMessageId = tailMessage?.id ?? null
   const tailMessageType = tailMessage?.type ?? null
+  const tailMessageMetricSignature = tailMessage ? getMessageMetricSignature(tailMessage) : null
 
   useEffect(() => {
     if (!resolvedSessionId) return
@@ -1687,13 +1712,29 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
   }, [resolvedSessionId, scrollToBottom, tailMessageId, tailMessageType])
 
   useEffect(() => {
+    if (!resolvedSessionId) return
+
+    const previousMessageCount = lastAutoScrollMessageCountBySessionRef.current.get(resolvedSessionId)
+    lastAutoScrollMessageCountBySessionRef.current.set(resolvedSessionId, messages.length)
+    const messageCountChanged = previousMessageCount === undefined || previousMessageCount !== messages.length
+    if (!isSessionRunning && !messageCountChanged) return
+
     if (!shouldAutoScrollRef.current) {
       setShowJumpToLatest(true)
       return
     }
 
     scrollToBottom('auto')
-  }, [messages.length, resolvedSessionId, scrollToBottom, streamingText, streamingToolInput])
+  }, [
+    isSessionRunning,
+    messages.length,
+    resolvedSessionId,
+    scrollToBottom,
+    streamingText,
+    streamingToolInput,
+    tailMessageId,
+    tailMessageMetricSignature,
+  ])
 
   const handleJumpToLatest = useCallback(() => {
     scrollToBottom('auto')
@@ -2018,6 +2059,7 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
       <>
         {item.kind === 'tool_group' ? (
           <ToolCallGroup
+            sessionId={resolvedSessionId}
             toolCalls={item.toolCalls}
             resultMap={toolResultMap}
             childToolCallsByParent={childToolCallsByParent}
@@ -2240,6 +2282,7 @@ export const MessageBlock = memo(function MessageBlock({
       }
       return (
         <ToolCallBlock
+          status={message.status}
           toolName={message.toolName}
           input={message.input}
           result={toolResult}

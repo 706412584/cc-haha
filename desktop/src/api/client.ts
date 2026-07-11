@@ -11,6 +11,7 @@ let baseUrl = DEFAULT_BASE_URL
 let authToken: string | null = null
 const DIAGNOSTICS_PATH = '/api/diagnostics/events'
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000
+const DIAGNOSTICS_REQUEST_TIMEOUT_MS = 5_000
 
 function getErrorMessage(status: number, body: unknown) {
   if (body && typeof body === 'object' && 'message' in body && typeof body.message === 'string') {
@@ -133,11 +134,16 @@ export function rawRecordDiagnosticEvent(event: {
   sessionId?: string
   details?: unknown
 }) {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), DIAGNOSTICS_REQUEST_TIMEOUT_MS)
   return fetch(`${baseUrl}${DIAGNOSTICS_PATH}`, {
     method: 'POST',
     headers: buildHeaders(),
     body: JSON.stringify(event),
-  }).catch(() => undefined)
+    signal: controller.signal,
+  })
+    .catch(() => undefined)
+    .finally(() => clearTimeout(timeout))
 }
 
 function buildHeaders(): Record<string, string> {

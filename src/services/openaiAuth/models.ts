@@ -1,8 +1,9 @@
-export const OPENAI_DEFAULT_MAIN_MODEL = 'gpt-5.3-codex'
-export const OPENAI_DEFAULT_SONNET_MODEL = 'gpt-5.4'
-export const OPENAI_DEFAULT_HAIKU_MODEL = 'gpt-5.4-mini'
+export const OPENAI_DEFAULT_MAIN_MODEL = 'gpt-5.6-sol'
+export const OPENAI_DEFAULT_SONNET_MODEL = 'gpt-5.6-terra'
+export const OPENAI_DEFAULT_HAIKU_MODEL = 'gpt-5.6-luna'
 export const OPENAI_CODEX_EFFECTIVE_CONTEXT_PERCENT = 95
 export const OPENAI_CODEX_STANDARD_CONTEXT_WINDOW = 272_000
+export const OPENAI_CODEX_FRONTIER_CONTEXT_WINDOW = 372_000
 export const OPENAI_CODEX_LARGE_CONTEXT_WINDOW = 1_000_000
 export const OPENAI_CODEX_SPARK_CONTEXT_WINDOW = 128_000
 export const OPENAI_CODEX_STANDARD_EFFECTIVE_CONTEXT_WINDOW = Math.floor(
@@ -11,6 +12,10 @@ export const OPENAI_CODEX_STANDARD_EFFECTIVE_CONTEXT_WINDOW = Math.floor(
 )
 export const OPENAI_CODEX_LARGE_EFFECTIVE_CONTEXT_WINDOW = Math.floor(
   (OPENAI_CODEX_LARGE_CONTEXT_WINDOW * OPENAI_CODEX_EFFECTIVE_CONTEXT_PERCENT) /
+    100,
+)
+export const OPENAI_CODEX_FRONTIER_EFFECTIVE_CONTEXT_WINDOW = Math.floor(
+  (OPENAI_CODEX_FRONTIER_CONTEXT_WINDOW * OPENAI_CODEX_EFFECTIVE_CONTEXT_PERCENT) /
     100,
 )
 export const OPENAI_CODEX_SPARK_EFFECTIVE_CONTEXT_WINDOW = Math.floor(
@@ -23,34 +28,136 @@ export type OpenAIModelCatalogEntry = {
   label: string
   description: string
   descriptionForModel?: string
+  defaultReasoningEffort: OpenAIReasoningEffort
+  supportedReasoningEfforts: OpenAIReasoningEffort[]
+  contextWindow?: number
 }
+
+export const OPENAI_REASONING_EFFORTS = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+] as const
+
+export type OpenAIReasoningEffort = (typeof OPENAI_REASONING_EFFORTS)[number]
+
+export const OPENAI_CODEX_REASONING_EFFORT_ENV_KEY =
+  'CC_HAHA_OPENAI_REASONING_EFFORT'
+
+const GPT_5_6_REASONING_EFFORTS: OpenAIReasoningEffort[] = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+]
+
+const GPT_5_5_REASONING_EFFORTS: OpenAIReasoningEffort[] = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+]
 
 export const OPENAI_CODEX_MODEL_CATALOG: OpenAIModelCatalogEntry[] = [
   {
     value: OPENAI_DEFAULT_MAIN_MODEL,
-    label: 'GPT-5.3 Codex',
-    description: 'Best for coding and agentic work',
-    descriptionForModel: 'GPT-5.3 Codex - best for coding and agentic work',
+    label: 'GPT-5.6-Sol',
+    description: 'Latest frontier agentic coding model',
+    descriptionForModel: 'GPT-5.6-Sol - latest frontier agentic coding model',
+    defaultReasoningEffort: 'low',
+    supportedReasoningEfforts: GPT_5_6_REASONING_EFFORTS,
+    contextWindow: OPENAI_CODEX_FRONTIER_EFFECTIVE_CONTEXT_WINDOW,
   },
   {
     value: OPENAI_DEFAULT_SONNET_MODEL,
+    label: 'GPT-5.6-Terra',
+    description: 'Balanced agentic coding model for everyday work',
+    descriptionForModel: 'GPT-5.6-Terra - balanced agentic coding model',
+    defaultReasoningEffort: 'medium',
+    supportedReasoningEfforts: GPT_5_6_REASONING_EFFORTS,
+    contextWindow: OPENAI_CODEX_FRONTIER_EFFECTIVE_CONTEXT_WINDOW,
+  },
+  {
+    value: OPENAI_DEFAULT_HAIKU_MODEL,
+    label: 'GPT-5.6-Luna',
+    description: 'Fast and affordable agentic coding model',
+    descriptionForModel: 'GPT-5.6-Luna - fast and affordable agentic coding model',
+    defaultReasoningEffort: 'medium',
+    supportedReasoningEfforts: GPT_5_6_REASONING_EFFORTS,
+    contextWindow: OPENAI_CODEX_FRONTIER_EFFECTIVE_CONTEXT_WINDOW,
+  },
+  {
+    value: 'gpt-5.3-codex',
+    label: 'GPT-5.3 Codex',
+    description: 'Best for coding and agentic work',
+    descriptionForModel: 'GPT-5.3 Codex - best for coding and agentic work',
+    defaultReasoningEffort: 'medium',
+    supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+    contextWindow: OPENAI_CODEX_STANDARD_EFFECTIVE_CONTEXT_WINDOW,
+  },
+  {
+    value: 'gpt-5.4',
     label: 'GPT-5.4',
     description: 'Strong general-purpose model',
     descriptionForModel: 'GPT-5.4 - strong general-purpose model',
+    defaultReasoningEffort: 'medium',
+    supportedReasoningEfforts: GPT_5_5_REASONING_EFFORTS,
+    contextWindow: OPENAI_CODEX_STANDARD_EFFECTIVE_CONTEXT_WINDOW,
   },
   {
     value: 'gpt-5.5',
     label: 'GPT-5.5',
     description: 'Latest general-purpose model',
     descriptionForModel: 'GPT-5.5 - latest general-purpose model',
+    defaultReasoningEffort: 'medium',
+    supportedReasoningEfforts: GPT_5_5_REASONING_EFFORTS,
+    contextWindow: OPENAI_CODEX_STANDARD_EFFECTIVE_CONTEXT_WINDOW,
   },
   {
-    value: OPENAI_DEFAULT_HAIKU_MODEL,
+    value: 'gpt-5.4-mini',
     label: 'GPT-5.4 Mini',
     description: 'Fastest for quick tasks',
     descriptionForModel: 'GPT-5.4 Mini - fastest for quick tasks',
+    defaultReasoningEffort: 'medium',
+    supportedReasoningEfforts: GPT_5_5_REASONING_EFFORTS,
+    contextWindow: OPENAI_CODEX_STANDARD_EFFECTIVE_CONTEXT_WINDOW,
   },
 ]
+
+export function isOpenAIReasoningEffort(
+  value: unknown,
+): value is OpenAIReasoningEffort {
+  return (
+    typeof value === 'string' &&
+    (OPENAI_REASONING_EFFORTS as readonly string[]).includes(value)
+  )
+}
+
+export function getOpenAIModelCatalogEntry(
+  model: string,
+  catalog: OpenAIModelCatalogEntry[] = OPENAI_CODEX_MODEL_CATALOG,
+): OpenAIModelCatalogEntry | undefined {
+  const normalized = model.trim().toLowerCase()
+  return catalog.find((entry) => entry.value.toLowerCase() === normalized)
+}
+
+export function resolveOpenAIReasoningEffort(
+  model: string,
+  requestedEffort: unknown,
+): OpenAIReasoningEffort {
+  const entry = getOpenAIModelCatalogEntry(model)
+  if (
+    isOpenAIReasoningEffort(requestedEffort) &&
+    (!entry || entry.supportedReasoningEfforts.includes(requestedEffort))
+  ) {
+    return requestedEffort
+  }
+
+  return entry?.defaultReasoningEffort ?? 'medium'
+}
 
 export function isOpenAIResponsesModel(model: string): boolean {
   const normalized = model.trim().toLowerCase()
@@ -94,6 +201,12 @@ export function getOpenAIModelDisplayName(model: string): string | null {
   switch (model.trim().toLowerCase()) {
     case 'gpt-5.3-codex':
       return 'GPT-5.3 Codex'
+    case 'gpt-5.6-sol':
+      return 'GPT-5.6-Sol'
+    case 'gpt-5.6-terra':
+      return 'GPT-5.6-Terra'
+    case 'gpt-5.6-luna':
+      return 'GPT-5.6-Luna'
     case 'gpt-5.3-codex-spark':
       return 'GPT-5.3 Codex Spark'
     case 'gpt-5.5':
@@ -125,6 +238,15 @@ export function getOpenAICodexContextWindowForModel(
   // Codex OAuth follows the Codex app model catalog, not the public API model
   // context limits. The catalog applies effective_context_window_percent=95,
   // and the runtime /context display reports this effective window.
+  if (
+    normalized === 'gpt-5.6-sol' ||
+    normalized === 'gpt-5.6-terra' ||
+    normalized === 'gpt-5.6-luna' ||
+    normalized === 'gpt-5.6'
+  ) {
+    return OPENAI_CODEX_FRONTIER_EFFECTIVE_CONTEXT_WINDOW
+  }
+
   if (
     normalized === 'gpt-5.4' ||
     normalized === 'gpt-5.4-pro'

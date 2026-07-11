@@ -52,6 +52,12 @@ class FakeWebSocket {
     this.readyState = FakeWebSocket.CLOSED
     ;(this.onclose as (() => void) | null)?.()
   }
+
+  receive(message: unknown) {
+    ;(this.onmessage as ((event: { data: string }) => void) | null)?.({
+      data: JSON.stringify(message),
+    })
+  }
 }
 
 describe('wsManager reconnect buffering', () => {
@@ -95,7 +101,54 @@ describe('wsManager reconnect buffering', () => {
 
     expect(secondSocket!.sent).toEqual([
       JSON.stringify({ type: 'user_message', content: 'queued while offline' }),
+      JSON.stringify({ type: 'sync_state' }),
     ])
+  })
+
+  it('closes and reconnects a half-open socket when a pong never arrives', async () => {
+    wsManager.connect('session-half-open')
+    const firstSocket = FakeWebSocket.instances[0]!
+    firstSocket.open()
+
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(firstSocket.sent).toContain(JSON.stringify({ type: 'ping' }))
+
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(firstSocket.readyState).toBe(FakeWebSocket.CLOSED)
+
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(FakeWebSocket.instances).toHaveLength(2)
+  })
+
+  it('keeps a healthy socket open when the server answers the heartbeat', async () => {
+    wsManager.connect('session-heartbeat')
+    const socket = FakeWebSocket.instances[0]!
+    socket.open()
+
+    await vi.advanceTimersByTimeAsync(30_000)
+    socket.receive({ type: 'pong' })
+    await vi.advanceTimersByTimeAsync(10_000)
+
+    expect(socket.readyState).toBe(FakeWebSocket.OPEN)
+    expect(FakeWebSocket.instances).toHaveLength(1)
+  })
+
+  it('does not let a stale socket close stop the replacement heartbeat', async () => {
+    wsManager.connect('session-stale-close')
+    const firstSocket = FakeWebSocket.instances[0]!
+    firstSocket.open()
+    firstSocket.fail()
+
+    await vi.advanceTimersByTimeAsync(1000)
+    const secondSocket = FakeWebSocket.instances[1]!
+    secondSocket.open()
+
+    // A browser may deliver a duplicate or delayed close callback for the
+    // replaced socket. It must not clear the replacement connection's timer.
+    firstSocket.fail()
+    await vi.advanceTimersByTimeAsync(30_000)
+
+    expect(secondSocket.sent).toContain(JSON.stringify({ type: 'ping' }))
   })
 
   it('builds websocket URLs from http and encodes token query params', () => {

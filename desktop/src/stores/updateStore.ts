@@ -21,6 +21,7 @@ type CheckOptions = {
 }
 
 const DISMISSED_UPDATE_VERSION_KEY = 'cc-haha-dismissed-update-version'
+const RELAUNCH_WATCHDOG_MS = 15_000
 
 type UpdateStore = {
   status: UpdateStatus
@@ -45,6 +46,31 @@ let pendingUpdateDownloaded = false
 let downloadPromise: Promise<void> | null = null
 let downloadingProxyKey: string | null = null
 let startupCheckPromise: Promise<void> | null = null
+let relaunchWatchdog: ReturnType<typeof setTimeout> | null = null
+
+function clearRelaunchWatchdog() {
+  if (!relaunchWatchdog) return
+  clearTimeout(relaunchWatchdog)
+  relaunchWatchdog = null
+}
+
+function scheduleRelaunchWatchdog(host: DesktopHost) {
+  clearRelaunchWatchdog()
+  relaunchWatchdog = setTimeout(() => {
+    relaunchWatchdog = null
+    if (useUpdateStore.getState().status !== 'restarting') return
+
+    void host.updates.cancelInstall().catch(() => undefined)
+    void host.runtime.getServerUrl().catch(() => undefined)
+    useUpdateStore.setState((state) => ({
+      ...state,
+      status: 'downloaded',
+      error: 'Restart did not start automatically. Restart the app manually to finish installing the update.',
+      shouldPrompt: true,
+      progressPercent: 100,
+    }))
+  }, RELAUNCH_WATCHDOG_MS)
+}
 
 function readDismissedUpdateVersion(): string | null {
   if (typeof window === 'undefined') return null
@@ -100,7 +126,7 @@ async function setPendingUpdate(next: DesktopUpdate | null, proxyKey: string | n
     downloadingProxyKey = null
   }
 
-  if (previous && previous !== next) {
+  if (previous && !next) {
     try {
       await previous.close()
     } catch {
@@ -185,6 +211,7 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
     const host = getUpdateHost()
     if (!host) return null
     if (downloadPromise && get().status === 'downloading' && pendingUpdate) return pendingUpdate
+    clearRelaunchWatchdog()
 
     set((state) => ({
       ...state,
@@ -281,6 +308,7 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
 
   downloadUpdate: async () => {
     if (!getUpdateHost()) return
+    clearRelaunchWatchdog()
 
     let update = pendingUpdate
     if (update && pendingUpdateProxyKey !== getUpdateProxyKey()) {
@@ -437,8 +465,10 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
         progressPercent: 100,
       }))
 
+      scheduleRelaunchWatchdog(host)
       await host.updates.relaunch()
     } catch (error) {
+      clearRelaunchWatchdog()
       if (prepareInstallAttempted) {
         try {
           await host.updates.cancelInstall()

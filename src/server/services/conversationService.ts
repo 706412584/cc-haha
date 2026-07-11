@@ -9,11 +9,17 @@
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { spawn, spawnSync } from 'node:child_process'
 import { ProviderService } from './providerService.js'
 import {
   OPENAI_CODEX_OAUTH_FILE_ENV_KEY,
   OPENAI_OAUTH_PROVIDER_ENV_KEY,
+  isOpenAIOfficialProviderId,
 } from './openaiOfficialProvider.js'
+import {
+  OPENAI_CODEX_REASONING_EFFORT_ENV_KEY,
+  isOpenAIReasoningEffort,
+} from '../../services/openaiAuth/models.js'
 import { sessionService } from './sessionService.js'
 import { diagnosticsService } from './diagnosticsService.js'
 import {
@@ -75,6 +81,29 @@ export function buildConversationCliSpawnOptions(
     stderr: 'pipe',
     windowsHide: true,
   } as const
+}
+
+type KillConversationProcessDeps = {
+  platform?: NodeJS.Platform
+  spawnAsync?: typeof spawn
+  spawnSyncFn?: typeof spawnSync
+}
+
+export function killConversationProcessTree(
+  proc: { pid?: number; kill(signal?: NodeJS.Signals): unknown },
+  signal?: NodeJS.Signals,
+  sync = false,
+  deps: KillConversationProcessDeps = {},
+): void {
+  const platform = deps.platform ?? process.platform
+  if (platform === 'win32' && proc.pid) {
+    const args = ['/F', '/T', '/PID', String(proc.pid)]
+    const options = { stdio: 'ignore', windowsHide: true } as const
+    if (sync) (deps.spawnSyncFn ?? spawnSync)('taskkill', args, options)
+    else (deps.spawnAsync ?? spawn)('taskkill', args, options)
+    return
+  }
+  proc.kill(signal)
 }
 
 type AttachmentRef = {
@@ -723,9 +752,12 @@ export class ConversationService {
     return true
   }
 
-  detachSdkConnection(sessionId: string): void {
+  detachSdkConnection(
+    sessionId: string,
+    socket: { send(data: string): void },
+  ): void {
     const session = this.sessions.get(sessionId)
-    if (session) {
+    if (session?.sdkSocket === socket) {
       session.sdkSocket = null
     }
   }
@@ -798,12 +830,28 @@ export class ConversationService {
         ) {
           session.pendingPermissionRequests.delete(msg.response.request_id)
         }
-        for (const cb of session.outputCallbacks) {
-          cb(msg)
-        }
+        this.notifyOutputCallbacks(sessionId, session.outputCallbacks, msg)
       } catch {
         console.warn(
           `[ConversationService] Ignoring malformed SDK payload for ${sessionId}`,
+        )
+      }
+    }
+  }
+
+  private notifyOutputCallbacks(
+    sessionId: string,
+    callbacks: Array<(msg: any) => void>,
+    message: any,
+  ): void {
+    for (const callback of [...callbacks]) {
+      try {
+        callback(message)
+      } catch (error) {
+        console.warn(
+          `[ConversationService] Output callback failed for ${sessionId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
         )
       }
     }
@@ -878,14 +926,14 @@ export class ConversationService {
     session: SessionProcess,
     timeoutMs: number,
   ): Promise<void> {
-    this.killProcess(sessionId, session, 'SIGTERM')
+    this.killProcess(sessionId, session, 'SIGTERM', true)
 
     const exited = await Promise.race([
       session.proc.exited.then(() => true, () => true),
       new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
     ])
     if (!exited) {
-      this.killProcess(sessionId, session, 'SIGKILL')
+      this.killProcess(sessionId, session, 'SIGKILL', true)
       await Promise.race([
         session.proc.exited.catch(() => undefined),
         new Promise<void>((resolve) => setTimeout(resolve, 500)),
@@ -898,9 +946,10 @@ export class ConversationService {
     sessionId: string,
     session: SessionProcess,
     signal?: NodeJS.Signals,
+    sync = false,
   ): void {
     try {
-      session.proc.kill(signal)
+      killConversationProcessTree(session.proc, signal, sync)
     } catch (error) {
       console.warn(
         `[ConversationService] Failed to kill CLI subprocess for ${sessionId}: ${
@@ -1037,17 +1086,16 @@ export class ConversationService {
           sdkMessages: this.summarizeSdkMessages(activeSession.sdkMessages),
         },
       })
-      for (const cb of activeSession.outputCallbacks) {
-        cb({
-          type: 'result',
-          subtype: 'error',
-          is_error: true,
-          result: exitError,
-          usage: { input_tokens: 0, output_tokens: 0 },
-          session_id: sessionId,
-        })
-      }
+      const callbacks = [...activeSession.outputCallbacks]
       this.sessions.delete(sessionId)
+      this.notifyOutputCallbacks(sessionId, callbacks, {
+        type: 'result',
+        subtype: 'error',
+        is_error: true,
+        result: exitError,
+        usage: { input_tokens: 0, output_tokens: 0 },
+        session_id: sessionId,
+      })
     }
   }
 
@@ -1075,11 +1123,11 @@ export class ConversationService {
       args.push('--model', options.model)
     }
 
-    if (options?.effort) {
+    if (options?.effort && !isOpenAIOfficialProviderId(options.providerId)) {
       args.push('--effort', options.effort)
     }
 
-    if (options?.thinking) {
+    if (options?.thinking && !isOpenAIOfficialProviderId(options.providerId)) {
       args.push('--thinking', options.thinking)
     }
 
@@ -1140,6 +1188,7 @@ export class ConversationService {
       'CLAUDE_CODE_MODEL_CONTEXT_WINDOWS',
       OPENAI_OAUTH_PROVIDER_ENV_KEY,
       OPENAI_CODEX_OAUTH_FILE_ENV_KEY,
+      OPENAI_CODEX_REASONING_EFFORT_ENV_KEY,
     ] as const
 
     const cleanEnv = await getProcessEnvWithTerminalShellEnvironment()
@@ -1255,6 +1304,9 @@ export class ConversationService {
       // should come from Desktop-managed config or inherited launch env, not
       // be reintroduced from the repo's .env file.
       CC_HAHA_SKIP_DOTENV: '1',
+      // Keep the SDK runtime identity for auth and client behavior, but stamp
+      // desktop-owned transcripts with an entrypoint visible to Claude /resume.
+      CC_HAHA_TRANSCRIPT_ENTRYPOINT: 'claude-desktop',
       ...(explicitProviderEnv
         ? { CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1' }
         : {}),
@@ -1264,6 +1316,12 @@ export class ConversationService {
       // 否则 CLI 会忽略 provider 的 AUTH_TOKEN、错误地走 OAuth 打到第三方
       // endpoint。详见 src/utils/auth.ts isManagedOAuthContext()。
       ...(explicitProviderEnv ?? {}),
+      ...(
+        isOpenAIOfficialProviderId(options?.providerId) &&
+        isOpenAIReasoningEffort(options?.effort)
+          ? { [OPENAI_CODEX_REASONING_EFFORT_ENV_KEY]: options.effort }
+          : {}
+      ),
       ...networkEnv,
       ...(this.shouldMarkManagedOAuth(options?.providerId)
         ? await this.buildOfficialOAuthEnv()

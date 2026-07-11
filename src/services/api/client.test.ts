@@ -15,7 +15,7 @@ describe('resolveAnthropicClientApiKey', () => {
 
     const apiKey = resolveAnthropicClientApiKey({
       envAuthToken: 'provider-bearer-token',
-      envApiKey: undefined,
+      envApiKey: '',
       getFallbackApiKey,
     })
 
@@ -42,8 +42,8 @@ describe('resolveAnthropicClientApiKey', () => {
     const getFallbackApiKey = mock(() => 'sk-keychain-fallback')
 
     const apiKey = resolveAnthropicClientApiKey({
-      envAuthToken: undefined,
-      envApiKey: undefined,
+      envAuthToken: '',
+      envApiKey: '',
       getFallbackApiKey,
     })
 

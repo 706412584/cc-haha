@@ -65,6 +65,12 @@ export function useKeyboardShortcuts() {
         openModal('globalSearch')
       }
 
+      // Ctrl+F — Open find-in-page bar
+      if (meta && e.key === 'f') {
+        e.preventDefault()
+        openModal('findInPage')
+      }
+
       // Escape — Close modal or clear state
       if (e.key === 'Escape') {
         if (activeModalRef.current) {

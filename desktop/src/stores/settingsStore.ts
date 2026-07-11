@@ -5,7 +5,6 @@ import { modelsApi } from '../api/models'
 import { h5AccessApi } from '../api/h5Access'
 import { tracesApi } from '../api/traces'
 import {
-  isThemeMode,
   type AppMode,
   type AppModeConfig,
   type ChatSendBehavior,
@@ -242,13 +241,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         loadH5AccessSettings(previousH5Access),
         loadTraceCaptureSettings(),
       ])
-      const serverTheme = isThemeMode(userSettings.theme) ? userSettings.theme : 'dark'
-      // 'system' is a desktop-only logical mode that never gets persisted to the
-      // server (the server rejects it). If the user previously chose 'system' and
-      // it was stored locally, honour the local value instead of overwriting it
-      // with whatever concrete theme the server last saw.
-      const localTheme = useUIStore.getState().theme
-      const theme = localTheme === 'system' ? 'system' : serverTheme
+      const theme = useUIStore.getState().theme
       useUIStore.getState().setTheme(theme)
       set({
         permissionMode: mode,
@@ -357,18 +350,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   },
 
   setTheme: async (theme) => {
-    const prev = get().theme
     set({ theme })
     useUIStore.getState().setTheme(theme)
-    // 'system' is a desktop-only logical mode (resolves to light/dark via OS preference).
-    // The server only persists concrete themes; skip the round-trip to avoid validation errors.
-    if (theme === 'system') return
-    try {
-      await settingsApi.updateUser({ theme })
-    } catch {
-      set({ theme: prev })
-      useUIStore.getState().setTheme(prev)
-    }
   },
 
   setChatSendBehavior: async (behavior) => {
@@ -667,8 +650,9 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         mode,
         portableDir: newMode.portableDir || null,
       })
-    } catch {
+    } catch (error) {
       set({ appMode: prev, appModeRequiresRestart: false })
+      throw error
     }
   },
 }))

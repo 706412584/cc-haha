@@ -310,11 +310,12 @@ describe('ContextUsageIndicator request behavior', () => {
     })
   })
 
-  it('retries the forced refresh once when it fails right after compaction (#743)', async () => {
+  it('retries the forced refresh through a bounded retry window when compaction finishes into a busy CLI', async () => {
     vi.useFakeTimers()
     try {
       sessionsApiMock.getInspection
         .mockResolvedValueOnce(baseInspection)
+        .mockRejectedValueOnce(new Error('Request timed out after 30s'))
         .mockRejectedValueOnce(new Error('Request timed out after 30s'))
         .mockResolvedValueOnce({
           ...baseInspection,
@@ -347,12 +348,61 @@ describe('ContextUsageIndicator request behavior', () => {
       })
       expect(sessionsApiMock.getInspection).toHaveBeenCalledTimes(2)
 
-      // The CLI was still busy and the forced refresh failed — one delayed
-      // retry recovers the meter instead of leaving the stale percentage.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(5_000)
       })
       expect(sessionsApiMock.getInspection).toHaveBeenCalledTimes(3)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000)
+        await Promise.resolve()
+      })
+      expect(sessionsApiMock.getInspection).toHaveBeenCalledTimes(4)
+      expect(screen.getByTestId('context-usage-indicator')).toHaveTextContent('5%')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('forces one recovery refresh after chat state returns to idle', async () => {
+    vi.useFakeTimers()
+    try {
+      sessionsApiMock.getInspection
+        .mockResolvedValueOnce(baseInspection)
+        .mockResolvedValueOnce({
+          ...baseInspection,
+          context: { ...baseInspection.context, totalTokens: 9_000, percentage: 5 },
+        })
+
+      const { rerender } = render(
+        <ContextUsageIndicator
+          sessionId="session-1"
+          chatState="compacting"
+          messageCount={1}
+          refreshNonce={0}
+        />,
+      )
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      expect(sessionsApiMock.getInspection).toHaveBeenCalledTimes(1)
+
+      rerender(
+        <ContextUsageIndicator
+          sessionId="session-1"
+          chatState="idle"
+          messageCount={1}
+          refreshNonce={0}
+        />,
+      )
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_000)
+        await Promise.resolve()
+      })
+      expect(sessionsApiMock.getInspection).toHaveBeenCalledTimes(2)
+      expect(screen.getByTestId('context-usage-indicator')).toHaveTextContent('5%')
     } finally {
       vi.useRealTimers()
     }

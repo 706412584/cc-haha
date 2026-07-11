@@ -13,6 +13,7 @@ import {
   createLocalTerminalRuntimeId,
   destroyTerminalRuntime,
   getTerminalRuntime,
+  isTerminalRuntimeCurrent,
   subscribeTerminalRuntime,
   updateTerminalRuntime,
   type TerminalRuntime,
@@ -150,196 +151,259 @@ export function TerminalSettings({
     }
   }, [runtime])
 
-  const startTerminal = useCallback(async () => {
+  const startTerminal = useCallback(() => {
     if (!terminalApi.isAvailable()) {
       updateTerminalRuntime(runtime, { status: 'unavailable' })
-      return
+      return Promise.resolve()
+    }
+
+    if (runtime.startPromise) {
+      const host = hostRef.current
+      void runtime.startPromise.then(() => {
+        if (!host || !isTerminalRuntimeCurrent(runtime) || !runtime.terminal) return
+        attachTerminalRuntime(runtime, host)
+        resizeSession()
+      })
+      return runtime.startPromise
     }
 
     const host = hostRef.current
-    if (!host) return
+    if (!host) return Promise.resolve()
 
-    updateTerminalRuntime(runtime, { error: null, status: 'starting', shellInfo: null })
+    const startToken = runtime.startToken + 1
+    runtime.startToken = startToken
+    const isCurrentStart = () => isTerminalRuntimeCurrent(runtime) && runtime.startToken === startToken
 
-    const existing = runtime.nativeSessionId
-    if (existing) {
-      await terminalApi.kill(existing).catch(() => {})
-      runtime.nativeSessionId = null
-    }
-    runtime.dataDisposable?.dispose()
-    runtime.dataDisposable = null
-    runtime.unlisteners.forEach((unlisten) => unlisten())
-    runtime.unlisteners = []
+    const startPromise = Promise.resolve().then(async () => {
+      if (!isCurrentStart()) return
+      updateTerminalRuntime(runtime, { error: null, status: 'starting', shellInfo: null })
 
-    runtime.terminal?.dispose()
-    runtime.terminal = null
-    runtime.fit = null
-    host.innerHTML = ''
-
-    const [{ Terminal }, { FitAddon }] = await Promise.all([
-      import('@xterm/xterm'),
-      import('@xterm/addon-fit'),
-    ])
-
-    const terminal = new Terminal({
-      cursorBlink: true,
-      convertEol: false,
-      fontFamily: "var(--font-mono), 'SFMono-Regular', Consolas, monospace",
-      fontSize: 12,
-      lineHeight: 1.25,
-      scrollback: 4000,
-      theme: {
-        background: '#121212',
-        foreground: '#d7d2d0',
-        cursor: '#ffb59f',
-        selectionBackground: '#5f4a40',
-        black: '#1f1f1f',
-        red: '#ff6d67',
-        green: '#7ef18a',
-        yellow: '#f8c55f',
-        blue: '#77a8ff',
-        magenta: '#d699ff',
-        cyan: '#61d6d6',
-        white: '#d7d2d0',
-        brightBlack: '#8f8683',
-        brightRed: '#ff8a85',
-        brightGreen: '#9ff7a7',
-        brightYellow: '#ffdd7a',
-        brightBlue: '#a6c5ff',
-        brightMagenta: '#e3b8ff',
-        brightCyan: '#8ceeee',
-        brightWhite: '#ffffff',
-      },
-    })
-    const fit = new FitAddon()
-    terminal.loadAddon(fit)
-    terminal.open(host)
-
-    // Clipboard wiring. xterm itself ships no copy/paste — without this,
-    // Ctrl+C only sends SIGINT and there's no way to lift selected text out.
-    // Conventions follow VS Code / GNOME Terminal on Windows + Linux:
-    //   - Ctrl+Shift+C / Ctrl+Insert  → copy current selection
-    //   - Ctrl+Shift+V / Shift+Insert → paste clipboard into the PTY
-    //   - Ctrl+C with an active selection → copy (then clear selection) so the
-    //     muscle-memory shortcut works; with no selection it falls through to
-    //     the shell as SIGINT, unchanged.
-    //   - right-click → copy selection if any, else paste
-    const writeToPty = (data: string) => {
-      const sessionId = runtime.nativeSessionId
-      if (sessionId) void terminalApi.write(sessionId, data).catch(() => {})
-    }
-    const copySelection = (): boolean => {
-      const selection = terminal.getSelection()
-      if (!selection) return false
-      void navigator.clipboard?.writeText(selection).catch(() => {})
-      return true
-    }
-    const pasteClipboard = () => {
-      void navigator.clipboard?.readText().then((text) => {
-        if (text) writeToPty(text)
-      }).catch(() => {})
-    }
-
-    terminal.attachCustomKeyEventHandler((event) => {
-      if (event.type !== 'keydown') return true
-      const ctrl = event.ctrlKey
-      const shift = event.shiftKey
-      const key = event.key
-
-      if (ctrl && shift && (key === 'C' || key === 'c')) {
-        copySelection()
-        return false
+      const existing = runtime.nativeSessionId
+      if (existing) {
+        await terminalApi.kill(existing).catch(() => {})
+        if (!isCurrentStart()) return
+        runtime.nativeSessionId = null
       }
-      if (ctrl && shift && (key === 'V' || key === 'v')) {
-        pasteClipboard()
-        return false
-      }
-      // Ctrl+Insert / Shift+Insert mirror the classic terminal bindings.
-      if (ctrl && key === 'Insert') {
-        copySelection()
-        return false
-      }
-      if (shift && key === 'Insert') {
-        pasteClipboard()
-        return false
-      }
-      // Bare Ctrl+C: copy when something is selected, else let SIGINT through.
-      if (ctrl && !shift && (key === 'C' || key === 'c') && terminal.hasSelection()) {
-        copySelection()
-        terminal.clearSelection()
-        return false
-      }
-      return true
-    })
+      runtime.dataDisposable?.dispose()
+      runtime.dataDisposable = null
+      runtime.unlisteners.forEach((unlisten) => unlisten())
+      runtime.unlisteners = []
 
-    // startTerminal can run again (restart button) against the *same* host
-    // node, so remove any contextmenu handler bound by a previous run before
-    // attaching a fresh one — otherwise they stack and fire N times.
-    const hostWithHandler = host as HTMLDivElement & {
-      __ccCopyMenuHandler?: (event: MouseEvent) => void
-    }
-    if (hostWithHandler.__ccCopyMenuHandler) {
-      host.removeEventListener('contextmenu', hostWithHandler.__ccCopyMenuHandler)
-    }
-    const contextMenuHandler = (event: MouseEvent) => {
-      event.preventDefault()
-      if (!copySelection()) pasteClipboard()
-    }
-    hostWithHandler.__ccCopyMenuHandler = contextMenuHandler
-    host.addEventListener('contextmenu', contextMenuHandler)
+      runtime.terminal?.dispose()
+      runtime.terminal = null
+      runtime.fit = null
+      host.innerHTML = ''
 
-    updateTerminalRuntime(runtime, { terminal, fit })
-    fit.fit()
-
-    const outputUnlisten = await terminalApi.onOutput((payload) => {
-      if (payload.session_id === runtime.nativeSessionId) {
-        terminal.write(payload.data)
-      }
-    })
-    const exitUnlisten = await terminalApi.onExit((payload) => {
-      if (payload.session_id !== runtime.nativeSessionId) return
-      updateTerminalRuntime(runtime, { status: 'exited' })
-      const signal = payload.signal ? `, ${payload.signal}` : ''
-      terminal.writeln(`\r\n[process exited: ${payload.code}${signal}]`)
-      updateTerminalRuntime(runtime, { nativeSessionId: null })
-    })
-    runtime.unlisteners = [outputUnlisten, exitUnlisten]
-
-    runtime.dataDisposable = terminal.onData((data) => {
-      const sessionId = runtime.nativeSessionId
-      if (sessionId) {
-        void terminalApi.write(sessionId, data).catch((err) => {
+      let TerminalModule: typeof import('@xterm/xterm')
+      let FitAddonModule: typeof import('@xterm/addon-fit')
+      try {
+        [TerminalModule, FitAddonModule] = await Promise.all([
+          import('@xterm/xterm'),
+          import('@xterm/addon-fit'),
+        ])
+      } catch (err) {
+        if (isCurrentStart()) {
           updateTerminalRuntime(runtime, {
             error: err instanceof Error ? err.message : String(err),
             status: 'error',
           })
+        }
+        return
+      }
+      if (!isCurrentStart()) return
+
+      let terminal: import('@xterm/xterm').Terminal | null = null
+      let fit: import('@xterm/addon-fit').FitAddon | null = null
+      let outputUnlisten: (() => void) | null = null
+      let exitUnlisten: (() => void) | null = null
+
+      try {
+        terminal = new TerminalModule.Terminal({
+          cursorBlink: true,
+          convertEol: false,
+          fontFamily: "var(--font-mono), 'SFMono-Regular', Consolas, monospace",
+          fontSize: 12,
+          lineHeight: 1.25,
+          scrollback: 4000,
+          theme: {
+            background: '#121212',
+            foreground: '#d7d2d0',
+            cursor: '#ffb59f',
+            selectionBackground: '#5f4a40',
+            black: '#1f1f1f',
+            red: '#ff6d67',
+            green: '#7ef18a',
+            yellow: '#f8c55f',
+            blue: '#77a8ff',
+            magenta: '#d699ff',
+            cyan: '#61d6d6',
+            white: '#d7d2d0',
+            brightBlack: '#8f8683',
+            brightRed: '#ff8a85',
+            brightGreen: '#9ff7a7',
+            brightYellow: '#ffdd7a',
+            brightBlue: '#a6c5ff',
+            brightMagenta: '#e3b8ff',
+            brightCyan: '#8ceeee',
+            brightWhite: '#ffffff',
+          },
         })
+        fit = new FitAddonModule.FitAddon()
+        const activeTerminal = terminal
+        const activeFit = fit
+        activeTerminal.loadAddon(activeFit)
+        activeTerminal.open(host)
+        // Clipboard wiring. xterm itself ships no copy/paste — without this,
+        // Ctrl+C only sends SIGINT and there's no way to lift selected text out.
+        // Conventions follow VS Code / GNOME Terminal on Windows + Linux:
+        //   - Ctrl+Shift+C / Ctrl+Insert  → copy current selection
+        //   - Ctrl+Shift+V / Shift+Insert → paste clipboard into the PTY
+        //   - Ctrl+C with an active selection → copy (then clear selection) so the
+        //     muscle-memory shortcut works; with no selection it falls through to
+        //     the shell as SIGINT, unchanged.
+        //   - right-click → copy selection if any, else paste
+        const writeToPty = (data: string) => {
+          const sessionId = runtime.nativeSessionId
+          if (sessionId) void terminalApi.write(sessionId, data).catch(() => {})
+        }
+        const copySelection = (): boolean => {
+          const selection = activeTerminal.getSelection()
+          if (!selection) return false
+          void navigator.clipboard?.writeText(selection).catch(() => {})
+          return true
+        }
+        const pasteClipboard = () => {
+          void navigator.clipboard?.readText().then((text) => {
+            if (text) writeToPty(text)
+          }).catch(() => {})
+        }
+
+        activeTerminal.attachCustomKeyEventHandler((event) => {
+          if (event.type !== 'keydown') return true
+          const ctrl = event.ctrlKey
+          const shift = event.shiftKey
+          const key = event.key
+
+          if (ctrl && shift && (key === 'C' || key === 'c')) {
+            copySelection()
+            return false
+          }
+          if (ctrl && shift && (key === 'V' || key === 'v')) {
+            pasteClipboard()
+            return false
+          }
+          // Ctrl+Insert / Shift+Insert mirror the classic activeTerminal bindings.
+          if (ctrl && key === 'Insert') {
+            copySelection()
+            return false
+          }
+          if (shift && key === 'Insert') {
+            pasteClipboard()
+            return false
+          }
+          // Bare Ctrl+C: copy when something is selected, else let SIGINT through.
+          if (ctrl && !shift && (key === 'C' || key === 'c') && activeTerminal.hasSelection()) {
+            copySelection()
+            activeTerminal.clearSelection()
+            return false
+          }
+          return true
+        })
+
+        // startTerminal can run again (restart button) against the *same* host
+        // node, so remove any contextmenu handler bound by a previous run before
+        // attaching a fresh one — otherwise they stack and fire N times.
+        const hostWithHandler = host as HTMLDivElement & {
+          __ccCopyMenuHandler?: (event: MouseEvent) => void
+        }
+        if (hostWithHandler.__ccCopyMenuHandler) {
+          host.removeEventListener('contextmenu', hostWithHandler.__ccCopyMenuHandler)
+        }
+        const contextMenuHandler = (event: MouseEvent) => {
+          event.preventDefault()
+          if (!copySelection()) pasteClipboard()
+        }
+        hostWithHandler.__ccCopyMenuHandler = contextMenuHandler
+        host.addEventListener('contextmenu', contextMenuHandler)
+
+        if (!isCurrentStart()) {
+          activeTerminal.dispose()
+          return
+        }
+        updateTerminalRuntime(runtime, { terminal: activeTerminal, fit: activeFit })
+        activeFit.fit()
+
+        outputUnlisten = await terminalApi.onOutput((payload) => {
+          if (payload.session_id === runtime.nativeSessionId) {
+            activeTerminal.write(payload.data)
+          }
+        })
+        exitUnlisten = await terminalApi.onExit((payload) => {
+          if (payload.session_id !== runtime.nativeSessionId) return
+          updateTerminalRuntime(runtime, { status: 'exited' })
+          const signal = payload.signal ? `, ${payload.signal}` : ''
+          activeTerminal.writeln(`\r\n[process exited: ${payload.code}${signal}]`)
+          updateTerminalRuntime(runtime, { nativeSessionId: null })
+        })
+        if (!isCurrentStart()) {
+          outputUnlisten()
+          exitUnlisten()
+          activeTerminal.dispose()
+          return
+        }
+        runtime.unlisteners = [outputUnlisten, exitUnlisten]
+
+        runtime.dataDisposable = terminal.onData((data) => {
+          const sessionId = runtime.nativeSessionId
+          if (sessionId) {
+            void terminalApi.write(sessionId, data).catch((err) => {
+              updateTerminalRuntime(runtime, {
+                error: err instanceof Error ? err.message : String(err),
+                status: 'error',
+              })
+            })
+          }
+        })
+
+        const result = await terminalApi.spawn({
+          cols: activeTerminal.cols,
+          rows: activeTerminal.rows,
+          ...(cwd ? { cwd } : {}),
+        })
+        if (!isCurrentStart()) {
+          await terminalApi.kill(result.session_id).catch(() => {})
+          outputUnlisten()
+          exitUnlisten()
+          activeTerminal.dispose()
+          return
+        }
+        updateTerminalRuntime(runtime, {
+          nativeSessionId: result.session_id,
+          shellInfo: { shell: result.shell, cwd: result.cwd },
+          status: 'running',
+        })
+        resizeSession()
+      } catch (err) {
+        outputUnlisten?.()
+        exitUnlisten?.()
+        terminal?.dispose()
+        if (isCurrentStart()) {
+          updateTerminalRuntime(runtime, {
+            terminal: null,
+            fit: null,
+            error: err instanceof Error ? err.message : String(err),
+            status: 'error',
+          })
+        }
       }
     })
-
-    try {
-      const result = await terminalApi.spawn({
-        cols: terminal.cols,
-        rows: terminal.rows,
-        ...(cwd ? { cwd } : {}),
-      })
-      updateTerminalRuntime(runtime, {
-        nativeSessionId: result.session_id,
-        shellInfo: { shell: result.shell, cwd: result.cwd },
-        status: 'running',
-      })
-      resizeSession()
-    } catch (err) {
-      outputUnlisten()
-      exitUnlisten()
-      terminal.dispose()
-      updateTerminalRuntime(runtime, {
-        terminal: null,
-        fit: null,
-        error: err instanceof Error ? err.message : String(err),
-        status: 'error',
-      })
-    }
+    runtime.startPromise = startPromise
+    void startPromise.finally(() => {
+      if (runtime.startPromise === startPromise) {
+        runtime.startPromise = null
+      }
+    }).catch(() => {})
+    return startPromise
   }, [cwd, resizeSession, runtime])
 
   useEffect(() => {
@@ -349,6 +413,12 @@ export function TerminalSettings({
         attachTerminalRuntime(runtime, hostRef.current)
       }
       resizeSession()
+    } else if (runtime.startPromise) {
+      void runtime.startPromise.then(() => {
+        if (!hostRef.current || !isTerminalRuntimeCurrent(runtime) || !runtime.terminal) return
+        attachTerminalRuntime(runtime, hostRef.current)
+        resizeSession()
+      })
     } else {
       void startTerminal()
     }

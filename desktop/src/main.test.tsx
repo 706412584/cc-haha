@@ -11,6 +11,7 @@ vi.mock('./lib/persistenceMigrations', () => ({
   runDesktopPersistenceMigrations: mocks.runDesktopPersistenceMigrations,
 }))
 
+vi.mock('@xterm/xterm/css/xterm.css', () => ({}))
 vi.mock('./theme/globals.css', () => ({}))
 
 vi.mock('./App', () => ({

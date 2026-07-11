@@ -8,6 +8,7 @@ import * as path from 'path'
 import * as os from 'os'
 import {
   cronMatches,
+  extractAssistantText,
   fieldMatches,
   CronScheduler,
   type TaskRun,
@@ -52,6 +53,26 @@ async function createFakeCronCli(dir: string): Promise<string> {
 }
 
 // ─── fieldMatches tests ────────────────────────────────────────────────────
+
+describe('extractAssistantText', () => {
+  it('does not duplicate the final assistant text repeated by the result event', () => {
+    const raw = [
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'X' }] } }),
+      JSON.stringify({ type: 'result', result: 'X' }),
+    ].join('\n')
+
+    expect(extractAssistantText(raw)).toBe('X')
+  })
+
+  it('keeps a distinct result summary after assistant text', () => {
+    const raw = [
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'details' }] } }),
+      JSON.stringify({ type: 'result', result: 'summary' }),
+    ].join('\n')
+
+    expect(extractAssistantText(raw)).toBe('details\n\nsummary')
+  })
+})
 
 describe('fieldMatches', () => {
   it('should match wildcard', () => {

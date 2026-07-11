@@ -3,7 +3,8 @@
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions' | 'dontAsk'
 
 export type EffortLevel = 'low' | 'medium' | 'high' | 'max'
-export const THEME_MODES = ['white', 'light', 'dark', 'system'] as const
+export type ReasoningEffortLevel = EffortLevel | 'xhigh'
+export const THEME_MODES = ['white', 'light', 'eyeCare', 'dark', 'system'] as const
 export type ThemeMode = (typeof THEME_MODES)[number]
 
 export function isThemeMode(value: unknown): value is ThemeMode {
@@ -126,6 +127,8 @@ export type ModelInfo = {
   name: string
   description: string
   context: string
+  defaultReasoningEffort?: ReasoningEffortLevel
+  supportedReasoningEfforts?: ReasoningEffortLevel[]
 }
 
 export type UserSettings = {

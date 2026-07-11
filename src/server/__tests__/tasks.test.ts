@@ -202,6 +202,35 @@ describe('Tasks API', () => {
     expect(res.status).toBe(404)
   })
 
+  it('should reset a persisted task list', async () => {
+    const taskListDir = path.join(tmpDir, 'tasks', 'desktop-session-1')
+    await fs.mkdir(taskListDir, { recursive: true })
+    await fs.writeFile(path.join(taskListDir, '1.json'), JSON.stringify(taskFixture({
+      id: '1',
+      subject: 'First task',
+      status: 'completed',
+    })))
+    await fs.writeFile(path.join(taskListDir, '2.json'), JSON.stringify(taskFixture({
+      id: '2',
+      subject: 'Second task',
+      status: 'completed',
+    })))
+
+    const before = await fetch(`${baseUrl}/api/tasks/lists/desktop-session-1`)
+    expect(before.status).toBe(200)
+    expect((await before.json()).tasks).toHaveLength(2)
+
+    const reset = await fetch(`${baseUrl}/api/tasks/lists/desktop-session-1/reset`, {
+      method: 'POST',
+    })
+    expect(reset.status).toBe(200)
+    expect(await reset.json()).toEqual({ ok: true })
+
+    const after = await fetch(`${baseUrl}/api/tasks/lists/desktop-session-1`)
+    expect(after.status).toBe(200)
+    expect((await after.json()).tasks).toEqual([])
+  })
+
   it('should reject non-GET methods', async () => {
     const res = await fetch(`${baseUrl}/api/tasks`, { method: 'POST' })
     expect(res.status).toBe(405)

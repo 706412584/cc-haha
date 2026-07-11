@@ -3,12 +3,16 @@ import { getAuthToken, getBaseUrl } from './client'
 
 type MessageHandler = (msg: ServerMessage) => void
 
+const HEARTBEAT_INTERVAL_MS = 30_000
+const HEARTBEAT_TIMEOUT_MS = 10_000
+
 type Connection = {
   ws: WebSocket
   handlers: Set<MessageHandler>
   reconnectTimer: ReturnType<typeof setTimeout> | null
   reconnectAttempt: number
   pingInterval: ReturnType<typeof setInterval> | null
+  pongTimeout: ReturnType<typeof setTimeout> | null
   intentionalClose: boolean
   pendingMessages: ClientMessage[]
 }
@@ -47,23 +51,34 @@ class WebSocketManager {
       reconnectTimer: null,
       reconnectAttempt: existing?.reconnectAttempt ?? 0,
       pingInterval: null,
+      pongTimeout: null,
       intentionalClose: false,
       pendingMessages: existing?.pendingMessages ?? [],
     }
     this.connections.set(sessionId, conn)
 
     ws.onopen = () => {
+      const isReconnect = conn.reconnectAttempt > 0
       conn.reconnectAttempt = 0
-      this.startPingLoop(sessionId)
+      this.startPingLoop(sessionId, conn)
       while (conn.pendingMessages.length > 0) {
         const msg = conn.pendingMessages.shift()!
         ws.send(JSON.stringify(msg))
+      }
+      // Ask for authoritative turn state only on an automatic reconnect. This
+      // is deliberately queued after pending user messages so the server sees
+      // those turns before deciding whether the session is running or idle.
+      if (isReconnect) {
+        ws.send(JSON.stringify({ type: 'sync_state' } satisfies ClientMessage))
       }
     }
 
     ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data as string) as ServerMessage
+        if (msg.type === 'pong') {
+          this.clearPongTimeout(conn)
+        }
         for (const handler of conn.handlers) {
           handler(msg)
         }
@@ -73,7 +88,7 @@ class WebSocketManager {
     }
 
     ws.onclose = () => {
-      this.stopPingLoop(sessionId)
+      this.stopPingLoopForConnection(conn)
       if (!conn.intentionalClose && this.connections.get(sessionId) === conn) {
         this.scheduleReconnect(sessionId, conn)
       }
@@ -89,7 +104,7 @@ class WebSocketManager {
     if (!conn) return
 
     conn.intentionalClose = true
-    this.stopPingLoop(sessionId)
+    this.stopPingLoopForConnection(conn)
     if (conn.reconnectTimer) {
       clearTimeout(conn.reconnectTimer)
       conn.reconnectTimer = null
@@ -143,20 +158,49 @@ class WebSocketManager {
     if (conn) conn.handlers.clear()
   }
 
-  private startPingLoop(sessionId: string) {
-    this.stopPingLoop(sessionId)
-    const conn = this.connections.get(sessionId)
-    if (!conn) return
+  private startPingLoop(sessionId: string, conn: Connection) {
+    this.stopPingLoopForConnection(conn)
+    if (this.connections.get(sessionId) !== conn) return
     conn.pingInterval = setInterval(() => {
-      this.send(sessionId, { type: 'ping' })
-    }, 30_000)
+      if (
+        this.connections.get(sessionId) !== conn ||
+        conn.ws.readyState !== WebSocket.OPEN
+      ) {
+        return
+      }
+
+      try {
+        conn.ws.send(JSON.stringify({ type: 'ping' } satisfies ClientMessage))
+      } catch {
+        conn.ws.close()
+        return
+      }
+
+      this.clearPongTimeout(conn)
+      conn.pongTimeout = setTimeout(() => {
+        conn.pongTimeout = null
+        if (
+          this.connections.get(sessionId) === conn &&
+          conn.ws.readyState === WebSocket.OPEN
+        ) {
+          conn.ws.close()
+        }
+      }, HEARTBEAT_TIMEOUT_MS)
+    }, HEARTBEAT_INTERVAL_MS)
   }
 
-  private stopPingLoop(sessionId: string) {
-    const conn = this.connections.get(sessionId)
-    if (conn?.pingInterval) {
+  private stopPingLoopForConnection(conn: Connection) {
+    if (conn.pingInterval) {
       clearInterval(conn.pingInterval)
       conn.pingInterval = null
+    }
+    this.clearPongTimeout(conn)
+  }
+
+  private clearPongTimeout(conn: Connection) {
+    if (conn.pongTimeout) {
+      clearTimeout(conn.pongTimeout)
+      conn.pongTimeout = null
     }
   }
 

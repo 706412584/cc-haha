@@ -56,7 +56,7 @@ The Code Council desktop app brings sessions, multi-project navigation, branch /
 
 1. Download the macOS / Windows / Linux desktop installer from [Releases](https://github.com/706412584/cc-haha/releases).
 2. On first launch, configure your model provider, API key, and default model in Settings.
-3. This build is currently unsigned, so the first launch needs a one-time manual approval (clear quarantine on macOS, click "Run anyway" on Windows). See the [desktop installation guide](docs/desktop/04-installation.md).
+3. Public macOS releases require signing and notarization. Draft or unsigned temporary builds may still need one-time manual approval. Unsigned Windows installers may show SmartScreen; click "More info" -> "Run anyway". See the [desktop installation guide](docs/desktop/04-installation.md).
 
 ## Run the CLI from Source
 
@@ -80,6 +80,8 @@ See [environment variables](docs/en/guide/env-vars.md) and [global usage](docs/e
 - **Visual code changes**: inspect edits, file writes, and diffs directly in the desktop app.
 - **Permission review**: approve risky commands, tool calls, and model follow-up questions in the GUI.
 - **Multi-provider setup**: configure Anthropic-compatible APIs, third-party models, WebSearch fallback, and local options.
+- **Skill Marketplace**: discover, preview, install, and manage third-party skills from ClawHub / SkillHub in the desktop app.
+- **Session Activity Panel**: review tasks, background tasks, SubAgents, team activity, and sources in one side panel.
 - **Computer Use**: let the agent take screenshots, click, type, and control desktop apps after authorization.
 - **H5 remote access**: open the current desktop session from a phone or another device with a one-time token.
 - **IM integration**: chat, switch projects, and approve actions through Telegram / Feishu / WeChat / DingTalk.
@@ -138,6 +140,16 @@ This project is maintained in the author's spare time. Corporate or individual s
       </td>
       <td valign="middle">
         Thanks to <a href="https://www.shengsuanyun.com/?from=CH_LEJ88KWR">ShengSuanYun</a> for sponsoring this project. ShengSuanYun is an industrial-grade AI task parallel execution platform for AI Native Teams, aggregating Claude, ChatGPT, Gemini, and other LLM, image, and video model capacity through direct, non-reverse-engineered access. Its platform SLA reaches 99.7%, with <a href="https://watch.shengsuanyun.com/status/shengsuanyun">service status</a> available online. It also supports dedicated enterprise gateways, cost and permission controls, smart routing, security protection, BYOK, usage-based billing, upcoming tokens plans, and invoicing. New users registering through <a href="https://www.shengsuanyun.com/?from=CH_LEJ88KWR">this link</a> can receive 10 yuan in model credits plus a 10% first top-up bonus.
+      </td>
+    </tr>
+    <tr>
+      <td align="center" valign="middle">
+        <a href="https://teamorouter.com/?utm_source=cc_haha&utm_medium=referral&utm_campaign=ai_directory">
+          <img src="docs/images/sponsors/teamorouter-logo.svg" width="180" alt="TeamoRouter">
+        </a>
+      </td>
+      <td valign="middle">
+        Thanks to <a href="https://teamorouter.com/?utm_source=cc_haha&utm_medium=referral&utm_campaign=ai_directory">TeamoRouter</a> for sponsoring this project. TeamoRouter is an enterprise-grade Agentic LLM gateway for developers, AI teams, and businesses. Without any subscription, it lets you use Claude Code, Codex, Gemini CLI, and other popular AI agents through a single unified API, with API pricing at discounts of up to 90%. It aggregates hundreds of official model providers and trusted infrastructure partners — including OpenAI, Anthropic, Vertex, Azure, and AWS Bedrock — each verified for 100% Agent protocol compatibility, cache performance, and request traceability, delivering near-official TTFT, a 99.6% SLA, throughput up to 5,000 QPM, and industry-leading cache hit rates rather than reverse-engineered endpoints. It also offers centralized billing, team management, BYOK, smart routing, usage analytics, and dedicated support, and Teamo Desktop lets you use these AI agents with one-click setup. New users who register through <a href="https://teamorouter.com/?utm_source=cc_haha&utm_medium=referral&utm_campaign=ai_directory">this link</a> receive 10% off their first top-up.
       </td>
     </tr>
   </tbody>

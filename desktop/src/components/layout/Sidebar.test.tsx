@@ -296,6 +296,33 @@ describe('Sidebar', () => {
     expect(screen.getByTestId('sidebar-title-region')).toHaveAttribute('data-desktop-drag-region')
   })
 
+  it('keeps desktop sidebar controls while simplifying them on mobile', () => {
+    const now = new Date('2026-05-15T10:00:00.000Z').toISOString()
+    useSessionStore.setState({
+      sessions: [makeSession('alpha-1', 'Alpha Session', '/workspace/alpha', now)],
+    })
+
+    const { rerender } = render(<Sidebar />)
+
+    expect(screen.getByRole('link', { name: 'GitHub' })).toHaveAttribute('href', 'https://github.com/706412584/cc-haha')
+    expect(screen.getByRole('button', { name: 'Search chats' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Batch manage' })).toBeInTheDocument()
+    expect(screen.getByTestId('sidebar-projects-header')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'New session in alpha' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Alpha Session/ })).toHaveTextContent('5/15')
+
+    rerender(<Sidebar isMobile />)
+
+    expect(screen.queryByRole('link')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Search chats' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Batch manage' })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('sidebar-projects-header')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'New session in alpha' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Refresh sessions' })).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('Search sessions')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Alpha Session/ })).not.toHaveTextContent('5/15')
+  })
+
   it('groups sessions by project and expands overflow rows', () => {
     const base = new Date('2026-05-15T10:00:00.000Z').getTime()
     useSessionStore.setState({
@@ -1270,6 +1297,24 @@ describe('Sidebar', () => {
       await Promise.resolve()
     })
     expect(fetchSessions).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not overlap automatic session refreshes when the previous request is still pending', async () => {
+    vi.useFakeTimers()
+    fetchSessions.mockReturnValue(new Promise(() => {}))
+
+    render(<Sidebar />)
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(fetchSessions).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      vi.advanceTimersByTime(90_000)
+      await Promise.resolve()
+    })
+
+    expect(fetchSessions).toHaveBeenCalledTimes(1)
   })
 
   it('does not poll for session changes while the document is hidden', async () => {

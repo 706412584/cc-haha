@@ -26,15 +26,21 @@ bun install
 
 Do not commit local artifacts such as `artifacts/quality-runs/`, `node_modules/`, or `desktop/node_modules/`.
 
-## Required PR Gate
+## Path-Aware PR Checks
 
-Before opening a normal PR, contributors and AI coding agents should run the single entrypoint:
+First ask the repository which deterministic checks match the changed paths:
+
+```bash
+bun run check:impact
+```
+
+Run the selected focused commands while developing. Before claiming PR-ready, for a high-risk change, or when reproducing the full hosted CI locally, use the unified entrypoint:
 
 ```bash
 bun run verify
 ```
 
-`bun run verify` is the one-command entrypoint and is equivalent to `bun run quality:pr`. This gate does not call real models, so every contributor can run it locally. It starts with an impact report, then actually runs the selected local gates for the changed paths: policy, desktop, server, adapters, native, docs, quarantine, and coverage. A non-zero exit means the branch is not ready for PR or push.
+`bun run verify` is equivalent to `bun run quality:pr`. It runs the selected policy, desktop, server, adapter, native, provider contract, chat contract, persistence, docs, and coverage lanes, without calling real models. Small external contributions do not need to run unrelated modules locally; GitHub CI runs the exact path-aware gate again.
 
 The main quality report embeds the current test scope, result matrix, coverage summary, and links to the full coverage/JUnit/log artifacts:
 
@@ -49,14 +55,15 @@ artifacts/coverage/<timestamp>/coverage-report.json
 
 Include the commands you ran and the report summary in your PR description. `quality:pr` / `quality:verify` remain available for contributors who prefer explicit quality command names, but docs and AI prompts should prefer `bun run verify`.
 
-The coverage gate does four things: measures source-only coverage, enforces the baseline ratchet, reports target gaps against 75-80%+ maintained-area goals, and enforces changed-line coverage for new or modified executable production lines. The current baseline lives in `scripts/quality-gate/coverage-baseline.json`, and CI compares against the base branch baseline when available. New PRs must not lower coverage beyond the allowed window. Changes to `coverage-baseline.json` or `coverage-thresholds.json` require the maintainer-only `allow-coverage-baseline-change` label. Quarantine entries must keep an owner, reviewAfter date, and exit criteria; once reviewAfter expires, the default server and coverage gates fail until maintainers review the entry.
+The coverage gate does four things: measures source-only coverage, enforces the baseline ratchet, reports target gaps against 75-80%+ maintained-area goals, and enforces changed-line coverage for new or modified executable production lines. The current baseline lives in `scripts/quality-gate/coverage-baseline.json`, and CI compares against the base branch baseline when available. New PRs must not lower coverage beyond the allowed window. Changes to `coverage-baseline.json` or `coverage-thresholds.json` require the maintainer-only `allow-coverage-baseline-change` label. Quarantine is reserved for maintainer baseline/release tracking and must never hide deterministic provider/chat contract tests; the normal PR gate does not depend on quarantine to pass.
 
 ## AI Coding Agent Fix Loop
 
 When asking an AI coding agent to work in this repo, use this as the acceptance instruction:
 
 ```text
-Run `bun run verify`. If it fails, read the latest
+Run `bun run check:impact`, then run the selected focused checks. If the task
+requires PR-ready/full validation, run `bun run verify`. If it fails, read the latest
 `artifacts/quality-runs/<timestamp>/report.md` and the relevant lane log,
 fix the missing tests, coverage failures, type/lint/build errors, or docs/native
 failures, then rerun `bun run verify` until it passes. Do not lower coverage
@@ -69,7 +76,7 @@ Agents should handle failures in this order:
 2. If `Path-aware PR checks` failed, check for missing same-area tests, CLI core changes, or coverage policy changes. Do not bypass normal feature PRs with maintainer overrides.
 3. If `Coverage gate` failed, open `artifacts/coverage/<timestamp>/coverage-report.md` or `coverage-report.json`, then fix `changedLines.failures` and `failures` first. `targetGaps` are technical-debt signals; touched areas should still improve.
 4. If desktop/server/adapters/native/docs failed, read `artifacts/quality-runs/<timestamp>/logs/<lane>.log`, add tests or fix the build, then rerun the narrow command.
-5. After narrow checks pass, run `bun run verify` again. The agent may only claim ready when the final Summary has `failed=0`.
+5. After narrow checks pass, run `bun run verify` when claiming PR-ready/full validation. The agent may only make that claim when the final Summary has `failed=0`.
 
 External reference points:
 
@@ -105,7 +112,7 @@ You can still install the local pre-push hook, but it only prints a non-blocking
 bun run hooks:install
 ```
 
-Maintainers or contributors with model quota can run real provider smoke and desktop agent-browser smoke manually:
+Maintainers with a trusted repository environment and model quota can run real provider smoke and desktop agent-browser smoke manually:
 
 ```bash
 bun run quality:providers
@@ -120,9 +127,9 @@ bun run quality:gate --mode baseline --allow-live --provider-model minimax:main:
 
 ## PR CI Merge Gate
 
-`.github/workflows/pr-quality.yml` runs for PR `opened`, `synchronize`, `reopened`, `ready_for_review`, `labeled`, and `unlabeled` events. It starts with `change-policy`, which maps changed files to the desktop, server, adapter, native, docs, and coverage lanes. The final `pr-quality-gate` job aggregates every selected job: failed selected jobs fail `pr-quality-gate`, while unselected jobs may be skipped.
+`.github/workflows/pr-quality.yml` runs for PR `opened`, `synchronize`, `reopened`, `ready_for_review`, `labeled`, and `unlabeled` events. `scope-plan` installs no dependencies and only produces the stable impact plan. `policy-enforcement` installs the frozen dependency graph independently and runs policy, so a policy failure cannot swallow product-test results. Product jobs depend only on `scope-plan` and select desktop, server, adapter, native, provider contract, chat contract, persistence, docs, and coverage lanes by path. The final `pr-quality-gate` validates every result strictly: selected jobs must succeed, unselected jobs must be skipped, and cancelled or missing results cannot be mistaken for success.
 
-Repository settings should protect `main` with GitHub branch protection / rulesets and require the `pr-quality-gate` status check. The local hook blocks low-quality pushes; the PR gate blocks low-quality merges.
+Repository settings should protect `main` with GitHub branch protection / rulesets and require the `pr-quality-gate` status check. CODEOWNERS requires maintainer review for workflows, quality policy, and high-risk provider/WebSocket boundaries. The local hook only reminds; the PR gate is what blocks low-quality merges.
 
 ## Area-Specific Checks
 
@@ -133,12 +140,15 @@ bun run check:server      # Server API, WebSocket, providers, sessions, and rela
 bun run check:desktop     # Desktop lint, Vitest, and production build
 bun run check:adapters    # IM adapter tests
 bun run check:native      # Desktop sidecars, Electron host, and package-smoke checks
+bun run check:provider-contract # Offline provider/runtime/proxy contract tests
+bun run check:chat-contract     # WebSocket, session, and desktop chat-store contracts
+bun run check:persistence-upgrade # Persistence migrations and old-fixture compatibility
 bun run check:docs        # Docs build, using npm ci + docs:build
-bun run check:quarantine  # Quarantine owners, exit criteria, and review windows
+bun run check:quarantine  # Maintainer baseline/release quarantine audit
 bun run check:coverage    # Root, desktop, and adapter coverage reports plus ratchet enforcement
 ```
 
-Focused tests are fine while developing, but run `bun run verify` before sending the PR.
+Focused tests are the normal development loop. Run `bun run verify` locally when claiming PR-ready/full validation; hosted CI still executes every selected required lane.
 
 Production code changes must include matching tests. Changes under `desktop/src/**`, `src/server/**`, `src/tools/**`, `src/utils/**`, or `adapters/**` without a same-area test file are blocked unless a maintainer applies `allow-missing-tests`. Coverage baseline/threshold changes are also blocked unless a maintainer applies `allow-coverage-baseline-change`.
 
@@ -204,7 +214,7 @@ bun run quality:gate --mode baseline --allow-live
 
 ## When To Run The Baseline
 
-Run the live baseline for changes touching:
+After deterministic contract/E2E checks pass, a trusted maintainer should run the live baseline for changes touching:
 
 - Desktop chat, session resume, WebSocket, or the CLI bridge
 - Provider, model, or runtime selection
@@ -212,7 +222,7 @@ Run the live baseline for changes touching:
 - agent-browser smoke, Computer Use, Skills, or MCP
 - Release preparation or broad cross-module refactors
 
-If you do not have model access, still run `bun run verify` and state in the PR why the live baseline was not run.
+External PRs from forks do not receive repository secrets, and contributors are not expected to pay for model calls. Record `live model: not run (untrusted fork / no provider)` in the PR. A maintainer should add live evidence before merging or releasing high-risk changes; missing live evidence must not make deterministic PR lanes flaky.
 
 ## Release Gate
 
@@ -232,22 +242,22 @@ In release mode, live lanes are not allowed to be silently skipped. Missing prov
 2. Install dependencies and make the change.
 3. Add tests for behavior changes.
 4. Run focused checks for the affected area.
-5. Optional but recommended: run `bun run hooks:install` so later pushes are blocked by failing gates.
-6. Run `bun run verify`.
-7. Run the live baseline for high-risk changes.
+5. Optional: run `bun run hooks:install` to show a non-blocking reminder before later pushes.
+6. Run `bun run verify` if you are claiming PR-ready/full validation.
+7. A trusted maintainer runs the live baseline for high-risk changes; external contributors only record why it was not run.
 8. In the PR description, include user impact, verification commands, coverage/quality report summary, and known risks.
 
 ## FAQ
 
 ### Can I run checks without a provider?
 
-Yes. Run the normal PR gate:
+Yes. Run the impact report and its selected deterministic checks:
 
 ```bash
-bun run verify
+bun run check:impact
 ```
 
-Only the live baseline needs a real model. Add your provider in Desktop Settings > Providers, then run:
+`bun run verify` also needs no real model. Only the live baseline does. Maintainers can add a provider in Desktop Settings > Providers, then run:
 
 ```bash
 bun run quality:providers

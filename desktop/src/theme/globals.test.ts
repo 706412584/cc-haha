@@ -4,7 +4,7 @@ import css from './globals.css?raw'
 
 const normalizedCss = css.replace(/\r\n/g, '\n')
 
-function getThemeBlock(selector: ':root,\n[data-theme="light"]' | '[data-theme="white"]' | '[data-theme="dark"]') {
+function getThemeBlock(selector: ':root,\n[data-theme="light"]' | '[data-theme="white"]' | '[data-theme="eyeCare"]' | '[data-theme="dark"]') {
   const start = normalizedCss.indexOf(`${selector} {`)
   expect(start).toBeGreaterThanOrEqual(0)
 
@@ -33,7 +33,7 @@ function getCssBetween(startMarker: string, endMarker: string) {
 }
 
 describe('desktop theme tokens', () => {
-  const themes = [':root,\n[data-theme="light"]', '[data-theme="white"]', '[data-theme="dark"]'] as const
+  const themes = [':root,\n[data-theme="light"]', '[data-theme="white"]', '[data-theme="eyeCare"]', '[data-theme="dark"]'] as const
   const requiredTokens = [
     '--color-activity-heat-0',
     '--color-activity-heat-1',
@@ -130,5 +130,15 @@ describe('desktop theme tokens', () => {
   it('keeps code viewer line hover and line numbers on theme tokens', () => {
     expect(css).toContain('background: var(--color-surface-hover);')
     expect(css).toContain('--line-numbers-foreground: var(--color-text-tertiary);')
+  })
+
+  it('keeps xterm helper and accessibility layers from rendering duplicate terminal text', () => {
+    expect(css).toContain('.settings-terminal-host .xterm-accessibility:not(.debug),')
+    expect(css).toContain('.settings-terminal-host .xterm-message')
+    expect(css).toContain('color: transparent;')
+    expect(css).toContain('pointer-events: none;')
+    expect(css).toContain('.settings-terminal-host .xterm-helper-textarea')
+    expect(css).toContain('left: -9999em;')
+    expect(css).toContain('overflow: hidden;')
   })
 })

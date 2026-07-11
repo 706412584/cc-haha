@@ -86,9 +86,9 @@
     "apiKeyUrl": "https://platform.kimi.com/console/api-keys",
     "authStrategy": "auth_token",
     "defaultEnv": {
-      "ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES": "thinking",
-      "ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES": "thinking",
-      "ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES": "thinking"
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES": "thinking,required_thinking",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES": "thinking,required_thinking",
+      "ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES": "thinking,required_thinking"
     },
     "modelContextWindows": {
       "kimi-k2.7-code": 262144,
@@ -178,6 +178,34 @@
       "anthropic/claude-sonnet-4.6": 1000000,
       "anthropic/claude-haiku-4.5:thinking": 200000,
       "anthropic/claude-opus-4.7": 1000000
+    }
+  },
+  {
+    "id": "teamorouter",
+    "name": "TeamoRouter",
+    "baseUrl": "https://api.teamorouter.com",
+    "apiFormat": "anthropic",
+    "defaultModels": {
+      "main": "claude-opus-4-8",
+      "haiku": "claude-haiku-4-5",
+      "sonnet": "claude-sonnet-5",
+      "opus": "claude-opus-4-8"
+    },
+    "needsApiKey": true,
+    "websiteUrl": "https://teamorouter.com",
+    "apiKeyUrl": "https://teamorouter.com/?utm_source=cc_haha&utm_medium=referral&utm_campaign=ai_directory",
+    "promoText": "TeamoRouter 为 cc-haha 的用户提供了专属福利，通过此链接注册的新用户首次充值可享 10% 折扣！",
+    "featured": true,
+    "authStrategy": "auth_token",
+    "defaultEnv": {
+      "CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-5",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES": "none"
+    },
+    "modelContextWindows": {
+      "claude-opus-4-8": 1000000,
+      "claude-sonnet-5": 1000000,
+      "claude-haiku-4-5": 200000,
+      "claude-haiku-4-5-20251001": 200000
     }
   },
   {

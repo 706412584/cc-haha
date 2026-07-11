@@ -60,6 +60,20 @@ export function writeAppModeConfig(configDir: string, config: PersistedAppModeCo
   fs.writeFileSync(path.join(configDir, APP_MODE_FILE), JSON.stringify(config, null, 2))
 }
 
+function assertWritableDataDir(configDir: string): void {
+  try {
+    fs.mkdirSync(configDir, { recursive: true })
+    const probeDir = fs.mkdtempSync(path.join(configDir, '.cc-haha-write-test-'))
+    try {
+      fs.writeFileSync(path.join(probeDir, 'probe'), '')
+    } finally {
+      fs.rmSync(probeDir, { recursive: true, force: true })
+    }
+  } catch {
+    throw new Error(`Data storage directory is not writable: ${configDir}`)
+  }
+}
+
 export function determineStartupPortableDir(
   app: AppModeAppLike,
   env: NodeJS.ProcessEnv = process.env,
@@ -129,7 +143,7 @@ export function setAppMode(
     if (fs.existsSync(selectedDir) && !fs.statSync(selectedDir).isDirectory()) {
       throw new Error(`portable config path is not a directory: ${selectedDir}`)
     }
-    fs.mkdirSync(selectedDir, { recursive: true })
+    assertWritableDataDir(selectedDir)
     targetPortableDir = selectedDir
     config = {
       mode: 'portable',
@@ -137,14 +151,15 @@ export function setAppMode(
     }
   }
 
-  writeAppModeConfig(activeConfigDir, config)
-  if (targetPortableDir && targetPortableDir !== activeConfigDir) {
-    writeAppModeConfig(targetPortableDir, config)
-  }
-
   const systemConfigDir = app.getPath('userData')
-  if (systemConfigDir !== activeConfigDir) {
-    writeAppModeConfig(systemConfigDir, config)
+  const configDirs = [
+    targetPortableDir,
+    activeConfigDir,
+    systemConfigDir,
+  ].filter((dir): dir is string => Boolean(dir))
+
+  for (const configDir of [...new Set(configDirs)]) {
+    writeAppModeConfig(configDir, config)
   }
 }
 

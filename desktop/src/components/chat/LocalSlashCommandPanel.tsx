@@ -954,7 +954,6 @@ function McpPanel({ cwd, onClose }: { cwd?: string; onClose: () => void }) {
 
 function SkillsPanel({ cwd, onClose }: { cwd?: string; onClose: () => void }) {
   const t = useTranslation()
-  const setPendingSettingsTab = useUIStore((s) => s.setPendingSettingsTab)
   const fetchSkillDetail = useSkillStore((s) => s.fetchSkillDetail)
   const [skills, setSkills] = useState<SkillMeta[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -995,7 +994,7 @@ function SkillsPanel({ cwd, onClose }: { cwd?: string; onClose: () => void }) {
               key={`${skill.source}:${skill.name}`}
               onClick={async () => {
                 await fetchSkillDetail(skill.source, skill.name, cwd, 'skills')
-                setPendingSettingsTab('skills')
+                useUIStore.getState().setPendingSettingsTab('skills')
                 useTabStore.getState().openTab(SETTINGS_TAB_ID, 'Settings', 'settings')
                 onClose()
               }}

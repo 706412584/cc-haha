@@ -1,12 +1,11 @@
 import { beforeEach, describe, expect, mock, test } from 'bun:test'
 
 const compactConversationMock = mock(async () => fakeCompactionResult())
+const realCompactModule = await import('./compact.js')
 
 mock.module('./compact.js', () => ({
+  ...realCompactModule,
   compactConversation: compactConversationMock,
-  ERROR_MESSAGE_PROMPT_TOO_LONG:
-    'Conversation too long. Press esc twice to go up a few messages and try again.',
-  ERROR_MESSAGE_USER_ABORT: 'API Error: Request was aborted.',
 }))
 
 const reactiveCompact = await import('./reactiveCompact.js')

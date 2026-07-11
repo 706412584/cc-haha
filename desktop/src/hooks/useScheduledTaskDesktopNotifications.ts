@@ -70,17 +70,26 @@ export function useScheduledTaskDesktopNotifications(): void {
     let stopped = false
     let initialized = false
     let interval: number | undefined
+    let pollInFlight = false
 
     const poll = async () => {
+      if (stopped || pollInFlight) return
+      pollInFlight = true
       try {
-        const [{ tasks }, { runs }] = await Promise.all([
-          tasksApi.list(),
-          tasksApi.getRecentRuns(50),
-        ])
+        const { tasks } = await tasksApi.list()
+        if (stopped) return
+
+        const desktopTasks = tasks.filter(hasDesktopNotification)
+        if (desktopTasks.length === 0) {
+          initialized = true
+          return
+        }
+
+        const { runs } = await tasksApi.getRecentRuns(50)
         if (stopped) return
 
         const notifiedRunIds = readNotifiedRunIds()
-        const pendingRuns = collectDesktopNotifiableRuns(tasks, runs, notifiedRunIds)
+        const pendingRuns = collectDesktopNotifiableRuns(desktopTasks, runs, notifiedRunIds)
 
         if (!initialized) {
           for (const run of pendingRuns) notifiedRunIds.add(run.id)
@@ -106,6 +115,8 @@ export function useScheduledTaskDesktopNotifications(): void {
         if (typeof console !== 'undefined') {
           console.warn('[scheduledTaskNotifications] failed to poll task runs:', err)
         }
+      } finally {
+        pollInFlight = false
       }
     }
 
