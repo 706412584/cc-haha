@@ -143,6 +143,7 @@ const handoffSummarySessions = new Map<string, string>()
 
 const runtimeTransitionPromises = new Map<string, Promise<void>>()
 const runtimeConfigHandlerPromises = new Map<string, Promise<void>>()
+let getCachedSessionSummaryForHandler = getCachedSessionSummary
 const sessionStartupPromises = new Map<string, Promise<void>>()
 const runtimeOverrideVersions = new Map<string, number>()
 const sessionStartupRuntimeVersions = new Map<string, number>()
@@ -322,7 +323,7 @@ export const handleWebSocket = {
           break
 
         case 'set_handoff_summary':
-          void handleSetHandoffSummary(ws, message)
+          trackRuntimeConfigHandler(ws.data.sessionId, () => handleSetHandoffSummary(ws, message))
           break
 
         case 'set_runtime_config':
@@ -992,7 +993,7 @@ async function handleSetHandoffSummary(
 
   let summaryText: string | undefined
   try {
-    const summary = await getCachedSessionSummary(previousSessionId)
+    const summary = await getCachedSessionSummaryForHandler(previousSessionId)
     if (summary) {
       // Deep handoff: rebuild the verbatim tail with enlarged sizing
       // (~12k tokens vs ~4k default) from the live JSONL. Keeps the
@@ -3480,6 +3481,12 @@ export function __setDisconnectCleanupDisabledForTests(disabled: boolean): void 
   disableDisconnectCleanupForTests = disabled
 }
 
+export function __setCachedSessionSummaryReaderForTests(
+  reader?: typeof getCachedSessionSummary,
+): void {
+  getCachedSessionSummaryForHandler = reader ?? getCachedSessionSummary
+}
+
 export function __runFailingRuntimeConfigHandlerForTests(sessionId: string): void {
   trackRuntimeConfigHandler(sessionId, async () => {
     throw new Error('test runtime config failure')
@@ -3511,6 +3518,7 @@ export function __cleanupWebSocketRuntimeStateForTests(): void {
 
 export function __resetWebSocketHandlerStateForTests(): void {
   disableDisconnectCleanupForTests = false
+  getCachedSessionSummaryForHandler = getCachedSessionSummary
   __cleanupWebSocketRuntimeStateForTests()
   for (const timer of prewarmIdleTimers.values()) clearTimeout(timer)
   activeSessions.clear()

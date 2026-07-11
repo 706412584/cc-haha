@@ -6,6 +6,7 @@ import {
   __registerPendingUserTurnForTests,
   __markPrewarmedForTests,
   __resetWebSocketHandlerStateForTests,
+  __setCachedSessionSummaryReaderForTests,
   closeSessionConnection,
   getActiveSessionIds,
   handleWebSocket,
@@ -524,6 +525,56 @@ describe('WebSocket handler session isolation', () => {
       type: 'session_state',
       turnState: 'idle',
     })
+  })
+
+  it('waits for handoff summary staging before starting the first user turn', async () => {
+    const sessionId = `handoff-target-${crypto.randomUUID()}`
+    const previousSessionId = `handoff-source-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    let resolveSummary!: (summary: any) => void
+    const summaryPending = new Promise<any>((resolve) => {
+      resolveSummary = resolve
+    })
+
+    spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([])
+    spyOn(conversationService, 'hasSession').mockReturnValue(false)
+    spyOn(conversationService, 'onOutput').mockImplementation(() => {})
+    spyOn(conversationService, 'sendMessage').mockResolvedValue(true)
+    let signalStarted!: () => void
+    const started = new Promise<void>((resolve) => {
+      signalStarted = resolve
+    })
+    const startSession = spyOn(conversationService, 'startSession').mockImplementation(async () => {
+      signalStarted()
+    })
+    __setCachedSessionSummaryReaderForTests(() => summaryPending)
+    spyOn(sessionService, 'getCustomTitle').mockResolvedValue(null)
+    spyOn(sessionService, 'getSessionLaunchInfo').mockResolvedValue(null)
+
+    handleWebSocket.open(ws)
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'set_handoff_summary',
+      previousSessionId,
+    }))
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'user_message',
+      content: 'continue from there',
+    }))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(startSession).not.toHaveBeenCalled()
+
+    resolveSummary({
+      sessionId: previousSessionId,
+      main: 'Previous work summary',
+      recent: 'Ready to continue',
+      baseMessageCount: 2,
+      modelUsed: 'test-model',
+      generatedAt: '2026-07-11T00:00:00.000Z',
+    })
+    await started
+
+    expect(startSession).toHaveBeenCalledTimes(1)
   })
 
   it('terminates the desktop turn when user-message handling throws unexpectedly', async () => {
