@@ -323,12 +323,16 @@ describe('ModelSelector', () => {
         name: 'GPT-5.3 Codex',
         description: 'Best for coding and agentic work',
         context: '',
+        defaultReasoningEffort: 'medium',
+        supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
       },
       {
         id: 'gpt-5.5',
         name: 'GPT-5.5',
         description: 'Latest general-purpose model',
         context: '',
+        defaultReasoningEffort: 'medium',
+        supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
       },
     ]
     const setSessionRuntime = vi.fn()
@@ -363,12 +367,76 @@ describe('ModelSelector', () => {
     expect(useSessionRuntimeStore.getState().selections['session-openai']).toEqual({
       providerId: OPENAI_OFFICIAL_PROVIDER_ID,
       modelId: 'gpt-5.5',
-      effortLevel: 'max',
+      effortLevel: 'medium',
     })
     expect(setSessionRuntime).toHaveBeenCalledWith('session-openai', {
       providerId: OPENAI_OFFICIAL_PROVIDER_ID,
       modelId: 'gpt-5.5',
+      effortLevel: 'medium',
+    })
+  })
+
+  it('uses each ChatGPT model reasoning catalog and resets unsupported effort to its default', async () => {
+    const openAIModels: ModelInfo[] = [
+      {
+        id: 'gpt-5.6-sol',
+        name: 'GPT-5.6-Sol',
+        description: 'Frontier model',
+        context: '353400',
+        defaultReasoningEffort: 'low',
+        supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      },
+      {
+        id: 'gpt-5.5',
+        name: 'GPT-5.5',
+        description: 'General model',
+        context: '258400',
+        defaultReasoningEffort: 'medium',
+        supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+      },
+    ]
+    useHahaOpenAIOAuthStore.setState({
+      status: { loggedIn: true, expiresAt: null, email: null, accountId: null },
+      fetchStatus: async () => {},
+    })
+    useSettingsStore.setState({
+      locale: 'en',
+      availableModels: openAIModels,
+      currentModel: openAIModels[0],
+      activeProviderName: 'ChatGPT Official',
       effortLevel: 'max',
+    })
+    useProviderStore.setState({
+      providers: [],
+      activeId: OPENAI_OFFICIAL_PROVIDER_ID,
+      hasLoadedProviders: true,
+      isLoading: true,
+    })
+    useSessionRuntimeStore.getState().setSelection('session-openai-effort', {
+      providerId: OPENAI_OFFICIAL_PROVIDER_ID,
+      modelId: 'gpt-5.6-sol',
+      effortLevel: 'max',
+    })
+
+    render(<ModelSelector runtimeKey="session-openai-effort" />)
+
+    await clickByRole(/GPT-5\.6-Sol/i)
+    await clickByRole(/GPT-5\.5/)
+
+    expect(useSessionRuntimeStore.getState().selections['session-openai-effort']).toEqual({
+      providerId: OPENAI_OFFICIAL_PROVIDER_ID,
+      modelId: 'gpt-5.5',
+      effortLevel: 'medium',
+    })
+
+    await clickByRole(/GPT-5\.5/i)
+    expect(screen.queryByRole('button', { name: /^Max$/ })).not.toBeInTheDocument()
+    await clickByRole(/^X-High$/)
+
+    expect(useSessionRuntimeStore.getState().selections['session-openai-effort']).toEqual({
+      providerId: OPENAI_OFFICIAL_PROVIDER_ID,
+      modelId: 'gpt-5.5',
+      effortLevel: 'xhigh',
     })
   })
 

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useChatStore } from '../../stores/chatStore'
+import { getPendingPermission, useChatStore } from '../../stores/chatStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useTranslation } from '../../i18n'
 import type { TranslationKey } from '../../i18n'
@@ -122,9 +122,11 @@ export function PermissionDialog({ sessionId, requestId, toolName, input, descri
   const { respondToPermission } = useChatStore()
   const activeTabId = useTabStore((s) => s.activeTabId)
   const targetSessionId = sessionId ?? activeTabId
-  const pendingPermission = useChatStore((s) => targetSessionId ? s.sessions[targetSessionId]?.pendingPermission : undefined)
+  const pendingPermission = useChatStore((s) => targetSessionId
+    ? getPendingPermission(s.sessions[targetSessionId], requestId)
+    : undefined)
   const t = useTranslation()
-  const isPending = pendingPermission?.requestId === requestId
+  const isPending = Boolean(pendingPermission)
   const [showRaw, setShowRaw] = useState(false)
 
   if (isExitPlanModeTool(toolName)) {
@@ -145,13 +147,18 @@ export function PermissionDialog({ sessionId, requestId, toolName, input, descri
   const preview = renderPermissionPreview(toolName, input)
   const title = getPermissionTitle(toolName, input, t)
   const allowRawToggle = !preview
+  const permissionContext = (details.primary || description || toolName).slice(0, 160)
 
   return (
-    <div className={`mb-4 overflow-hidden rounded-[var(--radius-lg)] border ${
-      isPending
-        ? 'border-[var(--color-warning)] bg-[var(--color-surface-container-lowest)]'
-        : 'border-[var(--color-outline-variant)]/40 bg-[var(--color-surface-container-low)] opacity-70'
-    }`}>
+    <div
+      role="group"
+      aria-label={`${title}: ${permissionContext}`}
+      className={`mb-4 overflow-hidden rounded-[var(--radius-lg)] border ${
+        isPending
+          ? 'border-[var(--color-warning)] bg-[var(--color-surface-container-lowest)]'
+          : 'border-[var(--color-outline-variant)]/40 bg-[var(--color-surface-container-low)] opacity-70'
+      }`}
+    >
       {/* Header */}
       <div className={`flex items-center gap-3 px-4 py-3 ${
         isPending
@@ -163,6 +170,7 @@ export function PermissionDialog({ sessionId, requestId, toolName, input, descri
           style={{ backgroundColor: `${meta.color}18` }}
         >
           <span
+            aria-hidden="true"
             className="material-symbols-outlined text-[18px]"
             style={{ color: meta.color }}
           >
@@ -176,7 +184,7 @@ export function PermissionDialog({ sessionId, requestId, toolName, input, descri
             </span>
             {isPending && (
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-[var(--color-warning)]/15 text-[var(--color-warning)]">
-                <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-warning)] animate-pulse-dot" />
+                <span aria-hidden="true" className="w-1.5 h-1.5 rounded-full bg-[var(--color-warning)] animate-pulse-dot" />
                 {t('permission.awaitingApproval')}
               </span>
             )}
@@ -198,7 +206,7 @@ export function PermissionDialog({ sessionId, requestId, toolName, input, descri
           <div className="space-y-2">
             {details.primary && toolName !== 'Bash' ? (
               <div className="flex items-center gap-2 rounded-[var(--radius-md)] bg-[var(--color-surface-container)] px-3 py-2 text-xs font-[var(--font-mono)] text-[var(--color-text-secondary)]">
-                <span className="material-symbols-outlined text-[14px] text-[var(--color-outline)] flex-shrink-0">
+                <span aria-hidden="true" className="material-symbols-outlined text-[14px] text-[var(--color-outline)] flex-shrink-0">
                   folder_open
                 </span>
                 <span className="truncate">{details.primary}</span>
@@ -209,7 +217,7 @@ export function PermissionDialog({ sessionId, requestId, toolName, input, descri
         ) : details.primary ? (
           <div className="mb-2">
             <div className="flex items-center gap-2 rounded-[var(--radius-md)] bg-[var(--color-surface-container)] px-3 py-2 text-xs font-[var(--font-mono)] text-[var(--color-text-secondary)]">
-              <span className="material-symbols-outlined text-[14px] text-[var(--color-outline)] flex-shrink-0">
+              <span aria-hidden="true" className="material-symbols-outlined text-[14px] text-[var(--color-outline)] flex-shrink-0">
                 {toolName === 'Glob' || toolName === 'Grep' ? 'search' : 'folder_open'}
               </span>
               <span className="truncate">{details.primary}</span>
@@ -227,7 +235,7 @@ export function PermissionDialog({ sessionId, requestId, toolName, input, descri
             onClick={() => setShowRaw(!showRaw)}
             className="mt-2 flex cursor-pointer items-center gap-1 text-[11px] text-[var(--color-text-accent)] hover:underline"
           >
-            <span className="material-symbols-outlined text-[14px]">
+            <span aria-hidden="true" className="material-symbols-outlined text-[14px]">
               {showRaw ? 'expand_less' : 'expand_more'}
             </span>
             {showRaw ? t('permission.hideDetails') : t('permission.showFullInput')}
@@ -247,9 +255,10 @@ export function PermissionDialog({ sessionId, requestId, toolName, input, descri
           <Button
             variant="primary"
             size="sm"
+            aria-label={`${t('permission.allow')}: ${permissionContext}`}
             onClick={() => targetSessionId && respondToPermission(targetSessionId, requestId, true)}
             icon={
-              <span className="material-symbols-outlined text-[14px]">check</span>
+              <span aria-hidden="true" className="material-symbols-outlined text-[14px]">check</span>
             }
           >
             {t('permission.allow')}
@@ -257,9 +266,10 @@ export function PermissionDialog({ sessionId, requestId, toolName, input, descri
           <Button
             variant="ghost"
             size="sm"
+            aria-label={`${t('permission.allowForSession')}: ${permissionContext}`}
             onClick={() => targetSessionId && respondToPermission(targetSessionId, requestId, true, { rule: 'always' })}
             icon={
-              <span className="material-symbols-outlined text-[14px]">verified</span>
+              <span aria-hidden="true" className="material-symbols-outlined text-[14px]">verified</span>
             }
           >
             {t('permission.allowForSession')}
@@ -268,9 +278,10 @@ export function PermissionDialog({ sessionId, requestId, toolName, input, descri
           <Button
             variant="danger"
             size="sm"
+            aria-label={`${t('permission.deny')}: ${permissionContext}`}
             onClick={() => targetSessionId && respondToPermission(targetSessionId, requestId, false)}
             icon={
-              <span className="material-symbols-outlined text-[14px]">close</span>
+              <span aria-hidden="true" className="material-symbols-outlined text-[14px]">close</span>
             }
           >
             {t('permission.deny')}

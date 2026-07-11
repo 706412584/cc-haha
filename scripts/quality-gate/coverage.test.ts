@@ -6,6 +6,9 @@ import {
   collectServerTestFiles,
   evaluateChangedLineCoverage,
   evaluateThresholds,
+  hasUsableCoverageSummary,
+  hasUsableLcov,
+  parseBunTestFileCount,
   parseChangedLinesFromDiff,
   parseLcov,
   prefixRelativeLcovSourcePaths,
@@ -63,6 +66,54 @@ describe('coverage gate helpers', () => {
 
     expect(summary.lines.pct).toBe(80)
     expect(summary.functions.pct).toBe(100)
+  })
+
+  test('fails closed when lcov has no source-file records', () => {
+    expect(hasUsableLcov('')).toBe(false)
+    expect(hasUsableLcov('TN:\nend_of_record\n')).toBe(false)
+    expect(hasUsableLcov('SF:src/server/empty.ts\nend_of_record\n')).toBe(false)
+    expect(hasUsableLcov([
+      'SF:src/server/routes.ts',
+      'DA:1,1',
+      'LF:1',
+      'LH:1',
+      'end_of_record',
+    ].join('\n'))).toBe(true)
+  })
+
+  test('normalizes Windows lcov source paths into repository-relative scope paths', () => {
+    const summary = parseLcov([
+      'SF:C:\\repo\\src\\server\\routes.ts',
+      'DA:1,1',
+      'DA:2,0',
+      'LF:2',
+      'LH:1',
+      'end_of_record',
+    ].join('\n'), {
+      rootDir: 'C:\\repo',
+      scope: {
+        id: 'server-api',
+        title: 'Server/API',
+        includePrefixes: ['src/server/'],
+      },
+    })
+
+    expect(summary.lines.pct).toBe(50)
+  })
+
+  test('requires Bun coverage to report every discovered test file', () => {
+    expect(parseBunTestFileCount('Ran 1605 tests across 141 files. [187.20s]')).toBe(141)
+    expect(parseBunTestFileCount('Ran 1 test across 1 file. [10.00ms]')).toBe(1)
+    expect(parseBunTestFileCount('process terminated before summary')).toBeNull()
+  })
+
+  test('rejects empty aggregate coverage summaries', () => {
+    expect(hasUsableCoverageSummary({
+      lines: { total: 0, covered: 0, pct: 100 },
+      functions: { total: 0, covered: 0, pct: 100 },
+      branches: { total: 0, covered: 0, pct: 100 },
+      statements: { total: 0, covered: 0, pct: 100 },
+    })).toBe(false)
   })
 
   test('prefixes package-relative lcov source paths for changed-line coverage', () => {
@@ -161,6 +212,67 @@ describe('coverage gate helpers', () => {
     expect(result.failures).toEqual([])
   })
 
+  test('excludes repository guidance from changed-line coverage', () => {
+    const changedLines = parseChangedLinesFromDiff([
+      'diff --git a/adapters/AGENTS.md b/adapters/AGENTS.md',
+      '--- /dev/null',
+      '+++ b/adapters/AGENTS.md',
+      '@@ -0,0 +1,2 @@',
+      '+# Adapter Instructions',
+      '+Use deterministic tests.',
+    ].join('\n'))
+
+    const result = evaluateChangedLineCoverage(
+      changedLines,
+      new Map(),
+      [{
+        id: 'adapters',
+        title: 'IM adapters',
+        includePrefixes: ['adapters/'],
+      }],
+      90,
+    )
+
+    expect(result.files).toEqual([])
+    expect(result.total).toBe(0)
+    expect(result.failures).toEqual([])
+  })
+
+  test('enforces changed-line coverage for root runtime outside server, tools, and utils', () => {
+    const changedLines = parseChangedLinesFromDiff([
+      'diff --git a/src/services/api/client.ts b/src/services/api/client.ts',
+      '--- a/src/services/api/client.ts',
+      '+++ b/src/services/api/client.ts',
+      '@@ -1,0 +1,2 @@',
+      '+export const first = true',
+      '+export const second = true',
+    ].join('\n'))
+    const coverageByFile = new Map([
+      ['src/services/api/client.ts', {
+        suiteId: 'root-runtime',
+        executableLines: new Set([1, 2]),
+        coveredLines: new Set([1]),
+      }],
+    ])
+
+    const result = evaluateChangedLineCoverage(
+      changedLines,
+      coverageByFile,
+      [{
+        id: 'root-runtime',
+        title: 'Root runtime',
+        includePrefixes: ['src/'],
+      }],
+      90,
+    )
+
+    expect(result.total).toBe(2)
+    expect(result.pct).toBe(50)
+    expect(result.failures).toEqual([
+      'changed-lines: coverage 50% is below minimum 90%',
+    ])
+  })
+
   test('reports minimum threshold failures', () => {
     const failures = evaluateThresholds([
       {
@@ -212,10 +324,13 @@ describe('coverage gate helpers', () => {
     const root = mkdtempSync(join(tmpdir(), 'cc-haha-coverage-'))
     try {
       mkdirSync(join(root, 'src/server/__tests__'), { recursive: true })
+      mkdirSync(join(root, 'src/services'), { recursive: true })
       mkdirSync(join(root, 'src/tools'), { recursive: true })
       mkdirSync(join(root, 'src/utils'), { recursive: true })
       writeFileSync(join(root, 'src/server/__tests__/active.test.ts'), '')
+      writeFileSync(join(root, 'src/server/__tests__/component.test.tsx'), '')
       writeFileSync(join(root, 'src/server/__tests__/quarantined.test.ts'), '')
+      writeFileSync(join(root, 'src/services/runtime.test.ts'), '')
 
       const files = collectServerTestFiles(root, {
         quarantined: [
@@ -230,7 +345,11 @@ describe('coverage gate helpers', () => {
         ],
       })
 
-      expect(files).toEqual(['src/server/__tests__/active.test.ts'])
+      expect(files).toEqual([
+        'src/server/__tests__/active.test.ts',
+        'src/server/__tests__/component.test.tsx',
+        'src/services/runtime.test.ts',
+      ])
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

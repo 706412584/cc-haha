@@ -23,7 +23,11 @@ async function changedFiles() {
 }
 
 function commandList(result: ReturnType<typeof evaluateChangePolicy>) {
-  const commands = ['bun run check:policy']
+  const commands: string[] = []
+
+  if (result.checks.policy) {
+    commands.push('bun run check:policy')
+  }
 
   if (result.checks.desktop) {
     commands.push('bun run check:desktop')
@@ -31,11 +35,20 @@ function commandList(result: ReturnType<typeof evaluateChangePolicy>) {
   if (result.checks.server) {
     commands.push('bun run check:server')
   }
+  if (result.checks.providerContract) {
+    commands.push('bun run check:provider-contract')
+  }
+  if (result.checks.chatContract) {
+    commands.push('bun run check:chat-contract')
+  }
   if (result.checks.adapters) {
     commands.push('bun run check:adapters')
   }
   if (result.checks.desktopNative) {
     commands.push('bun run check:native')
+  }
+  if (result.checks.persistence) {
+    commands.push('bun run check:persistence-upgrade')
   }
   if (result.checks.docs) {
     commands.push('bun run check:docs')
@@ -57,6 +70,7 @@ function hasMatchingTest(files: string[], predicate: (file: string) => boolean) 
 function changedProductionFiles(files: string[], predicate: (file: string) => boolean) {
   return files.filter((file) => (
     predicate(file) &&
+    /\.[cm]?[jt]sx?$/.test(file) &&
     !/\.test\.[cm]?[jt]sx?$/.test(file) &&
     !file.includes('/__tests__/') &&
     !file.includes('/fixtures/')

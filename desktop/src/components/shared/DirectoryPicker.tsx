@@ -294,7 +294,7 @@ export function DirectoryPicker({ value, onChange, variant = 'chip', isGitProjec
 
       <div className="flex items-center justify-between border-t border-[var(--color-border)] px-3 py-2">
         <span className="truncate font-[var(--font-mono)] text-[10px] text-[var(--color-text-tertiary)]">{browsePath}</span>
-        <button onClick={() => handleSelect(browsePath)} className="rounded-lg bg-[var(--color-brand)] px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90">
+        <button onClick={() => handleSelect(browsePath)} className="rounded-lg bg-[var(--color-brand)] px-3 py-1.5 text-xs font-semibold text-[var(--color-on-primary)] hover:opacity-90">
           {t('dirPicker.useThisFolder')}
         </button>
       </div>

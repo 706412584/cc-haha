@@ -679,6 +679,148 @@ describe('SessionService', () => {
     expect(scanCount).toBe(5)
   })
 
+  it('should coalesce concurrent session list scans for the same query', async () => {
+    for (let i = 0; i < 3; i++) {
+      const id = `2400000${i.toString(16)}-bbbb-cccc-dddd-eeeeeeeeeeee`
+      await writeSessionFile('-tmp-concurrent-session-list', id, [
+        makeSnapshotEntry(),
+        makeUserEntry(`Concurrent message ${i}`),
+      ])
+    }
+
+    const serviceWithSpy = service as unknown as {
+      scanSessionListSummary: (...args: unknown[]) => Promise<unknown>
+    }
+    const originalScanSessionListSummary = serviceWithSpy.scanSessionListSummary.bind(service)
+    let scanCount = 0
+    let releaseFirstScan: () => void = () => {}
+    let markFirstScanStarted: () => void = () => {}
+    const firstScanStarted = new Promise<void>((resolve) => {
+      markFirstScanStarted = resolve
+    })
+    const firstScanGate = new Promise<void>((resolve) => {
+      releaseFirstScan = resolve
+    })
+
+    serviceWithSpy.scanSessionListSummary = async (...args) => {
+      scanCount += 1
+      if (scanCount === 1) {
+        markFirstScanStarted()
+        await firstScanGate
+      }
+      return originalScanSessionListSummary(...args)
+    }
+
+    const first = service.listSessions({ limit: 3, offset: 0 })
+    await firstScanStarted
+    const second = service.listSessions({ limit: 3, offset: 0 })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    releaseFirstScan()
+
+    const [firstResult, secondResult] = await Promise.all([first, second])
+
+    expect(firstResult).toEqual(secondResult)
+    expect(scanCount).toBe(3)
+  })
+
+  it('should coalesce file summary scans across concurrent pagination queries', async () => {
+    for (let i = 0; i < 3; i++) {
+      const id = `2420000${i.toString(16)}-bbbb-cccc-dddd-eeeeeeeeeeee`
+      await writeSessionFile('-tmp-concurrent-session-pages', id, [
+        makeSnapshotEntry(),
+        makeUserEntry(`Concurrent page message ${i}`),
+      ])
+    }
+
+    const serviceWithSpy = service as unknown as {
+      scanSessionListSummary: (...args: unknown[]) => Promise<unknown>
+    }
+    const originalScanSessionListSummary = serviceWithSpy.scanSessionListSummary.bind(service)
+    let scanCount = 0
+    let releaseFirstScan: () => void = () => {}
+    let markFirstScanStarted: () => void = () => {}
+    const firstScanStarted = new Promise<void>((resolve) => {
+      markFirstScanStarted = resolve
+    })
+    const firstScanGate = new Promise<void>((resolve) => {
+      releaseFirstScan = resolve
+    })
+
+    serviceWithSpy.scanSessionListSummary = async (...args) => {
+      scanCount += 1
+      if (scanCount === 1) {
+        markFirstScanStarted()
+        await firstScanGate
+      }
+      return originalScanSessionListSummary(...args)
+    }
+
+    const sidebarRequest = service.listSessions({ limit: 400, offset: 0 })
+    await firstScanStarted
+    const tabRestoreRequest = service.listSessions({ limit: 200, offset: 0 })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    releaseFirstScan()
+
+    const [sidebarResult, tabRestoreResult] = await Promise.all([
+      sidebarRequest,
+      tabRestoreRequest,
+    ])
+
+    expect(sidebarResult.sessions).toHaveLength(3)
+    expect(tabRestoreResult.sessions).toHaveLength(3)
+    expect(scanCount).toBe(3)
+  })
+
+  it('should not reuse or cache a list scan started before session metadata changes', async () => {
+    const sessionId = '24500000-bbbb-cccc-dddd-eeeeeeeeeeee'
+    await writeSessionFile('-tmp-invalidated-session-list', sessionId, [
+      makeSnapshotEntry(),
+      makeUserEntry('Original title'),
+    ])
+
+    const serviceWithSpy = service as unknown as {
+      scanSessionListSummary: (...args: unknown[]) => Promise<unknown>
+    }
+    const originalScanSessionListSummary = serviceWithSpy.scanSessionListSummary.bind(service)
+    let scanCount = 0
+    let releaseFirstScan: () => void = () => {}
+    let markFirstScanStarted: () => void = () => {}
+    const firstScanStarted = new Promise<void>((resolve) => {
+      markFirstScanStarted = resolve
+    })
+    const firstScanGate = new Promise<void>((resolve) => {
+      releaseFirstScan = resolve
+    })
+
+    serviceWithSpy.scanSessionListSummary = async (...args) => {
+      scanCount += 1
+      const summary = await originalScanSessionListSummary(...args)
+      if (scanCount === 1) {
+        markFirstScanStarted()
+        await firstScanGate
+      }
+      return summary
+    }
+
+    const staleRequest = service.listSessions({ limit: 10, offset: 0 })
+    await firstScanStarted
+    await service.renameSession(sessionId, 'Renamed while scanning')
+
+    const freshRequest = service.listSessions({ limit: 10, offset: 0 })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(scanCount).toBe(2)
+
+    const freshResult = await freshRequest
+    expect(freshResult.sessions[0]?.title).toBe('Renamed while scanning')
+
+    releaseFirstScan()
+    const staleResult = await staleRequest
+    expect(staleResult.sessions[0]?.title).toBe('Original title')
+
+    const cachedResult = await service.listSessions({ limit: 10, offset: 0 })
+    expect(cachedResult.sessions[0]?.title).toBe('Renamed while scanning')
+  })
+
   it('should reuse unchanged file summaries after the list response cache is cleared', async () => {
     const sessionFiles: Array<{ id: string; filePath: string }> = []
     for (let i = 0; i < 3; i++) {
@@ -1868,11 +2010,12 @@ describe('SessionService', () => {
   })
 
   it('should default to the user home directory when workDir is missing', async () => {
-    const { sessionId } = await service.createSession('')
+    const { sessionId, workDir } = await service.createSession('')
+    expect(workDir).toBe(await fs.realpath(os.homedir()))
     const filePath = path.join(
       tmpDir,
       'projects',
-      sanitizePath(os.homedir()),
+      sanitizePath(workDir),
       `${sessionId}.jsonl`,
     )
 
@@ -2583,6 +2726,99 @@ describe('Sessions API', () => {
         timestamp: expect.any(String),
       },
     ])
+  })
+
+  it('GET /api/sessions/:id/subagents/by-tool/:toolUseId should return a resolved run', async () => {
+    const sessionId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+    const projectDir = '-tmp-api-subagent-run'
+    const agentId = 'abc123'
+    await writeSessionFile(projectDir, sessionId, [
+      makeSnapshotEntry(),
+      makeAssistantToolUseEntry([
+        {
+          id: 'tool-1',
+          name: 'Agent',
+          input: { description: 'Inspect server seam', prompt: 'Read session routes' },
+        },
+      ]),
+      makeToolResultUserEntry('tool-1', `server summary\nagentId: ${agentId}`),
+    ])
+    await writeSubagentTranscriptFile(projectDir, sessionId, agentId, [
+      {
+        type: 'user',
+        message: { role: 'user', content: 'Read session routes' },
+        uuid: crypto.randomUUID(),
+        timestamp: '2026-01-01T00:00:04.000Z',
+      },
+      {
+        type: 'assistant',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Found sessions.ts' }] },
+        uuid: crypto.randomUUID(),
+        timestamp: '2026-01-01T00:00:05.000Z',
+      },
+    ])
+
+    const res = await fetch(`${baseUrl}/api/sessions/${sessionId}/subagents/by-tool/tool-1`)
+    expect(res.status).toBe(200)
+
+    const body = (await res.json()) as {
+      sessionId: string
+      toolUseId: string
+      agentId: string | null
+      description?: string
+      prompt?: string
+      messages: unknown[]
+      source: string
+    }
+    expect(body).toMatchObject({
+      sessionId,
+      toolUseId: 'tool-1',
+      agentId,
+      description: 'Inspect server seam',
+      prompt: 'Read session routes',
+      source: 'subagent-jsonl',
+    })
+    expect(body.messages).toHaveLength(2)
+  })
+
+  it('POST /api/sessions/:id/subagents/by-tool/:toolUseId should return 405', async () => {
+    const res = await fetch(
+      `${baseUrl}/api/sessions/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/subagents/by-tool/tool-1`,
+      { method: 'POST' },
+    )
+
+    expect(res.status).toBe(405)
+  })
+
+  it('GET /api/sessions/:id/subagents/by-tool/:toolUseId/extra should return 404', async () => {
+    const sessionId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+    const agentId = 'abc123'
+    await writeSessionFile('-tmp-api-subagent-run-extra', sessionId, [
+      makeSnapshotEntry(),
+      makeAssistantToolUseEntry([
+        {
+          id: 'tool-1',
+          name: 'Agent',
+          input: { description: 'Inspect server seam', prompt: 'Read session routes' },
+        },
+      ]),
+      makeToolResultUserEntry('tool-1', `server summary\nagentId: ${agentId}`),
+    ])
+
+    const res = await fetch(`${baseUrl}/api/sessions/${sessionId}/subagents/by-tool/tool-1/extra`)
+
+    expect(res.status).toBe(404)
+  })
+
+  it('GET /api/sessions/:id/subagents/by-tool/:toolUseId should return 404 for malformed encoding', async () => {
+    const { handleSessionsApi } = await import('../api/sessions.js')
+    const res = await handleSessionsApi(
+      new Request(`${baseUrl}/api/sessions/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/subagents/by-tool/%25E0%25A4%25A`),
+      new URL(`${baseUrl}/api/sessions/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/subagents/by-tool/%25E0%25A4%25A`),
+      ['api', 'sessions', 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'subagents', 'by-tool', '%E0%A4%A'],
+    )
+
+    expect(res.status).toBe(404)
   })
 
   it('GET /api/sessions/:id/git-info should prefer the active CLI workDir', async () => {

@@ -88,6 +88,21 @@ const NETWORK_TIMEOUT_MAX_SECONDS = 1800
 const NETWORK_TIMEOUT_STEP_SECONDS = 30
 const SETTINGS_CHECKBOX_INPUT_CLASS = 'settings-checkbox-input peer'
 
+const BUILT_IN_OUTPUT_STYLE_TRANSLATION_KEYS = {
+  default: {
+    label: 'settings.general.outputStyleBuiltin.default.label',
+    description: 'settings.general.outputStyleBuiltin.default.description',
+  },
+  Explanatory: {
+    label: 'settings.general.outputStyleBuiltin.explanatory.label',
+    description: 'settings.general.outputStyleBuiltin.explanatory.description',
+  },
+  Learning: {
+    label: 'settings.general.outputStyleBuiltin.learning.label',
+    description: 'settings.general.outputStyleBuiltin.learning.description',
+  },
+} satisfies Record<string, { label: TranslationKey; description: TranslationKey }>
+
 type SettingsTabItem = {
   id: SettingsTab
   icon: string
@@ -2146,7 +2161,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
                     required={slot === 'main'}
                     value={models[slot]}
                     onChange={(value) => handleModelChange(slot, value)}
-                    placeholder={slot === 'main' ? 'Model ID' : t('settings.providers.sameAsMain')}
+                    placeholder={slot === 'main' ? t('settings.providers.modelIdPlaceholder') : t('settings.providers.sameAsMain')}
                     options={fetchedModels}
                   />
                   <label className="mt-1 inline-flex h-6 w-fit cursor-pointer items-center gap-1.5 rounded-[var(--radius-sm)] px-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]">
@@ -2542,8 +2557,8 @@ export function GeneralSettings() {
     RESPONSE_LANGUAGES.find(({ value }) => value === responseLanguage)?.label ?? RESPONSE_LANGUAGES[0]!.label
   const outputStyleItems = outputStyles.map((style) => ({
     value: style.value,
-    label: style.label,
-    description: `${style.description} · ${getOutputStyleSourceLabel(style.source, t)}`,
+    label: getOutputStyleLabel(style, t),
+    description: `${getOutputStyleDescription(style, t)} · ${getOutputStyleSourceLabel(style.source, t)}`,
   }))
   const selectedOutputStyle =
     outputStyles.find((style) => style.value === outputStyle) ?? outputStyles[0]
@@ -3025,7 +3040,7 @@ export function GeneralSettings() {
                 </span>
                 {selectedOutputStyle?.description && (
                   <span className="mt-0.5 block truncate text-xs text-[var(--color-text-tertiary)]">
-                    {selectedOutputStyle.description}
+                    {getOutputStyleDescription(selectedOutputStyle, t)}
                   </span>
                 )}
               </span>
@@ -3681,6 +3696,32 @@ export function GeneralSettings() {
       />
     </div>
   )
+}
+
+function getBuiltInOutputStyleTranslationKeys(style: {
+  value: string
+  source: OutputStyleSource
+}) {
+  if (style.source !== 'built-in') return null
+  return BUILT_IN_OUTPUT_STYLE_TRANSLATION_KEYS[
+    style.value as keyof typeof BUILT_IN_OUTPUT_STYLE_TRANSLATION_KEYS
+  ] ?? null
+}
+
+function getOutputStyleLabel(
+  style: { value: string; label: string; source: OutputStyleSource },
+  t: (key: TranslationKey) => string,
+) {
+  const keys = getBuiltInOutputStyleTranslationKeys(style)
+  return keys ? t(keys.label) : style.label
+}
+
+function getOutputStyleDescription(
+  style: { value: string; description: string; source: OutputStyleSource },
+  t: (key: TranslationKey) => string,
+) {
+  const keys = getBuiltInOutputStyleTranslationKeys(style)
+  return keys ? t(keys.description) : style.description
 }
 
 function getOutputStyleSourceLabel(

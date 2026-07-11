@@ -2,9 +2,12 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import '@testing-library/jest-dom'
 
-const { sessionsApiMock } = vi.hoisted(() => ({
+const { sessionsApiMock, skillsApiMock } = vi.hoisted(() => ({
   sessionsApiMock: {
     getInspection: vi.fn(),
+  },
+  skillsApiMock: {
+    list: vi.fn(),
   },
 }))
 
@@ -18,10 +21,17 @@ vi.mock('../../api/sessions', async (importOriginal) => {
   }
 })
 
+vi.mock('../../api/skills', () => ({
+  skillsApi: {
+    list: skillsApiMock.list,
+  },
+}))
+
 import { LocalSlashCommandPanel } from './LocalSlashCommandPanel'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useTabStore, SETTINGS_TAB_ID } from '../../stores/tabStore'
 import { useUIStore } from '../../stores/uiStore'
+import { useSkillStore } from '../../stores/skillStore'
 import type { SessionContextSnapshot, SessionInspectionResponse } from '../../api/sessions'
 
 const baseContext: SessionContextSnapshot = {
@@ -75,6 +85,17 @@ describe('LocalSlashCommandPanel memory context', () => {
     useUIStore.setState({
       pendingMemoryPath: null,
       pendingSettingsTab: null,
+    })
+    useSkillStore.setState({
+      skills: [],
+      selectedSkill: null,
+      selectedSkillReturnTab: 'skills',
+      isLoading: false,
+      isDetailLoading: false,
+      error: null,
+      fetchSkills: vi.fn(),
+      fetchSkillDetail: vi.fn().mockResolvedValue(undefined),
+      clearSelection: vi.fn(),
     })
   })
 
@@ -141,5 +162,39 @@ describe('LocalSlashCommandPanel memory context', () => {
       expect(useUIStore.getState().pendingMemoryPath).toBeNull()
       expect(useTabStore.getState().activeTabId).toBe(SETTINGS_TAB_ID)
     })
+  })
+
+  it('opens skill details in the unified Skill Center', async () => {
+    const onClose = vi.fn()
+    const fetchSkillDetail = vi.fn().mockResolvedValue(undefined)
+    useSkillStore.setState({ fetchSkillDetail })
+    skillsApiMock.list.mockResolvedValue({
+      skills: [{
+        name: 'ppt-generator',
+        displayName: 'PPT Generator',
+        description: 'Create slide decks.',
+        source: 'user',
+        userInvocable: true,
+        contentLength: 100,
+        hasDirectory: true,
+      }],
+    })
+
+    render(
+      <LocalSlashCommandPanel
+        command="skills"
+        cwd="/workspace/demo"
+        onClose={onClose}
+      />,
+    )
+
+    fireEvent.click(await screen.findByText('/ppt-generator'))
+
+    await waitFor(() => {
+      expect(fetchSkillDetail).toHaveBeenCalledWith('user', 'ppt-generator', '/workspace/demo', 'skills')
+      expect(useTabStore.getState().activeTabId).toBe(SETTINGS_TAB_ID)
+    })
+    expect(useUIStore.getState().pendingSettingsTab).toBe('skills')
+    expect(onClose).toHaveBeenCalled()
   })
 })

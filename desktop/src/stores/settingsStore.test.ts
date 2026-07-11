@@ -661,6 +661,30 @@ describe('settingsStore app mode', () => {
     })
   })
 
+  it('rolls back and surfaces app mode persistence failures', async () => {
+    const error = new Error('Data storage directory is not writable')
+    const setAppMode = vi.fn().mockRejectedValue(error)
+    installElectronAppModeHost({ set: setAppMode })
+
+    const { useSettingsStore } = await import('./settingsStore')
+    const prevAppMode = {
+      mode: 'default' as const,
+      portableDir: null,
+      defaultPortableDir: 'C:\\cc-haha\\CLAUDE_CONFIG_DIR',
+      activeConfigDir: null,
+      configDirSource: 'system' as const,
+    }
+    useSettingsStore.setState({
+      appMode: prevAppMode,
+      appModeRequiresRestart: false,
+    })
+
+    await expect(useSettingsStore.getState().setAppMode('portable', 'D:\\blocked-data'))
+      .rejects.toThrow('Data storage directory is not writable')
+    expect(useSettingsStore.getState().appMode).toEqual(prevAppMode)
+    expect(useSettingsStore.getState().appModeRequiresRestart).toBe(false)
+  })
+
   it('switches app mode back to the system data source', async () => {
     const setAppMode = vi.fn().mockResolvedValue(undefined)
     installElectronAppModeHost({ set: setAppMode })
@@ -1213,11 +1237,13 @@ describe('settingsStore theme persistence', () => {
     expect(document.documentElement.style.colorScheme).toBe('dark')
   })
 
-  it('hydrates the pure white theme from user settings', async () => {
+  it('keeps the desktop theme independent from the Claude user theme', async () => {
+    window.localStorage.setItem('cc-haha-theme', 'dark')
+    const updateUser = vi.fn()
     vi.doMock('../api/settings', () => ({
       settingsApi: {
-        getUser: vi.fn().mockResolvedValue({ theme: 'white' }),
-        updateUser: vi.fn(),
+        getUser: vi.fn().mockResolvedValue({ theme: 'light', unknownField: 'keep-me' }),
+        updateUser,
         getPermissionMode: vi.fn().mockResolvedValue({ mode: 'default' }),
         setPermissionMode: vi.fn(),
         getCliLauncherStatus: vi.fn(),
@@ -1254,10 +1280,15 @@ describe('settingsStore theme persistence', () => {
 
     await useSettingsStore.getState().fetchAll()
 
-    expect(useSettingsStore.getState().theme).toBe('white')
-    expect(useUIStore.getState().theme).toBe('white')
-    expect(document.documentElement.getAttribute('data-theme')).toBe('white')
-    expect(document.documentElement.style.colorScheme).toBe('light')
+    expect(useSettingsStore.getState().theme).toBe('dark')
+    expect(useUIStore.getState().theme).toBe('dark')
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
+    expect(document.documentElement.style.colorScheme).toBe('dark')
+
+    await useSettingsStore.getState().setTheme('light')
+
+    expect(window.localStorage.getItem('cc-haha-theme')).toBe('light')
+    expect(updateUser).not.toHaveBeenCalled()
   })
 })
 

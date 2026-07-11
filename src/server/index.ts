@@ -198,6 +198,13 @@ export function startServer(port = PORT, host = HOST) {
           context: h5RequestContext,
         })
         const h5AccessControlBlocked = isH5AccessControlRequest(req, url, h5RequestContext)
+        const requireRequestAuth = async (tokenOverride?: string | null) => {
+          if (authRequired) return requireH5Token(req, tokenOverride)
+          if (forceAuth && classifyH5Request(req, url, h5RequestContext) !== 'local-trusted') {
+            return requireAuth(req, tokenOverride)
+          }
+          return null
+        }
 
         if (h5AccessControlBlocked) {
           return h5AccessControlRejectedResponse()
@@ -305,16 +312,9 @@ export function startServer(port = PORT, host = HOST) {
             return corsRejectedResponse(cors)
           }
 
-          if (authRequired) {
-            const authError = await requireH5Token(req)
-            if (authError) {
-              return withCors(authError, cors)
-            }
-          } else if (forceAuth) {
-            const authError = await requireAuth(req)
-            if (authError) {
-              return withCors(authError, cors)
-            }
+          const authError = await requireRequestAuth()
+          if (authError) {
+            return withCors(authError, cors)
           }
 
           const response = await handlePreviewFs(
@@ -336,16 +336,9 @@ export function startServer(port = PORT, host = HOST) {
             return corsRejectedResponse(cors)
           }
 
-          if (authRequired) {
-            const authError = await requireH5Token(req)
-            if (authError) {
-              return withCors(authError, cors)
-            }
-          } else if (forceAuth) {
-            const authError = await requireAuth(req)
-            if (authError) {
-              return withCors(authError, cors)
-            }
+          const authError = await requireRequestAuth()
+          if (authError) {
+            return withCors(authError, cors)
           }
 
           const response = await handleLocalFile(url, req.headers)

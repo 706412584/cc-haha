@@ -3,6 +3,7 @@ import { sendToSession } from '../ws/handler.js'
 
 type PendingApproval = {
   sessionId: string
+  request: CuPermissionRequest
   resolve: (response: CuPermissionResponse) => void
   reject: (error: Error) => void
   timeout: ReturnType<typeof setTimeout>
@@ -32,6 +33,7 @@ class ComputerUseApprovalService {
 
       this.pending.set(request.requestId, {
         sessionId,
+        request,
         resolve,
         reject,
         timeout,
@@ -58,6 +60,12 @@ class ComputerUseApprovalService {
     this.pending.delete(requestId)
     pending.resolve(response)
     return true
+  }
+
+  getPendingRequests(sessionId: string): CuPermissionRequest[] {
+    return Array.from(this.pending.values())
+      .filter((pending) => pending.sessionId === sessionId)
+      .map((pending) => pending.request)
   }
 
   cancelSession(sessionId: string): void {

@@ -20,4 +20,15 @@ describe('desktop build compatibility', () => {
     expect(css).toContain('--color-text-secondary-a72')
     expect(css).toContain('--color-outline-a92')
   })
+
+  it('loads xterm base styles before app globals in the desktop entry', () => {
+    const main = readFileSync(join(desktopRoot, 'src', 'main.tsx'), 'utf8')
+
+    const xtermImport = main.indexOf("import '@xterm/xterm/css/xterm.css'")
+    const globalsImport = main.indexOf("import './theme/globals.css'")
+
+    expect(xtermImport).toBeGreaterThanOrEqual(0)
+    expect(globalsImport).toBeGreaterThanOrEqual(0)
+    expect(xtermImport).toBeLessThan(globalsImport)
+  })
 })

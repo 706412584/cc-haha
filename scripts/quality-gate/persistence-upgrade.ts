@@ -10,7 +10,7 @@ const rootDir = process.cwd()
 const checks: Check[] = [
   {
     title: 'Server persistent JSON migrations',
-    command: ['bun', 'test', 'src/server/__tests__/persistence-upgrade.test.ts'],
+    command: ['bun', 'test', './src/server/__tests__/persistence-upgrade.test.ts'],
   },
   {
     title: 'Desktop localStorage migrations',

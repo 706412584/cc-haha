@@ -5,6 +5,7 @@ import {
   buildProviderSelectionItems,
   createTelegramCommandController,
   createTelegramRuntimeCommandController,
+  registerAuthorizedTelegramCommand,
   registerTelegramExtendedCommands,
   renderSelectionView,
   sessionToSelectionItem,
@@ -243,6 +244,24 @@ describe('Telegram command controller helpers', () => {
     )
     expect(await tryHandleTelegramSelectionCallback('permit:req:yes', createCommandContext().ctx, controller))
       .toBe(false)
+  })
+
+  it('guards directly registered commands before running side effects', async () => {
+    const handlers = new Map<string, (ctx: ReturnType<typeof createCommandContext>['ctx']) => unknown>()
+    const bot = {
+      command: mock((command: string, handler: (ctx: ReturnType<typeof createCommandContext>['ctx']) => unknown) => {
+        handlers.set(command, handler)
+      }),
+    }
+    const action = mock(async () => {})
+
+    registerAuthorizedTelegramCommand(bot, 'new', () => false, action)
+
+    const denied = createCommandContext({ userId: 999 })
+    await handlers.get('new')!(denied.ctx)
+
+    expect(action).not.toHaveBeenCalled()
+    expect(denied.replies[0]).toContain('未授权')
   })
 
   it('syncs official provider command and rejects unauthorized private chats', async () => {

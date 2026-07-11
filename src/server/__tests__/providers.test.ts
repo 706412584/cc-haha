@@ -395,10 +395,10 @@ describe('ProviderService', () => {
           apiFormat: 'openai_responses',
           runtimeKind: 'openai_oauth',
           models: {
-            main: 'gpt-5.3-codex',
-            haiku: 'gpt-5.4-mini',
-            sonnet: 'gpt-5.4',
-            opus: 'gpt-5.3-codex',
+            main: 'gpt-5.6-sol',
+            haiku: 'gpt-5.6-luna',
+            sonnet: 'gpt-5.6-terra',
+            opus: 'gpt-5.6-sol',
           },
         })
       })
@@ -416,12 +416,15 @@ describe('ProviderService', () => {
         expect(env.OPENAI_CODEX_OAUTH_FILE).toBe(
           path.join(tmpDir, 'cc-haha', 'openai-oauth.json'),
         )
-        expect(env.ANTHROPIC_MODEL).toBe('gpt-5.3-codex')
-        expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('gpt-5.4-mini')
-        expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('gpt-5.4')
-        expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('gpt-5.3-codex')
+        expect(env.ANTHROPIC_MODEL).toBe('gpt-5.6-sol')
+        expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('gpt-5.6-luna')
+        expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('gpt-5.6-terra')
+        expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('gpt-5.6-sol')
         expect(typeof env.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS).toBe('string')
         expect(JSON.parse(env.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS)).toEqual({
+          'gpt-5.6-sol': 353_400,
+          'gpt-5.6-terra': 353_400,
+          'gpt-5.6-luna': 353_400,
           'gpt-5.3-codex': 258_400,
           'gpt-5.4': 950_000,
           'gpt-5.5': 258_400,

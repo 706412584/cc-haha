@@ -743,7 +743,8 @@ describe('H5AccessService', () => {
     expect(diag.storedPublicBaseUrl).toBe('https://h5.mydomain.com')
 
     // ok: stored URL host is on local interfaces
-    const localHost = collectLocalIPv4Hosts()[0]
+    const localHost = collectLocalIPv4Hosts()
+      .find((host) => classifyH5PublicBaseUrl(`http://${host}:55379`) === 'plain-lan')
     if (localHost) {
       await service.updateSettings({ publicBaseUrl: `http://${localHost}:55379` })
       diag = await service.getDiagnostics()

@@ -50,7 +50,9 @@ if (result.blockingReason) {
   process.exit(1)
 }
 
-await run(['bun', 'run', 'check:policy'])
+if (result.checks.policy) {
+  await run(['bun', 'run', 'check:policy'])
+}
 
 if (result.checks.desktop) {
   await run(['bun', 'run', 'check:desktop'])
@@ -60,12 +62,24 @@ if (result.checks.server) {
   await run(['bun', 'run', 'check:server'])
 }
 
+if (result.checks.providerContract) {
+  await run(['bun', 'run', 'check:provider-contract'])
+}
+
+if (result.checks.chatContract) {
+  await run(['bun', 'run', 'check:chat-contract'])
+}
+
 if (result.checks.adapters) {
   await run(['bun', 'run', 'check:adapters'])
 }
 
 if (result.checks.desktopNative) {
   await run(['bun', 'run', 'check:native'])
+}
+
+if (result.checks.persistence) {
+  await run(['bun', 'run', 'check:persistence-upgrade'])
 }
 
 if (result.checks.docs) {

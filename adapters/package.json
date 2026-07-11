@@ -10,12 +10,12 @@
     "dingtalk": "bun run dingtalk/index.ts",
     "whatsapp": "bun run whatsapp/index.ts",
     "test": "bun test",
-    "test:common": "bun test common/",
-    "test:telegram": "bun test telegram/",
-    "test:feishu": "bun test feishu/",
-    "test:wechat": "bun test wechat/",
-    "test:dingtalk": "bun test dingtalk/",
-    "test:whatsapp": "bun test whatsapp/"
+    "test:common": "bun test ./common/",
+    "test:telegram": "bun test ./telegram/",
+    "test:feishu": "bun test ./feishu/",
+    "test:wechat": "bun test ./wechat/",
+    "test:dingtalk": "bun test ./dingtalk/",
+    "test:whatsapp": "bun test ./whatsapp/"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.60.0",

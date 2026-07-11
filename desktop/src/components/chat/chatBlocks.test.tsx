@@ -325,4 +325,60 @@ describe('chat blocks', () => {
     // fully render in jsdom, so we verify the DiffViewer wrapper is mounted
     expect(container.querySelector('[class*="rounded-[var(--radius-lg)]"]')).toBeTruthy()
   })
+
+  it('keeps every concurrent permission request actionable', () => {
+    const firstPermission = {
+      requestId: 'perm-read-1',
+      toolName: 'Read',
+      toolUseId: 'tool-read-1',
+      input: { file_path: '/outside/one.ts' },
+    }
+    const secondPermission = {
+      requestId: 'perm-read-2',
+      toolName: 'Read',
+      toolUseId: 'tool-read-2',
+      input: { file_path: '/outside/two.ts' },
+    }
+    useChatStore.setState({
+      sessions: {
+        'active-tab': {
+          messages: [],
+          chatState: 'permission_pending',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: secondPermission,
+          pendingPermissions: {
+            [firstPermission.requestId]: firstPermission,
+            [secondPermission.requestId]: secondPermission,
+          },
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    render(
+      <>
+        <PermissionDialog {...firstPermission} />
+        <PermissionDialog {...secondPermission} />
+      </>,
+    )
+
+    expect(screen.getAllByText('Awaiting approval')).toHaveLength(2)
+    expect(screen.getByRole('group', { name: /\/outside\/one\.ts/ })).toBeTruthy()
+    expect(screen.getByRole('group', { name: /\/outside\/two\.ts/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Allow: /outside/one.ts' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Allow: /outside/two.ts' })).toBeTruthy()
+    expect(screen.queryByText('Responded')).toBeNull()
+  })
 })

@@ -1716,6 +1716,34 @@ describe('Settings > Providers tab', () => {
     expect(within(dialog).getByText('Requests will be translated via the local proxy')).toBeInTheDocument()
   })
 
+  it('localizes the main model placeholder in the provider form', () => {
+    useSettingsStore.setState({ locale: 'zh' })
+    providerStoreState.presets = [
+      {
+        id: 'custom',
+        name: 'Custom',
+        baseUrl: 'https://api.example.com/anthropic',
+        apiFormat: 'anthropic',
+        defaultModels: {
+          main: '',
+          haiku: '',
+          sonnet: '',
+          opus: '',
+        },
+        needsApiKey: true,
+        websiteUrl: '',
+      },
+    ]
+
+    render(<Settings />)
+
+    fireEvent.click(screen.getByRole('button', { name: /添加服务商/i }))
+
+    const dialog = screen.getByRole('dialog')
+    expect(within(dialog).getByPlaceholderText('模型 ID')).toBeInTheDocument()
+    expect(within(dialog).queryByPlaceholderText('Model ID')).not.toBeInTheDocument()
+  })
+
   it('normalizes blank model mappings to the main model when saving a provider', async () => {
     providerStoreState.createProvider = vi.fn().mockResolvedValue({
       id: 'provider-new',

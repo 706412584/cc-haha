@@ -432,6 +432,33 @@ function enforceReleaseLiveLanes(
   })
 }
 
+function enforceBlockedImpact(
+  options: QualityGateOptions,
+  results: LaneResult[],
+) {
+  if (options.dryRun || (options.mode !== 'pr' && options.mode !== 'release')) {
+    return results
+  }
+
+  const impact = parseImpactSummary(results)
+  if (!impact?.blocked) {
+    return results
+  }
+
+  return results.map((result) => {
+    if (result.id !== 'impact-report' || result.status === 'failed') {
+      return result
+    }
+
+    return {
+      ...result,
+      status: 'failed' as const,
+      exitCode: result.exitCode === 0 ? 1 : result.exitCode,
+      error: 'Local change policy blocked this diff; inspect the impact report and use maintainer overrides only when explicitly approved.',
+    }
+  })
+}
+
 export async function runQualityGate(options: QualityGateOptions) {
   return runQualityGateLanes(options, lanesForMode(options.mode, options.baselineTargets))
 }
@@ -454,7 +481,8 @@ export async function runQualityGateLanes(
     const result = await executeLane(lane, runOptions)
     rawResults.push(withLaneMetadata(lane, result))
   }
-  const results = enforceReleaseLiveLanes(options, selectedLanes, rawResults)
+  const releaseResults = enforceReleaseLiveLanes(options, selectedLanes, rawResults)
+  const results = enforceBlockedImpact(options, releaseResults)
 
   const report: QualityGateReport = {
     schemaVersion: 1,

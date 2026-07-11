@@ -3,6 +3,7 @@
   "version": "999.0.0-local",
   "private": true,
   "type": "module",
+  "packageManager": "bun@1.3.12",
   "bin": {
     "claude-haha": "./bin/claude-haha"
   },
@@ -11,8 +12,10 @@
     "start": "bun run ./bin/claude-haha",
     "check:pr": "bun run scripts/pr/check-pr.ts",
     "check:impact": "bun run scripts/pr/impact-report.ts",
-    "check:policy": "bun test scripts/pr/change-policy.test.ts scripts/pr/changed-files.test.ts scripts/pr/pr-triage-workflow.test.ts scripts/pr/pr-quality-workflow.test.ts scripts/pr/release-workflow.test.ts scripts/pr/quality-contract.test.ts scripts/release-update-metadata.test.ts scripts/git-hooks/install.test.ts scripts/quality-gate/quarantine.test.ts scripts/quality-gate/coverage.test.ts scripts/quality-gate/provider-smoke/execute.test.ts scripts/quality-gate/desktop-smoke/execute.test.ts scripts/quality-gate/providerTargets.test.ts scripts/quality-gate/runner.test.ts && bun run check:quarantine",
+    "check:policy": "bun test ./scripts/pr/bun-test-filter.test.ts ./scripts/pr/change-policy.test.ts ./scripts/pr/changed-files.test.ts ./scripts/pr/pr-triage-workflow.test.ts ./scripts/pr/pr-quality-workflow.test.ts ./scripts/pr/release-workflow.test.ts ./scripts/pr/quality-contract.test.ts ./scripts/pr/test-environment.test.ts ./scripts/release-update-metadata.test.ts ./scripts/git-hooks/install.test.ts ./scripts/quality-gate/quarantine.test.ts ./scripts/quality-gate/coverage.test.ts ./scripts/quality-gate/provider-smoke/execute.test.ts ./scripts/quality-gate/desktop-smoke/execute.test.ts ./scripts/quality-gate/providerTargets.test.ts ./scripts/quality-gate/runner.test.ts",
     "check:server": "bun run scripts/pr/run-server-tests.ts",
+    "check:provider-contract": "bun run scripts/pr/run-provider-contract-tests.ts",
+    "check:chat-contract": "bun run scripts/pr/run-chat-contract-tests.ts",
     "check:desktop": "cd desktop && bun run lint && bun run test -- --run && bun run build",
     "check:electron": "cd desktop && bun run check:electron",
     "check:adapters": "cd adapters && bun test",
@@ -66,6 +69,7 @@
     "emoji-regex": "^10.6.0",
     "env-paths": "^4.0.0",
     "execa": "^9.6.1",
+    "fflate": "^0.8.3",
     "figures": "^6.1.0",
     "fuse.js": "^7.1.0",
     "get-east-asian-width": "^1.5.0",

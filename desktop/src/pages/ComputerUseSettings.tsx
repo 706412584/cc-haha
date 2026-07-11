@@ -367,7 +367,7 @@ export function ComputerUseSettings() {
               <button
                 onClick={() => savePythonPath()}
                 disabled={pythonPathSaving || !pythonPathDirty}
-                className="flex items-center gap-1.5 rounded-lg bg-[var(--color-brand)] px-3 py-2 text-xs font-semibold text-white hover:opacity-90 disabled:opacity-50"
+                className="flex items-center gap-1.5 rounded-lg bg-[var(--color-brand)] px-3 py-2 text-xs font-semibold text-[var(--color-on-primary)] hover:opacity-90 disabled:opacity-50"
               >
                 <span className="material-symbols-outlined text-[16px]">{pythonPathSaving ? 'hourglass_empty' : 'save'}</span>
                 {t('settings.computerUse.pythonPathSave')}
@@ -463,7 +463,7 @@ export function ComputerUseSettings() {
             {!status.python.installed && (
               <button
                 onClick={() => openExternalUrl(pythonDownloadUrl)}
-                className="flex items-center gap-2 px-5 py-2.5 bg-[var(--color-brand)] text-white text-sm font-semibold rounded-lg hover:opacity-90 transition-opacity"
+                className="flex items-center gap-2 px-5 py-2.5 bg-[var(--color-brand)] text-[var(--color-on-primary)] text-sm font-semibold rounded-lg hover:opacity-90 transition-opacity"
               >
                 <span className="material-symbols-outlined text-[18px]">open_in_new</span>
                 {t('settings.computerUse.downloadPython')}
@@ -473,7 +473,7 @@ export function ComputerUseSettings() {
               <button
                 onClick={handleSetup}
                 disabled={setupRunning}
-                className="flex items-center gap-2 px-5 py-2.5 bg-[var(--color-brand)] text-white text-sm font-semibold rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
+                className="flex items-center gap-2 px-5 py-2.5 bg-[var(--color-brand)] text-[var(--color-on-primary)] text-sm font-semibold rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
               >
                 <span className="material-symbols-outlined text-[18px]">{setupRunning ? 'hourglass_empty' : 'download'}</span>
                 {setupRunning ? t('settings.computerUse.setupRunning') : t('settings.computerUse.setupBtn')}

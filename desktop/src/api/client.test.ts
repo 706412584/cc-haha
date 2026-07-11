@@ -166,4 +166,31 @@ describe('api diagnostics reporting', () => {
     const body = JSON.parse(String((init as RequestInit).body))
     expect(body.type).toBe('client_window_error')
   })
+
+  it('bounds raw diagnostics requests when the local server is unresponsive', async () => {
+    vi.useFakeTimers()
+    let signal: AbortSignal | undefined
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+    fetchMock.mockImplementation((_url, init) => {
+      signal = init?.signal ?? undefined
+      expect(signal).toBeInstanceOf(AbortSignal)
+      return new Promise<Response>((resolve) => {
+        signal?.addEventListener('abort', () => {
+          resolve(new Response(null, { status: 503 }))
+        })
+      })
+    })
+
+    const request = rawRecordDiagnosticEvent({
+      type: 'client_api_request_failed',
+      severity: 'warn',
+      summary: 'server stalled',
+    })
+
+    await vi.advanceTimersByTimeAsync(5_000)
+    await request
+
+    expect(signal?.aborted).toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
 })

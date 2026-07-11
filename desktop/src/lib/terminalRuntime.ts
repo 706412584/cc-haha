@@ -16,6 +16,8 @@ export type TerminalRuntime = {
   nativeSessionId: number | null
   unlisteners: Array<() => void>
   dataDisposable: IDisposable | null
+  startPromise: Promise<void> | null
+  startToken: number
   status: TerminalStatus
   error: string | null
   shellInfo: TerminalShellInfo | null
@@ -41,6 +43,8 @@ export function getTerminalRuntime(id: string, initialStatus: TerminalStatus): T
     nativeSessionId: null,
     unlisteners: [],
     dataDisposable: null,
+    startPromise: null,
+    startToken: 0,
     status: initialStatus,
     error: null,
     shellInfo: null,
@@ -69,6 +73,10 @@ export function subscribeTerminalRuntime(runtime: TerminalRuntime, listener: () 
   }
 }
 
+export function isTerminalRuntimeCurrent(runtime: TerminalRuntime) {
+  return runtimes.get(runtime.id) === runtime
+}
+
 export function attachTerminalRuntime(runtime: TerminalRuntime, host: HTMLElement) {
   const terminal = runtime.terminal
   if (!terminal) return
@@ -92,6 +100,8 @@ export function destroyTerminalRuntime(id: string) {
 
   const sessionId = runtime.nativeSessionId
   runtime.nativeSessionId = null
+  runtime.startToken += 1
+  runtime.startPromise = null
   if (sessionId) {
     void terminalApi.kill(sessionId).catch(() => {})
   }

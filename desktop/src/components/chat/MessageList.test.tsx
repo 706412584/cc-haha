@@ -1078,6 +1078,8 @@ describe('MessageList nested tool calls', () => {
     const { container } = render(<MessageList />)
 
     expect(screen.getAllByText('Running').length).toBeGreaterThan(0)
+    expect(screen.queryByText(/Read .*example\.ts.*done/i)).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: /dispatched an agent/i }))
     expect(screen.getByText(/Read .*example\.ts.*done/i)).toBeTruthy()
     expect(container.textContent).toContain('Agent')
   })
@@ -1234,6 +1236,9 @@ describe('MessageList nested tool calls', () => {
     const groupSummary = screen.getByText('TaskUpdate (1), ran a command')
     const groupButton = groupSummary.closest('button')
     expect(groupButton?.textContent).not.toContain('check_circle')
+    expect(screen.queryByText('local_bash')).toBeNull()
+
+    fireEvent.click(groupButton!)
     expect(screen.getByText('local_bash')).toBeTruthy()
   })
 
@@ -1337,6 +1342,11 @@ describe('MessageList nested tool calls', () => {
     render(<MessageList sessionId={ACTIVE_TAB} />)
 
     expect(screen.getByText('Saved 1 memory item(s)')).toBeTruthy()
+    expect(screen.queryByText('preferences.md')).toBeNull()
+    expect(screen.queryByText('Tool details')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: /Saved 1 memory item/i }))
+
     expect(screen.getByText('preferences.md')).toBeTruthy()
     expect(screen.getByText('Tool details')).toBeTruthy()
     const memoryCardClassName = screen.getByTestId('memory-tool-activity-card').className
@@ -1534,6 +1544,218 @@ describe('MessageList nested tool calls', () => {
     ])
   })
 
+  it('honors a manual collapse of an agent group while more SubAgents stream in', async () => {
+    const initialMessages: UIMessage[] = [
+      {
+        id: 'tool-agent-a',
+        type: 'tool_use',
+        toolName: 'Agent',
+        toolUseId: 'agent-a',
+        input: { description: 'Review renderer' },
+        timestamp: 1,
+      },
+      {
+        id: 'result-agent-a',
+        type: 'tool_result',
+        toolUseId: 'agent-a',
+        content: 'Async agent launched successfully.',
+        isError: false,
+        timestamp: 2,
+      },
+      {
+        id: 'tool-agent-b',
+        type: 'tool_use',
+        toolName: 'Agent',
+        toolUseId: 'agent-b',
+        input: { description: 'Review stores' },
+        timestamp: 3,
+      },
+      {
+        id: 'result-agent-b',
+        type: 'tool_result',
+        toolUseId: 'agent-b',
+        content: 'Async agent launched successfully.',
+        isError: false,
+        timestamp: 4,
+      },
+    ]
+
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({ messages: initialMessages }),
+      },
+    })
+
+    render(<MessageList />)
+
+    const agentGroupButton = screen.getByRole('button', { name: /dispatched 2 agents/i })
+    expect(screen.queryByText('Review renderer')).toBeNull()
+    fireEvent.click(agentGroupButton)
+    expect(screen.getByText('Review renderer')).toBeTruthy()
+    fireEvent.click(agentGroupButton)
+    expect(screen.queryByText('Review renderer')).toBeNull()
+
+    act(() => {
+      useChatStore.setState({
+        sessions: {
+          [ACTIVE_TAB]: makeSessionState({
+            chatState: 'tool_executing',
+            messages: [
+              ...initialMessages,
+              {
+                id: 'tool-agent-c',
+                type: 'tool_use',
+                toolName: 'Agent',
+                toolUseId: 'agent-c',
+                input: { description: 'Review coverage' },
+                timestamp: 5,
+              },
+            ],
+          }),
+        },
+      })
+    })
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /dispatched 3 agents/i })).toBeTruthy()
+    })
+    expect(screen.queryByText('Review renderer')).toBeNull()
+    expect(screen.queryByText('Review coverage')).toBeNull()
+  })
+
+  it('honors a manual collapse of mixed tool groups when nested tool calls arrive', async () => {
+    const initialMessages: UIMessage[] = [
+      {
+        id: 'tool-task-update',
+        type: 'tool_use',
+        toolName: 'TaskUpdate',
+        toolUseId: 'task-update-1',
+        input: { id: '1', status: 'in_progress' },
+        timestamp: 1,
+      },
+      {
+        id: 'tool-bash',
+        type: 'tool_use',
+        toolName: 'Bash',
+        toolUseId: 'bash-1',
+        input: { command: 'git status --short' },
+        timestamp: 2,
+      },
+    ]
+
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          chatState: 'tool_executing',
+          messages: initialMessages,
+        }),
+      },
+    })
+
+    render(<MessageList />)
+
+    const mixedGroupButton = screen.getByRole('button', { name: /TaskUpdate \(1\), ran a command/i })
+    expect(screen.queryByText('git status --short')).toBeNull()
+    fireEvent.click(mixedGroupButton)
+    expect(screen.getByText('git status --short')).toBeTruthy()
+    fireEvent.click(mixedGroupButton)
+    expect(screen.queryByText('git status --short')).toBeNull()
+
+    act(() => {
+      useChatStore.setState({
+        sessions: {
+          [ACTIVE_TAB]: makeSessionState({
+            chatState: 'tool_executing',
+            messages: [
+              ...initialMessages,
+              {
+                id: 'tool-child-read',
+                type: 'tool_use',
+                toolName: 'Read',
+                toolUseId: 'read-1',
+                input: { file_path: '/workspace/package.json' },
+                timestamp: 3,
+                parentToolUseId: 'task-update-1',
+              },
+            ],
+          }),
+        },
+      })
+    })
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /TaskUpdate \(1\), ran a command/i })).toBeTruthy()
+    })
+    expect(screen.queryByText('git status --short')).toBeNull()
+    expect(screen.queryByText('package.json')).toBeNull()
+  })
+
+  it('honors a manual collapse of memory activity when regular tools join the group', async () => {
+    const initialMessages: UIMessage[] = [
+      {
+        id: 'tool-memory-write',
+        type: 'tool_use',
+        toolName: 'Write',
+        toolUseId: 'memory-write-1',
+        input: {
+          file_path: '/Users/test/.codex/memory/project-notes.md',
+          content: 'Persisted context',
+        },
+        timestamp: 1,
+      },
+      {
+        id: 'result-memory-write',
+        type: 'tool_result',
+        toolUseId: 'memory-write-1',
+        content: 'Wrote 1 line to /Users/test/.codex/memory/project-notes.md',
+        isError: false,
+        timestamp: 2,
+      },
+    ]
+
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({ messages: initialMessages }),
+      },
+    })
+
+    render(<MessageList />)
+
+    expect(screen.getByText('Saved 1 memory item(s)')).toBeTruthy()
+    const memoryActivityButton = screen.getByRole('button', { name: /Saved 1 memory item/i })
+    expect(screen.queryByText('project-notes.md')).toBeNull()
+    fireEvent.click(memoryActivityButton)
+    expect(screen.getByText('project-notes.md')).toBeTruthy()
+    fireEvent.click(memoryActivityButton)
+    expect(screen.queryByText('project-notes.md')).toBeNull()
+
+    act(() => {
+      useChatStore.setState({
+        sessions: {
+          [ACTIVE_TAB]: makeSessionState({
+            chatState: 'tool_executing',
+            messages: [
+              ...initialMessages,
+              {
+                id: 'tool-bash',
+                type: 'tool_use',
+                toolName: 'Bash',
+                toolUseId: 'bash-1',
+                input: { command: 'bun test memory.test.ts' },
+                timestamp: 3,
+              },
+            ],
+          }),
+        },
+      })
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('bun test memory.test.ts')).toBeTruthy()
+    })
+    expect(screen.queryByText('project-notes.md')).toBeNull()
+  })
+
   it('keeps later nested tool calls under their parent after an interleaved user message', () => {
     const messages: UIMessage[] = [
       {
@@ -1641,6 +1863,7 @@ describe('MessageList nested tool calls', () => {
 
     render(<MessageList />)
 
+    fireEvent.click(screen.getByRole('button', { name: /dispatched an agent/i }))
     expect(screen.getByText('Failed')).toBeTruthy()
     expect(screen.getByText('Explore agent unavailable in this session')).toBeTruthy()
   })
@@ -1735,6 +1958,7 @@ describe('MessageList nested tool calls', () => {
 
     render(<MessageList />)
 
+    fireEvent.click(screen.getByRole('button', { name: /dispatched an agent/i }))
     expect(screen.getByText('Done')).toBeTruthy()
     expect(screen.getByRole('button', { name: 'View result' })).toBeTruthy()
 
@@ -1745,6 +1969,39 @@ describe('MessageList nested tool calls', () => {
     expect(within(dialog).queryByText(/agentId:/)).toBeNull()
     expect(within(dialog).queryByText(/total_tokens/)).toBeNull()
     expect(screen.getByRole('button', { name: 'Close dialog' })).toBeTruthy()
+  })
+
+  it('opens the SubAgent run tab from an agent tool card', () => {
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: [
+            {
+              id: 'tool-agent',
+              type: 'tool_use',
+              toolName: 'Agent',
+              toolUseId: 'agent-1',
+              input: { description: 'Inspect src/components' },
+              timestamp: 1,
+            },
+          ],
+        }),
+      },
+    })
+
+    render(<MessageList />)
+
+    fireEvent.click(screen.getByRole('button', { name: /dispatched an agent/i }))
+    fireEvent.click(screen.getByRole('button', { name: 'Open run Inspect src/components' }))
+
+    const expectedTabId = '__subagent__active-tab__agent-1'
+    expect(useTabStore.getState().activeTabId).toBe(expectedTabId)
+    expect(useTabStore.getState().tabs.find((tab) => tab.sessionId === expectedTabId)).toMatchObject({
+      title: 'Inspect src/components',
+      type: 'subagent',
+      sourceSessionId: ACTIVE_TAB,
+      subagentToolUseId: 'agent-1',
+    })
   })
 
   it('keeps async launched agents in running state until a terminal notification arrives', () => {
@@ -1821,6 +2078,7 @@ describe('MessageList nested tool calls', () => {
 
     render(<MessageList />)
 
+    fireEvent.click(screen.getByRole('button', { name: /dispatched an agent/i }))
     expect(screen.getByText('Done')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'View result' }))
 
@@ -1875,6 +2133,7 @@ describe('MessageList nested tool calls', () => {
 
     render(<MessageList />)
 
+    fireEvent.click(screen.getByRole('button', { name: /dispatched an agent/i }))
     expect(screen.getByText(/最终报告应该按 Markdown 展示。/)).toBeTruthy()
     expect(screen.queryByText(/raw structured JSON should not be shown/)).toBeNull()
 
@@ -1938,6 +2197,7 @@ describe('MessageList nested tool calls', () => {
 
     render(<MessageList />)
 
+    fireEvent.click(screen.getByRole('button', { name: /dispatched an agent/i }))
     expect(screen.getByText(/git:v0\.2\.6\.\.v0\.2\.7:0/)).toBeTruthy()
     expect(screen.queryByText(/\{"results"/)).toBeNull()
 

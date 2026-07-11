@@ -9,6 +9,7 @@ import {
   normalizePreviewUrl,
   parsePreviewAgentMessage,
   resolvePreviewScriptPath,
+  snapPreviewBoundsToScaleFactor,
   shouldForwardPreviewMessage,
   type PreviewViewLike,
   type PreviewWebContentsLike,
@@ -88,14 +89,35 @@ describe('Electron preview service', () => {
     expect(() => normalizePreviewUrl('javascript:alert(1)')).toThrow('unsupported url scheme')
   })
 
-  it('normalizes finite bounds for WebContentsView', () => {
+  it('normalizes finite bounds for WebContentsView without dropping high-DPI fractions', () => {
     expect(normalizePreviewBounds({ x: 1.2, y: 2.7, width: 20.4, height: -1 })).toEqual({
-      x: 1,
-      y: 3,
-      width: 20,
+      x: 1.2,
+      y: 2.7,
+      width: 20.4,
       height: 0,
     })
     expect(() => normalizePreviewBounds({ x: Number.NaN, y: 0, width: 1, height: 1 })).toThrow('invalid preview bounds x')
+  })
+
+  it('snaps preview bounds to physical pixels at fractional Windows scale factors', () => {
+    const snapped = snapPreviewBoundsToScaleFactor({
+      x: 1.1,
+      y: 2.2,
+      width: 10.3,
+      height: 4.4,
+    }, 2.25)
+
+    expect(snapped).toEqual({
+      x: 0.888889,
+      y: 2.222222,
+      width: 10.666667,
+      height: 4.444444,
+    })
+    expect(snapped.x * 2.25).toBeCloseTo(Math.round(snapped.x * 2.25), 5)
+    expect((snapped.x + snapped.width) * 2.25).toBeCloseTo(
+      Math.round((snapped.x + snapped.width) * 2.25),
+      5,
+    )
   })
 
   it('falls back from app.asar to app.asar.unpacked for the preview agent script', () => {
@@ -136,6 +158,32 @@ describe('Electron preview service', () => {
     ])
     expect(view.visible).toEqual([false])
     expect(view.webContents.scripts).toEqual(['window.__previewInjected = true', 'window.__previewInjected = true'])
+  })
+
+  it('applies scale-aware snapped bounds and can refresh them after display metrics change', async () => {
+    const view = new FakeView()
+    const parent = {
+      contentView: {
+        addChildView: vi.fn(),
+        removeChildView: vi.fn(),
+      },
+      getBounds: () => ({ x: 0, y: 0, width: 1200, height: 800 }),
+    }
+    let scaleFactor = 1
+    const service = new ElectronPreviewService({
+      createView: () => view,
+      previewScriptPath: previewScript(),
+      resolveScaleFactor: () => scaleFactor,
+    })
+
+    await service.open(parent, 'http://localhost:5173', { x: 1.1, y: 2.2, width: 10.3, height: 4.4 })
+    scaleFactor = 2.25
+    service.refreshBounds()
+
+    expect(view.bounds).toEqual([
+      { x: 1, y: 2, width: 10, height: 5 },
+      { x: 0.888889, y: 2.222222, width: 10.666667, height: 4.444444 },
+    ])
   })
 
   it('forwards only validated preview messages from the child view to the renderer', async () => {
@@ -226,6 +274,7 @@ describe('Electron preview service', () => {
     await service.message({ v: 1, type: 'capture', kind: 'full' }, renderer)
 
     expect(view.webContents.zoomFactors.at(-1)).toBe(0.8)
+    expect(view.bounds).toHaveLength(1)
     expect(view.webContents.capturePage).toHaveBeenCalledTimes(1)
     expect(renderer.sent.at(-1)).toEqual({
       channel: ELECTRON_EVENT_CHANNELS.previewEvent,

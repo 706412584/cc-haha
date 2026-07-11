@@ -126,6 +126,17 @@ export function modelSupportsThinking(model: string): boolean {
   return canonical.includes('sonnet-4') || canonical.includes('opus-4')
 }
 
+export function modelRequiresThinking(model: string): boolean {
+  return get3PModelCapabilityOverride(model, 'required_thinking') === true
+}
+
+export function resolveModelThinkingEnabled(
+  model: string,
+  requestedEnabled: boolean,
+): boolean {
+  return modelRequiresThinking(model) || requestedEnabled
+}
+
 // @[MODEL LAUNCH]: Add the new model to the allowlist if it supports adaptive thinking.
 export function modelSupportsAdaptiveThinking(model: string): boolean {
   const supported3P = get3PModelCapabilityOverride(model, 'adaptive_thinking')

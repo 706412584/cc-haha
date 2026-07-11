@@ -182,16 +182,6 @@ describe('Settings > Agents tab', () => {
       fetchAgents: noopFetch,
       selectAgent: (agent) => useAgentStore.setState({ selectedAgent: agent }),
     })
-    useSkillStore.setState({
-      skills: [],
-      selectedSkill: null,
-      isLoading: false,
-      isDetailLoading: false,
-      error: null,
-      fetchSkills: noopFetch,
-      fetchSkillDetail: noopFetch,
-      clearSelection: () => useSkillStore.setState({ selectedSkill: null }),
-    })
   })
 
   it('renders the Agents tab button in sidebar', () => {
@@ -365,7 +355,6 @@ describe('Settings > Skills tab', () => {
     render(<Settings />)
     switchToSkillsTab()
 
-    expect(screen.getByText('Skill metadata')).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Heading' })).toBeInTheDocument()
 
     const rendererRoot = screen.getByRole('heading', { name: 'Heading' }).closest('div[class*="prose"]')
@@ -375,7 +364,7 @@ describe('Settings > Skills tab', () => {
     expect(screen.getByText('Helpful quote')).toBeInTheDocument()
   })
 
-  it('keeps code files rendered in CodeViewer instead of markdown prose', () => {
+  it('keeps code files rendered in CodeViewer instead of markdown prose', async () => {
     useSkillStore.setState({
       selectedSkill: MOCK_SKILL_DETAIL,
       clearSelection: () => useSkillStore.setState({ selectedSkill: null }),
@@ -384,9 +373,10 @@ describe('Settings > Skills tab', () => {
     render(<Settings />)
     switchToSkillsTab()
 
-    fireEvent.click(screen.getAllByText('helper.ts')[0]!)
+    fireEvent.click(screen.getByTestId('skill-detail-tab-files'))
+    fireEvent.click(await screen.findByTestId('market-file-item-helper.ts'))
 
-    expect(screen.getByTestId('code-viewer')).toHaveTextContent('export const helper = true')
+    expect(await screen.findByTestId('code-viewer')).toHaveTextContent('export const helper = true')
     expect(screen.queryByRole('heading', { name: 'Heading' })).not.toBeInTheDocument()
   })
 })

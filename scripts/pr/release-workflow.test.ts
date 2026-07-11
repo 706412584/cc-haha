@@ -228,6 +228,8 @@ describe('release desktop workflow', () => {
     expect(signingJob).toContain('Missing macOS signing/notarization secrets')
     expect(signingJob).toContain('macOS artifacts will be unsigned')
     expect(signingJob).toContain('install-macos-unsigned.sh')
+    expect(signingJob).toContain("RELEASE_DRAFT: ${{ github.event_name == 'workflow_dispatch' && inputs.draft == true }}")
+    expect(signingJob).toContain('Refusing to publish a non-draft desktop release without macOS signing/notarization secrets.')
     expect(signingJob).toContain('macos_signed=false')
     expect(signingJob).toContain('macos_signed=true')
     expect(signingJob).toContain('Windows signing secrets missing')
@@ -239,7 +241,8 @@ describe('release desktop workflow', () => {
     const windowsOptionalBlock = signingJob?.match(
       /win_missing=\(\)[\s\S]*?(?:\n\s{2}build:|$)/,
     )?.[0]
-    expect(macRequiredBlock).not.toContain('exit 1')
+    expect(macRequiredBlock).toContain('if [ "$RELEASE_DRAFT" != "true" ]; then')
+    expect(macRequiredBlock).toContain('exit 1')
     expect(windowsOptionalBlock).toContain('::warning::')
     expect(windowsOptionalBlock).not.toContain('exit 1')
     expect(buildJob).toContain('- signing-preflight')
@@ -298,13 +301,29 @@ describe('release desktop workflow', () => {
     expect(publishJob).toContain('artifacts/release-assets/**/*.blockmap')
     expect(publishJob).toContain('artifacts/update-metadata-standard/*.yml')
     expect(publishJob).toContain('desktop/scripts/install-macos-unsigned.sh')
-    expect(publishJob).toContain("draft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft == true }}")
-    expect(publishJob).toContain('Ensure workflow-dispatch release remains draft')
+    expect(publishJob).toContain('draft: true')
+    expect(publishJob).toContain('Publish GitHub release after complete upload')
+    expect(publishJob).toContain("if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.draft == false)")
+    expect(publishJob).toContain('gh release edit "v${{ steps.version.outputs.value }}" --draft=false --repo "${{ github.repository }}"')
+    expect(publishJob).toContain('Keep workflow-dispatch release as draft')
     expect(publishJob).toContain("if: github.event_name == 'workflow_dispatch' && inputs.draft == true")
-    expect(publishJob).toContain('gh release edit "v${{ steps.version.outputs.value }}" --draft --repo "${{ github.repository }}"')
+    expect(publishJob).toContain('release remains draft')
     expect(publishJob).toContain('fail_on_unmatched_files: true')
     expect(publishJob).toContain('Load release notes')
+    expect(publishJob.indexOf('Publish complete GitHub release')).toBeLessThan(publishJob.indexOf('Publish GitHub release after complete upload'))
     expect(workflow.indexOf('publish-release:')).toBeGreaterThan(workflow.indexOf('build:'))
+  })
+
+  test('release workflow keeps updater-visible releases draft until every asset is uploaded', () => {
+    const workflow = readReleaseWorkflow()
+    const publishJob = extractJob(workflow, 'publish-release')
+
+    expect(publishJob).toContain('draft: true')
+    expect(publishJob).toContain('fail_on_unmatched_files: true')
+    expect(publishJob).toContain('Publish GitHub release after complete upload')
+    expect(publishJob).toContain('--draft=false')
+    expect(publishJob.indexOf('Publish complete GitHub release')).toBeLessThan(publishJob.indexOf('Publish GitHub release after complete upload'))
+    expect(publishJob.indexOf('Validate standard update metadata set')).toBeLessThan(publishJob.indexOf('Publish complete GitHub release'))
   })
 
   test('release matrix asset basenames remain unique when final artifacts are flattened', () => {
@@ -332,6 +351,8 @@ describe('release desktop workflow', () => {
       `Claude-Code-Haha-${version}-linux-arm64.deb`,
       `Claude-Code-Haha-${version}-win-x64.exe`,
       `Claude-Code-Haha-${version}-win-x64.exe.blockmap`,
+      `Claude-Code-Haha-${version}-win-arm64.exe`,
+      `Claude-Code-Haha-${version}-win-arm64.exe.blockmap`,
     ]
     const namespacedMetadata = [
       'latest-mac-macOS-ARM64.yml',
@@ -357,7 +378,7 @@ describe('release desktop workflow', () => {
     expect(expectedReleaseAssets.filter((name) => name.endsWith('.zip')).length).toBe(2)
     expect(expectedReleaseAssets.filter((name) => name.endsWith('.AppImage')).length).toBe(2)
     expect(expectedReleaseAssets.filter((name) => name.endsWith('.deb')).length).toBe(2)
-    expect(expectedReleaseAssets.filter((name) => name.endsWith('.exe')).length).toBe(1)
+    expect(expectedReleaseAssets.filter((name) => name.endsWith('.exe')).length).toBe(2)
     expect(expectedReleaseAssets.some((name) => name.includes('-linux-') && name.endsWith('.blockmap'))).toBe(false)
     for (const platform of ['mac', 'linux', 'win']) {
       expect(expectedReleaseAssets.some((name) => name.includes(`-${platform}-`))).toBe(true)
@@ -384,6 +405,9 @@ describe('release desktop workflow', () => {
       'Claude-Code-Haha-${APP_VERSION}-linux-arm64.AppImage',
       'Claude-Code-Haha-${APP_VERSION}-linux-arm64.deb',
       'Claude-Code-Haha-${APP_VERSION}-win-x64.exe',
+      'Claude-Code-Haha-${APP_VERSION}-win-x64.exe.blockmap',
+      'Claude-Code-Haha-${APP_VERSION}-win-arm64.exe',
+      'Claude-Code-Haha-${APP_VERSION}-win-arm64.exe.blockmap',
     ]
 
     for (const file of expectedFiles) {

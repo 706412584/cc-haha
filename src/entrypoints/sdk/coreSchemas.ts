@@ -1592,12 +1592,12 @@ export const SDKStreamingFallbackMessageSchema = lazySchema(() =>
     .object({
       type: z.literal('system'),
       subtype: z.literal('streaming_fallback'),
-      cause: z.enum(['watchdog', 'stream_error', '404_stream_creation']),
+      cause: z.enum(['watchdog', 'stream_error', '404_stream_creation', 'stream_retry']),
       uuid: UUIDPlaceholder(),
       session_id: z.string(),
     })
     .describe(
-      'Emitted when a streaming request fails and the query falls back to a non-streaming request. The fallback response arrives in one piece after a potentially long wait with no incremental output.',
+      'Emitted when a streaming request is recovered by either a bounded safe stream retry or a non-streaming fallback.',
     ),
 )
 

@@ -23,6 +23,7 @@ type Props = {
   agentTaskNotification?: AgentTaskNotification
   compact?: boolean
   isPending?: boolean
+  status?: 'stopped'
   partialInput?: string
 }
 
@@ -43,7 +44,7 @@ const TOOL_ICONS: Record<string, string> = {
 const WRITER_PREVIEW_MAX_LINES = 120
 const WRITER_PREVIEW_MAX_CHARS = 30000
 
-export const ToolCallBlock = memo(function ToolCallBlock({ toolName, input, result, compact = false, isPending = false, partialInput }: Props) {
+export const ToolCallBlock = memo(function ToolCallBlock({ toolName, input, result, compact = false, isPending = false, status, partialInput }: Props) {
   const isExitPlanTool = isExitPlanModeTool(toolName)
   const isEnterPlanTool = isEnterPlanModeTool(toolName)
   const [expanded, setExpanded] = useState(isExitPlanTool)
@@ -60,6 +61,9 @@ export const ToolCallBlock = memo(function ToolCallBlock({ toolName, input, resu
   )
   const pendingSummary = isPending && !result
     ? getPendingSummary(toolName, t)
+    : ''
+  const stoppedSummary = status === 'stopped' && !result
+    ? t('tool.stopped')
     : ''
 
   const preview = useMemo(() => renderPreview(toolName, obj, result, t), [obj, result, toolName, t])
@@ -124,6 +128,10 @@ export const ToolCallBlock = memo(function ToolCallBlock({ toolName, input, resu
           <span className="inline-flex shrink-0 items-center gap-1 text-[10px] text-[var(--color-outline)]">
             <LoaderCircle size={12} strokeWidth={2.4} className="animate-spin" aria-hidden="true" />
             {pendingSummary}
+          </span>
+        ) : stoppedSummary ? (
+          <span className="shrink-0 text-[10px] text-[var(--color-outline)]">
+            {stoppedSummary}
           </span>
         ) : result && outputSummary ? (
           <span

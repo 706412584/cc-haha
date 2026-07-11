@@ -1299,6 +1299,24 @@ describe('Sidebar', () => {
     expect(fetchSessions).toHaveBeenCalledTimes(3)
   })
 
+  it('does not overlap automatic session refreshes when the previous request is still pending', async () => {
+    vi.useFakeTimers()
+    fetchSessions.mockReturnValue(new Promise(() => {}))
+
+    render(<Sidebar />)
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(fetchSessions).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      vi.advanceTimersByTime(90_000)
+      await Promise.resolve()
+    })
+
+    expect(fetchSessions).toHaveBeenCalledTimes(1)
+  })
+
   it('does not poll for session changes while the document is hidden', async () => {
     vi.useFakeTimers()
     const originalVisibility = document.visibilityState

@@ -30,11 +30,22 @@ export type SkillFile = {
   isEntry?: boolean
 }
 
+export type SkillMarketMeta = {
+  id: string
+  source: string
+  slug: string
+  version?: string
+  installedAt?: string
+  fileCount?: number
+}
+
 export type SkillDetail = {
   meta: SkillMeta
   tree: FileTreeNode[]
   files: SkillFile[]
   skillRoot: string
+  /** Present when the skill was installed from the Skills Market. */
+  marketMeta?: SkillMarketMeta
 }
 
 export type CatalogSkill = {

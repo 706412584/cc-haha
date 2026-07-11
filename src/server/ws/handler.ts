@@ -249,7 +249,15 @@ export const handleWebSocket = {
 
     const msg: ServerMessage = { type: 'connected', sessionId }
     ws.send(JSON.stringify(msg))
-    replayPendingPermissionRequests(ws, sessionId)
+    const toolRequestIds = replayPendingPermissionRequests(ws, sessionId)
+    const computerUseRequestIds = replayPendingComputerUsePermissionRequests(ws, sessionId)
+    sendMessage(ws, {
+      type: 'permission_requests_snapshot',
+      toolRequestIds,
+      computerUseRequestIds,
+      turnActive:
+        hasPendingOrActiveUserTurn(sessionId) && !sessionStopRequested.has(sessionId),
+    })
   },
 
   message(ws: ServerWebSocket<WebSocketData>, rawMessage: string | Buffer) {
@@ -265,18 +273,33 @@ export const handleWebSocket = {
       ) as ClientMessage
 
       switch (message.type) {
-        case 'user_message':
-          handleUserMessage(ws, message).catch((err) => {
+        case 'user_message': {
+          const activeTurn: ActiveUserTurnState = { messageSent: false }
+          handleUserMessage(ws, message, activeTurn).catch((err) => {
+            const sessionId = ws.data.sessionId
             void diagnosticsService.recordEvent({
               type: 'ws_user_message_failed',
               severity: 'error',
-              sessionId: ws.data.sessionId,
+              sessionId,
               summary: err instanceof Error ? err.message : String(err),
               details: err,
             })
             console.error(`[WS] Unhandled error in handleUserMessage:`, err)
+            if (activeUserTurns.get(sessionId) === activeTurn) {
+              clearActiveUserTurn(sessionId, activeTurn)
+              const titleState = sessionTitleState.get(sessionId)
+              if (titleState) titleState.activeTurn = undefined
+              sendMessage(ws, {
+                type: 'error',
+                message: 'The request could not be started. Please retry.',
+                code: 'USER_TURN_FAILED',
+                retryable: true,
+              })
+              sendMessage(ws, { type: 'status', state: 'idle' })
+            }
           })
           break
+        }
 
         case 'permission_response':
           handlePermissionResponse(ws, message)
@@ -310,6 +333,15 @@ export const handleWebSocket = {
           void handlePrewarmSession(ws)
           break
 
+        case 'sync_state':
+          sendMessage(ws, {
+            type: 'session_state',
+            turnState: hasPendingOrActiveUserTurn(ws.data.sessionId)
+              ? 'running'
+              : 'idle',
+          })
+          break
+
         case 'stop_generation':
           handleStopGeneration(ws)
           break
@@ -335,7 +367,7 @@ export const handleWebSocket = {
 
     if (channel === 'sdk') {
       console.log(`[WS] SDK disconnected from session: ${sessionId} (${code}: ${reason})`)
-      conversationService.detachSdkConnection(sessionId)
+      conversationService.detachSdkConnection(sessionId, ws)
       return
     }
 
@@ -406,9 +438,14 @@ async function waitForRuntimeConfigHandlers(sessionId: string): Promise<void> {
 
 async function handleUserMessage(
   ws: ServerWebSocket<WebSocketData>,
-  message: Extract<ClientMessage, { type: 'user_message' }>
+  message: Extract<ClientMessage, { type: 'user_message' }>,
+  activeTurn: ActiveUserTurnState,
 ) {
   const { sessionId } = ws.data
+
+  // Register synchronously before any validation or runtime-config wait so
+  // concurrent prewarm/restart work sees this turn as user-owned.
+  activeUserTurns.set(sessionId, activeTurn)
 
   // Clear any stale stop flag from a previous turn
   sessionStopRequested.delete(sessionId)
@@ -422,11 +459,16 @@ async function handleUserMessage(
       code: 'INVALID_SLASH_COMMAND_ARGS',
     })
     sendMessage(ws, { type: 'status', state: 'idle' })
+    clearActiveUserTurn(sessionId, activeTurn)
     return
   }
 
   if (desktopSlashCommand?.commandName === 'clear') {
-    await handleDesktopClearCommand(ws)
+    try {
+      await handleDesktopClearCommand(ws)
+    } finally {
+      clearActiveUserTurn(sessionId, activeTurn)
+    }
     return
   }
 
@@ -434,9 +476,6 @@ async function handleUserMessage(
 
   // Send thinking status
   sendMessage(ws, { type: 'status', state: 'thinking', verb: 'Thinking' })
-
-  const activeTurn: ActiveUserTurnState = { messageSent: false }
-  activeUserTurns.set(sessionId, activeTurn)
 
   const initialRuntimeTransition = await waitForRuntimeTransitionBeforeUserTurn(ws, sessionId)
   if (!initialRuntimeTransition.ok) {
@@ -711,7 +750,7 @@ function handlePermissionResponse(
   message: Extract<ClientMessage, { type: 'permission_response' }>
 ) {
   const { sessionId } = ws.data
-  conversationService.respondToPermission(
+  const resolved = conversationService.respondToPermission(
     sessionId,
     message.requestId,
     message.allowed,
@@ -720,6 +759,14 @@ function handlePermissionResponse(
     message.denyMessage,
     message.permissionUpdates,
   )
+  if (resolved) {
+    sendToSession(sessionId, {
+      type: 'permission_resolved',
+      requestId: message.requestId,
+      permissionType: 'tool',
+      allowed: message.allowed,
+    })
+  }
   console.log(`[WS] Permission response for ${message.requestId}: ${message.allowed}`)
 }
 
@@ -736,7 +783,14 @@ function handleComputerUsePermissionResponse(
     console.warn(
       `[WS] Ignored Computer Use permission response for unknown request ${message.requestId} from ${sessionId}`
     )
+    return
   }
+  sendToSession(sessionId, {
+    type: 'permission_resolved',
+    requestId: message.requestId,
+    permissionType: 'computer_use',
+    allowed: message.response.userConsented !== false,
+  })
 }
 
 async function handleSetPermissionMode(
@@ -1194,12 +1248,13 @@ async function handleStopBackgroundTask(
   message: Extract<ClientMessage, { type: 'stop_background_task' }>,
 ) {
   const { sessionId } = ws.data
-  const taskId = message.taskId?.trim()
+  const taskId = typeof message.taskId === 'string' ? message.taskId.trim() : ''
+
   if (!taskId) {
     sendMessage(ws, {
-      type: 'error',
-      message: 'Background task id is required.',
-      code: 'BACKGROUND_TASK_STOP_INVALID',
+      type: 'background_task_stop_failed',
+      taskId,
+      message: 'Background task id is required',
     })
     return
   }
@@ -1210,17 +1265,10 @@ async function handleStopBackgroundTask(
       task_id: taskId,
     })
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    if (
-      message.startsWith('No task found with ID:') ||
-      /Task \S+ is not running \(status: (?:completed|failed|killed|stopped)\)/.test(message)
-    ) {
-      return
-    }
     sendMessage(ws, {
-      type: 'error',
-      message: `Failed to stop background task: ${message}`,
-      code: 'BACKGROUND_TASK_STOP_FAILED',
+      type: 'background_task_stop_failed',
+      taskId,
+      message: error instanceof Error ? error.message : String(error),
     })
   }
 }
@@ -1483,6 +1531,7 @@ type SessionStreamState = {
     message: string
     code: string
   }
+  suppressBufferedAssistant: boolean
 }
 
 const sessionStreamStates = new Map<string, SessionStreamState>()
@@ -1498,6 +1547,7 @@ function getStreamState(sessionId: string): SessionStreamState {
       pendingToolBlocks: new Map(),
       toolParentUseIds: new Map(),
       lastApiError: undefined,
+      suppressBufferedAssistant: false,
     }
     sessionStreamStates.set(sessionId, state)
   }
@@ -1843,7 +1893,12 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
           return []
         }
         const message = extractAssistantText(cliMsg) || cliMsg.error || 'Unknown API error'
-        const code = typeof cliMsg.error === 'string' ? cliMsg.error : 'API_ERROR'
+        const rawCode = typeof cliMsg.error === 'string' ? cliMsg.error : 'API_ERROR'
+        const code = /Provider stream stalled after partial response/i.test(message)
+          ? 'STREAM_IDLE_TIMEOUT'
+          : /Stream max duration exceeded/i.test(message)
+            ? 'STREAM_MAX_DURATION'
+            : rawCode
         streamState.lastApiError = { message, code }
         return [{
           type: 'error',
@@ -1861,7 +1916,7 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
         const messages: ServerMessage[] = []
 
         for (const block of cliMsg.message.content) {
-          if (streamState.hasReceivedStreamEvents) {
+          if (streamState.hasReceivedStreamEvents || streamState.suppressBufferedAssistant) {
             // Stream events handled most blocks — but any tool_use whose
             // input JSON failed to parse in content_block_stop was deferred.
             // Emit those now with the complete input from the assistant message.
@@ -1982,7 +2037,8 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
 
       switch (event.type) {
         case 'message_start': {
-          return [{ type: 'status', state: 'thinking' }]
+          streamState.suppressBufferedAssistant = true
+          return [{ type: 'status', state: 'thinking', attemptStart: true }]
         }
 
         case 'content_block_start': {
@@ -2114,8 +2170,32 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
       return []
     }
 
-    case 'control_response':
-      return []
+    case 'control_cancel_request':
+      return typeof cliMsg.request_id === 'string'
+        ? [{
+            type: 'permission_resolved',
+            requestId: cliMsg.request_id,
+            permissionType: 'tool',
+          }]
+        : []
+
+    case 'control_response': {
+      const requestId = typeof cliMsg.response?.request_id === 'string'
+        ? cliMsg.response.request_id
+        : typeof cliMsg.request_id === 'string'
+          ? cliMsg.request_id
+          : null
+      if (!requestId) return []
+      const behavior = cliMsg.response?.response?.behavior
+      return [{
+        type: 'permission_resolved',
+        requestId,
+        permissionType: 'tool',
+        ...(behavior === 'allow' || behavior === 'deny'
+          ? { allowed: behavior === 'allow' }
+          : {}),
+      }]
+    }
 
     case 'result': {
       // 对话结果（成功或错误）
@@ -2163,6 +2243,11 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
         return apiRetryMessage ? [apiRetryMessage] : []
       }
       if (subtype === 'streaming_fallback') {
+        streamState.hasReceivedStreamEvents = false
+        streamState.suppressBufferedAssistant = cliMsg.cause === 'stream_retry'
+        streamState.activeBlockTypes.clear()
+        streamState.activeToolBlocks.clear()
+        streamState.pendingToolBlocks.clear()
         return [toStreamingFallbackServerMessage(cliMsg)]
       }
       if (subtype === 'init') {
@@ -2263,13 +2348,15 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
         }]
       }
       if (subtype === 'task_started') {
+        const notification: ServerMessage = {
+          type: 'system_notification',
+          subtype: 'task_started',
+          message: cliMsg.message || cliMsg.description || 'Task started',
+          data: cliMsg,
+        }
+        if (cliMsg.task_type === 'dream') return [notification]
         return [
-          {
-            type: 'system_notification',
-            subtype: 'task_started',
-            message: cliMsg.message || cliMsg.description || 'Task started',
-            data: cliMsg,
-          },
+          notification,
           {
             type: 'status',
             state: 'tool_executing',
@@ -2407,6 +2494,7 @@ const STREAMING_FALLBACK_CAUSES: ReadonlySet<StreamingFallbackCause> = new Set([
   'watchdog',
   'stream_error',
   '404_stream_creation',
+  'stream_retry',
 ])
 
 function toStreamingFallbackServerMessage(cliMsg: any): ServerMessage {
@@ -2533,8 +2621,9 @@ function cancelSessionDisconnectWatcher(sessionId: string): void {
 function replayPendingPermissionRequests(
   ws: ServerWebSocket<WebSocketData>,
   sessionId: string,
-): void {
-  for (const request of conversationService.getPendingPermissionRequests(sessionId)) {
+): string[] {
+  const requests = conversationService.getPendingPermissionRequests(sessionId)
+  for (const request of requests) {
     sendMessage(ws, {
       type: 'permission_request',
       requestId: request.requestId,
@@ -2544,6 +2633,22 @@ function replayPendingPermissionRequests(
       ...(request.description ? { description: request.description } : {}),
     })
   }
+  return requests.map((request) => request.requestId)
+}
+
+function replayPendingComputerUsePermissionRequests(
+  ws: ServerWebSocket<WebSocketData>,
+  sessionId: string,
+): string[] {
+  const requests = computerUseApprovalService.getPendingRequests(sessionId)
+  for (const request of requests) {
+    sendMessage(ws, {
+      type: 'computer_use_permission_request',
+      requestId: request.requestId,
+      request,
+    })
+  }
+  return requests.map((request) => request.requestId)
 }
 
 function getDesktopSlashCommand(content: string): ReturnType<typeof parseSlashCommand> {

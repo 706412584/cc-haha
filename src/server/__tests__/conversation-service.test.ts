@@ -507,6 +507,7 @@ describe('ConversationService', () => {
     expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('kimi-k2.6')
     expect(env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST).toBe('1')
     expect(env.CLAUDE_CODE_ATTRIBUTION_HEADER).toBe('0')
+    expect(env.CC_HAHA_TRANSCRIPT_ENTRYPOINT).toBe('claude-desktop')
     expect(env.CLAUDE_CODE_ENTRYPOINT).toBeUndefined()
     expect(env.CC_HAHA_TRACE_PROVIDER_ID).toBeUndefined()
     expect(env.CC_HAHA_TRACE_PROVIDER_NAME).toBeUndefined()
@@ -760,14 +761,33 @@ describe('ConversationService', () => {
     expect(env.OPENAI_CODEX_OAUTH_FILE).toBe(
       path.join(tmpDir, 'cc-haha', 'openai-oauth.json'),
     )
-    expect(env.ANTHROPIC_MODEL).toBe('gpt-5.3-codex')
-    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('gpt-5.4')
+    expect(env.ANTHROPIC_MODEL).toBe('gpt-5.6-sol')
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('gpt-5.6-terra')
     expect(env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST).toBe('1')
     expect(env.CLAUDE_CODE_ENTRYPOINT).toBeUndefined()
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined()
     expect(env.ANTHROPIC_API_KEY).toBeUndefined()
     expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
     expect(env.ANTHROPIC_BASE_URL).toBeUndefined()
+  })
+
+  test('buildChildEnv passes OpenAI-native effort without leaking Claude effort state', async () => {
+    const originalEffort = process.env.CC_HAHA_OPENAI_REASONING_EFFORT
+    process.env.CC_HAHA_OPENAI_REASONING_EFFORT = 'stale-parent-effort'
+    try {
+      const service = new ConversationService() as any
+      const env = (await service.buildChildEnv('/tmp', undefined, {
+        providerId: 'openai-official',
+        model: 'gpt-5.6-sol',
+        effort: 'xhigh',
+      })) as Record<string, string>
+
+      expect(env.ANTHROPIC_MODEL).toBe('gpt-5.6-sol')
+      expect(env.CC_HAHA_OPENAI_REASONING_EFFORT).toBe('xhigh')
+    } finally {
+      if (originalEffort === undefined) delete process.env.CC_HAHA_OPENAI_REASONING_EFFORT
+      else process.env.CC_HAHA_OPENAI_REASONING_EFFORT = originalEffort
+    }
   })
 
   test('buildChildEnv does not leak inherited CLAUDE_CODE_OAUTH_TOKEN when official token is unavailable', async () => {
@@ -1053,6 +1073,59 @@ describe('ConversationService', () => {
 
   test('default CLI shutdown wait covers the CLI graceful cleanup budget', () => {
     expect(DESKTOP_CLI_GRACEFUL_SHUTDOWN_TIMEOUT_MS).toBeGreaterThanOrEqual(6_000)
+  })
+
+  test('isolates SDK output callbacks so one broken client cannot swallow turn completion', () => {
+    const service = new ConversationService() as any
+    let completionObserved = false
+    service.sessions.set('callback-isolation', {
+      outputCallbacks: [
+        () => { throw new Error('closed client socket') },
+        (message: any) => { completionObserved = message.type === 'result' },
+      ],
+      sdkMessages: [],
+      initMessage: null,
+      pendingPermissionRequests: new Map(),
+    })
+
+    service.handleSdkPayload('callback-isolation', JSON.stringify({
+      type: 'result',
+      subtype: 'success',
+      is_error: false,
+    }))
+
+    expect(completionObserved).toBe(true)
+  })
+
+  test('removes an exited CLI session even when one output callback throws', async () => {
+    const service = new ConversationService() as any
+    const sessionId = 'exit-callback-isolation'
+    const proc = {
+      exited: Promise.resolve(1),
+      kill: () => {},
+    }
+    let completionObserved = false
+    service.sessions.set(sessionId, {
+      proc,
+      startupPending: false,
+      startupExitCode: null,
+      outputDrain: Promise.resolve(),
+      outputCallbacks: [
+        () => { throw new Error('closed client socket') },
+        (message: any) => { completionObserved = message.type === 'result' },
+      ],
+      workDir: tmpDir,
+      permissionMode: 'default',
+      stdoutLines: [],
+      stderrLines: [],
+      sdkMessages: [],
+      pendingPermissionRequests: new Map(),
+    })
+
+    await service.handleProcessExit(sessionId, proc, 1)
+
+    expect(completionObserved).toBe(true)
+    expect(service.hasSession(sessionId)).toBe(false)
   })
 })
 

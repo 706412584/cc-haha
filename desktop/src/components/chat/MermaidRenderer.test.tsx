@@ -78,6 +78,40 @@ describe('MermaidRenderer', () => {
     expect(arrow?.getAttribute('style') ?? '').not.toContain('stroke:')
   })
 
+  it('quotes generated slash labels that Mermaid would parse as invalid shape syntax', async () => {
+    render(
+      <MermaidRenderer
+        code={[
+          'flowchart TD',
+          '  D1[/api/dcl] --> D2[直接调用 dclService]',
+        ].join('\n')}
+      />,
+    )
+
+    await waitFor(() => {
+      expect(renderMock).toHaveBeenCalledWith(
+        expect.any(String),
+        [
+          'flowchart TD',
+          '  D1["/api/dcl"] --> D2[直接调用 dclService]',
+        ].join('\n'),
+      )
+    })
+  })
+
+  it('preserves slash-delimited Mermaid flowchart shapes', async () => {
+    const code = [
+      'flowchart TD',
+      '  A[/Manual input/] --> B[OK]',
+    ].join('\n')
+
+    render(<MermaidRenderer code={code} />)
+
+    await waitFor(() => {
+      expect(renderMock).toHaveBeenCalledWith(expect.any(String), code)
+    })
+  })
+
   it('fits oversized diagrams inside the chat message surface', async () => {
     const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth')
     Object.defineProperty(HTMLElement.prototype, 'clientWidth', {

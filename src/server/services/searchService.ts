@@ -714,17 +714,29 @@ export class SearchService {
     return new Promise((resolve, reject) => {
       const proc = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] })
       const chunks: Buffer[] = []
+      const errorChunks: Buffer[] = []
 
       proc.stdout.on('data', (chunk: Buffer) => chunks.push(chunk))
+      proc.stderr.on('data', (chunk: Buffer) => errorChunks.push(chunk))
 
       proc.on('close', (code) => {
         const output = Buffer.concat(chunks).toString('utf-8')
+        const errorOutput = Buffer.concat(errorChunks).toString('utf-8')
+        // rg/grep only exit 0 after emitting at least one match. An empty
+        // successful capture means the host runtime did not provide usable
+        // output, so fall back instead of reporting a false empty result.
+        if (code === 0 && output.length === 0) {
+          reject(new Error(`Command "${cmd}" returned no searchable output`))
+          return
+        }
         // rg/grep 返回 1 表示无匹配，不视为错误
         if (code === 0 || code === 1) {
           resolve(output)
         } else {
           reject(
-            new Error(`Command "${cmd}" exited with code ${code}: ${output}`),
+            new Error(
+              `Command "${cmd}" exited with code ${code}: ${errorOutput || output}`,
+            ),
           )
         }
       })

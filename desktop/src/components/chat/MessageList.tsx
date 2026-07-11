@@ -2051,6 +2051,7 @@ export function MessageList({ sessionId, compact = false }: MessageListProps = {
       <>
         {item.kind === 'tool_group' ? (
           <ToolCallGroup
+            sessionId={resolvedSessionId}
             toolCalls={item.toolCalls}
             resultMap={toolResultMap}
             childToolCallsByParent={childToolCallsByParent}
@@ -2273,6 +2274,7 @@ export const MessageBlock = memo(function MessageBlock({
       }
       return (
         <ToolCallBlock
+          status={message.status}
           toolName={message.toolName}
           input={message.input}
           result={toolResult}

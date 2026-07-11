@@ -67,7 +67,7 @@ export function buildCronTaskSpawnOptions(
  * By extracting server-side we avoid the 10K naive truncation problem where
  * the useful content sits well past the first 10K characters.
  */
-function extractAssistantText(raw: string): string {
+export function extractAssistantText(raw: string): string {
   if (!raw) return ''
   const lines = raw.split('\n')
   const parts: string[] = []
@@ -97,9 +97,15 @@ function extractAssistantText(raw: string): string {
     if (type === 'result') {
       const result = parsed?.result
       if (typeof result === 'string' && result.trim()) {
-        parts.push(result.trim())
+        const text = result.trim()
+        if (text !== parts.at(-1) && text !== parts.join('\n\n')) {
+          parts.push(text)
+        }
       } else if (result?.message?.trim()) {
-        parts.push(result.message.trim())
+        const text = result.message.trim()
+        if (text !== parts.at(-1) && text !== parts.join('\n\n')) {
+          parts.push(text)
+        }
       }
     }
   }

@@ -36,8 +36,17 @@ export function PermissionModeSelector({ workDir: workDirProp, compact = false, 
   const setSessionPermissionMode = useChatStore((s) => s.setSessionPermissionMode)
   const activeTabId = useTabStore((s) => s.activeTabId)
   const sessions = useSessionStore((s) => s.sessions)
+  const chatState = useChatStore((s) =>
+    activeTabId ? s.sessions[activeTabId]?.chatState ?? 'idle' : 'idle',
+  )
+  const isTurnActive = chatState !== 'idle'
+  const isTurnActiveNow = (tabId: string | null) => {
+    if (!tabId) return false
+    return (useChatStore.getState().sessions[tabId]?.chatState ?? 'idle') !== 'idle'
+  }
   const [open, setOpen] = useState(false)
   const [confirmDialog, setConfirmDialog] = useState(false)
+  const interactionTabIdRef = useRef<string | null>(null)
   const ref = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
 
@@ -103,6 +112,25 @@ export function PermissionModeSelector({ workDir: workDirProp, compact = false, 
   const menuId = 'permission-mode-menu'
 
   useEffect(() => {
+    if (isTurnActive) {
+      setOpen(false)
+      setConfirmDialog(false)
+      interactionTabIdRef.current = null
+    }
+  }, [isTurnActive])
+
+  useEffect(() => {
+    if (
+      (open || confirmDialog) &&
+      activeTabId !== interactionTabIdRef.current
+    ) {
+      setOpen(false)
+      setConfirmDialog(false)
+      interactionTabIdRef.current = null
+    }
+  }, [activeTabId, confirmDialog, open])
+
+  useEffect(() => {
     if (!open) return
     const handleClick = (e: MouseEvent) => {
       const target = e.target as Node
@@ -132,6 +160,16 @@ export function PermissionModeSelector({ workDir: workDirProp, compact = false, 
           key={item.value}
           role="menuitem"
           onClick={() => {
+            const actionTabId = useTabStore.getState().activeTabId
+            if (
+              actionTabId !== interactionTabIdRef.current ||
+              isTurnActiveNow(actionTabId)
+            ) {
+              setOpen(false)
+              setConfirmDialog(false)
+              interactionTabIdRef.current = null
+              return
+            }
             if (item.value === 'bypassPermissions') {
               setOpen(false)
               setConfirmDialog(true)
@@ -140,9 +178,10 @@ export function PermissionModeSelector({ workDir: workDirProp, compact = false, 
             if (isControlled) {
               onChange?.(item.value)
             } else {
-              if (activeTabId) setSessionPermissionMode(activeTabId, item.value)
+              if (actionTabId) setSessionPermissionMode(actionTabId, item.value)
             }
             setOpen(false)
+            interactionTabIdRef.current = null
           }}
           className={`
             flex w-full items-start gap-3 px-4 py-3 text-left transition-colors
@@ -179,15 +218,26 @@ export function PermissionModeSelector({ workDir: workDirProp, compact = false, 
   return (
     <div ref={ref} className="relative">
       <button
-        onClick={() => setOpen(!open)}
+        onClick={() => {
+          const actionTabId = useTabStore.getState().activeTabId
+          if (isTurnActiveNow(actionTabId)) return
+          if (open) {
+            setOpen(false)
+            interactionTabIdRef.current = null
+            return
+          }
+          interactionTabIdRef.current = actionTabId
+          setOpen(true)
+        }}
+        disabled={isTurnActive}
         aria-label={MODE_LABELS[currentMode]}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
-        title={compact ? MODE_LABELS[currentMode] : undefined}
-        className={`flex items-center bg-[var(--color-surface-container-low)] font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] ${
-          compactButtonClass
-        }`}
+        title={isTurnActive ? t('permMode.disabledDuringTurn') : (compact ? MODE_LABELS[currentMode] : undefined)}
+        className={`flex items-center bg-[var(--color-surface-container-low)] font-medium text-[var(--color-text-secondary)] transition-colors ${
+          isTurnActive ? 'opacity-50 cursor-not-allowed' : 'hover:bg-[var(--color-surface-hover)]'
+        } ${compactButtonClass}`}
       >
         <span className="material-symbols-outlined text-[14px]">{MODE_ICONS[currentMode]}</span>
         {!compact && (
@@ -219,7 +269,10 @@ export function PermissionModeSelector({ workDir: workDirProp, compact = false, 
 
       <ActionDialog
         open={confirmDialog}
-        onClose={() => setConfirmDialog(false)}
+        onClose={() => {
+          setConfirmDialog(false)
+          interactionTabIdRef.current = null
+        }}
         title={t('permMode.enableBypassTitle')}
         width={420}
         body={(
@@ -254,18 +307,31 @@ export function PermissionModeSelector({ workDir: workDirProp, compact = false, 
         actions={[
           {
             label: t('common.cancel'),
-            onClick: () => setConfirmDialog(false),
+            onClick: () => {
+              setConfirmDialog(false)
+              interactionTabIdRef.current = null
+            },
             variant: 'secondary',
           },
           {
             label: t('permMode.enableBypassBtn'),
             onClick: () => {
+              const actionTabId = useTabStore.getState().activeTabId
+              if (
+                actionTabId !== interactionTabIdRef.current ||
+                isTurnActiveNow(actionTabId)
+              ) {
+                setConfirmDialog(false)
+                interactionTabIdRef.current = null
+                return
+              }
               if (isControlled) {
                 onChange?.('bypassPermissions')
-              } else if (activeTabId) {
-                setSessionPermissionMode(activeTabId, 'bypassPermissions')
+              } else if (actionTabId) {
+                setSessionPermissionMode(actionTabId, 'bypassPermissions')
               }
               setConfirmDialog(false)
+              interactionTabIdRef.current = null
             },
             variant: 'danger',
           },

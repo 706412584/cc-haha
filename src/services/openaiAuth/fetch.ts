@@ -1,8 +1,16 @@
 import type { ClientOptions } from '@anthropic-ai/sdk'
 import { randomUUID } from 'crypto'
-import { OPENAI_CODEX_API_ENDPOINT } from './client.js'
+import {
+  OPENAI_CODEX_API_ENDPOINT,
+  OPENAI_CODEX_ORIGINATOR,
+  OPENAI_CODEX_TOKEN_USER_AGENT,
+} from './client.js'
 import { ensureFreshOpenAITokens } from './index.js'
-import { resolveOpenAICodexModel } from './models.js'
+import {
+  OPENAI_CODEX_REASONING_EFFORT_ENV_KEY,
+  resolveOpenAICodexModel,
+  resolveOpenAIReasoningEffort,
+} from './models.js'
 import { getOpenAIOAuthTokens } from './storage.js'
 import { anthropicToOpenaiResponses } from '../../server/proxy/transform/anthropicToOpenaiResponses.js'
 import { openaiResponsesToAnthropic } from '../../server/proxy/transform/openaiResponsesToAnthropic.js'
@@ -37,8 +45,16 @@ export function buildOpenAICodexFetch(
       ...originalBody,
       model: mappedModel,
     })
+    const reasoningEffort = resolveOpenAIReasoningEffort(
+      mappedModel,
+      process.env[OPENAI_CODEX_REASONING_EFFORT_ENV_KEY],
+    )
     const upstreamBody = {
       ...transformedBody,
+      reasoning: {
+        ...(transformedBody.reasoning ?? {}),
+        effort: reasoningEffort,
+      },
       stream: true,
     }
 
@@ -52,6 +68,8 @@ export function buildOpenAICodexFetch(
     const headers = new Headers()
     headers.set('Content-Type', 'application/json')
     headers.set('Authorization', `Bearer ${tokens.accessToken}`)
+    headers.set('originator', OPENAI_CODEX_ORIGINATOR)
+    headers.set('User-Agent', OPENAI_CODEX_TOKEN_USER_AGENT)
     if (tokens.accountId) {
       headers.set('ChatGPT-Account-Id', tokens.accountId)
     }

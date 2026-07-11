@@ -223,6 +223,39 @@ describe('updateStore', () => {
     expect(useUpdateStore.getState().status).toBe('downloaded')
   })
 
+  it('does not cancel the freshly checked update when replacing an older wrapper', async () => {
+    const oldClose = vi.fn().mockResolvedValue(undefined)
+    const download = vi.fn(async (onEvent?: (event: unknown) => void) => {
+      onEvent?.({ event: 'Started', data: { contentLength: 100 } })
+      onEvent?.({ event: 'Finished' })
+    })
+
+    check
+      .mockResolvedValueOnce({
+        version: '0.2.0',
+        body: 'Notes',
+        download: vi.fn().mockResolvedValue(undefined),
+        close: oldClose,
+      })
+      .mockResolvedValueOnce({
+        version: '0.2.0',
+        body: 'Notes',
+        download,
+        close: vi.fn().mockResolvedValue(undefined),
+      })
+
+    vi.resetModules()
+    const { useUpdateStore } = await import('./updateStore')
+
+    await useUpdateStore.getState().checkForUpdates({ autoDownload: false })
+    await useUpdateStore.getState().checkForUpdates({ autoDownload: false })
+    await useUpdateStore.getState().downloadUpdate()
+
+    expect(oldClose).not.toHaveBeenCalled()
+    expect(download).toHaveBeenCalledTimes(1)
+    expect(useUpdateStore.getState().status).toBe('downloaded')
+  })
+
   it('passes the configured manual update proxy to update checks', async () => {
     const update = {
       version: '0.2.0',
@@ -427,6 +460,65 @@ describe('updateStore', () => {
     expect(useUpdateStore.getState().progressPercent).toBe(100)
     expect(useUpdateStore.getState().status).toBe('restarting')
     expect(relaunch).toHaveBeenCalledTimes(1)
+  })
+
+  it('recovers if the relaunch request returns but the app stays alive', async () => {
+    vi.useFakeTimers()
+    try {
+      const download = vi.fn(async (onEvent?: (event: unknown) => void) => {
+        onEvent?.({ event: 'Started', data: { contentLength: 100 } })
+        onEvent?.({ event: 'Finished' })
+      })
+      const install = vi.fn().mockResolvedValue(undefined)
+      const prepareInstall = vi.fn().mockResolvedValue(undefined)
+      const cancelInstall = vi.fn().mockResolvedValue(undefined)
+      const relaunchHost = vi.fn().mockResolvedValue(undefined)
+      const getServerUrl = vi.fn().mockResolvedValue('http://127.0.0.1:3456')
+
+      window.desktopHost = {
+        ...browserHost,
+        kind: 'electron',
+        isDesktop: true,
+        capabilities: {
+          ...browserHost.capabilities,
+          updates: true,
+        },
+        runtime: {
+          getServerUrl,
+        },
+        updates: {
+          ...browserHost.updates,
+          check: vi.fn().mockResolvedValue({
+            version: '0.4.0',
+            body: 'Electron host update',
+            download,
+            install,
+            close: vi.fn().mockResolvedValue(undefined),
+          }),
+          prepareInstall,
+          cancelInstall,
+          relaunch: relaunchHost,
+        },
+      }
+
+      vi.resetModules()
+      const { useUpdateStore } = await import('./updateStore')
+
+      await useUpdateStore.getState().checkForUpdates()
+      await useUpdateStore.getState().installUpdate()
+
+      expect(useUpdateStore.getState().status).toBe('restarting')
+      await vi.advanceTimersByTimeAsync(15_000)
+
+      expect(relaunchHost).toHaveBeenCalledTimes(1)
+      expect(cancelInstall).toHaveBeenCalledTimes(1)
+      expect(getServerUrl).toHaveBeenCalledTimes(1)
+      expect(useUpdateStore.getState().status).toBe('downloaded')
+      expect(useUpdateStore.getState().error).toContain('Restart did not start automatically')
+      expect(useUpdateStore.getState().shouldPrompt).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('refreshes the pending update when the proxy changes before install', async () => {

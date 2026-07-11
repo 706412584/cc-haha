@@ -235,6 +235,7 @@ beforeEach(async () => {
     'utf-8',
   )
   await fs.writeFile(path.join(h5DistDir, 'assets/app.js'), 'window.__h5 = true', 'utf-8')
+  await fs.writeFile(path.join(tmpDir, 'package.json'), '{"name":"h5-access-auth-fixture"}', 'utf-8')
   await startRemoteServer()
 })
 
@@ -365,7 +366,7 @@ describe('remote H5 auth and CORS integration', () => {
   })
 
   test('blocks remote browser local-file and preview-fs requests while H5 access is disabled', async () => {
-    const localFileResponse = await fetch(localFileUrl(baseUrl, path.join(tmpDir, 'dist', 'index.html')), {
+    const localFileResponse = await fetch(localFileUrl(baseUrl, path.join(tmpDir, 'package.json')), {
       headers: {
         Origin: PHONE_ORIGIN,
       },
@@ -382,7 +383,7 @@ describe('remote H5 auth and CORS integration', () => {
 
   test('allows loopback browser local-file and preview-fs requests through the H5 gate while H5 access is disabled', async () => {
     const loopbackBrowserOrigin = 'http://localhost:5173'
-    const localFileResponse = await fetch(localFileUrl(baseUrl, path.join(process.cwd(), 'package.json')), {
+    const localFileResponse = await fetch(localFileUrl(baseUrl, path.join(tmpDir, 'package.json')), {
       headers: {
         Origin: loopbackBrowserOrigin,
       },
@@ -822,7 +823,7 @@ describe('remote H5 auth and CORS integration', () => {
     const token = await enableH5Access({
       allowedOrigins: [PHONE_ORIGIN],
     })
-    const localFile = localFileUrl(baseUrl, path.join(process.cwd(), 'package.json'))
+    const localFile = localFileUrl(baseUrl, path.join(tmpDir, 'package.json'))
 
     const missingLocalFileToken = await fetch(localFile, {
       headers: {
@@ -859,7 +860,7 @@ describe('remote H5 auth and CORS integration', () => {
   test('keeps loopback browser local-file and preview-fs requests tokenless when H5 access is enabled', async () => {
     const loopbackBrowserOrigin = 'http://localhost:5173'
     await enableH5Access()
-    const localFile = localFileUrl(baseUrl, path.join(process.cwd(), 'package.json'))
+    const localFile = localFileUrl(baseUrl, path.join(tmpDir, 'package.json'))
 
     const localFileResponse = await fetch(localFile, {
       headers: {
@@ -989,7 +990,7 @@ describe('remote H5 auth and CORS integration', () => {
   test('keeps local loopback local-file navigations tokenless when H5 access is enabled', async () => {
     await enableH5Access()
 
-    const response = await fetch(localFileUrl(baseUrl, path.join(process.cwd(), 'package.json')))
+    const response = await fetch(localFileUrl(baseUrl, path.join(tmpDir, 'package.json')))
 
     expect(response.status).toBe(200)
     await expect(response.text()).resolves.toContain('"name"')

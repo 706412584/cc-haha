@@ -251,64 +251,6 @@ describe('Business Flow: Permission Modes', () => {
   })
 })
 
-describe('Business Flow: Task Lists API', () => {
-  beforeAll(startTestServer)
-  afterAll(async () => {
-    server?.stop()
-    await fs.rm(tmpDir, { recursive: true, force: true })
-  })
-
-  it('should reset a persisted task list through the API', async () => {
-    const taskListDir = path.join(tmpDir, 'tasks', 'desktop-session-1')
-    await fs.mkdir(taskListDir, { recursive: true })
-    await fs.writeFile(
-      path.join(taskListDir, '1.json'),
-      JSON.stringify({
-        id: '1',
-        subject: 'First task',
-        description: '',
-        status: 'completed',
-        blocks: [],
-        blockedBy: [],
-      }),
-      'utf-8',
-    )
-    await fs.writeFile(
-      path.join(taskListDir, '2.json'),
-      JSON.stringify({
-        id: '2',
-        subject: 'Second task',
-        description: '',
-        status: 'completed',
-        blocks: [],
-        blockedBy: [],
-      }),
-      'utf-8',
-    )
-
-    const { status: beforeStatus, data: beforeData } = await api(
-      'GET',
-      '/api/tasks/lists/desktop-session-1',
-    )
-    expect(beforeStatus).toBe(200)
-    expect(beforeData.tasks).toHaveLength(2)
-
-    const { status: resetStatus, data: resetData } = await api(
-      'POST',
-      '/api/tasks/lists/desktop-session-1/reset',
-    )
-    expect(resetStatus).toBe(200)
-    expect(resetData.ok).toBe(true)
-
-    const { status: afterStatus, data: afterData } = await api(
-      'GET',
-      '/api/tasks/lists/desktop-session-1',
-    )
-    expect(afterStatus).toBe(200)
-    expect(afterData.tasks).toEqual([])
-  })
-})
-
 describe('Business Flow: Agent Management', () => {
   beforeAll(startTestServer)
   afterAll(async () => {

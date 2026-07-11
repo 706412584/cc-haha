@@ -1,5 +1,4 @@
 @import "tailwindcss";
-@import "@xterm/xterm/css/xterm.css";
 @plugin "@tailwindcss/typography";
 
 /* ─── Self-hosted fonts (no Google CDN dependency) ────────────── */
@@ -128,6 +127,36 @@
 
 .settings-terminal-host .xterm-screen {
   outline: none;
+}
+
+.settings-terminal-host .xterm-accessibility:not(.debug),
+.settings-terminal-host .xterm-message {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  color: transparent;
+  pointer-events: none;
+}
+
+.settings-terminal-host .xterm-accessibility-tree {
+  color: transparent;
+  pointer-events: none;
+}
+
+.settings-terminal-host .xterm-helper-textarea {
+  position: absolute;
+  top: 0;
+  left: -9999em;
+  z-index: -5;
+  width: 0;
+  height: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
+  opacity: 0;
+  overflow: hidden;
+  resize: none;
+  white-space: nowrap;
 }
 
 .settings-checkbox-input {
@@ -373,7 +402,7 @@
   --color-inverse-on-surface: #F2F1ED;
   --color-inverse-primary: #FFB59D;
 
-  --color-success: #16A34A;
+  --color-success: #087E4F;
   --color-success-container: #E8F5E2;
   --color-info: #2D628F;
   --color-info-container: #E4F1FF;
@@ -478,6 +507,7 @@
 
   /* Brand & accents */
   --color-brand: var(--color-primary);
+  --color-brand-hover: var(--color-primary-container);
   --color-text-accent: var(--color-secondary);
 
   /* Shadows */
@@ -497,6 +527,7 @@
 
   /* Glass / overlays */
   --color-overlay-scrim: rgba(27, 28, 26, 0.48);
+  --color-modal-scrim: rgba(18, 18, 18, 0.56);
   --color-surface-glass: rgba(255, 255, 255, 0.84);
   --color-surface-glass-border: rgba(218, 193, 186, 0.22);
 
@@ -677,6 +708,7 @@
 
   --color-surface-info: #F6F8FA;
   --color-brand: var(--color-primary);
+  --color-brand-hover: var(--color-primary-container);
   --color-text-accent: var(--color-secondary);
 
   --shadow-dropdown: 0 8px 24px rgba(15, 23, 42, 0.06), 0 24px 60px rgba(15, 23, 42, 0.08);
@@ -692,6 +724,7 @@
   --color-surface-user-msg: #F1F4F7;
 
   --color-overlay-scrim: rgba(15, 23, 42, 0.42);
+  --color-modal-scrim: rgba(18, 18, 18, 0.54);
   --color-surface-glass: rgba(255, 255, 255, 0.94);
   --color-surface-glass-border: rgba(203, 213, 225, 0.72);
 
@@ -1051,6 +1084,7 @@
 
   --color-surface-info: rgba(32, 31, 31, 0.88);
   --color-brand: var(--color-primary);
+  --color-brand-hover: var(--color-primary-container);
   --color-text-accent: var(--color-tertiary);
 
   --shadow-dropdown: 0 16px 40px rgba(0, 0, 0, 0.42);
@@ -1065,6 +1099,7 @@
   --color-surface-user-msg: rgba(32, 31, 31, 0.92);
 
   --color-overlay-scrim: rgba(6, 6, 6, 0.56);
+  --color-modal-scrim: rgba(6, 6, 6, 0.68);
   --color-surface-glass: rgba(32, 31, 31, 0.8);
   --color-surface-glass-border: rgba(90, 65, 56, 0.18);
 
@@ -1226,6 +1261,19 @@ button, input, textarea, select, a, [role="button"] {
 
 .app-shell-backdrop {
   background: var(--color-overlay-scrim);
+}
+
+.skill-market-detail-scrim {
+  background: var(--color-modal-scrim);
+  backdrop-filter: blur(1.5px);
+  -webkit-backdrop-filter: blur(1.5px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skill-market-detail-scrim {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
 }
 
 .sidebar-shell {

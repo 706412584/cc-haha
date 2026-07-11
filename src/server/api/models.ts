@@ -13,7 +13,11 @@ import { ProviderService } from '../services/providerService.js'
 import { attributionHeaderEnvForModel } from '../services/attributionHeaderPolicy.js'
 import { ApiError, errorResponse } from '../middleware/errorHandler.js'
 import { hasOpenAIAuthLogin } from '../../utils/auth.js'
-import { OPENAI_CODEX_MODEL_CATALOG } from '../../services/openaiAuth/models.js'
+import { getOpenAICodexModelCatalog } from '../../services/openaiAuth/modelCatalog.js'
+import {
+  OPENAI_DEFAULT_MAIN_MODEL,
+  type OpenAIModelCatalogEntry,
+} from '../../services/openaiAuth/models.js'
 import {
   OPENAI_OFFICIAL_PROVIDER_ID,
   OPENAI_OFFICIAL_PROVIDER_NAME,
@@ -56,6 +60,8 @@ type ApiModelInfo = {
   name: string
   description: string
   context: string
+  defaultReasoningEffort?: string
+  supportedReasoningEfforts?: string[]
 }
 
 function addUniqueModel(
@@ -115,13 +121,19 @@ function buildProviderModelList(models: {
   return modelList
 }
 
-function buildOpenAIModelList(): ApiModelInfo[] {
-  return OPENAI_CODEX_MODEL_CATALOG.map(model => ({
+function buildOpenAIModelList(catalog: OpenAIModelCatalogEntry[]): ApiModelInfo[] {
+  return catalog.map(model => ({
     id: model.value,
     name: model.label,
     description: model.description,
-    context: '',
+    context: model.contextWindow ? String(model.contextWindow) : '',
+    defaultReasoningEffort: model.defaultReasoningEffort,
+    supportedReasoningEfforts: model.supportedReasoningEfforts,
   }))
+}
+
+async function getOpenAIModelList(): Promise<ApiModelInfo[]> {
+  return buildOpenAIModelList(await getOpenAICodexModelCatalog())
 }
 
 function getEnvConfiguredAnthropicModels(): ApiModelInfo[] {
@@ -133,22 +145,22 @@ function getEnvConfiguredAnthropicModels(): ApiModelInfo[] {
   })
 }
 
-function getOpenAIAuthModels(): ApiModelInfo[] {
+async function getOpenAIAuthModels(): Promise<ApiModelInfo[]> {
   if (!hasOpenAIAuthLogin()) {
     return []
   }
 
-  return buildOpenAIModelList()
+  return getOpenAIModelList()
 }
 
-function getStandaloneModelList(): ApiModelInfo[] {
+async function getStandaloneModelList(): Promise<ApiModelInfo[]> {
   const models = [...getEnvConfiguredAnthropicModels()]
 
   if (models.length === 0) {
     models.push(...DEFAULT_MODELS)
   }
 
-  for (const model of getOpenAIAuthModels()) {
+  for (const model of await getOpenAIAuthModels()) {
     addUniqueModel(models, model)
   }
 
@@ -201,7 +213,7 @@ async function handleModelsList(): Promise<Response> {
   const { providers, activeId } = await providerService.listProviders()
   if (isOpenAIOfficialProviderId(activeId)) {
     return Response.json({
-      models: buildOpenAIModelList(),
+      models: await getOpenAIModelList(),
       provider: {
         id: OPENAI_OFFICIAL_PROVIDER_ID,
         name: OPENAI_OFFICIAL_PROVIDER_NAME,
@@ -217,7 +229,7 @@ async function handleModelsList(): Promise<Response> {
       provider: { id: activeProvider.id, name: activeProvider.name },
     })
   }
-  return Response.json({ models: getStandaloneModelList(), provider: null })
+  return Response.json({ models: await getStandaloneModelList(), provider: null })
 }
 
 async function handleCurrentModel(req: Request): Promise<Response> {
@@ -238,7 +250,7 @@ async function handleCurrentModel(req: Request): Promise<Response> {
     let currentModelName: string
 
     if (isOpenAIProviderActive) {
-      currentModelId = explicitModel || env.ANTHROPIC_MODEL || 'gpt-5.3-codex'
+      currentModelId = explicitModel || env.ANTHROPIC_MODEL || OPENAI_DEFAULT_MAIN_MODEL
       currentModelName = currentModelId
     } else if (activeProvider) {
       // Provider is active — only use the provider-managed cc-haha settings.
@@ -262,10 +274,10 @@ async function handleCurrentModel(req: Request): Promise<Response> {
 
     // Build available models for name lookup
     const availableModels = isOpenAIProviderActive
-      ? buildOpenAIModelList()
+      ? await getOpenAIModelList()
       : activeProvider
         ? buildProviderModelList(activeProvider.models)
-        : getStandaloneModelList()
+        : await getStandaloneModelList()
 
     const modelEntry = availableModels.find((m) => m.id === lookupId)
       || availableModels.find((m) => m.id === currentModelId)

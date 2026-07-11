@@ -131,4 +131,14 @@ describe('desktop theme tokens', () => {
     expect(css).toContain('background: var(--color-surface-hover);')
     expect(css).toContain('--line-numbers-foreground: var(--color-text-tertiary);')
   })
+
+  it('keeps xterm helper and accessibility layers from rendering duplicate terminal text', () => {
+    expect(css).toContain('.settings-terminal-host .xterm-accessibility:not(.debug),')
+    expect(css).toContain('.settings-terminal-host .xterm-message')
+    expect(css).toContain('color: transparent;')
+    expect(css).toContain('pointer-events: none;')
+    expect(css).toContain('.settings-terminal-host .xterm-helper-textarea')
+    expect(css).toContain('left: -9999em;')
+    expect(css).toContain('overflow: hidden;')
+  })
 })

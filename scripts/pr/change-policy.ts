@@ -26,6 +26,10 @@ export type ChangePolicyResult = {
     server: boolean
     adapters: boolean
     desktopNative: boolean
+    providerContract: boolean
+    chatContract: boolean
+    persistence: boolean
+    policy: boolean
     docs: boolean
     coverage: boolean
   }
@@ -64,6 +68,76 @@ const desktopNativeExactPaths = new Set([
   'desktop/scripts/build-macos-arm64.sh',
   'desktop/scripts/build-windows-x64.ps1',
   'desktop/scripts/build-linux.sh',
+])
+
+const desktopWebExactPaths = new Set([
+  'desktop/bun.lock',
+  'desktop/package.json',
+  'desktop/package-lock.json',
+  'desktop/tsconfig.json',
+  'desktop/tsconfig.app.json',
+  'desktop/tsconfig.node.json',
+  'desktop/vite.config.ts',
+  'desktop/vitest.config.ts',
+])
+
+const providerContractPrefixes = [
+  'src/server/__tests__/network-settings',
+  'src/server/__tests__/provider',
+  'src/server/__tests__/providers',
+  'src/server/__tests__/proxy-',
+  'src/server/api/providers',
+  'src/server/config/provider',
+  'src/server/proxy/',
+  'src/server/services/provider',
+  'src/server/types/provider',
+  'src/services/api/client',
+  'src/services/compact/autoCompact',
+  'src/services/openaiAuth/',
+  'src/utils/model/',
+  'src/utils/__tests__/providerManagedEnvCompat',
+  'src/utils/managedEnv',
+  'src/utils/providerManagedEnvCompat',
+  'src/utils/proxy.test',
+]
+
+const chatContractPrefixes = [
+  'src/server/__tests__/conversations',
+  'src/server/__tests__/websocket-handler',
+  'src/server/ws/',
+  'src/server/services/conversationService',
+  'desktop/src/api/websocket',
+  'desktop/src/components/chat/ChatInput',
+  'desktop/src/pages/ActiveSession',
+  'desktop/src/pages/EmptySession',
+  'desktop/src/stores/chatStore',
+  'desktop/src/stores/sessionRuntimeStore',
+  'desktop/src/types/chat',
+]
+
+const persistencePrefixes = [
+  'src/server/services/persistentStorageMigrations',
+  'src/server/__tests__/persistence-upgrade',
+  'desktop/src/lib/persistenceMigrations',
+  'scripts/quality-gate/persistence-upgrade',
+]
+
+const policyPrefixes = [
+  '.github/workflows/',
+  'scripts/git-hooks/',
+  'scripts/pr/',
+  'scripts/quality-gate/',
+]
+
+const policyExactPaths = new Set([
+  '.github/CODEOWNERS',
+  '.github/copilot-instructions.md',
+  '.github/pull_request_template.md',
+  'AGENTS.md',
+  'CONTRIBUTING.md',
+  'docs/en/guide/contributing.md',
+  'docs/guide/contributing.md',
+  'package.json',
 ])
 
 const docsExactPaths = new Set([
@@ -107,8 +181,16 @@ function isCliCorePath(path: string) {
   return startsWithAny(path, cliCorePrefixes)
 }
 
+function isAgentInstructionPath(path: string) {
+  return /(^|\/)AGENTS(?:\.override)?\.md$/.test(path)
+}
+
 function areasForPath(path: string): ChangeArea[] {
   const areas = new Set<ChangeArea>()
+
+  if (isAgentInstructionPath(path)) {
+    return []
+  }
 
   if (path.startsWith('desktop/')) {
     areas.add('desktop')
@@ -148,9 +230,14 @@ function hasMatchingTest(files: string[], predicate: (file: string) => boolean) 
   ))
 }
 
+function isExecutableSourcePath(path: string) {
+  return /\.[cm]?[jt]sx?$/.test(path)
+}
+
 function changedProductionFiles(files: string[], predicate: (file: string) => boolean) {
   return files.filter((file) => (
     predicate(file) &&
+    isExecutableSourcePath(file) &&
     !/\.test\.[cm]?[jt]sx?$/.test(file) &&
     !file.includes('/__tests__/') &&
     !file.includes('/fixtures/')
@@ -162,9 +249,9 @@ function missingTestSignals(files: string[]) {
   const desktopProd = changedProductionFiles(files, (file) => file.startsWith('desktop/src/'))
   const serverProd = changedProductionFiles(files, (file) => file.startsWith('src/server/'))
   const adapterProd = changedProductionFiles(files, (file) => file.startsWith('adapters/'))
-  const agentRuntimeProd = changedProductionFiles(files, (file) => (
-    file.startsWith('src/tools/') ||
-    file.startsWith('src/utils/')
+  const rootRuntimeProd = changedProductionFiles(files, (file) => (
+    file.startsWith('src/') &&
+    !file.startsWith('src/server/')
   ))
 
   if (desktopProd.length > 0 && !hasMatchingTest(files, (file) => file.startsWith('desktop/src/'))) {
@@ -176,8 +263,11 @@ function missingTestSignals(files: string[]) {
   if (adapterProd.length > 0 && !hasMatchingTest(files, (file) => file.startsWith('adapters/'))) {
     signals.push('Adapter product files changed without an adapter test file in the PR.')
   }
-  if (agentRuntimeProd.length > 0 && !hasMatchingTest(files, (file) => file.startsWith('src/tools/') || file.startsWith('src/utils/'))) {
-    signals.push('Agent/runtime product files changed without a tools/utils test file in the PR.')
+  if (rootRuntimeProd.length > 0 && !hasMatchingTest(files, (file) => (
+    file.startsWith('src/') &&
+    !file.startsWith('src/server/')
+  ))) {
+    signals.push('Root runtime product files changed without a matching root runtime test file in the PR.')
   }
 
   return signals
@@ -217,25 +307,38 @@ export function evaluateChangePolicy(
   }
   const blocked = blockingReasons.length > 0
 
+  const touchesDesktopWeb = files.some((file) => (
+    file.startsWith('desktop/src/') || desktopWebExactPaths.has(file)
+  ))
   const touchesDesktopNative = files.some((file) => (
-    file.startsWith('desktop/') ||
-    file.startsWith('adapters/') ||
-    file.startsWith('src/server/') ||
+    file.startsWith('desktop/electron/') ||
+    file.startsWith('desktop/scripts/') ||
+    file.startsWith('desktop/src-tauri/') ||
     desktopNativeExactPaths.has(file)
+  ))
+  const touchesProviderContract = files.some((file) => startsWithAny(file, providerContractPrefixes))
+  const touchesChatContract = files.some((file) => startsWithAny(file, chatContractPrefixes))
+  const touchesPersistence = files.some((file) => startsWithAny(file, persistencePrefixes))
+  const touchesPolicy = files.some((file) => (
+    startsWithAny(file, policyPrefixes) ||
+    policyExactPaths.has(file) ||
+    isAgentInstructionPath(file)
   ))
 
   const touchesDocs = files.some((file) => (
-    file.startsWith('docs/') ||
-    file.startsWith('release-notes/') ||
-    docsExactPaths.has(file)
+    !isAgentInstructionPath(file) && (
+      file.startsWith('docs/') ||
+      file.startsWith('release-notes/') ||
+      docsExactPaths.has(file)
+    )
   ))
   const touchesCoverage = files.some((file) => (
-    file.startsWith('desktop/src/') ||
-    file.startsWith('src/server/') ||
-    file.startsWith('src/tools/') ||
-    file.startsWith('src/utils/') ||
-    file.startsWith('adapters/') ||
-    file.startsWith('scripts/quality-gate/') ||
+    (isExecutableSourcePath(file) && (
+      file.startsWith('desktop/src/') ||
+      file.startsWith('src/') ||
+      file.startsWith('adapters/')
+    )) ||
+    file.startsWith('scripts/quality-gate/coverage') ||
     file === 'package.json' ||
     file === 'desktop/package.json' ||
     file === 'desktop/bun.lock'
@@ -255,10 +358,14 @@ export function evaluateChangePolicy(
     coveragePolicyFiles,
     missingTestSignals: missingTests,
     checks: {
-      desktop: areas.has('desktop') || areas.has('server'),
-      server: areas.has('server') || files.some((file) => file.startsWith('src/tools/') || file.startsWith('src/utils/')),
+      desktop: touchesDesktopWeb,
+      server: files.some((file) => file.startsWith('src/') && !isAgentInstructionPath(file)),
       adapters: areas.has('adapters'),
       desktopNative: touchesDesktopNative,
+      providerContract: touchesProviderContract,
+      chatContract: touchesChatContract,
+      persistence: touchesPersistence,
+      policy: touchesPolicy,
       docs: touchesDocs,
       coverage: touchesCoverage,
     },
@@ -302,7 +409,7 @@ function formatSummary(result: ChangePolicyResult) {
     'PR change policy',
     `  Areas: ${result.areas.length ? result.areas.join(', ') : 'none'}`,
     `  Labels: ${result.labels.length ? result.labels.join(', ') : 'none'}`,
-    `  Checks: desktop=${result.checks.desktop}, server=${result.checks.server}, adapters=${result.checks.adapters}, desktopNative=${result.checks.desktopNative}, docs=${result.checks.docs}, coverage=${result.checks.coverage}`,
+    `  Checks: desktop=${result.checks.desktop}, server=${result.checks.server}, adapters=${result.checks.adapters}, desktopNative=${result.checks.desktopNative}, providerContract=${result.checks.providerContract}, chatContract=${result.checks.chatContract}, persistence=${result.checks.persistence}, policy=${result.checks.policy}, docs=${result.checks.docs}, coverage=${result.checks.coverage}`,
   ]
 
   if (result.cliCoreFiles.length > 0) {
@@ -346,10 +453,15 @@ function writeGithubOutputs(result: ChangePolicyResult) {
     areas: result.areas.join(','),
     area_labels: result.areaLabels.join(','),
     blocked: String(result.blocked),
+    blocking_reasons: result.blockingReasons.join(' | '),
     desktop_checks: String(result.checks.desktop),
     server_checks: String(result.checks.server),
     adapter_checks: String(result.checks.adapters),
     desktop_native_checks: String(result.checks.desktopNative),
+    provider_contract_checks: String(result.checks.providerContract),
+    chat_contract_checks: String(result.checks.chatContract),
+    persistence_checks: String(result.checks.persistence),
+    policy_checks: String(result.checks.policy),
     docs_checks: String(result.checks.docs),
     coverage_checks: String(result.checks.coverage),
   }
@@ -382,7 +494,7 @@ if (import.meta.main) {
   console.log(formatSummary(result))
   writeGithubOutputs(result)
 
-  if (result.blocked) {
+  if (result.blocked && !args.has('--plan-only')) {
     process.exit(1)
   }
 }

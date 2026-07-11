@@ -33,11 +33,13 @@ export type PreviewParentWindowLike = {
     addChildView(view: unknown): void
     removeChildView(view: unknown): void
   }
+  getBounds?(): PreviewBounds
 }
 
 export type ElectronPreviewServiceOptions = {
   createView: () => PreviewViewLike
   previewScriptPath: string
+  resolveScaleFactor?: (parent: PreviewParentWindowLike) => number
 }
 
 type PreviewHostCaptureMessage = {
@@ -72,10 +74,35 @@ export function normalizePreviewBounds(bounds: PreviewBounds): PreviewBounds {
     if (!Number.isFinite(value)) throw new Error(`invalid preview bounds ${key}`)
   }
   return {
-    x: Math.round(bounds.x),
-    y: Math.round(bounds.y),
-    width: Math.max(0, Math.round(bounds.width)),
-    height: Math.max(0, Math.round(bounds.height)),
+    x: bounds.x,
+    y: bounds.y,
+    width: Math.max(0, bounds.width),
+    height: Math.max(0, bounds.height),
+  }
+}
+
+function normalizeScaleFactor(value: unknown): number {
+  const numeric = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : 1
+}
+
+function roundDip(value: number): number {
+  return Math.round(value * 1000000) / 1000000
+}
+
+export function snapPreviewBoundsToScaleFactor(bounds: PreviewBounds, scaleFactor: unknown): PreviewBounds {
+  const normalized = normalizePreviewBounds(bounds)
+  const factor = normalizeScaleFactor(scaleFactor)
+  const left = Math.round(normalized.x * factor)
+  const top = Math.round(normalized.y * factor)
+  const right = Math.round((normalized.x + normalized.width) * factor)
+  const bottom = Math.round((normalized.y + normalized.height) * factor)
+
+  return {
+    x: roundDip(left / factor),
+    y: roundDip(top / factor),
+    width: roundDip(Math.max(0, right - left) / factor),
+    height: roundDip(Math.max(0, bottom - top) / factor),
   }
 }
 
@@ -89,20 +116,24 @@ export function resolvePreviewScriptPath(previewScriptPath: string): string {
 export class ElectronPreviewService {
   private readonly createView: () => PreviewViewLike
   private readonly previewScriptPath: string
+  private readonly resolveScaleFactor?: (parent: PreviewParentWindowLike) => number
   private view: PreviewViewLike | null = null
   private parent: PreviewParentWindowLike | null = null
+  private requestedBounds: PreviewBounds | null = null
   private zoomFactor = 1
 
   constructor(options: ElectronPreviewServiceOptions) {
     this.createView = options.createView
     this.previewScriptPath = options.previewScriptPath
+    this.resolveScaleFactor = options.resolveScaleFactor
   }
 
   async open(parent: PreviewParentWindowLike, url: string, bounds: PreviewBounds): Promise<void> {
     const normalizedUrl = normalizePreviewUrl(url)
-    const normalizedBounds = normalizePreviewBounds(bounds)
+    this.parent = parent
+    this.requestedBounds = normalizePreviewBounds(bounds)
     const view = this.ensureView(parent)
-    view.setBounds(normalizedBounds)
+    this.applyBounds(view)
     await view.webContents.loadURL(normalizedUrl)
   }
 
@@ -112,7 +143,8 @@ export class ElectronPreviewService {
   }
 
   setBounds(bounds: PreviewBounds): void {
-    this.view?.setBounds(normalizePreviewBounds(bounds))
+    this.requestedBounds = normalizePreviewBounds(bounds)
+    this.applyBounds(this.view)
   }
 
   setVisible(visible: boolean): void {
@@ -124,6 +156,10 @@ export class ElectronPreviewService {
     this.applyZoomFactor(this.view)
   }
 
+  refreshBounds(): void {
+    this.applyBounds(this.view)
+  }
+
   close(): void {
     if (!this.view) return
     this.parent?.contentView.removeChildView(this.view)
@@ -132,6 +168,7 @@ export class ElectronPreviewService {
     }
     this.view = null
     this.parent = null
+    this.requestedBounds = null
   }
 
   async message(payload: unknown, renderer?: PreviewWebContentsLike | null): Promise<void> {
@@ -189,6 +226,12 @@ export class ElectronPreviewService {
 
   private applyZoomFactor(view: PreviewViewLike | null): void {
     view?.webContents.setZoomFactor?.(this.zoomFactor)
+  }
+
+  private applyBounds(view: PreviewViewLike | null): void {
+    if (!view || !this.parent || !this.requestedBounds) return
+    const scaleFactor = this.resolveScaleFactor?.(this.parent) ?? 1
+    view.setBounds(snapPreviewBoundsToScaleFactor(this.requestedBounds, scaleFactor))
   }
 
   private async captureScreenshotToRenderer(kind: PreviewHostCaptureMessage['kind'], renderer: PreviewWebContentsLike): Promise<void> {

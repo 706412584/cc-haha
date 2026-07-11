@@ -8,7 +8,10 @@ const queryModelWithoutStreamingMock = mock(async () => ({
   },
 }))
 
+const claudeApi = await import('../../services/api/claude.js')
+
 mock.module('../../services/api/claude.js', () => ({
+  ...claudeApi,
   queryModelWithoutStreaming: queryModelWithoutStreamingMock,
 }))
 

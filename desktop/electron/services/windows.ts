@@ -8,6 +8,7 @@ export const DEFAULT_WINDOW_HEIGHT = 820
 export const MIN_WINDOW_WIDTH = 960
 export const MIN_WINDOW_HEIGHT = 640
 const MIN_VISIBLE_PIXELS = 80
+const failedWindowStateWritePaths = new Set<string>()
 
 export type StoredWindowState = {
   x: number
@@ -115,11 +116,22 @@ export function writeWindowState(
 ) {
   if (!isPersistableWindowState(state)) return
   const statePath = windowStatePath(app, env)
-  mkdirSync(path.dirname(statePath), { recursive: true })
-  writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`)
+  try {
+    mkdirSync(path.dirname(statePath), { recursive: true })
+    writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`)
+    failedWindowStateWritePaths.delete(statePath)
+  } catch (error) {
+    if (!failedWindowStateWritePaths.has(statePath)) {
+      failedWindowStateWritePaths.add(statePath)
+      console.error(`[desktop] failed to write Electron window state ${statePath}:`, error)
+    }
+  }
 }
 
 export function captureWindowState(window: BrowserWindow): StoredWindowState | null {
+  // quitAndInstall/quit can emit late move/resize/close events on an already
+  // torn-down native window; touching it then throws "Object has been destroyed".
+  if (window.isDestroyed()) return null
   if (window.isMinimized()) return null
   const bounds = window.getBounds()
   const state = {
