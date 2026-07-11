@@ -114,6 +114,7 @@ describe('coverage gate helpers', () => {
     const coverageScript = readFileSync(join(import.meta.dir, 'coverage.ts'), 'utf8')
     expect(coverageScript).toContain('rootBunTestFilter(serverFiles[fileIndex]!)')
     expect(coverageScript).toContain('Array.from({ length: 4 }, () => runCoverageWorker())')
+    expect(coverageScript).not.toContain("'--coverage-reporter=lcov', '--coverage-reporter=text']")
   })
 
   test('merges per-file LCOV records without inflating function or branch totals', () => {
