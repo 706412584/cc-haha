@@ -51,7 +51,7 @@ describe('PR quality workflow', () => {
     ]) {
       expect(jobs[jobId].needs).toBe('scope-plan')
     }
-    expect(workflow).toContain('bun-version: 1.3.12')
+    expect(workflow).toContain('bun-version: 1.3.14')
   })
 
   test('keeps coverage artifacts observable in CI', () => {

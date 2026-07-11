@@ -41,7 +41,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.12
+          bun-version: 1.3.14
 
       - name: Collect changed files
         env:
@@ -72,7 +72,7 @@ jobs:
         if: needs.scope-plan.outputs.policy_checks == 'true'
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.12
+          bun-version: 1.3.14
 
       - name: Install root dependencies
         if: needs.scope-plan.outputs.policy_checks == 'true'
@@ -104,7 +104,7 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.12
+          bun-version: 1.3.14
       - name: Install root dependencies
         run: bun install --frozen-lockfile
       - name: Install desktop dependencies
@@ -124,7 +124,7 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.12
+          bun-version: 1.3.14
       - name: Install root dependencies
         run: bun install --frozen-lockfile
       - name: Run root runtime checks
@@ -141,7 +141,7 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.12
+          bun-version: 1.3.14
       - name: Install root dependencies
         run: bun install --frozen-lockfile
       - name: Run offline provider contracts
@@ -158,7 +158,7 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.12
+          bun-version: 1.3.14
       - name: Install root dependencies
         run: bun install --frozen-lockfile
       - name: Install desktop dependencies
@@ -178,7 +178,7 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.12
+          bun-version: 1.3.14
       - name: Install adapter dependencies
         working-directory: adapters
         run: bun install --frozen-lockfile
@@ -203,11 +203,14 @@ jobs:
             libfuse2
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.12
+          bun-version: 1.3.14
       - name: Install root dependencies
         run: bun install --frozen-lockfile
       - name: Install desktop dependencies
         working-directory: desktop
+        run: bun install --frozen-lockfile
+      - name: Install adapter dependencies
+        working-directory: adapters
         run: bun install --frozen-lockfile
       - name: Run desktop native checks
         run: bun run check:native
@@ -223,7 +226,7 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.12
+          bun-version: 1.3.14
       - name: Install root dependencies
         run: bun install --frozen-lockfile
       - name: Install desktop dependencies
@@ -260,7 +263,7 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.12
+          bun-version: 1.3.14
       - name: Install root dependencies
         run: bun install --frozen-lockfile
       - name: Install desktop dependencies

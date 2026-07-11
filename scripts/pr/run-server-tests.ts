@@ -14,10 +14,7 @@ const root = process.cwd()
 // server check without their existing tests ever being discovered.
 const roots = ['src']
 const excludedFiles = quarantinedPathSet(loadQuarantineManifest())
-const TEST_PROCESS_CONCURRENCY = Math.max(
-  1,
-  Number.parseInt(process.env.TEST_PROCESS_CONCURRENCY ?? '4', 10) || 4,
-)
+const TEST_PROCESS_CONCURRENCY = 4
 const TEST_FILE_PATTERN = /\.test\.[cm]?[jt]sx?$/
 
 function normalize(path: string) {
