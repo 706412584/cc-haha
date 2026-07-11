@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Check, ChevronRight, Circle, FileText, LoaderCircle, Square, Terminal, Users, X } from 'lucide-react'
+import { Check, ChevronDown, ChevronRight, Circle, FileText, LoaderCircle, Square, Terminal, Users, X } from 'lucide-react'
 import { AgentMascot } from './AgentMascot'
 import { getVisibleActivitySections, type ActivityRow, type ActivitySectionId, type SessionActivityModel } from './sessionActivityModel'
 import { useTranslation } from '../../i18n'
@@ -16,6 +16,16 @@ export type OpenSubagentPayload = {
 type SessionActivityPanelPlacement = 'overlay' | 'rail'
 
 type TranslationFn = ReturnType<typeof useTranslation>
+
+function formatRecentActivity(updatedAt: ActivityRow['updatedAt'], now: number, t: TranslationFn): string | null {
+  const timestamp = typeof updatedAt === 'number' ? updatedAt : Date.parse(updatedAt ?? '')
+  if (!Number.isFinite(timestamp)) return null
+  const seconds = Math.max(0, Math.floor((now - timestamp) / 1000))
+  if (seconds < 10) return t('session.activity.recent.justNow')
+  if (seconds < 60) return t('session.activity.recent.secondsAgo', { count: seconds })
+  const minutes = Math.floor(seconds / 60)
+  return t('session.activity.recent.minutesAgo', { count: minutes })
+}
 
 const ACTIVITY_SCROLLBAR_CLASS = [
   '[scrollbar-width:auto]',
@@ -238,7 +248,7 @@ function ActivityStatusIndicator({
         {isRunning ? (
           <span className={`absolute inline-flex h-full w-full rounded-full opacity-35 motion-safe:animate-ping motion-reduce:animate-none ${getStatusTone(status)}`} />
         ) : null}
-        <span className={`relative inline-flex h-1.5 w-1.5 rounded-full ${getStatusTone(status)}`} />
+        <span data-testid={isRunning ? 'activity-live-dot' : undefined} className={`relative inline-flex h-1.5 w-1.5 rounded-full ${getStatusTone(status)}`} />
       </span>
       {label}
     </span>
@@ -299,7 +309,17 @@ function ActivityRowView({
   selected?: boolean
 }) {
   const t = useTranslation()
+  const [subagentExpanded, setSubagentExpanded] = useState(false)
+  const [now, setNow] = useState(() => Date.now())
   const isTask = row.section === 'tasks'
+  const isRunningSubagent = row.section === 'subagents' && row.status === 'running'
+  useEffect(() => {
+    if (!isRunningSubagent || !row.updatedAt) return
+    const timer = window.setInterval(() => setNow(Date.now()), 10_000)
+    return () => window.clearInterval(timer)
+  }, [isRunningSubagent, row.updatedAt])
+  const recentActivity = row.section === 'subagents' ? formatRecentActivity(row.updatedAt, now, t) : null
+  const latestEvent = row.recentEvents?.at(-1)
   const label = row.taskHistory
     ? t('session.activity.tasks.earlier')
     : row.label
@@ -335,13 +355,24 @@ function ActivityRowView({
           >
             {detail}
           </span>
+        ) : latestEvent ? (
+          <span
+            className="block truncate text-[10px] leading-4 text-[var(--color-text-tertiary)]"
+            title={latestEvent.description || latestEvent.toolName}
+          >
+            {t('session.activity.recent.executing', { tool: latestEvent.toolName })}{latestEvent.description ? ` · ${latestEvent.description}` : ''}
+          </span>
+        ) : recentActivity ? (
+          <span className="block truncate text-[10px] leading-4 text-[var(--color-text-tertiary)]">
+            {recentActivity}
+          </span>
         ) : null}
       </span>
       {isTask ? null : (
         <ActivityStatusIndicator
           status={row.status}
           label={getActivityStatusLabel(row.status, t)}
-          animated={row.section !== 'subagents'}
+          animated
         />
       )}
       {!isTask && row.openable ? (
@@ -373,24 +404,50 @@ function ActivityRowView({
   }
 
   if (row.section === 'subagents' && row.openable && row.toolUseId) {
-    const statusLabel = getActivityStatusLabel(row.status, t)
-    const openButton = (
-      <button
-        type="button"
-        aria-label={`${t('session.activity.openRun', { name: row.label })} · ${statusLabel}`}
-        onClick={() => onOpenSubagent({ sessionId, toolUseId: row.toolUseId!, title: row.label })}
-        className={`${interactiveRowClassName} ${stopButton ? 'flex-1' : 'w-full'}`}
-      >
-        {content}
-      </button>
-    )
-
-    return stopButton ? (
-      <div className="flex w-full items-center gap-1">
-        {openButton}
-        {stopButton}
+    const hasRecentEvents = Boolean(row.recentEvents?.length)
+    return (
+      <div className="w-full rounded-lg hover:bg-[var(--color-surface-hover)]">
+        <div className="flex min-w-0 items-center gap-1">
+          <button
+            type="button"
+            aria-label={t('session.activity.toggleRecent', { name: row.label })}
+            aria-expanded={subagentExpanded}
+            onClick={() => setSubagentExpanded((current) => !current)}
+            disabled={!hasRecentEvents}
+            className={`${interactiveRowClassName} min-w-0 flex-1 disabled:cursor-default`}
+          >
+            {content}
+            {hasRecentEvents ? (
+              <ChevronDown
+                size={13}
+                strokeWidth={2.2}
+                className={`shrink-0 text-[var(--color-text-tertiary)] transition-transform ${subagentExpanded ? 'rotate-180' : ''}`}
+                aria-hidden="true"
+              />
+            ) : null}
+          </button>
+          <button
+            type="button"
+            aria-label={t('session.activity.openRun', { name: row.label })}
+            title={t('session.activity.fullRun')}
+            onClick={() => onOpenSubagent({ sessionId, toolUseId: row.toolUseId!, title: row.label })}
+            className="mr-2 shrink-0 rounded-md px-2 py-1 text-[10px] font-medium text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-container)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
+          >
+            {t('session.activity.fullRun')}
+          </button>
+        </div>
+        {subagentExpanded && row.recentEvents ? (
+          <ol className="mx-2 mb-2 space-y-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-2.5 py-2">
+            {row.recentEvents.map((event) => (
+              <li key={event.id} className="flex min-w-0 items-center gap-2 text-[10px] leading-4">
+                <span className="shrink-0 font-medium text-[var(--color-text-secondary)]">{event.toolName}</span>
+                {event.description ? <span className="truncate text-[var(--color-text-tertiary)]" title={event.description}>{event.description}</span> : null}
+              </li>
+            ))}
+          </ol>
+        ) : null}
       </div>
-    ) : openButton
+    )
   }
 
   if (row.section === 'backgroundTasks' && onOpenBackgroundTask && hasBackgroundTaskDetails(row)) {
