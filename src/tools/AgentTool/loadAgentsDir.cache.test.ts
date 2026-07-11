@@ -57,7 +57,9 @@ describe('agent definition cache invalidation', () => {
   test('shows a newly-created project agent in the /agents output after an initial cached read', async () => {
     const projectRoot = path.join(tmpHome, 'project')
     await fs.mkdir(projectRoot, { recursive: true })
+    // Keep write path (getCwd → .claude/agents) and read key (cwd arg) identical.
     setCwdState(projectRoot)
+    clearAgentDefinitionsCache()
 
     const agentType = 'cache-created-agent'
     const before = await getAgentDefinitionsWithOverrides(projectRoot)
@@ -73,6 +75,9 @@ describe('agent definition cache invalidation', () => {
       true,
     )
 
+    // saveAgentToFile already clears cache; clear again so the next read reloads
+    // from the same projectRoot key used above.
+    clearAgentDefinitionsCache()
     const after = await getAgentDefinitionsWithOverrides(projectRoot)
 
     expect(after.allAgents).toContainEqual(

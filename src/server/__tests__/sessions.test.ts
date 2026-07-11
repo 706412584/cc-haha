@@ -28,20 +28,47 @@ import { updateSessionSlashCommands } from '../ws/handler.js'
 
 let tmpDir: string
 let service: SessionService
+let originalClaudeConfigDir: string | undefined
+let originalHome: string | undefined
+let originalUserProfile: string | undefined
 
 /** Create a temporary config dir and configure the service to use it. */
 async function setupTmpConfigDir(): Promise<string> {
   tmpDir = path.join(os.tmpdir(), `claude-test-${Date.now()}-${Math.random().toString(36).slice(2)}`)
   await fs.mkdir(path.join(tmpDir, 'projects'), { recursive: true })
+  originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR
+  originalHome = process.env.HOME
+  originalUserProfile = process.env.USERPROFILE
+  // Align with settings fixture: project dir walks stop at os.homedir(), not CLAUDE_CONFIG_DIR.
   process.env.CLAUDE_CONFIG_DIR = tmpDir
+  process.env.HOME = tmpDir
+  process.env.USERPROFILE = tmpDir
+  clearCommandsCache()
+  resetSettingsCache()
   return tmpDir
 }
 
 async function cleanupTmpDir(): Promise<void> {
+  clearCommandsCache()
+  resetSettingsCache()
   if (tmpDir) {
     await fs.rm(tmpDir, { recursive: true, force: true })
   }
-  delete process.env.CLAUDE_CONFIG_DIR
+  if (originalClaudeConfigDir !== undefined) {
+    process.env.CLAUDE_CONFIG_DIR = originalClaudeConfigDir
+  } else {
+    delete process.env.CLAUDE_CONFIG_DIR
+  }
+  if (originalHome !== undefined) {
+    process.env.HOME = originalHome
+  } else {
+    delete process.env.HOME
+  }
+  if (originalUserProfile !== undefined) {
+    process.env.USERPROFILE = originalUserProfile
+  } else {
+    delete process.env.USERPROFILE
+  }
 }
 
 function git(cwd: string, ...args: string[]): string {

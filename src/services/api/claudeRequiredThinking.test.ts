@@ -87,8 +87,11 @@ test('keeps required-thinking models enabled when the caller requests disabled t
     delete process.env.CLAUDE_CODE_USE_VERTEX
     delete process.env.CLAUDE_CODE_USE_FOUNDRY
     process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${server.port}`
-    process.env.ANTHROPIC_AUTH_TOKEN = 'loopback-test-key'
-    process.env.ANTHROPIC_API_KEY = ''
+    // CI/test auth requires a real accepted key source (ANTHROPIC_API_KEY /
+    // CLAUDE_CODE_OAUTH_TOKEN). AUTH_TOKEN alone is treated as external auth and
+    // still trips getAnthropicApiKeyWithSource() under NODE_ENV=test.
+    delete process.env.ANTHROPIC_AUTH_TOKEN
+    process.env.ANTHROPIC_API_KEY = 'loopback-test-key'
     process.env.ANTHROPIC_MODEL = 'kimi-k2.7-code'
     process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'kimi-k2.7-code'
     process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'kimi-k2.7-code'
