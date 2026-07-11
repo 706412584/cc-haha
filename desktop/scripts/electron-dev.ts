@@ -1,3 +1,5 @@
+import { fileURLToPath } from 'node:url'
+
 export const DEFAULT_RENDERER_URL = 'http://localhost:1420'
 export const LOCAL_NO_PROXY_ENTRIES = ['localhost', '127.0.0.1', '::1']
 
@@ -37,7 +39,7 @@ async function waitForRenderer(rendererUrl: string) {
 }
 
 async function main() {
-  const desktopRoot = new URL('..', import.meta.url).pathname
+  const desktopRoot = fileURLToPath(new URL('..', import.meta.url))
   const childEnv = createElectronDevEnv()
   const rendererUrl = childEnv.ELECTRON_RENDERER_URL
   process.env.NO_PROXY = childEnv.NO_PROXY
