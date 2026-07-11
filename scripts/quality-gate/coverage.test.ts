@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -8,11 +8,13 @@ import {
   evaluateThresholds,
   hasUsableCoverageSummary,
   hasUsableLcov,
+  mergeLcovRecords,
   parseBunJunitTestFileCount,
   parseBunTestFileCount,
   parseChangedLinesFromDiff,
   parseLcov,
   prefixRelativeLcovSourcePaths,
+  serializeLcovRecords,
   rangeContainsMergeCommit,
 } from './coverage'
 
@@ -106,6 +108,50 @@ describe('coverage gate helpers', () => {
     expect(parseBunTestFileCount('Ran 1605 tests across 141 files. [187.20s]')).toBe(141)
     expect(parseBunTestFileCount('Ran 1 test across 1 file. [10.00ms]')).toBe(1)
     expect(parseBunTestFileCount('process terminated before summary')).toBeNull()
+  })
+
+  test('runs root coverage in isolated per-file processes', () => {
+    const coverageScript = readFileSync(join(import.meta.dir, 'coverage.ts'), 'utf8')
+    expect(coverageScript).toContain('rootBunTestFilter(serverFiles[fileIndex]!)')
+    expect(coverageScript).toContain('Array.from({ length: 4 }, () => runCoverageWorker())')
+  })
+
+  test('merges per-file LCOV records without inflating function or branch totals', () => {
+    const records = mergeLcovRecords([
+      {
+        file: 'src/server/a.ts',
+        linesTotal: 2,
+        linesCovered: 1,
+        functionsTotal: 3,
+        functionsCovered: 1,
+        branchesTotal: 2,
+        branchesCovered: 1,
+        lineHits: new Map([[1, 1], [2, 0]]),
+      },
+      {
+        file: 'src/server/a.ts',
+        linesTotal: 2,
+        linesCovered: 1,
+        functionsTotal: 3,
+        functionsCovered: 2,
+        branchesTotal: 2,
+        branchesCovered: 2,
+        lineHits: new Map([[1, 0], [2, 4]]),
+      },
+    ])
+
+    expect(records).toHaveLength(1)
+    expect(records[0]?.linesCovered).toBe(2)
+    expect(records[0]?.functionsTotal).toBe(3)
+    expect(records[0]?.functionsCovered).toBe(2)
+    expect(records[0]?.branchesTotal).toBe(2)
+    expect(records[0]?.branchesCovered).toBe(2)
+
+    const serialized = serializeLcovRecords(records)
+    expect(serialized.match(/^SF:/gm)).toHaveLength(1)
+    expect(serialized).toContain('FNF:3')
+    expect(serialized).toContain('FNH:2')
+    expect(serialized).toContain('DA:2,4')
   })
 
   test('counts top-level test files from Bun JUnit output', () => {

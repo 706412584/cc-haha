@@ -350,6 +350,50 @@ export function parseBunJunitTestFileCount(output: string) {
   return output.match(/^  <testsuite name="[^"]+" file="[^"]+"/gm)?.length ?? 0
 }
 
+export function serializeLcovRecords(records: LcovRecord[]): string {
+  return records.map((record) => {
+    const lines = [
+      'TN:',
+      `SF:${record.file}`,
+      `FNF:${record.functionsTotal}`,
+      `FNH:${record.functionsCovered}`,
+      `BRF:${record.branchesTotal}`,
+      `BRH:${record.branchesCovered}`,
+      ...[...record.lineHits].sort(([a], [b]) => a - b).map(([line, hits]) => `DA:${line},${hits}`),
+      `LF:${record.linesTotal}`,
+      `LH:${record.linesCovered}`,
+      'end_of_record',
+    ]
+    return lines.join('\n')
+  }).join('\n') + '\n'
+}
+
+export function mergeLcovRecords(records: LcovRecord[]): LcovRecord[] {
+  const merged = new Map<string, LcovRecord>()
+  for (const record of records) {
+    const existing = merged.get(record.file)
+    if (!existing) {
+      merged.set(record.file, {
+        ...record,
+        lineHits: new Map(record.lineHits),
+      })
+      continue
+    }
+
+    existing.linesTotal = Math.max(existing.linesTotal, record.linesTotal)
+    existing.functionsTotal = Math.max(existing.functionsTotal, record.functionsTotal)
+    existing.functionsCovered = Math.max(existing.functionsCovered, record.functionsCovered)
+    existing.branchesTotal = Math.max(existing.branchesTotal, record.branchesTotal)
+    existing.branchesCovered = Math.max(existing.branchesCovered, record.branchesCovered)
+    for (const [line, hits] of record.lineHits) {
+      existing.lineHits.set(line, (existing.lineHits.get(line) ?? 0) + hits)
+    }
+    existing.linesTotal = Math.max(existing.linesTotal, existing.lineHits.size)
+    existing.linesCovered = [...existing.lineHits.values()].filter((hits) => hits > 0).length
+  }
+  return [...merged.values()]
+}
+
 function summarizeLcovRecords(records: LcovRecord[]): CoverageSummary {
   let linesTotal = 0
   let linesCovered = 0
@@ -827,28 +871,60 @@ export async function runCoverageGate(options: {
   const suites: SuiteCoverage[] = []
   const coverageByFile = new Map<string, FileLineCoverage>()
 
-  mkdirSync(join(outputDir, 'root-server'), { recursive: true })
-  const rootJunitPath = join(outputDir, 'root-server', 'junit.xml')
-  const rootCommand = ['bun', '--no-env-file', 'test', '--timeout=20000', '--coverage', '--coverage-reporter=lcov', '--coverage-reporter=text', '--coverage-dir', join(outputDir, 'root-server'), '--reporter=junit', `--reporter-outfile=${rootJunitPath}`, ...serverFiles.map(rootBunTestFilter)]
-  const rootLogPath = join(outputDir, 'root-server', 'coverage.log')
-  const rootResult = await runCommand(rootCommand, rootDir, rootLogPath)
-  const rootLcovPath = join(outputDir, 'root-server', 'lcov.info')
-  const rootLcov = existsSync(rootLcovPath)
-    ? readFileSync(rootLcovPath, 'utf8')
-    : ''
-  const rootRecords = parseLcovRecords(rootLcov, { rootDir }).filter(isUsableLcovRecord)
-  const rootTestFileCount = existsSync(rootJunitPath)
-    ? parseBunJunitTestFileCount(readFileSync(rootJunitPath, 'utf8'))
-    : parseBunTestFileCount(rootResult.output)
-  const rootTestDiscoveryComplete = rootTestFileCount === serverFiles.length
-  const rootCoverageAvailable = hasUsableLcov(rootLcov, { rootDir }) && rootTestDiscoveryComplete
+  const rootCoverageDir = join(outputDir, 'root-server')
+  const rootPartsDir = join(rootCoverageDir, 'parts')
+  mkdirSync(rootPartsDir, { recursive: true })
+  const rootCommand = ['bun', '--no-env-file', 'test', '--max-concurrency=1', '--timeout=20000', '--coverage', '--coverage-reporter=lcov', '--coverage-reporter=text']
+  const rootLogPath = join(rootCoverageDir, 'coverage.log')
+  const rootStarted = Date.now()
+  let nextFileIndex = 0
+  const partResults: Array<Awaited<ReturnType<typeof runCommand>> & { lcov: string; discovered: number }> = []
 
-  if (rootResult.exitCode !== 0 && rootCoverageAvailable) {
-    writeFileSync(
-      rootLogPath,
-      `${readFileSync(rootLogPath, 'utf8')}\n# Coverage note: test assertions exited with ${rootResult.exitCode}; correctness is enforced by check:server's per-file sandboxed test processes. This lane uses the complete single-process LCOV universe because Bun LCOV does not expose function identities for lossless cross-process merging.\n`,
-    )
+  async function runCoverageWorker() {
+    while (true) {
+      const fileIndex = nextFileIndex++
+      if (fileIndex >= serverFiles.length) return
+      const partDir = join(rootPartsDir, String(fileIndex).padStart(3, '0'))
+      const junitPath = join(partDir, 'junit.xml')
+      const logPath = join(partDir, 'coverage.log')
+      mkdirSync(partDir, { recursive: true })
+      const command = [
+        ...rootCommand,
+        '--coverage-dir', partDir,
+        '--reporter=junit',
+        `--reporter-outfile=${junitPath}`,
+        rootBunTestFilter(serverFiles[fileIndex]!),
+      ]
+      const result = await runCommand(command, rootDir, logPath)
+      const lcovPath = join(partDir, 'lcov.info')
+      partResults[fileIndex] = {
+        ...result,
+        lcov: existsSync(lcovPath) ? readFileSync(lcovPath, 'utf8') : '',
+        discovered: existsSync(junitPath)
+          ? parseBunJunitTestFileCount(readFileSync(junitPath, 'utf8'))
+          : parseBunTestFileCount(result.output) ?? 0,
+      }
+    }
   }
+
+  await Promise.all(Array.from({ length: 4 }, () => runCoverageWorker()))
+  const rootResult = {
+    exitCode: partResults.some((result) => result.exitCode !== 0) ? 1 : 0,
+    durationMs: Date.now() - rootStarted,
+    output: partResults.map((result) => result.output).join('\n'),
+  }
+  const rawRootLcov = partResults.map((result) => result.lcov).filter(Boolean).join('\n')
+  const rootRecords = mergeLcovRecords(
+    parseLcovRecords(rawRootLcov, { rootDir }).filter(isUsableLcovRecord),
+  )
+  const rootLcovPath = join(rootCoverageDir, 'lcov.info')
+  writeFileSync(rootLcovPath, serializeLcovRecords(rootRecords))
+  writeFileSync(rootLogPath, partResults.map((result, index) => (
+    `# ${serverFiles[index]} exit=${result.exitCode} discovered=${result.discovered}\n${result.output}`
+  )).join('\n'))
+  const rootTestFileCount = partResults.reduce((total, result) => total + result.discovered, 0)
+  const rootTestDiscoveryComplete = rootTestFileCount === serverFiles.length
+  const rootCoverageAvailable = rootRecords.length > 0 && rootTestDiscoveryComplete && rootResult.exitCode === 0
 
   for (const scope of ROOT_COVERAGE_SCOPES) {
     const scopedRecords = rootRecords.filter((record) => matchesScope(record.file, scope))
@@ -860,19 +936,18 @@ export async function runCoverageGate(options: {
       id: scope.id,
       title: scope.title,
       status: scopeCoverageAvailable ? 'passed' : 'failed',
-      command: rootCommand,
+      command: [...rootCommand, '<one-test-file-per-process>'],
       durationMs: rootResult.durationMs,
       logPath: rootLogPath,
       ...(summary ? { summary } : {}),
-      ...(rootResult.exitCode !== 0 && rootCoverageAvailable ? {
-        note: `instrumentation test process exited with ${rootResult.exitCode}; correctness is enforced by the required per-file server gate`,
-      } : {}),
       ...(!scopeCoverageAvailable ? {
-        error: rootCoverageAvailable
-          ? `coverage command produced no LCOV records for ${scope.id}`
+        error: rootResult.exitCode !== 0
+          ? 'one or more isolated coverage test processes failed'
           : !rootTestDiscoveryComplete
-            ? `coverage command discovered ${rootTestFileCount ?? 0}/${serverFiles.length} root test files`
-            : `coverage command exited with ${rootResult.exitCode} and produced no usable LCOV records`,
+            ? `coverage command discovered ${rootTestFileCount}/${serverFiles.length} root test files`
+            : rootRecords.length === 0
+              ? 'isolated coverage processes produced no usable LCOV records'
+              : `coverage command produced no LCOV records for ${scope.id}`,
       } : {}),
     })
     if (scopeCoverageAvailable) {
