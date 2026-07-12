@@ -40,12 +40,20 @@ export type TunnelStatus = {
   error: string | null
 }
 
+const TUNNEL_HEALTH_INITIAL_DELAY_MS = 15_000
+const TUNNEL_HEALTH_INTERVAL_MS = 30_000
+const TUNNEL_HEALTH_TIMEOUT_MS = 10_000
+const TUNNEL_HEALTH_FAILURE_THRESHOLD = 3
+
 type ServerRuntimeOptions = {
   desktopRoot: string
   appRoot?: string
   h5DistDir?: string
   appVersion?: string
   resolveSystemProxy?: (url: string) => Promise<string>
+  fetchFn?: typeof fetch
+  setTimeoutFn?: typeof setTimeout
+  clearTimeoutFn?: typeof clearTimeout
 }
 
 export class ElectronServerRuntime {
@@ -54,11 +62,17 @@ export class ElectronServerRuntime {
   private readonly h5DistDir: string
   private readonly appVersion?: string
   private readonly resolveSystemProxy?: (url: string) => Promise<string>
+  private readonly fetchFn: typeof fetch
+  private readonly setTimeoutFn: typeof setTimeout
+  private readonly clearTimeoutFn: typeof clearTimeout
   private sidecarEnvPromise: Promise<NodeJS.ProcessEnv> | null = null
   private server: { url: string, child: SidecarChild } | null = null
   private adapters: SidecarChild[] = []
   private tunnel: { child: SidecarChild, mode: H5TunnelMode } | null = null
   private tunnelState: TunnelStatus = { status: 'idle', url: null, mode: null, error: null }
+  private tunnelGeneration = 0
+  private tunnelHealthTimer: ReturnType<typeof setTimeout> | null = null
+  private tunnelHealthFailures = 0
   private startupError: string | null = null
   private startPromise: Promise<string> | null = null
 
@@ -68,6 +82,9 @@ export class ElectronServerRuntime {
     this.h5DistDir = options.h5DistDir ?? path.join(options.desktopRoot, 'dist')
     this.appVersion = options.appVersion
     this.resolveSystemProxy = options.resolveSystemProxy
+    this.fetchFn = options.fetchFn ?? ((input, init) => fetch(input, init))
+    this.setTimeoutFn = options.setTimeoutFn ?? setTimeout
+    this.clearTimeoutFn = options.clearTimeoutFn ?? clearTimeout
   }
 
   async startServer(): Promise<string> {
@@ -119,6 +136,7 @@ export class ElectronServerRuntime {
 
     // Replace any existing tunnel so a mode switch / restart is clean.
     this.stopTunnelProcess()
+    const generation = this.tunnelGeneration
     this.tunnelState = { status: 'starting', url: null, mode: options.mode, error: null }
 
     const cloudflaredPath = resolveCloudflaredPath()
@@ -134,23 +152,29 @@ export class ElectronServerRuntime {
     }
 
     try {
+      const env = await this.resolveSidecarBaseEnv()
+      if (generation !== this.tunnelGeneration) return this.getTunnelStatus()
       const plan = createTunnelPlan({
         cloudflaredPath,
         port,
         mode: options.mode,
         token: options.token,
-        env: await this.resolveSidecarBaseEnv(),
+        env,
       })
       const child = spawnTunnel(plan)
       this.tunnel = { child, mode: options.mode }
       this.captureLogs(child, `cloudflared:${options.mode}`)
-      child.on('exit', () => {
-        // Clear state when cloudflared dies so the UI never shows a stale URL.
-        if (this.tunnel?.child === child) {
-          this.tunnel = null
-          this.tunnelState = { status: 'idle', url: null, mode: null, error: null }
-          void this.reportTunnel(serverUrl)
+      child.on('exit', (code, signal) => {
+        if (generation !== this.tunnelGeneration || this.tunnel?.child !== child) return
+        this.clearTunnelHealthTimer()
+        this.tunnel = null
+        this.tunnelState = {
+          status: 'error',
+          url: null,
+          mode: options.mode,
+          error: `cloudflared exited unexpectedly (code=${code}, signal=${signal})`,
         }
+        void this.clearTunnelOnServer(serverUrl).then(() => this.reportTunnel(serverUrl))
       })
 
       let url: string
@@ -163,8 +187,15 @@ export class ElectronServerRuntime {
         url = await waitForTunnelUrl(child)
       }
 
+      if (generation !== this.tunnelGeneration || this.tunnel?.child !== child) {
+        if (this.tunnel?.child !== child) killSidecar(child)
+        return this.getTunnelStatus()
+      }
       this.tunnelState = { status: 'running', url, mode: options.mode, error: null }
       await this.reportTunnel(serverUrl)
+      if (options.mode === 'quick') {
+        this.scheduleTunnelHealthCheck({ generation, child, serverUrl, tunnelUrl: url })
+      }
       return this.getTunnelStatus()
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -191,16 +222,92 @@ export class ElectronServerRuntime {
   }
 
   private stopTunnelProcess(sync = false) {
+    this.tunnelGeneration += 1
+    this.clearTunnelHealthTimer()
     if (this.tunnel) {
-      killSidecar(this.tunnel.child, sync)
+      const child = this.tunnel.child
       this.tunnel = null
+      killSidecar(child, sync)
     }
+  }
+
+  private clearTunnelHealthTimer() {
+    if (this.tunnelHealthTimer !== null) {
+      this.clearTimeoutFn(this.tunnelHealthTimer)
+      this.tunnelHealthTimer = null
+    }
+    this.tunnelHealthFailures = 0
+  }
+
+  private scheduleTunnelHealthCheck(context: {
+    generation: number
+    child: SidecarChild
+    serverUrl: string
+    tunnelUrl: string
+  }, delayMs = TUNNEL_HEALTH_INITIAL_DELAY_MS) {
+    this.tunnelHealthTimer = this.setTimeoutFn(
+      () => this.checkTunnelHealth(context),
+      delayMs,
+    )
+    this.tunnelHealthTimer.unref?.()
+  }
+
+  private async checkTunnelHealth(context: {
+    generation: number
+    child: SidecarChild
+    serverUrl: string
+    tunnelUrl: string
+  }): Promise<void> {
+    if (context.generation !== this.tunnelGeneration || this.tunnel?.child !== context.child) return
+
+    let failureReason: string | null = null
+    try {
+      const response = await this.fetchFn(new URL('/health', context.tunnelUrl), {
+        method: 'GET',
+        headers: { 'Cache-Control': 'no-cache' },
+        redirect: 'manual',
+        signal: AbortSignal.timeout(TUNNEL_HEALTH_TIMEOUT_MS),
+      })
+      if (!response.ok) failureReason = `HTTP ${response.status}`
+    } catch {
+      // The main-process fetch may not share Electron's system/PAC proxy while
+      // cloudflared does. A network error is therefore inconclusive: retry it,
+      // but only an actual non-2xx response may tear down a running tunnel.
+      if (context.generation === this.tunnelGeneration && this.tunnel?.child === context.child) {
+        this.scheduleTunnelHealthCheck(context, TUNNEL_HEALTH_INTERVAL_MS)
+      }
+      return
+    }
+
+    if (context.generation !== this.tunnelGeneration || this.tunnel?.child !== context.child) return
+    if (failureReason === null) {
+      this.tunnelHealthFailures = 0
+    } else {
+      this.tunnelHealthFailures += 1
+    }
+
+    if (this.tunnelHealthFailures < TUNNEL_HEALTH_FAILURE_THRESHOLD) {
+      this.scheduleTunnelHealthCheck(context, TUNNEL_HEALTH_INTERVAL_MS)
+      return
+    }
+
+    this.clearTunnelHealthTimer()
+    this.tunnel = null
+    killSidecar(context.child)
+    this.tunnelState = {
+      status: 'error',
+      url: null,
+      mode: 'quick',
+      error: `Cloudflare tunnel became unreachable after ${TUNNEL_HEALTH_FAILURE_THRESHOLD} consecutive health check failures (${failureReason}).`,
+    }
+    await this.clearTunnelOnServer(context.serverUrl)
+    await this.reportTunnel(context.serverUrl)
   }
 
   /** Wipe the server-side runtime tunnel override after the tunnel is stopped. */
   private async clearTunnelOnServer(serverUrl: string): Promise<void> {
     try {
-      await fetch(`${serverUrl}/api/h5-access/tunnel/clear`, {
+      await this.fetchFn(`${serverUrl}/api/h5-access/tunnel/clear`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       })
@@ -212,7 +319,7 @@ export class ElectronServerRuntime {
   /** Push the current tunnel state into the server's runtime override. */
   private async reportTunnel(serverUrl: string): Promise<void> {
     try {
-      await fetch(`${serverUrl}/api/h5-access/tunnel/report`, {
+      await this.fetchFn(`${serverUrl}/api/h5-access/tunnel/report`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

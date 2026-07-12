@@ -3506,6 +3506,7 @@ function H5AccessSettings() {
     h5Access,
     h5AccessDiagnostics,
     h5AccessError,
+    fetchH5Access,
     enableH5Access,
     disableH5Access,
     regenerateH5AccessToken,
@@ -3552,6 +3553,14 @@ function H5AccessSettings() {
   const h5FixedPortPendingRestart = h5Access.fixedPort != null &&
     h5ActivePort != null &&
     String(h5Access.fixedPort) !== h5ActivePort
+
+  useEffect(() => {
+    if (!h5TunnelAvailable || (h5TunnelState?.status !== 'starting' && h5TunnelState?.status !== 'running')) return
+    const interval = window.setInterval(() => {
+      void fetchH5Access()
+    }, 10_000)
+    return () => window.clearInterval(interval)
+  }, [fetchH5Access, h5TunnelAvailable, h5TunnelState?.status])
 
   useEffect(() => {
     setH5PublicBaseUrlDraft(extractH5AccessAddressDraft(h5Access.publicBaseUrl))
