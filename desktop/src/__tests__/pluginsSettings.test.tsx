@@ -505,6 +505,12 @@ describe('Settings > Plugins tab', () => {
             summary: 'https://api.github.com/mcp',
           },
         ],
+        userConfig: {
+          token: {
+            type: 'string',
+            title: 'GitHub token',
+          },
+        },
         errors: [],
       },
     })
@@ -523,6 +529,7 @@ describe('Settings > Plugins tab', () => {
     expect(screen.getAllByText('LSP servers').length).toBeGreaterThan(0)
     expect(screen.getByText('github-lsp')).toBeInTheDocument()
     expect(screen.getByText('Apply changes')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Configure/i })).toBeInTheDocument()
     expect(screen.getByText('Uninstall')).toBeInTheDocument()
   })
 

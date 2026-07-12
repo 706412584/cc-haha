@@ -46,14 +46,35 @@ export async function handlePluginsApi(
 
     if (sub === 'media-gen' && segments[3] === 'config') {
       if (method === 'GET') return Response.json(getMediaGenConfig())
-      if (method === 'PUT') return Response.json(saveMediaGenConfig(await parseJsonBody(req)))
+      if (method === 'PUT') return Response.json(await saveMediaGenConfig(await parseJsonBody(req)))
+    }
+    if (method === 'GET' && sub === 'media-gen' && segments[3] === 'provider-choices') {
+      const { providers } = await providerService.listProviders()
+      return Response.json({ providers: providers.map(provider => ({
+        id: provider.id,
+        name: provider.name,
+        baseUrl: provider.baseUrl,
+        credentialConfigured: Boolean(provider.apiKey),
+        compatible: Boolean(provider.apiKey) && (provider.apiFormat === 'openai_chat' || provider.apiFormat === 'openai_responses'),
+      })) })
     }
     if (method === 'POST' && sub === 'media-gen' && segments[3] === 'fetch-models') {
       const body = await parseJsonBody(req)
+      const allowed = new Set(['providerId', 'baseUrl', 'apiFormat', 'apiKey'])
+      if (Object.keys(body).some(key => !allowed.has(key))) throw ApiError.badRequest('Unexpected fetch-models field')
       const providerId = asString(body.providerId)
-      if (!providerId || 'apiKey' in body) throw ApiError.badRequest('Expected providerId only')
-      const input = getMediaGenProviderCredentials(providerId)
-      return Response.json(await providerService.fetchUpstreamModels(input))
+      const baseUrl = asString(body.baseUrl)
+      const apiKey = body.apiKey
+      if (!providerId || !baseUrl || body.apiFormat !== 'openai_compatible' || !apiKey || typeof apiKey !== 'object' || Array.isArray(apiKey)) throw ApiError.badRequest('Invalid fetch-models request')
+      const key = apiKey as Record<string, unknown>
+      const validApiKey = key.action === 'keep' || key.action === 'clear'
+        ? Object.keys(key).length === 1
+        : key.action === 'replace' && typeof key.value === 'string' && key.value.length > 0 && Object.keys(key).length === 2 && Object.hasOwn(key, 'value')
+          || key.action === 'reference' && Object.keys(key).length === 2 && key.credentialRef && typeof key.credentialRef === 'object'
+      if (!validApiKey) throw ApiError.badRequest('Invalid API key action')
+      const input = await getMediaGenProviderCredentials({ providerId, baseUrl, apiFormat: 'openai_compatible', apiKey: key as never })
+      const result = await providerService.fetchUpstreamModels(input)
+      return Response.json(result.data)
     }
 
     if (method === 'GET' && sub === 'catalog') {

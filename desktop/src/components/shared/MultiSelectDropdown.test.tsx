@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import '@testing-library/jest-dom'
 
+import { Dropdown } from './Dropdown'
 import { MultiSelectDropdown } from './MultiSelectDropdown'
 
 type Item = { value: string; label: string }
@@ -20,6 +21,28 @@ function renderDropdown(props: {
     />,
   )
 }
+
+describe('Dropdown', () => {
+  it('stops wheel events from reaching an outer modal when height is constrained', () => {
+    const onOuterWheel = vi.fn()
+    render(
+      <div onWheel={onOuterWheel}>
+        <Dropdown
+          items={[{ value: 'a', label: 'Alpha' }]}
+          value="a"
+          onChange={() => {}}
+          trigger={<button>open constrained dropdown</button>}
+          maxHeight={240}
+        />
+      </div>,
+    )
+
+    fireEvent.click(screen.getByText('open constrained dropdown'))
+    fireEvent.wheel(screen.getByText('Alpha').parentElement!)
+
+    expect(onOuterWheel).not.toHaveBeenCalled()
+  })
+})
 
 describe('MultiSelectDropdown', () => {
   it('hides items until the trigger is clicked', () => {

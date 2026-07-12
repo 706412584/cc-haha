@@ -15,10 +15,12 @@ import { createInterface } from 'readline'
 import { randomUUID } from 'crypto'
 import { lookup } from 'dns/promises'
 import { isIP } from 'net'
+import http from 'http'
+import https from 'https'
+import { Readable } from 'stream'
 import { mkdir, writeFile } from 'fs/promises'
 import path from 'path'
 import { pathToFileURL } from 'url'
-import { Agent } from 'undici'
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -98,26 +100,39 @@ async function resolvePublicAddresses(urlString, label) {
   return { parsed, hostname, addresses }
 }
 
-function createPinnedDispatcher(hostname, addresses) {
-  const allowed = addresses.map(({ address, family }) => ({ address, family }))
-  return new Agent({
-    connect: {
+function fetchPinnedUrl(urlString, init, timeoutMs, hostname, addresses) {
+  const parsed = new URL(urlString)
+  const transport = parsed.protocol === 'https:' ? https : http
+  const headers = Object.fromEntries(new Headers(init?.headers).entries())
+  return new Promise((resolve, reject) => {
+    const request = transport.request(parsed, {
+      method: init?.method ?? 'GET',
+      headers,
       lookup(requestedHostname, options, callback) {
         if (requestedHostname.toLowerCase() !== hostname.toLowerCase()) {
           callback(new Error('DNS hostname changed after validation'))
           return
         }
-        if (allowed.length === 0) {
-          callback(new Error('No validated address available'))
-          return
-        }
-        if (options?.all) {
-          callback(null, allowed)
-          return
-        }
-        callback(null, allowed[0].address, allowed[0].family)
+        if (options?.all) callback(null, addresses)
+        else callback(null, addresses[0].address, addresses[0].family)
       },
-    },
+      signal: init?.signal,
+    }, response => {
+      const responseHeaders = new Headers()
+      for (const [name, value] of Object.entries(response.headers)) {
+        if (Array.isArray(value)) for (const item of value) responseHeaders.append(name, item)
+        else if (value !== undefined) responseHeaders.set(name, value)
+      }
+      resolve(new Response(Readable.toWeb(response), {
+        status: response.statusCode ?? 500,
+        statusText: response.statusMessage,
+        headers: responseHeaders,
+      }))
+    })
+    request.setTimeout(timeoutMs, () => request.destroy(new Error('Request timed out')))
+    request.once('error', reject)
+    if (init?.body) request.write(init.body)
+    request.end()
   })
 }
 
@@ -126,7 +141,7 @@ function hasSensitiveHeaders(headers) {
   return normalized.has('authorization') || normalized.has('cookie') || normalized.has('proxy-authorization')
 }
 
-async function fetchWithSafeRedirects(urlString, init, timeoutMs, label, prepareRequest) {
+async function fetchWithSafeRedirects(urlString, init, timeoutMs, label, performRequest) {
   let currentUrl = urlString
   const authenticated = hasSensitiveHeaders(init?.headers)
   for (let redirects = 0; redirects <= 5; redirects++) {
@@ -134,9 +149,7 @@ async function fetchWithSafeRedirects(urlString, init, timeoutMs, label, prepare
     if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
       throw new Error(`${label}: 不允许的协议 ${parsed.protocol}。仅支持 http/https。`)
     }
-    const { requestInit, cleanup } = await prepareRequest(currentUrl, init)
-    const res = await fetchWithTimeout(currentUrl, { ...requestInit, redirect: 'manual' }, timeoutMs)
-    cleanup?.()
+    const res = await performRequest(currentUrl, { ...init, redirect: 'manual' }, timeoutMs)
     if (![301, 302, 303, 307, 308].includes(res.status)) return res
     const location = res.headers.get('location')
     if (!location) throw new Error(`${label}: 重定向响应缺少 Location`)
@@ -153,15 +166,14 @@ async function fetchWithSafeRedirects(urlString, init, timeoutMs, label, prepare
 }
 
 async function fetchSafeUrl(urlString, init, timeoutMs, label = 'provider_url') {
-  return fetchWithSafeRedirects(urlString, init, timeoutMs, label, async (currentUrl, requestInit) => {
+  return fetchWithSafeRedirects(urlString, init, timeoutMs, label, async (currentUrl, requestInit, requestTimeoutMs) => {
     const { hostname, addresses } = await resolvePublicAddresses(currentUrl, label)
-    const dispatcher = createPinnedDispatcher(hostname, addresses)
-    return { requestInit: { ...requestInit, dispatcher }, cleanup: () => { void dispatcher.close() } }
+    return fetchPinnedUrl(currentUrl, requestInit, requestTimeoutMs, hostname, addresses)
   })
 }
 
 async function fetchProviderApiUrl(urlString, init, timeoutMs) {
-  return fetchWithSafeRedirects(urlString, init, timeoutMs, 'provider_url', async (_currentUrl, requestInit) => ({ requestInit }))
+  return fetchWithSafeRedirects(urlString, init, timeoutMs, 'provider_url', fetchWithTimeout)
 }
 
 const MODEL_CAPABILITIES = {
@@ -239,7 +251,7 @@ function parseRuntimeProviders() {
     config = JSON.parse(process.env.MEDIA_GEN_PROVIDERS_JSON)
     secrets = JSON.parse(process.env.MEDIA_GEN_PROVIDER_SECRETS_JSON || '{}')
   } catch { return [] }
-  if (!config || config.schemaVersion !== 2 || !Array.isArray(config.providers) ||
+  if (!config || ![2, 3].includes(config.schemaVersion) || !Array.isArray(config.providers) ||
       !secrets || typeof secrets !== 'object' || Array.isArray(secrets)) return []
   const ids = new Set()
   try {

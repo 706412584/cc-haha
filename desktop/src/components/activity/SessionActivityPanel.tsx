@@ -235,10 +235,12 @@ function ActivityStatusIndicator({
   status,
   label,
   animated = true,
+  hideLabel = false,
 }: {
   status: ActivityRow['status']
   label: string
   animated?: boolean
+  hideLabel?: boolean
 }) {
   const isRunning = animated && (status === 'running' || status === 'in_progress')
 
@@ -250,7 +252,7 @@ function ActivityStatusIndicator({
         ) : null}
         <span data-testid={isRunning ? 'activity-live-dot' : undefined} className={`relative inline-flex h-1.5 w-1.5 rounded-full ${getStatusTone(status)}`} />
       </span>
-      {label}
+      {hideLabel ? null : label}
     </span>
   )
 }
@@ -320,6 +322,8 @@ function ActivityRowView({
   }, [isRunningSubagent, row.updatedAt])
   const recentActivity = row.section === 'subagents' ? formatRecentActivity(row.updatedAt, now, t) : null
   const latestEvent = row.recentEvents?.at(-1)
+  const hideRunningLabel = isRunningSubagent && Boolean(latestEvent || recentActivity)
+  const showStatusIndicator = !isTask
   const label = row.taskHistory
     ? t('session.activity.tasks.earlier')
     : row.label
@@ -368,13 +372,14 @@ function ActivityRowView({
           </span>
         ) : null}
       </span>
-      {isTask ? null : (
+      {showStatusIndicator ? (
         <ActivityStatusIndicator
           status={row.status}
           label={getActivityStatusLabel(row.status, t)}
           animated
+          hideLabel={hideRunningLabel}
         />
-      )}
+      ) : null}
       {!isTask && row.openable ? (
         <ChevronRight size={13} strokeWidth={2.2} className="shrink-0 text-[var(--color-text-tertiary)]" aria-hidden="true" />
       ) : null}

@@ -804,7 +804,7 @@ describe('Media-gen provider config API', () => {
   it('GET returns schema v2 providers with key status and never returns secrets', async () => {
     await fs.writeFile(path.join(tmpDir, 'settings.json'), JSON.stringify({
       pluginConfigs: { 'media-gen@cc-haha-builtin': { options: { mediaProviderConfig: JSON.stringify({
-        schemaVersion: 2,
+        schemaVersion: 3,
         providers: [{ id: 'stable-id', name: 'Local', enabled: false, apiFormat: 'openai_compatible', baseUrl: 'http://127.0.0.1:8080/v1', models: { imageGeneration: 'flux' } }],
       }) } } },
     }))
@@ -817,7 +817,7 @@ describe('Media-gen provider config API', () => {
     const body = await response.json() as Record<string, unknown>
 
     expect(response.status).toBe(200)
-    expect(body).toEqual({ schemaVersion: 2, providers: [{
+    expect(body).toEqual({ schemaVersion: 3, providers: [{
       id: 'stable-id', name: 'Local', enabled: false, apiFormat: 'openai_compatible', baseUrl: 'http://127.0.0.1:8080/v1',
       models: { imageGeneration: 'flux' },
       apiKeyConfigured: true,
@@ -846,7 +846,7 @@ describe('Media-gen provider config API', () => {
     expect(body.providers.every(p => p.apiKeyConfigured)).toBe(true)
 
     const saved = JSON.parse(await fs.readFile(path.join(tmpDir, 'settings.json'), 'utf-8'))
-    expect(JSON.parse(saved.pluginConfigs['media-gen@cc-haha-builtin'].options.mediaProviderConfig).schemaVersion).toBe(2)
+    expect(JSON.parse(saved.pluginConfigs['media-gen@cc-haha-builtin'].options.mediaProviderConfig).schemaVersion).toBe(3)
     const credentials = JSON.parse(await fs.readFile(path.join(tmpDir, '.credentials.json'), 'utf-8')) as {
       pluginSecrets: Record<string, Record<string, string>>
     }
@@ -892,34 +892,151 @@ describe('Media-gen provider config API', () => {
     expect((await handlePluginsApi(request.req, request.url, request.segments)).status).toBe(500)
   })
 
-  it('POST fetch-models uses the saved provider key without accepting a secret in the request', async () => {
+  it('POST fetch-models fetches an unsaved draft with its current URL and replacement key', async () => {
     const originalFetch = globalThis.fetch
+    let upstreamUrl = ''
     let authorization = ''
-    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      upstreamUrl = String(url)
       authorization = new Headers(init?.headers).get('Authorization') ?? ''
       return new Response(JSON.stringify({ data: [{ id: 'flux' }] }), { status: 200 })
     }) as typeof fetch
     try {
-      const config = makeRequest('PUT', '/api/plugins/media-gen/config', { schemaVersion: 2, providers: [{
-        id: 'local', name: 'Local', enabled: true, apiFormat: 'openai_compatible', baseUrl: 'http://127.0.0.1:8080', models: {},
-        apiKey: { action: 'replace', value: 'saved-secret' },
-      }] })
-      expect((await handlePluginsApi(config.req, config.url, config.segments)).status).toBe(200)
-      const request = makeRequest('POST', '/api/plugins/media-gen/fetch-models', { providerId: 'local' })
+      const request = makeRequest('POST', '/api/plugins/media-gen/fetch-models', {
+        providerId: 'new-draft',
+        baseUrl: 'http://127.0.0.1:8080/draft',
+        apiFormat: 'openai_compatible',
+        apiKey: { action: 'replace', value: 'draft-secret' },
+      })
       const response = await handlePluginsApi(request.req, request.url, request.segments)
       expect(response.status).toBe(200)
-      expect(await response.json()).toEqual({ status: 200, data: { data: [{ id: 'flux' }] } })
-      expect(authorization).toBe('Bearer saved-secret')
-      const secretRequest = makeRequest('POST', '/api/plugins/media-gen/fetch-models', { providerId: 'local', apiKey: 'request-secret' })
-      expect((await handlePluginsApi(secretRequest.req, secretRequest.url, secretRequest.segments)).status).toBe(400)
+      expect(await response.json()).toEqual({ data: [{ id: 'flux' }] })
+      expect(upstreamUrl).toBe('http://127.0.0.1:8080/draft/v1/models')
+      expect(authorization).toBe('Bearer draft-secret')
     } finally {
       globalThis.fetch = originalFetch
     }
   })
 
+  it('PUT rejects keeping an existing key after the provider origin changes', async () => {
+    const initial = makeRequest('PUT', '/api/plugins/media-gen/config', { schemaVersion: 3, providers: [{
+      id: 'saved', name: 'Saved', enabled: true, apiFormat: 'openai_compatible', baseUrl: 'https://old.example/v1', models: { imageGeneration: 'image-model' },
+      apiKey: { action: 'replace', value: 'saved-secret' },
+    }] })
+    expect((await handlePluginsApi(initial.req, initial.url, initial.segments)).status).toBe(200)
+
+    const changed = makeRequest('PUT', '/api/plugins/media-gen/config', { schemaVersion: 3, providers: [{
+      id: 'saved', name: 'Saved', enabled: true, apiFormat: 'openai_compatible', baseUrl: 'https://attacker.example/v1', models: { imageGeneration: 'image-model' },
+      apiKey: { action: 'keep' },
+    }] })
+    const response = await handlePluginsApi(changed.req, changed.url, changed.segments)
+
+    expect(response.status).toBe(400)
+    expect(await response.text()).toMatch(/origin changed|re-enter/i)
+    const getConfig = makeRequest('GET', '/api/plugins/media-gen/config')
+    const stored = await (await handlePluginsApi(getConfig.req, getConfig.url, getConfig.segments)).json() as { providers: Array<{ baseUrl: string; apiKeyConfigured: boolean }> }
+    expect(stored.providers).toEqual([expect.objectContaining({ baseUrl: 'https://old.example/v1', apiKeyConfigured: true })])
+  })
+
+  it('POST fetch-models keeps the saved key only for the saved provider origin', async () => {
+    const config = makeRequest('PUT', '/api/plugins/media-gen/config', { schemaVersion: 3, providers: [{
+      id: 'saved', name: 'Saved', enabled: true, apiFormat: 'openai_compatible', baseUrl: 'https://old.example', models: {},
+      apiKey: { action: 'replace', value: 'saved-secret' },
+    }] })
+    expect((await handlePluginsApi(config.req, config.url, config.segments)).status).toBe(200)
+    const originalFetch = globalThis.fetch
+    let requestDetails: { url?: string; authorization?: string } = {}
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      requestDetails = { url: String(url), authorization: new Headers(init?.headers).get('Authorization') ?? '' }
+      return new Response(JSON.stringify({ models: [{ id: 'draft-model' }] }), { status: 200 })
+    }) as typeof fetch
+    try {
+      const request = makeRequest('POST', '/api/plugins/media-gen/fetch-models', {
+        providerId: 'saved', baseUrl: 'https://OLD.example:443/v1', apiFormat: 'openai_compatible', apiKey: { action: 'keep' },
+      })
+      const response = await handlePluginsApi(request.req, request.url, request.segments)
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual({ models: [{ id: 'draft-model' }] })
+      expect(requestDetails).toEqual({ url: 'https://OLD.example:443/v1/models', authorization: 'Bearer saved-secret' })
+
+      requestDetails = {}
+      const crossOrigin = makeRequest('POST', '/api/plugins/media-gen/fetch-models', {
+        providerId: 'saved', baseUrl: 'https://draft.example/v1', apiFormat: 'openai_compatible', apiKey: { action: 'keep' },
+      })
+      const rejected = await handlePluginsApi(crossOrigin.req, crossOrigin.url, crossOrigin.segments)
+      expect(rejected.status).toBe(400)
+      expect(await rejected.text()).toMatch(/re-enter|重新输入/i)
+      expect(requestDetails).toEqual({})
+
+      const unknown = makeRequest('POST', '/api/plugins/media-gen/fetch-models', {
+        providerId: 'new-draft', baseUrl: 'https://old.example', apiFormat: 'openai_compatible', apiKey: { action: 'keep' },
+      })
+      expect((await handlePluginsApi(unknown.req, unknown.url, unknown.segments)).status).toBe(400)
+      expect(requestDetails).toEqual({})
+    } finally { globalThis.fetch = originalFetch }
+  })
+
+  it('POST fetch-models replacement key overrides storage and clear never falls back', async () => {
+    const config = makeRequest('PUT', '/api/plugins/media-gen/config', { schemaVersion: 3, providers: [{
+      id: 'saved', name: 'Saved', enabled: true, apiFormat: 'openai_compatible', baseUrl: 'https://old.example', models: {},
+      apiKey: { action: 'replace', value: 'old-secret' },
+    }] })
+    await handlePluginsApi(config.req, config.url, config.segments)
+    const originalFetch = globalThis.fetch
+    let authorization = ''
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      authorization = new Headers(init?.headers).get('Authorization') ?? ''
+      return new Response(JSON.stringify([{ id: 'model' }]), { status: 200 })
+    }) as typeof fetch
+    try {
+      const replace = makeRequest('POST', '/api/plugins/media-gen/fetch-models', {
+        providerId: 'saved', baseUrl: 'https://draft.example', apiFormat: 'openai_compatible', apiKey: { action: 'replace', value: 'new-secret' },
+      })
+      expect((await handlePluginsApi(replace.req, replace.url, replace.segments)).status).toBe(200)
+      expect(authorization).toBe('Bearer new-secret')
+      const clear = makeRequest('POST', '/api/plugins/media-gen/fetch-models', {
+        providerId: 'saved', baseUrl: 'https://draft.example', apiFormat: 'openai_compatible', apiKey: { action: 'clear' },
+      })
+      expect((await handlePluginsApi(clear.req, clear.url, clear.segments)).status).toBe(400)
+    } finally { globalThis.fetch = originalFetch }
+  })
+
+  it('POST fetch-models rejects extra fields, nested secret fields, and non-http URLs', async () => {
+    const valid = { providerId: 'draft', baseUrl: 'https://draft.example', apiFormat: 'openai_compatible', apiKey: { action: 'replace', value: 'secret' } }
+    for (const body of [
+      { ...valid, secret: 'leak' },
+      { ...valid, apiKey: { action: 'replace', value: 'secret', token: 'leak' } },
+      { ...valid, apiKey: { action: 'keep', value: 'leak' } },
+      { ...valid, apiKey: { action: 'clear', value: 'leak' } },
+      { ...valid, apiKey: { action: 'replace', value: '' } },
+      { ...valid, baseUrl: 'file:///tmp/models' },
+    ]) {
+      const request = makeRequest('POST', '/api/plugins/media-gen/fetch-models', body)
+      expect((await handlePluginsApi(request.req, request.url, request.segments)).status).toBe(400)
+    }
+  })
+
+  it('PUT accepts an unnamed partial provider with one model and GET does not expose its key', async () => {
+    const put = makeRequest('PUT', '/api/plugins/media-gen/config', { schemaVersion: 3, providers: [{
+      id: 'unnamed', name: '', enabled: true, apiFormat: 'openai_compatible', baseUrl: 'https://example.com/v1',
+      models: { imageGeneration: 'image-model' }, apiKey: { action: 'replace', value: 'private-key' },
+    }] })
+    expect((await handlePluginsApi(put.req, put.url, put.segments)).status).toBe(200)
+
+    const get = makeRequest('GET', '/api/plugins/media-gen/config')
+    const response = await handlePluginsApi(get.req, get.url, get.segments)
+    const body = await response.json()
+    expect(response.status).toBe(200)
+    expect(body).toEqual({ schemaVersion: 3, providers: [{
+      id: 'unnamed', name: '', enabled: true, apiFormat: 'openai_compatible', baseUrl: 'https://example.com/v1',
+      models: { imageGeneration: 'image-model' }, apiKeyConfigured: true,
+    }] })
+    expect(JSON.stringify(body)).not.toContain('private-key')
+  })
+
   it('PUT validates providers and supports API key replace, keep, clear, and deletion cleanup', async () => {
     const put = async (providers: unknown[]) => {
-      const request = makeRequest('PUT', '/api/plugins/media-gen/config', { schemaVersion: 2, providers })
+      const request = makeRequest('PUT', '/api/plugins/media-gen/config', { schemaVersion: 3, providers })
       return handlePluginsApi(request.req, request.url, request.segments)
     }
     const provider = { id: 'provider-one', name: 'One', enabled: false, apiFormat: 'openai_compatible', baseUrl: 'http://127.0.0.1:8080/v1', models: { imageGeneration: 'flux' } }
@@ -947,7 +1064,7 @@ describe('Media-gen provider config API', () => {
 
   it('PUT enforces per-key and serialized API key UTF-8 byte limits', async () => {
     const put = async (providers: unknown[]) => {
-      const request = makeRequest('PUT', '/api/plugins/media-gen/config', { schemaVersion: 2, providers })
+      const request = makeRequest('PUT', '/api/plugins/media-gen/config', { schemaVersion: 3, providers })
       return handlePluginsApi(request.req, request.url, request.segments)
     }
     const provider = { name: 'One', enabled: true, apiFormat: 'openai_compatible', baseUrl: 'https://example.com/v1', models: {} }

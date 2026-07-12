@@ -391,7 +391,7 @@ export async function extractMcpServersFromPlugins(
         const userConfig = buildMcpUserConfig(plugin, name)
         try {
           const resolved = resolvePluginMcpEnvironment(
-            config,
+            withoutLegacyMediaGenEnv(plugin, name, config),
             plugin,
             userConfig,
             errors,
@@ -401,7 +401,7 @@ export async function extractMcpServersFromPlugins(
           if (!resolved.type || resolved.type === 'stdio') {
             resolved.env = {
               ...resolved.env,
-              ...buildMediaGenRuntimeEnv(plugin, name, config),
+              ...await buildMediaGenRuntimeEnv(plugin, name, config),
             }
           }
           resolvedServers[name] = resolved
@@ -449,11 +449,21 @@ export async function extractMcpServersFromPlugins(
  * Returns undefined when neither source has anything — resolvePluginMcpEnvironment
  * skips substituteUserConfigVariables in that case.
  */
-function buildMediaGenRuntimeEnv(
+function withoutLegacyMediaGenEnv(
   plugin: LoadedPlugin,
   serverName: string,
   config: McpServerConfig,
-): Record<string, string> {
+): McpServerConfig {
+  if (plugin.repository !== MEDIA_GEN_PLUGIN_ID || serverName !== 'media-gen') return config
+  const { env: _, ...configWithoutLegacyEnv } = config
+  return configWithoutLegacyEnv as McpServerConfig
+}
+
+async function buildMediaGenRuntimeEnv(
+  plugin: LoadedPlugin,
+  serverName: string,
+  config: McpServerConfig,
+): Promise<Record<string, string>> {
   if (
     plugin.repository !== MEDIA_GEN_PLUGIN_ID ||
     serverName !== 'media-gen' ||
@@ -465,14 +475,20 @@ function buildMediaGenRuntimeEnv(
   const mediaConfig = getMediaGenConfig()
   const providers = mediaConfig.providers.map(({ apiKeyConfigured: _, ...provider }) => provider)
   const secrets = Object.fromEntries(
-    mediaConfig.providers.flatMap(provider => {
-      if (!provider.apiKeyConfigured) return []
+    (await Promise.all(mediaConfig.providers.map(async provider => {
+      if (!provider.enabled || !provider.apiKeyConfigured) return null
       try {
-        return [[provider.id, getMediaGenProviderCredentials(provider.id).apiKey]]
+        const credentials = await getMediaGenProviderCredentials({
+          providerId: provider.id,
+          baseUrl: provider.baseUrl,
+          apiFormat: provider.apiFormat,
+          apiKey: { action: 'keep' },
+        })
+        return [provider.id, credentials.apiKey] as const
       } catch {
-        return []
+        return null
       }
-    }),
+    }))).filter((entry): entry is readonly [string, string] => entry !== null),
   )
   return {
     MEDIA_GEN_PROVIDERS_JSON: JSON.stringify({
@@ -658,7 +674,7 @@ export async function getPluginMcpServers(
     const userConfig = buildMcpUserConfig(plugin, name)
     try {
       const resolved = resolvePluginMcpEnvironment(
-        config,
+        withoutLegacyMediaGenEnv(plugin, name, config),
         plugin,
         userConfig,
         errors,
@@ -668,7 +684,7 @@ export async function getPluginMcpServers(
       if (!resolved.type || resolved.type === 'stdio') {
         resolved.env = {
           ...resolved.env,
-          ...buildMediaGenRuntimeEnv(plugin, name, config),
+          ...await buildMediaGenRuntimeEnv(plugin, name, config),
         }
       }
       resolvedServers[name] = resolved

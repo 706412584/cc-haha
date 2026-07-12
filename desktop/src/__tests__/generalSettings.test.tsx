@@ -1707,7 +1707,6 @@ describe('Settings > Providers tab', () => {
     fireEvent.click(screen.getByRole('button', { name: /Add Provider/i }))
 
     const dialog = screen.getByRole('dialog')
-    expect(within(dialog).queryByRole('combobox')).not.toBeInTheDocument()
 
     fireEvent.click(within(dialog).getByRole('button', { name: /Anthropic Messages \(native\)/i }))
     fireEvent.click(within(dialog).getByRole('button', { name: /OpenAI Responses API \(proxy\)/i }))
@@ -2166,6 +2165,35 @@ describe('Settings > Providers tab', () => {
         CLAUDE_CODE_MODEL_CONTEXT_WINDOWS: '{"claude-sonnet-4-6":1000000}',
       }),
     }))
+  })
+
+  it('shows only the API key link for a provider preset with promotional copy', () => {
+    providerStoreState.presets = [
+      {
+        id: 'minimax',
+        name: 'MiniMax',
+        baseUrl: 'https://api.minimaxi.com/anthropic',
+        apiFormat: 'anthropic',
+        defaultModels: {
+          main: 'MiniMax-M2.7',
+          haiku: '',
+          sonnet: '',
+          opus: '',
+        },
+        needsApiKey: true,
+        websiteUrl: 'https://www.minimaxi.com',
+        apiKeyUrl: 'https://platform.minimaxi.com/user-center/basic-information/interface-key',
+        promoText: 'Sign up with this promotional offer',
+      },
+    ]
+
+    render(<Settings />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Add Provider/i }))
+    const dialog = screen.getByRole('dialog')
+
+    expect(within(dialog).getByRole('button', { name: /Get API Key/ })).toBeInTheDocument()
+    expect(within(dialog).queryByText('Sign up with this promotional offer')).not.toBeInTheDocument()
   })
 
   it('hides the API key by default and reveals it from the eye button', () => {
