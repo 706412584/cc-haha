@@ -47,6 +47,7 @@ const harness = String.raw`
     reportPayloads: [],
     serverPlans: [],
     fetchMock: null,
+    killedTunnelChildren: [],
   }
 
   function makeChild(pid) {
@@ -81,7 +82,7 @@ const harness = String.raw`
       env: {},
     }),
     formatStartupError: (msg) => msg,
-    killSidecar: () => {},
+    killSidecar: (child) => state.killedTunnelChildren.push(child),
     mergeProxyEnv: (env) => env,
     POWERSHELL_PATH_OVERRIDE_ENV: 'CLAUDE_CODE_POWERSHELL_PATH',
     preferredServerPorts: () => [],
@@ -131,6 +132,7 @@ const harness = String.raw`
     state.tunnelChildren = []
     state.reportPayloads = []
     state.serverPlans = []
+    state.killedTunnelChildren = []
     state.fetchMock = async (_url, init) => {
       if (init?.body && typeof init.body === 'string') {
         state.reportPayloads.push(JSON.parse(init.body))
@@ -219,6 +221,174 @@ describe('ElectronServerRuntime tunnel lifecycle', () => {
 
         assert(urlsHit.some((url) => url.endsWith('/api/h5-access/tunnel/clear')), 'stopTunnel did not call /api/h5-access/tunnel/clear')
       })
+    `)
+  })
+
+  it('clears the server URL when the active cloudflared exits unexpectedly', async () => {
+    await expectIsolatedPass(String.raw`
+      await withRuntime(async (runtime) => {
+        const urlsHit = []
+        globalThis.fetch = async (url, init) => {
+          urlsHit.push(String(url))
+          if (init?.body && typeof init.body === 'string') {
+            state.reportPayloads.push(JSON.parse(init.body))
+          }
+          return new Response(null, { status: 200 })
+        }
+
+        const started = runtime.startTunnel({ mode: 'quick' })
+        const child = await waitForTunnelChild(0)
+        child.emitUrl('https://active-exit.trycloudflare.com')
+        await started
+        child.emit('exit', 1, null)
+        await new Promise((resolve) => setTimeout(resolve, 10))
+
+        assert(urlsHit.some((url) => url.endsWith('/api/h5-access/tunnel/clear')), 'unexpected exit did not clear the server URL')
+        assertEqual(runtime.getTunnelStatus(), {
+          status: 'error',
+          url: null,
+          mode: 'quick',
+          error: 'cloudflared exited unexpectedly (code=1, signal=null)',
+        }, 'unexpected exit status mismatch')
+      })
+    `)
+  })
+
+  it('marks a quick tunnel unavailable after three consecutive public health failures', async () => {
+    await expectIsolatedPass(String.raw`
+      const scheduled = []
+      const setTimeoutFn = (fn) => {
+        scheduled.push(fn)
+        return scheduled.length
+      }
+      const clearTimeoutFn = () => {}
+
+      await withRuntime(async (runtime) => {
+        const urlsHit = []
+        globalThis.fetch = async (url, init) => {
+          urlsHit.push(String(url))
+          if (String(url).includes('trycloudflare.com/health')) {
+            return new Response(null, { status: 524 })
+          }
+          if (init?.body && typeof init.body === 'string') {
+            state.reportPayloads.push(JSON.parse(init.body))
+          }
+          return new Response(null, { status: 200 })
+        }
+
+        const started = runtime.startTunnel({ mode: 'quick' })
+        const child = await waitForTunnelChild(0)
+        child.emitUrl('https://health-failure.trycloudflare.com')
+        await started
+
+        for (let index = 0; index < 3; index += 1) {
+          const callback = scheduled.shift()
+          assert(callback, 'health check was not scheduled')
+          await callback()
+        }
+
+        assertEqual(runtime.getTunnelStatus(), {
+          status: 'error',
+          url: null,
+          mode: 'quick',
+          error: 'Cloudflare tunnel became unreachable after 3 consecutive health check failures (HTTP 524).',
+        }, 'health failure status mismatch')
+        assert(state.killedTunnelChildren.includes(child), 'unhealthy tunnel child was not stopped')
+        assert(urlsHit.some((url) => url.endsWith('/api/h5-access/tunnel/clear')), 'unhealthy tunnel did not clear the server URL')
+      }, { setTimeoutFn, clearTimeoutFn })
+    `)
+  })
+
+  it('resets the quick tunnel health failure count after a successful check', async () => {
+    await expectIsolatedPass(String.raw`
+      const scheduled = []
+      const setTimeoutFn = (fn) => {
+        scheduled.push(fn)
+        return scheduled.length
+      }
+      const clearTimeoutFn = () => {}
+
+      await withRuntime(async (runtime) => {
+        const healthStatuses = [524, 200, 524, 524]
+        const urlsHit = []
+        globalThis.fetch = async (url, init) => {
+          urlsHit.push(String(url))
+          if (String(url).includes('trycloudflare.com/health')) {
+            return new Response(null, { status: healthStatuses.shift() ?? 524 })
+          }
+          if (init?.body && typeof init.body === 'string') {
+            state.reportPayloads.push(JSON.parse(init.body))
+          }
+          return new Response(null, { status: 200 })
+        }
+
+        const started = runtime.startTunnel({ mode: 'quick' })
+        const child = await waitForTunnelChild(0)
+        child.emitUrl('https://health-reset.trycloudflare.com')
+        await started
+
+        for (let index = 0; index < 4; index += 1) {
+          const callback = scheduled.shift()
+          assert(callback, 'health check was not scheduled')
+          await callback()
+        }
+
+        assertEqual(runtime.getTunnelStatus(), {
+          status: 'running',
+          url: 'https://health-reset.trycloudflare.com',
+          mode: 'quick',
+          error: null,
+        }, 'a successful health check should reset the consecutive failure count')
+        assert(!state.killedTunnelChildren.includes(child), 'tunnel was stopped even though failures were not consecutive')
+        assert(!urlsHit.some((url) => url.endsWith('/api/h5-access/tunnel/clear')), 'non-consecutive failures cleared the server URL')
+      }, { setTimeoutFn, clearTimeoutFn })
+    `)
+  })
+
+  it('ignores an old tunnel health callback after a new tunnel starts', async () => {
+    await expectIsolatedPass(String.raw`
+      const scheduled = []
+      const setTimeoutFn = (fn) => {
+        scheduled.push(fn)
+        return scheduled.length
+      }
+      const clearTimeoutFn = () => {}
+
+      await withRuntime(async (runtime) => {
+        let healthFetches = 0
+        globalThis.fetch = async (url, init) => {
+          if (String(url).includes('trycloudflare.com/health')) {
+            healthFetches += 1
+            return new Response(null, { status: 524 })
+          }
+          if (init?.body && typeof init.body === 'string') {
+            state.reportPayloads.push(JSON.parse(init.body))
+          }
+          return new Response(null, { status: 200 })
+        }
+
+        const first = runtime.startTunnel({ mode: 'quick' })
+        const oldChild = await waitForTunnelChild(0)
+        oldChild.emitUrl('https://old-health.trycloudflare.com')
+        await first
+        const oldHealthCallback = scheduled.shift()
+        assert(oldHealthCallback, 'old health check was not scheduled')
+
+        const second = runtime.startTunnel({ mode: 'quick' })
+        const newChild = await waitForTunnelChild(1)
+        newChild.emitUrl('https://new-health.trycloudflare.com')
+        await second
+
+        await oldHealthCallback()
+
+        assert(healthFetches === 0, 'stale health callback should not probe the old public URL')
+        assertEqual(runtime.getTunnelStatus(), {
+          status: 'running',
+          url: 'https://new-health.trycloudflare.com',
+          mode: 'quick',
+          error: null,
+        }, 'stale health callback clobbered the new tunnel')
+      }, { setTimeoutFn, clearTimeoutFn })
     `)
   })
 

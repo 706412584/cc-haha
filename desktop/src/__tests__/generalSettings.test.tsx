@@ -2421,4 +2421,70 @@ describe('Settings > About tab', () => {
     expect(within(section).getByTestId('h5-access-tunnel-status')).toHaveTextContent('https://abcd.trycloudflare.com')
     expect(within(section).getByTestId('h5-access-tunnel-toggle')).toHaveTextContent('Stop tunnel')
   })
+
+  it('stops polling H5 tunnel diagnostics after the tunnel reaches an error state', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(h5AccessApi, 'tunnelAvailable').mockReturnValue(true)
+    const fetchH5Access = vi.fn().mockImplementation(async () => {
+      useSettingsStore.setState({
+        h5AccessDiagnostics: {
+          storedHostStaleness: 'proxy',
+          storedPublicBaseUrl: null,
+          effectivePublicBaseUrl: null,
+          suggestedHost: null,
+          localInterfaceHosts: [],
+          activePort: 3456,
+          tunnel: {
+            status: 'error',
+            url: null,
+            mode: 'quick',
+            error: 'Cloudflare tunnel became unreachable after 3 consecutive health check failures (HTTP 524).',
+            hasToken: false,
+          },
+        },
+      })
+    })
+    useSettingsStore.setState({
+      h5Access: {
+        enabled: true,
+        token: 'h5_tunnel_token',
+        tokenPreview: 'h5_tunn...oken',
+        allowedOrigins: [],
+        publicBaseUrl: 'https://abcd.trycloudflare.com',
+        fixedPort: null,
+        disconnectGraceSeconds: null,
+      },
+      h5AccessDiagnostics: {
+        storedHostStaleness: 'proxy',
+        storedPublicBaseUrl: null,
+        effectivePublicBaseUrl: 'https://abcd.trycloudflare.com',
+        suggestedHost: null,
+        localInterfaceHosts: [],
+        activePort: 3456,
+        tunnel: {
+          status: 'running',
+          url: 'https://abcd.trycloudflare.com',
+          mode: 'quick',
+          error: null,
+          hasToken: false,
+        },
+      },
+      fetchH5Access,
+    })
+    render(<Settings />)
+
+    fireEvent.click(screen.getByText('H5 Access'))
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000)
+    })
+    expect(fetchH5Access).toHaveBeenCalledTimes(1)
+    const section = screen.getByRole('region', { name: 'H5 Access' })
+    expect(within(section).getByTestId('h5-access-tunnel-status')).toHaveTextContent('Cloudflare tunnel became unreachable')
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000)
+    })
+    expect(fetchH5Access).toHaveBeenCalledTimes(1)
+  })
 })
