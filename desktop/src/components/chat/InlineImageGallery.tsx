@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react'
 import { ImageGalleryModal } from './ImageGalleryModal'
+import { ImageAnnotationModal } from './ImageAnnotationModal'
 import { getBaseUrl } from '../../api/client'
+import { useChatStore } from '../../stores/chatStore'
 import { extractAssistantOutputTargets } from '../../lib/assistantOutputTargets'
 import { previewFsUrl } from '../../lib/handlePreviewLink'
 import { getServerBaseUrl } from '../../lib/desktopRuntime'
@@ -56,6 +58,7 @@ type Props = {
 
 export function InlineImageGallery({ text, sessionId, workDir }: Props) {
   const [activeIndex, setActiveIndex] = useState<number | null>(null)
+  const [annotationTarget, setAnnotationTarget] = useState<GalleryImage | null>(null)
 
   const imagePaths = useMemo(() => extractImagePaths(text), [text])
 
@@ -100,6 +103,23 @@ export function InlineImageGallery({ text, sessionId, workDir }: Props) {
   }, [imagePaths, sessionId, text, workDir])
 
   if (images.length === 0) return null
+
+  const saveAnnotatedImage = (dataUrl: string) => {
+    if (!sessionId || !annotationTarget) return
+    useChatStore.getState().queueComposerPrefill(sessionId, {
+      text: '',
+      mode: 'append',
+      attachments: [{
+        type: 'image',
+        name: annotationTarget.name.replace(/(\.[^.]+)?$/, '-annotated.png'),
+        data: dataUrl,
+        previewUrl: dataUrl,
+        mimeType: 'image/png',
+      }],
+    })
+    setAnnotationTarget(null)
+    setActiveIndex(null)
+  }
 
   return (
     <>
@@ -149,8 +169,19 @@ export function InlineImageGallery({ text, sessionId, workDir }: Props) {
           activeIndex={activeIndex}
           onClose={() => setActiveIndex(null)}
           onSelect={setActiveIndex}
+          onAnnotate={sessionId ? (image) => {
+            setActiveIndex(null)
+            setAnnotationTarget(image)
+          } : undefined}
         />
       )}
+
+      <ImageAnnotationModal
+        open={!!annotationTarget}
+        image={annotationTarget}
+        onClose={() => setAnnotationTarget(null)}
+        onSave={saveAnnotatedImage}
+      />
     </>
   )
 }
