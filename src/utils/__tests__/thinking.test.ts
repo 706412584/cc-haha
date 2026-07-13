@@ -41,13 +41,11 @@ describe('provider-aware thinking support', () => {
     restoreEnv('CLAUDE_CODE_USE_VERTEX', originalVertex)
     restoreEnv('CLAUDE_CODE_USE_FOUNDRY', originalFoundry)
     restoreEnv('CC_HAHA_SEND_DISABLED_THINKING', originalExplicitDisabledThinking)
-    clearCapabilityCache()
   })
 
   test('does not assume adaptive thinking for Anthropic-compatible third-party base URLs', () => {
     process.env.ANTHROPIC_BASE_URL = 'https://api.jiekou.ai/anthropic'
     delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES
-    clearCapabilityCache()
 
     expect(modelSupportsAdaptiveThinking('claude-sonnet-4-6')).toBe(false)
   })
@@ -56,7 +54,6 @@ describe('provider-aware thinking support', () => {
     process.env.ANTHROPIC_BASE_URL = 'https://api.jiekou.ai/anthropic'
     process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'claude-sonnet-4-6'
     process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES = 'none'
-    clearCapabilityCache()
 
     expect(get3PModelCapabilityOverride('claude-sonnet-4-6', 'thinking')).toBe(false)
     expect(modelSupportsThinking('claude-sonnet-4-6')).toBe(false)
@@ -66,7 +63,6 @@ describe('provider-aware thinking support', () => {
   test('keeps first-party Anthropic Sonnet adaptive thinking enabled', () => {
     process.env.ANTHROPIC_BASE_URL = 'https://api.anthropic.com'
     delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES
-    clearCapabilityCache()
 
     expect(modelSupportsThinking('claude-sonnet-4-6')).toBe(true)
     expect(modelSupportsAdaptiveThinking('claude-sonnet-4-6')).toBe(true)
@@ -86,7 +82,6 @@ describe('provider-aware thinking support', () => {
     process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES =
       'thinking,effort,adaptive_thinking,max_effort'
     delete process.env.CC_HAHA_SEND_DISABLED_THINKING
-    clearCapabilityCache()
 
     expect(modelSupportsThinking('deepseek-v4-pro')).toBe(true)
     expect(modelSupportsAdaptiveThinking('deepseek-v4-pro')).toBe(true)
@@ -100,7 +95,6 @@ describe('provider-aware thinking support', () => {
     process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'MiniMax-M3[1m]'
     process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES =
       'thinking,adaptive_thinking'
-    clearCapabilityCache()
 
     expect(modelSupportsThinking('MiniMax-M3[1m]')).toBe(true)
     expect(modelSupportsAdaptiveThinking('MiniMax-M3[1m]')).toBe(true)
@@ -113,7 +107,6 @@ describe('provider-aware thinking support', () => {
     process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'kimi-k2.7-code'
     process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES =
       'thinking,required_thinking'
-    clearCapabilityCache()
 
     expect(modelSupportsThinking('kimi-k2.7-code')).toBe(true)
     expect(modelSupportsAdaptiveThinking('kimi-k2.7-code')).toBe(false)
@@ -139,8 +132,7 @@ describe('provider-aware thinking support', () => {
     for (const { baseUrl, model } of cases) {
       process.env.ANTHROPIC_BASE_URL = baseUrl
       delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES
-      clearCapabilityCache()
-      expect(modelSupportsThinking(model)).toBe(true)
+        expect(modelSupportsThinking(model)).toBe(true)
     }
   })
 
@@ -151,7 +143,6 @@ describe('provider-aware thinking support', () => {
     process.env.ANTHROPIC_BASE_URL = 'https://api.example-no-thinking.com/anthropic'
     process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'pinned-model-id'
     process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES = 'none'
-    clearCapabilityCache()
 
     expect(modelSupportsThinking('pinned-model-id')).toBe(false)
   })
@@ -159,10 +150,21 @@ describe('provider-aware thinking support', () => {
   test('third-party base URLs do not default unknown model names to effort support', () => {
     process.env.ANTHROPIC_BASE_URL = 'https://api.moonshot.cn/anthropic'
     delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES
-    clearCapabilityCache()
 
     expect(modelSupportsEffort('kimi-k2.6')).toBe(false)
     expect(modelSupportsMaxEffort('kimi-k2.6')).toBe(false)
+  })
+
+  test('reads updated capabilities for the same model without stale caching', () => {
+    process.env.ANTHROPIC_BASE_URL = 'https://api.example.com/anthropic'
+    process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'switching-model'
+    process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES =
+      'thinking,effort,max_effort'
+
+    expect(modelSupportsMaxEffort('switching-model')).toBe(true)
+
+    process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES = 'thinking'
+    expect(modelSupportsMaxEffort('switching-model')).toBe(false)
   })
 
   test('side queries inherit explicit disabled thinking for opted-in providers', () => {
@@ -182,10 +184,4 @@ function restoreEnv(key: string, value: string | undefined) {
   } else {
     process.env[key] = value
   }
-}
-
-function clearCapabilityCache() {
-  ;(get3PModelCapabilityOverride as typeof get3PModelCapabilityOverride & {
-    cache?: { clear?: () => void }
-  }).cache?.clear?.()
 }

@@ -78,6 +78,7 @@ import {
   createSystemStreamingFallbackMessage,
   createUserMessage,
   ensureToolResultPairing,
+  mergeAssistantMessages,
   normalizeContentFromAPI,
   normalizeMessagesForAPI,
   stripAdvisorBlocks,
@@ -784,7 +785,18 @@ export async function queryModelWithoutStreaming({
     );
   })) {
     if (message.type === "assistant") {
-      assistantMessage = message;
+      if (!assistantMessage) {
+        assistantMessage = message;
+      } else {
+        const merged = mergeAssistantMessages(assistantMessage, message);
+        assistantMessage = {
+          ...message,
+          message: {
+            ...message.message,
+            content: merged.message.content,
+          },
+        };
+      }
     }
   }
   if (!assistantMessage) {
@@ -1828,17 +1840,13 @@ async function* queryModel(
       ...((extraBodyParams.output_config as BetaOutputConfig) ?? {}),
     };
 
-    if (sendsExplicitDisabledThinking) {
-      delete outputConfig.effort
-    } else {
-      configureEffortParams(
-        effort,
-        outputConfig,
-        extraBodyParams,
-        betasParams,
-        options.model,
-      )
-    }
+    configureEffortParams(
+      effort,
+      outputConfig,
+      extraBodyParams,
+      betasParams,
+      options.model,
+    )
 
     configureTaskBudgetParams(
       options.taskBudget,

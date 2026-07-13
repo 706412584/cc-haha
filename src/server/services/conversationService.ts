@@ -12,7 +12,10 @@ import * as path from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import { ProviderService } from './providerService.js'
 import {
-  OPENAI_CODEX_OAUTH_FILE_ENV_KEY,
+  applyProviderRuntimeModel,
+  getManagedEnvKeys,
+} from './providerRuntimeEnv.js'
+import {
   OPENAI_OAUTH_PROVIDER_ENV_KEY,
   isOpenAIOfficialProviderId,
 } from './openaiOfficialProvider.js'
@@ -1169,25 +1172,9 @@ export class ConversationService {
     // If the user never configured a Desktop provider and only launched the
     // app/server with ANTHROPIC_* env vars, keep those env vars so Windows
     // dev-mode and env-only setups can still authenticate successfully.
-    const PROVIDER_ENV_KEYS = [
-      'ANTHROPIC_API_KEY',
-      'ANTHROPIC_BASE_URL',
-      'ANTHROPIC_AUTH_TOKEN',
-      'ENABLE_TOOL_SEARCH',
-      'ANTHROPIC_MODEL',
-      'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-      'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES',
-      'ANTHROPIC_DEFAULT_SONNET_MODEL',
-      'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES',
-      'ANTHROPIC_DEFAULT_OPUS_MODEL',
-      'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES',
+    const providerEnvKeys = [
+      ...getManagedEnvKeys(),
       'CC_HAHA_SEND_DISABLED_THINKING',
-      'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS',
-      'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
-      'CLAUDE_CODE_ATTRIBUTION_HEADER',
-      'CLAUDE_CODE_MODEL_CONTEXT_WINDOWS',
-      OPENAI_OAUTH_PROVIDER_ENV_KEY,
-      OPENAI_CODEX_OAUTH_FILE_ENV_KEY,
       OPENAI_CODEX_REASONING_EFFORT_ENV_KEY,
     ] as const
 
@@ -1200,7 +1187,7 @@ export class ConversationService {
     delete cleanEnv.CC_HAHA_TRACE_PROVIDER_NAME
     delete cleanEnv.CC_HAHA_TRACE_PROVIDER_FORMAT
     if (this.shouldStripInheritedProviderEnv(options?.providerId)) {
-      for (const key of PROVIDER_ENV_KEYS) {
+      for (const key of providerEnvKeys) {
         delete cleanEnv[key]
       }
     }
@@ -1225,7 +1212,7 @@ export class ConversationService {
     const networkEnv = buildNetworkEnvironment(await loadNetworkSettings(), cleanEnv)
     const traceCaptureEnabled = (await readTraceCaptureSettings()).enabled
     if (explicitProviderEnv && options?.model?.trim()) {
-      explicitProviderEnv.ANTHROPIC_MODEL = options.model.trim()
+      applyProviderRuntimeModel(explicitProviderEnv, options.model)
     }
     const attributionHeaderEnv = attributionHeaderEnvForModel(
       options?.model?.trim() ||
@@ -1419,23 +1406,8 @@ export class ConversationService {
       const parsed = JSON.parse(raw) as { env?: Record<string, string> }
       const env = parsed.env ?? {}
       return [
-        'ANTHROPIC_API_KEY',
-        'ANTHROPIC_BASE_URL',
-        'ANTHROPIC_AUTH_TOKEN',
-        'ENABLE_TOOL_SEARCH',
-        'ANTHROPIC_MODEL',
-        'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-        'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES',
-        'ANTHROPIC_DEFAULT_SONNET_MODEL',
-        'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES',
-        'ANTHROPIC_DEFAULT_OPUS_MODEL',
-        'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES',
+        ...getManagedEnvKeys(),
         'CC_HAHA_SEND_DISABLED_THINKING',
-        'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
-        'CLAUDE_CODE_ATTRIBUTION_HEADER',
-        'CLAUDE_CODE_MODEL_CONTEXT_WINDOWS',
-        OPENAI_OAUTH_PROVIDER_ENV_KEY,
-        OPENAI_CODEX_OAUTH_FILE_ENV_KEY,
       ].some((key) => typeof env[key] === 'string' && env[key]!.trim().length > 0)
     } catch {
       return false

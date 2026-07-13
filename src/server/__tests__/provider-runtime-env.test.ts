@@ -4,6 +4,7 @@ import * as os from 'os'
 import * as path from 'path'
 
 import {
+  applyProviderRuntimeModel,
   mergeActiveProviderManagedEnv,
   readActiveProviderManagedEnv,
 } from '../services/providerRuntimeEnv.js'
@@ -87,6 +88,7 @@ describe('providerRuntimeEnv', () => {
         ANTHROPIC_API_KEY: 'proxy-managed',
         ANTHROPIC_MODEL: 'deepseek-v4-pro',
         CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
+        CLAUDE_CODE_DISABLE_THINKING: '1',
         DISABLE_AUTOUPDATER: '1',
       },
       tmpDir,
@@ -103,6 +105,70 @@ describe('providerRuntimeEnv', () => {
       DISABLE_AUTOUPDATER: '1',
     })
     expect(env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS).toBeUndefined()
+    expect(env.CLAUDE_CODE_DISABLE_THINKING).toBeUndefined()
+  })
+
+  test('clears stale managed settings when the provider index has no active provider', async () => {
+    await writeJson(path.join(tmpDir, 'cc-haha', 'providers.json'), {
+      activeId: null,
+      providers: [],
+    })
+
+    const env = mergeActiveProviderManagedEnv(
+      {
+        ANTHROPIC_BASE_URL: 'https://stale.example.com',
+        ANTHROPIC_API_KEY: 'stale-key',
+        ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES: 'thinking,effort,max_effort',
+        CLAUDE_CODE_DISABLE_THINKING: '1',
+        DISABLE_AUTOUPDATER: '1',
+      },
+      tmpDir,
+    )
+
+    expect(env).toEqual({ DISABLE_AUTOUPDATER: '1' })
+  })
+
+  test('keeps settings env when no provider index exists', () => {
+    const settingsEnv = {
+      ANTHROPIC_BASE_URL: 'https://env-only.example.com',
+      ANTHROPIC_API_KEY: 'env-only-key',
+    }
+
+    expect(mergeActiveProviderManagedEnv(settingsEnv, tmpDir)).toEqual(settingsEnv)
+  })
+
+  test('switches active capabilities with the selected provider model', () => {
+    const env = {
+      ANTHROPIC_MODEL: 'main-model',
+      ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES: 'thinking,effort,max_effort',
+      ANTHROPIC_DEFAULT_SONNET_MODEL: 'sonnet-model',
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: 'thinking',
+    }
+
+    applyProviderRuntimeModel(env, 'sonnet-model')
+    expect(env.ANTHROPIC_MODEL).toBe('sonnet-model')
+    expect(env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES).toBe('thinking')
+
+    applyProviderRuntimeModel(env, 'unknown-model')
+    expect(env.ANTHROPIC_MODEL).toBe('unknown-model')
+    expect(env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES).toBeUndefined()
+  })
+
+  test('prefers active capabilities when multiple slots use the same model id', () => {
+    const env = {
+      ANTHROPIC_MODEL: 'shared-model',
+      ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES: 'thinking,effort,max_effort',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'shared-model',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES: 'thinking',
+      ANTHROPIC_DEFAULT_SONNET_MODEL: 'shared-model',
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: 'none',
+    }
+
+    applyProviderRuntimeModel(env, 'shared-model')
+
+    expect(env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES).toBe(
+      'thinking,effort,max_effort',
+    )
   })
 
   test('injects CLAUDE_CODE_DISABLE_THINKING when the provider is flagged thinkingIncompatible', async () => {

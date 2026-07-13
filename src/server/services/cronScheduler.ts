@@ -16,6 +16,7 @@ import { CronService, type CronTask } from './cronService.js'
 import { SessionService } from './sessionService.js'
 import { sendTaskNotification } from './notificationService.js'
 import { ProviderService } from './providerService.js'
+import { applyProviderRuntimeModel } from './providerRuntimeEnv.js'
 import { isProviderManagedEnvVar } from '../../utils/managedEnvConstants.js'
 import {
   buildClaudeCliArgs,
@@ -721,7 +722,7 @@ export class CronScheduler {
         ? await this.providerService.getProviderRuntimeEnv(task.providerId)
         : null
     if (explicitProviderEnv && task.model?.trim()) {
-      explicitProviderEnv.ANTHROPIC_MODEL = task.model.trim()
+      applyProviderRuntimeModel(explicitProviderEnv, task.model)
     }
     const attributionHeaderEnv = attributionHeaderEnvForModel(
       task.model?.trim() ||

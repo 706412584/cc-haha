@@ -41,4 +41,14 @@ describe('provider managed env compatibility', () => {
   test('treats attribution header routing as provider-managed env', () => {
     expect(isProviderManagedEnvVar('CLAUDE_CODE_ATTRIBUTION_HEADER')).toBe(true)
   })
+
+  test('treats active model capabilities as provider-managed env', () => {
+    expect(isProviderManagedEnvVar('ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES')).toBe(
+      true,
+    )
+  })
+
+  test('treats the thinking compatibility override as provider-managed env', () => {
+    expect(isProviderManagedEnvVar('CLAUDE_CODE_DISABLE_THINKING')).toBe(true)
+  })
 })

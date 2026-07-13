@@ -29,7 +29,9 @@ export const MANAGED_PROVIDER_ENV_KEYS = [
   'ANTHROPIC_AUTH_TOKEN',
   'ENABLE_TOOL_SEARCH',
   'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS',
+  'CLAUDE_CODE_DISABLE_THINKING',
   'ANTHROPIC_MODEL',
+  'ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES',
   'ANTHROPIC_DEFAULT_HAIKU_MODEL',
   'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES',
   'ANTHROPIC_DEFAULT_SONNET_MODEL',
@@ -341,19 +343,39 @@ export function buildProviderManagedEnv(
   }
 
   const presetDefaultEnv = getPresetDefaultEnv(provider.presetId)
+  const preset = PROVIDER_PRESETS.find((entry) => entry.id === provider.presetId)
   const customProviderCapabilities = getCustomProviderModelCapabilities(provider, models)
-  const customProviderCapabilityEnv =
-    provider.presetId === 'custom'
-      ? {
-          ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES: customProviderCapabilities,
-          ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: customProviderCapabilities,
-          ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES: customProviderCapabilities,
-        }
-      : {}
+  const capabilitiesForSlot = (
+    slot: typeof MODEL_SLOTS[number],
+    envKey: string,
+  ): string | undefined =>
+    provider.presetId === 'custom' || models[slot] !== preset?.defaultModels[slot]
+      ? customProviderCapabilities
+      : presetDefaultEnv[envKey]
+  const modelCapabilityEnv = {
+    ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES: capabilitiesForSlot(
+      'main',
+      'ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES',
+    ),
+    ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES: capabilitiesForSlot(
+      'haiku',
+      'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES',
+    ),
+    ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: capabilitiesForSlot(
+      'sonnet',
+      'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES',
+    ),
+    ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES: capabilitiesForSlot(
+      'opus',
+      'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES',
+    ),
+  }
 
   return {
     ...omitAuthEnv(presetDefaultEnv),
-    ...customProviderCapabilityEnv,
+    ...Object.fromEntries(
+      Object.entries(modelCapabilityEnv).filter(([, value]) => value !== undefined),
+    ),
     ...(provider.autoCompactWindow !== undefined && {
       CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(provider.autoCompactWindow),
     }),
@@ -384,45 +406,74 @@ export function buildProviderManagedEnv(
   }
 }
 
-export function readActiveProviderManagedEnv(
-  configDir: string,
-  options?: { serverPort?: number },
-): Record<string, string> | null {
+export function applyProviderRuntimeModel(
+  env: Record<string, string>,
+  model: string,
+): void {
+  const normalizedModel = model.trim()
+  const activeCapabilities =
+    env.ANTHROPIC_MODEL?.toLowerCase() === normalizedModel.toLowerCase()
+      ? env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES
+      : undefined
+  env.ANTHROPIC_MODEL = normalizedModel
+
+  const matchingSlot = [
+    ['ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES'],
+    ['ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES'],
+    ['ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES'],
+  ].find(([modelKey]) => env[modelKey]?.toLowerCase() === normalizedModel.toLowerCase())
+
+  const capabilities = activeCapabilities ?? (matchingSlot ? env[matchingSlot[1]!] : undefined)
+  if (capabilities === undefined) {
+    delete env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES
+  } else {
+    env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES = capabilities
+  }
+}
+
+function readProvidersIndex(configDir: string): ProvidersIndex | null {
   try {
     const raw = fs.readFileSync(path.join(configDir, 'cc-haha', 'providers.json'), 'utf-8')
-    const index = normalizeProvidersIndex(JSON.parse(raw))
-    if (!index?.activeId) return null
-
-    if (isOpenAIOfficialProviderId(index.activeId)) {
-      return buildOpenAIOfficialRuntimeEnv()
-    }
-
-    const provider = index.providers.find((entry) => entry.id === index.activeId)
-    if (!provider) return null
-
-    return buildProviderManagedEnv(provider, {
-      serverPort: options?.serverPort,
-    })
+    return normalizeProvidersIndex(JSON.parse(raw))
   } catch {
     return null
   }
 }
 
+function buildActiveProviderManagedEnv(
+  index: ProvidersIndex,
+  options?: { serverPort?: number },
+): Record<string, string> | null {
+  if (!index.activeId) return null
+
+  if (isOpenAIOfficialProviderId(index.activeId)) {
+    return buildOpenAIOfficialRuntimeEnv()
+  }
+
+  const provider = index.providers.find((entry) => entry.id === index.activeId)
+  if (!provider) return null
+
+  return buildProviderManagedEnv(provider, {
+    serverPort: options?.serverPort,
+  })
+}
+
+export function readActiveProviderManagedEnv(
+  configDir: string,
+  options?: { serverPort?: number },
+): Record<string, string> | null {
+  const index = readProvidersIndex(configDir)
+  return index ? buildActiveProviderManagedEnv(index, options) : null
+}
+
 export function activeProviderNeedsProxy(configDir: string): boolean {
-  try {
-    const raw = fs.readFileSync(path.join(configDir, 'cc-haha', 'providers.json'), 'utf-8')
-    const index = normalizeProvidersIndex(JSON.parse(raw))
-    if (!index?.activeId || isOpenAIOfficialProviderId(index.activeId)) {
-      return false
-    }
-
-    const provider = index.providers.find((entry) => entry.id === index.activeId)
-    if (!provider) return false
-
-    return (provider.apiFormat ?? 'anthropic') !== 'anthropic'
-  } catch {
+  const index = readProvidersIndex(configDir)
+  if (!index?.activeId || isOpenAIOfficialProviderId(index.activeId)) {
     return false
   }
+
+  const provider = index.providers.find((entry) => entry.id === index.activeId)
+  return (provider?.apiFormat ?? 'anthropic') !== 'anthropic'
 }
 
 export function mergeActiveProviderManagedEnv(
@@ -430,10 +481,8 @@ export function mergeActiveProviderManagedEnv(
   configDir: string,
   options?: { serverPort?: number },
 ): Record<string, string> {
-  const activeProviderEnv = readActiveProviderManagedEnv(configDir, options)
-  if (!activeProviderEnv) {
-    return settingsEnv
-  }
+  const index = readProvidersIndex(configDir)
+  if (!index) return settingsEnv
 
   const cleanedEnv = { ...settingsEnv }
   for (const key of getManagedEnvKeys()) {
@@ -441,6 +490,6 @@ export function mergeActiveProviderManagedEnv(
   }
   return {
     ...cleanedEnv,
-    ...activeProviderEnv,
+    ...(buildActiveProviderManagedEnv(index, options) ?? {}),
   }
 }
