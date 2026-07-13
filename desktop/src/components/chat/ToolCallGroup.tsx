@@ -1,6 +1,6 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { BookMarked, ChevronDown, ChevronRight, Settings } from 'lucide-react'
-import { ToolCallBlock } from './ToolCallBlock'
+import { ImageBlockGallery, ToolCallBlock, type ImageBlock } from './ToolCallBlock'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
 import { Modal } from '../shared/Modal'
 import { useTranslation } from '../../i18n'
@@ -573,6 +573,8 @@ function AgentCallCard({
   const terminalTaskSummary = status === 'done' || status === 'stopped' ? taskSummary : ''
   const previewText = terminalTaskReport || fullOutputText || terminalTaskSummary
   const outputSummary = previewText ? getAgentOutputSummary(previewText) : ''
+  const agentType = typeof input.subagent_type === 'string' ? input.subagent_type : ''
+  const inlineImages = agentType.includes('media-gen') ? extractMediaAgentImages(previewText) : []
   const description = typeof input.description === 'string' ? input.description : ''
   const openRunTitle = description.trim() || 'Agent'
   const canOpenRun = showOpenRun && !!sessionId && !!toolCall.toolUseId
@@ -652,6 +654,12 @@ function AgentCallCard({
           </span>
         </button>
       </div>
+
+      {inlineImages.length > 0 && (
+        <div className="border-t border-[var(--color-border)]/60 px-3 py-3">
+          <ImageBlockGallery imageBlocks={inlineImages} />
+        </div>
+      )}
 
       {expanded && (
         <div className="border-t border-[var(--color-border)]/60 px-3 py-3">
@@ -1087,6 +1095,23 @@ function stripAgentResultMetadata(text: string): string {
     .replace(/^\s*(?:total_tokens|tool_uses|duration_ms):\s*\d+\s*$/gm, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
+}
+
+function extractMediaAgentImages(text: string): ImageBlock[] {
+  if (!text) return []
+
+  const urls = new Set<string>()
+  const patterns = [
+    /!\[[^\]]*\]\((https?:\/\/[^\s)]+)(?:\s+["'][^"']*["'])?\)/gi,
+    /^URL:\s*(https?:\/\/\S+)\s*$/gim,
+  ]
+  for (const pattern of patterns) {
+    let match: RegExpExecArray | null
+    while ((match = pattern.exec(text)) !== null && urls.size < 8) {
+      urls.add(match[1]!)
+    }
+  }
+  return [...urls].map((src) => ({ src, mimeType: 'image/png' }))
 }
 
 function isAgentLaunchResult(content: unknown): boolean {
