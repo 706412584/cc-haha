@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { ThinkingBlock } from './ThinkingBlock'
 import { ToolCallBlock } from './ToolCallBlock'
+import { ToolCallGroup } from './ToolCallGroup'
+import type { UIMessage } from '../../types/chat'
 import { PermissionDialog } from './PermissionDialog'
 import { useChatStore } from '../../stores/chatStore'
 import { useSettingsStore } from '../../stores/settingsStore'
@@ -68,6 +70,72 @@ describe('chat blocks', () => {
 
     expect(container.textContent).not.toContain('line-1')
     expect(container.textContent).not.toContain('line-11')
+  })
+
+  it('shows a media agent image through the real Agent group path', () => {
+    const toolCall: Extract<UIMessage, { type: 'tool_use' }> = {
+      id: 'agent-call',
+      type: 'tool_use',
+      toolName: 'Agent',
+      toolUseId: 'agent-1',
+      input: { subagent_type: 'media-gen:media-gen-agent', description: 'Generate image' },
+      timestamp: 1,
+    }
+    const result: Extract<UIMessage, { type: 'tool_result' }> = {
+      id: 'agent-result',
+      type: 'tool_result',
+      toolUseId: 'agent-1',
+      content: [{
+        type: 'text',
+        text: '生成成功。\n![generated](https://cdn.example.com/generated/image-123.png "preview")\nURL: https://cdn.example.com/generated/image-123.png',
+      }],
+      isError: false,
+      timestamp: 2,
+    }
+
+    render(
+      <ToolCallGroup
+        toolCalls={[toolCall]}
+        resultMap={new Map([['agent-1', result]])}
+        childToolCallsByParent={new Map()}
+        agentTaskNotifications={{}}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /dispatched an agent/ }))
+    const image = screen.getByRole('img', { name: 'Generated image 1' })
+    expect(image).toHaveAttribute('src', 'https://cdn.example.com/generated/image-123.png')
+  })
+
+  it('does not treat URLs from unrelated agents as generated images', () => {
+    const toolCall: Extract<UIMessage, { type: 'tool_use' }> = {
+      id: 'agent-call',
+      type: 'tool_use',
+      toolName: 'Agent',
+      toolUseId: 'agent-1',
+      input: { subagent_type: 'general-purpose', description: 'Research docs' },
+      timestamp: 1,
+    }
+    const result: Extract<UIMessage, { type: 'tool_result' }> = {
+      id: 'agent-result',
+      type: 'tool_result',
+      toolUseId: 'agent-1',
+      content: [{ type: 'text', text: 'URL: https://example.com/reference.png' }],
+      isError: false,
+      timestamp: 2,
+    }
+
+    render(
+      <ToolCallGroup
+        toolCalls={[toolCall]}
+        resultMap={new Map([['agent-1', result]])}
+        childToolCallsByParent={new Map()}
+        agentTaskNotifications={{}}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /dispatched an agent/ }))
+    expect(screen.queryByRole('img')).not.toBeInTheDocument()
   })
 
   it('shows tool previews only after expanding the tool block', () => {

@@ -13,9 +13,10 @@ type Props = {
   activeIndex: number
   onClose: () => void
   onSelect: (index: number) => void
+  onAnnotate?: (image: GalleryImage) => void
 }
 
-export function ImageGalleryModal({ open, images, activeIndex, onClose, onSelect }: Props) {
+export function ImageGalleryModal({ open, images, activeIndex, onClose, onSelect, onAnnotate }: Props) {
   const activeImage = images[activeIndex]
 
   // Native child webviews (e.g. the in-app browser preview) always render
@@ -55,24 +56,38 @@ export function ImageGalleryModal({ open, images, activeIndex, onClose, onSelect
               {activeIndex + 1} / {images.length}
             </div>
           </div>
-          {images.length > 1 && (
-            <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2">
+            {onAnnotate && (
               <button
-                onClick={() => onSelect((activeIndex - 1 + images.length) % images.length)}
-                className="flex h-9 w-9 items-center justify-center rounded-full border border-[var(--color-border)] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)]"
-                aria-label="Previous image"
+                type="button"
+                onClick={() => onAnnotate(activeImage)}
+                className="inline-flex h-9 items-center justify-center gap-1.5 rounded-full border border-[var(--color-border)] px-3 text-sm font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)]"
               >
-                <span className="material-symbols-outlined text-[18px]">chevron_left</span>
+                <span className="material-symbols-outlined text-[18px]">edit</span>
+                标注并提问
               </button>
-              <button
-                onClick={() => onSelect((activeIndex + 1) % images.length)}
-                className="flex h-9 w-9 items-center justify-center rounded-full border border-[var(--color-border)] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)]"
-                aria-label="Next image"
-              >
-                <span className="material-symbols-outlined text-[18px]">chevron_right</span>
-              </button>
-            </div>
-          )}
+            )}
+            {images.length > 1 && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => onSelect((activeIndex - 1 + images.length) % images.length)}
+                  className="flex h-9 w-9 items-center justify-center rounded-full border border-[var(--color-border)] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)]"
+                  aria-label="Previous image"
+                >
+                  <span className="material-symbols-outlined text-[18px]">chevron_left</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onSelect((activeIndex + 1) % images.length)}
+                  className="flex h-9 w-9 items-center justify-center rounded-full border border-[var(--color-border)] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)]"
+                  aria-label="Next image"
+                >
+                  <span className="material-symbols-outlined text-[18px]">chevron_right</span>
+                </button>
+              </>
+            )}
+          </div>
         </div>
 
         <div className="flex max-h-[70vh] items-center justify-center overflow-hidden rounded-2xl bg-[#111]">

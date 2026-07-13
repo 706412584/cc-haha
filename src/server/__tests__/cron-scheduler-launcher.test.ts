@@ -27,6 +27,7 @@ const originalZdotdir = process.env.ZDOTDIR
 const originalNvmDir = process.env.NVM_DIR
 const originalDisableTerminalShellEnv = process.env.CC_HAHA_DISABLE_TERMINAL_SHELL_ENV
 const originalTaskTimeout = process.env.CC_HAHA_TASK_TIMEOUT_MS
+const originalApiTimeout = process.env.API_TIMEOUT_MS
 
 const isWindows = process.platform === 'win32'
 const unixOnly = isWindows ? it.skip : it
@@ -119,6 +120,12 @@ function restoreEnv(): void {
     process.env.CC_HAHA_TASK_TIMEOUT_MS = originalTaskTimeout
   } else {
     delete process.env.CC_HAHA_TASK_TIMEOUT_MS
+  }
+  delete process.env.api_timeout_ms
+  if (originalApiTimeout) {
+    process.env.API_TIMEOUT_MS = originalApiTimeout
+  } else {
+    delete process.env.API_TIMEOUT_MS
   }
   resetTerminalShellEnvironmentCacheForTests()
 }
@@ -341,6 +348,36 @@ describe('cron scheduler launcher resolution', () => {
       .then(() => true)
       .catch(() => false)
     expect(bunWasCalled).toBe(false)
+  })
+
+  it.each([
+    { name: 'explicit provider', task: { providerId: 'provider-1' } },
+    { name: 'settings-only provider', task: {} },
+  ])('buildTaskChildEnv clears preset-managed env for $name', async ({ task }) => {
+    delete process.env.API_TIMEOUT_MS
+    process.env.api_timeout_ms = 'stale-parent-timeout'
+
+    await fs.mkdir(path.join(process.env.CLAUDE_CONFIG_DIR!, 'cc-haha'), {
+      recursive: true,
+    })
+    await fs.writeFile(
+      path.join(process.env.CLAUDE_CONFIG_DIR!, 'cc-haha', 'settings.json'),
+      JSON.stringify({ env: { api_timeout_ms: 'configured-timeout' } }),
+      'utf-8',
+    )
+
+    const scheduler = new CronScheduler(new CronService()) as any
+    scheduler.providerService.getProviderRuntimeEnv = async () => ({
+      ANTHROPIC_BASE_URL: 'https://provider.example',
+      ANTHROPIC_API_KEY: 'provider-key',
+      ANTHROPIC_MODEL: 'provider-model',
+    })
+
+    const env = await scheduler.buildTaskChildEnv(tmpDir, task)
+
+    expect(
+      Object.keys(env).some((key) => key.toUpperCase() === 'API_TIMEOUT_MS'),
+    ).toBe(false)
   })
 
   unixOnly('executeTask passes provider-scoped model runtime to the sidecar', async () => {

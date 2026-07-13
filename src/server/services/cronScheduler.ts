@@ -16,7 +16,10 @@ import { CronService, type CronTask } from './cronService.js'
 import { SessionService } from './sessionService.js'
 import { sendTaskNotification } from './notificationService.js'
 import { ProviderService } from './providerService.js'
-import { isProviderManagedEnvVar } from '../../utils/managedEnvConstants.js'
+import {
+  applyProviderRuntimeModel,
+  isManagedProviderEnvKey,
+} from './providerRuntimeEnv.js'
 import {
   buildClaudeCliArgs,
   resolveClaudeCliLauncher,
@@ -710,7 +713,7 @@ export class CronScheduler {
 
     if (this.shouldStripInheritedProviderEnv(task.providerId)) {
       for (const key of Object.keys(cleanEnv)) {
-        if (isProviderManagedEnvVar(key)) {
+        if (isManagedProviderEnvKey(key)) {
           delete cleanEnv[key]
         }
       }
@@ -721,7 +724,7 @@ export class CronScheduler {
         ? await this.providerService.getProviderRuntimeEnv(task.providerId)
         : null
     if (explicitProviderEnv && task.model?.trim()) {
-      explicitProviderEnv.ANTHROPIC_MODEL = task.model.trim()
+      applyProviderRuntimeModel(explicitProviderEnv, task.model)
     }
     const attributionHeaderEnv = attributionHeaderEnvForModel(
       task.model?.trim() ||
@@ -770,7 +773,7 @@ export class CronScheduler {
       const env = parsed.env ?? {}
       return Object.entries(env).some(
         ([key, value]) =>
-          isProviderManagedEnvVar(key) &&
+          isManagedProviderEnvKey(key) &&
           typeof value === 'string' &&
           value.trim().length > 0,
       )

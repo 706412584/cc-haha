@@ -1,6 +1,28 @@
 import '@testing-library/jest-dom'
-import { render, screen } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { fireEvent, render, screen } from '@testing-library/react'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+const { queueComposerPrefill } = vi.hoisted(() => ({
+  queueComposerPrefill: vi.fn(),
+}))
+
+vi.mock('../../stores/chatStore', () => ({
+  useChatStore: {
+    getState: () => ({ queueComposerPrefill }),
+  },
+}))
+
+vi.mock('./ImageAnnotationModal', () => ({
+  ImageAnnotationModal: ({ open, image, onSave }: {
+    open: boolean
+    image: { name: string } | null
+    onSave: (dataUrl: string) => void
+  }) => open ? (
+    <button type="button" onClick={() => onSave('data:image/png;base64,ANNOTATED')}>
+      Save {image?.name}
+    </button>
+  ) : null,
+}))
 
 // getBaseUrl backs the absolute-path src (/api/filesystem/file).
 vi.mock('../../api/client', () => ({
@@ -19,6 +41,37 @@ function imgSrcs(): string[] {
 }
 
 describe('InlineImageGallery', () => {
+  beforeEach(() => {
+    queueComposerPrefill.mockReset()
+  })
+
+  it('annotates an inline image and appends the result to the session composer', () => {
+    render(
+      <InlineImageGallery
+        text={'render saved to outputs/a/frame.png'}
+        sessionId="s1"
+        workDir="/w"
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /frame\.png/i }))
+    fireEvent.click(screen.getByRole('button', { name: /标注并提问/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save frame.png' }))
+
+    expect(queueComposerPrefill).toHaveBeenCalledWith('s1', {
+      text: '',
+      mode: 'append',
+      attachments: [{
+        type: 'image',
+        name: 'frame-annotated.png',
+        data: 'data:image/png;base64,ANNOTATED',
+        previewUrl: 'data:image/png;base64,ANNOTATED',
+        mimeType: 'image/png',
+      }],
+    })
+    expect(screen.queryByRole('button', { name: /标注并提问/ })).not.toBeInTheDocument()
+  })
+
   it('renders an absolute image path via /api/filesystem/file (legacy behavior)', () => {
     render(<InlineImageGallery text={'see /Users/me/out/result.png done'} />)
 

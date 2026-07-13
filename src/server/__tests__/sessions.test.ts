@@ -812,8 +812,12 @@ describe('SessionService', () => {
     let scanCount = 0
     let releaseFirstScan: () => void = () => {}
     let markFirstScanStarted: () => void = () => {}
+    let markSecondScanStarted: () => void = () => {}
     const firstScanStarted = new Promise<void>((resolve) => {
       markFirstScanStarted = resolve
+    })
+    const secondScanStarted = new Promise<void>((resolve) => {
+      markSecondScanStarted = resolve
     })
     const firstScanGate = new Promise<void>((resolve) => {
       releaseFirstScan = resolve
@@ -821,10 +825,13 @@ describe('SessionService', () => {
 
     serviceWithSpy.scanSessionListSummary = async (...args) => {
       scanCount += 1
+      const currentScan = scanCount
       const summary = await originalScanSessionListSummary(...args)
-      if (scanCount === 1) {
+      if (currentScan === 1) {
         markFirstScanStarted()
         await firstScanGate
+      } else if (currentScan === 2) {
+        markSecondScanStarted()
       }
       return summary
     }
@@ -834,7 +841,7 @@ describe('SessionService', () => {
     await service.renameSession(sessionId, 'Renamed while scanning')
 
     const freshRequest = service.listSessions({ limit: 10, offset: 0 })
-    await new Promise((resolve) => setTimeout(resolve, 10))
+    await secondScanStarted
     expect(scanCount).toBe(2)
 
     const freshResult = await freshRequest

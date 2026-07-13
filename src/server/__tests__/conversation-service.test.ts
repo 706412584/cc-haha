@@ -20,12 +20,14 @@ describe('ConversationService', () => {
   let originalAuthToken: string | undefined
   let originalBaseUrl: string | undefined
   let originalModel: string | undefined
+  let originalModelCapabilities: string | undefined
   let originalEntrypoint: string | undefined
   let originalOAuthToken: string | undefined
   let originalProviderManagedByHost: string | undefined
   let originalDiagnosticsFile: string | undefined
   let originalAttributionHeader: string | undefined
   let originalDisableExperimentalBetas: string | undefined
+  let originalDisableThinking: string | undefined
   let originalResumeInterruptedTurn: string | undefined
   let originalTraceApiCalls: string | undefined
   let originalTraceProviderId: string | undefined
@@ -53,12 +55,14 @@ describe('ConversationService', () => {
     originalAuthToken = process.env.ANTHROPIC_AUTH_TOKEN
     originalBaseUrl = process.env.ANTHROPIC_BASE_URL
     originalModel = process.env.ANTHROPIC_MODEL
+    originalModelCapabilities = process.env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES
     originalEntrypoint = process.env.CLAUDE_CODE_ENTRYPOINT
     originalOAuthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN
     originalProviderManagedByHost = process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST
     originalDiagnosticsFile = process.env.CLAUDE_CODE_DIAGNOSTICS_FILE
     originalAttributionHeader = process.env.CLAUDE_CODE_ATTRIBUTION_HEADER
     originalDisableExperimentalBetas = process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
+    originalDisableThinking = process.env.CLAUDE_CODE_DISABLE_THINKING
     originalResumeInterruptedTurn = process.env.CLAUDE_CODE_RESUME_INTERRUPTED_TURN
     originalTraceApiCalls = process.env.CC_HAHA_TRACE_API_CALLS
     originalTraceProviderId = process.env.CC_HAHA_TRACE_PROVIDER_ID
@@ -84,6 +88,7 @@ describe('ConversationService', () => {
     delete process.env.CLAUDE_CODE_DIAGNOSTICS_FILE
     delete process.env.CLAUDE_CODE_ATTRIBUTION_HEADER
     delete process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
+    delete process.env.CLAUDE_CODE_DISABLE_THINKING
     delete process.env.CLAUDE_CODE_RESUME_INTERRUPTED_TURN
     delete process.env.CC_HAHA_TRACE_API_CALLS
     delete process.env.CC_HAHA_TRACE_PROVIDER_ID
@@ -114,6 +119,12 @@ describe('ConversationService', () => {
     if (originalModel === undefined) delete process.env.ANTHROPIC_MODEL
     else process.env.ANTHROPIC_MODEL = originalModel
 
+    if (originalModelCapabilities === undefined) {
+      delete process.env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES
+    } else {
+      process.env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES = originalModelCapabilities
+    }
+
     if (originalEntrypoint === undefined) delete process.env.CLAUDE_CODE_ENTRYPOINT
     else process.env.CLAUDE_CODE_ENTRYPOINT = originalEntrypoint
 
@@ -131,6 +142,9 @@ describe('ConversationService', () => {
 
     if (originalDisableExperimentalBetas === undefined) delete process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
     else process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = originalDisableExperimentalBetas
+
+    if (originalDisableThinking === undefined) delete process.env.CLAUDE_CODE_DISABLE_THINKING
+    else process.env.CLAUDE_CODE_DISABLE_THINKING = originalDisableThinking
 
     if (originalResumeInterruptedTurn === undefined) delete process.env.CLAUDE_CODE_RESUME_INTERRUPTED_TURN
     else process.env.CLAUDE_CODE_RESUME_INTERRUPTED_TURN = originalResumeInterruptedTurn
@@ -318,6 +332,42 @@ describe('ConversationService', () => {
     expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
     expect(env.ANTHROPIC_BASE_URL).toBeUndefined()
     expect(env.ANTHROPIC_MODEL).toBeUndefined()
+  })
+
+  test('strips inherited provider env when active model capabilities are configured', async () => {
+    const ccHahaDir = path.join(tmpDir, 'cc-haha')
+    await fs.mkdir(ccHahaDir, { recursive: true })
+    await fs.writeFile(
+      path.join(ccHahaDir, 'settings.json'),
+      JSON.stringify({
+        env: { ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES: 'none' },
+      }),
+      'utf-8',
+    )
+    process.env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES =
+      'thinking,effort,adaptive_thinking,max_effort'
+
+    const service = new ConversationService() as any
+    const env = (await service.buildChildEnv('/tmp')) as Record<string, string>
+
+    expect(env.ANTHROPIC_MODEL).toBeUndefined()
+    expect(env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES).toBeUndefined()
+  })
+
+  test('strips stale inherited thinking compatibility overrides for desktop providers', async () => {
+    const ccHahaDir = path.join(tmpDir, 'cc-haha')
+    await fs.mkdir(ccHahaDir, { recursive: true })
+    await fs.writeFile(
+      path.join(ccHahaDir, 'settings.json'),
+      JSON.stringify({ env: { CLAUDE_CODE_DISABLE_THINKING: '1' } }),
+      'utf-8',
+    )
+    process.env.CLAUDE_CODE_DISABLE_THINKING = '1'
+
+    const service = new ConversationService() as any
+    const env = (await service.buildChildEnv('/tmp')) as Record<string, string>
+
+    expect(env.CLAUDE_CODE_DISABLE_THINKING).toBeUndefined()
   })
 
   test('buildChildEnv injects General network timeout and manual proxy for CLI requests', async () => {
@@ -658,8 +708,96 @@ describe('ConversationService', () => {
     expect(env.ANTHROPIC_AUTH_TOKEN).toBe('provider-key')
     expect(env.ANTHROPIC_API_KEY).toBe('')
     expect(env.ANTHROPIC_MODEL).toBe('claude-sonnet-4-6')
+    expect(env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES).toBe('none')
     expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe('none')
     expect(env.CLAUDE_CODE_ATTRIBUTION_HEADER).toBe('1')
+  })
+
+  test('buildChildEnv enables effort for a non-default model on an Anthropic-compatible preset', async () => {
+    const providerService = new ProviderService()
+    const provider = await providerService.addProvider({
+      presetId: 'jiekouai',
+      name: 'Local relay',
+      apiKey: 'provider-key',
+      baseUrl: 'http://127.0.0.1:18080',
+      apiFormat: 'anthropic',
+      models: {
+        main: 'gpt-5.6-sol',
+        haiku: 'grok-4.3',
+        sonnet: 'grok-4.5',
+        opus: 'grok-4.5',
+      },
+    })
+
+    const service = new ConversationService() as any
+    const env = (await service.buildChildEnv('/tmp', undefined, {
+      providerId: provider.id,
+      model: 'gpt-5.6-sol',
+      effort: 'max',
+    })) as Record<string, string>
+
+    expect(env.ANTHROPIC_BASE_URL).toBe('http://127.0.0.1:18080')
+    expect(env.ANTHROPIC_MODEL).toBe('gpt-5.6-sol')
+    expect(env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES).toBe(
+      'thinking,effort,adaptive_thinking,max_effort',
+    )
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe(
+      'thinking,effort,adaptive_thinking,max_effort',
+    )
+  })
+
+  test('buildChildEnv switches active capabilities with the selected provider model', async () => {
+    const providerService = new ProviderService()
+    const provider = await providerService.addProvider({
+      presetId: 'jiekouai',
+      name: 'Mixed capabilities',
+      apiKey: 'provider-key',
+      baseUrl: 'https://api.jiekou.ai/anthropic',
+      apiFormat: 'anthropic',
+      models: {
+        main: 'gpt-5.6-sol',
+        haiku: 'claude-haiku-4-5-20251001',
+        sonnet: 'claude-sonnet-4-6',
+        opus: 'claude-opus-4-7',
+      },
+    })
+
+    const service = new ConversationService() as any
+    const env = (await service.buildChildEnv('/tmp', undefined, {
+      providerId: provider.id,
+      model: 'claude-sonnet-4-6',
+      effort: 'max',
+    })) as Record<string, string>
+
+    expect(env.ANTHROPIC_MODEL).toBe('claude-sonnet-4-6')
+    expect(env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES).toBe('none')
+  })
+
+  test('buildChildEnv drops main-model capabilities for unknown selected models', async () => {
+    const providerService = new ProviderService()
+    const provider = await providerService.addProvider({
+      presetId: 'custom',
+      name: 'Unknown model selection',
+      apiKey: 'provider-key',
+      baseUrl: 'https://api.example.com/anthropic',
+      apiFormat: 'anthropic',
+      models: {
+        main: 'main-model',
+        haiku: 'haiku-model',
+        sonnet: 'sonnet-model',
+        opus: 'opus-model',
+      },
+    })
+
+    const service = new ConversationService() as any
+    const env = (await service.buildChildEnv('/tmp', undefined, {
+      providerId: provider.id,
+      model: 'unknown-model',
+      effort: 'max',
+    })) as Record<string, string>
+
+    expect(env.ANTHROPIC_MODEL).toBe('unknown-model')
+    expect(env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES).toBeUndefined()
   })
 
   test('buildChildEnv lets General network timeout override provider preset timeouts', async () => {
