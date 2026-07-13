@@ -121,6 +121,7 @@ function restoreEnv(): void {
   } else {
     delete process.env.CC_HAHA_TASK_TIMEOUT_MS
   }
+  delete process.env.api_timeout_ms
   if (originalApiTimeout) {
     process.env.API_TIMEOUT_MS = originalApiTimeout
   } else {
@@ -349,8 +350,21 @@ describe('cron scheduler launcher resolution', () => {
     expect(bunWasCalled).toBe(false)
   })
 
-  it('buildTaskChildEnv clears preset-managed env inherited by explicit providers', async () => {
-    process.env.API_TIMEOUT_MS = 'stale-parent-timeout'
+  it.each([
+    { name: 'explicit provider', task: { providerId: 'provider-1' } },
+    { name: 'settings-only provider', task: {} },
+  ])('buildTaskChildEnv clears preset-managed env for $name', async ({ task }) => {
+    delete process.env.API_TIMEOUT_MS
+    process.env.api_timeout_ms = 'stale-parent-timeout'
+
+    await fs.mkdir(path.join(process.env.CLAUDE_CONFIG_DIR!, 'cc-haha'), {
+      recursive: true,
+    })
+    await fs.writeFile(
+      path.join(process.env.CLAUDE_CONFIG_DIR!, 'cc-haha', 'settings.json'),
+      JSON.stringify({ env: { api_timeout_ms: 'configured-timeout' } }),
+      'utf-8',
+    )
 
     const scheduler = new CronScheduler(new CronService()) as any
     scheduler.providerService.getProviderRuntimeEnv = async () => ({
@@ -359,11 +373,11 @@ describe('cron scheduler launcher resolution', () => {
       ANTHROPIC_MODEL: 'provider-model',
     })
 
-    const env = await scheduler.buildTaskChildEnv(tmpDir, {
-      providerId: 'provider-1',
-    })
+    const env = await scheduler.buildTaskChildEnv(tmpDir, task)
 
-    expect(env.API_TIMEOUT_MS).toBeUndefined()
+    expect(
+      Object.keys(env).some((key) => key.toUpperCase() === 'API_TIMEOUT_MS'),
+    ).toBe(false)
   })
 
   unixOnly('executeTask passes provider-scoped model runtime to the sidecar', async () => {

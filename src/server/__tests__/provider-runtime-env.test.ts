@@ -118,6 +118,7 @@ describe('providerRuntimeEnv', () => {
       {
         ANTHROPIC_BASE_URL: 'https://stale.example.com',
         ANTHROPIC_API_KEY: 'stale-key',
+        api_timeout_ms: 'stale-timeout',
         ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES: 'thinking,effort,max_effort',
         CLAUDE_CODE_DISABLE_THINKING: '1',
         DISABLE_AUTOUPDATER: '1',

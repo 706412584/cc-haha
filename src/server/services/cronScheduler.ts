@@ -18,9 +18,8 @@ import { sendTaskNotification } from './notificationService.js'
 import { ProviderService } from './providerService.js'
 import {
   applyProviderRuntimeModel,
-  getManagedEnvKeys,
+  isManagedProviderEnvKey,
 } from './providerRuntimeEnv.js'
-import { isProviderManagedEnvVar } from '../../utils/managedEnvConstants.js'
 import {
   buildClaudeCliArgs,
   resolveClaudeCliLauncher,
@@ -713,9 +712,8 @@ export class CronScheduler {
     delete cleanEnv.CLAUDE_CODE_OAUTH_TOKEN
 
     if (this.shouldStripInheritedProviderEnv(task.providerId)) {
-      const managedEnvKeys = new Set(getManagedEnvKeys())
       for (const key of Object.keys(cleanEnv)) {
-        if (managedEnvKeys.has(key) || isProviderManagedEnvVar(key)) {
+        if (isManagedProviderEnvKey(key)) {
           delete cleanEnv[key]
         }
       }
@@ -775,7 +773,7 @@ export class CronScheduler {
       const env = parsed.env ?? {}
       return Object.entries(env).some(
         ([key, value]) =>
-          isProviderManagedEnvVar(key) &&
+          isManagedProviderEnvKey(key) &&
           typeof value === 'string' &&
           value.trim().length > 0,
       )

@@ -13,7 +13,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { ProviderService } from './providerService.js'
 import {
   applyProviderRuntimeModel,
-  getManagedEnvKeys,
+  isManagedProviderEnvKey,
 } from './providerRuntimeEnv.js'
 import {
   OPENAI_OAUTH_PROVIDER_ENV_KEY,
@@ -1172,12 +1172,6 @@ export class ConversationService {
     // If the user never configured a Desktop provider and only launched the
     // app/server with ANTHROPIC_* env vars, keep those env vars so Windows
     // dev-mode and env-only setups can still authenticate successfully.
-    const providerEnvKeys = [
-      ...getManagedEnvKeys(),
-      'CC_HAHA_SEND_DISABLED_THINKING',
-      OPENAI_CODEX_REASONING_EFFORT_ENV_KEY,
-    ] as const
-
     const cleanEnv = await getProcessEnvWithTerminalShellEnvironment()
     delete cleanEnv.CLAUDE_CODE_OAUTH_TOKEN
     if (options?.resumeInterruptedTurn === false) {
@@ -1187,8 +1181,14 @@ export class ConversationService {
     delete cleanEnv.CC_HAHA_TRACE_PROVIDER_NAME
     delete cleanEnv.CC_HAHA_TRACE_PROVIDER_FORMAT
     if (this.shouldStripInheritedProviderEnv(options?.providerId)) {
-      for (const key of providerEnvKeys) {
-        delete cleanEnv[key]
+      for (const key of Object.keys(cleanEnv)) {
+        if (
+          isManagedProviderEnvKey(key) ||
+          key.toUpperCase() === 'CC_HAHA_SEND_DISABLED_THINKING' ||
+          key.toUpperCase() === OPENAI_CODEX_REASONING_EFFORT_ENV_KEY
+        ) {
+          delete cleanEnv[key]
+        }
       }
     }
 
@@ -1405,10 +1405,13 @@ export class ConversationService {
       const raw = fs.readFileSync(settingsPath, 'utf-8')
       const parsed = JSON.parse(raw) as { env?: Record<string, string> }
       const env = parsed.env ?? {}
-      return [
-        ...getManagedEnvKeys(),
-        'CC_HAHA_SEND_DISABLED_THINKING',
-      ].some((key) => typeof env[key] === 'string' && env[key]!.trim().length > 0)
+      return Object.entries(env).some(
+        ([key, value]) =>
+          (isManagedProviderEnvKey(key) ||
+            key.toUpperCase() === 'CC_HAHA_SEND_DISABLED_THINKING') &&
+          typeof value === 'string' &&
+          value.trim().length > 0,
+      )
     } catch {
       return false
     }

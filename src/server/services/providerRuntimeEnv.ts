@@ -2,6 +2,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 
 import { MODEL_CONTEXT_WINDOWS_ENV_KEY } from '../../utils/model/modelContextWindows.js'
+import { isProviderManagedEnvVar } from '../../utils/managedEnvConstants.js'
 import { PROVIDER_PRESETS } from '../config/providerPresets.js'
 import type {
   ApiFormat,
@@ -309,14 +310,25 @@ export function buildProviderAuthEnv(
   }
 }
 
-export function getManagedEnvKeys(): string[] {
-  const keys = new Set<string>(MANAGED_PROVIDER_ENV_KEYS)
-  for (const preset of PROVIDER_PRESETS) {
-    for (const key of Object.keys(preset.defaultEnv ?? {})) {
-      keys.add(key)
-    }
+const managedProviderEnvKeys = new Set<string>(
+  MANAGED_PROVIDER_ENV_KEYS.map((key) => key.toUpperCase()),
+)
+for (const preset of PROVIDER_PRESETS) {
+  for (const key of Object.keys(preset.defaultEnv ?? {})) {
+    managedProviderEnvKeys.add(key.toUpperCase())
   }
-  return [...keys]
+}
+
+export function getManagedEnvKeys(): string[] {
+  return [...managedProviderEnvKeys]
+}
+
+export function isManagedProviderEnvKey(key: string): boolean {
+  const normalizedKey = key.toUpperCase()
+  return (
+    managedProviderEnvKeys.has(normalizedKey) ||
+    isProviderManagedEnvVar(normalizedKey)
+  )
 }
 
 export function buildProviderManagedEnv(
@@ -485,8 +497,10 @@ export function mergeActiveProviderManagedEnv(
   if (!index) return settingsEnv
 
   const cleanedEnv = { ...settingsEnv }
-  for (const key of getManagedEnvKeys()) {
-    delete cleanedEnv[key]
+  for (const key of Object.keys(cleanedEnv)) {
+    if (isManagedProviderEnvKey(key)) {
+      delete cleanedEnv[key]
+    }
   }
   return {
     ...cleanedEnv,
