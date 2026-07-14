@@ -8,6 +8,7 @@ import {
 } from './builtInAgents.js'
 import { PLAN_CRITIC_AGENT } from './built-in/planCriticAgent.js'
 import { PLAN_REVIEWER_AGENT } from './built-in/planReviewerAgent.js'
+import { VERIFICATION_AGENT } from './built-in/verificationAgent.js'
 
 const originalDisableBuiltIns =
   process.env.CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS
@@ -74,6 +75,19 @@ describe('built-in agents', () => {
     expect(agentTypes).toContain('commit-pr')
     expect(agentTypes).toContain('plan-critic')
     expect(agentTypes).toContain('plan-reviewer')
+  })
+
+  test('verification agent is reserved for independent scrutiny', () => {
+    expect(VERIFICATION_AGENT.whenToUse).toContain(
+      'independent scrutiny adds value',
+    )
+    expect(VERIFICATION_AGENT.whenToUse).toContain(
+      'main agent must run focused verification directly first',
+    )
+    expect(VERIFICATION_AGENT.whenToUse).toContain(
+      'do not invoke this agent solely because code was written',
+    )
+    expect(VERIFICATION_AGENT.whenToUse).not.toContain('3+ file edits')
   })
 
   test('plan-critic is read-only and returns a parseable verdict', () => {

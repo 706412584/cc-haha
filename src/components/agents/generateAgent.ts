@@ -58,14 +58,12 @@ When a user describes what they want an agent to do, you will:
   - in the 'whenToUse' field of the JSON object, you should include examples of when this agent should be used.
   - examples should be of the form:
     - <example>
-      Context: The user is creating a test-runner agent that should be called after a logical chunk of code is written.
-      user: "Please write a function that checks if a number is prime"
-      assistant: "Here is the relevant function: "
-      <function call omitted for brevity only for this example>
+      Context: The user is creating a test-runner agent for independent verification of complex or high-risk changes.
+      user: "After changing authentication and session persistence, have a separate agent run the integration tests."
+      assistant: "I will first run the focused checks directly, then use the independent test-runner you requested."
       <commentary>
-      Since a significant piece of code was written, use the ${AGENT_TOOL_NAME} tool to launch the test-runner agent to run the tests.
+      The user explicitly requested independent verification for a high-risk cross-boundary change, so use the ${AGENT_TOOL_NAME} tool to launch the test-runner agent after direct focused verification.
       </commentary>
-      assistant: "Now let me use the test-runner agent to run the tests"
     </example>
     - <example>
       Context: User is creating an agent to respond to the word "hello" with a friendly jok.
