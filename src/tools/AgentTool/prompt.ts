@@ -5,7 +5,6 @@ import { isEnvDefinedFalsy, isEnvTruthy } from '../../utils/envUtils.js'
 import { isTeammate } from '../../utils/teammate.js'
 import { isInProcessTeammate } from '../../utils/teammateContext.js'
 import { FILE_READ_TOOL_NAME } from '../FileReadTool/prompt.js'
-import { FILE_WRITE_TOOL_NAME } from '../FileWriteTool/prompt.js'
 import { GLOB_TOOL_NAME } from '../GlobTool/prompt.js'
 import { SEND_MESSAGE_TOOL_NAME } from '../SendMessageTool/constants.js'
 import { AGENT_TOOL_NAME } from './constants.js'
@@ -156,24 +155,14 @@ ${AGENT_TOOL_NAME}({
   const currentExamples = `Example usage:
 
 <example_agent_descriptions>
-"test-runner": use this agent after you are done writing code to run tests
+"test-runner": use this agent when the user requests independent test execution or a complex, high-risk change needs a separate verification pass
 "greeting-responder": use this agent to respond to user greetings with a friendly joke
 </example_agent_descriptions>
 
 <example>
-user: "Please write a function that checks if a number is prime"
-assistant: I'm going to use the ${FILE_WRITE_TOOL_NAME} tool to write the following code:
-<code>
-function isPrime(n) {
-  if (n <= 1) return false
-  for (let i = 2; i * i <= n; i++) {
-    if (n % i === 0) return false
-  }
-  return true
-}
-</code>
+user: "This migration touches authentication and session persistence. Please implement it, then have a separate agent run the integration tests."
 <commentary>
-Since a significant piece of code was written and the task was completed, now use the test-runner agent to run the tests
+The user explicitly requested independent verification for a high-risk cross-boundary change, so run focused checks directly before using the test-runner agent.
 </commentary>
 assistant: Uses the ${AGENT_TOOL_NAME} tool to launch the test-runner agent
 </example>

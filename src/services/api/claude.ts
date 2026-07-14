@@ -216,7 +216,10 @@ import {
   startSessionActivity,
   stopSessionActivity,
 } from "../../utils/sessionActivity.js";
-import { shouldTriggerNonStreamingFallbackForEmptyStream } from "./streamFallback.js";
+import {
+  EmptyStreamError,
+  shouldTriggerNonStreamingFallbackForEmptyStream,
+} from "./streamFallback.js";
 import { StreamAssistantCommitBuffer } from "./streamAssistantCommitBuffer.js";
 import {
   StreamWatchdogTimeoutError,
@@ -2786,7 +2789,7 @@ async function* queryModel(
           request_id: (streamRequestId ??
             "unknown") as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
         });
-        throw new Error("Stream ended without receiving any events");
+        throw new EmptyStreamError();
       }
 
       // No tool boundary was crossed, so completed thinking/text blocks were
@@ -2919,14 +2922,27 @@ async function* queryModel(
         throw new RetriableStreamError(streamingError);
       }
 
+      // When the flag is enabled, skip the non-streaming fallback. A fully empty
+      // stream is still safe to retry as streaming because no output or tool
+      // boundary has been crossed.
+      const disableFallback =
+        isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK) ||
+        getFeatureValue_CACHED_MAY_BE_STALE(
+          "tengu_disable_streaming_to_non_streaming_fallback",
+          false,
+        );
+
       if (
         newMessages.length === 0 &&
         !streamIdleAborted &&
         !signal.aborted &&
-        isRetryableStreamError(streamingError)
+        !streamWatchdogState.snapshot().serverToolUseStarted &&
+        !assistantCommitBuffer.hasCrossedSideEffectBoundary() &&
+        ((disableFallback && streamingError instanceof EmptyStreamError) ||
+          isRetryableStreamError(streamingError))
       ) {
         logForDebugging(
-          `Transient mid-stream error before any output, will retry stream: ${errorMessage(
+          `Recoverable stream error before any output, will retry stream: ${errorMessage(
             streamingError,
           )}`,
           { level: "warn" },
@@ -2934,17 +2950,10 @@ async function* queryModel(
         throw new RetriableStreamError(streamingError);
       }
 
-      // When the flag is enabled, skip the non-streaming fallback and let the
-      // error propagate to withRetry. The mid-stream fallback causes double tool
-      // execution when streaming tool execution is active: the partial stream
-      // starts a tool, then the non-streaming retry produces the same tool_use
-      // and runs it again. See inc-4258.
-      const disableFallback =
-        isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK) ||
-        getFeatureValue_CACHED_MAY_BE_STALE(
-          "tengu_disable_streaming_to_non_streaming_fallback",
-          false,
-        );
+      // The mid-stream non-streaming fallback causes double tool execution when
+      // streaming tool execution is active: the partial stream starts a tool,
+      // then the non-streaming retry produces the same tool_use and runs it again.
+      // See inc-4258.
 
       if (disableFallback) {
         logForDebugging(

@@ -6,7 +6,6 @@ import { buildTool, type ToolDef } from '../../Tool.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { isTodoV2Enabled } from '../../utils/tasks.js'
 import { TodoListSchema } from '../../utils/todo/types.js'
-import { VERIFICATION_AGENT_TYPE } from '../AgentTool/constants.js'
 import { TODO_WRITE_TOOL_NAME } from './constants.js'
 import { DESCRIPTION, PROMPT } from './prompt.js'
 
@@ -69,10 +68,9 @@ export const TodoWriteTool = buildTool({
     const allDone = todos.every(_ => _.status === 'completed')
     const newTodos = allDone ? [] : todos
 
-    // Structural nudge: if the main-thread agent is closing out a 3+ item
-    // list and none of those items was a verification step, append a reminder
-    // to the tool result. Fires at the exact loop-exit moment where skips
-    // happen ("when the last task closed, the loop exited").
+    // Structural nudge: when a multi-step task closes without an explicit
+    // verification step, remind the main agent to assess whether its direct
+    // checks are sufficient. Task count alone must not require a subagent.
     let verificationNudgeNeeded = false
     if (
       feature('VERIFICATION_AGENT') &&
@@ -107,7 +105,7 @@ export const TodoWriteTool = buildTool({
     // for the regression where embedded attribute syntax made models switch
     // to textual `<tool_use ...>` blocks instead of real tool calls.
     const nudge = verificationNudgeNeeded
-      ? `\n\nNOTE: You just closed out 3+ tasks and none of them was a verification step. Before writing your final summary, spawn the verification agent (call the Agent tool with the subagent_type parameter set to ${VERIFICATION_AGENT_TYPE}). You cannot self-assign PARTIAL by listing caveats in your summary \u2014 only the verifier issues a verdict.`
+      ? `\n\nNOTE: You just closed out a multi-step task without an explicit verification step. Confirm that you ran focused checks and inspected the diff directly. Small, localized changes do not require a verification subagent. Use independent verification only when it adds value for complex, high-risk, cross-boundary, uncertain, explicitly reviewed, or PR-ready work.`
       : ''
     return {
       tool_use_id: toolUseID,

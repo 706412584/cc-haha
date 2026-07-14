@@ -46,7 +46,7 @@ function findKeyValueAttrs(source: string): string[] {
 }
 
 describe('model-facing nudges do not embed key="value" attribute fragments', () => {
-  it('verification_gate_reminder uses prose, not subagent_type="..."', () => {
+  it('verification_gate_reminder is advisory prose, not a mandatory agent call', () => {
     const src = loadSource('src/utils/messages.ts')
     // Slice the relevant case so we don't false-positive on unrelated code.
     const start = src.indexOf("case 'verification_gate_reminder':")
@@ -54,15 +54,25 @@ describe('model-facing nudges do not embed key="value" attribute fragments', () 
     const end = src.indexOf("case '", start + 30)
     const block = src.slice(start, end > 0 ? end : start + 4000)
     expect(findKeyValueAttrs(block)).toEqual([])
+    expect(block).toContain('only a weak signal')
+    expect(block).toContain('run focused checks directly')
+    expect(block).toContain('Small, localized changes normally need no independent agent')
+    expect(block).not.toContain('Your own checks and a fork\'s self-checks do NOT substitute')
   })
 
-  it('TodoWriteTool verification nudge uses prose, not subagent_type="..."', () => {
+  it('TodoWriteTool verification nudge asks for direct checks before optional scrutiny', () => {
     const src = loadSource('src/tools/TodoWriteTool/TodoWriteTool.ts')
     expect(findKeyValueAttrs(src)).toEqual([])
+    expect(src).toContain('Confirm that you ran focused checks')
+    expect(src).toContain('Small, localized changes do not require a verification subagent')
+    expect(src).not.toContain('Before writing your final summary, spawn the verification agent')
   })
 
-  it('TaskUpdateTool verification nudge uses prose, not subagent_type="..."', () => {
+  it('TaskUpdateTool verification nudge asks for direct checks before optional scrutiny', () => {
     const src = loadSource('src/tools/TaskUpdateTool/TaskUpdateTool.ts')
     expect(findKeyValueAttrs(src)).toEqual([])
+    expect(src).toContain('Confirm that you ran focused checks')
+    expect(src).toContain('Small, localized changes do not require a verification subagent')
+    expect(src).not.toContain('Before writing your final summary, spawn the verification agent')
   })
 })

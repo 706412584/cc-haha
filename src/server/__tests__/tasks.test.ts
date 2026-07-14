@@ -7,6 +7,13 @@ import * as fs from 'fs/promises'
 import * as path from 'path'
 import * as os from 'os'
 import { TaskService } from '../services/taskService.js'
+import {
+  deleteTask,
+  resetTaskList,
+  resetTaskListIfMatches,
+  TaskSchema,
+} from '../../utils/tasks.js'
+import * as taskLockfile from '../../utils/lockfile.js'
 
 const taskFixture = (overrides: Record<string, unknown>) => ({
   id: '1',
@@ -222,13 +229,189 @@ describe('Tasks API', () => {
 
     const reset = await fetch(`${baseUrl}/api/tasks/lists/desktop-session-1/reset`, {
       method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        expectedTasks: [
+          taskFixture({ id: '1', subject: 'First task', status: 'completed' }),
+          taskFixture({ id: '2', subject: 'Second task', status: 'completed' }),
+        ],
+      }),
     })
     expect(reset.status).toBe(200)
-    expect(await reset.json()).toEqual({ ok: true })
+    expect(await reset.json()).toEqual({ ok: true, reset: true })
 
     const after = await fetch(`${baseUrl}/api/tasks/lists/desktop-session-1`)
     expect(after.status).toBe(200)
     expect((await after.json()).tasks).toEqual([])
+  })
+
+  it('should preserve a newer task cycle when resetting an older completed snapshot', async () => {
+    const taskListDir = path.join(tmpDir, 'tasks', 'desktop-session-1')
+    await fs.mkdir(taskListDir, { recursive: true })
+    await fs.writeFile(path.join(taskListDir, '1.json'), JSON.stringify(taskFixture({
+      id: '1',
+      subject: 'Completed task',
+      status: 'completed',
+    })))
+    await fs.writeFile(path.join(taskListDir, '2.json'), JSON.stringify(taskFixture({
+      id: '2',
+      subject: 'New cycle task',
+      status: 'in_progress',
+    })))
+
+    const reset = await fetch(`${baseUrl}/api/tasks/lists/desktop-session-1/reset`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        expectedTasks: [taskFixture({ id: '1', subject: 'Completed task', status: 'completed' })],
+      }),
+    })
+
+    expect(reset.status).toBe(200)
+    expect(await reset.json()).toEqual({ ok: true, reset: false })
+
+    const after = await fetch(`${baseUrl}/api/tasks/lists/desktop-session-1`)
+    expect((await after.json()).tasks).toHaveLength(2)
+  })
+
+  it('should preserve a completed task whose content changed after the reset snapshot', async () => {
+    const taskListDir = path.join(tmpDir, 'tasks', 'desktop-session-1')
+    await fs.mkdir(taskListDir, { recursive: true })
+    await fs.writeFile(path.join(taskListDir, '1.json'), JSON.stringify(taskFixture({
+      id: '1',
+      subject: 'Updated completed task',
+      status: 'completed',
+    })))
+
+    const reset = await fetch(`${baseUrl}/api/tasks/lists/desktop-session-1/reset`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        expectedTasks: [taskFixture({
+          id: '1',
+          subject: 'Original completed task',
+          status: 'completed',
+        })],
+      }),
+    })
+
+    expect(reset.status).toBe(200)
+    expect(await reset.json()).toEqual({ ok: true, reset: false })
+    const after = await fetch(`${baseUrl}/api/tasks/lists/desktop-session-1`)
+    expect((await after.json()).tasks[0].subject).toBe('Updated completed task')
+  })
+
+  it('should wait for an in-flight task update before comparing the reset snapshot', async () => {
+    const taskListDir = path.join(tmpDir, 'tasks', 'desktop-session-1')
+    const taskPath = path.join(taskListDir, '1.json')
+    await fs.mkdir(taskListDir, { recursive: true })
+    const originalTask = taskFixture({
+      id: '1',
+      subject: 'Original completed task',
+      status: 'completed',
+    })
+    await fs.writeFile(taskPath, JSON.stringify(originalTask))
+    const releaseUpdate = await taskLockfile.lock(taskPath)
+    const originalLock = taskLockfile.lock
+    let signalTaskLockRequested: (() => void) | null = null
+    const taskLockRequested = new Promise<void>((resolve) => {
+      signalTaskLockRequested = resolve
+    })
+    const lockSpy = spyOn(taskLockfile, 'lock').mockImplementation((file, options) => {
+      if (file === taskPath) signalTaskLockRequested?.()
+      return originalLock(file, options)
+    })
+
+    try {
+      const reset = resetTaskListIfMatches(
+        'desktop-session-1',
+        [TaskSchema().parse(originalTask)],
+      )
+      await taskLockRequested
+      await fs.writeFile(taskPath, JSON.stringify({
+        ...originalTask,
+        subject: 'Updated completed task',
+      }))
+      await releaseUpdate()
+
+      expect(await reset).toBe(false)
+      expect(JSON.parse(await fs.readFile(taskPath, 'utf-8')).subject).toBe('Updated completed task')
+    } finally {
+      lockSpy.mockRestore()
+    }
+  })
+
+  it('should wait for an in-flight task update before ordinary reset', async () => {
+    const taskListDir = path.join(tmpDir, 'tasks', 'desktop-session-1')
+    const taskPath = path.join(taskListDir, '1.json')
+    await fs.mkdir(taskListDir, { recursive: true })
+    await fs.writeFile(taskPath, JSON.stringify(taskFixture({ status: 'completed' })))
+    const releaseUpdate = await taskLockfile.lock(taskPath)
+    const originalLock = taskLockfile.lock
+    let signalTaskLockRequested: (() => void) | null = null
+    const taskLockRequested = new Promise<void>((resolve) => {
+      signalTaskLockRequested = resolve
+    })
+    const lockSpy = spyOn(taskLockfile, 'lock').mockImplementation((file, options) => {
+      if (file === taskPath) signalTaskLockRequested?.()
+      return originalLock(file, options)
+    })
+
+    try {
+      const reset = resetTaskList('desktop-session-1')
+      await taskLockRequested
+      expect(await fs.readFile(taskPath, 'utf-8')).toContain('Test task')
+      await releaseUpdate()
+      await reset
+      await expect(fs.access(taskPath)).rejects.toThrow()
+    } finally {
+      lockSpy.mockRestore()
+    }
+  })
+
+  it('should wait for an in-flight task update before deleting it', async () => {
+    const taskListDir = path.join(tmpDir, 'tasks', 'desktop-session-1')
+    const taskPath = path.join(taskListDir, '1.json')
+    await fs.mkdir(taskListDir, { recursive: true })
+    await fs.writeFile(taskPath, JSON.stringify(taskFixture({ status: 'completed' })))
+    const releaseUpdate = await taskLockfile.lock(taskPath)
+    const originalLock = taskLockfile.lock
+    let signalTaskLockRequested: (() => void) | null = null
+    const taskLockRequested = new Promise<void>((resolve) => {
+      signalTaskLockRequested = resolve
+    })
+    const lockSpy = spyOn(taskLockfile, 'lock').mockImplementation((file, options) => {
+      if (file === taskPath) signalTaskLockRequested?.()
+      return originalLock(file, options)
+    })
+
+    try {
+      const deletion = deleteTask('desktop-session-1', '1')
+      await taskLockRequested
+      expect(await fs.readFile(taskPath, 'utf-8')).toContain('Test task')
+      await releaseUpdate()
+      expect(await deletion).toBe(true)
+      await expect(fs.access(taskPath)).rejects.toThrow()
+    } finally {
+      lockSpy.mockRestore()
+    }
+  })
+
+  it('should reject invalid or oversized reset snapshots', async () => {
+    const nullBody = await fetch(`${baseUrl}/api/tasks/lists/desktop-session-1/reset`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: 'null',
+    })
+    expect(nullBody.status).toBe(400)
+
+    const oversized = await fetch(`${baseUrl}/api/tasks/lists/desktop-session-1/reset`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ expectedTasks: [], padding: 'x'.repeat(512 * 1024) }),
+    })
+    expect(oversized.status).toBe(413)
+    expect(await oversized.json()).toMatchObject({ error: 'PAYLOAD_TOO_LARGE' })
   })
 
   it('should reject non-GET methods', async () => {

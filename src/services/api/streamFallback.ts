@@ -1,3 +1,10 @@
+export class EmptyStreamError extends Error {
+  constructor() {
+    super('Stream ended without receiving any events')
+    this.name = 'EmptyStreamError'
+  }
+}
+
 export function shouldTriggerNonStreamingFallbackForEmptyStream({
   hasMessageStart,
   assistantMessageCount,

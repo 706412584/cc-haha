@@ -3525,15 +3525,16 @@ async function getVerificationGateReminderAttachment(
   messages: Message[] | undefined,
   toolUseContext: ToolUseContext,
 ): Promise<Attachment[]> {
-  // Opt out via env. Default-on so the gate provides value out of the box.
+  // Opt out via env. Default-on as a one-time verification sufficiency reminder;
+  // crossing the edit threshold alone must never require a subagent.
   if (isEnvTruthy(process.env.CLAUDE_CODE_VERIFICATION_GATE_OFF)) {
     return []
   }
 
   if (!messages || messages.length === 0) return []
 
-  // Subagents shouldn't get this reminder — only the main thread is
-  // responsible for invoking verification on its own work.
+  // Subagents shouldn't get this reminder — only the main thread decides
+  // whether direct checks are sufficient or independent scrutiny adds value.
   if (toolUseContext.agentId) return []
 
   // Don't fire if the verification agent isn't even available in this

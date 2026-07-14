@@ -55,6 +55,34 @@ function thinkingSummaryResponse(parts: string[]): string {
   ].join('')
 }
 
+function partialServerToolResponse(): string {
+  return [
+    sseEvent('message_start', {
+      type: 'message_start',
+      message: {
+        id: 'msg_partial_server_tool',
+        type: 'message',
+        role: 'assistant',
+        model: 'gpt-5.6-sol',
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 0 },
+      },
+    }),
+    sseEvent('content_block_start', {
+      type: 'content_block_start',
+      index: 0,
+      content_block: {
+        type: 'server_tool_use',
+        id: 'srvtool_1',
+        name: 'web_search',
+        input: {},
+      },
+    }),
+  ].join('')
+}
+
 function successfulResponse(): string {
   return [
     sseEvent('message_start', {
@@ -108,6 +136,8 @@ const ENV_KEYS = [
   'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES',
   'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES',
   'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES',
+  'CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK',
+  'CLAUDE_STREAM_TRANSIENT_RETRY_MAX',
 ] as const
 
 test.serial('accumulates every streamed thinking summary delta', async () => {
@@ -176,6 +206,103 @@ test.serial('accumulates every streamed thinking summary delta', async () => {
     server.stop(true)
     await rm(configDir, { recursive: true, force: true })
   }
+}, 10_000)
+
+async function runStreamRecoveryScenario(
+  name: string,
+  responseForRequest: (requestCount: number) => string,
+) {
+  let requestCount = 0
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    fetch() {
+      requestCount += 1
+      return new Response(responseForRequest(requestCount), {
+        headers: { 'content-type': 'text/event-stream' },
+      })
+    },
+  })
+  const configDir = await mkdtemp(join(tmpdir(), `cc-haha-${name}-`))
+  const originalEnv = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]))
+  const globals = globalThis as typeof globalThis & { MACRO?: { BUILD_TIME: string } }
+  const originalMacro = globals.MACRO
+
+  try {
+    globals.MACRO = { BUILD_TIME: '' }
+    process.env.NODE_ENV = 'production'
+    process.env.CLAUDE_CONFIG_DIR = configDir
+    delete process.env.CLAUDE_CODE_USE_BEDROCK
+    delete process.env.CLAUDE_CODE_USE_VERTEX
+    delete process.env.CLAUDE_CODE_USE_FOUNDRY
+    delete process.env.CLAUDE_CODE_DISABLE_THINKING
+    process.env.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK = '1'
+    process.env.CLAUDE_STREAM_TRANSIENT_RETRY_MAX = '1'
+    process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${server.port}`
+    delete process.env.ANTHROPIC_AUTH_TOKEN
+    process.env.ANTHROPIC_API_KEY = 'loopback-test-key'
+    process.env.ANTHROPIC_MODEL = 'gpt-5.6-sol'
+    process.env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES =
+      'thinking,effort,adaptive_thinking,max_effort'
+    enableConfigs()
+
+    const result = await queryWithModel({
+      userPrompt: 'Reply exactly OK',
+      signal: new AbortController().signal,
+      options: {
+        model: 'gpt-5.6-sol',
+        querySource: 'insights',
+        agents: [],
+        isNonInteractiveSession: true,
+        hasAppendSystemPrompt: false,
+        mcpTools: [],
+        effortValue: 'max',
+      },
+    })
+
+    return { requestCount, result }
+  } finally {
+    for (const key of ENV_KEYS) {
+      const value = originalEnv[key]
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    if (originalMacro === undefined) delete globals.MACRO
+    else globals.MACRO = originalMacro
+    server.stop(true)
+    await rm(configDir, { recursive: true, force: true })
+  }
+}
+
+test.serial('retries an empty SSE stream even when non-streaming fallback is disabled', async () => {
+  const { requestCount, result } = await runStreamRecoveryScenario(
+    'empty-stream-retry',
+    (attempt) => attempt === 1 ? '' : successfulResponse(),
+  )
+
+  expect(requestCount).toBe(2)
+  expect(result.message.content).toEqual([{ type: 'text', text: 'OK' }])
+  expect(result.isApiErrorMessage).not.toBe(true)
+}, 10_000)
+
+test.serial('surfaces one error after the empty-stream retry is exhausted', async () => {
+  const { requestCount, result } = await runStreamRecoveryScenario(
+    'empty-stream-exhausted',
+    () => '',
+  )
+
+  expect(requestCount).toBe(2)
+  expect(result.isApiErrorMessage).toBe(true)
+}, 10_000)
+
+test.serial('does not retry after server-side tool activity starts', async () => {
+  const { requestCount, result } = await runStreamRecoveryScenario(
+    'partial-server-tool',
+    () => partialServerToolResponse(),
+  )
+
+  expect(requestCount).toBe(1)
+  expect(result.isApiErrorMessage).toBe(true)
 }, 10_000)
 
 test.serial('sends effort when thinking is explicitly disabled', async () => {

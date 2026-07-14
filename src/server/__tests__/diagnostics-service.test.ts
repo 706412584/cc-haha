@@ -224,8 +224,12 @@ describe('DiagnosticsService', () => {
       expect(stderr).toContain(`Failed to start server. Is port ${port} in use?`)
 
       const raw = await fs.readFile(path.join(tmpDir, 'cc-haha', 'diagnostics', 'diagnostics.jsonl'), 'utf-8')
-      expect(raw).toContain('server_uncaught_exception')
-      expect(raw).toContain(`Failed to start server. Is port ${port} in use?`)
+      const fatalEvent = raw
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as { type: string; summary: string })
+        .find((event) => event.type === 'server_uncaught_exception')
+      expect(fatalEvent?.summary).toBe(`Failed to start server. Is port ${port} in use?`)
     } finally {
       server.kill()
       await server.exited.catch(() => undefined)
