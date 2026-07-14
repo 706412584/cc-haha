@@ -1,5 +1,6 @@
 import { mkdir, readdir, readFile, unlink, writeFile } from 'fs/promises'
 import { join } from 'path'
+import { isDeepStrictEqual } from 'util'
 import { z } from 'zod/v4'
 import { getIsNonInteractiveSession, getSessionId } from '../bootstrap/state.js'
 import { uniq } from './array.js'
@@ -144,46 +145,128 @@ export function isTodoV2Enabled(): boolean {
  * Should be called when a new swarm is created to ensure task numbering starts at 1.
  * Uses file locking to prevent race conditions when multiple Claudes run in parallel.
  */
-export async function resetTaskList(taskListId: string): Promise<void> {
+async function resetTaskListUnsafe(taskListId: string): Promise<void> {
   const dir = getTasksDir(taskListId)
-  const lockPath = await ensureTaskListLockFile(taskListId)
+  const currentHighest = await findHighestTaskIdFromFiles(taskListId)
+  if (currentHighest > 0) {
+    const existingMark = await readHighWaterMark(taskListId)
+    if (currentHighest > existingMark) {
+      await writeHighWaterMark(taskListId, currentHighest)
+    }
+  }
 
-  let release: (() => Promise<void>) | undefined
+  let files: string[]
   try {
-    // Acquire exclusive lock on the task list
-    release = await lockfile.lock(lockPath, LOCK_OPTIONS)
-
-    // Find the current highest ID and save it to the high water mark file
-    const currentHighest = await findHighestTaskIdFromFiles(taskListId)
-    if (currentHighest > 0) {
-      const existingMark = await readHighWaterMark(taskListId)
-      if (currentHighest > existingMark) {
-        await writeHighWaterMark(taskListId, currentHighest)
+    files = await readdir(dir)
+  } catch {
+    files = []
+  }
+  for (const file of files) {
+    if (file.endsWith('.json') && !file.startsWith('.')) {
+      try {
+        await unlink(join(dir, file))
+      } catch (error) {
+        if (getErrnoCode(error) !== 'ENOENT') throw error
       }
     }
+  }
+  notifyTasksUpdated()
+}
 
-    // Delete all task files
-    let files: string[]
+async function releaseLocks(releases: Array<() => Promise<void>>): Promise<void> {
+  let firstError: unknown
+  for (const release of releases.reverse()) {
     try {
-      files = await readdir(dir)
-    } catch {
-      files = []
-    }
-    for (const file of files) {
-      if (file.endsWith('.json') && !file.startsWith('.')) {
-        const filePath = join(dir, file)
-        try {
-          await unlink(filePath)
-        } catch {
-          // Ignore errors, file may already be deleted
-        }
-      }
-    }
-    notifyTasksUpdated()
-  } finally {
-    if (release) {
       await release()
+    } catch (error) {
+      firstError ??= error
     }
+  }
+  if (firstError) throw firstError
+}
+
+async function releaseTaskAndListLocks(
+  releaseTasks: Array<() => Promise<void>>,
+  releaseList: (() => Promise<void>) | undefined,
+): Promise<void> {
+  let firstError: unknown
+  try {
+    await releaseLocks(releaseTasks)
+  } catch (error) {
+    firstError = error
+  }
+  try {
+    await releaseList?.()
+  } catch (error) {
+    firstError ??= error
+  }
+  if (firstError) throw firstError
+}
+
+async function lockTaskFiles(taskListId: string): Promise<Array<() => Promise<void>> | null> {
+  let files: string[]
+  try {
+    files = await readdir(getTasksDir(taskListId))
+  } catch (error) {
+    if (getErrnoCode(error) === 'ENOENT') return null
+    throw error
+  }
+
+  const releases: Array<() => Promise<void>> = []
+  const taskPaths = files
+    .filter((file) => file.endsWith('.json') && !file.startsWith('.'))
+    .sort()
+    .map((file) => join(getTasksDir(taskListId), file))
+  for (const taskPath of taskPaths) {
+    try {
+      releases.push(await lockfile.lock(taskPath, LOCK_OPTIONS))
+    } catch (error) {
+      await releaseLocks(releases)
+      if (getErrnoCode(error) === 'ENOENT') return null
+      throw error
+    }
+  }
+  return releases
+}
+
+export async function resetTaskList(taskListId: string): Promise<void> {
+  const lockPath = await ensureTaskListLockFile(taskListId)
+  let releaseList: (() => Promise<void>) | undefined
+  let releaseTasks: Array<() => Promise<void>> = []
+  try {
+    releaseList = await lockfile.lock(lockPath, LOCK_OPTIONS)
+    releaseTasks = await lockTaskFiles(taskListId) ?? []
+    await resetTaskListUnsafe(taskListId)
+  } finally {
+    await releaseTaskAndListLocks(releaseTasks, releaseList)
+  }
+}
+
+export async function resetTaskListIfMatches(
+  taskListId: string,
+  expectedTasks: Task[],
+): Promise<boolean> {
+  const lockPath = await ensureTaskListLockFile(taskListId)
+  let releaseList: (() => Promise<void>) | undefined
+  let releaseTasks: Array<() => Promise<void>> = []
+  try {
+    releaseList = await lockfile.lock(lockPath, LOCK_OPTIONS)
+    const lockedTasks = await lockTaskFiles(taskListId)
+    if (!lockedTasks) return false
+    releaseTasks = lockedTasks
+
+    const currentTasks = await listTasks(taskListId)
+    const expectedById = new Map(expectedTasks.map((task) => [task.id, task]))
+    const matches =
+      expectedById.size === expectedTasks.length &&
+      currentTasks.length === expectedTasks.length &&
+      currentTasks.every((task) => isDeepStrictEqual(task, expectedById.get(task.id)))
+    if (!matches) return false
+
+    await resetTaskListUnsafe(taskListId)
+    return true
+  } finally {
+    await releaseTaskAndListLocks(releaseTasks, releaseList)
   }
 }
 
@@ -395,9 +478,18 @@ export async function deleteTask(
   taskId: string,
 ): Promise<boolean> {
   const path = getTaskPath(taskListId, taskId)
+  const lockPath = await ensureTaskListLockFile(taskListId)
+  let releaseList: (() => Promise<void>) | undefined
+  let releaseTask: (() => Promise<void>) | undefined
 
   try {
-    // Update high water mark before deleting to prevent ID reuse
+    releaseList = await lockfile.lock(lockPath, LOCK_OPTIONS)
+    try {
+      releaseTask = await lockfile.lock(path, LOCK_OPTIONS)
+    } catch (error) {
+      if (getErrnoCode(error) === 'ENOENT') return false
+      throw error
+    }
     const numericId = parseInt(taskId, 10)
     if (!isNaN(numericId)) {
       const currentMark = await readHighWaterMark(taskListId)
@@ -406,18 +498,13 @@ export async function deleteTask(
       }
     }
 
-    // Delete the task file
     try {
       await unlink(path)
     } catch (e) {
-      const code = getErrnoCode(e)
-      if (code === 'ENOENT') {
-        return false
-      }
+      if (getErrnoCode(e) === 'ENOENT') return false
       throw e
     }
 
-    // Remove references to this task from other tasks
     const allTasks = await listTasks(taskListId)
     for (const task of allTasks) {
       const newBlocks = task.blocks.filter(id => id !== taskId)
@@ -437,6 +524,8 @@ export async function deleteTask(
     return true
   } catch {
     return false
+  } finally {
+    await releaseTaskAndListLocks(releaseTask ? [releaseTask] : [], releaseList)
   }
 }
 

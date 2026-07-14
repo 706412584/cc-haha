@@ -216,7 +216,30 @@ export const useCLITaskStore = create<CLITaskStore>((set, get) => ({
     })
 
     try {
-      await cliTasksApi.resetTaskList(sessionId)
+      const { reset } = await cliTasksApi.resetTaskList(
+        sessionId,
+        tasks.map(({ taskListId: _, ...task }) => task),
+      )
+      if (
+        !reset &&
+        trackingGeneration === resetGeneration &&
+        get().sessionId === sessionId
+      ) {
+        set({ resetting: false })
+        await get().refreshTasks(sessionId)
+      }
+    } catch {
+      if (
+        trackingGeneration === resetGeneration &&
+        get().sessionId === sessionId
+      ) {
+        set({
+          tasks,
+          resetting: false,
+          completedAndDismissed: false,
+          dismissedCompletionKey: null,
+        })
+      }
     } finally {
       if (
         trackingGeneration === resetGeneration &&

@@ -14,7 +14,7 @@
 import { AgentService } from '../services/agentService.js'
 import { taskService } from '../services/taskService.js'
 import { ApiError, errorResponse } from '../middleware/errorHandler.js'
-import { resetTaskList } from '../../utils/tasks.js'
+import { resetTaskListIfMatches, TaskSchema } from '../../utils/tasks.js'
 import {
   resolveAgentModelDisplay,
   resolveAgentOverrides,
@@ -28,6 +28,7 @@ import {
 import { getCwd } from '../../utils/cwd.js'
 
 const agentService = new AgentService()
+const TASK_RESET_MAX_BODY_BYTES = 512 * 1024
 
 export async function handleAgentsApi(
   req: Request,
@@ -138,8 +139,13 @@ async function handleTasksApi(
     const taskId = segments[4]
 
     if (req.method === 'POST' && taskListId && taskId === 'reset') {
-      await resetTaskList(taskListId)
-      return Response.json({ ok: true })
+      const { expectedTasks } = await parseJsonBody(req, TASK_RESET_MAX_BODY_BYTES)
+      const parsedTasks = TaskSchema().array().nonempty().safeParse(expectedTasks)
+      if (!parsedTasks.success || parsedTasks.data.some((task) => task.status !== 'completed')) {
+        throw ApiError.badRequest('expectedTasks must be a non-empty completed task snapshot')
+      }
+      const reset = await resetTaskListIfMatches(taskListId, parsedTasks.data)
+      return Response.json({ ok: true, reset })
     }
 
     if (req.method !== 'GET') {
@@ -183,10 +189,47 @@ async function handleTasksApi(
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-async function parseJsonBody(req: Request): Promise<Record<string, unknown>> {
+async function parseJsonBody(
+  req: Request,
+  maxBytes?: number,
+): Promise<Record<string, unknown>> {
   try {
-    return (await req.json()) as Record<string, unknown>
-  } catch {
+    let value: unknown
+    if (maxBytes === undefined) {
+      value = await req.json()
+    } else {
+      const contentLength = Number(req.headers.get('content-length'))
+      if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+        throw new ApiError(413, 'JSON body is too large', 'PAYLOAD_TOO_LARGE')
+      }
+      const reader = req.body?.getReader()
+      if (!reader) throw ApiError.badRequest('Invalid JSON body')
+      const chunks: Uint8Array[] = []
+      let totalBytes = 0
+      while (true) {
+        const { done, value: chunk } = await reader.read()
+        if (done) break
+        totalBytes += chunk.byteLength
+        if (totalBytes > maxBytes) {
+          await reader.cancel()
+          throw new ApiError(413, 'JSON body is too large', 'PAYLOAD_TOO_LARGE')
+        }
+        chunks.push(chunk)
+      }
+      const body = new Uint8Array(totalBytes)
+      let offset = 0
+      for (const chunk of chunks) {
+        body.set(chunk, offset)
+        offset += chunk.byteLength
+      }
+      value = JSON.parse(new TextDecoder().decode(body))
+    }
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw ApiError.badRequest('Invalid JSON body')
+    }
+    return value as Record<string, unknown>
+  } catch (error) {
+    if (error instanceof ApiError) throw error
     throw ApiError.badRequest('Invalid JSON body')
   }
 }
