@@ -63,6 +63,8 @@ type SettingsStore = {
   thinkingEnabled: boolean
   thinkingAutoCollapse: boolean
   autoDreamEnabled: boolean
+  unifiedActivityPanelEnabled: boolean
+  autoModeOptInAccepted: boolean
   availableModels: ModelInfo[]
   activeProviderName: string | null
   locale: Locale
@@ -101,6 +103,8 @@ type SettingsStore = {
   setThinkingEnabled: (enabled: boolean) => Promise<void>
   setThinkingAutoCollapse: (enabled: boolean) => Promise<void>
   setAutoDreamEnabled: (enabled: boolean) => Promise<void>
+  setUnifiedActivityPanelEnabled: (enabled: boolean) => Promise<void>
+  acceptAutoModeOptIn: () => Promise<void>
   setLocale: (locale: Locale) => void
   setTheme: (theme: ThemeMode) => Promise<void>
   setChatSendBehavior: (behavior: ChatSendBehavior) => Promise<void>
@@ -187,6 +191,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   thinkingEnabled: true,
   thinkingAutoCollapse: true,
   autoDreamEnabled: false,
+  unifiedActivityPanelEnabled: false,
+  autoModeOptInAccepted: false,
   availableModels: [],
   activeProviderName: null,
   locale: getStoredLocale(),
@@ -217,7 +223,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   appMode: {
     mode: 'default',
     portableDir: null,
-    defaultPortableDir: null,
     activeConfigDir: null,
     configDirSource: 'system',
   },
@@ -252,6 +257,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         thinkingEnabled: userSettings.alwaysThinkingEnabled !== false,
         thinkingAutoCollapse: userSettings.thinkingAutoCollapse !== false,
         autoDreamEnabled: userSettings.autoDreamEnabled === true,
+        unifiedActivityPanelEnabled: userSettings.unifiedActivityPanelEnabled === true,
+        autoModeOptInAccepted: userSettings.skipAutoPermissionPrompt === true,
         theme,
         chatSendBehavior: normalizeChatSendBehavior(userSettings.chatSendBehavior),
         outputStyle: normalizeOutputStyle(userSettings.outputStyle),
@@ -340,6 +347,28 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       await settingsApi.updateUser({ autoDreamEnabled: enabled })
     } catch (error) {
       set({ autoDreamEnabled: prev })
+      throw error
+    }
+  },
+
+  setUnifiedActivityPanelEnabled: async (enabled) => {
+    const previous = get().unifiedActivityPanelEnabled
+    set({ unifiedActivityPanelEnabled: enabled })
+    try {
+      await settingsApi.updateUser({ unifiedActivityPanelEnabled: enabled })
+    } catch (error) {
+      set({ unifiedActivityPanelEnabled: previous })
+      throw error
+    }
+  },
+
+  acceptAutoModeOptIn: async () => {
+    const previous = get().autoModeOptInAccepted
+    set({ autoModeOptInAccepted: true })
+    try {
+      await settingsApi.updateUser({ skipAutoPermissionPrompt: true })
+    } catch (error) {
+      set({ autoModeOptInAccepted: previous })
       throw error
     }
   },
@@ -633,16 +662,14 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     const host = getDesktopHost()
     if (!host.isDesktop) return
     const prev = get().appMode
+    const selectedCustomDir = mode === 'portable' ? portableDir?.trim() || null : null
+    if (mode === 'portable' && !selectedCustomDir) {
+      throw new Error('Choose an absolute custom data directory')
+    }
     const newMode: AppModeConfig = {
       ...prev,
       mode,
-      portableDir: mode === 'portable'
-        ? portableDir ?? prev.defaultPortableDir ?? prev.portableDir
-        : null,
-      activeConfigDir: mode === 'portable'
-        ? portableDir ?? prev.defaultPortableDir ?? prev.portableDir
-        : null,
-      configDirSource: mode === 'portable' ? 'portable' : 'system',
+      portableDir: selectedCustomDir,
     }
     set({ appMode: newMode, appModeRequiresRestart: true })
     try {

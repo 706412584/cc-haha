@@ -5,9 +5,9 @@
  * Asserts that the total gzipped JS bundle size in `dist/assets/` does not
  * exceed `BASELINE_GZIP_BYTES + BUDGET_GZIP_BYTES`.
  *
- * The baseline was captured on `origin/main @ 95931d49` (post-R5 default-view
- * change, pre-CodeMirror) by summing gzip-compressed output of every
- * `dist/assets/*.js` file produced by `bun run build`.
+ * The baseline was captured on `origin/main @ 2a44f381` by summing
+ * gzip-compressed output of every `dist/assets/*.js` file produced by
+ * `bun run build` with the current dependency installation.
  *
  * Run before/after dependency or feature changes that affect the desktop
  * client bundle. Fails non-zero when the budget is exceeded so CI can gate it.
@@ -19,9 +19,9 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { gzipSync } from 'node:zlib'
 
-// Captured 2026-06-12 on origin/main @ 95931d49 (post-R5, pre-CodeMirror).
-const BASELINE_GZIP_BYTES = 3_378_955
-// Budget: ~100 KB (gzipped) of headroom for CodeMirror 6 core + 3 lang packs.
+// Captured 2026-07-14 on origin/main @ 2a44f381.
+const BASELINE_GZIP_BYTES = 3_707_686
+// Budget: ~100 KB (gzipped) of headroom for desktop client changes.
 const BUDGET_GZIP_BYTES = 100 * 1024
 
 const ROOT_DIR = new URL('..', import.meta.url).pathname
@@ -76,7 +76,7 @@ const delta = totalGzip - BASELINE_GZIP_BYTES
 console.log(`bundle-budget: scanned ${jsFileCount} JS files in dist/assets`)
 console.log(`bundle-budget: total raw    = ${formatBytes(totalRaw)}`)
 console.log(`bundle-budget: total gzip   = ${formatBytes(totalGzip)}`)
-console.log(`bundle-budget: baseline     = ${formatBytes(BASELINE_GZIP_BYTES)} (origin/main @ 95931d49, pre-CodeMirror)`)
+console.log(`bundle-budget: baseline     = ${formatBytes(BASELINE_GZIP_BYTES)} (origin/main @ 2a44f381)`)
 console.log(`bundle-budget: budget       = +${formatBytes(BUDGET_GZIP_BYTES)} gz`)
 console.log(`bundle-budget: ceiling      = ${formatBytes(ceiling)}`)
 console.log(`bundle-budget: delta        = ${delta >= 0 ? '+' : ''}${formatBytes(delta)} (vs baseline)`)

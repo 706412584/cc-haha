@@ -55,11 +55,13 @@ import { ProjectRulesSettings } from './ProjectRulesSettings'
 import { useUIStore, type SettingsTab } from '../stores/uiStore'
 import { ClaudeOfficialLogin } from '../components/settings/ClaudeOfficialLogin'
 import { ChatGPTOfficialLogin } from '../components/settings/ChatGPTOfficialLogin'
+import { GrokOfficialLogin } from '../components/settings/GrokOfficialLogin'
 import {
   BUILT_IN_PROVIDER_IDS,
   CLAUDE_OFFICIAL_PROVIDER_ID,
   OPENAI_OFFICIAL_PROVIDER_ID,
 } from '../constants/openaiOfficialProvider'
+import { GROK_OFFICIAL_PROVIDER_ID } from '../constants/grokOfficialProvider'
 import { useUpdateStore } from '../stores/updateStore'
 import { getBaseUrl } from '../api/client'
 import { h5AccessApi } from '../api/h5Access'
@@ -67,6 +69,7 @@ import { formatBytes } from '../lib/formatBytes'
 import { isDesktopRuntime } from '../lib/desktopRuntime'
 import { getDesktopHost } from '../lib/desktopHost'
 import { publicAssetPath } from '../lib/publicAsset'
+import { isBrowserSafePort } from '../lib/browserSafePort'
 import {
   getDesktopNotificationPermission,
   notifyDesktop,
@@ -197,7 +200,7 @@ function parseH5FixedPortDraft(draft: string): number | null | 'invalid' {
   if (!trimmed) return null
   if (!/^\d{1,5}$/.test(trimmed)) return 'invalid'
   const port = Number(trimmed)
-  return port >= 1024 && port <= 65535 ? port : 'invalid'
+  return port >= 1024 && port <= 65535 && isBrowserSafePort(port) ? port : 'invalid'
 }
 
 // Mirrors the server-side disconnect grace range (h5AccessService
@@ -294,13 +297,14 @@ function TabButton({ icon, label, active, onClick }: { icon: string; label: stri
   return (
     <button
       onClick={onClick}
+      aria-current={active ? 'page' : undefined}
       className={`settings-tab-button w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-left transition-colors ${
         active
           ? 'bg-[var(--color-surface-selected)] text-[var(--color-text-primary)] font-medium'
           : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
       }`}
     >
-      <span className="material-symbols-outlined text-[18px]">{icon}</span>
+      <span className="material-symbols-outlined text-[18px]" aria-hidden="true">{icon}</span>
       {label}
     </button>
   )
@@ -311,6 +315,7 @@ function TabButton({ icon, label, active, onClick }: { icon: string; label: stri
 type ProviderListItem =
   | { id: typeof CLAUDE_OFFICIAL_PROVIDER_ID; kind: 'claude-official' }
   | { id: typeof OPENAI_OFFICIAL_PROVIDER_ID; kind: 'openai-official' }
+  | { id: typeof GROK_OFFICIAL_PROVIDER_ID; kind: 'grok-official' }
   | { id: string; kind: 'saved'; provider: SavedProvider }
 
 function defaultProviderOrder(providers: SavedProvider[]): string[] {
@@ -357,6 +362,7 @@ function buildProviderListItems(
   const items = new Map<string, ProviderListItem>([
     [CLAUDE_OFFICIAL_PROVIDER_ID, { id: CLAUDE_OFFICIAL_PROVIDER_ID, kind: 'claude-official' }],
     [OPENAI_OFFICIAL_PROVIDER_ID, { id: OPENAI_OFFICIAL_PROVIDER_ID, kind: 'openai-official' }],
+    [GROK_OFFICIAL_PROVIDER_ID, { id: GROK_OFFICIAL_PROVIDER_ID, kind: 'grok-official' }],
     ...savedItems,
   ])
 
@@ -371,6 +377,8 @@ function providerItemTestId(item: ProviderListItem): string {
       return 'claude-official-provider'
     case 'openai-official':
       return 'openai-official-provider'
+    case 'grok-official':
+      return 'grok-official-provider'
     case 'saved':
       return `provider-${item.provider.id}`
   }
@@ -483,6 +491,7 @@ function ProviderSettings() {
 
   const isClaudeOfficialActive = hasLoadedProviders && activeId === null
   const isOpenAIOfficialActive = hasLoadedProviders && activeId === OPENAI_OFFICIAL_PROVIDER_ID
+  const isGrokOfficialActive = hasLoadedProviders && activeId === GROK_OFFICIAL_PROVIDER_ID
 
   return (
     <div className="max-w-2xl">
@@ -546,6 +555,28 @@ function ProviderSettings() {
                     details={isOpenAIOfficialActive ? (
                       <div className="border-t border-[var(--color-border-separator)] px-4 pb-4 pt-3">
                         <ChatGPTOfficialLogin />
+                      </div>
+                    ) : null}
+                  />
+                )
+              }
+
+              if (item.kind === 'grok-official') {
+                return (
+                  <SortableProviderCard
+                    key={item.id}
+                    item={item}
+                    isActive={isGrokOfficialActive}
+                    dragLabel={t('settings.providers.dragToReorder')}
+                    onActivate={!isGrokOfficialActive ? () => handleActivate(GROK_OFFICIAL_PROVIDER_ID) : undefined}
+                    title={t('settings.providers.grokOfficialName')}
+                    subtitle={t('settings.providers.grokOfficialDesc')}
+                    badges={isGrokOfficialActive ? (
+                      <span className="rounded border border-[var(--color-brand)]/18 bg-[var(--color-brand)]/12 px-1.5 py-0.5 text-[10px] font-bold leading-none text-[var(--color-brand)]">{t('settings.providers.default')}</span>
+                    ) : null}
+                    details={isGrokOfficialActive ? (
+                      <div className="border-t border-[var(--color-border-separator)] px-4 pb-4 pt-3">
+                        <GrokOfficialLogin />
                       </div>
                     ) : null}
                   />
@@ -2167,6 +2198,8 @@ export function GeneralSettings() {
     setPermissionMode,
     autoDreamEnabled,
     setAutoDreamEnabled,
+    unifiedActivityPanelEnabled,
+    setUnifiedActivityPanelEnabled,
     locale,
     setLocale,
     theme,
@@ -2272,8 +2305,8 @@ export function GeneralSettings() {
   }, [fetchAppMode])
 
   useEffect(() => {
-    setPortableDirDraft(appMode.portableDir ?? appMode.defaultPortableDir ?? '')
-  }, [appMode.defaultPortableDir, appMode.portableDir])
+    setPortableDirDraft(appMode.portableDir ?? '')
+  }, [appMode.portableDir])
 
   const LANGUAGES: Array<{ value: Locale; label: string }> = [
     { value: 'en', label: 'English' },
@@ -2394,6 +2427,17 @@ export function GeneralSettings() {
       }
     } finally {
       setNotificationActionRunning(false)
+    }
+  }
+
+  const handleUnifiedActivityPanelToggle = async (enabled: boolean) => {
+    try {
+      await setUnifiedActivityPanelEnabled(enabled)
+    } catch {
+      addToast({
+        type: 'error',
+        message: t('settings.general.activityPanelSaveFailed'),
+      })
     }
   }
 
@@ -2886,6 +2930,31 @@ export function GeneralSettings() {
       </div>
 
       <div className="mt-8">
+        <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.activityPanelTitle')}</h2>
+        <p className="text-sm text-[var(--color-text-tertiary)] mb-3">{t('settings.general.activityPanelDescription')}</p>
+        <label className="relative flex items-start gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3 cursor-pointer hover:border-[var(--color-border-focus)] transition-colors">
+          <input
+            type="checkbox"
+            aria-label={t('settings.general.activityPanelEnabled')}
+            checked={unifiedActivityPanelEnabled}
+            onChange={(event) => void handleUnifiedActivityPanelToggle(event.target.checked)}
+            className={SETTINGS_CHECKBOX_INPUT_CLASS}
+          />
+          <SettingsCheckboxMark checked={unifiedActivityPanelEnabled} />
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-[var(--color-text-primary)]">
+              {t('settings.general.activityPanelEnabled')}
+            </div>
+            <div className="text-xs text-[var(--color-text-tertiary)] mt-1 leading-5">
+              {unifiedActivityPanelEnabled
+                ? t('settings.general.activityPanelHintOn')
+                : t('settings.general.activityPanelHintOff')}
+            </div>
+          </div>
+        </label>
+      </div>
+
+      <div className="mt-8">
         <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.autoDreamTitle')}</h2>
         <p className="text-sm text-[var(--color-text-tertiary)] mb-3">{t('settings.general.autoDreamDescription')}</p>
         <label className="relative flex items-start gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3 cursor-pointer hover:border-[var(--color-border-focus)] transition-colors">
@@ -3349,17 +3418,7 @@ export function GeneralSettings() {
                   </Button>
                 </div>
 
-                <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-                  <button
-                    type="button"
-                    className="text-xs font-medium text-[var(--color-brand)] hover:underline"
-                    onClick={() => {
-                      setPortableDirDraft(appMode.defaultPortableDir ?? '')
-                      setModeError(null)
-                    }}
-                  >
-                    {t('settings.general.storageUseDefaultPortableDir')}
-                  </button>
+                <div className="mt-3 flex justify-end">
                   <Button
                     type="button"
                     size="sm"

@@ -23,6 +23,12 @@ import {
   buildOpenAIOfficialRuntimeEnv,
   isOpenAIOfficialProviderId,
 } from './openaiOfficialProvider.js'
+import {
+  GROK_OAUTH_FILE_ENV_KEY,
+  GROK_OAUTH_PROVIDER_ENV_KEY,
+  buildGrokOfficialRuntimeEnv,
+  isGrokOfficialProviderId,
+} from './grokOfficialProvider.js'
 
 export const MANAGED_PROVIDER_ENV_KEYS = [
   'ANTHROPIC_BASE_URL',
@@ -44,6 +50,8 @@ export const MANAGED_PROVIDER_ENV_KEYS = [
   MODEL_CONTEXT_WINDOWS_ENV_KEY,
   OPENAI_OAUTH_PROVIDER_ENV_KEY,
   OPENAI_CODEX_OAUTH_FILE_ENV_KEY,
+  GROK_OAUTH_PROVIDER_ENV_KEY,
+  GROK_OAUTH_FILE_ENV_KEY,
 ] as const
 
 const CUSTOM_PROVIDER_MODEL_CAPABILITIES = 'thinking,effort,adaptive_thinking,max_effort'
@@ -84,7 +92,8 @@ function isSavedProvider(value: unknown): value is SavedProvider {
     (
       runtimeKind === undefined ||
       runtimeKind === 'anthropic_compatible' ||
-      runtimeKind === 'openai_oauth'
+      runtimeKind === 'openai_oauth' ||
+      runtimeKind === 'grok_oauth'
     ) &&
     isProviderModels(value.models) &&
     (value.model1mSupport === undefined || isProviderModel1mSupport(value.model1mSupport))
@@ -231,7 +240,8 @@ export function normalizeProvidersIndex(value: unknown): ProvidersIndex | null {
         : null
   const activeId = rawActiveId && (
     providers.some((provider) => provider.id === rawActiveId) ||
-    isOpenAIOfficialProviderId(rawActiveId)
+    isOpenAIOfficialProviderId(rawActiveId) ||
+    isGrokOfficialProviderId(rawActiveId)
   )
     ? rawActiveId
     : null
@@ -337,6 +347,9 @@ export function buildProviderManagedEnv(
 ): Record<string, string> {
   if (provider.runtimeKind === 'openai_oauth') {
     return buildOpenAIOfficialRuntimeEnv()
+  }
+  if (provider.runtimeKind === 'grok_oauth') {
+    return buildGrokOfficialRuntimeEnv()
   }
 
   const apiFormat: ApiFormat = provider.apiFormat ?? 'anthropic'
@@ -461,6 +474,9 @@ function buildActiveProviderManagedEnv(
   if (isOpenAIOfficialProviderId(index.activeId)) {
     return buildOpenAIOfficialRuntimeEnv()
   }
+  if (isGrokOfficialProviderId(index.activeId)) {
+    return buildGrokOfficialRuntimeEnv()
+  }
 
   const provider = index.providers.find((entry) => entry.id === index.activeId)
   if (!provider) return null
@@ -480,7 +496,11 @@ export function readActiveProviderManagedEnv(
 
 export function activeProviderNeedsProxy(configDir: string): boolean {
   const index = readProvidersIndex(configDir)
-  if (!index?.activeId || isOpenAIOfficialProviderId(index.activeId)) {
+  if (
+    !index?.activeId ||
+    isOpenAIOfficialProviderId(index.activeId) ||
+    isGrokOfficialProviderId(index.activeId)
+  ) {
     return false
   }
 

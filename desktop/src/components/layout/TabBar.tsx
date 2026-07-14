@@ -29,6 +29,7 @@ import { ActionDialog } from '../shared/ActionDialog'
 import { buildSessionActivityModel, hasVisibleSessionActivity } from '../activity/sessionActivityModel'
 import { SessionActivityButton } from '../activity/SessionActivityButton'
 import { useActivityPanelStore } from '../../stores/activityPanelStore'
+import { useSettingsStore } from '../../stores/settingsStore'
 
 const TAB_WIDTH = 180
 const DRAG_START_THRESHOLD = 4
@@ -99,6 +100,9 @@ export function TabBar() {
   const isTerminalPanelOpen = useTerminalPanelStore((state) =>
     activeTabId && isActiveSessionTab ? state.isPanelOpen(activeTabId) : false,
   )
+  const unifiedActivityPanelEnabled = useSettingsStore(
+    (state) => state.unifiedActivityPanelEnabled,
+  )
   const cliTasks = useCLITaskStore((state) => state.tasks)
   const cliTasksSessionId = useCLITaskStore((state) => state.sessionId)
   const cliTasksCompletedAndDismissed = useCLITaskStore((state) => state.completedAndDismissed)
@@ -110,6 +114,9 @@ export function TabBar() {
   const dismissedBackgroundTaskKeys = useMemo(
     () => new Set(dismissedBackgroundTaskKeyList),
     [dismissedBackgroundTaskKeyList],
+  )
+  const isMemberSession = useTeamStore((state) =>
+    activeTabId ? state.getMemberBySessionId(activeTabId) !== null : false,
   )
   const activityTeamMembers = useTeamStore(useShallow((state) => {
     const activeTeam = state.activeTeam
@@ -141,7 +148,11 @@ export function TabBar() {
       hasVisibleActivity: hasVisibleSessionActivity(model),
     }
   }))
-  const showActivityButton = activeTabId && activityState.hasVisibleActivity
+  const showActivityButton = unifiedActivityPanelEnabled
+    && activeTabId
+    && !isMemberSession
+    && activityState.hasVisibleActivity
+    && !isWorkbenchOpen
 
   const moveTab = useTabStore((s) => s.moveTab)
   const scrollRef = useRef<HTMLDivElement>(null)

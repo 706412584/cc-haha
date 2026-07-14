@@ -72,6 +72,8 @@ function workspaceReferenceToAttachment(reference: WorkspaceChatReference): Atta
     isDirectory: reference.isDirectory,
     lineStart: reference.lineStart,
     lineEnd: reference.lineEnd,
+    diffSide: reference.diffSide,
+    hunkId: reference.hunkId,
     note: reference.note,
     quote: reference.quote,
   }
@@ -767,6 +769,8 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
         isDirectory: reference.isDirectory,
         lineStart: reference.lineStart,
         lineEnd: reference.lineEnd,
+        diffSide: reference.diffSide,
+        hunkId: reference.hunkId,
         note: reference.note,
         quote: reference.quote,
       })),
@@ -1144,6 +1148,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   return (
     <div
       data-testid="chat-input-shell"
+      data-session-id={activeTabId ?? undefined}
       className={
         isHeroComposer
           ? `bg-[var(--color-surface)] ${isMobileComposer ? 'px-4 pb-3' : 'px-8 pb-4'}`

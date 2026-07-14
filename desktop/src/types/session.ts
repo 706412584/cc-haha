@@ -1,5 +1,7 @@
 // Source: src/server/services/sessionService.ts
 
+import type { ReasoningEffortLevel } from './settings'
+
 export type SessionListItem = {
   id: string
   title: string
@@ -15,6 +17,9 @@ export type SessionListItem = {
    *  test fixtures that omit it remain compatible; sidebar context-menu
    *  actions fall back to a "not available" message when missing. */
   filePath?: string
+  runtimeProviderId?: string | null
+  runtimeModelId?: string
+  effortLevel?: ReasoningEffortLevel
 }
 
 export type MessageUsage = {

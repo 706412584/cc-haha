@@ -394,6 +394,19 @@ export function mergeLcovRecords(records: LcovRecord[]): LcovRecord[] {
   return [...merged.values()]
 }
 
+export function buildRootCoverageCommand() {
+  return [
+    'bun',
+    '--no-env-file',
+    '--feature=TRANSCRIPT_CLASSIFIER',
+    'test',
+    '--max-concurrency=1',
+    '--timeout=20000',
+    '--coverage',
+    '--coverage-reporter=lcov',
+  ]
+}
+
 function summarizeLcovRecords(records: LcovRecord[]): CoverageSummary {
   let linesTotal = 0
   let linesCovered = 0
@@ -874,7 +887,7 @@ export async function runCoverageGate(options: {
   const rootCoverageDir = join(outputDir, 'root-server')
   const rootPartsDir = join(rootCoverageDir, 'parts')
   mkdirSync(rootPartsDir, { recursive: true })
-  const rootCommand = ['bun', '--no-env-file', 'test', '--max-concurrency=1', '--timeout=20000', '--coverage', '--coverage-reporter=lcov']
+  const rootCommand = buildRootCoverageCommand()
   const rootLogPath = join(rootCoverageDir, 'coverage.log')
   const rootStarted = Date.now()
   let nextFileIndex = 0

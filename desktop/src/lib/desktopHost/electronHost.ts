@@ -75,6 +75,7 @@ export function createElectronHost(bridge: ElectronHostBridge): DesktopHost {
     },
     runtime: {
       getServerUrl: () => invoke(ELECTRON_IPC_CHANNELS.runtimeGetServerUrl),
+      getLocalAccessToken: () => invoke(ELECTRON_IPC_CHANNELS.runtimeGetLocalAccessToken),
     },
     tunnel: {
       start: options => invoke(ELECTRON_IPC_CHANNELS.tunnelStart, options),
@@ -159,7 +160,6 @@ export function createElectronHost(bridge: ElectronHostBridge): DesktopHost {
     appMode: {
       get: () => invoke(ELECTRON_IPC_CHANNELS.appModeGet),
       set: config => invoke(ELECTRON_IPC_CHANNELS.appModeSet, config),
-      detectPortableDir: () => invoke(ELECTRON_IPC_CHANNELS.appModeDetectPortableDir),
       prepareRestart: () => invoke(ELECTRON_IPC_CHANNELS.appModePrepareRestart),
       restart: () => invoke(ELECTRON_IPC_CHANNELS.appModeRestart),
     },

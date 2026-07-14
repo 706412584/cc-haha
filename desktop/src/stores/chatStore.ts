@@ -142,6 +142,7 @@ export type PerSessionState = {
   backgroundAgentTasks?: Record<string, BackgroundAgentTask>
   stoppingBackgroundTaskIds?: Record<string, boolean>
   suppressNextTaskNotificationResponse?: boolean
+  replaceHistoryOnCompletion?: boolean
   activeGoal?: ActiveGoalState | null
   elapsedTimer: ReturnType<typeof setInterval> | null
   composerPrefill?: {
@@ -184,6 +185,7 @@ const DEFAULT_SESSION_STATE: PerSessionState = {
   backgroundAgentTasks: {},
   stoppingBackgroundTaskIds: {},
   suppressNextTaskNotificationResponse: false,
+  replaceHistoryOnCompletion: false,
   activeGoal: null,
   elapsedTimer: null,
   composerPrefill: null,
@@ -1055,6 +1057,24 @@ function refreshCompletedTranscriptHistory(
   })
 }
 
+function reconcileCompletedTranscriptHistory(
+  get: () => ChatStore,
+  sessionId: string,
+  replaceHistory: boolean,
+): void {
+  if (!replaceHistory) {
+    refreshCompletedTranscriptHistory(get, sessionId)
+    return
+  }
+
+  const session = get().sessions[sessionId]
+  if (!session) return
+  void get().reloadHistory(sessionId, {
+    messages: session.messages,
+    backgroundAgentTasks: session.backgroundAgentTasks,
+  })
+}
+
 function normalizeMemoryEventFiles(data: unknown): MemoryEventFile[] {
   if (!data || typeof data !== 'object') return []
   const writtenPaths = (data as { writtenPaths?: unknown }).writtenPaths
@@ -1331,6 +1351,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             mimeType: a.mimeType,
             lineStart: a.lineStart,
             lineEnd: a.lineEnd,
+            diffSide: a.diffSide,
+            hunkId: a.hunkId,
             note: a.note,
             quote: a.quote,
           }))
@@ -1395,6 +1417,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             chatState: 'thinking',
             elapsedSeconds: 0,
             suppressNextTaskNotificationResponse: false,
+            replaceHistoryOnCompletion: false,
             streamingText: '',
             streamingResponseChars: 0,
             statusVerb: isMemberSession ? '' : randomSpinnerVerb(),
@@ -2047,6 +2070,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             .filter((message) => message.id !== messageId),
           ...(pendingText.trim() ? { streamingText: '' } : {}),
           suppressNextTaskNotificationResponse: false,
+          replaceHistoryOnCompletion: false,
         }
       }),
     }))
@@ -2072,6 +2096,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       apiRetry: null,
       streamingFallback: null,
       suppressNextTaskNotificationResponse: false,
+      replaceHistoryOnCompletion: false,
       queuedUserMessages: [],
     })) }))
   },
@@ -2145,6 +2170,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               apiRetry: null,
               streamingFallback: null,
               statusVerb: '',
+              replaceHistoryOnCompletion: true,
             }
           })
           useTabStore.getState().updateTabStatus(sessionId, 'running')
@@ -2260,9 +2286,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       case 'permission_mode_changed': {
         // CLI 是权限模式的真相来源。这里把它恢复/切换后的权威值校正到本地镜像。
         // 注意：只更新本地状态，**不要**走 setSessionPermissionMode —— 那会把
-        // set_permission_mode 再回发给 CLI 形成回环。未知模式（如未启用对应特性
-        // 的 'auto'）直接忽略，避免选择器拿到无法渲染的值。
-        const KNOWN_MODES: PermissionMode[] = ['default', 'acceptEdits', 'plan', 'bypassPermissions', 'dontAsk']
+        // set_permission_mode 再回发给 CLI 形成回环。未知模式直接忽略，避免
+        // 选择器拿到无法渲染的值。
+        const KNOWN_MODES: PermissionMode[] = ['default', 'acceptEdits', 'auto', 'plan', 'bypassPermissions', 'dontAsk']
         if (KNOWN_MODES.includes(msg.mode)) {
           useSessionStore.getState().updateSessionPermissionMode(sessionId, msg.mode)
         }
@@ -2777,9 +2803,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             streamingText: '',
             streamingToolInput: '',
             suppressNextTaskNotificationResponse: false,
+            replaceHistoryOnCompletion: false,
           }))
           useTabStore.getState().updateTabStatus(sessionId, hasRunningBackgroundAgents ? 'running' : 'idle')
-          refreshCompletedTranscriptHistory(get, sessionId)
+          reconcileCompletedTranscriptHistory(
+            get,
+            sessionId,
+            session.replaceHistoryOnCompletion === true,
+          )
           for (const queuedMessage of get().sessions[sessionId]?.queuedUserMessages ?? []) {
             get().sendQueuedUserMessage(sessionId, queuedMessage.id)
           }
@@ -2820,6 +2851,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           elapsedTimer: null,
           apiRetry: null,
           streamingFallback: null,
+          replaceHistoryOnCompletion: false,
         }))
         useTabStore.getState().updateTabStatus(sessionId, hasRunningBackgroundAgents ? 'running' : 'idle')
         const notification = wasAgentRunning && appendedCompletionMessage
@@ -2834,7 +2866,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             target: { type: 'session', sessionId },
           })
         }
-        refreshCompletedTranscriptHistory(get, sessionId)
+        reconcileCompletedTranscriptHistory(
+          get,
+          sessionId,
+          session.replaceHistoryOnCompletion === true,
+        )
         get().drainMessageQueue(sessionId)
         for (const queuedMessage of get().sessions[sessionId]?.queuedUserMessages ?? []) {
           get().sendQueuedUserMessage(sessionId, queuedMessage.id)
@@ -2853,6 +2889,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             ...(pendingText.trim() ? { streamingText: '' } : {}),
             activeThinkingId: null,
             suppressNextTaskNotificationResponse: false,
+            replaceHistoryOnCompletion: false,
           }
         })
         break
@@ -3999,6 +4036,133 @@ function extractLeadingFileReferences(text: string): {
   }
 }
 
+type WorkspaceReferenceHistoryDisplay = {
+  content: string
+  attachments: UIAttachment[]
+}
+
+function parseWorkspaceReferenceLocation(location: string): {
+  path: string
+  lineStart?: number
+  lineEnd?: number
+  diffSide?: 'old' | 'new'
+} {
+  const match = location.match(/^(.*?)(?::(old|new))?:L(\d+)(?:-L(\d+))?$/)
+  if (!match?.[1] || !match[3]) return { path: location }
+
+  const lineStart = Number(match[3])
+  const lineEnd = Number(match[4] ?? match[3])
+  return {
+    path: match[1],
+    lineStart,
+    lineEnd,
+    ...(match[2] === 'old' || match[2] === 'new' ? { diffSide: match[2] } : {}),
+  }
+}
+
+function parseWorkspaceReferenceHistoryPrompt(text: string): WorkspaceReferenceHistoryDisplay | null {
+  const lines = text.replace(/\r\n?/g, '\n').split('\n')
+  if (lines[0]?.trim() !== 'Referenced workspace context:') return null
+
+  const attachments: UIAttachment[] = []
+  let index = 1
+  const isLocationHeader = (line: string) => /^@".+":$/.test(line.trim())
+
+  while (index < lines.length) {
+    const header = lines[index]?.trim() ?? ''
+    const locationMatch = header.match(/^@"(.+)":$/)
+    if (!locationMatch?.[1]) break
+
+    const location = parseWorkspaceReferenceLocation(locationMatch[1])
+    index += 1
+
+    let note: string | undefined
+    if (lines[index]?.trimStart().startsWith('Comment:')) {
+      const noteLines = [lines[index]!.trimStart().slice('Comment:'.length).trimStart()]
+      index += 1
+      while (
+        index < lines.length &&
+        lines[index]!.trim() !== '' &&
+        !/^`{3,}/.test(lines[index]!.trim()) &&
+        !isLocationHeader(lines[index]!)
+      ) {
+        noteLines.push(lines[index]!)
+        index += 1
+      }
+      note = noteLines.join('\n').trim() || undefined
+    }
+
+    let quote: string | undefined
+    const fenceMatch = lines[index]?.trim().match(/^(`{3,})[^`]*$/)
+    if (fenceMatch?.[1]) {
+      const fence = fenceMatch[1]
+      index += 1
+      const quoteLines: string[] = []
+      while (index < lines.length && lines[index]?.trim() !== fence) {
+        quoteLines.push(lines[index]!)
+        index += 1
+      }
+      if (index >= lines.length) return null
+      index += 1
+      quote = quoteLines.join('\n').trim() || undefined
+    }
+
+    attachments.push({
+      type: 'file',
+      name: getReferenceName(location.path),
+      path: location.path,
+      ...(location.lineStart ? { lineStart: location.lineStart } : {}),
+      ...(location.lineEnd ? { lineEnd: location.lineEnd } : {}),
+      ...(location.diffSide ? { diffSide: location.diffSide } : {}),
+      ...(note ? { note } : {}),
+      ...(quote ? { quote } : {}),
+    })
+  }
+
+  if (attachments.length === 0) return null
+  while (lines[index]?.trim() === '') index += 1
+  return {
+    content: lines.slice(index).join('\n').trim(),
+    attachments,
+  }
+}
+
+function pathsReferToSameFile(left: string | undefined, right: string | undefined): boolean {
+  if (!left || !right) return false
+  const normalizedLeft = left.replace(/\\/g, '/').replace(/^\.\//, '')
+  const normalizedRight = right.replace(/\\/g, '/').replace(/^\.\//, '')
+  return (
+    normalizedLeft === normalizedRight ||
+    normalizedLeft.endsWith(`/${normalizedRight}`) ||
+    normalizedRight.endsWith(`/${normalizedLeft}`)
+  )
+}
+
+function extractRestoredUserDisplay(text: string): {
+  content: string
+  attachments?: UIAttachment[]
+  modelContent?: string
+} {
+  const leading = extractLeadingFileReferences(text)
+  const workspace = parseWorkspaceReferenceHistoryPrompt(leading.content)
+  if (!workspace) return leading
+
+  const unmatchedLeading = [...(leading.attachments ?? [])]
+  for (const attachment of workspace.attachments) {
+    const matchingIndex = unmatchedLeading.findIndex((candidate) =>
+      pathsReferToSameFile(candidate.path, attachment.path),
+    )
+    if (matchingIndex >= 0) unmatchedLeading.splice(matchingIndex, 1)
+  }
+
+  const attachments = [...unmatchedLeading, ...workspace.attachments]
+  return {
+    content: workspace.content,
+    attachments: attachments.length > 0 ? attachments : undefined,
+    modelContent: text,
+  }
+}
+
 export function appendReplayedUserMessage(
   messages: UIMessage[],
   content: string,
@@ -4009,9 +4173,9 @@ export function appendReplayedUserMessage(
   // mapping) so the dedupe below can match the already-rendered message instead
   // of appending the raw prompt — paths and all — as a duplicate bubble.
   const sanitized = stripGeneratedImageMetadataLines(content) || content.trim()
-  const parsed = extractLeadingFileReferences(sanitized)
-  const displayContent = parsed.content.trim() || sanitized
-  if (!displayContent) return messages
+  const parsed = extractRestoredUserDisplay(sanitized)
+  const displayContent = parsed.content.trim()
+  if (!displayContent && !parsed.attachments?.length) return messages
 
   const modelContent = parsed.modelContent ?? sanitized
   const currentTurnUserIndex = findCurrentTurnUserMessageIndex(messages, modelContent)
@@ -4076,6 +4240,8 @@ function mapQueuedDisplayAttachments(attachments?: AttachmentRef[]): UIAttachmen
     isDirectory: attachment.isDirectory,
     lineStart: attachment.lineStart,
     lineEnd: attachment.lineEnd,
+    diffSide: attachment.diffSide,
+    hunkId: attachment.hunkId,
     note: attachment.note,
     quote: attachment.quote,
   }))
@@ -4325,7 +4491,7 @@ export function mapHistoryMessagesToUiMessages(
         })
         continue
       }
-      const parsed = extractLeadingFileReferences(msg.content)
+      const parsed = extractRestoredUserDisplay(msg.content)
       uiMessages.push({
         id: msg.id || nextId(),
         type: 'user_text',
@@ -4403,7 +4569,7 @@ export function mapHistoryMessagesToUiMessages(
         if (visualSelectionDisplay) {
           applyVisualSelectionHistoryDisplay(attachments, visualSelectionDisplay)
         }
-        const parsed = extractLeadingFileReferences(visibleText)
+        const parsed = extractRestoredUserDisplay(visibleText)
         const userContent = visualSelectionDisplay ? '' : parsed.content
         const modelContent = visualSelectionDisplay || modelText !== visibleText ? modelText : parsed.modelContent
         const allAttachments = [...(parsed.attachments ?? []), ...attachments]

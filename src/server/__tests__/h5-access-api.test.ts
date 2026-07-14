@@ -295,4 +295,12 @@ describe('/api/h5-access', () => {
     const raw = await response.text()
     expect(raw).not.toContain('cf-secret-token')
   })
+
+  test('PUT rejects a browser-blocked fixedPort', async () => {
+    const response = await api('PUT', '/api/h5-access', {
+      body: { fixedPort: 5061 },
+    })
+
+    expect(response.status).toBe(400)
+  })
 })

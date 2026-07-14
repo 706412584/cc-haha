@@ -95,6 +95,11 @@ jobs:
         working-directory: adapters
         run: bun install
 
+      - name: Verify Windows legacy data recovery
+        if: matrix.smoke_platform == 'windows'
+        working-directory: desktop
+        run: bun run test:windows-storage-recovery
+
       - name: Build sidecars
         working-directory: desktop
         env:
@@ -114,6 +119,12 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: node ./node_modules/electron-builder/out/cli/cli.js ${{ matrix.builder_args }} --publish never
+
+      - name: Verify Windows installer execution
+        if: matrix.smoke_platform == 'windows' && matrix.arch == 'x64'
+        timeout-minutes: 10
+        working-directory: desktop
+        run: powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./scripts/windows-installer-smoke.ps1 -ArtifactsDir ./build-artifacts/electron -Arch x64
 
       - name: Verify packaged app structure
         run: bun run test:package-smoke --platform ${{ matrix.smoke_platform }} --arch ${{ matrix.arch }} --package-kind release --artifacts-dir desktop/build-artifacts/electron

@@ -1,9 +1,20 @@
 export type H5RequestKind = 'local-trusted' | 'internal-sdk' | 'h5-browser'
 export type H5RequestContext = {
   clientAddress: string | null
+  localAccessTokenConfigured?: boolean
+  localAccessAuthorized?: boolean
+  internalSdkAuthorized?: boolean
 }
 
 const LOCAL_DESKTOP_ORIGINS = new Set(['file://'])
+const PROXY_TRACE_HEADERS = [
+  'forwarded',
+  'x-forwarded-for',
+  'x-forwarded-host',
+  'x-forwarded-proto',
+  'x-real-ip',
+  'via',
+] as const
 
 export function normalizeHostname(hostname: string): string {
   return hostname.trim().replace(/^\[/, '').replace(/\]$/, '').toLowerCase()
@@ -53,6 +64,29 @@ function isLocalDesktopOrNavigationOrigin(origin: string | null): boolean {
   return LOCAL_DESKTOP_ORIGINS.has(origin) || isLoopbackBrowserOrigin(origin)
 }
 
+function hasProxyTraceHeaders(headers: Headers): boolean {
+  return PROXY_TRACE_HEADERS.some((header) => headers.has(header))
+}
+
+function isLocalTrustedRequest(
+  request: Request,
+  url: URL,
+  context: H5RequestContext,
+  origin: string | null,
+): boolean {
+  if (context.localAccessTokenConfigured) {
+    return context.localAccessAuthorized === true
+  }
+
+  const clientAddress = context.clientAddress
+  if (!clientAddress) return false
+  if (hasProxyTraceHeaders(request.headers)) return false
+
+  return isLoopbackHost(clientAddress) &&
+    isLoopbackHost(url.hostname) &&
+    isLocalDesktopOrNavigationOrigin(origin)
+}
+
 function isFilesystemCapabilityPath(pathname: string): boolean {
   return pathname.startsWith('/local-file/') ||
     pathname.startsWith('/preview-fs/')
@@ -64,19 +98,12 @@ export function classifyH5Request(
   context: H5RequestContext,
 ): H5RequestKind {
   const origin = request.headers.get('Origin')
+  const localTrusted = isLocalTrustedRequest(request, url, context, origin)
   if (isFilesystemCapabilityPath(url.pathname)) {
-    const localFilesystemTrusted = Boolean(context.clientAddress) &&
-      isLoopbackHost(context.clientAddress!) &&
-      isLocalDesktopOrNavigationOrigin(origin)
-
-    return localFilesystemTrusted ? 'local-trusted' : 'h5-browser'
+    return localTrusted ? 'local-trusted' : 'h5-browser'
   }
 
-  const localTrusted = Boolean(context.clientAddress) &&
-    isLoopbackHost(context.clientAddress!) &&
-    isLocalDesktopOrNavigationOrigin(origin)
-
-  if (url.pathname.startsWith('/sdk/') && localTrusted) {
+  if (url.pathname.startsWith('/sdk/') && (localTrusted || context.internalSdkAuthorized)) {
     return 'internal-sdk'
   }
 

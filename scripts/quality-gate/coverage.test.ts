@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  buildRootCoverageCommand,
   collectServerTestFiles,
   evaluateChangedLineCoverage,
   evaluateThresholds,
@@ -19,6 +20,19 @@ import {
 } from './coverage'
 
 describe('coverage gate helpers', () => {
+  test('builds the isolated root coverage command with the transcript classifier enabled', () => {
+    expect(buildRootCoverageCommand()).toEqual([
+      'bun',
+      '--no-env-file',
+      '--feature=TRANSCRIPT_CLASSIFIER',
+      'test',
+      '--max-concurrency=1',
+      '--timeout=20000',
+      '--coverage',
+      '--coverage-reporter=lcov',
+    ])
+  })
+
   test('parses lcov totals into percentages', () => {
     const summary = parseLcov([
       'TN:',

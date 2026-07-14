@@ -1,6 +1,6 @@
 // Source: src/server/api/models.ts, src/server/api/settings.ts
 
-export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions' | 'dontAsk'
+export type PermissionMode = 'default' | 'acceptEdits' | 'auto' | 'plan' | 'bypassPermissions' | 'dontAsk'
 
 export type EffortLevel = 'low' | 'medium' | 'high' | 'max'
 export type ReasoningEffortLevel = EffortLevel | 'xhigh'
@@ -137,6 +137,8 @@ export type UserSettings = {
   effort?: EffortLevel
   alwaysThinkingEnabled?: boolean
   autoDreamEnabled?: boolean
+  unifiedActivityPanelEnabled?: boolean
+  skipAutoPermissionPrompt?: boolean
   permissionMode?: PermissionMode
   theme?: ThemeMode
   chatSendBehavior?: ChatSendBehavior
@@ -160,7 +162,6 @@ export type AppMode = 'default' | 'portable'
 export type AppModeConfig = {
   mode: AppMode
   portableDir: string | null
-  defaultPortableDir: string | null
   activeConfigDir?: string | null
   configDirSource?: 'system' | 'environment' | 'portable'
 }
