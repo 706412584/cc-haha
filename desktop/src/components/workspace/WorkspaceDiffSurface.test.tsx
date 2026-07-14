@@ -5,7 +5,6 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { WorkspaceDiffSurface } from './WorkspaceDiffSurface'
 import {
   WORKSPACE_PLAIN_TEXT_LINE_THRESHOLD,
-  WORKSPACE_PREVIEW_LINE_LIMIT,
   WorkspaceDiffSurface as ExportedWorkspaceDiffSurface,
 } from './WorkspaceCodeSurface'
 
@@ -349,7 +348,7 @@ describe('WorkspaceDiffSurface', () => {
     expect(screen.getByRole('textbox', { name: 'Review comment' })).toHaveValue('Keep this collapsed draft')
   })
 
-  it('uses plain text instead of Prism after expanding a diff beyond the large preview threshold', () => {
+  it('uses plain text instead of Prism beyond the large preview threshold', () => {
     const additions = Array.from(
       { length: WORKSPACE_PLAIN_TEXT_LINE_THRESHOLD + 1 },
       (_, index) => `+const value${index} = ${index}`,
@@ -361,13 +360,19 @@ describe('WorkspaceDiffSurface', () => {
       `@@ -0,0 +1,${additions.length} @@`,
       ...additions,
     ].join('\n')
-    render(<WorkspaceDiffSurface value={largeDiff} path="src/large.ts" lineLimit={1} />)
-
-    fireEvent.click(screen.getByRole('button', { name: 'Show all loaded lines' }))
+    render(
+      <WorkspaceDiffSurface
+        value={largeDiff}
+        path="src/large.ts"
+        lineLimit={2}
+        hideSingleFileHeader
+      />,
+    )
 
     expect(screen.getByTestId('workspace-code')).toHaveAttribute('data-highlight-engine', 'plain')
     expect(highlightRequestSpy).not.toHaveBeenCalled()
-    expect(getCodeRow('const value5000 = 5000')).toHaveTextContent('const value5000 = 5000')
+    expect(getCodeRow('const value0 = 0')).toHaveTextContent('const value0 = 0')
+    expect(screen.getByRole('button', { name: 'Show all loaded lines' })).toBeInTheDocument()
   })
 
   it('renders parsed file headers and keeps multiple files visually separated', () => {
@@ -477,19 +482,8 @@ describe('WorkspaceDiffSurface', () => {
   })
 
   it('does not request Prism highlighting again for each controlled draft change', () => {
-    const additions = Array.from(
-      { length: WORKSPACE_PREVIEW_LINE_LIMIT - 4 },
-      (_, index) => `+const value${index + 1} = ${index + 1}`,
-    )
-    const nearLimitDiff = [
-      'diff --git a/src/near-limit.ts b/src/near-limit.ts',
-      '--- a/src/near-limit.ts',
-      '+++ b/src/near-limit.ts',
-      `@@ -0,0 +1,${additions.length} @@`,
-      ...additions,
-    ].join('\n')
-    render(<WorkspaceDiffSurface value={nearLimitDiff} path="src/near-limit.ts" />)
-    fireEvent.click(screen.getByRole('button', { name: 'Comment on src/near-limit.ts new line 1' }))
+    render(<WorkspaceDiffSurface value={diff} path="src/a.ts" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Comment on src/a.ts new line 11' }))
     const highlightCountBeforeTyping = highlightRequestSpy.mock.calls.length
     const editor = screen.getByRole('textbox', { name: 'Review comment' })
 
