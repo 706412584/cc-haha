@@ -5507,6 +5507,62 @@ describe('chatStore history mapping', () => {
     expect(userMessages?.[0]).toMatchObject({ content: '', modelContent: prompt })
   })
 
+  it('dedupes a sent image message when replay replaces its attachment path prefix with image metadata', () => {
+    const prompt = '看到了 只不过默认好像是隐藏的需要点击顶部按钮才显示'
+    const imagePath = 'C:\\Users\\Relakkes\\.claude\\uploads\\sid\\activity-panel.png'
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
+      },
+    })
+
+    useChatStore.getState().sendMessage(
+      TEST_SESSION_ID,
+      prompt,
+      [{
+        type: 'image',
+        name: 'activity-panel.png',
+        path: imagePath,
+        mimeType: 'image/png',
+      }],
+    )
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'user_message_replay',
+      content: `${prompt}\n[Image source: ${imagePath}]`,
+    })
+
+    const userMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
+      .filter((message) => message.type === 'user_text')
+    expect(userMessages).toHaveLength(1)
+    expect(userMessages?.[0]).toMatchObject({
+      content: prompt,
+      modelContent: `@"${imagePath}" ${prompt}`,
+    })
+  })
+
+  it('keeps a replay with the same text when it refers to a different image', () => {
+    const prompt = 'compare this screenshot'
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
+      },
+    })
+
+    useChatStore.getState().sendMessage(
+      TEST_SESSION_ID,
+      prompt,
+      [{ type: 'image', name: 'first.png', path: '/tmp/first.png' }],
+    )
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'user_message_replay',
+      content: `${prompt}\n[Image source: /tmp/second.png]`,
+    })
+
+    const userMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
+      .filter((message) => message.type === 'user_text')
+    expect(userMessages).toHaveLength(2)
+  })
+
   it('dedupes an image-bearing prompt when the replay appends detailed (macOS) image metadata', () => {
     const prompt = 'describe this screenshot for me'
     useChatStore.setState({
