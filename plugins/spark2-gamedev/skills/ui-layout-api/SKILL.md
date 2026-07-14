@@ -1,8 +1,8 @@
 ---
 name: ui-layout-api
 description: WasiCore 流式布局 UI API 参考。尺寸、间距、对齐、Flexbox、响应式布局的链式 API。当创建 UI 界面、设置布局、使用 Panel/Label/Button 等控件时使用。
-whenToUse: 当创建 UI 界面、设置布局、使用 Panel/Label/Button 等控件、或调试 UI 定位问题时使用。
-allowedTools: Bash, Read, Glob, Grep, Edit, Write
+when_to_use: 当创建 UI 界面、设置布局、使用 Panel/Label/Button 等控件、或调试 UI 定位问题时使用。
+allowed-tools: Bash, Read, Glob, Grep, Edit, Write
 ---
 
 # 流式布局 UI API 参考

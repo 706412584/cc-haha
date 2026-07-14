@@ -1,8 +1,8 @@
 ---
 name: client-only-debug
 description: Launch and diagnose SCE/WasiCore client-only debug mode without opening the editor. Use when an AI agent needs to start a pure client test process, verify UI/GameGraph/local tool behavior, compare editor-launched and standalone client debugging, or use the project-local docs/.client-only-debug.json launch config generated after opening the project in SCE Editor.
-whenToUse: When launching WasiCore in client-only mode without the editor, verifying UI/GameGraph/local tool behavior, or diagnosing client-side issues independently.
-allowedTools: Bash, Read, Glob, Grep, Edit, Write
+when_to_use: When launching WasiCore in client-only mode without the editor, verifying UI/GameGraph/local tool behavior, or diagnosing client-side issues independently.
+allowed-tools: Bash, Read, Glob, Grep, Edit, Write
 ---
 
 # SCE Client-Only Debug Skill
@@ -83,17 +83,25 @@ When launching from SCE Editor's normal debug button, the editor build flow comp
 - `AppBundle/managed/GameEntry.dll` for server-side runtime code.
 - `ui/AppBundle/managed/GameEntry.dll` for client-side runtime code.
 
-When launching directly from an AI agent or shell after `dotnet build`, do the deploy step yourself before starting the client:
+When launching directly from an AI agent or shell after `dotnet build`, resolve each configuration's actual MSBuild `TargetPath`; do not hard-code `net9.0`, `net10.0`, or another target framework:
 
 ```powershell
 $ProjectRoot = "D:\Maps\MyMap"
-dotnet build (Join-Path $ProjectRoot "src\GameEntry.csproj") -c Server-Debug
-dotnet build (Join-Path $ProjectRoot "src\GameEntry.csproj") -c Client-Debug
-Copy-Item -LiteralPath (Join-Path $ProjectRoot "src\bin\Server-Debug\net9.0\GameEntry.dll") -Destination (Join-Path $ProjectRoot "AppBundle\managed\GameEntry.dll") -Force
-Copy-Item -LiteralPath (Join-Path $ProjectRoot "src\bin\Client-Debug\net9.0\GameEntry.dll") -Destination (Join-Path $ProjectRoot "ui\AppBundle\managed\GameEntry.dll") -Force
+$Project = Join-Path $ProjectRoot "src\GameEntry.csproj"
+dotnet build $Project -c Server-Debug
+dotnet build $Project -c Client-Debug
+
+$ServerSource = (dotnet msbuild $Project -nologo -getProperty:TargetPath -p:Configuration=Server-Debug | Select-Object -Last 1).Trim()
+$ClientSource = (dotnet msbuild $Project -nologo -getProperty:TargetPath -p:Configuration=Client-Debug | Select-Object -Last 1).Trim()
+$ServerTarget = Join-Path $ProjectRoot "AppBundle\managed\GameEntry.dll"
+$ClientTarget = Join-Path $ProjectRoot "ui\AppBundle\managed\GameEntry.dll"
+Copy-Item -LiteralPath $ServerSource -Destination $ServerTarget -Force
+Copy-Item -LiteralPath $ClientSource -Destination $ClientTarget -Force
+Get-FileHash -Algorithm SHA256 $ServerSource, $ServerTarget
+Get-FileHash -Algorithm SHA256 $ClientSource, $ClientTarget
 ```
 
-If this copy step is skipped, the standalone client may run an older DLL even though `dotnet build` succeeded. This can produce misleading runtime symptoms, including Lua or UI initialization errors that do not match the code just compiled.
+For example, a project whose `TargetFramework` resolves to `net10.0` usually emits `src/bin/<Configuration>/net10.0/GameEntry.dll`, but `TargetPath` remains the source of truth. Keep Server-Debug and Client-Debug outputs paired with their own destinations. If the copy step is skipped or the hashes differ, the standalone client may run an older or wrong-side DLL even though `dotnet build` succeeded. This can produce misleading runtime symptoms, including Lua or UI initialization errors that do not match the code just compiled.
 
 ## Runtime Behavior
 
@@ -130,6 +138,8 @@ If `runtime_call_tool` is not visible in the current AI tool list, use `ai/tools
 For UI or local preview tasks, prefer this loop: build, deploy DLLs to AppBundle, launch client-only debug, call `debug.ping`, call `debug.capture_screenshot`, call `debug.list_tools`, call `ui.snapshot` or `ui.find`, adjust the UI code, then repeat. This gives the AI agent immediate runtime evidence of the game state and UI layout.
 
 Canvas-only rendering may not appear in the GameUI control tree. In that case, use `debug.capture_screenshot` as the primary signal and only use UI tools for the surrounding GameUI controls.
+
+For exported C# UI, all-page screenshot comparison, black bars, WebP, NineSlice, ZIndex, or hidden-control issues, also follow [Spark2 UI 导出真实闭环](../ui-export-real-loop/SKILL.md).
 
 ## Verification
 

@@ -10,7 +10,10 @@ argument-hint: "[--no-compile] [--client-only]"
 3. **--client-only**：读取 `client-only-debug` 技能，使用 `Start-SceClientOnlyDebug.ps1` 无编辑器启动
 
 流程：
-- 确认项目双端编译通过
-- 部署 DLL 到 AppBundle（client-only 模式需要手动 Copy-Item）
-- 启动调试
-- 等待 Runtime MCP 可用后，可执行 `spark2_runtime_call_tool` 进行运行时验证
+- 确认项目双端编译通过，并按项目实际 `TargetFramework` 定位输出；不要硬编码 `net9.0` / `net10.0`
+- 部署 Server/Client DLL 到各自 AppBundle，并比较文件长度、时间戳或 SHA-256
+- `--no-compile` 仅在双端构建和部署一致性验证完成后使用
+- 启动调试，等待启动/资源加载遮罩消失
+- 等待 Runtime MCP 可用后，依次执行 `debug.ping`、`debug.list_tools`、截图与 UI tree 检查
+- UI 导出任务读取 `ui-export-real-loop` 技能，完成全部页面/状态截图；不能用 validation stub、仅编译通过、单张首页截图或只有 UI tree 作为完成证据
+- client-only 只能证明客户端 UI/GameGraph/本地表现，涉及服务端逻辑时仍需真实 Server-Debug 运行证据

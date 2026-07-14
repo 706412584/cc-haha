@@ -72,6 +72,8 @@ describe('PLUGIN_CATALOG shape', () => {
     )
     expect(spark2).toBeDefined()
     expect(spark2?.displayName).toBe('Spark2 Game Dev')
+    expect(spark2?.description).toContain('12 个开发技能')
+    expect(spark2?.description).toContain('UI 导出真实运行')
   })
 })
 

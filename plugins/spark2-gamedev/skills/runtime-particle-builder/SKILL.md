@@ -1,8 +1,8 @@
 ---
 name: runtime-particle-builder
 description: Runtime Particle builder guide for AI-generated GameGraph particles. Use when creating particles from C# code instead of hand-authored .effect files, generating procedural VFX, building client-only GameGraph previews, configuring sprite/mesh/beam/ribbon emitters, or exporting debug .effect files from runtime builder output.
-whenToUse: When creating particles from C# code, generating procedural VFX, building client-only GameGraph previews, configuring emitters, or exporting debug .effect files from runtime builder output.
-allowedTools: Bash, Read, Glob, Grep, Edit, Write
+when_to_use: When creating particles from C# code, generating procedural VFX, building client-only GameGraph previews, configuring emitters, or exporting debug .effect files from runtime builder output.
+allowed-tools: Bash, Read, Glob, Grep, Edit, Write
 ---
 
 # Runtime Particle Builder Skill

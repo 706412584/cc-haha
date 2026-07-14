@@ -1,8 +1,8 @@
 ---
 name: wasicore-dev
 description: WasiCore 游戏框架开发指南。编译配置、技术约束、代码规范、坐标系统。当开发 WasiCore 框架游戏、遇到编译错误、或需要了解框架约束时使用。
-whenToUse: 当开发 WasiCore 框架游戏、遇到编译错误、需要了解框架约束、或配置项目编译选项时使用。
-allowedTools: Bash, Read, Glob, Grep, Edit, Write
+when_to_use: 当开发 WasiCore 框架游戏、遇到编译错误、需要了解框架约束、或配置项目编译选项时使用。
+allowed-tools: Bash, Read, Glob, Grep, Edit, Write
 ---
 
 # WasiCore 框架开发指南
