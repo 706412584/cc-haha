@@ -4172,13 +4172,23 @@ export function appendReplayedUserMessage(
   // optimistic message never had. Normalize them away (same as the history
   // mapping) so the dedupe below can match the already-rendered message instead
   // of appending the raw prompt — paths and all — as a duplicate bubble.
+  const replayedImageSourcePaths = content
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map(extractImageMetadataSourcePath)
+    .filter((path): path is string => Boolean(path))
   const sanitized = stripGeneratedImageMetadataLines(content) || content.trim()
   const parsed = extractRestoredUserDisplay(sanitized)
   const displayContent = parsed.content.trim()
   if (!displayContent && !parsed.attachments?.length) return messages
 
   const modelContent = parsed.modelContent ?? sanitized
-  const currentTurnUserIndex = findCurrentTurnUserMessageIndex(messages, modelContent)
+  const currentTurnUserIndex = findCurrentTurnUserMessageIndex(
+    messages,
+    modelContent,
+    displayContent,
+    replayedImageSourcePaths,
+  )
   if (currentTurnUserIndex >= 0) {
     const optimisticMessage = messages[currentTurnUserIndex]
     if (optimisticMessage?.type === 'user_text' && optimisticMessage.optimisticQueued) {
@@ -4250,13 +4260,29 @@ function mapQueuedDisplayAttachments(attachments?: AttachmentRef[]): UIAttachmen
 function findCurrentTurnUserMessageIndex(
   messages: UIMessage[],
   modelContent: string,
+  displayContent?: string,
+  replayedImageSourcePaths: string[] = [],
 ): number {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]
     if (message?.type !== 'user_text') {
       continue
     }
-    return (message.modelContent ?? message.content).trim() === modelContent ? index : -1
+    if ((message.modelContent ?? message.content).trim() === modelContent) return index
+
+    const imageAttachments = message.attachments?.filter(
+      (attachment) => attachment.type === 'image',
+    ) ?? []
+    const isSameImageReplay =
+      replayedImageSourcePaths.length > 0 &&
+      imageAttachments.length === replayedImageSourcePaths.length &&
+      imageAttachments.every((attachment, attachmentIndex) =>
+        pathsReferToSameFile(
+          attachment.path,
+          replayedImageSourcePaths[attachmentIndex],
+        )) &&
+      message.content.trim() === displayContent
+    return isSameImageReplay ? index : -1
   }
   return -1
 }
