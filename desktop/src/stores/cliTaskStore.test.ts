@@ -181,6 +181,10 @@ describe('cliTaskStore', () => {
     resolveRequest!({ tasks: [makeTask('session-1')] })
     await Promise.all([firstPoll, secondPoll, toolRefresh])
 
+    expect(useCLITaskStore.getState().tasks).toMatchObject([
+      { taskListId: 'session-1', status: 'in_progress' },
+    ])
+
     vi.mocked(cliTasksApi.getTasksForList).mockResolvedValue({ tasks: [] })
     await useCLITaskStore.getState().refreshTasks('session-1')
 

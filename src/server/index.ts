@@ -447,7 +447,9 @@ export function startServer(port = PORT, host = HOST) {
     const message = error instanceof Error && error.message
       ? error.message
       : `Failed to start server. Is port ${port} in use?`
-    throw new Error(message, { cause: error })
+    const startupError = new Error(message)
+    startupError.cause = error
+    throw startupError
   }
 
   // Start watching ~/.claude/teams/ for real-time WebSocket push
