@@ -1,8 +1,8 @@
 ---
 name: canvas-2d-game
 description: WasiCore Canvas 2D 游戏开发指南。设计分辨率、Canvas 绘图 API、碰撞检测、游戏循环。当开发 2D 游戏、使用 Canvas 绘图、或处理碰撞检测时使用。
-whenToUse: 当开发 2D 游戏、使用 Canvas 绘图 API、处理碰撞检测、或构建游戏主循环时使用。
-allowedTools: Bash, Read, Glob, Grep, Edit, Write
+when_to_use: 当开发 2D 游戏、使用 Canvas 绘图 API、处理碰撞检测、或构建游戏主循环时使用。
+allowed-tools: Bash, Read, Glob, Grep, Edit, Write
 ---
 
 # Canvas 2D 游戏开发指南

@@ -1,8 +1,8 @@
 ---
 name: data-editor
 description: SCE 数据编辑器 MCP 与 GameData 配置修改指南。覆盖 data_*、gamedata_*、ui_* 调用顺序，直接编辑 editor/data JSON、$id/$inherit/link 规则，以及保存与 DataGenerated 生成边界。
-whenToUse: 当需要通过 MCP 创建/修改/查询 GameData 配置、操作数据编辑器、或直接编辑 editor/data JSON 文件时使用。
-allowedTools: Bash, Read, Glob, Grep, Edit, Write
+when_to_use: 当需要通过 MCP 创建/修改/查询 GameData 配置、操作数据编辑器、或直接编辑 editor/data JSON 文件时使用。
+allowed-tools: Bash, Read, Glob, Grep, Edit, Write
 ---
 
 # SCE 数据编辑器 Skill

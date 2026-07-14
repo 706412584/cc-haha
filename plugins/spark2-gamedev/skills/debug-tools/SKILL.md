@@ -1,8 +1,8 @@
 ---
 name: debug-tools
 description: Use SCE Editor MCP debug tools to start and stop normal editor debugging, start debug without compiling after manually building and deploying GameEntry.dll, run full resource statistics plus Humanoid animation bake before debug, and inspect the launched client through runtime_call_tool.
-whenToUse: 当需要启动/停止 SCE 编辑器调试、执行资源统计、或通过 runtime_call_tool 检查运行时状态时使用。
-allowedTools: Bash, Read, Glob, Grep, Edit, Write
+when_to_use: 当需要启动/停止 SCE 编辑器调试、执行资源统计、或通过 runtime_call_tool 检查运行时状态时使用。
+allowed-tools: Bash, Read, Glob, Grep, Edit, Write
 ---
 
 # SCE DebugTools MCP Skill
@@ -95,15 +95,25 @@ After the command, inspect `ref/model_animation.json`, `res/anim/<ModelName>/...
 
 ## No-Compile Build And Deploy
 
-From the map project root:
+From the map project root, resolve the actual MSBuild `TargetPath` for each configuration instead of hard-coding a target framework:
 
 ```powershell
 $ProjectRoot = "D:\Maps\MyMap"
-dotnet build (Join-Path $ProjectRoot "src\GameEntry.csproj") -c Server-Debug
-dotnet build (Join-Path $ProjectRoot "src\GameEntry.csproj") -c Client-Debug
-Copy-Item -LiteralPath (Join-Path $ProjectRoot "src\bin\Server-Debug\net9.0\GameEntry.dll") -Destination (Join-Path $ProjectRoot "AppBundle\managed\GameEntry.dll") -Force
-Copy-Item -LiteralPath (Join-Path $ProjectRoot "src\bin\Client-Debug\net9.0\GameEntry.dll") -Destination (Join-Path $ProjectRoot "ui\AppBundle\managed\GameEntry.dll") -Force
+$Project = Join-Path $ProjectRoot "src\GameEntry.csproj"
+dotnet build $Project -c Server-Debug
+dotnet build $Project -c Client-Debug
+
+$ServerSource = (dotnet msbuild $Project -nologo -getProperty:TargetPath -p:Configuration=Server-Debug | Select-Object -Last 1).Trim()
+$ClientSource = (dotnet msbuild $Project -nologo -getProperty:TargetPath -p:Configuration=Client-Debug | Select-Object -Last 1).Trim()
+$ServerTarget = Join-Path $ProjectRoot "AppBundle\managed\GameEntry.dll"
+$ClientTarget = Join-Path $ProjectRoot "ui\AppBundle\managed\GameEntry.dll"
+Copy-Item -LiteralPath $ServerSource -Destination $ServerTarget -Force
+Copy-Item -LiteralPath $ClientSource -Destination $ClientTarget -Force
+Get-FileHash -Algorithm SHA256 $ServerSource, $ServerTarget
+Get-FileHash -Algorithm SHA256 $ClientSource, $ClientTarget
 ```
+
+A `net10.0` project normally produces a `net10.0` output directory, but `TargetPath` is authoritative. Do not swap Server-Debug and Client-Debug DLLs. Only call no-compile debug after both source/destination hash pairs match.
 
 Then call:
 
@@ -180,3 +190,4 @@ Common failures:
 - [SCE Editor MCP 工具速查](../../SCE_EDITOR_MCP_TOOLS.md)
 - [纯客户端调试启动 Skill](../client-only-debug/SKILL.md)
 - [Invoke-SceRuntimeMcp.ps1](../../tools/Invoke-SceRuntimeMcp.ps1)
+- [Spark2 UI 导出真实闭环](../ui-export-real-loop/SKILL.md)

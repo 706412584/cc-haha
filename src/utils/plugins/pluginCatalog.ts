@@ -191,7 +191,7 @@ export const PLUGIN_CATALOG: CatalogPlugin[] = [
     marketplace: 'cc-haha-builtin',
     displayName: 'Spark2 Game Dev',
     description:
-      '星火 2.0 (WasiCore) 游戏开发工具包。SCE 编辑器 MCP 桥接（数据/触发器/调试）+ 11 个开发技能（3D 单位战斗、Canvas 2D、联机同步、UI 布局、服务端物理、运行时粒子）。',
+      '星火 2.0 (WasiCore) 游戏开发工具包。SCE 编辑器 MCP 桥接（数据/触发器/调试）+ 12 个开发技能，包含 UI 导出真实运行、全页面截图与资源兼容性验收。',
     category: 'productivity',
   },
 ]

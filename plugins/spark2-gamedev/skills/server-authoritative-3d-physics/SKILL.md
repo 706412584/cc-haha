@@ -1,8 +1,8 @@
 ---
 name: server-authoritative-3d-physics
 description: 服务端权威 3D 物理与 GameGraph 发布图开发指南。当实现非 Unit 的同步 3D 物理物件、服务端模拟刚体、按玩家发布 SceneGraph、或排查客户端是否收到 replicated transform 时使用。
-whenToUse: 当实现非 Unit 的同步 3D 物理物件、服务端模拟刚体、按玩家发布 SceneGraph、或排查客户端是否收到 replicated transform 时使用。
-allowedTools: Bash, Read, Glob, Grep, Edit, Write
+when_to_use: 当实现非 Unit 的同步 3D 物理物件、服务端模拟刚体、按玩家发布 SceneGraph、或排查客户端是否收到 replicated transform 时使用。
+allowed-tools: Bash, Read, Glob, Grep, Edit, Write
 ---
 
 # 服务端权威 3D 物理指南

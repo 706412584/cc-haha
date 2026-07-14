@@ -3,14 +3,30 @@
  * Validates spark2-gamedev plugin structure and JSON files.
  */
 
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { parse } from 'yaml'
 
 const PLUGIN_ROOT = join(import.meta.dir, '..')
 
 function readJson(path: string) {
   const content = readFileSync(path, 'utf-8')
   return JSON.parse(content)
+}
+
+function readFrontmatter(path: string): Record<string, unknown> | undefined {
+  const content = readFileSync(path, 'utf-8')
+  const match = content.match(/^---\s*\n([\s\S]*?)\n---\s*(?:\n|$)/)
+  if (!match?.[1]) return undefined
+
+  try {
+    const value = parse(match[1])
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : undefined
+  } catch {
+    return undefined
+  }
 }
 
 function check(label: string, condition: boolean, detail?: string) {
@@ -55,20 +71,43 @@ const skills = [
   '3d-unit-game', 'canvas-2d-game', 'multiplayer-hybrid-sync',
   'ui-layout-api', 'server-authoritative-3d-physics', 'runtime-particle-builder',
   'wasicore-dev', 'data-editor', 'debug-tools', 'trigger-editor-mcp', 'client-only-debug',
+  'ui-export-real-loop',
 ]
+const skillsRoot = join(PLUGIN_ROOT, 'skills')
+const actualSkills = readdirSync(skillsRoot, { withFileTypes: true })
+  .filter((entry) => entry.isDirectory() && existsSync(join(skillsRoot, entry.name, 'SKILL.md')))
+  .map((entry) => entry.name)
+  .sort()
+const expectedSkills = [...skills].sort()
+check('skill count is 12', actualSkills.length === 12, `found ${actualSkills.length}`)
+check('skill directories match expected list', JSON.stringify(actualSkills) === JSON.stringify(expectedSkills))
 for (const skill of skills) {
-  const skillPath = join(PLUGIN_ROOT, 'skills', skill, 'SKILL.md')
+  const skillPath = join(skillsRoot, skill, 'SKILL.md')
   const exists = existsSync(skillPath)
   check(`${skill}/SKILL.md exists`, exists)
   if (exists) {
-    const content = readFileSync(skillPath, 'utf-8')
-    const hasFrontmatter = content.startsWith('---')
-    const hasWhenToUse = content.includes('whenToUse:')
-    const hasAllowedTools = content.includes('allowedTools:')
-    check(`${skill} has whenToUse`, hasWhenToUse)
-    check(`${skill} has allowedTools`, hasAllowedTools)
+    const frontmatter = readFrontmatter(skillPath)
+    check(`${skill} has valid frontmatter`, !!frontmatter)
+    check(`${skill} frontmatter name matches directory`, frontmatter?.name === skill)
+    check(`${skill} has description`, typeof frontmatter?.description === 'string')
+    check(`${skill} has when_to_use`, typeof frontmatter?.when_to_use === 'string')
+    check(`${skill} has allowed-tools`, typeof frontmatter?.['allowed-tools'] === 'string')
+    check(`${skill} omits legacy whenToUse`, frontmatter?.whenToUse === undefined)
+    check(`${skill} omits legacy allowedTools`, frontmatter?.allowedTools === undefined)
   }
 }
+
+const agentPath = join(PLUGIN_ROOT, 'agents', 'spark2-developer.md')
+const agentContent = readFileSync(agentPath, 'utf-8')
+const agentFrontmatter = readFrontmatter(agentPath)
+check('agent has valid frontmatter', !!agentFrontmatter)
+const agentSkills = String(agentFrontmatter?.skills ?? '')
+  .split(',')
+  .map((skill) => skill.trim())
+  .filter(Boolean)
+  .sort() ?? []
+check('agent preloads every skill', JSON.stringify(agentSkills) === JSON.stringify(expectedSkills))
+check('agent routes UI export skill', agentContent.includes('| C# UI 导出') && agentContent.includes('| ui-export-real-loop |'))
 
 // 5. reference.md companions
 console.log('\n[reference.md companions]')
