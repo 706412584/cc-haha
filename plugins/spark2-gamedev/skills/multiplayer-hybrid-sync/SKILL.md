@@ -1,8 +1,8 @@
 ---
 name: multiplayer-hybrid-sync
 description: 联机游戏的数据同步选型与连续运动配方。当做有移动元素的联机游戏（FlappyBird/跑酷/弹球/竞速等 Canvas/2D 联机）、要把位置平滑同步给客户端、需要 per-property 隐私/反作弊、或在 PropertyObject 与 Node+PropertyHostComponent 之间选型时使用。它只管「同步」这条轴；Canvas 渲染那条轴见 canvas-2d-game。
-whenToUse: 当做有移动元素的联机游戏、要把位置平滑同步给客户端、需要 per-property 隐私/反作弊、或在 PropertyObject 与 Node+PropertyHostComponent 之间选型时使用。
-allowedTools: Bash, Read, Glob, Grep, Edit, Write
+when_to_use: 当做有移动元素的联机游戏、要把位置平滑同步给客户端、需要 per-property 隐私/反作弊、或在 PropertyObject 与 Node+PropertyHostComponent 之间选型时使用。
+allowed-tools: Bash, Read, Glob, Grep, Edit, Write
 ---
 
 # 联机同步：选型与连续运动配方

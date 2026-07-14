@@ -1,6 +1,8 @@
 ---
 name: trigger-editor-mcp
 description: SCE trigger MCP (trigger_*). Write temp JSON (tool+arguments), run ai/tools/Invoke-SceMcp.ps1 once per call, delete temp file; Host from docs/.editor-root; mapReady on GET /health.
+when_to_use: 当需要通过 MCP 创建、修改、查询或验证 SCE 触发器与 Validator 模块时使用。
+allowed-tools: Bash, Read, Glob, Grep, Edit, Write
 ---
 
 # SCE 触发器编辑器 MCP Skill
@@ -847,8 +849,6 @@ LibModule (文件，Validator 模块)
 }
 ```
 
-whenToUse: 当需要通过 MCP 创建/编辑/查询触发器脚本、验证触发器项目、或操作触发器编辑器时使用。
-allowedTools: Bash, Read, Glob, Grep, Edit, Write
 ---
 
 ## 测试工具（MCP Server）
