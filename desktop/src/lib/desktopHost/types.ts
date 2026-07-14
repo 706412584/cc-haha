@@ -156,12 +156,14 @@ export type DesktopTunnelStartOptions = {
   namedUrl?: string | null
 }
 
+
 export type DesktopHost = {
   kind: DesktopHostKind
   isDesktop: boolean
   capabilities: DesktopHostCapabilities
   runtime: {
     getServerUrl(): Promise<string>
+    getLocalAccessToken(): Promise<string | null>
   }
   tunnel?: {
     start(options: DesktopTunnelStartOptions): Promise<DesktopTunnelStatus>
@@ -244,7 +246,6 @@ export type DesktopHost = {
   appMode: {
     get(): Promise<AppModeConfig>
     set(config: AppModeSetInput): Promise<void>
-    detectPortableDir(): Promise<PortableDirDetection | null>
     prepareRestart(): Promise<void>
     restart(): Promise<void>
   }

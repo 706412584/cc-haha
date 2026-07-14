@@ -29,6 +29,10 @@ import { classifyH5Request, shouldBlockDisabledH5Access, shouldRequireH5Token } 
 import { H5AccessService } from './services/h5AccessService.js'
 import { registerSeedMarketplaces } from '../utils/plugins/marketplaceManager.js'
 import { refreshDisconnectGraceMs } from './ws/disconnectGraceConfig.js'
+import {
+  hasConfiguredLocalAccessToken,
+  isLocalAccessAuthorized,
+} from './localAccessAuth.js'
 
 function readArgValue(flag: string): string | undefined {
   const args = process.argv.slice(2)
@@ -175,7 +179,19 @@ export function startServer(port = PORT, host = HOST) {
         const url = new URL(req.url)
         const origin = req.headers.get('Origin')
         const clientAddress = server.requestIP(req)?.address ?? null
-        const h5RequestContext = { clientAddress }
+        const localTokenOverride = url.searchParams.get('localToken') ?? url.searchParams.get('token')
+        const sdkSessionId = url.pathname.startsWith('/sdk/')
+          ? url.pathname.split('/').pop() || ''
+          : ''
+        const sdkToken = url.searchParams.get('token')
+        const h5RequestContext = {
+          clientAddress,
+          localAccessTokenConfigured: hasConfiguredLocalAccessToken(),
+          localAccessAuthorized: isLocalAccessAuthorized(req, localTokenOverride),
+          internalSdkAuthorized: Boolean(
+            sdkSessionId && sdkToken && conversationService.authorizeSdkConnection(sdkSessionId, sdkToken),
+          ),
+        }
         const h5Settings = await h5AccessService.getSettings()
         const h5PublicOrigin = originFromUrl(h5Settings.publicBaseUrl)
         const cors = await resolveCors(origin, url.origin, {

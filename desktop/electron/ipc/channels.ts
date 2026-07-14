@@ -1,6 +1,7 @@
 export const ELECTRON_IPC_CHANNELS = {
   appGetVersion: 'desktop:app:get-version',
   runtimeGetServerUrl: 'desktop:runtime:get-server-url',
+  runtimeGetLocalAccessToken: 'desktop:runtime:get-local-access-token',
   commandInvoke: 'desktop:command:invoke',
   clipboardReadText: 'desktop:clipboard:read-text',
   clipboardWriteText: 'desktop:clipboard:write-text',
@@ -42,7 +43,6 @@ export const ELECTRON_IPC_CHANNELS = {
   previewMessage: 'desktop:preview:message',
   appModeGet: 'desktop:app-mode:get',
   appModeSet: 'desktop:app-mode:set',
-  appModeDetectPortableDir: 'desktop:app-mode:detect-portable-dir',
   appModePrepareRestart: 'desktop:app-mode:prepare-restart',
   appModeRestart: 'desktop:app-mode:restart',
   adaptersRestartSidecar: 'desktop:adapters:restart-sidecar',

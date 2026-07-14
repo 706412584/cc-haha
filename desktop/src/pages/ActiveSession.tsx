@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import { Target } from 'lucide-react'
 import {
@@ -31,11 +31,15 @@ import { ComputerUsePermissionModal } from '../components/chat/ComputerUsePermis
 import { SessionTaskBar } from '../components/chat/SessionTaskBar'
 import { SoloCouncilPanel } from '../components/chat/SoloCouncilPanel'
 import { BackgroundTasksBar } from '../components/chat/BackgroundTasksBar'
+import { SessionActivityButton } from '../components/activity/SessionActivityButton'
+import { SessionActivityPanel } from '../components/activity/SessionActivityPanel'
+import { buildSessionActivityModel, hasVisibleSessionActivity } from '../components/activity/sessionActivityModel'
 import { WorkbenchPanel } from '../components/workbench/WorkbenchPanel'
 import { TeamStatusBar } from '../components/teams/TeamStatusBar'
 import { TerminalSettings } from './TerminalSettings'
 import type { SessionListItem } from '../types/session'
 import type { ActiveGoalState, TokenUsage } from '../types/chat'
+import type { TeamMember } from '../types/team'
 import { useMobileViewport } from '../hooks/useMobileViewport'
 import { isDesktopRuntime } from '../lib/desktopRuntime'
 import { formatTokenCount } from '../lib/formatTokenCount'
@@ -51,6 +55,8 @@ import {
   createBackgroundTaskDismissKey,
   hasRunningBackgroundTasks as hasAnyRunningBackgroundTasks,
 } from '../lib/backgroundTasks'
+import { useActivityPanelStore } from '../stores/activityPanelStore'
+import { useSettingsStore } from '../stores/settingsStore'
 
 const TASK_POLL_INTERVAL_MS = 1000
 const WORKSPACE_RESIZE_STEP = 32
@@ -58,6 +64,7 @@ const TERMINAL_RESIZE_STEP = 24
 const CHAT_COLUMN_WITH_WORKSPACE_CLASS =
   'min-w-[320px] flex-1 border-r border-[var(--color-border)] bg-[var(--color-surface)]'
 const EMPTY_DISMISSED_BACKGROUND_TASK_KEYS = new Set<string>()
+const EMPTY_ACTIVITY_DISMISSED_BACKGROUND_TASK_KEYS: readonly string[] = []
 
 function isSessionTabState(activeTabId: string | null, activeTabType: TabType | null | undefined) {
   if (!activeTabId) return false
@@ -326,11 +333,25 @@ export function ActiveSession() {
   const pendingComputerUsePermission = sessionState?.pendingComputerUsePermission ?? null
   const fetchSessionTasks = useCLITaskStore((s) => s.fetchSessionTasks)
   const trackedTaskSessionId = useCLITaskStore((s) => s.sessionId)
-  const hasIncompleteTasks = useCLITaskStore((s) => s.tasks.some((task) => task.status !== 'completed'))
-  const hasRunningTasks = useCLITaskStore((s) => s.tasks.some((task) => task.status === 'in_progress'))
+  const cliTasks = useCLITaskStore((s) => s.tasks)
+  const cliTasksCompletedAndDismissed = useCLITaskStore((s) => s.completedAndDismissed)
+  const hasIncompleteTasks = cliTasks.some((task) => task.status !== 'completed')
+  const hasRunningTasks = cliTasks.some((task) => task.status === 'in_progress')
+  const unifiedActivityPanelEnabled = useSettingsStore((state) => state.unifiedActivityPanelEnabled)
+  const isActivityPanelOpen = useActivityPanelStore((state) => activeTabId ? state.isOpen(activeTabId) : false)
+  const closeActivityPanel = useActivityPanelStore((state) => state.close)
+  const dismissActivityBackgroundTaskKeys = useActivityPanelStore((state) => state.dismissBackgroundTaskKeys)
+  const pruneActivityBackgroundTaskKeys = useActivityPanelStore((state) => state.pruneDismissedBackgroundTaskKeys)
+  const activityDismissedBackgroundTaskKeyList = useActivityPanelStore((state) =>
+    activeTabId
+      ? state.dismissedBackgroundTaskKeysBySession[activeTabId]
+        ?? EMPTY_ACTIVITY_DISMISSED_BACKGROUND_TASK_KEYS
+      : EMPTY_ACTIVITY_DISMISSED_BACKGROUND_TASK_KEYS,
+  )
   const chatState = sessionState?.chatState ?? 'idle'
   const tokenUsage = sessionState?.tokenUsage ?? { input_tokens: 0, output_tokens: 0 }
   const hasRunningBackgroundTasks = hasAnyRunningBackgroundTasks(sessionState?.backgroundAgentTasks)
+  const stoppingBackgroundTaskIds = sessionState?.stoppingBackgroundTaskIds
 
   const session = sessions.find((s) => s.id === activeTabId)
   const memberInfo = useTeamStore((s) => activeTabId ? s.getMemberBySessionId(activeTabId) : null)
@@ -393,6 +414,10 @@ export function ActiveSession() {
     () => Object.values(sessionState?.backgroundAgentTasks ?? {}),
     [sessionState?.backgroundAgentTasks],
   )
+  const activityDismissedBackgroundTaskKeys = useMemo(
+    () => new Set(activityDismissedBackgroundTaskKeyList),
+    [activityDismissedBackgroundTaskKeyList],
+  )
   const dismissedBackgroundTaskKeys = activeTabId
     ? dismissedBackgroundTaskKeysBySession[activeTabId] ?? EMPTY_DISMISSED_BACKGROUND_TASK_KEYS
     : EMPTY_DISMISSED_BACKGROUND_TASK_KEYS
@@ -417,6 +442,67 @@ export function ActiveSession() {
     (trackedTaskSessionId === activeTabId && hasRunningTasks) ||
     hasRunningBackgroundTasks
   const totalTokens = getTokenUsageTotal(tokenUsage)
+  const activityTeamMembers = useMemo(() => {
+    if (!activeTeam || activeTeam.leadSessionId !== activeTabId) return []
+    return activeTeam.members.filter((member) =>
+      !activeTeam.leadAgentId || member.agentId !== activeTeam.leadAgentId
+    )
+  }, [activeTabId, activeTeam])
+
+  useEffect(() => {
+    if (!unifiedActivityPanelEnabled || !activeTabId) return
+    pruneActivityBackgroundTaskKeys(
+      activeTabId,
+      backgroundTasks.map((task) => createBackgroundTaskDismissKey(task)),
+    )
+  }, [activeTabId, backgroundTasks, pruneActivityBackgroundTaskKeys, unifiedActivityPanelEnabled])
+
+  const activityModel = useMemo(() => {
+    if (!unifiedActivityPanelEnabled || !activeTabId) return null
+    const includeCliTasks = trackedTaskSessionId === activeTabId
+    return buildSessionActivityModel({
+      sessionId: activeTabId,
+      messages,
+      tasks: includeCliTasks ? cliTasks : [],
+      completedAndDismissed: includeCliTasks ? cliTasksCompletedAndDismissed : false,
+      backgroundTasks,
+      dismissedBackgroundTaskKeys: activityDismissedBackgroundTaskKeys,
+      agentNotifications: Object.values(sessionState?.agentTaskNotifications ?? {}),
+      teamMembers: activityTeamMembers,
+    })
+  }, [
+    activeTabId,
+    activityDismissedBackgroundTaskKeys,
+    activityTeamMembers,
+    backgroundTasks,
+    cliTasks,
+    cliTasksCompletedAndDismissed,
+    messages,
+    sessionState?.agentTaskNotifications,
+    trackedTaskSessionId,
+    unifiedActivityPanelEnabled,
+  ])
+  const hasVisibleActivity = activityModel ? hasVisibleSessionActivity(activityModel) : false
+
+  useEffect(() => {
+    if (!activeTabId || !isActivityPanelOpen || hasVisibleActivity) return
+    closeActivityPanel(activeTabId)
+  }, [activeTabId, closeActivityPanel, hasVisibleActivity, isActivityPanelOpen])
+
+  const handleOpenSubagentRun = useCallback((payload: { sessionId: string; toolUseId: string; title: string }) => {
+    useTabStore.getState().openSubagentTab(payload.sessionId, payload.toolUseId, payload.title)
+  }, [])
+  const handleOpenTeamMember = useCallback((member: TeamMember) => {
+    useTeamStore.getState().openMemberSession(member)
+  }, [])
+  const handleClearActivityBackgroundTasks = useCallback((taskKeys: string[]) => {
+    if (!activeTabId || taskKeys.length === 0) return
+    dismissActivityBackgroundTaskKeys(activeTabId, taskKeys)
+  }, [activeTabId, dismissActivityBackgroundTaskKeys])
+  const handleStopActivityBackgroundTask = useCallback((taskId: string) => {
+    if (!activeTabId) return
+    stopBackgroundTask(activeTabId, taskId)
+  }, [activeTabId, stopBackgroundTask])
 
   const lastUpdated = useMemo(() => {
     if (!session?.modifiedAt) return ''
@@ -775,11 +861,11 @@ export function ActiveSession() {
             </>
           )}
 
-          {!isMemberSession && <SessionTaskBar />}
+          {!unifiedActivityPanelEnabled && !isMemberSession && <SessionTaskBar />}
 
-          <TeamStatusBar />
+          {!unifiedActivityPanelEnabled && <TeamStatusBar />}
 
-          {!isMemberSession && (
+          {!unifiedActivityPanelEnabled && !isMemberSession && (
             <BackgroundTasksBar
               key={activeTabId}
               tasks={backgroundTasks}
@@ -798,6 +884,25 @@ export function ActiveSession() {
               onStopTask={(taskId) => stopBackgroundTask(activeTabId, taskId)}
             />
           )}
+
+          {activityModel && hasVisibleActivity && isMobileLayout && !isMemberSession && isSessionTabState(activeTabId, activeTabType) ? (
+            <>
+              <div className="absolute right-3 top-3 z-30">
+                <SessionActivityButton sessionId={activeTabId} />
+              </div>
+              <SessionActivityPanel
+                model={activityModel}
+                open={isActivityPanelOpen}
+                onClose={() => closeActivityPanel(activeTabId)}
+                onOpenSubagent={handleOpenSubagentRun}
+                onClearFinishedBackgroundTasks={handleClearActivityBackgroundTasks}
+                onOpenMember={handleOpenTeamMember}
+                onStopBackgroundTask={handleStopActivityBackgroundTask}
+                stoppingBackgroundTaskIds={stoppingBackgroundTaskIds}
+                placement="overlay"
+              />
+            </>
+          ) : null}
 
           <ChatInput
             variant={isEmpty && !isMemberSession && !showRightPanel ? 'hero' : 'default'}
@@ -831,6 +936,20 @@ export function ActiveSession() {
             </div>
           ) : null}
         </div>
+
+        {activityModel && hasVisibleActivity && !showWorkbench && !isMobileLayout && !isMemberSession && isSessionTabState(activeTabId, activeTabType) ? (
+          <SessionActivityPanel
+            model={activityModel}
+            open={isActivityPanelOpen}
+            onClose={() => closeActivityPanel(activeTabId)}
+            onOpenSubagent={handleOpenSubagentRun}
+            onClearFinishedBackgroundTasks={handleClearActivityBackgroundTasks}
+            onOpenMember={handleOpenTeamMember}
+            onStopBackgroundTask={handleStopActivityBackgroundTask}
+            stoppingBackgroundTaskIds={stoppingBackgroundTaskIds}
+            placement="rail"
+          />
+        ) : null}
 
         {showWorkbench ? (
           <>

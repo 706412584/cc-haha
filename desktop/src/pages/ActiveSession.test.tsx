@@ -69,8 +69,10 @@ vi.mock('./TerminalSettings', () => ({
 }))
 
 import { ActiveSession } from './ActiveSession'
+import { useActivityPanelStore } from '../stores/activityPanelStore'
 import { useChatStore } from '../stores/chatStore'
 import { useCLITaskStore } from '../stores/cliTaskStore'
+import { useSessionRuntimeStore } from '../stores/sessionRuntimeStore'
 import { useSessionStore } from '../stores/sessionStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import { useTabStore } from '../stores/tabStore'
@@ -91,7 +93,9 @@ afterEach(() => {
   useTabStore.setState({ tabs: [], activeTabId: null })
   useSessionStore.setState({ sessions: [], activeSessionId: null, isLoading: false, error: null })
   useChatStore.setState({ sessions: {} })
-  useSettingsStore.setState({ locale: 'en' })
+  useSettingsStore.setState({ locale: 'en', unifiedActivityPanelEnabled: false })
+  useActivityPanelStore.setState(useActivityPanelStore.getInitialState(), true)
+  useSessionRuntimeStore.setState({ coordinatorModes: {}, soloPipelineModes: {}, handoffInfo: {} })
   useTeamStore.setState({ teams: [], activeTeam: null, memberColors: new Map(), error: null })
   useWorkspacePanelStore.setState(useWorkspacePanelStore.getInitialState(), true)
   useTerminalPanelStore.setState(useTerminalPanelStore.getInitialState(), true)
@@ -459,6 +463,105 @@ describe('ActiveSession task polling', () => {
 
     expect(screen.queryByTestId('active-goal-strip')).not.toBeInTheDocument()
     expect(screen.getByTestId('message-list')).toBeInTheDocument()
+  })
+
+  it('uses the unified Activity rail while preserving local session modes and Workspace exclusivity', async () => {
+    const sessionId = 'unified-activity-session'
+    useSettingsStore.setState({ locale: 'en', unifiedActivityPanelEnabled: true })
+    useSessionRuntimeStore.setState({
+      coordinatorModes: { [sessionId]: true },
+      soloPipelineModes: { [sessionId]: false },
+      handoffInfo: {
+        [sessionId]: {
+          previousSessionId: 'previous-session',
+          previousSessionTitle: 'Previous work',
+          approxTokens: 320,
+          generatedAt: '2026-07-14T00:00:00.000Z',
+        },
+      },
+    })
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'Unified Activity Session',
+        createdAt: '2026-07-14T00:00:00.000Z',
+        modifiedAt: '2026-07-14T00:00:00.000Z',
+        messageCount: 1,
+        projectPath: '/workspace/project',
+        workDir: '/workspace/project',
+        workDirExists: true,
+      }],
+      activeSessionId: sessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Unified Activity Session', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          ...useChatStore.getState().getSession(sessionId),
+          messages: [{ id: 'message-1', type: 'assistant_text', content: 'Working', timestamp: 1 }],
+          backgroundAgentTasks: {
+            'task-1': {
+              taskId: 'task-1',
+              status: 'running',
+              taskType: 'local_bash',
+              description: 'Run checks',
+              startedAt: 1,
+              updatedAt: 2,
+            },
+          },
+          connectionState: 'connected',
+        },
+      },
+    })
+    useActivityPanelStore.getState().open(sessionId)
+
+    let view!: ReturnType<typeof render>
+    await act(async () => {
+      view = render(<ActiveSession />)
+    })
+
+    expect(screen.queryByTestId('session-task-bar')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('team-status-bar')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('background-tasks-button')).not.toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Activity' })).toHaveAttribute('data-placement', 'rail')
+    expect(screen.getByTestId('session-coordinator-chip')).toBeInTheDocument()
+    expect(screen.queryByTestId('session-solo-chip')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('solo-council-panel')).not.toBeInTheDocument()
+    expect(screen.getByTestId('session-handoff-chip')).toBeInTheDocument()
+
+    act(() => {
+      useSessionRuntimeStore.setState({
+        coordinatorModes: { [sessionId]: false },
+        soloPipelineModes: { [sessionId]: true },
+      })
+    })
+
+    expect(screen.queryByTestId('session-coordinator-chip')).not.toBeInTheDocument()
+    expect(screen.getByTestId('session-solo-chip')).toBeInTheDocument()
+    expect(screen.getByTestId('solo-council-panel')).toBeInTheDocument()
+
+    act(() => useWorkspacePanelStore.getState().openPanel(sessionId))
+    expect(screen.queryByRole('dialog', { name: 'Activity' })).not.toBeInTheDocument()
+    expect(screen.getByTestId('workspace-panel')).toBeInTheDocument()
+
+    act(() => useWorkspacePanelStore.getState().closePanel(sessionId))
+    expect(screen.getByRole('dialog', { name: 'Activity' })).toHaveAttribute('data-placement', 'rail')
+
+    act(() => {
+      viewportMocks.isMobile = true
+      view.rerender(<ActiveSession />)
+      useActivityPanelStore.getState().close(sessionId)
+    })
+    expect(screen.queryByRole('dialog', { name: 'Activity' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Activity' }))
+
+    expect(screen.getByRole('dialog', { name: 'Activity' })).toHaveAttribute('data-placement', 'overlay')
   })
 
   it('renders an official-style background task entry point and drawer', () => {

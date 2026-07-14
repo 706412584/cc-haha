@@ -42,7 +42,7 @@
 
 ### [Electron 发布与自动更新](./10-release-auto-update.md)
 
-维护者发版 runbook：Developer ID 签名、GitHub Release metadata、`v0.4.6 -> v0.4.7` 自动更新验证路径。
+维护者发版 runbook：Developer ID 签名、GitHub Release metadata、`v0.4.7 -> v0.4.8` 自动更新验证路径。
 
 ### [Electron 迁移交互式验收清单](/desktop/electron-migration-qa-checklist.html)
 

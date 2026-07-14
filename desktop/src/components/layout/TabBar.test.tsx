@@ -199,6 +199,7 @@ describe('TabBar', () => {
     const { useActivityPanelStore } = await import('../../stores/activityPanelStore')
     const { useCLITaskStore } = await import('../../stores/cliTaskStore')
     const { useTeamStore } = await import('../../stores/teamStore')
+    const { useSettingsStore } = await import('../../stores/settingsStore')
 
     useTabStore.setState({ tabs: [], activeTabId: null })
     useChatStore.setState({
@@ -223,6 +224,7 @@ describe('TabBar', () => {
       memberColors: new Map(),
       error: null,
     })
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: false })
 
     Reflect.deleteProperty(window, 'desktopHost')
     Reflect.deleteProperty(window, '__TAURI__')
@@ -295,11 +297,13 @@ describe('TabBar', () => {
     expect(screen.queryByTestId('session-activity-badge')).not.toBeInTheDocument()
   })
 
-  it('shows the activity button for completed TodoWrite history without a badge', async () => {
+  it('shows the activity button for completed TodoWrite history and hides it while the workspace is open', async () => {
     const { TabBar } = await import('./TabBar')
     const { useTabStore } = await import('../../stores/tabStore')
     const { useChatStore } = await import('../../stores/chatStore')
     const { useSessionStore } = await import('../../stores/sessionStore')
+    const { useWorkspacePanelStore } = await import('../../stores/workspacePanelStore')
+    const { useSettingsStore } = await import('../../stores/settingsStore')
     const sessionId = 'session-1'
     const chatSession = makeChatSession('idle')
     chatSession.messages = [completedTodoWriteMessage()]
@@ -322,8 +326,20 @@ describe('TabBar', () => {
       render(<TabBar />)
     })
 
+    expect(screen.queryByRole('button', { name: /activity/i })).not.toBeInTheDocument()
+
+    act(() => {
+      useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
+    })
+
     expect(screen.getByRole('button', { name: /activity/i })).toBeInTheDocument()
     expect(screen.queryByTestId('session-activity-badge')).not.toBeInTheDocument()
+
+    act(() => {
+      useWorkspacePanelStore.getState().openPanel(sessionId)
+    })
+
+    expect(screen.queryByRole('button', { name: /activity/i })).not.toBeInTheDocument()
   })
 
   it('shows the activity button without a numeric badge for running or failed activity', async () => {
@@ -332,6 +348,7 @@ describe('TabBar', () => {
     const { useChatStore } = await import('../../stores/chatStore')
     const { useSessionStore } = await import('../../stores/sessionStore')
     const { useActivityPanelStore } = await import('../../stores/activityPanelStore')
+    const { useSettingsStore } = await import('../../stores/settingsStore')
     const sessionId = 'session-1'
     const chatSession = makeChatSession('idle')
     chatSession.backgroundAgentTasks = {
@@ -368,6 +385,7 @@ describe('TabBar', () => {
       },
       disconnectSession: vi.fn(),
     } as Partial<ReturnType<typeof useChatStore.getState>>)
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
 
     await act(async () => {
       render(<TabBar />)
@@ -394,8 +412,10 @@ describe('TabBar', () => {
     const { useChatStore } = await import('../../stores/chatStore')
     const { useSessionStore } = await import('../../stores/sessionStore')
     const { useTeamStore } = await import('../../stores/teamStore')
+    const { useSettingsStore } = await import('../../stores/settingsStore')
     const sessionId = 'session-team'
 
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
     useTabStore.setState({
       tabs: [{ sessionId, title: 'Team Chat', type: 'session', status: 'idle' }],
       activeTabId: sessionId,
@@ -427,6 +447,47 @@ describe('TabBar', () => {
 
     expect(screen.getByRole('button', { name: /activity/i })).toBeInTheDocument()
     expect(screen.queryByTestId('session-activity-badge')).not.toBeInTheDocument()
+  })
+
+  it('hides the activity button for team member transcript sessions', async () => {
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useChatStore } = await import('../../stores/chatStore')
+    const { useSessionStore } = await import('../../stores/sessionStore')
+    const { useTeamStore } = await import('../../stores/teamStore')
+    const { useSettingsStore } = await import('../../stores/settingsStore')
+    const sessionId = 'team-member-session'
+    const chatSession = makeChatSession('idle')
+    chatSession.messages = [completedTodoWriteMessage()]
+
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Reviewer', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useSessionStore.setState({
+      sessions: [{ id: sessionId, title: 'Reviewer', workDir: '/tmp/project', workDirExists: true }],
+    } as Partial<ReturnType<typeof useSessionStore.getState>>)
+    useChatStore.setState({
+      sessions: { [sessionId]: chatSession },
+      disconnectSession: vi.fn(),
+    } as Partial<ReturnType<typeof useChatStore.getState>>)
+    useTeamStore.setState({
+      activeTeam: {
+        name: 'review-team',
+        leadAgentId: 'lead',
+        leadSessionId: 'lead-session',
+        members: [
+          { agentId: 'reviewer', role: 'Reviewer', status: 'running', sessionId },
+        ],
+      },
+    } as Partial<ReturnType<typeof useTeamStore.getState>>)
+
+    await act(async () => {
+      render(<TabBar />)
+    })
+
+    expect(screen.queryByRole('button', { name: /activity/i })).not.toBeInTheDocument()
   })
 
   it('hides team-only activity when the active team belongs to another session', async () => {
@@ -475,8 +536,10 @@ describe('TabBar', () => {
     const { useChatStore } = await import('../../stores/chatStore')
     const { useSessionStore } = await import('../../stores/sessionStore')
     const { useTeamStore } = await import('../../stores/teamStore')
+    const { useSettingsStore } = await import('../../stores/settingsStore')
     const sessionId = 'session-team'
 
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
     useTabStore.setState({
       tabs: [{ sessionId, title: 'Team Chat', type: 'session', status: 'idle' }],
       activeTabId: sessionId,
