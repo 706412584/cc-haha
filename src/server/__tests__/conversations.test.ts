@@ -2231,37 +2231,10 @@ describe('WebSocket Chat Integration', () => {
   }, 10000)
 
   it('uses the /goal objective for the derived session title', async () => {
-    const sessionId = `title-goal-${crypto.randomUUID()}`
-    const messages: any[] = []
-    const ws = new WebSocket(`${wsUrl}/ws/${sessionId}`)
-
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        ws.close()
-        reject(new Error('Timed out waiting for goal title'))
-      }, 5000)
-
-      ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data as string)
-        messages.push(msg)
-        if (msg.type === 'connected') {
-          ws.send(JSON.stringify({
-            type: 'user_message',
-            content: '/goal ship the desktop goal card',
-          }))
-          return
-        }
-        if (msg.type === 'session_title_updated') {
-          clearTimeout(timeout)
-          ws.close()
-          resolve()
-        }
-      }
-      ws.onerror = () => {
-        clearTimeout(timeout)
-        reject(new Error(`WebSocket error for goal title session ${sessionId}`))
-      }
-    })
+    const messages = await runTurn(
+      `title-goal-${crypto.randomUUID()}`,
+      '/goal ship the desktop goal card',
+    )
 
     const title = messages.find((msg) => msg.type === 'session_title_updated')?.title
     expect(title).toBe('ship the desktop goal card')
