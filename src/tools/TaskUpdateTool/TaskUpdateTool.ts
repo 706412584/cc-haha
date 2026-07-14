@@ -26,7 +26,6 @@ import {
   getTeamName,
 } from '../../utils/teammate.js'
 import { writeToMailbox } from '../../utils/teammateMailbox.js'
-import { VERIFICATION_AGENT_TYPE } from '../AgentTool/constants.js'
 import { TASK_UPDATE_TOOL_NAME } from './constants.js'
 import { DESCRIPTION, PROMPT } from './prompt.js'
 
@@ -323,10 +322,9 @@ export const TaskUpdateTool = buildTool({
       }
     }
 
-    // Structural verification nudge: if the main-thread agent just closed
-    // out a 3+ task list and none of those tasks was a verification step,
-    // append a reminder to the tool result. Fires at the loop-exit moment
-    // where skips happen ("when the last task closed, the loop exited").
+    // Structural nudge: when a multi-step task closes without an explicit
+    // verification step, remind the main agent to assess whether its direct
+    // checks are sufficient. Task count alone must not require a subagent.
     // Mirrors the TodoWriteTool nudge for V1 sessions; this covers V2
     // (interactive CLI). TaskUpdateToolOutput is @internal so this field
     // does not touch the public SDK surface.
@@ -397,7 +395,7 @@ export const TaskUpdateTool = buildTool({
       // Avoid `key="value"` shapes — see src/tools/AgentTool/specialistRouter.ts
       // for the regression where embedded attribute syntax made models switch
       // to textual `<tool_use ...>` blocks instead of real tool calls.
-      resultContent += `\n\nNOTE: You just closed out 3+ tasks and none of them was a verification step. Before writing your final summary, spawn the verification agent (call the Agent tool with the subagent_type parameter set to ${VERIFICATION_AGENT_TYPE}). You cannot self-assign PARTIAL by listing caveats in your summary — only the verifier issues a verdict.`
+      resultContent += `\n\nNOTE: You just closed out a multi-step task without an explicit verification step. Confirm that you ran focused checks and inspected the diff directly. Small, localized changes do not require a verification subagent. Use independent verification only when it adds value for complex, high-risk, cross-boundary, uncertain, explicitly reviewed, or PR-ready work.`
     }
 
     return {
