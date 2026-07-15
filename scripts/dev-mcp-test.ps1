@@ -38,6 +38,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+$serverHeaders = @{}
+if (-not [string]::IsNullOrWhiteSpace($env:CC_HAHA_LOCAL_ACCESS_TOKEN)) {
+  $serverHeaders.Authorization = "Bearer $($env:CC_HAHA_LOCAL_ACCESS_TOKEN)"
+}
+
 function Write-Step($msg) {
   if (-not $Quiet) { Write-Host "==> $msg" -ForegroundColor Cyan }
 }
@@ -97,7 +102,8 @@ docs/desktop/10-local-mcp-testing.md step 1).
 
 # 4. Allowed origins includes our Vite origin
 Write-Step "Ensuring $ViteOrigin is an allowed H5 origin"
-$current = Invoke-RestMethod -Uri "$ServerOrigin/api/h5-access" -UseBasicParsing
+$current = Invoke-RestMethod -Uri "$ServerOrigin/api/h5-access" `
+  -Headers $serverHeaders -UseBasicParsing
 $origins = @()
 if ($current.settings -and $current.settings.allowedOrigins) {
   $origins = @($current.settings.allowedOrigins)
@@ -106,7 +112,7 @@ if ($origins -notcontains $ViteOrigin) {
   $origins = @($origins) + $ViteOrigin
   $body = @{ allowedOrigins = $origins } | ConvertTo-Json -Compress
   $null = Invoke-WebRequest -Method PUT -Uri "$ServerOrigin/api/h5-access" `
-    -ContentType 'application/json' -Body $body -UseBasicParsing
+    -Headers $serverHeaders -ContentType 'application/json' -Body $body -UseBasicParsing
   Write-Ok "Added $ViteOrigin to allowedOrigins"
 } else {
   Write-Ok "$ViteOrigin already in allowedOrigins"
@@ -114,7 +120,8 @@ if ($origins -notcontains $ViteOrigin) {
 
 # 5. Regenerate token
 Write-Step "Regenerating H5 access token"
-$resp = Invoke-RestMethod -Method POST -Uri "$ServerOrigin/api/h5-access/regenerate" -UseBasicParsing
+$resp = Invoke-RestMethod -Method POST -Uri "$ServerOrigin/api/h5-access/regenerate" `
+  -Headers $serverHeaders -UseBasicParsing
 $token = $resp.token
 if (-not $token) { Fail "Regenerate response had no token: $($resp | ConvertTo-Json -Compress)" }
 Write-Ok "token issued: $($token.Substring(0,8))...$($token.Substring($token.Length-4))"

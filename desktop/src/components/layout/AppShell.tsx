@@ -26,6 +26,7 @@ import type { Tab } from '../../stores/tabStore'
 import { getTraceLaunchRequest } from '../../lib/traceLaunch'
 import { TraceList } from '../../pages/TraceList'
 import { TraceSession } from '../../pages/TraceSession'
+import { AgentOfficeModal } from '../../pages/AgentOffice'
 
 function isChatTab(tab: Tab | undefined) {
   return tab?.type === 'session'
@@ -34,6 +35,7 @@ function isChatTab(tab: Tab | undefined) {
 export function AppShell() {
   const fetchSettings = useSettingsStore((s) => s.fetchAll)
   const sidebarOpen = useUIStore((s) => s.sidebarOpen)
+  const activeModal = useUIStore((s) => s.activeModal)
   const toggleSidebar = useUIStore((s) => s.toggleSidebar)
   const setSidebarOpen = useUIStore((s) => s.setSidebarOpen)
   const [ready, setReady] = useState(false)
@@ -44,6 +46,9 @@ export function AppShell() {
   const t = useTranslation()
   const traceLaunch = useMemo(() => getTraceLaunchRequest(), [])
   const desktopRuntime = isDesktopRuntime()
+  const officeModalSessionId = activeModal?.startsWith('agentOffice:')
+    ? activeModal.slice('agentOffice:'.length)
+    : null
   const forceMobileShell = !desktopRuntime && typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('forceMobile') === '1'
   const isMobileShell = (useMobileViewport() || forceMobileShell) && !desktopRuntime
   const tabs = useTabStore((s) => s.tabs)
@@ -194,6 +199,14 @@ export function AppShell() {
     setEffectiveSidebarOpen(false)
   }
 
+  const expandOfficeModal = () => {
+    if (!officeModalSessionId) return
+    useUIStore.getState().closeModal()
+    queueMicrotask(() => {
+      useTabStore.getState().openOfficeTab(officeModalSessionId, t('agentOffice.title'))
+    })
+  }
+
   if (!desktopRuntime && h5StartupError) {
     return (
       <H5ConnectionView
@@ -320,6 +333,13 @@ export function AppShell() {
         {!isMobileShell ? <TabBar /> : null}
         <ContentRouter />
       </main>
+      {desktopRuntime && officeModalSessionId ? (
+        <AgentOfficeModal
+          sessionId={officeModalSessionId}
+          onClose={() => useUIStore.getState().closeModal()}
+          onExpand={expandOfficeModal}
+        />
+      ) : null}
       <ToastContainer />
       <UpdateChecker />
     </div>

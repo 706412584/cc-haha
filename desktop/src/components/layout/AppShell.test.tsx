@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   setActiveTab: vi.fn(),
   openTab: vi.fn(),
   openTraceTab: vi.fn(),
+  openOfficeTab: vi.fn(),
+  officeLifecycle: [] as string[],
   tabState: {
     activeTabId: null as string | null,
     tabs: [] as Array<{ sessionId: string; title: string; type: string; status: string }>,
@@ -53,6 +55,7 @@ vi.mock('../../stores/tabStore', () => {
     tabs: mocks.tabState.tabs,
     openTab: mocks.openTab,
     openTraceTab: mocks.openTraceTab,
+    openOfficeTab: mocks.openOfficeTab,
     setActiveTab: mocks.setActiveTab,
   })
   useTabStore.setState = (next: { activeTabId?: string | null }) => {
@@ -110,6 +113,24 @@ vi.mock('../../pages/TraceSession', () => ({
   ),
 }))
 
+vi.mock('../../pages/AgentOffice', async () => {
+  const { useEffect } = await import('react')
+  return {
+    AgentOfficeModal: ({ sessionId, onClose, onExpand }: { sessionId: string; onClose: () => void; onExpand: () => void }) => {
+      useEffect(() => () => {
+        mocks.officeLifecycle.push('unmounted')
+      }, [])
+      return (
+        <div role="dialog" aria-label="Agent Office">
+          <span>office:{sessionId}</span>
+          <button type="button" onClick={onExpand}>Expand Office</button>
+          <button type="button" onClick={onClose}>Close Office</button>
+        </div>
+      )
+    },
+  }
+})
+
 vi.mock('../shared/Toast', () => ({
   ToastContainer: () => null,
 }))
@@ -130,13 +151,19 @@ describe('AppShell boot flow', () => {
     mocks.restoreTabs.mockResolvedValue(undefined)
     mocks.openTab.mockReset()
     mocks.openTraceTab.mockReset()
+    mocks.openOfficeTab.mockReset()
+    mocks.openOfficeTab.mockImplementation(() => {
+      mocks.officeLifecycle.push('opened')
+      return '__office__session-1'
+    })
+    mocks.officeLifecycle = []
     mocks.setActiveTab.mockImplementation((sessionId: string) => {
       mocks.tabState.activeTabId = sessionId
     })
     mocks.tabState.activeTabId = null
     mocks.tabState.tabs = []
     useSessionStore.setState({ sessions: [], activeSessionId: null, isLoading: false, error: null })
-    useUIStore.setState({ sidebarOpen: true })
+    useUIStore.setState({ sidebarOpen: true, activeModal: null })
     Reflect.deleteProperty(window, 'desktopHost')
     window.history.pushState({}, '', '/')
   })
@@ -150,6 +177,22 @@ describe('AppShell boot flow', () => {
     expect(screen.getByText('tabs loaded')).toBeInTheDocument()
     expect(screen.getByText('content loaded')).toBeInTheDocument()
     expect(screen.getByText('updates loaded')).toBeInTheDocument()
+  })
+
+  it('unmounts the Office modal before expanding it into a tab', async () => {
+    mocks.isTauriRuntime = true
+    useUIStore.setState({ activeModal: 'agentOffice:session-1' })
+
+    render(<AppShell />)
+
+    expect(await screen.findByText('office:session-1')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Office' }))
+
+    await waitFor(() => {
+      expect(mocks.openOfficeTab).toHaveBeenCalledWith('session-1', 'agentOffice.title')
+    })
+    expect(useUIStore.getState().activeModal).toBeNull()
+    expect(mocks.officeLifecycle).toEqual(['unmounted', 'opened'])
   })
 
   it('uses the mobile shell when browser validation forces mobile mode', async () => {

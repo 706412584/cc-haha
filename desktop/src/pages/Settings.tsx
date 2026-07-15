@@ -2200,6 +2200,8 @@ export function GeneralSettings() {
     setAutoDreamEnabled,
     unifiedActivityPanelEnabled,
     setUnifiedActivityPanelEnabled,
+    agentOfficeSurface,
+    setAgentOfficeSurface,
     locale,
     setLocale,
     theme,
@@ -2437,6 +2439,17 @@ export function GeneralSettings() {
       addToast({
         type: 'error',
         message: t('settings.general.activityPanelSaveFailed'),
+      })
+    }
+  }
+
+  const handleAgentOfficeSurfaceChange = async (surface: 'modal' | 'tab') => {
+    try {
+      await setAgentOfficeSurface(surface)
+    } catch {
+      addToast({
+        type: 'error',
+        message: t('settings.general.agentOfficeSaveFailed'),
       })
     }
   }
@@ -2953,6 +2966,45 @@ export function GeneralSettings() {
           </div>
         </label>
       </div>
+
+      {isDesktopRuntime() && (
+        <div className="mt-8">
+          <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.agentOfficeTitle')}</h2>
+          <p className="text-sm text-[var(--color-text-tertiary)] mb-3">{t('settings.general.agentOfficeDescription')}</p>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {(['modal', 'tab'] as const).map((surface) => (
+              <label
+                key={surface}
+                className="flex cursor-pointer items-start gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3 transition-colors hover:border-[var(--color-border-focus)]"
+              >
+                <input
+                  type="radio"
+                  name="agent-office-surface"
+                  value={surface}
+                  aria-label={t(surface === 'modal'
+                    ? 'settings.general.agentOfficeSurfaceModal'
+                    : 'settings.general.agentOfficeSurfaceTab')}
+                  checked={agentOfficeSurface === surface}
+                  onChange={() => void handleAgentOfficeSurfaceChange(surface)}
+                  className="mt-0.5 h-4 w-4 accent-[var(--color-brand)]"
+                />
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-[var(--color-text-primary)]">
+                    {t(surface === 'modal'
+                      ? 'settings.general.agentOfficeSurfaceModal'
+                      : 'settings.general.agentOfficeSurfaceTab')}
+                  </div>
+                  <div className="mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]">
+                    {t(surface === 'modal'
+                      ? 'settings.general.agentOfficeSurfaceModalHint'
+                      : 'settings.general.agentOfficeSurfaceTabHint')}
+                  </div>
+                </div>
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="mt-8">
         <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.autoDreamTitle')}</h2>

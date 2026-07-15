@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import '@testing-library/jest-dom'
 
-const { settingsApiMock } = vi.hoisted(() => ({
+const { desktopRuntimeMock, settingsApiMock } = vi.hoisted(() => ({
+  desktopRuntimeMock: { isDesktop: true },
   settingsApiMock: {
     getPermissionMode: vi.fn(),
     getUser: vi.fn(),
@@ -44,18 +45,21 @@ vi.mock('../lib/desktopNotifications', () => ({
 }))
 
 vi.mock('../lib/desktopRuntime', () => ({
-  isDesktopRuntime: () => false,
+  isDesktopRuntime: () => desktopRuntimeMock.isDesktop,
 }))
 
 import { GeneralSettings } from './Settings'
 import { useSessionStore } from '../stores/sessionStore'
 import { useSettingsStore } from '../stores/settingsStore'
+import { useUIStore } from '../stores/uiStore'
 
 describe('GeneralSettings output style', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    desktopRuntimeMock.isDesktop = true
     useSettingsStore.setState(useSettingsStore.getInitialState(), true)
     useSessionStore.setState(useSessionStore.getInitialState(), true)
+    useUIStore.setState({ toasts: [] })
     useSettingsStore.setState({ locale: 'en' })
     useSessionStore.setState({
       activeSessionId: 'session-1',
@@ -103,6 +107,63 @@ describe('GeneralSettings output style', () => {
       outputStyle: 'Learning',
       scope: 'localSettings',
       workDir: '/repo',
+    })
+    settingsApiMock.updateUser.mockResolvedValue({ ok: true })
+  })
+
+  it('saves the selected Agent Office surface', async () => {
+    render(<GeneralSettings />)
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Dedicated tab' }))
+
+    await waitFor(() => {
+      expect(settingsApiMock.updateUser).toHaveBeenCalledWith({ agentOfficeSurface: 'tab' })
+    })
+    expect(useSettingsStore.getState().agentOfficeSurface).toBe('tab')
+  })
+
+  it('shows the modal selector checked and lets users switch to it', async () => {
+    useSettingsStore.setState({ agentOfficeSurface: 'tab' })
+    render(<GeneralSettings />)
+
+    const modal = screen.getByRole('radio', { name: 'Large dialog' })
+    const tab = screen.getByRole('radio', { name: 'Dedicated tab' })
+    expect(tab).toBeChecked()
+    expect(modal).not.toBeChecked()
+
+    fireEvent.click(modal)
+
+    await waitFor(() => expect(modal).toBeChecked())
+    expect(settingsApiMock.updateUser).toHaveBeenCalledWith({ agentOfficeSurface: 'modal' })
+  })
+
+  it('shows a failure toast and restores the prior selector when saving fails', async () => {
+    useSettingsStore.setState({ agentOfficeSurface: 'modal' })
+    settingsApiMock.updateUser.mockRejectedValueOnce(new Error('save failed'))
+    render(<GeneralSettings />)
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Dedicated tab' }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('radio', { name: 'Large dialog' })).toBeChecked()
+    })
+    expect(useSettingsStore.getState().agentOfficeSurface).toBe('modal')
+    expect(useUIStore.getState().toasts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'error',
+        message: 'Could not save the Agent Office preference.',
+      }),
+    ]))
+  })
+
+  it('hides Agent Office settings outside the Desktop runtime', async () => {
+    desktopRuntimeMock.isDesktop = false
+
+    render(<GeneralSettings />)
+
+    await waitFor(() => {
+      expect(screen.queryByRole('radio', { name: 'Dedicated tab' })).not.toBeInTheDocument()
+      expect(screen.queryByRole('radio', { name: 'Large modal' })).not.toBeInTheDocument()
     })
   })
 

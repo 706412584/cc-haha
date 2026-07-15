@@ -4,6 +4,7 @@ import {
   SCHEDULED_TAB_ID,
   SETTINGS_TAB_ID,
   MARKET_TAB_ID,
+  OFFICE_TAB_PREFIX,
   SUBAGENT_TAB_PREFIX,
   TERMINAL_TAB_PREFIX,
   TRACE_LIST_TAB_ID,
@@ -17,25 +18,24 @@ import { useSessionStore } from '../../stores/sessionStore'
 import { isPlaceholderSessionTitle } from '../../lib/sessionTitle'
 import { useWorkspacePanelStore } from '../../stores/workspacePanelStore'
 import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
-import { useCLITaskStore } from '../../stores/cliTaskStore'
-import { useTeamStore } from '../../stores/teamStore'
 import { useTranslation } from '../../i18n'
 import { getDesktopHost } from '../../lib/desktopHost'
 import { hasRunningBackgroundTasks } from '../../lib/backgroundTasks'
 import { WindowControls, showWindowControls } from './WindowControls'
 import { OpenProjectMenu } from './OpenProjectMenu'
-import { Folder, FolderOpen, SquareTerminal } from 'lucide-react'
+import { Building2, Folder, FolderOpen, SquareTerminal } from 'lucide-react'
 import { ActionDialog } from '../shared/ActionDialog'
-import { buildSessionActivityModel, hasVisibleSessionActivity } from '../activity/sessionActivityModel'
+import { hasVisibleSessionActivity } from '../activity/sessionActivityModel'
+import { useSessionActivityModel } from '../activity/useSessionActivityModel'
 import { SessionActivityButton } from '../activity/SessionActivityButton'
 import { useActivityPanelStore } from '../../stores/activityPanelStore'
 import { useSettingsStore } from '../../stores/settingsStore'
+import { useUIStore } from '../../stores/uiStore'
 
 const TAB_WIDTH = 180
 const DRAG_START_THRESHOLD = 4
 const desktopHost = getDesktopHost()
 const isDesktopRuntime = desktopHost.isDesktop
-const EMPTY_DISMISSED_BACKGROUND_TASK_KEYS: readonly string[] = []
 
 type PendingCloseRequest = {
   tabs: Tab[]
@@ -59,7 +59,8 @@ function isSessionTabId(tabId: string | null) {
     !tabId.startsWith(TERMINAL_TAB_PREFIX) &&
     !tabId.startsWith(TRACE_TAB_PREFIX) &&
     !tabId.startsWith(WORKBENCH_TAB_PREFIX) &&
-    !tabId.startsWith(SUBAGENT_TAB_PREFIX)
+    !tabId.startsWith(SUBAGENT_TAB_PREFIX) &&
+    !tabId.startsWith(OFFICE_TAB_PREFIX)
 }
 
 export function TabBar() {
@@ -100,59 +101,7 @@ export function TabBar() {
   const isTerminalPanelOpen = useTerminalPanelStore((state) =>
     activeTabId && isActiveSessionTab ? state.isPanelOpen(activeTabId) : false,
   )
-  const unifiedActivityPanelEnabled = useSettingsStore(
-    (state) => state.unifiedActivityPanelEnabled,
-  )
-  const cliTasks = useCLITaskStore((state) => state.tasks)
-  const cliTasksSessionId = useCLITaskStore((state) => state.sessionId)
-  const cliTasksCompletedAndDismissed = useCLITaskStore((state) => state.completedAndDismissed)
-  const dismissedBackgroundTaskKeyList = useActivityPanelStore((state) =>
-    activeTabId
-      ? state.dismissedBackgroundTaskKeysBySession[activeTabId] ?? EMPTY_DISMISSED_BACKGROUND_TASK_KEYS
-      : EMPTY_DISMISSED_BACKGROUND_TASK_KEYS,
-  )
-  const dismissedBackgroundTaskKeys = useMemo(
-    () => new Set(dismissedBackgroundTaskKeyList),
-    [dismissedBackgroundTaskKeyList],
-  )
-  const isMemberSession = useTeamStore((state) =>
-    activeTabId ? state.getMemberBySessionId(activeTabId) !== null : false,
-  )
-  const activityTeamMembers = useTeamStore(useShallow((state) => {
-    const activeTeam = state.activeTeam
-    if (!activeTabId || !activeTeam || activeTeam.leadSessionId !== activeTabId) {
-      return []
-    }
-    return activeTeam.members.filter((member) =>
-      !activeTeam.leadAgentId || member.agentId !== activeTeam.leadAgentId
-    )
-  }))
-  const activityState = useChatStore(useShallow((state) => {
-    if (!activeTabId || !isActiveSessionTab) {
-      return { hasVisibleActivity: false }
-    }
-    const sessionState = state.sessions[activeTabId]
-    const includeCliTasks = cliTasksSessionId === activeTabId
-
-    const model = buildSessionActivityModel({
-      sessionId: activeTabId,
-      messages: sessionState?.messages ?? [],
-      tasks: includeCliTasks ? cliTasks : [],
-      completedAndDismissed: includeCliTasks ? cliTasksCompletedAndDismissed : false,
-      backgroundTasks: Object.values(sessionState?.backgroundAgentTasks ?? {}),
-      dismissedBackgroundTaskKeys,
-      agentNotifications: Object.values(sessionState?.agentTaskNotifications ?? {}),
-      teamMembers: activityTeamMembers,
-    })
-    return {
-      hasVisibleActivity: hasVisibleSessionActivity(model),
-    }
-  }))
-  const showActivityButton = unifiedActivityPanelEnabled
-    && activeTabId
-    && !isMemberSession
-    && activityState.hasVisibleActivity
-    && !isWorkbenchOpen
+  const agentOfficeSurface = useSettingsStore((state) => state.agentOfficeSurface)
 
   const moveTab = useTabStore((s) => s.moveTab)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -484,8 +433,24 @@ export function TabBar() {
       </div>
 
       <div className="flex shrink-0 items-center gap-1 border-l border-[var(--color-border)]/70 px-2">
-        {showActivityButton && activeTabId && (
-          <SessionActivityButton sessionId={activeTabId} />
+        {isActiveSessionTab && activeTabId && (
+          <SessionActivityToolbarEntry
+            sessionId={activeTabId}
+            workbenchOpen={isWorkbenchOpen}
+          />
+        )}
+        {isDesktopRuntime && isActiveSessionTab && activeTabId && (
+          <ToolbarIconButton
+            icon={<Building2 size={17} strokeWidth={1.9} />}
+            label={t('agentOffice.title')}
+            onClick={() => {
+              if (agentOfficeSurface === 'tab') {
+                useTabStore.getState().openOfficeTab(activeTabId, t('agentOffice.title'))
+                return
+              }
+              useUIStore.getState().openModal(`agentOffice:${activeTabId}`)
+            }}
+          />
         )}
         {isDesktopRuntime && isActiveSessionTab && (
           <OpenProjectMenu path={openProjectPath} />
@@ -710,6 +675,28 @@ const TabItem = forwardRef<HTMLDivElement, {
   )
 })
 TabItem.displayName = 'TabItem'
+
+function SessionActivityToolbarEntry({
+  sessionId,
+  workbenchOpen,
+}: {
+  sessionId: string
+  workbenchOpen: boolean
+}) {
+  const enabled = useSettingsStore((state) => state.unifiedActivityPanelEnabled)
+  const activity = useSessionActivityModel(sessionId, enabled)
+
+  if (
+    !enabled ||
+    activity.isMemberSession ||
+    workbenchOpen ||
+    !hasVisibleSessionActivity(activity.model)
+  ) {
+    return null
+  }
+
+  return <SessionActivityButton sessionId={sessionId} />
+}
 
 function ToolbarIconButton({
   icon,

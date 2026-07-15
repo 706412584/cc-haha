@@ -10,6 +10,7 @@ import { TraceList } from '../../pages/TraceList'
 import { TraceSession } from '../../pages/TraceSession'
 import { SubagentRunPage } from '../../pages/SubagentRunPage'
 import { WorkbenchTab } from '../workbench/WorkbenchTab'
+import { AgentOfficePage } from '../../pages/AgentOffice'
 import { previewBridge } from '../../lib/previewBridge'
 
 export function ContentRouter() {
@@ -52,6 +53,11 @@ export function ContentRouter() {
     const workbenchTab = tabs.find((t) => t.sessionId === activeTabId)
     page = workbenchTab?.workbenchSessionId
       ? <WorkbenchTab tabId={activeTabId} sessionId={workbenchTab.workbenchSessionId} />
+      : <EmptySession />
+  } else if (activeTabType === 'office') {
+    const officeTab = tabs.find((t) => t.sessionId === activeTabId)
+    page = officeTab?.sourceSessionId
+      ? <AgentOfficePage tabId={activeTabId} sessionId={officeTab.sourceSessionId} />
       : <EmptySession />
   } else if (activeTabType !== 'terminal') {
     page = <ActiveSession />
