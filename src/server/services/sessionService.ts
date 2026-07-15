@@ -1039,6 +1039,14 @@ export class SessionService {
     if (!candidate) return null
 
     const canonicalCandidate = await this.canonicalizeProjectPath(candidate)
+    const worktreeMarker = `${path.sep}.claude${path.sep}worktrees${path.sep}`
+    const worktreeMarkerIndex = canonicalCandidate.indexOf(worktreeMarker)
+    const worktreeName = worktreeMarkerIndex > 0
+      ? canonicalCandidate.slice(worktreeMarkerIndex + worktreeMarker.length).split(path.sep, 1)[0]
+      : null
+    if (worktreeMarkerIndex > 0 && worktreeName && /^agent-[0-9a-f]{8}$/i.test(worktreeName)) {
+      return this.canonicalizeProjectPath(canonicalCandidate.slice(0, worktreeMarkerIndex))
+    }
 
     // If the user explicitly opened this exact directory as a project (the
     // desktop "Use existing folder" flow stores a session under
