@@ -88,6 +88,45 @@ describe('mergeOfficeAgentSnapshot', () => {
     expect(merged).toEqual(incoming)
   })
 
+  it.each([
+    ['is removed', undefined],
+    ['changes source identity', 'team:replacement'],
+  ])('ends a shared ambient event for survivors when one participant %s', (_, replacementSourceKey) => {
+    const current = [
+      agent({
+        id: 'office-agent-2',
+        sourceKey: 'team:designer',
+        state: 'talking',
+        customAnimation: 'emotes/laugh',
+        ambientEventId: 'ambient-chat',
+        ambientKind: 'chat',
+      }),
+      agent({
+        id: 'office-agent-3',
+        sourceKey: 'team:developer',
+        state: 'talking',
+        customAnimation: 'emotes/laugh',
+        ambientEventId: 'ambient-chat',
+        ambientKind: 'chat',
+      }),
+    ]
+    const incoming = [
+      ...(replacementSourceKey ? [agent({
+        id: 'office-agent-2',
+        sourceKey: replacementSourceKey,
+        state: 'working',
+        ambientEligible: false,
+      })] : []),
+      agent({
+        id: 'office-agent-3',
+        sourceKey: 'team:developer',
+        state: 'idle',
+      }),
+    ]
+
+    expect(mergeOfficeAgentSnapshot(current, incoming)).toEqual(incoming)
+  })
+
   it('keeps an active ambient event across matching real idle snapshots', () => {
     const current = agent({
       sourceKey: 'team:designer',
@@ -159,6 +198,10 @@ describe('mergeOfficeAgentSnapshot', () => {
       mission: {
         phase: 'goto',
         resumeTask: 'Summarize findings',
+        resumeTransient: expect.objectContaining({
+          state: 'working',
+          currentTask: 'Summarize findings',
+        }),
       },
     })
   })

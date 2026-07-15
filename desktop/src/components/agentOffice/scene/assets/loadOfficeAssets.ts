@@ -56,8 +56,10 @@ export async function loadOfficeAssets(): Promise<boolean> {
   }
 
   try {
-    const desk = (await Assets.load(DESK_ALIAS)) as Texture
-    const chair = (await Assets.load(CHAIR_ALIAS)) as Texture
+    const [desk, chair] = await Promise.all([
+      Assets.load(DESK_ALIAS) as Promise<Texture>,
+      Assets.load(CHAIR_ALIAS) as Promise<Texture>,
+    ])
 
     if (!desk?.source || !chair?.source) {
       throw new Error('桌椅纹理无效')

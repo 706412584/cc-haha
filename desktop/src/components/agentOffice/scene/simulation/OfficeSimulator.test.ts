@@ -20,12 +20,21 @@ function agent(index: number, overrides: Partial<Agent> = {}): Agent {
   }
 }
 
+const ENGLISH_AMBIENT_COPY = {
+  chatTask: 'Taking a break',
+  chatFirst: 'How is your day going?',
+  chatSecond: 'Glad to have a breather.',
+  watch: 'Watching a show',
+  game: 'Playing a game',
+}
+
 describe('OfficeSimulator ambient events', () => {
   it('starts at most one chat for idle real employees and excludes the boss or busy seats', () => {
     const simulator = new OfficeSimulator({
       random: () => 0,
       ambientInterval: 10,
       ambientDuration: 6,
+      copy: ENGLISH_AMBIENT_COPY,
     })
     const agents = [
       agent(0),
@@ -44,10 +53,54 @@ describe('OfficeSimulator ambient events', () => {
       'office-agent-2',
       'office-agent-3',
     ])
-    expect(ambientAgents.every((candidate) => candidate.bubbleText?.includes('闲聊'))).toBe(true)
+    expect(ambientAgents.map((candidate) => candidate.bubbleText)).toEqual([
+      'How is your day going?',
+      'Glad to have a breather.',
+    ])
     expect(next[0]).toMatchObject({ role: '老板', state: 'idle' })
     expect(next[0]?.ambientEventId).toBeUndefined()
     expect(next[3]).toMatchObject({ state: 'working', currentTask: 'Real task' })
+  })
+
+  it('uses copy injected by the UI locale boundary for ambient text', () => {
+    const simulator = new OfficeSimulator({
+      random: () => 0,
+      ambientInterval: 10,
+      ambientDuration: 6,
+      copy: ENGLISH_AMBIENT_COPY,
+    })
+
+    const next = simulator.tick(10, [agent(0), agent(1), agent(2)])
+
+    expect(next[1]).toMatchObject({
+      currentTask: 'Taking a break',
+      bubbleText: 'How is your day going?',
+    })
+    expect(next[2]).toMatchObject({
+      currentTask: 'Taking a break',
+      bubbleText: 'Glad to have a breather.',
+    })
+    expect(next.some((candidate) => candidate.bubbleText?.includes('闲聊'))).toBe(false)
+  })
+
+  it('uses updated locale copy for the next ambient event', () => {
+    const simulator = new OfficeSimulator({
+      random: () => 0.8,
+      ambientInterval: 10,
+      ambientDuration: 6,
+      copy: ENGLISH_AMBIENT_COPY,
+    })
+    simulator.setCopy({
+      ...ENGLISH_AMBIENT_COPY,
+      game: '休息·玩遊戲',
+    })
+
+    const next = simulator.tick(10, [agent(0), agent(1)])
+
+    expect(next[1]).toMatchObject({
+      currentTask: '休息·玩遊戲',
+      bubbleText: '休息·玩遊戲',
+    })
   })
 
   it('restores waiting employees to their real pending state after an ambient event', () => {
@@ -80,8 +133,8 @@ describe('OfficeSimulator ambient events', () => {
   })
 
   it.each([
-    { random: [0.5, 0], kind: 'watch', label: '摸鱼·追剧', animation: 'emotes/idea' },
-    { random: [0.8, 0], kind: 'game', label: '摸鱼·打游戏', animation: 'emotes/excited' },
+    { random: [0.5, 0], kind: 'watch', label: 'Watching a show', animation: 'emotes/idea' },
+    { random: [0.8, 0], kind: 'game', label: 'Playing a game', animation: 'emotes/excited' },
   ] as const)('shows a visible timed $kind event for one eligible employee', ({ random, kind, label, animation }) => {
     let randomIndex = 0
     const simulator = new OfficeSimulator({

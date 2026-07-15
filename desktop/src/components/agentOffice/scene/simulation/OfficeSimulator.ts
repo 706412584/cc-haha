@@ -14,10 +14,27 @@ import {
 import type { AgentEntity } from '../entities/AgentEntity'
 import { talkFacingToward } from '../systems/movementFacing'
 
+export type OfficeAmbientCopy = {
+  chatTask: string
+  chatFirst: string
+  chatSecond: string
+  watch: string
+  game: string
+}
+
+const DEFAULT_AMBIENT_COPY: OfficeAmbientCopy = {
+  chatTask: 'Taking a break',
+  chatFirst: 'How is your day going?',
+  chatSecond: 'Glad to have a breather.',
+  watch: 'Watching a show',
+  game: 'Playing a game',
+}
+
 type OfficeSimulatorOptions = {
   random?: () => number
   ambientInterval?: number
   ambientDuration?: number
+  copy?: OfficeAmbientCopy
 }
 
 const DEFAULT_AMBIENT_INTERVAL = 45
@@ -27,6 +44,7 @@ export class OfficeSimulator {
   private readonly random: () => number
   private readonly ambientInterval: number
   private readonly ambientDuration: number
+  private copy: OfficeAmbientCopy
   private ambientElapsed = 0
   private ambientSequence = 0
 
@@ -34,6 +52,11 @@ export class OfficeSimulator {
     this.random = options.random ?? Math.random
     this.ambientInterval = options.ambientInterval ?? DEFAULT_AMBIENT_INTERVAL
     this.ambientDuration = options.ambientDuration ?? DEFAULT_AMBIENT_DURATION
+    this.copy = options.copy ?? DEFAULT_AMBIENT_COPY
+  }
+
+  setCopy(copy: OfficeAmbientCopy) {
+    this.copy = copy
   }
 
   tick(dt: number, agents: Agent[]): Agent[] {
@@ -122,8 +145,8 @@ export class OfficeSimulator {
         return {
           ...agent,
           state: 'talking' as const,
-          currentTask: '闲聊中',
-          bubbleText: index === first.index ? '闲聊·最近忙吗？' : '闲聊·刚好歇会儿。',
+          currentTask: this.copy.chatTask,
+          bubbleText: index === first.index ? this.copy.chatFirst : this.copy.chatSecond,
           customAnimation: 'emotes/laugh',
           ambientEventId: eventId,
           ambientKind: kind,
@@ -136,7 +159,7 @@ export class OfficeSimulator {
     }
 
     const selected = candidates[Math.floor(this.random() * candidates.length)] ?? candidates[0]!
-    const label = kind === 'watch' ? '摸鱼·追剧' : '摸鱼·打游戏'
+    const label = kind === 'watch' ? this.copy.watch : this.copy.game
     const animation = kind === 'watch' ? 'emotes/idea' : 'emotes/excited'
     return agents.map((agent, index) => index === selected.index
       ? {

@@ -1,4 +1,10 @@
-import type { Agent, Desk, DeskVisitMission, DeskVisitStop } from '../../types/agent'
+import type {
+  Agent,
+  AgentTransientState,
+  Desk,
+  DeskVisitMission,
+  DeskVisitStop,
+} from '../../types/agent'
 import {
   AGENT_ROSTER,
   DESKS,
@@ -39,6 +45,19 @@ function defaultVisitMessage(hostRosterNo: number, hostName: string): string {
   return pickHandoffVisitMessage(hostName, hostRosterNo)
 }
 
+function transientState(agent: Agent): AgentTransientState {
+  return {
+    state: agent.state,
+    currentTask: agent.currentTask,
+    targetX: agent.targetX,
+    targetY: agent.targetY,
+    walkPath: agent.walkPath?.map((point) => ({ ...point })),
+    walkPathIndex: agent.walkPathIndex,
+    facing: agent.facing,
+    viewFacing: agent.viewFacing,
+  }
+}
+
 function buildStops(
   agents: Agent[],
   hostRosterNos: number[],
@@ -48,12 +67,13 @@ function buildStops(
   for (const rosterNo of hostRosterNos) {
     const host = rosterAgentAt(agents, rosterNo)
     if (!host) continue
-    const name = AGENT_ROSTER[rosterNo - 1]?.name ?? `#${rosterNo}`
+    const name = host.name || AGENT_ROSTER[rosterNo - 1]?.name || `#${rosterNo}`
     stops.push({
       hostRosterNo: rosterNo,
       hostAgentId: host.id,
       hostDeskId: deskForAgent(host).id,
       message: messageFn(rosterNo, name),
+      hostResume: transientState(host),
     })
   }
   return stops
@@ -101,6 +121,9 @@ function missionForStops(
     resumeTask,
     talkDuration,
     queue,
+    hostResumes: Object.fromEntries(
+      stops.map((stop) => [stop.hostAgentId, stop.hostResume]),
+    ),
   }
 }
 
@@ -138,12 +161,11 @@ export function startDeskVisitTour(
   const mission = missionForStops(
     stops,
     visitor.state,
-    visitor.currentTask ??
-      AGENT_ROSTER[visitorRosterNo - 1]?.task ??
-      '工作中…',
+    visitor.currentTask ?? AGENT_ROSTER[visitorRosterNo - 1]?.task ?? '',
     talkDuration,
   )
   if (!mission) return agents
+  mission.resumeTransient = transientState(visitor)
 
   const firstStop = stops[0]!
   return agents.map((a) => {
@@ -156,11 +178,14 @@ export function startDeskVisitTour(
 /** 工位拜访 talk 阶段：访客与被访者同步为 talking；结束后释放 stale 状态 */
 function syncDeskVisitTalkPartners(agents: Agent[]): Agent[] {
   const hostToVisitor = new Map<string, Agent>()
+  const hostResumeById = new Map<string, AgentTransientState>()
   for (const a of agents) {
     const m = a.mission
-    if (m?.kind === 'desk_visit' && m.phase === 'talk') {
-      hostToVisitor.set(m.hostAgentId, a)
+    if (m?.kind !== 'desk_visit') continue
+    for (const [hostId, resume] of Object.entries(m.hostResumes ?? {})) {
+      hostResumeById.set(hostId, resume)
     }
+    if (m.phase === 'talk') hostToVisitor.set(m.hostAgentId, a)
   }
 
   let result = agents.map((agent) => {
@@ -202,6 +227,15 @@ function syncDeskVisitTalkPartners(agents: Agent[]): Agent[] {
 
     const mission = agent.mission
     const roster = AGENT_ROSTER.find((r) => r.id === agent.id)
+    const hostResume = hostResumeById.get(agent.id)
+
+    if (hostResume && agent.state === 'talking') {
+      return {
+        ...agent,
+        ...hostResume,
+        bubbleText: undefined,
+      }
+    }
 
     if (mission?.kind === 'desk_visit' && mission.phase !== 'talk') {
       if (agent.state !== 'talking') return agent
@@ -346,9 +380,11 @@ export function processDeskVisitMissions(
       delete rest.mission
       return {
         ...rest,
-        state: mission.resumeState,
-        viewFacing: mission.resumeState === 'idle' ? 'front' as const : 'back' as const,
-        currentTask: mission.resumeTask || undefined,
+        ...(mission.resumeTransient ?? {
+          state: mission.resumeState,
+          viewFacing: mission.resumeState === 'idle' ? 'front' as const : 'back' as const,
+          currentTask: mission.resumeTask || undefined,
+        }),
         bubbleText: undefined,
       }
     }

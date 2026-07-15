@@ -20,10 +20,14 @@ export function mergeOfficeAgentSnapshot(
   incomingAgents: Agent[],
 ): Agent[] {
   const currentById = new Map(currentAgents.map((agent) => [agent.id, agent]))
+  const incomingById = new Map(incomingAgents.map((agent) => [agent.id, agent]))
   const interruptedAmbientEventIds = new Set(
-    incomingAgents.flatMap((incoming) => {
-      const current = currentById.get(incoming.id)
-      return current?.ambientEventId && incoming.ambientEligible !== true
+    currentAgents.flatMap((current) => {
+      if (!current.ambientEventId) return []
+      const incoming = incomingById.get(current.id)
+      return !incoming ||
+        incoming.sourceKey !== current.sourceKey ||
+        incoming.ambientEligible !== true
         ? [current.ambientEventId]
         : []
     }),
@@ -56,6 +60,16 @@ export function mergeOfficeAgentSnapshot(
         ...current.mission,
         resumeState: incoming.state,
         resumeTask: incoming.currentTask ?? '',
+        resumeTransient: {
+          state: incoming.state,
+          currentTask: incoming.currentTask,
+          targetX: incoming.targetX,
+          targetY: incoming.targetY,
+          walkPath: incoming.walkPath?.map((point) => ({ ...point })),
+          walkPathIndex: incoming.walkPathIndex,
+          facing: incoming.facing,
+          viewFacing: incoming.viewFacing,
+        },
       }
     }
 

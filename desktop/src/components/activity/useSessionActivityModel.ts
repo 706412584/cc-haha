@@ -8,6 +8,14 @@ import type { ChatState } from '../../types/chat'
 import { buildSessionActivityModel, type SessionActivityModel } from './sessionActivityModel'
 
 const EMPTY_DISMISSED_BACKGROUND_TASK_KEYS: readonly string[] = []
+const EMPTY_SESSION_ACTIVITY = {
+  chatState: 'idle' as ChatState,
+  activeToolName: null as string | null,
+  statusVerb: '',
+  messages: [] as NonNullable<ReturnType<typeof useChatStore.getState>['sessions'][string]>['messages'],
+  backgroundAgentTasks: {} as NonNullable<ReturnType<typeof useChatStore.getState>['sessions'][string]>['backgroundAgentTasks'],
+  agentTaskNotifications: {} as NonNullable<ReturnType<typeof useChatStore.getState>['sessions'][string]>['agentTaskNotifications'],
+}
 const EMPTY_TASK_STATE = {
   sessionId: null,
   tasks: [],
@@ -53,7 +61,19 @@ export function useSessionActivityModel(
   enabled = true,
 ): SessionActivitySnapshot {
   const targetSessionId = enabled ? sessionId ?? '' : ''
-  const sessionState = useChatStore((state) => enabled ? state.sessions[targetSessionId] : undefined)
+  const sessionState = useChatStore(useShallow((state) => {
+    if (!enabled) return EMPTY_SESSION_ACTIVITY
+    const session = state.sessions[targetSessionId]
+    if (!session) return EMPTY_SESSION_ACTIVITY
+    return {
+      chatState: session.chatState,
+      activeToolName: session.activeToolName,
+      statusVerb: session.statusVerb,
+      messages: session.messages,
+      backgroundAgentTasks: session.backgroundAgentTasks,
+      agentTaskNotifications: session.agentTaskNotifications,
+    }
+  }))
   const taskState = useCLITaskStore(useShallow((state) => enabled ? {
     sessionId: state.sessionId,
     tasks: state.tasks,

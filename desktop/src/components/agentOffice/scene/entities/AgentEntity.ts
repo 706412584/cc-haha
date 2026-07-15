@@ -135,6 +135,7 @@ export class AgentEntity extends Container {
       mission: undefined,
       bubbleText: undefined,
     }
+    this.bubble.hide()
 
     if (this.useSpine && this.spineChar) {
       this.spineChar.setViewFacing('front')
@@ -259,15 +260,15 @@ export class AgentEntity extends Container {
     g.fill(0xe8e8e6)
 
     // head
-    g.circle(facing * 1, -20 + bounce, 10)
+    g.circle(1, -20 + bounce, 10)
     g.fill(0xffe0c4)
-    g.roundRect(facing * 1 - 10, -28 + bounce, 20, 8, 3)
+    g.roundRect(-9, -28 + bounce, 20, 8, 3)
     g.fill(0x2a2a30)
 
     // typing arm when working
     if (state === 'working') {
       const armY = -4 + bounce + Math.sin(this.walkPhase * 3) * 2
-      g.roundRect(facing * 12, armY, 8, 4, 2)
+      g.roundRect(12, armY, 8, 4, 2)
       g.fill(0xf8f8f6)
     }
 
@@ -280,9 +281,10 @@ export class AgentEntity extends Container {
     }
 
     // badge / 工牌
-    s.roundRect(facing * 4 - 5, -2 + bounce, 10, 8, 2)
+    s.roundRect(-1, -2 + bounce, 10, 8, 2)
     s.fill(this.agent.color)
 
-    this.scale.x = facing
+    g.scale.x = facing
+    s.scale.x = facing
   }
 }

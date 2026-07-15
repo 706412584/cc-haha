@@ -7,12 +7,12 @@ import { AGENT_ROSTER, INITIAL_AGENTS } from './scene/layout/officeLayout'
 const ROW_ORDER = ['team', 'subagents', 'backgroundTasks', 'tasks'] as const
 const LIVE_STATUSES = new Set(['pending', 'in_progress', 'running', 'failed', 'error'])
 
-const SECTION_ROLES = {
-  team: '团队成员',
-  subagents: '研发专员',
-  backgroundTasks: '运维专员',
-  tasks: '项目专员',
-} as const
+export type OfficeActivityCopy = {
+  sectionRoles: Record<(typeof ROW_ORDER)[number], string>
+  mainAgentName: string
+  mainAgentRole: string
+  working: string
+}
 
 function mainAgentState(status: ChatState): AgentState {
   if (status === 'idle') return 'idle'
@@ -27,11 +27,44 @@ function rowState(row: ActivityRow): AgentState {
   return 'idle'
 }
 
+const graphemeSegmenter = typeof Intl.Segmenter === 'function'
+  ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+  : null
+const REGIONAL_INDICATOR = /\p{Regional_Indicator}/u
+const COMBINING_CHARACTER = /[\p{Mark}\uFE0E\uFE0F]/u
+
+function splitGraphemes(text: string): string[] {
+  if (graphemeSegmenter) {
+    return Array.from(graphemeSegmenter.segment(text), ({ segment }) => segment)
+  }
+
+  const clusters: string[] = []
+  for (const codePoint of Array.from(text)) {
+    const previous = clusters[clusters.length - 1]
+    if (
+      previous &&
+      (COMBINING_CHARACTER.test(codePoint) || previous.endsWith('\u200d') || codePoint === '\u200d')
+    ) {
+      clusters[clusters.length - 1] = previous + codePoint
+    } else if (
+      previous &&
+      REGIONAL_INDICATOR.test(previous) &&
+      REGIONAL_INDICATOR.test(codePoint) &&
+      Array.from(previous).length === 1
+    ) {
+      clusters[clusters.length - 1] = previous + codePoint
+    } else {
+      clusters.push(codePoint)
+    }
+  }
+  return clusters
+}
+
 function clipDeskText(text: string | undefined, maxLength: number): string | undefined {
   if (!text) return undefined
-  const characters = Array.from(text)
-  return characters.length > maxLength
-    ? `${characters.slice(0, maxLength).join('')}…`
+  const graphemes = splitGraphemes(text)
+  return graphemes.length > maxLength
+    ? `${graphemes.slice(0, maxLength).join('')}…`
     : text
 }
 
@@ -41,7 +74,10 @@ function taskLabel(row: ActivityRow): string | undefined {
   return clipDeskText(detail, 18)
 }
 
-export function adaptActivityToOfficeRoster(activity: SessionActivitySnapshot): Agent[] {
+export function adaptActivityToOfficeRoster(
+  activity: SessionActivitySnapshot,
+  copy: OfficeActivityCopy,
+): Agent[] {
   const mappedRows = ROW_ORDER.flatMap((section) =>
     activity.model.sections[section].rows
       .filter((row) => LIVE_STATUSES.has(row.status) || (section === 'team' && row.status === 'idle'))
@@ -58,12 +94,12 @@ export function adaptActivityToOfficeRoster(activity: SessionActivitySnapshot): 
       return {
         ...base,
         id: 'main-agent',
-        name: 'Main Agent',
-        role: '老板',
+        name: copy.mainAgentName,
+        role: copy.mainAgentRole,
         state: mainAgentState(status),
         currentTask: status === 'idle'
           ? undefined
-          : activity.mainAgent.statusVerb || activity.mainAgent.activeToolName || 'Working',
+          : activity.mainAgent.statusVerb || activity.mainAgent.activeToolName || copy.working,
         sourceKey: 'main-agent',
       }
     }
@@ -83,7 +119,7 @@ export function adaptActivityToOfficeRoster(activity: SessionActivitySnapshot): 
     return {
       ...base,
       name: clipDeskText(mapped.row.label, 12) ?? mapped.row.label,
-      role: SECTION_ROLES[mapped.section],
+      role: copy.sectionRoles[mapped.section],
       state: rowState(mapped.row),
       currentTask: taskLabel(mapped.row),
       ambientEligible: mapped.row.status === 'pending' || mapped.row.status === 'idle',

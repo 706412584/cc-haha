@@ -13,7 +13,10 @@ import { AgentEntity } from './entities/AgentEntity'
 import { DeskEntity } from './entities/DeskEntity'
 import { MovementSystem } from './systems/MovementSystem'
 import { AnimationSystem } from './systems/AnimationSystem'
-import { OfficeSimulator } from './simulation/OfficeSimulator'
+import {
+  OfficeSimulator,
+  type OfficeAmbientCopy,
+} from './simulation/OfficeSimulator'
 import { mergeOfficeAgentSnapshot } from './simulation/syncOfficeAgents'
 import {
   getOfficeBackgroundTexture,
@@ -38,7 +41,7 @@ export class OfficeScene {
 
   private movement = new MovementSystem()
   private animation = new AnimationSystem()
-  private simulator = new OfficeSimulator()
+  private simulator: OfficeSimulator
 
   private agents: Agent[] = INITIAL_AGENTS.map((agent) => ({ ...agent }))
   private syncedAgents: Agent[] = INITIAL_AGENTS.map((agent) => ({ ...agent }))
@@ -47,10 +50,15 @@ export class OfficeScene {
   private destroyed = false
   private readonly options: {
     onAgentClick?: (event: OfficeAgentClick) => void
+    ambientCopy?: OfficeAmbientCopy
   }
 
-  constructor(options: { onAgentClick?: (event: OfficeAgentClick) => void } = {}) {
+  constructor(options: {
+    onAgentClick?: (event: OfficeAgentClick) => void
+    ambientCopy?: OfficeAmbientCopy
+  } = {}) {
     this.options = options
+    this.simulator = new OfficeSimulator({ copy: options.ambientCopy })
   }
 
   async init(container: HTMLElement, width: number, height: number) {
@@ -102,6 +110,10 @@ export class OfficeScene {
       this.world = null
       throw error
     }
+  }
+
+  setAmbientCopy(copy: OfficeAmbientCopy) {
+    this.simulator.setCopy(copy)
   }
 
   syncAgents(nextAgents: Agent[]) {

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Agent } from './types/agent'
+import type { AgentOfficeCopy } from './officeCopy'
 import { OfficeScene, type OfficeAgentClick } from './scene/OfficeScene'
 
 type AgentMenuState = {
@@ -12,17 +13,27 @@ type AgentMenuState = {
 }
 
 const EMOTE_ACTIONS = [
-  { label: '坚定', animation: 'emotes/determined' },
-  { label: '思考', animation: 'emotes/thinking' },
-  { label: '灵感', animation: 'emotes/idea' },
-  { label: '兴奋', animation: 'emotes/excited' },
-  { label: '欢呼', animation: 'emotes/hooray' },
-  { label: '挥手', animation: 'emotes/wave' },
-  { label: '大笑', animation: 'emotes/laugh' },
-  { label: '困惑', animation: 'emotes/confused' },
+  { key: 'determined', animation: 'emotes/determined' },
+  { key: 'thinking', animation: 'emotes/thinking' },
+  { key: 'idea', animation: 'emotes/idea' },
+  { key: 'excited', animation: 'emotes/excited' },
+  { key: 'hooray', animation: 'emotes/hooray' },
+  { key: 'wave', animation: 'emotes/wave' },
+  { key: 'laugh', animation: 'emotes/laugh' },
+  { key: 'confused', animation: 'emotes/confused' },
 ] as const
 
-export function OfficeCanvas({ agents }: { agents: Agent[] }) {
+function interpolateName(template: string, name: string): string {
+  return template.replace('{name}', name)
+}
+
+export function OfficeCanvas({
+  agents,
+  copy,
+}: {
+  agents: Agent[]
+  copy: AgentOfficeCopy
+}) {
   const hostRef = useRef<HTMLDivElement>(null)
   const sceneRef = useRef<OfficeScene | null>(null)
   const agentsRef = useRef(agents)
@@ -51,7 +62,10 @@ export function OfficeCanvas({ agents }: { agents: Agent[] }) {
       })
     }
 
-    const scene = new OfficeScene({ onAgentClick: handleAgentClick })
+    const scene = new OfficeScene({
+      onAgentClick: handleAgentClick,
+      ambientCopy: copy,
+    })
     sceneRef.current = scene
     scene.syncAgents(agentsRef.current)
     let initializing = false
@@ -104,6 +118,10 @@ export function OfficeCanvas({ agents }: { agents: Agent[] }) {
   }, [agents])
 
   useEffect(() => {
+    sceneRef.current?.setAmbientCopy(copy)
+  }, [copy])
+
+  useEffect(() => {
     const closeMenu = (event: PointerEvent) => {
       const target = event.target
       if (target instanceof Element && target.closest('[data-agent-action-menu]')) return
@@ -126,7 +144,7 @@ export function OfficeCanvas({ agents }: { agents: Agent[] }) {
     sceneRef.current?.requestDeskVisit(
       menu.rosterNo,
       targetRosterNo,
-      `${targetName}，同步一下当前进度。`,
+      interpolateName(copy.visitMessage, targetName),
     )
     setMenu(null)
   }
@@ -146,7 +164,7 @@ export function OfficeCanvas({ agents }: { agents: Agent[] }) {
               className="mt-3 rounded-lg bg-neutral-900 px-3 py-2 text-sm font-medium text-white hover:bg-neutral-700"
               onClick={() => initializeRef.current()}
             >
-              重试
+              {copy.retry}
             </button>
           </div>
         </div>
@@ -171,10 +189,10 @@ export function OfficeCanvas({ agents }: { agents: Agent[] }) {
                 className="w-full rounded-lg px-2 py-2 text-left text-sm hover:bg-neutral-100"
                 onClick={() => setMenu((current) => current ? { ...current, pickingTarget: true } : null)}
               >
-                互动…
+                {copy.interact}
               </button>
               <div className="mt-2 border-t border-black/10 pt-2">
-                <p className="px-2 pb-1 text-[11px] font-medium text-neutral-400">表情动作</p>
+                <p className="px-2 pb-1 text-[11px] font-medium text-neutral-400">{copy.emotesHeading}</p>
                 <div className="grid grid-cols-2 gap-1">
                   {EMOTE_ACTIONS.map((action) => (
                     <button
@@ -185,12 +203,12 @@ export function OfficeCanvas({ agents }: { agents: Agent[] }) {
                         sceneRef.current?.playAgentAnimation(
                           menu.agent.id,
                           action.animation,
-                          action.label,
+                          copy.emotes[action.key],
                         )
                         setMenu(null)
                       }}
                     >
-                      {action.label}
+                      {copy.emotes[action.key]}
                     </button>
                   ))}
                 </div>
@@ -203,7 +221,7 @@ export function OfficeCanvas({ agents }: { agents: Agent[] }) {
                 className="mb-1 w-full rounded-lg px-2 py-2 text-left text-sm text-neutral-500 hover:bg-neutral-100"
                 onClick={() => setMenu((current) => current ? { ...current, pickingTarget: false } : null)}
               >
-                返回动作
+                {copy.backToActions}
               </button>
               {menu.agents
                 .map((agent, index) => ({ agent, rosterNo: index + 1 }))
@@ -215,7 +233,7 @@ export function OfficeCanvas({ agents }: { agents: Agent[] }) {
                     className="w-full rounded-lg px-2 py-2 text-left text-sm hover:bg-neutral-100"
                     onClick={() => startInteraction(rosterNo, agent.name)}
                   >
-                    和 {agent.name} 互动
+                    {interpolateName(copy.interactWith, agent.name)}
                   </button>
                 ))}
             </div>

@@ -38,18 +38,26 @@ function applySplitDepthZ(
   agentAhead: number,
   agentBehind: number,
 ): number {
-  let z = baseZ
+  let behindMax: number | undefined
+  let aheadMin: number | undefined
 
   for (const a of agents) {
     if (!isAgentNearDesk(desk, a.x, a.y)) continue
     if (a.y < split) {
-      z = Math.max(z, a.y + agentBehind)
+      behindMax = Math.max(behindMax ?? -Infinity, a.y + agentBehind)
     } else {
-      z = Math.min(z, a.y - agentAhead)
+      aheadMin = Math.min(aheadMin ?? Infinity, a.y - agentAhead)
     }
   }
 
-  return z
+  if (behindMax != null && aheadMin != null) {
+    return behindMax < aheadMin
+      ? Math.min(Math.max(baseZ, behindMax), aheadMin)
+      : (behindMax + aheadMin) / 2
+  }
+  if (behindMax != null) return Math.max(baseZ, behindMax)
+  if (aheadMin != null) return Math.min(baseZ, aheadMin)
+  return baseZ
 }
 
 /**

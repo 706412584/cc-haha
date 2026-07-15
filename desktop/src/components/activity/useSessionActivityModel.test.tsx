@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { renderHook } from '@testing-library/react'
+import { act, render, renderHook } from '@testing-library/react'
 import type { PerSessionState } from '../../stores/chatStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useCLITaskStore } from '../../stores/cliTaskStore'
@@ -135,6 +135,37 @@ describe('useSessionActivityModel', () => {
     expect(result.current).toBe(initial)
     expect(result.current.mainAgent.status).toBe('idle')
     expect(result.current.model.sections.tasks.rows).toEqual([])
+  })
+
+  it('does not re-render when unrelated session fields change', () => {
+    const sessionId = 'session-1'
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: makeSessionState(),
+      },
+    })
+    let renders = 0
+    function Consumer() {
+      useSessionActivityModel(sessionId)
+      renders += 1
+      return null
+    }
+    render(<Consumer />)
+
+    act(() => {
+      useChatStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [sessionId]: {
+            ...state.sessions[sessionId]!,
+            streamingText: 'unrelated streaming update',
+            elapsedSeconds: 10,
+          },
+        },
+      }))
+    })
+
+    expect(renders).toBe(1)
   })
 
   it('does not borrow CLI tasks tracked for another session', () => {

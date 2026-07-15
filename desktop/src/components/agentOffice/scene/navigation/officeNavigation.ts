@@ -117,13 +117,12 @@ export function buildNavGraph(desks: Desk[]): NavGraph {
     }
   }
 
-  const lastAisleCol = colAisleX.length - 1
   for (let ci = 0; ci < colAisleX.length; ci++) {
     for (let ri = 0; ri < nRows; ri++) {
       const id = `aisle-c${ci}-r${ri}`
       if (ci > 0) linkEdge(adj, id, `aisle-c${ci - 1}-r${ri}`)
-      // 中间列过道在桌列之间，只做横向连通，不做行间纵向（避免穿桌）
-      if (ri > 0 && (ci === 0 || ci === lastAisleCol)) {
+      // 所有列间过道均可纵向通行；实际边仍由座椅碰撞检测过滤。
+      if (ri > 0) {
         linkEdge(adj, id, `aisle-c${ci}-r${ri - 1}`)
       }
     }
@@ -394,10 +393,7 @@ function estimateExitCost(
 
   const toId = nearestNodeId(g, toX, toY)
   const ids = shortestPath(g.nodes, g.adj, aisleId, toId, ctx)
-  if (!ids) {
-    cost += Math.hypot(aisle.x - toX, aisle.y - toY)
-    return cost
-  }
+  if (!ids) return Infinity
 
   cost += pathIdsLength(g, ids)
   const last = g.nodes.get(ids[ids.length - 1]!)!
@@ -430,7 +426,7 @@ function estimateEnterCost(
   const ids = shortestPath(g.nodes, g.adj, fromId, approachAisleId, ctx)
   let cost = 0
   if (!ids) {
-    cost += Math.hypot(fromX - approachAisle.x, fromY - approachAisle.y)
+    return Infinity
   } else {
     cost += pathIdsLength(g, ids)
     const last = g.nodes.get(ids[ids.length - 1]!)!
@@ -569,14 +565,17 @@ export function planWalkTo(
   const fromId = nearestNodeId(g, fromX, fromY)
   const toId = nearestNodeId(g, toX, toY)
   const ids = shortestPath(g.nodes, g.adj, fromId, toId, ctx)
-  if (!ids) return [{ x: toX, y: toY }]
+  if (!ids) return []
 
   const points = idsToPoints(g, ids)
   const last = points[points.length - 1]!
   if (Math.hypot(last.x - toX, last.y - toY) > 4) {
+    if (segmentCrossesSeat(last.x, last.y, toX, toY, ctx)) return []
     points.push({ x: toX, y: toY })
   }
-  return points
+  return polylineCrossesSeat([{ x: fromX, y: fromY }, ...points], ctx)
+    ? []
+    : points
 }
 
 export function planWalkFrom(
@@ -625,6 +624,10 @@ export function planWalkFrom(
     }
     const tail = steps[steps.length - 1]!
     const corridor = planWalkTo(tail.x, tail.y, toX, toY, ctx)
+    if (
+      corridor.length === 0 &&
+      Math.hypot(tail.x - toX, tail.y - toY) > 4
+    ) return []
     return dedupePoints([...steps, ...corridor])
   }
   return planWalkTo(fromX, fromY, toX, toY, ctx)
@@ -657,7 +660,8 @@ export function planWalkToDeskSeat(
 
   const fromId = nearestNodeId(g, fromX, fromY)
   const ids = shortestPath(g.nodes, g.adj, fromId, approachAisleId, ctx)
-  const points = ids ? idsToPoints(g, ids) : []
+  if (!ids) return []
+  const points = idsToPoints(g, ids)
 
   const approachPt = { x: approachAisle.x, y: desk.seatY }
   const last = points[points.length - 1]
@@ -679,21 +683,32 @@ export function planWalkToDeskSeat(
     }
   }
   const beforeSide = points[points.length - 1]
-  if (
-    (!beforeSide ||
-      Math.hypot(beforeSide.x - side.x, beforeSide.y - side.y) > 4) &&
-    !segmentCrossesSeat(
-      beforeSide?.x ?? fromX,
-      beforeSide?.y ?? fromY,
+  if (!beforeSide) return []
+  if (Math.hypot(beforeSide.x - side.x, beforeSide.y - side.y) > 4) {
+    if (segmentCrossesSeat(
+      beforeSide.x,
+      beforeSide.y,
       side.x,
       side.y,
       ctx,
       lateralSeatCheck(desk, fromX, fromY),
-    )
-  ) {
+    )) return []
     points.push(side)
   }
+  if (segmentCrossesSeat(
+    side.x,
+    side.y,
+    desk.seatX,
+    desk.seatY,
+    ctx,
+    { excludeDeskIds: [desk.id] },
+  )) return []
   points.push({ x: desk.seatX, y: desk.seatY })
 
-  return dedupePoints(points)
+  const deduped = dedupePoints(points)
+  return polylineCrossesSeat(
+    [{ x: fromX, y: fromY }, ...deduped],
+    ctx,
+    { excludeDeskIds: [desk.id] },
+  ) ? [] : deduped
 }

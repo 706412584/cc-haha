@@ -1,8 +1,27 @@
 import { describe, expect, it } from 'vitest'
 import type { SessionActivitySnapshot } from '../activity/useSessionActivityModel'
 import { buildSessionActivityModel } from '../activity/sessionActivityModel'
-import { adaptActivityToOfficeRoster } from './officeActivityAdapter'
+import {
+  adaptActivityToOfficeRoster,
+  type OfficeActivityCopy,
+} from './officeActivityAdapter'
 import { formatOfficeAgentNameplate } from './types/agent'
+
+const ENGLISH_COPY: OfficeActivityCopy = {
+  sectionRoles: {
+    team: 'Team member',
+    subagents: 'Engineering specialist',
+    backgroundTasks: 'Operations specialist',
+    tasks: 'Project specialist',
+  },
+  mainAgentName: 'Main Agent',
+  mainAgentRole: 'Lead',
+  working: 'Working',
+}
+
+function adapt(activity: SessionActivitySnapshot) {
+  return adaptActivityToOfficeRoster(activity, ENGLISH_COPY)
+}
 
 function snapshot(overrides: Partial<SessionActivitySnapshot> = {}): SessionActivitySnapshot {
   return {
@@ -49,7 +68,7 @@ function snapshot(overrides: Partial<SessionActivitySnapshot> = {}): SessionActi
 
 describe('adaptActivityToOfficeRoster', () => {
   it('maps the main Agent and real activity rows onto the original six desks', () => {
-    const agents = adaptActivityToOfficeRoster(snapshot())
+    const agents = adapt(snapshot())
 
     expect(agents).toHaveLength(6)
     expect(agents[0]).toMatchObject({
@@ -78,7 +97,7 @@ describe('adaptActivityToOfficeRoster', () => {
   })
 
   it('assigns stable job titles from real activity semantics', () => {
-    const agents = adaptActivityToOfficeRoster(snapshot({
+    const agents = adapt(snapshot({
       model: buildSessionActivityModel({
         sessionId: 'session-1',
         tasks: [{
@@ -122,19 +141,19 @@ describe('adaptActivityToOfficeRoster', () => {
     }))
 
     expect(agents.slice(0, 5).map((agent) => agent.role)).toEqual([
-      '老板',
-      '团队成员',
-      '研发专员',
-      '运维专员',
-      '项目专员',
+      'Lead',
+      'Team member',
+      'Engineering specialist',
+      'Operations specialist',
+      'Project specialist',
     ])
     expect(agents[0]?.name).toBe('Main Agent')
-    expect(formatOfficeAgentNameplate(agents[0]!)).toBe('老板\nMain Agent')
-    expect(formatOfficeAgentNameplate(agents[2]!)).toBe('研发专员\nImplement fe…')
+    expect(formatOfficeAgentNameplate(agents[0]!)).toBe('Lead\nMain Agent')
+    expect(formatOfficeAgentNameplate(agents[2]!)).toBe('Engineering specialist\nImplement fe…')
   })
 
   it('ignores completed history when choosing live office seats', () => {
-    const agents = adaptActivityToOfficeRoster(snapshot({
+    const agents = adapt(snapshot({
       model: buildSessionActivityModel({
         sessionId: 'session-1',
         tasks: [
@@ -170,8 +189,31 @@ describe('adaptActivityToOfficeRoster', () => {
     expect(agents.some((agent) => agent.name === 'Old completed task')).toBe(false)
   })
 
+  it('uses locale-resolved copy instead of leaking Simplified Chinese', () => {
+    const agents = adapt(snapshot({
+      mainAgent: {
+        status: 'tool_executing',
+        activeToolName: null,
+        statusVerb: '',
+      },
+    }))
+
+    expect(agents[0]).toMatchObject({
+      name: 'Main Agent',
+      role: 'Lead',
+      currentTask: 'Working',
+    })
+    expect(agents.slice(0, 4).map((agent) => agent.role)).toEqual([
+      'Lead',
+      'Team member',
+      'Engineering specialist',
+      'Project specialist',
+    ])
+    expect(agents.map((agent) => agent.role).join(' ')).not.toMatch(/[团队研发运维项目老板]/)
+  })
+
   it('clips long live labels for desk readability without splitting Unicode characters', () => {
-    const agents = adaptActivityToOfficeRoster(snapshot({
+    const agents = adapt(snapshot({
       model: buildSessionActivityModel({
         sessionId: 'session-1',
         tasks: [{
@@ -195,8 +237,34 @@ describe('adaptActivityToOfficeRoster', () => {
     })
   })
 
+  it.each([
+    { label: '12345678901👨‍👩‍👧‍👦x', expected: '12345678901👨‍👩‍👧‍👦…' },
+    { label: '12345678901e\u0301x', expected: '12345678901e\u0301…' },
+    { label: '12345678901🇺🇳x', expected: '12345678901🇺🇳…' },
+  ])('clips complete grapheme clusters in $label', ({ label, expected }) => {
+    const agents = adapt(snapshot({
+      model: buildSessionActivityModel({
+        sessionId: 'session-1',
+        tasks: [{
+          id: 'grapheme-task',
+          subject: label,
+          description: '',
+          status: 'in_progress',
+          blocks: [],
+          blockedBy: [],
+          taskListId: 'session-1',
+        }],
+        completedAndDismissed: false,
+        backgroundTasks: [],
+        agentNotifications: [],
+      }),
+    }))
+
+    expect(agents[1]?.name).toBe(expected)
+  })
+
   it('marks real pending work and idle team members as available for ambient behavior', () => {
-    const agents = adaptActivityToOfficeRoster(snapshot({
+    const agents = adapt(snapshot({
       mainAgent: { status: 'idle', activeToolName: null, statusVerb: '' },
       model: buildSessionActivityModel({
         sessionId: 'session-1',
@@ -214,13 +282,13 @@ describe('adaptActivityToOfficeRoster', () => {
 
     expect(agents[1]).toMatchObject({
       name: 'Designer',
-      role: '团队成员',
+      role: 'Team member',
       state: 'idle',
       ambientEligible: true,
       sourceKey: 'team:waiting-designer',
     })
 
-    const pendingAgents = adaptActivityToOfficeRoster(snapshot({
+    const pendingAgents = adapt(snapshot({
       model: buildSessionActivityModel({
         sessionId: 'session-1',
         tasks: [{
@@ -246,7 +314,7 @@ describe('adaptActivityToOfficeRoster', () => {
   })
 
   it('fills seats with active work before real idle team members', () => {
-    const agents = adaptActivityToOfficeRoster(snapshot({
+    const agents = adapt(snapshot({
       model: buildSessionActivityModel({
         sessionId: 'session-1',
         tasks: [{
@@ -274,7 +342,7 @@ describe('adaptActivityToOfficeRoster', () => {
   })
 
   it('keeps unused seats idle instead of inventing work', () => {
-    const agents = adaptActivityToOfficeRoster(snapshot({
+    const agents = adapt(snapshot({
       mainAgent: { status: 'idle', activeToolName: null, statusVerb: '' },
       model: buildSessionActivityModel({
         sessionId: 'session-1',

@@ -2,11 +2,24 @@ import type { ChibiFacing } from '../scene/characters/chibiAgentPresets'
 
 export type AgentState = 'idle' | 'walking' | 'working' | 'talking' | 'thinking'
 
+export type AgentTransientState = Pick<
+  Agent,
+  | 'state'
+  | 'currentTask'
+  | 'targetX'
+  | 'targetY'
+  | 'walkPath'
+  | 'walkPathIndex'
+  | 'facing'
+  | 'viewFacing'
+>
+
 export interface DeskVisitStop {
   hostRosterNo: number
   hostAgentId: string
   hostDeskId: string
   message: string
+  hostResume: AgentTransientState
 }
 
 export interface DeskVisitMission {
@@ -17,6 +30,8 @@ export interface DeskVisitMission {
   message: string
   resumeState: AgentState
   resumeTask: string
+  resumeTransient?: AgentTransientState
+  hostResumes?: Record<string, AgentTransientState>
   talkDuration: number
   talkRemaining?: number
   queue: DeskVisitStop[]

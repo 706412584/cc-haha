@@ -11,7 +11,12 @@ const mocks = vi.hoisted(() => ({
     resize: ReturnType<typeof vi.fn>
     syncAgents: ReturnType<typeof vi.fn>
     destroy: ReturnType<typeof vi.fn>
+    getAgents: ReturnType<typeof vi.fn>
+    requestDeskVisit: ReturnType<typeof vi.fn>
+    playAgentAnimation: ReturnType<typeof vi.fn>
+    setAmbientCopy: ReturnType<typeof vi.fn>
   }>,
+  agentClick: null as ((event: unknown) => void) | null,
   resizeCallback: null as ResizeObserverCallback | null,
 }))
 
@@ -24,12 +29,66 @@ vi.mock('./scene/OfficeScene', () => ({
     getAgents = vi.fn(() => [])
     requestDeskVisit = vi.fn()
     playAgentAnimation = vi.fn()
+    setAmbientCopy = vi.fn()
 
-    constructor() {
+    constructor(options: { onAgentClick: (event: unknown) => void }) {
+      mocks.agentClick = options.onAgentClick
       mocks.instances.push(this)
     }
   },
 }))
+
+const ENGLISH_COPY = {
+  sectionRoles: {
+    team: 'Team member',
+    subagents: 'Engineering specialist',
+    backgroundTasks: 'Operations specialist',
+    tasks: 'Project specialist',
+  },
+  mainAgentName: 'Main Agent',
+  mainAgentRole: 'Lead',
+  working: 'Working',
+  status: {
+    running: 'In progress',
+    pending: 'Waiting',
+    completed: 'Completed',
+    failed: 'Needs attention',
+  },
+  stats: {
+    active: 'In progress',
+    activeHint: 'Real tasks and Agents',
+    completed: 'Completed',
+    completedHint: 'Current activity history',
+    attention: 'Needs attention',
+    attentionHint: 'Errors or blockers',
+    employees: 'AI employees',
+    employeesHint: 'Live activity',
+  },
+  flowHeading: 'Current workflow',
+  emptyFlow: 'Waiting for real tasks or SubAgents',
+  liveHeading: 'Live status',
+  chatTask: 'Taking a break',
+  chatFirst: 'How is your day going?',
+  chatSecond: 'Glad to have a breather.',
+  watch: 'Watching a show',
+  game: 'Playing a game',
+  retry: 'Retry',
+  interact: 'Interact…',
+  emotesHeading: 'Emotes',
+  backToActions: 'Back to actions',
+  interactWith: 'Interact with {name}',
+  visitMessage: '{name}, let us sync progress.',
+  emotes: {
+    determined: 'Determined',
+    thinking: 'Thinking',
+    idea: 'Idea',
+    excited: 'Excited',
+    hooray: 'Hooray',
+    wave: 'Wave',
+    laugh: 'Laugh',
+    confused: 'Confused',
+  },
+} as const
 
 function agent(name: string, state: Agent['state'] = 'working'): Agent {
   return {
@@ -50,6 +109,7 @@ describe('OfficeCanvas', () => {
   beforeEach(() => {
     mocks.initImplementation = () => Promise.resolve()
     mocks.instances.length = 0
+    mocks.agentClick = null
     mocks.resizeCallback = null
     vi.stubGlobal('ResizeObserver', class {
       constructor(callback: ResizeObserverCallback) {
@@ -62,7 +122,7 @@ describe('OfficeCanvas', () => {
   })
 
   it('initializes one Pixi scene, syncs activity updates, and destroys it on unmount', async () => {
-    const { rerender, unmount } = render(<OfficeCanvas agents={[agent('Main Agent')]} />)
+    const { rerender, unmount } = render(<OfficeCanvas agents={[agent('Main Agent')]} copy={ENGLISH_COPY} />)
     const scene = mocks.instances[0]!
 
     expect(scene.syncAgents).toHaveBeenCalledWith([agent('Main Agent')])
@@ -76,7 +136,7 @@ describe('OfficeCanvas', () => {
     expect(scene.init).toHaveBeenCalledTimes(1)
     expect(scene.init).toHaveBeenCalledWith(expect.any(HTMLElement), 960, 640)
 
-    rerender(<OfficeCanvas agents={[agent('Main Agent', 'thinking')]} />)
+    rerender(<OfficeCanvas agents={[agent('Main Agent', 'thinking')]} copy={ENGLISH_COPY} />)
 
     expect(mocks.instances).toHaveLength(1)
     expect(scene.syncAgents).toHaveBeenLastCalledWith([agent('Main Agent', 'thinking')])
@@ -87,7 +147,7 @@ describe('OfficeCanvas', () => {
 
   it('shows an error and retries scene initialization after a renderer failure', async () => {
     mocks.initImplementation = () => Promise.reject(new Error('WebGL unavailable'))
-    render(<OfficeCanvas agents={[agent('Main Agent')]} />)
+    render(<OfficeCanvas agents={[agent('Main Agent')]} copy={ENGLISH_COPY} />)
     const scene = mocks.instances[0]!
 
     await act(async () => {
@@ -102,7 +162,7 @@ describe('OfficeCanvas', () => {
 
     mocks.initImplementation = () => Promise.resolve()
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: '重试' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
       await Promise.resolve()
     })
 
@@ -118,7 +178,7 @@ describe('OfficeCanvas', () => {
         resolve()
       }
     })
-    render(<OfficeCanvas agents={[agent('Main Agent')]} />)
+    render(<OfficeCanvas agents={[agent('Main Agent')]} copy={ENGLISH_COPY} />)
     const scene = mocks.instances[0]!
     scene.resize.mockImplementation(() => events.push('resized'))
 
@@ -135,5 +195,115 @@ describe('OfficeCanvas', () => {
 
     expect(scene.resize).toHaveBeenLastCalledWith(800, 600)
     expect(events.slice(-2)).toEqual(['initialized', 'resized'])
+  })
+
+  it('renders localized interaction copy without leaking Chinese labels', () => {
+    render(<OfficeCanvas agents={[agent('Main Agent')]} copy={ENGLISH_COPY} />)
+
+    act(() => {
+      mocks.agentClick?.({
+        agent: agent('Main Agent'),
+        rosterNo: 1,
+        clientX: 100,
+        clientY: 100,
+      })
+    })
+
+    expect(screen.getByRole('button', { name: 'Interact…' })).toBeInTheDocument()
+    expect(screen.getByText('Emotes')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Wave' })).toBeInTheDocument()
+    expect(screen.queryByText('互动…')).not.toBeInTheDocument()
+    expect(screen.queryByText('表情动作')).not.toBeInTheDocument()
+  })
+
+  it('updates the mounted scene copy when the locale changes', () => {
+    const { rerender } = render(
+      <OfficeCanvas agents={[agent('Main Agent')]} copy={ENGLISH_COPY} />,
+    )
+    const scene = mocks.instances[0]!
+    const updatedCopy = { ...ENGLISH_COPY, game: '休息·玩遊戲' }
+
+    rerender(<OfficeCanvas agents={[agent('Main Agent')]} copy={updatedCopy} />)
+
+    expect(mocks.instances).toHaveLength(1)
+    expect(scene.setAmbientCopy).toHaveBeenLastCalledWith(updatedCopy)
+  })
+
+  it('offers agent emotes and closes the action menu after selection', () => {
+    render(<OfficeCanvas agents={[agent('Main Agent')]} copy={ENGLISH_COPY} />)
+    const scene = mocks.instances[0]!
+
+    act(() => {
+      mocks.agentClick?.({
+        agent: agent('Main Agent'),
+        rosterNo: 1,
+        clientX: 100,
+        clientY: 100,
+      })
+    })
+
+    expect(screen.getByText('Main Agent')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Wave' }))
+
+    expect(scene.playAgentAnimation).toHaveBeenCalledWith(
+      'main-agent',
+      'emotes/wave',
+      'Wave',
+    )
+    expect(screen.queryByText('Emotes')).not.toBeInTheDocument()
+  })
+
+  it('requests a desk visit for a selected peer and supports backing out', () => {
+    const peer = { ...agent('Reviewer', 'idle'), id: 'office-agent-2' }
+    render(<OfficeCanvas agents={[agent('Main Agent'), peer]} copy={ENGLISH_COPY} />)
+    const scene = mocks.instances[0]!
+    scene.getAgents.mockReturnValue([agent('Main Agent'), peer])
+
+    act(() => {
+      mocks.agentClick?.({
+        agent: agent('Main Agent'),
+        rosterNo: 1,
+        clientX: 100,
+        clientY: 100,
+      })
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Interact…' }))
+    expect(screen.queryByRole('button', { name: 'Interact with Main Agent' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Back to actions' }))
+    expect(screen.getByText('Emotes')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Interact…' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Interact with Reviewer' }))
+
+    expect(scene.requestDeskVisit).toHaveBeenCalledWith(
+      1,
+      2,
+      'Reviewer, let us sync progress.',
+    )
+    expect(screen.queryByText('Reviewer')).not.toBeInTheDocument()
+  })
+
+  it('closes the menu on outside pointer input and Escape but not inside it', () => {
+    render(<OfficeCanvas agents={[agent('Main Agent')]} copy={ENGLISH_COPY} />)
+    const openMenu = () => act(() => {
+      mocks.agentClick?.({
+        agent: agent('Main Agent'),
+        rosterNo: 1,
+        clientX: 100,
+        clientY: 100,
+      })
+    })
+
+    openMenu()
+    fireEvent.pointerDown(screen.getByText('Emotes'))
+    expect(screen.getByText('Emotes')).toBeInTheDocument()
+
+    fireEvent.pointerDown(document.body)
+    expect(screen.queryByText('Emotes')).not.toBeInTheDocument()
+
+    openMenu()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByText('Emotes')).not.toBeInTheDocument()
   })
 })

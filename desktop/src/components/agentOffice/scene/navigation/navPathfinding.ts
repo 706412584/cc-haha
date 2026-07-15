@@ -62,7 +62,7 @@ function collectSeatObstacles(
   for (const agent of agents) {
     if (agent.id === ctx?.selfAgentId) continue
     const desk = DESKS.find((d) => d.id === agent.assignedDeskId)
-    if (!desk || exclude.has(desk.id)) continue
+    if (!desk) continue
     if (
       agent.state === 'working' ||
       agent.state === 'talking' ||
