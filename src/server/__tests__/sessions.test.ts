@@ -589,6 +589,57 @@ describe('SessionService', () => {
     })
   })
 
+  it('should group nested metadata-free internal Agent worktree sessions under the source project', async () => {
+    const sourceWorkDir = path.join(tmpDir, 'source-repo')
+    const worktreePath = path.join(
+      sourceWorkDir,
+      '.claude',
+      'worktrees',
+      'agent-ab777add',
+      '.claude',
+      'worktrees',
+      'fix-background-agent-nonblocking',
+    )
+    await fs.mkdir(worktreePath, { recursive: true })
+    const sessionId = 'dddddddd-bbbb-cccc-dddd-eeeeeeeeeeee'
+    await writeSessionFile(sanitizePath(worktreePath), sessionId, [
+      makeSnapshotEntry(),
+      makeSessionMetaEntry(worktreePath),
+      makeUserEntry('Hello from internal Agent worktree'),
+    ])
+
+    const result = await service.listSessions()
+
+    expect(result.sessions).toHaveLength(1)
+    expect(result.sessions[0]).toMatchObject({
+      id: sessionId,
+      projectPath: sanitizePath(worktreePath),
+      projectRoot: await fs.realpath(sourceWorkDir),
+      workDir: worktreePath,
+    })
+  })
+
+  it('should keep named Agent worktrees as explicit projects', async () => {
+    const sourceWorkDir = path.join(tmpDir, 'source-repo')
+    const worktreePath = path.join(sourceWorkDir, '.claude', 'worktrees', 'agent-office-0.5.39')
+    await fs.mkdir(worktreePath, { recursive: true })
+    const sessionId = 'eeeeeeee-bbbb-cccc-dddd-eeeeeeeeeeee'
+    await writeSessionFile(sanitizePath(worktreePath), sessionId, [
+      makeSnapshotEntry(),
+      makeSessionMetaEntry(worktreePath),
+      makeUserEntry('Hello from named Agent worktree'),
+    ])
+
+    const result = await service.listSessions()
+
+    expect(result.sessions).toHaveLength(1)
+    expect(result.sessions[0]).toMatchObject({
+      id: sessionId,
+      projectRoot: await fs.realpath(worktreePath),
+      workDir: worktreePath,
+    })
+  })
+
   it('should paginate results with limit and offset', async () => {
     // Create 3 sessions
     for (let i = 0; i < 3; i++) {
