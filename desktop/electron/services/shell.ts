@@ -49,10 +49,31 @@ export function expandTildePath(target: string, platform: NodeJS.Platform = proc
   return target
 }
 
-export function normalizeOpenPath(target: string): string {
+export function normalizeOpenPath(
+  target: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const fileUrl = target.slice(0, 5).toLowerCase() === 'file:'
+    ? new URL(target)
+    : null
+  if (platform === 'win32' && fileUrl?.hostname) {
+    throw new Error('System file paths must be local paths')
+  }
+
   const filePath = expandTildePath(
-    target.startsWith('file://') ? fileURLToPath(target) : target,
+    fileUrl ? fileURLToPath(fileUrl) : target,
+    platform,
   )
+  if (platform === 'win32') {
+    const windowsPath = filePath.replaceAll('/', '\\')
+    if (
+      windowsPath.startsWith('\\\\') ||
+      windowsPath.startsWith('\\??\\') ||
+      (path.win32.isAbsolute(windowsPath) && !/^[A-Za-z]:\\/.test(windowsPath))
+    ) {
+      throw new Error('System file paths must be local paths')
+    }
+  }
   if (!path.isAbsolute(filePath)) {
     throw new Error('System file paths must be absolute')
   }

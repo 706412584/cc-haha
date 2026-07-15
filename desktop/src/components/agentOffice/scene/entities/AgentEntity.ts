@@ -8,17 +8,21 @@ import { SpineCharacter } from '../characters/SpineCharacter'
 import { isSpineReady } from '../assets/loadSpineAssets'
 import { Bubble } from '../ui/Bubble'
 import { StatusLabel } from '../ui/StatusLabel'
+import type { OfficeThemePalette } from '../../officeTheme'
 
 export class AgentEntity extends Container {
   readonly agentId: string
   private agent: Agent
   private spineChar: SpineCharacter | null = null
+  private interactionHighlight = new Graphics()
   private fallbackBody: Graphics | null = null
   private fallbackScarf: Graphics | null = null
   private statusLabel: StatusLabel
   private bubble: Bubble
   private walkPhase = 0
   private useSpine = false
+  private selected = false
+  private hovered = false
 
   constructor(agent: Agent) {
     super()
@@ -27,6 +31,8 @@ export class AgentEntity extends Container {
 
     this.statusLabel = new StatusLabel(formatOfficeAgentNameplate(agent))
     this.bubble = new Bubble()
+    this.interactionHighlight.visible = false
+    this.addChild(this.interactionHighlight)
 
     if (isSpineReady()) {
       this.spineChar = new SpineCharacter(agent.id, agent.color)
@@ -49,9 +55,47 @@ export class AgentEntity extends Container {
     this.eventMode = 'static'
     this.cursor = 'pointer'
     this.hitArea = new Rectangle(-34, -92, 68, 124)
+    this.on('pointerover', () => {
+      this.hovered = true
+      this.drawInteractionHighlight()
+    })
+    this.on('pointerout', () => {
+      this.hovered = false
+      this.drawInteractionHighlight()
+    })
 
     this.syncVisual()
     this.position.set(agent.x, agent.y)
+  }
+
+  setThemePalette(palette: OfficeThemePalette) {
+    this.statusLabel.setThemePalette(palette)
+    this.bubble.setThemePalette(palette)
+  }
+
+  setSelected(selected: boolean) {
+    this.selected = selected
+    this.drawInteractionHighlight()
+  }
+
+  setReducedMotion(reduced: boolean) {
+    this.spineChar?.setReducedMotion(reduced)
+  }
+
+  private drawInteractionHighlight() {
+    this.interactionHighlight.clear()
+    this.interactionHighlight.visible = this.selected || this.hovered
+    if (!this.interactionHighlight.visible) return
+    this.interactionHighlight.ellipse(0, 14, 30, 13)
+    this.interactionHighlight.fill({
+      color: this.selected ? 0x2563eb : 0xffffff,
+      alpha: this.selected ? 0.2 : 0.13,
+    })
+    this.interactionHighlight.stroke({
+      color: this.selected ? 0x60a5fa : 0xffffff,
+      width: this.selected ? 2.5 : 1.5,
+      alpha: this.selected ? 0.95 : 0.72,
+    })
   }
 
   get data(): Agent {

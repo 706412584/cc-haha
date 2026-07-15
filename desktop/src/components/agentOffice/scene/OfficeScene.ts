@@ -1,6 +1,8 @@
 import { Application, Container, Graphics, Sprite } from 'pixi.js'
 import type { FederatedPointerEvent } from 'pixi.js'
 import type { Agent } from '../types/agent'
+import type { OfficeThemePalette } from '../officeTheme'
+import { resolveOfficeThemePalette } from '../officeTheme'
 import {
   COLORS,
   DESKS,
@@ -18,6 +20,10 @@ import {
   type OfficeAmbientCopy,
 } from './simulation/OfficeSimulator'
 import { mergeOfficeAgentSnapshot } from './simulation/syncOfficeAgents'
+import {
+  reconcileOfficeRoster,
+  tickRetainedOfficeRoster,
+} from './simulation/reconcileOfficeRoster'
 import {
   getOfficeBackgroundTexture,
   loadOfficeAssets,
@@ -38,6 +44,11 @@ export class OfficeScene {
   private agentEntities = new Map<string, AgentEntity>()
   private deskEntities = new Map<string, DeskEntity>()
   private officeLayer: Container | null = null
+  private mapFloor: Graphics | null = null
+  private mapThemeOverlay: Graphics | null = null
+  private themePalette: OfficeThemePalette = resolveOfficeThemePalette('light')
+  private selectedSourceKey: string | null = null
+  private reducedMotion = false
 
   private movement = new MovementSystem()
   private animation = new AnimationSystem()
@@ -101,6 +112,7 @@ export class OfficeScene {
 
       this.drawMap(this.world)
       this.spawnOffice(this.world)
+      this.repaintTheme()
       this.pushDataToEntities()
 
       app.ticker.add(this.onTick)
@@ -116,11 +128,47 @@ export class OfficeScene {
     this.simulator.setCopy(copy)
   }
 
+  setThemePalette(palette: OfficeThemePalette) {
+    this.themePalette = palette
+    this.repaintTheme()
+  }
+
+  setReducedMotion(reduced: boolean) {
+    this.reducedMotion = reduced
+    for (const entity of this.agentEntities.values()) {
+      entity.setReducedMotion(reduced)
+    }
+    if (!reduced) return
+    this.pendingVisitRosterNos.clear()
+    this.customAnimationRemaining.clear()
+    this.agents = this.agents.map((agent) => {
+      const synced = this.syncedAgents.find((candidate) => candidate.id === agent.id)
+      if (!synced) return agent
+      return {
+        ...synced,
+        targetX: undefined,
+        targetY: undefined,
+        walkPath: undefined,
+        walkPathIndex: undefined,
+        mission: undefined,
+        customAnimation: undefined,
+      }
+    })
+    this.pushDataToEntities()
+  }
+
+  setSelectedSourceKey(sourceKey: string | null) {
+    this.selectedSourceKey = sourceKey
+    for (const entity of this.agentEntities.values()) {
+      entity.setSelected(Boolean(sourceKey && entity.data.sourceKey === sourceKey))
+    }
+  }
+
   syncAgents(nextAgents: Agent[]) {
     const previousSourceKeys = this.syncedAgents.map((agent) => agent.sourceKey)
-    this.syncedAgents = nextAgents.map((agent) => ({ ...agent }))
+    this.syncedAgents = reconcileOfficeRoster(this.syncedAgents, nextAgents)
 
-    nextAgents.forEach((agent, index) => {
+    this.syncedAgents.forEach((agent, index) => {
       if (index === 0) return
       const rosterNo = index + 1
       if (!agent.sourceKey) {
@@ -140,6 +188,7 @@ export class OfficeScene {
     hostRosterNo: number,
     message: string,
   ) {
+    if (this.reducedMotion) return
     this.agents = this.simulator.startDeskVisit(
       this.agents,
       visitorRosterNo,
@@ -155,6 +204,7 @@ export class OfficeScene {
     hostRosterNos: number[],
     messageFn?: (hostRosterNo: number, hostName: string) => string,
   ) {
+    if (this.reducedMotion) return
     this.agents = this.simulator.startDeskVisitTour(
       this.agents,
       visitorRosterNo,
@@ -233,6 +283,8 @@ export class OfficeScene {
     this.agentEntities.clear()
     this.deskEntities.clear()
     this.officeLayer = null
+    this.mapFloor = null
+    this.mapThemeOverlay = null
     this.pendingVisitRosterNos.clear()
     this.customAnimationRemaining.clear()
   }
@@ -240,8 +292,11 @@ export class OfficeScene {
   private onTick = (ticker: { deltaTime: number }) => {
     const dt = Math.min(ticker.deltaTime / 60, 0.05)
 
+    this.syncedAgents = tickRetainedOfficeRoster(this.syncedAgents, dt, INITIAL_AGENTS)
     this.agents = mergeOfficeAgentSnapshot(this.agents, this.syncedAgents)
-    this.agents = this.simulator.tick(dt, this.agents)
+    if (!this.reducedMotion) {
+      this.agents = this.simulator.tick(dt, this.agents)
+    }
     this.pushDataToEntities()
 
     this.movement.update(this.agentEntities, dt)
@@ -253,10 +308,10 @@ export class OfficeScene {
       this.agentEntities,
     )
     this.updateCustomAnimations(dt)
-    this.startPendingVisits()
+    if (!this.reducedMotion) this.startPendingVisits()
     this.pushDataToEntities()
 
-    this.animation.update(this.agentEntities, dt)
+    this.animation.update(this.agentEntities, this.reducedMotion ? 0 : dt)
     this.sortOfficeDepth()
     this.syncDeskOccupancy()
   }
@@ -398,6 +453,7 @@ export class OfficeScene {
     for (const agent of this.agents) {
       const entity = new AgentEntity(agent)
       this.agentEntities.set(agent.id, entity)
+      entity.setReducedMotion(this.reducedMotion)
       entity.zIndex = agent.y
       entity.on('pointertap', (event: FederatedPointerEvent) => {
         event.stopPropagation()
@@ -420,8 +476,7 @@ export class OfficeScene {
     map.label = 'map'
 
     const floor = new Graphics()
-    floor.rect(0, 0, SCENE_WIDTH, SCENE_HEIGHT)
-    floor.fill(COLORS.floor)
+    this.mapFloor = floor
     map.addChild(floor)
 
     const bgTex = getOfficeBackgroundTexture()
@@ -439,6 +494,34 @@ export class OfficeScene {
       map.addChild(bg)
     }
 
+    const themeOverlay = new Graphics()
+    this.mapThemeOverlay = themeOverlay
+    map.addChild(themeOverlay)
+    this.repaintTheme()
     parent.addChildAt(map, 0)
+  }
+
+  private repaintTheme() {
+    if (this.app) {
+      this.app.renderer.background.color = this.themePalette.floor
+    }
+    if (this.mapFloor) {
+      this.mapFloor.clear()
+      this.mapFloor.rect(0, 0, SCENE_WIDTH, SCENE_HEIGHT)
+      this.mapFloor.fill(this.themePalette.floor)
+    }
+    if (this.mapThemeOverlay) {
+      this.mapThemeOverlay.clear()
+      if (this.themePalette.floor === resolveOfficeThemePalette('dark').floor) {
+        this.mapThemeOverlay.rect(0, 0, SCENE_WIDTH, SCENE_HEIGHT)
+        this.mapThemeOverlay.fill({ color: this.themePalette.floor, alpha: 0.58 })
+      }
+    }
+    for (const entity of this.agentEntities.values()) {
+      entity.setThemePalette(this.themePalette)
+      entity.setSelected(Boolean(
+        this.selectedSourceKey && entity.data.sourceKey === this.selectedSourceKey,
+      ))
+    }
   }
 }

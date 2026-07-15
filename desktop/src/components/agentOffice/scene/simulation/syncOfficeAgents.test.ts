@@ -153,6 +153,30 @@ describe('mergeOfficeAgentSnapshot', () => {
     })
   })
 
+  it('keeps a working personality emote until the real task changes', () => {
+    const current = agent({
+      sourceKey: 'team:designer',
+      state: 'working',
+      currentTask: 'Polish release',
+      customAnimation: 'emotes/determined',
+      ambientEventId: 'ambient-focus',
+      ambientKind: 'focus',
+      ambientRemaining: 3,
+      ambientResumeState: 'working',
+      ambientResumeTask: 'Polish release',
+    })
+    const matching = agent({
+      sourceKey: 'team:designer',
+      state: 'working',
+      currentTask: 'Polish release',
+      ambientEligible: false,
+    })
+    const changed = { ...matching, currentTask: 'Ship release' }
+
+    expect(mergeOfficeAgentSnapshot([current], [matching])[0]?.ambientEventId).toBe('ambient-focus')
+    expect(mergeOfficeAgentSnapshot([current], [changed])[0]).toEqual(changed)
+  })
+
   it('updates real activity fields without resetting an active desk visit', () => {
     const current = agent({
       name: 'Researcher',

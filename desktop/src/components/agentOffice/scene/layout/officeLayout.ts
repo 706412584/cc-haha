@@ -1,3 +1,5 @@
+import { t } from '../../../../i18n'
+import type { AgentOfficeHandoffCopy } from '../../officeCopy'
 import type { Agent, AgentState, Desk } from '../../types/agent'
 
 export const SCENE_WIDTH = 960
@@ -75,22 +77,34 @@ function buildInitialAgents(): Agent[] {
 
 export const INITIAL_AGENTS = buildInitialAgents()
 
-export const HANDOFF_STATUS = {
-  delivering: 'Dispatching…',
-  handingOff: 'Handing off…',
-  receiving: 'Receiving handoff…',
-  wrappingUp: 'Returning to desk…',
-  planning: 'Planning handoff…',
-} as const
+export function resolveHandoffStatus(): AgentOfficeHandoffCopy {
+  return {
+    delivering: t('agentOffice.handoff.delivering'),
+    handingOff: t('agentOffice.handoff.handingOff'),
+    receiving: t('agentOffice.handoff.receiving'),
+    wrappingUp: t('agentOffice.handoff.wrappingUp'),
+    planning: t('agentOffice.handoff.planning'),
+  }
+}
 
-const HANDOFF_VISIT_MESSAGES: ((hostName: string) => string)[] = [
-  (name) => `${name}, this one is yours.`,
-  (name) => `${name}, the latest context is ready.`,
-  (name) => `${name}, please take it from here.`,
-  (name) => `${name}, I have unblocked your queue.`,
-]
+// Keep the existing API for simulation callers while resolving each value in
+// the active locale instead of freezing translated copy at module load time.
+export const HANDOFF_STATUS: AgentOfficeHandoffCopy = {
+  get delivering() { return resolveHandoffStatus().delivering },
+  get handingOff() { return resolveHandoffStatus().handingOff },
+  get receiving() { return resolveHandoffStatus().receiving },
+  get wrappingUp() { return resolveHandoffStatus().wrappingUp },
+  get planning() { return resolveHandoffStatus().planning },
+}
+
+const HANDOFF_VISIT_MESSAGE_KEYS = [
+  'agentOffice.handoff.visit.first',
+  'agentOffice.handoff.visit.second',
+  'agentOffice.handoff.visit.third',
+  'agentOffice.handoff.visit.fourth',
+] as const
 
 export function pickHandoffVisitMessage(hostName: string, hostRosterNo: number): string {
-  const index = Math.abs(hostRosterNo - 1) % HANDOFF_VISIT_MESSAGES.length
-  return HANDOFF_VISIT_MESSAGES[index]!(hostName)
+  const index = Math.abs(hostRosterNo - 1) % HANDOFF_VISIT_MESSAGE_KEYS.length
+  return t(HANDOFF_VISIT_MESSAGE_KEYS[index]!, { name: hostName })
 }

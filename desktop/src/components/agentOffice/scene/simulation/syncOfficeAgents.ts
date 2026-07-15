@@ -25,9 +25,13 @@ export function mergeOfficeAgentSnapshot(
     currentAgents.flatMap((current) => {
       if (!current.ambientEventId) return []
       const incoming = incomingById.get(current.id)
+      const realStateChanged = incoming && current.ambientResumeState
+        ? incoming.state !== current.ambientResumeState ||
+          incoming.currentTask !== current.ambientResumeTask
+        : incoming?.ambientEligible !== true
       return !incoming ||
         incoming.sourceKey !== current.sourceKey ||
-        incoming.ambientEligible !== true
+        realStateChanged
         ? [current.ambientEventId]
         : []
     }),

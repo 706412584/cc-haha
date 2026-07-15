@@ -61,8 +61,9 @@ export interface Agent {
   ambientEventId?: string
   ambientResumeState?: AgentState
   ambientResumeTask?: string
-  ambientKind?: 'chat' | 'watch' | 'game'
+  ambientKind?: 'chat' | 'watch' | 'game' | 'focus' | 'ponder'
   ambientRemaining?: number
+  retainedIdleRemaining?: number
 }
 
 export function formatOfficeAgentNameplate(agent: Pick<Agent, 'name' | 'role'>): string {

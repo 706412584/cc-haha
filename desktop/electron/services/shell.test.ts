@@ -50,6 +50,25 @@ describe('Electron shell service', () => {
     expect(normalizeOpenPath('~')).toBe(realpathSync(homedir()))
   })
 
+  it('rejects remote and device paths before touching the file system', () => {
+    const unsafePaths = [
+      '\\\\attacker-host\\share\\result.txt',
+      '//attacker-host/share/result.txt',
+      '\\/attacker-host/share/result.txt',
+      '/\\attacker-host/share/result.txt',
+      '\\\\?\\UNC\\attacker-host\\share\\result.txt',
+      '\\/?\\UNC\\attacker-host\\share\\result.txt',
+      '/\\?\\UNC\\attacker-host\\share\\result.txt',
+      '\\??\\UNC\\attacker-host\\share\\result.txt',
+      'file://attacker-host/share/result.txt',
+      'FILE://attacker-host/share/result.txt',
+    ]
+
+    for (const unsafePath of unsafePaths) {
+      expect(() => normalizeOpenPath(unsafePath, 'win32')).toThrow('local paths')
+    }
+  })
+
   it('allows only explicit system settings URLs', () => {
     expect(normalizeSystemSettingsUrl('ms-settings:notifications')).toBe('ms-settings:notifications')
     expect(normalizeSystemSettingsUrl('x-apple.systempreferences:com.apple.preference.notifications')).toBe(

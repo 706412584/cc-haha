@@ -32,10 +32,12 @@ const pixi = vi.hoisted(() => {
 
   class Text extends Container {
     text: string
+    style: Record<string, unknown>
     anchor = new Point()
-    constructor(options: { text: string }) {
+    constructor(options: { text: string; style?: Record<string, unknown> }) {
       super()
       this.text = options.text
+      this.style = { ...options.style }
     }
     get width() { return this.text.length * 6 }
     get height() { return 12 }
@@ -46,6 +48,7 @@ const pixi = vi.hoisted(() => {
 
 vi.mock('pixi.js', () => pixi)
 
+import { resolveOfficeThemePalette } from '../../officeTheme'
 import { Bubble } from './Bubble'
 import { StatusLabel } from './StatusLabel'
 
@@ -64,6 +67,23 @@ describe('Bubble', () => {
     expect(bubble.alpha).toBeCloseTo(0.5)
     expect(bubble.update(0.25)).toBe(false)
     expect(bubble.visible).toBe(false)
+  })
+
+  it('repaints a visible bubble when the theme palette changes', () => {
+    const bubble = new Bubble()
+    const [background, message] = bubble.children as unknown as [
+      InstanceType<typeof pixi.Graphics>,
+      InstanceType<typeof pixi.Text>,
+    ]
+    bubble.show('Visible')
+    background.clear.mockClear()
+
+    bubble.setThemePalette(resolveOfficeThemePalette('dark'))
+
+    expect(message.style.fill).toBe(0xf2f1ed)
+    expect(background.clear).toHaveBeenCalledTimes(1)
+    expect(background.fill).toHaveBeenCalledWith(expect.objectContaining({ color: 0x2f312e }))
+    expect(background.stroke).toHaveBeenCalledWith(expect.objectContaining({ color: 0x555751 }))
   })
 
   it('does nothing while hidden and supports explicit hiding', () => {
@@ -100,6 +120,24 @@ describe('StatusLabel', () => {
     label.setTask()
     expect(taskBg.visible).toBe(false)
     expect(taskText.text).toBe('')
+  })
+
+  it('repaints a visible task label when the theme palette changes', () => {
+    const label = new StatusLabel('Agent')
+    const [taskBg, nameText, taskText] = label.children as unknown as [
+      InstanceType<typeof pixi.Graphics>,
+      InstanceType<typeof pixi.Text>,
+      InstanceType<typeof pixi.Text>,
+    ]
+    label.setTask('Reviewing')
+    taskBg.clear.mockClear()
+
+    label.setThemePalette(resolveOfficeThemePalette('dark'))
+
+    expect(nameText.style.fill).toBe(0xf2f1ed)
+    expect(taskText.style.fill).toBe(0xc8c7c2)
+    expect(taskBg.clear).toHaveBeenCalledTimes(1)
+    expect(taskBg.fill).toHaveBeenLastCalledWith(expect.objectContaining({ color: 0x2f312e }))
   })
 
   it('updates name and accepts known and unknown states', () => {

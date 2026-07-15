@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import type { Agent } from './types/agent'
 import type { AgentOfficeCopy } from './officeCopy'
 import { OfficeScene, type OfficeAgentClick } from './scene/OfficeScene'
+import { resolveOfficeThemePalette } from './officeTheme'
+import type { ThemeMode } from '../../types/settings'
 
 type AgentMenuState = {
   agent: Agent
@@ -27,12 +29,21 @@ function interpolateName(template: string, name: string): string {
   return template.replace('{name}', name)
 }
 
+function appliedTheme(): Exclude<ThemeMode, 'system'> {
+  const value = document.documentElement.getAttribute('data-theme')
+  return value === 'dark' || value === 'eyeCare' || value === 'white' ? value : 'light'
+}
+
 export function OfficeCanvas({
   agents,
   copy,
+  selectedSourceKey = null,
+  onSelectAgent,
 }: {
   agents: Agent[]
   copy: AgentOfficeCopy
+  selectedSourceKey?: string | null
+  onSelectAgent?: (sourceKey: string) => void
 }) {
   const hostRef = useRef<HTMLDivElement>(null)
   const sceneRef = useRef<OfficeScene | null>(null)
@@ -49,6 +60,7 @@ export function OfficeCanvas({
     if (!host) return
 
     const handleAgentClick = (event: OfficeAgentClick) => {
+      if (event.agent.sourceKey) onSelectAgent?.(event.agent.sourceKey)
       const rect = host.getBoundingClientRect()
       const menuWidth = 260
       const menuHeight = Math.min(420, rect.height - 24)
@@ -67,6 +79,11 @@ export function OfficeCanvas({
       ambientCopy: copy,
     })
     sceneRef.current = scene
+    scene.setThemePalette(resolveOfficeThemePalette(appliedTheme()))
+    const reducedMotionQuery = window.matchMedia?.('(prefers-reduced-motion: reduce)')
+    const applyReducedMotion = () => scene.setReducedMotion(reducedMotionQuery?.matches ?? false)
+    applyReducedMotion()
+    reducedMotionQuery?.addEventListener('change', applyReducedMotion)
     scene.syncAgents(agentsRef.current)
     let initializing = false
     let initialized = false
@@ -103,9 +120,18 @@ export function OfficeCanvas({
     })
 
     observer.observe(host)
+    const themeObserver = new MutationObserver(() => {
+      scene.setThemePalette(resolveOfficeThemePalette(appliedTheme()))
+    })
+    themeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['data-theme'],
+    })
     return () => {
       disposed = true
       observer.disconnect()
+      themeObserver.disconnect()
+      reducedMotionQuery?.removeEventListener('change', applyReducedMotion)
       latestSizeRef.current = null
       initializeRef.current = () => {}
       scene.destroy()
@@ -120,6 +146,10 @@ export function OfficeCanvas({
   useEffect(() => {
     sceneRef.current?.setAmbientCopy(copy)
   }, [copy])
+
+  useEffect(() => {
+    sceneRef.current?.setSelectedSourceKey(selectedSourceKey)
+  }, [selectedSourceKey])
 
   useEffect(() => {
     const closeMenu = (event: PointerEvent) => {
@@ -153,15 +183,30 @@ export function OfficeCanvas({
     <div
       ref={hostRef}
       data-testid="agent-office-canvas"
-      className="relative h-full min-h-[420px] w-full overflow-hidden bg-white"
+      className="relative h-full min-h-[420px] w-full overflow-hidden bg-[var(--color-surface-container-lowest)]"
     >
+      <p className="pointer-events-none absolute left-1/2 top-3 z-10 -translate-x-1/2 rounded-full border border-[var(--color-border)] bg-[var(--color-surface-glass)] px-3 py-1 text-[10px] text-[var(--color-text-secondary)] shadow-sm backdrop-blur">
+        {copy.interactionHint}
+      </p>
+      <div className="sr-only" role="group" aria-label={copy.agentRosterLabel}>
+        {agents.filter((agent) => agent.sourceKey).map((agent) => (
+          <button
+            key={agent.id}
+            type="button"
+            aria-pressed={selectedSourceKey === agent.sourceKey}
+            onClick={() => agent.sourceKey && onSelectAgent?.(agent.sourceKey)}
+          >
+            {agent.name} · {copy.agentState[agent.state]}
+          </button>
+        ))}
+      </div>
       {initError ? (
-        <div role="alert" className="absolute inset-0 z-30 flex items-center justify-center bg-white/90 p-6">
-          <div className="max-w-sm rounded-xl border border-red-200 bg-white p-4 text-center shadow-lg">
-            <p className="text-sm text-red-700">{initError}</p>
+        <div role="alert" className="absolute inset-0 z-30 flex items-center justify-center bg-[var(--color-surface-glass)] p-6">
+          <div className="max-w-sm rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] p-4 text-center shadow-lg">
+            <p className="text-sm text-[var(--color-error)]">{initError}</p>
             <button
               type="button"
-              className="mt-3 rounded-lg bg-neutral-900 px-3 py-2 text-sm font-medium text-white hover:bg-neutral-700"
+              className="mt-3 rounded-lg bg-[var(--color-primary)] px-3 py-2 text-sm font-medium text-[var(--color-on-primary)] hover:bg-[var(--color-primary-container)]"
               onClick={() => initializeRef.current()}
             >
               {copy.retry}
@@ -172,13 +217,13 @@ export function OfficeCanvas({
       {menu ? (
         <div
           data-agent-action-menu
-          className="absolute z-20 max-h-[min(420px,calc(100%-24px))] w-[260px] overflow-auto rounded-xl border border-black/10 bg-white/95 p-2 text-neutral-800 shadow-2xl backdrop-blur-xl"
+          className="absolute z-20 max-h-[min(420px,calc(100%-24px))] w-[260px] overflow-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-glass)] p-2 text-[var(--color-text-primary)] shadow-2xl backdrop-blur-xl"
           style={{ left: menu.x, top: menu.y }}
         >
-          <div className="mb-2 flex items-center justify-between gap-2 border-b border-black/10 px-2 pb-2 pt-1">
+          <div className="mb-2 flex items-center justify-between gap-2 border-b border-[var(--color-border)] px-2 pb-2 pt-1">
             <strong className="truncate text-sm">{menu.agent.name}</strong>
-            <span className="rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] text-neutral-500">
-              {menu.agent.state}
+            <span className="rounded-full bg-[var(--color-surface-container)] px-2 py-0.5 text-[11px] text-[var(--color-text-secondary)]">
+              {copy.agentState[menu.agent.state]}
             </span>
           </div>
 
@@ -186,19 +231,19 @@ export function OfficeCanvas({
             <>
               <button
                 type="button"
-                className="w-full rounded-lg px-2 py-2 text-left text-sm hover:bg-neutral-100"
+                className="w-full rounded-lg px-2 py-2 text-left text-sm hover:bg-[var(--color-surface-hover)]"
                 onClick={() => setMenu((current) => current ? { ...current, pickingTarget: true } : null)}
               >
                 {copy.interact}
               </button>
-              <div className="mt-2 border-t border-black/10 pt-2">
-                <p className="px-2 pb-1 text-[11px] font-medium text-neutral-400">{copy.emotesHeading}</p>
+              <div className="mt-2 border-t border-[var(--color-border)] pt-2">
+                <p className="px-2 pb-1 text-[11px] font-medium text-[var(--color-text-tertiary)]">{copy.emotesHeading}</p>
                 <div className="grid grid-cols-2 gap-1">
                   {EMOTE_ACTIONS.map((action) => (
                     <button
                       key={action.animation}
                       type="button"
-                      className="rounded-lg px-2 py-1.5 text-left text-xs hover:bg-neutral-100"
+                      className="rounded-lg px-2 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)]"
                       onClick={() => {
                         sceneRef.current?.playAgentAnimation(
                           menu.agent.id,
@@ -218,7 +263,7 @@ export function OfficeCanvas({
             <div>
               <button
                 type="button"
-                className="mb-1 w-full rounded-lg px-2 py-2 text-left text-sm text-neutral-500 hover:bg-neutral-100"
+                className="mb-1 w-full rounded-lg px-2 py-2 text-left text-sm text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]"
                 onClick={() => setMenu((current) => current ? { ...current, pickingTarget: false } : null)}
               >
                 {copy.backToActions}
@@ -230,7 +275,7 @@ export function OfficeCanvas({
                   <button
                     key={agent.id}
                     type="button"
-                    className="w-full rounded-lg px-2 py-2 text-left text-sm hover:bg-neutral-100"
+                    className="w-full rounded-lg px-2 py-2 text-left text-sm hover:bg-[var(--color-surface-hover)]"
                     onClick={() => startInteraction(rosterNo, agent.name)}
                   >
                     {interpolateName(copy.interactWith, agent.name)}

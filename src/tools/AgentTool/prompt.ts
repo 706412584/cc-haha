@@ -32,6 +32,14 @@ const BACKGROUND_FORK_EXAMPLE = [
   "assistant: Audit's back. Three blockers: no tests for the new prompt path, GrowthBook gate wired but not in build_flags.yaml, and one uncommitted file.",
 ].join('\n')
 
+const PRIMARY_AGENT_OWNERSHIP_RULE = [
+  '## Primary-agent ownership — default rule',
+  '',
+  'The primary agent owns understanding, implementation, and focused verification. Do not delegate simple lookups, planning, local edits, or ordinary test execution.',
+  '',
+  'Use a subagent only when its separate context or independence repays the coordination cost: independent review or verification, complex bug isolation, or genuinely parallel implementation with non-overlapping file ownership. When implementation agents run in parallel, the primary agent must retain and continue at least one executable task.',
+].join('\n')
+
 const BACKGROUND_ORCHESTRATION_RULE = [
   '## Background orchestration — hard rule',
   '',
@@ -224,6 +232,8 @@ ${
     : `When using the ${AGENT_TOOL_NAME} tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used.`
 }
 
+${PRIMARY_AGENT_OWNERSHIP_RULE}
+
 ${BACKGROUND_ORCHESTRATION_RULE}`
 
   // Coordinator mode gets the slim prompt -- the coordinator system prompt
@@ -260,7 +270,7 @@ When NOT to use the ${AGENT_TOOL_NAME} tool:
   const concurrencyNote =
     !listViaAttachment && getSubscriptionType() !== 'pro'
       ? `
-- Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses`
+- Launch multiple agents concurrently only for genuinely independent work with non-overlapping ownership; keep one executable task with the primary agent. Use a single message with multiple tool uses.`
       : ''
 
   // Non-coordinator gets the full prompt with all sections
