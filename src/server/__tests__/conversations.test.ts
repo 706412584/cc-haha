@@ -176,6 +176,52 @@ describe('ConversationService', () => {
     })
   })
 
+  it('should ignore SDK payloads from a replaced socket', () => {
+    const svc = new ConversationService()
+    const sid = crypto.randomUUID()
+    const oldSocket = { send() {} }
+    const newSocket = { send() {} }
+    const observed: unknown[] = []
+
+    ;(svc as any).sessions.set(sid, {
+      proc: { kill() {}, exited: Promise.resolve(0) },
+      outputCallbacks: [(message: unknown) => observed.push(message)],
+      workDir: process.cwd(),
+      permissionMode: 'default',
+      sdkToken: 'token',
+      sdkSocket: null,
+      pendingOutbound: [],
+      startupPending: false,
+      startupExitCode: null,
+      stdoutLines: [],
+      stderrLines: [],
+      outputDrain: Promise.resolve(),
+      sdkMessages: [],
+      initMessage: null,
+      pendingPermissionRequests: new Map(),
+    })
+
+    expect(svc.attachSdkConnection(sid, oldSocket)).toBe(true)
+    expect(svc.attachSdkConnection(sid, newSocket)).toBe(true)
+
+    const compacting = JSON.stringify({
+      type: 'system',
+      subtype: 'status',
+      status: 'compacting',
+    })
+    svc.handleSdkPayload(sid, compacting, oldSocket)
+    expect(observed).toHaveLength(0)
+
+    svc.handleSdkPayload(sid, compacting, newSocket)
+    expect(observed).toMatchObject([
+      {
+        type: 'system',
+        subtype: 'status',
+        status: 'compacting',
+      },
+    ])
+  })
+
   it('should forward suggested permission updates for allow-for-session decisions', () => {
     const svc = new ConversationService()
     const sent: unknown[] = []

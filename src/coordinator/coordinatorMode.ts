@@ -16,6 +16,12 @@ import { TEAM_CREATE_TOOL_NAME } from '../tools/TeamCreateTool/constants.js'
 import { TEAM_DELETE_TOOL_NAME } from '../tools/TeamDeleteTool/constants.js'
 import { isEnvTruthy } from '../utils/envUtils.js'
 
+const BACKGROUND_ORCHESTRATION_RULES = [
+  '- Before launching an agent, separate work that depends on its result from independent work. Use background agents only for genuinely parallel work; use foreground when you must have the result before proceeding.',
+  '- After launching a background agent, continue in the same turn with the lowest-ordered or currently executable unblocked work. Do not end your response merely because an agent is running. If unblocked work exists, briefly tell the user which agent is running and what you are continuing, then actually perform it in the same turn. End only when every remaining task depends on an agent result, requires user input, or is complete.',
+  "- Never sleep, poll, check progress, or read an agent's `output_file` while it runs. Workers notify you when they finish. Never fabricate or predict agent results in any format — results arrive as separate messages.",
+].join('\n')
+
 // Checks the same gate as isScratchpadEnabled() in
 // utils/permissions/filesystem.ts. Duplicated here because importing
 // filesystem.ts creates a circular dependency (filesystem -> permissions
@@ -140,7 +146,7 @@ When calling ${AGENT_TOOL_NAME}:
 - Do not use workers to trivially report file contents or run commands. Give them higher-level tasks.
 - Do not set the model parameter. Workers need the default model for the substantive tasks you delegate.
 - Continue workers whose work is complete via ${SEND_MESSAGE_TOOL_NAME} to take advantage of their loaded context.
-- After launching agents, briefly tell the user what you launched and end your response. Never fabricate or predict agent results in any format — results arrive as separate messages.
+${BACKGROUND_ORCHESTRATION_RULES}
 
 ### ${AGENT_TOOL_NAME} Results
 

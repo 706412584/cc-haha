@@ -2954,6 +2954,7 @@ async function* queryModel(
       // streaming tool execution is active: the partial stream starts a tool,
       // then the non-streaming retry produces the same tool_use and runs it again.
       // See inc-4258.
+      if (streamWatchdogState.snapshot().serverToolUseStarted || assistantCommitBuffer.hasCrossedSideEffectBoundary()) throw streamingError;
 
       if (disableFallback) {
         logForDebugging(

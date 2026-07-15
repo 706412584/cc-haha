@@ -44,7 +44,10 @@ import {
   isMockRateLimitError,
 } from '../rateLimitMocking.js'
 import { REPEATED_529_ERROR_MESSAGE } from './errors.js'
-import { extractConnectionErrorDetails } from './errorUtils.js'
+import {
+  extractConnectionErrorDetails,
+  hasAPIErrorType,
+} from './errorUtils.js'
 
 const abortError = () => new APIUserAbortError()
 
@@ -221,11 +224,12 @@ export class RetriableStreamError extends Error {
 /**
  * Detect transient, server-side errors that the SDK surfaces *during streaming*
  * without a usable HTTP status. The upstream sends them inside a 200 SSE body as
- *   {"type":"error","error":{"type":"api_error"|"overloaded_error",...}}
+ *   {"type":"error","error":{"type":"api_error"|"overloaded_error"|"upstream_error",...}}
  * so `error.status` is undefined and every status-based check in shouldRetry()
- * falls through to `return false`. Per Anthropic semantics both are retryable:
- * `api_error` = "unexpected error internal to the server", `overloaded_error` =
- * capacity. Local/proxy providers (e.g. LM Studio) also wrap transient
+ * falls through to `return false`. These errors are retryable: `api_error` =
+ * unexpected server failure, `overloaded_error` = capacity, and
+ * `upstream_error` = a temporary dependency/provider failure. Local/proxy
+ * providers (e.g. LM Studio) also wrap transient
  * generation failures — such as a malformed tool_call the runtime rejects
  * mid-stream — as `api_error`, which a fresh attempt almost always clears.
  *
@@ -233,16 +237,11 @@ export class RetriableStreamError extends Error {
  * technique the overloaded-error check has always used (see shouldRetry).
  */
 export function isRetryableStreamError(error: unknown): boolean {
-  if (!(error instanceof APIError)) {
-    return false
-  }
-  const message = error.message
-  if (!message) {
-    return false
-  }
-  return (
-    message.includes('"type":"api_error"') ||
-    message.includes('"type":"overloaded_error"')
+  return hasAPIErrorType(
+    error,
+    'api_error',
+    'overloaded_error',
+    'upstream_error',
   )
 }
 

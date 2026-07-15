@@ -1,4 +1,4 @@
-import type { APIError } from '@anthropic-ai/sdk'
+import { APIError } from '@anthropic-ai/sdk'
 
 // SSL/TLS error codes from OpenSSL (used by both Node.js and Bun)
 // See: https://www.openssl.org/docs/man3.1/man3/X509_STORE_CTX_get_error.html
@@ -195,6 +195,30 @@ function extractNestedErrorMessage(error: APIError): string | null {
   }
 
   return null
+}
+
+type APIErrorBody = {
+  error?: {
+    type?: unknown
+    error?: { type?: unknown }
+  }
+}
+
+function getAPIErrorType(error: APIError): string | null {
+  const body = error.error
+  if (!body || typeof body !== 'object') return null
+
+  const nested = (body as APIErrorBody).error
+  if (!nested || typeof nested !== 'object') return null
+  if (typeof nested.type === 'string') return nested.type
+  return typeof nested.error?.type === 'string' ? nested.error.type : null
+}
+
+export function hasAPIErrorType(
+  error: unknown,
+  ...types: string[]
+): error is APIError {
+  return error instanceof APIError && types.includes(getAPIErrorType(error) ?? '')
 }
 
 export function formatAPIError(error: APIError): string {

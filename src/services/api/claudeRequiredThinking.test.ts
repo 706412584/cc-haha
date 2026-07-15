@@ -55,6 +55,16 @@ function thinkingSummaryResponse(parts: string[]): string {
   ].join('')
 }
 
+function upstreamErrorResponse(): string {
+  return sseEvent('error', {
+    error: {
+      message: 'Upstream service temporarily unavailable',
+      type: 'upstream_error',
+    },
+    type: 'error',
+  })
+}
+
 function partialServerToolResponse(): string {
   return [
     sseEvent('message_start', {
@@ -211,6 +221,7 @@ test.serial('accumulates every streamed thinking summary delta', async () => {
 async function runStreamRecoveryScenario(
   name: string,
   responseForRequest: (requestCount: number) => string,
+  options: { disableNonStreamingFallback?: boolean } = {},
 ) {
   let requestCount = 0
   const server = Bun.serve({
@@ -236,7 +247,11 @@ async function runStreamRecoveryScenario(
     delete process.env.CLAUDE_CODE_USE_VERTEX
     delete process.env.CLAUDE_CODE_USE_FOUNDRY
     delete process.env.CLAUDE_CODE_DISABLE_THINKING
-    process.env.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK = '1'
+    if (options.disableNonStreamingFallback === false) {
+      delete process.env.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK
+    } else {
+      process.env.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK = '1'
+    }
     process.env.CLAUDE_STREAM_TRANSIENT_RETRY_MAX = '1'
     process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${server.port}`
     delete process.env.ANTHROPIC_AUTH_TOKEN
@@ -274,6 +289,17 @@ async function runStreamRecoveryScenario(
   }
 }
 
+test.serial('retries an upstream_error through the real query path', async () => {
+  const { requestCount, result } = await runStreamRecoveryScenario(
+    'upstream-error-retry',
+    (attempt) => attempt === 1 ? upstreamErrorResponse() : successfulResponse(),
+  )
+
+  expect(requestCount).toBe(2)
+  expect(result.message.content).toEqual([{ type: 'text', text: 'OK' }])
+  expect(result.isApiErrorMessage).not.toBe(true)
+}, 10_000)
+
 test.serial('retries an empty SSE stream even when non-streaming fallback is disabled', async () => {
   const { requestCount, result } = await runStreamRecoveryScenario(
     'empty-stream-retry',
@@ -299,6 +325,17 @@ test.serial('does not retry after server-side tool activity starts', async () =>
   const { requestCount, result } = await runStreamRecoveryScenario(
     'partial-server-tool',
     () => partialServerToolResponse(),
+  )
+
+  expect(requestCount).toBe(1)
+  expect(result.isApiErrorMessage).toBe(true)
+}, 10_000)
+
+test.serial('does not use non-streaming fallback after server-side tool activity starts', async () => {
+  const { requestCount, result } = await runStreamRecoveryScenario(
+    'partial-server-tool-default-fallback',
+    () => partialServerToolResponse(),
+    { disableNonStreamingFallback: false },
   )
 
   expect(requestCount).toBe(1)
