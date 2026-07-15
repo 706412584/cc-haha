@@ -56,9 +56,9 @@ function installCanvasMocks() {
     set font(_value: string) {},
     set textBaseline(_value: string) {},
   } as unknown as CanvasRenderingContext2D
-  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation((contextId: string) => (
-    contextId === '2d' ? context2d : null
-  ))
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation((
+    (contextId: string) => contextId === '2d' ? context2d : null
+  ) as HTMLCanvasElement['getContext'])
   HTMLCanvasElement.prototype.toDataURL = vi.fn(() => 'data:image/png;base64,SAVED')
   HTMLCanvasElement.prototype.setPointerCapture = vi.fn()
   HTMLCanvasElement.prototype.releasePointerCapture = vi.fn()

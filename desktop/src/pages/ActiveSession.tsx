@@ -33,7 +33,8 @@ import { SoloCouncilPanel } from '../components/chat/SoloCouncilPanel'
 import { BackgroundTasksBar } from '../components/chat/BackgroundTasksBar'
 import { SessionActivityButton } from '../components/activity/SessionActivityButton'
 import { SessionActivityPanel } from '../components/activity/SessionActivityPanel'
-import { buildSessionActivityModel, hasVisibleSessionActivity } from '../components/activity/sessionActivityModel'
+import { hasVisibleSessionActivity } from '../components/activity/sessionActivityModel'
+import { useSessionActivityModel } from '../components/activity/useSessionActivityModel'
 import { WorkbenchPanel } from '../components/workbench/WorkbenchPanel'
 import { TeamStatusBar } from '../components/teams/TeamStatusBar'
 import { TerminalSettings } from './TerminalSettings'
@@ -64,7 +65,6 @@ const TERMINAL_RESIZE_STEP = 24
 const CHAT_COLUMN_WITH_WORKSPACE_CLASS =
   'min-w-[320px] flex-1 border-r border-[var(--color-border)] bg-[var(--color-surface)]'
 const EMPTY_DISMISSED_BACKGROUND_TASK_KEYS = new Set<string>()
-const EMPTY_ACTIVITY_DISMISSED_BACKGROUND_TASK_KEYS: readonly string[] = []
 
 function isSessionTabState(activeTabId: string | null, activeTabType: TabType | null | undefined) {
   if (!activeTabId) return false
@@ -334,7 +334,6 @@ export function ActiveSession() {
   const fetchSessionTasks = useCLITaskStore((s) => s.fetchSessionTasks)
   const trackedTaskSessionId = useCLITaskStore((s) => s.sessionId)
   const cliTasks = useCLITaskStore((s) => s.tasks)
-  const cliTasksCompletedAndDismissed = useCLITaskStore((s) => s.completedAndDismissed)
   const hasIncompleteTasks = cliTasks.some((task) => task.status !== 'completed')
   const hasRunningTasks = cliTasks.some((task) => task.status === 'in_progress')
   const unifiedActivityPanelEnabled = useSettingsStore((state) => state.unifiedActivityPanelEnabled)
@@ -342,12 +341,6 @@ export function ActiveSession() {
   const closeActivityPanel = useActivityPanelStore((state) => state.close)
   const dismissActivityBackgroundTaskKeys = useActivityPanelStore((state) => state.dismissBackgroundTaskKeys)
   const pruneActivityBackgroundTaskKeys = useActivityPanelStore((state) => state.pruneDismissedBackgroundTaskKeys)
-  const activityDismissedBackgroundTaskKeyList = useActivityPanelStore((state) =>
-    activeTabId
-      ? state.dismissedBackgroundTaskKeysBySession[activeTabId]
-        ?? EMPTY_ACTIVITY_DISMISSED_BACKGROUND_TASK_KEYS
-      : EMPTY_ACTIVITY_DISMISSED_BACKGROUND_TASK_KEYS,
-  )
   const chatState = sessionState?.chatState ?? 'idle'
   const tokenUsage = sessionState?.tokenUsage ?? { input_tokens: 0, output_tokens: 0 }
   const hasRunningBackgroundTasks = hasAnyRunningBackgroundTasks(sessionState?.backgroundAgentTasks)
@@ -414,10 +407,6 @@ export function ActiveSession() {
     () => Object.values(sessionState?.backgroundAgentTasks ?? {}),
     [sessionState?.backgroundAgentTasks],
   )
-  const activityDismissedBackgroundTaskKeys = useMemo(
-    () => new Set(activityDismissedBackgroundTaskKeyList),
-    [activityDismissedBackgroundTaskKeyList],
-  )
   const dismissedBackgroundTaskKeys = activeTabId
     ? dismissedBackgroundTaskKeysBySession[activeTabId] ?? EMPTY_DISMISSED_BACKGROUND_TASK_KEYS
     : EMPTY_DISMISSED_BACKGROUND_TASK_KEYS
@@ -442,13 +431,6 @@ export function ActiveSession() {
     (trackedTaskSessionId === activeTabId && hasRunningTasks) ||
     hasRunningBackgroundTasks
   const totalTokens = getTokenUsageTotal(tokenUsage)
-  const activityTeamMembers = useMemo(() => {
-    if (!activeTeam || activeTeam.leadSessionId !== activeTabId) return []
-    return activeTeam.members.filter((member) =>
-      !activeTeam.leadAgentId || member.agentId !== activeTeam.leadAgentId
-    )
-  }, [activeTabId, activeTeam])
-
   useEffect(() => {
     if (!unifiedActivityPanelEnabled || !activeTabId) return
     pruneActivityBackgroundTaskKeys(
@@ -457,31 +439,10 @@ export function ActiveSession() {
     )
   }, [activeTabId, backgroundTasks, pruneActivityBackgroundTaskKeys, unifiedActivityPanelEnabled])
 
-  const activityModel = useMemo(() => {
-    if (!unifiedActivityPanelEnabled || !activeTabId) return null
-    const includeCliTasks = trackedTaskSessionId === activeTabId
-    return buildSessionActivityModel({
-      sessionId: activeTabId,
-      messages,
-      tasks: includeCliTasks ? cliTasks : [],
-      completedAndDismissed: includeCliTasks ? cliTasksCompletedAndDismissed : false,
-      backgroundTasks,
-      dismissedBackgroundTaskKeys: activityDismissedBackgroundTaskKeys,
-      agentNotifications: Object.values(sessionState?.agentTaskNotifications ?? {}),
-      teamMembers: activityTeamMembers,
-    })
-  }, [
-    activeTabId,
-    activityDismissedBackgroundTaskKeys,
-    activityTeamMembers,
-    backgroundTasks,
-    cliTasks,
-    cliTasksCompletedAndDismissed,
-    messages,
-    sessionState?.agentTaskNotifications,
-    trackedTaskSessionId,
-    unifiedActivityPanelEnabled,
-  ])
+  const sharedActivity = useSessionActivityModel(activeTabId, unifiedActivityPanelEnabled)
+  const activityModel = unifiedActivityPanelEnabled && activeTabId
+    ? sharedActivity.model
+    : null
   const hasVisibleActivity = activityModel ? hasVisibleSessionActivity(activityModel) : false
 
   useEffect(() => {

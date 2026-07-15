@@ -15,6 +15,8 @@ export type WebSearchMode = 'auto' | 'anthropic' | 'tavily' | 'brave' | 'disable
 
 export type ChatSendBehavior = 'enter' | 'modifierEnter'
 
+export type AgentOfficeSurface = 'modal' | 'tab'
+
 export type OutputStyleSource =
   | 'built-in'
   | 'userSettings'
@@ -138,6 +140,7 @@ export type UserSettings = {
   alwaysThinkingEnabled?: boolean
   autoDreamEnabled?: boolean
   unifiedActivityPanelEnabled?: boolean
+  agentOfficeSurface?: AgentOfficeSurface
   skipAutoPermissionPrompt?: boolean
   permissionMode?: PermissionMode
   theme?: ThemeMode

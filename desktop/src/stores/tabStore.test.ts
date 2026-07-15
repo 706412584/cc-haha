@@ -130,6 +130,61 @@ describe('tabStore', () => {
     }))
   })
 
+  it('opens one ephemeral Office tab per source session', () => {
+    useTabStore.getState().openTab('session-1', 'Session 1')
+
+    const firstTabId = useTabStore.getState().openOfficeTab('session-1', 'Agent Office')
+    const secondTabId = useTabStore.getState().openOfficeTab('session-1', 'Agent Office')
+
+    expect(firstTabId).toBe('__office__session-1')
+    expect(secondTabId).toBe(firstTabId)
+    expect(useTabStore.getState().tabs).toEqual([
+      {
+        sessionId: 'session-1',
+        title: 'Session 1',
+        type: 'session',
+        status: 'idle',
+      },
+      {
+        sessionId: '__office__session-1',
+        title: 'Agent Office',
+        type: 'office',
+        status: 'idle',
+        sourceSessionId: 'session-1',
+      },
+    ])
+    expect(useTabStore.getState().activeTabId).toBe('__office__session-1')
+    expect(localStorage.getItem('cc-haha-open-tabs')).toBe(JSON.stringify({
+      openTabs: [{ sessionId: 'session-1', title: 'Session 1', type: 'session' }],
+      activeTabId: 'session-1',
+    }))
+  })
+
+  it('persists the Office source session as active when another session comes first', () => {
+    useTabStore.getState().openTab('session-a', 'Session A')
+    useTabStore.getState().openTab('session-b', 'Session B')
+    useTabStore.getState().openOfficeTab('session-b', 'Agent Office')
+
+    expect(localStorage.getItem('cc-haha-open-tabs')).toBe(JSON.stringify({
+      openTabs: [
+        { sessionId: 'session-a', title: 'Session A', type: 'session' },
+        { sessionId: 'session-b', title: 'Session B', type: 'session' },
+      ],
+      activeTabId: 'session-b',
+    }))
+  })
+
+  it('returns an Office tab to its source session before closing it', () => {
+    useTabStore.getState().openTab('session-a', 'Session A')
+    useTabStore.getState().openTab('session-b', 'Session B')
+    const tabId = useTabStore.getState().openOfficeTab('session-b', 'Agent Office')
+
+    useTabStore.getState().returnFromOffice(tabId)
+
+    expect(useTabStore.getState().activeTabId).toBe('session-b')
+    expect(useTabStore.getState().tabs.map((tab) => tab.sessionId)).toEqual(['session-a', 'session-b'])
+  })
+
   it('opens one ephemeral SubAgent tab per source session and tool use', () => {
     const tabId = useTabStore.getState().openSubagentTab('session-1', 'tool-1', 'Kuhn')
     const sameTabId = useTabStore.getState().openSubagentTab('session-1', 'tool-1', 'Kuhn updated')

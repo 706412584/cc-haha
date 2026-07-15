@@ -14,8 +14,9 @@ export const TERMINAL_TAB_PREFIX = '__terminal__'
 export const TRACE_TAB_PREFIX = '__trace__'
 export const WORKBENCH_TAB_PREFIX = '__workbench__'
 export const SUBAGENT_TAB_PREFIX = '__subagent__'
+export const OFFICE_TAB_PREFIX = '__office__'
 
-export type TabType = 'session' | 'settings' | 'scheduled' | 'market' | 'terminal' | 'trace' | 'traces' | 'workbench' | 'subagent'
+export type TabType = 'session' | 'settings' | 'scheduled' | 'market' | 'terminal' | 'trace' | 'traces' | 'workbench' | 'subagent' | 'office'
 type PersistentSpecialTabType = 'settings' | 'scheduled' | 'market' | 'traces'
 
 export type Tab = {
@@ -54,6 +55,8 @@ type TabStore = {
   openTerminalTab: (cwd?: string, terminalRuntimeId?: string) => string
   openWorkbenchTab: (sessionId: string, title?: string, origin?: WorkbenchTabOrigin) => string
   returnFromWorkbench: (tabId: string) => void
+  openOfficeTab: (sourceSessionId: string, title?: string) => string
+  returnFromOffice: (tabId: string) => void
   openSubagentTab: (sourceSessionId: string, toolUseId: string, title?: string) => string
   closeTab: (sessionId: string) => void
   setActiveTab: (sessionId: string) => void
@@ -218,6 +221,37 @@ export const useTabStore = create<TabStore>((set, get) => ({
     get().closeTab(tabId)
   },
 
+  openOfficeTab: (sourceSessionId, title = 'Agent Office') => {
+    const tabId = `${OFFICE_TAB_PREFIX}${sourceSessionId}`
+    const { tabs } = get()
+    const tab: Tab = {
+      sessionId: tabId,
+      title,
+      type: 'office',
+      status: 'idle',
+      sourceSessionId,
+    }
+
+    set({
+      tabs: tabs.some((current) => current.sessionId === tabId)
+        ? tabs.map((current) => current.sessionId === tabId ? tab : current)
+        : [...tabs, tab],
+      activeTabId: tabId,
+    })
+    get().saveTabs()
+    return tabId
+  },
+
+  returnFromOffice: (tabId) => {
+    const tab = get().tabs.find((current) => current.sessionId === tabId)
+    if (tab?.type !== 'office') return
+
+    if (tab.sourceSessionId && get().tabs.some((current) => current.sessionId === tab.sourceSessionId)) {
+      get().setActiveTab(tab.sourceSessionId)
+    }
+    get().closeTab(tabId)
+  },
+
   openSubagentTab: (sourceSessionId, toolUseId, title = 'SubAgent') => {
     const tabId = `${SUBAGENT_TAB_PREFIX}${sourceSessionId}__${toolUseId}`
     const { tabs } = get()
@@ -310,11 +344,11 @@ export const useTabStore = create<TabStore>((set, get) => ({
 
   saveTabs: () => {
     const { tabs, activeTabId } = get()
-    const persistableTabs = tabs.filter((tab) => tab.type !== 'terminal' && tab.type !== 'workbench' && tab.type !== 'subagent')
+    const persistableTabs = tabs.filter((tab) => tab.type !== 'terminal' && tab.type !== 'workbench' && tab.type !== 'subagent' && tab.type !== 'office')
     const activeTab = tabs.find((tab) => tab.sessionId === activeTabId)
     const persistedActiveTabId = activeTabId && persistableTabs.some((tab) => tab.sessionId === activeTabId)
       ? activeTabId
-      : activeTab?.type === 'workbench' && activeTab.sourceSessionId && persistableTabs.some((tab) => tab.sessionId === activeTab.sourceSessionId)
+      : (activeTab?.type === 'workbench' || activeTab?.type === 'office') && activeTab.sourceSessionId && persistableTabs.some((tab) => tab.sessionId === activeTab.sourceSessionId)
         ? activeTab.sourceSessionId
         : (persistableTabs[0]?.sessionId ?? null)
     const data: TabPersistence = {

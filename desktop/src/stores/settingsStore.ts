@@ -5,6 +5,7 @@ import { modelsApi } from '../api/models'
 import { h5AccessApi } from '../api/h5Access'
 import { tracesApi } from '../api/traces'
 import {
+  type AgentOfficeSurface,
   type AppMode,
   type AppModeConfig,
   type ChatSendBehavior,
@@ -64,6 +65,7 @@ type SettingsStore = {
   thinkingAutoCollapse: boolean
   autoDreamEnabled: boolean
   unifiedActivityPanelEnabled: boolean
+  agentOfficeSurface: AgentOfficeSurface
   autoModeOptInAccepted: boolean
   availableModels: ModelInfo[]
   activeProviderName: string | null
@@ -104,6 +106,7 @@ type SettingsStore = {
   setThinkingAutoCollapse: (enabled: boolean) => Promise<void>
   setAutoDreamEnabled: (enabled: boolean) => Promise<void>
   setUnifiedActivityPanelEnabled: (enabled: boolean) => Promise<void>
+  setAgentOfficeSurface: (surface: AgentOfficeSurface) => Promise<void>
   acceptAutoModeOptIn: () => Promise<void>
   setLocale: (locale: Locale) => void
   setTheme: (theme: ThemeMode) => Promise<void>
@@ -192,6 +195,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   thinkingAutoCollapse: true,
   autoDreamEnabled: false,
   unifiedActivityPanelEnabled: false,
+  agentOfficeSurface: 'modal',
   autoModeOptInAccepted: false,
   availableModels: [],
   activeProviderName: null,
@@ -258,6 +262,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         thinkingAutoCollapse: userSettings.thinkingAutoCollapse !== false,
         autoDreamEnabled: userSettings.autoDreamEnabled === true,
         unifiedActivityPanelEnabled: userSettings.unifiedActivityPanelEnabled === true,
+        agentOfficeSurface: userSettings.agentOfficeSurface === 'tab' ? 'tab' : 'modal',
         autoModeOptInAccepted: userSettings.skipAutoPermissionPrompt === true,
         theme,
         chatSendBehavior: normalizeChatSendBehavior(userSettings.chatSendBehavior),
@@ -358,6 +363,17 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       await settingsApi.updateUser({ unifiedActivityPanelEnabled: enabled })
     } catch (error) {
       set({ unifiedActivityPanelEnabled: previous })
+      throw error
+    }
+  },
+
+  setAgentOfficeSurface: async (surface) => {
+    const previous = get().agentOfficeSurface
+    set({ agentOfficeSurface: surface })
+    try {
+      await settingsApi.updateUser({ agentOfficeSurface: surface })
+    } catch (error) {
+      set({ agentOfficeSurface: previous })
       throw error
     }
   },

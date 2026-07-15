@@ -95,6 +95,7 @@ vi.mock('../../i18n', () => ({
       'tabs.closeAllConfirmStop': 'Stop All & Close',
       'tabs.sessionRunning': 'Session running',
       'tabs.openTerminal': 'Open Terminal',
+      'agentOffice.title': 'Agent Office',
       'tabs.showWorkspace': 'Show Workspace',
       'tabs.hideWorkspace': 'Hide Workspace',
       'tabs.showBrowser': 'Show Browser',
@@ -228,6 +229,69 @@ describe('TabBar', () => {
 
     Reflect.deleteProperty(window, 'desktopHost')
     Reflect.deleteProperty(window, '__TAURI__')
+  })
+
+  it('opens Agent Office in the configured surface for the active session', async () => {
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useSessionStore } = await import('../../stores/sessionStore')
+    const { useSettingsStore } = await import('../../stores/settingsStore')
+    const { useUIStore } = await import('../../stores/uiStore')
+    const sessionId = 'session-1'
+
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Chat', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useSessionStore.setState({
+      sessions: [{ id: sessionId, title: 'Chat', workDir: '/tmp/project', workDirExists: true }],
+    } as Partial<ReturnType<typeof useSessionStore.getState>>)
+    useSettingsStore.setState({ agentOfficeSurface: 'modal' })
+
+    await act(async () => {
+      render(<TabBar />)
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Agent Office' }))
+    expect(useUIStore.getState().activeModal).toBe('agentOffice:session-1')
+    expect(useTabStore.getState().tabs.filter((tab) => tab.type === 'office')).toHaveLength(0)
+
+    act(() => {
+      useUIStore.getState().closeModal()
+      useSettingsStore.setState({ agentOfficeSurface: 'tab' })
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Agent Office' }))
+
+    expect(useTabStore.getState().activeTabId).toBe('__office__session-1')
+    expect(useTabStore.getState().tabs.filter((tab) => tab.type === 'office')).toHaveLength(1)
+  })
+
+  it('hides session-only toolbar actions while an Office tab is active', async () => {
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useSettingsStore } = await import('../../stores/settingsStore')
+
+    useTabStore.setState({
+      tabs: [
+        { sessionId: 'session-1', title: 'Chat', type: 'session', status: 'idle' },
+        {
+          sessionId: '__office__session-1',
+          title: 'Agent Office',
+          type: 'office',
+          status: 'idle',
+          sourceSessionId: 'session-1',
+        },
+      ],
+      activeTabId: '__office__session-1',
+    })
+    useSettingsStore.setState({ agentOfficeSurface: 'tab' })
+
+    await act(async () => {
+      render(<TabBar />)
+    })
+
+    expect(screen.queryByRole('button', { name: 'Agent Office' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Show Workspace' })).not.toBeInTheDocument()
   })
 
   it('hides the activity button for no-activity chat session tabs', async () => {

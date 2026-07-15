@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import '@testing-library/jest-dom'
 
-const { settingsApiMock } = vi.hoisted(() => ({
+const { desktopRuntimeMock, settingsApiMock } = vi.hoisted(() => ({
+  desktopRuntimeMock: { isDesktop: true },
   settingsApiMock: {
     getPermissionMode: vi.fn(),
     getUser: vi.fn(),
@@ -44,7 +45,7 @@ vi.mock('../lib/desktopNotifications', () => ({
 }))
 
 vi.mock('../lib/desktopRuntime', () => ({
-  isDesktopRuntime: () => false,
+  isDesktopRuntime: () => desktopRuntimeMock.isDesktop,
 }))
 
 import { GeneralSettings } from './Settings'
@@ -54,6 +55,7 @@ import { useSettingsStore } from '../stores/settingsStore'
 describe('GeneralSettings output style', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    desktopRuntimeMock.isDesktop = true
     useSettingsStore.setState(useSettingsStore.getInitialState(), true)
     useSessionStore.setState(useSessionStore.getInitialState(), true)
     useSettingsStore.setState({ locale: 'en' })
@@ -103,6 +105,29 @@ describe('GeneralSettings output style', () => {
       outputStyle: 'Learning',
       scope: 'localSettings',
       workDir: '/repo',
+    })
+    settingsApiMock.updateUser.mockResolvedValue({ ok: true })
+  })
+
+  it('saves the selected Agent Office surface', async () => {
+    render(<GeneralSettings />)
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Dedicated tab' }))
+
+    await waitFor(() => {
+      expect(settingsApiMock.updateUser).toHaveBeenCalledWith({ agentOfficeSurface: 'tab' })
+    })
+    expect(useSettingsStore.getState().agentOfficeSurface).toBe('tab')
+  })
+
+  it('hides Agent Office settings outside the Desktop runtime', async () => {
+    desktopRuntimeMock.isDesktop = false
+
+    render(<GeneralSettings />)
+
+    await waitFor(() => {
+      expect(screen.queryByRole('radio', { name: 'Dedicated tab' })).not.toBeInTheDocument()
+      expect(screen.queryByRole('radio', { name: 'Large modal' })).not.toBeInTheDocument()
     })
   })
 
