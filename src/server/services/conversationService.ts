@@ -837,9 +837,13 @@ export class ConversationService {
     }
   }
 
-  handleSdkPayload(sessionId: string, rawPayload: string): void {
+  handleSdkPayload(
+    sessionId: string,
+    rawPayload: string,
+    socket?: { send(data: string): void },
+  ): void {
     const session = this.sessions.get(sessionId)
-    if (!session) return
+    if (!session || (socket && session.sdkSocket !== socket)) return
 
     const lines = rawPayload
       .split('\n')

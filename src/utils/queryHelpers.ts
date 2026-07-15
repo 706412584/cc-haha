@@ -76,7 +76,7 @@ export function isResultSuccessful(
 
   if (message.type === 'user') {
     const content = message.message.content
-    // Check if all content blocks are tool_result type.
+    // Check if all content blocks are tool_result type
     if (
       Array.isArray(content) &&
       content.length > 0 &&
@@ -84,10 +84,6 @@ export function isResultSuccessful(
     ) {
       return true
     }
-
-    // Stopping or switching models appends a synthetic user interruption after
-    // the final tool_result. That is an intentional terminal state, not a
-    // malformed tool loop, even though the prior API stop reason is tool_use.
     if (
       Array.isArray(content) &&
       content.length === 1 &&

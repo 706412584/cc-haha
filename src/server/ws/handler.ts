@@ -301,7 +301,7 @@ export const handleWebSocket = {
   message(ws: ServerWebSocket<WebSocketData>, rawMessage: string | Buffer) {
     if (ws.data.channel === 'sdk') {
       const payload = typeof rawMessage === 'string' ? rawMessage : rawMessage.toString()
-      conversationService.handleSdkPayload(ws.data.sessionId, payload)
+      conversationService.handleSdkPayload(ws.data.sessionId, payload, ws)
       return
     }
 

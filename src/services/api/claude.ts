@@ -2953,14 +2953,8 @@ async function* queryModel(
       // The mid-stream non-streaming fallback causes double tool execution when
       // streaming tool execution is active: the partial stream starts a tool,
       // then the non-streaming retry produces the same tool_use and runs it again.
-      // The same side-effect boundary that blocks a stream retry must therefore
-      // also block replay through the non-streaming fallback. See inc-4258.
-      if (
-        streamWatchdogState.snapshot().serverToolUseStarted ||
-        assistantCommitBuffer.hasCrossedSideEffectBoundary()
-      ) {
-        throw streamingError;
-      }
+      // See inc-4258.
+      if (streamWatchdogState.snapshot().serverToolUseStarted || assistantCommitBuffer.hasCrossedSideEffectBoundary()) throw streamingError;
 
       if (disableFallback) {
         logForDebugging(

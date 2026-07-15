@@ -196,6 +196,18 @@ describe('isRetryableStreamError', () => {
     expect(isRetryableStreamError(err)).toBe(true)
   })
 
+  test('matches an upstream_error nested by a compatibility gateway', () => {
+    const err = apiErrorWithBody({
+      error: {
+        error: {
+          type: 'upstream_error',
+        },
+      },
+      type: 'error',
+    })
+    expect(isRetryableStreamError(err)).toBe(true)
+  })
+
   test('does not match a client invalid_request_error', () => {
     const err = apiErrorWithBody(
       {
