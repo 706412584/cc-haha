@@ -50,7 +50,11 @@ import {
   type OverageDisabledReason,
 } from '../claudeAiLimits.js'
 import { shouldProcessRateLimits } from '../rateLimitMocking.js' // Used for /mock-limits command
-import { extractConnectionErrorDetails, formatAPIError } from './errorUtils.js'
+import {
+  extractConnectionErrorDetails,
+  formatAPIError,
+  hasAPIErrorType,
+} from './errorUtils.js'
 import { StreamWatchdogTimeoutError } from './streamWatchdog.js'
 
 export const API_ERROR_MESSAGE_PREFIX = 'API Error'
@@ -548,6 +552,14 @@ export function getAssistantMessageFromError(
     return createAssistantAPIErrorMessage({
       content: CUSTOM_OFF_SWITCH_MESSAGE,
       error: 'rate_limit',
+    })
+  }
+
+  if (hasAPIErrorType(error, 'upstream_error')) {
+    return createAssistantAPIErrorMessage({
+      content: `${API_ERROR_MESSAGE_PREFIX}: Upstream service is temporarily unavailable. Please try again.`,
+      error: 'server_error',
+      errorDetails: error.message,
     })
   }
 
@@ -1283,6 +1295,9 @@ export function categorizeRetryableAPIError(
   }
   if (error.status === 401 || error.status === 403) {
     return 'authentication_failed'
+  }
+  if (hasAPIErrorType(error, 'api_error', 'upstream_error')) {
+    return 'server_error'
   }
   if (error.status !== undefined && error.status >= 408) {
     return 'server_error'

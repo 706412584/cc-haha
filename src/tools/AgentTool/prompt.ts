@@ -87,7 +87,7 @@ Fork yourself (omit \`subagent_type\`) when the intermediate tool output isn't w
 
 Forks are cheap because they share your prompt cache. Don't set \`model\` on a fork \u2014 a different model can't reuse the parent's cache. Pass a short \`name\` (one or two words, lowercase) so the user can see the fork in the teams panel and steer it mid-run.
 
-**Don't peek.** The tool result includes an \`output_file\` path — do not Read or tail it unless the user explicitly asks for a progress check. You get a completion notification; trust it. Reading the transcript mid-flight pulls the fork's tool noise into your context, which defeats the point of forking.
+**Don't peek.** The tool result includes an \`output_file\` path — do not Read or tail it while the fork is running. You get a completion notification; trust it. Reading the transcript mid-flight pulls the fork's tool noise into your context, which defeats the point of forking.
 
 **Don't race.** After launching, you know nothing about what the fork found. Never fabricate or predict fork results in any format — not as prose, summary, or structured output. The notification arrives as a user-role message in a later turn; it is never something you write yourself. If the user asks a follow-up before the notification lands, tell them the fork is still running — give status, not a guess.
 
@@ -114,16 +114,19 @@ ${forkEnabled ? 'For fresh agents, terse' : 'Terse'} command-style prompts produ
   const forkExamples = `Example usage:
 
 <example>
-user: "What's left on this branch before we can ship?"
-assistant: <thinking>Forking this \u2014 it's a survey question. I want the punch list, not the git output in my context.</thinking>
+user: "Audit this branch for release blockers, and meanwhile run the independent formatting check."
+assistant: <thinking>The release audit and formatting check are independent. I'll fork the audit in the background, then continue the executable formatting work in this turn.</thinking>
 ${AGENT_TOOL_NAME}({
   name: "ship-audit",
   description: "Branch ship-readiness audit",
-  prompt: "Audit what's left before this branch can ship. Check: uncommitted changes, commits ahead of main, whether tests exist, whether the GrowthBook gate is wired up, whether CI-relevant files changed. Report a punch list \u2014 done vs. missing. Under 200 words."
+  prompt: "Audit what's left before this branch can ship. Check: uncommitted changes, commits ahead of main, whether tests exist, whether the GrowthBook gate is wired up, whether CI-relevant files changed. Report a punch list \u2014 done vs. missing. Under 200 words.",
+  run_in_background: true
 })
-assistant: Ship-readiness audit running.
+assistant: The ship-readiness audit is running; I'm continuing the independent formatting check.
+assistant: Uses the Bash tool to run the formatting check, then handles any actionable result without waiting for the audit.
+assistant: The formatting check is complete. There is no other unblocked work, so I'm waiting for the audit result.
 <commentary>
-Turn ends here. The coordinator knows nothing about the findings yet. What follows is a SEPARATE turn \u2014 the notification arrives from outside, as a user-role message. It is not something the coordinator writes.
+The turn ends here only after the independent work is complete and all remaining work depends on the audit result. The coordinator knows nothing about the findings yet. What follows is a SEPARATE turn \u2014 the notification arrives from outside, as a user-role message. It is not something the coordinator writes.
 </commentary>
 [later turn \u2014 notification arrives as user message]
 assistant: Audit's back. Three blockers: no tests for the new prompt path, GrowthBook gate wired but not in build_flags.yaml, and one uncommitted file.
@@ -198,7 +201,15 @@ ${
   forkEnabled
     ? `When using the ${AGENT_TOOL_NAME} tool, specify a subagent_type to use a specialized agent, or omit it to fork yourself — a fork inherits your full conversation context.`
     : `When using the ${AGENT_TOOL_NAME} tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used.`
-}`
+}
+
+## Background orchestration — hard rule
+
+Before launching an agent, classify the remaining work by dependency: which tasks require the agent's result, and which are independent. Use background agents only for genuinely independent, parallel work. Use a foreground agent when you must have its result before you can proceed.
+
+After launching a background agent, continue in the same turn with the lowest-ordered or currently executable unblocked work. Do not end your turn merely because a background agent is running. If unblocked work exists, briefly tell the user which agent is running and what you are continuing, then actually perform that work in the same turn — for example, "The verification agent is running; I'm continuing the Office entry implementation." Only say that you are waiting when every remaining task depends on the background result, requires user input, or is complete.
+
+Never sleep, poll, check progress, or read an agent's \`output_file\` while it runs. Wait for the automatic completion notification while doing other executable work.`
 
   // Coordinator mode gets the slim prompt -- the coordinator system prompt
   // already covers usage notes, examples, and when-not-to-use guidance.
@@ -249,8 +260,8 @@ Usage notes:
     !isInProcessTeammate() &&
     !forkEnabled
       ? `
-- You can optionally run agents in the background using the run_in_background parameter. When an agent runs in the background, you will be automatically notified when it completes — do NOT sleep, poll, or proactively check on its progress. Continue with other work or respond to the user instead.
-- **Foreground vs background**: Use foreground (default) when you need the agent's results before you can proceed — e.g., research agents whose findings inform your next steps. Use background when you have genuinely independent work to do in parallel.`
+- You can optionally run agents in the background using the run_in_background parameter. Background orchestration follows the hard rule above.
+- **Foreground vs background**: Use foreground (default) when you need the agent's results before you can proceed. Use background only when you have genuinely independent work to do in parallel.`
       : ''
   }
 - To continue a previously spawned agent, use ${SEND_MESSAGE_TOOL_NAME} with the agent's ID or name as the \`to\` field. The agent resumes with its full context preserved. ${forkEnabled ? 'Each fresh Agent invocation with a subagent_type starts without context — provide a complete task description.' : 'Each Agent invocation starts fresh — provide a complete task description.'}

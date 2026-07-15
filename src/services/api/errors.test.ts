@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
+import { APIError } from '@anthropic-ai/sdk'
 import { BUSINESS_ERROR_CODES } from '../../constants/businessErrors.js'
 import {
+  categorizeRetryableAPIError,
   getAssistantMessageFromError,
   getImageUnsupportedErrorMessage,
   isContextWindowExceededMessage,
@@ -38,6 +40,35 @@ describe('image unsupported API errors', () => {
       type: 'text',
       text: getImageUnsupportedErrorMessage(),
     })
+  })
+})
+
+describe('temporary upstream API errors', () => {
+  test('keeps the raw upstream payload in diagnostics but shows a retryable message', () => {
+    const body = {
+      error: {
+        message: 'Upstream service temporarily unavailable',
+        type: 'upstream_error',
+      },
+      type: 'error',
+    }
+    const error = new APIError(
+      undefined,
+      body,
+      JSON.stringify(body),
+      undefined,
+    )
+
+    const message = getAssistantMessageFromError(error, 'gpt-5.6-sol')
+
+    expect(message.isApiErrorMessage).toBe(true)
+    expect(message.error).toBe('server_error')
+    expect(message.message.content[0]).toMatchObject({
+      type: 'text',
+      text: 'API Error: Upstream service is temporarily unavailable. Please try again.',
+    })
+    expect(message.errorDetails).toContain('"type":"upstream_error"')
+    expect(categorizeRetryableAPIError(error)).toBe('server_error')
   })
 })
 

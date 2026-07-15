@@ -1,7 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { APIError } from '@anthropic-ai/sdk'
+import Anthropic, { APIError } from '@anthropic-ai/sdk'
 import { withStreamRetry } from './streamRetry.js'
-import { RetriableStreamError } from './withRetry.js'
+import {
+  isRetryableStreamError,
+  RetriableStreamError,
+} from './withRetry.js'
 
 const RETRY_ENV = 'CLAUDE_STREAM_TRANSIENT_RETRY_MAX'
 
@@ -43,6 +46,98 @@ async function collect(gen: AsyncGenerator<any, void>): Promise<any[]> {
 }
 
 describe('withStreamRetry', () => {
+  test('retries the screenshot upstream_error after the SDK parses it from SSE', async () => {
+    process.env[RETRY_ENV] = '1'
+    let requests = 0
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        requests += 1
+        const payload = requests === 1
+          ? [
+              'event: error',
+              `data: ${JSON.stringify({
+                error: {
+                  message: 'Upstream service temporarily unavailable',
+                  type: 'upstream_error',
+                },
+                type: 'error',
+              })}`,
+              '',
+              '',
+            ].join('\n')
+          : [
+              'event: message_start',
+              `data: ${JSON.stringify({
+                type: 'message_start',
+                message: {
+                  id: 'msg_recovered',
+                  type: 'message',
+                  role: 'assistant',
+                  content: [],
+                  model: 'claude-test',
+                  stop_reason: null,
+                  stop_sequence: null,
+                  usage: { input_tokens: 1, output_tokens: 0 },
+                },
+              })}`,
+              '',
+              'event: message_delta',
+              `data: ${JSON.stringify({
+                type: 'message_delta',
+                delta: { stop_reason: 'end_turn', stop_sequence: null },
+                usage: { output_tokens: 1 },
+              })}`,
+              '',
+              'event: message_stop',
+              `data: ${JSON.stringify({ type: 'message_stop' })}`,
+              '',
+              '',
+            ].join('\n')
+        return new Response(payload, {
+          headers: { 'content-type': 'text/event-stream' },
+        })
+      },
+    })
+    const client = new Anthropic({
+      apiKey: 'sk-ant-test',
+      baseURL: `http://127.0.0.1:${server.port}`,
+      maxRetries: 0,
+    })
+    const attempt = () =>
+      (async function* () {
+        try {
+          const stream = client.messages.stream({
+            model: 'claude-test',
+            max_tokens: 8,
+            messages: [{ role: 'user', content: 'hello' }],
+          })
+          await stream.finalMessage()
+          yield { type: 'assistant', message: { content: [] }, uuid: 'recovered' } as any
+        } catch (error) {
+          if (isRetryableStreamError(error)) {
+            throw new RetriableStreamError(error)
+          }
+          throw error
+        }
+      })()
+
+    try {
+      const out = await collect(withStreamRetry(attempt, 'claude-test', []))
+      expect(requests).toBe(2)
+      expect(out).toContainEqual(expect.objectContaining({
+        type: 'system',
+        subtype: 'streaming_fallback',
+        cause: 'stream_retry',
+      }))
+      expect(out.at(-1)).toMatchObject({ type: 'assistant', uuid: 'recovered' })
+      expect(out.some((message) => message.isApiErrorMessage)).toBe(false)
+    } finally {
+      server.stop(true)
+      delete process.env[RETRY_ENV]
+    }
+  })
+
   test('retries after a transient mid-stream error and yields the successful attempt', async () => {
     process.env[RETRY_ENV] = '2'
     let calls = 0

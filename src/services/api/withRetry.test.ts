@@ -185,6 +185,17 @@ describe('isRetryableStreamError', () => {
     expect(isRetryableStreamError(err)).toBe(true)
   })
 
+  test('matches a temporarily unavailable upstream_error', () => {
+    const err = apiErrorWithBody({
+      error: {
+        message: 'Upstream service temporarily unavailable',
+        type: 'upstream_error',
+      },
+      type: 'error',
+    })
+    expect(isRetryableStreamError(err)).toBe(true)
+  })
+
   test('does not match a client invalid_request_error', () => {
     const err = apiErrorWithBody(
       {
@@ -209,6 +220,17 @@ describe('isRetryableStreamError', () => {
       'Internal Server Error',
       undefined,
     )
+    expect(isRetryableStreamError(err)).toBe(false)
+  })
+
+  test('does not match a retryable type string embedded only in user-facing text', () => {
+    const err = apiErrorWithBody({
+      type: 'error',
+      error: {
+        type: 'invalid_request_error',
+        message: 'User text contained {"type":"upstream_error"}',
+      },
+    })
     expect(isRetryableStreamError(err)).toBe(false)
   })
 })
