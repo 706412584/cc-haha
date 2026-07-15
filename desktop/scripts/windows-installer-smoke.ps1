@@ -18,14 +18,19 @@ if ($installers.Count -ne 1) {
   throw "Expected exactly one Windows $Arch installer in $resolvedArtifactsDir, found $($installers.Count)."
 }
 $installer = $installers[0].FullName
+$packageJson = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\package.json') -Raw | ConvertFrom-Json
+$productName = [string]$packageJson.build.productName
+if ([string]::IsNullOrWhiteSpace($productName)) {
+  throw 'desktop/package.json must define build.productName for installer smoke validation.'
+}
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "cc-haha-installer-smoke-$([Guid]::NewGuid().ToString('N'))"
 $installDir = Join-Path $testRoot 'Claude Code Haha'
 $appData = Join-Path $testRoot 'AppData\Roaming'
 $localAppData = Join-Path $testRoot 'AppData\Local'
 $userProfile = Join-Path $testRoot 'UserProfile'
-$appExe = Join-Path $installDir 'Claude Code Haha.exe'
-$uninstaller = Join-Path $installDir 'Uninstall Claude Code Haha.exe'
+$appExe = Join-Path $installDir "$productName.exe"
+$uninstaller = Join-Path $installDir "Uninstall $productName.exe"
 $recoveryHelper = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\build\recover-legacy-install-data.ps1')).Path
 
 $savedEnvironment = @{}
@@ -76,7 +81,7 @@ function Invoke-LegacyRecoveryDiagnostic {
     '-RecoveryRoot',
     (Join-Path $userProfile 'Claude Code Haha Data\Recovered'),
     '-ProcessName',
-    'Claude Code Haha.exe',
+    "$productName.exe",
     '-InstallerIdentitySafety',
     'trusted-user'
   )
