@@ -15,6 +15,13 @@ describe('getCoordinatorSystemPrompt', () => {
     expect(prompt).toContain(
       'Keep concurrency proportional to the work instead of maximizing worker count',
     )
+    expect(prompt).toContain('Coordinator mode stays pure coordination')
+    expect(prompt).toContain(
+      'Do not keep an implementation task for yourself; assign file-changing work to workers',
+    )
+    expect(prompt).toContain(
+      'Parallel kickoff still requires independent, unblocked tasks with non-overlapping file ownership',
+    )
     expect(prompt).not.toContain('Parallelism is your superpower')
   })
 })

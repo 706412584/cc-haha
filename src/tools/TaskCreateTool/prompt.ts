@@ -44,8 +44,22 @@ NOTE that you should not use this tool if there is only one trivial task to do. 
 - **subject**: A brief, actionable title in imperative form (e.g., "Fix authentication bug in login flow")
 - **description**: What needs to be done
 - **activeForm** (optional): Present continuous form shown in the spinner when the task is in_progress (e.g., "Fixing authentication bug"). If omitted, the spinner shows the subject instead.
+- **metadata** (optional): Structured task metadata. For complex approved plans, include \`metadata.orchestration\` when a task participates in hybrid orchestration.
 
 All tasks are created with status \`pending\`.
+
+## Complex Plan DAG and Orchestration Metadata
+
+For complex approved plans, create the full Task DAG before starting work. Create all tasks first with TaskCreate, then use TaskUpdate to assign owners and dependencies.
+
+Use \`metadata.orchestration\` with this schema:
+- \`schemaVersion: 1\`
+- \`fileScope: repo-relative paths owned by that task\`
+- \`wave: positive integer\`
+- \`execution: 'main' | 'background-agent' | 'foreground-agent'\`
+- \`verification: focused proof required for that task\`
+
+Only use parallel kickoff when at least two tasks in the same wave are pending, unblocked, have non-overlapping file scopes, and do not need each other's results before starting. Do not fan out small changes, same-file work, or chain dependencies.
 
 ## Tips
 

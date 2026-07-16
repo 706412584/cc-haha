@@ -92,6 +92,7 @@ User: "What files handle routing?"
 
 ## Important Notes
 
+- For complex implementation plans, include a Task DAG with dependencies, file ownership, waves, main/background/foreground execution, and verification for each task
 - This tool REQUIRES user approval - they must consent to entering plan mode
 - If unsure whether to use it, err on the side of planning - it's better to get alignment upfront than to redo work
 - Users appreciate being consulted before significant changes are made to their codebase
@@ -159,6 +160,7 @@ User: "Fix the typo in the README"
 
 ## Important Notes
 
+- For complex implementation plans, include a Task DAG with dependencies, file ownership, waves, main/background/foreground execution, and verification for each task
 - This tool REQUIRES user approval - they must consent to entering plan mode
 `
 }

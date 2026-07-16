@@ -27,6 +27,12 @@ export const PROMPT = `Use this tool to update a task in the task list.
 - When requirements change or become clearer
 - When establishing dependencies between tasks
 
+**Hybrid orchestration setup:**
+- After TaskCreate has created the full DAG, use TaskUpdate to set owner, addBlocks, and addBlockedBy for main, named background agents, or foreground agents
+- Use owner \`main-agent\` for Main-owned tasks. For agent-owned tasks, owner must exactly match the unique Agent name passed to launch and resume
+- Do not assign overlapping fileScope ownership to parallel tasks
+- Use dependencies to model chain work instead of starting blocked tasks early
+
 ## Fields You Can Update
 
 - **status**: The task status (see Status Workflow below)

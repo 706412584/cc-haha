@@ -3277,7 +3277,8 @@ Goal: Write your final plan to the plan file (the only file you can edit).
 - Ensure that the plan file is concise enough to scan quickly, but detailed enough to execute effectively
 - Include the paths of critical files to be modified
 - Reference existing functions and utilities you found that should be reused, with their file paths
-- Include a verification section describing how to test the changes end-to-end (run the code, use MCP tools, run tests)`
+- Include a verification section describing how to test the changes end-to-end (run the code, use MCP tools, run tests)
+- For complex tasks, include a Task DAG: task dependencies, repo-relative file ownership, waves, main/background/foreground execution, and verification for each task`
 
 const PLAN_PHASE4_TRIM = `### Phase 4: Final Plan
 Goal: Write your final plan to the plan file (the only file you can edit).
@@ -3481,6 +3482,7 @@ Your plan file should be divided into clear sections using markdown headers, bas
 - Include the paths of critical files to be modified
 - Reference existing functions and utilities you found that should be reused, with their file paths
 - Include a verification section describing how to test the changes end-to-end (run the code, use MCP tools, run tests)
+- For complex tasks, include a Task DAG: task dependencies, repo-relative file ownership, waves, main/background/foreground execution, and verification for each task
 
 ### When to Converge
 
