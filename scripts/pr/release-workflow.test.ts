@@ -68,6 +68,17 @@ describe('release desktop workflow', () => {
     }
   })
 
+  test('release Linux dependency installation tolerates transient ARM mirror failures', () => {
+    const workflow = readReleaseWorkflow()
+    const installStep = extractStep(workflow, 'Install Linux dependencies')
+
+    expect(installStep).toContain("sed -i 's|http://ports.ubuntu.com|https://ports.ubuntu.com|g'")
+    expect(installStep).toContain('Acquire::ForceIPv4=true')
+    expect(installStep).toContain('Acquire::Retries=3')
+    expect(installStep).toContain('Acquire::Retries=3 update')
+    expect(installStep).toContain('install -y build-essential curl wget file libfuse2')
+  })
+
   test('development desktop artifacts exclude unpacked macOS app bundles and updater-only files', () => {
     const workflow = readFileSync('.github/workflows/build-desktop-dev.yml', 'utf8')
     const collectStep = workflow.match(
