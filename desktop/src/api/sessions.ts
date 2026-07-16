@@ -1,11 +1,15 @@
 import { api } from './client'
 import type { AgentTaskNotification } from '../types/chat'
-import type { SessionListItem, MessageEntry } from '../types/session'
+import type { LocalIndexStatus, SessionListItem, MessageEntry } from '../types/session'
 import type { PermissionMode } from '../types/settings'
 import type { TraceCallRecord, TraceSession } from '../types/trace'
 import type { WorkspaceLspDiagnostic, WorkspaceLspState } from '../types/lsp'
 
-type SessionsResponse = { sessions: SessionListItem[]; total: number }
+export type SessionsResponse = {
+  sessions: SessionListItem[]
+  total: number
+  index?: LocalIndexStatus
+}
 type MessagesResponse = {
   messages: MessageEntry[]
   taskNotifications?: AgentTaskNotification[]
@@ -271,6 +275,13 @@ export type WorkspaceTreeResult = {
   error?: string
 }
 
+export type WorkspaceSearchResult = {
+  state: 'ok'
+  query: string
+  truncated: boolean
+  entries: WorkspaceTreeEntry[]
+}
+
 export type WorkspaceDiffResult = {
   state: 'ok' | 'missing' | 'not_git_repo' | 'error'
   path: string
@@ -446,6 +457,11 @@ export const sessionsApi = {
 
   getWorkspaceTree(sessionId: string, workspacePath = '') {
     return api.get<WorkspaceTreeResult>(buildWorkspacePath(sessionId, 'tree', workspacePath))
+  },
+
+  searchWorkspace(sessionId: string, query: string) {
+    const params = new URLSearchParams({ query })
+    return api.get<WorkspaceSearchResult>(`/api/sessions/${sessionId}/workspace/search?${params}`)
   },
 
   getWorkspaceFile(sessionId: string, workspacePath: string) {

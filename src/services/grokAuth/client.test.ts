@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, mock, test } from 'bun:test'
 import {
   buildGrokAuthorizeUrl,
   exchangeGrokCodeForTokens,
@@ -8,6 +8,7 @@ import {
   GROK_OAUTH_CLIENT_ID,
   GROK_OAUTH_TOKEN_ENDPOINT,
   refreshGrokTokens,
+  resolveGrokProxyFetchOptions,
 } from './client.js'
 
 describe('Grok OAuth client', () => {
@@ -60,5 +61,20 @@ describe('Grok OAuth client', () => {
     expect(requests[0]!.body.has('client_secret')).toBe(false)
     expect(requests[1]!.body.get('grant_type')).toBe('refresh_token')
     expect(requests[1]!.body.get('refresh_token')).toBe('refresh')
+  })
+
+  test('distinguishes explicit direct proxy null from inherited proxy undefined', async () => {
+    const resolve = mock(async (proxyUrl: string | null) => ({
+      headers: { 'x-test-proxy-url': proxyUrl ?? 'direct' },
+    }))
+
+    expect(await resolveGrokProxyFetchOptions(undefined, resolve)).toEqual({})
+    expect(resolve).not.toHaveBeenCalled()
+
+    expect(await resolveGrokProxyFetchOptions(null, resolve)).toEqual({
+      headers: { 'x-test-proxy-url': 'direct' },
+    })
+    expect(resolve).toHaveBeenCalledTimes(1)
+    expect(resolve).toHaveBeenCalledWith(null)
   })
 })

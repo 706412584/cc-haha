@@ -6,12 +6,24 @@ import type { OpenTarget } from '../stores/openTargetStore'
 // describeFileType tests
 // ──────────────────────────────────────────────────────────────────────────────
 describe('describeFileType', () => {
-  it('markdown → document icon, document categoryKey, uppercased ext', () => {
+  it('markdown → markdown icon, document categoryKey, uppercased ext', () => {
     expect(describeFileType('a.md')).toEqual({
-      icon: 'description',
+      icon: 'markdown',
       categoryKey: 'openWith.fileType.document',
       ext: 'MD',
     })
+  })
+
+  it.each([
+    ['report.pdf', 'picture_as_pdf', 'openWith.fileType.document', 'PDF'],
+    ['brief.docx', 'docs', 'openWith.fileType.document', 'DOCX'],
+    ['budget.xlsx', 'table_chart', 'openWith.fileType.spreadsheet', 'XLSX'],
+    ['launch.pptx', 'slideshow', 'openWith.fileType.presentation', 'PPTX'],
+    ['sources.zip', 'folder_zip', 'openWith.fileType.archive', 'ZIP'],
+    ['voice.m4a', 'audio_file', 'openWith.fileType.audio', 'M4A'],
+    ['demo.mov', 'video_file', 'openWith.fileType.video', 'MOV'],
+  ])('classifies %s', (path, icon, categoryKey, ext) => {
+    expect(describeFileType(path)).toEqual({ icon, categoryKey, ext })
   })
 
   it('HTML (uppercase path) → web icon, web categoryKey', () => {
@@ -44,6 +56,10 @@ describe('describeFileType', () => {
       categoryKey: 'openWith.fileType.file',
       ext: 'BIN',
     })
+  })
+
+  it('extensionless files do not expose the entire filename as an extension', () => {
+    expect(describeFileType('Makefile').ext).toBe('')
   })
 })
 

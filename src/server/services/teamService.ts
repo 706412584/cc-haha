@@ -11,8 +11,14 @@
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import * as os from 'os'
+import * as crypto from 'node:crypto'
 import { ApiError } from '../middleware/errorHandler.js'
 import { writeToMailbox } from '../../utils/teammateMailbox.js'
+import { sessionService } from './sessionService.js'
+import { localIndexCoordinator } from './localIndex/coordinator.js'
+import { readSessionEntriesByLocator } from './localIndex/sessionEntries.js'
+import { deserializeSourceFingerprint } from './localIndex/sourceFingerprint.js'
+import type { LocalIndexGateway } from './localIndex/sessionIndex.js'
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -52,6 +58,111 @@ export type TranscriptMessage = {
   parentToolUseId?: string
 }
 
+export type TeamTranscriptPage = {
+  messages: TranscriptMessage[]
+  signature: string
+  cursor: string
+  afterOrdinal: number
+  reset?: boolean
+}
+
+export type TeamTranscriptPageOptions = {
+  signature?: string
+  cursor?: string
+  afterOrdinal?: number
+}
+
+type TranscriptCursor = {
+  version: 2
+  size: number
+  ctimeMs: number
+  fileIdentity: string | null
+  firstWindowHash: string
+  lastWindowHash: string
+  afterOrdinal: number
+}
+
+const CURSOR_WINDOW_BYTES = 64 * 1024
+const MESSAGE_ENTRY_TYPES = new Set([
+  'user',
+  'assistant',
+  'system',
+  'tool_use',
+  'tool_result',
+])
+
+function hash(bytes: Buffer | string): string {
+  return crypto.createHash('sha256').update(bytes).digest('hex')
+}
+
+function encodeTranscriptCursor(cursor: TranscriptCursor): string {
+  return Buffer.from(JSON.stringify(cursor)).toString('base64url')
+}
+
+function decodeTranscriptCursor(value: string | undefined): TranscriptCursor | null {
+  if (!value) return null
+  try {
+    const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as TranscriptCursor
+    if (
+      parsed.version === 2 &&
+      Number.isSafeInteger(parsed.size) && parsed.size >= 0 &&
+      Number.isFinite(parsed.ctimeMs) && parsed.ctimeMs >= 0 &&
+      Number.isSafeInteger(parsed.afterOrdinal) && parsed.afterOrdinal >= -1 &&
+      (parsed.fileIdentity === null || typeof parsed.fileIdentity === 'string') &&
+      typeof parsed.firstWindowHash === 'string' &&
+      typeof parsed.lastWindowHash === 'string'
+    ) return parsed
+  } catch {
+    // Treat malformed client cursors as a reset request.
+  }
+  return null
+}
+
+function cursorForBuffer(
+  bytes: Buffer,
+  fileIdentity: string | null,
+  ctimeMs: number,
+  afterOrdinal: number,
+): TranscriptCursor {
+  return {
+    version: 2,
+    size: bytes.length,
+    ctimeMs,
+    fileIdentity,
+    firstWindowHash: hash(bytes.subarray(0, Math.min(bytes.length, CURSOR_WINDOW_BYTES))),
+    lastWindowHash: hash(bytes.subarray(Math.max(0, bytes.length - CURSOR_WINDOW_BYTES))),
+    afterOrdinal,
+  }
+}
+
+function bufferPreservesCursorPrefix(
+  bytes: Buffer,
+  cursor: TranscriptCursor,
+  fileIdentity: string | null,
+): boolean {
+  if (bytes.length <= cursor.size) return false
+  if (
+    cursor.fileIdentity !== null &&
+    fileIdentity !== null &&
+    cursor.fileIdentity !== fileIdentity
+  ) return false
+  const firstEnd = Math.min(cursor.size, CURSOR_WINDOW_BYTES)
+  const lastStart = Math.max(0, cursor.size - CURSOR_WINDOW_BYTES)
+  return hash(bytes.subarray(0, firstEnd)) === cursor.firstWindowHash &&
+    hash(bytes.subarray(lastStart, cursor.size)) === cursor.lastWindowHash
+}
+
+function sameTranscriptFileSnapshot(
+  left: { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number },
+  right: { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number },
+): boolean {
+  return left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs
+}
+
 /** Raw config.json structure written by CLI */
 type TeamFileRaw = {
   name: string
@@ -80,6 +191,20 @@ type TeamFileRaw = {
 // ─── Service ───────────────────────────────────────────────────────────────
 
 export class TeamService {
+  private readonly sessionLocator: Pick<typeof sessionService, 'findSessionFile'>
+  private readonly localIndexGateway: LocalIndexGateway
+  private readonly targetedEntryReader: typeof readSessionEntriesByLocator
+
+  constructor(options: {
+    sessionLocator?: Pick<typeof sessionService, 'findSessionFile'>
+    localIndexGateway?: LocalIndexGateway
+    targetedEntryReader?: typeof readSessionEntriesByLocator
+  } = {}) {
+    this.sessionLocator = options.sessionLocator ?? sessionService
+    this.localIndexGateway = options.localIndexGateway ?? localIndexCoordinator
+    this.targetedEntryReader = options.targetedEntryReader ?? readSessionEntriesByLocator
+  }
+
   private getConfigDir(): string {
     return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude')
   }
@@ -200,6 +325,14 @@ export class TeamService {
     teamName: string,
     agentId: string,
   ): Promise<TranscriptMessage[]> {
+    return (await this.getMemberTranscriptPage(teamName, agentId)).messages
+  }
+
+  async getMemberTranscriptPage(
+    teamName: string,
+    agentId: string,
+    options: TeamTranscriptPageOptions = {},
+  ): Promise<TeamTranscriptPage> {
     const config = await this.loadTeamConfig(teamName)
     const memberName = await this.resolveMemberName(config, teamName, agentId)
     if (!memberName) {
@@ -208,27 +341,39 @@ export class TeamService {
       )
     }
 
-    // Try config.json member with sessionId first
+    let transcriptPath: string | null = null
+
+    // Try config.json member with sessionId first. SessionService uses the
+    // scalar session index for this lookup when it is ready.
     const member = config.members.find((m) => m.agentId === agentId)
     if (member?.sessionId) {
-      const jsonlPath = await this.findTranscriptFile(member.sessionId)
-      if (jsonlPath) {
-        return this.parseTranscriptFile(jsonlPath)
-      }
+      transcriptPath = (await this.sessionLocator.findSessionFile(member.sessionId))?.filePath ??
+        await this.findTranscriptFile(member.sessionId)
     }
 
     // Fallback: search subagents directory for this member's transcript
-    if (config.leadSessionId) {
+    if (!transcriptPath && config.leadSessionId) {
       const subagentPath = await this.findSubagentTranscript(
         config.leadSessionId,
         memberName,
       )
       if (subagentPath) {
-        return this.parseTranscriptFile(subagentPath)
+        transcriptPath = subagentPath
       }
     }
 
-    return []
+    if (!transcriptPath) {
+      return {
+        messages: [],
+        signature: 'missing',
+        cursor: encodeTranscriptCursor(cursorForBuffer(Buffer.alloc(0), null, 0, -1)),
+        afterOrdinal: -1,
+      }
+    }
+
+    const indexed = await this.readIndexedTranscriptPage(transcriptPath, options)
+    if (indexed) return indexed
+    return this.parseTranscriptFilePage(transcriptPath, options)
   }
 
   async sendMemberMessage(
@@ -557,51 +702,247 @@ export class TeamService {
     }
   }
 
-  /** Parse a JSONL transcript file into messages. */
-  private async parseTranscriptFile(
+  private fileIdentity(stat: { dev: number; ino: number }): string | null {
+    return process.platform === 'win32' || stat.ino === 0
+      ? null
+      : `${stat.dev}:${stat.ino}`
+  }
+
+  private transcriptMessageFromEntry(
+    entry: Record<string, unknown>,
+  ): TranscriptMessage | null {
+    const entryType = entry.type as string | undefined
+    if (!entryType || !MESSAGE_ENTRY_TYPES.has(entryType) || entry.isMeta) return null
+    return {
+      id: (entry.uuid as string) || crypto.randomUUID(),
+      type: entryType as TranscriptMessage['type'],
+      content: entry.message ?? entry.content ?? null,
+      timestamp: (entry.timestamp as string) || new Date().toISOString(),
+      ...(typeof entry.parentToolUseId === 'string'
+        ? { parentToolUseId: entry.parentToolUseId }
+        : {}),
+      ...(typeof entry.model === 'string' ? { model: entry.model } : {}),
+    }
+  }
+
+  private async filePreservesCursorPrefix(
     filePath: string,
-  ): Promise<TranscriptMessage[]> {
-    const raw = await fs.readFile(filePath, 'utf-8')
-    const lines = raw.split('\n').filter((line) => line.trim().length > 0)
+    cursor: TranscriptCursor,
+  ): Promise<boolean> {
+    let handle: fs.FileHandle | undefined
+    try {
+      const stat = await fs.stat(filePath)
+      const identity = this.fileIdentity(stat)
+      if (stat.size <= cursor.size) return false
+      if (
+        cursor.fileIdentity !== null &&
+        identity !== null &&
+        cursor.fileIdentity !== identity
+      ) return false
 
-    const messages: TranscriptMessage[] = []
+      handle = await fs.open(filePath, 'r')
+      const firstLength = Math.min(cursor.size, CURSOR_WINDOW_BYTES)
+      const lastStart = Math.max(0, cursor.size - CURSOR_WINDOW_BYTES)
+      const lastLength = cursor.size - lastStart
+      const first = Buffer.alloc(firstLength)
+      const last = Buffer.alloc(lastLength)
+      if (firstLength > 0) await handle.read(first, 0, firstLength, 0)
+      if (lastLength > 0) await handle.read(last, 0, lastLength, lastStart)
+      return hash(first) === cursor.firstWindowHash &&
+        hash(last) === cursor.lastWindowHash
+    } catch {
+      return false
+    } finally {
+      await handle?.close().catch(() => {})
+    }
+  }
 
-    for (const line of lines) {
+  private async readIndexedTranscriptPage(
+    filePath: string,
+    options: TeamTranscriptPageOptions,
+  ): Promise<TeamTranscriptPage | null> {
+    try {
+      if (
+        this.localIndexGateway.getMode() !== 'on' ||
+        !this.localIndexGateway.isSessionScopeReady() ||
+        !this.localIndexGateway.getSessionEntryLocators
+      ) return null
+      const page = this.localIndexGateway.getSessionEntryLocators(filePath)
+      if (!page) return null
+      // A pending source can contain a valid final JSON object without a
+      // newline. Locators intentionally exclude that tail, while the legacy
+      // canonical parser includes it, so never serve a partial indexed page.
+      if (
+        page.source.state !== 'ready' ||
+        page.source.indexedBytes !== page.source.size
+      ) return null
+      const fingerprint = deserializeSourceFingerprint(page.source.fingerprint)
+      if (!fingerprint) return null
+      const currentStat = await fs.stat(filePath)
+      const currentIdentity = this.fileIdentity(currentStat)
+
+      const currentAfterOrdinal = page.entries.at(-1)?.ordinal ?? -1
+      const signature = hash(page.source.fingerprint)
+      const previousCursor = decodeTranscriptCursor(options.cursor)
+      let afterOrdinal = options.afterOrdinal ?? -1
+      let reset = false
+      if (options.cursor !== undefined && !previousCursor) {
+        afterOrdinal = -1
+        reset = true
+      } else if (afterOrdinal >= 0 && (!options.signature || !previousCursor)) {
+        afterOrdinal = -1
+        reset = true
+      } else if (afterOrdinal > currentAfterOrdinal) {
+        afterOrdinal = -1
+        reset = true
+      } else if (previousCursor && previousCursor.afterOrdinal !== afterOrdinal) {
+        afterOrdinal = -1
+        reset = true
+      } else if (options.signature) {
+        if (options.signature === signature) {
+          const snapshotMatches = previousCursor &&
+            previousCursor.size === currentStat.size &&
+            previousCursor.ctimeMs === currentStat.ctimeMs &&
+            (
+              previousCursor.fileIdentity === null ||
+              currentIdentity === null ||
+              previousCursor.fileIdentity === currentIdentity
+            )
+          if (!snapshotMatches) {
+            afterOrdinal = -1
+            reset = true
+          }
+        } else {
+          const appendProven = previousCursor &&
+            currentStat.size > previousCursor.size &&
+            await this.filePreservesCursorPrefix(filePath, previousCursor)
+          if (!appendProven) {
+            afterOrdinal = -1
+            reset = true
+          }
+        }
+      }
+
+      if (currentStat.size !== fingerprint.size) {
+        return null
+      }
+
+      const selected = page.entries.filter(locator =>
+        locator.ordinal > afterOrdinal && MESSAGE_ENTRY_TYPES.has(locator.entryType),
+      )
+      const result = await this.targetedEntryReader({
+        transcriptPath: filePath,
+        projectsRoot: this.getProjectsDir(),
+        expectedProjectDir: path.basename(path.dirname(filePath)),
+        page: { source: page.source, entries: selected },
+      })
+      if (!result) return null
+      const statAfterRead = await fs.stat(filePath)
+      if (!sameTranscriptFileSnapshot(currentStat, statAfterRead)) return null
+
+      const messages = result.entries
+        .map(entry => this.transcriptMessageFromEntry(entry))
+        .filter((message): message is TranscriptMessage => message !== null)
+      const cursor = encodeTranscriptCursor({
+        version: 2,
+        size: fingerprint.size,
+        ctimeMs: currentStat.ctimeMs,
+        fileIdentity: currentIdentity,
+        firstWindowHash: fingerprint.firstWindowHash,
+        lastWindowHash: fingerprint.lastWindowHash,
+        afterOrdinal: currentAfterOrdinal,
+      })
+      return {
+        messages,
+        signature,
+        cursor,
+        afterOrdinal: currentAfterOrdinal,
+        ...(reset ? { reset: true } : {}),
+      }
+    } catch {
+      return null
+    }
+  }
+
+  /** Canonical parser used for legacy reads and every degraded/stale fallback. */
+  private async parseTranscriptFilePage(
+    filePath: string,
+    options: TeamTranscriptPageOptions,
+  ): Promise<TeamTranscriptPage> {
+    const bytes = await fs.readFile(filePath)
+    const stat = await fs.stat(filePath)
+    const identity = this.fileIdentity(stat)
+    const entries: Array<{ ordinal: number; message: TranscriptMessage }> = []
+    let ordinal = -1
+    for (const line of bytes.toString('utf8').split('\n')) {
+      if (!line.trim()) continue
       try {
         const entry = JSON.parse(line) as Record<string, unknown>
-
-        // Skip non-message entries (snapshots, meta, etc.)
-        const entryType = entry.type as string | undefined
-        if (
-          entryType !== 'user' &&
-          entryType !== 'assistant' &&
-          entryType !== 'system' &&
-          entryType !== 'tool_use' &&
-          entryType !== 'tool_result'
-        ) {
-          continue
-        }
-
-        // Skip meta entries
-        if (entry.isMeta) continue
-
-        const message: TranscriptMessage = {
-          id: (entry.uuid as string) || crypto.randomUUID(),
-          type: entryType as TranscriptMessage['type'],
-          content: entry.message ?? entry.content ?? null,
-          timestamp:
-            (entry.timestamp as string) || new Date().toISOString(),
-          ...(typeof entry.parentToolUseId === 'string' ? { parentToolUseId: entry.parentToolUseId } : {}),
-          ...(typeof entry.model === 'string' ? { model: entry.model } : {}),
-        }
-
-        messages.push(message)
+        ordinal += 1
+        const message = this.transcriptMessageFromEntry(entry)
+        if (message) entries.push({ ordinal, message })
       } catch {
         // Skip unparseable lines
       }
     }
-
-    return messages
+    const currentAfterOrdinal = ordinal
+    const signature = hash(bytes)
+    const previousCursor = decodeTranscriptCursor(options.cursor)
+    let afterOrdinal = options.afterOrdinal ?? -1
+    let reset = false
+    if (options.cursor !== undefined && !previousCursor) {
+      afterOrdinal = -1
+      reset = true
+    } else if (afterOrdinal >= 0 && !options.signature) {
+      afterOrdinal = -1
+      reset = true
+    } else if (afterOrdinal > currentAfterOrdinal) {
+      afterOrdinal = -1
+      reset = true
+    } else if (previousCursor && previousCursor.afterOrdinal !== afterOrdinal) {
+      afterOrdinal = -1
+      reset = true
+    } else if (options.signature) {
+      if (options.signature === signature) {
+        const snapshotMismatch = previousCursor &&
+          (
+            previousCursor.size !== bytes.length ||
+            previousCursor.ctimeMs !== stat.ctimeMs ||
+            (
+              previousCursor.fileIdentity !== null &&
+              identity !== null &&
+              previousCursor.fileIdentity !== identity
+            )
+          )
+        if (snapshotMismatch) {
+          afterOrdinal = -1
+          reset = true
+        }
+      } else {
+        const appendProven = previousCursor &&
+          bytes.length > previousCursor.size &&
+          bufferPreservesCursorPrefix(bytes, previousCursor, identity)
+        if (!appendProven) {
+          afterOrdinal = -1
+          reset = true
+        }
+      }
+    }
+    const cursor = encodeTranscriptCursor(cursorForBuffer(
+      bytes,
+      identity,
+      stat.ctimeMs,
+      currentAfterOrdinal,
+    ))
+    return {
+      messages: entries
+        .filter(entry => entry.ordinal > afterOrdinal)
+        .map(entry => entry.message),
+      signature,
+      cursor,
+      afterOrdinal: currentAfterOrdinal,
+      ...(reset ? { reset: true } : {}),
+    }
   }
 }
 

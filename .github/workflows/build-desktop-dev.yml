@@ -100,6 +100,12 @@ jobs:
         working-directory: desktop
         run: bun run test:windows-storage-recovery
 
+      - name: Prepare bundled ripgrep
+        working-directory: desktop
+        env:
+          SIDECAR_TARGET_TRIPLE: ${{ matrix.target_triple }}
+        run: bun run prepare:ripgrep
+
       - name: Build sidecars
         working-directory: desktop
         env:

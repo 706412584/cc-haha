@@ -1,0 +1,379 @@
+import http from 'node:http'
+import net from 'node:net'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  parseSystemProxyRules,
+  sanitizeProxyRequestHeaders,
+  SystemProxyBridge,
+} from './systemProxyBridge'
+
+const servers: Array<http.Server | net.Server> = []
+const bridges: SystemProxyBridge[] = []
+const sockets = new Set<net.Socket>()
+
+afterEach(async () => {
+  await Promise.all(bridges.splice(0).map(bridge => bridge.stop()))
+  for (const socket of sockets) socket.destroy()
+  sockets.clear()
+  await Promise.all(servers.splice(0).map(server => closeServer(server)))
+})
+
+describe('SystemProxyBridge', () => {
+  it('preserves Chromium proxy fallback order and supported rule types', () => {
+    expect(parseSystemProxyRules(
+      'HTTPS secure.example:8443; PROXY plain.example:8080; SOCKS4 old.example:1080; SOCKS5 socks.example:1081; DIRECT',
+    )).toEqual([
+      { type: 'https', host: 'secure.example', port: 8443 },
+      { type: 'http', host: 'plain.example', port: 8080 },
+      { type: 'socks4', host: 'old.example', port: 1080 },
+      { type: 'socks5', host: 'socks.example', port: 1081 },
+      { type: 'direct' },
+    ])
+    expect(parseSystemProxyRules('SOCKS socks.example:1080; DIRECT')[0]?.type).toBe('socks4')
+    expect(parseSystemProxyRules('')).toEqual([{ type: 'direct' }])
+    expect(parseSystemProxyRules('INVALID proxy.example:1234')).toEqual([])
+  })
+
+  it('removes proxy credentials and declared hop-by-hop headers', () => {
+    expect(sanitizeProxyRequestHeaders({
+      connection: 'keep-alive, x-remove-me',
+      'proxy-authorization': 'Basic secret',
+      'proxy-connection': 'keep-alive',
+      'x-remove-me': 'private-hop',
+    })).toEqual({})
+  })
+
+  it('resolves PAC rules per target and observes runtime changes without restart', async () => {
+    const firstProxy = await createProxyServer('first')
+    const secondProxy = await createProxyServer('second')
+    let selectedPort = firstProxy
+    const resolver = vi.fn(async () => `PROXY 127.0.0.1:${selectedPort}; DIRECT`)
+    const bridge = await startBridge(resolver)
+
+    expect(await requestThroughProxy(bridge, 'http://foreign.example/one')).toBe('first')
+    selectedPort = secondProxy
+    expect(await requestThroughProxy(bridge, 'http://foreign.example/two')).toBe('second')
+
+    expect(resolver).toHaveBeenNthCalledWith(1, 'http://foreign.example/one')
+    expect(resolver).toHaveBeenNthCalledWith(2, 'http://foreign.example/two')
+  })
+
+  it('falls back to the next PAC route when the preferred proxy cannot connect', async () => {
+    const unavailablePort = await reserveClosedPort()
+    const workingProxy = await createProxyServer('fallback')
+    const bridge = await startBridge(async () => (
+      `PROXY 127.0.0.1:${unavailablePort}; PROXY 127.0.0.1:${workingProxy}; DIRECT`
+    ))
+
+    expect(await requestThroughProxy(bridge, 'http://fallback.example/value')).toBe('fallback')
+  })
+
+  it('falls back when a connected proxy drops the request before responding', async () => {
+    const droppingProxy = net.createServer(socket => {
+      socket.once('data', () => socket.destroy())
+    })
+    servers.push(droppingProxy)
+    const droppingPort = await listen(droppingProxy)
+    const workingProxy = await createProxyServer('request-fallback')
+    const bridge = await startBridge(async () => (
+      `PROXY 127.0.0.1:${droppingPort}; PROXY 127.0.0.1:${workingProxy}; DIRECT`
+    ))
+
+    expect(await requestThroughProxy(bridge, 'http://fallback.example/after-drop'))
+      .toBe('request-fallback')
+  })
+
+  it('does not replay a non-idempotent request after its selected proxy drops it', async () => {
+    let firstProxyRequests = 0
+    const droppingProxy = net.createServer(socket => {
+      socket.once('data', () => {
+        firstProxyRequests++
+        socket.destroy()
+      })
+    })
+    servers.push(droppingProxy)
+    const droppingPort = await listen(droppingProxy)
+    let fallbackRequests = 0
+    const fallbackProxy = http.createServer((_request, response) => {
+      fallbackRequests++
+      response.end('must-not-replay')
+    })
+    servers.push(fallbackProxy)
+    const fallbackPort = await listen(fallbackProxy)
+    const bridge = await startBridge(async () => (
+      `PROXY 127.0.0.1:${droppingPort}; PROXY 127.0.0.1:${fallbackPort}; DIRECT`
+    ))
+
+    await expect(requestThroughProxy(bridge, 'http://foreign.example/model', 'POST', 'prompt'))
+      .rejects.toThrow('HTTP 502')
+    expect(firstProxyRequests).toBe(1)
+    expect(fallbackRequests).toBe(0)
+  })
+
+  it('removes proxy credentials and hop-by-hop headers before forwarding', async () => {
+    let receivedHeaders: http.IncomingHttpHeaders = {}
+    const proxy = http.createServer((request, response) => {
+      receivedHeaders = request.headers
+      response.end('sanitized')
+    })
+    servers.push(proxy)
+    const proxyPort = await listen(proxy)
+    const bridge = await startBridge(async () => `PROXY 127.0.0.1:${proxyPort}`)
+
+    expect(await requestThroughProxy(
+      bridge,
+      'http://foreign.example/value',
+      'GET',
+      undefined,
+      {
+        Connection: 'keep-alive, x-remove-me',
+        'Proxy-Authorization': 'Basic secret',
+        'Proxy-Connection': 'keep-alive',
+        'X-Remove-Me': 'private-hop',
+      },
+    )).toBe('sanitized')
+    expect(receivedHeaders['proxy-authorization']).toBeUndefined()
+    expect(receivedHeaders['x-remove-me']).toBeUndefined()
+  })
+
+  it('preserves fallback order for CONNECT tunnels', async () => {
+    const echoServer = net.createServer(socket => {
+      sockets.add(socket)
+      socket.once('close', () => sockets.delete(socket))
+      socket.pipe(socket)
+    })
+    servers.push(echoServer)
+    const echoPort = await listen(echoServer)
+    const tunnelProxy = http.createServer()
+    tunnelProxy.on('connect', (_request, clientSocket, head) => {
+      const targetSocket = net.connect({ host: '127.0.0.1', port: echoPort }, () => {
+        clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
+        if (head.length > 0) targetSocket.write(head)
+        targetSocket.pipe(clientSocket)
+        clientSocket.pipe(targetSocket)
+      })
+      targetSocket.on('error', () => clientSocket.destroy())
+    })
+    servers.push(tunnelProxy)
+    const proxyPort = await listen(tunnelProxy)
+    const unavailablePort = await reserveClosedPort()
+    const resolver = vi.fn(async () => (
+      `PROXY 127.0.0.1:${unavailablePort}; PROXY 127.0.0.1:${proxyPort}; DIRECT`
+    ))
+    const bridge = await startBridge(resolver)
+
+    await expect(connectAndEcho(bridge, 'foreign.example:443', 'tunnel-ok'))
+      .resolves.toBe('tunnel-ok')
+    expect(resolver).toHaveBeenCalledWith('https://foreign.example/')
+  })
+
+  it('surfaces proxy authentication requirements without falling through to DIRECT', async () => {
+    const authProxy = http.createServer()
+    authProxy.on('connect', (_request, socket) => {
+      socket.end('HTTP/1.1 407 Proxy Authentication Required\r\nConnection: close\r\n\r\n')
+    })
+    servers.push(authProxy)
+    const proxyPort = await listen(authProxy)
+    const bridge = await startBridge(async () => `PROXY 127.0.0.1:${proxyPort}; DIRECT`)
+
+    await expect(connectAndEcho(bridge, 'foreign.example:443', 'unused'))
+      .rejects.toThrow('407 Proxy Authentication Required')
+  })
+
+  it('always bypasses system proxy resolution for loopback targets', async () => {
+    const target = http.createServer((_request, response) => response.end('loopback'))
+    servers.push(target)
+    const targetPort = await listen(target)
+    const resolver = vi.fn(async () => 'PROXY unreachable.example:8080')
+    const bridge = await startBridge(resolver)
+
+    await expect(requestThroughProxy(bridge, `http://127.0.0.1:${targetPort}/health`))
+      .resolves.toBe('loopback')
+    expect(resolver).not.toHaveBeenCalled()
+  })
+
+  it('binds the bridge only to IPv4 loopback', async () => {
+    const bridgeUrl = await startBridge(async () => 'DIRECT')
+    expect(new URL(bridgeUrl).hostname).toBe('127.0.0.1')
+  })
+
+  it('does not publish a listener when stop races with startup', async () => {
+    const bridge = new SystemProxyBridge(async () => 'DIRECT')
+    bridges.push(bridge)
+
+    const startup = bridge.start()
+    await bridge.stop()
+    await expect(startup).rejects.toThrow('startup was stopped')
+
+    const restartedUrl = await bridge.start()
+    expect(new URL(restartedUrl).hostname).toBe('127.0.0.1')
+  })
+
+  it('closes active CONNECT clients and outbound routes during stop', async () => {
+    let acceptTarget!: () => void
+    const targetAccepted = new Promise<void>(resolve => { acceptTarget = resolve })
+    let closeTarget!: () => void
+    const targetClosed = new Promise<void>(resolve => { closeTarget = resolve })
+    const target = net.createServer(socket => {
+      acceptTarget()
+      socket.once('close', closeTarget)
+    })
+    servers.push(target)
+    const targetPort = await listen(target)
+    const bridge = new SystemProxyBridge(async () => 'DIRECT')
+    bridges.push(bridge)
+    const bridgeUrl = await bridge.start()
+    const client = await openConnectTunnel(bridgeUrl, `127.0.0.1:${targetPort}`)
+    sockets.add(client)
+    client.once('close', () => sockets.delete(client))
+    await targetAccepted
+
+    await expect(Promise.race([
+      bridge.stop().then(() => 'stopped'),
+      new Promise<string>(resolve => setTimeout(() => resolve('timed out'), 500)),
+    ])).resolves.toBe('stopped')
+    await expect(Promise.race([
+      targetClosed.then(() => 'closed'),
+      new Promise<string>(resolve => setTimeout(() => resolve('timed out'), 500)),
+    ])).resolves.toBe('closed')
+  })
+})
+
+async function startBridge(
+  resolver: (url: string) => Promise<string>,
+): Promise<string> {
+  const bridge = new SystemProxyBridge(resolver)
+  bridges.push(bridge)
+  return await bridge.start()
+}
+
+async function createProxyServer(label: string): Promise<number> {
+  const server = http.createServer((_request, response) => response.end(label))
+  servers.push(server)
+  return await listen(server)
+}
+
+function listen(server: http.Server | net.Server): Promise<number> {
+  return new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address()
+      if (!address || typeof address === 'string') {
+        reject(new Error('Could not resolve test server port'))
+        return
+      }
+      resolve(address.port)
+    })
+  })
+}
+
+function closeServer(server: http.Server | net.Server): Promise<void> {
+  return new Promise(resolve => {
+    if ('closeAllConnections' in server) server.closeAllConnections()
+    server.close(() => resolve())
+  })
+}
+
+async function reserveClosedPort(): Promise<number> {
+  const server = net.createServer()
+  const port = await listen(server)
+  await closeServer(server)
+  const index = servers.indexOf(server)
+  if (index >= 0) servers.splice(index, 1)
+  return port
+}
+
+function requestThroughProxy(
+  proxyUrl: string,
+  targetUrl: string,
+  method = 'GET',
+  body?: string,
+  extraHeaders: Record<string, string> = {},
+): Promise<string> {
+  const proxy = new URL(proxyUrl)
+  return new Promise((resolve, reject) => {
+    const request = http.request({
+      host: proxy.hostname,
+      port: Number(proxy.port),
+      path: targetUrl,
+      method,
+      headers: { Host: new URL(targetUrl).host, ...extraHeaders },
+    }, response => {
+      const chunks: Buffer[] = []
+      response.on('data', chunk => chunks.push(Buffer.from(chunk)))
+      response.on('end', () => {
+        if (response.statusCode !== 200) {
+          reject(new Error(`Proxy returned HTTP ${response.statusCode}: ${Buffer.concat(chunks).toString()}`))
+          return
+        }
+        resolve(Buffer.concat(chunks).toString())
+      })
+    })
+    request.on('error', reject)
+    request.end(body)
+  })
+}
+
+function connectAndEcho(
+  proxyUrl: string,
+  authority: string,
+  payload: string,
+): Promise<string> {
+  const proxy = new URL(proxyUrl)
+  return new Promise((resolve, reject) => {
+    const socket = net.connect({ host: proxy.hostname, port: Number(proxy.port) })
+    let connected = false
+    let buffered = Buffer.alloc(0)
+    socket.once('connect', () => {
+      socket.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n\r\n`)
+    })
+    socket.on('data', chunk => {
+      buffered = Buffer.concat([buffered, typeof chunk === 'string' ? Buffer.from(chunk) : chunk])
+      if (!connected) {
+        const headerEnd = buffered.indexOf('\r\n\r\n')
+        if (headerEnd < 0) return
+        const header = buffered.subarray(0, headerEnd).toString()
+        if (!header.includes(' 200 ')) {
+          socket.destroy()
+          reject(new Error(`CONNECT failed: ${header}`))
+          return
+        }
+        connected = true
+        buffered = buffered.subarray(headerEnd + 4)
+        socket.write(payload)
+      }
+      if (connected && buffered.length >= Buffer.byteLength(payload)) {
+        const result = buffered.subarray(0, Buffer.byteLength(payload)).toString()
+        socket.destroy()
+        resolve(result)
+      }
+    })
+    socket.once('error', reject)
+  })
+}
+
+function openConnectTunnel(proxyUrl: string, authority: string): Promise<net.Socket> {
+  const proxy = new URL(proxyUrl)
+  return new Promise((resolve, reject) => {
+    const socket = net.connect({ host: proxy.hostname, port: Number(proxy.port) })
+    let buffered = Buffer.alloc(0)
+    socket.once('connect', () => {
+      socket.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n\r\n`)
+    })
+    const onData = (chunk: Buffer) => {
+      buffered = Buffer.concat([buffered, chunk])
+      const headerEnd = buffered.indexOf('\r\n\r\n')
+      if (headerEnd < 0) return
+      socket.off('data', onData)
+      const header = buffered.subarray(0, headerEnd).toString()
+      if (!header.includes(' 200 ')) {
+        socket.destroy()
+        reject(new Error(`CONNECT failed: ${header}`))
+        return
+      }
+      resolve(socket)
+    }
+    socket.on('data', onData)
+    socket.once('error', reject)
+  })
+}

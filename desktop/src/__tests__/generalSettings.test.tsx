@@ -492,7 +492,7 @@ describe('Settings > General tab', () => {
     expect(screen.getByRole('button', { name: /Direct connection/i })).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getByRole('button', { name: /System proxy/i })).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: /Manual proxy/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^Manual proxy/i }))
     const proxyInput = screen.getByLabelText('Proxy URL')
     const saveButton = screen.getAllByRole('button', { name: 'Save' })[0]!
 

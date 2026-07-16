@@ -1,6 +1,13 @@
 import { useMemo, useState } from 'react'
-import { MessageSquare, X } from 'lucide-react'
-import { useTranslation } from '../../i18n'
+import type { MouseEvent as ReactMouseEvent } from 'react'
+import { ChevronDown, MessageSquare, X } from 'lucide-react'
+import { useTranslation, type TranslationKey } from '../../i18n'
+import { getDesktopHost } from '../../lib/desktopHost'
+import { isAbsoluteLocalPath } from '../../lib/handlePreviewLink'
+import { buildOpenWithItems, describeFileType, type OpenWithItem } from '../../lib/openWithItems'
+import { useOpenTargetStore } from '../../stores/openTargetStore'
+import { useUIStore } from '../../stores/uiStore'
+import { OpenWithMenu } from '../common/OpenWithMenu'
 import { ImageGalleryModal } from './ImageGalleryModal'
 
 export type AttachmentPreview = {
@@ -9,6 +16,7 @@ export type AttachmentPreview = {
   name: string
   path?: string
   data?: string
+  mimeType?: string
   previewUrl?: string
   isDirectory?: boolean
   lineStart?: number
@@ -17,6 +25,27 @@ export type AttachmentPreview = {
   hunkId?: string
   note?: string
   quote?: string
+}
+
+const FILE_ICON_ACCENTS: Record<string, string> = {
+  picture_as_pdf: '#d14343',
+  docs: '#3f6ecf',
+  markdown: '#4d6b8a',
+  text_snippet: '#667085',
+  table_chart: '#24845b',
+  slideshow: '#c85b2b',
+  folder_zip: '#a46a17',
+  code: '#7656b5',
+  audio_file: '#ad477c',
+  video_file: '#6655b8',
+  html: '#c05d2c',
+  image: '#24899a',
+  folder: '#a46a17',
+  insert_drive_file: '#667085',
+}
+
+function fileIconAccent(icon: string): string {
+  return FILE_ICON_ACCENTS[icon] ?? FILE_ICON_ACCENTS.insert_drive_file!
 }
 
 type Props = {
@@ -29,6 +58,8 @@ type Props = {
 export function AttachmentGallery({ attachments, variant = 'message', onRemove, onAnnotate }: Props) {
   const t = useTranslation()
   const [activeImageIndex, setActiveImageIndex] = useState<number | null>(null)
+  const [openWith, setOpenWith] = useState<{ items: OpenWithItem[]; anchor: DOMRect; triggerEl: HTMLElement } | null>(null)
+  const desktopHost = getDesktopHost()
 
   const images = useMemo(
     () =>
@@ -44,6 +75,53 @@ export function AttachmentGallery({ attachments, variant = 'message', onRemove, 
   if (attachments.length === 0) return null
 
   const isComposer = variant === 'composer'
+
+  const showOpenFailure = (name: string) => {
+    useUIStore.getState().addToast({
+      type: 'error',
+      message: t('attachments.openFailed', { name }),
+    })
+  }
+
+  const openLocalAttachment = (attachment: AttachmentPreview) => {
+    if (!attachment.path) return
+    void desktopHost.shell.openPath(attachment.path).catch(() => showOpenFailure(attachment.name))
+  }
+
+  const openAttachmentWith = (
+    event: ReactMouseEvent<HTMLButtonElement>,
+    attachment: AttachmentPreview,
+  ) => {
+    event.stopPropagation()
+    if (!attachment.path) return
+    if (openWith) {
+      setOpenWith(null)
+      return
+    }
+
+    const triggerEl = event.currentTarget
+    const anchor = triggerEl.getBoundingClientRect()
+    void (async () => {
+      await useOpenTargetStore.getState().ensureTargets()
+      const items = buildOpenWithItems(
+        { kind: 'file', absolutePath: attachment.path! },
+        useOpenTargetStore.getState().targets,
+        {
+          openInAppBrowser: () => {},
+          openSystem: (path) => {
+            void desktopHost.shell.openPath(path).catch(() => showOpenFailure(attachment.name))
+          },
+          openWorkspacePreview: () => {},
+          openTarget: (targetId, path) => {
+            void useOpenTargetStore.getState().openTarget(targetId, path)
+              .catch(() => showOpenFailure(attachment.name))
+          },
+          t: (key, vars) => t(key as TranslationKey, vars),
+        },
+      )
+      if (items.length > 0) setOpenWith({ items, anchor, triggerEl })
+    })()
+  }
 
   return (
     <>
@@ -205,24 +283,33 @@ export function AttachmentGallery({ attachments, variant = 'message', onRemove, 
             : ''
           const quotePreview = attachment.quote?.trim().replace(/\s+/g, ' ')
           const hasQuotePreview = !!quotePreview
+          const typeInfo = describeFileType(attachment.path || attachment.name)
+          const fileIcon = attachment.isDirectory ? 'folder' : typeInfo.icon
+          const typeLabel = attachment.isDirectory
+            ? t('openWith.fileType.file')
+            : typeInfo.ext || t(typeInfo.categoryKey as TranslationKey)
+          const canOpenLocally =
+            !isComposer &&
+            !!attachment.path &&
+            isAbsoluteLocalPath(attachment.path) &&
+            desktopHost.isDesktop &&
+            desktopHost.capabilities.shell
 
-          return (
-            <div
-              key={attachment.id || `${attachment.name}-${index}`}
-              className={[
-                'group/file inline-flex max-w-full min-w-0 border border-[var(--color-border)]',
-                'bg-[var(--color-surface-container-low)] text-[var(--color-text-secondary)] shadow-[0_1px_2px_rgba(0,0,0,0.04)]',
-                hasQuotePreview
-                  ? 'items-start gap-2 rounded-[8px] px-2.5 py-2'
-                  : 'h-9 items-center gap-2 rounded-full px-3',
-              ].join(' ')}
-            >
-              <span className={`material-symbols-outlined shrink-0 text-[17px] text-[var(--color-text-tertiary)] ${hasQuotePreview ? 'mt-0.5' : ''}`}>
-                {hasQuotePreview ? 'chat_bubble' : attachment.isDirectory ? 'folder' : 'description'}
+          const fileVisual = (
+            <>
+              <span
+                aria-hidden="true"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] bg-[var(--color-surface)] shadow-[inset_0_0_0_1px_var(--color-border)]"
+                style={{ color: fileIconAccent(fileIcon) }}
+              >
+                <span className="material-symbols-outlined text-[19px]">{fileIcon}</span>
               </span>
-              <span className="min-w-0">
-                <span className="block min-w-0 max-w-[260px] truncate text-[13px] font-medium leading-5 text-[var(--color-text-primary)]">
+              <span className="min-w-0 flex-1">
+                <span className="block min-w-0 max-w-[260px] truncate text-[13px] font-semibold leading-5 text-[var(--color-text-primary)]">
                   {attachment.name}{lineLabel}
+                </span>
+                <span className="block truncate text-[10px] font-semibold uppercase leading-3 tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                  {typeLabel}
                 </span>
                 {hasQuotePreview && (
                   <span className="mt-0.5 block max-w-[320px] truncate font-[var(--font-mono)] text-[11px] leading-4 text-[var(--color-text-tertiary)]">
@@ -230,6 +317,51 @@ export function AttachmentGallery({ attachments, variant = 'message', onRemove, 
                   </span>
                 )}
               </span>
+            </>
+          )
+
+          if (canOpenLocally) return (
+            <div
+              key={attachment.id || `${attachment.name}-${index}`}
+              data-file-extension={typeInfo.ext || undefined}
+              className={[
+                'group/file inline-flex max-w-full min-w-[220px] items-stretch overflow-hidden rounded-[12px] border border-[var(--color-border)]',
+                'bg-[var(--color-surface-container-low)] text-[var(--color-text-secondary)] shadow-[0_1px_2px_rgba(0,0,0,0.04)]',
+                'transition-colors hover:border-[var(--color-brand)]/35 hover:bg-[var(--color-surface-container)]',
+              ].join(' ')}
+            >
+              <button
+                type="button"
+                onClick={() => openLocalAttachment(attachment)}
+                aria-label={t('attachments.open', { name: attachment.name })}
+                title={attachment.path}
+                className="flex min-h-12 min-w-0 flex-1 items-center gap-2.5 px-2.5 py-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-brand)]/40"
+              >
+                {fileVisual}
+              </button>
+              <button
+                type="button"
+                onClick={(event) => openAttachmentWith(event, attachment)}
+                aria-label={t('openWith.title')}
+                title={t('openWith.title')}
+                className="flex w-9 shrink-0 items-center justify-center border-l border-[var(--color-border)] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-brand)]/40"
+              >
+                <ChevronDown size={14} strokeWidth={2} aria-hidden="true" />
+              </button>
+            </div>
+          )
+
+          return (
+            <div
+              key={attachment.id || `${attachment.name}-${index}`}
+              data-file-extension={typeInfo.ext || undefined}
+              className={[
+                'group/file inline-flex max-w-full min-w-0 items-center gap-2.5 border border-[var(--color-border)]',
+                'rounded-[12px] bg-[var(--color-surface-container-low)] px-2.5 py-1.5 text-[var(--color-text-secondary)]',
+                'shadow-[0_1px_2px_rgba(0,0,0,0.04)]',
+              ].join(' ')}
+            >
+              {fileVisual}
               {onRemove && attachment.id && (
                 <button
                   type="button"
@@ -252,6 +384,14 @@ export function AttachmentGallery({ attachments, variant = 'message', onRemove, 
           activeIndex={activeImageIndex}
           onClose={() => setActiveImageIndex(null)}
           onSelect={setActiveImageIndex}
+        />
+      )}
+      {openWith && (
+        <OpenWithMenu
+          items={openWith.items}
+          anchor={openWith.anchor}
+          triggerEl={openWith.triggerEl}
+          onClose={() => setOpenWith(null)}
         />
       )}
     </>

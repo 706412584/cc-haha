@@ -181,6 +181,64 @@ function renderBackgroundTaskDrawerForLocale(locale: 'jp' | 'kr', sessionId: str
 }
 
 describe('ActiveSession task polling', () => {
+  it('shows cleaned worktrees as retained history and uses the source project for tools', () => {
+    const sessionId = 'cleaned-worktree-session'
+    useSettingsStore.setState({ locale: 'en' })
+
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'Cleaned Worktree Session',
+        createdAt: '2026-05-07T00:00:00.000Z',
+        modifiedAt: '2026-05-07T00:00:00.000Z',
+        messageCount: 1,
+        projectPath: '/repo-worktree',
+        projectRoot: '/repo',
+        workDir: '/repo/.claude/worktrees/desktop-main-12345678',
+        workDirExists: false,
+        workspaceState: 'worktree_removed',
+      }],
+      activeSessionId: sessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Cleaned Worktree Session', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          messages: [{ id: 'existing', type: 'assistant_text', content: 'ready', timestamp: 1 }],
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+    useTerminalPanelStore.getState().openPanel(sessionId)
+
+    render(<ActiveSession />)
+
+    expect(screen.getByText(
+      'The temporary workspace was cleaned up. History is still available; start a new session in /repo to continue.',
+    )).toBeInTheDocument()
+    expect(screen.getByTestId(`session-terminal-host-${sessionId}`)).toHaveAttribute('data-cwd', '/repo')
+  })
+
   it('treats a persisted historical session as non-empty before messages finish loading', () => {
     const sessionId = 'history-loading-session'
 

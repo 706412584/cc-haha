@@ -8,6 +8,7 @@ import {
   RefreshCw,
 } from 'lucide-react'
 import { sessionsApi } from '../api/sessions'
+import { tracesApi } from '../api/traces'
 import { useSessionStore } from '../stores/sessionStore'
 import { useTranslation } from '../i18n'
 import type { MessageEntry } from '../types/session'
@@ -53,22 +54,77 @@ export function TraceSession({
   const [lastLoadedAt, setLastLoadedAt] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
   const [clockNowMs, setClockNowMs] = useState(() => Date.now())
+  const [revisionKey, setRevisionKey] = useState<string | undefined>()
   const snapshotSignatureRef = useRef<string | null>(null)
   const lastSpanIdRef = useRef<string | null>(null)
 
   useEffect(() => {
+    setSelectedId(null)
+    lastSpanIdRef.current = null
+  }, [sessionId])
+
+  useEffect(() => {
     let cancelled = false
+    let loadInFlight = false
+    let revisionPollingAvailable = true
+    let currentRevision: number | undefined
+    let currentRevisionToken: string | undefined
+    let revisionRequestGeneration = 0
     snapshotSignatureRef.current = null
 
     const load = async (silent: boolean) => {
+      if (silent && loadInFlight) return
+      loadInFlight = true
       if (!silent) setState({ status: 'loading' })
-      if (silent) setRefreshing(true)
       try {
+        let pendingRevision: number | undefined
+        let pendingRevisionKey: string | undefined
+        if (silent && revisionPollingAvailable) {
+          try {
+            const requestGeneration = ++revisionRequestGeneration
+            const revision = await tracesApi.getRevision(
+              sessionId,
+              currentRevision,
+              currentRevisionToken,
+            )
+            if (cancelled || requestGeneration !== revisionRequestGeneration) return
+            if (!revision.changed) {
+              currentRevision = revision.revision
+              currentRevisionToken = revision.revisionToken
+              return
+            }
+            pendingRevision = revision.revision
+            pendingRevisionKey = traceRevisionKey(revision)
+          } catch {
+            // Older sidecars keep the previous full-snapshot polling behavior.
+            revisionPollingAvailable = false
+          }
+        }
+
+        if (silent) setRefreshing(true)
         const trace = await sessionsApi.getTrace(sessionId)
         if (!isTraceSessionData(trace)) {
           throw new Error(t('trace.snapshotEmpty'))
         }
         if (cancelled) return
+        if (!silent && revisionPollingAvailable) {
+          const requestGeneration = ++revisionRequestGeneration
+          void tracesApi.getRevision(sessionId).then((revision) => {
+            if (cancelled || requestGeneration !== revisionRequestGeneration) return
+            currentRevision = revision.revision
+            currentRevisionToken = revision.revisionToken
+            setRevisionKey(traceRevisionKey(revision))
+          }).catch(() => {
+            if (cancelled || requestGeneration !== revisionRequestGeneration) return
+            revisionPollingAvailable = false
+          })
+        } else if (pendingRevision !== undefined) {
+          currentRevision = pendingRevision
+          currentRevisionToken = pendingRevisionKey?.startsWith('token:')
+            ? pendingRevisionKey.slice('token:'.length)
+            : undefined
+          setRevisionKey(pendingRevisionKey)
+        }
         const signature = traceSnapshotSignature(trace)
         if (silent && snapshotSignatureRef.current === signature) return
         const messageResponse = await sessionsApi.getMessages(sessionId).catch(() => ({ messages: [] }))
@@ -83,12 +139,11 @@ export function TraceSession({
           setState({ status: 'error', message: error instanceof Error ? error.message : String(error) })
         }
       } finally {
+        loadInFlight = false
         if (!cancelled) setRefreshing(false)
       }
     }
 
-    setSelectedId(null)
-    lastSpanIdRef.current = null
     void load(false)
     const interval = window.setInterval(() => {
       void load(true)
@@ -231,6 +286,7 @@ export function TraceSession({
                   span={activeSpan}
                   viewModel={viewModel}
                   sessionId={sessionId}
+                  revisionKey={revisionKey}
                   onSelect={setSelectedId}
                 />
               }
@@ -242,6 +298,15 @@ export function TraceSession({
       )}
     </div>
   )
+}
+
+function traceRevisionKey(revision: {
+  revision: number
+  revisionToken?: string
+}): string {
+  return revision.revisionToken
+    ? `token:${revision.revisionToken}`
+    : `legacy:${revision.revision}`
 }
 
 function TraceHeader({

@@ -59,6 +59,7 @@ export function buildGrokFetch(
 
     void source
     const requestUpstream = (requestHeaders: Headers) => inner(GROK_CLI_API_ENDPOINT, {
+      ...init,
       method: 'POST',
       headers: requestHeaders,
       body: JSON.stringify(transformedBody),

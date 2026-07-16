@@ -8,6 +8,7 @@ import { homedir, tmpdir } from 'node:os'
 import {
   appendHostDiagnostic,
   buildSidecarEnv,
+  clearProxyEnv,
   createAdapterPlan,
   createServerPlan,
   createTunnelPlan,
@@ -16,21 +17,26 @@ import {
   HOST_DIAGNOSTICS_BYTE_LIMIT,
   HOST_DIAGNOSTICS_LINE_LIMIT,
   killSidecar,
-  mergeProxyEnv,
   parseH5FixedPort,
   preferredServerPorts,
-  proxyUrlFromElectronProxyRules,
   pushStartupLog,
   readH5FixedPort,
   readLastServerPort,
   reserveLocalPort,
   reserveServerPort,
   resolveCloudflaredPath,
+  resolveBundledRipgrepExecutable,
   resolveHostTriple,
+  RIPGREP_PATH_ENV,
   SERVER_STATE_FILE,
+  SYSTEM_PROXY_BRIDGE_ENV,
+  SYSTEM_PROXY_ERROR_ENV,
   spawnSidecar,
   waitForServer,
   waitForTunnelUrl,
+  withAdapterProxyBridgeEnv,
+  withSystemProxyBridgeEnv,
+  withSystemProxyErrorEnv,
   windowsPowerShellOverride,
   writeLastServerPort,
   type SidecarChild,
@@ -81,6 +87,7 @@ describe('Electron sidecar manager', () => {
     expect(resolveHostTriple('darwin', 'x64')).toBe('x86_64-apple-darwin')
     expect(resolveHostTriple('win32', 'x64')).toBe('x86_64-pc-windows-msvc')
     expect(resolveHostTriple('win32', 'arm64')).toBe('aarch64-pc-windows-msvc')
+    expect(resolveHostTriple('linux', 'x64')).toBe('x86_64-unknown-linux-gnu')
     expect(resolveHostTriple('linux', 'arm64')).toBe('aarch64-unknown-linux-gnu')
   })
 
@@ -119,6 +126,58 @@ describe('Electron sidecar manager', () => {
     expect(plan.env.CLAUDE_H5_DIST_DIR).toBe('/Applications/App.app/Contents/Resources/app.asar.unpacked/dist')
   })
 
+  it('passes the packaged ripgrep path to the server and its CLI children', () => {
+    const desktopRoot = mkdtempSync(path.join(tmpdir(), 'cc-haha-ripgrep-plan-'))
+    try {
+      const bundledRipgrep = resolveBundledRipgrepExecutable(desktopRoot)
+      mkdirSync(path.dirname(bundledRipgrep), { recursive: true })
+      writeFileSync(bundledRipgrep, 'fixture')
+
+      const plan = createServerPlan({
+        desktopRoot,
+        appRoot: '/app',
+        port: 49321,
+        env: {},
+      })
+
+      expect(plan.env[RIPGREP_PATH_ENV]).toBe(bundledRipgrep)
+      const pathValue = plan.env.PATH ?? plan.env.Path
+      expect(pathValue?.split(path.delimiter)).toContain(
+        path.dirname(bundledRipgrep),
+      )
+
+      const adapter = createAdapterPlan({
+        desktopRoot,
+        appRoot: '/app',
+        serverUrl: 'http://127.0.0.1:49321',
+        flag: '--telegram',
+        env: {},
+      })
+      expect(adapter.env[RIPGREP_PATH_ENV]).toBe(bundledRipgrep)
+    } finally {
+      rmSync(desktopRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('preserves an explicit ripgrep override', () => {
+    const customDir = mkdtempSync(path.join(tmpdir(), 'cc-haha-custom-ripgrep-'))
+    try {
+      const customRipgrep = path.join(customDir, 'rg')
+      writeFileSync(customRipgrep, 'fixture')
+      const plan = createServerPlan({
+        desktopRoot: '/app/desktop',
+        appRoot: '/app',
+        port: 49321,
+        env: { PATH: '/usr/bin', [RIPGREP_PATH_ENV]: customRipgrep },
+      })
+
+      expect(plan.env[RIPGREP_PATH_ENV]).toBe(customRipgrep)
+      expect(plan.env.PATH?.split(path.delimiter)).toContain(customDir)
+    } finally {
+      rmSync(customDir, { recursive: true, force: true })
+    }
+  })
+
   it('passes portable config and adapter server URL through the sidecar env', () => {
     const configDir = mkdtempSync(path.join(tmpdir(), 'cc-haha-config-'))
     try {
@@ -150,31 +209,63 @@ describe('Electron sidecar manager', () => {
     }
   })
 
-  it('converts Electron system proxy rules into sidecar proxy env', () => {
-    expect(proxyUrlFromElectronProxyRules('DIRECT')).toBeUndefined()
-    expect(proxyUrlFromElectronProxyRules('SOCKS5 127.0.0.1:7891; DIRECT')).toBeUndefined()
-    expect(proxyUrlFromElectronProxyRules('PROXY 127.0.0.1:7897; DIRECT')).toBe('http://127.0.0.1:7897')
-    expect(proxyUrlFromElectronProxyRules('HTTPS proxy.example:8443; DIRECT')).toBe('https://proxy.example:8443')
+  it('isolates the server from inherited proxy env and exposes only the dynamic bridge URL', () => {
+    const baseEnv = {
+      HTTP_PROXY: 'http://stale.example:8080',
+      HTTPS_PROXY: 'http://stale.example:8080',
+      http_proxy: 'http://stale.example:8080',
+      https_proxy: 'http://stale.example:8080',
+      ALL_PROXY: 'socks5://stale.example:1080',
+      all_proxy: 'socks5://stale.example:1080',
+      NO_PROXY: '.corp.local',
+    }
+    const bridgeUrl = 'http://127.0.0.1:49123'
+    const serverEnv = withSystemProxyBridgeEnv(baseEnv, bridgeUrl)
 
-    const env = mergeProxyEnv({}, 'http://127.0.0.1:7897')
-    expect(env.HTTP_PROXY).toBe('http://127.0.0.1:7897')
-    expect(env.HTTPS_PROXY).toBe('http://127.0.0.1:7897')
-    expect(env.http_proxy).toBe('http://127.0.0.1:7897')
-    expect(env.https_proxy).toBe('http://127.0.0.1:7897')
-    expect(env.NO_PROXY).toContain('127.0.0.1')
-    expect(env.no_proxy).toContain('localhost')
+    expect(serverEnv[SYSTEM_PROXY_BRIDGE_ENV]).toBe(bridgeUrl)
+    expect(serverEnv.HTTP_PROXY).toBeUndefined()
+    expect(serverEnv.HTTPS_PROXY).toBeUndefined()
+    expect(serverEnv.http_proxy).toBeUndefined()
+    expect(serverEnv.https_proxy).toBeUndefined()
+    expect(serverEnv.ALL_PROXY).toBeUndefined()
+    expect(serverEnv.all_proxy).toBeUndefined()
+    expect(serverEnv.NO_PROXY).toBe('.corp.local,localhost,127.0.0.1,::1')
+    expect(clearProxyEnv(baseEnv).HTTP_PROXY).toBeUndefined()
   })
 
-  it('does not override explicit sidecar proxy environment and still preserves loopback bypasses', () => {
-    const env = mergeProxyEnv(
-      { HTTPS_PROXY: 'http://manual.example:8080', NO_PROXY: '.corp.local' },
-      'http://system.example:8080',
-    )
+  it('exposes a sanitized system proxy failure without leaving a direct-fallback proxy env', () => {
+    const env = withSystemProxyErrorEnv({
+      HTTP_PROXY: 'http://stale.example:8080',
+      HTTPS_PROXY: 'http://stale.example:8080',
+      ALL_PROXY: 'socks5://stale.example:1080',
+      [SYSTEM_PROXY_BRIDGE_ENV]: 'http://127.0.0.1:49123',
+    }, new Error('bridge failed for https://user:password@proxy.example/path with sk-secret12345678'))
 
-    expect(env.HTTPS_PROXY).toBe('http://manual.example:8080')
     expect(env.HTTP_PROXY).toBeUndefined()
-    expect(env.NO_PROXY).toBe('.corp.local,localhost,127.0.0.1,::1')
-    expect(env.no_proxy).toBe('.corp.local,localhost,127.0.0.1,::1')
+    expect(env.HTTPS_PROXY).toBeUndefined()
+    expect(env.ALL_PROXY).toBeUndefined()
+    expect(env[SYSTEM_PROXY_BRIDGE_ENV]).toBeUndefined()
+    expect(env[SYSTEM_PROXY_ERROR_ENV]).toContain('System proxy bridge unavailable: bridge failed')
+    expect(env[SYSTEM_PROXY_ERROR_ENV]).toContain('https://[REDACTED]@proxy.example/path')
+    expect(env[SYSTEM_PROXY_ERROR_ENV]).not.toContain('password')
+    expect(env[SYSTEM_PROXY_ERROR_ENV]).not.toContain('sk-secret')
+  })
+
+  it('routes adapter sidecars explicitly through the dynamic bridge', () => {
+    const bridgeUrl = 'http://127.0.0.1:49123'
+    const env = withAdapterProxyBridgeEnv({
+      HTTPS_PROXY: 'http://stale.example:8080',
+      ALL_PROXY: 'socks5://stale.example:1080',
+      [SYSTEM_PROXY_BRIDGE_ENV]: bridgeUrl,
+    }, bridgeUrl)
+
+    expect(env.HTTP_PROXY).toBe(bridgeUrl)
+    expect(env.HTTPS_PROXY).toBe(bridgeUrl)
+    expect(env.http_proxy).toBe(bridgeUrl)
+    expect(env.https_proxy).toBe(bridgeUrl)
+    expect(env.ALL_PROXY).toBe(bridgeUrl)
+    expect(env.all_proxy).toBe(bridgeUrl)
+    expect(env.NO_PROXY).toContain('127.0.0.1')
   })
 
   it('keeps startup logs bounded', () => {

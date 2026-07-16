@@ -11,6 +11,7 @@ import { useSessionStore } from '../../stores/sessionStore'
 import { useUIStore } from '../../stores/uiStore'
 import { Button } from '../shared/Button'
 import { ConfirmDialog } from '../shared/ConfirmDialog'
+import { getSessionBrowsablePath } from '../../lib/sessionWorkspace'
 
 type DoctorPanelProps = {
   compact?: boolean
@@ -25,9 +26,7 @@ export function DoctorPanel({ compact = false }: DoctorPanelProps) {
     () => sessions.find((session) => session.id === activeSessionId),
     [activeSessionId, sessions],
   )
-  const cwd = activeSession?.workDirExists === false
-    ? undefined
-    : activeSession?.workDir ?? activeSession?.projectRoot ?? undefined
+  const cwd = getSessionBrowsablePath(activeSession)
   const requestSequence = useRef(0)
   const cwdRef = useRef(cwd)
   cwdRef.current = cwd

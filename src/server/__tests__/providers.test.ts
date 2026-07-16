@@ -1160,20 +1160,34 @@ describe('ProviderService', () => {
       expect(dummyRuntimeEnv.ANTHROPIC_AUTH_TOKEN).toBe('dummy')
     })
 
-    test('proxy providers keep proxy-managed auth regardless of auth strategy', async () => {
-      const svc = new ProviderService()
-      const provider = await svc.addProvider(sampleInput({
-        apiFormat: 'openai_chat',
-        authStrategy: 'auth_token',
-      }))
+    test('proxy providers keep transient desktop auth out of persisted settings', async () => {
+      const originalLocalAccessToken = process.env.CC_HAHA_LOCAL_ACCESS_TOKEN
+      process.env.CC_HAHA_LOCAL_ACCESS_TOKEN = 'desktop-local-secret'
 
-      await svc.activateProvider(provider.id)
+      try {
+        const svc = new ProviderService()
+        for (const apiFormat of ['openai_chat', 'openai_responses'] as const) {
+          const provider = await svc.addProvider(sampleInput({
+            apiFormat,
+            authStrategy: 'auth_token',
+          }))
 
-      const settings = await readSettings()
-      const env = settings.env as Record<string, string>
-      expect(env.ANTHROPIC_API_KEY).toBe('proxy-managed')
-      expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
-      expect(env.ENABLE_TOOL_SEARCH).toBeUndefined()
+          await svc.activateProvider(provider.id)
+
+          const settings = await readSettings()
+          const env = settings.env as Record<string, string>
+          expect(env.ANTHROPIC_API_KEY).toBe('proxy-managed')
+          expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
+          expect(env.ENABLE_TOOL_SEARCH).toBeUndefined()
+          expect(JSON.stringify(settings)).not.toContain('desktop-local-secret')
+        }
+      } finally {
+        if (originalLocalAccessToken === undefined) {
+          delete process.env.CC_HAHA_LOCAL_ACCESS_TOKEN
+        } else {
+          process.env.CC_HAHA_LOCAL_ACCESS_TOKEN = originalLocalAccessToken
+        }
+      }
     })
 
     test('should include preset default env on activation and runtime env', async () => {
@@ -1394,7 +1408,9 @@ describe('ProviderService', () => {
   describe('handleProxyRequest', () => {
     test('records a session trace for proxied OpenAI Chat calls', async () => {
       const originalFetch = globalThis.fetch
-      globalThis.fetch = mock(async () => {
+      const upstreamHeaders: Headers[] = []
+      globalThis.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+        upstreamHeaders.push(new Headers(init?.headers))
         return new Response(JSON.stringify({
           id: 'chatcmpl-trace',
           object: 'chat.completion',
@@ -1417,6 +1433,7 @@ describe('ProviderService', () => {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
+            Authorization: 'Bearer desktop-local-secret',
             'X-Claude-Code-Session-Id': 'session-proxy-trace',
           },
           body: JSON.stringify({
@@ -1442,6 +1459,8 @@ describe('ProviderService', () => {
         })
         expect(trace.calls[0].request.body.preview).toContain('capture this call')
         expect(trace.calls[0].response.body.preview).toContain('chatcmpl-trace')
+        expect(upstreamHeaders[0].get('Authorization')).toBe('Bearer sk-test-key-123')
+        expect(upstreamHeaders[0].get('Authorization')).not.toContain('desktop-local-secret')
       } finally {
         globalThis.fetch = originalFetch
       }
@@ -1500,9 +1519,12 @@ describe('ProviderService', () => {
 
     test('forwards a stable prompt_cache_key from client session metadata for OpenAI Responses upstreams', async () => {
       const originalFetch = globalThis.fetch
-      const calls: Array<{ body: Record<string, unknown> }> = []
+      const calls: Array<{ body: Record<string, unknown>; headers: Headers }> = []
       globalThis.fetch = mock(async (_url: string | URL | Request, init?: RequestInit) => {
-        calls.push({ body: JSON.parse(String(init?.body)) as Record<string, unknown> })
+        calls.push({
+          body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+          headers: new Headers(init?.headers),
+        })
         return new Response(JSON.stringify({
           id: 'resp-1',
           object: 'response',
@@ -1524,7 +1546,10 @@ describe('ProviderService', () => {
 
         const req = new Request('http://localhost:3456/proxy/v1/messages', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer desktop-local-secret',
+          },
           body: JSON.stringify({
             model: 'gpt-5.4',
             max_tokens: 64,
@@ -1536,6 +1561,8 @@ describe('ProviderService', () => {
         const res = await handleProxyRequest(req, new URL(req.url))
         expect(res.status).toBe(200)
         expect(calls[0].body.prompt_cache_key).toBe('sess-42aa')
+        expect(calls[0].headers.get('Authorization')).toBe('Bearer sk-test-key-123')
+        expect(calls[0].headers.get('Authorization')).not.toContain('desktop-local-secret')
       } finally {
         globalThis.fetch = originalFetch
       }

@@ -60,6 +60,12 @@ export async function handleTracesApi(
         throw methodNotAllowed(req.method, '/api/traces/settings')
 
       default:
+        if (segments.length === 4 && segments[3] === 'revision') {
+          if (req.method !== 'GET') {
+            throw methodNotAllowed(req.method, '/api/traces/:sessionId/revision')
+          }
+          return await getTraceSessionRevision(sub, url)
+        }
         if (req.method === 'DELETE' && segments.length === 3) {
           return await deleteTraceSession(sub)
         }
@@ -68,6 +74,28 @@ export async function handleTracesApi(
   } catch (error) {
     return errorResponse(error)
   }
+}
+
+async function getTraceSessionRevision(segment: string, url: URL): Promise<Response> {
+  const sessionId = decodePathSegment(segment).trim()
+  if (!sessionId) throw ApiError.badRequest('Trace session id is required')
+  const value = url.searchParams.get('sinceRevision')
+  const parsed = value === null ? undefined : Number(value)
+  if (parsed !== undefined && (!Number.isSafeInteger(parsed) || parsed < 0)) {
+    throw ApiError.badRequest('Invalid trace revision')
+  }
+  const sinceRevisionToken = url.searchParams.get('sinceRevisionToken') ?? undefined
+  if (
+    sinceRevisionToken !== undefined &&
+    (sinceRevisionToken.length < 1 || sinceRevisionToken.length > 512)
+  ) {
+    throw ApiError.badRequest('Invalid trace revision token')
+  }
+  return Response.json(await traceCaptureService.getSessionTraceRevision(
+    sessionId,
+    parsed,
+    sinceRevisionToken,
+  ))
 }
 
 async function deleteTraceSession(segment: string): Promise<Response> {

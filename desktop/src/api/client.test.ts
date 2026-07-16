@@ -115,6 +115,24 @@ describe('api diagnostics reporting', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
+  it('propagates caller cancellation without reporting an API failure', async () => {
+    const controller = new AbortController()
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+    fetchMock.mockImplementation((_url, init) => new Promise<Response>((_, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        reject(new DOMException('The operation was aborted.', 'AbortError'))
+      })
+    }))
+
+    const request = api.get('/api/scheduled-tasks/runs/run-1', {
+      signal: controller.signal,
+    })
+    controller.abort()
+
+    await expect(request).rejects.toMatchObject({ name: 'AbortError' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it('defaults local API requests to a 120 second timeout', async () => {
     vi.useFakeTimers()
     const fetchMock = vi.spyOn(globalThis, 'fetch')

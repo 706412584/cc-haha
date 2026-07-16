@@ -18,6 +18,8 @@ import { handleHahaOpenAIOAuthCallback } from './api/haha-openai-oauth.js'
 import { handlePreviewFs } from './api/previewFs.js'
 import { handleLocalFile } from './api/localFile.js'
 import { sessionService } from './services/sessionService.js'
+import { localIndexCoordinator } from './services/localIndex/coordinator.js'
+import { searchContentCoordinator } from './services/localIndex/searchContentCoordinator.js'
 import { conversationService } from './services/conversationService.js'
 import { OPENAI_CODEX_REDIRECT_PATH } from '../services/openaiAuth/client.js'
 import { ensureDesktopCliLauncherInstalled } from './services/desktopCliLauncherService.js'
@@ -62,6 +64,61 @@ function resolveServerOptions() {
 const SERVER_OPTIONS = resolveServerOptions()
 const PORT = SERVER_OPTIONS.port
 const HOST = SERVER_OPTIONS.host
+const SEARCH_INDEX_PRIMARY_WAIT_MS = 30_000
+const SEARCH_INDEX_PRIMARY_POLL_MS = 50
+
+type BackgroundIndexStartupOptions = {
+  startPrimary?: () => Promise<void>
+  getPrimaryState?: () => string
+  startSearch?: () => Promise<void>
+  wait?: () => Promise<void>
+  now?: () => number
+  maxPrimaryWaitMs?: number
+  signal?: AbortSignal
+}
+
+/** Give the session-list projection first access to cold-start I/O. */
+export async function startBackgroundIndexesInPriorityOrder(
+  options: BackgroundIndexStartupOptions = {},
+): Promise<void> {
+  const startPrimary = options.startPrimary ?? (() => localIndexCoordinator.start())
+  const getPrimaryState = options.getPrimaryState ?? (
+    () => localIndexCoordinator.getPublicStatus().state
+  )
+  const startSearch = options.startSearch ?? (() => searchContentCoordinator.start())
+  const wait = options.wait ?? (
+    () => new Promise<void>(resolve => setTimeout(resolve, SEARCH_INDEX_PRIMARY_POLL_MS))
+  )
+  const now = options.now ?? Date.now
+  const deadline = now() + Math.max(
+    0,
+    options.maxPrimaryWaitMs ?? SEARCH_INDEX_PRIMARY_WAIT_MS,
+  )
+
+  await startPrimary()
+  while (
+    !options.signal?.aborted &&
+    getPrimaryState() === 'building' &&
+    now() < deadline
+  ) await wait()
+  if (!options.signal?.aborted) await startSearch()
+}
+
+let backgroundIndexStartupController: AbortController | undefined
+let backgroundIndexStartup: Promise<void> | undefined
+
+function beginBackgroundIndexStartup(): void {
+  backgroundIndexStartupController?.abort()
+  const controller = new AbortController()
+  backgroundIndexStartupController = controller
+  const operation = startBackgroundIndexesInPriorityOrder({
+    signal: controller.signal,
+  }).catch(() => undefined)
+  backgroundIndexStartup = operation
+  void operation.finally(() => {
+    if (backgroundIndexStartup === operation) backgroundIndexStartup = undefined
+  })
+}
 
 function withCors(response: Response, cors: CorsResolution): Response {
   const headers = new Headers(response.headers)
@@ -468,6 +525,11 @@ export function startServer(port = PORT, host = HOST) {
     throw startupError
   }
 
+  // Bun.serve is already accepting requests. Both projections remain
+  // background work; session-list metadata gets priority on a cold start so
+  // full-text backfill cannot make the sidebar slower on low-memory machines.
+  beginBackgroundIndexStartup()
+
   // Start watching ~/.claude/teams/ for real-time WebSocket push
   teamWatcher.start()
 
@@ -494,6 +556,13 @@ export async function stopServerRuntimeForShutdown(
 ): Promise<void> {
   teamWatcher.stop()
   cronScheduler.stop()
+  backgroundIndexStartupController?.abort()
+  const pendingIndexStartup = backgroundIndexStartup
+  await Promise.all([
+    localIndexCoordinator.stop(),
+    searchContentCoordinator.stop(),
+    pendingIndexStartup,
+  ])
 
   const active = conversationService.getActiveSessions()
   if (active.length > 0) {

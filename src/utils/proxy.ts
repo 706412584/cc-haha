@@ -2,7 +2,7 @@
 // dynamically in getAWSClientProxyConfig() to defer ~929KB of AWS SDK.
 // undici is lazy-required inside getProxyAgent/configureGlobalAgents to defer
 // ~1.5MB when no HTTPS_PROXY/mTLS env vars are set (the common case).
-import axios, { type AxiosInstance } from 'axios'
+import axios, { type AxiosInstance, type AxiosRequestConfig } from 'axios'
 import type { LookupOptions } from 'dns'
 import type { Agent } from 'http'
 import { HttpsProxyAgent, type HttpsProxyAgentOptions } from 'https-proxy-agent'
@@ -180,6 +180,25 @@ function createHttpsProxyAgent(
   }
 
   return new HttpsProxyAgent(proxyUrl, { ...agentOptions, ...extra })
+}
+
+/**
+ * Build request-local Axios routing without mutating the process-wide Axios
+ * defaults. `undefined` preserves the CLI's existing inherited environment,
+ * while `null` is an explicit direct connection.
+ */
+export function getAxiosProxyOptions(
+  proxyUrl: string | null | undefined,
+): Pick<AxiosRequestConfig, 'proxy' | 'httpAgent' | 'httpsAgent'> {
+  if (proxyUrl === undefined) return {}
+  if (!proxyUrl) return { proxy: false }
+
+  const proxyAgent = createHttpsProxyAgent(proxyUrl)
+  return {
+    proxy: false,
+    httpAgent: proxyAgent,
+    httpsAgent: proxyAgent,
+  }
 }
 
 /**

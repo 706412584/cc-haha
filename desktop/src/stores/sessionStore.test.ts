@@ -57,6 +57,24 @@ function createDeferred<T>() {
   return { promise, resolve }
 }
 
+function makeIndexStatus(
+  state: 'off' | 'building' | 'ready' | 'degraded',
+  indexed = 0,
+  discovered = indexed,
+) {
+  return {
+    mode: state === 'off' ? 'off' as const : 'on' as const,
+    state,
+    discovered,
+    indexed,
+    degradedSources: state === 'degraded' ? 1 : 0,
+    databaseBytes: 4096,
+    walBytes: 0,
+    lastUpdatedAt: '2026-07-15T00:00:00.000Z',
+    lastErrorCode: state === 'degraded' ? 'source_unreadable' : null,
+  }
+}
+
 describe('sessionStore', () => {
   beforeEach(() => {
     branchMock.mockReset()
@@ -71,6 +89,8 @@ describe('sessionStore', () => {
       activeSessionId: null,
       isLoading: false,
       error: null,
+      indexStatus: null,
+      selectedSessionIds: new Set(),
     })
     useSettingsStore.setState({ permissionMode: 'default' })
     useTabStore.setState({ tabs: [], activeTabId: null })
@@ -285,6 +305,167 @@ describe('sessionStore', () => {
 
     expect(useSessionStore.getState().sessions).toHaveLength(1)
     expect(useSessionStore.getState().sessions[0]?.id).toBe('new-session')
+  })
+
+  it('keeps older servers without index status backward compatible', async () => {
+    useSessionStore.setState({
+      indexStatus: makeIndexStatus('building', 3, 10),
+    })
+    listMock.mockResolvedValue({
+      sessions: [makeSession('legacy-session', '2026-07-15T00:00:00.000Z')],
+      total: 1,
+    })
+
+    await useSessionStore.getState().fetchSessions()
+
+    expect(useSessionStore.getState().sessions.map((session) => session.id)).toEqual(['legacy-session'])
+    expect(useSessionStore.getState().indexStatus).toBeNull()
+  })
+
+  it('merges partial building rows without clearing active or selected sessions', async () => {
+    const retained = makeSession('retained-session', '2026-07-15T00:00:01.000Z')
+    useSessionStore.setState({
+      sessions: [retained],
+      activeSessionId: retained.id,
+      isBatchMode: true,
+      selectedSessionIds: new Set([retained.id]),
+    })
+    listMock.mockResolvedValue({
+      sessions: [makeSession('newly-indexed', '2026-07-15T00:00:02.000Z')],
+      total: 2,
+      index: makeIndexStatus('building', 1, 2),
+    })
+
+    await useSessionStore.getState().fetchSessions()
+
+    const state = useSessionStore.getState()
+    expect(state.sessions.map((session) => session.id)).toEqual(['newly-indexed', 'retained-session'])
+    expect(state.activeSessionId).toBe(retained.id)
+    expect([...state.selectedSessionIds]).toEqual([retained.id])
+    expect(state.indexStatus).toMatchObject({ state: 'building', indexed: 1, discovered: 2 })
+  })
+
+  it('treats ready rows as an authoritative replacement', async () => {
+    useSessionStore.setState({
+      sessions: [makeSession('stale-session', '2026-07-15T00:00:01.000Z')],
+    })
+    listMock.mockResolvedValue({
+      sessions: [makeSession('ready-session', '2026-07-15T00:00:02.000Z')],
+      total: 1,
+      index: makeIndexStatus('ready', 1, 1),
+    })
+
+    await useSessionStore.getState().fetchSessions()
+
+    expect(useSessionStore.getState().sessions.map((session) => session.id)).toEqual(['ready-session'])
+    expect(useSessionStore.getState().indexStatus?.state).toBe('ready')
+  })
+
+  it('treats off rows as an authoritative file-backed replacement', async () => {
+    useSessionStore.setState({
+      sessions: [makeSession('stale-session', '2026-07-15T00:00:01.000Z')],
+    })
+    listMock.mockResolvedValue({
+      sessions: [makeSession('file-session', '2026-07-15T00:00:02.000Z')],
+      total: 1,
+      index: makeIndexStatus('off'),
+    })
+
+    await useSessionStore.getState().fetchSessions()
+
+    expect(useSessionStore.getState().sessions.map((session) => session.id)).toEqual(['file-session'])
+    expect(useSessionStore.getState().indexStatus?.state).toBe('off')
+  })
+
+  it('keeps loading without showing an error when the first building page is empty', async () => {
+    listMock.mockResolvedValue({
+      sessions: [],
+      total: 10,
+      index: makeIndexStatus('building', 0, 10),
+    })
+
+    await useSessionStore.getState().fetchSessions()
+
+    expect(useSessionStore.getState()).toMatchObject({
+      sessions: [],
+      isLoading: true,
+      error: null,
+      indexStatus: { state: 'building', indexed: 0, discovered: 10 },
+    })
+  })
+
+  it('rejects a slower old response for both rows and index progress', async () => {
+    const slow = createDeferred<{
+      sessions: ReturnType<typeof makeSession>[]
+      total: number
+      index: ReturnType<typeof makeIndexStatus>
+    }>()
+    const fast = createDeferred<{
+      sessions: ReturnType<typeof makeSession>[]
+      total: number
+      index: ReturnType<typeof makeIndexStatus>
+    }>()
+    listMock.mockReturnValueOnce(slow.promise).mockReturnValueOnce(fast.promise)
+
+    const first = useSessionStore.getState().fetchSessions()
+    const second = useSessionStore.getState().fetchSessions()
+
+    fast.resolve({
+      sessions: [makeSession('new-session', '2026-07-15T00:00:02.000Z')],
+      total: 1,
+      index: makeIndexStatus('building', 8, 10),
+    })
+    await second
+    slow.resolve({
+      sessions: [makeSession('old-session', '2026-07-15T00:00:01.000Z')],
+      total: 1,
+      index: makeIndexStatus('building', 2, 10),
+    })
+    await first
+
+    expect(useSessionStore.getState().sessions.map((session) => session.id)).toEqual(['new-session'])
+    expect(useSessionStore.getState().indexStatus).toMatchObject({ indexed: 8, discovered: 10 })
+  })
+
+  it('treats degraded fallback rows as an authoritative file-backed replacement', async () => {
+    useSessionStore.setState({
+      sessions: [makeSession('known-session', '2026-07-15T00:00:01.000Z')],
+    })
+    listMock.mockResolvedValue({
+      sessions: [makeSession('fallback-session', '2026-07-15T00:00:02.000Z')],
+      total: 2,
+      index: makeIndexStatus('degraded', 1, 2),
+    })
+
+    await useSessionStore.getState().fetchSessions()
+
+    expect(useSessionStore.getState().sessions.map((session) => session.id)).toEqual(['fallback-session'])
+    expect(useSessionStore.getState().error).toBeNull()
+    expect(useSessionStore.getState().indexStatus?.state).toBe('degraded')
+  })
+
+  it('keeps shadow building responses authoritative and bounded by the requested limit', async () => {
+    useSessionStore.setState({
+      sessions: [makeSession('stale-session', '2026-07-15T00:00:01.000Z')],
+    })
+    const fileSessions = Array.from({ length: 400 }, (_, index) => (
+      makeSession(`file-session-${index}`, `2026-07-15T00:${String(index % 60).padStart(2, '0')}:02.000Z`)
+    ))
+    listMock.mockResolvedValue({
+      sessions: fileSessions,
+      total: fileSessions.length,
+      index: {
+        ...makeIndexStatus('building', 200, 400),
+        mode: 'shadow',
+      },
+    })
+
+    await useSessionStore.getState().fetchSessions()
+
+    const sessions = useSessionStore.getState().sessions
+    expect(sessions).toHaveLength(400)
+    expect(sessions.some((session) => session.id === 'stale-session')).toBe(false)
+    expect(useSessionStore.getState().indexStatus).toMatchObject({ mode: 'shadow', state: 'building' })
   })
 
   it('forwards direct branch switch repository options when creating a session', async () => {

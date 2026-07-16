@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { getProxyFetchOptions, shouldBypassProxy } from './proxy.js'
+import {
+  getAxiosProxyOptions,
+  getProxyFetchOptions,
+  shouldBypassProxy,
+} from './proxy.js'
 
 const originalEnv = {
   HTTP_PROXY: process.env.HTTP_PROXY,
@@ -74,5 +78,15 @@ describe('proxy environment handling', () => {
       forAnthropicAPI: true,
       targetUrl: 'https://api.example.com',
     }).proxy).toBe('http://127.0.0.1:1181')
+  })
+
+  test('distinguishes inherited, direct, and explicit Axios proxy routing', () => {
+    expect(getAxiosProxyOptions(undefined)).toEqual({})
+    expect(getAxiosProxyOptions(null)).toEqual({ proxy: false })
+
+    const explicit = getAxiosProxyOptions('http://user:password@127.0.0.1:17890')
+    expect(explicit.proxy).toBe(false)
+    expect(explicit.httpAgent).toBeDefined()
+    expect(explicit.httpsAgent).toBe(explicit.httpAgent)
   })
 })

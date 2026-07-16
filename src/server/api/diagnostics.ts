@@ -8,6 +8,8 @@
  * POST   /api/diagnostics/export       — write a sanitized tar.gz bundle
  * POST   /api/diagnostics/open-log-dir — open the diagnostics directory
  * DELETE /api/diagnostics              — clear diagnostics files
+ * GET    /api/diagnostics/local-index  — sanitized local-index status
+ * POST   /api/diagnostics/local-index/rebuild — rebuild the fixed derived index
  */
 
 import { diagnosticsService } from '../services/diagnosticsService.js'
@@ -28,6 +30,19 @@ export async function handleDiagnosticsApi(
 
     if (action === 'status' && req.method === 'GET') {
       return Response.json(await diagnosticsService.getStatus())
+    }
+
+    if (action === 'local-index' && !segments[3] && req.method === 'GET') {
+      return Response.json(diagnosticsService.getLocalIndexStatus())
+    }
+
+    if (
+      action === 'local-index' &&
+      segments[3] === 'rebuild' &&
+      !segments[4] &&
+      req.method === 'POST'
+    ) {
+      return Response.json(await diagnosticsService.rebuildLocalIndex())
     }
 
     if (action === 'events' && req.method === 'GET') {

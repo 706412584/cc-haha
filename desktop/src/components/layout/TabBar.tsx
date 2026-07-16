@@ -31,6 +31,7 @@ import { SessionActivityButton } from '../activity/SessionActivityButton'
 import { useActivityPanelStore } from '../../stores/activityPanelStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useUIStore } from '../../stores/uiStore'
+import { getSessionBrowsablePath } from '../../lib/sessionWorkspace'
 
 const TAB_WIDTH = 180
 const DRAG_START_THRESHOLD = 4
@@ -85,8 +86,8 @@ export function TabBar() {
   const activeSession = useSessionStore((state) =>
     activeTabId ? state.sessions.find((session) => session.id === activeTabId) : undefined,
   )
-  const openProjectPath = isActiveSessionTab && activeSession?.workDirExists !== false
-    ? activeSession?.workDir ?? null
+  const openProjectPath = isActiveSessionTab
+    ? getSessionBrowsablePath(activeSession) ?? null
     : null
   // The right-side panel is now a single unified "workbench" with a per-session
   // mode (file ↔ browser). The folder/browser toolbar buttons reflect whether

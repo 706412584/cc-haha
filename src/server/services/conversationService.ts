@@ -44,7 +44,12 @@ import { ORCHESTRATION_SYSTEM_PROMPT } from '../orchestrationPrompt.js'
 import { sanitizePath } from '../../utils/path.js'
 import { getProcessEnvWithTerminalShellEnvironment } from '../../utils/terminalShellEnvironment.js'
 import { attributionHeaderEnvForModel } from './attributionHeaderPolicy.js'
-import { buildNetworkEnvironment, loadNetworkSettings } from './networkSettings.js'
+import {
+  buildNetworkEnvironment,
+  loadNetworkSettings,
+  SYSTEM_PROXY_URL_ENV,
+  type NetworkSettings,
+} from './networkSettings.js'
 import { readTraceCaptureSettings } from './traceCaptureService.js'
 import { logError } from '../../utils/log.js'
 import {
@@ -129,15 +134,35 @@ type MaterializedAttachments = {
   imageMetadataTexts: string[]
 }
 
+type SessionOutputCallback = (msg: any) => void
+
+function networkRoutingFingerprint(
+  settings: NetworkSettings,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return JSON.stringify({
+    timeoutMs: settings.aiRequestTimeoutMs,
+    proxyMode: settings.proxy.mode,
+    manualProxyUrl: settings.proxy.mode === 'manual' ? settings.proxy.url.trim() : '',
+    systemProxyUrl:
+      settings.proxy.mode === 'system'
+        ? env[SYSTEM_PROXY_URL_ENV]?.trim() || ''
+        : '',
+    noProxy: env.no_proxy || env.NO_PROXY || '',
+  })
+}
+
 type SessionProcess = {
   // Identifies this specific spawned process. A `sessionId` is reused across
   // restarts (e.g. provider/model switches), so callers that captured a stop
   // intent for one process must not act on a later restart's process.
   instanceId: string
   proc: ReturnType<typeof Bun.spawn>
-  outputCallbacks: Array<(msg: any) => void>
+  outputCallbacks: SessionOutputCallback[]
   workDir: string
   permissionMode: string
+  networkRoutingFingerprint: string
+  networkDerivedFirstTokenTimeout: boolean
   sdkToken: string
   sdkSocket: { send(data: string): void } | null
   sdkAttached: Promise<void>
@@ -371,7 +396,15 @@ export class ConversationService {
     // 工作目录就变成 `/`。把 CALLER_DIR / PWD 显式覆盖成 workDir，preload.ts
     // chdir 后落到正确目录。
     //
-    const childEnv = await this.buildChildEnv(launchWorkDir, sdkUrl, options)
+    const networkSettings = await loadNetworkSettings()
+    const networkRuntimeMetadata = { firstTokenTimeoutDerived: false }
+    const childEnv = await this.buildChildEnv(
+      launchWorkDir,
+      sdkUrl,
+      options,
+      networkSettings,
+      networkRuntimeMetadata,
+    )
     const usesOfficialOAuth = this.shouldMarkManagedOAuth(options?.providerId)
 
     let proc: ReturnType<typeof Bun.spawn>
@@ -409,6 +442,8 @@ export class ConversationService {
       outputCallbacks: [],
       workDir: launchWorkDir,
       permissionMode: options?.permissionMode || 'default',
+      networkRoutingFingerprint: networkRoutingFingerprint(networkSettings, childEnv),
+      networkDerivedFirstTokenTimeout: networkRuntimeMetadata.firstTokenTimeoutDerived,
       sdkToken: this.getSdkTokenFromUrl(sdkUrl),
       sdkSocket: null,
       sdkAttached,
@@ -539,11 +574,15 @@ export class ConversationService {
     content: string,
     attachments?: AttachmentRef[],
   ): Promise<boolean> {
-    const session = this.sessions.get(sessionId)
+    const userContent = await this.buildUserContent(content, sessionId, attachments)
+    let session = this.sessions.get(sessionId)
+    if (session && !await this.refreshNetworkEnvironmentBeforeTurn(sessionId, session)) {
+      return false
+    }
+    session = this.sessions.get(sessionId)
     if (session) {
       await this.refreshOfficialOAuthTokenBeforeTurn(sessionId, session)
     }
-    const userContent = await this.buildUserContent(content, sessionId, attachments)
     return this.sendSdkMessage(sessionId, {
       type: 'user',
       message: {
@@ -553,6 +592,45 @@ export class ConversationService {
       parent_tool_use_id: null,
       session_id: '',
     })
+  }
+
+  private async refreshNetworkEnvironmentBeforeTurn(
+    sessionId: string,
+    session: SessionProcess,
+  ): Promise<boolean> {
+    const settings = await loadNetworkSettings()
+    const baseEnv = await getProcessEnvWithTerminalShellEnvironment()
+    const networkEnv = buildNetworkEnvironment(settings, baseEnv)
+    const fingerprint = networkRoutingFingerprint(settings, {
+      ...baseEnv,
+      ...networkEnv,
+    })
+
+    if (this.sessions.get(sessionId) !== session) return false
+    if (!session.networkRoutingFingerprint) {
+      session.networkRoutingFingerprint = fingerprint
+      return true
+    }
+    if (session.networkRoutingFingerprint === fingerprint) return true
+
+    const noProxy = networkEnv.no_proxy || networkEnv.NO_PROXY || ''
+    const variables: Record<string, string> = {
+      ...networkEnv,
+      NO_PROXY: noProxy,
+      no_proxy: noProxy,
+    }
+    if (session.networkDerivedFirstTokenTimeout) {
+      variables.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS = networkEnv.API_TIMEOUT_MS
+    }
+
+    const sent = this.sendSdkMessage(sessionId, {
+      type: 'update_environment_variables',
+      variables,
+    })
+    if (sent && this.sessions.get(sessionId) === session) {
+      session.networkRoutingFingerprint = fingerprint
+    }
+    return sent
   }
 
   respondToPermission(
@@ -1244,6 +1322,8 @@ export class ConversationService {
     workDir: string,
     sdkUrl?: string,
     options?: SessionStartOptions,
+    networkSettingsOverride?: NetworkSettings,
+    networkRuntimeMetadata?: { firstTokenTimeoutDerived: boolean },
   ): Promise<Record<string, string>> {
     // Provider isolation: when Desktop has its own provider config/index,
     // strip inherited provider env vars so the child CLI reads fresh values
@@ -1253,6 +1333,10 @@ export class ConversationService {
     // app/server with ANTHROPIC_* env vars, keep those env vars so Windows
     // dev-mode and env-only setups can still authenticate successfully.
     const cleanEnv = await getProcessEnvWithTerminalShellEnvironment()
+    if (networkRuntimeMetadata) {
+      networkRuntimeMetadata.firstTokenTimeoutDerived =
+        !cleanEnv.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS
+    }
     delete cleanEnv.CLAUDE_CODE_OAUTH_TOKEN
     if (options?.resumeInterruptedTurn === false) {
       delete cleanEnv.CLAUDE_CODE_RESUME_INTERRUPTED_TURN
@@ -1289,7 +1373,10 @@ export class ConversationService {
     const explicitProviderEnv = explicitProvider
       ? await this.providerService.getProviderRuntimeEnv(explicitProvider.id)
       : null
-    const networkEnv = buildNetworkEnvironment(await loadNetworkSettings(), cleanEnv)
+    const networkEnv = buildNetworkEnvironment(
+      networkSettingsOverride ?? await loadNetworkSettings(),
+      cleanEnv,
+    )
     const traceCaptureEnabled = (await readTraceCaptureSettings()).enabled
     if (explicitProviderEnv && options?.model?.trim()) {
       applyProviderRuntimeModel(explicitProviderEnv, options.model)

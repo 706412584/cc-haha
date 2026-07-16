@@ -4,6 +4,12 @@ import type { OAuthProfileResponse } from 'src/services/oauth/types.js'
 import { getAnthropicApiKey } from 'src/utils/auth.js'
 import { getGlobalConfig } from 'src/utils/config.js'
 import { logError } from 'src/utils/log.js'
+import { getAxiosProxyOptions } from 'src/utils/proxy.js'
+
+export type OAuthProfileFetchOptions = {
+  proxyUrl?: string | null
+}
+
 export async function getOauthProfileFromApiKey(): Promise<
   OAuthProfileResponse | undefined
 > {
@@ -36,6 +42,7 @@ export async function getOauthProfileFromApiKey(): Promise<
 
 export async function getOauthProfileFromOauthToken(
   accessToken: string,
+  options: OAuthProfileFetchOptions = {},
 ): Promise<OAuthProfileResponse | undefined> {
   const endpoint = `${getOauthConfig().BASE_API_URL}/api/oauth/profile`
   try {
@@ -45,6 +52,7 @@ export async function getOauthProfileFromOauthToken(
         'Content-Type': 'application/json',
       },
       timeout: 10000,
+      ...getAxiosProxyOptions(options.proxyUrl),
     })
     return response.data
   } catch (error) {

@@ -419,8 +419,9 @@ describe('touch-H5 stylesheet contract', () => {
     expect(css).toMatch(/html\[data-touch-h5\]\[data-touch-h5-keyboard\] \.app-shell-viewport \{\s*\n\s*padding-bottom: 0px;/)
   })
 
-  it('keeps message action bars always visible on touch', () => {
-    expect(css).toMatch(/html\[data-touch-h5\] \[data-message-actions\] \{\s*\n\s*opacity: 1;\s*\n\s*pointer-events: auto;/)
+  it('keeps message action bars visible in the mobile shell without relying on touch detection', () => {
+    expect(css).toMatch(/\.app-shell--mobile \[data-message-actions\],\s*\nhtml\[data-touch-h5\] \[data-message-actions\] \{\s*\n\s*opacity: 1;\s*\n\s*pointer-events: auto;/)
+    expect(css).toMatch(/\.app-shell--mobile \[data-message-actions\] button \{\s*\n\s*width: 2\.5rem;/)
   })
 
   it('disables paint skipping for the trace-window rows too', () => {

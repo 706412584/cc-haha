@@ -8,6 +8,11 @@
 
 import { ProviderService } from './providerService.js'
 import { getPresetAuthStrategy } from './providerRuntimeEnv.js'
+import {
+  getNetworkProxyFetchOptions,
+  loadNetworkSettings,
+  type NetworkSettings,
+} from './networkSettings.js'
 import { sessionService } from './sessionService.js'
 import { hahaOpenAIOAuthService } from './hahaOpenAIOAuthService.js'
 import { isOpenAIOfficialProviderId } from './openaiOfficialProvider.js'
@@ -162,6 +167,7 @@ export async function generateTitle(
 
   try {
     const providerService = new ProviderService()
+    const networkSettings = await loadNetworkSettings()
     if (providerId === null) return null
 
     let resolvedProvider = providerId
@@ -182,6 +188,7 @@ export async function generateTitle(
         trimmed,
         resolvedProvider.models.haiku || resolvedProvider.models.main,
         languagePreference,
+        networkSettings,
       )
     }
 
@@ -209,6 +216,7 @@ export async function generateTitle(
               content: buildTitleUserPrompt(trimmed, languagePreference, strictLanguage),
             }],
           },
+          networkSettings,
         )
         if (!response) return null
         return parseGeneratedTitleText(response)
@@ -224,6 +232,7 @@ async function generateOpenAIOfficialTitle(
   trimmed: string,
   model: string,
   languagePreference?: TitleLanguagePreference | null,
+  networkSettings?: NetworkSettings,
 ): Promise<string | null> {
   const tokens = await hahaOpenAIOAuthService.ensureFreshTokens()
   if (!tokens?.accessToken) return null
@@ -257,6 +266,9 @@ async function generateOpenAIOfficialTitle(
         headers,
         body: JSON.stringify(requestBody),
         signal: AbortSignal.timeout(15_000),
+        ...(networkSettings
+          ? getNetworkProxyFetchOptions(networkSettings, OPENAI_CODEX_API_ENDPOINT)
+          : {}),
       })
 
       if (!response.ok || !response.body) return null
@@ -278,6 +290,7 @@ async function fetchAnthropicTitleResponse(
   url: string,
   requestHeaders: Record<string, string>,
   requestBody: Record<string, unknown>,
+  networkSettings: NetworkSettings,
 ): Promise<string | null> {
   let response = await fetch(url, {
     method: 'POST',
@@ -287,6 +300,7 @@ async function fetchAnthropicTitleResponse(
       thinking: { type: 'disabled' },
     }),
     signal: AbortSignal.timeout(15_000),
+    ...getNetworkProxyFetchOptions(networkSettings, url),
   })
 
   if (!response.ok && response.status >= 400 && response.status < 500) {
@@ -295,6 +309,7 @@ async function fetchAnthropicTitleResponse(
       headers: requestHeaders,
       body: JSON.stringify(requestBody),
       signal: AbortSignal.timeout(15_000),
+      ...getNetworkProxyFetchOptions(networkSettings, url),
     })
   }
 

@@ -4,7 +4,10 @@ import * as fs from 'fs'
 import * as fsp from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
-import { handleFilesystemRoute } from '../api/filesystem.js'
+import {
+  getProjectSearchFiles,
+  handleFilesystemRoute,
+} from '../api/filesystem.js'
 import { clearFilesystemAccessRootsForTests } from '../services/filesystemAccessRoots.js'
 import { getRepositoryContext } from '../services/repositoryLaunchService.js'
 
@@ -216,6 +219,56 @@ describe('filesystem API', () => {
       }),
     ]))
     expect(body.entries.some((entry) => entry.relativePath === 'node_modules/pkg/cache-result.js')).toBe(false)
+  })
+
+  it('keeps non-git file suggestions working when ripgrep cannot start', async () => {
+    const fixtureDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'claude-filesystem-fallback-'))
+    cleanupDirs.add(fixtureDir)
+    await fsp.mkdir(path.join(fixtureDir, 'app'), { recursive: true })
+    await fsp.mkdir(path.join(fixtureDir, 'app', 'generated'), { recursive: true })
+    await fsp.mkdir(path.join(fixtureDir, 'node_modules', 'pkg'), { recursive: true })
+    await fsp.mkdir(path.join(fixtureDir, '.git', 'objects'), { recursive: true })
+    await fsp.writeFile(path.join(fixtureDir, '.gitignore'), 'node_modules/\n')
+    await fsp.writeFile(path.join(fixtureDir, 'app', '.gitignore'), 'generated/\n')
+    await fsp.writeFile(path.join(fixtureDir, 'app', 'search-result.ts'), 'export {}')
+    await fsp.writeFile(path.join(fixtureDir, 'app', 'generated', 'search-result.ts'), '')
+    await fsp.writeFile(path.join(fixtureDir, 'node_modules', 'pkg', 'search-result.js'), '')
+    await fsp.writeFile(path.join(fixtureDir, '.git', 'objects', 'search-result'), '')
+
+    const files = await getProjectSearchFiles(fixtureDir, {
+      ripGrepFn: async () => {
+        throw new Error('ripgrep unavailable')
+      },
+    })
+
+    expect(files).toContain('app/search-result.ts')
+    expect(files).not.toContain('app/generated/search-result.ts')
+    expect(files).not.toContain('node_modules/pkg/search-result.js')
+    expect(files).not.toContain('.git/objects/search-result')
+  })
+
+  it('does not let unrelated files exhaust the fallback search budget', async () => {
+    const fixtureDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'claude-filesystem-fair-fallback-'))
+    cleanupDirs.add(fixtureDir)
+    await fsp.mkdir(path.join(fixtureDir, 'a-target'), { recursive: true })
+    await fsp.mkdir(path.join(fixtureDir, 'z-heavy'), { recursive: true })
+    await fsp.writeFile(path.join(fixtureDir, 'a-target', 'needle.ts'), '')
+    await Promise.all(
+      Array.from({ length: 10 }, (_, index) =>
+        fsp.writeFile(path.join(fixtureDir, 'z-heavy', `cache-${index}.tmp`), '')),
+    )
+
+    const files = await getProjectSearchFiles(fixtureDir, {
+      ripGrepFn: async () => {
+        throw new Error('ripgrep unavailable')
+      },
+      fallbackOptions: {
+        searchQuery: 'needle',
+        maxFiles: 1,
+      },
+    })
+
+    expect(files).toEqual(['a-target/needle.ts'])
   })
 
   it('accepts /private/tmp aliases on macOS for browsing and file serving', async () => {

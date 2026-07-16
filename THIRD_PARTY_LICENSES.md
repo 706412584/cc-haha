@@ -1,6 +1,14 @@
 # Third-Party Licenses
 
-This project includes code adapted from the following open source projects.
+This project includes code and binaries from the following open source projects.
+
+## ripgrep
+
+- Project: ripgrep (https://github.com/BurntSushi/ripgrep)
+- Included as: platform-specific desktop search executable
+- Version: 15.1.0
+- License: dual-licensed under MIT or the Unlicense
+- License texts: bundled beside the executable under `ripgrep-licenses/`
 
 ## claude-tap
 

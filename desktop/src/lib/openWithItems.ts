@@ -5,14 +5,26 @@ import type { OpenTarget } from '../stores/openTargetStore'
 export type FileTypeInfo = { icon: string; categoryKey: string; ext: string }
 
 const FILE_TYPE_RULES: Array<{ re: RegExp; key: string; icon: string }> = [
-  { re: /\.(md|markdown|txt|rst)$/i, key: 'document', icon: 'description' },
+  { re: /\.pdf$/i, key: 'document', icon: 'picture_as_pdf' },
+  { re: /\.(doc|docx|docm|odt|rtf|pages)$/i, key: 'document', icon: 'docs' },
+  { re: /\.(md|mdx|markdown)$/i, key: 'document', icon: 'markdown' },
+  { re: /\.(txt|log|rst)$/i, key: 'document', icon: 'text_snippet' },
+  { re: /\.(xls|xlsx|xlsm|csv|ods|numbers)$/i, key: 'spreadsheet', icon: 'table_chart' },
+  { re: /\.(ppt|pptx|pptm|odp|key)$/i, key: 'presentation', icon: 'slideshow' },
+  { re: /\.(zip|7z|rar|tar|gz|tgz|bz2|xz)$/i, key: 'archive', icon: 'folder_zip' },
+  { re: /\.(mp3|wav|m4a|flac|aac|ogg|opus)$/i, key: 'audio', icon: 'audio_file' },
+  { re: /\.(mp4|mov|m4v|webm|mkv|avi)$/i, key: 'video', icon: 'video_file' },
   { re: /\.(html?|xhtml)$/i, key: 'web', icon: 'html' },
   { re: /\.(png|jpe?g|gif|svg|webp|avif|bmp|ico)$/i, key: 'image', icon: 'image' },
-  { re: /\.(ts|tsx|js|jsx|mjs|cjs|json|css|scss|less|py|rs|go|java|rb|php|c|cc|cpp|h|hpp|sh|ya?ml|toml)$/i, key: 'code', icon: 'code' },
+  { re: /\.(ts|tsx|js|jsx|mjs|cjs|json|css|scss|less|py|rs|go|java|rb|php|c|cc|cpp|h|hpp|sh|ya?ml|toml|xml|sql)$/i, key: 'code', icon: 'code' },
 ]
 
 export function describeFileType(path: string): FileTypeInfo {
-  const ext = (path.split('.').pop() ?? '').toUpperCase()
+  const fileName = path.split(/[\\/]/).pop() ?? path
+  const dotIndex = fileName.lastIndexOf('.')
+  const ext = dotIndex > 0 && dotIndex < fileName.length - 1
+    ? fileName.slice(dotIndex + 1).toUpperCase()
+    : ''
   for (const rule of FILE_TYPE_RULES) {
     if (rule.re.test(path)) return { icon: rule.icon, categoryKey: `openWith.fileType.${rule.key}`, ext }
   }

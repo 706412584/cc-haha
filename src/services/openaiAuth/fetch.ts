@@ -79,6 +79,7 @@ export function buildOpenAICodexFetch(
     )
 
     const upstream = await inner(OPENAI_CODEX_API_ENDPOINT, {
+      ...init,
       method: 'POST',
       headers,
       body: JSON.stringify(upstreamBody),

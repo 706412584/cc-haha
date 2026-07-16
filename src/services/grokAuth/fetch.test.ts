@@ -32,12 +32,18 @@ describe('Grok Responses fetch adapter', () => {
   })
 
   test('maps Anthropic messages to the exact subscription endpoint and identity', async () => {
-    let call: { url: string; headers: Headers; body: Record<string, unknown> } | undefined
+    let call: {
+      url: string
+      headers: Headers
+      body: Record<string, unknown>
+      proxy?: string
+    } | undefined
     const fetchOverride: typeof fetch = async (input, init) => {
       call = {
         url: String(input),
         headers: new Headers(init?.headers),
         body: JSON.parse(String(init?.body)),
+        proxy: (init as RequestInit & { proxy?: string } | undefined)?.proxy,
       }
       return new Response([
         'event: response.completed',
@@ -53,7 +59,8 @@ describe('Grok Responses fetch adapter', () => {
         output_config: { effort: 'max' },
         messages: [{ role: 'user', content: 'Say ok' }],
       }),
-    })
+      proxy: 'http://127.0.0.1:17890',
+    } as RequestInit & { proxy: string })
 
     expect(call?.url).toBe(GROK_CLI_API_ENDPOINT)
     expect(call?.headers.get('Authorization')).toBe('Bearer access')
@@ -64,6 +71,7 @@ describe('Grok Responses fetch adapter', () => {
     expect(call?.body.model).toBe('grok-4.5')
     expect(call?.body.reasoning).toEqual({ effort: 'high' })
     expect(call?.body.stream).toBe(true)
+    expect(call?.proxy).toBe('http://127.0.0.1:17890')
     expect(response.status).toBe(200)
     await expect(response.json()).resolves.toMatchObject({
       type: 'message', content: [{ type: 'text', text: 'ok' }],

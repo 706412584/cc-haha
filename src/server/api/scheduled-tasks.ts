@@ -27,17 +27,65 @@ export async function handleScheduledTasksApi(
     const subResource = segments[3] // /api/scheduled-tasks/:id/runs
 
     // ── GET /api/scheduled-tasks/runs ────────────────────────────────────
+    if (method === 'GET' && taskId === 'runs' && subResource) {
+      const run = await cronScheduler.getRunDetail(subResource)
+      if (!run) throw ApiError.notFound(`Scheduled run ${subResource} not found`)
+      return Response.json({ run })
+    }
+
     if (method === 'GET' && taskId === 'runs') {
       const url = new URL(req.url)
       const limit = parseInt(url.searchParams.get('limit') || '50', 10)
-      const runs = await cronScheduler.getRecentRuns(limit)
-      return Response.json({ runs })
+      const cursor = url.searchParams.get('cursor') || undefined
+      const summaryOnly = url.searchParams.get('summaryOnly') === 'true'
+      const nonterminalOnly = url.searchParams.get('nonterminalOnly') === 'true'
+      const completedAfterParam = url.searchParams.get('completedAfterMs')
+      const completedAfterMs = completedAfterParam === null
+        ? undefined
+        : Number(completedAfterParam)
+      if (completedAfterMs !== undefined && (!Number.isFinite(completedAfterMs) || completedAfterMs < 0)) {
+        throw ApiError.badRequest('Invalid completedAfterMs parameter')
+      }
+      if (!cursor && !summaryOnly && !nonterminalOnly && completedAfterMs === undefined) {
+        const runs = await cronScheduler.getRecentRuns(limit)
+        return Response.json({ runs })
+      }
+      return Response.json(await cronScheduler.getRunsPage({
+        limit,
+        cursor,
+        summaryOnly,
+        nonterminalOnly,
+        completedAfterMs,
+      }))
     }
 
     // ── GET /api/scheduled-tasks/:id/runs ────────────────────────────────
     if (method === 'GET' && taskId && subResource === 'runs') {
-      const runs = await cronScheduler.getTaskRuns(taskId)
-      return Response.json({ runs })
+      const url = new URL(req.url)
+      const cursor = url.searchParams.get('cursor') || undefined
+      const limitParam = url.searchParams.get('limit')
+      const summaryOnly = url.searchParams.get('summaryOnly') === 'true'
+      const nonterminalOnly = url.searchParams.get('nonterminalOnly') === 'true'
+      const completedAfterParam = url.searchParams.get('completedAfterMs')
+      const completedAfterMs = completedAfterParam === null
+        ? undefined
+        : Number(completedAfterParam)
+      if (completedAfterMs !== undefined && (!Number.isFinite(completedAfterMs) || completedAfterMs < 0)) {
+        throw ApiError.badRequest('Invalid completedAfterMs parameter')
+      }
+      if (!cursor && !limitParam && !summaryOnly && !nonterminalOnly && completedAfterMs === undefined) {
+        const runs = await cronScheduler.getTaskRuns(taskId)
+        return Response.json({ runs })
+      }
+      const limit = parseInt(limitParam || '50', 10)
+      return Response.json(await cronScheduler.getRunsPage({
+        taskId,
+        limit,
+        cursor,
+        summaryOnly,
+        nonterminalOnly,
+        completedAfterMs,
+      }))
     }
 
     // ── GET /api/scheduled-tasks ──────────────────────────────────────────

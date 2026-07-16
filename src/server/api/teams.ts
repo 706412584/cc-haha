@@ -35,6 +35,21 @@ export async function handleTeamsApi(
       segments[5] === 'transcript'
     ) {
       const agentId = decodeURIComponent(segments[4])
+      const url = new URL(req.url)
+      if (url.searchParams.get('incremental') === 'true') {
+        const rawAfterOrdinal = url.searchParams.get('afterOrdinal')
+        const parsedAfterOrdinal = rawAfterOrdinal === null
+          ? undefined
+          : Number.parseInt(rawAfterOrdinal, 10)
+        const page = await teamService.getMemberTranscriptPage(teamName, agentId, {
+          signature: url.searchParams.get('signature') || undefined,
+          cursor: url.searchParams.get('cursor') || undefined,
+          afterOrdinal: parsedAfterOrdinal !== undefined && Number.isSafeInteger(parsedAfterOrdinal)
+            ? parsedAfterOrdinal
+            : undefined,
+        })
+        return Response.json(page)
+      }
       const messages = await teamService.getMemberTranscript(teamName, agentId)
       return Response.json({ messages })
     }

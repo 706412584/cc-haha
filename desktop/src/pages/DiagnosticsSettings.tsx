@@ -1,5 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { diagnosticsApi, type DiagnosticEvent, type DiagnosticsStatus } from '../api/diagnostics'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  diagnosticsApi,
+  type DiagnosticEvent,
+  type DiagnosticsStatus,
+  type LocalIndexState,
+  type LocalIndexStatus,
+} from '../api/diagnostics'
 import { Button } from '../components/shared/Button'
 import { copyTextToClipboard } from '../components/chat/clipboard'
 import { useTranslation } from '../i18n'
@@ -12,30 +18,88 @@ export function DiagnosticsSettings() {
   const t = useTranslation()
   const addToast = useUIStore((s) => s.addToast)
   const [status, setStatus] = useState<DiagnosticsStatus | null>(null)
+  const [localIndexStatus, setLocalIndexStatus] = useState<LocalIndexStatus | null>(null)
+  const [localIndexUnavailable, setLocalIndexUnavailable] = useState(false)
   const [events, setEvents] = useState<DiagnosticEvent[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [isExporting, setIsExporting] = useState(false)
   const [isCopyingIssueReport, setIsCopyingIssueReport] = useState(false)
   const [isClearing, setIsClearing] = useState(false)
+  const [isRebuildingIndex, setIsRebuildingIndex] = useState(false)
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false)
+  const [rebuildConfirmOpen, setRebuildConfirmOpen] = useState(false)
+  const [rebuildSucceeded, setRebuildSucceeded] = useState(false)
   const [lastExportPath, setLastExportPath] = useState<string | null>(null)
+  const mountedRef = useRef(true)
+  const loadRequestIdRef = useRef(0)
+  const localIndexReadIdRef = useRef(0)
+  const localIndexMutationIdRef = useRef(0)
+  const localIndexMutationGenerationRef = useRef(0)
+  const activeLoadCountRef = useRef(0)
+  const rebuildInFlightRef = useRef(false)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      loadRequestIdRef.current += 1
+      localIndexReadIdRef.current += 1
+      localIndexMutationIdRef.current += 1
+      localIndexMutationGenerationRef.current += 1
+    }
+  }, [])
 
   const load = useCallback(async () => {
-    setIsLoading(true)
+    const loadRequestId = ++loadRequestIdRef.current
+    const localIndexReadId = ++localIndexReadIdRef.current
+    const mutationGeneration = localIndexMutationGenerationRef.current
+    activeLoadCountRef.current += 1
+    if (mountedRef.current) {
+      setIsLoading(true)
+      setRebuildSucceeded(false)
+    }
+
     try {
-      const [nextStatus, eventResult] = await Promise.all([
-        diagnosticsApi.getStatus(),
-        diagnosticsApi.getEvents(100),
+      const [diagnosticsResult, localIndexResult] = await Promise.allSettled([
+        Promise.all([diagnosticsApi.getStatus(), diagnosticsApi.getEvents(100)]),
+        diagnosticsApi.getLocalIndexStatus(),
       ])
-      setStatus(nextStatus)
-      setEvents(eventResult.events)
-    } catch (error) {
-      addToast({
-        type: 'error',
-        message: error instanceof Error ? error.message : t('settings.diagnostics.loadFailed'),
-      })
+
+      if (!mountedRef.current) return
+
+      if (loadRequestId === loadRequestIdRef.current) {
+        if (diagnosticsResult.status === 'fulfilled') {
+          const [nextStatus, eventResult] = diagnosticsResult.value
+          setStatus(nextStatus)
+          setEvents(eventResult.events)
+        } else {
+          const error = diagnosticsResult.reason
+          addToast({
+            type: 'error',
+            message: error instanceof Error ? error.message : t('settings.diagnostics.loadFailed'),
+          })
+        }
+      }
+
+      // A mutation owns local-index state until it settles. Reads that began
+      // before or during that mutation cannot overwrite the mutation result.
+      const canCommitLocalIndexRead = localIndexReadId === localIndexReadIdRef.current
+        && mutationGeneration === localIndexMutationGenerationRef.current
+        && !rebuildInFlightRef.current
+      if (canCommitLocalIndexRead) {
+        if (localIndexResult.status === 'fulfilled') {
+          setLocalIndexStatus(localIndexResult.value)
+          setLocalIndexUnavailable(false)
+        } else {
+          // Older servers may not expose the additive local-index endpoint yet.
+          // Keep all legacy diagnostics usable and show one quiet inline state.
+          setLocalIndexStatus(null)
+          setLocalIndexUnavailable(true)
+        }
+      }
     } finally {
-      setIsLoading(false)
+      activeLoadCountRef.current = Math.max(0, activeLoadCountRef.current - 1)
+      if (mountedRef.current) setIsLoading(activeLoadCountRef.current > 0)
     }
   }, [addToast, t])
 
@@ -132,6 +196,36 @@ export function DiagnosticsSettings() {
     }
   }
 
+  const handleRebuildIndex = async () => {
+    if (rebuildInFlightRef.current) return
+    rebuildInFlightRef.current = true
+    const mutationId = ++localIndexMutationIdRef.current
+    localIndexMutationGenerationRef.current += 1
+    setIsRebuildingIndex(true)
+    setRebuildSucceeded(false)
+    try {
+      const nextStatus = await diagnosticsApi.rebuildLocalIndex()
+      if (!mountedRef.current || mutationId !== localIndexMutationIdRef.current) return
+      setLocalIndexStatus(nextStatus)
+      setLocalIndexUnavailable(false)
+      setRebuildSucceeded(true)
+      setRebuildConfirmOpen(false)
+      addToast({ type: 'success', message: t('settings.diagnostics.localIndex.rebuildSucceeded') })
+    } catch (error) {
+      if (!mountedRef.current || mutationId !== localIndexMutationIdRef.current) return
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : t('settings.diagnostics.localIndex.rebuildFailed'),
+      })
+    } finally {
+      rebuildInFlightRef.current = false
+      if (mutationId === localIndexMutationIdRef.current) {
+        localIndexMutationGenerationRef.current += 1
+      }
+      if (mountedRef.current) setIsRebuildingIndex(false)
+    }
+  }
+
   return (
     <div className="max-w-4xl">
       <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-5">
@@ -139,7 +233,7 @@ export function DiagnosticsSettings() {
           <h2 className="text-base font-semibold text-[var(--color-text-primary)]">{t('settings.diagnostics.title')}</h2>
           <p className="text-sm text-[var(--color-text-tertiary)] mt-0.5">{t('settings.diagnostics.description')}</p>
         </div>
-        <Button variant="secondary" size="sm" onClick={load} loading={isLoading}>
+        <Button variant="secondary" size="sm" onClick={load} loading={isLoading} disabled={isRebuildingIndex}>
           <span className="material-symbols-outlined text-[16px]" aria-hidden="true">refresh</span>
           {t('settings.diagnostics.refresh')}
         </Button>
@@ -167,6 +261,14 @@ export function DiagnosticsSettings() {
           {t('settings.diagnostics.storageLimitExceededWarning')}
         </div>
       ) : null}
+
+      <LocalIndexPanel
+        status={localIndexStatus}
+        unavailable={localIndexUnavailable}
+        rebuilding={isRebuildingIndex}
+        rebuildSucceeded={rebuildSucceeded}
+        onRebuild={() => setRebuildConfirmOpen(true)}
+      />
 
       <div className="mb-5">
         <DoctorPanel />
@@ -237,6 +339,20 @@ export function DiagnosticsSettings() {
       </div>
 
       <ConfirmDialog
+        open={rebuildConfirmOpen}
+        onClose={() => {
+          if (!isRebuildingIndex) setRebuildConfirmOpen(false)
+        }}
+        onConfirm={handleRebuildIndex}
+        title={t('settings.diagnostics.localIndex.rebuild')}
+        body={t('settings.diagnostics.localIndex.confirmRebuild')}
+        confirmLabel={t('settings.diagnostics.localIndex.rebuild')}
+        cancelLabel={t('common.cancel')}
+        confirmVariant="primary"
+        loading={isRebuildingIndex}
+      />
+
+      <ConfirmDialog
         open={clearConfirmOpen}
         onClose={() => {
           if (!isClearing) setClearConfirmOpen(false)
@@ -251,6 +367,111 @@ export function DiagnosticsSettings() {
       />
     </div>
   )
+}
+
+function LocalIndexPanel({
+  status,
+  unavailable,
+  rebuilding,
+  rebuildSucceeded,
+  onRebuild,
+}: {
+  status: LocalIndexStatus | null
+  unavailable: boolean
+  rebuilding: boolean
+  rebuildSucceeded: boolean
+  onRebuild: () => void
+}) {
+  const t = useTranslation()
+  const titleId = 'local-index-diagnostics-title'
+  const stateMessage = status?.state === 'building'
+    ? t('settings.diagnostics.localIndex.buildingMessage')
+    : status?.state === 'degraded'
+      ? t('settings.diagnostics.localIndex.degradedMessage')
+      : null
+
+  return (
+    <section
+      role="region"
+      aria-labelledby={titleId}
+      className="mb-5 rounded-lg border border-[var(--color-border)]"
+    >
+      <div className="flex flex-col gap-3 border-b border-[var(--color-border)] px-4 py-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h3 id={titleId} className="text-sm font-medium text-[var(--color-text-primary)]">
+            {t('settings.diagnostics.localIndex.title')}
+          </h3>
+          <p className="mt-0.5 text-xs text-[var(--color-text-tertiary)]">
+            {t('settings.diagnostics.localIndex.description')}
+          </p>
+        </div>
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={onRebuild}
+          loading={rebuilding}
+          disabled={unavailable}
+        >
+          <span className="material-symbols-outlined text-[16px]" aria-hidden="true">database</span>
+          {t('settings.diagnostics.localIndex.rebuild')}
+        </Button>
+      </div>
+
+      {status ? (
+        <div className="grid grid-cols-2 gap-x-4 gap-y-3 px-4 py-3 sm:grid-cols-4">
+          <IndexMetric label={t('settings.diagnostics.localIndex.state')} value={localIndexStateLabel(status.state, t)} />
+          <IndexMetric
+            label={t('settings.diagnostics.localIndex.indexed')}
+            value={`${status.indexed} / ${status.discovered}`}
+          />
+          <IndexMetric label={t('settings.diagnostics.localIndex.degradedSources')} value={String(status.degradedSources)} />
+          <IndexMetric label={t('settings.diagnostics.localIndex.databaseSize')} value={formatBytes(status.databaseBytes)} />
+          <IndexMetric label={t('settings.diagnostics.localIndex.walSize')} value={formatBytes(status.walBytes)} />
+          <IndexMetric
+            label={t('settings.diagnostics.localIndex.lastUpdated')}
+            value={status.lastUpdatedAt ? new Date(status.lastUpdatedAt).toLocaleString() : t('settings.diagnostics.localIndex.never')}
+          />
+          <IndexMetric
+            label={t('settings.diagnostics.localIndex.errorCode')}
+            value={status.lastErrorCode ?? t('settings.diagnostics.localIndex.none')}
+            mono={Boolean(status.lastErrorCode)}
+          />
+        </div>
+      ) : (
+        <div className="px-4 py-4 text-xs text-[var(--color-text-tertiary)]">
+          {unavailable ? t('settings.diagnostics.localIndex.unavailable') : t('common.loading')}
+        </div>
+      )}
+
+      {stateMessage ? (
+        <div role="status" className="border-t border-[var(--color-border)] px-4 py-2 text-xs text-[var(--color-text-tertiary)]">
+          {stateMessage}
+        </div>
+      ) : null}
+      {rebuildSucceeded ? (
+        <div role="status" className="border-t border-[var(--color-border)] px-4 py-2 text-xs text-[var(--color-success)]">
+          {t('settings.diagnostics.localIndex.rebuildSucceeded')}
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
+function IndexMetric({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="min-w-0">
+      <div className="text-[11px] text-[var(--color-text-tertiary)]">{label}</div>
+      <div className={`mt-0.5 break-words text-xs font-medium text-[var(--color-text-primary)]${mono ? ' font-mono' : ''}`}>
+        {value}
+      </div>
+    </div>
+  )
+}
+
+type Translation = ReturnType<typeof useTranslation>
+
+function localIndexStateLabel(state: LocalIndexState, t: Translation): string {
+  return t(`settings.diagnostics.localIndex.state.${state}`)
 }
 
 function Metric({ label, value }: { label: string; value: string }) {

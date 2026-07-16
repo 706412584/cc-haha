@@ -24,6 +24,7 @@ export const SERVER_STARTUP_LOG_LIMIT = 80
 export const HOST_DIAGNOSTICS_LINE_LIMIT = 80
 export const HOST_DIAGNOSTICS_BYTE_LIMIT = 256 * 1024
 export const ELECTRON_DIAGNOSTICS_FILE_ENV = 'CC_HAHA_ELECTRON_DIAGNOSTICS_FILE'
+export const RIPGREP_PATH_ENV = 'CC_HAHA_RIPGREP_PATH'
 const HOST_DIAGNOSTICS_LINE_BYTE_LIMIT = 4096
 // Shared with the Tauri shell (src-tauri/src/lib.rs) so both desktop builds
 // reuse the same sticky port across restarts (issue #767).
@@ -51,7 +52,11 @@ const PROXY_ENV_KEYS = [
   'HTTPS_PROXY',
   'http_proxy',
   'https_proxy',
+  'ALL_PROXY',
+  'all_proxy',
 ] as const
+export const SYSTEM_PROXY_BRIDGE_ENV = 'CC_HAHA_SYSTEM_PROXY_URL'
+export const SYSTEM_PROXY_ERROR_ENV = 'CC_HAHA_SYSTEM_PROXY_ERROR'
 const LOOPBACK_NO_PROXY_ENTRIES = ['localhost', '127.0.0.1', '::1'] as const
 
 export function resolveHostTriple(platform = process.platform, arch = process.arch): string {
@@ -67,6 +72,43 @@ export function resolveHostTriple(platform = process.platform, arch = process.ar
 export function resolveSidecarExecutable(desktopRoot: string, triple = resolveHostTriple()): string {
   const base = path.join(desktopRoot, 'src-tauri', 'binaries', `claude-sidecar-${triple}`)
   return process.platform === 'win32' ? `${base}.exe` : base
+}
+
+export function resolveBundledRipgrepExecutable(
+  desktopRoot: string,
+  triple = resolveHostTriple(),
+): string {
+  const extension = triple.includes('windows') ? '.exe' : ''
+  return path.join(desktopRoot, 'src-tauri', 'binaries', `rg${extension}`)
+}
+
+function withBundledRipgrepPath(
+  env: NodeJS.ProcessEnv,
+  desktopRoot: string,
+): NodeJS.ProcessEnv {
+  const bundledRipgrep = resolveBundledRipgrepExecutable(desktopRoot)
+  const explicitRipgrep = env[RIPGREP_PATH_ENV]?.trim()
+  const selectedRipgrep = explicitRipgrep && existsSync(explicitRipgrep)
+    ? explicitRipgrep
+    : existsSync(bundledRipgrep)
+      ? bundledRipgrep
+      : null
+  if (!selectedRipgrep) return env
+
+  const pathKey = process.platform === 'win32'
+    ? Object.keys(env).find(key => key.toLowerCase() === 'path') ?? 'Path'
+    : 'PATH'
+  const currentPath = env[pathKey] ?? ''
+  const ripgrepDirectory = path.dirname(selectedRipgrep)
+  const nextPath = currentPath
+    ? `${currentPath}${path.delimiter}${ripgrepDirectory}`
+    : ripgrepDirectory
+
+  return {
+    ...env,
+    [pathKey]: nextPath,
+    [RIPGREP_PATH_ENV]: explicitRipgrep || bundledRipgrep,
+  }
 }
 
 export function httpToWebSocketUrl(serverHttpUrl: string): string {
@@ -365,46 +407,51 @@ export function formatStartupError(message: string, logs: string[]): string {
   return `${message}\n\nRecent server logs:\n${logText}`
 }
 
-export function proxyUrlFromElectronProxyRules(rules: string | undefined): string | undefined {
-  if (!rules) return undefined
-
-  for (const rawRule of rules.split(';')) {
-    const rule = rawRule.trim()
-    if (!rule || /^DIRECT$/i.test(rule)) continue
-
-    const match = rule.match(/^(PROXY|HTTPS)\s+(.+)$/i)
-    if (!match) continue
-
-    const scheme = match[1]!.toUpperCase() === 'HTTPS' ? 'https' : 'http'
-    const hostPort = match[2]!.trim()
-    if (!hostPort) continue
-
-    return `${scheme}://${hostPort}`
-  }
-
-  return undefined
+export function clearProxyEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env = { ...baseEnv }
+  for (const key of PROXY_ENV_KEYS) delete env[key]
+  delete env[SYSTEM_PROXY_BRIDGE_ENV]
+  delete env[SYSTEM_PROXY_ERROR_ENV]
+  const noProxy = mergeLoopbackNoProxy(env.no_proxy || env.NO_PROXY)
+  return { ...env, NO_PROXY: noProxy, no_proxy: noProxy }
 }
 
-export function mergeProxyEnv(
+export function withSystemProxyBridgeEnv(
   baseEnv: NodeJS.ProcessEnv,
-  proxyUrl: string | undefined,
+  bridgeUrl: string,
 ): NodeJS.ProcessEnv {
-  if (!proxyUrl) return baseEnv
-  if (PROXY_ENV_KEYS.some(key => baseEnv[key])) {
-    const noProxy = mergeLoopbackNoProxy(baseEnv.no_proxy || baseEnv.NO_PROXY)
-    return { ...baseEnv, NO_PROXY: noProxy, no_proxy: noProxy }
-  }
-
-  const noProxy = mergeLoopbackNoProxy(baseEnv.no_proxy || baseEnv.NO_PROXY)
-
   return {
-    ...baseEnv,
-    HTTP_PROXY: proxyUrl,
-    HTTPS_PROXY: proxyUrl,
-    http_proxy: proxyUrl,
-    https_proxy: proxyUrl,
-    NO_PROXY: noProxy,
-    no_proxy: noProxy,
+    ...clearProxyEnv(baseEnv),
+    [SYSTEM_PROXY_BRIDGE_ENV]: bridgeUrl,
+  }
+}
+
+export function withSystemProxyErrorEnv(
+  baseEnv: NodeJS.ProcessEnv,
+  error: unknown,
+): NodeJS.ProcessEnv {
+  const message = error instanceof Error ? error.message : String(error)
+  const sanitized = sanitizeHostDiagnostic(message).replace(/\s+/g, ' ').trim()
+    || 'unknown bridge startup error'
+  return {
+    ...clearProxyEnv(baseEnv),
+    [SYSTEM_PROXY_ERROR_ENV]: `System proxy bridge unavailable: ${sanitized}`,
+  }
+}
+
+export function withAdapterProxyBridgeEnv(
+  baseEnv: NodeJS.ProcessEnv,
+  bridgeUrl: string,
+): NodeJS.ProcessEnv {
+  const env = clearProxyEnv(baseEnv)
+  return {
+    ...env,
+    HTTP_PROXY: bridgeUrl,
+    HTTPS_PROXY: bridgeUrl,
+    http_proxy: bridgeUrl,
+    https_proxy: bridgeUrl,
+    ALL_PROXY: bridgeUrl,
+    all_proxy: bridgeUrl,
   }
 }
 
@@ -479,7 +526,7 @@ export function createServerPlan({
   return {
     command: resolveSidecarExecutable(desktopRoot),
     args: ['server', '--app-root', appRoot, '--host', bindHost, '--port', String(port)],
-    env: buildSidecarEnv(env, h5DistDir, desktopRoot),
+    env: buildSidecarEnv(withBundledRipgrepPath(env, desktopRoot), h5DistDir, desktopRoot),
   }
 }
 
@@ -502,7 +549,7 @@ export function createAdapterPlan({
     command: resolveSidecarExecutable(desktopRoot),
     args: ['adapters', '--app-root', appRoot, flag],
     env: {
-      ...buildSidecarEnv(env, h5DistDir, desktopRoot),
+      ...buildSidecarEnv(withBundledRipgrepPath(env, desktopRoot), h5DistDir, desktopRoot),
       ADAPTER_SERVER_URL: httpToWebSocketUrl(serverUrl),
     },
   }

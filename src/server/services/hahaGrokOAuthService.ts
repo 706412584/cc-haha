@@ -17,7 +17,7 @@ import {
 import type { GrokOAuthTokenResponse } from '../../services/grokAuth/types.js'
 import { logTokenRefreshFailure } from './oauthRefreshLog.js'
 import {
-  getManualNetworkProxyUrl,
+  getNetworkProxyUrl,
   loadNetworkSettings,
 } from './networkSettings.js'
 
@@ -239,7 +239,7 @@ export class HahaGrokOAuthService {
   private async getTokenFetchOptions(): Promise<GrokTokenFetchOptions> {
     const settings = await loadNetworkSettings()
     return {
-      proxyUrl: getManualNetworkProxyUrl(settings),
+      proxyUrl: getNetworkProxyUrl(settings),
       timeoutMs: settings.aiRequestTimeoutMs,
     }
   }

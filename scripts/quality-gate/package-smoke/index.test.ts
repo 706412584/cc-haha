@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import {
   currentPackageSmokeArch,
   currentPackageSmokePlatform,
@@ -31,6 +31,21 @@ function writeFile(rootDir: string, relativePath: string, content = 'ok') {
   const fullPath = join(rootDir, relativePath)
   mkdirSync(dirname(fullPath), { recursive: true })
   writeFileSync(fullPath, content)
+
+  const fileName = basename(fullPath)
+  if (fileName.startsWith('claude-sidecar-')) {
+    const ripgrepName = fileName.endsWith('.exe') ? 'rg.exe' : 'rg'
+    writeFileSync(join(dirname(fullPath), ripgrepName), content)
+    writeFileSync(
+      join(dirname(fullPath), 'ripgrep-manifest.json'),
+      JSON.stringify({ targetTriple: fileName.replace(/^claude-sidecar-/, '').replace(/\.exe$/, '') }),
+    )
+    const licensesDir = join(dirname(fullPath), 'ripgrep-licenses')
+    mkdirSync(licensesDir, { recursive: true })
+    for (const licenseName of ['COPYING', 'LICENSE-MIT', 'UNLICENSE']) {
+      writeFileSync(join(licensesDir, licenseName), content)
+    }
+  }
 }
 
 const tempDirs: string[] = []
@@ -103,6 +118,34 @@ describe('packaged artifact inspection', () => {
     expect(report.passedChecks.some((check) => check.label.includes('update metadata referenced artifact'))).toBe(true)
     expect(report.passedChecks.some((check) => check.label.includes('macOS update artifact blockmap'))).toBe(true)
     expect(report.passedChecks.some((check) => check.label === 'macOS unpacked H5 shell')).toBe(true)
+  })
+
+  test('fails macOS inspection when bundled ripgrep is missing', async () => {
+    const rootDir = createRepoRoot()
+    tempDirs.push(rootDir)
+    const appRoot = 'desktop/build-artifacts/electron/mac-arm64/Claude Code Haha.app'
+    const sidecarRoot = `${appRoot}/Contents/Resources/app.asar.unpacked/src-tauri/binaries`
+
+    writeFile(rootDir, `${appRoot}/Contents/Info.plist`)
+    writeFile(rootDir, `${appRoot}/Contents/MacOS/Claude Code Haha`)
+    writeFile(rootDir, `${appRoot}/Contents/Resources/app.asar`)
+    writeFile(rootDir, `${appRoot}/Contents/Resources/app.asar.unpacked/dist/index.html`)
+    writeFile(rootDir, `${sidecarRoot}/claude-sidecar-aarch64-apple-darwin`)
+    writeFile(rootDir, `${appRoot}/Contents/Resources/app.asar.unpacked/node_modules/node-pty/package.json`)
+    writeFile(rootDir, `${appRoot}/Contents/Resources/app.asar.unpacked/node_modules/node-pty/prebuilds/darwin-arm64/pty.node`)
+    writeFile(rootDir, `${appRoot}/Contents/Resources/app.asar.unpacked/node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper`)
+    rmSync(join(rootDir, sidecarRoot, 'rg'))
+
+    const report = await inspectPackagedArtifacts(rootDir, {
+      platform: 'macos',
+      arch: 'arm64',
+      packageKind: 'dir',
+    })
+
+    expect(report.passed).toBe(false)
+    expect(report.missingChecks.some(
+      check => check.label === 'macOS bundled ripgrep binary',
+    )).toBe(true)
   })
 
   test('fails macOS inspection when the H5 shell is not unpacked for the sidecar', async () => {

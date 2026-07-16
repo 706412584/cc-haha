@@ -15,11 +15,13 @@ export function TraceDetail({
   span,
   viewModel,
   sessionId,
+  revisionKey,
   onSelect,
 }: {
   span: TraceSpan
   viewModel: TraceViewModel
   sessionId: string
+  revisionKey?: string
   onSelect: (spanId: string) => void
 }) {
   const t = useTranslation()
@@ -38,7 +40,13 @@ export function TraceDetail({
         </div>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <DetailBody span={span} viewModel={viewModel} sessionId={sessionId} onSelect={onSelect} />
+        <DetailBody
+          span={span}
+          viewModel={viewModel}
+          sessionId={sessionId}
+          revisionKey={revisionKey}
+          onSelect={onSelect}
+        />
       </div>
     </div>
   )
@@ -48,16 +56,18 @@ function DetailBody({
   span,
   viewModel,
   sessionId,
+  revisionKey,
   onSelect,
 }: {
   span: TraceSpan
   viewModel: TraceViewModel
   sessionId: string
+  revisionKey?: string
   onSelect: (spanId: string) => void
 }) {
   switch (span.kind) {
     case 'llm':
-      return <LlmCallDetail sessionId={sessionId} span={span} />
+      return <LlmCallDetail sessionId={sessionId} span={span} revisionKey={revisionKey} />
     case 'tool':
     case 'tool_result':
       return <ToolDetail span={span} />

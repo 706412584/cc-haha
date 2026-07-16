@@ -1,4 +1,6 @@
-import { normalizeTokens, Prism } from 'prism-react-renderer'
+import { createHighlighterCore } from 'shiki/core'
+import { createOnigurumaEngine } from 'shiki/engine/oniguruma'
+import type { HighlighterCore, LanguageRegistration, ThemeRegistration } from 'shiki'
 import type { WorkspaceDiffFile, WorkspaceDiffRow } from './workspaceDiffModel'
 
 export const WORKSPACE_DIFF_TOKENIZE_MAX_LINE_LENGTH = 1_000
@@ -17,65 +19,276 @@ export interface WorkspaceDiffWordRange {
 }
 
 export interface WorkspaceDiffHighlightResult {
-  engine: 'prism' | 'plain'
+  engine: 'shiki' | 'plain'
   tokensByRowId: Record<string, WorkspaceDiffHighlightToken[]>
   wordRangesByRowId: Record<string, WorkspaceDiffWordRange[]>
+}
+
+export interface WorkspaceCodeHighlightResult {
+  engine: 'shiki' | 'plain'
+  tokensByLine: WorkspaceDiffHighlightToken[][]
 }
 
 interface WordSegment extends WorkspaceDiffWordRange {
   text: string
 }
 
-const workspaceDiffSyntaxColors: Record<string, string> = {
-  comment: 'var(--color-diff-syntax-comment)',
-  cdata: 'var(--color-diff-syntax-comment)',
-  doctype: 'var(--color-diff-syntax-comment)',
-  prolog: 'var(--color-diff-syntax-comment)',
-  string: 'var(--color-diff-syntax-string)',
-  'attr-value': 'var(--color-diff-syntax-string)',
-  'template-string': 'var(--color-diff-syntax-string)',
-  regex: 'var(--color-diff-syntax-regexp)',
-  boolean: 'var(--color-diff-syntax-number)',
-  number: 'var(--color-diff-syntax-number)',
-  keyword: 'var(--color-diff-syntax-keyword)',
-  tag: 'var(--color-diff-syntax-keyword)',
-  function: 'var(--color-diff-syntax-function)',
-  builtin: 'var(--color-diff-syntax-type)',
-  'class-name': 'var(--color-diff-syntax-type)',
-  parameter: 'var(--color-diff-syntax-parameter)',
-  property: 'var(--color-diff-syntax-property)',
-  'attr-name': 'var(--color-diff-syntax-property)',
-  constant: 'var(--color-diff-syntax-variable)',
-  symbol: 'var(--color-diff-syntax-variable)',
-  variable: 'var(--color-diff-syntax-variable)',
-  operator: 'var(--color-diff-syntax-punctuation)',
-  punctuation: 'var(--color-diff-syntax-punctuation)',
+const workspaceDiffShikiTheme: ThemeRegistration = {
+  name: 'codex-workspace-diff',
+  type: 'dark',
+  fg: 'var(--color-diff-syntax-foreground)',
+  bg: 'transparent',
+  settings: [
+    {
+      settings: {
+        foreground: 'var(--color-diff-syntax-foreground)',
+        background: 'transparent',
+      },
+    },
+    {
+      scope: [
+        'comment',
+        'punctuation.definition.comment',
+        'string.quoted.docstring',
+      ],
+      settings: { foreground: 'var(--color-diff-syntax-comment)' },
+    },
+    {
+      scope: [
+        'string',
+        'string.quoted',
+        'string.template',
+        'string.other.link',
+        'markup.inline.raw.string.markdown',
+      ],
+      settings: { foreground: 'var(--color-diff-syntax-string)' },
+    },
+    {
+      scope: ['string.regexp', 'constant.other.character-class.regexp'],
+      settings: { foreground: 'var(--color-diff-syntax-regexp)' },
+    },
+    {
+      scope: [
+        'constant.numeric',
+        'constant.language.boolean',
+        'constant.language.null',
+        'constant.language.undefined',
+      ],
+      settings: { foreground: 'var(--color-diff-syntax-number)' },
+    },
+    {
+      scope: [
+        'constant',
+        'punctuation.definition.constant',
+        'variable.other.constant',
+      ],
+      settings: { foreground: 'var(--color-diff-syntax-variable)' },
+    },
+    {
+      scope: [
+        'keyword',
+        'keyword.control',
+        'storage',
+        'storage.type',
+        'storage.modifier',
+        'keyword.operator.new',
+        'keyword.operator.expression.instanceof',
+        'keyword.operator.expression.typeof',
+        'keyword.operator.expression.void',
+        'keyword.operator.expression.delete',
+        'keyword.operator.expression.in',
+        'keyword.operator.expression.of',
+        'keyword.operator.expression.keyof',
+      ],
+      settings: { foreground: 'var(--color-diff-syntax-keyword)' },
+    },
+    {
+      scope: [
+        'entity.name.function',
+        'meta.function-call',
+        'meta.require',
+        'support.function',
+        'support.function.any-method',
+        'variable.function',
+      ],
+      settings: { foreground: 'var(--color-diff-syntax-function)' },
+    },
+    {
+      scope: [
+        'entity.name.type',
+        'entity.name.type.alias',
+        'entity.name.class',
+        'entity.other.inherited-class',
+        'support.class',
+        'support.type',
+        'support.type.primitive',
+        'support.type.primitive.ts',
+        'support.type.builtin.ts',
+        'support.type.primitive.tsx',
+        'support.type.builtin.tsx',
+      ],
+      settings: { foreground: 'var(--color-diff-syntax-type)' },
+    },
+    {
+      scope: [
+        'variable.parameter',
+        'meta.parameters variable.other.readwrite',
+        'meta.parameter variable.other.readwrite',
+      ],
+      settings: { foreground: 'var(--color-diff-syntax-parameter)' },
+    },
+    {
+      scope: [
+        'variable.other.property',
+        'variable.other.object.property',
+        'support.type.property-name',
+        'meta.object-literal.key',
+        'support.variable.property',
+      ],
+      settings: { foreground: 'var(--color-diff-syntax-property)' },
+    },
+    {
+      scope: [
+        'variable',
+        'variable.other',
+        'variable.other.readwrite',
+        'variable.other.constant',
+        'variable.other.enummember',
+        'identifier',
+        'meta.definition.variable',
+        'entity.name.namespace',
+      ],
+      settings: { foreground: 'var(--color-diff-syntax-variable)' },
+    },
+    {
+      scope: ['keyword.operator'],
+      settings: { foreground: 'var(--color-diff-syntax-punctuation)' },
+    },
+    {
+      scope: [
+        'keyword.operator.logical',
+        'keyword.operator.bitwise',
+        'keyword.operator.channel',
+        'keyword.operator.arithmetic',
+        'keyword.operator.comparison',
+        'keyword.operator.relational',
+        'keyword.operator.increment',
+        'keyword.operator.decrement',
+        'keyword.operator.assignment',
+      ],
+      settings: { foreground: 'var(--color-diff-syntax-number)' },
+    },
+    {
+      scope: ['keyword.operator.assignment.compound'],
+      settings: { foreground: 'var(--color-diff-syntax-keyword)' },
+    },
+    {
+      scope: [
+        'keyword.operator.assignment.compound.js',
+        'keyword.operator.assignment.compound.ts',
+      ],
+      settings: { foreground: 'var(--color-diff-syntax-number)' },
+    },
+    {
+      scope: ['keyword.operator.ternary', 'keyword.operator.optional'],
+      settings: { foreground: 'var(--color-diff-syntax-keyword)' },
+    },
+    {
+      scope: [
+        'punctuation',
+        'punctuation.definition',
+        'punctuation.separator',
+        'meta.brace',
+        'meta.bracket',
+      ],
+      settings: { foreground: 'var(--color-diff-syntax-punctuation)' },
+    },
+    { scope: ['entity.name.tag'], settings: { foreground: 'var(--color-diff-syntax-keyword)' } },
+    { scope: ['entity.other.attribute-name'], settings: { foreground: 'var(--color-diff-syntax-number)' } },
+    {
+      scope: ['source.json meta.structure.dictionary.json > string.quoted.json', 'support.type.property-name.json'],
+      settings: { foreground: 'var(--color-diff-syntax-keyword)' },
+    },
+    {
+      scope: ['support.type.property-name.css', 'support.type.vendored.property-name.css'],
+      settings: { foreground: 'var(--color-diff-syntax-number)' },
+    },
+    {
+      scope: ['markup.heading', 'entity.name.section'],
+      settings: {
+        foreground: 'var(--color-diff-syntax-function)',
+        fontStyle: 'bold',
+      },
+    },
+    { scope: ['markup.bold'], settings: { fontStyle: 'bold' } },
+    { scope: ['markup.italic'], settings: { fontStyle: 'italic' } },
+  ],
 }
 
-const workspaceDiffPrismLanguages = new Set([
-  'bash',
-  'c',
-  'cpp',
-  'css',
-  'go',
-  'graphql',
-  'html',
-  'javascript',
-  'json',
-  'jsx',
-  'kotlin',
-  'markdown',
-  'python',
-  'rust',
-  'sql',
-  'swift',
-  'tsx',
-  'typescript',
-  'xml',
-  'yaml',
-])
+const workspaceCodeShikiTheme: ThemeRegistration = {
+  name: 'codex-workspace-code',
+  type: 'dark',
+  fg: 'var(--color-code-fg)',
+  bg: 'transparent',
+  settings: [
+    { settings: { foreground: 'var(--color-code-fg)', background: 'transparent' } },
+    { scope: ['comment', 'punctuation.definition.comment'], settings: { foreground: 'var(--color-code-comment)', fontStyle: 'italic' } },
+    { scope: ['string', 'string.quoted', 'string.template', 'string.other.link'], settings: { foreground: 'var(--color-code-string)' } },
+    { scope: ['string.regexp'], settings: { foreground: 'var(--color-primary-container)' } },
+    { scope: ['keyword', 'keyword.control', 'storage', 'storage.type', 'storage.modifier'], settings: { foreground: 'var(--color-code-keyword)' } },
+    { scope: ['keyword.operator'], settings: { foreground: 'var(--color-code-keyword)' } },
+    { scope: ['entity.name.function', 'support.function', 'meta.function-call'], settings: { foreground: 'var(--color-code-function)' } },
+    { scope: ['entity.name.type', 'support.type', 'support.class', 'entity.name.class', 'entity.other.inherited-class'], settings: { foreground: 'var(--color-code-type)' } },
+    { scope: ['variable.parameter'], settings: { foreground: 'var(--color-code-parameter)' } },
+    { scope: ['variable.other.property', 'support.type.property-name', 'meta.object-literal.key'], settings: { foreground: 'var(--color-code-property)' } },
+    { scope: ['variable.other.constant', 'variable.other.enummember'], settings: { foreground: 'var(--color-code-type)' } },
+    { scope: ['constant.numeric', 'constant.language'], settings: { foreground: 'var(--color-code-number)' } },
+    { scope: ['punctuation', 'meta.brace', 'meta.bracket'], settings: { foreground: 'var(--color-code-punctuation)' } },
+    { scope: ['entity.name.tag', 'punctuation.definition.tag'], settings: { foreground: 'var(--color-code-keyword)' } },
+    { scope: ['entity.other.attribute-name'], settings: { foreground: 'var(--color-code-property)' } },
+    { scope: ['meta.decorator', 'punctuation.decorator'], settings: { foreground: 'var(--color-code-type)' } },
+  ],
+}
 
-const prismLanguageAliases: Record<string, string> = {
+const workspaceDiffLanguageLoaders: Record<string, () => Promise<LanguageRegistration[]>> = {
+  bash: () => import('@shikijs/langs/bash').then((module) => module.default),
+  c: () => import('@shikijs/langs/c').then((module) => module.default),
+  cpp: () => import('@shikijs/langs/cpp').then((module) => module.default),
+  csharp: () => import('@shikijs/langs/csharp').then((module) => module.default),
+  css: () => import('@shikijs/langs/css').then((module) => module.default),
+  dockerfile: () => import('@shikijs/langs/dockerfile').then((module) => module.default),
+  go: () => import('@shikijs/langs/go').then((module) => module.default),
+  graphql: () => import('@shikijs/langs/graphql').then((module) => module.default),
+  html: () => import('@shikijs/langs/html').then((module) => module.default),
+  java: () => import('@shikijs/langs/java').then((module) => module.default),
+  javascript: () => import('@shikijs/langs/javascript').then((module) => module.default),
+  json: () => import('@shikijs/langs/json').then((module) => module.default),
+  jsonc: () => import('@shikijs/langs/jsonc').then((module) => module.default),
+  jsx: () => import('@shikijs/langs/jsx').then((module) => module.default),
+  kotlin: () => import('@shikijs/langs/kotlin').then((module) => module.default),
+  less: () => import('@shikijs/langs/less').then((module) => module.default),
+  lua: () => import('@shikijs/langs/lua').then((module) => module.default),
+  makefile: () => import('@shikijs/langs/makefile').then((module) => module.default),
+  markdown: () => import('@shikijs/langs/markdown').then((module) => module.default),
+  php: () => import('@shikijs/langs/php').then((module) => module.default),
+  prisma: () => import('@shikijs/langs/prisma').then((module) => module.default),
+  python: () => import('@shikijs/langs/python').then((module) => module.default),
+  ruby: () => import('@shikijs/langs/ruby').then((module) => module.default),
+  rust: () => import('@shikijs/langs/rust').then((module) => module.default),
+  sass: () => import('@shikijs/langs/sass').then((module) => module.default),
+  scss: () => import('@shikijs/langs/scss').then((module) => module.default),
+  sql: () => import('@shikijs/langs/sql').then((module) => module.default),
+  svelte: () => import('@shikijs/langs/svelte').then((module) => module.default),
+  swift: () => import('@shikijs/langs/swift').then((module) => module.default),
+  toml: () => import('@shikijs/langs/toml').then((module) => module.default),
+  tsx: () => import('@shikijs/langs/tsx').then((module) => module.default),
+  typescript: () => import('@shikijs/langs/typescript').then((module) => module.default),
+  vue: () => import('@shikijs/langs/vue').then((module) => module.default),
+  xml: () => import('@shikijs/langs/xml').then((module) => module.default),
+  yaml: () => import('@shikijs/langs/yaml').then((module) => module.default),
+}
+
+const shikiLanguageAliases: Record<string, string> = {
   bash: 'bash',
   c: 'c',
   cc: 'cpp',
@@ -125,17 +338,50 @@ const prismLanguageAliases: Record<string, string> = {
   zsh: 'bash',
 }
 
+let workspaceDiffHighlighterPromise: Promise<HighlighterCore> | null = null
+const workspaceDiffLanguagePromises = new Map<string, Promise<void>>()
+
+function getWorkspaceDiffHighlighter() {
+  workspaceDiffHighlighterPromise ??= createHighlighterCore({
+    themes: [workspaceDiffShikiTheme, workspaceCodeShikiTheme],
+    langs: [],
+    engine: createOnigurumaEngine(import('shiki/wasm')),
+  })
+  return workspaceDiffHighlighterPromise
+}
+
+async function ensureWorkspaceDiffLanguage(highlighter: HighlighterCore, language: string) {
+  if (language === 'text' || highlighter.getLoadedLanguages().includes(language)) return
+  const loader = workspaceDiffLanguageLoaders[language]
+  if (!loader) return
+
+  let loading = workspaceDiffLanguagePromises.get(language)
+  if (!loading) {
+    loading = loader().then(async (registrations) => {
+      await highlighter.loadLanguage(...registrations)
+    })
+    workspaceDiffLanguagePromises.set(language, loading)
+  }
+  await loading
+}
+
 function basename(path: string) {
   return path.split('/').pop()?.toLowerCase() ?? path.toLowerCase()
 }
 
-export function getWorkspaceDiffPrismLanguage(path: string) {
+export function getWorkspaceDiffShikiLanguage(path: string) {
   const name = basename(path)
   if (name === 'dockerfile') return 'dockerfile'
   if (name === 'makefile') return 'makefile'
   if (name === '.gitignore') return 'text'
   const extension = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1) : ''
-  return prismLanguageAliases[extension] ?? 'text'
+  return shikiLanguageAliases[extension] ?? 'text'
+}
+
+export function getWorkspaceCodeShikiLanguage(language: string) {
+  const normalized = language.trim().toLowerCase()
+  if (workspaceDiffLanguageLoaders[normalized]) return normalized
+  return shikiLanguageAliases[normalized] ?? 'text'
 }
 
 function tokenizeWords(value: string): WordSegment[] {
@@ -302,30 +548,56 @@ export async function highlightWorkspaceDiff({
   const wordRangesByRowId = buildWorkspaceDiffWordRanges(files)
 
   try {
+    const highlighter = await getWorkspaceDiffHighlighter()
     for (const file of files) {
       for (const document of getHighlightDocuments(file)) {
-        const language = getWorkspaceDiffPrismLanguage(document.path || path)
-        const grammar = (
-          workspaceDiffPrismLanguages.has(language)
-            ? Prism.languages[language]
-            : undefined
-        ) ?? Prism.languages.text
-        if (!grammar) continue
-        const lines = normalizeTokens(Prism.tokenize(
-          document.rows.map((row) => row.text).join('\n'),
-          grammar,
-        ))
+        const language = getWorkspaceDiffShikiLanguage(document.path || path)
+        await ensureWorkspaceDiffLanguage(highlighter, language)
+        const result = highlighter.codeToTokens(document.rows.map((row) => row.text).join('\n'), {
+          lang: workspaceDiffLanguageLoaders[language] ? language : 'text',
+          theme: workspaceDiffShikiTheme,
+          tokenizeMaxLineLength: WORKSPACE_DIFF_TOKENIZE_MAX_LINE_LENGTH,
+        })
         document.rows.forEach((row, index) => {
-          tokensByRowId[row.id] = (lines[index] ?? []).map((token) => ({
+          tokensByRowId[row.id] = (result.tokens[index] ?? []).map((token) => ({
             content: token.content,
-            color: token.types.map((type) => workspaceDiffSyntaxColors[type]).find(Boolean),
-            fontStyle: token.types.includes('italic') ? 1 : token.types.includes('bold') ? 2 : undefined,
+            color: token.color,
+            fontStyle: token.fontStyle,
           }))
         })
       }
     }
-    return { engine: 'prism', tokensByRowId, wordRangesByRowId }
+    return { engine: 'shiki', tokensByRowId, wordRangesByRowId }
   } catch {
     return { engine: 'plain', tokensByRowId: {}, wordRangesByRowId }
+  }
+}
+
+export async function highlightWorkspaceCode({
+  value,
+  language,
+}: {
+  value: string
+  language: string
+}): Promise<WorkspaceCodeHighlightResult> {
+  try {
+    const highlighter = await getWorkspaceDiffHighlighter()
+    const normalizedLanguage = getWorkspaceCodeShikiLanguage(language)
+    await ensureWorkspaceDiffLanguage(highlighter, normalizedLanguage)
+    const result = highlighter.codeToTokens(value, {
+      lang: workspaceDiffLanguageLoaders[normalizedLanguage] ? normalizedLanguage : 'text',
+      theme: workspaceCodeShikiTheme,
+      tokenizeMaxLineLength: WORKSPACE_DIFF_TOKENIZE_MAX_LINE_LENGTH,
+    })
+    return {
+      engine: 'shiki',
+      tokensByLine: result.tokens.map((line) => line.map((token) => ({
+        content: token.content,
+        color: token.color,
+        fontStyle: token.fontStyle,
+      }))),
+    }
+  } catch {
+    return { engine: 'plain', tokensByLine: [] }
   }
 }

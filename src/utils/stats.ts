@@ -9,7 +9,7 @@ import { getFsImplementation } from './fsOperations.js'
 import { readJSONLFile } from './json.js'
 import { SYNTHETIC_MODEL } from './messages.js'
 import { getProjectsDir, isTranscriptMessage } from './sessionStorage.js'
-import { SHELL_TOOL_NAMES } from './shell/shellToolUtils.js'
+import { extractShotCountFromAssistantContent } from './shotStats.js'
 import { jsonParse } from './slowOperations.js'
 import {
   getTodayDateString,
@@ -97,7 +97,7 @@ export type ClaudeCodeStats = {
 /**
  * Result of processing session files - intermediate stats that can be merged.
  */
-type ProcessedStats = {
+export type ProcessedStats = {
   dailyActivity: DailyActivity[]
   dailyModelTokens: DailyModelTokens[]
   modelUsage: { [modelName: string]: ModelUsage }
@@ -819,12 +819,32 @@ export async function aggregateClaudeCodeStats(): Promise<ClaudeCodeStats> {
 
 export type StatsDateRange = '7d' | '30d' | 'all'
 
+export type ResolvedStatsDateRange = {
+  fromDate?: string
+  toDate?: string
+}
+
+export function resolveStatsDateRange(
+  range: StatsDateRange,
+  now: Date = new Date(),
+): ResolvedStatsDateRange {
+  if (range === 'all') return {}
+  const daysBack = range === '7d' ? 7 : 30
+  const fromDate = new Date(now)
+  fromDate.setDate(now.getDate() - daysBack + 1)
+  return {
+    fromDate: toDateString(fromDate),
+    toDate: toDateString(now),
+  }
+}
+
 /**
  * Aggregates stats for a specific date range.
  * For 'all', uses the cached aggregation. For other ranges, processes files directly.
  */
 export async function aggregateClaudeCodeStatsForRange(
   range: StatsDateRange,
+  options: { now?: Date } = {},
 ): Promise<ClaudeCodeStats> {
   if (range === 'all') {
     return aggregateClaudeCodeStats()
@@ -836,12 +856,10 @@ export async function aggregateClaudeCodeStatsForRange(
   }
 
   // Calculate fromDate based on range
-  const today = new Date()
-  const daysBack = range === '7d' ? 7 : 30
-  const fromDate = new Date(today)
-  fromDate.setDate(today.getDate() - daysBack + 1) // +1 to include today
-  const fromDateStr = toDateString(fromDate)
-  const toDateStr = toDateString(today)
+  const { fromDate: fromDateStr, toDate: toDateStr } = resolveStatsDateRange(
+    range,
+    options.now ?? new Date(),
+  )
 
   // Process session files for the date range
   const stats = await processSessionFiles(allSessionFiles, {
@@ -849,15 +867,17 @@ export async function aggregateClaudeCodeStatsForRange(
     toDate: toDateStr,
   })
 
-  return processedStatsToClaudeCodeStats(stats)
+  return processedStatsToClaudeCodeStats(stats, options.now ?? new Date())
 }
 
 /**
  * Convert ProcessedStats to ClaudeCodeStats.
  * Used for filtered date ranges that bypass the cache.
  */
-function processedStatsToClaudeCodeStats(
+export function processedStatsToClaudeCodeStats(
   stats: ProcessedStats,
+  now: Date = new Date(),
+  options: { shotStatsEnabled?: boolean } = {},
 ): ClaudeCodeStats {
   const dailyActivitySorted = stats.dailyActivity
     .slice()
@@ -867,7 +887,7 @@ function processedStatsToClaudeCodeStats(
     .sort((a, b) => a.date.localeCompare(b.date))
 
   // Calculate streaks from daily activity
-  const streaks = calculateStreaks(dailyActivitySorted)
+  const streaks = calculateStreaks(dailyActivitySorted, now)
 
   // Find longest session
   let longestSession: SessionStats | null = null
@@ -938,7 +958,11 @@ function processedStatsToClaudeCodeStats(
     totalSpeculationTimeSavedMs: stats.totalSpeculationTimeSavedMs,
   }
 
-  if (feature('SHOT_STATS') && stats.shotDistribution) {
+  let shotStatsEnabled = options.shotStatsEnabled === true
+  if (options.shotStatsEnabled === undefined && feature('SHOT_STATS')) {
+    shotStatsEnabled = true
+  }
+  if (shotStatsEnabled && stats.shotDistribution) {
     result.shotDistribution = stats.shotDistribution
     const totalWithShots = Object.values(stats.shotDistribution).reduce(
       (sum, n) => sum + n,
@@ -962,7 +986,10 @@ function getNextDay(dateStr: string): string {
   return toDateString(date)
 }
 
-function calculateStreaks(dailyActivity: DailyActivity[]): StreakInfo {
+function calculateStreaks(
+  dailyActivity: DailyActivity[],
+  now: Date = new Date(),
+): StreakInfo {
   if (dailyActivity.length === 0) {
     return {
       currentStreak: 0,
@@ -973,7 +1000,7 @@ function calculateStreaks(dailyActivity: DailyActivity[]): StreakInfo {
     }
   }
 
-  const today = new Date()
+  const today = new Date(now)
   today.setHours(0, 0, 0, 0)
 
   // Calculate current streak (working backwards from today)
@@ -1042,8 +1069,6 @@ function calculateStreaks(dailyActivity: DailyActivity[]): StreakInfo {
   }
 }
 
-const SHOT_COUNT_REGEX = /(\d+)-shotted by/
-
 /**
  * Extract the shot count from PR attribution text in a `gh pr create` Bash call.
  * The attribution format is: "N-shotted by model-name"
@@ -1054,24 +1079,8 @@ function extractShotCountFromMessages(
 ): number | null {
   for (const m of messages) {
     if (m.type !== 'assistant') continue
-    const content = m.message?.content
-    if (!Array.isArray(content)) continue
-    for (const block of content) {
-      if (
-        block.type !== 'tool_use' ||
-        !SHELL_TOOL_NAMES.includes(block.name) ||
-        typeof block.input !== 'object' ||
-        block.input === null ||
-        !('command' in block.input) ||
-        typeof block.input.command !== 'string'
-      ) {
-        continue
-      }
-      const match = SHOT_COUNT_REGEX.exec(block.input.command)
-      if (match) {
-        return parseInt(match[1]!, 10)
-      }
-    }
+    const shotCount = extractShotCountFromAssistantContent(m.message?.content)
+    if (shotCount !== null) return shotCount
   }
   return null
 }

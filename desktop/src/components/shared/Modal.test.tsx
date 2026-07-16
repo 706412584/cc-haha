@@ -1,5 +1,6 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
+import { ConfirmDialog } from './ConfirmDialog'
 import { Modal } from './Modal'
 
 describe('Modal', () => {
@@ -32,5 +33,71 @@ describe('Modal', () => {
     fireEvent.click(backdrop!)
 
     expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('moves focus inside, loops Tab at both edges, and restores the trigger after close', async () => {
+    const onClose = vi.fn()
+    const view = (open: boolean) => (
+      <>
+        <button type="button">Open provider</button>
+        <Modal open={open} onClose={onClose} title="Provider">
+          <label>
+            Name
+            <input aria-label="Provider name" />
+          </label>
+          <button type="button">Save provider</button>
+        </Modal>
+      </>
+    )
+    const { rerender } = render(view(false))
+    const trigger = screen.getByRole('button', { name: 'Open provider' })
+    trigger.focus()
+
+    rerender(view(true))
+    const dialog = await screen.findByRole('dialog', { name: 'Provider' })
+    const close = within(dialog).getByRole('button', { name: 'Close dialog' })
+    const last = within(dialog).getByRole('button', { name: 'Save provider' })
+    await waitFor(() => expect(document.activeElement).toBe(close))
+
+    last.focus()
+    fireEvent.keyDown(document, { key: 'Tab' })
+    expect(document.activeElement).toBe(close)
+
+    close.focus()
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).toBe(last)
+
+    rerender(view(false))
+    await waitFor(() => expect(document.activeElement).toBe(trigger))
+  })
+
+  it('keeps a busy confirmation open for Escape, backdrop, and close-button attempts', async () => {
+    const onClose = vi.fn()
+    const view = (open: boolean) => (
+      <>
+        <button type="button">Start rebuild</button>
+        <ConfirmDialog
+          open={open}
+          onClose={onClose}
+          onConfirm={vi.fn()}
+          title="Rebuild local index"
+          body="Rebuild?"
+          confirmLabel="Rebuild"
+          cancelLabel="Cancel"
+          loading
+        />
+      </>
+    )
+    const { rerender } = render(view(false))
+    screen.getByRole('button', { name: 'Start rebuild' }).focus()
+    rerender(view(true))
+
+    const dialog = await screen.findByRole('dialog', { name: 'Rebuild local index' })
+    fireEvent.keyDown(document, { key: 'Escape' })
+    fireEvent.click(dialog.previousElementSibling!)
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close dialog' }))
+
+    expect(onClose).not.toHaveBeenCalled()
+    expect(document.body.contains(dialog)).toBe(true)
   })
 })

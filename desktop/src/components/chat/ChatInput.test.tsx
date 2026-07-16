@@ -72,14 +72,14 @@ vi.mock('../controls/PermissionModeSelector', () => ({
 vi.mock('../controls/ModelSelector', async () => {
   const React = await vi.importActual<typeof import('react')>('react')
   return {
-    ModelSelector: React.forwardRef<{ open: () => void }, Record<string, never>>((_props, ref) => {
+    ModelSelector: React.forwardRef<{ open: () => void }, { fluid?: boolean }>(({ fluid }, ref) => {
       const [open, setOpen] = React.useState(false)
       React.useImperativeHandle(ref, () => ({ open: () => setOpen(true) }), [])
       return (
-        <>
+        <div data-testid="model-selector-shell" className={fluid ? 'min-w-0 flex-1' : 'shrink-0'}>
           <button type="button">Model</button>
           {open && <div data-testid="model-selector-dropdown">Model selector opened</div>}
-        </>
+        </div>
       )
     }),
   }
@@ -222,6 +222,29 @@ describe('ChatInput file mentions', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals()
+  })
+
+  it('explains a cleaned worktree without calling the source project missing', () => {
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'Cleaned Worktree',
+        createdAt: '2026-05-01T00:00:00.000Z',
+        modifiedAt: '2026-05-01T00:00:00.000Z',
+        messageCount: 1,
+        projectPath: '/repo-worktree',
+        projectRoot: '/repo',
+        workDir: '/repo/.claude/worktrees/desktop-main-12345678',
+        workDirExists: false,
+        workspaceState: 'worktree_removed',
+      }],
+    })
+
+    render(<ChatInput />)
+
+    expect(screen.getByPlaceholderText(
+      'This temporary workspace was cleaned up. Start a new session in the original project to continue.',
+    )).toBeDisabled()
   })
 
   it('passes diff metadata to the composer card and clears the reference after send', async () => {
@@ -1382,6 +1405,9 @@ describe('ChatInput file mentions', () => {
     expect(screen.getByTestId('chat-input-panel')).not.toHaveClass('rounded-b-none')
     expect(screen.getByRole('textbox')).toHaveClass('mobile-composer-textarea', 'min-h-[44px]')
     expect(screen.getByTestId('chat-input-toolbar')).toHaveClass('mobile-composer-toolbar')
+    expect(screen.getByTestId('chat-input-toolbar-leading')).toHaveClass('mobile-composer-toolbar__tools', 'shrink-0', 'gap-1')
+    expect(screen.getByTestId('chat-input-toolbar-trailing')).toHaveClass('mobile-composer-toolbar__actions', 'min-w-0', 'flex-1', 'justify-end', 'gap-1')
+    expect(screen.getByTestId('model-selector-shell')).toHaveClass('min-w-0', 'flex-1')
 
     fireEvent.change(screen.getByRole('textbox'), {
       target: { value: '@cond', selectionStart: 5 },

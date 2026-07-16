@@ -54,6 +54,9 @@ import { findGitRoot } from '../../utils/git.js'
 import { traceCaptureService, trimTraceCallPreviews } from '../services/traceCaptureService.js'
 import { getSubagentRunByTool } from '../services/subagentRunService.js'
 import { isValidPermissionMode } from '../services/settingsService.js'
+import { handleWorkspaceSearchRoute } from './workspaceSearch.js'
+import { localIndexCoordinator } from '../services/localIndex/coordinator.js'
+import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 
 const DEFAULT_GIT_INFO_COMMAND_TIMEOUT_MS = 3_000
 const INSPECTION_CONTEXT_TIMEOUT_MS = 5_000
@@ -310,7 +313,10 @@ async function listSessions(url: URL): Promise<Response> {
   }
 
   const result = await sessionService.listSessions({ project, limit, offset })
-  return Response.json(result)
+  return Response.json({
+    ...result,
+    index: localIndexCoordinator.getPublicStatus(),
+  })
 }
 
 async function getSession(sessionId: string): Promise<Response> {
@@ -425,7 +431,7 @@ async function handleSessionWorkspaceRoute(
   url: URL,
   workspaceResource?: string,
 ): Promise<Response> {
-  await requireSessionWorkspace(sessionId)
+  const workDir = await requireSessionWorkspace(sessionId)
 
   switch (workspaceResource) {
     case 'status':
@@ -435,6 +441,8 @@ async function handleSessionWorkspaceRoute(
         sessionId,
         url.searchParams.get('path') || '',
       ))
+    case 'search':
+      return handleWorkspaceSearchRoute(workDir, url)
     case 'file':
       return await runWorkspaceRequest(() => workspaceService.readFile(
         sessionId,
@@ -1234,7 +1242,11 @@ type RecentProjectEntry = {
 }
 
 // In-memory cache for recent projects (TTL: 30s)
-let recentProjectsCache: { projects: RecentProjectEntry[]; timestamp: number } | null = null
+let recentProjectsCache: {
+  scope: string
+  projects: RecentProjectEntry[]
+  timestamp: number
+} | null = null
 const RECENT_PROJECTS_CACHE_TTL = 30_000
 const DESKTOP_WORKTREE_MARKER = '/.claude/worktrees/'
 
@@ -1252,15 +1264,22 @@ function isDesktopWorktreeBranchName(branch: string | null): boolean {
 
 async function getRecentProjects(url: URL): Promise<Response> {
   const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '10', 10) || 10, 1), 500)
-  const sessionScanLimit = Math.min(Math.max(limit * 8, 50), 200)
+  const sessionScanLimit = Math.min(Math.max(limit * 16, 100), 500)
+  const scope = path.resolve(getClaudeConfigHomeDir())
 
   // Return cached response if fresh
-  if (recentProjectsCache && Date.now() - recentProjectsCache.timestamp < RECENT_PROJECTS_CACHE_TTL) {
+  if (
+    recentProjectsCache?.scope === scope &&
+    Date.now() - recentProjectsCache.timestamp < RECENT_PROJECTS_CACHE_TTL
+  ) {
     return Response.json({ projects: recentProjectsCache.projects.slice(0, limit) })
   }
 
   const { sessions } = await sessionService.listSessions({ limit: sessionScanLimit })
-  const validSessions = sessions.filter((session) => session.workDirExists && session.workDir)
+  const validSessions = sessions.filter((session) => (
+    session.workspaceState !== 'missing' &&
+    (session.projectRoot || session.workDir)
+  ))
 
   // First pass: group by logical project root so worktrees stay under the same project.
   // Optimization: prefer s.projectRoot (already resolved by listSessions) and only fall back
@@ -1359,6 +1378,6 @@ async function getRecentProjects(url: URL): Promise<Response> {
   // Sort by most recent
   projects.sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt))
 
-  recentProjectsCache = { projects, timestamp: Date.now() }
+  recentProjectsCache = { scope, projects, timestamp: Date.now() }
   return Response.json({ projects: projects.slice(0, limit) })
 }

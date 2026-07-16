@@ -10,6 +10,8 @@ import { useUIStore } from '../stores/uiStore'
 
 const diagnosticsApiMock = vi.hoisted(() => ({
   getStatus: vi.fn(),
+  getLocalIndexStatus: vi.fn(),
+  rebuildLocalIndex: vi.fn(),
   getEvents: vi.fn(),
   getIssueReport: vi.fn(),
   exportBundle: vi.fn(),
@@ -29,6 +31,31 @@ function deferred<T>() {
     reject = nextReject
   })
   return { promise, resolve, reject }
+}
+
+function localIndexStatus(overrides: Partial<{
+  mode: 'off' | 'shadow' | 'on'
+  state: 'off' | 'building' | 'ready' | 'degraded'
+  discovered: number
+  indexed: number
+  degradedSources: number
+  databaseBytes: number
+  walBytes: number
+  lastUpdatedAt: string | null
+  lastErrorCode: string | null
+}> = {}) {
+  return {
+    mode: 'on' as const,
+    state: 'ready' as const,
+    discovered: 120,
+    indexed: 120,
+    degradedSources: 0,
+    databaseBytes: 2 * 1024 * 1024,
+    walBytes: 64 * 1024,
+    lastUpdatedAt: '2026-07-15T02:03:04.000Z',
+    lastErrorCode: null,
+    ...overrides,
+  }
 }
 
 function doctorReport(path: string) {
@@ -143,6 +170,8 @@ describe('Settings > Diagnostics tab', () => {
       recentErrorCount: 1,
       lastEventAt: '2026-05-02T00:00:00.000Z',
     })
+    diagnosticsApiMock.getLocalIndexStatus.mockResolvedValue(localIndexStatus())
+    diagnosticsApiMock.rebuildLocalIndex.mockResolvedValue(localIndexStatus())
     diagnosticsApiMock.getEvents.mockResolvedValue({
       events: [
         {
@@ -250,6 +279,233 @@ describe('Settings > Diagnostics tab', () => {
 
     const eventRow = screen.getByText('cli_start_failed').closest('.grid')
     expect(eventRow).toHaveClass('grid-cols-1', 'md:grid-cols-[120px_92px_1fr]')
+  })
+
+  it('shows local-index state, counts, storage, update time, and error code without rollout modes', async () => {
+    diagnosticsApiMock.getLocalIndexStatus.mockResolvedValueOnce(localIndexStatus({
+      mode: 'shadow',
+      state: 'degraded',
+      indexed: 118,
+      degradedSources: 2,
+      databaseBytes: 3 * 1024 * 1024,
+      walBytes: 128 * 1024,
+      lastErrorCode: 'SOURCE_PARSE_DEGRADED',
+    }))
+
+    render(<Settings />)
+    fireEvent.click(screen.getByText('Diagnostics'))
+
+    const section = await screen.findByRole('region', { name: 'Local index' })
+    expect(within(section).queryByText('Shadow')).not.toBeInTheDocument()
+    expect(within(section).queryByText('Mode')).not.toBeInTheDocument()
+    expect(within(section).getByText('Degraded')).toBeInTheDocument()
+    expect(within(section).getByText('118 / 120')).toBeInTheDocument()
+    expect(within(section).getByText('3 MB')).toBeInTheDocument()
+    expect(within(section).getByText('128 KB')).toBeInTheDocument()
+    expect(within(section).getByText('2')).toBeInTheDocument()
+    expect(within(section).getByText('SOURCE_PARSE_DEGRADED')).toBeInTheDocument()
+    expect(within(section).getByText(new Date('2026-07-15T02:03:04.000Z').toLocaleString())).toBeInTheDocument()
+  })
+
+  it('confirms a no-path rebuild and says transcripts and settings are untouched', async () => {
+    diagnosticsApiMock.rebuildLocalIndex.mockResolvedValueOnce(localIndexStatus({
+      discovered: 121,
+      indexed: 121,
+      lastUpdatedAt: '2026-07-15T03:00:00.000Z',
+    }))
+
+    render(<Settings />)
+    fireEvent.click(screen.getByText('Diagnostics'))
+    fireEvent.click(await screen.findByRole('button', { name: 'Rebuild local index' }))
+
+    const dialog = await screen.findByRole('dialog', { name: 'Rebuild local index' })
+    expect(within(dialog).getByText(/transcripts and settings are untouched/i)).toBeInTheDocument()
+    expect(diagnosticsApiMock.rebuildLocalIndex).not.toHaveBeenCalled()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Rebuild local index' }))
+
+    await waitFor(() => {
+      expect(diagnosticsApiMock.rebuildLocalIndex).toHaveBeenCalledTimes(1)
+    })
+    expect(diagnosticsApiMock.rebuildLocalIndex.mock.calls[0]).toEqual([])
+    expect(await screen.findByText('Local index rebuilt. Source history was not deleted.')).toBeInTheDocument()
+    expect(useUIStore.getState().toasts.at(-1)?.message).toBe('Local index rebuilt. Source history was not deleted.')
+  })
+
+  it('disables duplicate rebuild confirmation while the first request is pending', async () => {
+    const request = deferred<ReturnType<typeof localIndexStatus>>()
+    diagnosticsApiMock.rebuildLocalIndex.mockReturnValueOnce(request.promise)
+
+    render(<Settings />)
+    fireEvent.click(screen.getByText('Diagnostics'))
+    fireEvent.click(await screen.findByRole('button', { name: 'Rebuild local index' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Rebuild local index' })
+    const confirm = within(dialog).getByRole('button', { name: 'Rebuild local index' })
+    fireEvent.click(confirm)
+
+    await waitFor(() => expect(confirm).toBeDisabled())
+    fireEvent.click(confirm)
+    expect(diagnosticsApiMock.rebuildLocalIndex).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      request.resolve(localIndexStatus())
+      await Promise.resolve()
+    })
+  })
+
+  it('does not let an older status refresh replace a newer rebuild response', async () => {
+    const oldRefresh = deferred<ReturnType<typeof localIndexStatus>>()
+    diagnosticsApiMock.getLocalIndexStatus
+      .mockResolvedValueOnce(localIndexStatus({ discovered: 10, indexed: 10 }))
+      .mockReturnValueOnce(oldRefresh.promise)
+    diagnosticsApiMock.rebuildLocalIndex.mockResolvedValueOnce(localIndexStatus({
+      discovered: 25,
+      indexed: 25,
+      lastUpdatedAt: '2026-07-15T04:00:00.000Z',
+    }))
+
+    render(<Settings />)
+    fireEvent.click(screen.getByText('Diagnostics'))
+    const section = await screen.findByRole('region', { name: 'Local index' })
+    expect(within(section).getByText('10 / 10')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    fireEvent.click(within(section).getByRole('button', { name: 'Rebuild local index' }))
+    fireEvent.click(within(await screen.findByRole('dialog', { name: 'Rebuild local index' }))
+      .getByRole('button', { name: 'Rebuild local index' }))
+    expect(await within(section).findByText('25 / 25')).toBeInTheDocument()
+
+    await act(async () => {
+      oldRefresh.resolve(localIndexStatus({ state: 'building', discovered: 100, indexed: 1 }))
+      await Promise.resolve()
+    })
+
+    expect(within(section).getByText('25 / 25')).toBeInTheDocument()
+    expect(within(section).queryByText('1 / 100')).not.toBeInTheDocument()
+  })
+
+  it('lets a pending rebuild win over an export refresh and always releases its busy state', async () => {
+    const exportRequest = deferred<{
+      bundle: { path: string; fileName: string; bytes: number }
+    }>()
+    const rebuildRequest = deferred<ReturnType<typeof localIndexStatus>>()
+    diagnosticsApiMock.getLocalIndexStatus
+      .mockResolvedValueOnce(localIndexStatus({ discovered: 10, indexed: 10 }))
+      .mockResolvedValueOnce(localIndexStatus({ state: 'building', discovered: 100, indexed: 1 }))
+    diagnosticsApiMock.exportBundle.mockReturnValueOnce(exportRequest.promise)
+    diagnosticsApiMock.rebuildLocalIndex.mockReturnValueOnce(rebuildRequest.promise)
+
+    render(<Settings />)
+    fireEvent.click(screen.getByText('Diagnostics'))
+    const section = await screen.findByRole('region', { name: 'Local index' })
+    expect(within(section).getByText('10 / 10')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Export Bundle' }))
+    fireEvent.click(within(section).getByRole('button', { name: 'Rebuild local index' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Rebuild local index' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Rebuild local index' }))
+    expect(within(dialog).getByRole('button', { name: 'Rebuild local index' })).toBeDisabled()
+
+    await act(async () => {
+      exportRequest.resolve({
+        bundle: {
+          path: '/tmp/claude/cc-haha/diagnostics/exports/race.tar.gz',
+          fileName: 'race.tar.gz',
+          bytes: 128,
+        },
+      })
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(diagnosticsApiMock.getLocalIndexStatus).toHaveBeenCalledTimes(2))
+    expect(within(section).getByText('10 / 10')).toBeInTheDocument()
+    expect(within(section).queryByText('1 / 100')).not.toBeInTheDocument()
+
+    await act(async () => {
+      rebuildRequest.resolve(localIndexStatus({ discovered: 25, indexed: 25 }))
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Rebuild local index' })).not.toBeInTheDocument())
+    expect(within(section).getByText('25 / 25')).toBeInTheDocument()
+    const rebuildButton = within(section).getByRole('button', { name: 'Rebuild local index' })
+    expect(rebuildButton).not.toBeDisabled()
+    fireEvent.click(rebuildButton)
+    expect(await screen.findByRole('dialog', { name: 'Rebuild local index' })).toBeInTheDocument()
+    expect(useUIStore.getState().toasts.filter(
+      toast => toast.message === 'Local index rebuilt. Source history was not deleted.',
+    )).toHaveLength(1)
+  })
+
+  it('shows building and degraded status inline without repeat toasts', async () => {
+    diagnosticsApiMock.getLocalIndexStatus
+      .mockResolvedValueOnce(localIndexStatus({ state: 'building', discovered: 120, indexed: 40 }))
+      .mockResolvedValueOnce(localIndexStatus({
+        state: 'degraded',
+        discovered: 120,
+        indexed: 118,
+        degradedSources: 2,
+        lastErrorCode: 'SOURCE_PARSE_DEGRADED',
+      }))
+
+    render(<Settings />)
+    fireEvent.click(screen.getByText('Diagnostics'))
+    const section = await screen.findByRole('region', { name: 'Local index' })
+    expect(await within(section).findByText('Indexing runs in the background. Session history remains available.')).toBeInTheDocument()
+    expect(useUIStore.getState().toasts).toHaveLength(0)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    expect(await within(section).findByText('The local index is degraded. File-based fallback remains available.')).toBeInTheDocument()
+    expect(useUIStore.getState().toasts).toHaveLength(0)
+  })
+
+  it('keeps legacy diagnostics usable when the additive local-index endpoint is unavailable', async () => {
+    diagnosticsApiMock.getLocalIndexStatus.mockRejectedValueOnce(new Error('not found'))
+
+    render(<Settings />)
+    fireEvent.click(screen.getByText('Diagnostics'))
+
+    expect(await screen.findByText('/tmp/claude/cc-haha/diagnostics')).toBeInTheDocument()
+    const section = screen.getByRole('region', { name: 'Local index' })
+    expect(within(section).getByText('Local-index status is unavailable. Existing diagnostics remain available.')).toBeInTheDocument()
+    expect(useUIStore.getState().toasts).toHaveLength(0)
+  })
+
+  it('clears an older local-index snapshot when the latest endpoint request fails', async () => {
+    diagnosticsApiMock.getLocalIndexStatus
+      .mockResolvedValueOnce(localIndexStatus({ discovered: 120, indexed: 120 }))
+      .mockRejectedValueOnce(new Error('not found'))
+
+    render(<Settings />)
+    fireEvent.click(screen.getByText('Diagnostics'))
+    const section = await screen.findByRole('region', { name: 'Local index' })
+    expect(within(section).getByText('120 / 120')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+
+    expect(await within(section).findByText('Local-index status is unavailable. Existing diagnostics remain available.')).toBeInTheDocument()
+    expect(within(section).queryByText('120 / 120')).not.toBeInTheDocument()
+  })
+
+  it('posts the fixed rebuild endpoint without a path or request body', async () => {
+    const originalFetch = globalThis.fetch
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(localIndexStatus()), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+    Object.defineProperty(globalThis, 'fetch', { configurable: true, writable: true, value: fetchMock })
+
+    try {
+      const actual = await vi.importActual<typeof import('../api/diagnostics')>('../api/diagnostics')
+      await actual.diagnosticsApi.rebuildLocalIndex()
+
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+      expect(url).toMatch(/\/api\/diagnostics\/local-index\/rebuild$/)
+      expect(init.method).toBe('POST')
+      expect(init.body).toBeUndefined()
+    } finally {
+      Object.defineProperty(globalThis, 'fetch', { configurable: true, writable: true, value: originalFetch })
+    }
   })
 
   it('describes persisted corruption evidence accurately when current logs have no physical lines', async () => {
