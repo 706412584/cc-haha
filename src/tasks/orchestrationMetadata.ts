@@ -1,5 +1,3 @@
-import posixPath from 'path/posix'
-
 export type OrchestrationExecution =
   | 'main'
   | 'background-agent'
@@ -22,7 +20,17 @@ function normalizeRepoRelativePath(value: string): string | null {
   if (/^[A-Za-z]:[\\/]/.test(value) || value.startsWith('/')) return null
 
   const slashNormalized = value.replace(/\\/g, '/')
-  const normalized = posixPath.normalize(slashNormalized)
+  const normalizedParts: string[] = []
+  for (const part of slashNormalized.split('/')) {
+    if (!part || part === '.') continue
+    if (part === '..') {
+      if (normalizedParts.length === 0) return null
+      normalizedParts.pop()
+      continue
+    }
+    normalizedParts.push(part)
+  }
+  const normalized = normalizedParts.join('/')
 
   if (
     normalized === '.' ||
@@ -60,7 +68,7 @@ export function parseOrchestrationMetadata(
 
   if (schemaVersion !== 1) return null
   if (!Array.isArray(fileScope) || fileScope.length === 0) return null
-  if (!Number.isInteger(wave) || wave < 1) return null
+  if (typeof wave !== 'number' || !Number.isInteger(wave) || wave < 1) return null
   if (
     execution !== 'main' &&
     execution !== 'background-agent' &&

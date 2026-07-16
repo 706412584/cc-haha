@@ -1,12 +1,17 @@
 import type { BackgroundAgentTask, AgentTaskNotification, BackgroundAgentTaskUsage } from '../../types/chat'
 import type { TaskSummaryItem, UIMessage } from '../../types/chat'
+import type { QueuedMessage } from '../../stores/chatStore'
 import type { CLITask, TaskStatus } from '../../types/cliTask'
 import type { TeamMember } from '../../types/team'
 import { createBackgroundTaskDismissKey } from '../../lib/backgroundTasks'
+import {
+  parseOrchestrationMetadata,
+  type OrchestrationMetadata,
+} from '../../../../src/tasks/orchestrationMetadata'
 
 export type ActivityStatus = TaskStatus | BackgroundAgentTask['status'] | TeamMember['status']
 
-export type ActivitySectionId = 'output' | 'tasks' | 'team' | 'backgroundTasks' | 'subagents' | 'sources'
+export type ActivitySectionId = 'output' | 'tasks' | 'queue' | 'team' | 'backgroundTasks' | 'subagents' | 'sources'
 
 export type ActivityRow = {
   id: string
@@ -35,6 +40,15 @@ export type ActivityRow = {
     total: number
     turnCount: number
   }
+  owner?: string
+  blocks?: string[]
+  blockedBy?: string[]
+  orchestration?: OrchestrationMetadata
+  agentName?: string
+  queuedMessageId?: string
+  relatedTaskIds?: string[]
+  stale?: boolean
+  ownedTask?: Pick<ActivityRow, 'id' | 'label' | 'status' | 'taskId' | 'blockedBy'>
   openable: boolean
 }
 
@@ -60,10 +74,12 @@ export type BuildSessionActivityModelInput = {
   dismissedBackgroundTaskKeys?: Set<string>
   agentNotifications: AgentTaskNotification[]
   teamMembers?: TeamMember[]
+  queuedMessages?: QueuedMessage[]
 }
 
 export const VISIBLE_ACTIVITY_SECTION_ORDER = [
   'tasks',
+  'queue',
   'team',
   'backgroundTasks',
   'subagents',
@@ -75,6 +91,7 @@ const BADGE_STATUSES = new Set<ActivityStatus>(['pending', 'in_progress', 'runni
 const SECTION_META: Record<ActivitySectionId, Pick<ActivitySection, 'title' | 'emptyLabel'>> = {
   output: { title: 'Output', emptyLabel: 'No output' },
   tasks: { title: 'Tasks', emptyLabel: 'No tasks' },
+  queue: { title: 'Queue', emptyLabel: 'No queued messages' },
   team: { title: 'Team', emptyLabel: 'No team members' },
   backgroundTasks: { title: 'Background Tasks', emptyLabel: 'No background tasks' },
   subagents: { title: 'SubAgents', emptyLabel: 'No SubAgents' },
@@ -85,6 +102,7 @@ function createEmptySections(): Record<ActivitySectionId, ActivitySection> {
   return {
     output: createSection('output'),
     tasks: createSection('tasks'),
+    queue: createSection('queue'),
     team: createSection('team'),
     backgroundTasks: createSection('backgroundTasks'),
     subagents: createSection('subagents'),
@@ -143,6 +161,10 @@ function buildTaskRow(task: CLITask): ActivityRow {
     status: task.status,
     description: task.description,
     taskId: task.id,
+    owner: task.owner,
+    blocks: task.blocks,
+    blockedBy: task.blockedBy,
+    orchestration: parseOrchestrationMetadata(task.metadata) ?? undefined,
     openable: false,
   }
 }
@@ -200,6 +222,10 @@ function mergeTaskRows(existing: ActivityRow, row: ActivityRow): ActivityRow {
     description: nextDescription.length > existingDescription.length ? nextDescription : existing.description,
     summary: existing.summary || row.summary,
     taskId: existing.taskId || row.taskId,
+    owner: row.owner ?? existing.owner,
+    blocks: row.blocks ?? existing.blocks,
+    blockedBy: row.blockedBy ?? existing.blockedBy,
+    orchestration: row.orchestration ?? existing.orchestration,
     updatedAt: row.updatedAt ?? existing.updatedAt,
   }
 }
@@ -379,6 +405,11 @@ function stripAgentMetadata(text: string): string {
     .trim()
 }
 
+function agentToolName(toolCall: Extract<UIMessage, { type: 'tool_use' }>): string | undefined {
+  const input = isRecordValue(toolCall.input) ? toolCall.input : {}
+  return stringField(input, 'name') || undefined
+}
+
 function agentToolLabel(toolCall: Extract<UIMessage, { type: 'tool_use' }>): string {
   const input = isRecordValue(toolCall.input) ? toolCall.input : {}
   return compactText(
@@ -446,6 +477,7 @@ function buildAgentRowsFromMessages(messages: UIMessage[]): ActivityRow[] {
       summary: resultText ? compactText(resultText) : undefined,
       toolUseId: message.toolUseId,
       taskType: 'local_agent',
+      agentName: agentToolName(message),
       updatedAt: result?.timestamp ?? recentEvents?.at(-1)?.timestamp ?? message.timestamp,
       recentEvents,
       openable: true,
@@ -635,6 +667,7 @@ function mergeSubagentRow(existing: ActivityRow | undefined, row: ActivityRow): 
     updatedAt: latestActivityTimestamp(existing.updatedAt, row.updatedAt),
     recentEvents: row.recentEvents ?? existing.recentEvents,
     member: existing.member ?? row.member,
+    agentName: existing.agentName ?? row.agentName,
     openable: existing.openable || row.openable,
   }
 }
@@ -673,10 +706,37 @@ function buildOutputRow(key: string, outputFile: string): ActivityRow {
   }
 }
 
+function queuedTaskIds(content: string): string[] {
+  const match = content.match(/^Task IDs:\s*(.+)$/im)
+  if (!match?.[1]) return []
+  return Array.from(new Set(match[1].split(',').map(id => id.trim()).filter(Boolean)))
+}
+
+function buildQueueRow(message: QueuedMessage, tasksById: Map<string, CLITask>): ActivityRow {
+  const relatedTaskIds = queuedTaskIds(message.content)
+  return {
+    id: message.id,
+    section: 'queue',
+    label: message.displayContent?.trim() || compactText(message.content),
+    status: 'pending',
+    description: message.displayContent ? compactText(message.content) : undefined,
+    queuedMessageId: message.id,
+    relatedTaskIds,
+    stale: relatedTaskIds.some((id) => {
+      const task = tasksById.get(id)
+      return !task || task.status === 'completed'
+    }),
+    updatedAt: message.createdAt,
+    openable: false,
+  }
+}
+
 export function buildSessionActivityModel(input: BuildSessionActivityModelInput): SessionActivityModel {
   const sections = createEmptySections()
   let badgeCount = 0
   sections.tasks.rows = buildTaskRowsFromMessages(input.messages ?? [], input.tasks)
+  const tasksById = new Map(input.tasks.map(task => [task.id, task]))
+  sections.queue.rows = (input.queuedMessages ?? []).map(message => buildQueueRow(message, tasksById))
   for (const row of sections.tasks.rows) {
     if (isBadgeStatus(row.status)) {
       badgeCount += 1
@@ -766,7 +826,15 @@ export function buildSessionActivityModel(input: BuildSessionActivityModelInput)
     }
   }
 
-  sections.subagents.rows = Array.from(subagentRowsByKey.values())
+  const taskRowsByOwner = new Map(
+    sections.tasks.rows
+      .filter(row => row.owner)
+      .map(row => [row.owner!, row]),
+  )
+  sections.subagents.rows = Array.from(subagentRowsByKey.values()).map(row => ({
+    ...row,
+    ownedTask: row.agentName ? taskRowsByOwner.get(row.agentName) : undefined,
+  }))
   sections.output.rows = Array.from(outputRowsByKey.values())
 
   for (const row of sections.subagents.rows) {

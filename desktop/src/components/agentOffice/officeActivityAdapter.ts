@@ -1,4 +1,3 @@
-import type { ChatState } from '../../types/chat'
 import type { ActivityRow } from '../activity/sessionActivityModel'
 import type { SessionActivitySnapshot } from '../activity/useSessionActivityModel'
 import type { Agent, AgentState } from './types/agent'
@@ -14,9 +13,14 @@ export type OfficeActivityCopy = {
   working: string
 }
 
-function mainAgentState(status: ChatState): AgentState {
-  if (status === 'idle') return 'idle'
-  if (status === 'thinking' || status === 'compacting') return 'thinking'
+function mainAgentState(activity: SessionActivitySnapshot['mainAgent']): AgentState {
+  if (activity.operationalStatus === 'idle') return 'idle'
+  if (
+    activity.status === 'thinking' ||
+    activity.status === 'compacting' ||
+    activity.operationalStatus === 'ready' ||
+    activity.operationalStatus === 'blocked'
+  ) return 'thinking'
   return 'working'
 }
 
@@ -90,14 +94,13 @@ export function adaptActivityToOfficeRoster(
 
   return INITIAL_AGENTS.map((base, index) => {
     if (index === 0) {
-      const status = activity.mainAgent.status
       return {
         ...base,
         id: 'main-agent',
         name: copy.mainAgentName,
         role: copy.mainAgentRole,
-        state: mainAgentState(status),
-        currentTask: status === 'idle'
+        state: mainAgentState(activity.mainAgent),
+        currentTask: activity.mainAgent.operationalStatus === 'idle'
           ? undefined
           : activity.mainAgent.statusVerb || activity.mainAgent.activeToolName || copy.working,
         sourceKey: 'main-agent',

@@ -23,7 +23,8 @@ function statusLabel(
   if (status === 'pending') return copy.pending
   if (status === 'completed') return copy.completed
   if (status === 'failed' || status === 'error') return copy.failed
-  return String(status)
+  if (status === 'stopped') return copy.stopped ?? String(status)
+  return copy.idle ?? String(status)
 }
 
 function rowDescription(row: ActivityRow): string | undefined {
@@ -55,6 +56,11 @@ type AgentOfficeRuntimeProps = {
   onStopBackgroundTask?: (taskId: string) => void
   onDismissActivityRows?: (keys: string[]) => void
   onOpenOutputFile?: (path: string) => void
+  onDispatchTasks?: (taskIds: string[]) => void
+  onSendQueuedMessageNow?: (queuedMessageId: string) => void
+  onRemoveQueuedMessage?: (queuedMessageId: string) => void
+  onSendMemberMessage?: (member: TeamMember, content: string) => void
+  dispatchMode?: 'now' | 'queue'
 }
 
 export function AgentOfficeRuntime({
@@ -65,18 +71,34 @@ export function AgentOfficeRuntime({
   onStopBackgroundTask,
   onDismissActivityRows,
   onOpenOutputFile,
+  onDispatchTasks,
+  onSendQueuedMessageNow,
+  onRemoveQueuedMessage,
+  onSendMemberMessage,
+  dispatchMode = 'now',
 }: AgentOfficeRuntimeProps) {
   const t = useTranslation()
   const copy = useMemo(() => resolveAgentOfficeCopy(t), [t])
+  const mainStatusCopy = {
+    foreground: t('agentOffice.mainStatus.foreground'),
+    supervising: t('agentOffice.mainStatus.supervising'),
+    background: t('agentOffice.mainStatus.background'),
+    ready: t('agentOffice.mainStatus.ready'),
+    blocked: t('agentOffice.mainStatus.blocked'),
+    idle: t('agentOffice.mainStatus.idle'),
+  }
   const [selectedSourceKey, setSelectedSourceKey] = useState<string | null>(null)
+  const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([])
+  const [memberMessage, setMemberMessage] = useState('')
   const [now, setNow] = useState(() => Date.now())
   const taskRows = activity.model.sections.tasks.rows
+  const queueRows = activity.model.sections.queue.rows
   const agentRows = [
     ...activity.model.sections.team.rows,
     ...activity.model.sections.subagents.rows,
     ...activity.model.sections.backgroundTasks.rows,
   ]
-  const allRows = [...taskRows, ...agentRows]
+  const allRows = [...taskRows, ...queueRows, ...agentRows]
   const projection = projectOfficeActivity(allRows, now)
   const agentProjection = projectOfficeActivity(agentRows, now)
   const visibleRows = projection.liveRows
@@ -96,9 +118,10 @@ export function AgentOfficeRuntime({
         team: { ...activity.model.sections.team, rows: projectOfficeActivity(activity.model.sections.team.rows, now).liveRows },
         subagents: { ...activity.model.sections.subagents, rows: projectOfficeActivity(activity.model.sections.subagents.rows, now).liveRows },
         backgroundTasks: { ...activity.model.sections.backgroundTasks, rows: projectOfficeActivity(activity.model.sections.backgroundTasks.rows, now).liveRows },
+        queue: { ...activity.model.sections.queue, rows: queueRows },
       },
     },
-  }), [activity, now, taskRows])
+  }), [activity, now, queueRows, taskRows])
   const agents = useMemo(
     () => adaptActivityToOfficeRoster(officeActivity, copy),
     [copy, officeActivity],
@@ -131,7 +154,7 @@ export function AgentOfficeRuntime({
             onSelectAgent={setSelectedSourceKey}
           />
           <div className="pointer-events-none absolute bottom-4 left-1/2 z-10 -translate-x-1/2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-glass)] px-4 py-2 text-center shadow-lg backdrop-blur">
-            <strong className="block text-xs text-[var(--color-text-primary)]">Agent Office</strong>
+            <strong className="block text-xs text-[var(--color-text-primary)]">{t('agentOffice.canvasTitle')}</strong>
             <span className="block max-w-[360px] truncate text-[10px] text-[var(--color-text-tertiary)]">{sessionId}</span>
           </div>
         </main>
@@ -153,6 +176,16 @@ export function AgentOfficeRuntime({
                 <span className="text-[11px] text-[var(--color-text-tertiary)]">{visibleRows.length}</span>
               </div>
             </div>
+            {selectedTaskIds.length > 0 && onDispatchTasks ? (
+              <button
+                type="button"
+                aria-label={t(dispatchMode === 'now' ? 'agentOffice.task.processSelected' : 'agentOffice.task.queueSelected')}
+                onClick={() => onDispatchTasks([...selectedTaskIds].sort())}
+                className="mb-3 w-full rounded-lg bg-[var(--color-primary)] px-3 py-2 text-xs font-medium text-[var(--color-on-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
+              >
+                {t(dispatchMode === 'now' ? 'agentOffice.task.processSelected' : 'agentOffice.task.queueSelected')} ({selectedTaskIds.length})
+              </button>
+            ) : null}
 
             <div className="space-y-2" data-testid="agent-office-live-status">
               {visibleRows.length > 0 ? visibleRows.slice(0, 8).map((row) => {
@@ -162,18 +195,37 @@ export function AgentOfficeRuntime({
                 const canOpenMember = row.section === 'team' && Boolean(row.member && onOpenMember)
                 const canStop = row.section === 'backgroundTasks' && row.status === 'running' && Boolean(row.taskId && onStopBackgroundTask)
                 const canOpenOutput = Boolean(row.outputFile && onOpenOutputFile)
+                const isReadyTask = row.section === 'tasks' && row.status === 'pending' && (row.blockedBy?.length ?? 0) === 0
+                const isQueue = row.section === 'queue' && Boolean(row.queuedMessageId)
+                const isMember = row.section === 'team' && Boolean(row.member)
                 return (
                   <article key={sourceKey} className={`rounded-xl border shadow-sm transition-colors motion-reduce:transition-none ${
                     selected
                       ? 'border-[var(--color-border-focus)] bg-[var(--color-surface-container)]'
                       : 'border-[var(--color-border)] bg-[var(--color-surface-container-lowest)]'
                   }`}>
-                    <button
-                      type="button"
-                      aria-pressed={selected}
-                      onClick={() => setSelectedSourceKey((current) => current === sourceKey ? null : sourceKey)}
-                      className="w-full rounded-xl p-3 text-left hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
-                    >
+                    <div className="flex items-start gap-2 p-3">
+                      {row.section === 'tasks' ? (
+                        <input
+                          type="checkbox"
+                          aria-label={t('agentOffice.task.select', { task: row.label })}
+                          disabled={!isReadyTask}
+                          checked={selectedTaskIds.includes(row.taskId ?? row.id)}
+                          onChange={() => {
+                            const taskId = row.taskId ?? row.id
+                            setSelectedTaskIds((current) => current.includes(taskId)
+                              ? current.filter(id => id !== taskId)
+                              : [...current, taskId])
+                          }}
+                          className="mt-0.5"
+                        />
+                      ) : null}
+                      <button
+                        type="button"
+                        aria-pressed={selected}
+                        onClick={() => setSelectedSourceKey((current) => current === sourceKey ? null : sourceKey)}
+                        className="min-w-0 flex-1 rounded-lg text-left hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
+                      >
                       <span className="flex items-start justify-between gap-2">
                         <strong className="min-w-0 truncate text-xs text-[var(--color-text-primary)]">{row.label}</strong>
                         <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] ${
@@ -186,12 +238,22 @@ export function AgentOfficeRuntime({
                           {statusLabel(row.status, copy.status)}
                         </span>
                       </span>
-                      {rowDescription(row) ? (
-                        <span className="mt-1 block line-clamp-2 text-[11px] leading-4 text-[var(--color-text-secondary)]">{rowDescription(row)}</span>
-                      ) : null}
-                    </button>
-                    {selected && (canOpenSubagent || canOpenMember || canStop || canOpenOutput) ? (
+                        {rowDescription(row) ? (
+                          <span className="mt-1 block line-clamp-2 text-[11px] leading-4 text-[var(--color-text-secondary)]">{rowDescription(row)}</span>
+                        ) : null}
+                        {row.owner ? <span className="mt-1 block text-[10px] text-[var(--color-text-tertiary)]">{t('agentOffice.task.owner', { owner: row.owner })}</span> : null}
+                        {row.ownedTask ? <span className="mt-1 block text-[10px] text-[var(--color-text-tertiary)]">{t('agentOffice.task.assignedTask', { id: row.ownedTask.taskId ?? row.ownedTask.id, task: row.ownedTask.label })}</span> : null}
+                        {(row.blockedBy?.length ?? 0) > 0 ? <span className="mt-1 block text-[10px] text-[var(--color-warning)]">{t('agentOffice.task.blockedBy', { tasks: row.blockedBy!.join(', ') })}</span> : null}
+                        {row.stale ? <span className="mt-1 block text-[10px] text-[var(--color-warning)]">{t('agentOffice.queue.stale')}</span> : null}
+                      </button>
+                    </div>
+                    {selected && (canOpenSubagent || canOpenMember || canStop || canOpenOutput || isReadyTask || isQueue || isMember) ? (
                       <div className="flex flex-wrap gap-1 border-t border-[var(--color-border)] px-3 py-2">
+                        {isReadyTask && onDispatchTasks ? (
+                          <button type="button" onClick={() => onDispatchTasks([row.taskId ?? row.id])} className="rounded-md px-2 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]">
+                            {t(dispatchMode === 'now' ? 'agentOffice.task.processOne' : 'agentOffice.task.queueOne')}
+                          </button>
+                        ) : null}
                         {canOpenSubagent ? (
                           <button
                             type="button"
@@ -228,6 +290,31 @@ export function AgentOfficeRuntime({
                             {t('session.activity.details.outputFile')}
                           </button>
                         ) : null}
+                        {isQueue && onSendQueuedMessageNow ? (
+                          <button type="button" onClick={() => onSendQueuedMessageNow(row.queuedMessageId!)} className="rounded-md px-2 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]">
+                            {t('agentOffice.queue.sendNow')}
+                          </button>
+                        ) : null}
+                        {isQueue && onRemoveQueuedMessage ? (
+                          <button type="button" onClick={() => onRemoveQueuedMessage(row.queuedMessageId!)} className="rounded-md px-2 py-1 text-[10px] font-medium text-[var(--color-error)] hover:bg-[var(--color-error)]/10">
+                            {t('agentOffice.queue.remove')}
+                          </button>
+                        ) : null}
+                        {isMember && onSendMemberMessage ? (
+                          <form
+                            className="flex w-full gap-1"
+                            onSubmit={(event) => {
+                              event.preventDefault()
+                              const content = memberMessage.trim()
+                              if (!content) return
+                              onSendMemberMessage(row.member!, content)
+                              setMemberMessage('')
+                            }}
+                          >
+                            <input value={memberMessage} onChange={event => setMemberMessage(event.target.value)} placeholder={t('agentOffice.member.placeholder')} className="min-w-0 flex-1 rounded-md border border-[var(--color-border)] bg-transparent px-2 py-1 text-[10px]" />
+                            <button type="submit" disabled={!memberMessage.trim()} className="rounded-md px-2 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] disabled:opacity-50">{t('agentOffice.member.send')}</button>
+                          </form>
+                        ) : null}
                       </div>
                     ) : null}
                   </article>
@@ -247,7 +334,7 @@ export function AgentOfficeRuntime({
               <span className="truncate">
                 {formatMainAgentStatus(
                   copy,
-                  activity.mainAgent.statusVerb || activity.mainAgent.activeToolName || copy.agentState.idle,
+                  activity.mainAgent.statusVerb || activity.mainAgent.activeToolName || mainStatusCopy[activity.mainAgent.operationalStatus],
                 )}
               </span>
             </div>
