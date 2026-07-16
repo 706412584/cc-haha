@@ -30,6 +30,7 @@ const mocks = vi.hoisted(() => {
   }
 
   class Graphics extends Container {
+    clear = vi.fn(() => this)
     rect = vi.fn(() => this)
     fill = vi.fn(() => this)
   }
@@ -46,7 +47,7 @@ const mocks = vi.hoisted(() => {
     init: ReturnType<typeof vi.fn>
     destroy: ReturnType<typeof vi.fn>
     ticker: { add: ReturnType<typeof vi.fn>; remove: ReturnType<typeof vi.fn> }
-    renderer: { resize: ReturnType<typeof vi.fn> }
+    renderer: { resize: ReturnType<typeof vi.fn>; background: { color: number } }
   }> = []
 
   class Application {
@@ -55,7 +56,7 @@ const mocks = vi.hoisted(() => {
     init = vi.fn(() => Promise.resolve())
     destroy = vi.fn()
     ticker = { add: vi.fn(), remove: vi.fn() }
-    renderer = { resize: vi.fn() }
+    renderer = { resize: vi.fn(), background: { color: 0 } }
     constructor() {
       applications.push(this)
     }
@@ -75,6 +76,9 @@ const mocks = vi.hoisted(() => {
       this.data = { ...this.data, state: 'talking', customAnimation: animation, currentTask: task }
     })
     updateVisuals = vi.fn()
+    setThemePalette = vi.fn()
+    setSelected = vi.fn()
+    setReducedMotion = vi.fn()
     on = vi.fn((_name: string, callback: AgentEntity['eventCallback']) => {
       this.eventCallback = callback
     })
@@ -240,6 +244,88 @@ describe('OfficeScene', () => {
     expect(mocks.applications[0]!.destroy).toHaveBeenCalled()
   })
 
+  it('repaints an initialized scene when its theme changes', async () => {
+    const scene = new OfficeScene()
+    await scene.init(document.createElement('div'), 960, 640)
+
+    scene.setThemePalette({
+      floor: 0x171917,
+      labelText: 0xf2f1ed,
+      taskText: 0xc8c7c2,
+      labelSurface: 0x2f312e,
+      bubbleSurface: 0x2f312e,
+      bubbleBorder: 0x555751,
+    })
+
+    expect(mocks.applications[0]!.renderer.background.color).toBe(0x171917)
+    expect(mocks.agentEntities[0]!.setThemePalette).toHaveBeenCalledWith(expect.objectContaining({ floor: 0x171917 }))
+  })
+
+  it('propagates selected source keys to matching Pixi entities', async () => {
+    const scene = new OfficeScene()
+    scene.syncAgents([syncedAgent(0), syncedAgent(1, { sourceKey: 'team:selected' })])
+    await scene.init(document.createElement('div'), 960, 640)
+
+    scene.setSelectedSourceKey('team:selected')
+
+    expect(mocks.agentEntities[0]!.setSelected).toHaveBeenLastCalledWith(false)
+    expect(mocks.agentEntities[1]!.setSelected).toHaveBeenLastCalledWith(true)
+  })
+
+  it('does not start decorative ambient events or automatic visits when reduced motion is requested', async () => {
+    const scene = new OfficeScene()
+    scene.syncAgents([syncedAgent(0), syncedAgent(1, { sourceKey: undefined })])
+    scene.syncAgents([syncedAgent(0), syncedAgent(1, { sourceKey: 'team:new' })])
+    scene.setReducedMotion(true)
+    await scene.init(document.createElement('div'), 960, 640)
+    const tickerCallback = mocks.applications[0]!.ticker.add.mock.calls[0]![0]
+
+    tickerCallback({ deltaTime: 1 })
+
+    expect(mocks.simulatorTick).not.toHaveBeenCalled()
+    expect(mocks.simulatorStartVisit).not.toHaveBeenCalled()
+    expect(mocks.animationUpdate).toHaveBeenCalledWith(expect.any(Map), 0)
+    expect(mocks.movementUpdate).toHaveBeenCalled()
+    expect(mocks.agentEntities[0]!.setReducedMotion).toHaveBeenCalledWith(true)
+  })
+
+  it('returns visiting agents to their synced positions when reduced motion is enabled', async () => {
+    const scene = new OfficeScene()
+    const visitor = syncedAgent(0, { x: 120, y: 140 })
+    scene.syncAgents([visitor, syncedAgent(1)])
+    await scene.init(document.createElement('div'), 960, 640)
+    mocks.agentEntities[0]!.data = {
+      ...mocks.agentEntities[0]!.data,
+      x: 300,
+      y: 260,
+      targetX: 400,
+      targetY: 280,
+      mission: {
+        kind: 'desk_visit',
+        phase: 'goto',
+        hostAgentId: 'office-agent-2',
+        hostDeskId: 'desk-1',
+        message: 'Hi',
+        resumeState: 'idle',
+        resumeTask: '',
+        talkDuration: 1,
+        queue: [],
+      },
+    }
+    const tickerCallback = mocks.applications[0]!.ticker.add.mock.calls[0]![0]
+    tickerCallback({ deltaTime: 1 })
+
+    scene.setReducedMotion(true)
+
+    expect(scene.getAgents()[0]).toMatchObject({
+      x: 120,
+      y: 140,
+      targetX: undefined,
+      targetY: undefined,
+      mission: undefined,
+    })
+  })
+
   it('syncs cloned agent snapshots and exposes defensive copies', () => {
     const scene = new OfficeScene()
     const incoming = [syncedAgent(0), syncedAgent(1)]
@@ -268,6 +354,20 @@ describe('OfficeScene', () => {
       currentTask: 'Greeting',
       viewFacing: 'front',
     })
+  })
+
+  it('does not create manual visit missions while reduced motion is enabled', () => {
+    const scene = new OfficeScene()
+    scene.syncAgents([syncedAgent(0), syncedAgent(1)])
+    const before = scene.getAgents()
+    scene.setReducedMotion(true)
+
+    scene.requestDeskVisit(1, 2, 'Status?')
+    scene.requestDeskVisitTour(1, [2])
+
+    expect(mocks.simulatorStartVisit).not.toHaveBeenCalled()
+    expect(mocks.simulatorStartTour).not.toHaveBeenCalled()
+    expect(scene.getAgents()).toEqual(before)
   })
 
   it('ignores custom animations for missing agents or active missions', () => {

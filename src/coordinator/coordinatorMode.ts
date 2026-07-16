@@ -16,6 +16,11 @@ import { TEAM_CREATE_TOOL_NAME } from '../tools/TeamCreateTool/constants.js'
 import { TEAM_DELETE_TOOL_NAME } from '../tools/TeamDeleteTool/constants.js'
 import { isEnvTruthy } from '../utils/envUtils.js'
 
+const WORKER_SCOPE_RULES = [
+  '- Default to one well-scoped worker when delegation is required. Do not fan out simple research, planning, command execution, or ordinary tests.',
+  '- Parallel workers require genuinely independent tasks with non-overlapping ownership. Keep concurrency proportional to the work instead of maximizing worker count.',
+].join('\n')
+
 const BACKGROUND_ORCHESTRATION_RULES = [
   '- Before launching an agent, separate work that depends on its result from independent work. Use background agents only for genuinely parallel work; use foreground when you must have the result before proceeding.',
   '- After launching a background agent, continue in the same turn with the lowest-ordered or currently executable unblocked work. Do not end your response merely because an agent is running. If unblocked work exists, briefly tell the user which agent is running and what you are continuing, then actually perform it in the same turn. End only when every remaining task depends on an agent result, requires user input, or is complete.',
@@ -146,6 +151,7 @@ When calling ${AGENT_TOOL_NAME}:
 - Do not use workers to trivially report file contents or run commands. Give them higher-level tasks.
 - Do not set the model parameter. Workers need the default model for the substantive tasks you delegate.
 - Continue workers whose work is complete via ${SEND_MESSAGE_TOOL_NAME} to take advantage of their loaded context.
+${WORKER_SCOPE_RULES}
 ${BACKGROUND_ORCHESTRATION_RULES}
 
 ### ${AGENT_TOOL_NAME} Results
@@ -240,10 +246,10 @@ Most tasks can be broken down into the following phases:
 
 ### Concurrency
 
-**Parallelism is your superpower. Workers are async. Launch independent workers concurrently whenever possible — don't serialize work that can run simultaneously and look for opportunities to fan out. When doing research, cover multiple angles. To launch workers in parallel, make multiple tool calls in a single message.**
+**Parallelism is selective, not the default.** Launch multiple workers only when the tasks are independently executable and their separate contexts save more time than coordination costs. Prefer one well-scoped worker for a single problem; do not fan out merely because workers are available. To launch genuinely independent workers in parallel, make multiple tool calls in a single message.
 
 Manage concurrency:
-- **Read-only tasks** (research) — run in parallel freely
+- **Read-only tasks** (research) — parallelize only distinct questions that need isolated context
 - **Write-heavy tasks** (implementation) — one at a time per set of files
 - **Verification** can sometimes run alongside implementation on different file areas
 

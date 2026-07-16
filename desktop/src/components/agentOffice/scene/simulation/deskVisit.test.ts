@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
+import { useSettingsStore } from '../../../../stores/settingsStore'
 import type { Agent } from '../../types/agent'
-import { DESKS } from '../layout/officeLayout'
+import { DESKS, pickHandoffVisitMessage } from '../layout/officeLayout'
 import {
   processDeskVisitMissions,
   startDeskVisit,
@@ -24,6 +25,21 @@ function agent(index: number, overrides: Partial<Agent> = {}): Agent {
 }
 
 describe('desk visit live-state restoration', () => {
+  it('localizes automatic visit messages and handoff states at use time', () => {
+    const originalLocale = useSettingsStore.getState().locale
+    useSettingsStore.setState({ locale: 'zh' })
+
+    try {
+      expect(pickHandoffVisitMessage('研发 Agent', 2)).toBe('研发 Agent，最新上下文已准备好。')
+
+      const visiting = startDeskVisitTour([agent(0), agent(1)], 1, [2])
+      expect(visiting[0]?.currentTask).toBe('正在派发…')
+      expect(visiting[0]?.mission?.message).toBe('Live Agent 2，最新上下文已准备好。')
+    } finally {
+      useSettingsStore.setState({ locale: originalLocale })
+    }
+  })
+
   it('uses the live host name before the static roster fallback', () => {
     const message = vi.fn(() => 'hello')
     startDeskVisitTour([agent(0), agent(1, { name: 'Release Captain' })], 1, [2], message)

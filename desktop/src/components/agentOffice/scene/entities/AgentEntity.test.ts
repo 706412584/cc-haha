@@ -8,6 +8,7 @@ vi.mock('../ui/StatusLabel', () => ({
     setName() {}
     setState() {}
     setTask() {}
+    setThemePalette = vi.fn()
     layout() {}
     getLabelTopY(y: number) { return y }
   },
@@ -18,9 +19,11 @@ vi.mock('../ui/Bubble', () => ({
     show() { this.visible = true }
     hide() { this.visible = false }
     update() { return this.visible }
+    setThemePalette = vi.fn()
   },
 }))
 
+import { resolveOfficeThemePalette } from '../../officeTheme'
 import { AgentEntity } from './AgentEntity'
 
 function agent(overrides: Partial<Agent> = {}): Agent {
@@ -53,6 +56,27 @@ describe('AgentEntity fallback visuals', () => {
       y: 34,
     })
     expect(entity.position).toMatchObject({ x: 12, y: 34 })
+  })
+
+  it('applies theme and selected or hover highlights through public interaction state', () => {
+    const entity = new AgentEntity(agent())
+    const [highlight, , , label, bubble] = entity.children as unknown as [
+      { visible: boolean },
+      Container,
+      Container,
+      Container & { setThemePalette: ReturnType<typeof vi.fn> },
+      Container & { setThemePalette: ReturnType<typeof vi.fn> },
+    ]
+    const palette = resolveOfficeThemePalette('dark')
+
+    entity.setThemePalette(palette)
+    entity.setSelected(true)
+    expect(highlight.visible).toBe(true)
+
+    entity.setSelected(false)
+    expect(highlight.visible).toBe(false)
+    expect(label.setThemePalette).toHaveBeenCalledWith(palette)
+    expect(bubble.setThemePalette).toHaveBeenCalledWith(palette)
   })
 
   it('shows, updates, and hides bubble state through public methods', () => {
@@ -99,7 +123,7 @@ describe('AgentEntity fallback visuals', () => {
   it('mirrors only fallback character graphics, never labels or bubbles', () => {
     const entity = new AgentEntity(agent({ facing: -1 }))
     entity.updateVisuals('idle', 0)
-    const [body, scarf, label, bubble] = entity.children
+    const [, body, scarf, label, bubble] = entity.children
 
     expect(entity.scale.x).toBe(1)
     expect(body?.scale.x).toBe(-1)

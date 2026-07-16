@@ -82,6 +82,7 @@ export class SpineCharacter extends Container {
   private customAnimation: string | undefined
   private facing: 1 | -1 = 1
   private viewFacing: ChibiFacing = 'front'
+  private reducedMotion = false
 
   constructor(agentId: string, agentColor: number) {
     super()
@@ -135,6 +136,11 @@ export class SpineCharacter extends Container {
     this.applyAnimation()
   }
 
+  setReducedMotion(reduced: boolean) {
+    this.reducedMotion = reduced
+    this.applyTimeScale()
+  }
+
   playAnimation(animation: string) {
     if (!this.spine || !this.ready) return
     if (!this.spine.skeleton.data.findAnimation(animation)) {
@@ -146,7 +152,7 @@ export class SpineCharacter extends Container {
     this.agentState = 'talking'
     this.currentAnim = animation
     const entry = this.spine.state.setAnimation(0, animation, true)
-    this.spine.state.timeScale = 1
+    this.spine.state.timeScale = this.reducedMotion ? 0 : 1
     if (entry) entry.mixDuration = 0.12
   }
 
@@ -205,6 +211,14 @@ export class SpineCharacter extends Container {
     return cfg.anim[this.agentState] ?? cfg.anim.idle
   }
 
+  private applyTimeScale() {
+    if (!this.spine || !this.pack) return
+    const cfg = PACK_CONFIG[this.pack]
+    this.spine.state.timeScale = this.reducedMotion
+      ? 0
+      : cfg.timeScale?.[this.agentState] ?? 1
+  }
+
   private applyAnimation() {
     if (!this.spine || !this.pack) return
 
@@ -222,7 +236,7 @@ export class SpineCharacter extends Container {
         ? `${animName}@${this.viewFacing}`
         : animName
     if (walkKey === this.currentAnim) {
-      this.spine.state.timeScale = cfg.timeScale?.[this.agentState] ?? 1
+      this.applyTimeScale()
       return
     }
 
@@ -235,7 +249,7 @@ export class SpineCharacter extends Container {
 
     this.currentAnim = walkKey
     const entry = this.spine.state.setAnimation(0, animName, true)
-    this.spine.state.timeScale = cfg.timeScale?.[this.agentState] ?? 1
+    this.applyTimeScale()
     if (entry) entry.mixDuration = 0.22
   }
 

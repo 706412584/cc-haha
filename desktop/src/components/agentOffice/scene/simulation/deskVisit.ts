@@ -8,8 +8,8 @@ import type {
 import {
   AGENT_ROSTER,
   DESKS,
-  HANDOFF_STATUS,
   pickHandoffVisitMessage,
+  resolveHandoffStatus,
 } from '../layout/officeLayout'
 import {
   createNavContext,
@@ -98,7 +98,7 @@ function assignGotoHost(
   return {
     ...walking,
     bubbleText: undefined,
-    currentTask: HANDOFF_STATUS.delivering,
+    currentTask: resolveHandoffStatus().delivering,
   }
 }
 
@@ -199,7 +199,7 @@ function syncDeskVisitTalkPartners(agents: Agent[]): Agent[] {
         ...agent,
         ...toward,
         state: 'talking' as const,
-        currentTask: HANDOFF_STATUS.handingOff,
+        currentTask: resolveHandoffStatus().handingOff,
       }
     }
 
@@ -209,7 +209,7 @@ function syncDeskVisitTalkPartners(agents: Agent[]): Agent[] {
         ...agent,
         ...talkFacingToward(agent.x, agent.y, visitor.x, visitor.y),
         state: 'talking' as const,
-        currentTask: HANDOFF_STATUS.receiving,
+        currentTask: resolveHandoffStatus().receiving,
       }
     }
 
@@ -243,14 +243,14 @@ function syncDeskVisitTalkPartners(agents: Agent[]): Agent[] {
         return {
           ...agent,
           state: 'walking' as const,
-          currentTask: HANDOFF_STATUS.wrappingUp,
+          currentTask: resolveHandoffStatus().wrappingUp,
         }
       }
       if (mission.phase === 'goto') {
         return {
           ...agent,
           state: 'walking' as const,
-          currentTask: HANDOFF_STATUS.delivering,
+          currentTask: resolveHandoffStatus().delivering,
         }
       }
       return {
@@ -302,7 +302,7 @@ export function processDeskVisitMissions(
       return {
         ...agent,
         state: 'talking' as const,
-        currentTask: HANDOFF_STATUS.handingOff,
+        currentTask: resolveHandoffStatus().handingOff,
         viewFacing: toward.viewFacing,
         facing: toward.facing,
         mission: {
@@ -324,7 +324,7 @@ export function processDeskVisitMissions(
           ...agent,
           ...(toward ?? {}),
           state: 'talking' as const,
-          currentTask: HANDOFF_STATUS.handingOff,
+          currentTask: resolveHandoffStatus().handingOff,
           mission: { ...mission, talkRemaining: left } satisfies DeskVisitMission,
         }
       }
@@ -362,7 +362,7 @@ export function processDeskVisitMissions(
       )
       return {
         ...walking,
-        currentTask: HANDOFF_STATUS.wrappingUp,
+        currentTask: resolveHandoffStatus().wrappingUp,
         mission: { ...mission, phase: 'return' as const },
       }
     }
@@ -372,7 +372,7 @@ export function processDeskVisitMissions(
         return {
           ...agent,
           state: 'walking' as const,
-          currentTask: HANDOFF_STATUS.wrappingUp,
+          currentTask: resolveHandoffStatus().wrappingUp,
         }
       }
 

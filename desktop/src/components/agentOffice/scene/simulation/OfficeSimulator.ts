@@ -37,6 +37,7 @@ type OfficeSimulatorOptions = {
   copy?: OfficeAmbientCopy
 }
 
+const DEFAULT_FIRST_AMBIENT_INTERVAL = 12
 const DEFAULT_AMBIENT_INTERVAL = 45
 const DEFAULT_AMBIENT_DURATION = 7
 
@@ -44,6 +45,7 @@ export class OfficeSimulator {
   private readonly random: () => number
   private readonly ambientInterval: number
   private readonly ambientDuration: number
+  private readonly firstAmbientInterval: number
   private copy: OfficeAmbientCopy
   private ambientElapsed = 0
   private ambientSequence = 0
@@ -52,6 +54,7 @@ export class OfficeSimulator {
     this.random = options.random ?? Math.random
     this.ambientInterval = options.ambientInterval ?? DEFAULT_AMBIENT_INTERVAL
     this.ambientDuration = options.ambientDuration ?? DEFAULT_AMBIENT_DURATION
+    this.firstAmbientInterval = Math.min(this.ambientInterval, DEFAULT_FIRST_AMBIENT_INTERVAL)
     this.copy = options.copy ?? DEFAULT_AMBIENT_COPY
   }
 
@@ -63,8 +66,11 @@ export class OfficeSimulator {
     let next = this.updateAmbientEvents(dt, agents.map((a) => ({ ...a })))
     this.ambientElapsed += dt
 
+    const nextInterval = this.ambientSequence === 0
+      ? this.firstAmbientInterval
+      : this.ambientInterval
     if (
-      this.ambientElapsed >= this.ambientInterval &&
+      this.ambientElapsed >= nextInterval &&
       !next.some((agent) => agent.ambientEventId)
     ) {
       this.ambientElapsed = 0
@@ -103,9 +109,8 @@ export class OfficeSimulator {
       .map((agent, index) => ({ agent, index }))
       .filter(({ agent, index }) =>
         index > 0 &&
-        agent.ambientEligible === true &&
-        (agent.state === 'idle' || agent.state === 'thinking') &&
         Boolean(agent.sourceKey) &&
+        (agent.state === 'idle' || agent.state === 'thinking' || agent.state === 'working') &&
         !agent.mission &&
         !agent.customAnimation,
       )
@@ -113,19 +118,41 @@ export class OfficeSimulator {
     if (candidates.length === 0) return agents
 
     const kindRoll = this.random()
-    const kind = kindRoll < 1 / 3
-      ? 'chat' as const
-      : kindRoll < 2 / 3
-        ? 'watch' as const
-        : 'game' as const
-    if (kind === 'chat' && candidates.length < 2) return agents
+    const workingCandidates = candidates.filter(({ agent }) => agent.state === 'working')
+    const leisureCandidates = candidates.filter(({ agent }) => agent.ambientEligible === true)
+    if (leisureCandidates.length === 0 && workingCandidates.length > 0) {
+      const selected = workingCandidates[Math.floor(this.random() * workingCandidates.length)] ?? workingCandidates[0]!
+      const playful = kindRoll >= 0.97
+      return agents.map((agent, index) => index === selected.index
+        ? {
+            ...agent,
+            customAnimation: playful ? 'emotes/excited' : 'emotes/determined',
+            ambientEventId: `ambient-${++this.ambientSequence}`,
+            ambientKind: playful ? 'game' as const : 'focus' as const,
+            ambientRemaining: this.ambientDuration,
+            ambientResumeState: agent.state,
+            ambientResumeTask: agent.currentTask,
+            viewFacing: 'front' as const,
+            facing: 1 as const,
+          }
+        : agent)
+    }
+
+    const eventCandidates = leisureCandidates.length > 0 ? leisureCandidates : candidates
+    const kind = eventCandidates.length < 2
+      ? (kindRoll < 0.5 ? 'watch' as const : 'game' as const)
+      : kindRoll < 1 / 3
+        ? 'chat' as const
+        : kindRoll < 2 / 3
+          ? 'watch' as const
+          : 'game' as const
 
     const eventId = `ambient-${++this.ambientSequence}`
     if (kind === 'chat') {
-      const firstIndex = Math.floor(this.random() * candidates.length)
-      const secondOffset = 1 + Math.floor(this.random() * (candidates.length - 1))
-      const first = candidates[firstIndex]!
-      const second = candidates[(firstIndex + secondOffset) % candidates.length]!
+      const firstIndex = Math.floor(this.random() * eventCandidates.length)
+      const secondOffset = 1 + Math.floor(this.random() * (eventCandidates.length - 1))
+      const first = eventCandidates[firstIndex]!
+      const second = eventCandidates[(firstIndex + secondOffset) % eventCandidates.length]!
       const firstFacing = talkFacingToward(
         first.agent.x,
         first.agent.y,
@@ -158,7 +185,7 @@ export class OfficeSimulator {
       })
     }
 
-    const selected = candidates[Math.floor(this.random() * candidates.length)] ?? candidates[0]!
+    const selected = eventCandidates[Math.floor(this.random() * eventCandidates.length)] ?? eventCandidates[0]!
     const label = kind === 'watch' ? this.copy.watch : this.copy.game
     const animation = kind === 'watch' ? 'emotes/idea' : 'emotes/excited'
     return agents.map((agent, index) => index === selected.index

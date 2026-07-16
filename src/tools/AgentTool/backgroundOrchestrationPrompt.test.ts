@@ -58,6 +58,15 @@ describe('background agent orchestration guidance', () => {
     expect(prompt).not.toContain(OLD_COORDINATOR_RULE)
   })
 
+  test('normal Agent prompt keeps implementation with the primary agent by default', async () => {
+    const prompt = await getPrompt(agentDefinitions)
+
+    expect(prompt).toContain('The primary agent owns understanding, implementation, and focused verification')
+    expect(prompt).toContain('Do not delegate simple lookups, planning, local edits, or ordinary test execution')
+    expect(prompt).toContain('retain and continue at least one executable task')
+    expect(prompt).not.toContain('Launch multiple agents concurrently whenever possible')
+  })
+
   test('coordinator Agent prompt includes the shared non-blocking rule', async () => {
     const prompt = await getPrompt(agentDefinitions, true)
 
@@ -86,6 +95,9 @@ describe('background agent orchestration guidance', () => {
     expect(prompt).toContain(
       'use foreground when you must have the result before proceeding',
     )
+    expect(prompt).toContain('Default to one well-scoped worker')
+    expect(prompt).toContain('Do not fan out simple research, planning, command execution, or ordinary tests')
+    expect(prompt).toContain('Parallel workers require genuinely independent tasks')
     expect(prompt).toContain("read an agent's `output_file`")
     expect(prompt).not.toContain(OLD_COORDINATOR_RULE)
   })

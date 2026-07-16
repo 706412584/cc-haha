@@ -1,4 +1,5 @@
 import { Container, Graphics, Text } from 'pixi.js'
+import type { OfficeThemePalette } from '../../officeTheme'
 
 const BUBBLE_STYLE = {
   fontFamily: 'system-ui, -apple-system, sans-serif',
@@ -13,6 +14,8 @@ export class Bubble extends Container {
   private bg: Graphics
   private messageText: Text
   private lifetime = 0
+  private surfaceColor = 0xffffff
+  private borderColor = 0xe0e0e0
 
   constructor() {
     super()
@@ -21,6 +24,13 @@ export class Bubble extends Container {
     this.messageText.anchor.set(0.5, 0.5)
     this.addChild(this.bg, this.messageText)
     this.visible = false
+  }
+
+  setThemePalette(palette: OfficeThemePalette) {
+    this.messageText.style.fill = palette.labelText
+    this.surfaceColor = palette.bubbleSurface
+    this.borderColor = palette.bubbleBorder
+    if (this.visible) this.redraw()
   }
 
   show(text: string, duration = 4) {
@@ -57,14 +67,14 @@ export class Bubble extends Container {
 
     this.bg.clear()
     this.bg.roundRect(-w / 2, bodyTop, w, h, r)
-    this.bg.fill({ color: 0xffffff, alpha: 0.96 })
-    this.bg.stroke({ color: 0xe0e0e0, width: 1 })
+    this.bg.fill({ color: this.surfaceColor, alpha: 0.96 })
+    this.bg.stroke({ color: this.borderColor, width: 1 })
 
     // tail
     this.bg.moveTo(-6, -14)
     this.bg.lineTo(0, -4)
     this.bg.lineTo(6, -14)
-    this.bg.fill({ color: 0xffffff, alpha: 0.96 })
+    this.bg.fill({ color: this.surfaceColor, alpha: 0.96 })
 
     // 背景在负 Y，文字中心需对齐圆角框中部（原点在尾巴处会漂到显示器上）
     this.messageText.position.set(0, bodyTop + h / 2)

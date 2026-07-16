@@ -5,6 +5,10 @@ import { useTabStore } from '../stores/tabStore'
 import { Button } from '../components/shared/Button'
 import { Modal } from '../components/shared/Modal'
 import { useSessionActivityModel } from '../components/activity/useSessionActivityModel'
+import { useTeamStore } from '../stores/teamStore'
+import { useChatStore } from '../stores/chatStore'
+import { useActivityPanelStore } from '../stores/activityPanelStore'
+import { getDesktopHost } from '../lib/desktopHost'
 
 const AgentOfficeRuntime = lazy(() =>
   import('../components/agentOffice/AgentOfficeRuntime').then((module) => ({
@@ -14,6 +18,8 @@ const AgentOfficeRuntime = lazy(() =>
 
 function AgentOfficeContent({ sessionId }: { sessionId: string }) {
   const activity = useSessionActivityModel(sessionId)
+  const stopBackgroundTask = useChatStore((state) => state.stopBackgroundTask)
+  const dismissActivityRows = useActivityPanelStore((state) => state.dismissBackgroundTaskKeys)
 
   return (
     <Suspense
@@ -23,7 +29,20 @@ function AgentOfficeContent({ sessionId }: { sessionId: string }) {
         </div>
       )}
     >
-      <AgentOfficeRuntime sessionId={sessionId} activity={activity} />
+      <AgentOfficeRuntime
+        sessionId={sessionId}
+        activity={activity}
+        onOpenSubagent={(payload) => {
+          useTabStore.getState().openSubagentTab(payload.sessionId, payload.toolUseId, payload.title)
+        }}
+        onOpenMember={(member) => useTeamStore.getState().openMemberSession(member)}
+        onStopBackgroundTask={(taskId) => stopBackgroundTask(sessionId, taskId)}
+        onDismissActivityRows={(keys) => dismissActivityRows(sessionId, keys)}
+        onOpenOutputFile={(path) => {
+          const shell = getDesktopHost().shell
+          if (shell.showItemInFolder) void shell.showItemInFolder(path)
+        }}
+      />
     </Suspense>
   )
 }

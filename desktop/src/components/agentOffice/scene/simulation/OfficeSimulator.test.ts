@@ -62,6 +62,29 @@ describe('OfficeSimulator ambient events', () => {
     expect(next[3]).toMatchObject({ state: 'working', currentTask: 'Real task' })
   })
 
+  it('makes the first idle event observable within twelve seconds', () => {
+    const simulator = new OfficeSimulator({ random: () => 0.8 })
+
+    const before = simulator.tick(11.9, [agent(0), agent(1)])
+    const started = simulator.tick(0.1, before)
+
+    expect(started[1]?.ambientKind).toBe('game')
+  })
+
+  it('falls back to a solo ambient event instead of wasting the interval on chat', () => {
+    const simulator = new OfficeSimulator({
+      random: () => 0,
+      ambientInterval: 10,
+      ambientDuration: 6,
+      copy: ENGLISH_AMBIENT_COPY,
+    })
+
+    const next = simulator.tick(10, [agent(0), agent(1)])
+
+    expect(next[1]?.ambientEventId).toBeDefined()
+    expect(next[1]?.ambientKind).not.toBe('chat')
+  })
+
   it('uses copy injected by the UI locale boundary for ambient text', () => {
     const simulator = new OfficeSimulator({
       random: () => 0,
@@ -103,6 +126,49 @@ describe('OfficeSimulator ambient events', () => {
     })
   })
 
+  it('plays state-appropriate personality emotes for working employees without replacing their task', () => {
+    const simulator = new OfficeSimulator({
+      random: () => 0,
+      ambientInterval: 10,
+      ambientDuration: 6,
+    })
+
+    const next = simulator.tick(10, [
+      agent(0),
+      agent(1, {
+        state: 'working',
+        currentTask: 'Implement stable seats',
+        ambientEligible: false,
+      }),
+    ])
+
+    expect(next[1]).toMatchObject({
+      ambientKind: 'focus',
+      customAnimation: 'emotes/determined',
+      currentTask: 'Implement stable seats',
+      ambientResumeState: 'working',
+      ambientResumeTask: 'Implement stable seats',
+    })
+  })
+
+  it('allows a rare playful event during work without making it the default', () => {
+    const simulator = new OfficeSimulator({
+      random: () => 0.99,
+      ambientInterval: 10,
+      ambientDuration: 6,
+    })
+
+    const next = simulator.tick(10, [
+      agent(0),
+      agent(1, { state: 'working', currentTask: 'Ship release', ambientEligible: false }),
+    ])
+
+    expect(next[1]).toMatchObject({
+      ambientKind: 'game',
+      customAnimation: 'emotes/excited',
+    })
+  })
+
   it('restores waiting employees to their real pending state after an ambient event', () => {
     const simulator = new OfficeSimulator({
       random: () => 0.8,
@@ -133,7 +199,7 @@ describe('OfficeSimulator ambient events', () => {
   })
 
   it.each([
-    { random: [0.5, 0], kind: 'watch', label: 'Watching a show', animation: 'emotes/idea' },
+    { random: [0.4, 0], kind: 'watch', label: 'Watching a show', animation: 'emotes/idea' },
     { random: [0.8, 0], kind: 'game', label: 'Playing a game', animation: 'emotes/excited' },
   ] as const)('shows a visible timed $kind event for one eligible employee', ({ random, kind, label, animation }) => {
     let randomIndex = 0

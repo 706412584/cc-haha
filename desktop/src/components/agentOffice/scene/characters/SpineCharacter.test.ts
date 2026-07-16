@@ -151,6 +151,17 @@ describe('SpineCharacter', () => {
     expect(mocks.setAnimation).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps the Spine timeline paused while reduced motion is enabled', () => {
+    const character = new SpineCharacter('main-agent', 0)
+
+    character.setReducedMotion(true)
+    character.playState('working')
+    expect(mocks.spine.state.timeScale).toBe(0)
+
+    character.setReducedMotion(false)
+    expect(mocks.spine.state.timeScale).toBe(1)
+  })
+
   it('falls back to idle when a resolved animation is absent', () => {
     const character = new SpineCharacter('main-agent', 0)
     mocks.findAnimation.mockImplementation((name: string) =>

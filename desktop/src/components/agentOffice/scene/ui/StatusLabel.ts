@@ -1,4 +1,5 @@
 import { Container, Graphics, Text } from 'pixi.js'
+import type { OfficeThemePalette } from '../../officeTheme'
 
 const NAME_STYLE = {
   fontFamily: 'system-ui, -apple-system, sans-serif',
@@ -33,6 +34,7 @@ export class StatusLabel extends Container {
   private stateDot: Graphics
   private taskBg: Graphics
   private currentState = 'idle'
+  private surfaceColor = 0xffffff
 
   constructor(name: string) {
     super()
@@ -48,6 +50,13 @@ export class StatusLabel extends Container {
     this.addChild(this.taskBg, this.nameText, this.taskText, this.stateDot)
     this.taskBg.visible = false
     this.paintStateDot()
+  }
+
+  setThemePalette(palette: OfficeThemePalette) {
+    this.nameText.style.fill = palette.labelText
+    this.taskText.style.fill = palette.taskText
+    this.surfaceColor = palette.labelSurface
+    if (this.taskBg.visible) this.layoutTaskAboveName()
   }
 
   setName(name: string) {
@@ -77,7 +86,7 @@ export class StatusLabel extends Container {
 
     this.taskBg.clear()
     this.taskBg.roundRect(-w / 2, taskTop, w, h, 3)
-    this.taskBg.fill({ color: 0xffffff, alpha: 0.9 })
+    this.taskBg.fill({ color: this.surfaceColor, alpha: 0.9 })
     this.taskText.position.set(0, taskTop + padY)
   }
 

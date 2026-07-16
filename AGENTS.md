@@ -10,7 +10,8 @@ Rules closer to the code take precedence. Before editing `.github/`, `src/`, `de
 - Identify the affected surface and inspect its production path, nearest tests, and existing implementation pattern before proposing a change. Check recent history when regression context matters.
 - For bugs, reproduce the failure or add a regression test that fails for the intended reason. If reproduction is impossible, state the limitation instead of guessing.
 - Define the smallest behavior change and the proof that will demonstrate it. Stop and re-scope if the diff crosses an unplanned surface, adds a dependency, or grows beyond the verified seam.
-- For broad investigation, parallel read-only subagents are encouraged. Give editing agents non-overlapping file ownership; the primary agent owns integration and final verification.
+- The primary agent owns understanding, implementation, focused testing, integration, and final verification. Do not delegate simple lookup, planning, local edits, or ordinary test execution.
+- Use subagents only when isolation or genuine parallelism repays their context/coordination cost: independent review or verification, a complex bug investigation that benefits from a separate context, or multiple implementation tasks with non-overlapping file ownership. When implementation agents run in parallel, the primary agent must retain and actively continue at least one executable task.
 - Tool access is capability, not authorization. Do not create/switch branches, commit, push, open or merge a PR, publish a release, change repository settings, or spend live-provider quota unless the user explicitly requests that operation.
 
 ## Repository Map
