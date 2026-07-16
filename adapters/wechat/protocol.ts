@@ -107,6 +107,18 @@ export type WechatGetUpdatesResp = {
   longpolling_timeout_ms?: number
 }
 
+export const WECHAT_SESSION_TIMEOUT_CODE = -14
+export const WECHAT_GET_UPDATES_RETRY_DELAY_MS = 3000
+
+export type WechatAdapterStatusEvent = {
+  type: 'adapter_status'
+  adapter: 'wechat'
+  status: 'session_timeout'
+  code: typeof WECHAT_SESSION_TIMEOUT_CODE
+}
+
+export type WechatGetUpdatesErrorAction = 'retry' | 'stop'
+
 const activeLogins = new Map<string, ActiveLogin>()
 
 export function buildClientVersion(version: string): number {
@@ -115,6 +127,35 @@ export function buildClientVersion(version: string): number {
   const minor = parts[1] ?? 0
   const patch = parts[2] ?? 0
   return ((major & 0xff) << 16) | ((minor & 0xff) << 8) | (patch & 0xff)
+}
+
+export function isWechatSessionTimeout(resp: Pick<WechatGetUpdatesResp, 'ret' | 'errcode'>): boolean {
+  return resp.ret === WECHAT_SESSION_TIMEOUT_CODE || resp.errcode === WECHAT_SESSION_TIMEOUT_CODE
+}
+
+export function createWechatGetUpdatesErrorHandler(deps: {
+  emitStatus: (status: WechatAdapterStatusEvent) => void
+  destroyTyping: () => void
+  sleep: (ms: number) => Promise<void>
+}): (resp: Pick<WechatGetUpdatesResp, 'ret' | 'errcode' | 'errmsg'>) => Promise<WechatGetUpdatesErrorAction> {
+  let handledSessionTimeout = false
+
+  return async (resp) => {
+    const code = resp.errcode ?? resp.ret
+    console.warn(`[WeChat] getupdates error: ${code} ${resp.errmsg ?? ''}`)
+
+    if (isWechatSessionTimeout(resp)) {
+      if (!handledSessionTimeout) {
+        handledSessionTimeout = true
+        deps.emitStatus({ type: 'adapter_status', adapter: 'wechat', status: 'session_timeout', code: WECHAT_SESSION_TIMEOUT_CODE })
+        deps.destroyTyping()
+      }
+      return 'stop'
+    }
+
+    await deps.sleep(WECHAT_GET_UPDATES_RETRY_DELAY_MS)
+    return 'retry'
+  }
 }
 
 export function extractWechatText(itemList?: WechatMessageItem[]): string {

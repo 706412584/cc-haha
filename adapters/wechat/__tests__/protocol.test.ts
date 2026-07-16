@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { buildClientVersion, extractWechatText, sendWechatText, sendWechatTyping } from '../protocol.js'
+import {
+  buildClientVersion,
+  createWechatGetUpdatesErrorHandler,
+  extractWechatText,
+  isWechatSessionTimeout,
+  sendWechatText,
+  sendWechatTyping,
+} from '../protocol.js'
 import { collectWechatMediaCandidates } from '../media.js'
 
 const originalFetch = globalThis.fetch
@@ -9,6 +16,51 @@ afterEach(() => {
 })
 
 describe('WeChat protocol helpers', () => {
+  it('classifies getupdates session timeout ret and errcode values', () => {
+    expect(isWechatSessionTimeout({ ret: -14 })).toBe(true)
+    expect(isWechatSessionTimeout({ errcode: -14 })).toBe(true)
+    expect(isWechatSessionTimeout({ ret: 500 })).toBe(false)
+    expect(isWechatSessionTimeout({ errcode: 500 })).toBe(false)
+  })
+
+  it('emits getupdates session timeout status once and stops retrying', async () => {
+    const statuses: unknown[] = []
+    let destroyed = 0
+    let slept = 0
+    const handleError = createWechatGetUpdatesErrorHandler({
+      emitStatus: (status) => statuses.push(status),
+      destroyTyping: () => { destroyed += 1 },
+      sleep: async () => { slept += 1 },
+    })
+
+    expect(await handleError({ ret: -14, errmsg: 'session timeout' })).toBe('stop')
+    expect(await handleError({ errcode: -14, errmsg: 'session timeout again' })).toBe('stop')
+
+    expect(statuses).toEqual([{ type: 'adapter_status', adapter: 'wechat', status: 'session_timeout', code: -14 }])
+    expect(destroyed).toBe(1)
+    expect(slept).toBe(0)
+  })
+
+  it('keeps retrying ordinary getupdates errors after the existing delay', async () => {
+    const statuses: unknown[] = []
+    let destroyed = 0
+    let slept = 0
+    const handleError = createWechatGetUpdatesErrorHandler({
+      emitStatus: (status) => statuses.push(status),
+      destroyTyping: () => { destroyed += 1 },
+      sleep: async (ms) => {
+        expect(ms).toBe(3000)
+        slept += 1
+      },
+    })
+
+    expect(await handleError({ ret: 500, errmsg: 'temporary' })).toBe('retry')
+
+    expect(statuses).toEqual([])
+    expect(destroyed).toBe(0)
+    expect(slept).toBe(1)
+  })
+
   it('encodes iLink client versions like the OpenClaw Weixin plugin', () => {
     expect(buildClientVersion('2.1.7')).toBe((2 << 16) | (1 << 8) | 7)
     expect(buildClientVersion('1.0.11')).toBe(65547)

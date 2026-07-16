@@ -23,6 +23,7 @@ import { AttachmentStore } from '../common/attachment/attachment-store.js'
 import { checkAttachmentLimit } from '../common/attachment/attachment-limits.js'
 import { WechatTypingController } from './typing.js'
 import {
+  createWechatGetUpdatesErrorHandler,
   extractWechatText,
   getWechatConfig,
   getWechatUpdates,
@@ -62,6 +63,12 @@ const typingController = new WechatTypingController(sendTypingIndicator)
 
 let getUpdatesBuf = ''
 let stopped = false
+
+const handleGetUpdatesError = createWechatGetUpdatesErrorHandler({
+  emitStatus: (status) => console.log(JSON.stringify(status)),
+  destroyTyping: () => typingController.destroy(),
+  sleep,
+})
 
 attachmentStore.gc().catch((err) => {
   console.warn('[WeChat] AttachmentStore.gc failed:', err instanceof Error ? err.message : err)
@@ -588,8 +595,8 @@ async function pollLoop(): Promise<void> {
       const hasRetError = typeof resp.ret === 'number' && resp.ret !== 0
       const hasErrCode = typeof resp.errcode === 'number' && resp.errcode !== 0
       if (hasRetError || hasErrCode) {
-        console.warn(`[WeChat] getupdates error: ${resp.errcode ?? resp.ret} ${resp.errmsg ?? ''}`)
-        await sleep(3000)
+        const action = await handleGetUpdatesError(resp)
+        if (action === 'stop') break
         continue
       }
       for (const msg of resp.msgs ?? []) {
