@@ -23,6 +23,7 @@ export const en = {
   // ─── Sidebar ──────────────────────────────────────
   'sidebar.newSession': 'New session',
   'sidebar.scheduled': 'Scheduled',
+  'sidebar.market': 'Market',
   'sidebar.terminal': 'Terminal',
   'sidebar.settings': 'Settings',
   'sidebar.searchPlaceholder': 'Search sessions...',
@@ -192,6 +193,7 @@ export const en = {
   'workbench.navigation': 'Workbench navigation',
   'workspace.closeTab': 'Close tab',
   'workspace.preview': 'Preview',
+  'workspace.edit': 'Edit',
   'workspace.previewEmpty': 'Select a file to preview.',
   'workspace.lspState': 'LSP {state}',
   'workspace.lspDiagnostics': '{count} diagnostics',
@@ -717,6 +719,7 @@ export const en = {
   'settings.adapters.wechatQrAlt': 'WeChat binding QR code',
   'settings.adapters.wechatWaiting': 'Waiting for WeChat confirmation...',
   'settings.adapters.wechatBindSuccess': 'WeChat bound successfully.',
+  'settings.adapters.wechatSessionExpired': 'WeChat session expired. Scan again to rebind.',
   'settings.adapters.wechatUnbindAccount': 'Unbind WeChat account',
   'settings.adapters.wechatUnbindAccountConfirm': 'Unbind this WeChat account? You will need to scan again before WeChat can receive or send messages.',
   'settings.adapters.wechatUnbound': 'WeChat account unbound.',

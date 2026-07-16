@@ -918,7 +918,8 @@ describe('WorkspacePanel', () => {
     await clickElement(view.getByRole('button', { name: 'Show file navigator' }))
     const searchInput = view.getByPlaceholderText('Search all files...') as HTMLInputElement
     expect(searchInput.value).toBe('MentalHealthTrendController')
-    expect(view.getByText('MentalHealthTrendController.java')).toBeTruthy()
+    const searchResults = view.getByRole('list', { name: 'File search results' })
+    expect(searchResults.textContent).toContain('MentalHealthTrendController.java')
     await waitFor(() => {
       expect(document.activeElement).toBe(searchInput)
     })
@@ -1477,6 +1478,7 @@ describe('WorkspacePanel', () => {
     }))
 
     const view = await renderPanel(sessionId)
+    await clickElement(view.getByTestId('workspace-file-preview-toggle'))
     await waitFor(() => {
       expect(view.getByTestId('workspace-code').getAttribute('data-highlight-engine')).toBe('shiki')
     })
@@ -2449,6 +2451,10 @@ describe('WorkspacePanel', () => {
     }))
 
     const view = await renderPanel('session-line-range-comment')
+    await clickElement(view.getByTestId('workspace-file-preview-toggle'))
+    await waitFor(() => {
+      expect(view.getByTestId('workspace-code').getAttribute('data-highlight-engine')).toBe('shiki')
+    })
     const firstLine = view.getByRole('button', { name: 'Comment line 1' })
     const secondLine = view.getByRole('button', { name: 'Comment line 2' })
     const thirdLine = view.getByRole('button', { name: 'Comment line 3' })

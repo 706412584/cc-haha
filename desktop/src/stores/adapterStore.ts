@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { adaptersApi } from '../api/adapters'
-import type { AdapterFileConfig } from '../types/adapter'
+import type { AdapterFileConfig, AdapterRuntimeStatuses } from '../types/adapter'
 import type { DingtalkRegistrationBegin, DingtalkRegistrationPoll } from '../api/adapters'
 import { getDesktopHost } from '../lib/desktopHost'
 
@@ -45,10 +45,12 @@ function generateCode(): string {
 
 type AdapterStore = {
   config: AdapterFileConfig
+  runtimeStatus: AdapterRuntimeStatuses
   isLoading: boolean
   error: string | null
 
   fetchConfig: () => Promise<void>
+  fetchRuntimeStatus: () => Promise<void>
   updateConfig: (patch: Partial<AdapterFileConfig>) => Promise<void>
   generatePairingCode: () => Promise<string>
   startWechatLogin: () => Promise<{ qrcodeUrl?: string; message: string; sessionKey: string }>
@@ -65,6 +67,7 @@ type AdapterStore = {
 
 export const useAdapterStore = create<AdapterStore>((set, get) => ({
   config: {},
+  runtimeStatus: {},
   isLoading: false,
   error: null,
 
@@ -76,6 +79,15 @@ export const useAdapterStore = create<AdapterStore>((set, get) => ({
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to load config'
       set({ isLoading: false, error: message })
+    }
+  },
+
+  fetchRuntimeStatus: async () => {
+    try {
+      set({ runtimeStatus: await adaptersApi.getRuntimeStatus() })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to load adapter status'
+      set({ error: message })
     }
   },
 
@@ -112,7 +124,7 @@ export const useAdapterStore = create<AdapterStore>((set, get) => ({
       return { connected: false, status: result.status, message: result.message }
     }
     if ('wechat' in result || 'telegram' in result || 'feishu' in result || 'dingtalk' in result) {
-      set({ config: result })
+      set({ config: result, runtimeStatus: {} })
       void notifyDesktopRestartAdapters()
       return { connected: true }
     }

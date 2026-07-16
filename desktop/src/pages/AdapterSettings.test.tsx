@@ -17,8 +17,10 @@ function renderAdapterSettings(
   useSettingsStore.setState({ locale: 'en' })
   useAdapterStore.setState({
     config,
+    runtimeStatus: {},
     isLoading: false,
     fetchConfig: vi.fn(async () => {}),
+    fetchRuntimeStatus: vi.fn(async () => {}),
     updateConfig: vi.fn(async () => {}),
     startWhatsAppLogin: vi.fn(async () => ({ message: 'ok', sessionKey: 'whatsapp-session' })),
     pollWhatsAppLogin: vi.fn(async () => ({ connected: false })),
@@ -86,6 +88,30 @@ describe('AdapterSettings Feishu onboarding', () => {
 
     expect(screen.queryByRole('link', { name: /create feishu bot/i })).not.toBeInTheDocument()
     expect(screen.queryByText('Need a Feishu bot?')).not.toBeInTheDocument()
+  })
+})
+
+describe('AdapterSettings WeChat runtime status', () => {
+  it('shows a rebind prompt when the adapter session expires', () => {
+    renderAdapterSettings(
+      { wechat: { accountId: 'wx-account' } },
+      {
+        runtimeStatus: {
+          wechat: {
+            platform: 'wechat',
+            state: 'rebind_required',
+            code: 'session_expired',
+            generation: 2,
+            updatedAt: '2026-07-17T00:00:00.000Z',
+          },
+        },
+        fetchRuntimeStatus: vi.fn(async () => {}),
+      },
+    )
+
+    fireEvent.click(screen.getByRole('tab', { name: 'WeChat' }))
+
+    expect(screen.getByText('WeChat session expired. Scan again to rebind.')).toBeInTheDocument()
   })
 })
 

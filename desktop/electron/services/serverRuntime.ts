@@ -104,6 +104,31 @@ type ActiveServer = {
   adapterChildren: SidecarChild[]
 }
 
+function parseWechatAdapterStatus(line: string): {
+  platform: 'wechat'
+  state: 'rebind_required'
+  code: 'session_expired'
+} | null {
+  try {
+    const event = JSON.parse(line) as Record<string, unknown>
+    if (
+      event.type === 'adapter_status' &&
+      event.adapter === 'wechat' &&
+      event.status === 'session_timeout' &&
+      event.code === -14
+    ) {
+      return {
+        platform: 'wechat',
+        state: 'rebind_required',
+        code: 'session_expired',
+      }
+    }
+  } catch {
+    // Normal adapter logs are not structured status events.
+  }
+  return null
+}
+
 function createServerStartState(child: SidecarChild): ServerStartState {
   let failure: Error | null = null
   let rejectFailure!: (error: Error) => void
@@ -154,6 +179,7 @@ export class ElectronServerRuntime {
   private lifecycleGeneration = 0
   private startingServer: ServerStartState | null = null
   private adapterRestartPromise: Promise<void> | null = null
+  private adapterGeneration = 0
 
   constructor(options: ServerRuntimeOptions) {
     this.desktopRoot = options.desktopRoot
@@ -529,6 +555,7 @@ export class ElectronServerRuntime {
     startState?: ServerStartState,
     activeServer?: ActiveServer,
   ): Promise<void> {
+    const generation = ++this.adapterGeneration
     const baseEnv = this.withLocalAccessToken(await this.resolveSidecarBaseEnv())
     const bridgeUrl = baseEnv.CC_HAHA_SYSTEM_PROXY_URL
     const env = bridgeUrl
@@ -540,6 +567,11 @@ export class ElectronServerRuntime {
       return true
     }
     if (!isCurrentGeneration()) return
+    void this.publishAdapterRuntimeStatus(serverUrl, {
+      platform: 'wechat',
+      state: 'starting',
+      generation,
+    })
     const ownedAdapters = startState?.adapterChildren
       ?? activeServer?.adapterChildren
     for (const [label, flag] of [
@@ -563,12 +595,52 @@ export class ElectronServerRuntime {
           killSidecar(child)
           break
         }
-        this.captureLogs(child, `claude-adapters:${label}`)
+        this.captureLogs(
+          child,
+          `claude-adapters:${label}`,
+          undefined,
+          undefined,
+          undefined,
+          label === 'wechat'
+            ? line => {
+                if (!isCurrentGeneration() || generation !== this.adapterGeneration) return
+                const status = parseWechatAdapterStatus(line)
+                if (!status) return
+                void this.publishAdapterRuntimeStatus(serverUrl, {
+                  ...status,
+                  generation,
+                })
+              }
+            : undefined,
+        )
         this.adapters.push(child)
         ownedAdapters?.push(child)
       } catch (error) {
         console.error(`[desktop] failed to start ${label} adapter sidecar`, error)
       }
+    }
+  }
+
+  private async publishAdapterRuntimeStatus(
+    serverUrl: string,
+    status: {
+      platform: 'wechat'
+      state: 'starting' | 'rebind_required'
+      code?: 'session_expired'
+      generation: number
+    },
+  ): Promise<void> {
+    try {
+      const response = await this.fetchFn(`${serverUrl}/api/adapters/runtime-status`, {
+        method: 'POST',
+        headers: this.localServerHeaders(),
+        body: JSON.stringify(status),
+      })
+      if (!response.ok && response.status !== 409) {
+        console.error(`[desktop] failed to publish adapter runtime status (${response.status})`)
+      }
+    } catch (error) {
+      console.error('[desktop] failed to publish adapter runtime status', error)
     }
   }
 
@@ -612,9 +684,26 @@ export class ElectronServerRuntime {
     startupLogs?: string[],
     onExit?: (code: number | null, signal: NodeJS.Signals | null) => void,
     onError?: (error: Error) => void,
+    onStdoutLine?: (line: string) => void,
   ) {
+    let stdoutBuffer = ''
+    const emitStdoutLines = (chunk: string, flush = false) => {
+      if (!onStdoutLine) return
+      stdoutBuffer += chunk
+      const lines = stdoutBuffer.split(/\r?\n/)
+      stdoutBuffer = lines.pop() ?? ''
+      if (flush && stdoutBuffer) {
+        lines.push(stdoutBuffer)
+        stdoutBuffer = ''
+      }
+      for (const line of lines) {
+        if (line.trim()) onStdoutLine(line.trim())
+      }
+    }
     child.stdout.on('data', chunk => {
-      const line = String(chunk).trimEnd()
+      const chunkText = String(chunk)
+      emitStdoutLines(chunkText)
+      const line = chunkText.trimEnd()
       if (!line) return
       console.log(`[${label}] ${line}`)
       this.deps.appendHostDiagnostic(this.diagnosticsFile, `[${label}] [stdout] ${line}`)
@@ -628,6 +717,7 @@ export class ElectronServerRuntime {
       if (startupLogs) pushStartupLog(startupLogs, `[stderr] ${line}`)
     })
     child.on('exit', (code, signal) => {
+      emitStdoutLines('', true)
       const line = `sidecar exited (code=${code}, signal=${signal})`
       console.log(`[${label}] ${line}`)
       this.deps.appendHostDiagnostic(this.diagnosticsFile, `[${label}] [exit] ${line}`)

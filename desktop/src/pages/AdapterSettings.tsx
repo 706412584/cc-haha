@@ -18,8 +18,10 @@ export function AdapterSettings() {
   const t = useTranslation()
   const {
     config,
+    runtimeStatus,
     isLoading,
     fetchConfig,
+    fetchRuntimeStatus,
     updateConfig,
     generatePairingCode,
     startWechatLogin,
@@ -100,7 +102,15 @@ export function AdapterSettings() {
 
   useEffect(() => {
     fetchConfig()
+    fetchRuntimeStatus()
   }, [])
+
+  useEffect(() => {
+    if (activeIm !== 'wechat') return
+    void fetchRuntimeStatus()
+    const timer = window.setInterval(() => void fetchRuntimeStatus(), 5000)
+    return () => window.clearInterval(timer)
+  }, [activeIm, fetchRuntimeStatus])
 
   // Sync form state when config is loaded
   useEffect(() => {
@@ -716,6 +726,11 @@ export function AdapterSettings() {
         {activeIm === 'wechat' && (
           <div className="p-4 space-y-4">
             <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 space-y-3">
+              {runtimeStatus.wechat?.state === 'rebind_required' && (
+                <p role="status" className="text-sm text-[var(--color-warning)]">
+                  {t('settings.adapters.wechatSessionExpired')}
+                </p>
+              )}
               <div className="flex items-center justify-between gap-4">
                 <div>
                   <div className="text-sm font-medium text-[var(--color-text-primary)]">

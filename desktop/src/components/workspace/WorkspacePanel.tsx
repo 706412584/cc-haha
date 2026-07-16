@@ -36,7 +36,6 @@ import { WorkspaceEditor, saveWorkspaceBuffer } from './WorkspaceEditor'
 import { UnsavedChangesModal } from './UnsavedChangesModal'
 import { LspStatusIndicator } from './LspStatusIndicator'
 import { errorCountFromDiagnostics, toLegacyLspState } from '../../lib/lspStateMap'
-import { sessionsApi } from '../../api/sessions'
 import { getFileIdentity, getWorkspaceStatusLabel, type WorkspaceFileIdentity } from './fileIdentity'
 import type { WorkspaceDiffHighlightToken } from './workspaceDiffHighlighter'
 
@@ -1952,51 +1951,56 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
             hideSingleFileHeader
             onAddComment={(selection, note) => addDiffCommentToChat(activePreviewTab.path, selection, note)}
           />
-        ) : state === 'ok' && activePreviewTab.kind === 'file' && isMarkdownPreview(activePreviewTab) ? (
+        ) : state === 'ok' && activePreviewTab.kind === 'file' ? (
           <div className="flex min-h-0 flex-1 flex-col">
-            <div className="flex h-9 shrink-0 items-center justify-end gap-1 border-b border-[var(--color-border)] px-3">
-              {(['preview', 'edit'] as const).map((mode) => {
-                const activeMode = filePreviewModes[activePreviewTab.id] ?? 'preview'
-                return (
-                  <button
-                    key={mode}
-                    type="button"
-                    data-testid={`workspace-markdown-${mode}-toggle`}
-                    onClick={() => setFilePreviewModes((current) => ({ ...current, [activePreviewTab.id]: mode }))}
-                    className={`rounded-[6px] px-2.5 py-1 text-[12px] transition-colors ${
-                      activeMode === mode
-                        ? 'bg-[var(--color-surface-selected)] text-[var(--color-text-primary)]'
-                        : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
-                    }`}
-                  >
-                    {mode === 'preview' ? 'Preview' : 'Edit'}
-                  </button>
-                )
-              })}
-            </div>
-            {(filePreviewModes[activePreviewTab.id] ?? 'preview') === 'edit' && !unsupportedEditorPaths.has(activePreviewTab.path) ? (
-              <WorkspaceEditor
-                sessionId={sessionId}
-                tab={activePreviewTab}
-                onUnsupportedEncoding={handleUnsupportedEditorEncoding}
-                onSaved={handleWorkspaceFileSaved}
-                onClose={() => closePreviewTabs(sessionId, activePreviewTab.id, 'current')}
-              />
-            ) : (
-              <MarkdownSurface
-                value={bufferStateByTabId[activePreviewTab.id]?.currentContent ?? activePreviewTab.content ?? ''}
-                onAddSelection={(selection) => addSelectionToChat(activePreviewTab.path, selection)}
-              />
+            {!unsupportedEditorPaths.has(activePreviewTab.path) && (
+              <div className="flex h-9 shrink-0 items-center justify-end gap-1 border-b border-[var(--color-border)] px-3">
+                {(['preview', 'edit'] as const).map((mode) => {
+                  const activeMode = filePreviewModes[activePreviewTab.id]
+                    ?? (isMarkdownPreview(activePreviewTab) ? 'preview' : 'edit')
+                  return (
+                    <button
+                      key={mode}
+                      type="button"
+                      data-testid={`workspace-${isMarkdownPreview(activePreviewTab) ? 'markdown' : 'file'}-${mode}-toggle`}
+                      onClick={() => setFilePreviewModes((current) => ({ ...current, [activePreviewTab.id]: mode }))}
+                      className={`rounded-[6px] px-2.5 py-1 text-[12px] transition-colors ${
+                        activeMode === mode
+                          ? 'bg-[var(--color-surface-selected)] text-[var(--color-text-primary)]'
+                          : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
+                      }`}
+                    >
+                      {mode === 'preview' ? t('workspace.preview') : t('workspace.edit')}
+                    </button>
+                  )
+                })}
+              </div>
             )}
+            {!unsupportedEditorPaths.has(activePreviewTab.path)
+              && (filePreviewModes[activePreviewTab.id] ?? (isMarkdownPreview(activePreviewTab) ? 'preview' : 'edit')) === 'edit' ? (
+                <WorkspaceEditor
+                  sessionId={sessionId}
+                  tab={activePreviewTab}
+                  onUnsupportedEncoding={handleUnsupportedEditorEncoding}
+                  onSaved={handleWorkspaceFileSaved}
+                  onClose={() => closePreviewTabs(sessionId, activePreviewTab.id, 'current')}
+                />
+              ) : isMarkdownPreview(activePreviewTab) ? (
+                <MarkdownSurface
+                  value={bufferStateByTabId[activePreviewTab.id]?.currentContent ?? activePreviewTab.content ?? ''}
+                  onAddSelection={(selection) => addSelectionToChat(activePreviewTab.path, selection)}
+                />
+              ) : (
+                <CodeSurface
+                  value={bufferStateByTabId[activePreviewTab.id]?.currentContent ?? activePreviewTab.content ?? ''}
+                  language={activePreviewTab.language ?? 'text'}
+                  onAddLineComment={(lineStart, lineEnd, note, quote) => (
+                    addLineCommentToChat(activePreviewTab.path, lineStart, lineEnd, note, quote)
+                  )}
+                  onAddSelection={(selection) => addSelectionToChat(activePreviewTab.path, selection)}
+                />
+              )}
           </div>
-        ) : state === 'ok' && activePreviewTab.kind === 'file' && !unsupportedEditorPaths.has(activePreviewTab.path) ? (
-          <WorkspaceEditor
-            sessionId={sessionId}
-            tab={activePreviewTab}
-            onUnsupportedEncoding={handleUnsupportedEditorEncoding}
-            onSaved={handleWorkspaceFileSaved}
-            onClose={() => closePreviewTabs(sessionId, activePreviewTab.id, 'current')}
-          />
         ) : state === 'ok' ? (
           <CodeSurface
             value={activePreviewTab.content ?? ''}

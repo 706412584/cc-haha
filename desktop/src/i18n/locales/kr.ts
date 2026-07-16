@@ -25,6 +25,7 @@ export const kr: Record<TranslationKey, string> = {
   // ─── Sidebar ──────────────────────────────────────
   'sidebar.newSession': '새 세션',
   'sidebar.scheduled': '예약 작업',
+  'sidebar.market': '마켓',
   'sidebar.terminal': '터미널',
   'sidebar.settings': '설정',
   'sidebar.searchPlaceholder': '세션 검색...',
@@ -194,6 +195,7 @@ export const kr: Record<TranslationKey, string> = {
   'workbench.navigation': '워크벤치 탐색',
   'workspace.closeTab': '탭 닫기',
   'workspace.preview': '미리 보기',
+  'workspace.edit': '편집',
   'workspace.previewEmpty': '미리 볼 파일을 선택하세요.',
   'workspace.lspState': 'LSP {state}',
   'workspace.lspDiagnostics': '진단 {count}개',
@@ -717,6 +719,7 @@ export const kr: Record<TranslationKey, string> = {
   'settings.adapters.wechatQrAlt': 'WeChat 연결 QR 코드',
   'settings.adapters.wechatWaiting': 'WeChat 확인을 기다리는 중...',
   'settings.adapters.wechatBindSuccess': 'WeChat 연결에 성공했습니다.',
+  'settings.adapters.wechatSessionExpired': 'WeChat 세션이 만료되었습니다. 다시 스캔하여 연결하세요.',
   'settings.adapters.wechatUnbindAccount': 'WeChat 계정 연결 해제',
   'settings.adapters.wechatUnbindAccountConfirm': '이 WeChat 계정의 연결을 해제하시겠습니까? WeChat이 메시지를 주고받을 수 있으려면 다시 스캔해야 합니다.',
   'settings.adapters.wechatUnbound': 'WeChat 계정 연결을 해제했습니다.',

@@ -5,7 +5,11 @@
  * PUT  /api/adapters  → 更新配置（浅合并），返回更新后的脱敏配置
  */
 
-import { adapterService } from '../services/adapterService.js'
+import {
+  adapterService,
+  type AdapterRuntimeState,
+} from '../services/adapterService.js'
+import { isLocalAccessAuthorized } from '../localAccessAuth.js'
 import { ApiError, errorResponse } from '../middleware/errorHandler.js'
 import {
   pollWechatLoginWithQr,
@@ -146,6 +150,40 @@ export async function handleAdaptersApi(
 ): Promise<Response> {
   try {
     const tail = _segments.slice(2)
+    if (tail[0] === 'runtime-status') {
+      if (!isLocalAccessAuthorized(req)) {
+        throw new ApiError(401, 'Invalid desktop access token', 'UNAUTHORIZED')
+      }
+      if (req.method === 'GET') {
+        return Response.json(adapterService.getRuntimeStatus())
+      }
+      if (req.method === 'POST') {
+        const body = (await req.json()) as Record<string, unknown>
+        const state = body.state as AdapterRuntimeState
+        if (
+          body.platform !== 'wechat' ||
+          !['starting', 'connected', 'rebind_required'].includes(state) ||
+          !Number.isSafeInteger(body.generation) ||
+          (body.generation as number) < 1 ||
+          (body.code !== undefined && body.code !== 'session_expired') ||
+          (body.code === 'session_expired' && state !== 'rebind_required') ||
+          (state === 'rebind_required' && body.code !== 'session_expired')
+        ) {
+          throw ApiError.badRequest('Invalid adapter runtime status')
+        }
+        const accepted = adapterService.updateRuntimeStatus({
+          platform: 'wechat',
+          state,
+          ...(body.code === 'session_expired' ? { code: body.code } : {}),
+          generation: body.generation as number,
+        })
+        if (!accepted) {
+          throw new ApiError(409, 'Stale adapter runtime generation', 'CONFLICT')
+        }
+        return Response.json(adapterService.getRuntimeStatus())
+      }
+      throw new ApiError(405, `Method ${req.method} not allowed`, 'METHOD_NOT_ALLOWED')
+    }
     if (tail[0] === 'wechat') {
       return handleWechatAdaptersApi(req, tail.slice(1))
     }
@@ -198,6 +236,20 @@ export async function handleAdaptersApi(
   }
 }
 
+export function buildWechatLoginCredentialPatch(result: {
+  accountId?: string
+  botToken?: string
+  baseUrl?: string
+  userId?: string
+}) {
+  return {
+    accountId: result.accountId,
+    botToken: result.botToken,
+    baseUrl: result.baseUrl || WECHAT_DEFAULT_BASE_URL,
+    userId: result.userId,
+  }
+}
+
 async function handleWechatAdaptersApi(req: Request, tail: string[]): Promise<Response> {
   if (req.method === 'POST' && tail[0] === 'login' && tail[1] === 'start') {
     const result = await startWechatLoginWithQr({ force: true })
@@ -210,14 +262,9 @@ async function handleWechatAdaptersApi(req: Request, tail: string[]): Promise<Re
     const result = await pollWechatLoginWithQr({ sessionKey: body.sessionKey })
     if (result.connected) {
       await adapterService.updateConfig({
-        wechat: {
-          accountId: result.accountId,
-          botToken: result.botToken,
-          baseUrl: result.baseUrl || WECHAT_DEFAULT_BASE_URL,
-          userId: result.userId,
-          pairedUsers: [],
-        },
+        wechat: buildWechatLoginCredentialPatch(result),
       })
+      adapterService.clearRuntimeStatus('wechat')
     }
     return Response.json(result.connected ? await adapterService.getConfig() : result)
   }

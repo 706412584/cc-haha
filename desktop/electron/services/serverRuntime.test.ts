@@ -472,6 +472,7 @@ function createRuntime(options: {
   env?: NodeJS.ProcessEnv
   resolveSystemProxy?: (url: string) => Promise<string>
   proxyBridge?: SystemProxyBridgeLike
+  fetchFn?: typeof fetch
 } = {}) {
   return new ElectronServerRuntime({
     desktopRoot: '/isolated/desktop',
@@ -480,6 +481,7 @@ function createRuntime(options: {
     diagnosticsFile: options.diagnosticsFile,
     env: { CLAUDE_CONFIG_DIR: isolatedConfigDir, ...options.env },
     resolveSystemProxy: options.resolveSystemProxy,
+    fetchFn: options.fetchFn ?? (async () => new Response('{}', { status: 200 })),
     deps: {
       appendHostDiagnostic: sidecarMocks.appendHostDiagnostic,
       preferredServerPorts: () => [],
@@ -499,6 +501,13 @@ async function waitForServerChildren(count: number): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, 0))
   }
   expect(sidecarMocks.serverChildren).toHaveLength(count)
+}
+
+async function waitForCallCount(mock: ReturnType<typeof vi.fn>, count: number): Promise<void> {
+  for (let attempt = 0; attempt < 20 && mock.mock.calls.length !== count; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 0))
+  }
+  expect(mock).toHaveBeenCalledTimes(count)
 }
 
 describe('ElectronServerRuntime', () => {
@@ -580,6 +589,47 @@ describe('ElectronServerRuntime', () => {
       .filter(plan => plan.args[0] === 'adapters')) {
       expect(adapter.env.CC_HAHA_LOCAL_ACCESS_TOKEN).toBe(token)
     }
+  })
+
+  it('relays WeChat session expiry only from the current adapter generation', async () => {
+    const fetchFn = vi.fn(async () => new Response('{}', { status: 200 })) as unknown as typeof fetch
+    const runtime = createRuntime({ fetchFn })
+    await runtime.startServer()
+    await waitForCallCount(fetchFn, 1)
+    fetchFn.mockClear()
+    const firstWechat = sidecarMocks.adapterChildren[2]!
+    const expiryEvent = JSON.stringify({
+      type: 'adapter_status',
+      adapter: 'wechat',
+      status: 'session_timeout',
+      code: -14,
+    })
+
+    firstWechat.stdout.write(expiryEvent.slice(0, 20))
+    firstWechat.stdout.write(`${expiryEvent.slice(20)}\n`)
+    await waitForCallCount(fetchFn, 1)
+    expect(fetchFn).toHaveBeenLastCalledWith(
+      'http://127.0.0.1:49321/api/adapters/runtime-status',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          Authorization: `Bearer ${runtime.getLocalAccessToken()}`,
+        }),
+        body: JSON.stringify({
+          platform: 'wechat',
+          state: 'rebind_required',
+          code: 'session_expired',
+          generation: 1,
+        }),
+      }),
+    )
+
+    await runtime.restartAdaptersSidecars()
+    await waitForCallCount(fetchFn, 2)
+    fetchFn.mockClear()
+    firstWechat.stdout.write(`${expiryEvent}\n`)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(fetchFn).not.toHaveBeenCalled()
   })
 
   it('gives the server only the dynamic bridge URL while adapters explicitly inherit it', async () => {

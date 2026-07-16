@@ -25,6 +25,7 @@ export const zh: Record<TranslationKey, string> = {
   // ─── Sidebar ──────────────────────────────────────
   'sidebar.newSession': '新建會話',
   'sidebar.scheduled': '定時任務',
+  'sidebar.market': '市集',
   'sidebar.terminal': '終端',
   'sidebar.settings': '設定',
   'sidebar.searchPlaceholder': '搜尋會話...',
@@ -194,6 +195,7 @@ export const zh: Record<TranslationKey, string> = {
   'workbench.navigation': '工作臺導覽',
   'workspace.closeTab': '關閉標籤',
   'workspace.preview': '預覽',
+  'workspace.edit': '編輯',
   'workspace.previewEmpty': '選擇一個檔案進行預覽。',
   'workspace.lspState': 'LSP {state}',
   'workspace.lspDiagnostics': '{count} 條診斷',
@@ -717,6 +719,7 @@ export const zh: Record<TranslationKey, string> = {
   'settings.adapters.wechatQrAlt': '微信繫結二維碼',
   'settings.adapters.wechatWaiting': '等待微信掃碼確認...',
   'settings.adapters.wechatBindSuccess': '微信繫結成功。',
+  'settings.adapters.wechatSessionExpired': '微信工作階段已失效，請重新掃碼繫結。',
   'settings.adapters.wechatUnbindAccount': '解除微信繫結',
   'settings.adapters.wechatUnbindAccountConfirm': '確定解除這個微信賬號繫結嗎？解除後需要重新掃碼，微信才能繼續收發訊息。',
   'settings.adapters.wechatUnbound': '微信繫結已解除。',

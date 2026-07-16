@@ -25,6 +25,7 @@ export const jp: Record<TranslationKey, string> = {
   // ─── Sidebar ──────────────────────────────────────
   'sidebar.newSession': '新しいセッション',
   'sidebar.scheduled': 'スケジュール',
+  'sidebar.market': 'マーケット',
   'sidebar.terminal': 'ターミナル',
   'sidebar.settings': '設定',
   'sidebar.searchPlaceholder': 'セッションを検索...',
@@ -194,6 +195,7 @@ export const jp: Record<TranslationKey, string> = {
   'workbench.navigation': 'ワークベンチナビゲーション',
   'workspace.closeTab': 'タブを閉じる',
   'workspace.preview': 'プレビュー',
+  'workspace.edit': '編集',
   'workspace.previewEmpty': 'プレビューするファイルを選択してください。',
   'workspace.lspState': 'LSP {state}',
   'workspace.lspDiagnostics': '{count} 件の診断',
@@ -717,6 +719,7 @@ export const jp: Record<TranslationKey, string> = {
   'settings.adapters.wechatQrAlt': 'WeChat ひも付け用 QR コード',
   'settings.adapters.wechatWaiting': 'WeChat の確認を待っています...',
   'settings.adapters.wechatBindSuccess': 'WeChat のひも付けに成功しました。',
+  'settings.adapters.wechatSessionExpired': 'WeChat セッションの有効期限が切れました。再度スキャンして連携してください。',
   'settings.adapters.wechatUnbindAccount': 'WeChat アカウントのひも付けを解除',
   'settings.adapters.wechatUnbindAccountConfirm': 'この WeChat アカウントのひも付けを解除しますか？WeChat がメッセージを送受信できるようにするには、再度スキャンが必要になります。',
   'settings.adapters.wechatUnbound': 'WeChat アカウントのひも付けを解除しました。',
