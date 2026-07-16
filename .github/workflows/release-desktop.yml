@@ -144,8 +144,11 @@ jobs:
       - name: Install Linux dependencies
         if: contains(matrix.platform, 'ubuntu')
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential curl wget file libfuse2
+          sudo find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
+            -exec sed -i 's|http://ports.ubuntu.com|https://ports.ubuntu.com|g' {} +
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 \
+            install -y build-essential curl wget file libfuse2
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
