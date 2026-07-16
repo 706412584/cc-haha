@@ -32,6 +32,7 @@ Rules closer to the code take precedence. Before editing `.github/`, `src/`, `de
 - Use structured parsers and existing boundaries instead of ad hoc string manipulation. Add comments only for non-obvious control flow or external constraints.
 - Do not commit generated output such as `artifacts/`, coverage reports, `node_modules/`, build directories, or Rust `target/` trees.
 - When publishing is explicitly requested, use Conventional Commit subjects and normal product branch prefixes such as `fix/`, `feat/`, or `docs/`; do not create `codex/` branches in this repository.
+- After a branch is merged, delete its local and remote branch plus every associated Git worktree, build worktree, and temporary directory. Confirm cleanup with `git worktree list` and a directory scan so stale registrations and hidden worktrees do not keep consuming disk.
 
 ## Verification
 
