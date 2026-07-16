@@ -1814,11 +1814,13 @@ describe('Settings > Providers tab', () => {
 
     const dialog = screen.getByRole('dialog')
 
-    fireEvent.click(within(dialog).getByRole('button', { name: /Anthropic Messages \(native\)/i }))
-    fireEvent.click(within(dialog).getByRole('button', { name: /OpenAI Responses API \(proxy\)/i }))
+    fireEvent.click(within(dialog).getByRole('button', { name: /Anthropic Messages \(native protocol\)/i }))
+    fireEvent.click(within(dialog).getByRole('button', { name: /OpenAI Responses API \(local protocol translation\)/i }))
 
-    expect(within(dialog).getByRole('button', { name: /OpenAI Responses API \(proxy\)/i })).toBeInTheDocument()
-    expect(within(dialog).getByText('Requests will be translated via the local proxy')).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: /OpenAI Responses API \(local protocol translation\)/i })).toBeInTheDocument()
+    expect(within(dialog).getByText(
+      'cc-haha translates the protocol locally without an additional third-party conversion service',
+    )).toBeInTheDocument()
   })
 
   it('localizes the main model placeholder in the provider form', () => {

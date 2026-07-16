@@ -1947,6 +1947,9 @@ async function ensureCliSessionStarted(
 export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessage[] {
   const streamState = getStreamState(sessionId)
   switch (cliMsg.type) {
+    case 'keep_alive':
+      return []
+
     case 'assistant': {
       if (cliMsg.error || cliMsg.isApiErrorMessage) {
         // If the user requested stop, suppress API errors caused by the
