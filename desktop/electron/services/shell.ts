@@ -200,7 +200,10 @@ export async function normalizeRevealPath(
     platform,
   )
   if (platform === 'win32') assertLocalWindowsPath(filePath)
-  if (!path.isAbsolute(filePath)) {
+  const isAbsolute = platform === 'win32'
+    ? path.win32.isAbsolute(filePath)
+    : path.isAbsolute(filePath)
+  if (!isAbsolute) {
     throw new Error('System file paths must be absolute')
   }
   if (platform === 'win32') {
