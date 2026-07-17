@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { chmodSync, mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -19,7 +19,7 @@ describe('Electron shell service', () => {
     expect(() => normalizeExternalUrl('/tmp/report.md')).toThrow('absolute URLs')
   })
 
-  it('allows only existing non-executable file-system paths for openPath', () => {
+  it('allows only existing non-executable file-system paths for openPath', async () => {
     const rootDir = mkdtempSync(join(tmpdir(), 'electron-shell-'))
     const reportPath = join(rootDir, 'report.md')
     const folderPath = join(rootDir, 'folder')
@@ -32,15 +32,47 @@ describe('Electron shell service', () => {
       chmodSync(scriptPath, 0o755)
       mkdirSync(appPath)
 
-      expect(normalizeOpenPath(reportPath)).toBe(realpathSync(reportPath))
-      expect(normalizeOpenPath(new URL(`file://${reportPath}`).toString())).toBe(realpathSync(reportPath))
-      expect(normalizeOpenPath(folderPath)).toBe(realpathSync(folderPath))
-      expect(() => normalizeOpenPath(scriptPath)).toThrow('executable')
-      expect(() => normalizeOpenPath(appPath)).toThrow('executable')
+      await expect(normalizeOpenPath(reportPath)).resolves.toBe(realpathSync(reportPath))
+      await expect(normalizeOpenPath(reportPath.replaceAll('\\', '/'))).resolves.toBe(realpathSync(reportPath))
+      await expect(normalizeOpenPath(new URL(`file://${reportPath}`).toString())).resolves.toBe(realpathSync(reportPath))
+      await expect(normalizeOpenPath(folderPath)).resolves.toBe(realpathSync(folderPath))
+      await expect(normalizeOpenPath(scriptPath)).rejects.toThrow('executable')
+      await expect(normalizeOpenPath(appPath)).rejects.toThrow('executable')
     } finally {
       rmSync(rootDir, { recursive: true, force: true })
     }
-    expect(() => normalizeOpenPath('relative/report.md')).toThrow('absolute')
+    await expect(normalizeOpenPath('relative/report.md')).rejects.toThrow('absolute')
+  })
+
+  it('rejects unsafe Windows paths before resolving them', async () => {
+    let verifiedPath = ''
+    await expect(normalizeOpenPath(
+      'Z:\\attachments\\report.pdf',
+      'win32',
+      {
+        assertSafePath: async (target) => {
+          verifiedPath = target
+          throw new Error('reparse points')
+        },
+      },
+    )).rejects.toThrow('reparse points')
+    expect(verifiedPath).toBe('Z:\\attachments\\report.pdf')
+  })
+
+  it.runIf(process.platform === 'win32')('rejects real Windows junctions and missing paths', async () => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'electron-shell-junction-'))
+    const targetDir = join(rootDir, 'target')
+    const junctionDir = join(rootDir, 'junction')
+    try {
+      mkdirSync(targetDir)
+      writeFileSync(join(targetDir, 'report.pdf'), 'report')
+      symlinkSync(targetDir, junctionDir, 'junction')
+
+      await expect(normalizeOpenPath(join(junctionDir, 'report.pdf'))).rejects.toThrow('reparse points')
+      await expect(normalizeOpenPath(join(rootDir, 'missing.pdf'))).rejects.toThrow('reparse points')
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true })
+    }
   })
 
   it('rejects Windows shell shortcuts and script-host file types', () => {
@@ -96,7 +128,7 @@ describe('Electron shell service', () => {
     expect(isBlockedSystemPath('C:\\attachments\\invoice.pdf.PIF', false, 'win32')).toBe(true)
   })
 
-  it('reveals session and output files without allowing the system to open them', () => {
+  it('reveals session and output files without allowing the system to open them', async () => {
     const rootDir = mkdtempSync(join(tmpdir(), 'electron-shell-reveal-'))
     const sessionPath = join(rootDir, 'session.jsonl')
     const outputPath = join(rootDir, 'task.output')
@@ -104,8 +136,8 @@ describe('Electron shell service', () => {
       writeFileSync(sessionPath, 'session')
       writeFileSync(outputPath, 'output')
 
-      expect(normalizeRevealPath(sessionPath)).toBe(realpathSync(sessionPath))
-      expect(normalizeRevealPath(outputPath)).toBe(realpathSync(outputPath))
+      await expect(normalizeRevealPath(sessionPath)).resolves.toBe(realpathSync(sessionPath))
+      await expect(normalizeRevealPath(outputPath)).resolves.toBe(realpathSync(outputPath))
       expect(isBlockedSystemPath('C:\\sessions\\session.jsonl', false, 'win32')).toBe(true)
       expect(isBlockedSystemPath('C:\\outputs\\task.output', false, 'win32')).toBe(true)
     } finally {
@@ -123,11 +155,11 @@ describe('Electron shell service', () => {
     expect(expandTildePath('a/~/b.md', 'linux')).toBe('a/~/b.md')
   })
 
-  it('expands tilde paths before the absolute-path check in openPath', () => {
-    expect(normalizeOpenPath('~')).toBe(realpathSync(homedir()))
+  it('expands tilde paths before the absolute-path check in openPath', async () => {
+    await expect(normalizeOpenPath('~')).resolves.toBe(realpathSync(homedir()))
   })
 
-  it('rejects remote and device paths before touching the file system', () => {
+  it('rejects remote and device paths before touching the file system', async () => {
     const unsafePaths = [
       '\\\\attacker-host\\share\\result.txt',
       '//attacker-host/share/result.txt',
@@ -142,7 +174,7 @@ describe('Electron shell service', () => {
     ]
 
     for (const unsafePath of unsafePaths) {
-      expect(() => normalizeOpenPath(unsafePath, 'win32')).toThrow('local paths')
+      await expect(normalizeOpenPath(unsafePath, 'win32')).rejects.toThrow('local paths')
     }
   })
 

@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process'
 import { realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
@@ -120,10 +121,73 @@ export function expandTildePath(target: string, platform: NodeJS.Platform = proc
   return target
 }
 
-export function normalizeRevealPath(
+function assertLocalWindowsPath(target: string): void {
+  const windowsPath = target.replaceAll('/', '\\')
+  if (
+    windowsPath.startsWith('\\\\') ||
+    windowsPath.startsWith('\\??\\') ||
+    (path.win32.isAbsolute(windowsPath) && !/^[A-Za-z]:\\/.test(windowsPath))
+  ) {
+    throw new Error('System file paths must be local paths')
+  }
+}
+
+type WindowsPathDeps = {
+  assertSafePath?: (target: string) => Promise<void>
+}
+
+const WINDOWS_PATH_SAFETY_SCRIPT = [
+  "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; using System.Text; public static class NativePath { [DllImport(\"kernel32.dll\", CharSet = CharSet.Unicode, SetLastError = true)] public static extern uint QueryDosDevice(string name, StringBuilder target, int length); [DllImport(\"kernel32.dll\", CharSet = CharSet.Unicode, SetLastError = true)] public static extern uint GetDriveType(string root); [DllImport(\"kernel32.dll\", CharSet = CharSet.Unicode, SetLastError = true)] public static extern uint GetFileAttributes(string path); }'",
+  '$target = $env:CC_HAHA_SAFE_PATH',
+  '$root = [System.IO.Path]::GetPathRoot($target)',
+  '$buffer = New-Object System.Text.StringBuilder 32768',
+  "$driveName = $root.TrimEnd('\\')",
+  'if ([NativePath]::QueryDosDevice($driveName, $buffer, $buffer.Capacity) -eq 0) { exit 2 }',
+  "if ([NativePath]::GetDriveType($root) -notin @(2, 3, 5, 6)) { exit 3 }",
+  "if ($buffer.ToString() -notmatch '^\\\\Device\\\\(?:HarddiskVolume\\d+|CdRom\\d+|Floppy\\d+|Ramdisk\\w*)$') { exit 4 }",
+  '$current = $root',
+  'foreach ($segment in $target.Substring($root.Length).Split(@([char]92, [char]47), [System.StringSplitOptions]::RemoveEmptyEntries)) { $current = [System.IO.Path]::Combine($current, $segment); $attributes = [NativePath]::GetFileAttributes($current); if ($attributes -eq 0xFFFFFFFF) { exit 5 }; if (($attributes -band 0x400) -ne 0) { exit 6 } }',
+].join('; ')
+
+export function assertSafeWindowsPath(
+  target: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  const systemRoot = env.SystemRoot?.trim() || env.SYSTEMROOT?.trim() || env.WINDIR?.trim()
+  const normalizedTarget = path.win32.normalize(target)
+  const root = path.win32.parse(normalizedTarget).root
+  if (!systemRoot || !/^[A-Za-z]:\\$/.test(root)) {
+    return Promise.reject(new Error('System file paths must use direct local volumes'))
+  }
+  const powershell = path.win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  return new Promise((resolve, reject) => {
+    execFile(powershell, [
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      WINDOWS_PATH_SAFETY_SCRIPT,
+    ], {
+      cwd: systemRoot,
+      encoding: 'utf8',
+      env: { ...env, CC_HAHA_SAFE_PATH: normalizedTarget },
+      windowsHide: true,
+      timeout: 5_000,
+    }, (error) => {
+      if (error) {
+        reject(new Error('System file paths must use direct local volumes without reparse points'))
+        return
+      }
+      resolve()
+    })
+  })
+}
+
+export async function normalizeRevealPath(
   target: string,
   platform: NodeJS.Platform = process.platform,
-): string {
+  deps: WindowsPathDeps = {},
+): Promise<string> {
   const fileUrl = target.slice(0, 5).toLowerCase() === 'file:'
     ? new URL(target)
     : null
@@ -135,20 +199,15 @@ export function normalizeRevealPath(
     fileUrl ? fileURLToPath(fileUrl) : target,
     platform,
   )
-  if (platform === 'win32') {
-    const windowsPath = filePath.replaceAll('/', '\\')
-    if (
-      windowsPath.startsWith('\\\\') ||
-      windowsPath.startsWith('\\??\\') ||
-      (path.win32.isAbsolute(windowsPath) && !/^[A-Za-z]:\\/.test(windowsPath))
-    ) {
-      throw new Error('System file paths must be local paths')
-    }
-  }
+  if (platform === 'win32') assertLocalWindowsPath(filePath)
   if (!path.isAbsolute(filePath)) {
     throw new Error('System file paths must be absolute')
   }
+  if (platform === 'win32') {
+    await (deps.assertSafePath ?? assertSafeWindowsPath)(filePath)
+  }
   const realPath = realpathSync(filePath)
+  if (platform === 'win32') assertLocalWindowsPath(realPath)
   const stat = statSync(realPath)
   if (!stat.isFile() && !stat.isDirectory()) {
     throw new Error('System file paths must point to a file or directory')
@@ -156,11 +215,12 @@ export function normalizeRevealPath(
   return realPath
 }
 
-export function normalizeOpenPath(
+export async function normalizeOpenPath(
   target: string,
   platform: NodeJS.Platform = process.platform,
-): string {
-  const realPath = normalizeRevealPath(target, platform)
+  deps: WindowsPathDeps = {},
+): Promise<string> {
+  const realPath = await normalizeRevealPath(target, platform, deps)
   const stat = statSync(realPath)
   if (isBlockedSystemPath(realPath, stat.isDirectory(), platform)) {
     throw new Error('System file paths must not point to executable apps or scripts')
@@ -200,7 +260,7 @@ export async function openSystemSettingsUrl(target: string): Promise<boolean> {
 
 export async function openSystemPath(target: string): Promise<void> {
   const { shell } = await import('electron')
-  const error = await shell.openPath(normalizeOpenPath(target))
+  const error = await shell.openPath(await normalizeOpenPath(target))
   if (error) throw new Error(error)
 }
 
@@ -211,5 +271,5 @@ export async function openSystemPath(target: string): Promise<void> {
  */
 export async function showItemInFolder(target: string): Promise<void> {
   const { shell } = await import('electron')
-  shell.showItemInFolder(normalizeRevealPath(target))
+  shell.showItemInFolder(await normalizeRevealPath(target))
 }
