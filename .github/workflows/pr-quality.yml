@@ -219,6 +219,11 @@ jobs:
       - name: Install adapter dependencies
         working-directory: adapters
         run: bun install --frozen-lockfile
+      - name: Prepare bundled ripgrep
+        working-directory: desktop
+        env:
+          SIDECAR_TARGET_TRIPLE: x86_64-unknown-linux-gnu
+        run: bun run prepare:ripgrep
       - name: Run desktop native checks
         run: bun run check:native
 

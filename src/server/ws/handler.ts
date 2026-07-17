@@ -1144,14 +1144,6 @@ async function handleSetRuntimeConfig(
     return
   }
 
-  if (conversationService.hasSession(sessionId)) {
-    await enqueueRuntimeTransition(sessionId, async () => {
-      await persistSessionRuntimeConfig(sessionId, nextOverride)
-      await scheduleRestartSessionWithRuntimeConfig(ws, sessionId)
-    })
-    return
-  }
-
   const pendingStartup = sessionStartupPromises.get(sessionId)
   if (pendingStartup) {
     const startupRuntimeVersion = sessionStartupRuntimeVersions.get(sessionId) ?? 0
@@ -1171,6 +1163,14 @@ async function handleSetRuntimeConfig(
       ) {
         return
       }
+      await scheduleRestartSessionWithRuntimeConfig(ws, sessionId)
+    })
+    return
+  }
+
+  if (conversationService.hasSession(sessionId)) {
+    await enqueueRuntimeTransition(sessionId, async () => {
+      await persistSessionRuntimeConfig(sessionId, nextOverride)
       await scheduleRestartSessionWithRuntimeConfig(ws, sessionId)
     })
     return
