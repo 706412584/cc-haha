@@ -550,6 +550,7 @@ export const zh: Record<TranslationKey, string> = {
   'settings.providers.edit': '编辑',
   'settings.providers.dragToReorder': '拖动排序',
   'settings.providers.requestFailed': '请求失败',
+  'settings.providers.saveFailed': '保存服务商失败',
   'settings.providers.addTitle': '添加服务商',
   'settings.providers.editTitle': '编辑服务商',
   'settings.providers.preset': '预设',

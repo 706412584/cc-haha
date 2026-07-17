@@ -503,7 +503,9 @@ async function waitForServerChildren(count: number): Promise<void> {
   expect(sidecarMocks.serverChildren).toHaveLength(count)
 }
 
-async function waitForCallCount(mock: ReturnType<typeof vi.fn>, count: number): Promise<void> {
+type FetchMock = ReturnType<typeof vi.fn> & typeof fetch
+
+async function waitForCallCount(mock: FetchMock, count: number): Promise<void> {
   for (let attempt = 0; attempt < 20 && mock.mock.calls.length !== count; attempt++) {
     await new Promise(resolve => setTimeout(resolve, 0))
   }
@@ -592,7 +594,7 @@ describe('ElectronServerRuntime', () => {
   })
 
   it('relays WeChat session expiry only from the current adapter generation', async () => {
-    const fetchFn = vi.fn(async () => new Response('{}', { status: 200 })) as unknown as typeof fetch
+    const fetchFn = vi.fn(async () => new Response('{}', { status: 200 })) as FetchMock
     const runtime = createRuntime({ fetchFn })
     await runtime.startServer()
     await waitForCallCount(fetchFn, 1)

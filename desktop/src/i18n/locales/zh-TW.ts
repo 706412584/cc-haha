@@ -548,6 +548,7 @@ export const zh: Record<TranslationKey, string> = {
   'settings.providers.edit': '編輯',
   'settings.providers.dragToReorder': '拖曳排序',
   'settings.providers.requestFailed': '請求失敗',
+  'settings.providers.saveFailed': '儲存服務商失敗',
   'settings.providers.addTitle': '新增服務商',
   'settings.providers.editTitle': '編輯服務商',
   'settings.providers.preset': '預設',

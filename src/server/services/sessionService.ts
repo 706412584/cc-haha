@@ -2550,6 +2550,21 @@ export class SessionService {
     let transcriptHasMediaInput = false
 
     for (const entry of entries) {
+      if (entry.type === 'system' && entry.subtype === 'compact_boundary') {
+        estimatedTokensFromMessages = 0
+        transcriptHasMediaInput = false
+        if (latest) {
+          latest = {
+            ...latest,
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadInputTokens: 0,
+            cacheCreationInputTokens: 0,
+          }
+        }
+        continue
+      }
+
       if (
         entry.type === 'user' ||
         entry.type === 'assistant' ||

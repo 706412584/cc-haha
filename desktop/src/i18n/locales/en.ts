@@ -548,6 +548,7 @@ export const en = {
   'settings.providers.edit': 'Edit',
   'settings.providers.dragToReorder': 'Drag to reorder',
   'settings.providers.requestFailed': 'Request failed',
+  'settings.providers.saveFailed': 'Failed to save provider',
   'settings.providers.addTitle': 'Add Provider',
   'settings.providers.editTitle': 'Edit Provider',
   'settings.providers.preset': 'Preset',

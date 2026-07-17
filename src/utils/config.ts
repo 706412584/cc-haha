@@ -1347,6 +1347,10 @@ function saveConfigWithLock<A extends object>(
 // Flag to track if config reading is allowed
 let configReadingAllowed = false
 
+export function isConfigReadingAllowed(): boolean {
+  return configReadingAllowed
+}
+
 export function enableConfigs(): void {
   if (configReadingAllowed) {
     // Ensure this is idempotent

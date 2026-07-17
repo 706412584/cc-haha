@@ -206,14 +206,18 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
 
   updateProvider: async (id, input) => {
     const { provider } = await providersApi.update(id, input)
-    await get().fetchProviders()
+    set((state) => ({
+      providers: state.providers.map((current) =>
+        current.id === provider.id ? provider : current,
+      ),
+    }))
     const activeId = get().activeId
     if (activeId === provider.id && input.models !== undefined) {
       const mainModelId = provider.models.main.trim()
       if (mainModelId) {
-        const settings = useSettingsStore.getState()
-        await settings.setModel(mainModelId)
-        await settings.fetchAll()
+        void useSettingsStore.getState().setModel(mainModelId).catch((err) => {
+          console.error('Failed to synchronize the active provider model:', err)
+        })
       }
     }
     refreshConnectedSessionsForProvider(provider, activeId)

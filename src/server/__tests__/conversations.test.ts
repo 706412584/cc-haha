@@ -105,7 +105,7 @@ describe('ConversationService', () => {
     ;(svc as any).sessions.set(sid, session)
 
     const request = svc.requestControl(sid, { subtype: 'get_context_usage' }, 1_000)
-    await new Promise((resolve) => setTimeout(resolve, 75))
+    await Promise.resolve()
 
     expect(session.pendingOutbound).toHaveLength(0)
     expect(sent).toHaveLength(0)
@@ -165,14 +165,12 @@ describe('ConversationService', () => {
     expect(svc.attachSdkConnection(sid, newSocket)).toBe(true)
     svc.detachSdkConnection(sid, oldSocket)
 
-    expect(await svc.sendMessage(sid, 'still connected')).toBe(true)
+    expect(svc.sendInterrupt(sid)).toBe(true)
     expect(oldSent).toHaveLength(0)
     expect(newSent).toHaveLength(1)
     expect(JSON.parse(newSent[0])).toMatchObject({
-      type: 'user',
-      message: {
-        content: [{ type: 'text', text: 'still connected' }],
-      },
+      type: 'control_request',
+      request: { subtype: 'interrupt' },
     })
   })
 
@@ -391,7 +389,7 @@ describe('ConversationService', () => {
     })
 
     const change = svc.setPermissionMode(sessionId, 'auto')
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await Promise.resolve()
 
     expect(sent).toHaveLength(1)
     expect(sent[0]).toMatchObject({
@@ -412,7 +410,7 @@ describe('ConversationService', () => {
         response: { mode: 'auto' },
       },
     })}\n`)
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await Promise.resolve()
     expect(svc.getSessionPermissionMode(sessionId)).toBe('default')
 
     svc.handleSdkPayload(sessionId, `${JSON.stringify({
@@ -448,7 +446,7 @@ describe('ConversationService', () => {
     })
 
     const change = svc.setPermissionMode(sessionId, 'auto')
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await Promise.resolve()
     svc.handleSdkPayload(sessionId, `${JSON.stringify({
       type: 'control_response',
       response: {
@@ -484,7 +482,7 @@ describe('ConversationService', () => {
     })
 
     const change = svc.setPermissionMode(sessionId, 'auto', 25)
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await Promise.resolve()
     svc.handleSdkPayload(sessionId, `${JSON.stringify({
       type: 'control_response',
       response: {

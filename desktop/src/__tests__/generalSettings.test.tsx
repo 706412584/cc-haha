@@ -2001,6 +2001,53 @@ describe('Settings > Providers tab', () => {
     }))
   })
 
+  it('closes the edit form without waiting for settings to refresh', async () => {
+    providerStoreState.updateProvider = vi.fn().mockResolvedValue(providerStoreState.providers[0])
+    useSettingsStore.setState({
+      fetchAll: vi.fn().mockReturnValue(new Promise(() => {})),
+    })
+
+    render(<Settings />)
+
+    fireEvent.click(screen.getAllByText('Edit')[0]!)
+    const dialog = screen.getByRole('dialog')
+    await waitFor(() => {
+      expect(dialog.querySelector('textarea')?.value).not.toBe('')
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => {
+      expect(providerStoreState.updateProvider).toHaveBeenCalledTimes(1)
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    })
+  })
+
+  it('shows a visible error and unlocks the form when saving fails', async () => {
+    providerStoreState.updateProvider = vi.fn().mockRejectedValue(new Error('disk full'))
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    render(<Settings />)
+
+    fireEvent.click(screen.getAllByText('Edit')[0]!)
+    const dialog = screen.getByRole('dialog')
+    await waitFor(() => {
+      expect(dialog.querySelector('textarea')?.value).not.toBe('')
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => {
+      expect(useUIStore.getState().toasts).toEqual([
+        expect.objectContaining({
+          type: 'error',
+          message: 'Failed to save provider',
+        }),
+      ])
+      expect(within(dialog).getByRole('button', { name: 'Save' })).toBeEnabled()
+    })
+    expect(consoleError).toHaveBeenCalledWith('Failed to save provider:', expect.any(Error))
+    consoleError.mockRestore()
+  })
+
   it('keeps the provider form locked while save is in flight', async () => {
     let resolveCreate!: (provider: SavedProvider) => void
     providerStoreState.createProvider = vi.fn().mockImplementation(() => new Promise<SavedProvider>((resolve) => {

@@ -548,6 +548,7 @@ export const jp: Record<TranslationKey, string> = {
   'settings.providers.edit': '編集',
   'settings.providers.dragToReorder': 'ドラッグして並べ替え',
   'settings.providers.requestFailed': 'リクエストに失敗しました',
+  'settings.providers.saveFailed': 'プロバイダーを保存できませんでした',
   'settings.providers.addTitle': 'プロバイダーを追加',
   'settings.providers.editTitle': 'プロバイダーを編集',
   'settings.providers.preset': 'プリセット',

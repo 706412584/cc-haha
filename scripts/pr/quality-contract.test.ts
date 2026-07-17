@@ -159,6 +159,8 @@ describe('feature quality contract', () => {
       expect(contractRunner).toContain('createSandboxedTestEnvironment')
       expect(contractRunner).toContain('rootBunTestFilter')
     }
+    expect(chatRunner).toContain("'--max-concurrency=1'")
+    expect(chatRunner).toContain("'--timeout=20000'")
   })
 
   test('keeps general AI coding tools pointed at the same quality bar', () => {
