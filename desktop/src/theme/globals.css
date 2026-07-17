@@ -1956,11 +1956,27 @@ html[data-touch-h5][data-touch-h5-keyboard] .app-shell-viewport {
   padding-bottom: 0px;
 }
 
-/* Message action bars (copy / branch) are hover-revealed on desktop; touch
-   devices have no hover, so keep them always visible there. */
+/* Message action bars (copy / branch) are hover-revealed on desktop. Keep
+   them visible whenever the browser is in the narrow H5 shell, even if an
+   embedded browser reports no coarse pointer, and retain the touch marker as
+   coverage for wider tablets. */
+.app-shell--mobile [data-message-actions],
 html[data-touch-h5] [data-message-actions] {
   opacity: 1;
   pointer-events: auto;
+}
+
+.app-shell--mobile [data-message-actions] {
+  height: 2.5rem;
+}
+
+.app-shell--mobile [data-message-actions] > div,
+.app-shell--mobile [data-message-actions] button {
+  min-height: 2.5rem;
+}
+
+.app-shell--mobile [data-message-actions] button {
+  width: 2.5rem;
 }
 
 /* Kill the gray flash WKWebView paints over any tapped interactive element;

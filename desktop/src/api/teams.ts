@@ -12,7 +12,19 @@ type TranscriptMessage = {
   parentToolUseId?: string
 }
 
-type TranscriptResponse = { messages: TranscriptMessage[] }
+type TranscriptResponse = {
+  messages: TranscriptMessage[]
+  signature?: string
+  cursor?: string
+  afterOrdinal?: number
+  reset?: boolean
+}
+
+type TranscriptOptions = {
+  signature?: string
+  cursor?: string
+  afterOrdinal?: number
+}
 
 export type { TranscriptMessage }
 
@@ -25,9 +37,23 @@ export const teamsApi = {
     return api.get<TeamDetail>(`/api/teams/${encodeURIComponent(name)}`)
   },
 
-  getMemberTranscript(teamName: string, agentId: string) {
+  getMemberTranscript(
+    teamName: string,
+    agentId: string,
+    options?: TranscriptOptions,
+  ) {
+    const params = new URLSearchParams()
+    if (options) {
+      params.set('incremental', 'true')
+      if (options.signature) params.set('signature', options.signature)
+      if (options.cursor) params.set('cursor', options.cursor)
+      if (options.afterOrdinal !== undefined) {
+        params.set('afterOrdinal', String(options.afterOrdinal))
+      }
+    }
+    const query = params.toString()
     return api.get<TranscriptResponse>(
-      `/api/teams/${encodeURIComponent(teamName)}/members/${encodeURIComponent(agentId)}/transcript`,
+      `/api/teams/${encodeURIComponent(teamName)}/members/${encodeURIComponent(agentId)}/transcript${query ? `?${query}` : ''}`,
     )
   },
 

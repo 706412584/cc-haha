@@ -14,7 +14,12 @@ type TaskStore = {
   deleteTask: (id: string) => Promise<void>
   runTask: (taskId: string) => Promise<void>
   fetchRecentRuns: () => Promise<void>
-  fetchTaskRuns: (taskId: string) => Promise<TaskRun[]>
+  fetchTaskRuns: (taskId: string, options?: {
+    limit?: number
+    summaryOnly?: boolean
+    nonterminalOnly?: boolean
+  }) => Promise<TaskRun[]>
+  fetchTaskRunDetail: (runId: string, options?: { signal?: AbortSignal }) => Promise<TaskRun>
 }
 
 export const useTaskStore = create<TaskStore>((set) => ({
@@ -61,8 +66,13 @@ export const useTaskStore = create<TaskStore>((set) => ({
     }
   },
 
-  fetchTaskRuns: async (taskId) => {
-    const { runs } = await tasksApi.getTaskRuns(taskId)
+  fetchTaskRuns: async (taskId, options) => {
+    const { runs } = await tasksApi.getTaskRuns(taskId, options)
     return runs
+  },
+
+  fetchTaskRunDetail: async (runId, options) => {
+    const { run } = await tasksApi.getRunDetail(runId, options)
+    return run
   },
 }))

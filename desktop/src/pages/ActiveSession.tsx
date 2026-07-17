@@ -58,6 +58,7 @@ import {
 } from '../lib/backgroundTasks'
 import { useActivityPanelStore } from '../stores/activityPanelStore'
 import { useSettingsStore } from '../stores/settingsStore'
+import { getSessionBrowsablePath, getSessionWorkspaceState } from '../lib/sessionWorkspace'
 
 const TASK_POLL_INTERVAL_MS = 1000
 const WORKSPACE_RESIZE_STEP = 32
@@ -87,9 +88,7 @@ function getTokenUsageTotal(usage: TokenUsage): number {
 }
 
 function getSessionTerminalCwd(session: SessionListItem | undefined) {
-  if (!session) return undefined
-  if (session.workDir && session.workDirExists !== false) return session.workDir
-  return session.projectPath || undefined
+  return getSessionBrowsablePath(session)
 }
 
 function ActiveGoalStrip({
@@ -784,11 +783,19 @@ export function ActiveSession() {
                         </>
                       )}
                     </div>
-                    {session?.workDirExists === false && (
-                      <div className="mt-2 inline-flex max-w-full items-center gap-2 rounded-lg border border-[var(--color-error)]/20 bg-[var(--color-error)]/8 px-3 py-1.5 text-[11px] text-[var(--color-error)]">
-                        <span className="material-symbols-outlined text-[14px]">warning</span>
+                    {session && getSessionWorkspaceState(session) !== 'available' && (
+                      <div className={`mt-2 inline-flex max-w-full items-center gap-2 rounded-lg border px-3 py-1.5 text-[11px] ${
+                        getSessionWorkspaceState(session) === 'worktree_removed'
+                          ? 'border-[var(--color-border)] bg-[var(--color-surface-secondary)] text-[var(--color-text-secondary)]'
+                          : 'border-[var(--color-error)]/20 bg-[var(--color-error)]/8 text-[var(--color-error)]'
+                      }`}>
+                        <span className="material-symbols-outlined text-[14px]">
+                          {getSessionWorkspaceState(session) === 'worktree_removed' ? 'history' : 'warning'}
+                        </span>
                         <span className="truncate">
-                          {t('session.workspaceUnavailable', { dir: session.workDir || 'directory no longer exists' })}
+                          {getSessionWorkspaceState(session) === 'worktree_removed'
+                            ? t('session.worktreeRemoved', { dir: session.projectRoot || '' })
+                            : t('session.workspaceUnavailable', { dir: session.workDir || 'directory no longer exists' })}
                         </span>
                       </div>
                     )}
@@ -817,7 +824,7 @@ export function ActiveSession() {
                   {historyError}
                 </div>
               ) : (
-                <MessageList compact={showRightPanel} />
+                <MessageList compact={showRightPanel} mobileLayout={isMobileLayout} />
               )}
             </>
           )}

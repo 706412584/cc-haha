@@ -41,6 +41,7 @@ type Props = {
   runtimeKey?: string
   disabled?: boolean
   compact?: boolean
+  fluid?: boolean
 }
 
 export type ModelSelectorHandle = {
@@ -171,6 +172,7 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
   runtimeKey,
   disabled = false,
   compact = false,
+  fluid = false,
 }: Props = {}, selectorRef) {
   const t = useTranslation()
   const isMobileBrowser = useMobileViewport() && !isDesktopRuntime()
@@ -658,8 +660,11 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
     : null
 
   return (
-    <div className="relative min-w-0 shrink-0">
-      <div ref={ref} className={`flex min-w-0 items-stretch rounded-full bg-[var(--color-surface-container-low)] transition-colors hover:bg-[var(--color-surface-hover)] ${disabled ? 'opacity-50' : ''}`}>
+    <div
+      data-testid="model-selector-shell"
+      className={`relative min-w-0 ${fluid ? 'flex-1' : 'shrink-0'}`}
+    >
+      <div ref={ref} className={`flex min-w-0 items-stretch rounded-full bg-[var(--color-surface-container-low)] transition-colors hover:bg-[var(--color-surface-hover)] ${fluid ? 'w-full' : ''} ${disabled ? 'opacity-50' : ''}`}>
         <button
           onClick={() => {
             if (disabled) return
@@ -670,7 +675,7 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
           aria-label={buttonProviderLabel ? `${buttonModelLabel}, ${buttonProviderLabel}` : undefined}
           title={buttonProviderLabel ? `${buttonProviderLabel} · ${buttonModelLabel}` : undefined}
           className={`flex min-w-0 items-center gap-2 rounded-l-full text-xs font-medium text-[var(--color-text-secondary)] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-[var(--color-brand)] disabled:cursor-not-allowed ${
-            compact ? 'max-w-[112px] py-1.5 pl-2.5 pr-1' : 'max-w-[220px] py-1.5 pl-3 pr-1'
+            compact ? `${fluid ? 'flex-1' : ''} max-w-[112px] py-1.5 pl-2.5 pr-1` : 'max-w-[220px] py-1.5 pl-3 pr-1'
           }`}
         >
           <span className={`${compact ? 'text-xs' : 'text-sm'} min-w-0 flex-1 truncate font-semibold text-[var(--color-text-primary)]`}>

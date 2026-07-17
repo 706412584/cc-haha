@@ -79,6 +79,7 @@ function model(overrides: Partial<SessionActivityModel> = {}): SessionActivityMo
     badgeCount: 1,
     sections: {
       output: { id: 'output', title: 'Output', emptyLabel: 'No output', rows: [] },
+      queue: { id: 'queue', title: 'Queue', emptyLabel: 'No queued messages', rows: [] },
       tasks: {
         id: 'tasks',
         title: 'Tasks',

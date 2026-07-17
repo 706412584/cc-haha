@@ -90,7 +90,9 @@ describe('E2E: Full Flow', () => {
   })
 
   afterAll(async () => {
-    server?.stop()
+    server?.stop(true)
+    const { stopServerRuntimeForShutdown } = await import('../../index.js')
+    await stopServerRuntimeForShutdown()
     await fs.rm(tmpDir, { recursive: true, force: true })
   })
 

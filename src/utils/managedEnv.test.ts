@@ -9,6 +9,7 @@ let tmpDir: string
 const originalEnv = {
   CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
   CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST,
+  CC_HAHA_LOCAL_ACCESS_TOKEN: process.env.CC_HAHA_LOCAL_ACCESS_TOKEN,
   ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL,
   ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
   ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN,
@@ -34,6 +35,7 @@ describe('managedEnv', () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'managed-env-'))
     process.env.CLAUDE_CONFIG_DIR = tmpDir
     delete process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST
+    delete process.env.CC_HAHA_LOCAL_ACCESS_TOKEN
     delete process.env.ANTHROPIC_BASE_URL
     delete process.env.ANTHROPIC_API_KEY
     delete process.env.ANTHROPIC_AUTH_TOKEN
@@ -47,6 +49,7 @@ describe('managedEnv', () => {
     await fs.rm(tmpDir, { recursive: true, force: true })
     restoreEnv('CLAUDE_CONFIG_DIR')
     restoreEnv('CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST')
+    restoreEnv('CC_HAHA_LOCAL_ACCESS_TOKEN')
     restoreEnv('ANTHROPIC_BASE_URL')
     restoreEnv('ANTHROPIC_API_KEY')
     restoreEnv('ANTHROPIC_AUTH_TOKEN')
@@ -84,5 +87,21 @@ describe('managedEnv', () => {
 
     const health = await fetch(new URL('/health', baseUrl.origin))
     expect(health.status).toBe(200)
+  })
+
+  test('does not let settings replace host-owned provider routing credentials', async () => {
+    await writeJson(path.join(tmpDir, 'cc-haha', 'settings.json'), {
+      env: {
+        CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '0',
+        CC_HAHA_LOCAL_ACCESS_TOKEN: 'stale-settings-token',
+      },
+    })
+    process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = '1'
+    process.env.CC_HAHA_LOCAL_ACCESS_TOKEN = 'desktop-local-secret'
+
+    applySafeConfigEnvironmentVariables()
+
+    expect(process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST).toBe('1')
+    expect(process.env.CC_HAHA_LOCAL_ACCESS_TOKEN).toBe('desktop-local-secret')
   })
 })

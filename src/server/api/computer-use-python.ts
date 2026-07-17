@@ -100,6 +100,15 @@ async function locateCandidatePath(
   return firstOutputLine(locateResult.stdout)
 }
 
+export function getPythonUnavailableMessage(
+  resolution: PythonRuntimeResolution,
+): string {
+  if (resolution.source === 'custom') {
+    return `自定义 Python 路径不可用: ${resolution.error ?? resolution.path}`
+  }
+  return '桌面运行时无法启动 Python 3。Python 可能尚未安装，或未出现在应用当前的 PATH 中；可在 Computer Use 设置中选择解释器路径。'
+}
+
 export async function detectPythonRuntime(
   platform: NodeJS.Platform,
   runCommand: CommandRunner,

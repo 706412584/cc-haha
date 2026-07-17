@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import { detectPythonRuntime, isPythonVersionAtLeast } from '../api/computer-use-python.js'
+import {
+  detectPythonRuntime,
+  getPythonUnavailableMessage,
+  isPythonVersionAtLeast,
+} from '../api/computer-use-python.js'
 
 describe('isPythonVersionAtLeast', () => {
   test('accepts supported Python 3.9+ versions', () => {
@@ -117,6 +121,29 @@ describe('detectPythonRuntime', () => {
     expect(result.prefixArgs).toEqual(['-3'])
     expect(result.source).toBe('system')
     expect(result.error).toBeNull()
+  })
+
+  test('reports a custom Python failure without claiming the system installation state', () => {
+    expect(getPythonUnavailableMessage({
+      installed: false,
+      path: 'C:\\Tools\\python.exe',
+      version: null,
+      command: 'C:\\Tools\\python.exe',
+      prefixArgs: [],
+      source: 'custom',
+      error: 'spawn EACCES',
+    })).toBe('自定义 Python 路径不可用: spawn EACCES')
+  })
+
+  test('does not claim Python is uninstalled when the app cannot launch it', async () => {
+    const result = await detectPythonRuntime(
+      'win32',
+      async () => ({ ok: false, stdout: '', stderr: 'spawn ENOENT', code: 1 }),
+    )
+
+    expect(getPythonUnavailableMessage(result)).toBe(
+      '桌面运行时无法启动 Python 3。Python 可能尚未安装，或未出现在应用当前的 PATH 中；可在 Computer Use 设置中选择解释器路径。',
+    )
   })
 
   test('falls back to venv python when system python is not discoverable', async () => {

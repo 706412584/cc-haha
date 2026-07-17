@@ -52,6 +52,10 @@ export type TaskRun = {
   prompt: string
   output?: string
   error?: string
+  outputPreview?: string
+  errorPreview?: string
+  hasOutput?: boolean
+  hasError?: boolean
   exitCode?: number
   durationMs?: number
   sessionId?: string

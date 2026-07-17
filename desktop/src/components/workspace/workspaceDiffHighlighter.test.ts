@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { parseWorkspaceDiff } from './workspaceDiffModel'
 import {
   buildWorkspaceDiffWordRanges,
+  highlightWorkspaceCode,
   highlightWorkspaceDiff,
 } from './workspaceDiffHighlighter'
 
@@ -13,6 +14,25 @@ function findRowId(diff: string, text: string) {
 }
 
 describe('workspaceDiffHighlighter', () => {
+  it('loads the Java grammar for regular workspace file previews', async () => {
+    const result = await highlightWorkspaceCode({
+      language: 'java',
+      value: [
+        'package com.example.campus;',
+        'public final class MentalHealthTrendController {',
+        '  private String campusId;',
+        '  public int countVisibleOrganizations() { return 1; }',
+        '}',
+      ].join('\n'),
+    })
+    const tokens = result.tokensByLine.flat()
+
+    expect(result.engine).toBe('shiki')
+    expect(tokens.some((token) => token.content === 'package' && token.color === 'var(--color-code-keyword)')).toBe(true)
+    expect(tokens.some((token) => token.content === 'MentalHealthTrendController' && token.color === 'var(--color-code-type)')).toBe(true)
+    expect(tokens.some((token) => token.content === 'countVisibleOrganizations' && token.color === 'var(--color-code-function)')).toBe(true)
+  })
+
   it('keeps TextMate grammar state across the rows in one diff hunk', async () => {
     const diff = [
       'diff --git a/src/a.ts b/src/a.ts',
@@ -29,7 +49,7 @@ describe('workspaceDiffHighlighter', () => {
 
     const result = await highlightWorkspaceDiff({ files, path: 'src/a.ts' })
 
-    expect(result.engine).toBe('prism')
+    expect(result.engine).toBe('shiki')
     expect(result.tokensByRowId[rowId]).toEqual([
       expect.objectContaining({
         content: 'continued comment',

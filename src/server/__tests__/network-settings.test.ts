@@ -6,9 +6,12 @@ import {
   DEFAULT_AI_REQUEST_TIMEOUT_MS,
   MAX_AI_REQUEST_TIMEOUT_MS,
   MIN_AI_REQUEST_TIMEOUT_MS,
+  SYSTEM_PROXY_ERROR_ENV,
+  SYSTEM_PROXY_URL_ENV,
   getManualNetworkProxyUrl,
   buildNetworkEnvironment,
   getNetworkProxyFetchOptions,
+  getNetworkProxyUrl,
   loadNetworkSettings,
   normalizeNetworkSettings,
 } from '../services/networkSettings.js'
@@ -16,10 +19,28 @@ import { resetSettingsCache } from '../../utils/settings/settingsCache.js'
 
 let tmpDir: string
 let originalConfigDir: string | undefined
+const PROXY_ENV_KEYS = [
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'ALL_PROXY',
+  'all_proxy',
+  'NO_PROXY',
+  'no_proxy',
+  SYSTEM_PROXY_URL_ENV,
+  SYSTEM_PROXY_ERROR_ENV,
+] as const
+let originalProxyEnv: Partial<Record<typeof PROXY_ENV_KEYS[number], string>>
 
 async function setup() {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'network-settings-test-'))
   originalConfigDir = process.env.CLAUDE_CONFIG_DIR
+  originalProxyEnv = {}
+  for (const key of PROXY_ENV_KEYS) {
+    if (process.env[key] !== undefined) originalProxyEnv[key] = process.env[key]
+    delete process.env[key]
+  }
   process.env.CLAUDE_CONFIG_DIR = tmpDir
   resetSettingsCache()
 }
@@ -30,6 +51,11 @@ async function teardown() {
   } else {
     delete process.env.CLAUDE_CONFIG_DIR
   }
+  for (const key of PROXY_ENV_KEYS) {
+    const originalValue = originalProxyEnv[key]
+    if (originalValue === undefined) delete process.env[key]
+    else process.env[key] = originalValue
+  }
   resetSettingsCache()
   await fs.rm(tmpDir, { recursive: true, force: true })
 }
@@ -38,17 +64,23 @@ describe('network settings', () => {
   beforeEach(setup)
   afterEach(teardown)
 
-  it('normalizes missing settings to the 600s direct-proxy default', () => {
+  it('normalizes missing and legacy-invalid settings to the 600s system-proxy default', () => {
     expect(normalizeNetworkSettings({})).toEqual({
       aiRequestTimeoutMs: DEFAULT_AI_REQUEST_TIMEOUT_MS,
       proxy: {
-        mode: 'direct',
+        mode: 'system',
         url: '',
       },
     })
+    expect(normalizeNetworkSettings({
+      network: { proxy: { mode: 'legacy', url: 'http://stale.example:8080' } },
+    }).proxy).toEqual({
+      mode: 'system',
+      url: '',
+    })
   })
 
-  it('clears inherited proxy environment for direct provider requests', () => {
+  it('preserves explicit direct mode and clears inherited HTTP, HTTPS, and ALL proxy environment', () => {
     const settings = normalizeNetworkSettings({
       network: {
         proxy: {
@@ -63,16 +95,24 @@ describe('network settings', () => {
       HTTPS_PROXY: 'http://127.0.0.1:1181',
       http_proxy: 'http://127.0.0.1:1181',
       https_proxy: 'http://127.0.0.1:1181',
+      ALL_PROXY: 'socks5://127.0.0.1:1182',
+      all_proxy: 'socks5://127.0.0.1:1182',
     })).toMatchObject({
       HTTP_PROXY: '',
       HTTPS_PROXY: '',
       http_proxy: '',
       https_proxy: '',
+      ALL_PROXY: '',
+      all_proxy: '',
     })
+    expect(getNetworkProxyUrl(settings, {
+      [SYSTEM_PROXY_URL_ENV]: 'http://127.0.0.1:1183',
+    })).toBeNull()
+    process.env.HTTP_PROXY = 'http://127.0.0.1:1181'
     expect(getNetworkProxyFetchOptions(settings, 'https://api.example.com/v1/messages').proxy).toBeUndefined()
   })
 
-  it('keeps inherited process proxy for explicit system provider requests', () => {
+  it('uses only the explicit system-proxy bridge for system provider requests', () => {
     const settings = normalizeNetworkSettings({
       network: {
         proxy: {
@@ -82,30 +122,70 @@ describe('network settings', () => {
       },
     })
 
-    const originalHttpProxy = process.env.HTTP_PROXY
-    const originalHttpsProxy = process.env.HTTPS_PROXY
-    const originalLowerHttpProxy = process.env.http_proxy
-    const originalLowerHttpsProxy = process.env.https_proxy
-    delete process.env.http_proxy
-    delete process.env.https_proxy
-    process.env.HTTP_PROXY = 'http://127.0.0.1:1181'
-    process.env.HTTPS_PROXY = 'http://127.0.0.1:1181'
-    try {
-      expect(buildNetworkEnvironment(settings)).toEqual({
-        API_TIMEOUT_MS: String(DEFAULT_AI_REQUEST_TIMEOUT_MS),
-      })
-      expect(getNetworkProxyFetchOptions(settings, 'https://api.example.com/v1/messages').proxy)
-        .toBe('http://127.0.0.1:1181')
-    } finally {
-      if (originalHttpProxy === undefined) delete process.env.HTTP_PROXY
-      else process.env.HTTP_PROXY = originalHttpProxy
-      if (originalHttpsProxy === undefined) delete process.env.HTTPS_PROXY
-      else process.env.HTTPS_PROXY = originalHttpsProxy
-      if (originalLowerHttpProxy === undefined) delete process.env.http_proxy
-      else process.env.http_proxy = originalLowerHttpProxy
-      if (originalLowerHttpsProxy === undefined) delete process.env.https_proxy
-      else process.env.https_proxy = originalLowerHttpsProxy
+    const bridgeUrl = 'http://127.0.0.1:1183'
+    const baseEnv = {
+      HTTP_PROXY: 'http://inherited.example:8080',
+      ALL_PROXY: 'socks5://inherited.example:1080',
+      NO_PROXY: '.corp.local',
+      [SYSTEM_PROXY_URL_ENV]: `  ${bridgeUrl}  `,
     }
+    expect(getNetworkProxyUrl(settings, baseEnv)).toBe(bridgeUrl)
+    expect(buildNetworkEnvironment(settings, baseEnv)).toEqual({
+      API_TIMEOUT_MS: String(DEFAULT_AI_REQUEST_TIMEOUT_MS),
+      HTTP_PROXY: bridgeUrl,
+      HTTPS_PROXY: bridgeUrl,
+      http_proxy: bridgeUrl,
+      https_proxy: bridgeUrl,
+      ALL_PROXY: bridgeUrl,
+      all_proxy: bridgeUrl,
+      NO_PROXY: '.corp.local,localhost,127.0.0.1,::1',
+      no_proxy: '.corp.local,localhost,127.0.0.1,::1',
+    })
+
+    process.env.HTTP_PROXY = 'http://inherited.example:8080'
+    process.env[SYSTEM_PROXY_URL_ENV] = bridgeUrl
+    expect(getNetworkProxyFetchOptions(settings, 'https://api.example.com/v1/messages').proxy)
+      .toBe(bridgeUrl)
+  })
+
+  it('uses inherited process proxy for non-Electron system-mode servers', () => {
+    const settings = normalizeNetworkSettings({
+      network: { proxy: { mode: 'system', url: '' } },
+    })
+    process.env.HTTP_PROXY = 'http://inherited.example:8080'
+
+    expect(getNetworkProxyUrl(settings)).toBe('http://inherited.example:8080')
+    expect(buildNetworkEnvironment(settings, process.env)).toMatchObject({
+      HTTP_PROXY: 'http://inherited.example:8080',
+      HTTPS_PROXY: 'http://inherited.example:8080',
+      http_proxy: 'http://inherited.example:8080',
+      https_proxy: 'http://inherited.example:8080',
+      ALL_PROXY: 'http://inherited.example:8080',
+      all_proxy: 'http://inherited.example:8080',
+    })
+    expect(getNetworkProxyFetchOptions(settings, 'https://api.example.com/v1/messages').proxy)
+      .toBe('http://inherited.example:8080')
+  })
+
+  it('surfaces a host bridge startup failure instead of silently going direct', () => {
+    const settings = normalizeNetworkSettings({
+      network: { proxy: { mode: 'system', url: '' } },
+    })
+    const env = {
+      [SYSTEM_PROXY_ERROR_ENV]: 'local bridge could not bind',
+    }
+
+    expect(() => getNetworkProxyUrl(settings, env))
+      .toThrow('local bridge could not bind')
+    expect(() => buildNetworkEnvironment(settings, env))
+      .toThrow('local bridge could not bind')
+
+    expect(getNetworkProxyUrl(normalizeNetworkSettings({
+      network: { proxy: { mode: 'direct', url: '' } },
+    }), env)).toBeNull()
+    expect(getNetworkProxyUrl(normalizeNetworkSettings({
+      network: { proxy: { mode: 'manual', url: 'http://127.0.0.1:7890' } },
+    }), env)).toBe('http://127.0.0.1:7890')
   })
 
   it('clamps AI request timeouts and trims manual proxy URLs', () => {
@@ -157,6 +237,8 @@ describe('network settings', () => {
       HTTPS_PROXY: 'http://127.0.0.1:7890',
       http_proxy: 'http://127.0.0.1:7890',
       https_proxy: 'http://127.0.0.1:7890',
+      ALL_PROXY: 'http://127.0.0.1:7890',
+      all_proxy: 'http://127.0.0.1:7890',
       NO_PROXY: 'localhost,127.0.0.1,::1',
       no_proxy: 'localhost,127.0.0.1,::1',
     })
@@ -189,9 +271,37 @@ describe('network settings', () => {
     })
 
     expect(getManualNetworkProxyUrl(settings)).toBe('https://user:p%40ss@proxy.example.com:8443')
+    expect(getNetworkProxyUrl(settings, {
+      [SYSTEM_PROXY_URL_ENV]: 'http://system.example:8080',
+    })).toBe('https://user:p%40ss@proxy.example.com:8443')
     expect(buildNetworkEnvironment(settings)).toMatchObject({
       HTTP_PROXY: 'https://user:p%40ss@proxy.example.com:8443',
       HTTPS_PROXY: 'https://user:p%40ss@proxy.example.com:8443',
+      ALL_PROXY: 'https://user:p%40ss@proxy.example.com:8443',
+      all_proxy: 'https://user:p%40ss@proxy.example.com:8443',
+    })
+    process.env.HTTP_PROXY = 'http://inherited.example:8080'
+    process.env[SYSTEM_PROXY_URL_ENV] = 'http://system.example:8080'
+    expect(getNetworkProxyFetchOptions(settings, 'https://api.example.com/v1/messages').proxy)
+      .toBe('https://user:p%40ss@proxy.example.com:8443')
+  })
+
+  it('fails closed to direct when a corrupted manual setting has no URL', () => {
+    const settings = normalizeNetworkSettings({
+      network: { proxy: { mode: 'manual', url: '   ' } },
+    })
+
+    expect(getNetworkProxyUrl(settings)).toBeNull()
+    expect(buildNetworkEnvironment(settings, {
+      HTTP_PROXY: 'http://inherited.example:8080',
+      ALL_PROXY: 'socks5://inherited.example:1080',
+    })).toMatchObject({
+      HTTP_PROXY: '',
+      HTTPS_PROXY: '',
+      http_proxy: '',
+      https_proxy: '',
+      ALL_PROXY: '',
+      all_proxy: '',
     })
   })
 })

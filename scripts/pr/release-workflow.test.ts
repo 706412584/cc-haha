@@ -79,6 +79,24 @@ describe('release desktop workflow', () => {
     expect(installStep).toContain('install -y build-essential curl wget file libfuse2')
   })
 
+  test('desktop build workflows prepare the pinned ripgrep asset before sidecars', () => {
+    for (const workflowPath of [
+      '.github/workflows/build-desktop-dev.yml',
+      '.github/workflows/release-desktop.yml',
+    ]) {
+      const workflow = readFileSync(workflowPath, 'utf8')
+      const prepareStep = extractStep(workflow, 'Prepare bundled ripgrep')
+
+      expect(prepareStep, workflowPath).toContain(
+        'SIDECAR_TARGET_TRIPLE: ${{ matrix.target_triple }}',
+      )
+      expect(prepareStep, workflowPath).toContain('bun run prepare:ripgrep')
+      expect(workflow.indexOf('Prepare bundled ripgrep')).toBeLessThan(
+        workflow.indexOf('Build sidecars'),
+      )
+    }
+  })
+
   test('development desktop artifacts exclude unpacked macOS app bundles and updater-only files', () => {
     const workflow = readFileSync('.github/workflows/build-desktop-dev.yml', 'utf8')
     const collectStep = workflow.match(

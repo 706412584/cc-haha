@@ -15,6 +15,7 @@ const EMPTY_SESSION_ACTIVITY = {
   messages: [] as NonNullable<ReturnType<typeof useChatStore.getState>['sessions'][string]>['messages'],
   backgroundAgentTasks: {} as NonNullable<ReturnType<typeof useChatStore.getState>['sessions'][string]>['backgroundAgentTasks'],
   agentTaskNotifications: {} as NonNullable<ReturnType<typeof useChatStore.getState>['sessions'][string]>['agentTaskNotifications'],
+  messageQueue: [] as NonNullable<ReturnType<typeof useChatStore.getState>['sessions'][string]>['messageQueue'],
 }
 const EMPTY_TASK_STATE = {
   sessionId: null,
@@ -26,8 +27,17 @@ const EMPTY_TASK_STATE = {
   completedAndDismissed: boolean
 }
 
+export type MainAgentOperationalStatus =
+  | 'foreground'
+  | 'supervising'
+  | 'background'
+  | 'ready'
+  | 'blocked'
+  | 'idle'
+
 export type MainAgentActivity = {
   status: ChatState
+  operationalStatus: MainAgentOperationalStatus
   activeToolName: string | null
   statusVerb: string
 }
@@ -42,6 +52,7 @@ const EMPTY_ACTIVITY_SNAPSHOT: SessionActivitySnapshot = {
   isMemberSession: false,
   mainAgent: {
     status: 'idle',
+    operationalStatus: 'idle',
     activeToolName: null,
     statusVerb: '',
   },
@@ -54,6 +65,21 @@ const EMPTY_ACTIVITY_SNAPSHOT: SessionActivitySnapshot = {
     agentNotifications: [],
     teamMembers: [],
   }),
+}
+
+function deriveMainOperationalStatus(
+  chatState: ChatState,
+  backgroundTasks: SessionActivityModel['sections']['backgroundTasks']['rows'],
+  subagentTasks: SessionActivityModel['sections']['subagents']['rows'],
+  tasks: SessionActivityModel['sections']['tasks']['rows'],
+): MainAgentOperationalStatus {
+  if (chatState !== 'idle') return 'foreground'
+  if (subagentTasks.some(row => row.status === 'running' || row.status === 'in_progress')) return 'supervising'
+  if (backgroundTasks.some(row => row.status === 'running' || row.status === 'in_progress')) return 'background'
+  const pendingTasks = tasks.filter(row => row.status === 'pending')
+  if (pendingTasks.some(row => (row.blockedBy?.length ?? 0) === 0)) return 'ready'
+  if (pendingTasks.length > 0) return 'blocked'
+  return 'idle'
 }
 
 export function useSessionActivityModel(
@@ -72,6 +98,7 @@ export function useSessionActivityModel(
       messages: session.messages,
       backgroundAgentTasks: session.backgroundAgentTasks,
       agentTaskNotifications: session.agentTaskNotifications,
+      messageQueue: session.messageQueue,
     }
   }))
   const taskState = useCLITaskStore(useShallow((state) => enabled ? {
@@ -101,14 +128,10 @@ export function useSessionActivityModel(
     [dismissedBackgroundTaskKeyList],
   )
 
-  return useMemo(() => enabled ? ({
-    isMemberSession,
-    mainAgent: {
-      status: sessionState?.chatState ?? 'idle',
-      activeToolName: sessionState?.activeToolName ?? null,
-      statusVerb: sessionState?.statusVerb ?? '',
-    },
-    model: buildSessionActivityModel({
+  return useMemo(() => {
+    if (!enabled) return EMPTY_ACTIVITY_SNAPSHOT
+    const chatState = sessionState?.chatState ?? 'idle'
+    const model = buildSessionActivityModel({
       sessionId: sessionId ?? '',
       messages: sessionState?.messages ?? [],
       tasks: includeTasks ? taskState.tasks : [],
@@ -117,8 +140,24 @@ export function useSessionActivityModel(
       dismissedBackgroundTaskKeys,
       agentNotifications: Object.values(sessionState?.agentTaskNotifications ?? {}),
       teamMembers,
-    }),
-  }) : EMPTY_ACTIVITY_SNAPSHOT, [
+      queuedMessages: sessionState?.messageQueue ?? [],
+    })
+    return {
+      isMemberSession,
+      mainAgent: {
+        status: chatState,
+        operationalStatus: deriveMainOperationalStatus(
+          chatState,
+          model.sections.backgroundTasks.rows,
+          model.sections.subagents.rows,
+          model.sections.tasks.rows,
+        ),
+        activeToolName: sessionState?.activeToolName ?? null,
+        statusVerb: sessionState?.statusVerb ?? '',
+      },
+      model,
+    }
+  }, [
     dismissedBackgroundTaskKeys,
     enabled,
     includeTasks,
@@ -128,6 +167,7 @@ export function useSessionActivityModel(
     sessionState?.backgroundAgentTasks,
     sessionState?.chatState,
     sessionState?.messages,
+    sessionState?.messageQueue,
     sessionState?.statusVerb,
     taskState.completedAndDismissed,
     taskState.tasks,

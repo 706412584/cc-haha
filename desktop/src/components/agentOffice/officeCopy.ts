@@ -25,6 +25,8 @@ export type AgentOfficeCopy = OfficeActivityCopy & OfficeAmbientCopy & {
     pending: string
     completed: string
     failed: string
+    idle?: string
+    stopped?: string
   }
   stats: {
     active: string
@@ -97,6 +99,8 @@ export function resolveAgentOfficeCopy(t: Translate): AgentOfficeCopy {
       pending: t('agentOffice.status.pending'),
       completed: t('agentOffice.status.completed'),
       failed: t('agentOffice.status.failed'),
+      idle: t('agentOffice.status.idle'),
+      stopped: t('agentOffice.status.stopped'),
     },
     stats: {
       active: t('agentOffice.stats.active'),

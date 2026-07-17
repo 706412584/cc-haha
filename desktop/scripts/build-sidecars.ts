@@ -1,5 +1,9 @@
-import { mkdir } from 'node:fs/promises'
+import { chmod, copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import {
+  getBundledRipgrepName,
+  stageRipgrepLicenses,
+} from './prepare-ripgrep'
 
 const desktopRoot = path.resolve(import.meta.dir, '..')
 const repoRoot = path.resolve(desktopRoot, '..')
@@ -26,6 +30,8 @@ if (scanExit !== 0) {
 }
 
 await mkdir(binariesDir, { recursive: true })
+await stageRipgrepLicenses(binariesDir)
+await stageHostRipgrepForOfflineBuild()
 
 // 单一合并 sidecar：server / cli 共享一份 bun runtime + 共享依赖代码。
 // 调用方（Electron sidecar manager / legacy Tauri host / conversationService）
@@ -38,6 +44,71 @@ await compileExecutable({
 })
 
 console.log(`[build-sidecars] Built desktop sidecar for ${targetTriple} (${bunTarget})`)
+
+async function stageHostRipgrepForOfflineBuild() {
+  const destination = path.join(binariesDir, getBundledRipgrepName(targetTriple))
+  const manifestPath = path.join(binariesDir, 'ripgrep-manifest.json')
+  if (
+    await Bun.file(destination).exists() &&
+    await hasMatchingRipgrepManifest(manifestPath, targetTriple)
+  ) {
+    return
+  }
+
+  const hostTriple = await detectHostTriple()
+  if (hostTriple !== targetTriple) {
+    throw new Error(
+      `[build-sidecars] bundled ripgrep missing for cross target ${targetTriple}; run prepare:ripgrep first`,
+    )
+  }
+
+  const systemRipgrep = Bun.which('rg')
+  if (!systemRipgrep) {
+    console.warn(
+      '[build-sidecars] system ripgrep unavailable for offline build; release builds must run prepare:ripgrep',
+    )
+    return
+  }
+
+  const versionCheck = Bun.spawn([systemRipgrep, '--version'], {
+    stdout: 'pipe',
+    stderr: 'ignore',
+  })
+  const [versionOutput, versionExit] = await Promise.all([
+    new Response(versionCheck.stdout).text(),
+    versionCheck.exited,
+  ])
+  if (versionExit !== 0 || !versionOutput.startsWith('ripgrep ')) {
+    console.warn(`[build-sidecars] refusing unusable system ripgrep at ${systemRipgrep}`)
+    return
+  }
+
+  await copyFile(systemRipgrep, destination)
+  await chmod(destination, 0o755)
+  await writeFile(
+    manifestPath,
+    `${JSON.stringify({
+      version: versionOutput.split(/\r?\n/, 1)[0]?.replace(/^ripgrep\s+/, ''),
+      targetTriple,
+      source: 'system-dev-fallback',
+    }, null, 2)}\n`,
+  )
+  console.log(`[build-sidecars] staged host ripgrep for offline build: ${destination}`)
+}
+
+async function hasMatchingRipgrepManifest(
+  manifestPath: string,
+  expectedTargetTriple: string,
+): Promise<boolean> {
+  try {
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as {
+      targetTriple?: string
+    }
+    return manifest.targetTriple === expectedTargetTriple
+  } catch {
+    return false
+  }
+}
 
 async function detectHostTriple() {
   const platform = process.platform

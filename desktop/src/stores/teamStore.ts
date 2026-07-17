@@ -15,6 +15,14 @@ const memberSessionId = (agentId: string) => `team-member:${agentId}`
 /** Module-level timer for polling member transcript */
 let memberPollTimer: ReturnType<typeof setInterval> | null = null
 let polledMemberSessionId: string | null = null
+const memberTranscriptCursors = new Map<string, {
+  teamName: string
+  agentId: string
+  signature: string
+  cursor: string
+  afterOrdinal: number
+}>()
+const memberRefreshGenerations = new Map<string, number>()
 
 function createMemberSessionState() {
   return {
@@ -89,6 +97,23 @@ function mergeMemberTranscriptMessages(
   return pendingMessages.length > 0
     ? [...transcriptMessages, ...pendingMessages]
     : transcriptMessages
+}
+
+export function mergeMemberTranscriptDelta(
+  existingMessages: UIMessage[],
+  deltaMessages: UIMessage[],
+): UIMessage[] {
+  const durableMessages = existingMessages.filter(message => !isPendingMemberMessage(message))
+  const existingIds = new Set(durableMessages.map(message => message.id))
+  const appended = deltaMessages.filter((message) => {
+    if (existingIds.has(message.id)) return false
+    existingIds.add(message.id)
+    return true
+  })
+  const pendingMessages = existingMessages.filter(isPendingMemberMessage).filter(
+    message => !transcriptAlreadyContainsMessage(deltaMessages, message),
+  )
+  return [...durableMessages, ...appended, ...pendingMessages]
 }
 
 function syncMemberSessionMessages(
@@ -192,8 +217,26 @@ export const useTeamStore = create<TeamStore>((set, get) => ({
     const member = get().getMemberBySessionId(sessionId)
     if (!team || !member) return
 
+    const generation = (memberRefreshGenerations.get(sessionId) ?? 0) + 1
+    memberRefreshGenerations.set(sessionId, generation)
+    const previousCursor = memberTranscriptCursors.get(sessionId)
+    const cursorMatchesMember = previousCursor?.teamName === team.name &&
+      previousCursor.agentId === member.agentId
+
     try {
-      const { messages } = await teamsApi.getMemberTranscript(team.name, member.agentId)
+      const response = await teamsApi.getMemberTranscript(
+        team.name,
+        member.agentId,
+        cursorMatchesMember ? previousCursor : {},
+      )
+      if (memberRefreshGenerations.get(sessionId) !== generation) return
+      const currentTeam = get().activeTeam
+      const currentMember = get().getMemberBySessionId(sessionId)
+      if (
+        currentTeam?.name !== team.name ||
+        currentMember?.agentId !== member.agentId
+      ) return
+      const { messages } = response
       const asEntries = messages.map((msg) => ({
         id: msg.id,
         type: msg.type,
@@ -207,12 +250,26 @@ export const useTeamStore = create<TeamStore>((set, get) => ({
         { includeTeammateMessages: true },
       )
       const existingMessages = useChatStore.getState().sessions[sessionId]?.messages ?? []
-      const mergedMessages = mergeMemberTranscriptMessages(
-        existingMessages,
-        transcriptMessages,
-      )
+      const hasIncrementalMetadata = typeof response.signature === 'string' &&
+        typeof response.cursor === 'string' &&
+        response.afterOrdinal !== undefined
+      const mergedMessages = cursorMatchesMember && !response.reset && hasIncrementalMetadata
+        ? mergeMemberTranscriptDelta(existingMessages, transcriptMessages)
+        : mergeMemberTranscriptMessages(existingMessages, transcriptMessages)
+      if (hasIncrementalMetadata) {
+        memberTranscriptCursors.set(sessionId, {
+          teamName: team.name,
+          agentId: member.agentId,
+          signature: response.signature!,
+          cursor: response.cursor!,
+          afterOrdinal: response.afterOrdinal!,
+        })
+      } else {
+        memberTranscriptCursors.delete(sessionId)
+      }
       syncMemberSessionMessages(sessionId, member.status, mergedMessages)
     } catch {
+      if (memberRefreshGenerations.get(sessionId) !== generation) return
       const existingMessages = useChatStore.getState().sessions[sessionId]?.messages ?? []
       syncMemberSessionMessages(sessionId, member.status, existingMessages)
     }
@@ -280,6 +337,8 @@ export const useTeamStore = create<TeamStore>((set, get) => ({
 
   clearTeam: () => {
     get().stopMemberPolling()
+    memberTranscriptCursors.clear()
+    memberRefreshGenerations.clear()
     set({ activeTeam: null, memberColors: new Map() })
   },
 
@@ -337,6 +396,8 @@ export const useTeamStore = create<TeamStore>((set, get) => ({
 
   handleTeamDeleted: (teamName: string) => {
     get().stopMemberPolling()
+    memberTranscriptCursors.clear()
+    memberRefreshGenerations.clear()
     set((s) => ({
       teams: s.teams.filter((t) => t.name !== teamName),
       activeTeam: s.activeTeam?.name === teamName ? null : s.activeTeam,

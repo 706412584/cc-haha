@@ -17,8 +17,9 @@ import { TEAM_DELETE_TOOL_NAME } from '../tools/TeamDeleteTool/constants.js'
 import { isEnvTruthy } from '../utils/envUtils.js'
 
 const WORKER_SCOPE_RULES = [
+  '- Coordinator mode stays pure coordination. Do not keep an implementation task for yourself; assign file-changing work to workers.',
   '- Default to one well-scoped worker when delegation is required. Do not fan out simple research, planning, command execution, or ordinary tests.',
-  '- Parallel workers require genuinely independent tasks with non-overlapping ownership. Keep concurrency proportional to the work instead of maximizing worker count.',
+  '- Parallel workers require genuinely independent tasks with non-overlapping ownership. Parallel kickoff still requires independent, unblocked tasks with non-overlapping file ownership. Keep concurrency proportional to the work instead of maximizing worker count.',
 ].join('\n')
 
 const BACKGROUND_ORCHESTRATION_RULES = [

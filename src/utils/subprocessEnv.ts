@@ -52,6 +52,12 @@ const GHA_SUBPROCESS_SCRUB = [
   'SSH_SIGNING_KEY',
 ] as const
 
+const ALWAYS_SUBPROCESS_SCRUB = [
+  // Used only by the Claude process to authenticate its host-managed API hop.
+  // Bash, hooks, MCP, LSP, and shell snapshots must never inherit it.
+  'CC_HAHA_LOCAL_ACCESS_TOKEN',
+] as const
+
 /**
  * Returns a copy of process.env with sensitive secrets stripped, for use when
  * spawning subprocesses (Bash tool, shell snapshot, MCP stdio servers, LSP
@@ -82,13 +88,28 @@ export function subprocessEnv(): NodeJS.ProcessEnv {
   // proxy is disabled or not registered (non-CCR), so this is a no-op outside
   // CCR containers.
   const proxyEnv = _getUpstreamProxyEnv?.() ?? {}
+  const shouldScrubGhaSecrets = isEnvTruthy(
+    process.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB,
+  )
 
-  if (!isEnvTruthy(process.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB)) {
+  if (
+    !shouldScrubGhaSecrets &&
+    !ALWAYS_SUBPROCESS_SCRUB.some((key) => process.env[key] !== undefined)
+  ) {
     return Object.keys(proxyEnv).length > 0
       ? { ...process.env, ...proxyEnv }
       : process.env
   }
+
   const env = { ...process.env, ...proxyEnv }
+  for (const key of ALWAYS_SUBPROCESS_SCRUB) {
+    delete env[key]
+  }
+
+  if (!shouldScrubGhaSecrets) {
+    return env
+  }
+
   for (const k of GHA_SUBPROCESS_SCRUB) {
     delete env[k]
     // GitHub Actions auto-creates INPUT_<NAME> for `with:` inputs, duplicating

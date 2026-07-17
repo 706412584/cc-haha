@@ -14,7 +14,11 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import type { CuPermissionRequest } from '../../vendor/computer-use-mcp/types.js'
 import { computerUseApprovalService } from '../services/computerUseApprovalService.js'
-import { detectPythonRuntime, isPythonVersionAtLeast } from './computer-use-python.js'
+import {
+  detectPythonRuntime,
+  getPythonUnavailableMessage,
+  isPythonVersionAtLeast,
+} from './computer-use-python.js'
 import { buildPipInstallAttempts } from '../../utils/computerUse/pipInstall.js'
 import {
   DEFAULT_DESKTOP_GRANT_FLAGS,
@@ -335,9 +339,7 @@ async function runSetup(): Promise<SetupResult> {
     steps.push({
       name: 'python_check',
       ok: false,
-      message: pythonRuntime.source === 'custom'
-        ? `自定义 Python 路径不可用: ${pythonRuntime.error ?? pythonRuntime.path}`
-        : 'Python 3 未安装，请先安装 Python 3',
+      message: getPythonUnavailableMessage(pythonRuntime),
     })
     return { success: false, steps }
   }

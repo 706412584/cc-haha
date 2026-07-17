@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTaskStore } from '../../stores/taskStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useTabStore } from '../../stores/tabStore'
@@ -55,30 +55,150 @@ const STATUS_CONFIG: Record<string, { icon: string; color: string }> = {
 
 export function TaskRunsPanel({ taskId, onClose, refreshKey }: Props) {
   const t = useTranslation()
-  const { fetchTaskRuns } = useTaskStore()
+  const { fetchTaskRuns, fetchTaskRunDetail } = useTaskStore()
   const connectToSession = useChatStore((s) => s.connectToSession)
   const openTab = useTabStore((s) => s.openTab)
   const [runs, setRuns] = useState<TaskRun[]>([])
   const [loading, setLoading] = useState(true)
   const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [detailState, setDetailState] = useState<{
+    runId: string
+    status: 'loading' | 'error'
+  } | null>(null)
+  const requestGeneration = useRef(0)
+  const detailGeneration = useRef(0)
+  const selectedRunId = useRef<string | null>(null)
+  const currentTaskId = useRef(taskId)
+  const mounted = useRef(true)
+  const detailAbortController = useRef<AbortController | null>(null)
 
   const openSession = (sessionId: string, taskName?: string) => {
     openTab(sessionId, taskName || 'Task Run')
     connectToSession(sessionId)
   }
 
-  const refresh = () => {
-    fetchTaskRuns(taskId).then((r) => {
-      setRuns(r)
+  const cancelDetailRequest = useCallback(() => {
+    detailAbortController.current?.abort()
+    detailAbortController.current = null
+  }, [])
+
+  const refresh = useCallback(() => {
+    const generation = ++requestGeneration.current
+    fetchTaskRuns(taskId, { limit: 100, summaryOnly: true }).then((r) => {
+      if (generation !== requestGeneration.current) return
+      setRuns((current) => {
+        const previousById = new Map(current.map(run => [run.id, run]))
+        return r.map((run) => {
+          const previous = previousById.get(run.id)
+          return {
+            ...run,
+            ...(run.output === undefined && previous?.output !== undefined
+              ? { output: previous.output }
+              : {}),
+            ...(run.error === undefined && previous?.error !== undefined
+              ? { error: previous.error }
+              : {}),
+          }
+        })
+      })
+      const selectedId = selectedRunId.current
+      if (selectedId && r.some(run =>
+        run.id === selectedId && (!!run.output || !!run.error),
+      )) {
+        cancelDetailRequest()
+        detailGeneration.current += 1
+        setDetailState(null)
+      }
       setLoading(false)
-    }).catch(() => setLoading(false))
+    }).catch(() => {
+      if (generation === requestGeneration.current) setLoading(false)
+    })
+  }, [cancelDetailRequest, fetchTaskRuns, taskId])
+
+  const loadDetail = async (run: TaskRun) => {
+    cancelDetailRequest()
+    const controller = new AbortController()
+    detailAbortController.current = controller
+    const requestedTaskId = taskId
+    const requestedDetailGeneration = detailGeneration.current + 1
+    detailGeneration.current = requestedDetailGeneration
+    selectedRunId.current = run.id
+    setDetailState({ runId: run.id, status: 'loading' })
+    try {
+      const detail = await fetchTaskRunDetail(run.id, { signal: controller.signal })
+      if (
+        controller.signal.aborted ||
+        !mounted.current ||
+        currentTaskId.current !== requestedTaskId ||
+        detailGeneration.current !== requestedDetailGeneration ||
+        selectedRunId.current !== run.id
+      ) return
+      setRuns((current) => current.map((item) => {
+        if (item.id !== detail.id || item.taskId !== requestedTaskId) return item
+        if (item.output || item.error) return item
+        return detail
+      }))
+      setDetailState(null)
+    } catch {
+      if (
+        !controller.signal.aborted &&
+        mounted.current &&
+        currentTaskId.current === requestedTaskId &&
+        detailGeneration.current === requestedDetailGeneration &&
+        selectedRunId.current === run.id
+      ) {
+        setDetailState({ runId: run.id, status: 'error' })
+      }
+    } finally {
+      if (detailAbortController.current === controller) {
+        detailAbortController.current = null
+      }
+    }
   }
+
+  const toggleOutput = (run: TaskRun) => {
+    if (expandedId === run.id) {
+      cancelDetailRequest()
+      selectedRunId.current = null
+      detailGeneration.current += 1
+      setDetailState(null)
+      setExpandedId(null)
+      return
+    }
+    cancelDetailRequest()
+    selectedRunId.current = run.id
+    setDetailState(null)
+    setExpandedId(run.id)
+    if (!run.output && !run.error && (run.hasOutput || run.hasError)) {
+      void loadDetail(run)
+    }
+  }
+
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+      cancelDetailRequest()
+      selectedRunId.current = null
+      detailGeneration.current += 1
+    }
+  }, [cancelDetailRequest])
+
+  useEffect(() => {
+    cancelDetailRequest()
+    currentTaskId.current = taskId
+    selectedRunId.current = null
+    detailGeneration.current += 1
+    setDetailState(null)
+    setExpandedId(null)
+  }, [cancelDetailRequest, taskId])
 
   // Initial fetch + re-fetch when refreshKey changes
   useEffect(() => {
     setLoading(true)
     refresh()
-  }, [taskId, fetchTaskRuns, refreshKey])
+    return () => { requestGeneration.current += 1 }
+  }, [refresh, refreshKey])
 
   // Auto-poll while any run is "running" or shortly after a manual trigger.
   // Uses faster 1s polling for the first 10s after refreshKey changes, then 3s.
@@ -102,7 +222,7 @@ export function TaskRunsPanel({ taskId, onClose, refreshKey }: Props) {
       clearTimeout(slowDown)
       if (stopTimer) clearTimeout(stopTimer)
     }
-  }, [hasRunning, taskId, refreshKey])
+  }, [hasRunning, taskId, refreshKey, refresh])
 
   return (
     <div className="mt-2 mb-1 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
@@ -173,9 +293,9 @@ export function TaskRunsPanel({ taskId, onClose, refreshKey }: Props) {
                       )}
 
                       {/* Summary toggle */}
-                      {(run.output || run.error) && (
+                      {(run.output || run.error || run.hasOutput || run.hasError) && (
                         <button
-                          onClick={() => setExpandedId(isExpanded ? null : run.id)}
+                          onClick={() => { void toggleOutput(run) }}
                           className="text-xs text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors"
                         >
                           {isExpanded ? t('tasks.hideOutput') : t('tasks.viewOutput')}
@@ -185,9 +305,25 @@ export function TaskRunsPanel({ taskId, onClose, refreshKey }: Props) {
                   </div>
 
                   {/* Expanded output */}
-                  {isExpanded && (
+                  {isExpanded && (run.output || run.error) ? (
                     <RunOutput run={run} />
-                  )}
+                  ) : isExpanded && detailState?.runId === run.id && detailState.status === 'loading' ? (
+                    <div className="mt-2 rounded-[var(--radius-sm)] bg-[var(--color-surface-container)] p-2.5 text-xs text-[var(--color-text-tertiary)]">
+                      {t('common.loading')}
+                    </div>
+                  ) : isExpanded && detailState?.runId === run.id && detailState.status === 'error' ? (
+                    <div className="mt-2 flex items-center justify-between gap-3 rounded-[var(--radius-sm)] border border-[var(--color-error)]/20 bg-[var(--color-error-container)]/28 p-2.5 text-xs text-[var(--color-error)]">
+                      <span>{t('common.error')}</span>
+                      <button
+                        onClick={() => { void loadDetail(run) }}
+                        className="font-medium underline underline-offset-2"
+                      >
+                        {t('common.retry')}
+                      </button>
+                    </div>
+                  ) : isExpanded ? (
+                    <RunOutput run={run} />
+                  ) : null}
                 </div>
               )
             })}

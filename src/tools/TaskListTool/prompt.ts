@@ -29,6 +29,7 @@ When working as a teammate:
 
 ## When to Use This Tool
 
+- Before launching parallel agents for approved complex work, call TaskList to confirm Wave 1 tasks are pending, unblocked, and have non-overlapping file scopes
 - To see what tasks are available to work on (status: 'pending', no owner, not blocked)
 - To check overall progress on the project
 - To find tasks that are blocked and need dependencies resolved

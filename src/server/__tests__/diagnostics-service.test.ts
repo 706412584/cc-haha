@@ -814,6 +814,66 @@ describe('DiagnosticsService', () => {
 })
 
 describe('diagnostics API', () => {
+  test('exposes local-index status and a no-path rebuild action', async () => {
+    const statusSpy = spyOn(diagnosticsService, 'getLocalIndexStatus').mockReturnValue({
+      mode: 'on',
+      state: 'degraded',
+      discovered: 12,
+      indexed: 10,
+      degradedSources: 2,
+      databaseBytes: 4096,
+      walBytes: 1024,
+      lastUpdatedAt: '2026-07-15T00:00:00.000Z',
+      lastErrorCode: 'SQLITE_BUSY',
+    })
+    const rebuildSpy = spyOn(diagnosticsService, 'rebuildLocalIndex').mockResolvedValue({
+      mode: 'on',
+      state: 'building',
+      discovered: 0,
+      indexed: 0,
+      degradedSources: 0,
+      databaseBytes: 0,
+      walBytes: 0,
+      lastUpdatedAt: null,
+      lastErrorCode: null,
+    })
+    try {
+      const getRequest = makeRequest('GET', '/api/diagnostics/local-index')
+      const getResponse = await handleDiagnosticsApi(
+        getRequest.req,
+        getRequest.url,
+        getRequest.segments,
+      )
+      expect(getResponse.status).toBe(200)
+      expect(await getResponse.json()).toMatchObject({
+        mode: 'on',
+        state: 'degraded',
+        lastErrorCode: 'SQLITE_BUSY',
+      })
+
+      const postRequest = new Request(
+        'http://localhost:3456/api/diagnostics/local-index/rebuild',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: '/private/must-not-be-used.sqlite' }),
+        },
+      )
+      const postUrl = new URL(postRequest.url)
+      const postResponse = await handleDiagnosticsApi(
+        postRequest,
+        postUrl,
+        postUrl.pathname.split('/').filter(Boolean),
+      )
+      expect(postResponse.status).toBe(200)
+      expect(rebuildSpy).toHaveBeenCalledTimes(1)
+      expect(rebuildSpy.mock.calls[0]).toEqual([])
+    } finally {
+      statusSpy.mockRestore()
+      rebuildSpy.mockRestore()
+    }
+  })
+
   test('returns status, events, export path, and supports clearing logs', async () => {
     const service = diagnosticsService
     await service.recordEvent({

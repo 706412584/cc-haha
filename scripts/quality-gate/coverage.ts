@@ -2,7 +2,7 @@
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, relative, sep, win32 } from 'node:path'
+import { dirname, join, relative, resolve, sep, win32 } from 'node:path'
 import { rootBunTestFilter } from '../pr/bun-test-filter'
 import { createSandboxedTestEnvironment } from '../pr/test-environment'
 import { loadQuarantineManifest, quarantinedPathSet } from './quarantine'
@@ -106,7 +106,7 @@ type ChangedLineCoverage = {
   failures: string[]
 }
 
-const ROOT_DIR = process.cwd()
+const ROOT_DIR = resolve(import.meta.dir, '../..')
 const DEFAULT_THRESHOLDS_PATH = join(ROOT_DIR, 'scripts', 'quality-gate', 'coverage-thresholds.json')
 
 const ROOT_COVERAGE_SCOPES: CoverageScope[] = [
@@ -481,7 +481,7 @@ export function hasUsableCoverageSummary(summary: CoverageSummary) {
 
 async function runCommand(command: string[], cwd: string, logPath: string) {
   const started = Date.now()
-  const sandboxHome = mkdtempSync(join(tmpdir(), 'cc-haha-coverage-test-'))
+  const sandboxHome = mkdtempSync(join(tmpdir(), 'cch-cov-'))
   try {
     const proc = Bun.spawn(command, {
       cwd,
@@ -627,16 +627,16 @@ function gitOutput(rootDir: string, args: string[]) {
   return new TextDecoder().decode(proc.stdout)
 }
 
-function collectChangedLines(rootDir: string, baseRef?: string) {
-  const explicitBase = baseRef?.trim()
-  if (explicitBase) {
-    const diff = gitOutput(rootDir, ['diff', '--unified=0', '--no-ext-diff', `${explicitBase}...HEAD`, '--'])
+export function collectChangedLines(rootDir: string, baseRef?: string) {
+  const dirty = gitOutput(rootDir, ['diff', '--name-only', 'HEAD', '--'])
+  if (dirty?.trim()) {
+    const diff = gitOutput(rootDir, ['diff', '--unified=0', '--no-ext-diff', 'HEAD', '--'])
     return diff ? parseChangedLinesFromDiff(diff) : new Map<string, Set<number>>()
   }
 
-  const dirty = gitOutput(rootDir, ['diff', '--name-only', '--'])
-  if (dirty?.trim()) {
-    const diff = gitOutput(rootDir, ['diff', '--unified=0', '--no-ext-diff', 'HEAD', '--'])
+  const explicitBase = baseRef?.trim()
+  if (explicitBase) {
+    const diff = gitOutput(rootDir, ['diff', '--unified=0', '--no-ext-diff', `${explicitBase}...HEAD`, '--'])
     return diff ? parseChangedLinesFromDiff(diff) : new Map<string, Set<number>>()
   }
 
@@ -666,6 +666,11 @@ export function rangeContainsMergeCommit(rootDir: string, baseRef?: string): boo
   const rangeHead = firstParent === baseSha && secondParent ? secondParent : 'HEAD'
   const merges = gitOutput(rootDir, ['rev-list', '--merges', `${base}..${rangeHead}`])
   return Boolean(merges?.trim())
+}
+
+export function shouldEvaluateChangedLines(rootDir: string, baseRef?: string): boolean {
+  const dirty = gitOutput(rootDir, ['diff', '--name-only', 'HEAD', '--'])
+  return Boolean(dirty?.trim()) || !rangeContainsMergeCommit(rootDir, baseRef)
 }
 
 export function evaluateChangedLineCoverage(
@@ -1001,11 +1006,8 @@ export async function runCoverageGate(options: {
     'desktop',
     'Desktop React',
     [
-      'bun',
-      '--no-env-file',
-      'run',
-      'test',
-      '--',
+      'node',
+      join(rootDir, 'desktop', 'node_modules', 'vitest', 'vitest.mjs'),
       '--run',
       '--coverage',
       '--coverage.reporter=json-summary',
@@ -1031,7 +1033,7 @@ export async function runCoverageGate(options: {
   const changedLineMinimum = thresholds.changedLines?.minimumPercent
   const changedBaseRef = options.changedBaseRef ?? process.env.COVERAGE_BASE_REF
   const changedLines = typeof changedLineMinimum === 'number' &&
-    !rangeContainsMergeCommit(rootDir, changedBaseRef)
+    shouldEvaluateChangedLines(rootDir, changedBaseRef)
     ? evaluateChangedLineCoverage(
       collectChangedLines(rootDir, changedBaseRef),
       coverageByFile,

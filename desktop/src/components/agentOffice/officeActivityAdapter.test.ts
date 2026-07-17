@@ -28,6 +28,7 @@ function snapshot(overrides: Partial<SessionActivitySnapshot> = {}): SessionActi
     isMemberSession: false,
     mainAgent: {
       status: 'tool_executing',
+      operationalStatus: 'foreground',
       activeToolName: 'Agent',
       statusVerb: 'Delegating',
     },
@@ -193,6 +194,7 @@ describe('adaptActivityToOfficeRoster', () => {
     const agents = adapt(snapshot({
       mainAgent: {
         status: 'tool_executing',
+        operationalStatus: 'foreground',
         activeToolName: null,
         statusVerb: '',
       },
@@ -265,7 +267,7 @@ describe('adaptActivityToOfficeRoster', () => {
 
   it('marks real pending work and idle team members as available for ambient behavior', () => {
     const agents = adapt(snapshot({
-      mainAgent: { status: 'idle', activeToolName: null, statusVerb: '' },
+      mainAgent: { status: 'idle', operationalStatus: 'idle', activeToolName: null, statusVerb: '' },
       model: buildSessionActivityModel({
         sessionId: 'session-1',
         tasks: [],
@@ -341,9 +343,25 @@ describe('adaptActivityToOfficeRoster', () => {
     expect(agents.filter((agent) => agent.sourceKey?.startsWith('team:idle-'))).toHaveLength(4)
   })
 
+  it('shows idle Main as working while supervising a running Agent', () => {
+    const agents = adapt(snapshot({
+      mainAgent: { status: 'idle', operationalStatus: 'supervising', activeToolName: null, statusVerb: '' },
+    }))
+
+    expect(agents[0]).toMatchObject({ state: 'working', currentTask: 'Working' })
+  })
+
+  it('shows ready or blocked Main tasks as thinking without inventing active execution', () => {
+    const agents = adapt(snapshot({
+      mainAgent: { status: 'idle', operationalStatus: 'ready', activeToolName: null, statusVerb: '' },
+    }))
+
+    expect(agents[0]).toMatchObject({ state: 'thinking', currentTask: 'Working' })
+  })
+
   it('keeps unused seats idle instead of inventing work', () => {
     const agents = adapt(snapshot({
-      mainAgent: { status: 'idle', activeToolName: null, statusVerb: '' },
+      mainAgent: { status: 'idle', operationalStatus: 'idle', activeToolName: null, statusVerb: '' },
       model: buildSessionActivityModel({
         sessionId: 'session-1',
         tasks: [],

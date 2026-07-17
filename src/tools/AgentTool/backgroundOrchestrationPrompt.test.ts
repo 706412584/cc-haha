@@ -58,6 +58,30 @@ describe('background agent orchestration guidance', () => {
     expect(prompt).not.toContain(OLD_COORDINATOR_RULE)
   })
 
+  test('normal Agent prompt requires a restrained parallel kickoff contract', async () => {
+    const prompt = await getPrompt(agentDefinitions)
+
+    expect(prompt).toContain(
+      'Parallel kickoff requires at least two unblocked tasks with non-overlapping file ownership',
+    )
+    expect(prompt).toContain(
+      'the tasks do not need each other\'s results before they can start',
+    )
+    expect(prompt).toContain(
+      'small changes, same-file work, or chain dependencies are not a reason to fan out',
+    )
+    expect(prompt).toContain(
+      'Launch named background agents together in one assistant message',
+    )
+    expect(prompt).toContain("owner='main-agent'")
+    expect(prompt).toContain('owner must exactly match the unique Agent name')
+    expect(prompt).toContain(
+      'In that same assistant turn, the primary agent keeps the critical-path task and immediately performs its own first real non-Agent tool action',
+    )
+    expect(prompt).toContain('instead of waiting or merely restating the plan')
+    expect(prompt).not.toContain('Parallelism is your superpower')
+  })
+
   test('normal Agent prompt keeps implementation with the primary agent by default', async () => {
     const prompt = await getPrompt(agentDefinitions)
 

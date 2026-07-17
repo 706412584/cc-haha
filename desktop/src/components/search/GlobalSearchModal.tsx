@@ -42,30 +42,58 @@ export function GlobalSearchModal({ open, onClose }: Props) {
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const requestIdRef = useRef(0)
+  const requestControllerRef = useRef<AbortController | null>(null)
+  const [isComposing, setIsComposing] = useState(false)
 
   // Reset + focus whenever the modal opens.
   useEffect(() => {
-    if (!open) return
+    if (!open) {
+      requestControllerRef.current?.abort()
+      requestControllerRef.current = null
+      requestIdRef.current += 1
+      return
+    }
     setQuery('')
     setDebouncedQuery('')
     setResults([])
+    setLoading(false)
     setError(false)
     setTruncated(false)
     setActiveIndex(0)
+    setIsComposing(false)
+    requestControllerRef.current?.abort()
+    requestControllerRef.current = null
     requestIdRef.current += 1 // invalidate any in-flight request
     const id = requestAnimationFrame(() => inputRef.current?.focus())
     return () => cancelAnimationFrame(id)
   }, [open])
 
-  // Debounce the query.
+  // Cancel stale work as soon as the visible query changes. Waiting for the
+  // debounce here would leave the previous full-history scan running.
   useEffect(() => {
+    requestControllerRef.current?.abort()
+    requestControllerRef.current = null
+    requestIdRef.current += 1
+    setResults([])
+    setError(false)
+    setTruncated(false)
+    setActiveIndex(0)
+
+    if (!open || !query.trim()) {
+      setLoading(false)
+      setDebouncedQuery('')
+      return
+    }
+
+    setLoading(true)
+    if (isComposing) return
     const id = setTimeout(() => setDebouncedQuery(query), DEBOUNCE_MS)
     return () => clearTimeout(id)
-  }, [query])
+  }, [isComposing, open, query])
 
   // Run the search (or clear) when the debounced query changes.
   useEffect(() => {
-    setActiveIndex(0)
+    if (!open) return
     const q = debouncedQuery.trim()
     if (!q) {
       setResults([])
@@ -76,23 +104,40 @@ export function GlobalSearchModal({ open, onClose }: Props) {
     }
 
     const reqId = ++requestIdRef.current
+    const controller = new AbortController()
+    requestControllerRef.current = controller
     setLoading(true)
     setError(false)
     searchApi
-      .searchSessions(q, { limit: SEARCH_LIMIT })
+      .searchSessions(
+        q,
+        { limit: SEARCH_LIMIT, matchesPerSession: MATCH_PREVIEW_PER_SESSION },
+        { signal: controller.signal },
+      )
       .then((resp) => {
-        if (reqId !== requestIdRef.current) return // a newer request superseded this one
+        if (controller.signal.aborted || reqId !== requestIdRef.current) return
         setResults(resp.results)
         setTruncated(resp.truncated)
         setLoading(false)
       })
-      .catch(() => {
-        if (reqId !== requestIdRef.current) return
+      .catch((searchError: unknown) => {
+        if (
+          controller.signal.aborted ||
+          reqId !== requestIdRef.current ||
+          (searchError instanceof Error && searchError.name === 'AbortError')
+        ) return
         setResults([])
         setError(true)
         setLoading(false)
       })
-  }, [debouncedQuery])
+      .finally(() => {
+        if (requestControllerRef.current === controller) {
+          requestControllerRef.current = null
+        }
+      })
+
+    return () => controller.abort()
+  }, [debouncedQuery, open])
 
   const recentSessions = useMemo(
     () =>
@@ -102,7 +147,7 @@ export function GlobalSearchModal({ open, onClose }: Props) {
     [sessions],
   )
 
-  const isSearching = debouncedQuery.trim().length > 0
+  const isSearching = query.trim().length > 0
 
   const rows: Row[] = useMemo(() => {
     if (!isSearching) {
@@ -129,6 +174,10 @@ export function GlobalSearchModal({ open, onClose }: Props) {
 
   // Keep the active row in view.
   useEffect(() => {
+    setActiveIndex((index) => rows.length === 0 ? 0 : Math.min(index, rows.length - 1))
+  }, [rows.length])
+
+  useEffect(() => {
     listRef.current
       ?.querySelector(`[data-index="${activeIndex}"]`)
       ?.scrollIntoView({ block: 'nearest' })
@@ -140,11 +189,14 @@ export function GlobalSearchModal({ open, onClose }: Props) {
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (isComposing || e.nativeEvent.isComposing) return
     if (e.key === 'ArrowDown') {
       e.preventDefault()
+      if (rows.length === 0) return
       setActiveIndex((i) => Math.min(i + 1, rows.length - 1))
     } else if (e.key === 'ArrowUp') {
       e.preventDefault()
+      if (rows.length === 0) return
       setActiveIndex((i) => Math.max(i - 1, 0))
     } else if (e.key === 'Enter') {
       e.preventDefault()
@@ -178,6 +230,8 @@ export function GlobalSearchModal({ open, onClose }: Props) {
             ref={inputRef}
             type="text"
             value={query}
+            onCompositionStart={() => setIsComposing(true)}
+            onCompositionEnd={() => setIsComposing(false)}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder={t('search.global.placeholder')}

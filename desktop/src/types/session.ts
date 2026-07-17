@@ -2,6 +2,21 @@
 
 import type { ReasoningEffortLevel } from './settings'
 
+export type LocalIndexMode = 'off' | 'shadow' | 'on'
+export type LocalIndexState = 'off' | 'building' | 'ready' | 'degraded'
+
+export type LocalIndexStatus = {
+  mode: LocalIndexMode
+  state: LocalIndexState
+  discovered: number
+  indexed: number
+  degradedSources: number
+  databaseBytes: number
+  walBytes: number
+  lastUpdatedAt: string | null
+  lastErrorCode: string | null
+}
+
 export type SessionListItem = {
   id: string
   title: string
@@ -12,6 +27,7 @@ export type SessionListItem = {
   projectRoot?: string | null
   workDir: string | null
   workDirExists: boolean
+  workspaceState?: SessionWorkspaceState
   permissionMode?: string
   /** Absolute path of the .jsonl file on disk. Optional so older servers /
    *  test fixtures that omit it remain compatible; sidebar context-menu
@@ -21,6 +37,8 @@ export type SessionListItem = {
   runtimeModelId?: string
   effortLevel?: ReasoningEffortLevel
 }
+
+export type SessionWorkspaceState = 'available' | 'worktree_removed' | 'missing'
 
 export type MessageUsage = {
   input_tokens?: number

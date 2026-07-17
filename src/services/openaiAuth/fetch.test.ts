@@ -52,6 +52,7 @@ describe('buildOpenAICodexFetch', () => {
       url: string
       headers: Record<string, string>
       body: Record<string, unknown>
+      proxy?: string
     }> = []
     const fetchOverride: typeof fetch = async (input, init) => {
       const headers = new Headers(init?.headers)
@@ -59,6 +60,7 @@ describe('buildOpenAICodexFetch', () => {
         url: String(input),
         headers: Object.fromEntries(headers.entries()),
         body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+        proxy: (init as RequestInit & { proxy?: string } | undefined)?.proxy,
       })
       return Response.json({
         id: 'resp_123',
@@ -83,7 +85,8 @@ describe('buildOpenAICodexFetch', () => {
         max_tokens: 64,
         messages: [{ role: 'user', content: 'Say ok' }],
       }),
-    })
+      proxy: 'http://127.0.0.1:17890',
+    } as RequestInit & { proxy: string })
 
     expect(upstreamCalls).toHaveLength(1)
     expect(upstreamCalls[0].url).toBe(OPENAI_CODEX_API_ENDPOINT)
@@ -92,6 +95,7 @@ describe('buildOpenAICodexFetch', () => {
     expect(upstreamCalls[0].headers.originator).toBe('codex_cli_rs')
     expect(upstreamCalls[0].body.model).toBe('gpt-5.5')
     expect(upstreamCalls[0].body.reasoning).toEqual({ effort: 'medium' })
+    expect(upstreamCalls[0].proxy).toBe('http://127.0.0.1:17890')
     expect(response.status).toBe(200)
     await expect(response.json()).resolves.toMatchObject({
       type: 'message',

@@ -20,6 +20,7 @@ import {
 import type { AccountInfo } from '../../utils/config.js'
 import { getGlobalConfig, saveGlobalConfig } from '../../utils/config.js'
 import { logForDebugging } from '../../utils/debug.js'
+import { getAxiosProxyOptions } from '../../utils/proxy.js'
 import { getOauthProfileFromOauthToken } from './getOauthProfile.js'
 import type {
   BillingType,
@@ -145,7 +146,10 @@ export async function exchangeCodeForTokens(
 
 export async function refreshOAuthToken(
   refreshToken: string,
-  { scopes: requestedScopes }: { scopes?: string[] } = {},
+  {
+    scopes: requestedScopes,
+    proxyUrl,
+  }: { scopes?: string[]; proxyUrl?: string | null } = {},
 ): Promise<OAuthTokens> {
   const requestBody = {
     grant_type: 'refresh_token',
@@ -166,6 +170,7 @@ export async function refreshOAuthToken(
     const response = await axios.post(getOauthConfig().TOKEN_URL, requestBody, {
       headers: { 'Content-Type': 'application/json' },
       timeout: 15000,
+      ...getAxiosProxyOptions(proxyUrl),
     })
 
     if (response.status !== 200) {
@@ -208,7 +213,7 @@ export async function refreshOAuthToken(
 
     const profileInfo = haveProfileAlready
       ? null
-      : await fetchProfileInfo(accessToken)
+      : await fetchProfileInfo(accessToken, { proxyUrl })
 
     // Update the stored properties if they have changed
     if (profileInfo && config.oauthAccount) {
@@ -352,7 +357,10 @@ export function isOAuthTokenExpired(expiresAt: number | null): boolean {
   return expiresWithBuffer >= expiresAt
 }
 
-export async function fetchProfileInfo(accessToken: string): Promise<{
+export async function fetchProfileInfo(
+  accessToken: string,
+  options: { proxyUrl?: string | null } = {},
+): Promise<{
   subscriptionType: SubscriptionType | null
   displayName?: string
   rateLimitTier: RateLimitTier | null
@@ -362,7 +370,7 @@ export async function fetchProfileInfo(accessToken: string): Promise<{
   subscriptionCreatedAt?: string
   rawProfile?: OAuthProfileResponse
 }> {
-  const profile = await getOauthProfileFromOauthToken(accessToken)
+  const profile = await getOauthProfileFromOauthToken(accessToken, options)
   const orgType = profile?.organization?.organization_type
 
   // Reuse the logic from fetchSubscriptionType

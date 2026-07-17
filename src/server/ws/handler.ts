@@ -1144,14 +1144,6 @@ async function handleSetRuntimeConfig(
     return
   }
 
-  if (conversationService.hasSession(sessionId)) {
-    await enqueueRuntimeTransition(sessionId, async () => {
-      await persistSessionRuntimeConfig(sessionId, nextOverride)
-      await scheduleRestartSessionWithRuntimeConfig(ws, sessionId)
-    })
-    return
-  }
-
   const pendingStartup = sessionStartupPromises.get(sessionId)
   if (pendingStartup) {
     const startupRuntimeVersion = sessionStartupRuntimeVersions.get(sessionId) ?? 0
@@ -1171,6 +1163,14 @@ async function handleSetRuntimeConfig(
       ) {
         return
       }
+      await scheduleRestartSessionWithRuntimeConfig(ws, sessionId)
+    })
+    return
+  }
+
+  if (conversationService.hasSession(sessionId)) {
+    await enqueueRuntimeTransition(sessionId, async () => {
+      await persistSessionRuntimeConfig(sessionId, nextOverride)
       await scheduleRestartSessionWithRuntimeConfig(ws, sessionId)
     })
     return
@@ -1947,6 +1947,9 @@ async function ensureCliSessionStarted(
 export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessage[] {
   const streamState = getStreamState(sessionId)
   switch (cliMsg.type) {
+    case 'keep_alive':
+      return []
+
     case 'assistant': {
       if (cliMsg.error || cliMsg.isApiErrorMessage) {
         // If the user requested stop, suppress API errors caused by the

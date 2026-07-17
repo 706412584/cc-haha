@@ -31,6 +31,8 @@ type RipgrepConfig = {
   argv0?: string
 }
 
+export const CC_HAHA_RIPGREP_PATH_ENV = 'CC_HAHA_RIPGREP_PATH'
+
 function isBunVirtualPath(candidatePath: string): boolean {
   const normalized = candidatePath.replace(/\\/g, '/')
   return BUN_VIRTUAL_PATH_MARKERS.some(marker => normalized.includes(marker))
@@ -113,6 +115,51 @@ function builtinRipgrepConfig(): RipgrepConfig {
   return { mode: 'builtin', command, args: [] }
 }
 
+function runtimeTargetTriple(
+  platform: NodeJS.Platform,
+  arch: NodeJS.Architecture,
+): string | null {
+  if (platform === 'darwin' && arch === 'arm64') return 'aarch64-apple-darwin'
+  if (platform === 'darwin' && arch === 'x64') return 'x86_64-apple-darwin'
+  if (platform === 'win32' && arch === 'arm64') return 'aarch64-pc-windows-msvc'
+  if (platform === 'win32' && arch === 'x64') return 'x86_64-pc-windows-msvc'
+  if (platform === 'linux' && arch === 'arm64') return 'aarch64-unknown-linux-gnu'
+  if (platform === 'linux' && arch === 'x64') return 'x86_64-unknown-linux-gnu'
+  return null
+}
+
+export function getBundledRipgrepPath({
+  platform = process.platform,
+  arch = process.arch,
+  execPath = process.execPath,
+}: {
+  platform?: NodeJS.Platform
+  arch?: NodeJS.Architecture
+  execPath?: string
+} = {}): string | null {
+  const targetTriple = runtimeTargetTriple(platform, arch)
+  if (!targetTriple) return null
+  const pathApi = platform === 'win32' ? path.win32 : path.posix
+  return pathApi.join(
+    pathApi.dirname(execPath),
+    platform === 'win32' ? 'rg.exe' : 'rg',
+  )
+}
+
+function packagedRipgrepConfig(): RipgrepConfig | null {
+  const explicitPath = process.env[CC_HAHA_RIPGREP_PATH_ENV]?.trim()
+  if (explicitPath && isUsableBuiltinRipgrepPath(explicitPath)) {
+    return { mode: 'builtin', command: explicitPath, args: ['--no-config'] }
+  }
+
+  const siblingPath = getBundledRipgrepPath()
+  if (siblingPath && isUsableBuiltinRipgrepPath(siblingPath)) {
+    return { mode: 'builtin', command: siblingPath, args: ['--no-config'] }
+  }
+
+  return null
+}
+
 const getRipgrepConfig = memoize((): RipgrepConfig => {
   const userWantsSystemRipgrep = isEnvDefinedFalsy(
     process.env.USE_BUILTIN_RIPGREP,
@@ -127,6 +174,11 @@ const getRipgrepConfig = memoize((): RipgrepConfig => {
         args: [],
       }
     )
+  }
+
+  const packagedConfig = packagedRipgrepConfig()
+  if (packagedConfig) {
+    return packagedConfig
   }
 
   // In bundled (native) mode, ripgrep is statically compiled into bun-internal
@@ -794,4 +846,11 @@ async function codesignRipgrepIfNecessary() {
   } catch (e) {
     logError(e)
   }
+}
+
+export function resetRipgrepStateForTests(): void {
+  getRipgrepConfig.cache.clear?.()
+  testRipgrepOnFirstUse.cache.clear?.()
+  ripgrepStatus = null
+  alreadyDoneSignCheck = false
 }

@@ -56,6 +56,52 @@ describe('resolveAnthropicClientApiKey', () => {
   })
 })
 
+describe('resolveManagedProviderProxyAccessToken', () => {
+  test('returns the desktop local credential only for the host-managed loopback proxy', async () => {
+    const { resolveManagedProviderProxyAccessToken } = await import('./client.js')
+    const input = {
+      providerManagedByHost: '1',
+      apiKey: 'proxy-managed',
+      baseUrl: 'http://127.0.0.1:3456/proxy/providers/provider-1',
+      localAccessToken: ' desktop-local-secret ',
+    }
+
+    expect(resolveManagedProviderProxyAccessToken(input)).toBe('desktop-local-secret')
+    expect(resolveManagedProviderProxyAccessToken({
+      ...input,
+      baseUrl: 'http://127.0.0.1:3456/proxy',
+    })).toBe('desktop-local-secret')
+    expect(resolveManagedProviderProxyAccessToken({
+      ...input,
+      requestUrl: 'http://127.0.0.1:3456/proxy/providers/provider-1/v1/messages',
+    })).toBe('desktop-local-secret')
+  })
+
+  test('never sends the desktop credential to unowned or direct provider URLs', async () => {
+    const { resolveManagedProviderProxyAccessToken } = await import('./client.js')
+    const input = {
+      providerManagedByHost: '1',
+      apiKey: 'proxy-managed',
+      baseUrl: 'http://127.0.0.1:3456/proxy/providers/provider-1',
+      localAccessToken: 'desktop-local-secret',
+    }
+
+    for (const override of [
+      { providerManagedByHost: undefined },
+      { apiKey: 'real-provider-key' },
+      { baseUrl: 'https://api.example.com/proxy/providers/provider-1' },
+      { baseUrl: 'http://localhost:3456/proxy/providers/provider-1' },
+      { baseUrl: 'http://127.0.0.1:3456/api/status' },
+      { baseUrl: 'http://127.0.0.1:3456/proxy/providers/provider-1?target=external' },
+      { requestUrl: 'http://127.0.0.1:3457/proxy/providers/provider-1/v1/messages' },
+      { requestUrl: 'http://127.0.0.1:3456/api/status' },
+      { localAccessToken: undefined },
+    ]) {
+      expect(resolveManagedProviderProxyAccessToken({ ...input, ...override })).toBeNull()
+    }
+  })
+})
+
 describe('shouldUseOpenAICodexTransport', () => {
   test('lets ChatGPT Official marker override a saved Claude subscriber login', async () => {
     const { shouldUseOpenAICodexTransport } = await import('./client.js')
@@ -149,6 +195,67 @@ describe('getAnthropicClient', () => {
 
       if (originalSimple === undefined) delete process.env.CLAUDE_CODE_SIMPLE
       else process.env.CLAUDE_CODE_SIMPLE = originalSimple
+    }
+  })
+
+  test('authenticates the host-managed desktop provider proxy with the local access token', async () => {
+    const { getAnthropicClient } = await import('./client.js')
+    let requestHeaders: Headers | null = null
+    const previous = {
+      authToken: process.env.ANTHROPIC_AUTH_TOKEN,
+      apiKey: process.env.ANTHROPIC_API_KEY,
+      baseUrl: process.env.ANTHROPIC_BASE_URL,
+      localAccessToken: process.env.CC_HAHA_LOCAL_ACCESS_TOKEN,
+      providerManagedByHost: process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST,
+      simple: process.env.CLAUDE_CODE_SIMPLE,
+    }
+
+    process.env.ANTHROPIC_AUTH_TOKEN = 'stale-provider-token'
+    process.env.ANTHROPIC_API_KEY = 'proxy-managed'
+    process.env.ANTHROPIC_BASE_URL = 'http://127.0.0.1:3456/proxy/providers/provider-1'
+    process.env.CC_HAHA_LOCAL_ACCESS_TOKEN = 'desktop-local-secret'
+    process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = '1'
+    process.env.CLAUDE_CODE_SIMPLE = '1'
+
+    try {
+      const client = await getAnthropicClient({
+        maxRetries: 0,
+        model: 'openai-compatible-model',
+        fetchOverride: async (_input, init) => {
+          requestHeaders = new Headers(init?.headers)
+          return Response.json({
+            id: 'msg-local-proxy-auth',
+            type: 'message',
+            role: 'assistant',
+            model: 'openai-compatible-model',
+            content: [{ type: 'text', text: 'ok' }],
+            stop_reason: 'end_turn',
+            stop_sequence: null,
+            usage: { input_tokens: 1, output_tokens: 1 },
+          })
+        },
+      })
+
+      expect(client.apiKey).toBe('proxy-managed')
+      await client.messages.create({
+        model: 'openai-compatible-model',
+        max_tokens: 16,
+        messages: [{ role: 'user', content: 'hello' }],
+      })
+      expect(requestHeaders?.get('x-api-key')).toBe('proxy-managed')
+      expect(requestHeaders?.get('Authorization')).toBe('Bearer desktop-local-secret')
+    } finally {
+      for (const [envKey, value] of [
+        ['ANTHROPIC_AUTH_TOKEN', previous.authToken],
+        ['ANTHROPIC_API_KEY', previous.apiKey],
+        ['ANTHROPIC_BASE_URL', previous.baseUrl],
+        ['CC_HAHA_LOCAL_ACCESS_TOKEN', previous.localAccessToken],
+        ['CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST', previous.providerManagedByHost],
+        ['CLAUDE_CODE_SIMPLE', previous.simple],
+      ] as const) {
+        if (value === undefined) delete process.env[envKey]
+        else process.env[envKey] = value
+      }
     }
   })
 

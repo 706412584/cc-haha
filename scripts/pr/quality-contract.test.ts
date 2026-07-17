@@ -116,6 +116,11 @@ describe('feature quality contract', () => {
     const buildSidecars = readFileSync('desktop/scripts/build-sidecars.ts', 'utf8')
 
     expect(prQuality).toContain('run: bun run check:native')
+    expect(prQuality).toContain('SIDECAR_TARGET_TRIPLE: x86_64-unknown-linux-gnu')
+    expect(prQuality).toContain('run: bun run prepare:ripgrep')
+    expect(prQuality.indexOf('run: bun run prepare:ripgrep')).toBeLessThan(
+      prQuality.indexOf('run: bun run check:native'),
+    )
     expect(prQuality).not.toContain('dtolnay/rust-toolchain')
     expect(prQuality).not.toContain('swatinem/rust-cache')
     expect(prQuality).not.toContain('libwebkit2gtk')
@@ -152,13 +157,15 @@ describe('feature quality contract', () => {
     expect(coverageRunner).toContain('mergeLcovRecords')
     expect(coverageRunner).toContain('rootCoverageAvailable')
     expect(coverageRunner).toContain('rootTestDiscoveryComplete')
-    expect(coverageRunner).toContain('!rangeContainsMergeCommit(rootDir, changedBaseRef)')
+    expect(coverageRunner).toContain('shouldEvaluateChangedLines(rootDir, changedBaseRef)')
     expect(coverageRunner).toContain("id: 'root-runtime'")
     for (const contractRunner of [providerRunner, chatRunner]) {
       expect(contractRunner).toContain("'--no-env-file'")
       expect(contractRunner).toContain('createSandboxedTestEnvironment')
       expect(contractRunner).toContain('rootBunTestFilter')
     }
+    expect(chatRunner).toContain("'--max-concurrency=1'")
+    expect(chatRunner).toContain("'--timeout=20000'")
   })
 
   test('keeps general AI coding tools pointed at the same quality bar', () => {

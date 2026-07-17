@@ -136,6 +136,134 @@ describe('buildSessionActivityModel', () => {
     expect(model.badgeCount).toBe(0)
   })
 
+  it('preserves task orchestration fields and named Agent identity for exact ownership matching', () => {
+    const model = buildSessionActivityModel({
+      sessionId: 'session-1',
+      messages: [{
+        id: 'agent-tool',
+        type: 'tool_use',
+        toolName: 'Agent',
+        toolUseId: 'agent-tool',
+        input: { name: 'workspace-agent', description: 'Implement workspace controls' },
+        timestamp: 1000,
+      }],
+      tasks: [task({
+        id: 'owned-task',
+        owner: 'workspace-agent',
+        blocks: ['release-task'],
+        blockedBy: ['schema-task'],
+        metadata: {
+          orchestration: {
+            schemaVersion: 1,
+            fileScope: ['desktop/src/components/agentOffice/**'],
+            wave: 2,
+            execution: 'background-agent',
+            verification: 'Run Agent Office tests',
+          },
+        },
+      })],
+      completedAndDismissed: false,
+      backgroundTasks: [],
+      agentNotifications: [],
+    })
+
+    expect(model.sections.tasks.rows[0]).toMatchObject({
+      owner: 'workspace-agent',
+      blocks: ['release-task'],
+      blockedBy: ['schema-task'],
+      orchestration: {
+        schemaVersion: 1,
+        wave: 2,
+        execution: 'background-agent',
+      },
+    })
+    expect(model.sections.subagents.rows[0]).toMatchObject({
+      agentName: 'workspace-agent',
+      label: 'Implement workspace controls',
+      ownedTask: {
+        id: 'owned-task',
+        label: 'Write tests',
+        status: 'pending',
+      },
+    })
+  })
+
+  it('keeps live owner, dependencies, and orchestration metadata when transcript task rows exist', () => {
+    const model = buildSessionActivityModel({
+      sessionId: 'session-1',
+      messages: [
+        {
+          id: 'create-task',
+          type: 'tool_use',
+          toolName: 'TaskCreate',
+          toolUseId: 'create-task',
+          input: { subject: 'Owned task', description: 'Transcript description' },
+          timestamp: 1000,
+        },
+        {
+          id: 'create-result',
+          type: 'tool_result',
+          toolUseId: 'create-task',
+          content: 'Task #7 created successfully: Owned task',
+          isError: false,
+          timestamp: 1100,
+        },
+      ],
+      tasks: [task({
+        id: '7',
+        subject: 'Owned task',
+        owner: 'named-agent',
+        blocks: ['8'],
+        blockedBy: ['6'],
+        metadata: {
+          orchestration: {
+            schemaVersion: 1,
+            fileScope: ['desktop/src/pages/AgentOffice.tsx'],
+            wave: 2,
+            execution: 'background-agent',
+            verification: 'Run Office tests',
+          },
+        },
+      })],
+      completedAndDismissed: false,
+      backgroundTasks: [],
+      agentNotifications: [],
+    })
+
+    expect(model.sections.tasks.rows[0]).toMatchObject({
+      taskId: '7',
+      owner: 'named-agent',
+      blocks: ['8'],
+      blockedBy: ['6'],
+      orchestration: { wave: 2, execution: 'background-agent' },
+    })
+  })
+
+  it('projects queued task requests and marks queues stale when their tasks are gone or completed', () => {
+    const model = buildSessionActivityModel({
+      sessionId: 'session-1',
+      tasks: [task({ id: '1', status: 'completed' })],
+      completedAndDismissed: false,
+      backgroundTasks: [],
+      agentNotifications: [],
+      queuedMessages: [{
+        id: 'queue-1',
+        content: 'Process tasks\nTask IDs: 1, 2',
+        displayContent: '处理两个任务',
+        createdAt: 1000,
+      }],
+    })
+
+    expect(model.sections.queue.rows[0]).toMatchObject({
+      id: 'queue-1',
+      label: '处理两个任务',
+      status: 'pending',
+      queuedMessageId: 'queue-1',
+      relatedTaskIds: ['1', '2'],
+      stale: true,
+    })
+  })
+
   it('counts running and failed rows as visible while preserving badge attention semantics', () => {
     const model = buildSessionActivityModel({
       sessionId: 'session-1',

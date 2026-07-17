@@ -66,6 +66,23 @@ function withoutHostManagedProviderVars(
   return out
 }
 
+const HOST_OWNED_ENV_KEYS = new Set([
+  'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST',
+  'CC_HAHA_LOCAL_ACCESS_TOKEN',
+])
+
+function withoutHostOwnedEnvVars(
+  env: Record<string, string> | undefined,
+): Record<string, string> {
+  if (!env || !isEnvTruthy(process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST)) {
+    return env || {}
+  }
+
+  return Object.fromEntries(
+    Object.entries(env).filter(([key]) => !HOST_OWNED_ENV_KEYS.has(key)),
+  )
+}
+
 /**
  * Snapshot of env keys present before any settings.env is applied — for CCD,
  * these are the keys the desktop host set to orchestrate the subprocess.
@@ -94,7 +111,9 @@ function filterSettingsEnv(
   env: Record<string, string> | undefined,
 ): Record<string, string> {
   return withoutCcdSpawnEnvKeys(
-    withoutHostManagedProviderVars(withoutSSHTunnelVars(env)),
+    withoutHostOwnedEnvVars(
+      withoutHostManagedProviderVars(withoutSSHTunnelVars(env)),
+    ),
   )
 }
 

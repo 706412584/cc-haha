@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   buildRootCoverageCommand,
+  collectChangedLines,
   collectServerTestFiles,
   evaluateChangedLineCoverage,
   evaluateThresholds,
@@ -17,6 +18,7 @@ import {
   prefixRelativeLcovSourcePaths,
   serializeLcovRecords,
   rangeContainsMergeCommit,
+  shouldEvaluateChangedLines,
 } from './coverage'
 
 describe('coverage gate helpers', () => {
@@ -124,10 +126,12 @@ describe('coverage gate helpers', () => {
     expect(parseBunTestFileCount('process terminated before summary')).toBeNull()
   })
 
-  test('runs root coverage in isolated per-file processes', () => {
+  test('runs root coverage in isolated per-file processes and invokes the installed Vitest entry directly', () => {
     const coverageScript = readFileSync(join(import.meta.dir, 'coverage.ts'), 'utf8')
+    expect(coverageScript).toContain("const ROOT_DIR = resolve(import.meta.dir, '../..')")
     expect(coverageScript).toContain('rootBunTestFilter(serverFiles[fileIndex]!)')
     expect(coverageScript).toContain('Array.from({ length: 4 }, () => runCoverageWorker())')
+    expect(coverageScript).toContain("join(rootDir, 'desktop', 'node_modules', 'vitest', 'vitest.mjs')")
     expect(coverageScript).not.toContain("'--coverage-reporter=lcov', '--coverage-reporter=text']")
   })
 
@@ -495,6 +499,14 @@ describe('coverage gate helpers', () => {
       git('checkout', 'feature')
       git('merge', '--no-ff', 'side', '-m', 'merge side into feature')
       expect(rangeContainsMergeCommit(repo, 'main')).toBe(true)
+      expect(shouldEvaluateChangedLines(repo, 'main')).toBe(false)
+
+      writeFileSync(join(repo, 'feature.txt'), 'feature\nworking tree change\n')
+      expect(shouldEvaluateChangedLines(repo, 'main')).toBe(true)
+      expect([...collectChangedLines(repo, 'main').keys()]).toEqual(['feature.txt'])
+      git('add', 'feature.txt')
+      expect(shouldEvaluateChangedLines(repo, 'main')).toBe(true)
+      expect([...collectChangedLines(repo, 'main').keys()]).toEqual(['feature.txt'])
     } finally {
       rmSync(repo, { recursive: true, force: true })
     }

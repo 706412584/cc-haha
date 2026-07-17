@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
+import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { Download, Folder, FolderOpen, MoreHorizontal, Pin, PinOff, RefreshCw, RotateCcw, SquarePen, Trash2, Upload, X } from 'lucide-react'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useUIStore } from '../../stores/uiStore'
@@ -8,7 +8,7 @@ import { GlobalSearchModal } from '../search/GlobalSearchModal'
 import { Skeleton } from '../shared/Skeleton'
 import { Tooltip } from '../shared/Tooltip'
 import type { SessionListItem } from '../../types/session'
-import { useTabStore, SETTINGS_TAB_ID, SCHEDULED_TAB_ID } from '../../stores/tabStore'
+import { useTabStore, MARKET_TAB_ID, SETTINGS_TAB_ID, SCHEDULED_TAB_ID } from '../../stores/tabStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useOpenTargetStore } from '../../stores/openTargetStore'
 import { desktopUiPreferencesApi, type SidebarProjectPreferences } from '../../api/desktopUiPreferences'
@@ -68,11 +68,17 @@ type SidebarProps = {
   onRequestClose?: () => void
 }
 
+type SessionScrollAnchor = {
+  sessionId: string
+  topOffset: number
+}
+
 export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
   const t = useTranslation()
   const sessions = useSessionStore((s) => s.sessions)
   const isLoading = useSessionStore((s) => s.isLoading)
   const error = useSessionStore((s) => s.error)
+  const indexStatus = useSessionStore((s) => s.indexStatus)
   const fetchSessions = useSessionStore((s) => s.fetchSessions)
   const deleteSession = useSessionStore((s) => s.deleteSession)
   const deleteSessions = useSessionStore((s) => s.deleteSessions)
@@ -120,7 +126,39 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
   const [projectDropTarget, setProjectDropTarget] = useState<{ key: string; position: 'before' | 'after' } | null>(null)
   const suppressProjectClickRef = useRef<string | null>(null)
   const sidebarPreferenceRevisionRef = useRef(0)
+  const sessionScrollAreaRef = useRef<HTMLDivElement>(null)
+  const pendingSessionScrollAnchorRef = useRef<SessionScrollAnchor | null>(null)
   const refreshSessionsNow = useSessionListAutoRefresh(fetchSessions)
+
+  useEffect(() => useSessionStore.subscribe((nextState, previousState) => {
+    if (nextState.sessions === previousState.sessions) return
+
+    pendingSessionScrollAnchorRef.current = null
+    if (
+      nextState.indexStatus === previousState.indexStatus
+      || nextState.indexStatus?.mode !== 'on'
+      || nextState.indexStatus.state !== 'building'
+    ) return
+
+    const scrollArea = sessionScrollAreaRef.current
+    if (!scrollArea || scrollArea.scrollTop <= 0) return
+    pendingSessionScrollAnchorRef.current = readFirstVisibleSessionAnchor(scrollArea)
+  }), [])
+
+  useLayoutEffect(() => {
+    const anchor = pendingSessionScrollAnchorRef.current
+    pendingSessionScrollAnchorRef.current = null
+    if (!anchor) return
+
+    const scrollArea = sessionScrollAreaRef.current
+    if (!scrollArea || scrollArea.scrollTop <= 0) return
+    const row = findSessionRow(scrollArea, anchor.sessionId)
+    if (!row) return
+
+    const topOffset = row.getBoundingClientRect().top - scrollArea.getBoundingClientRect().top
+    const delta = topOffset - anchor.topOffset
+    if (Number.isFinite(delta) && delta !== 0) scrollArea.scrollTop += delta
+  }, [sessions])
 
   useEffect(() => {
     if (!contextMenu) return
@@ -161,6 +199,13 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
     ))
   }, [hiddenProjectKeys, orderedProjectGroups])
   const showInitialLoading = isLoading && sessions.length === 0
+  const showIndexBuilding = indexStatus?.mode === 'on' && indexStatus.state === 'building' && sessions.length > 0
+  const showIndexDegraded = indexStatus?.mode === 'on' && indexStatus.state === 'degraded'
+  const indexAnnouncement = showIndexBuilding
+    ? t('sidebar.indexBuilding')
+    : showIndexDegraded
+      ? t('sidebar.indexDegraded')
+      : ''
   const filteredSessionIds = useMemo(() => filteredSessions.map((session) => session.id), [filteredSessions])
   const selectedCount = selectedSessionIds.size
   const sessionsById = useMemo(
@@ -930,6 +975,21 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
         </Tooltip>
         {!isMobile && (
           <NavItem
+            active={activeTabId === MARKET_TAB_ID}
+            collapsed={!expanded}
+            label={t('sidebar.market')}
+            touchFriendly={isMobile}
+            onClick={() => {
+              useTabStore.getState().openTab(MARKET_TAB_ID, t('sidebar.market'), 'market')
+              closeMobileDrawer()
+            }}
+            icon={<span className="material-symbols-outlined text-[18px]">storefront</span>}
+          >
+            {t('sidebar.market')}
+          </NavItem>
+        )}
+        {!isMobile && (
+          <NavItem
             active={activeTabId === SCHEDULED_TAB_ID}
             collapsed={!expanded}
             label={t('sidebar.scheduled')}
@@ -1067,7 +1127,34 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                 </div>
               </div>
             )}
-            <div className="sidebar-scroll-area min-h-0 flex-1 overflow-y-auto px-3 pb-20">
+            <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+              {indexAnnouncement}
+            </div>
+            {showIndexBuilding ? (
+              <div
+                data-testid="sidebar-index-progress"
+                aria-hidden="true"
+                className="mx-4 mb-1 flex-none text-[11px] leading-5 text-[var(--color-text-tertiary)]"
+              >
+                {t('sidebar.indexBuildingProgress', {
+                  indexed: indexStatus.indexed,
+                  discovered: indexStatus.discovered,
+                })}
+              </div>
+            ) : null}
+            {showIndexDegraded ? (
+              <div
+                data-testid="sidebar-index-degraded"
+                className="mx-4 mb-1 flex-none text-[11px] leading-5 text-[var(--color-warning)]"
+              >
+                {t('sidebar.indexDegraded')}
+              </div>
+            ) : null}
+            <div
+              ref={sessionScrollAreaRef}
+              data-testid="sidebar-session-scroll-area"
+              className="sidebar-scroll-area min-h-0 flex-1 overflow-y-auto px-3 pb-20"
+            >
               {error && (
                 <div className="mx-1 mt-2 rounded-[var(--radius-md)] border border-[var(--color-error)]/20 bg-[var(--color-error)]/5 px-3 py-2">
                   <div className="text-xs font-medium text-[var(--color-error)]">{t('sidebar.sessionListFailed')}</div>
@@ -1245,6 +1332,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                                 />
                               ) : (
                                 <button
+                                  data-sidebar-session-id={session.id}
                                   onClick={(event) => {
                                     if (isBatchMode) {
                                       handleBatchSessionClick(event, session.id)
@@ -1283,7 +1371,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                                       </span>
                                     ) : null}
                                     <span className="min-w-0 flex-1 truncate font-medium tracking-normal">{session.title || 'Untitled'}</span>
-                                    {!session.workDirExists && (
+                                    {!session.workDirExists && session.workspaceState !== 'worktree_removed' && (
                                       <span
                                         className="flex-shrink-0 text-[10px] text-[var(--color-warning)]"
                                         title={session.workDir ?? ''}
@@ -1576,6 +1664,27 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
       <GlobalSearchModal open={activeModal === 'globalSearch'} onClose={closeModal} />
     </aside>
   )
+}
+
+function readFirstVisibleSessionAnchor(scrollArea: HTMLElement): SessionScrollAnchor | null {
+  const scrollRect = scrollArea.getBoundingClientRect()
+  const rows = scrollArea.querySelectorAll<HTMLElement>('[data-sidebar-session-id]')
+  for (const row of rows) {
+    const rowRect = row.getBoundingClientRect()
+    if (rowRect.bottom <= scrollRect.top || rowRect.top >= scrollRect.bottom) continue
+    const sessionId = row.dataset.sidebarSessionId
+    if (!sessionId) continue
+    return { sessionId, topOffset: rowRect.top - scrollRect.top }
+  }
+  return null
+}
+
+function findSessionRow(scrollArea: HTMLElement, sessionId: string): HTMLElement | null {
+  const rows = scrollArea.querySelectorAll<HTMLElement>('[data-sidebar-session-id]')
+  for (const row of rows) {
+    if (row.dataset.sidebarSessionId === sessionId) return row
+  }
+  return null
 }
 
 function useSessionListAutoRefresh(fetchSessions: () => Promise<void>): () => Promise<void> {

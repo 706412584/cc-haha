@@ -74,6 +74,8 @@ function getSectionTitle(sectionId: ActivitySectionId, t: TranslationFn): string
   switch (sectionId) {
     case 'tasks':
       return t('session.activity.section.tasks')
+    case 'queue':
+      return t('session.activity.section.queue')
     case 'team':
       return t('session.activity.section.team')
     case 'backgroundTasks':
@@ -93,6 +95,8 @@ function getSectionRowsClassName(sectionId: ActivitySectionId, rowCount: number)
 
   switch (sectionId) {
     case 'tasks':
+      return base
+    case 'queue':
       return base
     case 'team':
       return base
@@ -200,6 +204,7 @@ function getRowIcon(row: ActivityRow) {
     case 'output':
       return FileText
     case 'tasks':
+    case 'queue':
       return Circle
   }
 }

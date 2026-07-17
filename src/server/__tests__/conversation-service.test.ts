@@ -24,6 +24,7 @@ describe('ConversationService', () => {
   let originalEntrypoint: string | undefined
   let originalOAuthToken: string | undefined
   let originalProviderManagedByHost: string | undefined
+  let originalLocalAccessToken: string | undefined
   let originalDiagnosticsFile: string | undefined
   let originalAttributionHeader: string | undefined
   let originalDisableExperimentalBetas: string | undefined
@@ -59,6 +60,7 @@ describe('ConversationService', () => {
     originalEntrypoint = process.env.CLAUDE_CODE_ENTRYPOINT
     originalOAuthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN
     originalProviderManagedByHost = process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST
+    originalLocalAccessToken = process.env.CC_HAHA_LOCAL_ACCESS_TOKEN
     originalDiagnosticsFile = process.env.CLAUDE_CODE_DIAGNOSTICS_FILE
     originalAttributionHeader = process.env.CLAUDE_CODE_ATTRIBUTION_HEADER
     originalDisableExperimentalBetas = process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
@@ -85,6 +87,7 @@ describe('ConversationService', () => {
     // buildChildEnv injects it or not without interference from the shell env.
     delete process.env.CLAUDE_CODE_ENTRYPOINT
     delete process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST
+    delete process.env.CC_HAHA_LOCAL_ACCESS_TOKEN
     delete process.env.CLAUDE_CODE_DIAGNOSTICS_FILE
     delete process.env.CLAUDE_CODE_ATTRIBUTION_HEADER
     delete process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
@@ -133,6 +136,9 @@ describe('ConversationService', () => {
 
     if (originalProviderManagedByHost === undefined) delete process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST
     else process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = originalProviderManagedByHost
+
+    if (originalLocalAccessToken === undefined) delete process.env.CC_HAHA_LOCAL_ACCESS_TOKEN
+    else process.env.CC_HAHA_LOCAL_ACCESS_TOKEN = originalLocalAccessToken
 
     if (originalDiagnosticsFile === undefined) delete process.env.CLAUDE_CODE_DIAGNOSTICS_FILE
     else process.env.CLAUDE_CODE_DIAGNOSTICS_FILE = originalDiagnosticsFile
@@ -206,6 +212,30 @@ describe('ConversationService', () => {
       ].join('\n'),
       { mode: 0o755 },
     )
+  }
+
+  function installNetworkTestSession(
+    service: any,
+    sessionId: string,
+    sent: string[],
+    networkDerivedFirstTokenTimeout = true,
+  ) {
+    const session = {
+      outputCallbacks: [],
+      networkRoutingFingerprint: '',
+      networkDerivedFirstTokenTimeout,
+      sdkSocket: {
+        send(line: string) {
+          sent.push(line)
+        },
+      },
+      pendingOutbound: [],
+      usesOfficialOAuth: false,
+      officialOAuthToken: null,
+      pendingPermissionRequests: new Map(),
+    }
+    service.sessions.set(sessionId, session)
+    return session
   }
 
   test('keeps inherited provider env when no desktop provider config exists', async () => {
@@ -391,8 +421,37 @@ describe('ConversationService', () => {
     expect(env.API_TIMEOUT_MS).toBe('180000')
     expect(env.HTTP_PROXY).toBe('http://127.0.0.1:7890')
     expect(env.HTTPS_PROXY).toBe('http://127.0.0.1:7890')
+    expect(env.ALL_PROXY).toBe('http://127.0.0.1:7890')
+    expect(env.all_proxy).toBe('http://127.0.0.1:7890')
     expect(env.NO_PROXY).toContain('127.0.0.1')
     expect(env.no_proxy).toContain('localhost')
+  })
+
+  test('buildChildEnv routes system mode through the host-managed dynamic bridge', async () => {
+    const originalBridgeUrl = process.env.CC_HAHA_SYSTEM_PROXY_URL
+    process.env.CC_HAHA_SYSTEM_PROXY_URL = 'http://127.0.0.1:17890'
+    await fs.writeFile(
+      path.join(tmpDir, 'settings.json'),
+      JSON.stringify({
+        network: {
+          proxy: { mode: 'system', url: '' },
+        },
+      }),
+      'utf-8',
+    )
+
+    try {
+      const service = new ConversationService() as any
+      const env = (await service.buildChildEnv('/tmp')) as Record<string, string>
+
+      expect(env.HTTP_PROXY).toBe('http://127.0.0.1:17890')
+      expect(env.HTTPS_PROXY).toBe('http://127.0.0.1:17890')
+      expect(env.ALL_PROXY).toBe('http://127.0.0.1:17890')
+      expect(env.all_proxy).toBe('http://127.0.0.1:17890')
+    } finally {
+      if (originalBridgeUrl === undefined) delete process.env.CC_HAHA_SYSTEM_PROXY_URL
+      else process.env.CC_HAHA_SYSTEM_PROXY_URL = originalBridgeUrl
+    }
   })
 
   test('buildChildEnv ties the first-token watchdog to the user request timeout so slow prefill is not killed early (#826)', async () => {
@@ -503,6 +562,117 @@ describe('ConversationService', () => {
     expect(JSON.parse(sent[1]!).type).toBe('user')
   })
 
+  test('sendMessage hot-applies direct to system routing before the next user turn', async () => {
+    const originalBridgeUrl = process.env.CC_HAHA_SYSTEM_PROXY_URL
+    process.env.CC_HAHA_SYSTEM_PROXY_URL = 'http://127.0.0.1:17890'
+    try {
+      await fs.writeFile(
+        path.join(tmpDir, 'settings.json'),
+        JSON.stringify({ network: { proxy: { mode: 'direct', url: '' } } }),
+        'utf-8',
+      )
+      const service = new ConversationService() as any
+      const sent: string[] = []
+      const session = installNetworkTestSession(service, 'direct-to-system', sent)
+      await service.refreshNetworkEnvironmentBeforeTurn('direct-to-system', session)
+
+      await fs.writeFile(
+        path.join(tmpDir, 'settings.json'),
+        JSON.stringify({ network: { proxy: { mode: 'system', url: '' } } }),
+        'utf-8',
+      )
+
+      expect(await service.sendMessage('direct-to-system', 'use system proxy')).toBe(true)
+      expect(sent).toHaveLength(2)
+      const update = JSON.parse(sent[0]!)
+      expect(update.type).toBe('update_environment_variables')
+      expect(update.variables).toMatchObject({
+        HTTP_PROXY: 'http://127.0.0.1:17890',
+        HTTPS_PROXY: 'http://127.0.0.1:17890',
+        http_proxy: 'http://127.0.0.1:17890',
+        https_proxy: 'http://127.0.0.1:17890',
+        ALL_PROXY: 'http://127.0.0.1:17890',
+        all_proxy: 'http://127.0.0.1:17890',
+        API_TIMEOUT_MS: '600000',
+        CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS: '600000',
+      })
+      expect(update.variables.NO_PROXY).toContain('127.0.0.1')
+      expect(update.variables.no_proxy).toContain('localhost')
+      expect(JSON.parse(sent[1]!).type).toBe('user')
+    } finally {
+      if (originalBridgeUrl === undefined) delete process.env.CC_HAHA_SYSTEM_PROXY_URL
+      else process.env.CC_HAHA_SYSTEM_PROXY_URL = originalBridgeUrl
+    }
+  })
+
+  test('sendMessage hot-applies manual proxy and timeout changes before the next user turn', async () => {
+    await fs.writeFile(
+      path.join(tmpDir, 'settings.json'),
+      JSON.stringify({
+        network: {
+          aiRequestTimeoutMs: 600_000,
+          proxy: { mode: 'manual', url: 'http://127.0.0.1:17891' },
+        },
+      }),
+      'utf-8',
+    )
+    const service = new ConversationService() as any
+    const sent: string[] = []
+    const session = installNetworkTestSession(service, 'manual-change', sent)
+    await service.refreshNetworkEnvironmentBeforeTurn('manual-change', session)
+
+    await fs.writeFile(
+      path.join(tmpDir, 'settings.json'),
+      JSON.stringify({
+        network: {
+          aiRequestTimeoutMs: 180_000,
+          proxy: { mode: 'manual', url: 'http://127.0.0.1:17892' },
+        },
+      }),
+      'utf-8',
+    )
+
+    expect(await service.sendMessage('manual-change', 'use changed proxy')).toBe(true)
+    expect(sent).toHaveLength(2)
+    const update = JSON.parse(sent[0]!)
+    expect(update.type).toBe('update_environment_variables')
+    expect(update.variables).toMatchObject({
+      HTTP_PROXY: 'http://127.0.0.1:17892',
+      HTTPS_PROXY: 'http://127.0.0.1:17892',
+      ALL_PROXY: 'http://127.0.0.1:17892',
+      all_proxy: 'http://127.0.0.1:17892',
+      API_TIMEOUT_MS: '180000',
+      CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS: '180000',
+    })
+    expect(JSON.parse(sent[1]!).type).toBe('user')
+  })
+
+  test('sendMessage does not resend network env when the system bridge fingerprint is unchanged', async () => {
+    const originalBridgeUrl = process.env.CC_HAHA_SYSTEM_PROXY_URL
+    process.env.CC_HAHA_SYSTEM_PROXY_URL = 'http://127.0.0.1:17893'
+    try {
+      await fs.writeFile(
+        path.join(tmpDir, 'settings.json'),
+        JSON.stringify({ network: { proxy: { mode: 'system', url: '' } } }),
+        'utf-8',
+      )
+      const service = new ConversationService() as any
+      const sent: string[] = []
+      const session = installNetworkTestSession(service, 'unchanged-system', sent)
+      await service.refreshNetworkEnvironmentBeforeTurn('unchanged-system', session)
+
+      // PAC/system rules are resolved dynamically inside this stable bridge URL.
+      // Their changes must not churn the CLI environment between turns.
+      expect(await service.sendMessage('unchanged-system', 'same bridge')).toBe(true)
+
+      expect(sent).toHaveLength(1)
+      expect(JSON.parse(sent[0]!).type).toBe('user')
+    } finally {
+      if (originalBridgeUrl === undefined) delete process.env.CC_HAHA_SYSTEM_PROXY_URL
+      else process.env.CC_HAHA_SYSTEM_PROXY_URL = originalBridgeUrl
+    }
+  })
+
   test('buildChildEnv does NOT inject CLAUDE_CODE_OAUTH_TOKEN when not official mode', async () => {
     const ccHahaDir = path.join(tmpDir, 'cc-haha')
     await fs.mkdir(ccHahaDir, { recursive: true })
@@ -529,6 +699,7 @@ describe('ConversationService', () => {
   })
 
   test('buildChildEnv injects explicit provider runtime env for session-scoped providers', async () => {
+    process.env.CC_HAHA_LOCAL_ACCESS_TOKEN = 'desktop-local-secret'
     const providerService = new ProviderService()
     const provider = await providerService.addProvider({
       presetId: 'custom',
@@ -556,6 +727,7 @@ describe('ConversationService', () => {
     expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('kimi-k2.6')
     expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('kimi-k2.6')
     expect(env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST).toBe('1')
+    expect(env.CC_HAHA_LOCAL_ACCESS_TOKEN).toBe('desktop-local-secret')
     expect(env.CLAUDE_CODE_ATTRIBUTION_HEADER).toBe('0')
     expect(env.CC_HAHA_TRANSCRIPT_ENTRYPOINT).toBe('claude-desktop')
     expect(env.CLAUDE_CODE_ENTRYPOINT).toBeUndefined()

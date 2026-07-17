@@ -492,7 +492,7 @@ describe('Settings > General tab', () => {
     expect(screen.getByRole('button', { name: /Direct connection/i })).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getByRole('button', { name: /System proxy/i })).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: /Manual proxy/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^Manual proxy/i }))
     const proxyInput = screen.getByLabelText('Proxy URL')
     const saveButton = screen.getAllByRole('button', { name: 'Save' })[0]!
 
@@ -1814,11 +1814,13 @@ describe('Settings > Providers tab', () => {
 
     const dialog = screen.getByRole('dialog')
 
-    fireEvent.click(within(dialog).getByRole('button', { name: /Anthropic Messages \(native\)/i }))
-    fireEvent.click(within(dialog).getByRole('button', { name: /OpenAI Responses API \(proxy\)/i }))
+    fireEvent.click(within(dialog).getByRole('button', { name: /Anthropic Messages \(native protocol\)/i }))
+    fireEvent.click(within(dialog).getByRole('button', { name: /OpenAI Responses API \(local protocol translation\)/i }))
 
-    expect(within(dialog).getByRole('button', { name: /OpenAI Responses API \(proxy\)/i })).toBeInTheDocument()
-    expect(within(dialog).getByText('Requests will be translated via the local proxy')).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: /OpenAI Responses API \(local protocol translation\)/i })).toBeInTheDocument()
+    expect(within(dialog).getByText(
+      'cc-haha translates the protocol locally without an additional third-party conversion service',
+    )).toBeInTheDocument()
   })
 
   it('localizes the main model placeholder in the provider form', () => {
@@ -1997,6 +1999,53 @@ describe('Settings > Providers tab', () => {
     expect(providerStoreState.testConfig).not.toHaveBeenCalledWith(expect.objectContaining({
       modelId: 'deepseek-v4-pro',
     }))
+  })
+
+  it('closes the edit form without waiting for settings to refresh', async () => {
+    providerStoreState.updateProvider = vi.fn().mockResolvedValue(providerStoreState.providers[0])
+    useSettingsStore.setState({
+      fetchAll: vi.fn().mockReturnValue(new Promise(() => {})),
+    })
+
+    render(<Settings />)
+
+    fireEvent.click(screen.getAllByText('Edit')[0]!)
+    const dialog = screen.getByRole('dialog')
+    await waitFor(() => {
+      expect(dialog.querySelector('textarea')?.value).not.toBe('')
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => {
+      expect(providerStoreState.updateProvider).toHaveBeenCalledTimes(1)
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    })
+  })
+
+  it('shows a visible error and unlocks the form when saving fails', async () => {
+    providerStoreState.updateProvider = vi.fn().mockRejectedValue(new Error('disk full'))
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    render(<Settings />)
+
+    fireEvent.click(screen.getAllByText('Edit')[0]!)
+    const dialog = screen.getByRole('dialog')
+    await waitFor(() => {
+      expect(dialog.querySelector('textarea')?.value).not.toBe('')
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => {
+      expect(useUIStore.getState().toasts).toEqual([
+        expect.objectContaining({
+          type: 'error',
+          message: 'Failed to save provider',
+        }),
+      ])
+      expect(within(dialog).getByRole('button', { name: 'Save' })).toBeEnabled()
+    })
+    expect(consoleError).toHaveBeenCalledWith('Failed to save provider:', expect.any(Error))
+    consoleError.mockRestore()
   })
 
   it('keeps the provider form locked while save is in flight', async () => {

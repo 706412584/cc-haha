@@ -94,6 +94,8 @@ describe('providerStore runtime refresh', () => {
     chatStoreState.sessions = {}
     runtimeStoreState.selections = {}
     providersApiMock.list.mockResolvedValue({ providers: [], activeId: null })
+    settingsSetModelMock.mockResolvedValue(undefined)
+    settingsFetchAllMock.mockResolvedValue(undefined)
   })
 
   it('reapplies an updated active provider to idle connected sessions using default runtime', async () => {
@@ -105,6 +107,11 @@ describe('providerStore runtime refresh', () => {
     }
 
     const { useProviderStore } = await import('./providerStore')
+    useProviderStore.setState({
+      providers: [provider],
+      providerOrder: [provider.id],
+      activeId: provider.id,
+    })
     await useProviderStore.getState().updateProvider(provider.id, { apiKey: 'new-key' })
 
     expect(setSelectionMock).toHaveBeenCalledWith('session-a', {
@@ -194,19 +201,39 @@ describe('providerStore runtime refresh', () => {
     expect(settingsFetchAllMock).toHaveBeenCalled()
   })
 
+  it('finishes an update without waiting for a provider list refresh', async () => {
+    const original = makeProvider()
+    const updated = makeProvider({ name: 'Updated Provider' })
+    providersApiMock.update.mockResolvedValue({ provider: updated })
+    providersApiMock.list.mockReturnValue(new Promise(() => {}))
+
+    const { useProviderStore } = await import('./providerStore')
+    useProviderStore.setState({
+      providers: [original],
+      providerOrder: [original.id],
+      activeId: null,
+    })
+
+    await useProviderStore.getState().updateProvider(updated.id, { name: updated.name })
+
+    expect(providersApiMock.list).not.toHaveBeenCalled()
+    expect(useProviderStore.getState().providers).toEqual([updated])
+  })
+
   it('sets the provider main model when updating the active saved provider', async () => {
     const provider = makeProvider({ models: { main: 'model-flash', haiku: 'model-flash', sonnet: 'model-pro', opus: 'model-pro' } })
     providersApiMock.update.mockResolvedValue({ provider })
-    providersApiMock.list.mockResolvedValue({
-      providers: [provider],
-      activeId: provider.id,
-    })
 
     const { useProviderStore } = await import('./providerStore')
+    useProviderStore.setState({
+      providers: [makeProvider()],
+      providerOrder: [provider.id],
+      activeId: provider.id,
+    })
     await useProviderStore.getState().updateProvider(provider.id, { models: provider.models })
 
     expect(settingsSetModelMock).toHaveBeenCalledWith('model-flash')
-    expect(settingsFetchAllMock).toHaveBeenCalled()
+    expect(settingsFetchAllMock).not.toHaveBeenCalled()
   })
 })
 
@@ -216,6 +243,8 @@ describe('providerStore reorderProviders', () => {
     chatStoreState.sessions = {}
     runtimeStoreState.selections = {}
     providersApiMock.list.mockResolvedValue({ providers: [], activeId: null })
+    settingsSetModelMock.mockResolvedValue(undefined)
+    settingsFetchAllMock.mockResolvedValue(undefined)
   })
 
   it('optimistically applies the new order before the request resolves', async () => {

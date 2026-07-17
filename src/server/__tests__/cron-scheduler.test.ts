@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, mock, spyOn } from 'bun:test'
+import { Database } from 'bun:sqlite'
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import * as os from 'os'
@@ -14,6 +15,7 @@ import {
   type TaskRun,
 } from '../services/cronScheduler.js'
 import { CronService, type CronTask } from '../services/cronService.js'
+import { resetScheduledRunReadModelForTests } from '../services/localIndex/scheduledRunReadModel.js'
 
 // ─── Test helpers ───────────────────────────────────────────────────────────
 
@@ -21,6 +23,7 @@ let tmpDir: string
 const originalConfigDir = process.env.CLAUDE_CONFIG_DIR
 const originalClaudeCliPath = process.env.CLAUDE_CLI_PATH
 const originalDisableTerminalShellEnv = process.env.CC_HAHA_DISABLE_TERMINAL_SHELL_ENV
+const originalLocalIndexMode = process.env.CC_HAHA_LOCAL_INDEX
 
 async function createTmpDir(): Promise<string> {
   const dir = path.join(
@@ -50,6 +53,36 @@ async function createFakeCronCli(dir: string): Promise<string> {
     'utf-8',
   )
   return cliPath
+}
+
+async function createBlockingFakeCronCli(dir: string): Promise<{
+  cliPath: string
+  readyPath: string
+  releasePath: string
+}> {
+  const cliPath = path.join(dir, 'blocking-fake-cron-cli.ts')
+  const readyPath = path.join(dir, 'blocking-fake-cron-cli.ready')
+  const releasePath = path.join(dir, 'blocking-fake-cron-cli.release')
+  await fs.writeFile(
+    cliPath,
+    [
+      "import { existsSync, writeFileSync } from 'node:fs'",
+      `writeFileSync(${JSON.stringify(readyPath)}, 'ready')`,
+      `while (!existsSync(${JSON.stringify(releasePath)})) await Bun.sleep(5)`,
+      "console.log(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'blocking fake cron output' }] } }))",
+      "console.log(JSON.stringify({ type: 'result', result: 'blocking fake cron result' }))",
+    ].join('\n') + '\n',
+    'utf-8',
+  )
+  return { cliPath, readyPath, releasePath }
+}
+
+async function waitForFile(filePath: string): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    if (await fs.stat(filePath).then(() => true).catch(() => false)) return
+    await Bun.sleep(5)
+  }
+  throw new Error(`Timed out waiting for ${filePath}`)
 }
 
 // ─── fieldMatches tests ────────────────────────────────────────────────────
@@ -200,6 +233,7 @@ describe('CronScheduler', () => {
     process.env.CLAUDE_CONFIG_DIR = tmpDir
     process.env.CLAUDE_CLI_PATH = await createFakeCronCli(tmpDir)
     process.env.CC_HAHA_DISABLE_TERMINAL_SHELL_ENV = '1'
+    process.env.CC_HAHA_LOCAL_INDEX = 'off'
     cronService = new CronService()
     scheduler = new CronScheduler(cronService)
   })
@@ -220,6 +254,11 @@ describe('CronScheduler', () => {
       process.env.CC_HAHA_DISABLE_TERMINAL_SHELL_ENV = originalDisableTerminalShellEnv
     } else {
       delete process.env.CC_HAHA_DISABLE_TERMINAL_SHELL_ENV
+    }
+    if (originalLocalIndexMode) {
+      process.env.CC_HAHA_LOCAL_INDEX = originalLocalIndexMode
+    } else {
+      delete process.env.CC_HAHA_LOCAL_INDEX
     }
     await cleanupTmpDir(tmpDir)
   })
@@ -283,6 +322,114 @@ describe('CronScheduler', () => {
     expect(logContent.runs[0].taskId).toBe(task.id)
     expect(logContent.runs[0].taskName).toBe('Test Task')
     expect(logContent.runs[0].prompt).toBe('echo test')
+    await expect(fs.stat(path.join(
+      tmpDir,
+      'cc-haha',
+      'db',
+      'scheduled-runs-v1.sqlite',
+    ))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('keeps one execution lifecycle canonical and projected writes in its original scope', async () => {
+    const scopeA = path.join(tmpDir, 'scope-a')
+    const scopeB = path.join(tmpDir, 'scope-b')
+    await fs.mkdir(scopeA, { recursive: true })
+    await fs.mkdir(scopeB, { recursive: true })
+    process.env.CLAUDE_CONFIG_DIR = scopeA
+    process.env.CC_HAHA_LOCAL_INDEX = 'on'
+
+    const blockingCli = await createBlockingFakeCronCli(tmpDir)
+    process.env.CLAUDE_CLI_PATH = blockingCli.cliPath
+    const task = await cronService.createTask({
+      cron: '* * * * *',
+      prompt: 'scope A prompt',
+      name: 'Scope A Task',
+      recurring: true,
+    })
+    const scopeBMarker: TaskRun = {
+      id: 'scope-b-marker',
+      taskId: 'scope-b-task',
+      taskName: 'Scope B Task',
+      startedAt: new Date(0).toISOString(),
+      completedAt: new Date(1).toISOString(),
+      status: 'completed',
+      prompt: 'scope B prompt',
+    }
+    await fs.writeFile(
+      path.join(scopeB, 'scheduled_tasks_log.json'),
+      JSON.stringify({ runs: [scopeBMarker] }, null, 2) + '\n',
+      'utf-8',
+    )
+
+    const execution = scheduler.executeTask(task)
+    try {
+      await waitForFile(blockingCli.readyPath)
+
+      // The running write must already be projected in scope A before the
+      // process-level config scope changes while the task is still alive.
+      await resetScheduledRunReadModelForTests()
+      const scopeADatabasePath = path.join(
+        scopeA,
+        'cc-haha',
+        'db',
+        'scheduled-runs-v1.sqlite',
+      )
+      const runningDatabase = new Database(scopeADatabasePath, { readonly: true })
+      try {
+        expect(runningDatabase.query<{ status: string }, []>(
+          'SELECT status FROM scheduled_runs WHERE task_id = ?',
+        ).get(task.id)?.status).toBe('running')
+      } finally {
+        runningDatabase.close()
+      }
+
+      process.env.CLAUDE_CONFIG_DIR = scopeB
+      await fs.writeFile(blockingCli.releasePath, 'release', 'utf-8')
+      await execution
+      await resetScheduledRunReadModelForTests()
+    } finally {
+      await fs.writeFile(blockingCli.releasePath, 'release', 'utf-8').catch(() => {})
+      await execution.catch(() => {})
+      await resetScheduledRunReadModelForTests()
+    }
+
+    const scopeARuns = JSON.parse(await fs.readFile(
+      path.join(scopeA, 'scheduled_tasks_log.json'),
+      'utf-8',
+    )) as { runs: TaskRun[] }
+    const scopeBRuns = JSON.parse(await fs.readFile(
+      path.join(scopeB, 'scheduled_tasks_log.json'),
+      'utf-8',
+    )) as { runs: TaskRun[] }
+
+    expect(scopeARuns.runs).toHaveLength(1)
+    expect(scopeARuns.runs[0]).toMatchObject({
+      taskId: task.id,
+      status: 'completed',
+      prompt: 'scope A prompt',
+    })
+    expect(scopeBRuns.runs).toEqual([scopeBMarker])
+
+    const scopeADatabasePath = path.join(
+      scopeA,
+      'cc-haha',
+      'db',
+      'scheduled-runs-v1.sqlite',
+    )
+    const completedDatabase = new Database(scopeADatabasePath, { readonly: true })
+    try {
+      expect(completedDatabase.query<{ status: string }, []>(
+        'SELECT status FROM scheduled_runs WHERE task_id = ?',
+      ).get(task.id)?.status).toBe('completed')
+    } finally {
+      completedDatabase.close()
+    }
+    await expect(fs.stat(path.join(
+      scopeB,
+      'cc-haha',
+      'db',
+      'scheduled-runs-v1.sqlite',
+    ))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('should disable non-recurring task after execution', async () => {

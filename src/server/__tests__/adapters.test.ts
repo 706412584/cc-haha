@@ -2,15 +2,23 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { handleAdaptersApi } from '../api/adapters.js'
+import {
+  buildWechatLoginCredentialPatch,
+  handleAdaptersApi,
+} from '../api/adapters.js'
+import { adapterService } from '../services/adapterService.js'
 
 let tmpDir: string
 let originalConfigDir: string | undefined
+let originalLocalAccessToken: string | undefined
 
 async function setup() {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-adapters-test-'))
   originalConfigDir = process.env.CLAUDE_CONFIG_DIR
+  originalLocalAccessToken = process.env.CC_HAHA_LOCAL_ACCESS_TOKEN
   process.env.CLAUDE_CONFIG_DIR = tmpDir
+  process.env.CC_HAHA_LOCAL_ACCESS_TOKEN = 'desktop-token'
+  adapterService.clearRuntimeStatus()
 }
 
 async function teardown() {
@@ -19,14 +27,28 @@ async function teardown() {
   } else {
     delete process.env.CLAUDE_CONFIG_DIR
   }
+  if (originalLocalAccessToken !== undefined) {
+    process.env.CC_HAHA_LOCAL_ACCESS_TOKEN = originalLocalAccessToken
+  } else {
+    delete process.env.CC_HAHA_LOCAL_ACCESS_TOKEN
+  }
+  adapterService.clearRuntimeStatus()
   await fs.rm(tmpDir, { recursive: true, force: true })
 }
 
-function makeRequest(method: string, pathName: string, body?: Record<string, unknown>) {
+function makeRequest(
+  method: string,
+  pathName: string,
+  body?: Record<string, unknown>,
+  headers?: Record<string, string>,
+) {
   const url = new URL(pathName, 'http://localhost:3456')
   const req = new Request(url.toString(), {
     method,
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    headers: {
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+      ...headers,
+    },
     body: body ? JSON.stringify(body) : undefined,
   })
   const segments = url.pathname.split('/').filter(Boolean)
@@ -36,6 +58,97 @@ function makeRequest(method: string, pathName: string, body?: Record<string, unk
 describe('Adapters API', () => {
   beforeEach(setup)
   afterEach(teardown)
+
+  it('accepts authenticated runtime status and rejects stale generations', async () => {
+    const unauthorized = makeRequest('POST', '/api/adapters/runtime-status', {
+      platform: 'wechat',
+      state: 'rebind_required',
+      code: 'session_expired',
+      generation: 1,
+    })
+    expect((await handleAdaptersApi(
+      unauthorized.req,
+      unauthorized.url,
+      unauthorized.segments,
+    )).status).toBe(401)
+
+    const authorizedHeaders = { Authorization: 'Bearer desktop-token' }
+    const invalidGeneration = makeRequest('POST', '/api/adapters/runtime-status', {
+      platform: 'wechat',
+      state: 'starting',
+      generation: 0,
+    }, authorizedHeaders)
+    expect((await handleAdaptersApi(
+      invalidGeneration.req,
+      invalidGeneration.url,
+      invalidGeneration.segments,
+    )).status).toBe(400)
+
+    const first = makeRequest('POST', '/api/adapters/runtime-status', {
+      platform: 'wechat',
+      state: 'rebind_required',
+      code: 'session_expired',
+      generation: 2,
+    }, authorizedHeaders)
+    expect((await handleAdaptersApi(first.req, first.url, first.segments)).status).toBe(200)
+
+    const sameGenerationRegression = makeRequest('POST', '/api/adapters/runtime-status', {
+      platform: 'wechat',
+      state: 'starting',
+      generation: 2,
+    }, authorizedHeaders)
+    expect((await handleAdaptersApi(
+      sameGenerationRegression.req,
+      sameGenerationRegression.url,
+      sameGenerationRegression.segments,
+    )).status).toBe(409)
+
+    const stale = makeRequest('POST', '/api/adapters/runtime-status', {
+      platform: 'wechat',
+      state: 'starting',
+      generation: 1,
+    }, authorizedHeaders)
+    expect((await handleAdaptersApi(stale.req, stale.url, stale.segments)).status).toBe(409)
+
+    const unauthorizedGet = makeRequest('GET', '/api/adapters/runtime-status')
+    expect((await handleAdaptersApi(
+      unauthorizedGet.req,
+      unauthorizedGet.url,
+      unauthorizedGet.segments,
+    )).status).toBe(401)
+
+    const get = makeRequest('GET', '/api/adapters/runtime-status', undefined, authorizedHeaders)
+    const response = await handleAdaptersApi(get.req, get.url, get.segments)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      wechat: {
+        platform: 'wechat',
+        state: 'rebind_required',
+        code: 'session_expired',
+        generation: 2,
+        updatedAt: expect.any(String),
+      },
+    })
+  })
+
+  it('builds a WeChat rebind patch without clearing unrelated settings', () => {
+    const patch = buildWechatLoginCredentialPatch({
+      accountId: 'new-account',
+      botToken: 'new-token',
+      baseUrl: 'https://wechat.example',
+      userId: 'new-user',
+    })
+
+    expect(patch).toEqual({
+      accountId: 'new-account',
+      botToken: 'new-token',
+      baseUrl: 'https://wechat.example',
+      userId: 'new-user',
+    })
+    expect(patch).not.toHaveProperty('allowedUsers')
+    expect(patch).not.toHaveProperty('pairedUsers')
+    expect(patch).not.toHaveProperty('defaultWorkDir')
+  })
 
   it('masks WeChat bot tokens in GET responses', async () => {
     const put = makeRequest('PUT', '/api/adapters', {

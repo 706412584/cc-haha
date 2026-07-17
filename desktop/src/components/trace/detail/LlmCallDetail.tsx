@@ -18,7 +18,15 @@ const MESSAGE_FOLD_THRESHOLD = 20
 const MESSAGE_HEAD_COUNT = 2
 const MESSAGE_TAIL_COUNT = 6
 
-export function LlmCallDetail({ sessionId, span }: { sessionId: string; span: TraceSpan }) {
+export function LlmCallDetail({
+  sessionId,
+  span,
+  revisionKey,
+}: {
+  sessionId: string
+  span: TraceSpan
+  revisionKey?: string
+}) {
   const t = useTranslation()
   const call = span.call
   const callId = call?.id ?? null
@@ -29,12 +37,13 @@ export function LlmCallDetail({ sessionId, span }: { sessionId: string; span: Tr
 
   useEffect(() => {
     if (!callId || !isTerminal) return
-    const key = `${sessionId}:${callId}`
+    const key = `${sessionId}:${callId}:${revisionKey ?? 'legacy'}`
     // Ref guard keeps React StrictMode's double effect run from issuing a
     // second request; staleness is checked against the ref at resolve time.
     if (fetchKeyRef.current === key) return
     fetchKeyRef.current = key
-    void fetchTraceCallDetail(sessionId, callId).then((full) => {
+    setDetail(null)
+    void fetchTraceCallDetail(sessionId, callId, revisionKey).then((full) => {
       if (fetchKeyRef.current !== key) return
       if (full) {
         setDetail(full)
@@ -43,7 +52,7 @@ export function LlmCallDetail({ sessionId, span }: { sessionId: string; span: Tr
         setFetchFailed(true)
       }
     })
-  }, [sessionId, callId, isTerminal])
+  }, [sessionId, callId, isTerminal, revisionKey])
 
   const effectiveCall = detail && detail.id === callId ? detail : call
   const parsed = useMemo(() => {

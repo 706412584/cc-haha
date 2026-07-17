@@ -71,6 +71,13 @@ describe('translateCliMessage usage mapping', () => {
     }])
   })
 
+  it('silently ignores CLI keep-alive frames', () => {
+    const log = spyOn(console, 'log')
+
+    expect(translateCliMessage({ type: 'keep_alive' }, 'session-1')).toEqual([])
+    expect(log).not.toHaveBeenCalled()
+  })
+
   it('maps SDK permission cancellation and response events to resolution messages', () => {
     expect(translateCliMessage({
       type: 'control_cancel_request',

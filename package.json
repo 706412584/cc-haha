@@ -10,6 +10,8 @@
   "scripts": {
     "claude-haha": "bun run ./bin/claude-haha",
     "start": "bun run ./bin/claude-haha",
+    "perf:local-index": "bun run scripts/perf/local-index-benchmark.ts",
+    "perf:local-index:10k": "bun run scripts/perf/local-index-benchmark.ts --sessions 10000 --runs 20",
     "check:pr": "bun run scripts/pr/check-pr.ts",
     "check:impact": "bun run scripts/pr/impact-report.ts",
     "check:policy": "bun test ./scripts/pr/bun-test-filter.test.ts ./scripts/pr/change-policy.test.ts ./scripts/pr/changed-files.test.ts ./scripts/pr/pr-triage-workflow.test.ts ./scripts/pr/pr-quality-workflow.test.ts ./scripts/pr/release-workflow.test.ts ./scripts/pr/quality-contract.test.ts ./scripts/pr/test-environment.test.ts ./scripts/release-update-metadata.test.ts ./scripts/git-hooks/install.test.ts ./scripts/quality-gate/quarantine.test.ts ./scripts/quality-gate/coverage.test.ts ./scripts/quality-gate/provider-smoke/execute.test.ts ./scripts/quality-gate/desktop-smoke/execute.test.ts ./scripts/quality-gate/providerTargets.test.ts ./scripts/quality-gate/runner.test.ts",
@@ -19,7 +21,7 @@
     "check:desktop": "cd desktop && bun run lint && bun run test -- --run && bun run build",
     "check:electron": "cd desktop && bun run check:electron",
     "check:adapters": "cd adapters && bun test",
-    "check:native": "cd desktop && bun run build:sidecars && bun run check:electron && CSC_IDENTITY_AUTO_DISCOVERY=false bun run electron:package:dir && cd .. && bun run test:package-smoke:current",
+    "check:native": "cd desktop && bun run build:sidecars && bun run test:compiled-sidecar-smoke && bun run check:electron && CSC_IDENTITY_AUTO_DISCOVERY=false bun run electron:package:dir && cd .. && bun run test:package-smoke:current",
     "check:docs": "npm ci --loglevel=error && npm run --loglevel=error docs:build",
     "check:persistence-upgrade": "bun run scripts/quality-gate/persistence-upgrade.ts",
     "check:quarantine": "bun run scripts/quality-gate/quarantine.ts --enforce-review-date",

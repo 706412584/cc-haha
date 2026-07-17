@@ -61,6 +61,13 @@ import { ndjsonSafeStringify } from './ndjsonSafeStringify.js'
  */
 export const SANDBOX_NETWORK_ACCESS_TOOL_NAME = 'SandboxNetworkAccess'
 
+const NETWORK_RUNTIME_ENV_KEYS = new Set([
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'ALL_PROXY',
+  'NO_PROXY',
+])
+
 function serializeDecisionReason(
   reason: PermissionDecisionReason | undefined,
 ): string | undefined {
@@ -353,6 +360,13 @@ export class StructuredIO {
         const keys = Object.keys(message.variables)
         for (const [key, value] of Object.entries(message.variables)) {
           process.env[key] = value
+        }
+        if (keys.some(key => NETWORK_RUNTIME_ENV_KEYS.has(key.toUpperCase()))) {
+          const { clearProxyCache, configureGlobalAgents } = await import(
+            '../utils/proxy.js'
+          )
+          clearProxyCache()
+          configureGlobalAgents()
         }
         if (Object.hasOwn(message.variables, 'CLAUDE_CODE_OAUTH_TOKEN')) {
           const { clearOAuthTokenCache } = await import('../utils/auth.js')

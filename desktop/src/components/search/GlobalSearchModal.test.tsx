@@ -98,7 +98,14 @@ describe('GlobalSearchModal', () => {
       })
 
       expect(mockSearch).toHaveBeenCalledTimes(1)
-      expect(mockSearch).toHaveBeenCalledWith('abc', expect.objectContaining({ limit: expect.any(Number) }))
+      expect(mockSearch).toHaveBeenCalledWith(
+        'abc',
+        expect.objectContaining({
+          limit: expect.any(Number),
+          matchesPerSession: 3,
+        }),
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      )
     } finally {
       vi.useRealTimers()
     }
@@ -223,5 +230,66 @@ describe('GlobalSearchModal', () => {
 
     expect(screen.queryByText('Session One')).toBeNull()
     expect(screen.getByText('Session Two')).toBeInTheDocument()
+  })
+
+  it('aborts the previous request as soon as the visible query changes', async () => {
+    let firstSignal: AbortSignal | undefined
+    mockSearch.mockImplementationOnce((_query, _options, requestOptions) => {
+      firstSignal = requestOptions?.signal
+      return new Promise(() => {})
+    })
+
+    render(<GlobalSearchModal open onClose={() => {}} />)
+    const input = screen.getByPlaceholderText(/search all chats/i)
+    fireEvent.change(input, { target: { value: 'first' } })
+    await waitFor(() => expect(mockSearch).toHaveBeenCalledTimes(1))
+    expect(firstSignal?.aborted).toBe(false)
+
+    fireEvent.change(input, { target: { value: 'second' } })
+    expect(firstSignal?.aborted).toBe(true)
+    expect(screen.queryByText('Search failed')).toBeNull()
+  })
+
+  it('aborts an in-flight request when the modal closes', async () => {
+    let signal: AbortSignal | undefined
+    mockSearch.mockImplementationOnce((_query, _options, requestOptions) => {
+      signal = requestOptions?.signal
+      return new Promise(() => {})
+    })
+
+    const { rerender } = render(<GlobalSearchModal open onClose={() => {}} />)
+    fireEvent.change(screen.getByPlaceholderText(/search all chats/i), {
+      target: { value: 'running' },
+    })
+    await waitFor(() => expect(mockSearch).toHaveBeenCalledTimes(1))
+
+    rerender(<GlobalSearchModal open={false} onClose={() => {}} />)
+    expect(signal?.aborted).toBe(true)
+  })
+
+  it('waits for IME composition to finish before starting a search', async () => {
+    vi.useFakeTimers()
+    try {
+      render(<GlobalSearchModal open onClose={() => {}} />)
+      const input = screen.getByPlaceholderText(/search all chats/i)
+      fireEvent.compositionStart(input)
+      fireEvent.change(input, { target: { value: '搜索' } })
+
+      await act(async () => {
+        vi.advanceTimersByTime(300)
+        await Promise.resolve()
+      })
+      expect(mockSearch).not.toHaveBeenCalled()
+
+      fireEvent.compositionEnd(input)
+      await act(async () => {
+        vi.advanceTimersByTime(300)
+        await Promise.resolve()
+      })
+      expect(mockSearch).toHaveBeenCalledTimes(1)
+      expect(mockSearch.mock.calls[0]?.[0]).toBe('搜索')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

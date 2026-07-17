@@ -98,6 +98,7 @@ describe('useSessionActivityModel', () => {
 
     expect(result.current.mainAgent).toEqual({
       status: 'tool_executing',
+      operationalStatus: 'foreground',
       activeToolName: 'Agent',
       statusVerb: 'Delegating',
     })
@@ -113,6 +114,96 @@ describe('useSessionActivityModel', () => {
       label: 'Explore renderer lifecycle',
       status: 'running',
     })
+  })
+
+  it('derives truthful Main status and projects only the target session queue', () => {
+    const sessionId = 'session-1'
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: makeSessionState({
+          chatState: 'idle',
+          backgroundAgentTasks: {
+            'agent-tool': {
+              taskId: 'agent-task',
+              toolUseId: 'agent-tool',
+              status: 'running',
+              description: 'Review implementation',
+              taskType: 'local_agent',
+              startedAt: 1000,
+              updatedAt: 2000,
+            },
+          },
+          messageQueue: [{
+            id: 'queue-1',
+            content: 'Process task\nTask IDs: 1',
+            displayContent: '处理任务 1',
+            createdAt: 3000,
+          }],
+        }),
+        other: makeSessionState({
+          messageQueue: [{ id: 'wrong', content: 'Wrong queue', createdAt: 1 }],
+        }),
+      },
+    })
+    useCLITaskStore.setState({
+      sessionId,
+      tasks: [{
+        id: '1',
+        subject: 'Ready task',
+        description: '',
+        status: 'pending',
+        blocks: [],
+        blockedBy: [],
+        taskListId: sessionId,
+      }],
+    })
+
+    const { result } = renderHook(() => useSessionActivityModel(sessionId))
+
+    expect(result.current.mainAgent.operationalStatus).toBe('supervising')
+    expect(result.current.model.sections.queue.rows).toHaveLength(1)
+    expect(result.current.model.sections.queue.rows[0]?.queuedMessageId).toBe('queue-1')
+  })
+
+  it.each([
+    {
+      label: 'foreground work',
+      session: { chatState: 'thinking' as const },
+      tasks: [],
+      expected: 'foreground',
+    },
+    {
+      label: 'background command',
+      session: {
+        chatState: 'idle' as const,
+        backgroundAgentTasks: {
+          command: {
+            taskId: 'command', status: 'running' as const, description: 'Build', taskType: 'shell', startedAt: 1, updatedAt: 2,
+          },
+        },
+      },
+      tasks: [],
+      expected: 'background',
+    },
+    {
+      label: 'ready task',
+      session: { chatState: 'idle' as const },
+      tasks: [{ id: 'ready', subject: 'Ready', description: '', status: 'pending' as const, blocks: [], blockedBy: [], taskListId: 'session-1' }],
+      expected: 'ready',
+    },
+    {
+      label: 'blocked tasks',
+      session: { chatState: 'idle' as const },
+      tasks: [{ id: 'blocked', subject: 'Blocked', description: '', status: 'pending' as const, blocks: [], blockedBy: ['dependency'], taskListId: 'session-1' }],
+      expected: 'blocked',
+    },
+  ])('derives $label Main status', ({ session, tasks, expected }) => {
+    useChatStore.setState({ sessions: { 'session-1': makeSessionState(session) } })
+    useCLITaskStore.setState({ sessionId: 'session-1', tasks })
+
+    const { result } = renderHook(() => useSessionActivityModel('session-1'))
+
+    expect(result.current.mainAgent.operationalStatus).toBe(expected)
   })
 
   it('keeps a stable empty snapshot while activity derivation is disabled', () => {

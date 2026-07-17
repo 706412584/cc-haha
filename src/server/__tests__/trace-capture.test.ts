@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
+import { Database } from 'bun:sqlite'
 import { createHash } from 'crypto'
+import { promises as mutableFs } from 'fs'
 import * as fs from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
@@ -9,15 +11,21 @@ import {
   clearTraceCaptureStateForTests,
   createTraceCallId,
   createTraceBodySnapshot,
+  getTraceCaptureDiagnosticsForTests,
   readResponseTraceSnapshot,
+  setTraceAppendBeforeWriteHookForTests,
+  setTraceFullSnapshotAfterReadHookForTests,
+  setTraceProjectionAfterIndexHookForTests,
   traceCaptureService,
   updateTraceCaptureSettings,
 } from '../services/traceCaptureService.js'
 import { sessionService } from '../services/sessionService.js'
 import { createDumpPromptsFetch } from '../../services/api/dumpPrompts.js'
+import { getTraceIndexDatabasePath } from '../services/localIndex/traceDatabase.js'
 
 let tmpDir: string
 let originalConfigDir: string | undefined
+let originalLocalIndexMode: string | undefined
 
 async function waitForTrace(
   sessionId: string,
@@ -34,7 +42,9 @@ async function waitForTrace(
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'trace-capture-'))
   originalConfigDir = process.env.CLAUDE_CONFIG_DIR
+  originalLocalIndexMode = process.env.CC_HAHA_LOCAL_INDEX
   process.env.CLAUDE_CONFIG_DIR = tmpDir
+  process.env.CC_HAHA_LOCAL_INDEX = 'on'
   await clearTraceCaptureStateForTests()
 })
 
@@ -45,10 +55,241 @@ afterEach(async () => {
   } else {
     process.env.CLAUDE_CONFIG_DIR = originalConfigDir
   }
+  if (originalLocalIndexMode === undefined) {
+    delete process.env.CC_HAHA_LOCAL_INDEX
+  } else {
+    process.env.CC_HAHA_LOCAL_INDEX = originalLocalIndexMode
+  }
   await fs.rm(tmpDir, { recursive: true, force: true })
 })
 
 describe('trace capture service', () => {
+  test('keeps a queued trace append and projection in the scope captured by its caller', async () => {
+    const root = tmpDir
+    const scopeA = path.join(root, 'scope-a')
+    const scopeB = path.join(root, 'scope-b')
+    process.env.CLAUDE_CONFIG_DIR = scopeA
+
+    let releaseWrite: () => void = () => {}
+    const blockedWrite = new Promise<void>(resolve => {
+      releaseWrite = resolve
+    })
+    let signalQueued: () => void = () => {}
+    const queued = new Promise<void>(resolve => {
+      signalQueued = resolve
+    })
+    setTraceAppendBeforeWriteHookForTests(async () => {
+      setTraceAppendBeforeWriteHookForTests(null)
+      signalQueued()
+      await blockedWrite
+    })
+
+    const pending = traceCaptureService.recordCall({
+      id: 'scope-a-call',
+      sessionId: 'scope-frozen',
+      source: 'proxy',
+      startedAt: '2026-07-15T00:00:00.000Z',
+      completedAt: '2026-07-15T00:00:00.001Z',
+      request: { body: { marker: 'scope-a-private-body' } },
+      response: { status: 200, body: { ok: true } },
+    })
+    await queued
+    process.env.CLAUDE_CONFIG_DIR = scopeB
+    releaseWrite()
+    await pending
+
+    const canonicalA = path.join(
+      scopeA,
+      'cc-haha',
+      'traces',
+      'scope-frozen.jsonl',
+    )
+    const canonicalB = path.join(
+      scopeB,
+      'cc-haha',
+      'traces',
+      'scope-frozen.jsonl',
+    )
+    expect(await fs.readFile(canonicalA, 'utf8')).toContain('scope-a-private-body')
+    await expect(fs.stat(canonicalB)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect((await fs.lstat(path.join(
+      scopeA,
+      'cc-haha',
+      'db',
+      'trace-index-v1.sqlite',
+    ))).isFile()).toBe(true)
+    await expect(fs.stat(path.join(
+      scopeB,
+      'cc-haha',
+      'db',
+      'trace-index-v1.sqlite',
+    ))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('keeps interleaved scope projections on independent live database handles', async () => {
+    const root = tmpDir
+    const scopeA = path.join(root, 'scope-a')
+    const scopeB = path.join(root, 'scope-b')
+    process.env.CLAUDE_CONFIG_DIR = scopeA
+    let releaseA: () => void = () => {}
+    const blockedA = new Promise<void>(resolve => {
+      releaseA = resolve
+    })
+    let signalA: () => void = () => {}
+    const aHasIndex = new Promise<void>(resolve => {
+      signalA = resolve
+    })
+    let blocked = false
+    setTraceProjectionAfterIndexHookForTests(async target => {
+      if (target.scope !== scopeA || blocked) return
+      blocked = true
+      signalA()
+      await blockedA
+    })
+
+    const record = (id: string) => traceCaptureService.recordCall({
+      id,
+      sessionId: id,
+      source: 'proxy',
+      startedAt: '2026-07-15T00:00:00.000Z',
+      completedAt: '2026-07-15T00:00:00.001Z',
+      request: { body: { marker: id } },
+      response: { status: 200, body: { ok: true } },
+    })
+    const pendingA = record('scope-a-session')
+    await aHasIndex
+    process.env.CLAUDE_CONFIG_DIR = scopeB
+    await record('scope-b-session')
+    releaseA()
+    await pendingA
+    setTraceProjectionAfterIndexHookForTests(null)
+
+    for (const [scope, sessionId] of [
+      [scopeA, 'scope-a-session'],
+      [scopeB, 'scope-b-session'],
+    ] as const) {
+      const database = new Database(path.join(
+        scope,
+        'cc-haha',
+        'db',
+        'trace-index-v1.sqlite',
+      ), { readonly: true })
+      expect(database.query<{ state: string; last_error_code: string | null }, [string]>(`
+        SELECT state, last_error_code FROM trace_sources WHERE session_id = ?
+      `).get(sessionId)).toEqual({ state: 'ready', last_error_code: null })
+      database.close(true)
+    }
+  })
+
+  test('does not degrade scope B when a delayed scope A projection fails', async () => {
+    const root = tmpDir
+    const scopeA = path.join(root, 'scope-a')
+    const scopeB = path.join(root, 'scope-b')
+    process.env.CLAUDE_CONFIG_DIR = scopeA
+    let releaseA: () => void = () => {}
+    const blockedA = new Promise<void>(resolve => {
+      releaseA = resolve
+    })
+    let signalA: () => void = () => {}
+    const aHasIndex = new Promise<void>(resolve => {
+      signalA = resolve
+    })
+    let blocked = false
+    setTraceProjectionAfterIndexHookForTests(async target => {
+      if (target.scope !== scopeA || blocked) return
+      blocked = true
+      signalA()
+      await blockedA
+    })
+    const record = (id: string) => traceCaptureService.recordCall({
+      id,
+      sessionId: id,
+      source: 'proxy',
+      startedAt: '2026-07-15T00:00:00.000Z',
+      completedAt: '2026-07-15T00:00:00.001Z',
+      request: { body: { marker: id } },
+      response: { status: 200, body: { ok: true } },
+    })
+
+    const pendingA = record('failing-a-session')
+    await aHasIndex
+    process.env.CLAUDE_CONFIG_DIR = scopeB
+    await record('healthy-b-session')
+    await fs.rm(path.join(
+      scopeA,
+      'cc-haha',
+      'traces',
+      'failing-a-session.jsonl',
+    ))
+    releaseA()
+    await pendingA
+    setTraceProjectionAfterIndexHookForTests(null)
+
+    const databaseB = new Database(path.join(
+      scopeB,
+      'cc-haha',
+      'db',
+      'trace-index-v1.sqlite',
+    ), { readonly: true })
+    expect(databaseB.query<{
+      state: string
+      last_error_code: string | null
+    }, [string]>(`
+      SELECT state, last_error_code FROM trace_sources WHERE session_id = ?
+    `).get('healthy-b-session')).toEqual({
+      state: 'ready',
+      last_error_code: null,
+    })
+    databaseB.close(true)
+  })
+
+  test('keeps a trace-list request on one captured scope across an environment switch', async () => {
+    const root = tmpDir
+    const scopeA = path.join(root, 'scope-a')
+    const scopeB = path.join(root, 'scope-b')
+    const record = (model: string) => traceCaptureService.recordCall({
+      id: `${model}-call`,
+      sessionId: 'request-scope-session',
+      source: 'proxy',
+      model,
+      startedAt: '2026-07-15T00:00:00.000Z',
+      completedAt: '2026-07-15T00:00:00.001Z',
+      request: { body: { marker: model } },
+      response: { status: 200, body: { ok: true } },
+    })
+    process.env.CLAUDE_CONFIG_DIR = scopeA
+    await record('scope-a-model')
+    process.env.CLAUDE_CONFIG_DIR = scopeB
+    await record('scope-b-model')
+    process.env.CLAUDE_CONFIG_DIR = scopeA
+    process.env.CC_HAHA_LOCAL_INDEX = 'off'
+
+    const traceDirA = path.join(scopeA, 'cc-haha', 'traces')
+    const originalReaddir = mutableFs.readdir.bind(mutableFs)
+    let switched = false
+    const readdirSpy = spyOn(mutableFs, 'readdir').mockImplementation(
+      async (...args) => {
+        const result = await originalReaddir(...args)
+        if (!switched && args[0] === traceDirA) {
+          switched = true
+          process.env.CLAUDE_CONFIG_DIR = scopeB
+        }
+        return result
+      },
+    )
+    try {
+      const list = await traceCaptureService.listSessionTraces()
+      expect(switched).toBe(true)
+      expect(list.storageDir).toBe(traceDirA)
+      expect(list.settings.storageDir).toBe(traceDirA)
+      expect(list.traces[0]?.summary.models).toEqual([
+        { model: 'scope-a-model', calls: 1 },
+      ])
+    } finally {
+      readdirSpy.mockRestore()
+    }
+  })
+
   test('stores session scoped API calls with redacted headers and capped bodies', async () => {
     const body = {
       model: 'deepseek-v4-pro',
@@ -781,11 +1022,14 @@ describe('trace capture service', () => {
 
       const trace = await waitForTrace(
         'session-direct-abort-bare',
-        (snapshot) => snapshot.calls[0]?.status === 'error',
+        (snapshot) =>
+          snapshot.calls[0]?.status === 'error' &&
+          snapshot.events.at(-1)?.phase === 'api_call_aborted',
       )
       expect(trace.calls[0].status).toBe('error')
       expect(trace.calls[0].error?.name).toBe('AbortError')
       expect(trace.calls[0].metadata).toMatchObject({ phase: 'api_call_aborted', aborted: true })
+      expect(trace.events.at(-1)?.phase).toBe('api_call_aborted')
     } finally {
       globalThis.fetch = originalFetch
       if (originalTraceEnv === undefined) delete process.env.CC_HAHA_TRACE_API_CALLS
@@ -1183,6 +1427,44 @@ describe('session trace API', () => {
     }
   })
 
+  test('returns an unchanged revision cursor without rereading the trace body', async () => {
+    await traceCaptureService.recordCall({
+      sessionId: 'session-revision-probe',
+      source: 'proxy',
+      startedAt: '2026-06-09T08:00:00.000Z',
+      completedAt: '2026-06-09T08:00:00.010Z',
+      request: { body: { prompt: 'hello' } },
+      response: { status: 200, body: { ok: true } },
+    })
+
+    const firstReq = new Request('http://localhost:3456/api/traces/session-revision-probe/revision')
+    const firstRes = await handleApiRequest(firstReq, new URL(firstReq.url))
+    const first = await firstRes.json() as {
+      revision: number
+      revisionToken: string
+      changed: boolean
+    }
+    expect(firstRes.status).toBe(200)
+    expect(first.changed).toBe(true)
+
+    await clearTraceCaptureStateForTests()
+    const secondReq = new Request(
+      `http://localhost:3456/api/traces/session-revision-probe/revision?sinceRevision=${first.revision}`,
+    )
+    const secondRes = await handleApiRequest(secondReq, new URL(secondReq.url))
+    const second = await secondRes.json() as { revision: number; changed: boolean; reset: boolean }
+
+    expect(secondRes.status).toBe(200)
+    expect(second).toEqual({
+      sessionId: 'session-revision-probe',
+      revision: first.revision,
+      revisionToken: first.revisionToken,
+      changed: false,
+      reset: false,
+    })
+    expect(getTraceCaptureDiagnosticsForTests().fullJsonlBytesRead).toBe(0)
+  })
+
   test('deletes a trace session file and invalidates cached reads', async () => {
     await traceCaptureService.recordCall({
       sessionId: 'session-delete-trace',
@@ -1335,7 +1617,7 @@ describe('trace read cache', () => {
     })}\n`
   }
 
-  test('serves cached entries while file mtime and size are unchanged', async () => {
+  test('invalidates cached entries after a same-size rewrite with restored mtime', async () => {
     const traceDir = path.join(tmpDir, 'cc-haha', 'traces')
     const filePath = path.join(traceDir, 'session-cache-hit.jsonl')
     await fs.mkdir(traceDir, { recursive: true })
@@ -1351,12 +1633,12 @@ describe('trace read cache', () => {
     const first = await traceCaptureService.getSessionTrace('session-cache-hit')
     expect(first.calls.map((call) => call.id)).toEqual(['call-aaa'])
 
-    // Same size + restored mtime: the cached parse result must be reused.
+    // Same size + restored mtime still represents a different source snapshot.
     await fs.writeFile(filePath, lineB)
     await fs.utimes(filePath, initialTime, initialTime)
 
     const second = await traceCaptureService.getSessionTrace('session-cache-hit')
-    expect(second.calls.map((call) => call.id)).toEqual(['call-aaa'])
+    expect(second.calls.map((call) => call.id)).toEqual(['call-bbb'])
 
     const laterTime = new Date('2026-06-09T08:00:05.000Z')
     await fs.utimes(filePath, laterTime, laterTime)
@@ -1425,5 +1707,858 @@ describe('trace read cache', () => {
 
     const second = await traceCaptureService.getSessionTrace('session-cache-append')
     expect(second.calls.map((call) => call.id)).toEqual(['call-cache-1', 'call-cache-2'])
+  })
+
+  test('serves a warm trace list from the persisted projection without reopening JSONL', async () => {
+    await traceCaptureService.recordCall({
+      id: 'call-projection-warm',
+      sessionId: 'session-projection-warm',
+      source: 'proxy',
+      model: 'gpt-5.5',
+      startedAt: '2026-06-09T08:00:00.000Z',
+      completedAt: '2026-06-09T08:00:00.010Z',
+      durationMs: 10,
+      request: { body: { model: 'gpt-5.5' } },
+      response: { status: 200, body: { usage: { input_tokens: 3, output_tokens: 2 } } },
+    })
+    await traceCaptureService.listSessionTraces()
+    await clearTraceCaptureStateForTests()
+
+    const readFileSpy = spyOn(fs, 'readFile')
+    try {
+      const list = await traceCaptureService.listSessionTraces()
+
+      expect(list.traces).toHaveLength(1)
+      expect(list.traces[0].summary).toMatchObject({
+        apiCalls: 1,
+        totalInputTokens: 3,
+        totalOutputTokens: 2,
+      })
+      expect(getTraceCaptureDiagnosticsForTests().fullJsonlBytesRead).toBe(0)
+      expect(readFileSpy).not.toHaveBeenCalled()
+    } finally {
+      readFileSpy.mockRestore()
+    }
+  })
+
+  test('projects an in-process append without rereading the existing JSONL prefix', async () => {
+    await traceCaptureService.recordCall({
+      id: 'call-projection-1',
+      sessionId: 'session-projection-append',
+      source: 'proxy',
+      startedAt: '2026-06-09T08:00:00.000Z',
+      completedAt: '2026-06-09T08:00:00.010Z',
+      durationMs: 10,
+      request: { body: { padding: 'x'.repeat(64_000) } },
+      response: { status: 200, body: { ok: true } },
+    })
+    await traceCaptureService.listSessionTraces()
+    await clearTraceCaptureStateForTests()
+
+    const readFileSpy = spyOn(fs, 'readFile')
+    try {
+      await traceCaptureService.recordCall({
+        id: 'call-projection-2',
+        sessionId: 'session-projection-append',
+        source: 'proxy',
+        startedAt: '2026-06-09T08:00:01.000Z',
+        completedAt: '2026-06-09T08:00:01.010Z',
+        durationMs: 10,
+        request: { body: { small: true } },
+        response: { status: 200, body: { ok: true } },
+      })
+      const list = await traceCaptureService.listSessionTraces()
+
+      expect(list.traces[0].summary.apiCalls).toBe(2)
+      expect(getTraceCaptureDiagnosticsForTests()).toMatchObject({
+        fullJsonlBytesRead: 0,
+        appendedEntriesProjected: 1,
+      })
+      expect(readFileSpy).not.toHaveBeenCalled()
+    } finally {
+      readFileSpy.mockRestore()
+    }
+  })
+
+  test('projects an external append from the stored boundary without rereading the prefix', async () => {
+    const traceDir = path.join(tmpDir, 'cc-haha', 'traces')
+    const filePath = path.join(traceDir, 'session-projection-external-append.jsonl')
+    await fs.mkdir(traceDir, { recursive: true })
+    const prefix = buildTraceCallLine(
+      'call-external-a',
+      'session-projection-external-append',
+      'x'.repeat(180_000),
+    )
+    const appended = buildTraceCallLine(
+      'call-external-b',
+      'session-projection-external-append',
+      'small',
+    )
+    await fs.writeFile(filePath, prefix)
+    expect((await traceCaptureService.listSessionTraces()).traces[0].summary.apiCalls).toBe(1)
+    await clearTraceCaptureStateForTests()
+
+    await fs.appendFile(filePath, appended)
+    const revision = await traceCaptureService.getSessionTraceRevision(
+      'session-projection-external-append',
+    )
+    const diagnostics = getTraceCaptureDiagnosticsForTests() as Record<string, number>
+
+    expect(revision.changed).toBe(true)
+    expect(diagnostics.fullJsonlBytesRead).toBe(0)
+    expect(diagnostics.incrementalJsonlBytesRead).toBe(Buffer.byteLength(appended))
+    expect(diagnostics.fingerprintBytesRead).toBeLessThanOrEqual(7 * 64 * 1024)
+    expect((await traceCaptureService.listSessionTraces()).traces[0].summary.apiCalls).toBe(2)
+    expect((await traceCaptureService.getSessionTrace('session-projection-external-append')).calls)
+      .toHaveLength(2)
+    expect(await traceCaptureService.getSessionTraceRevision(
+      'session-projection-external-append',
+      revision.revision,
+    )).toMatchObject({
+      revision: revision.revision,
+      changed: false,
+      reset: false,
+    })
+  })
+
+  test('does not commit an append parsed from a different source snapshot than its fingerprint', async () => {
+    const traceDir = path.join(tmpDir, 'cc-haha', 'traces')
+    const filePath = path.join(traceDir, 'session-projection-append-race.jsonl')
+    await fs.mkdir(traceDir, { recursive: true })
+    const prefix = buildTraceCallLine(
+      'call-race-prefix',
+      'session-projection-append-race',
+    )
+    const oldAppend = JSON.parse(buildTraceCallLine(
+      'call-race-append',
+      'session-projection-append-race',
+    ))
+    oldAppend.record.model = 'model-old'
+    const newAppend = structuredClone(oldAppend)
+    newAppend.record.model = 'model-new'
+    const oldLine = `${JSON.stringify(oldAppend)}\n`
+    const newLine = `${JSON.stringify(newAppend)}\n`
+    expect(Buffer.byteLength(oldLine)).toBe(Buffer.byteLength(newLine))
+
+    await fs.writeFile(filePath, prefix)
+    expect((await traceCaptureService.listSessionTraces()).traces[0].summary.apiCalls).toBe(1)
+    await clearTraceCaptureStateForTests()
+
+    await fs.appendFile(filePath, oldLine)
+    const fixedTime = new Date('2026-06-09T08:00:00.000Z')
+    await fs.utimes(filePath, fixedTime, fixedTime)
+    const target = await fs.stat(filePath)
+    const prefixBytes = Buffer.byteLength(prefix)
+    const originalOpen = mutableFs.open.bind(mutableFs)
+    let rewroteAfterRangeRead = false
+    const openSpy = spyOn(mutableFs, 'open').mockImplementation(async (...args) => {
+      const handle = await originalOpen(...args)
+      let readAppendRange = false
+      return new Proxy(handle, {
+        get(targetHandle, property) {
+          if (property === 'read') {
+            return async (
+              buffer: Uint8Array,
+              offset: number,
+              length: number,
+              position: number,
+            ) => {
+              if (position === prefixBytes && length === Buffer.byteLength(oldLine)) {
+                readAppendRange = true
+              }
+              return targetHandle.read(buffer, offset, length, position)
+            }
+          }
+          if (property === 'close') {
+            return async () => {
+              await targetHandle.close()
+              if (readAppendRange && !rewroteAfterRangeRead) {
+                rewroteAfterRangeRead = true
+                await fs.writeFile(filePath, `${prefix}${newLine}`)
+                await fs.utimes(filePath, target.atime, target.mtime)
+              }
+            }
+          }
+          const value = Reflect.get(targetHandle, property, targetHandle)
+          return typeof value === 'function' ? value.bind(targetHandle) : value
+        },
+      })
+    })
+
+    try {
+      await traceCaptureService.getSessionTraceRevision('session-projection-append-race')
+      const list = await traceCaptureService.listSessionTraces()
+
+      expect(rewroteAfterRangeRead).toBe(true)
+      expect(list.traces[0].summary.models).toEqual([{ model: 'model-new', calls: 1 }])
+    } finally {
+      openSpy.mockRestore()
+    }
+  })
+
+  test('invalidates a projection after a same-size rewrite with restored mtime', async () => {
+    const traceDir = path.join(tmpDir, 'cc-haha', 'traces')
+    const filePath = path.join(traceDir, 'session-projection-same-size.jsonl')
+    await fs.mkdir(traceDir, { recursive: true })
+    const lineA = buildTraceCallLine('call-aaa', 'session-projection-same-size')
+    const lineB = buildTraceCallLine('call-bbb', 'session-projection-same-size')
+    const fixedTime = new Date('2026-06-09T08:00:00.000Z')
+    expect(Buffer.byteLength(lineA)).toBe(Buffer.byteLength(lineB))
+
+    await fs.writeFile(filePath, lineA)
+    await fs.utimes(filePath, fixedTime, fixedTime)
+    const initial = await traceCaptureService.getSessionTraceRevision('session-projection-same-size')
+    await clearTraceCaptureStateForTests()
+
+    await fs.writeFile(filePath, lineB)
+    await fs.utimes(filePath, fixedTime, fixedTime)
+    const rewritten = await traceCaptureService.getSessionTraceRevision(
+      'session-projection-same-size',
+      initial.revision,
+    )
+
+    expect(rewritten.changed).toBe(true)
+    expect(rewritten.reset).toBe(true)
+    expect(rewritten.revision).toBeGreaterThan(initial.revision)
+    expect((await traceCaptureService.getSessionTrace('session-projection-same-size')).calls[0].id)
+      .toBe('call-bbb')
+  })
+
+  test('invalidates a large projection after an unsampled middle rewrite with restored mtime', async () => {
+    const sessionId = 'session-projection-middle-rewrite'
+    const traceDir = path.join(tmpDir, 'cc-haha', 'traces')
+    const filePath = path.join(traceDir, `${sessionId}.jsonl`)
+    await fs.mkdir(traceDir, { recursive: true })
+    const paddedLine = (id: string, model: string, padding: number): string => {
+      const entry = JSON.parse(buildTraceCallLine(id, sessionId)) as {
+        record: Record<string, unknown>
+      }
+      entry.record.model = model
+      entry.record.metadata = { padding: 'x'.repeat(padding) }
+      return `${JSON.stringify(entry)}\n`
+    }
+    const original = [
+      paddedLine('call-first', 'model-first', 90_000),
+      paddedLine('call-middle', 'model-aaa', 1_000),
+      paddedLine('call-last', 'model-last-', 90_000),
+    ].join('')
+    const rewritten = original.replace('model-aaa', 'model-bbb')
+    const fixedTime = new Date('2026-06-09T08:00:00.000Z')
+    expect(Buffer.byteLength(original)).toBe(Buffer.byteLength(rewritten))
+    expect(Buffer.byteLength(original)).toBeGreaterThan(2 * 64 * 1024)
+
+    await fs.writeFile(filePath, original)
+    await fs.utimes(filePath, fixedTime, fixedTime)
+    const initial = (await traceCaptureService.listSessionTraces({
+      sessionIds: [sessionId],
+    })).traces[0]!.summary.models
+    await new Promise(resolve => setTimeout(resolve, 5))
+    await fs.writeFile(filePath, rewritten)
+    await fs.utimes(filePath, fixedTime, fixedTime)
+
+    const projected = (await traceCaptureService.listSessionTraces({
+      sessionIds: [sessionId],
+    })).traces[0]!.summary.models
+    process.env.CC_HAHA_LOCAL_INDEX = 'off'
+    const canonical = (await traceCaptureService.listSessionTraces({
+      sessionIds: [sessionId],
+    })).traces[0]!.summary.models
+
+    expect(initial).toContainEqual({ model: 'model-aaa', calls: 1 })
+    expect(projected).toEqual(canonical)
+    expect(projected).toContainEqual({ model: 'model-bbb', calls: 1 })
+  })
+
+  test('does not commit old full-trace bytes with a newer middle-rewrite fingerprint', async () => {
+    const sessionId = 'session-projection-full-read-race'
+    const traceDir = path.join(tmpDir, 'cc-haha', 'traces')
+    const filePath = path.join(traceDir, `${sessionId}.jsonl`)
+    await fs.mkdir(traceDir, { recursive: true })
+    const paddedLine = (id: string, model: string, padding: number): string => {
+      const entry = JSON.parse(buildTraceCallLine(id, sessionId)) as {
+        record: Record<string, unknown>
+      }
+      entry.record.model = model
+      entry.record.metadata = { padding: 'x'.repeat(padding) }
+      return `${JSON.stringify(entry)}\n`
+    }
+    const original = [
+      paddedLine('call-first', 'model-first', 90_000),
+      paddedLine('call-middle', 'model-aaa', 1_000),
+      paddedLine('call-last', 'model-last-', 90_000),
+    ].join('')
+    const rewritten = original.replace('model-aaa', 'model-bbb')
+    const fixedTime = new Date('2026-06-09T08:00:00.000Z')
+    await fs.writeFile(filePath, original)
+    await fs.utimes(filePath, fixedTime, fixedTime)
+    setTraceFullSnapshotAfterReadHookForTests(async () => {
+      setTraceFullSnapshotAfterReadHookForTests(null)
+      await new Promise(resolve => setTimeout(resolve, 5))
+      await fs.writeFile(filePath, rewritten)
+      await fs.utimes(filePath, fixedTime, fixedTime)
+    })
+
+    const projected = (await traceCaptureService.listSessionTraces({
+      sessionIds: [sessionId],
+    })).traces[0]!.summary.models
+    process.env.CC_HAHA_LOCAL_INDEX = 'off'
+    const canonical = (await traceCaptureService.listSessionTraces({
+      sessionIds: [sessionId],
+    })).traces[0]!.summary.models
+
+    expect(projected).toEqual(canonical)
+    expect(projected).toContainEqual({ model: 'model-bbb', calls: 1 })
+    expect(projected).not.toContainEqual({ model: 'model-aaa', calls: 1 })
+  })
+
+  test('rebuilds after a same-size rewrite and after a truncated source', async () => {
+    const traceDir = path.join(tmpDir, 'cc-haha', 'traces')
+    const filePath = path.join(traceDir, 'session-projection-rewrite.jsonl')
+    await fs.mkdir(traceDir, { recursive: true })
+    const lineA = buildTraceCallLine('call-aaa', 'session-projection-rewrite')
+    const lineB = buildTraceCallLine('call-bbb', 'session-projection-rewrite')
+    expect(Buffer.byteLength(lineA)).toBe(Buffer.byteLength(lineB))
+
+    await fs.writeFile(filePath, `${lineA}${buildTraceCallLine('call-ccc', 'session-projection-rewrite')}`)
+    const initial = await traceCaptureService.listSessionTraces()
+    expect(initial.traces[0].summary.apiCalls).toBe(2)
+    const initialRevision = await traceCaptureService.getSessionTraceRevision('session-projection-rewrite')
+
+    await fs.writeFile(filePath, lineB)
+    const later = new Date('2026-06-09T08:01:00.000Z')
+    await fs.utimes(filePath, later, later)
+    const rewritten = await traceCaptureService.listSessionTraces()
+    const rewrittenRevision = await traceCaptureService.getSessionTraceRevision('session-projection-rewrite')
+
+    expect(rewritten.traces[0].summary.apiCalls).toBe(1)
+    expect(rewrittenRevision.revision).toBeGreaterThan(initialRevision.revision)
+    expect((await traceCaptureService.getSessionTrace('session-projection-rewrite')).calls[0].id)
+      .toBe('call-bbb')
+  })
+
+  test('does not index a partial tail and picks up complete lines appended after it', async () => {
+    const traceDir = path.join(tmpDir, 'cc-haha', 'traces')
+    const filePath = path.join(traceDir, 'session-projection-tail.jsonl')
+    await fs.mkdir(traceDir, { recursive: true })
+    const lineA = buildTraceCallLine('call-tail-a', 'session-projection-tail')
+    const lineB = buildTraceCallLine('call-tail-b', 'session-projection-tail')
+
+    await fs.writeFile(filePath, `${lineA}{"type":"call"`)
+    expect((await traceCaptureService.listSessionTraces()).traces[0].summary.apiCalls).toBe(1)
+    await clearTraceCaptureStateForTests()
+
+    await fs.appendFile(filePath, `\n${lineB}`)
+    const afterAppend = await traceCaptureService.listSessionTraces()
+    expect(afterAppend.traces[0].summary.apiCalls).toBe(2)
+    const diagnostics = getTraceCaptureDiagnosticsForTests() as Record<string, number>
+    expect(diagnostics.fullJsonlBytesRead).toBe(0)
+    expect(diagnostics.incrementalJsonlBytesRead).toBe(
+      Buffer.byteLength('{"type":"call"') + 1 + Buffer.byteLength(lineB),
+    )
+  })
+
+  test('falls back to canonical JSONL when the independent trace database is corrupt', async () => {
+    await traceCaptureService.recordCall({
+      id: 'call-corrupt-index',
+      sessionId: 'session-corrupt-index',
+      source: 'proxy',
+      startedAt: '2026-06-09T08:00:00.000Z',
+      completedAt: '2026-06-09T08:00:00.010Z',
+      request: { body: { prompt: 'still readable' } },
+      response: { status: 200, body: { ok: true } },
+    })
+    await clearTraceCaptureStateForTests()
+    const databasePath = path.join(tmpDir, 'cc-haha', 'db', 'trace-index-v1.sqlite')
+    await fs.writeFile(databasePath, 'not a sqlite database')
+
+    const list = await traceCaptureService.listSessionTraces()
+    const trace = await traceCaptureService.getSessionTrace('session-corrupt-index')
+
+    expect(list.traces[0].summary.apiCalls).toBe(1)
+    expect(trace.calls.map(call => call.id)).toEqual(['call-corrupt-index'])
+  })
+
+  test('keeps trace SQLite completely untouched in off mode, including after a runtime rollback', async () => {
+    process.env.CC_HAHA_LOCAL_INDEX = 'off'
+    await clearTraceCaptureStateForTests()
+
+    await traceCaptureService.recordCall({
+      id: 'call-off-a',
+      sessionId: 'session-off',
+      source: 'proxy',
+      startedAt: '2026-07-15T08:00:00.000Z',
+      completedAt: '2026-07-15T08:00:00.010Z',
+      request: { body: { prompt: 'canonical only' } },
+      response: { status: 200, body: { ok: true } },
+    })
+    const databasePath = getTraceIndexDatabasePath()
+
+    expect((await traceCaptureService.listSessionTraces()).traces[0]?.summary.apiCalls).toBe(1)
+    expect((await traceCaptureService.getSessionTraceRevision('session-off')).changed).toBe(true)
+    expect((await traceCaptureService.getSessionTraceCall('session-off', 'call-off-a'))?.id)
+      .toBe('call-off-a')
+    await expect(fs.stat(databasePath)).rejects.toThrow()
+
+    process.env.CC_HAHA_LOCAL_INDEX = 'on'
+    await traceCaptureService.listSessionTraces()
+    expect((await fs.stat(databasePath)).isFile()).toBe(true)
+
+    process.env.CC_HAHA_LOCAL_INDEX = 'off'
+    await traceCaptureService.getSessionTraceRevision('session-off')
+    await fs.rm(databasePath, { force: true })
+    await traceCaptureService.recordCall({
+      id: 'call-off-b',
+      sessionId: 'session-off',
+      source: 'proxy',
+      startedAt: '2026-07-15T08:00:01.000Z',
+      completedAt: '2026-07-15T08:00:01.010Z',
+      request: { body: { prompt: 'still canonical only' } },
+      response: { status: 200, body: { ok: true } },
+    })
+    await expect(fs.stat(databasePath)).rejects.toThrow()
+  })
+
+  test('cools down after an opener busy error and retries after an explicit off-on cycle', async () => {
+    await traceCaptureService.recordCall({
+      id: 'call-busy-open',
+      sessionId: 'session-busy-open',
+      source: 'proxy',
+      startedAt: '2026-07-15T08:00:00.000Z',
+      completedAt: '2026-07-15T08:00:00.010Z',
+      request: { body: { prompt: 'canonical fallback' } },
+      response: { status: 200, body: { ok: true } },
+    })
+    await clearTraceCaptureStateForTests()
+    const database = new Database(getTraceIndexDatabasePath())
+    database.exec('PRAGMA journal_mode = DELETE')
+    database.exec('BEGIN EXCLUSIVE')
+    const startedAt = performance.now()
+    const first = await traceCaptureService.listSessionTraces({
+      sessionIds: ['session-busy-open'],
+    })
+    const elapsedMs = performance.now() - startedAt
+    database.exec('ROLLBACK')
+    database.run(
+      'UPDATE trace_sessions SET api_calls = 99 WHERE session_id = ?',
+      ['session-busy-open'],
+    )
+    database.close()
+
+    const duringCooldown = await traceCaptureService.listSessionTraces({
+      sessionIds: ['session-busy-open'],
+    })
+    expect(first.traces[0]?.summary.apiCalls).toBe(1)
+    expect(duringCooldown.traces[0]?.summary.apiCalls).toBe(1)
+    expect(elapsedMs).toBeLessThan(250)
+
+    process.env.CC_HAHA_LOCAL_INDEX = 'off'
+    await traceCaptureService.listSessionTraces({ sessionIds: ['session-busy-open'] })
+    process.env.CC_HAHA_LOCAL_INDEX = 'on'
+    const recovered = await traceCaptureService.listSessionTraces({
+      sessionIds: ['session-busy-open'],
+    })
+    expect(recovered.traces[0]?.summary.apiCalls).toBe(99)
+  })
+
+  test('cools down after an operation busy error and rebuilds after off-on recovery', async () => {
+    await traceCaptureService.recordCall({
+      id: 'call-busy-operation-a',
+      sessionId: 'session-busy-operation',
+      source: 'proxy',
+      startedAt: '2026-07-15T08:00:00.000Z',
+      completedAt: '2026-07-15T08:00:00.010Z',
+      request: { body: { prompt: 'first' } },
+      response: { status: 200, body: { ok: true } },
+    })
+    const databasePath = getTraceIndexDatabasePath()
+    const writer = new Database(databasePath)
+    writer.exec('BEGIN IMMEDIATE')
+    const traceFile = path.join(
+      tmpDir,
+      'cc-haha',
+      'traces',
+      'session-busy-operation.jsonl',
+    )
+    await fs.appendFile(
+      traceFile,
+      `${JSON.stringify({
+        type: 'call',
+        record: {
+          id: 'call-busy-operation-b',
+          sessionId: 'session-busy-operation',
+          source: 'proxy',
+          status: 'ok',
+          startedAt: '2026-07-15T08:00:01.000Z',
+          completedAt: '2026-07-15T08:00:01.010Z',
+          request: { method: 'POST', url: '', headers: {}, body: createTraceBodySnapshot({}) },
+          response: { status: 200, headers: {}, body: createTraceBodySnapshot({ ok: true }) },
+        },
+      })}\n`,
+    )
+
+    const fallback = await traceCaptureService.listSessionTraces({
+      sessionIds: ['session-busy-operation'],
+    })
+    writer.exec('ROLLBACK')
+    writer.close()
+    expect(fallback.traces[0]?.summary.apiCalls).toBe(2)
+
+    const duringCooldown = await traceCaptureService.listSessionTraces({
+      sessionIds: ['session-busy-operation'],
+    })
+    expect(duringCooldown.traces[0]?.summary.apiCalls).toBe(2)
+    process.env.CC_HAHA_LOCAL_INDEX = 'off'
+    await traceCaptureService.listSessionTraces({ sessionIds: ['session-busy-operation'] })
+    process.env.CC_HAHA_LOCAL_INDEX = 'on'
+    const recovered = await traceCaptureService.listSessionTraces({
+      sessionIds: ['session-busy-operation'],
+    })
+    expect(recovered.traces[0]?.summary.apiCalls).toBe(2)
+    const inspected = new Database(databasePath, { readonly: true })
+    expect(inspected.query<{ api_calls: number }, []>(
+      "SELECT api_calls FROM trace_sessions WHERE session_id = 'session-busy-operation'",
+    ).get()).toEqual({ api_calls: 2 })
+    inspected.close()
+  })
+
+  test('returns canonical trace summaries in shadow mode and records projection mismatches safely', async () => {
+    await traceCaptureService.recordCall({
+      id: 'call-shadow',
+      sessionId: 'session-shadow',
+      source: 'proxy',
+      startedAt: '2026-07-15T08:00:00.000Z',
+      completedAt: '2026-07-15T08:00:00.010Z',
+      request: { body: { prompt: 'canonical wins' } },
+      response: { status: 200, body: { ok: true } },
+    })
+    await clearTraceCaptureStateForTests()
+    const database = new Database(getTraceIndexDatabasePath())
+    database.run(
+      'UPDATE trace_sessions SET api_calls = 99 WHERE session_id = ?',
+      ['session-shadow'],
+    )
+    database.close()
+    process.env.CC_HAHA_LOCAL_INDEX = 'shadow'
+
+    const list = await traceCaptureService.listSessionTraces({ sessionIds: ['session-shadow'] })
+
+    expect(list.traces[0]?.summary.apiCalls).toBe(1)
+    expect(getTraceCaptureDiagnosticsForTests()).toMatchObject({
+      shadowComparisons: 1,
+      shadowMismatches: 1,
+    })
+  })
+
+  test('preserves canonical model order after a call changes models', async () => {
+    const record = async (input: {
+      id: string
+      model: string
+      startedAt: string
+    }) => traceCaptureService.recordCall({
+      ...input,
+      sessionId: 'session-model-order',
+      source: 'proxy',
+      completedAt: input.startedAt,
+      request: { body: { model: input.model } },
+      response: { status: 200, body: { ok: true } },
+    })
+    await record({
+      id: 'call-first',
+      model: 'z-model',
+      startedAt: '2026-07-15T08:00:00.000Z',
+    })
+    await record({
+      id: 'call-second',
+      model: 'a-model',
+      startedAt: '2026-07-15T08:00:01.000Z',
+    })
+    await record({
+      id: 'call-first',
+      model: 'b-model',
+      startedAt: '2026-07-15T08:00:00.000Z',
+    })
+
+    const projected = (await traceCaptureService.listSessionTraces({
+      sessionIds: ['session-model-order'],
+    })).traces[0]!.summary.models
+    process.env.CC_HAHA_LOCAL_INDEX = 'off'
+    const canonical = (await traceCaptureService.listSessionTraces({
+      sessionIds: ['session-model-order'],
+    })).traces[0]!.summary.models
+
+    expect(projected).toEqual(canonical)
+    expect(projected).toEqual([
+      { model: 'b-model', calls: 1 },
+      { model: 'a-model', calls: 1 },
+    ])
+  })
+
+  test('preserves canonical first-insertion order when call start times tie', async () => {
+    const startedAt = '2026-07-15T08:00:00.000Z'
+    await traceCaptureService.recordCall({
+      id: 'call-first',
+      sessionId: 'session-start-tie',
+      source: 'proxy',
+      status: 'pending',
+      startedAt,
+      request: { body: { state: 'pending' } },
+    })
+    await traceCaptureService.recordCall({
+      id: 'call-second',
+      sessionId: 'session-start-tie',
+      source: 'proxy',
+      startedAt,
+      completedAt: '2026-07-15T08:00:10.000Z',
+      request: { body: { state: 'second' } },
+      response: { status: 200, body: { ok: true } },
+    })
+    await traceCaptureService.recordCall({
+      id: 'call-first',
+      sessionId: 'session-start-tie',
+      source: 'proxy',
+      startedAt,
+      completedAt: '2026-07-15T08:00:20.000Z',
+      request: { body: { state: 'first-completed' } },
+      response: { status: 200, body: { ok: true } },
+    })
+
+    const projected = (await traceCaptureService.listSessionTraces({
+      sessionIds: ['session-start-tie'],
+    })).traces[0]!.summary.updatedAt
+    process.env.CC_HAHA_LOCAL_INDEX = 'off'
+    const canonical = (await traceCaptureService.listSessionTraces({
+      sessionIds: ['session-start-tie'],
+    })).traces[0]!.summary.updatedAt
+
+    expect(projected).toBe(canonical)
+    expect(projected).toBe('2026-07-15T08:00:10.000Z')
+  })
+
+  test('preserves canonical LWW insertion order after a full projection rebuild', async () => {
+    const startedAt = '2026-07-15T08:00:00.000Z'
+    const record = async (input: {
+      id: string
+      model: string
+      completedAt: string
+    }) => traceCaptureService.recordCall({
+      ...input,
+      sessionId: 'session-rebuild-lww-order',
+      source: 'proxy',
+      startedAt,
+      request: { body: { model: input.model } },
+      response: { status: 200, body: { ok: true } },
+    })
+    await record({
+      id: 'call-first',
+      model: 'z-model',
+      completedAt: '2026-07-15T08:00:20.000Z',
+    })
+    await record({
+      id: 'call-second',
+      model: 'a-model',
+      completedAt: '2026-07-15T08:00:10.000Z',
+    })
+    await record({
+      id: 'call-first',
+      model: 'z-model',
+      completedAt: '2026-07-15T08:00:20.000Z',
+    })
+
+    await clearTraceCaptureStateForTests()
+    for (const suffix of ['', '-wal', '-shm']) {
+      await fs.rm(`${getTraceIndexDatabasePath()}${suffix}`, { force: true })
+    }
+    const projected = (await traceCaptureService.listSessionTraces({
+      sessionIds: ['session-rebuild-lww-order'],
+    })).traces[0]!.summary
+    process.env.CC_HAHA_LOCAL_INDEX = 'off'
+    const canonical = (await traceCaptureService.listSessionTraces({
+      sessionIds: ['session-rebuild-lww-order'],
+    })).traces[0]!.summary
+
+    expect(projected).toEqual(canonical)
+    expect(projected.models).toEqual([
+      { model: 'z-model', calls: 1 },
+      { model: 'a-model', calls: 1 },
+    ])
+    expect(projected.updatedAt).toBe('2026-07-15T08:00:10.000Z')
+  })
+
+  test('uses an incarnation-safe revision token after deleting the DB and replacing the source', async () => {
+    await traceCaptureService.recordCall({
+      id: 'call-old',
+      sessionId: 'session-revision-incarnation',
+      source: 'proxy',
+      startedAt: '2026-07-15T08:00:00.000Z',
+      completedAt: '2026-07-15T08:00:00.010Z',
+      request: { body: { prompt: 'old' } },
+      response: { status: 200, body: { ok: true } },
+    })
+    const first = await traceCaptureService.getSessionTraceRevision('session-revision-incarnation')
+    expect(first.revisionToken).toBeString()
+    const filePath = path.join(
+      tmpDir,
+      'cc-haha',
+      'traces',
+      'session-revision-incarnation.jsonl',
+    )
+    const rewritten = (await fs.readFile(filePath, 'utf8'))
+      .replaceAll('call-old', 'call-new')
+      .replaceAll('"old"', '"new"')
+    await clearTraceCaptureStateForTests()
+    await fs.writeFile(filePath, rewritten)
+    for (const suffix of ['', '-wal', '-shm']) {
+      await fs.rm(`${getTraceIndexDatabasePath()}${suffix}`, { force: true })
+    }
+
+    const request = new Request(
+      `http://localhost:3456/api/traces/session-revision-incarnation/revision?sinceRevision=${first.revision}&sinceRevisionToken=${encodeURIComponent(first.revisionToken)}`,
+    )
+    const response = await handleApiRequest(request, new URL(request.url))
+    const second = await response.json() as Awaited<ReturnType<
+      typeof traceCaptureService.getSessionTraceRevision
+    >>
+
+    expect(second.revision).toBe(first.revision)
+    expect(second.revisionToken).not.toBe(first.revisionToken)
+    expect(second.changed).toBe(true)
+    expect(second.reset).toBe(true)
+    expect((await traceCaptureService.getSessionTrace('session-revision-incarnation')).calls[0]?.id)
+      .toBe('call-new')
+  })
+
+  test('keeps a revision reset epoch across append while changing the revision token', async () => {
+    await traceCaptureService.recordCall({
+      id: 'call-token-a',
+      sessionId: 'session-token-append',
+      source: 'proxy',
+      startedAt: '2026-07-15T08:00:00.000Z',
+      completedAt: '2026-07-15T08:00:00.010Z',
+      request: { body: { prompt: 'a' } },
+      response: { status: 200, body: { ok: true } },
+    })
+    const first = await traceCaptureService.getSessionTraceRevision('session-token-append')
+    await traceCaptureService.recordCall({
+      id: 'call-token-b',
+      sessionId: 'session-token-append',
+      source: 'proxy',
+      startedAt: '2026-07-15T08:00:01.000Z',
+      completedAt: '2026-07-15T08:00:01.010Z',
+      request: { body: { prompt: 'b' } },
+      response: { status: 200, body: { ok: true } },
+    })
+
+    const second = await traceCaptureService.getSessionTraceRevision(
+      'session-token-append',
+      first.revision,
+      first.revisionToken,
+    )
+
+    expect(second.revisionToken).not.toBe(first.revisionToken)
+    expect(second.changed).toBe(true)
+    expect(second.reset).toBe(false)
+  })
+
+  test('hydrates a warm targeted call detail from its latest bounded locator', async () => {
+    await traceCaptureService.recordCall({
+      id: 'call-bounded-detail',
+      sessionId: 'session-bounded-detail',
+      source: 'proxy',
+      startedAt: '2026-07-15T08:00:00.000Z',
+      completedAt: '2026-07-15T08:00:00.010Z',
+      request: { body: { padding: 'x'.repeat(400_000) } },
+      response: { status: 200, body: { ok: true } },
+    })
+    await traceCaptureService.getSessionTraceRevision('session-bounded-detail')
+    const sourceSize = (await fs.stat(path.join(
+      tmpDir,
+      'cc-haha',
+      'traces',
+      'session-bounded-detail.jsonl',
+    ))).size
+    await clearTraceCaptureStateForTests()
+
+    const detail = await traceCaptureService.getSessionTraceCall(
+      'session-bounded-detail',
+      'call-bounded-detail',
+    )
+    const diagnostics = getTraceCaptureDiagnosticsForTests()
+
+    expect(detail?.id).toBe('call-bounded-detail')
+    expect(diagnostics.fullJsonlBytesRead).toBe(0)
+    expect(diagnostics.incrementalJsonlBytesRead).toBe(sourceSize)
+    expect(diagnostics.incrementalJsonlBytesRead).toBeLessThan(250_000)
+  })
+
+  test('uses the last-write-wins locator and falls back when a locator is corrupt', async () => {
+    for (const [status, prompt] of [['pending', 'old'], ['ok', 'new']] as const) {
+      await traceCaptureService.recordCall({
+        id: 'call-lww-detail',
+        sessionId: 'session-lww-detail',
+        source: 'proxy',
+        status,
+        startedAt: '2026-07-15T08:00:00.000Z',
+        ...(status === 'ok' ? { completedAt: '2026-07-15T08:00:00.010Z' } : {}),
+        request: { body: { prompt } },
+        ...(status === 'ok' ? { response: { status: 200, body: { ok: true } } } : {}),
+      })
+    }
+    await clearTraceCaptureStateForTests()
+    const latest = await traceCaptureService.getSessionTraceCall('session-lww-detail', 'call-lww-detail')
+    expect(latest?.request.body.preview).toContain('new')
+    expect(getTraceCaptureDiagnosticsForTests().fullJsonlBytesRead).toBe(0)
+
+    await clearTraceCaptureStateForTests()
+    const database = new Database(getTraceIndexDatabasePath())
+    database.run(
+      'UPDATE trace_calls SET byte_start = 1, byte_length = 8 WHERE session_id = ? AND call_id = ?',
+      ['session-lww-detail', 'call-lww-detail'],
+    )
+    database.close()
+    const fallback = await traceCaptureService.getSessionTraceCall(
+      'session-lww-detail',
+      'call-lww-detail',
+    )
+    expect(fallback?.request.body.preview).toContain('new')
+    expect(getTraceCaptureDiagnosticsForTests().fullJsonlBytesRead).toBeGreaterThan(0)
+  })
+
+  test('falls back when a valid locator is tampered to an older record for the same call', async () => {
+    for (const [status, prompt] of [['pending', 'old'], ['ok', 'new']] as const) {
+      await traceCaptureService.recordCall({
+        id: 'call-stale-locator',
+        sessionId: 'session-stale-locator',
+        source: 'proxy',
+        status,
+        startedAt: '2026-07-15T08:00:00.000Z',
+        ...(status === 'ok' ? { completedAt: '2026-07-15T08:00:00.010Z' } : {}),
+        request: { body: { prompt } },
+        ...(status === 'ok' ? { response: { status: 200, body: { ok: true } } } : {}),
+      })
+    }
+    const filePath = path.join(
+      tmpDir,
+      'cc-haha',
+      'traces',
+      'session-stale-locator.jsonl',
+    )
+    const raw = await fs.readFile(filePath)
+    const oldLineLength = raw.indexOf(0x0a) + 1
+    await clearTraceCaptureStateForTests()
+    const database = new Database(getTraceIndexDatabasePath())
+    database.run(
+      'UPDATE trace_calls SET byte_start = 0, byte_length = ? WHERE session_id = ? AND call_id = ?',
+      [oldLineLength, 'session-stale-locator', 'call-stale-locator'],
+    )
+    database.close()
+
+    const detail = await traceCaptureService.getSessionTraceCall(
+      'session-stale-locator',
+      'call-stale-locator',
+    )
+
+    expect(detail?.status).toBe('ok')
+    expect(detail?.request.body.preview).toContain('new')
+    expect(getTraceCaptureDiagnosticsForTests().fullJsonlBytesRead).toBeGreaterThan(0)
   })
 })

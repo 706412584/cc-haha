@@ -4,6 +4,8 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { gzipSync } from 'node:zlib'
 import type { Dirent } from 'node:fs'
+import { localIndexCoordinator } from './localIndex/coordinator.js'
+import type { LocalIndexStatus } from './localIndex/types.js'
 import {
   buildDiagnosticsIssueReport,
   projectDiagnosticEventForSharing,
@@ -127,6 +129,14 @@ export class DiagnosticsService {
 
   getExportDir(): string {
     return path.join(this.getLogDir(), 'exports')
+  }
+
+  getLocalIndexStatus(): LocalIndexStatus {
+    return localIndexCoordinator.getPublicStatus()
+  }
+
+  rebuildLocalIndex(): Promise<LocalIndexStatus> {
+    return localIndexCoordinator.rebuild()
   }
 
   async recordEvent(input: DiagnosticEventInput): Promise<DiagnosticWriteResult> {

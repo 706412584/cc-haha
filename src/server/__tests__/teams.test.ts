@@ -7,6 +7,15 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import * as os from 'node:os'
 import { TeamService } from '../services/teamService.js'
+import {
+  captureSourceFingerprint,
+  serializeSourceFingerprint,
+} from '../services/localIndex/sourceFingerprint.js'
+import { readSessionEntriesByLocator } from '../services/localIndex/sessionEntries.js'
+import type {
+  LocalIndexGateway,
+  SessionEntryLocatorPage,
+} from '../services/localIndex/sessionIndex.js'
 
 // ============================================================================
 // Test helpers
@@ -107,6 +116,29 @@ function makeTeamConfig(overrides?: Record<string, unknown>) {
       },
     ],
     ...overrides,
+  }
+}
+
+function disabledIndexGateway(): LocalIndexGateway {
+  return {
+    async start() {},
+    async stop() {},
+    getMode: () => 'off',
+    getPublicStatus: () => ({
+      mode: 'off',
+      state: 'off',
+      discovered: 0,
+      indexed: 0,
+      degradedSources: 0,
+      databaseBytes: 0,
+      walBytes: 0,
+      lastUpdatedAt: null,
+      lastErrorCode: null,
+    }),
+    isSessionScopeReady: () => false,
+    listSessions: () => ({ sessions: [], total: 0 }),
+    findSessionFiles: () => [],
+    async rebuild() { return this.getPublicStatus() },
   }
 }
 
@@ -267,6 +299,596 @@ describe('TeamService', () => {
   // --------------------------------------------------------------------------
   // getMemberTranscript
   // --------------------------------------------------------------------------
+
+  it('uses the session index locator and bounded entry ranges for a configured session', async () => {
+    await writeTeamConfig('indexed-team', makeTeamConfig({ name: 'indexed-team' }))
+    const filePath = await writeTranscriptFile('-tmp-project', 'session-lead-001', [{
+      type: 'user',
+      uuid: 'u1',
+      message: { role: 'user', content: 'Indexed' },
+      timestamp: '2026-01-01T00:01:00.000Z',
+    }])
+    const stat = await fs.stat(filePath)
+    const fingerprint = serializeSourceFingerprint({
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      ctimeMs: stat.ctimeMs,
+      fileIdentity: null,
+      firstWindowHash: 'a'.repeat(64),
+      lastWindowHash: 'b'.repeat(64),
+      boundaryWindowHash: 'c'.repeat(64),
+      indexedBytes: stat.size,
+      parserVersion: 3,
+    })
+    const gateway: LocalIndexGateway = {
+      async start() {},
+      async stop() {},
+      getMode: () => 'on',
+      getPublicStatus: () => ({ mode: 'on', state: 'ready', discovered: 1, indexed: 1, degradedSources: 0, databaseBytes: 1, walBytes: 0, lastUpdatedAt: 'now', lastErrorCode: null }),
+      isSessionScopeReady: () => true,
+      listSessions: () => ({ sessions: [], total: 0 }),
+      findSessionFiles: () => [],
+      getSessionEntryLocators: () => ({
+        source: { path: filePath, size: stat.size, mtimeMs: stat.mtimeMs, fileIdentity: null, fingerprint, indexedBytes: stat.size, parserVersion: 3, state: 'ready', lastErrorCode: null, updatedAtMs: 1 },
+        entries: [{ ordinal: 0, jsonlLine: 1, byteStart: 0, byteLength: stat.size, entryType: 'user', messageId: 'u1', role: 'user', timestamp: '2026-01-01T00:01:00.000Z', parentToolUseId: null }],
+      }),
+      async rebuild() { return this.getPublicStatus() },
+    }
+    let selectedBytes = 0
+    const indexedService = new TeamService({
+      sessionLocator: { findSessionFile: async () => ({ filePath, projectDir: '-tmp-project' }) },
+      localIndexGateway: gateway,
+      targetedEntryReader: async (options) => {
+        selectedBytes = options.page.entries.reduce((sum, entry) => sum + entry.byteLength, 0)
+        return {
+          entries: [{
+            type: 'user',
+            uuid: 'u1',
+            message: { role: 'user', content: 'Indexed' },
+            timestamp: '2026-01-01T00:01:00.000Z',
+          }],
+          bytesRead: selectedBytes,
+          rangesRead: 1,
+        }
+      },
+    })
+
+    const page = await indexedService.getMemberTranscriptPage('indexed-team', 'agent-lead')
+
+    expect(page.messages.map(message => message.id)).toEqual(['u1'])
+    expect(page.afterOrdinal).toBe(0)
+    expect(selectedBytes).toBe(stat.size)
+  })
+
+  it('rejects an indexed page changed during an empty targeted read and resets from canonical data', async () => {
+    await writeTeamConfig(
+      'indexed-read-race-team',
+      makeTeamConfig({ name: 'indexed-read-race-team' }),
+    )
+    const transcriptPath = path.join(
+      tmpDir,
+      'projects',
+      '-tmp-project',
+      'session-lead-001.jsonl',
+    )
+    await fs.mkdir(path.dirname(transcriptPath), { recursive: true })
+    const line = (uuid: string, content: string) => `${JSON.stringify({
+      type: 'user',
+      uuid,
+      message: { role: 'user', content },
+      timestamp: '2026-01-01T00:01:00.000Z',
+    })}\n`
+    const originalLines = [
+      line('first', 'f'.repeat(70_000)),
+      line('middle', 'OLD-MIDDLE'),
+      line('last', 'l'.repeat(70_000)),
+    ]
+    const replacementMiddle = line('middle', 'NEW-MIDDLE')
+    expect(Buffer.byteLength(replacementMiddle)).toBe(
+      Buffer.byteLength(originalLines[1]!),
+    )
+    await fs.writeFile(transcriptPath, originalLines.join(''))
+    const initialStat = await fs.stat(transcriptPath)
+    const fingerprint = await captureSourceFingerprint({
+      path: transcriptPath,
+      indexedBytes: initialStat.size,
+      parserVersion: 3,
+    })
+    let byteStart = 0
+    const messageIds = ['first', 'middle', 'last']
+    const locators = originalLines.map((raw, index) => {
+      const byteLength = Buffer.byteLength(raw)
+      const locator = {
+        ordinal: index,
+        jsonlLine: index + 1,
+        byteStart,
+        byteLength,
+        entryType: 'user',
+        messageId: messageIds[index]!,
+        role: 'user',
+        timestamp: '2026-01-01T00:01:00.000Z',
+        parentToolUseId: null,
+      }
+      byteStart += byteLength
+      return locator
+    })
+    const locatorPage: SessionEntryLocatorPage = {
+      source: {
+        path: transcriptPath,
+        size: fingerprint.size,
+        mtimeMs: fingerprint.mtimeMs,
+        fileIdentity: fingerprint.fileIdentity,
+        fingerprint: serializeSourceFingerprint(fingerprint),
+        indexedBytes: fingerprint.indexedBytes,
+        parserVersion: fingerprint.parserVersion,
+        state: 'ready',
+        lastErrorCode: null,
+        updatedAtMs: 1,
+      },
+      entries: locators,
+    }
+    const gateway: LocalIndexGateway = {
+      async start() {},
+      async stop() {},
+      getMode: () => 'on',
+      getPublicStatus: () => ({ mode: 'on', state: 'ready', discovered: 1, indexed: 1, degradedSources: 0, databaseBytes: 1, walBytes: 0, lastUpdatedAt: 'now', lastErrorCode: null }),
+      isSessionScopeReady: () => true,
+      listSessions: () => ({ sessions: [], total: 0 }),
+      findSessionFiles: () => [],
+      getSessionEntryLocators: () => locatorPage,
+      async rebuild() { return this.getPublicStatus() },
+    }
+    let rewriteOnRead = false
+    let ctimeBeforeRewrite = 0
+    let ctimeAfterRewrite = 0
+    const indexedService = new TeamService({
+      sessionLocator: {
+        findSessionFile: async () => ({
+          filePath: transcriptPath,
+          projectDir: '-tmp-project',
+        }),
+      },
+      localIndexGateway: gateway,
+      targetedEntryReader: async (options) => {
+        if (rewriteOnRead) {
+          rewriteOnRead = false
+          ctimeBeforeRewrite = (await fs.stat(transcriptPath)).ctimeMs
+          await new Promise(resolve => setTimeout(resolve, 8))
+          await fs.writeFile(
+            transcriptPath,
+            originalLines[0]! + replacementMiddle + originalLines[2]!,
+          )
+          await fs.utimes(
+            transcriptPath,
+            fingerprint.mtimeMs / 1000,
+            fingerprint.mtimeMs / 1000,
+          )
+          ctimeAfterRewrite = (await fs.stat(transcriptPath)).ctimeMs
+        }
+        return readSessionEntriesByLocator(options)
+      },
+    })
+    const initial = await indexedService.getMemberTranscriptPage(
+      'indexed-read-race-team',
+      'agent-lead',
+    )
+    const unchanged = await indexedService.getMemberTranscriptPage(
+      'indexed-read-race-team',
+      'agent-lead',
+      {
+        signature: initial.signature,
+        cursor: initial.cursor,
+        afterOrdinal: initial.afterOrdinal,
+      },
+    )
+    expect(unchanged.reset).toBeUndefined()
+    expect(unchanged.messages).toEqual([])
+    rewriteOnRead = true
+
+    const raced = await indexedService.getMemberTranscriptPage(
+      'indexed-read-race-team',
+      'agent-lead',
+      {
+        signature: unchanged.signature,
+        cursor: unchanged.cursor,
+        afterOrdinal: unchanged.afterOrdinal,
+      },
+    )
+
+    expect(ctimeAfterRewrite).not.toBe(ctimeBeforeRewrite)
+    expect(raced.reset).toBe(true)
+    expect(raced.messages.map(message => message.id)).toEqual([
+      'first',
+      'middle',
+      'last',
+    ])
+    expect(raced.messages[1]?.content).toEqual({
+      role: 'user',
+      content: 'NEW-MIDDLE',
+    })
+  })
+
+  it('keeps a stable indexed append incremental after post-read snapshot verification', async () => {
+    await writeTeamConfig(
+      'indexed-append-team',
+      makeTeamConfig({ name: 'indexed-append-team' }),
+    )
+    const transcriptPath = path.join(
+      tmpDir,
+      'projects',
+      '-tmp-project',
+      'session-lead-001.jsonl',
+    )
+    await fs.mkdir(path.dirname(transcriptPath), { recursive: true })
+    const records = [{
+      type: 'user',
+      uuid: 'u1',
+      message: { role: 'user', content: 'First' },
+      timestamp: '2026-01-01T00:01:00.000Z',
+    }]
+    const rawLines = records.map(record => `${JSON.stringify(record)}\n`)
+    await fs.writeFile(transcriptPath, rawLines.join(''))
+    const makeLocatorPage = async (): Promise<SessionEntryLocatorPage> => {
+      const snapshot = await fs.stat(transcriptPath)
+      const fingerprint = await captureSourceFingerprint({
+        path: transcriptPath,
+        indexedBytes: snapshot.size,
+        parserVersion: 3,
+      })
+      let byteStart = 0
+      const entries = records.map((record, index) => {
+        const byteLength = Buffer.byteLength(rawLines[index]!)
+        const locator = {
+          ordinal: index,
+          jsonlLine: index + 1,
+          byteStart,
+          byteLength,
+          entryType: record.type,
+          messageId: record.uuid,
+          role: record.message.role,
+          timestamp: record.timestamp,
+          parentToolUseId: null,
+        }
+        byteStart += byteLength
+        return locator
+      })
+      return {
+        source: {
+          path: transcriptPath,
+          size: fingerprint.size,
+          mtimeMs: fingerprint.mtimeMs,
+          fileIdentity: fingerprint.fileIdentity,
+          fingerprint: serializeSourceFingerprint(fingerprint),
+          indexedBytes: fingerprint.indexedBytes,
+          parserVersion: fingerprint.parserVersion,
+          state: 'ready',
+          lastErrorCode: null,
+          updatedAtMs: 1,
+        },
+        entries,
+      }
+    }
+    let locatorPage = await makeLocatorPage()
+    const gateway: LocalIndexGateway = {
+      async start() {},
+      async stop() {},
+      getMode: () => 'on',
+      getPublicStatus: () => ({ mode: 'on', state: 'ready', discovered: 1, indexed: 1, degradedSources: 0, databaseBytes: 1, walBytes: 0, lastUpdatedAt: 'now', lastErrorCode: null }),
+      isSessionScopeReady: () => true,
+      listSessions: () => ({ sessions: [], total: 0 }),
+      findSessionFiles: () => [],
+      getSessionEntryLocators: () => locatorPage,
+      async rebuild() { return this.getPublicStatus() },
+    }
+    const indexedService = new TeamService({
+      sessionLocator: {
+        findSessionFile: async () => ({
+          filePath: transcriptPath,
+          projectDir: '-tmp-project',
+        }),
+      },
+      localIndexGateway: gateway,
+      targetedEntryReader: readSessionEntriesByLocator,
+    })
+    const initial = await indexedService.getMemberTranscriptPage(
+      'indexed-append-team',
+      'agent-lead',
+    )
+    const appendedRecord = {
+      type: 'assistant',
+      uuid: 'a1',
+      message: { role: 'assistant', content: 'Second' },
+      timestamp: '2026-01-01T00:02:00.000Z',
+    }
+    records.push(appendedRecord as typeof records[number])
+    const appendedLine = `${JSON.stringify(appendedRecord)}\n`
+    rawLines.push(appendedLine)
+    await fs.appendFile(transcriptPath, appendedLine)
+    locatorPage = await makeLocatorPage()
+
+    const appended = await indexedService.getMemberTranscriptPage(
+      'indexed-append-team',
+      'agent-lead',
+      {
+        signature: initial.signature,
+        cursor: initial.cursor,
+        afterOrdinal: initial.afterOrdinal,
+      },
+    )
+
+    expect(appended.reset).toBeUndefined()
+    expect(appended.messages.map(message => message.id)).toEqual(['a1'])
+    expect(appended.afterOrdinal).toBe(1)
+  })
+
+  it('falls back to the canonical parser for a pending indexed tail', async () => {
+    await writeTeamConfig('pending-team', makeTeamConfig({ name: 'pending-team' }))
+    const first = `${JSON.stringify({
+      type: 'user',
+      uuid: 'u1',
+      message: { role: 'user', content: 'Complete' },
+      timestamp: '2026-01-01T00:01:00.000Z',
+    })}\n`
+    const finalWithoutNewline = JSON.stringify({
+      type: 'assistant',
+      uuid: 'a1',
+      message: { role: 'assistant', content: 'Valid pending tail' },
+      timestamp: '2026-01-01T00:02:00.000Z',
+    })
+    const filePath = path.join(
+      tmpDir,
+      'projects',
+      '-tmp-project',
+      'session-lead-001.jsonl',
+    )
+    await fs.mkdir(path.dirname(filePath), { recursive: true })
+    await fs.writeFile(filePath, first + finalWithoutNewline)
+    const stat = await fs.stat(filePath)
+    const fingerprint = serializeSourceFingerprint({
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      ctimeMs: stat.ctimeMs,
+      fileIdentity: null,
+      firstWindowHash: 'a'.repeat(64),
+      lastWindowHash: 'b'.repeat(64),
+      boundaryWindowHash: 'c'.repeat(64),
+      indexedBytes: Buffer.byteLength(first),
+      parserVersion: 3,
+    })
+    const gateway: LocalIndexGateway = {
+      async start() {},
+      async stop() {},
+      getMode: () => 'on',
+      getPublicStatus: () => ({ mode: 'on', state: 'ready', discovered: 1, indexed: 1, degradedSources: 0, databaseBytes: 1, walBytes: 0, lastUpdatedAt: 'now', lastErrorCode: null }),
+      isSessionScopeReady: () => true,
+      listSessions: () => ({ sessions: [], total: 0 }),
+      findSessionFiles: () => [],
+      getSessionEntryLocators: () => ({
+        source: {
+          path: filePath,
+          size: stat.size,
+          mtimeMs: stat.mtimeMs,
+          fileIdentity: null,
+          fingerprint,
+          indexedBytes: Buffer.byteLength(first),
+          parserVersion: 3,
+          state: 'pending',
+          lastErrorCode: null,
+          updatedAtMs: 1,
+        },
+        entries: [{
+          ordinal: 0,
+          jsonlLine: 1,
+          byteStart: 0,
+          byteLength: Buffer.byteLength(first),
+          entryType: 'user',
+          messageId: 'u1',
+          role: 'user',
+          timestamp: '2026-01-01T00:01:00.000Z',
+          parentToolUseId: null,
+        }],
+      }),
+      async rebuild() { return this.getPublicStatus() },
+    }
+    let targetedReads = 0
+    const pendingService = new TeamService({
+      sessionLocator: { findSessionFile: async () => ({ filePath, projectDir: '-tmp-project' }) },
+      localIndexGateway: gateway,
+      targetedEntryReader: async () => {
+        targetedReads += 1
+        return {
+          entries: [JSON.parse(first) as Record<string, unknown>],
+          bytesRead: Buffer.byteLength(first),
+          rangesRead: 1,
+        }
+      },
+    })
+
+    const messages = await pendingService.getMemberTranscript('pending-team', 'agent-lead')
+
+    expect(messages.map(message => message.id)).toEqual(['u1', 'a1'])
+    expect(targetedReads).toBe(0)
+  })
+
+  it('resets malformed cursors even when the transcript signature is unchanged', async () => {
+    await writeTeamConfig('malformed-cursor-team', makeTeamConfig({ name: 'malformed-cursor-team' }))
+    await writeTranscriptFile('-tmp-project', 'session-lead-001', [{
+      type: 'user',
+      uuid: 'u1',
+      message: { role: 'user', content: 'First' },
+      timestamp: '2026-01-01T00:01:00.000Z',
+    }])
+    const canonicalService = new TeamService({
+      localIndexGateway: disabledIndexGateway(),
+    })
+    const initial = await canonicalService.getMemberTranscriptPage(
+      'malformed-cursor-team',
+      'agent-lead',
+    )
+
+    const reset = await canonicalService.getMemberTranscriptPage(
+      'malformed-cursor-team',
+      'agent-lead',
+      {
+        signature: initial.signature,
+        cursor: 'not-a-valid-cursor',
+        afterOrdinal: initial.afterOrdinal,
+      },
+    )
+
+    expect(reset.reset).toBe(true)
+    expect(reset.messages.map(message => message.id)).toEqual(['u1'])
+  })
+
+  it('continues through a partial append and resets after truncation', async () => {
+    await writeTeamConfig('cursor-boundary-team', makeTeamConfig({ name: 'cursor-boundary-team' }))
+    const transcriptPath = await writeTranscriptFile('-tmp-project', 'session-lead-001', [{
+      type: 'user',
+      uuid: 'u1',
+      message: { role: 'user', content: 'First' },
+      timestamp: '2026-01-01T00:01:00.000Z',
+    }])
+    const canonicalService = new TeamService({
+      localIndexGateway: disabledIndexGateway(),
+    })
+    const initial = await canonicalService.getMemberTranscriptPage(
+      'cursor-boundary-team',
+      'agent-lead',
+    )
+
+    await fs.appendFile(transcriptPath, '{"type":"assistant"')
+    const partial = await canonicalService.getMemberTranscriptPage(
+      'cursor-boundary-team',
+      'agent-lead',
+      {
+        signature: initial.signature,
+        cursor: initial.cursor,
+        afterOrdinal: initial.afterOrdinal,
+      },
+    )
+    expect(partial.messages).toEqual([])
+    expect(partial.reset).toBeUndefined()
+
+    await fs.appendFile(
+      transcriptPath,
+      ',"uuid":"a1","message":{"role":"assistant","content":"Second"},"timestamp":"2026-01-01T00:02:00.000Z"}\n',
+    )
+    const completed = await canonicalService.getMemberTranscriptPage(
+      'cursor-boundary-team',
+      'agent-lead',
+      {
+        signature: partial.signature,
+        cursor: partial.cursor,
+        afterOrdinal: partial.afterOrdinal,
+      },
+    )
+    expect(completed.messages.map(message => message.id)).toEqual(['a1'])
+    expect(completed.reset).toBeUndefined()
+
+    await fs.writeFile(transcriptPath, `${JSON.stringify({
+      type: 'user',
+      uuid: 'replacement',
+      message: { role: 'user', content: 'Replacement' },
+      timestamp: '2026-01-01T00:03:00.000Z',
+    })}\n`)
+    const truncated = await canonicalService.getMemberTranscriptPage(
+      'cursor-boundary-team',
+      'agent-lead',
+      {
+        signature: completed.signature,
+        cursor: completed.cursor,
+        afterOrdinal: completed.afterOrdinal,
+      },
+    )
+    expect(truncated.reset).toBe(true)
+    expect(truncated.messages.map(message => message.id)).toEqual(['replacement'])
+  })
+
+  it('resets a same-size rewrite outside the bounded cursor windows', async () => {
+    await writeTeamConfig('large-rewrite-team', makeTeamConfig({ name: 'large-rewrite-team' }))
+    const transcriptPath = path.join(
+      tmpDir,
+      'projects',
+      '-tmp-project',
+      'session-lead-001.jsonl',
+    )
+    await fs.mkdir(path.dirname(transcriptPath), { recursive: true })
+    const line = (uuid: string, content: string) => `${JSON.stringify({
+      type: 'user',
+      uuid,
+      message: { role: 'user', content },
+      timestamp: '2026-01-01T00:01:00.000Z',
+    })}\n`
+    const before = line('first', 'f'.repeat(70_000)) +
+      line('middle-old', 'OLD-MIDDLE') +
+      line('last', 'l'.repeat(70_000))
+    const after = line('first', 'f'.repeat(70_000)) +
+      line('middle-new', 'NEW-MIDDLE') +
+      line('last', 'l'.repeat(70_000))
+    expect(Buffer.byteLength(after)).toBe(Buffer.byteLength(before))
+    await fs.writeFile(transcriptPath, before)
+    const canonicalService = new TeamService({
+      localIndexGateway: disabledIndexGateway(),
+    })
+    const initial = await canonicalService.getMemberTranscriptPage(
+      'large-rewrite-team',
+      'agent-lead',
+    )
+
+    await fs.writeFile(transcriptPath, after)
+    const rewritten = await canonicalService.getMemberTranscriptPage(
+      'large-rewrite-team',
+      'agent-lead',
+      {
+        signature: initial.signature,
+        cursor: initial.cursor,
+        afterOrdinal: initial.afterOrdinal,
+      },
+    )
+
+    expect(rewritten.reset).toBe(true)
+    expect(rewritten.messages.map(message => message.id)).toEqual([
+      'first',
+      'middle-new',
+      'last',
+    ])
+  })
+
+  it('safely resets a legacy v1 transcript cursor', async () => {
+    await writeTeamConfig('legacy-cursor-team', makeTeamConfig({ name: 'legacy-cursor-team' }))
+    await writeTranscriptFile('-tmp-project', 'session-lead-001', [{
+      type: 'user',
+      uuid: 'u1',
+      message: { role: 'user', content: 'First' },
+      timestamp: '2026-01-01T00:01:00.000Z',
+    }])
+    const canonicalService = new TeamService({
+      localIndexGateway: disabledIndexGateway(),
+    })
+    const initial = await canonicalService.getMemberTranscriptPage(
+      'legacy-cursor-team',
+      'agent-lead',
+    )
+    const legacyPayload = JSON.parse(
+      Buffer.from(initial.cursor, 'base64url').toString('utf8'),
+    ) as Record<string, unknown>
+    legacyPayload.version = 1
+    delete legacyPayload.ctimeMs
+    const legacyCursor = Buffer.from(JSON.stringify(legacyPayload)).toString('base64url')
+
+    const reset = await canonicalService.getMemberTranscriptPage(
+      'legacy-cursor-team',
+      'agent-lead',
+      {
+        signature: initial.signature,
+        cursor: legacyCursor,
+        afterOrdinal: initial.afterOrdinal,
+      },
+    )
+
+    expect(reset.reset).toBe(true)
+    expect(reset.messages.map(message => message.id)).toEqual(['u1'])
+  })
 
   it('should return transcript messages for a member', async () => {
     await writeTeamConfig('transcript-team', makeTeamConfig({ name: 'transcript-team' }))
@@ -554,6 +1176,109 @@ describe('Teams API', () => {
     }
     expect(body.messages).toHaveLength(1)
     expect(body.messages[0]!.type).toBe('user')
+  })
+
+  it('supports an additive transcript cursor without changing the legacy full response', async () => {
+    await writeTeamConfig('delta-team', makeTeamConfig({ name: 'delta-team' }))
+    await writeTranscriptFile('-tmp-project', 'session-lead-001', [
+      {
+        type: 'user',
+        uuid: 'u1',
+        message: { role: 'user', content: 'First' },
+        timestamp: '2026-01-01T00:01:00.000Z',
+      },
+      {
+        type: 'assistant',
+        uuid: 'a1',
+        message: { role: 'assistant', content: 'Second' },
+        timestamp: '2026-01-01T00:02:00.000Z',
+      },
+    ])
+
+    const initial = await fetch(
+      `${baseUrl}/api/teams/delta-team/members/agent-lead/transcript?incremental=true`,
+    )
+    const initialBody = (await initial.json()) as {
+      messages: Array<{ id: string }>
+      signature?: string
+      cursor?: string
+      afterOrdinal?: number
+    }
+    expect(initialBody.messages.map(message => message.id)).toEqual(['u1', 'a1'])
+    expect(initialBody.signature).toBeString()
+    expect(initialBody.cursor).toBeString()
+    expect(initialBody.afterOrdinal).toBeNumber()
+
+    const unchanged = await fetch(
+      `${baseUrl}/api/teams/delta-team/members/agent-lead/transcript?incremental=true&signature=${encodeURIComponent(initialBody.signature!)}&afterOrdinal=${initialBody.afterOrdinal}`,
+    )
+    const unchangedBody = (await unchanged.json()) as {
+      messages: unknown[]
+      signature: string
+      afterOrdinal: number
+    }
+    expect(unchangedBody).toMatchObject({
+      messages: [],
+      signature: initialBody.signature,
+      afterOrdinal: initialBody.afterOrdinal,
+    })
+    expect((unchangedBody as { cursor?: string }).cursor).toBeString()
+
+    await fs.appendFile(
+      path.join(tmpDir, 'projects', '-tmp-project', 'session-lead-001.jsonl'),
+      `${JSON.stringify({
+        type: 'user',
+        uuid: 'u2',
+        message: { role: 'user', content: 'Third' },
+        timestamp: '2026-01-01T00:03:00.000Z',
+      })}\n`,
+    )
+    const appended = await fetch(
+      `${baseUrl}/api/teams/delta-team/members/agent-lead/transcript?incremental=true&signature=${encodeURIComponent(initialBody.signature!)}&cursor=${encodeURIComponent(initialBody.cursor!)}&afterOrdinal=${initialBody.afterOrdinal}`,
+    )
+    const appendedBody = (await appended.json()) as {
+      messages: Array<{ id: string }>
+      signature: string
+      cursor: string
+      afterOrdinal: number
+      reset?: boolean
+    }
+    expect(appendedBody.messages.map(message => message.id)).toEqual(['u2'])
+    expect(appendedBody.afterOrdinal).toBe(2)
+    expect(appendedBody.reset).toBeUndefined()
+
+    const transcriptPath = path.join(
+      tmpDir,
+      'projects',
+      '-tmp-project',
+      'session-lead-001.jsonl',
+    )
+    const beforeRewrite = await fs.stat(transcriptPath)
+    const rewritten = [
+      { type: 'user', uuid: 'x1', message: { role: 'user', content: 'Furst' }, timestamp: '2026-01-01T00:01:00.000Z' },
+      { type: 'assistant', uuid: 'b1', message: { role: 'assistant', content: 'Secand' }, timestamp: '2026-01-01T00:02:00.000Z' },
+      { type: 'user', uuid: 'x2', message: { role: 'user', content: 'Thurd' }, timestamp: '2026-01-01T00:03:00.000Z' },
+    ].map(entry => JSON.stringify(entry)).join('\n') + '\n'
+    await fs.writeFile(transcriptPath, rewritten)
+    expect((await fs.stat(transcriptPath)).size).toBe(beforeRewrite.size)
+    await fs.utimes(transcriptPath, beforeRewrite.atime, beforeRewrite.mtime)
+
+    const rewrittenResponse = await fetch(
+      `${baseUrl}/api/teams/delta-team/members/agent-lead/transcript?incremental=true&signature=${encodeURIComponent(appendedBody.signature)}&cursor=${encodeURIComponent(appendedBody.cursor)}&afterOrdinal=${appendedBody.afterOrdinal}`,
+    )
+    const rewrittenBody = (await rewrittenResponse.json()) as {
+      messages: Array<{ id: string }>
+      reset?: boolean
+    }
+    expect(rewrittenBody.reset).toBe(true)
+    expect(rewrittenBody.messages.map(message => message.id)).toEqual(['x1', 'b1', 'x2'])
+
+    const legacy = await fetch(
+      `${baseUrl}/api/teams/delta-team/members/agent-lead/transcript`,
+    )
+    const legacyBody = (await legacy.json()) as { messages: Array<{ id: string }> }
+    expect(Object.keys(legacyBody)).toEqual(['messages'])
+    expect(legacyBody.messages.map(message => message.id)).toEqual(['x1', 'b1', 'x2'])
   })
 
   it('GET /api/teams/:name/members/:id/transcript should 404 for unknown member', async () => {

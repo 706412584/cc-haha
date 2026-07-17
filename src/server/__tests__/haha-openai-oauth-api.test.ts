@@ -9,7 +9,7 @@ import * as os from 'os'
 import { createServer } from 'net'
 import { handleHahaOpenAIOAuthApi } from '../api/haha-openai-oauth.js'
 import { hahaOpenAIOAuthService } from '../services/hahaOpenAIOAuthService.js'
-import { startServer } from '../index.js'
+import { startServer, stopServerRuntimeForShutdown } from '../index.js'
 import { ProviderService } from '../services/providerService.js'
 
 let tmpDir: string
@@ -201,6 +201,7 @@ describe('GET /auth/callback', () => {
       expect(html).toContain('Missing code or state parameter')
     } finally {
       server.stop(true)
+      await stopServerRuntimeForShutdown()
       ProviderService.setServerPort(originalServerPort)
     }
   })

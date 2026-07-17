@@ -1271,7 +1271,7 @@ function openExternalUrl(url: string) {
 
 function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderFormProps) {
   const { createProvider, updateProvider, testConfig } = useProviderStore()
-  const fetchSettings = useSettingsStore((s) => s.fetchAll)
+  const addToast = useUIStore((s) => s.addToast)
   const t = useTranslation()
 
   const availablePresets = presets.filter((p) => p.id !== 'official')
@@ -1620,10 +1620,13 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
         // is still broken, we'll re-warn after the next 3 leaks.
         useProviderCompatStore.getState().clearProvider(provider.id)
       }
-      await fetchSettings()
       onClose()
     } catch (err) {
       console.error('Failed to save provider:', err)
+      addToast({
+        type: 'error',
+        message: t('settings.providers.saveFailed'),
+      })
     } finally {
       setIsSubmitting(false)
     }

@@ -3,7 +3,7 @@ import * as fs from 'node:fs/promises'
 import { createServer } from 'node:net'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { startServer } from '../index.js'
+import { startServer, stopServerRuntimeForShutdown } from '../index.js'
 import { H5AccessService } from '../services/h5AccessService.js'
 import { ProviderService } from '../services/providerService.js'
 
@@ -245,6 +245,7 @@ beforeEach(async () => {
 afterEach(async () => {
   server?.stop(true)
   server = undefined
+  await stopServerRuntimeForShutdown({ waitForCli: true })
   ProviderService.setServerPort(originalServerPort)
 
   if (originalConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
@@ -342,6 +343,43 @@ describe('remote H5 auth and CORS integration', () => {
     })
     expect(desktopResponse.status).toBe(200)
     await expect(desktopResponse.json()).resolves.toMatchObject({ status: 'ok' })
+  })
+
+  test('keeps the host-managed provider proxy working with local auth across H5 modes', async () => {
+    process.env.CC_HAHA_LOCAL_ACCESS_TOKEN = 'desktop-local-secret'
+    await restartRemoteServer()
+
+    const requestProxy = (authorized: boolean) => fetch(`${baseUrl}/proxy/v1/messages`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': 'proxy-managed',
+        ...(authorized
+          ? { Authorization: 'Bearer desktop-local-secret' }
+          : {}),
+      },
+      body: JSON.stringify({ model: 'test', max_tokens: 8, messages: [] }),
+    })
+
+    const disabledTokenlessResponse = await requestProxy(false)
+    expect(disabledTokenlessResponse.status).toBe(403)
+
+    const disabledAuthorizedResponse = await requestProxy(true)
+    expect(disabledAuthorizedResponse.status).toBe(400)
+    await expect(disabledAuthorizedResponse.json()).resolves.toMatchObject({
+      error: { message: 'No active provider configured for proxy' },
+    })
+
+    await new H5AccessService().enable()
+
+    const enabledTokenlessResponse = await requestProxy(false)
+    expect(enabledTokenlessResponse.status).toBe(401)
+
+    const enabledAuthorizedResponse = await requestProxy(true)
+    expect(enabledAuthorizedResponse.status).toBe(400)
+    await expect(enabledAuthorizedResponse.json()).resolves.toMatchObject({
+      error: { message: 'No active provider configured for proxy' },
+    })
   })
 
   test('does not keep retired Tauri origins trusted after Electron replacement', async () => {

@@ -6035,6 +6035,27 @@ describe('conversation navigation layout', () => {
     expect(getConversationNavigationTargetScrollTop(items[0]!, offsets, 400, 650)).toBe(0)
     expect(getConversationNavigationTargetScrollTop(items[2]!, offsets, 400, 650)).toBe(250)
   })
+
+  it('does not render the desktop conversation rail in the mobile chat layout', () => {
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: [
+            { id: 'user-1', type: 'user_text', content: 'First prompt', timestamp: 1 },
+            { id: 'assistant-1', type: 'assistant_text', content: 'First reply', timestamp: 2 },
+            { id: 'user-2', type: 'user_text', content: 'Second prompt', timestamp: 3 },
+            { id: 'assistant-2', type: 'assistant_text', content: 'Second reply', timestamp: 4 },
+          ],
+        }),
+      },
+    })
+
+    const { rerender } = render(<MessageList />)
+    expect(screen.getByRole('navigation', { name: 'Conversation navigation' })).toBeTruthy()
+
+    rerender(<MessageList mobileLayout />)
+    expect(screen.queryByRole('navigation', { name: 'Conversation navigation' })).toBeNull()
+  })
 })
 
 describe('workspace panel origin visibility', () => {

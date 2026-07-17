@@ -291,6 +291,39 @@ describe('activity stats token accounting', () => {
     expect(totalForDate(stats.dailyModelTokens, future)).toBe(0)
   })
 
+  it('uses fixed inclusive 7d and 30d UTC boundaries', async () => {
+    const now = new Date('2026-07-15T12:00:00.000Z')
+    for (const [sessionId, date, tokens] of [
+      ['inside-7d', '2026-07-09', 7],
+      ['outside-7d', '2026-07-08', 8],
+      ['inside-30d', '2026-06-16', 30],
+      ['outside-30d', '2026-06-15', 31],
+    ] as const) {
+      await writeJsonl(projectFile(sessionId), [
+        userEntry(`${sessionId}-user`, at(date, '10:00:00')),
+        assistantEntry(
+          `${sessionId}-assistant`,
+          at(date, '10:01:00'),
+          { input_tokens: tokens },
+          { parentUuid: `${sessionId}-user` },
+        ),
+      ])
+    }
+
+    const sevenDays = await aggregateClaudeCodeStatsForRange('7d', { now })
+    expect(sevenDays.dailyActivity.map(day => day.date)).toEqual(['2026-07-09'])
+    expect(totalForDate(sevenDays.dailyModelTokens, '2026-07-09')).toBe(7)
+
+    const thirtyDays = await aggregateClaudeCodeStatsForRange('30d', { now })
+    expect(thirtyDays.dailyActivity.map(day => day.date)).toEqual([
+      '2026-06-16',
+      '2026-07-08',
+      '2026-07-09',
+    ])
+    expect(totalForDate(thirtyDays.dailyModelTokens, '2026-06-16')).toBe(30)
+    expect(totalForDate(thirtyDays.dailyModelTokens, '2026-06-15')).toBe(0)
+  })
+
   it('invalidates pre-v6 stats caches because cached aggregates lack tool usage', async () => {
     await mkdir(tmpConfigDir, { recursive: true })
     await writeFile(

@@ -1,4 +1,4 @@
-import { api } from './client'
+import { api, type ApiRequestOptions } from './client'
 
 type SearchResult = {
   file: string
@@ -40,6 +40,9 @@ export type SessionSearchOptions = {
   limit?: number
   matchesPerSession?: number
   caseSensitive?: boolean
+  project?: string
+  modifiedAfter?: string
+  modifiedBefore?: string
 }
 
 export const searchApi = {
@@ -47,7 +50,15 @@ export const searchApi = {
     return api.post<SearchResponse>('/api/search', params)
   },
 
-  searchSessions(query: string, options?: SessionSearchOptions) {
-    return api.post<SessionSearchResponse>('/api/search/sessions', { query, ...options })
+  searchSessions(
+    query: string,
+    options?: SessionSearchOptions,
+    requestOptions?: ApiRequestOptions,
+  ) {
+    return api.post<SessionSearchResponse>(
+      '/api/search/sessions',
+      { query, ...options },
+      requestOptions,
+    )
   },
 }

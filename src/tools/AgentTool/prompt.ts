@@ -40,6 +40,16 @@ const PRIMARY_AGENT_OWNERSHIP_RULE = [
   'Use a subagent only when its separate context or independence repays the coordination cost: independent review or verification, complex bug isolation, or genuinely parallel implementation with non-overlapping file ownership. When implementation agents run in parallel, the primary agent must retain and continue at least one executable task.',
 ].join('\n')
 
+const HYBRID_PARALLEL_KICKOFF_RULE = [
+  '## Hybrid parallel kickoff contract',
+  '',
+  "Parallel kickoff requires at least two unblocked tasks with non-overlapping file ownership and the tasks do not need each other's results before they can start.",
+  '',
+  'small changes, same-file work, or chain dependencies are not a reason to fan out; keep them with the primary agent or run them sequentially.',
+  '',
+  "For approved complex work, first create the full task list, assign owners and dependencies, and confirm Wave 1 is unblocked. Use owner='main-agent' for main-owned tasks; for agent-owned tasks, owner must exactly match the unique Agent name used at launch and resume. Launch named background agents together in one assistant message. In that same assistant turn, the primary agent keeps the critical-path task and immediately performs its own first real non-Agent tool action instead of waiting or merely restating the plan.",
+].join('\n')
+
 const BACKGROUND_ORCHESTRATION_RULE = [
   '## Background orchestration — hard rule',
   '',
@@ -233,6 +243,8 @@ ${
 }
 
 ${PRIMARY_AGENT_OWNERSHIP_RULE}
+
+${HYBRID_PARALLEL_KICKOFF_RULE}
 
 ${BACKGROUND_ORCHESTRATION_RULE}`
 

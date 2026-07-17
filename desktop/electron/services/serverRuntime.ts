@@ -2,16 +2,15 @@ import path from 'node:path'
 import { randomBytes } from 'node:crypto'
 import {
   appendHostDiagnostic,
+  clearProxyEnv,
   createAdapterPlan,
   createServerPlan,
   createTunnelPlan,
   ELECTRON_DIAGNOSTICS_FILE_ENV,
   formatStartupError,
   killSidecar,
-  mergeProxyEnv,
   POWERSHELL_PATH_OVERRIDE_ENV,
   preferredServerPorts,
-  proxyUrlFromElectronProxyRules,
   pushStartupLog,
   reserveServerPort,
   resolveCloudflaredPath,
@@ -23,12 +22,19 @@ import {
   spawnTunnel,
   waitForServer,
   waitForTunnelUrl,
+  withAdapterProxyBridgeEnv,
+  withSystemProxyBridgeEnv,
+  withSystemProxyErrorEnv,
   windowsPowerShellOverride,
   writeLastServerPort,
   type H5TunnelMode,
   type SidecarChild,
 } from './sidecarManager'
 import { readDesktopTerminalConfig, resolveDesktopTerminalShell } from './terminal'
+import {
+  SystemProxyBridge,
+  type SystemProxyBridgeLike,
+} from './systemProxyBridge'
 
 export type TunnelStartOptions = {
   mode: H5TunnelMode
@@ -70,6 +76,7 @@ type ServerRuntimeDeps = {
   spawnSidecar: typeof spawnSidecar
   waitForServer: typeof waitForServer
   writeLastServerPort: typeof writeLastServerPort
+  createSystemProxyBridge: (resolveSystemProxy: (url: string) => Promise<string>) => SystemProxyBridgeLike
 }
 
 const DEFAULT_SERVER_RUNTIME_DEPS: ServerRuntimeDeps = {
@@ -79,6 +86,7 @@ const DEFAULT_SERVER_RUNTIME_DEPS: ServerRuntimeDeps = {
   spawnSidecar,
   waitForServer,
   writeLastServerPort,
+  createSystemProxyBridge: resolveSystemProxy => new SystemProxyBridge(resolveSystemProxy),
 }
 
 type ServerStartState = {
@@ -94,6 +102,31 @@ type ActiveServer = {
   url: string
   child: SidecarChild
   adapterChildren: SidecarChild[]
+}
+
+function parseWechatAdapterStatus(line: string): {
+  platform: 'wechat'
+  state: 'rebind_required'
+  code: 'session_expired'
+} | null {
+  try {
+    const event = JSON.parse(line) as Record<string, unknown>
+    if (
+      event.type === 'adapter_status' &&
+      event.adapter === 'wechat' &&
+      event.status === 'session_timeout' &&
+      event.code === -14
+    ) {
+      return {
+        platform: 'wechat',
+        state: 'rebind_required',
+        code: 'session_expired',
+      }
+    }
+  } catch {
+    // Normal adapter logs are not structured status events.
+  }
+  return null
 }
 
 function createServerStartState(child: SidecarChild): ServerStartState {
@@ -132,6 +165,7 @@ export class ElectronServerRuntime {
   private readonly clearTimeoutFn: typeof clearTimeout
   private readonly localAccessToken = randomBytes(32).toString('base64url')
   private sidecarEnvPromise: Promise<NodeJS.ProcessEnv> | null = null
+  private systemProxyBridge: SystemProxyBridgeLike | null = null
   private server: ActiveServer | null = null
   private adapters: SidecarChild[] = []
   private tunnel: { child: SidecarChild, mode: H5TunnelMode } | null = null
@@ -142,8 +176,10 @@ export class ElectronServerRuntime {
   private startupError: string | null = null
   private restartAfterExit = false
   private startPromise: Promise<string> | null = null
+  private lifecycleGeneration = 0
   private startingServer: ServerStartState | null = null
   private adapterRestartPromise: Promise<void> | null = null
+  private adapterGeneration = 0
 
   constructor(options: ServerRuntimeOptions) {
     this.desktopRoot = options.desktopRoot
@@ -164,7 +200,8 @@ export class ElectronServerRuntime {
     if (this.startPromise) return this.startPromise
 
     this.restartAfterExit = false
-    this.startPromise = this.startServerOnce()
+    const generation = this.lifecycleGeneration
+    this.startPromise = this.startServerOnce(generation)
     try {
       return await this.startPromise
     } finally {
@@ -207,6 +244,7 @@ export class ElectronServerRuntime {
 
   stopAll(sync = false) {
     this.stopTunnelProcess(sync)
+    ++this.lifecycleGeneration
     const starting = this.startingServer
     if (starting) {
       this.startingServer = null
@@ -223,6 +261,7 @@ export class ElectronServerRuntime {
       killSidecar(this.server.child, sync)
       this.server = null
     }
+    this.stopSystemProxyBridge()
   }
 
   getTunnelStatus(): TunnelStatus {
@@ -439,7 +478,7 @@ export class ElectronServerRuntime {
     }
   }
 
-  private async startServerOnce(): Promise<string> {
+  private async startServerOnce(generation: number): Promise<string> {
     // Prefer the configured fixed port, then the previous run's port, so
     // phone bookmarks / QR codes / reverse proxies survive restarts (#767).
     const port = await this.deps.reserveServerPort(
@@ -450,6 +489,7 @@ export class ElectronServerRuntime {
     const logs: string[] = []
     let startState: ServerStartState | null = null
     const env = this.withLocalAccessToken(await this.resolveSidecarBaseEnv())
+    this.assertCurrentGeneration(generation)
     const plan = createServerPlan({
       desktopRoot: this.desktopRoot,
       appRoot: this.appRoot,
@@ -506,18 +546,32 @@ export class ElectronServerRuntime {
     }
   }
 
+  private assertCurrentGeneration(generation: number): void {
+    if (generation !== this.lifecycleGeneration) throw new Error('server startup stopped')
+  }
+
   private async startAdaptersSidecars(
     serverUrl: string,
     startState?: ServerStartState,
     activeServer?: ActiveServer,
   ): Promise<void> {
-    const env = this.withLocalAccessToken(await this.resolveSidecarBaseEnv())
+    const generation = ++this.adapterGeneration
+    const baseEnv = this.withLocalAccessToken(await this.resolveSidecarBaseEnv())
+    const bridgeUrl = baseEnv.CC_HAHA_SYSTEM_PROXY_URL
+    const env = bridgeUrl
+      ? withAdapterProxyBridgeEnv(baseEnv, bridgeUrl)
+      : baseEnv
     const isCurrentGeneration = () => {
       if (startState?.failure) return false
       if (activeServer && this.server !== activeServer) return false
       return true
     }
     if (!isCurrentGeneration()) return
+    void this.publishAdapterRuntimeStatus(serverUrl, {
+      platform: 'wechat',
+      state: 'starting',
+      generation,
+    })
     const ownedAdapters = startState?.adapterChildren
       ?? activeServer?.adapterChildren
     for (const [label, flag] of [
@@ -541,12 +595,52 @@ export class ElectronServerRuntime {
           killSidecar(child)
           break
         }
-        this.captureLogs(child, `claude-adapters:${label}`)
+        this.captureLogs(
+          child,
+          `claude-adapters:${label}`,
+          undefined,
+          undefined,
+          undefined,
+          label === 'wechat'
+            ? line => {
+                if (!isCurrentGeneration() || generation !== this.adapterGeneration) return
+                const status = parseWechatAdapterStatus(line)
+                if (!status) return
+                void this.publishAdapterRuntimeStatus(serverUrl, {
+                  ...status,
+                  generation,
+                })
+              }
+            : undefined,
+        )
         this.adapters.push(child)
         ownedAdapters?.push(child)
       } catch (error) {
         console.error(`[desktop] failed to start ${label} adapter sidecar`, error)
       }
+    }
+  }
+
+  private async publishAdapterRuntimeStatus(
+    serverUrl: string,
+    status: {
+      platform: 'wechat'
+      state: 'starting' | 'rebind_required'
+      code?: 'session_expired'
+      generation: number
+    },
+  ): Promise<void> {
+    try {
+      const response = await this.fetchFn(`${serverUrl}/api/adapters/runtime-status`, {
+        method: 'POST',
+        headers: this.localServerHeaders(),
+        body: JSON.stringify(status),
+      })
+      if (!response.ok && response.status !== 409) {
+        console.error(`[desktop] failed to publish adapter runtime status (${response.status})`)
+      }
+    } catch (error) {
+      console.error('[desktop] failed to publish adapter runtime status', error)
     }
   }
 
@@ -590,9 +684,26 @@ export class ElectronServerRuntime {
     startupLogs?: string[],
     onExit?: (code: number | null, signal: NodeJS.Signals | null) => void,
     onError?: (error: Error) => void,
+    onStdoutLine?: (line: string) => void,
   ) {
+    let stdoutBuffer = ''
+    const emitStdoutLines = (chunk: string, flush = false) => {
+      if (!onStdoutLine) return
+      stdoutBuffer += chunk
+      const lines = stdoutBuffer.split(/\r?\n/)
+      stdoutBuffer = lines.pop() ?? ''
+      if (flush && stdoutBuffer) {
+        lines.push(stdoutBuffer)
+        stdoutBuffer = ''
+      }
+      for (const line of lines) {
+        if (line.trim()) onStdoutLine(line.trim())
+      }
+    }
     child.stdout.on('data', chunk => {
-      const line = String(chunk).trimEnd()
+      const chunkText = String(chunk)
+      emitStdoutLines(chunkText)
+      const line = chunkText.trimEnd()
       if (!line) return
       console.log(`[${label}] ${line}`)
       this.deps.appendHostDiagnostic(this.diagnosticsFile, `[${label}] [stdout] ${line}`)
@@ -606,6 +717,7 @@ export class ElectronServerRuntime {
       if (startupLogs) pushStartupLog(startupLogs, `[stderr] ${line}`)
     })
     child.on('exit', (code, signal) => {
+      emitStdoutLines('', true)
       const line = `sidecar exited (code=${code}, signal=${signal})`
       console.log(`[${label}] ${line}`)
       this.deps.appendHostDiagnostic(this.diagnosticsFile, `[${label}] [exit] ${line}`)
@@ -673,18 +785,25 @@ export class ElectronServerRuntime {
   private async resolveSidecarBaseEnvOnce(): Promise<NodeJS.ProcessEnv> {
     const applyRuntimeEnv = (env: NodeJS.ProcessEnv) =>
       this.applyDesktopRuntimeEnv(this.applyPowerShellOverride(env))
+    const baseEnv = clearProxyEnv(this.baseEnv)
+    if (!this.resolveSystemProxy) return applyRuntimeEnv(baseEnv)
 
-    if (!this.resolveSystemProxy) return applyRuntimeEnv(this.baseEnv)
-
+    const bridge = this.deps.createSystemProxyBridge(this.resolveSystemProxy)
+    this.systemProxyBridge = bridge
     try {
-      const rules = await this.resolveSystemProxy('https://auth.openai.com/')
-      return applyRuntimeEnv(mergeProxyEnv(
-        this.baseEnv,
-        proxyUrlFromElectronProxyRules(rules),
-      ))
+      const bridgeUrl = await bridge.start()
+      if (this.systemProxyBridge !== bridge) {
+        throw new Error('system proxy bridge startup was stopped')
+      }
+      return applyRuntimeEnv(withSystemProxyBridgeEnv(baseEnv, bridgeUrl))
     } catch (error) {
-      console.error('[desktop] failed to resolve system proxy for sidecars', error)
-      return applyRuntimeEnv(this.baseEnv)
+      if (this.systemProxyBridge === bridge) {
+        this.systemProxyBridge = null
+        await bridge.stop().catch(() => {})
+      }
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(`[desktop] failed to start system proxy bridge for sidecars: ${sanitizeHostDiagnostic(message)}`)
+      return applyRuntimeEnv(withSystemProxyErrorEnv(baseEnv, error))
     }
   }
 
@@ -695,6 +814,13 @@ export class ElectronServerRuntime {
       APP_VERSION: this.appVersion,
       CC_HAHA_DESKTOP_VERSION: this.appVersion,
     }
+  }
+
+  private stopSystemProxyBridge(): void {
+    const bridge = this.systemProxyBridge
+    this.systemProxyBridge = null
+    this.sidecarEnvPromise = null
+    if (bridge) void bridge.stop()
   }
 
   // On Windows, forward the user's chosen PowerShell to the agent sidecar so its

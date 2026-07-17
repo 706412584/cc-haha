@@ -6,7 +6,9 @@ import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
 import type { SidecarChild, SidecarPlan } from './sidecarManager'
+import { SYSTEM_PROXY_ERROR_ENV } from './sidecarManager'
 import { ElectronServerRuntime } from './serverRuntime'
+import type { SystemProxyBridgeLike } from './systemProxyBridge'
 
 async function runIsolated(script: string) {
   const child = spawn('bun', ['-e', script], {
@@ -93,10 +95,12 @@ const harness = String.raw`
     }),
     formatStartupError: (msg) => msg,
     killSidecar: (child) => state.killedTunnelChildren.push(child),
-    mergeProxyEnv: (env) => env,
+    clearProxyEnv: (env) => env,
+    withAdapterProxyBridgeEnv: (env) => env,
+    withSystemProxyBridgeEnv: (env) => env,
+    withSystemProxyErrorEnv: (env) => env,
     POWERSHELL_PATH_OVERRIDE_ENV: 'CLAUDE_CODE_POWERSHELL_PATH',
     preferredServerPorts: () => [],
-    proxyUrlFromElectronProxyRules: () => undefined,
     pushStartupLog: () => {},
     reserveServerPort: async () => 28670,
     sanitizeHostDiagnostic: (line) => line,
@@ -461,13 +465,23 @@ class FakeSidecarChild extends EventEmitter {
   readonly kill = vi.fn()
 }
 
-function createRuntime(options: { appRoot?: string, appVersion?: string, diagnosticsFile?: string } = {}) {
+function createRuntime(options: {
+  appRoot?: string
+  appVersion?: string
+  diagnosticsFile?: string
+  env?: NodeJS.ProcessEnv
+  resolveSystemProxy?: (url: string) => Promise<string>
+  proxyBridge?: SystemProxyBridgeLike
+  fetchFn?: typeof fetch
+} = {}) {
   return new ElectronServerRuntime({
     desktopRoot: '/isolated/desktop',
     appRoot: options.appRoot,
     appVersion: options.appVersion,
     diagnosticsFile: options.diagnosticsFile,
-    env: { CLAUDE_CONFIG_DIR: isolatedConfigDir },
+    env: { CLAUDE_CONFIG_DIR: isolatedConfigDir, ...options.env },
+    resolveSystemProxy: options.resolveSystemProxy,
+    fetchFn: options.fetchFn ?? (async () => new Response('{}', { status: 200 })),
     deps: {
       appendHostDiagnostic: sidecarMocks.appendHostDiagnostic,
       preferredServerPorts: () => [],
@@ -475,6 +489,9 @@ function createRuntime(options: { appRoot?: string, appVersion?: string, diagnos
       spawnSidecar: sidecarMocks.spawnSidecar,
       waitForServer: async () => await sidecarMocks.waitForServerImpl(),
       writeLastServerPort: () => undefined,
+      ...(options.proxyBridge
+        ? { createSystemProxyBridge: () => options.proxyBridge! }
+        : {}),
     },
   })
 }
@@ -484,6 +501,15 @@ async function waitForServerChildren(count: number): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, 0))
   }
   expect(sidecarMocks.serverChildren).toHaveLength(count)
+}
+
+type FetchMock = ReturnType<typeof vi.fn> & typeof fetch
+
+async function waitForCallCount(mock: FetchMock, count: number): Promise<void> {
+  for (let attempt = 0; attempt < 20 && mock.mock.calls.length !== count; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 0))
+  }
+  expect(mock).toHaveBeenCalledTimes(count)
 }
 
 describe('ElectronServerRuntime', () => {
@@ -565,6 +591,140 @@ describe('ElectronServerRuntime', () => {
       .filter(plan => plan.args[0] === 'adapters')) {
       expect(adapter.env.CC_HAHA_LOCAL_ACCESS_TOKEN).toBe(token)
     }
+  })
+
+  it('relays WeChat session expiry only from the current adapter generation', async () => {
+    const fetchFn = vi.fn(async () => new Response('{}', { status: 200 })) as FetchMock
+    const runtime = createRuntime({ fetchFn })
+    await runtime.startServer()
+    await waitForCallCount(fetchFn, 1)
+    fetchFn.mockClear()
+    const firstWechat = sidecarMocks.adapterChildren[2]!
+    const expiryEvent = JSON.stringify({
+      type: 'adapter_status',
+      adapter: 'wechat',
+      status: 'session_timeout',
+      code: -14,
+    })
+
+    firstWechat.stdout.write(expiryEvent.slice(0, 20))
+    firstWechat.stdout.write(`${expiryEvent.slice(20)}\n`)
+    await waitForCallCount(fetchFn, 1)
+    expect(fetchFn).toHaveBeenLastCalledWith(
+      'http://127.0.0.1:49321/api/adapters/runtime-status',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          Authorization: `Bearer ${runtime.getLocalAccessToken()}`,
+        }),
+        body: JSON.stringify({
+          platform: 'wechat',
+          state: 'rebind_required',
+          code: 'session_expired',
+          generation: 1,
+        }),
+      }),
+    )
+
+    await runtime.restartAdaptersSidecars()
+    await waitForCallCount(fetchFn, 2)
+    fetchFn.mockClear()
+    firstWechat.stdout.write(`${expiryEvent}\n`)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('gives the server only the dynamic bridge URL while adapters explicitly inherit it', async () => {
+    const bridge = {
+      start: vi.fn(async () => 'http://127.0.0.1:49123'),
+      stop: vi.fn(async () => undefined),
+    }
+    const runtime = createRuntime({
+      env: {
+        HTTP_PROXY: 'http://stale.example:8080',
+        HTTPS_PROXY: 'http://stale.example:8080',
+        ALL_PROXY: 'socks5://stale.example:1080',
+        all_proxy: 'socks5://stale.example:1080',
+      },
+      resolveSystemProxy: async () => 'DIRECT',
+      proxyBridge: bridge,
+    })
+
+    await runtime.startServer()
+
+    const serverEnv = sidecarMocks.serverPlans[0]!.env
+    expect(serverEnv.CC_HAHA_SYSTEM_PROXY_URL).toBe('http://127.0.0.1:49123')
+    expect(serverEnv.HTTP_PROXY).toBeUndefined()
+    expect(serverEnv.HTTPS_PROXY).toBeUndefined()
+    expect(serverEnv.ALL_PROXY).toBeUndefined()
+    expect(serverEnv.all_proxy).toBeUndefined()
+    const adapterPlans = sidecarMocks.spawnSidecar.mock.calls
+      .map(([plan]) => plan)
+      .filter(plan => plan.args[0] === 'adapters')
+    expect(adapterPlans).toHaveLength(5)
+    for (const plan of adapterPlans) {
+      expect(plan.env.HTTP_PROXY).toBe('http://127.0.0.1:49123')
+      expect(plan.env.HTTPS_PROXY).toBe('http://127.0.0.1:49123')
+      expect(plan.env.ALL_PROXY).toBe('http://127.0.0.1:49123')
+      expect(plan.env.all_proxy).toBe('http://127.0.0.1:49123')
+    }
+
+    runtime.stopAll()
+    expect(bridge.stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not spawn a server when stopAll races with proxy bridge startup', async () => {
+    let releaseBridge!: (url: string) => void
+    const bridge = {
+      start: vi.fn(() => new Promise<string>(resolve => { releaseBridge = resolve })),
+      stop: vi.fn(async () => undefined),
+    }
+    const runtime = createRuntime({
+      resolveSystemProxy: async () => 'DIRECT',
+      proxyBridge: bridge,
+    })
+
+    const starting = runtime.startServer()
+    for (let attempt = 0; attempt < 10 && bridge.start.mock.calls.length === 0; attempt++) {
+      await Promise.resolve()
+    }
+    expect(bridge.start).toHaveBeenCalledTimes(1)
+    runtime.stopAll()
+    releaseBridge('http://127.0.0.1:49123')
+
+    await expect(starting).rejects.toThrow('server startup stopped')
+    expect(sidecarMocks.spawnSidecar).not.toHaveBeenCalled()
+    expect(bridge.stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('passes a sanitized bridge startup failure to the server without silently using direct mode', async () => {
+    const bridge = {
+      start: vi.fn(async () => {
+        throw new Error('failed via https://user:password@proxy.example/path with sk-secret12345678')
+      }),
+      stop: vi.fn(async () => undefined),
+    }
+    const runtime = createRuntime({
+      env: {
+        HTTP_PROXY: 'http://stale.example:8080',
+        HTTPS_PROXY: 'http://stale.example:8080',
+        ALL_PROXY: 'socks5://stale.example:1080',
+      },
+      resolveSystemProxy: async () => 'DIRECT',
+      proxyBridge: bridge,
+    })
+
+    await runtime.startServer()
+
+    const serverEnv = sidecarMocks.serverPlans[0]!.env
+    expect(serverEnv.HTTP_PROXY).toBeUndefined()
+    expect(serverEnv.HTTPS_PROXY).toBeUndefined()
+    expect(serverEnv.ALL_PROXY).toBeUndefined()
+    expect(serverEnv.CC_HAHA_SYSTEM_PROXY_URL).toBeUndefined()
+    expect(serverEnv[SYSTEM_PROXY_ERROR_ENV]).toContain('System proxy bridge unavailable: failed via')
+    expect(serverEnv[SYSTEM_PROXY_ERROR_ENV]).not.toContain('password')
+    expect(serverEnv[SYSTEM_PROXY_ERROR_ENV]).not.toContain('sk-secret')
+    expect(sidecarMocks.serverChildren).toHaveLength(1)
   })
 
   it('persists a server startup failure through the sanitized host-log boundary', async () => {

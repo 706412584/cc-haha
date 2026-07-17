@@ -8,7 +8,7 @@ import {
 import { useSessionRuntimeStore } from './sessionRuntimeStore'
 import { useSettingsStore } from './settingsStore'
 import { useTabStore } from './tabStore'
-import type { SessionListItem } from '../types/session'
+import type { LocalIndexStatus, SessionListItem } from '../types/session'
 import type { PermissionMode } from '../types/settings'
 import { isPlaceholderSessionTitle } from '../lib/sessionTitle'
 import { invalidateRecentProjectsCache } from '../lib/recentProjectsCache'
@@ -27,6 +27,8 @@ type SessionStore = {
   activeSessionId: string | null
   isLoading: boolean
   error: string | null
+  indexStatus: LocalIndexStatus | null
+  sessionListRequestId: number
   isBatchMode: boolean
   selectedSessionIds: Set<string>
 
@@ -59,25 +61,39 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   activeSessionId: null,
   isLoading: false,
   error: null,
+  indexStatus: null,
+  sessionListRequestId: 0,
   isBatchMode: false,
   selectedSessionIds: new Set(),
 
   fetchSessions: async (project?: string) => {
     const requestId = ++fetchSessionsRequestId
-    set({ isLoading: true, error: null })
+    set({ isLoading: true, error: null, sessionListRequestId: requestId })
     try {
-      const { sessions: raw } = await sessionsApi.list(buildSessionListParams(project))
-      if (requestId !== fetchSessionsRequestId) return
+      const response = await sessionsApi.list(buildSessionListParams(project))
+      if (requestId !== get().sessionListRequestId) return
+      const raw = response.sessions
+      const indexStatus = response.index ?? null
       useSessionRuntimeStore.getState().syncFromSessions(raw)
       let syncedSessions: SessionListItem[] = []
       set((state) => {
-        const sessions = mergeSessionList(raw, state.sessions)
+        if (requestId !== state.sessionListRequestId) return state
+        const sessions = mergeSessionList(
+          shouldRetainRenderedSessions(indexStatus)
+            ? [...raw, ...state.sessions]
+            : raw,
+          state.sessions,
+        )
         syncedSessions = sessions
-        return { sessions, isLoading: false }
+        return {
+          sessions,
+          indexStatus,
+          isLoading: indexStatus?.state === 'building' && sessions.length === 0,
+        }
       })
       syncOpenSessionTabTitles(syncedSessions)
     } catch (err) {
-      if (requestId !== fetchSessionsRequestId) return
+      if (requestId !== get().sessionListRequestId) return
       set({ error: (err as Error).message, isLoading: false })
     }
   },
@@ -275,6 +291,10 @@ function mergeSessionList(
   }
 
   return [...byId.values()].sort((a, b) => sessionModifiedTime(b) - sessionModifiedTime(a))
+}
+
+function shouldRetainRenderedSessions(indexStatus: LocalIndexStatus | null): boolean {
+  return indexStatus?.mode === 'on' && indexStatus.state === 'building'
 }
 
 function sessionModifiedTime(session: SessionListItem): number {

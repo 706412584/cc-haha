@@ -22,6 +22,16 @@ export type PairingState = {
   createdAt?: number | null
 }
 
+export type AdapterRuntimePlatform = 'wechat'
+export type AdapterRuntimeState = 'starting' | 'connected' | 'rebind_required'
+export type AdapterRuntimeStatus = {
+  platform: AdapterRuntimePlatform
+  state: AdapterRuntimeState
+  code?: 'session_expired'
+  generation: number
+  updatedAt: string
+}
+
 export type AdapterFileConfig = {
   serverUrl?: string
   defaultProjectDir?: string
@@ -85,6 +95,40 @@ function isMasked(value: string | undefined): boolean {
 }
 
 class AdapterService {
+  private readonly runtimeStatus = new Map<AdapterRuntimePlatform, AdapterRuntimeStatus>()
+
+  getRuntimeStatus(): Partial<Record<AdapterRuntimePlatform, AdapterRuntimeStatus>> {
+    return Object.fromEntries(this.runtimeStatus)
+  }
+
+  updateRuntimeStatus(status: Omit<AdapterRuntimeStatus, 'updatedAt'>): boolean {
+    const current = this.runtimeStatus.get(status.platform)
+    if (
+      current &&
+      (
+        status.generation < current.generation ||
+        (
+          status.generation === current.generation &&
+          current.state === 'rebind_required' &&
+          status.state !== 'rebind_required'
+        )
+      )
+    ) return false
+    this.runtimeStatus.set(status.platform, {
+      ...status,
+      updatedAt: new Date().toISOString(),
+    })
+    return true
+  }
+
+  clearRuntimeStatus(platform?: AdapterRuntimePlatform): void {
+    if (platform) {
+      this.runtimeStatus.delete(platform)
+      return
+    }
+    this.runtimeStatus.clear()
+  }
+
   /** 读取原始配置（不脱敏） */
   async getRawConfig(): Promise<AdapterFileConfig> {
     try {

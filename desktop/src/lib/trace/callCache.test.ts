@@ -115,4 +115,80 @@ describe('fetchTraceCallDetail', () => {
 
     expect(traceCallRequests(fetchMock)).toHaveLength(2)
   })
+
+  it('keeps same-revision terminal calls cached and refetches after the revision token changes', async () => {
+    let version = 'old'
+    const fetchMock = mockFetch(() => jsonResponse({
+      call: makeCall({
+        request: {
+          method: 'POST',
+          url: 'https://api.example/v1/messages',
+          headers: {},
+          body: { contentType: 'text', bytes: 3, sha256: version, preview: version, truncated: false },
+        },
+      }),
+    }))
+
+    const first = await fetchTraceCallDetail('session-1', 'call-1', 'epoch-a:1')
+    version = 'new'
+    const sameRevision = await fetchTraceCallDetail('session-1', 'call-1', 'epoch-a:1')
+    const nextRevision = await fetchTraceCallDetail('session-1', 'call-1', 'epoch-a:2')
+
+    expect(first?.request.body.preview).toBe('old')
+    expect(sameRevision?.request.body.preview).toBe('old')
+    expect(nextRevision?.request.body.preview).toBe('new')
+    expect(traceCallRequests(fetchMock)).toHaveLength(2)
+  })
+
+  it('does not reuse terminal calls after switching to another API runtime', async () => {
+    const fetchMock = mockFetch((url) => jsonResponse({
+      call: makeCall({
+        request: {
+          method: 'POST',
+          url: 'https://api.example/v1/messages',
+          headers: {},
+          body: {
+            contentType: 'text',
+            bytes: 7,
+            sha256: url.includes(':4101/') ? 'runtime-a' : 'runtime-b',
+            preview: url.includes(':4101/') ? 'runtime-a' : 'runtime-b',
+            truncated: false,
+          },
+        },
+      }),
+    }))
+
+    setBaseUrl('http://127.0.0.1:4101')
+    const firstRuntime = await fetchTraceCallDetail('session-1', 'call-1', 'epoch:1')
+    setBaseUrl('http://127.0.0.1:4102')
+    const secondRuntime = await fetchTraceCallDetail('session-1', 'call-1', 'epoch:1')
+
+    expect(firstRuntime?.request.body.preview).toBe('runtime-a')
+    expect(secondRuntime?.request.body.preview).toBe('runtime-b')
+    expect(traceCallRequests(fetchMock)).toEqual([
+      'http://127.0.0.1:4101/api/sessions/session-1/trace/calls/call-1',
+      'http://127.0.0.1:4102/api/sessions/session-1/trace/calls/call-1',
+    ])
+  })
+
+  it('bounds terminal calls across runtimes and keeps a recently used entry', async () => {
+    const fetchMock = mockFetch((url) => {
+      const callId = decodeURIComponent(url.split('/trace/calls/')[1] ?? '')
+      return jsonResponse({ call: makeCall({ id: callId }) })
+    })
+
+    setBaseUrl('http://127.0.0.1:4101')
+    for (let index = 0; index < 32; index += 1) {
+      await fetchTraceCallDetail('session-1', `call-${index}`, 'epoch:1')
+    }
+
+    await fetchTraceCallDetail('session-1', 'call-0', 'epoch:1')
+    setBaseUrl('http://127.0.0.1:4102')
+    await fetchTraceCallDetail('session-1', 'call-32', 'epoch:1')
+    setBaseUrl('http://127.0.0.1:4101')
+    await fetchTraceCallDetail('session-1', 'call-1', 'epoch:1')
+    await fetchTraceCallDetail('session-1', 'call-0', 'epoch:1')
+
+    expect(traceCallRequests(fetchMock)).toHaveLength(34)
+  })
 })

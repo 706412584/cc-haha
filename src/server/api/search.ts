@@ -39,6 +39,10 @@ export async function handleSearchApi(
         limit: body.limit as number | undefined,
         matchesPerSession: body.matchesPerSession as number | undefined,
         caseSensitive: body.caseSensitive as boolean | undefined,
+        project: body.project as string | undefined,
+        modifiedAfter: body.modifiedAfter as string | undefined,
+        modifiedBefore: body.modifiedBefore as string | undefined,
+        signal: req.signal,
       })
       return Response.json({ results, total: results.length, truncated })
     }
@@ -56,6 +60,9 @@ export async function handleSearchApi(
 
     throw ApiError.notFound(`Unknown search endpoint: ${sub}`)
   } catch (error) {
+    if (req.signal.aborted) {
+      return new Response(null, { status: 499 })
+    }
     return errorResponse(error)
   }
 }

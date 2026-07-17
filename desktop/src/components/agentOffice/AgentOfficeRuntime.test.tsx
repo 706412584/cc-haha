@@ -25,6 +25,7 @@ function snapshot(backgroundTasks?: Parameters<typeof buildSessionActivityModel>
     isMemberSession: false,
     mainAgent: {
       status: 'tool_executing',
+      operationalStatus: 'foreground',
       activeToolName: 'Agent',
       statusVerb: 'Delegating',
     },
@@ -176,6 +177,102 @@ describe('AgentOfficeRuntime', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Clear finished' }))
     expect(onDismissActivityRows).toHaveBeenCalledWith([expect.any(String)])
+  })
+
+  it('operates ready tasks, queues, and TeamMember messages through explicit callbacks', () => {
+    const activity = snapshot([])
+    activity.mainAgent = {
+      status: 'idle',
+      operationalStatus: 'ready',
+      activeToolName: null,
+      statusVerb: '',
+    }
+    activity.model = buildSessionActivityModel({
+      sessionId: 'session-1',
+      tasks: [
+        {
+          id: 'ready-2', subject: 'Second ready task', description: '', status: 'pending', owner: 'main-agent', blocks: [], blockedBy: [], taskListId: 'session-1',
+        },
+        {
+          id: 'blocked-1', subject: 'Blocked task', description: '', status: 'pending', owner: 'worker-agent', blocks: [], blockedBy: ['ready-2'], taskListId: 'session-1',
+        },
+        {
+          id: 'ready-1', subject: 'First ready task', description: '', status: 'pending', blocks: [], blockedBy: [], taskListId: 'session-1',
+        },
+      ],
+      completedAndDismissed: false,
+      backgroundTasks: [],
+      agentNotifications: [],
+      teamMembers: [{ agentId: 'designer', role: 'Designer', status: 'idle' }],
+      queuedMessages: [{
+        id: 'queue-1',
+        content: 'Process task\nTask IDs: ready-1',
+        displayContent: 'Process first ready task',
+        createdAt: 1000,
+      }],
+    })
+    const onDispatchTasks = vi.fn()
+    const onSendQueuedMessageNow = vi.fn()
+    const onRemoveQueuedMessage = vi.fn()
+    const onSendMemberMessage = vi.fn()
+
+    render(
+      <AgentOfficeRuntime
+        sessionId="session-1"
+        activity={activity}
+        onDispatchTasks={onDispatchTasks}
+        onSendQueuedMessageNow={onSendQueuedMessageNow}
+        onRemoveQueuedMessage={onRemoveQueuedMessage}
+        onSendMemberMessage={onSendMemberMessage}
+      />,
+    )
+
+    expect(screen.getByText('Owner: main-agent')).toBeInTheDocument()
+    expect(screen.getByText('Blocked by: ready-2')).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'Select Blocked task' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select Second ready task' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select First ready task' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Process selected tasks now' }))
+    expect(onDispatchTasks).toHaveBeenCalledWith(['ready-1', 'ready-2'])
+
+    fireEvent.click(screen.getByRole('button', { name: /Process first ready task/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Send queued message now' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Remove queued message' }))
+    expect(onSendQueuedMessageNow).toHaveBeenCalledWith('queue-1')
+    expect(onRemoveQueuedMessage).toHaveBeenCalledWith('queue-1')
+
+    fireEvent.click(screen.getByRole('button', { name: /Designer/ }))
+    fireEvent.change(screen.getByPlaceholderText('Message this TeamMember'), { target: { value: 'Share progress' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send to TeamMember' }))
+    expect(onSendMemberMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: 'designer' }),
+      'Share progress',
+    )
+  })
+
+  it('labels busy Main task actions as next-turn queueing', () => {
+    const activity = snapshot([])
+    activity.model = buildSessionActivityModel({
+      sessionId: 'session-1',
+      tasks: [{
+        id: 'ready', subject: 'Ready task', description: '', status: 'pending', blocks: [], blockedBy: [], taskListId: 'session-1',
+      }],
+      completedAndDismissed: false,
+      backgroundTasks: [],
+      agentNotifications: [],
+    })
+
+    render(
+      <AgentOfficeRuntime
+        sessionId="session-1"
+        activity={activity}
+        dispatchMode="queue"
+        onDispatchTasks={vi.fn()}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /Ready task/ }))
+    expect(screen.getByRole('button', { name: 'Add this task to next turn' })).toBeInTheDocument()
   })
 
   it('renders locale-specific Office chrome without Simplified Chinese leakage', () => {
