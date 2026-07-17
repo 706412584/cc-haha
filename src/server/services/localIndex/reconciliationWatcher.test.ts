@@ -246,6 +246,7 @@ describe('local index reconciliation watcher', () => {
       },
     })
     await watcher.start()
+    await waitFor(() => batches.length === 1)
     await entered.promise
     watcher.queueTranscriptPath(join(projectDir, 'late.jsonl'))
     const stopping = watcher.stop()

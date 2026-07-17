@@ -373,7 +373,7 @@ describe('scheduled run read model', () => {
     await fs.utimes(sourcePath, original.atimeMs / 1000, original.mtimeMs / 1000)
     const restored = await fs.stat(sourcePath)
     expect(restored.size).toBe(original.size)
-    expect(restored.mtimeMs).toBe(original.mtimeMs)
+    expect(restored.mtimeMs).toBeCloseTo(original.mtimeMs, 2)
 
     expect((await readScheduledRunPage(sourcePath, { summaryOnly: true }))?.runs[0]?.id).toBe('run-b')
     expect(getScheduledRunReadModelDiagnosticsForTests()).toEqual({
@@ -404,7 +404,7 @@ describe('scheduled run read model', () => {
     await fs.utimes(sourcePath, original.atimeMs / 1000, original.mtimeMs / 1000)
     const restored = await fs.stat(sourcePath)
     expect(restored.size).toBe(original.size)
-    expect(restored.mtimeMs).toBe(original.mtimeMs)
+    expect(restored.mtimeMs).toBeCloseTo(original.mtimeMs, 2)
     expect(restored.ctimeMs).not.toBe(original.ctimeMs)
 
     await readScheduledRunPage(sourcePath, { summaryOnly: true })

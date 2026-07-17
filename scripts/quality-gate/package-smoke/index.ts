@@ -148,6 +148,10 @@ function detectHostPlatform() {
   return process.platform
 }
 
+export function resolvePackageSmokeRoot(packageSmokeDir: string = import.meta.dir): string {
+  return resolve(packageSmokeDir, '../../..')
+}
+
 function readDesktopMetadata(rootDir: string): DesktopMetadata {
   const packageJsonPath = join(rootDir, 'desktop', 'package.json')
   const raw = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as {
@@ -931,7 +935,7 @@ function printReport(report: PackageSmokeReport) {
 if (import.meta.main) {
   try {
     const args = parsePackageSmokeArgs(process.argv.slice(2))
-    const report = await inspectPackagedArtifacts(process.cwd(), args)
+    const report = await inspectPackagedArtifacts(resolvePackageSmokeRoot(), args)
     printReport(report)
     process.exit(report.passed ? 0 : 1)
   } catch (error) {

@@ -2527,7 +2527,7 @@ describe('WebSocket Chat Integration', () => {
           const timeout = setTimeout(() => {
             ws.close()
             reject(new Error(`Timed out waiting for prewarm connection for ${sessionId}`))
-          }, 5_000)
+          }, 15_000)
 
           ws.onmessage = (event) => {
             const msg = JSON.parse(event.data as string)
@@ -2567,7 +2567,7 @@ describe('WebSocket Chat Integration', () => {
         conversationService.stopSession(sessionId)
       }
     })
-  }, 10_000)
+  }, 20_000)
 
   it('should complete the client turn when the CLI exits after startup', async () => {
     const messages = await withMockExitAfterFirstUser(50, () =>

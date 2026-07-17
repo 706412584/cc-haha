@@ -88,7 +88,9 @@ async function api(method: string, urlPath: string, body?: unknown) {
 describe('Business Flow: Scheduled Tasks', () => {
   beforeAll(startTestServer)
   afterAll(async () => {
-    server?.stop()
+    server?.stop(true)
+    const { stopServerRuntimeForShutdown } = await import('../../index.js')
+    await stopServerRuntimeForShutdown()
     await fs.rm(tmpDir, { recursive: true, force: true })
   })
 
@@ -208,7 +210,9 @@ describe('Business Flow: Scheduled Tasks', () => {
 describe('Business Flow: Permission Modes', () => {
   beforeAll(startTestServer)
   afterAll(async () => {
-    server?.stop()
+    server?.stop(true)
+    const { stopServerRuntimeForShutdown } = await import('../../index.js')
+    await stopServerRuntimeForShutdown()
     await fs.rm(tmpDir, { recursive: true, force: true })
   })
 
@@ -254,7 +258,9 @@ describe('Business Flow: Permission Modes', () => {
 describe('Business Flow: Agent Management', () => {
   beforeAll(startTestServer)
   afterAll(async () => {
-    server?.stop()
+    server?.stop(true)
+    const { stopServerRuntimeForShutdown } = await import('../../index.js')
+    await stopServerRuntimeForShutdown()
     await fs.rm(tmpDir, { recursive: true, force: true })
   })
 
@@ -362,7 +368,9 @@ describe('Business Flow: Agent Management', () => {
 describe('Business Flow: Models & Effort', () => {
   beforeAll(startTestServer)
   afterAll(async () => {
-    server?.stop()
+    server?.stop(true)
+    const { stopServerRuntimeForShutdown } = await import('../../index.js')
+    await stopServerRuntimeForShutdown()
     await fs.rm(tmpDir, { recursive: true, force: true })
   })
 
@@ -449,7 +457,9 @@ describe('Business Flow: Models & Effort', () => {
 describe('Business Flow: Sessions & CLI Interop', () => {
   beforeAll(startTestServer)
   afterAll(async () => {
-    server?.stop()
+    server?.stop(true)
+    const { stopServerRuntimeForShutdown } = await import('../../index.js')
+    await stopServerRuntimeForShutdown()
     await fs.rm(tmpDir, { recursive: true, force: true })
   })
 
@@ -575,7 +585,9 @@ describe('Business Flow: Search', () => {
     await fs.writeFile(path.join(testDir, 'config.json'), '{"port": 3456}\n')
   })
   afterAll(async () => {
-    server?.stop()
+    server?.stop(true)
+    const { stopServerRuntimeForShutdown } = await import('../../index.js')
+    await stopServerRuntimeForShutdown()
     await fs.rm(tmpDir, { recursive: true, force: true })
   })
 
@@ -618,7 +630,9 @@ describe('Business Flow: Search', () => {
 describe('Business Flow: WebSocket Chat', () => {
   beforeAll(startTestServer)
   afterAll(async () => {
-    server?.stop()
+    server?.stop(true)
+    const { stopServerRuntimeForShutdown } = await import('../../index.js')
+    await stopServerRuntimeForShutdown()
     await fs.rm(tmpDir, { recursive: true, force: true })
   })
 
@@ -767,7 +781,9 @@ describe('Business Flow: WebSocket Chat', () => {
 describe('Business Flow: Settings Persistence', () => {
   beforeAll(startTestServer)
   afterAll(async () => {
-    server?.stop()
+    server?.stop(true)
+    const { stopServerRuntimeForShutdown } = await import('../../index.js')
+    await stopServerRuntimeForShutdown()
     await fs.rm(tmpDir, { recursive: true, force: true })
   })
 
@@ -827,7 +843,9 @@ describe('Business Flow: Settings Persistence', () => {
 describe('Business Flow: Status & Diagnostics', () => {
   beforeAll(startTestServer)
   afterAll(async () => {
-    server?.stop()
+    server?.stop(true)
+    const { stopServerRuntimeForShutdown } = await import('../../index.js')
+    await stopServerRuntimeForShutdown()
     await fs.rm(tmpDir, { recursive: true, force: true })
   })
 
@@ -867,7 +885,9 @@ describe('Business Flow: Status & Diagnostics', () => {
 describe('Business Flow: Error Handling', () => {
   beforeAll(startTestServer)
   afterAll(async () => {
-    server?.stop()
+    server?.stop(true)
+    const { stopServerRuntimeForShutdown } = await import('../../index.js')
+    await stopServerRuntimeForShutdown()
     await fs.rm(tmpDir, { recursive: true, force: true })
   })
 

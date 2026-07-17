@@ -1,6 +1,10 @@
 import {
+  chmodSync,
+  closeSync,
+  constants,
   lstatSync,
   mkdirSync,
+  openSync,
   realpathSync,
 } from 'node:fs'
 import {
@@ -41,9 +45,13 @@ function isContained(root: string, candidate: string): boolean {
   )
 }
 
+function restrictPermissions(path: string, mode: number): void {
+  if (process.platform !== 'win32') chmodSync(path, mode)
+}
+
 function ensureRealManagedDirectory(path: string, trustRoot: string): void {
   try {
-    mkdirSync(path)
+    mkdirSync(path, { mode: 0o700 })
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
   }
@@ -53,6 +61,20 @@ function ensureRealManagedDirectory(path: string, trustRoot: string): void {
   }
   if (!isContained(trustRoot, realpathSync(path))) {
     throw new UnsafeLocalIndexPathError()
+  }
+  restrictPermissions(path, 0o700)
+}
+
+function ensureDatabaseFile(databasePath: string): void {
+  try {
+    const descriptor = openSync(
+      databasePath,
+      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
+      0o600,
+    )
+    closeSync(descriptor)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
   }
 }
 
@@ -72,7 +94,12 @@ function assertDatabaseFamilySafe(databasePath: string): void {
     ) {
       throw new UnsafeLocalIndexPathError()
     }
+    restrictPermissions(path, 0o600)
   }
+}
+
+export function restrictManagedDatabasePermissions(databasePath: string): void {
+  assertDatabaseFamilySafe(resolve(databasePath))
 }
 
 /**
@@ -87,7 +114,8 @@ export function prepareManagedDatabasePath(options: {
 }): void {
   const databasePath = resolve(options.databasePath)
   if (!options.scope) {
-    mkdirSync(dirname(databasePath), { recursive: true })
+    mkdirSync(dirname(databasePath), { recursive: true, mode: 0o700 })
+    ensureDatabaseFile(databasePath)
     assertDatabaseFamilySafe(databasePath)
     return
   }
@@ -108,5 +136,6 @@ export function prepareManagedDatabasePath(options: {
   const databaseDir = join(ccHahaDir, 'db')
   ensureRealManagedDirectory(ccHahaDir, trustRoot)
   ensureRealManagedDirectory(databaseDir, trustRoot)
+  ensureDatabaseFile(databasePath)
   assertDatabaseFamilySafe(databasePath)
 }

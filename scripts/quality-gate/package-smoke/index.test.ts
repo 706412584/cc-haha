@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import {
   currentPackageSmokeArch,
   currentPackageSmokePlatform,
@@ -9,6 +9,7 @@ import {
 import {
   inspectPackagedArtifacts,
   parsePackageSmokeArgs,
+  resolvePackageSmokeRoot,
 } from './index'
 
 function createRepoRoot() {
@@ -67,6 +68,12 @@ describe('package smoke args', () => {
     expect(parsePackageSmokeArgs(['--platform', 'macos']).packageKind).toBe('auto')
     expect(parsePackageSmokeArgs(['--platform', 'macos', '--package-kind', 'dir']).packageKind).toBe('dir')
     expect(parsePackageSmokeArgs(['--platform', 'macos', '--require-macos-gatekeeper']).requireMacosGatekeeper).toBe(true)
+  })
+
+  test('resolves the repository root from the package-smoke module directory', () => {
+    expect(resolvePackageSmokeRoot(join('repo', 'scripts', 'quality-gate', 'package-smoke'))).toBe(
+      resolve('repo'),
+    )
   })
 
   test('maps host platforms to current package-smoke platforms', () => {
@@ -365,7 +372,7 @@ describe('packaged artifact inspection', () => {
     })
 
     expect(report.passed).toBe(true)
-    expect(report.artifactsDir.endsWith('desktop/build-artifacts/windows-x64')).toBe(true)
+    expect(report.artifactsDir.replaceAll('\\', '/').endsWith('desktop/build-artifacts/windows-x64')).toBe(true)
   })
 
   test('passes Windows arm64 checks only when arm64 sidecar and node-pty native module are present', async () => {
@@ -378,6 +385,7 @@ describe('packaged artifact inspection', () => {
     writeFile(rootDir, 'desktop/build-artifacts/windows-arm64/win-arm64-unpacked/resources/app-update.yml')
     writeFile(rootDir, 'desktop/build-artifacts/windows-arm64/win-arm64-unpacked/resources/app.asar.unpacked/src-tauri/binaries/claude-sidecar-aarch64-pc-windows-msvc.exe')
     writeFile(rootDir, 'desktop/build-artifacts/windows-arm64/win-arm64-unpacked/resources/app.asar.unpacked/node_modules/node-pty/package.json')
+    writeFile(rootDir, 'desktop/build-artifacts/windows-arm64/win-arm64-unpacked/resources/app.asar.unpacked/plugin-seed/marketplaces/cc-haha-builtin/.claude-plugin/marketplace.json')
     writeFile(rootDir, 'desktop/build-artifacts/windows-arm64/win-arm64-unpacked/resources/app.asar.unpacked/node_modules/node-pty/prebuilds/win32-arm64/pty.node')
     writeFile(rootDir, 'desktop/build-artifacts/windows-arm64/latest.yml', 'path: Claude-Code-Haha-0.3.1-arm64.exe\n')
 
@@ -499,7 +507,7 @@ describe('packaged artifact inspection', () => {
     })
 
     expect(report.passed).toBe(true)
-    expect(report.artifactsDir.endsWith('desktop/build-artifacts/linux-x64')).toBe(true)
+    expect(report.artifactsDir.replaceAll('\\', '/').endsWith('desktop/build-artifacts/linux-x64')).toBe(true)
   })
 
   test('accepts Linux architecture-specific update metadata from arm64 builds', async () => {
@@ -573,7 +581,7 @@ describe('packaged artifact inspection', () => {
     })
 
     expect(report.passed).toBe(true)
-    expect(report.passedChecks.some((check) => check.path.includes('linux-arm64-unpacked/resources/app.asar'))).toBe(true)
+    expect(report.passedChecks.some((check) => check.path.replaceAll('\\', '/').includes('linux-arm64-unpacked/resources/app.asar'))).toBe(true)
   })
 
   test('passes Linux directory-only checks for electron-builder --dir output', async () => {

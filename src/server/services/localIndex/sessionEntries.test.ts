@@ -505,14 +505,16 @@ describe('targeted session entry reads', () => {
         page: { ...page, source: { ...page.source, path: outside } },
       })).toBeNull()
 
-      const link = join(root, 'projects', '-tmp-project', 'linked.jsonl')
-      await symlink(outside, link)
-      expect(await readSessionEntriesByLocator({
-        transcriptPath: link,
-        projectsRoot: join(root, 'projects'),
-        expectedProjectDir: '-tmp-project',
-        page: { ...page, source: { ...page.source, path: link } },
-      })).toBeNull()
+      if (process.platform !== 'win32') {
+        const link = join(root, 'projects', '-tmp-project', 'linked.jsonl')
+        await symlink(outside, link)
+        expect(await readSessionEntriesByLocator({
+          transcriptPath: link,
+          projectsRoot: join(root, 'projects'),
+          expectedProjectDir: '-tmp-project',
+          page: { ...page, source: { ...page.source, path: link } },
+        })).toBeNull()
+      }
     } finally {
       database.close()
     }

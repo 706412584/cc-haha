@@ -5,6 +5,7 @@ import { getCcHahaDir, getClaudeConfigHomeDir } from '../../../utils/envUtils.js
 import {
   LOCAL_INDEX_BUSY_TIMEOUT_MS,
   prepareManagedDatabasePath,
+  restrictManagedDatabasePermissions,
 } from './managedDatabasePath.js'
 import {
   assertScheduledRunIndexSchemaSupported,
@@ -318,6 +319,7 @@ export function openScheduledRunIndex(options?: {
     database.exec('PRAGMA foreign_keys = ON')
     database.exec('PRAGMA wal_autocheckpoint = 1000')
     migrateScheduledRunIndexDatabase(database)
+    restrictManagedDatabasePermissions(databasePath)
   } catch (error) {
     database.close(true)
     throw error

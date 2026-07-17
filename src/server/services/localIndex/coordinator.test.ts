@@ -389,12 +389,14 @@ describe('local index coordinator', () => {
     await watcherOptions.onBatch({ paths: [second.path], fullSweep: false })
     expect(coordinator.listSessions({ limit: 10 }).total).toBe(2)
 
-    const outside = join(configDir, 'outside.jsonl')
-    const linked = join(configDir, 'projects', '-repo', 'linked.jsonl')
-    await writeFile(outside, await Bun.file(second.path).text())
-    await symlink(outside, linked)
-    await watcherOptions.onBatch({ paths: [linked], fullSweep: false })
-    expect(coordinator.listSessions({ limit: 10 }).total).toBe(2)
+    if (process.platform !== 'win32') {
+      const outside = join(configDir, 'outside.jsonl')
+      const linked = join(configDir, 'projects', '-repo', 'linked.jsonl')
+      await writeFile(outside, await Bun.file(second.path).text())
+      await symlink(outside, linked)
+      await watcherOptions.onBatch({ paths: [linked], fullSweep: false })
+      expect(coordinator.listSessions({ limit: 10 }).total).toBe(2)
+    }
 
     await rm(first.path)
     await watcherOptions.onBatch({ paths: [first.path], fullSweep: false })

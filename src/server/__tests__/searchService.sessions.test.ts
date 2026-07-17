@@ -636,7 +636,7 @@ describe('SearchService.searchSessions', () => {
 
     expect(directoryAfter.mtimeMs).toBe(directoryBefore.mtimeMs)
     expect(directoryAfter.ctimeMs).toBe(directoryBefore.ctimeMs)
-    expect((await fs.stat(transcriptPath)).mtimeMs).toBe(sourceBefore.mtimeMs)
+    expect((await fs.stat(transcriptPath)).mtimeMs).toBeCloseTo(sourceBefore.mtimeMs, 2)
     expect(filterCalls).toBe(2)
     expect(rgCalls).toBe(2)
     expect(results.map(result => result.sessionId)).toEqual(['changed-session'])

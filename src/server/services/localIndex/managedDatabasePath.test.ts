@@ -4,6 +4,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { openLocalIndexDatabase } from './database.js'
 import { openScheduledRunIndex } from './scheduledRunIndex.js'
+import { openSearchContentDatabase } from './searchContentDatabase.js'
 import { openTraceIndexDatabase } from './traceDatabase.js'
 
 const roots: string[] = []
@@ -21,10 +22,11 @@ afterEach(async () => {
 })
 
 describe('managed SQLite database paths', () => {
-  test.each([
+  test.skipIf(process.platform === 'win32').each([
     ['session', 'index-v1.sqlite', openLocalIndexDatabase],
     ['trace', 'trace-index-v1.sqlite', openTraceIndexDatabase],
     ['scheduled', 'scheduled-runs-v1.sqlite', openScheduledRunIndex],
+    ['search', 'search-index-v1.sqlite', openSearchContentDatabase],
   ] as const)(
     'rejects a descendant db-directory symlink before opening the %s database',
     async (_kind, filename, openDatabase) => {
@@ -45,7 +47,7 @@ describe('managed SQLite database paths', () => {
     },
   )
 
-  test('allows the configured trust root itself to be a symlink', async () => {
+  test.skipIf(process.platform === 'win32')('allows the configured trust root itself to be a symlink', async () => {
     const root = await tempRoot('scope-symlink')
     const realScope = path.join(root, 'real-config')
     const scope = path.join(root, 'config-link')
@@ -59,7 +61,67 @@ describe('managed SQLite database paths', () => {
     expect((await fs.lstat(databasePath)).isFile()).toBe(true)
   })
 
-  test('rejects an existing database-file symlink', async () => {
+  test.each([
+    ['session', 'index-v1.sqlite', openLocalIndexDatabase],
+    ['trace', 'trace-index-v1.sqlite', openTraceIndexDatabase],
+    ['scheduled', 'scheduled-runs-v1.sqlite', openScheduledRunIndex],
+    ['search', 'search-index-v1.sqlite', openSearchContentDatabase],
+  ] as const)(
+    'restricts the %s database directory and SQLite file family to the current user',
+    async (_kind, filename, openDatabase) => {
+      if (process.platform === 'win32') return
+
+      const root = await tempRoot(`permissions-${filename}`)
+      const scope = path.join(root, 'config')
+      const ccHahaDir = path.join(scope, 'cc-haha')
+      const databaseDir = path.join(ccHahaDir, 'db')
+      const databasePath = path.join(databaseDir, filename)
+      await fs.mkdir(databaseDir, { recursive: true, mode: 0o777 })
+      await fs.chmod(ccHahaDir, 0o777)
+      await fs.chmod(databaseDir, 0o777)
+      await fs.writeFile(databasePath, '')
+      await fs.chmod(databasePath, 0o666)
+
+      const database = openDatabase({ path: databasePath, scope })
+      try {
+        expect((await fs.stat(ccHahaDir)).mode & 0o777).toBe(0o700)
+        expect((await fs.stat(databaseDir)).mode & 0o777).toBe(0o700)
+        for (const candidate of [
+          databasePath,
+          `${databasePath}-wal`,
+          `${databasePath}-shm`,
+          `${databasePath}-journal`,
+        ]) {
+          const snapshot = await fs.stat(candidate).catch(error => {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+            throw error
+          })
+          if (snapshot) expect(snapshot.mode & 0o777).toBe(0o600)
+        }
+      } finally {
+        database.close()
+      }
+    },
+  )
+
+  test('creates a new managed database file with owner-only permissions before SQLite opens it', async () => {
+    if (process.platform === 'win32') return
+
+    const root = await tempRoot('new-file-permissions')
+    const scope = path.join(root, 'config')
+    const databasePath = path.join(scope, 'cc-haha', 'db', 'index-v1.sqlite')
+    const { prepareManagedDatabasePath } = await import('./managedDatabasePath.js')
+
+    prepareManagedDatabasePath({
+      databasePath,
+      filename: 'index-v1.sqlite',
+      scope,
+    })
+
+    expect((await fs.stat(databasePath)).mode & 0o777).toBe(0o600)
+  })
+
+  test.skipIf(process.platform === 'win32')('rejects an existing database-file symlink', async () => {
     const root = await tempRoot('file-symlink')
     const scope = path.join(root, 'config')
     const databaseDir = path.join(scope, 'cc-haha', 'db')

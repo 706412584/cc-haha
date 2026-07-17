@@ -4,6 +4,7 @@ import { getCcHahaDir, getClaudeConfigHomeDir } from '../../../utils/envUtils.js
 import {
   LOCAL_INDEX_BUSY_TIMEOUT_MS,
   prepareManagedDatabasePath,
+  restrictManagedDatabasePermissions,
 } from './managedDatabasePath.js'
 import {
   assertTraceIndexSchemaSupported,
@@ -70,6 +71,7 @@ export function openTraceIndexDatabase(options?: {
     assertTraceIndexSchemaSupported(database)
     configureConnection(database)
     migrateTraceIndexDatabase(database)
+    restrictManagedDatabasePermissions(databasePath)
   } catch (error) {
     database.clearQueryCache()
     database.close(true)

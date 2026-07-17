@@ -2,7 +2,14 @@ import { describe, expect, it } from 'vitest'
 import { chmodSync, mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { expandTildePath, normalizeExternalUrl, normalizeOpenPath, normalizeSystemSettingsUrl } from './shell'
+import {
+  expandTildePath,
+  isBlockedSystemPath,
+  normalizeExternalUrl,
+  normalizeOpenPath,
+  normalizeRevealPath,
+  normalizeSystemSettingsUrl,
+} from './shell'
 
 describe('Electron shell service', () => {
   it('allows only explicit external URL schemes', () => {
@@ -34,6 +41,76 @@ describe('Electron shell service', () => {
       rmSync(rootDir, { recursive: true, force: true })
     }
     expect(() => normalizeOpenPath('relative/report.md')).toThrow('absolute')
+  })
+
+  it('rejects Windows shell shortcuts and script-host file types', () => {
+    const blockedExtensions = [
+      '.lnk',
+      '.pif',
+      '.url',
+      '.hta',
+      '.js',
+      '.jse',
+      '.vbs',
+      '.vbe',
+      '.wsf',
+      '.wsh',
+      '.command',
+      '.cpl',
+      '.desktop',
+    ]
+    for (const extension of blockedExtensions) {
+      expect(isBlockedSystemPath(`C:\\attachments\\payload${extension.toUpperCase()}`, false, 'win32')).toBe(true)
+    }
+  })
+
+  it('allows only known document, archive, and media file types on Windows', () => {
+    const allowedExtensions = [
+      '.pdf',
+      '.zip',
+      '.7z',
+      '.rar',
+      '.tar',
+      '.gz',
+      '.tgz',
+      '.bz2',
+      '.xz',
+      '.mdx',
+      '.markdown',
+      '.rst',
+      '.m4a',
+      '.flac',
+      '.aac',
+      '.ogg',
+      '.opus',
+      '.m4v',
+      '.mkv',
+      '.avi',
+      '.ico',
+    ]
+    for (const extension of allowedExtensions) {
+      expect(isBlockedSystemPath(`C:\\attachments\\attachment${extension.toUpperCase()}`, false, 'win32')).toBe(false)
+    }
+
+    expect(isBlockedSystemPath('C:\\attachments\\attachment.unknown', false, 'win32')).toBe(true)
+    expect(isBlockedSystemPath('C:\\attachments\\invoice.pdf.PIF', false, 'win32')).toBe(true)
+  })
+
+  it('reveals session and output files without allowing the system to open them', () => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'electron-shell-reveal-'))
+    const sessionPath = join(rootDir, 'session.jsonl')
+    const outputPath = join(rootDir, 'task.output')
+    try {
+      writeFileSync(sessionPath, 'session')
+      writeFileSync(outputPath, 'output')
+
+      expect(normalizeRevealPath(sessionPath)).toBe(realpathSync(sessionPath))
+      expect(normalizeRevealPath(outputPath)).toBe(realpathSync(outputPath))
+      expect(isBlockedSystemPath('C:\\sessions\\session.jsonl', false, 'win32')).toBe(true)
+      expect(isBlockedSystemPath('C:\\outputs\\task.output', false, 'win32')).toBe(true)
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true })
+    }
   })
 
   it('expands tilde paths per platform', () => {

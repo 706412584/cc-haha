@@ -177,7 +177,9 @@ describe('Tasks API', () => {
   })
 
   afterEach(async () => {
-    server?.stop()
+    server?.stop(true)
+    const { stopServerRuntimeForShutdown } = await import('../../server/index.js')
+    await stopServerRuntimeForShutdown()
     await fs.rm(tmpDir, { recursive: true, force: true })
     delete process.env.CLAUDE_CONFIG_DIR
   })

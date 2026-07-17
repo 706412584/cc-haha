@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { spawnSync } from 'node:child_process'
+import { resolve } from 'node:path'
 
 export function currentPackageSmokePlatform(platform: NodeJS.Platform = process.platform) {
   if (platform === 'darwin') return 'macos'
@@ -36,6 +37,7 @@ if (import.meta.main) {
   }
 
   const result = spawnSync('bun', args, {
+    cwd: resolve(import.meta.dir, '../../..'),
     stdio: 'inherit',
   })
   process.exit(result.status ?? 1)

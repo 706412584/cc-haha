@@ -8,16 +8,87 @@ const ALLOWED_SYSTEM_SETTINGS_URLS = new Set([
   'ms-settings:notifications',
   'x-apple.systempreferences:com.apple.preference.notifications',
 ])
+const ALLOWED_SYSTEM_FILE_EXTENSIONS = new Set([
+  '.7z',
+  '.aac',
+  '.avif',
+  '.avi',
+  '.bmp',
+  '.bz2',
+  '.csv',
+  '.doc',
+  '.docx',
+  '.flac',
+  '.gif',
+  '.gz',
+  '.heic',
+  '.ico',
+  '.jpeg',
+  '.jpg',
+  '.json',
+  '.log',
+  '.m4a',
+  '.m4v',
+  '.markdown',
+  '.md',
+  '.mdx',
+  '.mkv',
+  '.mov',
+  '.mp3',
+  '.mp4',
+  '.odf',
+  '.odp',
+  '.ods',
+  '.odt',
+  '.ogg',
+  '.opus',
+  '.pdf',
+  '.png',
+  '.ppt',
+  '.pptx',
+  '.rar',
+  '.rst',
+  '.rtf',
+  '.svg',
+  '.tar',
+  '.tgz',
+  '.toml',
+  '.tsv',
+  '.txt',
+  '.wav',
+  '.webm',
+  '.webp',
+  '.xls',
+  '.xlsx',
+  '.xml',
+  '.xz',
+  '.yaml',
+  '.yml',
+  '.zip',
+])
 const BLOCKED_EXECUTABLE_EXTENSIONS = new Set([
   '.app',
   '.bat',
   '.cmd',
   '.com',
+  '.command',
+  '.cpl',
+  '.desktop',
   '.exe',
+  '.hta',
+  '.js',
+  '.jse',
+  '.lnk',
   '.msi',
+  '.pif',
   '.ps1',
   '.scr',
   '.sh',
+  '.url',
+  '.vbe',
+  '.vbs',
+  '.wsf',
+  '.wsh',
 ])
 
 export function normalizeExternalUrl(target: string): string {
@@ -49,7 +120,7 @@ export function expandTildePath(target: string, platform: NodeJS.Platform = proc
   return target
 }
 
-export function normalizeOpenPath(
+export function normalizeRevealPath(
   target: string,
   platform: NodeJS.Platform = process.platform,
 ): string {
@@ -82,17 +153,30 @@ export function normalizeOpenPath(
   if (!stat.isFile() && !stat.isDirectory()) {
     throw new Error('System file paths must point to a file or directory')
   }
-  if (isBlockedExecutablePath(realPath, stat.isDirectory())) {
+  return realPath
+}
+
+export function normalizeOpenPath(
+  target: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const realPath = normalizeRevealPath(target, platform)
+  const stat = statSync(realPath)
+  if (isBlockedSystemPath(realPath, stat.isDirectory(), platform)) {
     throw new Error('System file paths must not point to executable apps or scripts')
   }
   return realPath
 }
 
-function isBlockedExecutablePath(realPath: string, isDirectory: boolean) {
+export function isBlockedSystemPath(
+  realPath: string,
+  isDirectory: boolean,
+  platform: NodeJS.Platform,
+) {
   const ext = path.extname(realPath).toLowerCase()
   if (BLOCKED_EXECUTABLE_EXTENSIONS.has(ext)) return true
   if (isDirectory) return false
-  if (process.platform === 'win32') return false
+  if (platform === 'win32') return !ALLOWED_SYSTEM_FILE_EXTENSIONS.has(ext)
   return (statSync(realPath).mode & 0o111) !== 0
 }
 
@@ -127,5 +211,5 @@ export async function openSystemPath(target: string): Promise<void> {
  */
 export async function showItemInFolder(target: string): Promise<void> {
   const { shell } = await import('electron')
-  shell.showItemInFolder(normalizeOpenPath(target))
+  shell.showItemInFolder(normalizeRevealPath(target))
 }

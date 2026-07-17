@@ -1,82 +1,101 @@
+import { execFileSync } from 'node:child_process'
+import { realpathSync, statSync } from 'node:fs'
 import memoize from 'lodash-es/memoize.js'
-import * as path from 'path'
 import * as pathWin32 from 'path/win32'
 import { getCwd } from './cwd.js'
 import { logForDebugging } from './debug.js'
-import { execSync_DEPRECATED } from './execSyncWrapper.js'
 import { memoizeWithLRU } from './memoize.js'
 import { getPlatform } from './platform.js'
 
-/**
- * Check if a file or directory exists on Windows using the dir command
- * @param path - The path to check
- * @returns true if the path exists, false otherwise
- */
-function checkPathExists(path: string): boolean {
+function checkPathExists(target: string): boolean {
   try {
-    execSync_DEPRECATED(`dir "${path}"`, { stdio: 'pipe' })
-    return true
+    return statSync(target).isFile()
   } catch {
     return false
   }
 }
 
-/**
- * Find an executable using where.exe on Windows
- * @param executable - The name of the executable to find
- * @returns The path to the executable or null if not found
- */
-function findExecutable(executable: string): string | null {
-  // For git, check common installation locations first
-  if (executable === 'git') {
-    const defaultLocations = [
-      // check 64 bit before 32 bit
-      'C:\\Program Files\\Git\\cmd\\git.exe',
-      'C:\\Program Files (x86)\\Git\\cmd\\git.exe',
-      // intentionally don't look for C:\Program Files\Git\mingw64\bin\git.exe
-      // because that directory is the "raw" tools with no environment setup
-    ]
+export function resolveTrustedWherePath(env: NodeJS.ProcessEnv = process.env): string | null {
+  const systemRoot = env.SystemRoot?.trim()
+    || env.SYSTEMROOT?.trim()
+    || env.WINDIR?.trim()
+  return systemRoot ? pathWin32.join(systemRoot, 'System32', 'where.exe') : null
+}
 
-    for (const location of defaultLocations) {
-      if (checkPathExists(location)) {
-        return location
-      }
-    }
-  }
+type FindExecutablesDeps = {
+  cwd?: string
+  defaultLocations?: readonly string[]
+  env?: NodeJS.ProcessEnv
+  exists?: (candidate: string) => boolean
+  realpath?: (candidate: string) => string
+  runWhere?: (wherePath: string, executable: string) => string
+  wherePath?: string | null
+}
 
-  // Fall back to where.exe
-  try {
-    const result = execSync_DEPRECATED(`where.exe ${executable}`, {
-      stdio: 'pipe',
+/** Find every trusted executable candidate reported by Windows. */
+export function findExecutables(
+  executable: string,
+  deps: FindExecutablesDeps = {},
+): string[] {
+  const env = deps.env ?? process.env
+  const exists = deps.exists ?? checkPathExists
+  const realpath = deps.realpath ?? realpathSync.native
+  const defaultLocations = deps.defaultLocations ?? (executable === 'git'
+    ? [
+        env.ProgramFiles,
+        env.PROGRAMFILES,
+        env['ProgramFiles(x86)'],
+        env['PROGRAMFILES(X86)'],
+      ]
+        .map(value => value?.trim())
+        .filter((value): value is string => Boolean(value))
+        .map(programFiles => pathWin32.join(programFiles, 'Git', 'cmd', 'git.exe'))
+    : [])
+  const wherePath = deps.wherePath === undefined
+    ? resolveTrustedWherePath(env)
+    : deps.wherePath
+  const runWhere = deps.runWhere ?? ((trustedWherePath, command) =>
+    execFileSync(trustedWherePath, [command], {
+      stdio: ['ignore', 'pipe', 'ignore'],
       encoding: 'utf8',
-    }).trim()
+      windowsHide: true,
+    }))
 
-    // SECURITY: Filter out any results from the current directory
-    // to prevent executing malicious git.bat/cmd/exe files
-    const paths = result.split('\r\n').filter(Boolean)
-    const cwd = getCwd().toLowerCase()
-
-    for (const candidatePath of paths) {
-      // Normalize and compare paths to ensure we're not in current directory
-      const normalizedPath = path.resolve(candidatePath).toLowerCase()
-      const pathDir = path.dirname(normalizedPath).toLowerCase()
-
-      // Skip if the executable is in the current working directory
-      if (pathDir === cwd || normalizedPath.startsWith(cwd + path.sep)) {
-        logForDebugging(
-          `Skipping potentially malicious executable in current directory: ${candidatePath}`,
-        )
-        continue
-      }
-
-      // Return the first valid path that's not in the current directory
-      return candidatePath
+  let whereCandidates: string[] = []
+  if (wherePath && exists(wherePath)) {
+    try {
+      whereCandidates = runWhere(wherePath, executable)
+        .trim()
+        .split(/\r?\n/)
+        .filter(Boolean)
+    } catch {
+      // Keep trusted default locations when PATH lookup fails.
     }
-
-    return null
-  } catch {
-    return null
   }
+
+  const cwd = realpath(deps.cwd ?? getCwd()).toLowerCase()
+  const candidates: string[] = []
+  const seen = new Set<string>()
+  for (const candidatePath of [...defaultLocations.filter(exists), ...whereCandidates]) {
+    let canonicalPath: string
+    try {
+      canonicalPath = realpath(candidatePath)
+    } catch {
+      continue
+    }
+    const normalizedPath = canonicalPath.toLowerCase()
+    const pathDir = pathWin32.dirname(normalizedPath).toLowerCase()
+    if (pathDir === cwd || normalizedPath.startsWith(cwd + '\\')) {
+      logForDebugging(
+        `Skipping potentially malicious executable in current directory: ${candidatePath}`,
+      )
+      continue
+    }
+    if (seen.has(normalizedPath)) continue
+    seen.add(normalizedPath)
+    candidates.push(canonicalPath)
+  }
+  return candidates
 }
 
 /**
@@ -99,6 +118,56 @@ export function setShellIfWindows(): void {
   }
 }
 
+function gitInstallRoot(gitExecutable: string): string | null {
+  const normalized = gitExecutable.replaceAll('/', '\\')
+  for (const suffix of [
+    '\\cmd\\git.exe',
+    '\\mingw64\\bin\\git.exe',
+    '\\mingw32\\bin\\git.exe',
+    '\\usr\\bin\\git.exe',
+    '\\bin\\git.exe',
+  ]) {
+    if (normalized.toLowerCase().endsWith(suffix)) {
+      return normalized.slice(0, -suffix.length)
+    }
+  }
+  return null
+}
+
+export function resolveGitBashPathFromGitExecutables(
+  gitExecutables: readonly string[],
+  exists: (candidate: string) => boolean = checkPathExists,
+  realpath: (candidate: string) => string = realpathSync.native,
+): string | null {
+  for (const gitExecutable of gitExecutables) {
+    let installRoot: string | null
+    try {
+      installRoot = gitInstallRoot(realpath(gitExecutable))
+    } catch {
+      continue
+    }
+    if (!installRoot) continue
+
+    const normalizedRoot = installRoot.toLowerCase() + '\\'
+    for (const relativeBashPath of [
+      ['bin', 'bash.exe'],
+      ['usr', 'bin', 'bash.exe'],
+    ]) {
+      const candidate = pathWin32.join(installRoot, ...relativeBashPath)
+      if (!exists(candidate)) continue
+      try {
+        const canonicalBash = realpath(candidate)
+        if (canonicalBash.toLowerCase().startsWith(normalizedRoot)) {
+          return canonicalBash
+        }
+      } catch {
+        continue
+      }
+    }
+  }
+  return null
+}
+
 /**
  * Best-effort Git Bash resolution on Windows.
  *
@@ -113,15 +182,7 @@ export const tryFindGitBashPath = memoize((): string | null => {
     return null
   }
 
-  const gitPath = findExecutable('git')
-  if (gitPath) {
-    const bashPath = pathWin32.join(gitPath, '..', '..', 'bin', 'bash.exe')
-    if (checkPathExists(bashPath)) {
-      return bashPath
-    }
-  }
-
-  return null
+  return resolveGitBashPathFromGitExecutables(findExecutables('git'))
 })
 
 /**

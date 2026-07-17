@@ -120,7 +120,10 @@ describe('source fingerprint transitions', () => {
       path,
       previous: beforeReplacement,
       parserVersion: 1,
-    })).toEqual({ kind: 'rebuild', reason: 'replace' })
+    })).toEqual({
+      kind: 'rebuild',
+      reason: process.platform === 'win32' ? 'rewrite' : 'replace',
+    })
 
     const beforeRewrite = await captureSourceFingerprint({
       path,

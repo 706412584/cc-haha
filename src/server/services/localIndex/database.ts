@@ -5,6 +5,7 @@ import { getLocalIndexDatabasePath } from './config.js'
 import {
   LOCAL_INDEX_BUSY_TIMEOUT_MS,
   prepareManagedDatabasePath,
+  restrictManagedDatabasePermissions,
 } from './managedDatabasePath.js'
 import {
   assertLocalIndexSchemaSupported,
@@ -122,6 +123,7 @@ export function openLocalIndexDatabase(options?: {
     assertLocalIndexSchemaSupported(database)
     configureConnection(database)
     migrateLocalIndexDatabase(database)
+    restrictManagedDatabasePermissions(databasePath)
   } catch (error) {
     database.clearQueryCache()
     database.close(true)

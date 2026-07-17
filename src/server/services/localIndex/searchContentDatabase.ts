@@ -5,6 +5,7 @@ import { getCcHahaDir, getClaudeConfigHomeDir } from '../../../utils/envUtils.js
 import {
   LOCAL_INDEX_BUSY_TIMEOUT_MS,
   prepareManagedDatabasePath,
+  restrictManagedDatabasePermissions,
 } from './managedDatabasePath.js'
 import {
   assertSearchContentSchemaHealthy,
@@ -120,6 +121,7 @@ export function openSearchContentDatabase(options?: {
     configureConnection(database)
     migrateSearchContentDatabase(database)
     assertSearchContentSchemaHealthy(database)
+    restrictManagedDatabasePermissions(databasePath)
   } catch (error) {
     database.clearQueryCache()
     database.close(true)
