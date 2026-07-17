@@ -157,7 +157,7 @@ describe('feature quality contract', () => {
     expect(coverageRunner).toContain('mergeLcovRecords')
     expect(coverageRunner).toContain('rootCoverageAvailable')
     expect(coverageRunner).toContain('rootTestDiscoveryComplete')
-    expect(coverageRunner).toContain('!rangeContainsMergeCommit(rootDir, changedBaseRef)')
+    expect(coverageRunner).toContain('shouldEvaluateChangedLines(rootDir, changedBaseRef)')
     expect(coverageRunner).toContain("id: 'root-runtime'")
     for (const contractRunner of [providerRunner, chatRunner]) {
       expect(contractRunner).toContain("'--no-env-file'")

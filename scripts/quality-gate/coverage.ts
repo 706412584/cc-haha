@@ -627,16 +627,16 @@ function gitOutput(rootDir: string, args: string[]) {
   return new TextDecoder().decode(proc.stdout)
 }
 
-function collectChangedLines(rootDir: string, baseRef?: string) {
-  const explicitBase = baseRef?.trim()
-  if (explicitBase) {
-    const diff = gitOutput(rootDir, ['diff', '--unified=0', '--no-ext-diff', `${explicitBase}...HEAD`, '--'])
-    return diff ? parseChangedLinesFromDiff(diff) : new Map<string, Set<number>>()
-  }
-
+export function collectChangedLines(rootDir: string, baseRef?: string) {
   const dirty = gitOutput(rootDir, ['diff', '--name-only', 'HEAD', '--'])
   if (dirty?.trim()) {
     const diff = gitOutput(rootDir, ['diff', '--unified=0', '--no-ext-diff', 'HEAD', '--'])
+    return diff ? parseChangedLinesFromDiff(diff) : new Map<string, Set<number>>()
+  }
+
+  const explicitBase = baseRef?.trim()
+  if (explicitBase) {
+    const diff = gitOutput(rootDir, ['diff', '--unified=0', '--no-ext-diff', `${explicitBase}...HEAD`, '--'])
     return diff ? parseChangedLinesFromDiff(diff) : new Map<string, Set<number>>()
   }
 

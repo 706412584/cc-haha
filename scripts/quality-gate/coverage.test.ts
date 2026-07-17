@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   buildRootCoverageCommand,
+  collectChangedLines,
   collectServerTestFiles,
   evaluateChangedLineCoverage,
   evaluateThresholds,
@@ -502,8 +503,10 @@ describe('coverage gate helpers', () => {
 
       writeFileSync(join(repo, 'feature.txt'), 'feature\nworking tree change\n')
       expect(shouldEvaluateChangedLines(repo, 'main')).toBe(true)
+      expect([...collectChangedLines(repo, 'main').keys()]).toEqual(['feature.txt'])
       git('add', 'feature.txt')
       expect(shouldEvaluateChangedLines(repo, 'main')).toBe(true)
+      expect([...collectChangedLines(repo, 'main').keys()]).toEqual(['feature.txt'])
     } finally {
       rmSync(repo, { recursive: true, force: true })
     }
