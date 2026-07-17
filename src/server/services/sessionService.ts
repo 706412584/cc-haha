@@ -354,6 +354,7 @@ type SessionListSummaryCacheEntry = {
 
 const DEFAULT_SESSION_LIST_CACHE_MAX_ENTRIES = 16
 const DEFAULT_SESSION_LIST_SUMMARY_CACHE_MAX_ENTRIES = 20_000
+const SESSION_LIST_WORKSPACE_PROBE_TIMEOUT_MS = 500
 
 const VALID_SESSION_PERMISSION_MODES = new Set([
   'default',
@@ -3119,8 +3120,8 @@ export class SessionService {
         return null
       }
 
-      const sessions: SessionListItem[] = []
-      const pathExists = this.createCachedPathExists()
+      const pathExists = this.createCachedPathExists(targetPath =>
+        this.pathExistsForSessionList(targetPath))
       const projectsRoot = indexedPage.sessions.length > 0
         ? await fs.realpath(this.getProjectsDir())
         : null
@@ -3131,8 +3132,9 @@ export class SessionService {
           row.id,
           projectsRoot!,
         )
-        sessions.push(await this.hydrateIndexedSession(row, pathExists))
       }
+      const sessions = await Promise.all(indexedPage.sessions.map(row =>
+        this.hydrateIndexedSessionForList(row, pathExists)))
       if (sessions.length !== indexedPage.sessions.length) return null
       if (
         indexedMutationEpoch !== getSharedSessionMutationState(this.localIndexGateway).epoch
@@ -3143,6 +3145,42 @@ export class SessionService {
     } catch {
       this.markIndexReadFailure()
       return null
+    }
+  }
+
+  private async hydrateIndexedSessionForList(
+    row: IndexedSessionRow,
+    pathExists: (targetPath: string | null) => Promise<boolean>,
+  ): Promise<SessionListItem> {
+    const workDir = row.workDir
+    const projectRoot = row.worktreeSession?.originalCwd ||
+      row.repository?.repoRoot ||
+      workDir ||
+      this.desanitizePath(row.projectPath)
+    const { workDirExists, workspaceState } = await this.resolveWorkspaceAvailability({
+      workDir,
+      projectRoot,
+      worktreeSession: row.worktreeSession,
+      repository: row.repository,
+      pathExists,
+    })
+    return {
+      id: row.id,
+      title: row.title,
+      createdAt: row.createdAt,
+      modifiedAt: row.modifiedAt,
+      messageCount: row.messageCount,
+      projectPath: row.projectPath,
+      projectRoot,
+      workDir,
+      workDirExists,
+      workspaceState,
+      permissionMode: row.permissionMode,
+      ...(row.runtimeProviderId !== undefined
+        ? { runtimeProviderId: row.runtimeProviderId }
+        : {}),
+      ...(row.runtimeModelId ? { runtimeModelId: row.runtimeModelId } : {}),
+      ...(row.effortLevel ? { effortLevel: row.effortLevel } : {}),
     }
   }
 
@@ -4165,14 +4203,32 @@ export class SessionService {
     }
   }
 
-  private createCachedPathExists(): (targetPath: string | null) => Promise<boolean> {
+  private async pathExistsForSessionList(targetPath: string | null): Promise<boolean> {
+    if (!targetPath) return false
+
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        this.pathExists(targetPath),
+        new Promise<boolean>(resolve => {
+          timeout = setTimeout(() => resolve(false), SESSION_LIST_WORKSPACE_PROBE_TIMEOUT_MS)
+        }),
+      ])
+    } finally {
+      if (timeout) clearTimeout(timeout)
+    }
+  }
+
+  private createCachedPathExists(
+    pathExists = (targetPath: string | null) => this.pathExists(targetPath),
+  ): (targetPath: string | null) => Promise<boolean> {
     const cache = new Map<string, Promise<boolean>>()
     return (targetPath) => {
       if (!targetPath) return Promise.resolve(false)
       const key = targetPath.normalize('NFC')
       const cached = cache.get(key)
       if (cached) return cached
-      const pending = this.pathExists(targetPath)
+      const pending = pathExists(targetPath)
       cache.set(key, pending)
       return pending
     }
