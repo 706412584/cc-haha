@@ -93,7 +93,7 @@ describe('Windows shell discovery', () => {
     )
   })
 
-  test('uses trusted Program Files defaults and real filesystem probes', () => {
+  test.skipIf(process.platform !== 'win32')('uses trusted Program Files defaults and real filesystem probes', () => {
     const root = mkdtempSync(join(tmpdir(), 'windows-shell-discovery-'))
     const programFiles = join(root, 'Program Files')
     const gitPath = join(programFiles, 'Git', 'cmd', 'git.exe')

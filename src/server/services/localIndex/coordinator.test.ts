@@ -1763,8 +1763,7 @@ describe('local index coordinator', () => {
     async () => {
       const configDir = await createTempDir('readonly-create')
       const databaseDir = join(configDir, 'cc-haha', 'db')
-      await mkdir(databaseDir, { recursive: true })
-      await chmod(databaseDir, 0o500)
+      await chmod(configDir, 0o500)
       const coordinator = createLocalIndexCoordinator({
         resolveMode: () => ({ mode: 'on', warningCode: null }),
         resolveScope: () => configDir,
@@ -1781,7 +1780,7 @@ describe('local index coordinator', () => {
         })
         expect(JSON.stringify(publicStatus)).not.toContain(configDir)
       } finally {
-        await chmod(databaseDir, 0o700)
+        await chmod(configDir, 0o700)
         await coordinator.stop()
       }
     },
