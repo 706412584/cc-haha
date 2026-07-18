@@ -96,6 +96,53 @@ Get-FileHash -Algorithm SHA256 $ClientTarget, $ClientDestination
 
 Canvas 直接绘制内容可能不出现在 `ui.snapshot` 中。此时截图是 Canvas 内容的主证据，UI tree 只验证外围 GameUI 容器、遮罩和控件。
 
+### 3.1 真实按钮点击：优先使用项目级受限工具
+
+官方 Runtime MCP 当前通常只提供查询与截图工具，不应猜测存在 `ui.click`。先调用 `debug.list_tools`；若没有官方点击工具，但验收必须证明按钮真实触发了绑定动作，可按 `docs/sdk/guides/RuntimeMcpDebugGuide.md` 使用 `RuntimeDebugToolRegistry.Register` 注册项目级受限工具，例如：
+
+```text
+project.ui.click_node
+```
+
+该工具必须满足以下安全边界：
+
+1. 只接受当前页面导出节点表中的 `nodeId`，不能接受任意 `actionId`。
+2. 节点必须存在、`IsValid` 且 `IsActuallyFunctional`。
+3. 只能调用导出阶段已经通过 `BindAction` 绑定的 handler；禁止 `eval`、反射、动态代码或任意宿主命令。
+4. 页面切换后旧节点不得继续可调用。动作映射优先使用 `ConditionalWeakTable<Control, ...>`，避免延长控件生命周期。
+5. 返回 `node_id`、`action_id`、`screen_before` 和 `screen_after`，让导航结果可断言，而不是只返回“点击成功”。
+6. 重复 `BindAction` 不得叠加多个点击订阅；更新同一控件绑定时应复用可变绑定记录。
+
+推荐的项目实现边界：
+
+```csharp
+if (!currentNodes.TryGetValue(nodeId, out var node) || !node.IsValid)
+{
+    throw new RuntimeDebugToolException("node_not_found", "Current node not found.");
+}
+
+if (!node.IsActuallyFunctional)
+{
+    throw new RuntimeDebugToolException("node_not_functional", "Node is not interactive.");
+}
+
+if (!LayoutRuntime.TryInvokeBoundAction(node, out var actionId))
+{
+    throw new RuntimeDebugToolException("node_has_no_action", "Node has no bound action.");
+}
+```
+
+验收顺序固定为：
+
+1. `debug.list_tools` 确认自定义工具来自当前客户端，不凭源码猜测已注册。
+2. 点击入口节点，断言 `screen_before`、`action_id`、`screen_after`。
+3. 进入二级页后点击 `btn_back`，断言回到预期一级页。
+4. 选一个当前页签执行同页点击，确认没有无意义重建或状态重置。
+5. 选一个不存在、隐藏或不可交互节点，确认工具拒绝调用。
+6. 检查运行日志中没有 `unknown action`、异常或资源缺失。
+
+`OnPointerClicked` 是订阅事件，不等同于公开的事件 Raise API。不要用 Win32 `PostMessage`、系统鼠标注入或任意坐标点击冒充 GameUI 动作闭环；若客户端输入层不接收这些事件，应使用上述受限项目工具。
+
 ## 4. 全页面与全状态截图
 
 不能只截默认首页。先建立页面清单，包括页面 id、名称、稳定标识和期望截图文件名；再逐页执行：
@@ -192,7 +239,8 @@ UI 导出完成报告至少包含：
 - 真实 design resolution、scale mode、启动 source size
 - Client-Debug / Server-Debug 构建结果
 - 双端 DLL TargetPath 和部署一致性证据
-- `debug.ping` 结果
+- `debug.ping` 与 `debug.list_tools` 结果
+- 关键入口、返回和同页点击的 `project.ui.click_node` 断言结果（若项目注册了该工具）
 - 页面清单、截图数量、UI snapshot 数量和产物目录
 - WebP/PNG 数量与格式检查结果
 - NineSlice、ZIndex、Visible 的实机结论
