@@ -399,6 +399,7 @@ export function buildRootCoverageCommand() {
     'bun',
     '--no-env-file',
     '--feature=TRANSCRIPT_CLASSIFIER',
+    '--feature=VERIFICATION_AGENT',
     'test',
     '--max-concurrency=1',
     '--timeout=20000',

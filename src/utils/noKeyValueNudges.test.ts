@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { TodoWriteTool } from '../tools/TodoWriteTool/TodoWriteTool.js'
 
 /**
  * Edit and task counts are not evidence that verification is needed. Keep
@@ -36,6 +37,14 @@ function findKeyValueAttrs(source: string): string[] {
 
 describe('model-facing nudges do not embed key="value" attribute fragments', () => {
   it('does not inject verification reminders based on edit or task counts', () => {
+    const result = TodoWriteTool.mapToolResultToToolResultBlockParam(
+      { oldTodos: [], newTodos: [] },
+      'tool-use-id',
+    )
+    expect(result.content).toBe(
+      'Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable',
+    )
+
     const messages = loadSource('src/utils/messages.ts')
     const attachments = loadSource('src/utils/attachments.ts')
     const todoWrite = loadSource('src/tools/TodoWriteTool/TodoWriteTool.ts')
