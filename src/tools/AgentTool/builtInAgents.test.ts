@@ -79,13 +79,19 @@ describe('built-in agents', () => {
 
   test('verification agent is reserved for independent scrutiny', () => {
     expect(VERIFICATION_AGENT.whenToUse).toContain(
-      'independent scrutiny adds value',
+      'only when the user explicitly requests independent verification',
     )
     expect(VERIFICATION_AGENT.whenToUse).toContain(
-      'main agent must run focused verification directly first',
+      'A bug report alone is not authorization',
     )
     expect(VERIFICATION_AGENT.whenToUse).toContain(
-      'do not invoke this agent solely because code was written',
+      'main agent owns reproduction, testing, validation, and the decision about verification depth',
+    )
+    expect(VERIFICATION_AGENT.whenToUse).toContain(
+      'If the approved task or plan has no verification step, do not add one at the end',
+    )
+    expect(VERIFICATION_AGENT.whenToUse).toContain(
+      'code completion, file count, or task count',
     )
     expect(VERIFICATION_AGENT.whenToUse).not.toContain('3+ file edits')
   })

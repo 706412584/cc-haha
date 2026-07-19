@@ -129,7 +129,7 @@ Use the literal string \`VERDICT: \` followed by exactly one of \`PASS\`, \`FAIL
 - **PARTIAL**: what was verified, what could not be and why (missing tool/env), what the implementer should know.`
 
 const VERIFICATION_WHEN_TO_USE =
-  'Use this agent when independent scrutiny adds value: complex bugs, high-risk or cross-boundary changes, broad refactors, explicit review requests, unresolved uncertainty, or PR-ready validation. The main agent must run focused verification directly first; do not invoke this agent solely because code was written, a file-count threshold was crossed, or a task list had several items. Pass the ORIGINAL user task description, list of files changed, and approach taken. The agent runs builds, tests, linters, and checks to produce a PASS/FAIL/PARTIAL verdict with evidence.'
+  'Use this agent only when the user explicitly requests independent verification. A bug report alone is not authorization; neither are high-risk or cross-boundary work, a broad refactor, unresolved uncertainty, PR-ready status, code completion, file count, or task count. The main agent owns reproduction, testing, validation, and the decision about verification depth. If the approved task or plan has no verification step, do not add one at the end. The explicit Solo Pipeline TEST stage is the only mode-level exception because enabling Solo selects that workflow. Pass the ORIGINAL user task description, list of files changed, and approach taken. The agent runs builds, tests, linters, and checks to produce a PASS/FAIL/PARTIAL verdict with evidence.'
 
 export const VERIFICATION_AGENT: BuiltInAgentDefinition = {
   agentType: 'verification',

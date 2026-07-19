@@ -47,6 +47,41 @@ UI 导出验收至少需要真实双端 build、DLL 部署、Runtime MCP、关�
 3. 从截图判断黑色区域位于 viewport 外、root 外，还是背景控件内部。
 4. 只有 root rect 或背景 rect 错误时才改布局；不要用额外 Margin、拉伸图片或任意扩大 root 掩盖正常 letterbox。
 
+### 1.1 强制缩放矩阵
+
+除非项目明确只支持一种固定窗口，真实验收至少覆盖：
+
+1. 与设计分辨率等比的基准 viewport；
+2. 较小的等比 viewport；
+3. 比设计比例更宽的 viewport；
+4. 比设计比例更窄的 viewport；
+5. 项目声明的实际目标设备 viewport。
+
+每组记录：
+
+```text
+designWidth/designHeight
+ScaleMode
+sourceWidth/sourceHeight
+expectedScale
+screenshot source size
+root rect_px
+safe content rect_px
+expected letterbox/crop
+critical control rect_px
+```
+
+理论缩放：
+
+```text
+Contain     = min(sourceWidth / designWidth, sourceHeight / designHeight)
+Cover       = max(sourceWidth / designWidth, sourceHeight / designHeight)
+MatchWidth  = sourceWidth / designWidth
+MatchHeight = sourceHeight / designHeight
+```
+
+逐组检查 root、背景、安全内容、标题、返回按钮、主 CTA、底部导航和 ScrollView。预期 letterbox/crop 可以通过，非预期偏移、裁切、过小文字、触控目标不足或安全区侵入不能通过。若运行环境无法启动某个目标 viewport，报告中必须明确该 viewport 未验证，不能用公式推算冒充实机结果。
+
 ## 2. 使用真实 TargetFramework 构建和部署
 
 不要硬编码 `net9.0`、`net10.0` 或其他 TFM。先读取 `src/GameEntry.csproj` 的 `TargetFramework` / `TargetFrameworks`，或让 MSBuild 输出当前配置的 `TargetPath`：
@@ -143,6 +178,41 @@ if (!LayoutRuntime.TryInvokeBoundAction(node, out var actionId))
 
 `OnPointerClicked` 是订阅事件，不等同于公开的事件 Raise API。不要用 Win32 `PostMessage`、系统鼠标注入或任意坐标点击冒充 GameUI 动作闭环；若客户端输入层不接收这些事件，应使用上述受限项目工具。
 
+### 3.2 自动几何审计契约
+
+对每个页面和 viewport 的 `ui.snapshot` 执行确定性几何检查：
+
+- 可见普通子节点不得超出父节点可见 rect；
+- 同父普通兄弟节点不得发生非预期面积交叠；
+- 标题、返回、主 CTA、资源栏和底部导航必须位于 Safe Zone；
+- 交互节点 rect 应覆盖可见按钮但不得扩展成遮挡其他入口的透明大层；
+- 实际触控目标建议至少约 `44×44px`，相邻入口保留防误触距离；
+- `ClipContent()` 的越界内容不得残留，隐藏父节点的子树不得出现在截图中；
+- 长文本、大数字和本地化文本不得侵入图标、按钮或容器外。
+
+允许例外的节点必须按 id 或语义角色具名记录，例如背景、阴影、粒子、地图 Marker、Badge、Modal、Overlay、Toast、Guide、明确 `NoClip()` 的装饰。禁止用全局“忽略所有重叠/越界”开关。审计结果至少输出页面、viewport、节点 id、父/兄弟 id、rect、越界量或交集矩形和命中的例外规则。
+
+Canvas 内部对象不能仅靠 UI tree 审计，必须使用截图或 Canvas 专项状态工具验证。
+
+插件附带基础审计器：
+
+```bash
+bun run "${CLAUDE_PLUGIN_ROOT}/scripts/audit-ui-snapshot.ts" path/to/ui.snapshot.json [audit-options.json]
+```
+
+默认检查可见父子越界。可选配置格式：
+
+```json
+{
+  "checkSiblingOverlaps": true,
+  "overflowTolerancePx": 1,
+  "allowOverflowPaths": ["root[1].children[3]"],
+  "allowOverlapPairs": [["root[1].children[0]", "root[1].children[1]"]]
+}
+```
+
+默认允许 `1px` 的缩放取整误差，并在 `tolerated` 中显式记录；超过容差才报错。兄弟重叠因 GameUI 常用背景皮肤、透明 TextButton、Badge 和 Overlay，必须在先建立具名例外后启用；报告会同时列出 `issues` 和命中的 `exceptions`，避免白名单静默吞掉问题。配置包含未知字段或错误类型、Runtime MCP 调用失败、工具不是 `ui.snapshot` 或快照被截断时，CLI 都以非零码拒绝验收。该基础工具不理解 `ClipContent`、Safe Zone 和项目业务语义，不能替代上述完整契约或真实截图。
+
 ## 4. 全页面与全状态截图
 
 不能只截默认首页。先建立页面清单，包括页面 id、名称、稳定标识和期望截图文件名；再逐页执行：
@@ -165,6 +235,42 @@ runtime-manifest.json
 
 临时轮播入口仅用于验收。完成后必须恢复正式启动入口并重新 build/deploy；停止 client-only 或调用 `debug_stop`，避免残留客户端占用端口。
 
+### 4.1 像素回归与基线治理
+
+像素回归允许比较变更前后的不同构建，但必须锁定相同的构建配置、SDK/引擎版本、渲染后端、viewport、pageId、state、fixture data、locale、font 和 resource readiness，并分别记录 baseline/current 的构建标识或提交。每次比较保存：
+
+```text
+baseline.png
+current.png
+diff.png
+diffPixelRatio
+maxColorDistance
+changedRegions[]
+```
+
+- 静态页面可做全页像素 diff；文本抗锯齿可配置小范围颜色容差，但不能让布局位移、白块、裁切和资源缺失逃逸。
+- 动画、粒子、视频、时钟、随机数据和异步远程图应固定输入、等待稳定，或对明确区域使用 mask/region diff；不得靠提高全页容差掩盖非确定性。
+- 动态页面优先结合关键区域截图、关键节点 rect、文本和状态断言。
+- 差异超出项目阈值时必须打开 diff 图，并结合 `ui.get_rect` 定位；百分比只能用于筛查，不能自动证明“更美观”或“更差”。
+- 项目没有历史噪声数据时，不虚构通用阈值。先收集稳定重复截图的自然差异和真实缺陷样本，再设定项目阈值。
+- baseline 只能在确认预期设计变更后显式更新；禁止回归失败时自动覆盖。更新记录必须包含页面、状态、viewport、变更原因和审查人/审查动作。
+
+像素回归不能替代人工视觉 QA：图标语义、主次层级、背景保护区、信息密度和美观度仍需打开真实截图判断。
+
+### 4.2 页面状态矩阵
+
+页面清单不只列 pageId，还应列状态。按页面能力至少覆盖：
+
+- 默认、选中、按下/触发反馈、禁用/锁定；
+- 空、加载、错误、超时/离线、资源不足；
+- 最长文本、换行/截断、超大数值、最少/最多列表数据；
+- Modal/Mask/Toast/Guide 打开和关闭；
+- 列表滚动到底、虚拟化复用、离开再返回后的滚动位置；
+- 图片失败、自定义字体 fallback 和资源未稳定状态；
+- 重复进入退出后旧节点不可调用、事件不重复触发。
+
+只验默认态时，报告必须明确“状态矩阵未完成”。
+
 ## 5. 图片格式：WebP 必须真实转 PNG
 
 当前 Spark2 GameUI 验收中，不要假设 WebP 可由 UI 图片加载器直接显示。若编辑器资源是 WebP：
@@ -177,9 +283,20 @@ runtime-manifest.json
 
 只把 `foo.webp` 重命名为 `foo.png` 不会改变内容格式，不能视为转码。文件存在、路径正确或导出器 validation 通过也不能证明 GameUI 已渲染图片。
 
-## 6. NineSlice 必须做实机视觉验证
+## 6. NineSlice 必须做静态和实机双重验证
 
-NineSlice API 或属性存在只证明配置已生成。至少选择一个有明显四角/边框/中心纹理的资源，在真实客户端验证：
+NineSlice API 或属性存在只证明配置已生成。静态阶段先真实解码图片并记录宽高、格式、Alpha 与 `sliceLeft/top/right/bottom`，必须满足：
+
+```text
+sliceLeft + sliceRight < imageWidth
+sliceTop + sliceBottom < imageHeight
+sliceLeft + sliceRight < controlRuntimeWidth
+sliceTop + sliceBottom < controlRuntimeHeight
+```
+
+共享按钮、面板和条目框的资源路径与切片参数应集中在项目现有 `UiTheme`、`UiAssets`、`UiChrome` 或等价入口；同页同层级按钮不得散落不同皮肤、重复路径和切片数字。若项目尚无共享入口且资源只使用一次，可保留页面局部常量，不为一次使用创建全局抽象。
+
+实机阶段至少选择一个有明显四角/边框/中心纹理的资源验证：
 
 - 接近原图尺寸的小控件
 - 横向拉伸
@@ -241,10 +358,15 @@ UI 导出完成报告至少包含：
 - 双端 DLL TargetPath 和部署一致性证据
 - `debug.ping` 与 `debug.list_tools` 结果
 - 关键入口、返回和同页点击的 `project.ui.click_node` 断言结果（若项目注册了该工具）
-- 页面清单、截图数量、UI snapshot 数量和产物目录
+- 页面与状态矩阵、截图数量、UI snapshot 数量和产物目录
+- 缩放矩阵各 viewport 的理论 scale、root/Safe Zone/关键控件 rect 与结论
+- 自动几何审计结果及所有具名例外
+- 像素回归 baseline/current/diff、阈值来源和 baseline 更新记录
 - WebP/PNG 数量与格式检查结果
-- NineSlice、ZIndex、Visible 的实机结论
-- 未验证的远程资源或服务端运行边界
+- NineSlice 静态参数、四种尺寸、ZIndex、Visible 的实机结论
+- 触控目标、透明点击层、Modal 输入与导航/返回结论
+- 大列表虚拟化、过绘或其他已测性能边界（适用时）
+- 未验证的 viewport、状态、远程资源或服务端运行边界
 - 已恢复临时轮播/测试入口并停止调试进程
 
 只有这些证据来自当前构建和当前运行时，才能报告真实闭环完成。

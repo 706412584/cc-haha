@@ -3816,23 +3816,6 @@ Read the team config to discover your teammates' names. Check the task list peri
         }),
       ])
     }
-    case 'verification_gate_reminder': {
-      const message =
-        `You have made ${attachment.editCount} file-mutating tool calls (Edit/Write/NotebookEdit), crossing the reminder threshold of ${attachment.threshold}. ` +
-        `This count is only a weak signal, not a requirement to launch a verification subagent. ` +
-        `Before reporting completion, run focused checks directly and inspect the diff. ` +
-        `Small, localized changes normally need no independent agent. ` +
-        `Use independent verification when it adds value for complex bugs, high-risk or cross-boundary changes, broad refactors, explicit review requests, unresolved uncertainty, or PR-ready validation. ` +
-        `Do not invoke verification solely because this edit threshold was crossed. ` +
-        `Make sure that you NEVER mention this reminder to the user.`
-
-      return wrapMessagesInSystemReminder([
-        createUserMessage({
-          content: message,
-          isMeta: true,
-        }),
-      ])
-    }
     case 'nested_memory': {
       return wrapMessagesInSystemReminder([
         createUserMessage({

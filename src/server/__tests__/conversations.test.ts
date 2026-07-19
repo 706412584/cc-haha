@@ -652,6 +652,35 @@ describe('ConversationService', () => {
     expect(ORCHESTRATION_SYSTEM_PROMPT).toMatch(/REQUIRED, not optional/)
   })
 
+  it('orchestration prompt keeps delegation and verification proportional to risk', () => {
+    expect(ORCHESTRATION_SYSTEM_PROMPT).toContain(
+      'Do not delegate simple lookups, local edits, ordinary command execution, ordinary tests, or lightweight verification solely because this mode is enabled',
+    )
+    expect(ORCHESTRATION_SYSTEM_PROMPT).toContain(
+      'The orchestrator owns the decision about verification depth',
+    )
+    expect(ORCHESTRATION_SYSTEM_PROMPT).toContain(
+      'always inspects the final diff for unintended scope or leftovers',
+    )
+    expect(ORCHESTRATION_SYSTEM_PROMPT).toContain(
+      'Do not launch a verification sub-agent unless the user explicitly requests independent verification',
+    )
+    expect(ORCHESTRATION_SYSTEM_PROMPT).toContain(
+      'A bug report, high-risk change, cross-boundary change, broad refactor, unresolved uncertainty, or PR-ready status is not authorization',
+    )
+    expect(ORCHESTRATION_SYSTEM_PROMPT).toContain(
+      'If the approved task or plan has no verification step, do not add one at the end',
+    )
+    expect(ORCHESTRATION_SYSTEM_PROMPT).not.toContain(
+      'The bar for delegation is LOW',
+    )
+    expect(ORCHESTRATION_SYSTEM_PROMPT).not.toContain(
+      'when unsure whether a task is "big enough", prefer delegating it',
+    )
+    expect(ORCHESTRATION_SYSTEM_PROMPT).not.toContain('A/B/C Plan Gate')
+    expect(ORCHESTRATION_SYSTEM_PROMPT).not.toContain('Approve and land?')
+  })
+
   it('should send thinking token controls to active CLI sessions', () => {
     const svc = new ConversationService() as any
     const sent: string[] = []

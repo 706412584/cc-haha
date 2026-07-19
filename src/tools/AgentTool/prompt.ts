@@ -35,9 +35,11 @@ const BACKGROUND_FORK_EXAMPLE = [
 const PRIMARY_AGENT_OWNERSHIP_RULE = [
   '## Primary-agent ownership — default rule',
   '',
-  'The primary agent owns understanding, implementation, and focused verification. Do not delegate simple lookups, planning, local edits, or ordinary test execution.',
+  'The primary agent owns understanding, implementation, and the decision about verification depth. Do not delegate simple lookups, planning, local edits, or ordinary test execution.',
   '',
-  'Use a subagent only when its separate context or independence repays the coordination cost: independent review or verification, complex bug isolation, or genuinely parallel implementation with non-overlapping file ownership. When implementation agents run in parallel, the primary agent must retain and continue at least one executable task.',
+  'Match checks to risk and cost, and always inspect the final diff for unintended scope or leftovers. Simple, localized, low-risk changes can otherwise stop after LSP diagnostics, type checks, or the lightest relevant static check. When behavior changes and a cheap relevant test exists, decide whether to run the narrowest test yourself. Do not require a focused test after every small feature, task, file, or logical chunk.',
+  '',
+  'Use a subagent only when its separate context or independence repays the coordination cost: user-requested independent review or verification, complex bug isolation, or genuinely parallel implementation with non-overlapping file ownership. Do not launch a verification agent unless the user explicitly requests independent verification. A bug report, high-risk change, cross-boundary change, broad refactor, PR-ready status, file count, task count, or completed implementation is not authorization. The primary agent owns reproduction, testing, and validation. If the approved task or plan has no verification step, do not add one at the end. The explicit Solo Pipeline TEST stage is the only mode-level exception because enabling Solo selects that workflow. When implementation agents run in parallel, the primary agent must retain and continue at least one executable task.',
 ].join('\n')
 
 const HYBRID_PARALLEL_KICKOFF_RULE = [
@@ -55,7 +57,7 @@ const BACKGROUND_ORCHESTRATION_RULE = [
   '',
   "Before launching an agent, classify the remaining work by dependency: which tasks require the agent's result, and which are independent. Use background agents only for genuinely independent, parallel work. Use a foreground agent when you must have its result before you can proceed.",
   '',
-  `After launching a background agent, continue in the same turn with the lowest-ordered or currently executable unblocked work. Do not end your turn merely because a background agent is running. If unblocked work exists, briefly tell the user which agent is running and what you are continuing, then actually perform that work in the same turn — for example, "The verification agent is running; I'm continuing the Office entry implementation." Only say that you are waiting when every remaining task depends on the background result, requires user input, or is complete.`,
+  `After launching a background agent, continue in the same turn with the lowest-ordered or currently executable unblocked work. Do not end your turn merely because a background agent is running. If unblocked work exists, briefly tell the user which agent is running and what you are continuing, then actually perform that work in the same turn — for example, "The release audit is running; I'm continuing the independent formatting check." Only say that you are waiting when every remaining task depends on the background result, requires user input, or is complete.`,
   '',
   "Never sleep, poll, check progress, or read an agent's `output_file` while it runs. Wait for the automatic completion notification while doing other executable work.",
 ].join('\n')
@@ -137,7 +139,7 @@ export async function getPrompt(
 
 Fork yourself (omit \`subagent_type\`) when the intermediate tool output isn't worth keeping in your context. The criterion is qualitative \u2014 "will I need this output again" \u2014 not task size.
 - **Research**: fork open-ended questions. If research can be broken into independent questions, launch parallel forks in one message. A fork beats a fresh subagent for this \u2014 it inherits context and shares your cache.
-- **Implementation**: prefer to fork implementation work that requires more than a couple of edits. Do research before jumping to implementation.
+- **Implementation**: fork only when isolating implementation output or context will repay the handoff cost; edit count alone is not a trigger. Do research before jumping to implementation.
 
 Forks are cheap because they share your prompt cache. Don't set \`model\` on a fork \u2014 a different model can't reuse the parent's cache. Pass a short \`name\` (one or two words, lowercase) so the user can see the fork in the teams panel and steer it mid-run.
 
@@ -197,14 +199,14 @@ ${AGENT_TOOL_NAME}({
   const currentExamples = `Example usage:
 
 <example_agent_descriptions>
-"test-runner": use this agent when the user requests independent test execution or a complex, high-risk change needs a separate verification pass
+"test-runner": use this agent only when the user explicitly requests independent test execution or a separate verification pass
 "greeting-responder": use this agent to respond to user greetings with a friendly joke
 </example_agent_descriptions>
 
 <example>
 user: "This migration touches authentication and session persistence. Please implement it, then have a separate agent run the integration tests."
 <commentary>
-The user explicitly requested independent verification for a high-risk cross-boundary change, so run focused checks directly before using the test-runner agent.
+The user explicitly requested independent verification for a high-risk cross-boundary change, so finish the implementation scope, run only any immediate checks needed to proceed safely, then use the independent test-runner the user requested as the final verification pass.
 </commentary>
 assistant: Uses the ${AGENT_TOOL_NAME} tool to launch the test-runner agent
 </example>
@@ -229,6 +231,8 @@ assistant: "I'm going to use the ${AGENT_TOOL_NAME} tool to launch the greeting-
     : `Available agent types and the tools they have access to:
 ${effectiveAgents.map(agent => formatAgentLine(agent)).join('\n')}`
 
+  const ownershipRule = isCoordinator ? '' : PRIMARY_AGENT_OWNERSHIP_RULE
+
   // Shared core prompt used by both coordinator and non-coordinator modes
   const shared = `Launch a new agent to handle complex, multi-step tasks autonomously.
 
@@ -242,7 +246,7 @@ ${
     : `When using the ${AGENT_TOOL_NAME} tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used.`
 }
 
-${PRIMARY_AGENT_OWNERSHIP_RULE}
+${ownershipRule}
 
 ${HYBRID_PARALLEL_KICKOFF_RULE}
 
