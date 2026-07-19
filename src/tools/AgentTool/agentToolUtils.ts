@@ -606,8 +606,10 @@ export async function runAsyncAgentLifecycle({
   agentIdForCleanup,
   enableSummarization,
   getWorktreeResult,
+  epoch,
 }: {
   taskId: string
+  epoch?: number
   abortController: AbortController
   makeStream: (
     onCacheSafeParams: ((p: CacheSafeParams) => void) | undefined,
@@ -701,7 +703,7 @@ export async function runAsyncAgentLifecycle({
     // Mark task completed FIRST so TaskOutput(block=true) unblocks
     // immediately, then notify the parent before any optional cleanup. The
     // parent session depends on this notification to resume its loop.
-    completeAsyncAgent(agentResult, rootSetAppState)
+    completeAsyncAgent(agentResult, rootSetAppState, epoch)
 
     enqueueAgentNotification({
       taskId,
@@ -716,6 +718,7 @@ export async function runAsyncAgentLifecycle({
       },
       outputPath: getAgentProgressOutputPath(taskId),
       toolUseId: toolUseContext.toolUseId,
+      epoch,
     })
 
     void (async () => {
@@ -745,7 +748,7 @@ export async function runAsyncAgentLifecycle({
       // but only this catch handler has agentMessages, so the notification
       // must fire unconditionally. Transition status BEFORE worktree cleanup
       // so TaskOutput unblocks even if git hangs (gh-20236).
-      killAsyncAgent(taskId, rootSetAppState)
+      killAsyncAgent(taskId, rootSetAppState, epoch)
       logEvent('tengu_agent_tool_terminated', {
         agent_type:
           metadata.agentType as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -766,6 +769,7 @@ export async function runAsyncAgentLifecycle({
         toolUseId: toolUseContext.toolUseId,
         finalMessage: partialResult,
         outputPath: getAgentProgressOutputPath(taskId),
+        epoch,
       })
       void getWorktreeResult().catch(cleanupError =>
         logForDebugging(
@@ -775,7 +779,7 @@ export async function runAsyncAgentLifecycle({
       return
     }
     const msg = errorMessage(error)
-    failAsyncAgent(taskId, msg, rootSetAppState)
+    failAsyncAgent(taskId, msg, rootSetAppState, epoch)
     enqueueAgentNotification({
       taskId,
       description,
@@ -784,6 +788,7 @@ export async function runAsyncAgentLifecycle({
       setAppState: rootSetAppState,
       toolUseId: toolUseContext.toolUseId,
       outputPath: getAgentProgressOutputPath(taskId),
+      epoch,
     })
     void getWorktreeResult().catch(cleanupError =>
       logForDebugging(

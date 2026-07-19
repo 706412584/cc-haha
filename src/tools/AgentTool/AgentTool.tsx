@@ -928,6 +928,7 @@ export const AgentTool = buildTool({
       // parent turn's workload automatically, isolated from its finally.
       void runWithAgentContext(asyncAgentContext, () => wrapWithCwd(() => runAsyncAgentLifecycle({
         taskId: agentBackgroundTask.agentId,
+        epoch: agentBackgroundTask.epoch,
         abortController: agentBackgroundTask.abortController!,
         makeStream: onCacheSafeParams => runAgent({
           ...runAgentParams,
@@ -1097,6 +1098,7 @@ export const AgentTool = buildTool({
               if (isLocalAgentTask(task) && task.isBackgrounded) {
                 // Capture the taskId for use in the async callback
                 const backgroundedTaskId = foregroundTaskId;
+                const backgroundedEpoch = task.epoch;
                 wasBackgrounded = true;
                 // Stop foreground summarization; the backgrounded closure
                 // below owns its own independent stop function.
@@ -1171,7 +1173,7 @@ export const AgentTool = buildTool({
                     // unblocks immediately, then notify the parent before
                     // optional classifier/worktree cleanup. The parent loop
                     // depends on this notification to resume.
-                    completeAsyncAgent(agentResult, rootSetAppState);
+                    completeAsyncAgent(agentResult, rootSetAppState, backgroundedEpoch);
 
                     enqueueAgentNotification({
                       taskId: backgroundedTaskId,
@@ -1185,7 +1187,8 @@ export const AgentTool = buildTool({
                         durationMs: agentResult.totalDurationMs
                       },
                       outputPath: getAgentProgressOutputPath(backgroundedTaskId),
-                      toolUseId: toolUseContext.toolUseId
+                      toolUseId: toolUseContext.toolUseId,
+                      epoch: backgroundedEpoch
                     });
                     void (async () => {
                       try {
@@ -1209,7 +1212,7 @@ export const AgentTool = buildTool({
                     if (error instanceof AbortError) {
                       // Transition status BEFORE worktree cleanup so
                       // TaskOutput unblocks even if git hangs (gh-20236).
-                      killAsyncAgent(backgroundedTaskId, rootSetAppState);
+                      killAsyncAgent(backgroundedTaskId, rootSetAppState, backgroundedEpoch);
                       logEvent('tengu_agent_tool_terminated', {
                         agent_type: metadata.agentType as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
                         model: metadata.resolvedAgentModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -1226,13 +1229,14 @@ export const AgentTool = buildTool({
                         setAppState: rootSetAppState,
                         toolUseId: toolUseContext.toolUseId,
                         finalMessage: partialResult,
-                        outputPath: getAgentProgressOutputPath(backgroundedTaskId)
+                        outputPath: getAgentProgressOutputPath(backgroundedTaskId),
+                        epoch: backgroundedEpoch
                       });
                       void cleanupWorktreeIfNeeded().catch(cleanupError => logForDebugging(`Backgrounded sync agent post-cancel cleanup failed: ${errorMessage(cleanupError)}`));
                       return;
                     }
                     const errMsg = errorMessage(error);
-                    failAsyncAgent(backgroundedTaskId, errMsg, rootSetAppState);
+                    failAsyncAgent(backgroundedTaskId, errMsg, rootSetAppState, backgroundedEpoch);
                     enqueueAgentNotification({
                       taskId: backgroundedTaskId,
                       description,
@@ -1240,7 +1244,8 @@ export const AgentTool = buildTool({
                       error: errMsg,
                       setAppState: rootSetAppState,
                       toolUseId: toolUseContext.toolUseId,
-                      outputPath: getAgentProgressOutputPath(backgroundedTaskId)
+                      outputPath: getAgentProgressOutputPath(backgroundedTaskId),
+                      epoch: backgroundedEpoch
                     });
                     void cleanupWorktreeIfNeeded().catch(cleanupError => logForDebugging(`Backgrounded sync agent post-failure cleanup failed: ${errorMessage(cleanupError)}`));
                   } finally {

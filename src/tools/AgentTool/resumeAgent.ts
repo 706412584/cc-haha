@@ -230,6 +230,7 @@ export async function resumeAgentBackground({
     wrapWithCwd(() =>
       runAsyncAgentLifecycle({
         taskId: agentBackgroundTask.agentId,
+        epoch: agentBackgroundTask.epoch,
         abortController: agentBackgroundTask.abortController!,
         makeStream: onCacheSafeParams =>
           runAgent({

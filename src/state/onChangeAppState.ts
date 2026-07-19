@@ -19,6 +19,8 @@ import {
 } from '../utils/sessionState.js'
 import { updateSettingsForSource } from '../utils/settings/settings.js'
 import type { AppState } from './AppStateStore.js'
+import { persistAgentRuntimeSnapshot } from '../tasks/LocalAgentTask/LocalAgentTask.js'
+import { getAgentRuntimePath } from '../utils/sessionStorage.js'
 
 // Inverse of the push below — restore on worker restart.
 export function externalMetadataToAppState(
@@ -40,6 +42,28 @@ export function externalMetadataToAppState(
   })
 }
 
+let agentRuntimeWrite = Promise.resolve()
+
+export function flushAgentRuntimePersistence(): Promise<void> {
+  return agentRuntimeWrite
+}
+
+function agentRuntimeChanged(newState: AppState, oldState: AppState): boolean {
+  if (
+    newState.agentCompletionInbox !== oldState.agentCompletionInbox ||
+    newState.nextAgentCompletionSequence !== oldState.nextAgentCompletionSequence
+  ) return true
+  if (newState.tasks === oldState.tasks) return false
+  const previousAgents = Object.values(oldState.tasks).filter(task => task.type === 'local_agent')
+  const nextAgents = Object.values(newState.tasks).filter(task => task.type === 'local_agent')
+  if (previousAgents.length !== nextAgents.length) return true
+  const previousById = new Map(previousAgents.map(task => [task.id, task]))
+  return nextAgents.some(task => {
+    const previous = previousById.get(task.id)
+    return !previous || previous.status !== task.status || previous.epoch !== task.epoch || previous.notified !== task.notified || previous.endTime !== task.endTime || previous.error !== task.error || previous.result !== task.result
+  })
+}
+
 export function onChangeAppState({
   newState,
   oldState,
@@ -47,6 +71,18 @@ export function onChangeAppState({
   newState: AppState
   oldState: AppState
 }) {
+  if (agentRuntimeChanged(newState, oldState)) {
+    const snapshot = {
+      tasks: newState.tasks,
+      agentCompletionInbox: newState.agentCompletionInbox,
+      nextAgentCompletionSequence: newState.nextAgentCompletionSequence,
+    }
+    agentRuntimeWrite = agentRuntimeWrite
+      .catch(() => {})
+      .then(() => persistAgentRuntimeSnapshot(getAgentRuntimePath(), snapshot))
+      .catch(error => logError(toError(error)))
+  }
+
   // toolPermissionContext.mode — single choke point for CCR/SDK mode sync.
   //
   // Prior to this block, mode changes were relayed to CCR by only 2 of 8+

@@ -96,6 +96,8 @@ import { shouldCaptureApiTrace } from './services/api/traceCapture.js'
 import { StreamingToolExecutor } from './services/tools/StreamingToolExecutor.js'
 import { queryCheckpoint } from './utils/queryProfiler.js'
 import { runTools } from './services/tools/toolOrchestration.js'
+import { drainAgentCompletionInbox } from './tasks/LocalAgentTask/LocalAgentTask.js'
+import { flushAgentRuntimePersistence } from './state/onChangeAppState.js'
 import { applyToolResultBudget } from './utils/toolResultStorage.js'
 import { recordContentReplacement } from './utils/sessionStorage.js'
 import { handleStopHooks } from './query/stopHooks.js'
@@ -1552,6 +1554,13 @@ async function* queryLoop(
       queryChainId: queryChainIdForAnalytics,
       queryDepth: queryTracking.depth,
     })
+
+    // This is the safe continuation boundary: all tool results are complete, so
+    // terminal Agent events can enter model input without interrupting parallel tools.
+    if (querySource.startsWith('repl_main_thread') || querySource === 'sdk') {
+      drainAgentCompletionInbox(toolUseContext.setAppStateForTasks ?? toolUseContext.setAppState)
+      await flushAgentRuntimePersistence()
+    }
 
     // Get queued commands snapshot before processing attachments.
     // These will be sent as attachments so Claude can respond to them in the current turn.

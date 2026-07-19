@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, spyOn, test } from 'bun:test'
+import * as fs from 'node:fs/promises'
+import * as os from 'node:os'
+import * as path from 'node:path'
 import { setIsInteractive } from '../../bootstrap/state.js'
 import * as sdkEventQueue from '../../utils/sdkEventQueue.js'
 import type { AppState } from '../../state/AppState.js'
@@ -21,7 +24,189 @@ import {
   extractAgentToolActivities,
   runAsyncAgentLifecycle,
 } from './agentToolUtils.js'
+import {
+  completeAgentTask,
+  drainAgentCompletionInbox,
+  enqueueAgentNotification,
+  killAsyncAgent,
+  loadAgentRuntimeSnapshot,
+  persistAgentRuntimeSnapshot,
+  registerAsyncAgent,
+  restoreAgentRuntimeSnapshot,
+} from '../../tasks/LocalAgentTask/LocalAgentTask.js'
 import { SYNTHETIC_OUTPUT_TOOL_NAME } from '../SyntheticOutputTool/SyntheticOutputTool.js'
+
+describe('local Agent lifecycle epochs', () => {
+  test('ignores completion from a cancelled epoch after the task restarts', () => {
+    let appState = {
+      tasks: {},
+    } as unknown as AppState
+    const setAppState = (updater: (prev: AppState) => AppState): void => {
+      appState = updater(appState)
+    }
+    const selectedAgent = { agentType: 'general-purpose' } as never
+
+    const first = registerAsyncAgent({
+      agentId: 'agent-epoch-race',
+      description: 'Check epoch race',
+      prompt: 'Check epoch race',
+      selectedAgent,
+      setAppState,
+    })
+    killAsyncAgent(first.agentId, setAppState)
+    const second = registerAsyncAgent({
+      agentId: first.agentId,
+      description: 'Check epoch race again',
+      prompt: 'Check epoch race again',
+      selectedAgent,
+      setAppState,
+    })
+
+    completeAgentTask({ agentId: first.agentId, content: [], totalToolUseCount: 0, totalDurationMs: 1, totalTokens: 0, usage: {} as never }, setAppState, first.epoch)
+    expect(appState.tasks[first.agentId]?.status).toBe('running')
+
+    completeAgentTask({ agentId: second.agentId, content: [], totalToolUseCount: 0, totalDurationMs: 1, totalTokens: 0, usage: {} as never }, setAppState, second.epoch)
+    expect(appState.tasks[second.agentId]?.status).toBe('completed')
+  })
+})
+
+describe('Agent runtime recovery', () => {
+  test('marks orphaned running Agents interrupted and preserves only unconsumed completions', () => {
+    const restored = restoreAgentRuntimeSnapshot({
+      version: 1,
+      nextSequence: 9,
+      tasks: [{
+        id: 'agent-restored-running',
+        epoch: 3,
+        status: 'running',
+        description: 'Restore me',
+        prompt: 'Restore me',
+        agentType: 'general-purpose',
+        startTime: 10,
+        toolUseId: 'tool-restored-running',
+      }],
+      inbox: [{
+        version: 1,
+        sequence: 8,
+        taskId: 'agent-restored-finished',
+        epoch: 2,
+        notification: '<task-notification>finished</task-notification>',
+        consumed: false,
+      }, {
+        version: 1,
+        sequence: 7,
+        taskId: 'agent-restored-consumed',
+        epoch: 1,
+        notification: '<task-notification>consumed</task-notification>',
+        consumed: true,
+      }],
+    })
+
+    expect(restored.tasks['agent-restored-running']?.status).toBe('failed')
+    expect((restored.tasks['agent-restored-running'] as LocalAgentTaskState).error).toContain('interrupted')
+    expect(restored.agentCompletionInbox.map(item => item.taskId)).toEqual([
+      'agent-restored-finished',
+      'agent-restored-running',
+    ])
+    expect(restored.agentCompletionInbox[1]?.notification).toContain('<status>failed</status>')
+    expect(restored.agentCompletionInbox[1]?.notification).toContain('interrupted')
+    expect(restored.nextAgentCompletionSequence).toBe(10)
+  })
+})
+
+describe('Agent runtime persistence', () => {
+  test('round-trips a bounded snapshot and persists inbox consumption', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-runtime-'))
+    const filePath = path.join(directory, 'runtime.json')
+    try {
+      const task = {
+        ...createTaskStateBase('agent-persisted', 'local_agent', 'Persist me'),
+        type: 'local_agent' as const,
+        status: 'completed' as const,
+        agentId: 'agent-persisted',
+        epoch: 4,
+        prompt: 'Persist me',
+        agentType: 'general-purpose',
+        retrieved: false,
+        lastReportedToolCount: 0,
+        lastReportedTokenCount: 0,
+        isBackgrounded: true,
+        pendingMessages: [],
+        retain: false,
+        diskLoaded: false,
+      }
+      await persistAgentRuntimeSnapshot(filePath, {
+        tasks: { [task.id]: task },
+        agentCompletionInbox: [{ version: 1, sequence: 2, taskId: task.id, epoch: task.epoch, notification: '<task-notification />' }],
+        nextAgentCompletionSequence: 3,
+      })
+      expect((await loadAgentRuntimeSnapshot(filePath)).agentCompletionInbox).toHaveLength(1)
+
+      await persistAgentRuntimeSnapshot(filePath, {
+        tasks: { [task.id]: task },
+        agentCompletionInbox: [],
+        nextAgentCompletionSequence: 3,
+      })
+      expect((await loadAgentRuntimeSnapshot(filePath)).agentCompletionInbox).toHaveLength(0)
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('bounded Agent registry', () => {
+  test('evicts the oldest terminal Agent without evicting running Agents', () => {
+    let appState = { tasks: {} } as unknown as AppState
+    const setAppState = (updater: (prev: AppState) => AppState): void => {
+      appState = updater(appState)
+    }
+    const selectedAgent = { agentType: 'general-purpose' } as never
+    for (let index = 0; index < 64; index++) {
+      const agentId = `agent-registry-${String(index).padStart(2, '0')}`
+      const task = registerAsyncAgent({ agentId, description: agentId, prompt: agentId, selectedAgent, setAppState })
+      if (index < 63) {
+        completeAgentTask({ agentId, content: [], totalToolUseCount: 0, totalDurationMs: 1, totalTokens: 0, usage: {} as never }, setAppState, task.epoch)
+      }
+    }
+
+    registerAsyncAgent({ agentId: 'agent-registry-new', description: 'new', prompt: 'new', selectedAgent, setAppState })
+
+    expect(appState.tasks['agent-registry-00']).toBeUndefined()
+    expect(appState.tasks['agent-registry-63']?.status).toBe('running')
+    expect(appState.tasks['agent-registry-new']?.status).toBe('running')
+    expect(Object.values(appState.tasks).filter(task => task.type === 'local_agent')).toHaveLength(64)
+  })
+})
+
+describe('Agent completion inbox', () => {
+  test('defers ordered completion injection until a continuation boundary and consumes once', () => {
+    let appState = {
+      tasks: {},
+      agentCompletionInbox: [],
+      nextAgentCompletionSequence: 1,
+      speculation: IDLE_SPECULATION_STATE,
+    } as unknown as AppState
+    const setAppState = (updater: (prev: AppState) => AppState): void => {
+      appState = updater(appState)
+    }
+    const selectedAgent = { agentType: 'general-purpose' } as never
+    for (const [agentId, description] of [['agent-inbox-1', 'First'], ['agent-inbox-2', 'Second']] as const) {
+      const task = registerAsyncAgent({ agentId, description, prompt: description, selectedAgent, setAppState })
+      enqueueAgentNotification({ taskId: agentId, description, status: 'completed', setAppState, epoch: task.epoch })
+    }
+
+    expect(getCommandQueue()).toHaveLength(0)
+    expect(appState.agentCompletionInbox.map(item => item.taskId)).toEqual(['agent-inbox-1', 'agent-inbox-2'])
+
+    drainAgentCompletionInbox(setAppState)
+    expect(getCommandQueue().map(command => String(command.value))).toEqual([
+      expect.stringContaining('<task-id>agent-inbox-1</task-id>'),
+      expect.stringContaining('<task-id>agent-inbox-2</task-id>'),
+    ])
+    drainAgentCompletionInbox(setAppState)
+    expect(getCommandQueue()).toHaveLength(2)
+  })
+})
 
 describe('runAsyncAgentLifecycle', () => {
   afterEach(() => {
@@ -108,6 +293,7 @@ describe('runAsyncAgentLifecycle', () => {
       ...createTaskStateBase(taskId, 'local_agent', 'Review code', 'toolu_agent'),
       status: 'running',
       agentId: taskId,
+      epoch: 1,
       prompt: 'Review code',
       agentType: 'general-purpose',
       abortController,
@@ -121,6 +307,8 @@ describe('runAsyncAgentLifecycle', () => {
     }
     let appState = {
       tasks: { [taskId]: task },
+      agentCompletionInbox: [],
+      nextAgentCompletionSequence: 1,
       toolPermissionContext: getEmptyToolPermissionContext(),
       speculation: IDLE_SPECULATION_STATE,
     } as unknown as AppState
@@ -169,6 +357,8 @@ describe('runAsyncAgentLifecycle', () => {
     expect(result).toBe('completed')
     expect(cleanupStarted).toBe(true)
     expect(appState.tasks[taskId]?.status).toBe('completed')
+    expect(getCommandQueue()).toHaveLength(0)
+    drainAgentCompletionInbox(setAppState)
     expect(getCommandQueue()).toHaveLength(1)
     expect(String(getCommandQueue()[0]?.value)).toContain(
       '<status>completed</status>',

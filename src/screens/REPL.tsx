@@ -1796,7 +1796,7 @@ export function REPL({
       }
 
       // Restore file history and attribution state from the resumed conversation
-      restoreSessionStateFromLog(log, setAppState);
+      await restoreSessionStateFromLog(log, setAppState);
       if (log.fileHistorySnapshots) {
         void copyFileHistoryForResume(log);
       }

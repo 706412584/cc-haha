@@ -13,6 +13,7 @@ import { clearSystemPromptSections } from '../constants/systemPromptSections.js'
 import { restoreCostStateForSession } from '../cost-tracker.js'
 import type { AppState } from '../state/AppState.js'
 import type { AgentColorName } from '../tools/AgentTool/agentColorManager.js'
+import { loadAgentRuntimeSnapshot } from '../tasks/LocalAgentTask/LocalAgentTask.js'
 import {
   type AgentDefinition,
   type AgentDefinitionsResult,
@@ -49,6 +50,7 @@ import {
   recordContentReplacement,
   resetSessionFilePointer,
   restoreSessionMetadata,
+  getAgentRuntimePath,
   saveMode,
   saveWorktreeState,
 } from './sessionStorage.js'
@@ -96,10 +98,21 @@ function extractTodosFromTranscript(messages: Message[]): TodoList {
  * Restore session state (file history, attribution, todos) from log on resume.
  * Used by both SDK (print.ts) and interactive (REPL.tsx, main.tsx) resume paths.
  */
-export function restoreSessionStateFromLog(
+export async function restoreSessionStateFromLog(
   result: ResumeResult,
   setAppState: (f: (prev: AppState) => AppState) => void,
-): void {
+): Promise<void> {
+  const runtime = await loadAgentRuntimeSnapshot(getAgentRuntimePath())
+  setAppState(prev => ({
+    ...prev,
+    tasks: {
+      ...prev.tasks,
+      ...runtime.tasks,
+    },
+    agentCompletionInbox: runtime.agentCompletionInbox,
+    nextAgentCompletionSequence: runtime.nextAgentCompletionSequence,
+  }))
+
   // Restore file history state
   if (result.fileHistorySnapshots && result.fileHistorySnapshots.length > 0) {
     fileHistoryRestoreStateFromLog(result.fileHistorySnapshots, newState => {

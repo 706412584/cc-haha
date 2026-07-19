@@ -78,6 +78,14 @@ export type SpeculationState =
 
 export const IDLE_SPECULATION_STATE: SpeculationState = { status: 'idle' }
 
+export type AgentCompletionInboxItem = {
+  version: 1
+  sequence: number
+  taskId: string
+  epoch: number
+  notification: string
+}
+
 export type FooterItem =
   | 'tasks'
   | 'tmux'
@@ -158,6 +166,9 @@ export type AppState = DeepImmutable<{
 }> & {
   // Unified task state - excluded from DeepImmutable because TaskState contains function types
   tasks: { [taskId: string]: TaskState }
+  // Versioned, bounded handoff queue for terminal background Agent events.
+  agentCompletionInbox: AgentCompletionInboxItem[]
+  nextAgentCompletionSequence: number
   // Name → AgentId registry populated by Agent tool when `name` is provided.
   // Latest-wins on collision. Used by SendMessage to route by name.
   agentNameRegistry: Map<string, AgentId>
@@ -468,6 +479,8 @@ export function getDefaultAppState(): AppState {
   return {
     settings: getInitialSettings(),
     tasks: {},
+    agentCompletionInbox: [],
+    nextAgentCompletionSequence: 1,
     agentNameRegistry: new Map(),
     verbose: false,
     mainLoopModel: null, // alias, full name (as with --model or env var), or null (default)

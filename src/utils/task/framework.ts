@@ -74,8 +74,9 @@ export function updateTaskState<T extends TaskState>(
 /**
  * Register a new task in AppState.
  */
-export function registerTask(task: TaskState, setAppState: SetAppState): void {
+export function registerTask<T extends TaskState>(task: T, setAppState: SetAppState): T {
   let isReplacement = false
+  let registeredTask = task
   setAppState(prev => {
     const existing = prev.tasks[task.id]
     isReplacement = existing !== undefined
@@ -88,6 +89,9 @@ export function registerTask(task: TaskState, setAppState: SetAppState): void {
       existing && 'retain' in existing
         ? {
             ...task,
+            ...('epoch' in existing && 'epoch' in task
+              ? { epoch: existing.epoch + 1 }
+              : {}),
             retain: existing.retain,
             startTime: existing.startTime,
             messages: existing.messages,
@@ -95,11 +99,12 @@ export function registerTask(task: TaskState, setAppState: SetAppState): void {
             pendingMessages: existing.pendingMessages,
           }
         : task
+    registeredTask = merged as T
     return { ...prev, tasks: { ...prev.tasks, [task.id]: merged } }
   })
 
   // Replacement (resume) — not a new start. Skip to avoid double-emit.
-  if (isReplacement) return
+  if (isReplacement) return registeredTask
 
   enqueueSdkEvent({
     type: 'system',
@@ -114,6 +119,7 @@ export function registerTask(task: TaskState, setAppState: SetAppState): void {
         : undefined,
     prompt: 'prompt' in task ? (task.prompt as string) : undefined,
   })
+  return registeredTask
 }
 
 /**

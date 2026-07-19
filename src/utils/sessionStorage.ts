@@ -204,6 +204,10 @@ export function getTranscriptPath(): string {
   return join(projectDir, `${getSessionId()}.jsonl`)
 }
 
+export function getAgentRuntimePath(): string {
+  return getTranscriptPath().replace(/\.jsonl$/, '.agent-runtime.json')
+}
+
 export function getTranscriptPathForSession(sessionId: string): string {
   // When asking for the CURRENT session's transcript, honor sessionProjectDir
   // the same way getTranscriptPath() does. Without this, hooks get a

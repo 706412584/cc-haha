@@ -4920,7 +4920,7 @@ async function loadInitialMessages(
             }
           }
         }
-        restoreSessionStateFromLog(result, setAppState)
+        await restoreSessionStateFromLog(result, setAppState)
 
         // Restore session metadata so it's re-appended on exit via reAppendSessionMetadata
         restoreSessionMetadata(
@@ -5120,7 +5120,7 @@ async function loadInitialMessages(
           await resetSessionFilePointer()
         }
       }
-      restoreSessionStateFromLog(result, setAppState)
+      await restoreSessionStateFromLog(result, setAppState)
 
       // Restore session metadata so it's re-appended on exit via reAppendSessionMetadata
       restoreSessionMetadata(
