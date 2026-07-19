@@ -12,7 +12,16 @@ import {
   onChangeAppState,
 } from '../state/onChangeAppState.js'
 import { createStore } from '../state/store.js'
+import {
+  registerAsyncAgent,
+} from '../tasks/LocalAgentTask/LocalAgentTask.js'
+import type { ToolUseContext } from '../Tool.js'
 import type { SessionId } from '../types/ids.js'
+import type { Message } from '../types/message.js'
+import { runAsyncAgentLifecycle } from '../tools/AgentTool/agentToolUtils.js'
+import { AbortError } from './errors.js'
+import { createAssistantMessage } from './messages.js'
+import { flushSessionStorage, recordSidechainTranscript, resetProjectForTesting } from './sessionStorage.js'
 import {
   restoreSessionStateFromLog,
   switchSessionAndRestoreStateFromLog,
@@ -55,6 +64,7 @@ describe('Agent runtime session restore targeting', () => {
   const tempDirectories: string[] = []
 
   afterEach(async () => {
+    delete process.env.TEST_ENABLE_SESSION_PERSISTENCE
     setSessionPersistenceDisabled(false)
     await Promise.all(tempDirectories.splice(0).map(directory =>
       fs.rm(directory, { recursive: true, force: true }),
@@ -90,6 +100,91 @@ describe('Agent runtime session restore targeting', () => {
     expect(Object.keys(store.getState().tasks)).toEqual(['agent-from-b'])
     expect(await readRuntimeTaskIds(transcriptA)).toEqual(['agent-from-a'])
     expect(await readRuntimeTaskIds(transcriptB)).toEqual(['agent-from-b'])
+  })
+
+  test('aborts and quiesces an outgoing lifecycle before restoring another session', async () => {
+    process.env.TEST_ENABLE_SESSION_PERSISTENCE = '1'
+    const project = await fs.mkdtemp(path.join(os.tmpdir(), 'runtime-resume-lifecycle-'))
+    tempDirectories.push(project)
+    const sessionA = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' as SessionId
+    const sessionB = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' as SessionId
+    const transcriptA = path.join(project, `${sessionA}.jsonl`)
+    const transcriptB = path.join(project, `${sessionB}.jsonl`)
+    await writeRuntime(transcriptB, 'agent-from-b')
+    switchSession(sessionA, project)
+    resetProjectForTesting()
+    const store = createStore(getDefaultAppState(), onChangeAppState)
+    const task = registerAsyncAgent({
+      agentId: 'agent-running-in-a',
+      description: 'Running in A',
+      prompt: 'Running in A',
+      selectedAgent: { agentType: 'general-purpose' } as never,
+      setAppState: store.setState,
+    })
+    const started = createAssistantMessage({
+      content: [{ type: 'text', text: 'started in A' }],
+    }) as Message
+    const late = createAssistantMessage({
+      content: [{ type: 'text', text: 'late completion from A' }],
+    }) as Message
+    let markStarted!: () => void
+    const streamStarted = new Promise<void>(resolve => {
+      markStarted = resolve
+    })
+    async function* makeStream(): AsyncGenerator<Message, void> {
+      const aborted = new Promise<void>(resolve => {
+        task.abortController!.signal.addEventListener('abort', resolve, { once: true })
+      })
+      markStarted()
+      yield started
+      await aborted
+      await recordSidechainTranscript([late], task.agentId)
+      throw new AbortError()
+    }
+    const lifecycle = runAsyncAgentLifecycle({
+      taskId: task.agentId,
+      epoch: task.epoch,
+      abortController: task.abortController!,
+      makeStream,
+      metadata: {
+        prompt: task.prompt,
+        resolvedAgentModel: 'test-model',
+        isBuiltInAgent: true,
+        startTime: Date.now(),
+        agentType: task.agentType,
+        isAsync: true,
+      },
+      description: task.description,
+      toolUseContext: {
+        options: { tools: [] },
+        toolUseId: 'tool-agent-a',
+        getAppState: store.getState,
+      } as unknown as ToolUseContext,
+      rootSetAppState: store.setState,
+      agentIdForCleanup: task.agentId,
+      enableSummarization: false,
+      getWorktreeResult: async () => ({}),
+    })
+    await streamStarted
+
+    await switchSessionAndRestoreStateFromLog({}, store.setState, {
+      sessionId: sessionB,
+      transcriptPath: transcriptB,
+      forkSession: false,
+    })
+    const wasAbortedBeforeSwitchCompleted = task.abortController?.signal.aborted === true
+    if (!wasAbortedBeforeSwitchCompleted) task.abortController?.abort()
+    await lifecycle
+    await flushSessionStorage()
+    await flushAgentRuntimePersistence()
+
+    expect(wasAbortedBeforeSwitchCompleted).toBe(true)
+    expect(Object.keys(store.getState().tasks)).toEqual(['agent-from-b'])
+    expect(store.getState().agentCompletionInbox).toEqual([])
+    const aSidechain = path.join(project, sessionA, 'subagents', `agent-${task.agentId}.jsonl`)
+    const bSidechain = path.join(project, sessionB, 'subagents', `agent-${task.agentId}.jsonl`)
+    expect(await fs.readFile(aSidechain, 'utf8')).toContain('late completion from A')
+    expect(await fs.stat(bSidechain).then(() => true, () => false)).toBe(false)
   })
 
   test('restores a target runtime from another project', async () => {

@@ -296,9 +296,17 @@ export type QueuePriority = 'now' | 'next' | 'later'
 /**
  * Queued command type
  */
+export type AgentCompletionMetadata = {
+  taskId: string
+  epoch: number
+  sessionId: string
+}
+
 export type QueuedCommand = {
   value: string | Array<ContentBlockParam>
   mode: PromptInputMode
+  /** Structured identity for deferred local-Agent terminal events. */
+  agentCompletion?: AgentCompletionMetadata
   /** Defaults to the priority implied by `mode` when enqueued. */
   priority?: QueuePriority
   uuid?: UUID

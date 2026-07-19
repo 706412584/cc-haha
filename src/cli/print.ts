@@ -39,6 +39,7 @@ import {
   parseAgentsFromJson,
 } from 'src/tools/AgentTool/loadAgentsDir.js'
 import type { Message, NormalizedUserMessage } from 'src/types/message.js'
+import { isCurrentAgentCompletionCommand } from 'src/tasks/LocalAgentTask/LocalAgentTask.js'
 import type { QueuedCommand } from 'src/types/textInputTypes.js'
 import {
   dequeue,
@@ -1938,7 +1939,10 @@ function runHeadlessStreaming(
       // ask() call so messages that queued up during a long turn coalesce
       // into a single follow-up turn instead of N separate turns.
       const drainCommandQueue = async () => {
-        while ((command = dequeue(isMainThread))) {
+        const isCurrentMainThreadCommand = (candidate: QueuedCommand) =>
+          isMainThread(candidate) &&
+          isCurrentAgentCompletionCommand(candidate, getAppState())
+        while ((command = dequeue(isCurrentMainThreadCommand))) {
           if (
             command.mode !== 'prompt' &&
             command.mode !== 'orphaned-permission' &&

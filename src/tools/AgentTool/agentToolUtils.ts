@@ -591,11 +591,47 @@ export function extractPartialResult(
 
 type SetAppState = (f: (prev: AppState) => AppState) => void
 
+const activeAgentLifecycles = new Map<string, Promise<void>>()
+
+function agentLifecycleKey(taskId: string, epoch: number | undefined): string {
+  return `${taskId}:${epoch ?? 0}`
+}
+
+/**
+ * Abort outgoing local Agents and wait until their lifecycle handlers stop
+ * mutating task state. Session switches call this before flushing transcript
+ * and runtime persistence so no old-session work can cross the boundary.
+ */
+export async function quiesceLocalAgentLifecycles(
+  setAppState: SetAppState,
+): Promise<void> {
+  const outgoing: Array<{ taskId: string; epoch: number }> = []
+  setAppState(prev => {
+    for (const task of Object.values(prev.tasks)) {
+      if (
+        isLocalAgentTask(task) &&
+        (task.status === 'running' || task.status === 'pending')
+      ) {
+        outgoing.push({ taskId: task.id, epoch: task.epoch })
+      }
+    }
+    return prev
+  })
+  for (const task of outgoing) {
+    killAsyncAgent(task.taskId, setAppState, task.epoch)
+  }
+  await Promise.all(
+    outgoing.map(task =>
+      activeAgentLifecycles.get(agentLifecycleKey(task.taskId, task.epoch)),
+    ).filter((lifecycle): lifecycle is Promise<void> => lifecycle !== undefined),
+  )
+}
+
 /**
  * Drives a background agent from spawn to terminal notification.
  * Shared between AgentTool's async-from-start path and resumeAgentBackground.
  */
-export async function runAsyncAgentLifecycle({
+async function runAsyncAgentLifecycleImpl({
   taskId,
   abortController,
   makeStream,
@@ -799,4 +835,25 @@ export async function runAsyncAgentLifecycle({
     clearInvokedSkillsForAgent(agentIdForCleanup)
     clearDumpState(agentIdForCleanup)
   }
+}
+
+export function runAsyncAgentLifecycle(
+  options: Parameters<typeof runAsyncAgentLifecycleImpl>[0],
+): Promise<void> {
+  const key = agentLifecycleKey(options.taskId, options.epoch)
+  const lifecycle = runAsyncAgentLifecycleImpl(options)
+  activeAgentLifecycles.set(key, lifecycle)
+  void lifecycle.then(
+    () => {
+      if (activeAgentLifecycles.get(key) === lifecycle) {
+        activeAgentLifecycles.delete(key)
+      }
+    },
+    () => {
+      if (activeAgentLifecycles.get(key) === lifecycle) {
+        activeAgentLifecycles.delete(key)
+      }
+    },
+  )
+  return lifecycle
 }

@@ -138,7 +138,7 @@ import {
   applyTaskOffsetsAndEvictions,
 } from './task/framework.js'
 import { getTaskOutputPath } from './task/diskOutput.js'
-import { drainPendingMessages } from '../tasks/LocalAgentTask/LocalAgentTask.js'
+import { drainPendingMessages, isCurrentAgentCompletionCommand } from '../tasks/LocalAgentTask/LocalAgentTask.js'
 import type { TaskType, TaskStatus } from '../Task.js'
 import {
   getOriginalCwd,
@@ -544,6 +544,7 @@ export type Attachment =
       type: 'queued_command'
       prompt: string | Array<ContentBlockParam>
       source_uuid?: UUID
+      agentCompletion?: QueuedCommand['agentCompletion']
       imagePasteIds?: number[]
       /** Original queue mode — 'prompt' for user messages, 'task-notification' for system events */
       commandMode?: string
@@ -757,7 +758,7 @@ export async function getAttachments(
     // getAttachmentMessages runs — returning [] here silently drops them.
     // Coworker runs with --bare and depends on task-notification for
     // mid-tool-call notifications from Local*Task/Remote*Task.
-    return getQueuedCommandAttachments(queuedCommands)
+    return getQueuedCommandAttachments(queuedCommands, toolUseContext.getAppState())
   }
 
   // This will slow down submissions
@@ -826,7 +827,7 @@ export async function getAttachments(
     // main thread gets agentId===undefined, subagents get their own agentId.
     // Must run for all threads or subagent notifications drain into the void
     // (removed from queue by removeFromQueue but never attached).
-    maybe('queued_commands', () => getQueuedCommandAttachments(queuedCommands)),
+    maybe('queued_commands', () => getQueuedCommandAttachments(queuedCommands, toolUseContext.getAppState())),
     maybe('date_change', () =>
       Promise.resolve(getDateChangeAttachments(messages)),
     ),
@@ -1041,6 +1042,7 @@ const INLINE_NOTIFICATION_MODES = new Set(['prompt', 'task-notification'])
 
 export async function getQueuedCommandAttachments(
   queuedCommands: QueuedCommand[],
+  appState?: AppState,
 ): Promise<Attachment[]> {
   if (!queuedCommands) {
     return []
@@ -1050,8 +1052,9 @@ export async function getQueuedCommandAttachments(
   // stay in the queue permanently (useQueueProcessor can't run while a query
   // is active), causing hasPendingNotifications() to return true and Sleep to
   // wake immediately with 0ms duration in an infinite loop.
-  const filtered = queuedCommands.filter(_ =>
-    INLINE_NOTIFICATION_MODES.has(_.mode),
+  const filtered = queuedCommands.filter(command =>
+    INLINE_NOTIFICATION_MODES.has(command.mode) &&
+    (appState === undefined || isCurrentAgentCompletionCommand(command, appState)),
   )
   return Promise.all(
     filtered.map(async _ => {
@@ -1071,6 +1074,7 @@ export async function getQueuedCommandAttachments(
         source_uuid: _.uuid,
         imagePasteIds: getImagePasteIds(_.pastedContents),
         commandMode: _.mode,
+        agentCompletion: _.agentCompletion,
         origin: _.origin,
         isMeta: _.isMeta,
       }

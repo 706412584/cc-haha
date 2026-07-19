@@ -1,3 +1,5 @@
+import type { AppState } from '../state/AppState.js'
+import { isCurrentAgentCompletionCommand } from '../tasks/LocalAgentTask/LocalAgentTask.js'
 import type { QueuedCommand } from '../types/textInputTypes.js'
 import {
   dequeue,
@@ -8,6 +10,7 @@ import {
 
 type ProcessQueueParams = {
   executeInput: (commands: QueuedCommand[]) => Promise<void>
+  getAppState?: () => AppState
 }
 
 type ProcessQueueResult = {
@@ -51,6 +54,7 @@ function isSlashCommand(cmd: QueuedCommand): boolean {
  */
 export function processQueueIfReady({
   executeInput,
+  getAppState,
 }: ProcessQueueParams): ProcessQueueResult {
   // This processor runs on the REPL main thread between turns. Skip anything
   // addressed to a subagent — an unfiltered peek() returning a subagent
@@ -58,7 +62,10 @@ export function processQueueIfReady({
   // matching that mode with agentId===undefined, and we'd return processed:
   // false with the queue unchanged → the React effect never re-fires and any
   // queued user prompt stalls permanently.
-  const isMainThread = (cmd: QueuedCommand) => cmd.agentId === undefined
+  const appState = getAppState?.()
+  const isMainThread = (cmd: QueuedCommand) =>
+    cmd.agentId === undefined &&
+    (appState === undefined || isCurrentAgentCompletionCommand(cmd, appState))
 
   const next = peek(isMainThread)
   if (!next) {

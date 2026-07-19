@@ -2,18 +2,20 @@ import { afterEach, describe, expect, spyOn, test } from 'bun:test'
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { setIsInteractive } from '../../bootstrap/state.js'
+import { setIsInteractive, switchSession } from '../../bootstrap/state.js'
 import * as sdkEventQueue from '../../utils/sdkEventQueue.js'
 import type { AppState } from '../../state/AppState.js'
 import { IDLE_SPECULATION_STATE } from '../../state/AppStateStore.js'
 import { createTaskStateBase } from '../../Task.js'
 import type { ToolUseContext } from '../../Tool.js'
 import type { LocalAgentTaskState } from '../../tasks/LocalAgentTask/LocalAgentTask.js'
+import type { SessionId } from '../../types/ids.js'
 import type { Message } from '../../types/message.js'
 import { getEmptyToolPermissionContext } from '../../Tool.js'
 import {
   drainSdkEvents,
 } from '../../utils/sdkEventQueue.js'
+import { getQueuedCommandAttachments } from '../../utils/attachments.js'
 import {
   getCommandQueue,
   resetCommandQueue,
@@ -73,6 +75,40 @@ describe('local Agent lifecycle epochs', () => {
 })
 
 describe('Agent runtime recovery', () => {
+  test('preserves a full persisted inbox instead of replacing completions with interrupted notices', () => {
+    const persistedInbox = Array.from({ length: 64 }, (_, index) => ({
+      version: 1 as const,
+      sequence: index + 1,
+      taskId: `agent-existing-${index}`,
+      epoch: 1,
+      notification: `<task-notification>existing-${index}</task-notification>`,
+    }))
+    const restored = restoreAgentRuntimeSnapshot({
+      version: 1,
+      nextSequence: 65,
+      tasks: Array.from({ length: 3 }, (_, index) => ({
+        id: `agent-running-${index}`,
+        epoch: 1,
+        status: 'running',
+        description: `Running ${index}`,
+        prompt: `Running ${index}`,
+        agentType: 'general-purpose',
+        startTime: index + 1,
+      })),
+      inbox: persistedInbox,
+    })
+
+    expect(restored.agentCompletionInbox).toHaveLength(64)
+    expect(restored.agentCompletionInbox.map(item => item.taskId)).toEqual(
+      persistedInbox.map(item => item.taskId),
+    )
+    expect(Object.values(restored.tasks).map(task => task.status)).toEqual([
+      'failed',
+      'failed',
+      'failed',
+    ])
+  })
+
   test('marks orphaned running Agents interrupted and preserves only unconsumed completions', () => {
     const restored = restoreAgentRuntimeSnapshot({
       version: 1,
@@ -246,6 +282,10 @@ describe('bounded Agent registry', () => {
 })
 
 describe('Agent completion inbox', () => {
+  afterEach(() => {
+    resetCommandQueue()
+  })
+
   test('drops an enqueued completion when the same task resumes at a newer epoch', () => {
     let appState = {
       tasks: {},
@@ -280,7 +320,51 @@ describe('Agent completion inbox', () => {
     expect(getCommandQueue()).toHaveLength(0)
   })
 
-  test('defers ordered completion injection until a continuation boundary and consumes once', () => {
+  test('drops a drained completion when the task resumes before attachment consumption', async () => {
+    let appState = {
+      tasks: {},
+      agentCompletionInbox: [],
+      nextAgentCompletionSequence: 1,
+      speculation: IDLE_SPECULATION_STATE,
+    } as unknown as AppState
+    const setAppState = (updater: (prev: AppState) => AppState): void => {
+      appState = updater(appState)
+    }
+    const selectedAgent = { agentType: 'general-purpose' } as never
+    const first = registerAsyncAgent({ agentId: 'agent-drained-resume', description: 'First', prompt: 'First', selectedAgent, setAppState })
+    completeAgentTask({ agentId: first.agentId, content: [], totalToolUseCount: 0, totalDurationMs: 1, totalTokens: 0, usage: {} as never }, setAppState, first.epoch)
+    enqueueAgentNotification({ taskId: first.agentId, description: 'First', status: 'completed', setAppState, epoch: first.epoch })
+    drainAgentCompletionInbox(setAppState)
+
+    registerAsyncAgent({ agentId: first.agentId, description: 'Second', prompt: 'Second', selectedAgent, setAppState })
+
+    expect(await getQueuedCommandAttachments(getCommandQueue(), appState)).toEqual([])
+  })
+
+  test('drops a drained completion after switching sessions before attachment consumption', async () => {
+    const sessionA = '12121212-1212-4212-8212-121212121212' as SessionId
+    const sessionB = '34343434-3434-4434-8434-343434343434' as SessionId
+    switchSession(sessionA)
+    let appState = {
+      tasks: {},
+      agentCompletionInbox: [],
+      nextAgentCompletionSequence: 1,
+      speculation: IDLE_SPECULATION_STATE,
+    } as unknown as AppState
+    const setAppState = (updater: (prev: AppState) => AppState): void => {
+      appState = updater(appState)
+    }
+    const task = registerAsyncAgent({ agentId: 'agent-drained-switch', description: 'A', prompt: 'A', selectedAgent: { agentType: 'general-purpose' } as never, setAppState })
+    completeAgentTask({ agentId: task.agentId, content: [], totalToolUseCount: 0, totalDurationMs: 1, totalTokens: 0, usage: {} as never }, setAppState, task.epoch)
+    enqueueAgentNotification({ taskId: task.agentId, description: 'A', status: 'completed', setAppState, epoch: task.epoch })
+    drainAgentCompletionInbox(setAppState)
+
+    switchSession(sessionB)
+
+    expect(await getQueuedCommandAttachments(getCommandQueue(), appState)).toEqual([])
+  })
+
+  test('defers ordered completion injection until a continuation boundary and consumes once', async () => {
     let appState = {
       tasks: {},
       agentCompletionInbox: [],
@@ -305,6 +389,7 @@ describe('Agent completion inbox', () => {
       expect.stringContaining('<task-id>agent-inbox-1</task-id>'),
       expect.stringContaining('<task-id>agent-inbox-2</task-id>'),
     ])
+    expect(await getQueuedCommandAttachments(getCommandQueue(), appState)).toHaveLength(2)
     drainAgentCompletionInbox(setAppState)
     expect(getCommandQueue()).toHaveLength(2)
   })

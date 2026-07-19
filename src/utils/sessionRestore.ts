@@ -14,7 +14,9 @@ import { clearSystemPromptSections } from '../constants/systemPromptSections.js'
 import { restoreCostStateForSession } from '../cost-tracker.js'
 import type { AppState } from '../state/AppState.js'
 import { flushAgentRuntimePersistence } from '../state/onChangeAppState.js'
+import { removeByFilter } from './messageQueueManager.js'
 import type { AgentColorName } from '../tools/AgentTool/agentColorManager.js'
+import { quiesceLocalAgentLifecycles } from '../tools/AgentTool/agentToolUtils.js'
 import {
   loadAgentRuntimeSnapshot,
   restoreAgentRuntimeSnapshot,
@@ -55,6 +57,7 @@ import {
   recordContentReplacement,
   resetSessionFilePointer,
   restoreSessionMetadata,
+  flushSessionStorage,
   getAgentRuntimePathForTranscript,
   getTranscriptPathForSession,
   saveMode,
@@ -115,10 +118,16 @@ export async function switchSessionAndRestoreStateFromLog(
   setAppState: (f: (prev: AppState) => AppState) => void,
   runtimeTarget: AgentRuntimeResumeTarget,
 ): Promise<void> {
+  await quiesceLocalAgentLifecycles(setAppState)
+  await flushSessionStorage()
   await flushAgentRuntimePersistence()
   switchSession(
     asSessionId(runtimeTarget.sessionId),
     runtimeTarget.transcriptPath ? dirname(runtimeTarget.transcriptPath) : null,
+  )
+  removeByFilter(command =>
+    command.agentCompletion !== undefined &&
+    command.agentCompletion.sessionId !== runtimeTarget.sessionId,
   )
   await restoreSessionStateFromLog(result, setAppState, runtimeTarget)
 }

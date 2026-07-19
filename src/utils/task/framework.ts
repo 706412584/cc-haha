@@ -14,7 +14,7 @@ import {
   type TaskType,
 } from '../../Task.js'
 import type { TaskState } from '../../tasks/types.js'
-import { enqueuePendingNotification } from '../messageQueueManager.js'
+import { enqueuePendingNotification, removeByFilter } from '../messageQueueManager.js'
 import { enqueueSdkEvent } from '../sdkEventQueue.js'
 import { getTaskOutputDelta, getTaskOutputPath } from './diskOutput.js'
 
@@ -113,8 +113,17 @@ export function registerTask<T extends TaskState>(task: T, setAppState: SetAppSt
     }
   })
 
-  // Replacement (resume) — not a new start. Skip to avoid double-emit.
-  if (isReplacement) return registeredTask
+  // Replacement (resume) invalidates both persisted inbox entries and any
+  // completion that already crossed into the shared command queue.
+  if (isReplacement) {
+    if ('epoch' in registeredTask) {
+      removeByFilter(command =>
+        command.agentCompletion?.taskId === task.id &&
+        command.agentCompletion.epoch !== registeredTask.epoch,
+      )
+    }
+    return registeredTask
+  }
 
   enqueueSdkEvent({
     type: 'system',

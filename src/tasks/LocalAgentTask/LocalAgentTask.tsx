@@ -1,4 +1,4 @@
-import { getSdkAgentProgressSummariesEnabled, isSessionPersistenceDisabled } from '../../bootstrap/state.js';
+import { getSdkAgentProgressSummariesEnabled, getSessionId, isSessionPersistenceDisabled } from '../../bootstrap/state.js';
 import { promises as fs } from 'node:fs';
 import { dirname } from 'node:path';
 import { Buffer } from 'node:buffer';
@@ -18,6 +18,7 @@ import type { AgentDefinition } from '../../tools/AgentTool/loadAgentsDir.js';
 import { SYNTHETIC_OUTPUT_TOOL_NAME } from '../../tools/SyntheticOutputTool/SyntheticOutputTool.js';
 import { asAgentId } from '../../types/ids.js';
 import type { Message } from '../../types/message.js';
+import type { QueuedCommand } from '../../types/textInputTypes.js';
 import { createAbortController, createChildAbortController } from '../../utils/abortController.js';
 import { registerCleanup } from '../../utils/cleanupRegistry.js';
 import { getToolSearchOrReadInfo } from '../../utils/collapseReadSearch.js';
@@ -403,7 +404,9 @@ export function restoreAgentRuntimeSnapshot(snapshot: unknown): Pick<AppState, '
     ...item
   }) => item);
   let nextSequence = Number.isSafeInteger(record.nextSequence) && record.nextSequence! > 0 ? record.nextSequence! : Math.max(0, ...inbox.map(item => item.sequence)) + 1;
+  let remainingInboxCapacity = MAX_AGENT_COMPLETION_INBOX - inbox.length;
   for (const task of interruptedTasks.sort((a, b) => a.id.localeCompare(b.id))) {
+    if (remainingInboxCapacity <= 0) break;
     task.notified = true;
     const toolUseIdLine = task.toolUseId ? `\n<${TOOL_USE_ID_TAG}>${task.toolUseId}</${TOOL_USE_ID_TAG}>` : '';
     inbox.push({
@@ -413,10 +416,11 @@ export function restoreAgentRuntimeSnapshot(snapshot: unknown): Pick<AppState, '
       epoch: task.epoch,
       notification: `<${TASK_NOTIFICATION_TAG}>\n<${TASK_ID_TAG}>${task.id}</${TASK_ID_TAG}>${toolUseIdLine}\n<${TASK_TYPE_TAG}>local_agent</${TASK_TYPE_TAG}>\n<${OUTPUT_FILE_TAG}>${task.outputFile}</${OUTPUT_FILE_TAG}>\n<${STATUS_TAG}>failed</${STATUS_TAG}>\n<${SUMMARY_TAG}>Agent "${task.description}" interrupted during session recovery</${SUMMARY_TAG}>\n</${TASK_NOTIFICATION_TAG}>`
     });
+    remainingInboxCapacity--;
   }
   return {
     tasks,
-    agentCompletionInbox: inbox.sort((a, b) => a.sequence - b.sequence).slice(-MAX_AGENT_COMPLETION_INBOX),
+    agentCompletionInbox: inbox.sort((a, b) => a.sequence - b.sequence),
     nextAgentCompletionSequence: nextSequence
   };
 }
@@ -544,6 +548,14 @@ export function enqueueAgentNotification({
   }
 }
 
+export function isCurrentAgentCompletionCommand(command: QueuedCommand, state: AppState, sessionId = getSessionId()): boolean {
+  const completion = command.agentCompletion;
+  if (!completion) return true;
+  if (completion.sessionId !== sessionId) return false;
+  const task = state.tasks[completion.taskId];
+  return isLocalAgentTask(task) && task.epoch === completion.epoch;
+}
+
 /** Move deferred Agent completions into the existing model-input queue at a safe boundary. */
 export function drainAgentCompletionInbox(setAppState: SetAppState): void {
   let drained: AppState['agentCompletionInbox'] = [];
@@ -559,7 +571,12 @@ export function drainAgentCompletionInbox(setAppState: SetAppState): void {
   for (const completion of drained) {
     enqueuePendingNotification({
       value: completion.notification,
-      mode: 'task-notification'
+      mode: 'task-notification',
+      agentCompletion: {
+        taskId: completion.taskId,
+        epoch: completion.epoch,
+        sessionId: getSessionId()
+      }
     });
   }
 }

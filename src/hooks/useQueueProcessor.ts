@@ -1,4 +1,5 @@
 import { useEffect, useSyncExternalStore } from 'react'
+import { useAppStateStore } from '../state/AppState.js'
 import type { QueuedCommand } from '../types/textInputTypes.js'
 import {
   getCommandQueueSnapshot,
@@ -44,6 +45,7 @@ export function useQueueProcessor({
     subscribeToCommandQueue,
     getCommandQueueSnapshot,
   )
+  const appStateStore = useAppStateStore()
 
   useEffect(() => {
     if (isQueryActive) return
@@ -57,12 +59,16 @@ export function useQueueProcessor({
     // snapshot change), isQueryActive is already true (dispatching) and the
     // guard above returns early. handlePromptSubmit's finally releases the
     // reservation via cancelReservation() (no-op if onQuery already ran end()).
-    processQueueIfReady({ executeInput: executeQueuedInput })
+    processQueueIfReady({
+      executeInput: executeQueuedInput,
+      getAppState: appStateStore.getState,
+    })
   }, [
     queueSnapshot,
     isQueryActive,
     executeQueuedInput,
     hasActiveLocalJsxUI,
     queryGuard,
+    appStateStore,
   ])
 }

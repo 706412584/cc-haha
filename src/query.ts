@@ -96,7 +96,7 @@ import { shouldCaptureApiTrace } from './services/api/traceCapture.js'
 import { StreamingToolExecutor } from './services/tools/StreamingToolExecutor.js'
 import { queryCheckpoint } from './utils/queryProfiler.js'
 import { runTools } from './services/tools/toolOrchestration.js'
-import { drainAgentCompletionInbox } from './tasks/LocalAgentTask/LocalAgentTask.js'
+import { drainAgentCompletionInbox, isCurrentAgentCompletionCommand } from './tasks/LocalAgentTask/LocalAgentTask.js'
 import { flushAgentRuntimePersistence } from './state/onChangeAppState.js'
 import { applyToolResultBudget } from './utils/toolResultStorage.js'
 import { recordContentReplacement } from './utils/sessionStorage.js'
@@ -1585,9 +1585,11 @@ async function* queryLoop(
     const isMainThread =
       querySource.startsWith('repl_main_thread') || querySource === 'sdk'
     const currentAgentId = toolUseContext.agentId
+    const currentAppState = toolUseContext.getAppState()
     const queuedCommandsSnapshot = getCommandsByMaxPriority(
       sleepRan ? 'later' : 'next',
     ).filter(cmd => {
+      if (!isCurrentAgentCompletionCommand(cmd, currentAppState)) return false
       if (isSlashCommand(cmd)) return false
       if (isMainThread) return cmd.agentId === undefined
       // Subagents only drain task-notifications addressed to them — never
