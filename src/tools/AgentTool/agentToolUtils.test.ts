@@ -117,24 +117,26 @@ describe('Agent runtime recovery', () => {
 })
 
 describe('Agent runtime persistence', () => {
-  test('round-trips near registry capacity below the reader byte limit without mutating live results', async () => {
+  test('round-trips 64 escaped tasks and inbox items within the reader byte limit', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-runtime-budget-'))
     const filePath = path.join(directory, 'runtime.json')
     try {
-      const largeText = 'x'.repeat(128_000)
+      const escapedText = '\n\\"\u0001'.repeat(1_000)
       const tasks = Object.fromEntries(Array.from({ length: 64 }, (_, index) => {
-        const id = `agent-large-${String(index).padStart(2, '0')}`
+        const id = `agent-escaped-${String(index).padStart(2, '0')}`
         return [id, {
-          ...createTaskStateBase(id, 'local_agent', largeText),
+          ...createTaskStateBase(id, 'local_agent', escapedText),
           type: 'local_agent' as const,
-          status: 'completed' as const,
+          status: index < 4 ? 'running' as const : 'completed' as const,
           agentId: id,
           epoch: 1,
-          prompt: largeText,
-          agentType: 'general-purpose',
+          prompt: escapedText,
+          agentType: `general-purpose-${escapedText}`,
+          error: escapedText,
           result: {
             agentId: id,
-            content: [{ type: 'text' as const, text: largeText }],
+            agentType: escapedText,
+            content: [{ type: 'text' as const, text: escapedText }],
             totalToolUseCount: 1,
             totalDurationMs: 1,
             totalTokens: 1,
@@ -154,7 +156,7 @@ describe('Agent runtime persistence', () => {
         sequence: index + 1,
         taskId: task.id,
         epoch: task.epoch,
-        notification: `<task-notification><result>${largeText}</result></task-notification>`,
+        notification: escapedText,
       }))
 
       await persistAgentRuntimeSnapshot(filePath, {
@@ -163,12 +165,18 @@ describe('Agent runtime persistence', () => {
         nextAgentCompletionSequence: 65,
       })
 
-      expect((await fs.stat(filePath)).size).toBeLessThan(1_500_000)
+      expect((await fs.stat(filePath)).size).toBeLessThanOrEqual(2_000_000)
+      expect(JSON.parse(await fs.readFile(filePath, 'utf8')).version).toBe(1)
       const restored = await loadAgentRuntimeSnapshot(filePath)
       expect(Object.keys(restored.tasks)).toHaveLength(64)
+      for (let index = 0; index < 4; index++) {
+        const id = `agent-escaped-${String(index).padStart(2, '0')}`
+        expect(restored.tasks[id]?.status).toBe('failed')
+      }
       expect(restored.agentCompletionInbox).toHaveLength(64)
-      expect(tasks['agent-large-00']?.result?.content[0]?.text).toHaveLength(128_000)
-      expect((restored.tasks['agent-large-00'] as LocalAgentTaskState).result?.content[0]?.text.length).toBeLessThan(128_000)
+      expect(restored.agentCompletionInbox[0]?.notification).toContain('persisted recovery summary')
+      expect(restored.nextAgentCompletionSequence).toBeGreaterThanOrEqual(65)
+      expect(tasks['agent-escaped-00']?.result?.content[0]?.text).toBe(escapedText)
     } finally {
       await fs.rm(directory, { recursive: true, force: true })
     }

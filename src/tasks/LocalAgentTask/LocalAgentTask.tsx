@@ -210,25 +210,39 @@ export function isLocalAgentTask(task: unknown): task is LocalAgentTaskState {
   return typeof task === 'object' && task !== null && 'type' in task && task.type === 'local_agent';
 }
 
-function truncateRuntimeText(value: string | undefined): string | undefined {
-  if (value === undefined || Buffer.byteLength(value, 'utf8') <= MAX_PERSISTED_RUNTIME_TEXT_BYTES) {
-    return value;
-  }
-  let end = Math.min(value.length, MAX_PERSISTED_RUNTIME_TEXT_BYTES);
-  while (end > 0 && Buffer.byteLength(value.slice(0, end), 'utf8') > MAX_PERSISTED_RUNTIME_TEXT_BYTES) {
-    end--;
-  }
-  return value.slice(0, end);
+const COMPACT_PERSISTED_RUNTIME_TEXT_BYTES = 512;
+const PERSISTED_RUNTIME_TRUNCATION_SUFFIX = '… [persisted recovery summary]';
+
+function jsonStringByteLength(value: string): number {
+  return Buffer.byteLength(JSON.stringify(value), 'utf8');
 }
 
-function summarizePersistedResult(result: AgentToolResult | undefined): AgentToolResult | undefined {
+function truncateRuntimeText(value: string | undefined, maxBytes = MAX_PERSISTED_RUNTIME_TEXT_BYTES): string | undefined {
+  if (value === undefined || jsonStringByteLength(value) <= maxBytes) {
+    return value;
+  }
+  const suffix = jsonStringByteLength(PERSISTED_RUNTIME_TRUNCATION_SUFFIX) <= maxBytes ? PERSISTED_RUNTIME_TRUNCATION_SUFFIX : '';
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (jsonStringByteLength(value.slice(0, middle) + suffix) <= maxBytes) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return value.slice(0, low) + suffix;
+}
+
+function summarizePersistedResult(result: AgentToolResult | undefined, maxTextBytes = MAX_PERSISTED_RUNTIME_TEXT_BYTES): AgentToolResult | undefined {
   if (!result) return undefined;
   return {
-    agentId: truncateRuntimeText(result.agentId) ?? '',
-    agentType: truncateRuntimeText(result.agentType),
+    agentId: truncateRuntimeText(result.agentId, maxTextBytes) ?? '',
+    agentType: truncateRuntimeText(result.agentType, maxTextBytes),
     content: result.content.slice(0, 1).map(item => ({
       type: 'text',
-      text: truncateRuntimeText(item.text) ?? ''
+      text: truncateRuntimeText(item.text, maxTextBytes) ?? ''
     })),
     totalToolUseCount: result.totalToolUseCount,
     totalDurationMs: result.totalDurationMs,
@@ -245,39 +259,89 @@ function summarizePersistedResult(result: AgentToolResult | undefined): AgentToo
   };
 }
 
-function summarizePersistedNotification(item: AppState['agentCompletionInbox'][number]): string {
-  if (Buffer.byteLength(item.notification, 'utf8') <= MAX_PERSISTED_RUNTIME_TEXT_BYTES) {
+function summarizePersistedNotification(item: AppState['agentCompletionInbox'][number], forceSummary = false, taskId = item.taskId): string {
+  if (!forceSummary && jsonStringByteLength(item.notification) <= MAX_PERSISTED_RUNTIME_TEXT_BYTES) {
     return item.notification;
   }
   const status = item.notification.match(/<status>(completed|failed|killed)<\/status>/)?.[1] ?? 'completed';
-  return `<${TASK_NOTIFICATION_TAG}>\n<${TASK_ID_TAG}>${item.taskId}</${TASK_ID_TAG}>\n<${TASK_TYPE_TAG}>local_agent</${TASK_TYPE_TAG}>\n<${STATUS_TAG}>${status}</${STATUS_TAG}>\n<${SUMMARY_TAG}>Agent completion restored; full result omitted from persisted recovery summary</${SUMMARY_TAG}>\n</${TASK_NOTIFICATION_TAG}>`;
+  return `<${TASK_NOTIFICATION_TAG}>\n<${TASK_ID_TAG}>${taskId}</${TASK_ID_TAG}>\n<${TASK_TYPE_TAG}>local_agent</${TASK_TYPE_TAG}>\n<${STATUS_TAG}>${status}</${STATUS_TAG}>\n<${SUMMARY_TAG}>Agent completion restored; full result omitted from persisted recovery summary</${SUMMARY_TAG}>\n</${TASK_NOTIFICATION_TAG}>`;
+}
+
+function serializeRuntimeSnapshot(snapshot: AgentRuntimeSnapshot): string {
+  return JSON.stringify(snapshot);
+}
+
+function runtimeSnapshotFits(serialized: string): boolean {
+  return Buffer.byteLength(serialized, 'utf8') <= MAX_AGENT_RUNTIME_SNAPSHOT_BYTES;
 }
 
 export async function persistAgentRuntimeSnapshot(filePath: string, state: Pick<AppState, 'tasks' | 'agentCompletionInbox' | 'nextAgentCompletionSequence'>): Promise<void> {
   if (isSessionPersistenceDisabled()) return;
-  const tasks = Object.values(state.tasks).filter(isLocalAgentTask).slice(-MAX_AGENT_REGISTRY_SIZE).map(task => ({
-    id: task.id,
+  const liveTasks = Object.values(state.tasks).filter(isLocalAgentTask).slice(-MAX_AGENT_REGISTRY_SIZE);
+  const createPersistedTasks = (maxTextBytes: number): PersistedAgentRuntimeTask[] => liveTasks.map(task => ({
+    id: truncateRuntimeText(task.id, maxTextBytes) ?? '',
     epoch: task.epoch,
     status: taskStatusToRuntime(task.status),
-    description: truncateRuntimeText(task.description) ?? '',
-    prompt: truncateRuntimeText(task.prompt) ?? '',
-    agentType: task.agentType,
+    description: truncateRuntimeText(task.description, maxTextBytes) ?? '',
+    prompt: truncateRuntimeText(task.prompt, maxTextBytes) ?? '',
+    agentType: truncateRuntimeText(task.agentType, maxTextBytes) ?? '',
     startTime: task.startTime,
     endTime: task.endTime,
-    toolUseId: task.toolUseId,
-    error: truncateRuntimeText(task.error),
-    result: summarizePersistedResult(task.result)
-  } satisfies PersistedAgentRuntimeTask));
-  const snapshot: AgentRuntimeSnapshot = {
+    toolUseId: truncateRuntimeText(task.toolUseId, maxTextBytes),
+    error: truncateRuntimeText(task.error, maxTextBytes),
+    result: summarizePersistedResult(task.result, maxTextBytes)
+  }));
+  const sourceInbox = state.agentCompletionInbox.slice(-MAX_AGENT_COMPLETION_INBOX);
+  let snapshot: AgentRuntimeSnapshot = {
     version: 1,
     nextSequence: Number.isSafeInteger(state.nextAgentCompletionSequence) && state.nextAgentCompletionSequence > 0 ? state.nextAgentCompletionSequence : 1,
-    tasks,
-    inbox: state.agentCompletionInbox.slice(-MAX_AGENT_COMPLETION_INBOX).map(item => ({
-      ...item,
-      notification: summarizePersistedNotification(item)
-    }))
+    tasks: createPersistedTasks(MAX_PERSISTED_RUNTIME_TEXT_BYTES),
+    inbox: sourceInbox.map(item => {
+      const taskId = truncateRuntimeText(item.taskId) ?? '';
+      return {
+        ...item,
+        taskId,
+        notification: summarizePersistedNotification(item, false, taskId)
+      };
+    })
   };
-  const serialized = JSON.stringify(snapshot);
+  let serialized = serializeRuntimeSnapshot(snapshot);
+
+  if (!runtimeSnapshotFits(serialized)) {
+    snapshot = {
+      ...snapshot,
+      tasks: createPersistedTasks(COMPACT_PERSISTED_RUNTIME_TEXT_BYTES),
+      inbox: sourceInbox.map(item => {
+        const taskId = truncateRuntimeText(item.taskId, COMPACT_PERSISTED_RUNTIME_TEXT_BYTES) ?? '';
+        return {
+          ...item,
+          taskId,
+          notification: summarizePersistedNotification(item, true, taskId)
+        };
+      })
+    };
+    serialized = serializeRuntimeSnapshot(snapshot);
+  }
+
+  if (!runtimeSnapshotFits(serialized)) {
+    const terminalTasks = snapshot.tasks.filter(task => task.status !== 'running' && task.status !== 'queued').sort((a, b) => (a.endTime ?? a.startTime) - (b.endTime ?? b.startTime) || a.id.localeCompare(b.id));
+    for (const task of terminalTasks) {
+      snapshot.tasks = snapshot.tasks.filter(candidate => candidate !== task);
+      serialized = serializeRuntimeSnapshot(snapshot);
+      if (runtimeSnapshotFits(serialized)) break;
+    }
+  }
+
+  while (!runtimeSnapshotFits(serialized) && snapshot.inbox.length > 0) {
+    const oldestIndex = snapshot.inbox.reduce((selected, item, index, inbox) => item.sequence < inbox[selected]!.sequence ? index : selected, 0);
+    snapshot.inbox.splice(oldestIndex, 1);
+    serialized = serializeRuntimeSnapshot(snapshot);
+  }
+
+  if (!runtimeSnapshotFits(serialized)) {
+    throw new Error(`Agent runtime snapshot exceeds ${MAX_AGENT_RUNTIME_SNAPSHOT_BYTES} bytes after compaction`);
+  }
+
   const tempPath = `${filePath}.${process.pid}.tmp`;
   await fs.mkdir(dirname(filePath), {
     recursive: true

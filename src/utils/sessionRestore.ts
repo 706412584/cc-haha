@@ -13,6 +13,7 @@ import {
 import { clearSystemPromptSections } from '../constants/systemPromptSections.js'
 import { restoreCostStateForSession } from '../cost-tracker.js'
 import type { AppState } from '../state/AppState.js'
+import { flushAgentRuntimePersistence } from '../state/onChangeAppState.js'
 import type { AgentColorName } from '../tools/AgentTool/agentColorManager.js'
 import {
   loadAgentRuntimeSnapshot,
@@ -107,6 +108,19 @@ export type AgentRuntimeResumeTarget = {
   sessionId: string
   transcriptPath?: string
   forkSession: boolean
+}
+
+export async function switchSessionAndRestoreStateFromLog(
+  result: ResumeResult,
+  setAppState: (f: (prev: AppState) => AppState) => void,
+  runtimeTarget: AgentRuntimeResumeTarget,
+): Promise<void> {
+  await flushAgentRuntimePersistence()
+  switchSession(
+    asSessionId(runtimeTarget.sessionId),
+    runtimeTarget.transcriptPath ? dirname(runtimeTarget.transcriptPath) : null,
+  )
+  await restoreSessionStateFromLog(result, setAppState, runtimeTarget)
 }
 
 export async function restoreSessionStateFromLog(

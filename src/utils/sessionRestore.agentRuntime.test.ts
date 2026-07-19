@@ -6,10 +6,17 @@ import {
   setSessionPersistenceDisabled,
   switchSession,
 } from '../bootstrap/state.js'
-import type { AppState } from '../state/AppState.js'
 import { getDefaultAppState } from '../state/AppStateStore.js'
+import {
+  flushAgentRuntimePersistence,
+  onChangeAppState,
+} from '../state/onChangeAppState.js'
+import { createStore } from '../state/store.js'
 import type { SessionId } from '../types/ids.js'
-import { restoreSessionStateFromLog } from './sessionRestore.js'
+import {
+  restoreSessionStateFromLog,
+  switchSessionAndRestoreStateFromLog,
+} from './sessionRestore.js'
 
 function runtimeSnapshot(taskId: string): string {
   return JSON.stringify({
@@ -36,17 +43,12 @@ async function writeRuntime(transcriptPath: string, taskId: string): Promise<voi
   )
 }
 
-function createStateHarness(): {
-  getState: () => AppState
-  setAppState: (updater: (prev: AppState) => AppState) => void
-} {
-  let state = getDefaultAppState()
-  return {
-    getState: () => state,
-    setAppState: updater => {
-      state = updater(state)
-    },
-  }
+async function readRuntimeTaskIds(transcriptPath: string): Promise<string[]> {
+  const snapshot = JSON.parse(await fs.readFile(
+    transcriptPath.replace(/\.jsonl$/, '.agent-runtime.json'),
+    'utf8',
+  )) as { tasks: Array<{ id: string }> }
+  return snapshot.tasks.map(task => task.id)
 }
 
 describe('Agent runtime session restore targeting', () => {
@@ -69,21 +71,25 @@ describe('Agent runtime session restore targeting', () => {
     await writeRuntime(transcriptA, 'agent-from-a')
     await writeRuntime(transcriptB, 'agent-from-b')
     switchSession(sessionA, project)
-    const harness = createStateHarness()
-    await restoreSessionStateFromLog({}, harness.setAppState, {
+    const store = createStore(getDefaultAppState(), onChangeAppState)
+    await restoreSessionStateFromLog({}, store.setState, {
       sessionId: sessionA,
       transcriptPath: transcriptA,
       forkSession: false,
     })
-    expect(Object.keys(harness.getState().tasks)).toEqual(['agent-from-a'])
+    await flushAgentRuntimePersistence()
+    expect(Object.keys(store.getState().tasks)).toEqual(['agent-from-a'])
 
-    await restoreSessionStateFromLog({}, harness.setAppState, {
+    await switchSessionAndRestoreStateFromLog({}, store.setState, {
       sessionId: sessionB,
       transcriptPath: transcriptB,
       forkSession: false,
     })
+    await flushAgentRuntimePersistence()
 
-    expect(Object.keys(harness.getState().tasks)).toEqual(['agent-from-b'])
+    expect(Object.keys(store.getState().tasks)).toEqual(['agent-from-b'])
+    expect(await readRuntimeTaskIds(transcriptA)).toEqual(['agent-from-a'])
+    expect(await readRuntimeTaskIds(transcriptB)).toEqual(['agent-from-b'])
   })
 
   test('restores a target runtime from another project', async () => {
@@ -95,16 +101,26 @@ describe('Agent runtime session restore targeting', () => {
     await writeRuntime(path.join(projectA, `${sessionA}.jsonl`), 'agent-project-a')
     const transcriptB = path.join(projectB, `${sessionB}.jsonl`)
     await writeRuntime(transcriptB, 'agent-project-b')
+    const transcriptA = path.join(projectA, `${sessionA}.jsonl`)
     switchSession(sessionA, projectA)
-    const harness = createStateHarness()
+    const store = createStore(getDefaultAppState(), onChangeAppState)
+    await restoreSessionStateFromLog({}, store.setState, {
+      sessionId: sessionA,
+      transcriptPath: transcriptA,
+      forkSession: false,
+    })
+    await flushAgentRuntimePersistence()
 
-    await restoreSessionStateFromLog({}, harness.setAppState, {
+    await switchSessionAndRestoreStateFromLog({}, store.setState, {
       sessionId: sessionB,
       transcriptPath: transcriptB,
       forkSession: false,
     })
+    await flushAgentRuntimePersistence()
 
-    expect(Object.keys(harness.getState().tasks)).toEqual(['agent-project-b'])
+    expect(Object.keys(store.getState().tasks)).toEqual(['agent-project-b'])
+    expect(await readRuntimeTaskIds(transcriptA)).toEqual(['agent-project-a'])
+    expect(await readRuntimeTaskIds(transcriptB)).toEqual(['agent-project-b'])
   })
 
   test('does not read or write a runtime sidecar when persistence is disabled', async () => {
@@ -116,23 +132,20 @@ describe('Agent runtime session restore targeting', () => {
     await writeRuntime(transcript, 'agent-private')
     switchSession(session, project)
     setSessionPersistenceDisabled(true)
-    const harness = createStateHarness()
+    const store = createStore(getDefaultAppState(), onChangeAppState)
 
-    await restoreSessionStateFromLog({}, harness.setAppState, {
+    await restoreSessionStateFromLog({}, store.setState, {
       sessionId: session,
       transcriptPath: transcript,
       forkSession: false,
     })
 
-    expect(harness.getState().tasks).toEqual({})
+    expect(store.getState().tasks).toEqual({})
     await fs.rm(runtimePath, { force: true })
-    const oldState = harness.getState()
-    harness.setAppState(prev => ({
+    store.setState(prev => ({
       ...prev,
       nextAgentCompletionSequence: prev.nextAgentCompletionSequence + 1,
     }))
-    const { onChangeAppState, flushAgentRuntimePersistence } = await import('../state/onChangeAppState.js')
-    onChangeAppState({ oldState, newState: harness.getState() })
     await flushAgentRuntimePersistence()
     expect(await fs.stat(runtimePath).then(() => true, () => false)).toBe(false)
   })
@@ -142,16 +155,27 @@ describe('Agent runtime session restore targeting', () => {
     tempDirectories.push(project)
     const sourceSession = '55555555-5555-4555-8555-555555555555' as SessionId
     const forkSession = '66666666-6666-4666-8666-666666666666' as SessionId
-    await writeRuntime(path.join(project, `${sourceSession}.jsonl`), 'agent-source')
+    const sourceTranscript = path.join(project, `${sourceSession}.jsonl`)
+    const forkTranscript = path.join(project, `${forkSession}.jsonl`)
+    await writeRuntime(sourceTranscript, 'agent-source')
     switchSession(sourceSession, project)
-    const harness = createStateHarness()
+    const store = createStore(getDefaultAppState(), onChangeAppState)
+    await restoreSessionStateFromLog({}, store.setState, {
+      sessionId: sourceSession,
+      transcriptPath: sourceTranscript,
+      forkSession: false,
+    })
+    await flushAgentRuntimePersistence()
 
-    await restoreSessionStateFromLog({}, harness.setAppState, {
+    await switchSessionAndRestoreStateFromLog({}, store.setState, {
       sessionId: forkSession,
-      transcriptPath: path.join(project, `${forkSession}.jsonl`),
+      transcriptPath: forkTranscript,
       forkSession: true,
     })
+    await flushAgentRuntimePersistence()
 
-    expect(harness.getState().tasks).toEqual({})
+    expect(store.getState().tasks).toEqual({})
+    expect(await readRuntimeTaskIds(sourceTranscript)).toEqual(['agent-source'])
+    expect(await readRuntimeTaskIds(forkTranscript)).toEqual([])
   })
 })

@@ -5,7 +5,7 @@ import { spawnSync } from 'child_process';
 import { snapshotOutputTokensForTurn, getCurrentTurnTokenBudget, getTurnOutputTokens, getBudgetContinuationCount, getTotalInputTokens } from '../bootstrap/state.js';
 import { parseTokenBudget } from '../utils/tokenBudget.js';
 import { count } from '../utils/array.js';
-import { dirname, join } from 'path';
+import { join } from 'path';
 import { tmpdir } from 'os';
 import figures from 'figures';
 // eslint-disable-next-line custom-rules/prefer-use-keybindings -- / n N Esc [ v are bare letters in transcript modal context, same class as g/G/j/k in ScrollKeybindingHandler
@@ -29,7 +29,7 @@ import { startPreventSleep, stopPreventSleep } from '../services/preventSleep.js
 import { useTerminalNotification } from '../ink/useTerminalNotification.js';
 import { hasCursorUpViewportYankBug } from '../ink/terminal.js';
 import { createFileStateCacheWithSizeLimit, mergeFileStateCaches, READ_FILE_STATE_CACHE_SIZE } from '../utils/fileStateCache.js';
-import { updateLastInteractionTime, getLastInteractionTime, getOriginalCwd, getProjectRoot, getSessionId, switchSession, setCostStateForRestore, getTurnHookDurationMs, getTurnHookCount, resetTurnHookDuration, getTurnToolDurationMs, getTurnToolCount, resetTurnToolDuration, getTurnClassifierDurationMs, getTurnClassifierCount, resetTurnClassifierDuration } from '../bootstrap/state.js';
+import { updateLastInteractionTime, getLastInteractionTime, getOriginalCwd, getProjectRoot, getSessionId, setCostStateForRestore, getTurnHookDurationMs, getTurnHookCount, resetTurnHookDuration, getTurnToolDurationMs, getTurnToolCount, resetTurnToolDuration, getTurnClassifierDurationMs, getTurnClassifierCount, resetTurnClassifierDuration } from '../bootstrap/state.js';
 import { asSessionId, asAgentId } from '../types/ids.js';
 import { logForDebugging } from '../utils/debug.js';
 import { QueryGuard } from '../utils/QueryGuard.js';
@@ -184,7 +184,7 @@ import type { AgentColorName } from '../tools/AgentTool/agentColorManager.js';
 import { fileHistoryMakeSnapshot, type FileHistoryState, fileHistoryRewind, type FileHistorySnapshot, copyFileHistoryForResume, fileHistoryEnabled, fileHistoryHasAnyChanges } from '../utils/fileHistory.js';
 import { type AttributionState, incrementPromptCount } from '../utils/commitAttribution.js';
 import { recordAttributionSnapshot } from '../utils/sessionStorage.js';
-import { computeStandaloneAgentContext, restoreAgentFromSession, restoreSessionStateFromLog, restoreWorktreeForResume, exitRestoredWorktree } from '../utils/sessionRestore.js';
+import { computeStandaloneAgentContext, restoreAgentFromSession, switchSessionAndRestoreStateFromLog, restoreWorktreeForResume, exitRestoredWorktree } from '../utils/sessionRestore.js';
 import { isBgSession, updateSessionName, updateSessionActivity } from '../utils/concurrentSessions.js';
 import { isInProcessTeammateTask, type InProcessTeammateTaskState } from '../tasks/InProcessTeammateTask/types.js';
 import { restoreRemoteAgentTasks } from '../tasks/RemoteAgentTask/RemoteAgentTask.js';
@@ -1795,16 +1795,6 @@ export function REPL({
         void copyPlanForResume(log, asSessionId(sessionId));
       }
 
-      // Restore file history and attribution state from the resumed conversation
-      await restoreSessionStateFromLog(log, setAppState, {
-        sessionId,
-        transcriptPath: log.fullPath,
-        forkSession: entrypoint === 'fork'
-      });
-      if (log.fileHistorySnapshots) {
-        void copyFileHistoryForResume(log);
-      }
-
       // Restore agent setting from the resumed conversation
       // Always reset to the new session's values (or clear if none),
       // matching the standaloneAgentContext pattern below
@@ -1843,10 +1833,17 @@ export function REPL({
       // Reset cost state for clean slate before restoring target session
       resetCostState();
 
-      // Switch session (id + project dir atomically). fullPath may point to
-      // a different project (cross-worktree, /branch); null derives from
-      // current originalCwd.
-      switchSession(asSessionId(sessionId), log.fullPath ? dirname(log.fullPath) : null);
+      // Flush the outgoing runtime before switching the session/project pair,
+      // then apply the restored runtime while persistence targets the new
+      // session. This also writes an intentionally empty runtime for forks.
+      await switchSessionAndRestoreStateFromLog(log, setAppState, {
+        sessionId,
+        transcriptPath: log.fullPath,
+        forkSession: entrypoint === 'fork'
+      });
+      if (log.fileHistorySnapshots) {
+        void copyFileHistoryForResume(log);
+      }
       // Rename asciicast recording to match the resumed session ID
       const {
         renameRecordingForSession
