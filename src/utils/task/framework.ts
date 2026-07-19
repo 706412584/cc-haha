@@ -100,7 +100,17 @@ export function registerTask<T extends TaskState>(task: T, setAppState: SetAppSt
           }
         : task
     registeredTask = merged as T
-    return { ...prev, tasks: { ...prev.tasks, [task.id]: merged } }
+    return {
+      ...prev,
+      tasks: { ...prev.tasks, [task.id]: merged },
+      ...(isReplacement && 'epoch' in merged
+        ? {
+            agentCompletionInbox: (prev.agentCompletionInbox ?? []).filter(
+              completion => completion.taskId !== task.id,
+            ),
+          }
+        : {}),
+    }
   })
 
   // Replacement (resume) — not a new start. Skip to avoid double-emit.

@@ -1,6 +1,7 @@
-import { getSdkAgentProgressSummariesEnabled } from '../../bootstrap/state.js';
+import { getSdkAgentProgressSummariesEnabled, isSessionPersistenceDisabled } from '../../bootstrap/state.js';
 import { promises as fs } from 'node:fs';
 import { dirname } from 'node:path';
+import { Buffer } from 'node:buffer';
 import { OUTPUT_FILE_TAG, STATUS_TAG, SUMMARY_TAG, TASK_ID_TAG, TASK_NOTIFICATION_TAG, TASK_TYPE_TAG, TOOL_USE_ID_TAG, WORKTREE_BRANCH_TAG, WORKTREE_PATH_TAG, WORKTREE_TAG } from '../../constants/xml.js';
 import { abortSpeculation } from '../../services/PromptSuggestion/speculation.js';
 import type { AppState } from '../../state/AppState.js';
@@ -46,6 +47,8 @@ export type AgentProgress = {
 const MAX_RECENT_ACTIVITIES = 5;
 export const MAX_AGENT_COMPLETION_INBOX = 64;
 export const MAX_AGENT_REGISTRY_SIZE = 64;
+export const MAX_AGENT_RUNTIME_SNAPSHOT_BYTES = 2_000_000;
+const MAX_PERSISTED_RUNTIME_TEXT_BYTES = 4_000;
 export type AgentRuntimeStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 export type PersistedAgentRuntimeTask = {
   id: string;
@@ -207,38 +210,87 @@ export function isLocalAgentTask(task: unknown): task is LocalAgentTaskState {
   return typeof task === 'object' && task !== null && 'type' in task && task.type === 'local_agent';
 }
 
+function truncateRuntimeText(value: string | undefined): string | undefined {
+  if (value === undefined || Buffer.byteLength(value, 'utf8') <= MAX_PERSISTED_RUNTIME_TEXT_BYTES) {
+    return value;
+  }
+  let end = Math.min(value.length, MAX_PERSISTED_RUNTIME_TEXT_BYTES);
+  while (end > 0 && Buffer.byteLength(value.slice(0, end), 'utf8') > MAX_PERSISTED_RUNTIME_TEXT_BYTES) {
+    end--;
+  }
+  return value.slice(0, end);
+}
+
+function summarizePersistedResult(result: AgentToolResult | undefined): AgentToolResult | undefined {
+  if (!result) return undefined;
+  return {
+    agentId: truncateRuntimeText(result.agentId) ?? '',
+    agentType: truncateRuntimeText(result.agentType),
+    content: result.content.slice(0, 1).map(item => ({
+      type: 'text',
+      text: truncateRuntimeText(item.text) ?? ''
+    })),
+    totalToolUseCount: result.totalToolUseCount,
+    totalDurationMs: result.totalDurationMs,
+    totalTokens: result.totalTokens,
+    usage: {
+      input_tokens: result.usage.input_tokens,
+      output_tokens: result.usage.output_tokens,
+      cache_creation_input_tokens: result.usage.cache_creation_input_tokens,
+      cache_read_input_tokens: result.usage.cache_read_input_tokens,
+      server_tool_use: result.usage.server_tool_use,
+      service_tier: result.usage.service_tier,
+      cache_creation: result.usage.cache_creation
+    }
+  };
+}
+
+function summarizePersistedNotification(item: AppState['agentCompletionInbox'][number]): string {
+  if (Buffer.byteLength(item.notification, 'utf8') <= MAX_PERSISTED_RUNTIME_TEXT_BYTES) {
+    return item.notification;
+  }
+  const status = item.notification.match(/<status>(completed|failed|killed)<\/status>/)?.[1] ?? 'completed';
+  return `<${TASK_NOTIFICATION_TAG}>\n<${TASK_ID_TAG}>${item.taskId}</${TASK_ID_TAG}>\n<${TASK_TYPE_TAG}>local_agent</${TASK_TYPE_TAG}>\n<${STATUS_TAG}>${status}</${STATUS_TAG}>\n<${SUMMARY_TAG}>Agent completion restored; full result omitted from persisted recovery summary</${SUMMARY_TAG}>\n</${TASK_NOTIFICATION_TAG}>`;
+}
+
 export async function persistAgentRuntimeSnapshot(filePath: string, state: Pick<AppState, 'tasks' | 'agentCompletionInbox' | 'nextAgentCompletionSequence'>): Promise<void> {
+  if (isSessionPersistenceDisabled()) return;
   const tasks = Object.values(state.tasks).filter(isLocalAgentTask).slice(-MAX_AGENT_REGISTRY_SIZE).map(task => ({
     id: task.id,
     epoch: task.epoch,
     status: taskStatusToRuntime(task.status),
-    description: task.description,
-    prompt: task.prompt,
+    description: truncateRuntimeText(task.description) ?? '',
+    prompt: truncateRuntimeText(task.prompt) ?? '',
     agentType: task.agentType,
     startTime: task.startTime,
     endTime: task.endTime,
     toolUseId: task.toolUseId,
-    error: task.error,
-    result: task.result
+    error: truncateRuntimeText(task.error),
+    result: summarizePersistedResult(task.result)
   } satisfies PersistedAgentRuntimeTask));
   const snapshot: AgentRuntimeSnapshot = {
     version: 1,
     nextSequence: Number.isSafeInteger(state.nextAgentCompletionSequence) && state.nextAgentCompletionSequence > 0 ? state.nextAgentCompletionSequence : 1,
     tasks,
-    inbox: state.agentCompletionInbox.slice(-MAX_AGENT_COMPLETION_INBOX)
+    inbox: state.agentCompletionInbox.slice(-MAX_AGENT_COMPLETION_INBOX).map(item => ({
+      ...item,
+      notification: summarizePersistedNotification(item)
+    }))
   };
+  const serialized = JSON.stringify(snapshot);
   const tempPath = `${filePath}.${process.pid}.tmp`;
   await fs.mkdir(dirname(filePath), {
     recursive: true
   });
-  await fs.writeFile(tempPath, JSON.stringify(snapshot), 'utf8');
+  await fs.writeFile(tempPath, serialized, 'utf8');
   await fs.rename(tempPath, filePath);
 }
 
 export async function loadAgentRuntimeSnapshot(filePath: string): Promise<Pick<AppState, 'tasks' | 'agentCompletionInbox' | 'nextAgentCompletionSequence'>> {
+  if (isSessionPersistenceDisabled()) return restoreAgentRuntimeSnapshot(null);
   try {
     const stat = await fs.stat(filePath);
-    if (!stat.isFile() || stat.size > 2_000_000) return restoreAgentRuntimeSnapshot(null);
+    if (!stat.isFile() || stat.size > MAX_AGENT_RUNTIME_SNAPSHOT_BYTES) return restoreAgentRuntimeSnapshot(null);
     return restoreAgentRuntimeSnapshot(JSON.parse(await fs.readFile(filePath, 'utf8')));
   } catch {
     return restoreAgentRuntimeSnapshot(null);

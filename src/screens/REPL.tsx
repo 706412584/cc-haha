@@ -1796,7 +1796,11 @@ export function REPL({
       }
 
       // Restore file history and attribution state from the resumed conversation
-      await restoreSessionStateFromLog(log, setAppState);
+      await restoreSessionStateFromLog(log, setAppState, {
+        sessionId,
+        transcriptPath: log.fullPath,
+        forkSession: entrypoint === 'fork'
+      });
       if (log.fileHistorySnapshots) {
         void copyFileHistoryForResume(log);
       }

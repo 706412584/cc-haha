@@ -1,4 +1,7 @@
-import { setMainLoopModelOverride } from '../bootstrap/state.js'
+import {
+  isSessionPersistenceDisabled,
+  setMainLoopModelOverride,
+} from '../bootstrap/state.js'
 import {
   clearApiKeyHelperCache,
   clearAwsCredentialsCache,
@@ -42,10 +45,37 @@ export function externalMetadataToAppState(
   })
 }
 
-let agentRuntimeWrite = Promise.resolve()
+const agentRuntimeWrites = new Map<string, Promise<void>>()
 
-export function flushAgentRuntimePersistence(): Promise<void> {
-  return agentRuntimeWrite
+function enqueueAgentRuntimeWrite(
+  filePath: string,
+  write: () => Promise<void>,
+): Promise<void> {
+  const previous = agentRuntimeWrites.get(filePath) ?? Promise.resolve()
+  const pending = previous
+    .catch(() => {})
+    .then(write)
+    .catch(error => logError(toError(error)))
+  agentRuntimeWrites.set(filePath, pending)
+  void pending.finally(() => {
+    if (agentRuntimeWrites.get(filePath) === pending) {
+      agentRuntimeWrites.delete(filePath)
+    }
+  })
+  return pending
+}
+
+export function enqueueAgentRuntimeWriteForTesting(
+  filePath: string,
+  write: () => Promise<void>,
+): Promise<void> {
+  return enqueueAgentRuntimeWrite(filePath, write)
+}
+
+export async function flushAgentRuntimePersistence(): Promise<void> {
+  while (agentRuntimeWrites.size > 0) {
+    await Promise.all([...agentRuntimeWrites.values()])
+  }
 }
 
 function agentRuntimeChanged(newState: AppState, oldState: AppState): boolean {
@@ -71,16 +101,20 @@ export function onChangeAppState({
   newState: AppState
   oldState: AppState
 }) {
-  if (agentRuntimeChanged(newState, oldState)) {
+  if (
+    !isSessionPersistenceDisabled() &&
+    agentRuntimeChanged(newState, oldState)
+  ) {
     const snapshot = {
       tasks: newState.tasks,
       agentCompletionInbox: newState.agentCompletionInbox,
       nextAgentCompletionSequence: newState.nextAgentCompletionSequence,
     }
-    agentRuntimeWrite = agentRuntimeWrite
-      .catch(() => {})
-      .then(() => persistAgentRuntimeSnapshot(getAgentRuntimePath(), snapshot))
-      .catch(error => logError(toError(error)))
+    const filePath = getAgentRuntimePath()
+    void enqueueAgentRuntimeWrite(
+      filePath,
+      () => persistAgentRuntimeSnapshot(filePath, snapshot),
+    )
   }
 
   // toolPermissionContext.mode — single choke point for CCR/SDK mode sync.

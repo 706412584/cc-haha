@@ -117,6 +117,63 @@ describe('Agent runtime recovery', () => {
 })
 
 describe('Agent runtime persistence', () => {
+  test('round-trips near registry capacity below the reader byte limit without mutating live results', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-runtime-budget-'))
+    const filePath = path.join(directory, 'runtime.json')
+    try {
+      const largeText = 'x'.repeat(128_000)
+      const tasks = Object.fromEntries(Array.from({ length: 64 }, (_, index) => {
+        const id = `agent-large-${String(index).padStart(2, '0')}`
+        return [id, {
+          ...createTaskStateBase(id, 'local_agent', largeText),
+          type: 'local_agent' as const,
+          status: 'completed' as const,
+          agentId: id,
+          epoch: 1,
+          prompt: largeText,
+          agentType: 'general-purpose',
+          result: {
+            agentId: id,
+            content: [{ type: 'text' as const, text: largeText }],
+            totalToolUseCount: 1,
+            totalDurationMs: 1,
+            totalTokens: 1,
+            usage: {} as never,
+          },
+          retrieved: false,
+          lastReportedToolCount: 0,
+          lastReportedTokenCount: 0,
+          isBackgrounded: true,
+          pendingMessages: [],
+          retain: false,
+          diskLoaded: false,
+        }]
+      }))
+      const inbox = Object.values(tasks).map((task, index) => ({
+        version: 1 as const,
+        sequence: index + 1,
+        taskId: task.id,
+        epoch: task.epoch,
+        notification: `<task-notification><result>${largeText}</result></task-notification>`,
+      }))
+
+      await persistAgentRuntimeSnapshot(filePath, {
+        tasks,
+        agentCompletionInbox: inbox,
+        nextAgentCompletionSequence: 65,
+      })
+
+      expect((await fs.stat(filePath)).size).toBeLessThan(1_500_000)
+      const restored = await loadAgentRuntimeSnapshot(filePath)
+      expect(Object.keys(restored.tasks)).toHaveLength(64)
+      expect(restored.agentCompletionInbox).toHaveLength(64)
+      expect(tasks['agent-large-00']?.result?.content[0]?.text).toHaveLength(128_000)
+      expect((restored.tasks['agent-large-00'] as LocalAgentTaskState).result?.content[0]?.text.length).toBeLessThan(128_000)
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true })
+    }
+  })
+
   test('round-trips a bounded snapshot and persists inbox consumption', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-runtime-'))
     const filePath = path.join(directory, 'runtime.json')
@@ -181,6 +238,40 @@ describe('bounded Agent registry', () => {
 })
 
 describe('Agent completion inbox', () => {
+  test('drops an enqueued completion when the same task resumes at a newer epoch', () => {
+    let appState = {
+      tasks: {},
+      agentCompletionInbox: [],
+      nextAgentCompletionSequence: 1,
+      speculation: IDLE_SPECULATION_STATE,
+    } as unknown as AppState
+    const setAppState = (updater: (prev: AppState) => AppState): void => {
+      appState = updater(appState)
+    }
+    const selectedAgent = { agentType: 'general-purpose' } as never
+    const first = registerAsyncAgent({
+      agentId: 'agent-inbox-resumed',
+      description: 'First epoch',
+      prompt: 'First epoch',
+      selectedAgent,
+      setAppState,
+    })
+    completeAgentTask({ agentId: first.agentId, content: [], totalToolUseCount: 0, totalDurationMs: 1, totalTokens: 0, usage: {} as never }, setAppState, first.epoch)
+    enqueueAgentNotification({ taskId: first.agentId, description: 'First epoch', status: 'completed', setAppState, epoch: first.epoch })
+
+    const second = registerAsyncAgent({
+      agentId: first.agentId,
+      description: 'Second epoch',
+      prompt: 'Second epoch',
+      selectedAgent,
+      setAppState,
+    })
+    expect(second.epoch).toBe(first.epoch + 1)
+
+    drainAgentCompletionInbox(setAppState)
+    expect(getCommandQueue()).toHaveLength(0)
+  })
+
   test('defers ordered completion injection until a continuation boundary and consumes once', () => {
     let appState = {
       tasks: {},

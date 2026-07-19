@@ -4,6 +4,7 @@ import { dirname } from 'path'
 import {
   getMainLoopModelOverride,
   getSessionId,
+  isSessionPersistenceDisabled,
   setMainLoopModelOverride,
   setMainThreadAgentType,
   setOriginalCwd,
@@ -13,7 +14,10 @@ import { clearSystemPromptSections } from '../constants/systemPromptSections.js'
 import { restoreCostStateForSession } from '../cost-tracker.js'
 import type { AppState } from '../state/AppState.js'
 import type { AgentColorName } from '../tools/AgentTool/agentColorManager.js'
-import { loadAgentRuntimeSnapshot } from '../tasks/LocalAgentTask/LocalAgentTask.js'
+import {
+  loadAgentRuntimeSnapshot,
+  restoreAgentRuntimeSnapshot,
+} from '../tasks/LocalAgentTask/LocalAgentTask.js'
 import {
   type AgentDefinition,
   type AgentDefinitionsResult,
@@ -50,7 +54,8 @@ import {
   recordContentReplacement,
   resetSessionFilePointer,
   restoreSessionMetadata,
-  getAgentRuntimePath,
+  getAgentRuntimePathForTranscript,
+  getTranscriptPathForSession,
   saveMode,
   saveWorktreeState,
 } from './sessionStorage.js'
@@ -98,15 +103,32 @@ function extractTodosFromTranscript(messages: Message[]): TodoList {
  * Restore session state (file history, attribution, todos) from log on resume.
  * Used by both SDK (print.ts) and interactive (REPL.tsx, main.tsx) resume paths.
  */
+export type AgentRuntimeResumeTarget = {
+  sessionId: string
+  transcriptPath?: string
+  forkSession: boolean
+}
+
 export async function restoreSessionStateFromLog(
   result: ResumeResult,
   setAppState: (f: (prev: AppState) => AppState) => void,
+  runtimeTarget: AgentRuntimeResumeTarget,
 ): Promise<void> {
-  const runtime = await loadAgentRuntimeSnapshot(getAgentRuntimePath())
+  const targetTranscriptPath = runtimeTarget.transcriptPath ??
+    getTranscriptPathForSession(runtimeTarget.sessionId)
+  const runtime = runtimeTarget.forkSession || isSessionPersistenceDisabled()
+    ? restoreAgentRuntimeSnapshot(null)
+    : await loadAgentRuntimeSnapshot(
+        getAgentRuntimePathForTranscript(targetTranscriptPath),
+      )
   setAppState(prev => ({
     ...prev,
     tasks: {
-      ...prev.tasks,
+      ...Object.fromEntries(
+        Object.entries(prev.tasks).filter(
+          ([, task]) => task.type !== 'local_agent',
+        ),
+      ),
       ...runtime.tasks,
     },
     agentCompletionInbox: runtime.agentCompletionInbox,
