@@ -279,6 +279,17 @@ export const zh: Record<TranslationKey, string> = {
   'settings.projectRules.open': '打开',
   'settings.projectRules.create': '创建',
   'settings.projectRules.notFound': '文件尚不存在',
+  'settings.projectRules.federated': '联合 IDE 规则',
+  'settings.projectRules.importDecision': '导入决策：',
+  'settings.projectRules.chooseDecision': '选择导入方式',
+  'settings.projectRules.session': '仅此会话',
+  'settings.projectRules.persistent': '此项目始终启用',
+  'settings.projectRules.ignore': '忽略',
+  'settings.projectRules.statusAvailable': '可用',
+  'settings.projectRules.statusDuplicate': '重复',
+  'settings.projectRules.statusConflict': '与 Claude 规则冲突',
+  'settings.projectRules.statusNativeOverride': '已由 Claude 规则覆盖',
+  'settings.projectRules.related': '关联规则',
 
   // Settings > Usage
   'settings.activity.title': 'Token 用量',

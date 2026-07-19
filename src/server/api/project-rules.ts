@@ -21,6 +21,14 @@ import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 import { getCwd } from '../../utils/cwd.js'
 import { findCanonicalGitRoot } from '../../utils/git.js'
 import { sanitizePath, containsPathTraversal } from '../../utils/path.js'
+import type {
+  NormalizedProjectRule,
+  RuleImportDecision,
+} from '../../types/projectRules.js'
+import {
+  discoverFederatedProjectRules,
+  saveRuleImportDecision,
+} from '../../utils/projectRulesFederation.js'
 
 type RuleFile = {
   path: string
@@ -35,6 +43,7 @@ type ProjectRulesEntry = {
   projectPath: string | null
   isCurrent: boolean
   files: RuleFile[]
+  normalizedRules: NormalizedProjectRule[]
 }
 
 // Bounds for resolving a project ID back to a filesystem path.
@@ -58,6 +67,10 @@ export async function handleProjectRulesApi(
     return await createProjectRulesFile(req, url)
   }
 
+  if (req.method === 'POST' && sub === 'decision') {
+    return await updateRuleDecision(req)
+  }
+
   return Response.json(
     { error: 'Not Found', message: `Unknown project-rules endpoint` },
     { status: 404 },
@@ -72,6 +85,7 @@ async function getProjectRules(url: URL): Promise<Response> {
   const cwd = url.searchParams.get('cwd') || getCwd()
   const claudeHome = getClaudeConfigHomeDir()
   const projectsDir = getProjectsDir()
+  const sessionId = url.searchParams.get('sessionId') || undefined
 
   // Current project: prefer git root, fall back to cwd.
   const currentProjectPath = (findCanonicalGitRoot(cwd) ?? cwd).normalize('NFC')
@@ -97,13 +111,19 @@ async function getProjectRules(url: URL): Promise<Response> {
       const projectPath = isCurrent
         ? currentProjectPath
         : await resolveProjectPath(id)
-      const files = projectPath ? await scanProjectFiles(projectPath) : []
+      const [files, normalizedRules] = projectPath
+        ? await Promise.all([
+            scanProjectFiles(projectPath),
+            discoverFederatedProjectRules(projectPath, sessionId),
+          ])
+        : [[], []]
       return {
         id,
         label: projectPath ?? unsanitizeProjectLabel(id),
         projectPath,
         isCurrent,
         files,
+        normalizedRules,
       }
     }),
   )
@@ -155,6 +175,43 @@ async function scanProjectFiles(projectPath: string): Promise<RuleFile[]> {
   files.push({ path: localMd, exists: await fileExists(localMd), type: 'local', label: 'CLAUDE.local.md' })
 
   return files
+}
+
+async function updateRuleDecision(req: Request): Promise<Response> {
+  let body: {
+    cwd?: string
+    originalPath?: string
+    decision?: RuleImportDecision
+    sessionId?: string
+  }
+  try {
+    body = await req.json() as typeof body
+  } catch {
+    return Response.json({ error: 'Invalid JSON body' }, { status: 400 })
+  }
+  if (
+    !body.cwd ||
+    !path.isAbsolute(body.cwd) ||
+    !body.originalPath ||
+    !path.isAbsolute(body.originalPath) ||
+    !body.decision ||
+    !['session', 'persistent', 'ignore'].includes(body.decision)
+  ) {
+    return Response.json({ error: 'Invalid rule decision request' }, { status: 400 })
+  }
+  try {
+    await saveRuleImportDecision({
+      projectPath: body.cwd,
+      originalPath: body.originalPath,
+      decision: body.decision,
+      sessionId: body.sessionId,
+    })
+    return Response.json({ ok: true })
+  } catch (error) {
+    return Response.json({
+      error: error instanceof Error ? error.message : 'Invalid rule decision request',
+    }, { status: 400 })
+  }
 }
 
 async function createProjectRulesFile(req: Request, url: URL): Promise<Response> {

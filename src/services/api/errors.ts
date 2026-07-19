@@ -497,7 +497,7 @@ function isOpenAIImageUrlTextOnlySchemaError(raw: string): boolean {
   )
 }
 
-export function getAssistantMessageFromError(
+function buildAssistantMessageFromError(
   error: unknown,
   model: string,
   options?: {
@@ -1051,6 +1051,28 @@ export function getAssistantMessageFromError(
     content: API_ERROR_MESSAGE_PREFIX,
     error: 'unknown',
   })
+}
+
+export function getAssistantMessageFromError(
+  error: unknown,
+  model: string,
+  options?: {
+    messages?: Message[]
+    messagesForAPI?: (UserMessage | AssistantMessage)[]
+    retryCount?: number
+    requestId?: string
+  },
+): AssistantMessage {
+  const message = buildAssistantMessageFromError(error, model, options)
+  if (options?.retryCount !== undefined) {
+    message.message.content = message.message.content.map(block =>
+      block.type === 'text'
+        ? { ...block, text: `${block.text}\n\nRetried ${options.retryCount} times.` }
+        : block,
+    )
+  }
+  if (options?.requestId) message.requestId = options.requestId
+  return message
 }
 
 /**

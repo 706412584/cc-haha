@@ -785,6 +785,7 @@ export async function queryModelWithoutStreaming({
         ),
       options.model,
       messages,
+      signal,
     );
   })) {
     if (message.type === "assistant") {
@@ -844,6 +845,7 @@ export async function* queryModelWithStreaming({
         ),
       options.model,
       messages,
+      signal,
     );
   });
 }
@@ -2919,7 +2921,7 @@ async function* queryModel(
           )}`,
           { level: "warn" },
         );
-        throw new RetriableStreamError(streamingError);
+        throw new RetriableStreamError(streamingError, streamRequestId ?? undefined);
       }
 
       // When the flag is enabled, skip the non-streaming fallback. A fully empty
@@ -2947,7 +2949,7 @@ async function* queryModel(
           )}`,
           { level: "warn" },
         );
-        throw new RetriableStreamError(streamingError);
+        throw new RetriableStreamError(streamingError, streamRequestId ?? undefined);
       }
 
       // The mid-stream non-streaming fallback causes double tool execution when
@@ -3244,6 +3246,10 @@ async function* queryModel(
         yield getAssistantMessageFromError(error, errorModel, {
           messages,
           messagesForAPI,
+          ...(fallbackError instanceof CannotRetryError && {
+            retryCount: fallbackError.retryCount,
+          }),
+          requestId,
         });
         releaseStreamResources();
         return;
@@ -3302,6 +3308,10 @@ async function* queryModel(
       yield getAssistantMessageFromError(error, errorModel, {
         messages,
         messagesForAPI,
+        ...(errorFromRetry instanceof CannotRetryError && {
+          retryCount: errorFromRetry.retryCount,
+        }),
+        requestId,
       });
       releaseStreamResources();
       return;

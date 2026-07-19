@@ -44,6 +44,7 @@ import { logEvent } from 'src/services/analytics/index.js'
 import {
   getAdditionalDirectoriesForClaudeMd,
   getOriginalCwd,
+  getSessionId,
 } from '../bootstrap/state.js'
 import { truncateEntrypointContent } from '../memdir/memdir.js'
 import { getAutoMemEntrypoint, isAutoMemoryEnabled } from '../memdir/paths.js'
@@ -75,6 +76,7 @@ import {
 import type { MemoryType } from './memory/types.js'
 import { expandPath } from './path.js'
 import { pathInWorkingPath } from './permissions/filesystem.js'
+import { getImportedProjectRulePaths } from './projectRulesFederation.js'
 import { isSettingSourceEnabled } from './settings/constants.js'
 import { getInitialSettings } from './settings/settings.js'
 
@@ -96,6 +98,7 @@ export const MAX_MEMORY_CHARACTER_COUNT = 40000
 const TEXT_FILE_EXTENSIONS = new Set([
   // Markdown and text
   '.md',
+  '.mdc',
   '.txt',
   '.text',
   // Data formats
@@ -873,6 +876,25 @@ export const getMemoryFiles = memoize(
       normalizePathForComparison(gitRoot) !==
         normalizePathForComparison(canonicalRoot) &&
       pathInWorkingPath(gitRoot, canonicalRoot)
+
+    // Federated IDE rules are explicit project-local imports and intentionally
+    // load before native project memory. This keeps Claude rules at the higher
+    // (later) priority while reusing the same parser and duplicate suppression.
+    if (isSettingSourceEnabled('projectSettings')) {
+      for (const importedPath of await getImportedProjectRulePaths(
+        gitRoot ?? originalCwd,
+        getSessionId(),
+      )) {
+        result.push(
+          ...(await processMemoryFile(
+            importedPath,
+            'Project',
+            processedPaths,
+            includeExternal,
+          )),
+        )
+      }
+    }
 
     // Process from root downward to CWD
     for (const dir of dirs.reverse()) {

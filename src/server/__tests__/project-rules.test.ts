@@ -19,6 +19,7 @@ mock.module('../../utils/git.js', () => ({
 }))
 
 const mockFiles = new Set<string>()
+const mockFileContents = new Map<string, string>()
 const mockDirs = new Map<string, string[]>()
 
 mock.module('fs/promises', () => ({
@@ -27,6 +28,7 @@ mock.module('fs/promises', () => ({
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
     }
   },
+  realpath: async (filePath: string) => filePath,
   stat: async (filePath: string) => {
     if (!mockFiles.has(filePath)) {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
@@ -37,7 +39,7 @@ mock.module('fs/promises', () => ({
   writeFile: async (filePath: string) => {
     mockFiles.add(filePath)
   },
-  readFile: async () => '{}',
+  readFile: async (filePath: string) => mockFileContents.get(filePath) ?? '{}',
   readdir: async (dirPath: string, _opts?: unknown) => {
     // Check all registered mock dirs
     const entries = mockDirs.get(dirPath)
@@ -59,6 +61,7 @@ import { handleProjectRulesApi } from '../api/project-rules'
 describe('project-rules API', () => {
   beforeEach(() => {
     mockFiles.clear()
+    mockFileContents.clear()
     mockDirs.clear()
   })
 
@@ -92,6 +95,114 @@ describe('project-rules API', () => {
     expect(data.projects.length).toBeGreaterThanOrEqual(1)
     const current = data.projects.find(p => p.isCurrent)
     expect(current).toBeDefined()
+  })
+
+  it('GET /api/project-rules discovers and normalizes Cursor project rules', async () => {
+    const cursorRulesDir = path.join(MOCK_PROJECT, '.cursor', 'rules')
+    const cursorRulePath = path.join(cursorRulesDir, 'typescript.mdc')
+    mockDirs.set(cursorRulesDir, ['typescript.mdc'])
+    mockFiles.add(cursorRulePath)
+    mockFileContents.set(cursorRulePath, '# TypeScript\n\nUse strict types.')
+
+    const url = new URL(`http://localhost/api/project-rules?cwd=${encodeURIComponent(MOCK_PROJECT)}`)
+    const req = new Request(url, { method: 'GET' })
+    const res = await handleProjectRulesApi(req, url, ['api', 'project-rules'])
+    const data = await res.json() as {
+      projects: Array<{
+        isCurrent: boolean
+        normalizedRules: Array<{
+          source: string
+          originalPath: string
+          canonicalPath: string
+          fingerprint: string
+          isNative: boolean
+          scopes: string[]
+          provenance: { provider: string; label: string }
+        }>
+      }>
+    }
+
+    const current = data.projects.find(project => project.isCurrent)
+    const rule = current?.normalizedRules.find(item => item.source === 'cursor')
+    expect(rule).toMatchObject({
+      source: 'cursor',
+      originalPath: cursorRulePath,
+      canonicalPath: 'project/rules/typescript',
+      isNative: false,
+      scopes: ['project'],
+      provenance: { provider: 'Cursor', label: '.cursor/rules/typescript.mdc' },
+    })
+    expect(rule?.fingerprint).toMatch(/^[a-f0-9]{64}$/)
+  })
+
+  it('GET /api/project-rules federates all providers with native-first duplicate and conflict status', async () => {
+    const nativePath = path.join(MOCK_PROJECT, 'CLAUDE.md')
+    const cursorPath = path.join(MOCK_PROJECT, '.cursorrules')
+    const windsurfPath = path.join(MOCK_PROJECT, '.windsurfrules')
+    const copilotPath = path.join(MOCK_PROJECT, '.github', 'copilot-instructions.md')
+    const sharedContent = '# Project rules\n\nUse bun.'
+    for (const [filePath, content] of [
+      [nativePath, sharedContent],
+      [cursorPath, sharedContent],
+      [windsurfPath, '# Project rules\n\nUse npm.'],
+      [copilotPath, sharedContent],
+    ] as const) {
+      mockFiles.add(filePath)
+      mockFileContents.set(filePath, content)
+    }
+
+    const url = new URL(`http://localhost/api/project-rules?cwd=${encodeURIComponent(MOCK_PROJECT)}`)
+    const res = await handleProjectRulesApi(
+      new Request(url, { method: 'GET' }),
+      url,
+      ['api', 'project-rules'],
+    )
+    const data = await res.json() as {
+      projects: Array<{
+        isCurrent: boolean
+        normalizedRules: Array<{
+          source: string
+          canonicalPath: string
+          isNative: boolean
+          status: string
+          relatedRulePaths: string[]
+        }>
+      }>
+    }
+    const rules = data.projects.find(project => project.isCurrent)?.normalizedRules ?? []
+
+    expect(rules.map(rule => rule.source)).toEqual(['claude', 'cursor', 'windsurf', 'copilot'])
+    expect(rules.every(rule => rule.canonicalPath === 'project/global')).toBe(true)
+    expect(rules.find(rule => rule.source === 'claude')).toMatchObject({ isNative: true, status: 'active' })
+    expect(rules.find(rule => rule.source === 'cursor')?.status).toBe('overridden-by-native')
+    expect(rules.find(rule => rule.source === 'copilot')?.status).toBe('overridden-by-native')
+    expect(rules.find(rule => rule.source === 'windsurf')?.status).toBe('conflict')
+    expect(rules.find(rule => rule.source === 'windsurf')?.relatedRulePaths).toContain(nativePath)
+  })
+
+  it('normalizes Copilot .instructions.md and Cursor .mdc names to the same canonical path', async () => {
+    const cursorDir = path.join(MOCK_PROJECT, '.cursor', 'rules')
+    const copilotDir = path.join(MOCK_PROJECT, '.github', 'instructions')
+    const cursorPath = path.join(cursorDir, 'testing.mdc')
+    const copilotPath = path.join(copilotDir, 'testing.instructions.md')
+    mockDirs.set(cursorDir, ['testing.mdc'])
+    mockDirs.set(copilotDir, ['testing.instructions.md'])
+    for (const filePath of [cursorPath, copilotPath]) {
+      mockFiles.add(filePath)
+      mockFileContents.set(filePath, filePath === cursorPath ? 'Use bun test.' : 'Use npm test.')
+    }
+
+    const url = new URL(`http://localhost/api/project-rules?cwd=${encodeURIComponent(MOCK_PROJECT)}`)
+    const res = await handleProjectRulesApi(new Request(url), url, ['api', 'project-rules'])
+    const data = await res.json() as {
+      projects: Array<{ isCurrent: boolean; normalizedRules: Array<{ source: string; canonicalPath: string; status: string }> }>
+    }
+    const rules = data.projects.find(project => project.isCurrent)?.normalizedRules ?? []
+    expect(rules.find(rule => rule.source === 'cursor')?.canonicalPath).toBe('project/rules/testing')
+    expect(rules.find(rule => rule.source === 'copilot')).toMatchObject({
+      canonicalPath: 'project/rules/testing',
+      status: 'conflict',
+    })
   })
 
   it('GET /api/project-rules detects existing CLAUDE.md in project root', async () => {

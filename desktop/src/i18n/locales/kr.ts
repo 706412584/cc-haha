@@ -277,6 +277,17 @@ export const kr: Record<TranslationKey, string> = {
   'settings.projectRules.open': '열기',
   'settings.projectRules.create': '생성',
   'settings.projectRules.notFound': '파일이 아직 존재하지 않습니다',
+  'settings.projectRules.federated': '연동 IDE 규칙',
+  'settings.projectRules.importDecision': '가져오기 결정:',
+  'settings.projectRules.chooseDecision': '가져오기 방식 선택',
+  'settings.projectRules.session': '이 세션만',
+  'settings.projectRules.persistent': '이 프로젝트에서 항상 사용',
+  'settings.projectRules.ignore': '무시',
+  'settings.projectRules.statusAvailable': '사용 가능',
+  'settings.projectRules.statusDuplicate': '중복',
+  'settings.projectRules.statusConflict': 'Claude 규칙과 충돌',
+  'settings.projectRules.statusNativeOverride': 'Claude 규칙으로 대체됨',
+  'settings.projectRules.related': '관련 규칙',
 
   // Settings > Usage
   'settings.activity.title': '토큰 사용량',

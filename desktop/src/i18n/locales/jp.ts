@@ -277,6 +277,17 @@ export const jp: Record<TranslationKey, string> = {
   'settings.projectRules.open': '開く',
   'settings.projectRules.create': '作成',
   'settings.projectRules.notFound': 'ファイルがまだ存在しません',
+  'settings.projectRules.federated': '連携 IDE ルール',
+  'settings.projectRules.importDecision': 'インポート設定：',
+  'settings.projectRules.chooseDecision': 'インポート方法を選択',
+  'settings.projectRules.session': 'このセッションのみ',
+  'settings.projectRules.persistent': 'このプロジェクトで常に有効',
+  'settings.projectRules.ignore': '無視',
+  'settings.projectRules.statusAvailable': '利用可能',
+  'settings.projectRules.statusDuplicate': '重複',
+  'settings.projectRules.statusConflict': 'Claude ルールと競合',
+  'settings.projectRules.statusNativeOverride': 'Claude ルールでカバー済み',
+  'settings.projectRules.related': '関連ルール',
 
   // Settings > Usage
   'settings.activity.title': 'トークン使用量',

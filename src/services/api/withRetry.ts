@@ -181,6 +181,7 @@ export class CannotRetryError extends Error {
   constructor(
     public readonly originalError: unknown,
     public readonly retryContext: RetryContext,
+    public readonly retryCount = 0,
   ) {
     const message = errorMessage(originalError)
     super(message)
@@ -212,7 +213,10 @@ export class FallbackTriggeredError extends Error {
  * path can surface a faithful API-error message.
  */
 export class RetriableStreamError extends Error {
-  constructor(public readonly originalError: unknown) {
+  constructor(
+    public readonly originalError: unknown,
+    public readonly requestId?: string,
+  ) {
     super(errorMessage(originalError))
     this.name = 'RetriableStreamError'
     if (originalError instanceof Error && originalError.stack) {
@@ -447,7 +451,7 @@ export async function* withRetry<T>(
           query_source:
             options.querySource as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
         })
-        throw new CannotRetryError(error, retryContext)
+        throw new CannotRetryError(error, retryContext, attempt - 1)
       }
 
       // Track consecutive 529 errors
@@ -486,6 +490,7 @@ export async function* withRetry<T>(
             throw new CannotRetryError(
               new Error(REPEATED_529_ERROR_MESSAGE),
               retryContext,
+              attempt - 1,
             )
           }
         }
@@ -495,7 +500,7 @@ export async function* withRetry<T>(
       const persistent =
         isPersistentRetryEnabled() && isTransientCapacityError(error)
       if (attempt > maxRetries && !persistent) {
-        throw new CannotRetryError(error, retryContext)
+        throw new CannotRetryError(error, retryContext, attempt - 1)
       }
 
       // AWS/GCP errors aren't always APIError, but can be retried
@@ -505,7 +510,7 @@ export async function* withRetry<T>(
         !handledCloudAuthError &&
         (!(error instanceof APIError) || !shouldRetry(error))
       ) {
-        throw new CannotRetryError(error, retryContext)
+        throw new CannotRetryError(error, retryContext, attempt - 1)
       }
 
       // Handle max tokens context overflow errors by adjusting max_tokens for the next attempt
@@ -646,7 +651,7 @@ export async function* withRetry<T>(
     }
   }
 
-  throw new CannotRetryError(lastError, retryContext)
+  throw new CannotRetryError(lastError, retryContext, maxRetries)
 }
 
 function getRetryAfter(error: unknown): string | null {
@@ -849,10 +854,10 @@ function shouldRetry(error: APIError): boolean {
     return true
   }
 
-  // Check for overloaded errors first by examining the message content
-  // The SDK sometimes fails to properly pass the 529 status code during streaming,
-  // so we need to check the error message directly
-  if (error.message?.includes('"type":"overloaded_error"')) {
+  // Stream creation can fail with the same statusless transient API body as
+  // stream consumption. Use the structured body matcher for api_error,
+  // overloaded_error, and upstream_error before status-based checks.
+  if (error.status === undefined && isRetryableStreamError(error)) {
     return true
   }
 

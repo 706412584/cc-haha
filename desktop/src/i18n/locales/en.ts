@@ -277,6 +277,17 @@ export const en = {
   'settings.projectRules.open': 'Open',
   'settings.projectRules.create': 'Create',
   'settings.projectRules.notFound': 'File does not exist yet',
+  'settings.projectRules.federated': 'Federated IDE rules',
+  'settings.projectRules.importDecision': 'Import decision for',
+  'settings.projectRules.chooseDecision': 'Choose import behavior',
+  'settings.projectRules.session': 'This session',
+  'settings.projectRules.persistent': 'Always for this project',
+  'settings.projectRules.ignore': 'Ignore',
+  'settings.projectRules.statusAvailable': 'Available',
+  'settings.projectRules.statusDuplicate': 'Duplicate',
+  'settings.projectRules.statusConflict': 'Conflict with Claude rule',
+  'settings.projectRules.statusNativeOverride': 'Covered by Claude rule',
+  'settings.projectRules.related': 'Related',
 
   // Settings > Usage
   'settings.activity.title': 'Token usage',

@@ -1,3 +1,4 @@
+import { APIUserAbortError } from "@anthropic-ai/sdk";
 import type {
   AssistantMessage,
   Message,
@@ -7,6 +8,7 @@ import type {
 } from "../../types/message.js";
 import { logForDebugging } from "../../utils/debug.js";
 import { errorMessage } from "../../utils/errors.js";
+import { sleep } from "../../utils/sleep.js";
 import { createSystemStreamingFallbackMessage } from "../../utils/messages.js";
 import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -15,6 +17,7 @@ import {
 import { getAssistantMessageFromError } from "./errors.js";
 import {
   getMaxStreamTransientRetries,
+  getRetryDelay,
   RetriableStreamError,
 } from "./withRetry.js";
 
@@ -48,6 +51,7 @@ export async function* withStreamRetry(
   attempt: () => AsyncGenerator<StreamQueryMessage, void>,
   model: string,
   messages: Message[],
+  signal?: AbortSignal,
 ): AsyncGenerator<StreamQueryMessage, void> {
   const maxRetries = getMaxStreamTransientRetries();
   for (let i = 0; ; i++) {
@@ -58,6 +62,7 @@ export async function* withStreamRetry(
       if (!(error instanceof RetriableStreamError)) {
         throw error;
       }
+      if (signal?.aborted) throw new APIUserAbortError();
       if (i >= maxRetries) {
         // Retries exhausted — surface the original error as an assistant
         // message, matching queryModel's normal terminal-error behavior.
@@ -72,9 +77,20 @@ export async function* withStreamRetry(
           model:
             model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
         });
-        yield getAssistantMessageFromError(error.originalError, model, {
-          messages,
-        });
+        const requestId = error.requestId ?? (
+          error.originalError &&
+          typeof error.originalError === "object" &&
+          "requestID" in error.originalError &&
+          typeof error.originalError.requestID === "string"
+            ? error.originalError.requestID
+            : undefined
+        );
+        const terminalMessage = getAssistantMessageFromError(
+          error.originalError,
+          model,
+          { messages, retryCount: maxRetries, requestId },
+        );
+        yield terminalMessage;
         return;
       }
       logForDebugging(
@@ -91,6 +107,9 @@ export async function* withStreamRetry(
       // Raw deltas from the failed attempt may already be visible. Consumers
       // use this bounded retry signal to discard only that in-flight attempt.
       yield createSystemStreamingFallbackMessage("stream_retry");
+      await sleep(getRetryDelay(i + 1), signal, {
+        abortError: () => new APIUserAbortError(),
+      });
     }
   }
 }
