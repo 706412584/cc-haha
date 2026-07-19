@@ -1,6 +1,6 @@
 import { feature } from 'bun:bundle'
 import { z } from 'zod/v4'
-import { clearInvokedSkillsForAgent } from '../../bootstrap/state.js'
+import { clearInvokedSkillsForAgent, getSessionId } from '../../bootstrap/state.js'
 import {
   ALL_AGENT_DISALLOWED_TOOLS,
   ASYNC_AGENT_ALLOWED_TOOLS,
@@ -592,9 +592,48 @@ export function extractPartialResult(
 type SetAppState = (f: (prev: AppState) => AppState) => void
 
 const activeAgentLifecycles = new Map<string, Promise<void>>()
+const DEFAULT_AGENT_LIFECYCLE_QUIESCE_TIMEOUT_MS = 10_000
 
-function agentLifecycleKey(taskId: string, epoch: number | undefined): string {
-  return `${taskId}:${epoch ?? 0}`
+function agentLifecycleKey(sessionId: string, taskId: string, epoch: number | undefined): string {
+  return `${sessionId}:${taskId}:${epoch ?? 0}`
+}
+
+export function registerLocalAgentLifecycle(
+  sessionId: string,
+  taskId: string,
+  epoch: number | undefined,
+  lifecycle: Promise<void>,
+): Promise<void> {
+  const key = agentLifecycleKey(sessionId, taskId, epoch)
+  const prior = activeAgentLifecycles.get(key)
+  const registered = prior ? Promise.allSettled([prior, lifecycle]).then(() => {}) : lifecycle
+  activeAgentLifecycles.set(key, registered)
+  void registered.then(
+    () => {
+      if (activeAgentLifecycles.get(key) === registered) activeAgentLifecycles.delete(key)
+    },
+    () => {
+      if (activeAgentLifecycles.get(key) === registered) activeAgentLifecycles.delete(key)
+    },
+  )
+  return registered
+}
+
+export function createSessionScopedAgentSetAppState(
+  sessionId: string,
+  taskId: string,
+  epoch: number | undefined,
+  setAppState: SetAppState,
+): SetAppState {
+  return updater => {
+    if (getSessionId() !== sessionId) return
+    setAppState(prev => {
+      if (getSessionId() !== sessionId) return prev
+      const task = prev.tasks[taskId]
+      if (epoch !== undefined && (!isLocalAgentTask(task) || task.epoch !== epoch)) return prev
+      return updater(prev)
+    })
+  }
 }
 
 /**
@@ -604,7 +643,9 @@ function agentLifecycleKey(taskId: string, epoch: number | undefined): string {
  */
 export async function quiesceLocalAgentLifecycles(
   setAppState: SetAppState,
+  options: { sessionId?: string; timeoutMs?: number } = {},
 ): Promise<void> {
+  const sessionId = options.sessionId ?? getSessionId()
   const outgoing: Array<{ taskId: string; epoch: number }> = []
   setAppState(prev => {
     for (const task of Object.values(prev.tasks)) {
@@ -620,11 +661,24 @@ export async function quiesceLocalAgentLifecycles(
   for (const task of outgoing) {
     killAsyncAgent(task.taskId, setAppState, task.epoch)
   }
-  await Promise.all(
-    outgoing.map(task =>
-      activeAgentLifecycles.get(agentLifecycleKey(task.taskId, task.epoch)),
-    ).filter((lifecycle): lifecycle is Promise<void> => lifecycle !== undefined),
-  )
+  const lifecycles = outgoing.map(task =>
+    activeAgentLifecycles.get(agentLifecycleKey(sessionId, task.taskId, task.epoch)),
+  ).filter((lifecycle): lifecycle is Promise<void> => lifecycle !== undefined)
+  if (lifecycles.length === 0) return
+  const timeoutMs = options.timeoutMs ?? DEFAULT_AGENT_LIFECYCLE_QUIESCE_TIMEOUT_MS
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      Promise.all(lifecycles),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(
+          `Timed out after ${timeoutMs}ms quiescing ${lifecycles.length} local Agent lifecycle(s) for session ${sessionId}; session switch aborted`,
+        )), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timeout) clearTimeout(timeout)
+  }
 }
 
 /**
@@ -741,7 +795,7 @@ async function runAsyncAgentLifecycleImpl({
     // parent session depends on this notification to resume its loop.
     completeAsyncAgent(agentResult, rootSetAppState, epoch)
 
-    enqueueAgentNotification({
+    const notified = enqueueAgentNotification({
       taskId,
       description,
       status: 'completed',
@@ -756,6 +810,9 @@ async function runAsyncAgentLifecycleImpl({
       toolUseId: toolUseContext.toolUseId,
       epoch,
     })
+    if (!notified) {
+      logForDebugging('Agent completion backpressure: bounded inbox and command queue are full; completion remains unnotified for retry', { level: 'error' })
+    }
 
     void (async () => {
       try {
@@ -840,20 +897,20 @@ async function runAsyncAgentLifecycleImpl({
 export function runAsyncAgentLifecycle(
   options: Parameters<typeof runAsyncAgentLifecycleImpl>[0],
 ): Promise<void> {
-  const key = agentLifecycleKey(options.taskId, options.epoch)
-  const lifecycle = runAsyncAgentLifecycleImpl(options)
-  activeAgentLifecycles.set(key, lifecycle)
-  void lifecycle.then(
-    () => {
-      if (activeAgentLifecycles.get(key) === lifecycle) {
-        activeAgentLifecycles.delete(key)
-      }
-    },
-    () => {
-      if (activeAgentLifecycles.get(key) === lifecycle) {
-        activeAgentLifecycles.delete(key)
-      }
-    },
+  const sessionId = getSessionId()
+  const scopedOptions = {
+    ...options,
+    rootSetAppState: createSessionScopedAgentSetAppState(
+      sessionId,
+      options.taskId,
+      options.epoch,
+      options.rootSetAppState,
+    ),
+  }
+  return registerLocalAgentLifecycle(
+    sessionId,
+    options.taskId,
+    options.epoch,
+    runAsyncAgentLifecycleImpl(scopedOptions),
   )
-  return lifecycle
 }

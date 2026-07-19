@@ -117,8 +117,11 @@ export async function switchSessionAndRestoreStateFromLog(
   result: ResumeResult,
   setAppState: (f: (prev: AppState) => AppState) => void,
   runtimeTarget: AgentRuntimeResumeTarget,
+  options: { lifecycleQuiesceTimeoutMs?: number } = {},
 ): Promise<void> {
-  await quiesceLocalAgentLifecycles(setAppState)
+  await quiesceLocalAgentLifecycles(setAppState, {
+    timeoutMs: options.lifecycleQuiesceTimeoutMs,
+  })
   await flushSessionStorage()
   await flushAgentRuntimePersistence()
   switchSession(

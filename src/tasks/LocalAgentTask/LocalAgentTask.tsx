@@ -22,7 +22,7 @@ import type { QueuedCommand } from '../../types/textInputTypes.js';
 import { createAbortController, createChildAbortController } from '../../utils/abortController.js';
 import { registerCleanup } from '../../utils/cleanupRegistry.js';
 import { getToolSearchOrReadInfo } from '../../utils/collapseReadSearch.js';
-import { enqueuePendingNotification } from '../../utils/messageQueueManager.js';
+import { enqueuePendingNotifications, getCommandQueueLength, MAX_COMMAND_QUEUE_SIZE } from '../../utils/messageQueueManager.js';
 import { getAgentTranscriptPath } from '../../utils/sessionStorage.js';
 import { evictTaskOutput, getTaskOutputPath, initTaskOutputAsSymlink } from '../../utils/task/diskOutput.js';
 import { PANEL_GRACE_MS, registerTask, updateTaskState } from '../../utils/task/framework.js';
@@ -72,6 +72,20 @@ export type AgentRuntimeSnapshot = {
     consumed?: boolean;
   }>;
 };
+type AgentCompletionWakeListener = (sessionId: string) => void | Promise<void>;
+const agentCompletionWakeListeners = new Set<AgentCompletionWakeListener>();
+
+export function subscribeToAgentCompletionWake(listener: AgentCompletionWakeListener): () => void {
+  agentCompletionWakeListeners.add(listener);
+  return () => agentCompletionWakeListeners.delete(listener);
+}
+
+function wakeAgentCompletionConsumers(sessionId: string): void {
+  for (const listener of agentCompletionWakeListeners) {
+    void Promise.resolve(listener(sessionId)).catch(() => {});
+  }
+}
+
 const AGENT_STATUS_TRANSITIONS: Record<AgentRuntimeStatus, ReadonlySet<AgentRuntimeStatus>> = {
   queued: new Set(['running', 'failed', 'cancelled']),
   running: new Set(['completed', 'failed', 'cancelled']),
@@ -499,7 +513,7 @@ export function enqueueAgentNotification({
   worktreeBranch?: string;
   outputPath?: string;
   epoch?: number;
-}): void {
+}): boolean {
   const summary = status === 'completed' ? `Agent "${description}" completed` : status === 'failed' ? `Agent "${description}" failed: ${error || 'Unknown error'}` : `Agent "${description}" was stopped`;
   const notificationOutputPath = outputPath ?? getTaskOutputPath(taskId);
   const toolUseIdLine = toolUseId ? `\n<${TOOL_USE_ID_TAG}>${toolUseId}</${TOOL_USE_ID_TAG}>` : '';
@@ -514,6 +528,8 @@ export function enqueueAgentNotification({
 <${SUMMARY_TAG}>${summary}</${SUMMARY_TAG}>${resultSection}${usageSection}${worktreeSection}
 </${TASK_NOTIFICATION_TAG}>`;
   let enqueued = false;
+  let spilled: AppState['agentCompletionInbox'] = [];
+  const sessionId = getSessionId();
   setAppState(prev => {
     const task = prev.tasks[taskId];
     const expectedTaskStatus = status === 'killed' ? 'killed' : status;
@@ -522,13 +538,25 @@ export function enqueueAgentNotification({
     }
     enqueued = true;
     const sequence = Number.isSafeInteger(prev.nextAgentCompletionSequence) && prev.nextAgentCompletionSequence > 0 ? prev.nextAgentCompletionSequence : 1;
-    const inbox = [...(Array.isArray(prev.agentCompletionInbox) ? prev.agentCompletionInbox : []), {
+    const currentInbox = Array.isArray(prev.agentCompletionInbox) ? prev.agentCompletionInbox : [];
+    if (currentInbox.length >= MAX_AGENT_COMPLETION_INBOX) {
+      if (getCommandQueueLength() + currentInbox.length > MAX_COMMAND_QUEUE_SIZE) {
+        // Explicit bounded backpressure: keep the new task unnotified so its
+        // lifecycle can report/retry instead of silently dropping any item.
+        return prev;
+      }
+      // Spill the existing bounded inbox into the established command queue at
+      // this completion boundary, then admit the new item. Queue entries retain
+      // session/task/epoch identity and are filtered before consumption.
+      spilled = [...currentInbox].sort((a, b) => a.sequence - b.sequence);
+    }
+    const inbox = [...(spilled.length > 0 ? [] : currentInbox), {
       version: 1 as const,
       sequence,
       taskId,
       epoch: task.epoch,
       notification: message
-    }].slice(-MAX_AGENT_COMPLETION_INBOX);
+    }];
     return {
       ...prev,
       tasks: {
@@ -542,10 +570,27 @@ export function enqueueAgentNotification({
       nextAgentCompletionSequence: sequence + 1
     };
   });
+  enqueuePendingNotifications(spilled.map(completion => ({
+    value: completion.notification,
+    mode: 'task-notification',
+    agentCompletion: {
+      taskId: completion.taskId,
+      epoch: completion.epoch,
+      sessionId
+    }
+  })));
   if (enqueued) {
-    // Completion changed model-visible state; discard any stale speculation.
+    // Completion changed model-visible state; discard any stale speculation and
+    // wake idle REPL/headless consumers. The listener drains only at its safe
+    // between-turn boundary.
     abortSpeculation(setAppState);
+    wakeAgentCompletionConsumers(getSessionId());
   }
+  return enqueued;
+}
+
+export function isAgentCompletionCommand(command: QueuedCommand): boolean {
+  return command.agentCompletion !== undefined;
 }
 
 export function isCurrentAgentCompletionCommand(command: QueuedCommand, state: AppState, sessionId = getSessionId()): boolean {
@@ -557,28 +602,43 @@ export function isCurrentAgentCompletionCommand(command: QueuedCommand, state: A
 }
 
 /** Move deferred Agent completions into the existing model-input queue at a safe boundary. */
-export function drainAgentCompletionInbox(setAppState: SetAppState): void {
+export async function flushAndDrainAgentCompletionInbox(
+  setAppState: SetAppState,
+  sessionId = getSessionId(),
+  isSafeToDrain: () => boolean = () => true,
+): Promise<boolean> {
+  if (sessionId !== getSessionId() || !isSafeToDrain()) return false;
+  const { flushAgentRuntimePersistence } = await import('../../state/onChangeAppState.js');
+  await flushAgentRuntimePersistence();
+  if (sessionId !== getSessionId() || !isSafeToDrain()) return false;
+  const drained = drainAgentCompletionInbox(setAppState, sessionId);
+  await flushAgentRuntimePersistence();
+  return drained;
+}
+
+export function drainAgentCompletionInbox(setAppState: SetAppState, sessionId = getSessionId()): boolean {
   let drained: AppState['agentCompletionInbox'] = [];
   setAppState(prev => {
     const inbox = Array.isArray(prev.agentCompletionInbox) ? prev.agentCompletionInbox : [];
     if (inbox.length === 0) return prev;
+    if (getCommandQueueLength() + inbox.length > MAX_COMMAND_QUEUE_SIZE) return prev;
     drained = [...inbox].sort((a, b) => a.sequence - b.sequence);
     return {
       ...prev,
       agentCompletionInbox: []
     };
   });
-  for (const completion of drained) {
-    enqueuePendingNotification({
-      value: completion.notification,
-      mode: 'task-notification',
-      agentCompletion: {
-        taskId: completion.taskId,
-        epoch: completion.epoch,
-        sessionId: getSessionId()
-      }
-    });
-  }
+  if (sessionId !== getSessionId() || drained.length === 0) return false;
+  enqueuePendingNotifications(drained.map(completion => ({
+    value: completion.notification,
+    mode: 'task-notification',
+    agentCompletion: {
+      taskId: completion.taskId,
+      epoch: completion.epoch,
+      sessionId
+    }
+  })));
+  return true;
 }
 
 /**

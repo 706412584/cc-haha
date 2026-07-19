@@ -3,6 +3,7 @@ import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import {
+  getSessionId,
   setSessionPersistenceDisabled,
   switchSession,
 } from '../bootstrap/state.js'
@@ -13,12 +14,13 @@ import {
 } from '../state/onChangeAppState.js'
 import { createStore } from '../state/store.js'
 import {
+  killAsyncAgent,
   registerAsyncAgent,
 } from '../tasks/LocalAgentTask/LocalAgentTask.js'
 import type { ToolUseContext } from '../Tool.js'
 import type { SessionId } from '../types/ids.js'
 import type { Message } from '../types/message.js'
-import { runAsyncAgentLifecycle } from '../tools/AgentTool/agentToolUtils.js'
+import { registerLocalAgentLifecycle, runAsyncAgentLifecycle } from '../tools/AgentTool/agentToolUtils.js'
 import { AbortError } from './errors.js'
 import { createAssistantMessage } from './messages.js'
 import { flushSessionStorage, recordSidechainTranscript, resetProjectForTesting } from './sessionStorage.js'
@@ -115,7 +117,7 @@ describe('Agent runtime session restore targeting', () => {
     resetProjectForTesting()
     const store = createStore(getDefaultAppState(), onChangeAppState)
     const task = registerAsyncAgent({
-      agentId: 'agent-running-in-a',
+      agentId: 'agent-shared-across-sessions',
       description: 'Running in A',
       prompt: 'Running in A',
       selectedAgent: { agentType: 'general-purpose' } as never,
@@ -181,10 +183,54 @@ describe('Agent runtime session restore targeting', () => {
     expect(wasAbortedBeforeSwitchCompleted).toBe(true)
     expect(Object.keys(store.getState().tasks)).toEqual(['agent-from-b'])
     expect(store.getState().agentCompletionInbox).toEqual([])
+    const bTask = registerAsyncAgent({
+      agentId: task.agentId,
+      description: 'Running in B with reused identity',
+      prompt: 'Running in B with reused identity',
+      selectedAgent: { agentType: 'general-purpose' } as never,
+      setAppState: store.setState,
+    })
+    expect(bTask.epoch).toBe(task.epoch)
     const aSidechain = path.join(project, sessionA, 'subagents', `agent-${task.agentId}.jsonl`)
     const bSidechain = path.join(project, sessionB, 'subagents', `agent-${task.agentId}.jsonl`)
     expect(await fs.readFile(aSidechain, 'utf8')).toContain('late completion from A')
     expect(await fs.stat(bSidechain).then(() => true, () => false)).toBe(false)
+    killAsyncAgent(bTask.agentId, store.setState, bTask.epoch)
+  })
+
+  test('aborts a session switch within a bounded timeout when a detached lifecycle never settles', async () => {
+    const project = await fs.mkdtemp(path.join(os.tmpdir(), 'runtime-resume-timeout-'))
+    tempDirectories.push(project)
+    const sessionA = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' as SessionId
+    const sessionB = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd' as SessionId
+    const transcriptB = path.join(project, `${sessionB}.jsonl`)
+    await writeRuntime(transcriptB, 'agent-from-b')
+    switchSession(sessionA, project)
+    const store = createStore(getDefaultAppState(), onChangeAppState)
+    const task = registerAsyncAgent({
+      agentId: 'agent-never-settles',
+      description: 'Never settles',
+      prompt: 'Never settles',
+      selectedAgent: { agentType: 'general-purpose' } as never,
+      setAppState: store.setState,
+    })
+    const never = new Promise<void>(() => {})
+    registerLocalAgentLifecycle(sessionA, task.agentId, task.epoch, never)
+    const secondNever = new Promise<void>(() => {})
+    registerLocalAgentLifecycle(sessionA, task.agentId, task.epoch, secondNever)
+    const startedAt = Date.now()
+
+    await expect(switchSessionAndRestoreStateFromLog({}, store.setState, {
+      sessionId: sessionB,
+      transcriptPath: transcriptB,
+      forkSession: false,
+    }, { lifecycleQuiesceTimeoutMs: 20 })).rejects.toThrow(
+      'session switch aborted',
+    )
+
+    expect(Date.now() - startedAt).toBeLessThan(500)
+    expect(getSessionId()).toBe(sessionA)
+    expect(Object.keys(store.getState().tasks)).toEqual([task.agentId])
   })
 
   test('restores a target runtime from another project', async () => {

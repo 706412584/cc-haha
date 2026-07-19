@@ -39,7 +39,12 @@ import {
   parseAgentsFromJson,
 } from 'src/tools/AgentTool/loadAgentsDir.js'
 import type { Message, NormalizedUserMessage } from 'src/types/message.js'
-import { isCurrentAgentCompletionCommand } from 'src/tasks/LocalAgentTask/LocalAgentTask.js'
+import {
+  flushAndDrainAgentCompletionInbox,
+  isCurrentAgentCompletionCommand,
+  subscribeToAgentCompletionWake,
+} from 'src/tasks/LocalAgentTask/LocalAgentTask.js'
+import { removeStaleHeadlessAgentCompletions } from 'src/commands/headless.js'
 import type { QueuedCommand } from 'src/types/textInputTypes.js'
 import {
   dequeue,
@@ -2343,6 +2348,7 @@ function runHeadlessStreaming(
         }
 
         runPhase = 'draining_commands'
+        removeStaleHeadlessAgentCompletions(getAppState())
         await drainCommandQueue()
 
         // Check for running background tasks before exiting.
@@ -2359,7 +2365,10 @@ function runHeadlessStreaming(
           const hasRunningBg = getRunningTasks(state).some(
             t => isBackgroundTask(t) && t.type !== 'in_process_teammate',
           )
-          const hasMainThreadQueued = peek(isMainThread) !== undefined
+          const hasMainThreadQueued = peek(candidate =>
+            isMainThread(candidate) &&
+            isCurrentAgentCompletionCommand(candidate, state),
+          ) !== undefined
           if (hasRunningBg || hasMainThreadQueued) {
             waitingForAgents = true
             if (!hasMainThreadQueued) {
@@ -2435,6 +2444,12 @@ function runHeadlessStreaming(
         }
       }
       running = false
+      // A completion can arrive after query()'s last safe boundary but before
+      // this mutex is released. Persist it, drain it into the structured queue,
+      // then let the post-finally queue recheck start exactly one continuation.
+      if (getAppState().agentCompletionInbox.length > 0) {
+        await flushAndDrainAgentCompletionInbox(setAppState)
+      }
       // Start idle timer when we finish processing and are waiting for input
       idleTimeout.start()
     }
@@ -2646,6 +2661,19 @@ function runHeadlessStreaming(
       }
     }
   }
+
+  const unsubscribeAgentCompletionWake = subscribeToAgentCompletionWake(
+    async sessionId => {
+      if (inputClosed || sessionId !== getSessionId()) return
+      const drained = await flushAndDrainAgentCompletionInbox(
+        setAppState,
+        sessionId,
+        () => !running,
+      )
+      if (drained) void run()
+    },
+  )
+  registerCleanup(async () => unsubscribeAgentCompletionWake())
 
   // Set up UDS inbox callback so the query loop is kicked off
   // when a message arrives via the UDS socket in headless mode.

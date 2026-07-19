@@ -1,5 +1,5 @@
 import type { AppState } from '../state/AppState.js'
-import { isCurrentAgentCompletionCommand } from '../tasks/LocalAgentTask/LocalAgentTask.js'
+import { flushAndDrainAgentCompletionInbox, isCurrentAgentCompletionCommand } from '../tasks/LocalAgentTask/LocalAgentTask.js'
 import type { QueuedCommand } from '../types/textInputTypes.js'
 import {
   dequeue,
@@ -7,6 +7,8 @@ import {
   hasCommandsInQueue,
   peek,
 } from './messageQueueManager.js'
+
+export { flushAndDrainAgentCompletionInbox }
 
 type ProcessQueueParams = {
   executeInput: (commands: QueuedCommand[]) => Promise<void>

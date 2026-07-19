@@ -30,6 +30,8 @@ import {
   completeAgentTask,
   drainAgentCompletionInbox,
   enqueueAgentNotification,
+  flushAndDrainAgentCompletionInbox,
+  subscribeToAgentCompletionWake,
   killAsyncAgent,
   loadAgentRuntimeSnapshot,
   persistAgentRuntimeSnapshot,
@@ -362,6 +364,103 @@ describe('Agent completion inbox', () => {
     switchSession(sessionB)
 
     expect(await getQueuedCommandAttachments(getCommandQueue(), appState)).toEqual([])
+  })
+
+  test('wakes REPL after a completion arrives after the main turn and drains exactly once', async () => {
+    let appState = {
+      tasks: {},
+      agentCompletionInbox: [],
+      nextAgentCompletionSequence: 1,
+      speculation: IDLE_SPECULATION_STATE,
+    } as unknown as AppState
+    const setAppState = (updater: (prev: AppState) => AppState): void => {
+      appState = updater(appState)
+    }
+    const task = registerAsyncAgent({
+      agentId: 'agent-post-turn-repl',
+      description: 'Post-turn REPL',
+      prompt: 'Post-turn REPL',
+      selectedAgent: { agentType: 'general-purpose' } as never,
+      setAppState,
+    })
+    const wakes: string[] = []
+    const unsubscribe = subscribeToAgentCompletionWake(async sessionId => {
+      wakes.push(sessionId)
+      await flushAndDrainAgentCompletionInbox(setAppState, sessionId)
+    })
+
+    try {
+      completeAgentTask({ agentId: task.agentId, content: [], totalToolUseCount: 0, totalDurationMs: 1, totalTokens: 0, usage: {} as never }, setAppState, task.epoch)
+      enqueueAgentNotification({ taskId: task.agentId, description: task.description, status: 'completed', setAppState, epoch: task.epoch })
+      for (let attempt = 0; attempt < 50 && appState.agentCompletionInbox.length > 0; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+
+      expect(wakes).toHaveLength(1)
+      expect(appState.agentCompletionInbox).toEqual([])
+      expect(getCommandQueue()).toHaveLength(1)
+      await flushAndDrainAgentCompletionInbox(setAppState)
+      expect(getCommandQueue()).toHaveLength(1)
+    } finally {
+      unsubscribe()
+    }
+  })
+
+  test('delivers a restored full inbox plus a new completion exactly once', () => {
+    const restoredItems = Array.from({ length: 64 }, (_, index) => ({
+      version: 1 as const,
+      sequence: index + 1,
+      taskId: `agent-restored-${index}`,
+      epoch: 1,
+      notification: `<task-notification>${index}</task-notification>`,
+    }))
+    const newTaskId = 'agent-after-full-restore'
+    const newTask = {
+      ...createTaskStateBase(newTaskId, 'local_agent', 'New completion'),
+      type: 'local_agent' as const,
+      status: 'completed' as const,
+      agentId: newTaskId,
+      epoch: 1,
+      prompt: 'New completion',
+      agentType: 'general-purpose',
+      retrieved: false,
+      lastReportedToolCount: 0,
+      lastReportedTokenCount: 0,
+      isBackgrounded: true,
+      pendingMessages: [],
+      retain: false,
+      diskLoaded: false,
+    }
+    let appState = {
+      tasks: {
+        ...Object.fromEntries(restoredItems.map(item => [item.taskId, {
+          ...newTask,
+          id: item.taskId,
+          agentId: item.taskId,
+        }])),
+        [newTaskId]: newTask,
+      },
+      agentCompletionInbox: restoredItems,
+      nextAgentCompletionSequence: 65,
+      speculation: IDLE_SPECULATION_STATE,
+    } as unknown as AppState
+    const setAppState = (updater: (prev: AppState) => AppState): void => {
+      appState = updater(appState)
+    }
+
+    enqueueAgentNotification({
+      taskId: newTaskId,
+      description: 'New completion',
+      status: 'completed',
+      setAppState,
+      epoch: 1,
+    })
+    drainAgentCompletionInbox(setAppState)
+
+    const queue = getCommandQueue()
+    expect(queue).toHaveLength(65)
+    expect(new Set(queue.map(command => String(command.value))).size).toBe(65)
+    expect(appState.agentCompletionInbox).toEqual([])
   })
 
   test('defers ordered completion injection until a continuation boundary and consumes once', async () => {

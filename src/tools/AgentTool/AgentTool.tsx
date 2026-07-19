@@ -4,7 +4,7 @@ import { buildTool, type ToolDef, toolMatchesName } from 'src/Tool.js';
 import type { Message as MessageType, NormalizedUserMessage } from 'src/types/message.js';
 import { getQuerySourceForAgent } from 'src/utils/promptCategory.js';
 import { z } from 'zod/v4';
-import { clearInvokedSkillsForAgent, getSdkAgentProgressSummariesEnabled } from '../../bootstrap/state.js';
+import { clearInvokedSkillsForAgent, getSdkAgentProgressSummariesEnabled, getSessionId } from '../../bootstrap/state.js';
 import { enhanceSystemPromptWithEnvDetails, getSystemPrompt } from '../../constants/prompts.js';
 import { isCoordinatorMode } from '../../coordinator/coordinatorMode.js';
 import { startAgentSummarization } from '../../services/AgentSummary/agentSummary.js';
@@ -46,7 +46,7 @@ import { FILE_READ_TOOL_NAME } from '../FileReadTool/prompt.js';
 import { SEND_MESSAGE_TOOL_NAME } from '../SendMessageTool/constants.js';
 import { spawnTeammate } from '../shared/spawnMultiAgent.js';
 import { setAgentColor } from './agentColorManager.js';
-import { agentToolResultSchema, classifyHandoffIfNeeded, emitAgentToolActivitiesForMessage, emitTaskProgress, extractPartialResult, finalizeAgentTool, getAgentProgressOutputPath, getLastToolUseName, runAsyncAgentLifecycle } from './agentToolUtils.js';
+import { agentToolResultSchema, classifyHandoffIfNeeded, createSessionScopedAgentSetAppState, emitAgentToolActivitiesForMessage, emitTaskProgress, extractPartialResult, finalizeAgentTool, getAgentProgressOutputPath, getLastToolUseName, registerLocalAgentLifecycle, runAsyncAgentLifecycle } from './agentToolUtils.js';
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js';
 import { AGENT_TOOL_NAME, LEGACY_AGENT_TOOL_NAME, ONE_SHOT_BUILTIN_AGENT_TYPES } from './constants.js';
 import { buildForkedMessages, buildWorktreeNotice, COORDINATOR_RESEARCH_FORK_SUBAGENT_TYPE, FORK_AGENT, type ForkMode, isCoordinatorResearchForkEnabled, isForkSubagentEnabled, isInForkChild } from './forkSubagent.js';
@@ -1107,7 +1107,14 @@ export const AgentTool = buildTool({
                 // Workload: inherited via ALS at `void` invocation time,
                 // same as the async-from-start path above.
                 // Continue agent in background and return async result
-                void runWithAgentContext(syncAgentContext, async () => {
+                const lifecycleSessionId = getSessionId();
+                const backgroundSetAppState = createSessionScopedAgentSetAppState(
+                  lifecycleSessionId,
+                  backgroundedTaskId,
+                  backgroundedEpoch,
+                  rootSetAppState,
+                );
+                const detachedLifecycle = runWithAgentContext(syncAgentContext, async () => {
                   let stopBackgroundedSummarization: (() => void) | undefined;
                   try {
                     // Clean up the foreground iterator so its finally block runs
@@ -1135,11 +1142,11 @@ export const AgentTool = buildTool({
                       // `(stalled NNs) ...` prefix on progress.summary so the
                       // panel row visibly shows the wedge. Cleared when the
                       // worker yields again.
-                      onStallTransition: status => applyAgentStallStatus(backgroundedTaskId, status, rootSetAppState),
+                      onStallTransition: status => applyAgentStallStatus(backgroundedTaskId, status, backgroundSetAppState),
                       onCacheSafeParams: getSdkAgentProgressSummariesEnabled() ? (params: CacheSafeParams) => {
                         const {
                           stop
-                        } = startAgentSummarization(backgroundedTaskId, asAgentId(backgroundedTaskId), params, rootSetAppState);
+                        } = startAgentSummarization(backgroundedTaskId, asAgentId(backgroundedTaskId), params, backgroundSetAppState);
                         stopBackgroundedSummarization = stop;
                       } : undefined
                     })) {
@@ -1147,7 +1154,7 @@ export const AgentTool = buildTool({
 
                       // Track progress for backgrounded agents
                       updateProgressFromMessage(tracker, msg, resolveActivity2, toolUseContext.options.tools);
-                      updateAsyncAgentProgress(backgroundedTaskId, getProgressUpdate(tracker), rootSetAppState);
+                      updateAsyncAgentProgress(backgroundedTaskId, getProgressUpdate(tracker), backgroundSetAppState);
                       emitAgentToolActivitiesForMessage(msg, backgroundedTaskId, toolUseContext.toolUseId);
                       const lastToolName = getLastToolUseName(msg);
                       if (msg.type === 'assistant') {
@@ -1173,13 +1180,13 @@ export const AgentTool = buildTool({
                     // unblocks immediately, then notify the parent before
                     // optional classifier/worktree cleanup. The parent loop
                     // depends on this notification to resume.
-                    completeAsyncAgent(agentResult, rootSetAppState, backgroundedEpoch);
+                    completeAsyncAgent(agentResult, backgroundSetAppState, backgroundedEpoch);
 
                     enqueueAgentNotification({
                       taskId: backgroundedTaskId,
                       description,
                       status: 'completed',
-                      setAppState: rootSetAppState,
+                      setAppState: backgroundSetAppState,
                       finalMessage: extractTextContent(agentResult.content, '\n'),
                       usage: {
                         totalTokens: getTokenCountFromTracker(tracker),
@@ -1212,7 +1219,7 @@ export const AgentTool = buildTool({
                     if (error instanceof AbortError) {
                       // Transition status BEFORE worktree cleanup so
                       // TaskOutput unblocks even if git hangs (gh-20236).
-                      killAsyncAgent(backgroundedTaskId, rootSetAppState, backgroundedEpoch);
+                      killAsyncAgent(backgroundedTaskId, backgroundSetAppState, backgroundedEpoch);
                       logEvent('tengu_agent_tool_terminated', {
                         agent_type: metadata.agentType as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
                         model: metadata.resolvedAgentModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -1226,7 +1233,7 @@ export const AgentTool = buildTool({
                         taskId: backgroundedTaskId,
                         description,
                         status: 'killed',
-                        setAppState: rootSetAppState,
+                        setAppState: backgroundSetAppState,
                         toolUseId: toolUseContext.toolUseId,
                         finalMessage: partialResult,
                         outputPath: getAgentProgressOutputPath(backgroundedTaskId),
@@ -1236,13 +1243,13 @@ export const AgentTool = buildTool({
                       return;
                     }
                     const errMsg = errorMessage(error);
-                    failAsyncAgent(backgroundedTaskId, errMsg, rootSetAppState, backgroundedEpoch);
+                    failAsyncAgent(backgroundedTaskId, errMsg, backgroundSetAppState, backgroundedEpoch);
                     enqueueAgentNotification({
                       taskId: backgroundedTaskId,
                       description,
                       status: 'failed',
                       error: errMsg,
-                      setAppState: rootSetAppState,
+                      setAppState: backgroundSetAppState,
                       toolUseId: toolUseContext.toolUseId,
                       outputPath: getAgentProgressOutputPath(backgroundedTaskId),
                       epoch: backgroundedEpoch
@@ -1256,6 +1263,12 @@ export const AgentTool = buildTool({
                     // in both try and catch paths so we can include worktree info
                   }
                 });
+                void registerLocalAgentLifecycle(
+                  lifecycleSessionId,
+                  backgroundedTaskId,
+                  backgroundedEpoch,
+                  detachedLifecycle,
+                );
 
                 // Return async_launched result immediately
                 const canReadOutputFile = toolUseContext.options.tools.some(t => toolMatchesName(t, FILE_READ_TOOL_NAME) || toolMatchesName(t, BASH_TOOL_NAME));

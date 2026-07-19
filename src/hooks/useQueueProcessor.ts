@@ -6,7 +6,7 @@ import {
   subscribeToCommandQueue,
 } from '../utils/messageQueueManager.js'
 import type { QueryGuard } from '../utils/QueryGuard.js'
-import { processQueueIfReady } from '../utils/queueProcessor.js'
+import { flushAndDrainAgentCompletionInbox, processQueueIfReady } from '../utils/queueProcessor.js'
 
 type UseQueueProcessorParams = {
   executeQueuedInput: (commands: QueuedCommand[]) => Promise<void>
@@ -46,10 +46,19 @@ export function useQueueProcessor({
     getCommandQueueSnapshot,
   )
   const appStateStore = useAppStateStore()
+  const pendingAgentCompletions = useSyncExternalStore(
+    appStateStore.subscribe,
+    () => appStateStore.getState().agentCompletionInbox.length,
+  )
 
   useEffect(() => {
     if (isQueryActive) return
     if (hasActiveLocalJsxUI) return
+
+    if (appStateStore.getState().agentCompletionInbox.length > 0) {
+      void flushAndDrainAgentCompletionInbox(appStateStore.setState)
+      return
+    }
     if (queueSnapshot.length === 0) return
 
     // Reservation is now owned by handlePromptSubmit (inside executeUserInput's
@@ -65,6 +74,7 @@ export function useQueueProcessor({
     })
   }, [
     queueSnapshot,
+    pendingAgentCompletions,
     isQueryActive,
     executeQueuedInput,
     hasActiveLocalJsxUI,
