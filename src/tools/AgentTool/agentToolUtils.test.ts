@@ -63,7 +63,9 @@ describe('local Agent lifecycle epochs', () => {
     })
 
     completeAgentTask({ agentId: first.agentId, content: [], totalToolUseCount: 0, totalDurationMs: 1, totalTokens: 0, usage: {} as never }, setAppState, first.epoch)
+    enqueueAgentNotification({ taskId: first.agentId, description: 'stale', status: 'completed', setAppState, epoch: first.epoch })
     expect(appState.tasks[first.agentId]?.status).toBe('running')
+    expect(appState.agentCompletionInbox ?? []).toHaveLength(0)
 
     completeAgentTask({ agentId: second.agentId, content: [], totalToolUseCount: 0, totalDurationMs: 1, totalTokens: 0, usage: {} as never }, setAppState, second.epoch)
     expect(appState.tasks[second.agentId]?.status).toBe('completed')
@@ -192,6 +194,7 @@ describe('Agent completion inbox', () => {
     const selectedAgent = { agentType: 'general-purpose' } as never
     for (const [agentId, description] of [['agent-inbox-1', 'First'], ['agent-inbox-2', 'Second']] as const) {
       const task = registerAsyncAgent({ agentId, description, prompt: description, selectedAgent, setAppState })
+      completeAgentTask({ agentId, content: [], totalToolUseCount: 0, totalDurationMs: 1, totalTokens: 0, usage: {} as never }, setAppState, task.epoch)
       enqueueAgentNotification({ taskId: agentId, description, status: 'completed', setAppState, epoch: task.epoch })
     }
 

@@ -380,10 +380,6 @@ export function enqueueAgentNotification({
   outputPath?: string;
   epoch?: number;
 }): void {
-  // Abort any active speculation — background task state changed, so speculated
-  // results may reference stale task output. The prompt suggestion text is
-  // preserved; only the pre-computed response is discarded.
-  abortSpeculation(setAppState);
   const summary = status === 'completed' ? `Agent "${description}" completed` : status === 'failed' ? `Agent "${description}" failed: ${error || 'Unknown error'}` : `Agent "${description}" was stopped`;
   const notificationOutputPath = outputPath ?? getTaskOutputPath(taskId);
   const toolUseIdLine = toolUseId ? `\n<${TOOL_USE_ID_TAG}>${toolUseId}</${TOOL_USE_ID_TAG}>` : '';
@@ -397,11 +393,14 @@ export function enqueueAgentNotification({
 <${STATUS_TAG}>${status}</${STATUS_TAG}>
 <${SUMMARY_TAG}>${summary}</${SUMMARY_TAG}>${resultSection}${usageSection}${worktreeSection}
 </${TASK_NOTIFICATION_TAG}>`;
+  let enqueued = false;
   setAppState(prev => {
     const task = prev.tasks[taskId];
-    if (!isLocalAgentTask(task) || task.notified || epoch !== undefined && task.epoch !== epoch) {
+    const expectedTaskStatus = status === 'killed' ? 'killed' : status;
+    if (!isLocalAgentTask(task) || task.status !== expectedTaskStatus || task.notified || epoch !== undefined && task.epoch !== epoch) {
       return prev;
     }
+    enqueued = true;
     const sequence = Number.isSafeInteger(prev.nextAgentCompletionSequence) && prev.nextAgentCompletionSequence > 0 ? prev.nextAgentCompletionSequence : 1;
     const inbox = [...(Array.isArray(prev.agentCompletionInbox) ? prev.agentCompletionInbox : []), {
       version: 1 as const,
@@ -423,6 +422,10 @@ export function enqueueAgentNotification({
       nextAgentCompletionSequence: sequence + 1
     };
   });
+  if (enqueued) {
+    // Completion changed model-visible state; discard any stale speculation.
+    abortSpeculation(setAppState);
+  }
 }
 
 /** Move deferred Agent completions into the existing model-input queue at a safe boundary. */
