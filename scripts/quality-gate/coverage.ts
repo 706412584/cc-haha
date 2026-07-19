@@ -400,6 +400,7 @@ export function buildRootCoverageCommand() {
     '--no-env-file',
     '--feature=TRANSCRIPT_CLASSIFIER',
     '--feature=VERIFICATION_AGENT',
+    '--feature=FORK_SUBAGENT',
     'test',
     '--max-concurrency=1',
     '--timeout=20000',

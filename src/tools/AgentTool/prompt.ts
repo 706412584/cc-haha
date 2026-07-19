@@ -67,6 +67,12 @@ const BACKGROUND_USAGE_NOTES = [
   "- **Foreground vs background**: Use foreground (default) when you need the agent's results before you can proceed. Use background only when you have genuinely independent work to do in parallel.",
 ].join('\n')
 
+export const AGENT_TOOL_ORCHESTRATION_GUIDANCE = {
+  forkImplementation: '**Implementation**: fork only when isolating implementation output or context will repay the handoff cost; edit count alone is not a trigger. Do research before jumping to implementation.',
+  testRunnerDescription: '"test-runner": use this agent only when the user explicitly requests independent test execution or a separate verification pass',
+  independentTestRunner: 'The user explicitly requested independent verification for a high-risk cross-boundary change, so finish the implementation scope, run only any immediate checks needed to proceed safely, then use the independent test-runner the user requested as the final verification pass.',
+} as const
+
 function getToolsDescription(agent: AgentDefinition): string {
   const { tools, disallowedTools } = agent
   const hasAllowlist = tools && tools.length > 0
@@ -139,7 +145,7 @@ export async function getPrompt(
 
 Fork yourself (omit \`subagent_type\`) when the intermediate tool output isn't worth keeping in your context. The criterion is qualitative \u2014 "will I need this output again" \u2014 not task size.
 - **Research**: fork open-ended questions. If research can be broken into independent questions, launch parallel forks in one message. A fork beats a fresh subagent for this \u2014 it inherits context and shares your cache.
-- **Implementation**: fork only when isolating implementation output or context will repay the handoff cost; edit count alone is not a trigger. Do research before jumping to implementation.
+- ${AGENT_TOOL_ORCHESTRATION_GUIDANCE.forkImplementation}
 
 Forks are cheap because they share your prompt cache. Don't set \`model\` on a fork \u2014 a different model can't reuse the parent's cache. Pass a short \`name\` (one or two words, lowercase) so the user can see the fork in the teams panel and steer it mid-run.
 
@@ -199,14 +205,14 @@ ${AGENT_TOOL_NAME}({
   const currentExamples = `Example usage:
 
 <example_agent_descriptions>
-"test-runner": use this agent only when the user explicitly requests independent test execution or a separate verification pass
+${AGENT_TOOL_ORCHESTRATION_GUIDANCE.testRunnerDescription}
 "greeting-responder": use this agent to respond to user greetings with a friendly joke
 </example_agent_descriptions>
 
 <example>
 user: "This migration touches authentication and session persistence. Please implement it, then have a separate agent run the integration tests."
 <commentary>
-The user explicitly requested independent verification for a high-risk cross-boundary change, so finish the implementation scope, run only any immediate checks needed to proceed safely, then use the independent test-runner the user requested as the final verification pass.
+${AGENT_TOOL_ORCHESTRATION_GUIDANCE.independentTestRunner}
 </commentary>
 assistant: Uses the ${AGENT_TOOL_NAME} tool to launch the test-runner agent
 </example>

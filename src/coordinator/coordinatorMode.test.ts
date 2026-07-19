@@ -1,9 +1,27 @@
 import { describe, expect, it } from 'bun:test'
-import { getCoordinatorSystemPrompt } from './coordinatorMode'
+import {
+  COORDINATOR_VERIFICATION_GUIDANCE,
+  getCoordinatorSystemPrompt,
+} from './coordinatorMode'
 
 describe('getCoordinatorSystemPrompt', () => {
   it('keeps worker delegation selective and bounded', () => {
     const prompt = getCoordinatorSystemPrompt()
+
+    expect(prompt).toContain(COORDINATOR_VERIFICATION_GUIDANCE.specialist)
+    expect(prompt).toContain(COORDINATOR_VERIFICATION_GUIDANCE.implementationPhase)
+    expect(prompt).toContain(COORDINATOR_VERIFICATION_GUIDANCE.independentPhase)
+    expect(prompt).toContain(COORDINATOR_VERIFICATION_GUIDANCE.concurrency)
+    expect(prompt).toContain(COORDINATOR_VERIFICATION_GUIDANCE.heading)
+    expect(prompt).toContain(COORDINATOR_VERIFICATION_GUIDANCE.decision)
+    for (const rule of COORDINATOR_VERIFICATION_GUIDANCE.rules) {
+      expect(prompt).toContain(rule)
+    }
+    expect(prompt).toContain(COORDINATOR_VERIFICATION_GUIDANCE.proof)
+    expect(prompt).toContain(COORDINATOR_VERIFICATION_GUIDANCE.freshVerifier)
+    expect(prompt).toContain(COORDINATOR_VERIFICATION_GUIDANCE.implementationTip)
+    expect(prompt).toContain(COORDINATOR_VERIFICATION_GUIDANCE.bugInvestigation)
+    expect(prompt).toContain(COORDINATOR_VERIFICATION_GUIDANCE.bugProgress)
 
     expect(prompt).toContain('Default to one well-scoped worker')
     expect(prompt).toContain(
