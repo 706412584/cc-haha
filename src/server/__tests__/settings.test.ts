@@ -48,6 +48,7 @@ let originalAnthropicModel: string | undefined
 let originalAnthropicDefaultHaikuModel: string | undefined
 let originalAnthropicDefaultSonnetModel: string | undefined
 let originalAnthropicDefaultOpusModel: string | undefined
+let originalAnthropicDefaultFableModel: string | undefined
 
 async function setup() {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-test-'))
@@ -66,6 +67,7 @@ async function setup() {
   originalAnthropicDefaultHaikuModel = process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL
   originalAnthropicDefaultSonnetModel = process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
   originalAnthropicDefaultOpusModel = process.env.ANTHROPIC_DEFAULT_OPUS_MODEL
+  originalAnthropicDefaultFableModel = process.env.ANTHROPIC_DEFAULT_FABLE_MODEL
   process.env.CLAUDE_CONFIG_DIR = tmpDir
   process.env.HOME = tmpDir
   process.env.USERPROFILE = tmpDir
@@ -77,6 +79,7 @@ async function setup() {
   delete process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL
   delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
   delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL
+  delete process.env.ANTHROPIC_DEFAULT_FABLE_MODEL
   clearKeychainCache()
   primeKeychainCacheFromPrefetch(null)
   clearOpenAIOAuthTokenCache()
@@ -160,6 +163,12 @@ async function teardown() {
     process.env.ANTHROPIC_DEFAULT_OPUS_MODEL = originalAnthropicDefaultOpusModel
   } else {
     delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL
+  }
+
+  if (originalAnthropicDefaultFableModel !== undefined) {
+    process.env.ANTHROPIC_DEFAULT_FABLE_MODEL = originalAnthropicDefaultFableModel
+  } else {
+    delete process.env.ANTHROPIC_DEFAULT_FABLE_MODEL
   }
 
   await fs.rm(tmpDir, { recursive: true, force: true })
@@ -674,6 +683,46 @@ describe('Models API', () => {
     expect(ids).toContain('gpt-5.4')
     expect(ids).toContain('gpt-5.4-mini')
     expect(ids.filter((id: string) => id === 'deepseek-v4-pro')).toHaveLength(1)
+  })
+
+  it('GET /api/models should merge user settings model roles with runtime env and include Fable', async () => {
+    await new SettingsService().updateUserSettings({
+      env: {
+        ANTHROPIC_MODEL: 'claude-opus-4-8',
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5-20251001',
+        ANTHROPIC_DEFAULT_SONNET_MODEL: 'claude-sonnet-4-6',
+        ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-4-8',
+        ANTHROPIC_DEFAULT_FABLE_MODEL: 'claude-fable-5',
+      },
+    })
+    process.env.ANTHROPIC_MODEL = 'claude-opus-4-8'
+
+    const { req, url, segments } = makeRequest('GET', '/api/models')
+    const res = await handleModelsApi(req, url, segments)
+
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.models.map((model: { id: string }) => model.id)).toEqual([
+      'claude-opus-4-8',
+      'claude-haiku-4-5-20251001',
+      'claude-sonnet-4-6',
+      'claude-fable-5',
+    ])
+  })
+
+  it('GET /api/models/current should use the configured user env model without a runtime override', async () => {
+    await new SettingsService().updateUserSettings({
+      env: { ANTHROPIC_MODEL: 'claude-sonnet-from-settings' },
+    })
+    delete process.env.ANTHROPIC_MODEL
+
+    const { req, url, segments } = makeRequest('GET', '/api/models/current')
+    const res = await handleModelsApi(req, url, segments)
+
+    expect(res.status).toBe(200)
+    await expect(res.json()).resolves.toMatchObject({
+      model: { id: 'claude-sonnet-from-settings' },
+    })
   })
 
   it('GET /api/models/current should return default model when not set', async () => {

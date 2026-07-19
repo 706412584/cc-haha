@@ -173,6 +173,17 @@ function TaskStatusMarker({ status, t }: { status: ActivityRow['status']; t: Tra
     )
   }
 
+  if (status === 'stopped') {
+    return (
+      <span
+        aria-label={t('session.activity.status.stopped')}
+        className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md border border-[var(--color-text-tertiary)]/50 bg-[var(--color-surface)] text-[var(--color-text-tertiary)]"
+      >
+        <X size={12} strokeWidth={2.4} aria-hidden="true" />
+      </span>
+    )
+  }
+
   if (status === 'in_progress' || status === 'running') {
     return (
       <span

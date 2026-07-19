@@ -289,6 +289,50 @@ describe('WorkspaceService', () => {
     expect(diff.diff).toContain('+export default function App() { return <main>New</main> }')
   })
 
+  it('does not report a rejected session tool edit as a changed file', async () => {
+    const nonGitDir = await makeTempDir('workspace-service-rejected-change-')
+    const toolUseId = 'Write:rejected'
+    const service = new WorkspaceService(
+      async () => nonGitDir,
+      async () => [
+        {
+          id: 'assistant-1',
+          type: 'tool_use',
+          timestamp: new Date().toISOString(),
+          content: [{
+            type: 'tool_use',
+            id: toolUseId,
+            name: 'Write',
+            input: {
+              file_path: 'permission-denial-test.txt',
+              content: 'must not be written\n',
+            },
+          }],
+        },
+        {
+          id: 'tool-result-1',
+          type: 'tool_result',
+          timestamp: new Date().toISOString(),
+          content: [{
+            type: 'tool_result',
+            tool_use_id: toolUseId,
+            content: 'The user rejected this tool use.',
+            is_error: true,
+          }],
+        },
+      ],
+    )
+
+    const status = await service.getStatus('session-1')
+
+    expect(status).toMatchObject({
+      state: 'ok',
+      workDir: nonGitDir,
+      isGitRepo: false,
+      changedFiles: [],
+    })
+  })
+
   it('reports file-history changes without requiring a git repository', async () => {
     const nonGitDir = await makeTempDir('workspace-service-file-history-')
     const generatedFile = path.join(nonGitDir, 'aacc', 'src', 'App.tsx')

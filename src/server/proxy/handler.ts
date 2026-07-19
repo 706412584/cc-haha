@@ -301,7 +301,7 @@ async function handleOpenaiChat(
     }, networkSettings.aiRequestTimeoutMs, isStream)
   } catch (err) {
     if (traceContext) {
-      await recordProxyTrace({
+      recordProxyTraceInBackground({
         callId: traceCallId,
         context: traceContext,
         model: body.model,
@@ -327,7 +327,7 @@ async function handleOpenaiChat(
       },
     }
     if (traceContext) {
-      await recordProxyTrace({
+      recordProxyTraceInBackground({
         context: traceContext,
         callId: traceCallId,
         model: body.model,
@@ -351,7 +351,7 @@ async function handleOpenaiChat(
   if (isStream) {
     if (!upstream.body) {
       if (traceContext) {
-        await recordProxyTrace({
+        recordProxyTraceInBackground({
           callId: traceCallId,
           context: traceContext,
           model: body.model,
@@ -402,7 +402,7 @@ async function handleOpenaiChat(
   const responseBody = await upstream.json()
   const anthropicResponse = openaiChatToAnthropic(responseBody, body.model)
   if (traceContext) {
-    await recordProxyTrace({
+    recordProxyTraceInBackground({
       callId: traceCallId,
       context: traceContext,
       model: body.model,
@@ -470,7 +470,7 @@ async function handleOpenaiResponses(
     }, networkSettings.aiRequestTimeoutMs, isStream)
   } catch (err) {
     if (traceContext) {
-      await recordProxyTrace({
+      recordProxyTraceInBackground({
         callId: traceCallId,
         context: traceContext,
         model: body.model,
@@ -496,7 +496,7 @@ async function handleOpenaiResponses(
       },
     }
     if (traceContext) {
-      await recordProxyTrace({
+      recordProxyTraceInBackground({
         context: traceContext,
         callId: traceCallId,
         model: body.model,
@@ -520,7 +520,7 @@ async function handleOpenaiResponses(
   if (isStream) {
     if (!upstream.body) {
       if (traceContext) {
-        await recordProxyTrace({
+        recordProxyTraceInBackground({
           callId: traceCallId,
           context: traceContext,
           model: body.model,
@@ -571,7 +571,7 @@ async function handleOpenaiResponses(
   const responseBody = await upstream.json()
   const anthropicResponse = openaiResponsesToAnthropic(responseBody, body.model)
   if (traceContext) {
-    await recordProxyTrace({
+    recordProxyTraceInBackground({
       callId: traceCallId,
       context: traceContext,
       model: body.model,
@@ -672,6 +672,27 @@ function startProxyTraceCall({
   return callId
 }
 
+type RecordProxyTraceInput = {
+  callId?: string
+  context: ProxyTraceContext
+  model: string
+  upstreamUrl: string
+  upstreamRequest: unknown
+  requestHeaders?: Record<string, string>
+  startedAt: string
+  startedAtMs: number
+  responseStatus?: number
+  upstreamResponseBody?: unknown
+  anthropicResponseBody?: unknown
+  responseBodySnapshot?: TraceBodySnapshot
+  responseHeaders?: Headers
+  error?: unknown
+}
+
+function recordProxyTraceInBackground(input: RecordProxyTraceInput): void {
+  void recordProxyTrace(input).catch(() => {})
+}
+
 async function recordProxyTrace({
   callId,
   context,
@@ -687,22 +708,7 @@ async function recordProxyTrace({
   responseBodySnapshot,
   responseHeaders,
   error,
-}: {
-  callId?: string
-  context: ProxyTraceContext
-  model: string
-  upstreamUrl: string
-  upstreamRequest: unknown
-  requestHeaders?: Record<string, string>
-  startedAt: string
-  startedAtMs: number
-  responseStatus?: number
-  upstreamResponseBody?: unknown
-  anthropicResponseBody?: unknown
-  responseBodySnapshot?: TraceBodySnapshot
-  responseHeaders?: Headers
-  error?: unknown
-}): Promise<void> {
+}: RecordProxyTraceInput): Promise<void> {
   const completedAt = new Date().toISOString()
   const requestBody = createProxyTraceRequestBody(context, upstreamRequest)
   const responseBody = anthropicResponseBody === undefined && upstreamResponseBody === undefined
@@ -797,11 +803,11 @@ function captureTraceStream(
           captureChunk(value)
           controller.enqueue(value)
         }
-        await finalize()
         controller.close()
+        void finalize()
       } catch (err) {
-        await finalize(err)
         controller.error(err)
+        void finalize(err)
       } finally {
         reader?.releaseLock()
         reader = null
@@ -811,7 +817,7 @@ function captureTraceStream(
       const error = reason instanceof Error
         ? reason
         : new Error(reason ? `Stream cancelled: ${String(reason)}` : 'Stream cancelled')
-      await finalize(error)
+      void finalize(error)
       await reader?.cancel(reason).catch(() => undefined)
     },
   })

@@ -276,6 +276,35 @@ describe('ConversationService', () => {
     }
   })
 
+  test('buildChildEnv flushes desktop transcripts before the SDK reports turn completion (#1033)', async () => {
+    const previous = process.env.CLAUDE_CODE_EAGER_FLUSH
+    delete process.env.CLAUDE_CODE_EAGER_FLUSH
+    resetTerminalShellEnvironmentCacheForTests()
+    try {
+      const service = new ConversationService() as any
+      const sdkEnv = (await service.buildChildEnv(
+        '/tmp',
+        'ws://127.0.0.1:3456/sdk/session?token=test',
+      )) as Record<string, string>
+      const nonSdkEnv = (await service.buildChildEnv('/tmp')) as Record<string, string>
+
+      expect(sdkEnv.CLAUDE_CODE_EAGER_FLUSH).toBe('1')
+      expect(nonSdkEnv.CLAUDE_CODE_EAGER_FLUSH).toBeUndefined()
+
+      process.env.CLAUDE_CODE_EAGER_FLUSH = '0'
+      resetTerminalShellEnvironmentCacheForTests()
+      const explicitEnv = (await service.buildChildEnv(
+        '/tmp',
+        'ws://127.0.0.1:3456/sdk/session?token=test',
+      )) as Record<string, string>
+      expect(explicitEnv.CLAUDE_CODE_EAGER_FLUSH).toBe('0')
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_CODE_EAGER_FLUSH
+      else process.env.CLAUDE_CODE_EAGER_FLUSH = previous
+      resetTerminalShellEnvironmentCacheForTests()
+    }
+  })
+
   test('buildChildEnv lets caller env override the stream max-duration cap (#766)', async () => {
     const prev = process.env.CLAUDE_STREAM_MAX_DURATION_MS
     process.env.CLAUDE_STREAM_MAX_DURATION_MS = '120000'

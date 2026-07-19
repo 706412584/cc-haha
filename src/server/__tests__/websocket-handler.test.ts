@@ -3,6 +3,7 @@ import type { ServerWebSocket } from 'bun'
 import {
   __markPrewarmPendingForTests,
   __markActiveTurnForTests,
+  __refreshDisconnectedTurnCleanupWatcherForTests,
   __registerPendingUserTurnForTests,
   __markPrewarmedForTests,
   __resetWebSocketHandlerStateForTests,
@@ -330,6 +331,57 @@ describe('WebSocket handler session isolation', () => {
     })
   })
 
+  it('persists terminal task notifications before forwarding them to the client', async () => {
+    const sessionId = `task-notification-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    let outputCallback: ((cliMsg: any) => void) | null = null
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'onOutput').mockImplementation((_sid, callback) => {
+      outputCallback = callback
+    })
+    const append = spyOn(sessionService, 'appendSessionTaskNotification').mockResolvedValue()
+
+    handleWebSocket.open(ws)
+    ws.sent.length = 0
+
+    const completed = {
+      type: 'system',
+      subtype: 'task_notification',
+      uuid: 'terminal-task-event-1',
+      task_id: 'agent-task-1',
+      tool_use_id: 'agent-tool-1',
+      status: 'completed',
+      summary: 'Background task completed',
+      timestamp: '2026-07-18T00:01:00.000Z',
+    }
+    outputCallback?.(completed)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(append).toHaveBeenCalledTimes(1)
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'system_notification',
+      subtype: 'task_notification',
+      data: completed,
+    })
+
+    // A running notification is UI activity, not a terminal state that should
+    // be restored after restart. It must forward without another persistence.
+    const running = {
+      ...completed,
+      uuid: 'running-task-event-1',
+      status: 'running',
+    }
+    outputCallback?.(running)
+
+    expect(append).toHaveBeenCalledTimes(1)
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'system_notification',
+      subtype: 'task_notification',
+      data: running,
+    })
+  })
+
   it('broadcasts tool and Computer Use permission resolutions to every client', () => {
     const sessionId = `permission-resolution-${crypto.randomUUID()}`
     const first = makeClientSocket(sessionId)
@@ -403,6 +455,85 @@ describe('WebSocket handler session isolation', () => {
 
     expect(setTimeoutSpy).toHaveBeenCalled()
     expect(setTimeoutSpy.mock.calls[0]?.[1]).toBeGreaterThan(30_000)
+  })
+
+  it('bounds an active turn waiting on permission after the last client disconnects', () => {
+    const sessionId = `active-permission-disconnect-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    const setTimeoutSpy = spyOn(globalThis, 'setTimeout').mockImplementation(() => 0 as any)
+    spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([
+      {
+        requestId: 'request-bash-1',
+        toolName: 'Bash',
+        input: { command: 'echo hello' },
+      },
+    ])
+    let turnCompleteCallback: ((cliMsg: any) => void) | null = null
+    spyOn(conversationService, 'onOutput').mockImplementation((_sid, callback) => {
+      turnCompleteCallback = callback
+    })
+    spyOn(conversationService, 'removeOutputCallback').mockImplementation(() => {})
+    const stopSession = spyOn(conversationService, 'stopSession').mockImplementation(() => {})
+
+    handleWebSocket.open(ws)
+    __markActiveTurnForTests(sessionId)
+    setTimeoutSpy.mockClear()
+
+    handleWebSocket.close(ws, 1006, 'permission prompt abandoned')
+
+    expect(setTimeoutSpy).toHaveBeenCalledTimes(1)
+    expect(setTimeoutSpy.mock.calls[0]?.[1]).toBe(30 * 60_000)
+    expect(turnCompleteCallback).not.toBeNull()
+
+    const expirePermissionWait = setTimeoutSpy.mock.calls[0]?.[0] as (() => void) | undefined
+    expirePermissionWait?.()
+    expect(stopSession).toHaveBeenCalledWith(sessionId)
+  })
+
+  it('starts the permission cleanup bound when disconnect happens before the turn is sent', () => {
+    const sessionId = `late-permission-disconnect-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    const setTimeoutSpy = spyOn(globalThis, 'setTimeout').mockImplementation(() => 0 as any)
+    const pendingRequests = spyOn(conversationService, 'getPendingPermissionRequests')
+      .mockReturnValue([])
+    let turnOutputCallback: ((cliMsg: any) => void) | null = null
+    let cliSessionReady = false
+    spyOn(conversationService, 'onOutput').mockImplementation((_sid, callback) => {
+      // ConversationService.onOutput is a no-op until startSession has inserted
+      // the session. This was the gap hidden by the previous regression test.
+      if (cliSessionReady) turnOutputCallback = callback
+    })
+    spyOn(conversationService, 'removeOutputCallback').mockImplementation(() => {})
+
+    handleWebSocket.open(ws)
+    // Mirrors the real H5 race: user_message has synchronously claimed the
+    // turn, but CLI startup has not completed and messageSent is still false.
+    __registerPendingUserTurnForTests(sessionId)
+    setTimeoutSpy.mockClear()
+    handleWebSocket.close(ws, 1006, 'renderer closed before permission prompt')
+
+    expect(setTimeoutSpy).not.toHaveBeenCalled()
+    expect(turnOutputCallback).toBeNull()
+
+    // CLI startup finishes while the H5 tab remains closed. handleUserMessage
+    // refreshes the watcher immediately before sending the queued turn.
+    cliSessionReady = true
+    __refreshDisconnectedTurnCleanupWatcherForTests(sessionId)
+    expect(turnOutputCallback).not.toBeNull()
+
+    pendingRequests.mockReturnValue([{
+      requestId: 'late-request-1',
+      toolName: 'Bash',
+      input: { command: 'echo later' },
+    }])
+    ;(turnOutputCallback as ((cliMsg: any) => void) | null)?.({
+      type: 'control_request',
+      request_id: 'late-request-1',
+      request: { subtype: 'can_use_tool', tool_name: 'Bash' },
+    })
+
+    expect(setTimeoutSpy).toHaveBeenCalledTimes(1)
+    expect(setTimeoutSpy.mock.calls[0]?.[1]).toBe(30 * 60_000)
   })
 
   it('does not forward prewarm startup status to a reconnecting client', async () => {

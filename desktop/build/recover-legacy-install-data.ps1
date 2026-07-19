@@ -17,83 +17,113 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-if (-not ('CcHahaRecoveryNativePath' -as [type])) {
-  Add-Type @'
-using System;
-using System.ComponentModel;
-using System.IO;
-using System.Runtime.InteropServices;
-using System.Text;
-using Microsoft.Win32.SafeHandles;
+function Assert-NoUnsupportedPathAlias {
+  param([Parameter(Mandatory = $true)][string]$Path)
 
-public static class CcHahaRecoveryNativePath
-{
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern SafeFileHandle CreateFile(
-        string fileName,
-        uint desiredAccess,
-        uint shareMode,
-        IntPtr securityAttributes,
-        uint creationDisposition,
-        uint flagsAndAttributes,
-        IntPtr templateFile);
+  if ($Path.StartsWith('\\?\', [StringComparison]::OrdinalIgnoreCase) -or
+      $Path.StartsWith('\\.\', [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Extended device or volume aliases cannot be recovered safely without a final-path helper: $Path"
+  }
 
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern uint GetFinalPathNameByHandle(
-        SafeFileHandle file,
-        StringBuilder path,
-        uint pathLength,
-        uint flags);
+  $fullPath = [IO.Path]::GetFullPath($Path)
+  $root = [IO.Path]::GetPathRoot($fullPath)
+  if ([string]::IsNullOrWhiteSpace($root) -or $root -notmatch '^[A-Za-z]:\\$') {
+    throw "Only a local volume drive path can be recovered safely: $Path"
+  }
 
-    public static string Resolve(string path)
-    {
-        const uint shareReadWriteDelete = 0x00000007;
-        const uint openExisting = 3;
-        const uint backupSemantics = 0x02000000;
-        using (SafeFileHandle handle = CreateFile(
-            path,
-            0,
-            shareReadWriteDelete,
-            IntPtr.Zero,
-            openExisting,
-            backupSemantics,
-            IntPtr.Zero))
-        {
-            if (handle.IsInvalid) {
-                throw new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    "Cannot resolve the final path for " + path);
-            }
-            StringBuilder result = new StringBuilder(32768);
-            uint length = GetFinalPathNameByHandle(handle, result, (uint)result.Capacity, 0);
-            if (length == 0) {
-                throw new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    "Cannot resolve the final path for " + path);
-            }
-            if (length >= (uint)result.Capacity) {
-                throw new InvalidOperationException("Resolved path is too long: " + path);
-            }
-            string value = result.ToString();
-            if (value.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) {
-                return @"\\" + value.Substring(8);
-            }
-            return value.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase)
-                ? value.Substring(4)
-                : value;
-        }
+  $relative = $fullPath.Substring($root.Length)
+  $current = $root
+  foreach ($segment in $relative.Split(
+      [char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar),
+      [StringSplitOptions]::RemoveEmptyEntries)) {
+    $next = [IO.Path]::Combine($current, $segment)
+    $exists = [IO.Directory]::Exists($next) -or [IO.File]::Exists($next)
+    if ($exists) {
+      try {
+        $exactEntry = Get-ChildItem -LiteralPath $current -Force -ErrorAction Stop |
+          Where-Object { ([string]$_.Name).Equals($segment, [StringComparison]::OrdinalIgnoreCase) } |
+          Select-Object -First 1
+      } catch {
+        throw "Path segment identity cannot be proven because its parent cannot be enumerated: $next"
+      }
+      if ($null -eq $exactEntry) {
+        $item = Get-Item -LiteralPath $next -Force -ErrorAction SilentlyContinue
+        $resolvedName = if ($null -eq $item) { '<unavailable>' } else { [string]$item.Name }
+        throw "Alternate path alias cannot be recovered safely without a final-path helper: $next (resolved item name: $resolvedName)"
+      }
+    } elseif ($segment -match '^[^\\/:*?"<>|.~]{1,6}~[0-9]{1,6}(?:\.[^\\/:*?"<>|]{1,3})?$') {
+      throw "Possible 8.3 path alias cannot be proven safe because the segment does not exist: $next"
     }
+    $current = $next
+  }
+
+  $subst = Join-Path $env:SystemRoot 'System32\subst.exe'
+  $substOutput = @(& $subst 2>$null)
+  $substDrive = $root.Substring(0, 2)
+  $substMatch = $substOutput | Where-Object {
+    ([string]$_).TrimStart().StartsWith($substDrive, [StringComparison]::OrdinalIgnoreCase) -and
+      ([string]$_).Contains('=>')
+  } | Select-Object -First 1
+  if ($LASTEXITCODE -eq 0 -and $null -ne $substMatch) {
+    throw "SUBST aliases cannot be recovered safely without a final-path helper: $Path"
+  }
 }
-'@
+
+function Assert-NoReparsePointInPath {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $fullPath = [IO.Path]::GetFullPath($Path)
+  $root = [IO.Path]::GetPathRoot($fullPath)
+  if ([string]::IsNullOrWhiteSpace($root)) {
+    throw "Cannot determine the path root for $Path"
+  }
+
+  $current = $root
+  $rootAttributes = [IO.File]::GetAttributes($current)
+  if (($rootAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Path root is a reparse point and cannot be recovered safely: $current"
+  }
+  $relative = $fullPath.Substring($root.Length)
+  $segments = $relative.Split(
+    [char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar),
+    [StringSplitOptions]::RemoveEmptyEntries)
+  foreach ($segment in $segments) {
+    $current = [IO.Path]::Combine($current, $segment)
+    $attributes = [IO.File]::GetAttributes($current)
+    if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw "Path contains a reparse point and cannot be recovered safely: $current"
+    }
+  }
+}
+
+function Convert-ToCanonicalVolumePathIdentity {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $fullPath = [IO.Path]::GetFullPath($Path)
+  $root = [IO.Path]::GetPathRoot($fullPath)
+  $mountvol = Join-Path $env:SystemRoot 'System32\mountvol.exe'
+  $output = @(& $mountvol $root /L 2>$null)
+  if ($LASTEXITCODE -ne 0) {
+    throw "Cannot resolve the canonical volume for $Path"
+  }
+  $volumeRoots = @($output |
+    ForEach-Object { ([string]$_).Trim() } |
+    Where-Object { $_ -match '^\\\\\?\\Volume\{[0-9A-Fa-f-]+\}\\$' })
+  if ($volumeRoots.Count -ne 1) {
+    throw "Cannot resolve one unambiguous canonical volume for $Path"
+  }
+  $relative = $fullPath.Substring($root.Length)
+  return [IO.Path]::Combine($volumeRoots[0], $relative)
 }
 
 function Resolve-CanonicalPath {
   param([Parameter(Mandatory = $true)][string]$Path)
 
+  Assert-NoUnsupportedPathAlias -Path $Path
   $fullPath = [IO.Path]::GetFullPath($Path)
   $existingPath = $fullPath
   $missingSegments = New-Object 'System.Collections.Generic.List[string]'
-  while (-not (Test-Path -LiteralPath $existingPath)) {
+  while (-not ([IO.Directory]::Exists($existingPath) -or [IO.File]::Exists($existingPath))) {
     $parent = [IO.Path]::GetDirectoryName($existingPath)
     if ([string]::IsNullOrEmpty($parent) -or $parent -eq $existingPath) {
       throw "Cannot resolve an existing ancestor for $Path"
@@ -102,11 +132,20 @@ function Resolve-CanonicalPath {
     $existingPath = $parent
   }
 
-  $resolved = [CcHahaRecoveryNativePath]::Resolve($existingPath)
+  Assert-NoReparsePointInPath -Path $existingPath
+  $resolved = [IO.Path]::GetFullPath($existingPath)
   foreach ($segment in $missingSegments) {
-    $resolved = Join-Path $resolved $segment
+    $resolved = [IO.Path]::Combine($resolved, $segment)
   }
   return [IO.Path]::GetFullPath($resolved)
+}
+
+function Get-CanonicalPathIdentity {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  # Keep the DOS path for filesystem operations; use the volume GUID form only as a comparison key.
+  $resolved = Resolve-CanonicalPath -Path $Path
+  return Convert-ToCanonicalVolumePathIdentity -Path $resolved
 }
 
 function Test-PathAtOrBelow {
@@ -115,8 +154,8 @@ function Test-PathAtOrBelow {
     [Parameter(Mandatory = $true)][string]$Candidate
   )
 
-  $resolvedParent = (Resolve-CanonicalPath $Parent).TrimEnd('\', '/')
-  $resolvedCandidate = (Resolve-CanonicalPath $Candidate).TrimEnd('\', '/')
+  $resolvedParent = (Get-CanonicalPathIdentity $Parent).TrimEnd('\', '/')
+  $resolvedCandidate = (Get-CanonicalPathIdentity $Candidate).TrimEnd('\', '/')
   if ($resolvedCandidate.Equals($resolvedParent, [StringComparison]::OrdinalIgnoreCase)) {
     return $true
   }
@@ -131,6 +170,8 @@ function Test-LexicalPathAtOrBelow {
     [Parameter(Mandatory = $true)][string]$Candidate
   )
 
+  Assert-NoUnsupportedPathAlias -Path $Parent
+  Assert-NoUnsupportedPathAlias -Path $Candidate
   $fullParent = [IO.Path]::GetFullPath($Parent).TrimEnd('\', '/')
   $fullCandidate = [IO.Path]::GetFullPath($Candidate).TrimEnd('\', '/')
   if ($fullCandidate.Equals($fullParent, [StringComparison]::OrdinalIgnoreCase)) {
@@ -156,8 +197,8 @@ function Test-SamePath {
     [Parameter(Mandatory = $true)][string]$Left,
     [Parameter(Mandatory = $true)][string]$Right
   )
-  return (Resolve-CanonicalPath $Left).TrimEnd('\', '/').Equals(
-    (Resolve-CanonicalPath $Right).TrimEnd('\', '/'),
+  return (Get-CanonicalPathIdentity $Left).TrimEnd('\', '/').Equals(
+    (Get-CanonicalPathIdentity $Right).TrimEnd('\', '/'),
     [StringComparison]::OrdinalIgnoreCase)
 }
 
@@ -284,9 +325,10 @@ function Get-ExistingInstallDirs {
     if ([string]::IsNullOrWhiteSpace($installDir) -or -not (Test-Path -LiteralPath $installDir -PathType Container)) {
       continue
     }
-    $canonical = Resolve-CanonicalPath $installDir
-    if ($seen.Add($canonical)) {
-      $result.Add($canonical)
+    $resolved = Resolve-CanonicalPath $installDir
+    $identity = Convert-ToCanonicalVolumePathIdentity $resolved
+    if ($seen.Add($identity)) {
+      $result.Add($resolved)
     }
   }
   return $result.ToArray()
@@ -304,6 +346,7 @@ function Get-PotentialInstallDirs {
     if (-not [IO.Path]::IsPathRooted($installDir)) {
       throw "Application install directory is relative and cannot be checked safely: $installDir"
     }
+    Assert-NoUnsupportedPathAlias -Path $installDir
     $fullPath = [IO.Path]::GetFullPath($installDir)
     if ($seen.Add($fullPath)) {
       $result.Add($fullPath)
@@ -339,7 +382,7 @@ function Get-UnsafeLegacySource {
           throw "The active data directory is the application install root itself: $active"
         }
         if (Test-Path -LiteralPath $active -PathType Container) {
-          $canonicalActive = Resolve-CanonicalPath $active
+          $canonicalActive = Get-CanonicalPathIdentity $active
           if (-not $sources.ContainsKey($canonicalActive)) {
             $sources.Add($canonicalActive, $active)
           }
@@ -379,7 +422,7 @@ function Get-UnsafeLegacySource {
         if (Test-SamePath -Left $possiblyDeletedRoot -Right $source) {
           throw "The active data directory is the application install root itself: $source"
         }
-        $canonicalSource = Resolve-CanonicalPath $source
+        $canonicalSource = Get-CanonicalPathIdentity $source
         if (-not $sources.ContainsKey($canonicalSource)) {
           $sources.Add($canonicalSource, $source)
         }
@@ -726,6 +769,60 @@ function Run-SelfTest {
   $testRoot = Join-Path ([IO.Path]::GetTempPath()) "cc-haha-storage-recovery-$([Guid]::NewGuid().ToString('N'))"
   New-Item -ItemType Directory -Path $testRoot | Out-Null
   try {
+    $canonicalTestRoot = Get-CanonicalPathIdentity $testRoot
+    Assert-SelfTest `
+      -Condition ($canonicalTestRoot.StartsWith('\\?\Volume{', [StringComparison]::OrdinalIgnoreCase)) `
+      -Message 'ordinary drive path did not receive a canonical volume identity'
+
+    $volumeAliasFailed = $false
+    try {
+      Resolve-CanonicalPath -Path $canonicalTestRoot | Out-Null
+    } catch {
+      $volumeAliasFailed = $_.Exception.Message.Contains('Extended device or volume aliases')
+    }
+    Assert-SelfTest -Condition $volumeAliasFailed -Message 'extended volume alias did not fail closed'
+
+    $possibleShortAliasFailed = $false
+    try {
+      Resolve-CanonicalPath -Path (Join-Path $testRoot 'MISSIN~1') | Out-Null
+    } catch {
+      $possibleShortAliasFailed = $_.Exception.Message.Contains('8.3 path alias')
+    }
+    Assert-SelfTest -Condition $possibleShortAliasFailed -Message 'possible 8.3 alias did not fail closed'
+
+    $legalTildePath = Join-Path $testRoot 'project~notes'
+    New-Item -ItemType Directory -Path $legalTildePath | Out-Null
+    $resolvedLegalTildePath = Resolve-CanonicalPath -Path $legalTildePath
+    Assert-SelfTest `
+      -Condition ($resolvedLegalTildePath.EndsWith('project~notes', [StringComparison]::OrdinalIgnoreCase)) `
+      -Message 'legal long directory name containing a tilde was blocked as an 8.3 alias'
+
+    $substDrive = $null
+    foreach ($codePoint in (90..68)) {
+      $candidateDrive = "$([char]$codePoint):"
+      if (-not (Test-Path -LiteralPath "$candidateDrive\")) {
+        $substDrive = $candidateDrive
+        break
+      }
+    }
+    Assert-SelfTest -Condition ($null -ne $substDrive) -Message 'no drive letter was available for the SUBST alias test'
+    $subst = Join-Path $env:SystemRoot 'System32\subst.exe'
+    & $subst $substDrive $testRoot
+    if ($LASTEXITCODE -ne 0) {
+      throw "Self-test could not create SUBST alias $substDrive for $testRoot"
+    }
+    try {
+      $substAliasFailed = $false
+      try {
+        Resolve-CanonicalPath -Path "$substDrive\" | Out-Null
+      } catch {
+        $substAliasFailed = $_.Exception.Message.Contains('SUBST aliases')
+      }
+      Assert-SelfTest -Condition $substAliasFailed -Message 'SUBST alias did not fail closed'
+    } finally {
+      & $subst $substDrive /D | Out-Null
+    }
+
     $install = Join-Path $testRoot 'old install'
     $legacy = Join-Path $install 'CLAUDE_CONFIG_DIR'
     $userData = Join-Path $testRoot 'app data'

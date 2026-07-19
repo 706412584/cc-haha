@@ -80,7 +80,16 @@ async function runTestFile(file: string): Promise<TestFileResult> {
       ],
       {
         cwd: root,
-        env: createSandboxedTestEnvironment(sandboxHome),
+        env: createSandboxedTestEnvironment(
+          sandboxHome,
+          process.platform === 'win32'
+            ? {
+                GIT_CONFIG_COUNT: '1',
+                GIT_CONFIG_KEY_0: 'core.longpaths',
+                GIT_CONFIG_VALUE_0: 'true',
+              }
+            : {},
+        ),
         stdout: 'pipe',
         stderr: 'pipe',
       },

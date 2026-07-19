@@ -9,6 +9,7 @@ import {
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 import { conversationService } from './conversationService.js'
 import { sessionService, type MessageEntry } from './sessionService.js'
+import { collectErroredToolUseIds } from './transcriptToolResults.js'
 
 type RewindTarget = {
   targetUserMessageId: string
@@ -618,6 +619,7 @@ function collectTranscriptTurnFileChanges(
   if (turnMessages.length === 0) return []
 
   const changes = new Map<string, TranscriptFileChange>()
+  const erroredToolUseIds = collectErroredToolUseIds(turnMessages)
   for (const message of turnMessages) {
     if (message.type !== 'tool_use' || !Array.isArray(message.content)) continue
 
@@ -625,6 +627,7 @@ function collectTranscriptTurnFileChanges(
       if (!block || typeof block !== 'object') continue
       const record = block as Record<string, unknown>
       if (record.type !== 'tool_use' || typeof record.name !== 'string') continue
+      if (typeof record.id === 'string' && erroredToolUseIds.has(record.id)) continue
       const input = record.input
       if (!input || typeof input !== 'object') continue
 

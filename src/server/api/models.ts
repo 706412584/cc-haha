@@ -95,6 +95,7 @@ function buildProviderModelList(models: {
   haiku: string
   sonnet: string
   opus: string
+  fable?: string
 }): ApiModelInfo[] {
   const modelList: ApiModelInfo[] = []
 
@@ -125,6 +126,14 @@ function buildProviderModelList(models: {
         id: models.opus,
         name: models.opus,
         description: 'Opus model',
+        context: '',
+      }
+    : null)
+  addUniqueModel(modelList, models.fable
+    ? {
+        id: models.fable,
+        name: models.fable,
+        description: 'Fable model',
         context: '',
       }
     : null)
@@ -170,12 +179,20 @@ async function getGrokModelList(): Promise<ApiModelInfo[]> {
   }))
 }
 
-function getEnvConfiguredAnthropicModels(): ApiModelInfo[] {
+function getConfiguredAnthropicModels(settingsEnv: Record<string, unknown>): ApiModelInfo[] {
+  const resolveModel = (key: string): string => {
+    const runtimeValue = process.env[key]?.trim()
+    if (runtimeValue) return runtimeValue
+    const settingsValue = settingsEnv[key]
+    return typeof settingsValue === 'string' ? settingsValue.trim() : ''
+  }
+
   return buildProviderModelList({
-    main: process.env.ANTHROPIC_MODEL?.trim() || '',
-    haiku: process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL?.trim() || '',
-    sonnet: process.env.ANTHROPIC_DEFAULT_SONNET_MODEL?.trim() || '',
-    opus: process.env.ANTHROPIC_DEFAULT_OPUS_MODEL?.trim() || '',
+    main: resolveModel('ANTHROPIC_MODEL'),
+    haiku: resolveModel('ANTHROPIC_DEFAULT_HAIKU_MODEL'),
+    sonnet: resolveModel('ANTHROPIC_DEFAULT_SONNET_MODEL'),
+    opus: resolveModel('ANTHROPIC_DEFAULT_OPUS_MODEL'),
+    fable: resolveModel('ANTHROPIC_DEFAULT_FABLE_MODEL'),
   })
 }
 
@@ -188,7 +205,11 @@ async function getOpenAIAuthModels(): Promise<ApiModelInfo[]> {
 }
 
 async function getStandaloneModelList(): Promise<ApiModelInfo[]> {
-  const models = [...getEnvConfiguredAnthropicModels()]
+  const settings = await settingsService.getUserSettings()
+  const settingsEnv = settings.env && typeof settings.env === 'object' && !Array.isArray(settings.env)
+    ? settings.env as Record<string, unknown>
+    : {}
+  const models = [...getConfiguredAnthropicModels(settingsEnv)]
 
   if (models.length === 0) {
     models.push(...DEFAULT_MODELS)
@@ -288,7 +309,10 @@ async function handleCurrentModel(req: Request): Promise<Response> {
     const explicitModel = (settings.model as string) || ''
     const contextTier = (settings.modelContext as string) || undefined
     const env = (settings.env as Record<string, string>) || {}
-    const envModel = process.env.ANTHROPIC_MODEL?.trim() || ''
+    const runtimeEnvModel = process.env.ANTHROPIC_MODEL?.trim() || ''
+    const settingsEnvModel = typeof env.ANTHROPIC_MODEL === 'string'
+      ? env.ANTHROPIC_MODEL.trim()
+      : ''
 
     let currentModelId: string
     let currentModelName: string
@@ -313,7 +337,7 @@ async function handleCurrentModel(req: Request): Promise<Response> {
       }
     } else {
       // No provider — use settings model with context tier
-      currentModelId = explicitModel || envModel || DEFAULT_MODEL
+      currentModelId = explicitModel || runtimeEnvModel || settingsEnvModel || DEFAULT_MODEL
       currentModelName = currentModelId
     }
 

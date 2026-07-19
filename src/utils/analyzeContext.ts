@@ -60,7 +60,10 @@ import { logForDebugging } from './debug.js'
 import { isEnvTruthy } from './envUtils.js'
 import { errorMessage, toError } from './errors.js'
 import { logError } from './log.js'
-import { normalizeMessagesForAPI } from './messages.js'
+import {
+  normalizeAttachmentForAPI,
+  normalizeMessagesForAPI,
+} from './messages.js'
 import { getRuntimeMainLoopModel } from './model/model.js'
 import { isFirstPartyAnthropicBaseUrl } from './model/providers.js'
 import type { SettingSource } from './settings/constants.js'

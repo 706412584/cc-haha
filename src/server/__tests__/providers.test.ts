@@ -9,7 +9,11 @@ import * as os from 'os'
 import { ProviderService } from '../services/providerService.js'
 import { handleProvidersApi } from '../api/providers.js'
 import { handleProxyRequest } from '../proxy/handler.js'
-import { clearTraceCaptureStateForTests, traceCaptureService } from '../services/traceCaptureService.js'
+import {
+  clearTraceCaptureStateForTests,
+  setTraceAppendBeforeWriteHookForTests,
+  traceCaptureService,
+} from '../services/traceCaptureService.js'
 import type { CreateProviderInput } from '../types/provider.js'
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
@@ -87,6 +91,49 @@ async function readSettings(): Promise<Record<string, unknown>> {
 async function readProvidersConfig(): Promise<Record<string, unknown>> {
   const raw = await fs.readFile(path.join(tmpDir, 'cc-haha', 'providers.json'), 'utf-8')
   return JSON.parse(raw) as Record<string, unknown>
+}
+
+async function waitForCompletedProxyTrace(sessionId: string) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const trace = await traceCaptureService.getSessionTrace(sessionId)
+    if (
+      trace.calls.some((call) => call.response) &&
+      trace.events.some((event) => event.phase === 'upstream_fetch_completed')
+    ) {
+      return trace
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  return traceCaptureService.getSessionTrace(sessionId)
+}
+
+function blockNextTraceAppend() {
+  let releaseWrite: () => void = () => {}
+  const blockedWrite = new Promise<void>((resolve) => {
+    releaseWrite = resolve
+  })
+  let signalBlocked: () => void = () => {}
+  const writeBlocked = new Promise<void>((resolve) => {
+    signalBlocked = resolve
+  })
+
+  setTraceAppendBeforeWriteHookForTests(async () => {
+    setTraceAppendBeforeWriteHookForTests(null)
+    signalBlocked()
+    await blockedWrite
+  })
+
+  return { releaseWrite, writeBlocked }
+}
+
+async function settlesBeforeBlockedTraceWrite<T>(promise: Promise<T>): Promise<T | null> {
+  return Promise.race([
+    promise,
+    // The trace hook is already blocked, so this timeout is only a failure
+    // bound. Keep it generous enough that a busy CI worker cannot masquerade
+    // as response/trace coupling.
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 1_000)),
+  ])
 }
 
 // =============================================================================
@@ -1444,7 +1491,7 @@ describe('ProviderService', () => {
         })
 
         const res = await handleProxyRequest(req, new URL(req.url))
-        const trace = await traceCaptureService.getSessionTrace('session-proxy-trace')
+        const trace = await waitForCompletedProxyTrace('session-proxy-trace')
 
         expect(res.status).toBe(200)
         expect(trace.summary.apiCalls).toBe(1)
@@ -1462,6 +1509,123 @@ describe('ProviderService', () => {
         expect(upstreamHeaders[0].get('Authorization')).toBe('Bearer sk-test-key-123')
         expect(upstreamHeaders[0].get('Authorization')).not.toContain('desktop-local-secret')
       } finally {
+        globalThis.fetch = originalFetch
+      }
+    })
+
+    test('returns a non-streaming proxy response before trace persistence finishes', async () => {
+      const originalFetch = globalThis.fetch
+      globalThis.fetch = mock(async () => new Response(JSON.stringify({
+        id: 'chatcmpl-trace-background',
+        object: 'chat.completion',
+        created: 0,
+        model: 'gpt-4',
+        choices: [{ index: 0, message: { role: 'assistant', content: 'background trace ok' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch
+
+      const svc = new ProviderService()
+      const provider = await svc.addProvider(sampleInput({ apiFormat: 'openai_chat' }))
+      await svc.activateProvider(provider.id)
+      const { releaseWrite, writeBlocked } = blockNextTraceAppend()
+      let released = false
+      let responsePromise: Promise<Response> | undefined
+
+      try {
+        const req = new Request('http://localhost:3456/proxy/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Claude-Code-Session-Id': 'session-non-stream-background-trace',
+          },
+          body: JSON.stringify({
+            model: 'gpt-4',
+            max_tokens: 64,
+            messages: [{ role: 'user', content: 'return before trace persistence' }],
+          }),
+        })
+
+        responsePromise = handleProxyRequest(req, new URL(req.url))
+        await writeBlocked
+        const response = await settlesBeforeBlockedTraceWrite(responsePromise)
+        expect(response).not.toBeNull()
+        expect(response?.status).toBe(200)
+        await expect(response?.json()).resolves.toMatchObject({
+          content: [{ text: 'background trace ok' }],
+        })
+
+        releaseWrite()
+        released = true
+        const trace = await waitForCompletedProxyTrace('session-non-stream-background-trace')
+        expect(trace.calls[0]?.response?.body.preview).toContain('chatcmpl-trace-background')
+        expect(trace.events.at(-1)?.phase).toBe('upstream_fetch_completed')
+      } finally {
+        if (!released) releaseWrite()
+        await responsePromise?.catch(() => undefined)
+        globalThis.fetch = originalFetch
+      }
+    })
+
+    test('delivers streaming EOF before trace persistence finishes', async () => {
+      const originalFetch = globalThis.fetch
+      const encoder = new TextEncoder()
+      globalThis.fetch = mock(async () => new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode([
+            'data: {"id":"chatcmpl-stream-trace","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"role":"assistant","content":"streamed"},"finish_reason":null}]}',
+            '',
+            'data: {"id":"chatcmpl-stream-trace","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}',
+            '',
+            'data: [DONE]',
+            '',
+          ].join('\n')))
+          controller.close()
+        },
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      })) as typeof fetch
+
+      const svc = new ProviderService()
+      const provider = await svc.addProvider(sampleInput({ apiFormat: 'openai_chat' }))
+      await svc.activateProvider(provider.id)
+      const { releaseWrite, writeBlocked } = blockNextTraceAppend()
+      let released = false
+      let bodyPromise: Promise<string> | undefined
+
+      try {
+        const req = new Request('http://localhost:3456/proxy/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Claude-Code-Session-Id': 'session-stream-background-trace',
+          },
+          body: JSON.stringify({
+            model: 'gpt-4',
+            max_tokens: 64,
+            stream: true,
+            messages: [{ role: 'user', content: 'finish before trace persistence' }],
+          }),
+        })
+
+        const response = await handleProxyRequest(req, new URL(req.url))
+        bodyPromise = response.text()
+        await writeBlocked
+        const body = await settlesBeforeBlockedTraceWrite(bodyPromise)
+        expect(body).not.toBeNull()
+        expect(body).toContain('message_stop')
+
+        releaseWrite()
+        released = true
+        const trace = await waitForCompletedProxyTrace('session-stream-background-trace')
+        expect(trace.calls[0]?.response?.body.preview).toContain('message_stop')
+        expect(trace.events.at(-1)?.phase).toBe('upstream_fetch_completed')
+      } finally {
+        if (!released) releaseWrite()
+        await bodyPromise?.catch(() => undefined)
         globalThis.fetch = originalFetch
       }
     })
