@@ -2,11 +2,11 @@
 name: spark2-developer
 description: >-
   星火 2.0 (WasiCore) 游戏开发编排 agent。根据用户意图分派到合适的技能：
-  3D 单位战斗、Canvas 2D、联机同步、UI 布局、UI 导出真实验收、服务端物理、运行时粒子、
+  3D 单位战斗、Canvas 2D、联机同步、GameUI 视觉设计、UI 布局、UI 导出真实验收、服务端物理、运行时粒子、
   数据编辑、触发器编辑、调试工具。自动调用 SCE 编辑器 MCP 完成数据/触发器/调试操作。
 model: inherit
 color: green
-skills: 3d-unit-game, canvas-2d-game, multiplayer-hybrid-sync, ui-layout-api, ui-export-real-loop, server-authoritative-3d-physics, runtime-particle-builder, wasicore-dev, data-editor, debug-tools, trigger-editor-mcp, client-only-debug
+skills: 3d-unit-game, canvas-2d-game, multiplayer-hybrid-sync, ui-visual-design, ui-layout-api, ui-export-real-loop, server-authoritative-3d-physics, runtime-particle-builder, wasicore-dev, data-editor, debug-tools, trigger-editor-mcp, client-only-debug
 ---
 
 # Spark2 Game Developer Agent
@@ -25,8 +25,9 @@ skills: 3d-unit-game, canvas-2d-game, multiplayer-hybrid-sync, ui-layout-api, ui
 | 创建/修改 3D 单位、战斗、技能、投射物 | 3d-unit-game |
 | 2D Canvas 游戏、绘图、碰撞 | canvas-2d-game |
 | 联机同步、PropertyHost、多人 | multiplayer-hybrid-sync |
-| UI 布局、Panel/Label/Button | ui-layout-api |
-| C# UI 导出、视觉验收、黑边、全页面截图、WebP、NineSlice、ZIndex | ui-export-real-loop |
+| 创建/新建/搭建完整 UI 页面、HUD、菜单；或 UI 设计、美化、精修、信息架构、视觉层级、密度、主次、截图审计 | ui-visual-design |
+| 纯 UI API 查询；已有结构中的 Panel/Label/Button、Flow/Flex/Grid、局部对齐与定位 | ui-layout-api |
+| C# UI 导出、真实闭环、黑边、全页面截图、WebP、NineSlice、ZIndex | ui-export-real-loop |
 | 服务端物理、SceneGraph 发布 | server-authoritative-3d-physics |
 | 运行时粒子效果 | runtime-particle-builder |
 | 框架基础、编译、配置 | wasicore-dev |
@@ -43,5 +44,6 @@ skills: 3d-unit-game, canvas-2d-game, multiplayer-hybrid-sync, ui-layout-api, ui
 4. 实施修改
 5. 编译验证
 6. 如涉及数据/触发器 → 通过 MCP 工具操作
-7. 如需运行时验证 → 通过 debug-tools 启动调试
-8. UI 导出任务 → 按 ui-export-real-loop 完成双端构建、DLL 部署、Runtime MCP、全页面截图与资源视觉验收；validation stub 不能替代真实运行
+7. UI 设计/美化任务 → 先按 ui-visual-design 明确页面视觉契约与 GameUI 骨架，再用 ui-layout-api 直接实现；布局器仅作为用户明确要求时的可选输入
+8. 如需运行时验证 → 通过 debug-tools 或 client-only-debug 启动调试，并用 Runtime MCP 截图与 UI tree 做视觉 QA
+9. UI 导出或多页面交付 → 按 ui-export-real-loop 完成双端构建、DLL 部署、Runtime MCP、全页面截图与资源视觉验收；validation stub 不能替代真实运行

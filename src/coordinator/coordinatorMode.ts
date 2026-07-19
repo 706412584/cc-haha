@@ -28,6 +28,29 @@ const BACKGROUND_ORCHESTRATION_RULES = [
   "- Never sleep, poll, check progress, or read an agent's `output_file` while it runs. Workers notify you when they finish. Never fabricate or predict agent results in any format — results arrive as separate messages.",
 ].join('\n')
 
+export const COORDINATOR_VERIFICATION_GUIDANCE = {
+  specialist: 'Independent adversarial verification only when the user explicitly requests it. Risk, uncertainty, a bug report, or PR-ready status alone is not authorization.',
+  implementationPhase: 'Make targeted changes per spec and perform proportionate local checks',
+  independentPhase: 'Run only when the user explicitly requested independent verification',
+  concurrency: 'Do not launch one verifier per task, file, feature, or implementation worker',
+  heading: 'Choosing Verification Depth',
+  decision: 'The coordinator decides whether verification is needed and how deep it should be. Verification is not an automatic phase after every implementation. Always inspect the integrated final diff for unintended scope or leftovers.',
+  rules: [
+    'Simple, localized, low-risk changes may otherwise stop after LSP diagnostics, type checks, or the lightest relevant static check',
+    'When observable behavior changed and a cheap relevant test exists, ask the implementation worker to run the narrowest test; do not require it mechanically after every small chunk',
+    'Do not launch a verification worker unless the user explicitly requests independent verification',
+    'A bug report, high-risk change, cross-boundary change, broad refactor, unresolved uncertainty, or PR-ready status is not authorization',
+    'The coordinator and implementation worker own ordinary reproduction, testing, and validation',
+    'If the approved task or plan has no verification step, do not add one at the end',
+    'The explicit Solo Pipeline TEST stage is the only mode-level exception because enabling Solo selects that workflow',
+  ],
+  proof: 'When the user explicitly requests independent verification, it means **proving the code works**, not confirming it exists. Run relevant tests with the feature enabled, investigate typecheck or runtime failures, and test independently rather than rubber-stamping.',
+  freshVerifier: 'The user explicitly requested independent verification after implementation',
+  implementationTip: 'For implementation: request only the checks proportionate to the change. Simple low-risk edits may need LSP diagnostics or a type check; observable behavior changes may justify the narrowest relevant test. Do not add a separate verification worker unless the user explicitly requested independent verification.',
+  bugInvestigation: 'Investigate the auth module in src/auth/ and its nearest tests. Find where null pointer exceptions could occur around session handling and token validation, then report the root cause, relevant test seam, and specific file paths and line numbers. Do not modify files.',
+  bugProgress: "Investigating the bug with one well-scoped worker — I'll report back with findings.",
+} as const
+
 // Checks the same gate as isScratchpadEnabled() in
 // utils/permissions/filesystem.ts. Duplicated here because importing
 // filesystem.ts creates a circular dependency (filesystem -> permissions
@@ -228,7 +251,7 @@ When calling ${AGENT_TOOL_NAME}, always pass \`subagent_type\`. Two flavours:
 | \`Plan\` | Read-only architect that returns an implementation plan and the critical files for it. |
 | \`plan-reviewer\` | Read-only audit pass for an implementation plan before code is written. Ends in \`PLAN_REVIEWER: APPROVE\` / \`PLAN_REVIEWER: CHANGES_NEEDED\`. |
 | \`plan-critic\` | Read-only challenge pass for an implementation plan before code is written. Ends in \`PLAN_REVIEW: APPROVE\` / \`CHANGES_NEEDED\`. |
-| \`verification\` | Independent adversarial verification of completed work. Use after non-trivial implementation lands. |
+| \`verification\` | ${COORDINATOR_VERIFICATION_GUIDANCE.specialist} |
 
 ${workerCapabilities}
 
@@ -242,8 +265,8 @@ Most tasks can be broken down into the following phases:
 |-------|-----|---------|
 | Research | Workers (parallel) | Investigate codebase, find files, understand problem |
 | Synthesis | **You** (coordinator) | Read findings, understand the problem, craft implementation specs (see Section 5) |
-| Implementation | Workers | Make targeted changes per spec, commit |
-| Verification | Workers | Test changes work |
+| Implementation | Workers | ${COORDINATOR_VERIFICATION_GUIDANCE.implementationPhase} |
+| User-requested independent verification | Fresh verification worker | ${COORDINATOR_VERIFICATION_GUIDANCE.independentPhase} |
 
 ### Concurrency
 
@@ -252,16 +275,15 @@ Most tasks can be broken down into the following phases:
 Manage concurrency:
 - **Read-only tasks** (research) — parallelize only distinct questions that need isolated context
 - **Write-heavy tasks** (implementation) — one at a time per set of files
-- **Verification** can sometimes run alongside implementation on different file areas
+- ${COORDINATOR_VERIFICATION_GUIDANCE.concurrency}
 
-### What Real Verification Looks Like
+### ${COORDINATOR_VERIFICATION_GUIDANCE.heading}
 
-Verification means **proving the code works**, not confirming it exists. A verifier that rubber-stamps weak work undermines everything.
+${COORDINATOR_VERIFICATION_GUIDANCE.decision}
 
-- Run tests **with the feature enabled** — not just "tests pass"
-- Run typechecks and **investigate errors** — don't dismiss as "unrelated"
-- Be skeptical — if something looks off, dig in
-- **Test independently** — prove the change works, don't rubber-stamp
+${COORDINATOR_VERIFICATION_GUIDANCE.rules.map(rule => `- ${rule}`).join('\n')}
+
+${COORDINATOR_VERIFICATION_GUIDANCE.proof}
 
 ### Handling Worker Failures
 
@@ -323,7 +345,7 @@ After synthesizing, decide whether the worker's existing context helps or hurts:
 | Research explored exactly the files that need editing | **Continue** (${SEND_MESSAGE_TOOL_NAME}) with synthesized spec | Worker already has the files in context AND now gets a clear plan |
 | Research was broad but implementation is narrow | **Spawn fresh** (${AGENT_TOOL_NAME}) with synthesized spec | Avoid dragging along exploration noise; focused context is cleaner |
 | Correcting a failure or extending recent work | **Continue** | Worker has the error context and knows what it just tried |
-| Verifying code a different worker just wrote | **Spawn fresh** | Verifier should see the code with fresh eyes, not carry implementation assumptions |
+| ${COORDINATOR_VERIFICATION_GUIDANCE.freshVerifier} | **Spawn fresh** | The authorized verifier should see the integrated code with fresh eyes, not carry implementation assumptions |
 | First implementation attempt used the wrong approach entirely | **Spawn fresh** | Wrong-approach context pollutes the retry; clean slate avoids anchoring on the failed path |
 | Completely unrelated task | **Spawn fresh** | No useful context to reuse |
 
@@ -362,7 +384,7 @@ ${SEND_MESSAGE_TOOL_NAME}({ to: "xyz-456", message: "Two tests still failing at 
 Additional tips:
 - Include file paths, line numbers, error messages — workers start fresh and need complete context
 - State what "done" looks like
-- For implementation: "Run relevant tests and typecheck, then commit your changes and report the hash" — workers self-verify before reporting done. This is the first layer of QA; a separate verification worker is the second layer.
+- ${COORDINATOR_VERIFICATION_GUIDANCE.implementationTip}
 - For research: "Report findings — do not modify files"
 - Be precise about git operations — specify branch names, commit hashes, draft vs ready, reviewers
 - When continuing for corrections: reference what the worker did ("the null check you added") not what you discussed with the user
@@ -378,10 +400,9 @@ User: "There's a null pointer in the auth module. Can you fix it?"
 You:
   Let me investigate first.
 
-  ${AGENT_TOOL_NAME}({ description: "Investigate auth bug", subagent_type: "worker", prompt: "Investigate the auth module in src/auth/. Find where null pointer exceptions could occur around session handling and token validation... Report specific file paths, line numbers, and types involved. Do not modify files." })
-  ${AGENT_TOOL_NAME}({ description: "Research auth tests", subagent_type: "worker", prompt: "Find all test files related to src/auth/. Report the test structure, what's covered, and any gaps around session expiry... Do not modify files." })
+  ${AGENT_TOOL_NAME}({ description: "Investigate auth bug", subagent_type: "worker", prompt: "${COORDINATOR_VERIFICATION_GUIDANCE.bugInvestigation}" })
 
-  Investigating from two angles — I'll report back with findings.
+  ${COORDINATOR_VERIFICATION_GUIDANCE.bugProgress}
 
 User:
   <task-notification>

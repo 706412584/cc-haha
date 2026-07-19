@@ -76,6 +76,8 @@ describe('getSoloPipelineSystemPrompt — invariants', () => {
     expect(prompt).toMatch(/1\.\s+\*\*PLAN GATE/)
     expect(prompt).toMatch(/2\.\s+\*\*IMPLEMENT\*\*/)
     expect(prompt).toMatch(/3\.\s+\*\*TEST\*\*/)
+    expect(prompt).toContain('specialist: verification')
+    expect(prompt).toContain('Independently exercises')
     expect(prompt).toMatch(/4\.\s+\*\*REVIEW\*\*/)
     expect(prompt).toMatch(/5\.\s+\*\*LAND\*\*/)
   })

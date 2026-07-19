@@ -69,7 +69,7 @@ check('exists', existsSync(bridgePath))
 console.log('\n[skills]')
 const skills = [
   '3d-unit-game', 'canvas-2d-game', 'multiplayer-hybrid-sync',
-  'ui-layout-api', 'server-authoritative-3d-physics', 'runtime-particle-builder',
+  'ui-visual-design', 'ui-layout-api', 'server-authoritative-3d-physics', 'runtime-particle-builder',
   'wasicore-dev', 'data-editor', 'debug-tools', 'trigger-editor-mcp', 'client-only-debug',
   'ui-export-real-loop',
 ]
@@ -79,7 +79,7 @@ const actualSkills = readdirSync(skillsRoot, { withFileTypes: true })
   .map((entry) => entry.name)
   .sort()
 const expectedSkills = [...skills].sort()
-check('skill count is 12', actualSkills.length === 12, `found ${actualSkills.length}`)
+check('skill count is 13', actualSkills.length === 13, `found ${actualSkills.length}`)
 check('skill directories match expected list', JSON.stringify(actualSkills) === JSON.stringify(expectedSkills))
 for (const skill of skills) {
   const skillPath = join(skillsRoot, skill, 'SKILL.md')
@@ -107,6 +107,8 @@ const agentSkills = String(agentFrontmatter?.skills ?? '')
   .filter(Boolean)
   .sort() ?? []
 check('agent preloads every skill', JSON.stringify(agentSkills) === JSON.stringify(expectedSkills))
+check('agent routes UI visual design skill', agentContent.includes('创建/新建/搭建完整 UI 页面') && agentContent.includes('| ui-visual-design |'))
+check('agent routes UI layout skill', agentContent.includes('纯 UI API 查询') && agentContent.includes('| ui-layout-api |'))
 check('agent routes UI export skill', agentContent.includes('| C# UI 导出') && agentContent.includes('| ui-export-real-loop |'))
 
 // 5. reference.md companions

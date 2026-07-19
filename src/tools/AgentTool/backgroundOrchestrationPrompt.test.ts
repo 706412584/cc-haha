@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { getCoordinatorSystemPrompt } from '../../coordinator/coordinatorMode.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
-import { getPrompt } from './prompt.js'
+import {
+  AGENT_TOOL_ORCHESTRATION_GUIDANCE,
+  getPrompt,
+} from './prompt.js'
 
 const agentDefinitions: AgentDefinition[] = [
   {
@@ -50,6 +53,9 @@ describe('background agent orchestration guidance', () => {
       'then actually perform that work in the same turn',
     )
     expect(prompt).toContain(
+      "The release audit is running; I'm continuing the independent formatting check.",
+    )
+    expect(prompt).not.toContain(
       "The verification agent is running; I'm continuing the Office entry implementation.",
     )
     expect(prompt).toContain(
@@ -85,16 +91,40 @@ describe('background agent orchestration guidance', () => {
   test('normal Agent prompt keeps implementation with the primary agent by default', async () => {
     const prompt = await getPrompt(agentDefinitions)
 
-    expect(prompt).toContain('The primary agent owns understanding, implementation, and focused verification')
+    expect(prompt).toContain(AGENT_TOOL_ORCHESTRATION_GUIDANCE.testRunnerDescription)
+    expect(prompt).toContain(AGENT_TOOL_ORCHESTRATION_GUIDANCE.independentTestRunner)
+
+    expect(prompt).toContain('The primary agent owns understanding, implementation, and the decision about verification depth')
+    expect(prompt).toContain('always inspect the final diff for unintended scope or leftovers')
+    expect(prompt).toContain('Simple, localized, low-risk changes can otherwise stop after LSP diagnostics, type checks, or the lightest relevant static check')
+    expect(prompt).toContain('Do not require a focused test after every small feature, task, file, or logical chunk')
+    expect(prompt).toContain('Do not launch a verification agent unless the user explicitly requests independent verification')
+    expect(prompt).toContain('A bug report, high-risk change, cross-boundary change, broad refactor, PR-ready status, file count, task count, or completed implementation is not authorization')
+    expect(prompt).toContain('If the approved task or plan has no verification step, do not add one at the end')
     expect(prompt).toContain('Do not delegate simple lookups, planning, local edits, or ordinary test execution')
     expect(prompt).toContain('retain and continue at least one executable task')
     expect(prompt).not.toContain('Launch multiple agents concurrently whenever possible')
   })
 
-  test('coordinator Agent prompt includes the shared non-blocking rule', async () => {
+  test('fork-enabled prompt uses the qualitative implementation threshold', async () => {
+    const originalApiKey = process.env.ANTHROPIC_API_KEY
+    process.env.ANTHROPIC_API_KEY = 'test-api-key'
+    try {
+      const prompt = await getPrompt(agentDefinitions)
+      if (prompt.includes('## When to fork')) {
+        expect(prompt).toContain(AGENT_TOOL_ORCHESTRATION_GUIDANCE.forkImplementation)
+      }
+    } finally {
+      if (originalApiKey === undefined) delete process.env.ANTHROPIC_API_KEY
+      else process.env.ANTHROPIC_API_KEY = originalApiKey
+    }
+  })
+
+  test('coordinator Agent prompt includes the shared non-blocking rule without normal ownership', async () => {
     const prompt = await getPrompt(agentDefinitions, true)
 
     expect(prompt).toContain(HARD_RULE)
+    expect(prompt).not.toContain('The primary agent owns understanding, implementation')
     expect(prompt).toContain(CONTINUE_RULE)
     expect(prompt).toContain(VISIBLE_PROGRESS_RULE)
     expect(prompt).toContain('then actually perform that work in the same turn')

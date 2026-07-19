@@ -1,7 +1,7 @@
 ---
 name: ui-layout-api
 description: WasiCore 流式布局 UI API 参考。尺寸、间距、对齐、Flexbox、响应式布局的链式 API。当创建 UI 界面、设置布局、使用 Panel/Label/Button 等控件时使用。
-when_to_use: 当创建 UI 界面、设置布局、使用 Panel/Label/Button 等控件、或调试 UI 定位问题时使用。
+when_to_use: 当查询 GameUI API，或在已有页面结构中实现 Panel/Label/Button、Flow/Flex/Grid、尺寸、间距、局部对齐与定位时使用。创建完整页面、重做信息架构或视觉精修时先使用 ui-visual-design。
 allowed-tools: Bash, Read, Glob, Grep, Edit, Write
 ---
 
@@ -17,10 +17,10 @@ allowed-tools: Bash, Read, Glob, Grep, Edit, Write
 > **多个子控件更危险**：若容器内有多个子控件都未设对齐，它们全部被居中到同一区域后完全重叠。
 >
 > **必须遵守**：
-> - 用 Margin 定位子控件时，务必同时设置 `HorizontalAlignment = Left`、`VerticalAlignment = Top`
->   （或使用 `.AlignLeft().AlignTop()`），否则 Margin 的 left/top 值会叠加在居中位置上。
-> - 容器内有 2 个以上子控件时，优先使用 `FlowOrientation = Vertical`（或 `.FlowVertical()`）让子控件自动排列，
->   避免手动计算 Margin 导致的重叠风险。
+> - 用 Margin 定位子控件时，务必同时设置符合设计意图的水平和垂直对齐。只有以左上角为原点时才使用
+>   `HorizontalAlignment = Left`、`VerticalAlignment = Top`（或 `.AlignLeft().AlignTop()`）；贴右、贴底或居中元素使用对应的 Right/Bottom/Center 对齐。
+> - 容器内有 2 个以上普通内容子控件时，优先使用 `FlowOrientation`（`.FlowVertical()` / `.FlowHorizontal()`）自动排列，
+>   避免手动计算 Margin 导致重叠；Overlay、Badge、地图 Marker 等明确叠层除外。
 >
 > **推荐优先使用流式扩展方法**（`.AlignLeft()`, `.Size()`, `.Margin()` 等），而非对象初始化器直接赋值属性。
 > 流式风格鼓励显式设定每个布局属性，漏写对齐时更容易察觉"缺了什么"，且能避免 Margin 定位陷阱。
@@ -40,6 +40,40 @@ allowed-tools: Bash, Read, Glob, Grep, Edit, Write
 6. 重新启动调试或刷新客户端后再次截图和查询，确认排版已符合预期。
 
 不要只靠猜测坐标或用户口述来修 UI。若截图和 `ui.snapshot` 不一致，优先相信截图中的最终视觉结果，再用控件树定位可能的布局来源。Canvas 直接绘制的内容不一定出现在 `ui.snapshot` 中，此时用截图判断视觉问题，用 UI inspector 检查外围 GameUI 容器。
+
+### 运行时几何审计
+
+布局验证不能停在“节点存在”。基于 `ui.snapshot.rect_px` 或 `ui.get_rect` 至少检查：
+
+1. **父子越界**：将可见子节点矩形与父节点可见矩形求差。普通内容越界是错误；背景、粒子、地图 Marker、阴影和明确 `NoClip()` 的装饰可列入具名白名单。
+2. **兄弟重叠**：同父、可见且非零面积的兄弟节点求交集。文字盖按钮、按钮互盖、透明交互层盖住其他入口属于错误；Modal、Badge、选中框、Overlay、Toast 等有明确叠层意图的节点例外。
+3. **裁剪一致性**：父节点使用 `ClipContent()` 时，截图中不得出现越界残留；使用 `NoClip()` 时也不能让装饰遮住关键文字或交互。
+4. **Safe Zone**：标题、返回、资源、主 CTA 和底部导航必须位于安全内容区域；只有背景与非交互装饰可以延伸到 Safe Zone 外。
+5. **触控矩形**：可见按钮区域与实际交互 rect 应一致，运行时建议至少约 `44×44px`，相邻按钮保留防误触间距。透明点击层不得超过可见控件边界或遮挡其他控件。
+6. **文本边界**：长文本、本地化文本和大数字不得侵入图标、按钮或父容器外；需要换行、截断或 ScrollView 时必须显式配置并截图验证。
+
+几何检查只发现确定性的结构错误，不能替代截图中的视觉层级、构图和资源语义判断。自动审计必须输出节点 id、父节点 id、实际 rect、越界量或交集矩形；不得只返回“布局异常”。
+
+### 缩放验证矩阵
+
+响应式布局至少覆盖以下 viewport，不只测试一个等比窗口：
+
+- 与设计分辨率等比的基准 viewport；
+- 较小的等比 viewport；
+- 比设计比例更宽的 viewport；
+- 比设计比例更窄的 viewport；
+- 项目实际目标设备 viewport。
+
+每个 viewport 记录 `designWidth/designHeight`、`ScaleMode`、source 尺寸、理论 scale、root `rect_px`、关键控件 `rect_px`、Safe Zone、预期 letterbox/crop 和截图。理论 scale：
+
+```text
+Contain     = min(sourceWidth / designWidth, sourceHeight / designHeight)
+Cover       = max(sourceWidth / designWidth, sourceHeight / designHeight)
+MatchWidth  = sourceWidth / designWidth
+MatchHeight = sourceHeight / designHeight
+```
+
+允许由 `ScaleMode` 产生的预期留白或裁切；不允许通过任意扩大 root、整体拉伸图片或添加补偿 Margin 掩盖问题。字体、图标、触控目标应随 scale 保持相对层级，并在最小目标 viewport 仍可读可点。
 
 ## 尺寸
 
@@ -217,6 +251,30 @@ UI.Colors.Primary / .Secondary / .Success / .Warning / .Error
 UI.Colors.Background / .Surface
 UI.Colors.OnPrimary / .OnSurface / .OnBackground
 ```
+
+## 共享资源与 NineSlice 治理
+
+多页面项目先复用已有 `UiTheme`、`UiAssets`、`UiChrome` 或等价共享入口。若项目没有共享入口，且同一资源在至少两个页面复用，建立最小集中定义，至少包含：
+
+- `PrimaryButton`、`SecondaryButton`、`DangerButton`；
+- 主面板、轻量条目框、弹窗框；
+- 资源路径、正常/按下/禁用状态资源；
+- 默认尺寸、Padding 和 NineSlice 的 left/top/right/bottom。
+
+页面代码不得散落重复的资源路径和切片数字。同页面、同层级、同语义按钮必须使用同一套资源与尺寸；状态变化通过已定义的状态资源、颜色、透明度和文字表达，不为每个按钮临时换皮肤。
+
+NineSlice 使用前同时验证：
+
+```text
+sliceLeft + sliceRight < 原图宽度
+sliceTop + sliceBottom < 原图高度
+sliceLeft + sliceRight < 控件运行时宽度
+sliceTop + sliceBottom < 控件运行时高度
+```
+
+还必须确认图片可真实解码、格式与扩展名一致、Alpha 正常，并在真实客户端检查接近原图尺寸、横向拉伸、纵向拉伸、双向拉伸四种形态。API 存在、文件存在或代码编译通过都不能证明 NineSlice 视觉正确。
+
+只有单页单用资源时可以使用页面局部常量，不为一次使用创建全局抽象。
 
 ## 使用示例
 

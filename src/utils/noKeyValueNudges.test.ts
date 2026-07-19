@@ -1,22 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { TodoWriteTool } from '../tools/TodoWriteTool/TodoWriteTool.js'
 
 /**
- * Regression: src/tools/AgentTool/specialistRouter.ts documented that any
- * model-facing message containing `key="value"` attribute fragments tends
- * to make non-Anthropic gateway models switch from real tool_use blocks
- * into textual `<tool_use ...>` XML, breaking every subsequent tool call
- * in the session. The fix landed in specialistRouter.ts but TWO other
- * model-facing nudges still embedded `subagent_type="verification"`
- * style attributes: TodoWriteTool's verification nudge, TaskUpdateTool's
- * verification nudge, and the verification_gate_reminder in messages.ts.
- *
- * This test pins those three call sites: the strings they emit must NOT
- * contain `subagent_type="..."` (or any other `key="value"` near a known
- * Agent parameter name). When someone "fixes" a typo and accidentally
- * reverts to the attribute form, this test fails before the model gets
- * primed into XML mode again.
+ * Edit and task counts are not evidence that verification is needed. Keep
+ * the removed count-based nudges from returning, and retain the generic guard
+ * against model-facing `key="value"` Agent parameter fragments.
  */
 
 const REPO_ROOT = join(__dirname, '..', '..')
@@ -46,33 +36,25 @@ function findKeyValueAttrs(source: string): string[] {
 }
 
 describe('model-facing nudges do not embed key="value" attribute fragments', () => {
-  it('verification_gate_reminder is advisory prose, not a mandatory agent call', () => {
-    const src = loadSource('src/utils/messages.ts')
-    // Slice the relevant case so we don't false-positive on unrelated code.
-    const start = src.indexOf("case 'verification_gate_reminder':")
-    expect(start).toBeGreaterThan(-1)
-    const end = src.indexOf("case '", start + 30)
-    const block = src.slice(start, end > 0 ? end : start + 4000)
-    expect(findKeyValueAttrs(block)).toEqual([])
-    expect(block).toContain('only a weak signal')
-    expect(block).toContain('run focused checks directly')
-    expect(block).toContain('Small, localized changes normally need no independent agent')
-    expect(block).not.toContain('Your own checks and a fork\'s self-checks do NOT substitute')
-  })
+  it('does not inject verification reminders based on edit or task counts', () => {
+    const result = TodoWriteTool.mapToolResultToToolResultBlockParam(
+      { oldTodos: [], newTodos: [] },
+      'tool-use-id',
+    )
+    expect(result.content).toBe(
+      'Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable',
+    )
 
-  it('TodoWriteTool verification nudge asks for direct checks before optional scrutiny', () => {
-    const src = loadSource('src/tools/TodoWriteTool/TodoWriteTool.ts')
-    expect(findKeyValueAttrs(src)).toEqual([])
-    expect(src).toContain('Confirm that you ran focused checks')
-    expect(src).toContain('Small, localized changes do not require a verification subagent')
-    expect(src).not.toContain('Before writing your final summary, spawn the verification agent')
-  })
+    const messages = loadSource('src/utils/messages.ts')
+    const attachments = loadSource('src/utils/attachments.ts')
+    const todoWrite = loadSource('src/tools/TodoWriteTool/TodoWriteTool.ts')
+    const taskUpdate = loadSource('src/tools/TaskUpdateTool/TaskUpdateTool.ts')
 
-  it('TaskUpdateTool verification nudge asks for direct checks before optional scrutiny', () => {
-    const src = loadSource('src/tools/TaskUpdateTool/TaskUpdateTool.ts')
-    expect(findKeyValueAttrs(src)).toEqual([])
-    expect(src).toContain('Confirm that you ran focused checks')
-    expect(src).toContain('Small, localized changes do not require a verification subagent')
-    expect(src).not.toContain('Before writing your final summary, spawn the verification agent')
+    for (const source of [messages, attachments, todoWrite, taskUpdate]) {
+      expect(findKeyValueAttrs(source)).toEqual([])
+      expect(source).not.toContain('verification_gate_reminder')
+      expect(source).not.toContain('verificationNudgeNeeded')
+      expect(source).not.toContain('Confirm that you ran focused checks')
+    }
   })
 })
