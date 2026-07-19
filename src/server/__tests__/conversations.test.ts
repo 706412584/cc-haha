@@ -5959,7 +5959,7 @@ describe('WebSocket Chat Integration', () => {
       await providerService.activateOfficial()
       await providerService.deleteProvider(provider.id)
       upstream.stop(true)
-      await fs.rm(workDir, { recursive: true, force: true })
+      await rmWithRetry(workDir)
     }
   }, 70_000)
 })

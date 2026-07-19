@@ -166,6 +166,7 @@ describe('SessionService local-index routing parity', () => {
 
     const indexed = await service.listSessions()
     expect(indexed.sessions[0]?.title).toBe('Indexed title')
+    expect(indexed.sessions[0]?.filePath).toBe(filePath)
     expect(gateway.listCalls).toBe(1)
   })
 

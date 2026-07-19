@@ -4595,6 +4595,7 @@ describe('MessageList nested tool calls', () => {
     })
 
     await waitForProgrammaticScrollReset()
+    fireEvent.wheel(firstScroller, { deltaY: -120 })
     fireEvent.scroll(firstScroller)
     expect(screen.getByRole('button', { name: 'Latest' })).toBeTruthy()
     firstSession.unmount()
