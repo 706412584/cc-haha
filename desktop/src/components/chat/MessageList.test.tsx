@@ -7,6 +7,7 @@ import {
   getActiveConversationNavigationItemId,
   getConversationNavigationTargetScrollTop,
   isRenderItemFullyVisibleInChatScroller,
+  resetSessionScrollSnapshotsForTests,
   shouldVirtualizeRenderItems,
 } from './MessageList'
 import type { ConversationNavigationItem } from './ConversationNavigator'
@@ -23,6 +24,7 @@ import { useUIStore } from '../../stores/uiStore'
 import { formatExactMessageTimestamp, formatMessageHoverTime } from '../../lib/formatMessageTimestamp'
 import type { UIMessage } from '../../types/chat'
 import type { PerSessionState } from '../../stores/chatStore'
+import { FindInPageModal } from '../search/FindInPageModal'
 
 const ACTIVE_TAB = 'active-tab'
 
@@ -227,6 +229,7 @@ describe('MessageList nested tool calls', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
+    resetSessionScrollSnapshotsForTests()
     useSettingsStore.setState({ locale: 'en' })
     useUIStore.setState({ pendingSettingsTab: null })
     useTabStore.setState({ activeTabId: ACTIVE_TAB, tabs: [{ sessionId: ACTIVE_TAB, title: 'Test', type: 'session' as const, status: 'idle' }] })
@@ -283,6 +286,198 @@ describe('MessageList nested tool calls', () => {
     for (const item of container.querySelectorAll('[data-virtual-message-item]')) {
       expect((item as HTMLElement).className).not.toContain('chat-render-item--cv')
     }
+  })
+
+  it('finds, mounts, navigates, and highlights matches outside a 120-item virtual window', async () => {
+    const highlights = new Map<string, { ranges: Range[]; priority?: number }>()
+    class TestHighlight {
+      ranges: Range[] = []
+      priority?: number
+
+      add(range: Range) {
+        this.ranges.push(range)
+      }
+    }
+    vi.stubGlobal('CSS', { highlights })
+    vi.stubGlobal('Highlight', TestHighlight)
+
+    const messages = Array.from({ length: 130 }, (_, index) => ({
+      id: `assistant-${index}`,
+      type: 'assistant_text' as const,
+      content: index === 0 || index === 64
+        ? `Virtual history needle ${index}`
+        : `Virtual history filler ${index}`,
+      timestamp: index,
+    }))
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages,
+        }),
+      },
+    })
+
+    const { container } = render(
+      <>
+        <MessageList />
+        <FindInPageModal open onClose={() => {}} />
+      </>,
+    )
+    const scroller = container.querySelector('.chat-scroll-area') as HTMLElement
+    let scrollTop = 15_000
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 500 })
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 16_000 })
+    Object.defineProperty(scroller, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => { scrollTop = value },
+    })
+
+    expect(screen.queryByText('Virtual history needle 0')).toBeNull()
+    expect(screen.queryByText('Virtual history needle 64')).toBeNull()
+
+    fireEvent.change(screen.getByPlaceholderText('Find'), { target: { value: 'Virtual history needle' } })
+
+    await waitFor(() => expect(screen.getByText('1 / 2')).toBeTruthy())
+    await waitFor(() => expect(screen.getByText('Virtual history needle 0')).toBeTruthy())
+    expect(scrollTop).toBe(0)
+    await waitFor(() => expect(highlights.get('cc-find-active')?.ranges[0]?.startContainer.parentElement?.closest('[data-chat-render-item-key]')?.getAttribute('data-chat-render-item-key')).toBe('assistant-0'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next match' }))
+
+    await waitFor(() => expect(screen.getByText('2 / 2')).toBeTruthy())
+    await waitFor(() => expect(screen.getByText('Virtual history needle 64')).toBeTruthy())
+    expect(scrollTop).toBeGreaterThan(0)
+    expect(highlights.get('cc-find-active')?.ranges[0]?.startContainer.parentElement?.closest('[data-chat-render-item-key]')?.getAttribute('data-chat-render-item-key')).toBe('assistant-64')
+
+    act(() => {
+      useChatStore.setState({
+        sessions: {
+          [ACTIVE_TAB]: makeSessionState({
+            messages: [...messages, {
+              id: 'assistant-new-tail',
+              type: 'assistant_text',
+              content: 'new Virtual history needle response',
+              timestamp: 131,
+            }],
+          }),
+        },
+      })
+    })
+    await waitFor(() => expect(screen.getByText('2 / 3')).toBeTruthy())
+    expect(highlights.get('cc-find-active')?.ranges[0]?.startContainer.parentElement?.closest('[data-chat-render-item-key]')?.getAttribute('data-chat-render-item-key')).toBe('assistant-64')
+  })
+
+  it('bounds semantic conversation matches and ignores hidden tool payloads', async () => {
+    const highlights = new Map<string, { ranges: Range[] }>()
+    class TestHighlight {
+      ranges: Range[] = []
+
+      add(range: Range) {
+        this.ranges.push(range)
+      }
+    }
+    vi.stubGlobal('CSS', { highlights })
+    vi.stubGlobal('Highlight', TestHighlight)
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: [
+            {
+              id: 'assistant-many-matches',
+              type: 'assistant_text',
+              content: 'boundedneedle '.repeat(1_100),
+              timestamp: 1,
+            },
+            {
+              id: 'hidden-tool-payload',
+              type: 'tool_result',
+              toolUseId: 'tool-1',
+              content: 'hiddenpayloadneedle '.repeat(10_000),
+              isError: false,
+              timestamp: 2,
+            },
+          ],
+        }),
+      },
+    })
+
+    render(
+      <>
+        <MessageList />
+        <FindInPageModal open onClose={() => {}} />
+      </>,
+    )
+
+    fireEvent.change(screen.getByPlaceholderText('Find'), { target: { value: 'boundedneedle' } })
+    await waitFor(() => expect(screen.getByText('1 / 1000')).toBeTruthy())
+    await waitFor(() => expect(highlights.get('cc-find-results')?.ranges).toHaveLength(1_000))
+
+    fireEvent.change(screen.getByPlaceholderText('Find'), { target: { value: 'hiddenpayloadneedle' } })
+    await waitFor(() => expect(screen.getByText('0')).toBeTruthy())
+  })
+
+  it('finds the current streaming assistant response', async () => {
+    const highlights = new Map<string, { ranges: Range[] }>()
+    class TestHighlight {
+      ranges: Range[] = []
+
+      add(range: Range) {
+        this.ranges.push(range)
+      }
+    }
+    vi.stubGlobal('CSS', { highlights })
+    vi.stubGlobal('Highlight', TestHighlight)
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          chatState: 'streaming',
+          streamingText: 'Current streaming response without the target',
+        }),
+      },
+    })
+
+    render(
+      <>
+        <MessageList />
+        <FindInPageModal open onClose={() => {}} />
+      </>,
+    )
+
+    fireEvent.change(screen.getByPlaceholderText('Find'), { target: { value: 'late streaming needle' } })
+
+    await waitFor(() => expect(screen.getByText('0')).toBeTruthy())
+    act(() => {
+      useChatStore.setState({
+        sessions: {
+          [ACTIVE_TAB]: makeSessionState({
+            chatState: 'streaming',
+            streamingText: 'Current late streaming needle',
+          }),
+        },
+      })
+    })
+
+    await waitFor(() => expect(screen.getByText('1 / 1')).toBeTruthy())
+    await waitFor(() => expect(highlights.get('cc-find-active')?.ranges[0]?.startContainer.parentElement?.closest('[data-chat-render-item-key]')?.getAttribute('data-chat-render-item-key')).toBe('streaming-assistant-message'))
+
+    act(() => {
+      useChatStore.setState({
+        sessions: {
+          [ACTIVE_TAB]: makeSessionState({
+            messages: [{
+              id: 'assistant-completed-stream',
+              type: 'assistant_text',
+              content: 'Current late streaming needle',
+              timestamp: 2,
+            }],
+            chatState: 'idle',
+            streamingText: '',
+          }),
+        },
+      })
+    })
+    await waitFor(() => expect(highlights.get('cc-find-active')?.ranges[0]?.startContainer.parentElement?.closest('[data-chat-render-item-key]')?.getAttribute('data-chat-render-item-key')).toBe('assistant-completed-stream'))
   })
 
   it('keeps small transcripts fully mounted without deferred browser painting', () => {
@@ -4366,6 +4561,55 @@ describe('MessageList nested tool calls', () => {
     expect(screen.getByRole('button', { name: 'Latest' })).toBeTruthy()
   })
 
+  it('restores a session scroll position after the message list remounts between conversations', async () => {
+    const sessionA = 'issue-1057-session-a'
+    const sessionB = 'issue-1057-session-b'
+    useChatStore.setState({
+      sessions: {
+        [sessionA]: makeSessionState({
+          messages: [
+            { id: 'a-user', type: 'user_text', content: 'A prompt', timestamp: 1 },
+            { id: 'a-assistant', type: 'assistant_text', content: 'A response', timestamp: 2 },
+          ],
+        }),
+        [sessionB]: makeSessionState({
+          messages: [
+            { id: 'b-user', type: 'user_text', content: 'B prompt', timestamp: 1 },
+            { id: 'b-assistant', type: 'assistant_text', content: 'B response', timestamp: 2 },
+          ],
+        }),
+      },
+    })
+
+    const firstSession = render(<MessageList sessionId={sessionA} />)
+    const firstScroller = firstSession.container.querySelector('.overflow-y-auto') as HTMLDivElement
+    let firstScrollTop = 180
+    Object.defineProperty(firstScroller, 'scrollHeight', { configurable: true, value: 1200 })
+    Object.defineProperty(firstScroller, 'clientHeight', { configurable: true, value: 400 })
+    Object.defineProperty(firstScroller, 'scrollTop', {
+      configurable: true,
+      get: () => firstScrollTop,
+      set: (value) => {
+        firstScrollTop = value
+      },
+    })
+
+    await waitForProgrammaticScrollReset()
+    fireEvent.scroll(firstScroller)
+    expect(screen.getByRole('button', { name: 'Latest' })).toBeTruthy()
+    firstSession.unmount()
+
+    const secondSession = render(<MessageList sessionId={sessionB} />)
+    expect(screen.getByText('B response')).toBeTruthy()
+    secondSession.unmount()
+
+    const restoredSession = render(<MessageList sessionId={sessionA} />)
+    const restoredScroller = restoredSession.container.querySelector('.overflow-y-auto') as HTMLDivElement
+
+    expect(restoredScroller.scrollTop).toBe(180)
+    expect(screen.getByRole('button', { name: 'Latest' })).toBeTruthy()
+  })
+
   it('scrolls new sessions to the latest message instead of inheriting another tab position', async () => {
     const scrollIntoView = vi.fn()
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
@@ -5316,6 +5560,79 @@ describe('MessageList nested tool calls', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Open src/live.ts in workspace' }))
     await waitFor(() => {
       expect(getWorkspaceDiff).toHaveBeenCalledWith(ACTIVE_TAB, 'src/live.ts')
+    })
+  })
+
+  it('rewinds a live turn with the authoritative checkpoint id when the local UI id differs', async () => {
+    vi.spyOn(sessionsApi, 'getTurnCheckpoints').mockResolvedValue({
+      checkpoints: [
+        {
+          target: {
+            targetUserMessageId: 'transcript-user-1',
+            userMessageIndex: 0,
+            userMessageCount: 1,
+          },
+          code: {
+            available: true,
+            filesChanged: ['src/live.ts'],
+            insertions: 1,
+            deletions: 0,
+          },
+        },
+      ],
+    })
+    const rewind = vi.spyOn(sessionsApi, 'rewind').mockResolvedValue({
+      target: {
+        targetUserMessageId: 'transcript-user-1',
+        userMessageIndex: 0,
+        userMessageCount: 1,
+      },
+      conversation: {
+        messagesRemoved: 2,
+      },
+      code: {
+        available: true,
+        filesChanged: ['src/live.ts'],
+        insertions: 1,
+        deletions: 0,
+      },
+    })
+
+    useChatStore.setState({
+      reloadHistory: vi.fn().mockResolvedValue(undefined),
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: [
+            {
+              id: 'local-user-temp-id',
+              type: 'user_text',
+              content: '实时这一轮',
+              timestamp: 1,
+            },
+            {
+              id: 'assistant-1',
+              type: 'assistant_text',
+              content: 'done',
+              timestamp: 2,
+            },
+          ],
+        }),
+      },
+    })
+
+    render(<MessageList />)
+
+    await screen.findByText('live.ts')
+    fireEvent.click(screen.getByRole('button', { name: 'Undo current turn changes' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Undo current turn?' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Undo current turn' }))
+
+    await waitFor(() => {
+      expect(rewind).toHaveBeenCalledWith(ACTIVE_TAB, {
+        targetUserMessageId: 'transcript-user-1',
+        userMessageIndex: 0,
+        expectedContent: '实时这一轮',
+      })
     })
   })
 

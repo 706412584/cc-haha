@@ -3,6 +3,7 @@
 !define /ifndef INSTALL_REGISTRY_KEY "Software\${APP_GUID}"
 !define /ifndef UNINSTALL_REGISTRY_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_APP_KEY}"
 Var pid
+Var ccHahaProcessDiagnostic
 
 !ifndef BUILD_UNINSTALLER
 Var ccHahaRecoveryDone
@@ -91,6 +92,71 @@ Function CcHahaFinalInstallDir
     Pop $R2
     Pop $R1
     Exch $R0
+FunctionEnd
+
+Function CcHahaCanSkipLegacyRecovery
+  Push $R3
+  Push $R0
+  Push $R1
+  Push $R2
+
+  StrCpy $R0 "0"
+  ${If} $8 != "trusted-user"
+    Goto cc_haha_skip_recovery_done
+  ${EndIf}
+  ${If} $ccHahaPerUserInstallLocation == ""
+    Goto cc_haha_skip_recovery_done
+  ${EndIf}
+  ${If} $ccHahaPerMachineInstallLocation != ""
+    Goto cc_haha_skip_recovery_done
+  ${EndIf}
+  ${If} $ccHahaPerMachineUninstallString != ""
+    Goto cc_haha_skip_recovery_done
+  ${EndIf}
+  StrCmp $ccHahaPerUserInstallLocation $INSTDIR 0 cc_haha_skip_recovery_done
+
+  ReadEnvStr $R1 APPDATA
+  ${If} $R1 == ""
+    Goto cc_haha_skip_recovery_done
+  ${EndIf}
+  ReadEnvStr $R0 CLAUDE_CONFIG_DIR
+  ${If} $R0 != ""
+    StrCpy $R0 "0"
+    Goto cc_haha_skip_recovery_done
+  ${EndIf}
+  StrCpy $R0 "0"
+
+  IfFileExists "$ccHahaPerUserInstallLocation\CLAUDE_CONFIG_DIR\*.*" cc_haha_skip_recovery_done 0
+  IfFileExists "$R1\Claude Code Haha\app-mode.json" cc_haha_check_default_mode 0
+  StrCpy $R0 "1"
+  Goto cc_haha_skip_recovery_done
+
+  cc_haha_check_default_mode:
+    ClearErrors
+    FileOpen $R2 "$R1\Claude Code Haha\app-mode.json" r
+    IfErrors cc_haha_skip_recovery_done 0
+    FileRead $R2 $R3
+    StrCmp $R3 '{$\n' 0 cc_haha_close_mode_file
+    FileRead $R2 $R3
+    StrCmp $R3 '  "mode": "default",$\n' 0 cc_haha_close_mode_file
+    FileRead $R2 $R3
+    StrCmp $R3 '  "portable_dir": null$\n' 0 cc_haha_close_mode_file
+    FileRead $R2 $R3
+    StrCmp $R3 '}' 0 cc_haha_close_mode_file
+    ClearErrors
+    FileRead $R2 $R3
+    IfErrors 0 cc_haha_close_mode_file
+    StrCpy $R0 "1"
+
+  cc_haha_close_mode_file:
+    FileClose $R2
+
+  cc_haha_skip_recovery_done:
+    StrCpy $R3 $R0
+    Pop $R2
+    Pop $R1
+    Pop $R0
+    Exch $R3
 FunctionEnd
 
 Function CcHahaRecoverLegacy
@@ -184,34 +250,152 @@ FunctionEnd
       ${AndIfNot} ${UAC_IsInnerInstance}
         StrCpy $8 "untrusted-elevated"
       ${EndIf}
-
       ${If} ${UAC_IsInnerInstance}
         StrCpy $8 "trusted-uac-outer"
-        !insertmacro UAC_AsUser_Call Function CcHahaRecoverLegacy ${UAC_SYNCREGISTERS}|${UAC_SYNCOUTDIR}|${UAC_SYNCINSTDIR}
-      ${Else}
-        Call CcHahaRecoverLegacy
       ${EndIf}
 
-      ${If} $0 != "0"
-        DetailPrint "Legacy data recovery stopped the installer (helper exit code: $0; output: $1)"
-        ${If} $1 == ""
-          StrCpy $1 "Recovery helper failed without diagnostic output (exit code $0)"
+      Call CcHahaCanSkipLegacyRecovery
+      Pop $R0
+      ${If} $R0 == "1"
+        StrCpy $ccHahaRecoveryDone "1"
+        DetailPrint "No legacy data candidates found for the registered per-user installation"
+      ${Else}
+        ${If} ${UAC_IsInnerInstance}
+          !insertmacro UAC_AsUser_Call Function CcHahaRecoverLegacy ${UAC_SYNCREGISTERS}|${UAC_SYNCOUTDIR}|${UAC_SYNCINSTDIR}
+        ${Else}
+          Call CcHahaRecoverLegacy
         ${EndIf}
-        StrCpy $R2 "$1" 360
-        MessageBox MB_ICONSTOP|MB_OK "Claude Code Haha stopped setup before removing the old version. Reason: $R2$\r$\n$\r$\nClose the app and retry. If the reason mentions an elevated installer, launch setup normally instead of using Run as administrator.$\r$\n$\r$\nClaude Code Haha 已在删除旧版本前停止安装。原因：$R2$\r$\n$\r$\n请关闭旧程序后重试；如果原因提到安装器权限过高，请直接双击运行，不要使用“以管理员身份运行”。旧版本和原数据尚未删除。" /SD IDOK
-        SetErrorLevel 20
-        Quit
+
+        ${If} $0 != "0"
+          DetailPrint "Legacy data recovery stopped the installer (helper exit code: $0; output: $1)"
+          ${If} $1 == ""
+            StrCpy $1 "Recovery helper failed without diagnostic output (exit code $0)"
+          ${EndIf}
+          StrCpy $R2 "$1" 360
+          MessageBox MB_ICONSTOP|MB_OK "Claude Code Haha stopped setup before removing the old version. Reason: $R2$\r$\n$\r$\nClose the app and retry. If the reason mentions an elevated installer, launch setup normally instead of using Run as administrator.$\r$\n$\r$\nClaude Code Haha 已在删除旧版本前停止安装。原因：$R2$\r$\n$\r$\n请关闭旧程序后重试；如果原因提到安装器权限过高，请直接双击运行，不要使用“以管理员身份运行”。旧版本和原数据尚未删除。" /SD IDOK
+          SetErrorLevel 20
+          Quit
+        ${EndIf}
+        StrCpy $ccHahaRecoveryDone "1"
+        DetailPrint "Legacy Claude Code Haha data safety check completed"
       ${EndIf}
-      StrCpy $ccHahaRecoveryDone "1"
-      DetailPrint "Legacy Claude Code Haha data safety check completed"
     ${EndIf}
   ${EndIf}
 !macroend
 !endif
 
+!macro CcHahaFindInstallProcess _FILE _RETURN
+  ${If} $IsPowerShellAvailable == 0
+    nsExec::ExecToStack '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\check-install-processes.ps1" -InstallDir "$INSTDIR" -ProcessName "${_FILE}" -Action Find -InstallerPid "$pid" -InstallerParentPid "$1"'
+    Pop ${_RETURN}
+    Pop $ccHahaProcessDiagnostic
+    ${If} $ccHahaProcessDiagnostic != ""
+      DetailPrint "$ccHahaProcessDiagnostic"
+    ${EndIf}
+  ${Else}
+    Delete "$PLUGINSDIR\cc-haha-processes.csv"
+    !ifdef INSTALL_MODE_PER_ALL_USERS
+      nsExec::Exec '"$CmdPath" /D /C tasklist /FO CSV /NH > "$PLUGINSDIR\cc-haha-processes.csv"'
+    !else
+      nsExec::Exec '"$CmdPath" /D /C tasklist /FI "USERNAME eq %USERNAME%" /FO CSV /NH > "$PLUGINSDIR\cc-haha-processes.csv"'
+    !endif
+    Pop ${_RETURN}
+    ${If} ${_RETURN} != 0
+      StrCpy $ccHahaProcessDiagnostic "PowerShell unavailable and tasklist process enumeration failed (exit code ${_RETURN}); blocking setup."
+      StrCpy ${_RETURN} 0
+    ${Else}
+      nsExec::Exec '"$SYSDIR\findstr.exe" /I /L /C:"${_FILE}" /C:"claude-sidecar-x86_64-pc-windows-msvc.exe" /C:"claude-sidecar-aarch64-pc-windows-msvc.exe" /C:"claude-sidecar.exe" /C:"OpenConsole.exe" /C:"winpty-agent.exe" /C:"rg.exe" "$PLUGINSDIR\cc-haha-processes.csv"'
+      Pop ${_RETURN}
+      ${If} ${_RETURN} == 0
+        StrCpy $ccHahaProcessDiagnostic "PowerShell unavailable; the main app, a known sidecar, or a bundled terminal/search helper is running with an unknown path. Close it manually."
+      ${ElseIf} ${_RETURN} == 1
+        StrCpy $ccHahaProcessDiagnostic "PowerShell unavailable; exact-image fallback found no main app, known sidecar, or bundled terminal/search helper. Differently named child processes cannot be attributed without path data."
+      ${Else}
+        StrCpy $ccHahaProcessDiagnostic "PowerShell unavailable and fallback process filtering failed (exit code ${_RETURN}); blocking setup."
+        StrCpy ${_RETURN} 0
+      ${EndIf}
+    ${EndIf}
+    DetailPrint "$ccHahaProcessDiagnostic"
+  ${EndIf}
+!macroend
+
+!macro CcHahaKillInstallProcess _FILE _FORCE
+  Push $0
+  ${If} ${_FORCE} == 1
+    StrCpy $0 "KillForce"
+  ${Else}
+    StrCpy $0 "Kill"
+  ${EndIf}
+
+  ${If} $IsPowerShellAvailable == 0
+    nsExec::ExecToStack '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\check-install-processes.ps1" -InstallDir "$INSTDIR" -ProcessName "${_FILE}" -Action "$0" -InstallerPid "$pid" -InstallerParentPid "$1"'
+    Pop $0
+    Pop $ccHahaProcessDiagnostic
+    ${If} $ccHahaProcessDiagnostic != ""
+      DetailPrint "$ccHahaProcessDiagnostic"
+    ${EndIf}
+  ${Else}
+    StrCpy $ccHahaProcessDiagnostic "PowerShell unavailable; refusing to terminate by image name because the executable path is unknown. Close the app manually."
+    DetailPrint "$ccHahaProcessDiagnostic"
+  ${EndIf}
+  Pop $0
+!macroend
+
 !macro customCheckAppRunning
+  InitPluginsDir
+  File /oname=$PLUGINSDIR\check-install-processes.ps1 "${BUILD_RESOURCES_DIR}\check-install-processes.ps1"
   !insertmacro IS_POWERSHELL_AVAILABLE
-  !insertmacro _CHECK_APP_RUNNING
+  StrCpy $ccHahaProcessDiagnostic ""
+  ${GetProcessInfo} 0 $pid $1 $2 $3 $4
+  ${If} $3 != "${APP_EXECUTABLE_FILENAME}"
+    ${If} ${isUpdated}
+      Sleep 300
+    ${EndIf}
+
+    !insertmacro CcHahaFindInstallProcess "${APP_EXECUTABLE_FILENAME}" $R0
+    ${If} $R0 == 0
+      ${If} ${isUpdated}
+        Sleep 1000
+        Goto cc_haha_stop_process
+      ${EndIf}
+      MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "$(appRunning)" /SD IDOK IDOK cc_haha_stop_process
+      SetErrorLevel 22
+      Quit
+
+      cc_haha_stop_process:
+        DetailPrint "$(appClosing)"
+        !insertmacro CcHahaKillInstallProcess "${APP_EXECUTABLE_FILENAME}" 0
+        Sleep 300
+        StrCpy $R1 0
+
+      cc_haha_process_retry:
+        IntOp $R1 $R1 + 1
+        !insertmacro CcHahaFindInstallProcess "${APP_EXECUTABLE_FILENAME}" $R0
+        ${If} $R0 == 0
+          Sleep 1000
+          !insertmacro CcHahaKillInstallProcess "${APP_EXECUTABLE_FILENAME}" 1
+          !insertmacro CcHahaFindInstallProcess "${APP_EXECUTABLE_FILENAME}" $R0
+          ${If} $R0 == 0
+            DetailPrint `Waiting for "${PRODUCT_NAME}" to close.`
+            Sleep 2000
+          ${Else}
+            Goto cc_haha_process_not_running
+          ${EndIf}
+        ${Else}
+          Goto cc_haha_process_not_running
+        ${EndIf}
+
+        ${If} $R1 > 1
+          MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "$(appCannotBeClosed)$\r$\n$\r$\n$ccHahaProcessDiagnostic" /SD IDCANCEL IDRETRY cc_haha_process_retry
+          SetErrorLevel 22
+          Quit
+        ${Else}
+          Goto cc_haha_process_retry
+        ${EndIf}
+
+      cc_haha_process_not_running:
+    ${EndIf}
+  ${EndIf}
   !ifndef BUILD_UNINSTALLER
     !insertmacro CcHahaRunLegacyRecovery
   !endif

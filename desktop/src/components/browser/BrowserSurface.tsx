@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 import { Camera, Loader2, Minus, MousePointer2, Plus, RotateCcw } from 'lucide-react'
 import { BrowserAddressBar } from './BrowserAddressBar'
 import { computeWebviewBounds } from './computeWebviewBounds'
@@ -17,6 +17,7 @@ import {
 } from '../../stores/browserPanelStore'
 import { useOverlayStore } from '../../stores/overlayStore'
 import { useTranslation } from '../../i18n'
+import { useSettingsStore } from '../../stores/settingsStore'
 
 const LOCAL_PREVIEW_PATH_PREFIXES = ['/preview-fs/', '/local-file/']
 const LOCAL_PREVIEW_READY_TIMEOUT_MS = 2500
@@ -70,6 +71,7 @@ export function BrowserSurface({ sessionId }: { sessionId: string }) {
   const requestedUrlRef = useRef<string | null>(null)
   const hasNativePreviewRef = useRef(false)
   const session = useBrowserPanelStore((s) => s.bySession[sessionId])
+  const appZoom = useSettingsStore((s) => s.uiZoom)
   const store = useBrowserPanelStore.getState()
   const overlayCount = useOverlayStore((s) => s.count)
   const previewZoom = session?.zoom ?? DEFAULT_BROWSER_ZOOM
@@ -77,11 +79,11 @@ export function BrowserSurface({ sessionId }: { sessionId: string }) {
   const canZoomOut = previewZoom > MIN_BROWSER_ZOOM
   const canZoomIn = previewZoom < MAX_BROWSER_ZOOM
 
-  const reportBounds = () => {
+  const reportBounds = useCallback(() => {
     const el = hostRef.current
     if (!el) return
-    previewBridge.setBounds(computeWebviewBounds(el.getBoundingClientRect()))
-  }
+    previewBridge.setBounds(computeWebviewBounds(el.getBoundingClientRect(), appZoom))
+  }, [appZoom])
 
   const loadNativePreview = (
     url: string,
@@ -120,7 +122,7 @@ export function BrowserSurface({ sessionId }: { sessionId: string }) {
       const el = hostRef.current
       hasNativePreviewRef.current = true
       if (el) {
-        await previewBridge.open(url, computeWebviewBounds(el.getBoundingClientRect()))
+        await previewBridge.open(url, computeWebviewBounds(el.getBoundingClientRect(), appZoom))
       } else {
         await previewBridge.navigate(url)
       }
@@ -170,8 +172,11 @@ export function BrowserSurface({ sessionId }: { sessionId: string }) {
     ro.observe(el)
     window.addEventListener('resize', reportBounds)
     return () => { ro.disconnect(); window.removeEventListener('resize', reportBounds) }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId])
+  }, [reportBounds, sessionId])
+
+  useLayoutEffect(() => {
+    reportBounds()
+  }, [reportBounds, sessionId])
 
   useEffect(() => {
     let unsub: (() => void) | undefined

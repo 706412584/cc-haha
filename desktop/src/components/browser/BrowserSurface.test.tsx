@@ -28,6 +28,7 @@ import { getDefaultBaseUrl, setBaseUrl } from '../../api/client'
 import { useBrowserPanelStore } from '../../stores/browserPanelStore'
 import { useWorkspacePanelStore } from '../../stores/workspacePanelStore'
 import { useOverlayStore } from '../../stores/overlayStore'
+import { useSettingsStore } from '../../stores/settingsStore'
 
 afterEach(() => {
   cleanup()
@@ -37,6 +38,7 @@ afterEach(() => {
   // browserPanelStore.open() now also opens the unified workbench; keep it isolated.
   useWorkspacePanelStore.setState(useWorkspacePanelStore.getInitialState(), true)
   useOverlayStore.setState(useOverlayStore.getInitialState(), true)
+  useSettingsStore.setState({ uiZoom: 1 })
   setBaseUrl(getDefaultBaseUrl())
 })
 
@@ -46,6 +48,40 @@ describe('BrowserSurface', () => {
     render(<BrowserSurface sessionId="s1" />)
     return waitFor(() => {
       expect(bridge.open).toHaveBeenCalledWith('http://localhost:5173/', expect.objectContaining({ width: expect.any(Number) }))
+    })
+  })
+
+  it('rescales native preview bounds when app zoom changes', async () => {
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      left: 180,
+      top: 150,
+      width: 420,
+      height: 300,
+    } as DOMRect)
+    useSettingsStore.setState({ uiZoom: 1.25 })
+    useBrowserPanelStore.getState().open('s1', 'http://localhost:5173/')
+    render(<BrowserSurface sessionId="s1" />)
+
+    await waitFor(() => {
+      expect(bridge.open).toHaveBeenCalledWith('http://localhost:5173/', {
+        x: 225,
+        y: 187.5,
+        width: 525,
+        height: 375,
+      })
+    })
+
+    act(() => {
+      useSettingsStore.setState({ uiZoom: 1.5 })
+    })
+
+    await waitFor(() => {
+      expect(bridge.setBounds).toHaveBeenLastCalledWith({
+        x: 270,
+        y: 225,
+        width: 630,
+        height: 450,
+      })
     })
   })
 

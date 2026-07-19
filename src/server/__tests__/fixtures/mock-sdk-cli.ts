@@ -1,4 +1,5 @@
 import { appendFileSync } from 'node:fs'
+import { appendFile, readFile } from 'node:fs/promises'
 
 const args = process.argv.slice(2)
 
@@ -25,7 +26,7 @@ function extractUserText(message: any): string {
 }
 
 const sdkUrl = getArg('--sdk-url')
-const sessionId = getArg('--session-id') || crypto.randomUUID()
+const sessionId = getArg('--session-id') || getArg('--resume') || crypto.randomUUID()
 const initMode = process.env.MOCK_SDK_INIT_MODE || 'on_open'
 const initDelayMs = Number(process.env.MOCK_SDK_INIT_DELAY_MS || '0')
 const streamDelayMs = Number(process.env.MOCK_SDK_STREAM_DELAY_MS || '0')
@@ -36,8 +37,102 @@ const startupStdout = process.env.MOCK_SDK_STARTUP_STDOUT || ''
 const startupArgsLog = process.env.MOCK_SDK_STARTUP_ARGS_LOG || ''
 const exitBeforeSdkMs = Number(process.env.MOCK_SDK_EXIT_BEFORE_SDK_MS || '0')
 const permissionModeBehavior = process.env.MOCK_SDK_PERMISSION_MODE_BEHAVIOR || 'confirm'
+const resumeTranscriptPath = process.env.MOCK_SDK_RESUME_TRANSCRIPT_PATH
+const resumeUpstreamUrl = process.env.MOCK_SDK_RESUME_UPSTREAM_URL
 let initSent = false
 let firstUserExitScheduled = false
+
+function transcriptText(entry: any): string {
+  const content = entry?.message?.content
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter((block: any) => block?.type === 'text' && typeof block.text === 'string')
+    .map((block: any) => block.text)
+    .join(' ')
+}
+
+async function readResumeHistory(): Promise<Array<{ role: string; content: string }>> {
+  if (!resumeTranscriptPath) return []
+  const raw = await readFile(resumeTranscriptPath, 'utf8').catch(() => '')
+  return raw
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+    .filter((entry) => entry?.type === 'user' || entry?.type === 'assistant')
+    .map((entry) => ({ role: entry.message.role, content: transcriptText(entry) }))
+}
+
+async function appendResumeTurn(userText: string, assistantText: string): Promise<void> {
+  if (!resumeTranscriptPath) return
+  const userUuid = crypto.randomUUID()
+  const now = new Date().toISOString()
+  const records = [
+    {
+      parentUuid: null,
+      isSidechain: false,
+      type: 'user',
+      message: { role: 'user', content: userText },
+      uuid: userUuid,
+      timestamp: now,
+      userType: 'external',
+      cwd: process.cwd(),
+      sessionId,
+    },
+    {
+      parentUuid: userUuid,
+      isSidechain: false,
+      type: 'assistant',
+      message: {
+        model: 'mock-opus',
+        id: `msg_${crypto.randomUUID().slice(0, 20)}`,
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'text', text: assistantText }],
+      },
+      uuid: crypto.randomUUID(),
+      timestamp: now,
+      sessionId,
+    },
+  ]
+  await appendFile(resumeTranscriptPath, `${records.map((record) => JSON.stringify(record)).join('\n')}\n`)
+}
+
+async function runResumeTurn(ws: WebSocket, userText: string): Promise<void> {
+  const history = await readResumeHistory()
+  const upstreamBody = {
+    messages: [...history, { role: 'user', content: userText }],
+  }
+  const response = await fetch(resumeUpstreamUrl!, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(upstreamBody),
+  })
+  await response.text()
+
+  const assistantText = userText.includes('SECOND_TURN_1033')
+    ? 'SECOND_REPLY_1033'
+    : 'FIRST_REPLY_1033'
+  emit(ws, {
+    type: 'assistant',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'text', text: assistantText }],
+    },
+    session_id: sessionId,
+  })
+  if (process.env.CLAUDE_CODE_EAGER_FLUSH === '1') {
+    await appendResumeTurn(userText, assistantText)
+  }
+  emit(ws, {
+    type: 'result',
+    subtype: 'success',
+    is_error: false,
+    result: assistantText,
+    usage: { input_tokens: 3, output_tokens: 2 },
+    session_id: sessionId,
+  })
+}
 
 if (!sdkUrl) {
   console.error('Missing --sdk-url')
@@ -100,6 +195,10 @@ ws.addEventListener('message', (event) => {
           continue
         }
         const text = extractUserText(parsed)
+        if (resumeTranscriptPath && resumeUpstreamUrl) {
+          await runResumeTurn(ws, text)
+          continue
+        }
         const slashCommand = text.trim()
         if (slashCommand === '/cost') {
           emit(ws, {

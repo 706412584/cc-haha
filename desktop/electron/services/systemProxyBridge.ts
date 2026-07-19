@@ -4,6 +4,7 @@ import net from 'node:net'
 import tls from 'node:tls'
 import { lookup } from 'node:dns/promises'
 import type { Duplex } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 
 export const SYSTEM_PROXY_BRIDGE_HOST = '127.0.0.1'
 const CONNECT_TIMEOUT_MS = 10_000
@@ -161,9 +162,13 @@ export class SystemProxyBridge implements SystemProxyBridgeLike {
             onSocket,
           )
       response.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.statusMessage, upstreamResponse.headers)
-      upstreamResponse.pipe(response)
+      await pipeline(upstreamResponse, response)
     } catch (error) {
-      if (!response.headersSent) response.writeHead(502, { Connection: 'close' })
+      if (response.headersSent) {
+        response.destroy()
+        return
+      }
+      response.writeHead(502, { Connection: 'close' })
       response.end(`System proxy bridge failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }

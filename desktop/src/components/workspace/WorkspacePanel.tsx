@@ -1908,6 +1908,13 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
                 return nextOpen
               })}
             />
+            {previewTabs.length === 1 && (
+              <ToolbarIconButton
+                Icon={X}
+                label={`${t('workspace.closeTab')} ${activePreviewTab.title} ${getPreviewKindLabel(t, activePreviewTab.kind)}`}
+                onClick={() => closePreviewTabs(sessionId, activePreviewTab.id, 'current')}
+              />
+            )}
             {!embedded && (
               <ToolbarIconButton Icon={X} label={t('workspace.closePanel')} onClick={() => closePanel(sessionId)} />
             )}

@@ -5765,6 +5765,59 @@ describe('Sessions API', () => {
     expect(body.checkpoints[0]!.code.deletions).toBe(0)
   })
 
+  it('GET /api/sessions/:id/turn-checkpoints should ignore rejected transcript tool changes', async () => {
+    const sessionId = '99999999-bbbb-cccc-dddd-000000000004'
+    const workDir = path.join(tmpDir, 'transcript-rejected-session')
+    const userId = crypto.randomUUID()
+    const toolUseId = 'Write:rejected'
+    await fs.mkdir(workDir, { recursive: true })
+
+    await writeSessionFile('-tmp-transcript-rejected-session', sessionId, [
+      makeSessionMetaEntry(workDir),
+      {
+        ...makeUserEntry('write a denied file', userId),
+        cwd: workDir,
+        sessionId,
+      },
+      makeAssistantToolUseEntry([{
+        id: toolUseId,
+        name: 'Write',
+        input: {
+          file_path: path.join(workDir, 'permission-denial-test.txt'),
+          content: 'must not be written\n',
+        },
+      }], userId),
+      {
+        ...makeToolResultUserEntry(
+          toolUseId,
+          'The user rejected this tool use.',
+          undefined,
+          undefined,
+          sessionId,
+        ),
+        message: {
+          role: 'user',
+          content: [{
+            type: 'tool_result',
+            tool_use_id: toolUseId,
+            content: 'The user rejected this tool use.',
+            is_error: true,
+          }],
+        },
+        cwd: workDir,
+      },
+      makeAssistantEntry('The requested write was not completed.', userId),
+    ])
+
+    const res = await fetch(`${baseUrl}/api/sessions/${sessionId}/turn-checkpoints`)
+    expect(res.status).toBe(200)
+    const body = await res.json() as { checkpoints: unknown[] }
+
+    expect(body.checkpoints).toEqual([])
+    await expect(fs.stat(path.join(workDir, 'permission-denial-test.txt')))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   it('GET /api/sessions/:id/turn-checkpoints/diff should return transcript tool diffs when file snapshots are missing', async () => {
     const sessionId = '99999999-bbbb-cccc-dddd-000000000002'
     const workDir = path.join(tmpDir, 'transcript-only-diff-session')

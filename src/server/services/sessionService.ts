@@ -376,6 +376,7 @@ const USER_INTERRUPTION_TEXTS = new Set([
 const NO_RESPONSE_REQUESTED_TEXT = 'No response requested.'
 const TASK_NOTIFICATION_RE = /^<task-notification>\s*[\s\S]*<\/task-notification>$/i
 const TASK_NOTIFICATION_BLOCK_RE = /<task-notification>\s*[\s\S]*?<\/task-notification>/i
+const PERSISTED_TASK_NOTIFICATION_ENTRY_TYPE = 'cc-haha-task-notification'
 const PROVIDER_MODEL_ALIAS_SEPARATORS = ['-', '_', ':', '/', '.', ' ']
 
 function normalizeProviderModelAlias(model: string): string {
@@ -1695,6 +1696,38 @@ export class SessionService {
       ...(summary ? { summary } : {}),
       ...(result ? { result } : {}),
       ...(outputFile ? { outputFile } : {}),
+      ...(timestamp ? { timestamp } : {}),
+    }
+  }
+
+  private parsePersistedTaskNotification(
+    value: unknown,
+    timestamp?: string,
+  ): SessionTaskNotification | null {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+    const notification = value as Record<string, unknown>
+    const toolUseId = typeof notification.toolUseId === 'string'
+      ? notification.toolUseId
+      : null
+    const status = notification.status
+    if (
+      !toolUseId ||
+      (status !== 'completed' && status !== 'failed' && status !== 'stopped')
+    ) {
+      return null
+    }
+
+    const optionalString = (key: string) =>
+      typeof notification[key] === 'string' && notification[key]
+        ? notification[key] as string
+        : undefined
+    return {
+      taskId: optionalString('taskId') ?? toolUseId,
+      toolUseId,
+      status,
+      ...(optionalString('summary') ? { summary: optionalString('summary') } : {}),
+      ...(optionalString('result') ? { result: optionalString('result') } : {}),
+      ...(optionalString('outputFile') ? { outputFile: optionalString('outputFile') } : {}),
       ...(timestamp ? { timestamp } : {}),
     }
   }
@@ -4097,6 +4130,28 @@ export class SessionService {
     return [...snapshotsByMessageId.values()]
   }
 
+  async appendSessionTaskNotification(
+    sessionId: string,
+    notification: SessionTaskNotification,
+  ): Promise<void> {
+    const normalized = this.parsePersistedTaskNotification(
+      notification,
+      notification.timestamp ?? new Date(this.now()).toISOString(),
+    )
+    if (!normalized) return
+
+    const found = await this.findSessionFile(sessionId)
+    if (!found) return
+
+    await this.appendJsonlEntry(found.filePath, {
+      type: PERSISTED_TASK_NOTIFICATION_ENTRY_TYPE,
+      isMeta: true,
+      taskNotification: normalized,
+      timestamp: normalized.timestamp,
+    })
+    this.invalidateSessionListCache()
+  }
+
   async getSessionTaskNotifications(
     sessionId: string,
   ): Promise<SessionTaskNotification[]> {
@@ -4107,18 +4162,18 @@ export class SessionService {
 
     const entries = await this.readTargetedJsonlEntries(
       found,
-      ['user'],
+      ['user', PERSISTED_TASK_NOTIFICATION_ENTRY_TYPE],
     ) ?? await this.readJsonlFile(found.filePath)
-    const notifications: SessionTaskNotification[] = []
+    const notifications = new Map<string, SessionTaskNotification>()
     for (const entry of entries) {
-      if (entry.message?.role !== 'user') continue
-      const notification = this.parseTaskNotificationContent(
-        entry.message.content,
-        entry.timestamp,
-      )
-      if (notification) notifications.push(notification)
+      const notification = entry.type === PERSISTED_TASK_NOTIFICATION_ENTRY_TYPE
+        ? this.parsePersistedTaskNotification(entry.taskNotification, entry.timestamp)
+        : entry.message?.role === 'user'
+          ? this.parseTaskNotificationContent(entry.message.content, entry.timestamp)
+          : null
+      if (notification) notifications.set(notification.toolUseId, notification)
     }
-    return notifications
+    return [...notifications.values()]
   }
 
   // --------------------------------------------------------------------------

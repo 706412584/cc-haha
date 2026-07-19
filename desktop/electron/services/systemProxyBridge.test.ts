@@ -83,6 +83,28 @@ describe('SystemProxyBridge', () => {
       .toBe('request-fallback')
   })
 
+  it('terminates the downstream response when a selected proxy resets after sending headers', async () => {
+    const resettingProxy = net.createServer(socket => {
+      socket.once('data', () => {
+        socket.write(
+          'HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\npartial',
+          () => setTimeout(() => socket.resetAndDestroy(), 25),
+        )
+      })
+    })
+    servers.push(resettingProxy)
+    const resettingPort = await listen(resettingProxy)
+    const bridge = await startBridge(async () => `PROXY 127.0.0.1:${resettingPort}`)
+
+    const outcome = await Promise.race([
+      requestOutcomeThroughProxy(bridge, 'http://foreign.example/after-reset'),
+      new Promise<'timed-out'>(resolve => setTimeout(() => resolve('timed-out'), 500)),
+    ])
+
+    expect(outcome).not.toBe('timed-out')
+    expect(outcome).not.toBe('end')
+  })
+
   it('does not replay a non-idempotent request after its selected proxy drops it', async () => {
     let firstProxyRequests = 0
     const droppingProxy = net.createServer(socket => {
@@ -311,6 +333,28 @@ function requestThroughProxy(
     })
     request.on('error', reject)
     request.end(body)
+  })
+}
+
+function requestOutcomeThroughProxy(
+  proxyUrl: string,
+  targetUrl: string,
+): Promise<'aborted' | 'response-error' | 'request-error' | 'end'> {
+  const proxy = new URL(proxyUrl)
+  return new Promise(resolve => {
+    const request = http.request({
+      host: proxy.hostname,
+      port: Number(proxy.port),
+      path: targetUrl,
+      headers: { Host: new URL(targetUrl).host },
+    }, response => {
+      response.resume()
+      response.once('aborted', () => resolve('aborted'))
+      response.once('error', () => resolve('response-error'))
+      response.once('end', () => resolve('end'))
+    })
+    request.once('error', () => resolve('request-error'))
+    request.end()
   })
 }
 

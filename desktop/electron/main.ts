@@ -1,10 +1,10 @@
-import { app, BrowserWindow, clipboard, ipcMain, Notification, screen, session, WebContentsView } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification, screen, session, WebContentsView } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import path from 'node:path'
 import { ELECTRON_EVENT_CHANNELS, ELECTRON_INTERNAL_CHANNELS, ELECTRON_IPC_CHANNELS, type ElectronIpcChannel } from './ipc/channels'
 import { isElectronIpcChannel, validateElectronIpcPayload } from './ipc/capabilities'
 import { ElectronServerRuntime, type TunnelStartOptions } from './services/serverRuntime'
-import { electronHostDiagnosticsFile } from './services/sidecarManager'
+import { electronHostDiagnosticsFile, sanitizeHostDiagnostic } from './services/sidecarManager'
 import { openDialog, saveDialog } from './services/dialogs'
 import { openExternalUrl, openSystemPath, openSystemSettingsUrl, showItemInFolder } from './services/shell'
 import {
@@ -38,6 +38,7 @@ import { logNotificationSmokeRendererAck, scheduleNotificationSmoke } from './se
 import { normalizeZoomFactor } from './services/zoom'
 import { resolveRendererEntry } from './services/rendererEntry'
 import { writeWindowSmokeSnapshot } from './services/windowSmoke'
+import { loadAndRevealMainWindow } from './services/windowStartup'
 import {
   installWindowLifecycle,
   readWindowState,
@@ -416,10 +417,20 @@ async function createMainWindow() {
 
   writeWindowSmokeSnapshot(mainWindow, 'after-create')
 
-  await loadRendererEntry(mainWindow)
-
-  restoreWindowMaximized(mainWindow, restoredState)
-  showMainWindow(mainWindow, app)
+  await loadAndRevealMainWindow({
+    load: () => loadRendererEntry(mainWindow!),
+    beforeReveal: () => restoreWindowMaximized(mainWindow!, restoredState),
+    reveal: () => showMainWindow(mainWindow, app),
+    onLoadFailure: (error) => {
+      const detail = sanitizeHostDiagnostic(error instanceof Error ? error.message : String(error))
+      console.error(`[desktop] failed to load Electron renderer: ${detail}`)
+      writeWindowSmokeSnapshot(mainWindow, 'renderer-load-failed')
+      dialog.showErrorBox(
+        '启动错误 / Startup Error',
+        `桌面界面加载失败，请重启应用。如果问题持续存在，请附上诊断日志反馈。\n\nThe desktop interface could not be loaded. Restart the app and include diagnostics when reporting the problem.\n\n${detail}`,
+      )
+    },
+  })
   refreshWindowsDragHitTest(mainWindow, process.platform)
   writeWindowSmokeSnapshot(mainWindow, 'after-final-show')
 }
