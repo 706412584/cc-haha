@@ -63,6 +63,7 @@ export type PersistedAgentRuntimeTask = {
   toolUseId?: string;
   error?: string;
   result?: AgentToolResult;
+  notified?: boolean;
 };
 export type AgentRuntimeSnapshot = {
   version: 1;
@@ -304,7 +305,8 @@ export async function persistAgentRuntimeSnapshot(filePath: string, state: Pick<
     endTime: task.endTime,
     toolUseId: truncateRuntimeText(task.toolUseId, maxTextBytes),
     error: truncateRuntimeText(task.error, maxTextBytes),
-    result: summarizePersistedResult(task.result, maxTextBytes)
+    result: summarizePersistedResult(task.result, maxTextBytes),
+    notified: task.notified
   }));
   const sourceInbox = state.agentCompletionInbox.slice(-MAX_AGENT_COMPLETION_INBOX);
   let snapshot: AgentRuntimeSnapshot = {
@@ -402,6 +404,7 @@ export function restoreAgentRuntimeSnapshot(snapshot: unknown): Pick<AppState, '
       result: raw.result,
       startTime: raw.startTime,
       endTime: interrupted ? Date.now() : raw.endTime,
+      notified: interrupted ? false : raw.notified !== false,
       retrieved: false,
       lastReportedToolCount: 0,
       lastReportedTokenCount: 0,
@@ -480,23 +483,7 @@ export function drainPendingMessages(taskId: string, getAppState: () => AppState
   return drained;
 }
 
-/**
- * Enqueue an agent notification to the message queue.
- */
-export function enqueueAgentNotification({
-  taskId,
-  description,
-  status,
-  error,
-  setAppState,
-  finalMessage,
-  usage,
-  toolUseId,
-  worktreePath,
-  worktreeBranch,
-  outputPath,
-  epoch
-}: {
+type AgentNotificationInput = {
   taskId: string;
   description: string;
   status: 'completed' | 'failed' | 'killed';
@@ -513,7 +500,25 @@ export function enqueueAgentNotification({
   worktreeBranch?: string;
   outputPath?: string;
   epoch?: number;
-}): boolean {
+};
+
+/**
+ * Enqueue an agent notification to the message queue.
+ */
+export function enqueueAgentNotification({
+  taskId,
+  description,
+  status,
+  error,
+  setAppState,
+  finalMessage,
+  usage,
+  toolUseId,
+  worktreePath,
+  worktreeBranch,
+  outputPath,
+  epoch
+}: AgentNotificationInput): boolean {
   const summary = status === 'completed' ? `Agent "${description}" completed` : status === 'failed' ? `Agent "${description}" failed: ${error || 'Unknown error'}` : `Agent "${description}" was stopped`;
   const notificationOutputPath = outputPath ?? getTaskOutputPath(taskId);
   const toolUseIdLine = toolUseId ? `\n<${TOOL_USE_ID_TAG}>${toolUseId}</${TOOL_USE_ID_TAG}>` : '';
@@ -536,7 +541,6 @@ export function enqueueAgentNotification({
     if (!isLocalAgentTask(task) || task.status !== expectedTaskStatus || task.notified || epoch !== undefined && task.epoch !== epoch) {
       return prev;
     }
-    enqueued = true;
     const sequence = Number.isSafeInteger(prev.nextAgentCompletionSequence) && prev.nextAgentCompletionSequence > 0 ? prev.nextAgentCompletionSequence : 1;
     const currentInbox = Array.isArray(prev.agentCompletionInbox) ? prev.agentCompletionInbox : [];
     if (currentInbox.length >= MAX_AGENT_COMPLETION_INBOX) {
@@ -550,6 +554,7 @@ export function enqueueAgentNotification({
       // session/task/epoch identity and are filtered before consumption.
       spilled = [...currentInbox].sort((a, b) => a.sequence - b.sequence);
     }
+    enqueued = true;
     const inbox = [...(spilled.length > 0 ? [] : currentInbox), {
       version: 1 as const,
       sequence,
@@ -589,6 +594,41 @@ export function enqueueAgentNotification({
   return enqueued;
 }
 
+function retryUnnotifiedAgentCompletions(setAppState: SetAppState, sessionId: string): boolean {
+  if (sessionId !== getSessionId()) return false;
+  let candidates: LocalAgentTaskState[] = [];
+  setAppState(prev => {
+    candidates = Object.values(prev.tasks).filter((task): task is LocalAgentTaskState =>
+      isLocalAgentTask(task) &&
+      task.isBackgrounded &&
+      isTerminalTaskStatus(task.status) &&
+      !task.notified
+    ).sort((a, b) => (a.endTime ?? a.startTime) - (b.endTime ?? b.startTime) || a.id.localeCompare(b.id)).slice(0, MAX_AGENT_REGISTRY_SIZE);
+    return prev;
+  });
+  let enqueued = false;
+  for (const task of candidates) {
+    if (sessionId !== getSessionId()) break;
+    enqueued = enqueueAgentNotification({
+      taskId: task.id,
+      description: task.description,
+      status: task.status,
+      error: task.error,
+      setAppState,
+      finalMessage: task.result?.content.map(item => item.text).join('\n'),
+      usage: task.result ? {
+        totalTokens: task.result.totalTokens,
+        toolUses: task.result.totalToolUseCount,
+        durationMs: task.result.totalDurationMs
+      } : undefined,
+      toolUseId: task.toolUseId,
+      outputPath: task.outputFile,
+      epoch: task.epoch
+    }) || enqueued;
+  }
+  return enqueued;
+}
+
 export function isAgentCompletionCommand(command: QueuedCommand): boolean {
   return command.agentCompletion !== undefined;
 }
@@ -611,9 +651,10 @@ export async function flushAndDrainAgentCompletionInbox(
   const { flushAgentRuntimePersistence } = await import('../../state/onChangeAppState.js');
   await flushAgentRuntimePersistence();
   if (sessionId !== getSessionId() || !isSafeToDrain()) return false;
+  const retried = retryUnnotifiedAgentCompletions(setAppState, sessionId);
   const drained = drainAgentCompletionInbox(setAppState, sessionId);
   await flushAgentRuntimePersistence();
-  return drained;
+  return retried || drained;
 }
 
 export function drainAgentCompletionInbox(setAppState: SetAppState, sessionId = getSessionId()): boolean {

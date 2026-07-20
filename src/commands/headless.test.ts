@@ -5,6 +5,7 @@ import type { Command } from '../types/command.js'
 import { enqueue, enqueuePendingNotification, getCommandQueue, resetCommandQueue } from '../utils/messageQueueManager.js'
 import { completeAgentTask, enqueueAgentNotification, registerAsyncAgent } from '../tasks/LocalAgentTask/LocalAgentTask.js'
 import { filterCommandsForHeadlessMode, removeStaleHeadlessAgentCompletions, wakeHeadlessAgentContinuation } from './headless.js'
+import { flushAgentCompletionsAndProcessQueueIfReady } from '../utils/queueProcessor.js'
 
 afterEach(() => resetCommandQueue())
 
@@ -67,6 +68,42 @@ describe('removeStaleHeadlessAgentCompletions', () => {
     expect(removeStaleHeadlessAgentCompletions(state)).toHaveLength(1)
     expect(getCommandQueue().map(command => command.value)).toEqual(['keep me'])
     expect(removeStaleHeadlessAgentCompletions(state)).toEqual([])
+  })
+})
+
+describe('post-turn Agent completion backpressure', () => {
+  test('continues consuming non-Agent commands when a full inbox cannot drain yet', async () => {
+    let appState = {
+      tasks: {},
+      agentCompletionInbox: Array.from({ length: 64 }, (_, index) => ({
+        version: 1 as const,
+        sequence: index + 1,
+        taskId: `agent-blocked-${index}`,
+        epoch: 1,
+        notification: `<task-notification>${index}</task-notification>`,
+      })),
+      nextAgentCompletionSequence: 65,
+      speculation: IDLE_SPECULATION_STATE,
+    } as unknown as AppState
+    const setAppState = (updater: (prev: AppState) => AppState): void => {
+      appState = updater(appState)
+    }
+    for (let index = 0; index < 4_096; index++) {
+      enqueue({ mode: 'prompt', value: `keep-${index}` })
+    }
+    const processed: string[] = []
+
+    await flushAgentCompletionsAndProcessQueueIfReady({
+      setAppState,
+      getAppState: () => appState,
+      executeInput: async commands => {
+        processed.push(...commands.map(command => String(command.value)))
+      },
+    })
+
+    expect(processed).toHaveLength(4_096)
+    expect(processed[0]).toBe('keep-0')
+    expect(appState.agentCompletionInbox).toHaveLength(64)
   })
 })
 

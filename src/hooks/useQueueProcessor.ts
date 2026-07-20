@@ -6,7 +6,7 @@ import {
   subscribeToCommandQueue,
 } from '../utils/messageQueueManager.js'
 import type { QueryGuard } from '../utils/QueryGuard.js'
-import { flushAndDrainAgentCompletionInbox, processQueueIfReady } from '../utils/queueProcessor.js'
+import { flushAgentCompletionsAndProcessQueueIfReady, processQueueIfReady } from '../utils/queueProcessor.js'
 
 type UseQueueProcessorParams = {
   executeQueuedInput: (commands: QueuedCommand[]) => Promise<void>
@@ -56,7 +56,11 @@ export function useQueueProcessor({
     if (hasActiveLocalJsxUI) return
 
     if (appStateStore.getState().agentCompletionInbox.length > 0) {
-      void flushAndDrainAgentCompletionInbox(appStateStore.setState)
+      void flushAgentCompletionsAndProcessQueueIfReady({
+        setAppState: appStateStore.setState,
+        getAppState: appStateStore.getState,
+        executeInput: executeQueuedInput,
+      })
       return
     }
     if (queueSnapshot.length === 0) return

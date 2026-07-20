@@ -102,3 +102,21 @@ export function processQueueIfReady({
 export function hasQueuedCommands(): boolean {
   return hasCommandsInQueue()
 }
+
+export async function flushAgentCompletionsAndProcessQueueIfReady({
+  setAppState,
+  getAppState,
+  executeInput,
+}: {
+  setAppState: (updater: (prev: AppState) => AppState) => void
+  getAppState: () => AppState
+  executeInput: (commands: QueuedCommand[]) => Promise<void>
+}): Promise<ProcessQueueResult> {
+  if (getAppState().agentCompletionInbox.length > 0) {
+    await flushAndDrainAgentCompletionInbox(setAppState)
+    if (getAppState().agentCompletionInbox.length === 0) {
+      return { processed: false }
+    }
+  }
+  return processQueueIfReady({ executeInput, getAppState })
+}
