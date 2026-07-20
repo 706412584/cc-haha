@@ -280,7 +280,7 @@ export const en = {
   'settings.projectRules.federated': 'Federated IDE rules',
   'settings.projectRules.importDecision': 'Import decision for',
   'settings.projectRules.chooseDecision': 'Choose import behavior',
-  'settings.projectRules.session': 'This session',
+  'settings.projectRules.session': 'This session (after resume)',
   'settings.projectRules.persistent': 'Always for this project',
   'settings.projectRules.ignore': 'Ignore',
   'settings.projectRules.statusAvailable': 'Available',

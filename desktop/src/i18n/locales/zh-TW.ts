@@ -280,7 +280,7 @@ export const zh: Record<TranslationKey, string> = {
   'settings.projectRules.federated': '聯合 IDE 規則',
   'settings.projectRules.importDecision': '匯入決策：',
   'settings.projectRules.chooseDecision': '選擇匯入方式',
-  'settings.projectRules.session': '僅此工作階段',
+  'settings.projectRules.session': '僅此工作階段（恢復後生效）',
   'settings.projectRules.persistent': '此專案一律啟用',
   'settings.projectRules.ignore': '忽略',
   'settings.projectRules.statusAvailable': '可用',

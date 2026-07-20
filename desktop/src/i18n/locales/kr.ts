@@ -280,7 +280,7 @@ export const kr: Record<TranslationKey, string> = {
   'settings.projectRules.federated': '연동 IDE 규칙',
   'settings.projectRules.importDecision': '가져오기 결정:',
   'settings.projectRules.chooseDecision': '가져오기 방식 선택',
-  'settings.projectRules.session': '이 세션만',
+  'settings.projectRules.session': '이 세션만 (재개 후 적용)',
   'settings.projectRules.persistent': '이 프로젝트에서 항상 사용',
   'settings.projectRules.ignore': '무시',
   'settings.projectRules.statusAvailable': '사용 가능',

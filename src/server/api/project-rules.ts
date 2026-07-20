@@ -19,7 +19,7 @@ import * as fs from 'fs/promises'
 import { homedir } from 'os'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 import { getCwd } from '../../utils/cwd.js'
-import { findCanonicalGitRoot } from '../../utils/git.js'
+import { findGitRoot } from '../../utils/git.js'
 import { sanitizePath, containsPathTraversal } from '../../utils/path.js'
 import type {
   NormalizedProjectRule,
@@ -29,6 +29,8 @@ import {
   discoverFederatedProjectRules,
   saveRuleImportDecision,
 } from '../../utils/projectRulesFederation.js'
+import { sessionService } from '../services/sessionService.js'
+import { requireAuth } from '../middleware/auth.js'
 
 type RuleFile = {
   path: string
@@ -68,6 +70,8 @@ export async function handleProjectRulesApi(
   }
 
   if (req.method === 'POST' && sub === 'decision') {
+    const authError = await requireAuth(req)
+    if (authError) return authError
     return await updateRuleDecision(req)
   }
 
@@ -87,8 +91,10 @@ async function getProjectRules(url: URL): Promise<Response> {
   const projectsDir = getProjectsDir()
   const sessionId = url.searchParams.get('sessionId') || undefined
 
-  // Current project: prefer git root, fall back to cwd.
-  const currentProjectPath = (findCanonicalGitRoot(cwd) ?? cwd).normalize('NFC')
+  // Discover rules from the active checkout. Worktrees share authorization
+  // state by canonical repository identity inside projectRulesFederation, but
+  // must read the files from their own branch.
+  const currentProjectPath = (findGitRoot(cwd) ?? cwd).normalize('NFC')
   const currentProjectId = sanitizePath(currentProjectPath)
 
   // Collect project IDs: current + every dir under ~/.claude/projects/
@@ -114,7 +120,7 @@ async function getProjectRules(url: URL): Promise<Response> {
       const [files, normalizedRules] = projectPath
         ? await Promise.all([
             scanProjectFiles(projectPath),
-            discoverFederatedProjectRules(projectPath, sessionId),
+            discoverFederatedProjectRules(projectPath, sessionId).catch(() => []),
           ])
         : [[], []]
       return {
@@ -180,7 +186,7 @@ async function scanProjectFiles(projectPath: string): Promise<RuleFile[]> {
 async function updateRuleDecision(req: Request): Promise<Response> {
   let body: {
     cwd?: string
-    originalPath?: string
+    ruleId?: string
     decision?: RuleImportDecision
     sessionId?: string
   }
@@ -192,17 +198,25 @@ async function updateRuleDecision(req: Request): Promise<Response> {
   if (
     !body.cwd ||
     !path.isAbsolute(body.cwd) ||
-    !body.originalPath ||
-    !path.isAbsolute(body.originalPath) ||
+    !body.ruleId ||
+    typeof body.ruleId !== 'string' ||
     !body.decision ||
     !['session', 'persistent', 'ignore'].includes(body.decision)
   ) {
     return Response.json({ error: 'Invalid rule decision request' }, { status: 400 })
   }
   try {
+    if (body.sessionId) {
+      const sessionWorkDir = await sessionService.getSessionWorkDir(body.sessionId)
+      const requestedRoot = findGitRoot(body.cwd) ?? body.cwd
+      const sessionRoot = sessionWorkDir ? (findGitRoot(sessionWorkDir) ?? sessionWorkDir) : null
+      if (!sessionRoot || path.resolve(sessionRoot) !== path.resolve(requestedRoot)) {
+        return Response.json({ error: 'Session does not belong to the requested project checkout' }, { status: 403 })
+      }
+    }
     await saveRuleImportDecision({
       projectPath: body.cwd,
-      originalPath: body.originalPath,
+      ruleId: body.ruleId,
       decision: body.decision,
       sessionId: body.sessionId,
     })

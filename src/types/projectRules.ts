@@ -9,10 +9,12 @@ export type RuleProvenance = {
 
 export type NormalizedProjectRule = {
   source: RuleSource
+  ruleId: string
   originalPath: string
   canonicalPath: string
   fingerprint: string
   isNative: boolean
+  applicability: 'always' | 'conditional' | 'manual'
   scopes: string[]
   tags: string[]
   provenance: RuleProvenance

@@ -47,10 +47,12 @@ describe('ProjectRulesSettings', () => {
         }],
         normalizedRules: [{
           source: 'windsurf',
+          ruleId: 'windsurf:.windsurfrules',
           originalPath: '/workspace/demo/.windsurfrules',
           canonicalPath: 'project/global',
           fingerprint: 'abc123',
           isNative: false,
+          applicability: 'always',
           scopes: ['project'],
           tags: ['windsurf'],
           provenance: { provider: 'Windsurf', label: '.windsurfrules' },
@@ -79,7 +81,7 @@ describe('ProjectRulesSettings', () => {
     await waitFor(() => {
       expect(apiMock.post).toHaveBeenCalledWith('/api/project-rules/decision', {
         cwd: '/workspace/demo',
-        originalPath: '/workspace/demo/.windsurfrules',
+        ruleId: 'windsurf:.windsurfrules',
         decision: 'persistent',
         sessionId: 'session-1',
       })

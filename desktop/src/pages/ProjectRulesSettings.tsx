@@ -65,7 +65,7 @@ export function ProjectRulesSettings() {
 
   useEffect(() => {
     fetchRules()
-  }, [cwd])
+  }, [cwd, activeSessionId])
 
   const handleOpen = async (filePath: string) => {
     try {
@@ -83,7 +83,7 @@ export function ProjectRulesSettings() {
     try {
       await api.post('/api/project-rules/decision', {
         cwd: projectCwd,
-        originalPath: rule.originalPath,
+        ruleId: rule.ruleId,
         decision,
         sessionId: activeSessionId ?? undefined,
       })
@@ -274,8 +274,8 @@ function FederatedRuleRow({ rule, onOpen, onDecision, t }: {
         className="w-full text-xs rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-[var(--color-text)]"
       >
         <option value="">{t('settings.projectRules.chooseDecision')}</option>
-        <option value="session">{t('settings.projectRules.session')}</option>
-        <option value="persistent">{t('settings.projectRules.persistent')}</option>
+        <option value="session" disabled={rule.applicability === 'manual'}>{t('settings.projectRules.session')}</option>
+        <option value="persistent" disabled={rule.applicability === 'manual'}>{t('settings.projectRules.persistent')}</option>
         <option value="ignore">{t('settings.projectRules.ignore')}</option>
       </select>
     </div>

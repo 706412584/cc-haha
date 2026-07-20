@@ -282,7 +282,7 @@ export const zh: Record<TranslationKey, string> = {
   'settings.projectRules.federated': '联合 IDE 规则',
   'settings.projectRules.importDecision': '导入决策：',
   'settings.projectRules.chooseDecision': '选择导入方式',
-  'settings.projectRules.session': '仅此会话',
+  'settings.projectRules.session': '仅此会话（恢复后生效）',
   'settings.projectRules.persistent': '此项目始终启用',
   'settings.projectRules.ignore': '忽略',
   'settings.projectRules.statusAvailable': '可用',

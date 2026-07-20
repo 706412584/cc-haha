@@ -15,6 +15,7 @@ mock.module('../../utils/cwd.js', () => ({
 }))
 
 mock.module('../../utils/git.js', () => ({
+  findGitRoot: (cwd: string) => cwd,
   findCanonicalGitRoot: (cwd: string) => cwd,
 }))
 
@@ -33,7 +34,19 @@ mock.module('fs/promises', () => ({
     if (!mockFiles.has(filePath)) {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
     }
-    return { isDirectory: () => true }
+    const content = mockFileContents.get(filePath) ?? ''
+    return { isDirectory: () => false, isFile: () => true, dev: 1, ino: filePath.length, size: content.length, mtimeMs: 1 }
+  },
+  lstat: async (filePath: string) => {
+    if (!mockFiles.has(filePath)) {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+    }
+    return { isDirectory: () => false, isFile: () => true, isSymbolicLink: () => false }
+  },
+  open: async (filePath: string) => {
+    const content = mockFileContents.get(filePath) ?? ''
+    const stat = { isFile: () => true, dev: 1, ino: filePath.length, size: content.length, mtimeMs: 1 }
+    return { stat: async () => stat, readFile: async () => content, close: async () => {} }
   },
   mkdir: async () => {},
   writeFile: async (filePath: string) => {
@@ -49,7 +62,7 @@ mock.module('fs/promises', () => ({
         return entries.map(name => ({ name, isDirectory: () => true, isFile: () => false }))
       }
       // Otherwise return as files
-      return entries.map(name => ({ name, isFile: () => true, isDirectory: () => false }))
+      return entries.map(name => ({ name, isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false }))
     }
     // Default: throw ENOENT
     throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })

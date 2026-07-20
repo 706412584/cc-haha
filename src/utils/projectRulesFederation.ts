@@ -1,4 +1,5 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { constants as fsConstants } from 'node:fs'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import type {
@@ -7,11 +8,14 @@ import type {
   RuleSource,
   RuleSourceAdapter,
 } from '../types/projectRules.js'
-import { resolveGitDir, getCommonDir } from './git/gitFilesystem.js'
+import { getClaudeConfigHomeDir } from './envUtils.js'
+import { parseFrontmatter } from './frontmatterParser.js'
+import { findCanonicalGitRoot } from './git.js'
 
 const MARKDOWN_EXTENSIONS = new Set(['.md', '.mdc'])
-const CONFIG_DIRECTORY = '.cc-haha'
-const CONFIG_FILENAME = 'rule-federation.json'
+const CONFIG_DIRECTORY = 'rule-federation'
+const CONFIG_VERSION = 1
+const configLocks = new Map<string, Promise<void>>()
 
 type RuleDecisionRecord = {
   decision: RuleImportDecision
@@ -28,14 +32,33 @@ type RuleFederationConfig = {
 
 type RuleCandidate = {
   originalPath: string
+  relativePath: string
   canonicalPath: string
   label: string
-  scopes?: string[]
-  tags?: string[]
+  metadata: 'none' | 'cursor' | 'copilot'
+}
+
+export type ImportedProjectRule = {
+  path: string
+  content: string
+  globs?: string[]
+  source: Exclude<RuleSource, 'claude'>
+  provenance: string
+  fingerprint: string
+}
+
+type DiscoveredRule = NormalizedProjectRule & {
+  verifiedPath: string
+  content: string
+  globs?: string[]
+}
+
+function normalizeText(content: string): string {
+  return content.replace(/\r\n/g, '\n').trim()
 }
 
 function fingerprint(content: string): string {
-  return createHash('sha256').update(content.replace(/\r\n/g, '\n').trim()).digest('hex')
+  return createHash('sha256').update(normalizeText(content)).digest('hex')
 }
 
 function providerName(source: RuleSource): string {
@@ -54,73 +77,152 @@ function logicalRulePath(name: string): string {
   return `project/rules/${stem}`
 }
 
+function normalizePath(value: string): string {
+  const normalized = path.resolve(value).normalize('NFC')
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized
+}
+
 async function safeProjectRoot(projectPath: string): Promise<string> {
-  try {
-    return await fs.realpath(projectPath)
-  } catch {
-    return path.resolve(projectPath)
-  }
+  return await fs.realpath(projectPath)
 }
 
 async function safeRulePath(projectRoot: string, candidate: string): Promise<string | null> {
   if (!path.isAbsolute(candidate)) return null
-  let resolved: string
   try {
-    resolved = await fs.realpath(candidate)
+    const resolved = await fs.realpath(candidate)
+    const root = normalizePath(projectRoot)
+    const value = normalizePath(resolved)
+    return value === root || value.startsWith(`${root}${path.sep}`) ? resolved : null
   } catch {
     return null
   }
-  const boundary = projectRoot.endsWith(path.sep) ? projectRoot : `${projectRoot}${path.sep}`
-  return resolved.startsWith(boundary) ? resolved : null
 }
 
-function decisionKey(rule: Pick<NormalizedProjectRule, 'source' | 'canonicalPath'>): string {
-  return `${rule.source}:${rule.canonicalPath}`
+function ruleId(source: RuleSource, relativePath: string): string {
+  return `${source}:${relativePath.replaceAll('\\', '/').normalize('NFC')}`
 }
 
-function configPath(projectRoot: string): string {
-  return path.join(projectRoot, CONFIG_DIRECTORY, CONFIG_FILENAME)
+function decisionKey(rule: Pick<NormalizedProjectRule, 'ruleId'>): string {
+  return rule.ruleId
+}
+
+async function repositoryIdentity(projectRoot: string): Promise<string> {
+  const canonical = findCanonicalGitRoot(projectRoot) ?? projectRoot
+  try {
+    return normalizePath(await fs.realpath(canonical))
+  } catch {
+    return normalizePath(canonical)
+  }
+}
+
+async function configPath(projectRoot: string): Promise<string> {
+  const identity = await repositoryIdentity(projectRoot)
+  const repositoryHash = createHash('sha256').update(identity).digest('hex')
+  return path.join(getClaudeConfigHomeDir(), CONFIG_DIRECTORY, `${repositoryHash}.json`)
 }
 
 async function readConfig(projectRoot: string): Promise<RuleFederationConfig> {
+  const filePath = await configPath(projectRoot)
   try {
-    const parsed = JSON.parse(await fs.readFile(configPath(projectRoot), 'utf-8')) as RuleFederationConfig
-    if (parsed.version === 1 && parsed.decisions && typeof parsed.decisions === 'object') {
-      return parsed
+    const stat = await fs.lstat(filePath)
+    if (!stat.isFile() || stat.isSymbolicLink()) return { version: 1, decisions: {} }
+    const parsed = JSON.parse(await fs.readFile(filePath, 'utf-8')) as Partial<RuleFederationConfig>
+    if (parsed.version === CONFIG_VERSION && parsed.decisions && typeof parsed.decisions === 'object') {
+      return { version: 1, decisions: parsed.decisions }
     }
   } catch {
-    // Missing or malformed local config is treated as no decisions.
+    // Missing or malformed user-local state is treated as no decisions.
   }
   return { version: 1, decisions: {} }
 }
 
-async function ensureConfigIsGitignored(projectRoot: string): Promise<void> {
-  const resolvedGitDirectory = await resolveGitDir(projectRoot)
-  if (!resolvedGitDirectory) return
-  const gitDirectory = (await getCommonDir(resolvedGitDirectory)) ?? resolvedGitDirectory
-  const infoDirectory = path.join(gitDirectory, 'info')
-  const excludePath = path.join(infoDirectory, 'exclude')
-  let existing = ''
+async function withConfigLock<T>(filePath: string, operation: () => Promise<T>): Promise<T> {
+  const previous = configLocks.get(filePath) ?? Promise.resolve()
+  let release!: () => void
+  const current = new Promise<void>(resolve => { release = resolve })
+  configLocks.set(filePath, previous.then(() => current))
+  await previous
   try {
-    existing = await fs.readFile(excludePath, 'utf-8')
-  } catch {
-    // A newly initialized repository may not have an exclude file yet.
+    return await operation()
+  } finally {
+    release()
+    if (configLocks.get(filePath) === current) configLocks.delete(filePath)
   }
-  if (existing.split(/\r?\n/).includes(`/${CONFIG_DIRECTORY}/`)) return
-  await fs.mkdir(infoDirectory, { recursive: true })
-  const separator = existing.length > 0 && !existing.endsWith('\n') ? '\n' : ''
-  await fs.writeFile(excludePath, `${existing}${separator}/${CONFIG_DIRECTORY}/\n`, 'utf-8')
+}
+
+async function writeConfig(projectRoot: string, mutate: (config: RuleFederationConfig) => void): Promise<void> {
+  const filePath = await configPath(projectRoot)
+  await withConfigLock(filePath, async () => {
+    const directory = path.dirname(filePath)
+    await fs.mkdir(directory, { recursive: true, mode: 0o700 })
+    const existing = await fs.lstat(filePath).catch(() => null)
+    if (existing?.isSymbolicLink() || (existing && !existing.isFile())) {
+      throw new Error('Unsafe rule federation state file')
+    }
+    const config = await readConfig(projectRoot)
+    mutate(config)
+    const temporaryPath = path.join(directory, `.${path.basename(filePath)}.${randomUUID()}.tmp`)
+    try {
+      await fs.writeFile(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, {
+        encoding: 'utf-8',
+        mode: 0o600,
+        flag: 'wx',
+      })
+      await fs.rename(temporaryPath, filePath)
+    } finally {
+      await fs.rm(temporaryPath, { force: true }).catch(() => {})
+    }
+  })
+}
+
+function parsePatterns(value: unknown): string[] | undefined {
+  const values = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(',')
+      : []
+  const patterns = values.map(item => String(item).trim()).filter(Boolean)
+  return patterns.length > 0 ? patterns : undefined
+}
+
+function parseRuleContent(
+  source: RuleSource,
+  metadata: RuleCandidate['metadata'],
+  rawContent: string,
+): { content: string; applicability: NormalizedProjectRule['applicability']; globs?: string[] } {
+  const { frontmatter, content } = parseFrontmatter(rawContent)
+  if (metadata === 'cursor') {
+    const globs = parsePatterns(frontmatter.globs)
+    if (frontmatter.alwaysApply === true || frontmatter.alwaysApply === 'true') {
+      return { content, applicability: 'always' }
+    }
+    return globs
+      ? { content, applicability: 'conditional', globs }
+      : { content, applicability: 'manual' }
+  }
+  if (metadata === 'copilot') {
+    const globs = parsePatterns(frontmatter.applyTo)
+    return globs
+      ? { content, applicability: 'conditional', globs }
+      : { content, applicability: 'manual' }
+  }
+  const globs = source === 'claude' ? parsePatterns(frontmatter.paths) : undefined
+  return globs
+    ? { content, applicability: 'conditional', globs }
+    : { content, applicability: 'always' }
 }
 
 async function fileCandidate(
   projectPath: string,
   relativePath: string,
   canonicalPath: string,
+  metadata: RuleCandidate['metadata'] = 'none',
 ): Promise<RuleCandidate[]> {
   const originalPath = path.join(projectPath, ...relativePath.split('/'))
   try {
-    await fs.access(originalPath)
-    return [{ originalPath, canonicalPath, label: relativePath }]
+    const stat = await fs.lstat(originalPath)
+    if (!stat.isFile() || stat.isSymbolicLink()) return []
+    return [{ originalPath, relativePath, canonicalPath, label: relativePath, metadata }]
   } catch {
     return []
   }
@@ -129,17 +231,20 @@ async function fileCandidate(
 async function directoryCandidates(
   projectPath: string,
   relativeDirectory: string,
+  metadata: RuleCandidate['metadata'] = 'none',
 ): Promise<RuleCandidate[]> {
   const directory = path.join(projectPath, ...relativeDirectory.split('/'))
   try {
     const entries = await fs.readdir(directory, { withFileTypes: true })
     return entries
-      .filter(entry => entry.isFile() && MARKDOWN_EXTENSIONS.has(path.extname(entry.name).toLowerCase()))
+      .filter(entry => entry.isFile() && !entry.isSymbolicLink() && MARKDOWN_EXTENSIONS.has(path.extname(entry.name).toLowerCase()))
       .sort((a, b) => a.name.localeCompare(b.name))
       .map(entry => ({
         originalPath: path.join(directory, entry.name),
+        relativePath: `${relativeDirectory}/${entry.name}`,
         canonicalPath: logicalRulePath(entry.name),
         label: `${relativeDirectory}/${entry.name}`,
+        metadata,
       }))
   } catch {
     return []
@@ -154,181 +259,194 @@ function createAdapter(
   return {
     source,
     async discover(projectPath) {
-      const projectRoot = await safeProjectRoot(projectPath)
-      const discovered = await candidates(projectPath)
-      const rules: NormalizedProjectRule[] = []
-      for (const candidate of discovered) {
-        const safePath = await safeRulePath(projectRoot, candidate.originalPath)
-        if (!safePath) continue
-        const content = await fs.readFile(safePath, 'utf-8')
-        rules.push({
-          source,
-          originalPath: candidate.originalPath,
-          canonicalPath: candidate.canonicalPath,
-          fingerprint: fingerprint(content),
-          isNative,
-          scopes: candidate.scopes ?? ['project'],
-          tags: candidate.tags ?? [source],
-          provenance: {
-            provider: providerName(source),
-            label: candidate.label,
-          },
-          status: 'active',
-          relatedRulePaths: [],
-        })
-      }
-      return rules
+      return (await discoverAdapterRules(source, isNative, candidates, projectPath)).map(({ verifiedPath: _path, content: _content, globs: _globs, ...rule }) => rule)
     },
   }
 }
 
-const claudeAdapter = createAdapter('claude', true, async projectPath => [
+async function discoverAdapterRules(
+  source: RuleSource,
+  isNative: boolean,
+  candidates: (projectPath: string) => Promise<RuleCandidate[]>,
+  projectPath: string,
+): Promise<DiscoveredRule[]> {
+  const projectRoot = await safeProjectRoot(projectPath)
+  const discovered = await candidates(projectRoot)
+  const rules: DiscoveredRule[] = []
+  for (const candidate of discovered) {
+    const verifiedPath = await safeRulePath(projectRoot, candidate.originalPath)
+    if (!verifiedPath) continue
+    const before = await fs.stat(verifiedPath)
+    const handle = await fs.open(verifiedPath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0))
+    let rawContent: string
+    try {
+      const opened = await handle.stat()
+      if (!opened.isFile() || opened.size > 1_000_000) continue
+      rawContent = await handle.readFile('utf-8')
+      const after = await handle.stat()
+      const current = await fs.stat(verifiedPath)
+      if (before.dev !== opened.dev || before.ino !== opened.ino || opened.dev !== after.dev || opened.ino !== after.ino || after.dev !== current.dev || after.ino !== current.ino || opened.size !== after.size || after.size !== current.size || opened.mtimeMs !== after.mtimeMs || after.mtimeMs !== current.mtimeMs) continue
+    } finally {
+      await handle.close()
+    }
+    const parsed = parseRuleContent(source, candidate.metadata, rawContent)
+    const normalizedContent = normalizeText(parsed.content)
+    if (!normalizedContent) continue
+    rules.push({
+      source,
+      ruleId: ruleId(source, candidate.relativePath),
+      originalPath: candidate.originalPath,
+      verifiedPath,
+      canonicalPath: candidate.canonicalPath,
+      fingerprint: fingerprint(normalizedContent),
+      content: normalizedContent,
+      globs: parsed.globs,
+      isNative,
+      applicability: parsed.applicability,
+      scopes: parsed.globs ?? ['project'],
+      tags: [source],
+      provenance: { provider: providerName(source), label: candidate.label },
+      status: 'active',
+      relatedRulePaths: [],
+    })
+  }
+  return rules
+}
+
+const claudeCandidates = async (projectPath: string) => [
   ...await fileCandidate(projectPath, 'CLAUDE.md', 'project/global'),
   ...await fileCandidate(projectPath, '.claude/CLAUDE.md', 'project/global'),
   ...await directoryCandidates(projectPath, '.claude/rules'),
   ...await fileCandidate(projectPath, 'CLAUDE.local.md', 'project/local'),
-])
-
-const cursorAdapter = createAdapter('cursor', false, async projectPath => [
+]
+const cursorCandidates = async (projectPath: string) => [
   ...await fileCandidate(projectPath, '.cursorrules', 'project/global'),
-  ...await directoryCandidates(projectPath, '.cursor/rules'),
-])
-
-const windsurfAdapter = createAdapter('windsurf', false, async projectPath => [
+  ...await directoryCandidates(projectPath, '.cursor/rules', 'cursor'),
+]
+const windsurfCandidates = async (projectPath: string) => [
   ...await fileCandidate(projectPath, '.windsurfrules', 'project/global'),
   ...await directoryCandidates(projectPath, '.windsurf/rules'),
-])
-
-const copilotAdapter = createAdapter('copilot', false, async projectPath => [
+]
+const copilotCandidates = async (projectPath: string) => [
   ...await fileCandidate(projectPath, '.github/copilot-instructions.md', 'project/global'),
-  ...await directoryCandidates(projectPath, '.github/instructions'),
-])
-
-export const ruleSourceAdapters: readonly RuleSourceAdapter[] = [
-  claudeAdapter,
-  cursorAdapter,
-  windsurfAdapter,
-  copilotAdapter,
+  ...await directoryCandidates(projectPath, '.github/instructions', 'copilot'),
 ]
 
-export async function discoverFederatedProjectRules(
-  projectPath: string,
-  sessionId?: string,
-): Promise<NormalizedProjectRule[]> {
-  const discovered = (await Promise.all(
-    ruleSourceAdapters.map(adapter => adapter.discover(projectPath)),
-  )).flat()
-  const accepted: NormalizedProjectRule[] = []
+export const ruleSourceAdapters: readonly RuleSourceAdapter[] = [
+  createAdapter('claude', true, claudeCandidates),
+  createAdapter('cursor', false, cursorCandidates),
+  createAdapter('windsurf', false, windsurfCandidates),
+  createAdapter('copilot', false, copilotCandidates),
+]
 
-  for (const rule of discovered) {
-    if (rule.isNative) {
-      accepted.push(rule)
-      continue
-    }
-    const nativeMatch = accepted.find(candidate =>
-      candidate.isNative && (
-        candidate.fingerprint === rule.fingerprint ||
-        candidate.canonicalPath === rule.canonicalPath
-      ),
-    )
-    const priorMatch = nativeMatch ?? accepted.find(candidate =>
-      candidate.fingerprint === rule.fingerprint ||
-      candidate.canonicalPath === rule.canonicalPath,
-    )
-    if (priorMatch) {
-      rule.relatedRulePaths = [priorMatch.originalPath]
-      if (nativeMatch) {
-        rule.status = nativeMatch.fingerprint === rule.fingerprint
-          ? 'overridden-by-native'
-          : 'conflict'
-      } else {
+async function discoverRules(projectPath: string, sessionId?: string): Promise<DiscoveredRule[]> {
+  const groups = await Promise.all([
+    discoverAdapterRules('claude', true, claudeCandidates, projectPath),
+    discoverAdapterRules('cursor', false, cursorCandidates, projectPath),
+    discoverAdapterRules('windsurf', false, windsurfCandidates, projectPath),
+    discoverAdapterRules('copilot', false, copilotCandidates, projectPath),
+  ])
+  const accepted: DiscoveredRule[] = []
+  for (const rule of groups.flat()) {
+    if (!rule.isNative) {
+      const nativeMatch = accepted.find(candidate => candidate.isNative && (
+        candidate.fingerprint === rule.fingerprint || candidate.canonicalPath === rule.canonicalPath
+      ))
+      const priorMatch = nativeMatch ?? accepted.find(candidate =>
+        candidate.fingerprint === rule.fingerprint || candidate.canonicalPath === rule.canonicalPath
+      )
+      if (priorMatch) {
+        rule.relatedRulePaths = [priorMatch.originalPath]
         rule.status = priorMatch.fingerprint === rule.fingerprint
-          ? 'duplicate'
+          ? (nativeMatch ? 'overridden-by-native' : 'duplicate')
           : 'conflict'
       }
     }
     accepted.push(rule)
   }
-
-  const projectRoot = await safeProjectRoot(projectPath)
-  const config = await readConfig(projectRoot)
+  const config = await readConfig(await safeProjectRoot(projectPath))
   for (const rule of accepted) {
     const record = config.decisions[decisionKey(rule)]
-    if (
-      record &&
-      record.fingerprint === rule.fingerprint &&
-      record.source === rule.source &&
-      (record.decision !== 'session' || record.sessionId === sessionId)
-    ) {
-      rule.decision = record.decision
-    }
+    if (record && record.fingerprint === rule.fingerprint && record.source === rule.source && (
+      record.decision !== 'session' || record.sessionId === sessionId
+    )) rule.decision = record.decision
   }
-
   return accepted
 }
 
-export async function getImportedProjectRulePaths(
-  projectPath: string,
-  sessionId?: string,
-): Promise<string[]> {
+export async function discoverFederatedProjectRules(projectPath: string, sessionId?: string): Promise<NormalizedProjectRule[]> {
+  return (await discoverRules(projectPath, sessionId)).map(({ verifiedPath: _path, content: _content, globs: _globs, ...rule }) => rule)
+}
+
+function importedContent(rule: DiscoveredRule): string {
+  const metadata = JSON.stringify({
+    source: rule.source,
+    path: rule.provenance.label,
+    fingerprint: rule.fingerprint,
+    trust: 'user-approved-external-rule',
+  })
+  return `Imported external IDE rule metadata: ${metadata}\n\n${rule.content}`
+}
+
+export async function getImportedProjectRules(projectPath: string, sessionId?: string): Promise<ImportedProjectRule[]> {
   const projectRoot = await safeProjectRoot(projectPath)
   const config = await readConfig(projectRoot)
-  const rules = await discoverFederatedProjectRules(projectRoot, sessionId)
-  const imported: string[] = []
+  const rules = await discoverRules(projectRoot, sessionId)
+  const imported: ImportedProjectRule[] = []
+  const fingerprints = new Set<string>()
   for (const rule of rules) {
-    if (
-      rule.isNative ||
-      rule.status === 'duplicate' ||
-      rule.status === 'overridden-by-native'
-    ) continue
+    if (rule.isNative || rule.applicability === 'manual' || rule.status === 'duplicate' || rule.status === 'overridden-by-native') continue
     const record = config.decisions[decisionKey(rule)]
     if (!record || record.fingerprint !== rule.fingerprint || record.source !== rule.source) continue
-    if (record.decision === 'persistent' || (
-      record.decision === 'session' && record.sessionId === sessionId
-    )) {
-      imported.push(rule.originalPath)
-    }
+    if (record.decision !== 'persistent' && !(record.decision === 'session' && record.sessionId === sessionId)) continue
+    if (fingerprints.has(rule.fingerprint)) continue
+    fingerprints.add(rule.fingerprint)
+    imported.push({
+      path: rule.verifiedPath,
+      content: importedContent(rule),
+      globs: rule.globs,
+      source: rule.source as Exclude<RuleSource, 'claude'>,
+      provenance: rule.provenance.label,
+      fingerprint: rule.fingerprint,
+    })
   }
   return imported
 }
 
+export async function getImportedProjectRulePaths(projectPath: string, sessionId?: string): Promise<string[]> {
+  return (await getImportedProjectRules(projectPath, sessionId)).filter(rule => !rule.globs).map(rule => rule.path)
+}
+
 export async function saveRuleImportDecision(input: {
   projectPath: string
-  originalPath: string
+  ruleId?: string
+  originalPath?: string
   decision: RuleImportDecision
   sessionId?: string
 }): Promise<void> {
   const projectRoot = await safeProjectRoot(input.projectPath)
-  const safeOriginalPath = await safeRulePath(projectRoot, input.originalPath)
-  if (!safeOriginalPath) throw new Error('Rule path escapes project directory')
-
-  const rules = await discoverFederatedProjectRules(projectRoot, input.sessionId)
-  const rule = rules.find(candidate => {
-    const expected = path.resolve(candidate.originalPath)
-    return expected === path.resolve(input.originalPath)
-  })
+  const rules = await discoverRules(projectRoot, input.sessionId)
+  const rule = rules.find(candidate => input.ruleId
+    ? candidate.ruleId === input.ruleId
+    : input.originalPath !== undefined && normalizePath(candidate.originalPath) === normalizePath(input.originalPath)
+  )
   if (!rule || rule.isNative) throw new Error('Rule is not an importable external project rule')
-  if (input.decision === 'session' && !input.sessionId) {
-    throw new Error('Session decisions require a sessionId')
+  if (rule.applicability === 'manual' && input.decision !== 'ignore') {
+    throw new Error('Manual external rules cannot be automatically imported')
   }
+  if (input.decision === 'session' && !input.sessionId) throw new Error('Session decisions require a sessionId')
 
-  const config = await readConfig(projectRoot)
-  config.decisions[decisionKey(rule)] = {
-    decision: input.decision,
-    ...(input.decision === 'session' ? { sessionId: input.sessionId } : {}),
-    fingerprint: rule.fingerprint,
-    source: rule.source,
-    updatedAt: new Date().toISOString(),
-  }
-  const directory = path.dirname(configPath(projectRoot))
-  await fs.mkdir(directory, { recursive: true, mode: 0o700 })
-  const resolvedDirectory = await fs.realpath(directory)
-  if (resolvedDirectory !== directory && resolvedDirectory !== path.resolve(directory)) {
-    throw new Error('Rule config directory escapes project directory')
-  }
-  await fs.writeFile(configPath(projectRoot), `${JSON.stringify(config, null, 2)}\n`, {
-    encoding: 'utf-8',
-    mode: 0o600,
+  await writeConfig(projectRoot, config => {
+    config.decisions[decisionKey(rule)] = {
+      decision: input.decision,
+      ...(input.decision === 'session' ? { sessionId: input.sessionId } : {}),
+      fingerprint: rule.fingerprint,
+      source: rule.source,
+      updatedAt: new Date().toISOString(),
+    }
   })
-  await ensureConfigIsGitignored(projectRoot)
+}
+
+export async function getRuleFederationConfigPathForTest(projectPath: string): Promise<string> {
+  return configPath(await safeProjectRoot(projectPath))
 }

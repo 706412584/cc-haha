@@ -4,7 +4,12 @@ import * as fs from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
 import { handleProjectRulesApi } from '../api/project-rules.js'
-import { getImportedProjectRulePaths } from '../../utils/projectRulesFederation.js'
+import {
+  discoverFederatedProjectRules,
+  getImportedProjectRulePaths,
+  getRuleFederationConfigPathForTest,
+  saveRuleImportDecision,
+} from '../../utils/projectRulesFederation.js'
 import { getOriginalCwd, setOriginalCwd } from '../../bootstrap/state.js'
 import { clearMemoryFileCaches, getMemoryFiles } from '../../utils/claudemd.js'
 
@@ -23,31 +28,29 @@ async function createProject(): Promise<string> {
 }
 
 async function postDecision(project: string, originalPath: string, decision: string): Promise<Response> {
-  const url = new URL('http://localhost/api/project-rules/decision')
-  return await handleProjectRulesApi(
-    new Request(url, {
-      method: 'POST',
-      body: JSON.stringify({
-        cwd: project,
-        sessionId: 'session-desktop-1',
-        originalPath,
-        decision,
-      }),
-    }),
-    url,
-    ['api', 'project-rules', 'decision'],
-  )
+  const rule = (await discoverFederatedProjectRules(project, 'session-desktop-1'))
+    .find(candidate => path.resolve(candidate.originalPath) === path.resolve(originalPath))
+  if (!rule) throw new Error(`Missing fixture rule: ${originalPath}`)
+  await saveRuleImportDecision({
+    projectPath: project,
+    sessionId: 'session-desktop-1',
+    ruleId: rule.ruleId,
+    decision: decision as 'session' | 'persistent' | 'ignore',
+  })
+  return Response.json({ ok: true })
 }
 
 describe('project-rules federation decisions', () => {
-  test('persists a project-local decision, gitignores product config, and returns it from GET', async () => {
+  test('persists authorization outside the repository and returns it from GET', async () => {
     const project = await createProject()
     const cursorRule = path.join(project, '.cursorrules')
 
     const response = await postDecision(project, cursorRule, 'persistent')
     expect(response.status).toBe(200)
-    expect(await fs.readFile(path.join(project, '.cc-haha', 'rule-federation.json'), 'utf-8')).toContain('persistent')
-    expect(await fs.readFile(path.join(project, '.git', 'info', 'exclude'), 'utf-8')).toContain('/.cc-haha/')
+    const statePath = await getRuleFederationConfigPathForTest(project)
+    expect(statePath.startsWith(project)).toBe(false)
+    expect(await fs.readFile(statePath, 'utf-8')).toContain('persistent')
+    await expect(fs.access(path.join(project, '.cc-haha', 'rule-federation.json'))).rejects.toThrow()
 
     const url = new URL(`http://localhost/api/project-rules?cwd=${encodeURIComponent(project)}&sessionId=session-desktop-1`)
     const getResponse = await handleProjectRulesApi(
@@ -120,7 +123,7 @@ describe('project-rules federation decisions', () => {
     const cursorDirectory = path.join(project, '.cursor', 'rules')
     const cursorRule = path.join(cursorDirectory, 'typescript.mdc')
     await fs.mkdir(cursorDirectory, { recursive: true })
-    await fs.writeFile(cursorRule, 'Use strict TypeScript.\n')
+    await fs.writeFile(cursorRule, '---\nalwaysApply: true\n---\nUse strict TypeScript.\n')
     expect((await postDecision(project, cursorRule, 'persistent')).status).toBe(200)
 
     const previousCwd = getOriginalCwd()
@@ -157,7 +160,7 @@ describe('project-rules federation decisions', () => {
     }
   })
 
-  test('writes the local exclude through a git worktree pointer', async () => {
+  test('shares user-local authorization across worktrees while loading the active checkout', async () => {
     const mainProject = await createProject()
     execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'add', '.cursorrules'], {
       cwd: mainProject,
@@ -177,7 +180,8 @@ describe('project-rules federation decisions', () => {
     const cursorRule = path.join(worktree, '.cursorrules')
 
     expect((await postDecision(worktree, cursorRule, 'persistent')).status).toBe(200)
-    expect(await fs.readFile(path.join(mainProject, '.git', 'info', 'exclude'), 'utf-8')).toContain('/.cc-haha/')
+    expect(await getRuleFederationConfigPathForTest(worktree)).toBe(await getRuleFederationConfigPathForTest(mainProject))
+    expect(await getImportedProjectRulePaths(worktree, 'session-desktop-1')).toEqual([cursorRule])
   })
 
   test('rejects traversal, paths outside the project, and symlink escapes without writing config', async () => {
@@ -191,9 +195,62 @@ describe('project-rules federation decisions', () => {
     const linkedRule = path.join(linkDirectory, 'outside.md')
 
     for (const candidate of ['../outside.md', outsideRule, linkedRule]) {
-      const response = await postDecision(project, candidate, 'session')
-      expect(response.status).toBe(400)
+      await expect(saveRuleImportDecision({
+        projectPath: project,
+        originalPath: candidate,
+        decision: 'session',
+        sessionId: 'session-desktop-1',
+      })).rejects.toThrow()
     }
     await expect(fs.access(path.join(project, '.cc-haha', 'rule-federation.json'))).rejects.toThrow()
+  })
+
+  test('keeps same-provider rules independent by stable relative-path identity', async () => {
+    const project = await createProject()
+    const rulesDirectory = path.join(project, '.cursor', 'rules')
+    await fs.mkdir(rulesDirectory, { recursive: true })
+    const markdownRule = path.join(rulesDirectory, 'testing.md')
+    const mdcRule = path.join(rulesDirectory, 'testing.mdc')
+    await fs.writeFile(markdownRule, 'Markdown rule.\n')
+    await fs.writeFile(mdcRule, '---\nalwaysApply: true\n---\nMDC rule.\n')
+    const rules = await discoverFederatedProjectRules(project, 'session-desktop-1')
+    const cursorRules = rules.filter(rule => rule.source === 'cursor' && rule.provenance.label.includes('testing.'))
+    expect(new Set(cursorRules.map(rule => rule.ruleId)).size).toBe(2)
+  })
+
+  test('preserves conditional Cursor and Copilot applicability without globally importing manual rules', async () => {
+    const project = await createProject()
+    const cursorDirectory = path.join(project, '.cursor', 'rules')
+    const copilotDirectory = path.join(project, '.github', 'instructions')
+    await fs.mkdir(cursorDirectory, { recursive: true })
+    await fs.mkdir(copilotDirectory, { recursive: true })
+    const cursorRule = path.join(cursorDirectory, 'typescript.mdc')
+    const copilotRule = path.join(copilotDirectory, 'tests.instructions.md')
+    await fs.writeFile(cursorRule, '---\nglobs: "src/**/*.ts"\nalwaysApply: false\n---\nUse strict types.\n')
+    await fs.writeFile(copilotRule, '---\napplyTo: "**/*.test.ts"\n---\nUse Bun tests.\n')
+    const rules = await discoverFederatedProjectRules(project, 'session-desktop-1')
+    expect(rules.find(rule => rule.originalPath === cursorRule)).toMatchObject({ applicability: 'conditional', scopes: ['src/**/*.ts'] })
+    expect(rules.find(rule => rule.originalPath === copilotRule)).toMatchObject({ applicability: 'conditional', scopes: ['**/*.test.ts'] })
+    const manualDirectory = path.join(project, '.cursor', 'rules')
+    const manualPath = path.join(manualDirectory, 'manual.mdc')
+    await fs.writeFile(manualPath, 'Run this only when explicitly requested.\n')
+    const manual = (await discoverFederatedProjectRules(project, 'session-desktop-1')).find(rule => rule.originalPath === manualPath)!
+    await expect(saveRuleImportDecision({ projectPath: project, ruleId: manual.ruleId, decision: 'persistent' })).rejects.toThrow('Manual external rules')
+  })
+
+  test('serializes concurrent decisions without losing either update', async () => {
+    const project = await createProject()
+    const windsurfRule = path.join(project, '.windsurfrules')
+    await fs.writeFile(windsurfRule, 'Use npm.\n')
+    const rules = await discoverFederatedProjectRules(project, 'session-desktop-1')
+    const cursor = rules.find(rule => rule.source === 'cursor')!
+    const windsurf = rules.find(rule => rule.source === 'windsurf')!
+    await Promise.all([
+      saveRuleImportDecision({ projectPath: project, ruleId: cursor.ruleId, decision: 'persistent' }),
+      saveRuleImportDecision({ projectPath: project, ruleId: windsurf.ruleId, decision: 'ignore' }),
+    ])
+    const state = await fs.readFile(await getRuleFederationConfigPathForTest(project), 'utf-8')
+    expect(state).toContain(cursor.ruleId)
+    expect(state).toContain(windsurf.ruleId)
   })
 })
