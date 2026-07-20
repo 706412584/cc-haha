@@ -11,7 +11,7 @@ import {
   saveRuleImportDecision,
 } from '../../utils/projectRulesFederation.js'
 import { getOriginalCwd, setOriginalCwd } from '../../bootstrap/state.js'
-import { clearMemoryFileCaches, getMemoryFiles } from '../../utils/claudemd.js'
+import { clearMemoryFileCaches, getConditionalRulesForCwdLevelDirectory, getMemoryFiles } from '../../utils/claudemd.js'
 
 const tempProjects: string[] = []
 
@@ -253,6 +253,41 @@ describe('project-rules federation decisions', () => {
     expect(after.fingerprint).not.toBe(before.fingerprint)
     expect(after.decision).toBeUndefined()
     expect(await getImportedProjectRulePaths(project)).not.toContain(cursorRule)
+  })
+
+  test('applies approved conditional rules only to matching files through the real loader', async () => {
+    const project = await createProject()
+    const cursorDirectory = path.join(project, '.cursor', 'rules')
+    await fs.mkdir(cursorDirectory, { recursive: true })
+    const cursorRule = path.join(cursorDirectory, 'conditional.mdc')
+    await fs.writeFile(cursorRule, '---\nglobs: "src/**/*.{ts,tsx}"\nalwaysApply: false\n---\nUse strict types.\n')
+    const rule = (await discoverFederatedProjectRules(project)).find(candidate => candidate.originalPath === cursorRule)!
+    await saveRuleImportDecision({ projectPath: project, ruleId: rule.ruleId, decision: 'persistent' })
+    const previousCwd = getOriginalCwd()
+    try {
+      setOriginalCwd(project)
+      const ts = await getConditionalRulesForCwdLevelDirectory(project, path.join(project, 'src', 'a.ts'), new Set())
+      const tsx = await getConditionalRulesForCwdLevelDirectory(project, path.join(project, 'src', 'a.tsx'), new Set())
+      const js = await getConditionalRulesForCwdLevelDirectory(project, path.join(project, 'src', 'a.js'), new Set())
+      expect(ts.some(file => file.path === cursorRule)).toBe(true)
+      expect(tsx.some(file => file.path === cursorRule)).toBe(true)
+      expect(js.some(file => file.path === cursorRule)).toBe(false)
+    } finally {
+      setOriginalCwd(previousCwd)
+      clearMemoryFileCaches()
+    }
+  })
+
+  test('bounds hostile brace expansion before authorization', async () => {
+    const project = await createProject()
+    const cursorDirectory = path.join(project, '.cursor', 'rules')
+    await fs.mkdir(cursorDirectory, { recursive: true })
+    const cursorRule = path.join(cursorDirectory, 'hostile.mdc')
+    const hostile = Array.from({ length: 30 }, () => '{a,b}').join('')
+    await fs.writeFile(cursorRule, `---\nglobs: "${hostile}"\nalwaysApply: false\n---\nDo not expand me.\n`)
+    const rule = (await discoverFederatedProjectRules(project)).find(candidate => candidate.originalPath === cursorRule)!
+    expect(rule.applicability).toBe('manual')
+    await expect(saveRuleImportDecision({ projectPath: project, ruleId: rule.ruleId, decision: 'persistent' })).rejects.toThrow('Manual external rules')
   })
 
   test('expands brace globs for conditional provider rules', async () => {

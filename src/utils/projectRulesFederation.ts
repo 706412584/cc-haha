@@ -87,8 +87,23 @@ async function safeProjectRoot(projectPath: string): Promise<string> {
   return await fs.realpath(projectPath)
 }
 
+async function hasSymlinkPathComponent(projectRoot: string, candidate: string): Promise<boolean> {
+  const relativePath = path.relative(projectRoot, candidate)
+  if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) return true
+  let current = projectRoot
+  for (const segment of relativePath.split(path.sep)) {
+    current = path.join(current, segment)
+    try {
+      if ((await fs.lstat(current)).isSymbolicLink()) return true
+    } catch {
+      return true
+    }
+  }
+  return false
+}
+
 async function safeRulePath(projectRoot: string, candidate: string): Promise<string | null> {
-  if (!path.isAbsolute(candidate)) return null
+  if (!path.isAbsolute(candidate) || await hasSymlinkPathComponent(projectRoot, candidate)) return null
   try {
     const resolved = await fs.realpath(candidate)
     const root = normalizePath(projectRoot)
@@ -177,11 +192,51 @@ async function writeConfig(projectRoot: string, mutate: (config: RuleFederationC
   })
 }
 
+const MAX_GLOB_INPUT_BYTES = 4_096
+const MAX_GLOB_BRACE_DEPTH = 4
+const MAX_GLOB_BRACE_GROUPS = 8
+const MAX_EXPANDED_GLOBS = 256
+
+function validateGlobExpansionBudget(values: string[]): boolean {
+  if (values.length > 64) return false
+  let estimatedResults = 0
+  for (const value of values) {
+    if (Buffer.byteLength(value, 'utf8') > MAX_GLOB_INPUT_BYTES) return false
+    let depth = 0
+    let maxDepth = 0
+    let groups = 0
+    let combinations = 1
+    let groupStart = -1
+    for (let index = 0; index < value.length; index++) {
+      if (value[index] === '{') {
+        depth++
+        maxDepth = Math.max(maxDepth, depth)
+        if (depth === 1) groupStart = index + 1
+      } else if (value[index] === '}') {
+        if (depth === 0) return false
+        if (depth === 1 && groupStart >= 0) {
+          groups++
+          const choices = value.slice(groupStart, index).split(',').length
+          combinations *= Math.max(1, choices)
+          if (groups > MAX_GLOB_BRACE_GROUPS || combinations > MAX_EXPANDED_GLOBS) return false
+          groupStart = -1
+        }
+        depth--
+      }
+    }
+    if (depth !== 0 || maxDepth > MAX_GLOB_BRACE_DEPTH) return false
+    estimatedResults += combinations
+    if (estimatedResults > MAX_EXPANDED_GLOBS) return false
+  }
+  return true
+}
+
 function parsePatterns(value: unknown): string[] | undefined {
   if (typeof value !== 'string' && !Array.isArray(value)) return undefined
-  const values = Array.isArray(value) ? value.map(String) : value
+  const values = (Array.isArray(value) ? value.map(String) : [value]).map(item => item.trim()).filter(Boolean)
+  if (!validateGlobExpansionBudget(values)) return undefined
   const patterns = splitPathInFrontmatter(values).map(item => item.trim()).filter(Boolean)
-  return patterns.length > 0 ? patterns : undefined
+  return patterns.length > 0 && patterns.length <= MAX_EXPANDED_GLOBS ? patterns : undefined
 }
 
 function parseRuleContent(

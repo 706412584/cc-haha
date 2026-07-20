@@ -210,7 +210,10 @@ async function updateRuleDecision(req: Request): Promise<Response> {
       const sessionWorkDir = await sessionService.getSessionWorkDir(body.sessionId)
       const requestedRoot = findGitRoot(body.cwd) ?? body.cwd
       const sessionRoot = sessionWorkDir ? (findGitRoot(sessionWorkDir) ?? sessionWorkDir) : null
-      if (!sessionRoot || path.resolve(sessionRoot) !== path.resolve(requestedRoot)) {
+      const requestedIdentity = await fs.realpath(requestedRoot).catch(() => path.resolve(requestedRoot))
+      const sessionIdentity = sessionRoot ? await fs.realpath(sessionRoot).catch(() => path.resolve(sessionRoot)) : null
+      const normalized = (value: string) => process.platform === 'win32' ? value.normalize('NFC').toLowerCase() : value.normalize('NFC')
+      if (!sessionIdentity || normalized(sessionIdentity) !== normalized(requestedIdentity)) {
         return Response.json({ error: 'Session does not belong to the requested project checkout' }, { status: 403 })
       }
     }
