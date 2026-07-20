@@ -29,6 +29,12 @@ const SOLO_PRODUCT_KEYS = [
   'session.soloPipelineChipTooltip',
 ] as const
 
+const RE_PRODUCT_KEYS = [
+  'chat.rePipelineMode',
+  'session.rePipelineChip',
+  'session.rePipelineChipTooltip',
+] as const
+
 describe('Solo mode i18n naming contract', () => {
   for (const locale of Object.keys(LOCALES) as Locale[]) {
     describe(`locale: ${locale}`, () => {
@@ -59,6 +65,21 @@ describe('Solo mode i18n naming contract', () => {
             expect(value).not.toContain(phrase)
           }
         }
+      })
+
+      for (const key of RE_PRODUCT_KEYS) {
+        it(`${key} is defined for RE pipeline UI`, () => {
+          const dict = LOCALES[locale] as Record<string, string>
+          const value = dict[key]
+          expect(value).toBeDefined()
+          expect(typeof value).toBe('string')
+          expect(value!.length).toBeGreaterThan(0)
+        })
+      }
+
+      it('session.rePipelineChip uses the literal product token "RE"', () => {
+        const dict = LOCALES[locale] as Record<string, string>
+        expect(dict['session.rePipelineChip']).toContain('RE')
       })
     })
   }

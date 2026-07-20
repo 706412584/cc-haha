@@ -175,9 +175,11 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   const coordinatorMode = useSessionRuntimeStore((state) =>
     activeTabId ? state.coordinatorModes[activeTabId] ?? false : false,
   )
-  const soloPipelineMode = useSessionRuntimeStore((state) =>
-    activeTabId ? state.soloPipelineModes[activeTabId] ?? false : false,
+  const pipelineMode = useSessionRuntimeStore((state) =>
+    activeTabId ? state.pipelineModes[activeTabId] ?? 'normal' : 'normal',
   )
+  const soloPipelineMode = pipelineMode === 'solo'
+  const rePipelineMode = pipelineMode === 're'
   const currentModel = useSettingsStore((state) => state.currentModel)
   const chatSendBehavior = useSettingsStore((state) => state.chatSendBehavior)
   const runtimeSelectionKey = runtimeSelection
@@ -1148,6 +1150,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   const pluginsLabel = t('chat.openPlugins')
   const coordinatorModeLabel = t('chat.coordinatorMode')
   const soloPipelineModeLabel = t('chat.soloPipelineMode')
+  const rePipelineModeLabel = t('chat.rePipelineMode')
 
   return (
     <div
@@ -1632,7 +1635,10 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
                         {activeTabId && (
                           <button
                             onClick={() => {
-                              useChatStore.getState().setSessionSoloPipelineMode(activeTabId, !soloPipelineMode)
+                              useChatStore.getState().setSessionPipelineMode(
+                                activeTabId,
+                                soloPipelineMode ? 'normal' : 'solo',
+                              )
                               setPlusMenuOpen(false)
                             }}
                             className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
@@ -1640,6 +1646,24 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
                             <span className={`material-symbols-outlined text-[18px] ${soloPipelineMode ? 'text-[var(--color-primary)]' : 'text-[var(--color-text-secondary)]'}`}>linear_scale</span>
                             <span className="flex-1 text-sm text-[var(--color-text-primary)]">{soloPipelineModeLabel}</span>
                             {soloPipelineMode && (
+                              <span className="material-symbols-outlined text-[18px] text-[var(--color-primary)]">check</span>
+                            )}
+                          </button>
+                        )}
+                        {activeTabId && (
+                          <button
+                            onClick={() => {
+                              useChatStore.getState().setSessionPipelineMode(
+                                activeTabId,
+                                rePipelineMode ? 'normal' : 're',
+                              )
+                              setPlusMenuOpen(false)
+                            }}
+                            className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
+                          >
+                            <span className={`material-symbols-outlined text-[18px] ${rePipelineMode ? 'text-[var(--color-primary)]' : 'text-[var(--color-text-secondary)]'}`}>troubleshoot</span>
+                            <span className="flex-1 text-sm text-[var(--color-text-primary)]">{rePipelineModeLabel}</span>
+                            {rePipelineMode && (
                               <span className="material-symbols-outlined text-[18px] text-[var(--color-primary)]">check</span>
                             )}
                           </button>

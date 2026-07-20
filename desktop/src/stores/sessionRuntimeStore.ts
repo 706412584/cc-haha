@@ -10,6 +10,10 @@ import {
 const STORAGE_KEY = 'cc-haha-session-runtime'
 const COORDINATOR_STORAGE_KEY = 'cc-haha-session-coordinator'
 const SOLO_PIPELINE_STORAGE_KEY = 'cc-haha-session-solo-pipeline'
+/** Persisted pipeline flavor map (non-normal only). Migrates old boolean map. */
+const PIPELINE_MODE_STORAGE_KEY = 'cc-haha-session-pipeline-mode'
+
+export type PipelineModeFlavor = 'solo' | 're' | 'normal'
 const HANDOFF_STORAGE_KEY = 'cc-haha-session-handoff'
 const RETIRED_GROK_MODEL_IDS = new Set([
   'grok-build',
@@ -47,11 +51,15 @@ type SessionRuntimeStore = {
   /** Per-session orchestration ("协调") mode toggle. Absent/false = off. */
   coordinatorModes: Record<string, boolean>
   /**
-   * Per-session Solo Pipeline mode toggle. Absent/false = off. Mutually
-   * exclusive with `coordinatorModes` at the chatStore action layer
-   * (setSessionSoloPipelineMode clears coordinator and vice versa); the
-   * raw runtime store is intentionally orthogonal so each map stays a
-   * simple persistence-backed mirror of the user's toggle state.
+   * Per-session pipeline flavor. Absent / missing = `'normal'` (off).
+   * Values are only `'solo' | 're'` when enabled. Mutually exclusive with
+   * `coordinatorModes` at the chatStore action layer; the raw runtime
+   * store stays orthogonal for simple persistence.
+   */
+  pipelineModes: Record<string, Exclude<PipelineModeFlavor, 'normal'>>
+  /**
+   * @deprecated Derived convenience: `pipelineModes[id] === 'solo'`.
+   * Prefer `pipelineModes` / `getPipelineMode`.
    */
   soloPipelineModes: Record<string, boolean>
   /** Per-session hand-off context info. Absent = no hand-off attached. */
@@ -60,10 +68,29 @@ type SessionRuntimeStore = {
   clearSelection: (key: string) => void
   moveSelection: (fromKey: string, toKey: string) => void
   setCoordinatorMode: (key: string, enabled: boolean) => void
+  setPipelineMode: (key: string, flavor: PipelineModeFlavor) => void
   setSoloPipelineMode: (key: string, enabled: boolean) => void
   setHandoffInfo: (key: string, info: SessionHandoffInfo) => void
   clearHandoffInfo: (key: string) => void
   syncFromSessions: (sessions: SessionListItem[]) => void
+}
+
+function toSoloBooleanMap(
+  modes: Record<string, Exclude<PipelineModeFlavor, 'normal'>>,
+  previousSolo: Record<string, boolean> = {},
+): Record<string, boolean> {
+  // Preserve keys that were previously tracked as Solo so callers that read
+  // `soloPipelineModes[id] === false` (legacy off) keep working. Keys that
+  // never existed stay absent (normal default).
+  const out: Record<string, boolean> = {}
+  for (const key of Object.keys(previousSolo)) {
+    out[key] = false
+  }
+  for (const [key, flavor] of Object.entries(modes)) {
+    if (flavor === 'solo') out[key] = true
+    else if (key in out) out[key] = false
+  }
+  return out
 }
 
 function normalizeSelection(selection: RuntimeSelection): RuntimeSelection {
@@ -145,22 +172,46 @@ function persistCoordinatorModes(modes: Record<string, boolean>) {
   }
 }
 
-function loadSoloPipelineModes(): Record<string, boolean> {
+function loadPipelineModes(): Record<string, Exclude<PipelineModeFlavor, 'normal'>> {
   if (typeof localStorage === 'undefined') return {}
   try {
-    const raw = localStorage.getItem(SOLO_PIPELINE_STORAGE_KEY)
-    if (!raw) return {}
-    const parsed = JSON.parse(raw) as Record<string, boolean>
-    return parsed && typeof parsed === 'object' ? parsed : {}
+    const rawNew = localStorage.getItem(PIPELINE_MODE_STORAGE_KEY)
+    if (rawNew) {
+      const parsed = JSON.parse(rawNew) as Record<string, unknown>
+      if (!parsed || typeof parsed !== 'object') return {}
+      const out: Record<string, Exclude<PipelineModeFlavor, 'normal'>> = {}
+      for (const [key, value] of Object.entries(parsed)) {
+        if (value === 'solo' || value === 're') out[key] = value
+      }
+      return out
+    }
+    // Migrate legacy boolean Solo map → flavor map
+    const rawLegacy = localStorage.getItem(SOLO_PIPELINE_STORAGE_KEY)
+    if (!rawLegacy) return {}
+    const parsed = JSON.parse(rawLegacy) as Record<string, unknown>
+    if (!parsed || typeof parsed !== 'object') return {}
+    const out: Record<string, Exclude<PipelineModeFlavor, 'normal'>> = {}
+    for (const [key, value] of Object.entries(parsed)) {
+      if (value === true) out[key] = 'solo'
+    }
+    if (Object.keys(out).length > 0) persistPipelineModes(out)
+    return out
   } catch {
     return {}
   }
 }
 
-function persistSoloPipelineModes(modes: Record<string, boolean>) {
+function persistPipelineModes(
+  modes: Record<string, Exclude<PipelineModeFlavor, 'normal'>>,
+) {
   if (typeof localStorage === 'undefined') return
   try {
-    localStorage.setItem(SOLO_PIPELINE_STORAGE_KEY, JSON.stringify(modes))
+    localStorage.setItem(PIPELINE_MODE_STORAGE_KEY, JSON.stringify(modes))
+    // Keep legacy key in sync for older builds during rollout.
+    localStorage.setItem(
+      SOLO_PIPELINE_STORAGE_KEY,
+      JSON.stringify(toSoloBooleanMap(modes)),
+    )
   } catch {
     // noop
   }
@@ -187,10 +238,13 @@ function persistHandoffInfo(info: Record<string, SessionHandoffInfo>) {
   }
 }
 
-export const useSessionRuntimeStore = create<SessionRuntimeStore>((set) => ({
+export const useSessionRuntimeStore = create<SessionRuntimeStore>((set) => {
+  const initialPipelineModes = loadPipelineModes()
+  return {
   selections: loadSelections(),
   coordinatorModes: loadCoordinatorModes(),
-  soloPipelineModes: loadSoloPipelineModes(),
+  pipelineModes: initialPipelineModes,
+  soloPipelineModes: toSoloBooleanMap(initialPipelineModes),
   handoffInfo: loadHandoffInfo(),
 
   setSelection: (key, selection) =>
@@ -207,9 +261,9 @@ export const useSessionRuntimeStore = create<SessionRuntimeStore>((set) => ({
     set((state) => {
       const hadSelection = key in state.selections
       const hadCoordinator = key in state.coordinatorModes
-      const hadSoloPipeline = key in state.soloPipelineModes
+      const hadPipeline = key in state.pipelineModes
       const hadHandoff = key in state.handoffInfo
-      if (!hadSelection && !hadCoordinator && !hadSoloPipeline && !hadHandoff) return state
+      if (!hadSelection && !hadCoordinator && !hadPipeline && !hadHandoff) return state
 
       const next: Partial<SessionRuntimeStore> = {}
       if (hadSelection) {
@@ -222,10 +276,11 @@ export const useSessionRuntimeStore = create<SessionRuntimeStore>((set) => ({
         persistCoordinatorModes(rest)
         next.coordinatorModes = rest
       }
-      if (hadSoloPipeline) {
-        const { [key]: _removed, ...rest } = state.soloPipelineModes
-        persistSoloPipelineModes(rest)
-        next.soloPipelineModes = rest
+      if (hadPipeline) {
+        const { [key]: _removed, ...rest } = state.pipelineModes
+        persistPipelineModes(rest)
+        next.pipelineModes = rest
+        next.soloPipelineModes = toSoloBooleanMap(rest)
       }
       if (hadHandoff) {
         const { [key]: _removed, ...rest } = state.handoffInfo
@@ -239,9 +294,9 @@ export const useSessionRuntimeStore = create<SessionRuntimeStore>((set) => ({
     set((state) => {
       const selection = state.selections[fromKey]
       const coordinator = state.coordinatorModes[fromKey]
-      const soloPipeline = state.soloPipelineModes[fromKey]
+      const pipeline = state.pipelineModes[fromKey]
       const handoff = state.handoffInfo[fromKey]
-      if (!selection && coordinator === undefined && soloPipeline === undefined && !handoff) return state
+      if (!selection && coordinator === undefined && pipeline === undefined && !handoff) return state
 
       const next: Partial<SessionRuntimeStore> = {}
       if (selection) {
@@ -254,10 +309,11 @@ export const useSessionRuntimeStore = create<SessionRuntimeStore>((set) => ({
         next.coordinatorModes = { ...rest, [toKey]: coordinator }
         persistCoordinatorModes(next.coordinatorModes)
       }
-      if (soloPipeline !== undefined) {
-        const { [fromKey]: _removed, ...rest } = state.soloPipelineModes
-        next.soloPipelineModes = { ...rest, [toKey]: soloPipeline }
-        persistSoloPipelineModes(next.soloPipelineModes)
+      if (pipeline !== undefined) {
+        const { [fromKey]: _removed, ...rest } = state.pipelineModes
+        next.pipelineModes = { ...rest, [toKey]: pipeline }
+        persistPipelineModes(next.pipelineModes)
+        next.soloPipelineModes = toSoloBooleanMap(next.pipelineModes)
       }
       if (handoff) {
         const { [fromKey]: _removed, ...rest } = state.handoffInfo
@@ -275,12 +331,47 @@ export const useSessionRuntimeStore = create<SessionRuntimeStore>((set) => ({
       return { coordinatorModes }
     }),
 
+  setPipelineMode: (key, flavor) =>
+    set((state) => {
+      const current = state.pipelineModes[key]
+      const currentFlavor: PipelineModeFlavor = current ?? 'normal'
+      if (currentFlavor === flavor) return state
+      const pipelineModes = { ...state.pipelineModes }
+      if (flavor === 'normal') {
+        delete pipelineModes[key]
+      } else {
+        pipelineModes[key] = flavor
+      }
+      persistPipelineModes(pipelineModes)
+      const previousSolo = { ...state.soloPipelineModes }
+      if (flavor === 'normal' || flavor === 're') {
+        // Explicitly mark this key as non-solo for legacy boolean readers.
+        previousSolo[key] = false
+      }
+      return {
+        pipelineModes,
+        soloPipelineModes: toSoloBooleanMap(pipelineModes, previousSolo),
+      }
+    }),
+
   setSoloPipelineMode: (key, enabled) =>
     set((state) => {
-      if ((state.soloPipelineModes[key] ?? false) === enabled) return state
-      const soloPipelineModes = { ...state.soloPipelineModes, [key]: enabled }
-      persistSoloPipelineModes(soloPipelineModes)
-      return { soloPipelineModes }
+      const nextFlavor: PipelineModeFlavor = enabled ? 'solo' : 'normal'
+      const current = state.pipelineModes[key]
+      const currentFlavor: PipelineModeFlavor = current ?? 'normal'
+      if (currentFlavor === nextFlavor) return state
+      const pipelineModes = { ...state.pipelineModes }
+      if (nextFlavor === 'normal') {
+        delete pipelineModes[key]
+      } else {
+        pipelineModes[key] = nextFlavor
+      }
+      persistPipelineModes(pipelineModes)
+      const previousSolo = { ...state.soloPipelineModes, [key]: enabled }
+      return {
+        pipelineModes,
+        soloPipelineModes: toSoloBooleanMap(pipelineModes, previousSolo),
+      }
     }),
 
   setHandoffInfo: (key, info) =>
@@ -327,4 +418,5 @@ export const useSessionRuntimeStore = create<SessionRuntimeStore>((set) => ({
       persistSelections(selections)
       return { selections }
     }),
-}))
+  }
+})

@@ -701,6 +701,29 @@ describe('ConversationService', () => {
     expect((svc as any).getRuntimeArgs({ soloPipelineMode: false })).not.toContain('--append-system-prompt')
   })
 
+  it('should append the RE Pipeline system prompt when pipelineFlavor is re', () => {
+    const svc = new ConversationService()
+    const args = (svc as any).getRuntimeArgs({ pipelineFlavor: 're' }) as string[]
+    const idx = args.indexOf('--append-system-prompt')
+    expect(idx).toBeGreaterThanOrEqual(0)
+    expect(args[idx + 1]).toContain('Reverse Engineering Pipeline Mode')
+    expect(args[idx + 1]).toContain('AUTHORIZED RE TASK')
+    expect(args[idx + 1]).toContain('STAGE 1 — INVENTORY')
+    expect(args[idx + 1]).not.toContain('A/B/C Plan Gate')
+  })
+
+  it('should not append Solo and RE prompts at once when only one flavor is set', () => {
+    const svc = new ConversationService()
+    const reArgs = (svc as any).getRuntimeArgs({ pipelineFlavor: 're' }) as string[]
+    const soloArgs = (svc as any).getRuntimeArgs({ pipelineFlavor: 'solo' }) as string[]
+    const reText = reArgs[reArgs.indexOf('--append-system-prompt') + 1] ?? ''
+    const soloText = soloArgs[soloArgs.indexOf('--append-system-prompt') + 1] ?? ''
+    expect(reText).toContain('Reverse Engineering Pipeline Mode')
+    expect(soloText).toContain('Solo Pipeline mode')
+    expect(reText).not.toContain('Solo Pipeline mode')
+    expect(soloText).not.toContain('Reverse Engineering Pipeline Mode')
+  })
+
   it('routes coordinator and Solo into separate --append-system-prompt slots when both flags are set', () => {
     // The WS handler enforces mutual exclusion, but getRuntimeArgs must still
     // produce a deterministic shape if a caller somehow passes both true —
