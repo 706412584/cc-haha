@@ -45,18 +45,25 @@ describe('image unsupported API errors', () => {
 
 describe('retried API error metadata', () => {
   test('adds the bounded retry count and request ID to the final user-visible error', () => {
-    const body = { type: 'error', error: { type: 'api_error', message: 'temporary' } }
-    const error = new APIError(undefined, body, JSON.stringify(body), undefined)
-    const message = getAssistantMessageFromError(error, 'claude-test', {
-      retryCount: 2,
-      requestId: 'req-create-final',
-    })
-    expect(message.message.content[0]).toMatchObject({
-      type: 'text',
-      text: expect.stringContaining('Retried 2 times.'),
-    })
-    expect(message.requestId).toBe('req-create-final')
-    expect(String(message.errorDetails ?? '')).not.toContain('req-create-final')
+    const previousApiKey = process.env.ANTHROPIC_API_KEY
+    process.env.ANTHROPIC_API_KEY = 'sk-ant-test'
+    try {
+      const body = { type: 'error', error: { type: 'api_error', message: 'temporary' } }
+      const error = new APIError(undefined, body, JSON.stringify(body), undefined)
+      const message = getAssistantMessageFromError(error, 'claude-test', {
+        retryCount: 2,
+        requestId: 'req-create-final',
+      })
+      expect(message.message.content[0]).toMatchObject({
+        type: 'text',
+        text: expect.stringContaining('Retried 2 times.'),
+      })
+      expect(message.requestId).toBe('req-create-final')
+      expect(String(message.errorDetails ?? '')).not.toContain('req-create-final')
+    } finally {
+      if (previousApiKey === undefined) delete process.env.ANTHROPIC_API_KEY
+      else process.env.ANTHROPIC_API_KEY = previousApiKey
+    }
   })
 })
 
