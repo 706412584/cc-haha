@@ -1,6 +1,6 @@
 import { lstat, readdir, stat } from 'node:fs/promises'
 import { basename, join, relative, resolve, sep } from 'node:path'
-import { getClaudeConfigHomeDir } from '../../../utils/envUtils.js'
+import { getClaudeConfigHomeDir, parseMegabyteEnvToBytes } from '../../../utils/envUtils.js'
 import {
   getLocalIndexDatabasePath,
   resolveLocalIndexMode,
@@ -1481,4 +1481,6 @@ export function createLocalIndexCoordinator(
 
 // Construction is intentionally side-effect free. The active config scope and
 // database path are resolved only when start() is called after Bun.serve().
-export const localIndexCoordinator = createLocalIndexCoordinator()
+export const localIndexCoordinator = createLocalIndexCoordinator({
+  storageLimitBytes: parseMegabyteEnvToBytes(process.env.CC_HAHA_LOCAL_INDEX_LIMIT_MB),
+})

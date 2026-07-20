@@ -94,6 +94,19 @@ export function parseEnvVars(
 }
 
 /**
+ * Parse an MB-valued env var into bytes. Returns undefined when unset or invalid
+ * so callers fall back to their own hardcoded default.
+ */
+export function parseMegabyteEnvToBytes(
+  raw: string | undefined,
+): number | undefined {
+  if (raw === undefined) return undefined
+  const mb = Number(raw.trim())
+  if (!Number.isFinite(mb) || mb <= 0) return undefined
+  return Math.trunc(mb) * 1024 * 1024
+}
+
+/**
  * Get the AWS region with fallback to default
  * Matches the Anthropic Bedrock SDK's region behavior
  */

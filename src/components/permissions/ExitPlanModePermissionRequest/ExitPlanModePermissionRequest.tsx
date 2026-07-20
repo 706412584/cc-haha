@@ -160,6 +160,25 @@ export function ExitPlanModePermissionRequest({
     isBypassPermissionsModeAvailable,
     onFeedbackChange: setPlanFeedback
   }), [showClearContext, showUltraplan, usage, mode, messages, isAutoModeAvailable, isBypassPermissionsModeAvailable]);
+  // Focus the option that preserves the user's prePlanMode by default, so a
+  // bare Enter keeps the permission mode they had before plan mode. Without
+  // this, focus falls back to the first option, which for a bypass-mode user
+  // silently demotes them to acceptEdits/default on Enter (issue: "plan exit
+  // resets bypass → ask"). Users can still arrow to any other option.
+  const prePlanMode = toolPermissionContext.prePlanMode;
+  const defaultFocusValue = useMemo<ResponseValue | undefined>(() => {
+    if (!prePlanMode) return undefined;
+    if (feature('TRANSCRIPT_CLASSIFIER') && prePlanMode === 'auto' && isAutoModeAvailable) {
+      return 'yes-resume-auto-mode';
+    }
+    if (prePlanMode === 'bypassPermissions' || prePlanMode === 'acceptEdits') {
+      return 'yes-accept-edits-keep-context';
+    }
+    if (prePlanMode === 'default') {
+      return 'yes-default-keep-context';
+    }
+    return undefined;
+  }, [prePlanMode, isAutoModeAvailable]);
   function onImagePaste(base64Image: string, mediaType?: string, filename?: string, dimensions?: ImageDimensions, _sourcePath?: string) {
     const pasteId = nextPasteIdRef.current++;
     const newContent: PastedContent = {
@@ -539,7 +558,7 @@ export function ExitPlanModePermissionRequest({
     setStickyFooter(<Box flexDirection="column" borderStyle="round" borderColor="planMode" borderLeft={false} borderRight={false} borderBottom={false} paddingX={1}>
         <Text dimColor>Would you like to proceed?</Text>
         <Box marginTop={1}>
-          <Select options={options} onChange={v => void handleResponseRef.current(v)} onCancel={() => handleCancelRef.current?.()} onImagePaste={onImagePaste} pastedContents={pastedContents} onRemoveImage={onRemoveImage} />
+          <Select options={options} defaultFocusValue={defaultFocusValue} onChange={v => void handleResponseRef.current(v)} onCancel={() => handleCancelRef.current?.()} onImagePaste={onImagePaste} pastedContents={pastedContents} onRemoveImage={onRemoveImage} />
         </Box>
         {editorName && <Box flexDirection="row" gap={1} marginTop={1}>
             <Text dimColor>ctrl-g to edit in </Text>
@@ -652,7 +671,7 @@ export function ExitPlanModePermissionRequest({
                   you like to proceed?
                 </Text>
                 <Box marginTop={1}>
-                  <Select options={options} onChange={handleResponse} onCancel={() => handleCancelRef.current?.()} onImagePaste={onImagePaste} pastedContents={pastedContents} onRemoveImage={onRemoveImage} />
+                  <Select options={options} defaultFocusValue={defaultFocusValue} onChange={handleResponse} onCancel={() => handleCancelRef.current?.()} onImagePaste={onImagePaste} pastedContents={pastedContents} onRemoveImage={onRemoveImage} />
                 </Box>
               </>}
           </Box>
