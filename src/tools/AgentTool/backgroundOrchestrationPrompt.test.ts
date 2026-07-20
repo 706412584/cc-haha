@@ -62,6 +62,15 @@ describe('background agent orchestration guidance', () => {
       'Only say that you are waiting when every remaining task depends on the background result',
     )
     expect(prompt).not.toContain(OLD_COORDINATOR_RULE)
+    expect(prompt).toContain(
+      'A pending, unblocked task owned by `main-agent` is executable work',
+    )
+    expect(prompt).toContain(
+      'A status update, plan restatement, or promise to continue does not count as executing that work',
+    )
+    expect(prompt).toContain(
+      'Before ending any turn, inspect the task list',
+    )
   })
 
   test('normal Agent prompt requires a restrained parallel kickoff contract', async () => {

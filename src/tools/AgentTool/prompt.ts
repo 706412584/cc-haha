@@ -59,6 +59,8 @@ const BACKGROUND_ORCHESTRATION_RULE = [
   '',
   `After launching a background agent, continue in the same turn with the lowest-ordered or currently executable unblocked work. Do not end your turn merely because a background agent is running. If unblocked work exists, briefly tell the user which agent is running and what you are continuing, then actually perform that work in the same turn — for example, "The release audit is running; I'm continuing the independent formatting check." Only say that you are waiting when every remaining task depends on the background result, requires user input, or is complete.`,
   '',
+  'A pending, unblocked task owned by `main-agent` is executable work; ownership reserves it for the primary agent and does not make it unavailable. This rule applies on every turn, not only the turn that launched an agent. Before ending any turn, inspect the task list. If such a task exists, mark the lowest-ID one in_progress and immediately perform a real non-Task tool action for it in the same turn. A status update, plan restatement, or promise to continue does not count as executing that work.',
+  '',
   "Never sleep, poll, check progress, or read an agent's `output_file` while it runs. Wait for the automatic completion notification while doing other executable work.",
 ].join('\n')
 
