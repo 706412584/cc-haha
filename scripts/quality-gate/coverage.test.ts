@@ -381,6 +381,32 @@ describe('coverage gate helpers', () => {
     expect(result.failures).toEqual([])
   })
 
+  test('excludes UI entrypoints that Bun cannot instrument from root-runtime changed lines', () => {
+    const changedLines = parseChangedLinesFromDiff([
+      'diff --git a/src/screens/REPL.tsx b/src/screens/REPL.tsx',
+      '--- a/src/screens/REPL.tsx',
+      '+++ b/src/screens/REPL.tsx',
+      '@@ -1,0 +1,1 @@',
+      '+export const REPL = () => null',
+    ].join('\n'))
+
+    const result = evaluateChangedLineCoverage(
+      changedLines,
+      new Map(),
+      [{
+        id: 'root-runtime',
+        title: 'Root runtime',
+        includePrefixes: ['src/'],
+        excludePrefixes: ['src/cli/', 'src/hooks/', 'src/screens/'],
+      }],
+      90,
+    )
+
+    expect(result.files).toEqual([])
+    expect(result.total).toBe(0)
+    expect(result.failures).toEqual([])
+  })
+
   test('reports minimum threshold failures', () => {
     const failures = evaluateThresholds([
       {
