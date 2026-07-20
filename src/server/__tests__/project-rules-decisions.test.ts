@@ -238,6 +238,33 @@ describe('project-rules federation decisions', () => {
     await expect(saveRuleImportDecision({ projectPath: project, ruleId: manual.ruleId, decision: 'persistent' })).rejects.toThrow('Manual external rules')
   })
 
+  test('invalidates authorization when applicability expands without changing content', async () => {
+    const project = await createProject()
+    const cursorDirectory = path.join(project, '.cursor', 'rules')
+    await fs.mkdir(cursorDirectory, { recursive: true })
+    const cursorRule = path.join(cursorDirectory, 'scoped.mdc')
+    await fs.writeFile(cursorRule, '---\nglobs: "src/**/*.ts"\nalwaysApply: false\n---\nKeep this content.\n')
+    const before = (await discoverFederatedProjectRules(project)).find(rule => rule.originalPath === cursorRule)!
+    await saveRuleImportDecision({ projectPath: project, ruleId: before.ruleId, decision: 'persistent' })
+    expect((await getImportedProjectRulePaths(project)).includes(cursorRule)).toBe(false)
+
+    await fs.writeFile(cursorRule, '---\nalwaysApply: true\n---\nKeep this content.\n')
+    const after = (await discoverFederatedProjectRules(project)).find(rule => rule.originalPath === cursorRule)!
+    expect(after.fingerprint).not.toBe(before.fingerprint)
+    expect(after.decision).toBeUndefined()
+    expect(await getImportedProjectRulePaths(project)).not.toContain(cursorRule)
+  })
+
+  test('expands brace globs for conditional provider rules', async () => {
+    const project = await createProject()
+    const cursorDirectory = path.join(project, '.cursor', 'rules')
+    await fs.mkdir(cursorDirectory, { recursive: true })
+    const cursorRule = path.join(cursorDirectory, 'brace.mdc')
+    await fs.writeFile(cursorRule, '---\nglobs: "src/**/*.{ts,tsx}"\nalwaysApply: false\n---\nUse strict types.\n')
+    const rule = (await discoverFederatedProjectRules(project)).find(candidate => candidate.originalPath === cursorRule)!
+    expect(rule.scopes).toEqual(['src/**/*.ts', 'src/**/*.tsx'])
+  })
+
   test('serializes concurrent decisions without losing either update', async () => {
     const project = await createProject()
     const windsurfRule = path.join(project, '.windsurfrules')

@@ -83,7 +83,7 @@ describe('ProjectRulesSettings', () => {
         cwd: '/workspace/demo',
         ruleId: 'windsurf:.windsurfrules',
         decision: 'persistent',
-        sessionId: 'session-1',
+        sessionId: undefined,
       })
     })
     expect(apiMock.get).toHaveBeenCalledWith(

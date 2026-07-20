@@ -9,7 +9,7 @@ import type {
   RuleSourceAdapter,
 } from '../types/projectRules.js'
 import { getClaudeConfigHomeDir } from './envUtils.js'
-import { parseFrontmatter } from './frontmatterParser.js'
+import { parseFrontmatter, splitPathInFrontmatter } from './frontmatterParser.js'
 import { findCanonicalGitRoot } from './git.js'
 
 const MARKDOWN_EXTENSIONS = new Set(['.md', '.mdc'])
@@ -50,6 +50,7 @@ export type ImportedProjectRule = {
 type DiscoveredRule = NormalizedProjectRule & {
   verifiedPath: string
   content: string
+  contentFingerprint: string
   globs?: string[]
 }
 
@@ -140,13 +141,14 @@ async function withConfigLock<T>(filePath: string, operation: () => Promise<T>):
   const previous = configLocks.get(filePath) ?? Promise.resolve()
   let release!: () => void
   const current = new Promise<void>(resolve => { release = resolve })
-  configLocks.set(filePath, previous.then(() => current))
+  const chain = previous.then(() => current)
+  configLocks.set(filePath, chain)
   await previous
   try {
     return await operation()
   } finally {
     release()
-    if (configLocks.get(filePath) === current) configLocks.delete(filePath)
+    if (configLocks.get(filePath) === chain) configLocks.delete(filePath)
   }
 }
 
@@ -176,12 +178,9 @@ async function writeConfig(projectRoot: string, mutate: (config: RuleFederationC
 }
 
 function parsePatterns(value: unknown): string[] | undefined {
-  const values = Array.isArray(value)
-    ? value
-    : typeof value === 'string'
-      ? value.split(',')
-      : []
-  const patterns = values.map(item => String(item).trim()).filter(Boolean)
+  if (typeof value !== 'string' && !Array.isArray(value)) return undefined
+  const values = Array.isArray(value) ? value.map(String) : value
+  const patterns = splitPathInFrontmatter(values).map(item => item.trim()).filter(Boolean)
   return patterns.length > 0 ? patterns : undefined
 }
 
@@ -259,7 +258,7 @@ function createAdapter(
   return {
     source,
     async discover(projectPath) {
-      return (await discoverAdapterRules(source, isNative, candidates, projectPath)).map(({ verifiedPath: _path, content: _content, globs: _globs, ...rule }) => rule)
+      return (await discoverAdapterRules(source, isNative, candidates, projectPath)).map(({ verifiedPath: _path, content: _content, contentFingerprint: _contentFingerprint, globs: _globs, ...rule }) => rule)
     },
   }
 }
@@ -276,12 +275,18 @@ async function discoverAdapterRules(
   for (const candidate of discovered) {
     const verifiedPath = await safeRulePath(projectRoot, candidate.originalPath)
     if (!verifiedPath) continue
+    const pathStat = await fs.lstat(candidate.originalPath)
+    if (!pathStat.isFile() || pathStat.isSymbolicLink()) continue
     const before = await fs.stat(verifiedPath)
     const handle = await fs.open(verifiedPath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0))
     let rawContent: string
     try {
       const opened = await handle.stat()
-      if (!opened.isFile() || opened.size > 1_000_000) continue
+      if (!opened.isFile() || opened.size > 1_000_000 || pathStat.dev !== opened.dev || pathStat.ino !== opened.ino) continue
+      const openedPath = await fs.realpath(candidate.originalPath)
+      const root = normalizePath(projectRoot)
+      const value = normalizePath(openedPath)
+      if (value !== root && !value.startsWith(`${root}${path.sep}`)) continue
       rawContent = await handle.readFile('utf-8')
       const after = await handle.stat()
       const current = await fs.stat(verifiedPath)
@@ -292,13 +297,22 @@ async function discoverAdapterRules(
     const parsed = parseRuleContent(source, candidate.metadata, rawContent)
     const normalizedContent = normalizeText(parsed.content)
     if (!normalizedContent) continue
+    const normalizedGlobs = parsed.globs ? [...parsed.globs].sort() : []
+    const effectiveFingerprint = fingerprint(JSON.stringify({
+      source,
+      ruleId: ruleId(source, candidate.relativePath),
+      content: normalizedContent,
+      applicability: parsed.applicability,
+      globs: normalizedGlobs,
+    }))
     rules.push({
       source,
       ruleId: ruleId(source, candidate.relativePath),
       originalPath: candidate.originalPath,
       verifiedPath,
       canonicalPath: candidate.canonicalPath,
-      fingerprint: fingerprint(normalizedContent),
+      fingerprint: effectiveFingerprint,
+      contentFingerprint: fingerprint(normalizedContent),
       content: normalizedContent,
       globs: parsed.globs,
       isNative,
@@ -350,14 +364,14 @@ async function discoverRules(projectPath: string, sessionId?: string): Promise<D
   for (const rule of groups.flat()) {
     if (!rule.isNative) {
       const nativeMatch = accepted.find(candidate => candidate.isNative && (
-        candidate.fingerprint === rule.fingerprint || candidate.canonicalPath === rule.canonicalPath
+        candidate.contentFingerprint === rule.contentFingerprint || candidate.canonicalPath === rule.canonicalPath
       ))
       const priorMatch = nativeMatch ?? accepted.find(candidate =>
-        candidate.fingerprint === rule.fingerprint || candidate.canonicalPath === rule.canonicalPath
+        candidate.contentFingerprint === rule.contentFingerprint || candidate.canonicalPath === rule.canonicalPath
       )
       if (priorMatch) {
         rule.relatedRulePaths = [priorMatch.originalPath]
-        rule.status = priorMatch.fingerprint === rule.fingerprint
+        rule.status = priorMatch.contentFingerprint === rule.contentFingerprint
           ? (nativeMatch ? 'overridden-by-native' : 'duplicate')
           : 'conflict'
       }
@@ -375,7 +389,7 @@ async function discoverRules(projectPath: string, sessionId?: string): Promise<D
 }
 
 export async function discoverFederatedProjectRules(projectPath: string, sessionId?: string): Promise<NormalizedProjectRule[]> {
-  return (await discoverRules(projectPath, sessionId)).map(({ verifiedPath: _path, content: _content, globs: _globs, ...rule }) => rule)
+  return (await discoverRules(projectPath, sessionId)).map(({ verifiedPath: _path, content: _content, contentFingerprint: _contentFingerprint, globs: _globs, ...rule }) => rule)
 }
 
 function importedContent(rule: DiscoveredRule): string {
@@ -399,8 +413,8 @@ export async function getImportedProjectRules(projectPath: string, sessionId?: s
     const record = config.decisions[decisionKey(rule)]
     if (!record || record.fingerprint !== rule.fingerprint || record.source !== rule.source) continue
     if (record.decision !== 'persistent' && !(record.decision === 'session' && record.sessionId === sessionId)) continue
-    if (fingerprints.has(rule.fingerprint)) continue
-    fingerprints.add(rule.fingerprint)
+    if (fingerprints.has(rule.contentFingerprint)) continue
+    fingerprints.add(rule.contentFingerprint)
     imported.push({
       path: rule.verifiedPath,
       content: importedContent(rule),

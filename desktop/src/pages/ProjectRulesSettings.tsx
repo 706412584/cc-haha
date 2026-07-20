@@ -85,7 +85,7 @@ export function ProjectRulesSettings() {
         cwd: projectCwd,
         ruleId: rule.ruleId,
         decision,
-        sessionId: activeSessionId ?? undefined,
+        sessionId: decision === 'session' ? (activeSessionId ?? undefined) : undefined,
       })
       await fetchRules()
     } catch {

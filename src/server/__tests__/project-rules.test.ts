@@ -41,7 +41,7 @@ mock.module('fs/promises', () => ({
     if (!mockFiles.has(filePath)) {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
     }
-    return { isDirectory: () => false, isFile: () => true, isSymbolicLink: () => false }
+    return { isDirectory: () => false, isFile: () => true, isSymbolicLink: () => false, dev: 1, ino: filePath.length }
   },
   open: async (filePath: string) => {
     const content = mockFileContents.get(filePath) ?? ''

@@ -241,6 +241,7 @@ export class RetriableStreamError extends Error {
  * technique the overloaded-error check has always used (see shouldRetry).
  */
 export function isRetryableStreamError(error: unknown): boolean {
+  if (error instanceof APIError && error.status !== undefined) return false
   return hasAPIErrorType(
     error,
     'api_error',

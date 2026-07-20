@@ -325,6 +325,14 @@ describe('isRetryableStreamError', () => {
     expect(isRetryableStreamError(err)).toBe(false)
   })
 
+  test.each([400, 401, 403, 404, 422])('does not retry an explicit %i api_error', status => {
+    const err = apiErrorWithBody({
+      type: 'error',
+      error: { type: 'api_error', message: 'deterministic client failure' },
+    }, status)
+    expect(isRetryableStreamError(err)).toBe(false)
+  })
+
   test('does not match a non-APIError', () => {
     expect(
       isRetryableStreamError(new Error('Failed to generate a valid tool call.')),
