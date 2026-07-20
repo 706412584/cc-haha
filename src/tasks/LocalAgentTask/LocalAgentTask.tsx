@@ -949,7 +949,9 @@ function ensureAgentRegistryCapacity(agentId: string, setAppState: SetAppState):
       hasCapacity = true;
       return prev;
     }
-    const candidate = agentTasks.filter(task => isTerminalTaskStatus(task.status) && !task.retain).sort((a, b) => (a.endTime ?? a.startTime) - (b.endTime ?? b.startTime) || a.startTime - b.startTime || a.id.localeCompare(b.id))[0];
+    // Unnotified terminal tasks still own a completion retry. Evicting one here
+    // would permanently discard that model-visible completion under backpressure.
+    const candidate = agentTasks.filter(task => isTerminalTaskStatus(task.status) && task.notified === true && !task.retain).sort((a, b) => (a.endTime ?? a.startTime) - (b.endTime ?? b.startTime) || a.startTime - b.startTime || a.id.localeCompare(b.id))[0];
     if (!candidate) return prev;
     const {
       [candidate.id]: _evicted,
@@ -982,7 +984,7 @@ export function registerAsyncAgent({
   toolUseId?: string;
 }): LocalAgentTaskState {
   if (!ensureAgentRegistryCapacity(agentId, setAppState)) {
-    throw new Error(`Agent registry is full (${MAX_AGENT_REGISTRY_SIZE} active or retained tasks)`);
+    throw new Error(`Agent registry is full (${MAX_AGENT_REGISTRY_SIZE} tasks are running, retained, or awaiting completion delivery); retry after a task is notified and released`);
   }
   void initTaskOutputAsSymlink(agentId, getAgentTranscriptPath(asAgentId(agentId)));
 
@@ -1048,7 +1050,7 @@ export function registerAgentForeground({
   cancelAutoBackground?: () => void;
 } {
   if (!ensureAgentRegistryCapacity(agentId, setAppState)) {
-    throw new Error(`Agent registry is full (${MAX_AGENT_REGISTRY_SIZE} active or retained tasks)`);
+    throw new Error(`Agent registry is full (${MAX_AGENT_REGISTRY_SIZE} tasks are running, retained, or awaiting completion delivery); retry after a task is notified and released`);
   }
   void initTaskOutputAsSymlink(agentId, getAgentTranscriptPath(asAgentId(agentId)));
   const abortController = createAbortController();

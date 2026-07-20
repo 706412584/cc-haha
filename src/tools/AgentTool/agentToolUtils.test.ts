@@ -34,6 +34,7 @@ import {
   completeAgentTask,
   drainAgentCompletionInbox,
   enqueueAgentNotification,
+  failAgentTask,
   flushAndDrainAgentCompletionInbox,
   subscribeToAgentCompletionWake,
   killAsyncAgent,
@@ -294,8 +295,120 @@ describe('Agent runtime persistence', () => {
 })
 
 describe('bounded Agent registry', () => {
-  test('evicts the oldest terminal Agent without evicting running Agents', () => {
+  afterEach(() => resetCommandQueue())
+
+  test.each(['completed', 'failed', 'killed'] as const)(
+    'preserves an unnotified %s task under full queue backpressure until its completion is delivered once',
+    async status => {
+      const blockedTaskId = `agent-registry-blocked-${status}`
+      let appState = {
+        tasks: {},
+        agentCompletionInbox: Array.from({ length: 64 }, (_, index) => ({
+          version: 1 as const,
+          sequence: index + 1,
+          taskId: `agent-registry-inbox-${index}`,
+          epoch: 1,
+          notification: `<task-notification>registry-${index}</task-notification>`,
+        })),
+        nextAgentCompletionSequence: 65,
+        speculation: IDLE_SPECULATION_STATE,
+      } as unknown as AppState
+      const setAppState = (updater: (prev: AppState) => AppState): void => {
+        appState = updater(appState)
+      }
+      const selectedAgent = { agentType: 'general-purpose' } as never
+      for (let index = 0; index < 64; index++) {
+        const agentId = index === 0 ? blockedTaskId : `agent-registry-running-${index}`
+        const task = registerAsyncAgent({ agentId, description: agentId, prompt: agentId, selectedAgent, setAppState })
+        if (index === 0) {
+          if (status === 'completed') {
+            completeAgentTask({ agentId, content: [], totalToolUseCount: 0, totalDurationMs: 1, totalTokens: 0, usage: {} as never }, setAppState, task.epoch)
+          } else if (status === 'failed') {
+            failAgentTask(agentId, 'registry failure', setAppState, task.epoch)
+          } else {
+            killAsyncAgent(agentId, setAppState, task.epoch)
+          }
+        }
+      }
+      for (let index = 0; index < 4_096; index++) {
+        enqueue({ mode: 'prompt', value: `registry-user-${index}` })
+      }
+
+      expect(enqueueAgentNotification({
+        taskId: blockedTaskId,
+        description: blockedTaskId,
+        status,
+        error: status === 'failed' ? 'registry failure' : undefined,
+        setAppState,
+        epoch: 1,
+      })).toBe(false)
+      expect(() => registerAsyncAgent({
+        agentId: 'agent-registry-rejected',
+        description: 'rejected',
+        prompt: 'rejected',
+        selectedAgent,
+        setAppState,
+      })).toThrow('running, retained, or awaiting completion delivery')
+      expect(appState.tasks[blockedTaskId]?.status).toBe(status)
+      expect((appState.tasks[blockedTaskId] as LocalAgentTaskState).notified).toBe(false)
+      expect(appState.tasks['agent-registry-rejected']).toBeUndefined()
+      expect(Object.values(appState.tasks).filter(task => task.type === 'local_agent')).toHaveLength(64)
+
+      for (let index = 0; index < 64; index++) dequeue()
+      await flushAndDrainAgentCompletionInbox(setAppState)
+      expect((appState.tasks[blockedTaskId] as LocalAgentTaskState).notified).toBe(true)
+      expect(appState.agentCompletionInbox.map(item => item.taskId)).toEqual([blockedTaskId])
+
+      dequeueAllMatching(command => command.agentCompletion !== undefined)
+      await flushAndDrainAgentCompletionInbox(setAppState)
+      await flushAndDrainAgentCompletionInbox(setAppState)
+      expect(getCommandQueue().filter(command => command.agentCompletion?.taskId === blockedTaskId)).toHaveLength(1)
+    },
+  )
+
+  test('rejects registration when all registry slots are running or retained without changing existing state', () => {
     let appState = { tasks: {} } as unknown as AppState
+    const setAppState = (updater: (prev: AppState) => AppState): void => {
+      appState = updater(appState)
+    }
+    const selectedAgent = { agentType: 'general-purpose' } as never
+    for (let index = 0; index < 64; index++) {
+      const agentId = `agent-registry-protected-${index}`
+      registerAsyncAgent({ agentId, description: agentId, prompt: agentId, selectedAgent, setAppState })
+      if (index % 2 === 1) {
+        setAppState(prev => ({
+          ...prev,
+          tasks: {
+            ...prev.tasks,
+            [agentId]: {
+              ...(prev.tasks[agentId] as LocalAgentTaskState),
+              retain: true,
+            },
+          },
+        }))
+      }
+    }
+    const tasksBefore = appState.tasks
+
+    expect(() => registerAsyncAgent({
+      agentId: 'agent-registry-all-protected',
+      description: 'all protected',
+      prompt: 'all protected',
+      selectedAgent,
+      setAppState,
+    })).toThrow('running, retained, or awaiting completion delivery')
+    expect(appState.tasks).toBe(tasksBefore)
+    expect(appState.tasks['agent-registry-all-protected']).toBeUndefined()
+    expect(Object.values(appState.tasks).filter(task => task.type === 'local_agent')).toHaveLength(64)
+  })
+
+  test('evicts only the oldest notified terminal Agent without evicting running Agents', () => {
+    let appState = {
+      tasks: {},
+      agentCompletionInbox: [],
+      nextAgentCompletionSequence: 1,
+      speculation: IDLE_SPECULATION_STATE,
+    } as unknown as AppState
     const setAppState = (updater: (prev: AppState) => AppState): void => {
       appState = updater(appState)
     }
@@ -305,6 +418,7 @@ describe('bounded Agent registry', () => {
       const task = registerAsyncAgent({ agentId, description: agentId, prompt: agentId, selectedAgent, setAppState })
       if (index < 63) {
         completeAgentTask({ agentId, content: [], totalToolUseCount: 0, totalDurationMs: 1, totalTokens: 0, usage: {} as never }, setAppState, task.epoch)
+        enqueueAgentNotification({ taskId: agentId, description: agentId, status: 'completed', setAppState, epoch: task.epoch })
       }
     }
 
