@@ -156,7 +156,7 @@ const ROOT_RUNTIME_CHANGED_SCOPE: CoverageScope = {
   id: 'root-runtime',
   title: 'Root runtime',
   includePrefixes: ['src/'],
-  excludePrefixes: ['src/server/', 'src/tools/', 'src/utils/'],
+  excludePrefixes: ['src/server/', 'src/tools/', 'src/types/', 'src/utils/'],
   excludePathFragments: ['/__tests__/', '/fixtures/'],
   excludeSuffixes: ['.test.ts', '.test.tsx', '.d.ts'],
 }
