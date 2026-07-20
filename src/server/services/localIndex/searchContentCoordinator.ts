@@ -1,6 +1,6 @@
 import { lstat, readdir, rm } from 'node:fs/promises'
 import { basename, join, relative, resolve, sep } from 'node:path'
-import { getClaudeConfigHomeDir } from '../../../utils/envUtils.js'
+import { getClaudeConfigHomeDir, parseMegabyteEnvToBytes } from '../../../utils/envUtils.js'
 import { isConfirmedLocalIndexCorruption } from './recovery.js'
 import {
   getSearchContentDatabasePath,
@@ -843,4 +843,8 @@ export function createSearchContentCoordinator(
   return coordinator
 }
 
-export const searchContentCoordinator = createSearchContentCoordinator()
+export const searchContentCoordinator = createSearchContentCoordinator({
+  storageLimitBytes: parseMegabyteEnvToBytes(
+    process.env.CC_HAHA_SEARCH_INDEX_LIMIT_MB,
+  ),
+})
