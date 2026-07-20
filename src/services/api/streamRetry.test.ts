@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
-import Anthropic, { APIError } from '@anthropic-ai/sdk'
+import Anthropic, { APIConnectionError, APIError } from '@anthropic-ai/sdk'
 import { withStreamRetry } from './streamRetry.js'
 import {
   isRetryableStreamError,
@@ -139,6 +139,29 @@ describe('withStreamRetry', () => {
       delete process.env[RETRY_ENV]
     }
   })
+
+  test('uses four retries by default and only shows the final connection error', async () => {
+    delete process.env[RETRY_ENV]
+    let calls = 0
+    const connectionError = new APIConnectionError({
+      cause: new Error('The socket connection was closed unexpectedly.'),
+    })
+    const attempt = () =>
+      // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
+      (async function* (): AsyncGenerator<any, void> {
+        calls++
+        throw new RetriableStreamError(connectionError)
+      })()
+
+    const out = await collect(withStreamRetry(attempt, 'test-model', []))
+
+    expect(calls).toBe(5)
+    expect(out.filter(
+      m => m.type === 'assistant' && m.isApiErrorMessage === true,
+    )).toHaveLength(1)
+    const text = out.at(-1)?.message?.content?.find((block: { type: string }) => block.type === 'text')?.text
+    expect(text).toContain('Retried 4 times')
+  }, 15_000)
 
   test('retries after a transient mid-stream error and yields the successful attempt', async () => {
     process.env[RETRY_ENV] = '2'

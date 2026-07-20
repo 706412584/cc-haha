@@ -4610,6 +4610,141 @@ describe('chatStore history mapping', () => {
     expect(updateTabStatusMock).toHaveBeenLastCalledWith(TEST_SESSION_ID, 'running')
   })
 
+  it('marks the matching Agent card stopped before its terminal notification arrives', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          chatState: 'idle',
+          messages: [{
+            id: 'agent-tool-message',
+            type: 'tool_use',
+            toolName: 'Agent',
+            toolUseId: 'agent-tool-1',
+            input: { description: 'Verify screenshots' },
+            timestamp: 1,
+          }],
+          agentTaskNotifications: {},
+          backgroundAgentTasks: {
+            'agent-task-1': {
+              taskId: 'agent-task-1',
+              toolUseId: 'agent-tool-1',
+              status: 'running',
+              taskType: 'local_agent',
+              description: 'Verify screenshots',
+              startedAt: 1,
+              updatedAt: 2,
+            },
+          },
+        }),
+      },
+    })
+
+    useChatStore.getState().stopBackgroundTask(TEST_SESSION_ID, 'agent-task-1')
+
+    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.agentTaskNotifications['agent-tool-1']).toMatchObject({
+      taskId: 'agent-task-1',
+      toolUseId: 'agent-tool-1',
+      status: 'stopped',
+    })
+    expect(session?.messages).toContainEqual(expect.objectContaining({
+      type: 'tool_use',
+      toolUseId: 'agent-tool-1',
+      status: 'stopped',
+    }))
+  })
+
+  it('restores an Agent card to running when the stop request is rejected', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          chatState: 'idle',
+          messages: [{
+            id: 'agent-tool-message',
+            type: 'tool_use',
+            toolName: 'Agent',
+            toolUseId: 'agent-tool-1',
+            input: { description: 'Verify screenshots' },
+            timestamp: 1,
+          }],
+          agentTaskNotifications: {},
+          backgroundAgentTasks: {
+            'agent-task-1': {
+              taskId: 'agent-task-1',
+              toolUseId: 'agent-tool-1',
+              status: 'running',
+              taskType: 'local_agent',
+              description: 'Verify screenshots',
+              startedAt: 1,
+              updatedAt: 2,
+            },
+          },
+        }),
+      },
+    })
+    useChatStore.getState().stopBackgroundTask(TEST_SESSION_ID, 'agent-task-1')
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'background_task_stop_failed',
+      taskId: 'agent-task-1',
+      message: 'Task is no longer available',
+    })
+
+    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.backgroundAgentTasks?.['agent-task-1']?.status).toBe('running')
+    expect(updateTabStatusMock).toHaveBeenLastCalledWith(TEST_SESSION_ID, 'running')
+    expect(session?.agentTaskNotifications['agent-tool-1']).toBeUndefined()
+    expect(session?.messages).toContainEqual(expect.objectContaining({
+      type: 'tool_use',
+      toolUseId: 'agent-tool-1',
+      status: undefined,
+    }))
+  })
+
+  it('ignores a stale stop failure after a terminal notification wins the race', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          chatState: 'idle',
+          messages: [],
+          backgroundAgentTasks: {
+            'agent-task-1': {
+              taskId: 'agent-task-1',
+              toolUseId: 'agent-tool-1',
+              status: 'running',
+              taskType: 'local_agent',
+              description: 'Verify screenshots',
+              startedAt: 1,
+              updatedAt: 2,
+            },
+          },
+        }),
+      },
+    })
+    useChatStore.getState().stopBackgroundTask(TEST_SESSION_ID, 'agent-task-1')
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'system_notification',
+      subtype: 'task_notification',
+      data: {
+        task_id: 'agent-task-1',
+        tool_use_id: 'agent-tool-1',
+        status: 'completed',
+        summary: 'Agent completed',
+      },
+    })
+    const before = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages.length
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'background_task_stop_failed',
+      taskId: 'agent-task-1',
+      message: 'Task is no longer available',
+    })
+
+    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.backgroundAgentTasks?.['agent-task-1']?.status).toBe('completed')
+    expect(session?.messages).toHaveLength(before ?? 0)
+  })
+
   it('marks the tab idle after stopping the last running background task', () => {
     useChatStore.setState({
       sessions: {

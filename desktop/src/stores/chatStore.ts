@@ -1739,21 +1739,45 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (!task || task.status !== 'running' || session?.stoppingBackgroundTaskIds?.[taskId]) return
 
     set((state) => ({
-      sessions: updateSessionIn(state.sessions, sessionId, (current) => ({
-        backgroundAgentTasks: current.backgroundAgentTasks
-          ? {
-              ...current.backgroundAgentTasks,
-              [taskId]: {
-                ...current.backgroundAgentTasks[taskId]!,
-                status: 'stopped',
-              },
-            }
-          : current.backgroundAgentTasks,
-        stoppingBackgroundTaskIds: {
-          ...current.stoppingBackgroundTaskIds,
-          [taskId]: true,
-        },
-      })),
+      sessions: updateSessionIn(state.sessions, sessionId, (current) => {
+        const toolUseId = task.toolUseId
+        return {
+          messages: toolUseId
+            ? current.messages.map((message) =>
+                message.type === 'tool_use' && message.toolUseId === toolUseId
+                  ? { ...message, status: 'stopped' as const }
+                  : message,
+              )
+            : current.messages,
+          backgroundAgentTasks: current.backgroundAgentTasks
+            ? {
+                ...current.backgroundAgentTasks,
+                [taskId]: {
+                  ...current.backgroundAgentTasks[taskId]!,
+                  status: 'stopped',
+                },
+              }
+            : current.backgroundAgentTasks,
+          agentTaskNotifications: toolUseId && task.taskType === 'local_agent'
+            ? {
+                ...current.agentTaskNotifications,
+                [toolUseId]: {
+                  taskId,
+                  toolUseId,
+                  status: 'stopped',
+                  summary: task.summary ?? task.description,
+                  result: task.result,
+                  outputFile: task.outputFile,
+                  usage: task.usage,
+                },
+              }
+            : current.agentTaskNotifications,
+          stoppingBackgroundTaskIds: {
+            ...current.stoppingBackgroundTaskIds,
+            [taskId]: true,
+          },
+        }
+      }),
     }))
     const remainingTasks = get().sessions[sessionId]?.backgroundAgentTasks
     const hasRunningTasks = Object.values(remainingTasks ?? {}).some(
@@ -2940,28 +2964,54 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }
         break
 
-      case 'background_task_stop_failed':
+      case 'background_task_stop_failed': {
+        let rolledBackToRunning = false
         update((session) => {
           const stoppingBackgroundTaskIds = { ...session.stoppingBackgroundTaskIds }
+          const stopWasRequested = stoppingBackgroundTaskIds[msg.taskId] === true
           delete stoppingBackgroundTaskIds[msg.taskId]
-          const taskAlreadyFinished = session.backgroundAgentTasks?.[msg.taskId]?.status !== 'running'
+          const task = session.backgroundAgentTasks?.[msg.taskId]
+          const shouldRollbackOptimisticStop = stopWasRequested && task?.status === 'stopped'
+          if (!shouldRollbackOptimisticStop) {
+            return { stoppingBackgroundTaskIds }
+          }
+          rolledBackToRunning = true
+          const toolUseId = task.toolUseId
+          const backgroundAgentTasks = {
+            ...session.backgroundAgentTasks,
+            [msg.taskId]: { ...task, status: 'running' as const },
+          }
+          const agentTaskNotifications = toolUseId
+            ? { ...session.agentTaskNotifications }
+            : session.agentTaskNotifications
+          if (toolUseId) delete agentTaskNotifications[toolUseId]
           return {
             stoppingBackgroundTaskIds,
-            ...(taskAlreadyFinished ? {} : {
-              messages: [
-                ...session.messages,
-                {
-                  id: nextId(),
-                  type: 'error',
-                  message: msg.message,
-                  code: 'STOP_BACKGROUND_TASK_FAILED',
-                  timestamp: Date.now(),
-                },
-              ],
-            }),
+            backgroundAgentTasks,
+            agentTaskNotifications,
+            messages: [
+              ...(toolUseId
+                ? session.messages.map((message) =>
+                    message.type === 'tool_use' && message.toolUseId === toolUseId
+                      ? { ...message, status: undefined }
+                      : message,
+                  )
+                : session.messages),
+              {
+                id: nextId(),
+                type: 'error',
+                message: msg.message,
+                code: 'STOP_BACKGROUND_TASK_FAILED',
+                timestamp: Date.now(),
+              },
+            ],
           }
         })
+        if (rolledBackToRunning) {
+          useTabStore.getState().updateTabStatus(sessionId, 'running')
+        }
         break
+      }
 
       case 'team_created':
         useTeamStore.getState().handleTeamCreated(msg.teamName)
