@@ -22,7 +22,7 @@ import type { QueuedCommand } from '../../types/textInputTypes.js';
 import { createAbortController, createChildAbortController } from '../../utils/abortController.js';
 import { registerCleanup } from '../../utils/cleanupRegistry.js';
 import { getToolSearchOrReadInfo } from '../../utils/collapseReadSearch.js';
-import { enqueuePendingNotifications, getCommandQueueLength, MAX_COMMAND_QUEUE_SIZE } from '../../utils/messageQueueManager.js';
+import { enqueuePendingNotifications, getCommandQueue, getCommandQueueLength, MAX_COMMAND_QUEUE_SIZE } from '../../utils/messageQueueManager.js';
 import { getAgentTranscriptPath } from '../../utils/sessionStorage.js';
 import { evictTaskOutput, getTaskOutputPath, initTaskOutputAsSymlink } from '../../utils/task/diskOutput.js';
 import { PANEL_GRACE_MS, registerTask, updateTaskState } from '../../utils/task/framework.js';
@@ -941,6 +941,29 @@ export function failAgentTask(taskId: string, error: string, setAppState: SetApp
  *   the agent's abort controller will be a child that auto-aborts when parent aborts.
  *   This ensures subagents are aborted when their parent (e.g., in-process teammate) aborts.
  */
+function hasPendingAgentCompletion(task: LocalAgentTaskState, state: AppState): boolean {
+  if ((state.agentCompletionInbox ?? []).some(completion => completion.taskId === task.id && completion.epoch === task.epoch)) {
+    return true;
+  }
+  return getCommandQueue().some(command =>
+    command.agentCompletion?.taskId === task.id && command.agentCompletion.epoch === task.epoch
+  );
+}
+
+function findReclaimableAgentTask(state: AppState): LocalAgentTaskState | undefined {
+  return Object.values(state.tasks).filter(isLocalAgentTask).filter(task =>
+    isTerminalTaskStatus(task.status) &&
+    task.notified === true &&
+    !task.retain &&
+    !hasPendingAgentCompletion(task, state)
+  ).sort((a, b) => (a.endTime ?? a.startTime) - (b.endTime ?? b.startTime) || a.startTime - b.startTime || a.id.localeCompare(b.id))[0];
+}
+
+export function canRegisterLocalAgent(agentId: string, state: AppState): boolean {
+  const agentTasks = Object.values(state.tasks).filter(isLocalAgentTask);
+  return Boolean(state.tasks[agentId]) || agentTasks.length < MAX_AGENT_REGISTRY_SIZE || findReclaimableAgentTask(state) !== undefined;
+}
+
 function ensureAgentRegistryCapacity(agentId: string, setAppState: SetAppState): boolean {
   let hasCapacity = false;
   setAppState(prev => {
@@ -949,9 +972,10 @@ function ensureAgentRegistryCapacity(agentId: string, setAppState: SetAppState):
       hasCapacity = true;
       return prev;
     }
-    // Unnotified terminal tasks still own a completion retry. Evicting one here
-    // would permanently discard that model-visible completion under backpressure.
-    const candidate = agentTasks.filter(task => isTerminalTaskStatus(task.status) && task.notified === true && !task.retain).sort((a, b) => (a.endTime ?? a.startTime) - (b.endTime ?? b.startTime) || a.startTime - b.startTime || a.id.localeCompare(b.id))[0];
+    // A task cannot be reclaimed while its completion is waiting in either
+    // delivery queue: command validation still needs its epoch until the model
+    // consumes the notification. `notified` only means queued, not consumed.
+    const candidate = findReclaimableAgentTask(prev);
     if (!candidate) return prev;
     const {
       [candidate.id]: _evicted,

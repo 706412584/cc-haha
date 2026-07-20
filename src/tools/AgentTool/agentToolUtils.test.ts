@@ -402,7 +402,52 @@ describe('bounded Agent registry', () => {
     expect(Object.values(appState.tasks).filter(task => task.type === 'local_agent')).toHaveLength(64)
   })
 
-  test('evicts only the oldest notified terminal Agent without evicting running Agents', () => {
+  test('does not evict a terminal Agent until its queued completion is consumed', async () => {
+    let appState = {
+      tasks: {},
+      agentCompletionInbox: [],
+      nextAgentCompletionSequence: 1,
+      speculation: IDLE_SPECULATION_STATE,
+    } as unknown as AppState
+    const setAppState = (updater: (prev: AppState) => AppState): void => {
+      appState = updater(appState)
+    }
+    const selectedAgent = { agentType: 'general-purpose' } as never
+    for (let index = 0; index < 64; index++) {
+      const agentId = `agent-registry-queued-${String(index).padStart(2, '0')}`
+      const task = registerAsyncAgent({ agentId, description: agentId, prompt: agentId, selectedAgent, setAppState })
+      if (index < 63) {
+        completeAgentTask({ agentId, content: [], totalToolUseCount: 0, totalDurationMs: 1, totalTokens: 0, usage: {} as never }, setAppState, task.epoch)
+        enqueueAgentNotification({ taskId: agentId, description: agentId, status: 'completed', setAppState, epoch: task.epoch })
+      }
+    }
+
+    expect(() => registerAsyncAgent({
+      agentId: 'agent-registry-before-consumption',
+      description: 'before consumption',
+      prompt: 'before consumption',
+      selectedAgent,
+      setAppState,
+    })).toThrow('awaiting completion delivery')
+    expect(appState.tasks['agent-registry-queued-00']).toBeDefined()
+
+    drainAgentCompletionInbox(setAppState)
+    const queuedCompletions = dequeueAllMatching(command => command.agentCompletion !== undefined)
+    const attachments = await getQueuedCommandAttachments(queuedCompletions, appState)
+    expect(attachments).toHaveLength(63)
+
+    registerAsyncAgent({
+      agentId: 'agent-registry-after-consumption',
+      description: 'after consumption',
+      prompt: 'after consumption',
+      selectedAgent,
+      setAppState,
+    })
+    expect(appState.tasks['agent-registry-queued-00']).toBeUndefined()
+    expect(appState.tasks['agent-registry-after-consumption']).toBeDefined()
+  })
+
+  test('evicts only the oldest consumed terminal Agent without evicting running Agents', async () => {
     let appState = {
       tasks: {},
       agentCompletionInbox: [],
@@ -421,6 +466,10 @@ describe('bounded Agent registry', () => {
         enqueueAgentNotification({ taskId: agentId, description: agentId, status: 'completed', setAppState, epoch: task.epoch })
       }
     }
+
+    drainAgentCompletionInbox(setAppState)
+    const consumed = dequeueAllMatching(command => command.agentCompletion !== undefined)
+    expect(await getQueuedCommandAttachments(consumed, appState)).toHaveLength(63)
 
     registerAsyncAgent({ agentId: 'agent-registry-new', description: 'new', prompt: 'new', selectedAgent, setAppState })
 

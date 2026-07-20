@@ -11,7 +11,7 @@ import { startAgentSummarization } from '../../services/AgentSummary/agentSummar
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js';
 import { type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS, logEvent } from '../../services/analytics/index.js';
 import { clearDumpState } from '../../services/api/dumpPrompts.js';
-import { completeAgentTask as completeAsyncAgent, createActivityDescriptionResolver, createProgressTracker, enqueueAgentNotification, failAgentTask as failAsyncAgent, getProgressUpdate, getTokenCountFromTracker, isLocalAgentTask, isPanelAgentTask, killAsyncAgent, registerAgentForeground, registerAsyncAgent, unregisterAgentForeground, updateAgentProgress as updateAsyncAgentProgress, updateProgressFromMessage, applyAgentStallStatus } from '../../tasks/LocalAgentTask/LocalAgentTask.js';
+import { completeAgentTask as completeAsyncAgent, createActivityDescriptionResolver, createProgressTracker, enqueueAgentNotification, failAgentTask as failAsyncAgent, getProgressUpdate, getTokenCountFromTracker, isLocalAgentTask, isPanelAgentTask, killAsyncAgent, registerAgentForeground, registerAsyncAgent, unregisterAgentForeground, updateAgentProgress as updateAsyncAgentProgress, updateProgressFromMessage, applyAgentStallStatus, canRegisterLocalAgent, type LocalAgentTaskState } from '../../tasks/LocalAgentTask/LocalAgentTask.js';
 import { checkRemoteAgentEligibility, formatPreconditionError, getRemoteTaskSessionUrl, registerRemoteAgentTask } from '../../tasks/RemoteAgentTask/RemoteAgentTask.js';
 import { assembleToolPool } from '../../tools.js';
 import { asAgentId } from '../../types/ids.js';
@@ -775,6 +775,13 @@ export const AgentTool = buildTool({
     // Create a stable agent ID early so it can be used for worktree slug
     const earlyAgentId = createAgentId();
 
+    // Reject bounded-registry overflow before creating an isolation worktree.
+    // registerAsyncAgent/registerAgentForeground repeat this check atomically in
+    // case capacity changes while setup is awaiting I/O.
+    if (!isBackgroundTasksDisabled && !canRegisterLocalAgent(earlyAgentId, toolUseContext.getAppState())) {
+      throw new Error('Agent registry is full (64 tasks are running, retained, or awaiting completion delivery); retry after a task completion is consumed');
+    }
+
     // Set up worktree isolation if requested
     let worktreeInfo: {
       worktreePath: string;
@@ -836,6 +843,27 @@ export const AgentTool = buildTool({
     const cwdOverridePath = cwd ?? worktreeInfo?.worktreePath;
     const wrapWithCwd = <T,>(fn: () => T): T => cwdOverridePath ? runWithCwdOverride(cwdOverridePath, fn) : fn();
 
+    // Admission can fail after isolation is created (for example, when the
+    // bounded Agent registry fills while worktree setup is awaiting I/O). Roll
+    // back that external resource before surfacing the registration error.
+    const cleanupRejectedWorktree = async (): Promise<void> => {
+      if (!worktreeInfo) return;
+      const {
+        worktreePath,
+        worktreeBranch,
+        gitRoot,
+        hookBased
+      } = worktreeInfo;
+      worktreeInfo = null;
+      try {
+        await removeAgentWorktree(worktreePath, worktreeBranch, gitRoot, hookBased);
+      } catch (cleanupError) {
+        logForDebugging(`Failed to roll back rejected Agent worktree: ${errorMessage(cleanupError)}`, {
+          level: 'error'
+        });
+      }
+    };
+
     // Helper to clean up worktree after agent completes
     const cleanupWorktreeIfNeeded = async (): Promise<{
       worktreePath?: string;
@@ -881,17 +909,23 @@ export const AgentTool = buildTool({
     };
     if (shouldRunAsync) {
       const asyncAgentId = earlyAgentId;
-      const agentBackgroundTask = registerAsyncAgent({
-        agentId: asyncAgentId,
-        description,
-        prompt,
-        selectedAgent,
-        setAppState: rootSetAppState,
-        // Don't link to parent's abort controller -- background agents should
-        // survive when the user presses ESC to cancel the main thread.
-        // They are killed explicitly via chat:killAgents.
-        toolUseId: toolUseContext.toolUseId
-      });
+      let agentBackgroundTask: LocalAgentTaskState;
+      try {
+        agentBackgroundTask = registerAsyncAgent({
+          agentId: asyncAgentId,
+          description,
+          prompt,
+          selectedAgent,
+          setAppState: rootSetAppState,
+          // Don't link to parent's abort controller -- background agents should
+          // survive when the user presses ESC to cancel the main thread.
+          // They are killed explicitly via chat:killAgents.
+          toolUseId: toolUseContext.toolUseId
+        });
+      } catch (registrationError) {
+        await cleanupRejectedWorktree();
+        throw registrationError;
+      }
 
       // Register name → agentId for SendMessage routing. Post-registerAsyncAgent
       // so we don't leave a stale entry if spawn fails. Sync agents skipped —
@@ -1014,20 +1048,25 @@ export const AgentTool = buildTool({
         }> | undefined;
         let cancelAutoBackground: (() => void) | undefined;
         if (!isBackgroundTasksDisabled) {
-          const registration = registerAgentForeground({
-            agentId: syncAgentId,
-            description,
-            prompt,
-            selectedAgent,
-            setAppState: rootSetAppState,
-            toolUseId: toolUseContext.toolUseId,
-            autoBackgroundMs: getAutoBackgroundMs() || undefined
-          });
-          foregroundTaskId = registration.taskId;
-          backgroundPromise = registration.backgroundSignal.then(() => ({
-            type: 'background' as const
-          }));
-          cancelAutoBackground = registration.cancelAutoBackground;
+          try {
+            const registration = registerAgentForeground({
+              agentId: syncAgentId,
+              description,
+              prompt,
+              selectedAgent,
+              setAppState: rootSetAppState,
+              toolUseId: toolUseContext.toolUseId,
+              autoBackgroundMs: getAutoBackgroundMs() || undefined
+            });
+            foregroundTaskId = registration.taskId;
+            backgroundPromise = registration.backgroundSignal.then(() => ({
+              type: 'background' as const
+            }));
+            cancelAutoBackground = registration.cancelAutoBackground;
+          } catch (registrationError) {
+            await cleanupRejectedWorktree();
+            throw registrationError;
+          }
         }
 
         // Track if we've shown the background hint UI
