@@ -24,6 +24,7 @@ import { registerCleanup } from '../../utils/cleanupRegistry.js';
 import { getToolSearchOrReadInfo } from '../../utils/collapseReadSearch.js';
 import { enqueuePendingNotifications, getCommandQueue, getCommandQueueLength, MAX_COMMAND_QUEUE_SIZE } from '../../utils/messageQueueManager.js';
 import { getAgentTranscriptPath } from '../../utils/sessionStorage.js';
+import { escapeXml } from '../../utils/xml.js';
 import { evictTaskOutput, getTaskOutputPath, initTaskOutputAsSymlink } from '../../utils/task/diskOutput.js';
 import { PANEL_GRACE_MS, registerTask, updateTaskState } from '../../utils/task/framework.js';
 import { emitTaskProgress } from '../../utils/task/sdkProgress.js';
@@ -221,6 +222,13 @@ export type LocalAgentTaskState = TaskStateBase & {
   // Mirrored into progress.summary as a "(stalled NNs) ..." prefix so the
   // panel row surfaces the state without a UI change.
   stalledSinceMs?: number;
+  // Retained when the command queue is full so the one-shot reconciliation
+  // notification can be retried at the next safe completion boundary.
+  pendingStallNotification?: {
+    sessionId: string;
+    epoch: number;
+    notification: string;
+  };
 };
 export function isLocalAgentTask(task: unknown): task is LocalAgentTaskState {
   return typeof task === 'object' && task !== null && 'type' in task && task.type === 'local_agent';
@@ -629,6 +637,56 @@ function retryUnnotifiedAgentCompletions(setAppState: SetAppState, sessionId: st
   return enqueued;
 }
 
+export function hasPendingAgentStallNotification(
+  state: AppState,
+  sessionId = getSessionId(),
+): boolean {
+  return Object.values(state.tasks).some(task =>
+    isLocalAgentTask(task) &&
+    task.status === 'running' &&
+    task.pendingStallNotification?.sessionId === sessionId &&
+    task.pendingStallNotification.epoch === task.epoch
+  );
+}
+
+function retryPendingAgentStallNotifications(
+  setAppState: SetAppState,
+  sessionId: string,
+  onlyTaskId?: string,
+): boolean {
+  if (sessionId !== getSessionId() || getCommandQueueLength() >= MAX_COMMAND_QUEUE_SIZE) return false;
+  let candidate: LocalAgentTaskState | undefined;
+  setAppState(prev => {
+    candidate = Object.values(prev.tasks).filter((task): task is LocalAgentTaskState =>
+      isLocalAgentTask(task) &&
+      task.status === 'running' &&
+      task.pendingStallNotification?.sessionId === sessionId &&
+      task.pendingStallNotification.epoch === task.epoch &&
+      (onlyTaskId === undefined || task.id === onlyTaskId)
+    ).sort((a, b) => a.startTime - b.startTime || a.id.localeCompare(b.id))[0];
+    return prev;
+  });
+  const pending = candidate?.pendingStallNotification;
+  if (!candidate || !pending) return false;
+  try {
+    enqueuePendingNotifications([{
+      value: pending.notification,
+      mode: 'task-notification',
+      agentCompletion: {
+        taskId: candidate.id,
+        epoch: candidate.epoch,
+        sessionId
+      }
+    }]);
+  } catch {
+    return false;
+  }
+  updateTaskState<LocalAgentTaskState>(candidate.id, setAppState, task =>
+    task.epoch === pending.epoch ? { ...task, pendingStallNotification: undefined } : task
+  );
+  return true;
+}
+
 export function isAgentCompletionCommand(command: QueuedCommand): boolean {
   return command.agentCompletion !== undefined;
 }
@@ -651,10 +709,11 @@ export async function flushAndDrainAgentCompletionInbox(
   const { flushAgentRuntimePersistence } = await import('../../state/onChangeAppState.js');
   await flushAgentRuntimePersistence();
   if (sessionId !== getSessionId() || !isSafeToDrain()) return false;
-  const retried = retryUnnotifiedAgentCompletions(setAppState, sessionId);
+  const retriedCompletions = retryUnnotifiedAgentCompletions(setAppState, sessionId);
+  const retriedStall = retryPendingAgentStallNotifications(setAppState, sessionId);
   const drained = drainAgentCompletionInbox(setAppState, sessionId);
   await flushAgentRuntimePersistence();
-  return retried || drained;
+  return retriedCompletions || retriedStall || drained;
 }
 
 export function drainAgentCompletionInbox(setAppState: SetAppState, sessionId = getSessionId()): boolean {
@@ -711,6 +770,8 @@ export function killAsyncAgent(taskId: string, setAppState: SetAppState, epoch?:
     return {
       ...task,
       status: 'killed',
+      stalledSinceMs: undefined,
+      pendingStallNotification: undefined,
       endTime: Date.now(),
       evictAfter: task.retain ? undefined : Date.now() + PANEL_GRACE_MS,
       abortController: undefined,
@@ -786,12 +847,26 @@ export function updateAgentProgress(taskId: string, progress: AgentProgress, set
  * Idempotent / no-op for terminal tasks. Tracks `stalledSinceMs` independently
  * so callers (analytics, future UI) can react without parsing the prefix.
  */
-export function applyAgentStallStatus(taskId: string, status: StallStatus, setAppState: SetAppState): void {
+export function applyAgentStallStatus(
+  taskId: string,
+  status: StallStatus,
+  setAppState: SetAppState,
+  sessionId = getSessionId(),
+): void {
+  let reconciliationNotification: string | undefined;
   updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => {
     if (task.status !== 'running') {
       return task;
     }
     if (status.kind === 'stalled') {
+      if (status.transitioned) {
+        reconciliationNotification = `<${TASK_NOTIFICATION_TAG}>
+<${TASK_ID_TAG}>${task.id}</${TASK_ID_TAG}>
+<${TASK_TYPE_TAG}>local_agent</${TASK_TYPE_TAG}>
+<agent-status>stalled</agent-status>
+<${SUMMARY_TAG}>Agent "${escapeXml(task.description)}" has produced no activity for ${Math.floor(status.idleMs / 1000)} seconds. Reconcile its runtime status once before waiting again; do not poll continuously.</${SUMMARY_TAG}>
+</${TASK_NOTIFICATION_TAG}>`;
+      }
       const stalledSummary = formatStalledSummary(status.idleMs, task.progress?.summary, task.description);
       const baseProgress: AgentProgress = task.progress ?? {
         toolUseCount: 0,
@@ -801,6 +876,11 @@ export function applyAgentStallStatus(taskId: string, status: StallStatus, setAp
       return {
         ...task,
         stalledSinceMs: status.idleMs,
+        pendingStallNotification: reconciliationNotification ? {
+          sessionId,
+          epoch: task.epoch,
+          notification: reconciliationNotification
+        } : task.pendingStallNotification,
         progress: {
           ...baseProgress,
           summary: stalledSummary
@@ -816,7 +896,8 @@ export function applyAgentStallStatus(taskId: string, status: StallStatus, setAp
         : cur;
       const next: LocalAgentTaskState = {
         ...task,
-        stalledSinceMs: undefined
+        stalledSinceMs: undefined,
+        pendingStallNotification: undefined
       };
       if (task.progress) {
         next.progress = {
@@ -828,6 +909,9 @@ export function applyAgentStallStatus(taskId: string, status: StallStatus, setAp
     }
     return task;
   });
+  if (reconciliationNotification) {
+    retryPendingAgentStallNotifications(setAppState, sessionId, taskId);
+  }
 }
 
 /**
@@ -897,6 +981,8 @@ export function completeAgentTask(result: AgentToolResult, setAppState: SetAppSt
     return {
       ...task,
       status: 'completed',
+      stalledSinceMs: undefined,
+      pendingStallNotification: undefined,
       result,
       endTime: Date.now(),
       evictAfter: task.retain ? undefined : Date.now() + PANEL_GRACE_MS,
@@ -921,6 +1007,8 @@ export function failAgentTask(taskId: string, error: string, setAppState: SetApp
     return {
       ...task,
       status: 'failed',
+      stalledSinceMs: undefined,
+      pendingStallNotification: undefined,
       error,
       endTime: Date.now(),
       evictAfter: task.retain ? undefined : Date.now() + PANEL_GRACE_MS,

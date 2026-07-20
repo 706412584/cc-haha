@@ -72,6 +72,42 @@ describe('removeStaleHeadlessAgentCompletions', () => {
 })
 
 describe('post-turn Agent completion backpressure', () => {
+  test('processes a completion immediately after draining it from the inbox', async () => {
+    let appState = {
+      tasks: {},
+      agentCompletionInbox: [],
+      nextAgentCompletionSequence: 1,
+      speculation: IDLE_SPECULATION_STATE,
+    } as unknown as AppState
+    const setAppState = (updater: (prev: AppState) => AppState): void => {
+      appState = updater(appState)
+    }
+    const task = registerAsyncAgent({
+      agentId: 'agent-idle-continuation',
+      description: 'Idle continuation',
+      prompt: 'Idle continuation',
+      selectedAgent: { agentType: 'general-purpose' } as never,
+      setAppState,
+    })
+    completeAgentTask({ agentId: task.agentId, content: [], totalToolUseCount: 0, totalDurationMs: 1, totalTokens: 0, usage: {} as never }, setAppState, task.epoch)
+    enqueueAgentNotification({ taskId: task.agentId, description: task.description, status: 'completed', setAppState, epoch: task.epoch })
+    const processed: string[] = []
+
+    const result = await flushAgentCompletionsAndProcessQueueIfReady({
+      setAppState,
+      getAppState: () => appState,
+      executeInput: async commands => {
+        processed.push(...commands.map(command => String(command.value)))
+      },
+    })
+
+    expect(result.processed).toBe(true)
+    expect(processed).toHaveLength(1)
+    expect(processed[0]).toContain('<task-id>agent-idle-continuation</task-id>')
+    expect(appState.agentCompletionInbox).toEqual([])
+    expect(getCommandQueue()).toEqual([])
+  })
+
   test('continues consuming non-Agent commands when a full inbox cannot drain yet', async () => {
     let appState = {
       tasks: {},

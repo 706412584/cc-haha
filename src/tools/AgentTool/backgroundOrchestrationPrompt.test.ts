@@ -71,6 +71,21 @@ describe('background agent orchestration guidance', () => {
     expect(prompt).toContain(
       'Before ending any turn, inspect the task list',
     )
+    expect(prompt).toContain(
+      'Do not poll healthy background agents',
+    )
+    expect(prompt).toContain(
+      'If a stalled-agent notification arrives, reconcile that Agent once',
+    )
+    expect(prompt).toContain(
+      'If the runtime task no longer exists, return its linked task-list item to pending',
+    )
+    expect(prompt).toContain(
+      'When a terminal Agent notification corresponds to a TaskCreate item',
+    )
+    expect(prompt).toContain(
+      'Only mark the linked item completed when the Agent reports that its assigned work is fully complete',
+    )
   })
 
   test('normal Agent prompt requires a restrained parallel kickoff contract', async () => {

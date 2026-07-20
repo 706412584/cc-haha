@@ -1,5 +1,5 @@
 import type { AppState } from '../state/AppState.js'
-import { flushAndDrainAgentCompletionInbox, isCurrentAgentCompletionCommand } from '../tasks/LocalAgentTask/LocalAgentTask.js'
+import { flushAndDrainAgentCompletionInbox, hasPendingAgentStallNotification, isCurrentAgentCompletionCommand } from '../tasks/LocalAgentTask/LocalAgentTask.js'
 import type { QueuedCommand } from '../types/textInputTypes.js'
 import {
   dequeue,
@@ -112,11 +112,12 @@ export async function flushAgentCompletionsAndProcessQueueIfReady({
   getAppState: () => AppState
   executeInput: (commands: QueuedCommand[]) => Promise<void>
 }): Promise<ProcessQueueResult> {
-  if (getAppState().agentCompletionInbox.length > 0) {
+  const state = getAppState()
+  if (
+    state.agentCompletionInbox.length > 0 ||
+    hasPendingAgentStallNotification(state)
+  ) {
     await flushAndDrainAgentCompletionInbox(setAppState)
-    if (getAppState().agentCompletionInbox.length === 0) {
-      return { processed: false }
-    }
   }
   return processQueueIfReady({ executeInput, getAppState })
 }

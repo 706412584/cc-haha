@@ -1,5 +1,5 @@
 import { promises as fsp } from 'fs'
-import { getSdkAgentProgressSummariesEnabled } from '../../bootstrap/state.js'
+import { getSdkAgentProgressSummariesEnabled, getSessionId } from '../../bootstrap/state.js'
 import { getSystemPrompt } from '../../constants/prompts.js'
 import { isCoordinatorMode } from '../../coordinator/coordinatorMode.js'
 import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
@@ -26,7 +26,7 @@ import { buildEffectiveSystemPrompt } from '../../utils/systemPrompt.js'
 import type { SystemPrompt } from '../../utils/systemPromptType.js'
 import { getParentSessionId } from '../../utils/teammate.js'
 import { reconstructForSubagentResume } from '../../utils/toolResultStorage.js'
-import { getAgentProgressOutputPath, runAsyncAgentLifecycle } from './agentToolUtils.js'
+import { createAgentStallTransitionHandler, getAgentProgressOutputPath, runAsyncAgentLifecycle } from './agentToolUtils.js'
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js'
 import { FORK_AGENT, isForkSubagentEnabled } from './forkSubagent.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
@@ -241,6 +241,12 @@ export async function resumeAgentBackground({
               abortController: agentBackgroundTask.abortController!,
             },
             onCacheSafeParams,
+            onStallTransition: createAgentStallTransitionHandler(
+              getSessionId(),
+              agentBackgroundTask.agentId,
+              agentBackgroundTask.epoch,
+              rootSetAppState,
+            ),
           }),
         metadata,
         description: uiDescription,

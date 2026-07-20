@@ -46,7 +46,7 @@ import { FILE_READ_TOOL_NAME } from '../FileReadTool/prompt.js';
 import { SEND_MESSAGE_TOOL_NAME } from '../SendMessageTool/constants.js';
 import { spawnTeammate } from '../shared/spawnMultiAgent.js';
 import { setAgentColor } from './agentColorManager.js';
-import { agentToolResultSchema, classifyHandoffIfNeeded, createSessionScopedAgentSetAppState, emitAgentToolActivitiesForMessage, emitTaskProgress, extractPartialResult, finalizeAgentTool, getAgentProgressOutputPath, getLastToolUseName, registerLocalAgentLifecycle, runAsyncAgentLifecycle } from './agentToolUtils.js';
+import { agentToolResultSchema, classifyHandoffIfNeeded, createAgentStallTransitionHandler, createSessionScopedAgentSetAppState, emitAgentToolActivitiesForMessage, emitTaskProgress, extractPartialResult, finalizeAgentTool, getAgentProgressOutputPath, getLastToolUseName, registerLocalAgentLifecycle, runAsyncAgentLifecycle } from './agentToolUtils.js';
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js';
 import { AGENT_TOOL_NAME, LEGACY_AGENT_TOOL_NAME, ONE_SHOT_BUILTIN_AGENT_TYPES } from './constants.js';
 import { buildForkedMessages, buildWorktreeNotice, COORDINATOR_RESEARCH_FORK_SUBAGENT_TYPE, FORK_AGENT, type ForkMode, isCoordinatorResearchForkEnabled, isForkSubagentEnabled, isInForkChild } from './forkSubagent.js';
@@ -971,7 +971,13 @@ export const AgentTool = buildTool({
             agentId: asAgentId(agentBackgroundTask.agentId),
             abortController: agentBackgroundTask.abortController!
           },
-          onCacheSafeParams
+          onCacheSafeParams,
+          onStallTransition: createAgentStallTransitionHandler(
+            getSessionId(),
+            agentBackgroundTask.agentId,
+            agentBackgroundTask.epoch,
+            rootSetAppState
+          )
         }),
         metadata,
         description,
