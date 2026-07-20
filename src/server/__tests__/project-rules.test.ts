@@ -19,6 +19,16 @@ mock.module('../../utils/git.js', () => ({
   findCanonicalGitRoot: (cwd: string) => cwd,
 }))
 
+mock.module('../middleware/auth.js', () => ({
+  requireAuth: async () => null,
+}))
+
+mock.module('../services/sessionService.js', () => ({
+  sessionService: {
+    getSessionWorkDir: async () => MOCK_PROJECT,
+  },
+}))
+
 const mockFiles = new Set<string>()
 const mockFileContents = new Map<string, string>()
 const mockDirs = new Map<string, string[]>()
@@ -255,6 +265,47 @@ describe('project-rules API', () => {
     const currentProject = data.projects[0]
     const rootFile = currentProject.files.find(f => f.label === 'CLAUDE.md')
     expect(rootFile?.exists).toBe(true)
+  })
+
+  it('POST /api/project-rules/decision validates the request body', async () => {
+    const url = new URL('http://localhost/api/project-rules/decision')
+    const invalidJson = await handleProjectRulesApi(
+      new Request(url, { method: 'POST', body: '{' }),
+      url,
+      ['api', 'project-rules', 'decision'],
+    )
+    expect(invalidJson.status).toBe(400)
+    expect(await invalidJson.json()).toEqual({ error: 'Invalid JSON body' })
+
+    const invalidDecision = await handleProjectRulesApi(
+      new Request(url, {
+        method: 'POST',
+        body: JSON.stringify({ cwd: MOCK_PROJECT, ruleId: 'cursor:.cursorrules', decision: 'later' }),
+      }),
+      url,
+      ['api', 'project-rules', 'decision'],
+    )
+    expect(invalidDecision.status).toBe(400)
+    expect(await invalidDecision.json()).toEqual({ error: 'Invalid rule decision request' })
+  })
+
+  it('POST /api/project-rules/decision rejects sessions from another checkout', async () => {
+    const url = new URL('http://localhost/api/project-rules/decision')
+    const response = await handleProjectRulesApi(
+      new Request(url, {
+        method: 'POST',
+        body: JSON.stringify({
+          cwd: path.join('/mock', 'other'),
+          ruleId: 'cursor:.cursorrules',
+          decision: 'session',
+          sessionId: 'session-1',
+        }),
+      }),
+      url,
+      ['api', 'project-rules', 'decision'],
+    )
+    expect(response.status).toBe(403)
+    expect(await response.json()).toEqual({ error: 'Session does not belong to the requested project checkout' })
   })
 
   it('POST /api/project-rules/create creates project-root CLAUDE.md', async () => {
