@@ -3,6 +3,7 @@ import type Anthropic from '@anthropic-ai/sdk'
 import { APIConnectionError, APIError } from '@anthropic-ai/sdk'
 import { _resetKeepAliveForTesting, getProxyFetchOptions } from '../../utils/proxy.js'
 import {
+  CannotRetryError,
   getMaxStreamTransientRetries,
   isRetryableStreamError,
   RetriableStreamError,
@@ -159,6 +160,111 @@ describe('withRetry same-error suppression', () => {
   })
 })
 
+describe('withRetry statusless transient API errors', () => {
+  test('retries api_error during stream creation but does not retry deterministic 400 errors', async () => {
+    const transientBody = {
+      type: 'error',
+      error: { type: 'api_error', message: 'Temporary upstream failure' },
+    }
+    const transient = new APIError(undefined, transientBody, JSON.stringify(transientBody), undefined)
+    let transientAttempts = 0
+    const transientGenerator = withRetry(
+      async () => ({} as Anthropic),
+      async () => {
+        transientAttempts += 1
+        if (transientAttempts === 1) throw transient
+        return 'recovered'
+      },
+      {
+        model: 'claude-test',
+        thinkingConfig: { type: 'disabled' },
+        maxRetries: 1,
+      },
+    )
+    let recovered = ''
+    for (;;) {
+      const next = await transientGenerator.next()
+      if (next.done) {
+        recovered = next.value
+        break
+      }
+    }
+    expect(recovered).toBe('recovered')
+    expect(transientAttempts).toBe(2)
+
+    const deterministic = new APIError(
+      400,
+      { type: 'error', error: { type: 'invalid_request_error', message: 'bad input' } },
+      'bad input',
+      undefined,
+    )
+    let deterministicAttempts = 0
+    const deterministicGenerator = withRetry(
+      async () => ({} as Anthropic),
+      async () => {
+        deterministicAttempts += 1
+        throw deterministic
+      },
+      {
+        model: 'claude-test',
+        thinkingConfig: { type: 'disabled' },
+        maxRetries: 2,
+      },
+    )
+    await expect(deterministicGenerator.next()).rejects.toThrow('bad input')
+    expect(deterministicAttempts).toBe(1)
+
+    const typed400Body = {
+      type: 'error',
+      error: { type: 'api_error', message: 'deterministic gateway rejection' },
+    }
+    const typed400 = new APIError(400, typed400Body, JSON.stringify(typed400Body), undefined)
+    let typed400Attempts = 0
+    const typed400Generator = withRetry(
+      async () => ({} as Anthropic),
+      async () => {
+        typed400Attempts += 1
+        throw typed400
+      },
+      {
+        model: 'claude-test',
+        thinkingConfig: { type: 'disabled' },
+        maxRetries: 1,
+      },
+    )
+    await expect(typed400Generator.next()).rejects.toThrow('deterministic gateway rejection')
+    expect(typed400Attempts).toBe(1)
+  })
+})
+
+describe('CannotRetryError retry metadata', () => {
+  test('records the number of retries completed before a statusless api_error is exhausted', async () => {
+    const body = { type: 'error', error: { type: 'api_error', message: 'temporary' } }
+    const apiError = new APIError(undefined, body, JSON.stringify(body), undefined)
+    Object.defineProperty(apiError, 'requestID', { value: 'req-create-final' })
+    const generator = withRetry(
+      async () => ({} as Anthropic),
+      async () => { throw apiError },
+      {
+        model: 'claude-test',
+        thinkingConfig: { type: 'disabled' },
+        maxRetries: 2,
+      },
+    )
+    try {
+      for (;;) {
+        const next = await generator.next()
+        if (next.done) break
+      }
+      throw new Error('expected retry exhaustion')
+    } catch (error) {
+      expect(error).toBeInstanceOf(CannotRetryError)
+      expect((error as CannotRetryError).retryCount).toBe(2)
+      expect(((error as CannotRetryError).originalError as APIError).requestID).toBe('req-create-final')
+    }
+  })
+})
+
 describe('isRetryableStreamError', () => {
   // The SDK embeds the serialized error body in `error.message`; mirror that so
   // the matcher sees the same shape it does in production.
@@ -216,6 +322,14 @@ describe('isRetryableStreamError', () => {
       },
       400,
     )
+    expect(isRetryableStreamError(err)).toBe(false)
+  })
+
+  test.each([400, 401, 403, 404, 422])('does not retry an explicit %i api_error', status => {
+    const err = apiErrorWithBody({
+      type: 'error',
+      error: { type: 'api_error', message: 'deterministic client failure' },
+    }, status)
     expect(isRetryableStreamError(err)).toBe(false)
   })
 

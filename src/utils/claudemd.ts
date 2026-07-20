@@ -44,6 +44,7 @@ import { logEvent } from 'src/services/analytics/index.js'
 import {
   getAdditionalDirectoriesForClaudeMd,
   getOriginalCwd,
+  getSessionId,
 } from '../bootstrap/state.js'
 import { truncateEntrypointContent } from '../memdir/memdir.js'
 import { getAutoMemEntrypoint, isAutoMemoryEnabled } from '../memdir/paths.js'
@@ -75,6 +76,7 @@ import {
 import type { MemoryType } from './memory/types.js'
 import { expandPath } from './path.js'
 import { pathInWorkingPath } from './permissions/filesystem.js'
+import { getImportedProjectRules } from './projectRulesFederation.js'
 import { isSettingSourceEnabled } from './settings/constants.js'
 import { getInitialSettings } from './settings/settings.js'
 
@@ -96,6 +98,7 @@ export const MAX_MEMORY_CHARACTER_COUNT = 40000
 const TEXT_FILE_EXTENSIONS = new Set([
   // Markdown and text
   '.md',
+  '.mdc',
   '.txt',
   '.text',
   // Data formats
@@ -874,6 +877,29 @@ export const getMemoryFiles = memoize(
         normalizePathForComparison(canonicalRoot) &&
       pathInWorkingPath(gitRoot, canonicalRoot)
 
+    // Federated rules are read, verified, fingerprinted, and normalized in one
+    // pass. Reusing that immutable content here avoids reopening an approved
+    // pathname after an attacker swaps it for a symlink. Conditional external
+    // rules are injected lazily by the attachment path instead of globally.
+    if (isSettingSourceEnabled('projectSettings')) {
+      for (const importedRule of await getImportedProjectRules(
+        gitRoot ?? originalCwd,
+        getSessionId(),
+      )) {
+        if (importedRule.globs) continue
+        const normalizedPath = normalizePathForComparison(importedRule.path)
+        if (processedPaths.has(normalizedPath)) continue
+        processedPaths.add(normalizedPath)
+        result.push({
+          path: importedRule.path,
+          type: 'Project',
+          content: importedRule.content,
+          contentDiffersFromDisk: true,
+          rawContent: importedRule.content,
+        })
+      }
+    }
+
     // Process from root downward to CWD
     for (const dir of dirs.reverse()) {
       // In a nested worktree, skip checked-in files from the main repo's
@@ -1332,13 +1358,32 @@ export async function getConditionalRulesForCwdLevelDirectory(
   processedPaths: Set<string>,
 ): Promise<MemoryFileInfo[]> {
   const rulesDir = join(dir, '.claude', 'rules')
-  return processConditionedMdRules(
+  const nativeRules = await processConditionedMdRules(
     targetPath,
     rulesDir,
     'Project',
     processedPaths,
     false,
   )
+  const projectRoot = findGitRoot(dir) ?? dir
+  const relativePath = isAbsolute(targetPath) ? relative(projectRoot, targetPath) : targetPath
+  if (!relativePath || relativePath.startsWith('..') || isAbsolute(relativePath)) return nativeRules
+  const imported = await getImportedProjectRules(projectRoot, getSessionId())
+  for (const rule of imported) {
+    if (!rule.globs || !ignore().add(rule.globs).ignores(relativePath)) continue
+    const normalizedPath = normalizePathForComparison(rule.path)
+    if (processedPaths.has(normalizedPath)) continue
+    processedPaths.add(normalizedPath)
+    nativeRules.unshift({
+      path: rule.path,
+      type: 'Project',
+      content: rule.content,
+      globs: rule.globs,
+      contentDiffersFromDisk: true,
+      rawContent: rule.content,
+    })
+  }
+  return nativeRules
 }
 
 /**

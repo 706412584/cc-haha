@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
 import Anthropic, { APIError } from '@anthropic-ai/sdk'
 import { withStreamRetry } from './streamRetry.js'
 import {
@@ -24,7 +24,7 @@ afterAll(() => {
 })
 
 /** A RetriableStreamError wrapping a realistic mid-stream api_error (no status). */
-function retriableError(): RetriableStreamError {
+function retriableError(requestID?: string): RetriableStreamError {
   const body = {
     type: 'error',
     error: {
@@ -32,9 +32,8 @@ function retriableError(): RetriableStreamError {
       message: 'Failed to generate a valid tool call.',
     },
   }
-  return new RetriableStreamError(
-    new APIError(undefined, body, JSON.stringify(body), undefined),
-  )
+  const error = new APIError(undefined, body, JSON.stringify(body), undefined)
+  return new RetriableStreamError(error, requestID)
 }
 
 // biome-ignore lint/suspicious/noExplicitAny: test harness collects heterogeneous stream messages
@@ -46,6 +45,9 @@ async function collect(gen: AsyncGenerator<any, void>): Promise<any[]> {
 }
 
 describe('withStreamRetry', () => {
+  beforeEach(() => {
+    process.env.ANTHROPIC_API_KEY ??= 'sk-ant-test'
+  })
   test('retries the screenshot upstream_error after the SDK parses it from SSE', async () => {
     process.env[RETRY_ENV] = '1'
     let requests = 0
@@ -200,6 +202,22 @@ describe('withStreamRetry', () => {
     delete process.env[RETRY_ENV]
   })
 
+  test('final error says how many retries ran and preserves the upstream request ID', async () => {
+    process.env[RETRY_ENV] = '2'
+    const attempt = () =>
+      // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
+      (async function* (): AsyncGenerator<any, void> {
+        throw retriableError('req-stream-final')
+      })()
+
+    const out = await collect(withStreamRetry(attempt, 'test-model', []))
+    const last = out.at(-1)
+    const text = last?.message?.content?.find((block: { type: string }) => block.type === 'text')?.text
+    expect(text).toContain('Retried 2 times')
+    expect(last?.requestId).toBe('req-stream-final')
+    delete process.env[RETRY_ENV]
+  })
+
   test('retry attempts do not leak any error messages mid-stream (transparent retry)', async () => {
     // attempt 1 throws RetriableStreamError, attempt 2 succeeds. The user
     // must see ZERO error messages — the retry should be invisible.
@@ -223,6 +241,25 @@ describe('withStreamRetry', () => {
         (m) => m.type === 'assistant' && m.isApiErrorMessage === true,
       ),
     ).toBe(false)
+    delete process.env[RETRY_ENV]
+  })
+
+  test('does not retry a transient stream error after the caller aborts', async () => {
+    process.env[RETRY_ENV] = '2'
+    const controller = new AbortController()
+    let calls = 0
+    const attempt = () =>
+      // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
+      (async function* (): AsyncGenerator<any, void> {
+        calls++
+        controller.abort()
+        throw retriableError()
+      })()
+
+    await expect(
+      collect(withStreamRetry(attempt, 'test-model', [], controller.signal)),
+    ).rejects.toThrow()
+    expect(calls).toBe(1)
     delete process.env[RETRY_ENV]
   })
 

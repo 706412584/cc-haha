@@ -355,6 +355,32 @@ describe('coverage gate helpers', () => {
     ])
   })
 
+  test('excludes type-only modules from root-runtime changed-line coverage', () => {
+    const changedLines = parseChangedLinesFromDiff([
+      'diff --git a/src/types/projectRules.ts b/src/types/projectRules.ts',
+      '--- /dev/null',
+      '+++ b/src/types/projectRules.ts',
+      '@@ -0,0 +1,1 @@',
+      "+export type RuleSource = 'claude' | 'cursor'",
+    ].join('\n'))
+
+    const result = evaluateChangedLineCoverage(
+      changedLines,
+      new Map(),
+      [{
+        id: 'root-runtime',
+        title: 'Root runtime',
+        includePrefixes: ['src/'],
+        excludePrefixes: ['src/server/', 'src/tools/', 'src/types/', 'src/utils/'],
+      }],
+      90,
+    )
+
+    expect(result.files).toEqual([])
+    expect(result.total).toBe(0)
+    expect(result.failures).toEqual([])
+  })
+
   test('reports minimum threshold failures', () => {
     const failures = evaluateThresholds([
       {

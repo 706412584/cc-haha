@@ -4,6 +4,10 @@ import { Button } from '../components/shared/Button'
 import { useSessionStore } from '../stores/sessionStore'
 import { getDesktopHost } from '../lib/desktopHost'
 import { api } from '../api/client'
+import type {
+  NormalizedProjectRule,
+  RuleImportDecision,
+} from '../../../src/types/projectRules'
 
 type RuleFile = {
   path: string
@@ -18,6 +22,7 @@ type ProjectEntry = {
   projectPath: string | null
   isCurrent: boolean
   files: RuleFile[]
+  normalizedRules: NormalizedProjectRule[]
 }
 
 type ProjectRulesResponse = {
@@ -39,7 +44,10 @@ export function ProjectRulesSettings() {
   const fetchRules = async () => {
     setLoading(true)
     try {
-      const query = cwd ? `?cwd=${encodeURIComponent(cwd)}` : ''
+      const params = new URLSearchParams()
+      if (cwd) params.set('cwd', cwd)
+      if (activeSessionId) params.set('sessionId', activeSessionId)
+      const query = params.size > 0 ? `?${params.toString()}` : ''
       const res = await api.get<ProjectRulesResponse>(`/api/project-rules${query}`)
       setData(res)
       // Default-select the current project (or first project) once loaded.
@@ -57,13 +65,31 @@ export function ProjectRulesSettings() {
 
   useEffect(() => {
     fetchRules()
-  }, [cwd])
+  }, [cwd, activeSessionId])
 
   const handleOpen = async (filePath: string) => {
     try {
       await getDesktopHost().shell.openPath(filePath)
     } catch {
       // ignore
+    }
+  }
+
+  const handleDecision = async (
+    rule: NormalizedProjectRule,
+    decision: RuleImportDecision,
+    projectCwd: string,
+  ) => {
+    try {
+      await api.post('/api/project-rules/decision', {
+        cwd: projectCwd,
+        ruleId: rule.ruleId,
+        decision,
+        sessionId: decision === 'session' ? (activeSessionId ?? undefined) : undefined,
+      })
+      await fetchRules()
+    } catch {
+      // Keep the previous server-backed decision visible on failure.
     }
   }
 
@@ -143,6 +169,26 @@ export function ProjectRulesSettings() {
                 t={t}
               />
             ))}
+            {selectedProject.normalizedRules.some(rule => !rule.isNative) && (
+              <div className="mt-4 border-t border-[var(--color-border)] pt-3 space-y-2">
+                <h4 className="text-xs font-semibold uppercase tracking-wide text-[var(--color-text-muted)]">
+                  {t('settings.projectRules.federated')}
+                </h4>
+                {selectedProject.normalizedRules.filter(rule => !rule.isNative).map(rule => (
+                  <FederatedRuleRow
+                    key={`${rule.source}:${rule.originalPath}`}
+                    rule={rule}
+                    onOpen={handleOpen}
+                    onDecision={(decision) => {
+                      if (selectedProject.projectPath) {
+                        void handleDecision(rule, decision, selectedProject.projectPath)
+                      }
+                    }}
+                    t={t}
+                  />
+                ))}
+              </div>
+            )}
             <div className="flex gap-2 mt-2">
               <Button size="sm" variant="secondary" onClick={() => handleCreate('project-rules', selectedProject.projectPath || undefined, 'new-rule.md')}>
                 <span className="material-symbols-outlined text-base mr-1">add</span>
@@ -173,6 +219,65 @@ function Section({ title, description, children }: { title: string; description:
         <p className="text-xs text-[var(--color-text-muted)] font-mono truncate" title={description}>{description}</p>
       </div>
       {children}
+    </div>
+  )
+}
+
+function ruleStatusLabel(
+  rule: NormalizedProjectRule,
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string,
+): string {
+  switch (rule.status) {
+    case 'duplicate': return t('settings.projectRules.statusDuplicate')
+    case 'conflict': return t('settings.projectRules.statusConflict')
+    case 'overridden-by-native': return t('settings.projectRules.statusNativeOverride')
+    case 'active': return t('settings.projectRules.statusAvailable')
+  }
+}
+
+function FederatedRuleRow({ rule, onOpen, onDecision, t }: {
+  rule: NormalizedProjectRule
+  onOpen: (path: string) => void
+  onDecision: (decision: RuleImportDecision) => void
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string
+}) {
+  return (
+    <div className="rounded-md border border-[var(--color-border)] px-3 py-2 space-y-2">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium text-[var(--color-text)]">{rule.provenance.provider}</span>
+            <span className="text-xs rounded bg-[var(--color-surface-hover)] px-1.5 py-0.5 text-[var(--color-text-muted)]">
+              {ruleStatusLabel(rule, t)}
+            </span>
+          </div>
+          <p className="text-xs font-mono text-[var(--color-text-muted)] truncate" title={rule.originalPath}>
+            {rule.provenance.label}
+          </p>
+          {rule.relatedRulePaths.length > 0 && (
+            <p className="text-xs text-[var(--color-text-muted)] truncate" title={rule.relatedRulePaths.join(', ')}>
+              {t('settings.projectRules.related')}: {rule.relatedRulePaths.map(shortenPath).join(', ')}
+            </p>
+          )}
+        </div>
+        <Button size="sm" variant="ghost" onClick={() => onOpen(rule.originalPath)}>
+          {t('settings.projectRules.open')}
+        </Button>
+      </div>
+      <select
+        aria-label={`${t('settings.projectRules.importDecision')} ${rule.provenance.label}`}
+        value={rule.decision ?? ''}
+        onChange={(event) => {
+          const decision = event.target.value as RuleImportDecision
+          if (decision) onDecision(decision)
+        }}
+        className="w-full text-xs rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-[var(--color-text)]"
+      >
+        <option value="">{t('settings.projectRules.chooseDecision')}</option>
+        <option value="session" disabled={rule.applicability === 'manual'}>{t('settings.projectRules.session')}</option>
+        <option value="persistent" disabled={rule.applicability === 'manual'}>{t('settings.projectRules.persistent')}</option>
+        <option value="ignore">{t('settings.projectRules.ignore')}</option>
+      </select>
     </div>
   )
 }
