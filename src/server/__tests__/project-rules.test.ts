@@ -23,25 +23,39 @@ const mockFiles = new Set<string>()
 const mockFileContents = new Map<string, string>()
 const mockDirs = new Map<string, string[]>()
 
+function isMockDirectory(filePath: string): boolean {
+  const prefix = `${filePath}${path.sep}`
+  return mockDirs.has(filePath) ||
+    Array.from(mockDirs.keys()).some(directory => directory.startsWith(prefix)) ||
+    Array.from(mockFiles).some(candidate => candidate.startsWith(prefix))
+}
+
 mock.module('fs/promises', () => ({
   access: async (filePath: string) => {
     if (!mockFiles.has(filePath)) {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
     }
   },
-  realpath: async (filePath: string) => filePath,
-  stat: async (filePath: string) => {
-    if (!mockFiles.has(filePath)) {
+  realpath: async (filePath: string) => {
+    if (!mockFiles.has(filePath) && !isMockDirectory(filePath)) {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
     }
+    return filePath
+  },
+  stat: async (filePath: string) => {
+    if (!mockFiles.has(filePath) && !isMockDirectory(filePath)) {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+    }
+    const isDirectory = isMockDirectory(filePath) && !mockFiles.has(filePath)
     const content = mockFileContents.get(filePath) ?? ''
-    return { isDirectory: () => false, isFile: () => true, dev: 1, ino: filePath.length, size: content.length, mtimeMs: 1 }
+    return { isDirectory: () => isDirectory, isFile: () => !isDirectory, dev: 1, ino: filePath.length, size: content.length, mtimeMs: 1 }
   },
   lstat: async (filePath: string) => {
-    if (!mockFiles.has(filePath)) {
+    if (!mockFiles.has(filePath) && !isMockDirectory(filePath)) {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
     }
-    return { isDirectory: () => false, isFile: () => true, isSymbolicLink: () => false, dev: 1, ino: filePath.length }
+    const isDirectory = isMockDirectory(filePath) && !mockFiles.has(filePath)
+    return { isDirectory: () => isDirectory, isFile: () => !isDirectory, isSymbolicLink: () => false, dev: 1, ino: filePath.length }
   },
   open: async (filePath: string) => {
     const content = mockFileContents.get(filePath) ?? ''
@@ -53,6 +67,17 @@ mock.module('fs/promises', () => ({
     mockFiles.add(filePath)
   },
   readFile: async (filePath: string) => mockFileContents.get(filePath) ?? '{}',
+  opendir: async (dirPath: string) => {
+    const entries = mockDirs.get(dirPath)
+    if (!entries) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+    return {
+      async *[Symbol.asyncIterator]() {
+        for (const name of entries) {
+          yield { name, isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false }
+        }
+      },
+    }
+  },
   readdir: async (dirPath: string, _opts?: unknown) => {
     // Check all registered mock dirs
     const entries = mockDirs.get(dirPath)

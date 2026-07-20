@@ -255,6 +255,63 @@ describe('project-rules federation decisions', () => {
     expect(await getImportedProjectRulePaths(project)).not.toContain(cursorRule)
   })
 
+  test('invalidates authorization when ordered negation glob semantics change', async () => {
+    const project = await createProject()
+    const cursorDirectory = path.join(project, '.cursor', 'rules')
+    await fs.mkdir(cursorDirectory, { recursive: true })
+    const cursorRule = path.join(cursorDirectory, 'ordered.mdc')
+    await fs.writeFile(cursorRule, '---\nglobs:\n  - "**/*.ts"\n  - "!src/**"\nalwaysApply: false\n---\nKeep ordered globs.\n')
+    const before = (await discoverFederatedProjectRules(project)).find(rule => rule.originalPath === cursorRule)!
+    await saveRuleImportDecision({ projectPath: project, ruleId: before.ruleId, decision: 'persistent' })
+
+    await fs.writeFile(cursorRule, '---\nglobs:\n  - "!src/**"\n  - "**/*.ts"\nalwaysApply: false\n---\nKeep ordered globs.\n')
+    const after = (await discoverFederatedProjectRules(project)).find(rule => rule.originalPath === cursorRule)!
+    expect(after.fingerprint).not.toBe(before.fingerprint)
+    expect(after.decision).toBeUndefined()
+
+    const previousCwd = getOriginalCwd()
+    try {
+      setOriginalCwd(project)
+      const files = await getConditionalRulesForCwdLevelDirectory(project, path.join(project, 'src', 'a.ts'), new Set())
+      expect(files.some(file => file.path === cursorRule)).toBe(false)
+    } finally {
+      setOriginalCwd(previousCwd)
+      clearMemoryFileCaches()
+    }
+  })
+
+  test('bounds untrusted rule candidates per directory and across providers', async () => {
+    const project = await createProject()
+    const cursorDirectory = path.join(project, '.cursor', 'rules')
+    const windsurfDirectory = path.join(project, '.windsurf', 'rules')
+    await fs.mkdir(cursorDirectory, { recursive: true })
+    await fs.mkdir(windsurfDirectory, { recursive: true })
+    await Promise.all(Array.from({ length: 140 }, async (_, index) => {
+      const name = `${String(index).padStart(3, '0')}.md`
+      await Promise.all([
+        fs.writeFile(path.join(cursorDirectory, name), `Cursor ${index}.\n`),
+        fs.writeFile(path.join(windsurfDirectory, name), `Windsurf ${index}.\n`),
+      ])
+    }))
+
+    const rules = await discoverFederatedProjectRules(project)
+    expect(rules.filter(rule => rule.provenance.label.startsWith('.cursor/rules/'))).toHaveLength(128)
+    expect(rules).toHaveLength(256)
+  })
+
+  test('bounds cumulative bytes read from untrusted rules', async () => {
+    const project = await createProject()
+    const cursorDirectory = path.join(project, '.cursor', 'rules')
+    await fs.mkdir(cursorDirectory, { recursive: true })
+    const content = 'x'.repeat(900 * 1024)
+    await Promise.all(Array.from({ length: 10 }, (_, index) =>
+      fs.writeFile(path.join(cursorDirectory, `${index}.md`), content),
+    ))
+
+    const rules = await discoverFederatedProjectRules(project)
+    expect(rules.filter(rule => rule.provenance.label.startsWith('.cursor/rules/'))).toHaveLength(9)
+  })
+
   test('applies approved conditional rules only to matching files through the real loader', async () => {
     const project = await createProject()
     const cursorDirectory = path.join(project, '.cursor', 'rules')

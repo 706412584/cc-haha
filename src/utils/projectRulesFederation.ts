@@ -15,6 +15,9 @@ import { findCanonicalGitRoot } from './git.js'
 const MARKDOWN_EXTENSIONS = new Set(['.md', '.mdc'])
 const CONFIG_DIRECTORY = 'rule-federation'
 const CONFIG_VERSION = 1
+const MAX_RULES_PER_DIRECTORY = 128
+const MAX_DISCOVERED_RULES = 256
+const MAX_DISCOVERY_BYTES = 8 * 1024 * 1024
 const configLocks = new Map<string, Promise<void>>()
 
 type RuleDecisionRecord = {
@@ -36,6 +39,18 @@ type RuleCandidate = {
   canonicalPath: string
   label: string
   metadata: 'none' | 'cursor' | 'copilot'
+}
+
+type DiscoveryBudget = {
+  remainingRules: number
+  remainingBytes: number
+}
+
+function createDiscoveryBudget(): DiscoveryBudget {
+  return {
+    remainingRules: MAX_DISCOVERED_RULES,
+    remainingBytes: MAX_DISCOVERY_BYTES,
+  }
 }
 
 export type ImportedProjectRule = {
@@ -289,15 +304,25 @@ async function directoryCandidates(
 ): Promise<RuleCandidate[]> {
   const directory = path.join(projectPath, ...relativeDirectory.split('/'))
   try {
-    const entries = await fs.readdir(directory, { withFileTypes: true })
-    return entries
-      .filter(entry => entry.isFile() && !entry.isSymbolicLink() && MARKDOWN_EXTENSIONS.has(path.extname(entry.name).toLowerCase()))
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .map(entry => ({
-        originalPath: path.join(directory, entry.name),
-        relativePath: `${relativeDirectory}/${entry.name}`,
-        canonicalPath: logicalRulePath(entry.name),
-        label: `${relativeDirectory}/${entry.name}`,
+    const names: string[] = []
+    const entries = await fs.opendir(directory)
+    for await (const entry of entries) {
+      if (
+        entry.isFile() &&
+        !entry.isSymbolicLink() &&
+        MARKDOWN_EXTENSIONS.has(path.extname(entry.name).toLowerCase())
+      ) {
+        names.push(entry.name)
+        if (names.length >= MAX_RULES_PER_DIRECTORY) break
+      }
+    }
+    return names
+      .sort((a, b) => a.localeCompare(b))
+      .map(name => ({
+        originalPath: path.join(directory, name),
+        relativePath: `${relativeDirectory}/${name}`,
+        canonicalPath: logicalRulePath(name),
+        label: `${relativeDirectory}/${name}`,
         metadata,
       }))
   } catch {
@@ -313,7 +338,7 @@ function createAdapter(
   return {
     source,
     async discover(projectPath) {
-      return (await discoverAdapterRules(source, isNative, candidates, projectPath)).map(({ verifiedPath: _path, content: _content, contentFingerprint: _contentFingerprint, globs: _globs, ...rule }) => rule)
+      return (await discoverAdapterRules(source, isNative, candidates, projectPath, createDiscoveryBudget())).map(({ verifiedPath: _path, content: _content, contentFingerprint: _contentFingerprint, globs: _globs, ...rule }) => rule)
     },
   }
 }
@@ -323,16 +348,21 @@ async function discoverAdapterRules(
   isNative: boolean,
   candidates: (projectPath: string) => Promise<RuleCandidate[]>,
   projectPath: string,
+  budget: DiscoveryBudget,
 ): Promise<DiscoveredRule[]> {
   const projectRoot = await safeProjectRoot(projectPath)
   const discovered = await candidates(projectRoot)
   const rules: DiscoveredRule[] = []
   for (const candidate of discovered) {
+    if (budget.remainingRules <= 0) break
+    budget.remainingRules--
     const verifiedPath = await safeRulePath(projectRoot, candidate.originalPath)
     if (!verifiedPath) continue
     const pathStat = await fs.lstat(candidate.originalPath)
     if (!pathStat.isFile() || pathStat.isSymbolicLink()) continue
     const before = await fs.stat(verifiedPath)
+    if (before.size > 1_000_000 || before.size > budget.remainingBytes) continue
+    budget.remainingBytes -= before.size
     const handle = await fs.open(verifiedPath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0))
     let rawContent: string
     try {
@@ -352,7 +382,7 @@ async function discoverAdapterRules(
     const parsed = parseRuleContent(source, candidate.metadata, rawContent)
     const normalizedContent = normalizeText(parsed.content)
     if (!normalizedContent) continue
-    const normalizedGlobs = parsed.globs ? [...parsed.globs].sort() : []
+    const normalizedGlobs = parsed.globs ? [...parsed.globs] : []
     const effectiveFingerprint = fingerprint(JSON.stringify({
       source,
       ruleId: ruleId(source, candidate.relativePath),
@@ -409,12 +439,13 @@ export const ruleSourceAdapters: readonly RuleSourceAdapter[] = [
 ]
 
 async function discoverRules(projectPath: string, sessionId?: string): Promise<DiscoveredRule[]> {
-  const groups = await Promise.all([
-    discoverAdapterRules('claude', true, claudeCandidates, projectPath),
-    discoverAdapterRules('cursor', false, cursorCandidates, projectPath),
-    discoverAdapterRules('windsurf', false, windsurfCandidates, projectPath),
-    discoverAdapterRules('copilot', false, copilotCandidates, projectPath),
-  ])
+  const budget = createDiscoveryBudget()
+  const groups = [
+    await discoverAdapterRules('claude', true, claudeCandidates, projectPath, budget),
+    await discoverAdapterRules('cursor', false, cursorCandidates, projectPath, budget),
+    await discoverAdapterRules('windsurf', false, windsurfCandidates, projectPath, budget),
+    await discoverAdapterRules('copilot', false, copilotCandidates, projectPath, budget),
+  ]
   const accepted: DiscoveredRule[] = []
   for (const rule of groups.flat()) {
     if (!rule.isNative) {
