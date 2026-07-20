@@ -1,9 +1,12 @@
-import { getSdkAgentProgressSummariesEnabled } from '../../bootstrap/state.js';
+import { getSdkAgentProgressSummariesEnabled, getSessionId, isSessionPersistenceDisabled } from '../../bootstrap/state.js';
+import { promises as fs } from 'node:fs';
+import { dirname } from 'node:path';
+import { Buffer } from 'node:buffer';
 import { OUTPUT_FILE_TAG, STATUS_TAG, SUMMARY_TAG, TASK_ID_TAG, TASK_NOTIFICATION_TAG, TASK_TYPE_TAG, TOOL_USE_ID_TAG, WORKTREE_BRANCH_TAG, WORKTREE_PATH_TAG, WORKTREE_TAG } from '../../constants/xml.js';
 import { abortSpeculation } from '../../services/PromptSuggestion/speculation.js';
 import type { AppState } from '../../state/AppState.js';
 import type { SetAppState, Task, TaskStateBase } from '../../Task.js';
-import { createTaskStateBase } from '../../Task.js';
+import { createTaskStateBase, isTerminalTaskStatus } from '../../Task.js';
 import type { Tools } from '../../Tool.js';
 import { findToolByName } from '../../Tool.js';
 import type { AgentToolResult } from '../../tools/AgentTool/agentToolUtils.js';
@@ -15,10 +18,11 @@ import type { AgentDefinition } from '../../tools/AgentTool/loadAgentsDir.js';
 import { SYNTHETIC_OUTPUT_TOOL_NAME } from '../../tools/SyntheticOutputTool/SyntheticOutputTool.js';
 import { asAgentId } from '../../types/ids.js';
 import type { Message } from '../../types/message.js';
+import type { QueuedCommand } from '../../types/textInputTypes.js';
 import { createAbortController, createChildAbortController } from '../../utils/abortController.js';
 import { registerCleanup } from '../../utils/cleanupRegistry.js';
 import { getToolSearchOrReadInfo } from '../../utils/collapseReadSearch.js';
-import { enqueuePendingNotification } from '../../utils/messageQueueManager.js';
+import { enqueuePendingNotifications, getCommandQueue, getCommandQueueLength, MAX_COMMAND_QUEUE_SIZE } from '../../utils/messageQueueManager.js';
 import { getAgentTranscriptPath } from '../../utils/sessionStorage.js';
 import { evictTaskOutput, getTaskOutputPath, initTaskOutputAsSymlink } from '../../utils/task/diskOutput.js';
 import { PANEL_GRACE_MS, registerTask, updateTaskState } from '../../utils/task/framework.js';
@@ -42,6 +46,67 @@ export type AgentProgress = {
   summary?: string;
 };
 const MAX_RECENT_ACTIVITIES = 5;
+export const MAX_AGENT_COMPLETION_INBOX = 64;
+export const MAX_AGENT_REGISTRY_SIZE = 64;
+export const MAX_AGENT_RUNTIME_SNAPSHOT_BYTES = 2_000_000;
+const MAX_PERSISTED_RUNTIME_TEXT_BYTES = 4_000;
+export type AgentRuntimeStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type PersistedAgentRuntimeTask = {
+  id: string;
+  epoch: number;
+  status: AgentRuntimeStatus;
+  description: string;
+  prompt: string;
+  agentType: string;
+  startTime: number;
+  endTime?: number;
+  toolUseId?: string;
+  error?: string;
+  result?: AgentToolResult;
+  notified?: boolean;
+};
+export type AgentRuntimeSnapshot = {
+  version: 1;
+  nextSequence: number;
+  tasks: PersistedAgentRuntimeTask[];
+  inbox: Array<AppState['agentCompletionInbox'][number] & {
+    consumed?: boolean;
+  }>;
+};
+type AgentCompletionWakeListener = (sessionId: string) => void | Promise<void>;
+const agentCompletionWakeListeners = new Set<AgentCompletionWakeListener>();
+
+export function subscribeToAgentCompletionWake(listener: AgentCompletionWakeListener): () => void {
+  agentCompletionWakeListeners.add(listener);
+  return () => agentCompletionWakeListeners.delete(listener);
+}
+
+function wakeAgentCompletionConsumers(sessionId: string): void {
+  for (const listener of agentCompletionWakeListeners) {
+    void Promise.resolve(listener(sessionId)).catch(() => {});
+  }
+}
+
+const AGENT_STATUS_TRANSITIONS: Record<AgentRuntimeStatus, ReadonlySet<AgentRuntimeStatus>> = {
+  queued: new Set(['running', 'failed', 'cancelled']),
+  running: new Set(['completed', 'failed', 'cancelled']),
+  completed: new Set(),
+  failed: new Set(),
+  cancelled: new Set()
+};
+function taskStatusToRuntime(status: LocalAgentTaskState['status']): AgentRuntimeStatus {
+  if (status === 'pending') return 'queued';
+  if (status === 'killed') return 'cancelled';
+  return status;
+}
+function runtimeStatusToTask(status: AgentRuntimeStatus): LocalAgentTaskState['status'] {
+  if (status === 'queued') return 'pending';
+  if (status === 'cancelled') return 'killed';
+  return status;
+}
+function canTransitionAgentStatus(from: LocalAgentTaskState['status'], to: AgentRuntimeStatus): boolean {
+  return AGENT_STATUS_TRANSITIONS[taskStatusToRuntime(from)].has(to);
+}
 export type ProgressTracker = {
   toolUseCount: number;
   // Track input and output separately to avoid double-counting.
@@ -120,6 +185,8 @@ export function createActivityDescriptionResolver(tools: Tools): ActivityDescrip
 export type LocalAgentTaskState = TaskStateBase & {
   type: 'local_agent';
   agentId: string;
+  /** Monotonic execution generation. Terminal events must match this epoch. */
+  epoch: number;
   prompt: string;
   selectedAgent?: AgentDefinition;
   agentType: string;
@@ -157,6 +224,222 @@ export type LocalAgentTaskState = TaskStateBase & {
 };
 export function isLocalAgentTask(task: unknown): task is LocalAgentTaskState {
   return typeof task === 'object' && task !== null && 'type' in task && task.type === 'local_agent';
+}
+
+const COMPACT_PERSISTED_RUNTIME_TEXT_BYTES = 512;
+const PERSISTED_RUNTIME_TRUNCATION_SUFFIX = '… [persisted recovery summary]';
+
+function jsonStringByteLength(value: string): number {
+  return Buffer.byteLength(JSON.stringify(value), 'utf8');
+}
+
+function truncateRuntimeText(value: string | undefined, maxBytes = MAX_PERSISTED_RUNTIME_TEXT_BYTES): string | undefined {
+  if (value === undefined || jsonStringByteLength(value) <= maxBytes) {
+    return value;
+  }
+  const suffix = jsonStringByteLength(PERSISTED_RUNTIME_TRUNCATION_SUFFIX) <= maxBytes ? PERSISTED_RUNTIME_TRUNCATION_SUFFIX : '';
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (jsonStringByteLength(value.slice(0, middle) + suffix) <= maxBytes) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return value.slice(0, low) + suffix;
+}
+
+function summarizePersistedResult(result: AgentToolResult | undefined, maxTextBytes = MAX_PERSISTED_RUNTIME_TEXT_BYTES): AgentToolResult | undefined {
+  if (!result) return undefined;
+  return {
+    agentId: truncateRuntimeText(result.agentId, maxTextBytes) ?? '',
+    agentType: truncateRuntimeText(result.agentType, maxTextBytes),
+    content: result.content.slice(0, 1).map(item => ({
+      type: 'text',
+      text: truncateRuntimeText(item.text, maxTextBytes) ?? ''
+    })),
+    totalToolUseCount: result.totalToolUseCount,
+    totalDurationMs: result.totalDurationMs,
+    totalTokens: result.totalTokens,
+    usage: {
+      input_tokens: result.usage.input_tokens,
+      output_tokens: result.usage.output_tokens,
+      cache_creation_input_tokens: result.usage.cache_creation_input_tokens,
+      cache_read_input_tokens: result.usage.cache_read_input_tokens,
+      server_tool_use: result.usage.server_tool_use,
+      service_tier: result.usage.service_tier,
+      cache_creation: result.usage.cache_creation
+    }
+  };
+}
+
+function summarizePersistedNotification(item: AppState['agentCompletionInbox'][number], forceSummary = false, taskId = item.taskId): string {
+  if (!forceSummary && jsonStringByteLength(item.notification) <= MAX_PERSISTED_RUNTIME_TEXT_BYTES) {
+    return item.notification;
+  }
+  const status = item.notification.match(/<status>(completed|failed|killed)<\/status>/)?.[1] ?? 'completed';
+  return `<${TASK_NOTIFICATION_TAG}>\n<${TASK_ID_TAG}>${taskId}</${TASK_ID_TAG}>\n<${TASK_TYPE_TAG}>local_agent</${TASK_TYPE_TAG}>\n<${STATUS_TAG}>${status}</${STATUS_TAG}>\n<${SUMMARY_TAG}>Agent completion restored; full result omitted from persisted recovery summary</${SUMMARY_TAG}>\n</${TASK_NOTIFICATION_TAG}>`;
+}
+
+function serializeRuntimeSnapshot(snapshot: AgentRuntimeSnapshot): string {
+  return JSON.stringify(snapshot);
+}
+
+function runtimeSnapshotFits(serialized: string): boolean {
+  return Buffer.byteLength(serialized, 'utf8') <= MAX_AGENT_RUNTIME_SNAPSHOT_BYTES;
+}
+
+export async function persistAgentRuntimeSnapshot(filePath: string, state: Pick<AppState, 'tasks' | 'agentCompletionInbox' | 'nextAgentCompletionSequence'>): Promise<void> {
+  if (isSessionPersistenceDisabled()) return;
+  const liveTasks = Object.values(state.tasks).filter(isLocalAgentTask).slice(-MAX_AGENT_REGISTRY_SIZE);
+  const createPersistedTasks = (maxTextBytes: number): PersistedAgentRuntimeTask[] => liveTasks.map(task => ({
+    id: truncateRuntimeText(task.id, maxTextBytes) ?? '',
+    epoch: task.epoch,
+    status: taskStatusToRuntime(task.status),
+    description: truncateRuntimeText(task.description, maxTextBytes) ?? '',
+    prompt: truncateRuntimeText(task.prompt, maxTextBytes) ?? '',
+    agentType: truncateRuntimeText(task.agentType, maxTextBytes) ?? '',
+    startTime: task.startTime,
+    endTime: task.endTime,
+    toolUseId: truncateRuntimeText(task.toolUseId, maxTextBytes),
+    error: truncateRuntimeText(task.error, maxTextBytes),
+    result: summarizePersistedResult(task.result, maxTextBytes),
+    notified: task.notified
+  }));
+  const sourceInbox = state.agentCompletionInbox.slice(-MAX_AGENT_COMPLETION_INBOX);
+  let snapshot: AgentRuntimeSnapshot = {
+    version: 1,
+    nextSequence: Number.isSafeInteger(state.nextAgentCompletionSequence) && state.nextAgentCompletionSequence > 0 ? state.nextAgentCompletionSequence : 1,
+    tasks: createPersistedTasks(MAX_PERSISTED_RUNTIME_TEXT_BYTES),
+    inbox: sourceInbox.map(item => {
+      const taskId = truncateRuntimeText(item.taskId) ?? '';
+      return {
+        ...item,
+        taskId,
+        notification: summarizePersistedNotification(item, false, taskId)
+      };
+    })
+  };
+  let serialized = serializeRuntimeSnapshot(snapshot);
+
+  if (!runtimeSnapshotFits(serialized)) {
+    snapshot = {
+      ...snapshot,
+      tasks: createPersistedTasks(COMPACT_PERSISTED_RUNTIME_TEXT_BYTES),
+      inbox: sourceInbox.map(item => {
+        const taskId = truncateRuntimeText(item.taskId, COMPACT_PERSISTED_RUNTIME_TEXT_BYTES) ?? '';
+        return {
+          ...item,
+          taskId,
+          notification: summarizePersistedNotification(item, true, taskId)
+        };
+      })
+    };
+    serialized = serializeRuntimeSnapshot(snapshot);
+  }
+
+  if (!runtimeSnapshotFits(serialized)) {
+    const terminalTasks = snapshot.tasks.filter(task => task.status !== 'running' && task.status !== 'queued').sort((a, b) => (a.endTime ?? a.startTime) - (b.endTime ?? b.startTime) || a.id.localeCompare(b.id));
+    for (const task of terminalTasks) {
+      snapshot.tasks = snapshot.tasks.filter(candidate => candidate !== task);
+      serialized = serializeRuntimeSnapshot(snapshot);
+      if (runtimeSnapshotFits(serialized)) break;
+    }
+  }
+
+  while (!runtimeSnapshotFits(serialized) && snapshot.inbox.length > 0) {
+    const oldestIndex = snapshot.inbox.reduce((selected, item, index, inbox) => item.sequence < inbox[selected]!.sequence ? index : selected, 0);
+    snapshot.inbox.splice(oldestIndex, 1);
+    serialized = serializeRuntimeSnapshot(snapshot);
+  }
+
+  if (!runtimeSnapshotFits(serialized)) {
+    throw new Error(`Agent runtime snapshot exceeds ${MAX_AGENT_RUNTIME_SNAPSHOT_BYTES} bytes after compaction`);
+  }
+
+  const tempPath = `${filePath}.${process.pid}.tmp`;
+  await fs.mkdir(dirname(filePath), {
+    recursive: true
+  });
+  await fs.writeFile(tempPath, serialized, 'utf8');
+  await fs.rename(tempPath, filePath);
+}
+
+export async function loadAgentRuntimeSnapshot(filePath: string): Promise<Pick<AppState, 'tasks' | 'agentCompletionInbox' | 'nextAgentCompletionSequence'>> {
+  if (isSessionPersistenceDisabled()) return restoreAgentRuntimeSnapshot(null);
+  try {
+    const stat = await fs.stat(filePath);
+    if (!stat.isFile() || stat.size > MAX_AGENT_RUNTIME_SNAPSHOT_BYTES) return restoreAgentRuntimeSnapshot(null);
+    return restoreAgentRuntimeSnapshot(JSON.parse(await fs.readFile(filePath, 'utf8')));
+  } catch {
+    return restoreAgentRuntimeSnapshot(null);
+  }
+}
+
+export function restoreAgentRuntimeSnapshot(snapshot: unknown): Pick<AppState, 'tasks' | 'agentCompletionInbox' | 'nextAgentCompletionSequence'> {
+  const empty = {
+    tasks: {},
+    agentCompletionInbox: [],
+    nextAgentCompletionSequence: 1
+  } satisfies Pick<AppState, 'tasks' | 'agentCompletionInbox' | 'nextAgentCompletionSequence'>;
+  if (!snapshot || typeof snapshot !== 'object') return empty;
+  const record = snapshot as Partial<AgentRuntimeSnapshot>;
+  if (record.version !== 1 || !Array.isArray(record.tasks) || !Array.isArray(record.inbox)) return empty;
+  const tasks: Record<string, LocalAgentTaskState> = {};
+  const interruptedTasks: LocalAgentTaskState[] = [];
+  for (const raw of record.tasks.slice(-MAX_AGENT_REGISTRY_SIZE)) {
+    if (!raw || typeof raw !== 'object' || typeof raw.id !== 'string' || raw.id.length === 0 || !Number.isSafeInteger(raw.epoch) || raw.epoch < 1 || typeof raw.description !== 'string' || typeof raw.prompt !== 'string' || typeof raw.agentType !== 'string' || !Number.isFinite(raw.startTime) || !['queued', 'running', 'completed', 'failed', 'cancelled'].includes(raw.status)) continue;
+    const interrupted = raw.status === 'running' || raw.status === 'queued';
+    const task: LocalAgentTaskState = {
+      ...createTaskStateBase(raw.id, 'local_agent', raw.description, raw.toolUseId),
+      type: 'local_agent',
+      status: interrupted ? 'failed' : runtimeStatusToTask(raw.status),
+      agentId: raw.id,
+      epoch: raw.epoch,
+      prompt: raw.prompt,
+      agentType: raw.agentType,
+      error: interrupted ? 'Agent execution interrupted during session recovery' : raw.error,
+      result: raw.result,
+      startTime: raw.startTime,
+      endTime: interrupted ? Date.now() : raw.endTime,
+      notified: interrupted ? false : raw.notified !== false,
+      retrieved: false,
+      lastReportedToolCount: 0,
+      lastReportedTokenCount: 0,
+      isBackgrounded: true,
+      pendingMessages: [],
+      retain: false,
+      diskLoaded: false
+    };
+    tasks[raw.id] = task;
+    if (interrupted) interruptedTasks.push(task);
+  }
+  const inbox = record.inbox.filter(item => item && item.version === 1 && item.consumed !== true && typeof item.taskId === 'string' && Number.isSafeInteger(item.epoch) && item.epoch > 0 && Number.isSafeInteger(item.sequence) && item.sequence > 0 && typeof item.notification === 'string' && item.notification.length <= 1_000_000).slice(-MAX_AGENT_COMPLETION_INBOX).map(({
+    consumed: _consumed,
+    ...item
+  }) => item);
+  let nextSequence = Number.isSafeInteger(record.nextSequence) && record.nextSequence! > 0 ? record.nextSequence! : Math.max(0, ...inbox.map(item => item.sequence)) + 1;
+  let remainingInboxCapacity = MAX_AGENT_COMPLETION_INBOX - inbox.length;
+  for (const task of interruptedTasks.sort((a, b) => a.id.localeCompare(b.id))) {
+    if (remainingInboxCapacity <= 0) break;
+    task.notified = true;
+    const toolUseIdLine = task.toolUseId ? `\n<${TOOL_USE_ID_TAG}>${task.toolUseId}</${TOOL_USE_ID_TAG}>` : '';
+    inbox.push({
+      version: 1,
+      sequence: nextSequence++,
+      taskId: task.id,
+      epoch: task.epoch,
+      notification: `<${TASK_NOTIFICATION_TAG}>\n<${TASK_ID_TAG}>${task.id}</${TASK_ID_TAG}>${toolUseIdLine}\n<${TASK_TYPE_TAG}>local_agent</${TASK_TYPE_TAG}>\n<${OUTPUT_FILE_TAG}>${task.outputFile}</${OUTPUT_FILE_TAG}>\n<${STATUS_TAG}>failed</${STATUS_TAG}>\n<${SUMMARY_TAG}>Agent "${task.description}" interrupted during session recovery</${SUMMARY_TAG}>\n</${TASK_NOTIFICATION_TAG}>`
+    });
+    remainingInboxCapacity--;
+  }
+  return {
+    tasks,
+    agentCompletionInbox: inbox.sort((a, b) => a.sequence - b.sequence),
+    nextAgentCompletionSequence: nextSequence
+  };
 }
 
 /**
@@ -200,22 +483,7 @@ export function drainPendingMessages(taskId: string, getAppState: () => AppState
   return drained;
 }
 
-/**
- * Enqueue an agent notification to the message queue.
- */
-export function enqueueAgentNotification({
-  taskId,
-  description,
-  status,
-  error,
-  setAppState,
-  finalMessage,
-  usage,
-  toolUseId,
-  worktreePath,
-  worktreeBranch,
-  outputPath
-}: {
+type AgentNotificationInput = {
   taskId: string;
   description: string;
   status: 'completed' | 'failed' | 'killed';
@@ -231,29 +499,26 @@ export function enqueueAgentNotification({
   worktreePath?: string;
   worktreeBranch?: string;
   outputPath?: string;
-}): void {
-  // Atomically check and set notified flag to prevent duplicate notifications.
-  // If the task was already marked as notified (e.g., by TaskStopTool), skip
-  // enqueueing to avoid sending redundant messages to the model.
-  let shouldEnqueue = false;
-  updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => {
-    if (task.notified) {
-      return task;
-    }
-    shouldEnqueue = true;
-    return {
-      ...task,
-      notified: true
-    };
-  });
-  if (!shouldEnqueue) {
-    return;
-  }
+  epoch?: number;
+};
 
-  // Abort any active speculation — background task state changed, so speculated
-  // results may reference stale task output. The prompt suggestion text is
-  // preserved; only the pre-computed response is discarded.
-  abortSpeculation(setAppState);
+/**
+ * Enqueue an agent notification to the message queue.
+ */
+export function enqueueAgentNotification({
+  taskId,
+  description,
+  status,
+  error,
+  setAppState,
+  finalMessage,
+  usage,
+  toolUseId,
+  worktreePath,
+  worktreeBranch,
+  outputPath,
+  epoch
+}: AgentNotificationInput): boolean {
   const summary = status === 'completed' ? `Agent "${description}" completed` : status === 'failed' ? `Agent "${description}" failed: ${error || 'Unknown error'}` : `Agent "${description}" was stopped`;
   const notificationOutputPath = outputPath ?? getTaskOutputPath(taskId);
   const toolUseIdLine = toolUseId ? `\n<${TOOL_USE_ID_TAG}>${toolUseId}</${TOOL_USE_ID_TAG}>` : '';
@@ -267,10 +532,154 @@ export function enqueueAgentNotification({
 <${STATUS_TAG}>${status}</${STATUS_TAG}>
 <${SUMMARY_TAG}>${summary}</${SUMMARY_TAG}>${resultSection}${usageSection}${worktreeSection}
 </${TASK_NOTIFICATION_TAG}>`;
-  enqueuePendingNotification({
-    value: message,
-    mode: 'task-notification'
+  let enqueued = false;
+  let spilled: AppState['agentCompletionInbox'] = [];
+  const sessionId = getSessionId();
+  setAppState(prev => {
+    const task = prev.tasks[taskId];
+    const expectedTaskStatus = status === 'killed' ? 'killed' : status;
+    if (!isLocalAgentTask(task) || task.status !== expectedTaskStatus || task.notified || epoch !== undefined && task.epoch !== epoch) {
+      return prev;
+    }
+    const sequence = Number.isSafeInteger(prev.nextAgentCompletionSequence) && prev.nextAgentCompletionSequence > 0 ? prev.nextAgentCompletionSequence : 1;
+    const currentInbox = Array.isArray(prev.agentCompletionInbox) ? prev.agentCompletionInbox : [];
+    if (currentInbox.length >= MAX_AGENT_COMPLETION_INBOX) {
+      if (getCommandQueueLength() + currentInbox.length > MAX_COMMAND_QUEUE_SIZE) {
+        // Explicit bounded backpressure: keep the new task unnotified so its
+        // lifecycle can report/retry instead of silently dropping any item.
+        return prev;
+      }
+      // Spill the existing bounded inbox into the established command queue at
+      // this completion boundary, then admit the new item. Queue entries retain
+      // session/task/epoch identity and are filtered before consumption.
+      spilled = [...currentInbox].sort((a, b) => a.sequence - b.sequence);
+    }
+    enqueued = true;
+    const inbox = [...(spilled.length > 0 ? [] : currentInbox), {
+      version: 1 as const,
+      sequence,
+      taskId,
+      epoch: task.epoch,
+      notification: message
+    }];
+    return {
+      ...prev,
+      tasks: {
+        ...prev.tasks,
+        [taskId]: {
+          ...task,
+          notified: true
+        }
+      },
+      agentCompletionInbox: inbox,
+      nextAgentCompletionSequence: sequence + 1
+    };
   });
+  enqueuePendingNotifications(spilled.map(completion => ({
+    value: completion.notification,
+    mode: 'task-notification',
+    agentCompletion: {
+      taskId: completion.taskId,
+      epoch: completion.epoch,
+      sessionId
+    }
+  })));
+  if (enqueued) {
+    // Completion changed model-visible state; discard any stale speculation and
+    // wake idle REPL/headless consumers. The listener drains only at its safe
+    // between-turn boundary.
+    abortSpeculation(setAppState);
+    wakeAgentCompletionConsumers(getSessionId());
+  }
+  return enqueued;
+}
+
+function retryUnnotifiedAgentCompletions(setAppState: SetAppState, sessionId: string): boolean {
+  if (sessionId !== getSessionId()) return false;
+  let candidates: LocalAgentTaskState[] = [];
+  setAppState(prev => {
+    candidates = Object.values(prev.tasks).filter((task): task is LocalAgentTaskState =>
+      isLocalAgentTask(task) &&
+      task.isBackgrounded &&
+      isTerminalTaskStatus(task.status) &&
+      !task.notified
+    ).sort((a, b) => (a.endTime ?? a.startTime) - (b.endTime ?? b.startTime) || a.id.localeCompare(b.id)).slice(0, MAX_AGENT_REGISTRY_SIZE);
+    return prev;
+  });
+  let enqueued = false;
+  for (const task of candidates) {
+    if (sessionId !== getSessionId()) break;
+    enqueued = enqueueAgentNotification({
+      taskId: task.id,
+      description: task.description,
+      status: task.status,
+      error: task.error,
+      setAppState,
+      finalMessage: task.result?.content.map(item => item.text).join('\n'),
+      usage: task.result ? {
+        totalTokens: task.result.totalTokens,
+        toolUses: task.result.totalToolUseCount,
+        durationMs: task.result.totalDurationMs
+      } : undefined,
+      toolUseId: task.toolUseId,
+      outputPath: task.outputFile,
+      epoch: task.epoch
+    }) || enqueued;
+  }
+  return enqueued;
+}
+
+export function isAgentCompletionCommand(command: QueuedCommand): boolean {
+  return command.agentCompletion !== undefined;
+}
+
+export function isCurrentAgentCompletionCommand(command: QueuedCommand, state: AppState, sessionId = getSessionId()): boolean {
+  const completion = command.agentCompletion;
+  if (!completion) return true;
+  if (completion.sessionId !== sessionId) return false;
+  const task = state.tasks[completion.taskId];
+  return isLocalAgentTask(task) && task.epoch === completion.epoch;
+}
+
+/** Move deferred Agent completions into the existing model-input queue at a safe boundary. */
+export async function flushAndDrainAgentCompletionInbox(
+  setAppState: SetAppState,
+  sessionId = getSessionId(),
+  isSafeToDrain: () => boolean = () => true,
+): Promise<boolean> {
+  if (sessionId !== getSessionId() || !isSafeToDrain()) return false;
+  const { flushAgentRuntimePersistence } = await import('../../state/onChangeAppState.js');
+  await flushAgentRuntimePersistence();
+  if (sessionId !== getSessionId() || !isSafeToDrain()) return false;
+  const retried = retryUnnotifiedAgentCompletions(setAppState, sessionId);
+  const drained = drainAgentCompletionInbox(setAppState, sessionId);
+  await flushAgentRuntimePersistence();
+  return retried || drained;
+}
+
+export function drainAgentCompletionInbox(setAppState: SetAppState, sessionId = getSessionId()): boolean {
+  let drained: AppState['agentCompletionInbox'] = [];
+  setAppState(prev => {
+    const inbox = Array.isArray(prev.agentCompletionInbox) ? prev.agentCompletionInbox : [];
+    if (inbox.length === 0) return prev;
+    if (getCommandQueueLength() + inbox.length > MAX_COMMAND_QUEUE_SIZE) return prev;
+    drained = [...inbox].sort((a, b) => a.sequence - b.sequence);
+    return {
+      ...prev,
+      agentCompletionInbox: []
+    };
+  });
+  if (sessionId !== getSessionId() || drained.length === 0) return false;
+  enqueuePendingNotifications(drained.map(completion => ({
+    value: completion.notification,
+    mode: 'task-notification',
+    agentCompletion: {
+      taskId: completion.taskId,
+      epoch: completion.epoch,
+      sessionId
+    }
+  })));
+  return true;
 }
 
 /**
@@ -290,10 +699,10 @@ export const LocalAgentTask: Task = {
 /**
  * Kill an agent task. No-op if already killed/completed.
  */
-export function killAsyncAgent(taskId: string, setAppState: SetAppState): void {
+export function killAsyncAgent(taskId: string, setAppState: SetAppState, epoch?: number): void {
   let killed = false;
   updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => {
-    if (task.status !== 'running') {
+    if (!canTransitionAgentStatus(task.status, 'cancelled') || epoch !== undefined && task.epoch !== epoch) {
       return task;
     }
     killed = true;
@@ -478,10 +887,10 @@ export function updateAgentSummary(taskId: string, summary: string, setAppState:
 /**
  * Complete an agent task with result.
  */
-export function completeAgentTask(result: AgentToolResult, setAppState: SetAppState): void {
+export function completeAgentTask(result: AgentToolResult, setAppState: SetAppState, epoch?: number): void {
   const taskId = result.agentId;
   updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => {
-    if (task.status !== 'running') {
+    if (!canTransitionAgentStatus(task.status, 'completed') || epoch !== undefined && task.epoch !== epoch) {
       return task;
     }
     task.unregisterCleanup?.();
@@ -503,9 +912,9 @@ export function completeAgentTask(result: AgentToolResult, setAppState: SetAppSt
 /**
  * Fail an agent task with error.
  */
-export function failAgentTask(taskId: string, error: string, setAppState: SetAppState): void {
+export function failAgentTask(taskId: string, error: string, setAppState: SetAppState, epoch?: number): void {
   updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => {
-    if (task.status !== 'running') {
+    if (!canTransitionAgentStatus(task.status, 'failed') || epoch !== undefined && task.epoch !== epoch) {
       return task;
     }
     task.unregisterCleanup?.();
@@ -532,6 +941,55 @@ export function failAgentTask(taskId: string, error: string, setAppState: SetApp
  *   the agent's abort controller will be a child that auto-aborts when parent aborts.
  *   This ensures subagents are aborted when their parent (e.g., in-process teammate) aborts.
  */
+function hasPendingAgentCompletion(task: LocalAgentTaskState, state: AppState): boolean {
+  if ((state.agentCompletionInbox ?? []).some(completion => completion.taskId === task.id && completion.epoch === task.epoch)) {
+    return true;
+  }
+  return getCommandQueue().some(command =>
+    command.agentCompletion?.taskId === task.id && command.agentCompletion.epoch === task.epoch
+  );
+}
+
+function findReclaimableAgentTask(state: AppState): LocalAgentTaskState | undefined {
+  return Object.values(state.tasks).filter(isLocalAgentTask).filter(task =>
+    isTerminalTaskStatus(task.status) &&
+    task.notified === true &&
+    !task.retain &&
+    !hasPendingAgentCompletion(task, state)
+  ).sort((a, b) => (a.endTime ?? a.startTime) - (b.endTime ?? b.startTime) || a.startTime - b.startTime || a.id.localeCompare(b.id))[0];
+}
+
+export function canRegisterLocalAgent(agentId: string, state: AppState): boolean {
+  const agentTasks = Object.values(state.tasks).filter(isLocalAgentTask);
+  return Boolean(state.tasks[agentId]) || agentTasks.length < MAX_AGENT_REGISTRY_SIZE || findReclaimableAgentTask(state) !== undefined;
+}
+
+function ensureAgentRegistryCapacity(agentId: string, setAppState: SetAppState): boolean {
+  let hasCapacity = false;
+  setAppState(prev => {
+    const agentTasks = Object.values(prev.tasks).filter(isLocalAgentTask);
+    if (prev.tasks[agentId] || agentTasks.length < MAX_AGENT_REGISTRY_SIZE) {
+      hasCapacity = true;
+      return prev;
+    }
+    // A task cannot be reclaimed while its completion is waiting in either
+    // delivery queue: command validation still needs its epoch until the model
+    // consumes the notification. `notified` only means queued, not consumed.
+    const candidate = findReclaimableAgentTask(prev);
+    if (!candidate) return prev;
+    const {
+      [candidate.id]: _evicted,
+      ...tasks
+    } = prev.tasks;
+    hasCapacity = true;
+    return {
+      ...prev,
+      tasks
+    };
+  });
+  return hasCapacity;
+}
+
 export function registerAsyncAgent({
   agentId,
   description,
@@ -549,6 +1007,9 @@ export function registerAsyncAgent({
   parentAbortController?: AbortController;
   toolUseId?: string;
 }): LocalAgentTaskState {
+  if (!ensureAgentRegistryCapacity(agentId, setAppState)) {
+    throw new Error(`Agent registry is full (${MAX_AGENT_REGISTRY_SIZE} tasks are running, retained, or awaiting completion delivery); retry after a task is notified and released`);
+  }
   void initTaskOutputAsSymlink(agentId, getAgentTranscriptPath(asAgentId(agentId)));
 
   // Create abort controller - if parent provided, create child that auto-aborts with parent
@@ -558,6 +1019,7 @@ export function registerAsyncAgent({
     type: 'local_agent',
     status: 'running',
     agentId,
+    epoch: 1,
     prompt,
     selectedAgent,
     agentType: selectedAgent.agentType ?? 'general-purpose',
@@ -578,9 +1040,7 @@ export function registerAsyncAgent({
   });
   taskState.unregisterCleanup = unregisterCleanup;
 
-  // Register task in AppState
-  registerTask(taskState, setAppState);
-  return taskState;
+  return registerTask(taskState, setAppState);
 }
 
 // Map of taskId -> resolve function for background signals
@@ -613,6 +1073,9 @@ export function registerAgentForeground({
   backgroundSignal: Promise<void>;
   cancelAutoBackground?: () => void;
 } {
+  if (!ensureAgentRegistryCapacity(agentId, setAppState)) {
+    throw new Error(`Agent registry is full (${MAX_AGENT_REGISTRY_SIZE} tasks are running, retained, or awaiting completion delivery); retry after a task is notified and released`);
+  }
   void initTaskOutputAsSymlink(agentId, getAgentTranscriptPath(asAgentId(agentId)));
   const abortController = createAbortController();
   const unregisterCleanup = registerCleanup(async () => {
@@ -623,6 +1086,7 @@ export function registerAgentForeground({
     type: 'local_agent',
     status: 'running',
     agentId,
+    epoch: 1,
     prompt,
     selectedAgent,
     agentType: selectedAgent.agentType ?? 'general-purpose',

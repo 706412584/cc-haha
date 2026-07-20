@@ -14,7 +14,7 @@ import {
   type TaskType,
 } from '../../Task.js'
 import type { TaskState } from '../../tasks/types.js'
-import { enqueuePendingNotification } from '../messageQueueManager.js'
+import { enqueuePendingNotification, removeByFilter } from '../messageQueueManager.js'
 import { enqueueSdkEvent } from '../sdkEventQueue.js'
 import { getTaskOutputDelta, getTaskOutputPath } from './diskOutput.js'
 
@@ -74,8 +74,9 @@ export function updateTaskState<T extends TaskState>(
 /**
  * Register a new task in AppState.
  */
-export function registerTask(task: TaskState, setAppState: SetAppState): void {
+export function registerTask<T extends TaskState>(task: T, setAppState: SetAppState): T {
   let isReplacement = false
+  let registeredTask = task
   setAppState(prev => {
     const existing = prev.tasks[task.id]
     isReplacement = existing !== undefined
@@ -88,6 +89,9 @@ export function registerTask(task: TaskState, setAppState: SetAppState): void {
       existing && 'retain' in existing
         ? {
             ...task,
+            ...('epoch' in existing && 'epoch' in task
+              ? { epoch: existing.epoch + 1 }
+              : {}),
             retain: existing.retain,
             startTime: existing.startTime,
             messages: existing.messages,
@@ -95,11 +99,31 @@ export function registerTask(task: TaskState, setAppState: SetAppState): void {
             pendingMessages: existing.pendingMessages,
           }
         : task
-    return { ...prev, tasks: { ...prev.tasks, [task.id]: merged } }
+    registeredTask = merged as T
+    return {
+      ...prev,
+      tasks: { ...prev.tasks, [task.id]: merged },
+      ...(isReplacement && 'epoch' in merged
+        ? {
+            agentCompletionInbox: (prev.agentCompletionInbox ?? []).filter(
+              completion => completion.taskId !== task.id,
+            ),
+          }
+        : {}),
+    }
   })
 
-  // Replacement (resume) — not a new start. Skip to avoid double-emit.
-  if (isReplacement) return
+  // Replacement (resume) invalidates both persisted inbox entries and any
+  // completion that already crossed into the shared command queue.
+  if (isReplacement) {
+    if ('epoch' in registeredTask) {
+      removeByFilter(command =>
+        command.agentCompletion?.taskId === task.id &&
+        command.agentCompletion.epoch !== registeredTask.epoch,
+      )
+    }
+    return registeredTask
+  }
 
   enqueueSdkEvent({
     type: 'system',
@@ -114,6 +138,7 @@ export function registerTask(task: TaskState, setAppState: SetAppState): void {
         : undefined,
     prompt: 'prompt' in task ? (task.prompt as string) : undefined,
   })
+  return registeredTask
 }
 
 /**

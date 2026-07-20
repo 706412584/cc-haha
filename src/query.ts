@@ -96,6 +96,7 @@ import { shouldCaptureApiTrace } from './services/api/traceCapture.js'
 import { StreamingToolExecutor } from './services/tools/StreamingToolExecutor.js'
 import { queryCheckpoint } from './utils/queryProfiler.js'
 import { runTools } from './services/tools/toolOrchestration.js'
+import { flushAndDrainAgentCompletionInbox, isCurrentAgentCompletionCommand } from './tasks/LocalAgentTask/LocalAgentTask.js'
 import { applyToolResultBudget } from './utils/toolResultStorage.js'
 import { recordContentReplacement } from './utils/sessionStorage.js'
 import { handleStopHooks } from './query/stopHooks.js'
@@ -1553,6 +1554,12 @@ async function* queryLoop(
       queryDepth: queryTracking.depth,
     })
 
+    // This is the safe continuation boundary: all tool results are complete, so
+    // terminal Agent events can enter model input without interrupting parallel tools.
+    if (querySource.startsWith('repl_main_thread') || querySource === 'sdk') {
+      await flushAndDrainAgentCompletionInbox(toolUseContext.setAppStateForTasks ?? toolUseContext.setAppState)
+    }
+
     // Get queued commands snapshot before processing attachments.
     // These will be sent as attachments so Claude can respond to them in the current turn.
     //
@@ -1576,9 +1583,11 @@ async function* queryLoop(
     const isMainThread =
       querySource.startsWith('repl_main_thread') || querySource === 'sdk'
     const currentAgentId = toolUseContext.agentId
+    const currentAppState = toolUseContext.getAppState()
     const queuedCommandsSnapshot = getCommandsByMaxPriority(
       sleepRan ? 'later' : 'next',
     ).filter(cmd => {
+      if (!isCurrentAgentCompletionCommand(cmd, currentAppState)) return false
       if (isSlashCommand(cmd)) return false
       if (isMainThread) return cmd.agentId === undefined
       // Subagents only drain task-notifications addressed to them — never

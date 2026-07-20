@@ -1849,6 +1849,8 @@ export const kr: Record<TranslationKey, string> = {
   'chat.backgroundTasks.finishedCountMany': '완료된 작업 {count}개',
   'chat.backgroundTasks.running': '실행 중',
   'chat.backgroundTasks.finished': '완료됨',
+  'chat.backgroundTasks.watching': '관찰 중',
+  'chat.backgroundTasks.agentResults': 'Agent 결과',
   'chat.backgroundTasks.clear': '지우기',
   'chat.backgroundTasks.close': '백그라운드 작업 닫기',
   'chat.backgroundTasks.stopTask': '백그라운드 작업 중지: {title}',

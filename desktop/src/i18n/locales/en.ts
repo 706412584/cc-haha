@@ -1880,6 +1880,8 @@ export const en = {
   'chat.backgroundTasks.finishedCountMany': '{count} finished tasks',
   'chat.backgroundTasks.running': 'Running',
   'chat.backgroundTasks.finished': 'Finished',
+  'chat.backgroundTasks.watching': 'Watching',
+  'chat.backgroundTasks.agentResults': 'Agent Results',
   'chat.backgroundTasks.clear': 'Clear',
   'chat.backgroundTasks.close': 'Close background tasks',
   'chat.backgroundTasks.stopTask': 'Stop background task: {title}',

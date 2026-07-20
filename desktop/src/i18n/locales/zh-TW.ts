@@ -1849,6 +1849,8 @@ export const zh: Record<TranslationKey, string> = {
   'chat.backgroundTasks.finishedCountMany': '{count} 個已完成任務',
   'chat.backgroundTasks.running': '執行中',
   'chat.backgroundTasks.finished': '已完成',
+  'chat.backgroundTasks.watching': '關注中',
+  'chat.backgroundTasks.agentResults': 'Agent 結果',
   'chat.backgroundTasks.clear': '清除',
   'chat.backgroundTasks.close': '關閉後臺任務',
   'chat.backgroundTasks.stopTask': '停止後臺任務：{title}',

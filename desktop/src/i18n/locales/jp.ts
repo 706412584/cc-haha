@@ -1849,6 +1849,8 @@ export const jp: Record<TranslationKey, string> = {
   'chat.backgroundTasks.finishedCountMany': '{count} 件の完了タスク',
   'chat.backgroundTasks.running': '実行中',
   'chat.backgroundTasks.finished': '完了',
+  'chat.backgroundTasks.watching': '監視中',
+  'chat.backgroundTasks.agentResults': 'Agent 結果',
   'chat.backgroundTasks.clear': 'クリア',
   'chat.backgroundTasks.close': 'バックグラウンドタスクを閉じる',
   'chat.backgroundTasks.stopTask': 'バックグラウンドタスクを停止: {title}',

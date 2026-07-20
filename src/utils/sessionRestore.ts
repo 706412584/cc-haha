@@ -4,6 +4,7 @@ import { dirname } from 'path'
 import {
   getMainLoopModelOverride,
   getSessionId,
+  isSessionPersistenceDisabled,
   setMainLoopModelOverride,
   setMainThreadAgentType,
   setOriginalCwd,
@@ -12,7 +13,14 @@ import {
 import { clearSystemPromptSections } from '../constants/systemPromptSections.js'
 import { restoreCostStateForSession } from '../cost-tracker.js'
 import type { AppState } from '../state/AppState.js'
+import { flushAgentRuntimePersistence } from '../state/onChangeAppState.js'
+import { removeByFilter } from './messageQueueManager.js'
 import type { AgentColorName } from '../tools/AgentTool/agentColorManager.js'
+import { quiesceLocalAgentLifecycles } from '../tools/AgentTool/agentToolUtils.js'
+import {
+  loadAgentRuntimeSnapshot,
+  restoreAgentRuntimeSnapshot,
+} from '../tasks/LocalAgentTask/LocalAgentTask.js'
 import {
   type AgentDefinition,
   type AgentDefinitionsResult,
@@ -49,6 +57,9 @@ import {
   recordContentReplacement,
   resetSessionFilePointer,
   restoreSessionMetadata,
+  flushSessionStorage,
+  getAgentRuntimePathForTranscript,
+  getTranscriptPathForSession,
   saveMode,
   saveWorktreeState,
 } from './sessionStorage.js'
@@ -96,10 +107,60 @@ function extractTodosFromTranscript(messages: Message[]): TodoList {
  * Restore session state (file history, attribution, todos) from log on resume.
  * Used by both SDK (print.ts) and interactive (REPL.tsx, main.tsx) resume paths.
  */
-export function restoreSessionStateFromLog(
+export type AgentRuntimeResumeTarget = {
+  sessionId: string
+  transcriptPath?: string
+  forkSession: boolean
+}
+
+export async function switchSessionAndRestoreStateFromLog(
   result: ResumeResult,
   setAppState: (f: (prev: AppState) => AppState) => void,
-): void {
+  runtimeTarget: AgentRuntimeResumeTarget,
+  options: { lifecycleQuiesceTimeoutMs?: number } = {},
+): Promise<void> {
+  await quiesceLocalAgentLifecycles(setAppState, {
+    timeoutMs: options.lifecycleQuiesceTimeoutMs,
+  })
+  await flushSessionStorage()
+  await flushAgentRuntimePersistence()
+  switchSession(
+    asSessionId(runtimeTarget.sessionId),
+    runtimeTarget.transcriptPath ? dirname(runtimeTarget.transcriptPath) : null,
+  )
+  removeByFilter(command =>
+    command.agentCompletion !== undefined &&
+    command.agentCompletion.sessionId !== runtimeTarget.sessionId,
+  )
+  await restoreSessionStateFromLog(result, setAppState, runtimeTarget)
+}
+
+export async function restoreSessionStateFromLog(
+  result: ResumeResult,
+  setAppState: (f: (prev: AppState) => AppState) => void,
+  runtimeTarget: AgentRuntimeResumeTarget,
+): Promise<void> {
+  const targetTranscriptPath = runtimeTarget.transcriptPath ??
+    getTranscriptPathForSession(runtimeTarget.sessionId)
+  const runtime = runtimeTarget.forkSession || isSessionPersistenceDisabled()
+    ? restoreAgentRuntimeSnapshot(null)
+    : await loadAgentRuntimeSnapshot(
+        getAgentRuntimePathForTranscript(targetTranscriptPath),
+      )
+  setAppState(prev => ({
+    ...prev,
+    tasks: {
+      ...Object.fromEntries(
+        Object.entries(prev.tasks).filter(
+          ([, task]) => task.type !== 'local_agent',
+        ),
+      ),
+      ...runtime.tasks,
+    },
+    agentCompletionInbox: runtime.agentCompletionInbox,
+    nextAgentCompletionSequence: runtime.nextAgentCompletionSequence,
+  }))
+
   // Restore file history state
   if (result.fileHistorySnapshots && result.fileHistorySnapshots.length > 0) {
     fileHistoryRestoreStateFromLog(result.fileHistorySnapshots, newState => {

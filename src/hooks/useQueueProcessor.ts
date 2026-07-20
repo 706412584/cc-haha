@@ -1,11 +1,12 @@
 import { useEffect, useSyncExternalStore } from 'react'
+import { useAppStateStore } from '../state/AppState.js'
 import type { QueuedCommand } from '../types/textInputTypes.js'
 import {
   getCommandQueueSnapshot,
   subscribeToCommandQueue,
 } from '../utils/messageQueueManager.js'
 import type { QueryGuard } from '../utils/QueryGuard.js'
-import { processQueueIfReady } from '../utils/queueProcessor.js'
+import { flushAgentCompletionsAndProcessQueueIfReady, processQueueIfReady } from '../utils/queueProcessor.js'
 
 type UseQueueProcessorParams = {
   executeQueuedInput: (commands: QueuedCommand[]) => Promise<void>
@@ -44,10 +45,24 @@ export function useQueueProcessor({
     subscribeToCommandQueue,
     getCommandQueueSnapshot,
   )
+  const appStateStore = useAppStateStore()
+  const pendingAgentCompletions = useSyncExternalStore(
+    appStateStore.subscribe,
+    () => appStateStore.getState().agentCompletionInbox.length,
+  )
 
   useEffect(() => {
     if (isQueryActive) return
     if (hasActiveLocalJsxUI) return
+
+    if (appStateStore.getState().agentCompletionInbox.length > 0) {
+      void flushAgentCompletionsAndProcessQueueIfReady({
+        setAppState: appStateStore.setState,
+        getAppState: appStateStore.getState,
+        executeInput: executeQueuedInput,
+      })
+      return
+    }
     if (queueSnapshot.length === 0) return
 
     // Reservation is now owned by handlePromptSubmit (inside executeUserInput's
@@ -57,12 +72,17 @@ export function useQueueProcessor({
     // snapshot change), isQueryActive is already true (dispatching) and the
     // guard above returns early. handlePromptSubmit's finally releases the
     // reservation via cancelReservation() (no-op if onQuery already ran end()).
-    processQueueIfReady({ executeInput: executeQueuedInput })
+    processQueueIfReady({
+      executeInput: executeQueuedInput,
+      getAppState: appStateStore.getState,
+    })
   }, [
     queueSnapshot,
+    pendingAgentCompletions,
     isQueryActive,
     executeQueuedInput,
     hasActiveLocalJsxUI,
     queryGuard,
+    appStateStore,
   ])
 }

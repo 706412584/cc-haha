@@ -1,3 +1,5 @@
+import type { AppState } from '../state/AppState.js'
+import { flushAndDrainAgentCompletionInbox, isCurrentAgentCompletionCommand } from '../tasks/LocalAgentTask/LocalAgentTask.js'
 import type { QueuedCommand } from '../types/textInputTypes.js'
 import {
   dequeue,
@@ -6,8 +8,11 @@ import {
   peek,
 } from './messageQueueManager.js'
 
+export { flushAndDrainAgentCompletionInbox }
+
 type ProcessQueueParams = {
   executeInput: (commands: QueuedCommand[]) => Promise<void>
+  getAppState?: () => AppState
 }
 
 type ProcessQueueResult = {
@@ -51,6 +56,7 @@ function isSlashCommand(cmd: QueuedCommand): boolean {
  */
 export function processQueueIfReady({
   executeInput,
+  getAppState,
 }: ProcessQueueParams): ProcessQueueResult {
   // This processor runs on the REPL main thread between turns. Skip anything
   // addressed to a subagent — an unfiltered peek() returning a subagent
@@ -58,7 +64,10 @@ export function processQueueIfReady({
   // matching that mode with agentId===undefined, and we'd return processed:
   // false with the queue unchanged → the React effect never re-fires and any
   // queued user prompt stalls permanently.
-  const isMainThread = (cmd: QueuedCommand) => cmd.agentId === undefined
+  const appState = getAppState?.()
+  const isMainThread = (cmd: QueuedCommand) =>
+    cmd.agentId === undefined &&
+    (appState === undefined || isCurrentAgentCompletionCommand(cmd, appState))
 
   const next = peek(isMainThread)
   if (!next) {
@@ -92,4 +101,22 @@ export function processQueueIfReady({
  */
 export function hasQueuedCommands(): boolean {
   return hasCommandsInQueue()
+}
+
+export async function flushAgentCompletionsAndProcessQueueIfReady({
+  setAppState,
+  getAppState,
+  executeInput,
+}: {
+  setAppState: (updater: (prev: AppState) => AppState) => void
+  getAppState: () => AppState
+  executeInput: (commands: QueuedCommand[]) => Promise<void>
+}): Promise<ProcessQueueResult> {
+  if (getAppState().agentCompletionInbox.length > 0) {
+    await flushAndDrainAgentCompletionInbox(setAppState)
+    if (getAppState().agentCompletionInbox.length === 0) {
+      return { processed: false }
+    }
+  }
+  return processQueueIfReady({ executeInput, getAppState })
 }

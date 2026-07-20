@@ -1,6 +1,6 @@
 import { feature } from 'bun:bundle'
 import { z } from 'zod/v4'
-import { clearInvokedSkillsForAgent } from '../../bootstrap/state.js'
+import { clearInvokedSkillsForAgent, getSessionId } from '../../bootstrap/state.js'
 import {
   ALL_AGENT_DISALLOWED_TOOLS,
   ASYNC_AGENT_ALLOWED_TOOLS,
@@ -591,11 +591,101 @@ export function extractPartialResult(
 
 type SetAppState = (f: (prev: AppState) => AppState) => void
 
+const activeAgentLifecycles = new Map<string, Promise<void>>()
+const DEFAULT_AGENT_LIFECYCLE_QUIESCE_TIMEOUT_MS = 10_000
+
+function agentLifecycleKey(sessionId: string, taskId: string, epoch: number | undefined): string {
+  return `${sessionId}:${taskId}:${epoch ?? 0}`
+}
+
+export function registerLocalAgentLifecycle(
+  sessionId: string,
+  taskId: string,
+  epoch: number | undefined,
+  lifecycle: Promise<void>,
+): Promise<void> {
+  const key = agentLifecycleKey(sessionId, taskId, epoch)
+  const prior = activeAgentLifecycles.get(key)
+  const registered = prior ? Promise.allSettled([prior, lifecycle]).then(() => {}) : lifecycle
+  activeAgentLifecycles.set(key, registered)
+  void registered.then(
+    () => {
+      if (activeAgentLifecycles.get(key) === registered) activeAgentLifecycles.delete(key)
+    },
+    () => {
+      if (activeAgentLifecycles.get(key) === registered) activeAgentLifecycles.delete(key)
+    },
+  )
+  return registered
+}
+
+export function createSessionScopedAgentSetAppState(
+  sessionId: string,
+  taskId: string,
+  epoch: number | undefined,
+  setAppState: SetAppState,
+): SetAppState {
+  return updater => {
+    if (getSessionId() !== sessionId) return
+    setAppState(prev => {
+      if (getSessionId() !== sessionId) return prev
+      const task = prev.tasks[taskId]
+      if (epoch !== undefined && (!isLocalAgentTask(task) || task.epoch !== epoch)) return prev
+      return updater(prev)
+    })
+  }
+}
+
+/**
+ * Abort outgoing local Agents and wait until their lifecycle handlers stop
+ * mutating task state. Session switches call this before flushing transcript
+ * and runtime persistence so no old-session work can cross the boundary.
+ */
+export async function quiesceLocalAgentLifecycles(
+  setAppState: SetAppState,
+  options: { sessionId?: string; timeoutMs?: number } = {},
+): Promise<void> {
+  const sessionId = options.sessionId ?? getSessionId()
+  const outgoing: Array<{ taskId: string; epoch: number }> = []
+  setAppState(prev => {
+    for (const task of Object.values(prev.tasks)) {
+      if (
+        isLocalAgentTask(task) &&
+        (task.status === 'running' || task.status === 'pending')
+      ) {
+        outgoing.push({ taskId: task.id, epoch: task.epoch })
+      }
+    }
+    return prev
+  })
+  for (const task of outgoing) {
+    killAsyncAgent(task.taskId, setAppState, task.epoch)
+  }
+  const lifecycles = outgoing.map(task =>
+    activeAgentLifecycles.get(agentLifecycleKey(sessionId, task.taskId, task.epoch)),
+  ).filter((lifecycle): lifecycle is Promise<void> => lifecycle !== undefined)
+  if (lifecycles.length === 0) return
+  const timeoutMs = options.timeoutMs ?? DEFAULT_AGENT_LIFECYCLE_QUIESCE_TIMEOUT_MS
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      Promise.all(lifecycles),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(
+          `Timed out after ${timeoutMs}ms quiescing ${lifecycles.length} local Agent lifecycle(s) for session ${sessionId}; session switch aborted`,
+        )), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timeout) clearTimeout(timeout)
+  }
+}
+
 /**
  * Drives a background agent from spawn to terminal notification.
  * Shared between AgentTool's async-from-start path and resumeAgentBackground.
  */
-export async function runAsyncAgentLifecycle({
+async function runAsyncAgentLifecycleImpl({
   taskId,
   abortController,
   makeStream,
@@ -606,8 +696,10 @@ export async function runAsyncAgentLifecycle({
   agentIdForCleanup,
   enableSummarization,
   getWorktreeResult,
+  epoch,
 }: {
   taskId: string
+  epoch?: number
   abortController: AbortController
   makeStream: (
     onCacheSafeParams: ((p: CacheSafeParams) => void) | undefined,
@@ -701,9 +793,9 @@ export async function runAsyncAgentLifecycle({
     // Mark task completed FIRST so TaskOutput(block=true) unblocks
     // immediately, then notify the parent before any optional cleanup. The
     // parent session depends on this notification to resume its loop.
-    completeAsyncAgent(agentResult, rootSetAppState)
+    completeAsyncAgent(agentResult, rootSetAppState, epoch)
 
-    enqueueAgentNotification({
+    const notified = enqueueAgentNotification({
       taskId,
       description,
       status: 'completed',
@@ -716,7 +808,11 @@ export async function runAsyncAgentLifecycle({
       },
       outputPath: getAgentProgressOutputPath(taskId),
       toolUseId: toolUseContext.toolUseId,
+      epoch,
     })
+    if (!notified) {
+      logForDebugging('Agent completion backpressure: bounded inbox and command queue are full; completion remains unnotified for retry', { level: 'error' })
+    }
 
     void (async () => {
       try {
@@ -745,7 +841,7 @@ export async function runAsyncAgentLifecycle({
       // but only this catch handler has agentMessages, so the notification
       // must fire unconditionally. Transition status BEFORE worktree cleanup
       // so TaskOutput unblocks even if git hangs (gh-20236).
-      killAsyncAgent(taskId, rootSetAppState)
+      killAsyncAgent(taskId, rootSetAppState, epoch)
       logEvent('tengu_agent_tool_terminated', {
         agent_type:
           metadata.agentType as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -766,6 +862,7 @@ export async function runAsyncAgentLifecycle({
         toolUseId: toolUseContext.toolUseId,
         finalMessage: partialResult,
         outputPath: getAgentProgressOutputPath(taskId),
+        epoch,
       })
       void getWorktreeResult().catch(cleanupError =>
         logForDebugging(
@@ -775,7 +872,7 @@ export async function runAsyncAgentLifecycle({
       return
     }
     const msg = errorMessage(error)
-    failAsyncAgent(taskId, msg, rootSetAppState)
+    failAsyncAgent(taskId, msg, rootSetAppState, epoch)
     enqueueAgentNotification({
       taskId,
       description,
@@ -784,6 +881,7 @@ export async function runAsyncAgentLifecycle({
       setAppState: rootSetAppState,
       toolUseId: toolUseContext.toolUseId,
       outputPath: getAgentProgressOutputPath(taskId),
+      epoch,
     })
     void getWorktreeResult().catch(cleanupError =>
       logForDebugging(
@@ -794,4 +892,25 @@ export async function runAsyncAgentLifecycle({
     clearInvokedSkillsForAgent(agentIdForCleanup)
     clearDumpState(agentIdForCleanup)
   }
+}
+
+export function runAsyncAgentLifecycle(
+  options: Parameters<typeof runAsyncAgentLifecycleImpl>[0],
+): Promise<void> {
+  const sessionId = getSessionId()
+  const scopedOptions = {
+    ...options,
+    rootSetAppState: createSessionScopedAgentSetAppState(
+      sessionId,
+      options.taskId,
+      options.epoch,
+      options.rootSetAppState,
+    ),
+  }
+  return registerLocalAgentLifecycle(
+    sessionId,
+    options.taskId,
+    options.epoch,
+    runAsyncAgentLifecycleImpl(scopedOptions),
+  )
 }

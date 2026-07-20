@@ -50,6 +50,7 @@ function logOperation(operation: QueueOperation, content?: string): void {
 // Within the same priority, commands are processed FIFO.
 // ============================================================================
 
+export const MAX_COMMAND_QUEUE_SIZE = 4_096
 const commandQueue: QueuedCommand[] = []
 /** Frozen snapshot — recreated on every mutation for useSyncExternalStore. */
 let snapshot: readonly QueuedCommand[] = Object.freeze([])
@@ -126,6 +127,9 @@ export function recheckCommandQueue(): void {
  * Defaults priority to 'next' (processed before task notifications).
  */
 export function enqueue(command: QueuedCommand): void {
+  if (commandQueue.length >= MAX_COMMAND_QUEUE_SIZE) {
+    throw new Error(`Command queue capacity exceeded (${MAX_COMMAND_QUEUE_SIZE}); producer must retry after drain`)
+  }
   commandQueue.push({ ...command, priority: command.priority ?? 'next' })
   notifySubscribers()
   logOperation(
@@ -140,12 +144,25 @@ export function enqueue(command: QueuedCommand): void {
  * is never starved by system messages.
  */
 export function enqueuePendingNotification(command: QueuedCommand): void {
-  commandQueue.push({ ...command, priority: command.priority ?? 'later' })
+  enqueuePendingNotifications([command])
+}
+
+export function enqueuePendingNotifications(commands: QueuedCommand[]): void {
+  if (commands.length === 0) return
+  if (commandQueue.length + commands.length > MAX_COMMAND_QUEUE_SIZE) {
+    throw new Error(`Command queue capacity exceeded (${MAX_COMMAND_QUEUE_SIZE}); producer must retry after drain`)
+  }
+  commandQueue.push(...commands.map(command => ({
+    ...command,
+    priority: command.priority ?? 'later' as const,
+  })))
   notifySubscribers()
-  logOperation(
-    'enqueue',
-    typeof command.value === 'string' ? command.value : undefined,
-  )
+  for (const command of commands) {
+    logOperation(
+      'enqueue',
+      typeof command.value === 'string' ? command.value : undefined,
+    )
+  }
 }
 
 const PRIORITY_ORDER: Record<QueuePriority, number> = {
