@@ -719,10 +719,10 @@ describe('ActiveSession task polling', () => {
     const drawer = screen.getByTestId('background-tasks-drawer')
     expect(drawer).toHaveAttribute('role', 'dialog')
     expect(within(drawer).getByRole('heading', { name: 'Background tasks' })).toBeInTheDocument()
-    expect(within(drawer).getByText('Running')).toBeInTheDocument()
+    expect(within(drawer).getByText('Watching')).toBeInTheDocument()
     expect(within(drawer).getByText('Verify the todo app')).toBeInTheDocument()
     expect(within(drawer).getByText('Agent')).toBeInTheDocument()
-    expect(within(drawer).getByText('Finished')).toBeInTheDocument()
+    expect(within(drawer).getByText('Agent Results')).toBeInTheDocument()
     expect(within(drawer).getByText('Capture final screenshots')).toBeInTheDocument()
     expect(within(drawer).getByText('Bash')).toBeInTheDocument()
     expect(within(drawer).getByRole('button', { name: 'Stop background task: Verify the todo app' })).toBeInTheDocument()
@@ -1021,7 +1021,7 @@ describe('ActiveSession task polling', () => {
     fireEvent.click(taskButton)
 
     const drawer = screen.getByTestId('background-tasks-drawer')
-    expect(within(drawer).getByText('Finished')).toBeInTheDocument()
+    expect(within(drawer).getByText('Agent Results')).toBeInTheDocument()
     expect(within(drawer).getByText('1')).toBeInTheDocument()
     expect(within(drawer).getByText('Review screenshots')).toBeInTheDocument()
 
