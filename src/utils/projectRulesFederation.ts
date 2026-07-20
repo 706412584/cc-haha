@@ -38,7 +38,7 @@ type RuleCandidate = {
   relativePath: string
   canonicalPath: string
   label: string
-  metadata: 'none' | 'cursor' | 'copilot'
+  metadata: 'none' | 'cursor' | 'copilot' | 'kiro' | 'qoder' | 'codebuddy' | 'devin'
 }
 
 type DiscoveryBudget = {
@@ -83,6 +83,13 @@ function providerName(source: RuleSource): string {
     case 'cursor': return 'Cursor'
     case 'windsurf': return 'Windsurf'
     case 'copilot': return 'GitHub Copilot'
+    case 'kiro': return 'Kiro'
+    case 'trae': return 'Trae'
+    case 'qoder': return 'Qoder'
+    case 'codebuddy': return 'CodeBuddy'
+    case 'agents-md': return 'AGENTS.md'
+    case 'devin': return 'Devin'
+    case 'zcode': return 'Zcode'
   }
 }
 
@@ -275,6 +282,42 @@ function parseRuleContent(
       ? { content, applicability: 'conditional', globs }
       : { content, applicability: 'manual' }
   }
+  if (metadata === 'kiro') {
+    const globs = parsePatterns(frontmatter.fileMatchPattern)
+    if (frontmatter.inclusion === undefined || frontmatter.inclusion === 'always') {
+      return { content, applicability: 'always' }
+    }
+    return frontmatter.inclusion === 'fileMatch' && globs
+      ? { content, applicability: 'conditional', globs }
+      : { content, applicability: 'manual' }
+  }
+  if (metadata === 'devin') {
+    const globs = parsePatterns(frontmatter.globs ?? frontmatter.fileMatchPattern)
+    if (frontmatter.trigger === undefined || frontmatter.trigger === 'always_on') {
+      return { content, applicability: 'always' }
+    }
+    return globs
+      ? { content, applicability: 'conditional', globs }
+      : { content, applicability: 'manual' }
+  }
+  if (metadata === 'qoder') {
+    const globs = parsePatterns(frontmatter.globs ?? frontmatter.fileMatchPattern)
+    if (frontmatter.alwaysApply === true || frontmatter.trigger === 'always_on') {
+      return { content, applicability: 'always' }
+    }
+    return globs
+      ? { content, applicability: 'conditional', globs }
+      : { content, applicability: 'manual' }
+  }
+  if (metadata === 'codebuddy') {
+    const globs = parsePatterns(frontmatter.globs ?? frontmatter.fileMatchPattern)
+    if (frontmatter.alwaysApply === true || frontmatter.type === 'always') {
+      return { content, applicability: 'always' }
+    }
+    return globs
+      ? { content, applicability: 'conditional', globs }
+      : { content, applicability: 'manual' }
+  }
   const globs = source === 'claude' ? parsePatterns(frontmatter.paths) : undefined
   return globs
     ? { content, applicability: 'conditional', globs }
@@ -330,11 +373,17 @@ async function directoryCandidates(
   }
 }
 
-function createAdapter(
-  source: RuleSource,
-  isNative: boolean,
-  candidates: (projectPath: string) => Promise<RuleCandidate[]>,
-): RuleSourceAdapter {
+type RuleAdapterDefinition = {
+  source: RuleSource
+  isNative: boolean
+  candidates: (projectPath: string) => Promise<RuleCandidate[]>
+}
+
+function createAdapter({
+  source,
+  isNative,
+  candidates,
+}: RuleAdapterDefinition): RuleSourceAdapter {
   return {
     source,
     async discover(projectPath) {
@@ -349,9 +398,10 @@ async function discoverAdapterRules(
   candidates: (projectPath: string) => Promise<RuleCandidate[]>,
   projectPath: string,
   budget: DiscoveryBudget,
+  prepared?: { projectRoot: string; candidates: RuleCandidate[] },
 ): Promise<DiscoveredRule[]> {
-  const projectRoot = await safeProjectRoot(projectPath)
-  const discovered = await candidates(projectRoot)
+  const projectRoot = prepared?.projectRoot ?? await safeProjectRoot(projectPath)
+  const discovered = prepared?.candidates ?? await candidates(projectRoot)
   const rules: DiscoveredRule[] = []
   for (const candidate of discovered) {
     if (budget.remainingRules <= 0) break
@@ -430,22 +480,77 @@ const copilotCandidates = async (projectPath: string) => [
   ...await fileCandidate(projectPath, '.github/copilot-instructions.md', 'project/global'),
   ...await directoryCandidates(projectPath, '.github/instructions', 'copilot'),
 ]
-
-export const ruleSourceAdapters: readonly RuleSourceAdapter[] = [
-  createAdapter('claude', true, claudeCandidates),
-  createAdapter('cursor', false, cursorCandidates),
-  createAdapter('windsurf', false, windsurfCandidates),
-  createAdapter('copilot', false, copilotCandidates),
+const kiroCandidates = (projectPath: string) => directoryCandidates(projectPath, '.kiro/steering', 'kiro')
+const traeCandidates = async (projectPath: string) => [
+  ...await fileCandidate(projectPath, '.trae/rules.md', 'project/global'),
+  ...await fileCandidate(projectPath, '.trae/project_rules.md', 'project/global'),
+  ...await directoryCandidates(projectPath, '.trae/rules'),
+]
+const qoderCandidates = async (projectPath: string) => [
+  ...await fileCandidate(projectPath, '.qoder/project_rules.md', 'project/global'),
+  ...await directoryCandidates(projectPath, '.qoder/rules', 'qoder'),
+]
+const codebuddyCandidates = async (projectPath: string) => [
+  ...await fileCandidate(projectPath, '.codebuddy/rules.md', 'project/global'),
+  ...await directoryCandidates(projectPath, '.codebuddy/rules', 'codebuddy'),
+]
+const agentsMdCandidates = (projectPath: string) => fileCandidate(projectPath, 'AGENTS.md', 'project/global')
+const devinCandidates = async (projectPath: string) => [
+  ...await fileCandidate(projectPath, '.devin/rules.md', 'project/global'),
+  ...await directoryCandidates(projectPath, '.devin/rules', 'devin'),
+]
+const zcodeCandidates = async (projectPath: string) => [
+  ...await fileCandidate(projectPath, '.zcode/rules.md', 'project/global'),
+  ...await directoryCandidates(projectPath, '.zcode/rules'),
 ]
 
+const ruleAdapterDefinitions: readonly RuleAdapterDefinition[] = [
+  { source: 'claude', isNative: true, candidates: claudeCandidates },
+  { source: 'cursor', isNative: false, candidates: cursorCandidates },
+  { source: 'windsurf', isNative: false, candidates: windsurfCandidates },
+  { source: 'copilot', isNative: false, candidates: copilotCandidates },
+  { source: 'kiro', isNative: false, candidates: kiroCandidates },
+  { source: 'trae', isNative: false, candidates: traeCandidates },
+  { source: 'qoder', isNative: false, candidates: qoderCandidates },
+  { source: 'codebuddy', isNative: false, candidates: codebuddyCandidates },
+  { source: 'agents-md', isNative: false, candidates: agentsMdCandidates },
+  { source: 'devin', isNative: false, candidates: devinCandidates },
+  { source: 'zcode', isNative: false, candidates: zcodeCandidates },
+]
+
+export const ruleSourceAdapters: readonly RuleSourceAdapter[] = ruleAdapterDefinitions.map(createAdapter)
+
 async function discoverRules(projectPath: string, sessionId?: string): Promise<DiscoveredRule[]> {
-  const budget = createDiscoveryBudget()
-  const groups = [
-    await discoverAdapterRules('claude', true, claudeCandidates, projectPath, budget),
-    await discoverAdapterRules('cursor', false, cursorCandidates, projectPath, budget),
-    await discoverAdapterRules('windsurf', false, windsurfCandidates, projectPath, budget),
-    await discoverAdapterRules('copilot', false, copilotCandidates, projectPath, budget),
-  ]
+  const projectRoot = await safeProjectRoot(projectPath)
+  const candidatesByAdapter = await Promise.all(
+    ruleAdapterDefinitions.map(definition => definition.candidates(projectRoot)),
+  )
+  const discoveredCount = candidatesByAdapter.reduce((sum, candidates) => sum + candidates.length, 0)
+  const activeAdapterCount = candidatesByAdapter.filter(candidates => candidates.length > 0).length
+  const perActiveAdapterRules = activeAdapterCount > 0
+    ? Math.max(1, Math.floor(MAX_DISCOVERED_RULES / activeAdapterCount))
+    : MAX_DISCOVERED_RULES
+  const perActiveAdapterBytes = activeAdapterCount > 0
+    ? Math.max(1, Math.floor(MAX_DISCOVERY_BYTES / activeAdapterCount))
+    : MAX_DISCOVERY_BYTES
+  const sharedBudget = createDiscoveryBudget()
+  const groups = await Promise.all(ruleAdapterDefinitions.map((definition, index) => {
+    const candidates = candidatesByAdapter[index] ?? []
+    const budget = discoveredCount <= MAX_DISCOVERED_RULES
+      ? sharedBudget
+      : {
+          remainingRules: perActiveAdapterRules,
+          remainingBytes: perActiveAdapterBytes,
+        }
+    return discoverAdapterRules(
+      definition.source,
+      definition.isNative,
+      definition.candidates,
+      projectRoot,
+      budget,
+      { projectRoot, candidates },
+    )
+  }))
   const accepted: DiscoveredRule[] = []
   for (const rule of groups.flat()) {
     if (!rule.isNative) {

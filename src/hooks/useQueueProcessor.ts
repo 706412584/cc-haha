@@ -1,5 +1,6 @@
 import { useEffect, useSyncExternalStore } from 'react'
 import { useAppStateStore } from '../state/AppState.js'
+import { hasPendingAgentStallNotification } from '../tasks/LocalAgentTask/LocalAgentTask.js'
 import type { QueuedCommand } from '../types/textInputTypes.js'
 import {
   getCommandQueueSnapshot,
@@ -46,16 +47,23 @@ export function useQueueProcessor({
     getCommandQueueSnapshot,
   )
   const appStateStore = useAppStateStore()
-  const pendingAgentCompletions = useSyncExternalStore(
+  const pendingAgentNotifications = useSyncExternalStore(
     appStateStore.subscribe,
-    () => appStateStore.getState().agentCompletionInbox.length,
+    () => {
+      const state = appStateStore.getState()
+      return state.agentCompletionInbox.length + Number(hasPendingAgentStallNotification(state))
+    },
   )
 
   useEffect(() => {
     if (isQueryActive) return
     if (hasActiveLocalJsxUI) return
 
-    if (appStateStore.getState().agentCompletionInbox.length > 0) {
+    const state = appStateStore.getState()
+    if (
+      state.agentCompletionInbox.length > 0 ||
+      hasPendingAgentStallNotification(state)
+    ) {
       void flushAgentCompletionsAndProcessQueueIfReady({
         setAppState: appStateStore.setState,
         getAppState: appStateStore.getState,
@@ -78,7 +86,7 @@ export function useQueueProcessor({
     })
   }, [
     queueSnapshot,
-    pendingAgentCompletions,
+    pendingAgentNotifications,
     isQueryActive,
     executeQueuedInput,
     hasActiveLocalJsxUI,

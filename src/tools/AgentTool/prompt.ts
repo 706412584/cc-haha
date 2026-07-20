@@ -59,7 +59,13 @@ const BACKGROUND_ORCHESTRATION_RULE = [
   '',
   `After launching a background agent, continue in the same turn with the lowest-ordered or currently executable unblocked work. Do not end your turn merely because a background agent is running. If unblocked work exists, briefly tell the user which agent is running and what you are continuing, then actually perform that work in the same turn — for example, "The release audit is running; I'm continuing the independent formatting check." Only say that you are waiting when every remaining task depends on the background result, requires user input, or is complete.`,
   '',
-  "Never sleep, poll, check progress, or read an agent's `output_file` while it runs. Wait for the automatic completion notification while doing other executable work.",
+  'A pending, unblocked task owned by `main-agent` is executable work; ownership reserves it for the primary agent and does not make it unavailable. This rule applies on every turn, not only the turn that launched an agent. Before ending any turn, inspect the task list. If such a task exists, mark the lowest-ID one in_progress and immediately perform a real non-Task tool action for it in the same turn. A status update, plan restatement, or promise to continue does not count as executing that work.',
+  '',
+  "Do not poll healthy background agents, sleep awaiting them, or read an agent's `output_file` while it is making progress. Wait for the automatic completion notification while doing other executable work.",
+  '',
+  'If a stalled-agent notification arrives, reconcile that Agent once before waiting again: inspect the runtime task with a non-blocking status check. If it is still running, report the stall and wait without continuous polling. If it is terminal, consume its result. If the runtime task no longer exists, return its linked task-list item to pending, clear or replace the stale owner, and continue the now-unblocked work.',
+  '',
+  'When a terminal Agent notification corresponds to a TaskCreate item assigned to that Agent, reconcile the task-list state in the same turn. Only mark the linked item completed when the Agent reports that its assigned work is fully complete; otherwise return it to pending with the remaining scope recorded.',
 ].join('\n')
 
 const BACKGROUND_USAGE_NOTES = [

@@ -9,6 +9,7 @@ export const PROMPT = `Use this tool to update a task in the task list.
 - When a task is no longer needed or has been superseded
 - IMPORTANT: Always mark your assigned tasks as resolved when you finish them
 - After resolving, call TaskList to find your next task
+- Primary agent: If an unblocked pending task is owned by \`main-agent\`, start the lowest-ID one and execute a real tool action in the same turn. Do not end with only a progress update, task announcement, or promise to continue
 
 - ONLY mark a task as completed when you have FULLY accomplished it
 - If you encounter errors, blockers, or cannot finish, keep the task as in_progress

@@ -22,6 +22,7 @@ import type {
 } from '../../Tool.js'
 import { toolMatchesName } from '../../Tool.js'
 import {
+  applyAgentStallStatus,
   completeAgentTask as completeAsyncAgent,
   createActivityDescriptionResolver,
   createProgressTracker,
@@ -37,6 +38,7 @@ import {
 } from '../../tasks/LocalAgentTask/LocalAgentTask.js'
 import { asAgentId } from '../../types/ids.js'
 import type { Message as MessageType } from '../../types/message.js'
+import type { StallStatus } from './agentStallDetector.js'
 import { getAgentTranscriptPath } from '../../utils/sessionStorage.js'
 import { isAgentSwarmsEnabled } from '../../utils/agentSwarmsEnabled.js'
 import { logForDebugging } from '../../utils/debug.js'
@@ -633,6 +635,32 @@ export function createSessionScopedAgentSetAppState(
       if (epoch !== undefined && (!isLocalAgentTask(task) || task.epoch !== epoch)) return prev
       return updater(prev)
     })
+  }
+}
+
+export function createAgentStallTransitionHandler(
+  sessionId: string,
+  taskId: string,
+  epoch: number | undefined,
+  setAppState: SetAppState,
+): (status: StallStatus) => void {
+  const scopedSetAppState = createSessionScopedAgentSetAppState(
+    sessionId,
+    taskId,
+    epoch,
+    setAppState,
+  )
+  return status => {
+    const task = (() => {
+      let current: AppState['tasks'][string] | undefined
+      scopedSetAppState(prev => {
+        current = prev.tasks[taskId]
+        return prev
+      })
+      return current
+    })()
+    if (!isLocalAgentTask(task) || (epoch !== undefined && task.epoch !== epoch)) return
+    applyAgentStallStatus(taskId, status, scopedSetAppState, sessionId)
   }
 }
 

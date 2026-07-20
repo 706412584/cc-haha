@@ -333,7 +333,20 @@ describe('isRetryableStreamError', () => {
     expect(isRetryableStreamError(err)).toBe(false)
   })
 
-  test('does not match a non-APIError', () => {
+  test.each([
+    'The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()',
+    'fetch failed: ECONNRESET',
+    'socket hang up',
+  ])('matches a transient connection failure during stream consumption: %s', message => {
+    const cause = new Error(message)
+    if (message.includes('ECONNRESET')) {
+      ;(cause as NodeJS.ErrnoException).code = 'ECONNRESET'
+    }
+    const err = new APIConnectionError({ cause })
+    expect(isRetryableStreamError(err)).toBe(true)
+  })
+
+  test('does not match an arbitrary non-API error', () => {
     expect(
       isRetryableStreamError(new Error('Failed to generate a valid tool call.')),
     ).toBe(false)
@@ -364,9 +377,9 @@ describe('isRetryableStreamError', () => {
 describe('getMaxStreamTransientRetries', () => {
   const ENV = 'CLAUDE_STREAM_TRANSIENT_RETRY_MAX'
 
-  test('defaults to 1 when unset (one retry is cheap and almost always clears a transient blip)', () => {
+  test('defaults to 4 when unset so transient stream failures get a meaningful recovery window', () => {
     delete process.env[ENV]
-    expect(getMaxStreamTransientRetries()).toBe(1)
+    expect(getMaxStreamTransientRetries()).toBe(4)
   })
 
   test('honors a numeric override (including 0 to disable)', () => {
@@ -377,9 +390,9 @@ describe('getMaxStreamTransientRetries', () => {
     delete process.env[ENV]
   })
 
-  test('falls back to default 1 on non-numeric input', () => {
+  test('falls back to default 4 on non-numeric input', () => {
     process.env[ENV] = 'abc'
-    expect(getMaxStreamTransientRetries()).toBe(1)
+    expect(getMaxStreamTransientRetries()).toBe(4)
     delete process.env[ENV]
   })
 })

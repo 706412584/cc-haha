@@ -160,6 +160,106 @@ describe('project-rules federation decisions', () => {
     }
   })
 
+  test('discovers AGENTS.md, Devin, and Zcode rules with provider, path, and applicability metadata', async () => {
+    const project = await createProject()
+    const fixtures = [
+      ['AGENTS.md', 'Shared agent instructions.\n'],
+      ['.devin/rules.md', 'Devin root rules.\n'],
+      ['.devin/rules/devin-cli.md', 'Devin CLI rules.\n'],
+      ['.zcode/rules.md', 'Zcode root rules.\n'],
+      ['.zcode/rules/zcode-cli.md', 'Zcode CLI rules.\n'],
+    ] as const
+
+    for (const [relativePath, content] of fixtures) {
+      const filePath = path.join(project, ...relativePath.split('/'))
+      await fs.mkdir(path.dirname(filePath), { recursive: true })
+      await fs.writeFile(filePath, content)
+    }
+
+    const rules = await discoverFederatedProjectRules(project, 'session-desktop-1')
+    expect(rules.find(rule => rule.originalPath === path.join(project, 'AGENTS.md'))).toMatchObject({
+      source: 'agents-md',
+      originalPath: path.join(project, 'AGENTS.md'),
+      provenance: { provider: 'AGENTS.md', label: 'AGENTS.md' },
+      applicability: 'always',
+    })
+    expect(rules.find(rule => rule.originalPath === path.join(project, '.devin', 'rules.md'))).toMatchObject({
+      source: 'devin',
+      originalPath: path.join(project, '.devin', 'rules.md'),
+      provenance: { provider: 'Devin', label: '.devin/rules.md' },
+      applicability: 'always',
+    })
+    expect(rules.find(rule => rule.originalPath === path.join(project, '.devin', 'rules', 'devin-cli.md'))).toMatchObject({
+      source: 'devin',
+      originalPath: path.join(project, '.devin', 'rules', 'devin-cli.md'),
+      provenance: { provider: 'Devin', label: '.devin/rules/devin-cli.md' },
+      applicability: 'always',
+    })
+    expect(rules.find(rule => rule.originalPath === path.join(project, '.zcode', 'rules.md'))).toMatchObject({
+      source: 'zcode',
+      originalPath: path.join(project, '.zcode', 'rules.md'),
+      provenance: { provider: 'Zcode', label: '.zcode/rules.md' },
+      applicability: 'always',
+    })
+    expect(rules.find(rule => rule.originalPath === path.join(project, '.zcode', 'rules', 'zcode-cli.md'))).toMatchObject({
+      source: 'zcode',
+      originalPath: path.join(project, '.zcode', 'rules', 'zcode-cli.md'),
+      provenance: { provider: 'Zcode', label: '.zcode/rules/zcode-cli.md' },
+      applicability: 'always',
+    })
+  })
+
+  test('injects a persistent Devin rule through the real memory loader', async () => {
+    const project = await createProject()
+    const devinRule = path.join(project, '.devin', 'rules', 'devin-cli.md')
+    await fs.mkdir(path.dirname(devinRule), { recursive: true })
+    await fs.writeFile(devinRule, 'Use Devin rules from memory.\n')
+    expect((await postDecision(project, devinRule, 'persistent')).status).toBe(200)
+
+    const previousCwd = getOriginalCwd()
+    try {
+      setOriginalCwd(project)
+      clearMemoryFileCaches()
+      const files = await getMemoryFiles()
+      expect(files.find(file => file.path === devinRule)?.content).toContain('Use Devin rules from memory.')
+    } finally {
+      setOriginalCwd(previousCwd)
+      clearMemoryFileCaches()
+    }
+  })
+
+  test('deduplicates AGENTS.md against native CLAUDE.md before memory injection', async () => {
+    const project = await createProject()
+    const claudeRule = path.join(project, 'CLAUDE.md')
+    const agentsRule = path.join(project, 'AGENTS.md')
+    const sharedContent = 'Shared agent instructions.\n'
+    await fs.writeFile(claudeRule, sharedContent)
+    await fs.writeFile(agentsRule, sharedContent)
+    expect((await postDecision(project, agentsRule, 'persistent')).status).toBe(200)
+
+    const discovered = await discoverFederatedProjectRules(project, 'session-desktop-1')
+    expect(discovered.find(rule => rule.originalPath === agentsRule)).toMatchObject({
+      source: 'agents-md',
+      originalPath: agentsRule,
+      applicability: 'always',
+      status: 'overridden-by-native',
+      decision: 'persistent',
+      provenance: { provider: 'AGENTS.md', label: 'AGENTS.md' },
+    })
+
+    const previousCwd = getOriginalCwd()
+    try {
+      setOriginalCwd(project)
+      clearMemoryFileCaches()
+      const files = await getMemoryFiles()
+      expect(files.filter(file => file.path === claudeRule)).toHaveLength(1)
+      expect(files.some(file => file.path === agentsRule)).toBe(false)
+    } finally {
+      setOriginalCwd(previousCwd)
+      clearMemoryFileCaches()
+    }
+  })
+
   test('shares user-local authorization across worktrees while loading the active checkout', async () => {
     const mainProject = await createProject()
     execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'add', '.cursorrules'], {
@@ -216,6 +316,73 @@ describe('project-rules federation decisions', () => {
     const rules = await discoverFederatedProjectRules(project, 'session-desktop-1')
     const cursorRules = rules.filter(rule => rule.source === 'cursor' && rule.provenance.label.includes('testing.'))
     expect(new Set(cursorRules.map(rule => rule.ruleId)).size).toBe(2)
+  })
+
+  test('discovers Kiro, Trae, Qoder, and CodeBuddy with their native applicability metadata', async () => {
+    const project = await createProject()
+    const fixtures = [
+      ['.kiro/steering/typescript.md', '---\ninclusion: fileMatch\nfileMatchPattern: "src/**/*.ts"\n---\nKiro TypeScript.\n'],
+      ['.trae/rules/project.md', 'Trae project rule.\n'],
+      ['.qoder/rules/always.md', '---\ntrigger: always_on\nalwaysApply: true\n---\nQoder always.\n'],
+      ['.qoder/rules/manual.md', '---\ntrigger: model_decision\n---\nQoder manual.\n'],
+      ['.codebuddy/rules/typescript.mdc', '---\nglobs: "src/**/*.ts"\nalwaysApply: false\n---\nCodeBuddy TypeScript.\n'],
+      ['.codebuddy/rules/always.md', '---\ntype: always\n---\nCodeBuddy always.\n'],
+    ] as const
+    for (const [relativePath, content] of fixtures) {
+      const filePath = path.join(project, ...relativePath.split('/'))
+      await fs.mkdir(path.dirname(filePath), { recursive: true })
+      await fs.writeFile(filePath, content)
+    }
+
+    const rules = await discoverFederatedProjectRules(project, 'session-desktop-1')
+    expect(rules.find(rule => rule.provenance.label === '.kiro/steering/typescript.md')).toMatchObject({
+      source: 'kiro', applicability: 'conditional', scopes: ['src/**/*.ts'],
+    })
+    expect(rules.find(rule => rule.provenance.label === '.trae/rules/project.md')).toMatchObject({
+      source: 'trae', applicability: 'always',
+    })
+    expect(rules.find(rule => rule.provenance.label === '.qoder/rules/always.md')).toMatchObject({
+      source: 'qoder', applicability: 'always',
+    })
+    expect(rules.find(rule => rule.provenance.label === '.qoder/rules/manual.md')).toMatchObject({
+      source: 'qoder', applicability: 'manual',
+    })
+    expect(rules.find(rule => rule.provenance.label === '.codebuddy/rules/typescript.mdc')).toMatchObject({
+      source: 'codebuddy', applicability: 'conditional', scopes: ['src/**/*.ts'],
+    })
+    expect(rules.find(rule => rule.provenance.label === '.codebuddy/rules/always.md')).toMatchObject({
+      source: 'codebuddy', applicability: 'always',
+    })
+  })
+
+  test('loads approved Kiro and CodeBuddy conditional rules through the real loader', async () => {
+    const project = await createProject()
+    const fixtures = [
+      ['.kiro/steering/typescript.md', '---\ninclusion: fileMatch\nfileMatchPattern: "src/**/*.ts"\n---\nKiro TypeScript.\n'],
+      ['.codebuddy/rules/typescript.mdc', '---\nglobs: "src/**/*.ts"\nalwaysApply: false\n---\nCodeBuddy TypeScript.\n'],
+    ] as const
+    const paths: string[] = []
+    for (const [relativePath, content] of fixtures) {
+      const filePath = path.join(project, ...relativePath.split('/'))
+      paths.push(filePath)
+      await fs.mkdir(path.dirname(filePath), { recursive: true })
+      await fs.writeFile(filePath, content)
+      const rule = (await discoverFederatedProjectRules(project)).find(candidate => candidate.originalPath === filePath)!
+      await saveRuleImportDecision({ projectPath: project, ruleId: rule.ruleId, decision: 'persistent' })
+    }
+
+    const previousCwd = getOriginalCwd()
+    try {
+      setOriginalCwd(project)
+      clearMemoryFileCaches()
+      const tsRules = await getConditionalRulesForCwdLevelDirectory(project, path.join(project, 'src', 'file.ts'), new Set())
+      const jsRules = await getConditionalRulesForCwdLevelDirectory(project, path.join(project, 'src', 'file.js'), new Set())
+      expect(paths.every(filePath => tsRules.some(rule => rule.path === filePath))).toBe(true)
+      expect(paths.every(filePath => !jsRules.some(rule => rule.path === filePath))).toBe(true)
+    } finally {
+      setOriginalCwd(previousCwd)
+      clearMemoryFileCaches()
+    }
   })
 
   test('preserves conditional Cursor and Copilot applicability without globally importing manual rules', async () => {
@@ -280,23 +447,36 @@ describe('project-rules federation decisions', () => {
     }
   })
 
-  test('bounds untrusted rule candidates per directory and across providers', async () => {
+  test('bounds untrusted rule candidates without starving later providers', async () => {
     const project = await createProject()
     const cursorDirectory = path.join(project, '.cursor', 'rules')
     const windsurfDirectory = path.join(project, '.windsurf', 'rules')
-    await fs.mkdir(cursorDirectory, { recursive: true })
-    await fs.mkdir(windsurfDirectory, { recursive: true })
-    await Promise.all(Array.from({ length: 140 }, async (_, index) => {
-      const name = `${String(index).padStart(3, '0')}.md`
-      await Promise.all([
-        fs.writeFile(path.join(cursorDirectory, name), `Cursor ${index}.\n`),
-        fs.writeFile(path.join(windsurfDirectory, name), `Windsurf ${index}.\n`),
-      ])
-    }))
+    const kiroDirectory = path.join(project, '.kiro', 'steering')
+    const codebuddyDirectory = path.join(project, '.codebuddy', 'rules')
+    await Promise.all([
+      fs.mkdir(cursorDirectory, { recursive: true }),
+      fs.mkdir(windsurfDirectory, { recursive: true }),
+      fs.mkdir(kiroDirectory, { recursive: true }),
+      fs.mkdir(codebuddyDirectory, { recursive: true }),
+    ])
+    await Promise.all([
+      ...Array.from({ length: 140 }, async (_, index) => {
+        const name = `${String(index).padStart(3, '0')}.md`
+        await Promise.all([
+          fs.writeFile(path.join(cursorDirectory, name), `Cursor ${index}.\n`),
+          fs.writeFile(path.join(windsurfDirectory, name), `Windsurf ${index}.\n`),
+        ])
+      }),
+      fs.writeFile(path.join(kiroDirectory, 'late.md'), 'Kiro late provider.\n'),
+      fs.writeFile(path.join(codebuddyDirectory, 'late.md'), '---\ntype: always\n---\nCodeBuddy late provider.\n'),
+    ])
 
     const rules = await discoverFederatedProjectRules(project)
-    expect(rules.filter(rule => rule.provenance.label.startsWith('.cursor/rules/'))).toHaveLength(128)
-    expect(rules).toHaveLength(256)
+    expect(rules.filter(rule => rule.source === 'cursor').length).toBeLessThanOrEqual(64)
+    expect(rules.filter(rule => rule.source === 'windsurf').length).toBeLessThanOrEqual(64)
+    expect(rules.some(rule => rule.source === 'kiro')).toBe(true)
+    expect(rules.some(rule => rule.source === 'codebuddy')).toBe(true)
+    expect(rules.length).toBeLessThanOrEqual(256)
   })
 
   test('bounds cumulative bytes read from untrusted rules', async () => {

@@ -30,11 +30,12 @@ When working as a teammate:
 ## When to Use This Tool
 
 - Before launching parallel agents for approved complex work, call TaskList to confirm Wave 1 tasks are pending, unblocked, and have non-overlapping file scopes
-- To see what tasks are available to work on (status: 'pending', no owner, not blocked)
+- To see what tasks are available to work on (status: 'pending', not blocked, and either unowned or owned by you); pending tasks owned by \`main-agent\` are available to the primary agent when blockedBy is empty
 - To check overall progress on the project
 - To find tasks that are blocked and need dependencies resolved
 ${teammateUseCase}- After completing a task, to check for newly unblocked work or claim the next available task
 - **Prefer working on tasks in ID order** (lowest ID first) when multiple tasks are available, as earlier tasks often set up context for later ones
+- Primary agent: if any executable task exists, claim or mark the lowest-ID executable task in_progress and perform a real tool action in the same turn; do not stop after merely reporting or restating the next task
 
 ## Output
 

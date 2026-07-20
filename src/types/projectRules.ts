@@ -1,4 +1,15 @@
-export type RuleSource = 'claude' | 'cursor' | 'windsurf' | 'copilot'
+export type RuleSource =
+  | 'claude'
+  | 'cursor'
+  | 'windsurf'
+  | 'copilot'
+  | 'kiro'
+  | 'trae'
+  | 'qoder'
+  | 'codebuddy'
+  | 'agents-md'
+  | 'devin'
+  | 'zcode'
 
 export type RuleImportDecision = 'session' | 'persistent' | 'ignore'
 

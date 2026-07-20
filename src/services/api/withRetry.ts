@@ -242,6 +242,10 @@ export class RetriableStreamError extends Error {
  */
 export function isRetryableStreamError(error: unknown): boolean {
   if (error instanceof APIError && error.status !== undefined) return false
+  if (error instanceof APIConnectionError) {
+    const details = extractConnectionErrorDetails(error)
+    return !details?.isSSLError
+  }
   return hasAPIErrorType(
     error,
     'api_error',
@@ -252,25 +256,15 @@ export function isRetryableStreamError(error: unknown): boolean {
 
 /**
  * Max times withStreamRetry() re-establishes a stream after a transient
- * mid-stream error (see RetriableStreamError). Defaults to 1 — a malformed
- * tool_call, a brief upstream blip, or a relay's `terminated` mid-stream
- * almost always clears on a single retry, and a single fresh attempt is
- * cheap. Override with CLAUDE_STREAM_TRANSIENT_RETRY_MAX (set 0 to disable
- * for providers that can't tolerate the re-send, or higher for chronically
- * flaky relays).
- *
- * Historically defaulted to 0 to be safe for third-party providers that
- * misreport persistent failures as transient `api_error`s. The cost was that
- * a single mid-stream blip on an otherwise-healthy relay killed the whole
- * turn — observed in user diagnostics as `terminated` / `Request was
- * aborted` events that ended the conversation. One retry strictly beats
- * zero in practice; a stuck-loop provider still bottoms out at
- * `tengu_stream_transient_retry_exhausted` after the single retry, identical
- * to the old terminal path.
+ * mid-stream error (see RetriableStreamError). Defaults to 4 so statusless
+ * api_error responses and short socket disconnects get a meaningful recovery
+ * window instead of failing after one retry. Override with
+ * CLAUDE_STREAM_TRANSIENT_RETRY_MAX (set 0 to disable for providers that
+ * cannot tolerate a safe, pre-side-effect re-send).
  */
 export function getMaxStreamTransientRetries(): number {
   const raw = parseInt(process.env.CLAUDE_STREAM_TRANSIENT_RETRY_MAX || '', 10)
-  return Number.isFinite(raw) && raw >= 0 ? raw : 1
+  return Number.isFinite(raw) && raw >= 0 ? raw : 4
 }
 
 export async function* withRetry<T>(
