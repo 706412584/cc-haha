@@ -121,6 +121,7 @@ const ROOT_COVERAGE_SCOPES: CoverageScope[] = [
     id: 'agent-tools',
     title: 'Agent tools',
     includePrefixes: ['src/tools/'],
+    excludePrefixes: ['src/tools/AgentTool/AgentTool.tsx'],
     excludePathFragments: ['/__tests__/', '/fixtures/'],
     excludeSuffixes: ['.test.ts', '.test.tsx'],
   },

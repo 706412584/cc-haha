@@ -407,6 +407,32 @@ describe('coverage gate helpers', () => {
     expect(result.failures).toEqual([])
   })
 
+  test('excludes the Agent Tool executor that requires an integration harness', () => {
+    const changedLines = parseChangedLinesFromDiff([
+      'diff --git a/src/tools/AgentTool/AgentTool.tsx b/src/tools/AgentTool/AgentTool.tsx',
+      '--- a/src/tools/AgentTool/AgentTool.tsx',
+      '+++ b/src/tools/AgentTool/AgentTool.tsx',
+      '@@ -1,0 +1,1 @@',
+      '+export const AgentTool = buildTool({})',
+    ].join('\n'))
+
+    const result = evaluateChangedLineCoverage(
+      changedLines,
+      new Map(),
+      [{
+        id: 'agent-tools',
+        title: 'Agent tools',
+        includePrefixes: ['src/tools/'],
+        excludePrefixes: ['src/tools/AgentTool/AgentTool.tsx'],
+      }],
+      90,
+    )
+
+    expect(result.files).toEqual([])
+    expect(result.total).toBe(0)
+    expect(result.failures).toEqual([])
+  })
+
   test('reports minimum threshold failures', () => {
     const failures = evaluateThresholds([
       {
