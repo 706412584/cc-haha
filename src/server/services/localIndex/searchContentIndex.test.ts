@@ -243,4 +243,71 @@ describe('search content index', () => {
       database.close()
     }
   })
+
+  it('keeps batched replace and delete commits hidden until finalized', async () => {
+    const { database, index } = await setup()
+    let checkpoints = 0
+    ;(database as typeof database & {
+      checkpointTruncate: () => { busy: number; logFrames: number; checkpointedFrames: number }
+    }).checkpointTruncate = () => {
+      checkpoints += 1
+      return { busy: 0, logFrames: 0, checkpointedFrames: 0 }
+    }
+
+    const documents = Array.from({ length: 3 }, (_, offset) => ({
+      jsonlLine: offset + 1,
+      byteStart: offset * 10,
+      byteLength: 10,
+      segmentIndex: 0,
+      role: 'user' as const,
+      messageId: null,
+      timestamp: null,
+      body: `batched needle ${offset}`,
+      normalizedBody: `batched needle ${offset}`,
+    }))
+    const statesAfterReplaceBatches: Array<string | null> = []
+    let replaceYields = 0
+
+    try {
+      expect(await index.replaceSourceBatched(source(), documents, {
+        batchDocumentLimit: 1,
+        onBatchCommitted: () => {
+          statesAfterReplaceBatches.push(index.getSource(source().path)?.state ?? null)
+          return true
+        },
+        yieldToForeground: async () => {
+          replaceYields += 1
+        },
+      })).toEqual({ kind: 'committed' })
+      index.setReadiness({ state: 'ready', discovered: 1, indexed: 1 })
+
+      expect(statesAfterReplaceBatches.length).toBeGreaterThan(1)
+      expect(statesAfterReplaceBatches.at(-1)).toBe('ready')
+      expect(statesAfterReplaceBatches.slice(0, -1).every(state => state === 'pending')).toBe(true)
+      expect(replaceYields).toBe(statesAfterReplaceBatches.length)
+      expect(checkpoints).toBe(statesAfterReplaceBatches.length)
+      expect(index.query('batched needle')?.sessions[0]?.matchCount).toBe(3)
+
+      const visibleDuringDelete: number[] = []
+      let deleteYields = 0
+      expect(await index.deleteSourceBatched(source().path, {
+        batchDocumentLimit: 1,
+        onBatchCommitted: () => {
+          visibleDuringDelete.push(index.query('batched needle')?.sessions.length ?? 0)
+          return true
+        },
+        yieldToForeground: async () => {
+          deleteYields += 1
+        },
+      })).toEqual({ kind: 'committed' })
+
+      expect(visibleDuringDelete.length).toBeGreaterThan(1)
+      expect(visibleDuringDelete.every(count => count === 0)).toBe(true)
+      expect(deleteYields).toBe(visibleDuringDelete.length)
+      expect(index.getSource(source().path)).toBeNull()
+      expect(index.query('batched needle')?.sessions).toEqual([])
+    } finally {
+      database.close()
+    }
+  })
 })
