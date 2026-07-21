@@ -134,9 +134,15 @@ function errorCode(error: unknown, fallback: string): string {
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (!signal?.aborted) return
-  const error = signal.reason instanceof Error
-    ? signal.reason
-    : new Error('Search content operation was aborted')
+  if (signal.reason instanceof Error && signal.reason.name === 'AbortError') {
+    throw signal.reason
+  }
+  const error = new Error(
+    signal.reason instanceof Error
+      ? signal.reason.message
+      : 'Search content operation was aborted',
+    signal.reason instanceof Error ? { cause: signal.reason } : undefined,
+  )
   error.name = 'AbortError'
   throw error
 }

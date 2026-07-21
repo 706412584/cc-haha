@@ -244,6 +244,141 @@ describe('search content index', () => {
     }
   })
 
+  it('rejects an already-aborted batch without creating a source', async () => {
+    const { database, index } = await setup()
+    const controller = new AbortController()
+    controller.abort()
+
+    try {
+      await expect(index.replaceSourceBatched(source(), [], {
+        signal: controller.signal,
+      })).rejects.toMatchObject({ name: 'AbortError' })
+      expect(index.getSource(source().path)).toBeNull()
+    } finally {
+      database.close()
+    }
+  })
+
+  it('normalizes a custom abort reason without mutating the original error', async () => {
+    const { database, index } = await setup()
+    const controller = new AbortController()
+    const reason = new Error('projection cancelled')
+    controller.abort(reason)
+
+    try {
+      await expect(index.replaceSourceBatched(source(), [], {
+        signal: controller.signal,
+      })).rejects.toMatchObject({
+        name: 'AbortError',
+        message: 'projection cancelled',
+        cause: reason,
+      })
+      expect(reason.name).toBe('Error')
+      expect(index.getSource(source().path)).toBeNull()
+    } finally {
+      database.close()
+    }
+  })
+
+  it('appends documents in byte-bounded batches and finalizes the source', async () => {
+    const { database, index } = await setup()
+    const firstDocument = {
+      jsonlLine: 1,
+      byteStart: 0,
+      byteLength: 10,
+      segmentIndex: 0,
+      role: 'user' as const,
+      messageId: null,
+      timestamp: null,
+      body: 'original body',
+      normalizedBody: 'original body',
+    }
+    const appendedDocuments = [2, 3].map(jsonlLine => ({
+      ...firstDocument,
+      jsonlLine,
+      byteStart: (jsonlLine - 1) * 10,
+      body: `appended body ${jsonlLine}`,
+      normalizedBody: `appended body ${jsonlLine}`,
+    }))
+    let committedBatches = 0
+
+    try {
+      index.replaceSource(source({ indexedLines: 1 }), [firstDocument])
+      expect(await index.appendSourceBatched(
+        source({ indexedLines: 3 }),
+        appendedDocuments,
+        {
+          batchDocumentLimit: 10,
+          batchByteLimit: 1,
+          onBatchCommitted: () => {
+            committedBatches += 1
+            return true
+          },
+        },
+      )).toEqual({ kind: 'committed' })
+      index.setReadiness({ state: 'ready', discovered: 1, indexed: 1 })
+
+      expect(committedBatches).toBe(4)
+      expect(index.getSource(source().path)).toMatchObject({
+        state: 'ready',
+        indexedLines: 3,
+      })
+      expect(index.query('appended body')?.sessions[0]?.matchCount).toBe(2)
+    } finally {
+      database.close()
+    }
+  })
+
+  it('treats a batched delete of a missing source as committed', async () => {
+    const { database, index } = await setup()
+    let callbacks = 0
+
+    try {
+      expect(await index.deleteSourceBatched('/missing.jsonl', {
+        onBatchCommitted: () => {
+          callbacks += 1
+          return true
+        },
+      })).toEqual({ kind: 'committed' })
+      expect(callbacks).toBe(0)
+    } finally {
+      database.close()
+    }
+  })
+
+  it('keeps an interrupted batched delete hidden and completes it on retry', async () => {
+    const { database, index } = await setup()
+    const documents = [1, 2].map(jsonlLine => ({
+      jsonlLine,
+      byteStart: (jsonlLine - 1) * 10,
+      byteLength: 10,
+      segmentIndex: 0,
+      role: 'user' as const,
+      messageId: null,
+      timestamp: null,
+      body: `delete recovery ${jsonlLine}`,
+      normalizedBody: `delete recovery ${jsonlLine}`,
+    }))
+
+    try {
+      index.replaceSource(source(), documents)
+      index.setReadiness({ state: 'ready', discovered: 1, indexed: 1 })
+      expect(await index.deleteSourceBatched(source().path, {
+        batchDocumentLimit: 1,
+        onBatchCommitted: () => false,
+      })).toEqual({ kind: 'retry', reason: 'storage-limit' })
+      expect(index.getSource(source().path)?.state).toBe('pending')
+      expect(index.query('delete recovery')?.sessions).toEqual([])
+
+      expect(await index.deleteSourceBatched(source().path, {
+        batchDocumentLimit: 1,
+      })).toEqual({ kind: 'committed' })
+      expect(index.getSource(source().path)).toBeNull()
+    } finally {
+      database.close()
+    }
+  })
+
   it('keeps batched replace and delete commits hidden until finalized', async () => {
     const { database, index } = await setup()
     let checkpoints = 0
