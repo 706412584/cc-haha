@@ -26,6 +26,12 @@ export function resolveLocalIndexMode(
   return { mode: 'on', warningCode: LOCAL_INDEX_INVALID_MODE }
 }
 
+export function resolveSearchContentIndexEnabled(
+  value = process.env.CC_HAHA_SEARCH_INDEX,
+): boolean {
+  return value !== 'off'
+}
+
 export function getLocalIndexDatabasePath(): string {
   return join(getCcHahaDir(), 'db', 'index-v1.sqlite')
 }

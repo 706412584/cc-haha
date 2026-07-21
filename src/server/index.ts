@@ -19,6 +19,7 @@ import { handlePreviewFs } from './api/previewFs.js'
 import { handleLocalFile } from './api/localFile.js'
 import { sessionService } from './services/sessionService.js'
 import { localIndexCoordinator } from './services/localIndex/coordinator.js'
+import { resolveSearchContentIndexEnabled } from './services/localIndex/config.js'
 import { searchContentCoordinator } from './services/localIndex/searchContentCoordinator.js'
 import { conversationService } from './services/conversationService.js'
 import { OPENAI_CODEX_REDIRECT_PATH } from '../services/openaiAuth/client.js'
@@ -68,6 +69,7 @@ const SEARCH_INDEX_PRIMARY_WAIT_MS = 30_000
 const SEARCH_INDEX_PRIMARY_POLL_MS = 50
 
 type BackgroundIndexStartupOptions = {
+  searchEnabled?: boolean
   startPrimary?: () => Promise<void>
   getPrimaryState?: () => string
   startSearch?: () => Promise<void>
@@ -81,6 +83,7 @@ type BackgroundIndexStartupOptions = {
 export async function startBackgroundIndexesInPriorityOrder(
   options: BackgroundIndexStartupOptions = {},
 ): Promise<void> {
+  const searchEnabled = options.searchEnabled ?? resolveSearchContentIndexEnabled()
   const startPrimary = options.startPrimary ?? (() => localIndexCoordinator.start())
   const getPrimaryState = options.getPrimaryState ?? (
     () => localIndexCoordinator.getPublicStatus().state
@@ -96,6 +99,7 @@ export async function startBackgroundIndexesInPriorityOrder(
   )
 
   await startPrimary()
+  if (!searchEnabled || options.signal?.aborted) return
   while (
     !options.signal?.aborted &&
     getPrimaryState() === 'building' &&

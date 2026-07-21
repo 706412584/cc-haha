@@ -329,6 +329,71 @@ describe('search content projector', () => {
     }
   })
 
+  it('serves HTTP while a large projection is paused between committed batches', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cc-haha-search-projector-responsive-'))
+    tempDirs.push(root)
+    const sourcePath = join(root, 'projects', '-repo', 'responsive.jsonl')
+    await mkdir(dirname(sourcePath), { recursive: true })
+    await writeFile(sourcePath, Array.from({ length: 100 }, (_, offset) => line({
+      type: 'user',
+      message: { role: 'user', content: `responsive needle ${offset}` },
+    })).join(''))
+    const database = openSearchContentDatabase({ path: join(root, 'search.sqlite') })
+    const index = createSearchContentIndex(database, { scope: join(root, 'projects') })
+    let enteredYield!: () => void
+    const yieldEntered = new Promise<void>(resolve => {
+      enteredYield = resolve
+    })
+    let releaseYield!: () => void
+    const yieldGate = new Promise<void>(resolve => {
+      releaseYield = resolve
+    })
+    let firstYield = true
+    const projector = createSearchContentProjector({
+      database,
+      index,
+      batchDocumentLimit: 1,
+      yieldToForeground: async () => {
+        if (!firstYield) return
+        firstYield = false
+        enteredYield()
+        await yieldGate
+      },
+    })
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => new Response('healthy'),
+    })
+    let projectionSettled = false
+    const projection = projector.projectSource({
+      path: sourcePath,
+      projectPath: '-repo',
+      ownerSessionId: 'responsive',
+      ownerTranscriptPath: sourcePath,
+      modifiedAtMs: 100,
+    }).finally(() => {
+      projectionSettled = true
+    })
+
+    try {
+      await yieldEntered
+      const response = await fetch(new URL('/health', server.url))
+      expect(await response.text()).toBe('healthy')
+      expect(projectionSettled).toBe(false)
+      releaseYield()
+      expect(await projection).toMatchObject({
+        kind: 'indexed',
+        state: 'ready',
+        documentCount: 100,
+      })
+    } finally {
+      releaseYield()
+      await projection.catch(() => undefined)
+      server.stop(true)
+      database.close()
+    }
+  })
+
   it('rebuilds after an interrupted append without duplicating documents', async () => {
     const root = await mkdtemp(join(tmpdir(), 'cc-haha-search-projector-interrupted-append-'))
     tempDirs.push(root)
