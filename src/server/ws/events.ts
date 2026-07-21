@@ -110,6 +110,7 @@ export type ServerMessage =
   | { type: 'streaming_fallback'; cause: StreamingFallbackCause }
   | { type: 'error'; message: string; code: string; retryable?: boolean; businessErrorCode?: string }
   | { type: 'background_task_stop_failed'; taskId: string; message: string }
+  | { type: 'background_task_stopped'; taskId: string }
   | { type: 'system_notification'; subtype: string; message?: string; data?: unknown }
   | { type: 'pong' }
   | { type: 'team_update'; teamName: string; members: TeamMemberStatus[] }

@@ -2964,6 +2964,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }
         break
 
+      case 'background_task_stopped': {
+        update((session) => {
+          const stoppingBackgroundTaskIds = { ...session.stoppingBackgroundTaskIds }
+          delete stoppingBackgroundTaskIds[msg.taskId]
+          return { stoppingBackgroundTaskIds }
+        })
+        break
+      }
+
       case 'background_task_stop_failed': {
         let rolledBackToRunning = false
         update((session) => {

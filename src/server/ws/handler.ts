@@ -1342,16 +1342,26 @@ async function handleStopBackgroundTask(
     return
   }
 
+  const confirmStopped = () => sendMessage(ws, {
+    type: 'background_task_stopped',
+    taskId,
+  })
+
   try {
     await conversationService.requestControl(sessionId, {
       subtype: 'stop_task',
       task_id: taskId,
     })
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (message === 'CLI session is not running') {
+      confirmStopped()
+      return
+    }
     sendMessage(ws, {
       type: 'background_task_stop_failed',
       taskId,
-      message: error instanceof Error ? error.message : String(error),
+      message,
     })
   }
 }

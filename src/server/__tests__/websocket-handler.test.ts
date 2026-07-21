@@ -294,6 +294,55 @@ describe('WebSocket handler session isolation', () => {
     })
   })
 
+  it('silently confirms a background stop when the CLI session is already gone', async () => {
+    const sessionId = `stop-background-gone-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'requestControl').mockRejectedValue(
+      new Error('CLI session is not running'),
+    )
+
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'stop_background_task',
+      taskId: 'bash-task-1',
+    }))
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'background_task_stopped',
+      taskId: 'bash-task-1',
+    })
+    expect(ws.sent.map((payload) => JSON.parse(payload))).not.toContainEqual(
+      expect.objectContaining({ type: 'background_task_stop_failed' }),
+    )
+  })
+
+  it('confirms a background stop when the CLI exits during the request', async () => {
+    const sessionId = `stop-background-exit-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    let sessionRunning = true
+    spyOn(conversationService, 'hasSession').mockImplementation(() => sessionRunning)
+    spyOn(conversationService, 'requestControl').mockImplementation(async () => {
+      sessionRunning = false
+      throw new Error('CLI session is not running')
+    })
+
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'stop_background_task',
+      taskId: 'bash-task-1',
+    }))
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'background_task_stopped',
+      taskId: 'bash-task-1',
+    })
+    expect(ws.sent.map((payload) => JSON.parse(payload))).not.toContainEqual(
+      expect.objectContaining({ type: 'background_task_stop_failed' }),
+    )
+  })
+
   it('reports a task-scoped failure when the CLI rejects a background stop', async () => {
     const sessionId = `stop-background-failed-${crypto.randomUUID()}`
     const ws = makeClientSocket(sessionId)

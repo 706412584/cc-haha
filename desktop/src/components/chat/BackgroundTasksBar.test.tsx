@@ -28,6 +28,22 @@ vi.mock('../../i18n', () => ({
 afterEach(cleanup)
 
 describe('BackgroundTasksBar Agent results', () => {
+  it('keeps stopped tasks out of Watching while retaining them as results', () => {
+    render(<BackgroundTasksBar tasks={[{
+      taskId: 'stopped-task',
+      taskType: 'local_bash',
+      description: 'Stopped command',
+      status: 'stopped',
+      startedAt: 1,
+      updatedAt: 2,
+    }]} />)
+
+    fireEvent.click(screen.getByTestId('background-tasks-button'))
+    expect(screen.queryByRole('heading', { name: 'Watching' })).not.toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: /finished/ })).toBeInTheDocument()
+    expect(screen.getByTestId('background-task-row')).toHaveAttribute('data-status', 'stopped')
+  })
+
   it('shows watched Agents and their completion result in the existing drawer', () => {
     render(<BackgroundTasksBar tasks={[{
       taskId: 'running-agent',
