@@ -67,11 +67,14 @@ export type SearchContentDeleteResult = Extract<
   { kind: 'deleted' | 'retry' }
 >
 
+export type SearchContentDeleteOperation = SearchContentDeleteResult &
+  PromiseLike<SearchContentDeleteResult>
+
 export interface SearchContentProjector {
   projectSource(
     candidate: SearchContentSourceCandidate,
   ): Promise<SearchContentProjectResult>
-  deleteSource(path: string): SearchContentDeleteResult
+  deleteSource(path: string): SearchContentDeleteOperation
 }
 
 export type SearchContentProjectorOptions = {
@@ -326,19 +329,24 @@ export function createSearchContentProjector(
   })
   const pendingDeletes = new Map<string, Promise<SearchContentDeleteResult>>()
 
-  const remove = (path: string): SearchContentDeleteResult => {
+  const remove = (path: string): SearchContentDeleteOperation => {
     if (!pendingDeletes.has(path)) {
       const operation = options.index.deleteSourceBatched(path, batchOptions())
         .then(commit => commit.kind === 'retry' ? commit : { kind: 'deleted' } as const)
         .finally(() => pendingDeletes.delete(path))
       pendingDeletes.set(path, operation)
     }
-    return { kind: 'deleted' }
+    const operation = pendingDeletes.get(path)!
+    return {
+      kind: 'deleted',
+      then(onfulfilled, onrejected) {
+        return operation.then(onfulfilled, onrejected)
+      },
+    }
   }
 
   const awaitRemove = async (path: string): Promise<SearchContentDeleteResult> => {
-    const result = remove(path)
-    return await pendingDeletes.get(path) ?? result
+    return await remove(path)
   }
 
   return {

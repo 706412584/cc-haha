@@ -447,10 +447,9 @@ describe('search content projector', () => {
       callbacks = 0
       yields = 0
 
-      expect(projector.deleteSource(sourcePath)).toEqual({ kind: 'deleted' })
-      for (let attempt = 0; attempt < 10 && index.getSource(sourcePath) !== null; attempt += 1) {
-        await new Promise(resolve => setTimeout(resolve, 0))
-      }
+      const deleteOperation = projector.deleteSource(sourcePath)
+      expect(deleteOperation.kind).toBe('deleted')
+      expect(await deleteOperation).toEqual({ kind: 'deleted' })
       expect(index.getSource(sourcePath)).toBeNull()
       expect(callbacks).toBeGreaterThan(1)
       expect(yields).toBe(callbacks)
