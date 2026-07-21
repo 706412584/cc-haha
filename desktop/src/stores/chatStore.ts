@@ -2246,6 +2246,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
 
       case 'status':
+        if (msg.taskId && get().sessions[sessionId]?.stoppingBackgroundTaskIds?.[msg.taskId]) {
+          break
+        }
         update((session) => {
           const pendingText = `${session.streamingText}${consumePendingDelta(sessionId)}`
           const hasPendingStreamText =
@@ -3200,6 +3203,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             let shouldUpdateIdleTabStatus = false
             let hasRunningBackgroundAgentsAfterUpdate = false
             update((session) => {
+              if (session.stoppingBackgroundTaskIds?.[taskEvent.taskId]) return {}
               const backgroundAgentTasks = upsertBackgroundAgentTask(
                 session.backgroundAgentTasks ?? {},
                 taskEvent,

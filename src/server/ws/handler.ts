@@ -253,6 +253,7 @@ const clientOutputCallbacks = new Map<
   }
 >()
 const taskNotificationPersistence = new Map<string, Map<string, Promise<void>>>()
+const observedTerminalTasks = new Map<string, Set<string>>()
 
 export const handleWebSocket = {
   open(ws: ServerWebSocket<WebSocketData>) {
@@ -1354,7 +1355,8 @@ async function handleStopBackgroundTask(
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    if (message === 'CLI session is not running') {
+    if (observedTerminalTasks.get(sessionId)?.has(taskId)) return
+    if (message === 'CLI session is not running' || !conversationService.hasSession(sessionId)) {
       confirmStopped()
       return
     }
@@ -1694,6 +1696,7 @@ function cleanupSessionRuntimeState(sessionId: string) {
   sessionStartupPromises.delete(sessionId)
   lastResolvedStartupWorkDirs.delete(sessionId)
   taskNotificationPersistence.delete(sessionId)
+  observedTerminalTasks.delete(sessionId)
   clearPrewarmState(sessionId)
 }
 
@@ -2456,6 +2459,7 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
             type: 'status',
             state: 'tool_executing',
             verb: cliMsg.message || cliMsg.description || 'Task started',
+            taskId: cliMsg.task_id,
           },
         ]
       }
@@ -2471,6 +2475,7 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
             type: 'status',
             state: 'tool_executing',
             verb: cliMsg.message || cliMsg.summary || cliMsg.description || 'Task in progress',
+            taskId: cliMsg.task_id,
           },
         ]
       }
@@ -3174,6 +3179,16 @@ function bindClientSessionOutput(
       )
     }
 
+    const terminalNotification = normalizeCliTaskNotification(cliMsg)
+    if (terminalNotification) {
+      let terminalTasks = observedTerminalTasks.get(sessionId)
+      if (!terminalTasks) {
+        terminalTasks = new Set()
+        observedTerminalTasks.set(sessionId, terminalTasks)
+      }
+      terminalTasks.add(terminalNotification.taskId)
+    }
+
     const persistence = persistCliTaskNotification(sessionId, cliMsg)
     if (persistence) {
       void persistence
@@ -3747,6 +3762,7 @@ export function __clearWebSocketDisconnectTimersForTests(): void {
   activeSessions.clear()
   clientOutputCallbacks.clear()
   taskNotificationPersistence.clear()
+  observedTerminalTasks.clear()
   sessionCleanupTimers.clear()
   sessionDisconnectWatchers.clear()
 }
@@ -3794,9 +3810,8 @@ export function __resetWebSocketHandlerStateForTests(): void {
   disableDisconnectCleanupForTests = false
   getCachedSessionSummaryForHandler = getCachedSessionSummary
   __cleanupWebSocketRuntimeStateForTests()
+  __clearWebSocketDisconnectTimersForTests()
   for (const timer of prewarmIdleTimers.values()) clearTimeout(timer)
-  activeSessions.clear()
-  clientOutputCallbacks.clear()
   prewarmPendingSessions.clear()
   prewarmedSessions.clear()
   prewarmIdleTimers.clear()
