@@ -153,9 +153,8 @@ try {
   }
 
   $args = @('electron-builder', '--win', 'nsis', '--x64', '--publish', 'never')
-  $remainingArgs = @($BuilderArgs)
-  if ($remainingArgs.Count -gt 0) {
-    $args += $remainingArgs
+  if ($BuilderArgs) {
+    $args += $BuilderArgs
   }
 
   Write-Step 'Packaging Electron app...'
