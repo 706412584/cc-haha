@@ -469,6 +469,62 @@ describe('search content projector', () => {
     }
   })
 
+  it('shares an in-flight delete and allows a fresh delete after it settles', async () => {
+    const { database, index, candidate, sourcePath } = await setup()
+    await writeFile(sourcePath, [0, 1].map(offset => line({
+      type: 'user',
+      message: { role: 'user', content: `shared delete ${offset}` },
+    })).join(''))
+    const initialProjector = createSearchContentProjector({ database, index })
+    await initialProjector.projectSource(candidate)
+
+    let enteredYield!: () => void
+    const yieldEntered = new Promise<void>(resolve => {
+      enteredYield = resolve
+    })
+    let releaseYield!: () => void
+    const yieldGate = new Promise<void>(resolve => {
+      releaseYield = resolve
+    })
+    let firstYield = true
+    let deleteBatches = 0
+    const projector = createSearchContentProjector({
+      database,
+      index,
+      batchDocumentLimit: 1,
+      onBatchCommitted: () => {
+        deleteBatches += 1
+        return true
+      },
+      yieldToForeground: async () => {
+        if (!firstYield) return
+        firstYield = false
+        enteredYield()
+        await yieldGate
+      },
+    })
+
+    const firstDelete = projector.deleteSource(sourcePath)
+    try {
+      await yieldEntered
+      const secondDelete = projector.deleteSource(sourcePath)
+      releaseYield()
+
+      expect(await Promise.all([firstDelete, secondDelete])).toEqual([
+        { kind: 'deleted' },
+        { kind: 'deleted' },
+      ])
+      expect(deleteBatches).toBe(4)
+
+      expect(await projector.deleteSource(sourcePath)).toEqual({ kind: 'deleted' })
+      expect(deleteBatches).toBe(4)
+    } finally {
+      releaseYield()
+      await Promise.resolve(firstDelete).catch(() => undefined)
+      database.close()
+    }
+  })
+
   it('deletes sources through projector batches with foreground yields', async () => {
     const root = await mkdtemp(join(tmpdir(), 'cc-haha-search-projector-delete-batches-'))
     tempDirs.push(root)

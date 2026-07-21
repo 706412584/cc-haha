@@ -73,6 +73,21 @@ describe('search content database', () => {
     }
   })
 
+  it('rejects non-positive and non-finite storage limits', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cc-haha-search-database-invalid-cap-'))
+    tempDirs.push(root)
+
+    for (const [filename, storageLimitBytes] of [
+      ['zero.sqlite', 0],
+      ['nan.sqlite', Number.NaN],
+    ] as const) {
+      expect(() => openSearchContentDatabase({
+        path: join(root, filename),
+        storageLimitBytes,
+      })).toThrow('Search content storage limit must be a positive number')
+    }
+  })
+
   it('sets a conservative hard page cap only when a storage limit is provided', async () => {
     const root = await mkdtemp(join(tmpdir(), 'cc-haha-search-database-cap-'))
     tempDirs.push(root)
