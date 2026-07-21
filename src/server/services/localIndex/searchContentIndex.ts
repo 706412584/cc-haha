@@ -1,6 +1,5 @@
 import type {
   SearchContentBinding,
-  SearchContentCheckpointResult,
   SearchContentDatabase,
   SearchContentWriteOperation,
 } from './searchContentDatabase.js'
@@ -330,18 +329,6 @@ function insertDocuments(
 const DEFAULT_BATCH_DOCUMENT_LIMIT = 500
 const DEFAULT_BATCH_BYTE_LIMIT = 4 * 1024 * 1024
 
-type SearchContentBatchDatabase = SearchContentDatabase & {
-  checkpointTruncate?: () => SearchContentCheckpointResult
-}
-
-type ResolvedSearchContentBatchOptions = {
-  batchDocumentLimit: number
-  batchByteLimit: number
-  signal?: AbortSignal
-  onBatchCommitted?: () => boolean | Promise<boolean>
-  yieldToForeground?: () => Promise<void>
-}
-
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return
   if (signal.reason instanceof Error && signal.reason.name === 'AbortError') {
@@ -357,9 +344,7 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   throw error
 }
 
-function resolveBatchOptions(
-  options: SearchContentBatchOptions | undefined,
-): ResolvedSearchContentBatchOptions {
+function resolveBatchOptions(options: SearchContentBatchOptions | undefined) {
   const batchDocumentLimit = Number.isFinite(options?.batchDocumentLimit)
     ? Math.max(1, Math.trunc(options!.batchDocumentLimit!))
     : DEFAULT_BATCH_DOCUMENT_LIMIT
@@ -395,7 +380,7 @@ function documentBatchBytes(document: SearchContentDocumentWrite): number {
 function nextDocumentBatchEnd(
   documents: SearchContentDocumentWrite[],
   start: number,
-  options: ResolvedSearchContentBatchOptions,
+  options: ReturnType<typeof resolveBatchOptions>,
 ): number {
   let end = start
   let bytes = 0
@@ -409,16 +394,11 @@ function nextDocumentBatchEnd(
   return end
 }
 
-function checkpointAfterBatch(database: SearchContentDatabase): SearchContentCheckpointResult {
-  const batchDatabase = database as SearchContentBatchDatabase
-  return batchDatabase.checkpointTruncate?.() ?? database.checkpointPassive()
-}
-
 async function afterBatchCommitted(
   database: SearchContentDatabase,
-  options: ResolvedSearchContentBatchOptions,
+  options: ReturnType<typeof resolveBatchOptions>,
 ): Promise<SearchContentBatchResult | null> {
-  checkpointAfterBatch(database)
+  ;(database.checkpointTruncate ?? database.checkpointPassive)()
   const withinBudget = await options.onBatchCommitted?.() !== false
   await options.yieldToForeground?.()
   throwIfAborted(options.signal)
@@ -428,7 +408,7 @@ async function afterBatchCommitted(
 async function deleteDocumentsBatched(
   database: SearchContentDatabase,
   sourcePath: string,
-  options: ResolvedSearchContentBatchOptions,
+  options: ReturnType<typeof resolveBatchOptions>,
 ): Promise<SearchContentBatchResult | null> {
   while (true) {
     throwIfAborted(options.signal)
@@ -452,7 +432,7 @@ async function insertDocumentsBatched(
   database: SearchContentDatabase,
   sourcePath: string,
   documents: SearchContentDocumentWrite[],
-  options: ResolvedSearchContentBatchOptions,
+  options: ReturnType<typeof resolveBatchOptions>,
 ): Promise<SearchContentBatchResult | null> {
   let start = 0
   while (start < documents.length) {
