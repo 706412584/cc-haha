@@ -106,6 +106,18 @@ export type SearchContentQueryOptions = {
   caseSensitive?: boolean
 }
 
+export type SearchContentBatchResult =
+  | { kind: 'committed' }
+  | { kind: 'retry'; reason: 'storage-limit' }
+
+export type SearchContentBatchOptions = {
+  batchDocumentLimit?: number
+  batchByteLimit?: number
+  signal?: AbortSignal
+  onBatchCommitted?: () => boolean | Promise<boolean>
+  yieldToForeground?: () => Promise<void>
+}
+
 export interface SearchContentIndex {
   getSource(path: string): SearchContentSource | null
   listSources(): SearchContentSource[]
@@ -114,11 +126,25 @@ export interface SearchContentIndex {
     source: SearchContentSourceWrite,
     documents: SearchContentDocumentWrite[],
   ): void
+  replaceSourceBatched(
+    source: SearchContentSourceWrite,
+    documents: SearchContentDocumentWrite[],
+    options?: SearchContentBatchOptions,
+  ): Promise<SearchContentBatchResult>
   appendSource(
     source: SearchContentSourceWrite,
     documents: SearchContentDocumentWrite[],
   ): void
+  appendSourceBatched(
+    source: SearchContentSourceWrite,
+    documents: SearchContentDocumentWrite[],
+    options?: SearchContentBatchOptions,
+  ): Promise<SearchContentBatchResult>
   deleteSource(path: string): void
+  deleteSourceBatched(
+    path: string,
+    options?: SearchContentBatchOptions,
+  ): Promise<SearchContentBatchResult>
   getReadiness(): SearchContentReadiness | null
   setReadiness(readiness: SearchContentReadinessWrite): void
   query(
@@ -300,6 +326,123 @@ function insertDocuments(
   }
 }
 
+const DEFAULT_BATCH_DOCUMENT_LIMIT = 500
+const DEFAULT_BATCH_BYTE_LIMIT = 4 * 1024 * 1024
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return
+  if (signal.reason instanceof Error && signal.reason.name === 'AbortError') {
+    throw signal.reason
+  }
+  const error = new Error(
+    signal.reason instanceof Error
+      ? signal.reason.message
+      : 'Search content index operation was aborted',
+    signal.reason instanceof Error ? { cause: signal.reason } : undefined,
+  )
+  error.name = 'AbortError'
+  throw error
+}
+
+function resolveBatchOptions(options: SearchContentBatchOptions | undefined) {
+  const batchDocumentLimit = Number.isFinite(options?.batchDocumentLimit)
+    ? Math.max(1, Math.trunc(options!.batchDocumentLimit!))
+    : DEFAULT_BATCH_DOCUMENT_LIMIT
+  const batchByteLimit = Number.isFinite(options?.batchByteLimit)
+    ? Math.max(1, Math.trunc(options!.batchByteLimit!))
+    : DEFAULT_BATCH_BYTE_LIMIT
+  return {
+    batchDocumentLimit,
+    batchByteLimit,
+    signal: options?.signal,
+    onBatchCommitted: options?.onBatchCommitted,
+    yieldToForeground: options?.yieldToForeground,
+  }
+}
+
+function pendingSource(source: SearchContentSourceWrite): SearchContentSourceWrite {
+  return {
+    ...source,
+    state: 'pending',
+    lastErrorCode: null,
+  }
+}
+
+function documentBatchBytes(document: SearchContentDocumentWrite): number {
+  return Math.max(
+    1,
+    document.byteLength,
+    Buffer.byteLength(document.body),
+    Buffer.byteLength(document.normalizedBody),
+  )
+}
+
+function nextDocumentBatchEnd(
+  documents: SearchContentDocumentWrite[],
+  start: number,
+  options: ReturnType<typeof resolveBatchOptions>,
+): number {
+  let end = start
+  let bytes = 0
+  while (end < documents.length && end - start < options.batchDocumentLimit) {
+    const documentBytes = documentBatchBytes(documents[end]!)
+    if (end > start && bytes + documentBytes > options.batchByteLimit) break
+    bytes += documentBytes
+    end += 1
+    if (documentBytes >= options.batchByteLimit) break
+  }
+  return end
+}
+
+async function afterBatchCommitted(
+  database: SearchContentDatabase,
+  options: ReturnType<typeof resolveBatchOptions>,
+): Promise<SearchContentBatchResult | null> {
+  ;(database.checkpointTruncate ?? database.checkpointPassive)()
+  const withinBudget = await options.onBatchCommitted?.() !== false
+  await options.yieldToForeground?.()
+  throwIfAborted(options.signal)
+  return withinBudget ? null : { kind: 'retry', reason: 'storage-limit' }
+}
+
+async function deleteDocumentsBatched(
+  database: SearchContentDatabase,
+  sourcePath: string,
+  options: ReturnType<typeof resolveBatchOptions>,
+): Promise<SearchContentBatchResult | null> {
+  while (true) {
+    throwIfAborted(options.signal)
+    const changes = database.transaction(writer => writer.run(
+      'DELETE FROM search_documents WHERE id IN (SELECT id FROM search_documents WHERE source_path = ? ORDER BY id LIMIT ?)',
+      sourcePath,
+      options.batchDocumentLimit,
+    ).changes)
+    if (changes < 1) return null
+    const result = await afterBatchCommitted(database, options)
+    if (result) return result
+    if (changes < options.batchDocumentLimit) return null
+  }
+}
+
+async function insertDocumentsBatched(
+  database: SearchContentDatabase,
+  sourcePath: string,
+  documents: SearchContentDocumentWrite[],
+  options: ReturnType<typeof resolveBatchOptions>,
+): Promise<SearchContentBatchResult | null> {
+  let start = 0
+  while (start < documents.length) {
+    throwIfAborted(options.signal)
+    const end = nextDocumentBatchEnd(documents, start, options)
+    database.transaction(writer => {
+      insertDocuments(writer, sourcePath, documents.slice(start, end))
+    })
+    start = end
+    const result = await afterBatchCommitted(database, options)
+    if (result) return result
+  }
+  return null
+}
+
 function ftsPhrase(value: string): string {
   return `"${value.replace(/"/g, '""')}"`
 }
@@ -335,6 +478,25 @@ export function createSearchContentIndex(
         insertDocuments(writer, source.path, documents)
       })
     },
+    async replaceSourceBatched(source, documents, batchOptions) {
+      const resolved = resolveBatchOptions(batchOptions)
+      throwIfAborted(resolved.signal)
+      database.transaction(writer => {
+        upsertSource(writer, pendingSource(source))
+      })
+      let result = await afterBatchCommitted(database, resolved)
+      if (result) return result
+      result = await deleteDocumentsBatched(database, source.path, resolved)
+      if (result) return result
+      result = await insertDocumentsBatched(database, source.path, documents, resolved)
+      if (result) return result
+
+      database.transaction(writer => {
+        upsertSource(writer, source)
+      })
+      result = await afterBatchCommitted(database, resolved)
+      return result ?? { kind: 'committed' }
+    },
     appendSource(source, documents) {
       database.transaction(writer => {
         const existing = writer.get<{ path: string }>(
@@ -346,10 +508,56 @@ export function createSearchContentIndex(
         insertDocuments(writer, source.path, documents)
       })
     },
+    async appendSourceBatched(source, documents, batchOptions) {
+      const resolved = resolveBatchOptions(batchOptions)
+      throwIfAborted(resolved.signal)
+      database.transaction(writer => {
+        const existing = writer.get<{ path: string }>(
+          'SELECT path FROM search_sources WHERE path = ?',
+          source.path,
+        )
+        if (!existing) throw new Error('Cannot append an unindexed search source')
+        upsertSource(writer, pendingSource(source))
+      })
+      let result = await afterBatchCommitted(database, resolved)
+      if (result) return result
+      result = await insertDocumentsBatched(database, source.path, documents, resolved)
+      if (result) return result
+
+      database.transaction(writer => {
+        upsertSource(writer, source)
+      })
+      result = await afterBatchCommitted(database, resolved)
+      return result ?? { kind: 'committed' }
+    },
     deleteSource(path) {
       database.transaction(writer => {
         writer.run('DELETE FROM search_sources WHERE path = ?', path)
       })
+    },
+    async deleteSourceBatched(path, batchOptions) {
+      const resolved = resolveBatchOptions(batchOptions)
+      throwIfAborted(resolved.signal)
+      const exists = database.transaction(writer => {
+        const existing = writer.get<SourceRow>(
+          'SELECT * FROM search_sources WHERE path = ?',
+          path,
+        )
+        if (!existing) return false
+        upsertSource(writer, pendingSource(sourceFromRow(existing)))
+        return true
+      })
+      if (!exists) return { kind: 'committed' }
+      let result = await afterBatchCommitted(database, resolved)
+      if (result) return result
+      result = await deleteDocumentsBatched(database, path, resolved)
+      if (result) return result
+
+      database.transaction(writer => {
+        writer.run('DELETE FROM search_sources WHERE path = ?', path)
+      })
+      result = await afterBatchCommitted(database, resolved)
+      return result ?? { kind: 'committed' }
     },
     getReadiness() {
       const row = database.read(reader => reader.get<ReadinessRow>(

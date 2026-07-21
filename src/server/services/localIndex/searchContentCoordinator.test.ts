@@ -309,6 +309,257 @@ describe('search content coordinator', () => {
     await coordinator.stop()
   })
 
+  test('removes an over-limit database family before opening the search index', async () => {
+    const scope = await createTempScope()
+    const databasePath = join(scope, 'cc-haha', 'db', 'search-index-v1.sqlite')
+    await mkdir(join(databasePath, '..'), { recursive: true })
+    await writeFile(databasePath, Buffer.alloc(512 * 1024))
+    await writeFile(`${databasePath}-wal`, Buffer.alloc(128 * 1024))
+    await writeFile(`${databasePath}-shm`, Buffer.alloc(256 * 1024))
+    await writeFile(`${databasePath}-journal`, Buffer.alloc(256 * 1024))
+
+    const events: string[] = []
+    let watcherStarts = 0
+    const coordinator = createSearchContentCoordinator({
+      resolveScope: () => scope,
+      resolveDatabasePath: () => databasePath,
+      storageLimitBytes: 1024 * 1024,
+      openDatabase: (path, activeScope) => {
+        events.push('open')
+        return openSearchContentDatabase({ path, scope: activeScope })
+      },
+      removeDatabaseFamily: async path => {
+        events.push('remove')
+        await Promise.all(['', '-wal', '-shm', '-journal'].map(suffix =>
+          rm(`${path}${suffix}`, { force: true })))
+      },
+      createWatcher: () => noOpWatcher({
+        start: async () => {
+          watcherStarts += 1
+        },
+      }),
+    })
+
+    await coordinator.start()
+
+    expect(events).toEqual(['remove', 'open'])
+    expect(watcherStarts).toBe(1)
+    expect((await readFile(databasePath)).subarray(0, 16).toString())
+      .toBe('SQLite format 3\0')
+    await coordinator.stop()
+  })
+
+  test('fails closed when an over-limit database family cannot be reset', async () => {
+    const scope = await createTempScope()
+    const databasePath = join(scope, 'cc-haha', 'db', 'search-index-v1.sqlite')
+    await mkdir(join(databasePath, '..'), { recursive: true })
+    await writeFile(databasePath, Buffer.alloc(2 * 1024 * 1024))
+
+    let opens = 0
+    let watcherStarts = 0
+    const coordinator = createSearchContentCoordinator({
+      resolveScope: () => scope,
+      resolveDatabasePath: () => databasePath,
+      storageLimitBytes: 1024 * 1024,
+      openDatabase: () => {
+        opens += 1
+        return openSearchContentDatabase({ path: databasePath, scope })
+      },
+      removeDatabaseFamily: async () => {
+        throw new Error('locked by another process')
+      },
+      createWatcher: () => noOpWatcher({
+        start: async () => {
+          watcherStarts += 1
+        },
+      }),
+    })
+
+    await coordinator.start()
+
+    expect(opens).toBe(0)
+    expect(watcherStarts).toBe(0)
+    expect(coordinator.getStatus()).toMatchObject({
+      state: 'degraded',
+      lastErrorCode: 'SEARCH_CONTENT_STORAGE_RESET_FAILED',
+    })
+    await coordinator.stop()
+  })
+
+  test('fails closed when reset returns but the database family remains over limit', async () => {
+    const scope = await createTempScope()
+    const databasePath = join(scope, 'cc-haha', 'db', 'search-index-v1.sqlite')
+    let familyBytes = 2048
+    let watcherStarts = 0
+    const coordinator = createSearchContentCoordinator({
+      resolveScope: () => scope,
+      resolveDatabasePath: () => databasePath,
+      storageLimitBytes: 1024,
+      getDatabaseFamilySize: async () => familyBytes,
+      removeDatabaseFamily: async () => {
+        familyBytes = 1536
+      },
+      createWatcher: () => noOpWatcher({
+        start: async () => {
+          watcherStarts += 1
+        },
+      }),
+    })
+
+    await coordinator.start()
+
+    expect(watcherStarts).toBe(0)
+    expect(coordinator.getStatus()).toMatchObject({
+      state: 'degraded',
+      lastErrorCode: 'SEARCH_CONTENT_STORAGE_RESET_FAILED',
+    })
+    await coordinator.stop()
+  })
+
+  test('stops a full sweep before projecting later sources after the storage cap is reached', async () => {
+    const scope = await createTempScope()
+    const projected: string[] = []
+    const candidates = ['one', 'two', 'three'].map((name, index) => ({
+      path: join(scope, 'projects', '-repo', `${name}.jsonl`),
+      projectPath: '-repo',
+      ownerSessionId: name,
+      ownerTranscriptPath: join(scope, 'projects', '-repo', `${name}.jsonl`),
+      modifiedAtMs: index,
+    }))
+    const database = {
+      read: <T>(operation: (reader: never) => T) => operation({} as never),
+      write: <T>(operation: (writer: never) => T) => operation({} as never),
+      transaction: <T>(operation: (writer: never) => T) => operation({} as never),
+      checkpointPassive: () => ({ busy: 0, logFrames: 0, checkpointedFrames: 0 }),
+      checkpointTruncate: () => ({ busy: 0, logFrames: 0, checkpointedFrames: 0 }),
+      getStorageStats: () => ({
+        databaseBytes: projected.length > 0 ? 1024 : 0,
+        walBytes: 0,
+      }),
+      close() {},
+    }
+    const index = {
+      getSource: () => null,
+      listSources: () => [],
+      countSources: () => 0,
+      replaceSource() {},
+      replaceSourceBatched: async () => ({ kind: 'committed' as const }),
+      appendSource() {},
+      appendSourceBatched: async () => ({ kind: 'committed' as const }),
+      deleteSource() {},
+      deleteSourceBatched: async () => ({ kind: 'committed' as const }),
+      getReadiness: () => null,
+      setReadiness() {},
+      query: () => null,
+    }
+    const coordinator = createSearchContentCoordinator({
+      resolveScope: () => scope,
+      resolveDatabasePath: () => join(scope, 'cc-haha', 'db', 'search-index-v1.sqlite'),
+      storageLimitBytes: 512,
+      openDatabase: () => database,
+      createIndex: () => index,
+      createProjector: () => ({
+        async projectSource(candidate) {
+          projected.push(candidate.ownerSessionId)
+          return {
+            kind: 'indexed',
+            action: 'full',
+            state: 'ready',
+            indexedBytes: 1,
+            indexedLines: 1,
+            documentCount: 1,
+          }
+        },
+        deleteSource: () => ({ kind: 'deleted' }),
+      }),
+      discoverSources: async (_activeScope, _signal, emit) => {
+        await emit(candidates)
+        return { complete: true }
+      },
+      createWatcher: () => noOpWatcher(),
+    })
+
+    await coordinator.start()
+    const status = await waitForStatus(coordinator.getStatus, 'degraded')
+
+    expect(projected).toEqual(['one'])
+    expect(status.lastErrorCode).toBe('SEARCH_CONTENT_STORAGE_LIMIT')
+    await coordinator.stop()
+  })
+
+  test('stops discovery when a committed batch reports the storage limit', async () => {
+    const scope = await createTempScope()
+    const projected: string[] = []
+    const candidates = ['one', 'two', 'three'].map((name, index) => ({
+      path: join(scope, 'projects', '-repo', `${name}.jsonl`),
+      projectPath: '-repo',
+      ownerSessionId: name,
+      ownerTranscriptPath: join(scope, 'projects', '-repo', `${name}.jsonl`),
+      modifiedAtMs: index,
+    }))
+    let familyBytes = 0
+    const database = {
+      read: <T>(operation: (reader: never) => T) => operation({} as never),
+      write: <T>(operation: (writer: never) => T) => operation({} as never),
+      transaction: <T>(operation: (writer: never) => T) => operation({} as never),
+      checkpointPassive: () => ({ busy: 0, logFrames: 0, checkpointedFrames: 0 }),
+      checkpointTruncate: () => ({ busy: 0, logFrames: 0, checkpointedFrames: 0 }),
+      getStorageStats: () => ({ databaseBytes: familyBytes, walBytes: 0 }),
+      close() {},
+    }
+    const index = {
+      getSource: () => null,
+      listSources: () => [],
+      countSources: () => 0,
+      replaceSource() {},
+      replaceSourceBatched: async () => ({ kind: 'committed' as const }),
+      appendSource() {},
+      appendSourceBatched: async () => ({ kind: 'committed' as const }),
+      deleteSource() {},
+      deleteSourceBatched: async () => ({ kind: 'committed' as const }),
+      getReadiness: () => null,
+      setReadiness() {},
+      query: () => null,
+    }
+    const coordinator = createSearchContentCoordinator({
+      resolveScope: () => scope,
+      resolveDatabasePath: () => join(scope, 'cc-haha', 'db', 'search-index-v1.sqlite'),
+      storageLimitBytes: 512,
+      openDatabase: () => database,
+      createIndex: () => index,
+      createProjector: options => ({
+        async projectSource(candidate) {
+          projected.push(candidate.ownerSessionId)
+          familyBytes = 1024
+          const withinBudget = await options.onBatchCommitted?.()
+          familyBytes = 0
+          if (withinBudget === false) return { kind: 'retry', reason: 'storage-limit' }
+          return {
+            kind: 'indexed',
+            action: 'full',
+            state: 'ready',
+            indexedBytes: 1,
+            indexedLines: 1,
+            documentCount: 1,
+          }
+        },
+        deleteSource: () => ({ kind: 'deleted' }),
+      }),
+      discoverSources: async (_activeScope, _signal, emit) => {
+        await emit(candidates)
+        return { complete: true }
+      },
+      createWatcher: () => noOpWatcher(),
+    })
+
+    await coordinator.start()
+    const status = await waitForStatus(coordinator.getStatus, 'degraded')
+
+    expect(projected).toEqual(['one'])
+    expect(status.lastErrorCode).toBe('SEARCH_CONTENT_STORAGE_LIMIT')
+    await coordinator.stop()
+  })
+
   test('falls back instead of querying when the disposable index exceeds its cap', async () => {
     const scope = await createTempScope()
     const source = join(scope, 'projects', '-repo', 'session.jsonl')
@@ -337,7 +588,7 @@ describe('search content coordinator', () => {
     await coordinator.start()
     const status = await waitForStatus(coordinator.getStatus, 'degraded')
     expect(status.lastErrorCode).toBe('SEARCH_CONTENT_STORAGE_LIMIT')
-    expect(status.databaseBytes + status.walBytes).toBeGreaterThan(1)
+    expect(status.databaseBytes + status.walBytes).toBe(0)
     expect(coordinator.search('fallback')).toBeNull()
     await coordinator.stop()
   })

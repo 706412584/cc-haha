@@ -6,6 +6,7 @@ import {
 import type { SearchContentDatabase } from './searchContentDatabase.js'
 import {
   normalizeSearchContent,
+  type SearchContentBatchOptions,
   type SearchContentDocumentWrite,
   type SearchContentIndex,
   type SearchContentRole,
@@ -59,12 +60,21 @@ export type SearchContentProjectResult =
   }
   | { kind: 'deleted' }
   | Extract<SourceChange, { kind: 'retry' }>
+  | { kind: 'retry'; reason: 'storage-limit' }
+
+export type SearchContentDeleteResult = Extract<
+  SearchContentProjectResult,
+  { kind: 'deleted' | 'retry' }
+>
+
+export type SearchContentDeleteOperation = SearchContentDeleteResult &
+  PromiseLike<SearchContentDeleteResult>
 
 export interface SearchContentProjector {
   projectSource(
     candidate: SearchContentSourceCandidate,
   ): Promise<SearchContentProjectResult>
-  deleteSource(path: string): { kind: 'deleted' }
+  deleteSource(path: string): SearchContentDeleteOperation
 }
 
 export type SearchContentProjectorOptions = {
@@ -75,6 +85,10 @@ export type SearchContentProjectorOptions = {
   signal?: AbortSignal
   verifyFingerprint?: typeof verifySourceFingerprint
   maxJsonlLineBytes?: number
+  onBatchCommitted?: () => boolean | Promise<boolean>
+  yieldToForeground?: () => Promise<void>
+  batchDocumentLimit?: number
+  batchByteLimit?: number
 }
 
 const READ_BUFFER_BYTES = 256 * 1024
@@ -171,6 +185,14 @@ function sameReadSnapshot(
 
 function isMissing(error: unknown): boolean {
   return (error as NodeJS.ErrnoException)?.code === 'ENOENT'
+}
+
+function isAbort(error: unknown): boolean {
+  return (error as Error)?.name === 'AbortError'
+}
+
+function isSqliteFull(error: unknown): boolean {
+  return (error as { code?: unknown })?.code === 'SQLITE_FULL'
 }
 
 function retry(): Extract<SourceChange, { kind: 'retry' }> {
@@ -298,10 +320,33 @@ export function createSearchContentProjector(
   const maxJsonlLineBytes = Number.isFinite(configuredLineLimit)
     ? Math.max(1, Math.trunc(configuredLineLimit))
     : SEARCH_CONTENT_MAX_JSONL_LINE_BYTES
+  const batchOptions = (): SearchContentBatchOptions => ({
+    batchDocumentLimit: options.batchDocumentLimit,
+    batchByteLimit: options.batchByteLimit,
+    signal: options.signal,
+    onBatchCommitted: options.onBatchCommitted,
+    yieldToForeground: options.yieldToForeground,
+  })
+  const pendingDeletes = new Map<string, Promise<SearchContentDeleteResult>>()
 
-  const remove = (path: string): { kind: 'deleted' } => {
-    options.index.deleteSource(path)
-    return { kind: 'deleted' }
+  const remove = (path: string): SearchContentDeleteOperation => {
+    if (!pendingDeletes.has(path)) {
+      const operation = options.index.deleteSourceBatched(path, batchOptions())
+        .then(commit => commit.kind === 'retry' ? commit : { kind: 'deleted' } as const)
+        .finally(() => pendingDeletes.delete(path))
+      pendingDeletes.set(path, operation)
+    }
+    const operation = pendingDeletes.get(path)!
+    return {
+      kind: 'deleted',
+      then(onfulfilled, onrejected) {
+        return operation.then(onfulfilled, onrejected)
+      },
+    }
+  }
+
+  const awaitRemove = async (path: string): Promise<SearchContentDeleteResult> => {
+    return await remove(path)
   }
 
   return {
@@ -322,36 +367,38 @@ export function createSearchContentProjector(
           })
           : { kind: 'rebuild', reason: 'rewrite' } as const
         if (change.kind === 'retry') return change
-        if (change.kind === 'deleted') return remove(candidate.path)
-        if (change.kind === 'unchanged') {
-          if (
-            existing.projectPath !== candidate.projectPath ||
-            existing.ownerSessionId !== candidate.ownerSessionId ||
-            existing.ownerTranscriptPath !== candidate.ownerTranscriptPath ||
-            existing.modifiedAtMs !== candidate.modifiedAtMs
-          ) {
-            options.index.appendSource({
-              ...existing,
-              projectPath: candidate.projectPath,
-              ownerSessionId: candidate.ownerSessionId,
-              ownerTranscriptPath: candidate.ownerTranscriptPath,
-              modifiedAtMs: candidate.modifiedAtMs,
-              updatedAtMs: now(),
-            }, [])
+        if (change.kind === 'deleted') return await awaitRemove(candidate.path)
+        if (existing.state === 'ready') {
+          if (change.kind === 'unchanged') {
+            if (
+              existing.projectPath !== candidate.projectPath ||
+              existing.ownerSessionId !== candidate.ownerSessionId ||
+              existing.ownerTranscriptPath !== candidate.ownerTranscriptPath ||
+              existing.modifiedAtMs !== candidate.modifiedAtMs
+            ) {
+              options.index.appendSource({
+                ...existing,
+                projectPath: candidate.projectPath,
+                ownerSessionId: candidate.ownerSessionId,
+                ownerTranscriptPath: candidate.ownerTranscriptPath,
+                modifiedAtMs: candidate.modifiedAtMs,
+                updatedAtMs: now(),
+              }, [])
+            }
+            return {
+              kind: 'indexed',
+              action: 'unchanged',
+              state: existing.state,
+              indexedBytes: existing.indexedBytes,
+              indexedLines: existing.indexedLines,
+              documentCount: 0,
+            }
           }
-          return {
-            kind: 'indexed',
-            action: 'unchanged',
-            state: existing.state,
-            indexedBytes: existing.indexedBytes,
-            indexedLines: existing.indexedLines,
-            documentCount: 0,
+          if (change.kind === 'append') {
+            action = 'append'
+            start = change.readFrom
+            startingLine = existing.indexedLines
           }
-        }
-        if (change.kind === 'append') {
-          action = 'append'
-          start = change.readFrom
-          startingLine = existing.indexedLines
         }
       }
 
@@ -424,11 +471,10 @@ export function createSearchContentProjector(
             : null,
           updatedAtMs: now(),
         }
-        if (action === 'append') {
-          options.index.appendSource(source, reduced.documents)
-        } else {
-          options.index.replaceSource(source, reduced.documents)
-        }
+        const commit = action === 'append'
+          ? await options.index.appendSourceBatched(source, reduced.documents, batchOptions())
+          : await options.index.replaceSourceBatched(source, reduced.documents, batchOptions())
+        if (commit.kind === 'retry') return commit
         return {
           kind: 'indexed',
           action,
@@ -438,7 +484,8 @@ export function createSearchContentProjector(
           documentCount: reduced.documents.length,
         }
       } catch (error) {
-        if (isMissing(error)) return remove(candidate.path)
+        if (isMissing(error)) return await awaitRemove(candidate.path)
+        if (isAbort(error) || isSqliteFull(error)) throw error
         return retry()
       } finally {
         await handle?.close().catch(() => {})

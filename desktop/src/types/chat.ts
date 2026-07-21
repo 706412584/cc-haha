@@ -123,7 +123,7 @@ export type ServerMessage =
   | { type: 'user_message_replay'; content: string }
   | { type: 'message_complete'; usage: TokenUsage }
   | { type: 'thinking'; text: string }
-  | { type: 'status'; state: ChatState; verb?: string; attemptStart?: boolean }
+  | { type: 'status'; state: ChatState; verb?: string; attemptStart?: boolean; taskId?: string }
   // CLI 回传的权限模式变化（如 ExitPlanMode 退出 plan 后恢复、Shift+Tab）。
   // 桌面端据此把选择器校正回 CLI 的真实权限，避免本地影子值漂移。
   | { type: 'permission_mode_changed'; mode: PermissionMode }
@@ -140,6 +140,7 @@ export type ServerMessage =
   | { type: 'streaming_fallback'; cause: StreamingFallbackCause }
   | { type: 'error'; message: string; code: string; retryable?: boolean; businessErrorCode?: string }
   | { type: 'background_task_stop_failed'; taskId: string; message: string }
+  | { type: 'background_task_stopped'; taskId: string }
   | { type: 'system_notification'; subtype: string; message?: string; data?: unknown }
   | { type: 'pong' }
   | { type: 'team_update'; teamName: string; members: TeamMemberStatus[] }

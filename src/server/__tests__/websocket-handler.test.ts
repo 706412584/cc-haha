@@ -294,9 +294,102 @@ describe('WebSocket handler session isolation', () => {
     })
   })
 
+  it('silently confirms a background stop when the CLI session is already gone', async () => {
+    const sessionId = `stop-background-gone-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'requestControl').mockRejectedValue(
+      new Error('CLI session is not running'),
+    )
+
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'stop_background_task',
+      taskId: 'bash-task-1',
+    }))
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'background_task_stopped',
+      taskId: 'bash-task-1',
+    })
+    expect(ws.sent.map((payload) => JSON.parse(payload))).not.toContainEqual(
+      expect.objectContaining({ type: 'background_task_stop_failed' }),
+    )
+  })
+
+  it('confirms a background stop when the CLI exits during the request', async () => {
+    const sessionId = `stop-background-exit-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    let sessionRunning = true
+    spyOn(conversationService, 'hasSession').mockImplementation(() => sessionRunning)
+    spyOn(conversationService, 'requestControl').mockImplementation(async () => {
+      sessionRunning = false
+      throw new Error('CLI session is not running')
+    })
+
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'stop_background_task',
+      taskId: 'bash-task-1',
+    }))
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'background_task_stopped',
+      taskId: 'bash-task-1',
+    })
+    expect(ws.sent.map((payload) => JSON.parse(payload))).not.toContainEqual(
+      expect.objectContaining({ type: 'background_task_stop_failed' }),
+    )
+  })
+
+  it('confirms a timed-out background stop when the CLI session exited', async () => {
+    const sessionId = `stop-background-timeout-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'hasSession').mockReturnValue(false)
+    spyOn(conversationService, 'requestControl').mockRejectedValue(
+      new Error('Timed out waiting for stop_task response'),
+    )
+
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'stop_background_task',
+      taskId: 'bash-task-1',
+    }))
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'background_task_stopped',
+      taskId: 'bash-task-1',
+    })
+  })
+
+  it('reports a timed-out background stop while the CLI session is still running', async () => {
+    const sessionId = `stop-background-live-timeout-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'requestControl').mockRejectedValue(
+      new Error('Timed out waiting for stop_task response'),
+    )
+
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'stop_background_task',
+      taskId: 'bash-task-1',
+    }))
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'background_task_stop_failed',
+      taskId: 'bash-task-1',
+      message: 'Timed out waiting for stop_task response',
+    })
+  })
+
   it('reports a task-scoped failure when the CLI rejects a background stop', async () => {
     const sessionId = `stop-background-failed-${crypto.randomUUID()}`
     const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
     spyOn(conversationService, 'requestControl').mockRejectedValue(new Error('Task is not running'))
 
     handleWebSocket.message(ws, JSON.stringify({
@@ -379,6 +472,103 @@ describe('WebSocket handler session isolation', () => {
       type: 'system_notification',
       subtype: 'task_notification',
       data: running,
+    })
+  })
+
+  it('does not send a stale stop failure after observing a terminal task notification', async () => {
+    const sessionId = `task-notification-stop-race-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    let outputCallback: ((cliMsg: any) => void) | null = null
+    let finishPersistence!: () => void
+    const persistence = new Promise<void>((resolve) => {
+      finishPersistence = resolve
+    })
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'onOutput').mockImplementation((_sid, callback) => {
+      outputCallback = callback
+    })
+    spyOn(sessionService, 'appendSessionTaskNotification').mockReturnValue(persistence)
+    spyOn(conversationService, 'requestControl').mockRejectedValue(
+      new Error('Task is not running'),
+    )
+
+    handleWebSocket.open(ws)
+    ws.sent.length = 0
+
+    const completed = {
+      type: 'system',
+      subtype: 'task_notification',
+      uuid: 'terminal-task-stop-race-1',
+      task_id: 'agent-task-1',
+      tool_use_id: 'agent-tool-1',
+      status: 'completed',
+      summary: 'Background task completed',
+      timestamp: '2026-07-18T00:01:00.000Z',
+    }
+    outputCallback?.(completed)
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'stop_background_task',
+      taskId: 'agent-task-1',
+    }))
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(ws.sent.map((payload) => JSON.parse(payload))).not.toContainEqual(
+      expect.objectContaining({ type: 'background_task_stop_failed' }),
+    )
+    expect(ws.sent.map((payload) => JSON.parse(payload))).not.toContainEqual(
+      expect.objectContaining({ type: 'system_notification' }),
+    )
+
+    finishPersistence()
+    await persistence
+    await Promise.resolve()
+
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'system_notification',
+      subtype: 'task_notification',
+      data: completed,
+    })
+  })
+
+  it('does not retain terminal task state after the session is closed', async () => {
+    const sessionId = `task-notification-cleanup-${crypto.randomUUID()}`
+    const first = makeClientSocket(sessionId)
+    const second = makeClientSocket(sessionId)
+    let outputCallback: ((cliMsg: any) => void) | null = null
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'onOutput').mockImplementation((_sid, callback) => {
+      outputCallback = callback
+    })
+    spyOn(sessionService, 'appendSessionTaskNotification').mockResolvedValue()
+    spyOn(conversationService, 'requestControl').mockRejectedValue(
+      new Error('Task is not running'),
+    )
+
+    handleWebSocket.open(first)
+    outputCallback?.({
+      type: 'system',
+      subtype: 'task_notification',
+      uuid: 'terminal-task-cleanup-1',
+      task_id: 'agent-task-1',
+      tool_use_id: 'agent-tool-1',
+      status: 'completed',
+    })
+    expect(closeSessionConnection(sessionId, 'session replaced')).toBe(true)
+
+    handleWebSocket.open(second)
+    second.sent.length = 0
+    handleWebSocket.message(second, JSON.stringify({
+      type: 'stop_background_task',
+      taskId: 'agent-task-1',
+    }))
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(second.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'background_task_stop_failed',
+      taskId: 'agent-task-1',
+      message: 'Task is not running',
     })
   })
 

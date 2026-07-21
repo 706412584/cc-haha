@@ -125,7 +125,7 @@ describe('search content projector', () => {
     }
   })
 
-  it('atomically appends a completed tail, rebuilds rewrites, and cascades deletes', async () => {
+  it('rebuilds pending sources from byte zero, appends ready tails, and cascades deletes', async () => {
     const { database, index, projector, candidate, sourcePath } = await setup()
     try {
       await writeFile(
@@ -147,20 +147,40 @@ describe('search content projector', () => {
         modifiedAtMs: 200,
       })).toMatchObject({
         kind: 'indexed',
-        action: 'append',
+        action: 'rebuild',
         state: 'ready',
         indexedLines: 2,
-        documentCount: 1,
+        documentCount: 2,
       })
       index.setReadiness({ state: 'ready', discovered: 1, indexed: 1 })
+      expect(index.query('old stable')?.sessions[0]?.matchCount).toBe(1)
       expect(index.query('append complete')?.sessions[0]?.matches[0]).toMatchObject({
         lineNumber: 2,
         role: 'assistant',
       })
+      expect(index.query('append complete')?.sessions[0]?.matchCount).toBe(1)
+
+      await appendFile(sourcePath, line({
+        type: 'user',
+        uuid: 'u2',
+        message: { role: 'user', content: 'ready append body' },
+      }))
+      expect(await projector.projectSource({
+        ...candidate,
+        modifiedAtMs: 250,
+      })).toMatchObject({
+        kind: 'indexed',
+        action: 'append',
+        state: 'ready',
+        indexedLines: 3,
+        documentCount: 1,
+      })
+      expect(index.query('old stable')?.sessions[0]?.matchCount).toBe(1)
+      expect(index.query('ready append')?.sessions[0]?.matchCount).toBe(1)
 
       await writeFile(sourcePath, line({
         type: 'user',
-        uuid: 'u2',
+        uuid: 'u3',
         message: { role: 'user', content: 'replacement only body' },
       }))
       expect(await projector.projectSource({
@@ -173,6 +193,7 @@ describe('search content projector', () => {
       })
       expect(index.query('old stable')?.sessions).toEqual([])
       expect(index.query('append complete')?.sessions).toEqual([])
+      expect(index.query('ready append')?.sessions).toEqual([])
       expect(index.query('replacement only')?.sessions).toHaveLength(1)
 
       await rm(sourcePath)
@@ -247,6 +268,313 @@ describe('search content projector', () => {
       })
       index.setReadiness({ state: 'ready', discovered: 1, indexed: 1 })
       expect(index.query('safe searchable')?.sessions).toEqual([])
+    } finally {
+      database.close()
+    }
+  })
+
+  it('commits projection batches with budget callbacks and leaves interrupted writes pending', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cc-haha-search-projector-batches-'))
+    tempDirs.push(root)
+    const sourcePath = join(root, 'projects', '-repo', 'batched.jsonl')
+    await mkdir(dirname(sourcePath), { recursive: true })
+    const database = openSearchContentDatabase({ path: join(root, 'search.sqlite') })
+    const index = createSearchContentIndex(database, { scope: join(root, 'projects') })
+    let checkpoints = 0
+    ;(database as typeof database & {
+      checkpointTruncate: () => { busy: number; logFrames: number; checkpointedFrames: number }
+    }).checkpointTruncate = () => {
+      checkpoints += 1
+      return { busy: 0, logFrames: 0, checkpointedFrames: 0 }
+    }
+    let callbacks = 0
+    let yields = 0
+    const projector = createSearchContentProjector({
+      database,
+      index,
+      batchDocumentLimit: 1,
+      onBatchCommitted: () => {
+        callbacks += 1
+        return callbacks < 3
+      },
+      yieldToForeground: async () => {
+        yields += 1
+      },
+    })
+    await writeFile(sourcePath, [0, 1, 2].map(offset => line({
+      type: 'user',
+      message: { role: 'user', content: `budget needle ${offset}` },
+    })).join(''))
+    const candidate = {
+      path: sourcePath,
+      projectPath: '-repo',
+      ownerSessionId: 'batched',
+      ownerTranscriptPath: sourcePath,
+      modifiedAtMs: 100,
+    }
+
+    try {
+      expect(await projector.projectSource(candidate)).toEqual({
+        kind: 'retry',
+        reason: 'storage-limit',
+      })
+      expect(callbacks).toBe(3)
+      expect(yields).toBe(3)
+      expect(checkpoints).toBe(3)
+      expect(index.getSource(sourcePath)?.state).toBe('pending')
+      index.setReadiness({ state: 'ready', discovered: 1, indexed: 1 })
+      expect(index.query('budget needle')?.sessions).toEqual([])
+    } finally {
+      database.close()
+    }
+  })
+
+  it('serves HTTP while a large projection is paused between committed batches', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cc-haha-search-projector-responsive-'))
+    tempDirs.push(root)
+    const sourcePath = join(root, 'projects', '-repo', 'responsive.jsonl')
+    await mkdir(dirname(sourcePath), { recursive: true })
+    await writeFile(sourcePath, Array.from({ length: 100 }, (_, offset) => line({
+      type: 'user',
+      message: { role: 'user', content: `responsive needle ${offset}` },
+    })).join(''))
+    const database = openSearchContentDatabase({ path: join(root, 'search.sqlite') })
+    const index = createSearchContentIndex(database, { scope: join(root, 'projects') })
+    let enteredYield!: () => void
+    const yieldEntered = new Promise<void>(resolve => {
+      enteredYield = resolve
+    })
+    let releaseYield!: () => void
+    const yieldGate = new Promise<void>(resolve => {
+      releaseYield = resolve
+    })
+    let firstYield = true
+    const projector = createSearchContentProjector({
+      database,
+      index,
+      batchDocumentLimit: 1,
+      yieldToForeground: async () => {
+        if (!firstYield) return
+        firstYield = false
+        enteredYield()
+        await yieldGate
+      },
+    })
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => new Response('healthy'),
+    })
+    let projectionSettled = false
+    const projection = projector.projectSource({
+      path: sourcePath,
+      projectPath: '-repo',
+      ownerSessionId: 'responsive',
+      ownerTranscriptPath: sourcePath,
+      modifiedAtMs: 100,
+    }).finally(() => {
+      projectionSettled = true
+    })
+
+    try {
+      await yieldEntered
+      const response = await fetch(new URL('/health', server.url))
+      expect(await response.text()).toBe('healthy')
+      expect(projectionSettled).toBe(false)
+      releaseYield()
+      expect(await projection).toMatchObject({
+        kind: 'indexed',
+        state: 'ready',
+        documentCount: 100,
+      })
+    } finally {
+      releaseYield()
+      await projection.catch(() => undefined)
+      server.stop(true)
+      database.close()
+    }
+  })
+
+  it('rebuilds after an interrupted append without duplicating documents', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cc-haha-search-projector-interrupted-append-'))
+    tempDirs.push(root)
+    const sourcePath = join(root, 'projects', '-repo', 'interrupted-append.jsonl')
+    await mkdir(dirname(sourcePath), { recursive: true })
+    const database = openSearchContentDatabase({ path: join(root, 'search.sqlite') })
+    const index = createSearchContentIndex(database, { scope: join(root, 'projects') })
+    const candidate = {
+      path: sourcePath,
+      projectPath: '-repo',
+      ownerSessionId: 'interrupted-append',
+      ownerTranscriptPath: sourcePath,
+      modifiedAtMs: 100,
+    }
+
+    try {
+      await writeFile(sourcePath, line({
+        type: 'user',
+        uuid: 'u1',
+        message: { role: 'user', content: 'stable before append' },
+      }))
+      const initialProjector = createSearchContentProjector({ database, index })
+      expect(await initialProjector.projectSource(candidate)).toMatchObject({
+        action: 'full',
+        state: 'ready',
+        documentCount: 1,
+      })
+      index.setReadiness({ state: 'ready', discovered: 1, indexed: 1 })
+      expect(index.query('stable before append')?.sessions[0]?.matchCount).toBe(1)
+
+      await appendFile(sourcePath, line({
+        type: 'assistant',
+        uuid: 'a1',
+        message: { role: 'assistant', content: 'interrupted append body' },
+      }))
+      let callbacks = 0
+      const interruptedProjector = createSearchContentProjector({
+        database,
+        index,
+        batchDocumentLimit: 1,
+        onBatchCommitted: () => {
+          callbacks += 1
+          return callbacks < 2
+        },
+      })
+      expect(await interruptedProjector.projectSource({
+        ...candidate,
+        modifiedAtMs: 200,
+      })).toEqual({ kind: 'retry', reason: 'storage-limit' })
+      expect(index.getSource(sourcePath)?.state).toBe('pending')
+      expect(index.query('stable before append')?.sessions).toEqual([])
+      expect(index.query('interrupted append')?.sessions).toEqual([])
+
+      const recoveryProjector = createSearchContentProjector({
+        database,
+        index,
+        batchDocumentLimit: 1,
+      })
+      expect(await recoveryProjector.projectSource({
+        ...candidate,
+        modifiedAtMs: 300,
+      })).toMatchObject({
+        kind: 'indexed',
+        action: 'rebuild',
+        state: 'ready',
+        documentCount: 2,
+        indexedLines: 2,
+      })
+      expect(index.query('stable before append')?.sessions[0]?.matchCount).toBe(1)
+      expect(index.query('interrupted append')?.sessions[0]?.matchCount).toBe(1)
+    } finally {
+      database.close()
+    }
+  })
+
+  it('shares an in-flight delete and allows a fresh delete after it settles', async () => {
+    const { database, index, candidate, sourcePath } = await setup()
+    await writeFile(sourcePath, [0, 1].map(offset => line({
+      type: 'user',
+      message: { role: 'user', content: `shared delete ${offset}` },
+    })).join(''))
+    const initialProjector = createSearchContentProjector({ database, index })
+    await initialProjector.projectSource(candidate)
+
+    let enteredYield!: () => void
+    const yieldEntered = new Promise<void>(resolve => {
+      enteredYield = resolve
+    })
+    let releaseYield!: () => void
+    const yieldGate = new Promise<void>(resolve => {
+      releaseYield = resolve
+    })
+    let firstYield = true
+    let deleteBatches = 0
+    const projector = createSearchContentProjector({
+      database,
+      index,
+      batchDocumentLimit: 1,
+      onBatchCommitted: () => {
+        deleteBatches += 1
+        return true
+      },
+      yieldToForeground: async () => {
+        if (!firstYield) return
+        firstYield = false
+        enteredYield()
+        await yieldGate
+      },
+    })
+
+    const firstDelete = projector.deleteSource(sourcePath)
+    try {
+      await yieldEntered
+      const secondDelete = projector.deleteSource(sourcePath)
+      releaseYield()
+
+      expect(await Promise.all([firstDelete, secondDelete])).toEqual([
+        { kind: 'deleted' },
+        { kind: 'deleted' },
+      ])
+      expect(deleteBatches).toBe(4)
+
+      expect(await projector.deleteSource(sourcePath)).toEqual({ kind: 'deleted' })
+      expect(deleteBatches).toBe(4)
+    } finally {
+      releaseYield()
+      await Promise.resolve(firstDelete).catch(() => undefined)
+      database.close()
+    }
+  })
+
+  it('deletes sources through projector batches with foreground yields', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cc-haha-search-projector-delete-batches-'))
+    tempDirs.push(root)
+    const sourcePath = join(root, 'projects', '-repo', 'delete-batched.jsonl')
+    await mkdir(dirname(sourcePath), { recursive: true })
+    const database = openSearchContentDatabase({ path: join(root, 'search.sqlite') })
+    const index = createSearchContentIndex(database, { scope: join(root, 'projects') })
+    await writeFile(sourcePath, [0, 1, 2].map(offset => line({
+      type: 'user',
+      message: { role: 'user', content: `delete needle ${offset}` },
+    })).join(''))
+    const candidate = {
+      path: sourcePath,
+      projectPath: '-repo',
+      ownerSessionId: 'delete-batched',
+      ownerTranscriptPath: sourcePath,
+      modifiedAtMs: 100,
+    }
+    let callbacks = 0
+    let yields = 0
+    const projector = createSearchContentProjector({
+      database,
+      index,
+      batchDocumentLimit: 1,
+      onBatchCommitted: () => {
+        callbacks += 1
+        return true
+      },
+      yieldToForeground: async () => {
+        yields += 1
+      },
+    })
+
+    try {
+      expect(await projector.projectSource(candidate)).toMatchObject({
+        kind: 'indexed',
+        state: 'ready',
+      })
+      index.setReadiness({ state: 'ready', discovered: 1, indexed: 1 })
+      expect(index.query('delete needle')?.sessions[0]?.matchCount).toBe(3)
+      callbacks = 0
+      yields = 0
+
+      const deleteOperation = projector.deleteSource(sourcePath)
+      expect(deleteOperation.kind).toBe('deleted')
+      expect(await deleteOperation).toEqual({ kind: 'deleted' })
+      expect(index.getSource(sourcePath)).toBeNull()
+      expect(callbacks).toBeGreaterThan(1)
+      expect(yields).toBe(callbacks)
+      expect(index.query('delete needle')?.sessions).toEqual([])
     } finally {
       database.close()
     }

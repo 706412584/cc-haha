@@ -235,6 +235,16 @@ describe('local index config', () => {
     expect(resolveLocalIndexMode(' shadow ')).toEqual(result)
   })
 
+  it('enables search indexing unless it is explicitly off', async () => {
+    const { resolveSearchContentIndexEnabled } = await loadConfig()
+
+    expect(resolveSearchContentIndexEnabled(undefined)).toBe(true)
+    expect(resolveSearchContentIndexEnabled('on')).toBe(true)
+    expect(resolveSearchContentIndexEnabled('off')).toBe(false)
+    expect(resolveSearchContentIndexEnabled('ON')).toBe(true)
+    expect(resolveSearchContentIndexEnabled(' disabled ')).toBe(true)
+  })
+
   it('resolves the database path from the config active at startup time', async () => {
     const firstConfigDir = process.env.CLAUDE_CONFIG_DIR!
     const { getLocalIndexDatabasePath } = await loadConfig()

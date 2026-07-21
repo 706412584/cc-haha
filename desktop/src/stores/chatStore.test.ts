@@ -4654,6 +4654,135 @@ describe('chatStore history mapping', () => {
     }))
   })
 
+  it('keeps a stopped task out of running after an idempotent stop acknowledgement', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          chatState: 'idle',
+          backgroundAgentTasks: {
+            'agent-task-1': {
+              taskId: 'agent-task-1',
+              status: 'running',
+              taskType: 'local_agent',
+              description: 'Verify screenshots',
+              startedAt: 1,
+              updatedAt: 2,
+            },
+          },
+        }),
+      },
+    })
+
+    useChatStore.getState().stopBackgroundTask(TEST_SESSION_ID, 'agent-task-1')
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.backgroundAgentTasks?.['agent-task-1']?.status)
+      .toBe('stopped')
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'background_task_stopped',
+      taskId: 'agent-task-1',
+    })
+
+    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.backgroundAgentTasks?.['agent-task-1']?.status).toBe('stopped')
+    expect(session?.stoppingBackgroundTaskIds?.['agent-task-1']).toBeUndefined()
+    expect(session?.messages.some(message => message.type === 'error')).toBe(false)
+    expect(updateTabStatusMock).toHaveBeenLastCalledWith(TEST_SESSION_ID, 'idle')
+  })
+
+  it('ignores a late running event while a background stop is pending', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          chatState: 'idle',
+          backgroundAgentTasks: {
+            'agent-task-1': {
+              taskId: 'agent-task-1',
+              status: 'running',
+              taskType: 'local_agent',
+              description: 'Verify screenshots',
+              startedAt: 1,
+              updatedAt: 2,
+            },
+          },
+        }),
+      },
+    })
+
+    useChatStore.getState().stopBackgroundTask(TEST_SESSION_ID, 'agent-task-1')
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'system_notification',
+      subtype: 'task_progress',
+      data: {
+        task_id: 'agent-task-1',
+        status: 'running',
+        description: 'Late progress',
+      },
+    })
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'status',
+      state: 'tool_executing',
+      verb: 'Late progress',
+      taskId: 'agent-task-1',
+    })
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'background_task_stopped',
+      taskId: 'agent-task-1',
+    })
+
+    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.backgroundAgentTasks?.['agent-task-1']?.status).toBe('stopped')
+    expect(session?.backgroundAgentTasks?.['agent-task-1']?.description).toBe('Verify screenshots')
+    expect(session?.stoppingBackgroundTaskIds?.['agent-task-1']).toBeUndefined()
+    expect(session?.chatState).toBe('idle')
+    expect(session?.elapsedTimer).toBeNull()
+    expect(updateTabStatusMock).toHaveBeenLastCalledWith(TEST_SESSION_ID, 'idle')
+  })
+
+  it('allows a real stop failure after a late running event to roll back and report', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          chatState: 'idle',
+          backgroundAgentTasks: {
+            'agent-task-1': {
+              taskId: 'agent-task-1',
+              status: 'running',
+              taskType: 'local_agent',
+              description: 'Verify screenshots',
+              startedAt: 1,
+              updatedAt: 2,
+            },
+          },
+        }),
+      },
+    })
+
+    useChatStore.getState().stopBackgroundTask(TEST_SESSION_ID, 'agent-task-1')
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'system_notification',
+      subtype: 'task_started',
+      data: {
+        task_id: 'agent-task-1',
+        status: 'running',
+        description: 'Late start',
+      },
+    })
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'background_task_stop_failed',
+      taskId: 'agent-task-1',
+      message: 'Task is not running',
+    })
+
+    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.backgroundAgentTasks?.['agent-task-1']?.status).toBe('running')
+    expect(session?.stoppingBackgroundTaskIds?.['agent-task-1']).toBeUndefined()
+    expect(session?.messages).toContainEqual(expect.objectContaining({
+      type: 'error',
+      message: 'Task is not running',
+      code: 'STOP_BACKGROUND_TASK_FAILED',
+    }))
+  })
+
   it('restores an Agent card to running when the stop request is rejected', () => {
     useChatStore.setState({
       sessions: {

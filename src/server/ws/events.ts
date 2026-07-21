@@ -91,7 +91,7 @@ export type ServerMessage =
   | { type: 'user_message_replay'; content: string }
   | { type: 'message_complete'; usage: TokenUsage }
   | { type: 'thinking'; text: string }
-  | { type: 'status'; state: ChatState; verb?: string; attemptStart?: boolean }
+  | { type: 'status'; state: ChatState; verb?: string; attemptStart?: boolean; taskId?: string }
   // CLI 是权限模式的唯一真相来源。当 CLI 内部 mode 变化（如 ExitPlanMode 后
   // 恢复到进入 plan 前的模式、Shift+Tab 切换）时，把新模式回传给前端，让桌面端
   // 选择器与 CLI 保持同步，而不是停留在本地影子值上。
@@ -110,6 +110,7 @@ export type ServerMessage =
   | { type: 'streaming_fallback'; cause: StreamingFallbackCause }
   | { type: 'error'; message: string; code: string; retryable?: boolean; businessErrorCode?: string }
   | { type: 'background_task_stop_failed'; taskId: string; message: string }
+  | { type: 'background_task_stopped'; taskId: string }
   | { type: 'system_notification'; subtype: string; message?: string; data?: unknown }
   | { type: 'pong' }
   | { type: 'team_update'; teamName: string; members: TeamMemberStatus[] }

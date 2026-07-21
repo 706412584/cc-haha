@@ -59,18 +59,25 @@ export interface SearchContentCoordinator {
 type SearchContentCoordinatorDependencies = {
   resolveScope?: () => string
   resolveDatabasePath?: () => string
-  openDatabase?: (path: string, scope: string) => SearchContentDatabase
+  openDatabase?: (
+    path: string,
+    scope: string,
+    storageLimitBytes?: number,
+  ) => SearchContentDatabase
   createIndex?: (database: SearchContentDatabase, scope: string) => SearchContentIndex
   createProjector?: (options: {
     database: SearchContentDatabase
     index: SearchContentIndex
     signal: AbortSignal
+    onBatchCommitted?: () => boolean | Promise<boolean>
+    yieldToForeground?: () => Promise<void>
   }) => SearchContentProjector
   discoverSources?: typeof discoverSearchContentSources
   createWatcher?: (options: ReconciliationWatcherOptions) => ReconciliationWatcher
   schedule?: (task: () => void) => void
   yieldToForeground?: () => Promise<void>
   removeDatabaseFamily?: (databasePath: string) => Promise<void>
+  getDatabaseFamilySize?: (databasePath: string) => Promise<number>
   storageLimitBytes?: number
 }
 
@@ -86,6 +93,26 @@ const EMPTY_STATUS: SearchContentCoordinatorStatus = {
 
 const SEARCH_CONTENT_OWNER_MISSING = 'SEARCH_CONTENT_OWNER_MISSING'
 const SEARCH_CONTENT_PROJECTS_ROOT_MISSING = 'SEARCH_CONTENT_PROJECTS_ROOT_MISSING'
+const SEARCH_CONTENT_STORAGE_LIMIT = 'SEARCH_CONTENT_STORAGE_LIMIT'
+const SEARCH_CONTENT_STORAGE_RESET_FAILED = 'SEARCH_CONTENT_STORAGE_RESET_FAILED'
+
+class SearchContentStorageLimitReachedError extends Error {
+  readonly code = SEARCH_CONTENT_STORAGE_LIMIT
+
+  constructor() {
+    super('Search content storage limit reached')
+    this.name = 'SearchContentStorageLimitReachedError'
+  }
+}
+
+class SearchContentStorageResetError extends Error {
+  readonly code = SEARCH_CONTENT_STORAGE_RESET_FAILED
+
+  constructor(cause: unknown) {
+    super('Failed to reset an over-limit search content database', { cause })
+    this.name = 'SearchContentStorageResetError'
+  }
+}
 
 class SearchContentOwnerMissingError extends Error {
   readonly code = SEARCH_CONTENT_OWNER_MISSING
@@ -107,9 +134,15 @@ function errorCode(error: unknown, fallback: string): string {
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (!signal?.aborted) return
-  const error = signal.reason instanceof Error
-    ? signal.reason
-    : new Error('Search content operation was aborted')
+  if (signal.reason instanceof Error && signal.reason.name === 'AbortError') {
+    throw signal.reason
+  }
+  const error = new Error(
+    signal.reason instanceof Error
+      ? signal.reason.message
+      : 'Search content operation was aborted',
+    signal.reason instanceof Error ? { cause: signal.reason } : undefined,
+  )
   error.name = 'AbortError'
   throw error
 }
@@ -276,7 +309,11 @@ export function createSearchContentCoordinator(
   const resolveScope = dependencies.resolveScope ?? getClaudeConfigHomeDir
   const resolveDatabasePath = dependencies.resolveDatabasePath ?? getSearchContentDatabasePath
   const openDatabase = dependencies.openDatabase ?? (
-    (path, scope) => openSearchContentDatabase({ path, scope })
+    (path, scope, limit) => openSearchContentDatabase({
+      path,
+      scope,
+      storageLimitBytes: limit,
+    })
   )
   const createIndex = dependencies.createIndex ?? (
     (database, scope) => createSearchContentIndex(database, { scope })
@@ -291,6 +328,20 @@ export function createSearchContentCoordinator(
     () => new Promise<void>(resolve => setTimeout(resolve, 0))
   )
   const removeDatabaseFamily = dependencies.removeDatabaseFamily ?? removeSearchDatabaseFamily
+  const getDatabaseFamilySize = dependencies.getDatabaseFamilySize ?? (
+    async (path: string) => {
+      const sizes = await Promise.all(['', '-wal', '-shm', '-journal'].map(async suffix => {
+        try {
+          const snapshot = await lstat(`${path}${suffix}`)
+          return snapshot.isFile() ? snapshot.size : 0
+        } catch (error) {
+          if (isMissing(error)) return 0
+          throw error
+        }
+      }))
+      return sizes.reduce((total, size) => total + size, 0)
+    }
+  )
   const storageLimitBytes = Math.max(
     1,
     Math.trunc(dependencies.storageLimitBytes ?? SEARCH_CONTENT_STORAGE_LIMIT_BYTES),
@@ -440,17 +491,24 @@ export function createSearchContentCoordinator(
     const existing = new Set(activeIndex.listSources().map(source => resolve(source.path)))
     const seen = new Set<string>()
     const sweepFailures = new Map<string, string>()
+    let storageLimited = false
     try {
+      if (!refreshStorage()) throw new SearchContentStorageLimitReachedError()
       const discovery = await discoverSources(activeScope, signal, async candidates => {
         for (const candidate of candidates) {
           throwIfAborted(signal)
+          if (!refreshStorage()) throw new SearchContentStorageLimitReachedError()
           seen.add(resolve(candidate.path))
           const result = await activeProjector.projectSource(candidate)
           if (result.kind === 'retry') {
+            if (result.reason === 'storage-limit') {
+              throw new SearchContentStorageLimitReachedError()
+            }
             sweepFailures.set(resolve(candidate.path), result.reason === 'changed-during-read'
               ? 'SEARCH_CONTENT_SOURCE_CHANGED'
               : 'SEARCH_CONTENT_TRANSIENT_IO')
           }
+          if (!refreshStorage()) throw new SearchContentStorageLimitReachedError()
         }
         await yieldToForeground()
       })
@@ -461,7 +519,11 @@ export function createSearchContentCoordinator(
         discoveryFailureCode = SEARCH_CONTENT_PROJECTS_ROOT_MISSING
       } else if (discovery.complete) {
         for (const stalePath of existing) {
-          if (!seen.has(stalePath)) activeProjector.deleteSource(stalePath)
+          if (seen.has(stalePath)) continue
+          const result = await activeProjector.deleteSource(stalePath)
+          if (result.kind === 'retry' && result.reason === 'storage-limit') {
+            throw new SearchContentStorageLimitReachedError()
+          }
         }
         hasCompleteSweep = true
         failedPaths = sweepFailures
@@ -472,11 +534,16 @@ export function createSearchContentCoordinator(
       }
     } catch (error) {
       if (signal.aborted || expectedLifecycle !== lifecycle) return
-      discoveryFailureCode = errorCode(error, 'SEARCH_CONTENT_DISCOVERY_FAILED')
+      if (errorCode(error, '') === SEARCH_CONTENT_STORAGE_LIMIT) {
+        storageLimited = true
+      } else {
+        discoveryFailureCode = errorCode(error, 'SEARCH_CONTENT_DISCOVERY_FAILED')
+      }
     }
     finishProjection(expectedLifecycle, processedRevision, [
       ...failedPaths.values(),
       ...(discoveryFailureCode ? [discoveryFailureCode] : []),
+      ...(storageLimited ? [SEARCH_CONTENT_STORAGE_LIMIT] : []),
     ])
   }
 
@@ -498,9 +565,14 @@ export function createSearchContentCoordinator(
       !signal
     ) return
     let recoveredOwner = false
+    let storageLimited = false
     for (const path of paths) {
       throwIfAborted(signal)
       if (!started || expectedLifecycle !== lifecycle) return
+      if (!refreshStorage()) {
+        storageLimited = true
+        break
+      }
       const normalizedPath = resolve(path)
       try {
         const candidate = await candidateFromPath(activeScope, path)
@@ -519,22 +591,41 @@ export function createSearchContentCoordinator(
                 resolve(source.ownerTranscriptPath) === normalizedPath &&
                 resolve(source.path) !== normalizedPath)
             : []
-          result = activeProjector.deleteSource(normalizedPath)
+          result = await activeProjector.deleteSource(normalizedPath)
           for (const dependent of dependentSources) {
-            activeProjector.deleteSource(resolve(dependent.path))
+            const deleteResult = await activeProjector.deleteSource(resolve(dependent.path))
+            if (deleteResult.kind === 'retry' && deleteResult.reason === 'storage-limit') {
+              throw new SearchContentStorageLimitReachedError()
+            }
             failedPaths.set(resolve(dependent.path), SEARCH_CONTENT_OWNER_MISSING)
           }
         }
         if (result.kind === 'retry') {
+          if (result.reason === 'storage-limit') {
+            storageLimited = true
+            break
+          }
           failedPaths.set(normalizedPath, result.reason === 'changed-during-read'
             ? 'SEARCH_CONTENT_SOURCE_CHANGED'
             : 'SEARCH_CONTENT_TRANSIENT_IO')
         } else {
           failedPaths.delete(normalizedPath)
         }
+        if (!refreshStorage()) {
+          storageLimited = true
+          break
+        }
       } catch (error) {
+        if (errorCode(error, '') === SEARCH_CONTENT_STORAGE_LIMIT) {
+          storageLimited = true
+          break
+        }
         if (errorCode(error, '') === SEARCH_CONTENT_OWNER_MISSING) {
-          activeProjector.deleteSource(normalizedPath)
+          const result = await activeProjector.deleteSource(normalizedPath)
+          if (result.kind === 'retry' && result.reason === 'storage-limit') {
+            storageLimited = true
+            break
+          }
         }
         failedPaths.set(
           normalizedPath,
@@ -549,6 +640,7 @@ export function createSearchContentCoordinator(
     finishProjection(expectedLifecycle, processedRevision, [
       ...failedPaths.values(),
       ...(discoveryFailureCode ? [discoveryFailureCode] : []),
+      ...(storageLimited ? [SEARCH_CONTENT_STORAGE_LIMIT] : []),
     ])
   }
 
@@ -640,12 +732,22 @@ export function createSearchContentCoordinator(
           const activeScope = resolveScope()
           const resolvedDatabasePath = resolveDatabasePath()
           try {
-            opened = openDatabase(resolvedDatabasePath, activeScope)
+            if (await getDatabaseFamilySize(resolvedDatabasePath) > storageLimitBytes) {
+              try {
+                await removeDatabaseFamily(resolvedDatabasePath)
+                if (await getDatabaseFamilySize(resolvedDatabasePath) > storageLimitBytes) {
+                  throw new Error('Search content database family remains over limit after reset')
+                }
+              } catch (error) {
+                throw new SearchContentStorageResetError(error)
+              }
+            }
+            opened = openDatabase(resolvedDatabasePath, activeScope, storageLimitBytes)
           } catch (error) {
             if (!isConfirmedLocalIndexCorruption(error)) throw error
             await removeDatabaseFamily(resolvedDatabasePath)
             if (expectedLifecycle !== lifecycle) return
-            opened = openDatabase(resolvedDatabasePath, activeScope)
+            opened = openDatabase(resolvedDatabasePath, activeScope, storageLimitBytes)
           }
           if (expectedLifecycle !== lifecycle) {
             closeDatabaseOnce(opened)
@@ -664,6 +766,8 @@ export function createSearchContentCoordinator(
             database: activeDatabase,
             index: activeIndex,
             signal: activeController.signal,
+            onBatchCommitted: refreshStorage,
+            yieldToForeground,
           })
           writerQueue = Promise.resolve()
           status = { ...EMPTY_STATUS }
@@ -733,10 +837,13 @@ export function createSearchContentCoordinator(
             hasCompleteSweep = false
             failedPaths.clear()
             discoveryFailureCode = null
+            const startupErrorCode = errorCode(error, 'SEARCH_CONTENT_START_FAILED')
             status = {
               ...status,
               state: 'degraded',
-              lastErrorCode: errorCode(error, 'SEARCH_CONTENT_START_FAILED'),
+              lastErrorCode: startupErrorCode === 'SQLITE_FULL'
+                ? SEARCH_CONTENT_STORAGE_LIMIT
+                : startupErrorCode,
             }
           }
         }

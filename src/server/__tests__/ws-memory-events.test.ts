@@ -429,6 +429,7 @@ describe('WebSocket background task events', () => {
         type: 'status',
         state: 'tool_executing',
         verb: 'Verify the todo app',
+        taskId: 'agent-task-1',
       },
     ])
 
@@ -458,6 +459,7 @@ describe('WebSocket background task events', () => {
         type: 'status',
         state: 'tool_executing',
         verb: 'Running Playwright checks',
+        taskId: 'agent-task-1',
       },
     ])
   })

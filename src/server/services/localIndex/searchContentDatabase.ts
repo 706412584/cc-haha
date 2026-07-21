@@ -52,6 +52,7 @@ export type SearchContentDatabase = {
   write<T>(operation: (database: SearchContentWriteOperation) => T): T
   transaction<T>(operation: (database: SearchContentWriteOperation) => T): T
   checkpointPassive(): SearchContentCheckpointResult
+  checkpointTruncate(): SearchContentCheckpointResult
   getStorageStats(): SearchContentStorageStats
   close(): void
 }
@@ -67,6 +68,8 @@ const ASYNC_TRANSACTION_ERROR =
   'Search content transactions must be synchronous'
 const NESTED_TRANSACTION_ERROR =
   'Search content transactions cannot be nested'
+const STORAGE_RESERVE_PAGES = 16
+const SQLITE_FULL = 'SQLITE_FULL'
 
 export function getSearchContentDatabasePath(): string {
   return join(getCcHahaDir(), 'db', 'search-index-v1.sqlite')
@@ -90,6 +93,49 @@ function configureConnection(database: Database): void {
   database.exec(`PRAGMA journal_size_limit = ${16 * 1024 * 1024}`)
 }
 
+function readPragmaScalar(database: Database, sql: string): number {
+  const row = database.query<Record<string, number>, []>(sql).get()
+  return Object.values(row ?? {})[0] ?? 0
+}
+
+function checkpoint(database: Database, mode: 'PASSIVE' | 'TRUNCATE'): SearchContentCheckpointResult {
+  const row = database.query<{
+    busy: number
+    log: number
+    checkpointed: number
+  }, []>(`PRAGMA wal_checkpoint(${mode})`).get()
+  return {
+    busy: row?.busy ?? 0,
+    logFrames: row?.log ?? 0,
+    checkpointedFrames: row?.checkpointed ?? 0,
+  }
+}
+
+function sqliteFullError(message: string): Error & { code: typeof SQLITE_FULL } {
+  return Object.assign(new Error(message), { code: SQLITE_FULL })
+}
+
+function setStorageLimit(database: Database, storageLimitBytes?: number): void {
+  if (storageLimitBytes === undefined) return
+  if (!Number.isFinite(storageLimitBytes) || storageLimitBytes <= 0) {
+    throw new Error('Search content storage limit must be a positive number')
+  }
+  const pageSize = readPragmaScalar(database, 'PRAGMA page_size') || 4096
+  const requestedPages = Math.floor(storageLimitBytes / pageSize)
+  const safePageBudget = requestedPages - STORAGE_RESERVE_PAGES
+  const currentPages = readPragmaScalar(database, 'PRAGMA page_count')
+  if (safePageBudget < currentPages) {
+    throw sqliteFullError('Search content database exceeds storage limit')
+  }
+  const effectivePages = readPragmaScalar(
+    database,
+    `PRAGMA max_page_count = ${safePageBudget}`,
+  )
+  if (effectivePages > safePageBudget) {
+    throw sqliteFullError('Search content database exceeds storage limit')
+  }
+}
+
 function isThenable(value: unknown): boolean {
   if (
     value === null ||
@@ -107,6 +153,7 @@ function isThenable(value: unknown): boolean {
 export function openSearchContentDatabase(options?: {
   path?: string
   scope?: string
+  storageLimitBytes?: number
 }): SearchContentDatabase {
   const databasePath = options?.path ?? getSearchContentDatabasePath()
   prepareManagedDatabasePath({
@@ -120,6 +167,7 @@ export function openSearchContentDatabase(options?: {
     assertSearchContentSchemaSupported(database)
     configureConnection(database)
     migrateSearchContentDatabase(database)
+    setStorageLimit(database, options?.storageLimitBytes)
     assertSearchContentSchemaHealthy(database)
     restrictManagedDatabasePermissions(databasePath)
   } catch (error) {
@@ -201,16 +249,11 @@ export function openSearchContentDatabase(options?: {
     },
     checkpointPassive() {
       assertOpen()
-      const row = database.query<{
-        busy: number
-        log: number
-        checkpointed: number
-      }, []>('PRAGMA wal_checkpoint(PASSIVE)').get()
-      return {
-        busy: row?.busy ?? 0,
-        logFrames: row?.log ?? 0,
-        checkpointedFrames: row?.checkpointed ?? 0,
-      }
+      return checkpoint(database, 'PASSIVE')
+    },
+    checkpointTruncate() {
+      assertOpen()
+      return checkpoint(database, 'TRUNCATE')
     },
     getStorageStats() {
       assertOpen()

@@ -61,6 +61,7 @@ test('cold-start indexing lets the session-list projection settle before search 
   let now = 0
 
   await startBackgroundIndexesInPriorityOrder({
+    searchEnabled: true,
     startPrimary: async () => {
       calls.push('primary.start')
     },
@@ -80,11 +81,38 @@ test('cold-start indexing lets the session-list projection settle before search 
   expect(calls).toEqual(['primary.start', 'wait', 'search.start'])
 })
 
+test('disabled search indexing never starts or waits for search backfill', async () => {
+  const calls: string[] = []
+  const original = process.env.CC_HAHA_SEARCH_INDEX
+  process.env.CC_HAHA_SEARCH_INDEX = 'off'
+
+  try {
+    await startBackgroundIndexesInPriorityOrder({
+      startPrimary: async () => {
+        calls.push('primary.start')
+      },
+      getPrimaryState: () => 'building',
+      startSearch: async () => {
+        calls.push('search.start')
+      },
+      wait: async () => {
+        calls.push('wait')
+      },
+    })
+  } finally {
+    if (original === undefined) delete process.env.CC_HAHA_SEARCH_INDEX
+    else process.env.CC_HAHA_SEARCH_INDEX = original
+  }
+
+  expect(calls).toEqual(['primary.start'])
+})
+
 test('shutdown cancellation prevents a delayed search backfill from starting', async () => {
   const controller = new AbortController()
   let searchStarts = 0
 
   await startBackgroundIndexesInPriorityOrder({
+    searchEnabled: true,
     startPrimary: async () => {},
     getPrimaryState: () => 'building',
     startSearch: async () => {
