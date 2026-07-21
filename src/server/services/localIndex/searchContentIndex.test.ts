@@ -280,6 +280,42 @@ describe('search content index', () => {
     }
   })
 
+  it('uses default batch limits and the passive checkpoint fallback', async () => {
+    const { database } = await setup()
+    let passiveCheckpoints = 0
+    const fallbackDatabase = {
+      ...database,
+      checkpointTruncate: undefined,
+      checkpointPassive: () => {
+        passiveCheckpoints += 1
+        return database.checkpointPassive()
+      },
+    } as typeof database
+    const index = createSearchContentIndex(fallbackDatabase, {
+      scope: source().projectPath,
+    })
+
+    try {
+      expect(await index.replaceSourceBatched(source(), [{
+        jsonlLine: 1,
+        byteStart: 0,
+        byteLength: 10,
+        segmentIndex: 0,
+        role: 'user',
+        messageId: null,
+        timestamp: null,
+        body: 'default batch fallback',
+        normalizedBody: 'default batch fallback',
+      }])).toEqual({ kind: 'committed' })
+      index.setReadiness({ state: 'ready', discovered: 1, indexed: 1 })
+
+      expect(passiveCheckpoints).toBeGreaterThan(1)
+      expect(index.query('default batch')?.sessions).toHaveLength(1)
+    } finally {
+      database.close()
+    }
+  })
+
   it('appends documents in byte-bounded batches and finalizes the source', async () => {
     const { database, index } = await setup()
     const firstDocument = {
@@ -324,6 +360,77 @@ describe('search content index', () => {
         indexedLines: 3,
       })
       expect(index.query('appended body')?.sessions[0]?.matchCount).toBe(2)
+    } finally {
+      database.close()
+    }
+  })
+
+  it('stops replace, append, and delete at each storage-limit boundary', async () => {
+    const { database, index } = await setup()
+    const document = {
+      jsonlLine: 1,
+      byteStart: 0,
+      byteLength: 10,
+      segmentIndex: 0,
+      role: 'user' as const,
+      messageId: null,
+      timestamp: null,
+      body: 'storage boundary body',
+      normalizedBody: 'storage boundary body',
+    }
+    const appendedDocument = {
+      ...document,
+      jsonlLine: 2,
+      byteStart: 10,
+    }
+    const stopAfter = (target: number) => {
+      let commits = 0
+      return () => {
+        commits += 1
+        return commits < target
+      }
+    }
+
+    try {
+      expect(await index.replaceSourceBatched(source(), [document], {
+        onBatchCommitted: () => false,
+      })).toEqual({ kind: 'retry', reason: 'storage-limit' })
+      expect(await index.replaceSourceBatched(source(), [document], {
+        onBatchCommitted: stopAfter(2),
+      })).toEqual({ kind: 'retry', reason: 'storage-limit' })
+      expect(await index.replaceSourceBatched(source(), [document], {
+        onBatchCommitted: stopAfter(3),
+      })).toEqual({ kind: 'retry', reason: 'storage-limit' })
+      expect(await index.replaceSourceBatched(source(), [document])).toEqual({
+        kind: 'committed',
+      })
+
+      expect(await index.appendSourceBatched(source(), [appendedDocument], {
+        onBatchCommitted: () => false,
+      })).toEqual({ kind: 'retry', reason: 'storage-limit' })
+      expect(await index.appendSourceBatched(source(), [appendedDocument], {
+        onBatchCommitted: stopAfter(2),
+      })).toEqual({ kind: 'retry', reason: 'storage-limit' })
+
+      expect(await index.deleteSourceBatched(source().path, {
+        onBatchCommitted: () => false,
+      })).toEqual({ kind: 'retry', reason: 'storage-limit' })
+      expect(await index.deleteSourceBatched(source().path, {
+        onBatchCommitted: stopAfter(2),
+      })).toEqual({ kind: 'retry', reason: 'storage-limit' })
+    } finally {
+      database.close()
+    }
+  })
+
+  it('rejects a batched append before creating missing source metadata', async () => {
+    const { database, index } = await setup()
+
+    try {
+      await expect(index.appendSourceBatched(source(), [])).rejects.toThrow(
+        'Cannot append an unindexed search source',
+      )
+      expect(index.getSource(source().path)).toBeNull()
     } finally {
       database.close()
     }
