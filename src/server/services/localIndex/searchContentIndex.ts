@@ -328,7 +328,6 @@ function insertDocuments(
 
 const DEFAULT_BATCH_DOCUMENT_LIMIT = 500
 const DEFAULT_BATCH_BYTE_LIMIT = 4 * 1024 * 1024
-
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return
   if (signal.reason instanceof Error && signal.reason.name === 'AbortError') {
@@ -412,15 +411,11 @@ async function deleteDocumentsBatched(
 ): Promise<SearchContentBatchResult | null> {
   while (true) {
     throwIfAborted(options.signal)
-    const changes = database.transaction(writer => writer.run(`
-      DELETE FROM search_documents
-      WHERE id IN (
-        SELECT id FROM search_documents
-        WHERE source_path = ?
-        ORDER BY id
-        LIMIT ?
-      )
-    `, sourcePath, options.batchDocumentLimit).changes)
+    const changes = database.transaction(writer => writer.run(
+      'DELETE FROM search_documents WHERE id IN (SELECT id FROM search_documents WHERE source_path = ? ORDER BY id LIMIT ?)',
+      sourcePath,
+      options.batchDocumentLimit,
+    ).changes)
     if (changes < 1) return null
     const result = await afterBatchCommitted(database, options)
     if (result) return result
@@ -491,10 +486,8 @@ export function createSearchContentIndex(
       })
       let result = await afterBatchCommitted(database, resolved)
       if (result) return result
-
       result = await deleteDocumentsBatched(database, source.path, resolved)
       if (result) return result
-
       result = await insertDocumentsBatched(database, source.path, documents, resolved)
       if (result) return result
 
@@ -528,7 +521,6 @@ export function createSearchContentIndex(
       })
       let result = await afterBatchCommitted(database, resolved)
       if (result) return result
-
       result = await insertDocumentsBatched(database, source.path, documents, resolved)
       if (result) return result
 
@@ -558,7 +550,6 @@ export function createSearchContentIndex(
       if (!exists) return { kind: 'committed' }
       let result = await afterBatchCommitted(database, resolved)
       if (result) return result
-
       result = await deleteDocumentsBatched(database, path, resolved)
       if (result) return result
 
