@@ -450,7 +450,9 @@ describe('WebSocket handler session isolation', () => {
     const setTimeoutSpy = spyOn(globalThis, 'setTimeout').mockImplementation(() => 1 as any)
     const sendInterrupt = spyOn(conversationService, 'sendInterrupt').mockImplementation(() => {})
     const stopSession = spyOn(conversationService, 'stopSession').mockImplementation(() => {})
+    const stopSessionInstance = spyOn(conversationService, 'stopSessionInstance').mockReturnValue(true)
     spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'getActiveInstanceId').mockReturnValue('instance-stopped-turn')
     __markActiveTurnForTests(sessionId)
 
     handleWebSocket.message(ws, JSON.stringify({ type: 'stop_generation' }))
@@ -463,6 +465,7 @@ describe('WebSocket handler session isolation', () => {
     expireForceKill?.()
 
     expect(stopSession).not.toHaveBeenCalled()
+    expect(stopSessionInstance).not.toHaveBeenCalled()
   })
 
   it('forwards background task stop requests to the CLI control channel', async () => {

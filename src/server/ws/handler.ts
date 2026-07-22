@@ -1601,36 +1601,6 @@ async function restartSessionWithRuntimeConfig(
   }
 }
 
-function handleStopGeneration(ws: ServerWebSocket<WebSocketData>) {
-  const { sessionId } = ws.data
-  const stoppedTurn = activeUserTurns.get(sessionId)
-  console.log(`[WS] Stop generation requested for session: ${sessionId}`)
-
-  sessionStopRequested.add(sessionId)
-  legacyQueuedSessionChats.delete(sessionId)
-  terminalSessionChatStates.delete(sessionId)
-  interruptedSessionChats.add(sessionId)
-
-  if (stoppedTurn && conversationService.hasSession(sessionId)) {
-    // First try graceful interrupt via SDK control message
-    conversationService.sendInterrupt(sessionId)
-
-    // Force-kill if still running after 3 seconds
-    setTimeout(() => {
-      if (
-        sessionStopRequested.has(sessionId) &&
-        activeUserTurns.get(sessionId) === stoppedTurn &&
-        conversationService.hasSession(sessionId)
-      ) {
-        console.log(`[WS] Force-killing CLI subprocess for session: ${sessionId}`)
-        conversationService.stopSession(sessionId)
-      }
-    }, 3_000)
-  }
-
-  sendMessage(ws, { type: 'status', state: 'idle' })
-}
-
 async function handleStopBackgroundTask(
   ws: ServerWebSocket<WebSocketData>,
   message: Extract<ClientMessage, { type: 'stop_background_task' }>,
@@ -1674,9 +1644,13 @@ async function handleStopBackgroundTask(
 
 function handleStopGeneration(ws: ServerWebSocket<WebSocketData>) {
   const { sessionId } = ws.data
+  const stoppedTurn = activeUserTurns.get(sessionId)
   console.log(`[WS] Stop generation requested for session: ${sessionId}`)
 
   sessionStopRequested.add(sessionId)
+  legacyQueuedSessionChats.delete(sessionId)
+  terminalSessionChatStates.delete(sessionId)
+  interruptedSessionChats.add(sessionId)
 
   if (conversationService.hasSession(sessionId)) {
     // First try graceful interrupt via SDK control message
@@ -1686,11 +1660,16 @@ function handleStopGeneration(ws: ServerWebSocket<WebSocketData>) {
     // instance now: if the user switches provider/model in the meantime, the
     // restart replaces this process with a new one, and we must not kill that
     // new process during its startup (which would surface as "CLI exited
-    // during startup with code 143").
+    // during startup with code 143"). Also keep the stopped-turn identity so a
+    // replacement turn on the same process is not force-killed either.
     const instanceId = conversationService.getActiveInstanceId(sessionId)
     if (instanceId) {
       setTimeout(() => {
-        if (conversationService.stopSessionInstance(sessionId, instanceId)) {
+        if (
+          sessionStopRequested.has(sessionId) &&
+          activeUserTurns.get(sessionId) === stoppedTurn &&
+          conversationService.stopSessionInstance(sessionId, instanceId)
+        ) {
           console.log(`[WS] Force-killing CLI subprocess for session: ${sessionId}`)
         }
       }, 3_000)
