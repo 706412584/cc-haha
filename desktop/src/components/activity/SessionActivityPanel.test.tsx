@@ -430,7 +430,7 @@ describe('SessionActivityPanel', () => {
     expect(screen.getByText('Inspect auth.ts')).toBeInTheDocument()
     expect(screen.getByText('Run focused tests')).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Open full run for Kuhn' }))
+    fireEvent.click(screen.getByRole('button', { name: /Open full run for Kuhn/ }))
     expect(onOpenSubagent).toHaveBeenCalledWith({ sessionId: 'session-1', toolUseId: 'tool-1', title: 'Kuhn' })
   })
 

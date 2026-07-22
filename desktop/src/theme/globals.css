@@ -911,7 +911,7 @@
   --color-inspector-danger-border: #C8DDD2;
   --color-inspector-capacity: #96A59D;
   --shadow-inspector: 0 28px 80px rgba(39, 70, 55, 0.14);
-  --color-switch-checked-bg: #8FC9A9;
+  --color-switch-checked-bg: var(--color-brand);
   --color-switch-thumb: #FFFFFF;
   --color-sidebar-filter-bg: rgba(249, 254, 251, 0.58);
   --color-sidebar-filter-border: rgba(178, 210, 196, 0.88);
@@ -935,6 +935,7 @@
 
   --color-surface-info: #EAF6F0;
   --color-brand: var(--color-primary);
+  --color-brand-hover: var(--color-primary-container);
   --color-text-accent: var(--color-secondary);
 
   --shadow-dropdown: 0 8px 24px rgba(39, 70, 55, 0.06), 0 24px 60px rgba(39, 70, 55, 0.08);

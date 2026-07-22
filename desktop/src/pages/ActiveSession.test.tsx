@@ -1097,6 +1097,7 @@ describe('ActiveSession task polling', () => {
   it('opens a SubAgent detail tab from the activity panel', () => {
     const sessionId = 'activity-subagent-open-session'
 
+    useSettingsStore.setState({ locale: 'en', unifiedActivityPanelEnabled: true })
     useActivityPanelStore.getState().open(sessionId)
     useSessionStore.setState({
       sessions: [{
@@ -1169,7 +1170,7 @@ describe('ActiveSession task polling', () => {
 
     render(<ActiveSession />)
 
-    fireEvent.click(screen.getByRole('button', { name: /Open run Review workspace seams.*Completed/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Open full run for Review workspace seams/ }))
 
     const tab = useTabStore.getState().tabs.find((candidate) => candidate.sessionId === '__subagent__activity-subagent-open-session__agent-tool-1')
     expect(tab).toMatchObject({

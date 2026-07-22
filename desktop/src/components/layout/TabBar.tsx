@@ -601,18 +601,7 @@ const TabItem = forwardRef<HTMLDivElement, {
   onClose: () => void
   onContextMenu: (e: React.MouseEvent) => void
   onMouseDown: (event: React.MouseEvent) => void
-}>(({ tab, isRunning, isActive, isDragOver, isDragging, dragOffsetX, runningLabel, onClick, onClose, onContextMenu, onMouseDown }, ref) => {
-  const t = useTranslation()
-  // Special tabs carry a stored title from when they were first opened; that
-  // title is frozen at the locale active at the time and persists across locale
-  // switches. Always derive their labels from i18n at render time.
-  const displayTitle = tab.type === 'settings'
-    ? t('sidebar.settings')
-    : tab.type === 'scheduled'
-      ? t('sidebar.scheduled')
-      : tab.type === 'traces'
-        ? t('trace.list.title')
-        : (tab.title || 'Untitled')
+}>(({ tab, displayTitle, isRunning, isActive, isDragOver, isDragging, dragOffsetX, runningLabel, onClick, onClose, onContextMenu, onMouseDown }, ref) => {
   return (
     <div
       ref={ref}
