@@ -199,6 +199,9 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
   const runtimeSelection = useSessionRuntimeStore((state) =>
     runtimeKey ? state.selections[runtimeKey] : undefined,
   )
+  const pendingRuntimeSelection = useChatStore((state) =>
+    runtimeKey ? state.sessions[runtimeKey]?.pendingRuntimeConfig?.selection : undefined,
+  )
   const [open, setOpen] = useState(false)
   const [effortOpen, setEffortOpen] = useState(false)
   const [dropdownPosition, setDropdownPosition] = useState<DropdownPosition | null>(null)
@@ -356,7 +359,7 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
     : storeModel
 
   const activeRuntimeSelection = isRuntimeScoped
-    ? controlledRuntimeSelection ?? runtimeSelection ?? resolveDefaultRuntimeSelection(
+    ? controlledRuntimeSelection ?? pendingRuntimeSelection ?? runtimeSelection ?? resolveDefaultRuntimeSelection(
       activeId,
       activeProviderName,
       providers,
@@ -400,8 +403,9 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
   const handleRuntimeSelect = (selection: RuntimeSelection, options?: { keepOpen?: boolean }) => {
     onRuntimeSelectionChange?.(selection)
     if (runtimeKey) {
-      useSessionRuntimeStore.getState().setSelection(runtimeKey, selection)
-      if (runtimeKey !== DRAFT_RUNTIME_SELECTION_KEY) {
+      if (runtimeKey === DRAFT_RUNTIME_SELECTION_KEY) {
+        useSessionRuntimeStore.getState().setSelection(runtimeKey, selection)
+      } else {
         useChatStore.getState().setSessionRuntime(runtimeKey, selection)
       }
     }

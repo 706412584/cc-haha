@@ -208,7 +208,7 @@ async function main() {
 
     const client = await connect(sessionId)
     await client.waitForConnected()
-    client.ws.send(JSON.stringify({ type: 'set_runtime_config', providerId, modelId }))
+    client.ws.send(JSON.stringify({ type: 'set_runtime_config', requestId: crypto.randomUUID(), providerId, modelId }))
     await sleep(250)
 
     if (runPrewarm) {
@@ -251,7 +251,7 @@ async function main() {
 
     const resumeClient = await connect(sessionId)
     await resumeClient.waitForConnected()
-    resumeClient.ws.send(JSON.stringify({ type: 'set_runtime_config', providerId, modelId }))
+    resumeClient.ws.send(JSON.stringify({ type: 'set_runtime_config', requestId: crypto.randomUUID(), providerId, modelId }))
     await sleep(250)
     try {
       const batch = await resumeClient.sendTurn('Continue with exactly "OK".')

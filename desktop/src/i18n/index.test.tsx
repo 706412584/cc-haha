@@ -79,6 +79,23 @@ describe('useTranslation', () => {
     }
   })
 
+  it('translates provider transition and LSP lifecycle UI in every locale', () => {
+    const keys = [
+      'workspace.lspUnsupported',
+      'workspace.lspUnavailable',
+      'workspace.lspRetry',
+      'chat.providerTransitionTitle',
+      'chat.providerTransitionBody',
+      'chat.providerTransitionConfirm',
+    ] as const
+    for (const key of keys) {
+      for (const locale of ['en', 'zh', 'zh-TW', 'jp', 'kr'] as const) {
+        expect(translate(locale, key, { count: 3 }), `${locale} / ${key}`).not.toBe(key)
+      }
+    }
+    expect(translate('zh', 'chat.providerTransitionBody', { count: 3 })).toContain('3')
+  })
+
   it('describes exactly the standard ~/.claude mode and an external custom mode', () => {
     expect(translate('en', 'settings.general.storageSystemDescription')).toContain('~/.claude')
     expect(translate('zh', 'settings.general.storageSystemDescription')).toContain('~/.claude')

@@ -128,6 +128,45 @@ describe('sessionRuntimeStore Grok runtime cleanup', () => {
     })
   })
 
+  it('restores an explicit thinking override from session metadata', () => {
+    useSessionRuntimeStore.getState().syncFromSessions([{
+      id: 'session-thinking',
+      runtimeProviderId: 'provider-a',
+      runtimeModelId: 'model-a',
+      effortLevel: 'high',
+      thinkingEnabled: false,
+    } as SessionListItem])
+
+    expect(useSessionRuntimeStore.getState().selections['session-thinking']).toEqual({
+      providerId: 'provider-a',
+      modelId: 'model-a',
+      effortLevel: 'high',
+      thinkingEnabled: false,
+    })
+  })
+
+  it('keeps an identical thinking selection stable and updates only changed overrides', () => {
+    const session = {
+      id: 'session-thinking-stable',
+      runtimeProviderId: 'provider-a',
+      runtimeModelId: 'model-a',
+      effortLevel: 'high',
+      thinkingEnabled: true,
+    } as SessionListItem
+
+    useSessionRuntimeStore.getState().syncFromSessions([session])
+    const stableSelections = useSessionRuntimeStore.getState().selections
+    useSessionRuntimeStore.getState().syncFromSessions([session])
+
+    expect(useSessionRuntimeStore.getState().selections).toBe(stableSelections)
+
+    useSessionRuntimeStore.getState().syncFromSessions([{
+      ...session,
+      thinkingEnabled: false,
+    }])
+    expect(useSessionRuntimeStore.getState().selections['session-thinking-stable']?.thinkingEnabled).toBe(false)
+  })
+
   it('does not let retired Grok session metadata restore the removed model', () => {
     useSessionRuntimeStore.getState().syncFromSessions([{
       id: 'session-restored-grok',

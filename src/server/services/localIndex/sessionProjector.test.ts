@@ -428,6 +428,36 @@ describe('session projector', () => {
     }
   })
 
+  it('round-trips an explicit thinking override through the session index', async () => {
+    const root = await createTempDir('projector-thinking')
+    const database = openLocalIndexDatabase({ path: join(root, 'index.sqlite') })
+    const index = createSessionIndex(database)
+    const projector = createSessionProjector({ database, index, scope: root })
+    const candidate = await createCandidate({
+      root,
+      projectPath: '-repo-a',
+      sessionId: 'thinking-disabled',
+      content: line({
+        type: 'session-meta',
+        runtimeProviderId: 'provider-a',
+        runtimeModelId: 'model-a',
+        thinkingEnabled: false,
+        timestamp: '2026-01-01T00:02:00.000Z',
+      }),
+    })
+
+    try {
+      await projector.projectSource(candidate)
+      expect(index.listSessions().sessions[0]).toMatchObject({
+        id: 'thinking-disabled',
+        thinkingEnabled: false,
+      })
+      expect(index.getProjectionSeed(candidate.path)?.summary.thinkingEnabled).toBe(false)
+    } finally {
+      database.close()
+    }
+  })
+
   it('removes only a confirmed missing source projection', async () => {
     const root = await createTempDir('projector-delete')
     const candidate = await createCandidate({

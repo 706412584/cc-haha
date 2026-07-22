@@ -529,6 +529,7 @@ describe('EmptySession', () => {
         'draft-session',
         {
           type: 'set_runtime_config',
+          requestId: expect.any(String),
           providerId: 'provider-explicit',
           modelId: 'model-explicit',
         },
@@ -594,6 +595,7 @@ describe('EmptySession', () => {
       'draft-session',
       {
         type: 'set_runtime_config',
+        requestId: expect.any(String),
         providerId: 'provider-minimax',
         modelId: 'MiniMax-M3[1m]',
       },

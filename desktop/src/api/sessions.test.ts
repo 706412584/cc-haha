@@ -40,6 +40,42 @@ describe('sessionsApi', () => {
     })
   })
 
+  it('posts provider transitions to the source session endpoint', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      sessionId: '22222222-2222-4222-8222-222222222222',
+      workDir: '/workspace/repo',
+      created: true,
+      targetSelection: {
+        providerId: 'provider-b',
+        modelId: 'model-b',
+        thinkingEnabled: false,
+      },
+    }), {
+      status: 201,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    const body = {
+      transitionId: '22222222-2222-4222-8222-222222222222',
+      targetSelection: {
+        providerId: 'provider-b',
+        modelId: 'model-b',
+        thinkingEnabled: false,
+      },
+    }
+    const result = await sessionsApi.createProviderTransition('source-session', body)
+
+    expect(result.created).toBe(true)
+    expect(result.targetSelection).toEqual(body.targetSelection)
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(url).toBe('http://127.0.0.1:3456/api/sessions/source-session/provider-transition')
+    expect(init).toMatchObject({
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+  })
+
   it('fetches a single trace call from the call detail endpoint', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch')
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({

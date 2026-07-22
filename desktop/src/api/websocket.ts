@@ -15,6 +15,7 @@ type Connection = {
   pongTimeout: ReturnType<typeof setTimeout> | null
   intentionalClose: boolean
   pendingMessages: ClientMessage[]
+  pendingRuntimeConfig: Extract<ClientMessage, { type: 'set_runtime_config' }> | null
 }
 
 class WebSocketManager {
@@ -54,6 +55,7 @@ class WebSocketManager {
       pongTimeout: null,
       intentionalClose: false,
       pendingMessages: existing?.pendingMessages ?? [],
+      pendingRuntimeConfig: existing?.pendingRuntimeConfig ?? null,
     }
     this.connections.set(sessionId, conn)
 
@@ -61,14 +63,24 @@ class WebSocketManager {
       const isReconnect = conn.reconnectAttempt > 0
       conn.reconnectAttempt = 0
       this.startPingLoop(sessionId, conn)
+      let flushedPendingRuntime = false
       while (conn.pendingMessages.length > 0) {
         const msg = conn.pendingMessages.shift()!
         ws.send(JSON.stringify(msg))
+        if (
+          msg.type === 'set_runtime_config' &&
+          msg.requestId === conn.pendingRuntimeConfig?.requestId
+        ) {
+          flushedPendingRuntime = true
+        }
       }
       // Ask for authoritative turn state only on an automatic reconnect. This
       // is deliberately queued after pending user messages so the server sees
       // those turns before deciding whether the session is running or idle.
       if (isReconnect) {
+        if (conn.pendingRuntimeConfig && !flushedPendingRuntime) {
+          ws.send(JSON.stringify(conn.pendingRuntimeConfig))
+        }
         ws.send(JSON.stringify({ type: 'sync_state' } satisfies ClientMessage))
       }
     }
@@ -78,6 +90,12 @@ class WebSocketManager {
         const msg = JSON.parse(event.data as string) as ServerMessage
         if (msg.type === 'pong') {
           this.clearPongTimeout(conn)
+        }
+        if (
+          msg.type === 'runtime_config_result' &&
+          conn.pendingRuntimeConfig?.requestId === msg.requestId
+        ) {
+          conn.pendingRuntimeConfig = null
         }
         for (const handler of conn.handlers) {
           handler(msg)
@@ -110,6 +128,7 @@ class WebSocketManager {
       conn.reconnectTimer = null
     }
     conn.pendingMessages = []
+    conn.pendingRuntimeConfig = null
 
     conn.ws.close()
     this.connections.delete(sessionId)
@@ -127,6 +146,10 @@ class WebSocketManager {
       this.connect(sessionId)
       conn = this.connections.get(sessionId)
       if (!conn) return
+    }
+
+    if (message.type === 'set_runtime_config') {
+      conn.pendingRuntimeConfig = message
     }
 
     if (conn.ws.readyState === WebSocket.OPEN) {

@@ -80,6 +80,7 @@ export type SessionListItem = {
   modifiedAt: string
   messageCount: number
   projectPath: string
+  filePath: string
   projectRoot: string | null
   workDir: string | null
   workDirExists: boolean
@@ -88,6 +89,7 @@ export type SessionListItem = {
   runtimeProviderId?: string | null
   runtimeModelId?: string
   effortLevel?: string
+  thinkingEnabled?: boolean
 }
 
 export type SessionWorkspaceState = 'available' | 'worktree_removed' | 'missing'
@@ -151,6 +153,11 @@ export type SessionDetail = SessionListItem & {
   messages: MessageEntry[]
 }
 
+export type SessionProviderTransition = {
+  sourceSessionId: string
+  selectionHash: string
+}
+
 export type SessionLaunchInfo = {
   filePath: string
   projectDir: string
@@ -163,6 +170,8 @@ export type SessionLaunchInfo = {
   runtimeProviderId?: string | null
   runtimeModelId?: string
   effortLevel?: string
+  thinkingEnabled?: boolean
+  providerTransition?: SessionProviderTransition
 }
 
 type ProviderContextWindowHint = Pick<SessionLaunchInfo, 'runtimeProviderId' | 'runtimeModelId'>
@@ -3215,6 +3224,9 @@ export class SessionService {
         : {}),
       ...(row.runtimeModelId ? { runtimeModelId: row.runtimeModelId } : {}),
       ...(row.effortLevel ? { effortLevel: row.effortLevel } : {}),
+      ...(row.thinkingEnabled !== undefined
+        ? { thinkingEnabled: row.thinkingEnabled }
+        : {}),
     }
   }
 
@@ -3254,6 +3266,9 @@ export class SessionService {
         : {}),
       ...(row.runtimeModelId ? { runtimeModelId: row.runtimeModelId } : {}),
       ...(row.effortLevel ? { effortLevel: row.effortLevel } : {}),
+      ...(row.thinkingEnabled !== undefined
+        ? { thinkingEnabled: row.thinkingEnabled }
+        : {}),
     }
   }
 
@@ -3269,6 +3284,7 @@ export class SessionService {
       'modifiedAt',
       'messageCount',
       'projectPath',
+      'filePath',
       'projectRoot',
       'workDir',
       'workDirExists',
@@ -3277,6 +3293,7 @@ export class SessionService {
       'runtimeProviderId',
       'runtimeModelId',
       'effortLevel',
+      'thinkingEnabled',
     ]
     const hash = (value: unknown): string => createHash('sha256')
       .update(JSON.stringify(value) ?? 'undefined')
@@ -3399,7 +3416,7 @@ export class SessionService {
     // loaded into memory concurrently by the sidebar's frequent refresh.
     const items: SessionListItem[] = []
     const pathExists = this.createCachedPathExists()
-    for (const { projectDir, sessionId, summary } of paginatedFiles) {
+    for (const { filePath, projectDir, sessionId, summary } of paginatedFiles) {
       try {
         const workDir = summary.workDir
         const projectRoot = await this.resolveProjectRootFromSessionMetadata({
@@ -3423,6 +3440,7 @@ export class SessionService {
           modifiedAt: summary.modifiedAt,
           messageCount: summary.messageCount,
           projectPath: projectDir,
+          filePath,
           projectRoot,
           workDir,
           workDirExists,
@@ -3433,6 +3451,9 @@ export class SessionService {
             : {}),
           ...(summary.runtimeModelId ? { runtimeModelId: summary.runtimeModelId } : {}),
           ...(summary.effortLevel ? { effortLevel: summary.effortLevel } : {}),
+          ...(summary.thinkingEnabled !== undefined
+            ? { thinkingEnabled: summary.thinkingEnabled }
+            : {}),
         })
       } catch {
         // Skip unreadable files
@@ -3473,6 +3494,7 @@ export class SessionService {
     const title = this.extractTitle(entries)
     const workDir = this.resolveWorkDirFromEntries(entries, projectDir)
     const permissionMode = this.resolvePermissionModeFromEntries(entries)
+    const launchInfo = await this.getSessionLaunchInfo(sessionId)
     const projectRoot = await this.resolveProjectRootFromEntries(entries, workDir, projectDir)
     const worktreeSession = this.resolveWorktreeSessionFromEntries(entries)
     const repository = this.resolveRepositoryFromEntries(entries)
@@ -3498,11 +3520,20 @@ export class SessionService {
       modifiedAt: this.resolveTranscriptModifiedAtFromEntries(entries) ?? stat.mtime.toISOString(),
       messageCount: messages.length,
       projectPath: projectDir,
+      filePath,
       projectRoot,
       workDir,
       workDirExists,
       workspaceState,
       permissionMode,
+      ...(launchInfo?.runtimeProviderId !== undefined
+        ? { runtimeProviderId: launchInfo.runtimeProviderId }
+        : {}),
+      ...(launchInfo?.runtimeModelId ? { runtimeModelId: launchInfo.runtimeModelId } : {}),
+      ...(launchInfo?.effortLevel ? { effortLevel: launchInfo.effortLevel } : {}),
+      ...(launchInfo?.thinkingEnabled !== undefined
+        ? { thinkingEnabled: launchInfo.thinkingEnabled }
+        : {}),
       messages,
     }
   }
@@ -3682,6 +3713,89 @@ export class SessionService {
   /**
    * Delete a session's JSONL file.
    */
+  async createProviderTransitionSession(input: {
+    sourceSessionId: string
+    transitionId: string
+    selectionHash: string
+    runtimeProviderId: string | null
+    runtimeModelId: string
+    effortLevel?: string
+    thinkingEnabled?: boolean
+  }): Promise<{ sessionId: string; workDir: string; created: boolean }> {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.transitionId)) {
+      throw ApiError.badRequest('transitionId must be a valid UUID')
+    }
+    const source = await this.getSessionLaunchInfo(input.sourceSessionId)
+    if (!source) throw ApiError.notFound(`Session not found: ${input.sourceSessionId}`)
+
+    const targetDir = path.dirname(source.filePath)
+    const targetFilePath = path.join(targetDir, `${input.transitionId}.jsonl`)
+    const existing = await this.getSessionLaunchInfo(input.transitionId)
+    if (existing) {
+      const transition = existing.providerTransition
+      if (
+        transition?.sourceSessionId === input.sourceSessionId &&
+        transition.selectionHash === input.selectionHash
+      ) {
+        return { sessionId: input.transitionId, workDir: existing.workDir, created: false }
+      }
+      throw new ApiError(409, 'Provider transition id already belongs to a different request.', 'PROVIDER_TRANSITION_CONFLICT')
+    }
+
+    const now = new Date().toISOString()
+    const initialEntry = {
+      type: 'file-history-snapshot',
+      messageId: crypto.randomUUID(),
+      snapshot: {
+        messageId: crypto.randomUUID(),
+        trackedFileBackups: {},
+        timestamp: now,
+      },
+      isSnapshotUpdate: false,
+    }
+    const metaEntry = {
+      type: 'session-meta',
+      isMeta: true,
+      workDir: source.workDir,
+      repository: source.repository,
+      ...(source.permissionMode ? { permissionMode: source.permissionMode } : {}),
+      runtimeProviderId: input.runtimeProviderId,
+      runtimeModelId: input.runtimeModelId,
+      ...(input.effortLevel ? { effortLevel: input.effortLevel } : {}),
+      ...(input.thinkingEnabled !== undefined
+        ? { thinkingEnabled: input.thinkingEnabled }
+        : {}),
+      providerTransition: {
+        sourceSessionId: input.sourceSessionId,
+        selectionHash: input.selectionHash,
+      },
+      timestamp: now,
+    }
+
+    await fs.mkdir(targetDir, { recursive: true })
+    try {
+      await fs.writeFile(
+        targetFilePath,
+        `${JSON.stringify(initialEntry)}\n${JSON.stringify(metaEntry)}\n`,
+        { encoding: 'utf-8', flag: 'wx' },
+      )
+      this.invalidateReadCache(targetFilePath)
+      this.invalidateSessionListCache()
+      return { sessionId: input.transitionId, workDir: source.workDir, created: true }
+    } catch (error) {
+      const record = error as NodeJS.ErrnoException
+      if (record.code !== 'EEXIST') throw error
+      const raced = await this.getSessionLaunchInfo(input.transitionId)
+      if (
+        raced?.providerTransition?.sourceSessionId === input.sourceSessionId &&
+        raced.providerTransition.selectionHash === input.selectionHash
+      ) {
+        return { sessionId: input.transitionId, workDir: raced.workDir, created: false }
+      }
+      throw new ApiError(409, 'Provider transition id already belongs to a different request.', 'PROVIDER_TRANSITION_CONFLICT')
+    }
+  }
+
   async deleteSession(sessionId: string): Promise<void> {
     const found = await this.findSessionFile(sessionId)
     if (!found) {
@@ -3820,6 +3934,8 @@ export class SessionService {
     let runtimeProviderId: string | null | undefined
     let runtimeModelId: string | undefined
     let effortLevel: string | undefined
+    let thinkingEnabled: boolean | undefined
+    let providerTransition: SessionProviderTransition | undefined
 
     for (const entry of entries) {
       if (entry.type === 'custom-title' && typeof entry.customTitle === 'string') {
@@ -3839,6 +3955,24 @@ export class SessionService {
         ) {
           effortLevel = record.effortLevel
         }
+        if (typeof record.thinkingEnabled === 'boolean') {
+          thinkingEnabled = record.thinkingEnabled
+        }
+        if (
+          record.providerTransition &&
+          typeof record.providerTransition === 'object'
+        ) {
+          const transition = record.providerTransition as Record<string, unknown>
+          if (
+            typeof transition.sourceSessionId === 'string' &&
+            typeof transition.selectionHash === 'string'
+          ) {
+            providerTransition = {
+              sourceSessionId: transition.sourceSessionId,
+              selectionHash: transition.selectionHash,
+            }
+          }
+        }
       }
     }
     const transcriptMessageCount = this.countTranscriptMessages(entries)
@@ -3855,6 +3989,8 @@ export class SessionService {
       ...(runtimeProviderId !== undefined ? { runtimeProviderId } : {}),
       ...(runtimeModelId ? { runtimeModelId } : {}),
       ...(effortLevel ? { effortLevel } : {}),
+      ...(thinkingEnabled !== undefined ? { thinkingEnabled } : {}),
+      ...(providerTransition ? { providerTransition } : {}),
     }
   }
 

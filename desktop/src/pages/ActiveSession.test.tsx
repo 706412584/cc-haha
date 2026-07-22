@@ -181,6 +181,69 @@ function renderBackgroundTaskDrawerForLocale(locale: 'jp' | 'kr', sessionId: str
 }
 
 describe('ActiveSession task polling', () => {
+  it('asks before a provider transition and cancellation keeps the source tab open', () => {
+    useSettingsStore.setState({ locale: 'en' })
+    const sessionId = 'provider-transition-source'
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'Source Session',
+        createdAt: '2026-07-22T00:00:00.000Z',
+        modifiedAt: '2026-07-22T00:00:00.000Z',
+        messageCount: 6,
+        projectPath: '/workspace/project',
+        workDir: '/workspace/project',
+        workDirExists: true,
+      }],
+    })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Source Session', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          messages: [{ id: 'existing', type: 'assistant_text', content: 'history', timestamp: 1 }],
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+          pendingProviderTransition: {
+            type: 'runtime_config_result',
+            requestId: '11111111-1111-4111-8111-111111111111',
+            result: 'provider_transition_required',
+            sourceSessionId: sessionId,
+            sourceProviderId: 'provider-a',
+            targetSelection: { providerId: 'provider-b', modelId: 'target-model' },
+            messageCount: 6,
+            transitionId: '22222222-2222-4222-8222-222222222222',
+          },
+        },
+      },
+    })
+
+    render(<ActiveSession />)
+    expect(screen.getByRole('dialog', { name: 'Start a new session?' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    expect(screen.queryByRole('dialog', { name: 'Start a new session?' })).not.toBeInTheDocument()
+    expect(useTabStore.getState().tabs).toMatchObject([{ sessionId }])
+    expect(useTabStore.getState().activeTabId).toBe(sessionId)
+  })
+
   it('shows cleaned worktrees as retained history and uses the source project for tools', () => {
     const sessionId = 'cleaned-worktree-session'
     useSettingsStore.setState({ locale: 'en' })

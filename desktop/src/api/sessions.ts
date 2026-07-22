@@ -1,5 +1,6 @@
 import { api } from './client'
 import type { AgentTaskNotification } from '../types/chat'
+import type { RuntimeSelection } from '../types/runtime'
 import type { LocalIndexStatus, SessionListItem, MessageEntry } from '../types/session'
 import type { PermissionMode } from '../types/settings'
 import type { TraceCallRecord, TraceSession } from '../types/trace'
@@ -58,6 +59,16 @@ export type BranchSessionResponse = {
   workDir: string | null
   sourceSessionId: string
   targetMessageId: string
+}
+export type ProviderTransitionRequest = {
+  transitionId: string
+  targetSelection: RuntimeSelection
+}
+export type ProviderTransitionResponse = {
+  sessionId: string
+  workDir: string
+  created: boolean
+  targetSelection: RuntimeSelection
 }
 export type RepositoryBranchInfo = {
   name: string
@@ -405,6 +416,10 @@ export const sessionsApi = {
 
   branch(sessionId: string, body: BranchSessionRequest) {
     return api.post<BranchSessionResponse>(`/api/sessions/${sessionId}/branch`, body)
+  },
+
+  createProviderTransition(sessionId: string, body: ProviderTransitionRequest) {
+    return api.post<ProviderTransitionResponse>(`/api/sessions/${sessionId}/provider-transition`, body)
   },
 
   delete(sessionId: string) {

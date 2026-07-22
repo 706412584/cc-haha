@@ -180,6 +180,7 @@ async function runPromptOverWebSocket(
           if (target && target.modelId !== 'current') {
             ws.send(JSON.stringify({
               type: 'set_runtime_config',
+              requestId: crypto.randomUUID(),
               providerId: target.providerId,
               modelId: target.modelId,
             }))
