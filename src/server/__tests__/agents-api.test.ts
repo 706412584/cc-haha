@@ -453,14 +453,20 @@ describe('Agents API Markdown CRUD', () => {
       'GET',
       `/api/agents?cwd=${encodeURIComponent(projectCwd)}`,
     )
+    // User/project mutations must not leave editable overrides behind. Built-in
+    // agents with the same type may remain after the Markdown file is deleted.
     expect(
       afterDelete.data.activeAgents.some(
-        (agent: { agentType: string }) => agent.agentType === 'security-reviewer',
+        (agent: { agentType: string; source: string; editable?: boolean }) =>
+          agent.agentType === 'security-reviewer' &&
+          (agent.source === 'userSettings' || agent.editable === true),
       ),
     ).toBe(false)
     expect(
       afterDelete.data.activeAgents.some(
-        (agent: { agentType: string }) => agent.agentType === 'test-writer',
+        (agent: { agentType: string; source: string; editable?: boolean }) =>
+          agent.agentType === 'test-writer' &&
+          (agent.source === 'projectSettings' || agent.editable === true),
       ),
     ).toBe(false)
   })

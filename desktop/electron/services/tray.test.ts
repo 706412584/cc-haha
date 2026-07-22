@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { installTray, resolveTrayIconPath, shouldInstallTray } from './tray'
 import { buildElectronModuleMock, getElectronServiceMocks, resetElectronServiceMocks } from './__electronMock'
 
