@@ -40,6 +40,8 @@ export type LSPServerManager = {
   closeFile(filePath: string): Promise<void>
   /** Check if a file is already open on a compatible LSP server */
   isFileOpen(filePath: string): boolean
+  /** Last typed lifecycle failure observed while starting a server. */
+  getLastLifecycleError(filePath: string): Error | undefined
 }
 
 /**
@@ -415,6 +417,10 @@ export function createLSPServerManager(options: {
     return openedFiles.has(fileUri)
   }
 
+  function getLastLifecycleError(filePath: string): Error | undefined {
+    return getServerForFile(filePath)?.lastError
+  }
+
   return {
     initialize,
     shutdown,
@@ -427,5 +433,6 @@ export function createLSPServerManager(options: {
     saveFile,
     closeFile,
     isFileOpen,
+    getLastLifecycleError,
   }
 }

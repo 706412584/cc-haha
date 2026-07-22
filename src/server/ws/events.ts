@@ -35,7 +35,14 @@ export type ClientMessage =
       response: ComputerUsePermissionResponse
     }
   | { type: 'set_permission_mode'; mode: PermissionMode }
-  | { type: 'set_runtime_config'; providerId: string | null; modelId: string; effortLevel?: string; thinkingEnabled?: boolean }
+  | {
+      type: 'set_runtime_config'
+      requestId: string
+      providerId: string | null
+      modelId: string
+      effortLevel?: string
+      thinkingEnabled?: boolean
+    }
   | { type: 'set_coordinator_mode'; enabled: boolean }
   | { type: 'set_pipeline_mode'; flavor: 'solo' | 'normal' }
   | { type: 'set_handoff_summary'; previousSessionId: string; deep?: boolean }
@@ -56,7 +63,40 @@ export type AttachmentRef = {
 // Server → Client
 // ============================================================================
 
+export type RuntimeSelection = {
+  providerId: string | null
+  modelId: string
+  effortLevel?: string
+  thinkingEnabled?: boolean
+}
+
+export type RuntimeConfigResult =
+  | {
+      type: 'runtime_config_result'
+      requestId: string
+      result: 'applied'
+      selection: RuntimeSelection
+    }
+  | {
+      type: 'runtime_config_result'
+      requestId: string
+      result: 'provider_transition_required'
+      sourceSessionId: string
+      sourceProviderId: string | null
+      targetSelection: RuntimeSelection
+      messageCount: number
+      transitionId: string
+    }
+  | {
+      type: 'runtime_config_result'
+      requestId: string
+      result: 'rejected'
+      code: string
+      message: string
+    }
+
 export type ServerMessage =
+  | RuntimeConfigResult
   | { type: 'connected'; sessionId: string }
   | { type: 'session_state'; turnState: 'running' | 'idle' }
   | { type: 'content_start'; blockType: 'text' | 'tool_use'; toolName?: string; toolUseId?: string; parentToolUseId?: string }

@@ -8,6 +8,7 @@ import {
   __markPrewarmedForTests,
   __resetWebSocketHandlerStateForTests,
   __setCachedSessionSummaryReaderForTests,
+  __drainWebSocketRuntimeTransitionsForTests,
   closeSessionConnection,
   getActiveSessionIds,
   handleWebSocket,
@@ -275,6 +276,111 @@ describe('WebSocket handler session isolation', () => {
       computerUseRequestIds: [],
       turnActive: false,
     })
+  })
+
+  it('replays an applied runtime request idempotently after its result is lost', async () => {
+    const sessionId = `runtime-replay-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(sessionService, 'getSessionLaunchInfo').mockResolvedValue({
+      filePath: '/tmp/runtime-replay.jsonl',
+      projectDir: '-tmp',
+      workDir: '/tmp',
+      transcriptMessageCount: 0,
+      customTitle: null,
+    })
+    spyOn(sessionService, 'appendSessionMetadata').mockResolvedValue(undefined)
+    spyOn(conversationService, 'hasSession').mockReturnValue(false)
+    const request = {
+      type: 'set_runtime_config',
+      requestId: crypto.randomUUID(),
+      providerId: null,
+      modelId: 'claude-opus-4-7',
+    }
+
+    handleWebSocket.message(ws, JSON.stringify(request))
+    await __drainWebSocketRuntimeTransitionsForTests()
+    handleWebSocket.message(ws, JSON.stringify(request))
+    await __drainWebSocketRuntimeTransitionsForTests()
+
+    expect(ws.sent.map(payload => JSON.parse(payload)).filter(
+      message => message.type === 'runtime_config_result',
+    )).toEqual([
+      {
+        type: 'runtime_config_result',
+        requestId: request.requestId,
+        result: 'applied',
+        selection: {
+          providerId: null,
+          modelId: request.modelId,
+        },
+      },
+      {
+        type: 'runtime_config_result',
+        requestId: request.requestId,
+        result: 'applied',
+        selection: {
+          providerId: null,
+          modelId: request.modelId,
+        },
+      },
+    ])
+  })
+
+  it('replays the same provider transition id when its result is lost', async () => {
+    const sessionId = `runtime-transition-replay-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(sessionService, 'getSessionLaunchInfo').mockResolvedValue({
+      filePath: '/tmp/runtime-transition-replay.jsonl',
+      projectDir: '-tmp',
+      workDir: '/tmp',
+      transcriptMessageCount: 2,
+      customTitle: null,
+      runtimeProviderId: 'provider-a',
+    })
+    const request = {
+      type: 'set_runtime_config',
+      requestId: crypto.randomUUID(),
+      providerId: null,
+      modelId: 'claude-opus-4-7',
+    }
+
+    handleWebSocket.message(ws, JSON.stringify(request))
+    await __drainWebSocketRuntimeTransitionsForTests()
+    handleWebSocket.message(ws, JSON.stringify(request))
+    await __drainWebSocketRuntimeTransitionsForTests()
+
+    const results = ws.sent.map(payload => JSON.parse(payload)).filter(
+      message => message.type === 'runtime_config_result',
+    )
+    expect(results).toHaveLength(2)
+    expect(results[0]).toMatchObject({
+      requestId: request.requestId,
+      result: 'provider_transition_required',
+    })
+    expect(results[1]).toEqual(results[0])
+  })
+
+  it('rejects malformed runtime request ids without applying a selection', async () => {
+    const sessionId = `runtime-invalid-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    const appendMetadata = spyOn(sessionService, 'appendSessionMetadata')
+
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'set_runtime_config',
+      requestId: 'not-a-uuid',
+      providerId: null,
+      modelId: 'claude-opus-4-7',
+    }))
+    await __drainWebSocketRuntimeTransitionsForTests()
+
+    expect(ws.sent.map(payload => JSON.parse(payload))).toContainEqual({
+      type: 'runtime_config_result',
+      requestId: 'not-a-uuid',
+      result: 'rejected',
+      code: 'RUNTIME_CONFIG_REQUEST_INVALID',
+      message: 'Runtime config request id is invalid.',
+    })
+    expect(appendMetadata).not.toHaveBeenCalled()
   })
 
   it('forwards background task stop requests to the CLI control channel', async () => {
@@ -938,7 +1044,7 @@ describe('WebSocket handler session isolation', () => {
     })
   })
 
-  it('does not let an older failed handler clear a newer active turn', async () => {
+  it('rejects a second user message without releasing the active turn', async () => {
     const sessionId = `concurrent-user-message-${crypto.randomUUID()}`
     const ws = makeClientSocket(sessionId)
     spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([])
@@ -968,7 +1074,13 @@ describe('WebSocket handler session isolation', () => {
       content: 'newer turn',
     }))
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(customTitleCalls).toBe(2)
+    expect(customTitleCalls).toBe(1)
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'error',
+      message: 'The session is changing providers. Retry after the new session opens.',
+      code: 'SESSION_TRANSITION_IN_PROGRESS',
+      retryable: true,
+    })
 
     rejectFirst(new Error('older metadata request failed'))
     await new Promise((resolve) => setTimeout(resolve, 0))
@@ -977,7 +1089,7 @@ describe('WebSocket handler session isolation', () => {
     handleWebSocket.message(ws, JSON.stringify({ type: 'sync_state' }))
     expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
       type: 'session_state',
-      turnState: 'running',
+      turnState: 'idle',
     })
   })
 })

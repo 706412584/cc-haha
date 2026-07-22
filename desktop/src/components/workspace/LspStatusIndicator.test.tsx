@@ -1,8 +1,9 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 
 import { LspStatusIndicator } from './LspStatusIndicator'
 import type { LspDiagnostic, LegacyWorkspaceLspState } from '../../types/lsp'
+import { useSettingsStore } from '../../stores/settingsStore'
 
 const READY: LegacyWorkspaceLspState = { state: 'ready', workspaceId: 'w1', errorCount: 0 }
 const READY_ERRORS: LegacyWorkspaceLspState = { state: 'ready', workspaceId: 'w1', errorCount: 3 }
@@ -19,6 +20,12 @@ const UNAVAILABLE_CRASHED: LegacyWorkspaceLspState = {
   reason: 'crashed',
   errorCount: 0,
 }
+const UNAVAILABLE_UNSUPPORTED: LegacyWorkspaceLspState = {
+  state: 'unavailable',
+  workspaceId: 'w1',
+  reason: 'unsupported-extension',
+  errorCount: 0,
+}
 
 const sampleDiagnostic = (overrides: Partial<LspDiagnostic> = {}): LspDiagnostic => ({
   path: 'src/a.ts',
@@ -30,6 +37,10 @@ const sampleDiagnostic = (overrides: Partial<LspDiagnostic> = {}): LspDiagnostic
 })
 
 describe('LspStatusIndicator', () => {
+  beforeEach(() => {
+    useSettingsStore.setState({ locale: 'en' })
+  })
+
   it('renders "Ready" when state is ready with zero errors', () => {
     render(<LspStatusIndicator state={READY} diagnostics={[]} />)
     expect(screen.getByTestId('lsp-status-label').textContent).toBe('Ready')
@@ -63,10 +74,17 @@ describe('LspStatusIndicator', () => {
     expect(screen.queryByTestId('lsp-status-retry')).toBeNull()
   })
 
-  it('shows the Retry action for non-prereq unavailable reasons', () => {
+  it('shows the Retry action for lifecycle failures', () => {
     render(<LspStatusIndicator state={UNAVAILABLE_CRASHED} diagnostics={[]} />)
     expect(screen.getByTestId('lsp-status-retry')).toBeTruthy()
     expect(screen.queryByTestId('lsp-status-install')).toBeNull()
+  })
+
+  it('shows no action for unsupported extensions', () => {
+    render(<LspStatusIndicator state={UNAVAILABLE_UNSUPPORTED} diagnostics={[]} />)
+    expect(screen.getByTestId('lsp-status-label').textContent).toBe('Language server unsupported')
+    expect(screen.queryByTestId('lsp-status-install')).toBeNull()
+    expect(screen.queryByTestId('lsp-status-retry')).toBeNull()
   })
 
   it('opens the dropdown on trigger click and shows "No diagnostics" when empty', () => {

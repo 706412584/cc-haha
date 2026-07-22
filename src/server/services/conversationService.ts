@@ -234,11 +234,35 @@ export class ConversationStartupError extends Error {
       | 'CLI_SESSION_CONFLICT'
       | 'CLI_START_FAILED'
       | 'CLI_SPAWN_FAILED'
+      | 'PROVIDER_RESUME_MISMATCH'
       | 'SESSION_DELETED',
     readonly retryable = false,
   ) {
     super(message)
     this.name = 'ConversationStartupError'
+  }
+}
+
+export function assertProviderResumeCompatible({
+  sessionId,
+  transcriptMessageCount,
+  persistedProviderId,
+  targetProviderId,
+}: {
+  sessionId: string
+  transcriptMessageCount: number
+  persistedProviderId: string | null | undefined
+  targetProviderId: string | null | undefined
+}): void {
+  if (
+    transcriptMessageCount > 0 &&
+    persistedProviderId !== undefined &&
+    persistedProviderId !== (targetProviderId ?? null)
+  ) {
+    throw new ConversationStartupError(
+      `Session ${sessionId} was created with provider ${persistedProviderId ?? 'default'} and cannot be resumed with ${targetProviderId ?? 'default'}.`,
+      'PROVIDER_RESUME_MISMATCH',
+    )
   }
 }
 
@@ -322,6 +346,12 @@ export class ConversationService {
 
     const launchInfo = await sessionService.getSessionLaunchInfo(sessionId)
     const shouldResume = !!launchInfo && launchInfo.transcriptMessageCount > 0
+    assertProviderResumeCompatible({
+      sessionId,
+      transcriptMessageCount: launchInfo?.transcriptMessageCount ?? 0,
+      persistedProviderId: launchInfo?.runtimeProviderId,
+      targetProviderId: options?.providerId,
+    })
     const shouldReplacePlaceholder =
       !!launchInfo && launchInfo.transcriptMessageCount === 0
     const shouldCreateWorktree =

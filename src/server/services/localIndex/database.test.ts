@@ -308,7 +308,7 @@ describe('local index database', () => {
     }
   })
 
-  it('applies ordered v0 to v3 migrations and reopens v3 idempotently', async () => {
+  it('applies ordered v0 to v4 migrations and reopens v4 idempotently', async () => {
     const databasePath = join(process.env.CLAUDE_CONFIG_DIR!, 'index.sqlite')
     const { openLocalIndexDatabase } = await loadDatabase()
     const first = openLocalIndexDatabase({ path: databasePath })
@@ -316,7 +316,7 @@ describe('local index database', () => {
     expect(first.read(operation =>
       operation.get<{ user_version: number }>('PRAGMA user_version')
         ?.user_version,
-    )).toBe(3)
+    )).toBe(4)
     expect(first.read(operation =>
       operation.all<{ name: string }>(
         "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
@@ -356,6 +356,10 @@ describe('local index database', () => {
         ?.on_delete,
     )).toBe('CASCADE')
     expect(first.read(operation =>
+      operation.all<{ name: string }>('PRAGMA table_info(sessions)')
+        .map(column => column.name),
+    )).toContain('thinking_enabled')
+    expect(first.read(operation =>
       operation.all<{ name: string }>('PRAGMA table_info(session_entries)')
         .map(column => column.name),
     )).toEqual([
@@ -391,13 +395,13 @@ describe('local index database', () => {
       expect(second.read(operation =>
         operation.get<{ user_version: number }>('PRAGMA user_version')
           ?.user_version,
-      )).toBe(3)
+      )).toBe(4)
     } finally {
       second.close()
     }
   })
 
-  it('upgrades a frozen real v1 database to v3 without replaying v1 or losing rows', async () => {
+  it('upgrades a frozen real v1 database to v4 without replaying v1 or losing rows', async () => {
     const databasePath = join(process.env.CLAUDE_CONFIG_DIR!, 'frozen-v1.sqlite')
     await mkdir(dirname(databasePath), { recursive: true })
     const seed = await openRawDatabase(databasePath)
@@ -409,7 +413,7 @@ describe('local index database', () => {
     try {
       expect(upgraded.read(operation => operation.get<{ user_version: number }>(
         'PRAGMA user_version',
-      )?.user_version)).toBe(3)
+      )?.user_version)).toBe(4)
       expect(upgraded.read(operation => operation.get<{ value: string }>(
         "SELECT value FROM schema_meta WHERE key = 'fixture'",
       )?.value)).toBe('v1-preserved')
@@ -436,7 +440,7 @@ describe('local index database', () => {
     }
   })
 
-  it('upgrades a frozen real v2 database to v3 without losing session or locator rows', async () => {
+  it('upgrades a frozen real v2 database to v4 without losing session or locator rows', async () => {
     const databasePath = join(process.env.CLAUDE_CONFIG_DIR!, 'frozen-v2.sqlite')
     await mkdir(dirname(databasePath), { recursive: true })
     const seed = await openRawDatabase(databasePath)
@@ -448,7 +452,7 @@ describe('local index database', () => {
     try {
       expect(upgraded.read(operation => operation.get<{ user_version: number }>(
         'PRAGMA user_version',
-      )?.user_version)).toBe(3)
+      )?.user_version)).toBe(4)
       expect(upgraded.read(operation => operation.get<{ title: string }>(
         "SELECT title FROM sessions WHERE transcript_path = '/fixture/session.jsonl'",
       )?.title)).toBe('Frozen v1')
@@ -474,7 +478,7 @@ describe('local index database', () => {
     }
   })
 
-  it('rolls back an interrupted v2 to v3 migration without changing v2 data', async () => {
+  it('rolls back an interrupted v2 to v4 migration without changing v2 data', async () => {
     const databasePath = join(process.env.CLAUDE_CONFIG_DIR!, 'blocked-v3.sqlite')
     await mkdir(dirname(databasePath), { recursive: true })
     const seed = await openRawDatabase(databasePath)
@@ -949,7 +953,7 @@ describe('local index database', () => {
     await mkdir(dirname(databasePath), { recursive: true })
     const seed = await openRawDatabase(databasePath)
     seed.exec('CREATE TABLE future_schema_sentinel (value TEXT)')
-    seed.exec('PRAGMA user_version = 4')
+    seed.exec('PRAGMA user_version = 5')
     const journalModeBefore = queryOne<{ journal_mode: string }>(
       seed,
       'PRAGMA journal_mode',
@@ -971,7 +975,7 @@ describe('local index database', () => {
     const inspection = await openRawDatabase(databasePath)
     try {
       expect(queryOne<{ user_version: number }>(inspection, 'PRAGMA user_version')
-        ?.user_version).toBe(4)
+        ?.user_version).toBe(5)
       expect(queryAll<{ name: string }>(
         inspection,
         "SELECT name FROM sqlite_master WHERE type = 'table'",

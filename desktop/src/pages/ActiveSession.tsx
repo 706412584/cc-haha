@@ -28,6 +28,7 @@ import { useTranslation } from '../i18n'
 import { MessageList } from '../components/chat/MessageList'
 import { ChatInput } from '../components/chat/ChatInput'
 import { ComputerUsePermissionModal } from '../components/chat/ComputerUsePermissionModal'
+import { Modal } from '../components/shared/Modal'
 import { SessionTaskBar } from '../components/chat/SessionTaskBar'
 import { SoloCouncilPanel } from '../components/chat/SoloCouncilPanel'
 import { BackgroundTasksBar } from '../components/chat/BackgroundTasksBar'
@@ -330,6 +331,8 @@ export function ActiveSession() {
     activeTabId ? s.soloPipelineModes[activeTabId] ?? false : false,
   )
   const pendingComputerUsePermission = sessionState?.pendingComputerUsePermission ?? null
+  const pendingProviderTransition = sessionState?.pendingProviderTransition ?? null
+  const runtimeConfigError = sessionState?.runtimeConfigError ?? null
   const fetchSessionTasks = useCLITaskStore((s) => s.fetchSessionTasks)
   const trackedTaskSessionId = useCLITaskStore((s) => s.sessionId)
   const cliTasks = useCLITaskStore((s) => s.tasks)
@@ -939,6 +942,45 @@ export function ActiveSession() {
           sessionId={activeTabId}
           request={pendingComputerUsePermission?.request ?? null}
         />
+      ) : null}
+
+      {!isMemberSession && activeTabId && pendingProviderTransition ? (
+        <Modal
+          open
+          onClose={() => useChatStore.getState().cancelProviderTransition(activeTabId)}
+          title={t('chat.providerTransitionTitle')}
+          footer={(
+            <>
+              <button
+                type="button"
+                onClick={() => useChatStore.getState().cancelProviderTransition(activeTabId)}
+                className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]"
+              >
+                {t('chat.providerTransitionCancel')}
+              </button>
+              <button
+                type="button"
+                onClick={() => void useChatStore.getState().confirmProviderTransition(activeTabId)}
+                className="rounded-lg bg-[var(--color-brand)] px-4 py-2 text-sm font-semibold text-white"
+              >
+                {t('chat.providerTransitionConfirm')}
+              </button>
+            </>
+          )}
+        >
+          <p className="text-sm text-[var(--color-text-secondary)]">
+            {t('chat.providerTransitionBody', { count: pendingProviderTransition.messageCount })}
+          </p>
+        </Modal>
+      ) : null}
+
+      {!isMemberSession && runtimeConfigError ? (
+        <div
+          role="alert"
+          className="absolute bottom-20 left-1/2 z-40 max-w-[min(520px,calc(100vw-32px))] -translate-x-1/2 rounded-lg border border-[var(--color-error)]/30 bg-[var(--color-surface-container-lowest)] px-4 py-3 text-sm text-[var(--color-error)] shadow-lg"
+        >
+          {runtimeConfigError.message}
+        </div>
       ) : null}
     </div>
   )

@@ -355,6 +355,40 @@ describe('coverage gate helpers', () => {
     ])
   })
 
+  test('excludes type-only server contracts from changed-line coverage', () => {
+    const changedLines = parseChangedLinesFromDiff([
+      'diff --git a/src/server/ws/events.ts b/src/server/ws/events.ts',
+      '--- a/src/server/ws/events.ts',
+      '+++ b/src/server/ws/events.ts',
+      '@@ -1,0 +1,1 @@',
+      "+export type RuntimeResult = { result: 'applied' }",
+      'diff --git a/src/server/services/localIndex/types.ts b/src/server/services/localIndex/types.ts',
+      '--- a/src/server/services/localIndex/types.ts',
+      '+++ b/src/server/services/localIndex/types.ts',
+      '@@ -1,0 +1,1 @@',
+      '+export type SessionSummary = { thinkingEnabled?: boolean }',
+    ].join('\n'))
+
+    const result = evaluateChangedLineCoverage(
+      changedLines,
+      new Map(),
+      [{
+        id: 'server-api',
+        title: 'Server/API',
+        includePrefixes: ['src/server/'],
+        excludePrefixes: [
+          'src/server/ws/events.ts',
+          'src/server/services/localIndex/types.ts',
+        ],
+      }],
+      90,
+    )
+
+    expect(result.files).toEqual([])
+    expect(result.total).toBe(0)
+    expect(result.failures).toEqual([])
+  })
+
   test('excludes type-only modules from root-runtime changed-line coverage', () => {
     const changedLines = parseChangedLinesFromDiff([
       'diff --git a/src/types/projectRules.ts b/src/types/projectRules.ts',

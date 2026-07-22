@@ -6,8 +6,15 @@ import {
   createLSPServerManager,
   type LSPServerManager,
 } from '../../services/lsp/LSPServerManager.js'
+import { LspLifecycleError, type LspLifecycleFailureReason } from '../../services/lsp/LSPClient.js'
 import type { ScopedLspServerConfig } from '../../services/lsp/types.js'
+import { KNOWN_LANGUAGE_SERVERS } from './knownLanguageServers.js'
 import { probeHostCommand } from './prerequisitesService.js'
+import {
+  resolveExplicitWorkspaceLspLaunch,
+  resolveWorkspaceLspLaunch,
+  WorkspaceLspPrerequisiteError,
+} from './workspaceLspLaunchResolver.js'
 
 export type WorkspaceLspSeverity = 'error' | 'warning' | 'info' | 'hint'
 
@@ -21,11 +28,18 @@ export type WorkspaceLspDiagnostic = {
   code?: string | number
 }
 
+export type WorkspaceLspUnavailableReason =
+  | 'unsupported-extension'
+  | 'prereq-missing'
+  | LspLifecycleFailureReason
+
 export type WorkspaceLspState = {
   state: 'idle' | 'starting' | 'ready' | 'unavailable'
   path: string | null
   serverName: string | null
+  /** Display-only command name. Runtime paths and arguments never cross the wire. */
   command: string | null
+  reason?: WorkspaceLspUnavailableReason
   error?: string
 }
 
@@ -57,6 +71,7 @@ export type WorkspaceLspConfigInput = {
 
 type WorkspaceLspServiceOptions = {
   createManager?: (servers: Record<string, ScopedLspServerConfig>) => LSPServerManager
+  resolveBuiltInLaunch?: typeof resolveWorkspaceLspLaunch
   waitTimeoutMs?: number
   waitIntervalMs?: number
 }
@@ -66,6 +81,7 @@ type WorkspaceEntry = {
   root: string
   versions: Map<string, number>
   lastError?: string
+  lastReason?: WorkspaceLspUnavailableReason
   initialized: boolean
   configKey: string
 }
@@ -92,11 +108,13 @@ export function clearWorkspaceLspDiagnostics(): void {
 export class WorkspaceLspService {
   private readonly workspaces = new Map<string, WorkspaceEntry>()
   private readonly createManager: (servers: Record<string, ScopedLspServerConfig>) => LSPServerManager
+  private readonly resolveBuiltInLaunch: typeof resolveWorkspaceLspLaunch
   private readonly waitTimeoutMs: number
   private readonly waitIntervalMs: number
 
   constructor(options: WorkspaceLspServiceOptions = {}) {
     this.createManager = options.createManager ?? ((servers) => createLSPServerManager({ servers }))
+    this.resolveBuiltInLaunch = options.resolveBuiltInLaunch ?? resolveWorkspaceLspLaunch
     this.waitTimeoutMs = options.waitTimeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS
     this.waitIntervalMs = options.waitIntervalMs ?? DEFAULT_WAIT_INTERVAL_MS
   }
@@ -114,14 +132,27 @@ export class WorkspaceLspService {
       return { state: entry.initialized ? 'ready' : 'idle', path: null, serverName: null, command: null, error: entry.lastError }
     }
     if (!server) {
-      return { state: 'unavailable', path: pathInfo.relativePath, serverName: null, command: null, error: 'No LSP server configured for file extension' }
+      const knownExtension = isKnownLspExtension(pathInfo.absolutePath)
+      return {
+        state: 'unavailable',
+        path: pathInfo.relativePath,
+        serverName: null,
+        command: null,
+        reason: knownExtension ? 'prereq-missing' : 'unsupported-extension',
+        error: knownExtension
+          ? 'The language server prerequisite is not installed'
+          : 'No language server supports this file type',
+      }
     }
     return {
       state: server.state === 'running' ? 'ready' : server.state === 'starting' ? 'starting' : server.state === 'error' ? 'unavailable' : 'idle',
       path: pathInfo.relativePath,
       serverName: server.name,
-      command: server.config.command,
-      error: server.lastError?.message ?? entry.lastError,
+      command: displayCommand(server.name, server.config.command),
+      ...(server.state === 'error' || entry.lastReason
+        ? { reason: lifecycleReason(server.lastError) ?? entry.lastReason ?? 'init-failed' }
+        : {}),
+      error: sanitizeWorkspaceLspWireText(server.lastError?.message ?? entry.lastError, [workspaceRoot]),
     }
   }
 
@@ -146,8 +177,13 @@ export class WorkspaceLspService {
         await this.sendOpenOrChange(entry, pathInfo.absolutePath, content ?? '')
       }
       entry.lastError = undefined
+      entry.lastReason = undefined
     } catch (error) {
-      entry.lastError = error instanceof Error ? error.message : 'LSP sync failed'
+      entry.lastReason = lifecycleReason(error) ?? 'init-failed'
+      entry.lastError = sanitizeWorkspaceLspWireText(
+        error instanceof Error ? error.message : 'Language server sync failed',
+        [workspaceRoot],
+      )
     }
 
     return this.getState(sessionId, workspaceRoot, pathInfo.relativePath)
@@ -194,8 +230,13 @@ export class WorkspaceLspService {
       try {
         await entry.manager.ensureServerStarted(pathInfo.absolutePath)
         entry.lastError = undefined
+        entry.lastReason = undefined
       } catch (error) {
-        entry.lastError = error instanceof Error ? error.message : 'LSP restart failed'
+        entry.lastReason = lifecycleReason(error) ?? 'init-failed'
+        entry.lastError = sanitizeWorkspaceLspWireText(
+          error instanceof Error ? error.message : 'Language server restart failed',
+          [workspaceRoot],
+        )
       }
     }
     return this.getState(sessionId, workspaceRoot, pathInfo?.relativePath)
@@ -212,7 +253,11 @@ export class WorkspaceLspService {
     if (existing && existing.root === canonicalRoot && existing.configKey === configKey) return existing
     if (existing) await existing.manager.shutdown()
 
-    const servers = await buildServerConfigs(canonicalRoot, config)
+    const servers = await buildServerConfigs(
+      canonicalRoot,
+      config,
+      this.resolveBuiltInLaunch,
+    )
     const manager = this.createManager(servers)
     const entry: WorkspaceEntry = {
       manager,
@@ -295,7 +340,8 @@ function stableConfigKey(config?: WorkspaceLspConfigInput): string {
 
 async function buildServerConfigs(
   workspaceRoot: string,
-  config?: WorkspaceLspConfigInput,
+  config: WorkspaceLspConfigInput | undefined,
+  resolveBuiltInLaunch: typeof resolveWorkspaceLspLaunch,
 ): Promise<Record<string, ScopedLspServerConfig>> {
   const presets: Record<string, ScopedLspServerConfig> = {
     'preset:rust-analyzer': {
@@ -306,28 +352,34 @@ async function buildServerConfigs(
       workspaceFolder: workspaceRoot,
       startupTimeout: 10_000,
     },
-    'preset:typescript-language-server': {
-      command: 'typescript-language-server',
-      args: ['--stdio'],
-      extensionToLanguage: { '.ts': 'typescript', '.tsx': 'typescriptreact', '.js': 'javascript', '.jsx': 'javascriptreact' },
-      transport: 'stdio',
-      workspaceFolder: workspaceRoot,
-      startupTimeout: 10_000,
-    },
-    'preset:pyright-langserver': {
-      command: 'pyright-langserver',
-      args: ['--stdio'],
-      extensionToLanguage: { '.py': 'python' },
-      transport: 'stdio',
-      workspaceFolder: workspaceRoot,
-      startupTimeout: 10_000,
-    },
+  }
+  for (const known of KNOWN_LANGUAGE_SERVERS) {
+    if (!known.launch) continue
+    try {
+      const plan = await resolveBuiltInLaunch({
+        workspaceRoot,
+        descriptor: known.launch,
+      })
+      presets[`preset:${known.launch.binName}`] = {
+        command: plan.command,
+        args: plan.args,
+        extensionToLanguage: { ...known.launch.extensions },
+        transport: 'stdio',
+        workspaceFolder: workspaceRoot,
+        startupTimeout: 10_000,
+      }
+    } catch (error) {
+      if (!(error instanceof WorkspaceLspPrerequisiteError)) throw error
+    }
   }
 
   if (!config?.server) return presets
   const customName = config.server.name?.trim() || 'custom:lsp'
   const custom = normalizeCustomServerConfig(config.server, workspaceRoot)
   await probeLspCommand(custom.command)
+  const explicitPlan = resolveExplicitWorkspaceLspLaunch(custom.command, custom.args ?? [])
+  custom.command = explicitPlan.command
+  custom.args = explicitPlan.args
   const customExtensions = new Set(Object.keys(custom.extensionToLanguage))
   const remainingPresets = Object.fromEntries(
     Object.entries(presets)
@@ -492,6 +544,46 @@ function mapSeverityToWorkspace(severity: Diagnostic['severity']): WorkspaceLspS
     default:
       return 'error'
   }
+}
+
+function isKnownLspExtension(filePath: string): boolean {
+  const extension = path.extname(filePath).toLowerCase()
+  return KNOWN_LANGUAGE_SERVERS.some(known =>
+    known.launch && Object.hasOwn(known.launch.extensions, extension),
+  )
+}
+
+function lifecycleReason(error: unknown): LspLifecycleFailureReason | undefined {
+  return error instanceof LspLifecycleError ? error.reason : undefined
+}
+
+function displayCommand(serverName: string, command: string): string {
+  if (command === process.execPath && serverName.startsWith('preset:')) {
+    return serverName.slice('preset:'.length)
+  }
+  return path.basename(command).replace(/\.(?:cmd|exe|ps1)$/i, '')
+}
+
+export function sanitizeWorkspaceLspWireText(
+  value: string | undefined,
+  sensitivePaths: readonly string[] = [],
+): string | undefined {
+  if (!value) return undefined
+  let result = value
+    .replace(/\x1B(?:[@-_][0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g, '')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)([^\s/@]+)@/gi, '$1[redacted]@')
+    .replace(/\b(?:token|access[_-]?token|api[_-]?key|authorization)\s*[:=]\s*[^\s,;]+/gi, '[redacted]')
+  const paths = [
+    ...sensitivePaths,
+    process.env.HOME,
+    process.env.USERPROFILE,
+  ].filter((item): item is string => Boolean(item)).sort((a, b) => b.length - a.length)
+  for (const sensitive of paths) {
+    result = result.split(sensitive).join('[path]')
+    result = result.split(sensitive.replace(/\\/g, '/')).join('[path]')
+  }
+  return result.length > 512 ? `${result.slice(0, 509)}...` : result
 }
 
 function numberOrZero(value: unknown): number {

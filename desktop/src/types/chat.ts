@@ -24,7 +24,7 @@ export type ClientMessage =
       response: ComputerUsePermissionResponse
     }
   | { type: 'set_permission_mode'; mode: PermissionMode }
-  | ({ type: 'set_runtime_config' } & RuntimeSelection)
+  | ({ type: 'set_runtime_config'; requestId: string } & RuntimeSelection)
   | { type: 'set_coordinator_mode'; enabled: boolean }
   | { type: 'set_pipeline_mode'; flavor: 'solo' | 'normal' }
   | { type: 'set_handoff_summary'; previousSessionId: string; deep?: boolean }
@@ -88,7 +88,38 @@ export type UIAttachment = {
 
 // ─── Server → Client ──────────────────────────────────────────────
 
+export type RuntimeConfigResult =
+  | {
+      type: 'runtime_config_result'
+      requestId: string
+      result: 'applied'
+      selection: RuntimeSelection
+    }
+  | {
+      type: 'runtime_config_result'
+      requestId: string
+      result: 'provider_transition_required'
+      sourceSessionId: string
+      sourceProviderId: string | null
+      targetSelection: RuntimeSelection
+      messageCount: number
+      transitionId: string
+    }
+  | {
+      type: 'runtime_config_result'
+      requestId: string
+      result: 'rejected'
+      code: string
+      message: string
+    }
+
+export type ProviderTransitionRequired = Extract<
+  RuntimeConfigResult,
+  { result: 'provider_transition_required' }
+>
+
 export type ServerMessage =
+  | RuntimeConfigResult
   | { type: 'connected'; sessionId: string }
   | { type: 'session_state'; turnState: 'running' | 'idle' }
   | { type: 'content_start'; blockType: 'text' | 'tool_use'; toolName?: string; toolUseId?: string; parentToolUseId?: string }

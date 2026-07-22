@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, screen, waitFor } from '@testing-library/react'
 import { fireEvent } from '@testing-library/dom'
+import { undo, undoDepth } from '@codemirror/commands'
+import { EditorView } from '@codemirror/view'
+
+import globalsCss from '../../theme/globals.css?raw'
 
 const mocks = vi.hoisted(() => ({
   saveWorkspaceFileMock: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
@@ -62,7 +66,95 @@ describe('WorkspaceEditor', () => {
 
   afterEach(() => {
     useWorkspacePanelStore.setState(initialState, true)
+    document.documentElement.removeAttribute('data-theme')
     vi.restoreAllMocks()
+  })
+
+  it.each([
+    {
+      title: 'TypeScript',
+      tab: makeTab({
+        content: 'export type Result = { ok: boolean }\nconst result: Result = { ok: true }\n',
+      }),
+      tokens: [
+        { text: 'export', className: 'workspace-syntax-keyword', color: '--color-code-keyword' },
+        { text: 'Result', className: 'workspace-syntax-type', color: '--color-code-type' },
+        { text: 'true', className: 'workspace-syntax-bool', color: '--color-code-number' },
+      ],
+    },
+    {
+      title: 'JSON',
+      tab: makeTab({
+        id: 'file:config.json',
+        path: 'config.json',
+        title: 'config.json',
+        language: 'json',
+        content: '{ "enabled": true, "retries": 3 }\n',
+      }),
+      tokens: [
+        { text: '"enabled"', className: 'workspace-syntax-property', color: '--color-code-property' },
+        { text: 'true', className: 'workspace-syntax-bool', color: '--color-code-number' },
+        { text: '3', className: 'workspace-syntax-number', color: '--color-code-number' },
+      ],
+    },
+  ])('renders $title tokens with semantic syntax classes and CSS-variable colors', async ({ tab, tokens }) => {
+    const { container } = render(<WorkspaceEditor sessionId="s1" tab={tab} />)
+
+    await waitFor(() => {
+      expect(container.querySelector('.cm-editor')).toBeTruthy()
+    })
+
+    for (const token of tokens) {
+      const element = Array.from(container.querySelectorAll(`.${token.className}`))
+        .find((candidate) => candidate.textContent === token.text)
+      expect(element).toBeTruthy()
+      expect(globalsCss).toMatch(
+        new RegExp(`\\.${token.className}[^}]*color: var\\(${token.color}\\);`),
+      )
+    }
+  })
+
+  it.each(['light', 'dark', 'eyeCare'])('keeps editor state and history when switching to %s theme', async (theme) => {
+    document.documentElement.setAttribute('data-theme', 'white')
+    const tab = makeTab()
+    const { container } = render(<WorkspaceEditor sessionId="s1" tab={tab} />)
+
+    await waitFor(() => {
+      expect(container.querySelector('.cm-editor')).toBeTruthy()
+    })
+    const editorElement = container.querySelector<HTMLElement>('.cm-editor')!
+    const view = EditorView.findFromDOM(editorElement)!
+    expect(view).toBeTruthy()
+
+    act(() => {
+      view.dispatch({
+        changes: { from: 17, to: 18, insert: '2' },
+        selection: { anchor: 18 },
+      })
+    })
+    const dirtyBuffer = useWorkspacePanelStore.getState().bufferStateByTabId[tab.id]
+    expect(dirtyBuffer?.currentContent).toBe('export const x = 2\n')
+    expect(dirtyBuffer?.isDirty).toBe(true)
+    expect(undoDepth(view.state)).toBe(1)
+
+    act(() => {
+      document.documentElement.setAttribute('data-theme', theme)
+    })
+
+    expect(container.querySelector('.cm-editor')).toBe(editorElement)
+    expect(EditorView.findFromDOM(editorElement)).toBe(view)
+    expect(view.state.doc.toString()).toBe('export const x = 2\n')
+    expect(view.state.selection.main.anchor).toBe(18)
+    expect(useWorkspacePanelStore.getState().bufferStateByTabId[tab.id]).toMatchObject({
+      currentContent: 'export const x = 2\n',
+      isDirty: true,
+    })
+    expect(undoDepth(view.state)).toBe(1)
+
+    act(() => {
+      expect(undo(view)).toBe(true)
+    })
+    expect(view.state.doc.toString()).toBe('export const x = 1\n')
   })
 
   it('initializes the buffer with detected encoding and line ending', async () => {

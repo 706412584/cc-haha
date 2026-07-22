@@ -373,7 +373,7 @@ describe('local index coordinator', () => {
     expect(coordinator.listSessions({ limit: 10 }).sessions[0]?.messageCount).toBe(1)
     expect(coordinator.getSessionEntryLocators?.(first.path, ['user']))
       .toMatchObject({
-        source: { path: first.path, parserVersion: 2 },
+        source: { path: first.path, parserVersion: 3 },
         entries: [{ ordinal: 0, jsonlLine: 1, entryType: 'user' }],
       })
 
@@ -855,7 +855,7 @@ describe('local index coordinator', () => {
 
     const { Database } = await import('bun:sqlite')
     const future = new Database(databasePath)
-    future.exec('PRAGMA user_version = 4')
+    future.exec('PRAGMA user_version = 5')
     future.close(true)
     const unsupported = createCoordinator()
     await unsupported.start()

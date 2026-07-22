@@ -35,6 +35,7 @@ import type {
   UIAttachment,
   UIMessage,
   ServerMessage,
+  ProviderTransitionRequired,
   TokenUsage,
   PermissionUpdate,
 } from '../types/chat'
@@ -97,6 +98,16 @@ type PendingComputerUsePermission = {
 
 type PendingComputerUsePermissions = Record<string, PendingComputerUsePermission>
 
+export type PendingRuntimeConfig = {
+  requestId: string
+  selection: RuntimeSelection
+}
+
+export type RuntimeConfigError = {
+  code: string
+  message: string
+}
+
 export type PerSessionState = {
   messages: UIMessage[]
   chatState: ChatState
@@ -156,6 +167,9 @@ export type PerSessionState = {
   /** Per-session FIFO of messages queued while the agent is busy; drained on idle. */
   messageQueue?: QueuedMessage[]
   queuedUserMessages?: QueuedUserMessage[]
+  pendingRuntimeConfig?: PendingRuntimeConfig | null
+  pendingProviderTransition?: ProviderTransitionRequired | null
+  runtimeConfigError?: RuntimeConfigError | null
 }
 
 const DEFAULT_SESSION_STATE: PerSessionState = {
@@ -193,6 +207,9 @@ const DEFAULT_SESSION_STATE: PerSessionState = {
   composerDraft: null,
   messageQueue: [],
   queuedUserMessages: [],
+  pendingRuntimeConfig: null,
+  pendingProviderTransition: null,
+  runtimeConfigError: null,
 }
 
 function createDefaultSessionState(): PerSessionState {
@@ -300,7 +317,9 @@ type ChatStore = {
     requestId: string,
     response: ComputerUsePermissionResponse,
   ) => void
-  setSessionRuntime: (sessionId: string, selection: RuntimeSelection) => void
+  setSessionRuntime: (sessionId: string, selection: RuntimeSelection) => string
+  cancelProviderTransition: (sessionId: string) => void
+  confirmProviderTransition: (sessionId: string) => Promise<string | null>
   setSessionPermissionMode: (sessionId: string, mode: PermissionMode) => void
   setSessionCoordinatorMode: (sessionId: string, enabled: boolean) => void
   setSessionSoloPipelineMode: (sessionId: string, enabled: boolean) => void
@@ -1220,6 +1239,11 @@ async function fetchAndMapSessionHistory(sessionId: string) {
 }
 
 const historyLoadsInFlight = new Map<string, Promise<void>>()
+const providerTransitionsInFlight = new Map<string, Promise<string | null>>()
+
+function providerTransitionKey(sessionId: string, transitionId: string): string {
+  return `${sessionId}:${transitionId}`
+}
 
 function shouldPrewarmSession(sessionId: string): boolean {
   const knownSession = useSessionStore.getState().sessions.find((session) => session.id === sessionId)
@@ -1271,7 +1295,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     const runtimeSelection = useSessionRuntimeStore.getState().selections[sessionId]
     if (runtimeSelection) {
-      wsManager.send(sessionId, { type: 'set_runtime_config', ...runtimeSelection })
+      const persistedSelection = useSessionStore.getState().sessions.find(
+        (session) => session.id === sessionId,
+      )
+      const isAlreadyPersisted =
+        persistedSelection?.runtimeProviderId === runtimeSelection.providerId &&
+        persistedSelection.runtimeModelId === runtimeSelection.modelId &&
+        persistedSelection.effortLevel === runtimeSelection.effortLevel &&
+        persistedSelection.thinkingEnabled === runtimeSelection.thinkingEnabled
+      if (!isAlreadyPersisted) get().setSessionRuntime(sessionId, runtimeSelection)
     }
     // Replay the per-session orchestration toggle on (re)connect, before the
     // first message, so the CLI launches with the right --append-system-prompt.
@@ -1632,10 +1664,74 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   setSessionRuntime: (sessionId, selection) => {
+    const requestId = crypto.randomUUID()
+    set((state) => ({
+      sessions: {
+        ...state.sessions,
+        [sessionId]: {
+          ...(state.sessions[sessionId] ?? createDefaultSessionState()),
+          pendingRuntimeConfig: { requestId, selection },
+          pendingProviderTransition: null,
+          runtimeConfigError: null,
+        },
+      },
+    }))
     wsManager.send(sessionId, {
       type: 'set_runtime_config',
+      requestId,
       ...selection,
     })
+    return requestId
+  },
+
+  cancelProviderTransition: (sessionId) => {
+    set((state) => ({
+      sessions: updateSessionIn(state.sessions, sessionId, () => ({
+        pendingProviderTransition: null,
+      })),
+    }))
+  },
+
+  confirmProviderTransition: (sessionId) => {
+    const transition = get().sessions[sessionId]?.pendingProviderTransition
+    if (!transition) return Promise.resolve(null)
+    const transitionKey = providerTransitionKey(sessionId, transition.transitionId)
+    const existing = providerTransitionsInFlight.get(transitionKey)
+    if (existing) return existing
+
+    const request = sessionsApi.createProviderTransition(sessionId, {
+      transitionId: transition.transitionId,
+      targetSelection: transition.targetSelection,
+    }).then((result) => {
+      if (get().sessions[sessionId]?.pendingProviderTransition?.transitionId !== transition.transitionId) {
+        return null
+      }
+      useSessionRuntimeStore.getState().setSelection(result.sessionId, result.targetSelection)
+      useTabStore.getState().openTab(result.sessionId, t('sidebar.newSession'), 'session')
+      void useSessionStore.getState().fetchSessions()
+      set((state) => ({
+        sessions: updateSessionIn(state.sessions, sessionId, () => ({
+          pendingProviderTransition: null,
+        })),
+      }))
+      return result.sessionId
+    }).catch((error) => {
+      if (get().sessions[sessionId]?.pendingProviderTransition?.transitionId === transition.transitionId) {
+        set((state) => ({
+          sessions: updateSessionIn(state.sessions, sessionId, () => ({
+            runtimeConfigError: {
+              code: 'PROVIDER_TRANSITION_FAILED',
+              message: error instanceof Error ? error.message : t('chat.providerTransitionFailed'),
+            },
+          })),
+        }))
+      }
+      return null
+    }).finally(() => {
+      providerTransitionsInFlight.delete(transitionKey)
+    })
+    providerTransitionsInFlight.set(transitionKey, request)
+    return request
   },
 
   setSessionPermissionMode: (sessionId, mode) => {
@@ -2149,6 +2245,34 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     switch (msg.type) {
       case 'connected':
         break
+
+      case 'runtime_config_result': {
+        const pending = get().sessions[sessionId]?.pendingRuntimeConfig
+        if (!pending || pending.requestId !== msg.requestId) {
+          console.warn('[runtime-config] Ignoring stale or duplicate result', {
+            sessionId,
+            requestId: msg.requestId,
+            pendingRequestId: pending?.requestId,
+            result: msg.result,
+          })
+          break
+        }
+        if (msg.result === 'applied') {
+          useSessionRuntimeStore.getState().setSelection(sessionId, msg.selection)
+          update(() => ({ pendingRuntimeConfig: null }))
+        } else if (msg.result === 'provider_transition_required') {
+          update(() => ({
+            pendingRuntimeConfig: null,
+            pendingProviderTransition: msg,
+          }))
+        } else {
+          update(() => ({
+            pendingRuntimeConfig: null,
+            runtimeConfigError: { code: msg.code, message: msg.message },
+          }))
+        }
+        break
+      }
 
       case 'session_state': {
         const session = get().sessions[sessionId]
@@ -4318,6 +4442,38 @@ function mapQueuedDisplayAttachments(attachments?: AttachmentRef[]): UIAttachmen
   }))
 }
 
+function imageAttachmentsMatchReplay(
+  attachments: UIAttachment[],
+  replayedImageSourcePaths: string[],
+): boolean {
+  if (attachments.length !== replayedImageSourcePaths.length) return false
+
+  const consumedReplayIndexes = new Set<number>()
+  return attachments.every((attachment) => {
+    const identities = [attachment.path, attachment.name]
+      .filter((identity): identity is string => Boolean(identity))
+      .flatMap((identity) => {
+        const normalized = identity.replace(/\\/g, '/').replace(/^\.\//, '')
+        const basename = normalized.split('/').pop()
+        return basename && basename !== normalized ? [normalized, basename] : [normalized]
+      })
+
+    const replayIndex = replayedImageSourcePaths.findIndex((replayedPath, index) => {
+      if (consumedReplayIndexes.has(index)) return false
+      const normalizedReplayPath = replayedPath.replace(/\\/g, '/').replace(/^\.\//, '')
+      const replayBasename = normalizedReplayPath.split('/').pop() ?? normalizedReplayPath
+      return identities.some((identity) =>
+        pathsReferToSameFile(identity, normalizedReplayPath) ||
+        replayBasename === identity ||
+        replayBasename.endsWith(`-${identity}`),
+      )
+    })
+    if (replayIndex < 0) return false
+    consumedReplayIndexes.add(replayIndex)
+    return true
+  })
+}
+
 function findCurrentTurnUserMessageIndex(
   messages: UIMessage[],
   modelContent: string,
@@ -4329,19 +4485,15 @@ function findCurrentTurnUserMessageIndex(
     if (message?.type !== 'user_text') {
       continue
     }
-    if ((message.modelContent ?? message.content).trim() === modelContent) return index
-
     const imageAttachments = message.attachments?.filter(
       (attachment) => attachment.type === 'image',
     ) ?? []
+    const hasMatchingText = (message.modelContent ?? message.content).trim() === modelContent
+    if (hasMatchingText && imageAttachments.length === 0) return index
+
     const isSameImageReplay =
       replayedImageSourcePaths.length > 0 &&
-      imageAttachments.length === replayedImageSourcePaths.length &&
-      imageAttachments.every((attachment, attachmentIndex) =>
-        pathsReferToSameFile(
-          attachment.path,
-          replayedImageSourcePaths[attachmentIndex],
-        )) &&
+      imageAttachmentsMatchReplay(imageAttachments, replayedImageSourcePaths) &&
       message.content.trim() === displayContent
     return isSameImageReplay ? index : -1
   }

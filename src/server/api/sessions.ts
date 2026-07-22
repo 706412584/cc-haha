@@ -22,7 +22,8 @@ import * as path from 'node:path'
 import { sessionService } from '../services/sessionService.js'
 import { conversationService } from '../services/conversationService.js'
 import { ApiError, errorResponse } from '../middleware/errorHandler.js'
-import { closeSessionConnection, getSlashCommands } from '../ws/handler.js'
+import { closeSessionConnection, getSlashCommands, isRuntimeEffortSupported } from '../ws/handler.js'
+import { sessionActivityCoordinator } from '../services/sessionActivityCoordinator.js'
 import { listSkillSlashCommands, type SkillSlashCommand } from './skills.js'
 import { WorkspaceService } from '../services/workspaceService.js'
 import { WorkspaceFileService } from '../services/workspaceFileService.js'
@@ -57,6 +58,9 @@ import { isValidPermissionMode } from '../services/settingsService.js'
 import { handleWorkspaceSearchRoute } from './workspaceSearch.js'
 import { localIndexCoordinator } from '../services/localIndex/coordinator.js'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
+import { ProviderService } from '../services/providerService.js'
+import { isOpenAIOfficialProviderId } from '../services/openaiOfficialProvider.js'
+import { isGrokOfficialProviderId } from '../services/grokOfficialProvider.js'
 
 const DEFAULT_GIT_INFO_COMMAND_TIMEOUT_MS = 3_000
 const INSPECTION_CONTEXT_TIMEOUT_MS = 5_000
@@ -78,6 +82,7 @@ const workspaceFileService = new WorkspaceFileService(
 )
 
 const workspaceLspService = new WorkspaceLspService()
+const providerService = new ProviderService()
 
 export async function handleSessionsApi(
   req: Request,
@@ -130,6 +135,11 @@ export async function handleSessionsApi(
     // -----------------------------------------------------------------------
     // Sub-resource routes: /api/sessions/:id/messages
     // -----------------------------------------------------------------------
+    if (subResource === 'provider-transition') {
+      if (req.method !== 'POST') return methodNotAllowed(req.method)
+      return await createProviderTransitionSession(req, sessionId)
+    }
+
     if (subResource === 'messages') {
       if (req.method !== 'GET') {
         return Response.json(
@@ -325,6 +335,111 @@ async function getSession(sessionId: string): Promise<Response> {
     throw ApiError.notFound(`Session not found: ${sessionId}`)
   }
   return Response.json(detail)
+}
+
+type ProviderTransitionSelection = {
+  providerId: string | null
+  modelId: string
+  effortLevel?: string
+  thinkingEnabled?: boolean
+}
+
+function isUuid(value: unknown): value is string {
+  return typeof value === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+}
+
+function normalizeProviderTransitionSelection(value: unknown): ProviderTransitionSelection {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw ApiError.badRequest('targetSelection must be an object')
+  }
+  const record = value as Record<string, unknown>
+  if (record.providerId !== null && typeof record.providerId !== 'string') {
+    throw ApiError.badRequest('targetSelection.providerId must be a string or null')
+  }
+  const modelId = typeof record.modelId === 'string' ? record.modelId.trim() : ''
+  if (!modelId) throw ApiError.badRequest('targetSelection.modelId is required')
+  const effortLevel = typeof record.effortLevel === 'string'
+    ? record.effortLevel.trim()
+    : undefined
+  if (effortLevel && !['low', 'medium', 'high', 'max', 'xhigh'].includes(effortLevel)) {
+    throw ApiError.badRequest('targetSelection.effortLevel is invalid')
+  }
+  if (
+    record.thinkingEnabled !== undefined &&
+    typeof record.thinkingEnabled !== 'boolean'
+  ) {
+    throw ApiError.badRequest('targetSelection.thinkingEnabled must be boolean')
+  }
+  return {
+    providerId: (record.providerId as string | null) ?? null,
+    modelId,
+    ...(effortLevel ? { effortLevel } : {}),
+    ...(typeof record.thinkingEnabled === 'boolean'
+      ? { thinkingEnabled: record.thinkingEnabled }
+      : {}),
+  }
+}
+
+async function createProviderTransitionSession(
+  req: Request,
+  sourceSessionId: string,
+): Promise<Response> {
+  let body: { transitionId?: unknown; targetSelection?: unknown }
+  try {
+    body = await req.json() as { transitionId?: unknown; targetSelection?: unknown }
+  } catch {
+    throw ApiError.badRequest('Invalid JSON body')
+  }
+  if (!isUuid(body.transitionId)) {
+    throw ApiError.badRequest('transitionId must be a valid UUID')
+  }
+  const targetSelection = normalizeProviderTransitionSelection(body.targetSelection)
+  if (
+    targetSelection.effortLevel !== undefined &&
+    !(await isRuntimeEffortSupported(
+      targetSelection.providerId,
+      targetSelection.modelId,
+      targetSelection.effortLevel,
+    ))
+  ) {
+    throw ApiError.badRequest('targetSelection.effortLevel is invalid')
+  }
+  if (typeof targetSelection.providerId === 'string') {
+    const { providers } = await providerService.listProviders()
+    if (
+      !providers.some(provider => provider.id === targetSelection.providerId) &&
+      !isOpenAIOfficialProviderId(targetSelection.providerId) &&
+      !isGrokOfficialProviderId(targetSelection.providerId)
+    ) {
+      throw ApiError.badRequest('targetSelection.providerId is unknown')
+    }
+  }
+  const selectionHash = new Bun.CryptoHasher('sha256')
+    .update(JSON.stringify(targetSelection))
+    .digest('hex')
+
+  const result = await sessionActivityCoordinator.withTransitionReservation(
+    sourceSessionId,
+    () => sessionService.createProviderTransitionSession({
+      sourceSessionId,
+      transitionId: body.transitionId!,
+      selectionHash,
+      runtimeProviderId: targetSelection.providerId,
+      runtimeModelId: targetSelection.modelId,
+      ...(targetSelection.effortLevel
+        ? { effortLevel: targetSelection.effortLevel }
+        : {}),
+      ...(targetSelection.thinkingEnabled !== undefined
+        ? { thinkingEnabled: targetSelection.thinkingEnabled }
+        : {}),
+    }),
+  )
+  recentProjectsCache = null
+  return Response.json({
+    ...result,
+    targetSelection,
+  }, { status: result.created ? 201 : 200 })
 }
 
 async function getSessionMessages(sessionId: string): Promise<Response> {

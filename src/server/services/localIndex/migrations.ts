@@ -1,6 +1,6 @@
 import type { Database } from 'bun:sqlite'
 
-export const LOCAL_INDEX_SCHEMA_VERSION = 3
+export const LOCAL_INDEX_SCHEMA_VERSION = 4
 export const LOCAL_INDEX_SCHEMA_UNSUPPORTED =
   'LOCAL_INDEX_SCHEMA_UNSUPPORTED' as const
 
@@ -175,10 +175,16 @@ CREATE INDEX activity_sources_parent_idx
   ON activity_sources(parent_session_id, path);
 `
 
+const SCHEMA_V4 = `
+ALTER TABLE sessions ADD COLUMN thinking_enabled INTEGER
+  CHECK (thinking_enabled IS NULL OR thinking_enabled IN (0, 1));
+`
+
 const MIGRATIONS = [
   { version: 1, sql: SCHEMA_V1 },
   { version: 2, sql: SCHEMA_V2 },
   { version: 3, sql: SCHEMA_V3 },
+  { version: 4, sql: SCHEMA_V4 },
 ] as const
 
 export class UnsupportedLocalIndexSchemaError extends Error {

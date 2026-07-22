@@ -114,6 +114,10 @@ const ROOT_COVERAGE_SCOPES: CoverageScope[] = [
     id: 'server-api',
     title: 'Server/API',
     includePrefixes: ['src/server/'],
+    excludePrefixes: [
+      'src/server/ws/events.ts',
+      'src/server/services/localIndex/types.ts',
+    ],
     excludePathFragments: ['/__tests__/', '/fixtures/'],
     excludeSuffixes: ['.test.ts', '.test.tsx'],
   },

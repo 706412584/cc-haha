@@ -3398,6 +3398,7 @@ describe('WebSocket Chat Integration', () => {
         if (msg.type === 'connected') {
           ws.send(JSON.stringify({
             type: 'set_runtime_config',
+            requestId: crypto.randomUUID(),
             providerId,
             modelId,
           }))
@@ -3530,6 +3531,7 @@ describe('WebSocket Chat Integration', () => {
 
       ws.send(JSON.stringify({
         type: 'set_runtime_config',
+            requestId: crypto.randomUUID(),
         providerId: provider.id,
         modelId: 'late-sonnet',
       }))
@@ -3709,6 +3711,7 @@ describe('WebSocket Chat Integration', () => {
               ws.send(JSON.stringify({ type: 'user_message', content: 'first turn while runtime changes' }))
               ws.send(JSON.stringify({
                 type: 'set_runtime_config',
+            requestId: crypto.randomUUID(),
                 providerId: provider.id,
                 modelId: 'first-turn-sonnet',
               }))
@@ -3838,6 +3841,7 @@ describe('WebSocket Chat Integration', () => {
       const switchStartIndex = messages.length
       ws.send(JSON.stringify({
         type: 'set_runtime_config',
+            requestId: crypto.randomUUID(),
         providerId: provider.id,
         modelId: 'idle-sonnet',
       }))
@@ -3944,6 +3948,7 @@ describe('WebSocket Chat Integration', () => {
             sendFailureIdle = true
             ws.send(JSON.stringify({
               type: 'set_runtime_config',
+            requestId: crypto.randomUUID(),
               providerId: provider.id,
               modelId: 'send-failure-sonnet',
             }))
@@ -4049,6 +4054,7 @@ describe('WebSocket Chat Integration', () => {
             if (msg.type === 'connected') {
               ws.send(JSON.stringify({
                 type: 'set_runtime_config',
+            requestId: crypto.randomUUID(),
                 providerId: providerA.id,
                 modelId: 'active-a-sonnet',
               }))
@@ -4072,6 +4078,7 @@ describe('WebSocket Chat Integration', () => {
               switchTriggered = true
               ws.send(JSON.stringify({
                 type: 'set_runtime_config',
+            requestId: crypto.randomUUID(),
                 providerId: providerB.id,
                 modelId: 'active-b-opus',
               }))
@@ -4207,6 +4214,7 @@ describe('WebSocket Chat Integration', () => {
             if (msg.type === 'connected') {
               ws.send(JSON.stringify({
                 type: 'set_runtime_config',
+            requestId: crypto.randomUUID(),
                 providerId: providerA.id,
                 modelId: 'deferred-failure-a-sonnet',
               }))
@@ -4223,6 +4231,7 @@ describe('WebSocket Chat Integration', () => {
               switchTriggered = true
               ws.send(JSON.stringify({
                 type: 'set_runtime_config',
+            requestId: crypto.randomUUID(),
                 providerId: providerB.id,
                 modelId: 'deferred-failure-b-opus',
               }))
@@ -5147,6 +5156,7 @@ describe('WebSocket Chat Integration', () => {
           if (msg.type === 'connected') {
             ws.send(JSON.stringify({
               type: 'set_runtime_config',
+            requestId: crypto.randomUUID(),
               providerId: staleProviderId,
               modelId: 'stale-model',
             }))
@@ -5456,6 +5466,7 @@ describe('WebSocket Chat Integration', () => {
           if (msg.type === 'connected' && phase === 'boot') {
             ws.send(JSON.stringify({
               type: 'set_runtime_config',
+            requestId: crypto.randomUUID(),
               providerId: providerA.id,
               modelId: 'model-a-sonnet',
               effortLevel: 'medium',
@@ -5477,6 +5488,7 @@ describe('WebSocket Chat Integration', () => {
             phase = 'switching'
             ws.send(JSON.stringify({
               type: 'set_runtime_config',
+            requestId: crypto.randomUUID(),
               providerId: providerB.id,
               modelId: 'model-b-opus',
               effortLevel: 'max',
@@ -5605,6 +5617,7 @@ describe('WebSocket Chat Integration', () => {
           if (msg.type === 'connected' && phase === 'boot') {
             ws.send(JSON.stringify({
               type: 'set_runtime_config',
+            requestId: crypto.randomUUID(),
               providerId: providerA.id,
               modelId: 'restart-a-sonnet',
             }))
@@ -5623,6 +5636,7 @@ describe('WebSocket Chat Integration', () => {
           if (msg.type === 'message_complete' && phase === 'turn1') {
             ws.send(JSON.stringify({
               type: 'set_runtime_config',
+            requestId: crypto.randomUUID(),
               providerId: providerB.id,
               modelId: 'restart-b-opus',
             }))
@@ -5926,6 +5940,7 @@ describe('WebSocket Chat Integration', () => {
             phase = 'first'
             ws.send(JSON.stringify({
               type: 'set_runtime_config',
+            requestId: crypto.randomUUID(),
               providerId: provider.id,
               modelId: 'resume-model-a',
             }))
@@ -5940,6 +5955,7 @@ describe('WebSocket Chat Integration', () => {
             phase = 'switching'
             ws.send(JSON.stringify({
               type: 'set_runtime_config',
+            requestId: crypto.randomUUID(),
               providerId: provider.id,
               modelId: 'resume-model-b',
             }))

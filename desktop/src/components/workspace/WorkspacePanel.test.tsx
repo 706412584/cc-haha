@@ -36,7 +36,9 @@ type WorkspaceApiMocks = {
   getWorkspaceDiffMock: ReturnType<typeof vi.fn>
   saveWorkspaceFileMock: ReturnType<typeof vi.fn>
   syncWorkspaceLspMock: ReturnType<typeof vi.fn>
+  getWorkspaceLspStateMock: ReturnType<typeof vi.fn>
   getWorkspaceLspDiagnosticsMock: ReturnType<typeof vi.fn>
+  restartWorkspaceLspMock: ReturnType<typeof vi.fn>
 }
 
 var mocks: WorkspaceApiMocks | undefined
@@ -198,7 +200,9 @@ vi.mock('../../api/sessions', () => ({
         getWorkspaceDiffMock: vi.fn(),
         saveWorkspaceFileMock: vi.fn(),
         syncWorkspaceLspMock: vi.fn(),
+        getWorkspaceLspStateMock: vi.fn(),
         getWorkspaceLspDiagnosticsMock: vi.fn(),
+        restartWorkspaceLspMock: vi.fn(),
       }
     }
 
@@ -210,7 +214,9 @@ vi.mock('../../api/sessions', () => ({
       getWorkspaceDiff: mocks.getWorkspaceDiffMock,
       saveWorkspaceFile: mocks.saveWorkspaceFileMock,
       syncWorkspaceLsp: mocks.syncWorkspaceLspMock,
+      getWorkspaceLspState: mocks.getWorkspaceLspStateMock,
       getWorkspaceLspDiagnostics: mocks.getWorkspaceLspDiagnosticsMock,
+      restartWorkspaceLsp: mocks.restartWorkspaceLspMock,
     }
   })(),
 }))
@@ -228,14 +234,69 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useWorkspaceChatContextStore } from '../../stores/workspaceChatContextStore'
 import { useWorkspacePanelStore } from '../../stores/workspacePanelStore'
+import { useTabStore } from '../../stores/tabStore'
 import { useUIStore } from '../../stores/uiStore'
+import type { LspUnavailableReason } from '../../types/lsp'
 import { WorkspacePanel } from './WorkspacePanel'
+
+async function prepareUnavailableLspPreview(
+  sessionId: string,
+  reason: LspUnavailableReason,
+) {
+  await setWorkspaceState((state) => ({
+    ...state,
+    panelBySession: {
+      ...state.panelBySession,
+      [sessionId]: { isOpen: true, activeView: 'all', hasUserSelectedView: true },
+    },
+    statusBySession: {
+      ...state.statusBySession,
+      [sessionId]: {
+        state: 'ok',
+        workDir: '/repo',
+        repoName: 'repo',
+        branch: 'main',
+        isGitRepo: true,
+        changedFiles: [],
+      },
+    },
+    previewTabsBySession: {
+      ...state.previewTabsBySession,
+      [sessionId]: [{
+        id: 'file:src/app.ts',
+        path: 'src/app.ts',
+        kind: 'file',
+        title: 'app.ts',
+        language: 'typescript',
+        content: 'export const app = true',
+        state: 'ok',
+        size: 23,
+      }],
+    },
+    activePreviewTabIdBySession: {
+      ...state.activePreviewTabIdBySession,
+      [sessionId]: 'file:src/app.ts',
+    },
+    lspStateBySession: {
+      ...state.lspStateBySession,
+      [sessionId]: {
+        state: 'unavailable',
+        path: 'src/app.ts',
+        serverName: 'typescript-language-server',
+        command: 'typescript-language-server',
+        reason,
+      },
+    },
+  }))
+}
 
 describe('WorkspacePanel', () => {
   const workspaceInitialState = useWorkspacePanelStore.getInitialState()
   const workspaceChatInitialState = useWorkspaceChatContextStore.getInitialState()
   const settingsInitialState = useSettingsStore.getInitialState()
   const chatInitialState = useChatStore.getInitialState()
+  const tabInitialState = useTabStore.getInitialState()
+  const uiInitialState = useUIStore.getInitialState()
 
   beforeEach(async () => {
     vi.clearAllMocks()
@@ -243,6 +304,13 @@ describe('WorkspacePanel', () => {
     await setWorkspaceState(workspaceInitialState)
     useChatStore.setState(chatInitialState, true)
     useWorkspaceChatContextStore.setState(workspaceChatInitialState, true)
+    useTabStore.setState(tabInitialState, true)
+    useUIStore.setState({
+      ...uiInitialState,
+      activeSettingsTab: 'providers',
+      pendingSettingsTab: null,
+      toasts: [],
+    }, true)
     await setSettingsState({ ...settingsInitialState, locale: 'en' })
 
     getMocks().getWorkspaceStatusMock.mockImplementation(async (sessionId: string) =>
@@ -271,6 +339,12 @@ describe('WorkspacePanel', () => {
     getMocks().syncWorkspaceLspMock.mockResolvedValue({
       state: { state: 'ready', path: 'src/app.ts', serverName: 'custom:lsp', command: 'example-lsp' },
     })
+    getMocks().getWorkspaceLspStateMock.mockResolvedValue({
+      state: { state: 'ready', path: 'src/app.ts', serverName: 'custom:lsp', command: 'example-lsp' },
+    })
+    getMocks().restartWorkspaceLspMock.mockResolvedValue({
+      state: { state: 'ready', path: 'src/app.ts', serverName: 'custom:lsp', command: 'example-lsp' },
+    })
     getMocks().getWorkspaceLspDiagnosticsMock.mockResolvedValue({
       state: 'ready',
       diagnostics: [],
@@ -284,6 +358,8 @@ describe('WorkspacePanel', () => {
     await setWorkspaceState(workspaceInitialState)
     useChatStore.setState(chatInitialState, true)
     useWorkspaceChatContextStore.setState(workspaceChatInitialState, true)
+    useTabStore.setState(tabInitialState, true)
+    useUIStore.setState(uiInitialState, true)
     await setSettingsState(settingsInitialState)
     vi.restoreAllMocks()
   })
@@ -1156,6 +1232,66 @@ describe('WorkspacePanel', () => {
     await waitFor(() => {
       expect(view.getByTestId('workspace-editor-path').textContent).toContain('src/index.ts')
     })
+  })
+
+  it('opens Settings Plugins when the LSP prerequisite is missing', async () => {
+    const sessionId = 'session-lsp-install'
+    await prepareUnavailableLspPreview(sessionId, 'prereq-missing')
+    getMocks().syncWorkspaceLspMock.mockReturnValueOnce(new Promise(() => {}))
+
+    const view = await renderPanel(sessionId)
+    await clickElement(view.getByTestId('lsp-status-install'))
+
+    expect(useUIStore.getState().pendingSettingsTab).toBe('plugins')
+    expect(useTabStore.getState().activeTabId).toBe('__settings__')
+    expect(useTabStore.getState().tabs).toContainEqual(expect.objectContaining({
+      sessionId: '__settings__',
+      type: 'settings',
+    }))
+  })
+
+  it('refreshes LSP state and diagnostics after a successful retry', async () => {
+    const sessionId = 'session-lsp-retry'
+    await prepareUnavailableLspPreview(sessionId, 'crashed')
+    getMocks().syncWorkspaceLspMock.mockReturnValueOnce(new Promise(() => {}))
+
+    const view = await renderPanel(sessionId)
+    await clickElement(view.getByTestId('lsp-status-retry'))
+
+    await waitFor(() => {
+      expect(getMocks().restartWorkspaceLspMock).toHaveBeenCalledWith(sessionId, {
+        path: 'src/app.ts',
+      })
+      expect(getMocks().getWorkspaceLspStateMock).toHaveBeenCalledWith(
+        sessionId,
+        'src/app.ts',
+        undefined,
+      )
+      expect(getMocks().getWorkspaceLspDiagnosticsMock).toHaveBeenCalledWith(
+        sessionId,
+        'src/app.ts',
+        expect.objectContaining({ refresh: true }),
+      )
+    })
+  })
+
+  it('shows the restart failure without running refresh requests', async () => {
+    const sessionId = 'session-lsp-retry-failure'
+    await prepareUnavailableLspPreview(sessionId, 'spawn-failed')
+    getMocks().syncWorkspaceLspMock.mockReturnValueOnce(new Promise(() => {}))
+    getMocks().restartWorkspaceLspMock.mockRejectedValueOnce(new Error('LSP restart failed'))
+
+    const view = await renderPanel(sessionId)
+    await clickElement(view.getByTestId('lsp-status-retry'))
+
+    await waitFor(() => {
+      expect(useUIStore.getState().toasts).toContainEqual(expect.objectContaining({
+        type: 'error',
+        message: 'LSP restart failed',
+      }))
+    })
+    expect(getMocks().getWorkspaceLspStateMock).not.toHaveBeenCalled()
+    expect(getMocks().getWorkspaceLspDiagnosticsMock).not.toHaveBeenCalled()
   })
 
   it('renders multiple preview tabs and closes only the exact requested tab', async () => {

@@ -6,7 +6,11 @@ import { logForDebugging } from '../../utils/debug.js'
 import { errorMessage } from '../../utils/errors.js'
 import { logError } from '../../utils/log.js'
 import { sleep } from '../../utils/sleep.js'
-import type { createLSPClient as createLSPClientType } from './LSPClient.js'
+import {
+  LspLifecycleError,
+  type createLSPClient as createLSPClientType,
+  type LSPClient,
+} from './LSPClient.js'
 import type { LspServerState, ScopedLspServerConfig } from './types.js'
 
 /**
@@ -90,6 +94,7 @@ export type LSPServerInstance = {
 export function createLSPServerInstance(
   name: string,
   config: ScopedLspServerConfig,
+  options: { createClient?: (name: string, onCrash: (error: Error) => void) => LSPClient } = {},
 ): LSPServerInstance {
   // Validate that unimplemented fields are not set
   if (config.restartOnCrash !== undefined) {
@@ -110,6 +115,7 @@ export function createLSPServerInstance(
   const { createLSPClient } = require('./LSPClient.js') as {
     createLSPClient: typeof createLSPClientType
   }
+  const createClient = options.createClient ?? createLSPClient
   let state: LspServerState = 'stopped'
   let startTime: Date | undefined
   let lastError: Error | undefined
@@ -118,7 +124,7 @@ export function createLSPServerInstance(
   // Propagate crash state so ensureServerStarted can restart on next use.
   // Without this, state stays 'running' after crash and the server is never
   // restarted (zombie state).
-  const client = createLSPClient(name, error => {
+  const client = createClient(name, error => {
     state = 'error'
     lastError = error
     crashRecoveryCount++
@@ -141,8 +147,9 @@ export function createLSPServerInstance(
     // spawn unbounded child processes on every incoming request.
     const maxRestarts = config.maxRestarts ?? 3
     if (state === 'error' && crashRecoveryCount > maxRestarts) {
-      const error = new Error(
-        `LSP server '${name}' exceeded max crash recovery attempts (${maxRestarts})`,
+      const error = new LspLifecycleError(
+        'restart-cap-exhausted',
+        `Language server exceeded ${maxRestarts} crash recovery attempts`,
       )
       lastError = error
       logError(error)
@@ -241,7 +248,10 @@ export function createLSPServerInstance(
         await withTimeout(
           initPromise,
           config.startupTimeout,
-          `LSP server '${name}' timed out after ${config.startupTimeout}ms during initialization`,
+          new LspLifecycleError(
+            'init-timeout',
+            `Language server initialization timed out after ${config.startupTimeout}ms`,
+          ),
         )
       } else {
         await initPromise
@@ -499,11 +509,11 @@ export function createLSPServerInstance(
 function withTimeout<T>(
   promise: Promise<T>,
   ms: number,
-  message: string,
+  error: Error,
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout>
   const timeoutPromise = new Promise<never>((_, reject) => {
-    timer = setTimeout((rej, msg) => rej(new Error(msg)), ms, reject, message)
+    timer = setTimeout((rej, timeoutError) => rej(timeoutError), ms, reject, error)
   })
   return Promise.race([promise, timeoutPromise]).finally(() =>
     clearTimeout(timer!),

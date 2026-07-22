@@ -18,13 +18,17 @@ import {
 import { getQueuedCommandAttachments } from '../../utils/attachments.js'
 import {
   dequeue,
+  clearCommandQueue,
   dequeueAllMatching,
   enqueue,
   getCommandQueue,
+  popAllEditable,
+  remove,
+  removeByFilter,
   resetCommandQueue,
 } from '../../utils/messageQueueManager.js'
 import { createAssistantMessage, createUserMessage } from '../../utils/messages.js'
-import { flushAgentCompletionsAndProcessQueueIfReady } from '../../utils/queueProcessor.js'
+import { flushAgentCompletionsAndProcessQueueIfReady, processQueueIfReady } from '../../utils/queueProcessor.js'
 import { parseTaskNotificationXml } from '../../utils/taskNotificationPolicy.js'
 import {
   createAgentStallTransitionHandler,
@@ -36,6 +40,7 @@ import {
 import {
   applyAgentStallStatus,
   completeAgentTask,
+  ackAgentCompletionCommands,
   drainAgentCompletionInbox,
   enqueueAgentNotification,
   failAgentTask,
@@ -43,11 +48,14 @@ import {
   subscribeToAgentCompletionWake,
   killAsyncAgent,
   loadAgentRuntimeSnapshot,
+  reconcileAgentCompletionInbox,
+  requeueAgentCompletionCommands,
   persistAgentRuntimeSnapshot,
   registerAsyncAgent,
   restoreAgentRuntimeSnapshot,
 } from '../../tasks/LocalAgentTask/LocalAgentTask.js'
 import { SYNTHETIC_OUTPUT_TOOL_NAME } from '../SyntheticOutputTool/SyntheticOutputTool.js'
+import { consumeStagedCommands } from '../../query.js'
 
 describe('local Agent lifecycle epochs', () => {
   test('ignores completion from a cancelled epoch after the task restarts', () => {
@@ -503,6 +511,32 @@ describe('Agent runtime persistence', () => {
     }
   })
 
+  test('keeps the previous snapshot when an oversized unconsumed inbox cannot be compacted', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-runtime-oversized-'))
+    const filePath = path.join(directory, 'runtime.json')
+    try {
+      const previous = '{"version":1,"nextSequence":1,"tasks":[],"inbox":[]}'
+      await fs.writeFile(filePath, previous, 'utf8')
+      const oversizedInbox = Array.from({ length: 5_000 }, (_, index) => ({
+        version: 1 as const,
+        sequence: index + 1,
+        taskId: `agent-oversized-${index}-${'x'.repeat(500)}`,
+        epoch: 1,
+        notification: `${index}-completion`,
+        delivery: 'pending' as const,
+      }))
+
+      await expect(persistAgentRuntimeSnapshot(filePath, {
+        tasks: {},
+        agentCompletionInbox: oversizedInbox,
+        nextAgentCompletionSequence: 5_001,
+      })).rejects.toThrow('exceeds 2000000 bytes')
+      expect(await fs.readFile(filePath, 'utf8')).toBe(previous)
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true })
+    }
+  })
+
   test('round-trips a bounded snapshot and persists inbox consumption', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-runtime-'))
     const filePath = path.join(directory, 'runtime.json')
@@ -604,12 +638,15 @@ describe('bounded Agent registry', () => {
 
       for (let index = 0; index < 64; index++) dequeue()
       await flushAndDrainAgentCompletionInbox(setAppState)
-      expect((appState.tasks[blockedTaskId] as LocalAgentTaskState).notified).toBe(true)
-      expect(appState.agentCompletionInbox.map(item => item.taskId)).toEqual([blockedTaskId])
+      expect((appState.tasks[blockedTaskId] as LocalAgentTaskState).notified).toBe(false)
+      expect(appState.agentCompletionInbox).toHaveLength(64)
 
-      dequeueAllMatching(command => command.agentCompletion !== undefined)
+      const removed = dequeueAllMatching(command => command.agentCompletion !== undefined)
+      ackAgentCompletionCommands(setAppState, removed)
       await flushAndDrainAgentCompletionInbox(setAppState)
-      await flushAndDrainAgentCompletionInbox(setAppState)
+      expect((appState.tasks[blockedTaskId] as LocalAgentTaskState).notified).toBe(true)
+      expect(appState.agentCompletionInbox.at(-1)?.taskId).toBe(blockedTaskId)
+      expect(appState.agentCompletionInbox).toHaveLength(1)
       expect(getCommandQueue().filter(command => command.agentCompletion?.taskId === blockedTaskId)).toHaveLength(1)
     },
   )
@@ -683,6 +720,7 @@ describe('bounded Agent registry', () => {
     const queuedCompletions = dequeueAllMatching(command => command.agentCompletion !== undefined)
     const attachments = await getQueuedCommandAttachments(queuedCompletions, appState)
     expect(attachments).toHaveLength(63)
+    ackAgentCompletionCommands(setAppState, queuedCompletions)
 
     registerAsyncAgent({
       agentId: 'agent-registry-after-consumption',
@@ -718,6 +756,7 @@ describe('bounded Agent registry', () => {
     drainAgentCompletionInbox(setAppState)
     const consumed = dequeueAllMatching(command => command.agentCompletion !== undefined)
     expect(await getQueuedCommandAttachments(consumed, appState)).toHaveLength(63)
+    ackAgentCompletionCommands(setAppState, consumed)
 
     registerAsyncAgent({ agentId: 'agent-registry-new', description: 'new', prompt: 'new', selectedAgent, setAppState })
 
@@ -731,6 +770,243 @@ describe('bounded Agent registry', () => {
 describe('Agent completion inbox', () => {
   afterEach(() => {
     resetCommandQueue()
+  })
+
+  test('requeues only the removed completion when three completions share a timestamp', () => {
+    const sessionId = getSessionId()
+    const completions = ['agent-same-ms-1', 'agent-same-ms-2', 'agent-same-ms-3'].map((taskId, index) => ({
+      version: 1 as const,
+      sequence: index + 1,
+      taskId,
+      epoch: 1,
+      notification: `<task-notification>${taskId}</task-notification>`,
+      delivery: 'pending' as const,
+    }))
+    let appState = {
+      tasks: Object.fromEntries(completions.map(item => [item.taskId, {
+        ...createTaskStateBase(item.taskId, 'local_agent', item.taskId),
+        type: 'local_agent' as const,
+        status: 'completed' as const,
+        agentId: item.taskId,
+        epoch: 1,
+        prompt: item.taskId,
+        agentType: 'general-purpose',
+        notified: true,
+        retrieved: false,
+        lastReportedToolCount: 0,
+        lastReportedTokenCount: 0,
+        isBackgrounded: true,
+        pendingMessages: [],
+        retain: false,
+        diskLoaded: false,
+      }])),
+      agentCompletionInbox: completions,
+      nextAgentCompletionSequence: 4,
+      speculation: IDLE_SPECULATION_STATE,
+    } as unknown as AppState
+    const setAppState = (updater: (prev: AppState) => AppState): void => {
+      appState = updater(appState)
+    }
+
+    drainAgentCompletionInbox(setAppState, sessionId)
+    const middle = getCommandQueue()[1]!
+    dequeueAllMatching(command => command === middle)
+    reconcileAgentCompletionInbox(setAppState, sessionId)
+
+    expect(appState.agentCompletionInbox.map(item => [item.sequence, item.delivery])).toEqual([
+      [1, 'queued'],
+      [2, 'pending'],
+      [3, 'queued'],
+    ])
+    drainAgentCompletionInbox(setAppState, sessionId)
+    expect(getCommandQueue().map(command => command.agentCompletion?.sequence)).toEqual([1, 3, 2])
+  })
+
+  test('returns completion ownership when queue cleanup discards receipts', () => {
+    let receiptLosses = 0
+    const completion = {
+      value: '<task-notification>done</task-notification>',
+      mode: 'task-notification' as const,
+      onAgentCompletionQueueReceiptLost: () => { receiptLosses++ },
+    }
+
+    enqueue(completion)
+    expect(remove([])).toEqual([])
+    expect(remove([getCommandQueue()[0]!])).toHaveLength(1)
+    expect(receiptLosses).toBe(0)
+
+    enqueue(completion)
+    expect(removeByFilter(command => command.mode === 'task-notification')).toHaveLength(1)
+    expect(receiptLosses).toBe(1)
+
+    enqueue(completion)
+    clearCommandQueue()
+    expect(receiptLosses).toBe(2)
+    clearCommandQueue()
+
+    enqueue({ ...completion, mode: 'prompt' })
+    expect(popAllEditable()).toMatchObject({ text: '<task-notification>done</task-notification>' })
+    expect(receiptLosses).toBe(3)
+  })
+
+  test('rolls queued ownership back when enqueue fails after reservation', () => {
+    const sessionId = getSessionId()
+    let appState = {
+      tasks: {},
+      agentCompletionInbox: [{
+        version: 1 as const,
+        sequence: 1,
+        taskId: 'agent-enqueue-race',
+        epoch: 1,
+        notification: '<task-notification>race</task-notification>',
+        delivery: 'pending' as const,
+      }],
+      nextAgentCompletionSequence: 2,
+      speculation: IDLE_SPECULATION_STATE,
+    } as unknown as AppState
+    let saturated = false
+    const setAppState = (updater: (prev: AppState) => AppState): void => {
+      appState = updater(appState)
+      if (!saturated && appState.agentCompletionInbox[0]?.delivery === 'queued') {
+        saturated = true
+        for (let index = 0; index < 4_096; index++) {
+          enqueue({ mode: 'prompt', value: `race-${index}` })
+        }
+      }
+    }
+
+    expect(() => drainAgentCompletionInbox(setAppState, sessionId)).toThrow('capacity exceeded')
+    expect(appState.agentCompletionInbox[0]?.delivery).toBe('pending')
+  })
+
+  test('acks successful interactive batches and requeues rejected slash commands', async () => {
+    const sessionId = getSessionId()
+    const queuedItem = (sequence: number, value: string, delivery = 'queued' as const) => ({
+      version: 1 as const,
+      sequence,
+      taskId: `agent-interactive-${sequence}`,
+      epoch: 1,
+      notification: value,
+      delivery,
+    })
+    let appState = {
+      tasks: {},
+      agentCompletionInbox: [queuedItem(1, 'batch'), queuedItem(2, '/slash')],
+      nextAgentCompletionSequence: 3,
+      speculation: IDLE_SPECULATION_STATE,
+    } as unknown as AppState
+    const setAppState = (updater: (prev: AppState) => AppState): void => {
+      appState = updater(appState)
+    }
+    const command = (sequence: number, value: string) => ({
+      value,
+      mode: 'task-notification' as const,
+      agentCompletion: {
+        taskId: `agent-interactive-${sequence}`,
+        epoch: 1,
+        sessionId,
+        sequence,
+      },
+    })
+    for (const sequence of [1, 2]) {
+      registerAsyncAgent({
+        agentId: `agent-interactive-${sequence}`,
+        description: `Interactive completion ${sequence}`,
+        prompt: `Interactive completion ${sequence}`,
+        selectedAgent: { agentType: 'general-purpose' } as never,
+        setAppState,
+      })
+    }
+
+    enqueue(command(1, 'batch'))
+    expect(processQueueIfReady({
+      executeInput: async () => {},
+      getAppState: () => appState,
+      setAppState,
+    }).processed).toBe(true)
+    await Promise.resolve()
+    expect(appState.agentCompletionInbox.map(item => item.sequence)).toEqual([2])
+
+    enqueue(command(2, '/slash'))
+    expect(processQueueIfReady({
+      executeInput: async () => { throw new Error('consumer rejected') },
+      getAppState: () => appState,
+      setAppState,
+    }).processed).toBe(true)
+    await Promise.resolve()
+    expect(appState.agentCompletionInbox[0]?.delivery).toBe('pending')
+  })
+
+  test('acks completion ownership only after staged queue removal succeeds', () => {
+    const sessionId = getSessionId()
+    const command = {
+      mode: 'task-notification' as const,
+      value: '<task-notification>complete</task-notification>',
+      agentCompletion: {
+        taskId: 'agent-staged-success',
+        epoch: 1,
+        sessionId,
+        sequence: 1,
+      },
+    }
+    let appState = {
+      tasks: {},
+      agentCompletionInbox: [{
+        version: 1 as const,
+        sequence: 1,
+        taskId: command.agentCompletion.taskId,
+        epoch: 1,
+        notification: command.value,
+        delivery: 'queued' as const,
+      }],
+      nextAgentCompletionSequence: 2,
+      speculation: IDLE_SPECULATION_STATE,
+    } as unknown as AppState
+    const setAppState = (updater: (prev: AppState) => AppState): void => {
+      appState = updater(appState)
+    }
+    enqueue(command)
+    const queuedCommand = getCommandQueue()[0]!
+
+    consumeStagedCommands([queuedCommand], setAppState, [])
+
+    expect(getCommandQueue()).toEqual([])
+    expect(appState.agentCompletionInbox).toEqual([])
+  })
+
+  test('requeues completion ownership when staged queue removal cannot consume exactly', () => {
+    const sessionId = getSessionId()
+    const command = {
+      mode: 'task-notification' as const,
+      value: '<task-notification>missing</task-notification>',
+      agentCompletion: {
+        taskId: 'agent-staged-failure',
+        epoch: 1,
+        sessionId,
+        sequence: 1,
+      },
+    }
+    let appState = {
+      tasks: {},
+      agentCompletionInbox: [{
+        version: 1 as const,
+        sequence: 1,
+        taskId: command.agentCompletion.taskId,
+        epoch: 1,
+        notification: command.value,
+        delivery: 'queued' as const,
+      }],
+      nextAgentCompletionSequence: 2,
+      speculation: IDLE_SPECULATION_STATE,
+    } as unknown as AppState
+    const setAppState = (updater: (prev: AppState) => AppState): void => {
+      appState = updater(appState)
+    }
+
+    expect(() => consumeStagedCommands([command], setAppState, [])).toThrow(
+      'Failed to remove exact queued commands after attachment staging',
+    )
+    expect(appState.agentCompletionInbox[0]?.delivery).toBe('pending')
   })
 
   test('drops an enqueued completion when the same task resumes at a newer epoch', () => {
@@ -842,7 +1118,7 @@ describe('Agent completion inbox', () => {
       }
 
       expect(wakes).toHaveLength(1)
-      expect(appState.agentCompletionInbox).toEqual([])
+      expect(appState.agentCompletionInbox.map(item => item.delivery)).toEqual(['queued'])
       expect(getCommandQueue()).toHaveLength(1)
       await flushAndDrainAgentCompletionInbox(setAppState)
       expect(getCommandQueue()).toHaveLength(1)
@@ -959,14 +1235,16 @@ describe('Agent completion inbox', () => {
       for (let index = 0; index < 64; index++) dequeue()
 
       expect(await flushAndDrainAgentCompletionInbox(setAppState)).toBe(true)
-      expect((appState.tasks[taskId] as LocalAgentTaskState).notified).toBe(true)
-      expect(wakes).toHaveLength(1)
+      expect((appState.tasks[taskId] as LocalAgentTaskState).notified).toBe(false)
+      expect(wakes).toHaveLength(0)
       expect(getCommandQueue().filter(command => command.agentCompletion?.taskId === taskId)).toHaveLength(0)
 
-      dequeueAllMatching(command => command.agentCompletion !== undefined)
+      const removed = dequeueAllMatching(command => command.agentCompletion !== undefined)
+      ackAgentCompletionCommands(setAppState, removed)
       expect(await flushAndDrainAgentCompletionInbox(setAppState)).toBe(true)
       expect(await flushAndDrainAgentCompletionInbox(setAppState)).toBe(false)
 
+      expect((appState.tasks[taskId] as LocalAgentTaskState).notified).toBe(true)
       expect(wakes).toHaveLength(1)
       expect(getCommandQueue().filter(command => command.agentCompletion?.taskId === taskId)).toHaveLength(1)
       expect(getCommandQueue().filter(command => command.agentCompletion === undefined)).toHaveLength(4_032)
@@ -1025,22 +1303,22 @@ describe('Agent completion inbox', () => {
     expect(dequeue()?.value).toBe('user-0')
     await flushAndDrainAgentCompletionInbox(setAppState)
 
-    expect((appState.tasks[taskId] as LocalAgentTaskState).notified).toBe(true)
-    expect(appState.agentCompletionInbox.map(item => item.taskId)).toEqual([taskId])
+    expect((appState.tasks[taskId] as LocalAgentTaskState).notified).toBe(false)
+    expect(appState.agentCompletionInbox).toHaveLength(64)
     expect(getCommandQueue()).toHaveLength(4_096)
-    expect(getCommandQueue().filter(command => command.agentCompletion?.taskId === taskId)).toHaveLength(0)
-    expect(getCommandQueue().filter(command => command.agentCompletion === undefined)).toHaveLength(4_032)
 
-    dequeueAllMatching(command => command.agentCompletion !== undefined)
-    await flushAndDrainAgentCompletionInbox(setAppState)
+    const removed = dequeueAllMatching(command => command.agentCompletion !== undefined)
+    ackAgentCompletionCommands(setAppState, removed)
     await flushAndDrainAgentCompletionInbox(setAppState)
 
-    expect(appState.agentCompletionInbox).toEqual([])
+    expect((appState.tasks[taskId] as LocalAgentTaskState).notified).toBe(true)
+    expect(appState.agentCompletionInbox.at(-1)?.taskId).toBe(taskId)
+    expect(appState.agentCompletionInbox.at(-1)?.delivery).toBe('queued')
     expect(getCommandQueue().filter(command => command.agentCompletion?.taskId === taskId)).toHaveLength(1)
     expect(getCommandQueue().filter(command => command.agentCompletion === undefined)).toHaveLength(4_032)
   })
 
-  test('delivers a restored full inbox plus a new completion exactly once', () => {
+  test('keeps the 65th completion unnotified until persisted ownership has capacity', () => {
     const restoredItems = Array.from({ length: 64 }, (_, index) => ({
       version: 1 as const,
       sequence: index + 1,
@@ -1082,19 +1360,25 @@ describe('Agent completion inbox', () => {
       appState = updater(appState)
     }
 
-    enqueueAgentNotification({
+    expect(enqueueAgentNotification({
       taskId: newTaskId,
       description: 'New completion',
       status: 'completed',
       setAppState,
       epoch: 1,
-    })
-    drainAgentCompletionInbox(setAppState)
+    })).toBe(false)
 
-    const queue = getCommandQueue()
-    expect(queue).toHaveLength(65)
-    expect(new Set(queue.map(command => String(command.value))).size).toBe(65)
-    expect(appState.agentCompletionInbox).toEqual([])
+    expect(appState.agentCompletionInbox).toHaveLength(64)
+    expect((appState.tasks[newTaskId] as LocalAgentTaskState).notified).toBe(false)
+    const restored = restoreAgentRuntimeSnapshot({
+      version: 1,
+      nextSequence: appState.nextAgentCompletionSequence,
+      tasks: [],
+      inbox: appState.agentCompletionInbox,
+    })
+    expect(restored.agentCompletionInbox.map(item => item.sequence)).toEqual(
+      restoredItems.map(item => item.sequence),
+    )
   })
 
   test('defers ordered completion injection until a continuation boundary and consumes once', async () => {
@@ -1196,7 +1480,8 @@ describe('Agent lifecycle completion backpressure', () => {
 
     for (let index = 0; index < 64; index++) dequeue()
     await flushAndDrainAgentCompletionInbox(setAppState)
-    dequeueAllMatching(command => command.agentCompletion !== undefined)
+    const removed = dequeueAllMatching(command => command.agentCompletion !== undefined)
+    ackAgentCompletionCommands(setAppState, removed)
     await flushAndDrainAgentCompletionInbox(setAppState)
 
     expect(getCommandQueue().filter(command => command.agentCompletion?.taskId === task.agentId)).toHaveLength(1)

@@ -9,12 +9,9 @@ import type {
  * including `idle`) onto the legacy four-state shape that
  * {@link LspStatusIndicator} consumes.
  *
- * The indicator was authored against an earlier wire shape that exposed an
- * `LspUnavailableReason`. The current server response only carries an `error`
- * string, so unavailable states collapse to `init-failed` (Retry button) and
- * never trigger the prereq-missing path. That is acceptable because the
- * desktop's prereq UX lives in `PluginPrerequisitesModal`, reached from the
- * Plugins page, not the workspace pill.
+ * Preserve the server's typed unavailable reason so the indicator can
+ * distinguish unsupported files, missing prerequisites, and retryable
+ * lifecycle failures without inferring state from an error string.
  */
 export function toLegacyLspState(
   state: WorkspaceLspState | undefined,
@@ -32,7 +29,7 @@ export function toLegacyLspState(
   return {
     state: 'unavailable',
     workspaceId,
-    reason: 'init-failed',
+    reason: state.reason,
     errorCount: 0,
     ...(state.error ? { lastStderrTail: state.error } : {}),
   }

@@ -105,6 +105,66 @@ describe('wsManager reconnect buffering', () => {
     ])
   })
 
+  it('replays an unacknowledged runtime request with the same id after reconnect', async () => {
+    wsManager.connect('session-runtime-reconnect')
+    const firstSocket = FakeWebSocket.instances[0]!
+    firstSocket.open()
+    const request = {
+      type: 'set_runtime_config' as const,
+      requestId: '11111111-1111-4111-8111-111111111111',
+      providerId: 'provider-b',
+      modelId: 'model-b',
+    }
+    wsManager.send('session-runtime-reconnect', request)
+    firstSocket.fail()
+
+    await vi.advanceTimersByTimeAsync(1000)
+    const secondSocket = FakeWebSocket.instances[1]!
+    secondSocket.open()
+
+    expect(secondSocket.sent).toEqual([
+      JSON.stringify(request),
+      JSON.stringify({ type: 'sync_state' }),
+    ])
+    secondSocket.receive({
+      type: 'runtime_config_result',
+      requestId: request.requestId,
+      result: 'applied',
+      selection: {
+        providerId: request.providerId,
+        modelId: request.modelId,
+      },
+    })
+    secondSocket.fail()
+    await vi.advanceTimersByTimeAsync(1000)
+    FakeWebSocket.instances[2]!.open()
+    expect(FakeWebSocket.instances[2]!.sent).toEqual([
+      JSON.stringify({ type: 'sync_state' }),
+    ])
+  })
+
+  it('does not duplicate a runtime request that was originally queued offline', async () => {
+    wsManager.connect('session-runtime-offline')
+    const firstSocket = FakeWebSocket.instances[0]!
+    firstSocket.fail()
+    const request = {
+      type: 'set_runtime_config' as const,
+      requestId: '22222222-2222-4222-8222-222222222222',
+      providerId: 'provider-b',
+      modelId: 'model-b',
+    }
+    wsManager.send('session-runtime-offline', request)
+
+    await vi.advanceTimersByTimeAsync(1000)
+    const secondSocket = FakeWebSocket.instances[1]!
+    secondSocket.open()
+
+    expect(secondSocket.sent).toEqual([
+      JSON.stringify(request),
+      JSON.stringify({ type: 'sync_state' }),
+    ])
+  })
+
   it('closes and reconnects a half-open socket when a pong never arrives', async () => {
     wsManager.connect('session-half-open')
     const firstSocket = FakeWebSocket.instances[0]!

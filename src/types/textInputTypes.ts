@@ -300,6 +300,7 @@ export type AgentCompletionMetadata = {
   taskId: string
   epoch: number
   sessionId: string
+  sequence: number
 }
 
 export type QueuedCommand = {
@@ -307,6 +308,8 @@ export type QueuedCommand = {
   mode: PromptInputMode
   /** Structured identity for deferred local-Agent terminal events. */
   agentCompletion?: AgentCompletionMetadata
+  /** Internal ownership callback used when a queue receipt is discarded. */
+  onAgentCompletionQueueReceiptLost?: () => void
   /** Defaults to the priority implied by `mode` when enqueued. */
   priority?: QueuePriority
   uuid?: UUID

@@ -19,6 +19,7 @@ const {
   notifyDesktopMock,
   updateTabTitleMock,
   updateTabStatusMock,
+  openTabMock,
   updateSessionTitleMock,
   updateSessionMessageCountMock,
   updateSessionPermissionModeMock,
@@ -40,6 +41,7 @@ const {
   notifyDesktopMock: vi.fn(),
   updateTabTitleMock: vi.fn(),
   updateTabStatusMock: vi.fn(),
+  openTabMock: vi.fn(),
   updateSessionTitleMock: vi.fn(),
   updateSessionMessageCountMock: vi.fn(),
   updateSessionPermissionModeMock: vi.fn(),
@@ -79,6 +81,7 @@ vi.mock('../api/sessions', () => ({
   sessionsApi: {
     getMessages: vi.fn(async () => ({ messages: [] })),
     getSlashCommands: vi.fn(async () => ({ commands: [] })),
+    createProviderTransition: vi.fn(),
   },
 }))
 
@@ -99,6 +102,7 @@ vi.mock('./tabStore', () => ({
     getState: () => ({
       updateTabStatus: updateTabStatusMock,
       updateTabTitle: updateTabTitleMock,
+      openTab: openTabMock,
     }),
   },
 }))
@@ -110,6 +114,7 @@ vi.mock('./sessionStore', () => ({
       updateSessionTitle: updateSessionTitleMock,
       updateSessionMessageCount: updateSessionMessageCountMock,
       updateSessionPermissionMode: updateSessionPermissionModeMock,
+      fetchSessions: vi.fn(async () => {}),
     }),
   },
 }))
@@ -282,10 +287,12 @@ describe('chatStore history mapping', () => {
     notifyDesktopMock.mockReset()
     updateTabTitleMock.mockReset()
     updateTabStatusMock.mockReset()
+    openTabMock.mockReset()
     updateSessionTitleMock.mockReset()
     updateSessionMessageCountMock.mockReset()
     vi.mocked(sessionsApi.getMessages).mockReset()
     vi.mocked(sessionsApi.getMessages).mockResolvedValue({ messages: [] })
+    vi.mocked(sessionsApi.createProviderTransition).mockReset()
     sessionStoreSnapshot.sessions = []
     cliTaskStoreSnapshot.tasks = []
     cliTaskStoreSnapshot.sessionId = null
@@ -2717,6 +2724,7 @@ describe('chatStore history mapping', () => {
 
     expect(sendMock).toHaveBeenCalledWith(TEST_SESSION_ID, {
       type: 'set_runtime_config',
+      requestId: expect.stringMatching(/^[0-9a-f-]{36}$/i),
       providerId: 'provider-1',
       modelId: 'kimi-k2.6',
       effortLevel: 'high',
@@ -2726,6 +2734,7 @@ describe('chatStore history mapping', () => {
         TEST_SESSION_ID,
         {
           type: 'set_runtime_config',
+          requestId: expect.stringMatching(/^[0-9a-f-]{36}$/i),
           providerId: 'provider-1',
           modelId: 'kimi-k2.6',
           effortLevel: 'high',
@@ -2783,19 +2792,246 @@ describe('chatStore history mapping', () => {
     expect(sendMock).not.toHaveBeenCalledWith(TEST_SESSION_ID, { type: 'prewarm_session' })
   })
 
-  it('sends explicit runtime overrides over websocket', () => {
-    useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, {
+  it('sends explicit runtime overrides with a valid UUID without committing before applied', () => {
+    useSessionRuntimeStore.getState().setSelection(TEST_SESSION_ID, {
+      providerId: 'provider-a',
+      modelId: 'source-model',
+    })
+
+    const requestId = useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, {
       providerId: null,
       modelId: 'claude-opus-4-7',
       effortLevel: 'max',
     })
 
+    expect(requestId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
     expect(sendMock).toHaveBeenCalledWith(TEST_SESSION_ID, {
       type: 'set_runtime_config',
+      requestId,
       providerId: null,
       modelId: 'claude-opus-4-7',
       effortLevel: 'max',
     })
+    expect(useSessionRuntimeStore.getState().selections[TEST_SESSION_ID]).toEqual({
+      providerId: 'provider-a',
+      modelId: 'source-model',
+    })
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.pendingRuntimeConfig).toEqual({
+      requestId,
+      selection: {
+        providerId: null,
+        modelId: 'claude-opus-4-7',
+        effortLevel: 'max',
+      },
+    })
+  })
+
+  it('commits only the current applied runtime result and ignores stale or duplicate results', () => {
+    const sourceSelection = { providerId: 'provider-a', modelId: 'source-model' }
+    const firstSelection = { providerId: 'provider-a', modelId: 'first-model' }
+    const currentSelection = { providerId: 'provider-a', modelId: 'current-model', effortLevel: 'high' as const }
+    useSessionRuntimeStore.getState().setSelection(TEST_SESSION_ID, sourceSelection)
+
+    const staleRequestId = useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, firstSelection)
+    const currentRequestId = useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, currentSelection)
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'runtime_config_result',
+      requestId: staleRequestId,
+      result: 'applied',
+      selection: firstSelection,
+    })
+    expect(useSessionRuntimeStore.getState().selections[TEST_SESSION_ID]).toEqual(sourceSelection)
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'runtime_config_result',
+      requestId: currentRequestId,
+      result: 'applied',
+      selection: currentSelection,
+    })
+    expect(useSessionRuntimeStore.getState().selections[TEST_SESSION_ID]).toEqual(currentSelection)
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.pendingRuntimeConfig).toBeNull()
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'runtime_config_result',
+      requestId: currentRequestId,
+      result: 'applied',
+      selection: firstSelection,
+    })
+    expect(useSessionRuntimeStore.getState().selections[TEST_SESSION_ID]).toEqual(currentSelection)
+  })
+
+  it('surfaces only the current provider transition requirement without changing the source selection', () => {
+    const sourceSelection = { providerId: 'provider-a', modelId: 'source-model' }
+    const targetSelection = { providerId: 'provider-b', modelId: 'target-model' }
+    useSessionRuntimeStore.getState().setSelection(TEST_SESSION_ID, sourceSelection)
+
+    const staleRequestId = useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, {
+      providerId: 'provider-c',
+      modelId: 'stale-model',
+    })
+    const requestId = useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, targetSelection)
+    const required = {
+      type: 'runtime_config_result' as const,
+      requestId,
+      result: 'provider_transition_required' as const,
+      sourceSessionId: TEST_SESSION_ID,
+      sourceProviderId: 'provider-a',
+      targetSelection,
+      messageCount: 12,
+      transitionId: '11111111-1111-4111-8111-111111111111',
+    }
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      ...required,
+      requestId: staleRequestId,
+    })
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.pendingProviderTransition).toBeNull()
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, required)
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.pendingRuntimeConfig).toBeNull()
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.pendingProviderTransition).toEqual(required)
+    expect(useSessionRuntimeStore.getState().selections[TEST_SESSION_ID]).toEqual(sourceSelection)
+  })
+
+  it('cancels a provider transition without changing the source session', () => {
+    const sourceSelection = { providerId: 'provider-a', modelId: 'source-model' }
+    const targetSelection = { providerId: 'provider-b', modelId: 'target-model' }
+    useSessionRuntimeStore.getState().setSelection(TEST_SESSION_ID, sourceSelection)
+    const requestId = useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, targetSelection)
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'runtime_config_result',
+      requestId,
+      result: 'provider_transition_required',
+      sourceSessionId: TEST_SESSION_ID,
+      sourceProviderId: 'provider-a',
+      targetSelection,
+      messageCount: 8,
+      transitionId: '22222222-2222-4222-8222-222222222222',
+    })
+
+    useChatStore.getState().cancelProviderTransition(TEST_SESSION_ID)
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.pendingProviderTransition).toBeNull()
+    expect(useSessionRuntimeStore.getState().selections[TEST_SESSION_ID]).toEqual(sourceSelection)
+  })
+
+  it('confirms a provider transition once and reuses its server transition id', async () => {
+    const sourceSelection = { providerId: 'provider-a', modelId: 'source-model' }
+    const targetSelection = { providerId: 'provider-b', modelId: 'target-model', effortLevel: 'high' as const }
+    const transitionId = '33333333-3333-4333-8333-333333333333'
+    const createProviderTransition = vi.mocked(sessionsApi.createProviderTransition)
+    createProviderTransition.mockResolvedValue({
+      sessionId: transitionId,
+      workDir: '/workspace/project',
+      created: true,
+      targetSelection,
+    })
+    useSessionRuntimeStore.getState().setSelection(TEST_SESSION_ID, sourceSelection)
+    const requestId = useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, targetSelection)
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'runtime_config_result',
+      requestId,
+      result: 'provider_transition_required',
+      sourceSessionId: TEST_SESSION_ID,
+      sourceProviderId: 'provider-a',
+      targetSelection,
+      messageCount: 8,
+      transitionId,
+    })
+
+    const first = useChatStore.getState().confirmProviderTransition(TEST_SESSION_ID)
+    const second = useChatStore.getState().confirmProviderTransition(TEST_SESSION_ID)
+    await expect(first).resolves.toBe(transitionId)
+    await expect(second).resolves.toBe(transitionId)
+
+    expect(createProviderTransition).toHaveBeenCalledTimes(1)
+    expect(createProviderTransition).toHaveBeenCalledWith(TEST_SESSION_ID, {
+      transitionId,
+      targetSelection,
+    })
+    expect(openTabMock).toHaveBeenCalledWith(transitionId, 'New session', 'session')
+    expect(useSessionRuntimeStore.getState().selections[transitionId]).toEqual(targetSelection)
+    expect(useSessionRuntimeStore.getState().selections[TEST_SESSION_ID]).toEqual(sourceSelection)
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]).toBeDefined()
+  })
+
+  it('ignores a confirmed transition response after cancellation', async () => {
+    const targetSelection = { providerId: 'provider-b', modelId: 'target-model' }
+    const transitionId = '44444444-4444-4444-8444-444444444444'
+    let resolveTransition!: (value: Awaited<ReturnType<typeof sessionsApi.createProviderTransition>>) => void
+    vi.mocked(sessionsApi.createProviderTransition).mockReturnValue(new Promise((resolve) => {
+      resolveTransition = resolve
+    }))
+    const requestId = useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, targetSelection)
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'runtime_config_result', requestId, result: 'provider_transition_required',
+      sourceSessionId: TEST_SESSION_ID, sourceProviderId: 'provider-a', targetSelection,
+      messageCount: 8, transitionId,
+    })
+
+    const confirmation = useChatStore.getState().confirmProviderTransition(TEST_SESSION_ID)
+    useChatStore.getState().cancelProviderTransition(TEST_SESSION_ID)
+    resolveTransition({ sessionId: transitionId, workDir: '/workspace/project', created: true, targetSelection })
+
+    await expect(confirmation).resolves.toBeNull()
+    expect(openTabMock).not.toHaveBeenCalled()
+  })
+
+  it('does not let an in-flight transition swallow a newer confirmation', async () => {
+    const firstSelection = { providerId: 'provider-b', modelId: 'first-model' }
+    const secondSelection = { providerId: 'provider-c', modelId: 'second-model' }
+    const firstTransitionId = '55555555-5555-4555-8555-555555555555'
+    const secondTransitionId = '66666666-6666-4666-8666-666666666666'
+    let resolveFirst!: (value: Awaited<ReturnType<typeof sessionsApi.createProviderTransition>>) => void
+    vi.mocked(sessionsApi.createProviderTransition)
+      .mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve }))
+      .mockResolvedValueOnce({ sessionId: secondTransitionId, workDir: '/workspace/project', created: true, targetSelection: secondSelection })
+
+    const firstRequestId = useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, firstSelection)
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'runtime_config_result', requestId: firstRequestId, result: 'provider_transition_required',
+      sourceSessionId: TEST_SESSION_ID, sourceProviderId: 'provider-a', targetSelection: firstSelection,
+      messageCount: 8, transitionId: firstTransitionId,
+    })
+    const first = useChatStore.getState().confirmProviderTransition(TEST_SESSION_ID)
+
+    const secondRequestId = useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, secondSelection)
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'runtime_config_result', requestId: secondRequestId, result: 'provider_transition_required',
+      sourceSessionId: TEST_SESSION_ID, sourceProviderId: 'provider-a', targetSelection: secondSelection,
+      messageCount: 8, transitionId: secondTransitionId,
+    })
+    await expect(useChatStore.getState().confirmProviderTransition(TEST_SESSION_ID)).resolves.toBe(secondTransitionId)
+    resolveFirst({ sessionId: firstTransitionId, workDir: '/workspace/project', created: true, targetSelection: firstSelection })
+    await expect(first).resolves.toBeNull()
+
+    expect(openTabMock).toHaveBeenCalledTimes(1)
+    expect(openTabMock).toHaveBeenCalledWith(secondTransitionId, 'New session', 'session')
+  })
+
+  it('clears the current rejected runtime request and exposes a stable error', () => {
+    const sourceSelection = { providerId: 'provider-a', modelId: 'source-model' }
+    useSessionRuntimeStore.getState().setSelection(TEST_SESSION_ID, sourceSelection)
+    const requestId = useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, {
+      providerId: 'provider-b',
+      modelId: 'target-model',
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'runtime_config_result',
+      requestId,
+      result: 'rejected',
+      code: 'RUNTIME_CONFIG_INVALID',
+      message: 'Selected runtime is unavailable.',
+    })
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.pendingRuntimeConfig).toBeNull()
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.runtimeConfigError).toEqual({
+      code: 'RUNTIME_CONFIG_INVALID',
+      message: 'Selected runtime is unavailable.',
+    })
+    expect(useSessionRuntimeStore.getState().selections[TEST_SESSION_ID]).toEqual(sourceSelection)
   })
 
   it('keeps AskUserQuestion permission requests out of the message list while tracking the pending request', () => {
@@ -5877,6 +6113,262 @@ describe('chatStore history mapping', () => {
       content: prompt,
       modelContent: `@"${imagePath}" ${prompt}`,
     })
+  })
+
+  it('dedupes a real three-image turn when replay uses generated upload filenames', () => {
+    const prompt = '帮我对比这三张截图里的布局差异'
+    const images = [
+      {
+        type: 'image' as const,
+        name: '首页.png',
+        path: 'C:\\Users\\Relakkes\\Pictures\\首页.png',
+        data: 'data:image/png;base64,AAAA',
+        mimeType: 'image/png',
+      },
+      {
+        type: 'image' as const,
+        name: '详情页.png',
+        path: 'C:\\Users\\Relakkes\\Pictures\\详情页.png',
+        data: 'data:image/png;base64,BBBB',
+        mimeType: 'image/png',
+      },
+      {
+        type: 'image' as const,
+        name: '设置页.png',
+        path: 'C:\\Users\\Relakkes\\Pictures\\设置页.png',
+        data: 'data:image/png;base64,CCCC',
+        mimeType: 'image/png',
+      },
+    ]
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
+      },
+    })
+
+    useChatStore.getState().sendMessage(TEST_SESSION_ID, prompt, images)
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'user_message_replay',
+      content: [
+        prompt,
+        '[Image source: C:\\Users\\Relakkes\\.claude\\uploads\\sid\\4dbf58f8-24f1-42e9-8dd8-b572cc2b9488-首页.png]',
+        '[Image source: C:\\Users\\Relakkes\\.claude\\uploads\\sid\\05559a7c-aeae-45f5-ac6b-7580ea22e45b-详情页.png]',
+        '[Image source: C:\\Users\\Relakkes\\.claude\\uploads\\sid\\13b18a3e-dd72-4b93-8fc8-ff518c64c132-设置页.png]',
+      ].join('\n'),
+    })
+
+    const userMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
+      .filter((message) => message.type === 'user_text')
+    expect(userMessages).toHaveLength(1)
+  })
+
+  it('dedupes three images when each generated upload prefix changes', () => {
+    const prompt = 'compare all three uploads'
+    const names = ['first.png', 'second.png', 'third.png']
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
+      },
+    })
+
+    useChatStore.getState().sendMessage(
+      TEST_SESSION_ID,
+      prompt,
+      names.map((name, index) => ({
+        type: 'image',
+        name,
+        path: `C:\\Users\\Relakkes\\.claude\\uploads\\sid\\old-${index}-${name}`,
+      })),
+    )
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'user_message_replay',
+      content: [
+        prompt,
+        ...names.map((name, index) =>
+          `[Image source: C:/Users/Relakkes/.claude/uploads/sid/new-${index}-${name}]`),
+      ].join('\n'),
+    })
+
+    const userMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
+      .filter((message) => message.type === 'user_text')
+    expect(userMessages).toHaveLength(1)
+  })
+
+  it('dedupes three pathless optimistic images by attachment name', () => {
+    const prompt = 'inspect these screenshots'
+    const names = ['alpha.png', 'beta.png', 'gamma.png']
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
+      },
+    })
+
+    useChatStore.getState().sendMessage(
+      TEST_SESSION_ID,
+      prompt,
+      names.map((name) => ({
+        type: 'image',
+        name,
+        data: 'data:image/png;base64,AAAA',
+        mimeType: 'image/png',
+      })),
+    )
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'user_message_replay',
+      content: [
+        prompt,
+        ...names.map((name) => `[Image source: /Users/test/.claude/uploads/sid/random-${name}]`),
+      ].join('\n'),
+    })
+
+    const userMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
+      .filter((message) => message.type === 'user_text')
+    expect(userMessages).toHaveLength(1)
+  })
+
+  it('dedupes three replayed images when their order changes', () => {
+    const prompt = 'review the image set'
+    const images = ['one.png', 'two.png', 'three.png'].map((name) => ({
+      type: 'image' as const,
+      name,
+      path: `/tmp/original/${name}`,
+    }))
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
+      },
+    })
+
+    useChatStore.getState().sendMessage(TEST_SESSION_ID, prompt, images)
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'user_message_replay',
+      content: [
+        prompt,
+        '[Image source: C:\\uploads\\new-three.png]',
+        '[Image source: C:\\uploads\\new-one.png]',
+        '[Image source: C:\\uploads\\new-two.png]',
+      ].join('\n'),
+    })
+
+    const userMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
+      .filter((message) => message.type === 'user_text')
+    expect(userMessages).toHaveLength(1)
+  })
+
+  it('keeps both three-image messages when one replayed image differs', () => {
+    const prompt = 'compare this image set'
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
+      },
+    })
+
+    useChatStore.getState().sendMessage(
+      TEST_SESSION_ID,
+      prompt,
+      ['one.png', 'two.png', 'three.png'].map((name) => ({
+        type: 'image',
+        name,
+        path: `/tmp/${name}`,
+      })),
+    )
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'user_message_replay',
+      content: [
+        prompt,
+        '[Image source: /uploads/random-one.png]',
+        '[Image source: /uploads/random-two.png]',
+        '[Image source: /uploads/random-different.png]',
+      ].join('\n'),
+    })
+
+    const userMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
+      .filter((message) => message.type === 'user_text')
+    expect(userMessages).toHaveLength(2)
+  })
+
+  it('does not reuse one replayed image to match duplicate attachment names', () => {
+    const prompt = 'inspect duplicate filenames'
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
+      },
+    })
+
+    useChatStore.getState().sendMessage(
+      TEST_SESSION_ID,
+      prompt,
+      [
+        { type: 'image', name: 'same.png', data: 'data:image/png;base64,AAAA' },
+        { type: 'image', name: 'same.png', data: 'data:image/png;base64,BBBB' },
+      ],
+    )
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'user_message_replay',
+      content: [
+        prompt,
+        '[Image source: /uploads/random-same.png]',
+        '[Image source: /uploads/random-different.png]',
+      ].join('\n'),
+    })
+
+    const userMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
+      .filter((message) => message.type === 'user_text')
+    expect(userMessages).toHaveLength(2)
+  })
+
+  it('keeps both image messages when replay has no image metadata', () => {
+    const prompt = 'compare this image'
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
+      },
+    })
+
+    useChatStore.getState().sendMessage(
+      TEST_SESSION_ID,
+      prompt,
+      [{ type: 'image', name: 'only.png', path: '/tmp/only.png' }],
+    )
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'user_message_replay',
+      content: prompt,
+    })
+
+    const userMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
+      .filter((message) => message.type === 'user_text')
+    expect(userMessages).toHaveLength(2)
+  })
+
+  it('keeps both image messages when the replayed image count differs', () => {
+    const prompt = 'compare the uploads'
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
+      },
+    })
+
+    useChatStore.getState().sendMessage(
+      TEST_SESSION_ID,
+      prompt,
+      ['one.png', 'two.png', 'three.png'].map((name) => ({
+        type: 'image',
+        name,
+        path: `/tmp/${name}`,
+      })),
+    )
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'user_message_replay',
+      content: [
+        prompt,
+        '[Image source: /uploads/random-one.png]',
+        '[Image source: /uploads/random-two.png]',
+      ].join('\n'),
+    })
+
+    const userMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
+      .filter((message) => message.type === 'user_text')
+    expect(userMessages).toHaveLength(2)
   })
 
   it('keeps a replay with the same text when it refers to a different image', () => {

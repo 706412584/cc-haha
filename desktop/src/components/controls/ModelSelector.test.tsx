@@ -202,11 +202,7 @@ describe('ModelSelector', () => {
       await Promise.resolve()
     })
 
-    expect(useSessionRuntimeStore.getState().selections['session-1']).toEqual({
-      providerId: 'provider-a',
-      modelId: 'provider-fast',
-      effortLevel: 'max',
-    })
+    expect(useSessionRuntimeStore.getState().selections['session-1']).toBeUndefined()
     expect(setSessionRuntime).toHaveBeenCalledWith('session-1', {
       providerId: 'provider-a',
       modelId: 'provider-fast',
@@ -301,11 +297,7 @@ describe('ModelSelector', () => {
     await clickByRole('Effort: Max')
     fireEvent.keyDown(screen.getByRole('slider', { name: 'Effort' }), { key: 'ArrowLeft' })
 
-    expect(useSessionRuntimeStore.getState().selections['session-1']).toEqual({
-      providerId: 'provider-a',
-      modelId: 'provider-main',
-      effortLevel: 'high',
-    })
+    expect(useSessionRuntimeStore.getState().selections['session-1']).toBeUndefined()
     expect(useSessionRuntimeStore.getState().selections['session-2']).toEqual({
       providerId: 'provider-a',
       modelId: 'provider-main',
@@ -367,11 +359,7 @@ describe('ModelSelector', () => {
       await Promise.resolve()
     })
 
-    expect(useSessionRuntimeStore.getState().selections['session-openai']).toEqual({
-      providerId: OPENAI_OFFICIAL_PROVIDER_ID,
-      modelId: 'gpt-5.5',
-      effortLevel: 'medium',
-    })
+    expect(useSessionRuntimeStore.getState().selections['session-openai']).toBeUndefined()
     expect(setSessionRuntime).toHaveBeenCalledWith('session-openai', {
       providerId: OPENAI_OFFICIAL_PROVIDER_ID,
       modelId: 'gpt-5.5',
@@ -439,8 +427,8 @@ describe('ModelSelector', () => {
 
     expect(useSessionRuntimeStore.getState().selections['session-openai-effort']).toEqual({
       providerId: OPENAI_OFFICIAL_PROVIDER_ID,
-      modelId: 'gpt-5.5',
-      effortLevel: 'medium',
+      modelId: 'gpt-5.6-sol',
+      effortLevel: 'max',
     })
 
     expect(screen.getByRole('button', { name: 'Effort: Medium' })).toBeInTheDocument()
@@ -451,8 +439,8 @@ describe('ModelSelector', () => {
 
     expect(useSessionRuntimeStore.getState().selections['session-openai-effort']).toEqual({
       providerId: OPENAI_OFFICIAL_PROVIDER_ID,
-      modelId: 'gpt-5.5',
-      effortLevel: 'xhigh',
+      modelId: 'gpt-5.6-sol',
+      effortLevel: 'max',
     })
   })
 
@@ -488,10 +476,7 @@ describe('ModelSelector', () => {
       await Promise.resolve()
     })
 
-    expect(useSessionRuntimeStore.getState().selections['session-grok']).toMatchObject({
-      providerId: 'grok-official',
-      modelId: 'grok-4.5',
-    })
+    expect(useSessionRuntimeStore.getState().selections['session-grok']).toBeUndefined()
     expect(screen.queryByRole('button', { name: /Effort:/i })).not.toBeInTheDocument()
   })
 

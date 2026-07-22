@@ -15,6 +15,24 @@ import { logForDebugging } from '../../utils/debug.js'
 import { errorMessage } from '../../utils/errors.js'
 import { logError } from '../../utils/log.js'
 import { subprocessEnv } from '../../utils/subprocessEnv.js'
+export type LspLifecycleFailureReason =
+  | 'spawn-failed'
+  | 'init-timeout'
+  | 'init-failed'
+  | 'crashed'
+  | 'restart-cap-exhausted'
+
+export class LspLifecycleError extends Error {
+  constructor(
+    readonly reason: LspLifecycleFailureReason,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options)
+    this.name = 'LspLifecycleError'
+  }
+}
+
 /**
  * LSP client interface.
  */
@@ -120,7 +138,7 @@ export function createLSPClient(
           }
           const onError = (error: Error): void => {
             cleanup()
-            reject(error)
+            reject(new LspLifecycleError('spawn-failed', 'Language server failed to spawn', { cause: error }))
           }
           const cleanup = (): void => {
             spawnedProcess.removeListener('spawn', onSpawn)
@@ -158,8 +176,9 @@ export function createLSPClient(
             isInitialized = false
             startFailed = false
             startError = undefined
-            const crashError = new Error(
-              `LSP server ${serverName} crashed with exit code ${code}`,
+            const crashError = new LspLifecycleError(
+              'crashed',
+              `Language server exited with code ${code}`,
             )
             logError(crashError)
             onCrash?.(crashError)
@@ -249,7 +268,10 @@ export function createLSPClient(
         logError(
           new Error(`LSP server ${serverName} failed to start: ${err.message}`),
         )
-        throw error
+        if (error instanceof LspLifecycleError) throw error
+        throw new LspLifecycleError('spawn-failed', 'Language server failed to spawn', {
+          cause: error,
+        })
       }
     },
 
@@ -282,7 +304,9 @@ export function createLSPClient(
             `LSP server ${serverName} initialize failed: ${err.message}`,
           ),
         )
-        throw error
+        throw new LspLifecycleError('init-failed', 'Language server initialization failed', {
+          cause: error,
+        })
       }
     },
 

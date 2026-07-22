@@ -40,6 +40,15 @@ export type LanguageServerInstallMap = {
   linux?: LanguageServerInstallStep[]
 }
 
+export type KnownLanguageServerLaunchDescriptor = {
+  language: string
+  label: string
+  packageName: string
+  binName: string
+  presetArgs: readonly string[]
+  extensions: Readonly<Record<string, string>>
+}
+
 export type KnownLanguageServer = {
   /** Stable id, e.g. "python", "typescript". */
   language: string
@@ -49,6 +58,8 @@ export type KnownLanguageServer = {
   command: string
   /** Optional fallback commands probed when `command` is absent. */
   candidates?: string[]
+  /** Safe package launch metadata for built-in npm language servers. */
+  launch?: KnownLanguageServerLaunchDescriptor
   /** Project / install homepage shown when no install step fits. */
   homepage?: string
   /** Per-platform install commands. */
@@ -74,6 +85,14 @@ export const KNOWN_LANGUAGE_SERVERS: readonly KnownLanguageServer[] = [
     label: 'Python (Pyright)',
     command: 'pyright-langserver',
     candidates: ['pyright'],
+    launch: {
+      language: 'python',
+      label: 'Python (Pyright)',
+      packageName: 'pyright',
+      binName: 'pyright-langserver',
+      presetArgs: ['--stdio'],
+      extensions: { '.py': 'python' },
+    },
     homepage: 'https://github.com/microsoft/pyright',
     install: {
       win32: [{ manager: 'npm', cmd: 'npm install -g pyright' }],
@@ -85,6 +104,19 @@ export const KNOWN_LANGUAGE_SERVERS: readonly KnownLanguageServer[] = [
     language: 'typescript',
     label: 'JavaScript / TypeScript',
     command: 'typescript-language-server',
+    launch: {
+      language: 'typescript',
+      label: 'JavaScript / TypeScript',
+      packageName: 'typescript-language-server',
+      binName: 'typescript-language-server',
+      presetArgs: ['--stdio'],
+      extensions: {
+        '.ts': 'typescript',
+        '.tsx': 'typescriptreact',
+        '.js': 'javascript',
+        '.jsx': 'javascriptreact',
+      },
+    },
     homepage: 'https://github.com/typescript-language-server/typescript-language-server',
     install: {
       win32: [{ manager: 'npm', cmd: 'npm install -g typescript typescript-language-server' }],
@@ -139,6 +171,14 @@ export const KNOWN_LANGUAGE_SERVERS: readonly KnownLanguageServer[] = [
     language: 'php',
     label: 'PHP (Intelephense)',
     command: 'intelephense',
+    launch: {
+      language: 'php',
+      label: 'PHP (Intelephense)',
+      packageName: 'intelephense',
+      binName: 'intelephense',
+      presetArgs: ['--stdio'],
+      extensions: { '.php': 'php' },
+    },
     homepage: 'https://github.com/bmewburn/intelephense-docs',
     install: {
       win32: [{ manager: 'npm', cmd: 'npm install -g intelephense' }],

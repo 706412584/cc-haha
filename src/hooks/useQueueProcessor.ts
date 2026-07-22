@@ -83,6 +83,7 @@ export function useQueueProcessor({
     processQueueIfReady({
       executeInput: executeQueuedInput,
       getAppState: appStateStore.getState,
+      setAppState: appStateStore.setState,
     })
   }, [
     queueSnapshot,

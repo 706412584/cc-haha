@@ -10,6 +10,8 @@ import type { ServerWebSocket } from 'bun'
 import type {
   ClientMessage,
   PermissionMode,
+  RuntimeSelection,
+  RuntimeConfigResult,
   ServerMessage,
   StreamingFallbackCause,
   TokenUsage,
@@ -63,6 +65,7 @@ import {
 } from '../../utils/commandMetadata.js'
 import { shouldCreateWorktreeForSessionLaunch } from '../services/repositoryLaunchService.js'
 import { getDisconnectGraceMs } from './disconnectGraceConfig.js'
+import { sessionActivityCoordinator } from '../services/sessionActivityCoordinator.js'
 
 const settingsService = new SettingsService()
 const providerService = new ProviderService()
@@ -140,6 +143,37 @@ export type RuntimeOverride = {
   providerRevision?: number
 }
 
+export type RuntimeTransitionClassification =
+  | { kind: 'apply' }
+  | { kind: 'provider-transition'; sourceProviderId: string | null }
+
+export function classifyRuntimeTransition({
+  transcriptMessageCount,
+  persistedProviderId,
+  currentProviderId,
+  target,
+}: {
+  transcriptMessageCount: number
+  persistedProviderId: string | null | undefined
+  currentProviderId: string | null | undefined
+  target: RuntimeOverride
+}): RuntimeTransitionClassification {
+  if (transcriptMessageCount === 0) return { kind: 'apply' }
+
+  if (persistedProviderId !== undefined) {
+    return persistedProviderId === target.providerId
+      ? { kind: 'apply' }
+      : {
+          kind: 'provider-transition',
+          sourceProviderId: persistedProviderId,
+        }
+  }
+
+  return currentProviderId === target.providerId
+    ? { kind: 'apply' }
+    : { kind: 'provider-transition', sourceProviderId: null }
+}
+
 type ActiveUserTurnState = {
   messageSent: boolean
 }
@@ -183,6 +217,8 @@ const handoffSummarySessions = new Map<string, string>()
 
 const runtimeTransitionPromises = new Map<string, Promise<void>>()
 const runtimeConfigHandlerPromises = new Map<string, Promise<void>>()
+const runtimeConfigResults = new Map<string, Map<string, RuntimeConfigResult>>()
+const MAX_RUNTIME_CONFIG_RESULTS_PER_SESSION = 32
 let getCachedSessionSummaryForHandler = getCachedSessionSummary
 const sessionStartupPromises = new Map<string, Promise<void>>()
 const runtimeOverrideVersions = new Map<string, number>()
@@ -318,6 +354,15 @@ export const handleWebSocket = {
       switch (message.type) {
         case 'user_message': {
           const activeTurn: ActiveUserTurnState = { messageSent: false }
+          if (!sessionActivityCoordinator.tryBeginUserTurn(ws.data.sessionId)) {
+            sendMessage(ws, {
+              type: 'error',
+              message: 'The session is changing providers. Retry after the new session opens.',
+              code: 'SESSION_TRANSITION_IN_PROGRESS',
+              retryable: true,
+            })
+            break
+          }
           handleUserMessage(ws, message, activeTurn).catch((err) => {
             const sessionId = ws.data.sessionId
             void diagnosticsService.recordEvent({
@@ -645,9 +690,9 @@ async function handleUserMessage(
 }
 
 function clearActiveUserTurn(sessionId: string, activeTurn: ActiveUserTurnState): void {
-  if (activeUserTurns.get(sessionId) === activeTurn) {
-    activeUserTurns.delete(sessionId)
-  }
+  if (activeUserTurns.get(sessionId) !== activeTurn) return
+  activeUserTurns.delete(sessionId)
+  sessionActivityCoordinator.endUserTurn(sessionId)
 }
 
 function bindActiveUserTurnCompletion(
@@ -1104,97 +1149,157 @@ async function handleSetRuntimeConfig(
   message: Extract<ClientMessage, { type: 'set_runtime_config' }>
 ) {
   const { sessionId } = ws.data
-  let modelId = typeof message.modelId === 'string' ? message.modelId.trim() : ''
-  if (!modelId) {
-    sendMessage(ws, {
-      type: 'error',
-      message: 'Runtime model selection is invalid.',
-      code: 'RUNTIME_CONFIG_INVALID',
+  const requestId = typeof message.requestId === 'string' ? message.requestId : ''
+  const sendResult = (result: RuntimeConfigResult) => {
+    if (isUuid(requestId)) {
+      let sessionResults = runtimeConfigResults.get(sessionId)
+      if (!sessionResults) {
+        sessionResults = new Map()
+        runtimeConfigResults.set(sessionId, sessionResults)
+      }
+      sessionResults.set(requestId, result)
+      while (sessionResults.size > MAX_RUNTIME_CONFIG_RESULTS_PER_SESSION) {
+        sessionResults.delete(sessionResults.keys().next().value!)
+      }
+    }
+    sendMessage(ws, result)
+  }
+  const reject = (code: string, reason: string) => {
+    sendResult({
+      type: 'runtime_config_result',
+      requestId,
+      result: 'rejected',
+      code,
+      message: reason,
     })
+  }
+
+  if (!isUuid(requestId)) {
+    reject('RUNTIME_CONFIG_REQUEST_INVALID', 'Runtime config request id is invalid.')
     return
   }
-  if (isGrokOfficialProviderId(message.providerId)) {
-    modelId = (await getGrokReasoningEfforts(modelId)).modelId
+
+  const cachedResult = runtimeConfigResults.get(sessionId)?.get(requestId)
+  if (cachedResult) {
+    sendMessage(ws, cachedResult)
+    return
   }
-  const effortLevel =
-    typeof message.effortLevel === 'string' ? message.effortLevel.trim() : undefined
-  if (
-    effortLevel !== undefined &&
-    !(await isRuntimeEffortSupported(message.providerId, modelId, effortLevel))
-  ) {
-    sendMessage(ws, {
-      type: 'error',
-      message: 'Runtime effort selection is invalid.',
-      code: 'RUNTIME_CONFIG_INVALID',
+
+  try {
+    let modelId = typeof message.modelId === 'string' ? message.modelId.trim() : ''
+    if (!modelId) {
+      reject('RUNTIME_CONFIG_INVALID', 'Runtime model selection is invalid.')
+      return
+    }
+    if (isGrokOfficialProviderId(message.providerId)) {
+      modelId = (await getGrokReasoningEfforts(modelId)).modelId
+    }
+    const effortLevel =
+      typeof message.effortLevel === 'string' ? message.effortLevel.trim() : undefined
+    if (
+      effortLevel !== undefined &&
+      !(await isRuntimeEffortSupported(message.providerId, modelId, effortLevel))
+    ) {
+      reject('RUNTIME_CONFIG_INVALID', 'Runtime effort selection is invalid.')
+      return
+    }
+    const thinkingEnabled =
+      typeof message.thinkingEnabled === 'boolean' ? message.thinkingEnabled : undefined
+    const providerId = message.providerId ?? null
+    const providerRevision = await resolveProviderRevision(providerId)
+    const selection: RuntimeSelection = {
+      providerId,
+      modelId,
+      ...(effortLevel ? { effortLevel } : {}),
+      ...(thinkingEnabled !== undefined ? { thinkingEnabled } : {}),
+    }
+    const nextOverride: RuntimeOverride = {
+      providerId,
+      modelId,
+      ...(effortLevel ? { effort: effortLevel } : {}),
+      ...(thinkingEnabled !== undefined ? { thinkingEnabled } : {}),
+      ...(providerRevision > 0 ? { providerRevision } : {}),
+    }
+    const prevOverride = runtimeOverrides.get(sessionId)
+    const launchInfo = await sessionService.getSessionLaunchInfo(sessionId).catch(() => null)
+    const currentProviderId = prevOverride?.providerId ??
+      (launchInfo?.runtimeProviderId !== undefined
+        ? launchInfo.runtimeProviderId
+        : (await getDefaultRuntimeSettings()).providerId)
+    const classification = classifyRuntimeTransition({
+      transcriptMessageCount: launchInfo?.transcriptMessageCount ?? 0,
+      persistedProviderId: launchInfo?.runtimeProviderId,
+      currentProviderId,
+      target: nextOverride,
     })
-    return
-  }
-  // Per-session thinking override. `undefined` means "inherit from global user setting"
-  // (which `resolveDesktopThinkingMode` reads in getRuntimeSettings); a concrete boolean
-  // wins over the global toggle.
-  const thinkingEnabled =
-    typeof message.thinkingEnabled === 'boolean' ? message.thinkingEnabled : undefined
 
-  const providerId = message.providerId ?? null
-  const providerRevision = await resolveProviderRevision(providerId)
-
-  const nextOverride: RuntimeOverride = {
-    providerId,
-    modelId,
-    ...(effortLevel ? { effort: effortLevel } : {}),
-    ...(thinkingEnabled !== undefined ? { thinkingEnabled } : {}),
-    ...(providerRevision > 0 ? { providerRevision } : {}),
-  }
-  const prevOverride = runtimeOverrides.get(sessionId)
-  if (runtimeOverridesMatch(prevOverride, nextOverride)) {
-    return
-  }
-
-  runtimeOverrides.set(sessionId, nextOverride)
-  runtimeOverrideVersions.set(
-    sessionId,
-    (runtimeOverrideVersions.get(sessionId) ?? 0) + 1,
-  )
-
-  if (shouldDeferRuntimeRestartForActiveTurn(sessionId)) {
-    deferredRuntimeRestarts.set(sessionId, nextOverride)
-    await persistSessionRuntimeConfig(sessionId, nextOverride)
-    return
-  }
-
-  const pendingStartup = sessionStartupPromises.get(sessionId)
-  if (pendingStartup) {
-    const startupRuntimeVersion = sessionStartupRuntimeVersions.get(sessionId) ?? 0
-    const currentRuntimeVersion = runtimeOverrideVersions.get(sessionId) ?? 0
-    if (startupRuntimeVersion >= currentRuntimeVersion) {
-      await persistSessionRuntimeConfig(sessionId, nextOverride)
+    if (classification.kind === 'provider-transition') {
+      sendResult({
+        type: 'runtime_config_result',
+        requestId,
+        result: 'provider_transition_required',
+        sourceSessionId: sessionId,
+        sourceProviderId: classification.sourceProviderId,
+        targetSelection: selection,
+        messageCount: launchInfo?.transcriptMessageCount ?? 0,
+        transitionId: crypto.randomUUID(),
+      })
       return
     }
 
-    await enqueueRuntimeTransition(sessionId, async () => {
-      await persistSessionRuntimeConfig(sessionId, nextOverride)
-      await pendingStartup.catch(() => undefined)
-      const currentOverride = runtimeOverrides.get(sessionId)
-      if (
-        !runtimeOverridesMatch(currentOverride, nextOverride) ||
-        !conversationService.hasSession(sessionId)
-      ) {
-        return
+    if (!runtimeOverridesMatch(prevOverride, nextOverride)) {
+      runtimeOverrides.set(sessionId, nextOverride)
+      runtimeOverrideVersions.set(
+        sessionId,
+        (runtimeOverrideVersions.get(sessionId) ?? 0) + 1,
+      )
+
+      if (shouldDeferRuntimeRestartForActiveTurn(sessionId)) {
+        deferredRuntimeRestarts.set(sessionId, nextOverride)
+        await persistSessionRuntimeConfig(sessionId, nextOverride)
+      } else {
+        const pendingStartup = sessionStartupPromises.get(sessionId)
+        if (pendingStartup) {
+          const startupRuntimeVersion = sessionStartupRuntimeVersions.get(sessionId) ?? 0
+          const currentRuntimeVersion = runtimeOverrideVersions.get(sessionId) ?? 0
+          if (startupRuntimeVersion >= currentRuntimeVersion) {
+            await persistSessionRuntimeConfig(sessionId, nextOverride)
+          } else {
+            await enqueueRuntimeTransition(sessionId, async () => {
+              await persistSessionRuntimeConfig(sessionId, nextOverride)
+              await pendingStartup.catch(() => undefined)
+              const currentOverride = runtimeOverrides.get(sessionId)
+              if (
+                runtimeOverridesMatch(currentOverride, nextOverride) &&
+                conversationService.hasSession(sessionId)
+              ) {
+                await scheduleRestartSessionWithRuntimeConfig(ws, sessionId)
+              }
+            })
+          }
+        } else if (conversationService.hasSession(sessionId)) {
+          await enqueueRuntimeTransition(sessionId, async () => {
+            await persistSessionRuntimeConfig(sessionId, nextOverride)
+            await scheduleRestartSessionWithRuntimeConfig(ws, sessionId)
+          })
+        } else {
+          await persistSessionRuntimeConfig(sessionId, nextOverride)
+        }
       }
-      await scheduleRestartSessionWithRuntimeConfig(ws, sessionId)
-    })
-    return
-  }
+    }
 
-  if (conversationService.hasSession(sessionId)) {
-    await enqueueRuntimeTransition(sessionId, async () => {
-      await persistSessionRuntimeConfig(sessionId, nextOverride)
-      await scheduleRestartSessionWithRuntimeConfig(ws, sessionId)
+    sendResult({
+      type: 'runtime_config_result',
+      requestId,
+      result: 'applied',
+      selection,
     })
-    return
+  } catch (error) {
+    reject(
+      'RUNTIME_CONFIG_FAILED',
+      error instanceof Error ? error.message : 'Runtime config could not be applied.',
+    )
   }
-
-  await persistSessionRuntimeConfig(sessionId, nextOverride)
 }
 
 async function restartSessionWithPermissionMode(
@@ -1689,10 +1794,12 @@ function cleanupSessionRuntimeState(sessionId: string) {
   soloPipelineModeSessions.delete(sessionId)
   handoffSummarySessions.delete(sessionId)
   activeUserTurns.delete(sessionId)
+  sessionActivityCoordinator.clear(sessionId)
   deferredRuntimeRestarts.delete(sessionId)
   deferredPermissionModes.delete(sessionId)
   runtimeTransitionPromises.delete(sessionId)
   runtimeConfigHandlerPromises.delete(sessionId)
+  runtimeConfigResults.delete(sessionId)
   sessionStartupPromises.delete(sessionId)
   lastResolvedStartupWorkDirs.delete(sessionId)
   taskNotificationPersistence.delete(sessionId)
@@ -3284,7 +3391,7 @@ async function getGrokReasoningEfforts(modelId: string): Promise<{
   }
 }
 
-async function isRuntimeEffortSupported(
+export async function isRuntimeEffortSupported(
   providerId: string | null | undefined,
   modelId: string,
   effort: string,
@@ -3348,6 +3455,10 @@ async function resolveProviderRevision(
  * env (baseUrl / apiKey / model mapping) is stale, so we must consider
  * that a difference and force a restart.
  */
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+}
+
 export function runtimeOverridesMatch(
   prev: RuntimeOverride | undefined,
   next: RuntimeOverride,

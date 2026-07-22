@@ -307,12 +307,16 @@ export const useSessionRuntimeStore = create<SessionRuntimeStore>((set) => ({
           providerId: session.runtimeProviderId,
           modelId: session.runtimeModelId,
           ...(session.effortLevel ? { effortLevel: session.effortLevel } : {}),
+          ...(session.thinkingEnabled !== undefined
+            ? { thinkingEnabled: session.thinkingEnabled }
+            : {}),
         })
         const current = selections[session.id]
         if (
           current?.providerId === selection.providerId &&
           current.modelId === selection.modelId &&
-          current.effortLevel === selection.effortLevel
+          current.effortLevel === selection.effortLevel &&
+          current.thinkingEnabled === selection.thinkingEnabled
         ) {
           continue
         }
