@@ -76,6 +76,18 @@ function officialChoices(
   }
 }
 
+function mergeOfficialModels(availableModels: ModelInfo[]): ModelInfo[] {
+  const merged = [...OFFICIAL_MODELS]
+  const knownIds = new Set(merged.map(model => model.id))
+  for (const model of availableModels) {
+    if (!knownIds.has(model.id)) {
+      knownIds.add(model.id)
+      merged.push(model)
+    }
+  }
+  return merged
+}
+
 function buildProviderModels(
   provider: SavedProvider,
   labels: Record<'main' | 'haiku' | 'sonnet' | 'opus', string>,
@@ -121,7 +133,7 @@ function buildProviderChoices(
   grokOfficialLoggedIn: boolean,
 ): ProviderChoice[] {
   const claudeOfficialModels = activeId === null && availableModels.length > 0
-    ? availableModels
+    ? mergeOfficialModels(availableModels)
     : OFFICIAL_MODELS
   const openAIOfficialModels = activeId === OPENAI_OFFICIAL_PROVIDER_ID && availableModels.length > 0
     ? availableModels

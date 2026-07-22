@@ -539,6 +539,15 @@ describe('build-sidecars Windows x64 target mapping', () => {
 
 const compiledSidecarSmokeEnabled =
   process.env.CC_HAHA_RUN_COMPILED_SIDECAR_SMOKE === '1'
+const configuredCompiledSidecarStarts = Number.parseInt(
+  process.env.CC_HAHA_COMPILED_SIDECAR_SMOKE_STARTS ?? '',
+  10,
+)
+const compiledSidecarSmokeStarts = Number.isInteger(configuredCompiledSidecarStarts)
+  && configuredCompiledSidecarStarts >= 2
+  && configuredCompiledSidecarStarts <= 50
+  ? configuredCompiledSidecarStarts
+  : 2
 
 describe.skipIf(!compiledSidecarSmokeEnabled)('compiled sidecar local-index smoke', () => {
   it('uses SQLite by default, serves one indexed session, and reopens the database', async () => {
@@ -612,20 +621,17 @@ describe.skipIf(!compiledSidecarSmokeEnabled)('compiled sidecar local-index smok
         'utf8',
       )
 
-      await startAndVerify()
-      await startAndVerify()
-      expect(authenticationProofs).toEqual([
-        {
+      for (let start = 0; start < compiledSidecarSmokeStarts; start += 1) {
+        await startAndVerify()
+      }
+      expect(authenticationProofs).toHaveLength(compiledSidecarSmokeStarts)
+      for (const proof of authenticationProofs) {
+        expect(proof).toEqual({
           missingTokenStatus: 403,
           wrongTokenStatus: 403,
           correctTokenStatus: 200,
-        },
-        {
-          missingTokenStatus: 403,
-          wrongTokenStatus: 403,
-          correctTokenStatus: 200,
-        },
-      ])
+        })
+      }
     } finally {
       try {
         if (activeProcess) await terminateCompiledSidecar(activeProcess)
@@ -635,5 +641,5 @@ describe.skipIf(!compiledSidecarSmokeEnabled)('compiled sidecar local-index smok
     }
 
     expect(await stat(rootDir).then(() => true, () => false)).toBe(false)
-  }, 90_000)
+  }, Math.max(90_000, compiledSidecarSmokeStarts * 10_000))
 })

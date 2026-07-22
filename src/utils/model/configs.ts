@@ -38,6 +38,22 @@ export const CLAUDE_HAIKU_4_5_CONFIG = {
   azureOpenAI: 'claude-haiku-4-5-20251001',
 } as const satisfies ModelConfig
 
+export const CLAUDE_FABLE_5_CONFIG = {
+  firstParty: 'claude-fable-5',
+  bedrock: 'anthropic.claude-fable-5',
+  vertex: 'claude-fable-5',
+  foundry: 'claude-fable-5',
+  azureOpenAI: 'claude-fable-5',
+} as const satisfies ModelConfig
+
+export const CLAUDE_SONNET_5_CONFIG = {
+  firstParty: 'claude-sonnet-5',
+  bedrock: 'anthropic.claude-sonnet-5',
+  vertex: 'claude-sonnet-5',
+  foundry: 'claude-sonnet-5',
+  azureOpenAI: 'claude-sonnet-5',
+} as const satisfies ModelConfig
+
 export const CLAUDE_SONNET_4_CONFIG = {
   firstParty: 'claude-sonnet-4-20250514',
   bedrock: 'us.anthropic.claude-sonnet-4-20250514-v1:0',
@@ -86,6 +102,14 @@ export const CLAUDE_OPUS_4_6_CONFIG = {
   azureOpenAI: 'claude-opus-4-7',
 } as const satisfies ModelConfig
 
+export const CLAUDE_OPUS_4_8_CONFIG = {
+  firstParty: 'claude-opus-4-8',
+  bedrock: 'anthropic.claude-opus-4-8',
+  vertex: 'claude-opus-4-8',
+  foundry: 'claude-opus-4-8',
+  azureOpenAI: 'claude-opus-4-8',
+} as const satisfies ModelConfig
+
 export const CLAUDE_SONNET_4_6_CONFIG = {
   firstParty: 'claude-sonnet-4-6',
   bedrock: 'us.anthropic.claude-sonnet-4-6',
@@ -120,6 +144,7 @@ export const GPT_5_4_CODEX_CONFIG = {
 
 // @[MODEL LAUNCH]: Register the new config here.
 export const ALL_MODEL_CONFIGS = {
+  fable5: CLAUDE_FABLE_5_CONFIG,
   haiku35: CLAUDE_3_5_HAIKU_CONFIG,
   haiku45: CLAUDE_HAIKU_4_5_CONFIG,
   sonnet35: CLAUDE_3_5_V2_SONNET_CONFIG,
@@ -127,10 +152,12 @@ export const ALL_MODEL_CONFIGS = {
   sonnet40: CLAUDE_SONNET_4_CONFIG,
   sonnet45: CLAUDE_SONNET_4_5_CONFIG,
   sonnet46: CLAUDE_SONNET_4_6_CONFIG,
+  sonnet50: CLAUDE_SONNET_5_CONFIG,
   opus40: CLAUDE_OPUS_4_CONFIG,
   opus41: CLAUDE_OPUS_4_1_CONFIG,
   opus45: CLAUDE_OPUS_4_5_CONFIG,
   opus46: CLAUDE_OPUS_4_6_CONFIG,
+  opus48: CLAUDE_OPUS_4_8_CONFIG,
   gpt52codex: GPT_5_2_CODEX_CONFIG,
   gpt53codex: GPT_5_3_CODEX_CONFIG,
   gpt54codex: GPT_5_4_CODEX_CONFIG,

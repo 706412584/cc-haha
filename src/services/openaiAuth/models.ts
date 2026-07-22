@@ -148,12 +148,27 @@ export function resolveOpenAIReasoningEffort(
   model: string,
   requestedEffort: unknown,
 ): OpenAIReasoningEffort {
+  return resolveOpenAIReasoningEffortWithPriority(model, [requestedEffort])
+}
+
+/**
+ * Resolve the first model-supported effort candidate, in priority order.
+ * Request-scoped values should come before process/session defaults so
+ * concurrent subagents can select different efforts without mutating shared
+ * environment state.
+ */
+export function resolveOpenAIReasoningEffortWithPriority(
+  model: string,
+  requestedEfforts: readonly unknown[],
+): OpenAIReasoningEffort {
   const entry = getOpenAIModelCatalogEntry(model)
-  if (
-    isOpenAIReasoningEffort(requestedEffort) &&
-    (!entry || entry.supportedReasoningEfforts.includes(requestedEffort))
-  ) {
-    return requestedEffort
+  for (const requestedEffort of requestedEfforts) {
+    if (
+      isOpenAIReasoningEffort(requestedEffort) &&
+      (!entry || entry.supportedReasoningEfforts.includes(requestedEffort))
+    ) {
+      return requestedEffort
+    }
   }
 
   return entry?.defaultReasoningEffort ?? 'medium'

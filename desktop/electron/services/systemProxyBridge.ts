@@ -79,11 +79,15 @@ export class SystemProxyBridge implements SystemProxyBridgeLike {
     this.startPromise = null
     const server = this.server
     this.server = null
+    for (const socket of this.clientSockets) socket.destroy()
+    for (const socket of this.outboundSockets) socket.destroy()
+    // Bun needs the HTTP connection registry drained before close() will
+    // finish after an upgraded CONNECT socket. Calling this before listen
+    // completes breaks the separate startup/stop race, so guard on listening.
+    if (server?.listening) server.closeAllConnections()
     const closing = server?.listening
       ? new Promise<void>(resolve => server.close(() => resolve()))
       : Promise.resolve()
-    for (const socket of this.clientSockets) socket.destroy()
-    for (const socket of this.outboundSockets) socket.destroy()
     await closing
     await startPromise?.catch(() => {})
   }
@@ -178,24 +182,52 @@ export class SystemProxyBridge implements SystemProxyBridgeLike {
     clientSocket: Duplex,
     head: Buffer,
   ): Promise<void> {
+    let routeSocket: Duplex | null = null
+    let clientUnavailable = clientSocket.destroyed
+      || !clientSocket.writable
+      || clientSocket.writableEnded
+      || clientSocket.writableFinished
+    const isClientUnavailable = () => clientUnavailable
+      || clientSocket.destroyed
+      || !clientSocket.writable
+      || clientSocket.writableEnded
+      || clientSocket.writableFinished
+    const closeRoute = () => {
+      clientUnavailable = true
+      routeSocket?.destroy()
+      clientSocket.destroy()
+    }
+    clientSocket.on('error', closeRoute)
+    clientSocket.once('end', closeRoute)
+    clientSocket.once('close', closeRoute)
+
     try {
       const endpoint = parseEndpoint(request.url ?? '', 443)
       if (!endpoint) throw new Error('Invalid CONNECT target')
       const target = new URL(`https://${formatAuthority(endpoint.host, endpoint.port)}/`)
       const rules = await this.resolveRules(target)
+      if (isClientUnavailable()) return
       const route = await connectTunnelUsingRules(rules, endpoint.host, endpoint.port)
+      routeSocket = route.socket
       this.trackOutboundSocket(route.socket)
-      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
-      if (head.length > 0) route.socket.write(head)
-      route.socket.pipe(clientSocket)
-      clientSocket.pipe(route.socket)
       const closeBoth = () => {
         route.socket.destroy()
         clientSocket.destroy()
       }
       route.socket.on('error', closeBoth)
-      clientSocket.on('error', closeBoth)
+      if (isClientUnavailable()) {
+        route.socket.destroy()
+        return
+      }
+      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
+      if (head.length > 0) route.socket.write(head)
+      route.socket.pipe(clientSocket)
+      clientSocket.pipe(route.socket)
     } catch (error) {
+      if (isClientUnavailable()) {
+        clientSocket.destroy()
+        return
+      }
       const authenticationRequired = error instanceof ProxyAuthenticationRequiredError
       clientSocket.end(`${authenticationRequired
         ? 'HTTP/1.1 407 Proxy Authentication Required'

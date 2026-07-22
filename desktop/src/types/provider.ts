@@ -13,6 +13,7 @@ export type ProviderRuntimeKind = 'anthropic_compatible' | 'openai_oauth' | 'gro
 
 export type ModelMapping = {
   main: string
+  fable?: string
   haiku: string
   sonnet: string
   opus: string

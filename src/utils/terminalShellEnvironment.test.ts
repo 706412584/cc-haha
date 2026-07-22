@@ -72,14 +72,16 @@ describe('terminal shell environment', () => {
   })
 
   it('merges shell PATH before base PATH while preserving app env overrides', () => {
+    const basePath = ['/usr/bin', '/bin'].join(path.delimiter)
+    const shellPath = ['/opt/homebrew/bin', '/usr/bin'].join(path.delimiter)
     const merged = mergeTerminalShellEnvironment(
       {
-        PATH: ['/usr/bin', '/bin'].join(path.delimiter),
+        PATH: basePath,
         CC_HAHA_DESKTOP_SERVER_URL: 'http://127.0.0.1:3456',
         TOOL_HOME: '/base/tool',
       },
       {
-        PATH: ['/opt/homebrew/bin', '/usr/bin'].join(path.delimiter),
+        PATH: shellPath,
         NVM_DIR: '/Users/test/.nvm',
         TOOL_HOME: '/shell/tool',
       },

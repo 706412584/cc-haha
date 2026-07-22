@@ -85,7 +85,7 @@ function ringClassName(tone: AgentMascotSpec['tone']): string {
   if (tone === 'danger') return 'border-[color-mix(in_srgb,var(--color-error)_42%,transparent)]'
   if (tone === 'success') return 'border-[color-mix(in_srgb,var(--color-success)_34%,transparent)]'
   if (tone === 'muted') return 'border-[color-mix(in_srgb,var(--color-text-tertiary)_24%,transparent)]'
-  return 'border-[color-mix(in_srgb,var(--color-accent)_42%,transparent)]'
+  return 'border-[color-mix(in_srgb,var(--color-brand)_42%,transparent)]'
 }
 
 export function AgentMascot({ seed, status }: { seed: string; status: ActivityStatus }) {
@@ -108,7 +108,7 @@ export function AgentMascot({ seed, status }: { seed: string; status: ActivitySt
       {isActive ? (
         <span
           data-testid="agent-mascot-motion-ring"
-          className="absolute -inset-0.5 rounded-[14px] border border-transparent border-t-[var(--color-accent)] opacity-80 motion-safe:animate-spin motion-reduce:animate-none"
+          className="absolute -inset-0.5 rounded-[14px] border border-transparent border-t-[var(--color-brand)] opacity-80 motion-safe:animate-spin motion-reduce:animate-none"
           aria-hidden="true"
         />
       ) : null}

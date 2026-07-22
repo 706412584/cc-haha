@@ -822,6 +822,8 @@ export async function captureResponseTraceSnapshot(
       if (completed) return
       interrupted = true
       void reader.cancel().catch(() => {})
+      // This promise awaits the backstop; keep its timer referenced so Bun on
+      // Windows can fire it even when the pending stream read never settles.
       graceTimer = setTimeout(() => resolve('forced'), options?.abortGraceMs ?? TRACE_ABORT_CAPTURE_GRACE_MS)
     }
     if (signal.aborted) onAbort()

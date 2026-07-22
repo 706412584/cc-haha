@@ -124,6 +124,7 @@ vi.mock('../../i18n', () => ({
 import { Sidebar } from './Sidebar'
 import { useChatStore } from '../../stores/chatStore'
 import { useSessionStore } from '../../stores/sessionStore'
+import { useSettingsStore } from '../../stores/settingsStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useUIStore } from '../../stores/uiStore'
 import type { SessionListItem } from '../../types/session'
@@ -207,6 +208,7 @@ describe('Sidebar', () => {
   const connectToSession = vi.fn()
   const disconnectSession = vi.fn()
   const fetchSessions = vi.fn()
+  const syncIndexes = vi.fn()
   const createSession = vi.fn()
   const deleteSession = vi.fn()
   const deleteSessions = vi.fn()
@@ -216,6 +218,8 @@ describe('Sidebar', () => {
     connectToSession.mockReset()
     disconnectSession.mockReset()
     fetchSessions.mockReset()
+    syncIndexes.mockReset()
+    syncIndexes.mockResolvedValue(undefined)
     createSession.mockReset()
     deleteSession.mockReset()
     deleteSessions.mockReset()
@@ -255,6 +259,7 @@ describe('Sidebar', () => {
       isBatchMode: false,
       selectedSessionIds: new Set(),
       fetchSessions,
+      syncIndexes,
       createSession,
       deleteSession,
       deleteSessions,
@@ -267,6 +272,7 @@ describe('Sidebar', () => {
       sidebarOpen: true,
       addToast,
     } as Partial<ReturnType<typeof useUIStore.getState>>)
+    useSettingsStore.setState({ sessionContentSearchEnabled: true })
   })
 
   afterEach(() => {
@@ -364,7 +370,7 @@ describe('Sidebar', () => {
     expect(screen.getByRole('button', { name: 'Collapse display' })).toBeInTheDocument()
   })
 
-  it('lets a manual session refresh supersede a stuck automatic refresh', async () => {
+  it('syncs indexes from the manual refresh without replacing automatic list refreshes', async () => {
     fetchSessions.mockReturnValue(new Promise(() => {}))
 
     render(<Sidebar />)
@@ -372,7 +378,22 @@ describe('Sidebar', () => {
     await waitFor(() => expect(fetchSessions).toHaveBeenCalledTimes(1))
     fireEvent.click(screen.getByRole('button', { name: 'Refresh sessions' }))
 
-    await waitFor(() => expect(fetchSessions).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(syncIndexes).toHaveBeenCalledTimes(1))
+    expect(fetchSessions).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps title filtering while hiding content search when disabled', () => {
+    useSettingsStore.setState({ sessionContentSearchEnabled: false })
+    useSessionStore.setState({
+      sessions: [makeSession('alpha-1', 'Alpha Session', '/workspace/alpha', '2026-05-15T10:00:00.000Z')],
+    })
+
+    render(<Sidebar />)
+
+    expect(screen.queryByRole('button', { name: 'Search chats' })).not.toBeInTheDocument()
+    const titleFilter = screen.getByPlaceholderText('Search sessions')
+    fireEvent.change(titleFilter, { target: { value: 'alpha' } })
+    expect(screen.getByRole('button', { name: /Alpha Session/ })).toBeInTheDocument()
   })
 
   it('keeps the session refresh control usable when a background refresh is still loading existing sessions', async () => {
@@ -390,7 +411,7 @@ describe('Sidebar', () => {
     expect(refreshButton.querySelector('svg')).not.toHaveClass('animate-spin')
 
     fireEvent.click(refreshButton)
-    await waitFor(() => expect(fetchSessions).toHaveBeenCalled())
+    await waitFor(() => expect(syncIndexes).toHaveBeenCalled())
   })
 
   it('exposes the full session title as a row tooltip when the label is truncated', () => {
@@ -1576,7 +1597,7 @@ describe('Sidebar', () => {
     expect(screen.getByTestId('sidebar-index-progress')).toHaveAttribute('aria-hidden', 'true')
   })
 
-  it('refreshes sessions manually and through low-frequency visible polling', async () => {
+  it('syncs indexes manually and refreshes the session list through low-frequency visible polling', async () => {
     vi.useFakeTimers()
 
     render(<Sidebar />)
@@ -1590,19 +1611,20 @@ describe('Sidebar', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Refresh sessions' }))
       await Promise.resolve()
     })
-    expect(fetchSessions).toHaveBeenCalledTimes(2)
+    expect(syncIndexes).toHaveBeenCalledTimes(1)
+    expect(fetchSessions).toHaveBeenCalledTimes(1)
 
     await act(async () => {
       window.dispatchEvent(new Event('focus'))
       await Promise.resolve()
     })
-    expect(fetchSessions).toHaveBeenCalledTimes(2)
+    expect(fetchSessions).toHaveBeenCalledTimes(1)
 
     await act(async () => {
       vi.advanceTimersByTime(30_000)
       await Promise.resolve()
     })
-    expect(fetchSessions).toHaveBeenCalledTimes(3)
+    expect(fetchSessions).toHaveBeenCalledTimes(2)
   })
 
   it('does not overlap automatic session refreshes when the previous request is still pending', async () => {

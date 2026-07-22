@@ -7,7 +7,7 @@ import type { AgentDefinition } from '../../../../tools/AgentTool/loadAgentsDir.
 import { getActiveAgentsFromList } from '../../../../tools/AgentTool/loadAgentsDir.js';
 import { editFileInEditor } from '../../../../utils/promptEditor.js';
 import { useWizard } from '../../../wizard/index.js';
-import { getNewAgentFilePath, saveAgentToFile } from '../../agentFileUtils.js';
+import { getNewAgentFilePath, getPersistedAgentFrontmatter, saveAgentToFile } from '../../agentFileUtils.js';
 import type { AgentWizardData } from '../types.js';
 import { ConfirmStep } from './ConfirmStep.js';
 type Props = {
@@ -28,7 +28,7 @@ export function ConfirmStepWrapper({
   const saveAgent = useCallback(async (openInEditor: boolean): Promise<void> => {
     if (!wizardData?.finalAgent) return;
     try {
-      await saveAgentToFile(wizardData.location!, wizardData.finalAgent.agentType, wizardData.finalAgent.whenToUse, wizardData.finalAgent.tools, wizardData.finalAgent.getSystemPrompt(), true, wizardData.finalAgent.color, wizardData.finalAgent.model, wizardData.finalAgent.memory);
+      await saveAgentToFile(wizardData.location!, wizardData.finalAgent.agentType, wizardData.finalAgent.whenToUse, wizardData.finalAgent.tools, wizardData.finalAgent.getSystemPrompt(), true, wizardData.finalAgent.color, wizardData.finalAgent.model, wizardData.finalAgent.memory, wizardData.finalAgent.effort, getPersistedAgentFrontmatter(wizardData.finalAgent));
       setAppState(state => {
         if (!wizardData.finalAgent) return state;
         const allAgents = state.agentDefinitions.allAgents.concat(wizardData.finalAgent);

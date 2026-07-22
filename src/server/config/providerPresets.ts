@@ -8,6 +8,7 @@ import { ApiFormatSchema, ProviderAuthStrategySchema } from '../types/provider.j
 
 const ModelMappingSchema = z.object({
   main: z.string(),
+  fable: z.string().optional(),
   haiku: z.string(),
   sonnet: z.string(),
   opus: z.string(),

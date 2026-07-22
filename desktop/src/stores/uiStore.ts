@@ -17,6 +17,7 @@ const SETTINGS_TABS = [
   'memory',
   'projectRules',
   'plugins',
+  'pets',
   'computerUse',
   'trace',
   'diagnostics',
@@ -109,6 +110,7 @@ export type SettingsTab =
   | 'skills'
   | 'memory'
   | 'plugins'
+  | 'pets'
   | 'computerUse'
   | 'trace'
   | 'diagnostics'

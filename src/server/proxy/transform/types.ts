@@ -6,7 +6,7 @@
 
 // ─── OpenAI Chat Completions ────────────────────────────────
 
-export type OpenAIReasoningEffort = 'low' | 'medium' | 'high'
+export type OpenAIReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
 
 export type OpenAIChatMessage = {
   role: 'system' | 'user' | 'assistant' | 'tool'

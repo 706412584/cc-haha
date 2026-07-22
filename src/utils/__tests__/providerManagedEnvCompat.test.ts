@@ -13,6 +13,9 @@ describe('provider managed env compatibility', () => {
 
     expect(changed).toBe(true)
     expect(env.CC_HAHA_SEND_DISABLED_THINKING).toBeUndefined()
+    expect(env.ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES).toBe(
+      'thinking,effort,adaptive_thinking,max_effort',
+    )
     expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES).toBe(
       'thinking,effort,adaptive_thinking,max_effort',
     )

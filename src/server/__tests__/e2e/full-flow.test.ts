@@ -74,6 +74,18 @@ async function startTestServer() {
   baseUrl = `http://127.0.0.1:${server.port}`
 }
 
+async function stopTestServer() {
+  server?.stop(true)
+  const { stopServerRuntimeForShutdown } = await import('../../index.js')
+  await stopServerRuntimeForShutdown()
+  await fs.rm(tmpDir, {
+    recursive: true,
+    force: true,
+    maxRetries: process.platform === 'win32' ? 5 : 0,
+    retryDelay: 100,
+  })
+}
+
 async function api(method: string, path: string, body?: unknown): Promise<{ status: number; data: any }> {
   const res = await fetch(`${baseUrl}${path}`, {
     method,
@@ -89,12 +101,7 @@ describe('E2E: Full Flow', () => {
     await startTestServer()
   })
 
-  afterAll(async () => {
-    server?.stop(true)
-    const { stopServerRuntimeForShutdown } = await import('../../index.js')
-    await stopServerRuntimeForShutdown()
-    await fs.rm(tmpDir, { recursive: true, force: true })
-  })
+  afterAll(stopTestServer)
 
   // =============================================
   // 1. Health & Status
@@ -102,12 +109,14 @@ describe('E2E: Full Flow', () => {
 
   it('should return healthy status', async () => {
     const res = await fetch(`${baseUrl}/health`)
+    expect(res.headers.get('access-control-allow-origin')).toBe('*')
     const data = await res.json()
     expect(data.status).toBe('ok')
   })
 
   it('should return server status', async () => {
-    const { data } = await api('GET', '/api/status')
+    const response = await fetch(`${baseUrl}/api/status`)
+    const data = await response.json()
     expect(data.status).toBe('ok')
     expect(data.version).toBeDefined()
   })
@@ -207,8 +216,8 @@ describe('E2E: Full Flow', () => {
 
   it('should list available models', async () => {
     const { data } = await api('GET', '/api/models')
-    expect(data.models.length).toBe(3)
-    expect(data.models[0].name).toBe('Opus 4.7')
+    expect(data.models.length).toBe(4)
+    expect(data.models[0].name).toBe('Fable 5')
   })
 
   it('should switch model', async () => {
@@ -303,24 +312,26 @@ describe('E2E: Full Flow', () => {
 
   it('should create an agent', async () => {
     const { status } = await api('POST', '/api/agents', {
+      scope: 'user',
       name: 'test-agent',
       description: 'A test agent',
       model: 'claude-sonnet-4-6',
+      systemPrompt: 'Complete the requested test task.',
     })
     expect(status).toBe(201)
   })
 
-  it('should expose shared active/all agent payload independent of CRUD storage', async () => {
+  it('should expose the created Markdown agent through the shared loader', async () => {
     const { data } = await api('GET', '/api/agents')
     expect(Array.isArray(data.activeAgents)).toBe(true)
     expect(Array.isArray(data.allAgents)).toBe(true)
     expect(data.activeAgents.length).toBeGreaterThan(0)
     expect(data.activeAgents.some((agent: any) => agent.source === 'built-in')).toBe(true)
-    expect(data.activeAgents.some((agent: any) => agent.agentType === 'test-agent')).toBe(false)
+    expect(data.activeAgents.some((agent: any) => agent.agentType === 'test-agent')).toBe(true)
   })
 
   it('should delete an agent', async () => {
-    const { status } = await api('DELETE', '/api/agents/test-agent')
+    const { status } = await api('DELETE', '/api/agents/test-agent?scope=user')
     expect([200, 204]).toContain(status)
   })
 

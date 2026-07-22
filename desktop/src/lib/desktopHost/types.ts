@@ -21,6 +21,13 @@ export type DesktopHostCapabilities = Record<DesktopHostCapability, boolean>
 
 export type DesktopHostUnlisten = () => void
 
+export type DesktopPetInteractiveRegion = {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
 export type DialogFileFilter = {
   name: string
   extensions: string[]
@@ -129,6 +136,57 @@ export type PreviewPickerMessage = {
 
 export type PreviewHostMessage = PreviewCaptureMessage | PreviewPickerMessage
 
+type DesktopPetBase = {
+  id: string
+  displayName: string
+  description: string
+  mimeType: 'image/png' | 'image/webp'
+  dataUrl: string
+}
+
+export type DesktopAtlasPet = DesktopPetBase & {
+  spriteVersionNumber: 2
+  spritesheetPath: string
+}
+
+export type DesktopImagePet = DesktopPetBase & {
+  manifestVersion: 1
+  spriteVersionNumber: 1
+  imagePath: string
+  motionProfile: 'soft-spring-v1'
+}
+
+export type DesktopPet = DesktopAtlasPet | DesktopImagePet
+
+export type DesktopPetLoadError = {
+  entry?: string
+  code: string
+  message: string
+}
+
+export type DesktopPetListResult = {
+  pets: DesktopPet[]
+  errors: DesktopPetLoadError[]
+}
+
+export type DesktopPetCreateInput = {
+  slug: string
+  displayName: string
+  description: string
+  dialogTitle?: string
+  dialogFilterName?: string
+}
+
+export type DesktopPetCreateResult =
+  | { id: string }
+  | { errorCode: string }
+
+export type DesktopPetWindowDrag = {
+  phase: 'start' | 'move' | 'end'
+  x: number
+  y: number
+}
+
 export type AppModeConfig = SettingsAppModeConfig
 
 export type AppModeSetInput = {
@@ -194,6 +252,22 @@ export type DesktopHost = {
   }
   trace?: {
     openWindow(sessionId: string): Promise<void>
+  }
+  pets: {
+    list(): Promise<DesktopPetListResult>
+    createFromImage(input: DesktopPetCreateInput): Promise<DesktopPetCreateResult | null>
+    createFromAtlas(input: DesktopPetCreateInput): Promise<DesktopPetCreateResult | null>
+    openFolder(): Promise<void>
+    show(): Promise<void>
+    hide(): Promise<void>
+    showContextMenu(closeLabel: string): Promise<boolean>
+    dragWindow(payload: DesktopPetWindowDrag): Promise<void>
+    setIgnoreMouseEvents(ignore: boolean): Promise<void>
+    setInteractiveRegions(regions: DesktopPetInteractiveRegion[]): Promise<void>
+    focusMainWindow(): Promise<void>
+    focusSession(sessionId: string): Promise<void>
+    onNavigateSession(handler: (sessionId: string) => void): Promise<DesktopHostUnlisten>
+    onVisibilityChanged(handler: (visible: boolean) => void): Promise<DesktopHostUnlisten>
   }
   dialogs: {
     open(options?: DialogOpenOptions): Promise<string | string[] | null>

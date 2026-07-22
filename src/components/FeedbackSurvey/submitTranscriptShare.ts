@@ -26,6 +26,24 @@ export type TranscriptShareTrigger =
   | 'frustration'
   | 'memory_survey'
 
+export function filterMessagesForTranscriptShare(messages: Message[]): Message[] {
+  return messages.filter((message) => message.type !== 'attachment')
+}
+
+export function filterRawTranscriptForShare(rawTranscriptJsonl: string): string {
+  return rawTranscriptJsonl
+    .split('\n')
+    .filter((line) => {
+      if (!line.trim()) return true
+      try {
+        return JSON.parse(line)?.type !== 'attachment'
+      } catch {
+        return true
+      }
+    })
+    .join('\n')
+}
+
 export async function submitTranscriptShare(
   messages: Message[],
   trigger: TranscriptShareTrigger,
@@ -34,7 +52,9 @@ export async function submitTranscriptShare(
   try {
     logForDebugging('Collecting transcript for sharing', { level: 'info' })
 
-    const transcript = normalizeMessagesForAPI(messages)
+    const transcript = normalizeMessagesForAPI(
+      filterMessagesForTranscriptShare(messages),
+    )
 
     // Collect subagent transcripts
     const agentIds = extractAgentIdsFromMessages(messages)
@@ -46,7 +66,9 @@ export async function submitTranscriptShare(
       const transcriptPath = getTranscriptPath()
       const { size } = await stat(transcriptPath)
       if (size <= MAX_TRANSCRIPT_READ_BYTES) {
-        rawTranscriptJsonl = await readFile(transcriptPath, 'utf-8')
+        rawTranscriptJsonl = filterRawTranscriptForShare(
+          await readFile(transcriptPath, 'utf-8'),
+        )
       } else {
         logForDebugging(
           `Skipping raw transcript read: file too large (${size} bytes)`,

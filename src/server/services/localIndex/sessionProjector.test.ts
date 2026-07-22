@@ -83,6 +83,45 @@ async function sourceHash(path: string): Promise<string> {
 }
 
 describe('session projector', () => {
+  it('rejects an oversized source before opening or reducing its contents', async () => {
+    const root = await createTempDir('projector-source-limit')
+    const candidate = await createCandidate({
+      root,
+      projectPath: '-repo-a',
+      sessionId: 'oversized',
+      content: line(user('Never read', '2026-01-01T00:00:00.000Z')),
+    })
+    const database = openLocalIndexDatabase({ path: join(root, 'index.sqlite') })
+    const index = createSessionIndex(database)
+    let openCalls = 0
+    const projector = createSessionProjector({
+      database,
+      index,
+      scope: root,
+      maxSourceBytes: 128,
+      fileIo: {
+        async statPath() {
+          return { size: 129 } as Awaited<ReturnType<typeof stat>>
+        },
+        async openReadonly(path, flags) {
+          openCalls += 1
+          return open(path, flags)
+        },
+      },
+    })
+
+    try {
+      expect(await projector.projectSource(candidate)).toEqual({
+        kind: 'retry',
+        reason: 'source-too-large',
+      })
+      expect(openCalls).toBe(0)
+      expect(index.getSource(candidate.path)).toBeNull()
+    } finally {
+      database.close()
+    }
+  })
+
   it('fully builds without changing JSONL and preserves malformed/pending semantics', async () => {
     const root = await createTempDir('projector-full')
     const candidate = await createCandidate({

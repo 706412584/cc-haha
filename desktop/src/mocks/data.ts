@@ -146,8 +146,9 @@ export const mockPermissionModes = [
 ]
 
 export const mockModels = [
-  { id: 'opus', name: 'Opus 4.7', active: false },
-  { id: 'sonnet', name: 'Sonnet 4.6', active: true },
+  { id: 'fable', name: 'Fable 5', active: false },
+  { id: 'opus', name: 'Opus 4.8', active: true },
+  { id: 'sonnet', name: 'Sonnet 5', active: false },
   { id: 'haiku', name: 'Haiku 4.5', active: false },
 ]
 

@@ -8,8 +8,9 @@ import {
 import { ensureFreshOpenAITokens } from './index.js'
 import {
   OPENAI_CODEX_REASONING_EFFORT_ENV_KEY,
+  isOpenAIReasoningEffort,
   resolveOpenAICodexModel,
-  resolveOpenAIReasoningEffort,
+  resolveOpenAIReasoningEffortWithPriority,
 } from './models.js'
 import { getOpenAIOAuthTokens } from './storage.js'
 import { anthropicToOpenaiResponses } from '../../server/proxy/transform/anthropicToOpenaiResponses.js'
@@ -45,9 +46,22 @@ export function buildOpenAICodexFetch(
       ...originalBody,
       model: mappedModel,
     })
-    const reasoningEffort = resolveOpenAIReasoningEffort(
+    // The generic Anthropic -> OpenAI transformer intentionally narrows effort
+    // to the common low/medium/high subset. Codex models additionally support
+    // xhigh/max, so preserve a valid native request-scoped value before falling
+    // back to the transformed value, the session env, then the model default.
+    const nativeRequestEffort = isOpenAIReasoningEffort(
+      originalBody.output_config?.effort,
+    )
+      ? originalBody.output_config.effort
+      : undefined
+    const reasoningEffort = resolveOpenAIReasoningEffortWithPriority(
       mappedModel,
-      process.env[OPENAI_CODEX_REASONING_EFFORT_ENV_KEY],
+      [
+        nativeRequestEffort,
+        transformedBody.reasoning?.effort,
+        process.env[OPENAI_CODEX_REASONING_EFFORT_ENV_KEY],
+      ],
     )
     const upstreamBody = {
       ...transformedBody,

@@ -2,6 +2,7 @@ import type { ApiFormat, ProviderAuthStrategy } from './provider'
 
 export type ModelMapping = {
   main: string
+  fable?: string
   haiku: string
   sonnet: string
   opus: string

@@ -48,6 +48,7 @@ export type LocalIndexSchedulingMetrics = {
 }
 
 export interface LocalIndexCoordinator extends LocalIndexGateway {
+  sync(): Promise<LocalIndexStatus>
   getSchedulingMetrics(): LocalIndexSchedulingMetrics
   isActivityScopeReady(): boolean
   getActivityStats(range: StatsDateRange, now?: Date): ClaudeCodeStats | null
@@ -748,7 +749,9 @@ export function createLocalIndexCoordinator(
             if (result.kind === 'retry') {
               recordFailure(result.reason === 'changed-during-read'
                 ? 'LOCAL_INDEX_SOURCE_CHANGED'
-                : 'LOCAL_INDEX_TRANSIENT_IO', candidate.path)
+                : result.reason === 'source-too-large'
+                  ? 'LOCAL_INDEX_SOURCE_TOO_LARGE'
+                  : 'LOCAL_INDEX_TRANSIENT_IO', candidate.path)
             } else {
               committedPaths.add(candidate.path)
               status = {
@@ -973,7 +976,9 @@ export function createLocalIndexCoordinator(
         if (projected.kind === 'retry') {
           throw { code: projected.reason === 'changed-during-read'
             ? 'LOCAL_INDEX_SOURCE_CHANGED'
-            : 'LOCAL_INDEX_TRANSIENT_IO' }
+            : projected.reason === 'source-too-large'
+              ? 'LOCAL_INDEX_SOURCE_TOO_LARGE'
+              : 'LOCAL_INDEX_TRANSIENT_IO' }
         }
         failedPaths.delete(normalizedPath)
       } catch (error) {
@@ -1311,6 +1316,13 @@ export function createLocalIndexCoordinator(
         pendingRebuild?.catch(() => undefined),
         pendingReconfigure?.catch(() => undefined),
       ])
+    },
+
+    async sync(): Promise<LocalIndexStatus> {
+      const wasStarted = started
+      await coordinator.start()
+      if (wasStarted) watcher?.queueFullSweep()
+      return coordinator.getPublicStatus()
     },
 
     getMode(): LocalIndexMode {

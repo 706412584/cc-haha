@@ -89,6 +89,42 @@ describe('configureEffortParams', () => {
     expect(betas).toContain(EFFORT_BETA_HEADER)
   })
 
+  test('does not turn an unset OpenAI request effort into an explicit high override', () => {
+    const outputConfig: Record<string, unknown> = {}
+    const extraBodyParams: Record<string, unknown> = {}
+    const betas: string[] = []
+
+    configureEffortParams(
+      undefined,
+      outputConfig,
+      extraBodyParams,
+      betas,
+      'gpt-5.6-sol',
+    )
+
+    expect(outputConfig).toEqual({})
+    expect(extraBodyParams).toEqual({})
+    expect(betas).not.toContain(EFFORT_BETA_HEADER)
+  })
+
+  test('keeps an explicit Agent effort on OpenAI requests', () => {
+    const outputConfig: Record<string, unknown> = {}
+    const extraBodyParams: Record<string, unknown> = {}
+    const betas: string[] = []
+
+    configureEffortParams(
+      'xhigh',
+      outputConfig,
+      extraBodyParams,
+      betas,
+      'gpt-5.6-sol',
+    )
+
+    expect(outputConfig).toEqual({ effort: 'xhigh' })
+    expect(extraBodyParams).toEqual({})
+    expect(betas).toContain(EFFORT_BETA_HEADER)
+  })
+
   test('prefers active model capabilities when a tier uses the same model id', () => {
     process.env.ANTHROPIC_MODEL = 'claude-sonnet-5'
     process.env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES =

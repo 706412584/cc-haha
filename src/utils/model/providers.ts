@@ -45,3 +45,7 @@ export function isFirstPartyAnthropicBaseUrl(): boolean {
     return false
   }
 }
+
+export function hasAnthropicCompatibleThirdPartyConfig(): boolean {
+  return getAPIProvider() !== 'firstParty' || !isFirstPartyAnthropicBaseUrl()
+}

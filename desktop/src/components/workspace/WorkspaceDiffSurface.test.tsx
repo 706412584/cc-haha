@@ -349,30 +349,22 @@ describe('WorkspaceDiffSurface', () => {
   })
 
   it('uses plain text instead of Prism beyond the large preview threshold', () => {
-    const additions = Array.from(
+    const structuralMetadata = Array.from(
       { length: WORKSPACE_PLAIN_TEXT_LINE_THRESHOLD + 1 },
-      (_, index) => `+const value${index} = ${index}`,
+      () => '--- a/src/large.ts',
     )
     const largeDiff = [
       'diff --git a/src/large.ts b/src/large.ts',
-      '--- a/src/large.ts',
       '+++ b/src/large.ts',
-      `@@ -0,0 +1,${additions.length} @@`,
-      ...additions,
+      ...structuralMetadata,
+      '@@ -0,0 +1 @@',
+      '+const value = 1',
     ].join('\n')
-    render(
-      <WorkspaceDiffSurface
-        value={largeDiff}
-        path="src/large.ts"
-        lineLimit={2}
-        hideSingleFileHeader
-      />,
-    )
+    render(<WorkspaceDiffSurface value={largeDiff} path="src/large.ts" />)
 
     expect(screen.getByTestId('workspace-code')).toHaveAttribute('data-highlight-engine', 'plain')
     expect(highlightRequestSpy).not.toHaveBeenCalled()
-    expect(getCodeRow('const value0 = 0')).toHaveTextContent('const value0 = 0')
-    expect(screen.getByRole('button', { name: 'Show all loaded lines' })).toBeInTheDocument()
+    expect(getCodeRow('const value = 1')).toHaveTextContent('const value = 1')
   })
 
   it('renders parsed file headers and keeps multiple files visually separated', () => {

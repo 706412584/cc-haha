@@ -63,6 +63,7 @@ const DEFAULT_MAIN_SESSION_AGENT: CustomAgentDefinition = {
   agentType: 'main-session',
   whenToUse: 'Main session query',
   source: 'userSettings',
+  rawSystemPrompt: '',
   getSystemPrompt: () => '',
 }
 

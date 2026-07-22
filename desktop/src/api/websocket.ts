@@ -2,6 +2,8 @@ import type { ClientMessage, ServerMessage } from '../types/chat'
 import { getAuthToken, getBaseUrl } from './client'
 
 type MessageHandler = (msg: ServerMessage) => void
+export type WebSocketConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'disconnected'
+type ConnectionStateHandler = (state: WebSocketConnectionState) => void
 
 const HEARTBEAT_INTERVAL_MS = 30_000
 const HEARTBEAT_TIMEOUT_MS = 10_000
@@ -9,6 +11,8 @@ const HEARTBEAT_TIMEOUT_MS = 10_000
 type Connection = {
   ws: WebSocket
   handlers: Set<MessageHandler>
+  stateHandlers: Set<ConnectionStateHandler>
+  state: WebSocketConnectionState
   reconnectTimer: ReturnType<typeof setTimeout> | null
   reconnectAttempt: number
   pingInterval: ReturnType<typeof setInterval> | null
@@ -49,6 +53,8 @@ class WebSocketManager {
     const conn: Connection = {
       ws,
       handlers: existing?.handlers ?? new Set(),
+      stateHandlers: existing?.stateHandlers ?? new Set(),
+      state: existing && existing.reconnectAttempt > 0 ? 'reconnecting' : 'connecting',
       reconnectTimer: null,
       reconnectAttempt: existing?.reconnectAttempt ?? 0,
       pingInterval: null,
@@ -58,10 +64,12 @@ class WebSocketManager {
       pendingRuntimeConfig: existing?.pendingRuntimeConfig ?? null,
     }
     this.connections.set(sessionId, conn)
+    this.emitConnectionState(conn, conn.state)
 
     ws.onopen = () => {
       const isReconnect = conn.reconnectAttempt > 0
       conn.reconnectAttempt = 0
+      this.emitConnectionState(conn, 'connected')
       this.startPingLoop(sessionId, conn)
       let flushedPendingRuntime = false
       while (conn.pendingMessages.length > 0) {
@@ -108,6 +116,7 @@ class WebSocketManager {
     ws.onclose = () => {
       this.stopPingLoopForConnection(conn)
       if (!conn.intentionalClose && this.connections.get(sessionId) === conn) {
+        this.emitConnectionState(conn, 'reconnecting')
         this.scheduleReconnect(sessionId, conn)
       }
     }
@@ -129,6 +138,7 @@ class WebSocketManager {
     }
     conn.pendingMessages = []
     conn.pendingRuntimeConfig = null
+    this.emitConnectionState(conn, 'disconnected')
 
     conn.ws.close()
     this.connections.delete(sessionId)
@@ -176,9 +186,25 @@ class WebSocketManager {
     return () => { conn.handlers.delete(handler) }
   }
 
+  onConnectionState(sessionId: string, handler: ConnectionStateHandler): () => void {
+    const conn = this.connections.get(sessionId)
+    if (!conn) return () => {}
+    conn.stateHandlers.add(handler)
+    handler(conn.state)
+    return () => { conn.stateHandlers.delete(handler) }
+  }
+
   clearHandlers(sessionId: string) {
     const conn = this.connections.get(sessionId)
-    if (conn) conn.handlers.clear()
+    if (conn) {
+      conn.handlers.clear()
+      conn.stateHandlers.clear()
+    }
+  }
+
+  private emitConnectionState(conn: Connection, state: WebSocketConnectionState) {
+    conn.state = state
+    for (const handler of conn.stateHandlers) handler(state)
   }
 
   private startPingLoop(sessionId: string, conn: Connection) {

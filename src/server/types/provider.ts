@@ -45,6 +45,7 @@ export type ProviderRuntimeKind = z.infer<typeof ProviderRuntimeKindSchema>
 
 export const ModelMappingSchema = z.object({
   main: z.string(),
+  fable: z.string().optional(),
   haiku: z.string(),
   sonnet: z.string(),
   opus: z.string(),

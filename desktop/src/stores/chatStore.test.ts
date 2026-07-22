@@ -72,6 +72,7 @@ vi.mock('../api/websocket', () => ({
     connect: vi.fn(),
     disconnect: vi.fn(),
     onMessage: vi.fn(() => () => {}),
+    onConnectionState: vi.fn(() => () => {}),
     clearHandlers: vi.fn(),
     send: sendMock,
   },
@@ -3109,6 +3110,380 @@ describe('chatStore history mapping', () => {
       body: 'AskUserQuestion 请求执行，正在等待允许。',
       target: { type: 'session', sessionId: TEST_SESSION_ID },
     })
+  })
+
+  it('keeps concurrent permission requests independently pending until each is answered', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession(),
+      },
+    })
+    const store = useChatStore.getState()
+
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'permission_request',
+      requestId: 'perm-read-1',
+      toolName: 'Read',
+      toolUseId: 'tool-read-1',
+      input: { file_path: '/outside/one.ts' },
+    })
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'permission_request',
+      requestId: 'perm-read-2',
+      toolName: 'Read',
+      toolUseId: 'tool-read-2',
+      input: { file_path: '/outside/two.ts' },
+    })
+
+    let session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(Object.keys(session?.pendingPermissions ?? {})).toEqual([
+      'perm-read-1',
+      'perm-read-2',
+    ])
+    expect(session?.messages.filter((message) => message.type === 'permission_request'))
+      .toHaveLength(2)
+
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'permission_request',
+      requestId: 'perm-read-1',
+      toolName: 'Read',
+      toolUseId: 'tool-read-1',
+      input: { file_path: '/outside/one.ts' },
+    })
+    session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.messages.filter((message) => message.type === 'permission_request'))
+      .toHaveLength(2)
+
+    store.respondToPermission(TEST_SESSION_ID, 'perm-read-2', true)
+
+    session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.pendingPermissions).not.toHaveProperty('perm-read-2')
+    expect(session?.pendingPermissions).toHaveProperty('perm-read-1')
+    expect(session?.pendingPermission?.requestId).toBe('perm-read-1')
+    expect(session?.chatState).toBe('permission_pending')
+
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'tool_result',
+      toolUseId: 'tool-read-2',
+      content: 'second file',
+      isError: false,
+    })
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.chatState)
+      .toBe('permission_pending')
+
+    store.respondToPermission(TEST_SESSION_ID, 'perm-read-1', true)
+
+    session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.pendingPermissions).toEqual({})
+    expect(session?.pendingPermission).toBeNull()
+    expect(session?.chatState).toBe('tool_executing')
+  })
+
+  it('removes replayed or cancelled requests when the server resolves them', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession(),
+      },
+    })
+    const store = useChatStore.getState()
+    const sendPermission = (requestId: string) => {
+      store.handleServerMessage(TEST_SESSION_ID, {
+        type: 'permission_request',
+        requestId,
+        toolName: 'Read',
+        toolUseId: `tool-${requestId}`,
+        input: { file_path: `/outside/${requestId}.ts` },
+      })
+    }
+
+    sendPermission('perm-read-1')
+    sendPermission('perm-read-2')
+    store.respondToPermission(TEST_SESSION_ID, 'perm-read-2', true)
+    sendPermission('perm-read-2')
+
+    let session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.pendingPermissions).toHaveProperty('perm-read-2')
+
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'permission_resolved',
+      requestId: 'perm-read-2',
+      permissionType: 'tool',
+      allowed: true,
+    })
+    session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.pendingPermissions).not.toHaveProperty('perm-read-2')
+    expect(session?.pendingPermissions).toHaveProperty('perm-read-1')
+    expect(session?.chatState).toBe('permission_pending')
+
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'permission_resolved',
+      requestId: 'perm-read-1',
+      permissionType: 'tool',
+    })
+    session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.pendingPermissions).toEqual({})
+    expect(session?.pendingPermission).toBeNull()
+    expect(session?.chatState).toBe('thinking')
+  })
+
+  it('reconciles stale tool and Computer Use requests from the reconnect snapshot', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession(),
+      },
+    })
+    const store = useChatStore.getState()
+
+    for (const requestId of ['perm-read-1', 'perm-read-2']) {
+      store.handleServerMessage(TEST_SESSION_ID, {
+        type: 'permission_request',
+        requestId,
+        toolName: 'Read',
+        toolUseId: `tool-${requestId}`,
+        input: { file_path: `/outside/${requestId}.ts` },
+      })
+    }
+    for (const requestId of ['cu-1', 'cu-2']) {
+      store.handleServerMessage(TEST_SESSION_ID, {
+        type: 'computer_use_permission_request',
+        requestId,
+        request: {
+          requestId,
+          reason: `Computer Use ${requestId}`,
+          apps: [],
+          requestedFlags: {},
+          screenshotFiltering: 'native',
+        },
+      })
+    }
+
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'permission_requests_snapshot',
+      toolRequestIds: ['perm-read-2'],
+      computerUseRequestIds: ['cu-2'],
+      turnActive: true,
+    })
+
+    let session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.connectionSnapshotReady).toBe(true)
+    expect(Object.keys(session?.pendingPermissions ?? {})).toEqual(['perm-read-2'])
+    expect(session?.pendingPermission?.requestId).toBe('perm-read-2')
+    expect(Object.keys(session?.pendingComputerUsePermissions ?? {})).toEqual(['cu-2'])
+    expect(session?.pendingComputerUsePermission?.requestId).toBe('cu-2')
+    expect(session?.chatState).toBe('permission_pending')
+
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'permission_requests_snapshot',
+      toolRequestIds: [],
+      computerUseRequestIds: [],
+      turnActive: true,
+    })
+
+    session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.pendingPermissions).toEqual({})
+    expect(session?.pendingPermission).toBeNull()
+    expect(session?.pendingComputerUsePermissions).toEqual({})
+    expect(session?.pendingComputerUsePermission).toBeNull()
+    expect(session?.chatState).toBe('thinking')
+
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'permission_requests_snapshot',
+      toolRequestIds: [],
+      computerUseRequestIds: [],
+      turnActive: false,
+    })
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.chatState).toBe('idle')
+  })
+
+  it('preserves precise active chat states when a reconnect snapshot has no permissions', () => {
+    for (const chatState of ['streaming', 'tool_executing', 'compacting'] as const) {
+      useChatStore.setState({
+        sessions: {
+          [TEST_SESSION_ID]: makeSession({ chatState }),
+        },
+      })
+
+      useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+        type: 'permission_requests_snapshot',
+        toolRequestIds: [],
+        computerUseRequestIds: [],
+        turnActive: true,
+      })
+
+      expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.chatState).toBe(chatState)
+    }
+  })
+
+  it('keeps generic and Computer Use permissions pending in either arrival order', () => {
+    const sendReadPermission = () => {
+      useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+        type: 'permission_request',
+        requestId: 'perm-read-1',
+        toolName: 'Read',
+        toolUseId: 'tool-read-1',
+        input: { file_path: '/outside/one.ts' },
+      })
+    }
+    const sendComputerUsePermission = () => {
+      useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+        type: 'computer_use_permission_request',
+        requestId: 'cu-1',
+        request: {
+          requestId: 'cu-1',
+          reason: 'Inspect another app',
+          apps: [],
+          requestedFlags: {},
+          screenshotFiltering: 'native',
+        },
+      })
+    }
+    const allowComputerUse = {
+      granted: [],
+      denied: [],
+      flags: {
+        clipboardRead: false,
+        clipboardWrite: false,
+        systemKeyCombos: false,
+      },
+      userConsented: true,
+    }
+
+    for (const order of ['read-first', 'computer-first'] as const) {
+      useChatStore.setState({
+        sessions: {
+          [TEST_SESSION_ID]: makeSession(),
+        },
+      })
+      if (order === 'read-first') {
+        sendReadPermission()
+        sendComputerUsePermission()
+      } else {
+        sendComputerUsePermission()
+        sendReadPermission()
+      }
+
+      let session = useChatStore.getState().sessions[TEST_SESSION_ID]
+      expect(session?.pendingPermissions).toHaveProperty('perm-read-1')
+      expect(session?.pendingComputerUsePermissions).toHaveProperty('cu-1')
+      expect(session?.chatState).toBe('permission_pending')
+
+      if (order === 'read-first') {
+        useChatStore.getState().respondToPermission(TEST_SESSION_ID, 'perm-read-1', true)
+        session = useChatStore.getState().sessions[TEST_SESSION_ID]
+        expect(session?.pendingPermissions).toEqual({})
+        expect(session?.pendingComputerUsePermissions).toHaveProperty('cu-1')
+        expect(session?.chatState).toBe('permission_pending')
+        useChatStore.getState().respondToComputerUsePermission(
+          TEST_SESSION_ID,
+          'cu-1',
+          allowComputerUse,
+        )
+      } else {
+        useChatStore.getState().respondToComputerUsePermission(
+          TEST_SESSION_ID,
+          'cu-1',
+          allowComputerUse,
+        )
+        session = useChatStore.getState().sessions[TEST_SESSION_ID]
+        expect(session?.pendingComputerUsePermissions).toEqual({})
+        expect(session?.pendingPermissions).toHaveProperty('perm-read-1')
+        expect(session?.chatState).toBe('permission_pending')
+        useChatStore.getState().respondToPermission(TEST_SESSION_ID, 'perm-read-1', true)
+      }
+
+      session = useChatStore.getState().sessions[TEST_SESSION_ID]
+      expect(session?.pendingPermission).toBeNull()
+      expect(session?.pendingComputerUsePermission).toBeNull()
+      expect(session?.chatState).toBe('tool_executing')
+    }
+  })
+
+  it('queues concurrent Computer Use permissions until each is answered', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession(),
+      },
+    })
+    const store = useChatStore.getState()
+
+    for (const requestId of ['cu-1', 'cu-2']) {
+      store.handleServerMessage(TEST_SESSION_ID, {
+        type: 'computer_use_permission_request',
+        requestId,
+        request: {
+          requestId,
+          reason: `Computer Use ${requestId}`,
+          apps: [],
+          requestedFlags: {},
+          screenshotFiltering: 'native',
+        },
+      })
+    }
+
+    let session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(Object.keys(session?.pendingComputerUsePermissions ?? {})).toEqual([
+      'cu-1',
+      'cu-2',
+    ])
+    expect(session?.pendingComputerUsePermission?.requestId).toBe('cu-1')
+
+    const response = {
+      granted: [],
+      denied: [],
+      flags: {
+        clipboardRead: false,
+        clipboardWrite: false,
+        systemKeyCombos: false,
+      },
+      userConsented: true,
+    }
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'permission_resolved',
+      requestId: 'cu-1',
+      permissionType: 'computer_use',
+      allowed: true,
+    })
+
+    session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.pendingComputerUsePermissions).not.toHaveProperty('cu-1')
+    expect(session?.pendingComputerUsePermissions).toHaveProperty('cu-2')
+    expect(session?.pendingComputerUsePermission?.requestId).toBe('cu-2')
+    expect(session?.chatState).toBe('permission_pending')
+
+    store.respondToComputerUsePermission(TEST_SESSION_ID, 'cu-2', response)
+    session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.pendingComputerUsePermissions).toEqual({})
+    expect(session?.pendingComputerUsePermission).toBeNull()
+    expect(session?.chatState).toBe('tool_executing')
+  })
+
+  it('shows the latest Computer Use payload when a request id is superseded', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession(),
+      },
+    })
+    const store = useChatStore.getState()
+    const sendRequest = (reason: string) => {
+      store.handleServerMessage(TEST_SESSION_ID, {
+        type: 'computer_use_permission_request',
+        requestId: 'cu-1',
+        request: {
+          requestId: 'cu-1',
+          reason,
+          apps: [],
+          requestedFlags: {},
+          screenshotFiltering: 'native',
+        },
+      })
+    }
+
+    sendRequest('OLD request')
+    sendRequest('NEW request')
+
+    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.pendingComputerUsePermission?.request.reason).toBe('NEW request')
+    expect(session?.pendingComputerUsePermissions?.['cu-1']?.request.reason).toBe('NEW request')
   })
 
   it('surfaces a visible notice when an unanswered AskUserQuestion is cleared by turn end', () => {

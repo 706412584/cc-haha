@@ -54,7 +54,6 @@ export type ReconciliationWatcherOptions = {
 
 const DEFAULT_DEBOUNCE_MS = 350
 const DEFAULT_MAX_WAIT_MS = 2_000
-const DEFAULT_SAFETY_SWEEP_MS = 5 * 60 * 1_000
 const DEFAULT_MAX_QUEUED_PATHS = 2_048
 const DEFAULT_BATCH_SIZE = 25
 
@@ -119,9 +118,9 @@ export function createReconciliationWatcher(
   )
   const debounceMs = Math.max(1, Math.trunc(options.debounceMs ?? DEFAULT_DEBOUNCE_MS))
   const maxWaitMs = Math.max(debounceMs, Math.trunc(options.maxWaitMs ?? DEFAULT_MAX_WAIT_MS))
-  const safetySweepMs = Math.max(1, Math.trunc(
-    options.safetySweepMs ?? DEFAULT_SAFETY_SWEEP_MS,
-  ))
+  const safetySweepMs = options.safetySweepMs === undefined
+    ? null
+    : Math.max(1, Math.trunc(options.safetySweepMs))
   const maxQueuedPaths = Math.max(1, Math.trunc(
     options.maxQueuedPaths ?? DEFAULT_MAX_QUEUED_PATHS,
   ))
@@ -340,8 +339,10 @@ export function createReconciliationWatcher(
       const expectedGeneration = generation
       await refreshWatchers(expectedGeneration)
       if (!active || expectedGeneration !== generation) return
-      safetyTimer = setInterval(queueFullSweep, safetySweepMs)
-      safetyTimer.unref?.()
+      if (safetySweepMs !== null) {
+        safetyTimer = setInterval(queueFullSweep, safetySweepMs)
+        safetyTimer.unref?.()
+      }
     },
     async stop(): Promise<void> {
       if (!active && handles.size === 0) return

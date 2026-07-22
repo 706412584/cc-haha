@@ -1,8 +1,10 @@
 export const MODEL_ALIASES = [
+  'fable',
   'sonnet',
   'opus',
   'haiku',
   'best',
+  'fable[1m]',
   'sonnet[1m]',
   'opus[1m]',
   'opusplan',
@@ -18,7 +20,12 @@ export function isModelAlias(modelInput: string): modelInput is ModelAlias {
  * When "opus" is in the allowlist, ANY opus model is allowed (opus 4.5, 4.6, etc.).
  * When a specific model ID is in the allowlist, only that exact version is allowed.
  */
-export const MODEL_FAMILY_ALIASES = ['sonnet', 'opus', 'haiku'] as const
+export const MODEL_FAMILY_ALIASES = [
+  'fable',
+  'sonnet',
+  'opus',
+  'haiku',
+] as const
 
 export function isModelFamilyAlias(model: string): boolean {
   return (MODEL_FAMILY_ALIASES as readonly string[]).includes(model)

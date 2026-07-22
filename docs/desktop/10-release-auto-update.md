@@ -48,16 +48,16 @@ WINDOWS_CERTIFICATE_PASSWORD
 4. 确认只出现标准下载来源确认，不出现无法验证开发者、文件损坏或 unidentified developer。
 5. 再把后续 `v0.4.4` 作为自动更新验证目标。
 
-## v0.4.10 自动更新验证
+## v0.4.11 自动更新验证
 
-发布 `v0.4.10` 时至少验证一条真实更新链路：
+发布 `v0.4.11` 时至少验证一条真实更新链路：
 
-1. 安装 GitHub Release 中的 `v0.4.9` 正式包。
-2. 发布 `v0.4.10` tag，让 `Release Desktop` workflow 完整通过。
-3. 打开 `v0.4.9` 应用，等待启动后自动检查，或进入 Settings 手动检查更新。
-4. 确认应用提示 `v0.4.10`，下载完成后点击安装并重启。
-5. 重启后确认 About/Settings 中版本为 `0.4.10`，并检查原有服务商、会话、Skills、记忆和自定义数据目录仍然可用。
-6. 确认历史会话、对话内搜索、后台任务终态和全局搜索均可正常恢复；在「设置 → 诊断」查看本地索引状态，并验证重建索引不会删除源会话文件。
+1. 安装 GitHub Release 中的 `v0.4.10` 正式包。
+2. 发布 `v0.4.11` tag，让 `Release Desktop` workflow 完整通过。
+3. 打开 `v0.4.10` 应用，等待启动后自动检查，或进入 Settings 手动检查更新。
+4. 确认应用提示 `v0.4.11`，下载完成后点击安装并重启。
+5. 重启后确认 About/Settings 中版本为 `0.4.11`，并检查原有服务商、会话、Skills、Agents、记忆、自定义宠物和自定义数据目录仍然可用。
+6. 确认历史附件上下文、SubAgent 详情、Task 状态和 Agent 配置均可正常恢复；打开桌面宠物，验证悬浮窗口、任务面板和当前会话导航。
 
 平台重点：
 
@@ -70,9 +70,9 @@ WINDOWS_CERTIFICATE_PASSWORD
 发版前至少运行：
 
 ```bash
-bun run scripts/release.ts 0.4.10 --dry
+bun run scripts/release.ts 0.4.11 --dry
 bun test scripts/pr/release-workflow.test.ts scripts/release-update-metadata.test.ts scripts/quality-gate/package-smoke/index.test.ts
 bun run check:policy
 ```
 
-正式调用 `bun run scripts/release.ts 0.4.10` 前，先确认对应 `release-notes/v0.4.10.md` 已经存在。
+正式调用 `bun run scripts/release.ts 0.4.11` 前，先确认对应 `release-notes/v0.4.11.md` 已经存在。

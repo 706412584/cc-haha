@@ -53,6 +53,14 @@ describe('desktop bootstrap', () => {
     expect(window.__CC_HAHA_BOOTSTRAPPED__).toBe(true)
   })
 
+  it('recognizes only the dedicated pet window query', async () => {
+    const { isPetWindowLocation } = await import('./main')
+
+    expect(isPetWindowLocation('?petWindow=1')).toBe(true)
+    expect(isPetWindowLocation('?petWindow=0')).toBe(false)
+    expect(isPetWindowLocation('?traceWindow=1')).toBe(false)
+  })
+
   it('surfaces bootstrap failures in the root element', async () => {
     const { bootstrapDesktopApp } = await import('./main')
     const root = document.createElement('div')

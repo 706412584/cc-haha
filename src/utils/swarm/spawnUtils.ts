@@ -100,6 +100,31 @@ const TEAMMATE_ENV_VARS = [
   'CLAUDE_CODE_USE_VERTEX',
   'CLAUDE_CODE_USE_FOUNDRY',
   'CLAUDE_CODE_USE_AZURE_OPENAI',
+  // Global subagent controls must survive tmux's separate login-shell env.
+  // The child still receives request-specific --model/--effort flags, while
+  // these env values retain their documented higher precedence and apply to
+  // any nested subagents it launches.
+  'CLAUDE_CODE_SUBAGENT_MODEL',
+  'CLAUDE_CODE_EFFORT_LEVEL',
+  'CC_HAHA_OPENAI_REASONING_EFFORT',
+  // Request capability/toggle env is consulted dynamically by the API layer.
+  // Forward it so a tmux teammate behaves like an in-process teammate.
+  'CLAUDE_CODE_ALWAYS_ENABLE_EFFORT',
+  'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS',
+  'CLAUDE_CODE_DISABLE_THINKING',
+  'CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING',
+  'CC_HAHA_SEND_DISABLED_THINKING',
+  'DISABLE_INTERLEAVED_THINKING',
+  // Provider role mappings and their declared capabilities are needed when a
+  // selected Agent uses a family alias in a separate tmux process.
+  'ANTHROPIC_DEFAULT_FABLE_MODEL',
+  'ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES',
+  'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+  'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES',
+  'ANTHROPIC_DEFAULT_SONNET_MODEL',
+  'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES',
+  'ANTHROPIC_DEFAULT_OPUS_MODEL',
+  'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES',
   // Custom API endpoint
   'ANTHROPIC_BASE_URL',
   'AZURE_OPENAI_BASE_URL',

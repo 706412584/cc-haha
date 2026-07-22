@@ -7,8 +7,11 @@
 
 import { SearchService } from '../services/searchService.js'
 import { ApiError, errorResponse } from '../middleware/errorHandler.js'
+import { SettingsService } from '../services/settingsService.js'
+import { isSessionContentSearchEnabled } from '../services/localIndex/config.js'
 
 const searchService = new SearchService()
+const settingsService = new SettingsService()
 
 export async function handleSearchApi(
   req: Request,
@@ -35,6 +38,13 @@ export async function handleSearchApi(
 
     // ── POST /api/search/sessions ──────────────────────────────────────────
     if (sub === 'sessions') {
+      if (!isSessionContentSearchEnabled(await settingsService.getUserSettings())) {
+        throw new ApiError(
+          409,
+          'Session content search is disabled',
+          'SESSION_CONTENT_SEARCH_DISABLED',
+        )
+      }
       const { results, truncated } = await searchService.searchSessions(query, {
         limit: body.limit as number | undefined,
         matchesPerSession: body.matchesPerSession as number | undefined,

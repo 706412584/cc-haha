@@ -42,6 +42,7 @@ type WorkspaceApiMocks = {
 }
 
 var mocks: WorkspaceApiMocks | undefined
+const workspacePreviewLineLimitForTests = vi.hoisted(() => 20)
 
 function getMocks() {
   if (!mocks) {
@@ -229,6 +230,11 @@ vi.mock('../../api/openTargets', () => ({
 }))
 
 vi.mock('@tauri-apps/plugin-shell', () => ({ open: vi.fn().mockResolvedValue(undefined) }))
+
+vi.mock('./WorkspaceCodeSurface', async (importOriginal) => ({
+  ...await importOriginal<typeof import('./WorkspaceCodeSurface')>(),
+  WORKSPACE_PREVIEW_LINE_LIMIT: workspacePreviewLineLimitForTests,
+}))
 
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useChatStore } from '../../stores/chatStore'

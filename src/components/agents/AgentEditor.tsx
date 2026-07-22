@@ -10,7 +10,7 @@ import type { Tools } from '../../Tool.js';
 import { type AgentColorName, setAgentColor } from '../../tools/AgentTool/agentColorManager.js';
 import { type AgentDefinition, getActiveAgentsFromList, isCustomAgent, isPluginAgent } from '../../tools/AgentTool/loadAgentsDir.js';
 import { editFileInEditor } from '../../utils/promptEditor.js';
-import { getActualAgentFilePath, updateAgentFile } from './agentFileUtils.js';
+import { getActualAgentFilePath, getPersistedAgentTools, updateAgentFile } from './agentFileUtils.js';
 import { ColorPicker } from './ColorPicker.js';
 import { ModelSelector } from './ModelSelector.js';
 import { ToolSelector } from './ToolSelector.js';
@@ -54,7 +54,7 @@ export function AgentEditor({
       model: newModel
     } = changes;
     const finalColor = newColor ?? selectedColor;
-    const hasToolsChanged = newTools !== undefined;
+    const hasToolsChanged = Object.hasOwn(changes, 'tools');
     const hasModelChanged = newModel !== undefined;
     const hasColorChanged = finalColor !== agent.color;
     if (!hasToolsChanged && !hasModelChanged && !hasColorChanged) {
@@ -66,14 +66,15 @@ export function AgentEditor({
       if (!isCustomAgent(agent) && !isPluginAgent(agent)) {
         return false;
       }
-      await updateAgentFile(agent, agent.whenToUse, newTools ?? agent.tools, agent.getSystemPrompt(), finalColor, newModel ?? agent.model);
+      const persistedTools = hasToolsChanged ? newTools : getPersistedAgentTools(agent);
+      await updateAgentFile(agent, agent.whenToUse, persistedTools, undefined, finalColor, newModel ?? agent.model);
       if (hasColorChanged && finalColor) {
         setAgentColor(agent.agentType, finalColor);
       }
       setAppState(state => {
         const allAgents = state.agentDefinitions.allAgents.map(a => a.agentType === agent.agentType ? {
           ...a,
-          tools: newTools ?? a.tools,
+          tools: hasToolsChanged ? newTools : a.tools,
           color: finalColor,
           model: newModel ?? a.model
         } : a);
@@ -150,7 +151,7 @@ export function AgentEditor({
     case 'menu':
       return renderMenu();
     case 'edit-tools':
-      return <ToolSelector tools={tools} initialTools={agent.tools} onComplete={async finalTools => {
+      return <ToolSelector tools={tools} initialTools={getPersistedAgentTools(agent)} onComplete={async finalTools => {
         setEditMode('menu');
         await handleSave({
           tools: finalTools

@@ -120,7 +120,10 @@ function quoteProblematicValues(frontmatterText: string): string {
   return result.join('\n')
 }
 
-export const FRONTMATTER_REGEX = /^---\s*\n([\s\S]*?)---\s*\n?/
+// Delimiters must start at column zero. An indented `---` may be YAML block
+// scalar content, and treating it as the close can drop restrictive fields.
+export const FRONTMATTER_REGEX =
+  /^---[\t ]*\r?\n([\s\S]*?)^---[\t ]*(?:\r?\n[\t \r\n]*|$)/m
 
 /**
  * Parses markdown content to extract frontmatter and content

@@ -1,23 +1,43 @@
 // biome-ignore-all assist/source/organizeImports: ANT-ONLY import markers must not be reordered
 import { isUltrathinkEnabled } from './thinking.js'
 import { getInitialSettings } from './settings/settings.js'
-import { isProSubscriber, isMaxSubscriber, isTeamSubscriber } from './auth.js'
+import { isClaudeAISubscriber, isProSubscriber, isMaxSubscriber, isTeamSubscriber } from './auth.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from 'src/services/analytics/growthbook.js'
-import { getAPIProvider, isFirstPartyAnthropicBaseUrl } from './model/providers.js'
+import {
+  getAPIProvider,
+  hasAnthropicCompatibleThirdPartyConfig,
+  isFirstPartyAnthropicBaseUrl,
+} from './model/providers.js'
 import { get3PModelCapabilityOverride } from './model/modelSupportOverrides.js'
 import { isEnvTruthy } from './envUtils.js'
-import type { EffortLevel } from 'src/entrypoints/sdk/runtimeTypes.js'
+import type { EffortLevel as RuntimeEffortLevel } from 'src/entrypoints/sdk/runtimeTypes.js'
+import {
+  getOpenAIModelCatalogEntry,
+  isOpenAIResponsesModel,
+} from 'src/services/openaiAuth/models.js'
 
-export type { EffortLevel }
+export type EffortLevel = RuntimeEffortLevel | 'xhigh'
 
 export const EFFORT_LEVELS = [
   'low',
   'medium',
   'high',
+  'xhigh',
   'max',
 ] as const satisfies readonly EffortLevel[]
 
 export type EffortValue = EffortLevel | number
+
+function shouldTrustBuiltInClaudeCapabilityList(): boolean {
+  if (hasAnthropicCompatibleThirdPartyConfig()) {
+    return false
+  }
+  return (
+    getAPIProvider() !== 'firstParty' ||
+    isFirstPartyAnthropicBaseUrl() ||
+    isClaudeAISubscriber()
+  )
+}
 
 // @[MODEL LAUNCH]: Add the new model to the allowlist if it supports the effort parameter.
 export function modelSupportsEffort(model: string): boolean {
@@ -29,8 +49,21 @@ export function modelSupportsEffort(model: string): boolean {
   if (supported3P !== undefined) {
     return supported3P
   }
+  if (isOpenAIResponsesModel(model)) {
+    return true
+  }
   // Supported by a subset of Claude 4 models
-  if (m.includes('opus-4-6') || m.includes('sonnet-4-6')) {
+  if (shouldTrustBuiltInClaudeCapabilityList() && (
+    m.includes('opus-4-6') ||
+    m.includes('opus-4-7') ||
+    m.includes('opus-4-8') ||
+    m.includes('opus-4-5') ||
+    m.includes('sonnet-4-6') ||
+    m.includes('sonnet-5') ||
+    m.includes('fable-5') ||
+    m.includes('mythos-5') ||
+    m.includes('mythos-preview')
+  )) {
     return true
   }
   // Exclude any other known legacy models (haiku, older opus/sonnet variants)
@@ -45,23 +78,70 @@ export function modelSupportsEffort(model: string): boolean {
   // Default to true for unknown model strings on 1P.
   // Do not default to true for 3P as they have different formats for their
   // model strings (ex. anthropics/claude-code#30795)
-  return getAPIProvider() === 'firstParty' && isFirstPartyAnthropicBaseUrl()
+  return (
+    getAPIProvider() === 'firstParty' &&
+    (isFirstPartyAnthropicBaseUrl() || isClaudeAISubscriber())
+  )
+}
+
+// @[MODEL LAUNCH]: Add new models that expose the 'xhigh' effort level.
+export function modelSupportsXHighEffort(model: string): boolean {
+  const supported3P = get3PModelCapabilityOverride(model, 'xhigh_effort')
+  if (supported3P !== undefined) {
+    return supported3P
+  }
+  if (isOpenAIResponsesModel(model)) {
+    const entry = getOpenAIModelCatalogEntry(model)
+    return entry?.supportedReasoningEfforts.includes('xhigh') ?? true
+  }
+  const m = model.toLowerCase()
+  return shouldTrustBuiltInClaudeCapabilityList() && (
+    m.includes('opus-4-7') ||
+    m.includes('opus-4-8') ||
+    m.includes('sonnet-5') ||
+    m.includes('fable-5') ||
+    m.includes('mythos-5')
+  )
 }
 
 // @[MODEL LAUNCH]: Add the new model to the allowlist if it supports 'max' effort.
-// Per API docs, 'max' is Opus 4.7 only for public models — other models return an error.
 export function modelSupportsMaxEffort(model: string): boolean {
   const supported3P = get3PModelCapabilityOverride(model, 'max_effort')
   if (supported3P !== undefined) {
     return supported3P
   }
-  if (model.toLowerCase().includes('opus-4-6')) {
+  if (isOpenAIResponsesModel(model)) {
+    const entry = getOpenAIModelCatalogEntry(model)
+    return entry?.supportedReasoningEfforts.includes('max') ?? true
+  }
+  const m = model.toLowerCase()
+  if (shouldTrustBuiltInClaudeCapabilityList() && (
+    m.includes('opus-4-6') ||
+    m.includes('opus-4-7') ||
+    m.includes('opus-4-8') ||
+    m.includes('sonnet-4-6') ||
+    m.includes('sonnet-5') ||
+    m.includes('fable-5') ||
+    m.includes('mythos-5') ||
+    m.includes('mythos-preview')
+  )) {
     return true
   }
   if (process.env.USER_TYPE === 'ant' && resolveAntModel(model)) {
     return true
   }
   return false
+}
+
+export function getSupportedEffortLevelsForModel(
+  model: string,
+): EffortLevel[] {
+  if (!modelSupportsEffort(model)) return []
+  return EFFORT_LEVELS.filter(
+    level =>
+      (level !== 'xhigh' || modelSupportsXHighEffort(model)) &&
+      (level !== 'max' || modelSupportsMaxEffort(model)),
+  )
 }
 
 export function isEffortLevel(value: string): value is EffortLevel {
@@ -75,12 +155,13 @@ export function parseEffortValue(value: unknown): EffortValue | undefined {
   if (typeof value === 'number' && isValidNumericEffort(value)) {
     return value
   }
-  const str = String(value).toLowerCase()
+  const str = String(value).trim().toLowerCase()
   if (isEffortLevel(str)) {
     return str
   }
-  const numericValue = parseInt(str, 10)
-  if (!isNaN(numericValue) && isValidNumericEffort(numericValue)) {
+  if (!/^-?\d+$/.test(str)) return undefined
+  const numericValue = Number(str)
+  if (isValidNumericEffort(numericValue)) {
     return numericValue
   }
   return undefined
@@ -94,7 +175,7 @@ export function parseEffortValue(value: unknown): EffortValue | undefined {
  */
 export function toPersistableEffort(
   value: EffortValue | undefined,
-): EffortLevel | undefined {
+): RuntimeEffortLevel | undefined {
   if (value === 'low' || value === 'medium' || value === 'high') {
     return value
   }
@@ -144,23 +225,42 @@ export function getEffortEnvOverride(): EffortValue | null | undefined {
 /**
  * Resolve the effort value that will actually be sent to the API for a given
  * model, following the full precedence chain:
- *   env CLAUDE_CODE_EFFORT_LEVEL → appState.effortValue → model default
+ *   request-scoped Agent effort → env CLAUDE_CODE_EFFORT_LEVEL
+ *   → appState.effortValue → model default
  *
  * Returns undefined when no effort parameter should be sent (env set to
- * 'unset', or no default exists for the model).
+ * 'unset' without a request-scoped override, or no default exists for the
+ * model).
  */
 export function resolveAppliedEffort(
   model: string,
   appStateEffortValue: EffortValue | undefined,
+  options?: { effortValueOverridesEnv?: boolean },
 ): EffortValue | undefined {
   const envOverride = getEffortEnvOverride()
-  if (envOverride === null) {
+  const hasRequestScopedOverride =
+    options?.effortValueOverridesEnv === true &&
+    appStateEffortValue !== undefined
+  if (!hasRequestScopedOverride && envOverride === null) {
     return undefined
   }
-  const resolved =
-    envOverride ?? appStateEffortValue ?? getDefaultEffortForModel(model)
-  // API rejects 'max' on non-Opus-4.6 models — downgrade to 'high'.
-  if (resolved === 'max' && !modelSupportsMaxEffort(model)) {
+  const resolved = hasRequestScopedOverride
+    ? appStateEffortValue
+    : envOverride ?? appStateEffortValue ?? getDefaultEffortForModel(model)
+  // Claude Code falls back to the nearest supported level at or below the
+  // requested level. Opus/Sonnet 4.6 therefore run xhigh as high.
+  if (
+    resolved === 'xhigh' &&
+    !isOpenAIResponsesModel(model) &&
+    !modelSupportsXHighEffort(model)
+  ) {
+    return 'high'
+  }
+  if (
+    resolved === 'max' &&
+    !isOpenAIResponsesModel(model) &&
+    !modelSupportsMaxEffort(model)
+  ) {
     return 'high'
   }
   return resolved
@@ -229,8 +329,10 @@ export function getEffortLevelDescription(level: EffortLevel): string {
       return 'Balanced approach with standard implementation and testing'
     case 'high':
       return 'Comprehensive implementation with extensive testing and documentation'
+    case 'xhigh':
+      return 'Extra-high reasoning for especially complex tasks'
     case 'max':
-      return 'Maximum capability with deepest reasoning (Opus 4.7 only)'
+      return 'Maximum capability with deepest reasoning'
   }
 }
 
@@ -306,7 +408,10 @@ export function getDefaultEffortForModel(
 
   // Default effort on Opus 4.7 to medium for Pro.
   // Max/Team also get medium when the tengu_grey_step2 config is enabled.
-  if (model.toLowerCase().includes('opus-4-6')) {
+  if (
+    model.toLowerCase().includes('opus-4-6') ||
+    model.toLowerCase().includes('opus-4-7')
+  ) {
     if (isProSubscriber()) {
       return 'medium'
     }

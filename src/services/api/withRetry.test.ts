@@ -283,6 +283,13 @@ describe('isRetryableStreamError', () => {
     expect(isRetryableStreamError(err)).toBe(true)
   })
 
+  test('matches Grok stream disconnects serialized as a plain API Error message', () => {
+    const err = new Error(
+      'API Error: {"error":{"message":"OpenAI messages stream disconnected before completion","type":"api_error"},"type":"error"}',
+    )
+    expect(isRetryableStreamError(err)).toBe(true)
+  })
+
   test('matches an overloaded_error', () => {
     const err = apiErrorWithBody({
       type: 'error',

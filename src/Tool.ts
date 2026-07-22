@@ -163,6 +163,8 @@ export type ToolUseContext = {
     tools: Tools
     verbose: boolean
     thinkingConfig: ThinkingConfig
+    /** A request-scoped Agent effort is authoritative over session env. */
+    effortValueOverridesEnv?: boolean
     mcpClients: MCPServerConnection[]
     mcpResources: Record<string, ServerResource[]>
     isNonInteractiveSession: boolean

@@ -275,13 +275,13 @@ describe('ProviderService', () => {
       const env = settings.env as Record<string, string>
       expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('deepseek-ai/DeepSeek-V4-Pro')
       expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe(
-        'thinking,effort,adaptive_thinking,max_effort',
+        'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
       )
       expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES).toBe(
-        'thinking,effort,adaptive_thinking,max_effort',
+        'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
       )
       expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES).toBe(
-        'thinking,effort,adaptive_thinking,max_effort',
+        'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
       )
     })
 

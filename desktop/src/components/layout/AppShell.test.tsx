@@ -16,9 +16,18 @@ const mocks = vi.hoisted(() => ({
   openTraceTab: vi.fn(),
   openOfficeTab: vi.fn(),
   officeLifecycle: [] as string[],
+  getDesktopUiPreferences: vi.fn(),
+  updatePetPreferences: vi.fn(),
   tabState: {
     activeTabId: null as string | null,
     tabs: [] as Array<{ sessionId: string; title: string; type: string; status: string }>,
+  },
+}))
+
+vi.mock('../../api/desktopUiPreferences', () => ({
+  desktopUiPreferencesApi: {
+    getPreferences: mocks.getDesktopUiPreferences,
+    updatePetPreferences: mocks.updatePetPreferences,
   },
 }))
 
@@ -149,6 +158,38 @@ describe('AppShell boot flow', () => {
     mocks.initializeDesktopServerUrl.mockResolvedValue('http://127.0.0.1:3456')
     mocks.fetchAll.mockResolvedValue(undefined)
     mocks.restoreTabs.mockResolvedValue(undefined)
+    mocks.getDesktopUiPreferences.mockResolvedValue({
+      exists: true,
+      preferences: {
+        schemaVersion: 3,
+        sidebar: {},
+        profile: {},
+        pet: {
+          enabled: false,
+          selectedPetId: 'dada-code',
+          size: 144,
+          collapsed: false,
+          motionEnabled: true,
+          lastSessionId: null,
+        },
+      },
+    })
+    mocks.updatePetPreferences.mockResolvedValue({
+      ok: true,
+      preferences: {
+        schemaVersion: 3,
+        sidebar: {},
+        profile: {},
+        pet: {
+          enabled: false,
+          selectedPetId: 'dada-code',
+          size: 144,
+          collapsed: false,
+          motionEnabled: true,
+          lastSessionId: null,
+        },
+      },
+    })
     mocks.openTab.mockReset()
     mocks.openTraceTab.mockReset()
     mocks.openOfficeTab.mockReset()
@@ -207,6 +248,92 @@ describe('AppShell boot flow', () => {
     expect(screen.getByTestId('mobile-session-header')).not.toHaveTextContent('settings.title')
   })
 
+  it('keeps the last real session as Settings project context', async () => {
+    useSessionStore.setState({
+      sessions: [{
+        id: 'session-1',
+        title: 'Project session',
+        createdAt: '',
+        modifiedAt: '',
+        messageCount: 0,
+        projectPath: '/workspace/project',
+        workDir: '/workspace/project',
+        workDirExists: true,
+      }],
+      activeSessionId: null,
+    })
+    mocks.tabState.activeTabId = 'session-1'
+    mocks.tabState.tabs = [
+      { sessionId: 'session-1', title: 'Project session', type: 'session', status: 'idle' },
+      { sessionId: '__settings__', title: 'Settings', type: 'settings', status: 'idle' },
+    ]
+
+    const { rerender } = render(<AppShell />)
+
+    await waitFor(() => {
+      expect(useSessionStore.getState().activeSessionId).toBe('session-1')
+    })
+
+    mocks.tabState.activeTabId = '__settings__'
+    rerender(<AppShell />)
+    expect(useSessionStore.getState().activeSessionId).toBe('session-1')
+
+    mocks.tabState.activeTabId = 'team-member:synthetic'
+    mocks.tabState.tabs = [
+      ...mocks.tabState.tabs,
+      { sessionId: 'team-member:synthetic', title: 'Teammate', type: 'session', status: 'idle' },
+    ]
+    rerender(<AppShell />)
+    expect(useSessionStore.getState().activeSessionId).toBe('session-1')
+  })
+
+  it('restores the most recent open real session as Settings project context', async () => {
+    const restoredSessions = [
+      {
+        id: 'session-recent',
+        title: 'Recent project session',
+        createdAt: '2026-07-21T02:00:00.000Z',
+        modifiedAt: '2026-07-21T03:00:00.000Z',
+        messageCount: 2,
+        projectPath: '/workspace/recent',
+        workDir: '/workspace/recent',
+        workDirExists: true,
+      },
+      {
+        id: 'session-older',
+        title: 'Older project session',
+        createdAt: '2026-07-20T02:00:00.000Z',
+        modifiedAt: '2026-07-20T03:00:00.000Z',
+        messageCount: 1,
+        projectPath: '/workspace/older',
+        workDir: '/workspace/older',
+        workDirExists: true,
+      },
+    ]
+    mocks.tabState.activeTabId = '__settings__'
+    mocks.tabState.tabs = [
+      { sessionId: 'session-older', title: 'Older project session', type: 'session', status: 'idle' },
+      { sessionId: '__settings__', title: 'Settings', type: 'settings', status: 'idle' },
+      { sessionId: 'team-member:synthetic', title: 'Teammate', type: 'session', status: 'idle' },
+      { sessionId: 'session-recent', title: 'Recent project session', type: 'session', status: 'idle' },
+    ]
+
+    const { rerender } = render(<AppShell />)
+
+    expect(useSessionStore.getState().activeSessionId).toBeNull()
+    act(() => {
+      useSessionStore.setState({ sessions: restoredSessions })
+    })
+
+    await waitFor(() => {
+      expect(useSessionStore.getState().activeSessionId).toBe('session-recent')
+    })
+
+    mocks.tabState.activeTabId = 'team-member:synthetic'
+    rerender(<AppShell />)
+    expect(useSessionStore.getState().activeSessionId).toBe('session-recent')
+  })
+
   it('shows startup diagnostics instead of a blank shell when bootstrap fails', async () => {
     mocks.fetchAll.mockRejectedValueOnce(new Error('settings file could not be read'))
 
@@ -245,6 +372,26 @@ describe('AppShell boot flow', () => {
     await screen.findByText('sidebar loaded')
     await waitFor(() => {
       expect(mocks.connectToSession).toHaveBeenCalledWith('session-1')
+    })
+  })
+
+  it('keeps the pet selection synchronized with the main window current task', async () => {
+    mocks.isTauriRuntime = true
+    mocks.tabState.activeTabId = 'session-current'
+    mocks.tabState.tabs = [{
+      sessionId: 'session-current',
+      title: 'Current session',
+      type: 'session',
+      status: 'running',
+    }]
+
+    render(<AppShell />)
+
+    await screen.findByText('sidebar loaded')
+    await waitFor(() => {
+      expect(mocks.updatePetPreferences).toHaveBeenCalledWith({
+        lastSessionId: 'session-current',
+      })
     })
   })
 
@@ -299,6 +446,49 @@ describe('AppShell boot flow', () => {
 
     expect(useUIStore.getState().pendingSettingsTab).toBe('about')
     expect(mocks.openTab).toHaveBeenCalledWith('__settings__', 'Settings', 'settings')
+  })
+
+  it('restores an enabled pet window and routes pet session navigation', async () => {
+    mocks.isTauriRuntime = true
+    mocks.getDesktopUiPreferences.mockResolvedValueOnce({
+      exists: true,
+      preferences: {
+        schemaVersion: 3,
+        sidebar: {},
+        profile: {},
+        pet: {
+          enabled: true,
+          selectedPetId: 'dada-code',
+          size: 144,
+          collapsed: false,
+          motionEnabled: true,
+          lastSessionId: 'session-pet',
+        },
+      },
+    })
+    const show = vi.fn().mockResolvedValue(undefined)
+    let navigate: ((sessionId: string) => void) | undefined
+    window.desktopHost = {
+      isDesktop: true,
+      pets: {
+        show,
+        onNavigateSession: vi.fn((handler: (sessionId: string) => void) => {
+          navigate = handler
+          return Promise.resolve(vi.fn())
+        }),
+      },
+      window: {
+        onNativeMenuNavigate: vi.fn().mockResolvedValue(vi.fn()),
+      },
+    } as any
+
+    render(<AppShell />)
+
+    await screen.findByText('sidebar loaded')
+    await waitFor(() => expect(show).toHaveBeenCalledTimes(1))
+    act(() => navigate?.('session-pet'))
+    expect(mocks.openTab).toHaveBeenCalledWith('session-pet', 'Session', 'session')
+    expect(mocks.connectToSession).toHaveBeenCalledWith('session-pet')
   })
 
   it('shows the H5 connection view in browser mode when startup needs H5 auth', async () => {

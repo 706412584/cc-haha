@@ -8,6 +8,7 @@
  */
 
 import { z } from 'zod/v4'
+import { HooksSchema } from '../../schemas/hooks.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 
 // ============================================================================
@@ -1057,7 +1058,7 @@ export const ModelInfoSchema = lazySchema(() =>
         .optional()
         .describe('Whether this model supports effort levels'),
       supportedEffortLevels: z
-        .array(z.enum(['low', 'medium', 'high', 'max']))
+        .array(z.enum(['low', 'medium', 'high', 'xhigh', 'max']))
         .optional()
         .describe('Available effort levels for this model'),
       supportsAdaptiveThinking: z
@@ -1112,6 +1113,8 @@ export const AgentDefinitionSchema = lazySchema(() =>
     .object({
       description: z
         .string()
+        .trim()
+        .min(1, 'Description cannot be empty')
         .describe('Natural language description of when to use this agent'),
       tools: z
         .array(z.string())
@@ -1123,12 +1126,18 @@ export const AgentDefinitionSchema = lazySchema(() =>
         .array(z.string())
         .optional()
         .describe('Array of tool names to explicitly disallow for this agent'),
-      prompt: z.string().describe("The agent's system prompt"),
+      prompt: z
+        .string()
+        .trim()
+        .min(1, 'Prompt cannot be empty')
+        .describe("The agent's system prompt"),
       model: z
         .string()
+        .trim()
+        .min(1, 'Model cannot be empty')
         .optional()
         .describe(
-          "Model alias (e.g. 'sonnet', 'opus', 'haiku') or full model ID (e.g. 'claude-opus-4-5'). If omitted or 'inherit', uses the main model",
+          "Model alias (e.g. 'fable', 'sonnet', 'opus', 'haiku') or full model ID (e.g. 'claude-fable-5'). If omitted or 'inherit', uses the main model",
         ),
       mcpServers: z.array(AgentMcpServerSpecSchema()).optional(),
       criticalSystemReminder_EXPERIMENTAL: z
@@ -1166,7 +1175,10 @@ export const AgentDefinitionSchema = lazySchema(() =>
           "Scope for auto-loading agent memory files. 'user' - ~/.claude/agent-memory/<agentType>/, 'project' - .claude/agent-memory/<agentType>/, 'local' - .claude/agent-memory-local/<agentType>/",
         ),
       effort: z
-        .union([z.enum(['low', 'medium', 'high', 'max']), z.number().int()])
+        .union([
+          z.enum(['low', 'medium', 'high', 'xhigh', 'max']),
+          z.number().int(),
+        ])
         .optional()
         .describe(
           'Reasoning effort level for this agent. Either a named level or an integer',
@@ -1176,6 +1188,28 @@ export const AgentDefinitionSchema = lazySchema(() =>
         .describe(
           'Permission mode controlling how tool executions are handled',
         ),
+      hooks: HooksSchema()
+        .optional()
+        .describe('Session-scoped hooks registered when this agent starts'),
+      isolation: (process.env.USER_TYPE === 'ant'
+        ? z.enum(['worktree', 'remote'])
+        : z.enum(['worktree'])
+      )
+        .optional()
+        .describe('Isolation mode used when this agent runs'),
+      color: z
+        .enum([
+          'red',
+          'blue',
+          'green',
+          'yellow',
+          'purple',
+          'orange',
+          'pink',
+          'cyan',
+        ])
+        .optional()
+        .describe('Display color for this agent'),
     })
     .describe(
       'Definition for a custom subagent that can be invoked via the Agent tool.',

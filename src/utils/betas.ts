@@ -89,6 +89,14 @@ export function filterAllowedSdkBetas(
 // Generally, foundry supports all 1P features;
 // however out of an abundance of caution, we do not enable any which are behind an experiment
 
+function shouldTrustBuiltInClaudeCapabilities(): boolean {
+  return (
+    getAPIProvider() !== 'firstParty' ||
+    isFirstPartyAnthropicBaseUrl() ||
+    isClaudeAISubscriber()
+  )
+}
+
 export function modelSupportsISP(model: string): boolean {
   const supported3P = get3PModelCapabilityOverride(
     model,
@@ -104,6 +112,9 @@ export function modelSupportsISP(model: string): boolean {
     return true
   }
   if (provider === 'firstParty') {
+    if (!shouldTrustBuiltInClaudeCapabilities()) {
+      return false
+    }
     return !canonical.includes('claude-3-')
   }
   return (
@@ -129,9 +140,14 @@ export function modelSupportsContextManagement(model: string): boolean {
     return true
   }
   if (provider === 'firstParty') {
+    if (!shouldTrustBuiltInClaudeCapabilities()) {
+      return false
+    }
     return !canonical.includes('claude-3-')
   }
   return (
+    canonical.includes('claude-fable-5') ||
+    canonical.includes('claude-sonnet-5') ||
     canonical.includes('claude-opus-4') ||
     canonical.includes('claude-sonnet-4') ||
     canonical.includes('claude-haiku-4')
@@ -146,11 +162,17 @@ export function modelSupportsStructuredOutputs(model: string): boolean {
   if (provider !== 'firstParty' && provider !== 'foundry') {
     return false
   }
+  if (provider === 'firstParty' && !shouldTrustBuiltInClaudeCapabilities()) {
+    return false
+  }
   return (
+    canonical.includes('claude-fable-5') ||
+    canonical.includes('claude-sonnet-5') ||
     canonical.includes('claude-sonnet-4-6') ||
     canonical.includes('claude-sonnet-4-5') ||
     canonical.includes('claude-opus-4-1') ||
     canonical.includes('claude-opus-4-5') ||
+    canonical.includes('claude-opus-4-8') ||
     canonical.includes('claude-opus-4-7') ||
     canonical.includes('claude-haiku-4-5')
   )
@@ -163,7 +185,10 @@ export function modelSupportsAutoMode(model: string): boolean {
     // External: firstParty-only at launch (PI probes not wired for
     // Bedrock/Vertex/Foundry yet). Checked before allowModels so the GB
     // override can't enable auto mode on unsupported providers.
-    if (process.env.USER_TYPE !== 'ant' && getAPIProvider() !== 'firstParty') {
+    if (
+      process.env.USER_TYPE !== 'ant' &&
+      (getAPIProvider() !== 'firstParty' || !shouldTrustBuiltInClaudeCapabilities())
+    ) {
       return false
     }
     // GrowthBook override: tengu_auto_mode_config.allowModels force-enables
@@ -215,7 +240,11 @@ export function getToolSearchBetaHeader(): string {
 export function shouldIncludeFirstPartyOnlyBetas(): boolean {
   return (
     (getAPIProvider() === 'firstParty' || getAPIProvider() === 'foundry') &&
-    (getAPIProvider() !== 'firstParty' || isFirstPartyAnthropicBaseUrl()) &&
+    (
+      getAPIProvider() !== 'firstParty' ||
+      isFirstPartyAnthropicBaseUrl() ||
+      isClaudeAISubscriber()
+    ) &&
     !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS)
   )
 }
@@ -228,6 +257,7 @@ export function shouldIncludeFirstPartyOnlyBetas(): boolean {
 export function shouldUseGlobalCacheScope(): boolean {
   return (
     getAPIProvider() === 'firstParty' &&
+    (isFirstPartyAnthropicBaseUrl() || isClaudeAISubscriber()) &&
     !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS)
   )
 }

@@ -419,6 +419,7 @@ export function TabBar() {
             key={tab.sessionId}
             ref={(node) => { tabRefs.current.set(tab.sessionId, node) }}
             tab={tab}
+            displayTitle={tab.type === 'settings' ? t('settings.title') : tab.title}
             isRunning={runningSessionIds.has(tab.sessionId)}
             isActive={tab.sessionId === activeTabId}
             isDragOver={dragOverIndex === index}
@@ -589,6 +590,7 @@ export function TabBar() {
 
 const TabItem = forwardRef<HTMLDivElement, {
   tab: Tab
+  displayTitle: string
   isRunning: boolean
   isActive: boolean
   isDragOver: boolean
@@ -601,10 +603,9 @@ const TabItem = forwardRef<HTMLDivElement, {
   onMouseDown: (event: React.MouseEvent) => void
 }>(({ tab, isRunning, isActive, isDragOver, isDragging, dragOffsetX, runningLabel, onClick, onClose, onContextMenu, onMouseDown }, ref) => {
   const t = useTranslation()
-  // Special tabs (settings/scheduled/traces) carry a stored title from when
-  // they were first opened; that title is frozen at the locale active at the
-  // time and persists across locale switches via localStorage. Always derive
-  // the label from i18n at render time so the current locale wins.
+  // Special tabs carry a stored title from when they were first opened; that
+  // title is frozen at the locale active at the time and persists across locale
+  // switches. Always derive their labels from i18n at render time.
   const displayTitle = tab.type === 'settings'
     ? t('sidebar.settings')
     : tab.type === 'scheduled'

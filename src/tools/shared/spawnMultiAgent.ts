@@ -22,6 +22,7 @@ import { isInBundledMode } from '../../utils/bundledMode.js'
 import { getGlobalConfig } from '../../utils/config.js'
 import { getCwd } from '../../utils/cwd.js'
 import { logForDebugging } from '../../utils/debug.js'
+import type { EffortValue } from '../../utils/effort.js'
 import { errorMessage } from '../../utils/errors.js'
 import { execFileNoThrow } from '../../utils/execFileNoThrow.js'
 import { parseUserSpecifiedModel } from '../../utils/model/model.js'
@@ -66,8 +67,15 @@ import {
 import { getHardcodedTeammateModelFallback } from '../../utils/swarm/teammateModel.js'
 import { registerTask } from '../../utils/task/framework.js'
 import { writeToMailbox } from '../../utils/teammateMailbox.js'
-import type { CustomAgentDefinition } from '../AgentTool/loadAgentsDir.js'
-import { isCustomAgent } from '../AgentTool/loadAgentsDir.js'
+import type { ThinkingConfig } from '../../utils/thinking.js'
+import type {
+  CustomAgentDefinition,
+  PluginAgentDefinition,
+} from '../AgentTool/loadAgentsDir.js'
+import {
+  isCustomAgent,
+  isPluginAgent,
+} from '../AgentTool/loadAgentsDir.js'
 
 function getDefaultTeammateModel(leaderModel: string | null): string {
   const configured = getGlobalConfig().teammateDefaultModel
@@ -82,22 +90,61 @@ function getDefaultTeammateModel(leaderModel: string | null): string {
 }
 
 /**
- * Resolve a teammate model value. Handles the 'inherit' alias (from agent
- * frontmatter) by substituting the leader's model. gh-31069: 'inherit' was
- * passed literally to --model, producing "It may not exist or you may not
- * have access". If leader model is null (not yet set), falls through to the
- * default.
+ * Resolve a teammate model using the same precedence for tmux and in-process
+ * teammates: concrete env override, invocation override, selected Agent
+ * definition, then leader/default. `inherit` is never forwarded literally;
+ * it falls through to the next source. gh-31069 documents why passing it to
+ * --model is invalid.
  *
  * Exported for testing.
  */
 export function resolveTeammateModel(
   inputModel: string | undefined,
   leaderModel: string | null,
+  agentModel?: string,
+  hasAgentDefinition = agentModel !== undefined,
 ): string {
-  if (inputModel === 'inherit') {
+  const normalizeModelSpec = (
+    value: string | undefined,
+  ): string | undefined => {
+    const trimmed = value?.trim()
+    return trimmed || undefined
+  }
+
+  const configuredSubagentModel = normalizeModelSpec(
+    process.env.CLAUDE_CODE_SUBAGENT_MODEL,
+  )
+  if (
+    configuredSubagentModel &&
+    configuredSubagentModel.toLowerCase() !== 'inherit'
+  ) {
+    return parseUserSpecifiedModel(configuredSubagentModel)
+  }
+
+  const invocationModel = normalizeModelSpec(inputModel)
+  if (invocationModel) {
+    if (invocationModel.toLowerCase() === 'inherit') {
+      return leaderModel ?? getDefaultTeammateModel(leaderModel)
+    }
+    return invocationModel
+  }
+
+  if (hasAgentDefinition) {
+    const definitionModel = normalizeModelSpec(agentModel)
+    if (
+      definitionModel &&
+      definitionModel.toLowerCase() !== 'inherit'
+    ) {
+      return definitionModel
+    }
+    // Official Agent frontmatter defaults to `inherit`, so a selected Agent
+    // follows the leader when its model is omitted or explicitly inherit.
     return leaderModel ?? getDefaultTeammateModel(leaderModel)
   }
-  return inputModel ?? getDefaultTeammateModel(leaderModel)
+
+  // Plain teammates retain the existing /config teammateDefaultModel
+  // contract. Do not let the presence of a leader bypass that setting.
+  return getDefaultTeammateModel(leaderModel)
 }
 
 // ============================================================================
@@ -205,12 +252,40 @@ function getTeammateCommand(): string {
  * @param options.planModeRequired - If true, don't inherit bypass permissions (plan mode takes precedence)
  * @param options.permissionMode - Permission mode to propagate
  */
+export function buildTeammateRuntimeCliFlags(options: {
+  effort?: EffortValue
+  thinkingConfig?: ThinkingConfig
+}): string[] {
+  const flags: string[] = []
+
+  if (options.effort !== undefined) {
+    flags.push(`--effort ${quote([String(options.effort)])}`)
+  }
+
+  const thinkingConfig = options.thinkingConfig
+  if (thinkingConfig?.type === 'disabled') {
+    flags.push('--thinking disabled')
+  } else if (thinkingConfig?.type === 'adaptive') {
+    flags.push('--thinking adaptive')
+  } else if (thinkingConfig?.type === 'enabled') {
+    // Passing --thinking enabled would select adaptive mode before the CLI
+    // considers --max-thinking-tokens. The budget flag alone preserves the
+    // parent's manual-thinking semantics.
+    flags.push(`--max-thinking-tokens ${thinkingConfig.budgetTokens}`)
+  }
+
+  return flags
+}
+
 function buildInheritedCliFlags(options?: {
   planModeRequired?: boolean
   permissionMode?: PermissionMode
+  effort?: EffortValue
+  thinkingConfig?: ThinkingConfig
 }): string {
   const flags: string[] = []
-  const { planModeRequired, permissionMode } = options || {}
+  const { planModeRequired, permissionMode, effort, thinkingConfig } =
+    options || {}
 
   // Propagate permission mode to teammates, but NOT if plan mode is required
   // Plan mode takes precedence over bypass permissions for safety
@@ -229,6 +304,8 @@ function buildInheritedCliFlags(options?: {
     // GrowthBook gate checks and setAutoModeActive(true) independently.
     flags.push('--permission-mode auto')
   }
+
+  flags.push(...buildTeammateRuntimeCliFlags({ effort, thinkingConfig }))
 
   // Propagate --model if explicitly set via CLI
   const modelOverride = getMainLoopModelOverride()
@@ -308,16 +385,23 @@ async function handleSpawnSplitPane(
 ): Promise<{ data: SpawnOutput }> {
   const { setAppState, getAppState } = context
   const { name, prompt, agent_type, cwd, plan_mode_required } = input
-
-  // Resolve model: 'inherit' → leader's model; undefined → default Opus
-  const model = resolveTeammateModel(input.model, getAppState().mainLoopModel)
+  const appState = getAppState()
+  const selectedAgentDefinition =
+    context.options.agentDefinitions.activeAgents.find(
+      agent => agent.agentType === agent_type,
+    )
+  const model = resolveTeammateModel(
+    input.model,
+    appState.mainLoopModel,
+    selectedAgentDefinition?.model,
+    selectedAgentDefinition !== undefined,
+  )
 
   if (!name || !prompt) {
     throw new Error('name and prompt are required for spawn operation')
   }
 
   // Get team name from input or inherit from leader's team context
-  const appState = getAppState()
   const teamName = input.team_name || appState.teamContext?.teamName
 
   if (!teamName) {
@@ -418,6 +502,8 @@ async function handleSpawnSplitPane(
   let inheritedFlags = buildInheritedCliFlags({
     planModeRequired: plan_mode_required,
     permissionMode: appState.toolPermissionContext.mode,
+    effort: selectedAgentDefinition?.effort ?? appState.effortValue,
+    thinkingConfig: context.options.thinkingConfig,
   })
 
   // If teammate has a custom model, add --model flag (or replace inherited one)
@@ -544,16 +630,23 @@ async function handleSpawnSeparateWindow(
 ): Promise<{ data: SpawnOutput }> {
   const { setAppState, getAppState } = context
   const { name, prompt, agent_type, cwd, plan_mode_required } = input
-
-  // Resolve model: 'inherit' → leader's model; undefined → default Opus
-  const model = resolveTeammateModel(input.model, getAppState().mainLoopModel)
+  const appState = getAppState()
+  const selectedAgentDefinition =
+    context.options.agentDefinitions.activeAgents.find(
+      agent => agent.agentType === agent_type,
+    )
+  const model = resolveTeammateModel(
+    input.model,
+    appState.mainLoopModel,
+    selectedAgentDefinition?.model,
+    selectedAgentDefinition !== undefined,
+  )
 
   if (!name || !prompt) {
     throw new Error('name and prompt are required for spawn operation')
   }
 
   // Get team name from input or inherit from leader's team context
-  const appState = getAppState()
   const teamName = input.team_name || appState.teamContext?.teamName
 
   if (!teamName) {
@@ -621,6 +714,8 @@ async function handleSpawnSeparateWindow(
   let inheritedFlags = buildInheritedCliFlags({
     planModeRequired: plan_mode_required,
     permissionMode: appState.toolPermissionContext.mode,
+    effort: selectedAgentDefinition?.effort ?? appState.effortValue,
+    thinkingConfig: context.options.thinkingConfig,
   })
 
   // If teammate has a custom model, add --model flag (or replace inherited one)
@@ -833,16 +928,23 @@ async function handleSpawnInProcess(
 ): Promise<{ data: SpawnOutput }> {
   const { setAppState, getAppState } = context
   const { name, prompt, agent_type, plan_mode_required } = input
-
-  // Resolve model: 'inherit' → leader's model; undefined → default Opus
-  const model = resolveTeammateModel(input.model, getAppState().mainLoopModel)
+  const appState = getAppState()
+  const selectedAgentDefinition =
+    context.options.agentDefinitions.activeAgents.find(
+      agent => agent.agentType === agent_type,
+    )
+  const model = resolveTeammateModel(
+    input.model,
+    appState.mainLoopModel,
+    selectedAgentDefinition?.model,
+    selectedAgentDefinition !== undefined,
+  )
 
   if (!name || !prompt) {
     throw new Error('name and prompt are required for spawn operation')
   }
 
   // Get team name from input or inherit from leader's team context
-  const appState = getAppState()
   const teamName = input.team_name || appState.teamContext?.teamName
 
   if (!teamName) {
@@ -864,12 +966,17 @@ async function handleSpawnInProcess(
   const teammateColor = assignTeammateColor(teammateId)
 
   // Look up custom agent definition if agent_type is provided
-  let agentDefinition: CustomAgentDefinition | undefined
+  let agentDefinition:
+    | CustomAgentDefinition
+    | PluginAgentDefinition
+    | undefined
   if (agent_type) {
-    const allAgents = context.options.agentDefinitions.activeAgents
-    const foundAgent = allAgents.find(a => a.agentType === agent_type)
-    if (foundAgent && isCustomAgent(foundAgent)) {
-      agentDefinition = foundAgent
+    if (
+      selectedAgentDefinition &&
+      (isCustomAgent(selectedAgentDefinition) ||
+        isPluginAgent(selectedAgentDefinition))
+    ) {
+      agentDefinition = selectedAgentDefinition
     }
     logForDebugging(
       `[handleSpawnInProcess] agent_type=${agent_type}, found=${!!agentDefinition}`,

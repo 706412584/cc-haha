@@ -22,6 +22,7 @@ export function useKeyboardShortcuts() {
   const chatState = useChatStore((s) => activeTabId ? s.sessions[activeTabId]?.chatState ?? 'idle' : 'idle')
   const uiZoom = useSettingsStore((s) => s.uiZoom)
   const setUiZoom = useSettingsStore((s) => s.setUiZoom)
+  const sessionContentSearchEnabled = useSettingsStore((s) => s.sessionContentSearchEnabled)
 
   const activeModalRef = useRef(activeModal)
   activeModalRef.current = activeModal
@@ -60,7 +61,7 @@ export function useKeyboardShortcuts() {
       }
 
       // Cmd+K — Open global session search
-      if (meta && e.key === 'k') {
+      if (meta && e.key === 'k' && sessionContentSearchEnabled) {
         e.preventDefault()
         openModal('globalSearch')
       }
@@ -89,5 +90,5 @@ export function useKeyboardShortcuts() {
 
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)
-  }, [closeModal, openModal, setActiveSession, setActiveView, setSidebarOpen, toggleSidebar, setUiZoom, stopGeneration])
+  }, [closeModal, openModal, sessionContentSearchEnabled, setActiveSession, setActiveView, setSidebarOpen, toggleSidebar, setUiZoom, stopGeneration])
 }

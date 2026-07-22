@@ -153,7 +153,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version-file: package.json
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -188,6 +188,13 @@ jobs:
           BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/bun-install-cache
           SIDECAR_TARGET_TRIPLE: ${{ matrix.target_triple }}
         run: bun run build:sidecars
+
+      - name: Verify compiled Windows sidecar startup
+        if: matrix.smoke_platform == 'windows' && matrix.arch == 'x64'
+        working-directory: desktop
+        env:
+          CC_HAHA_COMPILED_SIDECAR_SMOKE_STARTS: '20'
+        run: bun run test:compiled-sidecar-smoke
 
       - name: Build renderer and Electron bundles
         working-directory: desktop
@@ -554,7 +561,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version-file: package.json
 
       - name: Install root dependencies
         run: bun install

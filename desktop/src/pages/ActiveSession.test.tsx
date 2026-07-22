@@ -1094,6 +1094,96 @@ describe('ActiveSession task polling', () => {
     expect(screen.queryByRole('button', { name: '1 finished task' })).not.toBeInTheDocument()
   })
 
+  it('opens a SubAgent detail tab from the activity panel', () => {
+    const sessionId = 'activity-subagent-open-session'
+
+    useActivityPanelStore.getState().open(sessionId)
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'SubAgent Activity Session',
+        createdAt: '2026-05-07T00:00:00.000Z',
+        modifiedAt: '2026-05-07T00:00:00.000Z',
+        messageCount: 1,
+        projectPath: '/workspace/project',
+        workDir: '/workspace/project',
+        workDirExists: true,
+      }],
+      activeSessionId: sessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'SubAgent Activity Session', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          messages: [
+            {
+              id: 'agent-tool-1',
+              type: 'tool_use',
+              toolName: 'Agent',
+              toolUseId: 'agent-tool-1',
+              input: { description: 'Review workspace seams' },
+              timestamp: 1,
+            },
+            {
+              id: 'agent-result-1',
+              type: 'tool_result',
+              toolUseId: 'agent-tool-1',
+              content: 'Done',
+              isError: false,
+              timestamp: 2,
+            },
+          ],
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          backgroundAgentTasks: {},
+          agentTaskNotifications: {
+            'agent-task-1': {
+              taskId: 'agent-task-1',
+              toolUseId: 'agent-tool-1',
+              status: 'completed',
+              summary: 'Review workspace seams',
+              timestamp: '2026-07-03T00:00:00.000Z',
+            },
+          },
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    render(<ActiveSession />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Open run Review workspace seams.*Completed/ }))
+
+    const tab = useTabStore.getState().tabs.find((candidate) => candidate.sessionId === '__subagent__activity-subagent-open-session__agent-tool-1')
+    expect(tab).toMatchObject({
+      sessionId: '__subagent__activity-subagent-open-session__agent-tool-1',
+      title: 'Review workspace seams',
+      type: 'subagent',
+      status: 'idle',
+      sourceSessionId: sessionId,
+      subagentToolUseId: 'agent-tool-1',
+      subagentTaskId: 'agent-task-1',
+    })
+    expect(useTabStore.getState().activeTabId).toBe('__subagent__activity-subagent-open-session__agent-tool-1')
+  })
+
   it('does not carry an open background task drawer across sessions', () => {
     const firstSessionId = 'background-agent-first-session'
     const secondSessionId = 'background-agent-second-session'

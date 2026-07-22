@@ -8,7 +8,7 @@ import {
 import { buildRenderModel, MessageBlock } from '../components/chat/MessageList'
 import { ToolCallGroup } from '../components/chat/ToolCallGroup'
 import { useTranslation } from '../i18n'
-import { mapHistoryMessagesToUiMessages } from '../stores/chatStore'
+import { mapHistoryMessagesToUiMessages, useChatStore } from '../stores/chatStore'
 import type { AgentTaskNotification, UIMessage } from '../types/chat'
 
 type TranslationFn = ReturnType<typeof useTranslation>
@@ -17,10 +17,12 @@ const LIVE_RUN_REFRESH_MS = 2000
 export function SubagentRunPage({
   sourceSessionId,
   toolUseId,
+  taskId,
   title,
 }: {
   sourceSessionId: string
   toolUseId: string
+  taskId?: string
   title: string
 }) {
   const t = useTranslation()
@@ -28,6 +30,13 @@ export function SubagentRunPage({
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const requestIdRef = useRef(0)
+  const discoveredTaskId = useChatStore((state) => {
+    const session = state.sessions[sourceSessionId]
+    const liveTask = Object.values(session?.backgroundAgentTasks ?? {})
+      .find((candidate) => candidate.toolUseId === toolUseId)
+    return liveTask?.taskId ?? session?.agentTaskNotifications?.[toolUseId]?.taskId
+  })
+  const resolvedTaskId = taskId ?? discoveredTaskId
 
   const load = useCallback(async (options?: { resetData?: boolean }) => {
     const requestId = requestIdRef.current + 1
@@ -36,7 +45,7 @@ export function SubagentRunPage({
     setError(null)
     if (options?.resetData) setData(null)
     try {
-      const nextData = await subagentsApi.getRunByTool(sourceSessionId, toolUseId)
+      const nextData = await subagentsApi.getRunByTool(sourceSessionId, toolUseId, resolvedTaskId)
       if (requestIdRef.current !== requestId) return
       setData(nextData)
     } catch (err) {
@@ -46,7 +55,7 @@ export function SubagentRunPage({
       if (requestIdRef.current !== requestId) return
       setLoading(false)
     }
-  }, [sourceSessionId, toolUseId])
+  }, [resolvedTaskId, sourceSessionId, toolUseId])
 
   useEffect(() => {
     void load({ resetData: true })

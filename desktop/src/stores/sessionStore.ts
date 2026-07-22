@@ -33,6 +33,7 @@ type SessionStore = {
   selectedSessionIds: Set<string>
 
   fetchSessions: (project?: string) => Promise<void>
+  syncIndexes: () => Promise<void>
   createSession: (workDir?: string, options?: CreateSessionOptions) => Promise<string>
   branchSession: (
     sourceSessionId: string,
@@ -96,6 +97,11 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       if (requestId !== get().sessionListRequestId) return
       set({ error: (err as Error).message, isLoading: false })
     }
+  },
+
+  syncIndexes: async () => {
+    await sessionsApi.syncIndexes()
+    await get().fetchSessions()
   },
 
   createSession: async (workDir?: string, options?: CreateSessionOptions) => {

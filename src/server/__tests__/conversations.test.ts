@@ -142,6 +142,86 @@ describe('ConversationService', () => {
     await expect(request).resolves.toEqual({ ok: true })
   })
 
+  it('should remove a pending control callback when the HTTP request is aborted', async () => {
+    const svc = new ConversationService()
+    const sid = crypto.randomUUID()
+    const sent: unknown[] = []
+    const session: any = {
+      proc: { kill() {}, exited: Promise.resolve(0) },
+      outputCallbacks: [],
+      workDir: process.cwd(),
+      permissionMode: 'default',
+      sdkToken: 'token',
+      sdkSocket: {
+        send(data: string) {
+          sent.push(JSON.parse(data))
+        },
+      },
+      pendingOutbound: [],
+      startupPending: false,
+      startupExitCode: null,
+      stdoutLines: [],
+      stderrLines: [],
+      outputDrain: Promise.resolve(),
+      sdkMessages: [],
+      initMessage: null,
+      pendingPermissionRequests: new Map(),
+    }
+    ;(svc as any).sessions.set(sid, session)
+    const controller = new AbortController()
+
+    const request = svc.requestControl(
+      sid,
+      { subtype: 'get_context_usage' },
+      10_000,
+      controller.signal,
+    )
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(sent).toHaveLength(1)
+    expect(session.outputCallbacks).toHaveLength(1)
+
+    controller.abort(new Error('HTTP client disconnected'))
+
+    await expect(request).rejects.toThrow('HTTP client disconnected')
+    expect(session.outputCallbacks).toHaveLength(0)
+  })
+
+  it('should remove the abort listener when a control request times out', async () => {
+    const svc = new ConversationService()
+    const sid = crypto.randomUUID()
+    const controller = new AbortController()
+    const removeAbortListener = spyOn(controller.signal, 'removeEventListener')
+    const session: any = {
+      proc: { kill() {}, exited: Promise.resolve(0) },
+      outputCallbacks: [],
+      workDir: process.cwd(),
+      permissionMode: 'default',
+      sdkToken: 'token',
+      sdkSocket: { send() {} },
+      pendingOutbound: [],
+      startupPending: false,
+      startupExitCode: null,
+      stdoutLines: [],
+      stderrLines: [],
+      outputDrain: Promise.resolve(),
+      sdkMessages: [],
+      initMessage: null,
+      pendingPermissionRequests: new Map(),
+    }
+    ;(svc as any).sessions.set(sid, session)
+
+    await expect(svc.requestControl(
+      sid,
+      { subtype: 'get_context_usage' },
+      20,
+      controller.signal,
+    )).rejects.toThrow('Timed out waiting for get_context_usage response')
+
+    expect(session.outputCallbacks).toHaveLength(0)
+    expect(removeAbortListener).toHaveBeenCalledWith('abort', expect.any(Function))
+  })
+
   it('should keep the replacement SDK socket attached when the old socket closes late', async () => {
     const svc = new ConversationService()
     const sid = crypto.randomUUID()
@@ -483,7 +563,7 @@ describe('ConversationService', () => {
     const svc = new ConversationService()
     const sent: Array<{ request_id: string }> = []
     const sessionId = 'session-permission-rejected'
-    ;(svc as any).sessions.set(sessionId, {
+    const session = {
       proc: null,
       outputCallbacks: [],
       workDir: process.cwd(),
@@ -498,7 +578,8 @@ describe('ConversationService', () => {
       stderrLines: [],
       sdkMessages: [],
       pendingPermissionRequests: new Map(),
-    })
+    }
+    ;(svc as any).sessions.set(sessionId, session)
 
     const change = svc.setPermissionMode(sessionId, 'auto')
     await Promise.resolve()
@@ -513,6 +594,8 @@ describe('ConversationService', () => {
 
     await expect(change).rejects.toThrow('auto mode unavailable')
     expect(svc.getSessionPermissionMode(sessionId)).toBe('default')
+    expect(session.outputCallbacks).toHaveLength(0)
+    expect((svc as any).pendingPermissionModeChanges.size).toBe(0)
   })
 
   it('should time out without recording a mode when control succeeds without CLI confirmation', async () => {
@@ -1073,6 +1156,76 @@ describe('ConversationService', () => {
         delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
       } else {
         process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = previousDisable1mContext
+      }
+      await fs.rm(tmpConfigDir, { recursive: true, force: true })
+      await fs.rm(workDir, { recursive: true, force: true })
+    }
+  })
+
+  it('should fall back to transcript estimates when provider usage is empty or zero', async () => {
+    const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
+    const previousNodeEnv = process.env.NODE_ENV
+    const tmpConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-transcript-zero-usage-'))
+    const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-workdir-zero-usage-'))
+    process.env.CLAUDE_CONFIG_DIR = tmpConfigDir
+    process.env.NODE_ENV = 'development'
+
+    try {
+      const svc = new SessionService()
+
+      for (const usage of [
+        {},
+        {
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        },
+      ]) {
+        const { sessionId } = await svc.createSession(workDir)
+        const found = await svc.findSessionFile(sessionId)
+        expect(found).not.toBeNull()
+
+        await fs.appendFile(found!.filePath, JSON.stringify({
+          type: 'user',
+          uuid: crypto.randomUUID(),
+          timestamp: '2026-07-20T12:00:00.000Z',
+          cwd: workDir,
+          message: {
+            role: 'user',
+            content: [{ type: 'text', text: 'Estimate this transcript even when the provider does not report token counts.' }],
+          },
+        }) + '\n')
+        await fs.appendFile(found!.filePath, JSON.stringify({
+          type: 'assistant',
+          uuid: crypto.randomUUID(),
+          timestamp: '2026-07-20T12:00:01.000Z',
+          cwd: workDir,
+          message: {
+            role: 'assistant',
+            model: 'claude-sonnet-4-6',
+            content: [{ type: 'text', text: 'The local transcript estimate should remain available.' }],
+            usage,
+          },
+        }) + '\n')
+
+        const contextEstimate = await svc.getTranscriptContextEstimate(sessionId)
+        const inspectionSnapshot = await svc.getInspectionTranscriptSnapshot(sessionId)
+
+        expect(contextEstimate?.model).toBe('claude-sonnet-4-6')
+        expect(contextEstimate?.totalTokens).toBeGreaterThan(0)
+        expect(inspectionSnapshot?.contextEstimate).toEqual(contextEstimate)
+      }
+    } finally {
+      if (previousConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = previousConfigDir
+      }
+      if (previousNodeEnv === undefined) {
+        delete process.env.NODE_ENV
+      } else {
+        process.env.NODE_ENV = previousNodeEnv
       }
       await fs.rm(tmpConfigDir, { recursive: true, force: true })
       await fs.rm(workDir, { recursive: true, force: true })
@@ -1978,6 +2131,7 @@ describe('WebSocket Chat Integration', () => {
     }
     throw new Error(`Timed out waiting for ${label}`)
   }
+  const originalConfigDir = process.env.CLAUDE_CONFIG_DIR
   const originalCliPath = process.env.CLAUDE_CLI_PATH
 
   beforeAll(async () => {
@@ -2002,10 +2156,10 @@ describe('WebSocket Chat Integration', () => {
   })
 
   afterAll(async () => {
+    server?.stop(true)
     const { stopServerRuntimeForShutdown } = await import('../index.js')
     await stopServerRuntimeForShutdown({ waitForCli: true })
     __resetWebSocketHandlerStateForTests()
-    server?.stop(true)
     if (tmpDir) {
       await rmWithRetry(tmpDir)
     }
@@ -2014,7 +2168,11 @@ describe('WebSocket Chat Integration', () => {
     } else {
       delete process.env.CLAUDE_CLI_PATH
     }
-    delete process.env.CLAUDE_CONFIG_DIR
+    if (originalConfigDir === undefined) {
+      delete process.env.CLAUDE_CONFIG_DIR
+    } else {
+      process.env.CLAUDE_CONFIG_DIR = originalConfigDir
+    }
   })
 
   it('should connect and receive connected event', async () => {

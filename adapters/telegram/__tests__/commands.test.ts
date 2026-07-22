@@ -271,8 +271,8 @@ describe('Telegram command controller helpers', () => {
     await controller.handleProviderCommand(allowed.ctx)
 
     expect(deps.httpClient.activateOfficialProvider).toHaveBeenCalled()
-    expect(deps.httpClient.setCurrentModel).toHaveBeenCalledWith('claude-opus-4-7')
-    expect(runtimeModels).toEqual(['claude-opus-4-7'])
+    expect(deps.httpClient.setCurrentModel).toHaveBeenCalledWith('claude-opus-4-8')
+    expect(runtimeModels).toEqual(['claude-opus-4-8'])
     expect(allowed.replies[0]).toContain('Claude 官方')
 
     const denied = createCommandContext({ userId: 999 })

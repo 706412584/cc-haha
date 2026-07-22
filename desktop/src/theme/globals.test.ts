@@ -58,6 +58,12 @@ describe('desktop theme tokens', () => {
     '--color-goal-icon-bg',
     '--color-goal-chip-bg',
     '--color-goal-chip-border',
+    '--color-brand',
+    '--color-brand-hover',
+    '--color-border-focus',
+    '--color-surface-selected',
+    '--color-switch-checked-bg',
+    '--color-switch-thumb',
     '--color-text-secondary-a72',
     '--color-text-secondary-a68',
     '--color-text-primary-a88',
@@ -87,6 +93,15 @@ describe('desktop theme tokens', () => {
     expect(css).toContain('--color-activity-heat-4: var(--color-primary);')
     expect(css).toContain('.activity-heat-cell:hover')
     expect(css).toContain('box-shadow: var(--shadow-activity-cell-hover);')
+  })
+
+  it('maps switch activation to each theme brand color', () => {
+    for (const theme of themes) {
+      const block = getThemeBlock(theme)
+
+      expect(block, `${theme} should use its brand color for checked switches`)
+        .toContain('--color-switch-checked-bg: var(--color-brand);')
+    }
   })
 
   it('uses container queries for the compact activity summary strip', () => {
@@ -140,5 +155,13 @@ describe('desktop theme tokens', () => {
     expect(css).toContain('.settings-terminal-host .xterm-helper-textarea')
     expect(css).toContain('left: -9999em;')
     expect(css).toContain('overflow: hidden;')
+  })
+
+  it('keeps the pet task card controls above the mascot hit target', () => {
+    const mascotCss = getCssBetween('.pet-mascot-button {', '.pet-mascot-wrap {')
+    const cardCss = getCssBetween('.pet-activity-card {', '.pet-activity-card[data-expanded=')
+
+    expect(mascotCss).toContain('z-index: 10;')
+    expect(cardCss).toContain('z-index: 15;')
   })
 })

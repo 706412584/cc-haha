@@ -574,6 +574,10 @@ async function loadMarkdownFiles(dir: string): Promise<
     throw e
   }
 
+  // File-system enumeration order is not portable. A stable path order makes
+  // duplicate definitions within one config directory resolve consistently.
+  files.sort()
+
   const results = await Promise.all(
     files.map(async filePath => {
       try {

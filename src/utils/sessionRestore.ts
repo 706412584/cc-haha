@@ -46,6 +46,7 @@ import {
 import { updateSessionName } from './concurrentSessions.js'
 import { getCwd } from './cwd.js'
 import { logForDebugging } from './debug.js'
+import type { EffortValue } from './effort.js'
 import type { FileHistorySnapshot } from './fileHistory.js'
 import { fileHistoryRestoreStateFromLog } from './fileHistory.js'
 import { createSystemMessage } from './messages.js'
@@ -303,6 +304,22 @@ export function restoreAgentFromSession(
 }
 
 /**
+ * Restore a selected Agent's request-scoped effort without overriding an
+ * explicit `--effort` from this invocation. Environment effort remains a
+ * separate, higher-priority request-layer override in resolveAppliedEffort().
+ */
+export function resolveResumedAgentEffortValue(
+  initialEffort: EffortValue | undefined,
+  restoredAgentEffort: EffortValue | undefined,
+  hasExplicitCliEffort: boolean,
+): EffortValue | undefined {
+  if (hasExplicitCliEffort || restoredAgentEffort === undefined) {
+    return initialEffort
+  }
+  return restoredAgentEffort
+}
+
+/**
  * Refresh agent definitions after a coordinator/normal mode switch.
  *
  * When resuming a session that was in a different mode (coordinator vs normal),
@@ -482,6 +499,7 @@ export async function processResumedConversation(
     currentCwd: string
     cliAgents: AgentDefinition[]
     initialState: AppState
+    hasExplicitCliEffort: boolean
   },
 ): Promise<ProcessedResume> {
   // Match coordinator/normal mode to the resumed session
@@ -604,6 +622,11 @@ export async function processResumedConversation(
     initialState: {
       ...context.initialState,
       ...(resumedAgentType && { agent: resumedAgentType }),
+      effortValue: resolveResumedAgentEffortValue(
+        context.initialState.effortValue,
+        restoredAgent?.effort,
+        context.hasExplicitCliEffort,
+      ),
       ...(restoredAttribution && { attribution: restoredAttribution }),
       ...(standaloneAgentContext && { standaloneAgentContext }),
       agentDefinitions: refreshedAgentDefs,

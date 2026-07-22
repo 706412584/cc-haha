@@ -361,20 +361,21 @@ describe('ConversationService', () => {
       ].join('\n'),
     )
 
-    delete process.env.CC_HAHA_DISABLE_TERMINAL_SHELL_ENV
-    process.env.HOME = tmpDir
-    process.env.SHELL = shellPath
-    process.env.PATH = '/usr/bin:/bin'
-    delete process.env.ZDOTDIR
-    resetTerminalShellEnvironmentCacheForTests()
+      delete process.env.CC_HAHA_DISABLE_TERMINAL_SHELL_ENV
+      process.env.HOME = tmpDir
+      process.env.SHELL = shellPath
+      process.env.PATH = '/usr/bin:/bin'
+      delete process.env.ZDOTDIR
+      resetTerminalShellEnvironmentCacheForTests()
 
-    const service = new ConversationService() as any
-    const env = (await service.buildChildEnv(tmpDir)) as Record<string, string>
+      const service = new ConversationService() as any
+      const env = (await service.buildChildEnv(tmpDir)) as Record<string, string>
 
-    expect(env.NVM_DIR).toBe(nvmDir)
-    expect(env.PATH.split(path.delimiter)[0]).toBe(nodeBin)
-    expect(env.PATH.split(path.delimiter)).toContain('/usr/bin')
-  })
+      expect(env.NVM_DIR).toBe(nvmDir)
+      expect(env.PATH.split(path.delimiter)[0]).toBe(nodeBin)
+      expect(env.PATH.split(path.delimiter)).toContain('/usr/bin')
+    },
+  )
 
   test('strips inherited provider env when desktop provider config exists', async () => {
     const ccHahaDir = path.join(tmpDir, 'cc-haha')
@@ -940,11 +941,9 @@ describe('ConversationService', () => {
     expect(env.ANTHROPIC_BASE_URL).toBe('http://127.0.0.1:18080')
     expect(env.ANTHROPIC_MODEL).toBe('gpt-5.6-sol')
     expect(env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES).toBe(
-      'thinking,effort,adaptive_thinking,max_effort',
+      'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
     )
-    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe(
-      'thinking,effort,adaptive_thinking,max_effort',
-    )
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe('none')
   })
 
   test('buildChildEnv switches active capabilities with the selected provider model', async () => {

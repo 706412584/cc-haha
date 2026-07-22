@@ -408,7 +408,7 @@ export default function SessionControls() {
                 <span className="material-symbols-outlined text-base">
                   {modelIcons[selectedModel] || 'smart_toy'}
                 </span>
-                {activeModel?.name || 'Sonnet 4.6'}
+                {activeModel?.name || 'Opus 4.8'}
               </button>
 
               {/* Attach file button */}

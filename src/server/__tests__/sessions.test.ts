@@ -178,10 +178,7 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 async function createWorkspaceApiGitRepo(baseDir: string): Promise<string> {
-  const workDir = path.join(
-    baseDir,
-    `workspace-api-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-  )
+  const workDir = await fs.mkdtemp(path.join(baseDir, 'w-'))
 
   const javaControllerDir = path.join(
     workDir,
@@ -3668,6 +3665,60 @@ describe('Sessions API', () => {
     expect(body.messages).toHaveLength(2)
   })
 
+  it('GET /api/sessions/:id/subagents/by-tool/:toolUseId should use a live task id while running', async () => {
+    const sessionId = 'edededed-bbbb-cccc-dddd-eeeeeeeeeeee'
+    const projectDir = '-tmp-api-live-subagent-run'
+    const agentId = 'abc123'
+    await writeSessionFile(projectDir, sessionId, [
+      makeSnapshotEntry(),
+      makeAssistantToolUseEntry([{
+        id: 'tool-1',
+        name: 'Agent',
+        input: { description: 'Inspect live seam', prompt: 'Read the route' },
+      }]),
+    ])
+    await writeSubagentTranscriptFile(projectDir, sessionId, agentId, [
+      {
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'child-tool-1', name: 'Read', input: {} }],
+        },
+        uuid: crypto.randomUUID(),
+        timestamp: '2026-01-01T00:00:04.000Z',
+      },
+      {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'child-tool-1', content: 'route source' }],
+        },
+        uuid: crypto.randomUUID(),
+        timestamp: '2026-01-01T00:00:05.000Z',
+      },
+    ])
+
+    const res = await fetch(
+      `${baseUrl}/api/sessions/${sessionId}/subagents/by-tool/tool-1?taskId=${agentId}`,
+    )
+    expect(res.status).toBe(200)
+
+    const body = (await res.json()) as {
+      agentId: string | null
+      taskId?: string
+      status: string
+      messages: unknown[]
+      source: string
+    }
+    expect(body).toMatchObject({
+      agentId,
+      taskId: agentId,
+      status: 'running',
+      source: 'subagent-jsonl',
+    })
+    expect(body.messages).toHaveLength(2)
+  })
+
   it('POST /api/sessions/:id/subagents/by-tool/:toolUseId should return 405', async () => {
     const res = await fetch(
       `${baseUrl}/api/sessions/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/subagents/by-tool/tool-1`,
@@ -5994,8 +6045,9 @@ describe('Sessions API', () => {
     const res = await fetch(`${baseUrl}/api/sessions/${sessionId}/chat/status`)
     expect(res.status).toBe(200)
 
-    const body = (await res.json()) as { state: string }
+    const body = (await res.json()) as { state: string; activityState: string }
     expect(body.state).toBe('idle')
+    expect(body.activityState).toBe('idle')
   })
 
   it('POST /api/sessions/:id/chat should queue a message', async () => {
@@ -6015,6 +6067,13 @@ describe('Sessions API', () => {
     const body = (await res.json()) as { messageId: string; status: string }
     expect(body.status).toBe('queued')
     expect(body.messageId).toBeTruthy()
+
+    const statusRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/chat/status`)
+    const status = (await statusRes.json()) as { state: string; activityState: string }
+    expect(status.state).toBe('thinking')
+    expect(status.activityState).toBe('running')
+
+    await fetch(`${baseUrl}/api/sessions/${sessionId}/chat/stop`, { method: 'POST' })
   })
 
   it('POST /api/sessions/:id/chat/stop should reset state to idle', async () => {
@@ -6026,7 +6085,69 @@ describe('Sessions API', () => {
 
     // Verify state is idle
     const statusRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/chat/status`)
-    const status = (await statusRes.json()) as { state: string }
+    const status = (await statusRes.json()) as { state: string; activityState: string }
     expect(status.state).toBe('idle')
+    expect(status.activityState).toBe('idle')
+  })
+
+  it('POST /api/sessions/sync-indexes should sync session index and optional search index', async () => {
+    const { localIndexCoordinator } = await import('../services/localIndex/coordinator.js')
+    const { searchContentCoordinator } = await import('../services/localIndex/searchContentCoordinator.js')
+    const sessionSync = spyOn(localIndexCoordinator, 'sync').mockResolvedValue({
+      mode: 'on',
+      state: 'ready',
+      discovered: 1,
+      indexed: 1,
+      degradedSources: 0,
+      databaseBytes: 1024,
+      walBytes: 0,
+      lastUpdatedAt: new Date().toISOString(),
+      lastErrorCode: null,
+    } as never)
+    const searchSync = spyOn(searchContentCoordinator, 'sync').mockResolvedValue({
+      state: 'ready',
+      discovered: 1,
+      indexed: 1,
+      lastErrorCode: null,
+    } as never)
+
+    try {
+      const res = await fetch(`${baseUrl}/api/sessions/sync-indexes`, { method: 'POST' })
+      expect(res.status).toBe(200)
+      const body = await res.json() as {
+        sessionIndex: { state: string }
+        searchEnabled: boolean
+        searchIndex: { state: string } | null
+      }
+      expect(body.sessionIndex.state).toBe('ready')
+      expect(body.searchEnabled).toBe(true)
+      expect(body.searchIndex?.state).toBe('ready')
+      expect(sessionSync).toHaveBeenCalledTimes(1)
+      expect(searchSync).toHaveBeenCalledTimes(1)
+
+      const disabledDir = path.join(tmpDir, 'settings')
+      await fs.mkdir(disabledDir, { recursive: true })
+      await fs.writeFile(
+        path.join(tmpDir, 'settings.json'),
+        JSON.stringify({ sessionContentSearchEnabled: false }, null, 2),
+      )
+      resetSettingsCache()
+      searchSync.mockClear()
+      sessionSync.mockClear()
+
+      const disabledRes = await fetch(`${baseUrl}/api/sessions/sync-indexes`, { method: 'POST' })
+      expect(disabledRes.status).toBe(200)
+      const disabledBody = await disabledRes.json() as {
+        searchEnabled: boolean
+        searchIndex: unknown
+      }
+      expect(disabledBody.searchEnabled).toBe(false)
+      expect(disabledBody.searchIndex).toBeNull()
+      expect(sessionSync).toHaveBeenCalledTimes(1)
+      expect(searchSync).not.toHaveBeenCalled()
+    } finally {
+      sessionSync.mockRestore()
+      searchSync.mockRestore()
+    }
   })
 })

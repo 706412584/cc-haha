@@ -246,12 +246,16 @@ export function isRetryableStreamError(error: unknown): boolean {
     const details = extractConnectionErrorDetails(error)
     return !details?.isSSLError
   }
-  return hasAPIErrorType(
+  if (hasAPIErrorType(
     error,
     'api_error',
     'overloaded_error',
     'upstream_error',
-  )
+  )) return true
+
+  const message = error instanceof Error ? error.message : String(error)
+  return message.includes('OpenAI messages stream disconnected before completion') &&
+    /["']type["']\s*:\s*["']api_error["']/.test(message)
 }
 
 /**

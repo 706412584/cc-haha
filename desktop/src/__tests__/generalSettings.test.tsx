@@ -44,9 +44,7 @@ const providerStoreState = {
   hasLoadedProviders: true,
   presets: [] as ProviderPreset[],
   isLoading: false,
-  isPresetsLoading: false,
   fetchProviders: vi.fn(),
-  fetchPresets: vi.fn(),
   deleteProvider: MOCK_DELETE_PROVIDER,
   activateProvider: vi.fn(),
   activateOfficial: vi.fn(),
@@ -211,9 +209,7 @@ describe('Settings > General tab', () => {
     providerStoreState.hasLoadedProviders = true
     providerStoreState.presets = []
     providerStoreState.isLoading = false
-    providerStoreState.isPresetsLoading = false
     providerStoreState.fetchProviders = vi.fn()
-    providerStoreState.fetchPresets = vi.fn()
     providerStoreState.activateProvider = vi.fn()
     providerStoreState.activateOfficial = vi.fn()
     providerStoreState.testProvider = vi.fn()
@@ -231,6 +227,7 @@ describe('Settings > General tab', () => {
       unifiedActivityPanelEnabled: false,
       skipWebFetchPreflight: true,
       desktopNotificationsEnabled: true,
+      sessionContentSearchEnabled: true,
       traceCapture: { enabled: true, storageDir: '/Users/test/.claude/cc-haha/traces' },
       chatSendBehavior: 'enter',
       responseLanguage: '',
@@ -291,6 +288,9 @@ describe('Settings > General tab', () => {
       }),
       setDesktopNotificationsEnabled: vi.fn().mockImplementation(async (enabled: boolean) => {
         useSettingsStore.setState({ desktopNotificationsEnabled: enabled })
+      }),
+      setSessionContentSearchEnabled: vi.fn().mockImplementation(async (enabled: boolean) => {
+        useSettingsStore.setState({ sessionContentSearchEnabled: enabled })
       }),
       setTraceCaptureEnabled: vi.fn().mockImplementation(async (enabled: boolean) => {
         const current = useSettingsStore.getState().traceCapture
@@ -790,6 +790,22 @@ describe('Settings > General tab', () => {
     fireEvent.click(toggle)
 
     expect(useSettingsStore.getState().setSkipWebFetchPreflight).toHaveBeenCalledWith(false)
+  })
+
+  it('lets the user disable session content search from General settings', async () => {
+    render(<Settings />)
+
+    fireEvent.click(screen.getByText('General'))
+
+    const toggle = screen.getByLabelText('Enable session content search')
+    expect(toggle).toBeChecked()
+
+    await act(async () => {
+      fireEvent.click(toggle)
+    })
+
+    expect(useSettingsStore.getState().setSessionContentSearchEnabled).toHaveBeenCalledWith(false)
+    expect(toggle).not.toBeChecked()
   })
 
   it('lets the user enable the unified activity panel', async () => {
@@ -1790,6 +1806,21 @@ describe('Settings > Providers tab', () => {
     expect(MOCK_DELETE_PROVIDER).toHaveBeenCalledWith('provider-1')
   })
 
+  it('keeps custom provider creation available when presets are unavailable', () => {
+    providerStoreState.presets = []
+
+    render(<Settings />)
+
+    const addButton = screen.getByRole('button', { name: /Add Provider/i })
+    expect(addButton).toBeEnabled()
+
+    fireEvent.click(addButton)
+
+    const dialog = screen.getByRole('dialog')
+    expect(within(dialog).getByLabelText(/Name/i)).toHaveValue('Custom')
+    expect(within(dialog).getByLabelText(/Base URL/i)).toBeEnabled()
+  })
+
   it('uses the shared dropdown for API format in the provider form', () => {
     providerStoreState.presets = [
       {
@@ -1999,6 +2030,20 @@ describe('Settings > Providers tab', () => {
     expect(providerStoreState.testConfig).not.toHaveBeenCalledWith(expect.objectContaining({
       modelId: 'deepseek-v4-pro',
     }))
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /Save|Add|保存|添加/i }))
+
+    await waitFor(() => {
+      expect(providerStoreState.createProvider).toHaveBeenCalledWith(expect.objectContaining({
+        models: expect.objectContaining({
+          fable: 'Qwen3Coder',
+          main: 'claude-sonnet-4-6',
+          haiku: 'claude-haiku-4-5',
+          sonnet: 'claude-sonnet-4-6',
+          opus: 'claude-opus-4-8',
+        }),
+      }))
+    })
   })
 
   it('closes the edit form without waiting for settings to refresh', async () => {

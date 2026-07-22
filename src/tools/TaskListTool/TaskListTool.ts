@@ -49,12 +49,12 @@ export const TaskListTool = buildTool({
   userFacingName() {
     return 'TaskList'
   },
-  shouldDefer: true,
+  alwaysLoad: true,
   isEnabled() {
     return isTodoV2Enabled()
   },
   isConcurrencySafe() {
-    return true
+    return false
   },
   isReadOnly() {
     return true

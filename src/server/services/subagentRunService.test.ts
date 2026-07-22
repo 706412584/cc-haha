@@ -86,6 +86,40 @@ function makeAgentToolResultEntry(toolUseId: string, agentId: string): Record<st
   }
 }
 
+function makeOneShotAgentToolResultEntry(toolUseId: string): Record<string, unknown> {
+  return {
+    type: 'user',
+    message: {
+      role: 'user',
+      content: [{
+        type: 'tool_result',
+        tool_use_id: toolUseId,
+        content: [{ type: 'text', text: 'Finished exploring the repo' }],
+      }],
+    },
+    uuid: 'user-one-shot-agent-result',
+    timestamp: '2026-01-01T00:00:05.000Z',
+  }
+}
+
+function makeTaskNotificationEntry(
+  toolUseId: string,
+  taskId: string,
+  status: 'completed' | 'failed' | 'stopped',
+): Record<string, unknown> {
+  return {
+    type: 'cc-haha-task-notification',
+    isMeta: true,
+    taskNotification: {
+      taskId,
+      toolUseId,
+      status,
+      summary: 'Agent completed',
+    },
+    timestamp: '2026-01-01T00:00:06.000Z',
+  }
+}
+
 describe('subagentRunService helpers', () => {
   it('resolves agentId, description, and prompt from parent Agent messages by toolUseId', () => {
     const messages = [
@@ -218,6 +252,169 @@ describe('getSubagentRunByTool', () => {
       content: [{ type: 'text', text: 'Found the service seam' }],
       usage: { input_tokens: 13, output_tokens: 17 },
     })
+  })
+
+  it('uses the live task id to resolve a running one-shot SubAgent transcript', async () => {
+    await setupTmpConfigDir()
+    const sessionId = 'eeeeeeee-bbbb-cccc-dddd-eeeeeeeeeeee'
+    const projectDir = '-tmp-subagent-run'
+    const toolUseId = 'tool-1'
+    const agentId = 'abc123'
+
+    await writeSessionFile(projectDir, sessionId, [
+      makeAgentToolUseEntry(toolUseId),
+    ])
+    await writeSubagentTranscriptFile(projectDir, sessionId, agentId, [
+      {
+        type: 'user',
+        message: { role: 'user', content: 'Read the source' },
+        uuid: 'subagent-user',
+        timestamp: '2026-01-01T00:00:02.000Z',
+      },
+      {
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{
+            type: 'tool_use',
+            id: 'subagent-tool-1',
+            name: 'Read',
+            input: { file_path: '/tmp/example.ts' },
+          }],
+        },
+        uuid: 'subagent-assistant-tool',
+        timestamp: '2026-01-01T00:00:03.000Z',
+      },
+      {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{
+            type: 'tool_result',
+            tool_use_id: 'subagent-tool-1',
+            content: 'export const ready = true',
+          }],
+        },
+        uuid: 'subagent-tool-result',
+        timestamp: '2026-01-01T00:00:04.000Z',
+      },
+    ])
+
+    const result = await getSubagentRunByTool(sessionId, toolUseId, agentId)
+
+    expect(result).toMatchObject({
+      sessionId,
+      toolUseId,
+      agentId,
+      taskId: agentId,
+      status: 'running',
+      source: 'subagent-jsonl',
+    })
+    expect(result?.messages).toHaveLength(3)
+    expect(result?.messages[1]).toMatchObject({
+      type: 'tool_use',
+      content: [{ type: 'tool_use', id: 'subagent-tool-1', name: 'Read' }],
+    })
+    expect(result?.messages[2]).toMatchObject({
+      type: 'tool_result',
+      content: [{ type: 'tool_result', tool_use_id: 'subagent-tool-1' }],
+    })
+  })
+
+  it('uses the terminal notification task id when a one-shot result omits agentId', async () => {
+    await setupTmpConfigDir()
+    const sessionId = 'ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee'
+    const projectDir = '-tmp-subagent-run'
+    const toolUseId = 'tool-1'
+    const agentId = 'abc123'
+
+    await writeSessionFile(projectDir, sessionId, [
+      makeAgentToolUseEntry(toolUseId),
+      makeOneShotAgentToolResultEntry(toolUseId),
+      makeTaskNotificationEntry(toolUseId, agentId, 'completed'),
+    ])
+    await writeSubagentTranscriptFile(projectDir, sessionId, agentId, [
+      {
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'subagent-tool-1', name: 'Read', input: {} }],
+        },
+        uuid: 'subagent-assistant-tool',
+        timestamp: '2026-01-01T00:00:03.000Z',
+      },
+      {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'subagent-tool-1', content: 'done' }],
+        },
+        uuid: 'subagent-tool-result',
+        timestamp: '2026-01-01T00:00:04.000Z',
+      },
+    ])
+
+    const result = await getSubagentRunByTool(sessionId, toolUseId)
+
+    expect(result).toMatchObject({
+      agentId,
+      taskId: agentId,
+      status: 'completed',
+      source: 'subagent-jsonl',
+    })
+    expect(result?.messages).toHaveLength(2)
+  })
+
+  it('keeps an async launch acknowledgement running until a terminal notification arrives', async () => {
+    await setupTmpConfigDir()
+    const sessionId = 'abababab-bbbb-cccc-dddd-eeeeeeeeeeee'
+    const projectDir = '-tmp-subagent-run'
+    const toolUseId = 'tool-1'
+    const agentId = 'abc123'
+
+    await writeSessionFile(projectDir, sessionId, [
+      makeAgentToolUseEntry(toolUseId),
+      {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{
+            type: 'tool_result',
+            tool_use_id: toolUseId,
+            content: `Async agent launched successfully.\nagentId: ${agentId}\nThe agent is working in the background.`,
+          }],
+        },
+        uuid: 'async-launch-result',
+        timestamp: '2026-01-01T00:00:02.000Z',
+      },
+    ])
+
+    const result = await getSubagentRunByTool(sessionId, toolUseId, agentId)
+
+    expect(result).toMatchObject({
+      agentId,
+      taskId: agentId,
+      status: 'running',
+      source: 'live-task',
+    })
+  })
+
+  it('ignores unsafe live task ids instead of using them as transcript paths', async () => {
+    await setupTmpConfigDir()
+    const sessionId = 'cdcdcdcd-bbbb-cccc-dddd-eeeeeeeeeeee'
+    const projectDir = '-tmp-subagent-run'
+    const toolUseId = 'tool-1'
+    await writeSessionFile(projectDir, sessionId, [makeAgentToolUseEntry(toolUseId)])
+
+    const result = await getSubagentRunByTool(sessionId, toolUseId, 'agent-/../../outside')
+
+    expect(result).toMatchObject({
+      agentId: null,
+      status: 'running',
+      source: 'session-history',
+    })
+    expect(result?.taskId).toBeUndefined()
+    expect(result?.messages).toEqual([])
   })
 
   it('does not report usage when parent and transcript usage are unknown', async () => {

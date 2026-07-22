@@ -12,9 +12,16 @@
 
 import { ApiError, errorResponse } from '../middleware/errorHandler.js'
 import { sessionService } from '../services/sessionService.js'
+import {
+  clearLegacySessionChatState,
+  getSessionChatActivityState,
+  markSessionChatQueued,
+} from '../ws/handler.js'
 
-// In-memory conversation state per session
-const sessionStates = new Map<string, 'idle' | 'thinking' | 'compacting' | 'tool_executing'>()
+type LegacySessionChatState = 'idle' | 'thinking' | 'compacting' | 'tool_executing'
+
+// Preserve the existing REST status contract for non-WebSocket callers.
+const sessionStates = new Map<string, LegacySessionChatState>()
 
 export async function handleConversationsApi(
   req: Request,
@@ -108,8 +115,9 @@ async function sendMessage(req: Request, sessionId: string): Promise<Response> {
 
   const messageId = crypto.randomUUID()
 
-  // Mark session as thinking — actual processing happens through WebSocket
-  sessionStates.set(sessionId, 'thinking')
+  // This legacy REST endpoint only queues a response; real turn state is
+  // tracked by the WebSocket handler once a client starts the turn.
+  setSessionChatState(sessionId, 'thinking')
 
   return Response.json(
     { messageId, status: 'queued' as const },
@@ -119,13 +127,14 @@ async function sendMessage(req: Request, sessionId: string): Promise<Response> {
 
 function getChatStatus(sessionId: string): Response {
   const state = sessionStates.get(sessionId) || 'idle'
-  return Response.json({ state })
+  const activityState = getSessionChatActivityState(sessionId)
+  return Response.json({ state, activityState })
 }
 
 function stopChat(sessionId: string): Response {
-  // Reset to idle — in a full implementation this would signal the
-  // WebSocket handler / subprocess to abort the current generation.
-  sessionStates.set(sessionId, 'idle')
+  // Preserve the legacy endpoint's queue-reset behavior. Live generation is
+  // interrupted by the WebSocket stop_generation command.
+  setSessionChatState(sessionId, 'idle')
   return Response.json({ ok: true })
 }
 
@@ -135,13 +144,15 @@ function stopChat(sessionId: string): Response {
 
 export function setSessionChatState(
   sessionId: string,
-  state: 'idle' | 'thinking' | 'compacting' | 'tool_executing'
+  state: LegacySessionChatState
 ): void {
   sessionStates.set(sessionId, state)
+  if (state === 'idle') clearLegacySessionChatState(sessionId)
+  else markSessionChatQueued(sessionId)
 }
 
 export function getSessionChatState(
   sessionId: string
-): 'idle' | 'thinking' | 'compacting' | 'tool_executing' {
+): LegacySessionChatState {
   return sessionStates.get(sessionId) || 'idle'
 }

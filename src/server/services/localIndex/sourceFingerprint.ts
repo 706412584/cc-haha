@@ -7,7 +7,7 @@ export type SourceChange =
   | { kind: 'append'; readFrom: number }
   | { kind: 'rebuild'; reason: 'replace' | 'truncate' | 'rewrite' | 'parser-version' }
   | { kind: 'deleted' }
-  | { kind: 'retry'; reason: 'changed-during-read' | 'transient-io' }
+  | { kind: 'retry'; reason: 'changed-during-read' | 'transient-io' | 'source-too-large' }
 
 export type LocalIndexIoMetrics = {
   filesOpened: number

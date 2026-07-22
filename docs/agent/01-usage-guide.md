@@ -350,9 +350,22 @@ Agent Teams 支持两种执行后端：
 
 除了内置 Agent，你还可以创建自己的专业代理。
 
+### 桌面端管理与作用域
+
+桌面端入口是 **设置 → Agents**。这里和 CLI 使用同一份 Agent 定义文件，不会再把配置复制到数据库或 `localStorage`：
+
+| 作用域 | 唯一事实源 | 用途 |
+|--------|------------|------|
+| **用户** | `~/.claude/agents/*.md` | 在所有项目中可用 |
+| **项目** | `<项目目录>/.claude/agents/*.md` | 只在当前项目中可用；同名时覆盖用户 Agent |
+
+用户和项目 Agent 可以在桌面端创建、编辑和删除，保存结果会直接写回对应的 Markdown 文件。内置、插件、托管策略和 CLI 参数等其他来源也会显示在列表中，但只能查看，不能从桌面端改写其来源文件。
+
+当桌面端连接着当前运行会话时，创建、编辑或删除 Agent 会原地热重载该会话，下一次 spawn 立即使用新定义。如果没有可用的运行时，或热重载失败，文件保存仍然成功；桌面端会显示不阻塞操作的警告，并在下次启动时自动读取已保存的定义。
+
 ### 定义格式
 
-在 `.claude/agents/` 目录下创建 `.md` 文件：
+在用户或项目的 `agents` 目录下创建 `.md` 文件：
 
 ```markdown
 ---
@@ -364,6 +377,7 @@ tools:
   - Glob
   - Bash
 model: sonnet
+effort: high
 permissionMode: dontAsk
 maxTurns: 10
 ---
@@ -384,28 +398,54 @@ maxTurns: 10
 | `description` | string | 何时使用的说明 |
 | `tools` | string[] | 允许的工具列表（`['*']` 表示全部） |
 | `disallowedTools` | string[] | 禁止的工具列表 |
-| `model` | string | 使用的模型（sonnet/opus/haiku/inherit） |
+| `model` | string | 使用的模型（`fable`/`opus`/`sonnet`/`haiku`、完整模型 ID 或 `inherit`） |
+| `effort` | string | 推理强度（`low`/`medium`/`high`/`xhigh`/`max`），以模型能力为准 |
 | `permissionMode` | string | 权限模式 |
 | `maxTurns` | number | 最大对话轮数 |
 | `mcpServers` | object[] | 需要的 MCP 服务器 |
 | `hooks` | object | Agent 特定的钩子 |
+| `color` | string | Agent 的界面标识颜色 |
 | `skills` | string[] | 可使用的技能 |
 | `memory` | string | 记忆作用域（user/project/local） |
 | `isolation` | string | 隔离模式（worktree/remote） |
 | `background` | boolean | 是否默认后台运行 |
 
-### 加载优先级
+### 模型、推理强度与 Thinking
 
-自定义 Agent 的加载遵循优先级：
+要继承当前会话，最清楚的写法是**省略对应字段**：不写 `model` 就继承主会话模型，不写 `effort` 就继承当前会话的推理强度。`model: inherit` 是模型字段的等价显式写法；`effort` 没有 `inherit` 值。
 
-1. **内置 Agent**（built-in）— 系统预定义
-2. **插件 Agent**（plugin）— 通过插件注册
-3. **用户 Agent**（user）— `~/.claude/agents/`
-4. **项目 Agent**（project）— `.claude/agents/`（项目级）
-5. **标记 Agent**（flag）— 通过 API 注册
-6. **策略 Agent**（policy）— 组织策略
+模型的解析优先级从高到低为：
 
-同名 Agent 按优先级覆盖。
+1. `CLAUDE_CODE_SUBAGENT_MODEL` 的具体模型值（设为 `inherit` 时不锁定模型）
+2. 本次 `Agent({ ..., model: "..." })` 调用指定的模型
+3. Agent Markdown frontmatter 中的 `model`
+4. 主会话模型
+
+推理强度的解析优先级从高到低为：
+
+1. `CLAUDE_CODE_EFFORT_LEVEL`
+2. Agent Markdown frontmatter 中的 `effort`
+3. 当前会话的 effort
+4. 模型默认值
+
+`Agent` 工具没有单次调用的 `effort` 参数，因此应在 Agent 定义或会话层设置。`low`、`medium`、`high`、`xhigh`、`max` 是否可用取决于解析后的真实模型及提供商能力；Claude 模型会向下回退到可用档位，其他提供商按各自的模型目录规范化，不支持 effort 的模型不会应用该字段。
+
+整数形式的 `effort` 仅为既有 SDK/JSON 与内部配置兼容而保留，不属于推荐的官方 Agent 配置；桌面端 Agent 管理器只写入以上五个命名档位。
+
+子 Agent 通常继承主会话的扩展思考（extended thinking）开关，但解析后的模型强制要求优先；例如 Fable 5 会规范化为 adaptive thinking。目前不支持在单个 Agent frontmatter 中设置 `thinking` 或 `thinkingBudget`；`effort` 也不是固定的 thinking token 预算。
+
+### 同名 Agent 的来源优先级
+
+当多个来源定义了同名 Agent 时，cc-haha 按以下优先级选择实际生效的定义（从高到低）：
+
+1. **策略 Agent**（policy）— 组织托管策略
+2. **CLI 参数 Agent**（flag）— 通过 `--agents` 注册
+3. **项目 Agent**（project）— `<项目目录>/.claude/agents/`
+4. **用户 Agent**（user）— `~/.claude/agents/`
+5. **插件 Agent**（plugin）— 由插件提供
+6. **内置 Agent**（built-in）— 系统预定义
+
+桌面端仍会展示被覆盖的定义及其来源，但真正 spawn 时使用优先级最高的活动定义。
 
 ---
 
@@ -438,6 +478,7 @@ maxTurns: 10
 | 广播消息 | `SendMessage({ to: "*", message: "..." })` |
 | 请求关停 | `SendMessage({ to: "name", message: { type: "shutdown_request" } })` |
 | 删除团队 | `TeamDelete()` |
-| 自定义 Agent | 在 `.claude/agents/*.md` 创建定义文件 |
+| 管理自定义 Agent | 桌面端 **设置 → Agents**，或直接编辑 `~/.claude/agents/*.md` / `<项目目录>/.claude/agents/*.md` |
 | 指定模型 | `Agent({ ..., model: "haiku" })` |
+| 指定推理强度 | 在 Agent Markdown frontmatter 中设置 `effort: high` |
 | 命名 Agent | `Agent({ ..., name: "researcher" })` |
