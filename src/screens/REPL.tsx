@@ -207,6 +207,7 @@ import exit from '../commands/exit/index.js';
 import { ExitFlow } from '../components/ExitFlow.js';
 import { getCurrentWorktreeSession } from '../utils/worktree.js';
 import { popAllEditable, enqueue, type SetAppState, getCommandQueue, getCommandQueueLength, removeByFilter } from '../utils/messageQueueManager.js';
+import { ackAgentCompletionCommands, requeueAgentCompletionCommands } from '../tasks/LocalAgentTask/LocalAgentTask.js';
 import { useCommandQueue } from '../hooks/useCommandQueue.js';
 import { SessionBackgroundHint } from '../components/SessionBackgroundHint.js';
 import { startBackgroundSession } from '../tasks/LocalMainSessionTask.js';
@@ -2533,7 +2534,8 @@ export function REPL({
     // start a new foreground query; forward them to the background session.
     const removedNotifications = removeByFilter(cmd => cmd.mode === 'task-notification');
     void (async () => {
-      const toolUseContext = getToolUseContext(messagesRef.current, [], new AbortController(), mainLoopModel);
+      try {
+        const toolUseContext = getToolUseContext(messagesRef.current, [], new AbortController(), mainLoopModel);
       const [defaultSystemPrompt, userContext, systemContext] = await Promise.all([getSystemPrompt(toolUseContext.options.tools, mainLoopModel, Array.from(toolPermissionContext.additionalWorkingDirectories.keys()), toolUseContext.options.mcpClients), getUserContext(), getSystemContext()]);
       const systemPrompt = buildEffectiveSystemPrompt({
         mainThreadAgentDefinition,
@@ -2543,7 +2545,7 @@ export function REPL({
         appendSystemPrompt
       });
       toolUseContext.renderedSystemPrompt = systemPrompt;
-      const notificationAttachments = await getQueuedCommandAttachments(removedNotifications).catch(() => []);
+      const notificationAttachments = await getQueuedCommandAttachments(removedNotifications);
       const notificationMessages = notificationAttachments.map(createAttachmentMessage);
 
       // Deduplicate: if the query loop already yielded a notification into
@@ -2572,6 +2574,10 @@ export function REPL({
         setAppState,
         agentDefinition: mainThreadAgentDefinition
       });
+      ackAgentCompletionCommands(setAppState, removedNotifications);
+      } catch {
+        requeueAgentCompletionCommands(setAppState, removedNotifications);
+      }
     })();
   }, [abortController, mainLoopModel, toolPermissionContext, mainThreadAgentDefinition, getToolUseContext, customSystemPrompt, appendSystemPrompt, canUseTool, setAppState]);
   const {

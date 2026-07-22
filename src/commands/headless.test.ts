@@ -61,7 +61,7 @@ describe('removeStaleHeadlessAgentCompletions', () => {
     enqueuePendingNotification({
       mode: 'task-notification',
       value: 'stale',
-      agentCompletion: { taskId: 'stale', epoch: 1, sessionId: 'stale-session' },
+      agentCompletion: { taskId: 'stale', epoch: 1, sessionId: 'stale-session', sequence: 1 },
     })
     enqueue({ mode: 'prompt', value: 'keep me' })
 
@@ -106,6 +106,43 @@ describe('post-turn Agent completion backpressure', () => {
     expect(processed[0]).toContain('<task-id>agent-idle-continuation</task-id>')
     expect(appState.agentCompletionInbox).toEqual([])
     expect(getCommandQueue()).toEqual([])
+  })
+
+  test('requeues a rejected interactive execution and acknowledges its retry', async () => {
+    let appState = {
+      tasks: {},
+      agentCompletionInbox: [],
+      nextAgentCompletionSequence: 1,
+      speculation: IDLE_SPECULATION_STATE,
+    } as unknown as AppState
+    const setAppState = (updater: (prev: AppState) => AppState): void => {
+      appState = updater(appState)
+    }
+    const task = registerAsyncAgent({
+      agentId: 'agent-interactive-retry',
+      description: 'Interactive retry',
+      prompt: 'Interactive retry',
+      selectedAgent: { agentType: 'general-purpose' } as never,
+      setAppState,
+    })
+    completeAgentTask({ agentId: task.agentId, content: [], totalToolUseCount: 0, totalDurationMs: 1, totalTokens: 0, usage: {} as never }, setAppState, task.epoch)
+    enqueueAgentNotification({ taskId: task.agentId, description: task.description, status: 'completed', setAppState, epoch: task.epoch })
+
+    await flushAgentCompletionsAndProcessQueueIfReady({
+      setAppState,
+      getAppState: () => appState,
+      executeInput: async () => { throw new Error('rejected') },
+    })
+    await Promise.resolve()
+    expect(appState.agentCompletionInbox[0]?.delivery).toBe('pending')
+
+    await flushAgentCompletionsAndProcessQueueIfReady({
+      setAppState,
+      getAppState: () => appState,
+      executeInput: async () => {},
+    })
+    await Promise.resolve()
+    expect(appState.agentCompletionInbox).toEqual([])
   })
 
   test('continues consuming non-Agent commands when a full inbox cannot drain yet', async () => {
@@ -167,7 +204,7 @@ describe('wakeHeadlessAgentContinuation', () => {
 
     await wakeHeadlessAgentContinuation(setAppState, () => continuations++)
 
-    expect(appState.agentCompletionInbox).toEqual([])
+    expect(appState.agentCompletionInbox.map(item => item.delivery)).toEqual(['queued'])
     expect(getCommandQueue()).toHaveLength(1)
     expect(continuations).toBe(1)
   })

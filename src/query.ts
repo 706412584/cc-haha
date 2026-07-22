@@ -71,6 +71,7 @@ const jobClassifier = feature('TEMPLATES')
 /* eslint-enable @typescript-eslint/no-require-imports */
 import {
   remove as removeFromQueue,
+  getCommandQueue,
   getCommandsByMaxPriority,
   isSlashCommand,
 } from './utils/messageQueueManager.js'
@@ -91,12 +92,14 @@ import { SLEEP_TOOL_NAME } from './tools/SleepTool/prompt.js'
 import { executePostSamplingHooks } from './utils/hooks/postSamplingHooks.js'
 import { executeStopFailureHooks } from './utils/hooks.js'
 import type { QuerySource } from './constants/querySource.js'
+import type { SetAppState } from './Task.js'
+import type { QueuedCommand } from './types/textInputTypes.js'
 import { createDumpPromptsFetch } from './services/api/dumpPrompts.js'
 import { shouldCaptureApiTrace } from './services/api/traceCapture.js'
 import { StreamingToolExecutor } from './services/tools/StreamingToolExecutor.js'
 import { queryCheckpoint } from './utils/queryProfiler.js'
 import { runTools } from './services/tools/toolOrchestration.js'
-import { flushAndDrainAgentCompletionInbox, isCurrentAgentCompletionCommand } from './tasks/LocalAgentTask/LocalAgentTask.js'
+import { ackAgentCompletionCommands, flushAndDrainAgentCompletionInbox, isCurrentAgentCompletionCommand, requeueAgentCompletionCommands } from './tasks/LocalAgentTask/LocalAgentTask.js'
 import { applyToolResultBudget } from './utils/toolResultStorage.js'
 import { recordContentReplacement } from './utils/sessionStorage.js'
 import { handleStopHooks } from './query/stopHooks.js'
@@ -216,6 +219,33 @@ type State = {
   // Why the previous iteration continued. Undefined on first iteration.
   // Lets tests assert recovery paths fired without inspecting message contents.
   transition: Continue | undefined
+}
+
+export function consumeStagedCommands(
+  consumedCommands: readonly QueuedCommand[],
+  setAppState: SetAppState,
+  consumedCommandUuids: string[],
+): void {
+  try {
+    for (const command of consumedCommands) {
+      if (command.uuid) {
+        consumedCommandUuids.push(command.uuid)
+        notifyCommandLifecycle(command.uuid, 'started')
+      }
+    }
+    const removedCommands = removeFromQueue(consumedCommands)
+    const queueAfterRemoval = getCommandQueue()
+    if (
+      removedCommands.length !== consumedCommands.length ||
+      consumedCommands.some(command => queueAfterRemoval.includes(command))
+    ) {
+      throw new Error('Failed to remove exact queued commands after attachment staging')
+    }
+    ackAgentCompletionCommands(setAppState, consumedCommands)
+  } catch (error) {
+    requeueAgentCompletionCommands(setAppState, consumedCommands)
+    throw error
+  }
 }
 
 export async function* query(
@@ -1651,13 +1681,11 @@ async function* queryLoop(
       cmd => cmd.mode === 'prompt' || cmd.mode === 'task-notification',
     )
     if (consumedCommands.length > 0) {
-      for (const cmd of consumedCommands) {
-        if (cmd.uuid) {
-          consumedCommandUuids.push(cmd.uuid)
-          notifyCommandLifecycle(cmd.uuid, 'started')
-        }
-      }
-      removeFromQueue(consumedCommands)
+      consumeStagedCommands(
+        consumedCommands,
+        toolUseContext.setAppStateForTasks ?? toolUseContext.setAppState,
+        consumedCommandUuids,
+      )
     }
 
     // Instrumentation: Track file change attachments after they're added

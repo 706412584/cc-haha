@@ -84,6 +84,7 @@ export type AgentCompletionInboxItem = {
   taskId: string
   epoch: number
   notification: string
+  delivery: 'pending' | 'queued'
 }
 
 export type FooterItem =

@@ -52,6 +52,13 @@ function logOperation(operation: QueueOperation, content?: string): void {
 
 export const MAX_COMMAND_QUEUE_SIZE = 4_096
 const commandQueue: QueuedCommand[] = []
+
+function notifyLostAgentCompletionReceipts(commands: readonly QueuedCommand[]): void {
+  for (const command of commands) {
+    command.onAgentCompletionQueueReceiptLost?.()
+  }
+}
+
 /** Frozen snapshot — recreated on every mutation for useSyncExternalStore. */
 let snapshot: readonly QueuedCommand[] = Object.freeze([])
 const queueChanged = createSignal()
@@ -287,25 +294,26 @@ export function dequeueAllMatching(
  * Callers must pass the same object references that are in the queue
  * (e.g. from getCommandsByMaxPriority). Logs a 'remove' operation for each.
  */
-export function remove(commandsToRemove: QueuedCommand[]): void {
+export function remove(commandsToRemove: QueuedCommand[]): QueuedCommand[] {
   if (commandsToRemove.length === 0) {
-    return
+    return []
   }
 
-  const before = commandQueue.length
+  const removed: QueuedCommand[] = []
   for (let i = commandQueue.length - 1; i >= 0; i--) {
     if (commandsToRemove.includes(commandQueue[i]!)) {
-      commandQueue.splice(i, 1)
+      removed.unshift(commandQueue.splice(i, 1)[0]!)
     }
   }
 
-  if (commandQueue.length !== before) {
+  if (removed.length > 0) {
     notifySubscribers()
   }
 
-  for (const _cmd of commandsToRemove) {
+  for (const _cmd of removed) {
     logOperation('remove')
   }
+  return removed
 }
 
 /**
@@ -324,6 +332,7 @@ export function removeByFilter(
 
   if (removed.length > 0) {
     notifySubscribers()
+    notifyLostAgentCompletionReceipts(removed)
     for (const _cmd of removed) {
       logOperation('remove')
     }
@@ -340,8 +349,10 @@ export function clearCommandQueue(): void {
   if (commandQueue.length === 0) {
     return
   }
+  const removed = [...commandQueue]
   commandQueue.length = 0
   notifySubscribers()
+  notifyLostAgentCompletionReceipts(removed)
 }
 
 /**
@@ -496,6 +507,7 @@ export function popAllEditable(
   commandQueue.length = 0
   commandQueue.push(...nonEditable)
   notifySubscribers()
+  notifyLostAgentCompletionReceipts(editable)
 
   return { text: newInput, cursorOffset, images }
 }

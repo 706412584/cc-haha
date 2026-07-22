@@ -42,6 +42,8 @@ import type { Message, NormalizedUserMessage } from 'src/types/message.js'
 import {
   flushAndDrainAgentCompletionInbox,
   isCurrentAgentCompletionCommand,
+  ackAgentCompletionCommands,
+  requeueAgentCompletionCommands,
   subscribeToAgentCompletionWake,
 } from 'src/tasks/LocalAgentTask/LocalAgentTask.js'
 import { removeStaleHeadlessAgentCompletions } from 'src/commands/headless.js'
@@ -1948,7 +1950,9 @@ function runHeadlessStreaming(
           isMainThread(candidate) &&
           isCurrentAgentCompletionCommand(candidate, getAppState())
         while ((command = dequeue(isCurrentMainThreadCommand))) {
-          if (
+          const ownedCompletionCommands: QueuedCommand[] = [command]
+          try {
+            if (
             command.mode !== 'prompt' &&
             command.mode !== 'orphaned-permission' &&
             command.mode !== 'task-notification'
@@ -1966,6 +1970,7 @@ function runHeadlessStreaming(
             while (canBatchWith(command, peek(isMainThread))) {
               batch.push(dequeue(isMainThread)!)
             }
+            ownedCompletionCommands.push(...batch.slice(1))
             if (batch.length > 1) {
               command = {
                 ...command,
@@ -2061,6 +2066,7 @@ function runHeadlessStreaming(
               for (const uuid of batchUuids) {
                 notifyCommandLifecycle(uuid, 'completed')
               }
+              ackAgentCompletionCommands(setAppState, ownedCompletionCommands)
               continue
             }
           }
@@ -2334,6 +2340,11 @@ function runHeadlessStreaming(
           logHeadlessProfilerTurn()
           logQueryProfileReport()
           headlessProfilerStartTurn()
+          ackAgentCompletionCommands(setAppState, ownedCompletionCommands)
+          } catch (error) {
+            requeueAgentCompletionCommands(setAppState, ownedCompletionCommands)
+            throw error
+          }
         }
       }
 

@@ -1,5 +1,5 @@
 import type { AppState } from '../state/AppState.js'
-import { flushAndDrainAgentCompletionInbox, hasPendingAgentStallNotification, isCurrentAgentCompletionCommand } from '../tasks/LocalAgentTask/LocalAgentTask.js'
+import { ackAgentCompletionCommands, flushAndDrainAgentCompletionInbox, hasPendingAgentStallNotification, isCurrentAgentCompletionCommand, requeueAgentCompletionCommands } from '../tasks/LocalAgentTask/LocalAgentTask.js'
 import type { QueuedCommand } from '../types/textInputTypes.js'
 import {
   dequeue,
@@ -13,6 +13,7 @@ export { flushAndDrainAgentCompletionInbox }
 type ProcessQueueParams = {
   executeInput: (commands: QueuedCommand[]) => Promise<void>
   getAppState?: () => AppState
+  setAppState?: (updater: (prev: AppState) => AppState) => void
 }
 
 type ProcessQueueResult = {
@@ -57,6 +58,7 @@ function isSlashCommand(cmd: QueuedCommand): boolean {
 export function processQueueIfReady({
   executeInput,
   getAppState,
+  setAppState,
 }: ProcessQueueParams): ProcessQueueResult {
   // This processor runs on the REPL main thread between turns. Skip anything
   // addressed to a subagent — an unfiltered peek() returning a subagent
@@ -78,7 +80,14 @@ export function processQueueIfReady({
   // Bash commands need per-command error isolation, exit codes, and progress UI.
   if (isSlashCommand(next) || next.mode === 'bash') {
     const cmd = dequeue(isMainThread)!
-    void executeInput([cmd])
+    void executeInput([cmd]).then(
+      () => {
+        if (setAppState) ackAgentCompletionCommands(setAppState, [cmd])
+      },
+      () => {
+        if (setAppState) requeueAgentCompletionCommands(setAppState, [cmd])
+      },
+    )
     return { processed: true }
   }
 
@@ -91,7 +100,14 @@ export function processQueueIfReady({
     return { processed: false }
   }
 
-  void executeInput(commands)
+  void executeInput(commands).then(
+    () => {
+      if (setAppState) ackAgentCompletionCommands(setAppState, commands)
+    },
+    () => {
+      if (setAppState) requeueAgentCompletionCommands(setAppState, commands)
+    },
+  )
   return { processed: true }
 }
 
@@ -119,5 +135,5 @@ export async function flushAgentCompletionsAndProcessQueueIfReady({
   ) {
     await flushAndDrainAgentCompletionInbox(setAppState)
   }
-  return processQueueIfReady({ executeInput, getAppState })
+  return processQueueIfReady({ executeInput, getAppState, setAppState })
 }
