@@ -3,11 +3,17 @@ import { EditorState } from '@codemirror/state'
 import { EditorView, keymap, lineNumbers } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
 import { search, searchKeymap } from '@codemirror/search'
-import { bracketMatching, indentOnInput } from '@codemirror/language'
+import {
+  bracketMatching,
+  HighlightStyle,
+  indentOnInput,
+  syntaxHighlighting,
+} from '@codemirror/language'
 import { autocompletion, completionKeymap } from '@codemirror/autocomplete'
 import { javascript } from '@codemirror/lang-javascript'
 import { json } from '@codemirror/lang-json'
 import { markdown } from '@codemirror/lang-markdown'
+import { tags } from '@lezer/highlight'
 
 import { sessionsApi, type SaveWorkspaceFileInput } from '../../api/sessions'
 import {
@@ -39,6 +45,45 @@ import { UnsavedChangesModal } from './UnsavedChangesModal'
  */
 
 const SAVE_TIMEOUT_MS = 30_000
+
+const workspaceHighlightStyle = HighlightStyle.define([
+  { tag: tags.comment, class: 'workspace-syntax-comment' },
+  { tag: tags.string, class: 'workspace-syntax-string' },
+  { tag: tags.keyword, class: 'workspace-syntax-keyword' },
+  {
+    tag: [tags.function(tags.variableName), tags.function(tags.propertyName)],
+    class: 'workspace-syntax-function',
+  },
+  { tag: tags.number, class: 'workspace-syntax-number' },
+  { tag: tags.bool, class: 'workspace-syntax-bool' },
+  { tag: tags.propertyName, class: 'workspace-syntax-property' },
+  { tag: [tags.typeName, tags.className], class: 'workspace-syntax-type' },
+  { tag: tags.punctuation, class: 'workspace-syntax-punctuation' },
+])
+
+const workspaceEditorTheme = EditorView.theme({
+  '&': {
+    height: '100%',
+    backgroundColor: 'var(--color-code-bg)',
+    color: 'var(--color-code-fg)',
+    fontFamily: 'var(--font-mono)',
+    fontSize: '13px',
+  },
+  '.cm-scroller': { overflow: 'auto' },
+  '.cm-content': { caretColor: 'var(--color-code-fg)' },
+  '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--color-code-fg)' },
+  '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection': {
+    backgroundColor: 'var(--color-selection-bg)',
+  },
+  '.cm-gutters': {
+    backgroundColor: 'var(--color-code-bg)',
+    color: 'var(--color-text-tertiary)',
+    borderRightColor: 'var(--color-border)',
+  },
+  '.cm-activeLine, .cm-activeLineGutter': {
+    backgroundColor: 'var(--color-surface-hover-a34)',
+  },
+})
 
 const LANGUAGE_BY_EXTENSION: Record<string, () => unknown> = {
   ts: javascript,
@@ -187,6 +232,8 @@ export function WorkspaceEditor(props: WorkspaceEditorProps) {
       autocompletion(),
       keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap, ...completionKeymap]),
       EditorState.tabSize.of(2),
+      syntaxHighlighting(workspaceHighlightStyle),
+      workspaceEditorTheme,
       EditorView.updateListener.of((update) => {
         if (!update.docChanged) return
         const content = update.state.doc.toString()

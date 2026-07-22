@@ -19,6 +19,7 @@ import {
 } from '../../stores/workspacePanelStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useWorkspaceChatContextStore } from '../../stores/workspaceChatContextStore'
+import { SETTINGS_TAB_ID, useTabStore } from '../../stores/tabStore'
 import { useUIStore } from '../../stores/uiStore'
 import { copyTextToClipboard } from '../chat/clipboard'
 import { clearWindowSelection, getSelectionPopoverPosition, useSelectionPopoverDismiss } from '../../hooks/useSelectionPopoverDismiss'
@@ -1277,6 +1278,7 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
   const initBuffer = useWorkspacePanelStore((state) => state.initBuffer)
   const syncLsp = useWorkspacePanelStore((state) => state.syncLsp)
   const loadLspState = useWorkspacePanelStore((state) => state.loadLspState)
+  const loadLspDiagnostics = useWorkspacePanelStore((state) => state.loadLspDiagnostics)
   const bufferStateByTabId = useWorkspacePanelStore((state) => state.bufferStateByTabId)
   const closePanel = useWorkspacePanelStore((state) => state.closePanel)
   const addWorkspaceReference = useWorkspaceChatContextStore((state) => state.addReference)
@@ -1875,11 +1877,23 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
                   sessionId,
                 )}
                 diagnostics={activeLspDiagnostics?.diagnostics ?? []}
+                onInstallClick={() => {
+                  useUIStore.getState().setPendingSettingsTab('plugins')
+                  useTabStore.getState().openTab(SETTINGS_TAB_ID, 'Settings', 'settings')
+                }}
                 onRetryClick={() => {
                   void sessionsApi
                     .restartWorkspaceLsp(sessionId, { path: activePreviewTab.path })
-                    .catch(() => undefined)
-                    .then(() => loadLspState(sessionId, activePreviewTab.path))
+                    .then(async () => {
+                      await loadLspState(sessionId, activePreviewTab.path)
+                      await loadLspDiagnostics(sessionId, activePreviewTab.path, true)
+                    })
+                    .catch((error) => {
+                      addToast({
+                        type: 'error',
+                        message: error instanceof Error ? error.message : 'Failed to restart language server',
+                      })
+                    })
                 }}
                 onDiagnosticOpen={(diagnostic) => {
                   void openPreview(sessionId, diagnostic.path, 'file')

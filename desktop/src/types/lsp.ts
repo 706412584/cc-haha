@@ -25,7 +25,9 @@ export type LspDiagnostic = {
 export type WorkspaceLspDiagnostic = LspDiagnostic
 
 export type LspUnavailableReason =
+  | 'unsupported-extension'
   | 'prereq-missing'
+  | 'spawn-failed'
   | 'init-timeout'
   | 'init-failed'
   | 'crashed'
@@ -35,7 +37,7 @@ export type WorkspaceLspState =
   | { state: 'idle'; path: string | null; serverName: string | null; command: string | null; error?: string }
   | { state: 'starting'; path: string | null; serverName: string | null; command: string | null; error?: string }
   | { state: 'ready'; path: string | null; serverName: string | null; command: string | null; error?: string }
-  | { state: 'unavailable'; path: string | null; serverName: string | null; command: string | null; error?: string }
+  | { state: 'unavailable'; path: string | null; serverName: string | null; command: string | null; reason: LspUnavailableReason; error?: string }
 
 export type LegacyWorkspaceLspState =
   | { state: 'starting'; workspaceId: string; errorCount: 0 }

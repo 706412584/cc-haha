@@ -6,6 +6,7 @@ import type {
   LspUnavailableReason,
   LegacyWorkspaceLspState,
 } from '../../types/lsp'
+import { useTranslation, type TranslationKey } from '../../i18n'
 
 /**
  * Status indicator for the editor's LSP backend (Phase 3 task 25).
@@ -52,28 +53,38 @@ type StatusVisual = {
   action: 'install' | 'retry' | null
 }
 
-function describeUnavailable(reason: LspUnavailableReason): StatusVisual {
+type Translate = (key: TranslationKey, params?: Record<string, string | number>) => string
+
+function describeUnavailable(reason: LspUnavailableReason, t: Translate): StatusVisual {
+  if (reason === 'unsupported-extension') {
+    return {
+      Icon: AlertTriangle,
+      label: t('workspace.lspUnsupported'),
+      className: 'text-[var(--color-text-muted)]',
+      action: null,
+    }
+  }
   if (reason === 'prereq-missing') {
     return {
       Icon: AlertTriangle,
-      label: 'Language server unavailable',
+      label: t('workspace.lspUnavailable'),
       className: 'text-[var(--color-warning-text)]',
       action: 'install',
     }
   }
   return {
     Icon: AlertCircle,
-    label: 'Language server unavailable',
+    label: t('workspace.lspUnavailable'),
     className: 'text-[var(--color-error-text)]',
     action: 'retry',
   }
 }
 
-function describe(state: LegacyWorkspaceLspState): StatusVisual {
+function describe(state: LegacyWorkspaceLspState, t: Translate): StatusVisual {
   if (state.state === 'starting') {
     return {
       Icon: Loader2,
-      label: 'Starting language server…',
+      label: t('workspace.lspStarting'),
       className: 'text-[var(--color-text-muted)] animate-spin',
       action: null,
     }
@@ -82,14 +93,16 @@ function describe(state: LegacyWorkspaceLspState): StatusVisual {
     if (state.errorCount === 0) {
       return {
         Icon: CheckCircle,
-        label: 'Ready',
+        label: t('workspace.lspReady'),
         className: 'text-[var(--color-success-text)]',
         action: null,
       }
     }
-    const display = state.errorCount > ERROR_COUNT_DISPLAY_CAP
-      ? `${ERROR_COUNT_DISPLAY_CAP}+ errors detected`
-      : `${state.errorCount} ${state.errorCount === 1 ? 'error' : 'errors'} detected`
+    const display = t('workspace.lspErrors', {
+      count: state.errorCount > ERROR_COUNT_DISPLAY_CAP
+        ? `${ERROR_COUNT_DISPLAY_CAP}+`
+        : state.errorCount,
+    })
     return {
       Icon: AlertCircle,
       label: display,
@@ -97,7 +110,7 @@ function describe(state: LegacyWorkspaceLspState): StatusVisual {
       action: null,
     }
   }
-  return describeUnavailable(state.reason)
+  return describeUnavailable(state.reason, t)
 }
 
 function truncateMessage(message: string): string {
@@ -110,7 +123,8 @@ export function LspStatusIndicator(props: LspStatusIndicatorProps) {
   const [open, setOpen] = useState(false)
   const [focusIndex, setFocusIndex] = useState(0)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
-  const visual = describe(state)
+  const t = useTranslation()
+  const visual = describe(state, t)
 
   useEffect(() => {
     if (!open) return
@@ -166,7 +180,7 @@ export function LspStatusIndicator(props: LspStatusIndicatorProps) {
           onClick={onInstallClick}
           className="rounded-[6px] border border-[var(--color-border)] px-2 py-0.5 hover:bg-[var(--color-surface-hover)]"
         >
-          Install...
+          {t('workspace.lspInstall')}
         </button>
       )}
       {visual.action === 'retry' && (
@@ -176,7 +190,7 @@ export function LspStatusIndicator(props: LspStatusIndicatorProps) {
           onClick={onRetryClick}
           className="rounded-[6px] border border-[var(--color-border)] px-2 py-0.5 hover:bg-[var(--color-surface-hover)]"
         >
-          Retry
+          {t('workspace.lspRetry')}
         </button>
       )}
 
@@ -189,13 +203,13 @@ export function LspStatusIndicator(props: LspStatusIndicatorProps) {
       {open && (
         <div
           role="listbox"
-          aria-label="LSP diagnostics"
+          aria-label={t('workspace.lspDiagnosticsLabel')}
           data-testid="lsp-status-dropdown"
           className="absolute left-0 top-full z-30 mt-1 w-[420px] rounded-[8px] border border-[var(--color-border)] bg-[var(--color-surface)] p-2 shadow-[var(--shadow-dropdown)]"
         >
           {diagnostics.length === 0 ? (
             <div data-testid="lsp-status-empty" className="px-2 py-1 text-[var(--color-text-muted)]">
-              No diagnostics
+              {t('workspace.lspNoDiagnostics')}
             </div>
           ) : (
             <ul className="space-y-1">

@@ -41,35 +41,37 @@ describe('toLegacyLspState', () => {
     })
   })
 
-  it('maps unavailable to init-failed (Retry button) since wire shape lacks reason', () => {
+  it('preserves a lifecycle failure reason and sanitized detail', () => {
     const unavailable: WorkspaceLspState = {
       state: 'unavailable',
       path: null,
       serverName: null,
       command: null,
-      error: 'spawn ENOENT typescript-language-server',
+      reason: 'spawn-failed',
+      error: 'Unable to launch typescript-language-server',
     }
     expect(toLegacyLspState(unavailable, 0, 'w1')).toEqual({
       state: 'unavailable',
       workspaceId: 'w1',
-      reason: 'init-failed',
+      reason: 'spawn-failed',
       errorCount: 0,
-      lastStderrTail: 'spawn ENOENT typescript-language-server',
+      lastStderrTail: 'Unable to launch typescript-language-server',
     })
   })
 
-  it('omits lastStderrTail when error string is absent', () => {
+  it('preserves unsupported-extension without inventing retry detail', () => {
     const unavailable: WorkspaceLspState = {
       state: 'unavailable',
       path: null,
       serverName: null,
       command: null,
+      reason: 'unsupported-extension',
     }
     const result = toLegacyLspState(unavailable, 0, 'w1')
     expect(result).toEqual({
       state: 'unavailable',
       workspaceId: 'w1',
-      reason: 'init-failed',
+      reason: 'unsupported-extension',
       errorCount: 0,
     })
   })

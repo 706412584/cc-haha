@@ -9,8 +9,10 @@ import type { ScopedLspServerConfig } from '../../services/lsp/types.js'
 import {
   clearWorkspaceLspDiagnostics,
   publishWorkspaceLspDiagnostics,
+  sanitizeWorkspaceLspWireText,
   WorkspaceLspService,
 } from './workspaceLspService.js'
+import { WorkspaceLspPrerequisiteError } from './workspaceLspLaunchResolver.js'
 
 type Notification = { method: string; params: unknown }
 
@@ -56,6 +58,7 @@ function createFakeManager(captured: { servers?: Record<string, ScopedLspServerC
       saveFile: async (filePath) => instance.sendNotification('textDocument/didSave', { textDocument: { uri: pathToFileURL(filePath).href } }),
       closeFile: async () => {},
       isFileOpen: (filePath) => openUris.has(pathToFileURL(filePath).href),
+      getLastLifecycleError: () => undefined,
     }
   }
 }
@@ -67,11 +70,54 @@ describe('WorkspaceLspService', () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'workspace-lsp-'))
     await fs.mkdir(path.join(tmpDir, 'src'))
     await fs.writeFile(path.join(tmpDir, 'src', 'app.ts'), 'const x = 1\n')
+    const packageRoot = path.join(tmpDir, 'node_modules', 'typescript-language-server')
+    await fs.mkdir(path.join(packageRoot, 'lib'), { recursive: true })
+    await fs.writeFile(path.join(packageRoot, 'package.json'), JSON.stringify({
+      name: 'typescript-language-server',
+      bin: { 'typescript-language-server': 'lib/cli.mjs' },
+    }))
+    await fs.writeFile(path.join(packageRoot, 'lib', 'cli.mjs'), 'process.stdin.resume()')
     clearWorkspaceLspDiagnostics()
   })
 
   afterEach(async () => {
     await fs.rm(tmpDir, { recursive: true, force: true })
+  })
+
+  it('returns prereq-missing when a built-in extension has no resolved package', async () => {
+    await fs.rm(path.join(tmpDir, 'node_modules'), { recursive: true, force: true })
+    const captured = { notifications: [] as Notification[] }
+    const service = new WorkspaceLspService({
+      createManager: createFakeManager(captured),
+      resolveBuiltInLaunch: async () => { throw new WorkspaceLspPrerequisiteError('missing') },
+      waitTimeoutMs: 1,
+    })
+    await service.sync('s1', tmpDir, { path: 'src/app.ts', content: '' })
+    await expect(service.getState('s1', tmpDir, 'src/app.ts')).resolves.toMatchObject({
+      state: 'unavailable',
+      reason: 'prereq-missing',
+    })
+  })
+
+  it('returns a typed unsupported-extension reason', async () => {
+    await fs.writeFile(path.join(tmpDir, 'src', 'app.unknown'), '')
+    const captured = { notifications: [] as Notification[] }
+    const service = new WorkspaceLspService({ createManager: createFakeManager(captured), waitTimeoutMs: 1 })
+    await service.sync('s1', tmpDir, { path: 'src/app.unknown', content: '' })
+    await expect(service.getState('s1', tmpDir, 'src/app.unknown')).resolves.toMatchObject({
+      state: 'unavailable',
+      reason: 'unsupported-extension',
+    })
+  })
+
+  it('redacts credentials, tokens, control sequences and host paths on the wire', () => {
+    const raw = `\u001b[31mfailed ${tmpDir} https://user:secret@example.test token=abc123\u0000`
+    const value = sanitizeWorkspaceLspWireText(raw, [tmpDir])!
+    expect(value).not.toContain(tmpDir)
+    expect(value).not.toContain('secret')
+    expect(value).not.toContain('abc123')
+    expect(value).not.toContain('\u001b')
+    expect(value.length).toBeLessThanOrEqual(512)
   })
 
   it('rejects paths outside the workspace', async () => {
@@ -114,7 +160,7 @@ describe('WorkspaceLspService', () => {
     })
 
     expect(state.serverName).toBe('custom:typescript')
-    expect(state.command).toBe(customPath)
+    expect(state.command).toBe('custom ts server')
     expect(captured.servers?.['custom:typescript']?.extensionToLanguage['.ts']).toBe('typescript')
     expect(captured.servers?.['preset:typescript-language-server']).toBeDefined()
     expect(captured.servers?.['preset:typescript-language-server']?.extensionToLanguage['.ts']).toBeUndefined()

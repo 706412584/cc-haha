@@ -351,6 +351,23 @@ describe('build-sidecars Windows x64 target mapping', () => {
     expect(readCliLauncher()).toContain('--feature=TRANSCRIPT_CLASSIFIER')
   })
 
+  it('keeps the restricted compiled LSP launcher in the sidecar entrypoint', () => {
+    const source = readFileSync(
+      path.resolve(import.meta.dirname, '../sidecars/claude-sidecar.ts'),
+      'utf8',
+    )
+    const routing = readFileSync(
+      path.resolve(import.meta.dirname, '../sidecars/launcherRouting.ts'),
+      'utf8',
+    )
+    expect(source).toContain("mode === 'lsp'")
+    expect(source).toContain('validateLspEntry(entry, packageRoot)')
+    expect(routing).toContain("rawArgs[0] !== '--package-root'")
+    expect(routing).toContain("rawArgs[2] !== '--entry'")
+    expect(routing).not.toContain("'-e'")
+    expect(routing).not.toContain("'--eval'")
+  })
+
   it('wires the opt-in compiled sidecar smoke into the native gate', () => {
     const desktopPackage = readJson(path.resolve(import.meta.dirname, '../package.json'))
     const rootPackage = readJson(path.resolve(import.meta.dirname, '../../package.json'))

@@ -66,6 +66,16 @@
   src: url('../../public/fonts/material-symbols-outlined.woff2') format('woff2');
 }
 
+.workspace-syntax-comment { color: var(--color-code-comment); }
+.workspace-syntax-string { color: var(--color-code-string); }
+.workspace-syntax-keyword { color: var(--color-code-keyword); }
+.workspace-syntax-function { color: var(--color-code-function); }
+.workspace-syntax-number,
+.workspace-syntax-bool { color: var(--color-code-number); }
+.workspace-syntax-property { color: var(--color-code-property); }
+.workspace-syntax-type { color: var(--color-code-type); }
+.workspace-syntax-punctuation { color: var(--color-code-punctuation); }
+
 .code-viewer-area .line,
 .code-viewer-area .token-line {
   display: block;
