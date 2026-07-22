@@ -125,6 +125,7 @@ async function waitForCompiledSidecar(options: {
 }): Promise<void> {
   const deadline = Date.now() + options.deadlineMs
   let authProbeComplete = false
+  let indexSyncRequested = false
   let lastFailure = 'no response received'
   while (Date.now() < deadline) {
     const exited = await Promise.race([
@@ -190,18 +191,36 @@ async function waitForCompiledSidecar(options: {
         total?: number
         index?: { mode?: string; state?: string; indexed?: number }
       }
+      const sessionVisible =
+        body.total === 1 &&
+        Boolean(body.sessions?.some(session => session.id === options.expectedSessionId))
+      // Startup no longer auto-rebuilds session indexes. Trigger the same manual
+      // sync path the desktop refresh control uses once the process is serving.
+      if (sessionVisible && !indexSyncRequested) {
+        const syncResponse = await fetchBeforeCompiledSidecarDeadline(
+          `${options.baseUrl}/api/sessions/sync-indexes`,
+          {
+            method: 'POST',
+            headers: authorizedHeaders,
+          },
+          deadline,
+        )
+        if (!syncResponse.ok) {
+          throw new Error(`sync-indexes returned ${syncResponse.status}`)
+        }
+        indexSyncRequested = true
+      }
       if (
+        sessionVisible &&
         body.index?.mode === 'on' &&
         body.index.state === 'ready' &&
-        body.index.indexed === 1 &&
-        body.total === 1 &&
-        body.sessions?.some(session => session.id === options.expectedSessionId)
+        body.index.indexed === 1
       ) {
         return
       }
       lastFailure = `sessions not ready: ${JSON.stringify(body)}`
     } catch (error) {
-      // Startup and backfill are asynchronous; keep polling until the deadline.
+      // Startup and index sync are asynchronous; keep polling until the deadline.
       lastFailure = error instanceof Error ? error.message : String(error)
     }
     const remainingMs = deadline - Date.now()
