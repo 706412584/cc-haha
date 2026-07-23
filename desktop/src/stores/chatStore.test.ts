@@ -4658,6 +4658,40 @@ describe('chatStore history mapping', () => {
     })
   })
 
+  it('keeps an in-flight turn running when SESSION_TURN_ACTIVE is rejected', () => {
+    const timer = setInterval(() => {}, 60_000)
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          chatState: 'streaming',
+          streamingText: 'partial answer',
+          statusVerb: 'Working',
+          elapsedTimer: timer,
+          elapsedSeconds: 4,
+        }),
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'error',
+      message: 'A user turn is already active for this session. Retry after it completes.',
+      code: 'SESSION_TURN_ACTIVE',
+      retryable: true,
+    })
+
+    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.chatState).toBe('streaming')
+    expect(session?.streamingText).toBe('partial answer')
+    expect(session?.statusVerb).toBe('Working')
+    expect(session?.elapsedTimer).toBe(timer)
+    expect(session?.messages.at(-1)).toMatchObject({
+      type: 'error',
+      code: 'SESSION_TURN_ACTIVE',
+    })
+    expect(updateTabStatusMock).not.toHaveBeenCalledWith(TEST_SESSION_ID, 'error')
+    clearInterval(timer)
+  })
+
   it('removes the transient compacting card when compacting status ends without a boundary', () => {
     useChatStore.setState({
       sessions: {

@@ -501,6 +501,29 @@ export const handleWebSocket = {
         case 'user_message': {
           const activeTurn: ActiveUserTurnState = { messageSent: false }
           if (!sessionActivityCoordinator.tryBeginUserTurn(ws.data.sessionId)) {
+            const existingTurn = activeUserTurns.get(ws.data.sessionId)
+            if (existingTurn?.messageSent && conversationService.hasSession(ws.data.sessionId)) {
+              void conversationService
+                .sendMessage(ws.data.sessionId, message.content, message.attachments)
+                .then((sent) => {
+                  if (sent) return
+                  sendMessage(ws, {
+                    type: 'error',
+                    message: 'CLI process is not running. The session may have ended or the process crashed.',
+                    code: 'CLI_NOT_RUNNING',
+                  })
+                })
+                .catch((err) => {
+                  console.error(`[WS] Mid-turn user message inject failed:`, err)
+                  sendMessage(ws, {
+                    type: 'error',
+                    message: 'The follow-up message could not be delivered. Please retry.',
+                    code: 'USER_TURN_INJECT_FAILED',
+                    retryable: true,
+                  })
+                })
+              break
+            }
             sendMessage(ws, {
               type: 'error',
               message: 'A user turn is already active for this session. Retry after it completes.',

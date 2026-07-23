@@ -21,6 +21,7 @@ import {
 } from '../ws/disconnectGraceConfig.js'
 import { conversationService } from '../services/conversationService.js'
 import { computerUseApprovalService } from '../services/computerUseApprovalService.js'
+import { sessionActivityCoordinator } from '../services/sessionActivityCoordinator.js'
 import { sessionService } from '../services/sessionService.js'
 
 function makeClientSocket(sessionId: string, clientKind: 'full' | 'pet' = 'full') {
@@ -1345,6 +1346,157 @@ describe('WebSocket handler session isolation', () => {
       type: 'session_state',
       turnState: 'idle',
     })
+  })
+
+  it('injects mid-turn follow-ups into the live CLI without starting a second turn', async () => {
+    const sessionId = `mid-turn-inject-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([])
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    const sendMessageSpy = spyOn(conversationService, 'sendMessage').mockResolvedValue(true)
+
+    handleWebSocket.open(ws)
+    expect(sessionActivityCoordinator.tryBeginUserTurn(sessionId)).toBe(true)
+    __markActiveTurnForTests(sessionId)
+    ws.sent.length = 0
+
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'user_message',
+      content: 'please steer this way',
+      attachments: [{ type: 'file', name: 'a.ts', path: '/tmp/a.ts' }],
+    }))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(sendMessageSpy).toHaveBeenCalledWith(
+      sessionId,
+      'please steer this way',
+      [{ type: 'file', name: 'a.ts', path: '/tmp/a.ts' }],
+    )
+    expect(ws.sent.map((payload) => JSON.parse(payload))).not.toContainEqual(
+      expect.objectContaining({ code: 'SESSION_TURN_ACTIVE' }),
+    )
+
+    // Active turn ownership must remain on the original turn.
+    ws.sent.length = 0
+    handleWebSocket.message(ws, JSON.stringify({ type: 'sync_state' }))
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual(
+      expect.objectContaining({
+        type: 'session_state',
+        turnState: 'running',
+      }),
+    )
+    sessionActivityCoordinator.clear(sessionId)
+  })
+
+  it('reports CLI_NOT_RUNNING when a mid-turn inject cannot reach the CLI', async () => {
+    const sessionId = `mid-turn-cli-missing-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([])
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'sendMessage').mockResolvedValue(false)
+
+    handleWebSocket.open(ws)
+    expect(sessionActivityCoordinator.tryBeginUserTurn(sessionId)).toBe(true)
+    __markActiveTurnForTests(sessionId)
+    ws.sent.length = 0
+
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'user_message',
+      content: 'steer while cli is gone',
+    }))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'error',
+      message: 'CLI process is not running. The session may have ended or the process crashed.',
+      code: 'CLI_NOT_RUNNING',
+    })
+    sessionActivityCoordinator.clear(sessionId)
+  })
+
+  it('reports USER_TURN_INJECT_FAILED when mid-turn inject throws', async () => {
+    const sessionId = `mid-turn-inject-fail-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([])
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'sendMessage').mockRejectedValue(new Error('inject boom'))
+    const errorLog = spyOn(console, 'error').mockImplementation(() => {})
+
+    handleWebSocket.open(ws)
+    expect(sessionActivityCoordinator.tryBeginUserTurn(sessionId)).toBe(true)
+    __markActiveTurnForTests(sessionId)
+    ws.sent.length = 0
+
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'user_message',
+      content: 'steer with failure',
+    }))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'error',
+      message: 'The follow-up message could not be delivered. Please retry.',
+      code: 'USER_TURN_INJECT_FAILED',
+      retryable: true,
+    })
+    expect(errorLog).toHaveBeenCalled()
+    sessionActivityCoordinator.clear(sessionId)
+  })
+
+  it('still rejects follow-ups during the pre-send startup window', async () => {
+    const sessionId = `mid-turn-presend-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([])
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    const sendMessageSpy = spyOn(conversationService, 'sendMessage').mockResolvedValue(true)
+
+    handleWebSocket.open(ws)
+    expect(sessionActivityCoordinator.tryBeginUserTurn(sessionId)).toBe(true)
+    __registerPendingUserTurnForTests(sessionId)
+    ws.sent.length = 0
+
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'user_message',
+      content: 'too early to steer',
+    }))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(sendMessageSpy).not.toHaveBeenCalled()
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'error',
+      message: 'A user turn is already active for this session. Retry after it completes.',
+      code: 'SESSION_TURN_ACTIVE',
+      retryable: true,
+    })
+    sessionActivityCoordinator.clear(sessionId)
+  })
+
+  it('rejects mid-turn follow-ups when the CLI session is gone', async () => {
+    const sessionId = `mid-turn-no-session-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([])
+    spyOn(conversationService, 'hasSession').mockReturnValue(false)
+    const sendMessageSpy = spyOn(conversationService, 'sendMessage').mockResolvedValue(true)
+
+    handleWebSocket.open(ws)
+    expect(sessionActivityCoordinator.tryBeginUserTurn(sessionId)).toBe(true)
+    __markActiveTurnForTests(sessionId)
+    ws.sent.length = 0
+
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'user_message',
+      content: 'steer without session',
+    }))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(sendMessageSpy).not.toHaveBeenCalled()
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'error',
+      message: 'A user turn is already active for this session. Retry after it completes.',
+      code: 'SESSION_TURN_ACTIVE',
+      retryable: true,
+    })
+    sessionActivityCoordinator.clear(sessionId)
   })
 })
 
