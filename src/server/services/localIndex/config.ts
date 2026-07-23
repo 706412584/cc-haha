@@ -32,6 +32,14 @@ export function resolveSearchContentIndexEnabled(
   return value !== 'off'
 }
 
+export function isSessionContentSearchEnabled(
+  settings: Record<string, unknown>,
+  envValue = process.env.CC_HAHA_SEARCH_INDEX,
+): boolean {
+  return resolveSearchContentIndexEnabled(envValue) &&
+    settings.sessionContentSearchEnabled !== false
+}
+
 export function getLocalIndexDatabasePath(): string {
   return join(getCcHahaDir(), 'db', 'index-v1.sqlite')
 }

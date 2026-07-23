@@ -40,6 +40,7 @@ export type SubagentRunResolution = {
   usage?: SubagentRunUsage
   updatedAt?: string
   hasResult: boolean
+  isAsyncLaunch: boolean
   isError: boolean
 }
 
@@ -102,6 +103,16 @@ function textFromContent(content: unknown): string {
 
 function extractAgentId(text: string): string | null {
   return text.match(/(?:^|\n)\s*agentId:\s*([A-Za-z0-9_-]+)/)?.[1] ?? null
+}
+
+function normalizeAgentIdHint(value: string | undefined): string | undefined {
+  if (!value || value.length > 256 || !/^[A-Za-z0-9_-]+$/.test(value)) return undefined
+  return value
+}
+
+function isAsyncAgentLaunchResult(text: string): boolean {
+  return text.includes('Async agent launched successfully.') &&
+    text.includes('The agent is working in the background.')
 }
 
 function cleanedAgentResultText(text: string): string | undefined {
@@ -220,6 +231,7 @@ export function resolveSubagentRunFromMessages(
   let usage: SubagentRunUsage | undefined
   let updatedAt: string | undefined
   let hasResult = false
+  let isAsyncLaunch = false
   let isError = false
 
   for (const entry of messages) {
@@ -242,6 +254,7 @@ export function resolveSubagentRunFromMessages(
         updatedAt = latestTimestamp(updatedAt, entry.timestamp)
         const text = textFromContent(block.content)
         agentId = extractAgentId(text) ?? agentId
+        isAsyncLaunch = isAsyncAgentLaunchResult(text) || isAsyncLaunch
         result = cleanedAgentResultText(text) ?? result
         usage = mergeUsage(extractUsage(text), usage)
       }
@@ -258,6 +271,7 @@ export function resolveSubagentRunFromMessages(
     ...(usage ? { usage } : {}),
     ...(updatedAt ? { updatedAt } : {}),
     hasResult,
+    isAsyncLaunch,
     isError,
   }
 }
@@ -279,13 +293,29 @@ function statusFromResolution(
 ): SubagentRunStatus {
   if (resolution.isError) return 'failed'
   if (notification?.status) return notification.status
-  if (resolution.hasResult) return 'completed'
+  if (resolution.hasResult && !resolution.isAsyncLaunch) return 'completed'
   return 'running'
+}
+
+async function resolveTranscript(
+  sessionId: string,
+  candidates: Array<string | null | undefined>,
+): Promise<{ agentId: string | null; messages: MessageEntry[] }> {
+  const seen = new Set<string>()
+  for (const candidate of candidates) {
+    const agentId = normalizeAgentIdHint(candidate ?? undefined)
+    if (!agentId || seen.has(agentId)) continue
+    seen.add(agentId)
+    const messages = await sessionService.getSubagentTranscriptMessages(sessionId, agentId)
+    if (messages.length > 0) return { agentId, messages }
+  }
+  return { agentId: null, messages: [] }
 }
 
 export async function getSubagentRunByTool(
   sessionId: string,
   toolUseId: string,
+  liveTaskId?: string,
 ): Promise<SubagentRunResponse | null> {
   const [parentMessages, taskNotifications] = await Promise.all([
     sessionService.getSessionMessages(sessionId),
@@ -295,9 +325,13 @@ export async function getSubagentRunByTool(
   if (!resolution) return null
 
   const notification = taskNotifications.find((candidate) => candidate.toolUseId === toolUseId)
-  const transcriptMessages = resolution.agentId
-    ? await sessionService.getSubagentTranscriptMessages(sessionId, resolution.agentId)
-    : []
+  const safeLiveTaskId = normalizeAgentIdHint(liveTaskId)
+  const transcript = await resolveTranscript(sessionId, [
+    resolution.agentId,
+    safeLiveTaskId,
+    notification?.taskId,
+  ])
+  const transcriptMessages = transcript.messages
   const truncated = truncateSubagentMessages(transcriptMessages)
   const transcriptUsage = usageFromTranscriptMessages(transcriptMessages)
   const usage = mergeUsage(resolution.usage, transcriptUsage)
@@ -312,8 +346,10 @@ export async function getSubagentRunByTool(
   return {
     sessionId,
     toolUseId,
-    agentId: resolution.agentId,
-    ...(notification?.taskId ? { taskId: notification.taskId } : {}),
+    agentId: resolution.agentId ?? transcript.agentId,
+    ...(notification?.taskId || safeLiveTaskId
+      ? { taskId: notification?.taskId || safeLiveTaskId }
+      : {}),
     status: statusFromResolution(resolution, notification),
     ...(resolution.description ? { description: resolution.description } : {}),
     ...(resolution.prompt ? { prompt: resolution.prompt } : {}),
@@ -328,6 +364,10 @@ export async function getSubagentRunByTool(
     ...(latestTimestamp(resolution.updatedAt, notification?.timestamp, latestTranscriptTimestamp)
       ? { updatedAt: latestTimestamp(resolution.updatedAt, notification?.timestamp, latestTranscriptTimestamp) }
       : {}),
-    source: transcriptMessages.length > 0 ? 'subagent-jsonl' : 'session-history',
+    source: transcriptMessages.length > 0
+      ? 'subagent-jsonl'
+      : safeLiveTaskId
+        ? 'live-task'
+        : 'session-history',
   }
 }

@@ -47,8 +47,8 @@ vi.mock('../../pages/TraceList', () => ({
 }))
 
 vi.mock('../../pages/SubagentRunPage', () => ({
-  SubagentRunPage: ({ sourceSessionId, toolUseId, title }: { sourceSessionId: string; toolUseId: string; title: string }) => (
-    <div data-testid="subagent-run-page">{sourceSessionId}:{toolUseId}:{title}</div>
+  SubagentRunPage: ({ sourceSessionId, taskId, toolUseId, title }: { sourceSessionId: string; taskId?: string; toolUseId: string; title: string }) => (
+    <div data-testid="subagent-run-page">{sourceSessionId}:{toolUseId}:{taskId}:{title}</div>
   ),
 }))
 
@@ -173,13 +173,14 @@ describe('ContentRouter tab surfaces', () => {
         status: 'idle',
         sourceSessionId: 'session-1',
         subagentToolUseId: 'tool-1',
+        subagentTaskId: 'agent-1',
       }],
       activeTabId: '__subagent__session-1__tool-1',
     })
 
     render(<ContentRouter />)
 
-    expect(screen.getByTestId('subagent-run-page')).toHaveTextContent('session-1:tool-1:Kuhn')
+    expect(screen.getByTestId('subagent-run-page')).toHaveTextContent('session-1:tool-1:agent-1:Kuhn')
     expect(screen.queryByTestId('active-session')).not.toBeInTheDocument()
   })
 

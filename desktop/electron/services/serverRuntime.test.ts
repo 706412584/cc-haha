@@ -578,18 +578,23 @@ describe('ElectronServerRuntime', () => {
     expect(sidecarMocks.serverPlans[0]!.env.CC_HAHA_DESKTOP_VERSION).toBe('0.5.32')
   })
 
-  it('shares one unguessable local access token with server, adapters, and renderer', async () => {
+  it('keeps the pet capability independent and exposes it only to the server sidecar', async () => {
     const runtime = createRuntime()
 
     await runtime.startServer()
 
-    const token = runtime.getLocalAccessToken()
-    expect(token.length).toBeGreaterThanOrEqual(32)
-    expect(sidecarMocks.serverPlans[0]!.env.CC_HAHA_LOCAL_ACCESS_TOKEN).toBe(token)
+    const localToken = runtime.getLocalAccessToken()
+    const petToken = runtime.getPetAccessToken()
+    expect(localToken.length).toBeGreaterThanOrEqual(32)
+    expect(petToken.length).toBeGreaterThanOrEqual(32)
+    expect(petToken).not.toBe(localToken)
+    expect(sidecarMocks.serverPlans[0]!.env.CC_HAHA_LOCAL_ACCESS_TOKEN).toBe(localToken)
+    expect(sidecarMocks.serverPlans[0]!.env.CC_HAHA_PET_ACCESS_TOKEN).toBe(petToken)
     for (const adapter of sidecarMocks.spawnSidecar.mock.calls
       .map(([plan]) => plan)
       .filter(plan => plan.args[0] === 'adapters')) {
-      expect(adapter.env.CC_HAHA_LOCAL_ACCESS_TOKEN).toBe(token)
+      expect(adapter.env.CC_HAHA_LOCAL_ACCESS_TOKEN).toBe(localToken)
+      expect(adapter.env.CC_HAHA_PET_ACCESS_TOKEN).toBeUndefined()
     }
   })
 

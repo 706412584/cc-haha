@@ -14,6 +14,8 @@ import {
   isH5ConnectionRequiredError,
 } from '../../lib/desktopRuntime'
 import { getDesktopHost } from '../../lib/desktopHost'
+import { desktopUiPreferencesApi } from '../../api/desktopUiPreferences'
+import { openDesktopNotificationTarget } from '../../lib/desktopNotificationNavigation'
 import { TabBar } from './TabBar'
 import { StartupErrorView } from './StartupErrorView'
 import { useTabStore, SETTINGS_TAB_ID } from '../../stores/tabStore'
@@ -54,9 +56,10 @@ export function AppShell() {
   const tabs = useTabStore((s) => s.tabs)
   const activeTabId = useTabStore((s) => s.activeTabId)
   const setActiveTab = useTabStore((s) => s.setActiveTab)
-  const activeSession = useSessionStore((s) =>
-    activeTabId ? s.sessions.find((session) => session.id === activeTabId) ?? null : null,
-  )
+  const sessions = useSessionStore((s) => s.sessions)
+  const activeSession = activeTabId
+    ? sessions.find((session) => session.id === activeTabId) ?? null
+    : null
   const wasMobileShellRef = useRef(false)
   const effectiveSidebarOpen = isMobileShell ? mobileSidebarOpen : sidebarOpen
   const activeTab = tabs.find((tab) => tab.sessionId === activeTabId)
@@ -79,6 +82,27 @@ export function AppShell() {
       : {}
 
   useEffect(() => {
+    const sessionStore = useSessionStore.getState()
+    if (activeSession) {
+      if (sessionStore.activeSessionId !== activeSession.id) {
+        sessionStore.setActiveSession(activeSession.id)
+      }
+      return
+    }
+    if (sessionStore.activeSessionId || activeTab?.type !== 'settings') return
+
+    const openSessionIds = new Set(
+      tabs.filter((tab) => tab.type === 'session').map((tab) => tab.sessionId),
+    )
+    // SessionStore keeps sessions most-recent-first; intersecting with restored
+    // tabs excludes Settings and synthetic teammate tabs.
+    const fallbackSession = sessions.find((session) => openSessionIds.has(session.id))
+    if (fallbackSession) {
+      sessionStore.setActiveSession(fallbackSession.id)
+    }
+  }, [activeSession, activeTab?.type, sessions, tabs])
+
+  useEffect(() => {
     let cancelled = false
 
     const bootstrap = async () => {
@@ -94,6 +118,14 @@ export function AppShell() {
 
         if (!cancelled) {
           setReady(true)
+        }
+
+        if (desktopRuntime && !traceLaunch.windowMode) {
+          void desktopUiPreferencesApi.getPreferences()
+            .then(({ preferences }) => {
+              if (preferences.pet.enabled) return getDesktopHost().pets.show()
+            })
+            .catch(() => undefined)
         }
 
         void (async () => {
@@ -151,6 +183,31 @@ export function AppShell() {
       .catch(() => {})
     return () => { unlisten?.() }
   }, [])
+
+  useEffect(() => {
+    const host = getDesktopHost()
+    if (!host.isDesktop || !host.pets) return
+    let unlisten: (() => void) | undefined
+    let disposed = false
+    host.pets.onNavigateSession((sessionId) => {
+      openDesktopNotificationTarget({ type: 'session', sessionId })
+    })
+      .then((fn) => {
+        if (disposed) fn()
+        else unlisten = fn
+      })
+      .catch(() => {})
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!ready || !desktopRuntime || !isActiveChatTab || !activeTabId) return
+    void desktopUiPreferencesApi.updatePetPreferences({ lastSessionId: activeTabId })
+      .catch(() => undefined)
+  }, [activeTabId, desktopRuntime, isActiveChatTab, ready])
 
   useKeyboardShortcuts()
   useElectronWindowDragRegions()

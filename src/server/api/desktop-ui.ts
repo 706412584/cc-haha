@@ -4,6 +4,8 @@
  * GET  /api/desktop-ui/preferences          — read cc-haha UI preferences
  * PUT  /api/desktop-ui/preferences/sidebar  — persist sidebar project preferences
  * PUT  /api/desktop-ui/preferences/profile  — persist local profile preferences
+ * GET  /api/desktop-ui/preferences/pet      — read only desktop pet preferences
+ * PUT  /api/desktop-ui/preferences/pet      — patch desktop pet preferences
  * GET  /api/desktop-ui/preferences/profile/avatar — read local profile avatar
  * PUT  /api/desktop-ui/preferences/profile/avatar — persist local profile avatar
  * DELETE /api/desktop-ui/preferences/profile/avatar — reset local profile avatar
@@ -11,6 +13,7 @@
 
 import { ApiError, errorResponse } from '../middleware/errorHandler.js'
 import { DesktopUiPreferencesService } from '../services/desktopUiPreferencesService.js'
+import { isPetAccessAuthorized } from '../localAccessAuth.js'
 
 const desktopUiPreferencesService = new DesktopUiPreferencesService()
 
@@ -40,6 +43,26 @@ export async function handleDesktopUiApi(
       return Response.json({
         ok: true,
         preferences: await desktopUiPreferencesService.updateSidebarPreferences(body),
+      })
+    }
+
+    if (detail === 'pet') {
+      if (req.method === 'GET') {
+        const result = await desktopUiPreferencesService.readPreferences()
+        return Response.json({
+          exists: result.exists,
+          pet: result.preferences.pet,
+        })
+      }
+      if (req.method !== 'PUT') throw methodNotAllowed(req.method)
+      const body = await parseJsonBody(req)
+      const preferences = await desktopUiPreferencesService.updatePetPreferences(body)
+      if (isPetAccessAuthorized(req)) {
+        return Response.json({ ok: true, pet: preferences.pet })
+      }
+      return Response.json({
+        ok: true,
+        preferences,
       })
     }
 

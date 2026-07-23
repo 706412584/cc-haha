@@ -84,7 +84,7 @@ export function BackgroundTasksBar({
               aria-expanded={open}
               aria-controls="background-tasks-drawer"
               onClick={() => setOpen(true)}
-              className="inline-flex min-h-8 items-center gap-2 rounded-md px-1.5 py-1 text-[13px] font-medium text-[var(--color-accent)] transition-colors hover:bg-[var(--color-surface-container-low)] hover:text-[var(--color-accent-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
+              className="inline-flex min-h-8 items-center gap-2 rounded-md px-1.5 py-1 text-[13px] font-medium text-[var(--color-brand)] transition-colors hover:bg-[var(--color-surface-container-low)] hover:text-[var(--color-brand-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
             >
               {runningCount > 0 ? (
                 <LoaderCircle size={16} strokeWidth={2.2} className="animate-spin text-[var(--color-warning)]" aria-hidden="true" />
@@ -212,7 +212,7 @@ function BackgroundTaskRow({ task, onStopTask }: { task: BackgroundAgentTask; on
       <div className="flex min-w-0 items-start gap-2">
         <span className="mt-1 flex h-2 w-2 shrink-0 items-center justify-center rounded-full bg-[var(--color-text-tertiary)]">
           {task.status === 'running' ? (
-            <span className="h-2 w-2 rounded-full bg-[var(--color-accent)] animate-pulse-dot" aria-hidden="true" />
+            <span className="h-2 w-2 rounded-full bg-[var(--color-brand)] animate-pulse-dot" aria-hidden="true" />
           ) : null}
         </span>
         <div className="min-w-0 flex-1">

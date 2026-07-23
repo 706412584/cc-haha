@@ -39,6 +39,10 @@ export const MANAGED_PROVIDER_ENV_KEYS = [
   'CLAUDE_CODE_DISABLE_THINKING',
   'ANTHROPIC_MODEL',
   'ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES',
+  'ANTHROPIC_DEFAULT_FABLE_MODEL',
+  'ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION',
+  'ANTHROPIC_DEFAULT_FABLE_MODEL_NAME',
+  'ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES',
   'ANTHROPIC_DEFAULT_HAIKU_MODEL',
   'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES',
   'ANTHROPIC_DEFAULT_SONNET_MODEL',
@@ -54,8 +58,11 @@ export const MANAGED_PROVIDER_ENV_KEYS = [
   GROK_OAUTH_FILE_ENV_KEY,
 ] as const
 
-const CUSTOM_PROVIDER_MODEL_CAPABILITIES = 'thinking,effort,adaptive_thinking,max_effort'
+const CUSTOM_PROVIDER_MODEL_CAPABILITIES =
+  'thinking,effort,adaptive_thinking,xhigh_effort,max_effort'
 const XIAOMI_MIMO_MODEL_CAPABILITIES = 'thinking'
+const KIMI_K3_MODEL_CAPABILITIES = 'thinking,required_thinking,effort,max_effort'
+const KIMI_CODING_FALLBACK_MODEL_CAPABILITIES = 'thinking,required_thinking'
 const AUTH_ENV_KEYS = new Set(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'])
 const MODEL_SLOTS = ['main', 'haiku', 'sonnet', 'opus'] as const
 
@@ -67,6 +74,7 @@ function isProviderModels(value: unknown): value is SavedProvider['models'] {
   return (
     isRecord(value) &&
     typeof value.main === 'string' &&
+    (value.fable === undefined || typeof value.fable === 'string') &&
     typeof value.haiku === 'string' &&
     typeof value.sonnet === 'string' &&
     typeof value.opus === 'string'
@@ -129,6 +137,7 @@ export function normalizeModelMapping(models: SavedProvider['models']): SavedPro
   const main = models.main.trim()
   return {
     main,
+    ...(models.fable?.trim() ? { fable: models.fable.trim() } : {}),
     haiku: models.haiku.trim() || main,
     sonnet: models.sonnet.trim() || main,
     opus: models.opus.trim() || main,
@@ -160,6 +169,7 @@ function applyModel1mSupportMapping(
 ): SavedProvider['models'] {
   return {
     main: applyModel1mSupport(models.main, model1mSupport?.main),
+    ...(models.fable ? { fable: models.fable.trim() } : {}),
     haiku: applyModel1mSupport(models.haiku, model1mSupport?.haiku),
     sonnet: applyModel1mSupport(models.sonnet, model1mSupport?.sonnet),
     opus: applyModel1mSupport(models.opus, model1mSupport?.opus),
@@ -292,6 +302,42 @@ function getCustomProviderModelCapabilities(
   return CUSTOM_PROVIDER_MODEL_CAPABILITIES
 }
 
+function getKimiModelCapabilities(model: string): string {
+  const normalized = model
+    .trim()
+    .replace(/\[1m\]$/i, '')
+    .replace(/:1m$/i, '')
+    .toLowerCase()
+  return normalized === 'k3'
+    ? KIMI_K3_MODEL_CAPABILITIES
+    : KIMI_CODING_FALLBACK_MODEL_CAPABILITIES
+}
+
+function getProviderCapabilityEnv(
+  provider: SavedProvider,
+  models: SavedProvider['models'],
+): Record<string, string> {
+  if (provider.presetId === 'custom') {
+    const capabilities = getCustomProviderModelCapabilities(provider, models)
+    return {
+      ...(models.fable
+        ? { ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES: capabilities }
+        : {}),
+      ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES: capabilities,
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: capabilities,
+      ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES: capabilities,
+    }
+  }
+  if (provider.presetId === 'kimi') {
+    return {
+      ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES: getKimiModelCapabilities(models.haiku),
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: getKimiModelCapabilities(models.sonnet),
+      ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES: getKimiModelCapabilities(models.opus),
+    }
+  }
+  return {}
+}
+
 export function buildProviderAuthEnv(
   provider: SavedProvider,
   presetDefaultEnv: Record<string, string>,
@@ -368,39 +414,19 @@ export function buildProviderManagedEnv(
   }
 
   const presetDefaultEnv = getPresetDefaultEnv(provider.presetId)
+  const providerCapabilityEnv = getProviderCapabilityEnv(provider, models)
   const preset = PROVIDER_PRESETS.find((entry) => entry.id === provider.presetId)
   const customProviderCapabilities = getCustomProviderModelCapabilities(provider, models)
-  const capabilitiesForSlot = (
-    slot: typeof MODEL_SLOTS[number],
-    envKey: string,
-  ): string | undefined =>
-    provider.presetId === 'custom' || models[slot] !== preset?.defaultModels[slot]
-      ? customProviderCapabilities
-      : presetDefaultEnv[envKey]
-  const modelCapabilityEnv = {
-    ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES: capabilitiesForSlot(
-      'main',
-      'ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES',
-    ),
-    ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES: capabilitiesForSlot(
-      'haiku',
-      'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES',
-    ),
-    ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: capabilitiesForSlot(
-      'sonnet',
-      'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES',
-    ),
-    ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES: capabilitiesForSlot(
-      'opus',
-      'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES',
-    ),
-  }
+  const mainModelCapabilities = provider.presetId === 'custom' || models.main !== preset?.defaultModels.main
+    ? customProviderCapabilities
+    : presetDefaultEnv.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES
 
   return {
     ...omitAuthEnv(presetDefaultEnv),
-    ...Object.fromEntries(
-      Object.entries(modelCapabilityEnv).filter(([, value]) => value !== undefined),
-    ),
+    ...providerCapabilityEnv,
+    ...(mainModelCapabilities
+      ? { ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES: mainModelCapabilities }
+      : {}),
     ...(provider.autoCompactWindow !== undefined && {
       CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(provider.autoCompactWindow),
     }),
@@ -424,6 +450,9 @@ export function buildProviderManagedEnv(
     ANTHROPIC_BASE_URL: baseUrl,
     ...buildProviderAuthEnv(provider, presetDefaultEnv, needsProxy),
     ANTHROPIC_MODEL: runtimeModels.main,
+    ...(runtimeModels.fable && {
+      ANTHROPIC_DEFAULT_FABLE_MODEL: runtimeModels.fable,
+    }),
     ANTHROPIC_DEFAULT_HAIKU_MODEL: runtimeModels.haiku,
     ANTHROPIC_DEFAULT_SONNET_MODEL: runtimeModels.sonnet,
     ANTHROPIC_DEFAULT_OPUS_MODEL: runtimeModels.opus,

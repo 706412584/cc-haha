@@ -731,6 +731,8 @@ async function* queryLoop(
               ),
               queryTracking,
               effortValue: appState.effortValue,
+              effortValueOverridesEnv:
+                toolUseContext.options.effortValueOverridesEnv,
               advisorModel: appState.advisorModel,
               skipCacheWrite,
               agentId: toolUseContext.agentId,

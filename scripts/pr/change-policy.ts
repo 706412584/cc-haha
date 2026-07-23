@@ -118,6 +118,8 @@ const chatContractPrefixes = [
 const persistencePrefixes = [
   'src/server/services/persistentStorageMigrations',
   'src/server/__tests__/persistence-upgrade',
+  'src/server/services/desktopUiPreferencesService',
+  'src/server/__tests__/desktop-ui-preferences',
   'desktop/src/lib/persistenceMigrations',
   'scripts/quality-gate/persistence-upgrade',
 ]

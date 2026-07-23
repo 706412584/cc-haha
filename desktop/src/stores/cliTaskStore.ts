@@ -39,6 +39,32 @@ type CLITaskStore = {
   toggleExpanded: () => void
 }
 
+type InFlightTaskRequest = {
+  generation: number
+  promise: Promise<{ tasks: CLITask[] }>
+}
+
+const inFlightTaskRequests = new Map<string, InFlightTaskRequest>()
+let trackingGeneration = 0
+
+function getTasksForSession(
+  sessionId: string,
+  generation: number,
+): Promise<{ tasks: CLITask[] }> {
+  const pending = inFlightTaskRequests.get(sessionId)
+  if (pending?.generation === generation) return pending.promise
+
+  const promise = cliTasksApi.getTasksForList(sessionId)
+  const request = { generation, promise }
+  inFlightTaskRequests.set(sessionId, request)
+  void promise.finally(() => {
+    if (inFlightTaskRequests.get(sessionId) === request) {
+      inFlightTaskRequests.delete(sessionId)
+    }
+  }).catch(() => {})
+  return promise
+}
+
 function buildCompletedTaskKey(tasks: CLITask[]): string | null {
   if (tasks.length === 0 || tasks.some((task) => task.status !== 'completed')) return null
 
@@ -79,32 +105,6 @@ function mapTodosToTasks(todos: TodoItem[], sessionId: string | null): CLITask[]
   }))
 }
 
-type InFlightTaskRequest = {
-  generation: number
-  promise: Promise<{ tasks: CLITask[] }>
-}
-
-const inFlightTaskRequests = new Map<string, InFlightTaskRequest>()
-let trackingGeneration = 0
-
-function getTasksForSession(
-  sessionId: string,
-  generation: number,
-): Promise<{ tasks: CLITask[] }> {
-  const pending = inFlightTaskRequests.get(sessionId)
-  if (pending?.generation === generation) return pending.promise
-
-  const promise = cliTasksApi.getTasksForList(sessionId)
-  const request = { generation, promise }
-  inFlightTaskRequests.set(sessionId, request)
-  void promise.finally(() => {
-    if (inFlightTaskRequests.get(sessionId) === request) {
-      inFlightTaskRequests.delete(sessionId)
-    }
-  }).catch(() => {})
-  return promise
-}
-
 export const useCLITaskStore = create<CLITaskStore>((set, get) => ({
   sessionId: null,
   tasks: [],
@@ -130,7 +130,6 @@ export const useCLITaskStore = create<CLITaskStore>((set, get) => ({
 
     try {
       const { tasks } = await getTasksForSession(sessionId, generation)
-      // Only update if this response belongs to the current tracking cycle.
       if (
         trackingGeneration === generation &&
         get().sessionId === sessionId &&
@@ -142,14 +141,7 @@ export const useCLITaskStore = create<CLITaskStore>((set, get) => ({
         }))
       }
     } catch {
-      // No tasks for this session — that's fine
-      if (
-        trackingGeneration === generation &&
-        get().sessionId === sessionId &&
-        !get().resetting
-      ) {
-        set({ tasks: [], completedAndDismissed: false, dismissedCompletionKey: null, expanded: false })
-      }
+      // Preserve the last known task state across transient polling failures.
     }
   },
 
@@ -170,7 +162,7 @@ export const useCLITaskStore = create<CLITaskStore>((set, get) => ({
         }))
       }
     } catch {
-      // ignore
+      // Preserve the last known task state across transient polling failures.
     }
   },
 

@@ -3,13 +3,19 @@ export const MODEL_CONTEXT_WINDOW_MIN = 16_000
 export const MODEL_CONTEXT_WINDOW_MAX = 10_000_000
 
 const DIRECT_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+  'claude-fable-5': 1_000_000,
+  'claude-opus-4-8': 1_000_000,
   'claude-opus-4-7': 1_000_000,
+  'claude-sonnet-5': 1_000_000,
   'claude-sonnet-4-6': 200_000,
   'claude-haiku-4-5': 200_000,
   'deepseek-v4-pro': 1_000_000,
   'deepseek-v4-flash': 1_000_000,
   'deepseek-chat': 1_000_000,
   'deepseek-reasoner': 1_000_000,
+  'k3': 262_144,
+  'kimi-for-coding': 262_144,
+  'kimi-for-coding-highspeed': 262_144,
   'kimi-k2.7-code': 262_144,
   'kimi-k2.7-code-highspeed': 262_144,
   'kimi-k2.6': 262_144,
@@ -34,6 +40,9 @@ const DIRECT_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
 }
 
 const PATTERN_MODEL_CONTEXT_WINDOWS: Array<[RegExp, number]> = [
+  [/^anthropic\/claude-fable-5\b/i, 1_000_000],
+  [/^anthropic\/claude-opus-4\.8\b/i, 1_000_000],
+  [/^anthropic\/claude-sonnet-5\b/i, 1_000_000],
   [/^anthropic\/claude-opus-4\.7\b/i, 1_000_000],
   [/^anthropic\/claude-sonnet-4\.6\b/i, 200_000],
   [/^anthropic\/claude-haiku-4\.5\b/i, 200_000],

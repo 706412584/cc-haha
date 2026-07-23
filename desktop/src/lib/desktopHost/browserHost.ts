@@ -103,6 +103,50 @@ export const browserHost: DesktopHost = {
       unsupported('Opening trace windows')
     },
   },
+  pets: {
+    async list() {
+      unsupported('Custom pets')
+    },
+    async createFromImage() {
+      unsupported('Creating custom pets')
+    },
+    async createFromAtlas() {
+      unsupported('Creating custom pets')
+    },
+    async openFolder() {
+      unsupported('Opening the custom pets folder')
+    },
+    async show() {
+      unsupported('Showing the companion pet')
+    },
+    async hide() {
+      unsupported('Hiding the companion pet')
+    },
+    async showContextMenu() {
+      unsupported('Showing the companion pet context menu')
+    },
+    async dragWindow() {
+      unsupported('Dragging the companion pet window')
+    },
+    async setIgnoreMouseEvents() {
+      unsupported('Changing companion pet mouse passthrough')
+    },
+    async setInteractiveRegions() {
+      unsupported('Changing companion pet interaction regions')
+    },
+    async focusMainWindow() {
+      unsupported('Focusing the main desktop window')
+    },
+    async focusSession() {
+      unsupported('Focusing a pet session')
+    },
+    async onNavigateSession() {
+      return noopUnlisten
+    },
+    async onVisibilityChanged() {
+      return noopUnlisten
+    },
+  },
   dialogs: {
     async open() {
       unsupported('Native file dialogs')

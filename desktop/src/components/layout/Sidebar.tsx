@@ -13,6 +13,7 @@ import { useChatStore } from '../../stores/chatStore'
 import { useOpenTargetStore } from '../../stores/openTargetStore'
 import { desktopUiPreferencesApi, type SidebarProjectPreferences } from '../../api/desktopUiPreferences'
 import { getDesktopHost } from '../../lib/desktopHost'
+import { useSettingsStore } from '../../stores/settingsStore'
 import { publicAssetPath } from '../../lib/publicAsset'
 import {
   type SidebarProjectOrganization,
@@ -80,6 +81,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
   const error = useSessionStore((s) => s.error)
   const indexStatus = useSessionStore((s) => s.indexStatus)
   const fetchSessions = useSessionStore((s) => s.fetchSessions)
+  const syncIndexes = useSessionStore((s) => s.syncIndexes)
   const deleteSession = useSessionStore((s) => s.deleteSession)
   const deleteSessions = useSessionStore((s) => s.deleteSessions)
   const isBatchMode = useSessionStore((s) => s.isBatchMode)
@@ -91,6 +93,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
   const deselectSessions = useSessionStore((s) => s.deselectSessions)
   const renameSession = useSessionStore((s) => s.renameSession)
   const addToast = useUIStore((s) => s.addToast)
+  const sessionContentSearchEnabled = useSettingsStore((s) => s.sessionContentSearchEnabled)
   const sidebarOpen = useUIStore((s) => s.sidebarOpen)
   const toggleSidebar = useUIStore((s) => s.toggleSidebar)
   const openModal = useUIStore((s) => s.openModal)
@@ -128,7 +131,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
   const sidebarPreferenceRevisionRef = useRef(0)
   const sessionScrollAreaRef = useRef<HTMLDivElement>(null)
   const pendingSessionScrollAnchorRef = useRef<SessionScrollAnchor | null>(null)
-  const refreshSessionsNow = useSessionListAutoRefresh(fetchSessions)
+  useSessionListAutoRefresh(fetchSessions)
 
   useEffect(() => useSessionStore.subscribe((nextState, previousState) => {
     if (nextState.sessions === previousState.sessions) return
@@ -1012,7 +1015,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
             className="sidebar-section sidebar-section--visible relative z-20 flex-none px-3 pb-2"
             style={{ overflow: 'visible' }}
           >
-            {!isMobile ? (
+            {!isMobile && sessionContentSearchEnabled ? (
               <button
                 type="button"
                 onClick={() => openModal('globalSearch')}
@@ -1043,7 +1046,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
               </div>
               <button
                 type="button"
-                onClick={() => void refreshSessionsNow()}
+                onClick={() => void syncIndexes()}
                 disabled={showInitialLoading}
                 className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-[12px] border border-[var(--color-sidebar-search-border)] bg-[var(--color-sidebar-search-bg)] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-sidebar-item-hover)] hover:text-[var(--color-text-primary)] disabled:cursor-default disabled:opacity-65 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
                 aria-label={t('sidebar.refreshSessions')}
@@ -1661,7 +1664,9 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
         className="hidden"
         onChange={handleImportFileChange}
       />
-      <GlobalSearchModal open={activeModal === 'globalSearch'} onClose={closeModal} />
+      {sessionContentSearchEnabled ? (
+        <GlobalSearchModal open={activeModal === 'globalSearch'} onClose={closeModal} />
+      ) : null}
     </aside>
   )
 }

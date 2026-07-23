@@ -80,6 +80,7 @@ type SettingsStore = {
   outputStyleError: string | null
   skipWebFetchPreflight: boolean
   desktopNotificationsEnabled: boolean
+  sessionContentSearchEnabled: boolean
   desktopTerminal: DesktopTerminalSettings
   workspaceLsp: WorkspaceLspSettings
   webSearch: WebSearchSettings
@@ -115,6 +116,7 @@ type SettingsStore = {
   setOutputStyle: (outputStyle: string, workDir?: string | null) => Promise<void>
   setSkipWebFetchPreflight: (enabled: boolean) => Promise<void>
   setDesktopNotificationsEnabled: (enabled: boolean) => Promise<void>
+  setSessionContentSearchEnabled: (enabled: boolean) => Promise<void>
   setDesktopTerminal: (settings: DesktopTerminalSettings) => Promise<void>
   setWorkspaceLsp: (settings: WorkspaceLspSettings) => Promise<void>
   setWebSearch: (settings: WebSearchSettings) => Promise<void>
@@ -210,6 +212,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   outputStyleError: null,
   skipWebFetchPreflight: true,
   desktopNotificationsEnabled: false,
+  sessionContentSearchEnabled: true,
   desktopTerminal: DEFAULT_DESKTOP_TERMINAL_SETTINGS,
   workspaceLsp: {},
   webSearch: { mode: 'auto', tavilyApiKey: '', braveApiKey: '' },
@@ -269,6 +272,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         outputStyle: normalizeOutputStyle(userSettings.outputStyle),
         skipWebFetchPreflight: userSettings.skipWebFetchPreflight !== false,
         desktopNotificationsEnabled: userSettings.desktopNotificationsEnabled === true,
+        sessionContentSearchEnabled: userSettings.sessionContentSearchEnabled !== false,
         desktopTerminal: normalizeDesktopTerminalSettings(userSettings.desktopTerminal),
         workspaceLsp: normalizeWorkspaceLspSettings(userSettings.workspaceLsp),
         webSearch: normalizeWebSearchSettings(userSettings.webSearch),
@@ -490,6 +494,20 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       if (get().desktopNotificationsEnabled === enabled) {
         set({ desktopNotificationsEnabled: prev })
       }
+    }
+  },
+
+  setSessionContentSearchEnabled: async (enabled) => {
+    const previous = get().sessionContentSearchEnabled
+    set({ sessionContentSearchEnabled: enabled })
+    try {
+      await settingsApi.updateUser({ sessionContentSearchEnabled: enabled })
+      if (!enabled && useUIStore.getState().activeModal === 'globalSearch') {
+        useUIStore.getState().closeModal()
+      }
+    } catch (error) {
+      set({ sessionContentSearchEnabled: previous })
+      throw error
     }
   },
 

@@ -88,6 +88,6 @@ function generateModelSection(): string {
 ${lines.join('\n')}`
   } catch {
     return `## Model
-- model - Override the default model (sonnet, opus, haiku, best, or full model ID)`
+- model - Override the default model (fable, sonnet, opus, haiku, best, or full model ID)`
   }
 }

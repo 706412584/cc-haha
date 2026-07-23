@@ -30,6 +30,27 @@ describe('desktop host contract', () => {
       'desktop app runtime',
     )
     await expect(browserHost.updates.check()).resolves.toBeNull()
+    await expect(browserHost.pets.list()).rejects.toThrow('desktop app runtime')
+    await expect(browserHost.pets.createFromImage({
+      slug: 'moon-cat',
+      displayName: 'Moon Cat',
+      description: 'A quiet companion.',
+    })).rejects.toThrow('desktop app runtime')
+    await expect(browserHost.pets.createFromAtlas({
+      slug: 'moon-cat',
+      displayName: 'Moon Cat',
+      description: 'A quiet companion.',
+    })).rejects.toThrow('desktop app runtime')
+    await expect(browserHost.pets.openFolder()).rejects.toThrow('desktop app runtime')
+    await expect(browserHost.pets.show()).rejects.toThrow('desktop app runtime')
+    await expect(browserHost.pets.hide()).rejects.toThrow('desktop app runtime')
+    await expect(browserHost.pets.showContextMenu('Close pet')).rejects.toThrow('desktop app runtime')
+    await expect(browserHost.pets.dragWindow({ phase: 'start', x: 100, y: 100 })).rejects.toThrow('desktop app runtime')
+    await expect(browserHost.pets.setIgnoreMouseEvents(true)).rejects.toThrow('desktop app runtime')
+    await expect(browserHost.pets.setInteractiveRegions([{ x: 0, y: 0, width: 10, height: 10 }])).rejects.toThrow('desktop app runtime')
+    await expect(browserHost.pets.focusMainWindow()).rejects.toThrow('desktop app runtime')
+    await expect(browserHost.pets.focusSession('session-1')).rejects.toThrow('desktop app runtime')
+    await expect(browserHost.pets.onNavigateSession(vi.fn())).resolves.toEqual(expect.any(Function))
   })
 
   it('detects the browser fallback when native host globals are absent', () => {

@@ -114,6 +114,16 @@ describe('evaluateChangePolicy', () => {
     expect(result.checks.policy).toBe(true)
   })
 
+  test('routes desktop UI preference schema changes to the persistence check', () => {
+    const result = evaluateChangePolicy([
+      'src/server/services/desktopUiPreferencesService.ts',
+      'src/server/__tests__/desktop-ui-preferences.test.ts',
+    ])
+
+    expect(result.checks.server).toBe(true)
+    expect(result.checks.persistence).toBe(true)
+  })
+
   test('keeps quality ownership and contributor contracts on the policy lane', () => {
     const result = evaluateChangePolicy([
       '.github/CODEOWNERS',

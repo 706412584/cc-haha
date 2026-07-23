@@ -29,9 +29,10 @@ export type SubagentRunResponse = {
 }
 
 export const subagentsApi = {
-  getRunByTool(sessionId: string, toolUseId: string) {
+  getRunByTool(sessionId: string, toolUseId: string, taskId?: string) {
+    const query = taskId ? `?taskId=${encodeURIComponent(taskId)}` : ''
     return api.get<SubagentRunResponse>(
-      `/api/sessions/${encodeURIComponent(sessionId)}/subagents/by-tool/${encodeURIComponent(toolUseId)}`,
+      `/api/sessions/${encodeURIComponent(sessionId)}/subagents/by-tool/${encodeURIComponent(toolUseId)}${query}`,
     )
   },
 }

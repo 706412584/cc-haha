@@ -1,4 +1,4 @@
-import { open, type FileHandle } from 'node:fs/promises'
+import { open, stat, type FileHandle } from 'node:fs/promises'
 import {
   getCommandMetadataDisplayText,
   shouldHideCommandMetadataContent,
@@ -25,6 +25,7 @@ import {
 
 export const SEARCH_CONTENT_PARSER_VERSION = 1
 export const SEARCH_CONTENT_MAX_JSONL_LINE_BYTES = 16 * 1024 * 1024
+export const SEARCH_CONTENT_MAX_SOURCE_BYTES = 256 * 1024 * 1024
 export const SEARCH_CONTENT_LINE_TOO_LARGE =
   'SEARCH_CONTENT_JSONL_LINE_TOO_LARGE' as const
 
@@ -85,6 +86,8 @@ export type SearchContentProjectorOptions = {
   signal?: AbortSignal
   verifyFingerprint?: typeof verifySourceFingerprint
   maxJsonlLineBytes?: number
+  maxSourceBytes?: number
+  statSource?: typeof stat
   onBatchCommitted?: () => boolean | Promise<boolean>
   yieldToForeground?: () => Promise<void>
   batchDocumentLimit?: number
@@ -320,6 +323,12 @@ export function createSearchContentProjector(
   const maxJsonlLineBytes = Number.isFinite(configuredLineLimit)
     ? Math.max(1, Math.trunc(configuredLineLimit))
     : SEARCH_CONTENT_MAX_JSONL_LINE_BYTES
+  const configuredSourceLimit = options.maxSourceBytes ??
+    SEARCH_CONTENT_MAX_SOURCE_BYTES
+  const maxSourceBytes = Number.isFinite(configuredSourceLimit)
+    ? Math.max(1, Math.trunc(configuredSourceLimit))
+    : SEARCH_CONTENT_MAX_SOURCE_BYTES
+  const statSource = options.statSource ?? stat
   const batchOptions = (): SearchContentBatchOptions => ({
     batchDocumentLimit: options.batchDocumentLimit,
     batchByteLimit: options.batchByteLimit,
@@ -404,6 +413,10 @@ export function createSearchContentProjector(
 
       let handle: FileHandle | undefined
       try {
+        const sourceSnapshot = await statSource(candidate.path)
+        if (sourceSnapshot.size > maxSourceBytes) {
+          return { kind: 'retry', reason: 'source-too-large' }
+        }
         const readSnapshot = await captureSourceFingerprint({
           path: candidate.path,
           indexedBytes: start,

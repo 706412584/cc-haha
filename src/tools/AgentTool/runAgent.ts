@@ -86,6 +86,19 @@ import {
 } from './agentStallDetector.js'
 import { type AgentDefinition, isBuiltInAgent } from './loadAgentsDir.js'
 
+export function resolveSubagentThinkingConfig(
+  parentThinkingConfig: ToolUseContext['options']['thinkingConfig'],
+): ToolUseContext['options']['thinkingConfig'] {
+  return parentThinkingConfig
+}
+
+export function resolveSubagentEffortValue(
+  agentEffort: AgentDefinition['effort'],
+  parentEffort: AgentDefinition['effort'],
+): AgentDefinition['effort'] {
+  return agentEffort ?? parentEffort
+}
+
 /**
  * Initialize agent-specific MCP servers
  * Agents can define their own MCP servers in their frontmatter that are additive
@@ -312,10 +325,10 @@ export async function* runAgent({
    * omitted, createSubagentContext clones the parent's state. */
   contentReplacementState?: ContentReplacementState
   /** When true, use availableTools directly without filtering through
-   * resolveAgentTools(). Also inherits the parent's thinkingConfig and
-   * isNonInteractiveSession instead of overriding them. Used by the fork
-   * subagent path to produce byte-identical API request prefixes for
-   * prompt cache hits. */
+   * resolveAgentTools(). Also inherits the parent's isNonInteractiveSession
+   * instead of overriding it. All subagents inherit thinkingConfig; fork
+   * children additionally need exact tools to produce byte-identical API
+   * request prefixes for prompt cache hits. */
   useExactTools?: boolean
   /** Worktree path if the agent was spawned with isolation: "worktree".
    * Persisted to metadata so resume can restore the correct cwd. */
@@ -490,10 +503,10 @@ export async function* runAgent({
     }
 
     // Override effort level if agent defines one
-    const effortValue =
-      agentDefinition.effort !== undefined
-        ? agentDefinition.effort
-        : state.effortValue
+    const effortValue = resolveSubagentEffortValue(
+      agentDefinition.effort,
+      state.effortValue,
+    )
 
     if (
       toolPermissionContext === state.toolPermissionContext &&
@@ -687,12 +700,18 @@ export async function* runAgent({
     debug: toolUseContext.options.debug,
     verbose: toolUseContext.options.verbose,
     mainLoopModel: resolvedAgentModel,
-    // For fork children (useExactTools), inherit thinking config to match the
-    // parent's API request prefix for prompt cache hits. For regular
-    // sub-agents, disable thinking to control output token costs.
-    thinkingConfig: useExactTools
-      ? toolUseContext.options.thinkingConfig
-      : { type: 'disabled' as const },
+    // Subagents inherit the parent session's thinking mode. Agent-specific
+    // effort is applied independently through agentGetAppState above. Keeping
+    // thinking in the request context (instead of process.env) also lets
+    // parallel agents use distinct effort values without sharing mutable
+    // process state. Fork children still receive the same object so their
+    // prompt-cache prefix remains byte-identical to the parent.
+    thinkingConfig: resolveSubagentThinkingConfig(
+      toolUseContext.options.thinkingConfig,
+    ),
+    effortValueOverridesEnv:
+      agentDefinition.effort !== undefined ||
+      toolUseContext.options.effortValueOverridesEnv === true,
     mcpClients: mergedMcpClients,
     mcpResources: toolUseContext.options.mcpResources,
     agentDefinitions: toolUseContext.options.agentDefinitions,
@@ -748,6 +767,7 @@ export async function* runAgent({
   )
   void writeAgentMetadata(agentId, {
     agentType: agentDefinition.agentType,
+    ...(model && { model }),
     ...(worktreePath && { worktreePath }),
     ...(description && { description }),
   }).catch(_err => logForDebugging(`Failed to write agent metadata: ${_err}`))

@@ -49,6 +49,7 @@ export type SearchContentCoordinatorStatus = {
 export interface SearchContentCoordinator {
   start(): Promise<void>
   stop(): Promise<void>
+  sync(): Promise<SearchContentCoordinatorStatus>
   search(
     query: string,
     options?: SearchContentQueryOptions & { signal?: AbortSignal },
@@ -93,6 +94,7 @@ const EMPTY_STATUS: SearchContentCoordinatorStatus = {
 
 const SEARCH_CONTENT_OWNER_MISSING = 'SEARCH_CONTENT_OWNER_MISSING'
 const SEARCH_CONTENT_PROJECTS_ROOT_MISSING = 'SEARCH_CONTENT_PROJECTS_ROOT_MISSING'
+const SEARCH_CONTENT_SOURCE_TOO_LARGE = 'SEARCH_CONTENT_SOURCE_TOO_LARGE'
 const SEARCH_CONTENT_STORAGE_LIMIT = 'SEARCH_CONTENT_STORAGE_LIMIT'
 const SEARCH_CONTENT_STORAGE_RESET_FAILED = 'SEARCH_CONTENT_STORAGE_RESET_FAILED'
 
@@ -506,7 +508,9 @@ export function createSearchContentCoordinator(
             }
             sweepFailures.set(resolve(candidate.path), result.reason === 'changed-during-read'
               ? 'SEARCH_CONTENT_SOURCE_CHANGED'
-              : 'SEARCH_CONTENT_TRANSIENT_IO')
+              : result.reason === 'source-too-large'
+                ? SEARCH_CONTENT_SOURCE_TOO_LARGE
+                : 'SEARCH_CONTENT_TRANSIENT_IO')
           }
           if (!refreshStorage()) throw new SearchContentStorageLimitReachedError()
         }
@@ -864,6 +868,12 @@ export function createSearchContentCoordinator(
         cancelCorruptionRecovery: true,
         resetStatus: true,
       })
+    },
+    async sync() {
+      const wasStarted = started
+      await coordinator.start()
+      if (wasStarted) watcher?.queueFullSweep()
+      return coordinator.getStatus()
     },
     search(query, options = {}) {
       if (

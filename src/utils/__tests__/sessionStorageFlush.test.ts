@@ -7,6 +7,7 @@ import {
   enqueueSessionEntryAfterPendingForTesting,
   flushSessionStorage,
   getTranscriptPathForSession,
+  loadTranscriptFile,
   recordTranscript,
   resetProjectForTesting,
 } from '../sessionStorage.js'
@@ -18,6 +19,7 @@ const originalConfigDir = process.env.CLAUDE_CONFIG_DIR
 const originalTranscriptEntrypoint = process.env.CC_HAHA_TRANSCRIPT_ENTRYPOINT
 const originalEntrypoint = process.env.CLAUDE_CODE_ENTRYPOINT
 const originalTestPersistence = process.env.TEST_ENABLE_SESSION_PERSISTENCE
+const originalUserType = process.env.USER_TYPE
 
 async function createTmpDir(): Promise<string> {
   const dir = path.join(
@@ -35,6 +37,7 @@ describe('sessionStorage flush', () => {
     tmpDir = await createTmpDir()
     process.env.CLAUDE_CONFIG_DIR = tmpDir
     process.env.TEST_ENABLE_SESSION_PERSISTENCE = '1'
+    process.env.USER_TYPE = 'external'
     resetProjectForTesting()
   })
 
@@ -59,6 +62,11 @@ describe('sessionStorage flush', () => {
       delete process.env.TEST_ENABLE_SESSION_PERSISTENCE
     } else {
       process.env.TEST_ENABLE_SESSION_PERSISTENCE = originalTestPersistence
+    }
+    if (originalUserType === undefined) {
+      delete process.env.USER_TYPE
+    } else {
+      process.env.USER_TYPE = originalUserType
     }
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
   })
@@ -86,6 +94,133 @@ describe('sessionStorage flush', () => {
 
     expect(userEntry?.entrypoint).toBe('claude-desktop')
     expect(process.env.CLAUDE_CODE_ENTRYPOINT).toBe('sdk-cli')
+  })
+
+  it('persists explicit desktop file attachments so resumed sessions retain their content', async () => {
+    const sessionId = '44444444-4444-4444-8444-444444444444'
+    const attachmentUuid = '55555555-5555-4555-8555-555555555555'
+    switchSession(sessionId as SessionId)
+    process.env.CLAUDE_CODE_ENTRYPOINT = 'sdk-cli'
+    process.env.CC_HAHA_TRANSCRIPT_ENTRYPOINT = 'claude-desktop'
+    resetProjectForTesting()
+
+    await recordTranscript([
+      {
+        type: 'user',
+        uuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        timestamp: '2026-07-21T00:00:00.000Z',
+        message: { role: 'user', content: '@"/workspace/README.md" summarize it' },
+      } as never,
+      {
+        type: 'attachment',
+        uuid: attachmentUuid,
+        timestamp: '2026-07-21T00:00:01.000Z',
+        attachment: {
+          type: 'file',
+          filename: '/workspace/README.md',
+          displayPath: 'README.md',
+          content: {
+            type: 'text',
+            file: {
+              filePath: '/workspace/README.md',
+              content: 'desktop attachment resume canary',
+              numLines: 1,
+              startLine: 1,
+              totalLines: 1,
+            },
+          },
+        },
+      },
+    ] as never[])
+    await flushSessionStorage()
+
+    const transcriptPath = getTranscriptPathForSession(sessionId)
+    const transcript = await fs.readFile(transcriptPath, 'utf-8')
+    expect(transcript).toContain('desktop attachment resume canary')
+
+    const restored = await loadTranscriptFile(transcriptPath)
+    expect(restored.messages.get(attachmentUuid as never)).toMatchObject({
+      type: 'attachment',
+      attachment: {
+        type: 'file',
+        content: {
+          type: 'text',
+          file: { content: 'desktop attachment resume canary' },
+        },
+      },
+    })
+  })
+
+  it('keeps desktop internal attachments and sdk-cli file attachments out of external transcripts', async () => {
+    const desktopSessionId = '66666666-6666-4666-8666-666666666666'
+    switchSession(desktopSessionId as SessionId)
+    process.env.CC_HAHA_TRANSCRIPT_ENTRYPOINT = 'claude-desktop'
+    resetProjectForTesting()
+
+    await recordTranscript([
+      {
+        type: 'user',
+        uuid: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        timestamp: '2026-07-21T00:00:00.000Z',
+        message: { role: 'user', content: 'desktop internal attachment' },
+      } as never,
+      {
+        type: 'attachment',
+        uuid: '77777777-7777-4777-8777-777777777777',
+        timestamp: '2026-07-21T00:00:01.000Z',
+        attachment: {
+          type: 'todo_reminder',
+          content: [],
+          itemCount: 0,
+        },
+      },
+    ] as never[])
+    await flushSessionStorage()
+    const desktopTranscript = await fs.readFile(
+      getTranscriptPathForSession(desktopSessionId),
+      'utf-8',
+    )
+    expect(desktopTranscript).not.toContain('todo_reminder')
+
+    const cliSessionId = '88888888-8888-4888-8888-888888888888'
+    switchSession(cliSessionId as SessionId)
+    process.env.CC_HAHA_TRANSCRIPT_ENTRYPOINT = 'sdk-cli'
+    resetProjectForTesting()
+
+    await recordTranscript([
+      {
+        type: 'user',
+        uuid: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+        timestamp: '2026-07-21T00:00:00.000Z',
+        message: { role: 'user', content: '@"/workspace/private.md" summarize it' },
+      } as never,
+      {
+        type: 'attachment',
+        uuid: '99999999-9999-4999-8999-999999999999',
+        timestamp: '2026-07-21T00:00:01.000Z',
+        attachment: {
+          type: 'file',
+          filename: '/workspace/private.md',
+          displayPath: 'private.md',
+          content: {
+            type: 'text',
+            file: {
+              filePath: '/workspace/private.md',
+              content: 'must remain filtered outside desktop',
+              numLines: 1,
+              startLine: 1,
+              totalLines: 1,
+            },
+          },
+        },
+      },
+    ] as never[])
+    await flushSessionStorage()
+    const cliTranscript = await fs.readFile(
+      getTranscriptPathForSession(cliSessionId),
+      'utf-8',
+    )
+    expect(cliTranscript).not.toContain('must remain filtered outside desktop')
   })
 
   it('drains writes that are queued by pending operations during flush', async () => {

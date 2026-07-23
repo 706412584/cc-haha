@@ -11,6 +11,7 @@ vi.mock('../api/subagents', () => ({
 }))
 
 import { subagentsApi } from '../api/subagents'
+import { useChatStore } from '../stores/chatStore'
 import { SubagentRunPage } from './SubagentRunPage'
 
 const TRANSCRIPT_TIMESTAMP = '2026-07-03T10:20:11.000Z'
@@ -57,6 +58,7 @@ function deferred<T>() {
 describe('SubagentRunPage', () => {
   beforeEach(() => {
     useSettingsStore.setState({ locale: 'en' })
+    useChatStore.setState({ sessions: {} })
   })
 
   afterEach(() => {
@@ -70,9 +72,10 @@ describe('SubagentRunPage', () => {
       outputFile: '/tmp/result.md',
     }))
 
-    render(<SubagentRunPage sourceSessionId="session-1" toolUseId="tool-1" title="Kuhn" />)
+    render(<SubagentRunPage sourceSessionId="session-1" toolUseId="tool-1" taskId="agent-1" title="Kuhn" />)
 
     expect(await screen.findByText('Kuhn')).toBeInTheDocument()
+    expect(subagentsApi.getRunByTool).toHaveBeenCalledWith('session-1', 'tool-1', 'agent-1')
     expect(screen.getByText('Agent: abc123')).toBeInTheDocument()
     expect(screen.getAllByText('Explore repo').length).toBeGreaterThan(0)
     expect(screen.getByText('Output: /tmp/result.md')).toBeInTheDocument()
@@ -134,6 +137,94 @@ describe('SubagentRunPage', () => {
     await waitFor(() => expect(subagentsApi.getRunByTool).toHaveBeenCalledTimes(2), { timeout: 2500 })
     expect(await screen.findByText('Completed')).toBeInTheDocument()
     expect(screen.getByTestId('subagent-conversation')).toHaveTextContent('Streaming review complete')
+  })
+
+  it('shows newly persisted tool activity before a running SubAgent completes', async () => {
+    vi.mocked(subagentsApi.getRunByTool)
+      .mockResolvedValueOnce(subagentRun({
+        status: 'running',
+        messages: [],
+        prompt: 'Inspect live tools',
+      }))
+      .mockResolvedValueOnce(subagentRun({
+        status: 'running',
+        prompt: 'Inspect live tools',
+        messages: [
+          {
+            id: 'child-tool-use',
+            type: 'tool_use',
+            content: [{
+              type: 'tool_use',
+              id: 'child-read-1',
+              name: 'Read',
+              input: { file_path: '/tmp/example.ts' },
+            }],
+            timestamp: TRANSCRIPT_TIMESTAMP,
+          },
+          {
+            id: 'child-tool-result',
+            type: 'tool_result',
+            content: [{
+              type: 'tool_result',
+              tool_use_id: 'child-read-1',
+              content: 'export const ready = true',
+            }],
+            timestamp: TRANSCRIPT_TIMESTAMP,
+          },
+        ],
+      }))
+
+    render(
+      <SubagentRunPage
+        sourceSessionId="session-1"
+        toolUseId="tool-1"
+        taskId="agent-1"
+        title="SubAgent"
+      />,
+    )
+
+    expect(await screen.findByText('Running')).toBeInTheDocument()
+    await waitFor(() => expect(subagentsApi.getRunByTool).toHaveBeenCalledTimes(2), { timeout: 2500 })
+
+    expect(screen.getByText('Running')).toBeInTheDocument()
+    expect(screen.getByTestId('subagent-conversation')).toHaveTextContent('Read')
+    expect(screen.getByTestId('subagent-conversation')).toHaveTextContent('example.ts')
+    expect(screen.getByTestId('subagent-conversation')).toHaveTextContent('export const ready = true')
+  })
+
+  it('discovers a live task id that arrives after the detail tab opens', async () => {
+    vi.mocked(subagentsApi.getRunByTool).mockResolvedValue(subagentRun({
+      status: 'running',
+      messages: [],
+      prompt: 'Wait for task metadata',
+    }))
+
+    render(<SubagentRunPage sourceSessionId="session-1" toolUseId="tool-1" title="SubAgent" />)
+
+    expect(await screen.findByText('Running')).toBeInTheDocument()
+    expect(subagentsApi.getRunByTool).toHaveBeenCalledWith('session-1', 'tool-1', undefined)
+
+    act(() => {
+      useChatStore.setState({
+        sessions: {
+          'session-1': {
+            backgroundAgentTasks: {
+              'agent-1': {
+                taskId: 'agent-1',
+                toolUseId: 'tool-1',
+                status: 'running',
+                startedAt: 1,
+                updatedAt: 1,
+              },
+            },
+          } as never,
+        },
+      })
+    })
+
+    await waitFor(() => {
+      expect(subagentsApi.getRunByTool).toHaveBeenCalledWith('session-1', 'tool-1', 'agent-1')
+    })
   })
 
   it('keeps the tab open on API errors', async () => {

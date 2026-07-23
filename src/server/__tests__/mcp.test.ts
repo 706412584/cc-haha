@@ -7,6 +7,7 @@ import * as mcpClient from '../../services/mcp/client.js'
 import * as mcpConfig from '../../services/mcp/config.js'
 import { _setGlobalConfigCacheForTesting, getProjectPathForConfig } from '../../utils/config.js'
 import { getGlobalClaudeFile } from '../../utils/env.js'
+import { normalizePathForConfigKey } from '../../utils/path.js'
 import * as mcpHostPreflight from '../services/mcpHostPreflight.js'
 import { handleMcpApi } from '../api/mcp.js'
 import { conversationService } from '../services/conversationService.js'
@@ -110,6 +111,8 @@ describe('MCP API', () => {
     const previousOriginalCwd = getOriginalCwd()
     const projectA = path.join(tmpDir, 'project-a')
     const projectB = path.join(tmpDir, 'project-b')
+    const projectAKey = normalizePathForConfigKey(projectA)
+    const projectBKey = normalizePathForConfigKey(projectB)
     await fs.mkdir(projectA, { recursive: true })
     await fs.mkdir(projectB, { recursive: true })
 
@@ -144,15 +147,13 @@ describe('MCP API', () => {
         await fs.readFile(path.join(tmpDir, '.claude.json'), 'utf8'),
       )
 
-      const projectAConfigPath = getProjectPathForConfig(projectA)
-      const projectBConfigPath = getProjectPathForConfig(projectB)
-      expect(rawConfig.projects?.[projectAConfigPath]?.mcpServers?.['scoped-server']).toBeUndefined()
-      expect(rawConfig.projects?.[projectAConfigPath]?.disabledMcpServers ?? []).not.toContain('scoped-server')
-      expect(rawConfig.projects?.[projectBConfigPath]?.mcpServers?.['scoped-server']).toMatchObject({
+      expect(rawConfig.projects?.[projectAKey]?.mcpServers?.['scoped-server']).toBeUndefined()
+      expect(rawConfig.projects?.[projectAKey]?.disabledMcpServers ?? []).not.toContain('scoped-server')
+      expect(rawConfig.projects?.[projectBKey]?.mcpServers?.['scoped-server']).toMatchObject({
         type: 'stdio',
         command: 'node',
       })
-      expect(rawConfig.projects?.[projectBConfigPath]?.disabledMcpServers).toContain('scoped-server')
+      expect(rawConfig.projects?.[projectBKey]?.disabledMcpServers).toContain('scoped-server')
     } finally {
       if (previousNodeEnv === undefined) {
         delete process.env.NODE_ENV
@@ -267,7 +268,7 @@ describe('MCP API', () => {
       expect(projectPathsRes.status).toBe(200)
       const body = await projectPathsRes.json()
 
-      expect(body.projectPaths).toEqual([getProjectPathForConfig(projectB)])
+      expect(body.projectPaths).toEqual([normalizePathForConfigKey(projectB)])
     } finally {
       if (previousNodeEnv === undefined) {
         delete process.env.NODE_ENV

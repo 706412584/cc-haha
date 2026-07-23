@@ -45,6 +45,7 @@ export function ContentRouter() {
         <SubagentRunPage
           sourceSessionId={subagentTab.sourceSessionId}
           toolUseId={subagentTab.subagentToolUseId}
+          taskId={subagentTab.subagentTaskId}
           title={subagentTab.title}
         />
       )

@@ -43,6 +43,44 @@ beforeEach(() => {
 })
 
 describe('ModelSelector', () => {
+  it('keeps the current Claude Official catalog visible when the API returns legacy settings models', async () => {
+    const legacyModels: ModelInfo[] = [
+      { id: 'claude-opus-4-7', name: 'Opus 4.7', description: 'Legacy Opus', context: '1m' },
+      { id: 'claude-sonnet-4-6', name: 'Sonnet 4.6', description: 'Legacy Sonnet', context: '200k' },
+      { id: 'claude-haiku-4-5', name: 'Haiku 4.5', description: 'Legacy Haiku', context: '200k' },
+    ]
+    useHahaOAuthStore.setState({
+      status: {
+        loggedIn: true,
+        expiresAt: null,
+        scopes: [],
+        subscriptionType: 'pro',
+      },
+      fetchStatus: async () => {},
+    })
+    useSettingsStore.setState({
+      locale: 'en',
+      availableModels: legacyModels,
+      currentModel: legacyModels[0],
+      activeProviderName: 'Claude Official',
+    })
+    useProviderStore.setState({
+      providers: [],
+      activeId: null,
+      hasLoadedProviders: true,
+      isLoading: false,
+    })
+
+    render(<ModelSelector runtimeKey="session-claude-legacy" />)
+
+    await clickByRole(/Opus 4\.7/i)
+
+    expect(screen.getByRole('button', { name: /Fable 5/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Opus 4\.8/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Sonnet 5/ })).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: /Opus 4\.7/ }).length).toBeGreaterThan(0)
+  })
+
   it('does not query official OAuth status when mounted', () => {
     const fetchClaudeStatus = vi.fn(async () => {})
     const fetchOpenAIStatus = vi.fn(async () => {})

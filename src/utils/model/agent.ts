@@ -30,7 +30,7 @@ export function getDefaultSubagentModel(): string {
  * Get the effective model string for an agent.
  *
  * For Bedrock, if the parent model uses a cross-region inference prefix (e.g., "eu.", "us."),
- * that prefix is inherited by subagents using alias models (e.g., "sonnet", "haiku", "opus").
+ * that prefix is inherited by subagents using alias models (e.g., "fable", "sonnet", "haiku", "opus").
  * This ensures subagents use the same region as the parent, which is necessary when
  * IAM permissions are scoped to specific cross-region inference profiles.
  */
@@ -40,8 +40,13 @@ export function getAgentModel(
   toolSpecifiedModel?: ModelAlias,
   permissionMode?: PermissionMode,
 ): string {
-  if (process.env.CLAUDE_CODE_SUBAGENT_MODEL) {
-    return parseUserSpecifiedModel(process.env.CLAUDE_CODE_SUBAGENT_MODEL)
+  const configuredSubagentModel =
+    process.env.CLAUDE_CODE_SUBAGENT_MODEL?.trim()
+  if (
+    configuredSubagentModel &&
+    configuredSubagentModel.toLowerCase() !== 'inherit'
+  ) {
+    return parseUserSpecifiedModel(configuredSubagentModel)
   }
 
   // Extract Bedrock region prefix from parent model to inherit for subagents.
@@ -95,7 +100,7 @@ export function getAgentModel(
 }
 
 /**
- * Check if a bare family alias (opus/sonnet/haiku) matches the parent model's
+ * Check if a bare family alias (fable/opus/sonnet/haiku) matches the parent model's
  * tier. When it does, the subagent inherits the parent's exact model string
  * instead of resolving the alias to a provider default.
  *
@@ -110,6 +115,8 @@ export function getAgentModel(
 function aliasMatchesParentTier(alias: string, parentModel: string): boolean {
   const canonical = getCanonicalName(parentModel)
   switch (alias.toLowerCase()) {
+    case 'fable':
+      return canonical.includes('fable')
     case 'opus':
       return canonical.includes('opus')
     case 'sonnet':
@@ -133,6 +140,11 @@ export function getAgentModelDisplay(model: string | undefined): string {
  */
 export function getAgentModelOptions(): AgentModelOption[] {
   return [
+    {
+      value: 'fable',
+      label: 'Fable',
+      description: 'Most capable for complex agent tasks',
+    },
     {
       value: 'sonnet',
       label: 'Sonnet',

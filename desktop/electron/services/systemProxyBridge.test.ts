@@ -1,5 +1,6 @@
 import http from 'node:http'
 import net from 'node:net'
+import { PassThrough, type Duplex } from 'node:stream'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   parseSystemProxyRules,
@@ -9,7 +10,7 @@ import {
 
 const servers: Array<http.Server | net.Server> = []
 const bridges: SystemProxyBridge[] = []
-const sockets = new Set<net.Socket>()
+const sockets = new Set<Duplex>()
 
 afterEach(async () => {
   await Promise.all(bridges.splice(0).map(bridge => bridge.stop()))
@@ -202,6 +203,101 @@ describe('SystemProxyBridge', () => {
       .rejects.toThrow('407 Proxy Authentication Required')
   })
 
+  it('handles a client reset while CONNECT proxy resolution is pending', async () => {
+    let markResolverStarted!: () => void
+    const resolverStarted = new Promise<void>(resolve => { markResolverStarted = resolve })
+    let releaseResolver!: () => void
+    const resolverReleased = new Promise<void>(resolve => { releaseResolver = resolve })
+    const bridge = new SystemProxyBridge(async () => {
+      markResolverStarted()
+      await resolverReleased
+      return 'INVALID'
+    })
+    bridges.push(bridge)
+    const clientSocket = new PassThrough()
+
+    const handling = invokeConnect(bridge, 'foreign.example:443', clientSocket)
+    await resolverStarted
+
+    expect(() => clientSocket.emit(
+      'error',
+      Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+    )).not.toThrow()
+    releaseResolver()
+
+    await expect(handling).resolves.toBeUndefined()
+    expect(clientSocket.destroyed).toBe(true)
+  })
+
+  it('handles a graceful client end while CONNECT proxy resolution is pending', async () => {
+    let markResolverStarted!: () => void
+    const resolverStarted = new Promise<void>(resolve => { markResolverStarted = resolve })
+    let releaseResolver!: () => void
+    const resolverReleased = new Promise<void>(resolve => { releaseResolver = resolve })
+    const bridge = new SystemProxyBridge(async () => {
+      markResolverStarted()
+      await resolverReleased
+      return 'INVALID'
+    })
+    bridges.push(bridge)
+    const clientSocket = new PassThrough()
+    const end = vi.spyOn(clientSocket, 'end')
+
+    const handling = invokeConnect(bridge, 'foreign.example:443', clientSocket)
+    await resolverStarted
+    clientSocket.emit('end')
+    releaseResolver()
+
+    await expect(handling).resolves.toBeUndefined()
+    expect(clientSocket.destroyed).toBe(true)
+    expect(end).not.toHaveBeenCalled()
+  })
+
+  it('does not send a CONNECT failure response after the client is closed', async () => {
+    const bridge = new SystemProxyBridge(async () => 'DIRECT')
+    bridges.push(bridge)
+    const clientSocket = new PassThrough()
+    const end = vi.spyOn(clientSocket, 'end')
+    clientSocket.destroy()
+
+    await expect(invokeConnect(bridge, 'invalid target', clientSocket)).resolves.toBeUndefined()
+
+    expect(end).not.toHaveBeenCalled()
+  })
+
+  it('destroys a CONNECT route that finishes after the client closes', async () => {
+    let markProxyAccepted!: () => void
+    const proxyAccepted = new Promise<void>(resolve => { markProxyAccepted = resolve })
+    let releaseProxyResponse!: () => void
+    const proxyResponseReleased = new Promise<void>(resolve => { releaseProxyResponse = resolve })
+    const tunnelProxy = http.createServer()
+    tunnelProxy.on('connect', (_request, socket) => {
+      sockets.add(socket)
+      socket.once('close', () => sockets.delete(socket))
+      markProxyAccepted()
+      void proxyResponseReleased.then(() => {
+        socket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
+      })
+    })
+    servers.push(tunnelProxy)
+    const proxyPort = await listen(tunnelProxy)
+    const bridge = new SystemProxyBridge(async () => `PROXY 127.0.0.1:${proxyPort}`)
+    bridges.push(bridge)
+    const trackedRoutes = vi.spyOn(bridge as unknown as {
+      trackOutboundSocket(socket: Duplex): void
+    }, 'trackOutboundSocket')
+    const clientSocket = new PassThrough()
+
+    const handling = invokeConnect(bridge, 'foreign.example:443', clientSocket)
+    await proxyAccepted
+    clientSocket.emit('close')
+    releaseProxyResponse()
+
+    await expect(handling).resolves.toBeUndefined()
+    expect(trackedRoutes).toHaveBeenCalledOnce()
+    expect(trackedRoutes.mock.calls[0]?.[0].destroyed).toBe(true)
+  })
+
   it('always bypasses system proxy resolution for loopback targets', async () => {
     const target = http.createServer((_request, response) => response.end('loopback'))
     servers.push(target)
@@ -267,6 +363,20 @@ async function startBridge(
   const bridge = new SystemProxyBridge(resolver)
   bridges.push(bridge)
   return await bridge.start()
+}
+
+function invokeConnect(
+  bridge: SystemProxyBridge,
+  url: string,
+  clientSocket: Duplex,
+): Promise<void> {
+  return (bridge as unknown as {
+    handleConnect(
+      request: http.IncomingMessage,
+      clientSocket: Duplex,
+      head: Buffer,
+    ): Promise<void>
+  }).handleConnect({ url } as http.IncomingMessage, clientSocket, Buffer.alloc(0))
 }
 
 async function createProxyServer(label: string): Promise<number> {

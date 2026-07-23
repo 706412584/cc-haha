@@ -25,6 +25,15 @@ const taskFixture = (overrides: Record<string, unknown>) => ({
   ...overrides,
 })
 
+async function rmWithRetry(targetPath: string): Promise<void> {
+  await fs.rm(targetPath, {
+    recursive: true,
+    force: true,
+    maxRetries: process.platform === 'win32' ? 5 : 0,
+    retryDelay: 100,
+  })
+}
+
 // ============================================================================
 // TaskService unit tests
 // ============================================================================
@@ -180,7 +189,7 @@ describe('Tasks API', () => {
     server?.stop(true)
     const { stopServerRuntimeForShutdown } = await import('../../server/index.js')
     await stopServerRuntimeForShutdown()
-    await fs.rm(tmpDir, { recursive: true, force: true })
+    await rmWithRetry(tmpDir)
     delete process.env.CLAUDE_CONFIG_DIR
   })
 
@@ -416,8 +425,8 @@ describe('Tasks API', () => {
     expect(await oversized.json()).toMatchObject({ error: 'PAYLOAD_TOO_LARGE' })
   })
 
-  it('should reject non-GET methods', async () => {
-    const res = await fetch(`${baseUrl}/api/tasks`, { method: 'POST' })
+  it('should reject unsupported methods', async () => {
+    const res = await fetch(`${baseUrl}/api/tasks`, { method: 'PUT' })
     expect(res.status).toBe(405)
   })
 })

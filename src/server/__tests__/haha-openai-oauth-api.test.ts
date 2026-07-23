@@ -200,8 +200,8 @@ describe('GET /auth/callback', () => {
       expect(html).toContain('OpenAI Login Failed')
       expect(html).toContain('Missing code or state parameter')
     } finally {
-      server.stop(true)
-      await stopServerRuntimeForShutdown()
+      await server.stop(true)
+      await stopServerRuntimeForShutdown({ waitForCli: false })
       ProviderService.setServerPort(originalServerPort)
     }
   })

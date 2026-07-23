@@ -197,6 +197,18 @@ describe('anthropicToOpenaiChat', () => {
     expect(result.reasoning_effort).toBe('high')
   })
 
+  test('preserves xhigh output_config effort for OpenAI-compatible chat providers', () => {
+    const req: AnthropicRequest = {
+      model: 'gpt-5.6-luna',
+      max_tokens: 100,
+      messages: [{ role: 'user', content: 'Hi' }],
+      output_config: { effort: 'xhigh' },
+    }
+
+    const result = anthropicToOpenaiChat(req)
+    expect(result.reasoning_effort).toBe('xhigh')
+  })
+
   test('clamps max output_config effort to high for OpenAI-compatible chat providers', () => {
     const req: AnthropicRequest = {
       model: 'longcat',
@@ -589,6 +601,18 @@ describe('anthropicToOpenaiResponses', () => {
 
     const result = anthropicToOpenaiResponses(req)
     expect(result.reasoning).toEqual({ effort: 'high' })
+  })
+
+  test('preserves xhigh output_config effort for Responses API', () => {
+    const req: AnthropicRequest = {
+      model: 'gpt-5.6-luna',
+      max_tokens: 100,
+      messages: [{ role: 'user', content: 'Hi' }],
+      output_config: { effort: 'xhigh' },
+    }
+
+    const result = anthropicToOpenaiResponses(req)
+    expect(result.reasoning).toEqual({ effort: 'xhigh' })
   })
 
   test('clamps max output_config effort for Responses API', () => {

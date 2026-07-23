@@ -6,12 +6,18 @@ import { ApiError } from '../middleware/errorHandler.js'
 import { readRecoverableJsonFile } from './recoverableJsonFile.js'
 import { ensurePersistentStorageUpgraded } from './persistentStorageMigrations.js'
 
-const CURRENT_DESKTOP_UI_PREFERENCES_SCHEMA_VERSION = 2
+const CURRENT_DESKTOP_UI_PREFERENCES_SCHEMA_VERSION = 4
 const MAX_PROJECT_PREFERENCE_ENTRIES = 2_000
 const MAX_PROFILE_DISPLAY_NAME_LENGTH = 80
 const MAX_PROFILE_SUBTITLE_LENGTH = 160
 const MAX_PROFILE_AVATAR_BYTES = 2_000_000
+const MAX_PET_ID_LENGTH = 80
+const MIN_PET_SIZE = 96
+const MAX_PET_SIZE = 192
+const DEFAULT_PET_SIZE = 144
+const MAX_PET_SESSION_ID_LENGTH = 200
 const DEFAULT_PROFILE_SUBTITLE = 'github.com/NanmiCoder/cc-haha'
+const DEFAULT_PET_ID = 'dada-code'
 
 const AVATAR_CONTENT_TYPES = {
   'image/png': { extension: 'png', mediaType: 'image/png' },
@@ -34,10 +40,21 @@ export type DesktopProfilePreferences = {
   avatarUpdatedAt: string | null
 }
 
+export type DesktopPetPreferences = {
+  enabled: boolean
+  selectedPetId: string
+  size: number
+  showTaskPanel: boolean
+  collapsed: boolean
+  motionEnabled: boolean
+  lastSessionId: string | null
+}
+
 export type DesktopUiPreferences = {
   schemaVersion: number
   sidebar: SidebarProjectPreferences
   profile: DesktopProfilePreferences
+  pet: DesktopPetPreferences
   [key: string]: unknown
 }
 
@@ -61,11 +78,22 @@ const DEFAULT_PROFILE_PREFERENCES: DesktopProfilePreferences = {
   avatarUpdatedAt: null,
 }
 
+const DEFAULT_PET_PREFERENCES: DesktopPetPreferences = {
+  enabled: false,
+  selectedPetId: DEFAULT_PET_ID,
+  size: DEFAULT_PET_SIZE,
+  showTaskPanel: false,
+  collapsed: false,
+  motionEnabled: true,
+  lastSessionId: null,
+}
+
 function defaultPreferences(): DesktopUiPreferences {
   return {
     schemaVersion: CURRENT_DESKTOP_UI_PREFERENCES_SCHEMA_VERSION,
     sidebar: { ...DEFAULT_SIDEBAR_PROJECT_PREFERENCES },
     profile: { ...DEFAULT_PROFILE_PREFERENCES },
+    pet: { ...DEFAULT_PET_PREFERENCES },
   }
 }
 
@@ -91,6 +119,7 @@ export function normalizeSidebarProjectPreferences(value: unknown): SidebarProje
 
   const record = value as Record<string, unknown>
   return {
+    ...record,
     projectOrder: normalizeStringArray(record.projectOrder),
     pinnedProjects: normalizeStringArray(record.pinnedProjects),
     hiddenProjects: normalizeStringArray(record.hiddenProjects),
@@ -126,10 +155,57 @@ function normalizeProfilePreferences(value: unknown): DesktopProfilePreferences 
 
   const record = value as Record<string, unknown>
   return {
+    ...record,
     displayName: normalizeProfileDisplayName(record.displayName),
     subtitle: normalizeProfileSubtitle(record.subtitle),
     avatarFile: normalizeAvatarFile(record.avatarFile),
     avatarUpdatedAt: typeof record.avatarUpdatedAt === 'string' ? record.avatarUpdatedAt : null,
+  }
+}
+
+function normalizePetId(value: unknown): string {
+  if (typeof value !== 'string') return DEFAULT_PET_ID
+  const trimmed = value.trim()
+  if (
+    trimmed.length === 0 ||
+    trimmed.length > MAX_PET_ID_LENGTH ||
+    !/^(?:custom:)?[a-z0-9]+(?:-[a-z0-9]+)*$/.test(trimmed)
+  ) {
+    return DEFAULT_PET_ID
+  }
+  return trimmed
+}
+
+function normalizePetSize(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isInteger(value)) return DEFAULT_PET_SIZE
+  return Math.min(MAX_PET_SIZE, Math.max(MIN_PET_SIZE, value))
+}
+
+function normalizePetSessionId(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed.slice(0, MAX_PET_SESSION_ID_LENGTH) : null
+}
+
+export function normalizeDesktopPetPreferences(value: unknown): DesktopPetPreferences {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { ...DEFAULT_PET_PREFERENCES }
+  }
+
+  const record = value as Record<string, unknown>
+  return {
+    ...record,
+    enabled: typeof record.enabled === 'boolean' ? record.enabled : DEFAULT_PET_PREFERENCES.enabled,
+    selectedPetId: normalizePetId(record.selectedPetId),
+    size: normalizePetSize(record.size),
+    showTaskPanel: typeof record.showTaskPanel === 'boolean'
+      ? record.showTaskPanel
+      : DEFAULT_PET_PREFERENCES.showTaskPanel,
+    collapsed: typeof record.collapsed === 'boolean' ? record.collapsed : DEFAULT_PET_PREFERENCES.collapsed,
+    motionEnabled: typeof record.motionEnabled === 'boolean'
+      ? record.motionEnabled
+      : DEFAULT_PET_PREFERENCES.motionEnabled,
+    lastSessionId: normalizePetSessionId(record.lastSessionId),
   }
 }
 
@@ -147,11 +223,17 @@ function normalizeDesktopUiPreferences(value: unknown): DesktopUiPreferences | n
   }
 
   const record = value as Record<string, unknown>
+  const sourceSchemaVersion = record.schemaVersion
   return {
     ...record,
-    schemaVersion: CURRENT_DESKTOP_UI_PREFERENCES_SCHEMA_VERSION,
+    schemaVersion: typeof sourceSchemaVersion === 'number'
+      && Number.isSafeInteger(sourceSchemaVersion)
+      && sourceSchemaVersion > CURRENT_DESKTOP_UI_PREFERENCES_SCHEMA_VERSION
+      ? sourceSchemaVersion
+      : CURRENT_DESKTOP_UI_PREFERENCES_SCHEMA_VERSION,
     sidebar: normalizeSidebarProjectPreferences(record.sidebar),
     profile: normalizeProfilePreferences(record.profile),
+    pet: normalizeDesktopPetPreferences(record.pet),
   }
 }
 
@@ -252,11 +334,18 @@ export class DesktopUiPreferencesService {
     const filePath = this.getPreferencesPath()
     return this.withWriteLock(filePath, async () => {
       const { preferences } = await this.readPreferences()
+      const sidebarPatch = sidebar && typeof sidebar === 'object' && !Array.isArray(sidebar)
+        ? sidebar as Record<string, unknown>
+        : {}
       const nextPreferences: DesktopUiPreferences = {
         ...preferences,
-        schemaVersion: CURRENT_DESKTOP_UI_PREFERENCES_SCHEMA_VERSION,
-        sidebar: normalizeSidebarProjectPreferences(sidebar),
+        schemaVersion: preferences.schemaVersion,
+        sidebar: normalizeSidebarProjectPreferences({
+          ...preferences.sidebar,
+          ...sidebarPatch,
+        }),
         profile: normalizeProfilePreferences(preferences.profile),
+        pet: normalizeDesktopPetPreferences(preferences.pet),
       }
 
       await this.writePreferences(nextPreferences)
@@ -283,13 +372,38 @@ export class DesktopUiPreferencesService {
       })
       const nextPreferences: DesktopUiPreferences = {
         ...preferences,
-        schemaVersion: CURRENT_DESKTOP_UI_PREFERENCES_SCHEMA_VERSION,
+        schemaVersion: preferences.schemaVersion,
         sidebar: normalizeSidebarProjectPreferences(preferences.sidebar),
         profile: {
           ...nextProfile,
           avatarFile: currentProfile.avatarFile,
           avatarUpdatedAt: currentProfile.avatarUpdatedAt,
         },
+        pet: normalizeDesktopPetPreferences(preferences.pet),
+      }
+
+      await this.writePreferences(nextPreferences)
+      return nextPreferences
+    })
+  }
+
+  async updatePetPreferences(pet: unknown): Promise<DesktopUiPreferences> {
+    const filePath = this.getPreferencesPath()
+    return this.withWriteLock(filePath, async () => {
+      const { preferences } = await this.readPreferences()
+      const currentPet = normalizeDesktopPetPreferences(preferences.pet)
+      const patch = pet && typeof pet === 'object' && !Array.isArray(pet)
+        ? pet as Record<string, unknown>
+        : {}
+      const nextPreferences: DesktopUiPreferences = {
+        ...preferences,
+        schemaVersion: preferences.schemaVersion,
+        sidebar: normalizeSidebarProjectPreferences(preferences.sidebar),
+        profile: normalizeProfilePreferences(preferences.profile),
+        pet: normalizeDesktopPetPreferences({
+          ...currentPet,
+          ...patch,
+        }),
       }
 
       await this.writePreferences(nextPreferences)
@@ -332,13 +446,14 @@ export class DesktopUiPreferencesService {
 
       const nextPreferences: DesktopUiPreferences = {
         ...preferences,
-        schemaVersion: CURRENT_DESKTOP_UI_PREFERENCES_SCHEMA_VERSION,
+        schemaVersion: preferences.schemaVersion,
         sidebar: normalizeSidebarProjectPreferences(preferences.sidebar),
         profile: {
           ...normalizeProfilePreferences(preferences.profile),
           avatarFile,
           avatarUpdatedAt: new Date().toISOString(),
         },
+        pet: normalizeDesktopPetPreferences(preferences.pet),
       }
 
       await this.writePreferences(nextPreferences)
@@ -357,13 +472,14 @@ export class DesktopUiPreferencesService {
       )
       const nextPreferences: DesktopUiPreferences = {
         ...preferences,
-        schemaVersion: CURRENT_DESKTOP_UI_PREFERENCES_SCHEMA_VERSION,
+        schemaVersion: preferences.schemaVersion,
         sidebar: normalizeSidebarProjectPreferences(preferences.sidebar),
         profile: {
           ...normalizeProfilePreferences(preferences.profile),
           avatarFile: null,
           avatarUpdatedAt: null,
         },
+        pet: normalizeDesktopPetPreferences(preferences.pet),
       }
 
       await this.writePreferences(nextPreferences)

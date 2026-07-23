@@ -2,6 +2,18 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test'
 import { WsBridge } from '../ws-bridge.js'
 import { WebSocketServer, type WebSocket as WsServerSocket } from 'ws'
 
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 500,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (predicate()) return true
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  return predicate()
+}
+
 describe('WsBridge', () => {
   let bridge: WsBridge
 
@@ -49,12 +61,28 @@ describe('WsBridge', () => {
     expect(bridge.sendStopGeneration('chat-stop')).toBe(false)
   })
 
-  it('destroy cleans up all sessions', () => {
+  it('destroy cleans up all sessions without leaking connecting-socket errors', async () => {
     bridge.connectSession('a', 'uuid-a')
     bridge.connectSession('b', 'uuid-b')
+    const sockets = [...(bridge as any).sessions.values()]
+      .map((session: any) => session.ws)
     bridge.destroy()
     expect(bridge.hasSession('a')).toBe(false)
     expect(bridge.hasSession('b')).toBe(false)
+
+    for (const ws of sockets) {
+      const settled = await waitFor(() => (
+        ws.readyState === ws.CLOSED
+        && ws.listenerCount('open') === 0
+        && ws.listenerCount('error') === 0
+        && ws.listenerCount('close') === 0
+      ))
+      expect(settled).toBe(true)
+      expect(ws.readyState).toBe(ws.CLOSED)
+      expect(ws.listenerCount('open')).toBe(0)
+      expect(ws.listenerCount('error')).toBe(0)
+      expect(ws.listenerCount('close')).toBe(0)
+    }
   })
 })
 
@@ -225,6 +253,13 @@ describe('WsBridge: handler serialization', () => {
     bridge.resetSession('chat-reset')
     expect(bridge.hasSession('chat-reset')).toBe(false)
     expect(staleSession.ws.listenerCount('message')).toBe(0)
+    await new Promise<void>((resolve) => {
+      if (staleSession.ws.readyState === staleSession.ws.CLOSED) {
+        resolve()
+        return
+      }
+      staleSession.ws.once('close', () => resolve())
+    })
     expect(staleSession.ws.listenerCount('close')).toBe(0)
     // resetSession detaches the bridge's handlers but intentionally keeps a
     // single no-op 'error' listener so a late async socket error (e.g. the

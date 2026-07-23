@@ -12,7 +12,6 @@ const {
 } = vi.hoisted(() => ({
   providersApiMock: {
     list: vi.fn(),
-    presets: vi.fn(),
     authStatus: vi.fn(),
     getSettings: vi.fn(),
     updateSettings: vi.fn(),
@@ -87,6 +86,17 @@ function makeProvider(overrides: Partial<SavedProvider> = {}): SavedProvider {
     ...overrides,
   }
 }
+
+describe('providerStore presets', () => {
+  it('starts with the provider presets bundled into the desktop app', async () => {
+    const { useProviderStore } = await import('./providerStore')
+
+    expect(useProviderStore.getState().presets).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'custom' }),
+      expect.objectContaining({ id: 'deepseek' }),
+    ]))
+  })
+})
 
 describe('providerStore runtime refresh', () => {
   beforeEach(() => {

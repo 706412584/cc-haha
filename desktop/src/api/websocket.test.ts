@@ -80,6 +80,8 @@ describe('wsManager reconnect buffering', () => {
 
   it('replays queued messages after an unexpected reconnect', async () => {
     wsManager.connect('session-reconnect')
+    const states: string[] = []
+    wsManager.onConnectionState('session-reconnect', state => states.push(state))
 
     const firstSocket = FakeWebSocket.instances[0]
     expect(firstSocket?.url).toContain('/ws/session-reconnect')
@@ -103,6 +105,7 @@ describe('wsManager reconnect buffering', () => {
       JSON.stringify({ type: 'user_message', content: 'queued while offline' }),
       JSON.stringify({ type: 'sync_state' }),
     ])
+    expect(states).toEqual(['connecting', 'connected', 'reconnecting', 'reconnecting', 'connected'])
   })
 
   it('replays an unacknowledged runtime request with the same id after reconnect', async () => {

@@ -111,6 +111,79 @@ describe('electron desktop host', () => {
     expect(unlisten).toHaveBeenCalledTimes(1)
   })
 
+  it('routes custom pet discovery and window controls through narrow IPC channels', async () => {
+    const petList = {
+      pets: [{
+        id: 'custom-bot',
+        displayName: 'Custom Bot',
+        description: 'A local companion.',
+        spriteVersionNumber: 2 as const,
+        spritesheetPath: 'spritesheet.webp',
+        mimeType: 'image/webp' as const,
+        dataUrl: 'data:image/webp;base64,AAAA',
+      }],
+      errors: [],
+    }
+    const invoke = vi.fn().mockResolvedValueOnce(petList).mockResolvedValue(undefined)
+    const subscribe = vi.fn().mockResolvedValue(vi.fn())
+    const host = createElectronHost({ invoke, subscribe })
+    const handler = vi.fn()
+
+    await expect(host.pets.list()).resolves.toEqual(petList)
+    await host.pets.createFromImage({
+      slug: 'soft-moon-cat',
+      displayName: 'Soft Moon Cat',
+      description: 'A softly animated companion.',
+    })
+    await host.pets.createFromAtlas({
+      slug: 'moon-cat',
+      displayName: 'Moon Cat',
+      description: 'A quiet companion.',
+    })
+    await host.pets.openFolder()
+    await host.pets.show()
+    await host.pets.hide()
+    await host.pets.showContextMenu('Close pet')
+    await host.pets.dragWindow({ phase: 'move', x: 640, y: 480 })
+    await host.pets.setIgnoreMouseEvents(true)
+    await host.pets.setInteractiveRegions([{ x: 100, y: 200, width: 120, height: 140 }])
+    await host.pets.focusMainWindow()
+    await host.pets.focusSession('session-123')
+    await host.pets.onNavigateSession(handler)
+    await host.pets.onVisibilityChanged(handler)
+
+    expect(invoke).toHaveBeenNthCalledWith(1, ELECTRON_IPC_CHANNELS.petsList, undefined)
+    expect(invoke).toHaveBeenNthCalledWith(2, ELECTRON_IPC_CHANNELS.petsCreateFromImage, {
+      slug: 'soft-moon-cat',
+      displayName: 'Soft Moon Cat',
+      description: 'A softly animated companion.',
+    })
+    expect(invoke).toHaveBeenNthCalledWith(3, ELECTRON_IPC_CHANNELS.petsCreateFromAtlas, {
+      slug: 'moon-cat',
+      displayName: 'Moon Cat',
+      description: 'A quiet companion.',
+    })
+    expect(invoke).toHaveBeenNthCalledWith(4, ELECTRON_IPC_CHANNELS.petsOpenFolder, undefined)
+    expect(invoke).toHaveBeenNthCalledWith(5, ELECTRON_IPC_CHANNELS.petsShow, undefined)
+    expect(invoke).toHaveBeenNthCalledWith(6, ELECTRON_IPC_CHANNELS.petsHide, undefined)
+    expect(invoke).toHaveBeenNthCalledWith(7, ELECTRON_IPC_CHANNELS.petsShowContextMenu, {
+      closeLabel: 'Close pet',
+    })
+    expect(invoke).toHaveBeenNthCalledWith(8, ELECTRON_IPC_CHANNELS.petsDragWindow, {
+      phase: 'move',
+      x: 640,
+      y: 480,
+    })
+    expect(invoke).toHaveBeenNthCalledWith(9, ELECTRON_IPC_CHANNELS.petsSetIgnoreMouseEvents, true)
+    expect(invoke).toHaveBeenNthCalledWith(10, ELECTRON_IPC_CHANNELS.petsSetInteractiveRegions, [
+      { x: 100, y: 200, width: 120, height: 140 },
+    ])
+    expect(invoke).toHaveBeenNthCalledWith(11, ELECTRON_IPC_CHANNELS.petsFocusMainWindow, undefined)
+    expect(invoke).toHaveBeenNthCalledWith(12, ELECTRON_IPC_CHANNELS.petsFocusSession, 'session-123')
+    expect(subscribe).toHaveBeenCalledWith(ELECTRON_EVENT_CHANNELS.petNavigateSession, handler)
+    expect(subscribe).toHaveBeenCalledWith(ELECTRON_EVENT_CHANNELS.petVisibilityChanged, handler)
+  })
+
   it('acknowledges handled notification actions through a diagnostics IPC channel', async () => {
     const invoke = vi.fn().mockResolvedValue(true)
     const payload = { target: { type: 'session', sessionId: 'session-1' } }

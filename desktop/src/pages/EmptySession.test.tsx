@@ -66,6 +66,10 @@ vi.mock('../api/websocket', () => ({
   wsManager: {
     clearHandlers: mocks.wsClearHandlers,
     connect: mocks.wsConnect,
+    onConnectionState: vi.fn((_sessionId: string, handler: (state: string) => void) => {
+      handler('connecting')
+      return () => {}
+    }),
     onMessage: mocks.wsOnMessage,
     send: mocks.wsSend,
     disconnect: mocks.wsDisconnect,

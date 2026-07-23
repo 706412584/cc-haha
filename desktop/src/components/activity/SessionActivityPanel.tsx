@@ -9,6 +9,7 @@ import { formatTokenCount } from '../../lib/formatTokenCount'
 
 export type OpenSubagentPayload = {
   sessionId: string
+  taskId?: string
   toolUseId: string
   title: string
 }
@@ -188,7 +189,7 @@ function TaskStatusMarker({ status, t }: { status: ActivityRow['status']; t: Tra
     return (
       <span
         aria-label={t('session.activity.task.inProgress')}
-        className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md border border-[var(--color-accent)] bg-[var(--color-surface)] text-[var(--color-accent)]"
+        className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md border border-[var(--color-brand)] bg-[var(--color-surface)] text-[var(--color-brand)]"
       >
         <LoaderCircle size={13} strokeWidth={2.4} aria-hidden="true" className="motion-safe:animate-spin motion-reduce:animate-none" />
       </span>
@@ -222,7 +223,7 @@ function getRowIcon(row: ActivityRow) {
 
 function getStatusTone(status: ActivityRow['status']) {
   if (status === 'running' || status === 'in_progress') {
-    return 'bg-[var(--color-accent)]'
+    return 'bg-[var(--color-brand)]'
   }
   if (status === 'completed' || status === 'idle') {
     return 'bg-[var(--color-success)]'
@@ -426,6 +427,7 @@ function ActivityRowView({
 
   if (row.section === 'subagents' && row.openable && row.toolUseId) {
     const hasRecentEvents = Boolean(row.recentEvents?.length)
+    const statusLabel = getActivityStatusLabel(row.status, t)
     return (
       <div className="w-full rounded-lg hover:bg-[var(--color-surface-hover)]">
         <div className="flex min-w-0 items-center gap-1">
@@ -449,9 +451,14 @@ function ActivityRowView({
           </button>
           <button
             type="button"
-            aria-label={t('session.activity.openRun', { name: row.label })}
+            aria-label={`${t('session.activity.openRun', { name: row.label })} · ${statusLabel}`}
             title={t('session.activity.fullRun')}
-            onClick={() => onOpenSubagent({ sessionId, toolUseId: row.toolUseId!, title: row.label })}
+            onClick={() => onOpenSubagent({
+              sessionId,
+              ...(row.taskId ? { taskId: row.taskId } : {}),
+              toolUseId: row.toolUseId!,
+              title: row.label,
+            })}
             className="mr-2 shrink-0 rounded-md px-2 py-1 text-[10px] font-medium text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-container)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
           >
             {t('session.activity.fullRun')}

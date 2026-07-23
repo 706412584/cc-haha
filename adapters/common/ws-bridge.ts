@@ -135,8 +135,7 @@ export class WsBridge {
     const session = this.sessions.get(chatId)
     if (session) {
       if (session.reconnectTimer) clearTimeout(session.reconnectTimer)
-      this.detachSocket(session.ws)
-      session.ws.close(1000, 'session reset')
+      this.closeSocket(session.ws, 1000, 'session reset')
       this.sessions.delete(chatId)
     }
     this.handlers.delete(chatId)
@@ -157,8 +156,7 @@ export class WsBridge {
     }
     for (const [, session] of this.sessions) {
       if (session.reconnectTimer) clearTimeout(session.reconnectTimer)
-      this.detachSocket(session.ws)
-      session.ws.close(1000, 'bridge destroyed')
+      this.closeSocket(session.ws, 1000, 'bridge destroyed')
     }
     this.sessions.clear()
     this.handlers.clear()
@@ -193,7 +191,7 @@ export class WsBridge {
     const prev = this.sessions.get(chatId)
     if (prev) {
       if (prev.reconnectTimer) clearTimeout(prev.reconnectTimer)
-      this.detachSocket(prev.ws)
+      this.closeSocket(prev.ws, 1000, 'session replaced')
     }
 
     const session: Session = {
@@ -253,6 +251,40 @@ export class WsBridge {
     ws.on('error', (err) => {
       console.error(`[WsBridge] Error on ${sessionId}:`, err.message)
     })
+  }
+
+  private closeSocket(ws: WebSocket, code: number, reason: string): void {
+    ws.removeAllListeners()
+    if (ws.readyState === WebSocket.CLOSED) return
+
+    if (ws.readyState === WebSocket.CONNECTING) {
+      // Bun's `ws` compatibility layer can remain stuck in CLOSING when a
+      // handshake is aborted. Let the handshake settle, consuming its natural
+      // error, and close normally if the connection opens first.
+      const cleanup = () => {
+        ws.removeListener('open', onOpen)
+        ws.removeListener('error', onError)
+        ws.removeListener('close', onClose)
+      }
+      const onOpen = () => {
+        ws.removeListener('open', onOpen)
+        ws.close(code, reason)
+      }
+      const onError = () => cleanup()
+      const onClose = () => cleanup()
+
+      ws.once('open', onOpen)
+      ws.once('error', onError)
+      ws.once('close', onClose)
+      return
+    }
+
+    // Keep a temporary error sink after detaching the session listeners so a
+    // close-time transport error cannot surface as an unhandled EventEmitter
+    // error.
+    const swallowTeardownError = () => {}
+    ws.on('error', swallowTeardownError)
+    ws.close(code, reason)
   }
 
   /** Wait until the WebSocket for chatId is open. Resolves false on timeout or error. */

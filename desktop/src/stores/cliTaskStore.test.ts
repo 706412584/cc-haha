@@ -434,6 +434,47 @@ describe('cliTaskStore', () => {
     })
   })
 
+  it('preserves known tasks when polling fails transiently', async () => {
+    const knownTasks = [makeTask('session-1', 'in_progress')]
+    vi.mocked(cliTasksApi.getTasksForList).mockRejectedValueOnce(new Error('temporary failure'))
+
+    useCLITaskStore.setState({
+      sessionId: 'session-1',
+      tasks: knownTasks,
+      expanded: true,
+      completedAndDismissed: false,
+      dismissedCompletionKey: null,
+    })
+
+    await useCLITaskStore.getState().fetchSessionTasks('session-1')
+
+    expect(useCLITaskStore.getState()).toMatchObject({
+      sessionId: 'session-1',
+      tasks: knownTasks,
+      expanded: true,
+    })
+  })
+
+  it('stays empty when the initial fetch for a new session fails', async () => {
+    vi.mocked(cliTasksApi.getTasksForList).mockRejectedValueOnce(new Error('temporary failure'))
+
+    useCLITaskStore.setState({
+      sessionId: 'session-1',
+      tasks: [makeTask('session-1', 'in_progress')],
+      expanded: true,
+      completedAndDismissed: false,
+      dismissedCompletionKey: null,
+    })
+
+    await useCLITaskStore.getState().fetchSessionTasks('session-2')
+
+    expect(useCLITaskStore.getState()).toMatchObject({
+      sessionId: 'session-2',
+      tasks: [],
+      expanded: false,
+    })
+  })
+
   it('marks completed tasks dismissed for the currently tracked session by default', () => {
     useCLITaskStore.setState({
       sessionId: 'session-1',

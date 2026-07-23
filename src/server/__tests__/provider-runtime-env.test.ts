@@ -8,6 +8,8 @@ import {
   mergeActiveProviderManagedEnv,
   readActiveProviderManagedEnv,
 } from '../services/providerRuntimeEnv.js'
+import { resolveAppliedEffort } from '../../utils/effort.js'
+import { get3PModelCapabilityOverride } from '../../utils/model/modelSupportOverrides.js'
 
 let tmpDir: string
 let originalConfigDir: string | undefined
@@ -81,6 +83,7 @@ describe('providerRuntimeEnv', () => {
           apiFormat: 'anthropic',
           models: {
             main: 'active-main',
+            fable: 'active-fable',
             haiku: '',
             sonnet: 'active-sonnet',
             opus: '',
@@ -96,10 +99,47 @@ describe('providerRuntimeEnv', () => {
       ANTHROPIC_API_KEY: '',
       ANTHROPIC_AUTH_TOKEN: 'sk-active',
       ANTHROPIC_MODEL: 'active-main',
+      ANTHROPIC_DEFAULT_FABLE_MODEL: 'active-fable',
+      ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES:
+        'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
       ANTHROPIC_DEFAULT_HAIKU_MODEL: 'active-main',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES:
+        'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
       ANTHROPIC_DEFAULT_SONNET_MODEL: 'active-sonnet',
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES:
+        'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
       ANTHROPIC_DEFAULT_OPUS_MODEL: 'active-main',
+      ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES:
+        'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
     })
+
+    const runtimeKeys = [
+      'ANTHROPIC_BASE_URL',
+      'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+      'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES',
+      'CLAUDE_CODE_EFFORT_LEVEL',
+    ] as const
+    const originalRuntimeEnv = Object.fromEntries(
+      runtimeKeys.map(key => [key, process.env[key]]),
+    )
+    try {
+      process.env.ANTHROPIC_BASE_URL = env.ANTHROPIC_BASE_URL
+      process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL =
+        env.ANTHROPIC_DEFAULT_HAIKU_MODEL
+      process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES =
+        env.ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES
+      delete process.env.CLAUDE_CODE_EFFORT_LEVEL
+      clearCapabilityCache()
+
+      expect(resolveAppliedEffort('active-main', 'xhigh')).toBe('xhigh')
+    } finally {
+      for (const key of runtimeKeys) {
+        const value = originalRuntimeEnv[key]
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+      clearCapabilityCache()
+    }
   })
 
   test('active provider env overrides stale proxy settings while preserving unrelated env', async () => {
@@ -307,6 +347,43 @@ describe('providerRuntimeEnv', () => {
           presetId: 'kimi',
           name: 'Kimi',
           apiKey: 'sk-kimi',
+          authStrategy: 'api_key',
+          baseUrl: 'https://api.kimi.com/coding/',
+          apiFormat: 'anthropic',
+          models: {
+            main: 'k3',
+            haiku: 'k3',
+            sonnet: 'k3',
+            opus: 'k3',
+          },
+        },
+      ],
+    })
+
+    const kimiEnv = readActiveProviderManagedEnv(tmpDir)
+
+    expect(kimiEnv).toMatchObject({
+      ANTHROPIC_BASE_URL: 'https://api.kimi.com/coding/',
+      ANTHROPIC_API_KEY: 'sk-kimi',
+      ANTHROPIC_MODEL: 'k3',
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES:
+        'thinking,required_thinking,effort,max_effort',
+    })
+    expect(kimiEnv?.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
+    expect(JSON.parse(kimiEnv!.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS)).toMatchObject({
+      k3: 262144,
+      'kimi-for-coding': 262144,
+      'kimi-for-coding-highspeed': 262144,
+    })
+
+    await writeJson(path.join(tmpDir, 'cc-haha', 'providers.json'), {
+      activeId: 'provider-kimi-legacy',
+      providers: [
+        {
+          id: 'provider-kimi-legacy',
+          presetId: 'kimi',
+          name: 'Kimi Open Platform',
+          apiKey: 'sk-kimi-legacy',
           authStrategy: 'auth_token',
           baseUrl: 'https://api.moonshot.cn/anthropic',
           apiFormat: 'anthropic',
@@ -320,16 +397,14 @@ describe('providerRuntimeEnv', () => {
       ],
     })
 
-    const kimiEnv = readActiveProviderManagedEnv(tmpDir)
+    const legacyKimiEnv = readActiveProviderManagedEnv(tmpDir)
 
-    expect(kimiEnv).toMatchObject({
+    expect(legacyKimiEnv).toMatchObject({
       ANTHROPIC_BASE_URL: 'https://api.moonshot.cn/anthropic',
+      ANTHROPIC_API_KEY: '',
+      ANTHROPIC_AUTH_TOKEN: 'sk-kimi-legacy',
       ANTHROPIC_MODEL: 'kimi-k2.7-code',
       ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: 'thinking,required_thinking',
-    })
-    expect(JSON.parse(kimiEnv!.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS)).toMatchObject({
-      'kimi-k2.7-code': 262144,
-      'kimi-k2.7-code-highspeed': 262144,
     })
 
     await writeJson(path.join(tmpDir, 'cc-haha', 'providers.json'), {
@@ -366,3 +441,9 @@ describe('providerRuntimeEnv', () => {
     })
   })
 })
+
+function clearCapabilityCache() {
+  ;(get3PModelCapabilityOverride as typeof get3PModelCapabilityOverride & {
+    cache?: { clear?: () => void }
+  }).cache?.clear?.()
+}

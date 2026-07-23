@@ -75,6 +75,18 @@ async function startTestServer() {
   wsUrl = `ws://127.0.0.1:${server.port}`
 }
 
+async function stopTestServer() {
+  server?.stop(true)
+  const { stopServerRuntimeForShutdown } = await import('../../index.js')
+  await stopServerRuntimeForShutdown()
+  await fs.rm(tmpDir, {
+    recursive: true,
+    force: true,
+    maxRetries: process.platform === 'win32' ? 5 : 0,
+    retryDelay: 100,
+  })
+}
+
 async function api(method: string, urlPath: string, body?: unknown) {
   const res = await fetch(`${baseUrl}${urlPath}`, {
     method,
@@ -87,12 +99,7 @@ async function api(method: string, urlPath: string, body?: unknown) {
 
 describe('Business Flow: Scheduled Tasks', () => {
   beforeAll(startTestServer)
-  afterAll(async () => {
-    server?.stop(true)
-    const { stopServerRuntimeForShutdown } = await import('../../index.js')
-    await stopServerRuntimeForShutdown()
-    await fs.rm(tmpDir, { recursive: true, force: true })
-  })
+  afterAll(stopTestServer)
 
   // ==========================================================================
   // 定时任务完整生命周期
@@ -209,12 +216,7 @@ describe('Business Flow: Scheduled Tasks', () => {
 
 describe('Business Flow: Permission Modes', () => {
   beforeAll(startTestServer)
-  afterAll(async () => {
-    server?.stop(true)
-    const { stopServerRuntimeForShutdown } = await import('../../index.js')
-    await stopServerRuntimeForShutdown()
-    await fs.rm(tmpDir, { recursive: true, force: true })
-  })
+  afterAll(stopTestServer)
 
   const VALID_MODES = ['default', 'acceptEdits', 'plan', 'bypassPermissions', 'dontAsk', 'auto']
 
@@ -257,12 +259,7 @@ describe('Business Flow: Permission Modes', () => {
 
 describe('Business Flow: Agent Management', () => {
   beforeAll(startTestServer)
-  afterAll(async () => {
-    server?.stop(true)
-    const { stopServerRuntimeForShutdown } = await import('../../index.js')
-    await stopServerRuntimeForShutdown()
-    await fs.rm(tmpDir, { recursive: true, force: true })
-  })
+  afterAll(stopTestServer)
 
   it('should start with shared active/all agent payload', async () => {
     const { data } = await api('GET', '/api/agents')
@@ -274,6 +271,7 @@ describe('Business Flow: Agent Management', () => {
 
   it('should create a new agent with full config', async () => {
     const { status, data } = await api('POST', '/api/agents', {
+      scope: 'user',
       name: 'security-auditor',
       description: 'Audits code for security vulnerabilities',
       model: 'claude-opus-4-7',
@@ -286,30 +284,32 @@ describe('Business Flow: Agent Management', () => {
 
   it('should create a second agent', async () => {
     const { status } = await api('POST', '/api/agents', {
+      scope: 'user',
       name: 'test-writer',
       description: 'Writes unit tests',
       model: 'claude-sonnet-4-6',
       tools: ['Read', 'Write', 'Bash'],
+      systemPrompt: 'Write focused unit tests for the requested behavior.',
     })
     expect(status).toBe(201)
   })
 
-  it('should list both created agents in CRUD detail endpoint while shared list stays source-based', async () => {
+  it('should list both created agents through the shared loader', async () => {
     const { data } = await api('GET', '/api/agents')
     expect(data.activeAgents.length).toBeGreaterThan(0)
     expect(data.activeAgents.some((agent: any) => agent.source === 'built-in')).toBe(true)
-    expect(data.activeAgents.some((agent: any) => agent.agentType === 'security-auditor')).toBe(false)
-    expect(data.activeAgents.some((agent: any) => agent.agentType === 'test-writer')).toBe(false)
+    expect(data.activeAgents.some((agent: any) => agent.agentType === 'security-auditor')).toBe(true)
+    expect(data.activeAgents.some((agent: any) => agent.agentType === 'test-writer')).toBe(true)
 
     const securityAuditor = await api('GET', '/api/agents/security-auditor')
     const testWriter = await api('GET', '/api/agents/test-writer')
-    expect(securityAuditor.data.agent.name).toBe('security-auditor')
-    expect(testWriter.data.agent.name).toBe('test-writer')
+    expect(securityAuditor.data.agent.agentType).toBe('security-auditor')
+    expect(testWriter.data.agent.agentType).toBe('test-writer')
   })
 
   it('should get agent details', async () => {
     const { data } = await api('GET', '/api/agents/security-auditor')
-    expect(data.agent.name).toBe('security-auditor')
+    expect(data.agent.agentType).toBe('security-auditor')
     expect(data.agent.description).toContain('security')
     expect(data.agent.model).toBe('claude-opus-4-7')
     expect(data.agent.systemPrompt).toContain('OWASP')
@@ -317,19 +317,22 @@ describe('Business Flow: Agent Management', () => {
 
   it('should update agent tools', async () => {
     const { status, data } = await api('PUT', '/api/agents/security-auditor', {
+      scope: 'user',
       tools: ['Read', 'Grep', 'Glob', 'Bash', 'WebFetch'],
       description: 'Updated: now with web access',
     })
     expect(status).toBe(200)
     expect(data.agent).toBeDefined()
-    expect(data.agent.name).toBe('security-auditor')
+    expect(data.agent.agentType).toBe('security-auditor')
     expect(data.agent.description).toBe('Updated: now with web access')
   })
 
   it('should reject creating duplicate agent', async () => {
     const { status, data } = await api('POST', '/api/agents', {
+      scope: 'user',
       name: 'security-auditor',
       description: 'duplicate',
+      systemPrompt: 'duplicate',
     })
     expect(status).toBe(409)
     expect(data.error).toBe('CONFLICT')
@@ -341,7 +344,7 @@ describe('Business Flow: Agent Management', () => {
   })
 
   it('should keep deleted agent out of shared active list while built-ins remain', async () => {
-    const { status } = await api('DELETE', '/api/agents/test-writer')
+    const { status } = await api('DELETE', '/api/agents/test-writer?scope=user')
     expect([200, 204]).toContain(status)
 
     const { data } = await api('GET', '/api/agents')
@@ -352,51 +355,47 @@ describe('Business Flow: Agent Management', () => {
     expect(deleted.status).toBe(404)
   })
 
-  it('should persist agent to YAML file on disk', async () => {
-    const filePath = path.join(tmpDir, 'agents', 'security-auditor.yaml')
+  it('should persist an official Markdown agent on disk', async () => {
+    const filePath = path.join(tmpDir, 'agents', 'security-auditor.md')
     const raw = await fs.readFile(filePath, 'utf-8')
     expect(raw).toContain('security-auditor')
     expect(raw).toContain('OWASP')
   })
 
   it('should reject deleting non-existent agent', async () => {
-    const { status } = await api('DELETE', '/api/agents/nonexistent')
+    const { status } = await api('DELETE', '/api/agents/nonexistent?scope=user')
     expect(status).toBe(404)
   })
 })
 
 describe('Business Flow: Models & Effort', () => {
   beforeAll(startTestServer)
-  afterAll(async () => {
-    server?.stop(true)
-    const { stopServerRuntimeForShutdown } = await import('../../index.js')
-    await stopServerRuntimeForShutdown()
-    await fs.rm(tmpDir, { recursive: true, force: true })
-  })
+  afterAll(stopTestServer)
 
   it('should return available fallback models', async () => {
     const { data } = await api('GET', '/api/models')
-    expect(data.models.length).toBe(3)
+    expect(data.models.length).toBe(4)
     const names = data.models.map((m: any) => m.name)
-    expect(names).toContain('Opus 4.7')
-    expect(names).toContain('Sonnet 4.6')
+    expect(names).toContain('Fable 5')
+    expect(names).toContain('Opus 4.8')
+    expect(names).toContain('Sonnet 5')
     expect(names).toContain('Haiku 4.5')
   })
 
   it('should default to Opus model', async () => {
     const { data } = await api('GET', '/api/models/current')
-    expect(data.model.id).toBe('claude-opus-4-7')
+    expect(data.model.id).toBe('claude-opus-4-8')
   })
 
-  it('should switch to Opus 4.7', async () => {
+  it('should switch to Opus 4.8', async () => {
     const { status } = await api('PUT', '/api/models/current', {
-      modelId: 'claude-opus-4-7',
+      modelId: 'claude-opus-4-8',
     })
     expect(status).toBe(200)
 
     const { data } = await api('GET', '/api/models/current')
-    expect(data.model.id).toBe('claude-opus-4-7')
-    expect(data.model.name).toBe('Opus 4.7')
+    expect(data.model.id).toBe('claude-opus-4-8')
+    expect(data.model.name).toBe('Opus 4.8')
   })
 
   it('should switch to Haiku 4.5', async () => {
@@ -456,12 +455,7 @@ describe('Business Flow: Models & Effort', () => {
 
 describe('Business Flow: Sessions & CLI Interop', () => {
   beforeAll(startTestServer)
-  afterAll(async () => {
-    server?.stop(true)
-    const { stopServerRuntimeForShutdown } = await import('../../index.js')
-    await stopServerRuntimeForShutdown()
-    await fs.rm(tmpDir, { recursive: true, force: true })
-  })
+  afterAll(stopTestServer)
 
   let sessionId: string
 
@@ -584,12 +578,7 @@ describe('Business Flow: Search', () => {
     await fs.writeFile(path.join(testDir, 'utils.ts'), 'export function helper() { return 42 }\n')
     await fs.writeFile(path.join(testDir, 'config.json'), '{"port": 3456}\n')
   })
-  afterAll(async () => {
-    server?.stop(true)
-    const { stopServerRuntimeForShutdown } = await import('../../index.js')
-    await stopServerRuntimeForShutdown()
-    await fs.rm(tmpDir, { recursive: true, force: true })
-  })
+  afterAll(stopTestServer)
 
   it('should find matches in workspace files', async () => {
     const { status, data } = await api('POST', '/api/search', {
@@ -629,12 +618,7 @@ describe('Business Flow: Search', () => {
 
 describe('Business Flow: WebSocket Chat', () => {
   beforeAll(startTestServer)
-  afterAll(async () => {
-    server?.stop(true)
-    const { stopServerRuntimeForShutdown } = await import('../../index.js')
-    await stopServerRuntimeForShutdown()
-    await fs.rm(tmpDir, { recursive: true, force: true })
-  })
+  afterAll(stopTestServer)
 
   it('should establish WebSocket connection and receive connected event', async () => {
     const messages: any[] = []
@@ -780,12 +764,7 @@ describe('Business Flow: WebSocket Chat', () => {
 
 describe('Business Flow: Settings Persistence', () => {
   beforeAll(startTestServer)
-  afterAll(async () => {
-    server?.stop(true)
-    const { stopServerRuntimeForShutdown } = await import('../../index.js')
-    await stopServerRuntimeForShutdown()
-    await fs.rm(tmpDir, { recursive: true, force: true })
-  })
+  afterAll(stopTestServer)
 
   it('should write and read complex settings', async () => {
     const settings = {
@@ -842,12 +821,7 @@ describe('Business Flow: Settings Persistence', () => {
 
 describe('Business Flow: Status & Diagnostics', () => {
   beforeAll(startTestServer)
-  afterAll(async () => {
-    server?.stop(true)
-    const { stopServerRuntimeForShutdown } = await import('../../index.js')
-    await stopServerRuntimeForShutdown()
-    await fs.rm(tmpDir, { recursive: true, force: true })
-  })
+  afterAll(stopTestServer)
 
   it('should return health with uptime', async () => {
     const { data } = await api('GET', '/api/status')
@@ -884,12 +858,7 @@ describe('Business Flow: Status & Diagnostics', () => {
 
 describe('Business Flow: Error Handling', () => {
   beforeAll(startTestServer)
-  afterAll(async () => {
-    server?.stop(true)
-    const { stopServerRuntimeForShutdown } = await import('../../index.js')
-    await stopServerRuntimeForShutdown()
-    await fs.rm(tmpDir, { recursive: true, force: true })
-  })
+  afterAll(stopTestServer)
 
   it('should return 404 for unknown API resource', async () => {
     const { status, data } = await api('GET', '/api/unknown')

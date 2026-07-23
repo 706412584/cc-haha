@@ -73,24 +73,27 @@
   {
     "id": "kimi",
     "name": "Kimi",
-    "baseUrl": "https://api.moonshot.cn/anthropic",
+    "baseUrl": "https://api.kimi.com/coding/",
     "apiFormat": "anthropic",
     "defaultModels": {
-      "main": "kimi-k2.7-code",
-      "haiku": "kimi-k2.7-code",
-      "sonnet": "kimi-k2.7-code",
-      "opus": "kimi-k2.7-code"
+      "main": "k3",
+      "haiku": "k3",
+      "sonnet": "k3",
+      "opus": "k3"
     },
     "needsApiKey": true,
-    "websiteUrl": "https://platform.kimi.com",
-    "apiKeyUrl": "https://platform.kimi.com/console/api-keys",
-    "authStrategy": "auth_token",
+    "websiteUrl": "https://www.kimi.com/code",
+    "apiKeyUrl": "https://www.kimi.com/code/console",
+    "authStrategy": "api_key",
     "defaultEnv": {
-      "ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES": "thinking,required_thinking",
-      "ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES": "thinking,required_thinking",
-      "ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES": "thinking,required_thinking"
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES": "thinking,required_thinking,effort,max_effort",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES": "thinking,required_thinking,effort,max_effort",
+      "ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES": "thinking,required_thinking,effort,max_effort"
     },
     "modelContextWindows": {
+      "k3": 262144,
+      "kimi-for-coding": 262144,
+      "kimi-for-coding-highspeed": 262144,
       "kimi-k2.7-code": 262144,
       "kimi-k2.7-code-highspeed": 262144,
       "kimi-k2.6": 262144,

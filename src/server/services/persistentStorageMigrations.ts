@@ -44,6 +44,7 @@ function isProviderModels(value: unknown): value is JsonObject {
   return (
     isRecord(value) &&
     typeof value.main === 'string' &&
+    (value.fable === undefined || typeof value.fable === 'string') &&
     typeof value.haiku === 'string' &&
     typeof value.sonnet === 'string' &&
     typeof value.opus === 'string'
@@ -311,6 +312,7 @@ function buildManagedSettingsForMigratedProvider(provider: JsonObject | undefine
       ANTHROPIC_BASE_URL: baseUrl,
       ANTHROPIC_AUTH_TOKEN: apiKey,
       ANTHROPIC_MODEL: provider.models.main,
+      ...(provider.models.fable ? { ANTHROPIC_DEFAULT_FABLE_MODEL: provider.models.fable } : {}),
       ANTHROPIC_DEFAULT_HAIKU_MODEL: provider.models.haiku,
       ANTHROPIC_DEFAULT_SONNET_MODEL: provider.models.sonnet,
       ANTHROPIC_DEFAULT_OPUS_MODEL: provider.models.opus,

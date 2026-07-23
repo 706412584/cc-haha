@@ -39,6 +39,8 @@ describe('model context window resolution', () => {
   test('uses built-in windows for current third-party coding models', () => {
     expect(getContextWindowForModel('deepseek-v4-pro')).toBe(1_000_000)
     expect(getContextWindowForModel('MiniMax-M2.7')).toBe(204_800)
+    expect(getContextWindowForModel('k3')).toBe(262_144)
+    expect(getContextWindowForModel('k3[1m]')).toBe(1_000_000)
     expect(getContextWindowForModel('kimi-k2.6')).toBe(262_144)
     expect(getContextWindowForModel('zai-org/GLM-5.2')).toBe(1_000_000)
     expect(getContextWindowForModel('glm-5.1')).toBe(200_000)

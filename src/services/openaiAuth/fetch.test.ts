@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import * as fs from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
+import { configureEffortParams } from '../api/claude.js'
 import { OPENAI_CODEX_API_ENDPOINT } from './client.js'
 import { buildOpenAICodexFetch } from './fetch.js'
 import { OPENAI_CODEX_REASONING_EFFORT_ENV_KEY } from './models.js'
@@ -146,7 +147,7 @@ describe('buildOpenAICodexFetch', () => {
     })
   })
 
-  test('applies model defaults and preserves native xhigh/max efforts on the final request', async () => {
+  test('applies defaults and validates request and session efforts for the final request', async () => {
     const upstreamBodies: Array<Record<string, unknown>> = []
     const fetchOverride: typeof fetch = async (_input, init) => {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>
@@ -167,15 +168,23 @@ describe('buildOpenAICodexFetch', () => {
     }
     const openAIFetch = buildOpenAICodexFetch(fetchOverride, 'test')
 
-    const send = async (model: string, effort?: string) => {
-      if (effort) process.env[OPENAI_CODEX_REASONING_EFFORT_ENV_KEY] = effort
-      else delete process.env[OPENAI_CODEX_REASONING_EFFORT_ENV_KEY]
+    const send = async (
+      model: string,
+      sessionEffort?: string,
+      requestEffort?: string,
+    ) => {
+      if (sessionEffort) {
+        process.env[OPENAI_CODEX_REASONING_EFFORT_ENV_KEY] = sessionEffort
+      } else {
+        delete process.env[OPENAI_CODEX_REASONING_EFFORT_ENV_KEY]
+      }
       await openAIFetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         body: JSON.stringify({
           model,
           max_tokens: 64,
           messages: [{ role: 'user', content: 'Say ok' }],
+          ...(requestEffort && { output_config: { effort: requestEffort } }),
         }),
       })
     }
@@ -185,6 +194,7 @@ describe('buildOpenAICodexFetch', () => {
     await send('gpt-5.6-sol', 'xhigh')
     await send('gpt-5.6-luna', 'max')
     await send('gpt-5.5', 'max')
+    await send('gpt-5.5', 'xhigh', 'max')
 
     expect(upstreamBodies.map((body) => body.reasoning)).toEqual([
       { effort: 'low' },
@@ -192,6 +202,129 @@ describe('buildOpenAICodexFetch', () => {
       { effort: 'xhigh' },
       { effort: 'max' },
       { effort: 'medium' },
+      { effort: 'high' },
     ])
+  })
+
+  test('keeps Agent request effort above Desktop session effort without synthesizing high', async () => {
+    const upstreamBodies: Array<Record<string, unknown>> = []
+    const fetchOverride: typeof fetch = async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+      upstreamBodies.push(body)
+      return Response.json({
+        id: `resp_${upstreamBodies.length}`,
+        object: 'response',
+        created_at: 1_779_118_000,
+        model: body.model,
+        status: 'completed',
+        output: [{
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: 'ok' }],
+        }],
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      })
+    }
+    const openAIFetch = buildOpenAICodexFetch(fetchOverride, 'agent:custom')
+
+    const send = async (
+      sessionEffort: 'low' | 'xhigh' | 'max',
+      requestEffort?: 'low' | 'xhigh' | 'max',
+    ) => {
+      process.env[OPENAI_CODEX_REASONING_EFFORT_ENV_KEY] = sessionEffort
+      const outputConfig: Record<string, unknown> = {}
+      configureEffortParams(
+        requestEffort,
+        outputConfig,
+        {},
+        [],
+        'gpt-5.6-sol',
+      )
+      await openAIFetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        body: JSON.stringify({
+          model: 'gpt-5.6-sol',
+          max_tokens: 64,
+          messages: [{ role: 'user', content: 'Say ok' }],
+          ...(Object.keys(outputConfig).length > 0 && {
+            output_config: outputConfig,
+          }),
+        }),
+      })
+    }
+
+    // Agent effort omitted: inherit the Desktop session choice at every
+    // supported level instead of receiving a synthetic request-level high.
+    await send('low')
+    await send('xhigh')
+    await send('max')
+    // Agent effort explicit: request-scoped value remains authoritative.
+    await send('max', 'low')
+
+    expect(upstreamBodies.map(body => body.reasoning)).toEqual([
+      { effort: 'low' },
+      { effort: 'xhigh' },
+      { effort: 'max' },
+      { effort: 'low' },
+    ])
+  })
+
+  test('keeps concurrent subagent request efforts isolated from the session default', async () => {
+    process.env[OPENAI_CODEX_REASONING_EFFORT_ENV_KEY] = 'high'
+    const upstreamBodies: Array<Record<string, unknown>> = []
+    const fetchOverride: typeof fetch = async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+      // Let the two requests overlap and finish in the opposite order from
+      // their launch. Per-request effort must not depend on process.env writes.
+      await new Promise(resolve =>
+        setTimeout(resolve, body.model === 'gpt-5.6-luna' ? 10 : 0),
+      )
+      upstreamBodies.push(body)
+      return Response.json({
+        id: `resp_${String(body.model)}`,
+        object: 'response',
+        created_at: 1_779_118_000,
+        model: body.model,
+        status: 'completed',
+        output: [{
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: 'ok' }],
+        }],
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      })
+    }
+    const openAIFetch = buildOpenAICodexFetch(fetchOverride, 'agent:custom')
+
+    await Promise.all([
+      openAIFetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        body: JSON.stringify({
+          model: 'gpt-5.6-luna',
+          max_tokens: 64,
+          messages: [{ role: 'user', content: 'Quick lookup' }],
+          output_config: { effort: 'low' },
+        }),
+      }),
+      openAIFetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        body: JSON.stringify({
+          model: 'gpt-5.6-sol',
+          max_tokens: 64,
+          messages: [{ role: 'user', content: 'Deep analysis' }],
+          output_config: { effort: 'xhigh' },
+        }),
+      }),
+    ])
+
+    expect(
+      Object.fromEntries(
+        upstreamBodies.map(body => [String(body.model), body.reasoning]),
+      ),
+    ).toEqual({
+      'gpt-5.6-luna': { effort: 'low' },
+      'gpt-5.6-sol': { effort: 'xhigh' },
+    })
+    expect(process.env[OPENAI_CODEX_REASONING_EFFORT_ENV_KEY]).toBe('high')
   })
 })

@@ -350,9 +350,22 @@ Agent Teams supports two execution backends:
 
 In addition to built-in agents, you can create your own specialized agents.
 
+### Desktop Management and Scopes
+
+In the desktop app, open **Settings → Agents**. The desktop app and CLI use the same Agent definition files; the configuration is not duplicated in a database or `localStorage`:
+
+| Scope | Single source of truth | Use |
+|-------|------------------------|-----|
+| **User** | `~/.claude/agents/*.md` | Available in every project |
+| **Project** | `<project-directory>/.claude/agents/*.md` | Available only in the current project; overrides a user Agent with the same name |
+
+User and project Agents can be created, edited, and deleted from the desktop app, and saving writes directly to the corresponding Markdown file. Other sources, including built-in Agents, plugins, managed policy, and CLI arguments, also appear in the list but are read-only because the desktop app does not own their source files.
+
+When the desktop app is connected to the active session, creating, editing, or deleting an Agent hot-reloads that session in place, so the next spawn uses the new definition immediately. If no runtime is available or the reload fails, the file is still saved; the desktop app shows a non-blocking warning, and the saved definition is loaded on the next launch.
+
 ### Definition Format
 
-Create a `.md` file in the `.claude/agents/` directory:
+Create a `.md` file in the user or project `agents` directory:
 
 ```markdown
 ---
@@ -364,6 +377,7 @@ tools:
   - Glob
   - Bash
 model: sonnet
+effort: high
 permissionMode: dontAsk
 maxTurns: 10
 ---
@@ -384,28 +398,54 @@ You are a professional code reviewer. Check the following aspects:
 | `description` | string | Description of when to use this agent |
 | `tools` | string[] | Allowed tool list (`['*']` for all) |
 | `disallowedTools` | string[] | Disallowed tool list |
-| `model` | string | Model to use (sonnet/opus/haiku/inherit) |
+| `model` | string | Model to use (`fable`/`opus`/`sonnet`/`haiku`, a full model ID, or `inherit`) |
+| `effort` | string | Reasoning effort (`low`/`medium`/`high`/`xhigh`/`max`), subject to model capabilities |
 | `permissionMode` | string | Permission mode |
 | `maxTurns` | number | Maximum conversation turns |
 | `mcpServers` | object[] | Required MCP servers |
 | `hooks` | object | Agent-specific hooks |
+| `color` | string | Display color used for the Agent |
 | `skills` | string[] | Available skills |
 | `memory` | string | Memory scope (user/project/local) |
 | `isolation` | string | Isolation mode (worktree/remote) |
 | `background` | boolean | Whether to run in background by default |
 
-### Loading Priority
+### Model, Reasoning Effort, and Thinking
 
-Custom agents are loaded according to the following priority:
+To inherit from the current session, the clearest form is to **omit the corresponding field**: omit `model` to inherit the primary conversation model, and omit `effort` to inherit the current session effort. `model: inherit` is the equivalent explicit spelling for the model field; `effort` has no `inherit` value.
 
-1. **Built-in agents** (built-in) — System predefined
-2. **Plugin agents** (plugin) — Registered via plugins
-3. **User agents** (user) — `~/.claude/agents/`
-4. **Project agents** (project) — `.claude/agents/` (project-level)
-5. **Flag agents** (flag) — Registered via API
-6. **Policy agents** (policy) — Organization policies
+Model resolution uses this precedence, from highest to lowest:
 
-Agents with the same name are overridden according to priority.
+1. A concrete model in `CLAUDE_CODE_SUBAGENT_MODEL` (`inherit` does not pin the model)
+2. The model supplied to this `Agent({ ..., model: "..." })` call
+3. `model` in the Agent Markdown frontmatter
+4. The primary conversation model
+
+Reasoning effort resolution uses this precedence, from highest to lowest:
+
+1. `CLAUDE_CODE_EFFORT_LEVEL`
+2. `effort` in the Agent Markdown frontmatter
+3. The current session effort
+4. The model default
+
+The `Agent` tool has no per-call `effort` parameter, so set it in the Agent definition or at the session level. Availability of `low`, `medium`, `high`, `xhigh`, and `max` depends on the resolved model and provider capabilities. Claude models fall back to a lower supported level, other providers normalize through their model catalogs, and models without effort support do not apply the field.
+
+Integer `effort` values remain only for compatibility with existing SDK/JSON and internal configurations; they are not a recommended official Agent configuration. The desktop Agent manager writes only the five named levels above.
+
+Subagents normally inherit the primary session's extended-thinking setting, but requirements of the resolved model take precedence; for example, Fable 5 is normalized to adaptive thinking. Per-Agent `thinking` and `thinkingBudget` frontmatter are not supported, and `effort` is not a fixed thinking-token budget.
+
+### Same-Name Source Priority
+
+When several sources define an Agent with the same name, cc-haha selects the active definition in this order, from highest to lowest:
+
+1. **Policy Agents** (policy) — Organization-managed policy
+2. **CLI argument Agents** (flag) — Registered with `--agents`
+3. **Project Agents** (project) — `<project-directory>/.claude/agents/`
+4. **User Agents** (user) — `~/.claude/agents/`
+5. **Plugin Agents** (plugin) — Supplied by plugins
+6. **Built-in Agents** (built-in) — System predefined
+
+The desktop app still shows overridden definitions and their sources, but spawning uses the highest-priority active definition.
 
 ---
 
@@ -438,6 +478,7 @@ Each agent can be configured with a different permission mode:
 | Broadcast a message | `SendMessage({ to: "*", message: "..." })` |
 | Request shutdown | `SendMessage({ to: "name", message: { type: "shutdown_request" } })` |
 | Delete a team | `TeamDelete()` |
-| Custom agent | Create a definition file in `.claude/agents/*.md` |
+| Manage custom Agents | Desktop **Settings → Agents**, or edit `~/.claude/agents/*.md` / `<project-directory>/.claude/agents/*.md` directly |
 | Specify a model | `Agent({ ..., model: "haiku" })` |
+| Specify reasoning effort | Set `effort: high` in the Agent Markdown frontmatter |
 | Name an agent | `Agent({ ..., name: "researcher" })` |

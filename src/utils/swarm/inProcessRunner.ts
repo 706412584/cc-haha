@@ -44,7 +44,10 @@ import {
   getProgressUpdate,
   updateProgressFromMessage,
 } from '../../tasks/LocalAgentTask/LocalAgentTask.js'
-import type { CustomAgentDefinition } from '../../tools/AgentTool/loadAgentsDir.js'
+import type {
+  CustomAgentDefinition,
+  PluginAgentDefinition,
+} from '../../tools/AgentTool/loadAgentsDir.js'
 import { runAgent } from '../../tools/AgentTool/runAgent.js'
 import { awaitClassifierAutoApproval } from '../../tools/BashTool/bashPermissions.js'
 import { BASH_TOOL_NAME } from '../../tools/BashTool/toolName.js'
@@ -476,7 +479,7 @@ export type InProcessRunnerConfig = {
   /** Initial prompt for the teammate */
   prompt: string
   /** Optional agent definition (for specialized agents) */
-  agentDefinition?: CustomAgentDefinition
+  agentDefinition?: CustomAgentDefinition | PluginAgentDefinition
   /** Teammate context for AsyncLocalStorage */
   teammateContext: TeammateContext
   /** Parent's tool use context */
@@ -511,6 +514,41 @@ export type InProcessRunnerResult = {
   error?: string
   /** Messages produced by the agent */
   messages: Message[]
+}
+
+export function buildInProcessTeammateAgentDefinition(
+  agentName: string,
+  systemPrompt: string,
+  agentDefinition?: CustomAgentDefinition | PluginAgentDefinition,
+): CustomAgentDefinition {
+  return {
+    agentType: agentName,
+    whenToUse: `In-process teammate: ${agentName}`,
+    rawSystemPrompt: systemPrompt,
+    getSystemPrompt: () => systemPrompt,
+    // Inject team-essential tools so teammates can always respond to shutdown
+    // requests, send messages, and coordinate via the task list.
+    tools: agentDefinition?.tools
+      ? [
+          ...new Set([
+            ...agentDefinition.tools,
+            SEND_MESSAGE_TOOL_NAME,
+            TEAM_CREATE_TOOL_NAME,
+            TEAM_DELETE_TOOL_NAME,
+            TASK_CREATE_TOOL_NAME,
+            TASK_GET_TOOL_NAME,
+            TASK_LIST_TOOL_NAME,
+            TASK_UPDATE_TOOL_NAME,
+          ]),
+        ]
+      : ['*'],
+    source: 'projectSettings',
+    permissionMode: 'default',
+    ...(agentDefinition?.model ? { model: agentDefinition.model } : {}),
+    ...(agentDefinition?.effort !== undefined
+      ? { effort: agentDefinition.effort }
+      : {}),
+  }
 }
 
 /**
@@ -972,33 +1010,13 @@ export async function runInProcessTeammate(
   // Resolve agent definition - use full system prompt with teammate addendum
   // IMPORTANT: Set permissionMode to 'default' so teammates always get full tool
   // access regardless of the leader's permission mode.
-  const resolvedAgentDefinition: CustomAgentDefinition = {
-    agentType: identity.agentName,
-    whenToUse: `In-process teammate: ${identity.agentName}`,
-    getSystemPrompt: () => teammateSystemPrompt,
-    // Inject team-essential tools so teammates can always respond to
-    // shutdown requests, send messages, and coordinate via the task list,
-    // even with explicit tool lists
-    tools: agentDefinition?.tools
-      ? [
-          ...new Set([
-            ...agentDefinition.tools,
-            SEND_MESSAGE_TOOL_NAME,
-            TEAM_CREATE_TOOL_NAME,
-            TEAM_DELETE_TOOL_NAME,
-            TASK_CREATE_TOOL_NAME,
-            TASK_GET_TOOL_NAME,
-            TASK_LIST_TOOL_NAME,
-            TASK_UPDATE_TOOL_NAME,
-          ]),
-        ]
-      : ['*'],
-    source: 'projectSettings',
-    permissionMode: 'default',
-    // Propagate model from custom agent definition so getAgentModel()
-    // can use it as a fallback when no tool-level model is specified
-    ...(agentDefinition?.model ? { model: agentDefinition.model } : {}),
-  }
+  // runAgent applies definition effort over the parent AppState while the
+  // existing ToolUseContext keeps the teammate on the session thinking mode.
+  const resolvedAgentDefinition = buildInProcessTeammateAgentDefinition(
+    identity.agentName,
+    teammateSystemPrompt,
+    agentDefinition,
+  )
 
   // All messages across all prompts
   const allMessages: Message[] = []

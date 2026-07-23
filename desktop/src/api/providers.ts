@@ -10,13 +10,11 @@ import type {
   FetchModelsResponse,
   ProviderTestResult,
 } from '../types/provider'
-import type { ProviderPreset } from '../types/providerPreset'
 
 type ProvidersResponse = { providers: SavedProvider[]; activeId: string | null }
 type ProvidersListResponse = ProvidersResponse & { providerOrder?: string[] }
 type ProvidersReorderResponse = { providers: SavedProvider[]; providerOrder?: string[] }
 type ProviderResponse = { provider: SavedProvider }
-type PresetsResponse = { presets: ProviderPreset[] }
 type TestResultResponse = { result: ProviderTestResult }
 type AuthStatusResponse = {
   hasAuth: boolean
@@ -27,10 +25,6 @@ type AuthStatusResponse = {
 export const providersApi = {
   list() {
     return api.get<ProvidersListResponse>('/api/providers')
-  },
-
-  presets() {
-    return api.get<PresetsResponse>('/api/providers/presets')
   },
 
   authStatus() {

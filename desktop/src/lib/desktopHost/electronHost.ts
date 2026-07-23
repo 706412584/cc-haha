@@ -106,6 +106,25 @@ export function createElectronHost(bridge: ElectronHostBridge): DesktopHost {
     trace: {
       openWindow: sessionId => invoke(ELECTRON_IPC_CHANNELS.traceOpenWindow, sessionId),
     },
+    pets: {
+      list: () => invoke(ELECTRON_IPC_CHANNELS.petsList),
+      createFromImage: input => invoke(ELECTRON_IPC_CHANNELS.petsCreateFromImage, input),
+      createFromAtlas: input => invoke(ELECTRON_IPC_CHANNELS.petsCreateFromAtlas, input),
+      openFolder: () => invoke(ELECTRON_IPC_CHANNELS.petsOpenFolder),
+      show: () => invoke(ELECTRON_IPC_CHANNELS.petsShow),
+      hide: () => invoke(ELECTRON_IPC_CHANNELS.petsHide),
+      showContextMenu: closeLabel => invoke(
+        ELECTRON_IPC_CHANNELS.petsShowContextMenu,
+        { closeLabel },
+      ),
+      dragWindow: payload => invoke(ELECTRON_IPC_CHANNELS.petsDragWindow, payload),
+      setIgnoreMouseEvents: ignore => invoke(ELECTRON_IPC_CHANNELS.petsSetIgnoreMouseEvents, ignore),
+      setInteractiveRegions: regions => invoke(ELECTRON_IPC_CHANNELS.petsSetInteractiveRegions, regions),
+      focusMainWindow: () => invoke(ELECTRON_IPC_CHANNELS.petsFocusMainWindow),
+      focusSession: sessionId => invoke(ELECTRON_IPC_CHANNELS.petsFocusSession, sessionId),
+      onNavigateSession: handler => subscribe(ELECTRON_EVENT_CHANNELS.petNavigateSession, handler),
+      onVisibilityChanged: handler => subscribe(ELECTRON_EVENT_CHANNELS.petVisibilityChanged, handler),
+    },
     dialogs: {
       open: options => invoke(ELECTRON_IPC_CHANNELS.dialogOpen, options),
       save: options => invoke(ELECTRON_IPC_CHANNELS.dialogSave, options),

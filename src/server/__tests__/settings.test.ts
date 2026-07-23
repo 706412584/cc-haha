@@ -8,6 +8,7 @@ import * as path from 'path'
 import * as os from 'os'
 import { SettingsService } from '../services/settingsService.js'
 import { conversationService } from '../services/conversationService.js'
+import { searchContentCoordinator } from '../services/localIndex/searchContentCoordinator.js'
 import { handleSettingsApi } from '../api/settings.js'
 import { handleModelsApi } from '../api/models.js'
 import { handleStatusApi, resetUsage, addUsage } from '../api/status.js'
@@ -440,6 +441,24 @@ describe('Settings API', () => {
     expect(body2.model).toBe('claude-opus-4-7')
   })
 
+  it('PUT /api/settings/user should persist the session content search toggle and stop indexing', async () => {
+    const stopSpy = spyOn(searchContentCoordinator, 'stop').mockResolvedValue(undefined)
+
+    try {
+      const disabled = makeRequest('PUT', '/api/settings/user', {
+        sessionContentSearchEnabled: false,
+      })
+      expect((await handleSettingsApi(disabled.req, disabled.url, disabled.segments)).status).toBe(200)
+
+      const current = makeRequest('GET', '/api/settings/user')
+      const response = await handleSettingsApi(current.req, current.url, current.segments)
+      expect(await response.json()).toMatchObject({ sessionContentSearchEnabled: false })
+      expect(stopSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      stopSpy.mockRestore()
+    }
+  })
+
   it('PUT /api/settings/user should sync thinking changes to active CLI sessions', async () => {
     const syncSpy = spyOn(conversationService, 'setMaxThinkingTokensForActiveSessions')
       .mockImplementation(() => 0)
@@ -646,7 +665,7 @@ describe('Models API', () => {
     expect(res.status).toBe(200)
     const body = await res.json()
     expect(body.models).toBeArray()
-    expect(body.models.length).toBe(3)
+    expect(body.models.length).toBe(4)
     expect(body.models[0].id).toContain('claude')
   })
 
@@ -731,7 +750,7 @@ describe('Models API', () => {
 
     expect(res.status).toBe(200)
     const body = await res.json()
-    expect(body.model.id).toBe('claude-opus-4-7')
+    expect(body.model.id).toBe('claude-opus-4-8')
   })
 
   it('GET /api/models/current should respect env-configured default model when no provider is active', async () => {

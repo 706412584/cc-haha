@@ -16,7 +16,7 @@ import {
 export const TELEGRAM_SELECTION_TTL_MS = 15 * 60 * 1000
 export const OFFICIAL_PROVIDER_VALUE = 'official'
 export const OPENAI_OFFICIAL_PROVIDER_ID = 'openai-official'
-export const OFFICIAL_DEFAULT_MODEL_ID = 'claude-opus-4-7'
+export const OFFICIAL_DEFAULT_MODEL_ID = 'claude-opus-4-8'
 export const OPENAI_OFFICIAL_DEFAULT_MODEL_ID = 'gpt-5.3-codex'
 
 type TelegramSendApi = {

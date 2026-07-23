@@ -138,6 +138,51 @@ describe('search content coordinator', () => {
     })
   })
 
+  test('marks oversized sources degraded without blocking later sources in the sweep', async () => {
+    const scope = await createTempScope()
+    const candidates = ['oversized', 'normal'].map((name, index) => ({
+      path: join(scope, 'projects', '-repo', `${name}.jsonl`),
+      projectPath: '-repo',
+      ownerSessionId: name,
+      ownerTranscriptPath: join(scope, 'projects', '-repo', `${name}.jsonl`),
+      modifiedAtMs: index,
+    }))
+    const projected: string[] = []
+    const coordinator = createSearchContentCoordinator({
+      resolveScope: () => scope,
+      resolveDatabasePath: () => join(scope, 'cc-haha', 'db', 'search-index-v1.sqlite'),
+      discoverSources: async (_scope, _signal, emit) => {
+        await emit(candidates)
+        return { complete: true }
+      },
+      createProjector: () => ({
+        async projectSource(candidate) {
+          projected.push(candidate.ownerSessionId)
+          if (candidate.ownerSessionId === 'oversized') {
+            return { kind: 'retry', reason: 'source-too-large' }
+          }
+          return {
+            kind: 'indexed',
+            action: 'full',
+            state: 'ready',
+            indexedBytes: 1,
+            indexedLines: 1,
+            documentCount: 1,
+          }
+        },
+        deleteSource: () => ({ kind: 'deleted' }),
+      }),
+      createWatcher: () => noOpWatcher(),
+    })
+
+    await coordinator.start()
+    const status = await waitForStatus(coordinator.getStatus, 'degraded')
+
+    expect(projected).toEqual(['oversized', 'normal'])
+    expect(status.lastErrorCode).toBe('SEARCH_CONTENT_SOURCE_TOO_LARGE')
+    await coordinator.stop()
+  })
+
   test('keeps queries on fallback until full backfill, then invalidates before watcher debounce', async () => {
     const scope = await createTempScope()
     const project = join(scope, 'projects', '-repo')

@@ -67,6 +67,8 @@ describe('provider settings JSON helpers', () => {
         ANTHROPIC_AUTH_TOKEN: 'old-auth-token',
         ANTHROPIC_BASE_URL: 'https://old.example.com',
         ANTHROPIC_MODEL: 'old-model',
+        ANTHROPIC_DEFAULT_FABLE_MODEL: 'old-fable',
+        ANTHROPIC_DEFAULT_FABLE_MODEL_NAME: 'Old Fable',
         CLAUDE_CODE_MODEL_CONTEXT_WINDOWS: '{"old":100000}',
         CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
         CC_HAHA_OPENAI_OAUTH_PROVIDER: '1',

@@ -72,10 +72,10 @@ const AgentMcpServerSpecSchema = lazySchema(() =>
 // is broken at module load time
 const AgentJsonSchema = lazySchema(() =>
   z.object({
-    description: z.string().min(1, 'Description cannot be empty'),
+    description: z.string().trim().min(1, 'Description cannot be empty'),
     tools: z.array(z.string()).optional(),
     disallowedTools: z.array(z.string()).optional(),
-    prompt: z.string().min(1, 'Prompt cannot be empty'),
+    prompt: z.string().trim().min(1, 'Prompt cannot be empty'),
     model: z
       .string()
       .trim()
@@ -91,6 +91,7 @@ const AgentJsonSchema = lazySchema(() =>
     initialPrompt: z.string().optional(),
     memory: z.enum(['user', 'project', 'local']).optional(),
     background: z.boolean().optional(),
+    color: z.enum(AGENT_COLORS).optional(),
     isolation: (process.env.USER_TYPE === 'ant'
       ? z.enum(['worktree', 'remote'])
       : z.enum(['worktree'])
@@ -106,6 +107,14 @@ const AgentsJsonSchema = lazySchema(() =>
 export type BaseAgentDefinition = {
   agentType: string
   whenToUse: string
+  /** Original custom-agent body before runtime additions such as memory. */
+  readonly rawSystemPrompt?: string
+  /**
+   * Persisted Markdown `tools` value before runtime additions such as memory.
+   * Markdown agents define this own property even when the field is absent so
+   * editors can distinguish inherited access from runtime-expanded tools.
+   */
+  readonly rawTools?: string[]
   tools?: string[]
   disallowedTools?: string[]
   skills?: string[] // Skill names to preload (parsed from comma-separated frontmatter)
@@ -118,6 +127,8 @@ export type BaseAgentDefinition = {
   maxTurns?: number // Maximum number of agentic turns before stopping
   filename?: string // Original filename without .md extension (for user/project/managed agents)
   baseDir?: string
+  /** Exact source path for Markdown custom agents; absent for JSON/built-in/plugin agents. */
+  readonly sourceFilePath?: string
   criticalSystemReminder_EXPERIMENTAL?: string // Short message re-injected at every user turn
   requiredMcpServers?: string[] // MCP server name patterns that must be configured for agent to be available
   background?: boolean // Always run as background task when spawned
@@ -144,6 +155,7 @@ export type BuiltInAgentDefinition = BaseAgentDefinition & {
 
 // Custom agents from user/project/policy settings - prompt stored via closure
 export type CustomAgentDefinition = BaseAgentDefinition & {
+  readonly rawSystemPrompt: string
   getSystemPrompt: () => string
   source: SettingSource
   filename?: string
@@ -212,7 +224,13 @@ export function getActiveAgentsFromList(
   const agentMap = new Map<string, AgentDefinition>()
 
   for (const agents of agentGroups) {
+    const seenWithinSource = new Set<string>()
     for (const agent of agents) {
+      // Markdown project agents are loaded closest-cwd first. Keep the first
+      // definition within one source, while later source groups still override
+      // lower-priority groups via Map.set below.
+      if (seenWithinSource.has(agent.agentType)) continue
+      seenWithinSource.add(agent.agentType)
       agentMap.set(agent.agentType, agent)
     }
   }
@@ -413,6 +431,19 @@ function getParseError(frontmatter: Record<string, unknown>): string {
     return 'Missing required "description" field in frontmatter'
   }
 
+  const effort = frontmatter['effort']
+  if (effort !== undefined && parseEffortValue(effort) === undefined) {
+    return `Invalid "effort" field in frontmatter. Valid options: ${EFFORT_LEVELS.join(', ')} or an integer`
+  }
+
+  const model = frontmatter['model']
+  if (
+    model !== undefined &&
+    (typeof model !== 'string' || model.trim().length === 0)
+  ) {
+    return 'Invalid "model" field in frontmatter. Expected a non-empty string or omit the field to inherit'
+  }
+
   return 'Unknown parsing error'
 }
 
@@ -477,6 +508,7 @@ export function parseAgentFromJson(
     const agent: CustomAgentDefinition = {
       agentType: name,
       whenToUse: parsed.description,
+      rawSystemPrompt: systemPrompt,
       ...(tools !== undefined ? { tools } : {}),
       ...(disallowedTools !== undefined ? { disallowedTools } : {}),
       getSystemPrompt: () => {
@@ -505,6 +537,7 @@ export function parseAgentFromJson(
       ...(parsed.background ? { background: parsed.background } : {}),
       ...(parsed.memory ? { memory: parsed.memory } : {}),
       ...(parsed.isolation ? { isolation: parsed.isolation } : {}),
+      ...(parsed.color ? { color: parsed.color } : {}),
     }
 
     return agent
@@ -568,7 +601,13 @@ export function parseAgentFromMarkdown(
     const color = frontmatter['color'] as AgentColorName | undefined
     const modelRaw = frontmatter['model']
     let model: string | undefined
-    if (typeof modelRaw === 'string' && modelRaw.trim().length > 0) {
+    if (modelRaw !== undefined) {
+      if (typeof modelRaw !== 'string' || modelRaw.trim().length === 0) {
+        logForDebugging(
+          `Agent file ${filePath} has invalid model '${modelRaw}'. Expected a non-empty string or omit the field to inherit.`,
+        )
+        return null
+      }
       const trimmed = modelRaw.trim()
       model = trimmed.toLowerCase() === 'inherit' ? 'inherit' : trimmed
     }
@@ -630,6 +669,7 @@ export function parseAgentFromMarkdown(
       logForDebugging(
         `Agent file ${filePath} has invalid effort '${effortRaw}'. Valid options: ${EFFORT_LEVELS.join(', ')} or an integer`,
       )
+      return null
     }
 
     // Parse permissionMode from frontmatter
@@ -659,6 +699,7 @@ export function parseAgentFromMarkdown(
 
     // Parse tools from frontmatter
     let tools = parseAgentToolsFromFrontmatter(frontmatter['tools'])
+    const rawTools = tools === undefined ? undefined : [...tools]
 
     // If memory is enabled, inject Write/Edit/Read tools for memory access
     if (isAutoMemoryEnabled() && memory && tools !== undefined) {
@@ -714,8 +755,11 @@ export function parseAgentFromMarkdown(
     const systemPrompt = content.trim()
     const agentDef: CustomAgentDefinition = {
       baseDir,
+      sourceFilePath: filePath,
       agentType: agentType,
       whenToUse: whenToUse,
+      rawSystemPrompt: systemPrompt,
+      rawTools,
       ...(tools !== undefined ? { tools } : {}),
       ...(disallowedTools !== undefined ? { disallowedTools } : {}),
       ...(skills !== undefined ? { skills } : {}),

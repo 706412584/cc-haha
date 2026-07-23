@@ -65,6 +65,7 @@ export type TerminalAppLike = {
 
 export type TerminalWebContentsLike = {
   send(channel: string, payload: unknown): void
+  isDestroyed?(): boolean
 }
 
 export type ElectronTerminalServiceOptions = {
@@ -94,6 +95,22 @@ type DesktopTerminalConfig = {
 
 type TerminalSession = {
   pty: TerminalPtyProcess
+}
+
+function sendTerminalEvent(
+  webContents: TerminalWebContentsLike,
+  channel: string,
+  payload: TerminalOutputPayload | TerminalExitPayload,
+): void {
+  if (webContents.isDestroyed?.()) return
+
+  try {
+    webContents.send(channel, payload)
+  } catch (error) {
+    // The renderer can be destroyed between the isDestroyed check and send.
+    if (error instanceof Error && error.message === 'Object has been destroyed') return
+    throw error
+  }
 }
 
 const preparedNodePtyDirs = new Set<string>()
@@ -563,15 +580,17 @@ export class ElectronTerminalService {
     this.sessions.set(sessionId, { pty })
 
     pty.onData(data => {
-      webContents.send(ELECTRON_EVENT_CHANNELS.terminalOutput, {
+      if (this.sessions.get(sessionId)?.pty !== pty) return
+      sendTerminalEvent(webContents, ELECTRON_EVENT_CHANNELS.terminalOutput, {
         session_id: sessionId,
         data,
       } satisfies TerminalOutputPayload)
     })
 
     pty.onExit(({ exitCode, signal }) => {
+      if (this.sessions.get(sessionId)?.pty !== pty) return
       this.sessions.delete(sessionId)
-      webContents.send(ELECTRON_EVENT_CHANNELS.terminalExit, {
+      sendTerminalEvent(webContents, ELECTRON_EVENT_CHANNELS.terminalExit, {
         session_id: sessionId,
         code: exitCode,
         signal: signal == null ? null : String(signal),

@@ -53,6 +53,9 @@ for command in bun node codesign hdiutil; do
   fi
 done
 
+echo "[build-macos-arm64] Checking that packaged output is not running..."
+(cd "${DESKTOP_DIR}" && bun run ./scripts/assert-electron-output-idle.ts "${ELECTRON_OUTPUT_DIR}" "${CANONICAL_OUTPUT_DIR}")
+
 read -r -a MAC_TARGET_ARRAY <<< "${MAC_TARGETS:-dmg zip}"
 if [[ "${#MAC_TARGET_ARRAY[@]}" -eq 0 ]]; then
   echo "[build-macos-arm64] MAC_TARGETS must contain at least one electron-builder macOS target." >&2
@@ -89,9 +92,10 @@ if [[ "${SKIP_INSTALL:-0}" != "1" ]]; then
 fi
 
 echo "[build-macos-arm64] Cleaning stale Electron outputs..."
+(cd "${DESKTOP_DIR}" && bun run ./scripts/assert-electron-output-idle.ts "${ELECTRON_OUTPUT_DIR}" "${CANONICAL_OUTPUT_DIR}")
+(cd "${DESKTOP_DIR}" && bun run ./scripts/clean-electron-output.ts)
 rm -rf "${DESKTOP_DIR}/dist"
 rm -rf "${DESKTOP_DIR}/electron-dist"
-rm -rf "${ELECTRON_OUTPUT_DIR}"
 rm -rf "${CANONICAL_OUTPUT_DIR}"
 rm -f "${DESKTOP_DIR}/tsconfig.tsbuildinfo"
 rm -rf "${DESKTOP_DIR}/src-tauri/binaries/claude-sidecar-"*

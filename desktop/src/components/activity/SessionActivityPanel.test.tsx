@@ -430,7 +430,7 @@ describe('SessionActivityPanel', () => {
     expect(screen.getByText('Inspect auth.ts')).toBeInTheDocument()
     expect(screen.getByText('Run focused tests')).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Open full run for Kuhn' }))
+    fireEvent.click(screen.getByRole('button', { name: /Open full run for Kuhn/ }))
     expect(onOpenSubagent).toHaveBeenCalledWith({ sessionId: 'session-1', toolUseId: 'tool-1', title: 'Kuhn' })
   })
 
@@ -776,12 +776,38 @@ describe('SessionActivityPanel', () => {
 
   it('opens a SubAgent row when the row is openable', () => {
     const onOpenSubagent = vi.fn()
-    render(<SessionActivityPanel model={model()} open onClose={vi.fn()} onOpenSubagent={onOpenSubagent} />)
+    render(
+      <SessionActivityPanel
+        model={model({
+          sections: {
+            ...model().sections,
+            subagents: {
+              id: 'subagents',
+              title: 'SubAgents',
+              emptyLabel: 'No SubAgents',
+              rows: [{
+                id: 'tool-1',
+                section: 'subagents',
+                label: 'Kuhn',
+                status: 'running',
+                taskId: 'agent-1',
+                toolUseId: 'tool-1',
+                openable: true,
+              }],
+            },
+          },
+        })}
+        open
+        onClose={vi.fn()}
+        onOpenSubagent={onOpenSubagent}
+      />,
+    )
 
     fireEvent.click(screen.getByRole('button', { name: /open full run for kuhn/i }))
 
     expect(onOpenSubagent).toHaveBeenCalledWith({
       sessionId: 'session-1',
+      taskId: 'agent-1',
       toolUseId: 'tool-1',
       title: 'Kuhn',
     })

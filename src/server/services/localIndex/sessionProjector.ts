@@ -103,6 +103,7 @@ export type SessionProjectorOptions = {
     Stats,
     'size' | 'mtimeMs' | 'ctimeMs' | 'dev' | 'ino' | 'birthtime' | 'mtime'
   >>
+  maxSourceBytes?: number
   canCommit?: () => boolean
   signal?: AbortSignal
 }
@@ -117,6 +118,7 @@ type SourceProjectionBundle = {
 }
 
 const READ_BUFFER_BYTES = 64 * 1024
+export const SESSION_INDEX_MAX_SOURCE_BYTES = 256 * 1024 * 1024
 const REDUCE_CHUNK_LIMIT = 256
 const REDUCE_BYTE_LIMIT = 1024 * 1024
 const ENTRY_INSERT_BATCH_SIZE = 75
@@ -454,6 +456,10 @@ export function createSessionProjector(options: SessionProjectorOptions): Sessio
   const verifyFingerprint = options.verifyFingerprint ?? verifySourceFingerprint
   const syncSourceStat = options.syncStat ?? statSync
   const sourceMetadataStat = options.sourceMetadataStat ?? stat
+  const configuredSourceLimit = options.maxSourceBytes ?? SESSION_INDEX_MAX_SOURCE_BYTES
+  const maxSourceBytes = Number.isFinite(configuredSourceLimit)
+    ? Math.max(1, Math.trunc(configuredSourceLimit))
+    : SESSION_INDEX_MAX_SOURCE_BYTES
   const projectionCache = new Map<string, TranscriptProjection>()
   const assertActive = (): void => {
     if (options.signal?.aborted || options.canCommit?.() === false) {
@@ -701,6 +707,11 @@ export function createSessionProjector(options: SessionProjectorOptions): Sessio
         assertActive()
       } catch (error) {
         return retryFrom(error)
+      }
+      const source = await io.statPath(candidate.path).catch(() => null)
+      if (!source) return { kind: 'retry', reason: 'transient-io' }
+      if (source.size > maxSourceBytes) {
+        return { kind: 'retry', reason: 'source-too-large' }
       }
       const existing = options.index.getSource(candidate.path)
       let action: 'full' | 'append' | 'rebuild' = 'full'

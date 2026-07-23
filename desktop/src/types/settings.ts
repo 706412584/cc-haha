@@ -148,6 +148,7 @@ export type UserSettings = {
   outputStyle?: string
   skipWebFetchPreflight?: boolean
   desktopNotificationsEnabled?: boolean
+  sessionContentSearchEnabled?: boolean
   webSearch?: WebSearchSettings
   updateProxy?: Partial<UpdateProxySettings>
   network?: {

@@ -57,10 +57,15 @@ import { getSubagentRunByTool } from '../services/subagentRunService.js'
 import { isValidPermissionMode } from '../services/settingsService.js'
 import { handleWorkspaceSearchRoute } from './workspaceSearch.js'
 import { localIndexCoordinator } from '../services/localIndex/coordinator.js'
+import { searchContentCoordinator } from '../services/localIndex/searchContentCoordinator.js'
+import { isSessionContentSearchEnabled } from '../services/localIndex/config.js'
+import { SettingsService } from '../services/settingsService.js'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 import { ProviderService } from '../services/providerService.js'
 import { isOpenAIOfficialProviderId } from '../services/openaiOfficialProvider.js'
 import { isGrokOfficialProviderId } from '../services/grokOfficialProvider.js'
+import { isPetAccessAuthorized } from '../localAccessAuth.js'
+import { PET_SESSION_LIMIT } from '../petAccessPolicy.js'
 
 const DEFAULT_GIT_INFO_COMMAND_TIMEOUT_MS = 3_000
 const INSPECTION_CONTEXT_TIMEOUT_MS = 5_000
@@ -83,6 +88,7 @@ const workspaceFileService = new WorkspaceFileService(
 
 const workspaceLspService = new WorkspaceLspService()
 const providerService = new ProviderService()
+const settingsService = new SettingsService()
 
 export async function handleSessionsApi(
   req: Request,
@@ -100,7 +106,7 @@ export async function handleSessionsApi(
     if (!sessionId) {
       switch (req.method) {
         case 'GET':
-          return await listSessions(url)
+          return await listSessions(req, url)
         case 'POST':
           return await createSession(req)
         default:
@@ -120,6 +126,10 @@ export async function handleSessionsApi(
         )
       }
       return await batchDeleteSessions(req)
+    }
+
+    if (sessionId === 'sync-indexes' && req.method === 'POST') {
+      return await syncSessionIndexes()
     }
 
     // Special collection route: /api/sessions/recent-projects
@@ -179,7 +189,11 @@ export async function handleSessionsApi(
       } catch {
         return Response.json({ error: 'NOT_FOUND', message: 'SubAgent run not found' }, { status: 404 })
       }
-      const result = await getSubagentRunByTool(sessionId, toolUseId)
+      const result = await getSubagentRunByTool(
+        sessionId,
+        toolUseId,
+        url.searchParams.get('taskId') ?? undefined,
+      )
       return result
         ? Response.json(result)
         : Response.json({ error: 'NOT_FOUND', message: 'SubAgent run not found' }, { status: 404 })
@@ -244,7 +258,7 @@ export async function handleSessionsApi(
           { status: 405 }
         )
       }
-      return await getSessionInspection(sessionId, url)
+      return await getSessionInspection(req, sessionId, url)
     }
 
     if (subResource === 'workspace') {
@@ -310,19 +324,50 @@ export async function handleSessionsApi(
 // Handler implementations
 // ============================================================================
 
-async function listSessions(url: URL): Promise<Response> {
+async function syncSessionIndexes(): Promise<Response> {
+  const sessionIndex = await localIndexCoordinator.sync()
+  const settings = await settingsService.getUserSettings()
+  const searchEnabled = isSessionContentSearchEnabled(settings)
+  const searchIndex = searchEnabled
+    ? await searchContentCoordinator.sync()
+    : null
+  return Response.json({ sessionIndex, searchEnabled, searchIndex })
+}
+
+async function listSessions(req: Request, url: URL): Promise<Response> {
   const project = url.searchParams.get('project') || undefined
-  const limit = parseInt(url.searchParams.get('limit') || '20', 10)
+  const requestedLimit = parseInt(url.searchParams.get('limit') || '20', 10)
   const offset = parseInt(url.searchParams.get('offset') || '0', 10)
 
-  if (isNaN(limit) || limit < 0) {
+  if (isNaN(requestedLimit) || requestedLimit < 0) {
     throw ApiError.badRequest('Invalid limit parameter')
   }
   if (isNaN(offset) || offset < 0) {
     throw ApiError.badRequest('Invalid offset parameter')
   }
 
-  const result = await sessionService.listSessions({ project, limit, offset })
+  const petAccess = isPetAccessAuthorized(req)
+  const limit = petAccess ? Math.min(requestedLimit, PET_SESSION_LIMIT) : requestedLimit
+  const result = await sessionService.listSessions({
+    ...(petAccess ? {} : { project }),
+    limit,
+    offset: petAccess ? 0 : offset,
+  })
+  if (petAccess) {
+    return Response.json({
+      sessions: result.sessions.map((session) => ({
+        id: session.id,
+        title: session.title,
+        createdAt: session.createdAt,
+        modifiedAt: session.modifiedAt,
+        messageCount: session.messageCount,
+        projectPath: '',
+        workDir: null,
+        workDirExists: false,
+      })),
+      total: result.sessions.length,
+    })
+  }
   return Response.json({
     ...result,
     index: localIndexCoordinator.getPublicStatus(),
@@ -901,7 +946,7 @@ async function getSessionSlashCommands(sessionId: string): Promise<Response> {
   return Response.json({ commands: slashCommands })
 }
 
-async function getSessionInspection(sessionId: string, url: URL): Promise<Response> {
+async function getSessionInspection(req: Request, sessionId: string, url: URL): Promise<Response> {
   const includeContext = url.searchParams.get('includeContext') !== '0'
   const contextOnly = includeContext && url.searchParams.get('contextOnly') === '1'
   let transcriptSnapshot: Awaited<ReturnType<typeof sessionService.getInspectionTranscriptSnapshot>> | undefined
@@ -983,8 +1028,10 @@ async function getSessionInspection(sessionId: string, url: URL): Promise<Respon
         sessionId,
         { subtype: 'get_context_usage', estimateOnly: true },
         INSPECTION_CONTEXT_TIMEOUT_MS,
+        req.signal,
       )
     } catch (error) {
+      throwIfRequestAborted(req)
       errors.context = error instanceof Error ? error.message : String(error)
     }
     if (!response.context) {
@@ -996,16 +1043,18 @@ async function getSessionInspection(sessionId: string, url: URL): Promise<Respon
   } else {
     const basicControlTimeoutMs = includeContext ? 10_000 : 4_000
     const [usageResult, contextResult, mcpResult] = await Promise.allSettled([
-      conversationService.requestControl(sessionId, { subtype: 'get_session_usage' }, basicControlTimeoutMs),
+      conversationService.requestControl(sessionId, { subtype: 'get_session_usage' }, basicControlTimeoutMs, req.signal),
       includeContext
         ? conversationService.requestControl(
             sessionId,
             { subtype: 'get_context_usage', estimateOnly: true },
             20_000,
+            req.signal,
           )
         : Promise.resolve(null),
-      conversationService.requestControl(sessionId, { subtype: 'mcp_status' }, basicControlTimeoutMs),
+      conversationService.requestControl(sessionId, { subtype: 'mcp_status' }, basicControlTimeoutMs, req.signal),
     ])
+    throwIfRequestAborted(req)
 
     if (usageResult.status === 'fulfilled') {
       const transcriptUsage = (await getTranscriptSnapshot())?.usage ?? null
@@ -1045,6 +1094,12 @@ async function getSessionInspection(sessionId: string, url: URL): Promise<Respon
 
   response.errors = errors
   return Response.json(response)
+}
+
+function throwIfRequestAborted(req: Request): void {
+  if (!req.signal.aborted) return
+  if (req.signal.reason instanceof Error) throw req.signal.reason
+  throw new DOMException('The operation was aborted', 'AbortError')
 }
 
 function usageTokenTotal(usage: unknown): number {

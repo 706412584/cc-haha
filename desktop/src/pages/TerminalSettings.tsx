@@ -75,6 +75,7 @@ export function TerminalSettings({
   const desktopTerminal = useSettingsStore((state) => state.desktopTerminal)
   const setDesktopTerminal = useSettingsStore((state) => state.setDesktopTerminal)
   const hostRef = useRef<HTMLDivElement | null>(null)
+  const lifecycleVersionRef = useRef(0)
   const localRuntimeIdRef = useRef<string | null>(null)
   if (!localRuntimeIdRef.current) {
     localRuntimeIdRef.current = runtimeId ?? createLocalTerminalRuntimeId()
@@ -407,6 +408,8 @@ export function TerminalSettings({
   }, [cwd, resizeSession, runtime])
 
   useEffect(() => {
+    lifecycleVersionRef.current += 1
+    const lifecycleVersion = lifecycleVersionRef.current
     if (!terminalApi.isAvailable()) return
     if (runtime.terminal) {
       if (hostRef.current) {
@@ -429,7 +432,13 @@ export function TerminalSettings({
     return () => {
       observer.disconnect()
       if (!preserveOnUnmount) {
-        destroyTerminalRuntime(runtime.id)
+        // StrictMode replays effects once during initial mount. Let the replay
+        // retain this runtime instead of leaving the component with a stale
+        // object that can never start or restart.
+        queueMicrotask(() => {
+          if (lifecycleVersionRef.current !== lifecycleVersion) return
+          destroyTerminalRuntime(runtime.id)
+        })
       }
     }
   }, [preserveOnUnmount, resizeSession, runtime, startTerminal])

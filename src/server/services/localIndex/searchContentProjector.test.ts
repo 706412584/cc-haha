@@ -227,6 +227,31 @@ describe('search content projector', () => {
     }
   })
 
+  it('rejects an oversized source before opening or fingerprinting its contents', async () => {
+    const { database, index, candidate, sourcePath } = await setup()
+    let statCalls = 0
+    const projector = createSearchContentProjector({
+      database,
+      index,
+      maxSourceBytes: 128,
+      statSource: async () => {
+        statCalls += 1
+        return { size: 129 } as Awaited<ReturnType<typeof stat>>
+      },
+    })
+
+    try {
+      expect(await projector.projectSource(candidate)).toEqual({
+        kind: 'retry',
+        reason: 'source-too-large',
+      })
+      expect(statCalls).toBe(1)
+      expect(index.getSource(sourcePath)).toBeNull()
+    } finally {
+      database.close()
+    }
+  })
+
   it('bounds a JSONL line without a newline and degrades at the last safe boundary', async () => {
     const root = await mkdtemp(join(tmpdir(), 'cc-haha-search-projector-bounded-'))
     tempDirs.push(root)

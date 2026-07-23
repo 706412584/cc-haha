@@ -55,6 +55,15 @@ describe('Electron tray service', () => {
         desktopRoot: root,
         show,
         quit,
+        electronRuntime: {
+          Menu: {
+            buildFromTemplate: trayMocks.buildFromTemplate,
+          },
+          Tray: trayMocks.Tray.mockImplementation(() => trayMocks.tray),
+          nativeImage: {
+            createFromPath: trayMocks.createFromPath,
+          },
+        } as never,
       })
 
       expect(trayMocks.createFromPath).toHaveBeenCalledWith(iconPath)

@@ -79,6 +79,43 @@ describe('release desktop workflow', () => {
     expect(installStep).toContain('install -y build-essential curl wget file libfuse2')
   })
 
+  test('desktop build workflows install the Bun version declared by packageManager', () => {
+    for (const workflowPath of [
+      '.github/workflows/build-desktop-dev.yml',
+      '.github/workflows/release-desktop.yml',
+    ]) {
+      const workflow = readFileSync(workflowPath, 'utf8')
+      const setupBunStepCount = workflow.match(/uses: oven-sh\/setup-bun@v2/g)?.length ?? 0
+      const packageVersionCount = workflow.match(/bun-version-file: package\.json/g)?.length ?? 0
+
+      expect(setupBunStepCount, workflowPath).toBeGreaterThan(0)
+      expect(packageVersionCount, workflowPath).toBe(setupBunStepCount)
+      expect(workflow, workflowPath).not.toContain('bun-version: latest')
+    }
+  })
+
+  test('Windows x64 builds execute the compiled sidecar before packaging', () => {
+    for (const workflowPath of [
+      '.github/workflows/build-desktop-dev.yml',
+      '.github/workflows/release-desktop.yml',
+    ]) {
+      const workflow = readFileSync(workflowPath, 'utf8')
+      const smokeStep = extractStep(workflow, 'Verify compiled Windows sidecar startup')
+
+      expect(smokeStep, workflowPath).toContain(
+        "if: matrix.smoke_platform == 'windows' && matrix.arch == 'x64'",
+      )
+      expect(smokeStep, workflowPath).toContain('working-directory: desktop')
+      expect(smokeStep, workflowPath).toContain("CC_HAHA_COMPILED_SIDECAR_SMOKE_STARTS: '20'")
+      expect(smokeStep, workflowPath).toContain('bun run test:compiled-sidecar-smoke')
+      expect(workflow.indexOf('Build sidecars'), workflowPath).toBeLessThan(
+        workflow.indexOf('Verify compiled Windows sidecar startup'),
+      )
+      expect(workflow.indexOf('Verify compiled Windows sidecar startup'), workflowPath)
+        .toBeLessThan(workflow.indexOf('Build renderer and Electron bundles'))
+    }
+  })
+
   test('desktop build workflows prepare the pinned ripgrep asset before sidecars', () => {
     for (const workflowPath of [
       '.github/workflows/build-desktop-dev.yml',

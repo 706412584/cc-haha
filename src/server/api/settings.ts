@@ -14,6 +14,8 @@ import { SettingsService } from '../services/settingsService.js'
 import { ApiError, errorResponse } from '../middleware/errorHandler.js'
 import { ensureDesktopCliLauncherInstalled } from '../services/desktopCliLauncherService.js'
 import { conversationService } from '../services/conversationService.js'
+import { searchContentCoordinator } from '../services/localIndex/searchContentCoordinator.js'
+import { isSessionContentSearchEnabled } from '../services/localIndex/config.js'
 import {
   DEFAULT_OUTPUT_STYLE_NAME,
   getAllOutputStyles,
@@ -99,6 +101,12 @@ async function handleUserSettings(req: Request): Promise<Response> {
     const body = await parseJsonBody(req)
     await settingsService.updateUserSettings(body)
     syncThinkingSettingToActiveSessions(body)
+    if (Object.prototype.hasOwnProperty.call(body, 'sessionContentSearchEnabled')) {
+      const settings = await settingsService.getUserSettings()
+      if (!isSessionContentSearchEnabled(settings)) {
+        await searchContentCoordinator.stop()
+      }
+    }
     return Response.json({ ok: true })
   }
 

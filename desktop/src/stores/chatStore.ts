@@ -112,6 +112,8 @@ export type PerSessionState = {
   messages: UIMessage[]
   chatState: ChatState
   connectionState: ConnectionState
+  /** True after the server's authoritative reconnect snapshot has arrived. */
+  connectionSnapshotReady?: boolean
   historyStatus?: 'idle' | 'loading' | 'ready' | 'error'
   historyError?: string | null
   streamingText: string
@@ -176,6 +178,7 @@ const DEFAULT_SESSION_STATE: PerSessionState = {
   messages: [],
   chatState: 'idle',
   connectionState: 'disconnected',
+  connectionSnapshotReady: false,
   historyStatus: 'idle',
   historyError: null,
   streamingText: '',
@@ -293,7 +296,14 @@ type ChatStore = {
   sessions: Record<string, PerSessionState>
 
   getSession: (sessionId: string) => PerSessionState
-  connectToSession: (sessionId: string) => void
+  connectToSession: (
+    sessionId: string,
+    options?: {
+      prewarm?: boolean
+      applyRuntimeSelection?: boolean
+      minimalBootstrap?: boolean
+    },
+  ) => void
   disconnectSession: (sessionId: string) => void
   sendMessage: (
     sessionId: string,
@@ -391,6 +401,13 @@ function consumePendingTaskToolUseId(sessionId: string, toolUseId: string): bool
 
 function clearPendingTaskToolUseIds(sessionId: string): void {
   pendingTaskToolUseIdsBySession.delete(sessionId)
+}
+
+function consumeAllPendingTaskToolUseIds(sessionId: string): boolean {
+  const hasPendingTaskTools =
+    (pendingTaskToolUseIdsBySession.get(sessionId)?.size ?? 0) > 0
+  pendingTaskToolUseIdsBySession.delete(sessionId)
+  return hasPendingTaskTools
 }
 
 function rememberPendingToolParentUseId(
@@ -1255,14 +1272,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   getSession: (sessionId) => get().sessions[sessionId] ?? createDefaultSessionState(),
 
-  connectToSession: (sessionId) => {
-    void useCLITaskStore.getState().fetchSessionTasks(sessionId)
+  connectToSession: (sessionId, options) => {
+    if (!options?.minimalBootstrap) {
+      void useCLITaskStore.getState().fetchSessionTasks(sessionId)
+    }
 
     const existing = get().sessions[sessionId]
     if (existing && existing.connectionState !== 'disconnected') {
       if (
         existing.messages.length === 0 &&
-        (existing.historyStatus === 'idle' || existing.historyStatus === 'error')
+        (existing.historyStatus === 'idle' || existing.historyStatus === 'error') &&
+        !options?.minimalBootstrap
       ) {
         void get().loadHistory(sessionId)
       }
@@ -1275,6 +1295,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         [sessionId]: {
           ...createDefaultSessionState(),
           connectionState: 'connecting',
+          connectionSnapshotReady: false,
           messages: existing?.messages ?? [],
           activeGoal: existing?.activeGoal ?? null,
           composerDraft: existing?.composerDraft ?? null,
@@ -1286,15 +1307,27 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     wsManager.clearHandlers(sessionId)
     wsManager.connect(sessionId)
+    wsManager.onConnectionState(sessionId, (connectionState) => {
+      if (!get().sessions[sessionId]) return
+      set((s) => ({
+        sessions: updateSessionIn(s.sessions, sessionId, () => ({
+          connectionState,
+          connectionSnapshotReady: false,
+        })),
+      }))
+    })
     wsManager.onMessage(sessionId, (msg) => {
       if (msg.type === 'connected') {
-        set((s) => ({ sessions: updateSessionIn(s.sessions, sessionId, () => ({ connectionState: 'connected' })) }))
+        set((s) => ({ sessions: updateSessionIn(s.sessions, sessionId, () => ({
+          connectionState: 'connected',
+          connectionSnapshotReady: false,
+        })) }))
       }
       get().handleServerMessage(sessionId, msg)
     })
 
     const runtimeSelection = useSessionRuntimeStore.getState().selections[sessionId]
-    if (runtimeSelection) {
+    if (runtimeSelection && options?.applyRuntimeSelection !== false) {
       const persistedSelection = useSessionStore.getState().sessions.find(
         (session) => session.id === sessionId,
       )
@@ -1317,6 +1350,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       wsManager.send(sessionId, { type: 'set_pipeline_mode', flavor: 'solo' })
     }
     if (
+      options?.prewarm !== false &&
       !sessionId.startsWith('__') &&
       !useTeamStore.getState().getMemberBySessionId(sessionId) &&
       shouldPrewarmSession(sessionId)
@@ -1324,18 +1358,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       wsManager.send(sessionId, { type: 'prewarm_session' })
     }
 
-    get().loadHistory(sessionId)
-    sessionsApi.getSlashCommands(sessionId)
-      .then(({ commands }) => {
-        if (get().sessions[sessionId]) {
-          set((s) => ({ sessions: updateSessionIn(s.sessions, sessionId, () => ({ slashCommands: commands })) }))
-        }
-      })
-      .catch(() => {
-        if (get().sessions[sessionId]) {
-          set((s) => ({ sessions: updateSessionIn(s.sessions, sessionId, () => ({ slashCommands: [] })) }))
-        }
-      })
+    if (!options?.minimalBootstrap) {
+      get().loadHistory(sessionId)
+      sessionsApi.getSlashCommands(sessionId)
+        .then(({ commands }) => {
+          if (get().sessions[sessionId]) {
+            set((s) => ({ sessions: updateSessionIn(s.sessions, sessionId, () => ({ slashCommands: commands })) }))
+          }
+        })
+        .catch(() => {
+          if (get().sessions[sessionId]) {
+            set((s) => ({ sessions: updateSessionIn(s.sessions, sessionId, () => ({ slashCommands: [] })) }))
+          }
+        })
+    }
   },
 
   disconnectSession: (sessionId) => {
@@ -2912,6 +2948,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             remainingComputerUsePermissions.length > 0
 
           return {
+            connectionSnapshotReady: true,
             pendingPermissions,
             pendingPermission: remainingPermissions[remainingPermissions.length - 1] ?? null,
             pendingComputerUsePermissions,
@@ -2933,6 +2970,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       case 'message_complete': {
         const session = get().sessions[sessionId]
         if (!session) break
+        if (consumeAllPendingTaskToolUseIds(sessionId)) {
+          const cliTaskStore = useCLITaskStore.getState()
+          if (cliTaskStore.sessionId === sessionId) {
+            void cliTaskStore.refreshTasks(sessionId)
+          }
+        }
         if (session.suppressNextTaskNotificationResponse) {
           consumePendingDelta(sessionId)
           clearPendingToolInputDelta(sessionId)
@@ -4323,11 +4366,13 @@ function pathsReferToSameFile(left: string | undefined, right: string | undefine
   )
 }
 
-function extractRestoredUserDisplay(text: string): {
+type RestoredUserDisplay = {
   content: string
   attachments?: UIAttachment[]
   modelContent?: string
-} {
+}
+
+function extractRestoredUserDisplay(text: string): RestoredUserDisplay {
   const leading = extractLeadingFileReferences(text)
   const workspace = parseWorkspaceReferenceHistoryPrompt(leading.content)
   if (!workspace) return leading
@@ -4346,6 +4391,38 @@ function extractRestoredUserDisplay(text: string): {
     attachments: attachments.length > 0 ? attachments : undefined,
     modelContent: text,
   }
+}
+
+function imageAttachmentsMatchReplay(
+  attachments: UIAttachment[],
+  replayedImageSourcePaths: string[],
+): boolean {
+  if (attachments.length !== replayedImageSourcePaths.length) return false
+
+  const consumedReplayIndexes = new Set<number>()
+  return attachments.every((attachment) => {
+    const identities = [attachment.path, attachment.name]
+      .filter((identity): identity is string => Boolean(identity))
+      .flatMap((identity) => {
+        const normalized = identity.replace(/\\/g, '/').replace(/^\.\//, '')
+        const basename = normalized.split('/').pop()
+        return basename && basename !== normalized ? [normalized, basename] : [normalized]
+      })
+
+    const replayIndex = replayedImageSourcePaths.findIndex((replayedPath, index) => {
+      if (consumedReplayIndexes.has(index)) return false
+      const normalizedReplayPath = replayedPath.replace(/\\/g, '/').replace(/^\.\//, '')
+      const replayBasename = normalizedReplayPath.split('/').pop() ?? normalizedReplayPath
+      return identities.some((identity) =>
+        pathsReferToSameFile(identity, normalizedReplayPath) ||
+        replayBasename === identity ||
+        replayBasename.endsWith(`-${identity}`),
+      )
+    })
+    if (replayIndex < 0) return false
+    consumedReplayIndexes.add(replayIndex)
+    return true
+  })
 }
 
 export function appendReplayedUserMessage(
@@ -4440,38 +4517,6 @@ function mapQueuedDisplayAttachments(attachments?: AttachmentRef[]): UIAttachmen
     note: attachment.note,
     quote: attachment.quote,
   }))
-}
-
-function imageAttachmentsMatchReplay(
-  attachments: UIAttachment[],
-  replayedImageSourcePaths: string[],
-): boolean {
-  if (attachments.length !== replayedImageSourcePaths.length) return false
-
-  const consumedReplayIndexes = new Set<number>()
-  return attachments.every((attachment) => {
-    const identities = [attachment.path, attachment.name]
-      .filter((identity): identity is string => Boolean(identity))
-      .flatMap((identity) => {
-        const normalized = identity.replace(/\\/g, '/').replace(/^\.\//, '')
-        const basename = normalized.split('/').pop()
-        return basename && basename !== normalized ? [normalized, basename] : [normalized]
-      })
-
-    const replayIndex = replayedImageSourcePaths.findIndex((replayedPath, index) => {
-      if (consumedReplayIndexes.has(index)) return false
-      const normalizedReplayPath = replayedPath.replace(/\\/g, '/').replace(/^\.\//, '')
-      const replayBasename = normalizedReplayPath.split('/').pop() ?? normalizedReplayPath
-      return identities.some((identity) =>
-        pathsReferToSameFile(identity, normalizedReplayPath) ||
-        replayBasename === identity ||
-        replayBasename.endsWith(`-${identity}`),
-      )
-    })
-    if (replayIndex < 0) return false
-    consumedReplayIndexes.add(replayIndex)
-    return true
-  })
 }
 
 function findCurrentTurnUserMessageIndex(

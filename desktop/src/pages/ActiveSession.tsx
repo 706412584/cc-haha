@@ -452,8 +452,11 @@ export function ActiveSession() {
     closeActivityPanel(activeTabId)
   }, [activeTabId, closeActivityPanel, hasVisibleActivity, isActivityPanelOpen])
 
-  const handleOpenSubagentRun = useCallback((payload: { sessionId: string; toolUseId: string; title: string }) => {
-    useTabStore.getState().openSubagentTab(payload.sessionId, payload.toolUseId, payload.title)
+  // Workspace exclusivity is render-time only: keep the activity open state so
+  // closing the workbench restores the Activity rail without re-opening it.
+
+  const handleOpenSubagentRun = useCallback((payload: { sessionId: string; taskId?: string; toolUseId: string; title: string }) => {
+    useTabStore.getState().openSubagentTab(payload.sessionId, payload.toolUseId, payload.title, payload.taskId)
   }, [])
   const handleOpenTeamMember = useCallback((member: TeamMember) => {
     useTeamStore.getState().openMemberSession(member)

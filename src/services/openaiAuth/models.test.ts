@@ -11,6 +11,7 @@ import {
   isOpenAIResponsesModel,
   resolveOpenAICodexModel,
   resolveOpenAIReasoningEffort,
+  resolveOpenAIReasoningEffortWithPriority,
 } from './models.js'
 
 describe('openai auth model resolution', () => {
@@ -23,8 +24,9 @@ describe('openai auth model resolution', () => {
     expect(isOpenAIResponsesModel('o3-mini')).toBe(true)
   })
 
-  test('maps opus aliases to the OpenAI default model', () => {
+  test('maps frontier Claude aliases to the OpenAI default model', () => {
     expect(resolveOpenAICodexModel('opus')).toBe(OPENAI_DEFAULT_MAIN_MODEL)
+    expect(resolveOpenAICodexModel('fable')).toBe(OPENAI_DEFAULT_MAIN_MODEL)
   })
 
   test('maps Codex OAuth GPT models to effective Codex context windows', () => {
@@ -60,5 +62,27 @@ describe('openai auth model resolution', () => {
     expect(resolveOpenAIReasoningEffort('gpt-5.6-luna', 'max')).toBe('max')
     expect(resolveOpenAIReasoningEffort('gpt-5.5', 'max')).toBe('medium')
     expect(resolveOpenAIReasoningEffort('gpt-5.5', 'xhigh')).toBe('xhigh')
+  })
+
+  test('uses the first model-supported effort candidate', () => {
+    expect(
+      resolveOpenAIReasoningEffortWithPriority('gpt-5.6-luna', [
+        'low',
+        'high',
+      ]),
+    ).toBe('low')
+    expect(
+      resolveOpenAIReasoningEffortWithPriority('gpt-5.5', [
+        'max',
+        'high',
+        'xhigh',
+      ]),
+    ).toBe('high')
+    expect(
+      resolveOpenAIReasoningEffortWithPriority('gpt-5.5', [
+        'max',
+        'invalid',
+      ]),
+    ).toBe('medium')
   })
 })

@@ -15,20 +15,10 @@ import {
 import type { PluginManifest } from '../../utils/plugins/schemas.js'
 import { getMediaGenConfig, getMediaGenProviderCredentials, saveMediaGenConfig } from '../services/mediaGenConfigService.js'
 import { ProviderService } from '../services/providerService.js'
+import { reloadSessionComponents } from '../services/sessionComponentReloadService.js'
 
 const pluginService = new PluginService()
 const providerService = new ProviderService()
-
-type PluginSessionReloadSummary = {
-  applied: boolean
-  reason?: 'not_running' | 'failed'
-  commands: number
-  agents: number
-  plugins: number
-  mcpServers: number
-  errors: number
-  error?: string
-}
 
 export async function handlePluginsApi(
   req: Request,
@@ -172,7 +162,7 @@ export async function handlePluginsApi(
 
       return Response.json({
         ...response,
-        session: await reloadSessionPlugins(sessionId),
+        session: await reloadSessionComponents(sessionId),
       })
     }
 
@@ -237,52 +227,6 @@ export async function handlePluginsApi(
     )
   } catch (error) {
     return errorResponse(error)
-  }
-}
-
-async function reloadSessionPlugins(
-  sessionId: string,
-): Promise<PluginSessionReloadSummary> {
-  if (!conversationService.hasSession(sessionId)) {
-    return {
-      applied: false,
-      reason: 'not_running',
-      commands: 0,
-      agents: 0,
-      plugins: 0,
-      mcpServers: 0,
-      errors: 0,
-    }
-  }
-
-  try {
-    const response = await conversationService.requestControl(
-      sessionId,
-      { subtype: 'reload_plugins' },
-      120_000,
-    )
-    const commands = Array.isArray(response.commands) ? response.commands : []
-    const normalizedCommands = updateSessionSlashCommands(sessionId, commands)
-
-    return {
-      applied: true,
-      commands: normalizedCommands.length,
-      agents: Array.isArray(response.agents) ? response.agents.length : 0,
-      plugins: Array.isArray(response.plugins) ? response.plugins.length : 0,
-      mcpServers: Array.isArray(response.mcpServers) ? response.mcpServers.length : 0,
-      errors: typeof response.error_count === 'number' ? response.error_count : 0,
-    }
-  } catch (error) {
-    return {
-      applied: false,
-      reason: 'failed',
-      commands: 0,
-      agents: 0,
-      plugins: 0,
-      mcpServers: 0,
-      errors: 0,
-      error: error instanceof Error ? error.message : String(error),
-    }
   }
 }
 

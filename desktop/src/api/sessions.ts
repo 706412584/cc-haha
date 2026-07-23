@@ -1,15 +1,20 @@
 import { api } from './client'
 import type { AgentTaskNotification } from '../types/chat'
-import type { RuntimeSelection } from '../types/runtime'
 import type { LocalIndexStatus, SessionListItem, MessageEntry } from '../types/session'
 import type { PermissionMode } from '../types/settings'
 import type { TraceCallRecord, TraceSession } from '../types/trace'
 import type { WorkspaceLspDiagnostic, WorkspaceLspState } from '../types/lsp'
+import type { RuntimeSelection } from '../types/runtime'
 
 export type SessionsResponse = {
   sessions: SessionListItem[]
   total: number
   index?: LocalIndexStatus
+}
+export type PetSessionRuntimeStatus = 'waiting' | 'failed' | 'review' | 'running' | 'idle'
+export type SessionChatStatusResponse = {
+  state: 'idle' | 'thinking' | 'compacting' | 'tool_executing'
+  activityState: PetSessionRuntimeStatus
 }
 type MessagesResponse = {
   messages: MessageEntry[]
@@ -399,6 +404,10 @@ export const sessionsApi = {
     return api.get<MessagesResponse>(`/api/sessions/${sessionId}/messages`)
   },
 
+  getChatStatus(sessionId: string, signal?: AbortSignal) {
+    return api.get<SessionChatStatusResponse>(`/api/sessions/${sessionId}/chat/status`, { signal })
+  },
+
   getTrace(sessionId: string) {
     return api.get<TraceSession>(`/api/sessions/${sessionId}/trace`)
   },
@@ -432,6 +441,10 @@ export const sessionsApi = {
 
   rename(sessionId: string, title: string) {
     return api.patch<{ ok: true }>(`/api/sessions/${sessionId}`, { title })
+  },
+
+  syncIndexes() {
+    return api.post('/api/sessions/sync-indexes')
   },
 
   getRecentProjects(limit?: number) {

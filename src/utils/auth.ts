@@ -10,7 +10,10 @@ import {
   logEvent,
 } from 'src/services/analytics/index.js'
 import { getModelStrings } from 'src/utils/model/modelStrings.js'
-import { getAPIProvider } from 'src/utils/model/providers.js'
+import {
+  getAPIProvider,
+  isFirstPartyAnthropicBaseUrl,
+} from 'src/utils/model/providers.js'
 import {
   getIsNonInteractiveSession,
   preferThirdPartyAuthentication,
@@ -129,9 +132,14 @@ export function isAnthropicAuthEnabled(): boolean {
     process.env.CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR
 
   // Check if API key is from an external source (not managed by /login)
-  const { source: apiKeySource } = getAnthropicApiKeyWithSource({
-    skipRetrievingKeyFromApiKeyHelper: true,
-  })
+  let apiKeySource: ApiKeySource = 'none'
+  try {
+    ;({ source: apiKeySource } = getAnthropicApiKeyWithSource({
+      skipRetrievingKeyFromApiKeyHelper: true,
+    }))
+  } catch {
+    apiKeySource = 'none'
+  }
   const hasExternalApiKey =
     apiKeySource === 'ANTHROPIC_API_KEY' || apiKeySource === 'apiKeyHelper'
 
@@ -1585,7 +1593,14 @@ async function checkAndRefreshOAuthTokenIfNeededImpl(
 }
 
 export function isClaudeAISubscriber(): boolean {
-  if (!isAnthropicAuthEnabled()) {
+  let anthropicAuthEnabled = false
+  try {
+    anthropicAuthEnabled = isAnthropicAuthEnabled()
+  } catch {
+    anthropicAuthEnabled = false
+  }
+
+  if (!anthropicAuthEnabled) {
     return false
   }
 
@@ -1620,6 +1635,10 @@ export function is1PApiCustomer(): boolean {
     isEnvTruthy(process.env.CLAUDE_CODE_USE_FOUNDRY) ||
     isEnvTruthy(process.env.CLAUDE_CODE_USE_AZURE_OPENAI)
   ) {
+    return false
+  }
+
+  if (!isFirstPartyAnthropicBaseUrl()) {
     return false
   }
 

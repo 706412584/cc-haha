@@ -140,6 +140,30 @@ describe('withStreamRetry', () => {
     }
   })
 
+  test('retries a Grok disconnect and only exposes the final error after exhaustion', async () => {
+    process.env[RETRY_ENV] = '1'
+    let calls = 0
+    const disconnect = new Error(
+      'API Error: {"error":{"message":"OpenAI messages stream disconnected before completion","type":"api_error"},"type":"error"}',
+    )
+    const attempt = () =>
+      (async function* (): AsyncGenerator<any, void> {
+        calls += 1
+        if (!isRetryableStreamError(disconnect)) throw disconnect
+        throw new RetriableStreamError(disconnect)
+      })()
+
+    const out = await collect(withStreamRetry(attempt, 'grok-4', []))
+
+    expect(calls).toBe(2)
+    expect(out.filter(
+      message => message.type === 'assistant' && message.isApiErrorMessage === true,
+    )).toHaveLength(1)
+    const text = out.at(-1)?.message?.content?.find((block: { type: string }) => block.type === 'text')?.text
+    expect(text).toContain('OpenAI messages stream disconnected before completion')
+    delete process.env[RETRY_ENV]
+  })
+
   test('uses four retries by default and only shows the final connection error', async () => {
     delete process.env[RETRY_ENV]
     let calls = 0
