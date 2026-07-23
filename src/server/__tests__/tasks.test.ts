@@ -85,6 +85,44 @@ describe('completedTasksMatchResetSnapshot', () => {
       ),
     ).toBe(false)
   })
+
+  it('rejects empty snapshots, duplicate ids, and id set mismatch', () => {
+    expect(completedTasksMatchResetSnapshot([], [])).toBe(false)
+    expect(
+      completedTasksMatchResetSnapshot(
+        [completedTask({ id: '1', subject: 'Done' })],
+        [],
+      ),
+    ).toBe(false)
+    expect(
+      completedTasksMatchResetSnapshot(
+        [
+          completedTask({ id: '1', subject: 'A' }),
+          completedTask({ id: '2', subject: 'B' }),
+        ],
+        [
+          completedTask({ id: '1', subject: 'A' }),
+          completedTask({ id: '1', subject: 'B' }),
+        ],
+      ),
+    ).toBe(false)
+    expect(
+      completedTasksMatchResetSnapshot(
+        [completedTask({ id: '1', subject: 'Done' })],
+        [completedTask({ id: '9', subject: 'Done' })],
+      ),
+    ).toBe(false)
+    expect(
+      completedTasksMatchResetSnapshot(
+        [completedTask({ id: '1', subject: 'Done' })],
+        [
+          TaskSchema().parse(
+            taskFixture({ id: '1', subject: 'Done', status: 'pending' }),
+          ),
+        ],
+      ),
+    ).toBe(false)
+  })
 })
 
 async function rmWithRetry(targetPath: string): Promise<void> {

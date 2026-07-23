@@ -258,24 +258,16 @@ export function completedTasksMatchResetSnapshot(
   currentTasks: Task[],
   expectedTasks: Task[],
 ): boolean {
-  if (
-    expectedTasks.length === 0 ||
-    currentTasks.length !== expectedTasks.length
-  ) {
+  if (expectedTasks.length === 0 || currentTasks.length !== expectedTasks.length) {
     return false
   }
   const expectedById = new Map(expectedTasks.map(task => [task.id, task]))
   if (expectedById.size !== expectedTasks.length) return false
   if (expectedTasks.some(task => task.status !== 'completed')) return false
   if (currentTasks.some(task => task.status !== 'completed')) return false
-
   return currentTasks.every(task => {
     const expected = expectedById.get(task.id)
-    return (
-      expected !== undefined &&
-      expected.status === 'completed' &&
-      task.subject === expected.subject
-    )
+    return expected !== undefined && expected.status === 'completed' && task.subject === expected.subject
   })
 }
 

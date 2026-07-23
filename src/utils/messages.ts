@@ -4754,19 +4754,31 @@ export function createSystemStreamingFallbackMessage(
       ? 'Provider stream stalled before a tool side effect; retrying safely'
       : `Streaming request failed (${cause.replace(/_/g, ' ')}); retrying in non-streaming mode`,
     cause,
-    ...(retryMeta
-      ? {
-          attempt: retryMeta.attempt,
-          maxRetries: retryMeta.maxRetries,
-          retryDelayMs: retryMeta.retryDelayMs,
-          ...(retryMeta.errorMessage
-            ? { errorMessage: retryMeta.errorMessage }
-            : {}),
-        }
-      : {}),
+    ...streamingFallbackRetryFields(retryMeta),
     timestamp: new Date().toISOString(),
     uuid: randomUUID(),
   } as SystemStreamingFallbackMessage
+}
+
+/** Progress fields for stream_retry banners (SDK / CLI / desktop). */
+export function streamingFallbackRetryFields(
+  meta?: Partial<StreamingFallbackRetryMeta> | null,
+): Partial<StreamingFallbackRetryMeta> {
+  if (!meta) return {}
+  const out: Partial<StreamingFallbackRetryMeta> = {}
+  if (typeof meta.attempt === 'number' && Number.isFinite(meta.attempt)) {
+    out.attempt = meta.attempt
+  }
+  if (typeof meta.maxRetries === 'number' && Number.isFinite(meta.maxRetries)) {
+    out.maxRetries = meta.maxRetries
+  }
+  if (typeof meta.retryDelayMs === 'number' && Number.isFinite(meta.retryDelayMs)) {
+    out.retryDelayMs = meta.retryDelayMs
+  }
+  if (typeof meta.errorMessage === 'string' && meta.errorMessage) {
+    out.errorMessage = meta.errorMessage
+  }
+  return out
 }
 
 /**

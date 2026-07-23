@@ -992,21 +992,6 @@ export class QueryEngine {
               cause: message.cause,
               session_id: getSessionId(),
               uuid: message.uuid,
-              // Mid-stream stream_retry progress (optional; other causes omit).
-              ...('attempt' in message && typeof message.attempt === 'number'
-                ? { attempt: message.attempt }
-                : {}),
-              ...('maxRetries' in message && typeof message.maxRetries === 'number'
-                ? { maxRetries: message.maxRetries }
-                : {}),
-              ...('retryDelayMs' in message && typeof message.retryDelayMs === 'number'
-                ? { retryDelayMs: message.retryDelayMs }
-                : {}),
-              ...('errorMessage' in message &&
-              typeof message.errorMessage === 'string' &&
-              message.errorMessage
-                ? { errorMessage: message.errorMessage }
-                : {}),
             }
           }
           // Don't yield other system messages in headless mode
