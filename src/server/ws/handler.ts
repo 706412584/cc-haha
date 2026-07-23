@@ -501,6 +501,43 @@ export const handleWebSocket = {
         case 'user_message': {
           const activeTurn: ActiveUserTurnState = { messageSent: false }
           if (!sessionActivityCoordinator.tryBeginUserTurn(ws.data.sessionId)) {
+            // Mid-turn steer / "Guide now": once the active turn has already
+            // enqueued its user message, inject follow-ups into the live CLI
+            // instead of rejecting. Still reject during the pre-send/startup
+            // window and during provider-transition reservations.
+            const existingTurn = activeUserTurns.get(ws.data.sessionId)
+            if (
+              existingTurn?.messageSent
+              && conversationService.hasSession(ws.data.sessionId)
+            ) {
+              void conversationService
+                .sendMessage(ws.data.sessionId, message.content, message.attachments)
+                .then((sent) => {
+                  if (sent) return
+                  sendMessage(ws, {
+                    type: 'error',
+                    message: 'CLI process is not running. The session may have ended or the process crashed.',
+                    code: 'CLI_NOT_RUNNING',
+                  })
+                })
+                .catch((err) => {
+                  void diagnosticsService.recordEvent({
+                    type: 'ws_user_message_failed',
+                    severity: 'error',
+                    sessionId: ws.data.sessionId,
+                    summary: err instanceof Error ? err.message : String(err),
+                    details: err,
+                  })
+                  console.error(`[WS] Mid-turn user message inject failed:`, err)
+                  sendMessage(ws, {
+                    type: 'error',
+                    message: 'The follow-up message could not be delivered. Please retry.',
+                    code: 'USER_TURN_INJECT_FAILED',
+                    retryable: true,
+                  })
+                })
+              break
+            }
             sendMessage(ws, {
               type: 'error',
               message: 'A user turn is already active for this session. Retry after it completes.',
@@ -4112,6 +4149,9 @@ export function __resetWebSocketHandlerStateForTests(): void {
   prewarmPendingSessions.clear()
   prewarmedSessions.clear()
   prewarmIdleTimers.clear()
+  for (const sessionId of activeUserTurns.keys()) {
+    sessionActivityCoordinator.clear(sessionId)
+  }
   activeUserTurns.clear()
   activeBackgroundTaskIds.clear()
   sessionStopRequested.clear()
@@ -4127,6 +4167,9 @@ export function __markPrewarmPendingForTests(sessionId: string): void {
 /** Test hook: mark a session as mid-turn so disconnect keeps the CLI alive. */
 export function __markActiveTurnForTests(sessionId: string): void {
   beginSessionChatActivity(sessionId)
+  // Keep the activity coordinator in sync so mid-turn inject / rejection paths
+  // observe the same turn ownership as production handleUserMessage.
+  sessionActivityCoordinator.tryBeginUserTurn(sessionId)
   activeUserTurns.set(sessionId, { messageSent: true })
 }
 
@@ -4136,6 +4179,7 @@ export function __markActiveTurnForTests(sessionId: string): void {
  */
 export function __registerPendingUserTurnForTests(sessionId: string): void {
   beginSessionChatActivity(sessionId)
+  sessionActivityCoordinator.tryBeginUserTurn(sessionId)
   activeUserTurns.set(sessionId, { messageSent: false })
 }
 
@@ -4143,6 +4187,7 @@ export function __registerPendingUserTurnForTests(sessionId: string): void {
 export function __settleActiveTurnForTests(sessionId: string, cliMsg: any): void {
   settleSessionChatActivity(sessionId, cliMsg)
   activeUserTurns.delete(sessionId)
+  sessionActivityCoordinator.endUserTurn(sessionId)
 }
 
 /** Test hook: simulate CLI startup completing after the last client left. */

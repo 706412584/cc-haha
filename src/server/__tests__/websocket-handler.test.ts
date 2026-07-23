@@ -1346,6 +1346,44 @@ describe('WebSocket handler session isolation', () => {
       turnState: 'idle',
     })
   })
+
+  it('injects mid-turn follow-ups into the live CLI without starting a second turn', async () => {
+    const sessionId = `mid-turn-inject-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([])
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    const sendMessageSpy = spyOn(conversationService, 'sendMessage').mockResolvedValue(true)
+
+    handleWebSocket.open(ws)
+    __markActiveTurnForTests(sessionId)
+    ws.sent.length = 0
+
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'user_message',
+      content: 'please steer this way',
+      attachments: [{ type: 'file', name: 'a.ts', path: '/tmp/a.ts' }],
+    }))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(sendMessageSpy).toHaveBeenCalledWith(
+      sessionId,
+      'please steer this way',
+      [{ type: 'file', name: 'a.ts', path: '/tmp/a.ts' }],
+    )
+    expect(ws.sent.map((payload) => JSON.parse(payload))).not.toContainEqual(
+      expect.objectContaining({ code: 'SESSION_TURN_ACTIVE' }),
+    )
+
+    // Active turn ownership must remain on the original turn.
+    ws.sent.length = 0
+    handleWebSocket.message(ws, JSON.stringify({ type: 'sync_state' }))
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual(
+      expect.objectContaining({
+        type: 'session_state',
+        turnState: 'running',
+      }),
+    )
+  })
 })
 
 describe('prewarm idle timer active-turn guard (issue #865 follow-up)', () => {

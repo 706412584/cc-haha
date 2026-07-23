@@ -3087,16 +3087,27 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         break
       }
 
-      case 'error':
+      case 'error': {
+        // Concurrent-turn rejections must not tear down an in-flight turn.
+        // The server still owns the original turn; forcing idle here causes a
+        // brief "idle/run" flash and lets the composer re-send into a busy turn.
+        const preserveActiveTurn =
+          msg.code === 'SESSION_TURN_ACTIVE'
+          && get().sessions[sessionId]?.chatState !== 'idle'
+
         update((s) => {
-          const pendingText = `${s.streamingText}${consumePendingDelta(sessionId)}`
+          const pendingText = preserveActiveTurn
+            ? ''
+            : `${s.streamingText}${consumePendingDelta(sessionId)}`
           let newMessages = s.messages
           if (pendingText.trim()) {
             newMessages = appendAssistantTextMessage(newMessages, pendingText, Date.now())
           }
-          newMessages = dropTailCompactingCompactSummary(newMessages)
-          if (s.pendingPermission?.toolName === 'AskUserQuestion') {
-            newMessages = [...newMessages, makeDroppedQuestionMessage()]
+          if (!preserveActiveTurn) {
+            newMessages = dropTailCompactingCompactSummary(newMessages)
+            if (s.pendingPermission?.toolName === 'AskUserQuestion') {
+              newMessages = [...newMessages, makeDroppedQuestionMessage()]
+            }
           }
           newMessages = [
             ...newMessages,
@@ -3109,6 +3120,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               timestamp: Date.now(),
             },
           ]
+          if (preserveActiveTurn) {
+            return { messages: newMessages }
+          }
           return {
             messages: newMessages,
             chatState: 'idle',
@@ -3124,8 +3138,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             suppressNextTaskNotificationResponse: false,
           }
         })
-        useTabStore.getState().updateTabStatus(sessionId, 'error')
-        {
+        if (!preserveActiveTurn) {
+          useTabStore.getState().updateTabStatus(sessionId, 'error')
           const session = get().sessions[sessionId]
           if (session?.elapsedTimer) {
             clearInterval(session.elapsedTimer)
@@ -3133,6 +3147,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           }
         }
         break
+      }
 
       case 'background_task_stopped': {
         update((session) => {
