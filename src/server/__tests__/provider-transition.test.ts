@@ -6,7 +6,6 @@ import {
 import { SessionActivityCoordinator } from '../services/sessionActivityCoordinator.js'
 import {
   assertProviderResumeCompatible,
-  ConversationStartupError,
 } from '../services/conversationService.js'
 import { SessionService } from '../services/sessionService.js'
 import * as fs from 'node:fs/promises'
@@ -38,16 +37,16 @@ describe('provider runtime transition classification', () => {
     })).toEqual({ kind: 'apply' })
   })
 
-  test('requires a new session before changing a known historical provider', () => {
+  test('applies cross-provider switches in-session without forcing a blank target', () => {
     expect(classifyRuntimeTransition({
       transcriptMessageCount: 4,
       persistedProviderId: 'provider-a',
       currentProviderId: 'provider-a',
       target,
-    })).toEqual({ kind: 'provider-transition', sourceProviderId: 'provider-a' })
+    })).toEqual({ kind: 'apply' })
   })
 
-  test('allows legacy history only when the current provider identity is unchanged', () => {
+  test('applies legacy history regardless of current provider identity', () => {
     expect(classifyRuntimeTransition({
       transcriptMessageCount: 4,
       persistedProviderId: undefined,
@@ -60,29 +59,18 @@ describe('provider runtime transition classification', () => {
       persistedProviderId: undefined,
       currentProviderId: 'provider-a',
       target,
-    })).toEqual({ kind: 'provider-transition', sourceProviderId: null })
+    })).toEqual({ kind: 'apply' })
   })
 })
 
 describe('provider resume guard', () => {
-  test('rejects a known historical provider mismatch before startup work', () => {
+  test('allows resume when the historical provider differs from the target', () => {
     expect(() => assertProviderResumeCompatible({
       sessionId: 'session-1',
       transcriptMessageCount: 2,
       persistedProviderId: 'provider-a',
       targetProviderId: 'provider-b',
-    })).toThrow(ConversationStartupError)
-
-    try {
-      assertProviderResumeCompatible({
-        sessionId: 'session-1',
-        transcriptMessageCount: 2,
-        persistedProviderId: 'provider-a',
-        targetProviderId: 'provider-b',
-      })
-    } catch (error) {
-      expect((error as ConversationStartupError).code).toBe('PROVIDER_RESUME_MISMATCH')
-    }
+    })).not.toThrow()
   })
 
   test('allows legacy history without provider metadata', () => {

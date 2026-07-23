@@ -387,17 +387,19 @@ describe('WebSocket handler session isolation', () => {
     ])
   })
 
-  it('replays the same provider transition id when its result is lost', async () => {
-    const sessionId = `runtime-transition-replay-${crypto.randomUUID()}`
+  it('applies cross-provider runtime config in-session without forcing a transition', async () => {
+    const sessionId = `runtime-cross-provider-apply-${crypto.randomUUID()}`
     const ws = makeClientSocket(sessionId)
     spyOn(sessionService, 'getSessionLaunchInfo').mockResolvedValue({
-      filePath: '/tmp/runtime-transition-replay.jsonl',
+      filePath: '/tmp/runtime-cross-provider-apply.jsonl',
       projectDir: '-tmp',
       workDir: '/tmp',
       transcriptMessageCount: 2,
       customTitle: null,
       runtimeProviderId: 'provider-a',
     })
+    spyOn(sessionService, 'appendSessionMetadata').mockResolvedValue(undefined)
+    spyOn(conversationService, 'hasSession').mockReturnValue(false)
     const request = {
       type: 'set_runtime_config',
       requestId: crypto.randomUUID(),
@@ -416,7 +418,11 @@ describe('WebSocket handler session isolation', () => {
     expect(results).toHaveLength(2)
     expect(results[0]).toMatchObject({
       requestId: request.requestId,
-      result: 'provider_transition_required',
+      result: 'applied',
+      selection: {
+        providerId: null,
+        modelId: request.modelId,
+      },
     })
     expect(results[1]).toEqual(results[0])
   })
@@ -1325,8 +1331,8 @@ describe('WebSocket handler session isolation', () => {
     expect(customTitleCalls).toBe(1)
     expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
       type: 'error',
-      message: 'The session is changing providers. Retry after the new session opens.',
-      code: 'SESSION_TRANSITION_IN_PROGRESS',
+      message: 'A user turn is already active for this session. Retry after it completes.',
+      code: 'SESSION_TURN_ACTIVE',
       retryable: true,
     })
 
