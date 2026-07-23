@@ -4142,9 +4142,6 @@ export function __resetWebSocketHandlerStateForTests(): void {
   prewarmPendingSessions.clear()
   prewarmedSessions.clear()
   prewarmIdleTimers.clear()
-  for (const sessionId of activeUserTurns.keys()) {
-    sessionActivityCoordinator.clear(sessionId)
-  }
   activeUserTurns.clear()
   activeBackgroundTaskIds.clear()
   sessionStopRequested.clear()
@@ -4160,9 +4157,6 @@ export function __markPrewarmPendingForTests(sessionId: string): void {
 /** Test hook: mark a session as mid-turn so disconnect keeps the CLI alive. */
 export function __markActiveTurnForTests(sessionId: string): void {
   beginSessionChatActivity(sessionId)
-  // Keep the activity coordinator in sync so mid-turn inject / rejection paths
-  // observe the same turn ownership as production handleUserMessage.
-  sessionActivityCoordinator.tryBeginUserTurn(sessionId)
   activeUserTurns.set(sessionId, { messageSent: true })
 }
 
@@ -4172,7 +4166,6 @@ export function __markActiveTurnForTests(sessionId: string): void {
  */
 export function __registerPendingUserTurnForTests(sessionId: string): void {
   beginSessionChatActivity(sessionId)
-  sessionActivityCoordinator.tryBeginUserTurn(sessionId)
   activeUserTurns.set(sessionId, { messageSent: false })
 }
 
@@ -4180,7 +4173,6 @@ export function __registerPendingUserTurnForTests(sessionId: string): void {
 export function __settleActiveTurnForTests(sessionId: string, cliMsg: any): void {
   settleSessionChatActivity(sessionId, cliMsg)
   activeUserTurns.delete(sessionId)
-  sessionActivityCoordinator.endUserTurn(sessionId)
 }
 
 /** Test hook: simulate CLI startup completing after the last client left. */

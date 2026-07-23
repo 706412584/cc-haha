@@ -21,6 +21,7 @@ import {
 } from '../ws/disconnectGraceConfig.js'
 import { conversationService } from '../services/conversationService.js'
 import { computerUseApprovalService } from '../services/computerUseApprovalService.js'
+import { sessionActivityCoordinator } from '../services/sessionActivityCoordinator.js'
 import { sessionService } from '../services/sessionService.js'
 
 function makeClientSocket(sessionId: string, clientKind: 'full' | 'pet' = 'full') {
@@ -1355,6 +1356,7 @@ describe('WebSocket handler session isolation', () => {
     const sendMessageSpy = spyOn(conversationService, 'sendMessage').mockResolvedValue(true)
 
     handleWebSocket.open(ws)
+    expect(sessionActivityCoordinator.tryBeginUserTurn(sessionId)).toBe(true)
     __markActiveTurnForTests(sessionId)
     ws.sent.length = 0
 
@@ -1383,6 +1385,7 @@ describe('WebSocket handler session isolation', () => {
         turnState: 'running',
       }),
     )
+    sessionActivityCoordinator.clear(sessionId)
   })
 
   it('reports CLI_NOT_RUNNING when a mid-turn inject cannot reach the CLI', async () => {
@@ -1393,6 +1396,7 @@ describe('WebSocket handler session isolation', () => {
     spyOn(conversationService, 'sendMessage').mockResolvedValue(false)
 
     handleWebSocket.open(ws)
+    expect(sessionActivityCoordinator.tryBeginUserTurn(sessionId)).toBe(true)
     __markActiveTurnForTests(sessionId)
     ws.sent.length = 0
 
@@ -1407,6 +1411,7 @@ describe('WebSocket handler session isolation', () => {
       message: 'CLI process is not running. The session may have ended or the process crashed.',
       code: 'CLI_NOT_RUNNING',
     })
+    sessionActivityCoordinator.clear(sessionId)
   })
 
   it('reports USER_TURN_INJECT_FAILED when mid-turn inject throws', async () => {
@@ -1418,6 +1423,7 @@ describe('WebSocket handler session isolation', () => {
     const errorLog = spyOn(console, 'error').mockImplementation(() => {})
 
     handleWebSocket.open(ws)
+    expect(sessionActivityCoordinator.tryBeginUserTurn(sessionId)).toBe(true)
     __markActiveTurnForTests(sessionId)
     ws.sent.length = 0
 
@@ -1434,6 +1440,7 @@ describe('WebSocket handler session isolation', () => {
       retryable: true,
     })
     expect(errorLog).toHaveBeenCalled()
+    sessionActivityCoordinator.clear(sessionId)
   })
 
   it('still rejects follow-ups during the pre-send startup window', async () => {
@@ -1444,6 +1451,7 @@ describe('WebSocket handler session isolation', () => {
     const sendMessageSpy = spyOn(conversationService, 'sendMessage').mockResolvedValue(true)
 
     handleWebSocket.open(ws)
+    expect(sessionActivityCoordinator.tryBeginUserTurn(sessionId)).toBe(true)
     __registerPendingUserTurnForTests(sessionId)
     ws.sent.length = 0
 
@@ -1460,6 +1468,7 @@ describe('WebSocket handler session isolation', () => {
       code: 'SESSION_TURN_ACTIVE',
       retryable: true,
     })
+    sessionActivityCoordinator.clear(sessionId)
   })
 
   it('rejects mid-turn follow-ups when the CLI session is gone', async () => {
@@ -1470,6 +1479,7 @@ describe('WebSocket handler session isolation', () => {
     const sendMessageSpy = spyOn(conversationService, 'sendMessage').mockResolvedValue(true)
 
     handleWebSocket.open(ws)
+    expect(sessionActivityCoordinator.tryBeginUserTurn(sessionId)).toBe(true)
     __markActiveTurnForTests(sessionId)
     ws.sent.length = 0
 
@@ -1486,6 +1496,7 @@ describe('WebSocket handler session isolation', () => {
       code: 'SESSION_TURN_ACTIVE',
       retryable: true,
     })
+    sessionActivityCoordinator.clear(sessionId)
   })
 })
 
