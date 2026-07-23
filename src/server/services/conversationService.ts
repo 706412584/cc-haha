@@ -243,27 +243,19 @@ export class ConversationStartupError extends Error {
   }
 }
 
-export function assertProviderResumeCompatible({
-  sessionId,
-  transcriptMessageCount,
-  persistedProviderId,
-  targetProviderId,
-}: {
+/**
+ * Previously rejected resume when the historical provider differed from the
+ * target. That forced a blank new session for every cross-provider switch.
+ * In-session switches are supported again; incompatible thinking/signature
+ * blocks are sanitized at the model-context boundary instead.
+ */
+export function assertProviderResumeCompatible(_input: {
   sessionId: string
   transcriptMessageCount: number
   persistedProviderId: string | null | undefined
   targetProviderId: string | null | undefined
 }): void {
-  if (
-    transcriptMessageCount > 0 &&
-    persistedProviderId !== undefined &&
-    persistedProviderId !== (targetProviderId ?? null)
-  ) {
-    throw new ConversationStartupError(
-      `Session ${sessionId} was created with provider ${persistedProviderId ?? 'default'} and cannot be resumed with ${targetProviderId ?? 'default'}.`,
-      'PROVIDER_RESUME_MISMATCH',
-    )
-  }
+  // no-op: cross-provider resume is allowed
 }
 
 export class ConversationService {

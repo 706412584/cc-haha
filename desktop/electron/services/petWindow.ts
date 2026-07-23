@@ -143,6 +143,33 @@ function normalizePetWindowRegion(region: Rectangle): Rectangle {
   return { x, y, width: right - x, height: bottom - y }
 }
 
+function unionPetWindowRegions(regions: Rectangle[]): Rectangle | null {
+  if (regions.length === 0) return null
+
+  let left = Number.POSITIVE_INFINITY
+  let top = Number.POSITIVE_INFINITY
+  let right = Number.NEGATIVE_INFINITY
+  let bottom = Number.NEGATIVE_INFINITY
+  for (const region of regions) {
+    const normalized = normalizePetWindowRegion(region)
+    left = Math.min(left, normalized.x)
+    top = Math.min(top, normalized.y)
+    right = Math.max(right, normalized.x + normalized.width)
+    bottom = Math.max(bottom, normalized.y + normalized.height)
+  }
+  if (
+    !Number.isFinite(left)
+    || !Number.isFinite(top)
+    || !Number.isFinite(right)
+    || !Number.isFinite(bottom)
+    || right <= left
+    || bottom <= top
+  ) {
+    return null
+  }
+  return { x: left, y: top, width: right - left, height: bottom - top }
+}
+
 export function getPetWindowBounds(
   workArea: Rectangle,
   restoredPosition?: PetWindowPosition | null,
@@ -345,42 +372,48 @@ export class PetWindowController {
       throw new Error('Pet window IPC sender does not own the companion window')
     }
     const platform = this.options.platform ?? process.platform
-    const primaryRegion = regions[0]
-    if (platform === 'darwin' && primaryRegion) {
-      this.visibleDragRegion = normalizePetWindowRegion(primaryRegion)
-      const requestedPosition = this.pendingRestoredPosition ?? window.getBounds()
-      this.pendingRestoredPosition = null
-      const anchor = {
-        x: requestedPosition.x + this.visibleDragRegion.x + Math.floor(this.visibleDragRegion.width / 2),
-        y: requestedPosition.y + this.visibleDragRegion.y + Math.floor(this.visibleDragRegion.height / 2),
-      }
-      const workArea = this.options.getWorkAreaForPoint?.(anchor)
-        ?? this.options.getCurrentWorkArea()
-      const nextPosition = clampPetWindowPosition(
-        requestedPosition,
-        workArea,
-        this.visibleDragRegion,
-      )
-      const bounds = window.getBounds()
-      if (nextPosition.x !== bounds.x || nextPosition.y !== bounds.y) {
-        window.setPosition(nextPosition.x, nextPosition.y, false)
+    // Clamp/drag against the union of every interactive region. Using only the
+    // first region (e.g. the top task bubble) lets vertical drags push the
+    // mascot off-screen while the bubble remains visible.
+    const visibleRegion = unionPetWindowRegions(regions)
+    if (visibleRegion) {
+      this.visibleDragRegion = visibleRegion
+      if (platform === 'darwin') {
+        const requestedPosition = this.pendingRestoredPosition ?? window.getBounds()
+        this.pendingRestoredPosition = null
+        const anchor = {
+          x: requestedPosition.x + visibleRegion.x + Math.floor(visibleRegion.width / 2),
+          y: requestedPosition.y + visibleRegion.y + Math.floor(visibleRegion.height / 2),
+        }
+        const workArea = this.options.getWorkAreaForPoint?.(anchor)
+          ?? this.options.getCurrentWorkArea()
+        const nextPosition = clampPetWindowPosition(
+          requestedPosition,
+          workArea,
+          visibleRegion,
+        )
+        const bounds = window.getBounds()
+        if (nextPosition.x !== bounds.x || nextPosition.y !== bounds.y) {
+          window.setPosition(nextPosition.x, nextPosition.y, false)
+        }
       }
     }
 
     if (platform === 'darwin') return
 
-    const shape = regions.flatMap((region) => {
-      const requestedLeft = Math.round(region.x) - PET_WINDOW_SHAPE_PADDING
-      const requestedTop = Math.round(region.y) - PET_WINDOW_SHAPE_PADDING
-      const requestedRight = Math.round(region.x + region.width) + PET_WINDOW_SHAPE_PADDING
-      const requestedBottom = Math.round(region.y + region.height) + PET_WINDOW_SHAPE_PADDING
-      const x = Math.max(0, Math.min(PET_WINDOW_WIDTH - 1, requestedLeft))
-      const y = Math.max(0, Math.min(PET_WINDOW_HEIGHT - 1, requestedTop))
-      const right = Math.max(x + 1, Math.min(PET_WINDOW_WIDTH, requestedRight))
-      const bottom = Math.max(y + 1, Math.min(PET_WINDOW_HEIGHT, requestedBottom))
-      return [{ x, y, width: right - x, height: bottom - y }]
-    })
-    if (shape.length > 0) window.setShape(shape)
+    // Windows clips both hit-testing and painting to the shape. Prefer one
+    // padded union rectangle so stacked mascot + bubble never lose half of
+    // the companion during drag/layout updates.
+    if (!visibleRegion) return
+    const requestedLeft = visibleRegion.x - PET_WINDOW_SHAPE_PADDING
+    const requestedTop = visibleRegion.y - PET_WINDOW_SHAPE_PADDING
+    const requestedRight = visibleRegion.x + visibleRegion.width + PET_WINDOW_SHAPE_PADDING
+    const requestedBottom = visibleRegion.y + visibleRegion.height + PET_WINDOW_SHAPE_PADDING
+    const x = Math.max(0, Math.min(PET_WINDOW_WIDTH - 1, requestedLeft))
+    const y = Math.max(0, Math.min(PET_WINDOW_HEIGHT - 1, requestedTop))
+    const right = Math.max(x + 1, Math.min(PET_WINDOW_WIDTH, requestedRight))
+    const bottom = Math.max(y + 1, Math.min(PET_WINDOW_HEIGHT, requestedBottom))
+    window.setShape([{ x, y, width: right - x, height: bottom - y }])
   }
 
   dragWindow(window: PetWindow, payload: PetWindowDragPayload): void {

@@ -151,31 +151,19 @@ export type RuntimeTransitionClassification =
   | { kind: 'apply' }
   | { kind: 'provider-transition'; sourceProviderId: string | null }
 
-export function classifyRuntimeTransition({
-  transcriptMessageCount,
-  persistedProviderId,
-  currentProviderId,
-  target,
-}: {
+/**
+ * Cross-provider switches always apply in-session. Forcing a blank target
+ * session was a mistaken workaround for encrypted thinking/signature
+ * incompatibility; that must be sanitized at the model-context boundary
+ * instead of discarding history.
+ */
+export function classifyRuntimeTransition(_input: {
   transcriptMessageCount: number
   persistedProviderId: string | null | undefined
   currentProviderId: string | null | undefined
   target: RuntimeOverride
 }): RuntimeTransitionClassification {
-  if (transcriptMessageCount === 0) return { kind: 'apply' }
-
-  if (persistedProviderId !== undefined) {
-    return persistedProviderId === target.providerId
-      ? { kind: 'apply' }
-      : {
-          kind: 'provider-transition',
-          sourceProviderId: persistedProviderId,
-        }
-  }
-
-  return currentProviderId === target.providerId
-    ? { kind: 'apply' }
-    : { kind: 'provider-transition', sourceProviderId: null }
+  return { kind: 'apply' }
 }
 
 type ActiveUserTurnState = {
@@ -515,8 +503,8 @@ export const handleWebSocket = {
           if (!sessionActivityCoordinator.tryBeginUserTurn(ws.data.sessionId)) {
             sendMessage(ws, {
               type: 'error',
-              message: 'The session is changing providers. Retry after the new session opens.',
-              code: 'SESSION_TRANSITION_IN_PROGRESS',
+              message: 'A user turn is already active for this session. Retry after it completes.',
+              code: 'SESSION_TURN_ACTIVE',
               retryable: true,
             })
             break
@@ -1390,31 +1378,6 @@ async function handleSetRuntimeConfig(
       ...(providerRevision > 0 ? { providerRevision } : {}),
     }
     const prevOverride = runtimeOverrides.get(sessionId)
-    const launchInfo = await sessionService.getSessionLaunchInfo(sessionId).catch(() => null)
-    const currentProviderId = prevOverride?.providerId ??
-      (launchInfo?.runtimeProviderId !== undefined
-        ? launchInfo.runtimeProviderId
-        : (await getDefaultRuntimeSettings()).providerId)
-    const classification = classifyRuntimeTransition({
-      transcriptMessageCount: launchInfo?.transcriptMessageCount ?? 0,
-      persistedProviderId: launchInfo?.runtimeProviderId,
-      currentProviderId,
-      target: nextOverride,
-    })
-
-    if (classification.kind === 'provider-transition') {
-      sendResult({
-        type: 'runtime_config_result',
-        requestId,
-        result: 'provider_transition_required',
-        sourceSessionId: sessionId,
-        sourceProviderId: classification.sourceProviderId,
-        targetSelection: selection,
-        messageCount: launchInfo?.transcriptMessageCount ?? 0,
-        transitionId: crypto.randomUUID(),
-      })
-      return
-    }
 
     if (!runtimeOverridesMatch(prevOverride, nextOverride)) {
       runtimeOverrides.set(sessionId, nextOverride)

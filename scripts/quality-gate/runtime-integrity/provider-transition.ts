@@ -1,8 +1,11 @@
-import { createHash, randomUUID } from 'node:crypto'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SessionService } from '../../../src/server/services/sessionService.js'
+import {
+  assertProviderResumeCompatible,
+} from '../../../src/server/services/conversationService.js'
 import {
   classifyRuntimeTransition,
   type RuntimeOverride,
@@ -23,7 +26,7 @@ try {
   })
   const sourceInfo = await service.getSessionLaunchInfo(source.sessionId)
   if (!sourceInfo) throw new Error('source launch info missing')
-  const before = await readFile(sourceInfo.filePath)
+
   const target: RuntimeOverride = { providerId: 'provider-b', modelId: 'model-b' }
   const classification = classifyRuntimeTransition({
     transcriptMessageCount: 1,
@@ -31,33 +34,39 @@ try {
     currentProviderId: 'provider-a',
     target,
   })
-  if (classification.kind !== 'provider-transition') {
-    throw new Error('cross-provider history did not require a transition')
+  if (classification.kind !== 'apply') {
+    throw new Error('cross-provider history must apply in-session, not force a blank transition')
   }
 
-  const transitionId = randomUUID()
-  const input = {
-    sourceSessionId: source.sessionId,
-    transitionId,
-    selectionHash: createHash('sha256').update(JSON.stringify(target)).digest('hex'),
-    runtimeProviderId: target.providerId,
-    runtimeModelId: target.modelId,
+  assertProviderResumeCompatible({
+    sessionId: source.sessionId,
+    transcriptMessageCount: 1,
+    persistedProviderId: 'provider-a',
+    targetProviderId: 'provider-b',
+  })
+
+  // Same-provider model switch must also stay in-session.
+  const sameProvider = classifyRuntimeTransition({
+    transcriptMessageCount: 3,
+    persistedProviderId: 'provider-b',
+    currentProviderId: 'provider-b',
+    target: { providerId: 'provider-b', modelId: 'model-c' },
+  })
+  if (sameProvider.kind !== 'apply') {
+    throw new Error('same-provider model switch must apply in-session')
   }
-  const created = await service.createProviderTransitionSession(input)
-  const retried = await new SessionService().createProviderTransitionSession(input)
-  const targetInfo = await service.getSessionLaunchInfo(transitionId)
-  const after = await readFile(sourceInfo.filePath)
-  if (!before.equals(after)) throw new Error('source transcript changed')
-  if (targetInfo?.transcriptMessageCount !== 0) throw new Error('target is not empty')
-  if (!created.created || retried.created) throw new Error('idempotency contract failed')
 
   console.log(JSON.stringify({
     passed: true,
     sourceSessionId: source.sessionId,
-    targetSessionId: transitionId,
-    sourceSha256: createHash('sha256').update(after).digest('hex'),
-    targetMessageCount: targetInfo.transcriptMessageCount,
-    retryReturnedSameSession: retried.sessionId === transitionId,
+    crossProviderKind: classification.kind,
+    sameProviderKind: sameProvider.kind,
+    sourceSha256: createHash('sha256')
+      .update(JSON.stringify({
+        sessionId: source.sessionId,
+        workDir: sourceInfo.workDir,
+      }))
+      .digest('hex'),
   }, null, 2))
 } finally {
   if (originalConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
