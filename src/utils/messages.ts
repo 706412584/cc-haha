@@ -4727,13 +4727,24 @@ export type StreamingFallbackCause =
   | '404_stream_creation'
   | 'stream_retry'
 
+/** Optional progress for mid-stream stream_retry (attempt banner on desktop). */
+export type StreamingFallbackRetryMeta = {
+  attempt: number
+  maxRetries: number
+  retryDelayMs: number
+  errorMessage?: string
+}
+
 /**
  * Marks recovery from a failed streaming attempt. Most causes switch to the
  * non-streaming fallback; stream_retry starts a new bounded streaming attempt.
  * UIs surface this as an active-turn status rather than a terminal error.
+ * stream_retry may carry attempt/maxRetries/retryDelayMs so the desktop can
+ * show a visible retry banner (distinct from user Stop).
  */
 export function createSystemStreamingFallbackMessage(
   cause: StreamingFallbackCause,
+  retryMeta?: StreamingFallbackRetryMeta,
 ): SystemStreamingFallbackMessage {
   return {
     type: 'system',
@@ -4743,9 +4754,31 @@ export function createSystemStreamingFallbackMessage(
       ? 'Provider stream stalled before a tool side effect; retrying safely'
       : `Streaming request failed (${cause.replace(/_/g, ' ')}); retrying in non-streaming mode`,
     cause,
+    ...streamingFallbackRetryFields(retryMeta),
     timestamp: new Date().toISOString(),
     uuid: randomUUID(),
+  } as SystemStreamingFallbackMessage
+}
+
+/** Progress fields for stream_retry banners (SDK / CLI / desktop). */
+export function streamingFallbackRetryFields(
+  meta?: Partial<StreamingFallbackRetryMeta> | null,
+): Partial<StreamingFallbackRetryMeta> {
+  if (!meta) return {}
+  const out: Partial<StreamingFallbackRetryMeta> = {}
+  if (typeof meta.attempt === 'number' && Number.isFinite(meta.attempt)) {
+    out.attempt = meta.attempt
   }
+  if (typeof meta.maxRetries === 'number' && Number.isFinite(meta.maxRetries)) {
+    out.maxRetries = meta.maxRetries
+  }
+  if (typeof meta.retryDelayMs === 'number' && Number.isFinite(meta.retryDelayMs)) {
+    out.retryDelayMs = meta.retryDelayMs
+  }
+  if (typeof meta.errorMessage === 'string' && meta.errorMessage) {
+    out.errorMessage = meta.errorMessage
+  }
+  return out
 }
 
 /**

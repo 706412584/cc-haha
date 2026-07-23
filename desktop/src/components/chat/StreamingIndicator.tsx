@@ -55,20 +55,27 @@ export function StreamingIndicator() {
 
   if (apiRetry) {
     const remainingMs = Math.max(0, apiRetry.retryDelayMs - (now - apiRetry.receivedAt))
+    const isStreamDisconnect = apiRetry.errorType === 'stream_disconnect'
     const statusText = apiRetry.errorStatus !== null
       ? t('chat.retry.httpStatus', { status: apiRetry.errorStatus })
-      : formatErrorType(apiRetry.errorType) ?? t('chat.retry.networkError')
+      : isStreamDisconnect
+        ? t('chat.retry.streamDisconnect')
+        : formatErrorType(apiRetry.errorType) ?? t('chat.retry.networkError')
     const detailText = apiRetry.errorMessage?.trim()
+    const title = isStreamDisconnect
+      ? t('chat.retry.streamTitle')
+      : t('chat.retry.title')
 
     return (
       <div
         data-testid="api-retry-indicator"
+        data-retry-kind={isStreamDisconnect ? 'stream_disconnect' : 'api'}
         role="status"
         aria-live="polite"
         className="mb-2 flex w-full max-w-[min(720px,100%)] flex-wrap items-center gap-2 rounded-md border border-amber-500/35 bg-amber-50/80 px-3 py-2 text-xs text-amber-950 shadow-sm dark:border-amber-400/25 dark:bg-amber-950/30 dark:text-amber-100"
       >
         <RefreshCw size={14} strokeWidth={2.2} className="shrink-0 animate-spin text-amber-700 dark:text-amber-300" aria-hidden="true" />
-        <span className="font-medium">{t('chat.retry.title')}</span>
+        <span className="font-medium">{title}</span>
         <span className="rounded-[4px] border border-amber-700/20 bg-white/70 px-1.5 py-0.5 font-mono text-[11px] leading-none text-amber-900 dark:border-amber-300/20 dark:bg-black/15 dark:text-amber-100">
           {t('chat.retry.attempt', { attempt: apiRetry.attempt, max: apiRetry.maxRetries })}
         </span>

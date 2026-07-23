@@ -310,6 +310,61 @@ describe('withStreamRetry', () => {
     delete process.env[RETRY_ENV]
   })
 
+  test('stream_retry payload includes attempt metadata for visible desktop banners', async () => {
+    process.env[RETRY_ENV] = '2'
+    let calls = 0
+    const disconnect = new Error(
+      'OpenAI messages stream disconnected before completion',
+    )
+    const attempt = () =>
+      // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
+      (async function* (): AsyncGenerator<any, void> {
+        calls++
+        if (calls === 1) throw new RetriableStreamError(disconnect)
+        yield { type: 'assistant', message: { content: [] }, uuid: 'ok' }
+      })()
+
+    const out = await collect(withStreamRetry(attempt, 'grok-4', []))
+    const retrySignals = out.filter(
+      (m) =>
+        m.type === 'system' &&
+        m.subtype === 'streaming_fallback' &&
+        m.cause === 'stream_retry',
+    )
+    expect(retrySignals).toHaveLength(1)
+    expect(retrySignals[0].attempt).toBe(1)
+    expect(retrySignals[0].maxRetries).toBe(2)
+    expect(typeof retrySignals[0].retryDelayMs).toBe('number')
+    expect(retrySignals[0].retryDelayMs).toBeGreaterThanOrEqual(0)
+    expect(String(retrySignals[0].errorMessage)).toContain('disconnected')
+    delete process.env[RETRY_ENV]
+  })
+
+  test('aborts during retry backoff without starting another attempt', async () => {
+    process.env[RETRY_ENV] = '3'
+    const controller = new AbortController()
+    let calls = 0
+    const attempt = () =>
+      // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
+      (async function* (): AsyncGenerator<any, void> {
+        calls++
+        throw retriableError()
+      })()
+
+    const gen = withStreamRetry(attempt, 'test-model', [], controller.signal)
+    const first = await gen.next()
+    expect(first.value).toMatchObject({
+      type: 'system',
+      subtype: 'streaming_fallback',
+      cause: 'stream_retry',
+      attempt: 1,
+    })
+    controller.abort()
+    await expect(gen.next()).rejects.toThrow()
+    expect(calls).toBe(1)
+    delete process.env[RETRY_ENV]
+  })
+
   test('does not retry a non-RetriableStreamError; rethrows it', async () => {
     let calls = 0
     const attempt = () =>

@@ -1,6 +1,5 @@
 import { mkdir, readdir, readFile, unlink, writeFile } from 'fs/promises'
 import { join } from 'path'
-import { isDeepStrictEqual } from 'util'
 import { z } from 'zod/v4'
 import { getIsNonInteractiveSession, getSessionId } from '../bootstrap/state.js'
 import { uniq } from './array.js'
@@ -242,6 +241,36 @@ export async function resetTaskList(taskListId: string): Promise<void> {
   }
 }
 
+/**
+ * Whether a completed-task dismiss snapshot still refers to the same cycle.
+ *
+ * Desktop clear-completed only needs identity of the finished set (id + subject +
+ * completed status). Full deep-equal is too brittle: TodoWrite V1 hydration omits
+ * description/owner/blocks edges that V2 disk files carry, which made reset return
+ * false and the bar reappear after refresh.
+ *
+ * Still refuse when:
+ * - counts / ids differ (new cycle already started)
+ * - any current task is not completed
+ * - subject changed for the same id (content edited after snapshot)
+ */
+export function completedTasksMatchResetSnapshot(
+  currentTasks: Task[],
+  expectedTasks: Task[],
+): boolean {
+  if (expectedTasks.length === 0 || currentTasks.length !== expectedTasks.length) {
+    return false
+  }
+  const expectedById = new Map(expectedTasks.map(task => [task.id, task]))
+  if (expectedById.size !== expectedTasks.length) return false
+  if (expectedTasks.some(task => task.status !== 'completed')) return false
+  if (currentTasks.some(task => task.status !== 'completed')) return false
+  return currentTasks.every(task => {
+    const expected = expectedById.get(task.id)
+    return expected !== undefined && expected.status === 'completed' && task.subject === expected.subject
+  })
+}
+
 export async function resetTaskListIfMatches(
   taskListId: string,
   expectedTasks: Task[],
@@ -256,12 +285,9 @@ export async function resetTaskListIfMatches(
     releaseTasks = lockedTasks
 
     const currentTasks = await listTasks(taskListId)
-    const expectedById = new Map(expectedTasks.map((task) => [task.id, task]))
-    const matches =
-      expectedById.size === expectedTasks.length &&
-      currentTasks.length === expectedTasks.length &&
-      currentTasks.every((task) => isDeepStrictEqual(task, expectedById.get(task.id)))
-    if (!matches) return false
+    if (!completedTasksMatchResetSnapshot(currentTasks, expectedTasks)) {
+      return false
+    }
 
     await resetTaskListUnsafe(taskListId)
     return true

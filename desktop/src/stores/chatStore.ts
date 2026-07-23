@@ -2569,10 +2569,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
       case 'streaming_fallback': {
         if (msg.cause === 'stream_retry') {
+          // Discard only this attempt's in-flight partials, then show a visible
+          // retry banner (apiRetry). Must NOT go idle — user Stop is separate.
           consumePendingDelta(sessionId)
           clearPendingToolInputDelta(sessionId)
           clearPendingTaskToolUseIds(sessionId)
           clearPendingToolParentUseIds(sessionId)
+          const attempt = Math.max(1, Math.trunc(msg.attempt ?? 1))
+          const maxRetries = Math.max(attempt, Math.trunc(msg.maxRetries ?? attempt))
+          const retryDelayMs = Math.max(0, Math.trunc(msg.retryDelayMs ?? 0))
           update((session) => {
             const startIndex = Math.max(
               0,
@@ -2600,7 +2605,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               streamAttemptStartIndex: undefined,
               streamAttemptStartResponseChars: undefined,
               streamingFallback: null,
-              apiRetry: null,
+              apiRetry: {
+                attempt,
+                maxRetries,
+                retryDelayMs,
+                errorStatus: null,
+                errorType: 'stream_disconnect',
+                errorMessage: msg.errorMessage?.trim() || undefined,
+                receivedAt: Date.now(),
+              },
               chatState: 'thinking',
               statusVerb: '',
             }

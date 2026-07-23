@@ -2879,7 +2879,30 @@ function toStreamingFallbackServerMessage(cliMsg: any): ServerMessage {
     typeof cliMsg.cause === 'string' && STREAMING_FALLBACK_CAUSES.has(cliMsg.cause as StreamingFallbackCause)
       ? (cliMsg.cause as StreamingFallbackCause)
       : 'unknown'
-  return { type: 'streaming_fallback', cause }
+  const attempt =
+    typeof cliMsg.attempt === 'number' && Number.isFinite(cliMsg.attempt)
+      ? Math.max(1, Math.trunc(cliMsg.attempt))
+      : undefined
+  const maxRetries =
+    typeof cliMsg.maxRetries === 'number' && Number.isFinite(cliMsg.maxRetries)
+      ? Math.max(0, Math.trunc(cliMsg.maxRetries))
+      : undefined
+  const retryDelayMs =
+    typeof cliMsg.retryDelayMs === 'number' && Number.isFinite(cliMsg.retryDelayMs)
+      ? Math.max(0, Math.trunc(cliMsg.retryDelayMs))
+      : undefined
+  const errorMessage =
+    typeof cliMsg.errorMessage === 'string' && cliMsg.errorMessage.trim()
+      ? cliMsg.errorMessage.trim().slice(0, 240)
+      : undefined
+  return {
+    type: 'streaming_fallback',
+    cause,
+    ...(attempt !== undefined ? { attempt } : {}),
+    ...(maxRetries !== undefined ? { maxRetries } : {}),
+    ...(retryDelayMs !== undefined ? { retryDelayMs } : {}),
+    ...(errorMessage ? { errorMessage } : {}),
+  }
 }
 
 function sendMessage(ws: ServerWebSocket<WebSocketData>, message: ServerMessage) {

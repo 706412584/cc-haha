@@ -5850,6 +5850,64 @@ describe('chatStore history mapping', () => {
     expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.streamingFallback).toBeNull()
   })
 
+  it('shows a visible stream_retry banner without going idle, and stop clears it', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          messages: [
+            { id: 'u1', type: 'user_text', content: 'hi', timestamp: 1 },
+            { id: 'a1', type: 'assistant_text', content: 'partial', timestamp: 2 },
+            {
+              id: 't1',
+              type: 'tool_use',
+              toolName: 'Bash',
+              toolUseId: 'tool-1',
+              input: {},
+              isPending: true,
+              timestamp: 3,
+            },
+          ],
+          chatState: 'streaming',
+          streamingText: 'partial',
+          streamAttemptStartIndex: 1,
+          streamAttemptStartResponseChars: 0,
+          streamingResponseChars: 7,
+        }),
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'streaming_fallback',
+      cause: 'stream_retry',
+      attempt: 2,
+      maxRetries: 4,
+      retryDelayMs: 1500,
+      errorMessage: 'OpenAI messages stream disconnected before completion',
+    })
+
+    const retrying = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(retrying?.chatState).toBe('thinking')
+    expect(retrying?.streamingFallback).toBeNull()
+    expect(retrying?.apiRetry).toMatchObject({
+      attempt: 2,
+      maxRetries: 4,
+      retryDelayMs: 1500,
+      errorStatus: null,
+      errorType: 'stream_disconnect',
+      errorMessage: 'OpenAI messages stream disconnected before completion',
+    })
+    expect(retrying?.streamingText).toBe('')
+    expect(retrying?.messages.some((m) => m.type === 'assistant_text')).toBe(false)
+    expect(retrying?.messages.some((m) => m.type === 'tool_use' && m.isPending)).toBe(false)
+    expect(updateTabStatusMock).toHaveBeenLastCalledWith(TEST_SESSION_ID, 'running')
+
+    useChatStore.getState().stopGeneration(TEST_SESSION_ID)
+    const stopped = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(stopped?.chatState).toBe('idle')
+    expect(stopped?.apiRetry).toBeNull()
+    expect(updateTabStatusMock).toHaveBeenLastCalledWith(TEST_SESSION_ID, 'idle')
+  })
+
   it('renders memory saved notifications as chat memory events', () => {
     useChatStore.setState({
       sessions: {

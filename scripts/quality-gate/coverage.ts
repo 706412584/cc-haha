@@ -163,6 +163,7 @@ const ROOT_RUNTIME_CHANGED_SCOPE: CoverageScope = {
   includePrefixes: ['src/'],
   excludePrefixes: [
     'src/cli/',
+    'src/entrypoints/',
     'src/hooks/',
     'src/screens/',
     'src/server/',
