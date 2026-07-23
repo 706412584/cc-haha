@@ -1629,6 +1629,11 @@ export const SDKStreamingFallbackMessageSchema = lazySchema(() =>
       cause: z.enum(['watchdog', 'stream_error', '404_stream_creation', 'stream_retry']),
       uuid: UUIDPlaceholder(),
       session_id: z.string(),
+      // Mid-stream stream_retry progress for UI (optional on other causes).
+      attempt: z.number().int().positive().optional(),
+      maxRetries: z.number().int().nonnegative().optional(),
+      retryDelayMs: z.number().int().nonnegative().optional(),
+      errorMessage: z.string().optional(),
     })
     .describe(
       'Emitted when a streaming request is recovered by either a bounded safe stream retry or a non-streaming fallback.',

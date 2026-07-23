@@ -168,7 +168,15 @@ export type ServerMessage =
       errorMessage?: string
     }
   // 流式请求失败后的恢复状态：可能安全重试流，也可能降级为非流式请求。
-  | { type: 'streaming_fallback'; cause: StreamingFallbackCause }
+  // stream_retry 可附带 attempt 元数据，供桌面显示断流重试横幅（与手动停止区分）。
+  | {
+      type: 'streaming_fallback'
+      cause: StreamingFallbackCause
+      attempt?: number
+      maxRetries?: number
+      retryDelayMs?: number
+      errorMessage?: string
+    }
   | { type: 'error'; message: string; code: string; retryable?: boolean; businessErrorCode?: string }
   | { type: 'background_task_stop_failed'; taskId: string; message: string }
   | { type: 'background_task_stopped'; taskId: string }

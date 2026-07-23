@@ -99,15 +99,25 @@ export async function* withStreamRetry(
         )}`,
         { level: "warn" },
       );
+      const attempt = i + 1
+      const retryDelayMs = Math.round(getRetryDelay(attempt))
+      const errText = errorMessage(error.originalError)
       logEvent("tengu_stream_transient_retry", {
-        attempt: i + 1,
+        attempt,
         model:
           model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
       });
       // Raw deltas from the failed attempt may already be visible. Consumers
       // use this bounded retry signal to discard only that in-flight attempt.
-      yield createSystemStreamingFallbackMessage("stream_retry");
-      await sleep(getRetryDelay(i + 1), signal, {
+      // Include attempt metadata so desktop can show a visible retry banner
+      // (distinct from user clicking Stop).
+      yield createSystemStreamingFallbackMessage("stream_retry", {
+        attempt,
+        maxRetries,
+        retryDelayMs,
+        errorMessage: errText.slice(0, 240),
+      });
+      await sleep(retryDelayMs, signal, {
         abortError: () => new APIUserAbortError(),
       });
     }

@@ -387,6 +387,27 @@ describe('WebSocket API retry events', () => {
     ])
   })
 
+  it('forwards stream_retry attempt metadata for desktop visible reconnect banners', () => {
+    expect(translateCliMessage({
+      type: 'system',
+      subtype: 'streaming_fallback',
+      cause: 'stream_retry',
+      attempt: 2,
+      maxRetries: 4,
+      retryDelayMs: 1500,
+      errorMessage: 'OpenAI messages stream disconnected before completion',
+    }, 'session-1')).toEqual([
+      {
+        type: 'streaming_fallback',
+        cause: 'stream_retry',
+        attempt: 2,
+        maxRetries: 4,
+        retryDelayMs: 1500,
+        errorMessage: 'OpenAI messages stream disconnected before completion',
+      },
+    ])
+  })
+
   it('normalizes unrecognized streaming_fallback causes to unknown instead of dropping the event', () => {
     // 新 CLI + 旧枚举：提示本身比成因重要，不能丢消息。
     expect(translateCliMessage({

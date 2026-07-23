@@ -8,10 +8,12 @@ import * as path from 'path'
 import * as os from 'os'
 import { TaskService } from '../services/taskService.js'
 import {
+  completedTasksMatchResetSnapshot,
   deleteTask,
   resetTaskList,
   resetTaskListIfMatches,
   TaskSchema,
+  type Task,
 } from '../../utils/tasks.js'
 import * as taskLockfile from '../../utils/lockfile.js'
 
@@ -23,6 +25,66 @@ const taskFixture = (overrides: Record<string, unknown>) => ({
   blocks: [],
   blockedBy: [],
   ...overrides,
+})
+
+const completedTask = (overrides: Partial<Task> = {}): Task =>
+  TaskSchema().parse(taskFixture({ status: 'completed', ...overrides }))
+
+describe('completedTasksMatchResetSnapshot', () => {
+  it('matches completed sets when only non-identity fields differ', () => {
+    const disk = [
+      completedTask({
+        id: '1',
+        subject: 'Done task',
+        description: 'Full disk description',
+        owner: 'main-agent',
+        activeForm: 'Finishing',
+        blocks: ['2'],
+      }),
+      completedTask({
+        id: '2',
+        subject: 'Also done',
+        description: 'Another description',
+        owner: 'main-agent',
+        blockedBy: ['1'],
+      }),
+    ]
+    const desktopSnapshot = [
+      completedTask({ id: '1', subject: 'Done task', description: '' }),
+      completedTask({ id: '2', subject: 'Also done', description: '' }),
+    ]
+    expect(completedTasksMatchResetSnapshot(disk, desktopSnapshot)).toBe(true)
+  })
+
+  it('rejects subject drift, incomplete tasks, and length mismatch', () => {
+    expect(
+      completedTasksMatchResetSnapshot(
+        [completedTask({ id: '1', subject: 'Updated' })],
+        [completedTask({ id: '1', subject: 'Original' })],
+      ),
+    ).toBe(false)
+    expect(
+      completedTasksMatchResetSnapshot(
+        [
+          completedTask({ id: '1', subject: 'Done' }),
+          TaskSchema().parse(taskFixture({ id: '2', subject: 'Still open', status: 'pending' })),
+        ],
+        [
+          completedTask({ id: '1', subject: 'Done' }),
+          completedTask({ id: '2', subject: 'Still open' }),
+        ],
+      ),
+    ).toBe(false)
+    expect(
+      completedTasksMatchResetSnapshot(
+        [completedTask({ id: '1', subject: 'Done' })],
+        [
+          completedTask({ id: '1', subject: 'Done' }),
+          completedTask({ id: '2', subject: 'Extra' }),
+        ],
+      ),
+    ).toBe(false)
+  })
 })
 
 async function rmWithRetry(targetPath: string): Promise<void> {
@@ -310,6 +372,56 @@ describe('Tasks API', () => {
     expect(await reset.json()).toEqual({ ok: true, reset: false })
     const after = await fetch(`${baseUrl}/api/tasks/lists/desktop-session-1`)
     expect((await after.json()).tasks[0].subject).toBe('Updated completed task')
+  })
+
+  it('should reset when disk tasks have richer fields than the desktop snapshot', async () => {
+    // Desktop V1 hydration / strip of taskListId often omits description/owner/blocks
+    // that V2 disk files carry; deep-equal used to make clear-completed a no-op.
+    // Exercise resetTaskListIfMatches directly (avoids HTTP access-token env flakiness).
+    const taskListDir = path.join(tmpDir, 'tasks', 'desktop-session-1')
+    await fs.mkdir(taskListDir, { recursive: true })
+    await fs.writeFile(path.join(taskListDir, '1.json'), JSON.stringify(taskFixture({
+      id: '1',
+      subject: 'Done task',
+      status: 'completed',
+      description: 'Full disk description',
+      owner: 'main-agent',
+      activeForm: 'Finishing',
+      blocks: ['2'],
+      blockedBy: [],
+    })))
+    await fs.writeFile(path.join(taskListDir, '2.json'), JSON.stringify(taskFixture({
+      id: '2',
+      subject: 'Also done',
+      status: 'completed',
+      description: 'Another description',
+      owner: 'main-agent',
+      blocks: [],
+      blockedBy: ['1'],
+    })))
+
+    const reset = await resetTaskListIfMatches('desktop-session-1', [
+      TaskSchema().parse({
+        id: '1',
+        subject: 'Done task',
+        description: '',
+        status: 'completed',
+        blocks: [],
+        blockedBy: [],
+      }),
+      TaskSchema().parse({
+        id: '2',
+        subject: 'Also done',
+        description: '',
+        status: 'completed',
+        blocks: [],
+        blockedBy: [],
+      }),
+    ])
+
+    expect(reset).toBe(true)
+    const remaining = await fs.readdir(taskListDir)
+    expect(remaining.filter((name) => name.endsWith('.json'))).toEqual([])
   })
 
   it('should wait for an in-flight task update before comparing the reset snapshot', async () => {
