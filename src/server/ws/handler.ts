@@ -521,13 +521,6 @@ export const handleWebSocket = {
                   })
                 })
                 .catch((err) => {
-                  void diagnosticsService.recordEvent({
-                    type: 'ws_user_message_failed',
-                    severity: 'error',
-                    sessionId: ws.data.sessionId,
-                    summary: err instanceof Error ? err.message : String(err),
-                    details: err,
-                  })
                   console.error(`[WS] Mid-turn user message inject failed:`, err)
                   sendMessage(ws, {
                     type: 'error',
