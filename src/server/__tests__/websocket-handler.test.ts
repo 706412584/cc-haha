@@ -1384,6 +1384,109 @@ describe('WebSocket handler session isolation', () => {
       }),
     )
   })
+
+  it('reports CLI_NOT_RUNNING when a mid-turn inject cannot reach the CLI', async () => {
+    const sessionId = `mid-turn-cli-missing-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([])
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'sendMessage').mockResolvedValue(false)
+
+    handleWebSocket.open(ws)
+    __markActiveTurnForTests(sessionId)
+    ws.sent.length = 0
+
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'user_message',
+      content: 'steer while cli is gone',
+    }))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'error',
+      message: 'CLI process is not running. The session may have ended or the process crashed.',
+      code: 'CLI_NOT_RUNNING',
+    })
+  })
+
+  it('reports USER_TURN_INJECT_FAILED when mid-turn inject throws', async () => {
+    const sessionId = `mid-turn-inject-fail-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([])
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'sendMessage').mockRejectedValue(new Error('inject boom'))
+    const errorLog = spyOn(console, 'error').mockImplementation(() => {})
+
+    handleWebSocket.open(ws)
+    __markActiveTurnForTests(sessionId)
+    ws.sent.length = 0
+
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'user_message',
+      content: 'steer with failure',
+    }))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'error',
+      message: 'The follow-up message could not be delivered. Please retry.',
+      code: 'USER_TURN_INJECT_FAILED',
+      retryable: true,
+    })
+    expect(errorLog).toHaveBeenCalled()
+  })
+
+  it('still rejects follow-ups during the pre-send startup window', async () => {
+    const sessionId = `mid-turn-presend-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([])
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    const sendMessageSpy = spyOn(conversationService, 'sendMessage').mockResolvedValue(true)
+
+    handleWebSocket.open(ws)
+    __registerPendingUserTurnForTests(sessionId)
+    ws.sent.length = 0
+
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'user_message',
+      content: 'too early to steer',
+    }))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(sendMessageSpy).not.toHaveBeenCalled()
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'error',
+      message: 'A user turn is already active for this session. Retry after it completes.',
+      code: 'SESSION_TURN_ACTIVE',
+      retryable: true,
+    })
+  })
+
+  it('rejects mid-turn follow-ups when the CLI session is gone', async () => {
+    const sessionId = `mid-turn-no-session-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([])
+    spyOn(conversationService, 'hasSession').mockReturnValue(false)
+    const sendMessageSpy = spyOn(conversationService, 'sendMessage').mockResolvedValue(true)
+
+    handleWebSocket.open(ws)
+    __markActiveTurnForTests(sessionId)
+    ws.sent.length = 0
+
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'user_message',
+      content: 'steer without session',
+    }))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(sendMessageSpy).not.toHaveBeenCalled()
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'error',
+      message: 'A user turn is already active for this session. Retry after it completes.',
+      code: 'SESSION_TURN_ACTIVE',
+      retryable: true,
+    })
+  })
 })
 
 describe('prewarm idle timer active-turn guard (issue #865 follow-up)', () => {
