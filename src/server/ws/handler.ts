@@ -501,15 +501,8 @@ export const handleWebSocket = {
         case 'user_message': {
           const activeTurn: ActiveUserTurnState = { messageSent: false }
           if (!sessionActivityCoordinator.tryBeginUserTurn(ws.data.sessionId)) {
-            // Mid-turn steer / "Guide now": once the active turn has already
-            // enqueued its user message, inject follow-ups into the live CLI
-            // instead of rejecting. Still reject during the pre-send/startup
-            // window and during provider-transition reservations.
             const existingTurn = activeUserTurns.get(ws.data.sessionId)
-            if (
-              existingTurn?.messageSent
-              && conversationService.hasSession(ws.data.sessionId)
-            ) {
+            if (existingTurn?.messageSent && conversationService.hasSession(ws.data.sessionId)) {
               void conversationService
                 .sendMessage(ws.data.sessionId, message.content, message.attachments)
                 .then((sent) => {

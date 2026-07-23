@@ -3088,9 +3088,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
 
       case 'error': {
-        // Concurrent-turn rejections must not tear down an in-flight turn.
-        // The server still owns the original turn; forcing idle here causes a
-        // brief "idle/run" flash and lets the composer re-send into a busy turn.
         const preserveActiveTurn =
           msg.code === 'SESSION_TURN_ACTIVE'
           && get().sessions[sessionId]?.chatState !== 'idle'
