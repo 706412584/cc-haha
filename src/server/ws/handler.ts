@@ -280,11 +280,7 @@ function hasActiveBackgroundTasks(sessionId: string): boolean {
   return (activeBackgroundTaskIds.get(sessionId)?.size ?? 0) > 0
 }
 
-/**
- * When the CLI dies or the session is torn down, active background tasks will
- * never emit a terminal task_notification. Drain the in-memory set and synthesize
- * stopped events so desktop agent cards leave the zombie "running" state.
- */
+// Drain active background tasks and synthesize stopped events for desktop UI.
 function takeActiveBackgroundTaskIds(sessionId: string): string[] {
   const taskIds = activeBackgroundTaskIds.get(sessionId)
   if (!taskIds || taskIds.size === 0) return []
@@ -309,20 +305,19 @@ function buildStoppedBackgroundTaskMessages(
   const summary = reason || 'CLI process ended'
   return taskIds.map((taskId) => {
     terminalTasks!.add(taskId)
-    const data = {
-      type: 'system',
-      subtype: 'task_notification',
-      task_id: taskId,
-      tool_use_id: taskId,
-      status: 'stopped' as const,
-      summary,
-      timestamp: new Date().toISOString(),
-    }
     return {
       type: 'system_notification' as const,
       subtype: 'task_notification',
       message: summary,
-      data,
+      data: {
+        type: 'system',
+        subtype: 'task_notification',
+        task_id: taskId,
+        tool_use_id: taskId,
+        status: 'stopped' as const,
+        summary,
+        timestamp: new Date().toISOString(),
+      },
     }
   })
 }
@@ -1645,8 +1640,6 @@ async function restartSessionWithRuntimeConfig(
 function isBackgroundTaskAlreadyGoneMessage(message: string): boolean {
   const text = message.trim()
   if (!text) return false
-  // CLI already discarded the task (reclaimed after terminal, or never registered).
-  // Stop's desired end state is "not running", so treat as success for the desktop.
   return (
     text.startsWith('No task found with ID:') ||
     /^Task .+ is not running \(status: .+\)/.test(text) ||
@@ -2036,8 +2029,6 @@ function cleanupSessionRuntimeState(sessionId: string) {
   activeUserTurns.delete(sessionId)
   sessionActivityCoordinator.clear(sessionId)
   sessionStopRequested.delete(sessionId)
-  // Prefer synthesizing stopped events while clients are still connected;
-  // if nobody is listening, drop the ids so reconnect does not inherit ghosts.
   if (hasActiveClients(sessionId)) {
     broadcastStoppedBackgroundTasks(sessionId, 'Session closed')
   } else {
@@ -2658,10 +2649,7 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
       const usage = translateCliUsage(cliMsg.usage)
 
       if (cliMsg.is_error) {
-        // If the user requested stop, this "error" is just the interrupt
-        // result — don't show it as an error in the chat UI.
-        // Background agents may still be running after a turn interrupt, so
-        // do not synthesize terminal task_notification here.
+        // Interrupt result after user stop — not a chat error; keep bg tasks alone.
         if (sessionStopRequested.has(sessionId)) {
           sessionStopRequested.delete(sessionId)
           return [{ type: 'message_complete', usage }]
@@ -2672,13 +2660,8 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
           (Array.isArray(cliMsg.errors) && cliMsg.errors.length > 0
             ? cliMsg.errors.join('\n')
             : 'Unknown error')
-        // CLI subprocess is gone — in-flight background tasks will never emit
-        // their own terminal notification; synthesize stopped so desktop leaves
-        // the zombie "running" state.
         const isCliProcessExit =
-          /CLI (?:process exited unexpectedly|exited during startup)/i.test(
-            resultMessage,
-          )
+          /CLI (?:process exited unexpectedly|exited during startup)/i.test(resultMessage)
         const stoppedTasks = isCliProcessExit
           ? buildStoppedBackgroundTaskMessages(sessionId, 'CLI process ended')
           : []
@@ -2686,7 +2669,6 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
           streamState.lastApiError = undefined
           return [...stoppedTasks, { type: 'message_complete', usage }]
         }
-        // 错误和完成消息都发送
         return [
           ...stoppedTasks,
           {
@@ -3623,9 +3605,6 @@ function bindClientSessionOutput(
 
     const persistence = persistCliTaskNotification(sessionId, cliMsg)
     if (persistence) {
-      // Terminal task_notification must still reach the desktop even if disk
-      // persistence fails; otherwise Agent cards stay stuck on "running" and
-      // stop becomes No task found after the CLI reclaims the task.
       void Promise.resolve(persistence).then(
         () => {
           if (activeSessions.get(sessionId)?.has(ws)) forward()

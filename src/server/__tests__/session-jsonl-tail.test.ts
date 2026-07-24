@@ -69,4 +69,48 @@ describe('SessionService oversized jsonl tail guard', () => {
     expect(text).toContain('tail-only-user-message')
     expect(text).not.toContain('early-user-should-be-cut')
   })
+
+  test('drops a cut mid-record when the tail window starts mid-line', async () => {
+    const projectDir = path.join(tmpDir, 'projects', 'test-project')
+    await fs.mkdir(projectDir, { recursive: true })
+    const sessionId = '00000000-0000-4000-8000-000000000098'
+    const filePath = path.join(projectDir, `${sessionId}.jsonl`)
+    const lateUser =
+      JSON.stringify({
+        type: 'user',
+        uuid: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+        timestamp: '2026-07-23T12:00:00.000Z',
+        message: { role: 'user', content: 'complete-tail-message' },
+      }) + '\n'
+    // Prefix with a long partial line (no newline until the end of the junk) so
+    // maxBytes=2000 lands mid-record and the first incomplete line is discarded.
+    const partial = `{"type":"queue-operation","content":"${'y'.repeat(2500)}"}\n`
+    await fs.writeFile(filePath, partial + lateUser)
+
+    const messages = await service.getSessionMessages(sessionId)
+    const text = messages
+      .map((m) =>
+        typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+      )
+      .join('\n')
+    expect(text).toContain('complete-tail-message')
+  })
+
+  test('returns empty messages for a small valid transcript under the ceiling', async () => {
+    const projectDir = path.join(tmpDir, 'projects', 'test-project')
+    await fs.mkdir(projectDir, { recursive: true })
+    const sessionId = '00000000-0000-4000-8000-000000000097'
+    const filePath = path.join(projectDir, `${sessionId}.jsonl`)
+    await fs.writeFile(
+      filePath,
+      JSON.stringify({
+        type: 'user',
+        uuid: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        timestamp: '2026-07-23T12:00:00.000Z',
+        message: { role: 'user', content: 'small-file' },
+      }) + '\n',
+    )
+    const messages = await service.getSessionMessages(sessionId)
+    expect(JSON.stringify(messages)).toContain('small-file')
+  })
 })

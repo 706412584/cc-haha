@@ -481,10 +481,7 @@ export class SessionService {
   private activeSessionListCacheScope: string | null = null
   private readonly readCacheMaxFileBytes = 16 * 1024 * 1024
   private readonly readCacheMaxTotalBytes = 64 * 1024 * 1024
-  /**
-   * Full in-memory JSONL parse ceiling. Matches CLI MAX_TRANSCRIPT_READ_BYTES
-   * (50 MiB). Multi-GB queue-operation transcripts must never be loaded whole.
-   */
+  // Matches CLI MAX_TRANSCRIPT_READ_BYTES (50 MiB) — never whole-load multi-GB transcripts.
   private readonly maxFullJsonlReadBytes: number
   private readCacheTotalBytes = 0
   private readonly readJsonlCache = new Map<string, {
@@ -881,8 +878,6 @@ export class SessionService {
     filePath: string,
     stat: { mtimeMs: number; size: number },
   ): Promise<RawEntry[]> {
-    // Refuse whole-file loads for multi-GB transcripts (queue-op spam).
-    // Tail-read only so history/detail still works without OOM.
     if (stat.size > this.maxFullJsonlReadBytes) {
       console.warn(
         `[SessionService] oversized transcript ${filePath} (${stat.size} bytes); parsing last ${this.maxFullJsonlReadBytes} bytes only`,
@@ -904,7 +899,6 @@ export class SessionService {
     }
 
     const entries = this.parseJsonlContent(content)
-
     if (stat.size <= this.readCacheMaxFileBytes) {
       this.storeReadCache(filePath, stat.mtimeMs, stat.size, entries)
     } else {
@@ -927,10 +921,7 @@ export class SessionService {
     return entries
   }
 
-  /**
-   * Read only the last `maxBytes` of a JSONL file. Drops the first partial line
-   * so we never parse a cut mid-record.
-   */
+  /** Read last maxBytes; drop the first partial line if the window starts mid-record. */
   private async readJsonlTail(
     filePath: string,
     maxBytes: number,

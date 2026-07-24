@@ -26,20 +26,14 @@ export type SetAppState = (f: (prev: AppState) => AppState) => void
 // Logging helper
 // ============================================================================
 
-/**
- * Queue-operation transcript writes caused multi-GB jsonl blowups (every
- * enqueue/dequeue/remove was appended). Conversation resume does not need
- * them (getLastSessionLog filters them out). Persistence is off by default;
- * set CLAUDE_CODE_PERSIST_QUEUE_OPS=1 only for debugging, and even then we
- * drop dequeue/remove, truncate content, and rate-limit writes.
- */
+// Off by default: full queue-op persistence ballooned multi-GB transcripts.
+// CLAUDE_CODE_PERSIST_QUEUE_OPS=1 enables rate-limited enqueue-only writes.
 const QUEUE_OP_CONTENT_MAX_CHARS = 200
 const QUEUE_OP_PERSIST_MIN_INTERVAL_MS = 1_000
 const QUEUE_OP_PERSIST_MAX_PER_WINDOW = 20
 const queueOpPersistWindow = { startedAt: 0, count: 0 }
 
 export function shouldPersistQueueOperation(operation: QueueOperation): boolean {
-  // dequeue/remove are pure bookkeeping — never worth disk.
   if (operation !== 'enqueue') return false
   if (!isEnvTruthy(process.env.CLAUDE_CODE_PERSIST_QUEUE_OPS)) return false
 
@@ -58,7 +52,7 @@ export function shouldPersistQueueOperation(operation: QueueOperation): boolean 
   return true
 }
 
-function truncateQueueOpContent(content: string | undefined): string | undefined {
+export function truncateQueueOpContent(content: string | undefined): string | undefined {
   if (content === undefined) return undefined
   if (content.length <= QUEUE_OP_CONTENT_MAX_CHARS) return content
   return `${content.slice(0, QUEUE_OP_CONTENT_MAX_CHARS)}…`
@@ -71,7 +65,6 @@ export function __resetQueueOpPersistWindowForTests(): void {
 
 function logOperation(operation: QueueOperation, content?: string): void {
   if (!shouldPersistQueueOperation(operation)) return
-
   const sessionId = getSessionId()
   const truncated = truncateQueueOpContent(content)
   const queueOp: QueueOperationMessage = {

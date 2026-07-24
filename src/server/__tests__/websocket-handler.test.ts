@@ -194,6 +194,94 @@ describe('translateCliMessage usage mapping', () => {
       expect.objectContaining({ type: 'error', code: 'CLI_ERROR' }),
     ]))
   })
+
+  it('still synthesizes stopped tasks when a CLI exit result is a duplicate of last API error', () => {
+    const sessionId = `cli-exit-dup-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    const outputCallbacks: Array<(cliMsg: any) => void> = []
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'onOutput').mockImplementation((_sid, callback) => {
+      outputCallbacks.push(callback)
+    })
+    spyOn(conversationService, 'removeOutputCallback').mockImplementation(() => {})
+
+    handleWebSocket.open(ws)
+    const exitText =
+      'CLI process exited unexpectedly (code 3): panic: Illegal instruction'
+    // Seed lastApiError via an assistant-style API error path if available,
+    // otherwise first translate an identical error then exit with active task.
+    translateCliMessage({
+      type: 'assistant',
+      isApiErrorMessage: true,
+      error: exitText,
+      message: { role: 'assistant', content: [{ type: 'text', text: exitText }] },
+    }, sessionId)
+
+    outputCallbacks[0]?.({
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'zombie-dup-1',
+      tool_use_id: 'zombie-dup-tool',
+      description: 'Dup exit',
+      task_type: 'local_agent',
+    })
+
+    const messages = translateCliMessage({
+      type: 'result',
+      subtype: 'error',
+      is_error: true,
+      result: exitText,
+      usage: { input_tokens: 0, output_tokens: 0 },
+    }, sessionId)
+
+    expect(messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'system_notification',
+        subtype: 'task_notification',
+        data: expect.objectContaining({
+          task_id: 'zombie-dup-1',
+          status: 'stopped',
+        }),
+      }),
+      expect.objectContaining({ type: 'message_complete' }),
+    ]))
+  })
+
+  it('broadcasts stopped tasks when closing a session that still has active background work', () => {
+    const sessionId = `close-bg-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    const outputCallbacks: Array<(cliMsg: any) => void> = []
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'onOutput').mockImplementation((_sid, callback) => {
+      outputCallbacks.push(callback)
+    })
+    spyOn(conversationService, 'removeOutputCallback').mockImplementation(() => {})
+    spyOn(conversationService, 'clearOutputCallbacks').mockImplementation(() => {})
+
+    handleWebSocket.open(ws)
+    ws.sent.length = 0
+    outputCallbacks[0]?.({
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'close-zombie-1',
+      tool_use_id: 'close-zombie-tool',
+      description: 'Close me',
+      task_type: 'local_agent',
+    })
+
+    expect(closeSessionConnection(sessionId, 'session closed')).toBe(true)
+    const payloads = ws.sent.map((payload) => JSON.parse(payload))
+    expect(payloads).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'system_notification',
+        subtype: 'task_notification',
+        data: expect.objectContaining({
+          task_id: 'close-zombie-1',
+          status: 'stopped',
+        }),
+      }),
+    ]))
+  })
 })
 
 describe('WebSocket handler session isolation', () => {
@@ -791,6 +879,45 @@ describe('WebSocket handler session isolation', () => {
       subtype: 'task_notification',
       data: running,
     })
+  })
+
+  it('forwards terminal task notifications even when disk persistence fails', async () => {
+    const sessionId = `task-notification-persist-fail-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    let outputCallback: ((cliMsg: any) => void) | null = null
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'onOutput').mockImplementation((_sid, callback) => {
+      outputCallback = callback
+    })
+    spyOn(sessionService, 'appendSessionTaskNotification').mockRejectedValue(
+      new Error('disk full'),
+    )
+    const warn = spyOn(console, 'warn').mockImplementation(() => {})
+
+    handleWebSocket.open(ws)
+    ws.sent.length = 0
+
+    const completed = {
+      type: 'system',
+      subtype: 'task_notification',
+      uuid: 'terminal-task-persist-fail-1',
+      task_id: 'agent-task-persist-fail',
+      tool_use_id: 'agent-tool-persist-fail',
+      status: 'completed',
+      summary: 'Background task completed',
+      timestamp: '2026-07-18T00:01:00.000Z',
+    }
+    outputCallback?.(completed)
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'system_notification',
+      subtype: 'task_notification',
+      data: completed,
+    })
+    expect(warn.mock.calls.some((args) => String(args[0]).includes('Failed to persist'))).toBe(true)
   })
 
   it('does not send a stale stop failure after observing a terminal task notification', async () => {

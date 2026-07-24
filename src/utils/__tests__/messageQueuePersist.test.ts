@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import {
   __resetQueueOpPersistWindowForTests,
   shouldPersistQueueOperation,
+  truncateQueueOpContent,
 } from '../messageQueueManager.js'
 
 describe('shouldPersistQueueOperation', () => {
@@ -37,5 +38,15 @@ describe('shouldPersistQueueOperation', () => {
       if (shouldPersistQueueOperation('enqueue')) allowed++
     }
     expect(allowed).toBe(20)
+  })
+
+  test('truncateQueueOpContent drops undefined and long payloads', () => {
+    expect(truncateQueueOpContent(undefined)).toBeUndefined()
+    expect(truncateQueueOpContent('short')).toBe('short')
+    const long = 'x'.repeat(250)
+    const truncated = truncateQueueOpContent(long)
+    expect(truncated).toBeDefined()
+    expect(truncated!.endsWith('…')).toBe(true)
+    expect(truncated!.length).toBe(201)
   })
 })
