@@ -5415,7 +5415,7 @@ describe('chatStore history mapping', () => {
     useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
       type: 'background_task_stop_failed',
       taskId: 'agent-task-1',
-      message: 'Task is not running',
+      message: 'Timed out waiting for stop_task response',
     })
 
     const session = useChatStore.getState().sessions[TEST_SESSION_ID]
@@ -5423,12 +5423,12 @@ describe('chatStore history mapping', () => {
     expect(session?.stoppingBackgroundTaskIds?.['agent-task-1']).toBeUndefined()
     expect(session?.messages).toContainEqual(expect.objectContaining({
       type: 'error',
-      message: 'Task is not running',
+      message: 'Timed out waiting for stop_task response',
       code: 'STOP_BACKGROUND_TASK_FAILED',
     }))
   })
 
-  it('restores an Agent card to running when the stop request is rejected', () => {
+  it('keeps optimistic stopped state when CLI says the task is already gone', () => {
     useChatStore.setState({
       sessions: {
         [TEST_SESSION_ID]: makeSession({
@@ -5461,7 +5461,57 @@ describe('chatStore history mapping', () => {
     useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
       type: 'background_task_stop_failed',
       taskId: 'agent-task-1',
-      message: 'Task is no longer available',
+      message: 'No task found with ID: agent-task-1',
+    })
+
+    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.backgroundAgentTasks?.['agent-task-1']?.status).toBe('stopped')
+    expect(session?.stoppingBackgroundTaskIds?.['agent-task-1']).toBeUndefined()
+    expect(session?.agentTaskNotifications['agent-tool-1']?.status).toBe('stopped')
+    expect(session?.messages).toContainEqual(expect.objectContaining({
+      type: 'tool_use',
+      toolUseId: 'agent-tool-1',
+      status: 'stopped',
+    }))
+    expect(session?.messages.some((message) =>
+      message.type === 'error' && message.code === 'STOP_BACKGROUND_TASK_FAILED',
+    )).toBe(false)
+  })
+
+  it('restores an Agent card to running when the stop request is rejected for a real failure', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          chatState: 'idle',
+          messages: [{
+            id: 'agent-tool-message',
+            type: 'tool_use',
+            toolName: 'Agent',
+            toolUseId: 'agent-tool-1',
+            input: { description: 'Verify screenshots' },
+            timestamp: 1,
+          }],
+          agentTaskNotifications: {},
+          backgroundAgentTasks: {
+            'agent-task-1': {
+              taskId: 'agent-task-1',
+              toolUseId: 'agent-tool-1',
+              status: 'running',
+              taskType: 'local_agent',
+              description: 'Verify screenshots',
+              startedAt: 1,
+              updatedAt: 2,
+            },
+          },
+        }),
+      },
+    })
+    useChatStore.getState().stopBackgroundTask(TEST_SESSION_ID, 'agent-task-1')
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'background_task_stop_failed',
+      taskId: 'agent-task-1',
+      message: 'Timed out waiting for stop_task response',
     })
 
     const session = useChatStore.getState().sessions[TEST_SESSION_ID]

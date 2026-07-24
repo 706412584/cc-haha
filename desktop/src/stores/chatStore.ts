@@ -3175,6 +3175,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           const stopWasRequested = stoppingBackgroundTaskIds[msg.taskId] === true
           delete stoppingBackgroundTaskIds[msg.taskId]
           const task = session.backgroundAgentTasks?.[msg.taskId]
+          // CLI already dropped the task (reclaimed after completion / never found).
+          // Keep the optimistic terminal UI instead of resurrecting a zombie "running".
+          if (isBackgroundTaskAlreadyGoneStopFailure(msg.message)) {
+            return { stoppingBackgroundTaskIds }
+          }
           const shouldRollbackOptimisticStop = stopWasRequested && task?.status === 'stopped'
           if (!shouldRollbackOptimisticStop) {
             return { stoppingBackgroundTaskIds }
@@ -3820,6 +3825,18 @@ function findToolUseMessage(messages: UIMessage[], toolUseId: string): ToolCall 
   ): message is ToolCall =>
     message.type === 'tool_use' &&
     message.toolUseId === toolUseId) ?? null
+}
+
+/** CLI already discarded the task — keep optimistic terminal UI, no error toast. */
+function isBackgroundTaskAlreadyGoneStopFailure(message: string | undefined): boolean {
+  const text = typeof message === 'string' ? message.trim() : ''
+  if (!text) return false
+  return (
+    text.startsWith('No task found with ID:') ||
+    /^Task .+ is not running \(status: .+\)/.test(text) ||
+    text === 'Task is not running' ||
+    text === 'Task is no longer available'
+  )
 }
 
 function getStoppedBackgroundTaskFromToolResult(

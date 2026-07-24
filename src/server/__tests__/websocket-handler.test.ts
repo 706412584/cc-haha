@@ -105,6 +105,95 @@ describe('translateCliMessage usage mapping', () => {
       allowed: false,
     }])
   })
+
+  it('synthesizes stopped task_notification when CLI process exit kills active background tasks', () => {
+    const sessionId = `cli-exit-bg-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    const outputCallbacks: Array<(cliMsg: any) => void> = []
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'onOutput').mockImplementation((_sid, callback) => {
+      outputCallbacks.push(callback)
+    })
+    spyOn(conversationService, 'removeOutputCallback').mockImplementation(() => {})
+
+    handleWebSocket.open(ws)
+    outputCallbacks[0]?.({
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'zombie-agent-1',
+      tool_use_id: 'zombie-tool-1',
+      description: 'Background research',
+      task_type: 'local_agent',
+    })
+
+    const messages = translateCliMessage({
+      type: 'result',
+      subtype: 'error',
+      is_error: true,
+      result: 'CLI process exited unexpectedly (code 3): panic: Illegal instruction',
+      usage: { input_tokens: 0, output_tokens: 0 },
+    }, sessionId)
+
+    expect(messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'system_notification',
+        subtype: 'task_notification',
+        data: expect.objectContaining({
+          task_id: 'zombie-agent-1',
+          status: 'stopped',
+        }),
+      }),
+      expect.objectContaining({
+        type: 'error',
+        code: 'CLI_ERROR',
+      }),
+      expect.objectContaining({ type: 'message_complete' }),
+    ]))
+
+    // Second exit translation must not re-emit the same synthetic stop.
+    const second = translateCliMessage({
+      type: 'result',
+      subtype: 'error',
+      is_error: true,
+      result: 'CLI process exited unexpectedly (code 3): panic: Illegal instruction',
+      usage: { input_tokens: 0, output_tokens: 0 },
+    }, sessionId)
+    expect(second.some((msg) => msg.type === 'system_notification')).toBe(false)
+  })
+
+  it('does not synthesize background stops for ordinary API errors', () => {
+    const sessionId = `api-error-bg-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    const outputCallbacks: Array<(cliMsg: any) => void> = []
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'onOutput').mockImplementation((_sid, callback) => {
+      outputCallbacks.push(callback)
+    })
+    spyOn(conversationService, 'removeOutputCallback').mockImplementation(() => {})
+
+    handleWebSocket.open(ws)
+    outputCallbacks[0]?.({
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'still-running-1',
+      tool_use_id: 'still-running-tool',
+      description: 'Still alive',
+      task_type: 'local_agent',
+    })
+
+    const messages = translateCliMessage({
+      type: 'result',
+      subtype: 'error',
+      is_error: true,
+      result: 'API Error: rate limit',
+      usage: { input_tokens: 0, output_tokens: 0 },
+    }, sessionId)
+
+    expect(messages.some((msg) => msg.type === 'system_notification')).toBe(false)
+    expect(messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'error', code: 'CLI_ERROR' }),
+    ]))
+  })
 })
 
 describe('WebSocket handler session isolation', () => {
@@ -485,10 +574,15 @@ describe('WebSocket handler session isolation', () => {
       taskId: 'bash-task-1',
     }))
     await Promise.resolve()
+    await Promise.resolve()
 
     expect(requestControl).toHaveBeenCalledWith(sessionId, {
       subtype: 'stop_task',
       task_id: 'bash-task-1',
+    })
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'background_task_stopped',
+      taskId: 'bash-task-1',
     })
   })
 
@@ -584,11 +678,37 @@ describe('WebSocket handler session isolation', () => {
     })
   })
 
-  it('reports a task-scoped failure when the CLI rejects a background stop', async () => {
+  it('confirms stop when CLI reports the task is already gone', async () => {
+    const sessionId = `stop-background-gone-task-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'requestControl').mockRejectedValue(
+      new Error('No task found with ID: ad2d22cddf8847715'),
+    )
+
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'stop_background_task',
+      taskId: 'ad2d22cddf8847715',
+    }))
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'background_task_stopped',
+      taskId: 'ad2d22cddf8847715',
+    })
+    expect(ws.sent.map((payload) => JSON.parse(payload))).not.toContainEqual(
+      expect.objectContaining({ type: 'background_task_stop_failed' }),
+    )
+  })
+
+  it('reports a task-scoped failure when the CLI rejects a background stop for a live reason', async () => {
     const sessionId = `stop-background-failed-${crypto.randomUUID()}`
     const ws = makeClientSocket(sessionId)
     spyOn(conversationService, 'hasSession').mockReturnValue(true)
-    spyOn(conversationService, 'requestControl').mockRejectedValue(new Error('Task is not running'))
+    spyOn(conversationService, 'requestControl').mockRejectedValue(
+      new Error('Timed out waiting for stop_task response'),
+    )
 
     handleWebSocket.message(ws, JSON.stringify({
       type: 'stop_background_task',
@@ -600,7 +720,7 @@ describe('WebSocket handler session isolation', () => {
     expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
       type: 'background_task_stop_failed',
       taskId: 'bash-task-1',
-      message: 'Task is not running',
+      message: 'Timed out waiting for stop_task response',
     })
   })
 
@@ -763,11 +883,15 @@ describe('WebSocket handler session isolation', () => {
     await Promise.resolve()
     await Promise.resolve()
 
+    // After session close, observedTerminalTasks is cleared. A late stop against
+    // a reclaimed task id is treated as already-gone success, not a hard error.
     expect(second.sent.map((payload) => JSON.parse(payload))).toContainEqual({
-      type: 'background_task_stop_failed',
+      type: 'background_task_stopped',
       taskId: 'agent-task-1',
-      message: 'Task is not running',
     })
+    expect(second.sent.map((payload) => JSON.parse(payload))).not.toContainEqual(
+      expect.objectContaining({ type: 'background_task_stop_failed' }),
+    )
   })
 
   it('broadcasts tool and Computer Use permission resolutions to every client', () => {
