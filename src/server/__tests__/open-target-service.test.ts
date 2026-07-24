@@ -12,7 +12,7 @@ function createService(
   platform: NodeJS.Platform,
   options: {
     commands?: Record<string, boolean>
-    commandPaths?: Record<string, string | null>
+    commandPaths?: Record<string, string | string[] | null>
     paths?: Record<string, boolean>
     plistValues?: Record<string, string | null>
     dirNames?: Record<string, string[]>
@@ -29,19 +29,24 @@ function createService(
   let pathProbes = 0
   const now = options.now ?? { value: 100 }
 
+  const resolveCommandPaths = (command: string): string[] => {
+    const commandPath = options.commandPaths?.[command]
+    if (commandPath === null) return []
+    if (Array.isArray(commandPath)) return commandPath.filter(Boolean)
+    if (typeof commandPath === 'string') return [commandPath]
+    return options.commands?.[command] === true ? [command] : []
+  }
+
   const service = createOpenTargetService({
     platform,
     ttlMs: options.ttlMs ?? 1_000,
     now: () => now.value,
     commandExists: async (command) => {
       commandProbes += 1
-      return options.commands?.[command] === true || Boolean(options.commandPaths?.[command])
+      return resolveCommandPaths(command).length > 0
     },
-    resolveCommand: async (command) => {
-      const commandPath = options.commandPaths?.[command]
-      if (commandPath !== undefined) return commandPath
-      return options.commands?.[command] === true ? command : null
-    },
+    resolveCommand: async (command) => resolveCommandPaths(command)[0] ?? null,
+    resolveCommands: async (command) => resolveCommandPaths(command),
     pathExists: async (targetPath) => {
       pathProbes += 1
       return options.paths?.[targetPath] === true
@@ -150,6 +155,37 @@ describe('openTargetService', () => {
     const result = await service.listTargets()
 
     expect(result.targets.map((target) => target.id)).toEqual(['vscode', 'explorer'])
+    expect(result.primaryTargetId).toBe('vscode')
+  })
+
+  it('still detects VS Code when Cursor owns the first where code.cmd hit', async () => {
+    // Real Windows PATH often lists Cursor's VS Code-compatible shim first:
+    //   C:\Users\...\cursor\resources\app\codeBin\code.cmd
+    //   D:\Microsoft VS Code\bin\code.cmd
+    // Detection must walk every where hit, not only the first.
+    const cursorShim = 'C:\\Users\\70641\\AppData\\Local\\Programs\\cursor\\resources\\app\\codeBin\\code.cmd'
+    const vscodeShim = 'D:\\Microsoft VS Code\\bin\\code.cmd'
+    const vscodeExe = 'D:\\Microsoft VS Code\\Code.exe'
+    const cursorExe = 'C:\\Users\\70641\\AppData\\Local\\Programs\\cursor\\Cursor.exe'
+    const cursorCmd = 'C:\\Users\\70641\\AppData\\Local\\Programs\\cursor\\resources\\app\\bin\\cursor.cmd'
+    const { service } = createService('win32', {
+      commandPaths: {
+        'code.cmd': [cursorShim, vscodeShim],
+        'cursor.cmd': cursorCmd,
+      },
+      paths: {
+        [vscodeExe]: true,
+        [cursorExe]: true,
+      },
+    })
+
+    const result = await service.listTargets()
+
+    expect(result.targets.map((target) => target.id)).toEqual([
+      'vscode',
+      'cursor',
+      'explorer',
+    ])
     expect(result.primaryTargetId).toBe('vscode')
   })
 

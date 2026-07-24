@@ -46,6 +46,8 @@ type Runtime = {
   now: () => number
   commandExists: (command: string) => Promise<boolean>
   resolveCommand: (command: string) => Promise<string | null>
+  /** All PATH hits for a command (`where` may return many). Falls back to resolveCommand. */
+  resolveCommands: (command: string) => Promise<string[]>
   pathExists: (targetPath: string) => Promise<boolean>
   launch: (command: string, args: string[]) => Promise<OpenTargetLaunchResult>
   readDirNames: (targetPath: string) => Promise<string[]>
@@ -77,6 +79,23 @@ type TargetDefinition = {
   fallback?: boolean
 }
 
+function windowsLocalProgramsPath(...parts: string[]): string {
+  const localAppData = process.env.LOCALAPPDATA?.trim()
+  if (localAppData) return winPath.join(localAppData, 'Programs', ...parts)
+  return winPath.join(homedir(), 'AppData', 'Local', 'Programs', ...parts)
+}
+
+function windowsProgramFilesPaths(...parts: string[]): string[] {
+  const roots = [
+    process.env.ProgramFiles?.trim(),
+    process.env['ProgramFiles(x86)']?.trim(),
+    'C:\\Program Files',
+    'C:\\Program Files (x86)',
+  ].filter((value): value is string => Boolean(value))
+
+  return [...new Set(roots.map((root) => winPath.join(root, ...parts)))]
+}
+
 const TARGET_DEFINITIONS: TargetDefinition[] = [
   {
     id: 'vscode',
@@ -95,6 +114,10 @@ const TARGET_DEFINITIONS: TargetDefinition[] = [
         '/Applications/Visual Studio Code.app',
         posixPath.join(homedir(), 'Applications', 'Visual Studio Code.app'),
       ],
+      win32: [
+        windowsLocalProgramsPath('Microsoft VS Code', 'Code.exe'),
+        ...windowsProgramFilesPaths('Microsoft VS Code', 'Code.exe'),
+      ],
     },
   },
   {
@@ -111,6 +134,10 @@ const TARGET_DEFINITIONS: TargetDefinition[] = [
     windowsExecutableNames: ['Cursor.exe'],
     appPaths: {
       darwin: ['/Applications/Cursor.app', posixPath.join(homedir(), 'Applications', 'Cursor.app')],
+      win32: [
+        windowsLocalProgramsPath('cursor', 'Cursor.exe'),
+        windowsLocalProgramsPath('Cursor', 'Cursor.exe'),
+      ],
     },
   },
   {
@@ -127,6 +154,10 @@ const TARGET_DEFINITIONS: TargetDefinition[] = [
     windowsExecutableNames: ['sublime_text.exe', 'subl.exe'],
     appPaths: {
       darwin: ['/Applications/Sublime Text.app', posixPath.join(homedir(), 'Applications', 'Sublime Text.app')],
+      win32: [
+        windowsLocalProgramsPath('Sublime Text', 'sublime_text.exe'),
+        ...windowsProgramFilesPaths('Sublime Text', 'sublime_text.exe'),
+      ],
     },
   },
   {
@@ -235,25 +266,50 @@ function openTargetError(statusCode: number, message: string, code: string): Api
   return new ApiError(statusCode, message, code)
 }
 
-async function defaultResolveCommand(command: string): Promise<string | null> {
+async function defaultResolveCommands(command: string): Promise<string[]> {
   const probe = process.platform === 'win32' ? 'where' : 'which'
   try {
     const { stdout } = await execFile(probe, [command], {
       timeout: 3_000,
       windowsHide: true,
     })
-    const firstPath = String(stdout ?? '')
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .find(Boolean)
-    return firstPath ?? null
+    const seen = new Set<string>()
+    const paths: string[] = []
+    for (const line of String(stdout ?? '').split(/\r?\n/)) {
+      const trimmed = line.trim()
+      if (!trimmed || seen.has(trimmed)) continue
+      seen.add(trimmed)
+      paths.push(trimmed)
+    }
+    return paths
   } catch {
-    return null
+    return []
   }
 }
 
+async function defaultResolveCommand(command: string): Promise<string | null> {
+  return (await defaultResolveCommands(command))[0] ?? null
+}
+
 async function defaultCommandExists(command: string): Promise<boolean> {
-  return (await defaultResolveCommand(command)) !== null
+  return (await defaultResolveCommands(command)).length > 0
+}
+
+function normalizeWindowsPathKey(targetPath: string): string {
+  return targetPath.replace(/\//g, '\\').toLowerCase()
+}
+
+/**
+ * Cursor ships a VS Code-compatible `code.cmd` shim that often wins `where code`
+ * on Windows. Those hits must not claim the real VS Code target.
+ */
+function isCursorOwnedWindowsPath(targetPath: string): boolean {
+  const normalized = normalizeWindowsPathKey(targetPath)
+  return (
+    normalized.includes('\\cursor\\') ||
+    normalized.includes('\\cursor.app\\') ||
+    normalized.endsWith('\\cursor.exe')
+  )
 }
 
 async function defaultPathExists(targetPath: string): Promise<boolean> {
@@ -336,11 +392,20 @@ async function resolveWindowsApplicationPath(
   }
 
   for (const command of definition.commands?.win32 ?? []) {
-    const commandPath = await runtime.resolveCommand(command)
-    if (!commandPath) continue
+    const commandPaths = await runtime.resolveCommands(command)
+    for (const commandPath of commandPaths) {
+      // Cursor's `code.cmd` is not VS Code even though the command name matches.
+      if (definition.id === 'vscode' && isCursorOwnedWindowsPath(commandPath)) {
+        continue
+      }
 
-    const executablePath = await resolveWindowsExecutablePath(commandPath, definition, runtime)
-    if (executablePath) return executablePath
+      const executablePath = await resolveWindowsExecutablePath(commandPath, definition, runtime)
+      if (!executablePath) continue
+      if (definition.id === 'vscode' && isCursorOwnedWindowsPath(executablePath)) {
+        continue
+      }
+      return executablePath
+    }
   }
 
   return null
@@ -952,12 +1017,24 @@ async function resolveIconPath(
 }
 
 export function createOpenTargetService(overrides: Partial<Runtime> = {}) {
+  const resolveCommand = overrides.resolveCommand ?? defaultResolveCommand
+  const resolveCommands =
+    overrides.resolveCommands ??
+    (async (command: string) => {
+      if (overrides.resolveCommand) {
+        const single = await overrides.resolveCommand(command)
+        return single ? [single] : []
+      }
+      return defaultResolveCommands(command)
+    })
+
   const runtime: Runtime = {
     platform: overrides.platform ?? process.platform,
     ttlMs: overrides.ttlMs ?? DEFAULT_TTL_MS,
     now: overrides.now ?? Date.now,
     commandExists: overrides.commandExists ?? defaultCommandExists,
-    resolveCommand: overrides.resolveCommand ?? defaultResolveCommand,
+    resolveCommand,
+    resolveCommands,
     pathExists: overrides.pathExists ?? defaultPathExists,
     launch: overrides.launch ?? defaultLaunch,
     readDirNames: overrides.readDirNames ?? defaultReadDirNames,

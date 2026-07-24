@@ -2409,6 +2409,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         if (msg.taskId && get().sessions[sessionId]?.stoppingBackgroundTaskIds?.[msg.taskId]) {
           break
         }
+        // Shell/task-notification follow-up turns still emit message_start →
+        // status:thinking. When we already chose to suppress that turn's
+        // assistant chrome (foreground idle + no live output), keep chatState
+        // idle so the Run/Stop control does not flash for each completion.
+        if (
+          msg.state !== 'idle' &&
+          get().sessions[sessionId]?.suppressNextTaskNotificationResponse
+        ) {
+          break
+        }
         update((session) => {
           const pendingText = `${session.streamingText}${consumePendingDelta(sessionId)}`
           const hasPendingStreamText =

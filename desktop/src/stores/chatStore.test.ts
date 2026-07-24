@@ -5679,6 +5679,91 @@ describe('chatStore history mapping', () => {
     expect(updateTabStatusMock).toHaveBeenLastCalledWith(TEST_SESSION_ID, 'idle')
   })
 
+  it('keeps Run button idle across suppressed shell completion status flips', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          chatState: 'idle',
+          backgroundAgentTasks: {
+            'pack-1': {
+              taskId: 'pack-1',
+              toolUseId: 'toolu_pack_1',
+              status: 'running',
+              description: 'electron-builder Windows NSIS installer',
+              startedAt: 1,
+              updatedAt: 2,
+            },
+            'pack-2': {
+              taskId: 'pack-2',
+              toolUseId: 'toolu_pack_2',
+              status: 'running',
+              description: 'Poll electron-builder progress',
+              startedAt: 1,
+              updatedAt: 2,
+            },
+          },
+        }),
+      },
+    })
+
+    // Terminal shell completion while foreground is already idle: UI should
+    // stay on Run, not flash Stop for each short model follow-up turn.
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'system_notification',
+      subtype: 'task_notification',
+      data: {
+        task_id: 'pack-1',
+        tool_use_id: 'toolu_pack_1',
+        status: 'completed',
+        summary: 'Background command "electron-builder Windows NSIS installer" completed (exit code 0)',
+        output_file: '/tmp/pack-1.output',
+      },
+    })
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.suppressNextTaskNotificationResponse).toBe(true)
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.chatState).toBe('idle')
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'status',
+      state: 'thinking',
+      attemptStart: true,
+    })
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.chatState).toBe('idle')
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.suppressNextTaskNotificationResponse).toBe(true)
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'thinking',
+      text: 'pack finished, nothing more to do',
+    })
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'status',
+      state: 'tool_executing',
+      verb: 'Working',
+    })
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'content_start',
+      blockType: 'text',
+    })
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'content_delta',
+      text: '安装包已完成。',
+    })
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'message_complete',
+      usage: { input_tokens: 4, output_tokens: 6 },
+    })
+
+    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.chatState).toBe('idle')
+    expect(session?.suppressNextTaskNotificationResponse).toBe(false)
+    expect(session?.messages).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'thinking' }),
+      expect.objectContaining({ type: 'assistant_text' }),
+    ]))
+    // Tab can still reflect remaining background work without flipping the
+    // composer Stop/Run control (which keys off chatState only).
+    expect(updateTabStatusMock).toHaveBeenLastCalledWith(TEST_SESSION_ID, 'running')
+  })
+
   it('does not suppress foreground skill output when a background task completes', () => {
     useChatStore.setState({
       sessions: {
