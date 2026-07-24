@@ -876,7 +876,12 @@ function getAgentStatus({
   if (taskStatus === 'completed') return 'done'
   if (hasResult && isError && !isLaunchResult) return 'failed'
   if (hasResult && !isLaunchResult) return 'done'
-  if (isStreaming || childCount > 0 || isLaunchResult) return 'running'
+  // Live stream or backgrounded (launch-only) agent still in flight.
+  if (isStreaming || isLaunchResult) return 'running'
+  // Nested tools alone do not mean the parent Agent is still running —
+  // after a missed terminal notification, finished child Grep/Read rows
+  // previously kept the card stuck on "进行中".
+  if (!hasResult && childCount > 0) return 'running'
   return 'starting'
 }
 

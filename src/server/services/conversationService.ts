@@ -63,6 +63,8 @@ const MAX_CAPTURED_SDK_SUMMARY = 20
 export const MAX_CAPTURED_SDK_MESSAGE_BYTES = 64 * 1024
 export const MAX_CAPTURED_SDK_TOTAL_BYTES = 512 * 1024
 const MAX_CAPTURED_SDK_DIAGNOSTIC_TEXT_BYTES = 4 * 1024
+/** Cap user-visible CLI exit detail so Bun panic dumps never flood chat. */
+export const MAX_RUNTIME_EXIT_DETAIL_BYTES = 4 * 1024
 const CONTROL_READY_POLL_MS = 50
 const AUTO_MEMORY_DIRNAME = 'memory'
 export const DESKTOP_CLI_GRACEFUL_SHUTDOWN_TIMEOUT_MS = 6_000
@@ -1867,7 +1869,7 @@ export class ConversationService {
       )
     }
 
-    const normalizedDetail = detail.trim()
+    const normalizedDetail = this.truncateUserVisibleErrorDetail(detail.trim())
     return new ConversationStartupError(
       normalizedDetail
         ? `CLI exited during startup (code ${exitCode}): ${normalizedDetail}`
@@ -1896,9 +1898,10 @@ export class ConversationService {
       this.extractStartupDetail(authStatus) ||
       capturedOutput
 
-    return detail
+    const message = detail
       ? `CLI process exited unexpectedly (code ${exitCode}): ${detail}`
       : `CLI process exited unexpectedly with code ${exitCode}; no CLI stderr/stdout or SDK error payload was captured before exit.`
+    return this.truncateUserVisibleErrorDetail(message)
   }
 
   private buildCapturedProcessOutputDetail(
@@ -1909,11 +1912,26 @@ export class ConversationService {
     const stderrText = (session.stderrLines ?? []).join('\n').trim()
     const stdoutText = (session.stdoutLines ?? []).join('\n').trim()
 
+    let detail = ''
     if (stderrText && stdoutText) {
-      return `stderr:\n${stderrText}\nstdout:\n${stdoutText}`
+      detail = `stderr:\n${stderrText}\nstdout:\n${stdoutText}`
+    } else {
+      detail = stderrText || stdoutText
     }
+    return this.truncateUserVisibleErrorDetail(detail)
+  }
 
-    return stderrText || stdoutText
+  private truncateUserVisibleErrorDetail(value: string): string {
+    if (!value) return value
+    if (Buffer.byteLength(value, 'utf-8') <= MAX_RUNTIME_EXIT_DETAIL_BYTES) {
+      return value
+    }
+    const prefixBytes = Buffer.from(value.slice(0, MAX_RUNTIME_EXIT_DETAIL_BYTES), 'utf-8')
+    const truncated = prefixBytes
+      .subarray(0, MAX_RUNTIME_EXIT_DETAIL_BYTES)
+      .toString('utf-8')
+      .replace(/\uFFFD$/, '')
+    return `${truncated}\n…[truncated]`
   }
 
   private redactProcessOutput(line: string): string {

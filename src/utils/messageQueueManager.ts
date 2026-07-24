@@ -16,6 +16,7 @@ import type {
 import type { PastedContent } from './config.js'
 import { extractTextContent } from './messages.js'
 import { objectGroupBy } from './objectGroupBy.js'
+import { isEnvTruthy } from './envUtils.js'
 import { recordQueueOperation } from './sessionStorage.js'
 import { createSignal } from './signal.js'
 
@@ -25,14 +26,53 @@ export type SetAppState = (f: (prev: AppState) => AppState) => void
 // Logging helper
 // ============================================================================
 
+// Off by default: full queue-op persistence ballooned multi-GB transcripts.
+// CLAUDE_CODE_PERSIST_QUEUE_OPS=1 enables rate-limited enqueue-only writes.
+const QUEUE_OP_CONTENT_MAX_CHARS = 200
+const QUEUE_OP_PERSIST_MIN_INTERVAL_MS = 1_000
+const QUEUE_OP_PERSIST_MAX_PER_WINDOW = 20
+const queueOpPersistWindow = { startedAt: 0, count: 0 }
+
+export function shouldPersistQueueOperation(operation: QueueOperation): boolean {
+  if (operation !== 'enqueue') return false
+  if (!isEnvTruthy(process.env.CLAUDE_CODE_PERSIST_QUEUE_OPS)) return false
+
+  const now = Date.now()
+  if (
+    queueOpPersistWindow.startedAt === 0 ||
+    now - queueOpPersistWindow.startedAt >= QUEUE_OP_PERSIST_MIN_INTERVAL_MS
+  ) {
+    queueOpPersistWindow.startedAt = now
+    queueOpPersistWindow.count = 0
+  }
+  if (queueOpPersistWindow.count >= QUEUE_OP_PERSIST_MAX_PER_WINDOW) {
+    return false
+  }
+  queueOpPersistWindow.count += 1
+  return true
+}
+
+export function truncateQueueOpContent(content: string | undefined): string | undefined {
+  if (content === undefined) return undefined
+  if (content.length <= QUEUE_OP_CONTENT_MAX_CHARS) return content
+  return `${content.slice(0, QUEUE_OP_CONTENT_MAX_CHARS)}…`
+}
+
+export function __resetQueueOpPersistWindowForTests(): void {
+  queueOpPersistWindow.startedAt = 0
+  queueOpPersistWindow.count = 0
+}
+
 function logOperation(operation: QueueOperation, content?: string): void {
+  if (!shouldPersistQueueOperation(operation)) return
   const sessionId = getSessionId()
+  const truncated = truncateQueueOpContent(content)
   const queueOp: QueueOperationMessage = {
     type: 'queue-operation',
     operation,
     timestamp: new Date().toISOString(),
     sessionId,
-    ...(content !== undefined && { content }),
+    ...(truncated !== undefined && { content: truncated }),
   }
   void recordQueueOperation(queueOp)
 }

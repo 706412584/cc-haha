@@ -116,6 +116,8 @@ export type SessionServiceLocalIndexOptions = {
   targetedEntryReader?: typeof readSessionEntriesByLocator
   sessionListCacheMaxEntries?: number
   sessionListSummaryCacheMaxEntries?: number
+  /** Override full-file JSONL parse ceiling (bytes). Production default 50 MiB. */
+  maxFullJsonlReadBytes?: number
 }
 
 export type SessionEntriesAtLinesResult = {
@@ -479,6 +481,8 @@ export class SessionService {
   private activeSessionListCacheScope: string | null = null
   private readonly readCacheMaxFileBytes = 16 * 1024 * 1024
   private readonly readCacheMaxTotalBytes = 64 * 1024 * 1024
+  // Matches CLI MAX_TRANSCRIPT_READ_BYTES (50 MiB) — never whole-load multi-GB transcripts.
+  private readonly maxFullJsonlReadBytes: number
   private readCacheTotalBytes = 0
   private readonly readJsonlCache = new Map<string, {
     mtimeMs: number
@@ -515,6 +519,12 @@ export class SessionService {
       })
     })
     this.targetedEntryReader = options.targetedEntryReader ?? readSessionEntriesByLocator
+    this.maxFullJsonlReadBytes =
+      typeof options.maxFullJsonlReadBytes === 'number' &&
+      Number.isFinite(options.maxFullJsonlReadBytes) &&
+      options.maxFullJsonlReadBytes > 0
+        ? Math.floor(options.maxFullJsonlReadBytes)
+        : 50 * 1024 * 1024
   }
 
   private normalizeCacheCapacity(value: number | undefined, fallback: number): number {
@@ -868,6 +878,15 @@ export class SessionService {
     filePath: string,
     stat: { mtimeMs: number; size: number },
   ): Promise<RawEntry[]> {
+    if (stat.size > this.maxFullJsonlReadBytes) {
+      console.warn(
+        `[SessionService] oversized transcript ${filePath} (${stat.size} bytes); parsing last ${this.maxFullJsonlReadBytes} bytes only`,
+      )
+      const entries = await this.readJsonlTail(filePath, this.maxFullJsonlReadBytes)
+      this.invalidateReadCache(filePath)
+      return entries
+    }
+
     let content: string
     try {
       content = await fs.readFile(filePath, 'utf-8')
@@ -879,6 +898,16 @@ export class SessionService {
       throw err
     }
 
+    const entries = this.parseJsonlContent(content)
+    if (stat.size <= this.readCacheMaxFileBytes) {
+      this.storeReadCache(filePath, stat.mtimeMs, stat.size, entries)
+    } else {
+      this.invalidateReadCache(filePath)
+    }
+    return entries
+  }
+
+  private parseJsonlContent(content: string): RawEntry[] {
     const entries: RawEntry[] = []
     for (const line of content.split('\n')) {
       const trimmed = line.trim()
@@ -889,13 +918,38 @@ export class SessionService {
         // skip malformed lines
       }
     }
-
-    if (stat.size <= this.readCacheMaxFileBytes) {
-      this.storeReadCache(filePath, stat.mtimeMs, stat.size, entries)
-    } else {
-      this.invalidateReadCache(filePath)
-    }
     return entries
+  }
+
+  /** Read last maxBytes; drop the first partial line if the window starts mid-record. */
+  private async readJsonlTail(
+    filePath: string,
+    maxBytes: number,
+  ): Promise<RawEntry[]> {
+    let handle: Awaited<ReturnType<typeof fs.open>> | undefined
+    try {
+      handle = await fs.open(filePath, 'r')
+      const { size } = await handle.stat()
+      if (size <= 0) return []
+      const readSize = Math.min(size, maxBytes)
+      const start = size - readSize
+      const buffer = Buffer.alloc(readSize)
+      await handle.read(buffer, 0, readSize, start)
+      let text = buffer.toString('utf-8')
+      if (start > 0) {
+        const firstNewline = text.indexOf('\n')
+        if (firstNewline === -1) return []
+        text = text.slice(firstNewline + 1)
+      }
+      return this.parseJsonlContent(text)
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        return []
+      }
+      throw err
+    } finally {
+      await handle?.close().catch(() => {})
+    }
   }
 
   private async readTargetedJsonlEntries(
