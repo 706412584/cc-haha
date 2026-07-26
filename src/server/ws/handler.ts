@@ -1707,6 +1707,15 @@ function handleStopGeneration(ws: ServerWebSocket<WebSocketData>) {
   terminalSessionChatStates.delete(sessionId)
   interruptedSessionChats.add(sessionId)
 
+  // Release the turn lock immediately so UI idle matches server state.
+  // Without this, a missing/late CLI `result` leaves SESSION_TURN_ACTIVE stuck
+  // and every subsequent user_message is rejected even though the client is idle.
+  if (stoppedTurn) {
+    clearActiveUserTurn(sessionId, stoppedTurn)
+  } else {
+    sessionActivityCoordinator.endUserTurn(sessionId)
+  }
+
   if (conversationService.hasSession(sessionId)) {
     // First try graceful interrupt via SDK control message
     conversationService.sendInterrupt(sessionId)
@@ -1715,16 +1724,16 @@ function handleStopGeneration(ws: ServerWebSocket<WebSocketData>) {
     // instance now: if the user switches provider/model in the meantime, the
     // restart replaces this process with a new one, and we must not kill that
     // new process during its startup (which would surface as "CLI exited
-    // during startup with code 143"). Also keep the stopped-turn identity so a
-    // replacement turn on the same process is not force-killed either.
+    // during startup with code 143"). A replacement turn on the same process
+    // must also be spared — only force-kill when no newer turn owns the session.
     const instanceId = conversationService.getActiveInstanceId(sessionId)
     if (instanceId) {
       setTimeout(() => {
-        if (
-          sessionStopRequested.has(sessionId) &&
-          activeUserTurns.get(sessionId) === stoppedTurn &&
-          conversationService.stopSessionInstance(sessionId, instanceId)
-        ) {
+        if (!sessionStopRequested.has(sessionId)) return
+        const currentTurn = activeUserTurns.get(sessionId)
+        // New turn after stop: do not kill its process.
+        if (currentTurn && currentTurn !== stoppedTurn) return
+        if (conversationService.stopSessionInstance(sessionId, instanceId)) {
           console.log(`[WS] Force-killing CLI subprocess for session: ${sessionId}`)
         }
       }, 3_000)

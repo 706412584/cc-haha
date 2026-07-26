@@ -22,6 +22,7 @@ import type { Stream } from "@anthropic-ai/sdk/streaming.mjs";
 import { randomUUID } from "crypto";
 import {
   getAPIProvider,
+  hasAnthropicCompatibleThirdPartyConfig,
   isFirstPartyAnthropicBaseUrl,
 } from "src/utils/model/providers.js";
 import {
@@ -83,6 +84,7 @@ import {
   normalizeMessagesForAPI,
   stripAdvisorBlocks,
   stripCallerFieldFromAssistantMessage,
+  stripSignatureBlocks,
   stripToolReferenceBlocksFromUserMessage,
 } from "../../utils/messages.js";
 import {
@@ -1551,6 +1553,14 @@ async function* queryModel(
   queryCheckpoint("query_message_normalization_start");
   let messagesForAPI = normalizeMessagesForAPI(messages, filteredTools);
   queryCheckpoint("query_message_normalization_end");
+
+  // Third-party / cross-provider proxies cannot verify thinking signatures or
+  // encrypted thinking blobs produced by another provider (e.g. Grok → GPT).
+  // Strip at the API boundary so in-session provider switches keep visible
+  // history without forcing a blank new session.
+  if (hasAnthropicCompatibleThirdPartyConfig()) {
+    messagesForAPI = stripSignatureBlocks(messagesForAPI);
+  }
 
   // Model-specific post-processing: strip tool-search-specific fields if the
   // selected model doesn't support tool search.
