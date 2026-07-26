@@ -964,9 +964,10 @@ async function* queryLoop(
 
             // Thinking signatures are model-bound: replaying a protected-thinking
             // block (e.g. capybara) to an unprotected fallback (e.g. opus) 400s.
-            // Also covers cross-provider switches that land in the same query
-            // loop (Grok encrypted thinking → GPT). Strip before retry.
-            messagesForQuery = stripSignatureBlocks(messagesForQuery)
+            // Strip before retry so the fallback model gets clean history.
+            if (process.env.USER_TYPE === 'ant') {
+              messagesForQuery = stripSignatureBlocks(messagesForQuery)
+            }
 
             // Log the fallback event
             logEvent('tengu_model_fallback_triggered', {

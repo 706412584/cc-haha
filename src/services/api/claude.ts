@@ -1553,11 +1553,6 @@ async function* queryModel(
   queryCheckpoint("query_message_normalization_start");
   let messagesForAPI = normalizeMessagesForAPI(messages, filteredTools);
   queryCheckpoint("query_message_normalization_end");
-
-  // Third-party / cross-provider proxies cannot verify thinking signatures or
-  // encrypted thinking blobs produced by another provider (e.g. Grok → GPT).
-  // Strip at the API boundary so in-session provider switches keep visible
-  // history without forcing a blank new session.
   if (hasAnthropicCompatibleThirdPartyConfig()) {
     messagesForAPI = stripSignatureBlocks(messagesForAPI);
   }
