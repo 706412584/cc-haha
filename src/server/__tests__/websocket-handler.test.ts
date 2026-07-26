@@ -652,6 +652,65 @@ describe('WebSocket handler session isolation', () => {
     expect(stopSessionInstance).not.toHaveBeenCalled()
   })
 
+  it('force-kills the stopped instance when no replacement turn owns the session', () => {
+    const sessionId = `stopped-turn-force-kill-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    const setTimeoutSpy = spyOn(globalThis, 'setTimeout').mockImplementation(() => 1 as any)
+    spyOn(conversationService, 'sendInterrupt').mockImplementation(() => {})
+    const stopSessionInstance = spyOn(conversationService, 'stopSessionInstance').mockReturnValue(true)
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'getActiveInstanceId').mockReturnValue('instance-force-kill')
+    __markActiveTurnForTests(sessionId)
+
+    handleWebSocket.message(ws, JSON.stringify({ type: 'stop_generation' }))
+
+    const expireForceKill = setTimeoutSpy.mock.calls[0]?.[0] as (() => void) | undefined
+    expireForceKill?.()
+
+    expect(stopSessionInstance).toHaveBeenCalledWith(sessionId, 'instance-force-kill')
+    expect(sessionActivityCoordinator.isUserTurnActive(sessionId)).toBe(false)
+  })
+
+  it('releases the active turn lock on stop so the next message is not SESSION_TURN_ACTIVE', async () => {
+    const sessionId = `stop-releases-turn-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([])
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'sendInterrupt').mockImplementation(() => {})
+    spyOn(conversationService, 'getActiveInstanceId').mockReturnValue(null)
+    spyOn(globalThis, 'setTimeout').mockImplementation(() => 1 as any)
+
+    handleWebSocket.open(ws)
+    expect(sessionActivityCoordinator.tryBeginUserTurn(sessionId)).toBe(true)
+    __markActiveTurnForTests(sessionId)
+
+    handleWebSocket.message(ws, JSON.stringify({ type: 'stop_generation' }))
+
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'status',
+      state: 'idle',
+    })
+    expect(sessionActivityCoordinator.isUserTurnActive(sessionId)).toBe(false)
+    expect(sessionActivityCoordinator.tryBeginUserTurn(sessionId)).toBe(true)
+    sessionActivityCoordinator.clear(sessionId)
+  })
+
+  it('releases coordinator turn state on stop even without an activeUserTurns entry', () => {
+    const sessionId = `stop-no-active-turn-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'hasSession').mockReturnValue(false)
+
+    handleWebSocket.open(ws)
+    expect(sessionActivityCoordinator.tryBeginUserTurn(sessionId)).toBe(true)
+    expect(sessionActivityCoordinator.isUserTurnActive(sessionId)).toBe(true)
+
+    handleWebSocket.message(ws, JSON.stringify({ type: 'stop_generation' }))
+
+    expect(sessionActivityCoordinator.isUserTurnActive(sessionId)).toBe(false)
+    expect(sessionActivityCoordinator.tryBeginUserTurn(sessionId)).toBe(true)
+    sessionActivityCoordinator.clear(sessionId)
+  })
+
   it('forwards background task stop requests to the CLI control channel', async () => {
     const sessionId = `stop-background-${crypto.randomUUID()}`
     const ws = makeClientSocket(sessionId)

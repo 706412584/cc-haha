@@ -1706,6 +1706,8 @@ function handleStopGeneration(ws: ServerWebSocket<WebSocketData>) {
   legacyQueuedSessionChats.delete(sessionId)
   terminalSessionChatStates.delete(sessionId)
   interruptedSessionChats.add(sessionId)
+  if (stoppedTurn) clearActiveUserTurn(sessionId, stoppedTurn)
+  else sessionActivityCoordinator.endUserTurn(sessionId)
 
   if (conversationService.hasSession(sessionId)) {
     // First try graceful interrupt via SDK control message
@@ -1722,7 +1724,7 @@ function handleStopGeneration(ws: ServerWebSocket<WebSocketData>) {
       setTimeout(() => {
         if (
           sessionStopRequested.has(sessionId) &&
-          activeUserTurns.get(sessionId) === stoppedTurn &&
+          !activeUserTurns.has(sessionId) &&
           conversationService.stopSessionInstance(sessionId, instanceId)
         ) {
           console.log(`[WS] Force-killing CLI subprocess for session: ${sessionId}`)
