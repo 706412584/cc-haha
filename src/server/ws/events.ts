@@ -44,7 +44,7 @@ export type ClientMessage =
       thinkingEnabled?: boolean
     }
   | { type: 'set_coordinator_mode'; enabled: boolean }
-  | { type: 'set_pipeline_mode'; flavor: 'solo' | 'normal' }
+  | { type: 'set_pipeline_mode'; flavor: 'solo' | 're' | 'normal' }
   | { type: 'set_handoff_summary'; previousSessionId: string; deep?: boolean }
   | { type: 'stop_generation' }
   | { type: 'stop_background_task'; taskId: string }

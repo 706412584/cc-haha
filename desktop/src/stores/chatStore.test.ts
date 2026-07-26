@@ -297,7 +297,7 @@ describe('chatStore history mapping', () => {
     sessionStoreSnapshot.sessions = []
     cliTaskStoreSnapshot.tasks = []
     cliTaskStoreSnapshot.sessionId = null
-    useSessionRuntimeStore.setState({ selections: {}, coordinatorModes: {}, soloPipelineModes: {} })
+    useSessionRuntimeStore.setState({ selections: {}, coordinatorModes: {}, pipelineModes: {}, soloPipelineModes: {} })
     localStorage.clear()
     useSettingsStore.setState({ locale: 'en' })
     useChatStore.setState({
@@ -2022,7 +2022,7 @@ describe('chatStore history mapping', () => {
   })
 
   it('replays Solo Pipeline mode immediately before sending a user turn', () => {
-    useSessionRuntimeStore.setState({ coordinatorModes: {}, soloPipelineModes: { [TEST_SESSION_ID]: true } })
+    useSessionRuntimeStore.setState({ coordinatorModes: {}, pipelineModes: { [TEST_SESSION_ID]: 'solo' }, soloPipelineModes: { [TEST_SESSION_ID]: true } })
     useChatStore.setState({
       sessions: {
         [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
@@ -3650,7 +3650,7 @@ describe('chatStore history mapping', () => {
   })
 
   it('persists Solo Pipeline mode and only sends it to a live session', () => {
-    useSessionRuntimeStore.setState({ coordinatorModes: {}, soloPipelineModes: {} })
+    useSessionRuntimeStore.setState({ coordinatorModes: {}, pipelineModes: {}, soloPipelineModes: {} })
     sendMock.mockReset()
 
     // No live session: persisted, not pushed.
@@ -3693,6 +3693,7 @@ describe('chatStore history mapping', () => {
   it('enabling Solo Pipeline mode clears coordinator mode for the same session', () => {
     useSessionRuntimeStore.setState({
       coordinatorModes: { 'mut-session': true },
+      pipelineModes: {},
       soloPipelineModes: {},
     })
     sendMock.mockReset()
@@ -3737,9 +3738,56 @@ describe('chatStore history mapping', () => {
     })
   })
 
+  it('enabling RE pipeline mode clears coordinator and Solo for the same session', () => {
+    useSessionRuntimeStore.setState({
+      coordinatorModes: { 're-session': true },
+      pipelineModes: {},
+      soloPipelineModes: {},
+    })
+    sendMock.mockReset()
+    useChatStore.setState({
+      sessions: {
+        're-session': {
+          messages: [],
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          streamingResponseChars: 0,
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    useChatStore.getState().setSessionPipelineMode('re-session', 're')
+
+    expect(useSessionRuntimeStore.getState().pipelineModes['re-session']).toBe('re')
+    expect(useSessionRuntimeStore.getState().soloPipelineModes['re-session']).toBe(false)
+    expect(useSessionRuntimeStore.getState().coordinatorModes['re-session']).toBe(false)
+    expect(sendMock).toHaveBeenCalledWith('re-session', {
+      type: 'set_coordinator_mode',
+      enabled: false,
+    })
+    expect(sendMock).toHaveBeenCalledWith('re-session', {
+      type: 'set_pipeline_mode',
+      flavor: 're',
+    })
+  })
+
   it('enabling coordinator mode clears Solo Pipeline mode for the same session', () => {
     useSessionRuntimeStore.setState({
       coordinatorModes: {},
+      pipelineModes: { 'mut-session2': 'solo' },
       soloPipelineModes: { 'mut-session2': true },
     })
     sendMock.mockReset()
@@ -7611,7 +7659,7 @@ describe('chatStore context-exhausted suggestion (方案3)', () => {
     sendMock.mockReset()
     getMemberBySessionIdMock.mockReset()
     getMemberBySessionIdMock.mockReturnValue(null)
-    useSessionRuntimeStore.setState({ selections: {}, coordinatorModes: {}, soloPipelineModes: {} })
+    useSessionRuntimeStore.setState({ selections: {}, coordinatorModes: {}, pipelineModes: {}, soloPipelineModes: {} })
     useChatStore.setState({ ...initialState, sessions: {} })
     // Reset the module-level compaction-thrash tracking for this session id.
     useChatStore.getState().clearMessages(SID)
@@ -7672,7 +7720,7 @@ describe('chatStore message queue', () => {
     sendMock.mockReset()
     getMemberBySessionIdMock.mockReset()
     getMemberBySessionIdMock.mockReturnValue(null)
-    useSessionRuntimeStore.setState({ selections: {}, coordinatorModes: {}, soloPipelineModes: {} })
+    useSessionRuntimeStore.setState({ selections: {}, coordinatorModes: {}, pipelineModes: {}, soloPipelineModes: {} })
     useChatStore.setState({ ...initialState, sessions: {} })
   })
 

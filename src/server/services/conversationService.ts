@@ -211,10 +211,13 @@ type SessionStartOptions = {
   providerId?: string | null
   coordinatorMode?: boolean
   /**
-   * Solo Pipeline mode toggle. When true, the CLI is launched (or
-   * restarted) with `--append-system-prompt` carrying the 5-stage
-   * Solo prompt. Mutually exclusive with `coordinatorMode` — the WS
-   * handler enforces that exclusion before this field is read.
+   * Active pipeline flavor. `solo` appends the delivery pipeline prompt;
+   * `re` appends the reverse-engineering pipeline prompt. Mutually
+   * exclusive with `coordinatorMode` — the WS handler enforces exclusion.
+   */
+  pipelineFlavor?: 'solo' | 're' | null
+  /**
+   * @deprecated Prefer `pipelineFlavor === 'solo'`.
    */
   soloPipelineMode?: boolean
   /**
@@ -1449,17 +1452,29 @@ export class ConversationService {
       args.push('--append-system-prompt', ORCHESTRATION_SYSTEM_PROMPT)
     }
 
-    // Solo Pipeline mode appends a different prompt addendum than
-    // coordinator mode (5-stage solo workflow). The WS handler keeps the
-    // two modes mutually exclusive, so at most one branch fires here.
-    if (options?.soloPipelineMode) {
+    // Pipeline flavors append a different prompt addendum than coordinator
+    // mode. The WS handler keeps modes mutually exclusive, so at most one
+    // pipeline branch fires here. `soloPipelineMode` is a deprecated alias
+    // for `pipelineFlavor === 'solo'`.
+    const pipelineFlavor =
+      options?.pipelineFlavor ??
+      (options?.soloPipelineMode ? ('solo' as const) : null)
+    if (pipelineFlavor === 'solo') {
       // Lazy require to avoid pulling the prompt module into builds that
       // don't enable the COORDINATOR_MODE feature flag (the flag gates
-      // both coordinator and Solo wiring at the moment).
+      // coordinator / Solo / RE wiring at the moment).
       const { getSoloPipelineSystemPrompt } =
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         require('../../coordinator/soloPipelinePrompt.js') as typeof import('../../coordinator/soloPipelinePrompt.js')
       args.push('--append-system-prompt', getSoloPipelineSystemPrompt())
+    } else if (pipelineFlavor === 're') {
+      const { getReverseEngineeringPipelineSystemPrompt } =
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        require('../../coordinator/reverseEngineeringPipelinePrompt.js') as typeof import('../../coordinator/reverseEngineeringPipelinePrompt.js')
+      args.push(
+        '--append-system-prompt',
+        getReverseEngineeringPipelineSystemPrompt(),
+      )
     }
 
     // Hand-off context from the previous session (welcome screen "Continue

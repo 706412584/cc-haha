@@ -95,7 +95,7 @@ afterEach(() => {
   useChatStore.setState({ sessions: {} })
   useSettingsStore.setState({ locale: 'en', unifiedActivityPanelEnabled: false })
   useActivityPanelStore.setState(useActivityPanelStore.getInitialState(), true)
-  useSessionRuntimeStore.setState({ coordinatorModes: {}, soloPipelineModes: {}, handoffInfo: {} })
+  useSessionRuntimeStore.setState({ coordinatorModes: {}, pipelineModes: {}, soloPipelineModes: {}, handoffInfo: {} })
   useTeamStore.setState({ teams: [], activeTeam: null, memberColors: new Map(), error: null })
   useWorkspacePanelStore.setState(useWorkspacePanelStore.getInitialState(), true)
   useTerminalPanelStore.setState(useTerminalPanelStore.getInitialState(), true)
@@ -591,6 +591,7 @@ describe('ActiveSession task polling', () => {
     useSettingsStore.setState({ locale: 'en', unifiedActivityPanelEnabled: true })
     useSessionRuntimeStore.setState({
       coordinatorModes: { [sessionId]: true },
+      pipelineModes: {},
       soloPipelineModes: { [sessionId]: false },
       handoffInfo: {
         [sessionId]: {
@@ -658,13 +659,21 @@ describe('ActiveSession task polling', () => {
     act(() => {
       useSessionRuntimeStore.setState({
         coordinatorModes: { [sessionId]: false },
-        soloPipelineModes: { [sessionId]: true },
+        pipelineModes: { [sessionId]: 'solo' },
       })
     })
 
     expect(screen.queryByTestId('session-coordinator-chip')).not.toBeInTheDocument()
     expect(screen.getByTestId('session-solo-chip')).toBeInTheDocument()
     expect(screen.getByTestId('solo-council-panel')).toBeInTheDocument()
+
+    act(() => {
+      useSessionRuntimeStore.setState({ pipelineModes: { [sessionId]: 're' } })
+    })
+
+    expect(screen.queryByTestId('session-solo-chip')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('solo-council-panel')).not.toBeInTheDocument()
+    expect(screen.getByTestId('session-re-chip')).toBeInTheDocument()
 
     act(() => useWorkspacePanelStore.getState().openPanel(sessionId))
     expect(screen.queryByRole('dialog', { name: 'Activity' })).not.toBeInTheDocument()

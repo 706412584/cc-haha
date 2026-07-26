@@ -26,7 +26,7 @@ export type ClientMessage =
   | { type: 'set_permission_mode'; mode: PermissionMode }
   | ({ type: 'set_runtime_config'; requestId: string } & RuntimeSelection)
   | { type: 'set_coordinator_mode'; enabled: boolean }
-  | { type: 'set_pipeline_mode'; flavor: 'solo' | 'normal' }
+  | { type: 'set_pipeline_mode'; flavor: 'solo' | 're' | 'normal' }
   | { type: 'set_handoff_summary'; previousSessionId: string; deep?: boolean }
   | { type: 'stop_generation' }
   | { type: 'stop_background_task'; taskId: string }

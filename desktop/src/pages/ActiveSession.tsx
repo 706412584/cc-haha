@@ -327,9 +327,11 @@ export function ActiveSession() {
   const coordinatorModeForActive = useSessionRuntimeStore((s) =>
     activeTabId ? s.coordinatorModes[activeTabId] ?? false : false,
   )
-  const soloPipelineModeForActive = useSessionRuntimeStore((s) =>
-    activeTabId ? s.soloPipelineModes[activeTabId] ?? false : false,
+  const pipelineModeForActive = useSessionRuntimeStore((s) =>
+    activeTabId ? s.pipelineModes[activeTabId] ?? 'normal' : 'normal',
   )
+  const soloPipelineModeForActive = pipelineModeForActive === 'solo'
+  const rePipelineModeForActive = pipelineModeForActive === 're'
   const pendingComputerUsePermission = sessionState?.pendingComputerUsePermission ?? null
   const pendingProviderTransition = sessionState?.pendingProviderTransition ?? null
   const runtimeConfigError = sessionState?.runtimeConfigError ?? null
@@ -785,6 +787,24 @@ export function ActiveSession() {
                               linear_scale
                             </span>
                             {t('session.soloPipelineChip')}
+                          </span>
+                        </>
+                      )}
+                      {rePipelineModeForActive && (
+                        <>
+                          <span className="text-[var(--color-outline)]">·</span>
+                          <span
+                            data-testid="session-re-chip"
+                            title={t('session.rePipelineChipTooltip')}
+                            className="inline-flex shrink-0 items-center gap-1 cursor-help text-[var(--color-primary)]"
+                          >
+                            <span
+                              className="material-symbols-outlined text-[12px]"
+                              aria-hidden="true"
+                            >
+                              troubleshoot
+                            </span>
+                            {t('session.rePipelineChip')}
                           </span>
                         </>
                       )}

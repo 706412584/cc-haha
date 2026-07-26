@@ -11,18 +11,17 @@
  *
  * This module owns ONLY the prompt text + the boolean predicate
  * (`isSoloPipelineMode`). Wiring (CLI flag plumbing,
- * `--append-system-prompt`, WS `set_pipeline_mode { flavor }`,
- * desktop toggle) lives in the consumer layer and lands in a
- * follow-up PR after the in-flight coordinator-mode optimization
- * stabilizes the geometry it has to plug into.
+ * `--append-system-prompt`, WS
+ * `set_pipeline_mode { flavor: 'solo' | 're' | 'normal' }`,
+ * desktop toggle) lives in the consumer layer.
  *
  * Why a separate module instead of a flag inside coordinatorMode:
  *   - Solo's prompt is a different shape (staged + gated) and would
  *     dilute coordinatorMode.ts. Keeping them sibling-but-separate
  *     means each can evolve on its own cadence.
  *   - The wiring layer (consumer of `getSoloPipelineSystemPrompt`)
- *     can dispatch on `flavor` cleanly: `flavor === 'solo'` → this
- *     prompt, otherwise the coordinator prompt or default.
+ *     dispatches on `flavor`: `solo` → this prompt, `re` → the sibling
+ *     reverse-engineering pipeline prompt, `normal` → no pipeline addendum.
  *
  * Stage 0 — intent triage — is in the prompt itself, not in the
  * wiring. Any chat message that arrives while Solo is on goes

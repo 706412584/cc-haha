@@ -376,13 +376,12 @@ function isPermissionMode(value: unknown): value is PermissionMode {
 // getRuntimeSettings and threaded into the CLI as --append-system-prompt.
 const coordinatorModeSessions = new Set<string>()
 
-// Per-session Solo Pipeline mode. Same semantics as coordinatorModeSessions but
-// drives a different prompt: a 5-stage solo-agent pipeline (planner → builder →
-// tester → reviewer → integrator) instead of the multi-worker coordinator
-// directive. Mutually exclusive with coordinator mode at the WS handler level
-// (handleSetPipelineMode clears the coordinator flag, and vice versa) so the
-// CLI subprocess never sees both --append-system-prompt addenda at once.
-const soloPipelineModeSessions = new Set<string>()
+// Per-session pipeline flavor (`solo` delivery or `re` reverse-engineering).
+// Absent key = normal (no pipeline addendum). Mutually exclusive with
+// coordinator mode at the WS handler level so the CLI subprocess never sees
+// contradictory --append-system-prompt addenda.
+type PipelineFlavorActive = 'solo' | 're'
+const pipelineModeSessions = new Map<string, PipelineFlavorActive>()
 
 // Per-session pending hand-off summary text. When set, the next CLI launch
 // (or restart) appends this text via --append-system-prompt so the new
@@ -1223,8 +1222,13 @@ async function handleSetCoordinatorMode(
   const was = coordinatorModeSessions.has(sessionId)
   if (was === enabled) return
 
-  if (enabled) coordinatorModeSessions.add(sessionId)
-  else coordinatorModeSessions.delete(sessionId)
+  if (enabled) {
+    coordinatorModeSessions.add(sessionId)
+    // Mutual exclusion with pipeline flavors (solo / re).
+    pipelineModeSessions.delete(sessionId)
+  } else {
+    coordinatorModeSessions.delete(sessionId)
+  }
 
   // Orchestration mode is applied via --append-system-prompt at CLI launch, so
   // an active session must restart to pick up (or drop) the directive. Defer
@@ -1251,36 +1255,34 @@ async function handleSetCoordinatorMode(
 }
 
 /**
- * Solo Pipeline mode toggle. Sibling of `handleSetCoordinatorMode` —
- * the two modes are mutually exclusive (enabling Solo clears the
- * coordinator flag for the same session), so a single CLI subprocess
- * launches with at most one mode-specific `--append-system-prompt`.
+ * Pipeline mode toggle. Sibling of `handleSetCoordinatorMode` —
+ * pipeline flavors and coordinator mode are mutually exclusive, so a
+ * single CLI subprocess launches with at most one mode-specific
+ * `--append-system-prompt`.
  *
- * `flavor: 'solo'` enables the Solo pipeline; `flavor: 'normal'` clears
- * it. Like coordinator mode, this is an in-memory per-session preference
- * applied at next CLI launch (or via deferred restart of an active
- * session).
+ * `flavor: 'solo' | 're'` enables the matching pipeline; `flavor: 'normal'`
+ * clears it. In-memory per-session preference applied at next CLI launch
+ * (or deferred restart of an active session).
  */
 async function handleSetPipelineMode(
   ws: ServerWebSocket<WebSocketData>,
   message: Extract<ClientMessage, { type: 'set_pipeline_mode' }>,
 ): Promise<void> {
   const { sessionId } = ws.data
-  const enabled = message.flavor === 'solo'
-  const was = soloPipelineModeSessions.has(sessionId)
-  // Mutual exclusion: enabling Solo clears any coordinator flag for the
-  // same session. The two modes ship different system-prompt addenda and
-  // assume distinct top-of-loop semantics; running them simultaneously
-  // would feed contradictory directives to the same CLI subprocess.
+  const nextFlavor: PipelineFlavorActive | null =
+    message.flavor === 'solo' || message.flavor === 're' ? message.flavor : null
+  const was = pipelineModeSessions.get(sessionId) ?? null
+  // Mutual exclusion: enabling any pipeline clears coordinator for the
+  // same session (different system-prompt addenda / top-of-loop semantics).
   const willClearCoordinator =
-    enabled && coordinatorModeSessions.has(sessionId)
-  if (was === enabled && !willClearCoordinator) return
+    nextFlavor !== null && coordinatorModeSessions.has(sessionId)
+  if (was === nextFlavor && !willClearCoordinator) return
 
-  if (enabled) {
-    soloPipelineModeSessions.add(sessionId)
+  if (nextFlavor) {
+    pipelineModeSessions.set(sessionId, nextFlavor)
     coordinatorModeSessions.delete(sessionId)
   } else {
-    soloPipelineModeSessions.delete(sessionId)
+    pipelineModeSessions.delete(sessionId)
   }
 
   // Same restart geometry as handleSetCoordinatorMode — the addendum is
@@ -2026,7 +2028,7 @@ function cleanupSessionRuntimeState(sessionId: string) {
   sessionTitleState.delete(sessionId)
   runtimeOverrides.delete(sessionId)
   coordinatorModeSessions.delete(sessionId)
-  soloPipelineModeSessions.delete(sessionId)
+  pipelineModeSessions.delete(sessionId)
   handoffSummarySessions.delete(sessionId)
   activeUserTurns.delete(sessionId)
   sessionActivityCoordinator.clear(sessionId)
@@ -3661,10 +3663,15 @@ type RuntimeSettings = {
   providerId?: string | null
   coordinatorMode?: boolean
   /**
-   * Solo Pipeline mode toggle. When true, the CLI is launched (or
-   * restarted) with `--append-system-prompt` carrying the 5-stage Solo
-   * prompt instead of the coordinator orchestration directive. Mutually
-   * exclusive with `coordinatorMode` (handleSetPipelineMode enforces this).
+   * Active pipeline flavor for `--append-system-prompt`. Mutually exclusive
+   * with `coordinatorMode` (handleSetPipelineMode enforces this).
+   * `solo` → delivery pipeline; `re` → reverse-engineering pipeline.
+   */
+  pipelineFlavor?: PipelineFlavorActive | null
+  /**
+   * @deprecated Prefer `pipelineFlavor === 'solo'`. Kept so older call sites
+   * that only understood the boolean Solo toggle keep compiling during the
+   * multi-flavor migration.
    */
   soloPipelineMode?: boolean
   /**
@@ -3786,7 +3793,8 @@ export function runtimeOverridesMatch(
 
 async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSettings> {
   const coordinatorMode = sessionId ? coordinatorModeSessions.has(sessionId) : false
-  const soloPipelineMode = sessionId ? soloPipelineModeSessions.has(sessionId) : false
+  const pipelineFlavor = sessionId ? pipelineModeSessions.get(sessionId) ?? null : null
+  const soloPipelineMode = pipelineFlavor === 'solo'
   // Hand-off summary is one-shot: read AND remove. The next CLI start will
   // pick it up; subsequent unrelated restarts won't re-attach a stale summary.
   const handoffSystemPrompt = sessionId ? handoffSummarySessions.get(sessionId) : undefined
@@ -3828,6 +3836,7 @@ async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSettings> 
           ...defaults,
           permissionMode: sessionPermissionMode ?? defaults.permissionMode,
           coordinatorMode,
+          pipelineFlavor,
           soloPipelineMode,
           ...(handoffSystemPrompt ? { handoffSystemPrompt } : {}),
         }
@@ -3888,6 +3897,7 @@ async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSettings> 
       thinking,
       providerId: runtimeOverride.providerId,
       coordinatorMode,
+      pipelineFlavor,
       soloPipelineMode,
       ...(handoffSystemPrompt ? { handoffSystemPrompt } : {}),
     }
@@ -3899,6 +3909,7 @@ async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSettings> 
     permissionMode: sessionPermissionMode ?? defaults.permissionMode,
     effort: launchInfo?.effortLevel ?? defaults.effort,
     coordinatorMode,
+    pipelineFlavor,
     soloPipelineMode,
     ...(handoffSystemPrompt ? { handoffSystemPrompt } : {}),
   }
