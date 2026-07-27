@@ -301,9 +301,12 @@ describe('ActivitySettings', () => {
     expect(primaryMetric).not.toHaveClass('lg:col-span-1')
     expect(primaryMetric).toHaveClass('text-center')
 
+    // Two lines, not one truncated line: at a fifth of the strip a duration like
+    // "436 小时 26 分钟" rendered as "436 小…". Clamping still caps the growth, so
+    // the strip stays compact.
     const longestTaskValue = screen.getByText('0m')
     expect(longestTaskValue).toHaveClass('activity-summary-value')
-    expect(longestTaskValue).toHaveClass('truncate')
+    expect(longestTaskValue).toHaveClass('line-clamp-2')
     expect(longestTaskValue).not.toHaveClass('break-words')
   })
 

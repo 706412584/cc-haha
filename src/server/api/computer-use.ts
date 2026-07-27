@@ -22,7 +22,9 @@ import {
 import { buildPipInstallAttempts } from '../../utils/computerUse/pipInstall.js'
 import {
   DEFAULT_DESKTOP_GRANT_FLAGS,
+  getComputerUseConfigPath,
   loadStoredComputerUseConfig,
+  loadStoredComputerUseConfigResult,
   normalizePythonPath,
   saveStoredComputerUseConfig,
 } from '../../utils/computerUse/preauthorizedConfig.js'
@@ -273,6 +275,17 @@ type SetupResult = {
   steps: { name: string; ok: boolean; message: string }[]
 }
 
+export function getUnsupportedComputerUsePlatformStep(
+  platform: string,
+): SetupResult['steps'][number] | null {
+  if (platform === 'darwin' || platform === 'win32') return null
+  return {
+    name: 'platform',
+    ok: false,
+    message: `Computer Use does not support platform: ${platform}`,
+  }
+}
+
 export function getUnsupportedPythonVersionStep(
   version: string | null,
 ): SetupResult['steps'][number] | null {
@@ -295,6 +308,10 @@ export async function installSetupDependencies(
 
 async function runSetup(): Promise<SetupResult> {
   const steps: SetupResult['steps'] = []
+  const unsupportedPlatformStep = getUnsupportedComputerUsePlatformStep(process.platform)
+  if (unsupportedPlatformStep) {
+    return { success: false, steps: [unsupportedPlatformStep] }
+  }
 
   const venvPython = isWindows
     ? join(venvRoot, 'Scripts', 'python.exe')
@@ -467,6 +484,7 @@ type AuthorizedApp = {
   bundleId: string
   displayName: string
   authorizedAt?: string
+  [key: string]: unknown
 }
 
 type ComputerUseConfig = {
@@ -478,6 +496,13 @@ type ComputerUseConfig = {
     systemKeyCombos: boolean
   }
   pythonPath: string | null
+}
+
+export type ComputerUseConfigPatch = {
+  enabled?: boolean
+  authorizedApps?: AuthorizedApp[]
+  grantFlags?: Partial<ComputerUseConfig['grantFlags']>
+  pythonPath?: string | null
 }
 
 type RequestAccessBody = {
@@ -498,6 +523,114 @@ async function loadConfig(): Promise<ComputerUseConfig> {
 
 async function saveConfig(config: ComputerUseConfig): Promise<void> {
   await saveStoredComputerUseConfig(config)
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+const CONFIG_PATCH_KEYS = new Set([
+  'enabled',
+  'authorizedApps',
+  'grantFlags',
+  'pythonPath',
+])
+const GRANT_FLAG_KEYS = new Set([
+  'clipboardRead',
+  'clipboardWrite',
+  'systemKeyCombos',
+])
+export function parseComputerUseConfigPatch(
+  value: unknown,
+): ComputerUseConfigPatch | null {
+  if (!isPlainObject(value)) return null
+  if (Object.keys(value).some(key => !CONFIG_PATCH_KEYS.has(key))) return null
+  if (value.enabled !== undefined && typeof value.enabled !== 'boolean') return null
+
+  let authorizedApps: AuthorizedApp[] | undefined
+  if (value.authorizedApps !== undefined) {
+    if (!Array.isArray(value.authorizedApps)) return null
+    authorizedApps = []
+    for (const candidate of value.authorizedApps) {
+      if (!isPlainObject(candidate)) return null
+      if (
+        typeof candidate.bundleId !== 'string'
+        || typeof candidate.displayName !== 'string'
+      ) {
+        return null
+      }
+      const bundleId = candidate.bundleId.trim()
+      const displayName = candidate.displayName.trim()
+      if (!bundleId || !displayName) return null
+      if (
+        candidate.authorizedAt !== undefined
+        && typeof candidate.authorizedAt !== 'string'
+      ) {
+        return null
+      }
+      authorizedApps.push({
+        ...candidate,
+        bundleId,
+        displayName,
+      })
+    }
+  }
+
+  let grantFlags: ComputerUseConfigPatch['grantFlags']
+  if (value.grantFlags !== undefined) {
+    if (
+      !isPlainObject(value.grantFlags)
+      || Object.keys(value.grantFlags).some(key => !GRANT_FLAG_KEYS.has(key))
+    ) {
+      return null
+    }
+    grantFlags = {}
+    for (const key of GRANT_FLAG_KEYS) {
+      const flag = value.grantFlags[key]
+      if (flag !== undefined && typeof flag !== 'boolean') return null
+      if (typeof flag === 'boolean') grantFlags[key] = flag
+    }
+  }
+
+  if (
+    value.pythonPath !== undefined
+    && value.pythonPath !== null
+    && (
+      typeof value.pythonPath !== 'string'
+    )
+  ) {
+    return null
+  }
+
+  return {
+    ...(value.enabled === undefined ? {} : { enabled: value.enabled }),
+    ...(authorizedApps === undefined ? {} : { authorizedApps }),
+    ...(grantFlags === undefined ? {} : { grantFlags }),
+    ...(value.pythonPath === undefined
+      ? {}
+      : { pythonPath: normalizePythonPath(value.pythonPath) }),
+  }
+}
+
+export async function openComputerUseSettings(
+  platform: string,
+  pane: 'Privacy_ScreenCapture' | 'Privacy_Accessibility',
+  run: typeof runCommand = runCommand,
+): Promise<{ ok: boolean; message?: string }> {
+  const command = platform === 'darwin'
+    ? {
+        cmd: 'open',
+        args: [`x-apple.systempreferences:com.apple.preference.security?${pane}`],
+      }
+    : platform === 'win32'
+      ? { cmd: 'cmd', args: ['/c', 'start', 'ms-settings:privacy'] }
+      : null
+  if (!command) return { ok: false, message: 'Unsupported platform' }
+
+  const result = await run(command.cmd, command.args)
+  return result.ok
+    ? { ok: true }
+    : { ok: false, message: result.stderr || `Failed to run ${command.cmd}` }
 }
 
 async function listInstalledApps(): Promise<{ bundleId: string; displayName: string; path: string }[]> {
@@ -550,44 +683,103 @@ export async function handleComputerUseApi(
 
   // GET /api/computer-use/authorized-apps — current authorized app config
   if (action === 'authorized-apps' && req.method === 'GET') {
-    const config = await loadConfig()
-    return Response.json(config)
+    const result = await loadStoredComputerUseConfigResult()
+    if (result.error) {
+      const configPath = getComputerUseConfigPath()
+      return Response.json(
+        {
+          error: 'COMPUTER_USE_CONFIG_INVALID',
+          message: `Computer Use config could not be loaded: ${result.error}`,
+          configPath,
+          recoveryHint: '删除或修复该文件即可恢复',
+        },
+        { status: 500 },
+      )
+    }
+    return Response.json(result.config)
   }
 
   // PUT /api/computer-use/authorized-apps — update authorized apps
   if (action === 'authorized-apps' && req.method === 'PUT') {
+    let body: ComputerUseConfigPatch | null = null
     try {
-      const body = (await req.json()) as Partial<ComputerUseConfig>
-      const config = await loadConfig()
-      if (body.enabled !== undefined) config.enabled = body.enabled
-      if (body.authorizedApps) config.authorizedApps = body.authorizedApps
-      if (body.grantFlags) config.grantFlags = { ...config.grantFlags, ...body.grantFlags }
-      if ('pythonPath' in body) config.pythonPath = normalizePythonPath(body.pythonPath)
+      body = parseComputerUseConfigPatch(await req.json())
+    } catch {}
+    if (!body) {
+      return Response.json(
+        { error: 'INVALID_COMPUTER_USE_CONFIG', message: 'Invalid Computer Use config' },
+        { status: 400 },
+      )
+    }
+    const stored = await loadStoredComputerUseConfigResult()
+    if (stored.error) {
+      const configPath = getComputerUseConfigPath()
+      return Response.json(
+        {
+          error: 'COMPUTER_USE_CONFIG_INVALID',
+          message: `Computer Use config must be repaired before it can be changed: ${stored.error}`,
+          configPath,
+          recoveryHint: '删除或修复该文件即可恢复',
+        },
+        { status: 409 },
+      )
+    }
+    const config = stored.config
+    if (body.enabled !== undefined) config.enabled = body.enabled
+    if (body.authorizedApps !== undefined) config.authorizedApps = body.authorizedApps
+    if (body.grantFlags !== undefined) {
+      config.grantFlags = { ...config.grantFlags, ...body.grantFlags }
+    }
+    if ('pythonPath' in body) config.pythonPath = body.pythonPath ?? null
+    try {
       await saveConfig(config)
       return Response.json({ ok: true })
     } catch {
-      return Response.json({ error: 'Invalid JSON' }, { status: 400 })
+      return Response.json(
+        { error: 'COMPUTER_USE_CONFIG_WRITE_FAILED', message: 'Could not save Computer Use config' },
+        { status: 500 },
+      )
     }
   }
 
   // POST /api/computer-use/open-settings — open system settings pane
   if (action === 'open-settings' && req.method === 'POST') {
-    const body = (await req.json().catch(() => ({}))) as { pane?: string }
+    let body: unknown
+    try {
+      body = await req.json()
+    } catch {
+      return Response.json(
+        { error: 'INVALID_OPEN_SETTINGS_REQUEST', message: 'Invalid settings request' },
+        { status: 400 },
+      )
+    }
+    if (!isPlainObject(body)) {
+      return Response.json(
+        { error: 'INVALID_OPEN_SETTINGS_REQUEST', message: 'Invalid settings request' },
+        { status: 400 },
+      )
+    }
     const pane = body.pane ?? 'Privacy_ScreenCapture'
     const allowed = ['Privacy_ScreenCapture', 'Privacy_Accessibility']
-    if (!allowed.includes(pane)) {
+    if (typeof pane !== 'string' || !allowed.includes(pane)) {
       return Response.json({ error: 'Invalid pane' }, { status: 400 })
     }
 
-    if (process.platform === 'darwin') {
-      const url = `x-apple.systempreferences:com.apple.preference.security?${pane}`
-      await runCommand('open', [url])
-    } else if (process.platform === 'win32') {
-      // Windows doesn't need privacy settings like macOS TCC, but we can
-      // open the general privacy page if requested
-      await runCommand('cmd', ['/c', 'start', 'ms-settings:privacy'])
-    } else {
-      return Response.json({ error: 'Unsupported platform' }, { status: 400 })
+    const result = await openComputerUseSettings(
+      process.platform,
+      pane as 'Privacy_ScreenCapture' | 'Privacy_Accessibility',
+    )
+    if (!result.ok) {
+      const supportedPlatform = process.platform === 'darwin' || process.platform === 'win32'
+      return Response.json(
+        {
+          error: supportedPlatform ? 'OPEN_SETTINGS_FAILED' : 'UNSUPPORTED_PLATFORM',
+          message: supportedPlatform
+            ? 'Could not open system settings'
+            : 'Computer Use is not supported on this platform',
+        },
+        { status: supportedPlatform ? 500 : 400 },
+      )
     }
     return Response.json({ ok: true })
   }

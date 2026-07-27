@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useRef, useState, type HTMLAttributes } from 'react'
 import { Sidebar } from './Sidebar'
 import { ContentRouter } from './ContentRouter'
-import { ToastContainer } from '../shared/Toast'
-import { UpdateChecker } from '../shared/UpdateChecker'
+import { ToastContainer } from '@/components/layout/Toast'
+import { UpdateChecker } from '@/components/layout/UpdateChecker'
+import { StatusDot } from '@/components/ui/Badge'
+import { IconButton } from '@/components/ui/IconButton'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useUIStore, type SettingsTab } from '../../stores/uiStore'
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts'
 import { useElectronWindowDragRegions } from '../../hooks/useElectronWindowDragRegions'
+import { useSidebarResize } from '../../hooks/useSidebarResize'
 import {
   H5ConnectionRequiredError,
   initializeDesktopServerUrl,
@@ -61,7 +64,9 @@ export function AppShell() {
     ? sessions.find((session) => session.id === activeTabId) ?? null
     : null
   const wasMobileShellRef = useRef(false)
+  const sidebarWidth = useUIStore((s) => s.sidebarWidth)
   const effectiveSidebarOpen = isMobileShell ? mobileSidebarOpen : sidebarOpen
+  const sidebarResize = useSidebarResize(!isMobileShell)
   const activeTab = tabs.find((tab) => tab.sessionId === activeTabId)
   const isActiveChatTab = isChatTab(activeTab)
   const mobileSessionTitle = activeSession?.title || activeTab?.title || t('session.untitled')
@@ -305,13 +310,14 @@ export function AppShell() {
         <button
           type="button"
           data-testid="sidebar-backdrop"
-          className="app-shell-backdrop fixed inset-0 z-40 border-0 p-0"
+          className="app-shell-backdrop fixed inset-0 z-[var(--z-scrim)] border-0 p-0"
           aria-label={t('sidebar.collapse')}
           onClick={() => setEffectiveSidebarOpen(false)}
         />
       ) : null}
       <div
         id="sidebar-shell"
+        ref={sidebarResize.shellRef}
         data-testid="sidebar-shell"
         data-state={effectiveSidebarOpen ? 'open' : 'closed'}
         data-mobile={isMobileShell ? 'true' : 'false'}
@@ -320,6 +326,18 @@ export function AppShell() {
       >
         {!isMobileShell || effectiveSidebarOpen ? (
           <Sidebar isMobile={isMobileShell} onRequestClose={() => setEffectiveSidebarOpen(false)} />
+        ) : null}
+        {!isMobileShell ? (
+          <div
+            data-testid="sidebar-resize-handle"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label={t('sidebar.resize')}
+            aria-valuenow={effectiveSidebarOpen ? sidebarWidth : 0}
+            tabIndex={0}
+            className="sidebar-resize-handle"
+            {...sidebarResize.handleProps}
+          />
         ) : null}
       </div>
       <main
@@ -332,19 +350,15 @@ export function AppShell() {
             data-testid="mobile-session-header"
             className="mobile-app-header flex shrink-0 items-center gap-3 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2"
           >
-            <button
-              type="button"
+            <IconButton
               data-testid="mobile-sidebar-toggle"
+              icon={effectiveSidebarOpen ? 'close' : 'menu'}
+              label={effectiveSidebarOpen ? t('sidebar.collapse') : t('sidebar.expand')}
+              onClick={toggleEffectiveSidebar}
+              size="2xl"
               aria-controls="sidebar-shell"
               aria-expanded={effectiveSidebarOpen}
-              aria-label={effectiveSidebarOpen ? t('sidebar.collapse') : t('sidebar.expand')}
-              onClick={toggleEffectiveSidebar}
-              className="mobile-app-header__button inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
-            >
-              <span className="material-symbols-outlined text-[20px]">
-                {effectiveSidebarOpen ? 'close' : 'menu'}
-              </span>
-            </button>
+            />
             <div className="min-w-0 flex-1">
               <h1 className="truncate text-[15px] font-bold leading-tight text-[var(--color-text-primary)]">
                 {mobilePageTitle}
@@ -353,7 +367,7 @@ export function AppShell() {
                 <div className="mt-0.5 flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap text-[10px] font-medium text-[var(--color-text-tertiary)]">
                   {activeTab?.status === 'running' ? (
                     <span className="flex shrink-0 items-center gap-1 text-[var(--color-text-secondary)]">
-                      <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-success)] animate-pulse-dot" />
+                      <StatusDot tone="success" pulse />
                       {t('session.active')}
                     </span>
                   ) : null}

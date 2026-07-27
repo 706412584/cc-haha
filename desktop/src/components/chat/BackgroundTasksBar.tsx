@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { CheckCircle2, CircleStop, LoaderCircle, X, XCircle } from 'lucide-react'
+import { StatusDot } from '@/components/ui/Badge'
+import { Button } from '@/components/ui/Button'
+import { IconButton } from '@/components/ui/IconButton'
 import { useTranslation } from '../../i18n'
 import { createBackgroundTaskDismissKey, formatDurationMs } from '../../lib/backgroundTasks'
 import type { BackgroundAgentTask } from '../../types/chat'
@@ -77,22 +80,22 @@ export function BackgroundTasksBar({
     <>
       {runningCount > 0 || visibleFinishedCount > 0 ? (
         <div className={['shrink-0', compact ? 'px-4' : 'px-8'].join(' ')}>
-          <div className={compact ? 'w-full py-2' : 'mx-auto w-full max-w-[860px] py-2'}>
-            <button
-              type="button"
+          <div className={compact ? 'w-full py-2' : 'mx-auto w-full max-w-[900px] py-2'}>
+            <Button
+              variant="tonal"
+              size="base"
               data-testid="background-tasks-button"
               aria-expanded={open}
               aria-controls="background-tasks-drawer"
               onClick={() => setOpen(true)}
-              className="inline-flex min-h-8 items-center gap-2 rounded-md px-1.5 py-1 text-[13px] font-medium text-[var(--color-brand)] transition-colors hover:bg-[var(--color-surface-container-low)] hover:text-[var(--color-brand-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
-            >
-              {runningCount > 0 ? (
+              icon={runningCount > 0 ? (
                 <LoaderCircle size={16} strokeWidth={2.2} className="animate-spin text-[var(--color-warning)]" aria-hidden="true" />
               ) : (
                 <CheckCircle2 size={16} strokeWidth={2.2} className="text-[var(--color-success)]" aria-hidden="true" />
               )}
-              <span>{taskButtonLabel}</span>
-            </button>
+            >
+              {taskButtonLabel}
+            </Button>
           </div>
         </div>
       ) : null}
@@ -110,14 +113,14 @@ export function BackgroundTasksBar({
             <h2 id={drawerTitleId} className="text-[15px] font-semibold text-[var(--color-text-primary)]">
               {t('chat.backgroundTasks.title')}
             </h2>
-            <button
-              type="button"
-              aria-label={t('chat.backgroundTasks.close')}
+            <IconButton
+              size="md"
+              tone="muted"
+              label={t('chat.backgroundTasks.close')}
+              showTooltip={false}
               onClick={() => setOpen(false)}
-              className="flex h-8 w-8 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-container-low)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
-            >
-              <X size={16} strokeWidth={2.2} aria-hidden="true" />
-            </button>
+              icon={<X size={16} strokeWidth={2.2} aria-hidden="true" />}
+            />
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
@@ -131,16 +134,16 @@ export function BackgroundTasksBar({
                 ) : null}
               </h3>
               {visibleFinishedCount > 0 ? (
-                <button
-                  type="button"
+                <Button
+                  variant="ghost"
+                  size="sm"
                   onClick={() => {
                     onClearFinished?.(finishedTasks.map(createBackgroundTaskDismissKey))
                     if (runningTasks.length === 0) setOpen(false)
                   }}
-                  className="rounded-md px-2 py-1 text-[12px] font-medium text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-container-low)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
                 >
                   {t('chat.backgroundTasks.clear')}
-                </button>
+                </Button>
               ) : null}
             </div>
             <TaskList tasks={finishedAgentTasks.filter((task) => !dismissedTaskKeys.has(createBackgroundTaskDismissKey(task)))} />
@@ -210,11 +213,12 @@ function BackgroundTaskRow({ task, onStopTask }: { task: BackgroundAgentTask; on
       className="rounded-[8px] bg-[var(--color-surface-container-low)] px-3 py-2.5"
     >
       <div className="flex min-w-0 items-start gap-2">
-        <span className="mt-1 flex h-2 w-2 shrink-0 items-center justify-center rounded-full bg-[var(--color-text-tertiary)]">
-          {task.status === 'running' ? (
-            <span className="h-2 w-2 rounded-full bg-[var(--color-brand)] animate-pulse-dot" aria-hidden="true" />
-          ) : null}
-        </span>
+        <StatusDot
+          tone={task.status === 'running' ? 'brand' : 'neutral'}
+          size="md"
+          pulse={task.status === 'running'}
+          className="mt-1"
+        />
         <div className="min-w-0 flex-1">
           <div className="truncate text-[13px] font-semibold text-[var(--color-text-primary)]" title={title}>
             {title}

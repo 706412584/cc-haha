@@ -1,4 +1,5 @@
 import { ListChecks } from 'lucide-react'
+import { IconButton } from '@/components/ui/IconButton'
 import { useTranslation } from '../../i18n'
 import { useActivityPanelStore } from '../../stores/activityPanelStore'
 
@@ -16,22 +17,21 @@ export function SessionActivityButton({
   const isOpen = useActivityPanelStore((state) => state.isOpen(sessionId))
   const toggle = useActivityPanelStore((state) => state.toggle)
   return (
-    <button
-      type="button"
-      aria-label={resolvedLabel}
+    <IconButton
+      icon={<ListChecks size={17} strokeWidth={1.9} />}
+      label={resolvedLabel}
+      size="md"
+      // The design's active toolbar toggle is a terracotta wash with a
+      // terracotta glyph, which `tone="brand"` + `filled` already are. The
+      // `className` fill this replaces raced the tone's own `bg-[…]`, and which
+      // won came down to stylesheet order.
+      tone={isOpen ? 'brand' : 'muted'}
+      filled={isOpen}
       aria-expanded={isOpen}
       aria-pressed={isOpen}
-      title={resolvedLabel}
       onClick={() => toggle(sessionId)}
       data-active={isOpen ? 'true' : 'false'}
       data-session-activity-trigger="true"
-      className={`relative inline-flex h-8 w-8 items-center justify-center rounded-[10px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] ${
-        isOpen
-          ? 'bg-[var(--color-surface-hover)] text-[var(--color-text-primary)]'
-          : 'text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
-      }`}
-    >
-      <ListChecks size={17} strokeWidth={1.9} />
-    </button>
+    />
   )
 }

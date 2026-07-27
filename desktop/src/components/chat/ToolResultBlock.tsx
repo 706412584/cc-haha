@@ -27,10 +27,10 @@ export const ToolResultBlock = memo(function ToolResultBlock({ content, isError,
   const hasMore = text.length > 200
 
   return (
-    <div className={`mb-2 overflow-hidden rounded-xl border ${
+    <div className={`mb-2 overflow-hidden rounded-[var(--radius-lg)] border ${
       isError
-        ? 'border-[var(--color-error)]/20'
-        : 'border-[var(--color-outline-variant)]/20'
+        ? 'border-[var(--color-error)]'
+        : 'border-[var(--color-border)]'
     }`}>
       {/* Status header */}
       <button
@@ -38,8 +38,8 @@ export const ToolResultBlock = memo(function ToolResultBlock({ content, isError,
         onClick={() => setExpanded((value) => !value)}
         className={`flex w-full items-center justify-between px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wider ${
         isError
-          ? 'bg-[var(--color-error-container)] text-[var(--color-error)]'
-          : 'bg-[var(--color-surface-container-high)] text-[var(--color-outline)]'
+          ? 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)]'
+          : 'bg-[var(--color-surface-container-high)] text-[var(--color-text-tertiary)]'
       }`}
       >
         <span className="flex items-center gap-1.5">
@@ -50,7 +50,7 @@ export const ToolResultBlock = memo(function ToolResultBlock({ content, isError,
         </span>
         <span className={`px-2 py-0.5 rounded-full text-[9px] ${
           isError
-            ? 'bg-[var(--color-error)]/10'
+            ? 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)]'
             : 'bg-[var(--color-diff-added-bg)] text-[var(--color-diff-added-text)]'
         }`}>
           {isError ? t('tool.error') : t('tool.success')}
@@ -63,7 +63,7 @@ export const ToolResultBlock = memo(function ToolResultBlock({ content, isError,
       {/* Content */}
       {expanded ? (
         isError ? (
-          <div className="bg-[var(--color-error-container)]/50 px-3 py-2.5 font-[var(--font-mono)] text-[11px] leading-[1.5] whitespace-pre-wrap break-words text-[var(--color-error)]">
+          <div className="bg-[var(--color-error-container)] px-3 py-2.5 font-mono text-[11px] leading-[1.5] whitespace-pre-wrap break-words text-[var(--color-on-error-container)]">
             {text}
           </div>
         ) : (
@@ -74,7 +74,7 @@ export const ToolResultBlock = memo(function ToolResultBlock({ content, isError,
           />
         )
       ) : (
-        <div className="bg-[var(--color-surface-container-lowest)] px-3 py-2 font-[var(--font-mono)] text-[10px] leading-[1.35] text-[var(--color-text-tertiary)]">
+        <div className="bg-[var(--color-surface-container-lowest)] px-3 py-2 font-mono text-[10px] leading-[1.35] text-[var(--color-text-tertiary)]">
           {preview}
           {hasMore ? '…' : ''}
         </div>
@@ -83,7 +83,7 @@ export const ToolResultBlock = memo(function ToolResultBlock({ content, isError,
       {hasMore && (
         <button
           onClick={() => setExpanded((value) => !value)}
-          className="w-full py-1 text-[10px] font-medium text-[var(--color-text-accent)] hover:underline bg-[var(--color-surface-container-low)] border-t border-[var(--color-outline-variant)]/10"
+          className="w-full py-1 text-[10px] font-medium text-[var(--color-text-accent)] hover:underline bg-[var(--color-surface-container-low)] border-t border-[var(--color-border)]"
         >
           {expanded ? t('tool.showLess') : t('tool.showMore', { count: text.length - 200 })}
         </button>

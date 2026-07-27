@@ -6,6 +6,7 @@ import { formatTraceJson } from '../../../lib/traceViewModel'
 import type { NormalizedBlock, NormalizedMessage } from '../../../lib/trace/types'
 import { normalizeContentBlock } from '../../../lib/trace/sse'
 import { CodeViewer } from '../../chat/CodeViewer'
+import { EmptyState } from '@/components/ui/EmptyState'
 import { Section } from './Section'
 import { MessageBlocks } from './MessageBlocks'
 
@@ -25,9 +26,7 @@ export function MessageDetail({ span }: { span: TraceSpan }) {
         {normalized.content.length > 0 ? (
           <MessageBlocks message={normalized} />
         ) : (
-          <div className="rounded-[var(--radius-md)] border border-dashed border-[var(--color-border)] px-3 py-3 text-xs text-[var(--color-text-tertiary)]">
-            {t('trace.noData')}
-          </div>
+          <EmptyState description={t('trace.noData')} variant="dashed" size="sm" />
         )}
       </Section>
       <Section sectionKey="message.raw" title={t('trace.section.raw')}>

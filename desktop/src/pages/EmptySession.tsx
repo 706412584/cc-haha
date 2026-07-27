@@ -1,4 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useDismissable } from '@/hooks/useDismissable'
+import { BrandSeal } from '@/components/composite/BrandSeal'
+import { Button } from '@/components/ui/Button'
+import { IconButton } from '@/components/ui/IconButton'
 import { ApiError } from '../api/client'
 import { agentsApi } from '../api/agents'
 import { skillsApi } from '../api/skills'
@@ -13,7 +17,7 @@ import { useSessionRuntimeStore, DRAFT_RUNTIME_SELECTION_KEY } from '../stores/s
 import { useSettingsStore } from '../stores/settingsStore'
 import { useUIStore } from '../stores/uiStore'
 import { SETTINGS_TAB_ID, useTabStore } from '../stores/tabStore'
-import { RepositoryLaunchControls } from '../components/shared/RepositoryLaunchControls'
+import { RepositoryLaunchControls } from '@/components/chat/RepositoryLaunchControls'
 import { PermissionModeSelector } from '../components/controls/PermissionModeSelector'
 import { ModelSelector, type ModelSelectorHandle } from '../components/controls/ModelSelector'
 import { AttachmentGallery } from '../components/chat/AttachmentGallery'
@@ -23,10 +27,10 @@ import { FileSearchMenu, type FileSearchMenuHandle } from '../components/chat/Fi
 import { LocalSlashCommandPanel, type LocalSlashCommandName } from '../components/chat/LocalSlashCommandPanel'
 import { useMobileViewport } from '../hooks/useMobileViewport'
 import { isDesktopRuntime } from '../lib/desktopRuntime'
-import { publicAssetPath } from '../lib/publicAsset'
 import { resolveActiveProviderRuntimeSelection } from '../lib/runtimeSelection'
 import {
   filesToComposerAttachments,
+  getDataTransferFiles,
   selectNativeFileAttachments,
   type ComposerAttachment,
 } from '../lib/composerAttachments'
@@ -145,65 +149,36 @@ export function EmptySession() {
     textareaRef.current?.focus()
   }, [])
 
-  useEffect(() => {
-    if (!plusMenuOpen) return
-    const handleClick = (event: MouseEvent) => {
-      if (plusMenuRef.current && !plusMenuRef.current.contains(event.target as Node)) {
-        setPlusMenuOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClick)
-    return () => document.removeEventListener('mousedown', handleClick)
-  }, [plusMenuOpen])
+  useDismissable({
+    open: plusMenuOpen,
+    refs: [plusMenuRef],
+    onDismiss: () => setPlusMenuOpen(false),
+  })
 
-  useEffect(() => {
-    if (!slashMenuOpen) return
-    const handleClick = (event: MouseEvent) => {
-      if (
-        slashMenuRef.current &&
-        !slashMenuRef.current.contains(event.target as Node) &&
-        textareaRef.current &&
-        !textareaRef.current.contains(event.target as Node)
-      ) {
-        setSlashMenuOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClick)
-    return () => document.removeEventListener('mousedown', handleClick)
-  }, [slashMenuOpen])
+  useDismissable({
+    open: slashMenuOpen,
+    refs: [slashMenuRef, textareaRef],
+    onDismiss: () => setSlashMenuOpen(false),
+  })
 
-  useEffect(() => {
-    if (!localSlashPanel) return
-    const handleClick = (event: MouseEvent) => {
-      if (
-        slashMenuRef.current &&
-        !slashMenuRef.current.contains(event.target as Node) &&
-        textareaRef.current &&
-        !textareaRef.current.contains(event.target as Node)
-      ) {
-        setLocalSlashPanel(null)
-      }
-    }
-    document.addEventListener('mousedown', handleClick)
-    return () => document.removeEventListener('mousedown', handleClick)
-  }, [localSlashPanel])
+  useDismissable({
+    open: !!localSlashPanel,
+    refs: [slashMenuRef, textareaRef],
+    onDismiss: () => setLocalSlashPanel(null),
+  })
 
-  useEffect(() => {
-    if (!fileSearchOpen) return
-    const handleClick = (event: MouseEvent) => {
+  useDismissable({
+    open: fileSearchOpen,
+    refs: [textareaRef],
+    onDismiss: () => setFileSearchOpen(false),
+    // See ChatInput: this menu is found by id, and its absence used to mean
+    // "ignore the press".
+    isExempt: (target) => {
       const menu = document.getElementById('file-search-menu')
-      if (
-        menu &&
-        !menu.contains(event.target as Node) &&
-        textareaRef.current &&
-        !textareaRef.current.contains(event.target as Node)
-      ) {
-        setFileSearchOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClick)
-    return () => document.removeEventListener('mousedown', handleClick)
-  }, [fileSearchOpen])
+      if (!menu) return true
+      return target instanceof Node && menu.contains(target)
+    },
+  })
 
   useEffect(() => {
     let cancelled = false
@@ -496,37 +471,18 @@ export function EmptySession() {
   }
 
   const handlePaste = (event: React.ClipboardEvent) => {
-    const items = event.clipboardData?.items
-    if (!items) return
+    const files = getDataTransferFiles(event.clipboardData)
+    if (files.length === 0) return
 
-    let hasImage = false
-    for (let i = 0; i < items.length; i += 1) {
-      const item = items[i]
-      if (!item || !item.type.startsWith('image/')) continue
-
-      hasImage = true
-      event.preventDefault()
-      const file = item.getAsFile()
-      if (!file) continue
-      const id = `att-${Date.now()}-${Math.random().toString(36).slice(2)}`
-      const reader = new FileReader()
-      reader.onload = () => {
-        setAttachments((prev) => [
-          ...prev,
-          {
-            id,
-            name: `pasted-image-${Date.now()}.png`,
-            type: 'image',
-            mimeType: file.type || undefined,
-            previewUrl: reader.result as string,
-            data: reader.result as string,
-          },
-        ])
-      }
-      reader.readAsDataURL(file)
-    }
-
-    if (!hasImage) return
+    event.preventDefault()
+    void filesToComposerAttachments(files)
+      .then((nextAttachments) => {
+        if (nextAttachments.length === 0) return
+        setAttachments((prev) => [...prev, ...nextAttachments])
+      })
+      .catch((error) => {
+        console.warn('[attachments] Failed to read pasted files', error)
+      })
   }
 
   const appendFiles = useCallback((files: FileList | File[]) => {
@@ -629,28 +585,24 @@ export function EmptySession() {
 
   return (
     <div className="relative flex flex-1 flex-col overflow-hidden bg-[var(--color-surface)]">
-      <div className={`flex flex-1 flex-col items-center justify-center ${
+      <div className={`brand-seal-glow flex flex-1 flex-col items-center justify-center ${
         isMobileComposer ? 'px-6 pb-[230px] pt-10' : 'p-8 pb-32'
       }`}>
         <div className={`flex flex-col items-center text-center ${
-          isMobileComposer ? 'max-w-[300px]' : 'max-w-md'
+          isMobileComposer ? 'max-w-[300px] gap-3' : 'max-w-[420px] gap-[13px]'
         }`}>
-          <img
-            src={publicAssetPath('app-icon.png')}
-            alt="Claude Code Haha"
-            className={isMobileComposer ? 'mb-4 h-16 w-16' : 'mb-6 h-24 w-24'}
-          />
+          <BrandSeal size={isMobileComposer ? 'lg' : 'xl'} />
           <h1
-            className={`mb-2 font-extrabold tracking-tight text-[var(--color-text-primary)] ${
-              isMobileComposer ? 'text-2xl' : 'text-3xl'
+            className={`font-bold tracking-tight text-[var(--color-text-primary)] ${
+              isMobileComposer ? 'text-2xl' : 'text-[27px]'
             }`}
             style={{ fontFamily: 'var(--font-headline)' }}
           >
             {t('empty.title')}
           </h1>
           <p
-            className={`mx-auto text-[var(--color-text-secondary)] ${
-              isMobileComposer ? 'max-w-[280px] text-sm leading-6' : 'max-w-xs'
+            className={`mx-auto -mt-1 text-[var(--color-text-secondary)] ${
+              isMobileComposer ? 'max-w-[280px] text-sm leading-6' : 'text-[15px] leading-[1.7]'
             }`}
             style={{ fontFamily: 'var(--font-body)' }}
           >
@@ -777,7 +729,7 @@ export function EmptySession() {
 
       <div
         data-testid="empty-session-composer-shell"
-        className={`absolute left-0 right-0 z-30 flex justify-center ${
+        className={`absolute left-0 right-0 z-[var(--z-nav)] flex justify-center ${
         isMobileComposer
           ? 'bottom-0 px-3 pb-[calc(env(safe-area-inset-bottom)+10px)]'
           : 'bottom-4 px-8'
@@ -787,8 +739,8 @@ export function EmptySession() {
           <div
             ref={panelRef}
             data-testid="empty-session-composer-panel"
-            className={`glass-panel relative flex flex-col gap-3 overflow-visible ${
-              isMobileComposer ? 'rounded-2xl p-3 shadow-[0_-12px_36px_rgba(54,35,28,0.12)]' : 'rounded-xl p-0'
+            className={`glass-panel glass-panel--composer relative flex flex-col gap-3 overflow-visible rounded-[var(--radius-2xl)] ${
+              isMobileComposer ? 'p-3' : 'p-0'
             } ${isDragActive ? 'composer-drop-target-active' : ''}`}
             {...dragHandlers}
           >
@@ -864,7 +816,7 @@ export function EmptySession() {
               {slashMenuOpen && filteredCommands.length > 0 && (
                 <div
                   ref={slashMenuRef}
-                  className="absolute bottom-full left-0 right-0 z-50 mb-2 overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-dropdown)]"
+                  className="absolute bottom-full left-0 right-0 z-[var(--z-dropdown)] mb-2 overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-dropdown)]"
                 >
                   <div className="max-h-[260px] overflow-y-auto py-1">
                     {filteredCommands.map((command, index) => (
@@ -915,20 +867,21 @@ export function EmptySession() {
               <div className={`border-t border-[var(--color-border-separator)] pt-3 ${
                 isMobileComposer ? 'flex flex-wrap items-center gap-2' : 'flex items-center justify-between'
               }`}>
-                <div className="flex shrink-0 items-center gap-2">
-                  <div ref={plusMenuRef} className="relative">
-                    <button
+                <div className="flex min-w-0 shrink items-center gap-2">
+                  <div ref={plusMenuRef} className="relative shrink-0">
+                    <IconButton
+                      icon="add"
+                      label={t('chat.composerTools')}
+                      showTooltip={false}
+                      tone="secondary"
+                      size={isMobileComposer ? 'xl' : 'md'}
+                      className={isMobileComposer ? 'h-11 w-11' : undefined}
+                      aria-expanded={plusMenuOpen}
                       onClick={() => setPlusMenuOpen((prev) => !prev)}
-                      aria-label="Open composer tools"
-                      className={`text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] ${
-                        isMobileComposer ? 'inline-flex h-11 w-11 items-center justify-center rounded-xl' : 'rounded-lg p-1.5'
-                      }`}
-                    >
-                      <span className="material-symbols-outlined text-[18px]">add</span>
-                    </button>
+                    />
 
                     {plusMenuOpen && (
-                      <div className={`absolute bottom-full left-0 mb-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] py-1 shadow-[var(--shadow-dropdown)] ${
+                      <div className={`absolute bottom-full left-0 mb-2 rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] py-1 shadow-[var(--shadow-dropdown)] ${
                         isMobileComposer ? 'w-[min(240px,calc(100vw-32px))]' : 'w-[240px]'
                       }`}>
                         <button
@@ -955,9 +908,23 @@ export function EmptySession() {
                     value={draftPermissionMode}
                     onChange={setDraftPermissionMode}
                   />
+
+                  {!isMobileComposer && (
+                    <RepositoryLaunchControls
+                      workDir={workDir}
+                      onWorkDirChange={handleWorkDirChange}
+                      branch={selectedBranch}
+                      onBranchChange={setSelectedBranch}
+                      useWorktree={useWorktree}
+                      onUseWorktreeChange={setUseWorktree}
+                      onLaunchReadyChange={setRepositoryLaunchReady}
+                      disabled={isSubmitting}
+                      placement="toolbar"
+                    />
+                  )}
                 </div>
 
-                <div className={`${isMobileComposer ? 'flex min-w-0 flex-1 items-center justify-end gap-2' : 'flex items-center gap-3'}`}>
+                <div className={`${isMobileComposer ? 'flex min-w-0 flex-1 items-center justify-end gap-2' : 'flex shrink-0 items-center gap-3'}`}>
                   <ContextUsageIndicator
                     chatState="idle"
                     messageCount={0}
@@ -967,35 +934,23 @@ export function EmptySession() {
                     compact={isMobileComposer}
                   />
                   <ModelSelector ref={modelSelectorRef} runtimeKey={DRAFT_RUNTIME_SELECTION_KEY} disabled={isSubmitting} compact={isMobileComposer} />
-                  <button
+                  <Button
+                    variant="primary"
+                    size="base"
                     onClick={handleSubmit}
                     disabled={!canSubmit}
                     aria-label={t('common.run')}
                     title={isMobileComposer ? t('common.run') : undefined}
-                    className={`flex shrink-0 items-center justify-center gap-1 rounded-lg bg-[image:var(--gradient-btn-primary)] text-xs font-semibold text-[var(--color-btn-primary-fg)] shadow-[var(--shadow-button-primary)] transition-all hover:brightness-105 disabled:opacity-30 ${
-                      isMobileComposer ? 'h-11 w-11 rounded-xl px-0 py-0' : 'w-[112px] px-3 py-1.5'
-                    }`}
+                    className={`shrink-0 ${isMobileComposer ? 'h-11 w-11' : 'w-[112px]'}`}
+                    icon={<span className="material-symbols-outlined text-[14px]">arrow_forward</span>}
+                    iconPosition="end"
                   >
                     {!isMobileComposer && t('common.run')}
-                    <span className="material-symbols-outlined text-[14px]">arrow_forward</span>
-                  </button>
+                  </Button>
                 </div>
               </div>
             </div>
 
-            {!isMobileComposer && (
-              <RepositoryLaunchControls
-                workDir={workDir}
-                onWorkDirChange={handleWorkDirChange}
-                branch={selectedBranch}
-                onBranchChange={setSelectedBranch}
-                useWorktree={useWorktree}
-                onUseWorktreeChange={setUseWorktree}
-                onLaunchReadyChange={setRepositoryLaunchReady}
-                disabled={isSubmitting}
-                placement="composer"
-              />
-            )}
           </div>
 
           {isMobileComposer && (

@@ -8,6 +8,7 @@
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import * as os from 'os'
+import * as crypto from 'crypto'
 import { ApiError } from '../middleware/errorHandler.js'
 
 export type PairedUser = {
@@ -96,6 +97,7 @@ function isMasked(value: string | undefined): boolean {
 
 class AdapterService {
   private readonly runtimeStatus = new Map<AdapterRuntimePlatform, AdapterRuntimeStatus>()
+  private updateQueue: Promise<void> = Promise.resolve()
 
   getRuntimeStatus(): Partial<Record<AdapterRuntimePlatform, AdapterRuntimeStatus>> {
     return Object.fromEntries(this.runtimeStatus)
@@ -138,7 +140,8 @@ class AdapterService {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         return {}
       }
-      throw ApiError.internal(`Failed to read adapter config: ${err}`)
+      console.error('[AdapterService] Failed to read adapter config:', err)
+      throw ApiError.internal('Failed to read adapter config')
     }
   }
 
@@ -167,6 +170,12 @@ class AdapterService {
 
   /** 更新配置（浅合并，敏感字段如果是脱敏值则保留原值） */
   async updateConfig(patch: Partial<AdapterFileConfig>): Promise<void> {
+    const update = this.updateQueue.then(() => this.applyConfigPatch(patch))
+    this.updateQueue = update.catch(() => {})
+    return update
+  }
+
+  private async applyConfigPatch(patch: Partial<AdapterFileConfig>): Promise<void> {
     const current = await this.getRawConfig()
 
     // 保留已存储的密钥（如果前端传回的是脱敏值）
@@ -207,7 +216,7 @@ class AdapterService {
     const dir = path.dirname(filePath)
     await fs.mkdir(dir, { recursive: true, mode: 0o700 })
 
-    const tmpFile = `${filePath}.tmp.${Date.now()}`
+    const tmpFile = `${filePath}.tmp.${crypto.randomUUID()}`
     try {
       await fs.writeFile(tmpFile, JSON.stringify(data, null, 2) + '\n', {
         encoding: 'utf-8',
@@ -217,7 +226,8 @@ class AdapterService {
       await fs.chmod(filePath, 0o600).catch(() => {})
     } catch (err) {
       await fs.unlink(tmpFile).catch(() => {})
-      throw ApiError.internal(`Failed to write adapter config: ${err}`)
+      console.error('[AdapterService] Failed to write adapter config:', err)
+      throw ApiError.internal('Failed to write adapter config')
     }
   }
 }

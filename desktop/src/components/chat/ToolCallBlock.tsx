@@ -3,7 +3,7 @@ import { LoaderCircle } from 'lucide-react'
 import { CodeViewer } from './CodeViewer'
 import { DiffViewer } from './DiffViewer'
 import { TerminalChrome } from './TerminalChrome'
-import { CopyButton } from '../shared/CopyButton'
+import { CopyButton } from '@/components/ui/CopyButton'
 import { useTranslation } from '../../i18n'
 import type { TranslationKey } from '../../i18n'
 import { InlineImageGallery } from './InlineImageGallery'
@@ -97,7 +97,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({ toolName, input, resu
   }
 
   return (
-    <div className={`overflow-hidden rounded-lg border border-[var(--color-border)]/50 bg-[var(--color-surface-container-lowest)] ${
+    <div className={`overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] ${
       compact ? 'mb-0' : 'mb-2'
     }`}>
       <button
@@ -107,18 +107,28 @@ export const ToolCallBlock = memo(function ToolCallBlock({ toolName, input, resu
             setExpanded((value) => !value)
           }
         }}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-[var(--color-surface-hover)]/50"
+        className={`flex w-full items-center text-left transition-colors hover:bg-[var(--color-surface-hover)] ${
+          compact ? 'gap-[11px] px-3.5 py-2.5' : 'gap-3 px-4 py-3'
+        }`}
       >
-        <span className="material-symbols-outlined text-[14px] text-[var(--color-outline)]">{icon}</span>
-        <span className="text-[11px] font-semibold text-[var(--color-text-secondary)]">
+        {compact ? (
+          <span className="material-symbols-outlined shrink-0 text-[16px] text-[var(--color-text-secondary)]">{icon}</span>
+        ) : (
+          /* The ink square is the design's tool badge: solid `--t1` with the page
+             ground as its glyph color, which is exactly the primary-button pair. */
+          <span className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-[8px] bg-[var(--color-btn-primary-bg)] text-[var(--color-btn-primary-fg)]">
+            <span className="material-symbols-outlined text-[16px]">{icon}</span>
+          </span>
+        )}
+        <span className={`shrink-0 font-bold text-[var(--color-text-primary)] ${compact ? 'text-[13px]' : 'text-[14px]'}`}>
           {toolName}
         </span>
         {filePath ? (
-          <span className="min-w-0 flex-1 truncate font-[var(--font-mono)] text-[11px] text-[var(--color-text-tertiary)]">
+          <span className={`min-w-0 flex-1 truncate font-mono text-[var(--color-text-secondary)] ${compact ? 'text-[12.5px]' : 'text-[13px]'}`}>
             {filePath.split('/').pop()}
           </span>
         ) : summary ? (
-          <span className="min-w-0 flex-1 truncate font-[var(--font-mono)] text-[11px] text-[var(--color-text-tertiary)]">
+          <span className={`min-w-0 flex-1 truncate font-mono text-[var(--color-text-secondary)] ${compact ? 'text-[12.5px]' : 'text-[13px]'}`}>
             {summary}
           </span>
         ) : (
@@ -135,27 +145,27 @@ export const ToolCallBlock = memo(function ToolCallBlock({ toolName, input, resu
           </span>
         ) : result && outputSummary ? (
           <span
-            className={`shrink-0 text-[10px] ${
+            className={`min-w-0 shrink truncate text-[12.5px] ${
               result.isError
                 ? 'text-[var(--color-error)]'
-                : 'text-[var(--color-outline)]'
+                : 'text-[var(--color-text-tertiary)]'
             }`}
           >
             {outputSummary}
           </span>
         ) : null}
         {result?.isError && (
-          <span className="material-symbols-outlined shrink-0 text-[14px] text-[var(--color-error)]">error</span>
+          <span className="material-symbols-outlined shrink-0 text-[15px] text-[var(--color-error)]">error</span>
         )}
         {expandable && (
-          <span className="material-symbols-outlined text-[14px] text-[var(--color-outline)]">
-            {expanded ? 'expand_less' : 'expand_more'}
+          <span className="shrink-0 text-[11px] leading-none text-[var(--color-text-tertiary)]" aria-hidden="true">
+            {expanded ? '▴' : '▾'}
           </span>
         )}
       </button>
 
       {expandable && expanded && (
-        <div className="fade-in space-y-2.5 border-t border-[var(--color-border)]/60 px-3 py-3">
+        <div className="space-y-2.5 border-t border-[var(--color-border)] px-4 py-3.5">
           {preview}
           {details}
         </div>
@@ -177,7 +187,7 @@ function EnterPlanModeToolCallBlock({
   const errorText = result?.isError ? extractTextContent(result.content) : null
 
   return (
-    <div className={`overflow-hidden rounded-lg border border-[var(--color-brand)]/30 bg-[var(--color-surface-container-lowest)] ${
+    <div className={`overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-primary-fixed-dim)] bg-[var(--color-surface-container-lowest)] ${
       compact ? 'mb-0' : 'mb-2'
     }`}>
       <div className="flex w-full items-center gap-2 px-3 py-2 text-left">
@@ -197,7 +207,7 @@ function EnterPlanModeToolCallBlock({
       </div>
 
       {result?.isError && errorText ? (
-        <div className="border-t border-[var(--color-border)]/60 px-3 py-3">
+        <div className="border-t border-[var(--color-border)] px-3 py-3">
           {renderResultOutput(result, errorText, t)}
         </div>
       ) : null}
@@ -236,20 +246,20 @@ function PlanToolCallBlock({
   const hasRawResult = Boolean(result && extractTextContent(result.content))
 
   return (
-    <div className={`overflow-hidden rounded-lg border border-[var(--color-brand)]/35 bg-[var(--color-surface-container-lowest)] ${
+    <div className={`overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-primary-fixed-dim)] bg-[var(--color-surface-container-lowest)] ${
       compact ? 'mb-0' : 'mb-2'
     }`}>
       <button
         type="button"
         onClick={onToggle}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-[var(--color-surface-hover)]/50"
+        className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
       >
         <span className="material-symbols-outlined text-[14px] text-[var(--color-brand)]">architecture</span>
         <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-[var(--color-text-primary)]">
           {title}
         </span>
         {preview.filePath ? (
-          <span className="hidden max-w-[40%] truncate font-[var(--font-mono)] text-[11px] text-[var(--color-text-tertiary)] sm:inline">
+          <span className="hidden max-w-[40%] truncate font-mono text-[11px] text-[var(--color-text-tertiary)] sm:inline">
             {preview.filePath}
           </span>
         ) : null}
@@ -265,7 +275,7 @@ function PlanToolCallBlock({
       </button>
 
       {expanded ? (
-        <div className="space-y-2.5 border-t border-[var(--color-border)]/60 px-3 py-3">
+        <div className="space-y-2.5 border-t border-[var(--color-border)] px-3 py-3">
           {showPlanPreview ? (
             <PlanPreviewCard
               title={t('permission.planPreviewTitle')}
@@ -317,7 +327,7 @@ function renderPreview(
     return (
       <>
         <TerminalChrome title={typeof obj.description === 'string' ? obj.description : filePath}>
-          <div className="px-3 py-2.5 font-[var(--font-mono)] text-[11px] leading-[1.3] text-[var(--color-terminal-fg)]">
+          <div className="px-3 py-2.5 font-mono text-[11px] leading-[1.3] text-[var(--color-terminal-fg)]">
             <span className="text-[var(--color-terminal-accent)]">$</span> {obj.command}
           </div>
         </TerminalChrome>
@@ -411,20 +421,20 @@ function renderResultOutput(
         <ImageBlockGallery imageBlocks={imageBlocks} />
       )}
       <InlineImageGallery text={text} />
-      <div className={`overflow-hidden rounded-lg border ${
+      <div className={`overflow-hidden rounded-[var(--radius-lg)] border ${
         result.isError
-          ? 'border-[var(--color-error)]/20 bg-[var(--color-error-container)]/60'
+          ? 'border-[var(--color-error)] bg-[var(--color-error-container)]'
           : 'border-[var(--color-border)] bg-[var(--color-surface)]'
       }`}>
-        <div className="flex items-center justify-between border-b border-[var(--color-border)]/60 px-3 py-2 text-[10px] uppercase tracking-[0.18em] text-[var(--color-outline)]">
+        <div className="flex items-center justify-between border-b border-[var(--color-border)] px-3 py-2 text-[10px] uppercase tracking-[0.18em] text-[var(--color-outline)]">
           <span>{result.isError ? t?.('tool.errorOutput') ?? 'Error Output' : t?.('tool.toolOutput') ?? 'Tool Output'}</span>
           <CopyButton
             text={text}
-            className="rounded-md border border-[var(--color-border)] px-2 py-1 text-[10px] normal-case tracking-normal text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-text-primary)]"
+            className="rounded-[var(--radius-sm)] border border-[var(--color-border)] px-2 py-1 text-[11px] normal-case tracking-normal text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-text-primary)]"
           />
         </div>
         {result.isError ? (
-          <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words bg-[var(--color-code-bg)] px-3 py-2 font-[var(--font-mono)] text-[12px] leading-[1.45] text-[var(--color-error)]">
+          <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words bg-[var(--color-code-bg)] px-3 py-2 font-mono text-[12px] leading-[1.45] text-[var(--color-error)]">
             {text}
           </pre>
         ) : (
@@ -457,12 +467,12 @@ function renderDetails(
 
   const text = JSON.stringify(obj, null, 2)
   return (
-    <div className="overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
+    <div className="overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)]">
       <div className="flex items-center justify-between border-b border-[var(--color-border)] px-3 py-2 text-[10px] uppercase tracking-[0.18em] text-[var(--color-outline)]">
         <span>{t?.('tool.toolInput') ?? 'Tool Input'}</span>
         <CopyButton
           text={text}
-          className="rounded-md border border-[var(--color-border)] px-2 py-1 text-[10px] normal-case tracking-normal text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-text-primary)]"
+          className="rounded-[var(--radius-sm)] border border-[var(--color-border)] px-2 py-1 text-[11px] normal-case tracking-normal text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-text-primary)]"
         />
       </div>
       <CodeViewer code={text} language="json" maxLines={18} />
@@ -558,16 +568,19 @@ function renderWriterPreview(
   const isWindowed = lineWindowed || charTruncated
 
   return (
-    <div className="overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
+    <div className="overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)]">
       <div className="flex items-center justify-between border-b border-[var(--color-border)] px-3 py-2 text-[10px] uppercase tracking-[0.18em] text-[var(--color-outline)]">
         <span>{t?.('tool.writerPreview') ?? 'Writer'}</span>
         {isWindowed ? (
-          <span className="normal-case tracking-normal">
-            {t?.('tool.writerPreviewLatest', { visible: visibleLines.length, total: totalLines }) ?? `Showing latest ${visibleLines.length} of ${totalLines} lines`}
+          <span className="font-mono normal-case tracking-normal tabular-nums">
+            {t?.('tool.writerPreviewLatest', {
+              visible: visibleLines.length,
+              total: totalLines,
+            }) ?? `Showing latest ${visibleLines.length} of ${totalLines} lines`}
           </span>
         ) : null}
       </div>
-      <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words bg-[var(--color-code-bg)] px-3 py-2 font-[var(--font-mono)] text-[12px] leading-[1.45] text-[var(--color-code-fg)]">
+      <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words bg-[var(--color-code-bg)] px-3 py-2 font-mono text-[12px] leading-[1.45] text-[var(--color-code-fg)]">
         {visibleContent}
       </pre>
     </div>
@@ -579,7 +592,7 @@ function renderPartialInput(
   t?: (key: TranslationKey, params?: Record<string, string | number>) => string,
 ) {
   return (
-    <div className="overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
+    <div className="overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)]">
       <div className="border-b border-[var(--color-border)] px-3 py-2 text-[10px] uppercase tracking-[0.18em] text-[var(--color-outline)]">
         {t?.('tool.partialInput') ?? 'Partial input'}
       </div>

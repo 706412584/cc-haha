@@ -1,19 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { CatalogSkill, SkillMeta } from '../types/skill'
+import type { CatalogSkill, SkillDetail, SkillMeta } from '../types/skill'
 
-const { listMock, catalogMock, installMock } = vi.hoisted(() => ({
-  listMock: vi.fn(),
-  catalogMock: vi.fn(),
-  installMock: vi.fn(),
+const mocks = vi.hoisted(() => ({
+  list: vi.fn(),
+  detail: vi.fn(),
+  catalog: vi.fn(),
+  install: vi.fn(),
 }))
 
 vi.mock('../api/skills', () => ({
-  skillsApi: {
-    list: listMock,
-    detail: vi.fn(),
-    catalog: catalogMock,
-    install: installMock,
-  },
+  skillsApi: mocks,
 }))
 
 import { useSkillStore } from './skillStore'
@@ -36,55 +32,182 @@ const installedMeta: SkillMeta = {
   hasDirectory: true,
 }
 
-describe('skillStore catalog + install', () => {
+function makeSkill(name: string): SkillMeta {
+  return {
+    name,
+    description: `${name} description`,
+    source: 'project',
+    userInvocable: true,
+    contentLength: 100,
+    hasDirectory: true,
+  }
+}
+
+function makeDetail(name: string): SkillDetail {
+  return {
+    meta: makeSkill(name),
+    tree: [],
+    files: [],
+    skillRoot: `/workspace/${name}`,
+  }
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
+describe('skillStore', () => {
   beforeEach(() => {
-    listMock.mockReset()
-    catalogMock.mockReset()
-    installMock.mockReset()
+    vi.resetAllMocks()
     useSkillStore.setState({
       skills: [],
-      catalog: [],
-      installingName: null,
+      skillsContext: null,
+      selectedSkill: null,
+      selectedSkillReturnTab: 'skills',
+      selectedSkillContext: null,
+      isLoading: false,
+      isDetailLoading: false,
       error: null,
+      catalog: [],
       isCatalogLoading: false,
+      installingName: null,
     })
   })
 
   it('fetchCatalog populates the catalog', async () => {
-    catalogMock.mockResolvedValue({ catalog: [catalogEntry] })
+    mocks.catalog.mockResolvedValue({ catalog: [catalogEntry] })
 
     await useSkillStore.getState().fetchCatalog()
 
-    expect(catalogMock).toHaveBeenCalledTimes(1)
+    expect(mocks.catalog).toHaveBeenCalledTimes(1)
     expect(useSkillStore.getState().catalog).toEqual([catalogEntry])
     expect(useSkillStore.getState().isCatalogLoading).toBe(false)
   })
 
-  it('installSkill installs then refreshes catalog and installed skills, clearing installingName', async () => {
-    installMock.mockResolvedValue({ ok: true, installed: true })
-    catalogMock.mockResolvedValue({ catalog: [{ ...catalogEntry, installed: true }] })
-    listMock.mockResolvedValue({ skills: [installedMeta] })
+  it('installs then refreshes catalog and installed skills', async () => {
+    mocks.install.mockResolvedValue({ ok: true, installed: true })
+    mocks.catalog.mockResolvedValue({ catalog: [{ ...catalogEntry, installed: true }] })
+    mocks.list.mockResolvedValue({ skills: [installedMeta] })
 
     await useSkillStore.getState().installSkill('coderabbit-review', '/work/dir')
 
-    expect(installMock).toHaveBeenCalledWith('coderabbit-review')
-    expect(catalogMock).toHaveBeenCalledTimes(1)
-    expect(listMock).toHaveBeenCalledWith('/work/dir')
-
-    const state = useSkillStore.getState()
-    expect(state.installingName).toBeNull()
-    expect(state.catalog[0]?.installed).toBe(true)
-    expect(state.skills).toEqual([installedMeta])
+    expect(mocks.install).toHaveBeenCalledWith('coderabbit-review')
+    expect(mocks.catalog).toHaveBeenCalledTimes(1)
+    expect(mocks.list).toHaveBeenCalledWith('/work/dir')
+    expect(useSkillStore.getState()).toMatchObject({
+      installingName: null,
+      catalog: [{ ...catalogEntry, installed: true }],
+      skills: [installedMeta],
+    })
   })
 
-  it('installSkill records an error and clears installingName when the request fails', async () => {
-    installMock.mockRejectedValue(new Error('disk full'))
+  it('records an install error and clears installingName', async () => {
+    mocks.install.mockRejectedValue(new Error('disk full'))
 
     await useSkillStore.getState().installSkill('coderabbit-review')
 
-    const state = useSkillStore.getState()
-    expect(state.error).toBe('disk full')
-    expect(state.installingName).toBeNull()
-    expect(catalogMock).not.toHaveBeenCalled()
+    expect(useSkillStore.getState()).toMatchObject({
+      error: 'disk full',
+      installingName: null,
+    })
+    expect(mocks.catalog).not.toHaveBeenCalled()
+  })
+
+  it('ignores a slower skill list from the previous project', async () => {
+    const oldRequest = deferred<{ skills: SkillMeta[] }>()
+    const newRequest = deferred<{ skills: SkillMeta[] }>()
+    mocks.list.mockImplementation((cwd: string) =>
+      cwd.endsWith('old') ? oldRequest.promise : newRequest.promise,
+    )
+
+    const oldFetch = useSkillStore.getState().fetchSkills('/workspace/old')
+    const newFetch = useSkillStore.getState().fetchSkills('/workspace/new')
+    newRequest.resolve({ skills: [makeSkill('new-skill')] })
+    await newFetch
+    oldRequest.resolve({ skills: [makeSkill('old-skill')] })
+    await oldFetch
+
+    expect(useSkillStore.getState()).toMatchObject({
+      skills: [makeSkill('new-skill')],
+      skillsContext: '/workspace/new',
+      isLoading: false,
+      error: null,
+    })
+  })
+
+  it('hides the previous project list while the next context loads', async () => {
+    const nextRequest = deferred<{ skills: SkillMeta[] }>()
+    useSkillStore.setState({
+      skills: [makeSkill('old-skill')],
+      skillsContext: '/workspace/old',
+    })
+    mocks.list.mockReturnValue(nextRequest.promise)
+
+    const fetch = useSkillStore.getState().fetchSkills('/workspace/new')
+
+    expect(useSkillStore.getState()).toMatchObject({
+      skills: [],
+      skillsContext: '/workspace/old',
+      isLoading: true,
+    })
+
+    nextRequest.resolve({ skills: [makeSkill('new-skill')] })
+    await fetch
+  })
+
+  it('keeps the newest detail when an older request resolves last', async () => {
+    const oldRequest = deferred<{ detail: SkillDetail }>()
+    const newRequest = deferred<{ detail: SkillDetail }>()
+    mocks.detail.mockImplementation((_source: string, name: string) =>
+      name === 'old-skill' ? oldRequest.promise : newRequest.promise,
+    )
+
+    const oldFetch = useSkillStore.getState().fetchSkillDetail(
+      'project',
+      'old-skill',
+      '/workspace/old',
+    )
+    const newFetch = useSkillStore.getState().fetchSkillDetail(
+      'project',
+      'new-skill',
+      '/workspace/new',
+    )
+    newRequest.resolve({ detail: makeDetail('new-skill') })
+    await newFetch
+    oldRequest.resolve({ detail: makeDetail('old-skill') })
+    await oldFetch
+
+    expect(useSkillStore.getState()).toMatchObject({
+      selectedSkill: makeDetail('new-skill'),
+      selectedSkillContext: '/workspace/new',
+      isDetailLoading: false,
+      error: null,
+    })
+  })
+
+  it('does not reopen a detail after the user returns to the list', async () => {
+    const request = deferred<{ detail: SkillDetail }>()
+    mocks.detail.mockReturnValue(request.promise)
+
+    const fetch = useSkillStore.getState().fetchSkillDetail(
+      'user',
+      'slow-skill',
+      '/workspace/current',
+    )
+    useSkillStore.getState().clearSelection()
+    request.resolve({ detail: makeDetail('slow-skill') })
+    await fetch
+
+    expect(useSkillStore.getState()).toMatchObject({
+      selectedSkill: null,
+      selectedSkillContext: null,
+      isDetailLoading: false,
+    })
   })
 })

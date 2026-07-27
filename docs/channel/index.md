@@ -37,8 +37,8 @@
 ## 相关入口
 
 - [IM 接入总览](../im/)
-- [Telegram 接入](../im/telegram)
-- [飞书接入](../im/feishu)
+- [Telegram 接入](../im/telegram.md)
+- [飞书接入](../im/feishu.md)
 
 ## 适合谁看
 

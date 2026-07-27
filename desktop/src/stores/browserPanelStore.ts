@@ -37,6 +37,7 @@ type BrowserPanelState = {
   setPicker: (sessionId: string, active: boolean) => void
   setZoom: (sessionId: string, zoom: number) => void
   close: (sessionId: string) => void
+  clearSession: (sessionId: string) => void
   setNavigated: (sessionId: string, url: string, title: string) => void
   setReady: (sessionId: string) => void
 }
@@ -112,6 +113,12 @@ export const useBrowserPanelStore = create<BrowserPanelState>((set) => ({
   close: (sessionId) => set((st) => {
     const cur = st.bySession[sessionId]; if (!cur) return st
     return { bySession: { ...st.bySession, [sessionId]: { ...cur, isOpen: false, pickerActive: false } } }
+  }),
+  clearSession: (sessionId) => set((st) => {
+    if (!st.bySession[sessionId]) return st
+    const bySession = { ...st.bySession }
+    delete bySession[sessionId]
+    return { bySession }
   }),
   setNavigated: (sessionId, url, title) => set((st) => {
     const cur = st.bySession[sessionId]; if (!cur) return st

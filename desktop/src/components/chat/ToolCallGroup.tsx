@@ -1,8 +1,11 @@
 import { memo, useEffect, useRef, useState } from 'react'
-import { BookMarked, ChevronDown, ChevronRight, Settings } from 'lucide-react'
+import { BookMarked, ChevronDown, ChevronRight, CircleCheck, Settings } from 'lucide-react'
 import { ImageBlockGallery, ToolCallBlock, type ImageBlock } from './ToolCallBlock'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
-import { Modal } from '../shared/Modal'
+import { Badge, StatusDot, type Tone } from '@/components/ui/Badge'
+import { Button } from '@/components/ui/Button'
+import { IconButton } from '@/components/ui/IconButton'
+import { Modal } from '@/components/ui/Modal'
 import { useTranslation } from '../../i18n'
 import type { TranslationKey } from '../../i18n'
 import { SETTINGS_TAB_ID, useTabStore } from '../../stores/tabStore'
@@ -259,12 +262,12 @@ function MemoryToolActivityGroup({
     <div className="mb-2">
       <div
         data-testid="memory-tool-activity-card"
-        className="overflow-hidden rounded-lg border border-[var(--color-memory-border)] bg-[var(--color-memory-surface)]"
+        className="overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-memory-border)] bg-[var(--color-memory-surface)]"
       >
         <button
           type="button"
           onClick={toggleExpanded}
-          className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-[var(--color-surface-hover)]/50"
+          className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
         >
           {expanded ? (
             <ChevronDown size={15} className="shrink-0 text-[var(--color-text-tertiary)]" aria-hidden="true" />
@@ -281,7 +284,7 @@ function MemoryToolActivityGroup({
         </button>
 
         {expanded ? (
-          <div className="border-t border-[var(--color-border)]/55 px-3 py-2.5">
+          <div className="border-t border-[var(--color-border)] px-3 py-2.5">
             <div className="space-y-1.5">
               {visibleFiles.map((file) => (
                 <button
@@ -289,9 +292,9 @@ function MemoryToolActivityGroup({
                   type="button"
                   title={file.path}
                   onClick={() => openMemorySettings(file.path)}
-                  className="group flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-[var(--color-surface-hover)] focus:outline-none focus-visible:shadow-[var(--shadow-focus-ring)]"
+                  className="group flex w-full items-start gap-2 rounded-[var(--radius-md)] px-2 py-1.5 text-left transition-colors hover:bg-[var(--color-surface-hover)] focus:outline-none focus-visible:shadow-[var(--shadow-focus-ring)]"
                 >
-                  <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-sm border border-[var(--color-memory-border)] bg-[var(--color-memory-icon-bg)] text-[var(--color-text-tertiary)] group-hover:text-[var(--color-memory-accent)]">
+                  <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-[var(--radius-sm)] border border-[var(--color-memory-border)] bg-[var(--color-memory-icon-bg)] text-[var(--color-text-tertiary)] group-hover:text-[var(--color-memory-accent)]">
                     <Settings size={12} aria-hidden="true" />
                   </span>
                   <span className="min-w-0 flex-1">
@@ -320,14 +323,17 @@ function MemoryToolActivityGroup({
               ) : null}
             </div>
 
-            <button
-              type="button"
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => setDetailsExpanded((value) => !value)}
-              className="mt-2 inline-flex h-7 items-center gap-1.5 rounded-md border border-[var(--color-border)] px-2 text-[11px] font-medium text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+              className="mt-2 border border-[var(--color-border)]"
+              icon={detailsExpanded
+                ? <ChevronDown size={13} aria-hidden="true" />
+                : <ChevronRight size={13} aria-hidden="true" />}
             >
-              {detailsExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
               {t('chat.memoryTechnicalDetails')}
-            </button>
+            </Button>
 
             {detailsExpanded ? (
               <div className="mt-2 space-y-1">
@@ -399,14 +405,14 @@ function AgentToolGroup({
     : ''
 
   return (
-    <div className="mb-2">
+    <div className="mb-2 overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)]">
       <button
         type="button"
         onClick={toggleExpanded}
-        className="flex w-full items-center gap-2 rounded-lg border border-[var(--color-border)]/40 bg-[var(--color-surface-container-low)] px-3 py-1.5 text-left transition-colors hover:bg-[var(--color-surface-container-high)]"
+        className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
       >
-        <span className="material-symbols-outlined text-[14px] text-[var(--color-outline)]">
-          {expanded ? 'expand_less' : 'expand_more'}
+        <span className="shrink-0 text-[11px] leading-none text-[var(--color-text-tertiary)]" aria-hidden="true">
+          {expanded ? '▾' : '▸'}
         </span>
         <span className="flex min-w-0 flex-1 items-center gap-2 text-[12px] text-[var(--color-text-secondary)]">
           <span className="truncate">
@@ -417,36 +423,35 @@ function AgentToolGroup({
           ) : null}
           {!expanded && singleAgentDescription ? (
             <span className="truncate">{singleAgentDescription}</span>
-          ) : null}
-        </span>
+          ) : null}        </span>
         {isAnyRunning && (
-          <span className="rounded-full bg-[var(--color-warning)]/12 px-2 py-0.5 text-[10px] font-semibold text-[var(--color-warning)]">
+          <Badge tone="warning" className="font-semibold">
             {t('agentStatus.running')}
-          </span>
+          </Badge>
         )}
         {!isAnyRunning && errorPresent && (
-          <span className="material-symbols-outlined text-[14px] text-[var(--color-error)]">error</span>
+          <span className="material-symbols-outlined shrink-0 text-[17px] text-[var(--color-error)]">error</span>
         )}
         {!isAnyRunning && !errorPresent && allComplete && (
-          <span className="material-symbols-outlined text-[14px] text-[var(--color-success)]">check_circle</span>
+          <CircleCheck size={19} strokeWidth={1.6} className="shrink-0 text-[var(--color-success)]" aria-hidden="true" />
         )}
         {!isAnyRunning && !errorPresent && !allComplete && !anyStopped && (
-          <span className="material-symbols-outlined text-[14px] text-[var(--color-outline)]">pending</span>
+          <span className="material-symbols-outlined shrink-0 text-[17px] text-[var(--color-text-tertiary)]">pending</span>
         )}
         {!isAnyRunning && !errorPresent && !allComplete && anyStopped && (
-          <span className="material-symbols-outlined text-[14px] text-[var(--color-outline)]">stop_circle</span>
+          <span className="material-symbols-outlined shrink-0 text-[17px] text-[var(--color-text-tertiary)]">stop_circle</span>
         )}
       </button>
 
       {expanded && (
-        <div className="relative mt-3 pl-5">
-          <div className="absolute bottom-6 left-[11px] top-4 w-px rounded-full bg-[var(--color-border)]/45" />
+        <div className="relative border-t border-[var(--color-border)] py-3 pl-5 pr-3.5">
+          <div className="absolute bottom-6 left-[11px] top-4 w-px rounded-full bg-[var(--color-border)]" />
           <div className="space-y-2">
             {toolCalls.map((toolCall) => (
               <div key={toolCall.id} className="relative pl-7">
                 <div className="absolute left-0 top-1/2 -translate-y-1/2">
-                  <div className="absolute left-[11px] top-1/2 h-px w-4 -translate-y-1/2 bg-[var(--color-border)]/45" />
-                  <div className="absolute left-[8px] top-1/2 h-2.5 w-2.5 -translate-y-1/2 rounded-full border border-[var(--color-border)]/65 bg-[var(--color-surface-container-lowest)] shadow-[0_0_0_2px_var(--color-surface)]" />
+                  <div className="absolute left-[11px] top-1/2 h-px w-4 -translate-y-1/2 bg-[var(--color-border)]" />
+                  <div className="absolute left-[8px] top-1/2 h-2.5 w-2.5 -translate-y-1/2 rounded-full border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[0_0_0_2px_var(--color-surface)]" />
                 </div>
                 <AgentCallCard
                   sessionId={sessionId}
@@ -478,31 +483,29 @@ function ToolCallGroupMulti({ toolCalls, resultMap, childToolCallsByParent, isSt
   const { expanded, toggleExpanded } = useEdgeAutoExpanded(false, shouldAutoOpen)
 
   return (
-    <div className="mb-2">
+    <div className="mb-2 overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)]">
       <button
         type="button"
         onClick={toggleExpanded}
-        className="flex w-full items-center gap-2 rounded-lg border border-[var(--color-border)]/40 bg-[var(--color-surface-container-low)] px-3 py-1.5 text-left transition-colors hover:bg-[var(--color-surface-container-high)]"
+        className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
       >
-        <span className="material-symbols-outlined text-[14px] text-[var(--color-outline)]">
-          {expanded ? 'expand_less' : 'expand_more'}
+        <span className="shrink-0 text-[11px] leading-none text-[var(--color-text-tertiary)]" aria-hidden="true">
+          {expanded ? '▾' : '▸'}
         </span>
-        <span className="flex-1 truncate text-[12px] text-[var(--color-text-secondary)]">
+        <span className="flex-1 truncate text-[14px] font-semibold text-[var(--color-text-primary)]">
           {summary}
         </span>
         {!isRunning && !errorPresent && (
-          <span className="material-symbols-outlined text-[14px] text-[var(--color-success)]">check_circle</span>
+          <CircleCheck size={19} strokeWidth={1.6} className="shrink-0 text-[var(--color-success)]" aria-hidden="true" />
         )}
         {!isRunning && errorPresent && (
-          <span className="material-symbols-outlined text-[14px] text-[var(--color-error)]">error</span>
+          <span className="material-symbols-outlined shrink-0 text-[17px] text-[var(--color-error)]">error</span>
         )}
-        {isRunning && (
-          <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-brand)] animate-pulse-dot" />
-        )}
+        {isRunning && <StatusDot tone="brand" pulse />}
       </button>
 
       {expanded && (
-        <div className="mt-1.5 space-y-1">
+        <div className="flex flex-col gap-2.5 border-t border-[var(--color-border)] px-3.5 py-2.5">
           {toolCalls.map((tc) => {
             return (
               <ToolCallTree
@@ -555,7 +558,7 @@ function AgentCallCard({
     childCount: childToolCalls.length,
     taskStatus: agentTaskNotification?.status,
   })
-  const statusClassName = getAgentStatusClassName(status)
+  const statusTone = getAgentStatusTone(status)
   const statusLabel = getAgentStatusLabel(status, t)
   const taskSummary = agentTaskNotification?.summary?.trim() || ''
   const taskResult = agentTaskNotification?.result?.trim() || ''
@@ -580,8 +583,8 @@ function AgentCallCard({
   const canOpenRun = showOpenRun && !!sessionId && !!toolCall.toolUseId
 
   return (
-    <div className="overflow-hidden rounded-lg border border-[var(--color-border)]/50 bg-[var(--color-surface-container-lowest)]">
-      <div className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-[var(--color-surface-hover)]/50">
+    <div className="overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)]">
+      <div className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-[var(--color-surface-hover)]">
         <span className="material-symbols-outlined text-[18px] text-[var(--color-outline)]">smart_toy</span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
@@ -616,43 +619,48 @@ function AgentCallCard({
           )}
         </div>
         {outputSummary && (
-          <button
-            type="button"
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={(event) => {
               event.stopPropagation()
               setPreviewOpen(true)
             }}
-            className="shrink-0 rounded-md border border-[var(--color-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+            className="shrink-0 border border-[var(--color-border)]"
           >
             {t('agentStatus.viewResult')}
-          </button>
+          </Button>
         )}
         {canOpenRun && (
-          <button
-            type="button"
-            aria-label={`Open run ${openRunTitle}`}
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-label={t('toolGroup.openRunNamed', { title: openRunTitle })}
             onClick={(event) => {
               event.stopPropagation()
               useTabStore.getState().openSubagentTab(sessionId, toolCall.toolUseId, openRunTitle)
             }}
-            className="shrink-0 rounded-md border border-[var(--color-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+            className="shrink-0 border border-[var(--color-border)]"
           >
-            Open run
-          </button>
+            {t('toolGroup.openRun')}
+          </Button>
         )}
-        <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${statusClassName}`}>
+        <Badge tone={statusTone} className="font-semibold">
           {statusLabel}
-        </span>
-        <button
-          type="button"
+        </Badge>
+        <IconButton
+          size="sm"
+          shape="circle"
+          tone="muted"
           onClick={() => setExpanded((value) => !value)}
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[var(--color-outline)] transition-colors hover:bg-[var(--color-surface-hover)]"
-          aria-label={expanded ? 'Collapse agent' : 'Expand agent'}
-        >
-          <span className="material-symbols-outlined text-[16px]">
-          {expanded ? 'expand_less' : 'expand_more'}
-          </span>
-        </button>
+          label={t(expanded ? 'toolGroup.collapseAgent' : 'toolGroup.expandAgent')}
+          showTooltip={false}
+          icon={(
+            <span className="material-symbols-outlined text-[16px]" aria-hidden="true">
+              {expanded ? 'expand_less' : 'expand_more'}
+            </span>
+          )}
+        />
       </div>
 
       {inlineImages.length > 0 && (
@@ -662,9 +670,9 @@ function AgentCallCard({
       )}
 
       {expanded && (
-        <div className="border-t border-[var(--color-border)]/60 px-3 py-3">
+        <div className="border-t border-[var(--color-border)] px-3 py-3">
           {errorText && (
-            <div className="mb-3 rounded-lg border border-[var(--color-error)]/20 bg-[var(--color-error-container)]/60 px-3 py-2 text-[11px] text-[var(--color-error)]">
+            <div className="mb-3 rounded-[var(--radius-lg)] border border-[var(--color-error)] bg-[var(--color-error-container)] px-3 py-2 text-[11px] text-[var(--color-on-error-container)]">
               {errorText}
             </div>
           )}
@@ -731,7 +739,7 @@ function ToolCallTree({
         partialInput={toolCall.partialInput}
       />
       {childToolCalls.length > 0 && (
-        <div className={compact ? 'ml-4 border-l border-[var(--color-border)]/60 pl-3' : 'mb-2 ml-16 border-l border-[var(--color-border)]/60 pl-3'}>
+        <div className={compact ? 'ml-4 border-l border-[var(--color-border)] pl-3' : 'mb-2 ml-16 border-l border-[var(--color-border)] pl-3'}>
           <div className="space-y-1">
             {childToolCalls.map((childToolCall) => (
               <ToolCallTree
@@ -904,19 +912,18 @@ function getAgentStatusLabel(
   }
 }
 
-function getAgentStatusClassName(status: AgentStatus): string {
+function getAgentStatusTone(status: AgentStatus): Tone {
   switch (status) {
     case 'failed':
-      return 'bg-[var(--color-error)]/10 text-[var(--color-error)]'
-    case 'stopped':
-      return 'bg-[var(--color-surface-container-high)] text-[var(--color-text-secondary)]'
+      return 'danger'
     case 'done':
-      return 'bg-[var(--color-success)]/10 text-[var(--color-success)]'
+      return 'success'
     case 'running':
-      return 'bg-[var(--color-warning)]/10 text-[var(--color-warning)]'
+      return 'warning'
+    case 'stopped':
     case 'starting':
     default:
-      return 'bg-[var(--color-surface-container-high)] text-[var(--color-text-secondary)]'
+      return 'neutral'
   }
 }
 

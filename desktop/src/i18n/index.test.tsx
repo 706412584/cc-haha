@@ -2,6 +2,13 @@ import { act, renderHook } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 import { useSettingsStore } from '../stores/settingsStore'
 import { translate, useTranslation } from '.'
+import { en } from './locales/en'
+import { zh } from './locales/zh'
+import { zh as zhTW } from './locales/zh-TW'
+import { jp } from './locales/jp'
+import { kr } from './locales/kr'
+
+const locales = { en, zh, 'zh-TW': zhTW, jp, kr }
 
 describe('useTranslation', () => {
   afterEach(() => {
@@ -113,5 +120,17 @@ describe('useTranslation', () => {
     expect(translate('kr', 'settings.general.storageSystemDescription')).toContain('~/.claude')
     expect(translate('en', 'settings.general.storagePortableTitle')).toContain('custom')
     expect(translate('zh', 'settings.general.storagePortableTitle')).toContain('自定义')
+  })
+
+  // The installed-skills overview was dropped in b64069a3, but the UI rollback
+  // right after it restored the locale files wholesale and carried its keys back
+  // in. Every locale kept the same key count, so a parity check cannot see this.
+  it('carries no key for the removed installed-skills overview', () => {
+    for (const [name, locale] of Object.entries(locales)) {
+      const resurrected = Object.keys(locale).filter(
+        key => key.startsWith('market.installedSkills.') || key === 'market.section.installed',
+      )
+      expect(resurrected, `${name} still defines removed installed-skills keys`).toEqual([])
+    }
   })
 })

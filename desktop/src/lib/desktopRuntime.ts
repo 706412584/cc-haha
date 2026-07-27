@@ -165,7 +165,12 @@ export async function initializeDesktopServerUrl() {
   try {
     const [serverUrl, localAccessToken] = await Promise.all([
       host.runtime.getServerUrl(),
-      host.runtime.getLocalAccessToken(),
+      // The process token only *raises* what the shell may do; loopback is
+      // trusted without it. Losing it must not take the whole app down with it.
+      host.runtime.getLocalAccessToken().catch((error) => {
+        console.warn('[desktop] local access token unavailable, continuing on loopback trust', error)
+        return null
+      }),
     ])
     setBaseUrl(serverUrl)
     setAuthToken(localAccessToken)

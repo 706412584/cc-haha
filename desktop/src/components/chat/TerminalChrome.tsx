@@ -12,16 +12,16 @@ type Props = {
  */
 export function TerminalChrome({ title, children, className = '' }: Props) {
   return (
-    <div className={`overflow-hidden rounded-2xl border border-[var(--color-outline-variant)]/20 bg-[var(--color-surface-dim)] ${className}`}>
+    <div className={`overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-terminal-border)] bg-[var(--color-terminal-bg)] ${className}`}>
       {/* Title bar with traffic lights */}
-      <div className="flex items-center gap-2 border-b border-[var(--color-terminal-border)] bg-[var(--color-terminal-header)] px-3 py-2">
+      <div className="flex items-center gap-2.5 border-b border-[var(--color-terminal-border)] bg-[var(--color-terminal-header)] px-4 py-[11px]">
         <div className="flex gap-1.5">
-          <div className="w-2.5 h-2.5 rounded-full bg-[var(--color-terminal-danger)]" />
-          <div className="w-2.5 h-2.5 rounded-full bg-[var(--color-terminal-warning)]" />
-          <div className="w-2.5 h-2.5 rounded-full bg-[var(--color-terminal-accent)]" />
+          <div className="h-2.5 w-2.5 rounded-[var(--radius-full)] bg-[var(--color-terminal-danger)]" />
+          <div className="h-2.5 w-2.5 rounded-[var(--radius-full)] bg-[var(--color-terminal-warning)]" />
+          <div className="h-2.5 w-2.5 rounded-[var(--radius-full)] bg-[var(--color-terminal-accent)]" />
         </div>
         {title && (
-          <span className="ml-2 truncate font-[var(--font-mono)] text-[10px] text-[var(--color-terminal-muted)]">
+          <span className="ml-1.5 truncate font-mono text-[12.5px] font-medium text-[var(--color-terminal-muted)]">
             {title}
           </span>
         )}

@@ -18,6 +18,7 @@ let originalConfigDir: string | undefined
 let connectSpy: ReturnType<typeof spyOn> | undefined
 let getClaudeCodeMcpConfigsSpy: ReturnType<typeof spyOn> | undefined
 let getAllMcpConfigsSpy: ReturnType<typeof spyOn> | undefined
+let getMcpConfigByNameSpy: ReturnType<typeof spyOn> | undefined
 let reconnectSpy: ReturnType<typeof spyOn> | undefined
 let hostPreflightSpy: ReturnType<typeof spyOn> | undefined
 let originalRequestControl: typeof conversationService.requestControl
@@ -97,6 +98,8 @@ describe('MCP API', () => {
     getClaudeCodeMcpConfigsSpy = undefined
     getAllMcpConfigsSpy?.mockRestore()
     getAllMcpConfigsSpy = undefined
+    getMcpConfigByNameSpy?.mockRestore()
+    getMcpConfigByNameSpy = undefined
     reconnectSpy?.mockRestore()
     reconnectSpy = undefined
     hostPreflightSpy?.mockRestore()
@@ -489,6 +492,185 @@ describe('MCP API', () => {
     const listRes = await handleMcpApi(list.req, list.url, list.segments)
     const listBody = await listRes.json()
     expect(listBody.servers.some((server: { name: string }) => server.name === 'context7')).toBe(false)
+  })
+
+  it('deletes project MCP servers inherited from a parent .mcp.json', async () => {
+    const parent = path.join(tmpDir, 'workspace')
+    const child = path.join(parent, 'nested-project')
+    await fs.mkdir(child, { recursive: true })
+    const parentMcpJson = path.join(parent, '.mcp.json')
+    await fs.writeFile(
+      parentMcpJson,
+      JSON.stringify(
+        {
+          mcpServers: {
+            inherited: { type: 'stdio', command: 'npx', args: ['inherited-mcp'] },
+          },
+        },
+        null,
+        2,
+      ),
+    )
+
+    // The server is visible from the nested cwd and advertised as removable.
+    const list = makeRequest('GET', `/api/mcp?cwd=${encodeURIComponent(child)}`)
+    const listRes = await handleMcpApi(list.req, list.url, list.segments)
+    const listBody = await listRes.json()
+    expect(listBody.servers).toContainEqual(
+      expect.objectContaining({
+        name: 'inherited',
+        scope: 'project',
+        canRemove: true,
+        configLocation: parentMcpJson,
+      }),
+    )
+
+    const remove = makeRequest(
+      'DELETE',
+      `/api/mcp/inherited?scope=project&cwd=${encodeURIComponent(child)}`,
+    )
+    const removeRes = await handleMcpApi(remove.req, remove.url, remove.segments)
+    expect(removeRes.status).toBe(200)
+
+    // Removed from the file that declares it, without creating one in the cwd.
+    const parentConfig = JSON.parse(await fs.readFile(parentMcpJson, 'utf8'))
+    expect(parentConfig.mcpServers?.inherited).toBeUndefined()
+    await expect(fs.stat(path.join(child, '.mcp.json'))).rejects.toThrow()
+
+    const listAfter = makeRequest('GET', `/api/mcp?cwd=${encodeURIComponent(child)}`)
+    const listAfterRes = await handleMcpApi(listAfter.req, listAfter.url, listAfter.segments)
+    const listAfterBody = await listAfterRes.json()
+    expect(listAfterBody.servers.some((server: { name: string }) => server.name === 'inherited')).toBe(false)
+  })
+
+  it('edits project MCP servers inherited from a parent .mcp.json', async () => {
+    const parent = path.join(tmpDir, 'edit-workspace')
+    const child = path.join(parent, 'nested-project')
+    await fs.mkdir(child, { recursive: true })
+    const parentMcpJson = path.join(parent, '.mcp.json')
+    await fs.writeFile(
+      parentMcpJson,
+      JSON.stringify(
+        { mcpServers: { inherited: { type: 'stdio', command: 'npx', args: ['old-args'] } } },
+        null,
+        2,
+      ),
+    )
+
+    const update = makeRequest('PUT', '/api/mcp/inherited', {
+      cwd: child,
+      previousCwd: child,
+      scope: 'project',
+      config: { type: 'stdio', command: 'npx', args: ['new-args'], env: {} },
+    })
+    const updateRes = await handleMcpApi(update.req, update.url, update.segments)
+    expect(updateRes.status).toBe(200)
+
+    // The edit moves the entry out of the inherited file into the target cwd.
+    const parentConfig = JSON.parse(await fs.readFile(parentMcpJson, 'utf8'))
+    const childConfig = JSON.parse(await fs.readFile(path.join(child, '.mcp.json'), 'utf8'))
+    expect(parentConfig.mcpServers?.inherited).toBeUndefined()
+    expect(childConfig.mcpServers?.inherited).toMatchObject({
+      type: 'stdio',
+      command: 'npx',
+      args: ['new-args'],
+    })
+  })
+
+  it('preserves unrelated content when rewriting .mcp.json on delete', async () => {
+    const proj = path.join(tmpDir, 'preserve')
+    await fs.mkdir(proj, { recursive: true })
+    const mcpJsonPath = path.join(proj, '.mcp.json')
+    await fs.writeFile(
+      mcpJsonPath,
+      JSON.stringify(
+        {
+          $schema: 'https://example.com/mcp.schema.json',
+          mcpServers: {
+            doomed: { type: 'stdio', command: 'npx', args: ['doomed-mcp'] },
+            kept: {
+              type: 'http',
+              url: 'https://mcp.example.com/mcp',
+              headers: { Authorization: 'Bearer ${MY_MCP_TOKEN}' },
+            },
+          },
+        },
+        null,
+        2,
+      ),
+    )
+
+    const remove = makeRequest(
+      'DELETE',
+      `/api/mcp/doomed?scope=project&cwd=${encodeURIComponent(proj)}`,
+    )
+    const removeRes = await handleMcpApi(remove.req, remove.url, remove.segments)
+    expect(removeRes.status).toBe(200)
+
+    const rewritten = JSON.parse(await fs.readFile(mcpJsonPath, 'utf8'))
+    expect(rewritten.mcpServers.doomed).toBeUndefined()
+    // Top-level keys outside mcpServers survive, and ${VAR} placeholders are
+    // written back verbatim rather than expanded into resolved values.
+    expect(rewritten.$schema).toBe('https://example.com/mcp.schema.json')
+    expect(rewritten.mcpServers.kept.headers.Authorization).toBe('Bearer ${MY_MCP_TOKEN}')
+  })
+
+  it('reports why a delete failed instead of a generic 500', async () => {
+    const create = makeRequest('POST', '/api/mcp', {
+      cwd: projectRoot,
+      name: 'mismatched',
+      scope: 'user',
+      config: { type: 'stdio', command: 'npx', args: ['mismatched-mcp'] },
+    })
+    await handleMcpApi(create.req, create.url, create.segments)
+
+    // Asking to remove a user-scoped server from local scope cannot succeed; the
+    // caller needs the reason, not an opaque "unexpected error occurred".
+    const remove = makeRequest(
+      'DELETE',
+      `/api/mcp/mismatched?scope=local&cwd=${encodeURIComponent(projectRoot)}`,
+    )
+    const removeRes = await handleMcpApi(remove.req, remove.url, remove.segments)
+
+    expect(removeRes.status).toBe(400)
+    await expect(removeRes.json()).resolves.toMatchObject({
+      error: 'BAD_REQUEST',
+      message: 'No project-local MCP server found with name: mismatched',
+    })
+  })
+
+  it('rejects delete requests for scopes that cannot be edited', async () => {
+    getMcpConfigByNameSpy = spyOn(mcpConfig, 'getMcpConfigByName').mockReturnValue({
+      type: 'stdio',
+      command: 'npx',
+      args: ['managed-mcp'],
+      scope: 'enterprise',
+    })
+
+    const remove = makeRequest(
+      'DELETE',
+      `/api/mcp/managed-server?scope=enterprise&cwd=${encodeURIComponent(projectRoot)}`,
+    )
+    const removeRes = await handleMcpApi(remove.req, remove.url, remove.segments)
+
+    expect(removeRes.status).toBe(400)
+    await expect(removeRes.json()).resolves.toMatchObject({
+      message: 'MCP server "managed-server" cannot be removed from scope "enterprise"',
+    })
+  })
+
+  it('rejects delete requests carrying an unknown scope', async () => {
+    const remove = makeRequest(
+      'DELETE',
+      `/api/mcp/whatever?scope=bogus&cwd=${encodeURIComponent(projectRoot)}`,
+    )
+    const removeRes = await handleMcpApi(remove.req, remove.url, remove.segments)
+
+    expect(removeRes.status).toBe(400)
+    await expect(removeRes.json()).resolves.toMatchObject({
+      error: 'BAD_REQUEST',
+      message: expect.stringContaining('Invalid scope: bogus'),
+    })
   })
 
   it('syncs MCP toggles into the active CLI session control channel', async () => {

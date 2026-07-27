@@ -38,14 +38,18 @@ export function SkillAvatar({
   size?: number
   className?: string
 }) {
+  // The handoff draws the tile at 46px/r12 in the grid and 92px/r22 in the
+  // detail header — one ratio, not one fixed corner.
+  const radius = Math.round(size * 0.24)
+
   if (skill.iconUrl) {
     return (
       <img
         src={skill.iconUrl}
         alt=""
         loading="lazy"
-        style={{ width: size, height: size }}
-        className={`flex-shrink-0 rounded-[14px] border border-[var(--color-border)] bg-[var(--color-surface-container)] object-cover shadow-[0_1px_2px_rgba(27,28,26,0.08)] ${className}`}
+        style={{ width: size, height: size, borderRadius: radius }}
+        className={`flex-shrink-0 border border-[var(--color-border)] bg-[var(--color-surface-container)] object-cover shadow-[var(--shadow-card)] ${className}`}
       />
     )
   }
@@ -57,11 +61,12 @@ export function SkillAvatar({
       style={{
         width: size,
         height: size,
-        fontSize: Math.round(size * 0.45),
+        borderRadius: radius,
+        fontSize: Math.round(size * 0.38),
         background: `linear-gradient(145deg, ${from}, ${to})`,
-        boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.18), 0 3px 10px rgba(27,28,26,0.12)',
+        boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.18), var(--shadow-card)',
       }}
-      className={`inline-flex flex-shrink-0 select-none items-center justify-center rounded-[14px] font-semibold tracking-[-0.04em] text-white ${className}`}
+      className={`inline-flex flex-shrink-0 select-none items-center justify-center font-bold tracking-[-0.04em] text-white ${className}`}
     >
       {initialOf(skill.name)}
     </span>

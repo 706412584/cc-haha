@@ -2,9 +2,13 @@ import { useState, useEffect } from 'react'
 import { useTaskStore } from '../../stores/taskStore'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useAdapterStore } from '../../stores/adapterStore'
-import { Modal } from '../shared/Modal'
-import { Input } from '../shared/Input'
-import { Button } from '../shared/Button'
+import { Modal } from '@/components/ui/Modal'
+import { Badge } from '@/components/ui/Badge'
+import { Card } from '@/components/ui/Card'
+import { Checkbox } from '@/components/ui/Checkbox'
+import { Input } from '@/components/ui/Input'
+import { SelectField } from '@/components/ui/SelectField'
+import { Button } from '@/components/ui/Button'
 import { PromptEditor } from './PromptEditor'
 import { DayOfWeekPicker } from './DayOfWeekPicker'
 import { useTranslation } from '../../i18n'
@@ -152,29 +156,41 @@ export function NewTaskModal({ open, onClose, editTask }: Props) {
     }
   }
 
-  const selectClass = 'w-full h-10 px-3 pr-8 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] text-sm text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)] appearance-none cursor-pointer'
+  const cronPreview = frequency === 'customCron' && customCron.trim() && !isValidCron(customCron)
+    ? t('newTask.invalidCron')
+    : describeCron(cronValue, t)
 
   return (
     <Modal
       open={open}
       onClose={onClose}
+      // 760px, per the handoff: the prompt editor's embedded toolbar puts a
+      // permission chip, a folder chip and a model picker on one line, which
+      // wraps into three rows at the 560px default.
+      width={760}
       title={isEdit ? t('tasks.editTitle') : t('newTask.title')}
       footer={
-        <>
-          <Button variant="secondary" onClick={onClose}>{t('common.cancel')}</Button>
-          <Button onClick={handleSubmit} disabled={!canSubmit} loading={isSubmitting}>
-            {isEdit ? t('tasks.saveChanges') : t('newTask.create')}
-          </Button>
-        </>
+        <div className="flex w-full flex-wrap items-center gap-2.5 border-t border-[var(--color-border)] pt-4">
+          {/* The human-readable schedule reads as the sentence the buttons are
+              about to commit to, so it sits with them rather than in the body. */}
+          <span aria-hidden="true" className="material-symbols-outlined shrink-0 text-[16px] text-[var(--color-text-secondary)]">schedule</span>
+          <span className="min-w-0 text-[13.5px] text-[var(--color-text-secondary)]">{cronPreview}</span>
+          <div className="ml-auto flex shrink-0 gap-2.5">
+            <Button variant="secondary" onClick={onClose}>{t('common.cancel')}</Button>
+            <Button onClick={handleSubmit} disabled={!canSubmit} loading={isSubmitting}>
+              {isEdit ? t('tasks.saveChanges') : t('newTask.create')}
+            </Button>
+          </div>
+        </div>
       }
     >
       {/* Info banner */}
-      <div className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-[var(--radius-md)] bg-[var(--color-surface-container)] mb-5">
-        <span className="material-symbols-outlined text-[18px] text-[var(--color-text-secondary)]">info</span>
-        <span className="text-xs text-[var(--color-text-secondary)]">
+      <Card radius="md" surface="low" padding="none" className="mb-5 flex items-center gap-2.5 px-[15px] py-[11px]">
+        <span aria-hidden="true" className="material-symbols-outlined shrink-0 text-[16px] text-[var(--color-text-secondary)]">info</span>
+        <span className="text-[13.5px] text-[var(--color-text-secondary)]">
           {t('newTask.localWarning')}
         </span>
-      </div>
+      </Card>
 
       <div className="flex flex-col gap-4">
         <Input
@@ -208,73 +224,69 @@ export function NewTaskModal({ open, onClose, editTask }: Props) {
           onUseWorktreeChange={setUseWorktree}
         />
 
-        {/* Frequency */}
-        <div className="flex flex-col gap-1">
-          <label className="text-sm font-medium text-[var(--color-text-primary)]">{t('newTask.frequency')}</label>
-          <div className="relative">
-            <select
-              value={frequency}
-              onChange={(e) => setFrequency(e.target.value as FrequencyKey)}
-              className={selectClass}
-            >
-              {FREQUENCY_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
-              ))}
-            </select>
-            <span className="material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)] absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none">
-              expand_more
-            </span>
-          </div>
+        {/* Frequency, with the time of day beside it — the handoff pairs
+            「每天」and「09:00」on one line because they are one sentence.
+            The selects are `SelectField` rather than bare `<select>`: all seven
+            native selects in the app shipped nameless, and the hand-rolled
+            chevron needed `appearance-none` plus an absolutely positioned icon
+            to reproduce what the platform control draws for free. */}
+        <div className="flex flex-wrap items-end gap-2.5">
+          <SelectField<FrequencyKey>
+            containerClassName="min-w-[220px] flex-1"
+            label={t('newTask.frequency')}
+            value={frequency}
+            onChange={setFrequency}
+            options={FREQUENCY_OPTIONS}
+          />
+
+          {/* Time picker — shown for daily, weekdays, specificDays, monthly.
+              Named by `aria-label` rather than a visible label: the handoff puts
+              one「频率」heading over both controls, and a second caption here
+              would break that pairing. Same treatment `SelectField` gives its
+              own `labelHidden` fields. */}
+          {showTime && (
+            <input
+              type="time"
+              aria-label={t('newTask.time')}
+              value={time}
+              onChange={(e) => setTime(e.target.value)}
+              className="h-10 w-40 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] px-3 font-mono text-sm tabular-nums text-[var(--color-text-primary)] outline-none transition-colors focus:border-[var(--color-border-focus)]"
+            />
+          )}
         </div>
 
         {/* Sub-controls based on frequency */}
         {frequency === 'everyNMinutes' && (
-          <div className="relative">
-            <select
-              value={minuteInterval}
-              onChange={(e) => setMinuteInterval(Number(e.target.value))}
-              className={selectClass}
-            >
-              {MINUTE_INTERVALS.map((n) => (
-                <option key={n} value={n}>{t('newTask.intervalMinutes', { n })}</option>
-              ))}
-            </select>
-            <span className="material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)] absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none">
-              expand_more
-            </span>
-          </div>
+          <SelectField
+            label={t('newTask.everyNMinutes')}
+            labelHidden
+            value={String(minuteInterval)}
+            onChange={(value) => setMinuteInterval(Number(value))}
+            options={MINUTE_INTERVALS.map((n) => ({ value: String(n), label: t('newTask.intervalMinutes', { n }) }))}
+          />
         )}
 
         {frequency === 'everyNHours' && (
-          <div className="flex gap-2">
-            <div className="relative flex-1">
-              <select
-                value={hourInterval}
-                onChange={(e) => setHourInterval(Number(e.target.value))}
-                className={selectClass}
-              >
-                {HOUR_INTERVALS.map((n) => (
-                  <option key={n} value={n}>{t('newTask.intervalHours', { n })}</option>
-                ))}
-              </select>
-              <span className="material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)] absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none">
-                expand_more
-              </span>
-            </div>
-            <div className="relative flex-1">
-              <select
-                value={minuteOffset}
-                onChange={(e) => setMinuteOffset(Number(e.target.value))}
-                className={selectClass}
-              >
-                {MINUTE_OFFSETS.map((m) => (
-                  <option key={m} value={m}>{t('newTask.atMinute', { m: m.toString().padStart(2, '0') })}</option>
-                ))}
-              </select>
-              <span className="material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)] absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none">
-                expand_more
-              </span>
-            </div>
+          <div className="flex gap-2.5">
+            <SelectField
+              containerClassName="flex-1"
+              label={t('newTask.everyNHours')}
+              labelHidden
+              value={String(hourInterval)}
+              onChange={(value) => setHourInterval(Number(value))}
+              options={HOUR_INTERVALS.map((n) => ({ value: String(n), label: t('newTask.intervalHours', { n }) }))}
+            />
+            <SelectField
+              containerClassName="flex-1"
+              label={t('newTask.atMinute', { m: '00' })}
+              labelHidden
+              value={String(minuteOffset)}
+              onChange={(value) => setMinuteOffset(Number(value))}
+              options={MINUTE_OFFSETS.map((m) => ({
+                value: String(m),
+                label: t('newTask.atMinute', { m: m.toString().padStart(2, '0') }),
+              }))}
+            />
           </div>
         )}
 
@@ -283,141 +295,111 @@ export function NewTaskModal({ open, onClose, editTask }: Props) {
         )}
 
         {frequency === 'monthly' && (
-          <div className="relative">
-            <select
-              value={monthDay}
-              onChange={(e) => setMonthDay(Number(e.target.value))}
-              className={selectClass}
-            >
-              {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => (
-                <option key={d} value={d}>{t('newTask.onMonthDay', { d })}</option>
-              ))}
-            </select>
-            <span className="material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)] absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none">
-              expand_more
-            </span>
-          </div>
+          <SelectField
+            label={t('newTask.monthly')}
+            labelHidden
+            value={String(monthDay)}
+            onChange={(value) => setMonthDay(Number(value))}
+            options={Array.from({ length: 28 }, (_, i) => i + 1).map((d) => ({
+              value: String(d),
+              label: t('newTask.onMonthDay', { d }),
+            }))}
+          />
         )}
 
         {frequency === 'customCron' && (
-          <div className="flex flex-col gap-1">
-            <input
-              type="text"
-              value={customCron}
-              onChange={(e) => setCustomCron(e.target.value)}
-              placeholder={t('newTask.cronFormatHint')}
-              className="w-full h-10 px-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] text-sm text-[var(--color-text-primary)] font-[var(--font-mono)] outline-none focus:border-[var(--color-border-focus)]"
-            />
-            <span className="text-xs text-[var(--color-text-tertiary)]">{t('newTask.cronFormatHint')}</span>
-            {customCron.trim() && !isValidCron(customCron) && (
-              <span className="text-xs text-[var(--color-error)]">{t('newTask.invalidCron')}</span>
-            )}
-          </div>
+          <Input
+            aria-label={t('newTask.customCron')}
+            value={customCron}
+            onChange={(e) => setCustomCron(e.target.value)}
+            placeholder={t('newTask.cronFormatHint')}
+            className="font-mono"
+            hint={t('newTask.cronFormatHint')}
+            // `error` gives the message `role="alert"` and points the field's
+            // `aria-describedby` at it; the loose span it replaces was never
+            // announced.
+            error={customCron.trim() && !isValidCron(customCron) ? t('newTask.invalidCron') : undefined}
+          />
         )}
 
-        {/* Time picker — shown for daily, weekdays, specificDays, monthly */}
-        {showTime && (
-          <div className="flex flex-col gap-1">
-            <input
-              type="time"
-              value={time}
-              onChange={(e) => setTime(e.target.value)}
-              className="w-auto h-10 px-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] text-sm text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)]"
-              style={{ maxWidth: 120 }}
-            />
-          </div>
-        )}
-
-        {/* Notification */}
-        <div className="flex flex-col gap-3 rounded-[var(--radius-md)] border border-[var(--color-border)] p-3">
-          <label className="flex items-center gap-3 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={notifyEnabled}
-              onChange={(e) => {
-                setNotifyEnabled(e.target.checked)
-                if (e.target.checked && notifyChannels.length === 0) {
-                  setNotifyChannels(['desktop'])
-                }
-              }}
-              className="w-4 h-4 rounded border-[var(--color-border)] accent-[var(--color-brand)]"
-            />
-            <div>
-              <span className="text-sm font-medium text-[var(--color-text-primary)]">{t('newTask.notifyOnComplete')}</span>
-              <p className="text-xs text-[var(--color-text-tertiary)]">{t('newTask.notifyHint')}</p>
-            </div>
-          </label>
+        {/* Notification. The three hand-rolled checkboxes here were part of the
+            19 across the app that varied in size, accent token and how the
+            label was associated; `Checkbox` also carries the disabled styling
+            the channel rows were spelling out by hand. */}
+        <Card radius="lg" padding="none" className="flex flex-col gap-3 px-[18px] py-[15px]">
+          <Checkbox
+            label={t('newTask.notifyOnComplete')}
+            description={t('newTask.notifyHint')}
+            checked={notifyEnabled}
+            onChange={(e) => {
+              setNotifyEnabled(e.target.checked)
+              if (e.target.checked && notifyChannels.length === 0) {
+                setNotifyChannels(['desktop'])
+              }
+            }}
+          />
           {notifyEnabled && (
-            <div className="flex flex-col gap-2 pl-7">
-              <div className="flex items-center gap-4">
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={notifyChannels.includes('desktop')}
-                    onChange={(e) => {
-                      setNotifyChannels((prev) =>
-                        e.target.checked ? [...prev, 'desktop'] : prev.filter((c) => c !== 'desktop'),
-                      )
-                    }}
-                    className="w-3.5 h-3.5 rounded border-[var(--color-border)] accent-[var(--color-brand)]"
-                  />
-                  <span className="text-sm text-[var(--color-text-primary)]">{t('newTask.notifyDesktop')}</span>
-                </label>
-                <label className={`flex items-center gap-2 ${isFeishuConfigured ? 'cursor-pointer' : 'opacity-50 cursor-not-allowed'}`}>
-                  <input
-                    type="checkbox"
-                    checked={notifyChannels.includes('feishu')}
-                    disabled={!isFeishuConfigured}
-                    onChange={(e) => {
-                      setNotifyChannels((prev) =>
-                        e.target.checked ? [...prev, 'feishu'] : prev.filter((c) => c !== 'feishu'),
-                      )
-                    }}
-                    className="w-3.5 h-3.5 rounded border-[var(--color-border)] accent-[var(--color-brand)]"
-                  />
-                  <span className="text-sm text-[var(--color-text-primary)]">{t('settings.adapters.feishu')}</span>
-                  {!isFeishuConfigured && (
-                    <span className="text-[10px] text-[var(--color-warning)]">{t('newTask.notConfigured')}</span>
-                  )}
-                </label>
-                <label className={`flex items-center gap-2 ${isTelegramConfigured ? 'cursor-pointer' : 'opacity-50 cursor-not-allowed'}`}>
-                  <input
-                    type="checkbox"
-                    checked={notifyChannels.includes('telegram')}
-                    disabled={!isTelegramConfigured}
-                    onChange={(e) => {
-                      setNotifyChannels((prev) =>
-                        e.target.checked ? [...prev, 'telegram'] : prev.filter((c) => c !== 'telegram'),
-                      )
-                    }}
-                    className="w-3.5 h-3.5 rounded border-[var(--color-border)] accent-[var(--color-brand)]"
-                  />
-                  <span className="text-sm text-[var(--color-text-primary)]">{t('settings.adapters.telegram')}</span>
-                  {!isTelegramConfigured && (
-                    <span className="text-[10px] text-[var(--color-warning)]">{t('newTask.notConfigured')}</span>
-                  )}
-                </label>
+            <div className="flex flex-col gap-2 pl-6">
+              <div className="flex flex-wrap items-center gap-4">
+                <Checkbox
+                  size="sm"
+                  label={t('newTask.notifyDesktop')}
+                  checked={notifyChannels.includes('desktop')}
+                  onChange={(e) => {
+                    setNotifyChannels((prev) =>
+                      e.target.checked ? [...prev, 'desktop'] : prev.filter((c) => c !== 'desktop'),
+                    )
+                  }}
+                />
+                <Checkbox
+                  size="sm"
+                  label={
+                    <span className="inline-flex items-center gap-1.5">
+                      {t('settings.adapters.feishu')}
+                      {!isFeishuConfigured && <Badge tone="warning">{t('newTask.notConfigured')}</Badge>}
+                    </span>
+                  }
+                  checked={notifyChannels.includes('feishu')}
+                  disabled={!isFeishuConfigured}
+                  onChange={(e) => {
+                    setNotifyChannels((prev) =>
+                      e.target.checked ? [...prev, 'feishu'] : prev.filter((c) => c !== 'feishu'),
+                    )
+                  }}
+                />
+                <Checkbox
+                  size="sm"
+                  label={
+                    <span className="inline-flex items-center gap-1.5">
+                      {t('settings.adapters.telegram')}
+                      {!isTelegramConfigured && <Badge tone="warning">{t('newTask.notConfigured')}</Badge>}
+                    </span>
+                  }
+                  checked={notifyChannels.includes('telegram')}
+                  disabled={!isTelegramConfigured}
+                  onChange={(e) => {
+                    setNotifyChannels((prev) =>
+                      e.target.checked ? [...prev, 'telegram'] : prev.filter((c) => c !== 'telegram'),
+                    )
+                  }}
+                />
               </div>
               {notifyChannels.length === 0 && (
-                <p className="text-xs text-[var(--color-warning)]">
-                  <span className="material-symbols-outlined text-[12px] align-middle mr-1">warning</span>
+                <Badge
+                  tone="warning"
+                  size="sm"
+                  wrap
+                  bordered
+                  pill={false}
+                  role="alert"
+                  icon={<span aria-hidden="true" className="material-symbols-outlined text-[13px]">warning</span>}
+                >
                   {t('newTask.noChannelSelected')}
-                </p>
+                </Badge>
               )}
             </div>
           )}
-        </div>
-
-        {/* Cron preview */}
-        <div className="flex items-center gap-2 px-3 py-2 rounded-[var(--radius-md)] bg-[var(--color-surface-container)] text-xs text-[var(--color-text-secondary)]">
-          <span className="material-symbols-outlined text-[16px]">schedule</span>
-          <span>
-            {frequency === 'customCron' && customCron.trim() && !isValidCron(customCron)
-              ? t('newTask.invalidCron')
-              : describeCron(cronValue, t)
-            }
-          </span>
-        </div>
+        </Card>
 
         <p className="text-xs text-[var(--color-text-tertiary)]">
           {t('newTask.delayNote')}

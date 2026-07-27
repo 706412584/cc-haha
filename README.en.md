@@ -1,7 +1,7 @@
 # Code Council
 
 <p align="center">
-  <img src="docs/images/logo-horizontal.png" alt="Code Council" width="480">
+  <img src="docs/images/app-icon.png" alt="Code Council" width="240">
 </p>
 
 <div align="center">

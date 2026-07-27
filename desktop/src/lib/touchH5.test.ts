@@ -421,7 +421,10 @@ describe('touch-H5 stylesheet contract', () => {
 
   it('keeps message action bars visible in the mobile shell without relying on touch detection', () => {
     expect(css).toMatch(/\.app-shell--mobile \[data-message-actions\],\s*\nhtml\[data-touch-h5\] \[data-message-actions\] \{\s*\n\s*opacity: 1;\s*\n\s*pointer-events: auto;/)
-    expect(css).toMatch(/\.app-shell--mobile \[data-message-actions\] button \{\s*\n\s*width: 2\.5rem;/)
+    // 2.75rem = 44px, the platform minimum for primary touch targets. These
+    // buttons shipped at 40px because IconButton's size doc had the 40/44
+    // tiers reversed.
+    expect(css).toMatch(/\.app-shell--mobile \[data-message-actions\] button \{\s*\n\s*width: 2\.75rem;/)
   })
 
   it('disables paint skipping for the trace-window rows too', () => {

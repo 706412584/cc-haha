@@ -1,13 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { KeyboardEvent, MouseEvent, ReactNode } from 'react'
-import { ExternalLink, RefreshCw, Search, Trash2, Workflow } from 'lucide-react'
+import type { KeyboardEvent } from 'react'
+import { ExternalLink, RefreshCw, Trash2, Workflow } from 'lucide-react'
 import { tracesApi } from '../api/traces'
 import { SETTINGS_TAB_ID, useTabStore } from '../stores/tabStore'
 import { useUIStore } from '../stores/uiStore'
 import { useTranslation } from '../i18n'
-import { Button } from '../components/shared/Button'
-import { Skeleton } from '../components/shared/Skeleton'
-import { ConfirmDialog } from '../components/shared/ConfirmDialog'
+import { Badge } from '@/components/ui/Badge'
+import { Button } from '@/components/ui/Button'
+import { IconButton } from '@/components/ui/IconButton'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { EmptyState } from '@/components/ui/EmptyState'
+import { ErrorState } from '@/components/ui/ErrorState'
+import { SearchField } from '@/components/ui/SearchField'
+import { Skeleton } from '@/components/ui/Skeleton'
 import { getDesktopHost } from '../lib/desktopHost'
 import type { TraceSessionList, TraceSessionListItem } from '../types/trace'
 
@@ -128,43 +133,44 @@ export function TraceList() {
   return (
     <>
       <div className="flex min-h-0 flex-1 flex-col bg-[var(--color-surface)]">
-        <header className="shrink-0 border-b border-[var(--color-border)] px-5 py-4">
+        <header className="shrink-0 border-b border-[var(--color-border)] px-6 py-6">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--color-text-tertiary)]">
-                <Workflow className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+              <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+                <Workflow className="h-3.5 w-3.5" strokeWidth={1.6} aria-hidden="true" />
                 <span>{t('trace.list.eyebrow')}</span>
               </div>
-              <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
-                <h1 className="text-lg font-semibold tracking-tight text-[var(--color-text-primary)]">{t('trace.list.title')}</h1>
+              <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
+                <h1
+                  className="text-[24px] font-bold leading-tight tracking-tight text-[var(--color-text-primary)]"
+                  style={{ fontFamily: 'var(--font-headline)' }}
+                >
+                  {t('trace.list.title')}
+                </h1>
                 {state.status === 'ready' && (
-                  <span className={`rounded-[var(--radius-sm)] border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
-                    state.data.settings.enabled
-                      ? 'border-[var(--color-success)]/25 bg-[var(--color-success)]/10 text-[var(--color-success)]'
-                      : 'border-[var(--color-border)] bg-[var(--color-surface-container-low)] text-[var(--color-text-tertiary)]'
-                  }`}>
+                  <Badge tone={state.data.settings.enabled ? 'success' : 'neutral'} size="sm" pill={false}>
                     {state.data.settings.enabled ? t('trace.list.collecting') : t('trace.list.paused')}
-                  </span>
+                  </Badge>
                 )}
                 {state.status === 'ready' && (
-                  <span className="min-w-0 max-w-full truncate font-mono text-[11px] text-[var(--color-text-tertiary)]" title={state.data.storageDir}>
+                  <span className="min-w-0 max-w-full truncate font-mono text-[12.5px] text-[var(--color-text-tertiary)]" title={state.data.storageDir}>
                     {state.data.storageDir}
                   </span>
                 )}
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-2">
-              <Button size="sm" variant="secondary" onClick={() => openTraceSettings(t)}>
+              <Button size="base" variant="secondary" onClick={() => openTraceSettings(t)}>
                 {t('trace.list.settings')}
               </Button>
-              <Button size="sm" variant="secondary" onClick={() => void load()}>
+              <Button size="base" variant="secondary" onClick={() => void load()}>
                 <RefreshCw className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
                 {t('trace.refresh')}
               </Button>
             </div>
           </div>
 
-          <div className="mt-3 flex flex-wrap items-baseline gap-x-5 gap-y-1.5">
+          <div className="mt-4 flex flex-wrap items-baseline gap-x-6 gap-y-1.5">
             <MetaChip label={t('trace.list.sessions')} value={state.status === 'ready' ? String(state.data.total) : '-'} />
             <MetaChip label={t('trace.apiCalls')} value={String(summary.apiCalls)} />
             <MetaChip label={t('trace.failedCalls')} value={String(summary.failedCalls)} tone={summary.failedCalls > 0 ? 'danger' : 'default'} />
@@ -173,23 +179,27 @@ export function TraceList() {
         </header>
 
         <div className="flex min-h-0 flex-1 flex-col">
-          <div className="shrink-0 border-b border-[var(--color-border)] px-5 py-3">
-            <div className="flex h-9 max-w-xl items-center rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 focus-within:border-[var(--color-border-focus)]">
-              <Search className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-tertiary)]" strokeWidth={2} aria-hidden="true" />
-              <input
-                value={queryInput}
-                onChange={(event) => setQueryInput(event.currentTarget.value)}
-                placeholder={t('trace.list.searchPlaceholder')}
-                className="min-w-0 flex-1 bg-transparent px-2 text-sm text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)]"
-              />
-            </div>
+          <div className="shrink-0 border-b border-[var(--color-border)] px-6 py-3.5">
+            <SearchField
+              value={queryInput}
+              onChange={setQueryInput}
+              label={t('trace.list.searchPlaceholder')}
+              clearLabel={t('common.clearSearch')}
+              placeholder={t('trace.list.searchPlaceholder')}
+              containerClassName="max-w-xl"
+            />
           </div>
 
           {state.status === 'loading' && <TraceListSkeleton label={t('common.loading')} />}
           {state.status === 'error' && (
-            <div className="m-5 rounded-[var(--radius-md)] border border-[var(--color-error)]/30 bg-[var(--color-error)]/5 p-4 text-sm text-[var(--color-error)]">
-              {state.message}
-            </div>
+            <ErrorState
+              className="m-6"
+              tone="strong"
+              title={t('common.error')}
+              detail={state.message}
+              onRetry={() => void load()}
+              retryLabel={t('common.retry')}
+            />
           )}
           {state.status === 'ready' && (
             <TraceRows
@@ -250,11 +260,13 @@ function TraceRows({
   if (traces.length === 0) {
     return (
       <div className="flex flex-1 items-start justify-center px-6 py-10">
-        <div className="w-full max-w-md rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-6 py-12 text-center">
-          <Workflow className="mx-auto h-8 w-8 text-[var(--color-text-tertiary)]" strokeWidth={2} aria-hidden="true" />
-          <h2 className="mt-3 text-sm font-semibold text-[var(--color-text-primary)]">{t('trace.list.emptyTitle')}</h2>
-          <p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">{t('trace.list.emptyBody')}</p>
-        </div>
+        <EmptyState
+          className="w-full max-w-md"
+          headingLevel={2}
+          icon={<Workflow className="h-5 w-5" strokeWidth={2} />}
+          title={t('trace.list.emptyTitle')}
+          description={t('trace.list.emptyBody')}
+        />
       </div>
     )
   }
@@ -272,7 +284,7 @@ function TraceRows({
           />
         ))}
       </div>
-      <div className="flex items-center justify-between border-t border-[var(--color-border)] px-5 py-3 text-xs text-[var(--color-text-tertiary)]">
+      <div className="flex items-center justify-between border-t border-[var(--color-border)] px-6 py-3 text-xs text-[var(--color-text-tertiary)]">
         <span>{t('trace.list.loadedCount', { shown: traces.length, total })}</span>
         {traces.length < total && (
           <Button size="sm" variant="secondary" onClick={onLoadMore} disabled={loadingMore}>
@@ -314,40 +326,40 @@ function TraceRow({
     <div
       role="listitem"
       aria-label={title}
-      className="trace-list-row-cv group flex h-14 cursor-pointer items-center gap-4 px-5 transition-colors hover:bg-[var(--color-surface-hover)]"
+      className="trace-list-row-cv group flex h-14 cursor-pointer items-center gap-5 px-6 transition-colors hover:bg-[var(--color-surface-hover)]"
     >
       <button
         type="button"
         onClick={open}
         onKeyDown={onKeyDown}
-        className="flex min-w-0 flex-1 items-center gap-4 self-stretch bg-transparent p-0 text-left"
+        className="flex min-w-0 flex-1 items-center gap-5 self-stretch bg-transparent p-0 text-left"
       >
         <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="min-w-0 truncate text-sm font-semibold text-[var(--color-text-primary)]">{title}</span>
+          <div className="flex min-w-0 items-center gap-2.5">
+            <span className="min-w-0 truncate text-[15px] font-semibold text-[var(--color-text-primary)]">{title}</span>
             {visibleModels.map((model) => (
               <span
                 key={model.model}
                 title={`${model.model} x${model.calls}`}
-                className="shrink-0 rounded-[var(--radius-sm)] bg-[var(--color-brand)]/10 px-1.5 py-0.5 font-mono text-[10px] leading-4 text-[var(--color-brand)]"
+                className="shrink-0 rounded-[var(--radius-sm)] bg-[var(--color-brand-soft)] px-2 py-0.5 font-mono text-[11px] font-medium leading-4 text-[var(--color-on-brand-soft)]"
               >
                 {shortModelName(model.model)}
               </span>
             ))}
             {hiddenModels > 0 && (
-              <span className="shrink-0 rounded-[var(--radius-sm)] bg-[var(--color-surface-container-high)] px-1.5 py-0.5 font-mono text-[10px] leading-4 text-[var(--color-text-tertiary)]">
+              <span className="shrink-0 rounded-[var(--radius-sm)] bg-[var(--color-surface-container-high)] px-2 py-0.5 font-mono text-[11px] font-medium leading-4 text-[var(--color-text-tertiary)]">
                 +{hiddenModels}
               </span>
             )}
             {failedCalls > 0 && (
-              <span title={t('trace.failedCalls')} className="flex shrink-0 items-center gap-1">
-                <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-error)]" aria-hidden="true" />
-                <span className="font-mono text-[10px] text-[var(--color-error)]">{failedCalls}</span>
+              <span title={t('trace.failedCalls')} className="flex shrink-0 items-center gap-1.5 text-[12px] font-semibold text-[var(--color-error)]">
+                <span className="h-[7px] w-[7px] rounded-full bg-[var(--color-error)]" aria-hidden="true" />
+                <span>{failedCalls}</span>
               </span>
             )}
           </div>
-          <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[10px] text-[var(--color-text-tertiary)]">
-            <span className="shrink-0 font-mono">{trace.sessionId.slice(0, 8)}</span>
+          <div className="mt-1 flex min-w-0 items-center gap-1.5 font-mono text-[12px] text-[var(--color-text-tertiary)]">
+            <span className="shrink-0">{trace.sessionId.slice(0, 8)}</span>
             {trace.session?.projectPath && (
               <>
                 <span aria-hidden="true">·</span>
@@ -355,95 +367,67 @@ function TraceRow({
               </>
             )}
             <span aria-hidden="true">·</span>
-            <span className="shrink-0 font-mono">{formatUpdatedAt(updatedAt)}</span>
+            <span className="shrink-0">{formatUpdatedAt(updatedAt)}</span>
           </div>
         </div>
-        <div className="grid shrink-0 grid-cols-[3.5rem_4rem_4rem] items-center gap-3">
+        <div className="grid shrink-0 grid-cols-[4.5rem_5rem_4.5rem] items-center gap-4">
           <MetricCell label={t('trace.apiCalls')} value={String(trace.summary.apiCalls)} />
           <MetricCell label={t('trace.modelTime')} value={formatDuration(trace.summary.totalDurationMs)} />
           <MetricCell label={t('trace.tokens')} value={formatCompact(totalTokens)} />
         </div>
       </button>
       <div className="flex w-[92px] shrink-0 items-center justify-end gap-1 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
-        <RowAction
+        <IconButton
+          size="sm"
+          tone="secondary"
           label={t('trace.open')}
+          icon={<Workflow className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />}
           onClick={(event) => {
             event.stopPropagation()
             open()
           }}
-        >
-          <Workflow className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
-        </RowAction>
-        <RowAction
+        />
+        <IconButton
+          size="sm"
+          tone="secondary"
           label={t('trace.openWindow')}
+          icon={<ExternalLink className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />}
           onClick={(event) => {
             event.stopPropagation()
             onOpenWindow(trace.sessionId)
           }}
-        >
-          <ExternalLink className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
-        </RowAction>
-        <RowAction
+        />
+        <IconButton
+          size="sm"
+          tone="secondary"
+          hoverTone="danger"
           label={t('trace.delete')}
-          tone="danger"
+          icon={<Trash2 className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />}
           disabled={isDeleting}
           onClick={(event) => {
             event.stopPropagation()
             onDelete(trace)
           }}
-        >
-          <Trash2 className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
-        </RowAction>
+        />
       </div>
     </div>
-  )
-}
-
-function RowAction({
-  label,
-  onClick,
-  children,
-  tone = 'default',
-  disabled = false,
-}: {
-  label: string
-  onClick: (event: MouseEvent<HTMLButtonElement>) => void
-  children: ReactNode
-  tone?: 'default' | 'danger'
-  disabled?: boolean
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      aria-label={label}
-      title={label}
-      className={`flex h-7 w-7 items-center justify-center rounded-[var(--radius-sm)] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-container-high)] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 ${
-        tone === 'danger'
-          ? 'hover:text-[var(--color-error)]'
-          : 'hover:text-[var(--color-text-primary)]'
-      }`}
-    >
-      {children}
-    </button>
   )
 }
 
 function MetricCell({ label, value }: { label: string; value: string }) {
   return (
     <div className="text-right">
-      <div className="font-mono text-[11px] leading-4 text-[var(--color-text-primary)]">{value}</div>
-      <div className="truncate text-[10px] uppercase leading-4 tracking-wide text-[var(--color-text-tertiary)]" title={label}>{label}</div>
+      <div className="font-mono text-[13px] font-semibold leading-5 text-[var(--color-text-primary)]">{value}</div>
+      <div className="truncate text-[11px] leading-4 text-[var(--color-text-tertiary)]" title={label}>{label}</div>
     </div>
   )
 }
 
 function MetaChip({ label, value, tone = 'default' }: { label: string; value: string; tone?: 'default' | 'danger' }) {
   return (
-    <div className="flex items-baseline gap-1.5">
-      <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-text-tertiary)]">{label}</span>
-      <span className={`font-mono text-[13px] ${tone === 'danger' ? 'text-[var(--color-error)]' : 'text-[var(--color-text-primary)]'}`}>{value}</span>
+    <div className="flex items-baseline gap-1.5 text-[13px]">
+      <span className="text-[var(--color-text-secondary)]">{label}</span>
+      <span className={`font-semibold tabular-nums ${tone === 'danger' ? 'text-[var(--color-error)]' : 'text-[var(--color-text-primary)]'}`}>{value}</span>
     </div>
   )
 }
@@ -453,15 +437,15 @@ function TraceListSkeleton({ label }: { label: string }) {
     <div className="min-h-0 flex-1 overflow-hidden" role="status" aria-label={label}>
       <div className="divide-y divide-[var(--color-border)]" aria-hidden="true">
         {Array.from({ length: 6 }, (_, index) => (
-          <div key={index} className="flex h-14 items-center gap-4 px-5">
+          <div key={index} className="flex h-14 items-center gap-4 px-6">
             <div className="min-w-0 flex-1">
-              <Skeleton variant="text" width="48%" height={12} />
-              <Skeleton variant="text" width="72%" height={10} className="mt-2" />
+              <Skeleton shape="line" width="48%" height="12px" />
+              <Skeleton shape="line" width="72%" height="10px" className="mt-2" />
             </div>
             <div className="flex shrink-0 items-center gap-3">
-              <Skeleton variant="text" width={40} height={12} />
-              <Skeleton variant="text" width={48} height={12} />
-              <Skeleton variant="text" width={48} height={12} />
+              <Skeleton shape="line" width="40px" height="12px" />
+              <Skeleton shape="line" width="48px" height="12px" />
+              <Skeleton shape="line" width="48px" height="12px" />
             </div>
           </div>
         ))}

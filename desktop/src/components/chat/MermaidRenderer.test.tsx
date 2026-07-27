@@ -16,10 +16,13 @@ vi.mock('mermaid', () => ({
 
 import { MermaidRenderer } from './MermaidRenderer'
 import { useUIStore } from '../../stores/uiStore'
+import { useSettingsStore } from '../../stores/settingsStore'
 
 describe('MermaidRenderer', () => {
   beforeEach(() => {
     useUIStore.setState({ theme: 'white' })
+    // The zoom controls are translated; assertions below spell the English strings.
+    useSettingsStore.setState({ locale: 'en' })
     initializeMock.mockReset()
     renderMock.mockReset()
     renderMock.mockResolvedValue({

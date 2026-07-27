@@ -1556,7 +1556,7 @@ describe('WorkspacePanel', () => {
   })
 
   it('uses theme tokens for the panel, preview header, and code surface in dark mode', async () => {
-    await setSettingsState({ ...settingsInitialState, locale: 'en', theme: 'dark' })
+    await setSettingsState({ ...settingsInitialState, locale: 'en' })
     await setWorkspaceState((state) => ({
       ...state,
       panelBySession: {

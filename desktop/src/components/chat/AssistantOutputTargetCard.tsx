@@ -3,7 +3,10 @@ import type { MouseEvent as ReactMouseEvent } from 'react'
 import { ChevronDown, ExternalLink, Globe } from 'lucide-react'
 import type { AssistantOutputTarget } from '../../lib/assistantOutputTargets'
 import { useTranslation, type TranslationKey } from '../../i18n'
-import { OpenWithMenu } from '../common/OpenWithMenu'
+import { Badge } from '@/components/ui/Badge'
+import { Button } from '@/components/ui/Button'
+import { IconButton } from '@/components/ui/IconButton'
+import { OpenWithMenu } from '@/components/composite/OpenWithMenu'
 import { buildOpenWithItems, describeFileType, type OpenWithItem } from '../../lib/openWithItems'
 import { openWithContextForHref } from '../../lib/openWithContextForHref'
 import { handlePreviewLink } from '../../lib/handlePreviewLink'
@@ -84,7 +87,7 @@ export function AssistantOutputTargetCard({ target, sessionId, workDir }: Props)
   }, [openWith, sessionId, t, target.href, workDir])
 
   return (
-    <section className="flex items-start gap-3 rounded-[var(--radius-lg)] border border-[var(--color-border)]/70 bg-[var(--color-surface-container-low)] px-3 py-2.5 shadow-sm">
+    <section className="flex items-start gap-3 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-2.5 shadow-[var(--shadow-card)]">
       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[var(--color-surface)] text-[var(--color-text-secondary)]">
         {isLocalhost ? (
           <Globe size={17} strokeWidth={2.1} aria-hidden="true" />
@@ -98,9 +101,9 @@ export function AssistantOutputTargetCard({ target, sessionId, workDir }: Props)
           <span className="truncate text-sm font-semibold text-[var(--color-text-primary)]">
             {target.title}
           </span>
-          <span className="shrink-0 rounded-full border border-[var(--color-border)]/70 bg-[var(--color-surface)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+          <Badge bordered className="font-semibold uppercase tracking-[0.08em]">
             {badge}
-          </span>
+          </Badge>
         </div>
         {showSubtitle && (
           <div className="mt-1 truncate text-xs text-[var(--color-text-tertiary)]" title={subtitle}>
@@ -110,24 +113,26 @@ export function AssistantOutputTargetCard({ target, sessionId, workDir }: Props)
       </div>
 
       <div className="flex shrink-0 items-center gap-1.5">
-        <button
-          type="button"
+        <IconButton
+          icon={<ExternalLink size={14} strokeWidth={2.2} aria-hidden="true" />}
+          label={t('assistantOutputs.open')}
+          size="md"
+          tone="secondary"
+          shape="circle"
+          filled
           onClick={handleOpen}
-          aria-label={t('assistantOutputs.open')}
-          title={t('assistantOutputs.open')}
-          className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--color-border)]/70 bg-[var(--color-surface)] text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-brand)]/35 hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]/35"
-        >
-          <ExternalLink size={14} strokeWidth={2.2} aria-hidden="true" />
-        </button>
-        <button
-          type="button"
+        />
+        <Button
+          variant="secondary"
+          size="base"
           aria-label={t('openWith.title')}
           onClick={handleOpenWith}
-          className="inline-flex h-8 shrink-0 items-center gap-1 rounded-full border border-[var(--color-border)]/70 bg-[var(--color-surface)] px-2.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-brand)]/35 hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]/35"
+          className="shrink-0 rounded-full"
+          icon={<ChevronDown size={13} strokeWidth={2.2} aria-hidden="true" />}
+          iconPosition="end"
         >
           {t('openWith.title')}
-          <ChevronDown size={13} strokeWidth={2.2} aria-hidden="true" />
-        </button>
+        </Button>
       </div>
 
       {openWith && <OpenWithMenu items={openWith.items} anchor={openWith.anchor} triggerEl={openWith.triggerEl} onClose={() => setOpenWith(null)} />}

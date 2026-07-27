@@ -1,14 +1,20 @@
 import { spawn, spawnSync, type ChildProcessByStdio } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import {
+  constants as fsConstants,
   closeSync,
   existsSync,
+  fchmodSync,
   fstatSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
   readSync,
+  realpathSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs'
 import type { Readable } from 'node:stream'
@@ -337,10 +343,14 @@ export function appendHostDiagnostic(
   { homeDir = os.homedir() }: { homeDir?: string } = {},
 ): void {
   if (!filePath) return
-  const tempPath = `${filePath}.${process.pid}.tmp`
+  const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`
+  let tempDescriptor: number | undefined
   try {
     const sanitized = sanitizeHostDiagnostic(line, homeDir)
     if (!sanitized) return
+    const diagnosticsDir = path.dirname(filePath)
+    ensurePrivateHostDiagnosticsDirectory(diagnosticsDir)
+    assertRegularHostDiagnosticsFileOrMissing(filePath)
     const existing = readHostDiagnosticsTail(filePath)
     const lines = existing.trimEnd()
       ? existing.trimEnd().split('\n').map(entry => sanitizeHostDiagnostic(entry, homeDir)).filter(Boolean)
@@ -354,13 +364,30 @@ export function appendHostDiagnostic(
       boundedLines.unshift(entry)
       retainedBytes += entryBytes
     }
-    mkdirSync(path.dirname(filePath), { recursive: true })
-    writeFileSync(tempPath, `${boundedLines.join('\n')}\n`, {
-      encoding: 'utf-8',
-      mode: 0o600,
-    })
+    const noFollow = process.platform === 'win32' ? 0 : fsConstants.O_NOFOLLOW
+    tempDescriptor = openSync(
+      tempPath,
+      fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | noFollow,
+      0o600,
+    )
+    if (!fstatSync(tempDescriptor).isFile()) {
+      throw new Error(`Refusing non-regular Electron diagnostics file: ${tempPath}`)
+    }
+    if (process.platform !== 'win32') fchmodSync(tempDescriptor, 0o600)
+    writeFileSync(tempDescriptor, `${boundedLines.join('\n')}\n`, 'utf-8')
+    closeSync(tempDescriptor)
+    tempDescriptor = undefined
+    ensurePrivateHostDiagnosticsDirectory(diagnosticsDir)
+    assertRegularHostDiagnosticsFileOrMissing(filePath)
     renameSync(tempPath, filePath)
   } catch {
+    if (tempDescriptor !== undefined) {
+      try {
+        closeSync(tempDescriptor)
+      } catch {
+        // Best-effort cleanup must not mask the original diagnostics failure.
+      }
+    }
     try {
       rmSync(tempPath, { force: true })
     } catch {
@@ -370,10 +397,97 @@ export function appendHostDiagnostic(
   }
 }
 
+function ensurePrivateHostDiagnosticsDirectory(directory: string): void {
+  const parent = path.dirname(directory)
+  const rootBoundary = path.basename(directory) === 'diagnostics' &&
+      path.basename(parent) === 'cc-haha'
+    ? path.dirname(parent)
+    : parent
+  mkdirSync(rootBoundary, { recursive: true, mode: 0o700 })
+  const boundaryStats = lstatSync(rootBoundary)
+  if (
+    (!boundaryStats.isDirectory() && !boundaryStats.isSymbolicLink()) ||
+    (boundaryStats.isSymbolicLink() && !statSync(rootBoundary).isDirectory())
+  ) {
+    throw new Error(`Refusing non-directory Electron diagnostics root: ${rootBoundary}`)
+  }
+  const rootRealPath = realpathSync(rootBoundary)
+  const relative = path.relative(rootBoundary, directory)
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`Refusing Electron diagnostics directory outside its managed root: ${directory}`)
+  }
+
+  let current = rootBoundary
+  for (const segment of relative.split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment)
+    let stats
+    try {
+      stats = lstatSync(current)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      try {
+        mkdirSync(current, { mode: 0o700 })
+      } catch (mkdirError) {
+        if ((mkdirError as NodeJS.ErrnoException).code !== 'EEXIST') throw mkdirError
+      }
+      stats = lstatSync(current)
+    }
+    if (stats.isSymbolicLink()) {
+      throw new Error(`Refusing symbolic link for Electron diagnostics directory: ${current}`)
+    }
+    if (!stats.isDirectory()) {
+      throw new Error(`Refusing non-directory Electron diagnostics path: ${current}`)
+    }
+    const currentRealPath = realpathSync(current)
+    const realRelative = path.relative(rootRealPath, currentRealPath)
+    if (
+      realRelative === '..' ||
+      realRelative.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(realRelative)
+    ) {
+      throw new Error(`Refusing Electron diagnostics directory outside its managed root: ${current}`)
+    }
+  }
+
+  const finalStats = lstatSync(directory)
+  if (finalStats.isSymbolicLink() || !finalStats.isDirectory()) {
+    throw new Error(`Refusing unsafe Electron diagnostics directory: ${directory}`)
+  }
+  if (process.platform !== 'win32') {
+    const descriptor = openSync(
+      directory,
+      fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW,
+    )
+    try {
+      if (!fstatSync(descriptor).isDirectory()) {
+        throw new Error(`Refusing non-directory Electron diagnostics path: ${directory}`)
+      }
+      fchmodSync(descriptor, 0o700)
+    } finally {
+      closeSync(descriptor)
+    }
+  }
+}
+
+function assertRegularHostDiagnosticsFileOrMissing(filePath: string): void {
+  try {
+    const stats = lstatSync(filePath)
+    if (stats.isSymbolicLink()) {
+      throw new Error(`Refusing symbolic link for Electron diagnostics file: ${filePath}`)
+    }
+    if (!stats.isFile()) {
+      throw new Error(`Refusing non-regular Electron diagnostics file: ${filePath}`)
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+}
+
 function readHostDiagnosticsTail(filePath: string): string {
   let descriptor: number | undefined
   try {
-    descriptor = openSync(filePath, 'r')
+    const noFollow = process.platform === 'win32' ? 0 : fsConstants.O_NOFOLLOW
+    descriptor = openSync(filePath, fsConstants.O_RDONLY | noFollow)
     const size = fstatSync(descriptor).size
     const length = Math.min(size, HOST_DIAGNOSTICS_BYTE_LIMIT)
     const buffer = Buffer.alloc(length)
@@ -722,8 +836,31 @@ export function waitForTunnelUrl(
 
 export type KillSidecarDeps = {
   platform?: NodeJS.Platform
+  env?: NodeJS.ProcessEnv
   spawnAsync?: typeof spawn
   spawnSyncFn?: typeof spawnSync
+}
+
+function getWindowsEnv(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  const normalizedName = name.toLowerCase()
+  return Object.entries(env)
+    .find(([key, value]) => key.toLowerCase() === normalizedName && value)?.[1]
+}
+
+export function resolveWindowsTaskkillExecutable(env: NodeJS.ProcessEnv = process.env): string {
+  const systemRoot = getWindowsEnv(env, 'SystemRoot') ?? getWindowsEnv(env, 'windir')
+  return systemRoot
+    ? path.win32.join(systemRoot, 'System32', 'taskkill.exe')
+    : 'taskkill.exe'
+}
+
+function fallbackToDirectSidecarKill(child: SidecarChild, error: unknown) {
+  console.error('[desktop] taskkill failed; falling back to direct sidecar termination', error)
+  try {
+    child.kill()
+  } catch (fallbackError) {
+    console.error('[desktop] direct sidecar termination failed', fallbackError)
+  }
 }
 
 /**
@@ -735,10 +872,24 @@ export type KillSidecarDeps = {
 export function killSidecar(child: SidecarChild, sync = false, deps: KillSidecarDeps = {}) {
   const platform = deps.platform ?? process.platform
   if (platform === 'win32' && child.pid) {
+    const command = resolveWindowsTaskkillExecutable(deps.env)
     const args = ['/F', '/T', '/PID', String(child.pid)]
     const options = { stdio: 'ignore', windowsHide: true } as const
-    if (sync) (deps.spawnSyncFn ?? spawnSync)('taskkill', args, options)
-    else (deps.spawnAsync ?? spawn)('taskkill', args, options)
+    if (sync) {
+      try {
+        const result = (deps.spawnSyncFn ?? spawnSync)(command, args, options)
+        if (result.error) fallbackToDirectSidecarKill(child, result.error)
+      } catch (error) {
+        fallbackToDirectSidecarKill(child, error)
+      }
+    } else {
+      try {
+        const killer = (deps.spawnAsync ?? spawn)(command, args, options)
+        killer.once('error', error => fallbackToDirectSidecarKill(child, error))
+      } catch (error) {
+        fallbackToDirectSidecarKill(child, error)
+      }
+    }
     return
   }
   child.kill()

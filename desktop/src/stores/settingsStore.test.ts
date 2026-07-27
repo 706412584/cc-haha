@@ -2,6 +2,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/client'
 import { browserHost } from '../lib/desktopHost/browserHost'
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
 describe('settingsStore locale defaults', () => {
   beforeEach(() => {
     vi.resetModules()
@@ -1336,6 +1346,92 @@ describe('settingsStore desktop terminal shell persistence', () => {
       customShellPath: 'C:\\tools\\pwsh.exe',
     })
   })
+
+  it('does not let an older failed save roll back a newer successful selection', async () => {
+    const firstSave = createDeferred<Record<string, unknown>>()
+    const updateUser = vi.fn()
+      .mockImplementationOnce(() => firstSave.promise)
+      .mockResolvedValueOnce({ ok: true })
+
+    vi.doMock('../api/settings', () => ({
+      settingsApi: {
+        getUser: vi.fn(),
+        updateUser,
+        getPermissionMode: vi.fn(),
+        setPermissionMode: vi.fn(),
+        getCliLauncherStatus: vi.fn(),
+      },
+    }))
+
+    const { useSettingsStore } = await import('./settingsStore')
+    const oldRequest = useSettingsStore.getState().setDesktopTerminal({
+      startupShell: 'powershell',
+      customShellPath: '',
+    })
+    const oldRequestResult = oldRequest.catch((error) => error)
+    const newRequest = useSettingsStore.getState().setDesktopTerminal({
+      startupShell: 'pwsh',
+      customShellPath: '',
+    })
+
+    expect(useSettingsStore.getState().desktopTerminal).toEqual({
+      startupShell: 'pwsh',
+      customShellPath: '',
+    })
+    await vi.waitFor(() => {
+      expect(updateUser).toHaveBeenCalledTimes(1)
+    })
+
+    const saveError = new Error('first save failed')
+    firstSave.reject(saveError)
+
+    expect(await oldRequestResult).toBe(saveError)
+    await newRequest
+    expect(updateUser).toHaveBeenNthCalledWith(2, {
+      desktopTerminal: {
+        startupShell: 'pwsh',
+        customShellPath: '',
+      },
+    })
+    expect(useSettingsStore.getState().desktopTerminal).toEqual({
+      startupShell: 'pwsh',
+      customShellPath: '',
+    })
+  })
+
+  it('rolls back a latest failed save to the last successfully persisted terminal settings', async () => {
+    const updateUser = vi.fn()
+      .mockResolvedValueOnce({ ok: true })
+      .mockRejectedValueOnce(new Error('second save failed'))
+
+    vi.doMock('../api/settings', () => ({
+      settingsApi: {
+        getUser: vi.fn(),
+        updateUser,
+        getPermissionMode: vi.fn(),
+        setPermissionMode: vi.fn(),
+        getCliLauncherStatus: vi.fn(),
+      },
+    }))
+
+    const { useSettingsStore } = await import('./settingsStore')
+    const firstRequest = useSettingsStore.getState().setDesktopTerminal({
+      startupShell: 'powershell',
+      customShellPath: '',
+    })
+    const secondRequest = useSettingsStore.getState().setDesktopTerminal({
+      startupShell: 'pwsh',
+      customShellPath: '',
+    })
+
+    await firstRequest
+    await expect(secondRequest).rejects.toThrow('second save failed')
+
+    expect(useSettingsStore.getState().desktopTerminal).toEqual({
+      startupShell: 'powershell',
+      customShellPath: '',
+    })
+  })
 })
 
 describe('settingsStore theme persistence', () => {
@@ -1384,15 +1480,16 @@ describe('settingsStore theme persistence', () => {
     }))
 
     const { useSettingsStore } = await import('./settingsStore')
-    const { useUIStore } = await import('./uiStore')
+    const { useUIStore, initializeTheme, teardownTheme } = await import('./uiStore')
+    // The renderer bootstrap applies the theme; fetchAll must not disturb it.
+    initializeTheme()
 
     await useSettingsStore.getState().fetchAll()
 
-    expect(useSettingsStore.getState().theme).toBe('dark')
-    expect(useUIStore.getState().theme).toBe('dark')
-    expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
-    expect(document.documentElement.style.colorScheme).toBe('dark')
-  })
+    expect(useUIStore.getState().theme).toBe('white')
+    expect(document.documentElement.getAttribute('data-theme')).toBe('white')
+    expect(document.documentElement.style.colorScheme).toBe('light')
+    teardownTheme()  })
 
   it('keeps the desktop theme independent from the Claude user theme', async () => {
     window.localStorage.setItem('cc-haha-theme', 'dark')
@@ -1433,19 +1530,21 @@ describe('settingsStore theme persistence', () => {
     }))
 
     const { useSettingsStore } = await import('./settingsStore')
-    const { useUIStore } = await import('./uiStore')
+    const { useUIStore, initializeTheme, teardownTheme } = await import('./uiStore')
+    // The renderer bootstrap applies the theme; fetchAll must not disturb it.
+    initializeTheme()
 
     await useSettingsStore.getState().fetchAll()
 
-    expect(useSettingsStore.getState().theme).toBe('dark')
     expect(useUIStore.getState().theme).toBe('dark')
     expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
     expect(document.documentElement.style.colorScheme).toBe('dark')
 
-    await useSettingsStore.getState().setTheme('light')
+    await useSettingsStore.getState().setTheme('warm-classic')
 
-    expect(window.localStorage.getItem('cc-haha-theme')).toBe('light')
+    expect(window.localStorage.getItem('cc-haha-theme')).toBe('warm-classic')
     expect(updateUser).not.toHaveBeenCalled()
+    teardownTheme()
   })
 })
 

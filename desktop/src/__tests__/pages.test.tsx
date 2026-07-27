@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import '@testing-library/jest-dom'
 
@@ -75,9 +75,7 @@ vi.mock('../api/sessions', async (importOriginal) => {
 // Import all pages
 import { EmptySession } from '../pages/EmptySession'
 import { ActiveSession } from '../pages/ActiveSession'
-import { AgentTeams } from '../pages/AgentTeams'
 import { ScheduledTasks } from '../pages/ScheduledTasks'
-import { ToolInspection } from '../pages/ToolInspection'
 
 // Layout components (chrome is now here, not in pages)
 import { Sidebar } from '../components/layout/Sidebar'
@@ -89,6 +87,7 @@ import { useSessionStore } from '../stores/sessionStore'
 import { useProviderStore } from '../stores/providerStore'
 import { useSessionRuntimeStore } from '../stores/sessionRuntimeStore'
 import { useTabStore } from '../stores/tabStore'
+import { useTaskStore } from '../stores/taskStore'
 
 beforeEach(() => {
   useSettingsStore.setState({ locale: 'en' })
@@ -1243,24 +1242,30 @@ describe('Content-only pages render without errors', () => {
     useSessionRuntimeStore.setState({ selections: {} })
   })
 
-  it('AgentTeams renders team strip and members', () => {
-    const { container } = render(<AgentTeams />)
-    expect(container.innerHTML).toContain('Architect')
-    expect(container.innerHTML).toContain('session-dev')
-    expect(container.innerHTML).toContain('groups')
-  })
-
   it('ScheduledTasks renders (store-connected)', async () => {
     const { container } = render(<ScheduledTasks />)
     await screen.findByText('Scheduled tasks')
     expect(container.innerHTML).toContain('Scheduled tasks')
   })
 
-  it('ToolInspection renders diff viewer', () => {
-    const { container } = render(<ToolInspection />)
-    expect(container.innerHTML).toContain('edit_file')
-    expect(container.innerHTML).toContain('Split')
-    expect(container.innerHTML).toContain('Unified')
+  it('ScheduledTasks reports a failed load instead of showing the empty state', async () => {
+    const fetchTasks = vi.fn().mockResolvedValue(undefined)
+    useTaskStore.setState({ tasks: [], isLoading: false, error: 'tasks unreachable', fetchTasks })
+
+    // `fetchTasks` resolves and flips `initialized` after mount; awaiting the
+    // render keeps that state update inside act().
+    await act(async () => { render(<ScheduledTasks />) })
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('tasks unreachable')
+    // The empty state invites creating a task; a failed load must not.
+    expect(screen.queryByText('No scheduled tasks yet.')).not.toBeInTheDocument()
+
+    fetchTasks.mockClear()
+    fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }))
+    expect(fetchTasks).toHaveBeenCalled()
+
+    act(() => { useTaskStore.setState({ error: null }) })
   })
 })
 
@@ -1301,7 +1306,7 @@ describe('AppShell layout renders chrome', () => {
 
 describe('Design system compliance', () => {
   it('Pages use Material Symbols Outlined icons', () => {
-    const pages = [EmptySession, AgentTeams, ToolInspection]
+    const pages = [EmptySession]
     for (const Page of pages) {
       const { container, unmount } = render(<Page />)
       const icons = container.querySelectorAll('.material-symbols-outlined')
@@ -1324,15 +1329,5 @@ describe('Design system compliance', () => {
       ).toBe(true)
       unmount()
     }
-  })
-})
-
-describe('Mock data integration', () => {
-  it('AgentTeams shows team members from mock data', () => {
-    const { container } = render(<AgentTeams />)
-    expect(container.innerHTML).toContain('Architect')
-    expect(container.innerHTML).toContain('Frontend Dev')
-    expect(container.innerHTML).toContain('Backend Dev')
-    expect(container.innerHTML).toContain('Tester')
   })
 })

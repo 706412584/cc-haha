@@ -5,6 +5,9 @@ import { useTranslation, type TranslationKey } from '../../i18n'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useTabStore } from '../../stores/tabStore'
 import { searchApi, type SessionSearchResult, type SessionMatch, type SessionMatchRole } from '../../api/search'
+import { Badge } from '@/components/ui/Badge'
+import { IconButton } from '@/components/ui/IconButton'
+import { Spinner } from '@/components/ui/Spinner'
 
 const DEBOUNCE_MS = 250
 const RECENT_LIMIT = 8
@@ -211,21 +214,21 @@ export function GlobalSearchModal({ open, onClose }: Props) {
   if (!open) return null
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[12vh]">
+    <div className="fixed inset-0 z-[var(--z-dialog)] flex items-start justify-center pt-[12vh]">
       <div
-        className="absolute inset-0 bg-[var(--color-overlay-scrim)] transition-opacity duration-200"
+        className="absolute inset-0 bg-[var(--color-modal-scrim)] backdrop-blur-[2px] transition-opacity duration-200"
         onClick={onClose}
       />
 
       <div
-        className="glass-panel relative z-10 flex max-h-[70vh] w-[640px] max-w-[calc(100vw-48px)] flex-col overflow-hidden rounded-[var(--radius-xl)]"
+        className="animate-overlay-in relative z-10 flex max-h-[70vh] w-[640px] max-w-[calc(100vw-48px)] flex-col overflow-hidden rounded-[var(--radius-2xl)] border border-[var(--color-border)] bg-[var(--color-surface)] shadow-[var(--shadow-overlay)]"
         role="dialog"
         aria-modal="true"
         aria-label={t('search.global.placeholder')}
       >
         {/* Search input */}
-        <div className="flex items-center gap-2.5 border-b border-[var(--color-border)] px-4 py-3">
-          <Search className="h-4 w-4 shrink-0 text-[var(--color-text-tertiary)]" aria-hidden="true" />
+        <div className="flex items-center gap-3 border-b border-[var(--color-border)] px-[22px] py-[18px]">
+          <Search className="h-[17px] w-[17px] shrink-0 text-[var(--color-text-tertiary)]" aria-hidden="true" />
           <input
             ref={inputRef}
             type="text"
@@ -236,30 +239,25 @@ export function GlobalSearchModal({ open, onClose }: Props) {
             onKeyDown={handleKeyDown}
             placeholder={t('search.global.placeholder')}
             aria-label={t('search.global.placeholder')}
-            className="min-w-0 flex-1 bg-transparent text-sm text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)]"
+            className="min-w-0 flex-1 bg-transparent text-[16px] text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)]"
           />
-          {loading && (
-            <span className="material-symbols-outlined animate-spin text-[16px] text-[var(--color-text-tertiary)]">
-              progress_activity
-            </span>
-          )}
-          <button
-            type="button"
+          {loading && <Spinner size={16} className="text-[var(--color-text-tertiary)]" />}
+          <IconButton
+            icon={<X className="h-4 w-4" aria-hidden="true" />}
+            label={t('search.global.close')}
+            size="sm"
+            shape="circle"
+            tone="secondary"
             onClick={onClose}
-            aria-label={t('search.global.close')}
-            title={t('search.global.close')}
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
-          >
-            <X className="h-4 w-4" aria-hidden="true" />
-          </button>
+          />
         </div>
 
         {/* Results */}
-        <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto py-1.5" role="listbox">
+        <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto px-2 py-2.5" role="listbox">
           {!isSearching ? (
             <>
               {rows.length > 0 && (
-                <div className="px-4 pb-1 pt-1.5 text-[11px] font-medium uppercase tracking-wide text-[var(--color-text-tertiary)]">
+                <div className="px-4 py-1.5 text-[12px] text-[var(--color-text-tertiary)]">
                   {t('search.global.recentTitle')}
                 </div>
               )}
@@ -276,15 +274,15 @@ export function GlobalSearchModal({ open, onClose }: Props) {
               ))}
             </>
           ) : loading && results.length === 0 ? (
-            <div className="px-4 py-8 text-center text-xs text-[var(--color-text-tertiary)]">
+            <div className="px-4 py-8 text-center text-[13px] text-[var(--color-text-tertiary)]">
               {t('search.global.loading')}
             </div>
           ) : error ? (
-            <div className="px-4 py-8 text-center text-xs text-[var(--color-error)]">
+            <div className="px-4 py-8 text-center text-[13px] text-[var(--color-error)]">
               {t('search.global.error')}
             </div>
           ) : rows.length === 0 ? (
-            <div className="px-4 py-8 text-center text-xs text-[var(--color-text-tertiary)]">
+            <div className="px-4 py-8 text-center text-[13px] text-[var(--color-text-tertiary)]">
               {t('search.global.noResults')}
             </div>
           ) : (
@@ -301,7 +299,7 @@ export function GlobalSearchModal({ open, onClose }: Props) {
                 />
               ))}
               {truncated && (
-                <div className="px-4 py-2 text-center text-[11px] text-[var(--color-text-tertiary)]">
+                <div className="px-4 py-2 text-center text-[12px] text-[var(--color-text-tertiary)]">
                   {t('search.global.truncated', { count: SEARCH_LIMIT })}
                 </div>
               )}
@@ -310,17 +308,31 @@ export function GlobalSearchModal({ open, onClose }: Props) {
         </div>
 
         {/* Footer hints */}
-        <div className="flex items-center gap-1.5 border-t border-[var(--color-border)] px-4 py-1.5 text-[10px] text-[var(--color-text-tertiary)]">
-          <kbd className="rounded border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-1 py-0.5 font-mono">↑↓</kbd>
-          <span>{t('fileSearch.navigate')}</span>
-          <kbd className="ml-2 rounded border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-1 py-0.5 font-mono">Enter</kbd>
-          <span>{t('fileSearch.select')}</span>
-          <kbd className="ml-2 rounded border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-1 py-0.5 font-mono">Esc</kbd>
-          <span>{t('fileSearch.close')}</span>
+        <div className="flex items-center gap-3.5 border-t border-[var(--color-border)] px-[22px] py-3 text-[12px] text-[var(--color-text-tertiary)]">
+          <span className="flex items-center gap-1.5">
+            <Keycap>↑↓</Keycap>
+            {t('fileSearch.navigate')}
+          </span>
+          <span className="flex items-center gap-1.5">
+            <Keycap>Enter</Keycap>
+            {t('fileSearch.select')}
+          </span>
+          <span className="flex items-center gap-1.5">
+            <Keycap>Esc</Keycap>
+            {t('fileSearch.close')}
+          </span>
         </div>
       </div>
     </div>,
     document.body,
+  )
+}
+
+function Keycap({ children }: { children: ReactNode }) {
+  return (
+    <kbd className="rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-surface-container)] px-1.5 py-px font-mono text-[11px] font-medium text-[var(--color-text-secondary)]">
+      {children}
+    </kbd>
   )
 }
 
@@ -342,19 +354,19 @@ function ResultRow({ row, index, active, onActivate, onOpen, t }: RowProps) {
       aria-selected={active}
       onMouseEnter={() => onActivate(index)}
       onClick={() => onOpen(row)}
-      className={`flex w-full flex-col gap-0.5 px-4 py-2 text-left transition-colors focus-visible:outline-none ${
+      className={`flex w-full flex-col gap-0.5 rounded-[var(--radius-md)] px-4 py-2.5 text-left transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none ${
         active ? 'bg-[var(--color-surface-hover)]' : ''
       }`}
     >
       <div className="flex items-center gap-2">
-        <span className="min-w-0 flex-1 truncate text-sm font-medium text-[var(--color-text-primary)]">
+        <span className="min-w-0 flex-1 truncate text-[14.5px] font-medium text-[var(--color-text-primary)]">
           {row.title}
         </span>
-        <span className="shrink-0 text-[10px] tabular-nums text-[var(--color-text-tertiary)]">
+        <span className="shrink-0 text-[12px] tabular-nums text-[var(--color-text-tertiary)]">
           {formatRelativeTime(row.modifiedAt, t)}
         </span>
       </div>
-      <div className="flex items-center gap-1.5 text-[11px] text-[var(--color-text-tertiary)]">
+      <div className="flex items-center gap-1.5 text-[12.5px] text-[var(--color-text-tertiary)]">
         <span className="min-w-0 truncate">{projectLabel(row)}</span>
         {row.matchCount > 0 && (
           <>
@@ -384,15 +396,9 @@ function RoleBadge({
 }) {
   const isUser = role === 'user'
   return (
-    <span
-      className={`mt-px shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium leading-none ${
-        isUser
-          ? 'bg-[var(--color-brand)]/15 text-[var(--color-brand)]'
-          : 'bg-[var(--color-surface-hover)] text-[var(--color-text-secondary)]'
-      }`}
-    >
+    <Badge tone={isUser ? 'brand' : 'neutral'} pill={false} className="mt-px leading-none">
       {isUser ? t('search.global.roleUser') : t('search.global.roleAssistant')}
-    </span>
+    </Badge>
   )
 }
 
@@ -411,7 +417,7 @@ function renderHighlighted(
     parts.push(
       <mark
         key={`${start}-${end}`}
-        className="rounded-[3px] bg-[var(--color-brand)]/25 px-0.5 text-[var(--color-text-primary)]"
+        className="rounded-[var(--radius-sm)] bg-[var(--color-brand-soft)] px-0.5 text-[var(--color-on-brand-soft)]"
       >
         {snippet.slice(start, end)}
       </mark>,

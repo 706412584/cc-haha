@@ -16,7 +16,6 @@ import {
   Pencil,
   Plus,
   RefreshCw,
-  Search,
   Shield,
   Terminal,
   Trash2,
@@ -36,12 +35,18 @@ import { useSessionStore } from '../../stores/sessionStore'
 import { getSessionBrowsablePath } from '../../lib/sessionWorkspace'
 import { useUIStore } from '../../stores/uiStore'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
-import { Button } from '../shared/Button'
-import { ConfirmDialog } from '../shared/ConfirmDialog'
-import { DirectoryPicker } from '../shared/DirectoryPicker'
-import { Dropdown } from '../shared/Dropdown'
-import { Input } from '../shared/Input'
-import { Modal } from '../shared/Modal'
+import { Badge } from '@/components/ui/Badge'
+import { Button } from '@/components/ui/Button'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { EmptyState } from '@/components/ui/EmptyState'
+import { ErrorState } from '@/components/ui/ErrorState'
+import { LoadingState } from '@/components/ui/LoadingState'
+import { DirectoryPicker } from '@/components/composite/DirectoryPicker'
+import { Dropdown } from '@/components/ui/Dropdown'
+import { Input } from '@/components/ui/Input'
+import { Modal } from '@/components/ui/Modal'
+import { SearchField } from '@/components/ui/SearchField'
+import { SettingsPageHeader } from '@/components/settings/SettingsSection'
 
 const AGENT_COLORS: Record<string, string> = {
   red: '#ef4444',
@@ -150,7 +155,7 @@ export function AgentManager() {
     <div className="w-full min-w-0">
       {mutationWarning && (
         <div
-          className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--color-warning)]/30 bg-[var(--color-warning-container)] px-4 py-3"
+          className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-[var(--radius-xl)] border border-[var(--color-warning)] bg-[var(--color-warning-container)] px-4 py-3"
           role="status"
         >
           <div className="flex min-w-0 items-start gap-2">
@@ -183,61 +188,53 @@ export function AgentManager() {
         />
       ) : (
         <>
-          <div className="mb-5 flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <h2 className="text-xl font-semibold text-[var(--color-text-primary)]">
-                {t('settings.agents.title')}
-              </h2>
-              <p className="mt-1 max-w-3xl text-sm leading-6 text-[var(--color-text-secondary)]">
-                {t('settings.agents.description')}
-              </p>
-            </div>
-            <Button icon={<Plus size={16} />} onClick={() => setFormState({ mode: 'create' })}>
-              {t('settings.agents.create')}
-            </Button>
-          </div>
+          <SettingsPageHeader
+            title={t('settings.agents.title')}
+            description={t('settings.agents.description')}
+            action={(
+              <Button icon={<Plus size={16} />} onClick={() => setFormState({ mode: 'create' })}>
+                {t('settings.agents.create')}
+              </Button>
+            )}
+          />
 
           {isLoading && allAgents.length === 0 ? (
-            <div className="flex justify-center py-12" role="status" aria-label={t('common.loading')}>
-              <div className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--color-brand)] border-t-transparent" />
-            </div>
+            <LoadingState label={t('common.loading')} labelHidden size="md" />
           ) : error ? (
-            <div className="rounded-2xl border border-[var(--color-error)]/30 bg-[var(--color-error)]/5 px-5 py-10 text-center">
-              <p className="mb-3 text-sm text-[var(--color-error)]">{t('settings.agents.loadError')}</p>
-              <Button
-                variant="secondary"
-                size="sm"
-                icon={<RefreshCw size={14} />}
-                onClick={() => void fetchAgents(agentContextPath)}
-              >
-                {t('common.retry')}
-              </Button>
-            </div>
+            <ErrorState
+              title={t('settings.agents.loadError')}
+              onRetry={() => void fetchAgents(agentContextPath)}
+              retryLabel={t('common.retry')}
+              size="lg"
+            />
           ) : allAgents.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-12 text-center">
-              <Bot className="mx-auto mb-3 text-[var(--color-text-tertiary)]" size={40} />
-              <p className="mb-1 text-sm text-[var(--color-text-secondary)]">{t('settings.agents.empty')}</p>
-              <p className="text-xs text-[var(--color-text-tertiary)]">{t('settings.agents.emptyHint')}</p>
-            </div>
+            <EmptyState
+              icon={<Bot size={20} />}
+              title={t('settings.agents.empty')}
+              description={t('settings.agents.emptyHint')}
+              size="md"
+            />
           ) : (
             <div className="flex min-w-0 flex-col gap-6">
-              <section className="overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)]">
-                <div className="grid min-w-0 gap-4 px-5 py-5 xl:grid-cols-[minmax(0,1.6fr)_minmax(320px,1fr)] xl:items-end">
+              <section className="overflow-hidden rounded-[var(--radius-2xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)]">
+                <div className="grid min-w-0 gap-4 px-5 py-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(400px,1fr)] xl:items-end">
                   <div className="min-w-0">
                     <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-[var(--color-text-tertiary)]">
                       {t('settings.agents.browserEyebrow')}
                     </div>
                     <div className="mb-2 flex items-center gap-3">
                       <Bot size={22} className="text-[var(--color-brand)]" />
-                      <h3 className="text-lg font-semibold text-[var(--color-text-primary)]">
+                      <h3 className="text-lg font-semibold text-[var(--color-text-primary)]" style={{ fontFamily: 'var(--font-headline)' }}>
                         {t('settings.agents.browserTitle')}
                       </h3>
                     </div>
                   </div>
-                  <div className="grid min-w-0 grid-cols-2 gap-3 sm:grid-cols-3">
+                  {/* Column count follows the track width, not the viewport: `sm:grid-cols-3`
+                      kept forcing three columns into a 320px column and clipped the CJK labels. */}
+                  <div className="grid min-w-0 grid-cols-[repeat(auto-fit,minmax(116px,1fr))] gap-3">
                     <SummaryCard label={t('settings.agents.summary.totalAgents')} value={String(allAgents.length)} icon={<Bot size={14} />} />
                     <SummaryCard label={t('settings.agents.summary.activeAgents')} value={String(activeAgents.length)} icon={<Bolt size={14} />} />
-                    <SummaryCard label={t('settings.agents.summary.sources')} value={String(sourceCount)} icon={<Layers size={14} />} className="col-span-2 sm:col-span-1" />
+                    <SummaryCard label={t('settings.agents.summary.sources')} value={String(sourceCount)} icon={<Layers size={14} />} />
                   </div>
                 </div>
               </section>
@@ -248,7 +245,7 @@ export function AgentManager() {
                   if (!group?.length) return null
                   const sourceLabel = t(`settings.agents.source.${source}`)
                   return (
-                    <section key={source} className="min-w-0 overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)]">
+                    <section key={source} className="min-w-0 overflow-hidden rounded-[var(--radius-2xl)] border border-[var(--color-border)] bg-[var(--color-surface)]">
                       <div className="border-b border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-5 py-4">
                         <div className="mb-1 flex flex-wrap items-center gap-2">
                           <span className={`inline-flex h-7 w-7 items-center justify-center rounded-full ${getAgentSourceAccentClass(source)}`}>
@@ -266,17 +263,24 @@ export function AgentManager() {
                           <button
                             key={`${agent.source}-${agent.agentType}-${agent.target ?? agent.baseDir ?? index}`}
                             onClick={() => selectAgent(agent, 'agents')}
-                            className="group rounded-xl border border-transparent px-3 py-3 text-left transition-all hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]"
+                            className="group rounded-[var(--radius-xl)] border border-transparent px-3 py-3 text-left transition-all hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]"
                           >
                             <div className="flex items-start gap-3">
                               <Bot size={18} className="mt-0.5 shrink-0" style={{ color: getAgentDotColor(agent.color) }} />
                               <div className="min-w-0 flex-1">
                                 <div className="flex flex-wrap items-center gap-2">
-                                  <span className="break-all text-sm font-bold text-[var(--color-text-primary)]">{agent.agentType}</span>
+                                  <span className="break-all font-mono text-[13px] font-semibold text-[var(--color-text-primary)]">{agent.agentType}</span>
                                   {agent.modelDisplay && <MetaPill>{agent.modelDisplay}</MetaPill>}
                                   {agent.effort !== undefined && <MetaPill>{agent.effort}</MetaPill>}
                                   <MetaPill>{sourceLabel}</MetaPill>
-                                  <MetaPill>{agent.isActive ? t('settings.agents.status.active') : t('settings.agents.status.available')}</MetaPill>
+                                  <Badge
+                                    tone={agent.isActive ? 'success' : 'neutral'}
+                                    size="md"
+                                    bordered
+                                    className="uppercase tracking-[0.12em]"
+                                  >
+                                    {agent.isActive ? t('settings.agents.status.active') : t('settings.agents.status.available')}
+                                  </Badge>
                                   {agent.overriddenBy && (
                                     <MetaPill>{t('settings.agents.overriddenBy', { source: t(`settings.agents.source.${agent.overriddenBy}`) })}</MetaPill>
                                   )}
@@ -290,7 +294,7 @@ export function AgentManager() {
                                     : agent.tools.length === 0
                                       ? t('settings.agents.disabledTools')
                                       : t('settings.agents.toolCount', { count: String(agent.tools.length) })}</span>
-                                  {(agent.target || agent.baseDir) && <span className="break-all">{agent.target || agent.baseDir}</span>}
+                                  {(agent.target || agent.baseDir) && <span className="break-all font-mono">{agent.target || agent.baseDir}</span>}
                                 </div>
                               </div>
                             </div>
@@ -362,13 +366,13 @@ function AgentDetailView({
         )}
       </div>
 
-      <section className="overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)]">
+      <section className="overflow-hidden rounded-[var(--radius-2xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)]">
         <div className="grid gap-4 px-5 py-5 lg:grid-cols-[minmax(0,1.4fr)_minmax(340px,1fr)] lg:items-start">
           <div className="min-w-0">
             <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-[var(--color-text-tertiary)]">{t('settings.agents.entryEyebrow')}</div>
             <div className="mb-2 flex flex-wrap items-center gap-2">
               <span className="h-3 w-3 shrink-0 rounded-full" style={{ backgroundColor: getAgentDotColor(agent.color) }} />
-              <h3 className="break-all text-[22px] font-semibold leading-tight text-[var(--color-text-primary)]">{agent.agentType}</h3>
+              <h3 className="break-all text-[22px] font-semibold leading-tight text-[var(--color-text-primary)]" style={{ fontFamily: 'var(--font-headline)' }}>{agent.agentType}</h3>
               <MetaPill>{sourceLabel}</MetaPill>
               <MetaPill>{agent.isActive ? t('settings.agents.status.active') : t('settings.agents.status.available')}</MetaPill>
               {agent.overriddenBy && (
@@ -399,7 +403,7 @@ function AgentDetailView({
       </section>
 
       {agent.tools && agent.tools.length > 0 && (
-        <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] px-5 py-4">
+        <section className="rounded-[var(--radius-2xl)] border border-[var(--color-border)] bg-[var(--color-surface)] px-5 py-4">
           <div className="mb-3 flex items-center gap-2">
             <Wrench size={18} className="text-[var(--color-text-tertiary)]" />
             <h4 className="text-sm font-semibold text-[var(--color-text-primary)]">{t('settings.agents.tools')}</h4>
@@ -408,7 +412,7 @@ function AgentDetailView({
         </section>
       )}
 
-      <section className="flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)]">
+      <section className="flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-[var(--radius-2xl)] border border-[var(--color-border)] bg-[var(--color-surface)]">
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3">
             <div className="min-w-0">
@@ -737,11 +741,7 @@ function AgentFormModal({
           />
         </Field>
 
-        {submitError && (
-          <div role="alert" className="rounded-lg border border-[var(--color-error)]/30 bg-[var(--color-error)]/5 px-3 py-2 text-sm text-[var(--color-error)]">
-            {submitError}
-          </div>
-        )}
+        {submitError && <ErrorState title={submitError} size="sm" />}
       </div>
     </Modal>
   )
@@ -796,24 +796,24 @@ function ToolPicker({
             {t('settings.agents.form.builtInToolsHint')}
           </p>
         </div>
-        <span className="rounded-full bg-[var(--color-primary-fixed)] px-2.5 py-1 text-xs font-medium text-[var(--color-brand)]">
+        <Badge tone="brand" size="md">
           {t('settings.agents.form.toolsSelectedCount', { count: selectedTools.length })}
-        </span>
+        </Badge>
       </div>
 
       {availableTools.length > 0 ? (
         <>
-          <label className="relative mb-3 block">
-            <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--color-text-tertiary)]" />
-            <input
-              type="search"
-              aria-label={t('settings.agents.form.toolsSearch')}
-              value={query}
-              placeholder={t('settings.agents.form.toolsSearchPlaceholder')}
-              onChange={(event) => setQuery(event.target.value)}
-              className="h-9 w-full rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] pl-9 pr-3 text-sm text-[var(--color-text-primary)] outline-none transition-colors placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-border-focus)] focus:ring-2 focus:ring-[var(--color-brand)]/15"
-            />
-          </label>
+          <SearchField
+            value={query}
+            onChange={setQuery}
+            label={t('settings.agents.form.toolsSearch')}
+            // Without this the clear button falls back to the field's own name,
+            // so both carry the same accessible label.
+            clearLabel={t('common.clearSearch')}
+            placeholder={t('settings.agents.form.toolsSearchPlaceholder')}
+            size="md"
+            containerClassName="mb-3"
+          />
           <div className="max-h-64 space-y-3 overflow-y-auto pr-1">
             {groupedTools.map(({ category, tools }) => (
               <section key={category} aria-label={t(`settings.agents.form.toolCategory.${category}`)}>
@@ -841,7 +841,7 @@ function ToolPicker({
                         <span className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
                           selected
                             ? 'border-[var(--color-brand)] bg-[var(--color-brand)] text-white'
-                            : 'border-[var(--color-border-strong)] bg-[var(--color-surface)]'
+                            : 'border-[var(--color-outline)] bg-[var(--color-surface)]'
                         }`}>
                           {selected && <Check size={12} strokeWidth={3} />}
                         </span>
@@ -863,9 +863,7 @@ function ToolPicker({
           </div>
         </>
       ) : (
-        <p className="rounded-[var(--radius-md)] border border-dashed border-[var(--color-border)] px-3 py-4 text-center text-xs text-[var(--color-text-tertiary)]">
-          {t('settings.agents.form.toolsUnavailable')}
-        </p>
+        <EmptyState description={t('settings.agents.form.toolsUnavailable')} variant="dashed" size="sm" />
       )}
 
       <div className="mt-3 border-t border-[var(--color-border)] pt-3">
@@ -1001,9 +999,9 @@ function getAgentSourceAccentClass(source: AgentSource) {
     case 'userSettings': return 'bg-[var(--color-primary-fixed)] text-[var(--color-brand)]'
     case 'projectSettings': return 'bg-[var(--color-success-container)] text-[var(--color-success)]'
     case 'localSettings': return 'bg-[var(--color-info-container)] text-[var(--color-info)]'
-    case 'policySettings': return 'bg-[var(--color-warning-container)] text-[var(--color-warning)]'
-    case 'plugin': return 'bg-[var(--color-warning-container)] text-[var(--color-warning)]'
-    case 'flagSettings': return 'bg-[var(--color-error)]/10 text-[var(--color-error)]'
+    case 'policySettings': return 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]'
+    case 'plugin': return 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]'
+    case 'flagSettings': return 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)]'
     case 'built-in': return 'bg-[var(--color-surface-container-high)] text-[var(--color-text-tertiary)]'
   }
 }
@@ -1056,17 +1054,26 @@ function Field({ label, error, required, children }: { label: string; error?: st
   )
 }
 
+/**
+ * The agent metadata chip.
+ *
+ * `bordered` is what makes this expressible as a `Badge`: these pills carry
+ * both a fill and a hairline border, and they sit on three different
+ * backgrounds (`--color-surface` cards, `--color-surface-container-low`
+ * headers, and the bare page). A plain `outline` badge would collapse into the
+ * card on the first of those.
+ */
 function MetaPill({ children }: { children: ReactNode }) {
   return (
-    <span className="inline-flex items-center gap-1 rounded-full border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+    <Badge tone="neutral" size="md" bordered className="uppercase tracking-[0.12em]">
       {children}
-    </span>
+    </Badge>
   )
 }
 
 function SummaryCard({ label, value, icon, className = '' }: { label: string; value: string; icon: ReactNode; className?: string }) {
   return (
-    <div className={`min-w-0 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-3 ${className}`}>
+    <div className={`min-w-0 rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-3 ${className}`}>
       <div className="flex min-w-0 items-center gap-1.5 text-[11px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">{icon}<span className="truncate">{label}</span></div>
       <div className="mt-2 truncate text-lg font-semibold text-[var(--color-text-primary)]">{value}</div>
     </div>
@@ -1075,7 +1082,7 @@ function SummaryCard({ label, value, icon, className = '' }: { label: string; va
 
 function DetailStat({ label, value, icon }: { label: string; value: string; icon: ReactNode }) {
   return (
-    <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-3">
+    <div className="rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-3">
       <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.16em] text-[var(--color-text-tertiary)]">{icon}<span>{label}</span></div>
       <div className="mt-2 break-all text-base font-semibold text-[var(--color-text-primary)]">{value}</div>
     </div>

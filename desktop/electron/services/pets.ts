@@ -159,6 +159,19 @@ export type CreateCustomPetFromAtlasInput = {
   atlasPath: string
 }
 
+/**
+ * Atlas bytes assembled in the renderer (see petAtlasNormalize) rather than read
+ * from a file the user picked. The package is validated exactly like a file
+ * import — nothing is trusted just because it was produced in-process.
+ */
+export type CreateCustomPetFromAtlasBytesInput = {
+  slug: string
+  displayName: string
+  description: string
+  atlasData: Uint8Array
+  mimeType: CustomPetImageMimeType
+}
+
 export type CreateCustomPetFromAtlasOptions = CustomPetsRootOptions & {
   inspectImageSize?: ImageSizeInspector
 }
@@ -1007,10 +1020,51 @@ async function assertCustomPetTargetAvailable(targetPath: string): Promise<void>
   throw new PetPackageError('duplicate-id', 'A custom pet with this ID already exists.')
 }
 
-export async function createCustomPetFromAtlas(
-  input: CreateCustomPetFromAtlasInput,
-  options: CreateCustomPetFromAtlasOptions = {},
-): Promise<LoadedCustomAtlasPet> {
+export type CustomPetSourceImage = {
+  data: Buffer
+  mimeType: CustomPetImageMimeType
+  width: number
+  height: number
+}
+
+/**
+ * Reads an image the user picked so the renderer can normalize it into an atlas.
+ * Applies the same size, signature and static-image checks as a direct import, so
+ * a malformed file is rejected before it ever reaches a canvas.
+ */
+export async function readCustomPetSourceImage(
+  imagePath: string,
+): Promise<CustomPetSourceImage> {
+  const resolved = path.resolve(imagePath)
+  const mimeType = mimeTypeForPath(resolved, 'imagePath')
+  const data = await readBoundedRegularFile({
+    filePath: resolved,
+    maxBytes: DEFAULT_CUSTOM_PET_MAX_IMAGE_BYTES,
+    missingCode: 'missing-image',
+    symlinkCode: 'symlink-image',
+    tooLargeCode: 'image-too-large',
+    invalidCode: 'invalid-image',
+    missingMessage: 'The selected pet image does not exist.',
+    symlinkMessage: 'The selected pet image cannot be a symlink.',
+    tooLargeMessage: 'The selected pet image exceeds the allowed size.',
+    invalidMessage: 'The selected pet image must be a regular file.',
+  })
+  if (!hasExpectedImageSignature(data, mimeType)) {
+    throw new PetPackageError('invalid-image', 'The pet image header is invalid.')
+  }
+  if (hasEmbeddedImageAnimation(data, mimeType)) {
+    throw new PetPackageError('invalid-image', 'The pet image must be a static PNG or WebP.')
+  }
+  const { width, height } = inspectPetImageSize({ data, mimeType })
+  return { data, mimeType, width, height }
+}
+
+/** Shared identity checks for every custom pet creation path. */
+function validatedCustomPetIdentity(input: {
+  slug: string
+  displayName: string
+  description: string
+}): { slug: string, displayName: string, description: string } {
   const slug = input.slug.trim()
   if (
     slug !== input.slug
@@ -1020,22 +1074,30 @@ export async function createCustomPetFromAtlas(
   ) {
     throw new PetPackageError('invalid-id', 'Custom pet ID must be a lowercase kebab-case slug.')
   }
-  const displayName = sanitizedTextField(
-    input.displayName,
-    MAX_DISPLAY_NAME_LENGTH,
-    'invalid-display-name',
-    'displayName',
-  )
-  const description = sanitizedTextField(
-    input.description,
-    MAX_DESCRIPTION_LENGTH,
-    'invalid-description',
-    'description',
-  )
+  return {
+    slug,
+    displayName: sanitizedTextField(
+      input.displayName,
+      MAX_DISPLAY_NAME_LENGTH,
+      'invalid-display-name',
+      'displayName',
+    ),
+    description: sanitizedTextField(
+      input.description,
+      MAX_DESCRIPTION_LENGTH,
+      'invalid-description',
+      'description',
+    ),
+  }
+}
+
+export async function createCustomPetFromAtlas(
+  input: CreateCustomPetFromAtlasInput,
+  options: CreateCustomPetFromAtlasOptions = {},
+): Promise<LoadedCustomAtlasPet> {
+  const { slug, displayName, description } = validatedCustomPetIdentity(input)
   const atlasPath = path.resolve(input.atlasPath)
   const mimeType = mimeTypeForPath(atlasPath, 'spritesheetPath')
-  const extension = mimeType === 'image/png' ? 'png' : 'webp'
-  const spritesheetPath = `spritesheet.${extension}`
   const atlasData = await readBoundedRegularFile({
     filePath: atlasPath,
     maxBytes: DEFAULT_CUSTOM_PET_MAX_IMAGE_BYTES,
@@ -1048,6 +1110,58 @@ export async function createCustomPetFromAtlas(
     tooLargeMessage: 'The selected spritesheet image exceeds the allowed size.',
     invalidMessage: 'The selected spritesheet image must be a regular file.',
   })
+  return installCustomAtlasPet({ slug, displayName, description, atlasData, mimeType }, options)
+}
+
+/**
+ * Installs an atlas the renderer assembled in memory. Used by the guided flow that
+ * normalizes a nine-row action sheet into the v2 grid, so authors never have to
+ * hit 1536x2288 by hand.
+ */
+export async function createCustomPetFromAtlasBytes(
+  input: CreateCustomPetFromAtlasBytesInput,
+  options: CreateCustomPetFromAtlasOptions = {},
+): Promise<LoadedCustomAtlasPet> {
+  const { slug, displayName, description } = validatedCustomPetIdentity(input)
+  if (input.mimeType !== 'image/png' && input.mimeType !== 'image/webp') {
+    throw new PetPackageError(
+      'unsupported-image-format',
+      'The assembled spritesheet must be a PNG or WebP image.',
+    )
+  }
+  const atlasData = input.atlasData
+  if (!(atlasData instanceof Uint8Array) || atlasData.byteLength < MIN_CUSTOM_PET_IMAGE_BYTES) {
+    throw new PetPackageError('invalid-image', 'The assembled spritesheet image is not readable.')
+  }
+  if (atlasData.byteLength > DEFAULT_CUSTOM_PET_MAX_IMAGE_BYTES) {
+    throw new PetPackageError(
+      'image-too-large',
+      'The assembled spritesheet image exceeds the allowed size.',
+    )
+  }
+  return installCustomAtlasPet(
+    { slug, displayName, description, atlasData, mimeType: input.mimeType },
+    options,
+  )
+}
+
+/**
+ * Writes an already-validated identity plus atlas bytes into a staging directory,
+ * re-validates the whole package from disk, then atomically moves it into place.
+ */
+async function installCustomAtlasPet(
+  request: {
+    slug: string
+    displayName: string
+    description: string
+    atlasData: Uint8Array
+    mimeType: CustomPetImageMimeType
+  },
+  options: CreateCustomPetFromAtlasOptions,
+): Promise<LoadedCustomAtlasPet> {
+  const { slug, displayName, description, atlasData } = request
+  const extension = request.mimeType === 'image/png' ? 'png' : 'webp'
+  const spritesheetPath = `spritesheet.${extension}`
 
   const root = await ensureCustomPetsRoot(options)
   const rootIdentity = await captureDirectoryIdentity(root, ROOT_DIRECTORY_OPTIONS)

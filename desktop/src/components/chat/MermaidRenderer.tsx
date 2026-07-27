@@ -1,14 +1,30 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from 'react'
 import DOMPurify from 'dompurify'
 import mermaid from 'mermaid'
-import { Modal } from '../shared/Modal'
-import { CopyButton } from '../shared/CopyButton'
+import { Button } from '@/components/ui/Button'
+import { IconButton } from '@/components/ui/IconButton'
+import { Modal } from '@/components/ui/Modal'
+import { CopyButton } from '@/components/ui/CopyButton'
 import { useUIStore } from '../../stores/uiStore'
-import type { ThemeMode } from '../../types/settings'
+import { useTranslation } from '../../i18n'
+import { isDarkTheme, type ThemeMode } from '../../types/settings'
 
 type Props = {
   code: string
 }
+
+/**
+ * `CopyButton` is styled by className rather than variants, so the chip it sits
+ * beside — a `Button variant="ghost" size="sm"` with a hairline — is mirrored
+ * here. Without this the two chips in the same row drift apart.
+ */
+const COPY_CHIP_CLASS = [
+  'inline-flex h-6 items-center justify-center gap-1.5 rounded-[var(--radius-md)]',
+  'border border-[var(--color-border)] px-2 text-xs font-medium',
+  'text-[var(--color-text-secondary)] transition-colors',
+  'hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]',
+  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]',
+].join(' ')
 
 const MIN_PREVIEW_ZOOM = 0.05
 const MAX_PREVIEW_ZOOM = 3
@@ -184,14 +200,17 @@ function resolveThemeColor(token: string, fallback: string) {
 }
 
 function getMermaidThemeColors(theme: ThemeMode): MermaidThemeColors {
-  const isDark = theme === 'dark'
+  const isDark = isDarkTheme(theme)
+  // The fallbacks only apply when the probe cannot resolve a token (jsdom, or
+  // a diagram rendered before first paint); the live values come from
+  // `data-theme`, so all six palettes are covered by the six token reads.
   return {
-    textColor: resolveThemeColor('--color-text-primary', isDark ? '#E5E2E1' : '#1B1C1A'),
-    mutedTextColor: resolveThemeColor('--color-text-secondary', isDark ? '#B7AAA5' : '#61514B'),
-    surfaceColor: resolveThemeColor('--color-surface-container-lowest', isDark ? '#0E0E0E' : '#FFFFFF'),
-    nodeColor: resolveThemeColor('--color-surface-container-low', isDark ? '#1C1B1B' : '#F4EFEA'),
-    accentColor: resolveThemeColor('--color-primary', isDark ? '#FFB59F' : '#8F482F'),
-    lineColor: resolveThemeColor('--color-outline', isDark ? '#BFAEAA' : '#667485'),
+    textColor: resolveThemeColor('--color-text-primary', isDark ? '#EDE6D6' : '#1F1C17'),
+    mutedTextColor: resolveThemeColor('--color-text-secondary', isDark ? '#A79B83' : '#5D5850'),
+    surfaceColor: resolveThemeColor('--color-surface-container-lowest', isDark ? '#201D17' : '#FFFFFF'),
+    nodeColor: resolveThemeColor('--color-surface-container-low', isDark ? '#1A1813' : '#F6F6F3'),
+    accentColor: resolveThemeColor('--color-primary', isDark ? '#D07B52' : '#96442B'),
+    lineColor: resolveThemeColor('--color-outline', isDark ? '#4C4433' : '#D8D5CC'),
     isDark,
   }
 }
@@ -396,6 +415,7 @@ function parseSvgMetrics(svg: string): SvgMetrics | null {
 }
 
 export function MermaidRenderer({ code }: Props) {
+  const t = useTranslation()
   const theme = useUIStore((state) => state.theme)
   const containerRef = useRef<HTMLDivElement>(null)
   const previewViewportRef = useRef<HTMLDivElement>(null)
@@ -639,12 +659,12 @@ export function MermaidRenderer({ code }: Props) {
 
   if (error) {
     return (
-      <div className="my-4 overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-error)]/30">
-        <div className="flex items-center gap-2 border-b border-[var(--color-error)]/20 bg-[var(--color-error-container)] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--color-error)]">
+      <div className="my-4 overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-error-soft-hover)]">
+        <div className="flex items-center gap-2 border-b border-[var(--color-error-soft-hover)] bg-[var(--color-error-container)] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--color-on-error-container)]">
           <span className="material-symbols-outlined text-[14px]">error</span>
           Mermaid Error
         </div>
-        <div className="bg-[var(--color-error-container)]/30 px-3 py-2 font-[var(--font-mono)] text-[11px] text-[var(--color-error)]">
+        <div className="bg-[var(--color-error-soft)] px-3 py-2 font-mono text-[11px] text-[var(--color-on-error-container)]">
           {error}
         </div>
       </div>
@@ -653,7 +673,7 @@ export function MermaidRenderer({ code }: Props) {
 
   if (!svg) {
     return (
-      <div className="my-4 flex items-center justify-center rounded-[var(--radius-lg)] border border-[var(--color-border)]/50 bg-[var(--color-surface-container-low)] py-8">
+      <div className="my-4 flex items-center justify-center rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] py-8">
         <div className="flex items-center gap-2 text-[11px] text-[var(--color-text-tertiary)]">
           <span className="material-symbols-outlined animate-spin text-[16px]">progress_activity</span>
           Rendering diagram...
@@ -664,25 +684,24 @@ export function MermaidRenderer({ code }: Props) {
 
   return (
     <>
-      <div className="my-4 overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-outline-variant)]/50 bg-[var(--color-surface-container-low)]">
+      <div className="my-4 overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)]">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-[var(--color-outline-variant)]/40 bg-[var(--color-surface-container)] px-3 py-1.5 text-[11px] text-[var(--color-text-tertiary)]">
+        <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-surface-container)] px-3 py-1.5 text-[11px] text-[var(--color-text-tertiary)]">
           <div className="flex items-center gap-2">
             <span className="material-symbols-outlined text-[14px]">account_tree</span>
             <span className="font-semibold uppercase tracking-[0.14em]">Mermaid</span>
           </div>
           <div className="flex items-center gap-1.5">
-            <button
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={handlePreview}
-              className="flex items-center gap-1 rounded-md border border-[var(--color-outline-variant)]/40 bg-[var(--color-surface-container-lowest)] px-2 py-1 text-[11px] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-container-high)] hover:text-[var(--color-text-primary)]"
+              className="border border-[var(--color-border)]"
+              icon={<span className="material-symbols-outlined text-[12px]" aria-hidden="true">fullscreen</span>}
             >
-              <span className="material-symbols-outlined text-[12px]">fullscreen</span>
-              Preview
-            </button>
-            <CopyButton
-              text={code}
-              className="rounded-md border border-[var(--color-outline-variant)]/40 bg-[var(--color-surface-container-lowest)] px-2 py-1 text-[11px] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-container-high)] hover:text-[var(--color-text-primary)]"
-            />
+              {t('mermaid.preview')}
+            </Button>
+            <CopyButton text={code} className={COPY_CHIP_CLASS} />
           </div>
         </div>
 
@@ -714,42 +733,41 @@ export function MermaidRenderer({ code }: Props) {
             </div>
             <div className="flex items-center gap-2">
               <div className="flex items-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-1 py-1">
-                <button
-                  type="button"
+                <IconButton
+                  icon="remove"
+                  label={t('mermaid.zoomOut')}
+                  showTooltip={false}
+                  size="md"
+                  tone="secondary"
                   onClick={zoomOut}
-                  aria-label="Zoom out"
-                  className="flex h-8 w-8 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
-                >
-                  <span className="material-symbols-outlined text-[16px]">remove</span>
-                </button>
-                <button
-                  type="button"
+                />
+                <Button
+                  variant="ghost"
+                  size="base"
                   onClick={resetZoom}
-                  className="min-w-[68px] rounded-md px-2 py-1 text-[11px] font-semibold text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+                  className="min-w-[68px] font-semibold"
                 >
                   {Math.round(previewZoom * 100)}%
-                </button>
-                <button
-                  type="button"
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="base"
                   onClick={fitPreview}
-                  aria-label="Fit diagram"
-                  className="rounded-md px-2 py-1 text-[11px] font-semibold text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+                  aria-label={t('mermaid.fitDiagram')}
+                  className="font-semibold"
                 >
-                  Fit
-                </button>
-                <button
-                  type="button"
+                  {t('mermaid.fit')}
+                </Button>
+                <IconButton
+                  icon="add"
+                  label={t('mermaid.zoomIn')}
+                  showTooltip={false}
+                  size="md"
+                  tone="secondary"
                   onClick={zoomIn}
-                  aria-label="Zoom in"
-                  className="flex h-8 w-8 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
-                >
-                  <span className="material-symbols-outlined text-[16px]">add</span>
-                </button>
+                />
               </div>
-              <CopyButton
-                text={code}
-                className="rounded-md border border-[var(--color-border)] px-2.5 py-1 text-[11px] text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-text-primary)]"
-              />
+              <CopyButton text={code} className={COPY_CHIP_CLASS} />
             </div>
           </div>
           <div

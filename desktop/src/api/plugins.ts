@@ -25,6 +25,7 @@ type PluginActionPayload = {
   id: string
   scope?: PluginScope
   keepData?: boolean
+  cwd?: string
 }
 
 export const pluginsApi = {

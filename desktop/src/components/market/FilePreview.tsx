@@ -1,7 +1,25 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  Braces,
+  CircleAlert,
+  Code,
+  File,
+  FileCode2,
+  FileText,
+  FolderX,
+  RefreshCw,
+  Scissors,
+  Terminal,
+  type LucideIcon,
+} from 'lucide-react'
 import { useTranslation } from '../../i18n'
+import { Button } from '@/components/ui/Button'
+import { EmptyState } from '@/components/ui/EmptyState'
+import { Spinner } from '@/components/ui/Spinner'
 import { CodeViewer } from '../chat/CodeViewer'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
+import { splitFrontmatter } from '../../lib/skillFrontmatter'
+import { FrontmatterPanel } from './FrontmatterPanel'
 
 export type PreviewFile = {
   path: string
@@ -18,15 +36,15 @@ export type PreviewFileContent = {
   truncated: boolean
 }
 
-const LANG_ICONS: Record<string, string> = {
-  markdown: 'description',
-  python: 'code',
-  javascript: 'javascript',
-  typescript: 'code',
-  bash: 'terminal',
-  json: 'data_object',
-  yaml: 'data_object',
-  text: 'notes',
+const LANG_ICONS: Record<string, LucideIcon> = {
+  markdown: FileText,
+  python: Code,
+  javascript: FileCode2,
+  typescript: FileCode2,
+  bash: Terminal,
+  json: Braces,
+  yaml: Braces,
+  text: FileText,
 }
 
 function formatSize(bytes: number): string {
@@ -40,6 +58,21 @@ type LoadState =
   | { kind: 'loading' }
   | { kind: 'error'; message: string }
   | { kind: 'loaded'; file: PreviewFileContent }
+
+/**
+ * Markdown body plus its structured frontmatter. SKILL.md leads with a YAML
+ * block that markdown would otherwise turn into a giant setext heading.
+ */
+function MarkdownFilePreview({ content }: { content: string }) {
+  const { frontmatter, body } = useMemo(() => splitFrontmatter(content), [content])
+
+  return (
+    <>
+      {frontmatter && <FrontmatterPanel frontmatter={frontmatter} className="mb-5" />}
+      <MarkdownRenderer content={body} variant="document" />
+    </>
+  )
+}
 
 /**
  * Two-pane file preview: file list on the left, rendered content on the
@@ -92,39 +125,47 @@ export function FilePreview({
   }, [])
 
   if (files.length === 0) {
+    // `min-h-0 flex-1` is carried over from the layout fix this file already
+    // had: the placeholder must claim the leftover height of the preview
+    // column rather than shrink to its content.
     return (
-      <div className="rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-6 py-12 text-center">
-        <span className="material-symbols-outlined mb-2 block text-[32px] text-[var(--color-text-tertiary)]">folder_off</span>
-        <p className="text-sm text-[var(--color-text-tertiary)]">{t('market.file.noFiles')}</p>
-      </div>
+      <EmptyState
+        icon={<FolderX size={20} strokeWidth={1.6} aria-hidden="true" />}
+        title={t('market.file.noFiles')}
+        className="min-h-0 flex-1"
+      />
     )
   }
 
   const activeFile = files.find((f) => f.path === activePath)
 
   return (
-    <div className="grid min-w-0 gap-4 lg:grid-cols-[240px_minmax(0,1fr)]" data-testid="market-file-preview">
-      <div className="flex max-h-[520px] flex-col gap-0.5 overflow-y-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5">
+    <div
+      className="grid min-h-0 min-w-0 flex-1 gap-5 lg:h-full lg:grid-cols-[minmax(0,320px)_minmax(0,1fr)]"
+      data-testid="market-file-preview"
+    >
+      <div className="flex max-h-[40vh] min-h-0 flex-col gap-0.5 overflow-y-auto rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface)] p-2 lg:max-h-none">
         {files.map((file) => {
           const active = file.path === activePath
+          const Icon = LANG_ICONS[file.language] ?? File
           return (
             <button
               key={file.path}
               type="button"
               data-testid={`market-file-item-${file.path}`}
               onClick={() => void open(file.path)}
-              className={`flex items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors ${
+              className={`flex items-center gap-2.5 rounded-[var(--radius-lg)] px-3 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:shadow-[var(--shadow-focus-ring)] ${
                 active
-                  ? 'bg-[var(--color-primary-fixed)] text-[var(--color-brand)]'
+                  ? // The darkened pair, not `--color-brand`: raw terracotta on
+                    // its own soft fill misses AA under the two ink themes.
+                    'bg-[var(--color-brand-soft)] text-[var(--color-on-brand-soft)]'
                   : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
               }`}
             >
-              <span className="material-symbols-outlined flex-shrink-0 text-[16px]" aria-hidden>
-                {LANG_ICONS[file.language] || 'draft'}
-              </span>
+              <Icon className="h-[15px] w-[15px] flex-shrink-0" strokeWidth={1.5} aria-hidden="true" />
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-xs font-medium">{file.path}</span>
-                <span className={`block text-[10px] ${active ? 'opacity-80' : 'text-[var(--color-text-tertiary)]'}`}>
+                <span className="block truncate text-[13.5px] font-medium">{file.path}</span>
+                <span className={`mt-px block text-[11.5px] ${active ? 'opacity-80' : 'text-[var(--color-text-tertiary)]'}`}>
                   {file.language} · {formatSize(file.size)}
                 </span>
               </span>
@@ -133,40 +174,42 @@ export function FilePreview({
         })}
       </div>
 
-      <div className="min-w-0 overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]">
+      <div className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface)]">
         {activeFile && (
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-2.5 text-[11px] text-[var(--color-text-tertiary)]">
-            <span className="font-mono font-medium text-[var(--color-text-secondary)]">{activeFile.path}</span>
+          <div className="flex flex-shrink-0 flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-[18px] py-3 text-xs text-[var(--color-text-tertiary)]">
+            <span className="font-mono text-[13.5px] font-semibold text-[var(--color-text-primary)]">{activeFile.path}</span>
             <span>{activeFile.language}</span>
+            <span>·</span>
             <span>{formatSize(activeFile.size)}</span>
             {state.kind === 'loaded' && state.file.truncated && (
               <span className="inline-flex items-center gap-1 text-[var(--color-warning)]">
-                <span className="material-symbols-outlined text-[13px]" aria-hidden>content_cut</span>
+                <Scissors className="h-3 w-3" strokeWidth={1.6} aria-hidden="true" />
                 {t('market.file.truncated')}
               </span>
             )}
           </div>
         )}
 
-        <div className="max-h-[480px] overflow-y-auto p-4">
+        <div className="min-h-0 flex-1 overflow-y-auto px-[26px] py-[22px] max-lg:max-h-[70vh]">
           {state.kind === 'loading' && (
             <div className="flex justify-center py-10" data-testid="market-file-loading">
-              <div className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--color-brand)] border-t-transparent" />
+              <Spinner size={20} tone="brand" label={t('common.loading')} />
             </div>
           )}
           {state.kind === 'error' && (
             <div className="flex flex-col items-center gap-2 py-8 text-center" data-testid="market-file-error">
-              <span className="material-symbols-outlined text-[28px] text-[var(--color-error)]">error</span>
+              <CircleAlert className="h-7 w-7 text-[var(--color-error)]" strokeWidth={1.6} aria-hidden="true" />
               <p className="text-sm text-[var(--color-text-primary)]">{t('market.file.loadError')}</p>
               <p className="max-w-md break-words text-xs text-[var(--color-text-tertiary)]">{state.message}</p>
-              <button
-                type="button"
+              <Button
+                variant="secondary"
+                size="base"
+                className="mt-1"
+                icon={<RefreshCw className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />}
                 onClick={() => activePath && void open(activePath)}
-                className="mt-1 inline-flex min-h-8 items-center gap-1 rounded-lg border border-[var(--color-border)] px-3 text-xs text-[var(--color-text-primary)] hover:border-[var(--color-border-focus)]"
               >
-                <span className="material-symbols-outlined text-[14px]">refresh</span>
                 {t('market.retry')}
-              </button>
+              </Button>
             </div>
           )}
           {state.kind === 'idle' && (
@@ -174,7 +217,7 @@ export function FilePreview({
           )}
           {state.kind === 'loaded' &&
             (state.file.language === 'markdown' ? (
-              <MarkdownRenderer content={state.file.content} variant="document" />
+              <MarkdownFilePreview content={state.file.content} />
             ) : (
               <CodeViewer
                 code={state.file.content}

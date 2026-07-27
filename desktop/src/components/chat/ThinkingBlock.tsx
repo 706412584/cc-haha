@@ -64,9 +64,9 @@ export function ThinkingBlock({ content, isActive = false }: { content: string; 
         type="button"
         onClick={() => setExpanded((v) => !v)}
         aria-expanded={expanded}
-        className="flex w-full items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[12px] text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-text-secondary)]"
+        className="flex w-full items-center gap-[7px] rounded-[var(--radius-sm)] px-1 py-0.5 text-left text-[13.5px] text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-text-primary)]"
       >
-        <span className="text-[10px] text-[var(--color-outline)]">
+        <span className="text-[10px]">
           {expanded ? '\u25BE' : '\u25B8'}
         </span>
         <ThinkingBrainIcon isActive={isActive} />
@@ -79,7 +79,7 @@ export function ThinkingBlock({ content, isActive = false }: { content: string; 
         <div
           ref={contentRef}
           data-thinking-content="expanded"
-          className="relative mt-1 max-h-[300px] overflow-y-auto rounded-lg border border-[var(--color-border)]/40 bg-[var(--color-surface-container-lowest)] p-2.5 text-[11px] text-[var(--color-text-secondary)]"
+          className="relative mt-1 max-h-[300px] overflow-y-auto rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] p-2.5 text-[11px] text-[var(--color-text-secondary)]"
         >
           <MarkdownRenderer
             content={displayContent}

@@ -250,7 +250,28 @@ describe('ConversationService', () => {
     expect(env.CLAUDE_COWORK_MEMORY_PATH_OVERRIDE).toBe(
       `${path.join(tmpDir, 'projects', 'D--workspace-code-myself-code-cc-haha', 'memory')}${path.sep}`,
     )
-    await expect(fs.stat(path.dirname(env.CLAUDE_CODE_DIAGNOSTICS_FILE))).resolves.toBeTruthy()
+    const diagnosticsDirectory = await fs.stat(path.dirname(env.CLAUDE_CODE_DIAGNOSTICS_FILE))
+    expect(diagnosticsDirectory).toBeTruthy()
+    if (process.platform !== 'win32') {
+      expect(diagnosticsDirectory.mode & 0o777).toBe(0o700)
+    }
+  })
+
+  test('omits CLI diagnostics when its managed directory resolves through a symlink', async () => {
+    if (process.platform === 'win32') return
+    const unrelatedDir = path.join(tmpDir, 'unrelated-cli-diagnostics')
+    const unrelatedDiagnosticsDir = path.join(unrelatedDir, 'diagnostics')
+    await fs.mkdir(unrelatedDiagnosticsDir, { recursive: true, mode: 0o755 })
+    await fs.mkdir(path.join(tmpDir, 'cc-haha'), { recursive: true })
+    await fs.rm(path.join(tmpDir, 'cc-haha'), { recursive: true, force: true })
+    await fs.symlink(unrelatedDir, path.join(tmpDir, 'cc-haha'), 'dir')
+
+    const service = new ConversationService() as any
+    const env = (await service.buildChildEnv('/tmp')) as Record<string, string>
+
+    expect(env.CLAUDE_CODE_DIAGNOSTICS_FILE).toBeUndefined()
+    expect((await fs.stat(unrelatedDiagnosticsDir)).mode & 0o777).toBe(0o755)
+    await expect(fs.stat(path.join(unrelatedDiagnosticsDir, 'cli-diagnostics.jsonl'))).rejects.toThrow()
   })
 
   test('buildChildEnv injects stream watchdog + overall max-duration so a trickling provider stream cannot hang the desktop forever (#766)', async () => {

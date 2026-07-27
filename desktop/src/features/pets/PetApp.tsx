@@ -597,7 +597,10 @@ export function PetApp() {
             onMouseLeave={(event) => releasePointerPassthrough(event.relatedTarget)}
           >
             {actionError && (
-              <p role="alert" className="mx-3 mt-2 rounded-lg bg-rose-500/10 px-3 py-2 text-xs text-rose-700 dark:text-rose-200">
+              <p
+                role="alert"
+                className="mx-3 mt-2 rounded-[var(--radius-md)] bg-[var(--color-error-container)] px-3 py-2 text-xs text-[var(--color-on-error-container)]"
+              >
                 {actionError}
               </p>
             )}

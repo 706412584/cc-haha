@@ -47,6 +47,24 @@ export type DialogSaveOptions = {
   filters?: DialogFileFilter[]
 }
 
+/**
+ * What the renderer settled on, reported to the native shell so the window
+ * background and the OS-drawn chrome can match it.
+ */
+export type AppliedAppearance = {
+  isDark: boolean
+  /** Base background of the applied theme, as a CSS hex color. */
+  background: string
+  /**
+   * Base background of the user's light theme, also as a hex color. Carried
+   * separately so a shell that cached this at night knows which light theme to
+   * repaint when it next starts in the morning.
+   */
+  lightBackground: string
+  /** Whether the renderer is tracking the OS setting rather than a fixed pick. */
+  followSystem: boolean
+}
+
 export type NotificationPermissionState = 'granted' | 'denied' | 'default'
 
 export type DesktopNotificationOptions = {
@@ -89,7 +107,6 @@ export type DesktopUpdateCheckOptions = {
 
 export type TerminalSpawnOptions = {
   cwd?: string
-  shell?: string
   cols: number
   rows: number
 }
@@ -181,6 +198,31 @@ export type DesktopPetCreateResult =
   | { id: string }
   | { errorCode: string }
 
+export type DesktopPetSheetPickInput = {
+  dialogTitle?: string
+  dialogFilterName?: string
+}
+
+/** Decoded pixels of a user-picked action sheet, ready to be normalized on a canvas. */
+export type DesktopPetSourceSheet = {
+  bytes: Uint8Array
+  mimeType: 'image/png' | 'image/webp'
+  width: number
+  height: number
+}
+
+export type DesktopPetSheetPickResult =
+  | DesktopPetSourceSheet
+  | { errorCode: string }
+
+export type DesktopPetCreateFromAtlasBytesInput = {
+  slug: string
+  displayName: string
+  description: string
+  atlasData: Uint8Array
+  mimeType: 'image/png' | 'image/webp'
+}
+
 export type DesktopPetWindowDrag = {
   phase: 'start' | 'move' | 'end'
   x: number
@@ -238,6 +280,9 @@ export type DesktopHost = {
     readText(): Promise<string>
     writeText(text: string): Promise<void>
   }
+  files: {
+    getPathForFile(file: File): string
+  }
   events: {
     listen<T>(eventName: string, handler: (payload: T) => void): Promise<DesktopHostUnlisten>
   }
@@ -257,6 +302,10 @@ export type DesktopHost = {
     list(): Promise<DesktopPetListResult>
     createFromImage(input: DesktopPetCreateInput): Promise<DesktopPetCreateResult | null>
     createFromAtlas(input: DesktopPetCreateInput): Promise<DesktopPetCreateResult | null>
+    pickSourceSheet(input: DesktopPetSheetPickInput): Promise<DesktopPetSheetPickResult | null>
+    createFromAtlasBytes(
+      input: DesktopPetCreateFromAtlasBytesInput,
+    ): Promise<DesktopPetCreateResult | null>
     openFolder(): Promise<void>
     show(): Promise<void>
     hide(): Promise<void>
@@ -328,6 +377,9 @@ export type DesktopHost = {
   }
   zoom: {
     set(level: number): Promise<void>
+  }
+  appearance: {
+    setApplied(state: AppliedAppearance): Promise<void>
   }
 }
 

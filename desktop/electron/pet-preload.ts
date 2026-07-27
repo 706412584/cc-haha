@@ -37,6 +37,12 @@ const petHost = {
     // server-enforced companion capability, never the desktop master token.
     getLocalAccessToken: () => invoke<string | null>(ELECTRON_IPC_CHANNELS.runtimeGetPetAccessToken),
   },
+  appearance: {
+    // The pet window is transparent and shares the renderer bootstrap, which
+    // reports the applied theme. It has no native chrome to sync, and it must
+    // not repaint the main window, so this stays a no-op.
+    setApplied: () => Promise.resolve(),
+  },
   pets: {
     list: () => invoke(ELECTRON_IPC_CHANNELS.petsList),
     hide: () => invoke<void>(ELECTRON_IPC_CHANNELS.petsHide),

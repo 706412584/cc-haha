@@ -49,11 +49,19 @@ import { isPathGitignored } from '../utils/git/gitignore.js'
 import { logError } from '../utils/log.js'
 import {
   extractDescriptionFromMarkdown,
-  getProjectDirsUpToHome,
   loadMarkdownFilesForSubdir,
   type MarkdownFile,
   parseSlashCommandToolsFromFrontmatter,
 } from '../utils/markdownConfigLoader.js'
+import {
+  getAddDirSkillRoots,
+  getNestedSkillDirCandidates,
+  getProjectSkillRoots,
+  getUserSkillRoots,
+  outranksClaimedSkill,
+  type SkillRoot,
+  type SkillRootFlavor,
+} from './skillRoots.js'
 import { parseUserSpecifiedModel } from '../utils/model/model.js'
 import { executeShellCommandsInPrompt } from '../utils/promptShellExecution.js'
 import type { SettingSource } from '../utils/settings/constants.js'
@@ -127,6 +135,14 @@ async function getFileIdentity(filePath: string): Promise<string | null> {
 type SkillWithPath = {
   skill: Command
   filePath: string
+  /**
+   * Which directory convention this skill came from, and which scope that
+   * directory represents. Present only for skills loaded from a /skills/ dir;
+   * legacy /commands/ entries leave them undefined and skip name-collision
+   * dedup entirely.
+   */
+  rootFlavor?: SkillRootFlavor
+  scopeKey?: string
 }
 
 /**
@@ -407,6 +423,7 @@ export function createSkillCommand({
 async function loadSkillsFromSkillsDir(
   basePath: string,
   source: SettingSource,
+  root?: Pick<SkillRoot, 'flavor' | 'scopeKey'>,
 ): Promise<SkillWithPath[]> {
   const fs = getFsImplementation()
 
@@ -450,6 +467,13 @@ async function loadSkillsFromSkillsDir(
         )
 
         const skillName = entry.name
+        if (!isRenderableSkillName(skillName)) {
+          logForDebugging(
+            `[skills] Skipped ${skillDirPath}: the directory name contains control characters`,
+            { level: 'warn' },
+          )
+          return null
+        }
         const parsed = parseSkillFrontmatterFields(
           frontmatter,
           markdownContent,
@@ -468,6 +492,8 @@ async function loadSkillsFromSkillsDir(
             paths,
           }),
           filePath: skillFilePath,
+          rootFlavor: root?.flavor,
+          scopeKey: root?.scopeKey,
         }
       } catch (error) {
         logError(error)
@@ -477,6 +503,63 @@ async function loadSkillsFromSkillsDir(
   )
 
   return results.filter((r): r is SkillWithPath => r !== null)
+}
+
+/**
+ * Whether a skill directory name can be rendered without corrupting whatever
+ * it is rendered into.
+ *
+ * The name reaches the model as one `- name: description` line in the skill
+ * catalog, so a name carrying a line break writes extra entries of its own.
+ * `.agents/skills` is a directory other clients and checked-out repositories
+ * write into, which makes the name attacker-controlled rather than the user's.
+ *
+ * Deliberately narrower than the Agent Skills spec (lowercase alphanumerics and
+ * hyphens): existing `.claude/skills` directories predate that rule, and
+ * silently dropping one of those would be a worse failure than the one this
+ * prevents. Only genuinely unrenderable names are rejected.
+ */
+export function isRenderableSkillName(name: string): boolean {
+  if (name.length === 0) return false
+  for (const char of name) {
+    const code = char.codePointAt(0) ?? 0
+    // C0 and C1 controls — the line breaks among them are what would let a
+    // name write extra catalog entries.
+    if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) return false
+  }
+  return true
+}
+
+/**
+ * Collapses skills that share a name, keeping the highest-precedence one.
+ *
+ * Used on paths that don't run the full realpath dedup; the main loader inlines
+ * the same rule so it can interleave with file-identity dedup.
+ */
+function dedupeSkillNameCollisions(entries: SkillWithPath[]): SkillWithPath[] {
+  const claimedByName = new Map<
+    string,
+    { entry: SkillWithPath; flavor: SkillRootFlavor | undefined }
+  >()
+
+  for (const entry of entries) {
+    const flavor =
+      entry.scopeKey === undefined ? undefined : (entry.rootFlavor ?? 'claude')
+    const claimed = claimedByName.get(entry.skill.name)
+    if (
+      claimed !== undefined &&
+      !outranksClaimedSkill(claimed.flavor, flavor)
+    ) {
+      logForDebugging(
+        `[skills] Shadowed skill '${entry.skill.name}' in ${entry.filePath}: a skill of the same name was already loaded from a ${claimed.flavor ?? 'legacy commands'} directory`,
+        { level: 'warn' },
+      )
+      continue
+    }
+    claimedByName.set(entry.skill.name, { entry, flavor })
+  }
+
+  return [...claimedByName.values()].map(claim => claim.entry)
 }
 
 // --- Legacy /commands/ loader ---
@@ -637,16 +720,21 @@ async function loadSkillsFromCommandsDir(
  */
 export const getSkillDirCommands = memoize(
   async (cwd: string): Promise<Command[]> => {
-    const userSkillsDir = join(getClaudeConfigHomeDir(), 'skills')
+    // Each scope contributes both `.claude/skills` and the cross-client
+    // `.agents/skills` convention, `.claude` first so it wins collisions.
+    const userSkillRoots = getUserSkillRoots()
     const managedSkillsDir = join(getManagedFilePath(), '.claude', 'skills')
-    const projectSkillsDirs = getProjectDirsUpToHome('skills', cwd)
+    const projectSkillRoots = getProjectSkillRoots(cwd)
 
     logForDebugging(
-      `Loading skills from: managed=${managedSkillsDir}, user=${userSkillsDir}, project=[${projectSkillsDirs.join(', ')}]`,
+      `Loading skills from: managed=${managedSkillsDir}, user=[${userSkillRoots
+        .map(r => r.path)
+        .join(', ')}], project=[${projectSkillRoots.map(r => r.path).join(', ')}]`,
     )
 
     // Load from additional directories (--add-dir)
     const additionalDirs = getAdditionalDirectoriesForClaudeMd()
+    const additionalSkillRoots = additionalDirs.flatMap(getAddDirSkillRoots)
     const skillsLocked = isRestrictedToPluginOnly('skills')
     const projectSettingsEnabled =
       isSettingSourceEnabled('projectSettings') && !skillsLocked
@@ -663,46 +751,50 @@ export const getSkillDirCommands = memoize(
         return []
       }
       const additionalSkillsNested = await Promise.all(
-        additionalDirs.map(dir =>
-          loadSkillsFromSkillsDir(
-            join(dir, '.claude', 'skills'),
-            'projectSettings',
-          ),
+        additionalSkillRoots.map(root =>
+          loadSkillsFromSkillsDir(root.path, 'projectSettings', root),
         ),
       )
-      // No dedup needed — explicit dirs, user controls uniqueness.
-      return additionalSkillsNested.flat().map(s => s.skill)
+      // Both conventions inside one added dir, and the same name across two of
+      // them, collapse the same way they do on the main path.
+      return dedupeSkillNameCollisions(additionalSkillsNested.flat()).map(
+        s => s.skill,
+      )
     }
 
     // Load from /skills/ directories, additional dirs, and legacy /commands/ in parallel
     // (all independent — different directories, no shared state)
     const [
       managedSkills,
-      userSkills,
+      userSkillsNested,
       projectSkillsNested,
       additionalSkillsNested,
       legacyCommands,
     ] = await Promise.all([
       isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_POLICY_SKILLS)
         ? Promise.resolve([])
-        : loadSkillsFromSkillsDir(managedSkillsDir, 'policySettings'),
+        : loadSkillsFromSkillsDir(managedSkillsDir, 'policySettings', {
+            flavor: 'claude',
+            scopeKey: 'managed',
+          }),
       isSettingSourceEnabled('userSettings') && !skillsLocked
-        ? loadSkillsFromSkillsDir(userSkillsDir, 'userSettings')
-        : Promise.resolve([]),
-      projectSettingsEnabled
         ? Promise.all(
-            projectSkillsDirs.map(dir =>
-              loadSkillsFromSkillsDir(dir, 'projectSettings'),
+            userSkillRoots.map(root =>
+              loadSkillsFromSkillsDir(root.path, 'userSettings', root),
             ),
           )
         : Promise.resolve([]),
       projectSettingsEnabled
         ? Promise.all(
-            additionalDirs.map(dir =>
-              loadSkillsFromSkillsDir(
-                join(dir, '.claude', 'skills'),
-                'projectSettings',
-              ),
+            projectSkillRoots.map(root =>
+              loadSkillsFromSkillsDir(root.path, 'projectSettings', root),
+            ),
+          )
+        : Promise.resolve([]),
+      projectSettingsEnabled
+        ? Promise.all(
+            additionalSkillRoots.map(root =>
+              loadSkillsFromSkillsDir(root.path, 'projectSettings', root),
             ),
           )
         : Promise.resolve([]),
@@ -716,7 +808,7 @@ export const getSkillDirCommands = memoize(
     // Flatten and combine all skills
     const allSkillsWithPaths = [
       ...managedSkills,
-      ...userSkills,
+      ...userSkillsNested.flat(),
       ...projectSkillsNested.flat(),
       ...additionalSkillsNested.flat(),
       ...legacyCommands,
@@ -737,30 +829,76 @@ export const getSkillDirCommands = memoize(
       string,
       SettingSource | 'builtin' | 'mcp' | 'plugin' | 'bundled'
     >()
-    const deduplicatedSkills: Command[] = []
+    /**
+     * name → the entry currently holding it, and the flavor that claimed it.
+     *
+     * A skill name is a single slash command, so it has to resolve to exactly
+     * one file however many roots spell it. `.claude` outranks `.agents` even
+     * across scopes: this is the Claude Code CLI, so a skill installed for us
+     * stays authoritative over one another client dropped into the shared
+     * `.agents` space. Within one flavor the root order above decides
+     * (managed → user → project, each most-specific-first → --add-dir).
+     *
+     * A `undefined` flavor marks a legacy `/commands/` entry: those only fill a
+     * name nothing else claimed and never displace a skill.
+     */
+    const claimedByName = new Map<
+      string,
+      { skill: Command; flavor: SkillRootFlavor | undefined }
+    >()
 
     for (let i = 0; i < allSkillsWithPaths.length; i++) {
       const entry = allSkillsWithPaths[i]
       if (entry === undefined || entry.skill.type !== 'prompt') continue
-      const { skill } = entry
+      const { skill, scopeKey, rootFlavor } = entry
 
       const fileId = fileIds[i]
-      if (fileId === null || fileId === undefined) {
-        deduplicatedSkills.push(skill)
-        continue
+      if (fileId !== null && fileId !== undefined) {
+        const existingSource = seenFileIds.get(fileId)
+        if (existingSource !== undefined) {
+          logForDebugging(
+            `Skipping duplicate skill '${skill.name}' from ${skill.source} (same file already loaded from ${existingSource})`,
+          )
+          continue
+        }
       }
 
-      const existingSource = seenFileIds.get(fileId)
-      if (existingSource !== undefined) {
+      // Two genuinely distinct files claiming one name — the copy-based sync
+      // case, which the realpath dedup above cannot collapse.
+      const flavor = scopeKey === undefined ? undefined : (rootFlavor ?? 'claude')
+      const claimed = claimedByName.get(skill.name)
+      if (claimed !== undefined) {
+        if (!outranksClaimedSkill(claimed.flavor, flavor)) {
+          logForDebugging(
+            `[skills] Shadowed skill '${skill.name}' in ${entry.filePath}: a skill of the same name was already loaded from a ${claimed.flavor ?? 'legacy commands'} directory`,
+            { level: 'warn' },
+          )
+          // Record the loser's file identity too. Roots can overlap — e.g.
+          // CLAUDE_CONFIG_DIR pointing inside the project makes one directory
+          // both the user root and a project root — and without this the
+          // shadowed file reappears later under the other scope.
+          if (fileId !== null && fileId !== undefined) {
+            seenFileIds.set(fileId, skill.source)
+          }
+          continue
+        }
         logForDebugging(
-          `Skipping duplicate skill '${skill.name}' from ${skill.source} (same file already loaded from ${existingSource})`,
+          `[skills] Replacing skill '${skill.name}' with ${entry.filePath}: a .claude directory outranks the .agents copy loaded earlier`,
+          { level: 'warn' },
         )
-        continue
       }
 
-      seenFileIds.set(fileId, skill.source)
-      deduplicatedSkills.push(skill)
+      if (fileId !== null && fileId !== undefined) {
+        seenFileIds.set(fileId, skill.source)
+      }
+      // Map.set keeps the first insertion position, so a replacement inherits
+      // the slot its predecessor held rather than jumping to the end.
+      claimedByName.set(skill.name, { skill, flavor })
     }
+
+    const deduplicatedSkills: Command[] = [...claimedByName.values()].map(
+      claim => claim.skill,
+    )
 
     const duplicatesRemoved =
       allSkillsWithPaths.length - deduplicatedSkills.length
@@ -796,7 +934,7 @@ export const getSkillDirCommands = memoize(
     }
 
     logForDebugging(
-      `Loaded ${deduplicatedSkills.length} unique skills (${unconditionalSkills.length} unconditional, ${newConditionalSkills.length} conditional, managed: ${managedSkills.length}, user: ${userSkills.length}, project: ${projectSkillsNested.flat().length}, additional: ${additionalSkillsNested.flat().length}, legacy commands: ${legacyCommands.length})`,
+      `Loaded ${deduplicatedSkills.length} unique skills (${unconditionalSkills.length} unconditional, ${newConditionalSkills.length} conditional, managed: ${managedSkills.length}, user: ${userSkillsNested.flat().length}, project: ${projectSkillsNested.flat().length}, additional: ${additionalSkillsNested.flat().length}, legacy commands: ${legacyCommands.length})`,
     )
 
     return unconditionalSkills
@@ -874,12 +1012,13 @@ export async function discoverSkillDirsForPaths(
     // CWD-level skills are already loaded at startup, so we only discover nested ones
     // Use prefix+separator check to avoid matching /project-backup when cwd is /project
     while (currentDir.startsWith(resolvedCwd + pathSep)) {
-      const skillDir = join(currentDir, '.claude', 'skills')
+      // Both `.claude/skills` and the cross-client `.agents/skills`.
+      for (const skillDir of getNestedSkillDirCandidates(currentDir)) {
+        // Skip if we've already checked this path (hit or miss) — avoids
+        // repeating the same failed stat on every Read/Write/Edit call when
+        // the directory doesn't exist (the common case).
+        if (dynamicSkillDirs.has(skillDir)) continue
 
-      // Skip if we've already checked this path (hit or miss) — avoids
-      // repeating the same failed stat on every Read/Write/Edit call when
-      // the directory doesn't exist (the common case).
-      if (!dynamicSkillDirs.has(skillDir)) {
         dynamicSkillDirs.add(skillDir)
         try {
           await fs.stat(skillDir)

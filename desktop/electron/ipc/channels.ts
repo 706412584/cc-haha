@@ -13,6 +13,8 @@ export const ELECTRON_IPC_CHANNELS = {
   petsList: 'desktop:pets:list',
   petsCreateFromImage: 'desktop:pets:create-from-image',
   petsCreateFromAtlas: 'desktop:pets:create-from-atlas',
+  petsPickSourceSheet: 'desktop:pets:pick-source-sheet',
+  petsCreateFromAtlasBytes: 'desktop:pets:create-from-atlas-bytes',
   petsOpenFolder: 'desktop:pets:open-folder',
   petsShow: 'desktop:pets:show',
   petsHide: 'desktop:pets:hide',
@@ -63,6 +65,7 @@ export const ELECTRON_IPC_CHANNELS = {
   tunnelStop: 'desktop:tunnel:stop',
   tunnelGetStatus: 'desktop:tunnel:get-status',
   zoomSet: 'desktop:zoom:set',
+  appearanceSetApplied: 'desktop:appearance:set-applied',
 } as const
 
 export const ELECTRON_EVENT_CHANNELS = {

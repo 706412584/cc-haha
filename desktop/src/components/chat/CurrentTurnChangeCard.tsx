@@ -3,7 +3,8 @@ import type { MouseEvent as ReactMouseEvent } from 'react'
 import { ChevronDown, ChevronRight, ChevronUp } from 'lucide-react'
 import type { SessionTurnCheckpoint } from '../../api/sessions'
 import { useTranslation, type TranslationKey } from '../../i18n'
-import { OpenWithMenu } from '../common/OpenWithMenu'
+import { Button } from '@/components/ui/Button'
+import { OpenWithMenu } from '@/components/composite/OpenWithMenu'
 import { buildOpenWithItems, describeFileType, isPreviewableChangedFile, type OpenWithItem } from '../../lib/openWithItems'
 import { openWithContextForWorkspaceFile } from '../../lib/openWithContextForHref'
 import { isAbsoluteLocalPath, localFileUrl } from '../../lib/handlePreviewLink'
@@ -128,7 +129,7 @@ export function CurrentTurnChangeCard({
 
   return (
     <section
-      className="mx-auto mb-5 w-full max-w-[860px] overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm"
+      className="mx-auto mb-5 w-full max-w-[900px] overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface)] shadow-[var(--shadow-card)]"
       aria-label={cardLabel}
     >
       <div className="flex items-center justify-between gap-3 border-b border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3">
@@ -137,10 +138,10 @@ export function CurrentTurnChangeCard({
             <span className="text-sm font-semibold text-[var(--color-text-primary)]">
               {t('chat.turnChangesTitle', { count: files.length })}
             </span>
-            <span className="font-mono text-sm font-semibold text-[var(--color-success)]">
+            <span className="rounded-[var(--radius-sm)] bg-[var(--color-diff-added-gutter)] px-2 py-0.5 font-mono text-[12px] font-semibold text-[var(--color-diff-added-text)]">
               +{checkpoint.code.insertions}
             </span>
-            <span className="font-mono text-sm font-semibold text-[var(--color-error)]">
+            <span className="rounded-[var(--radius-sm)] bg-[var(--color-diff-removed-gutter)] px-2 py-0.5 font-mono text-[12px] font-semibold text-[var(--color-diff-removed-text)]">
               -{checkpoint.code.deletions}
             </span>
           </div>
@@ -149,16 +150,17 @@ export function CurrentTurnChangeCard({
           </div>
         </div>
 
-        <button
-          type="button"
+        <Button
+          variant="secondary"
+          size="base"
+          loading={isUndoing}
           onClick={onUndo}
-          disabled={isUndoing}
           aria-label={undoAria}
-          className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-brand)]/40 hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]/35 disabled:cursor-not-allowed disabled:opacity-50"
+          className="shrink-0"
+          icon={<span className="material-symbols-outlined text-[15px]" aria-hidden="true">undo</span>}
         >
-          <span className="material-symbols-outlined text-[15px]">undo</span>
           {isUndoing ? t('chat.turnChangesUndoing') : undoLabel}
-        </button>
+        </Button>
       </div>
 
       <div className="divide-y divide-[var(--color-border)]">
@@ -175,7 +177,7 @@ export function CurrentTurnChangeCard({
                 onClick={(event) => openChangedFile(event, fileEntry)}
                 aria-label={t('chat.turnChangesOpenInWorkspaceAria', { path: fileEntry.displayPath })}
                 title={fileEntry.displayPath}
-                className="flex min-h-[52px] min-w-0 flex-1 items-center gap-3 rounded-[var(--radius-md)] px-4 text-left transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-brand)]/35"
+                className="flex min-h-[52px] min-w-0 flex-1 items-center gap-3 rounded-[var(--radius-md)] px-4 text-left transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)]"
               >
                 <span className="material-symbols-outlined shrink-0 text-[22px] text-[var(--color-text-tertiary)]">{typeInfo.icon}</span>
                 <span className="min-w-0 flex-1">
@@ -185,15 +187,17 @@ export function CurrentTurnChangeCard({
                 <ChevronRight size={17} strokeWidth={1.9} aria-hidden="true" className="shrink-0 text-[var(--color-text-tertiary)]" />
               </button>
               {previewable && (
-                <button
-                  type="button"
+                <Button
+                  variant="secondary"
+                  size="base"
                   aria-label={t('openWith.title')}
                   onClick={(event) => handleOpenWith(event, fileEntry)}
-                  className="mr-2 inline-flex h-8 shrink-0 items-center gap-1 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]/35"
+                  className="mr-2 shrink-0"
+                  icon={<ChevronDown size={14} strokeWidth={1.9} aria-hidden="true" />}
+                  iconPosition="end"
                 >
                   {t('openWith.title')}
-                  <ChevronDown size={14} strokeWidth={1.9} />
-                </button>
+                </Button>
               )}
             </div>
           )
@@ -204,7 +208,7 @@ export function CurrentTurnChangeCard({
         <button
           type="button"
           onClick={() => setShowAllFiles((current) => !current)}
-          className="flex w-full items-center justify-center gap-1 border-t border-[var(--color-border)] px-4 py-2 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-brand)]/35"
+          className="flex w-full items-center justify-center gap-1 border-t border-[var(--color-border)] px-4 py-2 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)]"
         >
           {showAllFiles ? (
             <>
@@ -221,7 +225,7 @@ export function CurrentTurnChangeCard({
       )}
 
       {error && (
-        <div className="border-t border-[var(--color-error)]/20 bg-[var(--color-error-container)]/18 px-4 py-3 text-xs text-[var(--color-error)]">
+        <div className="border-t border-[var(--color-error)] bg-[var(--color-error-container)] px-4 py-3 text-xs text-[var(--color-on-error-container)]">
           {error}
         </div>
       )}

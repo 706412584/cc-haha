@@ -12,23 +12,27 @@ import { getDesktopHost } from '../lib/desktopHost'
  * 在非桌面环境（纯浏览器调试 / 单元测试）这会安静跳过 —— 那种场景下
  * 本来也没有 sidecar 可重启。
  */
-async function notifyDesktopRestartAdapters(): Promise<void> {
+async function notifyDesktopRestartAdapters(): Promise<string | null> {
   const host = getDesktopHost()
-  if (!host.isDesktop) return
+  if (!host.isDesktop) return null
 
   try {
     await host.adapters.restartSidecar()
+    return null
   } catch (err) {
     // 不阻塞保存流程 —— 配置文件已经写入，下次启动 App 也会生效
     if (typeof console !== 'undefined') {
       console.warn('[adapterStore] restart_adapters_sidecar failed:', err)
     }
+    return err instanceof Error ? err.message : 'Adapter sidecar restart failed'
   }
 }
 
 const SAFE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
 const CODE_LENGTH = 6
 const CODE_TTL_MS = 60 * 60 * 1000 // 60 minutes
+let configRequestVersion = 0
+let configUpdateQueue: Promise<void> = Promise.resolve()
 
 function generateCode(): string {
   const maxValid = Math.floor(256 / SAFE_ALPHABET.length) * SAFE_ALPHABET.length
@@ -47,7 +51,9 @@ type AdapterStore = {
   config: AdapterFileConfig
   runtimeStatus: AdapterRuntimeStatuses
   isLoading: boolean
+  hasLoaded: boolean
   error: string | null
+  restartWarning: string | null
 
   fetchConfig: () => Promise<void>
   fetchRuntimeStatus: () => Promise<void>
@@ -69,16 +75,21 @@ export const useAdapterStore = create<AdapterStore>((set, get) => ({
   config: {},
   runtimeStatus: {},
   isLoading: false,
+  hasLoaded: false,
   error: null,
+  restartWarning: null,
 
   fetchConfig: async () => {
+    const requestVersion = ++configRequestVersion
     set({ isLoading: true, error: null })
     try {
       const config = await adaptersApi.getConfig()
-      set({ config, isLoading: false })
+      if (requestVersion !== configRequestVersion) return
+      set({ config, isLoading: false, hasLoaded: true })
     } catch (err) {
+      if (requestVersion !== configRequestVersion) return
       const message = err instanceof Error ? err.message : 'Failed to load config'
-      set({ isLoading: false, error: message })
+      set({ isLoading: false, hasLoaded: false, error: message })
     }
   },
 
@@ -92,13 +103,32 @@ export const useAdapterStore = create<AdapterStore>((set, get) => ({
   },
 
   updateConfig: async (patch) => {
-    const config = await adaptersApi.updateConfig(patch)
-    set({ config })
+    const requestVersion = ++configRequestVersion
+    let resolveUpdate!: (config: AdapterFileConfig) => void
+    let rejectUpdate!: (error: unknown) => void
+    const result = new Promise<AdapterFileConfig>((resolve, reject) => {
+      resolveUpdate = resolve
+      rejectUpdate = reject
+    })
+    configUpdateQueue = configUpdateQueue
+      .then(async () => {
+        try {
+          resolveUpdate(await adaptersApi.updateConfig(patch))
+        } catch (error) {
+          rejectUpdate(error)
+        }
+      })
+      .catch(() => {})
+    const config = await result
+    if (requestVersion === configRequestVersion) {
+      set({ config, hasLoaded: true, error: null, restartWarning: null })
+    }
     // 配置文件已写入磁盘，让 Tauri 主进程 kill + respawn adapter sidecar，
     // 触发各 IM adapter 用新凭据重连。pairing code / paired users
     // 这种轻量更新也会触发重启 —— 这是个有意为之的简化：保证"任何配置变更
     // 都立刻生效"，比起精细判断哪些字段值得重启更可靠。
-    void notifyDesktopRestartAdapters()
+    const restartWarning = await notifyDesktopRestartAdapters()
+    if (requestVersion === configRequestVersion) set({ restartWarning })
   },
 
   generatePairingCode: async () => {
@@ -124,8 +154,9 @@ export const useAdapterStore = create<AdapterStore>((set, get) => ({
       return { connected: false, status: result.status, message: result.message }
     }
     if ('wechat' in result || 'telegram' in result || 'feishu' in result || 'dingtalk' in result) {
+      configRequestVersion += 1
       set({ config: result, runtimeStatus: {} })
-      void notifyDesktopRestartAdapters()
+      void notifyDesktopRestartAdapters().then((restartWarning) => set({ restartWarning }))
       return { connected: true }
     }
     return { connected: false }
@@ -146,8 +177,9 @@ export const useAdapterStore = create<AdapterStore>((set, get) => ({
       }
     }
     if ('whatsapp' in result || 'wechat' in result || 'telegram' in result || 'feishu' in result || 'dingtalk' in result) {
+      configRequestVersion += 1
       set({ config: result })
-      void notifyDesktopRestartAdapters()
+      void notifyDesktopRestartAdapters().then((restartWarning) => set({ restartWarning }))
       return { connected: true }
     }
     return { connected: false }
@@ -158,28 +190,32 @@ export const useAdapterStore = create<AdapterStore>((set, get) => ({
   pollDingtalkRegistration: async (deviceCode) => {
     const result = await adaptersApi.pollDingtalkRegistration(deviceCode)
     if (result.config) {
+      configRequestVersion += 1
       set({ config: result.config })
-      void notifyDesktopRestartAdapters()
+      void notifyDesktopRestartAdapters().then((restartWarning) => set({ restartWarning }))
     }
     return result
   },
 
   unbindWechatAccount: async () => {
+    configRequestVersion += 1
     const config = await adaptersApi.unbindWechat()
     set({ config })
-    void notifyDesktopRestartAdapters()
+    set({ restartWarning: await notifyDesktopRestartAdapters() })
   },
 
   unbindDingtalkBot: async () => {
+    configRequestVersion += 1
     const config = await adaptersApi.unbindDingtalk()
     set({ config })
-    void notifyDesktopRestartAdapters()
+    set({ restartWarning: await notifyDesktopRestartAdapters() })
   },
 
   unbindWhatsAppAccount: async () => {
+    configRequestVersion += 1
     const config = await adaptersApi.unbindWhatsApp()
     set({ config })
-    void notifyDesktopRestartAdapters()
+    set({ restartWarning: await notifyDesktopRestartAdapters() })
   },
 
   removePairedUser: async (platform, userId) => {
@@ -192,7 +228,7 @@ export const useAdapterStore = create<AdapterStore>((set, get) => ({
     )
 
     await get().updateConfig({
-      [platform]: { ...platformConfig, pairedUsers },
+      [platform]: { pairedUsers },
     })
   },
 }))

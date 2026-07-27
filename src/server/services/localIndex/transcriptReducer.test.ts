@@ -388,3 +388,294 @@ describe('reduceTranscript', () => {
     })
   })
 })
+
+// One assistant reply, written the way Claude Code actually writes it: one JSONL line per content
+// block, every line repeating the same complete `usage`. Real transcripts hit 52 lines for a
+// single reply, and counting each one is what inflated the token totals 2.2x.
+function assistantBlockLines(options: {
+  messageId: string
+  requestId: string
+  timestamp: string
+  blocks: Array<Record<string, unknown>>
+  usage: Record<string, unknown>
+  model?: string
+  extra?: Record<string, unknown>
+}) {
+  return options.blocks.map(block => ({
+    type: 'assistant',
+    requestId: options.requestId,
+    version: '1.0.24',
+    message: {
+      id: options.messageId,
+      role: 'assistant',
+      model: options.model ?? 'claude-opus-5',
+      content: [block],
+      usage: options.usage,
+    },
+    timestamp: options.timestamp,
+    ...options.extra,
+  }))
+}
+
+const STANDARD_USAGE = {
+  input_tokens: 1000,
+  output_tokens: 200,
+  cache_read_input_tokens: 50_000,
+  cache_creation_input_tokens: 300,
+}
+
+function modelTotals(projection: ReturnType<typeof reduceTranscript>) {
+  return (projection.activity?.models ?? []).map(model => ({
+    model: model.model,
+    inputTokens: model.inputTokens,
+    outputTokens: model.outputTokens,
+    cacheReadInputTokens: model.cacheReadInputTokens,
+    cacheCreationInputTokens: model.cacheCreationInputTokens,
+  }))
+}
+
+describe('reduceTranscript activity usage', () => {
+  it('counts one reply once no matter how many content-block lines it was written as', () => {
+    const chunks = completeChunks(assistantBlockLines({
+      messageId: 'msg_one',
+      requestId: 'req_one',
+      timestamp: '2026-01-01T10:00:00.000Z',
+      usage: STANDARD_USAGE,
+      blocks: [
+        { type: 'thinking', thinking: 'planning' },
+        { type: 'text', text: 'here goes' },
+        ...Array.from({ length: 10 }, (_, index) => ({
+          type: 'tool_use',
+          id: `toolu_${index}`,
+          name: 'Bash',
+          input: {},
+        })),
+      ],
+    }))
+
+    const result = reduceTranscript(chunks, initialProjection())
+
+    expect(modelTotals(result)).toEqual([{
+      model: 'claude-opus-5',
+      inputTokens: 1000,
+      outputTokens: 200,
+      cacheReadInputTokens: 50_000,
+      cacheCreationInputTokens: 300,
+    }])
+    // The tool calls themselves are real and must still all be counted — only usage deduplicates.
+    expect(result.activity?.daily[0]?.toolCallCount).toBe(10)
+    expect(result.activity?.daily[0]?.messageCount).toBe(12)
+  })
+
+  it('counts a genuinely new reply separately', () => {
+    const chunks = completeChunks([
+      ...assistantBlockLines({
+        messageId: 'msg_one',
+        requestId: 'req_one',
+        timestamp: '2026-01-01T10:00:00.000Z',
+        usage: STANDARD_USAGE,
+        blocks: [{ type: 'text', text: 'first' }, { type: 'text', text: 'also first' }],
+      }),
+      ...assistantBlockLines({
+        messageId: 'msg_two',
+        requestId: 'req_two',
+        timestamp: '2026-01-01T10:05:00.000Z',
+        usage: STANDARD_USAGE,
+        blocks: [{ type: 'text', text: 'second' }],
+      }),
+    ])
+
+    const result = reduceTranscript(chunks, initialProjection())
+
+    expect(modelTotals(result)[0]).toMatchObject({ inputTokens: 2000, outputTokens: 400 })
+  })
+
+  it('keeps deduplicating across an incremental read', () => {
+    const [firstLine, ...restLines] = assistantBlockLines({
+      messageId: 'msg_split',
+      requestId: 'req_split',
+      timestamp: '2026-01-01T10:00:00.000Z',
+      usage: STANDARD_USAGE,
+      blocks: [
+        { type: 'text', text: 'part one' },
+        { type: 'tool_use', id: 'toolu_a', name: 'Read', input: {} },
+        { type: 'tool_use', id: 'toolu_b', name: 'Read', input: {} },
+      ],
+    })
+    const head = completeChunks([firstLine!])
+    const first = reduceTranscript(head, initialProjection())
+    const tail = completeChunks(restLines, first.indexedBytes)
+
+    const second = reduceTranscript(tail, first)
+
+    // The trailing block lines arrive in a later read; their repeated usage must stay uncounted.
+    expect(modelTotals(second)[0]).toMatchObject({ inputTokens: 1000, outputTokens: 200 })
+  })
+
+  it('counts every line when the log carries no message id to deduplicate on', () => {
+    const chunks = completeChunks([0, 1].map(() => ({
+      type: 'assistant',
+      requestId: 'req_anon',
+      message: {
+        role: 'assistant',
+        model: 'claude-opus-5',
+        content: [{ type: 'text', text: 'x' }],
+        usage: STANDARD_USAGE,
+      },
+      timestamp: '2026-01-01T10:00:00.000Z',
+    })))
+
+    const result = reduceTranscript(chunks, initialProjection())
+
+    expect(modelTotals(result)[0]).toMatchObject({ inputTokens: 2000 })
+  })
+
+  it('skips usage from foreign log formats but keeps their activity', () => {
+    const chunks = completeChunks([
+      ...assistantBlockLines({
+        messageId: 'msg_foreign',
+        requestId: 'req_foreign',
+        timestamp: '2026-01-01T10:00:00.000Z',
+        usage: STANDARD_USAGE,
+        blocks: [{ type: 'tool_use', id: 'toolu_x', name: 'Bash', input: {} }],
+        extra: { version: 'unknown' },
+      }),
+      ...assistantBlockLines({
+        messageId: '',
+        requestId: 'req_empty_id',
+        timestamp: '2026-01-01T10:01:00.000Z',
+        usage: STANDARD_USAGE,
+        blocks: [{ type: 'text', text: 'malformed' }],
+      }),
+    ])
+
+    const result = reduceTranscript(chunks, initialProjection())
+
+    expect(result.activity?.models).toEqual([])
+    // Rejecting a line for billing must not erase it from the activity heatmap.
+    expect(result.activity?.daily[0]?.toolCallCount).toBe(1)
+    expect(result.activity?.messageCount).toBe(2)
+  })
+
+  it('estimates cost for Claude models and leaves third-party models unpriced', () => {
+    const chunks = completeChunks([
+      ...assistantBlockLines({
+        messageId: 'msg_claude',
+        requestId: 'req_claude',
+        timestamp: '2026-01-01T10:00:00.000Z',
+        model: 'claude-opus-5',
+        usage: {
+          input_tokens: 1_000_000,
+          output_tokens: 0,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+          server_tool_use: { web_search_requests: 3 },
+        },
+        blocks: [{ type: 'text', text: 'priced' }],
+      }),
+      ...assistantBlockLines({
+        messageId: 'msg_glm',
+        requestId: 'req_glm',
+        timestamp: '2026-01-01T10:01:00.000Z',
+        model: 'glm-5.2',
+        usage: { input_tokens: 9_000_000, output_tokens: 9_000_000 },
+        blocks: [{ type: 'text', text: 'unpriced' }],
+      }),
+    ])
+
+    const result = reduceTranscript(chunks, initialProjection())
+    const byModel = Object.fromEntries(
+      (result.activity?.models ?? []).map(model => [model.model, model]),
+    )
+
+    expect(byModel['claude-opus-5']?.costUSD).toBeCloseTo(5.03, 6)
+    expect(byModel['claude-opus-5']?.webSearchRequests).toBe(3)
+    // Tokens still count toward activity; dollars stay at zero rather than being invented.
+    expect(byModel['glm-5.2']?.inputTokens).toBe(9_000_000)
+    expect(byModel['glm-5.2']?.costUSD).toBe(0)
+  })
+
+  it('reads the split cache_creation buckets when the legacy total is absent', () => {
+    const chunks = completeChunks(assistantBlockLines({
+      messageId: 'msg_split_cache',
+      requestId: 'req_split_cache',
+      timestamp: '2026-01-01T10:00:00.000Z',
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation: {
+          ephemeral_5m_input_tokens: 700,
+          ephemeral_1h_input_tokens: 300,
+        },
+      },
+      blocks: [{ type: 'text', text: 'cached' }],
+    }))
+
+    const result = reduceTranscript(chunks, initialProjection())
+
+    expect(modelTotals(result)[0]?.cacheCreationInputTokens).toBe(1000)
+  })
+
+  it('bills advisor iterations under their own model without recounting the parent', () => {
+    const chunks = completeChunks(assistantBlockLines({
+      messageId: 'msg_advisor',
+      requestId: 'req_advisor',
+      timestamp: '2026-01-01T10:00:00.000Z',
+      usage: {
+        ...STANDARD_USAGE,
+        iterations: [
+          { type: 'message', input_tokens: 999_999, output_tokens: 999_999 },
+          {
+            type: 'advisor_message',
+            model: 'claude-opus-4-8',
+            input_tokens: 400,
+            output_tokens: 20,
+          },
+        ],
+      },
+      blocks: [
+        { type: 'text', text: 'one' },
+        { type: 'tool_use', id: 'toolu_adv', name: 'Bash', input: {} },
+      ],
+    }))
+
+    const result = reduceTranscript(chunks, initialProjection())
+    const byModel = Object.fromEntries(
+      (result.activity?.models ?? []).map(model => [model.model, model]),
+    )
+
+    // A plain `message` iteration is already inside the parent's totals — counting it would
+    // double-bill the turn.
+    expect(byModel['claude-opus-5']).toMatchObject({ inputTokens: 1000, outputTokens: 200 })
+    expect(byModel['claude-opus-4-8']).toMatchObject({ inputTokens: 400, outputTokens: 20 })
+  })
+
+  it('sums working time across gaps and drops the overnight break', () => {
+    const chunks = completeChunks([
+      user('start', '2026-01-01T09:00:00.000Z'),
+      user('still going', '2026-01-01T09:20:00.000Z'),
+      user('after a long break', '2026-01-02T09:00:00.000Z'),
+      user('wrapping up', '2026-01-02T09:10:00.000Z'),
+    ])
+
+    const result = reduceTranscript(chunks, initialProjection())
+
+    // 20 min + 10 min of work; the 23h40m the user was asleep is not task time.
+    expect(result.activity?.activeDurationMs).toBe(30 * 60 * 1000)
+  })
+
+  it('carries working time across an incremental read', () => {
+    const head = completeChunks([
+      user('start', '2026-01-01T09:00:00.000Z'),
+      user('next', '2026-01-01T09:05:00.000Z'),
+    ])
+    const first = reduceTranscript(head, initialProjection())
+    const tail = completeChunks([user('later', '2026-01-01T09:11:00.000Z')], first.indexedBytes)
+
+    const second = reduceTranscript(tail, first)
+
+    expect(first.activity?.activeDurationMs).toBe(5 * 60 * 1000)
+    expect(second.activity?.activeDurationMs).toBe(11 * 60 * 1000)
+  })
+})

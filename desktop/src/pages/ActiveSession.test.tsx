@@ -2254,3 +2254,103 @@ describe('ActiveSession task polling', () => {
     expect(screen.getByTestId(`session-terminal-host-${sessionId}`)).toHaveAttribute('data-runtime-id', `__session_terminal__${sessionId}`)
   })
 })
+
+describe('ActiveSession header', () => {
+  // 回归锚点：标题曾经是 text-[22px] 且不截断，长标题会折成两行再加一行元数据，
+  // 连同 pt-6/pb-4 把聊天区顶掉约 120px。标题必须单行截断，元数据留在它下面那行。
+  const longTitle = 'Create a todo_cccc-ccccbb directory, write a throwaway todo app with react + vite + tailwindcss, then start it'
+
+  function mountSessionWithLongTitle(sessionId: string) {
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: longTitle,
+        createdAt: '2026-05-07T00:00:00.000Z',
+        modifiedAt: new Date().toISOString(),
+        messageCount: 2,
+        projectPath: '/workspace/project',
+        workDir: '/workspace/project',
+        workDirExists: true,
+      }],
+      activeSessionId: sessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: longTitle, type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          messages: [
+            { id: 'msg-1', type: 'user_text', content: 'hi', timestamp: 1 },
+            { id: 'msg-2', type: 'assistant_text', content: 'hello', timestamp: 2 },
+          ],
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 12000, output_tokens: 3000 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+  }
+
+  it('keeps a long title on one truncated line and hovers the full text', () => {
+    const sessionId = 'long-title-session'
+    mountSessionWithLongTitle(sessionId)
+
+    render(<ActiveSession />)
+
+    const heading = within(screen.getByTestId('session-header')).getByRole('heading', { level: 1 })
+    expect(heading).toHaveTextContent(longTitle)
+    expect(heading).toHaveAttribute('title', longTitle)
+    expect(heading).toHaveClass('truncate')
+    expect(heading.className).not.toMatch(/text-\[22px\]/)
+  })
+
+  it('gives the metadata its own line under the title', () => {
+    const sessionId = 'header-meta-session'
+    mountSessionWithLongTitle(sessionId)
+
+    render(<ActiveSession />)
+
+    const header = screen.getByTestId('session-header')
+    const heading = within(header).getByRole('heading', { level: 1 })
+    const titleRow = heading.parentElement as HTMLElement
+    const meta = titleRow.nextElementSibling as HTMLElement
+
+    // 元数据挤在标题右侧时会离标题很远，读起来像飘在角落的另一块内容。
+    expect(within(titleRow).queryByText('2 messages')).not.toBeInTheDocument()
+    expect(within(meta).getByText('2 messages')).toBeInTheDocument()
+    expect(within(meta).getByText('15k tokens')).toBeInTheDocument()
+    expect(header).toHaveClass('py-3')
+  })
+
+  it('keeps the separators between metadata items, never in front of them', () => {
+    const sessionId = 'idle-header-session'
+    mountSessionWithLongTitle(sessionId)
+
+    render(<ActiveSession />)
+
+    const heading = within(screen.getByTestId('session-header')).getByRole('heading', { level: 1 })
+    const meta = (heading.parentElement as HTMLElement).nextElementSibling as HTMLElement
+
+    // 空闲会话只有三项元数据（tokens / 更新时间 / 消息数），之间两个「·」，开头不该有。
+    // 分隔符是纯装饰，读屏时不该被念出来。
+    expect(meta.textContent?.trimStart().startsWith('·')).toBe(false)
+    expect(meta.querySelectorAll('[aria-hidden="true"]')).toHaveLength(2)
+  })
+})

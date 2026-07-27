@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'react'
 import { ImageGalleryModal } from './ImageGalleryModal'
 import { ImageAnnotationModal } from './ImageAnnotationModal'
-import { getBaseUrl } from '../../api/client'
 import { useChatStore } from '../../stores/chatStore'
+import { localImageFileUrl } from '../../lib/attachmentImages'
 import { extractAssistantOutputTargets } from '../../lib/assistantOutputTargets'
 import { previewFsUrl } from '../../lib/handlePreviewLink'
 import { getServerBaseUrl } from '../../lib/desktopRuntime'
@@ -30,10 +30,6 @@ export function extractImagePaths(text: string): string[] {
   }
 
   return paths
-}
-
-function fileUrl(filePath: string): string {
-  return `${getBaseUrl()}/api/filesystem/file?path=${encodeURIComponent(filePath)}`
 }
 
 function fileName(filePath: string): string {
@@ -64,7 +60,7 @@ export function InlineImageGallery({ text, sessionId, workDir }: Props) {
 
   const images = useMemo<GalleryImage[]>(() => {
     // 1. Absolute paths (legacy behavior) — served via /api/filesystem/file.
-    const absolute: GalleryImage[] = imagePaths.map((p) => ({ src: fileUrl(p), name: fileName(p) }))
+    const absolute: GalleryImage[] = imagePaths.map((p) => ({ src: localImageFileUrl(p), name: fileName(p) }))
 
     if (!sessionId) {
       return absolute
@@ -134,7 +130,7 @@ export function InlineImageGallery({ text, sessionId, workDir }: Props) {
               key={img.src}
               type="button"
               onClick={() => setActiveIndex(i)}
-              className="group/image relative overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] text-left shadow-sm transition-all hover:shadow-md hover:border-[var(--color-brand)]/40"
+              className="group/image relative overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] text-left shadow-[var(--shadow-card)] transition-[border-color,box-shadow] duration-150 hover:shadow-[var(--shadow-composer)] hover:border-[var(--color-primary-fixed-dim)]"
             >
               <img
                 src={img.src}

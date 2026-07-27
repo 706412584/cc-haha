@@ -6,7 +6,8 @@ import 'katex/dist/katex.min.css'
 import { marked, type Tokens } from 'marked'
 import { CodeViewer } from '../chat/CodeViewer'
 import { MermaidRenderer } from '../chat/MermaidRenderer'
-import { copyTextToClipboard } from '../chat/clipboard'
+import { copyTextToClipboard } from '@/lib/clipboard'
+import { t } from '../../i18n'
 
 type Props = {
   content: string
@@ -78,11 +79,11 @@ function MermaidStreamingPlaceholder() {
   return (
     <div
       data-testid="mermaid-streaming-placeholder"
-      className="my-4 flex items-center justify-center rounded-[var(--radius-lg)] border border-[var(--color-border)]/50 bg-[var(--color-surface-container-low)] py-8"
+      className="my-4 flex items-center justify-center rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] py-8"
     >
       <div className="flex items-center gap-2 text-[11px] text-[var(--color-text-tertiary)]">
         <span className="material-symbols-outlined animate-spin text-[16px]">progress_activity</span>
-        Generating diagram...
+        {t('chat.generatingDiagram')}
       </div>
     </div>
   )
@@ -410,10 +411,10 @@ export const __markdownParseCacheInternals = {
 }
 
 const BASE_PROSE_CLASSES = `markdown-prose prose prose-sm min-w-0 max-w-none break-words [overflow-wrap:anywhere] text-[var(--color-text-primary)]
-  prose-headings:text-[var(--color-text-primary)] prose-headings:font-semibold
+  prose-headings:text-[var(--color-text-primary)] prose-headings:font-semibold prose-headings:font-[var(--font-headline)]
   prose-p:my-2 prose-p:leading-relaxed
   prose-p:break-words prose-p:[overflow-wrap:anywhere]
-  prose-code:text-[13px] prose-code:text-[var(--color-code-fg)] prose-code:font-[var(--font-mono)] prose-code:bg-[var(--color-code-bg)] prose-code:border prose-code:border-[var(--color-border)] prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-md prose-code:before:hidden prose-code:after:hidden
+  prose-code:text-[13px] prose-code:text-[var(--color-code-fg)] prose-code:font-mono prose-code:bg-[var(--color-code-bg)] prose-code:border prose-code:border-[var(--color-border)] prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-[var(--radius-sm)] prose-code:before:hidden prose-code:after:hidden
   prose-pre:!bg-transparent prose-pre:!p-0 prose-pre:!shadow-none
   prose-a:text-[var(--color-text-accent)] prose-a:no-underline prose-a:[overflow-wrap:anywhere] hover:prose-a:underline
   prose-strong:text-[var(--color-text-primary)]
@@ -426,7 +427,7 @@ const BASE_PROSE_CLASSES = `markdown-prose prose prose-sm min-w-0 max-w-none bre
   [&_.md-math-inline]:inline-flex [&_.md-math-inline]:max-w-full [&_.md-math-inline]:overflow-x-auto [&_.md-math-inline]:[vertical-align:-0.08em] [&_.md-math-inline_.katex]:text-[1.02em]
   [&_.md-math-display]:my-5 [&_.md-math-display]:flex [&_.md-math-display]:max-w-full [&_.md-math-display]:justify-center [&_.md-math-display]:overflow-x-auto [&_.md-math-display]:px-1 [&_.md-math-display]:py-2 [&_.md-math-display]:[scrollbar-width:thin]
   [&_.md-math-display_.katex-display]:m-0 [&_.md-math-display_.katex]:text-[1.14em] [&_.md-math-display_.katex-html]:min-w-max
-  [&_.md-table-wrap]:my-5 [&_.md-table-wrap]:overflow-x-auto [&_.md-table-wrap]:rounded-xl [&_.md-table-wrap]:border [&_.md-table-wrap]:border-[var(--color-border)] [&_.md-table-wrap]:bg-[var(--color-surface-container-lowest)]`
+  [&_.md-table-wrap]:my-5 [&_.md-table-wrap]:overflow-x-auto [&_.md-table-wrap]:rounded-[var(--radius-lg)] [&_.md-table-wrap]:border [&_.md-table-wrap]:border-[var(--color-border)] [&_.md-table-wrap]:bg-[var(--color-surface-container-lowest)]`
 
 const DOCUMENT_PROSE_CLASSES = `
   prose-p:text-[15px] prose-p:leading-7
@@ -435,10 +436,10 @@ const DOCUMENT_PROSE_CLASSES = `
   prose-h2:mt-8 prose-h2:mb-3 prose-h2:border-b prose-h2:border-[var(--color-border)] prose-h2:pb-2 prose-h2:text-xl prose-h2:font-semibold
   prose-h3:mt-6 prose-h3:mb-2 prose-h3:text-base prose-h3:font-semibold
   prose-h4:mt-5 prose-h4:mb-2 prose-h4:text-sm prose-h4:font-semibold
-  prose-blockquote:my-4 prose-blockquote:rounded-r-lg prose-blockquote:border-l-4 prose-blockquote:border-[var(--color-outline-variant)] prose-blockquote:bg-[var(--color-surface-container-low)] prose-blockquote:px-4 prose-blockquote:py-2 prose-blockquote:italic
+  prose-blockquote:my-4 prose-blockquote:rounded-r-[var(--radius-md)] prose-blockquote:border-l-4 prose-blockquote:border-[var(--color-primary-fixed-dim)] prose-blockquote:bg-[var(--color-surface-container-low)] prose-blockquote:px-4 prose-blockquote:py-2 prose-blockquote:italic
   prose-hr:my-6 prose-hr:border-[var(--color-border)]
-  prose-img:rounded-lg prose-img:border prose-img:border-[var(--color-border)]
-  prose-kbd:rounded prose-kbd:border prose-kbd:border-[var(--color-border)] prose-kbd:bg-[var(--color-surface-container-lowest)] prose-kbd:px-1.5 prose-kbd:py-0.5 prose-kbd:font-[var(--font-mono)] prose-kbd:text-[12px] prose-kbd:font-normal prose-kbd:text-[var(--color-text-secondary)] prose-kbd:shadow-none
+  prose-img:rounded-[var(--radius-lg)] prose-img:border prose-img:border-[var(--color-border)]
+  prose-kbd:rounded-[var(--radius-sm)] prose-kbd:border prose-kbd:border-[var(--color-border)] prose-kbd:bg-[var(--color-surface-container-lowest)] prose-kbd:px-1.5 prose-kbd:py-0.5 prose-kbd:font-mono prose-kbd:text-[12px] prose-kbd:font-normal prose-kbd:text-[var(--color-text-secondary)] prose-kbd:shadow-none
   prose-ul:pl-5 prose-ul:[&>li]:marker:text-[var(--color-text-tertiary)]
   prose-ol:pl-5 prose-ol:[&>li]:marker:text-[var(--color-text-tertiary)]
   prose-li:my-1.5
@@ -449,7 +450,7 @@ const COMPACT_PROSE_CLASSES = `
   prose-p:my-1 prose-p:text-xs prose-p:leading-5 prose-p:text-[var(--color-text-secondary)]
   prose-headings:mt-2 prose-headings:mb-1 prose-headings:leading-snug
   prose-h1:text-base prose-h2:text-sm prose-h3:text-xs prose-h4:text-xs
-  prose-blockquote:my-2 prose-blockquote:border-l-2 prose-blockquote:border-[var(--color-outline-variant)] prose-blockquote:pl-3 prose-blockquote:text-[var(--color-text-secondary)]
+  prose-blockquote:my-2 prose-blockquote:border-l-2 prose-blockquote:border-[var(--color-primary-fixed-dim)] prose-blockquote:pl-3 prose-blockquote:text-[var(--color-text-secondary)]
   prose-code:text-[12px]
   prose-ul:my-1 prose-ol:my-1 prose-ul:pl-4 prose-ol:pl-4
   prose-li:my-0.5 prose-li:text-xs prose-li:leading-5 prose-li:text-[var(--color-text-secondary)]
@@ -528,7 +529,7 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({ content, varian
     if (!copied) return
 
     const original = button.textContent
-    button.textContent = 'Copied'
+    button.textContent = t('common.copied')
     window.setTimeout(() => {
       button.textContent = original
     }, 1500)

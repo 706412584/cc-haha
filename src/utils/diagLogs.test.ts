@@ -21,6 +21,24 @@ afterEach(async () => {
 })
 
 describe('logForDiagnosticsNoPII', () => {
+  test.serial('creates and repairs CLI diagnostic storage with private permissions', async () => {
+    if (process.platform === 'win32') return
+    const previousUmask = process.umask(0o022)
+    const basePath = process.env.CLAUDE_CODE_DIAGNOSTICS_FILE!
+    const activePath = `${basePath}.${process.pid}.current.jsonl`
+    try {
+      fs.chmodSync(tmpDir, 0o755)
+      fs.writeFileSync(activePath, 'existing\n', { mode: 0o644 })
+
+      logForDiagnosticsNoPII('info', 'private_mode_probe')
+
+      expect((await fsp.stat(tmpDir)).mode & 0o777).toBe(0o700)
+      expect((await fsp.stat(activePath)).mode & 0o777).toBe(0o600)
+    } finally {
+      process.umask(previousUmask)
+    }
+  })
+
   test('owns a per-process segment and rotates it without replacing a shared append target', async () => {
     const basePath = process.env.CLAUDE_CODE_DIAGNOSTICS_FILE!
     const activePath = `${basePath}.${process.pid}.current.jsonl`

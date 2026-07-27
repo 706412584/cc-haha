@@ -60,7 +60,7 @@ Claude Code 从 6 个不同来源加载 Skills，按优先级从高到低：
 
 ### 3. User（用户 Skills）
 
-用户个人定义，存放在 `~/.claude/skills/`。
+用户个人定义，存放在 `~/.claude/skills/`，同时也会读取跨工具开放标准目录 `~/.agents/skills/`。
 
 ```
 ~/.claude/skills/
@@ -69,21 +69,43 @@ Claude Code 从 6 个不同来源加载 Skills，按优先级从高到低：
 ├── deploy-check/
 │   └── SKILL.md
 └── ...
+
+~/.agents/skills/         ← 开放标准目录，与 Codex / Cursor / Gemini CLI 共享
+└── pdf-processing/
+    └── SKILL.md
 ```
 
 ### 4. Project（项目 Skills）
 
-项目级别定义，存放在 `.claude/skills/`，可提交到版本控制。
+项目级别定义，存放在 `.claude/skills/` 或 `.agents/skills/`，可提交到版本控制。
 
 ```
 your-project/
-└── .claude/
-    └── skills/
-        ├── lint-fix/
-        │   └── SKILL.md
-        └── test-runner/
+├── .claude/
+│   └── skills/
+│       ├── lint-fix/
+│       │   └── SKILL.md
+│       └── test-runner/
+│           └── SKILL.md
+└── .agents/
+    └── skills/           ← 团队共享，其它 Agent 工具同样能发现
+        └── deploy-app/
             └── SKILL.md
 ```
+
+### 关于 `.agents/skills/`（Agent Skills 开放标准）
+
+`.agents/skills/` 是 [agentskills.io](https://agentskills.io) 规范推荐的跨客户端共享目录，
+OpenAI Codex、Cursor、Gemini CLI、opencode 等工具都会扫描它。放在这里的技能不必再往每个
+工具的私有目录里复制一份。
+
+- 两种目录**同时生效**，`SKILL.md` 格式完全一致，无需改写。
+- 同一层级下若出现同名技能，`.claude/` 优先，`.agents/` 中的同名项被忽略（会记录一条 warn 日志）。
+  不同层级（如用户级与项目级）同名仍按原有规则各自保留。
+- 通过软链接共享同一份技能时会自动识别为同一个，不会重复加载。
+- 如需关闭，在 `settings.json` 中设置 `"disableAgentSkillsDirectory": true`，
+  或设置环境变量 `CLAUDE_CODE_DISABLE_AGENT_SKILLS_DIR=1`。关闭后 `.claude/skills/` 不受影响。
+- 技能市场安装、`/skillify` 创建等写入操作仍然写到 `~/.claude/skills/`。
 
 ### 5. Plugin（插件 Skills）
 
@@ -311,7 +333,7 @@ paths: "src/**/*.ts, test/**/*.ts"
 ```
 1. 用户操作某个深层目录中的文件
 2. discoverSkillDirsForPaths() 从文件路径向上遍历
-3. 寻找 .claude/skills/ 目录（不超过 cwd）
+3. 寻找 .claude/skills/ 与 .agents/skills/ 目录（不超过 cwd）
 4. 跳过 .gitignore 忽略的目录
 5. 发现新目录 → addSkillDirectories() → 加载并注册
 ```
@@ -374,6 +396,7 @@ EOF
 |------|------|
 | 创建 Skill | `~/.claude/skills/<name>/SKILL.md` |
 | 项目级 Skill | `.claude/skills/<name>/SKILL.md` |
+| 跨工具共享 Skill | `~/.agents/skills/<name>/SKILL.md`（Codex / Cursor / Gemini CLI 同样可见） |
 | 调用 Skill | 终端输入 `/skill-name` |
 | 查看可用 Skills | 终端输入 `/skills` |
 | 用 AI 创建 Skill | `/skillify` |

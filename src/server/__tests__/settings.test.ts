@@ -249,6 +249,44 @@ describe('SettingsService', () => {
     expect(settings.model).toBe('claude-haiku-4-5')
   })
 
+  it('should preserve unknown desktop terminal fields from older or future settings', async () => {
+    await fs.writeFile(
+      path.join(tmpDir, 'settings.json'),
+      JSON.stringify({
+        desktopTerminal: {
+          startupShell: 'system',
+          customShellPath: '',
+          legacyEncoding: 'utf-8',
+          futureProfile: {
+            id: 'work',
+            inheritEnvironment: false,
+          },
+        },
+      }),
+      'utf-8',
+    )
+
+    const svc = new SettingsService()
+    await svc.updateUserSettings({
+      desktopTerminal: {
+        startupShell: 'pwsh',
+        customShellPath: 'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
+      },
+    })
+
+    expect(await svc.getUserSettings()).toMatchObject({
+      desktopTerminal: {
+        startupShell: 'pwsh',
+        customShellPath: 'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
+        legacyEncoding: 'utf-8',
+        futureProfile: {
+          id: 'work',
+          inheritEnvironment: false,
+        },
+      },
+    })
+  })
+
   it('should not let cached CLI settings overwrite desktop settings updates', async () => {
     const svc = new SettingsService()
     await svc.updateUserSettings({

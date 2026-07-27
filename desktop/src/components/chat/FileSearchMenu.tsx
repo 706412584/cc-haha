@@ -3,6 +3,7 @@ import { ApiError } from '../../api/client'
 import { filesystemApi } from '../../api/filesystem'
 import { useTranslation } from '../../i18n'
 import type { TranslationKey } from '../../i18n'
+import { IconButton } from '@/components/ui/IconButton'
 
 type DirEntry = {
   name: string
@@ -215,7 +216,7 @@ export const FileSearchMenu = forwardRef<FileSearchMenuHandle, Props>(({ cwd, fi
         <button
           type="button"
           onClick={() => selectEntry(entry)}
-          className={`flex min-w-0 flex-1 items-center rounded-lg px-2.5 text-left transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]/40 ${
+          className={`flex min-w-0 flex-1 items-center rounded-[var(--radius-md)] px-2.5 text-left transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] ${
             isSearchMode ? 'gap-2.5 py-2' : 'gap-3 py-2'
           }`}
           role="option"
@@ -227,7 +228,7 @@ export const FileSearchMenu = forwardRef<FileSearchMenuHandle, Props>(({ cwd, fi
           <span className="min-w-0 flex-1">
             {isSearchMode ? (
               <span
-                className="block truncate font-[var(--font-mono)] text-sm text-[var(--color-text-primary)]"
+                className="block truncate font-mono text-sm text-[var(--color-text-primary)]"
                 title={displayPath}
               >
                 {displayPath}
@@ -235,31 +236,30 @@ export const FileSearchMenu = forwardRef<FileSearchMenuHandle, Props>(({ cwd, fi
             ) : (
               <>
                 <span className="block truncate text-sm font-medium text-[var(--color-text-primary)]">{entry.name}</span>
-                <span className="block truncate font-[var(--font-mono)] text-[11px] text-[var(--color-text-tertiary)]">
+                <span className="block truncate font-mono text-[11px] text-[var(--color-text-tertiary)]">
                   {parentPath || (entry.isDirectory ? t('fileSearch.directory') : t('fileSearch.currentDirectory'))}
                 </span>
               </>
             )}
           </span>
           {!isSearchMode ? (
-            <span className="shrink-0 rounded-md border border-[var(--color-border)] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-[0.02em] text-[var(--color-text-tertiary)]">
+            <span className="shrink-0 rounded-[var(--radius-sm)] border border-[var(--color-border)] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-[0.02em] text-[var(--color-text-tertiary)]">
               {entry.isDirectory ? t('fileSearch.folderTag') : t('fileSearch.fileTag')}
             </span>
           ) : null}
         </button>
         {entry.isDirectory ? (
-          <button
-            type="button"
-            aria-label={t('fileSearch.openFolder')}
-            title={t('fileSearch.openFolder')}
+          <IconButton
+            icon="chevron_right"
+            label={t('fileSearch.openFolder')}
+            size="lg"
+            tone="muted"
+            className="my-1 opacity-70 group-hover:opacity-100"
             onClick={(event) => {
               event.stopPropagation()
               navigateEntry(entry)
             }}
-            className="my-1 flex w-9 shrink-0 items-center justify-center rounded-lg text-[var(--color-text-tertiary)] opacity-70 transition hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]/40 group-hover:opacity-100"
-          >
-            <span className="material-symbols-outlined text-[16px]">chevron_right</span>
-          </button>
+          />
         ) : null}
       </div>
     )
@@ -268,7 +268,7 @@ export const FileSearchMenu = forwardRef<FileSearchMenuHandle, Props>(({ cwd, fi
   return (
     <div
       id="file-search-menu"
-      className={`absolute bottom-full mb-2 z-50 w-full overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-dropdown)] ${
+      className={`absolute bottom-full mb-2 z-[var(--z-dropdown)] w-full overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-overlay)] ${
         compact ? 'left-0 right-0 min-w-0 max-w-[calc(100vw-32px)]' : 'left-0 min-w-[480px]'
       }`}
       onMouseDown={(e) => e.stopPropagation()}

@@ -194,7 +194,7 @@ export function ConversationNavigator({
                   setPreviewItemId(null)
                 }}
                 onClick={() => onNavigate(item)}
-                className={`group flex h-4 items-center rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]/35 ${modeStyles.button}`}
+                className={`group flex h-4 items-center rounded-[var(--radius-sm)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] ${modeStyles.button}`}
               >
                 <span
                   aria-hidden="true"
@@ -221,7 +221,7 @@ export function ConversationNavigator({
           id="conversation-navigation-preview"
           data-testid="conversation-navigation-preview"
           role="tooltip"
-          className="fixed z-50 w-[min(320px,calc(100vw-88px))] -translate-y-1/2 rounded-xl border border-[var(--color-border)]/80 bg-[var(--color-surface-container-lowest)] px-3.5 py-3 text-left shadow-[var(--shadow-dropdown)]"
+          className="fixed z-[var(--z-tooltip)] w-[min(320px,calc(100vw-88px))] -translate-y-1/2 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-3.5 py-3 text-left shadow-[var(--shadow-overlay)]"
           style={{ left: previewPosition.left, top: previewPosition.top }}
         >
           <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">

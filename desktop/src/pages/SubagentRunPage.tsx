@@ -7,6 +7,8 @@ import {
 } from '../api/subagents'
 import { buildRenderModel, MessageBlock } from '../components/chat/MessageList'
 import { ToolCallGroup } from '../components/chat/ToolCallGroup'
+import { Badge, type Tone as BadgeTone } from '@/components/ui/Badge'
+import { IconButton } from '@/components/ui/IconButton'
 import { useTranslation } from '../i18n'
 import { mapHistoryMessagesToUiMessages, useChatStore } from '../stores/chatStore'
 import type { AgentTaskNotification, UIMessage } from '../types/chat'
@@ -76,22 +78,29 @@ export function SubagentRunPage({
       <header className="flex shrink-0 items-start justify-between gap-4 border-b border-[var(--color-border)] px-5 py-3">
         <div className="min-w-0">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <h1 className="min-w-0 truncate text-sm font-semibold text-[var(--color-text-primary)]">{title}</h1>
+            <h1
+              className="min-w-0 truncate text-[16.5px] font-semibold leading-tight text-[var(--color-text-primary)]"
+              style={{ fontFamily: 'var(--font-headline)' }}
+            >
+              {title}
+            </h1>
             {data ? <StatusBadge status={data.status} t={t} /> : null}
           </div>
           <p className="mt-1 truncate font-mono text-[11px] text-[var(--color-text-tertiary)]">
             {sourceSessionId} / {toolUseId}
           </p>
         </div>
-        <button
-          type="button"
-          aria-label={t('subagentRun.refresh')}
+        {/* The icon spins in place while loading rather than using IconButton's
+            `loading` prop, which would swap RefreshCw for the generic Spinner. */}
+        <IconButton
+          icon={<RefreshCw size={15} strokeWidth={2.2} aria-hidden="true" className={loading ? 'animate-spin' : undefined} />}
+          label={t('subagentRun.refresh')}
+          showTooltip={false}
+          size="md"
+          tone="muted"
           onClick={() => void load()}
           disabled={loading}
-          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          <RefreshCw size={15} strokeWidth={2.2} aria-hidden="true" className={loading ? 'animate-spin' : undefined} />
-        </button>
+        />
       </header>
 
       <main className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
@@ -99,7 +108,7 @@ export function SubagentRunPage({
           <div role="status" className="text-sm text-[var(--color-text-tertiary)]">{t('subagentRun.loading')}</div>
         ) : null}
         {error ? (
-          <div role="alert" className="rounded-[var(--radius-md)] border border-[var(--color-error)]/30 bg-[var(--color-error)]/5 px-3 py-2 text-sm text-[var(--color-error)]">
+          <div role="alert" className="rounded-[var(--radius-md)] border border-[var(--color-error)] bg-[var(--color-error-container)] px-3 py-2 text-sm text-[var(--color-on-error-container)]">
             {error}
           </div>
         ) : null}
@@ -129,15 +138,15 @@ function SubagentRunDetails({ data }: { data: SubagentRunResponse }) {
         {data.taskId ? (
           <>
             <span aria-hidden="true">/</span>
-            <span>{t('subagentRun.task')}: {data.taskId}</span>
+            <span>{t('subagentRun.task')}: <span className="font-mono">{data.taskId}</span></span>
           </>
         ) : null}
         <span aria-hidden="true">/</span>
-        <span>{t('subagentRun.updated')}: {formatTimestamp(data.updatedAt)}</span>
+        <span>{t('subagentRun.updated')}: <span className="font-mono tabular-nums">{formatTimestamp(data.updatedAt)}</span></span>
         {data.usage?.totalTokens ? (
           <>
             <span aria-hidden="true">/</span>
-            <span>{t('common.tokens', { count: formatNumber(data.usage.totalTokens) })}</span>
+            <span className="font-mono tabular-nums">{t('common.tokens', { count: formatNumber(data.usage.totalTokens) })}</span>
           </>
         ) : null}
         {data.outputFile ? (
@@ -163,8 +172,13 @@ function ConversationSection({ data }: { data: SubagentRunResponse }) {
   if (renderModel.renderItems.length === 0) {
     return (
       <section>
-        <h2 className="mb-2 text-xs font-semibold uppercase tracking-normal text-[var(--color-text-tertiary)]">{t('subagentRun.transcript')}</h2>
-        <div className="rounded-lg border border-dashed border-[var(--color-border)] px-3 py-2 text-sm text-[var(--color-text-tertiary)]">
+        <h2
+          className="mb-2 text-[13.5px] font-semibold text-[var(--color-text-secondary)]"
+          style={{ fontFamily: 'var(--font-headline)' }}
+        >
+          {t('subagentRun.transcript')}
+        </h2>
+        <div className="rounded-[var(--radius-lg)] border border-dashed border-[var(--color-border)] px-3 py-2 text-sm text-[var(--color-text-tertiary)]">
           {t('subagentRun.noTranscript')}
         </div>
       </section>
@@ -174,7 +188,12 @@ function ConversationSection({ data }: { data: SubagentRunResponse }) {
   return (
     <section>
       <div className="mb-2 flex items-center justify-between gap-3">
-        <h2 className="text-xs font-semibold uppercase tracking-normal text-[var(--color-text-tertiary)]">{t('subagentRun.transcript')}</h2>
+        <h2
+          className="text-[13.5px] font-semibold text-[var(--color-text-secondary)]"
+          style={{ fontFamily: 'var(--font-headline)' }}
+        >
+          {t('subagentRun.transcript')}
+        </h2>
         {data.truncated ? (
           <span className="text-[11px] text-[var(--color-text-tertiary)]">{t('subagentRun.truncated')}</span>
         ) : null}
@@ -216,23 +235,17 @@ function ConversationSection({ data }: { data: SubagentRunResponse }) {
 
 function StatusBadge({ status, t }: { status: SubagentRunStatus; t: TranslationFn }) {
   return (
-    <span className={`rounded-[var(--radius-sm)] border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-normal ${statusToneClass(status)}`}>
+    <Badge tone={statusTone(status)} size="xs" bordered>
       {getSubagentStatusLabel(status, t)}
-    </span>
+    </Badge>
   )
 }
 
-function statusToneClass(status: SubagentRunStatus) {
-  if (status === 'completed') {
-    return 'border-[var(--color-success)]/25 bg-[var(--color-success)]/10 text-[var(--color-success)]'
-  }
-  if (status === 'failed' || status === 'stopped') {
-    return 'border-[var(--color-error)]/30 bg-[var(--color-error)]/5 text-[var(--color-error)]'
-  }
-  if (status === 'running') {
-    return 'border-[var(--color-brand)]/25 bg-[var(--color-brand)]/10 text-[var(--color-brand)]'
-  }
-  return 'border-[var(--color-border)] bg-[var(--color-surface-container-low)] text-[var(--color-text-tertiary)]'
+function statusTone(status: SubagentRunStatus): BadgeTone {
+  if (status === 'completed') return 'success'
+  if (status === 'failed' || status === 'stopped') return 'danger'
+  if (status === 'running') return 'brand'
+  return 'neutral'
 }
 
 function sourceLabel(source: SubagentRunResponse['source'], t: TranslationFn) {

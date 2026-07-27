@@ -26,6 +26,7 @@ import { logError } from '../../utils/log.js'
 import {
   loadMarkdownFilesForSubdir,
   parseAgentToolsFromFrontmatter,
+  parseRawToolListFromFrontmatter,
   parseSlashCommandToolsFromFrontmatter,
 } from '../../utils/markdownConfigLoader.js'
 import {
@@ -699,7 +700,7 @@ export function parseAgentFromMarkdown(
 
     // Parse tools from frontmatter
     let tools = parseAgentToolsFromFrontmatter(frontmatter['tools'])
-    const rawTools = tools === undefined ? undefined : [...tools]
+    const rawTools = parseRawToolListFromFrontmatter(frontmatter['tools'])
 
     // If memory is enabled, inject Write/Edit/Read tools for memory access
     if (isAutoMemoryEnabled() && memory && tools !== undefined) {

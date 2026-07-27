@@ -287,6 +287,34 @@ function normalizeTaskStatus(status: unknown): TaskSummaryItem['status'] {
   return 'pending'
 }
 
+function taskIdFromInput(input: Record<string, unknown>): string {
+  return stringField(input, 'taskId') || stringField(input, 'id')
+}
+
+function isDeletedStatus(input: Record<string, unknown>): boolean {
+  return stringField(input, 'status') === 'deleted'
+}
+
+/**
+ * TaskUpdate 的 deleted 是删除动作而非状态，删除可能发生在创建它的那一轮之后，
+ * 所以要跨轮次收集，避免已删任务留在历史统计里。
+ */
+function collectDeletedTaskIds(messages: UIMessage[]): Set<string> {
+  const deletedTaskIds = new Set<string>()
+
+  for (const message of messages) {
+    if (message.type !== 'tool_use' || message.toolName !== 'TaskUpdate') continue
+
+    const input = isRecordValue(message.input) ? message.input : {}
+    if (!isDeletedStatus(input)) continue
+
+    const taskId = taskIdFromInput(input)
+    if (taskId) deletedTaskIds.add(taskId)
+  }
+
+  return deletedTaskIds
+}
+
 function parseCreatedTaskResult(content: unknown): { id: string; subject?: string } | null {
   const text = extractTextContent(content)
   const match = text.match(/Task\s+#([^\s:]+)\s+created\s+successfully(?::\s*(.+))?/i)
@@ -513,8 +541,14 @@ function buildTaskRowsFromTaskTools(messages: UIMessage[]): ActivityRow[] {
 
     if (message.toolName === 'TaskUpdate') {
       const input = isRecordValue(message.input) ? message.input : {}
-      const taskId = stringField(input, 'taskId') || stringField(input, 'id')
+      const taskId = taskIdFromInput(input)
       if (!taskId) continue
+
+      // deleted 不是一种任务状态：CLI 侧 TaskUpdateTool 会真的删掉任务文件
+      if (isDeletedStatus(input)) {
+        rowsByTaskId.delete(taskId)
+        continue
+      }
 
       const existing = rowsByTaskId.get(taskId)
       const activeForm = stringField(input, 'activeForm')
@@ -611,9 +645,12 @@ function buildHistoricalTasksRow(groups: TaskTurnRows[]): ActivityRow | null {
 }
 
 function buildTaskRowsFromMessages(messages: UIMessage[], liveTasks: CLITask[]): ActivityRow[] {
-  const liveRows = liveTasks.map(buildTaskRow)
+  const deletedTaskIds = collectDeletedTaskIds(messages)
+  const isLiveRow = (row: ActivityRow) => (row.taskId ? !deletedTaskIds.has(row.taskId) : true)
+  // 任务列表要等 tool_result 到达后才异步刷新，这中间 liveTasks 里还留着已删的任务
+  const liveRows = liveTasks.filter((task) => !deletedTaskIds.has(task.id)).map(buildTaskRow)
   const taskTurnRows = splitMessagesIntoTurns(messages)
-    .map((turn) => ({ turn, rows: buildTaskRowsFromTurnMessages(turn.messages) }))
+    .map((turn) => ({ turn, rows: buildTaskRowsFromTurnMessages(turn.messages).filter(isLiveRow) }))
     .filter((group) => group.rows.length > 0)
 
   if (taskTurnRows.length === 0) {

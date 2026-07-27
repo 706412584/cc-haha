@@ -195,6 +195,22 @@ describe('TraceList', () => {
     expect(useTabStore.getState().tabs.find((tab) => tab.sessionId === SETTINGS_TAB_ID)?.type).toBe('settings')
   })
 
+  it('announces a failed load and retries from inside the error', async () => {
+    vi.mocked(tracesApi.list)
+      .mockRejectedValueOnce(new Error('trace store unreachable'))
+      .mockResolvedValueOnce(traceList)
+
+    render(<TraceList />)
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('trace store unreachable')
+
+    fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }))
+
+    expect(await screen.findByText('/tmp/cc-haha/traces')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
   it('loads additional trace pages instead of fetching all rows at once', async () => {
     vi.mocked(tracesApi.list)
       .mockResolvedValueOnce({ ...traceList, total: 2 })

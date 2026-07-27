@@ -174,4 +174,87 @@ describe('buildDiagnosticsIssueReport', () => {
     expect(report).toContain('2026-07-11T09:00:00.000Z')
     expect(report).not.toContain('PRIVATE_ASSISTANT_REPLY')
   })
+
+  test('keeps ordinary model names readable but redacts secret-like model values', () => {
+    const report = buildDiagnosticsIssueReport({
+      generatedAt: '2026-07-11T09:10:11.000Z',
+      appInfo: { appVersion: '0.4.7', platform: 'darwin', arch: 'arm64', bun: '1.2.18', node: 'v22.17.0' },
+      providersSummary: {
+        providers: [{
+          id: 'provider-1',
+          name: 'Test Provider',
+          apiFormat: 'anthropic',
+          baseUrl: { hostname: 'api.example.com' },
+          models: {
+            main: 'claude-sonnet-4',
+            fallback: 'gpt-4o',
+            leaked: 'sk-proj-LEAKEDMODELKEY',
+          },
+        }],
+      },
+      events: [],
+      corruptLineCount: 0,
+    })
+
+    expect(report).toContain('claude-sonnet-4')
+    expect(report).toContain('gpt-4o')
+    expect(report).not.toContain('sk-proj-LEAKEDMODELKEY')
+    expect(report).toContain('leaked=\\[REDACTED\\]')
+  })
+
+  test('keeps untrusted event and provider metadata from injecting Markdown or leaking secrets', () => {
+    const extendedSecrets = [
+      `AIza${'A'.repeat(35)}`,
+      `gho_${'B'.repeat(36)}`,
+      `ghr_${'C'.repeat(36)}`,
+      'xoxb-1234567890-1234567890-abcdefghijkl',
+    ]
+    const report = buildDiagnosticsIssueReport({
+      generatedAt: '2026-07-11T09:10:11.000Z -->\n## injected-generated',
+      appInfo: {
+        appVersion: '0.4.7\n## injected-app',
+        platform: 'darwin',
+        arch: 'arm64',
+        bun: '1.2.18',
+        node: 'v22.17.0',
+      },
+      providersSummary: {
+        providers: [{
+          id: 'provider-1',
+          name: `[private provider](https://evil.example)\n## injected-provider sk-proj-PROVIDERSECRET ${extendedSecrets[0]} **bold** __underlined__ _italic_ @maintainer`,
+          apiFormat: 'anthropic\n- [x] forged-provider-field',
+          baseUrl: { hostname: 'api.example.com\n## injected-host' },
+          models: {
+            'main\n## injected-model-key': 'sk-ant-api03-MODELSECRET',
+            oauth: extendedSecrets[1],
+            refresh: extendedSecrets[2],
+            slack: extendedSecrets[3],
+          },
+        }],
+      },
+      events: [{
+        id: 'event-1\n## injected-event-id',
+        timestamp: '2026-07-11T09:00:00.000Z\n## injected-timestamp',
+        type: 'sdk_api_error\n## injected-event-type',
+        severity: 'error',
+        details: {
+          errorCode: 'API_ERROR\n## injected-error-code',
+          status: 'failed',
+        },
+        omittedFields: ['summary'],
+      }],
+      corruptLineCount: 0,
+    })
+
+    expect(report).not.toMatch(/\n## injected-/)
+    expect(report).not.toContain('- [x] forged-provider-field')
+    expect(report).not.toContain('](evil.example)')
+    expect(report).not.toContain('sk-proj-PROVIDERSECRET')
+    expect(report).not.toContain('sk-ant-api03-MODELSECRET')
+    for (const secret of extendedSecrets) expect(report).not.toContain(secret)
+    expect(report).not.toContain('**bold**')
+    expect(report).not.toContain('__underlined__')
+    expect(report).not.toContain('_italic_')
+    expect(report).not.toContain('@maintainer')
+  })
 })

@@ -153,6 +153,12 @@ const DESKTOP_SCOPE: CoverageScope = {
   excludePrefixes: [
     'desktop/src/mocks/',
     'desktop/src/types/',
+    // Dev-only tooling, same category as mocks/. `dev/` holds the component
+    // gallery, which Vite never bundles (its build input is index.html alone)
+    // and which exists precisely to be looked at by a person — unit-testing a
+    // page whose whole job is rendering every primitive would assert that the
+    // primitives render, which their own tests already do.
+    'desktop/src/dev/',
   ],
   excludeSuffixes: ['.test.ts', '.test.tsx', '.d.ts', 'vite-env.d.ts', '.css'],
 }
@@ -685,6 +691,9 @@ export function rangeContainsMergeCommit(rootDir: string, baseRef?: string): boo
 }
 
 export function shouldEvaluateChangedLines(rootDir: string, baseRef?: string): boolean {
+  const mergeHead = gitOutput(rootDir, ['rev-parse', '--verify', 'MERGE_HEAD'])
+  if (mergeHead?.trim()) return false
+
   const dirty = gitOutput(rootDir, ['diff', '--name-only', 'HEAD', '--'])
   return Boolean(dirty?.trim()) || !rangeContainsMergeCommit(rootDir, baseRef)
 }

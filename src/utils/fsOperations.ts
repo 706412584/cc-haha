@@ -49,6 +49,8 @@ export type FsOperations = {
   statSync(path: string): fs.Stats
   /** Gets file stats without following symlinks */
   lstatSync(path: string): fs.Stats
+  /** Changes file or directory permissions */
+  chmodSync(path: string, mode: number): void
 
   // File content operations
   /** Reads file content as string with specified encoding */
@@ -442,6 +444,11 @@ export const NodeFsOperations: FsOperations = {
     return fs.lstatSync(fsPath)
   },
 
+  chmodSync(fsPath, mode) {
+    using _ = slowLogging`fs.chmodSync(${fsPath}, ${mode.toString(8)})`
+    fs.chmodSync(fsPath, mode)
+  },
+
   readFileSync(fsPath, options) {
     using _ = slowLogging`fs.readFileSync(${fsPath})`
     return fs.readFileSync(fsPath, { encoding: options.encoding })
@@ -480,7 +487,18 @@ export const NodeFsOperations: FsOperations = {
         return
       } catch (e) {
         if (getErrnoCode(e) !== 'EEXIST') throw e
-        // File exists — fall through to normal append
+        // Existing files are opened without following a final symlink on
+        // POSIX. Tighten their mode through the descriptor before appending.
+        const noFollow = process.platform === 'win32' ? 0 : fs.constants.O_NOFOLLOW
+        const fd = fs.openSync(path, fs.constants.O_WRONLY | fs.constants.O_APPEND | noFollow)
+        try {
+          if (!fs.fstatSync(fd).isFile()) throw new Error(`Refusing non-regular append target: ${path}`)
+          if (process.platform !== 'win32') fs.fchmodSync(fd, options.mode)
+          fs.appendFileSync(fd, data)
+        } finally {
+          fs.closeSync(fd)
+        }
+        return
       }
     }
     fs.appendFileSync(path, data)

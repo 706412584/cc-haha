@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import '@testing-library/jest-dom'
 
 import { Settings } from '../pages/Settings'
@@ -253,10 +253,15 @@ describe('Settings > Skills tab', () => {
 
     expect(screen.getByText('Alpha Skill')).toBeInTheDocument()
     expect(screen.getByText('First skill description')).toBeInTheDocument()
-    expect(screen.getByText('Read, Edit')).toBeInTheDocument()
-    expect(screen.getByText('sonnet')).toBeInTheDocument()
     expect(screen.getByText('Hello')).toBeInTheDocument()
     expect(screen.queryByText(/^---$/)).not.toBeInTheDocument()
+
+    // Frontmatter renders as a structured panel: list fields become individual
+    // chips rather than one comma-joined string squeezed into the sidebar.
+    const frontmatter = screen.getByTestId('skill-frontmatter-panel')
+    expect(within(frontmatter).getByText('Read')).toBeInTheDocument()
+    expect(within(frontmatter).getByText('Edit')).toBeInTheDocument()
+    expect(within(frontmatter).getByText('sonnet')).toBeInTheDocument()
   })
 
   it('returns to plugins tab when skill detail was opened from plugins', async () => {

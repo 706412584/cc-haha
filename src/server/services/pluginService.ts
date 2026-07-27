@@ -43,7 +43,7 @@ import {
 import { loadPluginLspServers } from '../../utils/plugins/lspPluginIntegration.js'
 import { loadPluginMcpServers } from '../../utils/plugins/mcpPluginIntegration.js'
 import { parsePluginIdentifier } from '../../utils/plugins/pluginIdentifier.js'
-import { loadAllPlugins } from '../../utils/plugins/pluginLoader.js'
+import { loadAllPluginsCacheOnly } from '../../utils/plugins/pluginLoader.js'
 import { loadPluginHooks } from '../../utils/plugins/loadPluginHooks.js'
 import { getPluginSkills } from '../../utils/plugins/loadPluginCommands.js'
 import { clearPluginCacheExclusions } from '../../utils/plugins/orphanedPluginFilter.js'
@@ -394,8 +394,10 @@ export class PluginService {
   async enablePlugin(
     pluginId: string,
     scope?: InstallableScope,
+    projectRoot?: string,
   ): Promise<ApiPluginActionResponse> {
-    const result = await enablePluginOp(pluginId, scope)
+    this.requireProjectRoot(scope, projectRoot)
+    const result = await enablePluginOp(pluginId, scope, projectRoot)
     if (!result.success) {
       throw ApiError.badRequest(result.message)
     }
@@ -405,8 +407,10 @@ export class PluginService {
   async disablePlugin(
     pluginId: string,
     scope?: InstallableScope,
+    projectRoot?: string,
   ): Promise<ApiPluginActionResponse> {
-    const result = await disablePluginOp(pluginId, scope)
+    this.requireProjectRoot(scope, projectRoot)
+    const result = await disablePluginOp(pluginId, scope, projectRoot)
     if (!result.success) {
       throw ApiError.badRequest(result.message)
     }
@@ -417,12 +421,19 @@ export class PluginService {
     pluginId: string,
     scope?: InstallableScope,
     keepData = false,
+    projectRoot?: string,
   ): Promise<ApiPluginActionResponse> {
     if (!scope) {
       throw ApiError.badRequest('Plugin uninstall requires a scope')
     }
 
-    const result = await uninstallPluginOp(pluginId, scope, keepData)
+    this.requireProjectRoot(scope, projectRoot)
+    const result = await uninstallPluginOp(
+      pluginId,
+      scope,
+      !keepData,
+      projectRoot,
+    )
     if (!result.success) {
       throw ApiError.badRequest(result.message)
     }
@@ -432,12 +443,14 @@ export class PluginService {
   async updatePlugin(
     pluginId: string,
     scope?: PluginScope,
+    projectRoot?: string,
   ): Promise<ApiPluginActionResponse> {
     if (!scope) {
       throw ApiError.badRequest('Plugin update requires a scope')
     }
 
-    const result = await updatePluginOp(pluginId, scope)
+    this.requireProjectRoot(scope, projectRoot)
+    const result = await updatePluginOp(pluginId, scope, projectRoot)
     if (!result.success) {
       throw ApiError.badRequest(result.message)
     }
@@ -723,7 +736,7 @@ export class PluginService {
   }
 
   private async loadPluginState(): Promise<HydratedPluginState> {
-    const result = await loadAllPlugins()
+    const result = await loadAllPluginsCacheOnly()
     await Promise.all(
       result.enabled.map(async (plugin) => {
         plugin.mcpServers = plugin.mcpServers || await loadPluginMcpServers(plugin, result.errors)
@@ -1208,5 +1221,16 @@ export class PluginService {
         hookSum + (matchers?.reduce((matcherSum, matcher) => matcherSum + matcher.hooks.length, 0) ?? 0)
       ), 0)
     }, 0)
+  }
+
+  private requireProjectRoot(
+    scope: PluginScope | undefined,
+    projectRoot: string | undefined,
+  ): void {
+    if ((scope === 'project' || scope === 'local') && !projectRoot) {
+      throw ApiError.badRequest(
+        `Plugin ${scope} scope requires the active project directory`,
+      )
+    }
   }
 }

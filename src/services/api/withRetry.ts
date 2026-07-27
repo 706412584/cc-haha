@@ -259,6 +259,67 @@ export function isRetryableStreamError(error: unknown): boolean {
 }
 
 /**
+ * Transport failures that mean the TCP/TLS connection under an *already
+ * established* stream died: a pooled keep-alive socket the peer had already
+ * closed, a proxy/NAT that dropped an idle-then-reused connection, or an
+ * upstream edge that reset the response mid-flight. Bun and Node/undici report
+ * the same physical failure under different codes.
+ */
+const STREAM_TRANSPORT_DISCONNECT_CODES = new Set([
+  'ECONNRESET',
+  'ECONNABORTED',
+  'EPIPE',
+  'UND_ERR_SOCKET',
+  'ERR_STREAM_PREMATURE_CLOSE',
+])
+
+/**
+ * Detect a transport disconnect raised while *consuming* an established stream.
+ *
+ * These reach neither retry layer on their own: withRetry only guards stream
+ * creation, and isRetryableStreamError only matches error payloads the upstream
+ * serialized into a 200 SSE body. A dead socket produces neither — under Bun it
+ * surfaces as a bare `Error` with `code: 'ECONNRESET'` and the message "The
+ * socket connection was closed unexpectedly", which is not an APIError at all.
+ * Hence the check walks the cause chain for a code instead of keying on type.
+ *
+ * Retrying is only safe behind a side-effect guard; see
+ * shouldRetryStreamAfterTransportDisconnect.
+ */
+export function isRetryableStreamTransportError(error: unknown): boolean {
+  const code = extractConnectionErrorDetails(error)?.code
+  return code !== undefined && STREAM_TRANSPORT_DISCONNECT_CODES.has(code)
+}
+
+/**
+ * Decide whether a mid-stream transport disconnect can be recovered by
+ * re-establishing the stream.
+ *
+ * SSE has no resume, so recovery is a full re-send — legitimate only while the
+ * failed attempt is still side-effect-free. That is exactly the boundary
+ * StreamAssistantCommitBuffer tracks: completed thinking/text stay buffered and
+ * are discarded with the attempt, but once a tool_use block completes or
+ * server-side tool activity starts, a re-send could duplicate a tool call
+ * (#766 / inc-4258), so the disconnect must surface to the user instead.
+ *
+ * A watchdog abort is excluded because it has its own retry path with a
+ * narrower safety check, and a user abort is not a fault to recover from.
+ */
+export function shouldRetryStreamAfterTransportDisconnect(input: {
+  error: unknown
+  hasCrossedSideEffectBoundary: boolean
+  streamIdleAborted: boolean
+  signalAborted: boolean
+}): boolean {
+  return (
+    !input.hasCrossedSideEffectBoundary &&
+    !input.streamIdleAborted &&
+    !input.signalAborted &&
+    isRetryableStreamTransportError(input.error)
+  )
+}
+
+/**
  * Max times withStreamRetry() re-establishes a stream after a transient
  * mid-stream error (see RetriableStreamError). Defaults to 4 so statusless
  * api_error responses and short socket disconnects get a meaningful recovery

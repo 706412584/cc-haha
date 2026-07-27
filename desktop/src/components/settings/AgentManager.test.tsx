@@ -88,8 +88,11 @@ async function renderManager(response: AgentListResponse = EMPTY_RESPONSE) {
 }
 
 function chooseAgentSelect(label: string, option: string) {
+  // The trigger is a button; the entries inside the panel are listbox options.
+  // They used to be buttons, which is invalid inside a `role="listbox"` and
+  // left the dropdown without arrow-key navigation.
   fireEvent.click(screen.getByRole('button', { name: label }))
-  fireEvent.click(screen.getByRole('button', { name: option }))
+  fireEvent.click(screen.getByRole('option', { name: option }))
 }
 
 describe('AgentManager', () => {
@@ -146,7 +149,7 @@ describe('AgentManager', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Selected Project/ }))
     expect(screen.getByText('Target project: /workspace/selected')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Model' }))
-    const modelMenuOption = screen.getByRole('button', { name: 'fable' })
+    const modelMenuOption = screen.getByRole('option', { name: 'fable' })
     expect(modelMenuOption).toBeInTheDocument()
     expect(modelMenuOption.parentElement).toHaveClass('bottom-full')
     fireEvent.keyDown(document, { key: 'Escape' })

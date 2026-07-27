@@ -638,6 +638,66 @@ describe('anthropicToOpenaiResponses', () => {
     expect((result as Record<string, unknown>).stop).toBeUndefined()
     expect((result as Record<string, unknown>).stop_sequences).toBeUndefined()
   })
+
+  // Responses names the function inline. The nested {function:{name}} shape is
+  // Chat Completions syntax and strict upstreams (xAI) reject it.
+  test('tool_choice type=tool names the function inline, not nested', () => {
+    const req: AnthropicRequest = {
+      model: 'gpt-4o',
+      max_tokens: 100,
+      messages: [{ role: 'user', content: 'Hi' }],
+      tools: [{ name: 'get_weather', input_schema: { type: 'object' } }],
+      tool_choice: { type: 'tool', name: 'get_weather' },
+    }
+    const result = anthropicToOpenaiResponses(req)
+    expect(result.tool_choice).toEqual({ type: 'function', name: 'get_weather' })
+  })
+
+  test('drops tool_choice when the request carries no tools', () => {
+    for (const choice of [
+      { type: 'auto' },
+      { type: 'any' },
+      { type: 'tool', name: 'get_weather' },
+    ]) {
+      const result = anthropicToOpenaiResponses({
+        model: 'gpt-4o',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'Hi' }],
+        tool_choice: choice,
+      } as AnthropicRequest)
+      expect(result.tools).toBeUndefined()
+      expect(result.tool_choice).toBeUndefined()
+    }
+  })
+
+  test('drops a tool_choice orphaned by tool filtering', () => {
+    const result = anthropicToOpenaiResponses({
+      model: 'gpt-4o',
+      max_tokens: 100,
+      messages: [{ role: 'user', content: 'Hi' }],
+      // BatchTool is filtered out of the tool list, so a choice naming it
+      // would point at a tool the upstream never receives.
+      tools: [{ name: 'BatchTool', input_schema: { type: 'object' } }],
+      tool_choice: { type: 'tool', name: 'BatchTool' },
+    } as AnthropicRequest)
+    expect(result.tools).toBeUndefined()
+    expect(result.tool_choice).toBeUndefined()
+  })
+
+  test('keeps a tool_choice whose target survives filtering', () => {
+    const result = anthropicToOpenaiResponses({
+      model: 'gpt-4o',
+      max_tokens: 100,
+      messages: [{ role: 'user', content: 'Hi' }],
+      tools: [
+        { name: 'BatchTool', input_schema: { type: 'object' } },
+        { name: 'get_weather', input_schema: { type: 'object' } },
+      ],
+      tool_choice: { type: 'tool', name: 'get_weather' },
+    } as AnthropicRequest)
+    expect(result.tools).toHaveLength(1)
+    expect(result.tool_choice).toEqual({ type: 'function', name: 'get_weather' })
+  })
 })
 
 // ─── openaiResponsesToAnthropic ─────────────────────────────────

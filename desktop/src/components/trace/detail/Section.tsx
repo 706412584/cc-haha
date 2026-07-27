@@ -1,6 +1,8 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { ChevronRight } from 'lucide-react'
 
+import { Badge } from '@/components/ui/Badge'
+
 const sectionOpenState = new Map<string, boolean>()
 const TraceSectionScopeContext = createContext('default')
 
@@ -57,30 +59,30 @@ export function Section({
 
   return (
     <section className="border-t border-[var(--color-border)] first:border-t-0">
-      <div className="flex items-center gap-2 px-4 py-2">
+      <div className="flex items-center gap-2 px-6 pb-2 pt-4">
         <button
           type="button"
           onClick={toggle}
           aria-expanded={open}
-          className="flex min-w-0 flex-1 items-center gap-1.5 text-left transition-colors"
+          className="flex min-w-0 flex-1 items-center gap-2 text-left transition-colors"
         >
           <ChevronRight
             size={13}
             strokeWidth={2}
             className={`shrink-0 text-[var(--color-text-tertiary)] transition-transform ${open ? 'rotate-90' : ''}`}
           />
-          <span className="truncate text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+          <span className="truncate text-[14px] font-bold text-[var(--color-text-primary)]">
             {title}
           </span>
           {badge !== undefined ? (
-            <span className="shrink-0 rounded-[var(--radius-sm)] bg-[var(--color-surface-container)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--color-text-tertiary)]">
+            <Badge tone="neutral" size="xs" pill={false} mono>
               {badge}
-            </span>
+            </Badge>
           ) : null}
         </button>
         {actions ? <div className="flex shrink-0 items-center gap-1">{actions}</div> : null}
       </div>
-      {open ? <div className="px-4 pb-4">{children}</div> : null}
+      {open ? <div className="px-6 pb-5">{children}</div> : null}
     </section>
   )
 }

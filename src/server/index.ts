@@ -27,7 +27,14 @@ import { enableConfigs } from '../utils/config.js'
 import { diagnosticsService } from './services/diagnosticsService.js'
 import { ensurePersistentStorageUpgraded } from './services/persistentStorageMigrations.js'
 import { handleStaticH5Request } from './staticH5.js'
-import { classifyH5Request, shouldBlockDisabledH5Access, shouldRequireH5Token } from './h5AccessPolicy.js'
+import {
+  classifyH5Request,
+  isH5AccessControlPath,
+  requiresLocalAccessCredential,
+  shouldBlockDisabledH5Access,
+  shouldRequireH5Token,
+  type H5RequestContext,
+} from './h5AccessPolicy.js'
 import { H5AccessService } from './services/h5AccessService.js'
 import { registerSeedMarketplaces } from '../utils/plugins/marketplaceManager.js'
 import { refreshDisconnectGraceMs } from './ws/disconnectGraceConfig.js'
@@ -116,14 +123,14 @@ function h5AccessDisabledResponse(): Response {
 function isH5AccessControlRequest(
   req: Request,
   url: URL,
-  context: { clientAddress: string | null },
+  context: H5RequestContext,
 ): boolean {
-  if (!url.pathname.startsWith('/api/h5-access')) {
+  if (!isH5AccessControlPath(url.pathname)) {
     return false
   }
 
-  if (url.pathname === '/api/h5-access/verify') {
-    return false
+  if (requiresLocalAccessCredential(url.pathname, context)) {
+    return true
   }
 
   return classifyH5Request(req, url, context) !== 'local-trusted'

@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { sessionsApi, type SessionContextSnapshot } from '../../api/sessions'
 import { useTranslation } from '../../i18n'
 import type { ChatState } from '../../types/chat'
-import { MobileBottomSheet } from '../shared/MobileBottomSheet'
+import { useMobileViewport } from '../../hooks/useMobileViewport'
+import { isDesktopRuntime } from '../../lib/desktopRuntime'
+import { MobileBottomSheet } from '@/components/ui/MobileBottomSheet'
 
 type Props = {
   sessionId?: string
@@ -85,6 +87,10 @@ export function ContextUsageIndicator({
   refreshNonce = 0,
 }: Props) {
   const t = useTranslation()
+  // `compact` also fires for the desktop composer, which narrows for the right
+  // panel rather than for touch, so the phone touch target keys off the
+  // viewport instead — see the trigger's height below.
+  const isMobileBrowser = useMobileViewport() && !isDesktopRuntime()
   const [context, setContext] = useState<SessionContextSnapshot | null>(null)
   const [contextSource, setContextSource] = useState<'live' | 'estimate' | null>(null)
   const [loading, setLoading] = useState(() => shouldFetchContext(sessionId, draft))
@@ -290,9 +296,9 @@ export function ContextUsageIndicator({
         }}
         title={t('contextIndicator.title')}
         data-testid="context-usage-indicator"
-        className={`flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-surface-container)] text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-container-high)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-surface-container-lowest)] ${
-          compact ? 'px-2' : 'px-2.5'
-        }`}
+        className={`flex shrink-0 items-center gap-[7px] rounded-full border border-[var(--color-border)] bg-transparent text-[var(--color-text-secondary)] transition-[background-color,color,border-color] duration-150 ease-out hover:border-[var(--color-outline)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-surface-container-lowest)] ${
+          isMobileBrowser ? 'h-11' : 'h-8'
+        } ${compact ? 'px-2' : 'px-3'}`}
       >
         <span className="relative grid h-[18px] w-[18px] shrink-0 place-items-center rounded-full">
           {loading && !displayContext ? (
@@ -315,58 +321,66 @@ export function ContextUsageIndicator({
         </span>
       </button>
 
-      <div className={`pointer-events-none absolute bottom-full right-0 z-40 mb-2 w-[320px] max-w-[calc(100vw-2rem)] translate-y-1 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] p-4 text-left opacity-0 shadow-[var(--shadow-dropdown)] transition-all duration-150 group-hover/context:translate-y-0 group-hover/context:opacity-100 group-focus-within/context:translate-y-0 group-focus-within/context:opacity-100 ${
+      <div className={`pointer-events-none absolute bottom-full right-0 z-[var(--z-popover)] mb-2 w-[340px] max-w-[calc(100vw-2rem)] translate-y-1 rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-[22px] py-5 text-left opacity-0 shadow-[var(--shadow-overlay)] transition-all duration-150 group-hover/context:translate-y-0 group-hover/context:opacity-100 group-focus-within/context:translate-y-0 group-focus-within/context:opacity-100 ${
         compact ? 'hidden' : ''
       }`}>
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <div className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-text-tertiary)]">
+            <div className="text-xs font-semibold tracking-[0.08em] text-[var(--color-text-tertiary)]">
               {t('contextIndicator.title')}
             </div>
-            <div className="mt-1 truncate text-sm font-semibold text-[var(--color-text-primary)]">
+            <div className="mt-1 truncate text-base font-bold text-[var(--color-text-primary)]">
               {displayModel ?? t('contextIndicator.modelUnknown')}
             </div>
           </div>
-          <div className="shrink-0 font-mono text-xl font-semibold text-[var(--color-text-primary)]">
+          {/* The headline serif carries the one large number on the panel —
+              the same treatment the handoff gives every hero statistic. */}
+          <div
+            className="shrink-0 text-[27px] font-bold leading-none text-[var(--color-text-primary)]"
+            style={{ fontFamily: 'var(--font-headline)' }}
+          >
             {displayContext ? formatPercent(percentage) : '--'}
           </div>
         </div>
 
         {displayContext ? (
           <>
-            <div className="mt-4 grid grid-cols-2 gap-3 font-mono text-xs">
+            <div className="mt-4 grid grid-cols-2 gap-2">
               <div>
-                <div className="text-[var(--color-text-tertiary)]">{t('contextIndicator.used')}</div>
-                <div className="mt-1 text-[var(--color-text-primary)]">{formatNumber(usedTokens)}</div>
+                <div className="text-[12.5px] text-[var(--color-text-tertiary)]">{t('contextIndicator.used')}</div>
+                <div className="mt-[3px] font-mono text-sm font-medium text-[var(--color-text-primary)]">{formatNumber(usedTokens)}</div>
               </div>
               <div>
-                <div className="text-[var(--color-text-tertiary)]">{t('contextIndicator.free')}</div>
-                <div className="mt-1 text-[var(--color-text-primary)]">{formatNumber(freeTokens)}</div>
+                <div className="text-[12.5px] text-[var(--color-text-tertiary)]">{t('contextIndicator.free')}</div>
+                <div className="mt-[3px] font-mono text-sm font-medium text-[var(--color-text-primary)]">{formatNumber(freeTokens)}</div>
               </div>
-              <div className="col-span-2">
-                <div className="text-[var(--color-text-tertiary)]">{t('contextIndicator.window')}</div>
-                <div className="mt-1 text-[var(--color-text-primary)]">{maxTokens > 0 ? formatNumber(maxTokens) : '--'}</div>
+              <div className="col-span-2 mt-1">
+                <div className="text-[12.5px] text-[var(--color-text-tertiary)]">{t('contextIndicator.window')}</div>
+                <div className="mt-[3px] font-mono text-sm font-medium text-[var(--color-text-primary)]">{maxTokens > 0 ? formatNumber(maxTokens) : '--'}</div>
               </div>
             </div>
             {details.length > 0 && (
-              <div className="mt-4 space-y-2">
+              <div className="mt-[18px] flex flex-col gap-3">
                 {details.map((category) => {
                   const percent = maxTokens > 0 ? Math.max(0.5, Math.min(100, (category.tokens / maxTokens) * 100)) : 0
                   return (
                     <div key={category.name}>
-                      <div className="flex items-center justify-between gap-3 text-xs">
-                        <span className="min-w-0 truncate text-[var(--color-text-secondary)]">{category.name}</span>
-                        <span className="shrink-0 font-mono text-[var(--color-text-tertiary)]">{formatNumber(category.tokens)}</span>
+                      <div className="flex items-baseline justify-between gap-3">
+                        <span className="min-w-0 truncate text-[13.5px] text-[var(--color-text-primary)]">{category.name}</span>
+                        <span className="shrink-0 font-mono text-[13px] text-[var(--color-text-secondary)]">{formatNumber(category.tokens)}</span>
                       </div>
-                      <div className="mt-1 h-1 overflow-hidden rounded-full bg-[var(--color-surface-container)]">
-                        <div className="h-full rounded-full" style={{ width: `${percent}%`, backgroundColor: category.color }} />
+                      {/* One terracotta scale for every row. The per-category
+                          colors that used to fill these bars came from the API
+                          payload and read as six unrelated statuses. */}
+                      <div className="mt-[7px] h-[3px] overflow-hidden rounded-full bg-[var(--color-surface-hover)]">
+                        <div className="h-full rounded-full bg-[var(--color-brand)]" style={{ width: `${percent}%` }} />
                       </div>
                     </div>
                   )
                 })}
               </div>
             )}
-            <div className="mt-4 text-[11px] text-[var(--color-text-tertiary)]">
+            <div className="mt-4 text-xs text-[var(--color-text-tertiary)]">
               {formatUpdatedAt(updatedAt, t)}
               {contextSource === 'estimate' && (
                 <span className="ml-2 inline-flex rounded-full border border-[var(--color-border)] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em]">
@@ -401,7 +415,10 @@ export function ContextUsageIndicator({
           contentClassName="p-4"
         >
           <div className="flex items-end justify-between gap-4">
-            <div className="font-mono text-4xl font-semibold text-[var(--color-text-primary)]">
+            <div
+              className="text-4xl font-bold leading-none text-[var(--color-text-primary)]"
+              style={{ fontFamily: 'var(--font-headline)' }}
+            >
               {displayContext ? formatPercent(percentage) : '--'}
             </div>
             {contextSource === 'estimate' && (
@@ -414,15 +431,15 @@ export function ContextUsageIndicator({
           {displayContext ? (
             <div className="mt-5">
               <div className="grid grid-cols-3 gap-2 font-mono text-xs">
-                <div className="rounded-xl bg-[var(--color-surface-container)] p-3">
+                <div className="rounded-[var(--radius-lg)] bg-[var(--color-surface-container)] p-3">
                   <div className="text-[var(--color-text-tertiary)]">{t('contextIndicator.used')}</div>
                   <div className="mt-1 text-[var(--color-text-primary)]">{formatNumber(usedTokens)}</div>
                 </div>
-                <div className="rounded-xl bg-[var(--color-surface-container)] p-3">
+                <div className="rounded-[var(--radius-lg)] bg-[var(--color-surface-container)] p-3">
                   <div className="text-[var(--color-text-tertiary)]">{t('contextIndicator.free')}</div>
                   <div className="mt-1 text-[var(--color-text-primary)]">{formatNumber(freeTokens)}</div>
                 </div>
-                <div className="rounded-xl bg-[var(--color-surface-container)] p-3">
+                <div className="rounded-[var(--radius-lg)] bg-[var(--color-surface-container)] p-3">
                   <div className="text-[var(--color-text-tertiary)]">{t('contextIndicator.window')}</div>
                   <div className="mt-1 text-[var(--color-text-primary)]">{maxTokens > 0 ? formatNumber(maxTokens) : '--'}</div>
                 </div>
@@ -437,8 +454,8 @@ export function ContextUsageIndicator({
                           <span className="min-w-0 truncate text-[var(--color-text-secondary)]">{category.name}</span>
                           <span className="shrink-0 font-mono text-[var(--color-text-tertiary)]">{formatNumber(category.tokens)}</span>
                         </div>
-                        <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-[var(--color-surface-container)]">
-                          <div className="h-full rounded-full" style={{ width: `${percent}%`, backgroundColor: category.color }} />
+                        <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-[var(--color-surface-hover)]">
+                          <div className="h-full rounded-full bg-[var(--color-brand)]" style={{ width: `${percent}%` }} />
                         </div>
                       </div>
                     )
@@ -450,7 +467,7 @@ export function ContextUsageIndicator({
               </div>
             </div>
           ) : (
-            <div className="mt-5 rounded-xl bg-[var(--color-surface-container)] p-4 text-sm leading-6 text-[var(--color-text-secondary)]">
+            <div className="mt-5 rounded-[var(--radius-lg)] bg-[var(--color-surface-container)] p-4 text-sm leading-6 text-[var(--color-text-secondary)]">
               {isPendingContext
                 ? t('contextIndicator.pendingDetail')
                 : loading

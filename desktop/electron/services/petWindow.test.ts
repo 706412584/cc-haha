@@ -6,6 +6,7 @@ import {
   PET_WINDOW_HEIGHT,
   PET_WINDOW_WIDTH,
   PetWindowController,
+  type PetWindowPosition,
   clampPetWindowPosition,
   getPetWindowBounds,
   petWindowStatePath,
@@ -20,23 +21,99 @@ const desktopRoot = existsSync(path.resolve(process.cwd(), 'electron', 'main.ts'
 const mainSource = readFileSync(path.join(desktopRoot, 'electron', 'main.ts'), 'utf8')
   .replace(/\r\n/g, '\n')
 
-function createFakeWindow(initialBounds = {
-  x: 100,
-  y: 100,
-  width: PET_WINDOW_WIDTH,
-  height: PET_WINDOW_HEIGHT,
-}) {
+type FakeWindowOptions = {
+  /**
+   * Display scale factor. Chromium converts window rects between physical
+   * pixels and DIP with ceil in *both* directions (ScreenWin::ScreenToDIPRect
+   * and DIPToScreenRect), so on a fractional scale every getBounds ->
+   * setBounds round trip grows the window by a pixel. Modelling that is what
+   * makes the size-neutrality assertions mean anything; the default of 1 keeps
+   * the arithmetic exact for every test that does not care.
+   */
+  scaleFactor?: number
+  /**
+   * Client area, when it differs from the window box. Renderer regions are
+   * measured against this, not against getBounds().
+   */
+  contentSize?: { width: number; height: number }
+  /** Drop getContentBounds entirely, to exercise the fallback. */
+  withoutContentBounds?: boolean
+  /**
+   * Work area top edge, when the platform constrains the window to it.
+   *
+   * macOS runs a *visible* window's frame through
+   * -[NSWindow constrainFrameRect:toScreen:], which rewrites any y above the
+   * work area back down to that edge — so the negative y the mascot clamp asks
+   * for is silently refused and the mascot strands a padding-height below the
+   * menu bar. A fake window that accepts every y proves nothing about the top
+   * edge, which is why the bug survived a green suite. Left undefined the fake
+   * behaves like Windows and Linux, which impose no such limit.
+   */
+  constrainTopTo?: number
+}
+
+function createFakeWindow(
+  initialBounds = {
+    x: 100,
+    y: 100,
+    width: PET_WINDOW_WIDTH,
+    height: PET_WINDOW_HEIGHT,
+  },
+  {
+    scaleFactor = 1,
+    contentSize,
+    withoutContentBounds = false,
+    constrainTopTo,
+  }: FakeWindowOptions = {},
+) {
   const handlers = new Map<string, () => void>()
   let visible = false
   let destroyed = false
-  let bounds = { ...initialBounds }
+  let escapesConstraint = false
+  const toPhysical = (value: number) => Math.ceil(value * scaleFactor)
+  const toDip = (value: number) => Math.ceil(value / scaleFactor)
+  let physical = {
+    x: initialBounds.x,
+    y: initialBounds.y,
+    width: toPhysical(initialBounds.width),
+    height: toPhysical(initialBounds.height),
+  }
+  const readBounds = () => ({
+    x: physical.x,
+    y: physical.y,
+    width: toDip(physical.width),
+    height: toDip(physical.height),
+  })
+  // enableLargerThanScreen is the one flag that skips constrainFrameRect, so
+  // the constraint has to read it off the constructor options the controller
+  // actually passed — otherwise the fake proves the platform's behaviour
+  // rather than the fix for it.
+  const constrainTop = (y: number) =>
+    constrainTopTo !== undefined && visible && !escapesConstraint
+      ? Math.max(y, constrainTopTo)
+      : y
+  const setBounds = vi.fn((next: Partial<typeof physical>) => {
+    const merged = { ...readBounds(), ...next }
+    physical = {
+      x: merged.x,
+      y: constrainTop(merged.y),
+      width: toPhysical(merged.width),
+      height: toPhysical(merged.height),
+    }
+  })
 
   return {
     handlers,
+    applyConstructorOptions(options: { enableLargerThanScreen?: boolean }) {
+      escapesConstraint = options.enableLargerThanScreen === true
+    },
     isDestroyed: vi.fn(() => destroyed),
     isVisible: vi.fn(() => visible),
+    // Showing re-runs the constraint, so parking a hidden window above the
+    // work area does not survive the reveal.
     showInactive: vi.fn(() => {
       visible = true
+      physical = { ...physical, y: constrainTop(physical.y) }
     }),
     hide: vi.fn(() => {
       visible = false
@@ -48,14 +125,31 @@ function createFakeWindow(initialBounds = {
     setVisibleOnAllWorkspaces: vi.fn(),
     setIgnoreMouseEvents: vi.fn(),
     setShape: vi.fn(),
-    getBounds: vi.fn(() => ({ ...bounds })),
+    getBounds: vi.fn(readBounds),
+    ...(withoutContentBounds ? {} : {
+      getContentBounds: vi.fn(() => ({ ...readBounds(), ...contentSize })),
+    }),
+    setBounds,
+    // Electron implements NativeWindow::SetPosition as
+    // SetBounds(gfx::Rect(position, GetSize())) — the size makes a lossy round
+    // trip through DIP on every call.
     setPosition: vi.fn((x: number, y: number) => {
-      bounds = { ...bounds, x, y }
+      const { width, height } = readBounds()
+      setBounds({ x, y, width, height })
     }),
     on: vi.fn((event: string, handler: () => void) => {
       handlers.set(event, handler)
     }),
   }
+}
+
+// Dragging moves the window with setBounds so the size is restated every tick.
+function lastDragBounds(window: ReturnType<typeof createFakeWindow>) {
+  return window.setBounds.mock.calls.at(-1)?.[0]
+}
+
+function draggedTo(position: PetWindowPosition) {
+  return { ...position, width: PET_WINDOW_WIDTH, height: PET_WINDOW_HEIGHT }
 }
 
 describe('Electron pet window service', () => {
@@ -103,6 +197,50 @@ describe('Electron pet window service', () => {
     }
   })
 
+  it('persists the mascot box with the position and tolerates state without one', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'cc-haha-pet-region-'))
+    const env = { CLAUDE_CONFIG_DIR: path.join(root, 'portable') }
+    try {
+      writePetWindowPosition(
+        { x: 100, y: -215, region: { x: 136.4, y: 240.2, width: 112, height: 128 } },
+        env,
+        root,
+      )
+      expect(readPetWindowPosition(env, root)).toEqual({
+        x: 100,
+        y: -215,
+        region: { x: 136, y: 240, width: 112, height: 128 },
+      })
+
+      // State written before the region was persisted still restores.
+      writePetWindowPosition({ x: 12, y: 34 }, env, root)
+      expect(readPetWindowPosition(env, root)).toEqual({ x: 12, y: 34 })
+
+      // An empty box would clamp as if the mascot filled nothing, so it is
+      // dropped rather than trusted.
+      writePetWindowPosition(
+        { x: 12, y: 34, region: { x: 0, y: 0, width: 0, height: 10 } },
+        env,
+        root,
+      )
+      expect(readPetWindowPosition(env, root)).toEqual({ x: 12, y: 34 })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('reopens a saved edge position where the drag actually left it', () => {
+    const workArea = { x: 0, y: 25, width: 800, height: 575 }
+    const region = { x: 136, y: 240, width: 112, height: 128 }
+    const saved = { x: 100, y: workArea.y - region.y, region }
+
+    expect(getPetWindowBounds(workArea, saved).y).toBe(saved.y)
+    // The same position without the box clamps against the whole window and
+    // opens a padding-height lower — the jump the renderer used to correct
+    // once it reported the live region.
+    expect(getPetWindowBounds(workArea, { x: saved.x, y: saved.y }).y).toBe(workArea.y)
+  })
+
   it('creates a transparent frameless sandboxed always-on-top window', () => {
     const macOptions = petWindowOptions(
       { x: 20, y: 30, width: PET_WINDOW_WIDTH, height: PET_WINDOW_HEIGHT },
@@ -116,6 +254,10 @@ describe('Electron pet window service', () => {
       height: PET_WINDOW_HEIGHT,
       alwaysOnTop: true,
       backgroundColor: '#00000000',
+      // Without this macOS refuses every y above the work area, so the mascot
+      // can never be dragged up to the menu bar: the transparent padding above
+      // it has to be allowed off-screen.
+      enableLargerThanScreen: true,
       frame: false,
       fullscreenable: false,
       hasShadow: false,
@@ -140,6 +282,8 @@ describe('Electron pet window service', () => {
     )
     expect(windowsOptions.type).toBeUndefined()
     expect(windowsOptions.skipTaskbar).toBe(true)
+    // Documented macOS-only; Windows and Linux never constrain the frame.
+    expect(windowsOptions).not.toHaveProperty('enableLargerThanScreen')
   })
 
   it('loads the dedicated renderer mode with pet-scoped server auth configured', () => {
@@ -283,15 +427,14 @@ describe('Electron pet window service', () => {
 
     controller.dragWindow(petWindow as never, { phase: 'start', x: 150, y: 180 })
     controller.dragWindow(petWindow as never, { phase: 'move', x: 190, y: 220 })
-    expect(petWindow.setPosition).toHaveBeenLastCalledWith(140, 160, false)
+    expect(lastDragBounds(petWindow)).toEqual(draggedTo({ x: 140, y: 160 }))
 
     controller.dragWindow(petWindow as never, { phase: 'end', x: 1_000, y: 900 })
     expect(getWorkAreaForPoint).toHaveBeenLastCalledWith({ x: 1_000, y: 900 })
-    expect(petWindow.setPosition).toHaveBeenLastCalledWith(
-      800 - PET_WINDOW_WIDTH,
-      25 + 575 - PET_WINDOW_HEIGHT,
-      false,
-    )
+    expect(lastDragBounds(petWindow)).toEqual(draggedTo({
+      x: 800 - PET_WINDOW_WIDTH,
+      y: 25 + 575 - PET_WINDOW_HEIGHT,
+    }))
     expect(writePosition).toHaveBeenCalledOnce()
     expect(writePosition).toHaveBeenCalledWith({
       x: 800 - PET_WINDOW_WIDTH,
@@ -300,11 +443,17 @@ describe('Electron pet window service', () => {
   })
 
   it.each([
-    ['left', { x: -100, y: 220 }, { x: -136, y: 160 }],
-    ['right', { x: 1_000, y: 220 }, { x: 552, y: 160 }],
+    ['darwin', 'left', { x: -100, y: 220 }, { x: -136, y: 160 }],
+    ['darwin', 'right', { x: 1_000, y: 220 }, { x: 552, y: 160 }],
+    ['darwin', 'top', { x: 150, y: -200 }, { x: 100, y: -215 }],
+    ['darwin', 'bottom', { x: 150, y: 900 }, { x: 100, y: 232 }],
+    ['win32', 'left', { x: -100, y: 220 }, { x: -136, y: 160 }],
+    ['win32', 'right', { x: 1_000, y: 220 }, { x: 552, y: 160 }],
+    ['win32', 'top', { x: 150, y: -200 }, { x: 100, y: -215 }],
+    ['win32', 'bottom', { x: 150, y: 900 }, { x: 100, y: 232 }],
   ] as const)(
-    'lets the mascot reach the %s display edge through transparent window padding',
-    async (_edge, pointerEnd, expectedPosition) => {
+    'lets the %s mascot reach the %s display edge through transparent window padding',
+    async (platform, _edge, pointerEnd, expectedPosition) => {
       const petWindow = createFakeWindow({
         x: 100,
         y: 120,
@@ -316,7 +465,7 @@ describe('Electron pet window service', () => {
         getCurrentWorkArea: () => ({ x: 0, y: 25, width: 800, height: 575 }),
         getWorkAreaForPoint: () => ({ x: 0, y: 25, width: 800, height: 575 }),
         load: vi.fn().mockResolvedValue(undefined),
-        platform: 'darwin',
+        platform,
         preloadPath: '/app/electron-dist/preload.cjs',
       })
       await controller.show()
@@ -327,11 +476,7 @@ describe('Electron pet window service', () => {
       controller.dragWindow(petWindow as never, { phase: 'start', x: 150, y: 180 })
       controller.dragWindow(petWindow as never, { phase: 'end', ...pointerEnd })
 
-      expect(petWindow.setPosition).toHaveBeenLastCalledWith(
-        expectedPosition.x,
-        expectedPosition.y,
-        false,
-      )
+      expect(lastDragBounds(petWindow)).toEqual(draggedTo(expectedPosition))
     },
   )
 
@@ -394,35 +539,157 @@ describe('Electron pet window service', () => {
     }
   })
 
-  it('restores an edge position after the renderer reports the visible mascot region', async () => {
-    let petWindow: ReturnType<typeof createFakeWindow> | undefined
-    const createWindow = vi.fn((bounds) => {
-      petWindow = createFakeWindow(bounds as {
-        x: number
-        y: number
-        width: number
-        height: number
-      })
-      return petWindow
-    })
+  // The mascot sits at the bottom of a mostly transparent window, so reaching
+  // the menu bar means the window's own top edge has to go *above* the work
+  // area. macOS refuses that for a visible window unless it opted out, and the
+  // refusal is silent — the controller reads back a position it never got.
+  const menuBarDrag = {
+    workArea: { x: 0, y: 25, width: 800, height: 575 },
+    region: { x: 136, y: 240, width: 112, height: 128 },
+  }
+
+  async function dragToTopEdge(
+    createWindow: (
+      window: ReturnType<typeof createFakeWindow>,
+      options: { enableLargerThanScreen?: boolean },
+    ) => unknown,
+  ) {
+    const petWindow = createFakeWindow(
+      { x: 100, y: 120, width: PET_WINDOW_WIDTH, height: PET_WINDOW_HEIGHT },
+      { constrainTopTo: menuBarDrag.workArea.y },
+    )
+    const writePosition = vi.fn()
     const controller = new PetWindowController({
-      createWindow: createWindow as never,
-      getCurrentWorkArea: () => ({ x: 0, y: 25, width: 800, height: 575 }),
-      getWorkAreaForPoint: () => ({ x: 0, y: 25, width: 800, height: 575 }),
+      createWindow: vi.fn((options: { enableLargerThanScreen?: boolean }) =>
+        createWindow(petWindow, options)) as never,
+      getCurrentWorkArea: () => menuBarDrag.workArea,
+      getWorkAreaForPoint: () => menuBarDrag.workArea,
       load: vi.fn().mockResolvedValue(undefined),
       platform: 'darwin',
       preloadPath: '/app/electron-dist/preload.cjs',
-      readPosition: () => ({ x: -136, y: 160 }),
+      writePosition,
     })
-
     await controller.show()
-    expect(createWindow).toHaveBeenCalledWith(expect.objectContaining({ x: 0, y: 160 }))
+    controller.setInteractiveRegions(petWindow as never, [menuBarDrag.region])
+    controller.dragWindow(petWindow as never, { phase: 'start', x: 150, y: 180 })
+    controller.dragWindow(petWindow as never, { phase: 'end', x: 150, y: -400 })
+    return { petWindow, writePosition }
+  }
+
+  it('drags the darwin mascot up to the menu bar through the frame constraint', async () => {
+    // The opt-out has to come from the options the controller really built.
+    const { petWindow, writePosition } = await dragToTopEdge((window, options) => {
+      window.applyConstructorOptions(options)
+      return window
+    })
+    const { region, workArea } = menuBarDrag
+
+    // The window really sits above the work area, so the mascot's own top edge
+    // lands on it rather than a padding-height below.
+    expect(petWindow.getBounds().y).toBe(workArea.y - region.y)
+    expect(petWindow.getBounds().y + region.y).toBe(workArea.y)
+    // And what lands on disk is a position the window actually reached, next
+    // to the box that makes it mean anything.
+    expect(writePosition).toHaveBeenCalledWith({
+      x: 100,
+      y: workArea.y - region.y,
+      region,
+    })
+  })
+
+  it('strands the mascot below the menu bar when the window keeps the constraint', async () => {
+    // Guards the guard: a fake that accepted every y would pass the test above
+    // whether or not the window opts out, which is exactly how the real bug
+    // survived a green suite.
+    const { petWindow } = await dragToTopEdge((window) => {
+      window.applyConstructorOptions({ enableLargerThanScreen: false })
+      return window
+    })
+    const { region, workArea } = menuBarDrag
+
+    expect(petWindow.getBounds().y).toBe(workArea.y)
+    expect(petWindow.getBounds().y + region.y).toBe(workArea.y + region.y)
+  })
+
+  it('clamps dragging against the mascot measured in the real content box', async () => {
+    // The renderer measures the mascot against the live viewport, so a content
+    // area taller than the nominal height puts the mascot below the constant.
+    // Clamping the drag region to the constant would trim the mascot's bottom
+    // and stop it short of the work area floor.
+    const contentHeight = PET_WINDOW_HEIGHT + 40
+    const petWindow = createFakeWindow(
+      { x: 100, y: 120, width: PET_WINDOW_WIDTH, height: PET_WINDOW_HEIGHT },
+      { contentSize: { width: PET_WINDOW_WIDTH, height: contentHeight } },
+    )
+    const controller = new PetWindowController({
+      createWindow: vi.fn(() => petWindow) as never,
+      getCurrentWorkArea: () => ({ x: 0, y: 25, width: 800, height: 575 }),
+      getWorkAreaForPoint: () => ({ x: 0, y: 25, width: 800, height: 575 }),
+      load: vi.fn().mockResolvedValue(undefined),
+      platform: 'win32',
+      preloadPath: '/app/electron-dist/preload.cjs',
+    })
+    await controller.show()
     controller.setInteractiveRegions(petWindow as never, [
-      { x: 136, y: 240, width: 112, height: 128 },
+      { x: 136, y: contentHeight - 160, width: 112, height: 128 },
     ])
 
-    expect(petWindow?.setPosition).toHaveBeenLastCalledWith(-136, 160, false)
+    controller.dragWindow(petWindow as never, { phase: 'start', x: 150, y: 180 })
+    controller.dragWindow(petWindow as never, { phase: 'end', x: 150, y: 2_000 })
+
+    expect(lastDragBounds(petWindow)).toEqual({
+      x: 100,
+      // Mascot bottom (y + 128) lands exactly on the work area floor. Clamping
+      // the region to the window box instead of the content box would place it
+      // 40px short of the floor.
+      y: 25 + 575 - (contentHeight - 160) - 128,
+      width: PET_WINDOW_WIDTH,
+      height: PET_WINDOW_HEIGHT,
+    })
   })
+
+  it.each(['darwin', 'win32', 'linux'] as const)(
+    'restores a %s edge position once the renderer reports the mascot region',
+    async (platform) => {
+      // Dragging clamps against the mascot, so a saved edge position puts the
+      // window's transparent padding off-screen. Recreating the window (every
+      // hide/show, and every restart) re-clamps that position against the whole
+      // window, which walks the mascot inwards by the padding width unless the
+      // reported region moves it back.
+      let petWindow: ReturnType<typeof createFakeWindow> | undefined
+      const createWindow = vi.fn((bounds) => {
+        petWindow = createFakeWindow(bounds as {
+          x: number
+          y: number
+          width: number
+          height: number
+        })
+        return petWindow
+      })
+      const controller = new PetWindowController({
+        createWindow: createWindow as never,
+        getCurrentWorkArea: () => ({ x: 0, y: 25, width: 800, height: 575 }),
+        getWorkAreaForPoint: () => ({ x: 0, y: 25, width: 800, height: 575 }),
+        load: vi.fn().mockResolvedValue(undefined),
+        platform,
+        preloadPath: '/app/electron-dist/preload.cjs',
+        readPosition: () => ({ x: -136, y: 160 }),
+      })
+
+      await controller.show()
+      expect(createWindow).toHaveBeenCalledWith(expect.objectContaining({ x: 0, y: 160 }))
+      controller.setInteractiveRegions(petWindow as never, [
+        { x: 136, y: 240, width: 112, height: 128 },
+      ])
+
+      expect(petWindow?.getBounds()).toEqual({
+        x: -136,
+        y: 160,
+        width: PET_WINDOW_WIDTH,
+        height: PET_WINDOW_HEIGHT,
+      })
+    },
+  )
 
   it('tracks the native cursor at 60 Hz without renderer move payloads', async () => {
     vi.useFakeTimers()
@@ -451,7 +718,7 @@ describe('Electron pet window service', () => {
       cursor = { x: 203, y: 227 }
       vi.advanceTimersByTime(16)
 
-      expect(petWindow.setPosition).toHaveBeenLastCalledWith(153, 167, false)
+      expect(lastDragBounds(petWindow)).toEqual(draggedTo({ x: 153, y: 167 }))
       expect(writePosition).not.toHaveBeenCalled()
 
       controller.dragWindow(petWindow as never, { phase: 'end', x: 203, y: 227 })
@@ -459,10 +726,10 @@ describe('Electron pet window service', () => {
       expect(writePosition).toHaveBeenCalledWith({ x: 153, y: 167 })
       expect(vi.getTimerCount()).toBe(0)
 
-      const setPositionCalls = petWindow.setPosition.mock.calls.length
+      const setBoundsCalls = petWindow.setBounds.mock.calls.length
       cursor = { x: 260, y: 280 }
       vi.advanceTimersByTime(32)
-      expect(petWindow.setPosition).toHaveBeenCalledTimes(setPositionCalls)
+      expect(petWindow.setBounds).toHaveBeenCalledTimes(setBoundsCalls)
     } finally {
       vi.useRealTimers()
     }
@@ -496,7 +763,7 @@ describe('Electron pet window service', () => {
         expect(vi.getTimerCount()).toBe(1)
         cursor = { x: 180, y: 200 }
         vi.advanceTimersByTime(16)
-        expect(petWindow.setPosition).toHaveBeenLastCalledWith(130, 140, false)
+        expect(lastDragBounds(petWindow)).toEqual(draggedTo({ x: 130, y: 140 }))
 
         if (action === 'hide') controller.hide()
         if (action === 'closed') petWindow.handlers.get('closed')?.()
@@ -505,10 +772,10 @@ describe('Electron pet window service', () => {
         expect(vi.getTimerCount()).toBe(0)
         expect(writePosition).toHaveBeenCalledOnce()
         expect(writePosition).toHaveBeenCalledWith({ x: 130, y: 140 })
-        const setPositionCalls = petWindow.setPosition.mock.calls.length
+        const setBoundsCalls = petWindow.setBounds.mock.calls.length
         cursor = { x: 260, y: 280 }
         vi.advanceTimersByTime(32)
-        expect(petWindow.setPosition).toHaveBeenCalledTimes(setPositionCalls)
+        expect(petWindow.setBounds).toHaveBeenCalledTimes(setBoundsCalls)
       } finally {
         vi.useRealTimers()
       }
@@ -592,6 +859,203 @@ describe('Electron pet window service', () => {
     expect(() => controller.setInteractiveRegions(otherWindow as never, [
       { x: 0, y: 0, width: 10, height: 10 },
     ])).toThrow('does not own')
+  })
+
+  it('shapes the Windows pet against the real content size, not the nominal height', async () => {
+    // A Windows content area can end up taller than the nominal height (DPI
+    // rounding, invisible frame). The mascot sits flush with the viewport
+    // bottom, so clamping the shape to the constant would slice its legs off.
+    const contentHeight = PET_WINDOW_HEIGHT + 40
+    const petWindow = createFakeWindow(
+      { x: 100, y: 120, width: PET_WINDOW_WIDTH, height: PET_WINDOW_HEIGHT },
+      { contentSize: { width: PET_WINDOW_WIDTH, height: contentHeight } },
+    )
+    const controller = new PetWindowController({
+      createWindow: vi.fn(() => petWindow) as never,
+      getCurrentWorkArea: () => ({ x: 0, y: 0, width: 1440, height: 900 }),
+      load: vi.fn().mockResolvedValue(undefined),
+      platform: 'win32',
+      preloadPath: '/app/electron-dist/preload.cjs',
+    })
+
+    await controller.show()
+    controller.setInteractiveRegions(petWindow as never, [
+      { x: 144, y: contentHeight - 114, width: 96, height: 104 },
+    ])
+
+    expect(petWindow.setShape).toHaveBeenLastCalledWith([
+      { x: 132, y: contentHeight - 126, width: 120, height: 126 },
+    ])
+  })
+
+  it('unions every reported region into the native shape', async () => {
+    // The task badge sits above the mascot and carries its own rect; dropping
+    // the tail of the list would make it unclickable, while separate shapes can
+    // split stacked companion content during native layout updates.
+    const petWindow = createFakeWindow()
+    const controller = new PetWindowController({
+      createWindow: vi.fn(() => petWindow) as never,
+      getCurrentWorkArea: () => ({ x: 0, y: 0, width: 1440, height: 900 }),
+      load: vi.fn().mockResolvedValue(undefined),
+      platform: 'win32',
+      preloadPath: '/app/electron-dist/preload.cjs',
+    })
+
+    await controller.show()
+    controller.setInteractiveRegions(petWindow as never, [
+      { x: 144, y: 280, width: 96, height: 104 },
+      { x: 250, y: 40, width: 24, height: 24 },
+    ])
+
+    expect(petWindow.setShape).toHaveBeenLastCalledWith([
+      { x: 132, y: 28, width: 154, height: 368 },
+    ])
+  })
+
+  it.each([
+    [
+      'clamps a region reported past the content box',
+      { x: PET_WINDOW_WIDTH + 50, y: PET_WINDOW_HEIGHT + 50, width: 40, height: 40 },
+      {
+        x: PET_WINDOW_WIDTH - 1,
+        y: PET_WINDOW_HEIGHT - 1,
+        width: 1,
+        height: 1,
+      },
+    ],
+    [
+      'keeps a degenerate region at least one pixel wide',
+      { x: 100, y: 100, width: 0, height: 0 },
+      { x: 88, y: 88, width: 24, height: 24 },
+    ],
+    [
+      'clamps a negative region back into the content box',
+      { x: -100, y: -100, width: 40, height: 40 },
+      { x: 0, y: 0, width: 1, height: 1 },
+    ],
+  ] as const)('%s', async (_name, region, expected) => {
+    // setShape rejects rectangles outside the window or without positive
+    // extent, so normalization has to hold that invariant for any input the
+    // renderer can produce.
+    const petWindow = createFakeWindow()
+    const controller = new PetWindowController({
+      createWindow: vi.fn(() => petWindow) as never,
+      getCurrentWorkArea: () => ({ x: 0, y: 0, width: 1440, height: 900 }),
+      load: vi.fn().mockResolvedValue(undefined),
+      platform: 'win32',
+      preloadPath: '/app/electron-dist/preload.cjs',
+    })
+
+    await controller.show()
+    controller.setInteractiveRegions(petWindow as never, [region])
+
+    expect(petWindow.setShape).toHaveBeenLastCalledWith([expected])
+  })
+
+  it.each([
+    ['getContentBounds is unavailable', { withoutContentBounds: true }],
+    ['the content view has no extent yet', {
+      contentSize: { width: 0, height: 0 },
+    }],
+  ] as const)('falls back to the window box when %s', async (_name, options) => {
+    // Falling back to the nominal constants would silently reinstate the very
+    // clamp this code exists to avoid, so the live window box is the fallback.
+    const windowHeight = PET_WINDOW_HEIGHT + 40
+    const petWindow = createFakeWindow(
+      { x: 100, y: 120, width: PET_WINDOW_WIDTH, height: windowHeight },
+      options,
+    )
+    const controller = new PetWindowController({
+      createWindow: vi.fn(() => petWindow) as never,
+      getCurrentWorkArea: () => ({ x: 0, y: 0, width: 1440, height: 900 }),
+      load: vi.fn().mockResolvedValue(undefined),
+      platform: 'win32',
+      preloadPath: '/app/electron-dist/preload.cjs',
+    })
+
+    await controller.show()
+    controller.setInteractiveRegions(petWindow as never, [
+      { x: 144, y: windowHeight - 114, width: 96, height: 104 },
+    ])
+
+    expect(petWindow.setShape).toHaveBeenLastCalledWith([
+      { x: 132, y: windowHeight - 126, width: 120, height: 126 },
+    ])
+  })
+
+  it('keeps the window size fixed across drag ticks so DIP rounding cannot grow it', async () => {
+    vi.useFakeTimers()
+    try {
+      const petWindow = createFakeWindow(
+        { x: 100, y: 120, width: PET_WINDOW_WIDTH, height: PET_WINDOW_HEIGHT },
+        { scaleFactor: 1.15 },
+      )
+      let cursor = { x: 150, y: 180 }
+      const controller = new PetWindowController({
+        createWindow: vi.fn(() => petWindow) as never,
+        getCursorScreenPoint: () => cursor,
+        getCurrentWorkArea: () => ({ x: 0, y: 0, width: 1_600, height: 1_000 }),
+        getWorkAreaForPoint: () => ({ x: 0, y: 0, width: 1_600, height: 1_000 }),
+        load: vi.fn().mockResolvedValue(undefined),
+        platform: 'win32',
+        preloadPath: '/app/electron-dist/preload.cjs',
+      })
+      await controller.show()
+      // Chromium reports a fractionally scaled window back a pixel larger than
+      // it was created; that rounding is the engine's, not ours. What has to
+      // hold is that dragging never adds to it.
+      const { width, height } = petWindow.getBounds()
+
+      controller.dragWindow(petWindow as never, { phase: 'start', x: 150, y: 180 })
+      for (let tick = 0; tick < 60; tick += 1) {
+        cursor = { x: cursor.x + 2, y: cursor.y + 2 }
+        vi.advanceTimersByTime(16)
+      }
+      controller.dragWindow(petWindow as never, { phase: 'end', ...cursor })
+
+      // Without a position assertion this test would also pass for a drag tick
+      // that moves nothing at all.
+      expect(petWindow.getBounds()).toEqual({ x: 220, y: 240, width, height })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stays size-neutral across repeated drags on a fractionally scaled display', async () => {
+    // Restating a size that was itself read back through the DIP round trip
+    // re-applies the ceil, so the window grows a pixel per drag even though any
+    // single drag looks stable. The recorded size has to come from the nominal
+    // constants the window was created with.
+    vi.useFakeTimers()
+    try {
+      const petWindow = createFakeWindow(
+        { x: 100, y: 120, width: PET_WINDOW_WIDTH, height: PET_WINDOW_HEIGHT },
+        { scaleFactor: 1.15 },
+      )
+      let cursor = { x: 150, y: 180 }
+      const controller = new PetWindowController({
+        createWindow: vi.fn(() => petWindow) as never,
+        getCursorScreenPoint: () => cursor,
+        getCurrentWorkArea: () => ({ x: 0, y: 0, width: 1_600, height: 1_000 }),
+        getWorkAreaForPoint: () => ({ x: 0, y: 0, width: 1_600, height: 1_000 }),
+        load: vi.fn().mockResolvedValue(undefined),
+        platform: 'win32',
+        preloadPath: '/app/electron-dist/preload.cjs',
+      })
+      await controller.show()
+      const { width, height } = petWindow.getBounds()
+
+      for (let drag = 0; drag < 40; drag += 1) {
+        controller.dragWindow(petWindow as never, { phase: 'start', ...cursor })
+        cursor = { x: cursor.x + 4, y: cursor.y + 4 }
+        vi.advanceTimersByTime(16)
+        controller.dragWindow(petWindow as never, { phase: 'end', ...cursor })
+      }
+
+      expect(petWindow.getBounds()).toMatchObject({ width, height })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('returns whether the native pet context menu close item was selected', async () => {

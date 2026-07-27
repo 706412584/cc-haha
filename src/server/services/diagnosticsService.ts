@@ -3,12 +3,13 @@ import { createHash } from 'node:crypto'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { gzipSync } from 'node:zlib'
-import type { Dirent } from 'node:fs'
+import { constants as fsConstants, type Dirent } from 'node:fs'
 import { localIndexCoordinator } from './localIndex/coordinator.js'
 import type { LocalIndexStatus } from './localIndex/types.js'
 import {
   buildDiagnosticsIssueReport,
   projectDiagnosticEventForSharing,
+  projectProviderSummaryForSharing,
   type SharedDiagnosticEvent,
 } from './diagnosticsShare.js'
 
@@ -131,6 +132,10 @@ export class DiagnosticsService {
     return path.join(this.getLogDir(), 'exports')
   }
 
+  async prepareCliDiagnosticsStorage(): Promise<void> {
+    await this.ensureLogDir()
+  }
+
   getLocalIndexStatus(): LocalIndexStatus {
     return localIndexCoordinator.getPublicStatus()
   }
@@ -169,9 +174,9 @@ export class DiagnosticsService {
   private async writeEvent(event: DiagnosticEvent): Promise<DiagnosticWriteResult> {
     try {
       await this.ensureLogDir()
-      await fs.appendFile(this.getDiagnosticsPath(), JSON.stringify(event) + '\n', 'utf-8')
+      await this.appendPrivateFile(this.getDiagnosticsPath(), JSON.stringify(event) + '\n')
       if (event.severity === 'warn' || event.severity === 'error') {
-        await fs.appendFile(this.getRuntimeErrorsPath(), this.formatRuntimeLogEntry(event), 'utf-8')
+        await this.appendPrivateFile(this.getRuntimeErrorsPath(), this.formatRuntimeLogEntry(event))
       }
       await this.enforceRetention().catch(() => {})
       return { ok: true, event }
@@ -382,8 +387,7 @@ export class DiagnosticsService {
     ]
 
     const archive = this.createTarGz(files)
-    await fs.mkdir(this.getExportDir(), { recursive: true })
-    await fs.writeFile(outPath, archive)
+    await this.writePrivateFile(outPath, archive)
     await this.enforceExportRetention(Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000)
     return { path: outPath, fileName, bytes: archive.byteLength }
   }
@@ -477,7 +481,166 @@ export class DiagnosticsService {
   }
 
   private async ensureLogDir(): Promise<void> {
-    await fs.mkdir(this.getExportDir(), { recursive: true })
+    await this.ensurePrivateDirectory(this.getLogDir())
+    await this.ensurePrivateDirectory(this.getExportDir())
+    await Promise.all([
+      this.restrictDirectoryFiles(this.getLogDir()),
+      this.restrictDirectoryFiles(this.getExportDir()),
+    ])
+  }
+
+  private async ensurePrivateDirectory(directory: string): Promise<void> {
+    const configDirectory = path.resolve(this.getConfigDir())
+    const targetDirectory = path.resolve(directory)
+    const relative = path.relative(configDirectory, targetDirectory)
+    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error('Refusing diagnostics directory outside the configured root')
+    }
+
+    await fs.mkdir(configDirectory, { recursive: true })
+    let current = configDirectory
+    for (const segment of relative.split(path.sep).filter(Boolean)) {
+      current = path.join(current, segment)
+      let stats
+      try {
+        stats = await fs.lstat(current)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        try {
+          await fs.mkdir(current, { mode: 0o700 })
+        } catch (mkdirError) {
+          if ((mkdirError as NodeJS.ErrnoException).code !== 'EEXIST') throw mkdirError
+        }
+        stats = await fs.lstat(current)
+      }
+      if (stats.isSymbolicLink()) {
+        throw new Error(`Refusing symbolic link for diagnostics directory: ${current}`)
+      }
+      if (!stats.isDirectory()) {
+        throw new Error(`Refusing non-directory diagnostics path: ${current}`)
+      }
+
+      const [rootRealPath, currentRealPath] = await Promise.all([
+        fs.realpath(configDirectory),
+        fs.realpath(current),
+      ])
+      if (!this.isPathInside(rootRealPath, currentRealPath)) {
+        throw new Error(`Refusing diagnostics directory outside the configured root: ${current}`)
+      }
+      if (process.platform !== 'win32') {
+        const handle = await fs.open(
+          current,
+          fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW,
+        )
+        try {
+          if (!(await handle.stat()).isDirectory()) {
+            throw new Error(`Refusing non-directory diagnostics path: ${current}`)
+          }
+          await handle.chmod(0o700)
+        } finally {
+          await handle.close()
+        }
+      }
+    }
+  }
+
+  private async restrictDirectoryFiles(directory: string): Promise<void> {
+    const entries = await fs.readdir(directory, { withFileTypes: true })
+    await Promise.all(entries.map(async (entry) => {
+      const filePath = path.join(directory, entry.name)
+      const stats = await fs.lstat(filePath)
+      if (stats.isSymbolicLink()) {
+        throw new Error(`Refusing symbolic link in diagnostics directory: ${filePath}`)
+      }
+      if (!stats.isFile()) return
+      await this.restrictRegularFile(filePath)
+    }))
+  }
+
+  private async appendPrivateFile(filePath: string, content: string): Promise<void> {
+    await this.assertManagedRegularFileOrMissing(filePath)
+    const noFollow = process.platform === 'win32' ? 0 : fsConstants.O_NOFOLLOW
+    const handle = await fs.open(
+      filePath,
+      fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | noFollow,
+      0o600,
+    )
+    try {
+      if (!(await handle.stat()).isFile()) {
+        throw new Error(`Refusing non-regular diagnostics file: ${filePath}`)
+      }
+      if (process.platform !== 'win32') await handle.chmod(0o600)
+      await handle.writeFile(content, { encoding: 'utf-8' })
+    } finally {
+      await handle.close()
+    }
+  }
+
+  private async writePrivateFile(filePath: string, content: string | Buffer): Promise<void> {
+    await this.assertManagedRegularFileOrMissing(filePath)
+    const noFollow = process.platform === 'win32' ? 0 : fsConstants.O_NOFOLLOW
+    const handle = await fs.open(
+      filePath,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | noFollow,
+      0o600,
+    )
+    try {
+      if (!(await handle.stat()).isFile()) {
+        throw new Error(`Refusing non-regular diagnostics file: ${filePath}`)
+      }
+      if (process.platform !== 'win32') await handle.chmod(0o600)
+      await handle.writeFile(content)
+    } finally {
+      await handle.close()
+    }
+  }
+
+  private async assertManagedRegularFileOrMissing(filePath: string): Promise<void> {
+    const parentRealPath = await fs.realpath(path.dirname(filePath))
+    const rootRealPath = await fs.realpath(this.getConfigDir())
+    if (!this.isPathInside(rootRealPath, parentRealPath)) {
+      throw new Error(`Refusing diagnostics file outside the configured root: ${filePath}`)
+    }
+    try {
+      const stats = await fs.lstat(filePath)
+      if (stats.isSymbolicLink()) {
+        throw new Error(`Refusing symbolic link for diagnostics file: ${filePath}`)
+      }
+      if (!stats.isFile()) {
+        throw new Error(`Refusing non-regular diagnostics file: ${filePath}`)
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+  }
+
+  private async restrictRegularFile(filePath: string): Promise<void> {
+    await this.assertManagedRegularFileOrMissing(filePath)
+    if (process.platform === 'win32') return
+    let handle
+    try {
+      handle = await fs.open(
+        filePath,
+        fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+      )
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw error
+    }
+    try {
+      if (!(await handle.stat()).isFile()) {
+        throw new Error(`Refusing non-regular diagnostics file: ${filePath}`)
+      }
+      await handle.chmod(0o600)
+    } finally {
+      await handle.close()
+    }
+  }
+
+  private isPathInside(rootPath: string, candidatePath: string): boolean {
+    const relative = path.relative(rootPath, candidatePath)
+    return relative === '' ||
+      (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
   }
 
   private getConfigDir(): string {
@@ -621,7 +784,7 @@ export class DiagnosticsService {
         activeId?: string | null
         providers?: Array<Record<string, unknown>>
       }
-      return {
+      return projectProviderSummaryForSharing({
         activeId: parsed.activeId ?? null,
         count: Array.isArray(parsed.providers) ? parsed.providers.length : 0,
         providers: (parsed.providers ?? []).map((provider) => ({
@@ -632,7 +795,7 @@ export class DiagnosticsService {
           baseUrl: this.summarizeUrl(typeof provider.baseUrl === 'string' ? provider.baseUrl : ''),
           models: provider.models,
         })),
-      }
+      })
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         return { activeId: null, count: 0, providers: [] }
@@ -824,10 +987,9 @@ export class DiagnosticsService {
   }
 
   private async writePendingCorruptLineCount(evidence: PendingCorruptionEvidence): Promise<void> {
-    await fs.writeFile(
+    await this.writePrivateFile(
       this.getPendingCorruptionEvidencePath(),
       `${JSON.stringify(evidence)}\n`,
-      { encoding: 'utf-8', mode: 0o600 },
     )
   }
 
@@ -856,7 +1018,7 @@ export class DiagnosticsService {
       while (Buffer.byteLength(tail, 'utf-8') > maxBytes) tail = tail.slice(1)
       const temporaryPath = `${filePath}.${crypto.randomUUID()}.tmp`
       try {
-        await fs.writeFile(temporaryPath, tail, { encoding: 'utf-8', mode: 0o600 })
+        await this.writePrivateFile(temporaryPath, tail)
         await fs.rename(temporaryPath, filePath)
       } finally {
         await fs.rm(temporaryPath, { force: true })
@@ -998,7 +1160,7 @@ export class DiagnosticsService {
     const temporaryPath = `${diagnosticsPath}.${crypto.randomUUID()}.tmp`
     const content = lines.length > 0 ? `${lines.join('\n')}\n` : ''
     try {
-      await fs.writeFile(temporaryPath, content, 'utf-8')
+      await this.writePrivateFile(temporaryPath, content)
       await fs.rename(temporaryPath, diagnosticsPath)
     } finally {
       await fs.rm(temporaryPath, { force: true })
@@ -1066,7 +1228,7 @@ export class DiagnosticsService {
   private createTarHeader(name: string, size: number, mtime: number): Buffer {
     const header = Buffer.alloc(512)
     this.writeTarString(header, 0, 100, name)
-    this.writeTarString(header, 100, 8, '0000644')
+    this.writeTarString(header, 100, 8, '0000600')
     this.writeTarString(header, 108, 8, '0000000')
     this.writeTarString(header, 116, 8, '0000000')
     this.writeTarOctal(header, 124, 12, size)

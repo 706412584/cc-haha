@@ -106,10 +106,10 @@ export const AssistantMessage = memo(function AssistantMessage({ content, isStre
         className={`group flex min-w-0 flex-col items-start ${
           documentLayout
             ? 'w-full max-w-full'
-            : 'max-w-[88%] sm:max-w-[80%] lg:max-w-[72%]'
+            : 'max-w-[88%] sm:max-w-[80%] lg:max-w-[720px]'
         }`}
       >
-        <div className={`rounded-[20px] rounded-tl-[8px] border border-[var(--color-border)]/60 bg-[var(--color-surface)] px-4 py-3 text-sm text-[var(--color-text-primary)] shadow-sm ${
+        <div className={`rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface)] px-5 py-4 text-[14.5px] text-[var(--color-text-primary)] shadow-[var(--shadow-card)] ${
           documentLayout ? 'w-full' : 'max-w-full'
         }`}>
           <FakeToolUseNotice blocks={fakeBlocks} />
@@ -141,8 +141,7 @@ export const AssistantMessage = memo(function AssistantMessage({ content, isStre
 
         <MessageActionBar
           copyText={isStreaming ? undefined : cleanContent}
-          copyLabel="Copy reply"
-          branchAction={branchAction}
+          copyLabel={t('chat.copyReply')}          branchAction={branchAction}
           align="start"
           timestamp={timestamp}
         />

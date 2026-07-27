@@ -91,4 +91,41 @@ describe('NewTaskModal', () => {
       recurring: true,
     }))
   })
+
+  describe('schedule controls', () => {
+    function renderModal() {
+      useSettingsStore.setState({ locale: 'en' })
+      useAdapterStore.setState({
+        fetchConfig: vi.fn(async () => {}),
+        config: {},
+      } as Partial<ReturnType<typeof useAdapterStore.getState>>)
+      return render(<NewTaskModal open onClose={vi.fn()} />)
+    }
+
+    it('gives the frequency select a name', () => {
+      // All seven native selects in the app shipped without a label or an
+      // `aria-label`, leaving them nameless in the accessibility tree.
+      renderModal()
+      expect(screen.getByLabelText('Frequency')).toHaveValue('daily')
+    })
+
+    it('names the time field even though it shares the frequency caption', () => {
+      // One「频率」heading covers both controls, so the time input carries its
+      // name on `aria-label` rather than a second visible label.
+      renderModal()
+      expect(screen.getByLabelText('Run time')).toHaveValue('09:00')
+    })
+
+    it('announces an invalid custom cron instead of only printing it', () => {
+      renderModal()
+      fireEvent.change(screen.getByLabelText('Frequency'), { target: { value: 'customCron' } })
+
+      const cronField = screen.getByLabelText('Custom cron expression')
+      fireEvent.change(cronField, { target: { value: 'not a cron' } })
+
+      expect(screen.getByRole('alert')).toHaveTextContent('Invalid cron expression')
+      expect(cronField).toHaveAttribute('aria-invalid', 'true')
+      expect(screen.getByRole('button', { name: 'Create task' })).toBeDisabled()
+    })
+  })
 })

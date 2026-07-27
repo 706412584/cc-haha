@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  buildPreAuthorizedAppGrants,
   DEFAULT_DESKTOP_GRANT_FLAGS,
+  parseStoredComputerUseConfig,
   resolveStoredComputerUseConfig,
 } from './preauthorizedConfig.js'
 
@@ -51,5 +53,72 @@ describe('resolveStoredComputerUseConfig', () => {
     expect(resolveStoredComputerUseConfig({ pythonPath: '' })).toMatchObject({
       pythonPath: null,
     })
+  })
+
+  test('rejects malformed persisted security fields instead of enabling them by coercion', () => {
+    expect(parseStoredComputerUseConfig({ enabled: 'false' })).toBeNull()
+    expect(parseStoredComputerUseConfig({
+      grantFlags: { clipboardWrite: 'yes' },
+    })).toBeNull()
+    expect(parseStoredComputerUseConfig({
+      authorizedApps: [{ bundleId: '', displayName: 'Preview' }],
+    })).toBeNull()
+    expect(parseStoredComputerUseConfig({
+      enabled: false,
+      grantFlags: {
+        clipboardRead: false,
+        clipboardWrite: true,
+      },
+      futureField: 'preserved by newer versions',
+    })).toEqual({
+      enabled: false,
+      grantFlags: {
+        clipboardRead: false,
+        clipboardWrite: true,
+      },
+      futureField: 'preserved by newer versions',
+    })
+  })
+
+  test('derives least-privilege tiers and filters policy-denied pre-authorizations', () => {
+    expect(
+      buildPreAuthorizedAppGrants([
+        {
+          bundleId: 'com.google.Chrome',
+          displayName: 'Google Chrome',
+        },
+        {
+          bundleId: 'com.apple.Terminal',
+          displayName: 'Terminal',
+        },
+        {
+          bundleId: 'com.apple.Preview',
+          displayName: 'Preview',
+        },
+        {
+          bundleId: 'com.spotify.client',
+          displayName: 'Spotify',
+        },
+      ], 1234),
+    ).toEqual([
+      {
+        bundleId: 'com.google.Chrome',
+        displayName: 'Google Chrome',
+        grantedAt: 1234,
+        tier: 'read',
+      },
+      {
+        bundleId: 'com.apple.Terminal',
+        displayName: 'Terminal',
+        grantedAt: 1234,
+        tier: 'click',
+      },
+      {
+        bundleId: 'com.apple.Preview',
+        displayName: 'Preview',
+        grantedAt: 1234,
+        tier: 'full',
+      },
+    ])
   })
 })

@@ -6,16 +6,29 @@ import { useTranslation } from '../../i18n'
 import { parseRunOutput } from '../../lib/parseRunOutput'
 import type { TaskRun } from '../../types/task'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
+import { Button } from '@/components/ui/Button'
+import { Card } from '@/components/ui/Card'
+import { EmptyState } from '@/components/ui/EmptyState'
+import { ErrorState } from '@/components/ui/ErrorState'
+import { IconButton } from '@/components/ui/IconButton'
+import { LoadingState } from '@/components/ui/LoadingState'
 
 function RunOutput({ run }: { run: TaskRun }) {
   const t = useTranslation()
 
-  // Show error prominently if present
+  // Show error prominently if present. The `/20` + `/28` alpha fills this used
+  // are exactly what Safari 15 WebView refuses to parse, so on the desktop
+  // shell the box rendered as bare red text with no panel around it.
   if (run.error) {
     return (
-      <div className="mt-2 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-[var(--radius-sm)] border border-[var(--color-error)]/20 bg-[var(--color-error-container)]/28 p-2.5 text-xs text-[var(--color-error)]">
-        {run.error}
-      </div>
+      <ErrorState
+        size="sm"
+        className="mt-3"
+        title={t('common.error')}
+        detail={
+          <span className="block max-h-40 overflow-y-auto whitespace-pre-wrap break-words">{run.error}</span>
+        }
+      />
     )
   }
 
@@ -23,20 +36,23 @@ function RunOutput({ run }: { run: TaskRun }) {
 
   if (!text) {
     return (
-      <div className="mt-2 p-2.5 rounded-[var(--radius-sm)] bg-[var(--color-surface-container)] text-xs text-[var(--color-text-tertiary)] italic">
+      <Card radius="lg" padding="none" className="mt-3 px-[18px] py-3 text-xs italic text-[var(--color-text-tertiary)]">
         {run.sessionId ? t('tasks.outputHintSession') : t('tasks.noOutputText')}
-      </div>
+      </Card>
     )
   }
 
+  // The handoff's "summary card": a bordered sheet on the page ground rather
+  // than a tinted inset, so the commit hashes inside it read as badges against
+  // a surface instead of two greys stacked on each other.
   return (
-    <div className="mt-2 max-h-48 overflow-y-auto rounded-[var(--radius-sm)] bg-[var(--color-surface-container)] p-2.5">
+    <Card radius="lg" padding="none" className="mt-3 max-h-48 overflow-y-auto px-[22px] py-[18px]">
       <MarkdownRenderer
         content={text}
         variant="compact"
         className="break-words"
       />
-    </div>
+    </Card>
   )
 }
 
@@ -225,57 +241,60 @@ export function TaskRunsPanel({ taskId, onClose, refreshKey }: Props) {
   }, [hasRunning, taskId, refreshKey, refresh])
 
   return (
-    <div className="mt-2 mb-1 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
+    // A drawer under its row, not a card inside it: the border-top continues
+    // the list's own separator and the fill is the next surface layer down.
+    <div className="border-t border-[var(--color-border-separator)] bg-[var(--color-surface-container-low)]">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-2.5 bg-[var(--color-surface-container)]">
-        <span className="text-xs font-medium text-[var(--color-text-primary)]">{t('tasks.logsTitle')}</span>
-        <button
+      <div className="flex items-center justify-between px-5 pb-1.5 pt-3.5">
+        <span className="text-[14.5px] font-bold text-[var(--color-text-primary)]">{t('tasks.logsTitle')}</span>
+        <IconButton
+          icon={<span className="material-symbols-outlined text-[16px]">close</span>}
+          label={t('tasks.close')}
+          size="xs"
+          tone="muted"
           onClick={onClose}
-          className="p-0.5 text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] transition-colors"
-        >
-          <span className="material-symbols-outlined text-[16px]">close</span>
-        </button>
+        />
       </div>
 
       {/* Content */}
-      <div className="max-h-64 overflow-y-auto">
+      <div className="max-h-64 overflow-y-auto px-5 pb-4">
         {loading ? (
-          <div className="flex items-center justify-center py-6">
-            <div className="animate-spin w-4 h-4 border-2 border-[var(--color-brand)] border-t-transparent rounded-full" />
-          </div>
+          // Same 16px brand spinner in the same `py-6` box; the label goes from
+          // an `aria-label` on the SVG to an `aria-live` region, so the wait is
+          // announced rather than only readable on focus.
+          <LoadingState size="sm" label={t('common.loading')} labelHidden />
         ) : runs.length === 0 ? (
-          <div className="px-4 py-6 text-center text-xs text-[var(--color-text-tertiary)]">
-            {t('tasks.noLogs')}
-          </div>
+          <EmptyState variant="plain" size="sm" description={t('tasks.noLogs')} />
         ) : (
           <div className="divide-y divide-[var(--color-border-separator)]">
             {runs.map((run) => {
               const cfg = STATUS_CONFIG[run.status] || STATUS_CONFIG.failed!
               const isExpanded = expandedId === run.id
               return (
-                <div key={run.id} className="px-4 py-2.5">
-                  <div className="flex items-center gap-3">
+                <div key={run.id} className="py-2.5">
+                  <div className="flex items-center gap-[11px]">
                     {/* Status icon */}
                     <span
-                      className={`material-symbols-outlined text-[16px] ${run.status === 'running' ? 'animate-spin' : ''}`}
+                      aria-hidden="true"
+                      className={`material-symbols-outlined shrink-0 text-[17px] ${run.status === 'running' ? 'animate-spin' : ''}`}
                       style={{ color: cfg.color, fontVariationSettings: "'FILL' 1" }}
                     >
                       {cfg.icon}
                     </span>
 
                     {/* Status text */}
-                    <span className="text-xs font-medium" style={{ color: cfg.color }}>
+                    <span className="text-[13.5px] font-bold" style={{ color: cfg.color }}>
                       {t(`tasks.runStatus.${run.status}` as any)} {/* dynamic key */}
                     </span>
 
-                    {/* Time */}
-                    <span className="text-xs text-[var(--color-text-tertiary)]">
+                    {/* Time — mono, so timestamps line up down the column */}
+                    <span className="font-mono text-[13px] tabular-nums text-[var(--color-text-secondary)]">
                       {new Date(run.startedAt).toLocaleString()}
                     </span>
 
                     {/* Duration */}
                     {run.durationMs != null && (
-                      <span className="text-xs text-[var(--color-text-tertiary)]">
+                      <span className="text-[13px] text-[var(--color-text-tertiary)]">
                         {t('tasks.duration', { s: Math.round(run.durationMs / 1000) })}
                       </span>
                     )}
@@ -283,23 +302,27 @@ export function TaskRunsPanel({ taskId, onClose, refreshKey }: Props) {
                     <div className="ml-auto flex items-center gap-2">
                       {/* Open session — only after run completes (session is empty while running) */}
                       {run.sessionId && run.status !== 'running' && (
-                        <button
+                        <Button
+                          variant="link"
+                          size="sm"
+                          icon={<span aria-hidden="true" className="material-symbols-outlined text-[13px]">north_east</span>}
+                          iconPosition="end"
                           onClick={() => openSession(run.sessionId!, run.taskName)}
-                          className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-[var(--color-brand)] bg-[var(--color-brand)]/8 hover:bg-[var(--color-brand)]/15 rounded-[var(--radius-sm)] transition-colors"
                         >
-                          <span className="material-symbols-outlined text-[14px]">open_in_new</span>
                           {t('tasks.openSession')}
-                        </button>
+                        </Button>
                       )}
 
                       {/* Summary toggle */}
                       {(run.output || run.error || run.hasOutput || run.hasError) && (
-                        <button
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          aria-expanded={isExpanded}
                           onClick={() => { void toggleOutput(run) }}
-                          className="text-xs text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors"
                         >
                           {isExpanded ? t('tasks.hideOutput') : t('tasks.viewOutput')}
-                        </button>
+                        </Button>
                       )}
                     </div>
                   </div>
@@ -308,19 +331,17 @@ export function TaskRunsPanel({ taskId, onClose, refreshKey }: Props) {
                   {isExpanded && (run.output || run.error) ? (
                     <RunOutput run={run} />
                   ) : isExpanded && detailState?.runId === run.id && detailState.status === 'loading' ? (
-                    <div className="mt-2 rounded-[var(--radius-sm)] bg-[var(--color-surface-container)] p-2.5 text-xs text-[var(--color-text-tertiary)]">
+                    <Card radius="lg" padding="none" className="mt-3 px-[18px] py-3 text-xs text-[var(--color-text-tertiary)]">
                       {t('common.loading')}
-                    </div>
+                    </Card>
                   ) : isExpanded && detailState?.runId === run.id && detailState.status === 'error' ? (
-                    <div className="mt-2 flex items-center justify-between gap-3 rounded-[var(--radius-sm)] border border-[var(--color-error)]/20 bg-[var(--color-error-container)]/28 p-2.5 text-xs text-[var(--color-error)]">
-                      <span>{t('common.error')}</span>
-                      <button
-                        onClick={() => { void loadDetail(run) }}
-                        className="font-medium underline underline-offset-2"
-                      >
-                        {t('common.retry')}
-                      </button>
-                    </div>
+                    <ErrorState
+                      size="sm"
+                      className="mt-3"
+                      title={t('common.error')}
+                      onRetry={() => { void loadDetail(run) }}
+                      retryLabel={t('common.retry')}
+                    />
                   ) : isExpanded ? (
                     <RunOutput run={run} />
                   ) : null}

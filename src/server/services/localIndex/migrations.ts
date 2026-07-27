@@ -1,6 +1,6 @@
 import type { Database } from 'bun:sqlite'
 
-export const LOCAL_INDEX_SCHEMA_VERSION = 4
+export const LOCAL_INDEX_SCHEMA_VERSION = 5
 export const LOCAL_INDEX_SCHEMA_UNSUPPORTED =
   'LOCAL_INDEX_SCHEMA_UNSUPPORTED' as const
 
@@ -180,11 +180,19 @@ ALTER TABLE sessions ADD COLUMN thinking_enabled INTEGER
   CHECK (thinking_enabled IS NULL OR thinking_enabled IN (0, 1));
 `
 
+// Time actually spent working, as opposed to the calendar span between a session's first and last
+// message. Existing rows default to 0 and are refilled when the bumped parser version rebuilds
+// them; nothing reads the column before that rebuild lands.
+const SCHEMA_V5 = `
+ALTER TABLE activity_sessions ADD COLUMN active_duration_ms INTEGER NOT NULL DEFAULT 0;
+`
+
 const MIGRATIONS = [
   { version: 1, sql: SCHEMA_V1 },
   { version: 2, sql: SCHEMA_V2 },
   { version: 3, sql: SCHEMA_V3 },
   { version: 4, sql: SCHEMA_V4 },
+  { version: 5, sql: SCHEMA_V5 },
 ] as const
 
 export class UnsupportedLocalIndexSchemaError extends Error {
@@ -207,6 +215,17 @@ function getUserVersion(database: Database): number {
   }
 }
 
+function hasColumn(database: Database, table: string, column: string): boolean {
+  const statement = database.prepare<{ name: string }, []>(
+    `PRAGMA table_info(${table})`,
+  )
+  try {
+    return statement.all().some(candidate => candidate.name === column)
+  } finally {
+    statement.finalize()
+  }
+}
+
 export function assertLocalIndexSchemaSupported(database: Database): void {
   const currentVersion = getUserVersion(database)
   if (currentVersion > LOCAL_INDEX_SCHEMA_VERSION) {
@@ -222,9 +241,29 @@ export function migrateLocalIndexDatabase(database: Database): void {
   if (currentVersion === LOCAL_INDEX_SCHEMA_VERSION) return
 
   database.transaction(() => {
+    if (
+      currentVersion === 4 &&
+      !hasColumn(database, 'sessions', 'thinking_enabled')
+    ) {
+      database.exec(SCHEMA_V4)
+    }
+
     for (const migration of MIGRATIONS) {
       if (migration.version <= currentVersion) continue
-      database.exec(migration.sql)
+      // Both branches used schema version 4 for different columns. A database
+      // created by the upstream branch may therefore report v4 while lacking
+      // the local thinking column; repair either side before advancing to v5.
+      if (migration.version === 4) {
+        if (!hasColumn(database, 'sessions', 'thinking_enabled')) {
+          database.exec(migration.sql)
+        }
+      } else if (migration.version === 5) {
+        if (!hasColumn(database, 'activity_sessions', 'active_duration_ms')) {
+          database.exec(migration.sql)
+        }
+      } else {
+        database.exec(migration.sql)
+      }
       database.exec(`PRAGMA user_version = ${migration.version}`)
     }
   })()

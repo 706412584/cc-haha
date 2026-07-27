@@ -154,7 +154,12 @@ describe('PermissionModeSelector', () => {
     fireEvent.click(trigger)
 
     expect(trigger).toHaveAttribute('aria-expanded', 'true')
-    expect(trigger).toHaveAttribute('aria-controls', 'permission-mode-menu')
+    // The id is generated per instance rather than hard-coded, so assert the
+    // relationship: `aria-controls` must resolve to the one menu on the page.
+    // The literal it replaced was rendered twice, leaving this pointer ambiguous.
+    const menu = screen.getByRole('menu')
+    expect(menu.id).not.toBe('')
+    expect(trigger).toHaveAttribute('aria-controls', menu.id)
     expect(screen.getByRole('dialog', { name: 'Execution Permissions' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Close' })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: /Auto accept edits/ })).toBeInTheDocument()
@@ -471,6 +476,22 @@ describe('PermissionModeSelector', () => {
       .getByRole('button', { name: 'Auto mode' })
       .querySelector('.material-symbols-outlined')
     expect(triggerIcon).toHaveClass('text-[12px]')
+  })
+
+  it('keeps every row on one text column despite the reduced Auto glyph', () => {
+    render(<PermissionModeSelector value="default" onChange={vi.fn()} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Ask permissions' }))
+    const icons = screen
+      .getAllByRole('menuitem')
+      .map((item) => item.querySelector('.material-symbols-outlined'))
+
+    expect(icons).toHaveLength(5)
+    // The box, not the glyph, sets where the title starts. Without it the
+    // 18px Auto glyph pulled its own title 2px left of the other four.
+    for (const icon of icons) {
+      expect(icon).toHaveClass('w-5', 'shrink-0', 'text-center')
+    }
   })
 
   it('does not change mode when first-use Auto confirmation is cancelled', () => {

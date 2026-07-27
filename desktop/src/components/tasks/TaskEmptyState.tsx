@@ -1,30 +1,31 @@
-import { Button } from '../shared/Button'
+import { EmptyState } from '@/components/ui/EmptyState'
 import { useTranslation } from '../../i18n'
 
 type Props = {
   onCreateTask: () => void
 }
 
+/**
+ * The clock now sits in the shared 48px bordered icon box instead of a 64px
+ * tinted circle, and the description drops from `text-sm` to the shared
+ * `text-xs` — the deliberate cost of having one empty state instead of 24.
+ * In exchange the title is a real heading, which it was not before.
+ */
 export function TaskEmptyState({ onCreateTask }: Props) {
   const t = useTranslation()
   return (
-    <div className="flex flex-col items-center justify-center py-20">
-      {/* Clock icon */}
-      <div className="w-16 h-16 rounded-full bg-[var(--color-surface-info)] flex items-center justify-center mb-4">
-        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-tertiary)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <EmptyState
+      variant="plain"
+      size="lg"
+      icon={
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
           <circle cx="12" cy="12" r="10" />
           <polyline points="12 6 12 12 16 14" />
         </svg>
-      </div>
-
-      <h3 className="text-sm font-medium text-[var(--color-text-primary)] mb-1">
-        {t('tasks.emptyTitle')}
-      </h3>
-      <p className="text-sm text-[var(--color-text-tertiary)] mb-4 text-center max-w-sm">
-        {t('tasks.emptyDesc')}
-      </p>
-
-      <Button onClick={onCreateTask}>{t('tasks.newTask')}</Button>
-    </div>
+      }
+      title={t('tasks.emptyTitle')}
+      description={t('tasks.emptyDesc')}
+      action={{ label: t('tasks.newTask'), onClick: onCreateTask, variant: 'primary' }}
+    />
   )
 }

@@ -21,7 +21,10 @@ import { useChatStore } from '../../stores/chatStore'
 import { useWorkspaceChatContextStore } from '../../stores/workspaceChatContextStore'
 import { SETTINGS_TAB_ID, useTabStore } from '../../stores/tabStore'
 import { useUIStore } from '../../stores/uiStore'
-import { copyTextToClipboard } from '../chat/clipboard'
+import { Button } from '@/components/ui/Button'
+import { IconButton } from '@/components/ui/IconButton'
+import { useDismissable } from '@/hooks/useDismissable'
+import { copyTextToClipboard } from '@/lib/clipboard'
 import { clearWindowSelection, getSelectionPopoverPosition, useSelectionPopoverDismiss } from '../../hooks/useSelectionPopoverDismiss'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
 import {
@@ -159,19 +162,19 @@ const SELECTION_MENU_WIDTH = 158
 const SELECTION_MENU_HEIGHT = 44
 const WORKSPACE_SEARCH_DEBOUNCE_MS = 250
 const FILE_BADGE_META: Record<string, { label: string; className: string }> = {
-  ts: { label: 'TS', className: 'bg-[var(--color-secondary)]/14 text-[var(--color-secondary)]' },
-  tsx: { label: 'TSX', className: 'bg-[var(--color-secondary)]/14 text-[var(--color-secondary)]' },
-  js: { label: 'JS', className: 'bg-[var(--color-warning)]/16 text-[var(--color-warning)]' },
-  jsx: { label: 'JSX', className: 'bg-[var(--color-warning)]/16 text-[var(--color-warning)]' },
-  json: { label: '{}', className: 'bg-[var(--color-tertiary)]/14 text-[var(--color-tertiary)]' },
-  md: { label: 'MD', className: 'bg-[var(--color-text-tertiary)]/14 text-[var(--color-text-secondary)]' },
-  css: { label: 'CSS', className: 'bg-[var(--color-secondary)]/14 text-[var(--color-secondary)]' },
-  html: { label: 'H', className: 'bg-[var(--color-brand)]/14 text-[var(--color-brand)]' },
-  png: { label: 'IMG', className: 'bg-[var(--color-success)]/14 text-[var(--color-success)]' },
-  jpg: { label: 'IMG', className: 'bg-[var(--color-success)]/14 text-[var(--color-success)]' },
-  jpeg: { label: 'IMG', className: 'bg-[var(--color-success)]/14 text-[var(--color-success)]' },
-  gif: { label: 'IMG', className: 'bg-[var(--color-success)]/14 text-[var(--color-success)]' },
-  svg: { label: 'SVG', className: 'bg-[var(--color-success)]/14 text-[var(--color-success)]' },
+  ts: { label: 'TS', className: 'bg-[var(--color-info-container)] text-[var(--color-on-info-container)]' },
+  tsx: { label: 'TSX', className: 'bg-[var(--color-info-container)] text-[var(--color-on-info-container)]' },
+  js: { label: 'JS', className: 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]' },
+  jsx: { label: 'JSX', className: 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]' },
+  json: { label: '{}', className: 'bg-[var(--color-surface-container-high)] text-[var(--color-text-secondary)]' },
+  md: { label: 'MD', className: 'bg-[var(--color-surface-container-high)] text-[var(--color-text-secondary)]' },
+  css: { label: 'CSS', className: 'bg-[var(--color-info-container)] text-[var(--color-on-info-container)]' },
+  html: { label: 'H', className: 'bg-[var(--color-brand-soft)] text-[var(--color-on-brand-soft)]' },
+  png: { label: 'IMG', className: 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]' },
+  jpg: { label: 'IMG', className: 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]' },
+  jpeg: { label: 'IMG', className: 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]' },
+  gif: { label: 'IMG', className: 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]' },
+  svg: { label: 'SVG', className: 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]' },
 }
 
 function makeTreeStateKey(sessionId: string, path: string) {
@@ -203,7 +206,7 @@ function getFileBadgeMeta(name: string) {
   const extension = getFileExtension(name)
   return FILE_BADGE_META[extension] ?? {
     label: extension ? extension.slice(0, 3).toUpperCase() : 'TXT',
-    className: 'bg-[var(--color-text-tertiary)]/12 text-[var(--color-text-secondary)]',
+    className: 'bg-[var(--color-surface-container-high)] text-[var(--color-text-secondary)]',
   }
 }
 
@@ -228,7 +231,7 @@ function FileTypeBadge({ name, subtle = false }: { name: string; subtle?: boolea
   const meta = getFileBadgeMeta(name)
   return (
     <span
-      className={`inline-flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-[5px] px-1 font-[var(--font-label)] text-[9px] font-semibold leading-none ${meta.className} ${subtle ? 'opacity-55 grayscale' : ''}`}
+      className={`inline-flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-[var(--radius-sm)] px-1 font-[var(--font-label)] text-[9px] font-semibold leading-none ${meta.className} ${subtle ? 'opacity-55 grayscale' : ''}`}
       aria-hidden="true"
     >
       {meta.label}
@@ -404,7 +407,7 @@ function FloatingSelectionMenu({
       type="button"
       onMouseDown={(event) => event.preventDefault()}
       onClick={onAdd}
-      className="fixed z-50 inline-flex h-11 items-center gap-2 rounded-full border border-[var(--color-border)]/70 bg-[var(--color-surface-container-lowest)] px-5 text-[15px] font-semibold text-[var(--color-text-primary)] shadow-[0_10px_28px_rgba(15,23,42,0.14),0_2px_8px_rgba(15,23,42,0.08)] transition-colors hover:bg-[var(--color-surface)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]/35"
+      className="glass-panel fixed z-[var(--z-popover)] inline-flex h-11 items-center gap-2 rounded-full px-5 text-[15px] font-semibold text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
       style={{ left: selection.x, top: selection.y }}
     >
       <MessageCircle size={21} strokeWidth={2.15} className="shrink-0 text-[var(--color-text-primary)]" aria-hidden="true" />
@@ -444,27 +447,6 @@ function PanelMessage({
   )
 }
 
-function ToolbarIconButton({
-  Icon,
-  label,
-  onClick,
-}: {
-  Icon: LucideIcon
-  label: string
-  onClick: () => void
-}) {
-  return (
-    <button
-      type="button"
-      aria-label={label}
-      onClick={onClick}
-      className="inline-flex h-8 w-8 items-center justify-center rounded-[8px] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-info)]/30"
-    >
-      <Icon size={16} strokeWidth={1.9} aria-hidden="true" />
-    </button>
-  )
-}
-
 function WorkspaceFilterInput({
   value,
   onChange,
@@ -488,8 +470,8 @@ function WorkspaceFilterInput({
     : t('workspace.filterChangedPlaceholder')
 
   return (
-    <div className="shrink-0 border-b border-[var(--color-text-primary)]/10 px-3 pb-2.5 pt-2.5">
-      <div className="flex h-9 items-center gap-2 rounded-[7px] bg-[var(--color-surface-container-low)] px-2.5 text-[var(--color-text-tertiary)] shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-text-primary)_8%,transparent)] transition-[background-color,box-shadow] duration-200 ease-out focus-within:bg-[var(--color-surface)] focus-within:shadow-[inset_0_0_0_1px_var(--color-info),0_0_0_3px_color-mix(in_srgb,var(--color-info)_12%,transparent)]">
+    <div className="shrink-0 border-b border-[var(--color-border)] px-3 pb-2.5 pt-2.5">
+      <div className="flex h-9 items-center gap-2 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-2.5 text-[var(--color-text-tertiary)] transition-[background-color,border-color,box-shadow] duration-150 ease-out focus-within:border-[var(--color-border-focus)] focus-within:bg-[var(--color-surface)] focus-within:shadow-[var(--shadow-focus-ring)]">
         <Search size={15} strokeWidth={1.9} aria-hidden="true" className="shrink-0" />
         <input
           ref={inputRef}
@@ -512,17 +494,17 @@ function WorkspaceFilterInput({
           <RefreshCw size={13} aria-hidden="true" className="shrink-0 animate-spin" />
         )}
         {value.length > 0 && (
-          <button
-            type="button"
-            aria-label={t('workspace.clearFilter')}
+          <IconButton
+            icon={<X size={13} strokeWidth={2} aria-hidden="true" />}
+            label={t('workspace.clearFilter')}
             onClick={() => {
               onChange('')
               inputRef.current?.focus()
             }}
-            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[6px] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
-          >
-            <X size={13} strokeWidth={2} aria-hidden="true" />
-          </button>
+            size="sm"
+            tone="muted"
+            showTooltip={false}
+          />
         )}
       </div>
       {summary && (
@@ -543,7 +525,7 @@ function FileStatusBadge({ status }: { status: WorkspaceFileStatus }) {
   const meta = FILE_STATUS_META[status]
   return (
     <span
-      className={`inline-flex h-5 w-4 shrink-0 items-center justify-center font-[var(--font-mono)] text-[10px] font-semibold ${meta.className}`}
+      className={`inline-flex h-5 w-4 shrink-0 items-center justify-center font-mono text-[10px] font-semibold ${meta.className}`}
       aria-label={getWorkspaceStatusLabel(status, t)}
     >
       {meta.label}
@@ -662,9 +644,9 @@ function CodeSurface({
     if (!commentLineStart || commentLineEnd !== lineNumber) return null
 
     return (
-      <div className="grid grid-cols-[48px_minmax(0,720px)] gap-3 bg-[var(--color-brand)]/10 px-3 py-2">
+      <div className="grid grid-cols-[48px_minmax(0,720px)] gap-3 bg-[var(--color-brand-soft)] px-3 py-2">
         <span aria-hidden="true" />
-        <div className="rounded-[10px] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-sm">
+        <div className="rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-card)]">
           <div className="flex items-center gap-2 border-b border-[var(--color-border)] px-3 py-2">
             <span className="material-symbols-outlined text-[15px] text-[var(--color-text-tertiary)]">chat_bubble</span>
             <span className="text-[12px] font-semibold text-[var(--color-text-primary)]">{t('workspace.localComment')}</span>
@@ -683,24 +665,24 @@ function CodeSurface({
             className="block w-full resize-none bg-transparent px-3 py-3 text-[13px] leading-6 text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)]"
           />
           <div className="flex justify-end gap-2 px-3 pb-3">
-            <button
-              type="button"
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => {
                 setCommentRange(null)
                 setCommentDraft('')
               }}
-              className="rounded-[7px] px-2.5 py-1 text-[12px] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]"
             >
               {t('common.cancel')}
-            </button>
-            <button
-              type="button"
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
               onClick={submitLineComment}
               disabled={!commentDraft.trim()}
-              className="rounded-[7px] bg-[var(--color-text-primary)] px-2.5 py-1 text-[12px] font-medium text-[var(--color-surface)] disabled:cursor-not-allowed disabled:opacity-45"
             >
               {t('workspace.addCommentToChat')}
-            </button>
+            </Button>
           </div>
         </div>
       </div>
@@ -761,7 +743,7 @@ function CodeSurface({
           <pre
             data-workspace-code=""
             data-testid="workspace-code"
-            className="m-0 font-[var(--font-mono)] text-[12px] leading-[1.55]"
+            className="m-0 font-mono text-[12px] leading-[1.55]"
             style={{ color: 'var(--color-code-fg)', background: 'transparent' }}
           >
             {visibleLines.map((line, index) => {
@@ -785,7 +767,7 @@ function CodeSurface({
             data-workspace-code=""
             data-testid="workspace-code"
             data-highlight-engine="shiki"
-            className="m-0 font-[var(--font-mono)] text-[12px] leading-[1.55]"
+            className="m-0 font-mono text-[12px] leading-[1.55]"
             style={{ color: 'var(--color-code-fg)', background: 'transparent' }}
           >
             {shikiTokensByLine.map((line, index) => {
@@ -825,7 +807,7 @@ function CodeSurface({
                 data-workspace-code=""
                 data-testid="workspace-code"
                 data-highlight-engine="prism"
-                className="m-0 font-[var(--font-mono)] text-[12px] leading-[1.55]"
+                className="m-0 font-mono text-[12px] leading-[1.55]"
                 style={{ color: 'var(--color-code-fg)', background: 'transparent' }}
               >
                 {tokens.map((line, index) => {
@@ -861,13 +843,14 @@ function CodeSurface({
                 ? t('workspace.previewAllLines', { total: lines.length })
                 : t('workspace.previewLineLimit', { count: visibleLines.length, total: lines.length })}
             </span>
-            <button
-              type="button"
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => setShowAllLines((current) => !current)}
-              className="ml-auto rounded-[6px] px-2 py-1 text-[12px] font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+              className="ml-auto"
             >
               {showAllLines ? t('workspace.collapsePreview') : t('workspace.showAllLoadedLines')}
-            </button>
+            </Button>
           </div>
         )}
       </div>
@@ -959,7 +942,7 @@ function ImagePreview({ tab }: { tab: WorkspacePreviewTab }) {
         <img
           src={tab.dataUrl}
           alt={tab.path}
-          className="max-h-full max-w-full rounded-[8px] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] object-contain shadow-sm"
+          className="max-h-full max-w-full rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] object-contain shadow-[var(--shadow-card)]"
         />
       </div>
     </div>
@@ -990,7 +973,7 @@ function ChangedFileRow({
       data-workspace-file-row=""
       data-workspace-file-path={file.path}
       title={file.path}
-      className={`group mx-2 flex w-[calc(100%-16px)] items-center gap-1.5 rounded-[5px] px-2 text-left transition-[background-color,transform] duration-150 ease-out active:scale-[0.99] ${
+      className={`group mx-2 flex w-[calc(100%-16px)] items-center gap-1.5 rounded-[var(--radius-sm)] px-2 text-left transition-[background-color,transform] duration-150 ease-out active:scale-[0.99] ${
         file.oldPath ? 'min-h-11 py-1' : 'h-[30px]'
       } ${
         active
@@ -1018,7 +1001,7 @@ function ChangedFileRow({
           </div>
         )}
       </div>
-      <div className="shrink-0 text-right font-[var(--font-mono)] text-[10px] leading-4">
+      <div className="shrink-0 text-right font-mono text-[10px] leading-4">
         <span className="text-[var(--color-success)]">+{file.additions}</span>
         <span className="ml-1 text-[var(--color-error)]">-{file.deletions}</span>
       </div>
@@ -1094,7 +1077,7 @@ function WorkspaceSearchResultRow({
             onClearSearch()
           }
         }}
-        className={`group mx-2 flex min-h-12 w-[calc(100%-16px)] items-start gap-2 rounded-[7px] px-2.5 py-2 text-left transition-[background-color,transform] duration-150 ease-out active:scale-[0.99] ${
+        className={`group mx-2 flex min-h-12 w-[calc(100%-16px)] items-start gap-2 rounded-[var(--radius-md)] px-2.5 py-2 text-left transition-[background-color,transform] duration-150 ease-out active:scale-[0.99] ${
           active
             ? 'bg-[var(--color-info-container)] shadow-[inset_3px_0_0_var(--color-info)]'
             : 'hover:bg-[var(--color-surface-hover)]'
@@ -1105,7 +1088,7 @@ function WorkspaceSearchResultRow({
           <span className="block truncate text-[13px] font-medium text-[var(--color-text-primary)]">
             {entry.name}
           </span>
-          <span className="mt-0.5 block truncate font-[var(--font-mono)] text-[10px] text-[var(--color-text-tertiary)]">
+          <span className="mt-0.5 block truncate font-mono text-[10px] text-[var(--color-text-tertiary)]">
             {parentPath}
           </span>
         </span>
@@ -1144,7 +1127,7 @@ function TreeNode({
         onClick={() => onOpenFile(entry.path)}
         onContextMenu={(event) => onFileContextMenu(event, entry.path, false)}
         aria-current={isActive ? 'true' : undefined}
-        className={`group mx-2 flex h-8 w-[calc(100%-16px)] items-center gap-2 rounded-[7px] pr-2 text-left transition-colors ${
+        className={`group mx-2 flex h-8 w-[calc(100%-16px)] items-center gap-2 rounded-[var(--radius-md)] pr-2 text-left transition-colors ${
           isActive
             ? 'bg-[var(--color-surface-selected)] shadow-[inset_0_0_0_1.5px_var(--color-border-focus)]'
             : 'hover:bg-[var(--color-surface-hover)]'
@@ -1164,7 +1147,7 @@ function TreeNode({
         onClick={() => onToggle(entry.path)}
         onContextMenu={(event) => onFileContextMenu(event, entry.path, true)}
         aria-expanded={isVisuallyExpanded}
-        className="group mx-2 flex h-8 w-[calc(100%-16px)] items-center gap-2 rounded-[7px] pr-2 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
+        className="group mx-2 flex h-8 w-[calc(100%-16px)] items-center gap-2 rounded-[var(--radius-md)] pr-2 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
         style={{ paddingLeft: indent }}
       >
         <span aria-hidden="true" className="material-symbols-outlined shrink-0 text-[18px] text-[var(--color-text-tertiary)] transition-colors group-hover:text-[var(--color-text-primary)]">
@@ -1253,6 +1236,8 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
   const [pendingPreviewClose, setPendingPreviewClose] = useState<PendingPreviewClose | null>(null)
   const [isSavingPendingClose, setIsSavingPendingClose] = useState(false)
   const [pendingCloseError, setPendingCloseError] = useState<string | null>(null)
+  const previewTabContextMenuRef = useRef<HTMLDivElement>(null)
+  const fileContextMenuRef = useRef<HTMLDivElement>(null)
   const width = useWorkspacePanelStore((state) => state.width)
   const isOpen = useWorkspacePanelStore((state) => state.isPanelOpen(sessionId))
   const activeView = useWorkspacePanelStore((state) => state.getActiveView(sessionId))
@@ -1416,15 +1401,19 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
     }
   }, [filterQuery, navigatorView, normalizedFilterQuery, sessionId, shouldRender, t, workspaceSearchRevision])
 
-  useEffect(() => {
-    if (!previewTabContextMenu && !fileContextMenu) return
-    const close = () => {
-      setPreviewTabContextMenu(null)
-      setFileContextMenu(null)
-    }
-    document.addEventListener('click', close)
-    return () => document.removeEventListener('click', close)
-  }, [fileContextMenu, previewTabContextMenu])
+  const closeContextMenus = useCallback(() => {
+    setPreviewTabContextMenu(null)
+    setFileContextMenu(null)
+  }, [])
+
+  // Both menus already stopped propagation on their own container, so treating
+  // them as "inside" reproduces the previous behavior (a copy-path click leaves
+  // the menu open) without a hand-rolled document listener.
+  useDismissable({
+    open: previewTabContextMenu !== null || fileContextMenu !== null,
+    refs: [previewTabContextMenuRef, fileContextMenuRef],
+    onDismiss: closeContextMenus,
+  })
 
   useEffect(() => {
     if (!hasPreviewTabs && isNavigatorOpen) {
@@ -1697,7 +1686,7 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
         {changedFileGroups.map((group) => (
           <section key={group.directory || '__root__'}>
             {group.directory && (
-              <div className="flex h-8 items-center gap-1.5 px-3.5 text-[11px] font-medium text-[var(--color-text-tertiary)]">
+              <div className="flex h-8 items-center gap-1.5 px-3.5 font-mono text-[11px] font-medium text-[var(--color-text-tertiary)]">
                 <FolderOpen size={14} strokeWidth={1.8} aria-hidden="true" className="shrink-0" />
                 <span className="min-w-0 truncate">{group.directory}</span>
               </div>
@@ -1724,18 +1713,19 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
       }
       if (workspaceSearchError && !displayedWorkspaceSearch) {
         return (
-          <div role="alert" className="mx-3 my-3 rounded-[8px] border border-[var(--color-error)]/20 bg-[var(--color-error)]/6 p-3 text-[12px] text-[var(--color-error)]">
+          <div role="alert" className="mx-3 my-3 rounded-[var(--radius-md)] border border-[var(--color-error)] bg-[var(--color-error-container)] p-3 text-[12px] text-[var(--color-on-error-container)]">
             <div className="flex items-start gap-2">
               <CircleAlert size={15} aria-hidden="true" className="mt-0.5 shrink-0" />
               <span className="min-w-0 flex-1 leading-5">{workspaceSearchError}</span>
             </div>
-            <button
-              type="button"
+            <Button
+              variant="danger-outline"
+              size="sm"
               onClick={() => setWorkspaceSearchRevision((revision) => revision + 1)}
-              className="mt-2 rounded-[6px] border border-[var(--color-error)]/30 px-2 py-1 font-medium hover:bg-[var(--color-error)]/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-error)]/25"
+              className="mt-2"
             >
               {t('common.retry')}
-            </button>
+            </Button>
           </div>
         )
       }
@@ -1755,16 +1745,17 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
           className="space-y-0.5 py-1"
         >
           {workspaceSearchError && (
-            <div role="alert" className="mx-3 mb-2 flex items-center gap-2 rounded-[7px] bg-[var(--color-error)]/6 px-2.5 py-2 text-[11px] text-[var(--color-error)]">
+            <div role="alert" className="mx-3 mb-2 flex items-center gap-2 rounded-[var(--radius-md)] border border-[var(--color-error)] bg-[var(--color-error-container)] px-2.5 py-2 text-[11px] text-[var(--color-on-error-container)]">
               <CircleAlert size={14} aria-hidden="true" className="shrink-0" />
               <span className="min-w-0 flex-1 truncate">{workspaceSearchError}</span>
-              <button
-                type="button"
+              <Button
+                variant="danger-outline"
+                size="xs"
                 onClick={() => setWorkspaceSearchRevision((revision) => revision + 1)}
-                className="shrink-0 rounded-[5px] px-1.5 py-1 font-medium hover:bg-[var(--color-error)]/10"
+                className="shrink-0"
               >
                 {t('common.retry')}
-              </button>
+              </Button>
             </div>
           )}
           {displayedWorkspaceSearch.entries.map((entry) => (
@@ -1858,12 +1849,12 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
           ref={previewHeaderRef}
           tabIndex={-1}
           data-testid="workspace-preview-header"
-          className="flex h-10 shrink-0 items-center gap-2 border-b border-[var(--color-text-primary)]/10 bg-[var(--color-surface)] px-3 text-[12px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-info)]/35"
+          className="flex h-10 shrink-0 items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-[12px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)]"
         >
           <FileText size={15} strokeWidth={1.8} aria-hidden="true" className="shrink-0 text-[var(--color-text-tertiary)]" />
-          <span className="min-w-0 truncate font-medium text-[var(--color-text-primary)]">{activePreviewTab.path}</span>
+          <span className="min-w-0 truncate font-mono font-medium text-[var(--color-text-primary)]">{activePreviewTab.path}</span>
           {activeChangedFile && (
-            <span className="flex shrink-0 items-center gap-1.5 font-[var(--font-mono)] text-[11px] tabular-nums">
+            <span className="flex shrink-0 items-center gap-1.5 font-mono text-[11px] tabular-nums">
               <span className="text-[var(--color-success)]">+{activeChangedFile.additions}</span>
               <span className="text-[var(--color-error)]">-{activeChangedFile.deletions}</span>
             </span>
@@ -1903,27 +1894,48 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
             <span className="shrink-0 rounded-[5px] border border-[var(--color-border)] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]">
               {kindLabel}
             </span>
-            <button
-              type="button"
+            <Button
+              variant="ghost"
+              size="base"
               aria-label={t('workspace.addToChat')}
               onClick={() => addWorkspacePathToChat(activePreviewTab.path)}
-              className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-[7px] px-2 text-[11px] font-medium text-[var(--color-text-secondary)] transition-[color,background-color,transform] duration-200 ease-out hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] active:scale-[0.98]"
+              icon={<MessageCircle size={14} strokeWidth={1.8} aria-hidden="true" />}
+              className="shrink-0"
             >
-              <MessageCircle size={14} strokeWidth={1.8} aria-hidden="true" />
               <span className="hidden min-[960px]:inline">{t('workspace.addToChat')}</span>
-            </button>
-            <ToolbarIconButton Icon={RefreshCw} label={t('workspace.refresh')} onClick={handleRefresh} />
-            <ToolbarIconButton
-              Icon={isNavigatorVisible ? PanelRightClose : PanelRightOpen}
+            </Button>
+            <IconButton
+              icon={<RefreshCw size={16} strokeWidth={1.9} aria-hidden="true" />}
+              label={t('workspace.refresh')}
+              onClick={handleRefresh}
+              size="md"
+              tone="muted"
+              showTooltip={false}
+            />
+            <IconButton
+              icon={isNavigatorVisible
+                ? <PanelRightClose size={16} strokeWidth={1.9} aria-hidden="true" />
+                : <PanelRightOpen size={16} strokeWidth={1.9} aria-hidden="true" />}
               label={isNavigatorVisible ? t('workspace.hideNavigator') : t('workspace.showNavigator')}
               onClick={() => setIsNavigatorOpen((open) => {
                 const nextOpen = !open
                 if (nextOpen) window.requestAnimationFrame(() => filterInputRef.current?.focus())
                 return nextOpen
               })}
+              size="md"
+              tone="muted"
+              pressed={isNavigatorVisible}
+              showTooltip={false}
             />
             {!embedded && (
-              <ToolbarIconButton Icon={X} label={t('workspace.closePanel')} onClick={() => closePanel(sessionId)} />
+              <IconButton
+                icon={<X size={16} strokeWidth={1.9} aria-hidden="true" />}
+                label={t('workspace.closePanel')}
+                onClick={() => closePanel(sessionId)}
+                size="md"
+                tone="muted"
+                showTooltip={false}
+              />
             )}
             {activePreviewLoading && state === 'ok' && (
               <RefreshCw
@@ -1938,19 +1950,20 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
         {state === 'ok' && refreshErrorMessage && !activePreviewLoading && (
           <div
             role="alert"
-            className="flex shrink-0 items-center gap-2 border-b border-[var(--color-error)]/20 bg-[var(--color-error)]/6 px-3 py-2 text-[11px] text-[var(--color-error)]"
+            className="flex shrink-0 items-center gap-2 border-b border-[var(--color-error)] bg-[var(--color-error-container)] px-3 py-2 text-[11px] text-[var(--color-on-error-container)]"
           >
             <CircleAlert size={15} className="shrink-0" aria-hidden="true" />
             <span className="min-w-0 flex-1 truncate">{refreshErrorMessage}</span>
-            <button
-              type="button"
+            <Button
+              variant="danger-outline"
+              size="sm"
               onClick={() => {
                 void openPreview(sessionId, activePreviewTab.path, activePreviewTab.kind)
               }}
-              className="shrink-0 rounded-[6px] border border-[var(--color-error)]/30 px-2 py-1 font-medium hover:bg-[var(--color-error)]/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-error)]/25"
+              className="shrink-0"
             >
               {t('common.retry')}
-            </button>
+            </Button>
           </div>
         )}
 
@@ -2037,7 +2050,7 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
 
   const renderPreviewTabs = () => (
     <>
-      <div className="flex h-11 shrink-0 items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-3">
+      <div className="flex h-9 shrink-0 items-end border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3">
         <div
           role="tablist"
           aria-label={t('workspace.previewTabs')}
@@ -2081,16 +2094,18 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
                       {bufferStateByTabId[tab.id]?.isDirty ? '● ' : ''}{tab.title}
                     </span>
                   </button>
-                  <button
-                    type="button"
-                    aria-label={`${t('workspace.closeTab')} ${tab.title} ${kindLabel}`}
-                    onClick={() => {
-                      requestClosePreviewTabs(tab.id, 'current')
-                    }}
-                    className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-[5px] text-[var(--color-text-tertiary)] opacity-0 transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] group-hover:opacity-100 focus-visible:opacity-100"
-                  >
-                    <span className="material-symbols-outlined text-[13px] leading-none">close</span>
-                  </button>
+                  <span className="shrink-0 opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100">
+                    <IconButton
+                      icon="close"
+                      label={`${t('workspace.closeTab')} ${tab.title} ${kindLabel}`}
+                      onClick={() => {
+                        requestClosePreviewTabs(tab.id, 'current')
+                      }}
+                      size="2xs"
+                      tone="muted"
+                      showTooltip={false}
+                    />
+                  </span>
                 </div>
               )
           })
@@ -2100,8 +2115,9 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
 
       {previewTabContextMenu && (
         <div
+          ref={previewTabContextMenuRef}
           role="menu"
-          className="fixed z-50 min-w-[156px] rounded-[10px] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] py-1 text-[12px] shadow-[var(--shadow-dropdown)]"
+          className="glass-panel fixed z-[var(--z-dropdown)] min-w-[156px] rounded-[var(--radius-md)] py-1 text-[12px]"
           style={{ left: previewTabContextMenu.x, top: previewTabContextMenu.y }}
           onClick={(event) => event.stopPropagation()}
         >
@@ -2175,11 +2191,11 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
         {isNavigatorVisible && (
           <div
             data-testid="workspace-file-navigator"
-            className={`${hasPreviewTabs ? 'border-l border-[var(--color-text-primary)]/10' : ''} ${hasPreviewTabs && !forceVisible ? 'absolute inset-y-0 right-0 z-20 w-[min(280px,100%)] shadow-[-12px_0_28px_rgba(15,23,42,0.08)]' : ''} flex min-h-0 flex-col bg-[var(--color-surface)]`}
+            className={`${hasPreviewTabs ? 'border-l border-[var(--color-border)]' : ''} ${hasPreviewTabs && !forceVisible ? 'absolute inset-y-0 right-0 z-[var(--z-sticky)] w-[min(280px,100%)] shadow-[var(--shadow-overlay)]' : ''} flex min-h-0 flex-col bg-[var(--color-surface)]`}
           >
             <header
               data-testid="workspace-file-navigator-header"
-              className="flex h-10 shrink-0 items-center gap-1.5 border-b border-[var(--color-text-primary)]/10 px-3"
+              className="flex h-10 shrink-0 items-center gap-1.5 border-b border-[var(--color-border)] px-3"
             >
               <div className="relative min-w-0">
               <button
@@ -2188,7 +2204,7 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
                 aria-haspopup="menu"
                 aria-expanded={isViewMenuOpen}
                 onClick={() => setIsViewMenuOpen((open) => !open)}
-                className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-[7px] px-1 py-1 text-[14px] font-semibold leading-5 text-[var(--color-text-primary)] transition-colors hover:text-[var(--color-text-secondary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-info)]/30"
+                className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-[var(--radius-md)] px-1 py-1 text-[14px] font-semibold leading-5 text-[var(--color-text-primary)] transition-colors hover:text-[var(--color-text-secondary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
               >
                 <span className="truncate">
                   {activeView === 'changed' ? t('workspace.changedFiles') : t('workspace.allFiles')}
@@ -2198,7 +2214,7 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
               {isViewMenuOpen && (
                 <div
                   role="menu"
-                  className="absolute left-0 top-[calc(100%+4px)] z-30 min-w-[124px] overflow-hidden rounded-[9px] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] py-1 shadow-[var(--shadow-dropdown)]"
+                  className="glass-panel absolute left-0 top-[calc(100%+4px)] z-[var(--z-dropdown)] min-w-[124px] overflow-hidden rounded-[var(--radius-md)] py-1"
                 >
                   {(['changed', 'all'] as const).map((view) => {
                     const selected = activeView === view
@@ -2208,7 +2224,7 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
                         type="button"
                         role="menuitem"
                         onClick={() => handleSetActiveView(view)}
-                        className={`flex h-7 w-full items-center gap-2 px-2.5 text-left text-[12px] transition-colors ${
+                        className={`flex h-7 w-full items-center gap-2 rounded-[var(--radius-sm)] px-2.5 text-left text-[12px] transition-colors ${
                           selected ? 'bg-[var(--color-surface-selected)] text-[var(--color-text-primary)]' : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
                         }`}
                       >
@@ -2226,9 +2242,23 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
               </div>
               {!hasPreviewTabs && (
                 <div className="ml-auto flex shrink-0 items-center gap-0.5">
-                  <ToolbarIconButton Icon={RefreshCw} label={t('workspace.refresh')} onClick={handleRefresh} />
+                  <IconButton
+                    icon={<RefreshCw size={16} strokeWidth={1.9} aria-hidden="true" />}
+                    label={t('workspace.refresh')}
+                    onClick={handleRefresh}
+                    size="md"
+                    tone="muted"
+                    showTooltip={false}
+                  />
                   {!embedded && (
-                    <ToolbarIconButton Icon={X} label={t('workspace.closePanel')} onClick={() => closePanel(sessionId)} />
+                    <IconButton
+                      icon={<X size={16} strokeWidth={1.9} aria-hidden="true" />}
+                      label={t('workspace.closePanel')}
+                      onClick={() => closePanel(sessionId)}
+                      size="md"
+                      tone="muted"
+                      showTooltip={false}
+                    />
                   )}
                 </div>
               )}
@@ -2274,8 +2304,9 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
 
       {fileContextMenu && (
         <div
+          ref={fileContextMenuRef}
           role="menu"
-          className="fixed z-50 min-w-[156px] rounded-[10px] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] py-1 text-[12px] shadow-[var(--shadow-dropdown)]"
+          className="glass-panel fixed z-[var(--z-dropdown)] min-w-[156px] rounded-[var(--radius-md)] py-1 text-[12px]"
           style={{ left: fileContextMenu.x, top: fileContextMenu.y }}
           onClick={(event) => event.stopPropagation()}
         >

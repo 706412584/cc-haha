@@ -18,7 +18,7 @@ vi.mock('../../api/hahaGrokOAuth', () => ({
   },
 }))
 
-vi.mock('../chat/clipboard', () => ({ copyTextToClipboard: copyMock }))
+vi.mock('@/lib/clipboard', () => ({ copyTextToClipboard: copyMock }))
 
 import { GrokOfficialLogin } from './GrokOfficialLogin'
 import { useHahaGrokOAuthStore } from '../../stores/hahaGrokOAuthStore'

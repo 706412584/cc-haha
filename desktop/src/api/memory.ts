@@ -17,6 +17,12 @@ export const memoryApi = {
     return api.get<{ file: MemoryFileDetail }>(`/api/memory/file?${query.toString()}`)
   },
 
-  saveFile: (input: { projectId: string; path: string; content: string }) =>
+  saveFile: (input: {
+    projectId: string
+    path: string
+    content: string
+    expectedUpdatedAt?: string
+    expectedBytes?: number
+  }) =>
     api.put<{ ok: true; file: Omit<MemoryFileDetail, 'content'> }>('/api/memory/file', input),
 }

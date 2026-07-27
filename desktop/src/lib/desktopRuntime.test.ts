@@ -178,6 +178,33 @@ describe('desktopRuntime browser H5 bootstrap', () => {
     expect(globalThis.fetch).toHaveBeenCalledTimes(1)
   })
 
+  it('still starts when the desktop host cannot resolve the local access token', async () => {
+    // The token only raises what the shell may do — loopback is trusted without
+    // it — so losing it must degrade rather than block startup.
+    const serverUrl = 'http://127.0.0.1:59232'
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    window.desktopHost = {
+      ...browserHost,
+      kind: 'electron',
+      isDesktop: true,
+      runtime: {
+        getServerUrl: vi.fn().mockResolvedValue(serverUrl),
+        getLocalAccessToken: vi.fn().mockRejectedValue(new Error('ipc channel missing')),
+      },
+    }
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      healthOkResponse(),
+    ) as typeof fetch
+
+    await expect(initializeDesktopServerUrl()).resolves.toBe(serverUrl)
+
+    expect(clientMocks.setBaseUrl).toHaveBeenLastCalledWith(serverUrl)
+    expect(clientMocks.setAuthToken).toHaveBeenLastCalledWith(null)
+    expect(consoleWarn).toHaveBeenCalled()
+
+    consoleWarn.mockRestore()
+  })
+
   it('classifies browser H5 runtime using the desktop host boundary', () => {
     expect(isBrowserH5Runtime()).toBe(true)
     expect(isDesktopRuntime()).toBe(false)

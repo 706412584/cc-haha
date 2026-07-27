@@ -65,6 +65,5 @@ describe('BackgroundTasksBar Agent results', () => {
     fireEvent.click(screen.getByTestId('background-tasks-button'))
     expect(screen.getByRole('heading', { name: 'Watching' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: /Agent Results/ })).toBeInTheDocument()
-    expect(screen.getByText('No stale completion was injected.')).toBeInTheDocument()
-  })
+    expect(screen.getByText('No stale completion was injected.')).toBeInTheDocument()  })
 })

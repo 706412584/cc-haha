@@ -1,21 +1,47 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
-import { ArrowLeft, FolderOpen, Grid3X3, ImageIcon, Plus, RefreshCw, Sparkles } from 'lucide-react'
+import {
+  ArrowLeft,
+  Check,
+  Copy,
+  Download,
+  FolderOpen,
+  Grid3X3,
+  ImageIcon,
+  Plus,
+  RefreshCw,
+  Sparkles,
+} from 'lucide-react'
 import {
   desktopUiPreferencesApi,
   type DesktopPetPreferences,
 } from '../../api/desktopUiPreferences'
-import { Button } from '../../components/shared/Button'
-import { Modal } from '../../components/shared/Modal'
+import actionSheetGuideEn from '../../assets/pets/action-sheet-guide.en.png'
+import actionSheetGuideZh from '../../assets/pets/action-sheet-guide.zh.png'
+import { useSettingsStore } from '../../stores/settingsStore'
+import { Badge } from '@/components/ui/Badge'
+import { Button } from '@/components/ui/Button'
+import { Card } from '@/components/ui/Card'
+import { EmptyState } from '@/components/ui/EmptyState'
+import { ErrorState } from '@/components/ui/ErrorState'
+import { LoadingState } from '@/components/ui/LoadingState'
+import { Switch } from '@/components/ui/Switch'
+import { Modal } from '@/components/ui/Modal'
 import { useTranslation, type TranslationKey } from '../../i18n'
 import { getDesktopHost } from '../../lib/desktopHost'
 import { BUILTIN_PETS } from './builtinPets'
 import { PetRenderer } from './PetRenderer'
+import { importPetFromActionSheet } from './petSheetImport'
 import type { CustomPet, PetDescriptor } from './types'
 
 const PET_SIZE_MIN = 96
 const PET_SIZE_MAX = 192
 const PET_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
-type PetCreationMethod = 'image' | 'atlas'
+
+/**
+ * `guided` and `atlas` share the same import pipeline; they differ only in whether
+ * the walkthrough is shown first.
+ */
+type PetCreationMethod = 'image' | 'guided' | 'atlas'
 
 const PET_CREATE_ERROR_KEYS: Record<string, TranslationKey> = {
   'invalid-id': 'settings.pets.createError.invalidId',
@@ -25,6 +51,7 @@ const PET_CREATE_ERROR_KEYS: Record<string, TranslationKey> = {
   'total-image-bytes-exceeded': 'settings.pets.createError.imageTooLarge',
   'decode-budget-exceeded': 'settings.pets.createError.imageTooLarge',
   'invalid-image': 'settings.pets.createError.invalidImage',
+  'opaque-background': 'settings.pets.createError.opaqueBackground',
   'missing-image': 'settings.pets.createError.invalidImage',
   'symlink-image': 'settings.pets.createError.invalidImage',
   'invalid-renderer': 'settings.pets.createError.invalidImage',
@@ -61,6 +88,13 @@ export function PetSettings() {
   const [createError, setCreateError] = useState<string | null>(null)
   const [createMethod, setCreateMethod] = useState<PetCreationMethod | null>(null)
   const [createForm, setCreateForm] = useState({ slug: '', displayName: '', description: '' })
+  const [walkthroughVisible, setWalkthroughVisible] = useState(false)
+  const [promptCopied, setPromptCopied] = useState(false)
+  const [guideExpanded, setGuideExpanded] = useState(false)
+  const locale = useSettingsStore((s) => s.locale)
+  const actionSheetGuide = locale === 'zh' || locale === 'zh-TW'
+    ? actionSheetGuideZh
+    : actionSheetGuideEn
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -202,6 +236,40 @@ export function PetSettings() {
     setCreateMethod(null)
     setCreateError(null)
     setCreateForm({ slug: '', displayName: '', description: '' })
+    setWalkthroughVisible(false)
+    setPromptCopied(false)
+    setGuideExpanded(false)
+  }
+
+  const selectCreateMethod = (method: PetCreationMethod) => {
+    setCreateMethod(method)
+    setCreateError(null)
+    setWalkthroughVisible(method === 'guided')
+  }
+
+  const handleCopyPrompt = async () => {
+    try {
+      await getDesktopHost().clipboard.writeText(t('settings.pets.guide.prompt'))
+      setPromptCopied(true)
+      window.setTimeout(() => setPromptCopied(false), 2000)
+    } catch {
+      setCreateError(t('settings.pets.guide.copyFailed'))
+    }
+  }
+
+  const handleSaveGuide = async () => {
+    try {
+      const response = await fetch(actionSheetGuide)
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = 'pet-action-sheet-guide.png'
+      link.click()
+      URL.revokeObjectURL(url)
+    } catch {
+      setCreateError(t('settings.pets.guide.saveFailed'))
+    }
   }
 
   const handleCreate = async () => {
@@ -224,9 +292,17 @@ export function PetSettings() {
           ? t('settings.pets.dialog.imageFilter')
           : t('settings.pets.dialog.atlasFilter'),
       }
-      created = createMethod === 'image'
-        ? await host.pets.createFromImage(input)
-        : await host.pets.createFromAtlas(input)
+      if (createMethod === 'image') {
+        created = await host.pets.createFromImage(input)
+      } else {
+        // Normalizes an action sheet of any size into the v2 grid before install.
+        const outcome = await importPetFromActionSheet(host, input)
+        created = outcome.status === 'cancelled'
+          ? null
+          : outcome.status === 'created'
+            ? { id: outcome.id }
+            : { errorCode: outcome.errorCode }
+      }
     } catch {
       setCreateError(t('settings.pets.createError'))
       setCreateBusy(false)
@@ -272,22 +348,22 @@ export function PetSettings() {
   return (
     <div className="mx-auto w-full max-w-4xl space-y-6 pb-8">
       <header>
-        <h1 className="text-xl font-semibold text-[var(--color-text-primary)]">{t('settings.pets.title')}</h1>
-        <p className="mt-1 text-sm text-[var(--color-text-secondary)]">{t('settings.pets.subtitle')}</p>
+        <h1 className="text-[24px] font-semibold leading-tight text-[var(--color-text-primary)]" style={{ fontFamily: 'var(--font-headline)' }}>{t('settings.pets.title')}</h1>
+        <p className="mt-1.5 text-[13.5px] leading-6 text-[var(--color-text-secondary)]">{t('settings.pets.subtitle')}</p>
       </header>
 
       {loading ? (
-        <div role="status" className="rounded-xl border border-[var(--color-border)] p-5 text-sm text-[var(--color-text-secondary)]">
-          {t('settings.pets.loading')}
-        </div>
+        <LoadingState label={t('settings.pets.loading')} variant="dashed" size="md" />
       ) : loadError || !preferences ? (
-        <div role="alert" className="flex items-center justify-between gap-4 rounded-xl border border-[var(--color-error)]/30 bg-[var(--color-error)]/5 p-4">
-          <span className="text-sm text-[var(--color-error)]">{t('settings.pets.loadError')}</span>
-          <Button variant="secondary" size="sm" onClick={() => void load()}>{t('settings.pets.retry')}</Button>
-        </div>
+        <ErrorState
+          title={t('settings.pets.loadError')}
+          onRetry={() => void load()}
+          retryLabel={t('settings.pets.retry')}
+          size="md"
+        />
       ) : (
         <>
-          <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5">
+          <Card as="section" radius="lg" padding="lg">
             <ToggleRow
               label={t('settings.pets.enableTitle')}
               description={t('settings.pets.enableDescription')}
@@ -295,7 +371,7 @@ export function PetSettings() {
               disabled={!desktopAvailable}
               onChange={(checked) => void updatePreferences({ enabled: checked }, true)}
             />
-          </section>
+          </Card>
 
           <PetCatalog
             title={t('settings.pets.builtInTitle')}
@@ -308,7 +384,7 @@ export function PetSettings() {
 
           <section className="space-y-3">
             <div className="flex items-center justify-between gap-3">
-              <h2 className="text-base font-semibold text-[var(--color-text-primary)]">{t('settings.pets.customTitle')}</h2>
+              <h2 className="text-base font-semibold text-[var(--color-text-primary)]" style={{ fontFamily: 'var(--font-headline)' }}>{t('settings.pets.customTitle')}</h2>
               <div className="flex items-center gap-2">
                 <Button
                   variant="secondary"
@@ -343,9 +419,7 @@ export function PetSettings() {
                 onSelect={(id) => void updatePreferences({ selectedPetId: id }, preferences.enabled && desktopAvailable)}
               />
             ) : (
-              <div className="rounded-xl border border-dashed border-[var(--color-border)] p-5 text-sm text-[var(--color-text-secondary)]">
-                {t('settings.pets.customEmpty')}
-              </div>
+              <EmptyState description={t('settings.pets.customEmpty')} variant="dashed" size="md" />
             )}
             {invalidPetCount > 0 && (
               <p role="status" className="text-xs text-[var(--color-warning)]">
@@ -354,8 +428,8 @@ export function PetSettings() {
             )}
           </section>
 
-          <section className="space-y-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5">
-            <h2 className="text-base font-semibold text-[var(--color-text-primary)]">{t('settings.pets.appearanceTitle')}</h2>
+          <Card as="section" radius="lg" padding="lg" className="space-y-4">
+            <h2 className="text-base font-semibold text-[var(--color-text-primary)]" style={{ fontFamily: 'var(--font-headline)' }}>{t('settings.pets.appearanceTitle')}</h2>
             <label className="block">
               <span className="flex items-center justify-between gap-3 text-sm font-medium text-[var(--color-text-primary)]">
                 <span>{t('settings.pets.size')}</span>
@@ -374,7 +448,7 @@ export function PetSettings() {
                 onChange={(event) => void updatePreferences({ size: Number(event.target.value) })}
               />
             </label>
-            <div className="border-t border-[var(--color-border)]/70 pt-4">
+            <div className="border-t border-[var(--color-border-separator)] pt-4">
               <ToggleRow
                 label={t('settings.pets.motion')}
                 description={t('settings.pets.motionDescription')}
@@ -382,7 +456,7 @@ export function PetSettings() {
                 onChange={(checked) => void updatePreferences({ motionEnabled: checked })}
               />
             </div>
-            <div className="border-t border-[var(--color-border)]/70 pt-4">
+            <div className="border-t border-[var(--color-border-separator)] pt-4">
               <ToggleRow
                 label={t('settings.pets.showTaskPanel')}
                 description={t('settings.pets.showTaskPanelDescription')}
@@ -390,11 +464,11 @@ export function PetSettings() {
                 onChange={(checked) => void updatePreferences({ showTaskPanel: checked })}
               />
             </div>
-          </section>
+          </Card>
 
-          <section className="flex items-center justify-between gap-5 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5">
+          <Card as="section" radius="lg" padding="lg" className="flex items-center justify-between gap-5">
             <div className="min-w-0">
-              <h2 className="text-sm font-medium text-[var(--color-text-primary)]">{t('settings.pets.folderTitle')}</h2>
+              <h2 className="text-sm font-medium text-[var(--color-text-primary)]" style={{ fontFamily: 'var(--font-headline)' }}>{t('settings.pets.folderTitle')}</h2>
               <p className="mt-1 break-all font-mono text-xs text-[var(--color-text-secondary)]">
                 {t('settings.pets.folderDescription')}
               </p>
@@ -408,7 +482,7 @@ export function PetSettings() {
             >
               {t('settings.pets.openFolder')}
             </Button>
-          </section>
+          </Card>
         </>
       )}
 
@@ -416,6 +490,7 @@ export function PetSettings() {
 
       <Modal
         open={createOpen}
+        width={640}
         title={t('settings.pets.createTitle')}
         onClose={() => {
           if (!createBusy) resetCreateDialog()
@@ -425,7 +500,11 @@ export function PetSettings() {
             <Button variant="secondary" disabled={createBusy} onClick={resetCreateDialog}>
               {t('settings.pets.createCancel')}
             </Button>
-            {createMethod && (
+            {walkthroughVisible ? (
+              <Button onClick={() => setWalkthroughVisible(false)}>
+                {t('settings.pets.guide.continue')}
+              </Button>
+            ) : createMethod && (
               <Button
                 loading={createBusy}
                 disabled={!createFormValid}
@@ -449,43 +528,149 @@ export function PetSettings() {
               title={t('settings.pets.createImageTitle')}
               description={t('settings.pets.createImageDescription')}
               detail={t('settings.pets.createImageDetail')}
+              badge={t('settings.pets.createImageBadge')}
+              onClick={() => selectCreateMethod('image')}
+            />
+            <CreationMethodCard
+              icon={<Sparkles size={20} aria-hidden="true" />}
+              title={t('settings.pets.createAiTitle')}
+              description={t('settings.pets.createAiDescription')}
+              detail={t('settings.pets.createAiDetail')}
               badge={t('settings.pets.createRecommended')}
-              onClick={() => setCreateMethod('image')}
+              onClick={() => selectCreateMethod('guided')}
             />
             <CreationMethodCard
               icon={<Grid3X3 size={20} aria-hidden="true" />}
               title={t('settings.pets.createAtlasTitle')}
               description={t('settings.pets.createAtlasDescription')}
               detail={t('settings.pets.createAtlasDetail')}
-              onClick={() => setCreateMethod('atlas')}
+              onClick={() => selectCreateMethod('atlas')}
             />
-            <CreationMethodCard
-              icon={<Sparkles size={20} aria-hidden="true" />}
-              title={t('settings.pets.createAiTitle')}
-              description={t('settings.pets.createAiDescription')}
-              detail={t('settings.pets.createAiUnavailable')}
-              disabled
-            />
+          </div>
+        ) : walkthroughVisible ? (
+          <div className="space-y-4">
+            <Button
+              variant="link"
+              size="sm"
+              icon={<ArrowLeft size={15} aria-hidden="true" />}
+              onClick={() => {
+                setCreateMethod(null)
+                setCreateError(null)
+                setWalkthroughVisible(false)
+              }}
+            >
+              {t('settings.pets.createBack')}
+            </Button>
+
+            <p className="text-sm leading-6 text-[var(--color-text-secondary)]">
+              {t('settings.pets.guide.intro')}
+            </p>
+
+            <GuideStep index={1} title={t('settings.pets.guide.step1Title')}>
+              <p className="text-xs leading-5 text-[var(--color-text-secondary)]">
+                {t('settings.pets.guide.step1Body')}
+              </p>
+              <div className="mt-2 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)]">
+                <pre className="max-h-56 overflow-y-auto whitespace-pre-wrap px-3 py-2.5 text-[11.5px] leading-5 text-[var(--color-text-primary)]" style={{ fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>
+                  {t('settings.pets.guide.prompt')}
+                </pre>
+              </div>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  icon={promptCopied
+                    ? <Check size={14} aria-hidden="true" />
+                    : <Copy size={14} aria-hidden="true" />}
+                  onClick={() => void handleCopyPrompt()}
+                >
+                  {promptCopied
+                    ? t('settings.pets.guide.promptCopied')
+                    : t('settings.pets.guide.promptCopy')}
+                </Button>
+              </div>
+              <p className="mt-2 text-[11px] leading-4 text-[var(--color-text-tertiary)]">
+                {t('settings.pets.guide.step1Tools')}
+              </p>
+            </GuideStep>
+
+            <GuideStep index={2} title={t('settings.pets.guide.step2Title')}>
+              <p className="text-xs leading-5 text-[var(--color-text-secondary)]">
+                {t('settings.pets.guide.step2Body')}
+              </p>
+              <ul className="mt-2 space-y-1">
+                {([
+                  'settings.pets.guide.check1',
+                  'settings.pets.guide.check2',
+                  'settings.pets.guide.check3',
+                ] as const).map((key) => (
+                  <li key={key} className="flex items-start gap-1.5 text-xs leading-5 text-[var(--color-text-secondary)]">
+                    <Check size={13} className="mt-0.5 flex-none text-[var(--color-brand)]" aria-hidden="true" />
+                    <span>{t(key)}</span>
+                  </li>
+                ))}
+              </ul>
+              <button
+                type="button"
+                className="mt-2.5 block w-full overflow-hidden rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)]"
+                onClick={() => setGuideExpanded((current) => !current)}
+                aria-label={t('settings.pets.guide.templateAlt')}
+              >
+                <img
+                  src={actionSheetGuide}
+                  alt={t('settings.pets.guide.templateAlt')}
+                  className={guideExpanded ? 'w-full' : 'h-40 w-full object-cover object-top'}
+                />
+              </button>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  icon={<Download size={14} aria-hidden="true" />}
+                  onClick={() => void handleSaveGuide()}
+                >
+                  {t('settings.pets.guide.saveTemplate')}
+                </Button>
+                <span className="text-[11px] leading-4 text-[var(--color-text-tertiary)]">
+                  {guideExpanded
+                    ? t('settings.pets.guide.templateCollapse')
+                    : t('settings.pets.guide.templateExpand')}
+                </span>
+              </div>
+            </GuideStep>
+
+            <GuideStep index={3} title={t('settings.pets.guide.step3Title')}>
+              <p className="text-xs leading-5 text-[var(--color-text-secondary)]">
+                {t('settings.pets.guide.step3Body')}
+              </p>
+            </GuideStep>
           </div>
         ) : (
           <div className="space-y-4">
-            <button
-              type="button"
-              className="inline-flex items-center gap-1.5 rounded-md text-sm font-medium text-[var(--color-text-secondary)] transition-colors hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]/40"
+            <Button
+              variant="link"
+              size="sm"
+              icon={<ArrowLeft size={15} aria-hidden="true" />}
               disabled={createBusy}
               onClick={() => {
+                if (createMethod === 'guided') {
+                  setWalkthroughVisible(true)
+                  setCreateError(null)
+                  return
+                }
                 setCreateMethod(null)
                 setCreateError(null)
               }}
             >
-              <ArrowLeft size={15} aria-hidden="true" />
-              {t('settings.pets.createBack')}
-            </button>
-            <div className="rounded-lg bg-[var(--color-surface-hover)] px-3.5 py-3">
-              <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
-                {createMethod === 'image'
-                  ? t('settings.pets.createImageTitle')
-                  : t('settings.pets.createAtlasTitle')}
+              {createMethod === 'guided'
+                ? t('settings.pets.guide.backToSteps')
+                : t('settings.pets.createBack')}
+            </Button>
+            <div className="rounded-[var(--radius-lg)] bg-[var(--color-surface-hover)] px-3.5 py-3">
+              <h3 className="text-sm font-semibold text-[var(--color-text-primary)]" style={{ fontFamily: 'var(--font-headline)' }}>
+                {createMethod === 'image' ? t('settings.pets.createImageTitle')
+                  : createMethod === 'guided' ? t('settings.pets.createAiTitle')
+                    : t('settings.pets.createAtlasTitle')}
               </h3>
               <p className="mt-1 text-xs leading-5 text-[var(--color-text-secondary)]">
                 {createMethod === 'image'
@@ -496,7 +681,7 @@ export function PetSettings() {
             <label className="block space-y-1.5 text-sm text-[var(--color-text-primary)]">
               <span className="font-medium">{t('settings.pets.createId')}</span>
               <input
-                className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 outline-none focus:border-[var(--color-border-focus)]"
+                className="w-full rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 outline-none focus:border-[var(--color-border-focus)]"
                 aria-label={t('settings.pets.createId')}
                 value={createForm.slug}
                 maxLength={73}
@@ -508,7 +693,7 @@ export function PetSettings() {
             <label className="block space-y-1.5 text-sm text-[var(--color-text-primary)]">
               <span className="font-medium">{t('settings.pets.createName')}</span>
               <input
-                className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 outline-none focus:border-[var(--color-border-focus)]"
+                className="w-full rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 outline-none focus:border-[var(--color-border-focus)]"
                 aria-label={t('settings.pets.createName')}
                 value={createForm.displayName}
                 maxLength={80}
@@ -518,7 +703,7 @@ export function PetSettings() {
             <label className="block space-y-1.5 text-sm text-[var(--color-text-primary)]">
               <span className="font-medium">{t('settings.pets.createDescription')}</span>
               <textarea
-                className="min-h-24 w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 outline-none focus:border-[var(--color-border-focus)]"
+                className="min-h-24 w-full resize-y rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 outline-none focus:border-[var(--color-border-focus)]"
                 aria-label={t('settings.pets.createDescription')}
                 value={createForm.description}
                 maxLength={500}
@@ -530,6 +715,33 @@ export function PetSettings() {
         )}
       </Modal>
     </div>
+  )
+}
+
+function GuideStep({
+  index,
+  title,
+  children,
+}: {
+  index: number
+  title: string
+  children: ReactNode
+}) {
+  return (
+    <section className="rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] p-3.5">
+      <div className="flex items-center gap-2">
+        <span className="flex h-5 w-5 flex-none items-center justify-center rounded-full bg-[var(--color-brand)] text-[11px] font-semibold text-[var(--color-on-primary)]">
+          {index}
+        </span>
+        <h4
+          className="text-sm font-semibold text-[var(--color-text-primary)]"
+          style={{ fontFamily: 'var(--font-headline)' }}
+        >
+          {title}
+        </h4>
+      </div>
+      <div className="mt-2">{children}</div>
+    </section>
   )
 }
 
@@ -553,21 +765,17 @@ function CreationMethodCard({
   return (
     <button
       type="button"
-      className="group flex w-full items-start gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-left transition-[border-color,background-color,transform] enabled:hover:-translate-y-0.5 enabled:hover:border-[var(--color-brand)]/60 enabled:hover:bg-[var(--color-surface-hover)] enabled:active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-55"
+      className="group flex w-full items-start gap-3 rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-left transition-[border-color,background-color,transform] enabled:hover:-translate-y-0.5 enabled:hover:border-[var(--color-primary-fixed-dim)] enabled:hover:bg-[var(--color-surface-hover)] motion-reduce:transition-none motion-reduce:enabled:hover:translate-y-0 enabled:active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-55"
       disabled={disabled}
       onClick={onClick}
     >
-      <span className="flex h-9 w-9 flex-none items-center justify-center rounded-lg bg-[var(--color-brand)]/10 text-[var(--color-brand)]">
+      <span className="flex h-9 w-9 flex-none items-center justify-center rounded-[var(--radius-md)] bg-[var(--color-brand-soft)] text-[var(--color-brand)]">
         {icon}
       </span>
       <span className="min-w-0 flex-1">
         <span className="flex flex-wrap items-center gap-2">
           <span className="text-sm font-semibold text-[var(--color-text-primary)]">{title}</span>
-          {badge && (
-            <span className="rounded-full bg-[var(--color-brand)]/10 px-2 py-0.5 text-[11px] font-medium text-[var(--color-brand)]">
-              {badge}
-            </span>
-          )}
+          {badge && <Badge tone="brand" size="sm">{badge}</Badge>}
         </span>
         <span className="mt-1 block text-xs leading-5 text-[var(--color-text-secondary)]">{description}</span>
         <span className="mt-1 block text-[11px] leading-4 text-[var(--color-text-tertiary)]">{detail}</span>
@@ -594,22 +802,22 @@ function PetCatalog({
   const t = useTranslation()
   return (
     <section className="space-y-3">
-      {title && <h2 className="text-base font-semibold text-[var(--color-text-primary)]">{title}</h2>}
+      {title && <h2 className="text-base font-semibold text-[var(--color-text-primary)]" style={{ fontFamily: 'var(--font-headline)' }}>{title}</h2>}
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
         {pets.map((pet) => {
           const selected = pet.id === selectedPetId
           return (
             <article
               key={pet.id}
-              className={`flex items-center gap-4 rounded-xl border p-4 transition-colors ${
+              className={`flex items-center gap-4 rounded-[var(--radius-xl)] p-4 transition-[background-color,border-color] duration-150 ease-out ${
                 selected
-                  ? 'border-[var(--color-brand)] bg-[var(--color-surface-selected)]'
-                  : 'border-[var(--color-border)] bg-[var(--color-surface)]'
+                  ? 'border-[1.5px] border-[var(--color-primary-fixed-dim)] bg-[var(--color-surface-hover)]'
+                  : 'border border-[var(--color-border)] bg-[var(--color-surface)]'
               }`}
             >
               <PetPreview pet={pet} />
               <div className="min-w-0 flex-1">
-                <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">{pet.displayName}</h3>
+                <h3 className="text-sm font-semibold text-[var(--color-text-primary)]" style={{ fontFamily: 'var(--font-headline)' }}>{pet.displayName}</h3>
                 <p className="mt-1 text-xs leading-5 text-[var(--color-text-secondary)]">
                   {pet.source === 'builtin' ? t(pet.descriptionKey) : pet.description}
                 </p>
@@ -634,7 +842,7 @@ function PetCatalog({
 function PetPreview({ pet }: { pet: PetDescriptor }) {
   return (
     <div
-      className="flex h-16 w-16 flex-none items-center justify-center rounded-2xl"
+      className="flex h-16 w-16 flex-none items-center justify-center rounded-[var(--radius-2xl)]"
       style={{ backgroundColor: pet.source === 'builtin' ? `${pet.accent}18` : undefined }}
     >
       <PetRenderer pet={pet} state="idle" size={54} motionEnabled={false} />
@@ -656,23 +864,12 @@ function ToggleRow({
   onChange: (checked: boolean) => void
 }) {
   return (
-    <label className="flex cursor-pointer items-center justify-between gap-6">
-      <span>
-        <span className="block text-sm font-medium text-[var(--color-text-primary)]">{label}</span>
-        <span className="mt-0.5 block text-xs text-[var(--color-text-secondary)]">{description}</span>
-      </span>
-      <span className="relative inline-flex h-6 w-11 flex-none items-center">
-        <input
-          className="peer sr-only"
-          type="checkbox"
-          checked={checked}
-          disabled={disabled}
-          onChange={(event) => onChange(event.target.checked)}
-          aria-label={label}
-        />
-        <span className="absolute inset-0 rounded-full bg-[var(--color-border)] transition-colors peer-checked:bg-[var(--color-switch-checked-bg)] peer-focus-visible:ring-2 peer-focus-visible:ring-[var(--color-border-focus)]/40" />
-        <span className="relative ml-1 h-4 w-4 rounded-full bg-[var(--color-switch-thumb)] shadow-sm transition-transform peer-checked:translate-x-5" />
-      </span>
-    </label>
+    <Switch
+      label={label}
+      description={description}
+      checked={checked}
+      disabled={disabled}
+      onChange={onChange}
+    />
   )
 }

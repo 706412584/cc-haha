@@ -1,6 +1,9 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { computerUseApi, type ComputerUseStatus, type SetupResult, type InstalledApp, type AuthorizedApp } from '../api/computerUse'
 import { useTranslation } from '../i18n'
+import { Button } from '@/components/ui/Button'
+import { ErrorState } from '@/components/ui/ErrorState'
+import { LoadingState } from '@/components/ui/LoadingState'
 import { getDesktopHost } from '../lib/desktopHost'
 
 type CheckState = 'loading' | 'ready' | 'error'
@@ -14,15 +17,15 @@ function StatusIcon({ ok }: { ok: boolean | null }) {
     return <span className="material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)]">help</span>
   }
   return ok ? (
-    <span className="material-symbols-outlined text-[18px] text-green-500" style={{ fontVariationSettings: "'FILL' 1" }}>check_circle</span>
+    <span className="material-symbols-outlined text-[18px] text-[var(--color-success)]" style={{ fontVariationSettings: "'FILL' 1" }}>check_circle</span>
   ) : (
-    <span className="material-symbols-outlined text-[18px] text-red-400" style={{ fontVariationSettings: "'FILL' 1" }}>cancel</span>
+    <span className="material-symbols-outlined text-[18px] text-[var(--color-error)]" style={{ fontVariationSettings: "'FILL' 1" }}>cancel</span>
   )
 }
 
 function StatusRow({ label, ok, detail }: { label: string; ok: boolean | null; detail: string }) {
   return (
-    <div className="flex items-center gap-3 py-2.5 px-4 rounded-lg bg-[var(--color-surface-container-low)]">
+    <div className="flex items-center gap-3 py-2.5 px-4 rounded-[var(--radius-lg)] bg-[var(--color-surface-container-low)]">
       <StatusIcon ok={ok} />
       <div className="flex-1 min-w-0">
         <span className="text-sm font-medium text-[var(--color-text-primary)]">{label}</span>
@@ -280,7 +283,7 @@ export function ComputerUseSettings() {
       {/* Title */}
       <div>
         <div className="flex items-center justify-between gap-4">
-          <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">
+          <h2 className="text-[24px] font-semibold leading-tight text-[var(--color-text-primary)]" style={{ fontFamily: 'var(--font-headline)' }}>
             {t('settings.computerUse.title')}
           </h2>
           <label className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)] cursor-pointer">
@@ -293,30 +296,30 @@ export function ComputerUseSettings() {
             {t('settings.computerUse.enabledToggle')}
           </label>
         </div>
-        <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
+        <p className="mt-1.5 text-[13.5px] leading-6 text-[var(--color-text-secondary)]">
           {t('settings.computerUse.description')}
         </p>
       </div>
 
       {!computerUseEnabled && (
-        <div className="px-4 py-3 rounded-lg bg-yellow-500/10 border border-yellow-500/30 text-sm text-yellow-700">
+        <div className="px-4 py-3 rounded-[var(--radius-lg)] border border-[var(--color-warning)] bg-[var(--color-warning-container)] text-sm text-[var(--color-on-warning-container)]">
           {t('settings.computerUse.disabledHint')}
         </div>
       )}
 
       {checkState === 'loading' ? (
-        <div className="py-8 text-center text-sm text-[var(--color-text-tertiary)]">
-          {t('common.loading')}
-        </div>
+        <LoadingState size="md" label={t('common.loading')} />
       ) : checkState === 'error' ? (
-        <div className="py-8 text-center text-sm text-red-400">
-          Failed to check status.
-          <button onClick={fetchStatus} className="ml-2 underline">{t('common.retry')}</button>
-        </div>
+        <ErrorState
+          size="lg"
+          title="Failed to check status."
+          retryLabel={t('common.retry')}
+          onRetry={fetchStatus}
+        />
       ) : status ? (
         <>
           {!status.supported && (
-            <div className="px-4 py-3 rounded-lg bg-yellow-500/10 border border-yellow-500/30 text-sm text-yellow-600">
+            <div className="px-4 py-3 rounded-[var(--radius-lg)] border border-[var(--color-warning)] bg-[var(--color-warning-container)] text-sm text-[var(--color-on-warning-container)]">
               {t('settings.computerUse.notSupported')}
             </div>
           )}
@@ -340,7 +343,7 @@ export function ComputerUseSettings() {
             />
           </div>
 
-          <div className="space-y-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-low)] p-4">
+          <div className="space-y-2 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] p-4">
             <label htmlFor="computer-use-python-path" className="block text-sm font-medium text-[var(--color-text-primary)]">
               {t('settings.computerUse.pythonPathLabel')}
             </label>
@@ -354,33 +357,37 @@ export function ComputerUseSettings() {
                   setPythonPathMessage(null)
                 }}
                 placeholder={t('settings.computerUse.pythonPathPlaceholder')}
-                className="min-w-[220px] flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] px-3 py-2 font-mono text-xs text-[var(--color-text-primary)] placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-brand)] focus:outline-none"
+                className="min-w-[220px] flex-1 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container)] px-3 py-2 font-mono text-xs text-[var(--color-text-primary)] placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-brand)] focus:outline-none"
               />
-              <button
+              <Button
+                variant="secondary"
+                size="base"
                 onClick={choosePythonPath}
                 disabled={pythonPathSaving}
-                className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] px-3 py-2 text-xs font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] disabled:opacity-50"
+                icon={<span className="material-symbols-outlined text-[16px]">folder_open</span>}
               >
-                <span className="material-symbols-outlined text-[16px]">folder_open</span>
                 {t('settings.computerUse.pythonPathBrowse')}
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="primary"
+                size="base"
                 onClick={() => savePythonPath()}
-                disabled={pythonPathSaving || !pythonPathDirty}
-                className="flex items-center gap-1.5 rounded-lg bg-[var(--color-brand)] px-3 py-2 text-xs font-semibold text-[var(--color-on-primary)] hover:opacity-90 disabled:opacity-50"
+                disabled={!pythonPathDirty}
+                loading={pythonPathSaving}
+                icon={<span className="material-symbols-outlined text-[16px]">save</span>}
               >
-                <span className="material-symbols-outlined text-[16px]">{pythonPathSaving ? 'hourglass_empty' : 'save'}</span>
                 {t('settings.computerUse.pythonPathSave')}
-              </button>
+              </Button>
               {pythonPathSaved && (
-                <button
+                <Button
+                  variant="secondary"
+                  size="base"
                   onClick={() => savePythonPath('')}
                   disabled={pythonPathSaving}
-                  className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] px-3 py-2 text-xs font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] disabled:opacity-50"
+                  icon={<span className="material-symbols-outlined text-[16px]">restart_alt</span>}
                 >
-                  <span className="material-symbols-outlined text-[16px]">restart_alt</span>
                   {t('settings.computerUse.pythonPathAuto')}
-                </button>
+                </Button>
               )}
             </div>
             <p className="text-xs text-[var(--color-text-tertiary)]">
@@ -410,26 +417,28 @@ export function ComputerUseSettings() {
                 }
               />
               {(accessibilityNeedsAttention || screenRecordingNeedsAttention) && (
-                <div className="flex flex-col gap-2 px-4 py-3 rounded-lg bg-yellow-500/5 border border-yellow-500/20">
-                  <p className="text-xs text-[var(--color-text-tertiary)]">{t('settings.computerUse.permRestartHint')}</p>
+                <div className="flex flex-col gap-2 px-4 py-3 rounded-[var(--radius-lg)] border border-[var(--color-warning)] bg-[var(--color-warning-container)]">
+                  <p className="text-xs text-[var(--color-on-warning-container)]">{t('settings.computerUse.permRestartHint')}</p>
                   <div className="flex gap-2">
                     {accessibilityNeedsAttention && (
-                      <button
+                      <Button
+                        variant="secondary"
+                        size="base"
                         onClick={() => openSystemSettings('Privacy_Accessibility')}
-                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[var(--color-text-accent)] border border-[var(--color-border)] rounded-lg hover:bg-[var(--color-surface-hover)]"
+                        icon={<span className="material-symbols-outlined text-[14px]">open_in_new</span>}
                       >
-                        <span className="material-symbols-outlined text-[14px]">open_in_new</span>
                         {t('settings.computerUse.openAccessibility')}
-                      </button>
+                      </Button>
                     )}
                     {screenRecordingNeedsAttention && (
-                      <button
+                      <Button
+                        variant="secondary"
+                        size="base"
                         onClick={() => openSystemSettings('Privacy_ScreenCapture')}
-                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[var(--color-text-accent)] border border-[var(--color-border)] rounded-lg hover:bg-[var(--color-surface-hover)]"
+                        icon={<span className="material-symbols-outlined text-[14px]">open_in_new</span>}
                       >
-                        <span className="material-symbols-outlined text-[14px]">open_in_new</span>
                         {t('settings.computerUse.openScreenRecording')}
-                      </button>
+                      </Button>
                     )}
                   </div>
                 </div>
@@ -438,15 +447,15 @@ export function ComputerUseSettings() {
           )}
 
           {allReady && (status.platform !== 'darwin' || (status.permissions.accessibility && screenRecordingReady)) && (
-            <div className="px-4 py-3 rounded-lg bg-green-500/10 border border-green-500/30 text-sm text-green-600 flex items-center gap-2">
+            <div className="px-4 py-3 rounded-[var(--radius-lg)] border border-[var(--color-success)] bg-[var(--color-success-container)] text-sm text-[var(--color-on-success-container)] flex items-center gap-2">
               <span className="material-symbols-outlined text-[18px]" style={{ fontVariationSettings: "'FILL' 1" }}>verified</span>
               {t('settings.computerUse.allReady')}
             </div>
           )}
 
           {setupResult && (
-            <div className={`rounded-lg border p-4 space-y-2 ${setupResult.success ? 'bg-green-500/5 border-green-500/30' : 'bg-red-500/5 border-red-500/30'}`}>
-              <div className={`text-sm font-medium ${setupResult.success ? 'text-green-600' : 'text-red-400'}`}>
+            <div className={`rounded-[var(--radius-lg)] border p-4 space-y-2 ${setupResult.success ? 'border-[var(--color-success)] bg-[var(--color-success-container)]' : 'border-[var(--color-error)] bg-[var(--color-error-container)]'}`}>
+              <div className={`text-sm font-medium ${setupResult.success ? 'text-[var(--color-on-success-container)]' : 'text-[var(--color-on-error-container)]'}`}>
                 {setupResult.success ? t('settings.computerUse.setupSuccess') : t('settings.computerUse.setupFail')}
               </div>
               {setupResult.steps.map((step, i) => (
@@ -461,41 +470,44 @@ export function ComputerUseSettings() {
           {/* Action buttons */}
           <div className="flex gap-3">
             {!status.python.installed && (
-              <button
+              <Button
+                variant="primary"
+                size="lg"
                 onClick={() => openExternalUrl(pythonDownloadUrl)}
-                className="flex items-center gap-2 px-5 py-2.5 bg-[var(--color-brand)] text-[var(--color-on-primary)] text-sm font-semibold rounded-lg hover:opacity-90 transition-opacity"
+                icon={<span className="material-symbols-outlined text-[18px]">open_in_new</span>}
               >
-                <span className="material-symbols-outlined text-[18px]">open_in_new</span>
                 {t('settings.computerUse.downloadPython')}
-              </button>
+              </Button>
             )}
             {!envReady && status.python.installed && (
-              <button
+              <Button
+                variant="primary"
+                size="lg"
                 onClick={handleSetup}
-                disabled={setupRunning}
-                className="flex items-center gap-2 px-5 py-2.5 bg-[var(--color-brand)] text-[var(--color-on-primary)] text-sm font-semibold rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
+                loading={setupRunning}
+                icon={<span className="material-symbols-outlined text-[18px]">download</span>}
               >
-                <span className="material-symbols-outlined text-[18px]">{setupRunning ? 'hourglass_empty' : 'download'}</span>
                 {setupRunning ? t('settings.computerUse.setupRunning') : t('settings.computerUse.setupBtn')}
-              </button>
+              </Button>
             )}
-            <button
+            <Button
+              variant="secondary"
+              size="lg"
               onClick={fetchStatus}
-              className="flex items-center gap-2 px-4 py-2.5 text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] border border-[var(--color-border)] rounded-lg hover:bg-[var(--color-surface-hover)] transition-colors"
+              icon={<span className="material-symbols-outlined text-[18px]">refresh</span>}
             >
-              <span className="material-symbols-outlined text-[18px]">refresh</span>
               {t('settings.computerUse.recheckBtn')}
-            </button>
+            </Button>
           </div>
 
           {/* ─── App Authorization Section ─── */}
           {envReady && (
             <div className="space-y-4 pt-4 border-t border-[var(--color-border)]">
               <div>
-                <h3 className="text-base font-semibold text-[var(--color-text-primary)] flex items-center gap-2">
+                <h3 className="text-base font-semibold text-[var(--color-text-primary)] flex items-center gap-2" style={{ fontFamily: 'var(--font-headline)' }}>
                   {t('settings.computerUse.appsTitle')}
                   {appsSaved && (
-                    <span className="text-xs font-normal text-green-500 flex items-center gap-1">
+                    <span className="text-xs font-normal text-[var(--color-success)] flex items-center gap-1">
                       <span className="material-symbols-outlined text-[14px]" style={{ fontVariationSettings: "'FILL' 1" }}>check</span>
                       {t('settings.computerUse.appsSaved')}
                     </span>
@@ -536,7 +548,7 @@ export function ComputerUseSettings() {
                   value={searchQuery}
                   onChange={e => setSearchQuery(e.target.value)}
                   placeholder={t('settings.computerUse.appsSearch')}
-                  className="w-full pl-9 pr-4 py-2 text-sm bg-[var(--color-surface-container-low)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] placeholder:text-[var(--color-text-tertiary)] focus:outline-none focus:border-[var(--color-brand)]"
+                  className="w-full pl-9 pr-4 py-2 text-sm bg-[var(--color-surface-container-low)] border border-[var(--color-border)] rounded-[var(--radius-lg)] text-[var(--color-text-primary)] placeholder:text-[var(--color-text-tertiary)] focus:outline-none focus:border-[var(--color-brand)]"
                 />
               </div>
 
@@ -550,7 +562,7 @@ export function ComputerUseSettings() {
                   {t('settings.computerUse.appsEmpty')}
                 </div>
               ) : (
-                <div className="max-h-[400px] overflow-y-auto rounded-lg border border-[var(--color-border)]">
+                <div className="max-h-[400px] overflow-y-auto rounded-[var(--radius-lg)] border border-[var(--color-border)]">
                   {sortedApps.map(app => {
                     const isAuthorized = authorizedBundleIds.has(app.bundleId)
                     return (
@@ -558,7 +570,7 @@ export function ComputerUseSettings() {
                         key={app.bundleId}
                         onClick={() => toggleApp(app)}
                         className={`w-full flex items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-[var(--color-surface-hover)] border-b border-[var(--color-border)] last:border-b-0 ${
-                          isAuthorized ? 'bg-[var(--color-brand)]/5' : ''
+                          isAuthorized ? 'bg-[var(--color-brand-soft)]' : ''
                         }`}
                       >
                         <div className={`w-5 h-5 rounded flex items-center justify-center flex-shrink-0 border ${
@@ -567,7 +579,7 @@ export function ComputerUseSettings() {
                             : 'border-[var(--color-border)]'
                         }`}>
                           {isAuthorized && (
-                            <span className="material-symbols-outlined text-[14px] text-white" style={{ fontVariationSettings: "'FILL' 1" }}>check</span>
+                            <span className="material-symbols-outlined text-[14px] text-[var(--color-on-primary)]" style={{ fontVariationSettings: "'FILL' 1" }}>check</span>
                           )}
                         </div>
                         <div className="flex-1 min-w-0">

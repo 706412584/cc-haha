@@ -70,7 +70,10 @@ type SettingsStore = {
   availableModels: ModelInfo[]
   activeProviderName: string | null
   locale: Locale
-  theme: ThemeMode
+  // No `theme` here on purpose: uiStore owns it. A copy in this store went
+  // stale the moment the OS flipped the appearance without going through
+  // setTheme, and the Settings picker highlighted a theme that was no longer
+  // on screen. Read `useUIStore(s => s.theme)` instead.
   chatSendBehavior: ChatSendBehavior
   outputStyle: string
   outputStyles: OutputStyleOption[]
@@ -160,6 +163,9 @@ const DEFAULT_DESKTOP_TERMINAL_SETTINGS: DesktopTerminalSettings = {
   startupShell: 'system',
   customShellPath: '',
 }
+let desktopTerminalSaveQueue: Promise<void> = Promise.resolve()
+let desktopTerminalSaveVersion = 0
+let lastPersistedDesktopTerminal = DEFAULT_DESKTOP_TERMINAL_SETTINGS
 
 const DEFAULT_UPDATE_PROXY_SETTINGS: UpdateProxySettings = {
   mode: 'system',
@@ -202,7 +208,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   availableModels: [],
   activeProviderName: null,
   locale: getStoredLocale(),
-  theme: useUIStore.getState().theme,
   chatSendBehavior: 'enter',
   outputStyle: DEFAULT_OUTPUT_STYLE,
   outputStyles: DEFAULT_OUTPUT_STYLE_OPTIONS,
@@ -253,11 +258,15 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         loadH5AccessSettings(previousH5Access),
         loadTraceCaptureSettings(),
       ])
-      const theme = useUIStore.getState().theme
-      useUIStore.getState().setTheme(theme)
+      const desktopTerminal = normalizeDesktopTerminalSettings(userSettings.desktopTerminal)
+      lastPersistedDesktopTerminal = desktopTerminal
+      // Nothing to do for the theme here: uiStore already applied it at
+      // startup, and re-applying would re-persist and re-report it on every
+      // provider switch.
       set({
         permissionMode: mode,
-        availableModels: modelsRes.models,
+        // 服务端响应异常可能缺 models 字段,兜底为空数组防止下游渲染崩溃
+        availableModels: modelsRes.models ?? [],
         activeProviderName: modelsRes.provider?.name ?? null,
         currentModel: model,
         effortLevel: level,
@@ -267,15 +276,13 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         unifiedActivityPanelEnabled: userSettings.unifiedActivityPanelEnabled === true,
         agentOfficeSurface: userSettings.agentOfficeSurface === 'tab' ? 'tab' : 'modal',
         autoModeOptInAccepted: userSettings.skipAutoPermissionPrompt === true,
-        theme,
         chatSendBehavior: normalizeChatSendBehavior(userSettings.chatSendBehavior),
         outputStyle: normalizeOutputStyle(userSettings.outputStyle),
         skipWebFetchPreflight: userSettings.skipWebFetchPreflight !== false,
         desktopNotificationsEnabled: userSettings.desktopNotificationsEnabled === true,
         sessionContentSearchEnabled: userSettings.sessionContentSearchEnabled !== false,
-        desktopTerminal: normalizeDesktopTerminalSettings(userSettings.desktopTerminal),
-        workspaceLsp: normalizeWorkspaceLspSettings(userSettings.workspaceLsp),
-        webSearch: normalizeWebSearchSettings(userSettings.webSearch),
+        desktopTerminal,
+        workspaceLsp: normalizeWorkspaceLspSettings(userSettings.workspaceLsp),        webSearch: normalizeWebSearchSettings(userSettings.webSearch),
         updateProxy: normalizeUpdateProxySettings(userSettings.updateProxy),
         network: normalizeNetworkSettings(userSettings.network),
         traceCapture,
@@ -398,8 +405,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     try { localStorage.setItem(LOCALE_STORAGE_KEY, locale) } catch { /* noop */ }
   },
 
+  // Kept as the Settings page's entry point; uiStore owns the state.
   setTheme: async (theme) => {
-    set({ theme })
     useUIStore.getState().setTheme(theme)
   },
 
@@ -512,15 +519,25 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   },
 
   setDesktopTerminal: async (settings) => {
-    const prev = get().desktopTerminal
     const next = normalizeDesktopTerminalSettings(settings)
+    const saveVersion = ++desktopTerminalSaveVersion
     set({ desktopTerminal: next })
-    try {
-      await settingsApi.updateUser({ desktopTerminal: next })
-    } catch (error) {
-      set({ desktopTerminal: prev })
-      throw error
-    }
+    const save = desktopTerminalSaveQueue
+      .catch(() => undefined)
+      .then(async () => {
+        try {
+          await settingsApi.updateUser({ desktopTerminal: next })
+          lastPersistedDesktopTerminal = next
+        } catch (error) {
+          if (saveVersion === desktopTerminalSaveVersion) {
+            set({ desktopTerminal: lastPersistedDesktopTerminal })
+          }
+          throw error
+        }
+      })
+
+    desktopTerminalSaveQueue = save
+    await save
   },
 
   setWorkspaceLsp: async (settings) => {

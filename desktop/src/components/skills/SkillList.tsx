@@ -1,25 +1,47 @@
 import { useEffect, useMemo, useState } from 'react'
+import {
+  ChevronRight,
+  FileStack,
+  Folder,
+  Layers,
+  Package,
+  Puzzle,
+  Search,
+  SearchX,
+  Share2,
+  Sparkles,
+  User,
+  X,
+  type LucideIcon,
+} from 'lucide-react'
 import { useSkillStore } from '../../stores/skillStore'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useTranslation } from '../../i18n'
 import type { TranslationKey } from '../../i18n'
+import { Badge } from '@/components/ui/Badge'
+import { Card } from '@/components/ui/Card'
+import { EmptyState } from '@/components/ui/EmptyState'
+import { ErrorState } from '@/components/ui/ErrorState'
+import { IconButton } from '@/components/ui/IconButton'
+import { LoadingState } from '@/components/ui/LoadingState'
 import type { SkillMeta, SkillSource } from '../../types/skill'
 
 const SOURCE_ORDER: SkillSource[] = ['user', 'project', 'plugin', 'mcp', 'bundled']
 
-const SOURCE_ICONS: Record<SkillSource, string> = {
-  user: 'person',
-  project: 'folder',
-  plugin: 'extension',
-  mcp: 'hub',
-  bundled: 'inventory_2',
+const SOURCE_ICONS: Record<SkillSource, LucideIcon> = {
+  user: User,
+  project: Folder,
+  plugin: Puzzle,
+  mcp: Share2,
+  bundled: Package,
 }
 
+/** Fill plus its AA-checked foreground — never the accent on its own tint. */
 const SOURCE_ACCENT_CLASSES: Record<SkillSource, string> = {
-  user: 'bg-[var(--color-primary-fixed)] text-[var(--color-brand)]',
-  project: 'bg-[var(--color-success-container)] text-[var(--color-success)]',
-  plugin: 'bg-[var(--color-warning-container)] text-[var(--color-warning)]',
-  mcp: 'bg-[var(--color-info-container)] text-[var(--color-info)]',
+  user: 'bg-[var(--color-brand-soft)] text-[var(--color-on-brand-soft)]',
+  project: 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]',
+  plugin: 'bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]',
+  mcp: 'bg-[var(--color-info-container)] text-[var(--color-on-info-container)]',
   bundled: 'bg-[var(--color-surface-container-high)] text-[var(--color-text-tertiary)]',
 }
 
@@ -139,44 +161,41 @@ export function SkillList() {
   )
 
   if (isLoading) {
-    return (
-      <div className="flex justify-center py-12">
-        <div className="animate-spin w-5 h-5 border-2 border-[var(--color-brand)] border-t-transparent rounded-full" />
-      </div>
-    )
+    return <LoadingState label={t('common.loading')} labelHidden />
   }
 
   if (error) {
-    return <div className="text-sm text-[var(--color-error)] py-4">{error}</div>
+    // Was a bare red line of text with no role, so a screen reader only found
+    // the failure by walking into it.
+    return <ErrorState title={error} />
   }
 
   return (
-    <div className="flex flex-col gap-6 min-w-0">
-      <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] overflow-hidden">
-        <div className="grid gap-4 px-5 py-5 min-w-0 xl:grid-cols-[minmax(0,1.6fr)_minmax(320px,1fr)] xl:items-end">
+    <div className="flex min-w-0 flex-col gap-6">
+      <Card radius="xl" surface="low" padding="none" className="overflow-hidden">
+        <div className="grid min-w-0 gap-5 px-5 py-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(400px,1fr)] xl:items-end">
           <div className="min-w-0">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[var(--color-text-tertiary)] mb-2">
+            <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-[var(--color-text-tertiary)]">
               {t('settings.skills.browserEyebrow')}
             </div>
-            <div className="flex items-center gap-3 mb-2">
-              <span className="material-symbols-outlined text-[22px] text-[var(--color-brand)]">
-                auto_awesome
-              </span>
-              <h3 className="text-lg font-semibold text-[var(--color-text-primary)]">
+            <div className="mb-2 flex items-center gap-2.5">
+              <Sparkles className="h-[22px] w-[22px] text-[var(--color-brand)]" strokeWidth={1.5} aria-hidden="true" />
+              <h3
+                style={{ fontFamily: 'var(--font-headline)' }}
+                className="text-[21px] font-bold tracking-[-0.01em] text-[var(--color-text-primary)]"
+              >
                 {t('settings.skills.browserTitle')}
               </h3>
             </div>
-            <p className="text-sm leading-6 text-[var(--color-text-secondary)] max-w-3xl">
+            <p className="max-w-3xl text-sm leading-6 text-[var(--color-text-secondary)]">
               {t('settings.skills.browserDescription')}
             </p>
             <div className="mt-4 max-w-2xl">
               <label className="sr-only" htmlFor="settings-skill-search">
                 {t('settings.skills.searchLabel')}
               </label>
-              <div className="flex min-h-11 items-center gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 transition-colors focus-within:border-[var(--color-border-focus)] focus-within:ring-2 focus-within:ring-[var(--color-brand)]/20">
-                <span className="material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)]">
-                  search
-                </span>
+              <div className="flex min-h-11 items-center gap-2.5 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] px-3.5 transition-colors focus-within:border-[var(--color-border-focus)] focus-within:shadow-[var(--shadow-focus-ring)]">
+                <Search className="h-[15px] w-[15px] flex-shrink-0 text-[var(--color-text-tertiary)]" strokeWidth={1.6} aria-hidden="true" />
                 <input
                   id="settings-skill-search"
                   value={searchQuery}
@@ -185,14 +204,14 @@ export function SkillList() {
                   className="min-w-0 flex-1 bg-transparent text-sm text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)]"
                 />
                 {searchQuery && (
-                  <button
-                    type="button"
-                    aria-label={t('settings.skills.clearSearch')}
+                  <IconButton
+                    icon={<X className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />}
+                    label={t('settings.skills.clearSearch')}
+                    size="sm"
+                    shape="circle"
+                    tone="muted"
                     onClick={() => setSearchQuery('')}
-                    className="inline-flex h-7 w-7 items-center justify-center rounded-full text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]"
-                  >
-                    <span className="material-symbols-outlined text-[16px]">close</span>
-                  </button>
+                  />
                 )}
               </div>
               {normalizedSearchQuery && (
@@ -206,11 +225,13 @@ export function SkillList() {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3 min-w-0 sm:grid-cols-3">
+          {/* Column count follows the track width, not the viewport: `sm:grid-cols-3` kept
+              forcing three columns into a 320px sidebar column and clipped the CJK labels. */}
+          <div className="grid min-w-0 grid-cols-[repeat(auto-fit,minmax(116px,1fr))] gap-3">
             <SummaryCard
               label={t('settings.skills.summary.totalSkills')}
               value={String(filteredSkills.length)}
-              icon="auto_awesome"
+              icon={Sparkles}
             />
             <SummaryCard
               label={t('settings.skills.summary.sources')}
@@ -218,20 +239,19 @@ export function SkillList() {
                 SOURCE_ORDER.filter((source) => (grouped[source] ?? []).length > 0)
                   .length,
               )}
-              icon="layers"
+              icon={Layers}
             />
             <SummaryCard
               label={t('settings.skills.summary.tokens')}
               value={t('settings.skills.tokenEstimateShort', { count: String(totalTokens) })}
-              icon="notes"
-              className="col-span-2 sm:col-span-1"
+              icon={FileStack}
             />
           </div>
         </div>
-      </section>
+      </Card>
 
       {filteredCatalog.length > 0 && (
-        <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden min-w-0">
+        <Card as="section" radius="xl" surface="base" padding="none" className="min-w-0 overflow-hidden">
           <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-[var(--color-border)] bg-[var(--color-surface-container-low)]">
             <div className="min-w-0">
               <div className="flex items-center gap-2 mb-1">
@@ -310,35 +330,24 @@ export function SkillList() {
               )
             })}
           </div>
-        </section>
+        </Card>
       )}
 
       {filteredSkills.length === 0 && normalizedSearchQuery && (
-        <div className="text-center py-12 rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-6">
-          <span className="material-symbols-outlined text-[40px] text-[var(--color-text-tertiary)] mb-2 block">
-            search_off
-          </span>
-          <p className="text-sm text-[var(--color-text-tertiary)]">
-            {t('settings.skills.noSearchResults')}
-          </p>
-          <p className="text-xs text-[var(--color-text-tertiary)] mt-1">
-            {t('settings.skills.noSearchResultsHint')}
-          </p>
-        </div>
+        <EmptyState
+          icon={<SearchX size={20} strokeWidth={1.6} aria-hidden="true" />}
+          title={t('settings.skills.noSearchResults')}
+          description={t('settings.skills.noSearchResultsHint')}
+          action={{ label: t('settings.skills.clearSearch'), onClick: () => setSearchQuery('') }}
+        />
       )}
 
       {skills.length === 0 && !normalizedSearchQuery && (
-        <div className="text-center py-12 rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-6">
-          <span className="material-symbols-outlined text-[40px] text-[var(--color-text-tertiary)] mb-2 block">
-            auto_awesome
-          </span>
-          <p className="text-sm text-[var(--color-text-tertiary)]">
-            {t('settings.skills.empty')}
-          </p>
-          <p className="text-xs text-[var(--color-text-tertiary)] mt-1">
-            {t('settings.skills.emptyHint')}
-          </p>
-        </div>
+        <EmptyState
+          icon={<Sparkles size={20} strokeWidth={1.6} aria-hidden="true" />}
+          title={t('settings.skills.empty')}
+          description={t('settings.skills.emptyHint')}
+        />
       )}
 
       <div className={`grid gap-4 ${visibleGroupCount >= 2 ? 'xl:grid-cols-2' : ''}`}>
@@ -347,28 +356,31 @@ export function SkillList() {
           if (!group?.length) return null
 
           const sourceLabel = t(`settings.skills.source.${source}`)
+          const SourceIcon = SOURCE_ICONS[source]
           const sourceTokenCount = group.reduce(
             (sum, skill) => sum + estimateTokens(skill.contentLength),
             0,
           )
 
           return (
-            <section
+            <Card
               key={source}
-              className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden min-w-0"
+              as="section"
+              radius="xl"
+              surface="base"
+              padding="none"
+              className="min-w-0 overflow-hidden"
             >
-              <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-[var(--color-border)] bg-[var(--color-surface-container-low)]">
+              <div className="flex items-start justify-between gap-3 border-b border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-5 py-4">
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2 mb-1">
+                  <div className="mb-1 flex items-center gap-2">
                     <span className={`inline-flex h-7 w-7 items-center justify-center rounded-full ${SOURCE_ACCENT_CLASSES[source]}`}>
-                      <span className="material-symbols-outlined text-[16px]">
-                        {SOURCE_ICONS[source]}
-                      </span>
+                      <SourceIcon className="h-4 w-4" strokeWidth={1.6} aria-hidden="true" />
                     </span>
                     <h4 className="text-sm font-semibold text-[var(--color-text-primary)]">
                       {sourceLabel}
                     </h4>
-                    <span className="text-xs text-[var(--color-text-tertiary)]">
+                    <span className="font-mono text-xs text-[var(--color-text-tertiary)]">
                       {group.length}
                     </span>
                   </div>
@@ -379,7 +391,7 @@ export function SkillList() {
                     })}
                   </p>
                 </div>
-                <div className="text-[11px] text-[var(--color-text-tertiary)] whitespace-nowrap">
+                <div className="whitespace-nowrap font-mono text-[11px] text-[var(--color-text-tertiary)]">
                   {t('settings.skills.tokenEstimateShort', { count: String(sourceTokenCount) })}
                 </div>
               </div>
@@ -393,45 +405,55 @@ export function SkillList() {
                       fetchSkillDetail(skill.source, skill.name, currentWorkDir, 'skills')
                     }
                     disabled={!skill.hasDirectory}
-                    className="group rounded-xl border border-transparent px-3 py-3 text-left transition-all hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-surface)] disabled:opacity-60 disabled:cursor-default disabled:hover:bg-transparent disabled:hover:border-transparent"
+                    className="group rounded-[var(--radius-lg)] border border-transparent px-3 py-3 text-left transition-[background-color,border-color,box-shadow] duration-150 ease-out hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-surface)] disabled:cursor-default disabled:opacity-60 disabled:hover:border-transparent disabled:hover:bg-transparent"
                   >
                     <div className="flex items-start gap-3">
-                      <span className="mt-0.5 material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)]">
-                        auto_awesome
-                      </span>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-sm font-semibold text-[var(--color-text-primary)] break-all">
+                      <Sparkles className="mt-0.5 h-[18px] w-[18px] flex-shrink-0 text-[var(--color-text-tertiary)]" strokeWidth={1.5} aria-hidden="true" />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="break-all text-sm font-semibold text-[var(--color-text-primary)]">
                             {skill.displayName || skill.name}
                           </span>
-                          {skill.version && (
-                            <span className="rounded-full bg-[var(--color-surface-container-high)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-text-tertiary)]">
-                              v{skill.version}
-                            </span>
-                          )}
+                          {skill.version && <Badge mono>v{skill.version}</Badge>}
                           {skill.userInvocable && (
-                            <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-text-tertiary)]">
-                              {t('settings.skills.slashCommand')}
-                            </span>
+                            <Badge variant="outline">{t('settings.skills.slashCommand')}</Badge>
+                          )}
+                          {/* Only flagged for `.agents`: `.claude` is the norm and
+                              badging it would be noise on every existing skill. */}
+                          {skill.rootFlavor === 'agents' && (
+                            // The badge covers both scopes, and they are not
+                            // equally trusted: a project one ships with the
+                            // repository rather than being installed by the
+                            // user — hence two hint strings.
+                            <Badge
+                              mono
+                              title={t(skill.source === 'project'
+                                ? 'settings.skills.agentsDirProjectHint'
+                                : 'settings.skills.agentsDirHint')}
+                            >
+                              {t('settings.skills.agentsDirBadge')}
+                            </Badge>
                           )}
                         </div>
-                        <p className="mt-1 text-xs leading-5 text-[var(--color-text-secondary)] break-words">
+                        <p className="mt-1 break-words text-xs leading-5 text-[var(--color-text-secondary)]">
                           {skill.description}
                         </p>
                         <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[var(--color-text-tertiary)]">
                           <span>{sourceLabel}</span>
-                          <span>{t('settings.skills.tokenEstimateShort', { count: String(estimateTokens(skill.contentLength)) })}</span>
+                          <span className="font-mono">{t('settings.skills.tokenEstimateShort', { count: String(estimateTokens(skill.contentLength)) })}</span>
                           <span>{skill.hasDirectory ? t('settings.skills.ready') : t('settings.skills.unavailable')}</span>
                         </div>
                       </div>
-                      <span className="material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)] opacity-60 transition-transform group-hover:translate-x-0.5 group-hover:opacity-100">
-                        chevron_right
-                      </span>
+                      <ChevronRight
+                        className="h-[18px] w-[18px] flex-shrink-0 text-[var(--color-text-tertiary)] opacity-60 transition-transform duration-150 group-hover:translate-x-0.5 group-hover:opacity-100 motion-reduce:transition-none motion-reduce:group-hover:translate-x-0"
+                        strokeWidth={1.6}
+                        aria-hidden="true"
+                      />
                     </div>
                   </button>
                 ))}
               </div>
-            </section>
+            </Card>
           )
         })}
       </div>
@@ -442,23 +464,27 @@ export function SkillList() {
 function SummaryCard({
   label,
   value,
-  icon,
+  icon: Icon,
   className = '',
 }: {
   label: string
   value: string
-  icon: string
+  icon: LucideIcon
   className?: string
 }) {
   return (
-    <div className={`rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-3 min-w-0 ${className}`}>
-      <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)] min-w-0">
-        <span className="material-symbols-outlined text-[14px] flex-shrink-0">{icon}</span>
+    <Card radius="lg" padding="sm" className={`min-w-0 ${className}`}>
+      <div className="flex min-w-0 items-center gap-1.5 text-[11px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+        <Icon className="h-3.5 w-3.5 flex-shrink-0" strokeWidth={1.6} aria-hidden="true" />
         <span className="truncate">{label}</span>
       </div>
-      <div className="mt-2 text-lg font-semibold text-[var(--color-text-primary)] truncate">
+      {/* Statistic, so it takes the serif face the handoff pins on big numbers. */}
+      <div
+        style={{ fontFamily: 'var(--font-headline)' }}
+        className="mt-2 truncate text-[21px] font-bold text-[var(--color-text-primary)]"
+      >
         {value}
       </div>
-    </div>
+    </Card>
   )
 }

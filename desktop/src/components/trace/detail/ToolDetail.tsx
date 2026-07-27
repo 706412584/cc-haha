@@ -3,6 +3,7 @@ import type { TraceSpan } from '../../../lib/traceViewModel'
 import { formatTraceJson } from '../../../lib/traceViewModel'
 import { formatClockTime, formatDurationMs } from '../../../lib/trace/formatters'
 import { CodeViewer } from '../../chat/CodeViewer'
+import { EmptyState } from '@/components/ui/EmptyState'
 import { Section } from './Section'
 
 export function ToolDetail({ span }: { span: TraceSpan }) {
@@ -20,22 +21,18 @@ export function ToolDetail({ span }: { span: TraceSpan }) {
 
       <Section sectionKey="tool.result" title={t('trace.section.result')} defaultOpen>
         {pending ? (
-          <div className="rounded-[var(--radius-md)] border border-dashed border-[var(--color-border)] px-3 py-3 text-xs text-[var(--color-text-tertiary)]">
-            {t('trace.waitingForResult')}
-          </div>
+          <EmptyState description={t('trace.waitingForResult')} variant="dashed" size="sm" />
         ) : outputs.length > 0 ? (
           <div className="flex flex-col gap-2">
             {outputs.map((output, index) => <OutputView key={index} value={output} />)}
           </div>
         ) : (
-          <div className="rounded-[var(--radius-md)] border border-dashed border-[var(--color-border)] px-3 py-3 text-xs text-[var(--color-text-tertiary)]">
-            {t('trace.noData')}
-          </div>
+          <EmptyState description={t('trace.noData')} variant="dashed" size="sm" />
         )}
       </Section>
 
       <Section sectionKey="tool.meta" title={t('trace.section.meta')}>
-        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-[11px]">
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-[12.5px]">
           {span.toolUseId ? (
             <MetaRow label={t('trace.detail.toolUseId')} value={span.toolUseId} />
           ) : null}
@@ -73,7 +70,7 @@ function OutputView({ value }: { value: unknown }) {
   if (text !== null) {
     if (!text.trim()) return null
     return (
-      <pre className="max-h-[400px] overflow-y-auto whitespace-pre-wrap break-words rounded-[var(--radius-sm)] bg-[var(--color-surface-container-low)] px-2 py-1.5 font-mono text-[11px] leading-5 text-[var(--color-text-secondary)]">
+      <pre className="max-h-[400px] overflow-y-auto whitespace-pre-wrap break-words rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] px-3 py-2 font-mono text-[12px] leading-[1.7] text-[var(--color-text-secondary)]">
         {text}
       </pre>
     )

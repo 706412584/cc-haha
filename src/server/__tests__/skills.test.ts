@@ -7,7 +7,7 @@ import { clearInstalledPluginsCache } from '../../utils/plugins/installedPlugins
 import { clearPluginCache } from '../../utils/plugins/pluginLoader.js'
 import { resetSettingsCache } from '../../utils/settings/settingsCache.js'
 import { handlePluginsApi } from '../api/plugins.js'
-import { handleSkillsApi } from '../api/skills.js'
+import { handleSkillsApi, listSkillSlashCommands } from '../api/skills.js'
 
 let tmpHome: string
 let originalHome: string | undefined
@@ -278,6 +278,63 @@ describe('Skills API', () => {
     )
   })
 
+  it('does not expose a mismatched market marker on a user skill', async () => {
+    const userSkillsRoot = path.join(tmpHome, '.claude', 'skills')
+    const skillDir = path.join(userSkillsRoot, 'skill-a')
+    await writeSkill(
+      userSkillsRoot,
+      'skill-a',
+      ['---', 'description: User skill', '---', '', '# Skill A'].join('\n'),
+    )
+    await fs.writeFile(
+      path.join(skillDir, '.market-meta.json'),
+      JSON.stringify({
+        id: 'clawhub:skill-b',
+        source: 'clawhub',
+        slug: 'skill-b',
+        installedAt: new Date(0).toISOString(),
+        fileCount: 1,
+      }),
+    )
+
+    const { req, url, segments } = makeRequest('/api/skills/detail?source=user&name=skill-a')
+    const res = await handleSkillsApi(req, url, segments)
+
+    expect(res.status).toBe(200)
+    const body = await res.json() as { detail: { marketMeta?: unknown } }
+    expect(body.detail.marketMeta).toBeUndefined()
+  })
+
+  it('never exposes a market marker on a project skill', async () => {
+    const projectRoot = path.join(tmpHome, 'workspace')
+    const projectSkillsRoot = path.join(projectRoot, '.claude', 'skills')
+    const skillDir = path.join(projectSkillsRoot, 'project-skill')
+    await writeSkill(
+      projectSkillsRoot,
+      'project-skill',
+      ['---', 'description: Project skill', '---', '', '# Project skill'].join('\n'),
+    )
+    await fs.writeFile(
+      path.join(skillDir, '.market-meta.json'),
+      JSON.stringify({
+        id: 'clawhub:project-skill',
+        source: 'clawhub',
+        slug: 'project-skill',
+        installedAt: new Date(0).toISOString(),
+        fileCount: 1,
+      }),
+    )
+
+    const { req, url, segments } = makeRequest(
+      `/api/skills/detail?source=project&name=project-skill&cwd=${encodeURIComponent(projectRoot)}`,
+    )
+    const res = await handleSkillsApi(req, url, segments)
+
+    expect(res.status).toBe(200)
+    const body = await res.json() as { detail: { marketMeta?: unknown } }
+    expect(body.detail.marketMeta).toBeUndefined()
+  })
+
   it('lists plugin skills after reload rereads an external enable toggle', async () => {
     const marketplaceRoot = path.join(tmpHome, 'marketplace-root')
     const pluginRoot = path.join(marketplaceRoot, 'plugins', 'draw')
@@ -488,5 +545,240 @@ describe('Skills API', () => {
         description: 'Render with the drawing plugin.',
       }),
     )
+  })
+
+  describe('.agents/skills convention', () => {
+    it('lists user and project skills from .agents, tagged with rootFlavor', async () => {
+      const projectRoot = path.join(tmpHome, 'workspace')
+      await fs.mkdir(path.join(projectRoot, '.git'), { recursive: true })
+
+      await writeSkill(
+        path.join(tmpHome, '.agents', 'skills'),
+        'agents-user-skill',
+        ['---', 'description: Installed by Codex', '---', '', '# Shared'].join('\n'),
+      )
+      await writeSkill(
+        path.join(projectRoot, '.agents', 'skills'),
+        'agents-project-skill',
+        ['---', 'description: Checked into the repo', '---', '', '# Repo'].join('\n'),
+      )
+
+      const { req, url, segments } = makeRequest(
+        `/api/skills?cwd=${encodeURIComponent(projectRoot)}`,
+      )
+      const res = await handleSkillsApi(req, url, segments)
+
+      expect(res.status).toBe(200)
+      const body = await res.json() as {
+        skills: Array<{ name: string; source: string; rootFlavor?: string }>
+      }
+      expect(body.skills).toContainEqual(
+        expect.objectContaining({
+          name: 'agents-user-skill',
+          source: 'user',
+          rootFlavor: 'agents',
+        }),
+      )
+      expect(body.skills).toContainEqual(
+        expect.objectContaining({
+          name: 'agents-project-skill',
+          source: 'project',
+          rootFlavor: 'agents',
+        }),
+      )
+    })
+
+    it('tags .claude skills as the claude flavor', async () => {
+      await writeSkill(
+        path.join(tmpHome, '.claude', 'skills'),
+        'native-skill',
+        ['---', 'description: Native', '---', '', '# Native'].join('\n'),
+      )
+
+      const { req, url, segments } = makeRequest('/api/skills')
+      const res = await handleSkillsApi(req, url, segments)
+      const body = await res.json() as {
+        skills: Array<{ name: string; rootFlavor?: string }>
+      }
+
+      expect(body.skills).toContainEqual(
+        expect.objectContaining({ name: 'native-skill', rootFlavor: 'claude' }),
+      )
+    })
+
+    it('reports a name present in both user conventions once, as .claude', async () => {
+      // A cwd whose own tree holds no skills, so only the user roots contribute
+      // and the two spellings of the user scope are the only candidates.
+      const emptyWorkspace = path.join(tmpHome, 'workspace-without-skills')
+      await fs.mkdir(path.join(emptyWorkspace, '.git'), { recursive: true })
+
+      await writeSkill(
+        path.join(tmpHome, '.claude', 'skills'),
+        'dup',
+        ['---', 'description: The claude one', '---', '', '# Dup'].join('\n'),
+      )
+      await writeSkill(
+        path.join(tmpHome, '.agents', 'skills'),
+        'dup',
+        ['---', 'description: The agents one', '---', '', '# Dup'].join('\n'),
+      )
+
+      const { req, url, segments } = makeRequest(
+        `/api/skills?cwd=${encodeURIComponent(emptyWorkspace)}`,
+      )
+      const res = await handleSkillsApi(req, url, segments)
+      const body = await res.json() as {
+        skills: Array<{ name: string; description: string; rootFlavor?: string }>
+      }
+
+      const matches = body.skills.filter((s) => s.name === 'dup')
+      expect(matches).toHaveLength(1)
+      expect(matches[0]).toEqual(
+        expect.objectContaining({
+          description: 'The claude one',
+          rootFlavor: 'claude',
+        }),
+      )
+    })
+
+    it('serves detail for a skill that only exists under .agents', async () => {
+      await writeSkill(
+        path.join(tmpHome, '.agents', 'skills'),
+        'agents-only',
+        ['---', 'description: Only in agents', '---', '', '# Body'].join('\n'),
+      )
+
+      const { req, url, segments } = makeRequest(
+        '/api/skills/detail?source=user&name=agents-only',
+      )
+      const res = await handleSkillsApi(req, url, segments)
+
+      expect(res.status).toBe(200)
+      const body = await res.json() as {
+        detail: { meta: { name: string; rootFlavor?: string }; skillRoot: string }
+      }
+      expect(body.detail.meta.name).toBe('agents-only')
+      expect(body.detail.skillRoot).toBe(
+        path.join(tmpHome, '.agents', 'skills', 'agents-only'),
+      )
+      // Detail must report the same flavor the listing does, or the badge
+      // flickers when the user opens a skill.
+      expect(body.detail.meta.rootFlavor).toBe('agents')
+    })
+
+    it('reports the claude flavor in detail for a .claude skill', async () => {
+      await writeSkill(
+        path.join(tmpHome, '.claude', 'skills'),
+        'native-only',
+        ['---', 'description: Native', '---', '', '# Body'].join('\n'),
+      )
+
+      const { req, url, segments } = makeRequest(
+        '/api/skills/detail?source=user&name=native-only',
+      )
+      const res = await handleSkillsApi(req, url, segments)
+      const body = await res.json() as {
+        detail: { meta: { rootFlavor?: string } }
+      }
+
+      expect(body.detail.meta.rootFlavor).toBe('claude')
+    })
+
+    it('ignores .agents when the feature is switched off', async () => {
+      process.env.CLAUDE_CODE_DISABLE_AGENT_SKILLS_DIR = '1'
+      try {
+        await writeSkill(
+          path.join(tmpHome, '.agents', 'skills'),
+          'agents-only',
+          ['---', 'description: Only in agents', '---', '', '# Body'].join('\n'),
+        )
+
+        const { req, url, segments } = makeRequest('/api/skills')
+        const res = await handleSkillsApi(req, url, segments)
+        const body = await res.json() as { skills: Array<{ name: string }> }
+
+        expect(body.skills.map((s) => s.name)).not.toContain('agents-only')
+      } finally {
+        delete process.env.CLAUDE_CODE_DISABLE_AGENT_SKILLS_DIR
+      }
+    })
+  })
+
+  /**
+   * The slash command list feeds the desktop composer menu, so it has to agree
+   * with the CLI on which file a name resolves to — otherwise the menu
+   * describes one skill and running it executes another.
+   *
+   * See the matching cases in
+   * src/skills/__tests__/agentSkillsDiscovery.test.ts.
+   */
+  describe('slash command name collisions', () => {
+    async function repoWith(
+      skills: Array<{ root: string; marker: string }>,
+    ): Promise<string> {
+      const repo = path.join(tmpHome, 'workspace')
+      await fs.mkdir(path.join(repo, '.git'), { recursive: true })
+      for (const { root, marker } of skills) {
+        await writeSkill(
+          root.replace('<repo>', repo),
+          'deploy',
+          ['---', `description: ${marker}`, '---', '', '# Deploy'].join('\n'),
+        )
+      }
+      return repo
+    }
+
+    it('prefers a project .claude skill over a user .agents skill', async () => {
+      const repo = await repoWith([
+        { root: path.join(tmpHome, '.agents', 'skills'), marker: 'User agents' },
+        { root: path.join('<repo>', '.claude', 'skills'), marker: 'Project claude' },
+      ])
+
+      const commands = await listSkillSlashCommands(repo)
+      const matches = commands.filter((c) => c.name === 'deploy')
+
+      expect(matches).toHaveLength(1)
+      expect(matches[0]!.description).toBe('Project claude')
+    })
+
+    it('prefers a user .claude skill over a project .agents skill', async () => {
+      const repo = await repoWith([
+        { root: path.join(tmpHome, '.claude', 'skills'), marker: 'User claude' },
+        { root: path.join('<repo>', '.agents', 'skills'), marker: 'Project agents' },
+      ])
+
+      const commands = await listSkillSlashCommands(repo)
+      const matches = commands.filter((c) => c.name === 'deploy')
+
+      expect(matches).toHaveLength(1)
+      expect(matches[0]!.description).toBe('User claude')
+    })
+
+    it('keeps the user copy when both scopes use .claude', async () => {
+      const repo = await repoWith([
+        { root: path.join(tmpHome, '.claude', 'skills'), marker: 'User claude' },
+        { root: path.join('<repo>', '.claude', 'skills'), marker: 'Project claude' },
+      ])
+
+      const commands = await listSkillSlashCommands(repo)
+      const matches = commands.filter((c) => c.name === 'deploy')
+
+      expect(matches).toHaveLength(1)
+      expect(matches[0]!.description).toBe('User claude')
+    })
+
+    it('lists no duplicate names at all', async () => {
+      const repo = await repoWith([
+        { root: path.join(tmpHome, '.claude', 'skills'), marker: 'User claude' },
+        { root: path.join(tmpHome, '.agents', 'skills'), marker: 'User agents' },
+        { root: path.join('<repo>', '.claude', 'skills'), marker: 'Repo claude' },
+        { root: path.join('<repo>', '.agents', 'skills'), marker: 'Repo agents' },
+      ])
+
+      const names = (await listSkillSlashCommands(repo)).map((c) => c.name)
+
+      expect(names.filter((n) => n === 'deploy')).toHaveLength(1)
+      expect(new Set(names).size).toBe(names.length)
+    })
   })
 })

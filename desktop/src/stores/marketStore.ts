@@ -54,6 +54,13 @@ type MarketStore = {
   isLoading: boolean
   isLoadingMore: boolean
   error: string | null
+  /**
+   * Kept apart from `error`: the list is scrolled by an observer now, so a
+   * failed page must not blank the catalogue behind a full-region error, and
+   * must not leave the observer re-firing into the same failure forever. The
+   * next page is only retried when the user asks for it.
+   */
+  loadMoreError: string | null
 
   selectedId: string | null
   detail: NormalizedSkillDetail | null
@@ -82,6 +89,7 @@ type MarketStore = {
 
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
 let listRequestSeq = 0
+let detailRequestSeq = 0
 
 function fileCacheKey(id: string, path: string): string {
   return `${id}:${path}`
@@ -89,7 +97,13 @@ function fileCacheKey(id: string, path: string): string {
 
 /** Replace an item in place (list + detail) after install/uninstall state changes. */
 function mergeSkillUpdate(state: MarketStore, updated: NormalizedSkill): Partial<MarketStore> {
-  const items = state.items.map((item) => (item.id === updated.id ? { ...item, ...updated } : item))
+  const items = state.items
+    .map((item) => (item.id === updated.id ? { ...item, ...updated } : item))
+    .filter((item) => {
+      if (state.filters.installed === 'installed') return item.installState === 'installed'
+      if (state.filters.installed === 'installable') return item.installState !== 'installed'
+      return true
+    })
   const patch: Partial<MarketStore> = { items }
   if (state.detail && state.detail.id === updated.id) {
     const detail = {
@@ -127,6 +141,7 @@ export const useMarketStore = create<MarketStore>((set, get) => ({
   isLoading: false,
   isLoadingMore: false,
   error: null,
+  loadMoreError: null,
 
   selectedId: null,
   detail: null,
@@ -143,7 +158,13 @@ export const useMarketStore = create<MarketStore>((set, get) => ({
   fetchList: async ({ reset = true } = {}) => {
     const seq = ++listRequestSeq
     const { query, filters } = get()
-    set({ isLoading: true, error: null, ...(reset ? { items: [], nextCursor: null } : {}) })
+    set({
+      isLoading: true,
+      isLoadingMore: false,
+      error: null,
+      loadMoreError: null,
+      ...(reset ? { items: [], nextCursor: null } : {}),
+    })
     try {
       const result = await marketApi.list({
         q: query.trim() || undefined,
@@ -166,10 +187,10 @@ export const useMarketStore = create<MarketStore>((set, get) => ({
   },
 
   loadMore: async () => {
-    const { nextCursor, isLoadingMore, isLoading, query, filters, items } = get()
+    const { nextCursor, isLoadingMore, isLoading, query, filters } = get()
     if (!nextCursor || isLoadingMore || isLoading) return
     const seq = listRequestSeq
-    set({ isLoadingMore: true })
+    set({ isLoadingMore: true, loadMoreError: null })
     try {
       const result = await marketApi.list({
         q: query.trim() || undefined,
@@ -180,17 +201,19 @@ export const useMarketStore = create<MarketStore>((set, get) => ({
         limit: PAGE_SIZE,
       })
       if (seq !== listRequestSeq) return
-      const seen = new Set(items.map((i) => i.id))
+      const currentItems = get().items
+      const seen = new Set(currentItems.map((i) => i.id))
       const appended = result.items.filter((i) => !seen.has(i.id))
       set({
-        items: [...items, ...appended],
+        items: [...currentItems, ...appended],
         nextCursor: result.nextCursor,
         sources: result.sources,
         isLoadingMore: false,
+        loadMoreError: null,
       })
     } catch (err) {
       if (seq !== listRequestSeq) return
-      set({ error: err instanceof Error ? err.message : String(err), isLoadingMore: false })
+      set({ loadMoreError: err instanceof Error ? err.message : String(err), isLoadingMore: false })
     }
   },
 
@@ -220,17 +243,18 @@ export const useMarketStore = create<MarketStore>((set, get) => ({
   },
 
   refreshDetail: async (id) => {
+    const seq = ++detailRequestSeq
     const [source, ...slugParts] = id.split(':')
     const slug = slugParts.join(':')
     set({ isDetailLoading: get().detail?.id !== id, detailError: null })
     try {
       const { skill } = await marketApi.detail(source as MarketSource, slug)
-      if (get().selectedId !== id) return
+      if (seq !== detailRequestSeq || get().selectedId !== id) return
       const cache = new Map(get().detailCache)
       cache.set(id, skill)
       set({ detail: skill, detailCache: cache, isDetailLoading: false, detailError: null })
     } catch (err) {
-      if (get().selectedId !== id) return
+      if (seq !== detailRequestSeq || get().selectedId !== id) return
       set({
         detailError: err instanceof Error ? err.message : String(err),
         isDetailLoading: false,
@@ -308,6 +332,7 @@ export const useMarketStore = create<MarketStore>((set, get) => ({
   },
 
   backToList: () => {
+    detailRequestSeq += 1
     set({ selectedId: null, detail: null, detailError: null, activeFilePath: null, installError: null })
   },
 }))

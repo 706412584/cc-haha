@@ -32,8 +32,8 @@ export function SessionOverview({
     .filter((child): child is TraceSpan => !!child && child.isLifecycleNoise !== true)
 
   return (
-    <div className="px-4 py-3" data-testid="trace-overview">
-      <div className="grid grid-cols-2 gap-x-6 gap-y-3 md:grid-cols-3">
+    <div className="px-6 py-5" data-testid="trace-overview">
+      <div className="grid grid-cols-2 gap-x-6 gap-y-4 md:grid-cols-3">
         <Stat label={t('trace.llmCalls')} value={String(stats.llmCalls)} />
         <Stat label={t('trace.toolCalls')} value={String(stats.toolCalls)} />
         <Stat label={t('trace.errors')} value={String(stats.errors)} tone={stats.errors > 0 ? 'danger' : 'default'} />
@@ -48,24 +48,24 @@ export function SessionOverview({
       </div>
 
       {children.length > 0 ? (
-        <div className="mt-4">
-          <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+        <div className="mt-6">
+          <div className="mb-1.5 font-mono text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
             {t('trace.childSpans')}
           </div>
-          <div className="divide-y divide-[var(--color-border)]/60">
+          <div className="divide-y divide-[var(--color-border)]">
             {children.map((child) => (
               <button
                 key={child.id}
                 type="button"
                 onClick={() => onSelect(child.id)}
-                className="flex h-[34px] w-full items-center gap-2 text-left transition-colors hover:bg-[var(--color-surface-container-low)]"
+                className="flex h-[34px] w-full items-center gap-2 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
               >
                 <TypeIcon span={child} />
-                <span className="min-w-0 flex-1 truncate text-xs font-semibold text-[var(--color-text-secondary)]">
+                <span className="min-w-0 flex-1 truncate text-[13.5px] font-semibold text-[var(--color-text-secondary)]">
                   {spanDisplayTitle(child, t)}
                 </span>
                 {child.durationMs !== undefined ? (
-                  <span className="shrink-0 font-mono text-[10px] text-[var(--color-text-tertiary)]">
+                  <span className="shrink-0 font-mono text-[12px] text-[var(--color-text-tertiary)]">
                     {formatDurationMs(child.durationMs)}
                   </span>
                 ) : null}
@@ -82,8 +82,8 @@ export function SessionOverview({
 function Stat({ label, value, tone = 'default' }: { label: string; value: string; tone?: 'default' | 'danger' }) {
   return (
     <div className="min-w-0">
-      <div className="text-[10px] font-medium uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">{label}</div>
-      <div className={`mt-0.5 truncate font-mono text-xs ${tone === 'danger' ? 'text-[var(--color-error)]' : 'text-[var(--color-text-primary)]'}`}>
+      <div className="text-[11px] font-medium uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]">{label}</div>
+      <div className={`mt-1 truncate font-mono text-[15px] font-semibold ${tone === 'danger' ? 'text-[var(--color-error)]' : 'text-[var(--color-text-primary)]'}`}>
         {value}
       </div>
     </div>

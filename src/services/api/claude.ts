@@ -93,6 +93,7 @@ import {
   getSmallFastModel,
   isNonCustomOpusModel,
 } from "../../utils/model/model.js";
+import { disableKeepAlive } from "../../utils/proxy.js";
 import {
   asSystemPrompt,
   type SystemPrompt,
@@ -282,6 +283,7 @@ import {
   isRetryableStreamError,
   RetriableStreamError,
   type RetryContext,
+  shouldRetryStreamAfterTransportDisconnect,
   withRetry,
 } from "./withRetry.js";
 
@@ -2956,9 +2958,44 @@ async function* queryModel(
         throw new RetriableStreamError(streamingError, streamRequestId ?? undefined);
       }
 
-      // When the flag is enabled, skip the non-streaming fallback. A fully empty
-      // stream is still safe to retry as streaming because no output or tool
-      // boundary has been crossed.
+      // The socket under the stream died mid-response (stale pooled keep-alive
+      // connection, proxy/NAT dropping a reused one, upstream edge reset). It
+      // arrives as a bare transport error inside the SSE body, so withRetry
+      // (stream creation only) and isRetryableStreamError (SSE error payloads)
+      // both miss it, and with the non-streaming fallback disabled the turn
+      // would die on a fault a plain re-send clears. Recover on the same
+      // side-effect boundary the watchdog retry uses.
+      if (
+        shouldRetryStreamAfterTransportDisconnect({
+          error: streamingError,
+          hasCrossedSideEffectBoundary:
+            streamWatchdogState.snapshot().serverToolUseStarted ||
+            assistantCommitBuffer.hasCrossedSideEffectBoundary(),
+          streamIdleAborted,
+          signalAborted: signal.aborted,
+        })
+      ) {
+        // Nothing arrived at all, so the connection was already dead when the
+        // request went out — the pool is serving closed sockets. Stop reusing
+        // it so the retry opens a fresh one. A disconnect after message_start
+        // is a live connection that broke later; that pool stays trusted.
+        if (partialMessage === undefined) {
+          disableKeepAlive();
+        }
+        logForDebugging(
+          `Mid-stream transport disconnect before any tool output, will retry stream: ${errorMessage(
+            streamingError,
+          )}`,
+          { level: "warn" },
+        );
+        throw new RetriableStreamError(streamingError);
+      }
+
+      // When the flag is enabled, skip the non-streaming fallback and let the
+      // error propagate to withRetry. The mid-stream fallback causes double tool
+      // execution when streaming tool execution is active: the partial stream
+      // starts a tool, then the non-streaming retry produces the same tool_use
+      // and runs it again. See inc-4258.
       const disableFallback =
         isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK) ||
         getFeatureValue_CACHED_MAY_BE_STALE(

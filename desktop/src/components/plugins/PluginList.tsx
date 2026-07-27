@@ -4,9 +4,14 @@ import { useSessionStore } from '../../stores/sessionStore'
 import { useTranslation } from '../../i18n'
 import type { TranslationKey } from '../../i18n'
 import { useUIStore } from '../../stores/uiStore'
-import { Button } from '../shared/Button'
-import { ConfirmDialog } from '../shared/ConfirmDialog'
-import { ToggleSwitch } from '../shared/ToggleSwitch'
+import { Badge } from '@/components/ui/Badge'
+import { Button } from '@/components/ui/Button'
+import { Card } from '@/components/ui/Card'
+import { Checkbox } from '@/components/ui/Checkbox'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { ErrorState } from '@/components/ui/ErrorState'
+import { LoadingState } from '@/components/ui/LoadingState'
+import { ToggleSwitch } from '@/components/ui/ToggleSwitch'
 import type {
   CatalogPlugin,
   KnownLanguageServerRow,
@@ -17,7 +22,6 @@ import { pluginsApi } from '../../api/plugins'
 import { PluginPrerequisitesModal } from './PluginPrerequisitesModal'
 import { detectPlatform } from '../../lib/detectPlatform'
 import { injectInstallScriptIntoNewTerminal } from '../../lib/terminalCommandInjection'
-
 type PluginBucket = 'attention' | 'enabled' | 'disabled'
 type BatchAction = 'enable' | 'disable'
 
@@ -389,25 +393,22 @@ export function PluginList() {
   }
 
   if (isLoading) {
-    return (
-      <div className="flex justify-center py-12">
-        <div className="animate-spin w-5 h-5 border-2 border-[var(--color-brand)] border-t-transparent rounded-full" />
-      </div>
-    )
+    return <LoadingState label={t('common.loading')} labelHidden />
   }
 
   if (error) {
-    return <div className="text-sm text-[var(--color-error)] py-4">{error}</div>
+    // Was a bare red line of text with no role, so a screen reader only found
+    // the failure by walking into it.
+    return <ErrorState title={error} />
   }
 
   // Empty installed list is no longer an early return — we still show the
   // Recommended section and URL install form below so first-run users have a
   // path forward without dropping to the CLI.
   const showInstalledEmptyState = plugins.length === 0
-
   return (
     <div className="flex flex-col gap-6 min-w-0">
-      <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] overflow-hidden">
+      <section className="rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] shadow-[var(--shadow-card)] overflow-hidden">
         <div className="flex flex-col gap-4 px-5 py-5 min-w-0">
           <div className="flex flex-col gap-4 min-w-0 xl:flex-row xl:items-start xl:justify-between">
             <div className="min-w-0 max-w-4xl">
@@ -418,7 +419,10 @@ export function PluginList() {
                 <span className="material-symbols-outlined text-[22px] text-[var(--color-brand)]">
                   extension
                 </span>
-                <h3 className="text-lg font-semibold text-[var(--color-text-primary)]">
+                <h3
+                  className="text-[21px] font-semibold leading-tight text-[var(--color-text-primary)]"
+                  style={{ fontFamily: 'var(--font-headline)' }}
+                >
                   {t('settings.plugins.browserTitle')}
                 </h3>
               </div>
@@ -428,22 +432,25 @@ export function PluginList() {
             </div>
 
             <div className="flex flex-wrap gap-2 xl:justify-end">
+              {/* `size="sm"` plus `min-h-9` was two heights fighting; `md` is
+                  h-9 outright. The material icon also moves into `icon`, so
+                  `loading` swaps it for the spinner instead of rendering both. */}
               <Button
                 variant="secondary"
-                size="sm"
-                className="min-h-9 flex-1 sm:flex-none"
+                size="md"
+                className="flex-1 sm:flex-none"
+                icon={<span className="material-symbols-outlined text-[16px]" aria-hidden="true">refresh</span>}
                 onClick={() => void fetchPlugins(currentWorkDir)}
               >
-                <span className="material-symbols-outlined text-[16px]">refresh</span>
                 {t('settings.plugins.refresh')}
               </Button>
               <Button
-                size="sm"
-                className="min-h-9 flex-1 sm:flex-none"
+                size="md"
+                className="flex-1 sm:flex-none"
+                icon={<span className="material-symbols-outlined text-[16px]" aria-hidden="true">sync</span>}
                 onClick={handleReload}
                 loading={isApplying}
               >
-                <span className="material-symbols-outlined text-[16px]">sync</span>
                 {t('settings.plugins.apply')}
               </Button>
             </div>
@@ -492,31 +499,27 @@ export function PluginList() {
               {t('settings.plugins.selectionCount', { count: String(selectedPlugins.length) })}
             </span>
             {selectedPlugins.length > 0 && (
-              <button
-                type="button"
-                onClick={clearSelection}
-                className="rounded-md px-2 py-1 text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]"
-              >
+              <Button variant="ghost" size="sm" onClick={clearSelection}>
                 {t('settings.plugins.clearSelection')}
-              </button>
+              </Button>
             )}
           </div>
           <div className="flex flex-wrap gap-2 sm:justify-end">
             <Button
-              size="sm"
+              size="base"
+              icon={<span className="material-symbols-outlined text-[16px]" aria-hidden="true">toggle_on</span>}
               disabled={enableCandidates.length === 0 || isApplying}
               onClick={() => setConfirmBatchAction('enable')}
             >
-              <span className="material-symbols-outlined text-[16px]" aria-hidden="true">toggle_on</span>
               {t('settings.plugins.enableSelected')}
             </Button>
             <Button
               variant="secondary"
-              size="sm"
+              size="base"
+              icon={<span className="material-symbols-outlined text-[16px]" aria-hidden="true">toggle_off</span>}
               disabled={disableCandidates.length === 0 || isApplying}
               onClick={() => setConfirmBatchAction('disable')}
             >
-              <span className="material-symbols-outlined text-[16px]" aria-hidden="true">toggle_off</span>
               {t('settings.plugins.disableSelected')}
             </Button>
           </div>
@@ -546,9 +549,12 @@ export function PluginList() {
       />
 
       {marketplaces.length > 0 && (
-        <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
+        <section className="rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface)] shadow-[var(--shadow-card)] overflow-hidden">
           <div className="px-5 py-4 border-b border-[var(--color-border)] bg-[var(--color-surface-container-low)]">
-            <h4 className="text-sm font-semibold text-[var(--color-text-primary)]">
+            <h4
+              className="text-[16.5px] font-semibold leading-tight text-[var(--color-text-primary)]"
+              style={{ fontFamily: 'var(--font-headline)' }}
+            >
               {t('settings.plugins.marketplacesTitle')}
             </h4>
             <p className="text-xs text-[var(--color-text-tertiary)] mt-1">
@@ -559,21 +565,17 @@ export function PluginList() {
             {marketplaces.map((marketplace) => (
               <div
                 key={marketplace.name}
-                className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3"
+                className="rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3"
               >
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-semibold text-[var(--color-text-primary)]">
                     {marketplace.name}
                   </span>
-                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
-                    marketplace.autoUpdate
-                      ? 'bg-[var(--color-success-container)] text-[var(--color-success)]'
-                      : 'bg-[var(--color-surface-container-high)] text-[var(--color-text-tertiary)]'
-                  }`}>
+                  <Badge tone={marketplace.autoUpdate ? 'success' : 'neutral'}>
                     {marketplace.autoUpdate
                       ? t('settings.plugins.marketplaceAutoUpdateOn')
                       : t('settings.plugins.marketplaceAutoUpdateOff')}
-                  </span>
+                  </Badge>
                 </div>
                 <div className="mt-2 text-xs leading-5 text-[var(--color-text-secondary)] break-words">
                   {marketplace.source}
@@ -722,18 +724,21 @@ function renderGroup(
   return (
     <section
       key={bucket}
-      className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden"
+      className="rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface)] shadow-[var(--shadow-card)] overflow-hidden"
     >
       <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-[var(--color-border)] bg-[var(--color-surface-container-low)]">
         <div className="min-w-0">
-          <h4 className="text-sm font-semibold text-[var(--color-text-primary)]">
+          <h4
+            className="text-[16.5px] font-semibold leading-tight text-[var(--color-text-primary)]"
+            style={{ fontFamily: 'var(--font-headline)' }}
+          >
             {t(titleKey)}
           </h4>
           <p className="text-xs leading-5 text-[var(--color-text-tertiary)] mt-1">
             {t('settings.plugins.groupHint', { count: String(items.length) })}
           </p>
         </div>
-        <span className="text-xs text-[var(--color-text-tertiary)]">{items.length}</span>
+        <span className="font-mono text-xs tabular-nums text-[var(--color-text-tertiary)]">{items.length}</span>
       </div>
       <div className="flex flex-col p-2">
         {items.map((plugin) => {
@@ -741,74 +746,65 @@ function renderGroup(
           const isToggling = pendingActionKey === `${plugin.id}:toggle`
           const isUninstalling = pendingActionKey === `${plugin.id}:uninstall`
           return (
-            <div
-              key={plugin.id}
-              className={`group rounded-xl border px-3 py-3 transition-all hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)] ${
-                selectedPluginIds.has(plugin.id)
-                  ? 'border-[var(--color-brand)]/45 bg-[var(--color-surface-selected)]'
-                  : 'border-transparent'
-              }`}
-            >
-              <div className="flex items-start gap-3">
-                {canMutate ? (
-                  <label className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-container-high)]">
-                    <input
-                      type="checkbox"
-                      aria-label={t('settings.plugins.selectPlugin', { name: plugin.name })}
-                      checked={selectedPluginIds.has(plugin.id)}
-                      onChange={(event) => onToggleSelection(plugin.id, event.currentTarget.checked)}
-                      className="h-4 w-4 rounded border-[var(--color-border)] accent-[var(--color-brand)]"
-                    />
-                  </label>
-                ) : (
-                  <span className="mt-0.5 h-6 w-6 shrink-0" aria-hidden="true" />
-                )}
-                <button
-                  type="button"
-                  onClick={() => void fetchPluginDetail(plugin.id, cwd)}
-                  className="flex flex-1 min-w-0 items-start gap-3 rounded-lg text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-surface)]"
-                >
-                  <span className="mt-0.5 material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)]">
-                    {plugin.hasErrors ? 'warning' : plugin.enabled ? 'extension' : 'extension_off'}
-                  </span>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-sm font-semibold text-[var(--color-text-primary)] break-all">
-                        {plugin.name}
-                      </span>
-                      <StatusPill plugin={plugin} />
-                      <ScopePill scope={plugin.scope} />
-                      {plugin.version && (
-                        <span className="rounded-full bg-[var(--color-surface-container-high)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-text-tertiary)]">
-                          v{plugin.version}
-                        </span>
-                      )}
-                    </div>
-                    <p className="mt-1 text-xs leading-5 text-[var(--color-text-secondary)] break-words">
-                      {plugin.description || t('settings.plugins.noDescription')}
-                    </p>
-                    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[var(--color-text-tertiary)]">
-                      <span>{plugin.marketplace}</span>
-                      {plugin.componentCounts.skills > 0 && (
-                        <span>{t('settings.plugins.capability.skills', { count: String(plugin.componentCounts.skills) })}</span>
-                      )}
-                      {plugin.componentCounts.agents > 0 && (
-                        <span>{t('settings.plugins.capability.agents', { count: String(plugin.componentCounts.agents) })}</span>
-                      )}
-                      {plugin.componentCounts.mcpServers > 0 && (
-                        <span>{t('settings.plugins.capability.mcpServers', { count: String(plugin.componentCounts.mcpServers) })}</span>
-                      )}
-                      {plugin.componentCounts.lspServers > 0 && (
-                        <span>{t('settings.plugins.capability.lspServers', { count: String(plugin.componentCounts.lspServers) })}</span>
-                      )}
-                      {plugin.errors.length > 0 && (
-                        <span className="text-[var(--color-error)]">
-                          {t('settings.plugins.errorCount', { count: String(plugin.errors.length) })}
-                        </span>
-                      )}
-                    </div>
+          <div
+            key={plugin.id}
+            className={`group rounded-[var(--radius-lg)] border px-3 py-3 transition-[background-color,border-color] duration-150 ease-out hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)] ${
+              selectedPluginIds.has(plugin.id)
+                ? 'border-[var(--color-primary-fixed-dim)] bg-[var(--color-surface-selected)]'
+                : 'border-transparent'
+            }`}
+          >
+            <div className="flex items-start gap-3">
+              {canMutatePlugin(plugin) ? (
+                <Checkbox
+                  label={t('settings.plugins.selectPlugin', { name: plugin.name })}
+                  labelHidden
+                  checked={selectedPluginIds.has(plugin.id)}
+                  onChange={(event) => onToggleSelection(plugin.id, event.currentTarget.checked)}
+                  containerClassName="h-6 w-6 shrink-0"
+                />
+              ) : (
+                <span className="mt-0.5 h-6 w-6 shrink-0" aria-hidden="true" />
+              )}
+              <button
+                type="button"
+                onClick={() => void fetchPluginDetail(plugin.id, cwd)}
+                className="flex min-w-0 flex-1 items-start gap-3 rounded-[var(--radius-lg)] text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-surface)]"
+              >
+                <span className="mt-0.5 material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)]">
+                  {plugin.hasErrors ? 'warning' : plugin.enabled ? 'extension' : 'extension_off'}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-sm font-semibold text-[var(--color-text-primary)] break-all">
+                      {plugin.name}
+                    </span>
+                    <StatusPill plugin={plugin} />
+                    <ScopePill scope={plugin.scope} />
+                    {plugin.version && <Badge mono>v{plugin.version}</Badge>}
                   </div>
-                </button>
+                  <p className="mt-1 text-xs leading-5 text-[var(--color-text-secondary)] break-words">
+                    {plugin.description || t('settings.plugins.noDescription')}
+                  </p>
+                  <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[var(--color-text-tertiary)]">
+                    <span>{plugin.marketplace}</span>
+                    {plugin.componentCounts.skills > 0 && (
+                      <span>{t('settings.plugins.capability.skills', { count: String(plugin.componentCounts.skills) })}</span>
+                    )}
+                    {plugin.componentCounts.agents > 0 && (
+                      <span>{t('settings.plugins.capability.agents', { count: String(plugin.componentCounts.agents) })}</span>
+                    )}
+                    {plugin.componentCounts.mcpServers > 0 && (
+                      <span>{t('settings.plugins.capability.mcpServers', { count: String(plugin.componentCounts.mcpServers) })}</span>
+                    )}
+                    {plugin.errors.length > 0 && (
+                      <span className="text-[var(--color-error)]">
+                        {t('settings.plugins.errorCount', { count: String(plugin.errors.length) })}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </button>
 
                 <div className="flex flex-shrink-0 items-center gap-2 pt-0.5">
                   {canMutate ? (
@@ -862,17 +858,20 @@ function SummaryCard({
   icon: string
 }) {
   return (
-    <div className="min-w-0 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-3">
+    <Card radius="lg" padding="sm" className="min-w-0">
       <div className="flex min-w-0 items-center gap-1.5 text-[11px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
         <span className="material-symbols-outlined text-[14px] flex-shrink-0">{icon}</span>
         <span className="min-w-0 truncate text-[10px] leading-4">
           {label}
         </span>
       </div>
-      <div className="mt-1.5 truncate text-lg font-semibold text-[var(--color-text-primary)]">
+      <div
+        className="mt-1.5 truncate text-[21px] font-semibold leading-none text-[var(--color-text-primary)]"
+        style={{ fontFamily: 'var(--font-headline)' }}
+      >
         {value}
       </div>
-    </div>
+    </Card>
   )
 }
 
@@ -880,33 +879,21 @@ function StatusPill({ plugin }: { plugin: PluginSummary }) {
   const t = useTranslation()
 
   if (plugin.hasErrors) {
-    return (
-      <span className="rounded-full bg-[var(--color-error)]/12 px-2 py-0.5 text-[10px] font-medium text-[var(--color-error)]">
-        {t('settings.plugins.status.attention')}
-      </span>
-    )
+    return <Badge tone="danger">{t('settings.plugins.status.attention')}</Badge>
   }
 
   return (
-    <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
-      plugin.enabled
-        ? 'bg-[var(--color-success-container)] text-[var(--color-success)]'
-        : 'bg-[var(--color-surface-container-high)] text-[var(--color-text-tertiary)]'
-    }`}>
+    <Badge tone={plugin.enabled ? 'success' : 'neutral'}>
       {plugin.enabled
         ? t('settings.plugins.status.enabled')
         : t('settings.plugins.status.disabled')}
-    </span>
+    </Badge>
   )
 }
 
 function ScopePill({ scope }: { scope: PluginSummary['scope'] }) {
   const t = useTranslation()
-  return (
-    <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-text-tertiary)]">
-      {t(`settings.plugins.scope.${scope}`)}
-    </span>
-  )
+  return <Badge variant="outline">{t(`settings.plugins.scope.${scope}`)}</Badge>
 }
 
 function LanguageServersSection({

@@ -17,10 +17,17 @@ import {
   ConversationStartupError,
   MAX_CAPTURED_SDK_MESSAGE_BYTES,
   MAX_CAPTURED_SDK_TOTAL_BYTES,
+  buildDenyMessage,
   conversationService,
 } from '../services/conversationService.js'
 import { getSoloPipelineSystemPrompt } from '../../coordinator/soloPipelinePrompt.js'
 import { ORCHESTRATION_PROMPT_MARKER, ORCHESTRATION_SYSTEM_PROMPT, ORCHESTRATION_PROPAGATE_RULES_MARKER } from '../orchestrationPrompt.js'
+import {
+  PLAN_REJECTION_MESSAGE,
+  PLAN_REJECTION_WITH_REASON_PREFIX,
+  REJECT_MESSAGE,
+  REJECT_MESSAGE_WITH_REASON_PREFIX,
+} from '../../constants/messages.js'
 import { SessionService, sessionService } from '../services/sessionService.js'
 import { ProviderService } from '../services/providerService.js'
 import { diagnosticsService } from '../services/diagnosticsService.js'
@@ -453,14 +460,89 @@ describe('ConversationService', () => {
       response: {
         response: {
           behavior: 'deny',
-          message: 'Add rollback steps before implementation.',
+          message: `${PLAN_REJECTION_WITH_REASON_PREFIX}Add rollback steps before implementation.`,
         },
       },
     })
     expect((sent[0] as any).response.response.interrupt).toBeUndefined()
+    // Bare feedback left the model without the "this was a plan rejection, keep
+    // planning" framing — it reads "add rollback steps" as a go-ahead.
+    expect((sent[0] as any).response.response.message).toContain(
+      'stay in plan mode',
+    )
   })
 
-  it('should interrupt the active turn when desktop denies a tool permission', () => {
+  it('should tell the model to keep planning when a plan is rejected without feedback', () => {
+    const svc = new ConversationService()
+    const sent: unknown[] = []
+
+    ;(svc as any).sessions.set('session-1', {
+      proc: null,
+      outputCallbacks: [],
+      workDir: process.cwd(),
+      sdkToken: 'token',
+      sdkSocket: {
+        send(data: string) {
+          sent.push(JSON.parse(data))
+        },
+      },
+      pendingOutbound: [],
+      stderrLines: [],
+      sdkMessages: [],
+      pendingPermissionRequests: new Map([
+        ['req-1', {
+          toolName: 'ExitPlanMode',
+          input: { plan: '# Plan\n\nDo the thing.' },
+          permissionSuggestions: [],
+        }],
+      ]),
+    })
+
+    const result = svc.respondToPermission('session-1', 'req-1', false)
+
+    expect(result).toBe(true)
+    expect(sent[0]).toMatchObject({
+      type: 'control_response',
+      response: {
+        response: {
+          behavior: 'deny',
+          message: PLAN_REJECTION_MESSAGE,
+        },
+      },
+    })
+    expect((sent[0] as any).response.response.interrupt).toBeUndefined()
+    // 'User denied via UI' was a debug string; the model had no way to tell a
+    // plan rejection ("revise it") from a tool denial ("stop").
+    expect((sent[0] as any).response.response.message).not.toBe(
+      'User denied via UI',
+    )
+    // Rejecting a plan must never carry REJECT_MESSAGE's STOP instruction.
+    expect((sent[0] as any).response.response.message).not.toContain('STOP')
+  })
+
+  describe('buildDenyMessage', () => {
+    it('does not echo the plan back — both renderers read it from the tool input', () => {
+      const plan = '# Plan\n\nStep one.\nStep two.'
+      const message = buildDenyMessage('ExitPlanMode', undefined)
+
+      expect(message).not.toContain(plan)
+      expect(message).not.toContain('Rejected plan:')
+    })
+
+    it('treats whitespace-only feedback as no feedback', () => {
+      expect(buildDenyMessage('ExitPlanMode', '   ')).toBe(PLAN_REJECTION_MESSAGE)
+      expect(buildDenyMessage('Write', '  \n ')).toBe(REJECT_MESSAGE)
+    })
+
+    it('keeps plan and non-plan denials on opposite instructions', () => {
+      expect(buildDenyMessage('Write', undefined)).toContain('STOP what you are doing')
+      expect(buildDenyMessage('ExitPlanMode', undefined)).toContain(
+        'Do not start implementing',
+      )
+    })
+  })
+
+  it('should let the model finish the turn when desktop denies a tool permission', () => {
     const svc = new ConversationService()
     const sent: unknown[] = []
 
@@ -494,11 +576,64 @@ describe('ConversationService', () => {
       response: {
         response: {
           behavior: 'deny',
-          message: 'User denied via UI',
-          interrupt: true,
+          message: REJECT_MESSAGE,
         },
       },
     })
+    // Interrupting aborted the turn before the denial ever reached the model,
+    // so a rejected tool ended the turn with no closing reply (#1051).
+    expect((sent[0] as any).response.response.interrupt).toBeUndefined()
+    expect((sent[0] as any).response.response.message).not.toBe(
+      'User denied via UI',
+    )
+  })
+
+  it('should prefix desktop denial feedback for non-plan tools', () => {
+    const svc = new ConversationService()
+    const sent: unknown[] = []
+
+    ;(svc as any).sessions.set('session-1', {
+      proc: null,
+      outputCallbacks: [],
+      workDir: process.cwd(),
+      sdkToken: 'token',
+      sdkSocket: {
+        send(data: string) {
+          sent.push(JSON.parse(data))
+        },
+      },
+      pendingOutbound: [],
+      stderrLines: [],
+      sdkMessages: [],
+      pendingPermissionRequests: new Map([
+        ['req-1', {
+          toolName: 'Write',
+          input: { file_path: '/tmp/a.sh' },
+          permissionSuggestions: [],
+        }],
+      ]),
+    })
+
+    const result = svc.respondToPermission(
+      'session-1',
+      'req-1',
+      false,
+      undefined,
+      undefined,
+      'Write it under /tmp/scratch instead.',
+    )
+
+    expect(result).toBe(true)
+    expect(sent[0]).toMatchObject({
+      type: 'control_response',
+      response: {
+        response: {
+          behavior: 'deny',
+          message: `${REJECT_MESSAGE_WITH_REASON_PREFIX}Write it under /tmp/scratch instead.`,
+        },
+      },
+    })
+    expect((sent[0] as any).response.response.interrupt).toBeUndefined()
   })
 
   it('should resolve a permission mode request only after the CLI confirms the change', async () => {

@@ -19,9 +19,9 @@ export function InlineTaskSummary({ tasks }: { tasks: TaskSummaryItem[] }) {
   const total = tasks.length
 
   return (
-    <div className="mb-3 rounded-[var(--radius-lg)] border border-[var(--color-outline-variant)]/40 bg-[var(--color-surface-container-lowest)] overflow-hidden">
+    <div className="mb-3 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] overflow-hidden">
       <div className="flex items-center gap-3 px-4 py-2 bg-[var(--color-surface-container)]">
-        <div className="flex items-center justify-center w-5 h-5 rounded-[var(--radius-md)] bg-[var(--color-success)]/10">
+        <div className="flex items-center justify-center w-5 h-5 rounded-[var(--radius-md)] bg-[var(--color-success-container)]">
           <span className="material-symbols-outlined text-[13px] text-[var(--color-success)]" style={{ fontVariationSettings: "'FILL' 1" }}>
             task_alt
           </span>

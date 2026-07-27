@@ -1,13 +1,24 @@
 import { useState, useEffect } from 'react'
 import { getDesktopHost } from '../../lib/desktopHost'
 import type { DesktopHost } from '../../lib/desktopHost'
+import { useTranslation } from '../../i18n'
 
 const isWindows = typeof navigator !== 'undefined' && /Win/.test(navigator.platform)
 
 /** Whether to render custom window controls (Windows + desktop host only) */
 export const showWindowControls = isWindows && getDesktopHost().capabilities.windowControls
 
+/**
+ * These stay hand-rolled buttons rather than `IconButton`: they are OS chrome,
+ * so they must stay square, full-bleed to the titlebar edge and free of the
+ * radius/padding every in-app control carries. The focus ring is inset for the
+ * same reason — an offset ring would be clipped by the window edge.
+ */
+const WINDOW_CONTROL_CLASS =
+  'w-[46px] h-full flex items-center justify-center text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)]'
+
 export function WindowControls() {
+  const t = useTranslation()
   const [maximized, setMaximized] = useState(false)
   const [win, setWin] = useState<DesktopHost['window'] | null>(null)
 
@@ -52,8 +63,8 @@ export function WindowControls() {
       {/* Minimize */}
       <button
         onClick={() => runWindowAction(() => win.minimize())}
-        aria-label="Minimize window"
-        className="w-[46px] h-full flex items-center justify-center text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] transition-colors"
+        aria-label={t('windowControls.minimize')}
+        className={WINDOW_CONTROL_CLASS}
       >
         <svg width="10" height="1" viewBox="0 0 10 1">
           <rect width="10" height="1" fill="currentColor" />
@@ -63,8 +74,8 @@ export function WindowControls() {
       {/* Maximize / Restore */}
       <button
         onClick={() => runWindowAction(() => win.toggleMaximize())}
-        aria-label={maximized ? 'Restore window' : 'Maximize window'}
-        className="w-[46px] h-full flex items-center justify-center text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] transition-colors"
+        aria-label={t(maximized ? 'windowControls.restore' : 'windowControls.maximize')}
+        className={WINDOW_CONTROL_CLASS}
       >
         {maximized ? (
           <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1">
@@ -81,8 +92,8 @@ export function WindowControls() {
       {/* Close */}
       <button
         onClick={() => runWindowAction(() => win.close())}
-        aria-label="Close window"
-        className="w-[46px] h-full flex items-center justify-center text-[var(--color-text-secondary)] hover:bg-[var(--color-window-close-hover)] hover:text-white transition-colors"
+        aria-label={t('windowControls.close')}
+        className={`${WINDOW_CONTROL_CLASS} hover:bg-[var(--color-window-close-hover)] hover:text-[var(--color-on-error)]`}
       >
         <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2">
           <line x1="0" y1="0" x2="10" y2="10" />

@@ -245,6 +245,127 @@ describe('Plugins API', () => {
     ])
   })
 
+  it('validates mutation bodies and action-specific plugin scopes', async () => {
+    const nullUrl = new URL('http://localhost:3456/api/plugins/enable')
+    const nullResponse = await handlePluginsApi(
+      new Request(nullUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: 'null',
+      }),
+      nullUrl,
+      ['api', 'plugins', 'enable'],
+    )
+    expect(nullResponse.status).toBe(400)
+
+    const managed = makeRequest('POST', '/api/plugins/disable', {
+      id: 'demo@test',
+      scope: 'managed',
+    })
+    expect(
+      (await handlePluginsApi(managed.req, managed.url, managed.segments)).status,
+    ).toBe(400)
+
+    const invalidKeepData = makeRequest('POST', '/api/plugins/uninstall', {
+      id: 'demo@test',
+      scope: 'user',
+      keepData: 'yes',
+    })
+    expect(
+      (await handlePluginsApi(
+        invalidKeepData.req,
+        invalidKeepData.url,
+        invalidKeepData.segments,
+      )).status,
+    ).toBe(400)
+
+    const unknown = makeRequest('POST', '/api/plugins/enable', {
+      id: 'demo@test',
+      scope: 'user',
+      surprise: true,
+    })
+    expect(
+      (await handlePluginsApi(unknown.req, unknown.url, unknown.segments)).status,
+    ).toBe(400)
+  })
+
+  it('writes project-scoped plugin state to the explicit desktop project root', async () => {
+    const projectRoot = path.join(tmpDir, 'project-a')
+    await fs.mkdir(projectRoot, { recursive: true })
+
+    const enable = makeRequest('POST', '/api/plugins/enable', {
+      id: 'demo@test',
+      scope: 'project',
+      cwd: projectRoot,
+    })
+    const enableResponse = await handlePluginsApi(
+      enable.req,
+      enable.url,
+      enable.segments,
+    )
+    expect(enableResponse.status).toBe(200)
+
+    const settingsPath = path.join(projectRoot, '.claude', 'settings.json')
+    const enabledSettings = JSON.parse(await fs.readFile(settingsPath, 'utf-8')) as {
+      enabledPlugins: Record<string, boolean>
+    }
+    expect(enabledSettings.enabledPlugins['demo@test']).toBe(true)
+
+    const disable = makeRequest('POST', '/api/plugins/disable', {
+      id: 'demo@test',
+      scope: 'project',
+      cwd: projectRoot,
+    })
+    const disableResponse = await handlePluginsApi(
+      disable.req,
+      disable.url,
+      disable.segments,
+    )
+    expect(disableResponse.status).toBe(200)
+
+    const disabledSettings = JSON.parse(await fs.readFile(settingsPath, 'utf-8')) as {
+      enabledPlugins: Record<string, boolean>
+    }
+    expect(disabledSettings.enabledPlugins['demo@test']).toBe(false)
+
+    const relative = makeRequest('POST', '/api/plugins/enable', {
+      id: 'demo@test',
+      scope: 'project',
+      cwd: 'relative/project',
+    })
+    expect(
+      (await handlePluginsApi(relative.req, relative.url, relative.segments)).status,
+    ).toBe(400)
+  })
+
+  it('honors keepData when uninstalling through the desktop API', async () => {
+    const pluginId = 'demo@test'
+    const dataDir = await writeUninstallFixture(pluginId, 'keep')
+
+    const keep = makeRequest('POST', '/api/plugins/uninstall', {
+      id: pluginId,
+      scope: 'user',
+      keepData: true,
+    })
+    const keepResponse = await handlePluginsApi(keep.req, keep.url, keep.segments)
+    expect(keepResponse.status).toBe(200)
+    expect(await fs.readFile(path.join(dataDir, 'sentinel.txt'), 'utf-8')).toBe('keep')
+
+    const deleteDir = await writeUninstallFixture(pluginId, 'delete')
+    const remove = makeRequest('POST', '/api/plugins/uninstall', {
+      id: pluginId,
+      scope: 'user',
+      keepData: false,
+    })
+    const removeResponse = await handlePluginsApi(
+      remove.req,
+      remove.url,
+      remove.segments,
+    )
+    expect(removeResponse.status).toBe(200)
+    await expect(fs.access(deleteDir)).rejects.toThrow()
+  })
+
   it('refreshActivePlugins rereads settings after an external enable toggle', async () => {
     const marketplaceRoot = path.join(tmpDir, 'marketplace-root')
     const pluginRoot = path.join(marketplaceRoot, 'plugins', 'draw')
@@ -372,6 +493,42 @@ describe('Plugins API', () => {
       expect.objectContaining({ name: 'draw:paint' }),
     )
   })
+
+  async function writeUninstallFixture(pluginId: string, sentinel: string) {
+    const pluginsDir = path.join(tmpDir, 'plugins')
+    const installPath = path.join(pluginsDir, 'cache', 'test', 'demo', '1.0.0')
+    const dataDir = path.join(pluginsDir, 'data', 'demo-test')
+    await fs.mkdir(installPath, { recursive: true })
+    await fs.mkdir(dataDir, { recursive: true })
+    await fs.writeFile(path.join(dataDir, 'sentinel.txt'), sentinel, 'utf-8')
+    await fs.writeFile(
+      path.join(tmpDir, 'settings.json'),
+      JSON.stringify({ enabledPlugins: { [pluginId]: true } }),
+      'utf-8',
+    )
+    await fs.mkdir(pluginsDir, { recursive: true })
+    await fs.writeFile(
+      path.join(pluginsDir, 'installed_plugins.json'),
+      JSON.stringify({
+        version: 2,
+        plugins: {
+          [pluginId]: [
+            {
+              scope: 'user',
+              installPath,
+              version: '1.0.0',
+              installedAt: '2026-07-24T00:00:00.000Z',
+            },
+          ],
+        },
+      }),
+      'utf-8',
+    )
+    clearInstalledPluginsCache()
+    clearPluginCache('plugins-api-uninstall-fixture')
+    resetSettingsCache()
+    return dataDir
+  }
 })
 
 describe('Plugins catalog & install API', () => {

@@ -43,7 +43,7 @@ vi.mock('../../stores/tabStore', () => ({
   },
 }))
 
-vi.mock('../chat/clipboard', () => ({
+vi.mock('@/lib/clipboard', () => ({
   copyTextToClipboard: vi.fn().mockResolvedValue(true),
 }))
 

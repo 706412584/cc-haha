@@ -28,7 +28,7 @@ vi.mock('../../api/hahaOpenAIOAuth', () => ({
   },
 }))
 
-vi.mock('../chat/clipboard', () => ({
+vi.mock('@/lib/clipboard', () => ({
   copyTextToClipboard: copyTextToClipboardMock,
 }))
 

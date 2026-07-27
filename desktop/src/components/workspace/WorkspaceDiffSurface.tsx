@@ -11,6 +11,7 @@ import {
 } from 'react'
 import { CornerDownLeft, FileCode2, MessageSquare, Plus } from 'lucide-react'
 import { Highlight, type PrismTheme } from 'prism-react-renderer'
+import { Button } from '@/components/ui/Button'
 import { useTranslation } from '../../i18n'
 import {
   getCompatibleDiffRange,
@@ -542,14 +543,14 @@ export function WorkspaceDiffSurface({
   const renderEditor = () => review.selection && (
     <div
       data-diff-editor=""
-      className="sticky z-[2] my-1.5 min-w-[280px] max-w-3xl overflow-hidden rounded-[10px] bg-[var(--color-surface-container-low)] shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-text-primary)_9%,transparent)]"
+      className="sticky z-[var(--z-raised)] my-1.5 min-w-[280px] max-w-3xl overflow-hidden rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] shadow-[var(--shadow-card)]"
       style={{
         left: 'var(--workspace-diff-gutter-width)',
         width: 'min(48rem, calc(100cqi - var(--workspace-diff-gutter-width) - 0.75rem))',
       }}
     >
       <div className="flex min-h-10 items-center gap-2 px-3 pt-2.5">
-        <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[6px] bg-[var(--color-surface-container)] text-[var(--color-text-secondary)]">
+        <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[var(--radius-sm)] bg-[var(--color-surface-container)] text-[var(--color-text-secondary)]">
           <MessageSquare aria-hidden="true" size={14} />
         </span>
         <div className="text-[12px] font-semibold text-[var(--color-text-primary)]">{t('workspace.localComment')}</div>
@@ -573,19 +574,19 @@ export function WorkspaceDiffSurface({
         className="block min-h-0 w-full resize-y bg-transparent px-3 py-2 font-[var(--font-body)] text-[13px] leading-5 text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)]"
       />
       <div className="flex items-center justify-end gap-2 px-2 pb-2">
-        <button
-          type="button"
-          onClick={closeEditor}
-          className="inline-flex h-8 items-center justify-center rounded-[7px] px-3 text-[12px] font-medium text-[var(--color-text-secondary)] transition-[color,background-color,transform] duration-200 ease-out hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] active:scale-[0.98]"
-        >
+        <Button variant="ghost" size="base" onClick={closeEditor}>
           {t('common.cancel')}
-        </button>
+        </Button>
+        {/* Stays hand-rolled rather than `Button variant="primary"`: this action
+            belongs to the line selection, which is drawn in `--color-info`
+            throughout the surface (selected rows, gutter rail, focused gutter
+            button). An ink primary here would read as unrelated to it. */}
         <button
           type="button"
           aria-label={t('workspace.diffReview.submitAria')}
           disabled={!review.draft.trim()}
           onClick={submitComment}
-          className="inline-flex h-8 min-w-8 items-center justify-center gap-1.5 rounded-[7px] bg-[var(--color-info)] px-3 text-[12px] font-medium text-[var(--color-surface)] transition-[opacity,transform] duration-200 ease-out hover:opacity-90 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-35"
+          className="inline-flex h-8 min-w-8 items-center justify-center gap-1.5 rounded-[var(--radius-md)] bg-[var(--color-info)] px-3 text-[12px] font-medium text-[var(--color-surface)] transition-[opacity,transform] duration-150 ease-out hover:opacity-90 active:scale-[0.98] motion-reduce:transition-none motion-reduce:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-surface-container-low)] disabled:cursor-not-allowed disabled:opacity-35"
         >
           <CornerDownLeft aria-hidden="true" size={14} />
           <span>{t('workspace.diffReview.submit')}</span>
@@ -603,7 +604,7 @@ export function WorkspaceDiffSurface({
           data-highlight-engine={highlightResult.engine}
           role="grid"
           aria-label={`${path} diff`}
-          className="m-0 min-w-full font-[var(--font-mono)] text-[13px] leading-5 text-[var(--color-code-fg)]"
+          className="m-0 min-w-full font-mono text-[13px] leading-5 text-[var(--color-code-fg)]"
           style={codeStyle}
         >
           {files.map((file) => {
@@ -622,7 +623,7 @@ export function WorkspaceDiffSurface({
                 {headerVisible && (
                   <div
                     data-testid="workspace-diff-file-header"
-                    className="sticky top-0 z-10 flex h-10 items-center gap-2 border-b border-[var(--color-text-primary)]/10 bg-[var(--color-surface)]/96 px-4 text-[12px] backdrop-blur"
+                    className="sticky top-0 z-[var(--z-raised)] flex h-10 items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface-glass)] px-4 text-[12px] backdrop-blur"
                   >
                     <FileCode2 aria-hidden="true" size={15} className="shrink-0 text-[var(--color-text-tertiary)]" />
                     <span className="min-w-0 truncate">
@@ -631,7 +632,7 @@ export function WorkspaceDiffSurface({
                       )}
                       <span className="font-semibold text-[var(--color-text-primary)]">{displayName}</span>
                     </span>
-                    <span className="ml-auto shrink-0 font-[var(--font-mono)] text-[11px] tabular-nums">
+                    <span className="ml-auto shrink-0 font-mono text-[11px] tabular-nums">
                       <span className="text-[var(--color-success)]">+{fileAdditions}</span>
                       <span className="ml-1.5 text-[var(--color-error)]">-{fileDeletions}</span>
                     </span>
@@ -672,7 +673,7 @@ export function WorkspaceDiffSurface({
                               data-diff-selection-rail=""
                               aria-hidden="true"
                               className={`absolute inset-y-0 left-0 w-[3px] bg-[var(--color-info)] ${
-                                rangeEdge === 'single' ? 'rounded-sm' : rangeEdge === 'start' ? 'rounded-t-sm' : rangeEdge === 'end' ? 'rounded-b-sm' : ''
+                                rangeEdge === 'single' ? 'rounded-full' : rangeEdge === 'start' ? 'rounded-t-full' : rangeEdge === 'end' ? 'rounded-b-full' : ''
                               }`}
                             />
                           )}
@@ -704,7 +705,7 @@ export function WorkspaceDiffSurface({
                                 onClick={(event) => handleRowClick(event, row)}
                                 onFocus={() => setRovingId(row.id)}
                                 onKeyDown={(event) => handleRowKeyDown(event, row)}
-                                className={`relative right-[calc(1ch-1.25rem)] inline-flex h-5 w-5 items-center justify-center rounded-[4px] transition-[color,background-color,opacity,transform] duration-100 ease-out before:absolute before:-inset-1 hover:bg-[var(--color-info)] hover:text-[var(--color-surface)] active:scale-[0.96] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-1px] focus-visible:outline-[var(--color-info)] ${
+                                className={`relative right-[calc(1ch-1.25rem)] inline-flex h-5 w-5 items-center justify-center rounded-[var(--radius-sm)] transition-[color,background-color,opacity,transform] duration-100 ease-out before:absolute before:-inset-1 hover:bg-[var(--color-info)] hover:text-[var(--color-surface)] active:scale-[0.96] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-1px] focus-visible:outline-[var(--color-info)] ${
                                   selectionFocus ? 'bg-[var(--color-info)] text-[var(--color-surface)] opacity-100' : 'text-[var(--color-text-tertiary)] opacity-0 group-hover:opacity-100 focus:opacity-100'
                                 }`}
                               >
@@ -756,13 +757,9 @@ export function WorkspaceDiffSurface({
                 ? t('workspace.previewAllLines', { total: displayItemIds.length })
                 : t('workspace.previewLineLimit', { count: visibleItemIds.size, total: displayItemIds.length })}
             </span>
-            <button
-              type="button"
-              onClick={toggleRows}
-              className="ml-auto h-7 rounded-[5px] px-2 text-[11px] font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
-            >
+            <Button variant="ghost" size="sm" onClick={toggleRows} className="ml-auto">
               {showAllRows ? t('workspace.collapsePreview') : t('workspace.showAllLoadedLines')}
-            </button>
+            </Button>
           </div>
         )}
       </div>

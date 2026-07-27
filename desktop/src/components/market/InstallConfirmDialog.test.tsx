@@ -37,7 +37,7 @@ describe('InstallConfirmDialog', () => {
     expect(screen.getAllByText('SkillHub').length).toBeGreaterThan(0)
     expect(screen.getByText('v2.0.0')).toBeInTheDocument()
     expect(screen.getByTestId('security-badge-benign')).toBeInTheDocument()
-    expect(screen.getByText('~/.claude/skills/demo/')).toBeInTheDocument()
+    expect(screen.getByText('…/skills/demo/')).toBeInTheDocument()
     expect(screen.getByText(/new sessions/)).toBeInTheDocument()
   })
 

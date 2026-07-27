@@ -140,11 +140,11 @@ vi.mock('../../pages/AgentOffice', async () => {
   }
 })
 
-vi.mock('../shared/Toast', () => ({
+vi.mock('@/components/layout/Toast', () => ({
   ToastContainer: () => null,
 }))
 
-vi.mock('../shared/UpdateChecker', () => ({
+vi.mock('@/components/layout/UpdateChecker', () => ({
   UpdateChecker: () => <div>updates loaded</div>,
 }))
 
@@ -617,7 +617,8 @@ describe('AppShell boot flow', () => {
     expect(header).toHaveTextContent('Analyze recent commits')
     expect(header).toHaveTextContent('session.active')
     expect(header).toHaveTextContent('session.messages')
-    expect(screen.getByTestId('mobile-sidebar-toggle')).toHaveClass('h-10', 'w-10')
+    // 44px — these are primary mobile navigation targets.
+    expect(screen.getByTestId('mobile-sidebar-toggle')).toHaveClass('h-11', 'w-11')
     expect(screen.getByTestId('mobile-settings-button')).toBeInTheDocument()
   })
 

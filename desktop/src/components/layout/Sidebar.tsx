@@ -1,59 +1,28 @@
-import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef } from 'react'
-import { Download, Folder, FolderOpen, MoreHorizontal, Pin, PinOff, RefreshCw, RotateCcw, SquarePen, Trash2, Upload, X } from 'lucide-react'
+import { forwardRef, useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef } from 'react'
+import { Check, ChevronDown, Clock, Download, Folder, FolderOpen, FolderPlus, GitBranch, MoreHorizontal, Pin, PinOff, RefreshCw, RotateCcw, SquarePen, Trash2, Upload, X } from 'lucide-react'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useUIStore } from '../../stores/uiStore'
-import { useTranslation } from '../../i18n'
-import { ConfirmDialog } from '../shared/ConfirmDialog'
+import { useSettingsStore } from '../../stores/settingsStore'
+import { useTranslation, type TranslationKey } from '../../i18n'
+import { BrandSeal } from '@/components/composite/BrandSeal'
+import { Button } from '@/components/ui/Button'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { EmptyState } from '@/components/ui/EmptyState'
+import { ErrorState } from '@/components/ui/ErrorState'
+import { IconButton } from '@/components/ui/IconButton'
+import { Spinner } from '@/components/ui/Spinner'
+import { useDismissable } from '@/hooks/useDismissable'
 import { GlobalSearchModal } from '../search/GlobalSearchModal'
-import { Skeleton } from '../shared/Skeleton'
-import { Tooltip } from '../shared/Tooltip'
+import { FindInPageModal } from '../search/FindInPageModal'
 import type { SessionListItem } from '../../types/session'
-import { useTabStore, MARKET_TAB_ID, SETTINGS_TAB_ID, SCHEDULED_TAB_ID } from '../../stores/tabStore'
+import { useTabStore, SETTINGS_TAB_ID, SCHEDULED_TAB_ID, MARKET_TAB_ID } from '../../stores/tabStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useOpenTargetStore } from '../../stores/openTargetStore'
 import { desktopUiPreferencesApi, type SidebarProjectPreferences } from '../../api/desktopUiPreferences'
-import { getDesktopHost } from '../../lib/desktopHost'
-import { useSettingsStore } from '../../stores/settingsStore'
-import { publicAssetPath } from '../../lib/publicAsset'
-import {
-  type SidebarProjectOrganization,
-  type SidebarProjectSortBy,
-  type ProjectGroup,
-  PROJECT_GROUP_SCROLL_COUNT,
-  groupByProject,
-  applyProjectOrder,
-  moveProjectKey,
-  getProjectDropPosition,
-  readStoredProjectOrder,
-  readStoredProjectPins,
-  readStoredProjectHidden,
-  readStoredProjectOrganization,
-  readStoredProjectSortBy,
-  buildSidebarProjectPreferences,
-  readCachedSidebarProjectPreferences,
-  writeCachedSidebarProjectPreferences,
-  normalizeSidebarProjectPreferences,
-  projectPathMatches,
-  hasSidebarProjectPreferences,
-  getVisibleProjectSessions,
-  isWorktreeSession,
-  domSafeProjectKey,
-  positionProjectMenu,
-  isDocumentVisible,
-} from './sidebarUtils'
 import { projectsApi } from '../../api/projects'
-import {
-  GitHubIcon,
-  PlusIcon,
-  ClockIcon,
-  SearchIcon,
-  SidebarToggleIcon,
-  ProjectHeaderActions,
-  ProjectHeaderMenu,
-  ProjectMenuItem,
-  SessionRowMeta,
-  NavItem,
-} from './sidebarComponents'
+import { getDesktopHost } from '../../lib/desktopHost'
+import { hasRunningBackgroundTasks } from '../../lib/backgroundTasks'
+import { getSessionWorkspaceState } from '../../lib/sessionWorkspace'
 
 const desktopHost = getDesktopHost()
 const isDesktopRuntime = desktopHost.isDesktop
@@ -61,8 +30,25 @@ const canUseNativeDialogs = desktopHost.capabilities.dialogs
 const isWindows = typeof navigator !== 'undefined' && /Win/.test(navigator.platform)
 const SESSION_LIST_AUTO_REFRESH_MS = 30_000
 const SESSION_LIST_FOCUS_REFRESH_MIN_MS = 5_000
+const PROJECT_ORDER_STORAGE_KEY = 'cc-haha-sidebar-project-order'
+const PROJECT_PINNED_STORAGE_KEY = 'cc-haha-sidebar-pinned-projects'
+const PROJECT_HIDDEN_STORAGE_KEY = 'cc-haha-sidebar-hidden-projects'
+const PROJECT_ORGANIZATION_STORAGE_KEY = 'cc-haha-sidebar-project-organization'
+const PROJECT_SORT_STORAGE_KEY = 'cc-haha-sidebar-project-sort'
+const PROJECT_GROUP_VISIBLE_COUNT = 6
+const PROJECT_GROUP_SCROLL_COUNT = 12
 
+type SidebarProjectOrganization = 'project' | 'recentProject' | 'time'
+type SidebarProjectSortBy = 'createdAt' | 'updatedAt'
 type SidebarHeaderMenuType = 'main' | 'organize' | 'sort' | 'create'
+
+type ProjectGroup = {
+  key: string
+  title: string
+  subtitle: string | null
+  workDir: string | undefined
+  sessions: SessionListItem[]
+}
 
 type SidebarProps = {
   isMobile?: boolean
@@ -96,9 +82,9 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
   const sessionContentSearchEnabled = useSettingsStore((s) => s.sessionContentSearchEnabled)
   const sidebarOpen = useUIStore((s) => s.sidebarOpen)
   const toggleSidebar = useUIStore((s) => s.toggleSidebar)
+  const activeModal = useUIStore((s) => s.activeModal)
   const openModal = useUIStore((s) => s.openModal)
   const closeModal = useUIStore((s) => s.closeModal)
-  const activeModal = useUIStore((s) => s.activeModal)
   const activeTabId = useTabStore((s) => s.activeTabId)
   const tabs = useTabStore((s) => s.tabs)
   const chatSessions = useChatStore((s) => s.sessions)
@@ -128,10 +114,18 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
   const [draggingProjectKey, setDraggingProjectKey] = useState<string | null>(null)
   const [projectDropTarget, setProjectDropTarget] = useState<{ key: string; position: 'before' | 'after' } | null>(null)
   const suppressProjectClickRef = useRef<string | null>(null)
+  const sessionContextMenuRef = useRef<HTMLDivElement>(null)
+  const projectContextMenuRef = useRef<HTMLDivElement>(null)
+  const projectHeaderMenuRef = useRef<HTMLDivElement>(null)
+  const projectHeaderSubmenuRef = useRef<HTMLDivElement>(null)
+  const projectHeaderActionsRef = useRef<HTMLDivElement>(null)
   const sidebarPreferenceRevisionRef = useRef(0)
   const sessionScrollAreaRef = useRef<HTMLDivElement>(null)
   const pendingSessionScrollAnchorRef = useRef<SessionScrollAnchor | null>(null)
   useSessionListAutoRefresh(fetchSessions)
+  const handleManualRefresh = useCallback(async () => {
+    await syncIndexes()
+  }, [syncIndexes])
 
   useEffect(() => useSessionStore.subscribe((nextState, previousState) => {
     if (nextState.sessions === previousState.sessions) return
@@ -141,7 +135,9 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
       nextState.indexStatus === previousState.indexStatus
       || nextState.indexStatus?.mode !== 'on'
       || nextState.indexStatus.state !== 'building'
-    ) return
+    ) {
+      return
+    }
 
     const scrollArea = sessionScrollAreaRef.current
     if (!scrollArea || scrollArea.scrollTop <= 0) return
@@ -160,7 +156,9 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
 
     const topOffset = row.getBoundingClientRect().top - scrollArea.getBoundingClientRect().top
     const delta = topOffset - anchor.topOffset
-    if (Number.isFinite(delta) && delta !== 0) scrollArea.scrollTop += delta
+    if (Number.isFinite(delta) && delta !== 0) {
+      scrollArea.scrollTop += delta
+    }
   }, [sessions])
 
   useEffect(() => {
@@ -169,26 +167,29 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sidebarOpen])
 
-  useEffect(() => {
-    if (!contextMenu && !projectContextMenu && !projectHeaderMenu && !projectHeaderSubmenu) return
-    const close = () => {
-      setContextMenu(null)
-      setProjectContextMenu(null)
-      setProjectHeaderMenu(null)
-      setProjectHeaderSubmenu(null)
-    }
-    document.addEventListener('click', close)
-    return () => document.removeEventListener('click', close)
-  }, [contextMenu, projectContextMenu, projectHeaderMenu, projectHeaderSubmenu])
+  const closeAllSidebarMenus = useCallback(() => {
+    setContextMenu(null)
+    setProjectContextMenu(null)
+    setProjectHeaderMenu(null)
+    setProjectHeaderSubmenu(null)
+  }, [])
+
+  // Each menu already stops propagation on its own container, so listing them
+  // as "inside" reproduces the previous behavior. `triggerRef` covers the two
+  // project-header buttons: without it their own click would reopen the menu
+  // this hook just closed.
+  useDismissable({
+    open: contextMenu !== null || projectContextMenu !== null || projectHeaderMenu !== null || projectHeaderSubmenu !== null,
+    refs: [sessionContextMenuRef, projectContextMenuRef, projectHeaderMenuRef, projectHeaderSubmenuRef],
+    triggerRef: projectHeaderActionsRef,
+    onDismiss: closeAllSidebarMenus,
+  })
 
   const filteredSessions = useMemo(() => {
-    let result = sessions
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase()
-      result = result.filter((s) => s.title.toLowerCase().includes(q))
-    }
-    return result
-  }, [sessions, searchQuery])
+    const query = searchQuery.trim().toLocaleLowerCase()
+    if (!query) return sessions
+    return sessions.filter((session) => session.title.toLocaleLowerCase().includes(query))
+  }, [searchQuery, sessions])
 
   const projectGroups = useMemo(() => groupByProject(filteredSessions, projectSortBy), [filteredSessions, projectSortBy])
   const orderedProjectGroups = useMemo(
@@ -202,13 +203,18 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
     ))
   }, [hiddenProjectKeys, orderedProjectGroups])
   const showInitialLoading = isLoading && sessions.length === 0
-  const showIndexBuilding = indexStatus?.mode === 'on' && indexStatus.state === 'building' && sessions.length > 0
-  const showIndexDegraded = indexStatus?.mode === 'on' && indexStatus.state === 'degraded'
-  const indexAnnouncement = showIndexBuilding
-    ? t('sidebar.indexBuilding')
-    : showIndexDegraded
-      ? t('sidebar.indexDegraded')
-      : ''
+  const showRefreshLoading = showInitialLoading
+  const showIndexBuilding = indexStatus?.state === 'building' && sessions.length > 0
+  const showIndexDegraded = indexStatus?.state === 'degraded'
+  const indexAnnouncement = indexStatus
+    ? t(indexStatus.state === 'building'
+      ? 'sidebar.indexBuilding'
+      : indexStatus.state === 'ready'
+        ? 'sidebar.indexReady'
+        : indexStatus.state === 'degraded'
+          ? 'sidebar.indexDegraded'
+          : 'sidebar.indexOff')
+    : ''
   const filteredSessionIds = useMemo(() => filteredSessions.map((session) => session.id), [filteredSessions])
   const selectedCount = selectedSessionIds.size
   const sessionsById = useMemo(
@@ -221,9 +227,9 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
       if (tab.type === 'session' && tab.status === 'running') ids.add(tab.sessionId)
     }
     for (const [sessionId, sessionState] of Object.entries(chatSessions)) {
-      const hasRunningBackgroundTask = Object.values(sessionState.backgroundAgentTasks ?? {})
-        .some((task) => task.status === 'running')
-      if (sessionState.chatState !== 'idle' || hasRunningBackgroundTask) ids.add(sessionId)
+      if (sessionState.chatState !== 'idle' || hasRunningBackgroundTasks(sessionState.backgroundAgentTasks)) {
+        ids.add(sessionId)
+      }
     }
     return ids
   }, [chatSessions, tabs])
@@ -513,13 +519,12 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
 
   const confirmClearProjectSessions = useCallback(async () => {
     if (!pendingClearProjectKey) return
-    const project = orderedProjectGroups.find((g) => g.key === pendingClearProjectKey)
+    const project = orderedProjectGroups.find((group) => group.key === pendingClearProjectKey)
     if (!project) {
       setPendingClearProjectKey(null)
       return
     }
-    const workDir = project.workDir
-    if (!workDir) {
+    if (!project.workDir) {
       addToast({
         type: 'error',
         message: t('sidebar.clearProjectSessionsNoWorkDir', { project: project.title }),
@@ -527,18 +532,14 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
       setPendingClearProjectKey(null)
       return
     }
+
     setIsClearingProject(true)
     try {
-      // Disconnect any open sessions for this project so the websocket
-      // server-side handles don't keep referencing files we're about to
-      // delete. closeTab handles missing tabs gracefully.
       for (const session of project.sessions) {
-        try { closeTab(session.id) } catch { /* ignore */ }
-        try { disconnectSession(session.id) } catch { /* ignore */ }
+        closeTab(session.id)
+        disconnectSession(session.id)
       }
-      const result = await projectsApi.clearSessions(workDir)
-      // Re-fetch sessions so the project either disappears (if dir removed)
-      // or shows up empty (preserved memory/ etc.).
+      const result = await projectsApi.clearSessions(project.workDir)
       await fetchSessions()
       addToast({
         type: 'success',
@@ -591,7 +592,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
 
   const handleCopySessionPath = useCallback(async (sessionId: string) => {
     setContextMenu(null)
-    const session = sessions.find((s) => s.id === sessionId)
+    const session = sessions.find((candidate) => candidate.id === sessionId)
     if (!session?.filePath) {
       addToast({ type: 'error', message: t('sidebar.copySessionPathUnavailable') })
       return
@@ -606,7 +607,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
 
   const handleRevealSession = useCallback(async (sessionId: string) => {
     setContextMenu(null)
-    const session = sessions.find((s) => s.id === sessionId)
+    const session = sessions.find((candidate) => candidate.id === sessionId)
     if (!session?.filePath) {
       addToast({ type: 'error', message: t('sidebar.copySessionPathUnavailable') })
       return
@@ -630,7 +631,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
 
   const handleExportSession = useCallback(async (sessionId: string) => {
     setContextMenu(null)
-    const session = sessions.find((s) => s.id === sessionId)
+    const session = sessions.find((candidate) => candidate.id === sessionId)
     const workDir = session?.workDir || session?.projectRoot || session?.projectPath
     if (!workDir) {
       addToast({ type: 'error', message: t('sidebar.exportSessionNoWorkDir') })
@@ -668,7 +669,6 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
   const handleImportFileChange = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     const workDir = importTargetWorkDirRef.current
-    // Always reset the input so picking the same file twice still fires change.
     event.target.value = ''
     importTargetWorkDirRef.current = null
     if (!file || !workDir) return
@@ -677,9 +677,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
       await fetchSessions()
       addToast({
         type: 'success',
-        message: t('sidebar.importSessionSuccess', {
-          lines: result.nonEmptyLines,
-        }),
+        message: t('sidebar.importSessionSuccess', { lines: result.nonEmptyLines }),
       })
     } catch (error) {
       addToast({
@@ -724,52 +722,50 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
   const handleBatchExport = useCallback(async () => {
     const ids = [...selectedSessionIds]
     if (ids.length === 0) return
-
     if (ids.length === 1) {
       await handleExportSession(ids[0]!)
       handleExitBatchMode()
       return
     }
 
-    // Multiple sessions: collect blobs, pack into zip
     setIsBatchExporting(true)
     addToast({ type: 'info', message: t('sidebar.batchExporting', { count: ids.length }) })
     try {
       const { zipSync } = await import('fflate')
       const entries: Record<string, Uint8Array> = {}
       for (const sessionId of ids) {
-        const session = sessions.find((s) => s.id === sessionId)
+        const session = sessions.find((candidate) => candidate.id === sessionId)
         const workDir = session?.workDir || session?.projectRoot || session?.projectPath
         if (!workDir) continue
         try {
           const { filename, blob } = await projectsApi.exportSessionBlob(workDir, sessionId)
-          const buffer = await blob.arrayBuffer()
-          entries[filename] = new Uint8Array(buffer)
+          entries[filename] = new Uint8Array(await blob.arrayBuffer())
         } catch {
-          // skip failed individual exports
+          // Export the sessions that are still available; report failure only if none remain.
         }
       }
       const exportedCount = Object.keys(entries).length
       if (exportedCount === 0) {
-        addToast({ type: 'error', message: t('sidebar.exportSessionFailure', { error: 'No sessions exported' }) })
+        addToast({
+          type: 'error',
+          message: t('sidebar.exportSessionFailure', { error: 'No sessions exported' }),
+        })
         return
       }
       const zipData = zipSync(entries)
       const zipBlob = new Blob([zipData], { type: 'application/zip' })
-      const zipFilename = `sessions-export-${new Date().toISOString().slice(0, 10)}.zip`
-      if (typeof window !== 'undefined' && typeof document !== 'undefined') {
-        const objectUrl = URL.createObjectURL(zipBlob)
-        const a = document.createElement('a')
-        a.href = objectUrl
-        a.download = zipFilename
-        document.body.appendChild(a)
-        a.click()
-        a.remove()
-        setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
-      }
+      const filename = `sessions-export-${new Date().toISOString().slice(0, 10)}.zip`
+      const objectUrl = URL.createObjectURL(zipBlob)
+      const anchor = document.createElement('a')
+      anchor.href = objectUrl
+      anchor.download = filename
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
       addToast({
         type: 'success',
-        message: t('sidebar.exportSessionSuccess', { filename: `${zipFilename} (${exportedCount} sessions)` }),
+        message: t('sidebar.exportSessionSuccess', { filename: `${filename} (${exportedCount} sessions)` }),
       })
       handleExitBatchMode()
     } catch (error) {
@@ -905,16 +901,34 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
       <div
         data-testid="sidebar-title-region"
         data-desktop-drag-region
-        className={`px-3 pb-2 ${isDesktopRuntime && !isWindows ? 'pt-[44px]' : 'pt-3'}`}
+        className={`sidebar-title-region px-3 pb-2 ${isDesktopRuntime && !isWindows ? 'pt-[44px]' : 'pt-3'}`}
       >
         <div className={`flex ${expanded ? 'items-center justify-between gap-3' : 'flex-col items-center gap-2'}`}>
-          <div className={`flex min-w-0 items-center ${expanded ? 'gap-2.5' : 'justify-center'}`}>
-            <img src={publicAssetPath('app-icon.png')} alt="" className="h-8 w-8 flex-shrink-0" />
+          {/* The mark only stands in for the wordmark on the rail. Expanded,
+              the name says it better and the icon beside it is just clutter;
+              collapsed, the copy is width-clamped to zero and the header would
+              otherwise be empty. `sm` is the cleanest cut of the mark — two C's
+              and the seal bar, no cursor or sparkles to turn to mush at 24px. */}
+          {/* Expanded, `pl-3` lands the wordmark on the same 24px line as the
+              nav icons, the search glyph and the settings gear below it —
+              the section's own `px-3` alone left it sticking out on its own.
+              Collapsed, the mark is centered on the rail instead. */}
+          <div className={`flex min-w-0 items-center ${expanded ? 'gap-2.5 pl-3' : 'justify-center'}`}>
+            {!expanded ? <BrandSeal size="sm" /> : null}
+            {/* Two forms of one wordmark. Drag the sidebar under ~256px and
+                "Code Council" stops fitting; rather than clip it mid-letter
+                the header falls back to the short form. The swap is a container
+                query on the title region — see `.sidebar-wordmark-*` in globals.css. */}
             <span
-              className={`sidebar-copy ${expanded ? 'sidebar-copy--visible' : 'sidebar-copy--hidden'} text-[13px] font-semibold tracking-tight text-[var(--color-text-primary)]`}
+              className={`sidebar-copy ${expanded ? 'sidebar-copy--visible' : 'sidebar-copy--hidden'} text-base font-bold tracking-tight text-[var(--color-text-primary)]`}
               style={{ fontFamily: 'var(--font-headline)' }}
             >
-              Code <span className="text-[var(--color-primary-container)]">Council</span>
+              <span className="sidebar-wordmark-long">
+                Code <span className="text-[var(--color-brand)]">Council</span>
+              </span>
+              <span className="sidebar-wordmark-short">
+                Code <span className="text-[var(--color-brand)]">Co.</span>
+              </span>
             </span>
           </div>
           <div className={`flex items-center ${expanded ? 'gap-1.5' : 'flex-col gap-2'}`}>
@@ -923,7 +937,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                 href="https://github.com/706412584/cc-haha"
                 target="_blank"
                 rel="noopener noreferrer"
-                className={`sidebar-copy ${expanded ? 'sidebar-copy--visible' : 'sidebar-copy--hidden'} inline-flex items-center justify-center rounded-md p-1 text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]`}
+                className={`sidebar-copy ${expanded ? 'sidebar-copy--visible' : 'sidebar-copy--hidden'} inline-flex items-center justify-center rounded-[var(--radius-sm)] p-1 text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]`}
                 title="GitHub"
                 tabIndex={expanded ? undefined : -1}
                 aria-hidden={!expanded}
@@ -935,7 +949,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
               <button
                 type="button"
                 onClick={closeMobileDrawer}
-                className="sidebar-toggle-button flex h-11 w-11 items-center justify-center rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-surface-sidebar)]"
+                className="sidebar-toggle-button flex h-11 w-11 items-center justify-center rounded-[var(--radius-lg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-surface-sidebar)]"
                 aria-label={t('sidebar.collapse')}
                 title={t('sidebar.collapse')}
               >
@@ -958,39 +972,22 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
       </div>
 
       <div className={`px-3 pb-3 flex flex-col ${expanded ? 'gap-0.5' : 'items-center gap-2'}`}>
-        <Tooltip content={t('sidebar.newSession')} shortcut="⌘N">
-          <NavItem
-            active={false}
-            collapsed={!expanded}
-            label={t('sidebar.newSession')}
-            touchFriendly={isMobile}
-            onClick={() => {
-              const currentTabId = useTabStore.getState().activeTabId
-              const currentSession = currentTabId
-                ? useSessionStore.getState().sessions.find((s) => s.id === currentTabId)
-                : null
-              void createSessionForWorkDir(currentSession?.workDir || currentSession?.projectRoot || undefined)
-            }}
-            icon={<PlusIcon />}
-          >
-            {t('sidebar.newSession')}
-          </NavItem>
-        </Tooltip>
-        {!isMobile && (
-          <NavItem
-            active={activeTabId === MARKET_TAB_ID}
-            collapsed={!expanded}
-            label={t('sidebar.market')}
-            touchFriendly={isMobile}
-            onClick={() => {
-              useTabStore.getState().openTab(MARKET_TAB_ID, t('sidebar.market'), 'market')
-              closeMobileDrawer()
-            }}
-            icon={<span className="material-symbols-outlined text-[18px]">storefront</span>}
-          >
-            {t('sidebar.market')}
-          </NavItem>
-        )}
+        <NavItem
+          active={false}
+          collapsed={!expanded}
+          label={t('sidebar.newSession')}
+          touchFriendly={isMobile}
+          onClick={() => {
+            const currentTabId = useTabStore.getState().activeTabId
+            const currentSession = currentTabId
+              ? useSessionStore.getState().sessions.find((s) => s.id === currentTabId)
+              : null
+            void createSessionForWorkDir(currentSession?.workDir || currentSession?.projectRoot || undefined)
+          }}
+          icon={<PlusIcon />}
+        >
+          {t('sidebar.newSession')}
+        </NavItem>
         {!isMobile && (
           <NavItem
             active={activeTabId === SCHEDULED_TAB_ID}
@@ -1006,6 +1003,21 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
             {t('sidebar.scheduled')}
           </NavItem>
         )}
+        {!isMobile && (
+          <NavItem
+            active={activeTabId === MARKET_TAB_ID}
+            collapsed={!expanded}
+            label={t('sidebar.market')}
+            touchFriendly={isMobile}
+            onClick={() => {
+              useTabStore.getState().openTab(MARKET_TAB_ID, t('sidebar.market'), 'market')
+              closeMobileDrawer()
+            }}
+            icon={<StorefrontIcon />}
+          >
+            {t('sidebar.market')}
+          </NavItem>
+        )}
       </div>
 
       {expanded ? (
@@ -1015,62 +1027,53 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
             className="sidebar-section sidebar-section--visible relative z-20 flex-none px-3 pb-2"
             style={{ overflow: 'visible' }}
           >
-            {!isMobile && sessionContentSearchEnabled ? (
-              <button
-                type="button"
-                onClick={() => openModal('globalSearch')}
-                className="mb-1.5 flex h-9 w-full min-w-0 items-center gap-2 rounded-[14px] border border-[var(--color-sidebar-search-border)] bg-[var(--color-sidebar-search-bg)] pl-3 pr-2 text-left text-[13px] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-sidebar-item-hover)] focus-visible:border-[var(--color-border-focus)] focus-visible:outline-none"
-                aria-label={t('search.global.trigger')}
-                title={t('search.global.trigger')}
-              >
-                <span className="pointer-events-none flex shrink-0 items-center text-[var(--color-text-tertiary)]">
-                  <SearchIcon />
-                </span>
-                <span className="min-w-0 flex-1 truncate pl-2">{t('search.global.trigger')}</span>
-                <kbd className="pointer-events-none shrink-0 rounded border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-1 font-mono text-[10px] leading-tight text-[var(--color-text-tertiary)]">⌘K</kbd>
-              </button>
-            ) : null}
             <div className="flex items-center gap-1.5">
-              <div className="flex h-9 min-w-0 flex-1 items-center rounded-[14px] border border-[var(--color-sidebar-search-border)] bg-[var(--color-sidebar-search-bg)] pl-3 pr-3 transition-colors focus-within:border-[var(--color-border-focus)]">
-                <span className="pointer-events-none flex shrink-0 items-center text-[var(--color-text-tertiary)]">
+              {isMobile || !sessionContentSearchEnabled ? (
+                <label className={`flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] border border-[var(--color-sidebar-search-border)] bg-[var(--color-sidebar-search-bg)] px-3 text-[13px] text-[var(--color-text-tertiary)] focus-within:border-[var(--color-border-focus)] focus-within:ring-2 focus-within:ring-[var(--color-border-focus)] ${isMobile ? 'h-11' : 'h-9'}`}>
                   <SearchIcon />
-                </span>
-                <input
-                  id="sidebar-search"
-                  type="text"
-                  placeholder={t('sidebar.searchPlaceholder')}
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="min-w-0 flex-1 bg-transparent pl-2 pr-0 text-[13px] text-[var(--color-text-primary)] placeholder:text-[var(--color-text-tertiary)] outline-none"
-                />
-              </div>
-              <button
-                type="button"
-                onClick={() => void syncIndexes()}
-                disabled={showInitialLoading}
-                className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-[12px] border border-[var(--color-sidebar-search-border)] bg-[var(--color-sidebar-search-bg)] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-sidebar-item-hover)] hover:text-[var(--color-text-primary)] disabled:cursor-default disabled:opacity-65 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
-                aria-label={t('sidebar.refreshSessions')}
-                title={t('sidebar.refreshSessions')}
-              >
-                <RefreshCw className={`h-4 w-4 ${showInitialLoading ? 'animate-spin' : ''}`} strokeWidth={1.9} aria-hidden="true" />
-              </button>
-              {!isMobile ? (
+                  <input
+                    value={searchQuery}
+                    onChange={(event) => setSearchQuery(event.target.value)}
+                    placeholder={t('sidebar.searchPlaceholder')}
+                    className="min-w-0 flex-1 bg-transparent text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)]"
+                  />
+                </label>
+              ) : (
                 <button
                   type="button"
-                  onClick={isBatchMode ? handleExitBatchMode : enterBatchMode}
-                  className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-[12px] border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] ${
-                    isBatchMode
-                      ? 'border-[var(--color-brand)] bg-[var(--color-sidebar-item-active)] text-[var(--color-brand)]'
-                      : 'border-[var(--color-sidebar-search-border)] bg-[var(--color-sidebar-search-bg)] text-[var(--color-text-secondary)] hover:bg-[var(--color-sidebar-item-hover)] hover:text-[var(--color-text-primary)]'
-                  }`}
-                  aria-label={isBatchMode ? t('sidebar.batchExit') : t('sidebar.batchManage')}
-                  title={isBatchMode ? t('sidebar.batchExit') : t('sidebar.batchManage')}
+                  onClick={() => openModal('globalSearch')}
+                  className="flex h-9 min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] border border-[var(--color-sidebar-search-border)] bg-[var(--color-sidebar-search-bg)] pl-3 pr-2 text-left text-[13px] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-sidebar-item-hover)] focus-visible:border-[var(--color-border-focus)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-surface-sidebar)]"
+                  aria-label={t('search.global.trigger')}
+                  title={t('search.global.trigger')}
                 >
-                  <span className="material-symbols-outlined text-[18px]">
-                    {isBatchMode ? 'close' : 'delete_sweep'}
+                  <span className="pointer-events-none flex shrink-0 items-center text-[var(--color-text-tertiary)]">
+                    <SearchIcon />
                   </span>
+                  <span className="min-w-0 flex-1 truncate pl-2">{t('search.global.trigger')}</span>
+                  <kbd className="pointer-events-none shrink-0 rounded border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-1 font-mono text-[10px] leading-tight text-[var(--color-text-tertiary)]">⌘K</kbd>
                 </button>
-              ) : null}
+              )}
+              <IconButton
+                icon={<RefreshCw className={`h-4 w-4 ${showRefreshLoading ? 'animate-spin' : ''}`} strokeWidth={1.9} aria-hidden="true" />}
+                label={t('sidebar.refreshSessions')}
+                onClick={() => void handleManualRefresh()}
+                size={isMobile ? '2xl' : 'lg'}
+                tone="secondary"
+                surface="sidebar"
+                className="border border-[var(--color-sidebar-search-border)] bg-[var(--color-sidebar-search-bg)]"
+              />
+              <IconButton
+                icon={isBatchMode ? 'close' : 'delete_sweep'}
+                label={isBatchMode ? t('sidebar.batchExit') : t('sidebar.batchManage')}
+                onClick={isBatchMode ? handleExitBatchMode : enterBatchMode}
+                size={isMobile ? '2xl' : 'lg'}
+                tone={isBatchMode ? 'brand' : 'secondary'}
+                surface="sidebar"
+                aria-pressed={isBatchMode}
+                className={isBatchMode
+                  ? 'border border-[var(--color-brand)] bg-[var(--color-sidebar-item-active)]'
+                  : 'border border-[var(--color-sidebar-search-border)] bg-[var(--color-sidebar-search-bg)]'}
+              />
             </div>
           </div>
 
@@ -1084,19 +1087,18 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                   <span className="min-w-0 text-xs font-medium text-[var(--color-text-primary)]">
                     {t('sidebar.batchSelectedCount', { count: selectedCount })}
                   </span>
-                  <button
-                    type="button"
+                  <IconButton
+                    icon={<span className="material-symbols-outlined text-[17px]" aria-hidden="true">close</span>}
+                    label={t('sidebar.batchExit')}
                     onClick={handleExitBatchMode}
-                    className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
-                    aria-label={t('sidebar.batchExit')}
-                    title={t('sidebar.batchExit')}
-                  >
-                    <span className="material-symbols-outlined text-[17px]">close</span>
-                  </button>
+                    size="sm"
+                    tone="muted"
+                  />
                 </div>
                 <div className="mt-2 grid grid-cols-3 gap-1.5">
-                  <button
-                    type="button"
+                  <Button
+                    variant="secondary"
+                    size="base"
                     onClick={() => {
                       if (filteredSessionIds.every((id) => selectedSessionIds.has(id))) {
                         deselectSessions(filteredSessionIds)
@@ -1105,35 +1107,37 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                       }
                     }}
                     disabled={filteredSessionIds.length === 0}
-                    className="rounded-md border border-[var(--color-border)] px-2 py-1.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] disabled:opacity-50"
                   >
                     {filteredSessionIds.length > 0 && filteredSessionIds.every((id) => selectedSessionIds.has(id))
                       ? t('sidebar.batchDeselectAll')
                       : t('sidebar.batchSelectAll')}
-                  </button>
-                  <button
-                    type="button"
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="base"
                     onClick={() => void handleBatchExport()}
                     disabled={selectedCount === 0 || isBatchExporting}
-                    className="rounded-md border border-[var(--color-border)] px-2 py-1.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] disabled:opacity-50"
+                    loading={isBatchExporting}
                   >
-                    {isBatchExporting ? t('sidebar.batchExporting', { count: selectedCount }) : t('sidebar.batchExportSelected', { count: selectedCount })}
-                  </button>
-                  <button
-                    type="button"
+                    {isBatchExporting
+                      ? t('sidebar.batchExporting', { count: selectedCount })
+                      : t('sidebar.batchExportSelected', { count: selectedCount })}
+                  </Button>
+                  <Button
+                    variant="danger"
+                    size="base"
                     onClick={() => requestBatchDelete([...selectedSessionIds])}
                     disabled={selectedCount === 0}
-                    className="rounded-md bg-[var(--color-error)] px-2 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
                   >
                     {t('sidebar.batchDeleteSelected', { count: selectedCount })}
-                  </button>
+                  </Button>
                 </div>
               </div>
             )}
             <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
               {indexAnnouncement}
             </div>
-            {showIndexBuilding ? (
+            {showIndexBuilding && (
               <div
                 data-testid="sidebar-index-progress"
                 aria-hidden="true"
@@ -1144,53 +1148,54 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                   discovered: indexStatus.discovered,
                 })}
               </div>
-            ) : null}
-            {showIndexDegraded ? (
+            )}
+            {showIndexDegraded && (
               <div
                 data-testid="sidebar-index-degraded"
-                className="mx-4 mb-1 flex-none text-[11px] leading-5 text-[var(--color-warning)]"
+                aria-hidden="true"
+                className="mx-4 mb-1 flex-none text-[11px] leading-5 text-[var(--color-text-tertiary)]"
               >
                 {t('sidebar.indexDegraded')}
               </div>
-            ) : null}
+            )}
             <div
               ref={sessionScrollAreaRef}
               data-testid="sidebar-session-scroll-area"
               className="sidebar-scroll-area min-h-0 flex-1 overflow-y-auto px-3 pb-20"
             >
               {error && (
-                <div className="mx-1 mt-2 rounded-[var(--radius-md)] border border-[var(--color-error)]/20 bg-[var(--color-error)]/5 px-3 py-2">
-                  <div className="text-xs font-medium text-[var(--color-error)]">{t('sidebar.sessionListFailed')}</div>
-                  <div className="mt-1 text-[11px] text-[var(--color-text-secondary)] break-words">{error}</div>
-                  <button
-                    onClick={() => fetchSessions()}
-                    className="mt-2 text-[11px] font-medium text-[var(--color-brand)] hover:underline"
-                  >
-                    {t('common.retry')}
-                  </button>
-                </div>
+                <ErrorState
+                  className="mx-1 mt-2 break-words"
+                  size="sm"
+                  tone="strong"
+                  title={t('sidebar.sessionListFailed')}
+                  detail={error}
+                  onRetry={() => fetchSessions()}
+                  retryLabel={t('common.retry')}
+                />
               )}
               {showInitialLoading ? (
-                <div className="px-1 py-2 space-y-1">
-                  {Array.from({ length: 6 }, (_, i) => (
-                    <div key={i} className="flex items-center gap-2.5 rounded-lg px-2.5 py-2">
-                      <Skeleton variant="rect" width={18} height={18} className="shrink-0" />
-                      <Skeleton variant="text" height={13} className="flex-1" />
-                    </div>
-                  ))}
+                <div
+                  role="status"
+                  aria-label={t('common.loading')}
+                  className="px-3 py-4 text-center text-xs text-[var(--color-text-tertiary)]"
+                >
+                  {t('common.loading')}
                 </div>
-              ) : filteredSessions.length === 0 && (
-                <div className="px-3 py-4 text-center text-xs text-[var(--color-text-tertiary)]">
-                  {searchQuery ? t('sidebar.noMatching') : t('sidebar.noSessions')}
+              ) : !error && filteredSessions.length === 0 && (
+                <div className="px-3 py-2">
+                  <EmptyState variant="inline" title={t('sidebar.noSessions')} />
                 </div>
               )}
-              {orderedProjectGroups.length > 0 && !isMobile && (
+              {!isMobile && orderedProjectGroups.length > 0 && (
                 <ProjectHeaderActions
                   title={t('sidebar.projects')}
                   menuLabel={t('sidebar.projectMenu')}
                   createLabel={t('sidebar.newProject')}
                   onOpenMenu={(event) => openProjectHeaderMenu(event, 'main')}
                   onOpenCreate={(event) => openProjectHeaderMenu(event, 'create')}
+                  actionsRef={projectHeaderActionsRef}
+                  isMobile={isMobile}
                 />
               )}
               {visibleProjectGroups.map((project) => {
@@ -1231,7 +1236,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                         onDragEnd={clearProjectDragState}
                         onClick={() => toggleProjectCollapsed(project.key)}
                         data-state={projectCollapsed ? 'closed' : 'open'}
-                        className="flex min-w-0 flex-1 cursor-grab items-center gap-2 rounded-xl px-1.5 py-2 text-left transition-[background,color] active:cursor-grabbing hover:bg-[var(--color-sidebar-item-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
+                        className={`flex min-w-0 flex-1 cursor-grab items-center gap-2 rounded-[var(--radius-md)] px-1.5 text-left transition-[background,color] active:cursor-grabbing hover:bg-[var(--color-sidebar-item-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] ${isMobile ? 'min-h-11 py-2.5' : 'py-2'}`}
                         aria-expanded={!projectCollapsed}
                         aria-label={t(projectCollapsed ? 'sidebar.expandProject' : 'sidebar.collapseProject', { project: project.title })}
                         title={project.subtitle || project.title}
@@ -1267,9 +1272,9 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                           <button
                             type="button"
                             onClick={() => toggleGroupSelection(groupIds)}
-                            className={`rounded-md px-1.5 py-1 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] ${
+                            className={`rounded-[var(--radius-sm)] px-1.5 py-1 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] ${
                               groupSelectedCount > 0
-                                ? 'text-[var(--color-brand)] hover:bg-[var(--color-brand)]/10'
+                                ? 'text-[var(--color-brand)] hover:bg-[var(--color-brand-soft)]'
                                 : 'text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-secondary)]'
                             }`}
                             aria-label={t('sidebar.batchSelectGroup', { group: project.title })}
@@ -1279,45 +1284,55 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                               : t('sidebar.batchSelectAll')}
                           </button>
                         )}
-                        {!isBatchMode && !isMobile && (
-                          <div className="pointer-events-none flex items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover/project:pointer-events-auto group-hover/project:opacity-100 group-focus-within/project:pointer-events-auto group-focus-within/project:opacity-100">
-                            <button
-                              type="button"
+                        {!isBatchMode && (
+                          // Desktop reveals these on row hover. The touch drawer
+                          // has neither hover nor a way to focus through
+                          // `pointer-events: none`, so there they stay put — two
+                          // 44px targets with enough gap not to catch each other.
+                          <div className={`flex items-center transition-opacity duration-150 ${
+                            isMobile
+                              ? 'gap-1.5 opacity-100'
+                              : 'pointer-events-none gap-0.5 opacity-0 group-hover/project:pointer-events-auto group-hover/project:opacity-100 group-focus-within/project:pointer-events-auto group-focus-within/project:opacity-100'
+                          }`}>
+                            <IconButton
+                              icon={<MoreHorizontal className="h-[17px] w-[17px]" strokeWidth={2} aria-hidden="true" />}
+                              label={t('sidebar.projectActions', { project: project.title })}
                               onClick={(event) => {
                                 event.stopPropagation()
                                 setContextMenu(null)
                                 setProjectContextMenu({ key: project.key, x: event.clientX, y: event.clientY })
                               }}
-                              className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-sidebar-item-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
-                              aria-label={t('sidebar.projectActions', { project: project.title })}
-                              title={t('sidebar.projectActions', { project: project.title })}
-                            >
-                              <MoreHorizontal className="h-[17px] w-[17px]" strokeWidth={2} aria-hidden="true" />
-                            </button>
-                            <button
-                              type="button"
+                              size={isMobile ? '2xl' : 'sm'}
+                              tone="muted"
+                              surface="sidebar"
+                            />
+                            <IconButton
+                              icon={<SquarePen className="h-[16px] w-[16px]" strokeWidth={2} aria-hidden="true" />}
+                              label={t('sidebar.newSessionInProject', { project: project.title })}
                               onClick={(event) => {
                                 event.stopPropagation()
                                 void createSessionForWorkDir(project.workDir)
                               }}
-                              className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-sidebar-item-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
-                              aria-label={t('sidebar.newSessionInProject', { project: project.title })}
-                              title={t('sidebar.newSessionInProject', { project: project.title })}
-                            >
-                              <SquarePen className="h-[16px] w-[16px]" strokeWidth={2} aria-hidden="true" />
-                            </button>
+                              size={isMobile ? '2xl' : 'sm'}
+                              tone="muted"
+                              surface="sidebar"
+                            />
                           </div>
                         )}
                       </div>
                     </div>
                     {!projectCollapsed && (
-                      <div className={`mt-0.5 ${isMobile ? 'pl-2' : 'pl-6'}`}>
+                      <div className="mt-0.5 pl-6">
                         <div
                           className={hasInternalScroll ? 'max-h-[420px] overflow-y-auto pr-1' : undefined}
                           data-testid={`sidebar-project-session-list-${domSafeProjectKey(project.key)}`}
                         >
                           {visibleItems.map((session) => (
-                            <div key={session.id} className="relative mb-0.5 last:mb-0">
+                            <div
+                              key={session.id}
+                              data-sidebar-session-id={session.id}
+                              className="relative mb-0.5 last:mb-0"
+                            >
                               {renamingId === session.id ? (
                                 <input
                                   autoFocus
@@ -1335,7 +1350,6 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                                 />
                               ) : (
                                 <button
-                                  data-sidebar-session-id={session.id}
                                   onClick={(event) => {
                                     if (isBatchMode) {
                                       handleBatchSessionClick(event, session.id)
@@ -1347,11 +1361,14 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                                   }}
                                   onContextMenu={(e) => handleContextMenu(e, session.id)}
                                   className={`
-                                    group/session w-full rounded-lg px-2.5 ${isMobile ? 'py-3' : 'py-1.5'} text-left text-[13px] transition-[background,filter,color] duration-200
+                                    group/session w-full rounded-[var(--radius-md)] px-2.5 ${isMobile ? 'py-3' : 'py-1.5'} text-left text-[13px] transition-[background,filter,color,box-shadow] duration-200
+                                    focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--color-surface-sidebar)]
                                     ${selectedSessionIds.has(session.id)
-                                      ? 'sidebar-session-row--selected bg-[var(--color-sidebar-item-active)] text-[var(--color-text-primary)]'
+                                      ? 'sidebar-session-row--selected bg-[var(--color-sidebar-item-active)] text-[var(--color-text-primary)] shadow-[var(--shadow-card)]'
                                       : session.id === activeTabId
-                                      ? 'sidebar-session-row--active bg-[var(--color-sidebar-item-active)] text-[var(--color-text-primary)]'
+                                      // The handoff marks the open session as a card lifted off the
+                                      // sidebar ground: page-white fill plus the resting shadow step.
+                                      ? 'sidebar-session-row--active bg-[var(--color-sidebar-item-active)] text-[var(--color-text-primary)] shadow-[var(--shadow-card)]'
                                       : 'sidebar-session-row--idle text-[var(--color-text-secondary)] hover:bg-[var(--color-sidebar-item-hover)] hover:text-[var(--color-text-primary)]'
                                     }
                                   `}
@@ -1363,8 +1380,10 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                                       <span
                                         className={`flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-[5px] border transition-colors ${
                                           selectedSessionIds.has(session.id)
-                                            ? 'border-[var(--color-brand)] bg-[var(--color-brand)] text-white'
-                                            : 'border-[var(--color-border)] bg-[var(--color-surface)]'
+                                            ? 'border-[var(--color-brand)] bg-[var(--color-brand)] text-[var(--color-on-primary)]'
+                                            // Hairline `--color-border` only reaches 1.2:1 here; a control
+                                            // boundary needs 3:1 (WCAG 1.4.11).
+                                            : 'border-[var(--color-border-strong)] bg-[var(--color-surface)]'
                                         }`}
                                         aria-hidden="true"
                                       >
@@ -1374,7 +1393,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                                       </span>
                                     ) : null}
                                     <span className="min-w-0 flex-1 truncate font-medium tracking-normal">{session.title || 'Untitled'}</span>
-                                    {!session.workDirExists && session.workspaceState !== 'worktree_removed' && (
+                                    {getSessionWorkspaceState(session) === 'missing' && (
                                       <span
                                         className="flex-shrink-0 text-[10px] text-[var(--color-warning)]"
                                         title={session.workDir ?? ''}
@@ -1386,8 +1405,8 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                                       isRunning={runningSessionIds.has(session.id)}
                                       isWorktree={isWorktreeSession(session)}
                                       modifiedAt={session.modifiedAt}
-                                      compact={isMobile}
                                       t={t}
+                                      hideTimestamp={isMobile}
                                     />
                                   </span>
                                 </button>
@@ -1400,7 +1419,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                             <button
                               type="button"
                               onClick={() => toggleProjectSessionExpansion(project.key)}
-                              className="inline-flex items-center justify-start py-1 text-[13px] font-semibold text-[var(--color-text-tertiary)] opacity-75 transition-[color,opacity] hover:text-[var(--color-text-secondary)] hover:opacity-100 focus-visible:rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
+                              className={`inline-flex items-center justify-start text-[13px] font-semibold text-[var(--color-text-tertiary)] opacity-75 transition-[color,opacity] hover:text-[var(--color-text-secondary)] hover:opacity-100 focus-visible:rounded-[var(--radius-sm)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] ${isMobile ? 'min-h-11 py-2' : 'py-1'}`}
                               aria-expanded={sessionsExpanded}
                             >
                               {sessionsExpanded
@@ -1447,40 +1466,41 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
 
       {contextMenu && (
         <div
-          className="fixed z-50 min-w-[140px] rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] py-1"
-          style={{ left: contextMenu.x, top: contextMenu.y, boxShadow: 'var(--shadow-dropdown)' }}
+          ref={sessionContextMenuRef}
+          className="fixed z-[var(--z-dropdown)] min-w-[180px] overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] py-2 shadow-[var(--shadow-dropdown)]"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
         >
           <button
             onClick={() => {
               const session = sessions.find((s) => s.id === contextMenu.id)
               handleStartRename(contextMenu.id, session?.title || '')
             }}
-            className="w-full px-3 py-1.5 text-left text-xs text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)]"
+            className="w-full px-4 py-2 text-left text-[13px] text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)]"
           >
             {t('common.rename')}
           </button>
           <button
             onClick={() => handleDelete(contextMenu.id)}
-            className="w-full px-3 py-1.5 text-left text-xs text-[var(--color-error)] transition-colors hover:bg-[var(--color-surface-hover)]"
+            className="w-full px-4 py-2 text-left text-[13px] text-[var(--color-error)] transition-colors hover:bg-[var(--color-error-container)]"
           >
             {t('common.delete')}
           </button>
           <button
-            onClick={() => handleExportSession(contextMenu.id)}
-            className="w-full px-3 py-1.5 text-left text-xs text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)]"
+            onClick={() => void handleExportSession(contextMenu.id)}
+            className="w-full px-4 py-2 text-left text-[13px] text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)]"
           >
             {t('sidebar.exportSession')}
           </button>
           <button
-            onClick={() => handleCopySessionPath(contextMenu.id)}
-            className="w-full px-3 py-1.5 text-left text-xs text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)]"
+            onClick={() => void handleCopySessionPath(contextMenu.id)}
+            className="w-full px-4 py-2 text-left text-[13px] text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)]"
           >
             {t('sidebar.copySessionPath')}
           </button>
           {desktopHost.shell.showItemInFolder && (
             <button
-              onClick={() => handleRevealSession(contextMenu.id)}
-              className="w-full px-3 py-1.5 text-left text-xs text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)]"
+              onClick={() => void handleRevealSession(contextMenu.id)}
+              className="w-full px-4 py-2 text-left text-[13px] text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)]"
             >
               {t('sidebar.revealSession')}
             </button>
@@ -1495,8 +1515,9 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
         const hidden = hiddenProjectKeys.has(project.key)
         return (
           <div
+            ref={projectContextMenuRef}
             role="menu"
-            className="fixed z-50 min-w-[230px] overflow-hidden rounded-[18px] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] py-2 shadow-[var(--shadow-dropdown)]"
+            className="fixed z-[var(--z-dropdown)] min-w-[230px] overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] py-2 shadow-[var(--shadow-dropdown)]"
             style={positionProjectMenu(projectContextMenu.x, projectContextMenu.y)}
             onClick={(event) => event.stopPropagation()}
           >
@@ -1523,10 +1544,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
               onClick={() => {
                 setProjectContextMenu(null)
                 enterBatchMode()
-                const projectSessionIds = sessions
-                  .filter((s) => (s.workDir || s.projectRoot || s.projectPath) === project.workDir)
-                  .map((s) => s.id)
-                selectSessions(projectSessionIds)
+                selectSessions(project.sessions.map((session) => session.id))
               }}
             >
               {t('sidebar.exportProjectSessions')}
@@ -1551,6 +1569,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
 
       {projectHeaderMenu && (
         <ProjectHeaderMenu
+          ref={projectHeaderMenuRef}
           type={projectHeaderMenu.type}
           x={projectHeaderMenu.x}
           y={projectHeaderMenu.y}
@@ -1569,6 +1588,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
 
       {projectHeaderSubmenu && (
         <ProjectHeaderMenu
+          ref={projectHeaderSubmenuRef}
           type={projectHeaderSubmenu.type}
           x={projectHeaderSubmenu.x}
           y={projectHeaderSubmenu.y}
@@ -1631,6 +1651,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
         confirmVariant="danger"
         loading={isBatchDeleting}
       />
+
       <ConfirmDialog
         open={pendingClearProjectKey !== null}
         onClose={() => {
@@ -1640,17 +1661,13 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
         title={t('sidebar.clearProjectSessions')}
         body={(() => {
           const project = pendingClearProjectKey
-            ? orderedProjectGroups.find((g) => g.key === pendingClearProjectKey)
+            ? orderedProjectGroups.find((group) => group.key === pendingClearProjectKey)
             : null
           if (!project) return ''
-          return (
-            <p className="text-sm leading-6 text-[var(--color-text-secondary)]">
-              {t('sidebar.clearProjectSessionsConfirm', {
-                project: project.title,
-                count: project.sessions.length,
-              })}
-            </p>
-          )
+          return t('sidebar.clearProjectSessionsConfirm', {
+            project: project.title,
+            count: project.sessions.length,
+          })
         })()}
         confirmLabel={t('common.delete')}
         cancelLabel={t('common.cancel')}
@@ -1664,40 +1681,19 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
         className="hidden"
         onChange={handleImportFileChange}
       />
-      {sessionContentSearchEnabled ? (
-        <GlobalSearchModal open={activeModal === 'globalSearch'} onClose={closeModal} />
-      ) : null}
+
+      <GlobalSearchModal open={activeModal === 'globalSearch'} onClose={closeModal} />
+      <FindInPageModal open={activeModal === 'findInPage'} onClose={closeModal} />
     </aside>
   )
-}
-
-function readFirstVisibleSessionAnchor(scrollArea: HTMLElement): SessionScrollAnchor | null {
-  const scrollRect = scrollArea.getBoundingClientRect()
-  const rows = scrollArea.querySelectorAll<HTMLElement>('[data-sidebar-session-id]')
-  for (const row of rows) {
-    const rowRect = row.getBoundingClientRect()
-    if (rowRect.bottom <= scrollRect.top || rowRect.top >= scrollRect.bottom) continue
-    const sessionId = row.dataset.sidebarSessionId
-    if (!sessionId) continue
-    return { sessionId, topOffset: rowRect.top - scrollRect.top }
-  }
-  return null
-}
-
-function findSessionRow(scrollArea: HTMLElement, sessionId: string): HTMLElement | null {
-  const rows = scrollArea.querySelectorAll<HTMLElement>('[data-sidebar-session-id]')
-  for (const row of rows) {
-    if (row.dataset.sidebarSessionId === sessionId) return row
-  }
-  return null
 }
 
 function useSessionListAutoRefresh(fetchSessions: () => Promise<void>): () => Promise<void> {
   const inFlightRef = useRef<Promise<void> | null>(null)
   const lastStartedAtRef = useRef(0)
 
-  const refreshSessions = useCallback((force = false, replaceInFlight = false) => {
-    if (inFlightRef.current && !replaceInFlight) return inFlightRef.current
+  const refreshSessions = useCallback((force = false) => {
+    if (inFlightRef.current && !force) return inFlightRef.current
 
     const now = Date.now()
     if (!force && now - lastStartedAtRef.current < SESSION_LIST_FOCUS_REFRESH_MIN_MS) {
@@ -1729,7 +1725,7 @@ function useSessionListAutoRefresh(fetchSessions: () => Promise<void>): () => Pr
     document.addEventListener('visibilitychange', refreshIfVisible)
     const timer = window.setInterval(() => {
       if (!isDocumentVisible()) return
-      void refreshSessions(true)
+      void refreshSessions()
     }, SESSION_LIST_AUTO_REFRESH_MS)
 
     return () => {
@@ -1739,5 +1735,774 @@ function useSessionListAutoRefresh(fetchSessions: () => Promise<void>): () => Pr
     }
   }, [refreshSessions])
 
-  return useCallback(() => refreshSessions(true, true), [refreshSessions])
-}
+  return useCallback(() => refreshSessions(true), [refreshSessions])
+}
+
+function isDocumentVisible(): boolean {
+  return typeof document === 'undefined' || document.visibilityState !== 'hidden'
+}
+
+function readFirstVisibleSessionAnchor(scrollArea: HTMLElement): SessionScrollAnchor | null {
+  const scrollRect = scrollArea.getBoundingClientRect()
+  const rows = scrollArea.querySelectorAll<HTMLElement>('[data-sidebar-session-id]')
+  for (const row of rows) {
+    const rowRect = row.getBoundingClientRect()
+    if (rowRect.bottom <= scrollRect.top || rowRect.top >= scrollRect.bottom) continue
+    const sessionId = row.dataset.sidebarSessionId
+    if (!sessionId) continue
+    return {
+      sessionId,
+      topOffset: rowRect.top - scrollRect.top,
+    }
+  }
+  return null
+}
+
+function findSessionRow(scrollArea: HTMLElement, sessionId: string): HTMLElement | null {
+  const rows = scrollArea.querySelectorAll<HTMLElement>('[data-sidebar-session-id]')
+  for (const row of rows) {
+    if (row.dataset.sidebarSessionId === sessionId) return row
+  }
+  return null
+}
+
+function ProjectHeaderActions({
+  title,
+  menuLabel,
+  createLabel,
+  onOpenMenu,
+  onOpenCreate,
+  actionsRef,
+  isMobile = false,
+}: {
+  title: string
+  menuLabel: string
+  createLabel: string
+  onOpenMenu: (event: React.MouseEvent) => void
+  onOpenCreate: (event: React.MouseEvent) => void
+  /** Handed to `useDismissable` as the trigger, so opening does not self-close. */
+  actionsRef: React.RefObject<HTMLDivElement>
+  isMobile?: boolean
+}) {
+  return (
+    <div
+      data-testid="sidebar-projects-header"
+      className="group/sidebar-projects flex items-center justify-between px-1.5 pb-2 pt-1"
+    >
+      <div className="text-[12px] font-semibold tracking-normal text-[var(--color-text-primary)]">
+        {title}
+      </div>
+      {/* Hover-revealed on desktop. A touch drawer has no hover, and these kept
+          `pointer-events`, so on the phone they were invisible but still
+          tappable — a blind target. */}
+      <div
+        ref={actionsRef}
+        className={`flex items-center transition-opacity focus-within:opacity-100 ${
+          isMobile
+            ? 'gap-1.5 opacity-100'
+            : 'gap-1 opacity-0 group-hover/sidebar-projects:opacity-100'
+        }`}
+      >
+        <IconButton
+          icon={<MoreHorizontal className="h-[18px] w-[18px]" strokeWidth={2} aria-hidden="true" />}
+          label={menuLabel}
+          onClick={onOpenMenu}
+          size={isMobile ? '2xl' : 'md'}
+          tone="muted"
+          surface="sidebar"
+        />
+        <IconButton
+          icon={<FolderPlus className="h-[18px] w-[18px]" strokeWidth={1.9} aria-hidden="true" />}
+          label={createLabel}
+          onClick={onOpenCreate}
+          size={isMobile ? '2xl' : 'md'}
+          tone="muted"
+          surface="sidebar"
+        />
+      </div>
+    </div>
+  )
+}
+
+/**
+ * `forwardRef` because `useDismissable` needs the rendered menu element to tell
+ * an inside click from an outside one. Without it the hook only ever sees
+ * "outside" and the menu closes the moment any item is pressed.
+ */
+const ProjectHeaderMenu = forwardRef<HTMLDivElement, {
+  type: SidebarHeaderMenuType
+  x: number
+  y: number
+  organization: SidebarProjectOrganization
+  sortBy: SidebarProjectSortBy
+  onOpenSubmenu: (event: React.MouseEvent, type: 'organize' | 'sort') => void
+  onSetOrganization: (organization: SidebarProjectOrganization) => void
+  onSetSortBy: (sortBy: SidebarProjectSortBy) => void
+  onCreateBlank: () => void
+  onUseExistingFolder: () => void
+  onRestoreHiddenProjects: () => void
+  hiddenProjectCount: number
+  t: ReturnType<typeof useTranslation>
+}>(function ProjectHeaderMenu({
+  type,
+  x,
+  y,
+  organization,
+  sortBy,
+  onOpenSubmenu,
+  onSetOrganization,
+  onSetSortBy,
+  onCreateBlank,
+  onUseExistingFolder,
+  onRestoreHiddenProjects,
+  hiddenProjectCount,
+  t,
+}, ref) {
+  const width = type === 'sort' ? 230 : type === 'create' ? 250 : 270
+  const style: React.CSSProperties = { left: x, top: y, width, boxShadow: 'var(--shadow-dropdown)' }
+  const className = 'fixed z-[var(--z-dropdown)] overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] py-2 shadow-[var(--shadow-dropdown)]'
+
+  if (type === 'create') {
+    return (
+      <div ref={ref} role="menu" className={className} style={style} onClick={(event) => event.stopPropagation()}>
+        <HeaderMenuItem icon={<SquarePen size={18} aria-hidden="true" />} onClick={onCreateBlank}>
+          {t('sidebar.newBlankProject')}
+        </HeaderMenuItem>
+        <HeaderMenuItem icon={<FolderOpen size={18} aria-hidden="true" />} onClick={onUseExistingFolder}>
+          {t('sidebar.useExistingFolder')}
+        </HeaderMenuItem>
+      </div>
+    )
+  }
+
+  if (type === 'organize') {
+    return (
+      <div ref={ref} role="menu" className={className} style={style} onClick={(event) => event.stopPropagation()}>
+        <HeaderMenuItem icon={<Folder size={18} aria-hidden="true" />} checked={organization === 'project'} onClick={() => onSetOrganization('project')}>
+          {t('sidebar.organizeByProject')}
+        </HeaderMenuItem>
+        <HeaderMenuItem icon={<FolderOpen size={18} aria-hidden="true" />} checked={organization === 'recentProject'} onClick={() => onSetOrganization('recentProject')}>
+          {t('sidebar.organizeByRecentProject')}
+        </HeaderMenuItem>
+        <HeaderMenuItem icon={<Clock size={18} aria-hidden="true" />} checked={organization === 'time'} onClick={() => onSetOrganization('time')}>
+          {t('sidebar.organizeByTime')}
+        </HeaderMenuItem>
+      </div>
+    )
+  }
+
+  if (type === 'sort') {
+    return (
+      <div ref={ref} role="menu" className={className} style={style} onClick={(event) => event.stopPropagation()}>
+        <HeaderMenuItem icon={<Clock size={18} aria-hidden="true" />} checked={sortBy === 'createdAt'} onClick={() => onSetSortBy('createdAt')}>
+          {t('sidebar.sortByCreatedAt')}
+        </HeaderMenuItem>
+        <HeaderMenuItem icon={<RefreshCw size={18} aria-hidden="true" />} checked={sortBy === 'updatedAt'} onClick={() => onSetSortBy('updatedAt')}>
+          {t('sidebar.sortByUpdatedAt')}
+        </HeaderMenuItem>
+      </div>
+    )
+  }
+
+  return (
+    <div ref={ref} role="menu" className={className} style={style} onClick={(event) => event.stopPropagation()}>
+      <HeaderMenuItem
+        icon={<Folder size={18} aria-hidden="true" />}
+        trailing
+        onMouseEnter={(event) => onOpenSubmenu(event, 'organize')}
+        onClick={(event) => onOpenSubmenu(event, 'organize')}
+      >
+        {t('sidebar.organizeSidebar')}
+      </HeaderMenuItem>
+      <HeaderMenuItem
+        icon={<Clock size={18} aria-hidden="true" />}
+        trailing
+        onMouseEnter={(event) => onOpenSubmenu(event, 'sort')}
+        onClick={(event) => onOpenSubmenu(event, 'sort')}
+      >
+        {t('sidebar.sortCondition')}
+      </HeaderMenuItem>
+      {hiddenProjectCount > 0 && (
+        <HeaderMenuItem
+          icon={<RotateCcw size={18} aria-hidden="true" />}
+          onClick={onRestoreHiddenProjects}
+        >
+          {t('sidebar.restoreHiddenProjects', { count: hiddenProjectCount })}
+        </HeaderMenuItem>
+      )}
+    </div>
+  )
+})
+
+function HeaderMenuItem({
+  icon,
+  children,
+  onClick,
+  onMouseEnter,
+  checked = false,
+  trailing = false,
+}: {
+  icon: React.ReactNode
+  children: React.ReactNode
+  onClick: (event: React.MouseEvent<HTMLButtonElement>) => void
+  onMouseEnter?: (event: React.MouseEvent<HTMLButtonElement>) => void
+  checked?: boolean
+  trailing?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={onClick}
+      onMouseEnter={onMouseEnter}
+      className="flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm font-semibold text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:bg-[var(--color-surface-hover)]"
+    >
+      <span className="flex h-5 w-5 shrink-0 items-center justify-center text-[var(--color-text-secondary)]">
+        {icon}
+      </span>
+      <span className="min-w-0 flex-1 truncate">{children}</span>
+      {checked && <Check className="h-[17px] w-[17px] text-[var(--color-text-secondary)]" strokeWidth={2} aria-hidden="true" />}
+      {trailing && !checked && (
+        <ChevronDown className="-rotate-90 h-[17px] w-[17px] text-[var(--color-text-tertiary)]" strokeWidth={2} aria-hidden="true" />
+      )}
+    </button>
+  )
+}
+
+function groupByProject(sessions: SessionListItem[], sortBy: SidebarProjectSortBy): ProjectGroup[] {
+  const groupsByKey = new Map<string, SessionListItem[]>()
+  for (const session of sessions) {
+    const key = getSessionProjectKey(session)
+    const items = groupsByKey.get(key) ?? []
+    items.push(session)
+    groupsByKey.set(key, items)
+  }
+
+  const groups = [...groupsByKey.entries()].map(([key, items]) => {
+    const sortedSessions = [...items].sort((a, b) => compareSessionsByTimestamp(a, b, sortBy))
+    const newest = sortedSessions[0]
+    const projectRoot = newest?.projectRoot || newest?.workDir || key
+    return {
+      key,
+      title: projectTitle(projectRoot),
+      subtitle: projectSubtitle(projectRoot, key),
+      workDir: projectRoot || newest?.workDir || undefined,
+      sessions: sortedSessions,
+    }
+  })
+
+  return groups.sort((a, b) => compareSessionsByTimestamp(a.sessions[0], b.sessions[0], sortBy))
+}
+
+function applyProjectOrder(
+  groups: ProjectGroup[],
+  projectOrder: string[],
+  pinnedProjectKeys: Set<string>,
+  organization: SidebarProjectOrganization,
+  sortBy: SidebarProjectSortBy,
+): ProjectGroup[] {
+  const orderIndex = new Map(projectOrder.map((key, index) => [key, index]))
+  return [...groups].sort((a, b) => {
+    const aPinned = pinnedProjectKeys.has(a.key)
+    const bPinned = pinnedProjectKeys.has(b.key)
+    if (aPinned !== bPinned) return aPinned ? -1 : 1
+    if (organization === 'project') return a.title.localeCompare(b.title)
+    const aIndex = orderIndex.get(a.key)
+    const bIndex = orderIndex.get(b.key)
+    if (aIndex !== undefined && bIndex !== undefined) return aIndex - bIndex
+    if (aIndex !== undefined) return -1
+    if (bIndex !== undefined) return 1
+    return compareSessionsByTimestamp(a.sessions[0], b.sessions[0], sortBy)
+  })
+}
+
+function moveProjectKey(
+  projectKeys: string[],
+  sourceKey: string,
+  targetKey: string,
+  position: 'before' | 'after',
+): string[] {
+  const withoutSource = projectKeys.filter((key) => key !== sourceKey)
+  const targetIndex = withoutSource.indexOf(targetKey)
+  if (targetIndex < 0) return projectKeys
+  const insertIndex = position === 'before' ? targetIndex : targetIndex + 1
+  return [
+    ...withoutSource.slice(0, insertIndex),
+    sourceKey,
+    ...withoutSource.slice(insertIndex),
+  ]
+}
+
+function getProjectDropPosition(event: React.DragEvent<HTMLElement>): 'before' | 'after' {
+  const rect = event.currentTarget.getBoundingClientRect()
+  return event.clientY <= rect.top + rect.height / 2 ? 'before' : 'after'
+}
+
+function readStoredProjectOrder(): string[] {
+  if (typeof localStorage === 'undefined') return []
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PROJECT_ORDER_STORAGE_KEY) ?? '[]')
+    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function writeStoredProjectOrder(projectOrder: string[]): void {
+  if (typeof localStorage === 'undefined') return
+  try {
+    localStorage.setItem(PROJECT_ORDER_STORAGE_KEY, JSON.stringify(projectOrder))
+  } catch {
+    // Sidebar ordering is a UI preference; ignore storage failures.
+  }
+}
+
+function readStoredProjectPins(): Set<string> {
+  if (typeof localStorage === 'undefined') return new Set()
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PROJECT_PINNED_STORAGE_KEY) ?? '[]')
+    return new Set(Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : [])
+  } catch {
+    return new Set()
+  }
+}
+
+function writeStoredProjectPins(projectKeys: Set<string>): void {
+  if (typeof localStorage === 'undefined') return
+  try {
+    localStorage.setItem(PROJECT_PINNED_STORAGE_KEY, JSON.stringify([...projectKeys]))
+  } catch {
+    // Sidebar pinning is a UI preference; ignore storage failures.
+  }
+}
+
+function readStoredProjectHidden(): Set<string> {
+  if (typeof localStorage === 'undefined') return new Set()
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PROJECT_HIDDEN_STORAGE_KEY) ?? '[]')
+    return new Set(Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : [])
+  } catch {
+    return new Set()
+  }
+}
+
+function writeStoredProjectHidden(projectKeys: Set<string>): void {
+  if (typeof localStorage === 'undefined') return
+  try {
+    localStorage.setItem(PROJECT_HIDDEN_STORAGE_KEY, JSON.stringify([...projectKeys]))
+  } catch {
+    // Hidden projects are a local UI preference; ignore storage failures.
+  }
+}
+
+function readStoredProjectOrganization(): SidebarProjectOrganization {
+  if (typeof localStorage === 'undefined') return 'recentProject'
+  return normalizeProjectOrganization(localStorage.getItem(PROJECT_ORGANIZATION_STORAGE_KEY))
+}
+
+function writeStoredProjectOrganization(organization: SidebarProjectOrganization): void {
+  if (typeof localStorage === 'undefined') return
+  try {
+    localStorage.setItem(PROJECT_ORGANIZATION_STORAGE_KEY, organization)
+  } catch {
+    // Sidebar organization is a UI preference; ignore storage failures.
+  }
+}
+
+function readStoredProjectSortBy(): SidebarProjectSortBy {
+  if (typeof localStorage === 'undefined') return 'updatedAt'
+  return normalizeProjectSortBy(localStorage.getItem(PROJECT_SORT_STORAGE_KEY))
+}
+
+function writeStoredProjectSortBy(sortBy: SidebarProjectSortBy): void {
+  if (typeof localStorage === 'undefined') return
+  try {
+    localStorage.setItem(PROJECT_SORT_STORAGE_KEY, sortBy)
+  } catch {
+    // Sidebar sorting is a UI preference; ignore storage failures.
+  }
+}
+
+function buildSidebarProjectPreferences(
+  projectOrder: string[],
+  pinnedProjectKeys: Set<string>,
+  hiddenProjectKeys: Set<string>,
+  projectOrganization: SidebarProjectOrganization,
+  projectSortBy: SidebarProjectSortBy,
+): SidebarProjectPreferences {
+  return normalizeSidebarProjectPreferences({
+    projectOrder,
+    pinnedProjects: [...pinnedProjectKeys],
+    hiddenProjects: [...hiddenProjectKeys],
+    projectOrganization,
+    projectSortBy,
+  })
+}
+
+function readCachedSidebarProjectPreferences(): SidebarProjectPreferences {
+  return {
+    projectOrder: readStoredProjectOrder(),
+    pinnedProjects: [...readStoredProjectPins()],
+    hiddenProjects: [...readStoredProjectHidden()],
+    projectOrganization: readStoredProjectOrganization(),
+    projectSortBy: readStoredProjectSortBy(),
+  }
+}
+
+function writeCachedSidebarProjectPreferences(preferences: SidebarProjectPreferences): void {
+  const normalized = normalizeSidebarProjectPreferences(preferences)
+  writeStoredProjectOrder(normalized.projectOrder)
+  writeStoredProjectPins(new Set(normalized.pinnedProjects))
+  writeStoredProjectHidden(new Set(normalized.hiddenProjects))
+  writeStoredProjectOrganization(normalized.projectOrganization)
+  writeStoredProjectSortBy(normalized.projectSortBy)
+}
+
+function normalizeSidebarProjectPreferences(preferences: Partial<SidebarProjectPreferences> | undefined): SidebarProjectPreferences {
+  return {
+    projectOrder: normalizeProjectKeyList(preferences?.projectOrder),
+    pinnedProjects: normalizeProjectKeyList(preferences?.pinnedProjects),
+    hiddenProjects: normalizeProjectKeyList(preferences?.hiddenProjects),
+    projectOrganization: normalizeProjectOrganization(preferences?.projectOrganization),
+    projectSortBy: normalizeProjectSortBy(preferences?.projectSortBy),
+  }
+}
+
+function normalizeProjectKeyList(values: unknown): string[] {
+  if (!Array.isArray(values)) return []
+  const seen = new Set<string>()
+  const normalized: string[] = []
+
+  for (const value of values) {
+    if (typeof value !== 'string' || value.length === 0 || seen.has(value)) continue
+    seen.add(value)
+    normalized.push(value)
+  }
+
+  return normalized
+}
+
+function normalizeProjectPathForComparison(value: string): string {
+  const normalized = value.replace(/\\/g, '/').replace(/\/+$/g, '') || value
+  return isWindows ? normalized.toLowerCase() : normalized
+}
+
+function isDriveRootComparisonPath(value: string): boolean {
+  return /^[a-z]:$/i.test(value)
+}
+
+function projectPathMatches(projectKey: string, workDir: string): boolean {
+  const normalizedProjectKey = normalizeProjectPathForComparison(projectKey)
+  const normalizedWorkDir = normalizeProjectPathForComparison(workDir)
+
+  if (normalizedProjectKey === normalizedWorkDir) return true
+  if (isDriveRootComparisonPath(normalizedProjectKey)) return false
+  return normalizedWorkDir.startsWith(`${normalizedProjectKey}/`)
+}
+
+function hasSidebarProjectPreferences(preferences: SidebarProjectPreferences): boolean {
+  return preferences.projectOrder.length > 0
+    || preferences.pinnedProjects.length > 0
+    || preferences.hiddenProjects.length > 0
+    || preferences.projectOrganization !== 'recentProject'
+    || preferences.projectSortBy !== 'updatedAt'
+}
+
+function normalizeProjectOrganization(value: unknown): SidebarProjectOrganization {
+  return value === 'project' || value === 'recentProject' || value === 'time' ? value : 'recentProject'
+}
+
+function normalizeProjectSortBy(value: unknown): SidebarProjectSortBy {
+  return value === 'createdAt' || value === 'updatedAt' ? value : 'updatedAt'
+}
+
+function getVisibleProjectSessions(
+  sessions: SessionListItem[],
+  expanded: boolean,
+  activeSessionId: string | null,
+): SessionListItem[] {
+  if (expanded || sessions.length <= PROJECT_GROUP_VISIBLE_COUNT) return sessions
+
+  const visible = sessions.slice(0, PROJECT_GROUP_VISIBLE_COUNT)
+  if (!activeSessionId || visible.some((session) => session.id === activeSessionId)) return visible
+
+  const activeSession = sessions.find((session) => session.id === activeSessionId)
+  return activeSession ? [...visible, activeSession] : visible
+}
+
+function getSessionProjectKey(session: SessionListItem): string {
+  return session.projectRoot || session.workDir || session.projectPath || 'unknown'
+}
+
+function compareSessionsByTimestamp(
+  a: SessionListItem | undefined,
+  b: SessionListItem | undefined,
+  sortBy: SidebarProjectSortBy,
+): number {
+  return getSessionTimestamp(b, sortBy) - getSessionTimestamp(a, sortBy)
+}
+
+function getSessionTimestamp(session: SessionListItem | undefined, sortBy: SidebarProjectSortBy): number {
+  const value = sortBy === 'createdAt' ? session?.createdAt : session?.modifiedAt
+  const timestamp = new Date(value ?? 0).getTime()
+  return Number.isFinite(timestamp) ? timestamp : 0
+}
+
+function projectTitle(pathLike: string | null | undefined): string {
+  if (!pathLike) return 'Unknown project'
+  const normalized = pathLike.replace(/[\\/]+$/, '')
+  const segments = normalized.split(/[\\/]/).filter(Boolean)
+  const last = segments[segments.length - 1]
+  if (last) return last
+  return normalized || 'Unknown project'
+}
+
+function projectSubtitle(projectRoot: string | null | undefined, fallbackKey: string): string | null {
+  if (!projectRoot) return fallbackKey === 'unknown' ? null : fallbackKey
+  return compactProjectPath(projectRoot)
+}
+
+function isWorktreeSession(session: SessionListItem): boolean {
+  if (!session.workDir) return false
+  if (/[\\/]\.claude[\\/]worktrees[\\/]/.test(session.workDir)) return true
+  if (!session.projectRoot || session.workDir === session.projectRoot) return false
+  return !isSameOrChildPath(session.workDir, session.projectRoot)
+}
+
+function isSameOrChildPath(childPath: string, parentPath: string): boolean {
+  const child = normalizePathForCompare(childPath)
+  const parent = normalizePathForCompare(parentPath)
+  return child === parent || child.startsWith(`${parent}/`)
+}
+
+function normalizePathForCompare(pathLike: string): string {
+  return pathLike.replace(/\\/g, '/').replace(/\/+$/, '')
+}
+
+function compactProjectPath(pathLike: string): string {
+  const normalized = normalizePathForCompare(pathLike)
+  const segments = normalized.split('/').filter(Boolean)
+  if (segments.length <= 3) return normalized
+  return `.../${segments.slice(-3, -1).join('/')}`
+}
+
+function domSafeProjectKey(projectKey: string): string {
+  return projectKey.replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'unknown'
+}
+
+function positionProjectMenu(clientX: number, clientY: number): React.CSSProperties {
+  if (typeof window === 'undefined') return { left: clientX, top: clientY }
+  const width = 230
+  const height = 280
+  return {
+    left: Math.max(8, Math.min(clientX, window.innerWidth - width - 8)),
+    top: Math.max(8, Math.min(clientY, window.innerHeight - height - 8)),
+  }
+}
+
+function ProjectMenuItem({
+  icon,
+  children,
+  onClick,
+  disabled = false,
+  danger = false,
+}: {
+  icon: React.ReactNode
+  children: React.ReactNode
+  onClick?: () => void
+  disabled?: boolean
+  danger?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      disabled={disabled}
+      onClick={disabled ? undefined : onClick}
+      className={`flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:bg-[var(--color-surface-hover)] disabled:cursor-default disabled:opacity-45 ${
+        danger
+          ? 'text-[var(--color-error)] enabled:hover:bg-[var(--color-error-container)]'
+          : 'text-[var(--color-text-primary)] enabled:hover:bg-[var(--color-surface-hover)]'
+      }`}
+    >
+      <span className="flex h-5 w-5 shrink-0 items-center justify-center text-current">
+        {icon}
+      </span>
+      <span className="min-w-0 truncate">{children}</span>
+    </button>
+  )
+}
+
+function SessionRowMeta({
+  isRunning,
+  isWorktree,
+  modifiedAt,
+  t,
+  hideTimestamp = false,
+}: {
+  isRunning: boolean
+  isWorktree: boolean
+  modifiedAt: string
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string
+  hideTimestamp?: boolean
+}) {
+  const relativeTime = formatRelativeTime(modifiedAt, t)
+  const updatedLabel = t('session.lastUpdated', { time: relativeTime })
+
+  return (
+    <span
+      className="ml-auto flex h-5 min-w-[78px] flex-shrink-0 items-center justify-end gap-1.5 text-[10px] font-medium tabular-nums text-[var(--color-text-tertiary)]"
+      title={updatedLabel}
+    >
+      {isRunning && (
+        <span
+          className="inline-flex h-4 w-4 flex-shrink-0 items-center justify-center text-[var(--color-success)]"
+          aria-label={t('sidebar.sessionRunning')}
+          title={t('sidebar.sessionRunning')}
+        >
+          {/* The wrapper already carries the name, so the spinner stays silent. */}
+          <Spinner size={14} />
+        </span>
+      )}
+      {isWorktree && (
+        <span
+          className="inline-flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-[5px] text-[var(--color-text-tertiary)]"
+          title={t('sidebar.worktree')}
+        >
+          <GitBranch className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+          <span className="sr-only">{t('sidebar.worktree')}</span>
+        </span>
+      )}
+      {!hideTimestamp ? (
+        <span className="inline-flex min-w-[42px] flex-shrink-0 items-center justify-end">
+          <span>{relativeTime}</span>
+        </span>
+      ) : null}
+    </span>
+  )
+}
+
+function NavItem({
+  active,
+  collapsed,
+  label,
+  touchFriendly,
+  onClick,
+  icon,
+  children,
+}: {
+  active: boolean
+  collapsed: boolean
+  label: string
+  touchFriendly?: boolean
+  onClick: () => void
+  icon: React.ReactNode
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      onClick={onClick}
+      aria-label={label}
+      title={collapsed ? label : undefined}
+      className={`
+        flex items-center transition-colors duration-200
+        focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-surface-sidebar)]
+        ${collapsed ? 'h-10 w-10 justify-center rounded-[var(--radius-md)] px-0 py-0' : `w-full gap-2.5 rounded-[var(--radius-md)] px-3 ${touchFriendly ? 'py-3' : 'py-2.5'} text-[14.5px]`}
+        ${active
+          ? 'bg-[var(--color-sidebar-item-active)] font-medium text-[var(--color-text-primary)]'
+          : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-sidebar-item-hover)] hover:text-[var(--color-text-primary)]'
+        }
+      `}
+    >
+      <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center">
+        {icon}
+      </span>
+      <span className={`sidebar-copy ${collapsed ? 'sidebar-copy--hidden' : 'sidebar-copy--visible'}`}>
+        {children}
+      </span>
+    </button>
+  )
+}
+
+function formatRelativeTime(
+  dateStr: string,
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string,
+): string {
+  const date = new Date(dateStr)
+  const timestamp = date.getTime()
+  if (!Number.isFinite(timestamp)) return ''
+
+  const diff = Date.now() - timestamp
+  const min = Math.floor(diff / 60000)
+  if (min < 1) return t('session.timeJustNow')
+  if (min < 60) return t('session.timeMinutes', { n: min })
+  const hr = Math.floor(min / 60)
+  if (hr < 24) return t('session.timeHours', { n: hr })
+  const day = Math.floor(hr / 24)
+  if (day < 30) return t('session.timeDays', { n: day })
+  return new Intl.DateTimeFormat(undefined, { month: 'numeric', day: 'numeric' }).format(date)
+}
+
+function GitHubIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z" />
+    </svg>
+  )
+}
+
+function PlusIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  )
+}
+
+function ClockIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10" />
+      <polyline points="12 6 12 12 16 14" />
+    </svg>
+  )
+}
+
+function StorefrontIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 9l1.5-5h15L21 9" />
+      <path d="M4 9v11h16V9" />
+      <path d="M4 9c0 1.5 1.3 2.5 2.8 2.5S9.7 10.5 9.7 9c0 1.5 1.3 2.5 2.8 2.5s2.8-1 2.8-2.5c0 1.5 1.3 2.5 2.8 2.5S21 10.5 21 9" />
+      <path d="M9 20v-6h6v6" />
+    </svg>
+  )
+}
+
+function SearchIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="11" cy="11" r="7" />
+      <line x1="21" y1="21" x2="16.65" y2="16.65" />
+    </svg>
+  )
+}
+
+function SidebarToggleIcon({ collapsed }: { collapsed: boolean }) {
+  return (
+    <svg
+      width={collapsed ? 16 : 14}
+      height={collapsed ? 16 : 14}
+      viewBox="0 0 14 14"
+      fill="none"
+      className={`sidebar-toggle-icon ${collapsed ? 'sidebar-toggle-icon--collapsed' : 'sidebar-toggle-icon--open'}`}
+      aria-hidden="true"
+    >
+      <path
+        d={collapsed ? 'M5 3 9 7l-4 4' : 'M9 3 5 7l4 4'}
+        className="sidebar-toggle-chevron"
+      />
+    </svg>
+  )
+}

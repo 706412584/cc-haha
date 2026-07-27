@@ -76,6 +76,9 @@ describe('agentStore', () => {
       mutationWarning: null,
       selectedAgent: null,
       selectedAgentReturnTab: 'agents',
+      requestedCwd: undefined,
+      resolvedCwd: undefined,
+      isContextStale: false,
     })
   })
 
@@ -134,6 +137,47 @@ describe('agentStore', () => {
       allAgents: [newAgent],
       isLoading: false,
       error: null,
+      requestedCwd: '/workspace/new',
+      resolvedCwd: '/workspace/new',
+      isContextStale: false,
+    })
+  })
+
+  it('marks an old project context stale while the next project is pending or fails', async () => {
+    const oldAgent = makeAgent({ agentType: 'old-project', source: 'projectSettings' })
+    const nextRequest = deferred<{ activeAgents: AgentDefinition[]; allAgents: AgentDefinition[] }>()
+    useAgentStore.setState({
+      activeAgents: [oldAgent],
+      allAgents: [oldAgent],
+      selectedAgent: oldAgent,
+      requestedCwd: '/workspace/old',
+      resolvedCwd: '/workspace/old',
+      isContextStale: false,
+    })
+    apiListMock.mockReturnValue(nextRequest.promise)
+
+    const fetch = useAgentStore.getState().fetchAgents('/workspace/new')
+
+    expect(useAgentStore.getState()).toMatchObject({
+      allAgents: [oldAgent],
+      selectedAgent: oldAgent,
+      isLoading: true,
+      requestedCwd: '/workspace/new',
+      resolvedCwd: '/workspace/old',
+      isContextStale: true,
+    })
+
+    nextRequest.reject(new Error('New project unavailable'))
+    await fetch
+
+    expect(useAgentStore.getState()).toMatchObject({
+      allAgents: [oldAgent],
+      selectedAgent: oldAgent,
+      isLoading: false,
+      error: 'New project unavailable',
+      requestedCwd: '/workspace/new',
+      resolvedCwd: '/workspace/old',
+      isContextStale: true,
     })
   })
 
@@ -252,6 +296,10 @@ describe('agentStore', () => {
     const currentFetch = useAgentStore.getState().fetchAgents('/workspace/current-project')
     currentRefresh.resolve({ activeAgents: [currentAgent], allAgents: [currentAgent] })
     await currentFetch
+    expect(useAgentStore.getState()).toMatchObject({
+      allAgents: [currentAgent],
+      isMutating: true,
+    })
     mutationRefresh.resolve({ activeAgents: [oldAgent], allAgents: [oldAgent] })
     await expect(mutation).resolves.toBe(oldAgent)
 
@@ -260,6 +308,36 @@ describe('agentStore', () => {
       allAgents: [currentAgent],
       selectedAgent: null,
       isMutating: false,
+    })
+  })
+
+  it('keeps a persistent write busy across a project fetch without exposing its late error there', async () => {
+    const write = deferred<{ agent: AgentDefinition }>()
+    const currentAgent = makeAgent({ agentType: 'current-project', source: 'projectSettings' })
+    apiCreateMock.mockReturnValue(write.promise)
+    apiListMock.mockResolvedValue({
+      activeAgents: [currentAgent],
+      allAgents: [currentAgent],
+    })
+
+    const mutation = useAgentStore.getState().createAgent(
+      makeInput({ scope: 'project', cwd: '/workspace/old-project' }),
+    )
+    await vi.waitFor(() => expect(apiCreateMock).toHaveBeenCalledTimes(1))
+
+    await useAgentStore.getState().fetchAgents('/workspace/current-project')
+    expect(useAgentStore.getState()).toMatchObject({
+      allAgents: [currentAgent],
+      isMutating: true,
+      mutationError: null,
+    })
+
+    write.reject(new Error('Old project create failed'))
+    await expect(mutation).rejects.toThrow('Old project create failed')
+    expect(useAgentStore.getState()).toMatchObject({
+      allAgents: [currentAgent],
+      isMutating: false,
+      mutationError: null,
     })
   })
 

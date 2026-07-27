@@ -17,7 +17,6 @@ export type TerminalSpawnInput = {
   cols?: number
   rows?: number
   cwd?: string
-  shell?: string
 }
 
 export type TerminalSpawnResult = {
@@ -65,7 +64,9 @@ export type TerminalAppLike = {
 
 export type TerminalWebContentsLike = {
   send(channel: string, payload: unknown): void
-  isDestroyed?(): boolean
+  isDestroyed(): boolean
+  once(event: 'destroyed', listener: () => void): unknown
+  removeListener(event: 'destroyed', listener: () => void): unknown
 }
 
 export type ElectronTerminalServiceOptions = {
@@ -80,12 +81,8 @@ export type ElectronTerminalServiceOptions = {
   cwd?: () => string
 }
 
-type TerminalConfig = {
+type TerminalConfig = Record<string, unknown> & {
   bash_path?: string | null
-}
-
-type DesktopTerminalSettingsFile = {
-  desktopTerminal?: DesktopTerminalConfig | null
 }
 
 type DesktopTerminalConfig = {
@@ -95,14 +92,19 @@ type DesktopTerminalConfig = {
 
 type TerminalSession = {
   pty: TerminalPtyProcess
+  owner: TerminalWebContentsLike
+  onOwnerDestroyed: () => void
 }
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
 
 function sendTerminalEvent(
   webContents: TerminalWebContentsLike,
   channel: string,
   payload: TerminalOutputPayload | TerminalExitPayload,
 ): void {
-  if (webContents.isDestroyed?.()) return
+  if (webContents.isDestroyed()) return
 
   try {
     webContents.send(channel, payload)
@@ -145,7 +147,7 @@ export function desktopTerminalSettingsPath(
 }
 
 export function normalizeTerminalBashPath(
-  value: string | null | undefined,
+  value: unknown,
   isFile: (filePath: string) => boolean = filePath => {
     try {
       return fs.statSync(filePath).isFile()
@@ -154,7 +156,7 @@ export function normalizeTerminalBashPath(
     }
   },
 ): string | null {
-  const trimmed = value?.trim()
+  const trimmed = typeof value === 'string' ? value.trim() : ''
   if (!trimmed) return null
   if (!isFile(trimmed)) {
     throw new Error(`terminal bash path does not exist: ${trimmed}`)
@@ -165,11 +167,11 @@ export function normalizeTerminalBashPath(
 export function defaultShell(
   platform: NodeJS.Platform = process.platform,
   env: NodeJS.ProcessEnv = process.env,
-  customBashPath: string | null = null,
+  customBashPath: unknown = null,
   fileExists: (filePath: string) => boolean = fs.existsSync,
 ): string {
   if (platform === 'win32') {
-    const bashPath = customBashPath?.trim()
+    const bashPath = typeof customBashPath === 'string' ? customBashPath.trim() : ''
     if (bashPath && fileExists(bashPath)) return bashPath
     return env.COMSPEC || 'powershell.exe'
   }
@@ -182,7 +184,9 @@ export function resolveDesktopTerminalShell(
   config: DesktopTerminalConfig | null | undefined,
 ): string | null {
   if (platform !== 'win32' || !config) return null
-  const startupShell = config.startupShell?.trim()
+  const startupShell = typeof config.startupShell === 'string'
+    ? config.startupShell.trim()
+    : undefined
   switch (startupShell) {
     case undefined:
     case '':
@@ -195,7 +199,9 @@ export function resolveDesktopTerminalShell(
     case 'cmd':
       return 'cmd.exe'
     case 'custom': {
-      const customShellPath = config.customShellPath?.trim()
+      const customShellPath = typeof config.customShellPath === 'string'
+        ? config.customShellPath.trim()
+        : ''
       if (!customShellPath) throw new Error('custom terminal shell path is empty')
       return customShellPath
     }
@@ -260,8 +266,25 @@ export function readDesktopTerminalConfig(
   const settingsPath = desktopTerminalSettingsPath(env, platform)
   if (!settingsPath) return null
   try {
-    const parsed = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as DesktopTerminalSettingsFile
-    return parsed.desktopTerminal ?? null
+    const parsed = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as unknown
+    if (!isRecord(parsed) || !isRecord(parsed.desktopTerminal)) return null
+    const startupShell = typeof parsed.desktopTerminal.startupShell === 'string'
+      ? parsed.desktopTerminal.startupShell
+      : null
+    const customShellPath = typeof parsed.desktopTerminal.customShellPath === 'string'
+      ? parsed.desktopTerminal.customShellPath
+      : null
+    const normalizedStartupShell = startupShell?.trim() ?? ''
+    if (!['', 'system', 'pwsh', 'powershell', 'cmd', 'custom'].includes(normalizedStartupShell)) {
+      return null
+    }
+    if (normalizedStartupShell === 'custom' && !customShellPath?.trim()) {
+      return null
+    }
+    return {
+      startupShell,
+      customShellPath,
+    }
   } catch {
     return null
   }
@@ -276,7 +299,13 @@ function loadTerminalConfig(app: TerminalAppLike | undefined, env: NodeJS.Proces
   }
   for (const candidate of candidates) {
     try {
-      return JSON.parse(fs.readFileSync(candidate, 'utf8')) as TerminalConfig
+      const parsed = JSON.parse(fs.readFileSync(candidate, 'utf8')) as unknown
+      if (!isRecord(parsed)) continue
+      const config: TerminalConfig = { ...parsed }
+      if (typeof config.bash_path !== 'string' && config.bash_path !== null) {
+        delete config.bash_path
+      }
+      return config
     } catch {
       // Try the old Electron userData location before using defaults.
     }
@@ -563,74 +592,154 @@ export class ElectronTerminalService {
     const rows = Math.max(MIN_TERMINAL_ROWS, Math.floor(input.rows ?? 24))
     const cwd = resolveTerminalCwd(input.cwd, this.env, this.cwd)
     const shell = this.resolveShell()
-    const ptyFactory = await resolvePtyFactory(this.ptyFactory, this.nodePtySourceDir, this.nodePtyCacheDir)
-    const sessionId = this.nextSessionId++
-    const pty = ptyFactory.spawn(shell, [], {
-      name: 'xterm-256color',
-      cols,
-      rows,
-      cwd,
-      env: {
-        ...terminalEnvironment(shell, this.platform, this.env),
-        TERM: 'xterm-256color',
-        COLORTERM: 'truecolor',
-      },
-    })
+    let rendererDestroyed = webContents.isDestroyed()
+    if (rendererDestroyed) throw new Error('terminal renderer is destroyed')
 
-    this.sessions.set(sessionId, { pty })
-
-    pty.onData(data => {
-      if (this.sessions.get(sessionId)?.pty !== pty) return
-      sendTerminalEvent(webContents, ELECTRON_EVENT_CHANNELS.terminalOutput, {
-        session_id: sessionId,
-        data,
-      } satisfies TerminalOutputPayload)
-    })
-
-    pty.onExit(({ exitCode, signal }) => {
-      if (this.sessions.get(sessionId)?.pty !== pty) return
+    let sessionId: number | null = null
+    let pty: TerminalPtyProcess | null = null
+    let ptyDisposed = false
+    const disposePty = () => {
+      if (!pty || ptyDisposed) return
+      ptyDisposed = true
+      try {
+        pty.kill()
+      } catch {
+        // Renderer teardown must not surface a native PTY kill error.
+      }
+    }
+    const onOwnerDestroyed = () => {
+      rendererDestroyed = true
+      if (sessionId === null || !pty) return
+      const active = this.sessions.get(sessionId)
+      if (active?.pty !== pty) return
       this.sessions.delete(sessionId)
-      sendTerminalEvent(webContents, ELECTRON_EVENT_CHANNELS.terminalExit, {
-        session_id: sessionId,
-        code: exitCode,
-        signal: signal == null ? null : String(signal),
-      } satisfies TerminalExitPayload)
-    })
+      this.detachOwnerListener(active)
+      disposePty()
+    }
+    webContents.once('destroyed', onOwnerDestroyed)
 
-    return {
-      session_id: sessionId,
-      shell,
-      cwd,
+    try {
+      const ptyFactory = await resolvePtyFactory(this.ptyFactory, this.nodePtySourceDir, this.nodePtyCacheDir)
+      if (rendererDestroyed || webContents.isDestroyed()) {
+        throw new Error('terminal renderer is destroyed')
+      }
+
+      sessionId = this.nextSessionId++
+      pty = ptyFactory.spawn(shell, [], {
+        name: 'xterm-256color',
+        cols,
+        rows,
+        cwd,
+        env: {
+          ...terminalEnvironment(shell, this.platform, this.env),
+          TERM: 'xterm-256color',
+          COLORTERM: 'truecolor',
+        },
+      })
+
+      if (rendererDestroyed || webContents.isDestroyed()) {
+        disposePty()
+        throw new Error('terminal renderer is destroyed')
+      }
+
+      const activeSessionId = sessionId
+      const activePty = pty
+      this.sessions.set(activeSessionId, {
+        pty: activePty,
+        owner: webContents,
+        onOwnerDestroyed,
+      })
+
+      activePty.onData(data => {
+        if (this.sessions.get(activeSessionId)?.pty !== activePty) return
+        sendTerminalEvent(webContents, ELECTRON_EVENT_CHANNELS.terminalOutput, {
+          session_id: activeSessionId,
+          data,
+        } satisfies TerminalOutputPayload)
+      })
+
+      activePty.onExit(({ exitCode, signal }) => {
+        const active = this.removeSession(activeSessionId, activePty)
+        if (!active) return
+        sendTerminalEvent(webContents, ELECTRON_EVENT_CHANNELS.terminalExit, {
+          session_id: activeSessionId,
+          code: exitCode,
+          signal: signal == null ? null : String(signal),
+        } satisfies TerminalExitPayload)
+      })
+
+      if (rendererDestroyed || webContents.isDestroyed()) {
+        const active = this.removeSession(activeSessionId, activePty)
+        if (active) disposePty()
+        throw new Error('terminal renderer is destroyed')
+      }
+
+      return {
+        session_id: activeSessionId,
+        shell,
+        cwd,
+      }
+    } catch (error) {
+      if (sessionId !== null && pty) {
+        const active = this.removeSession(sessionId, pty)
+        if (active) disposePty()
+      }
+      webContents.removeListener('destroyed', onOwnerDestroyed)
+      throw error
     }
   }
 
-  write(sessionId: number, data: string): void {
-    this.getSession(sessionId).pty.write(data)
+  write(sessionId: number, data: string, owner: TerminalWebContentsLike): void {
+    this.getSession(sessionId, owner).pty.write(data)
   }
 
-  resize(sessionId: number, cols: number, rows: number): void {
-    this.getSession(sessionId).pty.resize(
+  resize(sessionId: number, cols: number, rows: number, owner: TerminalWebContentsLike): void {
+    this.getSession(sessionId, owner).pty.resize(
       Math.max(MIN_TERMINAL_COLS, Math.floor(cols)),
       Math.max(MIN_TERMINAL_ROWS, Math.floor(rows)),
     )
   }
 
-  kill(sessionId: number): void {
+  kill(sessionId: number, owner: TerminalWebContentsLike): void {
     const session = this.sessions.get(sessionId)
     if (!session) return
-    this.sessions.delete(sessionId)
-    session.pty.kill()
+    this.assertSessionOwner(session, owner)
+    this.stopSession(sessionId, session)
   }
 
   killAll(): void {
-    for (const sessionId of Array.from(this.sessions.keys())) {
-      this.kill(sessionId)
+    for (const [sessionId, session] of Array.from(this.sessions.entries())) {
+      this.stopSession(sessionId, session)
     }
   }
 
-  private getSession(sessionId: number): TerminalSession {
+  private getSession(sessionId: number, owner: TerminalWebContentsLike): TerminalSession {
     const session = this.sessions.get(sessionId)
     if (!session) throw new Error('terminal session is not running')
+    this.assertSessionOwner(session, owner)
     return session
+  }
+
+  private assertSessionOwner(session: TerminalSession, owner: TerminalWebContentsLike): void {
+    if (session.owner !== owner) {
+      throw new Error('terminal session is owned by another renderer')
+    }
+  }
+
+  private detachOwnerListener(session: TerminalSession): void {
+    session.owner.removeListener('destroyed', session.onOwnerDestroyed)
+  }
+
+  private removeSession(sessionId: number, expectedPty: TerminalPtyProcess): TerminalSession | null {
+    const session = this.sessions.get(sessionId)
+    if (!session || session.pty !== expectedPty) return null
+    this.sessions.delete(sessionId)
+    this.detachOwnerListener(session)
+    return session
+  }
+
+  private stopSession(sessionId: number, session: TerminalSession): void {
+    if (!this.removeSession(sessionId, session.pty)) return
+    session.pty.kill()
   }
 }

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   classifyH5Request,
   isLoopbackHost,
+  requiresLocalAccessCredential,
   shouldBlockDisabledH5Access,
   shouldRequireH5Token,
 } from '../h5AccessPolicy.js'
@@ -193,9 +194,7 @@ describe('h5AccessPolicy', () => {
     }
   })
 
-  test('requires the configured local credential even when a proxy perfectly mimics loopback', () => {
-    const request = req('http://127.0.0.1:3456/api/h5-access')
-    const url = new URL(request.url)
+  test('requires the configured local credential to reach the H5 control plane', () => {
     const unauthorizedContext = {
       clientAddress: '127.0.0.1',
       localAccessTokenConfigured: true,
@@ -206,15 +205,72 @@ describe('h5AccessPolicy', () => {
       localAccessAuthorized: true,
     }
 
-    expect(classifyH5Request(request, url, unauthorizedContext)).toBe('h5-browser')
-    expect(shouldBlockDisabledH5Access({
-      request,
-      url,
-      h5Enabled: false,
-      explicitAuthRequired: false,
-      context: unauthorizedContext,
-    })).toBe(true)
-    expect(classifyH5Request(request, url, authorizedContext)).toBe('local-trusted')
+    for (const pathname of ['/api/h5-access', '/api/h5-access/enable']) {
+      expect(requiresLocalAccessCredential(pathname, unauthorizedContext)).toBe(true)
+      expect(requiresLocalAccessCredential(pathname, authorizedContext)).toBe(false)
+    }
+
+    // Verifying a token the phone already holds is not a control-plane change,
+    // and an unmanaged (tokenless) server must not lock itself out either.
+    expect(requiresLocalAccessCredential('/api/h5-access/verify', unauthorizedContext)).toBe(false)
+    expect(requiresLocalAccessCredential('/api/h5-access', { clientAddress: '127.0.0.1' })).toBe(false)
+  })
+
+  test('keeps ordinary loopback capabilities usable without the desktop process token', () => {
+    // The desktop shell injects a process token, but the OAuth success page the
+    // system browser opens, a `/preview-fs` link and plain `curl` can never
+    // carry it. Gating loopback behind that token 401'd all of them.
+    const desktopContext = {
+      clientAddress: '127.0.0.1',
+      localAccessTokenConfigured: true,
+      localAccessAuthorized: false,
+    }
+
+    for (const pathname of [
+      '/api/haha-grok-oauth/success',
+      '/api/sessions',
+      '/preview-fs/session-1/index.html',
+      '/ws/session-1',
+    ]) {
+      const request = req(`http://127.0.0.1:3456${pathname}`)
+      const url = new URL(request.url)
+
+      expect(classifyH5Request(request, url, desktopContext)).toBe('local-trusted')
+      expect(shouldRequireH5Token({ request, url, h5Enabled: true, context: desktopContext })).toBe(false)
+      expect(shouldBlockDisabledH5Access({
+        request,
+        url,
+        h5Enabled: false,
+        explicitAuthRequired: false,
+        context: desktopContext,
+      })).toBe(false)
+    }
+  })
+
+  test('does not extend loopback trust to cross-site subresource loads', () => {
+    // `<img src="http://127.0.0.1:3456/api/...">` from a malicious page reaches
+    // us without an Origin header; only Fetch Metadata separates it from a real
+    // local navigation.
+    const request = req('http://127.0.0.1:3456/api/sessions', {
+      headers: {
+        'Sec-Fetch-Site': 'cross-site',
+        'Sec-Fetch-Mode': 'no-cors',
+        'Sec-Fetch-Dest': 'image',
+      },
+    })
+    expect(classifyH5Request(request, new URL(request.url), localContext)).toBe('h5-browser')
+
+    for (const headers of [
+      // The OAuth provider redirecting the browser back to us.
+      { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document' },
+      // The user opening the URL from the address bar or `shell.open`.
+      { 'Sec-Fetch-Site': 'none', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document' },
+      // The local H5 shell calling its own API.
+      { 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'empty' },
+    ]) {
+      const allowed = req('http://127.0.0.1:3456/api/sessions', { headers })
+      expect(classifyH5Request(allowed, new URL(allowed.url), localContext)).toBe('local-trusted')
+    }
   })
 
   test('does not grant internal SDK trust to a request carrying proxy traces', () => {

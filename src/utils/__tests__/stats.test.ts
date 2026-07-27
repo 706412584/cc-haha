@@ -324,6 +324,61 @@ describe('activity stats token accounting', () => {
     expect(totalForDate(thirtyDays.dailyModelTokens, '2026-06-15')).toBe(0)
   })
 
+  it('counts calendar days instead of rounding timestamps within one UTC day', async () => {
+    const now = new Date('2026-07-15T23:59:30.000Z')
+    await writeJsonl(projectFile('early-session'), [
+      userEntry('early-user', '2026-07-15T00:01:00.000Z'),
+      assistantEntry(
+        'early-assistant',
+        '2026-07-15T00:02:00.000Z',
+        { input_tokens: 1 },
+        { parentUuid: 'early-user' },
+      ),
+    ])
+    await writeJsonl(projectFile('late-session'), [
+      userEntry('late-user', '2026-07-15T23:58:00.000Z'),
+      assistantEntry(
+        'late-assistant',
+        '2026-07-15T23:59:00.000Z',
+        { input_tokens: 1 },
+        { parentUuid: 'late-user' },
+      ),
+    ])
+
+    const stats = await aggregateClaudeCodeStatsForRange('7d', { now })
+
+    expect(stats.totalSessions).toBe(2)
+    expect(stats.totalDays).toBe(1)
+  })
+
+  it('anchors the current streak to the UTC activity date in positive-offset timezones', async () => {
+    const originalTimezone = process.env.TZ
+    process.env.TZ = 'Asia/Shanghai'
+    try {
+      const now = new Date('2026-07-15T01:00:00.000Z')
+      await writeJsonl(projectFile('utc-today-session'), [
+        userEntry('today-user', '2026-07-15T00:20:00.000Z'),
+        assistantEntry(
+          'today-assistant',
+          '2026-07-15T00:21:00.000Z',
+          { input_tokens: 1 },
+          { parentUuid: 'today-user' },
+        ),
+      ])
+
+      const stats = await aggregateClaudeCodeStatsForRange('7d', { now })
+
+      expect(stats.streaks.currentStreak).toBe(1)
+      expect(stats.streaks.currentStreakStart).toBe('2026-07-15')
+    } finally {
+      if (originalTimezone === undefined) {
+        delete process.env.TZ
+      } else {
+        process.env.TZ = originalTimezone
+      }
+    }
+  })
+
   it('invalidates pre-v6 stats caches because cached aggregates lack tool usage', async () => {
     await mkdir(tmpConfigDir, { recursive: true })
     await writeFile(

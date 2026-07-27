@@ -9,9 +9,14 @@
 import * as path from 'path'
 import * as fs from 'fs/promises'
 import { parseFrontmatter } from '../../utils/frontmatterParser.js'
-import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
-import { getProjectDirsUpToHome } from '../../utils/markdownConfigLoader.js'
 import { getCwd } from '../../utils/cwd.js'
+import {
+  getProjectSkillRoots,
+  getUserSkillRoots,
+  outranksClaimedSkill,
+  type SkillRoot,
+  type SkillRootFlavor,
+} from '../../skills/skillRoots.js'
 import { clearInstalledPluginsCache } from '../../utils/plugins/installedPluginsManager.js'
 import { clearPluginCache, loadAllPlugins, loadAllPluginsCacheOnly } from '../../utils/plugins/pluginLoader.js'
 import { getSkillDirCommands } from '../../skills/loadSkillsDir.js'
@@ -25,6 +30,7 @@ import {
 import { getActiveSkillNames } from '../../skills/activeSkills.js'
 import { getGlobalConfig, getCurrentProjectConfig, saveCurrentProjectConfig, saveGlobalConfig } from '../../utils/config.js'
 import { ApiError, errorResponse } from '../middleware/errorHandler.js'
+import { readMarketMeta } from '../services/market/marketService.js'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -33,6 +39,11 @@ type SkillMeta = {
   displayName?: string
   description: string
   source: 'user' | 'project' | 'plugin'
+  /**
+   * Which directory convention the skill was found in — `.claude/skills` or the
+   * cross-client `.agents/skills`. Absent for plugin skills.
+   */
+  rootFlavor?: SkillRootFlavor
   userInvocable: boolean
   version?: string
   contentLength: number
@@ -90,16 +101,8 @@ function normalizeFrontmatter(content: string, sourcePath?: string): {
   }
 }
 
-function getUserSkillsDir(): string {
-  return path.join(getClaudeConfigHomeDir(), 'skills')
-}
-
 function getRequestedCwd(url: URL): string {
   return url.searchParams.get('cwd') || getCwd()
-}
-
-function getProjectSkillsDirs(cwd: string): string[] {
-  return getProjectDirsUpToHome('skills', cwd)
 }
 
 async function loadSkillMeta(
@@ -107,6 +110,7 @@ async function loadSkillMeta(
   skillName: string,
   source: SkillSource,
   pluginName?: string,
+  rootFlavor?: SkillRootFlavor,
 ): Promise<SkillMeta | null> {
   const skillFile = path.join(skillDir, 'SKILL.md')
   try {
@@ -126,6 +130,7 @@ async function loadSkillMeta(
       displayName: (frontmatter.name as string) || undefined,
       description,
       source,
+      rootFlavor,
       userInvocable: frontmatter['user-invocable'] !== false,
       version: frontmatter.version != null ? String(frontmatter.version) : undefined,
       contentLength: raw.length,
@@ -219,7 +224,7 @@ async function buildFileTree(
 }
 
 async function collectSkillsFromRoots(
-  skillRoots: string[],
+  skillRoots: SkillRoot[],
   source: SkillSource,
 ): Promise<SkillMeta[]> {
   const skills: SkillMeta[] = []
@@ -228,7 +233,7 @@ async function collectSkillsFromRoots(
   for (const root of skillRoots) {
     let entries: import('fs').Dirent[]
     try {
-      entries = await fs.readdir(root, { withFileTypes: true })
+      entries = await fs.readdir(root.path, { withFileTypes: true })
     } catch {
       continue
     }
@@ -237,12 +242,20 @@ async function collectSkillsFromRoots(
       if (
         (!entry.isDirectory() && !entry.isSymbolicLink()) ||
         entry.name.startsWith('.') ||
+        // First root wins. Roots are ordered `.claude` before `.agents`, so a
+        // skill present in both conventions is reported once, as `.claude`.
         seenNames.has(entry.name)
       ) {
         continue
       }
 
-      const meta = await loadSkillMeta(path.join(root, entry.name), entry.name, source)
+      const meta = await loadSkillMeta(
+        path.join(root.path, entry.name),
+        entry.name,
+        source,
+        undefined,
+        root.flavor,
+      )
       if (!meta) continue
 
       seenNames.add(entry.name)
@@ -257,20 +270,22 @@ async function resolveSkillDir(
   source: SkillSource,
   name: string,
   cwd: string,
-): Promise<string | null> {
+): Promise<{ skillDir: string; rootFlavor: SkillRootFlavor } | null> {
   const skillRoots =
     source === 'user'
-      ? [getUserSkillsDir()]
+      ? getUserSkillRoots()
       : source === 'project'
-        ? getProjectSkillsDirs(cwd)
+        ? getProjectSkillRoots(cwd)
         : []
 
   for (const root of skillRoots) {
-    const skillDir = path.join(root, name)
+    const skillDir = path.join(root.path, name)
     try {
       const stat = await fs.stat(skillDir)
       if (stat.isDirectory()) {
-        return skillDir
+        // Same first-wins order as the listing, so detail and list agree on
+        // which copy of a colliding name they describe.
+        return { skillDir, rootFlavor: root.flavor }
       }
     } catch {
       // Try the next candidate root.
@@ -400,14 +415,19 @@ async function collectPluginSkills(): Promise<SkillMeta[]> {
 
 async function collectAllSkills(cwd?: string): Promise<SkillMeta[]> {
   const [userSkills, projectSkills, pluginSkills] = await Promise.all([
-    collectSkillsFromRoots([getUserSkillsDir()], 'user'),
-    collectSkillsFromRoots(getProjectSkillsDirs(cwd), 'project'),
+    collectSkillsFromRoots(getUserSkillRoots(), 'user'),
+    collectSkillsFromRoots(getProjectSkillRoots(cwd ?? getCwd()), 'project'),
     collectPluginSkills(),
   ])
 
   const skills = [...userSkills, ...projectSkills, ...pluginSkills]
   skills.sort((a, b) => a.name.localeCompare(b.name))
   return skills
+}
+
+export async function collectUserSkillNames(): Promise<Set<string>> {
+  const skills = await collectSkillsFromRoots(getUserSkillRoots(), 'user')
+  return new Set(skills.map((skill) => skill.name))
 }
 
 export async function listSkillSlashCommands(cwd?: string): Promise<SkillSlashCommand[]> {
@@ -417,23 +437,37 @@ export async function listSkillSlashCommands(cwd?: string): Promise<SkillSlashCo
     collectLegacySlashCommands(requestedCwd),
   ])
 
-  const byName = new Map<string, SkillSlashCommand>()
+  // Same precedence the CLI loader applies, so the composer menu and the
+  // command it runs always come from one file. See outranksClaimedSkill.
+  const byName = new Map<
+    string,
+    { command: SkillSlashCommand; flavor: SkillRootFlavor | undefined }
+  >()
 
   for (const skill of skills) {
     if (!skill.userInvocable) continue
+    const claimed = byName.get(skill.name)
+    if (
+      claimed !== undefined &&
+      !outranksClaimedSkill(claimed.flavor, skill.rootFlavor)
+    ) {
+      continue
+    }
     byName.set(skill.name, {
-      name: skill.name,
-      description: skill.description || '',
+      command: { name: skill.name, description: skill.description || '' },
+      flavor: skill.rootFlavor,
     })
   }
 
   for (const command of legacyCommands) {
     if (!byName.has(command.name)) {
-      byName.set(command.name, command)
+      byName.set(command.name, { command, flavor: undefined })
     }
   }
 
-  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name))
+  return [...byName.values()]
+    .map(claim => claim.command)
+    .sort((a, b) => a.name.localeCompare(b.name))
 }
 
 // ─── Router ──────────────────────────────────────────────────────────────────
@@ -508,41 +542,48 @@ async function getSkillDetail(url: URL): Promise<Response> {
     source === 'plugin' ? await collectPluginSkillDirectories() : null
 
   const pluginLocation = pluginLocations?.get(name)
-  const skillDir =
+  const resolved =
     source === 'plugin'
-      ? pluginLocation?.skillDir ?? null
+      ? pluginLocation?.skillDir
+        ? { skillDir: pluginLocation.skillDir, rootFlavor: undefined }
+        : null
       : await resolveSkillDir(source, name, cwd)
 
-  if (!skillDir) {
+  if (!resolved) {
     throw ApiError.notFound(`Skill not found: ${name}`)
   }
+
+  const { skillDir, rootFlavor } = resolved
 
   const meta = await loadSkillMeta(
     skillDir,
     name,
     source,
     pluginLocation?.pluginName,
+    rootFlavor,
   )
   if (!meta) {
     throw ApiError.notFound(`Skill missing SKILL.md: ${name}`)
   }
 
   const { tree, files } = await buildFileTree(skillDir)
+  const marketMeta = source === 'user'
+    ? await readMarketMeta(name) ?? undefined
+    : undefined
 
   return Response.json({
-    detail: { meta, tree, files, skillRoot: skillDir },
+    detail: { meta, tree, files, skillRoot: skillDir, marketMeta },
   })
 }
 
 // ─── Catalog (one-click install) ───────────────────────────────────────────────
 
+function getCatalogInstallRoot(): string {
+  return getUserSkillRoots().find(root => root.flavor === 'claude')!.path
+}
+
 async function isInstalledUserSkill(name: string): Promise<boolean> {
-  try {
-    const stat = await fs.stat(path.join(getUserSkillsDir(), name))
-    return stat.isDirectory()
-  } catch {
-    return false
-  }
+  return (await resolveSkillDir('user', name, getCwd())) !== null
 }
 
 async function getCatalog(): Promise<Response> {
@@ -596,7 +637,7 @@ async function installCatalogSkill(req: Request): Promise<Response> {
     throw ApiError.notFound(`Unknown catalog skill: ${name}`)
   }
 
-  const targetDir = path.join(getUserSkillsDir(), entry.name)
+  const targetDir = path.join(getCatalogInstallRoot(), entry.name)
 
   // Idempotent: never overwrite an existing skill directory.
   if (await isInstalledUserSkill(entry.name)) {

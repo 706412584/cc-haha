@@ -112,7 +112,7 @@ describe('MarkdownRenderer', () => {
     render(<MarkdownRenderer content={'```mermaid\ngraph TB\nA-->B'} streaming />)
 
     expect(screen.getByTestId('mermaid-streaming-placeholder')).toHaveTextContent(
-      'Generating diagram...',
+      '正在生成图表…',
     )
     expect(screen.queryByTestId('mermaid-renderer')).not.toBeInTheDocument()
     expect(screen.queryByTestId('code-viewer')).not.toBeInTheDocument()
@@ -344,7 +344,7 @@ describe('MarkdownRenderer', () => {
         expect(execCommand).toHaveBeenCalledWith('copy')
       })
       expect(writeText).toHaveBeenCalledWith('npm run verify')
-      expect(screen.getByRole('button', { name: 'Copied' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '已复制' })).toBeInTheDocument()
     } finally {
       Object.defineProperty(document, 'execCommand', {
         configurable: true,

@@ -99,6 +99,12 @@ export type TranscriptActivityProjection = {
   isSubagent: boolean
   firstTimestamp: string | null
   lastTimestamp: string | null
+  /**
+   * Time actually spent working, summed over gaps between consecutive messages that are shorter
+   * than `ACTIVE_SESSION_GAP_MS`. `lastTimestamp - firstTimestamp` is a calendar span, not a
+   * duration: a session resumed the next morning would report the whole night as task time.
+   */
+  activeDurationMs: number
   messageCount: number
   startHour: number | null
   speculationTimeSavedMs: number

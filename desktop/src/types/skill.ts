@@ -1,10 +1,18 @@
 export type SkillSource = 'user' | 'project' | 'plugin' | 'mcp' | 'bundled'
 
+/**
+ * Which directory convention a skill was found in: our native `.claude/skills`
+ * or the cross-client `.agents/skills` shared with Codex, Cursor, and Gemini CLI.
+ * Absent for plugin/mcp/bundled skills, and for servers predating the field.
+ */
+export type SkillRootFlavor = 'claude' | 'agents'
+
 export type SkillMeta = {
   name: string
   displayName?: string
   description: string
   source: SkillSource
+  rootFlavor?: SkillRootFlavor
   userInvocable: boolean
   version?: string
   contentLength: number

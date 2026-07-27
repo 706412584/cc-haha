@@ -213,13 +213,26 @@ export async function uninstallMarketSkill(source: MarketSource, slug: string): 
     throw ApiError.badRequest(`Invalid skill slug: ${slug}`)
   }
   const target = path.join(getMarketSkillsDir(), dirName)
+  let targetStat
   try {
-    await fs.stat(target)
+    targetStat = await fs.lstat(target)
   } catch {
     throw new ApiError(404, `Skill is not installed: ${slug}`, MARKET_ERROR_CODES.notInstalled)
   }
+  if (!targetStat.isDirectory() || targetStat.isSymbolicLink()) {
+    throw new ApiError(
+      409,
+      `Skill directory is not a managed directory: ${dirName}`,
+      MARKET_ERROR_CODES.notManaged,
+    )
+  }
   const meta = await readMarketMeta(dirName)
-  if (!meta) {
+  if (
+    !meta
+    || meta.source !== source
+    || meta.slug !== slug
+    || meta.id !== `${source}:${slug}`
+  ) {
     // Never delete directories the market didn't create.
     throw new ApiError(
       409,

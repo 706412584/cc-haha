@@ -318,7 +318,7 @@ describe('createCustomPetFromAtlas', () => {
     expect(fs.readFileSync(path.join(root, 'tiny-orbit', 'spritesheet.webp'))).toEqual(webpHeader())
   })
 
-  it('rejects duplicate IDs and invalid or symlinked atlases without replacing an installed pet', async () => {
+  it('rejects duplicate IDs and invalid slugs without replacing an installed pet', async () => {
     const root = makeTempDir()
     const atlasPath = path.join(root, 'chosen.png')
     fs.writeFileSync(atlasPath, pngHeader())
@@ -336,19 +336,26 @@ describe('createCustomPetFromAtlas', () => {
     })).rejects.toThrow('already exists')
     expect(fs.readFileSync(path.join(root, 'safe-pet', 'spritesheet.png'))).toEqual(pngHeader())
 
-    const symlinkPath = path.join(root, 'linked.png')
-    fs.symlinkSync(atlasPath, symlinkPath)
-    await expect(createCustomPetFromAtlas({
-      ...input,
-      slug: 'linked-pet',
-      atlasPath: symlinkPath,
-    }, { root, inspectImageSize: validSizeInspector })).rejects.toThrow('cannot be a symlink')
-    expect(fs.existsSync(path.join(root, 'linked-pet'))).toBe(false)
-
     await expect(createCustomPetFromAtlas({
       ...input,
       slug: '../escape',
     }, { root, inspectImageSize: validSizeInspector })).rejects.toThrow('lowercase kebab-case')
+  })
+
+  it.skipIf(process.platform === 'win32')('rejects a symlinked atlas without installing a pet', async () => {
+    const root = makeTempDir()
+    const atlasPath = path.join(root, 'chosen.png')
+    const symlinkPath = path.join(root, 'linked.png')
+    fs.writeFileSync(atlasPath, pngHeader())
+    fs.symlinkSync(atlasPath, symlinkPath)
+
+    await expect(createCustomPetFromAtlas({
+      slug: 'linked-pet',
+      displayName: 'Linked Pet',
+      description: 'Must not be installed.',
+      atlasPath: symlinkPath,
+    }, { root, inspectImageSize: validSizeInspector })).rejects.toThrow('cannot be a symlink')
+    expect(fs.existsSync(path.join(root, 'linked-pet'))).toBe(false)
   })
 })
 
@@ -397,7 +404,7 @@ describe('createCustomPetFromImage', () => {
     expect(fs.readdirSync(path.dirname(root)).some(entry => entry.startsWith('.pet-install-'))).toBe(false)
   })
 
-  it('rejects duplicate IDs, symlinked sources, and failed validation without partial installs', async () => {
+  it('rejects duplicate IDs and failed validation without partial installs', async () => {
     const root = makeTempDir()
     const imagePath = path.join(root, 'chosen.png')
     fs.writeFileSync(imagePath, pngHeader(512, 640))
@@ -418,15 +425,6 @@ describe('createCustomPetFromImage', () => {
     })).rejects.toThrow('already exists')
     expect(fs.readFileSync(path.join(root, 'safe-image', 'pet.png'))).toEqual(pngHeader(512, 640))
 
-    const symlinkPath = path.join(root, 'linked.png')
-    fs.symlinkSync(imagePath, symlinkPath)
-    await expect(createCustomPetFromImage({
-      ...input,
-      slug: 'linked-image',
-      imagePath: symlinkPath,
-    }, { root })).rejects.toThrow('cannot be a symlink')
-    expect(fs.existsSync(path.join(root, 'linked-image'))).toBe(false)
-
     const animatedPath = path.join(root, 'animated.png')
     fs.writeFileSync(animatedPath, apngHeader(512, 640))
     await expect(createCustomPetFromImage({
@@ -439,6 +437,22 @@ describe('createCustomPetFromImage', () => {
     })).rejects.toThrow('static PNG or WebP')
     expect(fs.existsSync(path.join(root, 'animated-image'))).toBe(false)
     expect(fs.readdirSync(path.dirname(root)).some(entry => entry.startsWith('.pet-install-'))).toBe(false)
+  })
+
+  it.skipIf(process.platform === 'win32')('rejects a symlinked image source without installing a pet', async () => {
+    const root = makeTempDir()
+    const imagePath = path.join(root, 'chosen.png')
+    const symlinkPath = path.join(root, 'linked.png')
+    fs.writeFileSync(imagePath, pngHeader(512, 640))
+    fs.symlinkSync(imagePath, symlinkPath)
+
+    await expect(createCustomPetFromImage({
+      slug: 'linked-image',
+      displayName: 'Linked Image',
+      description: 'Must not be installed.',
+      imagePath: symlinkPath,
+    }, { root })).rejects.toThrow('cannot be a symlink')
+    expect(fs.existsSync(path.join(root, 'linked-image'))).toBe(false)
   })
 
   it('rejects unsupported motion profiles and unsafe image geometry before installation', async () => {
@@ -523,14 +537,8 @@ describe('loadCustomPets', () => {
     ])
   })
 
-  it('rejects symlinked and animated single-image assets before runtime decoding', async () => {
+  it('rejects animated single-image assets before runtime decoding', async () => {
     const root = makeTempDir()
-    const outside = makeTempDir()
-    const linkedDir = path.join(root, 'linked-image')
-    fs.mkdirSync(linkedDir)
-    fs.writeFileSync(path.join(linkedDir, 'pet.json'), JSON.stringify(validSingleImageManifest()))
-    fs.writeFileSync(path.join(outside, 'pet.webp'), webpHeader(512, 640))
-    fs.symlinkSync(path.join(outside, 'pet.webp'), path.join(linkedDir, 'pet.webp'))
     writeSingleImagePet(
       root,
       'animated-image',
@@ -547,10 +555,28 @@ describe('loadCustomPets', () => {
     const result = await loadCustomPets({ root, inspectImageSize })
 
     expect(result.pets).toEqual([])
-    expect(result.errors).toEqual(expect.arrayContaining([
-      expect.objectContaining({ entry: 'linked-image', code: 'symlink-image' }),
+    expect(result.errors).toEqual([
       expect.objectContaining({ entry: 'animated-image', code: 'invalid-image' }),
-    ]))
+    ])
+    expect(inspectImageSize).not.toHaveBeenCalled()
+  })
+
+  it.skipIf(process.platform === 'win32')('rejects a symlinked single-image asset before runtime decoding', async () => {
+    const root = makeTempDir()
+    const outside = makeTempDir()
+    const linkedDir = path.join(root, 'linked-image')
+    fs.mkdirSync(linkedDir)
+    fs.writeFileSync(path.join(linkedDir, 'pet.json'), JSON.stringify(validSingleImageManifest()))
+    fs.writeFileSync(path.join(outside, 'pet.webp'), webpHeader(512, 640))
+    fs.symlinkSync(path.join(outside, 'pet.webp'), path.join(linkedDir, 'pet.webp'))
+    const inspectImageSize = vi.fn(async () => ({ width: 512, height: 640 }))
+
+    const result = await loadCustomPets({ root, inspectImageSize })
+
+    expect(result.pets).toEqual([])
+    expect(result.errors).toEqual([
+      expect.objectContaining({ entry: 'linked-image', code: 'symlink-image' }),
+    ])
     expect(inspectImageSize).not.toHaveBeenCalled()
   })
 
@@ -683,7 +709,11 @@ describe('loadCustomPets', () => {
     const root = makeTempDir()
     const outside = makeTempDir()
     writePet(outside, 'target')
-    fs.symlinkSync(path.join(outside, 'target'), path.join(root, 'linked-pet'), 'dir')
+    fs.symlinkSync(
+      path.join(outside, 'target'),
+      path.join(root, 'linked-pet'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    )
 
     const result = await loadCustomPets({ root, inspectImageSize: validSizeInspector })
 
@@ -693,28 +723,48 @@ describe('loadCustomPets', () => {
     ])
   })
 
-  it.each(['manifest', 'image', 'nested-directory'])('rejects a symlinked %s', async target => {
+  it.skipIf(process.platform === 'win32').each(['manifest', 'image'])(
+    'rejects a symlinked %s',
+    async target => {
+      const root = makeTempDir()
+      const outside = makeTempDir()
+      const petDir = path.join(root, 'linked-content')
+      fs.mkdirSync(petDir)
+
+      if (target === 'manifest') {
+        fs.writeFileSync(path.join(outside, 'pet.json'), JSON.stringify(validManifest()))
+        fs.symlinkSync(path.join(outside, 'pet.json'), path.join(petDir, 'pet.json'))
+        fs.writeFileSync(path.join(petDir, 'spritesheet.webp'), webpHeader())
+      } else if (target === 'image') {
+        fs.writeFileSync(path.join(petDir, 'pet.json'), JSON.stringify(validManifest()))
+        fs.writeFileSync(path.join(outside, 'spritesheet.webp'), webpHeader())
+        fs.symlinkSync(path.join(outside, 'spritesheet.webp'), path.join(petDir, 'spritesheet.webp'))
+      }
+
+      const result = await loadCustomPets({ root, inspectImageSize: validSizeInspector })
+
+      expect(result.pets).toEqual([])
+      expect(result.errors).toEqual([
+        expect.objectContaining({ entry: 'linked-content', code: expect.stringContaining('symlink') }),
+      ])
+    },
+  )
+
+  it('rejects a symlinked nested directory', async () => {
     const root = makeTempDir()
     const outside = makeTempDir()
     const petDir = path.join(root, 'linked-content')
     fs.mkdirSync(petDir)
-
-    if (target === 'manifest') {
-      fs.writeFileSync(path.join(outside, 'pet.json'), JSON.stringify(validManifest()))
-      fs.symlinkSync(path.join(outside, 'pet.json'), path.join(petDir, 'pet.json'))
-      fs.writeFileSync(path.join(petDir, 'spritesheet.webp'), webpHeader())
-    } else if (target === 'image') {
-      fs.writeFileSync(path.join(petDir, 'pet.json'), JSON.stringify(validManifest()))
-      fs.writeFileSync(path.join(outside, 'spritesheet.webp'), webpHeader())
-      fs.symlinkSync(path.join(outside, 'spritesheet.webp'), path.join(petDir, 'spritesheet.webp'))
-    } else {
-      fs.writeFileSync(path.join(petDir, 'pet.json'), JSON.stringify(validManifest({
-        spritesheetPath: 'assets/spritesheet.webp',
-      })))
-      fs.mkdirSync(path.join(outside, 'assets'))
-      fs.writeFileSync(path.join(outside, 'assets', 'spritesheet.webp'), webpHeader())
-      fs.symlinkSync(path.join(outside, 'assets'), path.join(petDir, 'assets'), 'dir')
-    }
+    fs.writeFileSync(path.join(petDir, 'pet.json'), JSON.stringify(validManifest({
+      spritesheetPath: 'assets/spritesheet.webp',
+    })))
+    fs.mkdirSync(path.join(outside, 'assets'))
+    fs.writeFileSync(path.join(outside, 'assets', 'spritesheet.webp'), webpHeader())
+    fs.symlinkSync(
+      path.join(outside, 'assets'),
+      path.join(petDir, 'assets'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    )
 
     const result = await loadCustomPets({ root, inspectImageSize: validSizeInspector })
 

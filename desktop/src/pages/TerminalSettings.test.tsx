@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import '@testing-library/jest-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useSettingsStore } from '../stores/settingsStore'
+import { useUIStore } from '../stores/uiStore'
 import { destroyTerminalRuntime } from '../lib/terminalRuntime'
 import { browserHost } from '../lib/desktopHost/browserHost'
 
@@ -11,6 +12,9 @@ const terminalMocks = vi.hoisted(() => {
     cols: 80,
     rows: 24,
     element: null as HTMLElement | null,
+    // Real xterm terminals always expose `options`; the theme bridge assigns
+    // `options.theme` when the app theme changes.
+    options: {} as { theme?: Record<string, string> },
     loadAddon: vi.fn(),
     open: vi.fn(),
     dispose: vi.fn(),
@@ -191,9 +195,55 @@ describe('TerminalSettings', () => {
     render(<TerminalSettings />)
 
     await waitFor(() => expect(terminalMocks.spawn).toHaveBeenCalled())
-    expect(screen.getByTestId('settings-terminal-toolbar')).toHaveTextContent('/bin/zsh')
+    const toolbar = screen.getByTestId('settings-terminal-toolbar')
+    expect(toolbar).toHaveTextContent('/bin/zsh')
     expect(screen.getByTestId('settings-terminal-frame')).toBeInTheDocument()
     expect(screen.queryByText('Host shell')).not.toBeInTheDocument()
+
+    // Still one bar — but it is now the ink window's own title bar rather than
+    // a second strip floating above it on the page ground (handoff §9).
+    expect(toolbar.className).toContain('bg-[var(--color-terminal-header)]')
+    const panel = toolbar.parentElement
+    expect(panel?.className).toContain('bg-[var(--color-terminal-bg)]')
+    expect(panel?.className).toContain('rounded-[var(--radius-xl)]')
+    expect(panel).toContainElement(screen.getByTestId('settings-terminal-frame'))
+  })
+
+  it('puts the cwd and shell in mono and keeps the status a bare dot', async () => {
+    terminalMocks.available = true
+
+    render(<TerminalSettings />)
+
+    await waitFor(() => expect(terminalMocks.spawn).toHaveBeenCalled())
+    // The cwd is the window title in §9, so it reads as a path, not prose.
+    expect(screen.getByText('/Users/test').className).toContain('truncate')
+    expect(screen.getByText('/Users/test').parentElement?.className).toContain('font-mono')
+    expect(screen.getByText('Running')).toBeInTheDocument()
+  })
+
+  it('drops the ink chrome when there is no session to frame', () => {
+    render(<TerminalSettings />)
+
+    // Page tokens are inverted against the terminal ground; framing the
+    // "desktop runtime required" empty state in ink would leave it unreadable.
+    const toolbar = screen.getByTestId('settings-terminal-toolbar')
+    expect(toolbar.className).not.toContain('bg-[var(--color-terminal-header)]')
+    expect(toolbar.parentElement?.className).not.toContain('bg-[var(--color-terminal-bg)]')
+    expect(screen.getByText('Desktop runtime required')).toBeInTheDocument()
+  })
+
+  it('exposes the header actions as named icon buttons', async () => {
+    terminalMocks.available = true
+
+    render(<TerminalSettings onClose={vi.fn()} />)
+
+    await waitFor(() => expect(terminalMocks.spawn).toHaveBeenCalled())
+    // Icon-only now, so the label is the only accessible name they have.
+    for (const name of ['Clear', 'Restart', 'Close terminal panel']) {
+      expect(screen.getByRole('button', { name })).toBeInTheDocument()
+    }
+    expect(screen.getByRole('button', { name: 'Clear' }).className)
+      .toContain('hover:bg-[var(--color-terminal-selection)]')
   })
 
   it('shows setup guidance from the terminal info button', () => {
@@ -378,6 +428,31 @@ describe('TerminalSettings', () => {
     expect(terminalMocks.spawn).toHaveBeenCalledTimes(1)
 
     destroyTerminalRuntime('shared-runtime')
+  })
+
+  it('repaints a running terminal when the app theme changes', async () => {
+    terminalMocks.available = true
+    // Pick themes by hand here: while following the system the OS decides the
+    // dark half, so setTheme('dark') would resolve back to the light theme.
+    useUIStore.setState({ followSystemTheme: false })
+    useUIStore.getState().setTheme('dark')
+
+    render(<TerminalSettings runtimeId="theme-runtime" />)
+    await waitFor(() => expect(terminalMocks.spawn).toHaveBeenCalledTimes(1))
+
+    const darkTheme = terminalMocks.terminalInstance.options.theme
+    expect(darkTheme).toBeDefined()
+
+    // The runtime outlives the component, so a terminal opened under one theme
+    // used to keep that palette for the rest of the session.
+    act(() => { useUIStore.getState().setTheme('white') })
+
+    await waitFor(() => {
+      expect(terminalMocks.terminalInstance.options.theme).not.toBe(darkTheme)
+    })
+    expect(terminalMocks.terminalInstance.options.theme).toHaveProperty('background')
+
+    destroyTerminalRuntime('theme-runtime')
   })
 
   it('shows Windows-only startup shell controls in settings mode', () => {

@@ -1,7 +1,7 @@
 import React from 'react'
 import { t } from '../i18n'
 import { reportReactError } from '../lib/diagnosticsCapture'
-import { Button } from './shared/Button'
+import { Button } from '@/components/ui/Button'
 import { DoctorPanel } from './doctor/DoctorPanel'
 
 type Props = {
@@ -34,7 +34,7 @@ export class ErrorBoundary extends React.Component<Props, State> {
 
 function ErrorBoundaryFallback() {
   return (
-    <div className="h-screen w-screen bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] flex items-center justify-center p-6">
+    <div className="h-screen w-screen bg-[var(--color-background)] text-[var(--color-text-primary)] flex items-center justify-center p-6">
       <div className="max-w-md w-full text-center">
         <div className="text-base font-semibold">{t('errorBoundary.title')}</div>
         <div className="mt-2 text-sm text-[var(--color-text-tertiary)]">

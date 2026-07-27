@@ -2,9 +2,10 @@
 
 import { useEffect, useState } from 'react'
 import { Copy, LogIn, LogOut } from 'lucide-react'
+import { Button } from '@/components/ui/Button'
 import { useHahaOpenAIOAuthStore } from '../../stores/hahaOpenAIOAuthStore'
 import { useTranslation } from '../../i18n'
-import { copyTextToClipboard } from '../chat/clipboard'
+import { copyTextToClipboard } from '@/lib/clipboard'
 import { getDesktopHost } from '../../lib/desktopHost'
 
 export function ChatGPTOfficialLogin() {
@@ -67,14 +68,15 @@ export function ChatGPTOfficialLogin() {
   }
 
   const manualAuthorizeButton = manualAuthorizeUrl ? (
-    <button
-      type="button"
+    <Button
+      variant="secondary"
+      size="sm"
       onClick={handleCopyAuthorizeUrl}
-      className="inline-flex items-center gap-1.5 self-start rounded-md border border-[var(--color-border-separator)] bg-[var(--color-surface)] px-3 py-1.5 text-xs transition-colors hover:bg-[var(--color-surface-hover)]"
+      icon={<Copy className="h-3.5 w-3.5" aria-hidden="true" />}
+      className="self-start"
     >
-      <Copy className="h-3.5 w-3.5" aria-hidden="true" />
       {t('settings.chatgptOfficialLogin.copyAuthorizeUrl')}
-    </button>
+    </Button>
   ) : null
 
   if (status === null) {
@@ -102,17 +104,17 @@ export function ChatGPTOfficialLogin() {
         <span className="text-[var(--color-success)]">
           {t('settings.chatgptOfficialLogin.loggedInPrefix')} {accountLabel}
         </span>
-        <button
-          type="button"
+        <Button
+          variant="secondary"
+          size="sm"
           onClick={logout}
           disabled={isLoading}
-          className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border-separator)] bg-[var(--color-surface)] px-3 py-1 text-xs transition-colors hover:bg-[var(--color-surface-hover)] disabled:opacity-50"
+          icon={<LogOut className="h-3.5 w-3.5" aria-hidden="true" />}
         >
-          <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
           {isLoading
             ? t('settings.chatgptOfficialLogin.logoutProcessing')
             : t('settings.chatgptOfficialLogin.logoutButton')}
-        </button>
+        </Button>
       </div>
     )
   }
@@ -122,17 +124,16 @@ export function ChatGPTOfficialLogin() {
       <div className="text-sm text-[var(--color-text-secondary)]">
         {t('settings.chatgptOfficialLogin.intro')}
       </div>
-      <button
-        type="button"
+      <Button
         onClick={handleLogin}
         disabled={isLoading}
-        className="inline-flex items-center gap-2 self-start rounded-md bg-[image:var(--gradient-btn-primary)] px-4 py-2 text-sm text-[var(--color-btn-primary-fg)] shadow-[var(--shadow-button-primary)] transition-opacity hover:brightness-105 disabled:opacity-50"
+        icon={<LogIn className="h-4 w-4" aria-hidden="true" />}
+        className="self-start"
       >
-        <LogIn className="h-4 w-4" aria-hidden="true" />
         {isLoading
           ? t('settings.chatgptOfficialLogin.loginStarting')
           : t('settings.chatgptOfficialLogin.loginButton')}
-      </button>
+      </Button>
       {error && (
         <div className="text-xs text-[var(--color-error)]">
           {t('settings.chatgptOfficialLogin.errorPrefix')}{error}

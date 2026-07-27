@@ -68,9 +68,10 @@ export function anthropicToOpenaiResponses(
     if (body.top_p !== undefined) result.top_p = body.top_p
   }
 
-  // tools
+  // tools — an empty array after filtering is dropped, not sent as `[]`, so it
+  // reads as "no tools" to strict upstreams instead of "an empty tool set".
   if (body.tools && body.tools.length > 0) {
-    result.tools = body.tools
+    const tools = body.tools
       .filter((t) => t.name !== 'BatchTool')
       .map((t) => ({
         type: 'function',
@@ -78,11 +79,20 @@ export function anthropicToOpenaiResponses(
         description: t.description,
         parameters: t.input_schema,
       }))
+    if (tools.length > 0) {
+      result.tools = tools
+    }
   }
 
-  // tool_choice
+  // tool_choice — only meaningful next to the tools it selects from. A choice
+  // that outlives its tool (BatchTool filtered above, or a client that sends
+  // tool_choice with no tools at all) is an orphan that strict Responses
+  // upstreams reject.
   if (body.tool_choice !== undefined) {
-    result.tool_choice = convertToolChoice(body.tool_choice)
+    const toolChoice = convertToolChoice(body.tool_choice)
+    if (isSelectableToolChoice(toolChoice, result.tools)) {
+      result.tool_choice = toolChoice
+    }
   }
 
   // thinking → reasoning
@@ -184,8 +194,27 @@ function convertToolChoice(choice: unknown): unknown {
     if (c.type === 'any') return 'required'
     if (c.type === 'none') return 'none'
     if (c.type === 'tool' && typeof c.name === 'string') {
-      return { type: 'function', function: { name: c.name } }
+      // Responses names the function inline: {type:'function', name}. The
+      // nested {function:{name}} form belongs to Chat Completions and is
+      // rejected here (see anthropicToOpenaiChat for that shape).
+      return { type: 'function', name: c.name }
     }
   }
   return 'auto'
+}
+
+/**
+ * A named tool_choice is only valid while its target survives into the request.
+ * Anything else — a choice with no tools at all — is dropped so the upstream
+ * never sees a selector pointing at nothing.
+ */
+function isSelectableToolChoice(
+  choice: unknown,
+  tools: { name: string }[] | undefined,
+): boolean {
+  if (!tools || tools.length === 0) return false
+  if (typeof choice !== 'object' || choice === null) return true
+  const name = (choice as Record<string, unknown>).name
+  if (typeof name !== 'string') return true
+  return tools.some((tool) => tool.name === name)
 }

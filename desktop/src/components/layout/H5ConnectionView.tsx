@@ -1,8 +1,11 @@
 import type { FormEvent } from 'react'
 import { useState } from 'react'
 import { saveAndVerifyH5Connection } from '../../lib/desktopRuntime'
-import { Button } from '../shared/Button'
-import { Input } from '../shared/Input'
+import { Button } from '@/components/ui/Button'
+import { Card } from '@/components/ui/Card'
+import { Input } from '@/components/ui/Input'
+import { BrandSeal } from '@/components/composite/BrandSeal'
+import { useTranslation } from '../../i18n'
 
 type H5ConnectionViewProps = {
   initialServerUrl?: string | null
@@ -15,6 +18,7 @@ export function H5ConnectionView({
   error: initialError,
   onConnected,
 }: H5ConnectionViewProps) {
+  const t = useTranslation()
   const [serverUrl, setServerUrl] = useState(initialServerUrl ?? '')
   const [token, setToken] = useState('')
   const [error, setError] = useState(initialError ?? '')
@@ -30,7 +34,7 @@ export function H5ConnectionView({
       onConnected()
     } catch (submitError) {
       setError(
-        submitError instanceof Error ? submitError.message : 'Unable to connect to the H5 server.',
+        submitError instanceof Error ? submitError.message : t('h5Connect.failed'),
       )
     } finally {
       setSubmitting(false)
@@ -38,20 +42,31 @@ export function H5ConnectionView({
   }
 
   return (
-    <div className="h-screen flex items-center justify-center bg-[var(--color-surface)] px-6">
-      <section className="w-full max-w-md rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-low)] p-6 shadow-[var(--shadow-md)]">
-        <div className="mb-5">
-          <h1 className="text-lg font-semibold text-[var(--color-text-primary)]">
-            Connect to H5 Access
+    <div className="animate-screen-pop h-screen flex items-center justify-center bg-[var(--color-surface)] px-6">
+      <Card
+        as="section"
+        radius="xl"
+        surface="low"
+        padding="lg"
+        shadow="card"
+        className="w-full max-w-md"
+      >
+        <div className="mb-5 flex flex-col items-center gap-3 text-center">
+          <BrandSeal size="lg" />
+          <h1
+            className="text-[21px] font-semibold tracking-tight text-[var(--color-text-primary)]"
+            style={{ fontFamily: 'var(--font-headline)' }}
+          >
+            {t('h5Connect.title')}
           </h1>
-          <p className="mt-2 text-sm text-[var(--color-text-secondary)]">
-            Enter the server URL and H5 access token from the desktop app.
+          <p className="text-sm leading-6 text-[var(--color-text-secondary)]">
+            {t('h5Connect.subtitle')}
           </p>
         </div>
 
         <form className="space-y-4" onSubmit={handleSubmit}>
           <Input
-            label="Server URL"
+            label={t('h5Connect.serverUrl')}
             placeholder="https://chat.example.com"
             value={serverUrl}
             onChange={(event) => setServerUrl(event.target.value)}
@@ -59,7 +74,7 @@ export function H5ConnectionView({
             required
           />
           <Input
-            label="H5 Token"
+            label={t('h5Connect.token')}
             type="password"
             placeholder="h5_..."
             value={token}
@@ -69,16 +84,19 @@ export function H5ConnectionView({
           />
 
           {error ? (
-            <div className="rounded-lg border border-[var(--color-error)]/30 bg-[var(--color-error)]/8 px-3 py-2 text-sm text-[var(--color-error)]">
+            <div
+              role="alert"
+              className="rounded-[var(--radius-md)] border border-[var(--color-error)] bg-[var(--color-error-container)] px-3 py-2 text-sm text-[var(--color-on-error-container)]"
+            >
               {error}
             </div>
           ) : null}
 
           <Button type="submit" size="lg" className="w-full" loading={submitting}>
-            Connect
+            {t('h5Connect.submit')}
           </Button>
         </form>
-      </section>
+      </Card>
     </div>
   )
 }

@@ -20,6 +20,9 @@ type AgentStore = {
   mutationWarning: string | null
   selectedAgent: AgentDefinition | null
   selectedAgentReturnTab: AgentDetailReturnTab
+  requestedCwd: string | null | undefined
+  resolvedCwd: string | null | undefined
+  isContextStale: boolean
 
   fetchAgents: (cwd?: string) => Promise<void>
   retryMutationRefresh: (cwd?: string, sessionId?: string) => Promise<void>
@@ -43,6 +46,7 @@ type AgentStore = {
 }
 
 let latestFetchRequestId = 0
+let latestMutationRequestId = 0
 
 export const useAgentStore = create<AgentStore>((set, get) => ({
   activeAgents: [],
@@ -55,16 +59,23 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   mutationWarning: null,
   selectedAgent: null,
   selectedAgentReturnTab: 'agents',
+  requestedCwd: undefined,
+  resolvedCwd: undefined,
+  isContextStale: false,
 
   fetchAgents: async (cwd) => {
     const requestId = ++latestFetchRequestId
-    set({
+    const requestedCwd = normalizeAgentCwd(cwd)
+    const resolvedCwd = get().resolvedCwd
+    set((state) => ({
       isLoading: true,
       error: null,
-      isMutating: false,
-      mutationError: null,
-      mutationWarning: null,
-    })
+      requestedCwd,
+      isContextStale: resolvedCwd !== undefined && resolvedCwd !== requestedCwd,
+      ...(!state.isMutating
+        ? { mutationError: null, mutationWarning: null }
+        : {}),
+    }))
     try {
       const { activeAgents, allAgents, availableTools = [] } = await agentsApi.list(cwd)
       if (requestId !== latestFetchRequestId) return
@@ -77,6 +88,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           allAgents,
           availableTools,
           isLoading: false,
+          requestedCwd,
+          resolvedCwd: requestedCwd,
+          isContextStale: false,
           selectedAgent,
           selectedAgentReturnTab: selectedAgent ? state.selectedAgentReturnTab : 'agents',
         }
@@ -84,7 +98,11 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     } catch (error) {
       if (requestId !== latestFetchRequestId) return
       const message = error instanceof Error ? error.message : 'Failed to load agents'
-      set({ isLoading: false, error: message })
+      set((state) => ({
+        isLoading: false,
+        error: message,
+        isContextStale: state.resolvedCwd !== undefined && state.resolvedCwd !== requestedCwd,
+      }))
     }
   },
 
@@ -98,7 +116,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   createAgent: async (input, sessionId) => {
-    const requestId = ++latestFetchRequestId
+    const requestId = ++latestMutationRequestId
+    const displayRequestId = ++latestFetchRequestId
     set({
       isMutating: true,
       mutationError: null,
@@ -110,14 +129,17 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       const mutationResponse = await agentsApi.create(input)
       createdAgent = mutationResponse.agent
     } catch (error) {
-      if (requestId === latestFetchRequestId) {
+      if (requestId === latestMutationRequestId) {
         const message = getErrorMessage(error, 'Failed to create agent')
-        set({ isMutating: false, mutationError: message })
+        set({
+          isMutating: false,
+          ...(displayRequestId === latestFetchRequestId ? { mutationError: message } : {}),
+        })
       }
       throw error
     }
 
-    startSessionReloadWarning(sessionId, requestId, set)
+    startSessionReloadWarning(sessionId, requestId, displayRequestId, set)
     try {
       const response = await agentsApi.list(input.cwd)
       const refreshedAgent = findEditableAgent(
@@ -129,21 +151,35 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       if (!refreshedAgent) {
         throw new Error('Created agent was not returned by the refreshed list')
       }
-      if (requestId !== latestFetchRequestId) return refreshedAgent
+      if (requestId !== latestMutationRequestId) return refreshedAgent
+      if (displayRequestId !== latestFetchRequestId) {
+        set({ isMutating: false })
+        return refreshedAgent
+      }
+      const contextCwd = normalizeAgentCwd(input.cwd)
       set({
         ...response,
         selectedAgent: refreshedAgent,
         selectedAgentReturnTab: 'agents',
         isMutating: false,
+        requestedCwd: contextCwd,
+        resolvedCwd: contextCwd,
+        isContextStale: false,
       })
       return refreshedAgent
     } catch (refreshError) {
-      if (requestId === latestFetchRequestId) {
+      if (requestId === latestMutationRequestId && displayRequestId !== latestFetchRequestId) {
+        set({ isMutating: false })
+      } else if (requestId === latestMutationRequestId) {
+        const contextCwd = normalizeAgentCwd(input.cwd)
         set((state) => ({
           ...upsertMutationAgent(state, createdAgent),
           selectedAgent: createdAgent,
           selectedAgentReturnTab: 'agents',
           isMutating: false,
+          requestedCwd: contextCwd,
+          resolvedCwd: contextCwd,
+          isContextStale: false,
           mutationWarning: combineWarnings(
             getErrorMessage(
               refreshError,
@@ -158,7 +194,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   updateAgent: async (name, input, sessionId) => {
-    const requestId = ++latestFetchRequestId
+    const requestId = ++latestMutationRequestId
+    const displayRequestId = ++latestFetchRequestId
     set({
       isMutating: true,
       mutationError: null,
@@ -170,14 +207,17 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       const mutationResponse = await agentsApi.update(name, input)
       updatedAgent = mutationResponse.agent
     } catch (error) {
-      if (requestId === latestFetchRequestId) {
+      if (requestId === latestMutationRequestId) {
         const message = getErrorMessage(error, 'Failed to update agent')
-        set({ isMutating: false, mutationError: message })
+        set({
+          isMutating: false,
+          ...(displayRequestId === latestFetchRequestId ? { mutationError: message } : {}),
+        })
       }
       throw error
     }
 
-    startSessionReloadWarning(sessionId, requestId, set)
+    startSessionReloadWarning(sessionId, requestId, displayRequestId, set)
     try {
       const response = await agentsApi.list(input.cwd)
       const refreshedAgent = findEditableAgent(
@@ -189,21 +229,35 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       if (!refreshedAgent) {
         throw new Error('Updated agent was not returned by the refreshed list')
       }
-      if (requestId !== latestFetchRequestId) return refreshedAgent
+      if (requestId !== latestMutationRequestId) return refreshedAgent
+      if (displayRequestId !== latestFetchRequestId) {
+        set({ isMutating: false })
+        return refreshedAgent
+      }
+      const contextCwd = normalizeAgentCwd(input.cwd)
       set({
         ...response,
         selectedAgent: refreshedAgent,
         selectedAgentReturnTab: 'agents',
         isMutating: false,
+        requestedCwd: contextCwd,
+        resolvedCwd: contextCwd,
+        isContextStale: false,
       })
       return refreshedAgent
     } catch (refreshError) {
-      if (requestId === latestFetchRequestId) {
+      if (requestId === latestMutationRequestId && displayRequestId !== latestFetchRequestId) {
+        set({ isMutating: false })
+      } else if (requestId === latestMutationRequestId) {
+        const contextCwd = normalizeAgentCwd(input.cwd)
         set((state) => ({
           ...upsertMutationAgent(state, updatedAgent),
           selectedAgent: updatedAgent,
           selectedAgentReturnTab: 'agents',
           isMutating: false,
+          requestedCwd: contextCwd,
+          resolvedCwd: contextCwd,
+          isContextStale: false,
           mutationWarning: combineWarnings(
             getErrorMessage(
               refreshError,
@@ -218,7 +272,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   deleteAgent: async (name, scope, cwd, target, sessionId) => {
-    const requestId = ++latestFetchRequestId
+    const requestId = ++latestMutationRequestId
+    const displayRequestId = ++latestFetchRequestId
     set({
       isMutating: true,
       mutationError: null,
@@ -228,25 +283,39 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     try {
       await agentsApi.delete(name, scope, cwd, target)
     } catch (error) {
-      if (requestId === latestFetchRequestId) {
+      if (requestId === latestMutationRequestId) {
         const message = getErrorMessage(error, 'Failed to delete agent')
-        set({ isMutating: false, mutationError: message })
+        set({
+          isMutating: false,
+          ...(displayRequestId === latestFetchRequestId ? { mutationError: message } : {}),
+        })
       }
       throw error
     }
 
-    startSessionReloadWarning(sessionId, requestId, set)
+    startSessionReloadWarning(sessionId, requestId, displayRequestId, set)
     try {
       const response = await agentsApi.list(cwd)
-      if (requestId !== latestFetchRequestId) return
+      if (requestId !== latestMutationRequestId) return
+      if (displayRequestId !== latestFetchRequestId) {
+        set({ isMutating: false })
+        return
+      }
+      const contextCwd = normalizeAgentCwd(cwd)
       set({
         ...response,
         selectedAgent: null,
         selectedAgentReturnTab: 'agents',
         isMutating: false,
+        requestedCwd: contextCwd,
+        resolvedCwd: contextCwd,
+        isContextStale: false,
       })
     } catch (refreshError) {
-      if (requestId === latestFetchRequestId) {
+      if (requestId === latestMutationRequestId && displayRequestId !== latestFetchRequestId) {
+        set({ isMutating: false })
+      } else if (requestId === latestMutationRequestId) {
+        const contextCwd = normalizeAgentCwd(cwd)
         set((state) => ({
           activeAgents: removeMutationAgent(
             state.activeAgents,
@@ -263,6 +332,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           selectedAgent: null,
           selectedAgentReturnTab: 'agents',
           isMutating: false,
+          requestedCwd: contextCwd,
+          resolvedCwd: contextCwd,
+          isContextStale: false,
           mutationWarning: combineWarnings(
             getErrorMessage(
               refreshError,
@@ -281,6 +353,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       selectedAgentReturnTab: agent ? returnTab : 'agents',
     }),
 }))
+
+function normalizeAgentCwd(cwd?: string): string | null {
+  return cwd ?? null
+}
 
 function findEditableAgent(
   agents: AgentDefinition[],
@@ -357,10 +433,14 @@ function getErrorMessage(error: unknown, fallback: string) {
 function startSessionReloadWarning(
   sessionId: string | undefined,
   requestId: number,
+  displayRequestId: number,
   setState: typeof useAgentStore.setState,
 ) {
   void getSessionReloadWarning(sessionId).then((reloadWarning) => {
-    if (requestId !== latestFetchRequestId) return
+    if (
+      requestId !== latestMutationRequestId ||
+      displayRequestId !== latestFetchRequestId
+    ) return
     setState((state) => ({
       mutationWarning: combineWarnings(state.mutationWarning, reloadWarning),
     }))

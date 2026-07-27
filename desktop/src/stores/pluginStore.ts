@@ -5,6 +5,7 @@ import type {
   PluginDetail,
   PluginListResponse,
   PluginReloadSummary,
+  PluginSessionReloadSummary,
   PluginScope,
   PluginSummary,
 } from '../types/plugin'
@@ -14,7 +15,10 @@ type PluginStore = {
   marketplaces: PluginListResponse['marketplaces']
   summary: PluginListResponse['summary'] | null
   selectedPlugin: PluginDetail | null
+  selectedPluginContext: string | null
   lastReloadSummary: PluginReloadSummary | null
+  lastSessionReload: PluginSessionReloadSummary | null
+  refreshWarning: string | null
   isLoading: boolean
   isDetailLoading: boolean
   isApplying: boolean
@@ -59,7 +63,10 @@ export const usePluginStore = create<PluginStore>((set, get) => ({
   marketplaces: [],
   summary: null,
   selectedPlugin: null,
+  selectedPluginContext: null,
   lastReloadSummary: null,
+  lastSessionReload: null,
+  refreshWarning: null,
   isLoading: false,
   isDetailLoading: false,
   isApplying: false,
@@ -71,9 +78,11 @@ export const usePluginStore = create<PluginStore>((set, get) => ({
   isAddingMarketplace: false,
 
   fetchPlugins: async (cwd) => {
+    const requestVersion = ++listRequestVersion
     set({ isLoading: true, error: null })
     try {
       const data = await pluginsApi.list(cwd)
+      if (requestVersion !== listRequestVersion) return
       set({
         plugins: data.plugins,
         marketplaces: data.marketplaces,
@@ -81,6 +90,7 @@ export const usePluginStore = create<PluginStore>((set, get) => ({
         isLoading: false,
       })
     } catch (err) {
+      if (requestVersion !== listRequestVersion) return
       set({
         isLoading: false,
         error: err instanceof Error ? err.message : String(err),
@@ -89,12 +99,27 @@ export const usePluginStore = create<PluginStore>((set, get) => ({
   },
 
   fetchPluginDetail: async (id, cwd) => {
-    set({ isDetailLoading: true, error: null })
+    const requestVersion = ++detailRequestVersion
+    const context = cwd ?? ''
+    set({
+      selectedPlugin: null,
+      selectedPluginContext: context,
+      isDetailLoading: true,
+      error: null,
+    })
     try {
       const { detail } = await pluginsApi.detail(id, cwd)
-      set({ selectedPlugin: detail, isDetailLoading: false })
-    } catch (err) {
+      if (requestVersion !== detailRequestVersion) return
       set({
+        selectedPlugin: detail,
+        selectedPluginContext: context,
+        isDetailLoading: false,
+      })
+    } catch (err) {
+      if (requestVersion !== detailRequestVersion) return
+      set({
+        selectedPlugin: null,
+        selectedPluginContext: null,
         isDetailLoading: false,
         error: err instanceof Error ? err.message : String(err),
       })
@@ -102,83 +127,114 @@ export const usePluginStore = create<PluginStore>((set, get) => ({
   },
 
   reloadPlugins: async (cwd, sessionId) => {
-    set({ isApplying: true, error: null })
-    try {
-      const { summary } = await pluginsApi.reload(cwd, sessionId)
-      await get().fetchPlugins(cwd)
-      const selected = get().selectedPlugin
-      if (selected) {
-        await get().fetchPluginDetail(selected.id, cwd)
+    return enqueuePluginMutation(async () => {
+      try {
+        const { summary, session } = await pluginsApi.reload(cwd, sessionId)
+        await get().fetchPlugins(cwd)
+        const selected = get().selectedPlugin
+        if (selected) {
+          await get().fetchPluginDetail(selected.id, cwd)
+        }
+        set({
+          lastReloadSummary: summary,
+          lastSessionReload: session ?? null,
+        })
+        return summary
+      } catch (err) {
+        throw err
       }
-      set({ isApplying: false, lastReloadSummary: summary })
-      return summary
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      set({ isApplying: false, error: message })
-      throw err
-    }
+    }, set)
   },
 
   enablePlugin: async (id, scope, cwd, sessionId) => {
-    return runAction(
-      () => pluginsApi.enable({ id, scope }),
+    return enqueuePluginMutation(
+      () => runAction(
+        () => pluginsApi.enable({ id, scope, cwd: mutationCwd(scope, cwd) }),
+        set,
+        get,
+        cwd,
+        sessionId,
+      ),
       set,
-      get,
-      cwd,
-      sessionId,
     )
   },
 
   disablePlugin: async (id, scope, cwd, sessionId) => {
-    return runAction(
-      () => pluginsApi.disable({ id, scope }),
+    return enqueuePluginMutation(
+      () => runAction(
+        () => pluginsApi.disable({ id, scope, cwd: mutationCwd(scope, cwd) }),
+        set,
+        get,
+        cwd,
+        sessionId,
+      ),
       set,
-      get,
-      cwd,
-      sessionId,
     )
   },
 
   bulkEnablePlugins: async (plugins, cwd, sessionId) => {
-    return runBulkAction(
-      plugins,
-      (plugin) => pluginsApi.enable(plugin),
+    return enqueuePluginMutation(
+      () => runBulkAction(
+        plugins,
+        (plugin) => pluginsApi.enable({
+          ...plugin,
+          cwd: mutationCwd(plugin.scope, cwd),
+        }),
+        set,
+        get,
+        cwd,
+        sessionId,
+      ),
       set,
-      get,
-      cwd,
-      sessionId,
     )
   },
 
   bulkDisablePlugins: async (plugins, cwd, sessionId) => {
-    return runBulkAction(
-      plugins,
-      (plugin) => pluginsApi.disable(plugin),
+    return enqueuePluginMutation(
+      () => runBulkAction(
+        plugins,
+        (plugin) => pluginsApi.disable({
+          ...plugin,
+          cwd: mutationCwd(plugin.scope, cwd),
+        }),
+        set,
+        get,
+        cwd,
+        sessionId,
+      ),
       set,
-      get,
-      cwd,
-      sessionId,
     )
   },
 
   updatePlugin: async (id, scope, cwd, sessionId) => {
-    return runAction(
-      () => pluginsApi.update({ id, scope }),
+    return enqueuePluginMutation(
+      () => runAction(
+        () => pluginsApi.update({ id, scope, cwd: mutationCwd(scope, cwd) }),
+        set,
+        get,
+        cwd,
+        sessionId,
+      ),
       set,
-      get,
-      cwd,
-      sessionId,
     )
   },
 
   uninstallPlugin: async (id, scope, keepData = false, cwd, sessionId) => {
-    return runAction(
-      () => pluginsApi.uninstall({ id, scope, keepData }),
+    return enqueuePluginMutation(
+      () => runAction(
+        () => pluginsApi.uninstall({
+          id,
+          scope,
+          keepData,
+          cwd: mutationCwd(scope, cwd),
+        }),
+        set,
+        get,
+        cwd,
+        sessionId,
+        true,
+      ),
       set,
-      get,
-      cwd,
-      sessionId,
-      true,
     )
   },
 
@@ -231,8 +287,48 @@ export const usePluginStore = create<PluginStore>((set, get) => ({
     }
   },
 
-  clearSelection: () => set({ selectedPlugin: null }),
-}))
+  clearSelection: () => {
+    detailRequestVersion += 1
+    set({
+      selectedPlugin: null,
+      selectedPluginContext: null,
+      isDetailLoading: false,
+    })
+  },}))
+
+let listRequestVersion = 0
+let detailRequestVersion = 0
+let mutationQueue: Promise<void> = Promise.resolve()
+let pendingMutations = 0
+
+function mutationCwd(scope: PluginScope | undefined, cwd: string | undefined) {
+  return scope === 'project' || scope === 'local' ? cwd : undefined
+}
+
+async function enqueuePluginMutation<T>(
+  mutation: () => Promise<T>,
+  set: (updater: Partial<PluginStore>) => void,
+): Promise<T> {
+  pendingMutations += 1
+  set({
+    isApplying: true,
+    lastSessionReload: null,
+    refreshWarning: null,
+  })
+
+  const result = mutationQueue.then(mutation, mutation)
+  mutationQueue = result.then(
+    () => undefined,
+    () => undefined,
+  )
+
+  try {
+    return await result
+  } finally {
+    pendingMutations -= 1
+    if (pendingMutations === 0) set({ isApplying: false })
+  }
+}
 
 async function runAction(
   action: () => Promise<{ ok: true; message: string }>,
@@ -242,26 +338,34 @@ async function runAction(
   sessionId?: string,
   clearSelection = false,
 ): Promise<string> {
-  set({ isApplying: true, error: null })
+  const { message } = await action()
+
+  const selected = get().selectedPlugin
+  if (clearSelection) {
+    detailRequestVersion += 1
+    set({
+      selectedPlugin: null,
+      selectedPluginContext: null,
+      isDetailLoading: false,
+    })
+  }
+
   try {
-    const { message } = await action()
-    const { summary } = await pluginsApi.reload(cwd, sessionId)
+    const { summary, session } = await pluginsApi.reload(cwd, sessionId)
     await get().fetchPlugins(cwd)
-    const selected = get().selectedPlugin
-    if (clearSelection) {
-      set({ selectedPlugin: null })
-    } else if (selected) {
+    if (!clearSelection && selected) {
       await get().fetchPluginDetail(selected.id, cwd)
     }
-    set({ isApplying: false, lastReloadSummary: summary })
-    return message
+    set({
+      lastReloadSummary: summary,
+      lastSessionReload: session ?? null,
+    })
   } catch (err) {
     set({
-      isApplying: false,
-      error: err instanceof Error ? err.message : String(err),
+      refreshWarning: err instanceof Error ? err.message : String(err),
     })
-    throw err
   }
+  return message
 }
 
 async function runBulkAction(
@@ -274,25 +378,43 @@ async function runBulkAction(
 ): Promise<number> {
   if (plugins.length === 0) return 0
 
-  set({ isApplying: true, error: null })
+  let appliedCount = 0
   try {
     for (const plugin of plugins) {
       await action(plugin)
+      appliedCount += 1
     }
+  } catch (err) {
+    if (appliedCount > 0) {
+      try {
+        const { summary, session } = await pluginsApi.reload(cwd, sessionId)
+        await get().fetchPlugins(cwd)
+        set({
+          lastReloadSummary: summary,
+          lastSessionReload: session ?? null,
+        })
+      } catch {
+        // Preserve the original mutation failure while best-effort reconciliation runs.
+      }
+    }
+    throw err
+  }
 
-    const { summary } = await pluginsApi.reload(cwd, sessionId)
+  try {
+    const { summary, session } = await pluginsApi.reload(cwd, sessionId)
     await get().fetchPlugins(cwd)
     const selected = get().selectedPlugin
     if (selected) {
       await get().fetchPluginDetail(selected.id, cwd)
     }
-    set({ isApplying: false, lastReloadSummary: summary })
-    return plugins.length
+    set({
+      lastReloadSummary: summary,
+      lastSessionReload: session ?? null,
+    })
   } catch (err) {
     set({
-      isApplying: false,
-      error: err instanceof Error ? err.message : String(err),
+      refreshWarning: err instanceof Error ? err.message : String(err),
     })
-    throw err
   }
+  return plugins.length
 }

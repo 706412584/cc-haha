@@ -690,4 +690,52 @@ describe('Settings > Plugins tab', () => {
     expect(screen.getByRole('button', { name: /codex-rescue/i })).toBeDisabled()
     expect(screen.getByRole('button', { name: /gpt-5-4-prompting/i })).toBeDisabled()
   })
+
+  // The store records a failed post-change runtime reload in `refreshWarning`
+  // and still resolves, so the action itself reads as a success. Without the
+  // warning surfacing, "disabled the plugin but the runtime never reloaded"
+  // looks identical to a clean success.
+  it('warns when a plugin change succeeds but the runtime reload fails', async () => {
+    usePluginStore.setState({
+      selectedPlugin: {
+        id: 'github@claude-plugins-official',
+        name: 'github',
+        marketplace: 'claude-plugins-official',
+        scope: 'user',
+        enabled: true,
+        hasErrors: false,
+        isBuiltin: false,
+        description: 'GitHub integration',
+        componentCounts: {
+          commands: 0, agents: 0, skills: 0, hooks: 0, mcpServers: 0, lspServers: 0,
+        },
+        capabilities: {
+          commands: [], agents: [], skills: [], hooks: [], mcpServers: [], lspServers: [],
+        },
+        commandEntries: [],
+        agentEntries: [],
+        hookEntries: [],
+        skillEntries: [],
+        mcpServerEntries: [],
+        errors: [],
+      },
+      disablePlugin: async () => {
+        usePluginStore.setState({ refreshWarning: 'runtime refresh failed' })
+        return 'Plugin disabled'
+      },
+    })
+
+    render(<Settings />)
+    switchToPluginsTab()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Disable' }))
+
+    await waitFor(() => {
+      const toasts = useUIStore.getState().toasts
+      expect(
+        toasts.some(t => t.type === 'warning' && t.message.includes('runtime refresh failed')),
+        `expected a warning toast, got ${JSON.stringify(toasts)}`,
+      ).toBe(true)
+    })
+  })
 })

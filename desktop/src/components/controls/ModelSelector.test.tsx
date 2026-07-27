@@ -2,6 +2,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import '@testing-library/jest-dom'
 
+const { runtimeMocks } = vi.hoisted(() => ({
+  runtimeMocks: { isMobileViewport: false, isDesktopRuntime: false },
+}))
+
+vi.mock('../../hooks/useMobileViewport', () => ({
+  useMobileViewport: () => runtimeMocks.isMobileViewport,
+}))
+
+vi.mock('../../lib/desktopRuntime', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../lib/desktopRuntime')>()
+  return { ...actual, isDesktopRuntime: () => runtimeMocks.isDesktopRuntime }
+})
+
 import { ModelSelector } from './ModelSelector'
 import { useChatStore } from '../../stores/chatStore'
 import { useHahaOAuthStore } from '../../stores/hahaOAuthStore'
@@ -291,6 +304,59 @@ describe('ModelSelector', () => {
       .find((button) => button.textContent?.includes('Main Model'))
     expect(flashOption).toBeDefined()
     expect(flashOption?.className).toContain('border-[var(--color-model-option-selected-border)]')
+  })
+
+  it('closes the focus ring on both halves of the segmented control', () => {
+    useSettingsStore.setState({
+      locale: 'en',
+      availableModels: MODELS,
+      currentModel: MODELS[0],
+      activeProviderName: 'Provider A',
+      effortLevel: 'max',
+    })
+    useSessionRuntimeStore.getState().setSelection('session-ring', {
+      providerId: null,
+      modelId: 'alpha',
+      effortLevel: 'max',
+    })
+
+    const { container } = render(<ModelSelector runtimeKey="session-ring" />)
+    const [modelHalf, effortHalf] = [...container.querySelectorAll('button')]
+
+    // The ring traces `border-radius`. Each half is rounded on one side only,
+    // so without this the focused half drew a box that was round down one edge
+    // and square down the other.
+    expect(modelHalf).toHaveClass('rounded-l-[var(--radius-md)]', 'focus-visible:rounded-[var(--radius-md)]')
+    expect(effortHalf).toHaveClass('rounded-r-[var(--radius-md)]', 'focus-visible:rounded-[var(--radius-md)]')
+  })
+
+  // On the phone composer this control sits between two 44px buttons and opens
+  // a bottom sheet. `compact` cannot drive the height: the desktop composer
+  // also sets it, and there it narrows for the right panel, not for touch.
+  it.each([
+    ['browser H5', { isMobileViewport: true, isDesktopRuntime: false }, true],
+    ['desktop compact composer', { isMobileViewport: false, isDesktopRuntime: false }, false],
+    ['narrow Electron window', { isMobileViewport: true, isDesktopRuntime: true }, false],
+  ])('stretches both halves to the 44px touch target only on %s', (_name, runtime, expected) => {
+    Object.assign(runtimeMocks, runtime)
+    useSettingsStore.setState({
+      locale: 'en',
+      availableModels: MODELS,
+      currentModel: MODELS[0],
+      activeProviderName: 'Provider A',
+      effortLevel: 'max',
+    })
+    useSessionRuntimeStore.getState().setSelection('session-touch', {
+      providerId: null,
+      modelId: 'alpha',
+      effortLevel: 'max',
+    })
+
+    const { container } = render(<ModelSelector runtimeKey="session-touch" compact />)
+    const segmented = container.querySelector('[data-testid="model-selector-shell"] > div')
+
+    expect(segmented).toHaveClass('items-stretch')
+    expect(segmented?.classList.contains('min-h-11')).toBe(expected)
   })
 
   it('keeps runtime effort scoped to the selected session', async () => {

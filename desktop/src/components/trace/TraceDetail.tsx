@@ -27,26 +27,33 @@ export function TraceDetail({
   const t = useTranslation()
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="trace-detail">
-      <div className="shrink-0 border-b border-[var(--color-border)] px-4 py-2.5">
-        <div className="flex min-w-0 items-center gap-2">
-          <TypeIcon span={span} />
-          <h2 className="min-w-0 truncate text-sm font-semibold text-[var(--color-text-primary)]">
+      <div className="shrink-0 border-b border-[var(--color-border)] px-6 py-4">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <TypeIcon span={span} size={16} />
+          <h2
+            className="min-w-0 truncate text-[17px] font-bold text-[var(--color-text-primary)]"
+            style={{ fontFamily: 'var(--font-headline)' }}
+          >
             {spanDisplayTitle(span, t)}
           </h2>
           <StatusPill status={span.status} />
         </div>
-        <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+        <div className="mt-2.5 flex min-w-0 flex-wrap items-baseline gap-x-4 gap-y-1.5">
           <HeaderChips span={span} />
         </div>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <DetailBody
-          span={span}
-          viewModel={viewModel}
-          sessionId={sessionId}
-          revisionKey={revisionKey}
-          onSelect={onSelect}
-        />
+        {/* Left-aligned reading column, per the handoff's 960px detail width —
+            long JSON bodies are unreadable stretched across a wide monitor. */}
+        <div className="w-full max-w-[960px]">
+          <DetailBody
+            span={span}
+            viewModel={viewModel}
+            sessionId={sessionId}
+            revisionKey={revisionKey}
+            onSelect={onSelect}
+          />
+        </div>
       </div>
     </div>
   )
@@ -159,7 +166,7 @@ function EventDetail({ span }: { span: TraceSpan }) {
   return (
     <div data-testid="trace-event-detail">
       <Section sectionKey="event.detail" title={t('trace.section.event')} defaultOpen>
-        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-[11px]">
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-[12.5px]">
           <dt className="text-[var(--color-text-tertiary)]">{t('trace.detail.phase')}</dt>
           <dd className="min-w-0 truncate font-mono text-[var(--color-text-secondary)]">
             {traceEventPhaseLabel(event.phase, t)}

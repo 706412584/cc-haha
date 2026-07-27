@@ -1,6 +1,9 @@
 import { useEffect } from 'react'
-import { Modal } from '../shared/Modal'
+import { Button } from '@/components/ui/Button'
+import { IconButton } from '@/components/ui/IconButton'
+import { Modal } from '@/components/ui/Modal'
 import { useOverlayStore } from '../../stores/overlayStore'
+import { useTranslation } from '../../i18n'
 
 type GalleryImage = {
   src: string
@@ -17,6 +20,7 @@ type Props = {
 }
 
 export function ImageGalleryModal({ open, images, activeIndex, onClose, onSelect, onAnnotate }: Props) {
+  const t = useTranslation()
   const activeImage = images[activeIndex]
 
   // Native child webviews (e.g. the in-app browser preview) always render
@@ -58,33 +62,19 @@ export function ImageGalleryModal({ open, images, activeIndex, onClose, onSelect
           </div>
           <div className="flex items-center gap-2">
             {onAnnotate && (
-              <button
-                type="button"
+              <Button
+                variant="secondary"
+                size="md"
+                icon={<span className="material-symbols-outlined text-[18px]">edit</span>}
                 onClick={() => onAnnotate(activeImage)}
-                className="inline-flex h-9 items-center justify-center gap-1.5 rounded-full border border-[var(--color-border)] px-3 text-sm font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)]"
               >
-                <span className="material-symbols-outlined text-[18px]">edit</span>
                 标注并提问
-              </button>
+              </Button>
             )}
             {images.length > 1 && (
               <>
-                <button
-                  type="button"
-                  onClick={() => onSelect((activeIndex - 1 + images.length) % images.length)}
-                  className="flex h-9 w-9 items-center justify-center rounded-full border border-[var(--color-border)] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)]"
-                  aria-label="Previous image"
-                >
-                  <span className="material-symbols-outlined text-[18px]">chevron_left</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onSelect((activeIndex + 1) % images.length)}
-                  className="flex h-9 w-9 items-center justify-center rounded-full border border-[var(--color-border)] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)]"
-                  aria-label="Next image"
-                >
-                  <span className="material-symbols-outlined text-[18px]">chevron_right</span>
-                </button>
+                <IconButton icon="chevron_left" label={t('attachments.previousImage')} size="lg" tone="secondary" shape="circle" bordered onClick={() => onSelect((activeIndex - 1 + images.length) % images.length)} />
+                <IconButton icon="chevron_right" label={t('attachments.nextImage')} size="lg" tone="secondary" shape="circle" bordered onClick={() => onSelect((activeIndex + 1) % images.length)} />
               </>
             )}
           </div>

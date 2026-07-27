@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
-import { createPortal } from 'react-dom'
 import { activityStatsApi, type ActivityStatsResponse, type DailyActivity } from '../api/activityStats'
 import {
   desktopUiPreferencesApi,
   getProfileAvatarUrl,
   type DesktopProfilePreferences,
 } from '../api/desktopUiPreferences'
+import { Button } from '@/components/ui/Button'
+import { Card } from '@/components/ui/Card'
+import { Modal } from '@/components/ui/Modal'
 import { type Locale, useTranslation } from '../i18n'
 import { useSettingsStore } from '../stores/settingsStore'
 import { publicAssetPath } from '../lib/publicAsset'
@@ -168,6 +170,36 @@ function getModelTokenTotal(usage: ActivityStatsResponse['modelUsage'][string] |
     (usage.cacheReadInputTokens ?? 0) +
     (usage.cacheCreationInputTokens ?? 0)
   )
+}
+
+/**
+ * Tokens the model actually had to process, as opposed to prefix it read back from cache. Cache
+ * reads dominate the headline total — over 90% of it on a heavy agentic workload — and bill at a
+ * tenth of input, so the raw total on its own says very little about what was spent.
+ */
+function getFreshTokenTotal(usage: ActivityStatsResponse['modelUsage'][string] | undefined) {
+  if (!usage) return 0
+  return (
+    (usage.inputTokens ?? 0) +
+    (usage.outputTokens ?? 0) +
+    (usage.cacheCreationInputTokens ?? 0)
+  )
+}
+
+function formatCostUSD(cost: number, locale: Locale) {
+  return new Intl.NumberFormat(DATE_LOCALES[locale], {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: cost >= 100 ? 0 : 2,
+  }).format(cost)
+}
+
+function formatShare(part: number, whole: number, locale: Locale) {
+  if (whole <= 0) return '0%'
+  return new Intl.NumberFormat(DATE_LOCALES[locale], {
+    maximumFractionDigits: part / whole < 0.1 ? 1 : 0,
+    style: 'percent',
+  }).format(part / whole)
 }
 
 function formatModelName(model: string) {
@@ -571,6 +603,18 @@ export function ActivitySettings() {
       return Math.max(peak, dayTotal)
     }, 0)
   }, [stats])
+  const tokenBreakdown = useMemo(() => {
+    let fresh = 0
+    let cached = 0
+    let costUSD = 0
+    for (const usage of Object.values(stats?.modelUsage ?? {})) {
+      fresh += getFreshTokenTotal(usage)
+      cached += usage.cacheReadInputTokens ?? 0
+      costUSD += usage.costUSD ?? 0
+    }
+    return { fresh, cached, costUSD }
+  }, [stats])
+  const unpricedModelCount = stats?.unpricedModels?.length ?? 0
   const topPluginItems = useMemo(() => buildPluginAndSkillRankItems(stats), [stats])
   const metrics: SummaryMetric[] = [
     {
@@ -610,6 +654,29 @@ export function ActivitySettings() {
       detail: topModel ? `${formatTokens(topModel.tokens)} ${t('settings.activity.tokens')}` : undefined,
     },
     {
+      label: t('settings.activity.freshTokens'),
+      value: formatTokens(tokenBreakdown.fresh),
+      detail: t('settings.activity.ofTotal', {
+        percent: formatShare(tokenBreakdown.fresh, totalTokens, locale),
+      }),
+    },
+    {
+      label: t('settings.activity.cachedTokens'),
+      value: formatTokens(tokenBreakdown.cached),
+      detail: t('settings.activity.ofTotal', {
+        percent: formatShare(tokenBreakdown.cached, totalTokens, locale),
+      }),
+    },
+    {
+      label: t('settings.activity.estimatedCost'),
+      value: formatCostUSD(tokenBreakdown.costUSD, locale),
+      // A partial total presented as a complete one would understate spend for anyone running
+      // third-party models, so say what it leaves out.
+      detail: unpricedModelCount > 0
+        ? t('settings.activity.costExcludesModels', { count: unpricedModelCount })
+        : undefined,
+    },
+    {
       label: t('settings.activity.exploredSkills'),
       value: formatInteger(exploredSkillsCount, locale),
     },
@@ -637,6 +704,13 @@ export function ActivitySettings() {
     { mode: 'weekly', label: t('settings.activity.mode.weekly'), help: t('settings.activity.modeHelp.weekly') },
     { mode: 'cumulative', label: t('settings.activity.mode.cumulative'), help: t('settings.activity.modeHelp.cumulative') },
   ]
+
+  const cancelProfileEdit = () => {
+    setIsEditingProfile(false)
+    setDraftDisplayName(profile.displayName)
+    setDraftSubtitle(profile.subtitle)
+    setProfileError(null)
+  }
 
   const saveProfile = async () => {
     setIsSavingProfile(true)
@@ -699,7 +773,7 @@ export function ActivitySettings() {
   return (
     <div className="mx-auto w-full max-w-[1060px] min-w-0 pb-12">
       <section className="relative flex min-h-[176px] flex-col items-center justify-start pt-4 text-center">
-        <div className="relative h-16 w-16 overflow-hidden rounded-full border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[0_10px_28px_-22px_rgba(15,23,42,0.6)]">
+        <div className="relative h-16 w-16 overflow-hidden rounded-full border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-card)]">
           <img
             src={avatarSrc}
             alt={`${profile.displayName} avatar`}
@@ -711,12 +785,12 @@ export function ActivitySettings() {
           />
         </div>
         <div className="group/activity-profile mt-4 flex max-w-full items-center justify-center gap-2">
-          <h1 className="max-w-[min(720px,calc(100%-2.25rem))] truncate text-[28px] font-semibold tracking-tight text-[var(--color-text-primary)] sm:text-[34px]">{profile.displayName}</h1>
+          <h1 className="max-w-[min(720px,calc(100%-2.25rem))] truncate text-[26px] font-semibold text-[var(--color-text-primary)] sm:text-[31px]" style={{ fontFamily: 'var(--font-headline)' }}>{profile.displayName}</h1>
           <button
             type="button"
             aria-label={t('settings.activity.editProfile')}
             title={t('settings.activity.editProfile')}
-            className="mt-1 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--color-text-tertiary)] opacity-0 transition-[background-color,color,opacity,transform] group-hover/activity-profile:opacity-100 hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--color-brand)] focus:ring-offset-2 focus:ring-offset-[var(--color-surface)] focus-visible:opacity-100 active:translate-y-[1px] disabled:pointer-events-none disabled:opacity-0"
+            className="mt-1 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-md)] text-[var(--color-text-tertiary)] opacity-0 transition-[background-color,color,opacity,transform] group-hover/activity-profile:opacity-100 hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--color-brand)] focus:ring-offset-2 focus:ring-offset-[var(--color-surface)] focus-visible:opacity-100 active:translate-y-[1px] disabled:pointer-events-none disabled:opacity-0"
             onClick={() => {
               setIsEditingProfile(true)
               setDraftDisplayName(profile.displayName)
@@ -743,165 +817,146 @@ export function ActivitySettings() {
         {profileError && !isEditingProfile && <div className="mt-3 text-xs text-[var(--color-error)]">{profileError}</div>}
       </section>
 
-      <section className="activity-summary-panel mx-auto mt-7 w-full max-w-[900px] overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-border)] p-px shadow-[0_12px_34px_-32px_rgba(15,23,42,0.55)]">
+      <section className="activity-summary-panel mx-auto mt-7 w-full min-w-0 max-w-[900px]">
         {isLoading ? (
-          <div className="activity-summary-grid grid gap-px">
+          <div className="activity-summary-grid grid gap-3">
             {Array.from({ length: 5 }).map((_, index) => (
-              <div
+              <Card
                 key={index}
-                className={`activity-summary-metric min-h-[76px] animate-pulse bg-[var(--color-surface)] px-4 py-3 ${
+                radius="xl"
+                surface="lowest"
+                padding="none"
+                shadow="card"
+                className={`activity-summary-metric min-h-[92px] animate-pulse px-4 py-4 ${
                   index === 0 ? 'activity-summary-metric-primary' : ''
                 }`}
               >
-                <div className="mx-auto h-5 w-16 rounded bg-[var(--color-surface-container)]" />
-                <div className="mx-auto mt-2 h-3 w-20 rounded bg-[var(--color-surface-container)]" />
-                <div className="mx-auto mt-2 h-2.5 w-14 rounded bg-[var(--color-surface-container)]" />
-              </div>
+                <div className="mx-auto h-6 w-16 rounded-[var(--radius-sm)] bg-[var(--color-surface-container)]" />
+                <div className="mx-auto mt-2.5 h-3 w-20 rounded-[var(--radius-sm)] bg-[var(--color-surface-container)]" />
+                <div className="mx-auto mt-2 h-2.5 w-14 rounded-[var(--radius-sm)] bg-[var(--color-surface-container)]" />
+              </Card>
             ))}
           </div>
         ) : (
-          <div className="activity-summary-grid grid gap-px">
+          <div className="activity-summary-grid grid gap-3">
             {metrics.map((metric, index) => {
               const isPrimary = index === 0
               return (
-                <div
+                <Card
                   key={metric.label}
-                  className={`activity-summary-metric min-w-0 bg-[var(--color-surface-container-lowest)] px-4 py-3 text-center opacity-0 shadow-[inset_0_1px_0_rgba(255,255,255,0.48)] [animation:activity-reveal_420ms_cubic-bezier(0.16,1,0.3,1)_forwards] ${
+                  radius="xl"
+                  surface="lowest"
+                  padding="none"
+                  lift
+                  // `backwards` holds the entry frame through `animationDelay` so the stagger still
+                  // reads, without a standalone `opacity-0`: that pairing is what made these cards
+                  // invisible once the keyframes they named were dropped from globals.css.
+                  className={`activity-summary-metric min-w-0 px-4 py-4 text-center [animation:screen-pop_420ms_cubic-bezier(0.16,1,0.3,1)_backwards] motion-reduce:animate-none ${
                     isPrimary ? 'activity-summary-metric-primary' : ''
                   }`}
                   style={{ animationDelay: `${index * 45}ms` }}
                 >
-                  <div className="flex min-h-[68px] flex-col items-center justify-center gap-1.5">
-                    <div className={`activity-summary-value max-w-full min-w-0 truncate font-semibold leading-none tracking-tight text-[var(--color-text-primary)] tabular-nums ${
-                      isPrimary ? 'text-[23px]' : 'text-[22px]'
-                    }`}>
+                  <div className="flex min-h-[68px] flex-col items-center justify-center gap-2">
+                    <div
+                      // Two lines rather than one truncated one: durations like "436 小时 26 分钟"
+                      // do not fit a fifth of the row and were rendering as "436 小…".
+                      className={`activity-summary-value max-w-full min-w-0 line-clamp-2 font-semibold leading-[1.15] text-[var(--color-text-primary)] tabular-nums ${
+                        isPrimary ? 'text-[25px]' : 'text-[24px]'
+                      }`}
+                      style={{ fontFamily: 'var(--font-headline)' }}
+                    >
                       {metric.value}
                     </div>
-                    <div className="min-w-0 truncate text-[13px] font-medium leading-tight text-[var(--color-text-secondary)]">
+                    <div className="min-w-0 truncate text-[12px] font-medium leading-tight text-[var(--color-text-tertiary)]">
                       {metric.label}
                     </div>
                     {metric.detail && <div className="max-w-full truncate text-[11px] leading-tight text-[var(--color-text-tertiary)]">{metric.detail}</div>}
                   </div>
-                </div>
+                </Card>
               )
             })}
           </div>
         )}
       </section>
 
-      {isEditingProfile && createPortal(
-        <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-[var(--color-overlay-scrim)] px-4 py-8" role="dialog" aria-modal="true" aria-labelledby="activity-profile-dialog-title">
-          <div className="w-full max-w-[420px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] p-5 shadow-2xl">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <h2 id="activity-profile-dialog-title" className="text-base font-semibold text-[var(--color-text-primary)]">{t('settings.activity.editProfile')}</h2>
-                <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">{t('settings.activity.displayNameHelper')}</p>
-              </div>
-              <button
-                type="button"
-                className="inline-flex h-8 w-8 items-center justify-center rounded-md text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
-                onClick={() => {
-                  setIsEditingProfile(false)
-                  setDraftDisplayName(profile.displayName)
-                  setDraftSubtitle(profile.subtitle)
-                  setProfileError(null)
-                }}
-                aria-label={t('settings.activity.cancelEdit')}
+      <Modal
+        open={isEditingProfile}
+        onClose={cancelProfileEdit}
+        title={t('settings.activity.editProfile')}
+        width={420}
+        footer={
+          <>
+            <Button variant="ghost" size="base" onClick={cancelProfileEdit}>
+              {t('settings.activity.cancelEdit')}
+            </Button>
+            <Button variant="primary" size="base" onClick={saveProfile} disabled={isSavingProfile}>
+              {t('settings.activity.saveProfile')}
+            </Button>
+          </>
+        }
+      >
+        <p className="text-xs text-[var(--color-text-tertiary)]">{t('settings.activity.displayNameHelper')}</p>
+
+        <div className="mt-5 grid gap-4">
+          <div className="grid gap-2">
+            <label htmlFor="activity-profile-display-name" className="text-xs font-medium text-[var(--color-text-secondary)]">
+              {t('settings.activity.displayName')}
+            </label>
+            <input
+              id="activity-profile-display-name"
+              value={draftDisplayName}
+              onChange={(event) => setDraftDisplayName(event.target.value)}
+              className="h-10 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text-primary)] outline-none transition-colors focus:border-[var(--color-border-focus)]"
+            />
+          </div>
+
+          <div className="grid gap-2">
+            <label htmlFor="activity-profile-subtitle" className="text-xs font-medium text-[var(--color-text-secondary)]">
+              {t('settings.activity.subtitle')}
+            </label>
+            <input
+              id="activity-profile-subtitle"
+              value={draftSubtitle}
+              onChange={(event) => setDraftSubtitle(event.target.value)}
+              className="h-10 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text-primary)] outline-none transition-colors focus:border-[var(--color-border-focus)]"
+            />
+          </div>
+
+          <div className="grid gap-2">
+            <div className="text-xs font-medium text-[var(--color-text-secondary)]">{t('settings.activity.avatar')}</div>
+            <p className="text-xs text-[var(--color-text-tertiary)]">{t('settings.activity.avatarHelper')}</p>
+            <div className="flex flex-wrap gap-2">
+              <input
+                ref={avatarInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                className="hidden"
+                onChange={handleAvatarChange}
+              />
+              <Button
+                variant="secondary"
+                size="base"
+                onClick={() => avatarInputRef.current?.click()}
+                icon={<span className="material-symbols-outlined text-[15px]" aria-hidden="true">upload</span>}
               >
-                <span className="material-symbols-outlined text-[17px]" aria-hidden="true">close</span>
-              </button>
-            </div>
-
-            <div className="mt-5 grid gap-4">
-              <div className="grid gap-2">
-                <label htmlFor="activity-profile-display-name" className="text-xs font-medium text-[var(--color-text-secondary)]">
-                  {t('settings.activity.displayName')}
-                </label>
-                <input
-                  id="activity-profile-display-name"
-                  value={draftDisplayName}
-                  onChange={(event) => setDraftDisplayName(event.target.value)}
-                  className="h-10 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text-primary)] outline-none transition-colors focus:border-[var(--color-border-focus)]"
-                />
-              </div>
-
-              <div className="grid gap-2">
-                <label htmlFor="activity-profile-subtitle" className="text-xs font-medium text-[var(--color-text-secondary)]">
-                  {t('settings.activity.subtitle')}
-                </label>
-                <input
-                  id="activity-profile-subtitle"
-                  value={draftSubtitle}
-                  onChange={(event) => setDraftSubtitle(event.target.value)}
-                  className="h-10 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text-primary)] outline-none transition-colors focus:border-[var(--color-border-focus)]"
-                />
-              </div>
-
-              <div className="grid gap-2">
-                <div className="text-xs font-medium text-[var(--color-text-secondary)]">{t('settings.activity.avatar')}</div>
-                <p className="text-xs text-[var(--color-text-tertiary)]">{t('settings.activity.avatarHelper')}</p>
-                <div className="flex flex-wrap gap-2">
-                  <input
-                    ref={avatarInputRef}
-                    type="file"
-                    accept="image/png,image/jpeg,image/webp"
-                    className="hidden"
-                    onChange={handleAvatarChange}
-                  />
-                  <button
-                    type="button"
-                    className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--color-border)] px-2.5 text-xs font-medium text-[var(--color-text-secondary)] transition-[background-color,transform] hover:bg-[var(--color-surface-hover)] active:translate-y-[1px]"
-                    onClick={() => avatarInputRef.current?.click()}
-                  >
-                    <span className="material-symbols-outlined text-[15px]" aria-hidden="true">upload</span>
-                    {t('settings.activity.changeAvatar')}
-                  </button>
-                  {profile.avatarFile && (
-                    <button
-                      type="button"
-                      className="inline-flex h-8 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-[var(--color-text-tertiary)] transition-[background-color,transform] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] active:translate-y-[1px]"
-                      onClick={removeAvatar}
-                    >
-                      {t('settings.activity.removeAvatar')}
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {profileError && <div className="mt-4 rounded-md border border-[var(--color-error)]/30 bg-[var(--color-error)]/10 px-3 py-2 text-xs text-[var(--color-error)]">{profileError}</div>}
-
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                type="button"
-                className="h-8 rounded-md px-3 text-xs font-medium text-[var(--color-text-secondary)] transition-[background-color,transform] hover:bg-[var(--color-surface-hover)] active:translate-y-[1px]"
-                onClick={() => {
-                  setIsEditingProfile(false)
-                  setDraftDisplayName(profile.displayName)
-                  setDraftSubtitle(profile.subtitle)
-                  setProfileError(null)
-                }}
-              >
-                {t('settings.activity.cancelEdit')}
-              </button>
-              <button
-                type="button"
-                className="h-8 rounded-md bg-[var(--color-text-primary)] px-3 text-xs font-medium text-[var(--color-surface)] transition-[opacity,transform] active:translate-y-[1px] disabled:opacity-50"
-                onClick={saveProfile}
-                disabled={isSavingProfile}
-              >
-                {t('settings.activity.saveProfile')}
-              </button>
+                {t('settings.activity.changeAvatar')}
+              </Button>
+              {profile.avatarFile && (
+                <Button variant="ghost" size="base" onClick={removeAvatar}>
+                  {t('settings.activity.removeAvatar')}
+                </Button>
+              )}
             </div>
           </div>
-        </div>,
-        document.body,
-      )}
+        </div>
+
+        {profileError && <div className="mt-4 rounded-[var(--radius-md)] border border-[var(--color-error)] bg-[var(--color-error-container)] px-3 py-2 text-xs text-[var(--color-on-error-container)]">{profileError}</div>}
+      </Modal>
 
       <div className="mt-10">
         <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <h2 className="text-xl font-semibold text-[var(--color-text-primary)]">{t('settings.activity.tokenActivity')}</h2>
+            <h2 className="text-xl font-semibold text-[var(--color-text-primary)]" style={{ fontFamily: 'var(--font-headline)' }}>{t('settings.activity.tokenActivity')}</h2>
           </div>
           <div className="inline-flex w-fit items-center gap-7">
             {modeOptions.map((option) => (
@@ -937,13 +992,13 @@ export function ActivitySettings() {
             </div>
           </div>
         ) : error ? (
-          <div className="rounded-md border border-[var(--color-error)]/30 bg-[var(--color-error)]/10 px-4 py-3 text-sm text-[var(--color-error)]">
+          <div className="rounded-[var(--radius-md)] border border-[var(--color-error)] bg-[var(--color-error-container)] px-4 py-3 text-sm text-[var(--color-on-error-container)]">
             {error}
           </div>
         ) : !hasUsage ? (
           <div className="flex min-h-[190px] items-center justify-center">
             <div className="max-w-sm text-center">
-              <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] text-[var(--color-text-tertiary)]">
+              <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] text-[var(--color-text-tertiary)]">
                 <span className="material-symbols-outlined text-[20px]" aria-hidden="true">monitoring</span>
               </div>
               <div className="mt-3 text-sm font-medium text-[var(--color-text-primary)]">{t('settings.activity.emptyTitle')}</div>
@@ -1026,7 +1081,7 @@ export function ActivitySettings() {
                   <div
                     id={`activity-day-tooltip-${tooltipDay.date}`}
                     role="tooltip"
-                    className="pointer-events-none absolute z-20 min-w-[172px] rounded-md border border-[var(--color-activity-tooltip-border)] bg-[var(--color-activity-tooltip-surface)] px-3 py-2 text-xs shadow-xl"
+                    className="pointer-events-none absolute z-20 min-w-[172px] rounded-[var(--radius-md)] border border-[var(--color-activity-tooltip-border)] bg-[var(--color-activity-tooltip-surface)] px-3 py-2 text-xs shadow-xl"
                     style={tooltipStyle}
                   >
                     <div className="font-medium text-[var(--color-activity-tooltip-text)]">{getHeatmapCellTitle(tooltipDay, locale, t)}</div>
@@ -1059,7 +1114,7 @@ export function ActivitySettings() {
           topPluginItems.length > 0 ? 'lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1fr)]' : 'lg:max-w-[520px]'
         }`}>
           <section className="min-w-0">
-            <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">{t('settings.activity.activityInsights')}</h2>
+            <h2 className="text-lg font-semibold text-[var(--color-text-primary)]" style={{ fontFamily: 'var(--font-headline)' }}>{t('settings.activity.activityInsights')}</h2>
             <dl className="mt-5 grid gap-3">
               {insightMetrics.map((metric) => (
                 <div key={metric.label} className="grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-5">
@@ -1077,11 +1132,11 @@ export function ActivitySettings() {
 
           {topPluginItems.length > 0 && (
             <section className="min-w-0">
-              <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">{t('settings.activity.mostUsedPluginsAndSkills')}</h2>
+              <h2 className="text-lg font-semibold text-[var(--color-text-primary)]" style={{ fontFamily: 'var(--font-headline)' }}>{t('settings.activity.mostUsedPluginsAndSkills')}</h2>
               <div className="mt-5 grid gap-3">
                 {topPluginItems.map((item) => (
                   <div key={item.id} className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3">
-                    <span className="flex h-7 w-7 items-center justify-center rounded-md border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] text-[var(--color-text-tertiary)]">
+                    <span className="flex h-7 w-7 items-center justify-center rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] text-[var(--color-text-tertiary)]">
                       <span className="material-symbols-outlined text-[16px]" aria-hidden="true">
                         {item.kind === 'skill' ? 'extension' : 'hub'}
                       </span>

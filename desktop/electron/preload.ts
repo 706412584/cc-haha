@@ -1,9 +1,12 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { createElectronHost } from '../src/lib/desktopHost/electronHost'
 import type { DesktopHostUnlisten } from '../src/lib/desktopHost/types'
 import type { ElectronEventChannel, ElectronIpcChannel } from './ipc/channels'
 
 const electronHost = createElectronHost({
+  getPathForFile(file) {
+    return webUtils.getPathForFile(file)
+  },
   invoke<T>(channel: ElectronIpcChannel, payload?: unknown): Promise<T> {
     return ipcRenderer.invoke(channel, payload) as Promise<T>
   },

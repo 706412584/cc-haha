@@ -1,5 +1,7 @@
-import { ArrowUpRight, Download, Star } from 'lucide-react'
+import { Download, Star } from 'lucide-react'
 import { useTranslation } from '../../i18n'
+import { Button } from '@/components/ui/Button'
+import { Card } from '@/components/ui/Card'
 import type { NormalizedSkill } from '../../types/market'
 import { InstallStateBadge } from './InstallStateBadge'
 import { SecurityBadge } from './SecurityBadge'
@@ -29,75 +31,64 @@ export function SkillCard({
   const showInstallButton = Boolean(onInstall) && skill.installState === 'installable'
 
   return (
-    <article
-      data-testid={`market-skill-card-${skill.id}`}
-      className="group relative isolate flex min-h-[212px] min-w-0 flex-col overflow-hidden rounded-xl border border-[var(--color-border)]/70 bg-[var(--color-surface-container-low)] p-4 transition-[background-color,border-color,box-shadow] duration-200 hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface)] hover:shadow-[var(--shadow-dropdown)]"
-      style={{ contentVisibility: 'auto', containIntrinsicSize: '212px' }}
+    <Card
+      as="article"
+      radius="xl"
+      surface="base"
+      padding="lg"
+      interactive
+      lift
+      className="group relative isolate flex min-h-[232px] min-w-0 flex-col gap-3"
     >
       <button
         type="button"
         aria-label={skill.name}
+        data-market-skill-open-id={skill.id}
         onClick={() => onOpen(skill.id)}
-        className="absolute inset-0 z-0 rounded-xl focus-visible:outline-none focus-visible:shadow-[var(--shadow-focus-ring)]"
+        className="absolute inset-0 z-0 rounded-[var(--radius-xl)] focus-visible:outline-none focus-visible:shadow-[var(--shadow-focus-ring)]"
       />
 
-      <div className="pointer-events-none absolute inset-x-5 top-0 z-10 h-px bg-gradient-to-r from-transparent via-[var(--color-brand)]/55 to-transparent opacity-0 transition-opacity duration-200 group-hover:opacity-100" />
-
-      <div className="pointer-events-none relative z-10 flex items-start gap-3.5">
+      <div className="pointer-events-none relative z-10 flex items-center gap-3.5">
         <SkillAvatar skill={skill} size={46} />
         <div className="min-w-0 flex-1">
-          <div className="flex items-start gap-2">
-            <h3 className="min-w-0 flex-1 truncate text-[15px] font-semibold leading-5 tracking-[-0.01em] text-[var(--color-text-primary)]">
+          <div className="flex items-baseline gap-2.5">
+            <h3 className="min-w-0 flex-1 truncate text-[15.5px] font-bold leading-6 tracking-[-0.01em] text-[var(--color-text-primary)]">
               {skill.name}
             </h3>
             {skill.version && (
-              <span className="flex-shrink-0 font-mono text-[10px] leading-5 text-[var(--color-text-tertiary)]">
+              <span className="flex-shrink-0 font-mono text-xs text-[var(--color-text-tertiary)]">
                 v{skill.version}
               </span>
             )}
           </div>
-          <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[11px] text-[var(--color-text-tertiary)]">
-            <span className="flex-shrink-0 font-semibold uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">
-              {t(`market.source.${skill.source}`)}
-            </span>
+          <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11.5px] font-semibold uppercase tracking-[0.06em] text-[var(--color-text-tertiary)]">
+            <span className="flex-shrink-0">{t(`market.source.${skill.source}`)}</span>
             {skill.author.handle && (
               <>
                 <span aria-hidden>·</span>
-                <span className="truncate">{t('market.card.by', { author: skill.author.displayName || skill.author.handle })}</span>
+                <span className="truncate font-normal normal-case tracking-normal">
+                  {t('market.card.by', { author: skill.author.displayName || skill.author.handle })}
+                </span>
               </>
             )}
           </div>
         </div>
-        <ArrowUpRight
-          className="mt-0.5 h-4 w-4 flex-shrink-0 text-[var(--color-text-tertiary)] opacity-0 transition-[opacity,transform] duration-200 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:opacity-100"
-          strokeWidth={1.8}
-          aria-hidden="true"
-        />
       </div>
 
-      <p className="pointer-events-none relative z-10 mt-3 line-clamp-2 min-h-[2.75rem] text-[12px] leading-[1.375rem] text-[var(--color-text-secondary)] break-words">
+      <p className="pointer-events-none relative z-10 line-clamp-2 min-h-[44px] break-words text-[13.5px] leading-[1.65] text-[var(--color-text-secondary)]">
         {skill.summary || t('market.detail.noDescription')}
       </p>
 
       {skill.tags.length > 0 && (
-        <div className="pointer-events-none relative z-10 mt-2.5 flex min-h-4 flex-wrap items-center gap-x-2.5 gap-y-1">
+        <div className="pointer-events-none relative z-10 flex min-h-5 flex-wrap items-center gap-x-2.5 gap-y-1 text-[12.5px] text-[var(--color-text-tertiary)]">
           {skill.tags.slice(0, MAX_VISIBLE_TAGS).map((tag) => (
-            <span
-              key={tag}
-              className="text-[10px] text-[var(--color-text-tertiary)]"
-            >
-              #{tag}
-            </span>
+            <span key={tag}>#{tag}</span>
           ))}
-          {extraTags > 0 && (
-            <span className="text-[10px] text-[var(--color-text-tertiary)]">
-              {t('market.card.moreTags', { count: String(extraTags) })}
-            </span>
-          )}
+          {extraTags > 0 && <span>{t('market.card.moreTags', { count: String(extraTags) })}</span>}
         </div>
       )}
 
-      <footer className="pointer-events-none relative z-10 mt-auto flex flex-wrap items-center justify-between gap-x-2 gap-y-2 border-t border-[var(--color-border)]/60 pt-3">
+      <footer className="pointer-events-none relative z-10 mt-auto flex flex-wrap items-center gap-x-2 gap-y-2 border-t border-[var(--color-border)] pt-3.5">
         <div className="flex min-w-0 flex-wrap items-center gap-1.5">
           <SecurityBadge status={skill.securityStatus} />
           {/* The quick-install button already communicates "installable" — skip the badge when the button renders. */}
@@ -105,34 +96,36 @@ export function SkillCard({
             <InstallStateBadge state={skill.installState} />
           )}
         </div>
-        <div className="ml-auto flex flex-shrink-0 items-center gap-2.5 text-[11px] tabular-nums text-[var(--color-text-tertiary)]">
-          <span className="inline-flex items-center gap-1" title={t('market.detail.downloads')}>
-            <Download className="h-3.5 w-3.5" strokeWidth={1.8} aria-hidden="true" />
+        <div className="ml-auto flex flex-shrink-0 items-center gap-2.5 text-[12.5px] tabular-nums text-[var(--color-text-secondary)]">
+          <span className="inline-flex items-center gap-1.5" title={t('market.detail.downloads')}>
+            <Download className="h-3 w-3" strokeWidth={1.5} aria-hidden="true" />
             {formatCount(skill.stats.downloads)}
           </span>
           {typeof skill.stats.stars === 'number' && skill.stats.stars > 0 && (
-            <span className="inline-flex items-center gap-1" title={t('market.detail.stars')}>
-              <Star className="h-3.5 w-3.5" strokeWidth={1.8} aria-hidden="true" />
+            <span className="inline-flex items-center gap-1.5" title={t('market.detail.stars')}>
+              <Star className="h-3 w-3" strokeWidth={1.5} aria-hidden="true" />
               {formatCount(skill.stats.stars)}
             </span>
           )}
           {showInstallButton && (
-            <button
-              type="button"
-              disabled={installing}
+            // The card's overlay link sets `pointer-events-none` on this
+            // footer, so the button has to opt back in and sit above it.
+            // `tonal` is the soft terracotta fill; the border is the handoff's
+            // terracotta hairline around it.
+            <Button
+              variant="tonal"
+              size="base"
+              className="pointer-events-auto relative z-20 border border-[var(--color-primary-fixed-dim)]"
+              loading={installing}
+              data-market-skill-action-id={skill.id}
+              icon={<Download className="h-3 w-3" strokeWidth={1.6} aria-hidden="true" />}
               onClick={() => onInstall?.(skill.id)}
-              className="pointer-events-auto relative z-20 inline-flex min-h-8 cursor-pointer items-center gap-1.5 rounded-md border border-[var(--color-brand)]/25 bg-[var(--color-surface)] px-2.5 text-[11px] font-semibold text-[var(--color-brand)] transition-colors hover:border-[var(--color-brand)]/45 hover:bg-[var(--color-primary-fixed)] focus-visible:outline-none focus-visible:shadow-[var(--shadow-focus-ring)] active:scale-[0.98] disabled:opacity-50"
             >
-              {installing ? (
-                <span className="h-3 w-3 animate-spin rounded-full border border-current border-t-transparent" aria-hidden />
-              ) : (
-                <Download className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
-              )}
               {installing ? t('market.install.installing') : t('market.install.action')}
-            </button>
+            </Button>
           )}
         </div>
       </footer>
-    </article>
+    </Card>
   )
 }

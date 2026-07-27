@@ -7,6 +7,8 @@ import {
   subscribeConversationFindController,
   type ConversationFindController,
 } from './conversationFindBridge'
+import { IconButton } from '@/components/ui/IconButton'
+import { useTranslation } from '../../i18n'
 
 // JS-based scoped find-in-page. We walk text nodes in the document body EXCLUDING the
 // sidebar (.sidebar-panel) and this find bar ([data-find-bar]), then highlight matches
@@ -33,6 +35,7 @@ type Props = {
 }
 
 export function FindInPageModal({ open, onClose }: Props) {
+  const t = useTranslation()
   const [query, setQuery] = useState('')
   const [debouncedQuery, setDebouncedQuery] = useState('')
   const [count, setCount] = useState(0)
@@ -198,15 +201,19 @@ export function FindInPageModal({ open, onClose }: Props) {
   if (!open) return null
 
   return createPortal(
-    <div className="fixed right-3 top-3 z-50" data-find-bar>
+    <div className="fixed right-3 top-3 z-[var(--z-dialog)]" data-find-bar>
+      {/* Highlight colors have to be real CSS declarations (the Custom Highlight
+          API takes no class). They use the dedicated search-highlight pair —
+          these wash over arbitrary page content, not a brand-soft panel, so
+          borrowing the brand chip tokens reads wrong on tinted surfaces. */}
       <style>{`
-        ::highlight(${RESULTS_HL}) { background-color: rgba(250, 204, 21, 0.45); color: inherit; }
-        ::highlight(${ACTIVE_HL}) { background-color: rgba(249, 115, 22, 0.9); color: #fff; }
+        ::highlight(${RESULTS_HL}) { background-color: var(--color-search-highlight); color: var(--color-on-search-highlight); }
+        ::highlight(${ACTIVE_HL}) { background-color: var(--color-search-highlight-active); color: var(--color-on-search-highlight-active); }
       `}</style>
       <div
-        className="glass-panel flex items-center gap-1 rounded-lg border border-[var(--color-border)] px-2 py-1.5 shadow-lg"
+        className="glass-panel animate-overlay-in-top flex items-center gap-1 rounded-[var(--radius-lg)] px-2 py-1.5"
         role="dialog"
-        aria-label="Find in page"
+        aria-label={t('search.findInPage.title')}
       >
         <Search className="h-4 w-4 shrink-0 text-[var(--color-text-tertiary)]" aria-hidden="true" />
         <input
@@ -215,38 +222,35 @@ export function FindInPageModal({ open, onClose }: Props) {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={onKeyDown}
-          placeholder="Find"
-          className="w-52 bg-transparent text-sm text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)]"
+          placeholder={t('search.findInPage.placeholder')}
+          className="w-52 bg-transparent text-[13.5px] text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)]"
         />
-        <span className="min-w-[48px] shrink-0 px-1 text-center text-[11px] tabular-nums text-[var(--color-text-tertiary)]">
+        <span className="min-w-[48px] shrink-0 px-1 text-center font-mono text-[12px] tabular-nums text-[var(--color-text-tertiary)]">
           {count > 0 ? `${activeIndex + 1} / ${count}` : (debouncedQuery.trim() ? '0' : '')}
         </span>
-        <button
-          type="button"
+        <IconButton
+          icon={<ChevronUp className="h-4 w-4" aria-hidden="true" />}
+          label={t('search.findInPage.previousMatch')}
+          size="xs"
+          tone="secondary"
+          disabled={count === 0}
           onClick={() => step(false)}
+        />
+        <IconButton
+          icon={<ChevronDown className="h-4 w-4" aria-hidden="true" />}
+          label={t('search.findInPage.nextMatch')}
+          size="xs"
+          tone="secondary"
           disabled={count === 0}
-          aria-label="Previous match"
-          className="flex h-6 w-6 items-center justify-center rounded text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] disabled:opacity-40"
-        >
-          <ChevronUp className="h-4 w-4" aria-hidden="true" />
-        </button>
-        <button
-          type="button"
           onClick={() => step(true)}
-          disabled={count === 0}
-          aria-label="Next match"
-          className="flex h-6 w-6 items-center justify-center rounded text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] disabled:opacity-40"
-        >
-          <ChevronDown className="h-4 w-4" aria-hidden="true" />
-        </button>
-        <button
-          type="button"
+        />
+        <IconButton
+          icon={<X className="h-4 w-4" aria-hidden="true" />}
+          label={t('search.findInPage.close')}
+          size="xs"
+          tone="secondary"
           onClick={onClose}
-          aria-label="Close find bar"
-          className="flex h-6 w-6 items-center justify-center rounded text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]"
-        >
-          <X className="h-4 w-4" aria-hidden="true" />
-        </button>
+        />
       </div>
     </div>,
     document.body,

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { RefreshCw } from 'lucide-react'
+import { Badge } from '@/components/ui/Badge'
 import { useChatStore } from '../../stores/chatStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useTranslation, type TranslationKey } from '../../i18n'
@@ -62,33 +63,36 @@ export function StreamingIndicator() {
         ? t('chat.retry.streamDisconnect')
         : formatErrorType(apiRetry.errorType) ?? t('chat.retry.networkError')
     const detailText = apiRetry.errorMessage?.trim()
-    const title = isStreamDisconnect
-      ? t('chat.retry.streamTitle')
-      : t('chat.retry.title')
-
     return (
       <div
         data-testid="api-retry-indicator"
         data-retry-kind={isStreamDisconnect ? 'stream_disconnect' : 'api'}
         role="status"
         aria-live="polite"
-        className="mb-2 flex w-full max-w-[min(720px,100%)] flex-wrap items-center gap-2 rounded-md border border-amber-500/35 bg-amber-50/80 px-3 py-2 text-xs text-amber-950 shadow-sm dark:border-amber-400/25 dark:bg-amber-950/30 dark:text-amber-100"
+        className="mb-2 flex w-full max-w-[min(720px,100%)] flex-wrap items-center gap-2 rounded-[var(--radius-md)] border border-[var(--color-warning)] bg-[var(--color-warning-container)] px-3 py-2 text-xs text-[var(--color-on-warning-container)] shadow-[var(--shadow-card)]"
       >
-        <RefreshCw size={14} strokeWidth={2.2} className="shrink-0 animate-spin text-amber-700 dark:text-amber-300" aria-hidden="true" />
-        <span className="font-medium">{title}</span>
-        <span className="rounded-[4px] border border-amber-700/20 bg-white/70 px-1.5 py-0.5 font-mono text-[11px] leading-none text-amber-900 dark:border-amber-300/20 dark:bg-black/15 dark:text-amber-100">
-          {t('chat.retry.attempt', { attempt: apiRetry.attempt, max: apiRetry.maxRetries })}
+        <RefreshCw size={14} strokeWidth={2.2} className="shrink-0 animate-spin text-[var(--color-warning)]" aria-hidden="true" />
+        <span className="font-medium">
+          {t(isStreamDisconnect ? 'chat.retry.streamTitle' : 'chat.retry.title')}
         </span>
-        <span className="rounded-[4px] border border-amber-700/20 bg-white/70 px-1.5 py-0.5 font-mono text-[11px] leading-none text-amber-900 dark:border-amber-300/20 dark:bg-black/15 dark:text-amber-100">
+        {/*
+          Neutral rather than `tone="warning"`: these chips sit on the warning
+          container itself, so a warning-tinted chip would disappear into it,
+          and the warning accent as foreground on that fill measures 2.66:1 in
+          the light theme (see components/AGENTS.md §3.2).
+        */}
+        <Badge mono pill={false} bordered className="leading-none">          {t('chat.retry.attempt', { attempt: apiRetry.attempt, max: apiRetry.maxRetries })}
+        </Badge>
+        <Badge mono pill={false} bordered className="leading-none">
           {statusText}
-        </span>
-        <span className="text-amber-800 dark:text-amber-200">
+        </Badge>
+        <span>
           {remainingMs > 0
             ? t('chat.retry.waiting', { seconds: formatRetrySeconds(remainingMs) })
             : t('chat.retry.retrying')}
         </span>
         {detailText && (
-          <span className="min-w-0 max-w-full truncate text-amber-700 dark:text-amber-200" title={detailText}>
+          <span className="min-w-0 max-w-full truncate opacity-80" title={detailText}>
             {detailText}
           </span>
         )}
@@ -104,17 +108,17 @@ export function StreamingIndicator() {
         data-testid="streaming-fallback-indicator"
         role="status"
         aria-live="polite"
-        className="mb-2 flex w-fit items-center gap-2 rounded-full border border-[var(--color-border)]/40 bg-[var(--color-surface-container-low)] px-3 py-1"
+        className="mb-2 flex w-fit items-center gap-[9px] rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-4 py-2 text-[13.5px] text-[var(--color-text-secondary)]"
       >
-        <RefreshCw size={12} strokeWidth={2.2} className="shrink-0 animate-spin text-[var(--color-text-secondary)]" aria-hidden="true" />
-        <span className="text-xs font-medium text-[var(--color-text-secondary)]">
+        <RefreshCw size={13} strokeWidth={2.2} className="shrink-0 animate-spin text-[var(--color-text-secondary)]" aria-hidden="true" />
+        <span className="font-medium text-[var(--color-text-primary)]">
           {t('chat.fallback.title')}
         </span>
-        <span className="text-[10px] text-[var(--color-text-tertiary)]">
+        <span className="text-[12.5px] text-[var(--color-text-tertiary)]">
           {t('chat.fallback.detail')}
         </span>
         {elapsedSeconds > 0 && (
-          <span className="text-[10px] text-[var(--color-text-tertiary)]">
+          <span className="text-[12.5px] text-[var(--color-text-tertiary)]">
             {formatElapsed(elapsedSeconds)}
           </span>
         )}
@@ -142,16 +146,16 @@ export function StreamingIndicator() {
       className="mb-2 flex w-fit items-center gap-2 rounded-full border border-[var(--color-border)]/40 bg-[var(--color-surface-container-low)] px-3 py-1"
     >
       <span className="material-symbols-outlined text-[14px] text-[var(--color-brand)] animate-shimmer" aria-hidden="true">auto_awesome</span>
-      <span className="text-xs font-medium text-[var(--color-text-secondary)]">{verb}...</span>
-      {elapsedSeconds > 0 && (
-        <span className="text-[10px] text-[var(--color-text-tertiary)]">
-          {formatElapsed(elapsedSeconds)}
-        </span>
+      <span className="text-xs font-medium text-[var(--color-text-secondary)]">{verb}...</span>      {elapsedSeconds > 0 && (
+        <span>{formatElapsed(elapsedSeconds)}</span>
       )}
       {streamingTokens > 0 && (
-        <span className="text-[10px] text-[var(--color-text-tertiary)]">
-          · ↓ {t('common.tokens', { count: formatTokenCount(streamingTokens) })}
-        </span>
+        <>
+          <span aria-hidden="true">·</span>
+          <span className="font-mono text-[12.5px]">
+            ↓ {t('common.tokens', { count: formatTokenCount(streamingTokens) })}
+          </span>
+        </>
       )}
     </div>
   )

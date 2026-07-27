@@ -11,6 +11,7 @@ import {
   Sparkles,
   Wrench,
 } from 'lucide-react'
+import { Badge } from '@/components/ui/Badge'
 import { useTranslation } from '../../i18n'
 import type { TraceSpan, TraceSpanStatus } from '../../lib/traceViewModel'
 
@@ -25,13 +26,23 @@ export function TypeIcon({ span, size = 14 }: { span: TraceSpan; size?: number }
   )
 }
 
+/**
+ * Three tiers of ink, so a glance at the timeline separates the model from
+ * everything else: clay for LLM calls, secondary ink for content (messages,
+ * tool invocations), tertiary for structure and lifecycle.
+ *
+ * The spec calls the message icons "blue-grey", but `--color-info` resolves to
+ * the same clay as `--color-brand` in five of the six themes, which would erase
+ * the LLM signal. Secondary ink is the closest thing that holds in all six.
+ */
 function iconForSpan(span: TraceSpan, size: number): { icon: ReactNode; className: string } {
   const tertiary = 'text-[var(--color-text-tertiary)]'
+  const secondary = 'text-[var(--color-text-secondary)]'
   switch (span.kind) {
     case 'llm':
       return { icon: <Sparkles size={size} strokeWidth={2} />, className: 'text-[var(--color-brand)]' }
     case 'tool':
-      return { icon: <Wrench size={size} strokeWidth={2} />, className: 'text-[var(--color-warning)]' }
+      return { icon: <Wrench size={size} strokeWidth={2} />, className: secondary }
     case 'tool_result':
       return { icon: <Wrench size={size} strokeWidth={2} />, className: tertiary }
     case 'turn':
@@ -44,12 +55,12 @@ function iconForSpan(span: TraceSpan, size: number): { icon: ReactNode; classNam
         : { icon: <CircleDot size={size} strokeWidth={2} />, className: tertiary }
     case 'message':
       if (span.message?.type === 'assistant') {
-        return { icon: <Bot size={size} strokeWidth={2} />, className: tertiary }
+        return { icon: <Bot size={size} strokeWidth={2} />, className: secondary }
       }
       if (span.message?.type === 'system') {
         return { icon: <FileJson2 size={size} strokeWidth={2} />, className: tertiary }
       }
-      return { icon: <MessageSquareText size={size} strokeWidth={2} />, className: tertiary }
+      return { icon: <MessageSquareText size={size} strokeWidth={2} />, className: secondary }
     default:
       return { icon: <FileJson2 size={size} strokeWidth={2} />, className: tertiary }
   }
@@ -67,21 +78,13 @@ export function StatusGlyph({ status }: { status: TraceSpanStatus }) {
 
 export function StatusPill({ status }: { status: TraceSpanStatus }) {
   const t = useTranslation()
-  const className = status === 'error'
-    ? 'bg-[var(--color-error)]/10 text-[var(--color-error)]'
-    : status === 'pending'
-      ? 'bg-[var(--color-warning)]/10 text-[var(--color-warning)]'
-      : 'bg-[var(--color-success)]/10 text-[var(--color-success)]'
+  const tone = status === 'error' ? 'danger' : status === 'pending' ? 'warning' : 'success'
   const label = status === 'error'
     ? t('trace.status.error')
     : status === 'pending'
       ? t('trace.status.pending')
       : t('trace.status.ok')
-  return (
-    <span className={`inline-flex shrink-0 items-center rounded-[var(--radius-sm)] px-1.5 py-0.5 text-[10px] font-semibold ${className}`}>
-      {label}
-    </span>
-  )
+  return <Badge tone={tone} size="sm" pill={false}>{label}</Badge>
 }
 
 export function MetaChip({
@@ -97,24 +100,28 @@ export function MetaChip({
 }) {
   return (
     <span
-      className="inline-flex min-w-0 items-center gap-1 text-[10px]"
+      className="inline-flex min-w-0 items-baseline gap-1.5 text-[12.5px]"
       {...(title ? { title } : {})}
     >
-      <span className="shrink-0 text-[var(--color-text-tertiary)]">{label}</span>
-      <span className={`truncate font-mono ${tone === 'danger' ? 'text-[var(--color-error)]' : 'text-[var(--color-text-secondary)]'}`}>
+      <span className="shrink-0 text-[var(--color-text-secondary)]">{label}</span>
+      <span className={`truncate font-mono font-semibold ${tone === 'danger' ? 'text-[var(--color-error)]' : 'text-[var(--color-text-primary)]'}`}>
         {value}
       </span>
     </span>
   )
 }
 
+/**
+ * The live chip. The breathing dot lives beside it in the header (and carries
+ * the health color), so this one is a plain tinted chip — two pulsing dots on
+ * the same line read as two different signals.
+ */
 export function LiveBadge() {
   const t = useTranslation()
   return (
-    <span className="inline-flex shrink-0 items-center gap-1 rounded-[var(--radius-sm)] border border-[var(--color-success)]/25 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--color-success)]">
-      <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-success)] animate-pulse-dot" />
+    <Badge tone="success" size="sm" pill={false}>
       {t('trace.live')}
-    </span>
+    </Badge>
   )
 }
 

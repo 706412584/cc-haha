@@ -1,3 +1,4 @@
+import '@testing-library/jest-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { FindInPageModal } from './FindInPageModal'
@@ -5,10 +6,13 @@ import {
   notifyConversationFindContentChanged,
   registerConversationFindController,
 } from './conversationFindBridge'
+import { useSettingsStore } from '../../stores/settingsStore'
 
 describe('FindInPageModal', () => {
   beforeEach(() => {
     vi.unstubAllGlobals()
+    // The bar's copy is translated; assertions below spell the English strings.
+    useSettingsStore.setState({ locale: 'en' })
   })
 
   it('keeps DOM-scoped search for non-chat pages', async () => {
@@ -204,5 +208,80 @@ describe('FindInPageModal', () => {
     } finally {
       act(() => unregister())
     }
+  })
+})
+
+describe('FindInPageModal · match stepping', () => {
+  function setupHighlights() {
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: vi.fn(),
+    })
+    const highlights = new Map<string, { ranges: Range[]; priority?: number }>()
+    class TestHighlight {
+      ranges: Range[] = []
+      priority?: number
+      add(range: Range) { this.ranges.push(range) }
+    }
+    vi.stubGlobal('CSS', { highlights })
+    vi.stubGlobal('Highlight', TestHighlight)
+  }
+
+  beforeEach(() => {
+    vi.unstubAllGlobals()
+    useSettingsStore.setState({ locale: 'en' })
+  })
+
+  it('names every control, none of which shows visible text', async () => {
+    setupHighlights()
+    render(<><main>alpha</main><FindInPageModal open onClose={() => {}} /></>)
+
+    // These three were icon-only with hardcoded English before; the file had no
+    // `useTranslation` at all.
+    expect(screen.getByRole('button', { name: 'Previous match' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Next match' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Close find bar' })).toBeInTheDocument()
+  })
+
+  it('disables stepping until there is something to step through', async () => {
+    setupHighlights()
+    render(<><main>alpha beta alpha</main><FindInPageModal open onClose={() => {}} /></>)
+
+    expect(screen.getByRole('button', { name: 'Next match' })).toBeDisabled()
+
+    fireEvent.change(screen.getByPlaceholderText('Find'), { target: { value: 'alpha' } })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Next match' })).toBeEnabled())
+  })
+
+  it('steps forward and wraps at the last match', async () => {
+    setupHighlights()
+    render(<><main>alpha beta alpha</main><FindInPageModal open onClose={() => {}} /></>)
+    fireEvent.change(screen.getByPlaceholderText('Find'), { target: { value: 'alpha' } })
+    await waitFor(() => expect(screen.getByText('1 / 2')).toBeTruthy())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next match' }))
+    await waitFor(() => expect(screen.getByText('2 / 2')).toBeTruthy())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next match' }))
+    await waitFor(() => expect(screen.getByText('1 / 2')).toBeTruthy())
+  })
+
+  it('steps backward and wraps at the first match', async () => {
+    setupHighlights()
+    render(<><main>alpha beta alpha</main><FindInPageModal open onClose={() => {}} /></>)
+    fireEvent.change(screen.getByPlaceholderText('Find'), { target: { value: 'alpha' } })
+    await waitFor(() => expect(screen.getByText('1 / 2')).toBeTruthy())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Previous match' }))
+    await waitFor(() => expect(screen.getByText('2 / 2')).toBeTruthy())
+  })
+
+  it('closes from the close button', async () => {
+    setupHighlights()
+    const onClose = vi.fn()
+    render(<><main>alpha</main><FindInPageModal open onClose={onClose} /></>)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close find bar' }))
+    expect(onClose).toHaveBeenCalled()
   })
 })

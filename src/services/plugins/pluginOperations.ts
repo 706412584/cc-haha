@@ -112,8 +112,13 @@ export function isInstallableScope(
  * Get the project path for scopes that are project-specific.
  * Returns the original cwd for 'project' and 'local' scopes, undefined otherwise.
  */
-export function getProjectPathForScope(scope: PluginScope): string | undefined {
-  return scope === 'project' || scope === 'local' ? getOriginalCwd() : undefined
+export function getProjectPathForScope(
+  scope: PluginScope,
+  projectRoot?: string,
+): string | undefined {
+  return scope === 'project' || scope === 'local'
+    ? (projectRoot ?? getOriginalCwd())
+    : undefined
 }
 
 /**
@@ -126,9 +131,12 @@ export function getProjectPathForScope(scope: PluginScope): string | undefined {
  * would succeed at removing the user install while leaving the project
  * enablement active — the plugin keeps running.
  */
-export function isPluginEnabledAtProjectScope(pluginId: string): boolean {
+export function isPluginEnabledAtProjectScope(
+  pluginId: string,
+  projectRoot?: string,
+): boolean {
   return isEnabledPluginSettingValue(
-    getSettingsForSource('projectSettings')?.enabledPlugins?.[pluginId],
+    getSettingsForSource('projectSettings', projectRoot)?.enabledPlugins?.[pluginId],
   )
 }
 
@@ -178,7 +186,7 @@ export type PluginUpdateResult = {
  *
  * Precedence: local > project > user (most specific wins).
  */
-function findPluginInSettings(plugin: string): {
+function findPluginInSettings(plugin: string, projectRoot?: string): {
   pluginId: string
   scope: InstallableScope
 } | null {
@@ -189,6 +197,7 @@ function findPluginInSettings(plugin: string): {
   for (const scope of searchOrder) {
     const enabledPlugins = getSettingsForSource(
       scopeToSettingSource(scope),
+      getProjectPathForScope(scope, projectRoot),
     )?.enabledPlugins
     if (!enabledPlugins) continue
 
@@ -256,7 +265,10 @@ function resolveDelistedPluginId(
  * For project/local scoped plugins, prioritizes installations matching the current project.
  * Priority order: local (matching project) > project (matching project) > user > first available
  */
-export function getPluginInstallationFromV2(pluginId: string): {
+export function getPluginInstallationFromV2(
+  pluginId: string,
+  projectRoot?: string,
+): {
   scope: PluginScope
   projectPath?: string
 } {
@@ -267,7 +279,7 @@ export function getPluginInstallationFromV2(pluginId: string): {
     return { scope: 'user' }
   }
 
-  const currentProjectPath = getOriginalCwd()
+  const currentProjectPath = projectRoot ?? getOriginalCwd()
 
   // Find installations by priority: local > project > user > managed
   const localInstall = installations.find(
@@ -429,6 +441,7 @@ export async function uninstallPluginOp(
   plugin: string,
   scope: InstallableScope = 'user',
   deleteDataDir = true,
+  projectRoot?: string,
 ): Promise<PluginOperationResult> {
   // Validate scope at runtime for early error detection
   assertInstallableScope(scope)
@@ -440,7 +453,8 @@ export async function uninstallPluginOp(
   const foundPlugin = findPluginByIdentifier(plugin, allPlugins)
 
   const settingSource = scopeToSettingSource(scope)
-  const settings = getSettingsForSource(settingSource)
+  const settingsRoot = getProjectPathForScope(scope, projectRoot)
+  const settings = getSettingsForSource(settingSource, settingsRoot)
 
   let pluginId: string
   let pluginName: string
@@ -472,7 +486,7 @@ export async function uninstallPluginOp(
   }
 
   // Check if the plugin is installed in this scope (in V2 file)
-  const projectPath = getProjectPathForScope(scope)
+  const projectPath = getProjectPathForScope(scope, projectRoot)
   const installedData = loadInstalledPluginsV2()
   const installations = installedData.plugins[pluginId]
   const scopeInstallation = installations?.find(
@@ -481,7 +495,10 @@ export async function uninstallPluginOp(
 
   if (!scopeInstallation) {
     // Try to find where the plugin is actually installed to provide a helpful error
-    const { scope: actualScope } = getPluginInstallationFromV2(pluginId)
+    const { scope: actualScope } = getPluginInstallationFromV2(
+      pluginId,
+      projectRoot,
+    )
     if (actualScope !== scope && installations && installations.length > 0) {
       // Project scope is special: .claude/settings.json is shared with the team.
       // Point users at the local-override escape hatch instead of --scope project.
@@ -510,9 +527,18 @@ export async function uninstallPluginOp(
     ...settings?.enabledPlugins,
   }
   newEnabledPlugins[pluginId] = undefined
-  updateSettingsForSource(settingSource, {
+  const { error: settingsError } = updateSettingsForSource(settingSource, {
     enabledPlugins: newEnabledPlugins,
-  })
+  }, settingsRoot)
+  if (settingsError) {
+    return {
+      success: false,
+      message: `Failed to update settings: ${settingsError.message}`,
+      pluginId,
+      pluginName,
+      scope,
+    }
+  }
 
   clearAllCaches()
 
@@ -575,6 +601,7 @@ export async function setPluginEnabledOp(
   plugin: string,
   enabled: boolean,
   scope?: InstallableScope,
+  projectRoot?: string,
 ): Promise<PluginOperationResult> {
   const operation = enabled ? 'enable' : 'disable'
 
@@ -614,7 +641,7 @@ export async function setPluginEnabledOp(
   let pluginId: string
   let resolvedScope: InstallableScope
 
-  const found = findPluginInSettings(plugin)
+  const found = findPluginInSettings(plugin, projectRoot)
 
   if (scope) {
     // Explicit scope: use it. Resolve pluginId from settings if possible,
@@ -659,8 +686,9 @@ export async function setPluginEnabledOp(
   }
 
   const settingSource = scopeToSettingSource(resolvedScope)
+  const settingsRoot = getProjectPathForScope(resolvedScope, projectRoot)
   const scopeSettingsValue =
-    getSettingsForSource(settingSource)?.enabledPlugins?.[pluginId]
+    getSettingsForSource(settingSource, settingsRoot)?.enabledPlugins?.[pluginId]
 
   // ── Cross-scope hint: explicit scope given but plugin is elsewhere ──
   // If the plugin is absent from the requested scope but present at a
@@ -722,10 +750,10 @@ export async function setPluginEnabledOp(
   // ── ACTION: write settings ──
   const { error } = updateSettingsForSource(settingSource, {
     enabledPlugins: {
-      ...getSettingsForSource(settingSource)?.enabledPlugins,
+      ...getSettingsForSource(settingSource, settingsRoot)?.enabledPlugins,
       [pluginId]: enabled,
     },
-  })
+  }, settingsRoot)
   if (error) {
     return {
       success: false,
@@ -757,8 +785,9 @@ export async function setPluginEnabledOp(
 export async function enablePluginOp(
   plugin: string,
   scope?: InstallableScope,
+  projectRoot?: string,
 ): Promise<PluginOperationResult> {
-  return setPluginEnabledOp(plugin, true, scope)
+  return setPluginEnabledOp(plugin, true, scope, projectRoot)
 }
 
 /**
@@ -771,8 +800,9 @@ export async function enablePluginOp(
 export async function disablePluginOp(
   plugin: string,
   scope?: InstallableScope,
+  projectRoot?: string,
 ): Promise<PluginOperationResult> {
-  return setPluginEnabledOp(plugin, false, scope)
+  return setPluginEnabledOp(plugin, false, scope, projectRoot)
 }
 
 /**
@@ -830,6 +860,7 @@ export async function disableAllPluginsOp(): Promise<PluginOperationResult> {
 export async function updatePluginOp(
   plugin: string,
   scope: PluginScope,
+  projectRoot?: string,
 ): Promise<PluginUpdateResult> {
   // Parse the plugin identifier to get the full plugin ID
   const { name: pluginName, marketplace: marketplaceName } =
@@ -863,7 +894,7 @@ export async function updatePluginOp(
   }
 
   // Determine projectPath based on scope
-  const projectPath = getProjectPathForScope(scope)
+  const projectPath = getProjectPathForScope(scope, projectRoot)
 
   // Find the installation for this scope
   const installation = installations.find(

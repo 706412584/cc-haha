@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -25,6 +25,23 @@ async function callAuthorizedApps(method: string, body?: unknown): Promise<Respo
     makeRequest(method, body),
     new URL('http://localhost/api/computer-use/authorized-apps'),
     ['api', 'computer-use', 'authorized-apps'],
+  )
+}
+
+async function callComputerUseAction(
+  action: string,
+  method: string,
+  body: string,
+): Promise<Response> {
+  const { handleComputerUseApi } = await importComputerUseApi()
+  return handleComputerUseApi(
+    new Request(`http://localhost/api/computer-use/${action}`, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    }),
+    new URL(`http://localhost/api/computer-use/${action}`),
+    ['api', 'computer-use', action],
   )
 }
 
@@ -95,9 +112,151 @@ describe('Computer Use API authorized app config', () => {
     const resetGetRes = await callAuthorizedApps('GET')
     expect(await resetGetRes.json()).toMatchObject({ pythonPath: null })
   })
+
+  it('preserves asymmetric clipboard permissions', async () => {
+    const putRes = await callAuthorizedApps('PUT', {
+      grantFlags: {
+        clipboardRead: true,
+        clipboardWrite: false,
+        systemKeyCombos: true,
+      },
+    })
+    expect(putRes.status).toBe(200)
+
+    const getRes = await callAuthorizedApps('GET')
+    expect(await getRes.json()).toMatchObject({
+      grantFlags: {
+        clipboardRead: true,
+        clipboardWrite: false,
+        systemKeyCombos: true,
+      },
+    })
+  })
+
+  it('rejects malformed config patches without writing them', async () => {
+    const invalidBodies = [
+      { enabled: 'false' },
+      { grantFlags: { clipboardRead: 'yes' } },
+      { authorizedApps: [{ bundleId: '', displayName: 'Preview' }] },
+      {
+        authorizedApps: [
+          {
+            bundleId: 'com.apple.Preview',
+            displayName: 'Preview',
+            authorizedAt: 42,
+          },
+        ],
+      },
+      { pythonPath: 42 },
+      { enabled: false, unexpected: true },
+    ]
+
+    for (const body of invalidBodies) {
+      const response = await callAuthorizedApps('PUT', body)
+      expect(response.status).toBe(400)
+    }
+
+    await expect(
+      readFile(join(configDir!, 'cc-haha', 'computer-use-config.json'), 'utf8'),
+    ).rejects.toThrow()
+  })
+
+  it('fails closed on a corrupt stored config and refuses to overwrite it', async () => {
+    const configPath = join(configDir!, 'cc-haha', 'computer-use-config.json')
+    await mkdir(join(configDir!, 'cc-haha'), { recursive: true })
+    await writeFile(configPath, '{"enabled":"yes"}', 'utf8')
+
+    const getRes = await callAuthorizedApps('GET')
+    expect(getRes.status).toBe(500)
+    const getBody = await getRes.json() as any
+    expect(getBody.error).toBe('COMPUTER_USE_CONFIG_INVALID')
+    expect(getBody.configPath).toBe(configPath)
+    expect(getBody.recoveryHint).toContain('删除或修复')
+
+    const putRes = await callAuthorizedApps('PUT', { enabled: false })
+    expect(putRes.status).toBe(409)
+    const putBody = await putRes.json() as any
+    expect(putBody.error).toBe('COMPUTER_USE_CONFIG_INVALID')
+    expect(putBody.configPath).toBe(configPath)
+    expect(putBody.recoveryHint).toContain('删除或修复')
+    expect(await readFile(configPath, 'utf8')).toBe('{"enabled":"yes"}')
+  })
+
+  it('preserves old and future config fields while changing a known field', async () => {
+    const configPath = join(configDir!, 'cc-haha', 'computer-use-config.json')
+    await mkdir(join(configDir!, 'cc-haha'), { recursive: true })
+    await writeFile(configPath, JSON.stringify({
+      enabled: true,
+      authorizedApps: [
+        {
+          bundleId: 'com.google.Chrome',
+          displayName: 'Google Chrome',
+          authorizedAt: 'legacy timestamp',
+          tier: 'full',
+          futureAppField: { keep: true },
+        },
+      ],
+      grantFlags: {
+        clipboardRead: true,
+        clipboardWrite: false,
+        systemKeyCombos: true,
+        futureGrantFlag: 'keep',
+      },
+      pythonPath: null,
+      futureTopLevel: { keep: true },
+    }), 'utf8')
+
+    const putRes = await callAuthorizedApps('PUT', { enabled: false })
+    expect(putRes.status).toBe(200)
+
+    const saved = JSON.parse(await readFile(configPath, 'utf8'))
+    expect(saved).toMatchObject({
+      enabled: false,
+      authorizedApps: [
+        {
+          bundleId: 'com.google.Chrome',
+          authorizedAt: 'legacy timestamp',
+          tier: 'full',
+          futureAppField: { keep: true },
+        },
+      ],
+      grantFlags: {
+        clipboardRead: true,
+        clipboardWrite: false,
+        systemKeyCombos: true,
+        futureGrantFlag: 'keep',
+      },
+      futureTopLevel: { keep: true },
+    })
+  })
+
+  it('rejects malformed open-settings JSON without performing a fallback action', async () => {
+    const malformed = await callComputerUseAction('open-settings', 'POST', '{')
+    expect(malformed.status).toBe(400)
+    expect(await malformed.json()).toMatchObject({
+      error: 'INVALID_OPEN_SETTINGS_REQUEST',
+    })
+
+    for (const body of ['null', '[]']) {
+      const response = await callComputerUseAction('open-settings', 'POST', body)
+      expect(response.status).toBe(400)
+    }
+  })
 })
 
 describe('runPipInstallWithFallback', () => {
+  it('rejects setup on unsupported platforms before writing runtime files', async () => {
+    const { getUnsupportedComputerUsePlatformStep } = await importComputerUseApi()
+
+    expect(getUnsupportedComputerUsePlatformStep('linux')).toEqual({
+      name: 'platform',
+      ok: false,
+      message: 'Computer Use does not support platform: linux',
+    })
+    expect(getUnsupportedComputerUsePlatformStep('darwin')).toBeNull()
+    expect(getUnsupportedComputerUsePlatformStep('win32')).toBeNull()
+  })
+
   it('builds a clear unsupported Python version step for setup', async () => {
     const { getUnsupportedPythonVersionStep } = await importComputerUseApi()
 
@@ -166,5 +325,31 @@ describe('runPipInstallWithFallback', () => {
     )
 
     expect(result).toEqual({ ok: false, stdout: '', stderr: 'mirror failed', code: 1 })
+  })
+
+  it('reports OS settings launch failures instead of returning success', async () => {
+    const { openComputerUseSettings } = await importComputerUseApi()
+    const calls: string[] = []
+
+    const failed = await openComputerUseSettings(
+      'darwin',
+      'Privacy_Accessibility',
+      async (cmd, args) => {
+        calls.push(`${cmd} ${args.join(' ')}`)
+        return { ok: false, stdout: '', stderr: 'open failed', code: 1 }
+      },
+    )
+    expect(failed).toEqual({ ok: false, message: 'open failed' })
+    expect(calls).toEqual([
+      'open x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
+    ])
+
+    expect(
+      await openComputerUseSettings(
+        'linux',
+        'Privacy_ScreenCapture',
+        async () => ({ ok: true, stdout: '', stderr: '', code: 0 }),
+      ),
+    ).toEqual({ ok: false, message: 'Unsupported platform' })
   })
 })

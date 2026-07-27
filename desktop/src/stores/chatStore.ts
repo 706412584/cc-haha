@@ -739,6 +739,24 @@ function clearPendingToolInputDelta(sessionId: string): void {
   pendingToolInputDeltaBySession.delete(sessionId)
 }
 
+/**
+ * 后台（异步）子 agent 的工具活动会带着 parentToolUseId 冒泡进主消息流，但
+ * 渲染层把它们折叠进父 agent 卡片、不在主流单独显示（MessageList 的
+ * childToolCallsByParent）。合并流式块时必须跳过这些"隐形"消息去看真正的上一
+ * 条主流消息，否则主 agent 一段连续的 thinking / 正文会被它们切成好几块 ——
+ * 块之间还什么都不显示（#1108）。
+ */
+function findStreamMergeTargetIndex(messages: UIMessage[]): number {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]!
+    const isBubbledChildActivity =
+      (message.type === 'tool_use' || message.type === 'tool_result') &&
+      Boolean(message.parentToolUseId)
+    if (!isBubbledChildActivity) return index
+  }
+  return -1
+}
+
 function appendAssistantTextMessage(
   messages: UIMessage[],
   content: string,
@@ -749,7 +767,8 @@ function appendAssistantTextMessage(
   const trimmedContent = content.trim()
   if (!trimmedContent) return messages
 
-  const last = messages[messages.length - 1]
+  const lastIndex = findStreamMergeTargetIndex(messages)
+  const last = lastIndex >= 0 ? messages[lastIndex] : undefined
   // Wake/reconnect replay can resend persisted assistant text without a
   // transcript id. Only drop exact duplicates from the hydrated tail — a
   // contained substring may still be a legitimate new suffix chunk.
@@ -778,7 +797,9 @@ function appendAssistantTextMessage(
         ? { transcriptMessageId: transcriptMessageId ?? last.transcriptMessageId }
         : {}),
     }
-    return [...messages.slice(0, -1), merged]
+    const next = [...messages]
+    next[lastIndex] = merged
+    return next
   }
 
   return [
@@ -2732,10 +2753,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           const base = pendingText.trim()
             ? appendAssistantTextMessage(s.messages, pendingText, Date.now())
             : s.messages
-          const last = base[base.length - 1]
+          const lastIndex = findStreamMergeTargetIndex(base)
+          const last = lastIndex >= 0 ? base[lastIndex] : undefined
           if (last && last.type === 'thinking') {
             const updated = [...base]
-            updated[updated.length - 1] = { ...last, content: last.content + msg.text }
+            updated[lastIndex] = { ...last, content: last.content + msg.text }
             return {
               messages: updated,
               chatState: 'thinking',

@@ -6,13 +6,13 @@ import {
   type LocalIndexState,
   type LocalIndexStatus,
 } from '../api/diagnostics'
-import { Button } from '../components/shared/Button'
-import { copyTextToClipboard } from '../components/chat/clipboard'
+import { Button } from '@/components/ui/Button'
+import { copyTextToClipboard } from '@/lib/clipboard'
 import { useTranslation } from '../i18n'
 import { formatBytes } from '../lib/formatBytes'
 import { useUIStore } from '../stores/uiStore'
 import { DoctorPanel } from '../components/doctor/DoctorPanel'
-import { ConfirmDialog } from '../components/shared/ConfirmDialog'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 
 export function DiagnosticsSettings() {
   const t = useTranslation()
@@ -230,8 +230,8 @@ export function DiagnosticsSettings() {
     <div className="max-w-4xl">
       <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-5">
         <div>
-          <h2 className="text-base font-semibold text-[var(--color-text-primary)]">{t('settings.diagnostics.title')}</h2>
-          <p className="text-sm text-[var(--color-text-tertiary)] mt-0.5">{t('settings.diagnostics.description')}</p>
+          <h2 className="text-[24px] font-semibold leading-tight text-[var(--color-text-primary)]" style={{ fontFamily: 'var(--font-headline)' }}>{t('settings.diagnostics.title')}</h2>
+          <p className="mt-1.5 text-[13.5px] leading-6 text-[var(--color-text-secondary)]">{t('settings.diagnostics.description')}</p>
         </div>
         <Button variant="secondary" size="sm" onClick={load} loading={isLoading} disabled={isRebuildingIndex}>
           <span className="material-symbols-outlined text-[16px]" aria-hidden="true">refresh</span>
@@ -248,7 +248,7 @@ export function DiagnosticsSettings() {
       </div>
 
       {status && status.corruptLineCount > 0 ? (
-        <div role="alert" className="mb-5 rounded-lg border border-[var(--color-warning)]/40 bg-[var(--color-warning)]/10 px-3 py-2 text-xs text-[var(--color-warning)]">
+        <div role="alert" className="mb-5 rounded-[var(--radius-lg)] border border-[var(--color-warning)] bg-[var(--color-warning-container)] px-3 py-2 text-xs text-[var(--color-on-warning-container)]">
           {t('settings.diagnostics.corruptLinesWarning', {
             count: status.corruptLineCount,
             physical: status.physicalLineCount,
@@ -257,7 +257,7 @@ export function DiagnosticsSettings() {
       ) : null}
 
       {status?.storageLimitExceeded ? (
-        <div role="alert" className="mb-5 rounded-lg border border-[var(--color-warning)]/40 bg-[var(--color-warning)]/10 px-3 py-2 text-xs text-[var(--color-warning)]">
+        <div role="alert" className="mb-5 rounded-[var(--radius-lg)] border border-[var(--color-warning)] bg-[var(--color-warning-container)] px-3 py-2 text-xs text-[var(--color-on-warning-container)]">
           {t('settings.diagnostics.storageLimitExceededWarning')}
         </div>
       ) : null}
@@ -274,7 +274,7 @@ export function DiagnosticsSettings() {
         <DoctorPanel />
       </div>
 
-      <div className="border border-[var(--color-border)] rounded-lg mb-5">
+      <div className="border border-[var(--color-border)] rounded-[var(--radius-lg)] mb-5">
         <div className="px-4 py-3 border-b border-[var(--color-border)] flex items-center justify-between gap-3">
           <div>
             <div className="text-sm font-medium text-[var(--color-text-primary)]">{t('settings.diagnostics.logDirectory')}</div>
@@ -311,11 +311,11 @@ export function DiagnosticsSettings() {
       </div>
 
       <div className="mb-3">
-        <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">{t('settings.diagnostics.recentEvents')}</h3>
+        <h3 className="text-sm font-semibold text-[var(--color-text-primary)]" style={{ fontFamily: 'var(--font-headline)' }}>{t('settings.diagnostics.recentEvents')}</h3>
         <p className="text-xs text-[var(--color-text-tertiary)] mt-0.5">{t('settings.diagnostics.privacyNote')}</p>
       </div>
 
-      <div className="border border-[var(--color-border)] rounded-lg overflow-hidden">
+      <div className="border border-[var(--color-border)] rounded-[var(--radius-lg)] overflow-hidden">
         {events.length === 0 ? (
           <div className="px-4 py-8 text-sm text-[var(--color-text-tertiary)] text-center">
             {isLoading ? t('common.loading') : t('settings.diagnostics.noEvents')}
@@ -394,11 +394,11 @@ function LocalIndexPanel({
     <section
       role="region"
       aria-labelledby={titleId}
-      className="mb-5 rounded-lg border border-[var(--color-border)]"
+      className="mb-5 rounded-[var(--radius-lg)] border border-[var(--color-border)]"
     >
       <div className="flex flex-col gap-3 border-b border-[var(--color-border)] px-4 py-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h3 id={titleId} className="text-sm font-medium text-[var(--color-text-primary)]">
+          <h3 id={titleId} className="text-sm font-medium text-[var(--color-text-primary)]" style={{ fontFamily: 'var(--font-headline)' }}>
             {t('settings.diagnostics.localIndex.title')}
           </h3>
           <p className="mt-0.5 text-xs text-[var(--color-text-tertiary)]">
@@ -476,7 +476,7 @@ function localIndexStateLabel(state: LocalIndexState, t: Translation): string {
 
 function Metric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="border border-[var(--color-border)] rounded-lg px-3 py-2">
+    <div className="border border-[var(--color-border)] rounded-[var(--radius-lg)] px-3 py-2">
       <div className="text-xs text-[var(--color-text-tertiary)]">{label}</div>
       <div className="text-sm font-semibold text-[var(--color-text-primary)] mt-1">{value}</div>
     </div>
@@ -522,25 +522,27 @@ function EventRow({
           )}
         </div>
         <div className="text-xs text-[var(--color-text-secondary)] mt-1 break-words">{event.summary}</div>
-        <button
-          type="button"
-          className="mt-1 inline-flex max-w-full items-center gap-1 text-[11px] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)]"
+        <Button
+          variant="ghost"
+          size="xs"
+          className="mt-1 max-w-full"
           aria-label={`${copyEventIdLabel}: ${event.id}`}
           onClick={async () => {
             const copied = await copyTextToClipboard(event.id)
             addToast({ type: copied ? 'success' : 'error', message: copied ? eventIdCopiedLabel : eventIdCopyFailedLabel })
           }}
+          icon={<span className="material-symbols-outlined text-[13px]" aria-hidden="true">content_copy</span>}
+          iconPosition="end"
         >
           <span>{eventIdLabel}:</span>
           <span className="font-mono truncate">{event.id}</span>
-          <span className="material-symbols-outlined text-[13px]" aria-hidden="true">content_copy</span>
-        </button>
+        </Button>
         {detailsText && (
           <details className="mt-2">
             <summary className="cursor-pointer text-xs text-[var(--color-text-tertiary)] select-none">
               {detailsLabel}
             </summary>
-            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-2 text-[11px] leading-relaxed text-[var(--color-text-secondary)]">
+            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container)] p-2 text-[11px] leading-relaxed text-[var(--color-text-secondary)]">
               {detailsText}
             </pre>
           </details>

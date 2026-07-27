@@ -1,4 +1,4 @@
-import { THEME_MODES } from '../types/settings'
+import { DARK_THEME_MODES, LIGHT_THEME_MODES, THEME_MODES } from '../types/settings'
 import {
   APP_ZOOM_STORAGE_KEY,
   LEGACY_UI_ZOOM_STORAGE_KEY,
@@ -18,6 +18,9 @@ type StorageLike = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
 const TAB_STORAGE_KEY = 'cc-haha-open-tabs'
 const SESSION_RUNTIME_STORAGE_KEY = 'cc-haha-session-runtime'
 const THEME_STORAGE_KEY = 'cc-haha-theme'
+const FOLLOW_SYSTEM_THEME_STORAGE_KEY = 'cc-haha-follow-system-theme'
+const LIGHT_THEME_STORAGE_KEY = 'cc-haha-light-theme'
+const DARK_THEME_STORAGE_KEY = 'cc-haha-dark-theme'
 const LOCALE_STORAGE_KEY = 'cc-haha-locale'
 const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max']
 const PERSISTED_SPECIAL_TAB_TYPES = ['settings', 'scheduled', 'market', 'traces'] as const
@@ -138,6 +141,40 @@ function migrateSessionRuntime(storage: StorageLike, report: DesktopMigrationRep
   }
 }
 
+/**
+ * The 「纸 · 墨 · 印」 redesign replaced three theme keys with six.
+ *
+ * `light` was the warm workspace, labelled 经典暖色 in the picker, so it lands
+ * on `warm-classic` — the palette carrying the same name. Without this it
+ * would fail the enum check and silently reset those users to the default,
+ * which reads as "the app forgot my theme" rather than as a rename.
+ */
+const RENAMED_THEMES: Record<string, string> = {
+  light: 'warm-classic',
+}
+
+/**
+ * Rename-aware normalization for any key holding a theme name. The applied
+ * theme is not the only one: following the system stores a preference per
+ * ground, and those hold theme names too, so a rename has to reach them or
+ * the preference silently resets.
+ */
+function migrateThemeKey(
+  storage: StorageLike,
+  key: string,
+  allowedValues: readonly string[],
+  report: DesktopMigrationReport,
+): void {
+  const stored = storage.getItem(key)
+  const renamed = stored === null ? null : RENAMED_THEMES[stored]
+  if (renamed && allowedValues.includes(renamed)) {
+    storage.setItem(key, renamed)
+    report.migratedKeys.push(key)
+    return
+  }
+  normalizeEnumKey(storage, key, [...allowedValues], report)
+}
+
 function normalizeEnumKey(
   storage: StorageLike,
   key: string,
@@ -196,7 +233,16 @@ export function runDesktopPersistenceMigrations(storage: StorageLike | null = ge
 
   runMigrationStep(report, TAB_STORAGE_KEY, () => migrateTabs(storage, report))
   runMigrationStep(report, SESSION_RUNTIME_STORAGE_KEY, () => migrateSessionRuntime(storage, report))
-  runMigrationStep(report, THEME_STORAGE_KEY, () => normalizeEnumKey(storage, THEME_STORAGE_KEY, [...THEME_MODES], report))
+  runMigrationStep(report, THEME_STORAGE_KEY, () =>
+    migrateThemeKey(storage, THEME_STORAGE_KEY, THEME_MODES, report))
+  // A junk value here would otherwise be read as "never chosen", which is what
+  // tells a fresh install to follow the system.
+  runMigrationStep(report, FOLLOW_SYSTEM_THEME_STORAGE_KEY, () =>
+    normalizeEnumKey(storage, FOLLOW_SYSTEM_THEME_STORAGE_KEY, ['0', '1'], report))
+  runMigrationStep(report, LIGHT_THEME_STORAGE_KEY, () =>
+    migrateThemeKey(storage, LIGHT_THEME_STORAGE_KEY, LIGHT_THEME_MODES, report))
+  runMigrationStep(report, DARK_THEME_STORAGE_KEY, () =>
+    migrateThemeKey(storage, DARK_THEME_STORAGE_KEY, DARK_THEME_MODES, report))
   runMigrationStep(report, LOCALE_STORAGE_KEY, () => normalizeEnumKey(storage, LOCALE_STORAGE_KEY, SUPPORTED_LOCALES, report))
   runMigrationStep(report, APP_ZOOM_STORAGE_KEY, () => normalizeAppZoomKey(storage, report))
   try {

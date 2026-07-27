@@ -74,11 +74,14 @@ export function extractDescriptionFromMarkdown(
  * @param toolsValue The value from frontmatter
  * @returns Parsed tool list as string[]
  */
-function parseToolListString(toolsValue: unknown): string[] | null {
-  // Return null for missing/null - let caller decide the default
-  if (toolsValue === undefined || toolsValue === null) {
-    return null
+export function parseRawToolListFromFrontmatter(
+  toolsValue: unknown,
+): string[] | undefined {
+  // Missing fields inherit access; an explicit null is an empty allowlist.
+  if (toolsValue === undefined) {
+    return undefined
   }
+  if (toolsValue === null) return []
 
   // Empty string or other falsy values mean no tools
   if (!toolsValue) {
@@ -98,11 +101,7 @@ function parseToolListString(toolsValue: unknown): string[] | null {
     return []
   }
 
-  const parsedTools = parseToolListFromCLI(toolsArray)
-  if (parsedTools.includes('*')) {
-    return ['*']
-  }
-  return parsedTools
+  return parseToolListFromCLI(toolsArray)
 }
 
 /**
@@ -113,8 +112,8 @@ function parseToolListString(toolsValue: unknown): string[] | null {
 export function parseAgentToolsFromFrontmatter(
   toolsValue: unknown,
 ): string[] | undefined {
-  const parsed = parseToolListString(toolsValue)
-  if (parsed === null) {
+  const parsed = parseRawToolListFromFrontmatter(toolsValue)
+  if (parsed === undefined) {
     // For agents: undefined = all tools (undefined), null = no tools ([])
     return toolsValue === undefined ? undefined : []
   }
@@ -132,8 +131,8 @@ export function parseAgentToolsFromFrontmatter(
 export function parseSlashCommandToolsFromFrontmatter(
   toolsValue: unknown,
 ): string[] {
-  const parsed = parseToolListString(toolsValue)
-  if (parsed === null) {
+  const parsed = parseRawToolListFromFrontmatter(toolsValue)
+  if (parsed === undefined) {
     return []
   }
   return parsed
@@ -221,20 +220,19 @@ function resolveStopBoundary(cwd: string): string | null {
 
 /**
  * Traverses from the current directory up to the git root (or home directory if not in a git repo),
- * collecting all .claude directories along the way.
+ * yielding every directory along the way (excluding the home directory itself).
  *
  * Stopping at git root prevents commands/skills from parent directories outside the repository
  * from leaking into projects. For example, if ~/projects/.claude/commands/ exists, it won't
  * appear in ~/projects/my-repo/ if my-repo is a git repository.
  *
- * @param subdir Subdirectory (eg. "commands", "agents")
+ * Shared by getProjectDirsUpToHome and the skill-root resolver (skills/skillRoots.ts) so both
+ * honor the exact same submodule/worktree stop boundary.
+ *
  * @param cwd Current working directory to start from
- * @returns Array of directory paths containing .claude/subdir, from most specific (cwd) to least specific
+ * @returns Array of directory paths, from most specific (cwd) to least specific
  */
-export function getProjectDirsUpToHome(
-  subdir: ClaudeConfigDirectory,
-  cwd: string,
-): string[] {
+export function walkProjectDirsUpToHome(cwd: string): string[] {
   const home = resolve(homedir()).normalize('NFC')
   const gitRoot = resolveStopBoundary(cwd)
   let current = resolve(cwd)
@@ -250,19 +248,7 @@ export function getProjectDirsUpToHome(
       break
     }
 
-    const claudeSubdir = join(current, '.claude', subdir)
-    // Filter to existing dirs. This is a perf filter (avoids spawning
-    // ripgrep on non-existent dirs downstream) and the worktree fallback
-    // in loadMarkdownFilesForSubdir relies on it. statSync + explicit error
-    // handling instead of existsSync — re-throws unexpected errors rather
-    // than silently swallowing them. Downstream loadMarkdownFiles handles
-    // the TOCTOU window (dir disappearing before read) gracefully.
-    try {
-      statSync(claudeSubdir)
-      dirs.push(claudeSubdir)
-    } catch (e: unknown) {
-      if (!isFsInaccessible(e)) throw e
-    }
+    dirs.push(current)
 
     // Stop after processing the git root directory - this prevents commands from parent
     // directories outside the repository from appearing in the project
@@ -283,6 +269,38 @@ export function getProjectDirsUpToHome(
     }
 
     current = parent
+  }
+
+  return dirs
+}
+
+/**
+ * Collects all existing `.claude/<subdir>` directories from cwd up to the git root.
+ *
+ * @param subdir Subdirectory (eg. "commands", "agents")
+ * @param cwd Current working directory to start from
+ * @returns Array of directory paths containing .claude/subdir, from most specific (cwd) to least specific
+ */
+export function getProjectDirsUpToHome(
+  subdir: ClaudeConfigDirectory,
+  cwd: string,
+): string[] {
+  const dirs: string[] = []
+
+  for (const current of walkProjectDirsUpToHome(cwd)) {
+    const claudeSubdir = join(current, '.claude', subdir)
+    // Filter to existing dirs. This is a perf filter (avoids spawning
+    // ripgrep on non-existent dirs downstream) and the worktree fallback
+    // in loadMarkdownFilesForSubdir relies on it. statSync + explicit error
+    // handling instead of existsSync — re-throws unexpected errors rather
+    // than silently swallowing them. Downstream loadMarkdownFiles handles
+    // the TOCTOU window (dir disappearing before read) gracefully.
+    try {
+      statSync(claudeSubdir)
+      dirs.push(claudeSubdir)
+    } catch (e: unknown) {
+      if (!isFsInaccessible(e)) throw e
+    }
   }
 
   return dirs

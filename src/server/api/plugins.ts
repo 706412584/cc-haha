@@ -1,4 +1,6 @@
 import type { PluginScope } from '../../utils/plugins/schemas.js'
+import { statSync } from 'node:fs'
+import { isAbsolute, resolve } from 'node:path'
 import { ApiError, errorResponse } from '../middleware/errorHandler.js'
 import { PluginService } from '../services/pluginService.js'
 import {
@@ -196,25 +198,43 @@ export async function handlePluginsApi(
         throw ApiError.badRequest('Missing or invalid "id" in request body')
       }
 
-      const scope = coerceScope(body.scope)
+      assertAllowedBodyKeys(
+        body,
+        sub === 'uninstall'
+          ? ['id', 'scope', 'keepData', 'cwd']
+          : ['id', 'scope', 'cwd'],
+      )
+      const cwd = coerceProjectRoot(body.cwd)
 
       switch (sub) {
-        case 'enable':
-          return Response.json(await pluginService.enablePlugin(pluginId, scope))
-        case 'disable':
-          return Response.json(await pluginService.disablePlugin(pluginId, scope))
-        case 'update':
+        case 'enable': {
+          const scope = coerceScope(body.scope, false)
+          return Response.json(await pluginService.enablePlugin(pluginId, scope, cwd))
+        }
+        case 'disable': {
+          const scope = coerceScope(body.scope, false)
+          return Response.json(await pluginService.disablePlugin(pluginId, scope, cwd))
+        }
+        case 'update': {
+          const scope = coerceScope(body.scope, true)
           return Response.json(
-            await pluginService.updatePlugin(pluginId, scope as PluginScope | undefined),
+            await pluginService.updatePlugin(pluginId, scope as PluginScope | undefined, cwd),
           )
-        case 'uninstall':
+        }
+        case 'uninstall': {
+          const scope = coerceScope(body.scope, false)
+          if ('keepData' in body && typeof body.keepData !== 'boolean') {
+            throw ApiError.badRequest('"keepData" must be a boolean')
+          }
           return Response.json(
             await pluginService.uninstallPlugin(
               pluginId,
               scope,
               body.keepData === true,
+              cwd,
             ),
           )
+        }
         default:
           throw ApiError.notFound(`Unknown plugins endpoint: ${sub}`)
       }
@@ -232,17 +252,26 @@ export async function handlePluginsApi(
 
 async function parseJsonBody(req: Request): Promise<Record<string, unknown>> {
   try {
-    return (await req.json()) as Record<string, unknown>
-  } catch {
+    const body = await req.json() as unknown
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      throw ApiError.badRequest('JSON body must be an object')
+    }
+    return body as Record<string, unknown>
+  } catch (error) {
+    if (error instanceof ApiError) throw error
     throw ApiError.badRequest('Invalid JSON body')
   }
 }
 
 function asString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.length > 0 ? value : undefined
+  if (typeof value !== 'string') return undefined
+  const normalized = value.trim()
+  return normalized.length > 0 && normalized.length <= 512
+    ? normalized
+    : undefined
 }
 
-function coerceScope(value: unknown):
+function coerceScope(value: unknown, allowManaged: boolean):
   | 'user'
   | 'project'
   | 'local'
@@ -253,11 +282,42 @@ function coerceScope(value: unknown):
     value === 'user' ||
     value === 'project' ||
     value === 'local' ||
-    value === 'managed'
+    (allowManaged && value === 'managed')
   ) {
     return value
   }
   throw ApiError.badRequest(
-    'Invalid "scope". Expected one of: user, project, local, managed',
+    `Invalid "scope". Expected one of: user, project, local${allowManaged ? ', managed' : ''}`,
   )
+}
+
+function coerceProjectRoot(value: unknown): string | undefined {
+  if (value == null) return undefined
+  if (typeof value !== 'string' || value.length === 0 || value.length > 4096) {
+    throw ApiError.badRequest('"cwd" must be a non-empty absolute directory path')
+  }
+  if (!isAbsolute(value)) {
+    throw ApiError.badRequest('"cwd" must be an absolute directory path')
+  }
+  const normalized = resolve(value)
+  try {
+    if (!statSync(normalized).isDirectory()) {
+      throw ApiError.badRequest('"cwd" must reference an existing directory')
+    }
+  } catch (error) {
+    if (error instanceof ApiError) throw error
+    throw ApiError.badRequest('"cwd" must reference an existing directory')
+  }
+  return normalized
+}
+
+function assertAllowedBodyKeys(
+  body: Record<string, unknown>,
+  allowed: string[],
+): void {
+  const allowedKeys = new Set(allowed)
+  const unknownKey = Object.keys(body).find((key) => !allowedKeys.has(key))
+  if (unknownKey) {
+    throw ApiError.badRequest(`Unknown request field: "${unknownKey}"`)
+  }
 }

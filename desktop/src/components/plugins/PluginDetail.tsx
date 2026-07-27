@@ -3,8 +3,12 @@ import { usePluginStore } from '../../stores/pluginStore'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useTranslation } from '../../i18n'
 import { useUIStore } from '../../stores/uiStore'
-import { Button } from '../shared/Button'
-import { ConfirmDialog } from '../shared/ConfirmDialog'
+import { Badge } from '@/components/ui/Badge'
+import { Button } from '@/components/ui/Button'
+import { Card } from '@/components/ui/Card'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { ErrorState } from '@/components/ui/ErrorState'
+import { LoadingState } from '@/components/ui/LoadingState'
 import type { PluginCapabilityKey } from '../../types/plugin'
 import { SETTINGS_TAB_ID, useTabStore } from '../../stores/tabStore'
 import { useSkillStore } from '../../stores/skillStore'
@@ -54,11 +58,7 @@ export function PluginDetail() {
   )
 
   if (isDetailLoading) {
-    return (
-      <div className="flex justify-center py-12">
-        <div className="animate-spin w-5 h-5 border-2 border-[var(--color-brand)] border-t-transparent rounded-full" />
-      </div>
-    )
+    return <LoadingState label={t('common.loading')} labelHidden />
   }
 
   if (!selectedPlugin) return null
@@ -70,7 +70,20 @@ export function PluginDetail() {
     setActionKey(key)
     try {
       const message = await fn()
-      addToast({ type: 'success', message })
+      // The store applies the change, then reloads the runtime, and resolves
+      // either way -- a failed reload only lands in `refreshWarning`. Reporting
+      // a plain success here would make "applied but never reloaded" look
+      // identical to a clean run. Read it after the call: the store clears it
+      // when the mutation starts, so anything present belongs to this action.
+      const refreshWarning = usePluginStore.getState().refreshWarning
+      if (refreshWarning) {
+        addToast({
+          type: 'warning',
+          message: t('settings.plugins.reloadWarning', { message: refreshWarning }),
+        })
+      } else {
+        addToast({ type: 'success', message })
+      }
     } catch (err) {
       addToast({
         type: 'error',
@@ -177,23 +190,27 @@ export function PluginDetail() {
   return (
     <div className="flex flex-col gap-4 min-w-0">
       <div>
-        <button
+        <Button
+          variant="ghost"
+          size="base"
+          icon={<span className="material-symbols-outlined text-[16px]">arrow_back</span>}
           onClick={clearSelection}
-          className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-sm text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]"
         >
-          <span className="material-symbols-outlined text-[16px]">arrow_back</span>
           {t('settings.plugins.back')}
-        </button>
+        </Button>
       </div>
 
-      <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] overflow-hidden">
+      <section className="rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] shadow-[var(--shadow-card)] overflow-hidden">
         <div className="grid gap-4 px-5 py-5 lg:grid-cols-[minmax(0,1.5fr)_minmax(280px,0.9fr)] lg:items-start">
           <div className="min-w-0">
             <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[var(--color-text-tertiary)] mb-2">
               {t('settings.plugins.entryEyebrow')}
             </div>
             <div className="flex flex-wrap items-center gap-2 mb-2">
-              <h3 className="text-[22px] font-semibold leading-tight text-[var(--color-text-primary)] break-all">
+              <h3
+                className="text-[24px] font-semibold leading-tight text-[var(--color-text-primary)] break-all"
+                style={{ fontFamily: 'var(--font-headline)' }}
+              >
                 {selectedPlugin.name}
               </h3>
               <StatusPill enabled={selectedPlugin.enabled} hasErrors={selectedPlugin.hasErrors} />
@@ -247,7 +264,7 @@ export function PluginDetail() {
         </div>
       </section>
 
-      <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] px-5 py-4">
+      <section className="rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface)] shadow-[var(--shadow-card)] px-5 py-4">
         <div className="flex flex-wrap gap-2">
           {canMutate && (
             selectedPlugin.enabled ? (
@@ -328,32 +345,36 @@ export function PluginDetail() {
         </p>
       </section>
 
+      {/* The heading tag and the leading icon are the cost of adopting
+          `ErrorState`; `role="alert"` and three fewer alpha fills are what it
+          buys. `bg-[var(--color-error)]/6` in particular is the pattern Safari
+          15 WebView cannot parse, so this panel had no tint on the desktop
+          shell at all. */}
       {selectedPlugin.errors.length > 0 && (
-        <section className="rounded-2xl border border-[var(--color-error)]/20 bg-[var(--color-error)]/6 px-5 py-4">
-          <div className="flex items-center gap-2 mb-3">
-            <span className="material-symbols-outlined text-[18px] text-[var(--color-error)]">
-              error
+        <ErrorState
+          size="lg"
+          title={t('settings.plugins.errorsTitle')}
+          detail={
+            <span className="mt-1 flex flex-col gap-2">
+              {selectedPlugin.errors.map((error) => (
+                <span
+                  key={error}
+                  className="rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-3 text-sm text-[var(--color-text-secondary)]"
+                >
+                  {error}
+                </span>
+              ))}
             </span>
-            <h4 className="text-sm font-semibold text-[var(--color-text-primary)]">
-              {t('settings.plugins.errorsTitle')}
-            </h4>
-          </div>
-          <div className="flex flex-col gap-2">
-            {selectedPlugin.errors.map((error) => (
-              <div
-                key={error}
-                className="rounded-xl border border-[var(--color-error)]/15 bg-[var(--color-surface)] px-3 py-3 text-sm text-[var(--color-text-secondary)]"
-              >
-                {error}
-              </div>
-            ))}
-          </div>
-        </section>
+          }
+        />
       )}
 
-      <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
+      <section className="rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface)] shadow-[var(--shadow-card)] overflow-hidden">
         <div className="px-5 py-4 border-b border-[var(--color-border)] bg-[var(--color-surface-container-low)]">
-          <h4 className="text-sm font-semibold text-[var(--color-text-primary)]">
+          <h4
+            className="text-[16.5px] font-semibold leading-tight text-[var(--color-text-primary)]"
+            style={{ fontFamily: 'var(--font-headline)' }}
+          >
             {t('settings.plugins.capabilitiesTitle')}
           </h4>
           <p className="text-xs text-[var(--color-text-tertiary)] mt-1">
@@ -468,7 +489,7 @@ export function PluginDetail() {
             {otherCapabilityItems.map(({ key, items }) => (
               <div
                 key={key}
-                className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3"
+                className="rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3"
               >
                 <div className="flex items-center justify-between gap-2 mb-2">
                   <div className="text-sm font-semibold text-[var(--color-text-primary)]">
@@ -481,12 +502,9 @@ export function PluginDetail() {
                 {items.length > 0 ? (
                   <div className="flex flex-wrap gap-2">
                     {items.map((item) => (
-                      <span
-                        key={item}
-                        className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1 text-[11px] text-[var(--color-text-secondary)] break-all"
-                      >
+                      <Badge key={item} size="md" bordered wrap mono>
                         {item}
-                      </span>
+                      </Badge>
                     ))}
                   </div>
                 ) : (
@@ -546,10 +564,15 @@ function CapabilityPreviewSection({
   hint?: string
 }) {
   return (
-    <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] overflow-hidden">
+    <section className="rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] overflow-hidden">
       <div className="flex items-center justify-between gap-3 border-b border-[var(--color-border)] px-4 py-3">
-        <div className="text-sm font-semibold text-[var(--color-text-primary)]">{title}</div>
-        <div className="text-[11px] text-[var(--color-text-tertiary)]">{count}</div>
+        <div
+          className="text-[14.5px] font-semibold text-[var(--color-text-primary)]"
+          style={{ fontFamily: 'var(--font-headline)' }}
+        >
+          {title}
+        </div>
+        <div className="font-mono text-[11px] tabular-nums text-[var(--color-text-tertiary)]">{count}</div>
       </div>
       <div className="p-4">
         {hint && count > 0 && (
@@ -586,19 +609,13 @@ function SkillPreviewCard({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="group rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 text-left transition-colors hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)] disabled:cursor-default disabled:opacity-70 disabled:hover:border-[var(--color-border)] disabled:hover:bg-[var(--color-surface)]"
+      className="group rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 text-left transition-colors hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] disabled:cursor-default disabled:opacity-70 disabled:hover:border-[var(--color-border)] disabled:hover:bg-[var(--color-surface)]"
     >
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2 flex-wrap min-w-0">
           <span className="text-sm font-semibold text-[var(--color-text-primary)] break-all">{name}</span>
-          {version && (
-            <span className="rounded-full bg-[var(--color-surface-container-high)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-text-tertiary)]">
-              v{version}
-            </span>
-          )}
-          <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-text-tertiary)]">
-            {t('settings.skills.slashCommand')}
-          </span>
+          {version && <Badge mono>v{version}</Badge>}
+          <Badge variant="outline">{t('settings.skills.slashCommand')}</Badge>
         </div>
         <span className="material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)] transition-transform group-hover:translate-x-0.5">
           chevron_right
@@ -618,7 +635,7 @@ function CommandPreviewCard({
   description: string
 }) {
   return (
-    <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
+    <div className="rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
       <div className="text-sm font-semibold text-[var(--color-text-primary)] break-all">/{name}</div>
       <div className="mt-2 text-xs leading-5 text-[var(--color-text-secondary)] break-words">{description}</div>
     </div>
@@ -641,7 +658,7 @@ function AgentPreviewCard({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="group rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 text-left transition-colors hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)] disabled:cursor-default disabled:opacity-70 disabled:hover:border-[var(--color-border)] disabled:hover:bg-[var(--color-surface)]"
+      className="group rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 text-left transition-colors hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] disabled:cursor-default disabled:opacity-70 disabled:hover:border-[var(--color-border)] disabled:hover:bg-[var(--color-surface)]"
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
@@ -674,15 +691,13 @@ function McpPreviewCard({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="group rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 text-left transition-colors hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)] disabled:cursor-default disabled:opacity-70 disabled:hover:border-[var(--color-border)] disabled:hover:bg-[var(--color-surface)]"
+      className="group rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 text-left transition-colors hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] disabled:cursor-default disabled:opacity-70 disabled:hover:border-[var(--color-border)] disabled:hover:bg-[var(--color-surface)]"
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-semibold text-[var(--color-text-primary)] break-all">{name}</span>
-            <span className="rounded-full bg-[var(--color-surface-container-high)] px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-              {transport}
-            </span>
+            <Badge className="uppercase tracking-[0.12em]">{transport}</Badge>
           </div>
           <div className="mt-2 text-xs leading-5 text-[var(--color-text-secondary)] break-all">{summary}</div>
         </div>
@@ -704,23 +719,19 @@ function HookPreviewCard({
   actions: string[]
 }) {
   return (
-    <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
+    <div className="rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-sm font-semibold text-[var(--color-text-primary)] break-all">{event}</span>
-        {matcher && (
-          <span className="rounded-full bg-[var(--color-surface-container-high)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-text-tertiary)] break-all">
-            {matcher}
-          </span>
-        )}
+        {/* `wrap` is what unblocked these two: a hook matcher is a regex and an
+            action is a shell command, and a nowrap badge pushed both off the
+            card. */}
+        {matcher && <Badge wrap mono>{matcher}</Badge>}
       </div>
       <div className="mt-2 flex flex-wrap gap-2">
         {actions.map((action) => (
-          <span
-            key={action}
-            className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-2.5 py-1 text-[11px] text-[var(--color-text-secondary)] break-all"
-          >
+          <Badge key={action} size="md" bordered wrap mono>
             {action}
-          </span>
+          </Badge>
         ))}
       </div>
     </div>
@@ -729,9 +740,9 @@ function HookPreviewCard({
 
 function MetaPill({ children }: { children: ReactNode }) {
   return (
-    <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+    <Badge bordered className="uppercase tracking-[0.12em]">
       {children}
-    </span>
+    </Badge>
   )
 }
 
@@ -745,15 +756,18 @@ function DetailStat({
   icon: string
 }) {
   return (
-    <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-3">
+    <Card radius="lg" padding="sm">
       <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.16em] text-[var(--color-text-tertiary)]">
         <span className="material-symbols-outlined text-[14px]">{icon}</span>
         <span>{label}</span>
       </div>
-      <div className="mt-2 text-base font-semibold text-[var(--color-text-primary)] break-all">
+      <div
+        className="mt-2 text-[21px] font-semibold leading-none text-[var(--color-text-primary)] break-all"
+        style={{ fontFamily: 'var(--font-headline)' }}
+      >
         {value}
       </div>
-    </div>
+    </Card>
   )
 }
 
@@ -765,11 +779,7 @@ function StatusPill({
   hasErrors: boolean
 }) {
   const t = useTranslation()
-  const classes = hasErrors
-    ? 'bg-[var(--color-error)]/12 text-[var(--color-error)]'
-    : enabled
-      ? 'bg-[var(--color-success-container)] text-[var(--color-success)]'
-      : 'bg-[var(--color-surface-container-high)] text-[var(--color-text-tertiary)]'
+  const tone = hasErrors ? 'danger' : enabled ? 'success' : 'neutral'
 
   const label = hasErrors
     ? t('settings.plugins.status.attention')
@@ -777,9 +787,5 @@ function StatusPill({
       ? t('settings.plugins.status.enabled')
       : t('settings.plugins.status.disabled')
 
-  return (
-    <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${classes}`}>
-      {label}
-    </span>
-  )
+  return <Badge tone={tone}>{label}</Badge>
 }

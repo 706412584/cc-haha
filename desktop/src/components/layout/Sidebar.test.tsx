@@ -304,7 +304,7 @@ describe('Sidebar', () => {
       { sessionId: 'session-new-1', title: 'New Session', type: 'session', status: 'idle' },
     ])
     expect(useTabStore.getState().activeTabId).toBe('session-new-1')
-    expect(screen.getByText(/Code/)).toHaveTextContent('Code Council')
+    expect(screen.getByText('Council').closest('.sidebar-wordmark-long')).toHaveTextContent('Code Council')
     expect(screen.getByRole('complementary')).not.toHaveAttribute('data-desktop-drag-region')
     expect(screen.getByTestId('sidebar-title-region')).toHaveAttribute('data-desktop-drag-region')
   })
@@ -328,9 +328,9 @@ describe('Sidebar', () => {
 
     expect(screen.queryByRole('link')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Search chats' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Batch manage' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Batch manage' })).toHaveClass('h-11', 'w-11')
     expect(screen.queryByTestId('sidebar-projects-header')).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'New session in alpha' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'New session in alpha' })).toHaveClass('h-11', 'w-11')
     expect(screen.getByRole('button', { name: 'Refresh sessions' })).toBeInTheDocument()
     expect(screen.getByPlaceholderText('Search sessions')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Alpha Session/ })).not.toHaveTextContent('5/15')
@@ -1250,6 +1250,25 @@ describe('Sidebar', () => {
     expect(screen.getByRole('complementary')).toHaveAttribute('data-state', 'open')
   })
 
+  it('shows the brand mark only on the rail, where the wordmark is clamped away', async () => {
+    render(<Sidebar />)
+
+    // Scope to the wordmark's own row — the GitHub link in the same header is
+    // also an svg and would answer a looser query.
+    const brandRow = () => screen.getByText('Council').closest('div')
+
+    // Expanded, the name carries the brand and the mark beside it is clutter.
+    expect(brandRow()?.querySelector('svg')).toBeNull()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Collapse sidebar' }))
+    })
+
+    // Collapsed, the copy is width-clamped to zero, so the mark is the only
+    // thing left to identify the app.
+    expect(brandRow()?.querySelector('svg')).not.toBeNull()
+  })
+
   it('renders search controls without the removed embedded project filter', () => {
     render(<Sidebar />)
 
@@ -1402,6 +1421,39 @@ describe('Sidebar', () => {
     expect(screen.getByTestId('sidebar-index-degraded')).toHaveTextContent('Using standard history loading')
     expect(screen.queryByText('Session list failed')).not.toBeInTheDocument()
     expect(addToast).not.toHaveBeenCalled()
+  })
+
+  it('announces a session list failure and offers a retry', () => {
+    useSessionStore.setState({ sessions: [], isLoading: false, error: 'upstream exploded' })
+
+    render(<Sidebar />)
+
+    const alert = screen.getByRole('alert')
+    expect(alert).toHaveTextContent('Session list failed')
+    expect(alert).toHaveTextContent('upstream exploded')
+
+    fetchSessions.mockClear()
+    fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }))
+    expect(fetchSessions).toHaveBeenCalled()
+  })
+
+  it('does not claim there are no sessions while the list is failing', () => {
+    useSessionStore.setState({ sessions: [], isLoading: false, error: 'upstream exploded' })
+
+    render(<Sidebar />)
+
+    // Showing "no sessions" next to the failure reads as "the list is empty",
+    // which is a different fact from "we could not load the list".
+    expect(screen.queryByText('No sessions')).not.toBeInTheDocument()
+  })
+
+  it('says there are no sessions once the list loads empty', () => {
+    useSessionStore.setState({ sessions: [], isLoading: false, error: null })
+
+    render(<Sidebar />)
+
+    expect(screen.getByText('No sessions')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
   it('keeps the initial loading state during an empty first build', () => {
@@ -1772,6 +1824,55 @@ describe('Sidebar', () => {
     expect(addToast).toHaveBeenCalledWith({
       type: 'error',
       message: 'Session file path is unavailable.',
+    })
+  })
+
+  // The whole drawer is touch-only: it has no hover, and nothing can be focused
+  // through `pointer-events: none`. Every control gated on `group-hover` was
+  // therefore either dead or an invisible tap target, and the 53 tests above
+  // never saw it because they all render the desktop sidebar.
+  describe('touch drawer controls', () => {
+    const renderWithProject = (isMobile: boolean) => {
+      useSessionStore.setState({
+        sessions: [makeSession('alpha-1', 'Alpha newest', '/workspace/alpha', new Date('2026-05-15T10:00:00.000Z').toISOString())],
+      })
+      return render(<Sidebar isMobile={isMobile} />)
+    }
+
+    it('keeps the project row actions hover-gated on desktop', () => {
+      renderWithProject(false)
+
+      const actions = screen.getByRole('button', { name: 'Project actions for alpha' })
+      expect(actions).toHaveClass('h-7', 'w-7')
+      expect(actions.parentElement).toHaveClass('pointer-events-none', 'opacity-0')
+    })
+
+    it('leaves the project row actions tappable at 44px in the drawer', () => {
+      renderWithProject(true)
+
+      const actions = screen.getByRole('button', { name: 'Project actions for alpha' })
+      const create = screen.getByRole('button', { name: 'New session in alpha' })
+      expect(actions).toHaveClass('h-11', 'w-11')
+      expect(create).toHaveClass('h-11', 'w-11')
+      // Both live in one row, so they need a gap wide enough not to catch a
+      // thumb aimed at the other.
+      expect(actions.parentElement).toHaveClass('opacity-100', 'gap-1.5')
+      expect(actions.parentElement).not.toHaveClass('pointer-events-none')
+    })
+
+    it('does not render desktop project header actions in the mobile drawer', () => {
+      renderWithProject(true)
+
+      expect(screen.queryByRole('button', { name: 'Project menu' })).not.toBeInTheDocument()
+    })
+
+    it('raises the search row and overflow toggle to the touch minimum', () => {
+      renderWithProject(true)
+
+      expect(screen.getByRole('button', { name: 'Refresh sessions' })).toHaveClass('h-11', 'w-11')
+      expect(screen.getByRole('button', { name: 'Batch manage' })).toHaveClass('h-11', 'w-11')
+      // The title filter shares the row and keeps the same touch height.
+      expect(screen.getByPlaceholderText('Search sessions').parentElement).toHaveClass('h-11')
     })
   })
 })

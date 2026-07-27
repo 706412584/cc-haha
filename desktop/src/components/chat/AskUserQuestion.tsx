@@ -2,7 +2,7 @@ import { useMemo, useRef, useState } from 'react'
 import { listPendingPermissions, useChatStore } from '../../stores/chatStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useTranslation } from '../../i18n'
-import { Button } from '../shared/Button'
+import { Button } from '@/components/ui/Button'
 
 type QuestionOption = {
   label: string
@@ -208,7 +208,7 @@ export function AskUserQuestion({ sessionId, toolUseId, input, result }: Props) 
   return (
     <div className={`mb-4 rounded-[var(--radius-lg)] border overflow-hidden ${
       submitted
-        ? 'border-[var(--color-outline-variant)]/40 bg-[var(--color-surface-container-low)] opacity-70'
+        ? 'border-[var(--color-border)] bg-[var(--color-surface-container-low)] opacity-70'
         : 'border-[var(--color-secondary)] bg-[var(--color-surface-container-lowest)]'
     }`}>
       {/* Header */}
@@ -217,7 +217,7 @@ export function AskUserQuestion({ sessionId, toolUseId, input, result }: Props) 
           ? 'bg-[var(--color-surface-container-low)]'
           : 'bg-[var(--color-surface-container)]'
       }`}>
-        <div className="flex items-center justify-center w-8 h-8 rounded-[var(--radius-md)] bg-[var(--color-secondary)]/10">
+        <div className="flex items-center justify-center w-8 h-8 rounded-[var(--radius-md)] bg-[var(--color-secondary-container)]">
           <span className="material-symbols-outlined text-[18px] text-[var(--color-secondary)]">
             help
           </span>
@@ -236,7 +236,7 @@ export function AskUserQuestion({ sessionId, toolUseId, input, result }: Props) 
 
       {/* Question tabs — horizontal tab bar (only show when multiple questions) */}
       {questions.length > 1 && (
-        <div className="flex px-4 border-b border-[var(--color-outline-variant)]/20 bg-[var(--color-surface-container-low)] overflow-x-auto">
+        <div className="flex px-4 border-b border-[var(--color-border)] bg-[var(--color-surface-container-low)] overflow-x-auto">
           {questions.map((q, i) => {
             const isActive = safeActiveTab === i
             const isAnswered = Boolean(freeTexts[i]?.trim()) || (selections[i]?.length ?? 0) > 0
@@ -283,8 +283,8 @@ export function AskUserQuestion({ sessionId, toolUseId, input, result }: Props) 
                   disabled={submitted}
                   className={`w-full text-left px-4 py-3 rounded-[var(--radius-md)] border transition-all duration-150 cursor-pointer ${
                     isSelected
-                      ? 'border-[var(--color-secondary)] bg-[var(--color-secondary)]/8 ring-1 ring-[var(--color-secondary)]/30'
-                      : 'border-[var(--color-outline-variant)]/40 bg-[var(--color-surface)] hover:border-[var(--color-outline-variant)] hover:bg-[var(--color-surface-container-low)]'
+                      ? 'border-[var(--color-secondary)] bg-[var(--color-secondary-container)]'
+                      : 'border-[var(--color-border)] bg-[var(--color-surface)] hover:border-[var(--color-outline)] hover:bg-[var(--color-surface-container-low)]'
                   } ${submitted ? 'cursor-default' : ''}`}
                 >
                   <div className="flex items-start gap-3">
@@ -342,7 +342,7 @@ export function AskUserQuestion({ sessionId, toolUseId, input, result }: Props) 
               placeholder={t('question.typePlaceholder')}
               rows={3}
               wrap="soft"
-              className="max-h-48 min-h-[84px] w-full resize-y rounded-[var(--radius-md)] border border-[var(--color-outline-variant)]/40 bg-[var(--color-surface)] px-3 py-2 text-sm leading-relaxed text-[var(--color-text-primary)] placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-secondary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-secondary)]/30"
+              className="max-h-48 min-h-[84px] w-full resize-y rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm leading-relaxed text-[var(--color-text-primary)] placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-border-focus)] focus:outline-none focus:shadow-[var(--shadow-focus-ring)]"
             />
           </div>
         )}
@@ -360,7 +360,7 @@ export function AskUserQuestion({ sessionId, toolUseId, input, result }: Props) 
 
       {/* Submit button */}
       {!submitted && (
-        <div className="flex items-center gap-2 px-4 py-3 border-t border-[var(--color-outline-variant)]/20 bg-[var(--color-surface-container-low)]">
+        <div className="flex items-center gap-2 px-4 py-3 border-t border-[var(--color-border)] bg-[var(--color-surface-container-low)]">
           <Button
             variant="primary"
             size="sm"

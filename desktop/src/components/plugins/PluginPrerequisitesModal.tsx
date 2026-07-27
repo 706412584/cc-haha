@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Modal } from '../shared/Modal'
-import { Button } from '../shared/Button'
+import { Modal } from '@/components/ui/Modal'
+import { Button } from '@/components/ui/Button'
 import { useTranslation } from '../../i18n'
 import { useUIStore } from '../../stores/uiStore'
 import { useTabStore } from '../../stores/tabStore'
-import { copyTextToClipboard } from '../chat/clipboard'
+import { copyTextToClipboard } from '@/lib/clipboard'
 import { injectInstallScriptIntoNewTerminal } from '../../lib/terminalCommandInjection'
 import { detectPlatform } from '../../lib/detectPlatform'
 import {

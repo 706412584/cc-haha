@@ -1,6 +1,7 @@
 import ReactDiffViewer, { DiffMethod } from 'react-diff-viewer-continued'
 import { Highlight, type PrismTheme } from 'prism-react-renderer'
-import { CopyButton } from '../shared/CopyButton'
+import { CopyButton } from '@/components/ui/CopyButton'
+import { useTranslation } from '../../i18n'
 import { useUIStore } from '../../stores/uiStore'
 
 type Props = {
@@ -93,18 +94,17 @@ const diffStyles = {
     },
   },
   diffContainer: {
-    borderRadius: '0 0 var(--radius-lg) var(--radius-lg)',
-    fontSize: '12px',
-    lineHeight: '1.45',
-    fontFamily: 'var(--font-mono)',
+    borderRadius: '0',
+    fontSize: '13px',
+    lineHeight: '1.7',    fontFamily: 'var(--font-mono)',
   },
   line: {
-    padding: '1px 0',
+    padding: '0',
   },
   gutter: {
-    padding: '1px 8px',
-    minWidth: '40px',
-    fontSize: '11px',
+    padding: '0 10px',
+    minWidth: '44px',
+    fontSize: '12px',
   },
   wordDiff: {
     padding: '1px 2px',
@@ -113,6 +113,7 @@ const diffStyles = {
 }
 
 export function DiffViewer({ filePath, oldString, newString }: Props) {
+  const t = useTranslation()
   const theme = useUIStore((state) => state.theme)
   const language = inferLanguage(filePath)
 
@@ -122,23 +123,23 @@ export function DiffViewer({ filePath, oldString, newString }: Props) {
   const deletions = oldLines.filter((l, i) => l !== (newLines[i] ?? null)).length
 
   return (
-    <div className="overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-outline-variant)]/50 bg-[var(--color-surface-container-low)]">
-      {/* Header */}
-      <div className="flex items-center justify-between border-b border-[var(--color-outline-variant)]/40 bg-[var(--color-surface-container)] px-3 py-1.5">
-        <div className="min-w-0">
-          <div className="truncate font-[var(--font-mono)] text-[11px] text-[var(--color-text-tertiary)]">
-            {filePath}
-          </div>
-          <div className="mt-1 flex items-center gap-2 text-[10px] uppercase tracking-[0.14em]">
-            <span className="rounded-full bg-[var(--color-diff-added-bg)] px-2 py-0.5 text-[var(--color-diff-added-text)]">+{additions}</span>
-            <span className="rounded-full bg-[var(--color-diff-removed-bg)] px-2 py-0.5 text-[var(--color-diff-removed-text)]">-{deletions}</span>
-          </div>
-        </div>
+    <div className="overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-code-bg)]">
+      {/* Header — mono path on the left, Copy path chip on the right */}
+      <div className="flex items-center gap-2.5 px-3.5 py-2.5">
+        <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] text-[var(--color-text-secondary)]">
+          {filePath}
+        </span>
         <CopyButton
           text={`--- ${filePath}\n+++ ${filePath}`}
-          label="Copy path"
-          className="rounded-md border border-[var(--color-outline-variant)]/40 bg-[var(--color-surface-container-lowest)] px-2 py-1 text-[11px] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-container-high)] hover:text-[var(--color-text-primary)]"
+          label={t('chat.copyPath')}
+          className="shrink-0 rounded-[8px] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-3 py-1 text-[12.5px] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
         />
+      </div>
+
+      {/* Change counts */}
+      <div className="flex gap-2 px-3.5 pb-2 font-mono text-[12px] font-semibold">
+        <span className="rounded-[var(--radius-sm)] bg-[var(--color-diff-added-gutter)] px-2 py-0.5 text-[var(--color-diff-added-text)]">+{additions}</span>
+        <span className="rounded-[var(--radius-sm)] bg-[var(--color-diff-removed-gutter)] px-2 py-0.5 text-[var(--color-diff-removed-text)]">-{deletions}</span>
       </div>
 
       {/* Diff area */}

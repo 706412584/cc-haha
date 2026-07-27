@@ -157,6 +157,8 @@ describe('MemorySettings', () => {
         projectId: '-workspace-demo',
         path: 'MEMORY.md',
         content: '# Project Memory\n\n- Prefer small diffs.\n',
+        expectedUpdatedAt: '2026-05-01T00:00:00.000Z',
+        expectedBytes: 18,
       })
     })
     expect(screen.queryByLabelText('Editor')).not.toBeInTheDocument()
@@ -287,6 +289,8 @@ describe('MemorySettings', () => {
         projectId: '-workspace-demo',
         path: 'MEMORY.md',
         content: '# Project Memory\n\n- Shortcut save.\n',
+        expectedUpdatedAt: '2026-05-01T00:00:00.000Z',
+        expectedBytes: 18,
       })
     })
     expect(screen.queryByLabelText('Editor')).not.toBeInTheDocument()

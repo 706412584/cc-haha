@@ -46,7 +46,7 @@ export class OfficeScene {
   private officeLayer: Container | null = null
   private mapFloor: Graphics | null = null
   private mapThemeOverlay: Graphics | null = null
-  private themePalette: OfficeThemePalette = resolveOfficeThemePalette('light')
+  private themePalette: OfficeThemePalette = resolveOfficeThemePalette('warm-classic')
   private selectedSourceKey: string | null = null
   private reducedMotion = false
 

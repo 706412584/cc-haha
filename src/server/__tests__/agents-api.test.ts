@@ -249,6 +249,24 @@ describe('Agents API Markdown CRUD', () => {
     expect(createdMarkdown).toContain('effort: xhigh')
     expect(createdMarkdown).toContain('Review this change for security regressions.')
 
+    const wildcardTools = [
+      'Read',
+      '*',
+      'Bash(git:*)',
+      'Agent(worker, researcher)',
+      'mcp__qa__search',
+    ]
+    const wildcardCreate = await api('POST', '/api/agents', {
+      scope: 'user',
+      cwd: projectCwd,
+      name: 'wildcard-editor',
+      description: 'Preserves persisted wildcard tool rules',
+      systemPrompt: 'Keep the exact persisted tool list available to editors.',
+      tools: wildcardTools,
+    })
+    expect(wildcardCreate.status).toBe(201)
+    expect(wildcardCreate.data.agent.tools).toEqual(wildcardTools)
+
     const userList = await api(
       'GET',
       `/api/agents?cwd=${encodeURIComponent(projectCwd)}`,
@@ -267,6 +285,11 @@ describe('Agents API Markdown CRUD', () => {
         }),
       ]),
     )
+    expect(
+      userList.data.activeAgents.find(
+        (agent: { agentType: string }) => agent.agentType === 'wildcard-editor',
+      )?.tools,
+    ).toEqual(wildcardTools)
 
     const nestedUserDir = path.join(configDir, 'agents', 'review')
     const nestedUserFile = path.join(nestedUserDir, 'reviewer-definition.md')
@@ -960,7 +983,11 @@ describe('Agents API Markdown CRUD', () => {
       '---\nname: escaped-user\ndescription: Outside user agent\n---\nOutside user prompt.\n'
     await fs.mkdir(outsideUserAgents, { recursive: true })
     await fs.writeFile(outsideUserFile, outsideUserContent, 'utf-8')
-    await fs.symlink(outsideUserAgents, path.join(configDir, 'agents'))
+    await fs.symlink(
+      outsideUserAgents,
+      path.join(configDir, 'agents'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    )
 
     const userCreate = await api('POST', '/api/agents', {
       scope: 'user',
@@ -1020,6 +1047,7 @@ describe('Agents API Markdown CRUD', () => {
     await fs.symlink(
       outsideProjectAgents,
       path.join(projectRoot, '.claude', 'agents'),
+      process.platform === 'win32' ? 'junction' : 'dir',
     )
 
     const projectCreate = await api('POST', '/api/agents', {
@@ -1083,7 +1111,11 @@ describe('Agents API Markdown CRUD', () => {
     await fs.mkdir(path.join(ancestorProjectRoot, '.git'), { recursive: true })
     await fs.mkdir(ancestorProjectCwd, { recursive: true })
     await fs.mkdir(path.join(outsideClaudeDir, 'agents'), { recursive: true })
-    await fs.symlink(outsideClaudeDir, path.join(ancestorProjectRoot, '.claude'))
+    await fs.symlink(
+      outsideClaudeDir,
+      path.join(ancestorProjectRoot, '.claude'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    )
     const ancestorCreate = await api('POST', '/api/agents', {
       scope: 'project',
       cwd: ancestorProjectCwd,
@@ -1417,29 +1449,35 @@ describe('Agents API Markdown CRUD', () => {
       )
     }
 
-    const outsideFile = path.join(tempRoot, 'outside-agent.md')
-    await fs.writeFile(
-      outsideFile,
-      '---\nname: linked-agent\ndescription: Outside\n---\nPrompt',
-      'utf-8',
-    )
-    await fs.symlink(outsideFile, path.join(agentsDir, 'linked-agent.md'))
-    const linkedUpdate = await api('PUT', '/api/agents/linked-agent', {
-      scope: 'user',
-      cwd: projectCwd,
-      description: 'Must not follow the link',
-    })
-    expect(linkedUpdate.status).toBe(403)
-    expect(await fs.readFile(outsideFile, 'utf-8')).toContain('description: Outside')
+    if (process.platform !== 'win32') {
+      const outsideFile = path.join(tempRoot, 'outside-agent.md')
+      await fs.writeFile(
+        outsideFile,
+        '---\nname: linked-agent\ndescription: Outside\n---\nPrompt',
+        'utf-8',
+      )
+      await fs.symlink(outsideFile, path.join(agentsDir, 'linked-agent.md'))
+      const linkedUpdate = await api('PUT', '/api/agents/linked-agent', {
+        scope: 'user',
+        cwd: projectCwd,
+        description: 'Must not follow the link',
+      })
+      expect(linkedUpdate.status).toBe(403)
+      expect(await fs.readFile(outsideFile, 'utf-8')).toContain(
+        'description: Outside',
+      )
 
-    const linkedTargetUpdate = await api('PUT', '/api/agents/linked-agent', {
-      scope: 'user',
-      cwd: projectCwd,
-      target: path.join(agentsDir, 'linked-agent.md'),
-      description: 'Must not follow an explicit link either',
-    })
-    expect(linkedTargetUpdate.status).toBe(403)
-    expect(await fs.readFile(outsideFile, 'utf-8')).toContain('description: Outside')
+      const linkedTargetUpdate = await api('PUT', '/api/agents/linked-agent', {
+        scope: 'user',
+        cwd: projectCwd,
+        target: path.join(agentsDir, 'linked-agent.md'),
+        description: 'Must not follow an explicit link either',
+      })
+      expect(linkedTargetUpdate.status).toBe(403)
+      expect(await fs.readFile(outsideFile, 'utf-8')).toContain(
+        'description: Outside',
+      )
+    }
 
     const escapedTarget = path.join(tempRoot, 'escaped-target.md')
     const escapedContent =

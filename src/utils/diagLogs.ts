@@ -49,18 +49,45 @@ export function logForDiagnosticsNoPII(
   const line = jsonStringify(entry) + '\n'
   const logFile = `${baseLogFile}.${process.pid}.current.jsonl`
   try {
+    preparePrivateDiagnosticsStorage(fs, logFile)
     rotateOwnedSegmentIfNeeded(fs, baseLogFile, logFile, Buffer.byteLength(line))
-    fs.appendFileSync(logFile, line)
+    fs.appendFileSync(logFile, line, { mode: 0o600 })
   } catch {
     // If append fails, try creating the directory first
     try {
-      fs.mkdirSync(dirname(logFile))
+      preparePrivateDiagnosticsStorage(fs, logFile)
       rotateOwnedSegmentIfNeeded(fs, baseLogFile, logFile, Buffer.byteLength(line))
-      fs.appendFileSync(logFile, line)
+      fs.appendFileSync(logFile, line, { mode: 0o600 })
     } catch {
       // Silently fail if logging is not possible
     }
   }
+}
+
+function preparePrivateDiagnosticsStorage(
+  fs: ReturnType<typeof getFsImplementation>,
+  logFile: string,
+): void {
+  const logDir = dirname(logFile)
+  fs.mkdirSync(logDir, { mode: 0o700 })
+  const directoryStats = fs.lstatSync(logDir)
+  if (directoryStats.isSymbolicLink()) {
+    throw new Error(`Refusing symbolic link for diagnostics directory: ${logDir}`)
+  }
+  if (!directoryStats.isDirectory()) {
+    throw new Error(`Refusing non-directory diagnostics path: ${logDir}`)
+  }
+  if (process.platform !== 'win32') fs.chmodSync(logDir, 0o700)
+
+  if (!fs.existsSync(logFile)) return
+  const fileStats = fs.lstatSync(logFile)
+  if (fileStats.isSymbolicLink()) {
+    throw new Error(`Refusing symbolic link for diagnostics file: ${logFile}`)
+  }
+  if (!fileStats.isFile()) {
+    throw new Error(`Refusing non-regular diagnostics file: ${logFile}`)
+  }
+  if (process.platform !== 'win32') fs.chmodSync(logFile, 0o600)
 }
 
 function rotateOwnedSegmentIfNeeded(

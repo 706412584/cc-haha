@@ -2,11 +2,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import '@testing-library/jest-dom'
 
-const { sessionsApiMock } = vi.hoisted(() => ({
+const { sessionsApiMock, runtimeMocks } = vi.hoisted(() => ({
   sessionsApiMock: {
     getInspection: vi.fn(),
   },
+  runtimeMocks: {
+    isMobileViewport: false,
+    isDesktopRuntime: false,
+  },
 }))
+
+vi.mock('../../hooks/useMobileViewport', () => ({
+  useMobileViewport: () => runtimeMocks.isMobileViewport,
+}))
+
+vi.mock('../../lib/desktopRuntime', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../lib/desktopRuntime')>()
+  return { ...actual, isDesktopRuntime: () => runtimeMocks.isDesktopRuntime }
+})
 
 vi.mock('../../api/sessions', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../api/sessions')>()
@@ -406,5 +419,47 @@ describe('ContextUsageIndicator request behavior', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('ContextUsageIndicator touch target', () => {
+  afterEach(() => {
+    cleanup()
+    runtimeMocks.isMobileViewport = false
+    runtimeMocks.isDesktopRuntime = false
+  })
+
+  // `compact` is also true on the desktop composer, which narrows for the right
+  // panel rather than for touch — so it cannot be the signal that grows this
+  // trigger. On the phone shell it sits between two 44px buttons.
+  it('keeps the desktop trigger at 32px even when the composer is compact', () => {
+    sessionsApiMock.getInspection.mockResolvedValue(baseInspection)
+
+    render(<ContextUsageIndicator sessionId="session-1" chatState="idle" messageCount={1} compact />)
+
+    const trigger = screen.getByTestId('context-usage-indicator')
+    expect(trigger).toHaveClass('h-8')
+    expect(trigger).not.toHaveClass('h-11')
+  })
+
+  it('grows the trigger to the 44px touch target on the browser H5 shell', () => {
+    sessionsApiMock.getInspection.mockResolvedValue(baseInspection)
+    runtimeMocks.isMobileViewport = true
+
+    render(<ContextUsageIndicator sessionId="session-1" chatState="idle" messageCount={1} compact />)
+
+    const trigger = screen.getByTestId('context-usage-indicator')
+    expect(trigger).toHaveClass('h-11')
+    expect(trigger).not.toHaveClass('h-8')
+  })
+
+  it('leaves the desktop shell alone on a narrow Electron window', () => {
+    sessionsApiMock.getInspection.mockResolvedValue(baseInspection)
+    runtimeMocks.isMobileViewport = true
+    runtimeMocks.isDesktopRuntime = true
+
+    render(<ContextUsageIndicator sessionId="session-1" chatState="idle" messageCount={1} compact />)
+
+    expect(screen.getByTestId('context-usage-indicator')).toHaveClass('h-8')
   })
 })

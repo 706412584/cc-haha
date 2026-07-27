@@ -9,8 +9,10 @@ import {
 } from '../../lib/doctorRepair'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useUIStore } from '../../stores/uiStore'
-import { Button } from '../shared/Button'
-import { ConfirmDialog } from '../shared/ConfirmDialog'
+import { Badge } from '@/components/ui/Badge'
+import { Button } from '@/components/ui/Button'
+import { Card } from '@/components/ui/Card'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { getSessionBrowsablePath } from '../../lib/sessionWorkspace'
 
 type DoctorPanelProps = {
@@ -115,10 +117,15 @@ export function DoctorPanel({ compact = false }: DoctorPanelProps) {
   const healthyCount = report?.items.filter((item) => item.status === 'ok').length ?? 0
 
   return (
-    <section className={`rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] ${compact ? 'p-3' : 'p-4'}`}>
+    <Card as="section" radius="md" padding={compact ? 'sm' : 'md'}>
       <div className={`flex ${compact ? 'flex-col gap-3' : 'items-start justify-between gap-4'}`}>
         <div className="min-w-0">
-          <div className="text-sm font-medium text-[var(--color-text-primary)]">{t('settings.diagnostics.doctorTitle')}</div>
+          <div
+            className="text-[14.5px] font-semibold text-[var(--color-text-primary)]"
+            style={{ fontFamily: 'var(--font-headline)' }}
+          >
+            {t('settings.diagnostics.doctorTitle')}
+          </div>
           <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">
             {t('settings.diagnostics.doctorDescription')}
           </p>
@@ -158,14 +165,14 @@ export function DoctorPanel({ compact = false }: DoctorPanelProps) {
 
       {report ? (
         <div className="mt-3 space-y-2">
-          <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2.5 py-2 text-xs text-[var(--color-text-secondary)]">
+          <Card radius="md" surface="none" padding="sm" className="bg-[var(--color-surface-container)] text-xs text-[var(--color-text-secondary)]">
             {t('settings.diagnostics.doctorSummary', {
               healthy: String(healthyCount),
               neutral: String(report.summary.neutralCount),
               missing: String(report.summary.missingCount),
               invalid: String(report.summary.invalidCount),
             })}
-          </div>
+          </Card>
           {unhealthyItems.length === 0 ? (
             <div className="text-xs text-[var(--color-text-tertiary)]">
               {t('settings.diagnostics.doctorNoFindings')}
@@ -179,10 +186,10 @@ export function DoctorPanel({ compact = false }: DoctorPanelProps) {
       ) : null}
 
       {resetResult ? (
-        <div className="mt-2 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2.5 py-2 text-xs text-[var(--color-text-secondary)]">
+        <Card radius="md" surface="none" padding="sm" className="mt-2 bg-[var(--color-surface-container)] text-xs text-[var(--color-text-secondary)]">
           <div>{t('settings.diagnostics.doctorRemovedKeys')}: {formatKeys(resetResult.removedKeys, t('settings.diagnostics.doctorNoKeys'))}</div>
           <div className="mt-1">{t('settings.diagnostics.doctorFailedKeys')}: {formatKeys(resetResult.failedKeys, t('settings.diagnostics.doctorNoKeys'))}</div>
-        </div>
+        </Card>
       ) : null}
 
       <ConfirmDialog
@@ -198,22 +205,20 @@ export function DoctorPanel({ compact = false }: DoctorPanelProps) {
         confirmVariant="danger"
         loading={resettingRequestId !== null}
       />
-    </section>
+    </Card>
   )
 }
 
 function DoctorFinding({ item }: { item: DoctorReportItem }) {
   const t = useTranslation()
   return (
-    <div className="rounded-md border border-[var(--color-border)] px-2.5 py-2 text-xs">
+    <Card radius="md" surface="none" padding="sm" className="text-xs">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="font-mono text-[var(--color-text-secondary)] break-all">{item.path}</span>
-        <span className="font-medium text-[var(--color-warning)]">
-          {getStatusLabel(t, item.status)}
-        </span>
+        <Badge tone="warning" size="sm">{getStatusLabel(t, item.status)}</Badge>
       </div>
       {item.error ? <div className="mt-1 text-[var(--color-text-tertiary)] break-words">{item.error}</div> : null}
-    </div>
+    </Card>
   )
 }
 

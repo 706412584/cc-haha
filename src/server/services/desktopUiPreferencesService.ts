@@ -163,6 +163,28 @@ function normalizeProfilePreferences(value: unknown): DesktopProfilePreferences 
   }
 }
 
+function validateProfilePreferencesPatch(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw ApiError.badRequest('Profile preferences must be an object')
+  }
+  const patch = value as Record<string, unknown>
+  for (const [field, maxLength] of [
+    ['displayName', MAX_PROFILE_DISPLAY_NAME_LENGTH],
+    ['subtitle', MAX_PROFILE_SUBTITLE_LENGTH],
+  ] as const) {
+    if (!Object.prototype.hasOwnProperty.call(patch, field)) continue
+    const candidate = patch[field]
+    if (typeof candidate !== 'string') {
+      throw ApiError.badRequest(`${field} must be a string`)
+    }
+    const normalized = candidate.trim().replace(/\s+/g, ' ')
+    if (normalized.length === 0 || normalized.length > maxLength) {
+      throw ApiError.badRequest(`${field} must be between 1 and ${maxLength} characters`)
+    }
+  }
+  return patch
+}
+
 function normalizePetId(value: unknown): string {
   if (typeof value !== 'string') return DEFAULT_PET_ID
   const trimmed = value.trim()
@@ -358,9 +380,7 @@ export class DesktopUiPreferencesService {
     return this.withWriteLock(filePath, async () => {
       const { preferences } = await this.readPreferences()
       const currentProfile = normalizeProfilePreferences(preferences.profile)
-      const patch = profile && typeof profile === 'object' && !Array.isArray(profile)
-        ? profile as Record<string, unknown>
-        : {}
+      const patch = validateProfilePreferencesPatch(profile)
       const nextProfile = normalizeProfilePreferences({
         ...currentProfile,
         displayName: Object.prototype.hasOwnProperty.call(patch, 'displayName')

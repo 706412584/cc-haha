@@ -63,6 +63,17 @@ describe('browserPanelStore', () => {
     expect(useBrowserPanelStore.getState().bySession['s1']!.pickerActive).toBe(true)
   })
 
+  it('clears one browser session without disturbing another session', () => {
+    const st = useBrowserPanelStore.getState()
+    st.open('s1', 'http://localhost/a')
+    st.open('s2', 'http://localhost/b')
+
+    st.clearSession('s1')
+
+    expect(useBrowserPanelStore.getState().bySession['s1']).toBeUndefined()
+    expect(useBrowserPanelStore.getState().bySession['s2']?.url).toBe('http://localhost/b')
+  })
+
   it('tracks preview zoom per session and clamps to supported bounds', () => {
     const st = useBrowserPanelStore.getState()
     st.open('s1', 'http://localhost/a')

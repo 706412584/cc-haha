@@ -100,6 +100,10 @@ vi.mock('../../i18n', () => ({
       'tabs.hideWorkspace': 'Hide Workspace',
       'tabs.showBrowser': 'Show Browser',
       'tabs.hideBrowser': 'Hide Browser',
+      'tabs.scrollLeft': 'Scroll tabs left',
+      'tabs.scrollRight': 'Scroll tabs right',
+      'tabs.closeTab': 'Close {title}',
+      'tabs.untitled': 'Untitled',
       'settings.title': 'Localized Settings',
       'openProject.openProject': 'Open project',
       'openProject.openIn': 'Open in {target}',
@@ -1093,9 +1097,43 @@ describe('TabBar', () => {
     const tabBar = screen.getByTestId('tab-bar')
     const tab = screen.getByText('Untitled Session').closest('.tab-bar-interactive')
 
-    expect(tabBar).toHaveClass('min-h-11')
-    expect(tab).toHaveClass('min-h-11')
-    expect(screen.getByTestId('tab-bar-drag-gutter')).toHaveClass('min-h-11')
+    // 52px, from the handoff. The three have to agree: the strip, the tab, and
+    // the drag gutter are siblings, so a mismatch leaves the shorter one with a
+    // dead strip of titlebar that the window drag region does not cover.
+    expect(tabBar).toHaveClass('min-h-[52px]')
+    expect(tab).toHaveClass('min-h-[52px]')
+    expect(screen.getByTestId('tab-bar-drag-gutter')).toHaveClass('min-h-[52px]')
+  })
+
+  it('marks the active tab with a rule rather than a filled pill', async () => {
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useChatStore } = await import('../../stores/chatStore')
+
+    useTabStore.setState({
+      tabs: [
+        { sessionId: 'tab-1', title: 'Active One', type: 'session', status: 'idle' },
+        { sessionId: 'tab-2', title: 'Inactive One', type: 'session', status: 'idle' },
+      ],
+      activeTabId: 'tab-1',
+    })
+    useChatStore.setState({
+      sessions: {},
+      disconnectSession: vi.fn(),
+    } as Partial<ReturnType<typeof useChatStore.getState>>)
+
+    await act(async () => {
+      render(<TabBar />)
+    })
+
+    const active = screen.getByText('Active One').closest('.tab-bar-interactive')
+    const inactive = screen.getByText('Inactive One').closest('.tab-bar-interactive')
+
+    expect(active?.className).toContain('shadow-[inset_0_-3px_0_var(--color-brand)]')
+    // The active tab shares the strip's ground; giving it its own fill is what
+    // turned the underline treatment back into a pill.
+    expect(active?.className).toContain('bg-transparent')
+    expect(inactive?.className).not.toContain('inset_0_-3px')
   })
 
   it('passes the active session workdir into the open-project control', async () => {

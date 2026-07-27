@@ -3,7 +3,7 @@ import type { Agent } from './types/agent'
 import type { AgentOfficeCopy } from './officeCopy'
 import { OfficeScene, type OfficeAgentClick } from './scene/OfficeScene'
 import { resolveOfficeThemePalette } from './officeTheme'
-import type { ThemeMode } from '../../types/settings'
+import { isThemeMode, type ThemeMode } from '../../types/settings'
 
 type AgentMenuState = {
   agent: Agent
@@ -29,9 +29,9 @@ function interpolateName(template: string, name: string): string {
   return template.replace('{name}', name)
 }
 
-function appliedTheme(): Exclude<ThemeMode, 'system'> {
+function appliedTheme(): ThemeMode {
   const value = document.documentElement.getAttribute('data-theme')
-  return value === 'dark' || value === 'eyeCare' || value === 'white' ? value : 'light'
+  return isThemeMode(value) ? value : 'warm-classic'
 }
 
 export function OfficeCanvas({

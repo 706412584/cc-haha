@@ -1,6 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { browserHost } from '../lib/desktopHost/browserHost'
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (error: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
 describe('adapterStore IM pairing behavior', () => {
   const adaptersApi = {
     getConfig: vi.fn(),
@@ -116,6 +126,7 @@ describe('adapterStore IM pairing behavior', () => {
       )
     })
     expect(adaptersApi.updateConfig).toHaveBeenCalledWith({ telegram: { botToken: 'token' } })
+    expect(useAdapterStore.getState().restartWarning).toBe('restart failed')
 
     warn.mockRestore()
   })
@@ -141,9 +152,6 @@ describe('adapterStore IM pairing behavior', () => {
     expect(adaptersApi.unbindWechat).not.toHaveBeenCalled()
     expect(adaptersApi.updateConfig).toHaveBeenCalledWith({
       wechat: {
-        accountId: 'wx-account',
-        botToken: '****oken',
-        userId: 'wx-login-user',
         pairedUsers: [{ userId: 'wx-user-2', displayName: 'User 2', pairedAt: 2 }],
       },
     })
@@ -184,5 +192,45 @@ describe('adapterStore IM pairing behavior', () => {
 
     expect(adaptersApi.unbindWhatsApp).toHaveBeenCalledTimes(1)
     expect(useAdapterStore.getState().config).toBe(nextConfig)
+  })
+
+  it('discards a stale config fetch that resolves after a newer request', async () => {
+    const first = deferred<{ telegram: { botToken: string } }>()
+    const second = deferred<{ feishu: { appId: string } }>()
+    adaptersApi.getConfig
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+    const { useAdapterStore } = await import('./adapterStore')
+
+    const firstFetch = useAdapterStore.getState().fetchConfig()
+    const secondFetch = useAdapterStore.getState().fetchConfig()
+    second.resolve({ feishu: { appId: 'newer' } })
+    await secondFetch
+    first.resolve({ telegram: { botToken: 'older' } })
+    await firstFetch
+
+    expect(useAdapterStore.getState().config).toEqual({ feishu: { appId: 'newer' } })
+    expect(useAdapterStore.getState().hasLoaded).toBe(true)
+  })
+
+  it('serializes config updates and exposes only the latest response', async () => {
+    const first = deferred<{ telegram: { botToken: string } }>()
+    const second = deferred<{ feishu: { appId: string } }>()
+    adaptersApi.updateConfig
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+    const { useAdapterStore } = await import('./adapterStore')
+
+    const firstUpdate = useAdapterStore.getState().updateConfig({ telegram: { botToken: 'one' } })
+    const secondUpdate = useAdapterStore.getState().updateConfig({ feishu: { appId: 'two' } })
+    await vi.waitFor(() => expect(adaptersApi.updateConfig).toHaveBeenCalledTimes(1))
+
+    first.resolve({ telegram: { botToken: '****one' } })
+    await vi.waitFor(() => expect(adaptersApi.updateConfig).toHaveBeenCalledTimes(2))
+    expect(useAdapterStore.getState().config).toEqual({})
+
+    second.resolve({ feishu: { appId: 'two' } })
+    await Promise.all([firstUpdate, secondUpdate])
+    expect(useAdapterStore.getState().config).toEqual({ feishu: { appId: 'two' } })
   })
 })

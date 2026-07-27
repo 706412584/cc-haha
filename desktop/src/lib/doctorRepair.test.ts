@@ -34,6 +34,17 @@ describe('doctorRepair', () => {
     expect(window.localStorage.getItem('cc-haha-provider-config')).toBe('preserve')
   })
 
+  it('resets the appearance completely, not just the applied theme', () => {
+    // The theme is three keys. Clearing only the applied one leaves the
+    // follow-the-system switch behind, so the reset would not restore the
+    // out-of-the-box appearance.
+    expect(SAFE_DOCTOR_STORAGE_KEYS).toEqual(expect.arrayContaining([
+      'cc-haha-theme',
+      'cc-haha-follow-system-theme',
+      'cc-haha-light-theme',
+    ]))
+  })
+
   it('keeps local repair non-throwing when storage access is blocked', () => {
     const storage = {
       getItem: () => {

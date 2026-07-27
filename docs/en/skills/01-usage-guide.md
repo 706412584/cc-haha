@@ -60,7 +60,8 @@ Controlled by organizational policies, stored in `<managed-path>/.claude/skills/
 
 ### 3. User (User Skills)
 
-Defined by individual users, stored in `~/.claude/skills/`.
+Defined by individual users, stored in `~/.claude/skills/`. The cross-client open-standard
+directory `~/.agents/skills/` is read as well.
 
 ```
 ~/.claude/skills/
@@ -69,21 +70,46 @@ Defined by individual users, stored in `~/.claude/skills/`.
 ├── deploy-check/
 │   └── SKILL.md
 └── ...
+
+~/.agents/skills/         ← Open-standard directory, shared with Codex / Cursor / Gemini CLI
+└── pdf-processing/
+    └── SKILL.md
 ```
 
 ### 4. Project (Project Skills)
 
-Defined at the project level, stored in `.claude/skills/`. Can be committed to version control.
+Defined at the project level, stored in `.claude/skills/` or `.agents/skills/`. Can be
+committed to version control.
 
 ```
 your-project/
-└── .claude/
-    └── skills/
-        ├── lint-fix/
-        │   └── SKILL.md
-        └── test-runner/
+├── .claude/
+│   └── skills/
+│       ├── lint-fix/
+│       │   └── SKILL.md
+│       └── test-runner/
+│           └── SKILL.md
+└── .agents/
+    └── skills/           ← Shared with the team; other agent tools discover it too
+        └── deploy-app/
             └── SKILL.md
 ```
+
+### About `.agents/skills/` (the Agent Skills open standard)
+
+`.agents/skills/` is the cross-client directory recommended by the
+[agentskills.io](https://agentskills.io) specification, and is scanned by OpenAI Codex,
+Cursor, Gemini CLI, and opencode among others. Skills placed there no longer need to be
+copied into each tool's private directory.
+
+- Both directories are active at once, and the `SKILL.md` format is identical — nothing to rewrite.
+- If the same skill name appears in both at one level, `.claude/` wins and the `.agents/` entry
+  is skipped (a warn-level log records it). Names colliding across different levels — user vs.
+  project, say — still both survive, exactly as before.
+- Sharing one skill through a symlink is recognized as a single skill, not loaded twice.
+- To turn it off, set `"disableAgentSkillsDirectory": true` in `settings.json`, or set the
+  `CLAUDE_CODE_DISABLE_AGENT_SKILLS_DIR=1` environment variable. `.claude/skills/` is unaffected.
+- Writes — Skills Market installs, `/skillify` — still go to `~/.claude/skills/`.
 
 ### 5. Plugin (Plugin Skills)
 
@@ -311,7 +337,7 @@ In addition to conditional activation, Skills also support **runtime discovery**
 ```
 1. User operates on a file in a deeply nested directory
 2. discoverSkillDirsForPaths() traverses upward from the file path
-3. Looks for .claude/skills/ directories (not beyond cwd)
+3. Looks for .claude/skills/ and .agents/skills/ directories (not beyond cwd)
 4. Skips directories ignored by .gitignore
 5. New directory found → addSkillDirectories() → load and register
 ```
@@ -374,6 +400,7 @@ EOF
 |-----------|--------|
 | Create a Skill | `~/.claude/skills/<name>/SKILL.md` |
 | Project-level Skill | `.claude/skills/<name>/SKILL.md` |
+| Cross-tool shared Skill | `~/.agents/skills/<name>/SKILL.md` (visible to Codex / Cursor / Gemini CLI too) |
 | Invoke a Skill | Type `/skill-name` in terminal |
 | View available Skills | Type `/skills` in terminal |
 | Create Skill with AI | `/skillify` |

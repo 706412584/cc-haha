@@ -6,8 +6,9 @@ import type {
   ComputerUsePermissionRequest,
   ComputerUsePermissionResponse,
 } from '../../types/chat'
-import { Button } from '../shared/Button'
-import { Modal } from '../shared/Modal'
+import { Badge } from '@/components/ui/Badge'
+import { Button } from '@/components/ui/Button'
+import { Modal } from '@/components/ui/Modal'
 
 type Props = {
   sessionId: string
@@ -206,9 +207,9 @@ export function ComputerUsePermissionModal({ sessionId, request }: Props) {
                         {resolved?.bundleId ?? t('computerUseApproval.notInstalled')}
                       </div>
                     </div>
-                    <span className="rounded-full bg-[var(--color-surface-container)] px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">
+                    <Badge className="font-semibold uppercase tracking-wide">
                       {app.proposedTier}
-                    </span>
+                    </Badge>
                   </div>
 
                   {!resolved ? (
@@ -240,12 +241,9 @@ export function ComputerUsePermissionModal({ sessionId, request }: Props) {
               </div>
               <div className="mt-2 flex flex-wrap gap-2">
                 {requestedFlags.map((flag) => (
-                  <span
-                    key={flag}
-                    className="rounded-full bg-[var(--color-surface-container)] px-2 py-1 text-[11px] text-[var(--color-text-secondary)]"
-                  >
+                  <Badge key={flag} size="md" mono wrap>
                     {flag}
-                  </span>
+                  </Badge>
                 ))}
               </div>
             </div>

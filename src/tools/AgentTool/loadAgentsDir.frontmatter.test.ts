@@ -34,4 +34,39 @@ describe('Markdown agent frontmatter boundaries', () => {
     expect(agent?.permissionMode).toBe('plan')
     expect(agent?.rawSystemPrompt).toBe('Only inspect the requested files.')
   })
+
+  test('preserves persisted tools when a wildcard grants runtime access', () => {
+    const markdown = [
+      '---',
+      'name: wildcard-reviewer',
+      'description: Reviews with an explicit wildcard and custom rules.',
+      'tools:',
+      '  - Read',
+      '  - "*"',
+      '  - Bash(git:*)',
+      '  - Agent(worker, researcher)',
+      '  - mcp__qa__search',
+      '---',
+      'Review the requested files.',
+    ].join('\n')
+    const { frontmatter, content } = parseFrontmatter(markdown)
+
+    const agent = parseAgentFromMarkdown(
+      '/tmp/wildcard-reviewer.md',
+      '/tmp',
+      frontmatter,
+      content,
+      'userSettings',
+    )
+
+    expect(agent).not.toBeNull()
+    expect(agent?.rawTools).toEqual([
+      'Read',
+      '*',
+      'Bash(git:*)',
+      'Agent(worker, researcher)',
+      'mcp__qa__search',
+    ])
+    expect(agent?.tools).toBeUndefined()
+  })
 })

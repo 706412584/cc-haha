@@ -259,7 +259,7 @@ describe('OfficeCanvas', () => {
   })
 
   it('updates the mounted Pixi palette when the app theme changes', async () => {
-    document.documentElement.setAttribute('data-theme', 'light')
+    document.documentElement.setAttribute('data-theme', 'warm-classic')
     render(<OfficeCanvas agents={[agent('Main Agent')]} copy={ENGLISH_COPY} />)
     const scene = mocks.instances[0]!
 

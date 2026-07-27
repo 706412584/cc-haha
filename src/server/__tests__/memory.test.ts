@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -161,6 +161,119 @@ describe('memory API', () => {
     })
   })
 
+  it('rejects malformed request bodies and absolute memory paths as bad requests', async () => {
+    const projectId = sanitizePath(path.join(tmpDir, 'workspace', 'app'))
+
+    for (const body of [null, [], 'memory']) {
+      const response = await request('PUT', '/api/memory/file', body)
+      expect(response.status).toBe(400)
+    }
+
+    for (const memoryPath of ['/absolute.md', 'C:\\Users\\fixture\\absolute.md']) {
+      const response = await request('PUT', '/api/memory/file', {
+        projectId,
+        path: memoryPath,
+        content: '# Must not be written',
+      })
+      expect(response.status).toBe(400)
+    }
+  })
+
+  it('rejects stale and concurrent saves instead of silently overwriting newer content', async () => {
+    const projectId = sanitizePath(path.join(tmpDir, 'workspace', 'app'))
+    const memoryDir = path.join(tmpDir, 'projects', projectId, 'memory')
+    const filePath = path.join(memoryDir, 'MEMORY.md')
+    await fs.mkdir(memoryDir, { recursive: true })
+    await fs.writeFile(filePath, '# Original\n')
+    const original = await fs.stat(filePath)
+    const expected = {
+      expectedUpdatedAt: original.mtime.toISOString(),
+      expectedBytes: original.size,
+    }
+
+    const [first, second] = await Promise.all([
+      request('PUT', '/api/memory/file', {
+        projectId,
+        path: 'MEMORY.md',
+        content: '# First writer\n',
+        ...expected,
+      }),
+      request('PUT', '/api/memory/file', {
+        projectId,
+        path: 'MEMORY.md',
+        content: '# Second writer\n',
+        ...expected,
+      }),
+    ])
+
+    expect([first.status, second.status].sort()).toEqual([200, 409])
+    const savedContent = await fs.readFile(filePath, 'utf-8')
+    expect(['# First writer\n', '# Second writer\n']).toContain(savedContent)
+
+    const stale = await request('PUT', '/api/memory/file', {
+      projectId,
+      path: 'MEMORY.md',
+      content: '# Stale overwrite\n',
+      ...expected,
+    })
+    expect(stale.status).toBe(409)
+    expect(await fs.readFile(filePath, 'utf-8')).toBe(savedContent)
+  })
+
+  it('keeps the old file intact when an atomic replacement cannot be created', async () => {
+    if (process.platform === 'win32') return
+
+    const projectId = sanitizePath(path.join(tmpDir, 'workspace', 'app'))
+    const memoryDir = path.join(tmpDir, 'projects', projectId, 'memory')
+    const filePath = path.join(memoryDir, 'MEMORY.md')
+    await fs.mkdir(memoryDir, { recursive: true })
+    await fs.writeFile(filePath, '# Original\n')
+    await fs.chmod(filePath, 0o600)
+    await fs.chmod(memoryDir, 0o500)
+    const consoleError = spyOn(console, 'error').mockImplementation(() => undefined)
+
+    try {
+      const response = await request('PUT', '/api/memory/file', {
+        projectId,
+        path: 'MEMORY.md',
+        content: '# Replacement\n',
+      })
+      expect(response.status).toBe(500)
+      expect(await fs.readFile(filePath, 'utf-8')).toBe('# Original\n')
+    } finally {
+      consoleError.mockRestore()
+      await fs.chmod(memoryDir, 0o700)
+    }
+  })
+
+  it('enforces the editable file size boundary for writes and reads', async () => {
+    const projectId = sanitizePath(path.join(tmpDir, 'workspace', 'app'))
+    const memoryDir = path.join(tmpDir, 'projects', projectId, 'memory')
+    await fs.mkdir(memoryDir, { recursive: true })
+
+    const exact = 'a'.repeat(512 * 1024)
+    const exactResponse = await request('PUT', '/api/memory/file', {
+      projectId,
+      path: 'exact.md',
+      content: exact,
+    })
+    expect(exactResponse.status).toBe(200)
+
+    const oversizedResponse = await request('PUT', '/api/memory/file', {
+      projectId,
+      path: 'oversized.md',
+      content: `${exact}a`,
+    })
+    expect(oversizedResponse.status).toBe(400)
+
+    await fs.writeFile(path.join(memoryDir, 'external.md'), `${exact}a`)
+    const readResponse = await request(
+      'GET',
+      `/api/memory/file?projectId=${encodeURIComponent(projectId)}&path=external.md`,
+    )
+    expect(readResponse.status).toBe(400)
+  })
+
   it.skipIf(process.platform === 'win32')('rejects traversal and symlink escapes', async () => {
     const projectId = sanitizePath(path.join(tmpDir, 'workspace', 'app'))
     const memoryDir = path.join(tmpDir, 'projects', projectId, 'memory')
@@ -186,10 +299,10 @@ describe('memory API', () => {
   })
 })
 
-function request(method: string, pathname: string, body?: Record<string, unknown>): Promise<Response> {
+function request(method: string, pathname: string, body?: unknown): Promise<Response> {
   const url = new URL(pathname, 'http://localhost:3456')
   const init: RequestInit = { method }
-  if (body) {
+  if (body !== undefined) {
     init.headers = { 'Content-Type': 'application/json' }
     init.body = JSON.stringify(body)
   }

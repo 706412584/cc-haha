@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import type { Database } from 'bun:sqlite'
 import type { LocalIndexWriteOperation } from './database.js'
+import { LOCAL_INDEX_SCHEMA_VERSION } from './migrations.js'
 
 type EnvironmentName = 'HOME' | 'CLAUDE_CONFIG_DIR' | 'CC_HAHA_LOCAL_INDEX'
 
@@ -172,6 +173,132 @@ function seedFrozenV2(database: Database): void {
   `)
 }
 
+// A frozen snapshot of the v3 activity schema, kept verbatim so later migrations are exercised
+// against the shape real databases were left in rather than against today's CREATE TABLE.
+function seedFrozenV3(database: Database): void {
+  seedFrozenV2(database)
+  database.exec(`
+    CREATE TABLE activity_sources (
+      path TEXT PRIMARY KEY,
+      parent_session_id TEXT NOT NULL,
+      project_path TEXT NOT NULL,
+      is_subagent INTEGER NOT NULL CHECK (is_subagent IN (0, 1)),
+      size_bytes INTEGER NOT NULL,
+      mtime_ms INTEGER NOT NULL,
+      file_identity TEXT,
+      prefix_hash TEXT NOT NULL,
+      indexed_bytes INTEGER NOT NULL DEFAULT 0,
+      parser_version INTEGER NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('ready', 'pending', 'degraded')),
+      last_error_code TEXT,
+      updated_at_ms INTEGER NOT NULL
+    );
+    CREATE TABLE activity_sessions (
+      transcript_path TEXT PRIMARY KEY REFERENCES activity_sources(path) ON DELETE CASCADE,
+      session_id TEXT NOT NULL,
+      first_timestamp TEXT,
+      last_timestamp TEXT,
+      duration_ms INTEGER NOT NULL DEFAULT 0,
+      message_count INTEGER NOT NULL DEFAULT 0,
+      start_hour INTEGER,
+      speculation_time_saved_ms INTEGER NOT NULL DEFAULT 0,
+      shot_count INTEGER
+    );
+    CREATE TABLE activity_daily (
+      transcript_path TEXT NOT NULL REFERENCES activity_sources(path) ON DELETE CASCADE,
+      date TEXT NOT NULL,
+      message_count INTEGER NOT NULL DEFAULT 0,
+      tool_call_count INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (transcript_path, date)
+    );
+    CREATE TABLE activity_daily_models (
+      transcript_path TEXT NOT NULL REFERENCES activity_sources(path) ON DELETE CASCADE,
+      date TEXT NOT NULL,
+      model TEXT NOT NULL,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+      web_search_requests INTEGER NOT NULL DEFAULT 0,
+      cost_usd REAL NOT NULL DEFAULT 0,
+      context_window INTEGER NOT NULL DEFAULT 0,
+      max_output_tokens INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (transcript_path, date, model)
+    );
+    CREATE TABLE activity_daily_tools (
+      transcript_path TEXT NOT NULL REFERENCES activity_sources(path) ON DELETE CASCADE,
+      date TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      call_count INTEGER NOT NULL,
+      PRIMARY KEY (transcript_path, date, tool_name)
+    );
+    CREATE TABLE activity_daily_skills (
+      transcript_path TEXT NOT NULL REFERENCES activity_sources(path) ON DELETE CASCADE,
+      date TEXT NOT NULL,
+      skill_name TEXT NOT NULL,
+      call_count INTEGER NOT NULL,
+      PRIMARY KEY (transcript_path, date, skill_name)
+    );
+    CREATE TABLE activity_backfill_state (
+      scope TEXT PRIMARY KEY,
+      state TEXT NOT NULL,
+      watermark TEXT,
+      discovered INTEGER NOT NULL DEFAULT 0,
+      indexed INTEGER NOT NULL DEFAULT 0,
+      degraded INTEGER NOT NULL DEFAULT 0,
+      last_error_code TEXT,
+      updated_at_ms INTEGER NOT NULL
+    );
+    CREATE INDEX activity_daily_date_idx
+      ON activity_daily(date, transcript_path);
+    CREATE INDEX activity_models_date_idx
+      ON activity_daily_models(date, model, transcript_path);
+    CREATE INDEX activity_tools_date_idx
+      ON activity_daily_tools(date, tool_name, transcript_path);
+    CREATE INDEX activity_skills_date_idx
+      ON activity_daily_skills(date, skill_name, transcript_path);
+    CREATE INDEX activity_sources_parent_idx
+      ON activity_sources(parent_session_id, path);
+    INSERT INTO activity_sources (
+      path, parent_session_id, project_path, is_subagent, size_bytes, mtime_ms,
+      file_identity, prefix_hash, indexed_bytes, parser_version, state,
+      last_error_code, updated_at_ms
+    ) VALUES (
+      '/fixture/activity.jsonl', 'fixture-session', '-repo', 0, 512, 1750000000000,
+      '1:2', 'fixture-hash', 512, 2, 'ready', NULL, 1750000000000
+    );
+    INSERT INTO activity_sessions (
+      transcript_path, session_id, first_timestamp, last_timestamp,
+      duration_ms, message_count, start_hour, speculation_time_saved_ms, shot_count
+    ) VALUES (
+      '/fixture/activity.jsonl', 'fixture-session', '2026-07-01T00:00:00.000Z',
+      '2026-07-19T00:00:00.000Z', 1571040000, 17, 9, 0, NULL
+    );
+    PRAGMA user_version = 3;
+  `)
+}
+
+function seedFrozenV4(database: Database): void {
+  seedFrozenV3(database)
+  database.exec(`
+    ALTER TABLE sessions ADD COLUMN thinking_enabled INTEGER
+      CHECK (thinking_enabled IS NULL OR thinking_enabled IN (0, 1));
+    UPDATE sessions SET thinking_enabled = 1
+      WHERE transcript_path = '/fixture/session.jsonl';
+    PRAGMA user_version = 4;
+  `)
+}
+
+function seedUpstreamFrozenV4(database: Database): void {
+  seedFrozenV3(database)
+  database.exec(`
+    ALTER TABLE activity_sessions ADD COLUMN active_duration_ms INTEGER NOT NULL DEFAULT 0;
+    UPDATE activity_sessions SET active_duration_ms = 12345
+      WHERE transcript_path = '/fixture/activity.jsonl';
+    PRAGMA user_version = 4;
+  `)
+}
+
 async function transcriptHashes(paths: string[]): Promise<Record<string, string>> {
   return Object.fromEntries(await Promise.all(paths.map(async path => [
     path,
@@ -308,7 +435,7 @@ describe('local index database', () => {
     }
   })
 
-  it('applies ordered v0 to v4 migrations and reopens v4 idempotently', async () => {
+  it('applies ordered v0 to current migrations and reopens idempotently', async () => {
     const databasePath = join(process.env.CLAUDE_CONFIG_DIR!, 'index.sqlite')
     const { openLocalIndexDatabase } = await loadDatabase()
     const first = openLocalIndexDatabase({ path: databasePath })
@@ -316,7 +443,7 @@ describe('local index database', () => {
     expect(first.read(operation =>
       operation.get<{ user_version: number }>('PRAGMA user_version')
         ?.user_version,
-    )).toBe(4)
+    )).toBe(LOCAL_INDEX_SCHEMA_VERSION)
     expect(first.read(operation =>
       operation.all<{ name: string }>(
         "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
@@ -395,13 +522,13 @@ describe('local index database', () => {
       expect(second.read(operation =>
         operation.get<{ user_version: number }>('PRAGMA user_version')
           ?.user_version,
-      )).toBe(4)
+      )).toBe(LOCAL_INDEX_SCHEMA_VERSION)
     } finally {
       second.close()
     }
   })
 
-  it('upgrades a frozen real v1 database to v4 without replaying v1 or losing rows', async () => {
+  it('upgrades a frozen real v1 database to current without replaying v1 or losing rows', async () => {
     const databasePath = join(process.env.CLAUDE_CONFIG_DIR!, 'frozen-v1.sqlite')
     await mkdir(dirname(databasePath), { recursive: true })
     const seed = await openRawDatabase(databasePath)
@@ -413,7 +540,7 @@ describe('local index database', () => {
     try {
       expect(upgraded.read(operation => operation.get<{ user_version: number }>(
         'PRAGMA user_version',
-      )?.user_version)).toBe(4)
+      )?.user_version)).toBe(LOCAL_INDEX_SCHEMA_VERSION)
       expect(upgraded.read(operation => operation.get<{ value: string }>(
         "SELECT value FROM schema_meta WHERE key = 'fixture'",
       )?.value)).toBe('v1-preserved')
@@ -440,7 +567,7 @@ describe('local index database', () => {
     }
   })
 
-  it('upgrades a frozen real v2 database to v4 without losing session or locator rows', async () => {
+  it('upgrades a frozen real v2 database to current without losing session or locator rows', async () => {
     const databasePath = join(process.env.CLAUDE_CONFIG_DIR!, 'frozen-v2.sqlite')
     await mkdir(dirname(databasePath), { recursive: true })
     const seed = await openRawDatabase(databasePath)
@@ -452,7 +579,7 @@ describe('local index database', () => {
     try {
       expect(upgraded.read(operation => operation.get<{ user_version: number }>(
         'PRAGMA user_version',
-      )?.user_version)).toBe(4)
+      )?.user_version)).toBe(LOCAL_INDEX_SCHEMA_VERSION)
       expect(upgraded.read(operation => operation.get<{ title: string }>(
         "SELECT title FROM sessions WHERE transcript_path = '/fixture/session.jsonl'",
       )?.title)).toBe('Frozen v1')
@@ -478,7 +605,91 @@ describe('local index database', () => {
     }
   })
 
-  it('rolls back an interrupted v2 to v4 migration without changing v2 data', async () => {
+  it('upgrades a frozen real v3 database to current, keeping activity rows', async () => {
+    const databasePath = join(process.env.CLAUDE_CONFIG_DIR!, 'frozen-v3.sqlite')
+    await mkdir(dirname(databasePath), { recursive: true })
+    const seed = await openRawDatabase(databasePath)
+    seedFrozenV3(seed)
+    seed.close(true)
+    const { openLocalIndexDatabase } = await loadDatabase()
+
+    const upgraded = openLocalIndexDatabase({ path: databasePath })
+    try {
+      expect(upgraded.read(operation => operation.get<{ user_version: number }>(
+        'PRAGMA user_version',
+      )?.user_version)).toBe(LOCAL_INDEX_SCHEMA_VERSION)
+      expect(upgraded.read(operation => operation.all<{ name: string }>(
+        'PRAGMA table_info(activity_sessions)',
+      ).map(row => row.name))).toContain('active_duration_ms')
+      const session = upgraded.read(operation => operation.get<{
+        duration_ms: number
+        active_duration_ms: number
+        message_count: number
+      }>(
+        `SELECT duration_ms, active_duration_ms, message_count FROM activity_sessions
+         WHERE transcript_path = '/fixture/activity.jsonl'`,
+      ))
+      // Pre-existing rows survive with the calendar span they were written with; the new column
+      // backfills to 0 and is refilled once the bumped parser version rebuilds the source.
+      expect(session?.duration_ms).toBe(1571040000)
+      expect(session?.message_count).toBe(17)
+      expect(session?.active_duration_ms).toBe(0)
+    } finally {
+      upgraded.close()
+    }
+  })
+
+  it('upgrades a frozen real v4 database to current without losing thinking state', async () => {
+    const databasePath = join(process.env.CLAUDE_CONFIG_DIR!, 'frozen-v4.sqlite')
+    await mkdir(dirname(databasePath), { recursive: true })
+    const seed = await openRawDatabase(databasePath)
+    seedFrozenV4(seed)
+    seed.close(true)
+    const { openLocalIndexDatabase } = await loadDatabase()
+
+    const upgraded = openLocalIndexDatabase({ path: databasePath })
+    try {
+      expect(upgraded.read(operation => operation.get<{ user_version: number }>(
+        'PRAGMA user_version',
+      )?.user_version)).toBe(LOCAL_INDEX_SCHEMA_VERSION)
+      expect(upgraded.read(operation => operation.get<{ thinking_enabled: number }>(
+        `SELECT thinking_enabled FROM sessions
+         WHERE transcript_path = '/fixture/session.jsonl'`,
+      )?.thinking_enabled)).toBe(1)
+      expect(upgraded.read(operation => operation.all<{ name: string }>(
+        'PRAGMA table_info(activity_sessions)',
+      ).map(row => row.name))).toContain('active_duration_ms')
+    } finally {
+      upgraded.close()
+    }
+  })
+
+  it('repairs an upstream v4 database while preserving active duration', async () => {
+    const databasePath = join(process.env.CLAUDE_CONFIG_DIR!, 'upstream-frozen-v4.sqlite')
+    await mkdir(dirname(databasePath), { recursive: true })
+    const seed = await openRawDatabase(databasePath)
+    seedUpstreamFrozenV4(seed)
+    seed.close(true)
+    const { openLocalIndexDatabase } = await loadDatabase()
+
+    const upgraded = openLocalIndexDatabase({ path: databasePath })
+    try {
+      expect(upgraded.read(operation => operation.get<{ user_version: number }>(
+        'PRAGMA user_version',
+      )?.user_version)).toBe(LOCAL_INDEX_SCHEMA_VERSION)
+      expect(upgraded.read(operation => operation.all<{ name: string }>(
+        'PRAGMA table_info(sessions)',
+      ).map(row => row.name))).toContain('thinking_enabled')
+      expect(upgraded.read(operation => operation.get<{ active_duration_ms: number }>(
+        `SELECT active_duration_ms FROM activity_sessions
+         WHERE transcript_path = '/fixture/activity.jsonl'`,
+      )?.active_duration_ms)).toBe(12345)
+    } finally {
+      upgraded.close()
+    }
+  })
+
+  it('rolls back an interrupted v2 to v3 migration without changing v2 data', async () => {
     const databasePath = join(process.env.CLAUDE_CONFIG_DIR!, 'blocked-v3.sqlite')
     await mkdir(dirname(databasePath), { recursive: true })
     const seed = await openRawDatabase(databasePath)
@@ -953,7 +1164,7 @@ describe('local index database', () => {
     await mkdir(dirname(databasePath), { recursive: true })
     const seed = await openRawDatabase(databasePath)
     seed.exec('CREATE TABLE future_schema_sentinel (value TEXT)')
-    seed.exec('PRAGMA user_version = 5')
+    seed.exec(`PRAGMA user_version = ${LOCAL_INDEX_SCHEMA_VERSION + 1}`)
     const journalModeBefore = queryOne<{ journal_mode: string }>(
       seed,
       'PRAGMA journal_mode',
@@ -975,7 +1186,7 @@ describe('local index database', () => {
     const inspection = await openRawDatabase(databasePath)
     try {
       expect(queryOne<{ user_version: number }>(inspection, 'PRAGMA user_version')
-        ?.user_version).toBe(5)
+        ?.user_version).toBe(LOCAL_INDEX_SCHEMA_VERSION + 1)
       expect(queryAll<{ name: string }>(
         inspection,
         "SELECT name FROM sqlite_master WHERE type = 'table'",

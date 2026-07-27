@@ -955,9 +955,10 @@ describe('local index file benchmark', () => {
         }
         loopbackAuth: {
           measured: boolean
-          missingTokenStatus: number
-          wrongTokenStatus: number
-          correctTokenStatus: number
+          loopbackWithoutTokenStatus: number
+          controlPlaneMissingTokenStatus: number
+          controlPlaneWrongTokenStatus: number
+          controlPlaneCorrectTokenStatus: number
         }
       }
       validation: {
@@ -1000,9 +1001,10 @@ describe('local index file benchmark', () => {
         peakRss: { measured: true },
         loopbackAuth: {
           measured: true,
-          missingTokenStatus: 403,
-          wrongTokenStatus: 403,
-          correctTokenStatus: 200,
+          loopbackWithoutTokenStatus: 200,
+          controlPlaneMissingTokenStatus: 403,
+          controlPlaneWrongTokenStatus: 403,
+          controlPlaneCorrectTokenStatus: 200,
         },
       },
       validation: {

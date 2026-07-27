@@ -200,6 +200,66 @@ describe('uninstallMarketSkill', () => {
     expect(await fs.stat(manual).catch(() => null)).not.toBeNull()
   })
 
+  it('refuses malformed or mismatched market markers and preserves the directory', async () => {
+    const target = path.join(tmpHome, '.claude', 'skills', 'demo')
+    const markers = [
+      {},
+      {
+        id: 'clawhub:other',
+        source: 'clawhub',
+        slug: 'other',
+        installedAt: new Date().toISOString(),
+        fileCount: 1,
+      },
+      {
+        id: 'skillhub:demo',
+        source: 'skillhub',
+        slug: 'demo',
+        installedAt: new Date().toISOString(),
+        fileCount: 1,
+      },
+      {
+        id: 'clawhub:demo',
+        source: 'clawhub',
+        slug: 'demo',
+        installedAt: new Date().toISOString(),
+        fileCount: -1,
+      },
+    ]
+
+    for (const marker of markers) {
+      await fs.mkdir(target, { recursive: true })
+      await fs.writeFile(path.join(target, 'SKILL.md'), SKILL_MD)
+      await fs.writeFile(path.join(target, '.market-meta.json'), JSON.stringify(marker))
+
+      const error = await uninstallMarketSkill('clawhub', 'demo').catch((caught) => caught)
+
+      expect(error).toBeInstanceOf(ApiError)
+      expect((error as ApiError).code).toBe('MARKET_NOT_MANAGED')
+      expect(await fs.stat(target).catch(() => null)).not.toBeNull()
+      await fs.rm(target, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses to follow a skill-directory symlink during uninstall', async () => {
+    const victim = path.join(tmpHome, 'victim')
+    const target = path.join(tmpHome, '.claude', 'skills', 'demo')
+    await fs.mkdir(victim, { recursive: true })
+    await fs.mkdir(path.dirname(target), { recursive: true })
+    await fs.writeFile(path.join(victim, 'SKILL.md'), SKILL_MD)
+    await fs.symlink(
+      victim,
+      target,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    )
+
+    const error = await uninstallMarketSkill('clawhub', 'demo').catch((caught) => caught)
+
+    expect(error).toBeInstanceOf(ApiError)
+    expect((error as ApiError).code).toBe('MARKET_NOT_MANAGED')
+    expect(await fs.stat(victim).catch(() => null)).not.toBeNull()
+  })
+
   it('404s for a skill that is not installed', async () => {
     try {
       await uninstallMarketSkill('clawhub', 'ghost')

@@ -5,6 +5,7 @@
 // 到 haha server 后,store 的 polling 自动刷新 UI 展示"已登录"。
 
 import { useEffect } from 'react'
+import { Button } from '@/components/ui/Button'
 import { useHahaOAuthStore } from '../../stores/hahaOAuthStore'
 import { useTranslation } from '../../i18n'
 import { getDesktopHost } from '../../lib/desktopHost'
@@ -68,16 +69,11 @@ export function ClaudeOfficialLogin() {
         <span className="text-[var(--color-success)]">
           ✓ {t('settings.claudeOfficialLogin.loggedInPrefix')} {subTypeLabel})
         </span>
-        <button
-          type="button"
-          onClick={logout}
-          disabled={isLoading}
-          className="px-3 py-1 text-xs rounded-md border border-[var(--color-border-separator)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] disabled:opacity-50 transition-colors"
-        >
+        <Button variant="secondary" size="sm" onClick={logout} disabled={isLoading}>
           {isLoading
             ? t('settings.claudeOfficialLogin.logoutProcessing')
             : t('settings.claudeOfficialLogin.logoutButton')}
-        </button>
+        </Button>
       </div>
     )
   }
@@ -87,16 +83,11 @@ export function ClaudeOfficialLogin() {
       <div className="text-sm text-[var(--color-text-secondary)]">
         {t('settings.claudeOfficialLogin.intro')}
       </div>
-      <button
-        type="button"
-        onClick={handleLogin}
-        disabled={isLoading}
-        className="self-start rounded-md bg-[image:var(--gradient-btn-primary)] px-4 py-2 text-sm text-[var(--color-btn-primary-fg)] shadow-[var(--shadow-button-primary)] hover:brightness-105 disabled:opacity-50 transition-opacity"
-      >
+      <Button onClick={handleLogin} disabled={isLoading} className="self-start">
         {isLoading
           ? t('settings.claudeOfficialLogin.loginStarting')
           : t('settings.claudeOfficialLogin.loginButton')}
-      </button>
+      </Button>
       {error && (
         <div className="text-xs text-[var(--color-error)]">
           {t('settings.claudeOfficialLogin.errorPrefix')}{error}

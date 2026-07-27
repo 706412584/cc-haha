@@ -273,6 +273,115 @@ describe('chatStore tool settlement', () => {
   })
 })
 
+// #1108: a background (async) agent's tool activity bubbles into the main
+// message stream carrying parentToolUseId, but MessageList folds those into
+// the agent card instead of rendering them inline. Merging streamed blocks
+// against the raw array tail therefore chopped one continuous thinking block
+// (or reply) into several, with nothing visible in between.
+describe('chatStore background agent activity interleaving', () => {
+  beforeEach(() => {
+    useChatStore.setState({
+      ...initialState,
+      sessions: { [TEST_SESSION_ID]: makeSession() },
+    })
+  })
+
+  function startBackgroundAgent(store: ReturnType<typeof useChatStore.getState>) {
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'tool_use_complete',
+      toolName: 'Task',
+      toolUseId: 'agent-1',
+      input: { description: 'Explore project', run_in_background: true },
+    })
+  }
+
+  function emitChildToolActivity(store: ReturnType<typeof useChatStore.getState>, id: string) {
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'tool_use_complete',
+      toolName: 'Grep',
+      toolUseId: id,
+      input: { pattern: 'needle' },
+      parentToolUseId: 'agent-1',
+    })
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'tool_result',
+      toolUseId: id,
+      content: 'match',
+      isError: false,
+      parentToolUseId: 'agent-1',
+    })
+  }
+
+  it('keeps one thinking block while a background agent streams tool activity', () => {
+    const store = useChatStore.getState()
+    startBackgroundAgent(store)
+
+    store.handleServerMessage(TEST_SESSION_ID, { type: 'thinking', text: 'The agents ' })
+    emitChildToolActivity(store, 'child-grep-1')
+    store.handleServerMessage(TEST_SESSION_ID, { type: 'thinking', text: 'are still running. ' })
+    emitChildToolActivity(store, 'child-grep-2')
+    store.handleServerMessage(TEST_SESSION_ID, { type: 'thinking', text: 'Let me wait a bit.' })
+
+    const messages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages ?? []
+    const thinking = messages.filter((message) => message.type === 'thinking')
+    expect(thinking).toHaveLength(1)
+    expect(thinking[0]).toMatchObject({
+      content: 'The agents are still running. Let me wait a bit.',
+    })
+  })
+
+  it('keeps one assistant reply while a background agent streams tool activity', () => {
+    const store = useChatStore.getState()
+    startBackgroundAgent(store)
+
+    store.handleServerMessage(TEST_SESSION_ID, { type: 'content_start', blockType: 'text' })
+    store.handleServerMessage(TEST_SESSION_ID, { type: 'content_delta', text: 'First half. ' })
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'message_complete',
+      usage: { input_tokens: 1, output_tokens: 1 },
+    })
+    emitChildToolActivity(store, 'child-grep-3')
+    store.handleServerMessage(TEST_SESSION_ID, { type: 'content_start', blockType: 'text' })
+    store.handleServerMessage(TEST_SESSION_ID, { type: 'content_delta', text: 'Second half.' })
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'message_complete',
+      usage: { input_tokens: 1, output_tokens: 1 },
+    })
+
+    const messages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages ?? []
+    const assistantText = messages.filter((message) => message.type === 'assistant_text')
+    expect(assistantText).toHaveLength(1)
+    expect(assistantText[0]).toMatchObject({ content: 'First half. Second half.' })
+  })
+
+  it('still starts a new thinking block after the main agent runs its own tool', () => {
+    const store = useChatStore.getState()
+
+    store.handleServerMessage(TEST_SESSION_ID, { type: 'thinking', text: 'Before the tool.' })
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'tool_use_complete',
+      toolName: 'Read',
+      toolUseId: 'read-1',
+      input: { file_path: '/a.md' },
+    })
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'tool_result',
+      toolUseId: 'read-1',
+      content: 'contents',
+      isError: false,
+    })
+    store.handleServerMessage(TEST_SESSION_ID, { type: 'thinking', text: 'After the tool.' })
+
+    const messages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages ?? []
+    const thinking = messages.filter((message) => message.type === 'thinking')
+    expect(thinking).toHaveLength(2)
+    expect(thinking.map((message) => message.content)).toEqual([
+      'Before the tool.',
+      'After the tool.',
+    ])
+  })
+})
+
 describe('chatStore history mapping', () => {
   beforeEach(() => {
     sendMock.mockReset()

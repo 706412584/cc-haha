@@ -34,6 +34,9 @@ export type ModelUsage = {
   outputTokens?: number
   cacheReadInputTokens?: number
   cacheCreationInputTokens?: number
+  webSearchRequests?: number
+  /** Estimated dollars. Always 0 for models listed in `unpricedModels`. */
+  costUSD?: number
 }
 
 export type ActivityStats = {
@@ -46,6 +49,12 @@ export type ActivityStats = {
   dailyModelTokens: DailyModelTokens[]
   longestSession: SessionStats | null
   modelUsage: Record<string, ModelUsage>
+  /**
+   * Models whose tokens count toward the totals but whose dollars don't, because no published
+   * rates exist for them (third-party providers). The cost figure is a floor when this is
+   * non-empty, and the UI has to say so rather than presenting it as the whole bill.
+   */
+  unpricedModels?: string[]
   toolUsage: Record<string, number>
   skillUsage: Record<string, number>
   firstSessionDate: string | null

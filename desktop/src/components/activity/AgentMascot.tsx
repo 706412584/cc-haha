@@ -102,13 +102,13 @@ export function AgentMascot({ seed, status }: { seed: string; status: ActivitySt
       data-agent-mascot-motion={spec.motion}
       data-agent-mascot-tone={spec.tone}
       data-agent-mascot-src={imageSrc}
-      className={`relative inline-flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-xl border bg-[var(--color-surface)] shadow-[0_1px_3px_rgba(15,23,42,0.14),inset_0_1px_0_rgba(255,255,255,0.76)] ${ringClassName(spec.tone)}`}
+      className={`relative inline-flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-[var(--radius-md)] border bg-[var(--color-surface-container)] ${ringClassName(spec.tone)}`}
       aria-hidden="true"
     >
       {isActive ? (
         <span
           data-testid="agent-mascot-motion-ring"
-          className="absolute -inset-0.5 rounded-[14px] border border-transparent border-t-[var(--color-brand)] opacity-80 motion-safe:animate-spin motion-reduce:animate-none"
+          className="absolute -inset-0.5 rounded-[var(--radius-lg)] border border-transparent border-t-[var(--color-brand)] opacity-80 motion-safe:animate-spin motion-reduce:animate-none"
           aria-hidden="true"
         />
       ) : null}

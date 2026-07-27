@@ -1,4 +1,6 @@
 import { useState } from 'react'
+import { StatusDot } from '@/components/ui/Badge'
+import { Progress } from '@/components/ui/Progress'
 import { useTeamStore } from '../../stores/teamStore'
 import { useTranslation } from '../../i18n'
 import type { TeamMember } from '../../types/team'
@@ -45,13 +47,13 @@ export function TeamStatusBar() {
 
   return (
     <div className="shrink-0 px-8">
-      <div className="mx-auto max-w-[860px] rounded-[var(--radius-lg)] border border-[var(--color-outline-variant)]/40 bg-[var(--color-surface-container-lowest)] overflow-hidden mb-2">
+      <div className="mx-auto max-w-[860px] rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-card)] overflow-hidden mb-2">
         {/* Header */}
         <button
           onClick={() => setExpanded((v) => !v)}
-          className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-[var(--color-surface-container-low)] transition-colors bg-[var(--color-surface-container)]"
+          className="w-full flex items-center gap-3 px-4 py-2.5 bg-[var(--color-surface-container)] transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)]"
         >
-          <div className="flex items-center justify-center w-6 h-6 rounded-[var(--radius-md)] bg-[var(--color-brand)]/10">
+          <div className="flex items-center justify-center w-6 h-6 rounded-[var(--radius-md)] bg-[var(--color-brand-soft)]">
             <span className="material-symbols-outlined text-[14px] text-[var(--color-brand)]">groups</span>
           </div>
 
@@ -59,24 +61,23 @@ export function TeamStatusBar() {
             {t('teams.team')} {activeTeam.name}
           </span>
 
-          {/* Progress bar */}
-          <div className="flex-1 h-1.5 rounded-full bg-[var(--color-border)] overflow-hidden max-w-[200px]">
-            <div
-              className="h-full rounded-full transition-all duration-300"
-              style={{
-                width: `${progressPercent}%`,
-                backgroundColor: allDone ? 'var(--color-success)' : 'var(--color-brand)',
-              }}
-            />
-          </div>
+          {/* `tone` stays explicit rather than `auto`: this bar turns green once
+              nothing is running, which is not the same as reaching 100%. */}
+          <Progress
+            label={`${t('teams.team')} ${activeTeam.name}`}
+            value={progressPercent}
+            size="sm"
+            tone={allDone ? 'success' : 'brand'}
+            className="max-w-[200px] flex-1"
+          />
 
-          <span className="text-[10px] text-[var(--color-text-tertiary)] tabular-nums">
+          <span className="font-mono text-[10px] text-[var(--color-text-tertiary)] tabular-nums">
             {completedCount}/{totalCount}
           </span>
 
           {runningCount > 0 && (
             <span className="flex items-center gap-1 text-[10px] text-[var(--color-warning)]">
-              <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-warning)] animate-pulse-dot" />
+              <StatusDot tone="warning" pulse />
               {runningCount} {t('teams.running')}
             </span>
           )}
@@ -91,7 +92,7 @@ export function TeamStatusBar() {
 
         {/* Expanded member list */}
         {expanded && (
-          <div className="px-4 pb-2 pt-1 flex flex-col gap-0.5 max-h-[240px] overflow-y-auto border-t border-[var(--color-outline-variant)]/20">
+          <div className="px-4 pb-2 pt-1 flex flex-col gap-0.5 max-h-[240px] overflow-y-auto border-t border-[var(--color-border-separator)]">
             {members.map((member) => (
               <MemberRow key={member.agentId} member={member} onView={() => openMemberSession(member)} />
             ))}
@@ -108,7 +109,7 @@ function MemberRow({ member, onView }: { member: TeamMember; onView: () => void 
   return (
     <button
       onClick={onView}
-      className="w-full flex items-center gap-2 py-1.5 px-1 rounded-md text-left hover:bg-[var(--color-surface-container-low)] transition-colors group"
+      className="w-full flex items-center gap-2 py-1.5 px-1 rounded-[var(--radius-sm)] text-left transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] group"
     >
       <span
         className={`material-symbols-outlined text-[16px] shrink-0 ${config.pulse ? 'animate-pulse-dot' : ''}`}
@@ -131,7 +132,7 @@ function MemberRow({ member, onView }: { member: TeamMember; onView: () => void 
 
         {member.status === 'running' && member.currentTask && (
           <div className="flex items-center gap-1 mt-0.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-warning)] animate-pulse-dot" />
+            <StatusDot tone="warning" pulse />
             <span className="text-[10px] text-[var(--color-warning)] truncate">
               {member.currentTask}
             </span>

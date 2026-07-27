@@ -626,6 +626,35 @@ describe('coverage gate helpers', () => {
     }
   })
 
+  test('skips changed-line coverage while an upstream merge is still in progress', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'cc-haha-coverage-merge-head-'))
+    const git = (...args: string[]) => {
+      const proc = Bun.spawnSync(['git', ...args], { cwd: repo, stdout: 'pipe', stderr: 'pipe' })
+      if (proc.exitCode !== 0) {
+        throw new Error(`git ${args.join(' ')} failed: ${new TextDecoder().decode(proc.stderr)}`)
+      }
+    }
+    try {
+      git('init', '-b', 'main')
+      git('config', 'user.email', 'test@example.com')
+      git('config', 'user.name', 'Test')
+      writeFileSync(join(repo, 'base.txt'), 'base\n')
+      git('add', '.')
+      git('commit', '-m', 'base')
+
+      git('checkout', '-b', 'upstream')
+      writeFileSync(join(repo, 'upstream.txt'), 'upstream\n')
+      git('add', '.')
+      git('commit', '-m', 'upstream work')
+      git('checkout', 'main')
+      git('merge', '--no-ff', '--no-commit', 'upstream')
+
+      expect(shouldEvaluateChangedLines(repo, 'main')).toBe(false)
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
   test('ignores GitHub pull-request synthetic merge commits for changed-line coverage', () => {
     const repo = mkdtempSync(join(tmpdir(), 'cc-haha-coverage-pr-merge-'))
     const git = (...args: string[]) => {

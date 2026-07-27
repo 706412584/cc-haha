@@ -8,6 +8,7 @@
  */
 
 import * as fs from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import * as path from 'node:path'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
@@ -41,10 +42,14 @@ type MemoryFile = {
 
 const MAX_MEMORY_FILE_BYTES = 512 * 1024
 const MAX_MEMORY_FILES = 500
+const MAX_MEMORY_PROJECT_ID_BYTES = 1024
+const MAX_MEMORY_PATH_BYTES = 4096
+const MAX_MEMORY_PATH_SEGMENT_BYTES = 255
 const PROJECT_LABEL_SESSION_SCAN_LIMIT = 10
 const PROJECT_LABEL_HEAD_BYTES = 64 * 1024
 const PROJECT_LABEL_FS_SEARCH_DEPTH = 24
 const PROJECT_LABEL_FS_SEARCH_NODE_LIMIT = 2000
+const memoryFileWriteQueues = new Map<string, Promise<unknown>>()
 
 export async function handleMemoryApi(
   req: Request,
@@ -216,18 +221,32 @@ async function handleMemoryFile(req: Request, url: URL): Promise<Response> {
     const fullPath = await resolveMemoryFilePath(projectId, relativePath, {
       mustExist: true,
     })
-    const stat = await fs.stat(fullPath)
-    if (stat.size > MAX_MEMORY_FILE_BYTES) {
-      throw ApiError.badRequest(`Memory file is too large to edit: ${relativePath}`)
+    const fileHandle = await fs.open(fullPath, 'r')
+    try {
+      const before = await fileHandle.stat()
+      if (before.size > MAX_MEMORY_FILE_BYTES) {
+        throw ApiError.badRequest(`Memory file is too large to edit: ${relativePath}`)
+      }
+      const content = await fileHandle.readFile({ encoding: 'utf-8' })
+      const after = await fileHandle.stat()
+      if (
+        before.size !== after.size ||
+        before.mtimeMs !== after.mtimeMs ||
+        Buffer.byteLength(content, 'utf-8') > MAX_MEMORY_FILE_BYTES
+      ) {
+        throw ApiError.conflict(`Memory file changed while it was being read: ${relativePath}`)
+      }
+      return Response.json({
+        file: {
+          path: relativePath,
+          content,
+          updatedAt: after.mtime.toISOString(),
+          bytes: after.size,
+        },
+      })
+    } finally {
+      await fileHandle.close()
     }
-    return Response.json({
-      file: {
-        path: relativePath,
-        content: await fs.readFile(fullPath, 'utf-8'),
-        updatedAt: stat.mtime.toISOString(),
-        bytes: stat.size,
-      },
-    })
   }
 
   if (req.method === 'PUT') {
@@ -243,6 +262,20 @@ async function handleMemoryFile(req: Request, url: URL): Promise<Response> {
     if (Buffer.byteLength(content, 'utf-8') > MAX_MEMORY_FILE_BYTES) {
       throw ApiError.badRequest('Memory file content exceeds 512 KB')
     }
+    const expectedUpdatedAt =
+      typeof body.expectedUpdatedAt === 'string' ? body.expectedUpdatedAt : undefined
+    const expectedBytes =
+      typeof body.expectedBytes === 'number' ? body.expectedBytes : undefined
+    if (
+      (body.expectedUpdatedAt !== undefined && expectedUpdatedAt === undefined) ||
+      (body.expectedBytes !== undefined &&
+        (!Number.isSafeInteger(expectedBytes) || (expectedBytes ?? -1) < 0)) ||
+      (expectedUpdatedAt === undefined) !== (expectedBytes === undefined)
+    ) {
+      throw ApiError.badRequest(
+        '"expectedUpdatedAt" and "expectedBytes" must be provided together as a valid file revision',
+      )
+    }
 
     const fullPath = await resolveMemoryFilePath(projectId, relativePath, {
       mustExist: false,
@@ -253,8 +286,25 @@ async function handleMemoryFile(req: Request, url: URL): Promise<Response> {
     if (await fileExists(fullPath)) {
       await assertWithinDirectory(fullPath, memoryDir, true)
     }
-    await fs.writeFile(fullPath, content, { encoding: 'utf-8', mode: 0o600 })
-    const stat = await fs.stat(fullPath)
+    const stat = await enqueueMemoryFileWrite(fullPath, async () => {
+      if (expectedUpdatedAt !== undefined && expectedBytes !== undefined) {
+        let current: import('node:fs').Stats
+        try {
+          current = await fs.stat(fullPath)
+        } catch {
+          throw ApiError.conflict(`Memory file changed before it could be saved: ${relativePath}`)
+        }
+        if (
+          current.mtime.toISOString() !== expectedUpdatedAt ||
+          current.size !== expectedBytes
+        ) {
+          throw ApiError.conflict(`Memory file changed before it could be saved: ${relativePath}`)
+        }
+      }
+
+      await writeFileAtomically(fullPath, content)
+      return fs.stat(fullPath)
+    })
     return Response.json({
       ok: true,
       file: {
@@ -278,11 +328,20 @@ function requireMemoryPath(value: string | null | undefined): string {
   if (!value || typeof value !== 'string') {
     throw ApiError.badRequest('Missing memory file path')
   }
-  const normalized = value.replace(/\\/g, '/').replace(/^\/+/, '')
+  const normalized = value.replace(/\\/g, '/')
+  const parts = normalized.split('/')
   if (
     normalized.length === 0 ||
-    normalized.includes('\0') ||
-    normalized.split('/').some(part => part === '' || part === '.' || part === '..') ||
+    Buffer.byteLength(normalized, 'utf-8') > MAX_MEMORY_PATH_BYTES ||
+    path.posix.isAbsolute(normalized) ||
+    path.win32.isAbsolute(value) ||
+    /[\0-\x1f\x7f]/.test(normalized) ||
+    parts.some(part =>
+      part === '' ||
+      part === '.' ||
+      part === '..' ||
+      Buffer.byteLength(part, 'utf-8') > MAX_MEMORY_PATH_SEGMENT_BYTES
+    ) ||
     !normalized.endsWith('.md')
   ) {
     throw ApiError.badRequest('Memory path must be a relative .md file path')
@@ -356,7 +415,8 @@ async function safeRealpath(targetPath: string): Promise<string> {
 function isValidProjectId(projectId: string): boolean {
   return (
     projectId.length > 0 &&
-    !projectId.includes('\0') &&
+    Buffer.byteLength(projectId, 'utf-8') <= MAX_MEMORY_PROJECT_ID_BYTES &&
+    !/[\0-\x1f\x7f]/.test(projectId) &&
     !projectId.includes('/') &&
     !projectId.includes('\\') &&
     projectId !== '.' &&
@@ -541,9 +601,59 @@ async function countMarkdownFiles(dir: string): Promise<number> {
 
 async function parseJsonBody(req: Request): Promise<Record<string, unknown>> {
   try {
-    return (await req.json()) as Record<string, unknown>
-  } catch {
+    const body = await req.json()
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      throw ApiError.badRequest('JSON body must be an object')
+    }
+    const allowedFields = new Set([
+      'projectId',
+      'path',
+      'content',
+      'expectedUpdatedAt',
+      'expectedBytes',
+    ])
+    if (Object.keys(body).some(key => !allowedFields.has(key))) {
+      throw ApiError.badRequest('JSON body contains unsupported fields')
+    }
+    return body as Record<string, unknown>
+  } catch (error) {
+    if (error instanceof ApiError) throw error
     throw ApiError.badRequest('Invalid JSON body')
+  }
+}
+
+async function enqueueMemoryFileWrite<T>(
+  filePath: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const previous = memoryFileWriteQueues.get(filePath) ?? Promise.resolve()
+  const current = previous.catch(() => undefined).then(operation)
+  memoryFileWriteQueues.set(filePath, current)
+  try {
+    return await current
+  } finally {
+    if (memoryFileWriteQueues.get(filePath) === current) {
+      memoryFileWriteQueues.delete(filePath)
+    }
+  }
+}
+
+async function writeFileAtomically(filePath: string, content: string): Promise<void> {
+  const tempPath = path.join(
+    path.dirname(filePath),
+    `.${path.basename(filePath)}.${process.pid}.${randomUUID()}.tmp`,
+  )
+  let handle: fs.FileHandle | undefined
+  try {
+    handle = await fs.open(tempPath, 'wx', 0o600)
+    await handle.writeFile(content, { encoding: 'utf-8' })
+    await handle.sync()
+    await handle.close()
+    handle = undefined
+    await fs.rename(tempPath, filePath)
+  } finally {
+    await handle?.close().catch(() => undefined)
+    await fs.unlink(tempPath).catch(() => undefined)
   }
 }
 

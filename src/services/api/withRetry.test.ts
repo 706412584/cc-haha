@@ -6,7 +6,9 @@ import {
   CannotRetryError,
   getMaxStreamTransientRetries,
   isRetryableStreamError,
+  isRetryableStreamTransportError,
   RetriableStreamError,
+  shouldRetryStreamAfterTransportDisconnect,
   withRetry,
 } from './withRetry.js'
 
@@ -378,6 +380,118 @@ describe('isRetryableStreamError', () => {
       },
     })
     expect(isRetryableStreamError(err)).toBe(false)
+  })
+})
+
+describe('isRetryableStreamTransportError', () => {
+  /**
+   * The exact object Bun's fetch throws when the peer resets a connection whose
+   * response body is still being read. Captured from a raw TCP server that sent
+   * chunked SSE headers plus one event, then terminated the socket.
+   */
+  function bunMidStreamReset(): Error {
+    return Object.assign(
+      new Error(
+        'The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()',
+      ),
+      { code: 'ECONNRESET' },
+    )
+  }
+
+  test("matches Bun's bare mid-stream socket reset", () => {
+    expect(isRetryableStreamTransportError(bunMidStreamReset())).toBe(true)
+  })
+
+  test('matches every transport code, wherever it sits in the cause chain', () => {
+    for (const code of [
+      'ECONNRESET',
+      'ECONNABORTED',
+      'EPIPE',
+      'UND_ERR_SOCKET',
+      'ERR_STREAM_PREMATURE_CLOSE',
+    ]) {
+      const cause = Object.assign(new Error('socket hang up'), { code })
+      expect(isRetryableStreamTransportError(cause)).toBe(true)
+      expect(
+        isRetryableStreamTransportError(
+          new APIConnectionError({ message: 'Connection error.', cause }),
+        ),
+      ).toBe(true)
+    }
+  })
+
+  test('does not match faults a re-send cannot clear', () => {
+    expect(isRetryableStreamTransportError(new Error('boom'))).toBe(false)
+    expect(isRetryableStreamTransportError(undefined)).toBe(false)
+    expect(
+      isRetryableStreamTransportError(
+        Object.assign(new Error('bad certificate'), {
+          code: 'CERT_HAS_EXPIRED',
+        }),
+      ),
+    ).toBe(false)
+    expect(
+      isRetryableStreamTransportError(
+        new APIError(
+          500,
+          { error: { type: 'internal', message: 'x' } },
+          'Internal Server Error',
+          undefined,
+        ),
+      ),
+    ).toBe(false)
+  })
+})
+
+describe('shouldRetryStreamAfterTransportDisconnect', () => {
+  const disconnect = Object.assign(new Error('socket closed'), {
+    code: 'ECONNRESET',
+  })
+  const clean = {
+    error: disconnect,
+    hasCrossedSideEffectBoundary: false,
+    streamIdleAborted: false,
+    signalAborted: false,
+  }
+
+  test('recovers a disconnect while the attempt is still side-effect-free', () => {
+    expect(shouldRetryStreamAfterTransportDisconnect(clean)).toBe(true)
+  })
+
+  test('refuses once a tool block completed — a re-send would run it twice', () => {
+    expect(
+      shouldRetryStreamAfterTransportDisconnect({
+        ...clean,
+        hasCrossedSideEffectBoundary: true,
+      }),
+    ).toBe(false)
+  })
+
+  test('leaves watchdog aborts to their own retry path', () => {
+    expect(
+      shouldRetryStreamAfterTransportDisconnect({
+        ...clean,
+        streamIdleAborted: true,
+      }),
+    ).toBe(false)
+  })
+
+  test('never fights a user abort', () => {
+    expect(
+      shouldRetryStreamAfterTransportDisconnect({
+        ...clean,
+        signalAborted: true,
+      }),
+    ).toBe(false)
+  })
+
+  test('ignores non-transport stream errors', () => {
+    expect(
+      shouldRetryStreamAfterTransportDisconnect({
+        ...clean,
+        error: new Error('Stream ended without receiving any events'),
+      }),
+    ).toBe(false)
   })
 })
 

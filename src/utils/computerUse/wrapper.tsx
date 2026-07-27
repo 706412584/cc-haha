@@ -27,7 +27,10 @@ import { registerEscHotkey } from './escHotkey.js';
 import { getChicagoCoordinateMode } from './gates.js';
 import { getComputerUseHostAdapter } from './hostAdapter.js';
 import { getComputerUseMCPRenderingOverrides } from './toolRendering.js';
-import { loadStoredComputerUseConfig } from './preauthorizedConfig.js';
+import {
+  buildPreAuthorizedAppGrants,
+  loadStoredComputerUseConfig,
+} from './preauthorizedConfig.js';
 type CallOverride = Pick<Tool, 'call'>['call'];
 type Binding = {
   ctx: ComputerUseSessionContext;
@@ -272,12 +275,7 @@ async function loadPreAuthorizedApps(): Promise<void> {
   }
 
   const resolved = await loadStoredComputerUseConfig()
-  const apps = resolved.authorizedApps.map(a => ({
-    bundleId: a.bundleId,
-    displayName: a.displayName,
-    grantedAt: Date.now(),
-    tier: 'full' as const,
-  }))
+  const apps = buildPreAuthorizedAppGrants(resolved.authorizedApps)
   const flags = {
     ...DEFAULT_GRANT_FLAGS,
     ...resolved.grantFlags,

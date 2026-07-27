@@ -460,6 +460,16 @@ export const SettingsSchema = lazySchema(() =>
         .boolean()
         .optional()
         .describe('Disable all hooks and statusLine execution'),
+      // Opt out of the cross-client `.agents/skills` convention (agentskills.io),
+      // which is scanned alongside `.claude/skills` by default.
+      disableAgentSkillsDirectory: z
+        .boolean()
+        .optional()
+        .describe(
+          'Stop discovering skills from `.agents/skills` directories (the cross-client ' +
+            'Agent Skills convention shared with Codex, Cursor, and Gemini CLI). ' +
+            '`.claude/skills` is unaffected.',
+        ),
       // Which shell backs input-box `!` (see docs/design/ps-shell-selection.md §4.2)
       defaultShell: z
         .enum(['bash', 'powershell'])

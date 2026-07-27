@@ -91,13 +91,16 @@ function addScopeToServers(
 }
 
 /**
- * Internal utility: Write MCP config to .mcp.json file.
+ * Internal utility: Write MCP config to a .mcp.json file.
  * Preserves file permissions and flushes to disk before rename.
  * Uses the original path for rename (does not follow symlinks).
+ * Defaults to the cwd's .mcp.json; project-scoped servers inherited from a
+ * parent directory are written back to the file that declares them.
  */
-async function writeMcpjsonFile(config: McpJsonConfig): Promise<void> {
-  const mcpJsonPath = join(getCwd(), '.mcp.json')
-
+async function writeMcpjsonFile(
+  config: McpJsonConfig | Record<string, unknown>,
+  mcpJsonPath: string = join(getCwd(), '.mcp.json'),
+): Promise<void> {
   // Read existing file permissions to preserve them
   let existingMode: number | undefined
   try {
@@ -689,8 +692,10 @@ export async function addMcpConfig(
   // Check if server already exists in the target scope
   switch (scope) {
     case 'project': {
-      const { servers } = getProjectMcpConfigsFromCwd()
-      if (servers[name]) {
+      // Check the raw file so a name already present in a .mcp.json that fails
+      // validation is still reported as a conflict rather than silently
+      // overwritten by the raw rewrite below.
+      if (readCwdMcpJsonServers().servers[name]) {
         throw new Error(`MCP server ${name} already exists in .mcp.json`)
       }
       break
@@ -720,21 +725,16 @@ export async function addMcpConfig(
   // Add based on scope
   switch (scope) {
     case 'project': {
-      const { servers: existingServers } = getProjectMcpConfigsFromCwd()
-
-      const mcpServers: Record<string, McpServerConfig> = {}
-      for (const [serverName, serverConfig] of Object.entries(
-        existingServers,
-      )) {
-        const { scope: _, ...configWithoutScope } = serverConfig
-        mcpServers[serverName] = configWithoutScope
-      }
+      // Insert into the raw file so unrelated servers keep their unexpanded
+      // ${VAR} values and any other top-level keys survive the rewrite.
+      const { path: mcpJsonPath, config: mcpConfig, servers: mcpServers } =
+        readCwdMcpJsonServers()
       mcpServers[name] = validatedConfig
-      const mcpConfig = { mcpServers }
+      mcpConfig.mcpServers = mcpServers
 
       // Write back to .mcp.json
       try {
-        await writeMcpjsonFile(mcpConfig)
+        await writeMcpjsonFile(mcpConfig, mcpJsonPath)
       } catch (error) {
         throw new Error(`Failed to write to .mcp.json: ${error}`)
       }
@@ -780,27 +780,28 @@ export async function removeMcpConfig(
 ): Promise<void> {
   switch (scope) {
     case 'project': {
-      const { servers: existingServers } = getProjectMcpConfigsFromCwd()
-
-      if (!existingServers[name]) {
+      // Resolve the file that declares the server rather than assuming it lives
+      // in the cwd: project scope inherits from parent directories, so a server
+      // shown for this cwd may be declared further up the tree.
+      const mcpJsonPath = findProjectMcpConfigPath(name)
+      if (!mcpJsonPath) {
         throw new Error(`No MCP server found with name: ${name} in .mcp.json`)
       }
 
-      // Strip scope information when writing back to .mcp.json
-      const mcpServers: Record<string, McpServerConfig> = {}
-      for (const [serverName, serverConfig] of Object.entries(
-        existingServers,
-      )) {
-        if (serverName !== name) {
-          const { scope: _, ...configWithoutScope } = serverConfig
-          mcpServers[serverName] = configWithoutScope
-        }
+      const mcpConfig = readRawMcpJsonFile(mcpJsonPath)
+      const mcpServers = mcpConfig?.mcpServers
+      if (!mcpConfig || !mcpServers || typeof mcpServers !== 'object') {
+        throw new Error(`No MCP server found with name: ${name} in ${mcpJsonPath}`)
       }
-      const mcpConfig = { mcpServers }
+
+      // Edit the raw object so unrelated servers, unexpanded ${VAR} values and
+      // any other top-level keys survive the rewrite untouched.
+      delete (mcpServers as Record<string, unknown>)[name]
+
       try {
-        await writeMcpjsonFile(mcpConfig)
+        await writeMcpjsonFile(mcpConfig, mcpJsonPath)
       } catch (error) {
-        throw new Error(`Failed to remove from .mcp.json: ${error}`)
+        throw new Error(`Failed to remove from ${mcpJsonPath}: ${error}`)
       }
       break
     }
@@ -843,8 +844,11 @@ export async function removeMcpConfig(
 
 /**
  * Get MCP configs from current directory only (no parent traversal).
- * Used by addMcpConfig and removeMcpConfig to modify the local .mcp.json file.
- * Exported for testing purposes.
+ *
+ * Note: addMcpConfig and removeMcpConfig no longer read through this. They edit
+ * the raw .mcp.json instead (see readCwdMcpJsonServers), because rewriting a
+ * file from validated configs expands ${VAR} placeholders and drops unknown
+ * top-level keys. This currently has no callers.
  *
  * @returns Servers with scope information and any validation errors from current directory's .mcp.json
  */
@@ -886,6 +890,109 @@ export function getProjectMcpConfigsFromCwd(): {
       : {},
     errors: errors || [],
   }
+}
+
+/**
+ * List candidate .mcp.json paths from the cwd up to (but excluding) the
+ * filesystem root, nearest first. Mirrors the traversal in
+ * getMcpConfigsByScope('project'), where files closer to the cwd win.
+ */
+function listProjectMcpJsonPaths(): string[] {
+  const paths: string[] = []
+  let currentDir = getCwd()
+
+  while (currentDir !== parse(currentDir).root) {
+    paths.push(join(currentDir, '.mcp.json'))
+    currentDir = dirname(currentDir)
+  }
+
+  return paths
+}
+
+/**
+ * Find the .mcp.json file that actually declares a project-scoped server.
+ *
+ * getMcpConfigsByScope('project') inherits servers from parent directories, so
+ * a server can be visible from the cwd while being declared further up the
+ * tree. Editing or removing it has to target the declaring file, not the cwd.
+ *
+ * @param name The name of the server
+ * @returns Absolute path to the declaring .mcp.json, or null when no file in
+ *   the cwd's ancestry declares the server
+ */
+export function findProjectMcpConfigPath(name: string): string | null {
+  if (!isSettingSourceEnabled('projectSettings')) {
+    return null
+  }
+
+  for (const mcpJsonPath of listProjectMcpJsonPaths()) {
+    // Match on the raw JSON rather than the validated config: a single entry
+    // that fails schema validation invalidates the whole file, which would
+    // otherwise make every server in it unremovable. This also keeps lookup and
+    // rewrite working off the same view of the file.
+    const mcpServers = readRawMcpJsonFile(mcpJsonPath)?.mcpServers
+    if (
+      mcpServers &&
+      typeof mcpServers === 'object' &&
+      !Array.isArray(mcpServers) &&
+      name in mcpServers
+    ) {
+      return mcpJsonPath
+    }
+  }
+
+  return null
+}
+
+/**
+ * Read a .mcp.json file as raw JSON, preserving every field verbatim.
+ *
+ * Rewriting a file from parsed-and-validated configs would expand ${VAR}
+ * placeholders into their resolved values and drop top-level keys other than
+ * mcpServers. Validation is also all-or-nothing per file, so one malformed
+ * entry would take the rest of the file down with it. Editing the raw object
+ * keeps unrelated content intact.
+ */
+function readRawMcpJsonFile(mcpJsonPath: string): Record<string, unknown> | null {
+  const fs = getFsImplementation()
+
+  let contents: string
+  try {
+    contents = fs.readFileSync(mcpJsonPath, { encoding: 'utf8' })
+  } catch (error: unknown) {
+    if (getErrnoCode(error) === 'ENOENT') {
+      return null
+    }
+    throw error
+  }
+
+  const parsed = safeParseJSON(contents)
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return null
+  }
+
+  return parsed as Record<string, unknown>
+}
+
+/**
+ * Open the cwd's .mcp.json for editing, as a raw object plus a mutable handle
+ * on its mcpServers map. Missing or unusable files yield empty structures so
+ * callers can treat creation and update the same way.
+ */
+function readCwdMcpJsonServers(): {
+  path: string
+  config: Record<string, unknown>
+  servers: Record<string, unknown>
+} {
+  const path = join(getCwd(), '.mcp.json')
+  const config = readRawMcpJsonFile(path) ?? {}
+  const existing = config.mcpServers
+  const servers =
+    existing && typeof existing === 'object' && !Array.isArray(existing)
+      ? (existing as Record<string, unknown>)
+      : {}
+
+  return { path, config, servers }
 }
 
 /**

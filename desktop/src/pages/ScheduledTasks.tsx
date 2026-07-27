@@ -2,13 +2,15 @@ import { useEffect, useState } from 'react'
 import { useTaskStore } from '../stores/taskStore'
 import { useUIStore } from '../stores/uiStore'
 import { useTranslation } from '../i18n'
-import { Button } from '../components/shared/Button'
+import { Button } from '@/components/ui/Button'
+import { ErrorState } from '@/components/ui/ErrorState'
+import { Spinner } from '@/components/ui/Spinner'
 import { TaskList } from '../components/tasks/TaskList'
 import { TaskEmptyState } from '../components/tasks/TaskEmptyState'
 import { NewTaskModal } from '../components/tasks/NewTaskModal'
 
 export function ScheduledTasks() {
-  const { tasks, fetchTasks, isLoading } = useTaskStore()
+  const { tasks, fetchTasks, isLoading, error } = useTaskStore()
   const { activeModal, openModal, closeModal } = useUIStore()
   const t = useTranslation()
   const [initialized, setInitialized] = useState(false)
@@ -19,39 +21,66 @@ export function ScheduledTasks() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="px-10 py-8">
+      <div className="animate-screen-pop mx-auto max-w-[1180px] px-11 pb-12 pt-8">
         {/* Header */}
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">{t('scheduledPage.title')}</h1>
-            <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <h1
+              className="text-[28px] font-bold tracking-tight text-[var(--color-text-primary)]"
+              style={{ fontFamily: 'var(--font-headline)' }}
+            >
+              {t('scheduledPage.title')}
+            </h1>
+            <p className="mt-[7px] text-[14.5px] leading-[1.6] text-[var(--color-text-secondary)]">
               {(() => {
                 const parts = t('scheduledPage.subtitle').split('{code}')
-                return <>{parts[0]}<code className="px-1 py-0.5 rounded bg-[var(--color-surface-container)] text-xs font-[var(--font-mono)]">/schedule</code>{parts[1]}</>
+                return (
+                  <>
+                    {parts[0]}
+                    <code className="rounded-[var(--radius-sm)] bg-[var(--color-surface-container)] px-2 py-0.5 font-mono text-[12.5px] font-medium">
+                      /schedule
+                    </code>
+                    {parts[1]}
+                  </>
+                )
               })()}
             </p>
           </div>
-          <Button onClick={() => openModal('new-task')}>{t('tasks.newTask')}</Button>
+          <Button size="lg" className="shrink-0" onClick={() => openModal('new-task')}>{t('tasks.newTask')}</Button>
         </div>
 
-        {/* Desktop-online notice */}
-        <div className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-[var(--radius-md)] bg-[var(--color-warning)]/8 border border-[var(--color-warning)]/15 mb-6">
-          <span className="material-symbols-outlined text-[18px] text-[var(--color-warning)]">schedule</span>
-          <span className="text-xs text-[var(--color-text-secondary)]">
+        {/* Desktop-online notice. Terracotta rather than the previous
+            `--color-warning` wash: this is a standing condition, not a fault.
+            The old fill was `/8` and `/15` alpha, which Safari 15 WebView drops
+            outright — on the desktop shell the strip had no ground at all. */}
+        <div className="mt-[22px] flex items-center gap-3 rounded-[var(--radius-xl)] border border-[var(--color-primary-fixed-dim)] bg-[var(--color-brand-soft)] px-[18px] py-[13px]">
+          <span aria-hidden="true" className="material-symbols-outlined shrink-0 text-[18px] text-[var(--color-on-brand-soft)]">schedule</span>
+          <span className="text-[13.5px] leading-[1.5] text-[var(--color-on-brand-soft)]">
             {t('scheduledPage.desktopNotice')}
           </span>
         </div>
 
         {/* Content */}
-        {!initialized && isLoading ? (
-          <div className="flex items-center justify-center py-16">
-            <div className="animate-spin w-6 h-6 border-2 border-[var(--color-brand)] border-t-transparent rounded-full" />
-          </div>
-        ) : tasks.length === 0 ? (
-          <TaskEmptyState onCreateTask={() => openModal('new-task')} />
-        ) : (
-          <TaskList tasks={tasks} />
-        )}
+        <div className="mt-[18px]">
+          {!initialized && isLoading ? (
+            <div className="flex items-center justify-center py-16">
+              <Spinner size={24} tone="brand" label={t('common.loading')} />
+            </div>
+          ) : error && tasks.length === 0 ? (
+            // Without this the store's error falls through to the empty state,
+            // so a failed load reads as "you have no tasks".
+            <ErrorState
+              title={t('common.error')}
+              detail={error}
+              onRetry={() => void fetchTasks()}
+              retryLabel={t('common.retry')}
+            />
+          ) : tasks.length === 0 ? (
+            <TaskEmptyState onCreateTask={() => openModal('new-task')} />
+          ) : (
+            <TaskList tasks={tasks} />
+          )}
+        </div>
       </div>
 
       {/* New Task Modal */}

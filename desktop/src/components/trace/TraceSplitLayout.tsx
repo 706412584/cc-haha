@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 
 const STORAGE_KEY = 'trace.treeWidth'
-const DEFAULT_WIDTH = 380
+const DEFAULT_WIDTH = 400
 const MIN_WIDTH = 280
 const MAX_WIDTH = 560
 
@@ -85,7 +85,7 @@ export function TraceSplitLayout({ tree, detail }: { tree: ReactNode; detail: Re
         onDoubleClick={onDividerDoubleClick}
         className="group relative hidden w-px shrink-0 cursor-col-resize bg-[var(--color-border)] lg:block"
       >
-        <div className="absolute inset-y-0 -left-[2px] w-[5px] transition-colors group-hover:bg-[var(--color-brand)]/25" />
+        <div className="absolute inset-y-0 -left-[2px] w-[5px] transition-colors group-hover:bg-[var(--color-primary-fixed-dim)]" />
       </div>
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border-t border-[var(--color-border)] lg:border-t-0">
         {detail}

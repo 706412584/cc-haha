@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle,
   CheckCircle2,
@@ -16,7 +16,11 @@ import type { TraceSession as TraceSessionData } from '../types/trace'
 import { getDesktopHost } from '../lib/desktopHost'
 import { buildTraceWindowUrl } from '../lib/traceLaunch'
 import { formatClockTime, formatDurationMs, formatTokenCount } from '../lib/trace/formatters'
-import { CopyButton } from '../components/shared/CopyButton'
+import { Button } from '@/components/ui/Button'
+import { StatusDot } from '@/components/ui/Badge'
+import { CopyButton } from '@/components/ui/CopyButton'
+import { EmptyState } from '@/components/ui/EmptyState'
+import { IconButton } from '@/components/ui/IconButton'
 import { TraceSplitLayout } from '../components/trace/TraceSplitLayout'
 import { TraceTree } from '../components/trace/TraceTree'
 import { TraceDetail } from '../components/trace/TraceDetail'
@@ -226,20 +230,21 @@ export function TraceSession({
           updatedAt={lastLoadedAt}
         />
         <div className="flex flex-1 items-center justify-center p-8">
-          <div className="max-w-md border-t border-[var(--color-error)]/30 pt-5">
-            <div className="flex items-center gap-2 text-sm font-semibold text-[var(--color-error)]">
+          <div className="max-w-md rounded-[var(--radius-xl)] border border-[var(--color-error)] bg-[var(--color-error-container)] px-6 py-5">
+            <div className="flex items-center gap-2 text-sm font-semibold text-[var(--color-on-error-container)]">
               <AlertTriangle size={14} strokeWidth={2} />
               {t('trace.loadFailed')}
             </div>
-            <p className="mt-2 text-sm text-[var(--color-text-secondary)]">{state.message}</p>
-            <button
-              type="button"
+            <p className="mt-2 text-sm text-[var(--color-on-error-container)]">{state.message}</p>
+            <Button
+              variant="secondary"
+              size="base"
+              className="mt-4"
               onClick={refresh}
-              className="mt-4 inline-flex items-center gap-2 rounded-[var(--radius-md)] border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-primary)] transition-transform active:scale-[0.98]"
+              icon={<RefreshCw size={14} strokeWidth={2} />}
             >
-              <RefreshCw size={14} strokeWidth={2} />
               {t('common.retry')}
-            </button>
+            </Button>
           </div>
         </div>
       </div>
@@ -271,7 +276,7 @@ export function TraceSession({
       />
       <DiagnosisBanner viewModel={viewModel} onSelect={setSelectedId} />
       {hasTraceContent && activeSpan ? (
-        <div className="flex min-h-0 flex-1 flex-col border-t border-[var(--color-border)]">
+        <div className="flex min-h-0 flex-1 flex-col">
           <TraceSectionStateProvider scopeId={sessionId}>
             <TraceSplitLayout
               tree={
@@ -335,26 +340,39 @@ function TraceHeader({
   const diagnosisStatus = viewModel?.diagnosis.status
 
   return (
-    <header className="flex shrink-0 items-center justify-between gap-3 px-4 py-2.5" data-testid="trace-header">
-      <div className="flex min-w-0 items-center gap-2.5">
-        <RadioTower size={14} strokeWidth={2} className="shrink-0 text-[var(--color-text-tertiary)]" />
+    <header
+      className="flex shrink-0 items-center justify-between gap-3.5 border-b border-[var(--color-border)] px-6 py-4"
+      data-testid="trace-header"
+    >
+      <div className="flex min-w-0 items-center gap-3.5">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[var(--color-brand-soft)] text-[var(--color-on-brand-soft)]">
+          <RadioTower size={17} strokeWidth={1.8} aria-hidden="true" />
+        </span>
         <div className="min-w-0">
-          <div className="flex min-w-0 items-center gap-2">
-            <h1 className="min-w-0 truncate text-sm font-semibold tracking-tight text-[var(--color-text-primary)]">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <h1
+              className="min-w-0 truncate text-[17px] font-bold tracking-tight text-[var(--color-text-primary)]"
+              style={{ fontFamily: 'var(--font-headline)' }}
+            >
               {title}
             </h1>
             <LiveBadge />
             {diagnosisStatus ? <DiagnosisDot status={diagnosisStatus} /> : null}
           </div>
-          <div className="mt-0.5 flex min-w-0 items-center gap-2 font-mono text-[10px] text-[var(--color-text-tertiary)]">
+          <div className="mt-1 flex min-w-0 items-center gap-1.5 font-mono text-[12.5px] text-[var(--color-text-tertiary)]">
             <span className="max-w-[280px] truncate">{sessionId}</span>
-            {updatedAt ? <span className="shrink-0">{t('trace.updatedAt')} {formatClockTime(updatedAt)}</span> : null}
+            {updatedAt ? (
+              <>
+                <span aria-hidden="true">·</span>
+                <span className="shrink-0">{t('trace.updatedAt')} {formatClockTime(updatedAt)}</span>
+              </>
+            ) : null}
           </div>
         </div>
       </div>
-      <div className="flex shrink-0 items-center gap-3">
+      <div className="flex shrink-0 items-center gap-3.5">
         {summary ? (
-          <div className="hidden items-center gap-3 md:flex">
+          <div className="hidden items-center gap-3.5 md:flex">
             <MetaChip label={t('trace.apiCalls')} value={String(summary.apiCalls)} />
             {summary.failedCalls > 0 ? (
               <MetaChip label={t('trace.failedCalls')} value={String(summary.failedCalls)} tone="danger" />
@@ -377,17 +395,30 @@ function TraceHeader({
             text={sessionId}
             label={t('trace.copySessionId')}
             copiedLabel={t('common.copied')}
-            displayLabel={<Copy size={14} strokeWidth={2} />}
-            displayCopiedLabel={<CheckCircle2 size={14} strokeWidth={2} />}
-            className="inline-flex h-7 w-7 items-center justify-center rounded-[var(--radius-md)] border border-[var(--color-border)] text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-border-focus)] hover:text-[var(--color-text-primary)] active:scale-[0.98]"
+            displayLabel={<Copy size={16} strokeWidth={2} />}
+            displayCopiedLabel={<CheckCircle2 size={16} strokeWidth={2} />}
+            // Mirrors IconButton size="md" tone="secondary" bordered, so this
+            // sits flush with the two IconButtons beside it. CopyButton owns its
+            // own copied/reset state, so it cannot be swapped for IconButton.
+            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-md)] border border-[var(--color-border)] text-[var(--color-text-secondary)] transition-colors duration-150 hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
           />
-          <IconAction label={t('trace.refresh')} onClick={onRefresh}>
-            <RefreshCw size={14} strokeWidth={2} className={refreshing ? 'animate-spin' : ''} />
-          </IconAction>
+          <IconButton
+            size="md"
+            tone="secondary"
+            bordered
+            label={t('trace.refresh')}
+            onClick={onRefresh}
+            icon={<RefreshCw size={16} strokeWidth={2} className={refreshing ? 'animate-spin' : ''} />}
+          />
           {!standalone ? (
-            <IconAction label={t('trace.openWindow')} onClick={onOpenWindow}>
-              <ExternalLink size={14} strokeWidth={2} />
-            </IconAction>
+            <IconButton
+              size="md"
+              tone="secondary"
+              bordered
+              label={t('trace.openWindow')}
+              onClick={onOpenWindow}
+              icon={<ExternalLink size={16} strokeWidth={2} />}
+            />
           ) : null}
         </div>
       </div>
@@ -396,12 +427,8 @@ function TraceHeader({
 }
 
 function DiagnosisDot({ status }: { status: TraceViewModel['diagnosis']['status'] }) {
-  const color = status === 'blocked'
-    ? 'bg-[var(--color-error)]'
-    : status === 'attention'
-      ? 'bg-[var(--color-warning)]'
-      : 'bg-[var(--color-success)]'
-  return <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${color}`} aria-hidden="true" />
+  const tone = status === 'blocked' ? 'danger' : status === 'attention' ? 'warning' : 'success'
+  return <StatusDot tone={tone} size="md" pulse />
 }
 
 function DiagnosisBanner({
@@ -420,36 +447,41 @@ function DiagnosisBanner({
     .map((spanId) => viewModel.spansById.get(spanId))
     .filter((span): span is TraceSpan => !!span)
     .slice(0, 3)
+  // Warning-bar recipe from the redesign spec: `-container` fill, matching
+  // `on-*-container` ink, same-tone hairline. No alpha modifiers — Safari 15
+  // drops the color function they compile to.
   const toneClass = diagnosis.status === 'blocked'
-    ? 'border-[var(--color-error)]/30 bg-[var(--color-error-container)]/30'
-    : 'border-[var(--color-warning)]/30 bg-[var(--color-warning-container)]/25'
+    ? 'border-[var(--color-error)] bg-[var(--color-error-container)] text-[var(--color-on-error-container)]'
+    : 'border-[var(--color-warning)] bg-[var(--color-warning-container)] text-[var(--color-on-warning-container)]'
 
   return (
-    <section className={`flex shrink-0 items-center gap-2 border-t px-4 py-1.5 ${toneClass}`} data-testid="trace-diagnosis">
+    <section className={`flex shrink-0 items-center gap-2.5 border-b px-6 py-2 ${toneClass}`} data-testid="trace-diagnosis">
       <StatusPill status={diagnosis.status === 'blocked' ? 'error' : 'pending'} />
-      <span className="min-w-0 truncate text-xs font-semibold text-[var(--color-text-primary)]">
+      <span className="min-w-0 truncate text-[12.5px] font-semibold">
         {diagnosisReasonLabel(diagnosis.reason, t)}
       </span>
       {focusSpan ? (
-        <button
-          type="button"
+        <Button
+          variant="secondary"
+          size="xs"
+          className="shrink-0"
           onClick={() => onSelect(focusSpan.id)}
-          className="shrink-0 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-0.5 text-[11px] text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-border-focus)] hover:text-[var(--color-text-primary)] active:scale-[0.98]"
         >
           {t('trace.focus')}
-        </button>
+        </Button>
       ) : null}
       <div className="ml-auto flex min-w-0 items-center justify-end gap-1.5 overflow-hidden">
         {evidenceSpans.map((span) => (
-          <button
+          <Button
             key={span.id}
-            type="button"
+            variant="secondary"
+            size="xs"
+            className="max-w-[200px]"
             onClick={() => onSelect(span.id)}
-            className="inline-flex max-w-[200px] items-center gap-1.5 rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-0.5 text-[11px] text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-border-focus)] hover:text-[var(--color-text-primary)] active:scale-[0.98]"
+            icon={<TypeIcon span={span} size={13} />}
           >
-            <TypeIcon span={span} size={13} />
             <span className="truncate">{spanDisplayTitle(span, t)}</span>
-          </button>
+          </Button>
         ))}
       </div>
     </section>
@@ -469,32 +501,18 @@ function diagnosisReasonLabel(reason: TraceViewModel['diagnosis']['reason'], t: 
   }
 }
 
-function IconAction({ label, onClick, children }: { label: string; onClick?: () => void; children: ReactNode }) {
-  return (
-    <button
-      type="button"
-      aria-label={label}
-      title={label}
-      onClick={onClick}
-      className="inline-flex h-7 w-7 items-center justify-center rounded-[var(--radius-md)] border border-[var(--color-border)] text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-border-focus)] hover:text-[var(--color-text-primary)] active:scale-[0.98]"
-    >
-      {children}
-    </button>
-  )
-}
-
 function TraceSkeleton() {
   return (
-    <div className="flex min-h-0 flex-1 flex-col border-t border-[var(--color-border)] lg:flex-row" data-testid="trace-skeleton">
-      <div className="shrink-0 border-b border-[var(--color-border)] p-3 lg:w-[380px] lg:border-b-0 lg:border-r">
-        <div className="h-7 animate-pulse rounded-[var(--radius-md)] bg-[var(--color-surface-container)]" />
+    <div className="flex min-h-0 flex-1 flex-col lg:flex-row" data-testid="trace-skeleton">
+      <div className="shrink-0 border-b border-[var(--color-border)] bg-[var(--color-surface-container-low)] p-4 lg:w-[400px] lg:border-b-0 lg:border-r">
+        <div className="h-8 animate-pulse rounded-[var(--radius-md)] bg-[var(--color-surface-container)]" />
         <div className="mt-3 space-y-1.5">
           {Array.from({ length: 10 }).map((_, index) => (
             <div key={index} className="h-[34px] animate-pulse rounded-[var(--radius-sm)] bg-[var(--color-surface-container)]" />
           ))}
         </div>
       </div>
-      <div className="min-w-0 flex-1 p-4">
+      <div className="min-w-0 flex-1 p-6">
         <div className="h-5 w-64 animate-pulse rounded bg-[var(--color-surface-container)]" />
         <div className="mt-2 h-3 w-96 animate-pulse rounded bg-[var(--color-surface-container)]" />
         <div className="mt-5 space-y-3">
@@ -510,12 +528,14 @@ function TraceSkeleton() {
 function TraceEmpty() {
   const t = useTranslation()
   return (
-    <div className="flex flex-1 items-center justify-center border-t border-[var(--color-border)] p-8">
-      <div className="max-w-sm rounded-[var(--radius-md)] border border-dashed border-[var(--color-border)] px-6 py-8 text-center">
-        <RadioTower size={22} strokeWidth={2} className="mx-auto text-[var(--color-text-tertiary)]" />
-        <h2 className="mt-3 text-sm font-semibold text-[var(--color-text-primary)]">{t('trace.emptyTitle')}</h2>
-        <p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">{t('trace.emptyBody')}</p>
-      </div>
+    <div className="flex flex-1 items-center justify-center p-8">
+      <EmptyState
+        className="max-w-sm"
+        headingLevel={2}
+        icon={<RadioTower size={20} strokeWidth={2} />}
+        title={t('trace.emptyTitle')}
+        description={t('trace.emptyBody')}
+      />
     </div>
   )
 }

@@ -52,6 +52,7 @@ vi.mock('../../i18n', () => ({
       'session.activity.task.inProgress': 'Task in progress',
       'session.activity.task.pending': 'Task pending',
       'session.activity.tasks.earlier': 'Earlier tasks',
+      'session.activity.tasksProgress': 'Task progress {completed}/{total}',
       'session.activity.tasks.earlierSummary': 'Earlier turns: {completed}/{total} completed',
       'session.activity.status.pending': 'Pending',
       'session.activity.status.inProgress': 'In progress',
@@ -169,10 +170,71 @@ describe('SessionActivityPanel', () => {
     expect(screen.getByLabelText('Task completed')).toBeInTheDocument()
     expect(screen.getByLabelText('Task in progress')).toBeInTheDocument()
     expect(screen.getByLabelText('Task pending')).toBeInTheDocument()
-    expect(screen.getByLabelText('Task in progress').querySelector('svg')).toHaveClass('motion-safe:animate-spin')
+    // The in-progress marker is the design's terracotta ring — a bordered
+    // circle, not an icon — so the animation classes sit on the marker itself.
+    // It still stops rather than slows under reduced motion, which is why this
+    // panel does not use `Spinner`.
+    expect(screen.getByLabelText('Task in progress')).toHaveClass('motion-safe:animate-spin')
+    expect(screen.getByLabelText('Task in progress')).toHaveClass('motion-reduce:animate-none')
+    expect(screen.getByLabelText('Task in progress')).toHaveClass('rounded-full')
+    expect(screen.getByLabelText('Task in progress').querySelector('svg')).toBeNull()
     expect(screen.getByText('Active task').closest('button,div')).toHaveClass('py-2.5')
+    expect(screen.getByText('Finished task')).toHaveClass('line-through')
     expect(screen.queryByText('Completed')).not.toBeInTheDocument()
     expect(screen.queryByText('Pending')).not.toBeInTheDocument()
+  })
+
+  it('summarizes task completion as a labelled mini progress rail and a ratio', () => {
+    render(
+      <SessionActivityPanel
+        model={model({
+          sections: {
+            ...model().sections,
+            tasks: {
+              id: 'tasks',
+              title: 'Tasks',
+              emptyLabel: 'No tasks',
+              rows: [
+                { id: 'a', section: 'tasks', label: 'First', status: 'completed', openable: false },
+                { id: 'b', section: 'tasks', label: 'Second', status: 'completed', openable: false },
+                { id: 'c', section: 'tasks', label: 'Third', status: 'in_progress', openable: false },
+                { id: 'd', section: 'tasks', label: 'Fourth', status: 'pending', openable: false },
+              ],
+            },
+          },
+        })}
+        open
+        onClose={vi.fn()}
+        onOpenSubagent={vi.fn()}
+      />,
+    )
+
+    // Named for what it measures, not the section it sits in: borrowing the
+    // section title made screen readers announce "Tasks, 50%", which reads as
+    // the section being half-done rather than 2 of 4 tasks complete.
+    const progress = screen.getByRole('progressbar', { name: 'Task progress 2/4' })
+
+    expect(progress).toHaveAttribute('aria-valuenow', '50')
+    expect(screen.getByText('2/4')).toBeInTheDocument()
+  })
+
+  it('leaves sections other than tasks without a progress rail', () => {
+    render(
+      <SessionActivityPanel
+        model={model({
+          sections: {
+            ...model().sections,
+            tasks: { id: 'tasks', title: 'Tasks', emptyLabel: 'No tasks', rows: [] },
+          },
+        })}
+        open
+        onClose={vi.fn()}
+        onOpenSubagent={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByText('SubAgents')).toBeInTheDocument()
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
   })
 
   it('renders earlier task history as a localized compact checklist row', () => {
@@ -693,14 +755,29 @@ describe('SessionActivityPanel', () => {
       </>,
     )
 
-    expect(screen.getByTestId('session-activity-panel')).toHaveAttribute('data-placement', 'rail')
-    expect(screen.getByTestId('session-activity-panel')).toHaveClass('my-4')
-    expect(screen.getByTestId('session-activity-panel')).toHaveClass('mr-3')
-    expect(screen.getByTestId('session-activity-panel')).toHaveClass('w-[336px]')
-    expect(screen.getByTestId('session-activity-panel')).toHaveClass('rounded-[22px]')
-    expect(screen.getByTestId('session-activity-panel')).toHaveClass('self-start')
-    expect(screen.getByTestId('session-activity-panel')).toHaveClass('max-h-[min(620px,calc(100vh-72px))]')
-    expect(screen.getByTestId('session-activity-panel')).not.toHaveClass('h-[calc(100%-24px)]')
+    const panel = screen.getByTestId('session-activity-panel')
+
+    expect(panel).toHaveAttribute('data-placement', 'rail')
+    // Out of flow, not an in-flow flex sibling. This is what lets the content
+    // column animate its own padding to make way: a width flex computed for it
+    // could not be transitioned. Anything that puts this panel back in the
+    // layout takes that transition away with it.
+    expect(panel).toHaveClass('absolute')
+    expect(panel).toHaveClass('top-4')
+    expect(panel).toHaveClass('right-5')
+    expect(panel).not.toHaveClass('shrink-0')
+    expect(panel).not.toHaveClass('self-start')
+    // 340px, 20px from the right edge and `--radius-xl` are the handoff's
+    // floating-panel numbers; the frosted fill, hairline and overlay shadow all
+    // come from `glass-panel` rather than the three hardcoded slate shadows
+    // this used to carry.
+    expect(panel).toHaveClass('w-[340px]')
+    expect(panel).toHaveClass('rounded-[var(--radius-xl)]')
+    expect(panel).toHaveClass('glass-panel')
+    // Height is capped against the containing block now that the panel is
+    // absolute, rather than against the viewport as the in-flow rail was.
+    expect(panel).toHaveClass('max-h-[min(620px,calc(100%-80px))]')
+    expect(panel).not.toHaveClass('h-[calc(100%-24px)]')
     fireEvent.pointerDown(screen.getByRole('button', { name: 'Outside' }))
 
     expect(onClose).not.toHaveBeenCalled()

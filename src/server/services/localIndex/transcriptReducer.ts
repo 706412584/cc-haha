@@ -2,6 +2,12 @@ import { cleanSessionTitleSource } from '../../../utils/sessionTitleText.js'
 import { SYNTHETIC_MODEL } from '../../../utils/messages.js'
 import { extractShotCountFromAssistantContent } from '../../../utils/shotStats.js'
 import { normalizeDriveRootPathForPlatform } from '../windowsDrivePath.js'
+import {
+  activeGapMs,
+  estimateCostUSD,
+  isBillableUsageRecord,
+  usageRecordKey,
+} from '../../../utils/usageAccounting.js'
 import type {
   ActivityDailyProjection,
   ActivityModelProjection,
@@ -25,6 +31,22 @@ export class TranscriptRebuildRequiredError extends Error {
   }
 }
 
+type ReducerUsage = {
+  input_tokens?: number
+  output_tokens?: number
+  cache_read_input_tokens?: number
+  cache_creation_input_tokens?: number
+  cache_creation?: {
+    ephemeral_5m_input_tokens?: number
+    ephemeral_1h_input_tokens?: number
+  }
+  server_tool_use?: {
+    web_search_requests?: number
+  }
+  speed?: string
+  iterations?: unknown
+}
+
 type ReducerEntry = {
   type?: string
   subtype?: string
@@ -35,17 +57,16 @@ type ReducerEntry = {
   customTitle?: unknown
   aiTitle?: unknown
   permissionMode?: unknown
+  requestId?: unknown
+  version?: unknown
+  sessionId?: unknown
   worktreeSession?: PersistedWorktreeSession | null
   message?: {
+    id?: unknown
     role?: string
     content?: unknown
     model?: string
-    usage?: {
-      input_tokens?: number
-      output_tokens?: number
-      cache_read_input_tokens?: number
-      cache_creation_input_tokens?: number
-    }
+    usage?: ReducerUsage
   }
   [key: string]: unknown
 }
@@ -79,6 +100,8 @@ type ReducerState = {
   activityLastTimestampValid: boolean
   activityFirstTimestamp: string | null
   activityLastTimestamp: string | null
+  activityLastMessageTime: number | null
+  activityActiveDurationMs: number
   activityMessageCount: number
   activityStartHour: number | null
   activitySpeculationTimeSavedMs: number
@@ -87,6 +110,13 @@ type ReducerState = {
   activityModels: Map<string, ActivityModelProjection>
   activityTools: Map<string, ActivityNamedUsageProjection>
   activitySkills: Map<string, ActivityNamedUsageProjection>
+  // (message.id, requestId) pairs whose usage has already been counted for this source. Claude
+  // Code writes one JSONL line per content block of an assistant message — a turn with thinking,
+  // text and 12 tool_use blocks is 14 lines — and every one of them repeats the same complete
+  // `usage` object. Without this the tokens of a single reply get counted once per block; on real
+  // transcripts that inflated the total by 2.2x. Lives only in memory alongside the projection
+  // Maps: a full re-read starts empty (correct), and an incremental read clones it forward.
+  activityUsageKeys: Set<string>
 }
 
 export type TranscriptReductionOptions = {
@@ -191,6 +221,7 @@ function cloneState(state: ReducerState): ReducerState {
     activitySkills: new Map(
       [...state.activitySkills].map(([key, value]) => [key, { ...value }]),
     ),
+    activityUsageKeys: new Set(state.activityUsageKeys),
   }
 }
 
@@ -229,6 +260,8 @@ function createInitialState(
     activityLastTimestampValid: activity?.lastTimestamp !== null && activity?.lastTimestamp !== undefined,
     activityFirstTimestamp: activity?.firstTimestamp ?? null,
     activityLastTimestamp: activity?.lastTimestamp ?? null,
+    activityLastMessageTime: parseTimestampMs(activity?.lastTimestamp),
+    activityActiveDurationMs: activity?.activeDurationMs ?? 0,
     activityMessageCount: activity?.messageCount ?? 0,
     activityStartHour: activity?.startHour ?? null,
     activitySpeculationTimeSavedMs: activity?.speculationTimeSavedMs ?? 0,
@@ -254,7 +287,14 @@ function createInitialState(
         { ...skill },
       ]),
     ),
+    activityUsageKeys: new Set(),
   }
+}
+
+function parseTimestampMs(timestamp: string | null | undefined): number | null {
+  if (typeof timestamp !== 'string') return null
+  const parsed = Date.parse(timestamp)
+  return Number.isFinite(parsed) ? parsed : null
 }
 
 function activityDateKey(timestamp: unknown): { date: string; time: number } | null {
@@ -277,6 +317,113 @@ function incrementNamedActivity(
   const existing = values.get(key)
   if (existing) existing.count += 1
   else values.set(key, { date, name: normalized, count: 1 })
+}
+
+function usageIdentity(entry: ReducerEntry) {
+  return {
+    version: entry.version,
+    sessionId: entry.sessionId,
+    requestId: entry.requestId,
+    messageId: entry.message?.id,
+  }
+}
+
+/**
+ * Claim this usage record, returning false when its key was already counted — i.e. this line is
+ * another content block of a reply already accounted for.
+ */
+function claimUsageRecord(state: ReducerState, entry: ReducerEntry, suffix = ''): boolean {
+  const key = usageRecordKey(usageIdentity(entry), suffix)
+  if (key === null) return true
+  if (state.activityUsageKeys.has(key)) return false
+  state.activityUsageKeys.add(key)
+  return true
+}
+
+function cacheCreationTokens(usage: ReducerUsage): number {
+  const split = usage.cache_creation
+  if (split) {
+    return (split.ephemeral_5m_input_tokens ?? 0) + (split.ephemeral_1h_input_tokens ?? 0)
+  }
+  return usage.cache_creation_input_tokens ?? 0
+}
+
+function accumulateUsage(
+  state: ReducerState,
+  date: string,
+  model: string,
+  usage: ReducerUsage,
+): void {
+  const key = `${date}\0${model}`
+  let aggregate = state.activityModels.get(key)
+  if (!aggregate) {
+    aggregate = {
+      date,
+      model,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      webSearchRequests: 0,
+      costUSD: 0,
+      contextWindow: 0,
+      maxOutputTokens: 0,
+    }
+    state.activityModels.set(key, aggregate)
+  }
+  const inputTokens = usage.input_tokens ?? 0
+  const outputTokens = usage.output_tokens ?? 0
+  const cacheReadInputTokens = usage.cache_read_input_tokens ?? 0
+  const cacheCreationInputTokens = cacheCreationTokens(usage)
+  const webSearchRequests = usage.server_tool_use?.web_search_requests ?? 0
+
+  aggregate.inputTokens += inputTokens
+  aggregate.outputTokens += outputTokens
+  aggregate.cacheReadInputTokens += cacheReadInputTokens
+  aggregate.cacheCreationInputTokens += cacheCreationInputTokens
+  aggregate.webSearchRequests += webSearchRequests
+
+  // A model we have no published rates for (every third-party provider) contributes tokens but no
+  // dollars — see modelPricing.ts for why a null must never be folded in as a zero.
+  const cost = estimateCostUSD(
+    model,
+    {
+      inputTokens,
+      outputTokens,
+      cacheReadInputTokens,
+      cacheCreationInputTokens,
+      webSearchRequests,
+    },
+    usage.speed,
+  )
+  if (cost !== null) aggregate.costUSD += cost
+}
+
+/**
+ * Nested advisor work rides along in `usage.iterations` under its own model. Only
+ * `advisor_message` iterations become separate records — the other iteration types are already
+ * represented by the parent's totals, so counting them would double-bill the same turn.
+ */
+function accumulateAdvisorUsage(
+  state: ReducerState,
+  entry: ReducerEntry,
+  date: string,
+  usage: ReducerUsage,
+): void {
+  if (!Array.isArray(usage.iterations)) return
+  let advisorIndex = 0
+  for (const iteration of usage.iterations) {
+    if (!iteration || typeof iteration !== 'object') continue
+    const record = iteration as { type?: unknown; model?: unknown } & ReducerUsage
+    if (record.type !== 'advisor_message') continue
+    if (typeof record.model !== 'string' || !record.model) continue
+    // Index before claiming, so a repeated content-block line maps its Nth advisor onto the same
+    // key as the first line's Nth advisor rather than shifting by the number already claimed.
+    const index = advisorIndex
+    advisorIndex += 1
+    if (!claimUsageRecord(state, entry, `\0advisor:${index}`)) continue
+    accumulateUsage(state, date, record.model, record)
+  }
 }
 
 function applyActivityEntry(state: ReducerState, entry: ReducerEntry): void {
@@ -311,6 +458,10 @@ function applyActivityEntry(state: ReducerState, entry: ReducerEntry): void {
   state.activityLastTimestampValid = timestamp !== null
   state.activityLastTimestamp = timestamp ? entry.timestamp! : null
   state.activityMessageCount += 1
+  if (timestamp) {
+    state.activityActiveDurationMs += activeGapMs(state.activityLastMessageTime, timestamp.time)
+    state.activityLastMessageTime = timestamp.time
+  }
   if (!timestamp) return
 
   let daily = state.activityDaily.get(timestamp.date)
@@ -348,27 +499,11 @@ function applyActivityEntry(state: ReducerState, entry: ReducerEntry): void {
   const usage = entry.message?.usage
   const model = entry.message?.model || 'unknown'
   if (!usage || model === SYNTHETIC_MODEL) return
-  const key = `${timestamp.date}\0${model}`
-  let aggregate = state.activityModels.get(key)
-  if (!aggregate) {
-    aggregate = {
-      date: timestamp.date,
-      model,
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheReadInputTokens: 0,
-      cacheCreationInputTokens: 0,
-      webSearchRequests: 0,
-      costUSD: 0,
-      contextWindow: 0,
-      maxOutputTokens: 0,
-    }
-    state.activityModels.set(key, aggregate)
-  }
-  aggregate.inputTokens += usage.input_tokens ?? 0
-  aggregate.outputTokens += usage.output_tokens ?? 0
-  aggregate.cacheReadInputTokens += usage.cache_read_input_tokens ?? 0
-  aggregate.cacheCreationInputTokens += usage.cache_creation_input_tokens ?? 0
+  if (!isBillableUsageRecord(usageIdentity(entry))) return
+  // Every content-block line of this reply carries the same usage; bill only the first one.
+  if (!claimUsageRecord(state, entry)) return
+  accumulateUsage(state, timestamp.date, model, usage)
+  accumulateAdvisorUsage(state, entry, timestamp.date, usage)
 }
 
 function applyEntry(state: ReducerState, entry: ReducerEntry): void {
@@ -649,6 +784,9 @@ export function reduceTranscriptWithLocators(
       lastTimestamp: state.activityFirstTimestampValid && state.activityLastTimestampValid
         ? state.activityLastTimestamp
         : null,
+      activeDurationMs: state.activityFirstTimestampValid && state.activityLastTimestampValid
+        ? state.activityActiveDurationMs
+        : 0,
       messageCount: state.activityFirstTimestampValid && state.activityLastTimestampValid
         ? state.activityMessageCount
         : 0,

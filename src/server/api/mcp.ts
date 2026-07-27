@@ -13,6 +13,7 @@ import {
 } from '../../services/mcp/client.js'
 import {
   addMcpConfig,
+  findProjectMcpConfigPath,
   getAllMcpConfigs,
   getClaudeCodeMcpConfigs,
   getMcpConfigByName,
@@ -150,6 +151,14 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
+function parseScopeParam(value: string | null): ConfigScope {
+  try {
+    return ensureConfigScope(value || undefined)
+  } catch (error) {
+    throw ApiError.badRequest(error instanceof Error ? error.message : String(error))
+  }
+}
+
 async function syncMcpToggleToSession(
   sessionId: string | undefined,
   serverName: string,
@@ -220,6 +229,16 @@ function serializeEditableConfig(config: ScopedMcpServerConfig): McpEditableConf
   }
 
   return { type: config.type }
+}
+
+function describeServerConfigLocation(name: string, scope: ConfigScope): string {
+  // Project scope inherits from parent directories, so the cwd's .mcp.json is
+  // not necessarily the file that declares this server. Point at the real one.
+  if (scope === 'project') {
+    return findProjectMcpConfigPath(name) ?? describeMcpConfigFilePath(scope)
+  }
+
+  return describeMcpConfigFilePath(scope)
 }
 
 function getSummary(config: ScopedMcpServerConfig): string {
@@ -364,7 +383,7 @@ function buildServerDto(
     status: status.status,
     statusLabel: status.statusLabel,
     statusDetail: status.statusDetail,
-    configLocation: describeMcpConfigFilePath(config.scope),
+    configLocation: describeServerConfigLocation(name, config.scope),
     summary: getSummary(config),
     canEdit,
     canRemove: EDITABLE_SCOPES.has(config.scope),
@@ -740,13 +759,24 @@ async function updateServer(name: string, body: Record<string, unknown>): Promis
 }
 
 async function deleteServer(name: string, url: URL): Promise<Response> {
-  const scope = ensureConfigScope(url.searchParams.get('scope') || undefined)
+  const scope = parseScopeParam(url.searchParams.get('scope'))
   const existing = getMcpConfigByName(name)
   if (!existing) {
     throw ApiError.notFound(`MCP server not found: ${name}`)
   }
 
-  await removeMcpConfig(name, scope)
+  if (!EDITABLE_SCOPES.has(scope)) {
+    throw ApiError.badRequest(`MCP server "${name}" cannot be removed from scope "${scope}"`)
+  }
+
+  try {
+    await removeMcpConfig(name, scope)
+  } catch (error) {
+    // Report why the config file could not be rewritten. Falling through to the
+    // generic handler would surface an opaque 500 with no actionable detail.
+    throw ApiError.badRequest(error instanceof Error ? error.message : String(error))
+  }
+
   cleanupSecureStorage(name, existing)
   await clearServerCache(name, existing).catch(() => {})
 

@@ -10,6 +10,13 @@ import { readJSONLFile } from './json.js'
 import { SYNTHETIC_MODEL } from './messages.js'
 import { getProjectsDir, isTranscriptMessage } from './sessionStorage.js'
 import { extractShotCountFromAssistantContent } from './shotStats.js'
+import {
+  activeGapMs,
+  estimateCostUSD,
+  isBillableUsageRecord,
+  resolveModelCosts,
+  usageRecordKey,
+} from './usageAccounting.js'
 import { jsonParse } from './slowOperations.js'
 import {
   getTodayDateString,
@@ -86,6 +93,11 @@ export type ClaudeCodeStats = {
   peakActivityDay: string | null
   peakActivityHour: number | null
 
+  // Models whose tokens are counted but whose dollars are not, because no published rates exist
+  // for them (third-party providers). Lets the UI say what the cost figure leaves out instead of
+  // presenting a partial total as if it were complete.
+  unpricedModels: string[]
+
   // Speculation time saved
   totalSpeculationTimeSavedMs: number
 
@@ -125,6 +137,24 @@ type UsageLike = {
   output_tokens?: number
   cache_read_input_tokens?: number
   cache_creation_input_tokens?: number
+  cache_creation?: {
+    ephemeral_5m_input_tokens?: number
+    ephemeral_1h_input_tokens?: number
+  }
+  server_tool_use?: { web_search_requests?: number }
+  speed?: string
+}
+
+/** The 5m/1h split when the API sends it, else the legacy aggregate field. */
+function cacheCreationTokens(usage: UsageLike): number {
+  const split = usage.cache_creation
+  if (split) {
+    return (
+      (split.ephemeral_5m_input_tokens || 0) +
+      (split.ephemeral_1h_input_tokens || 0)
+    )
+  }
+  return usage.cache_creation_input_tokens || 0
 }
 
 function getTotalUsageTokens(usage: UsageLike): number {
@@ -132,8 +162,46 @@ function getTotalUsageTokens(usage: UsageLike): number {
     (usage.input_tokens || 0) +
     (usage.output_tokens || 0) +
     (usage.cache_read_input_tokens || 0) +
-    (usage.cache_creation_input_tokens || 0)
+    cacheCreationTokens(usage)
   )
+}
+
+/**
+ * Whether `candidate` should replace the current longest session. Ties break on session id rather
+ * than on whichever the caller happened to visit first: the two stats paths iterate sessions in
+ * different orders (file order vs. indexed order), so an order-dependent tie would make them
+ * disagree — and ties are common now that a session with out-of-order timestamps scores 0 rather
+ * than a distinct negative span.
+ */
+function isLongerSession(
+  candidate: SessionStats,
+  current: SessionStats | null,
+): boolean {
+  if (!current) return true
+  if (candidate.duration !== current.duration) {
+    return candidate.duration > current.duration
+  }
+  return candidate.sessionId < current.sessionId
+}
+
+/**
+ * Models that contributed tokens but no dollars. Both stats paths funnel through this so the
+ * indexed and direct-scan results agree.
+ */
+function collectUnpricedModels(modelUsage: {
+  [modelName: string]: ModelUsage
+}): string[] {
+  return Object.entries(modelUsage)
+    .filter(([model, usage]) => {
+      const tokens =
+        usage.inputTokens +
+        usage.outputTokens +
+        usage.cacheReadInputTokens +
+        usage.cacheCreationInputTokens
+      return tokens > 0 && resolveModelCosts(model) === null
+    })
+    .map(([model]) => model)
+    .sort()
 }
 
 function incrementUsageCount(counts: Map<string, number>, name: string) {
@@ -294,8 +362,14 @@ async function processSessionFiles(
       // Subagent transcripts mark all messages as sidechain. We still want
       // their token usage counted, but not as separate sessions.
       const isSubagentFile = sessionFile.includes(`${sep}subagents${sep}`)
-      const parentSessionId = isSubagentFile
-        ? basename(dirname(dirname(sessionFile)))
+      // The owning session is the directory just above `subagents/`. Taking two levels up instead
+      // breaks for workflow agents, which nest one group deeper
+      // (`<session>/subagents/workflows/<wf_id>/agent-*.jsonl`) and would be attributed to a
+      // session literally named "workflows".
+      const pathSegments = sessionFile.split(sep)
+      const subagentsIndex = pathSegments.indexOf('subagents')
+      const parentSessionId = isSubagentFile && subagentsIndex > 0
+        ? pathSegments[subagentsIndex - 1]!
         : sessionId
 
       // Extract shot count from PR attribution in gh pr create calls (ant-only)
@@ -345,7 +419,16 @@ async function processSessionFiles(
       // sessions. Daily activity is tracked below by each message date so token
       // totals and visible per-day session counts share one date bucket.
       if (!isSubagentFile && includeSessionInRange) {
-        const duration = lastTimestamp.getTime() - firstTimestamp.getTime()
+        // Time actually worked, not `last - first`: a session picked up the next morning spans
+        // the whole night, and reporting that as task length produced figures like "436 hours".
+        let duration = 0
+        let previousMessageMs: number | null = null
+        for (const message of mainMessages) {
+          const messageMs = new Date(message.timestamp).getTime()
+          if (!Number.isFinite(messageMs)) continue
+          duration += activeGapMs(previousMessageMs, messageMs)
+          previousMessageMs = messageMs
+        }
 
         sessions.push({
           sessionId,
@@ -358,6 +441,26 @@ async function processSessionFiles(
 
         const hour = firstTimestamp.getHours()
         hourCounts.set(hour, (hourCounts.get(hour) || 0) + 1)
+      }
+
+      // One assistant reply is written as one JSONL line per content block, each repeating the
+      // same complete `usage`. Scoped per transcript, matching how the local index reducer keys
+      // its own deduplication, so both paths produce identical totals.
+      const countedUsageKeys = new Set<string>()
+      const claimUsage = (message: TranscriptMessage, suffix = ''): boolean => {
+        const record = message as unknown as Record<string, unknown>
+        const identity = {
+          version: record.version,
+          sessionId: record.sessionId,
+          requestId: record.requestId,
+          messageId: (message.message as { id?: unknown } | undefined)?.id,
+        }
+        if (!isBillableUsageRecord(identity)) return false
+        const key = usageRecordKey(identity, suffix)
+        if (key === null) return true
+        if (countedUsageKeys.has(key)) return false
+        countedUsageKeys.add(key)
+        return true
       }
 
       // Process messages for tool usage and model stats
@@ -412,6 +515,10 @@ async function processSessionFiles(
               continue
             }
 
+            if (!claimUsage(message)) {
+              continue
+            }
+
             if (!modelUsageAgg[model]) {
               modelUsageAgg[model] = {
                 inputTokens: 0,
@@ -425,12 +532,31 @@ async function processSessionFiles(
               }
             }
 
+            const cacheCreationInputTokens = cacheCreationTokens(usage)
+            const webSearchRequests =
+              (usage as UsageLike).server_tool_use?.web_search_requests || 0
             modelUsageAgg[model]!.inputTokens += usage.input_tokens || 0
             modelUsageAgg[model]!.outputTokens += usage.output_tokens || 0
             modelUsageAgg[model]!.cacheReadInputTokens +=
               usage.cache_read_input_tokens || 0
             modelUsageAgg[model]!.cacheCreationInputTokens +=
-              usage.cache_creation_input_tokens || 0
+              cacheCreationInputTokens
+            modelUsageAgg[model]!.webSearchRequests += webSearchRequests
+
+            // A model with no published rates (every third-party provider) contributes tokens but
+            // no dollars — a null must never be folded in as a zero.
+            const cost = estimateCostUSD(
+              model,
+              {
+                inputTokens: usage.input_tokens || 0,
+                outputTokens: usage.output_tokens || 0,
+                cacheReadInputTokens: usage.cache_read_input_tokens || 0,
+                cacheCreationInputTokens,
+                webSearchRequests,
+              },
+              (usage as UsageLike).speed,
+            )
+            if (cost !== null) modelUsageAgg[model]!.costUSD += cost
 
             // Track daily tokens per model
             const totalTokens = getTotalUsageTokens(usage)
@@ -471,6 +597,46 @@ async function processSessionFiles(
 }
 
 /**
+ * Depth a `subagents/` tree is walked. Plain subagents sit directly under it; a workflow nests
+ * them one group directory deeper. The bound keeps an unexpected deep tree from turning file
+ * discovery into a full filesystem walk.
+ */
+const SUBAGENT_SCAN_MAX_DEPTH = 3
+
+/** Every `agent-*.jsonl` beneath one session's `subagents/` directory, at any nesting level. */
+async function collectSubagentFiles(
+  directory: string,
+  depth = 1,
+): Promise<string[]> {
+  const fs = getFsImplementation()
+  let entries
+  try {
+    entries = await fs.readdir(directory)
+  } catch {
+    // No subagents directory for this session, or it became unreadable — nothing to collect.
+    return []
+  }
+
+  const files: string[] = []
+  const nestedDirs: string[] = []
+  for (const dirent of entries) {
+    if (dirent.isFile()) {
+      if (dirent.name.startsWith('agent-') && dirent.name.endsWith('.jsonl')) {
+        files.push(join(directory, dirent.name))
+      }
+      continue
+    }
+    if (dirent.isDirectory() && depth < SUBAGENT_SCAN_MAX_DEPTH) {
+      nestedDirs.push(join(directory, dirent.name))
+    }
+  }
+  const nested = await Promise.all(
+    nestedDirs.map(nestedDir => collectSubagentFiles(nestedDir, depth + 1)),
+  )
+  return [...files, ...nested.flat()]
+}
+
+/**
  * Get all session files from all project directories.
  * Includes both main session files and subagent transcript files.
  */
@@ -501,27 +667,14 @@ async function getAllSessionFiles(): Promise<string[]> {
           .filter(dirent => dirent.isFile() && dirent.name.endsWith('.jsonl'))
           .map(dirent => join(projectDir, dirent.name))
 
-        // Collect subagent files from session subdirectories in parallel
-        // Structure: {projectDir}/{sessionId}/subagents/agent-{agentId}.jsonl
+        // Collect subagent files from session subdirectories in parallel.
+        // Structure: {projectDir}/{sessionId}/subagents/agent-{agentId}.jsonl, plus workflow
+        // agents one group deeper at subagents/workflows/{workflowId}/agent-{agentId}.jsonl.
         const sessionDirs = entries.filter(dirent => dirent.isDirectory())
         const subagentResults = await Promise.all(
-          sessionDirs.map(async sessionDir => {
-            const subagentsDir = join(projectDir, sessionDir.name, 'subagents')
-            try {
-              const subagentEntries = await fs.readdir(subagentsDir)
-              return subagentEntries
-                .filter(
-                  dirent =>
-                    dirent.isFile() &&
-                    dirent.name.endsWith('.jsonl') &&
-                    dirent.name.startsWith('agent-'),
-                )
-                .map(dirent => join(subagentsDir, dirent.name))
-            } catch {
-              // subagents directory doesn't exist for this session, skip
-              return []
-            }
-          }),
+          sessionDirs.map(sessionDir =>
+            collectSubagentFiles(join(projectDir, sessionDir.name, 'subagents')),
+          ),
         )
 
         return [...mainFiles, ...subagentResults.flat()]
@@ -645,7 +798,7 @@ function cacheToStats(
   let longestSession = cache.longestSession
   if (todayStats) {
     for (const session of todayStats.sessionStats) {
-      if (!longestSession || session.duration > longestSession.duration) {
+      if (isLongerSession(session, longestSession)) {
         longestSession = session
       }
     }
@@ -683,14 +836,7 @@ function cacheToStats(
         )[0]
       : null
 
-  const totalDays =
-    firstSessionDate && lastSessionDate
-      ? Math.ceil(
-          (new Date(lastSessionDate).getTime() -
-            new Date(firstSessionDate).getTime()) /
-            (1000 * 60 * 60 * 24),
-        ) + 1
-      : 0
+  const totalDays = countUtcCalendarDaysInclusive(firstSessionDate, lastSessionDate)
 
   const totalSpeculationTimeSavedMs =
     cache.totalSpeculationTimeSavedMs +
@@ -706,6 +852,7 @@ function cacheToStats(
     dailyModelTokens,
     longestSession,
     modelUsage,
+    unpricedModels: collectUnpricedModels(modelUsage),
     toolUsage,
     skillUsage,
     firstSessionDate,
@@ -824,6 +971,30 @@ export type ResolvedStatsDateRange = {
   toDate?: string
 }
 
+const UTC_DAY_MS = 24 * 60 * 60 * 1000
+
+export function countUtcCalendarDaysInclusive(
+  first: string | null,
+  last: string | null,
+): number {
+  if (!first || !last) return 0
+  const firstDate = new Date(first)
+  const lastDate = new Date(last)
+  if (Number.isNaN(firstDate.getTime()) || Number.isNaN(lastDate.getTime())) return 0
+  const firstDay = Date.UTC(
+    firstDate.getUTCFullYear(),
+    firstDate.getUTCMonth(),
+    firstDate.getUTCDate(),
+  )
+  const lastDay = Date.UTC(
+    lastDate.getUTCFullYear(),
+    lastDate.getUTCMonth(),
+    lastDate.getUTCDate(),
+  )
+  if (lastDay < firstDay) return 0
+  return Math.floor((lastDay - firstDay) / UTC_DAY_MS) + 1
+}
+
 export function resolveStatsDateRange(
   range: StatsDateRange,
   now: Date = new Date(),
@@ -831,7 +1002,7 @@ export function resolveStatsDateRange(
   if (range === 'all') return {}
   const daysBack = range === '7d' ? 7 : 30
   const fromDate = new Date(now)
-  fromDate.setDate(now.getDate() - daysBack + 1)
+  fromDate.setUTCDate(now.getUTCDate() - daysBack + 1)
   return {
     fromDate: toDateString(fromDate),
     toDate: toDateString(now),
@@ -892,7 +1063,7 @@ export function processedStatsToClaudeCodeStats(
   // Find longest session
   let longestSession: SessionStats | null = null
   for (const session of stats.sessionStats) {
-    if (!longestSession || session.duration > longestSession.duration) {
+    if (isLongerSession(session, longestSession)) {
       longestSession = session
     }
   }
@@ -930,14 +1101,7 @@ export function processedStatsToClaudeCodeStats(
       : null
 
   // Total days in range
-  const totalDays =
-    firstSessionDate && lastSessionDate
-      ? Math.ceil(
-          (new Date(lastSessionDate).getTime() -
-            new Date(firstSessionDate).getTime()) /
-            (1000 * 60 * 60 * 24),
-        ) + 1
-      : 0
+  const totalDays = countUtcCalendarDaysInclusive(firstSessionDate, lastSessionDate)
 
   const result: ClaudeCodeStats = {
     totalSessions: stats.sessionStats.length,
@@ -949,6 +1113,7 @@ export function processedStatsToClaudeCodeStats(
     dailyModelTokens: dailyModelTokensSorted,
     longestSession,
     modelUsage: stats.modelUsage,
+    unpricedModels: collectUnpricedModels(stats.modelUsage),
     toolUsage: stats.toolUsage,
     skillUsage: stats.skillUsage,
     firstSessionDate,
@@ -981,8 +1146,8 @@ export function processedStatsToClaudeCodeStats(
  * Get the next day after a given date string (YYYY-MM-DD format).
  */
 function getNextDay(dateStr: string): string {
-  const date = new Date(dateStr)
-  date.setDate(date.getDate() + 1)
+  const date = new Date(`${dateStr}T00:00:00.000Z`)
+  date.setUTCDate(date.getUTCDate() + 1)
   return toDateString(date)
 }
 
@@ -1000,8 +1165,11 @@ function calculateStreaks(
     }
   }
 
-  const today = new Date(now)
-  today.setHours(0, 0, 0, 0)
+  const today = new Date(Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate(),
+  ))
 
   // Calculate current streak (working backwards from today)
   let currentStreak = 0
@@ -1018,7 +1186,7 @@ function calculateStreaks(
     }
     currentStreak++
     currentStreakStart = dateStr
-    checkDate.setDate(checkDate.getDate() - 1)
+    checkDate.setUTCDate(checkDate.getUTCDate() - 1)
   }
 
   // Calculate longest streak
@@ -1175,6 +1343,7 @@ function getEmptyStats(): ClaudeCodeStats {
     modelUsage: {},
     toolUsage: {},
     skillUsage: {},
+    unpricedModels: [],
     firstSessionDate: null,
     lastSessionDate: null,
     peakActivityDay: null,

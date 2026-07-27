@@ -8,7 +8,7 @@ import { getServerBaseUrl } from '../../lib/desktopRuntime'
 import { openWithContextForWorkspaceFile } from '../../lib/openWithContextForHref'
 import { useBrowserPanelStore } from '../../stores/browserPanelStore'
 import { useWorkspacePanelStore } from '../../stores/workspacePanelStore'
-import { TargetIcon } from '../common/TargetIcon'
+import { TargetIcon } from '@/components/composite/TargetIcon'
 
 function openExternal(path: string) {
   void getDesktopHost().shell.openPath(path).catch(() => {})

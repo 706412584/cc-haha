@@ -40,11 +40,18 @@ export function DayOfWeekPicker({ selected, onChange }: Props) {
             key={day}
             type="button"
             onClick={() => toggle(day)}
+            aria-pressed={isActive}
             className={`
-              w-8 h-8 rounded-full text-xs font-medium transition-colors
+              h-8 w-8 cursor-pointer rounded-full border text-xs font-medium
+              transition-[background-color,color,border-color] duration-150 ease-out
+              focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]
+              focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-surface)]
               ${isActive
-                ? 'bg-[var(--color-surface-selected)] text-[var(--color-text-primary)] border border-[var(--color-border-focus)]'
-                : 'bg-[var(--color-surface)] text-[var(--color-text-tertiary)] border border-[var(--color-border)] hover:bg-[var(--color-surface-hover)]'
+                // The handoff's active chip: terracotta wash, its paired ink,
+                // and the accent border. `--color-brand` as the text would be
+                // 4.3:1 on this fill under the two ink palettes.
+                ? 'border-[var(--color-primary-fixed-dim)] bg-[var(--color-brand-soft)] text-[var(--color-on-brand-soft)]'
+                : 'border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-tertiary)] hover:border-[var(--color-outline)] hover:bg-[var(--color-surface-hover)]'
               }
             `}
           >

@@ -37,6 +37,19 @@ describe('electron desktop host', () => {
     expect(invoke).toHaveBeenNthCalledWith(2, ELECTRON_IPC_CHANNELS.clipboardWriteText, 'to clipboard')
   })
 
+  it('resolves native paths for renderer File objects through the preload bridge', () => {
+    const file = new File(['# Notes'], 'notes.md', { type: 'text/markdown' })
+    const getPathForFile = vi.fn().mockReturnValue('C:\\Users\\Nanmi\\Desktop\\notes.md')
+    const host = createElectronHost({
+      getPathForFile,
+      invoke: vi.fn(),
+      subscribe: vi.fn(),
+    })
+
+    expect(host.files.getPathForFile(file)).toBe('C:\\Users\\Nanmi\\Desktop\\notes.md')
+    expect(getPathForFile).toHaveBeenCalledWith(file)
+  })
+
   it('rejects invalid preload payloads before invoking Electron IPC', async () => {
     const invoke = vi.fn()
     const host = createElectronHost({

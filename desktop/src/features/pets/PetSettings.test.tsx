@@ -11,6 +11,8 @@ const {
   listPetsMock,
   createFromImageMock,
   createFromAtlasMock,
+  importSheetMock,
+  writeTextMock,
   openFolderMock,
   showPetMock,
   hidePetMock,
@@ -21,10 +23,18 @@ const {
   listPetsMock: vi.fn(),
   createFromImageMock: vi.fn(),
   createFromAtlasMock: vi.fn(),
+  importSheetMock: vi.fn(),
+  writeTextMock: vi.fn(),
   openFolderMock: vi.fn(),
   showPetMock: vi.fn(),
   hidePetMock: vi.fn(),
   onVisibilityChangedMock: vi.fn(),
+}))
+
+// The guided import normalizes the sheet on a real canvas, which jsdom does not
+// provide. Canvas behaviour is covered by petAtlasNormalize.test.ts instead.
+vi.mock('./petSheetImport', () => ({
+  importPetFromActionSheet: importSheetMock,
 }))
 
 vi.mock('../../api/desktopUiPreferences', async () => {
@@ -42,6 +52,7 @@ vi.mock('../../api/desktopUiPreferences', async () => {
 vi.mock('../../lib/desktopHost', () => ({
   getDesktopHost: () => ({
     isDesktop: true,
+    clipboard: { writeText: writeTextMock, readText: vi.fn() },
     pets: {
       list: listPetsMock,
       createFromImage: createFromImageMock,
@@ -96,6 +107,9 @@ describe('PetSettings', () => {
     listPetsMock.mockReset()
     createFromImageMock.mockReset()
     createFromAtlasMock.mockReset()
+    importSheetMock.mockReset()
+    writeTextMock.mockReset()
+    writeTextMock.mockResolvedValue(undefined)
     openFolderMock.mockReset()
     showPetMock.mockReset()
     hidePetMock.mockReset()
@@ -145,7 +159,7 @@ describe('PetSettings', () => {
   it('persists enabling the pet and opens the floating pet window', async () => {
     render(<PetSettings />)
 
-    const toggle = await screen.findByRole('checkbox', { name: 'Show desktop pet' })
+    const toggle = await screen.findByRole('switch', { name: 'Show desktop pet' })
     fireEvent.click(toggle)
 
     await waitFor(() => {
@@ -160,9 +174,9 @@ describe('PetSettings', () => {
   it('keeps the task panel disabled by default and persists enabling it', async () => {
     render(<PetSettings />)
 
-    const panelToggle = await screen.findByRole('checkbox', { name: 'Show active task panel' })
+    const panelToggle = await screen.findByRole('switch', { name: 'Show active task panel' })
     expect(panelToggle).not.toBeChecked()
-    expect(screen.queryByRole('checkbox', { name: 'Start collapsed' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('switch', { name: 'Start collapsed' })).not.toBeInTheDocument()
 
     fireEvent.click(panelToggle)
 
@@ -175,7 +189,7 @@ describe('PetSettings', () => {
     updatePetPreferencesMock.mockRejectedValueOnce(new Error('disk full'))
     render(<PetSettings />)
 
-    const toggle = await screen.findByRole('checkbox', { name: 'Show desktop pet' })
+    const toggle = await screen.findByRole('switch', { name: 'Show desktop pet' })
     fireEvent.click(toggle)
 
     expect(toggle).toBeChecked()
@@ -188,7 +202,7 @@ describe('PetSettings', () => {
     showPetMock.mockRejectedValueOnce(new Error('window unavailable'))
     render(<PetSettings />)
 
-    const toggle = await screen.findByRole('checkbox', { name: 'Show desktop pet' })
+    const toggle = await screen.findByRole('switch', { name: 'Show desktop pet' })
     fireEvent.click(toggle)
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Pet preferences could not be saved.')
@@ -204,7 +218,7 @@ describe('PetSettings', () => {
       .mockResolvedValueOnce(preferencesResponse({ ...defaultPetPreferences, enabled: false }))
     render(<PetSettings />)
 
-    const toggle = await screen.findByRole('checkbox', { name: 'Show desktop pet' })
+    const toggle = await screen.findByRole('switch', { name: 'Show desktop pet' })
     expect(toggle).toBeChecked()
 
     window.dispatchEvent(new Event('focus'))
@@ -223,7 +237,7 @@ describe('PetSettings', () => {
       .mockResolvedValueOnce(preferencesResponse({ ...defaultPetPreferences, enabled: false }))
     render(<PetSettings />)
 
-    const toggle = await screen.findByRole('checkbox', { name: 'Show desktop pet' })
+    const toggle = await screen.findByRole('switch', { name: 'Show desktop pet' })
     expect(toggle).toBeChecked()
 
     notifyVisibilityChanged?.()
@@ -246,8 +260,8 @@ describe('PetSettings', () => {
     })
 
     fireEvent.change(screen.getByRole('slider', { name: 'Pet size' }), { target: { value: '176' } })
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Play animations' }))
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Show active task panel' }))
+    fireEvent.click(screen.getByRole('switch', { name: 'Play animations' }))
+    fireEvent.click(screen.getByRole('switch', { name: 'Show active task panel' }))
 
     await waitFor(() => {
       expect(updatePetPreferencesMock).toHaveBeenCalledWith({ size: 176 })
@@ -265,19 +279,27 @@ describe('PetSettings', () => {
     expect(slider).toHaveClass('accent-[var(--color-brand)]')
     expect(slider).not.toHaveClass('accent-[var(--color-accent)]')
 
-    const motionToggle = screen.getByRole('checkbox', { name: 'Play animations' })
+    const motionToggle = screen.getByRole('switch', { name: 'Play animations' })
     const track = motionToggle.nextElementSibling
     const thumb = track?.nextElementSibling
+    // The focus ring is the opaque token, not `/40`: the alpha modifier
+    // compiles to a color function Safari 15 WebViews drop, and at 40% this
+    // ring was barely visible anyway.
     expect(track).toHaveClass(
       'peer-checked:bg-[var(--color-switch-checked-bg)]',
-      'peer-focus-visible:ring-[var(--color-border-focus)]/40',
+      'peer-focus-visible:ring-[var(--color-border-focus)]',
     )
     expect(thumb).toHaveClass('bg-[var(--color-switch-thumb)]')
 
+    // Selection is a 1.5px terracotta outline over the hover ground, matching
+    // the provider list and the worktree cards. The raw `--color-brand` border
+    // it used to carry is the accent at full strength, which read as an error
+    // outline next to the muted card grid.
     const selectedCard = screen.getByRole('button', { name: 'Selected' }).closest('article')
     expect(selectedCard).toHaveClass(
-      'border-[var(--color-brand)]',
-      'bg-[var(--color-surface-selected)]',
+      'border-[1.5px]',
+      'border-[var(--color-primary-fixed-dim)]',
+      'bg-[var(--color-surface-hover)]',
     )
   })
 
@@ -289,17 +311,60 @@ describe('PetSettings', () => {
     await waitFor(() => expect(openFolderMock).toHaveBeenCalledTimes(1))
   })
 
-  it('explains the three creation paths without depending on the current chat model', async () => {
+  it('offers three usable creation paths with no disabled dead end', async () => {
     render(<PetSettings />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Add pet' }))
 
-    expect(screen.getByRole('button', { name: /Animate one image/ })).toBeEnabled()
-    expect(screen.getByText('Local only · No image model or video generation required')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /Import professional animation atlas/ })).toBeEnabled()
-    expect(screen.getByRole('button', { name: /Generate full animation with AI/ })).toBeDisabled()
-    expect(screen.getByText(/configure a separate image-generation service first/i)).toBeInTheDocument()
-    expect(screen.getByText(/current chat model is never used/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Use a picture you already have/ })).toBeEnabled()
+    expect(screen.getByRole('button', { name: /Draw one with AI that runs and jumps/ })).toBeEnabled()
+    expect(screen.getByRole('button', { name: /I already have an action sheet/ })).toBeEnabled()
+    expect(screen.getByText(/none of your chat quota is used/i)).toBeInTheDocument()
+  })
+
+  it('walks the AI path through the prompt and template before asking for a file', async () => {
+    render(<PetSettings />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Add pet' }))
+    fireEvent.click(screen.getByRole('button', { name: /Draw one with AI that runs and jumps/ }))
+
+    // Step 1 hands over a prompt the user can paste straight into an image model.
+    expect(screen.getByText(/Draw me a game character action sheet/)).toBeInTheDocument()
+    expect(screen.getByText(/8 columns x 9 rows/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Copy this prompt/ }))
+    await waitFor(() => expect(writeTextMock).toHaveBeenCalledWith(
+      expect.stringContaining('Row 2, all 8 cells'),
+    ))
+
+    // Step 2 shows the reference grid rather than describing pixel maths.
+    expect(screen.getByRole('img', { name: /Action sheet template/ })).toBeInTheDocument()
+    expect(screen.getByText(/a white backdrop becomes a square/i)).toBeInTheDocument()
+
+    // The form only appears once the walkthrough is acknowledged.
+    expect(screen.queryByRole('textbox', { name: 'Pet ID' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Done drawing, next' }))
+    expect(screen.getByRole('textbox', { name: 'Pet ID' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Back to the steps' })).toBeInTheDocument()
+    // The form must stay badged as the AI path, not fall through to the "already
+    // have a sheet" heading.
+    expect(screen.getByRole('heading', { name: /Draw one with AI that runs and jumps/ }))
+      .toBeInTheDocument()
+  })
+
+  it('tells the user plainly when the sheet has no transparent background', async () => {
+    importSheetMock.mockResolvedValueOnce({ status: 'error', errorCode: 'opaque-background' })
+    render(<PetSettings />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Add pet' }))
+    fireEvent.click(screen.getByRole('button', { name: /I already have an action sheet/ }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Pet ID' }), { target: { value: 'flat-cat' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Display name' }), { target: { value: 'Flat Cat' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Description' }), { target: { value: 'Needs alpha.' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Pick an action sheet' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      /no transparent background, so the pet would show up as a square/i,
+    )
   })
 
   it('creates a lightweight animated pet from one local image and selects it', async () => {
@@ -321,29 +386,29 @@ describe('PetSettings', () => {
     render(<PetSettings />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Add pet' }))
-    fireEvent.click(screen.getByRole('button', { name: /Animate one image/ }))
-    expect(screen.getByText(/lightweight breathing, floating, and task-state motion/i)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Use a picture you already have/ }))
+    expect(screen.getByText(/only sways gently/i)).toBeInTheDocument()
     fireEvent.change(screen.getByRole('textbox', { name: 'Pet ID' }), { target: { value: 'orbit-fox' } })
     fireEvent.change(screen.getByRole('textbox', { name: 'Display name' }), { target: { value: 'Orbit Fox' } })
     fireEvent.change(screen.getByRole('textbox', { name: 'Description' }), {
       target: { value: 'A bright local companion.' },
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Choose image and create' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Pick a picture' }))
 
     await waitFor(() => expect(createFromImageMock).toHaveBeenCalledWith({
       slug: 'orbit-fox',
       displayName: 'Orbit Fox',
       description: 'A bright local companion.',
-      dialogTitle: 'Choose a transparent pet image',
+      dialogTitle: 'Choose a pet image with a transparent background',
       dialogFilterName: 'Pet image',
     }))
-    expect(createFromAtlasMock).not.toHaveBeenCalled()
+    expect(importSheetMock).not.toHaveBeenCalled()
     expect(updatePetPreferencesMock).toHaveBeenCalledWith({ selectedPetId: 'custom:orbit-fox' })
     expect(await screen.findByText('Orbit Fox')).toBeInTheDocument()
   })
 
   it('creates a validated atlas package in app storage and selects it', async () => {
-    createFromAtlasMock.mockResolvedValueOnce({ id: 'custom:orbit-fox' })
+    importSheetMock.mockResolvedValueOnce({ status: 'created', id: 'custom:orbit-fox' })
     listPetsMock.mockResolvedValueOnce({
       pets: [{
         id: 'custom:moon-cat',
@@ -370,45 +435,47 @@ describe('PetSettings', () => {
     render(<PetSettings />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Add pet' }))
-    fireEvent.click(screen.getByRole('button', { name: /Import professional animation atlas/ }))
+    fireEvent.click(screen.getByRole('button', { name: /I already have an action sheet/ }))
     fireEvent.change(screen.getByRole('textbox', { name: 'Pet ID' }), { target: { value: 'orbit-fox' } })
     fireEvent.change(screen.getByRole('textbox', { name: 'Display name' }), { target: { value: 'Orbit Fox' } })
     fireEvent.change(screen.getByRole('textbox', { name: 'Description' }), {
       target: { value: 'A bright local companion.' },
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Choose atlas and create' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Pick an action sheet' }))
 
-    await waitFor(() => expect(createFromAtlasMock).toHaveBeenCalledWith({
+    await waitFor(() => expect(importSheetMock).toHaveBeenCalledWith(expect.anything(), {
       slug: 'orbit-fox',
       displayName: 'Orbit Fox',
       description: 'A bright local companion.',
-      dialogTitle: 'Choose a v2 pet animation atlas',
-      dialogFilterName: 'Pet animation atlas',
+      dialogTitle: 'Choose a pet action sheet',
+      dialogFilterName: 'Pet action sheet',
     }))
     expect(updatePetPreferencesMock).toHaveBeenCalledWith({ selectedPetId: 'custom:orbit-fox' })
     expect(await screen.findByText('Orbit Fox')).toBeInTheDocument()
   })
 
   it('keeps the create dialog open and localizes validation failures', async () => {
-    createFromAtlasMock.mockResolvedValueOnce({ errorCode: 'invalid-image-dimensions' })
+    importSheetMock.mockResolvedValueOnce({ status: 'error', errorCode: 'invalid-image-dimensions' })
     render(<PetSettings />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Add pet' }))
-    fireEvent.click(screen.getByRole('button', { name: /Import professional animation atlas/ }))
+    fireEvent.click(screen.getByRole('button', { name: /I already have an action sheet/ }))
     fireEvent.change(screen.getByRole('textbox', { name: 'Pet ID' }), { target: { value: 'bad-atlas' } })
     fireEvent.change(screen.getByRole('textbox', { name: 'Display name' }), { target: { value: 'Bad Atlas' } })
     fireEvent.change(screen.getByRole('textbox', { name: 'Description' }), { target: { value: 'Needs repair.' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Choose atlas and create' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Pick an action sheet' }))
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('The animation atlas must be exactly 1536×2288 pixels.')
-    expect(screen.getByRole('dialog', { name: 'Create a custom pet' })).toBeInTheDocument()
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      /cannot be sliced into 8 columns by 9 rows/i,
+    )
+    expect(screen.getByRole('dialog', { name: 'Make your own pet' })).toBeInTheDocument()
     expect(updatePetPreferencesMock).not.toHaveBeenCalledWith(expect.objectContaining({
       selectedPetId: 'custom:bad-atlas',
     }))
   })
 
   it('keeps an installed pet visible when selecting it cannot be persisted', async () => {
-    createFromAtlasMock.mockResolvedValueOnce({ id: 'custom:orbit-fox' })
+    importSheetMock.mockResolvedValueOnce({ status: 'created', id: 'custom:orbit-fox' })
     listPetsMock.mockResolvedValueOnce({ pets: [], errors: [] }).mockResolvedValueOnce({
       pets: [{
         id: 'custom:orbit-fox',
@@ -425,16 +492,16 @@ describe('PetSettings', () => {
     render(<PetSettings />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Add pet' }))
-    fireEvent.click(screen.getByRole('button', { name: /Import professional animation atlas/ }))
+    fireEvent.click(screen.getByRole('button', { name: /I already have an action sheet/ }))
     fireEvent.change(screen.getByRole('textbox', { name: 'Pet ID' }), { target: { value: 'orbit-fox' } })
     fireEvent.change(screen.getByRole('textbox', { name: 'Display name' }), { target: { value: 'Orbit Fox' } })
     fireEvent.change(screen.getByRole('textbox', { name: 'Description' }), {
       target: { value: 'A bright local companion.' },
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Choose atlas and create' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Pick an action sheet' }))
 
     expect(await screen.findByText('Orbit Fox')).toBeInTheDocument()
-    expect(screen.queryByRole('dialog', { name: 'Create a custom pet' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: 'Make your own pet' })).not.toBeInTheDocument()
     expect(screen.getByRole('alert')).toHaveTextContent('Pet preferences could not be saved.')
   })
 
@@ -455,18 +522,18 @@ describe('PetSettings', () => {
     render(<PetSettings />)
 
     fireEvent.click(await screen.findByRole('button', { name: '添加宠物' }))
-    fireEvent.click(screen.getByRole('button', { name: /用一张图片制作轻动画/ }))
+    fireEvent.click(screen.getByRole('button', { name: /用一张现成的图/ }))
     fireEvent.change(screen.getByRole('textbox', { name: '宠物 ID' }), { target: { value: 'bad-image' } })
     fireEvent.change(screen.getByRole('textbox', { name: '显示名称' }), { target: { value: 'Bad Image' } })
     fireEvent.change(screen.getByRole('textbox', { name: '宠物描述' }), { target: { value: 'Needs repair.' } })
-    fireEvent.click(screen.getByRole('button', { name: '选择图片并创建' }))
+    fireEvent.click(screen.getByRole('button', { name: '选图片，做宠物' }))
 
     await waitFor(() => expect(createFromImageMock).toHaveBeenCalledWith(expect.objectContaining({
-      dialogTitle: '选择透明背景的宠物图片',
+      dialogTitle: '选一张背景透明的宠物图片',
       dialogFilterName: '宠物图片',
     })))
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      '宠物图片每边必须为 32–4096 像素，且总像素数不能超过 16,777,216。',
+      '图片长宽都要在 32 到 4096 像素之间，总像素数不超过 16,777,216。',
     )
   })
 })

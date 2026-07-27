@@ -77,9 +77,11 @@ credentials*.json
 # Temp markdown snapshots
 sidebar-snapshot.md
 
-# VitePress
+# Legacy VitePress output retained by existing local checkouts
+# (the active documentation site is built from site/)
 docs/.vitepress/dist
 docs/.vitepress/cache
+
 runtime/__pycache__
 
 # IDE

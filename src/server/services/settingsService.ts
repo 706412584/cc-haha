@@ -170,12 +170,21 @@ export class SettingsService {
     )
   }
 
-  /** 更新用户级设置（浅合并） */
+  /** 更新用户级设置（顶层浅合并，并保留桌面终端的未知子字段） */
   async updateUserSettings(settings: Record<string, unknown>): Promise<void> {
     const filePath = this.getUserSettingsPath()
     await this.withWriteLock(filePath, async () => {
       const current = await this.readJsonFile(filePath)
       const merged = Object.assign({}, current, settings)
+      const currentDesktopTerminal = normalizeJsonObject(current.desktopTerminal)
+      const updatedDesktopTerminal = normalizeJsonObject(settings.desktopTerminal)
+      if (currentDesktopTerminal && updatedDesktopTerminal) {
+        merged.desktopTerminal = Object.assign(
+          {},
+          currentDesktopTerminal,
+          updatedDesktopTerminal,
+        )
+      }
       await this.writeJsonFile(filePath, merged)
     })
   }

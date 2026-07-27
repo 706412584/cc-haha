@@ -372,18 +372,71 @@ describe('remote H5 auth and CORS integration', () => {
     }
   })
 
-  test('rejects a tokenless loopback proxy hop when desktop local auth is configured', async () => {
+  test('keeps tokenless loopback capabilities working when desktop local auth is configured', async () => {
+    // The desktop shell injects a process token, but the browser windows it
+    // opens (OAuth success pages, `/preview-fs` links) and local scripts cannot
+    // carry it. Loopback must stay trusted on its own.
     process.env.CC_HAHA_LOCAL_ACCESS_TOKEN = 'desktop-local-secret'
     await restartRemoteServer()
 
-    const proxyShapedResponse = await fetch(`${baseUrl}/api/status`)
-    expect(proxyShapedResponse.status).toBe(403)
+    const tokenlessResponse = await fetch(`${baseUrl}/api/status`)
+    expect(tokenlessResponse.status).toBe(200)
+    await expect(tokenlessResponse.json()).resolves.toMatchObject({ status: 'ok' })
+
+    const oauthSuccessResponse = await fetch(`${baseUrl}/api/haha-grok-oauth/success`)
+    expect(oauthSuccessResponse.status).toBe(200)
+    expect(oauthSuccessResponse.headers.get('Content-Type')).toContain('text/html')
 
     const desktopResponse = await fetch(`${baseUrl}/api/status`, {
       headers: { Authorization: 'Bearer desktop-local-secret' },
     })
     expect(desktopResponse.status).toBe(200)
     await expect(desktopResponse.json()).resolves.toMatchObject({ status: 'ok' })
+  })
+
+  test('still requires the desktop process token for the H5 control plane', async () => {
+    process.env.CC_HAHA_LOCAL_ACCESS_TOKEN = 'desktop-local-secret'
+    await restartRemoteServer()
+
+    // Another browser or script on the same machine must not be able to publish
+    // the user's sessions to the network.
+    const tokenlessRead = await fetch(`${baseUrl}/api/h5-access`)
+    expect(tokenlessRead.status).toBe(403)
+
+    const tokenlessEnable = await fetch(`${baseUrl}/api/h5-access/enable`, { method: 'POST' })
+    expect(tokenlessEnable.status).toBe(403)
+
+    const desktopEnable = await fetch(`${baseUrl}/api/h5-access/enable`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer desktop-local-secret' },
+    })
+    expect(desktopEnable.status).toBe(200)
+    await expect(desktopEnable.json()).resolves.toHaveProperty('token')
+  })
+
+  test('does not extend tokenless loopback trust to cross-site subresource loads', async () => {
+    process.env.CC_HAHA_LOCAL_ACCESS_TOKEN = 'desktop-local-secret'
+    await restartRemoteServer()
+
+    // A malicious page embedding `<img src="http://127.0.0.1:<port>/api/...">`
+    // sends no Origin, so Fetch Metadata is what marks it as not-a-navigation.
+    const subresourceResponse = await fetch(`${baseUrl}/api/status`, {
+      headers: {
+        'Sec-Fetch-Site': 'cross-site',
+        'Sec-Fetch-Mode': 'no-cors',
+        'Sec-Fetch-Dest': 'image',
+      },
+    })
+    expect(subresourceResponse.status).toBe(403)
+
+    const navigationResponse = await fetch(`${baseUrl}/api/status`, {
+      headers: {
+        'Sec-Fetch-Site': 'cross-site',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Dest': 'document',
+      },
+    })
+    expect(navigationResponse.status).toBe(200)
   })
 
   test('enforces the pet bearer capability allowlist before API routing', async () => {
@@ -518,8 +571,10 @@ describe('remote H5 auth and CORS integration', () => {
       body: JSON.stringify({ model: 'test', max_tokens: 8, messages: [] }),
     })
 
+    // Loopback reaches the proxy with or without the process token; only the
+    // provider configuration decides the outcome.
     const disabledTokenlessResponse = await requestProxy(false)
-    expect(disabledTokenlessResponse.status).toBe(403)
+    expect(disabledTokenlessResponse.status).toBe(400)
 
     const disabledAuthorizedResponse = await requestProxy(true)
     expect(disabledAuthorizedResponse.status).toBe(400)
@@ -529,8 +584,11 @@ describe('remote H5 auth and CORS integration', () => {
 
     await new H5AccessService().enable()
 
+    // Remote browsers on this same route still need the H5 token — covered by
+    // 'requires H5 token for remote browser proxy requests when H5 access is
+    // enabled'.
     const enabledTokenlessResponse = await requestProxy(false)
-    expect(enabledTokenlessResponse.status).toBe(401)
+    expect(enabledTokenlessResponse.status).toBe(400)
 
     const enabledAuthorizedResponse = await requestProxy(true)
     expect(enabledAuthorizedResponse.status).toBe(400)

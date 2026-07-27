@@ -1,6 +1,7 @@
 import { ChevronDown } from 'lucide-react'
+import { forwardRef, type ButtonHTMLAttributes } from 'react'
 import { useTranslation } from '../../i18n'
-import { Dropdown } from '../shared/Dropdown'
+import { Dropdown } from '@/components/ui/Dropdown'
 import { useMarketStore, type MarketFilters } from '../../stores/marketStore'
 import type {
   MarketInstalledFilter,
@@ -8,23 +9,41 @@ import type {
   MarketSourceFilter,
 } from '../../types/market'
 
-function FilterTrigger({ label, value, active }: { label: string; value: string; active: boolean }) {
+type FilterTriggerProps = ButtonHTMLAttributes<HTMLButtonElement> & {
+  label: string
+  value: string
+  active: boolean
+}
+
+/**
+ * `Dropdown` clones its trigger to attach a ref, the aria state and its own
+ * click/keydown handlers. A trigger that neither forwards the ref nor spreads
+ * the rest of its props silently drops all of that — the chips render but the
+ * menu never opens.
+ */
+const FilterTrigger = forwardRef<HTMLButtonElement, FilterTriggerProps>(function FilterTrigger(
+  { label, value, active, ...props },
+  ref,
+) {
   return (
     <button
+      ref={ref}
       type="button"
-      aria-haspopup="menu"
-      className={`inline-flex min-h-10 items-center gap-1.5 rounded-lg border px-3 text-xs transition-colors focus-visible:outline-none focus-visible:shadow-[var(--shadow-focus-ring)] active:scale-[0.98] ${
+      className={`inline-flex min-h-11 items-center gap-2 rounded-[var(--radius-lg)] border px-4 text-sm transition-[background-color,color,border-color,box-shadow,transform] duration-150 ease-out focus-visible:outline-none focus-visible:shadow-[var(--shadow-focus-ring)] active:scale-[0.98] motion-reduce:transition-none ${
         active
-          ? 'border-[var(--color-brand)]/35 bg-[var(--color-primary-fixed)] text-[var(--color-brand)]'
-          : 'border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] text-[var(--color-text-secondary)] hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)]'
+          ? // Foreground is the darkened pair; raw terracotta on its own soft
+            // fill only reaches 4.3:1 under the two ink themes.
+            'border-[var(--color-primary-fixed-dim)] bg-[var(--color-brand-soft)] text-[var(--color-on-brand-soft)]'
+          : 'border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-primary)] hover:border-[var(--color-outline)] hover:bg-[var(--color-surface-hover)]'
       }`}
+      {...props}
     >
-      <span className={active ? 'text-[var(--color-brand)]/75' : 'text-[var(--color-text-tertiary)]'}>{label}</span>
-      <span className="font-medium">{value}</span>
-      <ChevronDown className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+      <span className={active ? 'text-[var(--color-on-brand-soft)]' : 'text-[var(--color-text-secondary)]'}>{label}</span>
+      <span className="font-semibold">{value}</span>
+      <ChevronDown className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]" strokeWidth={1.8} aria-hidden="true" />
     </button>
   )
-}
+})
 
 export function FilterBar({ className = '' }: { className?: string }) {
   const t = useTranslation()

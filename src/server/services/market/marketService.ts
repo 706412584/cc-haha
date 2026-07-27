@@ -77,10 +77,42 @@ export type MarketMeta = {
   signatureVerified?: boolean
 }
 
+export function parseMarketMeta(value: unknown): MarketMeta | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+
+  const candidate = value as Record<string, unknown>
+  const source = candidate.source
+  const slug = candidate.slug
+  const id = candidate.id
+  const installedAt = candidate.installedAt
+  const fileCount = candidate.fileCount
+  const version = candidate.version
+  const signatureVerified = candidate.signatureVerified
+
+  if (typeof source !== 'string' || !MARKET_SOURCES.includes(source as MarketSource)) return null
+  if (typeof slug !== 'string' || !slug || !sanitizeDirName(slug)) return null
+  if (id !== skillId(source as MarketSource, slug)) return null
+  if (typeof installedAt !== 'string' || !installedAt) return null
+  if (typeof fileCount !== 'number' || !Number.isInteger(fileCount) || fileCount < 0) return null
+  if (version !== undefined && typeof version !== 'string') return null
+  if (signatureVerified !== undefined && typeof signatureVerified !== 'boolean') return null
+
+  return {
+    id,
+    source: source as MarketSource,
+    slug,
+    installedAt,
+    fileCount,
+    ...(version === undefined ? {} : { version }),
+    ...(signatureVerified === undefined ? {} : { signatureVerified }),
+  }
+}
+
 export async function readMarketMeta(dirName: string): Promise<MarketMeta | null> {
   try {
     const raw = await fs.readFile(path.join(getMarketSkillsDir(), dirName, MARKET_META_FILENAME), 'utf-8')
-    return JSON.parse(raw) as MarketMeta
+    const meta = parseMarketMeta(JSON.parse(raw))
+    return meta && sanitizeDirName(meta.slug) === dirName ? meta : null
   } catch {
     return null
   }
@@ -109,7 +141,7 @@ export async function annotateInstallState<T extends NormalizedSkill>(skill: T):
     return { ...skill, installState: 'installable', notInstallableReason: undefined, installedInfo: undefined }
   }
   const meta = await readMarketMeta(dirName)
-  if (meta && meta.slug === skill.slug) {
+  if (meta && meta.id === skillId(skill.source, skill.slug)) {
     return {
       ...skill,
       installState: 'installed',

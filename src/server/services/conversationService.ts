@@ -38,6 +38,12 @@ import {
   buildClaudeCliArgs,
   resolveClaudeCliLauncher,
 } from '../../utils/desktopBundledCli.js'
+import {
+  PLAN_REJECTION_MESSAGE,
+  PLAN_REJECTION_WITH_REASON_PREFIX,
+  REJECT_MESSAGE,
+  REJECT_MESSAGE_WITH_REASON_PREFIX,
+} from '../../constants/messages.js'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 import { findCanonicalGitRoot } from '../../utils/git.js'
 import { ORCHESTRATION_SYSTEM_PROMPT } from '../orchestrationPrompt.js'
@@ -83,6 +89,30 @@ export const DESKTOP_CLI_GRACEFUL_SHUTDOWN_TIMEOUT_MS = 6_000
 export function cliExitSeverity(code: number | null): 'info' | 'error' {
   if (code === 0 || code === null || code === 143 || code === 137) return 'info'
   return 'error'
+}
+
+/**
+ * Builds the denial text the CLI hands to the model as tool_result content.
+ *
+ * The model reads this verbatim, so it has to carry the instruction the desktop
+ * UI can't: a plain tool denial means "stop and wait for me", while a rejected
+ * plan means "keep planning". Both renderers (the CLI's
+ * renderToolUseRejectedMessage, the desktop's extractPlanPreview) read the plan
+ * from the tool input, so nothing here needs to echo the plan back.
+ */
+export function buildDenyMessage(
+  toolName: string | undefined,
+  denyMessage: string | undefined,
+): string {
+  const feedback = denyMessage?.trim()
+  if (toolName === 'ExitPlanMode') {
+    return feedback
+      ? `${PLAN_REJECTION_WITH_REASON_PREFIX}${feedback}`
+      : PLAN_REJECTION_MESSAGE
+  }
+  return feedback
+    ? `${REJECT_MESSAGE_WITH_REASON_PREFIX}${feedback}`
+    : REJECT_MESSAGE
 }
 
 export function buildConversationCliSpawnOptions(
@@ -704,12 +734,16 @@ export class ConversationService {
             }
           : {
               behavior: 'deny',
-              message: denyMessage || 'User denied via UI',
-              // Rejecting ExitPlanMode means "keep planning"; other desktop
-              // denials stop the current agent turn and wait for user input.
-              ...(pendingRequest?.toolName !== 'ExitPlanMode'
-                ? { interrupt: true }
-                : {}),
+              // No `interrupt`: the denial travels back to the model as a
+              // tool_result so it can acknowledge the rejection and stop on its
+              // own. Aborting the turn instead (#1051) kept the model from ever
+              // seeing the denial, so a rejected tool ended the turn silently.
+              // REJECT_MESSAGE carries the "STOP and wait for the user"
+              // instruction that the abort used to enforce; 'User denied via UI'
+              // was a debug string the model had no way to act on.
+              // ExitPlanMode is the exception — rejecting it means "keep
+              // planning", so the model is told to revise rather than stop.
+              message: buildDenyMessage(pendingRequest?.toolName, denyMessage),
             },
       },
     })
@@ -1555,11 +1589,13 @@ export class ConversationService {
         cleanEnv.ANTHROPIC_MODEL,
     )
 
-    const cliDiagnosticsPath = diagnosticsService.getCliDiagnosticsPath()
+    let cliDiagnosticsPath: string | undefined
     try {
-      fs.mkdirSync(path.dirname(cliDiagnosticsPath), { recursive: true })
+      await diagnosticsService.prepareCliDiagnosticsStorage()
+      cliDiagnosticsPath = diagnosticsService.getCliDiagnosticsPath()
     } catch {
-      // Diagnostics must never block session startup.
+      // Diagnostics must never block session startup or point the child at an
+      // unsafe path when private storage could not be prepared.
     }
 
     return {
@@ -1596,7 +1632,7 @@ export class ConversationService {
       // forever while the UI shows "running" (#766). It can also double-run
       // tools (upstream inc-4258).
       CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK: cleanEnv.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK || '1',
-      CLAUDE_CODE_DIAGNOSTICS_FILE: cliDiagnosticsPath,
+      ...(cliDiagnosticsPath ? { CLAUDE_CODE_DIAGNOSTICS_FILE: cliDiagnosticsPath } : {}),
       CLAUDE_COWORK_MEMORY_PATH_OVERRIDE: this.resolveDesktopAutoMemoryPath(workDir),
       CALLER_DIR: workDir,
       PWD: workDir,

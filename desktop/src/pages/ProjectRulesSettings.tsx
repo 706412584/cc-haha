@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useTranslation, type TranslationKey } from '../i18n'
-import { Button } from '../components/shared/Button'
+import { Button } from '@/components/ui/Button'
 import { useSessionStore } from '../stores/sessionStore'
 import { getDesktopHost } from '../lib/desktopHost'
 import { api } from '../api/client'

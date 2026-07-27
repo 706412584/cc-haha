@@ -136,11 +136,11 @@ describe('PluginConfigModal dynamic contract', () => {
 
     fireEvent.click(within(section).getByRole('button', { name: /choose saved provider|选择.*服务商/i }))
 
-    expect(screen.getByRole('button', { name: /Chat Compatible/i })).toBeEnabled()
-    expect(screen.getByRole('button', { name: /Anthropic Only/i })).toBeEnabled()
-    expect(screen.getByRole('button', { name: /Missing Key/i })).toBeEnabled()
+    expect(screen.getByRole('option', { name: /Chat Compatible/i })).not.toHaveAttribute('aria-disabled', 'true')
+    expect(screen.getByRole('option', { name: /Anthropic Only/i })).not.toHaveAttribute('aria-disabled', 'true')
+    expect(screen.getByRole('option', { name: /Missing Key/i })).not.toHaveAttribute('aria-disabled', 'true')
 
-    fireEvent.click(screen.getByRole('button', { name: /Missing Key/i }))
+    fireEvent.click(screen.getByRole('option', { name: /Missing Key/i }))
     expect(within(section).getByLabelText(/base url|基础 URL/i)).toHaveValue('https://missing.example/v1')
     expect(within(section).getByText(/^(partial|待完善)$/i)).toBeInTheDocument()
   })

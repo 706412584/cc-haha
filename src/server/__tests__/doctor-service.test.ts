@@ -99,10 +99,42 @@ describe('DoctorService', () => {
     expect(projectItems.map((item) => item.id)).toEqual([
       'project-settings',
       'project-skills',
+      'project-agent-skills',
       'project-mcp',
     ])
     expect(projectItems.every((item) => item.status === 'not_configured')).toBe(true)
     expect(report.summary.neutralCount).toBeGreaterThanOrEqual(3)
+  })
+
+  test('anchors the user .agents skills target at the home directory, not the config directory', async () => {
+    // `.agents` is a space shared with other tools, so it follows $HOME even
+    // when CLAUDE_CONFIG_DIR points somewhere else entirely.
+    const service = new DoctorService({ configDir, homeDir })
+
+    const report = await service.getReport()
+    const byId = (id: string) => report.items.find((item) => item.id === id)?.path
+
+    // Reported paths are abbreviated, and configDir renders as `~/.claude`, so
+    // an `.agents` root built from the config dir would show up nested under it.
+    expect(byId('user-skills')).toBe('~/.claude/skills')
+    expect(byId('user-agent-skills')).toBe('~/.agents/skills')
+  })
+
+  test('drops the .agents targets when cross-client discovery is switched off', async () => {
+    // Reporting a directory the loader has been told to ignore reads as "these
+    // skills are in use" — with an entry count, when the user has any.
+    await fs.mkdir(path.join(homeDir, '.agents', 'skills', 'codex-skill'), { recursive: true })
+    process.env.CLAUDE_CODE_DISABLE_AGENT_SKILLS_DIR = '1'
+    try {
+      const service = new DoctorService({ configDir, homeDir, projectRoot })
+      const report = await service.getReport()
+
+      expect(report.items.map((item) => item.id)).not.toContain('user-agent-skills')
+      expect(report.items.map((item) => item.id)).not.toContain('project-agent-skills')
+      expect(report.items.map((item) => item.id)).toContain('user-skills')
+    } finally {
+      delete process.env.CLAUDE_CODE_DISABLE_AGENT_SKILLS_DIR
+    }
   })
 
   test('still reports a configured optional feature when its file is malformed', async () => {

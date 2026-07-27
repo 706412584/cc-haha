@@ -1,4 +1,5 @@
 import type { DiagnosticEvent, DiagnosticSeverity } from './diagnosticsService.js'
+import { redactSecrets, scanForSecrets } from '../../services/teamMemorySync/secretScanner.js'
 
 export type SharedDiagnosticEvent = {
   id: string
@@ -53,9 +54,11 @@ const SAFE_SCALAR_KEYS = new Set([
 ])
 
 const SAFE_METADATA_VALUE_RE = /^[a-z0-9][a-z0-9_.:/ -]{0,127}$/i
+const MAX_SHARED_IDENTIFIER_LENGTH = 256
+const MAX_SHARED_METADATA_LENGTH = 512
 const URL_RE = /https?:\/\/[^\s<>"')\]}]+/gi
 const EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi
-const SECRET_RE = /\b(?:sk-ant-api03-|sk-proj-|ghp_)[A-Za-z0-9_-]+\b/g
+const LEGACY_DIAGNOSTIC_SECRET_RE = /\b(?:sk-ant-api03-|sk-proj-|ghp_)[A-Za-z0-9_-]+\b/g
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/-]+/gi
 const AWS_ACCESS_KEY_RE = /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g
 const PRIVATE_PATH_RE = /(?:\/Users|\/home|\/private|\/var\/folders|\/tmp)\/[^\s<>"')\]}]+/g
@@ -75,20 +78,70 @@ export function projectDiagnosticEventForSharing(event: DiagnosticEvent): Shared
   const omittedFields = ['summary']
   const details = projectDetails(event.details, 'details', omittedFields)
   return {
-    id: sanitizeSharedString(event.id),
-    timestamp: sanitizeSharedString(event.timestamp),
-    type: sanitizeSharedString(event.type),
+    id: sanitizeSharedIdentifier(event.id, 'unknown-event', MAX_SHARED_IDENTIFIER_LENGTH),
+    timestamp: sanitizeSharedIdentifier(event.timestamp, 'unknown-time', 64),
+    type: sanitizeSharedIdentifier(event.type, 'unknown-event-type', 128),
     severity: event.severity,
-    ...(event.sessionId ? { sessionId: sanitizeSharedString(event.sessionId) } : {}),
+    ...(event.sessionId
+      ? { sessionId: sanitizeSharedIdentifier(event.sessionId, 'unknown-session', MAX_SHARED_IDENTIFIER_LENGTH) }
+      : {}),
     ...(details ? { details } : {}),
     omittedFields: [...new Set(omittedFields)].sort(),
   }
 }
 
+export function projectProviderSummaryForSharing(
+  providersSummary: Record<string, unknown>,
+): Record<string, unknown> {
+  const providers = Array.isArray(providersSummary.providers)
+    ? providersSummary.providers
+      .filter((provider): provider is Record<string, unknown> =>
+        Boolean(provider) && typeof provider === 'object' && !Array.isArray(provider))
+      .slice(0, 100)
+    : []
+  return {
+    activeId: projectProviderScalar(providersSummary.activeId),
+    count: providers.length,
+    providers: providers.map((provider) => {
+      const baseUrl = provider.baseUrl && typeof provider.baseUrl === 'object' && !Array.isArray(provider.baseUrl)
+        ? provider.baseUrl as Record<string, unknown>
+        : {}
+      const models = provider.models && typeof provider.models === 'object' && !Array.isArray(provider.models)
+        ? Object.fromEntries(
+          Object.entries(provider.models as Record<string, unknown>)
+            .filter(([, value]) => typeof value === 'string')
+            .slice(0, 40)
+            .map(([key, value]) => {
+              const stringValue = String(value)
+              const redacted = scanForSecrets(stringValue).length > 0
+              return [
+                sanitizeSharedIdentifier(key, 'unknown-model-key', 128),
+                redacted
+                  ? '[REDACTED]'
+                  : sanitizeSharedIdentifier(stringValue, '[REDACTED]', MAX_SHARED_IDENTIFIER_LENGTH),
+              ]
+            }),
+        )
+        : {}
+      return {
+        id: projectProviderScalar(provider.id),
+        name: projectProviderScalar(provider.name),
+        presetId: projectProviderScalar(provider.presetId),
+        apiFormat: projectProviderScalar(provider.apiFormat),
+        baseUrl: typeof baseUrl.hostname === 'string'
+          ? { hostname: sanitizeSharedIdentifier(baseUrl.hostname, '[REDACTED]', MAX_SHARED_IDENTIFIER_LENGTH) }
+          : null,
+        models,
+      }
+    }),
+  }
+}
+
 export function buildDiagnosticsIssueReport(input: DiagnosticsIssueReportInput): string {
-  const eventIds = input.events.map((event) => event.id).join(', ') || 'None'
-  const providers = Array.isArray(input.providersSummary.providers)
-    ? input.providersSummary.providers as Array<Record<string, unknown>>
+  const eventIds = input.events.map((event) => formatMetadata(event.id)).join(', ') || 'None'
+  const providersSummary = projectProviderSummaryForSharing(input.providersSummary)
+  const providers = Array.isArray(providersSummary.providers)
+    ? providersSummary.providers as Array<Record<string, unknown>>
     : []
   const providerLines = providers.length > 0
     ? providers.map(formatProviderLine)
@@ -104,7 +157,7 @@ export function buildDiagnosticsIssueReport(input: DiagnosticsIssueReportInput):
     : '> 未检测到损坏的诊断记录。'
 
   return [
-    `<!-- Generated: ${sanitizeSharedString(input.generatedAt)} -->`,
+    `<!-- Generated: ${sanitizeSharedString(input.generatedAt, 128).replace(/-->/g, '-- >')} -->`,
     '',
     '## 问题描述',
     '<!-- 请补充 -->',
@@ -212,12 +265,12 @@ function isScalar(value: unknown): value is string | number | boolean | null {
 
 function projectSafeMetadataScalar(value: string | number | boolean | null): string | number | boolean | null {
   if (typeof value !== 'string') return value
-  const sanitized = sanitizeSharedString(value)
+  const sanitized = sanitizeSharedString(value, MAX_SHARED_METADATA_LENGTH)
   return SAFE_METADATA_VALUE_RE.test(sanitized) ? sanitized : '[REDACTED]'
 }
 
-function sanitizeSharedString(value: string): string {
-  return value
+function sanitizeSharedString(value: string, maxLength = MAX_SHARED_METADATA_LENGTH): string {
+  const sanitized = redactSecrets(value.replace(LEGACY_DIAGNOSTIC_SECRET_RE, '[REDACTED]'))
     .replace(URL_RE, (candidate) => {
       try {
         return new URL(candidate).hostname
@@ -225,17 +278,45 @@ function sanitizeSharedString(value: string): string {
         return '[REDACTED_URL]'
       }
     })
-    .replace(SECRET_RE, '[REDACTED]')
     .replace(BEARER_RE, 'Bearer [REDACTED]')
     .replace(EMAIL_RE, '[REDACTED_EMAIL]')
     .replace(AWS_ACCESS_KEY_RE, '[REDACTED_AWS_ACCESS_KEY]')
     .replace(PRIVATE_PATH_RE, '[REDACTED_PATH]')
     .replace(WINDOWS_PATH_RE, '[REDACTED_PATH]')
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return sanitized.length > maxLength
+    ? `${sanitized.slice(0, maxLength)}...[TRUNCATED]`
+    : sanitized
+}
+
+function sanitizeSharedIdentifier(value: string, fallback: string, maxLength: number): string {
+  return sanitizeSharedString(value, maxLength) || fallback
+}
+
+function projectProviderScalar(value: unknown): string | number | boolean | null {
+  if (value === null || typeof value === 'number' || typeof value === 'boolean') return value
+  if (typeof value !== 'string') return null
+  return sanitizeSharedIdentifier(value, '[REDACTED]', MAX_SHARED_IDENTIFIER_LENGTH)
+}
+
+function escapeMarkdownInline(value: string): string {
+  return value
+    .replace(/[\\`*[\]()<>!~]/g, '\\$&')
+    .replace(/@/g, '&#64;')
+    .replace(/_/g, (match, offset, string) => {
+      // GFM disables intra-word underscore emphasis, so only escape underscores
+      // that sit at a word boundary and could actually trigger italics.
+      const isWordChar = (char: string | undefined) => char !== undefined && /\w/.test(char)
+      if (isWordChar(string[offset - 1]) && isWordChar(string[offset + 1])) return match
+      return '&#95;'
+    })
 }
 
 function formatMetadata(value: unknown): string {
   if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-    return sanitizeSharedString(String(value))
+    return escapeMarkdownInline(sanitizeSharedString(String(value)))
   }
   return 'unknown'
 }
@@ -247,7 +328,7 @@ function formatProviderLine(provider: Record<string, unknown>): string {
   const models = provider.models && typeof provider.models === 'object' && !Array.isArray(provider.models)
     ? Object.entries(provider.models as Record<string, unknown>)
       .filter(([, value]) => typeof value === 'string')
-      .map(([key, value]) => `${sanitizeSharedString(key)}=${sanitizeSharedString(String(value))}`)
+      .map(([key, value]) => `${formatMetadata(key)}=${formatMetadata(value)}`)
       .join(', ')
     : 'None'
   return `- ${formatMetadata(provider.name ?? provider.id)} | ${formatMetadata(provider.apiFormat)} | Host: ${formatMetadata(baseUrl.hostname)} | Models: ${models || 'None'}`
@@ -256,8 +337,8 @@ function formatProviderLine(provider: Record<string, unknown>): string {
 function formatErrorLine(event: SharedDiagnosticEvent): string {
   const details = event.details ?? {}
   const metadata = [
-    typeof details.errorCode === 'string' ? `errorCode=${details.errorCode}` : '',
-    typeof details.status === 'string' ? `status=${details.status}` : '',
+    typeof details.errorCode === 'string' ? `errorCode=${formatMetadata(details.errorCode)}` : '',
+    typeof details.status === 'string' ? `status=${formatMetadata(details.status)}` : '',
   ].filter(Boolean).join(', ')
-  return `- ${event.timestamp} [${event.severity.toUpperCase()}] ${event.type} (${event.id})${metadata ? ` — ${metadata}` : ''}`
+  return `- ${formatMetadata(event.timestamp)} [${event.severity.toUpperCase()}] ${formatMetadata(event.type)} (${formatMetadata(event.id)})${metadata ? ` — ${metadata}` : ''}`
 }

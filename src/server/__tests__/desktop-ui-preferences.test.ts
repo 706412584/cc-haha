@@ -408,6 +408,27 @@ describe('DesktopUiPreferencesService', () => {
     expect(await readDesktopUiFile()).toEqual(after)
   })
 
+  test('rejects malformed profile patches without overwriting stored values', async () => {
+    const service = new DesktopUiPreferencesService()
+    const before = await service.updateProfilePreferences({
+      displayName: 'Local Operator',
+      subtitle: 'operator.example',
+    })
+
+    await expect(service.updateProfilePreferences({
+      displayName: 42,
+      subtitle: 'replacement.example',
+    })).rejects.toThrow('displayName must be a string')
+    await expect(service.updateProfilePreferences({
+      displayName: '   ',
+    })).rejects.toThrow('displayName must be between 1 and 80 characters')
+    await expect(service.updateProfilePreferences([])).rejects.toThrow(
+      'Profile preferences must be an object',
+    )
+
+    expect(await readDesktopUiFile()).toEqual(before)
+  })
+
   test('stores uploaded profile avatars under cc-haha profile storage', async () => {
     const service = new DesktopUiPreferencesService()
     const after = await service.updateProfileAvatar(new Uint8Array([137, 80, 78, 71]), 'image/png')
@@ -644,6 +665,33 @@ describe('desktop UI preferences API', () => {
     expect(getAvatarRes.status).toBe(200)
     expect(getAvatarRes.headers.get('Content-Type')).toBe('image/jpeg')
     expect([...new Uint8Array(await getAvatarRes.arrayBuffer())]).toEqual([255, 216, 255])
+  })
+
+  test('returns 400 for malformed profile fields and preserves the prior profile', async () => {
+    const validReq = makeRequest('PUT', '/api/desktop-ui/preferences/profile', {
+      displayName: 'Local Operator',
+      subtitle: 'operator.example',
+    })
+    const validRes = await handleDesktopUiApi(validReq.req, validReq.url, validReq.segments)
+    expect(validRes.status).toBe(200)
+
+    const invalidReq = makeRequest('PUT', '/api/desktop-ui/preferences/profile', {
+      displayName: 42,
+      subtitle: 'replacement.example',
+    })
+    const invalidRes = await handleDesktopUiApi(invalidReq.req, invalidReq.url, invalidReq.segments)
+
+    expect(invalidRes.status).toBe(400)
+    await expect(invalidRes.json()).resolves.toMatchObject({
+      error: 'BAD_REQUEST',
+      message: 'displayName must be a string',
+    })
+    await expect(readDesktopUiFile()).resolves.toMatchObject({
+      profile: {
+        displayName: 'Local Operator',
+        subtitle: 'operator.example',
+      },
+    })
   })
 
   test('returns API errors for missing avatars, invalid JSON, and unknown routes', async () => {
