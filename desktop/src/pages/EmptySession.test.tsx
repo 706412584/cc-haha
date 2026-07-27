@@ -977,6 +977,9 @@ describe('EmptySession', () => {
 
     expect(screen.queryByText('worktree-desktop-feature-a-12345678')).not.toBeInTheDocument()
 
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Run/i })).not.toBeDisabled()
+    })
     fireEvent.click(screen.getByRole('button', { name: /Run/i }))
 
     await waitFor(() => {

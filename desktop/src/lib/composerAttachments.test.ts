@@ -104,6 +104,53 @@ describe('composer attachment payloads', () => {
     ])
   })
 
+  it('keeps a mixed desktop batch when one image preview cannot be read', async () => {
+    class SelectiveFileReader {
+      result: string | ArrayBuffer | null = null
+      onload: ((event: ProgressEvent<FileReader>) => void) | null = null
+      onerror: (() => void) | null = null
+      error: DOMException | null = null
+
+      readAsDataURL(file: File) {
+        if (file.name === 'broken.jpg') {
+          this.error = new DOMException('read failed')
+          this.onerror?.()
+          return
+        }
+        this.result = 'data:image/jpeg;base64,GOOD'
+        this.onload?.({} as ProgressEvent<FileReader>)
+      }
+    }
+    vi.stubGlobal('FileReader', SelectiveFileReader)
+
+    const broken = new File(['broken'], 'broken.jpg', { type: 'image/jpeg' })
+    const good = new File(['good'], 'good.jpg', { type: 'image/jpeg' })
+    const paths = new Map<File, string>([
+      [broken, 'D:\\download\\broken.jpg'],
+      [good, 'D:\\download\\good.jpg'],
+    ])
+    window.desktopHost = {
+      ...browserHost,
+      kind: 'electron',
+      isDesktop: true,
+      files: { getPathForFile: file => paths.get(file) ?? '' },
+    }
+
+    const attachments = await filesToComposerAttachments([broken, good])
+
+    expect(attachments).toHaveLength(2)
+    expect(attachments[0]).toMatchObject({
+      name: 'broken.jpg',
+      path: 'D:\\download\\broken.jpg',
+      previewUrl: undefined,
+    })
+    expect(attachments[1]).toMatchObject({
+      name: 'good.jpg',
+      path: 'D:\\download\\good.jpg',
+      previewUrl: 'data:image/jpeg;base64,GOOD',
+    })
+  })
+
   it('uses selected desktop image bytes for preview while keeping attachments path-only', async () => {
     class ImmediateFileReader {
       result: string | ArrayBuffer | null = null

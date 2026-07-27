@@ -119,11 +119,15 @@ async function fileToComposerAttachment(file: File): Promise<ComposerAttachment 
     const attachment = pathToComposerAttachment(nativePath)
     if (attachment.type !== 'image') return attachment
 
-    return {
-      ...attachment,
-      // The selected File is already user-authorized, so use its bytes for the
-      // local preview. Keep `data` empty: the model payload remains path-only.
-      previewUrl: await compressDataUrl(await readFileAsDataUrl(file)),
+    try {
+      return {
+        ...attachment,
+        // The selected File is already user-authorized, so use its bytes for the
+        // local preview. Keep `data` empty: the model payload remains path-only.
+        previewUrl: await compressDataUrl(await readFileAsDataUrl(file)),
+      }
+    } catch {
+      return { ...attachment, previewUrl: undefined }
     }
   }
 
