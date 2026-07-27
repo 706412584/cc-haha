@@ -643,36 +643,38 @@ describe('EmptySession', () => {
 
   it('uses native desktop file paths for draft attachments', async () => {
     mocks.isTauriRuntime = true
+    const firstFile = new File(['log'], 'huge-a.log', { type: 'text/plain' })
+    const secondFile = new File(['zip'], 'huge-b.zip', { type: 'application/zip' })
+    Object.defineProperty(firstFile, 'path', {
+      configurable: true,
+      value: 'C:\\Users\\Nanmi\\Desktop\\huge-a.log',
+    })
+    Object.defineProperty(secondFile, 'path', {
+      configurable: true,
+      value: '/Users/nanmi/tmp/huge-b.zip',
+    })
     window.desktopHost = {
+      ...browserHost,
       kind: 'electron',
       isDesktop: true,
       capabilities: {
-        appMode: false,
+        ...browserHost.capabilities,
         dialogs: true,
-        notifications: false,
-        previewWebview: false,
-        shell: false,
-        terminal: false,
-        updates: false,
-        windowControls: false,
-        zoom: false,
       },
-      dialogs: {
-        open: mocks.dialogOpen,
+      files: {
+        getPathForFile: (file) => (file as File & { path?: string }).path ?? '',
       },
       webview: {
         onDragDropEvent: vi.fn().mockResolvedValue(mocks.webviewUnlisten),
       },
-    } as any
-    mocks.dialogOpen.mockResolvedValueOnce([
-      'C:\\Users\\Nanmi\\Desktop\\huge-a.log',
-      '/Users/nanmi/tmp/huge-b.zip',
-    ])
+    }
 
     render(<EmptySession />)
 
     fireEvent.click(screen.getByLabelText('Open composer tools'))
     fireEvent.click(screen.getByText('Add files or photos'))
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(fileInput, { target: { files: [firstFile, secondFile] } })
 
     expect(await screen.findByText('huge-a.log')).toBeInTheDocument()
     expect(await screen.findByText('huge-b.zip')).toBeInTheDocument()

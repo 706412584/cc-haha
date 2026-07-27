@@ -21,6 +21,7 @@ import { RepositoryLaunchControls } from '@/components/chat/RepositoryLaunchCont
 import { PermissionModeSelector } from '../components/controls/PermissionModeSelector'
 import { ModelSelector, type ModelSelectorHandle } from '../components/controls/ModelSelector'
 import { AttachmentGallery } from '../components/chat/AttachmentGallery'
+import { ImageAnnotationModal } from '../components/chat/ImageAnnotationModal'
 import { ComposerDropOverlay } from '../components/chat/ComposerDropOverlay'
 import { ContextUsageIndicator } from '../components/chat/ContextUsageIndicator'
 import { FileSearchMenu, type FileSearchMenuHandle } from '../components/chat/FileSearchMenu'
@@ -31,7 +32,6 @@ import { resolveActiveProviderRuntimeSelection } from '../lib/runtimeSelection'
 import {
   filesToComposerAttachments,
   getDataTransferFiles,
-  selectNativeFileAttachments,
   type ComposerAttachment,
 } from '../lib/composerAttachments'
 import { useComposerFileDrop } from '../components/chat/useComposerFileDrop'
@@ -103,6 +103,7 @@ export function EmptySession() {
   const [useWorktree, setUseWorktree] = useState(false)
   const [repositoryLaunchReady, setRepositoryLaunchReady] = useState(true)
   const [attachments, setAttachments] = useState<Attachment[]>([])
+  const [annotationTarget, setAnnotationTarget] = useState<Attachment | null>(null)
   const [plusMenuOpen, setPlusMenuOpen] = useState(false)
   const [slashMenuOpen, setSlashMenuOpen] = useState(false)
   // Tracks whether a welcome-screen task card requested orchestration mode for
@@ -511,21 +512,7 @@ export function EmptySession() {
 
   const openAttachmentPicker = useCallback(() => {
     setPlusMenuOpen(false)
-    if (!isDesktopRuntime()) {
-      fileInputRef.current?.click()
-      return
-    }
-
-    void selectNativeFileAttachments()
-      .then((nativeAttachments) => {
-        if (nativeAttachments) {
-          if (nativeAttachments.length > 0) {
-            setAttachments((prev) => [...prev, ...nativeAttachments])
-          }
-          return
-        }
-        fileInputRef.current?.click()
-      })
+    fileInputRef.current?.click()
   }, [])
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -538,6 +525,23 @@ export function EmptySession() {
 
   const removeAttachment = (id: string) => {
     setAttachments((prev) => prev.filter((attachment) => attachment.id !== id))
+    if (annotationTarget?.id === id) setAnnotationTarget(null)
+  }
+
+  const saveAnnotatedImage = (dataUrl: string) => {
+    if (!annotationTarget?.id) return
+    setAttachments((prev) => prev.map((attachment) => {
+      if (attachment.id !== annotationTarget.id) return attachment
+      return {
+        ...attachment,
+        name: attachment.name.replace(/(\.[^.]+)?$/, '-annotated.png'),
+        path: undefined,
+        data: dataUrl,
+        previewUrl: dataUrl,
+        mimeType: 'image/png',
+      }
+    }))
+    setAnnotationTarget(null)
   }
 
   const selectSlashCommand = (command: string) => {
@@ -845,7 +849,12 @@ export function EmptySession() {
               )}
 
               {attachments.length > 0 && (
-                <AttachmentGallery attachments={attachments} variant="composer" onRemove={removeAttachment} />
+                <AttachmentGallery
+                  attachments={attachments}
+                  variant="composer"
+                  onRemove={removeAttachment}
+                  onAnnotate={(attachment) => setAnnotationTarget(attachment as Attachment)}
+                />
               )}
 
               <div className="flex items-start gap-3">
@@ -969,6 +978,12 @@ export function EmptySession() {
       </div>
 
       <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} />
+      <ImageAnnotationModal
+        open={!!annotationTarget}
+        image={annotationTarget ? { src: annotationTarget.previewUrl || annotationTarget.data || '', name: annotationTarget.name } : null}
+        onClose={() => setAnnotationTarget(null)}
+        onSave={saveAnnotatedImage}
+      />
     </div>
   )
 }
