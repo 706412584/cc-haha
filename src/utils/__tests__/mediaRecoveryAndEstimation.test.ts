@@ -146,6 +146,37 @@ describe('media error recovery', () => {
     expect(serialized).toContain('continue with text only')
   })
 
+  test('merges repeated media rejections for the same historical image', () => {
+    const imageUser = createUserMessage({
+      content: [
+        { type: 'text', text: 'inspect this image' },
+        imageBlock('repeated-rejection-image'),
+      ],
+      uuid: '00000000-0000-4000-8000-000000000008',
+    })
+    const unsupported = createAssistantAPIErrorMessage({
+      content: 'unsupported image',
+      error: 'invalid_request',
+      businessErrorCode: BUSINESS_ERROR_CODES.IMAGE_UNSUPPORTED,
+    })
+    const invalid = createAssistantAPIErrorMessage({
+      content: 'invalid image',
+      error: 'invalid_request',
+      businessErrorCode: BUSINESS_ERROR_CODES.IMAGE_INVALID,
+    })
+    const nextUser = createUserMessage({
+      content: 'continue without it',
+      uuid: '00000000-0000-4000-8000-000000000009',
+    })
+
+    const serialized = JSON.stringify(
+      normalizeMessagesForAPI([imageUser, unsupported, invalid, nextUser]),
+    )
+
+    expect(serialized).not.toContain('repeated-rejection-image')
+    expect(serialized).toContain('continue without it')
+  })
+
   test('strips every candidate image when an invalid-image error does not identify which one failed', () => {
     const corruptToolResult = createUserMessage({
       content: [

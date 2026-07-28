@@ -138,6 +138,39 @@ vi.mock('../components/controls/ModelSelector', async () => {
   }
 })
 
+vi.mock('../components/chat/ImageAnnotationModal', () => ({
+  ImageAnnotationModal: ({ open, image, onSave }: {
+    open: boolean
+    image: { name: string } | null
+    onSave: (dataUrl: string) => void
+  }) => open && image ? (
+    <button type="button" onClick={() => onSave('data:image/png;base64,ANNOTATED')}>
+      Save annotation for {image.name}
+    </button>
+  ) : null,
+}))
+
+vi.mock('../lib/composerAttachments', async () => {
+  const actual = await vi.importActual<typeof import('../lib/composerAttachments')>('../lib/composerAttachments')
+  return {
+    ...actual,
+    filesToComposerAttachments: async (files: FileList | File[]) => {
+      const entries = Array.from(files)
+      if (entries.length === 1 && entries[0]?.name === 'screenshot.jpg') {
+        return [{
+          id: 'selected-screenshot',
+          type: 'image' as const,
+          name: 'screenshot.jpg',
+          path: 'C:\\Users\\Nanmi\\Desktop\\screenshot.jpg',
+          mimeType: 'image/jpeg',
+          previewUrl: 'data:image/jpeg;base64,SELECTED',
+        }]
+      }
+      return actual.filesToComposerAttachments(files)
+    },
+  }
+})
+
 import { EmptySession } from './EmptySession'
 import { ApiError } from '../api/client'
 import { useChatStore } from '../stores/chatStore'
@@ -705,6 +738,80 @@ describe('EmptySession', () => {
         }),
       ],
     })
+  })
+
+  it('replaces a selected desktop image with the saved annotation', async () => {
+    mocks.isTauriRuntime = true
+    const image = new File(['image'], 'screenshot.jpg', { type: 'image/jpeg' })
+    Object.defineProperty(image, 'path', {
+      configurable: true,
+      value: 'C:\\Users\\Nanmi\\Desktop\\screenshot.jpg',
+    })
+    window.desktopHost = {
+      ...browserHost,
+      kind: 'electron',
+      isDesktop: true,
+      capabilities: {
+        ...browserHost.capabilities,
+        dialogs: true,
+      },
+      files: {
+        getPathForFile: (file) => (file as File & { path?: string }).path ?? '',
+      },
+      webview: {
+        onDragDropEvent: vi.fn().mockResolvedValue(mocks.webviewUnlisten),
+      },
+    }
+
+    render(<EmptySession />)
+
+    fireEvent.click(screen.getByLabelText('Open composer tools'))
+    fireEvent.click(screen.getByText('Add files or photos'))
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(fileInput, { target: { files: [image] } })
+
+    expect(await screen.findByLabelText('Annotate screenshot.jpg')).toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('Annotate screenshot.jpg'))
+    fireEvent.click(await screen.findByRole('button', { name: 'Save annotation for screenshot.jpg' }))
+
+    expect(await screen.findByLabelText('Annotate screenshot-annotated.png')).toBeInTheDocument()
+    fireEvent.change(screen.getByRole('textbox'), {
+      target: { value: 'use the annotation', selectionStart: 'use the annotation'.length },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /Run/i }))
+
+    await waitFor(() => {
+      expect(mocks.createSession).toHaveBeenCalledWith({ permissionMode: 'default' })
+    })
+    expect(mocks.wsSend).toHaveBeenCalledWith('draft-session', {
+      type: 'user_message',
+      content: 'use the annotation',
+      attachments: [expect.objectContaining({
+        type: 'image',
+        name: 'screenshot-annotated.png',
+        path: undefined,
+        data: 'data:image/png;base64,ANNOTATED',
+        mimeType: 'image/png',
+      })],
+    })
+  })
+
+  it('closes image annotation when the target attachment is removed', async () => {
+    const image = new File(['image'], 'screenshot.jpg', { type: 'image/jpeg' })
+
+    render(<EmptySession />)
+
+    fireEvent.click(screen.getByLabelText('Open composer tools'))
+    fireEvent.click(screen.getByText('Add files or photos'))
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(fileInput, { target: { files: [image] } })
+
+    fireEvent.click(await screen.findByLabelText('Annotate screenshot.jpg'))
+    expect(screen.getByRole('button', { name: 'Save annotation for screenshot.jpg' })).toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('Remove screenshot.jpg'))
+
+    expect(screen.queryByRole('button', { name: 'Save annotation for screenshot.jpg' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Annotate screenshot.jpg')).not.toBeInTheDocument()
   })
 
   it('shows a drop affordance and sends dropped desktop files as path attachments', async () => {
