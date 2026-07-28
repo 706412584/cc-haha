@@ -55,6 +55,7 @@ const {
       projectPath: string
       workDir: string | null
       workDirExists: boolean
+      permissionMode?: string
     }>,
   },
   cliTaskStoreSnapshot: {
@@ -6200,6 +6201,67 @@ describe('chatStore history mapping', () => {
     expect(updateTabStatusMock).toHaveBeenLastCalledWith(TEST_SESSION_ID, 'idle')
   })
 
+  it('ignores late retry updates until the server settles the stopped turn', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          messages: [],
+          chatState: 'thinking',
+        }),
+      },
+    })
+
+    const store = useChatStore.getState()
+    store.stopGeneration(TEST_SESSION_ID)
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'api_retry',
+      attempt: 3,
+      maxRetries: 10,
+      retryDelayMs: 3_000,
+      errorStatus: null,
+    })
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'streaming_fallback',
+      cause: 'watchdog',
+    })
+
+    const stopped = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(stopped?.chatState).toBe('idle')
+    expect(stopped?.apiRetry).toBeNull()
+    expect(stopped?.streamingFallback).toBeNull()
+
+    store.sendMessage(TEST_SESSION_ID, 'start a new turn')
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'status',
+      state: 'thinking',
+      attemptStart: true,
+    })
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'api_retry',
+      attempt: 4,
+      maxRetries: 10,
+      retryDelayMs: 3_000,
+      errorStatus: null,
+    })
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.apiRetry).toBeNull()
+
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'system_notification',
+      subtype: 'generation_stopped',
+    })
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'api_retry',
+      attempt: 1,
+      maxRetries: 10,
+      retryDelayMs: 1_000,
+      errorStatus: null,
+    })
+
+    const restarted = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(restarted?.chatState).toBe('thinking')
+    expect(restarted?.apiRetry).toMatchObject({ attempt: 1 })
+  })
+
   it('renders memory saved notifications as chat memory events', () => {
     useChatStore.setState({
       sessions: {
@@ -6508,6 +6570,62 @@ describe('chatStore history mapping', () => {
     expect(refreshTasksMock).toHaveBeenCalledTimes(2)
     expect(refreshTasksMock).toHaveBeenNthCalledWith(1, 'session-a')
     expect(refreshTasksMock).toHaveBeenNthCalledWith(2, 'session-b')
+  })
+
+  it('does not trust a stale Desktop bypass mode when the Server asks for Computer Use approval', () => {
+    sessionStoreSnapshot.sessions = [
+      {
+        id: TEST_SESSION_ID,
+        title: 'Bypass session',
+        createdAt: '',
+        modifiedAt: '',
+        messageCount: 0,
+        projectPath: '',
+        workDir: null,
+        workDirExists: true,
+        permissionMode: 'bypassPermissions',
+      },
+    ]
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({ chatState: 'tool_executing' }),
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'computer_use_permission_request',
+      requestId: 'cu-bypass',
+      request: {
+        requestId: 'cu-bypass',
+        reason: 'Use Windows PowerShell',
+        apps: [
+          {
+            requestedName: 'Windows PowerShell',
+            isSentinel: false,
+            alreadyGranted: false,
+            proposedTier: 'click',
+          },
+        ],
+        requestedFlags: {
+          clipboardRead: true,
+          clipboardWrite: true,
+          systemKeyCombos: true,
+        },
+        screenshotFiltering: 'native',
+      },
+    })
+
+    expect(sendMock).not.toHaveBeenCalledWith(
+      TEST_SESSION_ID,
+      expect.objectContaining({
+        type: 'computer_use_permission_response',
+        requestId: 'cu-bypass',
+      }),
+    )
+    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.pendingComputerUsePermission?.requestId).toBe('cu-bypass')
+    expect(session?.chatState).toBe('permission_pending')
+    expect(notifyDesktopMock).toHaveBeenCalled()
   })
 
   it('tracks Computer Use approval requests separately from generic tool permissions', () => {

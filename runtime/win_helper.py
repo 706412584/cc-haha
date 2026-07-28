@@ -343,6 +343,19 @@ def installed_apps() -> list[dict[str, Any]]:
         finally:
             winreg.CloseKey(key)
 
+    windows_dir = os.environ.get("WINDIR")
+    if windows_dir:
+        powershell = Path(windows_dir) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        if powershell.is_file():
+            results.setdefault(
+                "powershell",
+                {
+                    "bundleId": "powershell",
+                    "displayName": "Windows PowerShell",
+                    "path": str(powershell),
+                },
+            )
+
     return sorted(results.values(), key=lambda item: item["displayName"].lower())
 
 

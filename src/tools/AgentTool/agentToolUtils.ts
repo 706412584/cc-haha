@@ -235,7 +235,7 @@ export const agentToolResultSchema = lazySchema(() =>
     agentId: z.string(),
     // Optional: older persisted sessions won't have this (resume replays
     // results verbatim without re-validation). Used to gate the sync
-    // result trailer — one-shot built-ins skip the SendMessage hint.
+    // result trailer — one-shot built-ins skip the terminal resume metadata.
     agentType: z.string().optional(),
     content: z.array(z.object({ type: z.literal('text'), text: z.string() })),
     totalToolUseCount: z.number(),

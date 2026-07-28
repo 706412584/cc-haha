@@ -44,10 +44,10 @@ function getCssBetween(startMarker: string, endMarker: string) {
 }
 
 /**
- * The six 「纸 · 墨 · 印」 palettes. Each block holds only raw `--cc-*` color
- * values; the shared `:root` semantic layer turns those into the `--color-*`
- * tokens components consume, so the mapping is written once instead of copied
- * per theme.
+ * Every supported palette. Each block holds only raw `--cc-*` color values;
+ * the shared `:root` semantic layer turns those into the `--color-*` tokens
+ * components consume, so the mapping is written once instead of copied per
+ * theme.
  */
 const themes = [
   ':root,\n[data-theme="white"]',
@@ -56,6 +56,10 @@ const themes = [
   '[data-theme="celadon"]',
   '[data-theme="dark"]',
   '[data-theme="ink-blue"]',
+  '[data-theme="classic-white"]',
+  '[data-theme="classic-light"]',
+  '[data-theme="eye-care"]',
+  '[data-theme="classic-dark"]',
 ] as const
 
 describe('desktop theme tokens', () => {
@@ -160,10 +164,12 @@ describe('desktop theme tokens', () => {
     expect(getThemeBlock('[data-theme="ink-blue"]')).toContain('color-scheme: dark;')
   })
 
-  it('binds the dark utility variant to both ink themes', () => {
-    // `dark:` utilities compile against this list. Omitting ink-blue makes
+  it('binds the dark utility variant to every dark-ground theme', () => {
+    // `dark:` utilities compile against this list. Omitting a dark ID makes
     // every one of them silently render its light branch on that theme.
-    expect(normalizedCss).toContain('[data-theme="ink-blue"], [data-theme="ink-blue"] *')
+    for (const theme of ['dark', 'ink-blue', 'classic-dark']) {
+      expect(normalizedCss).toContain(`[data-theme="${theme}"], [data-theme="${theme}"] *`)
+    }
   })
 
   it('keeps activity heatmap colors on the app theme accent instead of the old blue ramp', () => {
@@ -196,10 +202,10 @@ describe('desktop theme tokens', () => {
     expect(zoomShellCss).not.toContain('color-mix(')
   })
 
-  it('keeps the UI zoom slider thumb visible on both ink grounds', () => {
+  it('keeps the UI zoom slider thumb visible on every dark ground', () => {
     // The thumb is a light disc on a light track; on a dark ground it needs an
-    // accent border to read at all. Both dark palettes get the override.
-    expect(css).toContain('[data-theme="dark"] .settings-zoom-control,\n[data-theme="ink-blue"] .settings-zoom-control')
+    // accent border to read at all. Every dark palette gets the override.
+    expect(css).toContain('[data-theme="dark"] .settings-zoom-control,\n[data-theme="ink-blue"] .settings-zoom-control,\n[data-theme="classic-dark"] .settings-zoom-control')
     expect(css).toContain('--settings-zoom-thumb-bg: var(--color-surface-bright);')
     expect(css).toContain('--settings-zoom-thumb-border: var(--color-brand);')
     expect(css).toContain('box-shadow: var(--settings-zoom-thumb-shadow);')
@@ -243,9 +249,9 @@ describe('desktop theme tokens', () => {
   })
 
   it('binds the dark variant to the app theme attribute, not the operating system', () => {
-    // The app ships six themes toggled via `<html data-theme>`. Tailwind's
+    // The app ships multiple themes toggled via `<html data-theme>`. Tailwind's
     // stock `dark:` compiles to `prefers-color-scheme`, which fires on the OS
-    // setting and is wrong for every one of them.
+    // setting and is wrong for fixed themes.
     expect(normalizedCss).toContain('@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *')
     expect(normalizedCss).not.toMatch(/@media[^{]*\(\s*prefers-color-scheme/)
   })

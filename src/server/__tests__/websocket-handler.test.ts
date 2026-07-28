@@ -436,6 +436,69 @@ describe('WebSocket handler session isolation', () => {
     expect(second.close).not.toHaveBeenCalled()
   })
 
+  it('auto-approves Computer Use from the authoritative bypass session mode without a Desktop request', async () => {
+    const sessionId = `computer-use-bypass-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    const request = {
+      requestId: 'cu-bypass-request',
+      reason: 'Inspect PowerShell output',
+      apps: [
+        {
+          requestedName: 'Windows PowerShell',
+          resolved: {
+            bundleId: 'powershell',
+            displayName: 'Windows PowerShell',
+          },
+          isSentinel: true,
+          alreadyGranted: false,
+          proposedTier: 'click' as const,
+        },
+        {
+          requestedName: 'Already Granted App',
+          resolved: {
+            bundleId: 'already-granted',
+            displayName: 'Already Granted App',
+          },
+          isSentinel: false,
+          alreadyGranted: true,
+          proposedTier: 'full' as const,
+        },
+        {
+          requestedName: 'Missing App',
+          isSentinel: false,
+          alreadyGranted: false,
+          proposedTier: 'full' as const,
+        },
+      ],
+      requestedFlags: { clipboardRead: true },
+      screenshotFiltering: 'none' as const,
+    }
+    spyOn(conversationService, 'getSessionPermissionMode').mockReturnValue('bypassPermissions')
+
+    handleWebSocket.open(ws)
+    ws.sent.length = 0
+    const response = await computerUseApprovalService.requestApproval(sessionId, request)
+
+    expect(response).toEqual({
+      granted: [
+        expect.objectContaining({
+          bundleId: 'powershell',
+          displayName: 'Windows PowerShell',
+          tier: 'click',
+        }),
+      ],
+      denied: [{ bundleId: 'Missing App', reason: 'not_installed' }],
+      flags: {
+        clipboardRead: true,
+        clipboardWrite: false,
+        systemKeyCombos: false,
+      },
+      userConsented: true,
+    })
+    expect(computerUseApprovalService.getPendingRequests(sessionId)).toEqual([])
+    expect(ws.sent).toEqual([])
+  })
+
   it('tracks and replays pending Computer Use requests when a client reconnects', async () => {
     const sessionId = `computer-use-reconnect-${crypto.randomUUID()}`
     const first = makeClientSocket(sessionId)
@@ -515,6 +578,193 @@ describe('WebSocket handler session isolation', () => {
       computerUseRequestIds: [],
       turnActive: false,
     })
+  })
+
+  it('treats repeated stop requests as idempotent', () => {
+    const sessionId = `stopped-turn-repeat-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    const sendInterrupt = spyOn(conversationService, 'sendInterrupt').mockImplementation(() => true)
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'getActiveInstanceId').mockReturnValue('instance-repeat-stop')
+    spyOn(globalThis, 'setTimeout').mockImplementation(() => 1 as any)
+    __markActiveTurnForTests(sessionId)
+
+    handleWebSocket.message(ws, JSON.stringify({ type: 'stop_generation' }))
+    handleWebSocket.message(ws, JSON.stringify({ type: 'stop_generation' }))
+
+    expect(sendInterrupt).toHaveBeenCalledTimes(1)
+    expect(ws.sent.map((payload) => JSON.parse(payload)).filter(
+      (message) => message.type === 'status' && message.state === 'idle',
+    )).toHaveLength(2)
+  })
+
+  it('drops API retry updates from a stopped turn', () => {
+    const sessionId = `stopped-turn-api-retry-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'sendInterrupt').mockImplementation(() => true)
+    spyOn(conversationService, 'getActiveInstanceId').mockReturnValue('instance-retrying')
+    spyOn(globalThis, 'setTimeout').mockImplementation(() => 1 as any)
+    __markActiveTurnForTests(sessionId)
+
+    handleWebSocket.message(ws, JSON.stringify({ type: 'stop_generation' }))
+
+    expect(translateCliMessage({
+      type: 'system',
+      subtype: 'api_retry',
+      attempt: 3,
+      max_retries: 10,
+      retry_delay_ms: 3_000,
+    }, sessionId)).toEqual([])
+
+    expect(translateCliMessage({
+      type: 'result',
+      subtype: 'error_during_execution',
+      is_error: true,
+      result: 'Interrupted by user',
+    }, sessionId)).toEqual([{
+      type: 'error',
+      message: 'Interrupted by user',
+      code: 'CLI_ERROR',
+    }, {
+      type: 'message_complete',
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+      },
+    }])
+  })
+
+  it('settles a stopped result once for every connected client', () => {
+    const sessionId = `stopped-turn-multi-client-${crypto.randomUUID()}`
+    const first = makeClientSocket(sessionId)
+    const second = makeClientSocket(sessionId)
+    const callbacks: Array<(message: any) => void> = []
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'onOutput').mockImplementation((_sessionId, callback) => {
+      callbacks.push(callback)
+    })
+    spyOn(conversationService, 'sendInterrupt').mockImplementation(() => true)
+    spyOn(conversationService, 'getActiveInstanceId').mockReturnValue('instance-multi-client')
+    spyOn(globalThis, 'setTimeout').mockImplementation(() => 1 as any)
+
+    handleWebSocket.open(first)
+    handleWebSocket.open(second)
+    __markActiveTurnForTests(sessionId)
+    handleWebSocket.message(first, JSON.stringify({ type: 'stop_generation' }))
+    first.sent.length = 0
+    second.sent.length = 0
+
+    const result = {
+      type: 'result',
+      subtype: 'error_during_execution',
+      is_error: true,
+      result: 'Interrupted by user',
+    }
+    callbacks.forEach((callback) => callback(result))
+
+    expect(first.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'system_notification',
+      subtype: 'generation_stopped',
+      message: 'Generation stopped',
+    })
+    expect(second.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'system_notification',
+      subtype: 'generation_stopped',
+      message: 'Generation stopped',
+    })
+    expect(first.sent.map((payload) => JSON.parse(payload))).not.toContainEqual(
+      expect.objectContaining({ type: 'error' }),
+    )
+    expect(second.sent.map((payload) => JSON.parse(payload))).not.toContainEqual(
+      expect.objectContaining({ type: 'error' }),
+    )
+  })
+
+  it('drops streaming fallback updates from a stopped turn', () => {
+    const sessionId = `stopped-turn-streaming-fallback-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'sendInterrupt').mockImplementation(() => true)
+    spyOn(conversationService, 'getActiveInstanceId').mockReturnValue('instance-retrying')
+    spyOn(globalThis, 'setTimeout').mockImplementation(() => 1 as any)
+    __markActiveTurnForTests(sessionId)
+
+    handleWebSocket.message(ws, JSON.stringify({ type: 'stop_generation' }))
+
+    expect(translateCliMessage({
+      type: 'system',
+      subtype: 'streaming_fallback',
+      cause: 'stream_retry',
+      attempt: 3,
+      maxRetries: 10,
+      retryDelayMs: 3_000,
+    }, sessionId)).toEqual([])
+  })
+
+  it('clears stopped-turn streaming state before processing later buffered output', () => {
+    const sessionId = `stopped-turn-stream-state-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'hasSession').mockReturnValue(false)
+    __markActiveTurnForTests(sessionId)
+
+    expect(translateCliMessage({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'text' },
+      },
+    }, sessionId)).toEqual([{ type: 'content_start', blockType: 'text' }])
+
+    handleWebSocket.message(ws, JSON.stringify({ type: 'stop_generation' }))
+
+    expect(translateCliMessage({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'fresh buffered output' }] },
+    }, sessionId)).toEqual([
+      { type: 'content_start', blockType: 'text' },
+      { type: 'content_delta', text: 'fresh buffered output' },
+    ])
+  })
+
+  it('cancels a turn stopped while waiting for runtime config', async () => {
+    const sessionId = `stopped-turn-runtime-config-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    let resolveLaunchInfo!: (value: null) => void
+    const launchInfoPending = new Promise<null>((resolve) => {
+      resolveLaunchInfo = resolve
+    })
+    spyOn(sessionService, 'getSessionLaunchInfo').mockReturnValue(launchInfoPending)
+    spyOn(sessionService, 'appendSessionMetadata').mockResolvedValue(undefined)
+    spyOn(conversationService, 'hasSession').mockReturnValue(false)
+    const sendMessage = spyOn(conversationService, 'sendMessage').mockResolvedValue(true)
+
+    handleWebSocket.open(ws)
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'set_runtime_config',
+      requestId: crypto.randomUUID(),
+      providerId: null,
+      modelId: 'claude-opus-4-7',
+    }))
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'user_message',
+      content: 'wait for runtime config',
+    }))
+    await Promise.resolve()
+
+    handleWebSocket.message(ws, JSON.stringify({ type: 'stop_generation' }))
+    resolveLaunchInfo(null)
+    await __drainWebSocketRuntimeTransitionsForTests()
+    await new Promise<void>((resolve) => setImmediate(resolve))
+
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'system_notification',
+      subtype: 'generation_stopped',
+      message: 'Generation stopped',
+    })
+    expect(sessionActivityCoordinator.isUserTurnActive(sessionId)).toBe(false)
   })
 
   it('replays an applied runtime request idempotently after its result is lost', async () => {
@@ -626,6 +876,125 @@ describe('WebSocket handler session isolation', () => {
       message: 'Runtime config request id is invalid.',
     })
     expect(appendMetadata).not.toHaveBeenCalled()
+  })
+
+  it('keeps a stopped turn terminal when sendMessage resolves late', async () => {
+    const sessionId = `stopped-turn-late-send-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    let resolveSend!: (sent: boolean) => void
+    const pendingSend = new Promise<boolean>((resolve) => {
+      resolveSend = resolve
+    })
+    spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([])
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'onOutput').mockImplementation(() => {})
+    spyOn(conversationService, 'removeOutputCallback').mockImplementation(() => {})
+    spyOn(sessionService, 'getCustomTitle').mockResolvedValue('Existing title')
+    const sendMessage = spyOn(conversationService, 'sendMessage').mockReturnValue(pendingSend)
+    const sendInterrupt = spyOn(conversationService, 'sendInterrupt').mockImplementation(() => true)
+    spyOn(conversationService, 'getActiveInstanceId').mockReturnValue('instance-late-send')
+    const stopSessionInstance = spyOn(conversationService, 'stopSessionInstance').mockReturnValue(true)
+
+    handleWebSocket.open(ws)
+    ws.sent.length = 0
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'user_message',
+      content: 'start the old turn',
+    }))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(sendMessage).toHaveBeenCalledWith(sessionId, 'start the old turn', undefined)
+
+    const setTimeoutSpy = spyOn(globalThis, 'setTimeout').mockImplementation(() => 1 as any)
+    handleWebSocket.message(ws, JSON.stringify({ type: 'stop_generation' }))
+    resolveSend(true)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(sendInterrupt).toHaveBeenCalledWith(sessionId)
+    for (const [callback] of setTimeoutSpy.mock.calls) {
+      if (typeof callback === 'function') callback()
+    }
+
+    expect(stopSessionInstance).toHaveBeenCalledWith(sessionId, 'instance-late-send')
+    expect(ws.sent.map((payload) => JSON.parse(payload)).filter(
+      (message) => message.type === 'system_notification' && message.subtype === 'generation_stopped',
+    )).toHaveLength(1)
+    expect(sessionActivityCoordinator.isUserTurnActive(sessionId)).toBe(false)
+  })
+
+  it('tears down callbacks when stop arrives immediately before CLI send', async () => {
+    const sessionId = `stopped-turn-before-send-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    let outputRegistrations = 0
+    spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([])
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    const removeOutputCallback = spyOn(conversationService, 'removeOutputCallback').mockImplementation(() => {})
+    spyOn(conversationService, 'onOutput').mockImplementation(() => {
+      outputRegistrations++
+      if (outputRegistrations === 3) {
+        handleWebSocket.message(ws, JSON.stringify({ type: 'stop_generation' }))
+      }
+    })
+    spyOn(sessionService, 'getCustomTitle').mockResolvedValue('Existing title')
+    const sendMessage = spyOn(conversationService, 'sendMessage').mockResolvedValue(true)
+    spyOn(conversationService, 'getActiveInstanceId').mockReturnValue(null)
+
+    handleWebSocket.open(ws)
+    ws.sent.length = 0
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'user_message',
+      content: 'stop before send',
+    }))
+    await new Promise<void>((resolve) => setImmediate(resolve))
+
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(removeOutputCallback).toHaveBeenCalled()
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'system_notification',
+      subtype: 'generation_stopped',
+      message: 'Generation stopped',
+    })
+    expect(sessionActivityCoordinator.isUserTurnActive(sessionId)).toBe(false)
+  })
+
+  it('waits for stopped-turn settlement before sending a replacement turn', async () => {
+    const sessionId = `stopped-turn-replacement-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    const callbacks: Array<() => void> = []
+    const sendInterrupt = spyOn(conversationService, 'sendInterrupt').mockImplementation(() => true)
+    const sendMessage = spyOn(conversationService, 'sendMessage').mockResolvedValue(true)
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'onOutput').mockImplementation(() => {})
+    spyOn(conversationService, 'removeOutputCallback').mockImplementation(() => {})
+    spyOn(conversationService, 'getActiveInstanceId').mockReturnValue('instance-replacement')
+    spyOn(conversationService, 'stopSessionInstance').mockReturnValue(true)
+    spyOn(sessionService, 'getCustomTitle').mockResolvedValue('Existing title')
+    spyOn(globalThis, 'setTimeout').mockImplementation(((callback: () => void) => {
+      callbacks.push(callback)
+      return callbacks.length as any
+    }) as typeof setTimeout)
+
+    handleWebSocket.open(ws)
+    __markActiveTurnForTests(sessionId)
+    handleWebSocket.message(ws, JSON.stringify({ type: 'stop_generation' }))
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'user_message',
+      content: 'replacement turn',
+    }))
+    await Promise.resolve()
+
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(sendInterrupt).toHaveBeenCalledWith(sessionId)
+
+    callbacks[0]?.()
+    await new Promise<void>((resolve) => setImmediate(resolve))
+
+    expect(sendMessage).toHaveBeenCalledWith(sessionId, 'replacement turn', undefined)
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'system_notification',
+      subtype: 'generation_stopped',
+      message: 'Generation stopped',
+    })
   })
 
   it('does not let a stopped turn fallback kill a replacement turn', () => {

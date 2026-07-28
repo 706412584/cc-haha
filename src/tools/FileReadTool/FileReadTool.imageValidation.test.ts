@@ -14,6 +14,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { deflateSync } from 'node:zlib'
+import { crc32 } from '../../utils/crc32.js'
 import {
   getFsImplementation,
   setFsImplementation,
@@ -27,8 +29,8 @@ import {
 // Minimal valid 1x1 PNG — magic bytes `89 50 4E 47 0D 0A 1A 0A` then a real IHDR.
 // Hand-crafted so we don't need sharp/node-canvas at test time.
 const TINY_PNG = Buffer.from(
-  '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da636060000000050001a5f64570000000049454e44ae426082',
-  'hex',
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  'base64',
 )
 
 // The actual bug payload: 43 bytes of JSON error body written into a `.png` file.
@@ -36,6 +38,23 @@ const NOT_A_PNG_43_BYTES = Buffer.from(
   '{"ok":false,"message":"not found"}\n',
   'utf8',
 )
+
+function pngChunk(type: string, data: Buffer): Buffer {
+  const body = Buffer.concat([Buffer.from(type, 'ascii'), data])
+  const chunk = Buffer.alloc(12 + data.length)
+  chunk.writeUInt32BE(data.length, 0)
+  body.copy(chunk, 4)
+  chunk.writeUInt32BE(crc32(body), 8 + data.length)
+  return chunk
+}
+
+function pngWithImageData(data: Buffer): Buffer {
+  return Buffer.concat([
+    TINY_PNG.subarray(0, 33),
+    pngChunk('IDAT', data),
+    TINY_PNG.subarray(TINY_PNG.length - 12),
+  ])
+}
 
 function installFakeFs(fileMap: Record<string, Buffer>): void {
   const realFs = getFsImplementation()
@@ -101,6 +120,121 @@ describe('readImageWithTokenBudget — magic byte validation', () => {
     await expect(
       readImageWithTokenBudget('/fake/empty.png'),
     ).rejects.toThrow(/empty/i)
+  })
+
+  test('rejects a PNG whose IDAT chunk is truncated despite valid magic bytes', async () => {
+    const truncatedPng = Buffer.from(TINY_PNG)
+    truncatedPng.writeUInt32BE(TINY_PNG.length, 33)
+    installFakeFs({
+      '/fake/truncated.png': truncatedPng,
+    })
+
+    await expect(
+      readImageWithTokenBudget('/fake/truncated.png'),
+    ).rejects.toBeInstanceOf(InvalidImageDataError)
+  })
+
+  test('rejects a PNG with IHDR and IEND but no image data', async () => {
+    const pngWithoutIdat = Buffer.concat([
+      TINY_PNG.subarray(0, 33),
+      TINY_PNG.subarray(TINY_PNG.length - 12),
+    ])
+    installFakeFs({
+      '/fake/no-idat.png': pngWithoutIdat,
+    })
+
+    await expect(
+      readImageWithTokenBudget('/fake/no-idat.png'),
+    ).rejects.toBeInstanceOf(InvalidImageDataError)
+  })
+
+  test('rejects a PNG whose chunk CRC is corrupt', async () => {
+    const corruptCrcPng = Buffer.from(TINY_PNG)
+    const idatLength = corruptCrcPng.readUInt32BE(33)
+    const idatCrcOffset = 33 + 8 + idatLength
+    corruptCrcPng[idatCrcOffset] ^= 0xff
+    installFakeFs({
+      '/fake/corrupt-crc.png': corruptCrcPng,
+    })
+
+    await expect(
+      readImageWithTokenBudget('/fake/corrupt-crc.png'),
+    ).rejects.toBeInstanceOf(InvalidImageDataError)
+  })
+
+  test('rejects a PNG with valid chunk CRCs but corrupt pixel data', async () => {
+    const corruptPixelsPng = Buffer.from(TINY_PNG)
+    const idatLength = corruptPixelsPng.readUInt32BE(33)
+    const idatDataOffset = 33 + 8
+    corruptPixelsPng[idatDataOffset] ^= 0xff
+    const idatCrcOffset = idatDataOffset + idatLength
+    corruptPixelsPng.writeUInt32BE(
+      crc32(corruptPixelsPng.subarray(33 + 4, idatCrcOffset)),
+      idatCrcOffset,
+    )
+    installFakeFs({
+      '/fake/corrupt-pixels.png': corruptPixelsPng,
+    })
+
+    await expect(
+      readImageWithTokenBudget('/fake/corrupt-pixels.png'),
+    ).rejects.toBeInstanceOf(InvalidImageDataError)
+  })
+
+  test('rejects a PNG whose valid zlib stream has no scanline data', async () => {
+    installFakeFs({
+      '/fake/empty-scanlines.png': pngWithImageData(deflateSync(Buffer.alloc(0))),
+    })
+
+    await expect(
+      readImageWithTokenBudget('/fake/empty-scanlines.png'),
+    ).rejects.toBeInstanceOf(InvalidImageDataError)
+  })
+
+  test('rejects decompressed scanlines larger than the IHDR requires', async () => {
+    installFakeFs({
+      '/fake/oversized-scanlines.png': pngWithImageData(
+        deflateSync(Buffer.alloc(8 * 1024 * 1024, 0)),
+      ),
+    })
+
+    await expect(
+      readImageWithTokenBudget('/fake/oversized-scanlines.png'),
+    ).rejects.toBeInstanceOf(InvalidImageDataError)
+  })
+
+  test('rejects bytes appended after a complete zlib stream inside IDAT', async () => {
+    const scanline = Buffer.from([0, 0, 0])
+    installFakeFs({
+      '/fake/idat-trailing-bytes.png': pngWithImageData(
+        Buffer.concat([deflateSync(scanline), Buffer.alloc(64, 0)]),
+      ),
+    })
+
+    await expect(
+      readImageWithTokenBudget('/fake/idat-trailing-bytes.png'),
+    ).rejects.toBeInstanceOf(InvalidImageDataError)
+  })
+
+  test('rejects excessive IDAT chunk counts before feeding zlib', async () => {
+    const scanline = Buffer.from([0, 0, 0])
+    const idatChunks = [
+      pngChunk('IDAT', deflateSync(scanline)),
+      ...Array.from({ length: 1024 }, () =>
+        pngChunk('IDAT', Buffer.alloc(0)),
+      ),
+    ]
+    installFakeFs({
+      '/fake/too-many-idat.png': Buffer.concat([
+        TINY_PNG.subarray(0, 33),
+        ...idatChunks,
+        TINY_PNG.subarray(TINY_PNG.length - 12),
+      ]),
+    })
+
+    await expect(
+      readImageWithTokenBudget('/fake/too-many-idat.png'),
+    ).rejects.toBeInstanceOf(InvalidImageDataError)
   })
 
   test('accepts a real PNG with valid magic bytes', async () => {

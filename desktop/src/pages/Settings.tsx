@@ -2381,7 +2381,12 @@ export function GeneralSettings() {
     { value: 'warm-classic', label: t('settings.general.appearance.warmClassic') },
     { value: 'celadon', label: t('settings.general.appearance.celadon') },
     { value: 'dark', label: t('settings.general.appearance.dark') },
-    { value: 'ink-blue', label: t('settings.general.appearance.inkBlue') },  ]
+    { value: 'ink-blue', label: t('settings.general.appearance.inkBlue') },
+    { value: 'classic-white', label: t('settings.general.appearance.classicWhite') },
+    { value: 'classic-light', label: t('settings.general.appearance.classicLight') },
+    { value: 'eye-care', label: t('settings.general.appearance.eyeCare') },
+    { value: 'classic-dark', label: t('settings.general.appearance.classicDark') },
+  ]
   // Split by ground, in the order THEMES already lists them, so the two rows
   // shown while following the system stay consistent with the flat picker.
   const LIGHT_THEMES = THEMES.filter(({ value }) => isLightThemeMode(value))

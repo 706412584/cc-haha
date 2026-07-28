@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { setBaseUrl } from '../api/client'
+
+vi.mock('./imageCompress', () => ({
+  compressDataUrl: vi.fn(async (dataUrl: string) => dataUrl),
+}))
 import { browserHost } from './desktopHost/browserHost'
 import {
   filesToComposerAttachments,
   getDataTransferFiles,
   pathToComposerAttachment,
-  selectNativeFileAttachments,
 } from './composerAttachments'
 
 describe('composer attachment payloads', () => {
@@ -71,31 +74,6 @@ describe('composer attachment payloads', () => {
     expect(attachment.data).toBeUndefined()
   })
 
-  it('selects native file attachments through the injected desktop host', async () => {
-    const open = vi.fn().mockResolvedValue(['/workspace/a.txt', '/workspace/b.log'])
-    window.desktopHost = {
-      ...browserHost,
-      kind: 'electron',
-      isDesktop: true,
-      capabilities: {
-        ...browserHost.capabilities,
-        dialogs: true,
-      },
-      dialogs: {
-        ...browserHost.dialogs,
-        open,
-      },
-    }
-
-    const attachments = await selectNativeFileAttachments()
-
-    expect(open).toHaveBeenCalledWith({ multiple: true, directory: false })
-    expect(attachments?.map((attachment) => attachment.path)).toEqual([
-      '/workspace/a.txt',
-      '/workspace/b.log',
-    ])
-  })
-
   it('keeps pasted desktop files as native path attachments across common file types', async () => {
     const nativePaths = new Map<File, string>()
     const files = [
@@ -126,18 +104,73 @@ describe('composer attachment payloads', () => {
     ])
   })
 
-  it('classifies pasted desktop images as image attachments without inlining their bytes', async () => {
+  it('keeps a mixed desktop batch when one image preview cannot be read', async () => {
+    class SelectiveFileReader {
+      result: string | ArrayBuffer | null = null
+      onload: ((event: ProgressEvent<FileReader>) => void) | null = null
+      onerror: (() => void) | null = null
+      error: DOMException | null = null
+
+      readAsDataURL(file: File) {
+        if (file.name === 'broken.jpg') {
+          this.error = new DOMException('read failed')
+          this.onerror?.()
+          return
+        }
+        this.result = 'data:image/jpeg;base64,GOOD'
+        this.onload?.({} as ProgressEvent<FileReader>)
+      }
+    }
+    vi.stubGlobal('FileReader', SelectiveFileReader)
+
+    const broken = new File(['broken'], 'broken.jpg', { type: 'image/jpeg' })
+    const good = new File(['good'], 'good.jpg', { type: 'image/jpeg' })
+    const paths = new Map<File, string>([
+      [broken, 'D:\\download\\broken.jpg'],
+      [good, 'D:\\download\\good.jpg'],
+    ])
+    window.desktopHost = {
+      ...browserHost,
+      kind: 'electron',
+      isDesktop: true,
+      files: { getPathForFile: file => paths.get(file) ?? '' },
+    }
+
+    const attachments = await filesToComposerAttachments([broken, good])
+
+    expect(attachments).toHaveLength(2)
+    expect(attachments[0]).toMatchObject({
+      name: 'broken.jpg',
+      path: 'D:\\download\\broken.jpg',
+      previewUrl: undefined,
+    })
+    expect(attachments[1]).toMatchObject({
+      name: 'good.jpg',
+      path: 'D:\\download\\good.jpg',
+      previewUrl: 'data:image/jpeg;base64,GOOD',
+    })
+  })
+
+  it('uses selected desktop image bytes for preview while keeping attachments path-only', async () => {
+    class ImmediateFileReader {
+      result: string | ArrayBuffer | null = null
+      onload: ((event: ProgressEvent<FileReader>) => void) | null = null
+      onerror: (() => void) | null = null
+      error: DOMException | null = null
+
+      readAsDataURL(file: Blob) {
+        const mimeType = file.type || 'application/octet-stream'
+        this.result = `data:${mimeType};base64,SELECTED`
+        this.onload?.({} as ProgressEvent<FileReader>)
+      }
+    }
+    vi.stubGlobal('FileReader', ImmediateFileReader)
+
     const nativePaths = new Map<File, string>()
-    const files = [
-      new File(['png'], 'screenshot.PNG', { type: 'image/png' }),
-      new File(['jpg'], '6代码仓库.jpg', { type: 'image/jpeg' }),
-      new File(['webp'], 'hero.webp', { type: 'image/webp' }),
-      new File(['# Notes'], 'notes.md', { type: 'text/markdown' }),
-    ]
-    nativePaths.set(files[0]!, '/Users/nanmi/Desktop/screenshot.PNG')
-    nativePaths.set(files[1]!, '/Users/nanmi/Desktop/6代码仓库.jpg')
-    nativePaths.set(files[2]!, 'C:\\Users\\Nanmi\\Desktop\\hero.webp')
-    nativePaths.set(files[3]!, '/Users/nanmi/Desktop/notes.md')
+    const image = new File(['jpg'], '6代码仓库.jpg', { type: 'image/jpeg' })
+    const notes = new File(['# Notes'], 'notes.md', { type: 'text/markdown' })
+    nativePaths.set(image, 'D:\\download\\6代码仓库.jpg')
+    nativePaths.set(notes, 'D:\\download\\notes.md')
     window.desktopHost = {
       ...browserHost,
       kind: 'electron',
@@ -147,14 +180,23 @@ describe('composer attachment payloads', () => {
       },
     }
 
-    const attachments = await filesToComposerAttachments(files)
+    const attachments = await filesToComposerAttachments([image, notes])
 
-    expect(attachments.map(({ name, type, path, data, previewUrl }) => ({ name, type, path, data, previewUrl }))).toEqual([
-      { name: 'screenshot.PNG', type: 'image', path: '/Users/nanmi/Desktop/screenshot.PNG', data: undefined, previewUrl: 'http://127.0.0.1:3456/api/filesystem/file?path=%2FUsers%2Fnanmi%2FDesktop%2Fscreenshot.PNG' },
-      { name: '6代码仓库.jpg', type: 'image', path: '/Users/nanmi/Desktop/6代码仓库.jpg', data: undefined, previewUrl: 'http://127.0.0.1:3456/api/filesystem/file?path=%2FUsers%2Fnanmi%2FDesktop%2F6%E4%BB%A3%E7%A0%81%E4%BB%93%E5%BA%93.jpg' },
-      { name: 'hero.webp', type: 'image', path: 'C:\\Users\\Nanmi\\Desktop\\hero.webp', data: undefined, previewUrl: 'http://127.0.0.1:3456/api/filesystem/file?path=C%3A%5CUsers%5CNanmi%5CDesktop%5Chero.webp' },
-      { name: 'notes.md', type: 'file', path: '/Users/nanmi/Desktop/notes.md', data: undefined, previewUrl: undefined },
+    expect(attachments).toEqual([
+      expect.objectContaining({
+        name: '6代码仓库.jpg',
+        type: 'image',
+        path: 'D:\\download\\6代码仓库.jpg',
+        previewUrl: 'data:image/jpeg;base64,SELECTED',
+      }),
+      expect.objectContaining({
+        name: 'notes.md',
+        type: 'file',
+        path: 'D:\\download\\notes.md',
+        previewUrl: undefined,
+      }),
     ])
+    expect(attachments.every((attachment) => attachment.data === undefined)).toBe(true)
   })
 
   it('keeps formats the server cannot inline as file attachments', () => {

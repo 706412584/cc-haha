@@ -10,6 +10,28 @@ import {
   PROMPT_TOO_LONG_ERROR_MESSAGE,
 } from './errors.js'
 
+describe('invalid image API errors', () => {
+  test('maps malformed image rejections to a recoverable synthetic error', () => {
+    for (const format of ['PNG', 'JPEG', 'WebP', 'GIF']) {
+      const body = {
+        error: {
+          message: `Invalid ${format} image.`,
+          type: 'invalid_request_error',
+        },
+        type: 'error',
+      }
+      const msg = getAssistantMessageFromError(
+        new APIError(400, body, JSON.stringify(body), undefined),
+        'claude-test',
+      )
+
+      expect(msg.isApiErrorMessage).toBe(true)
+      expect(msg.businessErrorCode).toBe(BUSINESS_ERROR_CODES.IMAGE_INVALID)
+      expect(msg.errorDetails).toContain(`Invalid ${format} image.`)
+    }
+  })
+})
+
 describe('image unsupported API errors', () => {
   test('detects provider-specific text-only model image rejections', () => {
     const unsupportedImageErrors = [

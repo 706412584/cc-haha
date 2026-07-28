@@ -2053,32 +2053,38 @@ export function normalizeMessagesForAPI(
         : undefined
     if (!blockTypesToStrip && errorText) {
       blockTypesToStrip = errorToBlockTypes[errorText]
+      if (/invalid\s+(?:png|jpe?g|webp|gif)\s+image\b/i.test(errorText)) {
+        blockTypesToStrip = new Set(['image'])
+      }
     }
     if (!blockTypesToStrip) {
       continue
     }
-    // Walk backward to find the nearest preceding user message. Normal pasted
-    // images are ordinary user turns, while attachment-derived media can be
-    // meta turns; both need to be stripped after a provider media rejection.
+    // The API does not identify which content block was rejected. Strip every
+    // earlier candidate of that media type; keeping any one can leave the bad
+    // block in history and make every later text-only turn fail again.
     for (let j = i - 1; j >= 0; j--) {
       const candidate = reorderedMessages[j]!
-      if (candidate.type === 'user') {
-        const existing = stripTargets.get(candidate.uuid)
-        if (existing) {
-          for (const t of blockTypesToStrip) {
-            existing.add(t)
-          }
-        } else {
-          stripTargets.set(candidate.uuid, new Set(blockTypesToStrip))
-        }
-        break
+      if (candidate.type !== 'user') continue
+
+      const content = candidate.message.content
+      if (!Array.isArray(content)) continue
+      const containsTargetMedia = content.some(block => {
+        if (blockTypesToStrip.has(block.type)) return true
+        return (
+          block.type === 'tool_result' &&
+          Array.isArray(block.content) &&
+          block.content.some(nested => blockTypesToStrip.has(nested.type))
+        )
+      })
+      if (!containsTargetMedia) continue
+
+      const existing = stripTargets.get(candidate.uuid)
+      if (existing) {
+        for (const t of blockTypesToStrip) existing.add(t)
+      } else {
+        stripTargets.set(candidate.uuid, new Set(blockTypesToStrip))
       }
-      // Skip over other synthetic error messages
-      if (isSyntheticApiErrorMessage(candidate)) {
-        continue
-      }
-      // Stop if we hit an assistant message or any other non-user message.
-      break
     }
   }
 
@@ -2146,14 +2152,37 @@ export function normalizeMessagesForAPI(
           if (typesToStrip) {
             const content = normalizedMessage.message.content
             if (Array.isArray(content)) {
-              const filtered = content.filter(
-                block => !typesToStrip.has(block.type),
-              )
+              const filtered = content
+                .filter(block => !typesToStrip.has(block.type))
+                .map(block => {
+                  if (block.type !== 'tool_result' || !Array.isArray(block.content)) {
+                    return block
+                  }
+                  const nestedContent = block.content.filter(
+                    nested => !typesToStrip.has(nested.type),
+                  )
+                  if (nestedContent.length === block.content.length) return block
+                  return {
+                    ...block,
+                    content:
+                      nestedContent.length > 0
+                        ? nestedContent
+                        : [
+                            {
+                              type: 'text' as const,
+                              text: '[media removed after API rejection]',
+                            },
+                          ],
+                  }
+                })
               if (filtered.length === 0) {
                 // All content blocks were stripped; skip this message entirely
                 return
               }
-              if (filtered.length < content.length) {
+              if (
+                filtered.length < content.length ||
+                filtered.some((block, index) => block !== content[index])
+              ) {
                 normalizedMessage = {
                   ...normalizedMessage,
                   message: {

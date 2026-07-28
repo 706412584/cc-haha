@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { getCoordinatorSystemPrompt } from '../../coordinator/coordinatorMode.js'
+import { getSessionSpecificGuidanceSection } from '../../constants/prompts.js'
+import { TASK_OUTPUT_TOOL_NAME } from '../TaskOutputTool/constants.js'
+import { TASK_STOP_TOOL_NAME } from '../TaskStopTool/prompt.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
 import {
   AGENT_TOOL_ORCHESTRATION_GUIDANCE,
@@ -86,6 +89,29 @@ describe('background agent orchestration guidance', () => {
     expect(prompt).toContain(
       'Only mark the linked item completed when the Agent reports that its assigned work is fully complete',
     )
+    expect(prompt).toContain(
+      'After an agent completes, fails, stops, is killed, or is cancelled, keep it terminal by default',
+    )
+    expect(prompt).toContain(
+      'Only use SendMessage to resume a terminal agent when the current user message explicitly asks to resume that specific agent',
+    )
+    expect(prompt).not.toContain(
+      'To continue a previously spawned agent, use SendMessage',
+    )
+  })
+
+  test('session guidance reconciles background tasks before ending a conversation', () => {
+    const prompt = getSessionSpecificGuidanceSection(
+      new Set([TASK_OUTPUT_TOOL_NAME, TASK_STOP_TOOL_NAME]),
+      [],
+    )
+
+    expect(prompt).toContain('Before ending a conversation')
+    expect(prompt).toContain(TASK_OUTPUT_TOOL_NAME)
+    expect(prompt).toContain(TASK_STOP_TOOL_NAME)
+    expect(prompt).toContain('long-lived services')
+    expect(prompt).toContain('completed, failed, stopped, killed, or cancelled')
+    expect(prompt).toContain('explicitly asks to resume')
   })
 
   test('normal Agent prompt requires a restrained parallel kickoff contract', async () => {
@@ -176,7 +202,17 @@ describe('background agent orchestration guidance', () => {
     expect(prompt).toContain('Default to one well-scoped worker')
     expect(prompt).toContain('Do not fan out simple research, planning, command execution, or ordinary tests')
     expect(prompt).toContain('Parallel workers require genuinely independent tasks')
+    expect(prompt).toContain('Before ending the user conversation')
+    expect(prompt).toContain('completed, failed, stopped, killed, or cancelled')
+    expect(prompt).toContain('explicitly asks to resume')
     expect(prompt).toContain("read an agent's `output_file`")
+    expect(prompt).not.toContain('Continue workers whose work is complete')
+    expect(prompt).not.toContain('Stopped workers can be continued')
+    expect(prompt).not.toContain('Continue the same worker with SendMessage')
+    expect(prompt).not.toContain('Research explored exactly the files that need editing | **Continue**')
+    expect(prompt).not.toContain('Correcting a failure or extending recent work | **Continue**')
+    expect(prompt).not.toContain('worker finished research, now give it')
+    expect(prompt).not.toContain('worker just reported test failures')
     expect(prompt).not.toContain(OLD_COORDINATOR_RULE)
   })
 })

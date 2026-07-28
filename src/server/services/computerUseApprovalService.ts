@@ -1,5 +1,7 @@
+import { buildComputerUseAllowResponse } from '../../utils/computerUsePermissions.js'
 import type { CuPermissionRequest, CuPermissionResponse } from '../../vendor/computer-use-mcp/types.js'
 import { sendToSession } from '../ws/handler.js'
+import { conversationService } from './conversationService.js'
 
 type PendingApproval = {
   sessionId: string
@@ -18,6 +20,10 @@ class ComputerUseApprovalService {
     sessionId: string,
     request: CuPermissionRequest,
   ): Promise<CuPermissionResponse> {
+    if (conversationService.getSessionPermissionMode(sessionId) === 'bypassPermissions') {
+      return buildComputerUseAllowResponse(request)
+    }
+
     const existing = this.pending.get(request.requestId)
     if (existing) {
       clearTimeout(existing.timeout)

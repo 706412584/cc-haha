@@ -69,6 +69,10 @@ vi.mock('../../hooks/useMobileViewport', () => ({
   useMobileViewport: () => viewportMocks.isMobile,
 }))
 
+vi.mock('../../lib/imageCompress', () => ({
+  compressDataUrl: vi.fn(async (dataUrl: string) => dataUrl),
+}))
+
 vi.mock('../controls/PermissionModeSelector', () => ({
   PermissionModeSelector: () => <button type="button">Permissions</button>,
 }))
@@ -1224,17 +1228,60 @@ describe('ChatInput file mentions', () => {
     })
   })
 
-  it('uses native desktop file paths instead of inlining selected files', async () => {
+  it('previews and annotates a selected desktop JPG outside the filesystem allow-list', async () => {
+    class ImmediateFileReader {
+      result: string | ArrayBuffer | null = null
+      onload: ((event: ProgressEvent<FileReader>) => void) | null = null
+      onerror: (() => void) | null = null
+      error: DOMException | null = null
+
+      readAsDataURL() {
+        this.result = 'data:image/jpeg;base64,SELECTED'
+        this.onload?.({} as ProgressEvent<FileReader>)
+      }
+    }
+    vi.stubGlobal('FileReader', ImmediateFileReader)
     installElectronFileHost()
-    mocks.dialogOpen.mockResolvedValueOnce([
-      '/Users/nanmi/tmp/large-a.log',
-      'C:\\Users\\Nanmi\\Desktop\\large-b.zip',
-    ])
+    const selectedImage = new File(['jpg'], 'EEA4B68044C134AC00FDCFA6F1C8027E.jpg', { type: 'image/jpeg' })
+    Object.defineProperty(selectedImage, 'path', {
+      configurable: true,
+      value: 'D:\\download\\EEA4B68044C134AC00FDCFA6F1C8027E.jpg',
+    })
 
     render(<ChatInput compact />)
 
     fireEvent.click(screen.getByLabelText('Open composer tools'))
     fireEvent.click(screen.getByText('Add files or photos'))
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(fileInput, { target: { files: [selectedImage] } })
+
+    expect(await screen.findByRole('img', { name: selectedImage.name })).toHaveAttribute(
+      'src',
+      'data:image/jpeg;base64,SELECTED',
+    )
+    fireEvent.click(screen.getByRole('button', { name: `Annotate ${selectedImage.name}` }))
+    expect(await screen.findByRole('dialog', { name: '图片标注' })).toBeInTheDocument()
+  })
+
+  it('uses native desktop file paths instead of inlining selected files', async () => {
+    installElectronFileHost()
+    const firstFile = new File(['log'], 'large-a.log', { type: 'text/plain' })
+    const secondFile = new File(['zip'], 'large-b.zip', { type: 'application/zip' })
+    Object.defineProperty(firstFile, 'path', {
+      configurable: true,
+      value: '/Users/nanmi/tmp/large-a.log',
+    })
+    Object.defineProperty(secondFile, 'path', {
+      configurable: true,
+      value: 'C:\\Users\\Nanmi\\Desktop\\large-b.zip',
+    })
+
+    render(<ChatInput compact />)
+
+    fireEvent.click(screen.getByLabelText('Open composer tools'))
+    fireEvent.click(screen.getByText('Add files or photos'))
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(fileInput, { target: { files: [firstFile, secondFile] } })
 
     expect(await screen.findByText('large-a.log')).toBeInTheDocument()
     expect(await screen.findByText('large-b.zip')).toBeInTheDocument()

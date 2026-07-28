@@ -54,17 +54,28 @@ describe('uiStore theme handling', () => {
     expect(document.documentElement.style.colorScheme).toBe('light')
   })
 
-  it('cycles through all six palettes and wraps back to pure white', async () => {
+  it('cycles through all current and classic palettes and wraps back to pure white', async () => {
     const { useUIStore } = await import('./uiStore')
 
-    const cycle = ['paper', 'warm-classic', 'celadon', 'dark', 'ink-blue', 'white']
+    const cycle = [
+      'paper',
+      'warm-classic',
+      'celadon',
+      'dark',
+      'ink-blue',
+      'classic-white',
+      'classic-light',
+      'eye-care',
+      'classic-dark',
+      'white',
+    ]
     for (const expected of cycle) {
       useUIStore.getState().toggleTheme()
       expect(useUIStore.getState().theme).toBe(expected)
     }
   })
 
-  it('reports a dark color scheme for both ink palettes, not just the one named dark', async () => {
+  it('reports a dark color scheme for dark-ground palettes, not just the one named dark', async () => {
     // `ink-blue` is a dark ground under a name that does not contain "dark".
     // Testing `theme === 'dark'` leaves native scrollbars and form controls in
     // their light variant against a near-black page.

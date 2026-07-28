@@ -102,33 +102,10 @@ export async function dataTransferToComposerAttachments(dataTransfer: DataTransf
   return filesToComposerAttachments(getDataTransferFiles(dataTransfer))
 }
 
-export async function selectNativeFileAttachments(): Promise<ComposerAttachment[] | null> {
-  const host = getDesktopHost()
-  if (!host.isDesktop || !host.capabilities.dialogs) return null
-
-  try {
-    const selected = await host.dialogs.open({
-      multiple: true,
-      directory: false,
-    })
-    const paths = normalizeDialogSelection(selected)
-    return pathsToComposerAttachments(paths)
-  } catch (error) {
-    console.warn('[attachments] Native file picker failed; falling back to browser file input', error)
-    return null
-  }
-}
-
 export async function filesToComposerAttachments(files: FileList | File[]): Promise<ComposerAttachment[]> {
   const entries = Array.from(files)
   const attachments = await Promise.all(entries.map(fileToComposerAttachment))
   return attachments.filter((attachment): attachment is ComposerAttachment => !!attachment)
-}
-
-function normalizeDialogSelection(selected: string | string[] | null): string[] {
-  if (!selected) return []
-  const paths = Array.isArray(selected) ? selected : [selected]
-  return paths.filter((filePath) => typeof filePath === 'string' && filePath.length > 0)
 }
 
 function getNativeFilePath(file: File): string | undefined {
@@ -139,7 +116,19 @@ function getNativeFilePath(file: File): string | undefined {
 async function fileToComposerAttachment(file: File): Promise<ComposerAttachment | null> {
   const nativePath = isDesktopRuntime() ? getNativeFilePath(file) : undefined
   if (nativePath) {
-    return pathToComposerAttachment(nativePath)
+    const attachment = pathToComposerAttachment(nativePath)
+    if (attachment.type !== 'image') return attachment
+
+    try {
+      return {
+        ...attachment,
+        // The selected File is already user-authorized, so use its bytes for the
+        // local preview. Keep `data` empty: the model payload remains path-only.
+        previewUrl: await compressDataUrl(await readFileAsDataUrl(file)),
+      }
+    } catch {
+      return { ...attachment, previewUrl: undefined }
+    }
   }
 
   const isImage = file.type.startsWith('image/')

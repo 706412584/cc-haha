@@ -44,7 +44,6 @@ import { isDesktopRuntime } from '../../lib/desktopRuntime'
 import {
   filesToComposerAttachments,
   getDataTransferFiles,
-  selectNativeFileAttachments,
   type ComposerAttachment,
 } from '../../lib/composerAttachments'
 import { useComposerFileDrop } from './useComposerFileDrop'
@@ -946,22 +945,8 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
   const openAttachmentPicker = useCallback(() => {
     setPlusMenuOpen(false)
-    if (!isDesktopRuntime()) {
-      fileInputRef.current?.click()
-      return
-    }
-
-    void selectNativeFileAttachments()
-      .then((nativeAttachments) => {
-        if (nativeAttachments) {
-          if (nativeAttachments.length > 0) {
-            setComposerAttachments((prev) => [...prev, ...nativeAttachments])
-          }
-          return
-        }
-        fileInputRef.current?.click()
-      })
-  }, [setComposerAttachments])
+    fileInputRef.current?.click()
+  }, [])
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (isMemberSession) return

@@ -26,6 +26,7 @@ const BACKGROUND_ORCHESTRATION_RULES = [
   '- Before launching an agent, separate work that depends on its result from independent work. Use background agents only for genuinely parallel work; use foreground when you must have the result before proceeding.',
   '- After launching a background agent, continue in the same turn with the lowest-ordered or currently executable unblocked work. Do not end your response merely because an agent is running. If unblocked work exists, briefly tell the user which agent is running and what you are continuing, then actually perform it in the same turn. End only when every remaining task depends on an agent result, requires user input, or is complete.',
   "- Never sleep, poll, check progress, or read an agent's `output_file` while it runs. Workers notify you when they finish. Never fabricate or predict agent results in any format — results arrive as separate messages.",
+  `- Before ending the user conversation, reconcile every worker you started from its latest task notification. Use ${TASK_STOP_TOOL_NAME} only for workers that are no longer useful or clearly runaway. Preserve intentionally long-lived work the user still needs. Do not leave a worker shown as running after a terminal notification (completed, failed, stopped, killed, or cancelled), and do not restart or re-check a terminal worker merely because the user clicked Stop unless the user explicitly asks to resume it.`,
 ].join('\n')
 
 export const COORDINATOR_VERIFICATION_GUIDANCE = {
@@ -45,7 +46,6 @@ export const COORDINATOR_VERIFICATION_GUIDANCE = {
     'The explicit Solo Pipeline TEST stage is the only mode-level exception because enabling Solo selects that workflow',
   ],
   proof: 'When the user explicitly requests independent verification, it means **proving the code works**, not confirming it exists. Run relevant tests with the feature enabled, investigate typecheck or runtime failures, and test independently rather than rubber-stamping.',
-  freshVerifier: 'The user explicitly requested independent verification after implementation',
   implementationTip: 'For implementation: request only the checks proportionate to the change. Simple low-risk edits may need LSP diagnostics or a type check; observable behavior changes may justify the narrowest relevant test. Do not add a separate verification worker unless the user explicitly requested independent verification.',
   bugInvestigation: 'Investigate the auth module in src/auth/ and its nearest tests. Find where null pointer exceptions could occur around session handling and token validation, then report the root cause, relevant test seam, and specific file paths and line numbers. Do not modify files.',
   bugProgress: "Investigating the bug with one well-scoped worker — I'll report back with findings.",
@@ -174,7 +174,7 @@ When calling ${AGENT_TOOL_NAME}:
 - Do not use one worker to check on another. Workers will notify you when they are done.
 - Do not use workers to trivially report file contents or run commands. Give them higher-level tasks.
 - Do not set the model parameter. Workers need the default model for the substantive tasks you delegate.
-- Continue workers whose work is complete via ${SEND_MESSAGE_TOOL_NAME} to take advantage of their loaded context.
+- Continue a terminal worker via ${SEND_MESSAGE_TOOL_NAME} only when the user explicitly asks to resume that worker; otherwise start fresh work without reactivating it.
 ${WORKER_SCOPE_RULES}
 ${BACKGROUND_ORCHESTRATION_RULES}
 
@@ -200,7 +200,7 @@ Format:
 
 - \`<result>\` and \`<usage>\` are optional sections
 - The \`<summary>\` describes the outcome: "completed", "failed: {error}", or "was stopped"
-- The \`<task-id>\` value is the agent ID — use SendMessage with that ID as \`to\` to continue that worker
+- The \`<task-id>\` value is the agent ID. Keep it only for a user-authorized resume of that terminal worker.
 
 ### Example
 
@@ -223,10 +223,10 @@ User:
   </task-notification>
 
 You:
-  Found the bug — null pointer in confirmTokenExists in validate.ts. I'll fix it.
+  Found the bug — null pointer in confirmTokenExists in validate.ts.
   Still waiting on the token storage research.
 
-  ${SEND_MESSAGE_TOOL_NAME}({ to: "agent-a1b", message: "Fix the null pointer in src/auth/validate.ts:42..." })
+  ${AGENT_TOOL_NAME}({ description: "Fix auth null pointer", subagent_type: "worker", prompt: "Fix the null pointer in src/auth/validate.ts:42..." })
 
 ## 3. Workers
 
@@ -288,12 +288,12 @@ ${COORDINATOR_VERIFICATION_GUIDANCE.proof}
 ### Handling Worker Failures
 
 When a worker reports failure (tests failed, build errors, file not found):
-- Continue the same worker with ${SEND_MESSAGE_TOOL_NAME} — it has the full error context
-- If a correction attempt fails, try a different approach or report to the user
+- Do not resume the failed worker unless the user explicitly asks you to; synthesize the failure into a fresh worker prompt when more work is needed
+- If a fresh correction attempt fails, try a different approach or report to the user
 
 ### Stopping Workers
 
-Use ${TASK_STOP_TOOL_NAME} to stop a worker you sent in the wrong direction — for example, when you realize mid-flight that the approach is wrong, or the user changes requirements after you launched the worker. Pass the \`task_id\` from the ${AGENT_TOOL_NAME} tool's launch result. Stopped workers can be continued with ${SEND_MESSAGE_TOOL_NAME}.
+Use ${TASK_STOP_TOOL_NAME} to stop a worker you sent in the wrong direction — for example, when you realize mid-flight that the approach is wrong, or the user changes requirements after you launched the worker. Pass the \`task_id\` from the ${AGENT_TOOL_NAME} tool's launch result. A stopped worker stays terminal unless the user explicitly asks to resume it with ${SEND_MESSAGE_TOOL_NAME}.
 
 \`\`\`
 // Launched a worker to refactor auth to use JWT
@@ -303,13 +303,13 @@ ${AGENT_TOOL_NAME}({ description: "Refactor auth to JWT", subagent_type: "worker
 // User clarifies: "Actually, keep sessions — just fix the null pointer"
 ${TASK_STOP_TOOL_NAME}({ task_id: "agent-x7q" })
 
-// Continue with corrected instructions
-${SEND_MESSAGE_TOOL_NAME}({ to: "agent-x7q", message: "Stop the JWT refactor. Instead, fix the null pointer in src/auth/validate.ts:42..." })
+// The user explicitly asked to redirect this stopped worker
+${SEND_MESSAGE_TOOL_NAME}({ to: "agent-x7q", message: "Resume with the corrected request: keep sessions and fix the null pointer in src/auth/validate.ts:42..." })
 \`\`\`
 
 ## 5. Writing Worker Prompts
 
-**Workers can't see your conversation.** Every prompt must be self-contained with everything the worker needs. After research completes, you always do two things: (1) synthesize findings into a specific prompt, and (2) choose whether to continue that worker via ${SEND_MESSAGE_TOOL_NAME} or spawn a fresh one.
+**Workers can't see your conversation.** Every prompt must be self-contained with everything the worker needs. After research completes, synthesize findings into a specific prompt and spawn a fresh worker for follow-up work. Resume a terminal worker with ${SEND_MESSAGE_TOOL_NAME} only when the current user message explicitly asks to resume that specific worker.
 
 ### Always synthesize — your most important job
 
@@ -318,15 +318,15 @@ When workers report research findings, **you must understand them before directi
 Never write "based on your findings" or "based on the research." These phrases delegate understanding to the worker instead of doing it yourself. You never hand off understanding to another worker.
 
 \`\`\`
-// Anti-pattern — lazy delegation (bad whether continuing or spawning)
+// Anti-pattern — lazy delegation
 ${AGENT_TOOL_NAME}({ prompt: "Based on your findings, fix the auth bug", ... })
 ${AGENT_TOOL_NAME}({ prompt: "The worker found an issue in the auth module. Please fix it.", ... })
 
-// Good — synthesized spec (works with either continue or spawn)
+// Good — synthesized spec for a fresh worker
 ${AGENT_TOOL_NAME}({ prompt: "Fix the null pointer in src/auth/validate.ts:42. The user field on Session (src/auth/types.ts:15) is undefined when sessions expire but the token remains cached. Add a null check before user.id access — if null, return 401 with 'Session expired'. Commit and report the hash.", ... })
 \`\`\`
 
-A well-synthesized spec gives the worker everything it needs in a few sentences. It does not matter whether the worker is fresh or continued — the spec quality determines the outcome.
+A well-synthesized spec gives a fresh worker everything it needs in a few sentences.
 
 ### Add a purpose statement
 
@@ -336,32 +336,15 @@ Include a brief purpose so workers can calibrate depth and emphasis:
 - "I need this to plan an implementation — report file paths, line numbers, and type signatures."
 - "This is a quick check before we merge — just verify the happy path."
 
-### Choose continue vs. spawn by context overlap
+### Terminal workers stay terminal by default
 
-After synthesizing, decide whether the worker's existing context helps or hurts:
+After a worker completes, fails, stops, is killed, or is cancelled, synthesize its result and spawn a fresh worker for any follow-up. This keeps terminal state accurate and prevents a user Stop from silently reactivating old work.
 
-| Situation | Mechanism | Why |
-|-----------|-----------|-----|
-| Research explored exactly the files that need editing | **Continue** (${SEND_MESSAGE_TOOL_NAME}) with synthesized spec | Worker already has the files in context AND now gets a clear plan |
-| Research was broad but implementation is narrow | **Spawn fresh** (${AGENT_TOOL_NAME}) with synthesized spec | Avoid dragging along exploration noise; focused context is cleaner |
-| Correcting a failure or extending recent work | **Continue** | Worker has the error context and knows what it just tried |
-| ${COORDINATOR_VERIFICATION_GUIDANCE.freshVerifier} | **Spawn fresh** | The authorized verifier should see the integrated code with fresh eyes, not carry implementation assumptions |
-| First implementation attempt used the wrong approach entirely | **Spawn fresh** | Wrong-approach context pollutes the retry; clean slate avoids anchoring on the failed path |
-| Completely unrelated task | **Spawn fresh** | No useful context to reuse |
-
-There is no universal default. Think about how much of the worker's context overlaps with the next task. High overlap -> continue. Low overlap -> spawn fresh.
-
-### Continue mechanics
-
-When continuing a worker with ${SEND_MESSAGE_TOOL_NAME}, it has full context from its previous run:
-\`\`\`
-// Continuation — worker finished research, now give it a synthesized implementation spec
-${SEND_MESSAGE_TOOL_NAME}({ to: "xyz-456", message: "Fix the null pointer in src/auth/validate.ts:42. The user field is undefined when Session.expired is true but the token is still cached. Add a null check before accessing user.id — if null, return 401 with 'Session expired'. Commit and report the hash." })
-\`\`\`
+Use ${SEND_MESSAGE_TOOL_NAME} on a terminal worker only when the current user message explicitly asks to resume that specific worker. Include that authorization in the continuation message.
 
 \`\`\`
-// Correction — worker just reported test failures from its own change, keep it brief
-${SEND_MESSAGE_TOOL_NAME}({ to: "xyz-456", message: "Two tests still failing at lines 58 and 72 — update the assertions to match the new error message." })
+// User-authorized resume of one specific terminal worker
+${SEND_MESSAGE_TOOL_NAME}({ to: "xyz-456", message: "The user explicitly asked to resume this worker. Fix the remaining assertions at lines 58 and 72, then report the result." })
 \`\`\`
 
 ### Prompt tips
@@ -372,7 +355,7 @@ ${SEND_MESSAGE_TOOL_NAME}({ to: "xyz-456", message: "Two tests still failing at 
 
 2. Precise git operation: "Create a new branch from main called 'fix/session-expiry'. Cherry-pick only commit abc123 onto it. Push and create a draft PR targeting main. Add anthropics/claude-code as reviewer. Report the PR URL."
 
-3. Correction (continued worker, short): "The tests failed on the null check you added — validate.test.ts:58 expects 'Invalid session' but you changed it to 'Session expired'. Fix the assertion. Commit and report the hash."
+3. User-authorized correction (continued worker, short): "The user explicitly asked to resume this worker. Fix validate.test.ts:58 so it expects 'Session expired'. Commit and report the hash."
 
 **Bad examples:**
 
@@ -387,7 +370,7 @@ Additional tips:
 - ${COORDINATOR_VERIFICATION_GUIDANCE.implementationTip}
 - For research: "Report findings — do not modify files"
 - Be precise about git operations — specify branch names, commit hashes, draft vs ready, reviewers
-- When continuing for corrections: reference what the worker did ("the null check you added") not what you discussed with the user
+- When the user explicitly authorizes a terminal-worker resume, reference the worker's concrete prior change and restate the user's authorization
 - For implementation: "Fix the root cause, not the symptom" — guide workers toward durable fixes
 - For verification: "Prove the code works, don't just confirm it exists"
 - For verification: "Try edge cases and error paths — don't just re-run what the implementation worker ran"
@@ -413,11 +396,11 @@ User:
   </task-notification>
 
 You:
-  Found the bug — null pointer in validate.ts:42. 
+  Found the bug — null pointer in validate.ts:42.
 
-  ${SEND_MESSAGE_TOOL_NAME}({ to: "agent-a1b", message: "Fix the null pointer in src/auth/validate.ts:42. Add a null check before accessing user.id — if null, ... Commit and report the hash." })
+  ${AGENT_TOOL_NAME}({ description: "Fix auth null pointer", subagent_type: "worker", prompt: "Fix the null pointer in src/auth/validate.ts:42. Add a null check before accessing user.id — if null, ... Commit and report the hash." })
 
-  Fix is in progress.
+  Fix is in progress with a fresh worker.
 
 User:
   How's it going?

@@ -66,6 +66,8 @@ const BACKGROUND_ORCHESTRATION_RULE = [
   'If a stalled-agent notification arrives, reconcile that Agent once before waiting again: inspect the runtime task with a non-blocking status check. If it is still running, report the stall and wait without continuous polling. If it is terminal, consume its result. If the runtime task no longer exists, return its linked task-list item to pending, clear or replace the stale owner, and continue the now-unblocked work.',
   '',
   'When a terminal Agent notification corresponds to a TaskCreate item assigned to that Agent, reconcile the task-list state in the same turn. Only mark the linked item completed when the Agent reports that its assigned work is fully complete; otherwise return it to pending with the remaining scope recorded.',
+  '',
+  'After an agent completes, fails, stops, is killed, or is cancelled, keep it terminal by default. Synthesize its result and launch a fresh agent for follow-up work when delegation is still warranted. Only use SendMessage to resume a terminal agent when the current user message explicitly asks to resume that specific agent.',
 ].join('\n')
 
 const BACKGROUND_USAGE_NOTES = [
@@ -315,7 +317,7 @@ Usage notes:
       ? `\n${BACKGROUND_USAGE_NOTES}`
       : ''
   }
-- To continue a previously spawned agent, use ${SEND_MESSAGE_TOOL_NAME} with the agent's ID or name as the \`to\` field. The agent resumes with its full context preserved. ${forkEnabled ? 'Each fresh Agent invocation with a subagent_type starts without context — provide a complete task description.' : 'Each Agent invocation starts fresh — provide a complete task description.'}
+- Use ${SEND_MESSAGE_TOOL_NAME} to message a running agent by ID or name. For a terminal agent, use it only when the current user message explicitly asks to resume that specific agent. ${forkEnabled ? 'Each fresh Agent invocation with a subagent_type starts without context — provide a complete task description.' : 'Each Agent invocation starts fresh — provide a complete task description.'}
 - The agent's outputs should generally be trusted
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.)${forkEnabled ? '' : ", since it is not aware of the user's intent"}
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
