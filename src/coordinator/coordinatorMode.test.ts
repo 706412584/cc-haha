@@ -18,7 +18,6 @@ describe('getCoordinatorSystemPrompt', () => {
       expect(prompt).toContain(rule)
     }
     expect(prompt).toContain(COORDINATOR_VERIFICATION_GUIDANCE.proof)
-    expect(prompt).toContain(COORDINATOR_VERIFICATION_GUIDANCE.freshVerifier)
     expect(prompt).toContain(COORDINATOR_VERIFICATION_GUIDANCE.implementationTip)
     expect(prompt).toContain(COORDINATOR_VERIFICATION_GUIDANCE.bugInvestigation)
     expect(prompt).toContain(COORDINATOR_VERIFICATION_GUIDANCE.bugProgress)
@@ -69,5 +68,28 @@ describe('getCoordinatorSystemPrompt', () => {
       'Use after non-trivial implementation lands',
     )
     expect(prompt).not.toContain('Parallelism is your superpower')
+  })
+
+  it('keeps terminal workers terminal unless the user explicitly resumes one', () => {
+    const prompt = getCoordinatorSystemPrompt()
+
+    expect(prompt).toContain(
+      'Before ending the user conversation',
+    )
+    expect(prompt).toContain(
+      'completed, failed, stopped, killed, or cancelled',
+    )
+    expect(prompt).toContain('explicitly asks to resume')
+    expect(prompt).not.toContain('Continue workers whose work is complete')
+    expect(prompt).not.toContain('Stopped workers can be continued')
+    expect(prompt).not.toContain('Continue the same worker with SendMessage')
+    expect(prompt).not.toContain(
+      'Research explored exactly the files that need editing | **Continue**',
+    )
+    expect(prompt).not.toContain(
+      'Correcting a failure or extending recent work | **Continue**',
+    )
+    expect(prompt).not.toContain('worker finished research, now give it')
+    expect(prompt).not.toContain('worker just reported test failures')
   })
 })

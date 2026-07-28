@@ -46,7 +46,6 @@ export const COORDINATOR_VERIFICATION_GUIDANCE = {
     'The explicit Solo Pipeline TEST stage is the only mode-level exception because enabling Solo selects that workflow',
   ],
   proof: 'When the user explicitly requests independent verification, it means **proving the code works**, not confirming it exists. Run relevant tests with the feature enabled, investigate typecheck or runtime failures, and test independently rather than rubber-stamping.',
-  freshVerifier: 'The user explicitly requested independent verification after implementation',
   implementationTip: 'For implementation: request only the checks proportionate to the change. Simple low-risk edits may need LSP diagnostics or a type check; observable behavior changes may justify the narrowest relevant test. Do not add a separate verification worker unless the user explicitly requested independent verification.',
   bugInvestigation: 'Investigate the auth module in src/auth/ and its nearest tests. Find where null pointer exceptions could occur around session handling and token validation, then report the root cause, relevant test seam, and specific file paths and line numbers. Do not modify files.',
   bugProgress: "Investigating the bug with one well-scoped worker — I'll report back with findings.",
