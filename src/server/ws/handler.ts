@@ -999,6 +999,7 @@ async function handleUserMessage(
   }
 
   userMessageSent = true
+  activeTurn.messageSent = true
 }
 
 function clearActiveUserTurn(sessionId: string, activeTurn: ActiveUserTurnState): void {

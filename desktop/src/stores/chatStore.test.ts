@@ -6217,6 +6217,7 @@ describe('chatStore history mapping', () => {
       attempt: 3,
       maxRetries: 10,
       retryDelayMs: 3_000,
+      errorStatus: null,
     })
     store.handleServerMessage(TEST_SESSION_ID, {
       type: 'streaming_fallback',
@@ -6239,6 +6240,7 @@ describe('chatStore history mapping', () => {
       attempt: 4,
       maxRetries: 10,
       retryDelayMs: 3_000,
+      errorStatus: null,
     })
     expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.apiRetry).toBeNull()
 
@@ -6251,6 +6253,7 @@ describe('chatStore history mapping', () => {
       attempt: 1,
       maxRetries: 10,
       retryDelayMs: 1_000,
+      errorStatus: null,
     })
 
     const restarted = useChatStore.getState().sessions[TEST_SESSION_ID]
