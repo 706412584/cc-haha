@@ -388,8 +388,10 @@ export function serializeLcovRecords(records: LcovRecord[]): string {
   }).join('\n') + '\n'
 }
 
-export function mergeLcovRecords(records: LcovRecord[]): LcovRecord[] {
-  const merged = new Map<string, LcovRecord>()
+function mergeLcovRecordsInto(
+  merged: Map<string, LcovRecord>,
+  records: LcovRecord[],
+): void {
   for (const record of records) {
     const existing = merged.get(record.file)
     if (!existing) {
@@ -411,6 +413,11 @@ export function mergeLcovRecords(records: LcovRecord[]): LcovRecord[] {
     existing.linesTotal = Math.max(existing.linesTotal, existing.lineHits.size)
     existing.linesCovered = [...existing.lineHits.values()].filter((hits) => hits > 0).length
   }
+}
+
+export function mergeLcovRecords(records: LcovRecord[]): LcovRecord[] {
+  const merged = new Map<string, LcovRecord>()
+  mergeLcovRecordsInto(merged, records)
   return [...merged.values()]
 }
 
@@ -921,7 +928,8 @@ export async function runCoverageGate(options: {
   const rootLogPath = join(rootCoverageDir, 'coverage.log')
   const rootStarted = Date.now()
   let nextFileIndex = 0
-  const partResults: Array<Awaited<ReturnType<typeof runCommand>> & { lcov: string; discovered: number }> = []
+  const partResults: Array<Awaited<ReturnType<typeof runCommand>> & { discovered: number }> = []
+  const rootRecordByFile = new Map<string, LcovRecord>()
 
   async function runCoverageWorker() {
     while (true) {
@@ -940,9 +948,13 @@ export async function runCoverageGate(options: {
       ]
       const result = await runCommand(command, rootDir, logPath)
       const lcovPath = join(partDir, 'lcov.info')
+      if (existsSync(lcovPath)) {
+        const partRecords = parseLcovRecords(readFileSync(lcovPath, 'utf8'), { rootDir })
+          .filter(isUsableLcovRecord)
+        mergeLcovRecordsInto(rootRecordByFile, partRecords)
+      }
       partResults[fileIndex] = {
         ...result,
-        lcov: existsSync(lcovPath) ? readFileSync(lcovPath, 'utf8') : '',
         discovered: existsSync(junitPath)
           ? parseBunJunitTestFileCount(readFileSync(junitPath, 'utf8'))
           : parseBunTestFileCount(result.output) ?? 0,
@@ -956,10 +968,7 @@ export async function runCoverageGate(options: {
     durationMs: Date.now() - rootStarted,
     output: partResults.map((result) => result.output).join('\n'),
   }
-  const rawRootLcov = partResults.map((result) => result.lcov).filter(Boolean).join('\n')
-  const rootRecords = mergeLcovRecords(
-    parseLcovRecords(rawRootLcov, { rootDir }).filter(isUsableLcovRecord),
-  )
+  const rootRecords = [...rootRecordByFile.values()]
   const rootLcovPath = join(rootCoverageDir, 'lcov.info')
   writeFileSync(rootLcovPath, serializeLcovRecords(rootRecords))
   writeFileSync(rootLogPath, partResults.map((result, index) => (
