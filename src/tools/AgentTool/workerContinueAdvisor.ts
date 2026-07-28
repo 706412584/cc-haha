@@ -7,10 +7,10 @@
  * means re-prefilling the system prompt + tool schemas + per-file Read
  * results — easily 10-50k tokens that could be reused via SendMessage.
  *
- * This module is the spawn-time check. It looks at the just-completed
- * panel-agent tasks and asks: "did one of them touch a file the new
- * prompt mentions?" If yes, hard-fail the spawn with an error pointing
- * the model at SendMessage with that agentId. Same model-facing prose
+ * This module is the spawn-time check. It looks at running panel-agent
+ * tasks and asks: "did one of them touch a file the new prompt mentions?"
+ * If yes, hard-fail the spawn with an error pointing the model at
+ * SendMessage with that agentId. Same model-facing prose
  * style as specialistRouter — no `key="value"` fragments.
  *
  * Integration is opt-in via CLAUDE_CODE_COORDINATOR_CONTINUE_HINT=1.
@@ -31,23 +31,21 @@ export type ContinueCandidateTask = {
   /** Short human label for the error message. */
   description: string
   /** When the worker started; used to break ties (most-recent wins) and
-   *  to filter out very old finished workers. */
+   *  to filter out very old running workers. */
   startTime: number
   /** Files the worker touched. The caller extracts these from
    *  task.progress.recentActivities; this module is policy-only. */
   touchedFiles: ReadonlyArray<string>
-  /** Whether the worker reached a terminal (completed/failed/killed)
-   *  status. Only completed workers are continue candidates — a still-
-   *  running worker should be addressed via SendMessage anyway, and a
-   *  failed/killed one shouldn't be revived blindly. */
-  isCompleted: boolean
+  /** Whether the worker is still running. Terminal workers must not be
+   *  reactivated unless the current user explicitly asks to resume one. */
+  isRunning: boolean
 }
 
 export type ContinueCandidateOptions = {
   /** Minimum number of overlapping files to recommend continuation.
    *  Default 1 — even a single shared file is a strong hint. */
   minSharedFiles?: number
-  /** Maximum age of a candidate task. Older completed workers' context
+  /** Maximum age of a candidate task. Older running workers' context
    *  may already have been compacted away on the SDK side. Default 30
    *  minutes. */
   maxAgeMs?: number
@@ -103,8 +101,8 @@ export function normalizePath(p: string): string {
 }
 
 /**
- * Score the given prompt against a list of recently-completed worker
- * tasks. Returns the best candidate (most files in common, ties broken
+ * Score the given prompt against a list of running worker tasks. Returns
+ * the best candidate (most files in common, ties broken
  * by recency) or null if no task crosses the threshold.
  *
  * Deliberately pure: the caller materialises the candidate list (with
@@ -125,7 +123,7 @@ export function findContinueCandidate(args: {
 
   const scored: Array<ContinueCandidate & { score: number }> = []
   for (const task of args.candidates) {
-    if (!task.isCompleted) continue
+    if (!task.isRunning) continue
     if (task.agentType !== args.subagentType) continue
     if (now - task.startTime > opts.maxAgeMs) continue
     const taskFiles = new Set(task.touchedFiles.map(normalizePath))

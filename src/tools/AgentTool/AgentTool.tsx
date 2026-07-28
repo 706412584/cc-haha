@@ -415,10 +415,10 @@ export const AgentTool = buildTool({
     }
 
     // Coordinator-mode worker-continue advisor (OPT-IN, off by default). When
-    // a recently-completed panel worker of the SAME subagent_type already
-    // touched files this prompt mentions, recommend SendMessage instead of
-    // a fresh spawn. Reuses the prior worker's prompt cache + loaded context
-    // (typically 10-50k tokens of saved prefill). Skips fork (no
+    // a running panel worker of the SAME subagent_type already touched files
+    // this prompt mentions, recommend SendMessage instead of a duplicate
+    // spawn. Terminal workers stay terminal unless the current user explicitly
+    // asks to resume one. Skips fork (no
     // subagent_type) since fork inherits parent context anyway. Enable with
     // CLAUDE_CODE_COORDINATOR_CONTINUE_HINT=1.
     if (
@@ -429,12 +429,11 @@ export const AgentTool = buildTool({
       const tasks = appState.tasks;
       const candidates: ContinueCandidateTask[] = [];
       for (const t of Object.values(tasks)) {
-        // Only panel-tracked agent tasks (excludes main-session); only
-        // completed (running -> address via SendMessage anyway, failed/killed
-        // -> don't revive blindly); only those still visible (evictAfter !== 0
-        // means a user x-key dismissal, no longer a continue candidate).
+        // Only panel-tracked running agents are continue candidates. Terminal
+        // agents remain terminal unless the current user explicitly asks to
+        // resume one. A user x-key dismissal also removes the candidate.
         if (!isPanelAgentTask(t)) continue;
-        if (t.status !== 'completed') continue;
+        if (t.status !== 'running') continue;
         if (t.evictAfter === 0) continue;
         const recent = t.progress?.recentActivities ?? [];
         candidates.push({
@@ -443,7 +442,7 @@ export const AgentTool = buildTool({
           description: t.description,
           startTime: t.startTime,
           touchedFiles: extractTouchedFilesFromActivities(recent),
-          isCompleted: true,
+          isRunning: true,
         });
       }
       const winner = findContinueCandidate({
@@ -1655,8 +1654,8 @@ The agent is now running and will receive instructions via mailbox.`
         type: 'text' as const,
         text: '(Subagent completed but returned no output.)'
       }];
-      // One-shot built-ins (Explore, Plan) are never continued via SendMessage
-      // — the agentId hint and <usage> block are dead weight (~135 chars ×
+      // One-shot built-ins (Explore, Plan) are never resumed, so the agentId
+      // hint and <usage> block are dead weight (~135 chars ×
       // 34M Explore runs/week ≈ 1-2 Gtok/week). Telemetry doesn't parse this
       // block (it uses logEvent in finalizeAgentTool), so dropping is safe.
       // agentType is optional for resume compat — missing means show trailer.
@@ -1672,7 +1671,7 @@ The agent is now running and will receive instructions via mailbox.`
         type: 'tool_result',
         content: [...contentOrMarker, {
           type: 'text',
-          text: `agentId: ${data.agentId} (use SendMessage with to: '${data.agentId}' to continue this agent)${worktreeInfoText}
+          text: `agentId: ${data.agentId} (terminal; keep for user-authorized resume only)${worktreeInfoText}
 <usage>total_tokens: ${data.totalTokens}
 tool_uses: ${data.totalToolUseCount}
 duration_ms: ${data.totalDurationMs}</usage>`

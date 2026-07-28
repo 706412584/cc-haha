@@ -16,6 +16,8 @@ import { FILE_READ_TOOL_NAME } from '../tools/FileReadTool/prompt.js'
 import { FILE_EDIT_TOOL_NAME } from '../tools/FileEditTool/constants.js'
 import { TODO_WRITE_TOOL_NAME } from '../tools/TodoWriteTool/constants.js'
 import { TASK_CREATE_TOOL_NAME } from '../tools/TaskCreateTool/constants.js'
+import { TASK_OUTPUT_TOOL_NAME } from '../tools/TaskOutputTool/constants.js'
+import { TASK_STOP_TOOL_NAME } from '../tools/TaskStopTool/prompt.js'
 import type { Tools } from '../Tool.js'
 import type { Command } from '../types/command.js'
 import { BASH_TOOL_NAME } from '../tools/BashTool/toolName.js'
@@ -375,6 +377,8 @@ export function getSessionSpecificGuidanceSection(
   const hasSkills =
     skillToolCommands.length > 0 && enabledTools.has(SKILL_TOOL_NAME)
   const hasAgentTool = enabledTools.has(AGENT_TOOL_NAME)
+  const hasBackgroundTaskTools =
+    enabledTools.has(TASK_OUTPUT_TOOL_NAME) && enabledTools.has(TASK_STOP_TOOL_NAME)
   const searchTools = hasEmbeddedSearchTools()
     ? `\`find\` or \`grep\` via the ${BASH_TOOL_NAME} tool`
     : `the ${GLOB_TOOL_NAME} or ${GREP_TOOL_NAME}`
@@ -399,6 +403,9 @@ export function getSessionSpecificGuidanceSection(
       : []),
     hasSkills
       ? `/<skill-name> (e.g., /commit) is shorthand for users to invoke a user-invocable skill. When executed, the skill gets expanded to a full prompt. Use the ${SKILL_TOOL_NAME} tool to execute them. IMPORTANT: Only use ${SKILL_TOOL_NAME} for skills listed in its user-invocable skills section - do not guess or use built-in CLI commands.`
+      : null,
+    hasBackgroundTaskTools
+      ? `Before ending a conversation, reconcile every background task you started. Inspect the latest status or output with ${TASK_OUTPUT_TOOL_NAME} when no terminal notification has arrived. Use ${TASK_STOP_TOOL_NAME} only for tasks that are no longer useful or are clearly runaway; preserve intentionally long-lived services the user still needs. Do not leave a task shown as running when its process already reached any terminal state (completed, failed, stopped, killed, or cancelled), and do not restart or re-check a terminal task merely because the user clicked Stop unless the user explicitly asks to resume it.`
       : null,
     DISCOVER_SKILLS_TOOL_NAME !== null &&
     hasSkills &&

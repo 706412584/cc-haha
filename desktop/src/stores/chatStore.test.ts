@@ -6200,6 +6200,64 @@ describe('chatStore history mapping', () => {
     expect(updateTabStatusMock).toHaveBeenLastCalledWith(TEST_SESSION_ID, 'idle')
   })
 
+  it('ignores late retry updates until the server settles the stopped turn', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          messages: [],
+          chatState: 'thinking',
+        }),
+      },
+    })
+
+    const store = useChatStore.getState()
+    store.stopGeneration(TEST_SESSION_ID)
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'api_retry',
+      attempt: 3,
+      maxRetries: 10,
+      retryDelayMs: 3_000,
+    })
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'streaming_fallback',
+      cause: 'watchdog',
+    })
+
+    const stopped = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(stopped?.chatState).toBe('idle')
+    expect(stopped?.apiRetry).toBeNull()
+    expect(stopped?.streamingFallback).toBeNull()
+
+    store.sendMessage(TEST_SESSION_ID, 'start a new turn')
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'status',
+      state: 'thinking',
+      attemptStart: true,
+    })
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'api_retry',
+      attempt: 4,
+      maxRetries: 10,
+      retryDelayMs: 3_000,
+    })
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.apiRetry).toBeNull()
+
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'system_notification',
+      subtype: 'generation_stopped',
+    })
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'api_retry',
+      attempt: 1,
+      maxRetries: 10,
+      retryDelayMs: 1_000,
+    })
+
+    const restarted = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(restarted?.chatState).toBe('thinking')
+    expect(restarted?.apiRetry).toMatchObject({ attempt: 1 })
+  })
+
   it('renders memory saved notifications as chat memory events', () => {
     useChatStore.setState({
       sessions: {

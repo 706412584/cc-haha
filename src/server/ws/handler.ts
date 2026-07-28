@@ -114,6 +114,8 @@ const sessionDisconnectWatchers = new Map<string, () => void>()
  * follows an interrupt so the frontend doesn't show "处理过程中发生错误".
  */
 const sessionStopRequested = new Set<string>()
+// Reject stale retry/fallback frames until the stopped turn is explicitly settled.
+const stoppedTurnEventFences = new Set<string>()
 
 /**
  * Track user message count and title state per session for auto-title generation.
@@ -168,10 +170,22 @@ export function classifyRuntimeTransition(_input: {
 
 type ActiveUserTurnState = {
   messageSent: boolean
+  sendStarted?: boolean
+  stopped?: boolean
+  titleTurnNumber?: number
+  removeCompletionCallback?: () => void
+  removeTitleCallback?: () => void
+}
+
+type StopSettlement = {
+  promise: Promise<void>
+  resolve: () => void
 }
 
 const runtimeOverrides = new Map<string, RuntimeOverride>()
 const activeUserTurns = new Map<string, ActiveUserTurnState>()
+const stopSettlements = new Map<string, StopSettlement>()
+const settledStopTerminalFrames = new WeakSet<object>()
 const activeBackgroundTaskIds = new Map<string, Set<string>>()
 const deferredRuntimeRestarts = new Map<string, RuntimeOverride>()
 const deferredPermissionModes = new Map<string, PermissionMode>()
@@ -752,6 +766,25 @@ async function waitForRuntimeConfigHandlers(sessionId: string): Promise<void> {
   }
 }
 
+async function waitForStopSettlement(sessionId: string): Promise<void> {
+  const settlement = stopSettlements.get(sessionId)
+  if (settlement) await settlement.promise
+}
+
+function settleStoppedGeneration(sessionId: string): void {
+  if (!sessionStopRequested.delete(sessionId)) return
+  stoppedTurnEventFences.delete(sessionId)
+  const settlement = stopSettlements.get(sessionId)
+  stopSettlements.delete(sessionId)
+  settlement?.resolve()
+  interruptedSessionChats.delete(sessionId)
+  sendToSession(sessionId, {
+    type: 'system_notification',
+    subtype: 'generation_stopped',
+    message: 'Generation stopped',
+  })
+}
+
 async function handleUserMessage(
   ws: ServerWebSocket<WebSocketData>,
   message: Extract<ClientMessage, { type: 'user_message' }>,
@@ -759,12 +792,13 @@ async function handleUserMessage(
 ) {
   const { sessionId } = ws.data
 
-  // Register synchronously before any validation or runtime-config wait so
-  // concurrent prewarm/restart work sees this turn as user-owned.
+  // A replacement turn waits outside activeUserTurns so the stopped process can
+  // still be force-killed. With no pending Stop, registration remains synchronous.
+  if (stopSettlements.has(sessionId)) {
+    await waitForStopSettlement(sessionId)
+  }
   activeUserTurns.set(sessionId, activeTurn)
 
-  // Clear any stale stop flag from a previous turn
-  sessionStopRequested.delete(sessionId)
   beginSessionChatActivity(sessionId)
   clearPrewarmState(sessionId)
 
@@ -790,11 +824,19 @@ async function handleUserMessage(
   }
 
   await waitForRuntimeConfigHandlers(sessionId)
+  if (activeTurn.stopped) {
+    clearActiveUserTurn(sessionId, activeTurn)
+    return
+  }
 
   // Send thinking status
   sendMessage(ws, { type: 'status', state: 'thinking', verb: 'Thinking' })
 
   const initialRuntimeTransition = await waitForRuntimeTransitionBeforeUserTurn(ws, sessionId)
+  if (activeTurn.stopped) {
+    clearActiveUserTurn(sessionId, activeTurn)
+    return
+  }
   if (!initialRuntimeTransition.ok) {
     clearActiveUserTurn(sessionId, activeTurn)
     return
@@ -852,8 +894,16 @@ async function handleUserMessage(
     clearActiveUserTurn(sessionId, activeTurn)
     return
   }
+  if (activeTurn.stopped) {
+    clearActiveUserTurn(sessionId, activeTurn)
+    return
+  }
 
   const startupRuntimeTransition = await waitForRuntimeTransitionBeforeUserTurn(ws, sessionId)
+  if (activeTurn.stopped) {
+    clearActiveUserTurn(sessionId, activeTurn)
+    return
+  }
   if (startupRuntimeTransition.ok) {
     if (startupRuntimeTransition.waited) {
       sendMessage(ws, { type: 'status', state: 'thinking', verb: 'Thinking' })
@@ -869,9 +919,11 @@ async function handleUserMessage(
   let userMessageSent = false
   const shouldForwardCurrentTurnLocalCommand =
     createCurrentTurnLocalCommandForwarder(desktopSlashCommand)
+  activeTurn.titleTurnNumber = titleTurnNumber ?? undefined
   const removeTitleOutputCallback = titleTurnNumber === null
     ? null
-    : bindTitleSessionOutput(ws, sessionId, () => userMessageSent)
+    : bindTitleSessionOutput(ws, sessionId, titleTurnNumber, () => userMessageSent)
+  activeTurn.removeTitleCallback = removeTitleOutputCallback ?? undefined
 
   bindAllClientSessionOutputs(sessionId, {
     shouldForward: (cliMsg) => {
@@ -882,6 +934,15 @@ async function handleUserMessage(
     },
   })
   const removeActiveTurnOutputCallback = bindActiveUserTurnCompletion(ws, sessionId, activeTurn)
+  activeTurn.removeCompletionCallback = removeActiveTurnOutputCallback
+
+  if (activeTurn.stopped) {
+    removeActiveTurnOutputCallback()
+    removeTitleOutputCallback?.()
+    clearActiveUserTurn(sessionId, activeTurn)
+    discardActiveTitleTurn(sessionId, titleTurnNumber)
+    return
+  }
 
   // The renderer may have left while the CLI was still starting, before this
   // turn could flip messageSent=true. The disconnect handler cannot attach an
@@ -890,11 +951,38 @@ async function handleUserMessage(
   // permission request that arrives after the disconnect.
   refreshDisconnectedTurnCleanupWatcher(sessionId)
 
+  activeTurn.sendStarted = true
+  const instanceBeforeSend = conversationService.getActiveInstanceId(sessionId)
   const sent = await conversationService.sendMessage(
     sessionId,
     message.content,
     message.attachments
   )
+  if (activeTurn.stopped) {
+    removeActiveTurnOutputCallback()
+    removeTitleOutputCallback?.()
+    clearActiveUserTurn(sessionId, activeTurn)
+    discardActiveTitleTurn(sessionId, titleTurnNumber)
+    if (sent) {
+      activeTurn.messageSent = true
+      conversationService.sendInterrupt(sessionId)
+      if (instanceBeforeSend) {
+        setTimeout(() => {
+          if (
+            sessionStopRequested.has(sessionId) &&
+            conversationService.stopSessionInstance(sessionId, instanceBeforeSend)
+          ) {
+            settleStoppedGeneration(sessionId)
+          }
+        }, 3_000)
+      } else {
+        settleStoppedGeneration(sessionId)
+      }
+    } else {
+      settleStoppedGeneration(sessionId)
+    }
+    return
+  }
   if (!sent) {
     removeActiveTurnOutputCallback()
     clearActiveUserTurn(sessionId, activeTurn)
@@ -911,7 +999,6 @@ async function handleUserMessage(
   }
 
   userMessageSent = true
-  activeTurn.messageSent = true
 }
 
 function clearActiveUserTurn(sessionId: string, activeTurn: ActiveUserTurnState): void {
@@ -1704,14 +1791,32 @@ function handleStopGeneration(ws: ServerWebSocket<WebSocketData>) {
   const stoppedTurn = activeUserTurns.get(sessionId)
   console.log(`[WS] Stop generation requested for session: ${sessionId}`)
 
+  if (sessionStopRequested.has(sessionId)) {
+    sendMessage(ws, { type: 'status', state: 'idle' })
+    return
+  }
+
   sessionStopRequested.add(sessionId)
+  stoppedTurnEventFences.add(sessionId)
+  let resolveSettlement!: () => void
+  const settlement = new Promise<void>((resolve) => {
+    resolveSettlement = resolve
+  })
+  stopSettlements.set(sessionId, { promise: settlement, resolve: resolveSettlement })
+  if (stoppedTurn) stoppedTurn.stopped = true
+  stoppedTurn?.removeCompletionCallback?.()
+  stoppedTurn?.removeTitleCallback?.()
+  discardActiveTitleTurn(sessionId, stoppedTurn?.titleTurnNumber ?? null)
+  resetStoppedTurnStreamState(sessionId)
   legacyQueuedSessionChats.delete(sessionId)
   terminalSessionChatStates.delete(sessionId)
   interruptedSessionChats.add(sessionId)
   if (stoppedTurn) clearActiveUserTurn(sessionId, stoppedTurn)
   else sessionActivityCoordinator.endUserTurn(sessionId)
 
-  if (conversationService.hasSession(sessionId)) {
+  if (!stoppedTurn || (!stoppedTurn.messageSent && !stoppedTurn.sendStarted)) {
+    settleStoppedGeneration(sessionId)
+  } else if (conversationService.hasSession(sessionId)) {
     // First try graceful interrupt via SDK control message
     conversationService.sendInterrupt(sessionId)
 
@@ -1729,10 +1834,15 @@ function handleStopGeneration(ws: ServerWebSocket<WebSocketData>) {
           !activeUserTurns.has(sessionId) &&
           conversationService.stopSessionInstance(sessionId, instanceId)
         ) {
+          settleStoppedGeneration(sessionId)
           console.log(`[WS] Force-killing CLI subprocess for session: ${sessionId}`)
         }
       }, 3_000)
+    } else {
+      settleStoppedGeneration(sessionId)
     }
+  } else {
+    settleStoppedGeneration(sessionId)
   }
 
   sendMessage(ws, { type: 'status', state: 'idle' })
@@ -1845,10 +1955,14 @@ function sendSessionTitleUpdated(
 function bindTitleSessionOutput(
   ws: ServerWebSocket<WebSocketData>,
   sessionId: string,
+  titleTurnNumber: number,
   shouldProcess: () => boolean,
 ): () => void {
   const callback = (cliMsg: any) => {
     if (!shouldProcess() && !(cliMsg?.type === 'result' && cliMsg?.is_error)) {
+      return
+    }
+    if (sessionTitleState.get(sessionId)?.activeTurn?.count !== titleTurnNumber) {
       return
     }
 
@@ -1991,6 +2105,19 @@ function getStreamState(sessionId: string): SessionStreamState {
   return state
 }
 
+function resetStoppedTurnStreamState(sessionId: string): void {
+  const state = sessionStreamStates.get(sessionId)
+  if (!state) return
+  state.hasReceivedStreamEvents = false
+  state.activeBlockTypes.clear()
+  state.activeToolBlocks.clear()
+  state.pendingLocalCommand = undefined
+  state.pendingToolBlocks.clear()
+  state.toolParentUseIds.clear()
+  state.lastApiError = undefined
+  state.suppressBufferedAssistant = false
+}
+
 function cliParentToolUseId(cliMsg: any): string | undefined {
   return typeof cliMsg.parent_tool_use_id === 'string' && cliMsg.parent_tool_use_id.length > 0
     ? cliMsg.parent_tool_use_id
@@ -2033,6 +2160,10 @@ function cleanupSessionRuntimeState(sessionId: string) {
   activeUserTurns.delete(sessionId)
   sessionActivityCoordinator.clear(sessionId)
   sessionStopRequested.delete(sessionId)
+  stoppedTurnEventFences.delete(sessionId)
+  const stopSettlement = stopSettlements.get(sessionId)
+  stopSettlements.delete(sessionId)
+  stopSettlement?.resolve()
   if (hasActiveClients(sessionId)) {
     broadcastStoppedBackgroundTasks(sessionId, 'Session closed')
   } else {
@@ -2653,12 +2784,6 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
       const usage = translateCliUsage(cliMsg.usage)
 
       if (cliMsg.is_error) {
-        // Interrupt result after user stop — not a chat error; keep bg tasks alone.
-        if (sessionStopRequested.has(sessionId)) {
-          sessionStopRequested.delete(sessionId)
-          return [{ type: 'message_complete', usage }]
-        }
-
         const resultMessage =
           (typeof cliMsg.result === 'string' && cliMsg.result) ||
           (Array.isArray(cliMsg.errors) && cliMsg.errors.length > 0
@@ -2684,8 +2809,6 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
         ]
       }
 
-      // Clear stop flag on successful completion too
-      sessionStopRequested.delete(sessionId)
       streamState.lastApiError = undefined
       return [{ type: 'message_complete', usage }]
     }
@@ -2694,10 +2817,12 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
       // 区分不同的 system 子类型
       const subtype = cliMsg.subtype
       if (subtype === 'api_retry') {
+        if (stoppedTurnEventFences.has(sessionId)) return []
         const apiRetryMessage = toApiRetryServerMessage(cliMsg)
         return apiRetryMessage ? [apiRetryMessage] : []
       }
       if (subtype === 'streaming_fallback') {
+        if (stoppedTurnEventFences.has(sessionId)) return []
         streamState.hasReceivedStreamEvents = false
         streamState.suppressBufferedAssistant = cliMsg.cause === 'stream_retry'
         streamState.activeBlockTypes.clear()
@@ -3564,6 +3689,24 @@ function bindClientSessionOutput(
   removeClientOutputCallback(ws)
 
   const callback = (cliMsg: any) => {
+    if (
+      cliMsg?.type === 'result' &&
+      sessionStopRequested.has(sessionId)
+    ) {
+      if (cliMsg && typeof cliMsg === 'object') {
+        settledStopTerminalFrames.add(cliMsg)
+      }
+      settleStoppedGeneration(sessionId)
+      return
+    }
+    if (
+      cliMsg?.type === 'result' &&
+      cliMsg &&
+      typeof cliMsg === 'object' &&
+      settledStopTerminalFrames.has(cliMsg)
+    ) {
+      return
+    }
     trackCliBackgroundTaskLifecycle(sessionId, cliMsg)
     if (options?.shouldForward && !options.shouldForward(cliMsg)) {
       return
@@ -4253,6 +4396,9 @@ export function __resetWebSocketHandlerStateForTests(): void {
   activeUserTurns.clear()
   activeBackgroundTaskIds.clear()
   sessionStopRequested.clear()
+  stoppedTurnEventFences.clear()
+  for (const settlement of stopSettlements.values()) settlement.resolve()
+  stopSettlements.clear()
   terminalSessionChatStates.clear()
   legacyQueuedSessionChats.clear()
   interruptedSessionChats.clear()

@@ -517,6 +517,110 @@ describe('WebSocket handler session isolation', () => {
     })
   })
 
+  it('drops API retry updates from a stopped turn', () => {
+    const sessionId = `stopped-turn-api-retry-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'sendInterrupt').mockImplementation(() => true)
+    spyOn(conversationService, 'getActiveInstanceId').mockReturnValue('instance-retrying')
+    spyOn(globalThis, 'setTimeout').mockImplementation(() => 1 as any)
+    __markActiveTurnForTests(sessionId)
+
+    handleWebSocket.message(ws, JSON.stringify({ type: 'stop_generation' }))
+
+    expect(translateCliMessage({
+      type: 'system',
+      subtype: 'api_retry',
+      attempt: 3,
+      max_retries: 10,
+      retry_delay_ms: 3_000,
+    }, sessionId)).toEqual([])
+
+    expect(translateCliMessage({
+      type: 'result',
+      subtype: 'error_during_execution',
+      is_error: true,
+      result: 'Interrupted by user',
+    }, sessionId)).toEqual([{
+      type: 'error',
+      message: 'Interrupted by user',
+      code: 'CLI_ERROR',
+    }, {
+      type: 'message_complete',
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+      },
+    }])
+  })
+
+  it('settles a stopped result once for every connected client', () => {
+    const sessionId = `stopped-turn-multi-client-${crypto.randomUUID()}`
+    const first = makeClientSocket(sessionId)
+    const second = makeClientSocket(sessionId)
+    const callbacks: Array<(message: any) => void> = []
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'onOutput').mockImplementation((_sessionId, callback) => {
+      callbacks.push(callback)
+    })
+    spyOn(conversationService, 'sendInterrupt').mockImplementation(() => true)
+    spyOn(conversationService, 'getActiveInstanceId').mockReturnValue('instance-multi-client')
+    spyOn(globalThis, 'setTimeout').mockImplementation(() => 1 as any)
+
+    handleWebSocket.open(first)
+    handleWebSocket.open(second)
+    __markActiveTurnForTests(sessionId)
+    handleWebSocket.message(first, JSON.stringify({ type: 'stop_generation' }))
+    first.sent.length = 0
+    second.sent.length = 0
+
+    const result = {
+      type: 'result',
+      subtype: 'error_during_execution',
+      is_error: true,
+      result: 'Interrupted by user',
+    }
+    callbacks.forEach((callback) => callback(result))
+
+    expect(first.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'system_notification',
+      subtype: 'generation_stopped',
+      message: 'Generation stopped',
+    })
+    expect(second.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'system_notification',
+      subtype: 'generation_stopped',
+      message: 'Generation stopped',
+    })
+    expect(first.sent.map((payload) => JSON.parse(payload))).not.toContainEqual(
+      expect.objectContaining({ type: 'error' }),
+    )
+    expect(second.sent.map((payload) => JSON.parse(payload))).not.toContainEqual(
+      expect.objectContaining({ type: 'error' }),
+    )
+  })
+
+  it('drops streaming fallback updates from a stopped turn', () => {
+    const sessionId = `stopped-turn-streaming-fallback-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    spyOn(conversationService, 'sendInterrupt').mockImplementation(() => true)
+    spyOn(conversationService, 'getActiveInstanceId').mockReturnValue('instance-retrying')
+    spyOn(globalThis, 'setTimeout').mockImplementation(() => 1 as any)
+    __markActiveTurnForTests(sessionId)
+
+    handleWebSocket.message(ws, JSON.stringify({ type: 'stop_generation' }))
+
+    expect(translateCliMessage({
+      type: 'system',
+      subtype: 'streaming_fallback',
+      cause: 'stream_retry',
+      attempt: 3,
+      maxRetries: 10,
+      retryDelayMs: 3_000,
+    }, sessionId)).toEqual([])
+  })
+
   it('replays an applied runtime request idempotently after its result is lost', async () => {
     const sessionId = `runtime-replay-${crypto.randomUUID()}`
     const ws = makeClientSocket(sessionId)

@@ -18,7 +18,7 @@ function makeTask(overrides: Partial<ContinueCandidateTask>): ContinueCandidateT
     description: 'sample task',
     startTime: T0,
     touchedFiles: [],
-    isCompleted: true,
+    isRunning: true,
     ...overrides,
   }
 }
@@ -194,15 +194,15 @@ describe('findContinueCandidate', () => {
     expect(c).toBeNull()
   })
 
-  test('skips non-completed tasks', () => {
+  test('skips terminal tasks so completed workers are not reactivated implicitly', () => {
     const c = findContinueCandidate({
       prompt: 'investigate src/auth/validate.ts',
       subagentType: 'worker',
       candidates: [
         makeTask({
-          agentId: 'still-running',
+          agentId: 'already-completed',
           touchedFiles: ['src/auth/validate.ts'],
-          isCompleted: false,
+          isRunning: false,
         }),
       ],
       options: { now: T0 + 1000 },

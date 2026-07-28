@@ -684,6 +684,9 @@ const toolInputFlushTimerBySession = new Map<string, ReturnType<typeof setTimeou
 // when a fresh user message is sent (which then runs immediately, ahead of the
 // queue). The queue resumes on the idle after that message completes.
 const queueDrainPaused = new Set<string>()
+// Ignore retry/fallback events that were already in flight when Stop was sent.
+// A new user message clears the fence and starts a distinct turn.
+const stoppedTurns = new Set<string>()
 
 function consumePendingDelta(sessionId: string): string {
   const flushTimer = flushTimerBySession.get(sessionId)
@@ -1411,6 +1414,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     clearPendingToolParentUseIds(sessionId)
     clearPendingFileEdits(sessionId)
     queueDrainPaused.delete(sessionId)
+    stoppedTurns.delete(sessionId)
     wsManager.disconnect(sessionId)
     set((s) => {
       const { [sessionId]: _, ...rest } = s.sessions
@@ -1842,6 +1846,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   stopGeneration: (sessionId) => {
+    stoppedTurns.add(sessionId)
     wsManager.send(sessionId, { type: 'stop_generation' })
     // Pause queue draining until the user sends their next message. Stop emits
     // multiple idle events (result + status); staying paused (rather than a
@@ -2580,6 +2585,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
 
       case 'api_retry': {
+        if (stoppedTurns.has(sessionId)) break
         const attempt = Math.max(1, Math.trunc(msg.attempt))
         const maxRetries = Math.max(attempt, Math.trunc(msg.maxRetries))
         const retryDelayMs = Math.max(0, Math.trunc(msg.retryDelayMs))
@@ -2603,6 +2609,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
 
       case 'streaming_fallback': {
+        if (stoppedTurns.has(sessionId)) break
         if (msg.cause === 'stream_retry') {
           // Discard only this attempt's in-flight partials, then show a visible
           // retry banner (apiRetry). Must NOT go idle — user Stop is separate.
@@ -3286,6 +3293,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }
         break
       case 'system_notification':
+        if (msg.subtype === 'generation_stopped') {
+          stoppedTurns.delete(sessionId)
+          break
+        }
         if (msg.subtype === 'slash_commands' && Array.isArray(msg.data)) {
           const incomingCommands = normalizeSlashCommandList(msg.data)
           update((session) => ({
