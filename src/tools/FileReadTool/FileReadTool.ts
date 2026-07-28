@@ -219,7 +219,11 @@ type PngScanlineLayout = {
   expectedOutputBytes: number
 }
 
+const IMAGE_MAX_INPUT_BYTES = 64 * 1024 * 1024
+const PNG_MAX_COMPRESSED_BYTES = IMAGE_MAX_INPUT_BYTES
 const PNG_MAX_INFLATED_BYTES = 256 * 1024 * 1024
+const PNG_MAX_CHUNKS = 4096
+const PNG_MAX_IDAT_CHUNKS = 1024
 const PNG_ADAM7_PASSES = [
   [0, 0, 8, 8],
   [4, 0, 8, 8],
@@ -342,10 +346,12 @@ async function canInflatePngImageData(
     })
     inflater.once('end', () => {
       advancePass()
+      const compressedBytes = chunks.reduce((total, chunk) => total + chunk.length, 0)
       settle(
         outputBytes === layout.expectedOutputBytes &&
         passIndex === layout.passes.length &&
-        remainingRowBytes === 0,
+        remainingRowBytes === 0 &&
+        inflater.bytesWritten === compressedBytes,
       )
     })
     inflater.once('error', () => settle(false))
@@ -370,12 +376,17 @@ async function hasCompletePngStructure(buffer: Buffer): Promise<boolean> {
   }
 
   let offset = 8
+  let chunkCount = 0
+  let idatChunkCount = 0
+  let compressedBytes = 0
   let isFirstChunk = true
   let scanlineLayout: PngScanlineLayout | null = null
   let hasImageData = false
   let imageDataEnded = false
   const imageDataChunks: Buffer[] = []
   while (offset + 12 <= buffer.length) {
+    chunkCount++
+    if (chunkCount > PNG_MAX_CHUNKS) return false
     const length = buffer.readUInt32BE(offset)
     const chunkEnd = offset + 12 + length
     if (chunkEnd > buffer.length) return false
@@ -396,7 +407,15 @@ async function hasCompletePngStructure(buffer: Buffer): Promise<boolean> {
       if (!scanlineLayout) return false
     }
     if (type === 'IDAT') {
-      if (imageDataEnded) return false
+      idatChunkCount++
+      compressedBytes += length
+      if (
+        imageDataEnded ||
+        idatChunkCount > PNG_MAX_IDAT_CHUNKS ||
+        compressedBytes > PNG_MAX_COMPRESSED_BYTES
+      ) {
+        return false
+      }
       hasImageData = true
       imageDataChunks.push(buffer.subarray(offset + 8, crcOffset))
     } else if (hasImageData) {
@@ -1394,13 +1413,25 @@ export async function readImageWithTokenBudget(
   maxTokens: number = getDefaultFileReadingLimits().maxTokens,
   maxBytes?: number,
 ): Promise<ImageResult> {
-  // Read file ONCE — capped to maxBytes to avoid OOM on huge files
+  // Read file ONCE with a hard compressed-input cap. The extra byte lets us
+  // distinguish an exactly-at-limit image from a truncated oversized file.
+  const imageReadLimit = Math.min(
+    maxBytes ?? IMAGE_MAX_INPUT_BYTES,
+    IMAGE_MAX_INPUT_BYTES,
+  )
   const imageBuffer = await getFsImplementation().readFileBytes(
     filePath,
-    maxBytes,
+    imageReadLimit + 1,
   )
   const originalSize = imageBuffer.length
 
+  if (originalSize > imageReadLimit) {
+    throw new InvalidImageDataError(
+      filePath,
+      originalSize,
+      imageBuffer.subarray(0, 16).toString('hex'),
+    )
+  }
   if (originalSize === 0) {
     throw new Error(`Image file is empty: ${filePath}`)
   }

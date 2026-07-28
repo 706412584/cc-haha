@@ -203,6 +203,40 @@ describe('readImageWithTokenBudget — magic byte validation', () => {
     ).rejects.toBeInstanceOf(InvalidImageDataError)
   })
 
+  test('rejects bytes appended after a complete zlib stream inside IDAT', async () => {
+    const scanline = Buffer.from([0, 0, 0])
+    installFakeFs({
+      '/fake/idat-trailing-bytes.png': pngWithImageData(
+        Buffer.concat([deflateSync(scanline), Buffer.alloc(64, 0)]),
+      ),
+    })
+
+    await expect(
+      readImageWithTokenBudget('/fake/idat-trailing-bytes.png'),
+    ).rejects.toBeInstanceOf(InvalidImageDataError)
+  })
+
+  test('rejects excessive IDAT chunk counts before feeding zlib', async () => {
+    const scanline = Buffer.from([0, 0, 0])
+    const idatChunks = [
+      pngChunk('IDAT', deflateSync(scanline)),
+      ...Array.from({ length: 1024 }, () =>
+        pngChunk('IDAT', Buffer.alloc(0)),
+      ),
+    ]
+    installFakeFs({
+      '/fake/too-many-idat.png': Buffer.concat([
+        TINY_PNG.subarray(0, 33),
+        ...idatChunks,
+        TINY_PNG.subarray(TINY_PNG.length - 12),
+      ]),
+    })
+
+    await expect(
+      readImageWithTokenBudget('/fake/too-many-idat.png'),
+    ).rejects.toBeInstanceOf(InvalidImageDataError)
+  })
+
   test('accepts a real PNG with valid magic bytes', async () => {
     installFakeFs({
       '/fake/real.png': TINY_PNG,
