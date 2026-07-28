@@ -42,6 +42,7 @@ import {
 import { useMobileViewport } from '../../hooks/useMobileViewport'
 import { isDesktopRuntime } from '../../lib/desktopRuntime'
 import {
+  composerAttachmentToPayload,
   filesToComposerAttachments,
   getDataTransferFiles,
   type ComposerAttachment,
@@ -700,17 +701,21 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
         ? t('chat.contextReferencesOnly', { count: workspaceReferences.length })
         : ''
     )
-    const uploadAttachmentPayload: AttachmentRef[] = attachments.map((attachment) => ({
-      type: attachment.type,
-      name: attachment.name,
-      path: attachment.path,
-      data: attachment.data,
-      mimeType: attachment.mimeType,
-      lineStart: attachment.lineStart,
-      lineEnd: attachment.lineEnd,
-      note: attachment.note,
-      quote: attachment.quote,
-    }))
+    const uploadAttachmentPayload: AttachmentRef[] = attachments.some(
+      (attachment) => attachment.sourceFile,
+    )
+      ? await Promise.all(attachments.map(composerAttachmentToPayload))
+      : attachments.map((attachment) => ({
+          type: attachment.type,
+          name: attachment.name,
+          path: attachment.path,
+          data: attachment.data,
+          mimeType: attachment.mimeType,
+          lineStart: attachment.lineStart,
+          lineEnd: attachment.lineEnd,
+          note: attachment.note,
+          quote: attachment.quote,
+        }))
     const visibleUploadAttachmentPayload: DisplayAttachmentRef[] = attachments.map((attachment) => ({
       type: attachment.type,
       name: attachment.name,

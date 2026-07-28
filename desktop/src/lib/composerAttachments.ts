@@ -12,6 +12,7 @@ export type ComposerAttachment = {
   mimeType?: string
   previewUrl?: string
   data?: string
+  sourceFile?: File
   isDirectory?: boolean
   lineStart?: number
   lineEnd?: number
@@ -122,9 +123,11 @@ async function fileToComposerAttachment(file: File): Promise<ComposerAttachment 
     try {
       return {
         ...attachment,
-        // The selected File is already user-authorized, so use its bytes for the
-        // local preview. Keep `data` empty: the model payload remains path-only.
-        previewUrl: await compressDataUrl(await readFileAsDataUrl(file)),
+        // The selected File is already user-authorized. A blob URL lets Chromium
+        // decode it only when rendered instead of synchronously copying it to
+        // Base64 and re-encoding the full image on the renderer thread.
+        // Keep `data` empty: the model payload remains path-only.
+        previewUrl: URL.createObjectURL(file),
       }
     } catch {
       return { ...attachment, previewUrl: undefined }
@@ -132,6 +135,23 @@ async function fileToComposerAttachment(file: File): Promise<ComposerAttachment 
   }
 
   const isImage = file.type.startsWith('image/')
+  if (isImage && isDesktopRuntime()) {
+    let previewUrl: string | undefined
+    try {
+      previewUrl = URL.createObjectURL(file)
+    } catch {
+      previewUrl = undefined
+    }
+    return {
+      id: nextAttachmentId(),
+      name: file.name,
+      type: 'image',
+      mimeType: file.type || undefined,
+      previewUrl,
+      sourceFile: file,
+    }
+  }
+
   const rawData = await readFileAsDataUrl(file)
   const data = isImage ? await compressDataUrl(rawData) : rawData
   return {
@@ -141,6 +161,28 @@ async function fileToComposerAttachment(file: File): Promise<ComposerAttachment 
     mimeType: isImage ? 'image/jpeg' : (file.type || undefined),
     previewUrl: isImage ? data : undefined,
     data,
+  }
+}
+
+export async function composerAttachmentToPayload(
+  attachment: ComposerAttachment,
+): Promise<Omit<ComposerAttachment, 'id' | 'previewUrl' | 'sourceFile'>> {
+  const data = attachment.data ?? (
+    attachment.sourceFile ? await readFileAsDataUrl(attachment.sourceFile) : undefined
+  )
+  return {
+    type: attachment.type,
+    name: attachment.name,
+    path: attachment.path,
+    data,
+    mimeType: attachment.mimeType,
+    isDirectory: attachment.isDirectory,
+    lineStart: attachment.lineStart,
+    lineEnd: attachment.lineEnd,
+    diffSide: attachment.diffSide,
+    hunkId: attachment.hunkId,
+    note: attachment.note,
+    quote: attachment.quote,
   }
 }
 

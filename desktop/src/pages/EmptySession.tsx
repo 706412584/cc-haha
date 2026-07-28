@@ -30,6 +30,7 @@ import { useMobileViewport } from '../hooks/useMobileViewport'
 import { isDesktopRuntime } from '../lib/desktopRuntime'
 import { resolveActiveProviderRuntimeSelection } from '../lib/runtimeSelection'
 import {
+  composerAttachmentToPayload,
   filesToComposerAttachments,
   getDataTransferFiles,
   type ComposerAttachment,
@@ -340,13 +341,17 @@ export function EmptySession() {
         useChatStore.getState().setSessionCoordinatorMode(sessionId, true)
       }
       connectToSession(sessionId)
-      const attachmentPayload: AttachmentRef[] = attachments.map((attachment) => ({
-        type: attachment.type,
-        name: attachment.name,
-        path: attachment.path,
-        data: attachment.data,
-        mimeType: attachment.mimeType,
-      }))
+      const attachmentPayload: AttachmentRef[] = attachments.some(
+        (attachment) => attachment.sourceFile,
+      )
+        ? await Promise.all(attachments.map(composerAttachmentToPayload))
+        : attachments.map((attachment) => ({
+            type: attachment.type,
+            name: attachment.name,
+            path: attachment.path,
+            data: attachment.data,
+            mimeType: attachment.mimeType,
+          }))
       const displayAttachmentPayload: DisplayAttachmentRef[] = attachments.map((attachment) => ({
         type: attachment.type,
         name: attachment.name,
