@@ -777,7 +777,6 @@ function settleStoppedGeneration(sessionId: string): void {
   const settlement = stopSettlements.get(sessionId)
   stopSettlements.delete(sessionId)
   settlement?.resolve()
-  interruptedSessionChats.delete(sessionId)
   sendToSession(sessionId, {
     type: 'system_notification',
     subtype: 'generation_stopped',
