@@ -1229,18 +1229,8 @@ describe('ChatInput file mentions', () => {
   })
 
   it('previews and annotates a selected desktop JPG outside the filesystem allow-list', async () => {
-    class ImmediateFileReader {
-      result: string | ArrayBuffer | null = null
-      onload: ((event: ProgressEvent<FileReader>) => void) | null = null
-      onerror: (() => void) | null = null
-      error: DOMException | null = null
-
-      readAsDataURL() {
-        this.result = 'data:image/jpeg;base64,SELECTED'
-        this.onload?.({} as ProgressEvent<FileReader>)
-      }
-    }
-    vi.stubGlobal('FileReader', ImmediateFileReader)
+    const createObjectURL = vi.fn(() => 'blob:selected-desktop-image')
+    vi.stubGlobal('URL', { ...URL, createObjectURL })
     installElectronFileHost()
     const selectedImage = new File(['jpg'], 'EEA4B68044C134AC00FDCFA6F1C8027E.jpg', { type: 'image/jpeg' })
     Object.defineProperty(selectedImage, 'path', {
@@ -1257,8 +1247,9 @@ describe('ChatInput file mentions', () => {
 
     expect(await screen.findByRole('img', { name: selectedImage.name })).toHaveAttribute(
       'src',
-      'data:image/jpeg;base64,SELECTED',
+      'blob:selected-desktop-image',
     )
+    expect(createObjectURL).toHaveBeenCalledWith(selectedImage)
     fireEvent.click(screen.getByRole('button', { name: `Annotate ${selectedImage.name}` }))
     expect(await screen.findByRole('dialog', { name: '图片标注' })).toBeInTheDocument()
   })

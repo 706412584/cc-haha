@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { setBaseUrl } from '../api/client'
+import { compressDataUrl } from './imageCompress'
 
 vi.mock('./imageCompress', () => ({
   compressDataUrl: vi.fn(async (dataUrl: string) => dataUrl),
 }))
 import { browserHost } from './desktopHost/browserHost'
 import {
+  composerAttachmentToPayload,
   filesToComposerAttachments,
   getDataTransferFiles,
   pathToComposerAttachment,
@@ -14,6 +16,8 @@ import {
 describe('composer attachment payloads', () => {
   afterEach(() => {
     Reflect.deleteProperty(window, 'desktopHost')
+    vi.unstubAllGlobals()
+    vi.clearAllMocks()
     setBaseUrl('http://127.0.0.1:3456')
   })
 
@@ -104,24 +108,12 @@ describe('composer attachment payloads', () => {
     ])
   })
 
-  it('keeps a mixed desktop batch when one image preview cannot be read', async () => {
-    class SelectiveFileReader {
-      result: string | ArrayBuffer | null = null
-      onload: ((event: ProgressEvent<FileReader>) => void) | null = null
-      onerror: (() => void) | null = null
-      error: DOMException | null = null
-
-      readAsDataURL(file: File) {
-        if (file.name === 'broken.jpg') {
-          this.error = new DOMException('read failed')
-          this.onerror?.()
-          return
-        }
-        this.result = 'data:image/jpeg;base64,GOOD'
-        this.onload?.({} as ProgressEvent<FileReader>)
-      }
-    }
-    vi.stubGlobal('FileReader', SelectiveFileReader)
+  it('keeps a mixed desktop batch when one image preview cannot be created', async () => {
+    const createObjectURL = vi.fn((file: File) => {
+      if (file.name === 'broken.jpg') throw new Error('preview failed')
+      return `blob:${file.name}`
+    })
+    vi.stubGlobal('URL', { ...URL, createObjectURL })
 
     const broken = new File(['broken'], 'broken.jpg', { type: 'image/jpeg' })
     const good = new File(['good'], 'good.jpg', { type: 'image/jpeg' })
@@ -147,24 +139,17 @@ describe('composer attachment payloads', () => {
     expect(attachments[1]).toMatchObject({
       name: 'good.jpg',
       path: 'D:\\download\\good.jpg',
-      previewUrl: 'data:image/jpeg;base64,GOOD',
+      previewUrl: 'blob:good.jpg',
     })
   })
 
-  it('uses selected desktop image bytes for preview while keeping attachments path-only', async () => {
-    class ImmediateFileReader {
-      result: string | ArrayBuffer | null = null
-      onload: ((event: ProgressEvent<FileReader>) => void) | null = null
-      onerror: (() => void) | null = null
-      error: DOMException | null = null
-
-      readAsDataURL(file: Blob) {
-        const mimeType = file.type || 'application/octet-stream'
-        this.result = `data:${mimeType};base64,SELECTED`
-        this.onload?.({} as ProgressEvent<FileReader>)
-      }
-    }
-    vi.stubGlobal('FileReader', ImmediateFileReader)
+  it('uses selected desktop image bytes for preview without encoding or recompressing them', async () => {
+    const createObjectURL = vi.fn(() => 'blob:selected-image')
+    vi.stubGlobal('URL', { ...URL, createObjectURL })
+    const fileReader = vi.fn(() => {
+      throw new Error('desktop image previews must not read files as base64')
+    })
+    vi.stubGlobal('FileReader', fileReader)
 
     const nativePaths = new Map<File, string>()
     const image = new File(['jpg'], '6代码仓库.jpg', { type: 'image/jpeg' })
@@ -187,7 +172,7 @@ describe('composer attachment payloads', () => {
         name: '6代码仓库.jpg',
         type: 'image',
         path: 'D:\\download\\6代码仓库.jpg',
-        previewUrl: 'data:image/jpeg;base64,SELECTED',
+        previewUrl: 'blob:selected-image',
       }),
       expect.objectContaining({
         name: 'notes.md',
@@ -196,7 +181,139 @@ describe('composer attachment payloads', () => {
         previewUrl: undefined,
       }),
     ])
+    expect(createObjectURL).toHaveBeenCalledOnce()
+    expect(createObjectURL).toHaveBeenCalledWith(image)
+    expect(fileReader).not.toHaveBeenCalled()
+    expect(compressDataUrl).not.toHaveBeenCalled()
     expect(attachments.every((attachment) => attachment.data === undefined)).toBe(true)
+  })
+
+  it('shows a pathless clipboard screenshot before reading its bytes', async () => {
+    const readAsDataURL = vi.fn()
+    class PendingFileReader {
+      result: string | ArrayBuffer | null = null
+      onload: ((event: ProgressEvent<FileReader>) => void) | null = null
+      onerror: (() => void) | null = null
+      error: DOMException | null = null
+      readAsDataURL = readAsDataURL
+    }
+    vi.stubGlobal('FileReader', PendingFileReader)
+    const createObjectURL = vi.fn(() => 'blob:clipboard-screenshot')
+    vi.stubGlobal('URL', { ...URL, createObjectURL })
+    window.desktopHost = {
+      ...browserHost,
+      kind: 'electron',
+      isDesktop: true,
+      files: { getPathForFile: () => '' },
+    }
+    const screenshot = new File(['png'], 'screenshot.png', { type: 'image/png' })
+
+    const result = await Promise.race([
+      filesToComposerAttachments([screenshot]),
+      new Promise<'timed-out'>((resolve) => setTimeout(() => resolve('timed-out'), 0)),
+    ])
+
+    expect(result).not.toBe('timed-out')
+    expect(result).toEqual([
+      expect.objectContaining({
+        name: 'screenshot.png',
+        type: 'image',
+        mimeType: 'image/png',
+        previewUrl: 'blob:clipboard-screenshot',
+        sourceFile: screenshot,
+      }),
+    ])
+    expect(result[0]).not.toHaveProperty('data')
+    expect(createObjectURL).toHaveBeenCalledWith(screenshot)
+    expect(readAsDataURL).not.toHaveBeenCalled()
+    expect(compressDataUrl).not.toHaveBeenCalled()
+  })
+
+  it('keeps a pathless screenshot when its instant preview cannot be created', async () => {
+    const createObjectURL = vi.fn(() => {
+      throw new Error('preview failed')
+    })
+    vi.stubGlobal('URL', { ...URL, createObjectURL })
+    window.desktopHost = {
+      ...browserHost,
+      kind: 'electron',
+      isDesktop: true,
+      files: { getPathForFile: () => '' },
+    }
+    const screenshot = new File(['png'], 'screenshot.png', { type: 'image/png' })
+
+    const attachments = await filesToComposerAttachments([screenshot])
+
+    expect(attachments).toEqual([
+      expect.objectContaining({
+        name: 'screenshot.png',
+        type: 'image',
+        previewUrl: undefined,
+        sourceFile: screenshot,
+      }),
+    ])
+  })
+
+  it('keeps browser image compression outside Electron desktop', async () => {
+    class ImmediateFileReader {
+      result: string | ArrayBuffer | null = null
+      onload: ((event: ProgressEvent<FileReader>) => void) | null = null
+      onerror: (() => void) | null = null
+      error: DOMException | null = null
+
+      readAsDataURL() {
+        this.result = 'data:image/png;base64,BROWSER'
+        this.onload?.({} as ProgressEvent<FileReader>)
+      }
+    }
+    vi.stubGlobal('FileReader', ImmediateFileReader)
+    window.desktopHost = browserHost
+    const image = new File(['png'], 'browser.png', { type: 'image/png' })
+
+    const attachments = await filesToComposerAttachments([image])
+
+    expect(compressDataUrl).toHaveBeenCalledWith('data:image/png;base64,BROWSER')
+    expect(attachments[0]).toMatchObject({
+      type: 'image',
+      data: 'data:image/png;base64,BROWSER',
+      previewUrl: 'data:image/png;base64,BROWSER',
+    })
+    expect(attachments[0]).not.toHaveProperty('sourceFile')
+  })
+
+  it('reads a pathless screenshot only when preparing the model payload', async () => {
+    class ImmediateFileReader {
+      result: string | ArrayBuffer | null = null
+      onload: ((event: ProgressEvent<FileReader>) => void) | null = null
+      onerror: (() => void) | null = null
+      error: DOMException | null = null
+
+      readAsDataURL(file: Blob) {
+        this.result = `data:${file.type};base64,SCREENSHOT`
+        this.onload?.({} as ProgressEvent<FileReader>)
+      }
+    }
+    vi.stubGlobal('FileReader', ImmediateFileReader)
+    const screenshot = new File(['png'], 'screenshot.png', { type: 'image/png' })
+
+    const payload = await composerAttachmentToPayload({
+      id: 'clipboard-screenshot',
+      name: screenshot.name,
+      type: 'image',
+      mimeType: screenshot.type,
+      previewUrl: 'blob:clipboard-screenshot',
+      sourceFile: screenshot,
+    })
+
+    expect(payload).toMatchObject({
+      name: 'screenshot.png',
+      type: 'image',
+      data: 'data:image/png;base64,SCREENSHOT',
+      mimeType: 'image/png',
+    })
+    expect(payload).not.toHaveProperty('previewUrl')
+    expect(payload).not.toHaveProperty('sourceFile')
+    expect(compressDataUrl).not.toHaveBeenCalled()
   })
 
   it('keeps formats the server cannot inline as file attachments', () => {
