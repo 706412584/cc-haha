@@ -3,6 +3,7 @@ import { rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { deflateSync } from 'node:zlib'
+import { ansiToPng } from '../ansiToPng.js'
 import { crc32 } from '../crc32.js'
 
 type ProcessorMode = 'metadata' | 'throw'
@@ -19,6 +20,10 @@ let outputForOperations: (operations: Operation[]) => Buffer = () =>
   Buffer.from('resized-image')
 
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+
+test('encodes ANSI text as a PNG with the shared CRC implementation', () => {
+  expect(ansiToPng('coverage gate').subarray(0, 8)).toEqual(PNG_MAGIC)
+})
 
 function pngChunk(type: string, data: Buffer): Buffer {
   const body = Buffer.concat([Buffer.from(type, 'ascii'), data])
