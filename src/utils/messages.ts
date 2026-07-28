@@ -2060,10 +2060,9 @@ export function normalizeMessagesForAPI(
     if (!blockTypesToStrip) {
       continue
     }
-    // Find the nearest earlier user message that actually contains the rejected
-    // media. Parallel tool results and later text-only turns may sit between the
-    // image and the API error, so targeting the nearest user message alone can
-    // leave the bad image in history indefinitely.
+    // The API does not identify which content block was rejected. Strip every
+    // earlier candidate of that media type; keeping any one can leave the bad
+    // block in history and make every later text-only turn fail again.
     for (let j = i - 1; j >= 0; j--) {
       const candidate = reorderedMessages[j]!
       if (candidate.type !== 'user') continue
@@ -2086,7 +2085,6 @@ export function normalizeMessagesForAPI(
       } else {
         stripTargets.set(candidate.uuid, new Set(blockTypesToStrip))
       }
-      break
     }
   }
 

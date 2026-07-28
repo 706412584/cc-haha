@@ -6107,6 +6107,34 @@ describe('MessageList nested tool calls', () => {
     expect(screen.queryByText(/This model does not support images/)).toBeNull()
   })
 
+  it('localizes invalid-image API errors instead of showing raw English', () => {
+    useSettingsStore.setState({ locale: 'zh' })
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: [
+            {
+              id: 'error-invalid-image',
+              type: 'error',
+              code: 'invalid_request',
+              businessErrorCode: 'image_invalid',
+              message: 'The image data was invalid. Replace the image or continue with text.',
+              timestamp: 1,
+            },
+          ],
+        }),
+      },
+    })
+
+    render(<MessageList />)
+
+    expect(screen.getByText('错误:')).toBeTruthy()
+    expect(
+      screen.getByText('图片数据无效。请重新生成或替换图片，也可以继续使用文字。'),
+    ).toBeTruthy()
+    expect(screen.queryByText(/The image data was invalid/)).toBeNull()
+  })
+
   it('restores opener focus without scrolling when its render item remains fully visible', async () => {
     useChatStore.setState({
       sessions: {

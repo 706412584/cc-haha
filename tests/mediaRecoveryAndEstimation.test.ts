@@ -145,6 +145,53 @@ describe('media error recovery', () => {
     expect(serialized).toContain('read-corrupt-image')
     expect(serialized).toContain('continue with text only')
   })
+
+  test('strips every candidate image when an invalid-image error does not identify which one failed', () => {
+    const corruptToolResult = createUserMessage({
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: 'read-corrupt-image',
+          content: [imageBlock('corrupt-earlier-image')],
+        },
+      ],
+      uuid: '00000000-0000-4000-8000-000000000008',
+    })
+    const laterImageResult = createUserMessage({
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: 'read-later-image',
+          content: [imageBlock('later-image')],
+        },
+      ],
+      uuid: '00000000-0000-4000-8000-000000000009',
+    })
+    const invalid = createAssistantAPIErrorMessage({
+      content: 'localized invalid image text',
+      error: 'invalid_request',
+      businessErrorCode: BUSINESS_ERROR_CODES.IMAGE_INVALID,
+    })
+    const nextUser = createUserMessage({
+      content: 'continue without rejected media',
+      uuid: '00000000-0000-4000-8000-000000000010',
+    })
+
+    const serialized = JSON.stringify(
+      normalizeMessagesForAPI([
+        corruptToolResult,
+        laterImageResult,
+        invalid,
+        nextUser,
+      ]),
+    )
+
+    expect(serialized).not.toContain('corrupt-earlier-image')
+    expect(serialized).not.toContain('"data":"later-image"')
+    expect(serialized).toContain('read-corrupt-image')
+    expect(serialized).toContain('read-later-image')
+    expect(serialized).toContain('continue without rejected media')
+  })
 })
 
 describe('media context estimation', () => {

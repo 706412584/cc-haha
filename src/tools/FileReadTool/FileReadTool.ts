@@ -2,8 +2,11 @@ import type { Base64ImageSource } from '@anthropic-ai/sdk/resources/index.mjs'
 import { readdir, readFile as readFileAsync } from 'fs/promises'
 import * as path from 'path'
 import { posix, win32 } from 'path'
+import { createInflate } from 'zlib'
 import { z } from 'zod/v4'
 import {
+  IMAGE_MAX_HEIGHT,
+  IMAGE_MAX_WIDTH,
   PDF_AT_MENTION_INLINE_THRESHOLD,
   PDF_EXTRACT_SIZE_THRESHOLD,
   PDF_MAX_PAGES_PER_READ,
@@ -27,6 +30,7 @@ import {
 } from '../../skills/loadSkillsDir.js'
 import type { ToolUseContext } from '../../Tool.js'
 import { buildTool, type ToolDef } from '../../Tool.js'
+import { crc32 } from '../../utils/crc32.js'
 import { getCwd } from '../../utils/cwd.js'
 import { getClaudeConfigHomeDir, isEnvTruthy } from '../../utils/envUtils.js'
 import { getErrnoCode, isENOENT } from '../../utils/errors.js'
@@ -210,7 +214,152 @@ export class InvalidImageDataError extends Error {
  * structural validation because a truncated file can retain valid magic bytes;
  * other formats currently use their identifying signatures.
  */
-function hasCompletePngStructure(buffer: Buffer): boolean {
+type PngScanlineLayout = {
+  passes: Array<{ rows: number; rowBytes: number }>
+  expectedOutputBytes: number
+}
+
+const PNG_MAX_INFLATED_BYTES = 256 * 1024 * 1024
+const PNG_ADAM7_PASSES = [
+  [0, 0, 8, 8],
+  [4, 0, 8, 8],
+  [0, 4, 4, 8],
+  [2, 0, 4, 4],
+  [0, 2, 2, 4],
+  [1, 0, 2, 2],
+  [0, 1, 1, 2],
+] as const
+
+function getPngScanlineLayout(ihdr: Buffer): PngScanlineLayout | null {
+  if (ihdr.length !== 13) return null
+  const width = ihdr.readUInt32BE(0)
+  const height = ihdr.readUInt32BE(4)
+  const bitDepth = ihdr[8]!
+  const colorType = ihdr[9]!
+  const compression = ihdr[10]!
+  const filter = ihdr[11]!
+  const interlace = ihdr[12]!
+  if (
+    width === 0 ||
+    height === 0 ||
+    width > IMAGE_MAX_WIDTH ||
+    height > IMAGE_MAX_HEIGHT ||
+    compression !== 0 ||
+    filter !== 0
+  ) {
+    return null
+  }
+  if (interlace !== 0 && interlace !== 1) return null
+
+  const channels = new Map<number, { channels: number; bitDepths: number[] }>([
+    [0, { channels: 1, bitDepths: [1, 2, 4, 8, 16] }],
+    [2, { channels: 3, bitDepths: [8, 16] }],
+    [3, { channels: 1, bitDepths: [1, 2, 4, 8] }],
+    [4, { channels: 2, bitDepths: [8, 16] }],
+    [6, { channels: 4, bitDepths: [8, 16] }],
+  ]).get(colorType)
+  if (!channels?.bitDepths.includes(bitDepth)) return null
+
+  const passSpecs = interlace === 0 ? [[0, 0, 1, 1] as const] : PNG_ADAM7_PASSES
+  const bitsPerPixel = channels.channels * bitDepth
+  const passes: PngScanlineLayout['passes'] = []
+  let expectedOutputBytes = 0n
+  for (const [startX, startY, stepX, stepY] of passSpecs) {
+    if (width <= startX || height <= startY) continue
+    const passWidth = Math.ceil((width - startX) / stepX)
+    const rows = Math.ceil((height - startY) / stepY)
+    const rowBytes = Math.ceil((passWidth * bitsPerPixel) / 8)
+    expectedOutputBytes += BigInt(rows) * BigInt(rowBytes + 1)
+    if (expectedOutputBytes > BigInt(PNG_MAX_INFLATED_BYTES)) return null
+    passes.push({ rows, rowBytes })
+  }
+
+  if (passes.length === 0) return null
+  return { passes, expectedOutputBytes: Number(expectedOutputBytes) }
+}
+
+async function canInflatePngImageData(
+  chunks: Buffer[],
+  layout: PngScanlineLayout,
+): Promise<boolean> {
+  return await new Promise<boolean>(resolve => {
+    const inflater = createInflate()
+    let settled = false
+    let outputBytes = 0
+    let passIndex = 0
+    let rowIndex = 0
+    let remainingRowBytes = 0
+
+    const settle = (valid: boolean) => {
+      if (settled) return
+      settled = true
+      resolve(valid)
+    }
+    const rejectOutput = () => {
+      if (settled) return
+      inflater.destroy()
+      settle(false)
+    }
+    const advancePass = () => {
+      while (
+        passIndex < layout.passes.length &&
+        rowIndex >= layout.passes[passIndex]!.rows
+      ) {
+        passIndex++
+        rowIndex = 0
+      }
+    }
+
+    inflater.on('data', (data: Buffer) => {
+      if (settled) return
+      outputBytes += data.length
+      if (outputBytes > layout.expectedOutputBytes) {
+        rejectOutput()
+        return
+      }
+
+      let offset = 0
+      while (offset < data.length) {
+        advancePass()
+        const pass = layout.passes[passIndex]
+        if (!pass) {
+          rejectOutput()
+          return
+        }
+        if (remainingRowBytes === 0) {
+          const filterType = data[offset++]!
+          if (filterType > 4) {
+            rejectOutput()
+            return
+          }
+          remainingRowBytes = pass.rowBytes
+        }
+        const consumed = Math.min(remainingRowBytes, data.length - offset)
+        remainingRowBytes -= consumed
+        offset += consumed
+        if (remainingRowBytes === 0) rowIndex++
+      }
+    })
+    inflater.once('end', () => {
+      advancePass()
+      settle(
+        outputBytes === layout.expectedOutputBytes &&
+        passIndex === layout.passes.length &&
+        remainingRowBytes === 0,
+      )
+    })
+    inflater.once('error', () => settle(false))
+
+    try {
+      for (const chunk of chunks) inflater.write(chunk)
+      inflater.end()
+    } catch {
+      rejectOutput()
+    }
+  })
+}
+
+async function hasCompletePngStructure(buffer: Buffer): Promise<boolean> {
   if (
     buffer.length < 8 ||
     !buffer.subarray(0, 8).equals(
@@ -222,6 +371,10 @@ function hasCompletePngStructure(buffer: Buffer): boolean {
 
   let offset = 8
   let isFirstChunk = true
+  let scanlineLayout: PngScanlineLayout | null = null
+  let hasImageData = false
+  let imageDataEnded = false
+  const imageDataChunks: Buffer[] = []
   while (offset + 12 <= buffer.length) {
     const length = buffer.readUInt32BE(offset)
     const chunkEnd = offset + 12 + length
@@ -229,8 +382,36 @@ function hasCompletePngStructure(buffer: Buffer): boolean {
 
     const type = buffer.subarray(offset + 4, offset + 8).toString('ascii')
     if (isFirstChunk && (type !== 'IHDR' || length !== 13)) return false
+    if (!isFirstChunk && type === 'IHDR') return false
+
+    const crcOffset = offset + 8 + length
+    const expectedCrc = buffer.readUInt32BE(crcOffset)
+    const actualCrc = crc32(buffer.subarray(offset + 4, crcOffset))
+    if (actualCrc !== expectedCrc) return false
+
+    if (type === 'IHDR') {
+      scanlineLayout = getPngScanlineLayout(
+        buffer.subarray(offset + 8, crcOffset),
+      )
+      if (!scanlineLayout) return false
+    }
+    if (type === 'IDAT') {
+      if (imageDataEnded) return false
+      hasImageData = true
+      imageDataChunks.push(buffer.subarray(offset + 8, crcOffset))
+    } else if (hasImageData) {
+      imageDataEnded = true
+    }
     if (type === 'IEND') {
-      return length === 0 && chunkEnd === buffer.length
+      if (
+        length !== 0 ||
+        !hasImageData ||
+        !scanlineLayout ||
+        chunkEnd !== buffer.length
+      ) {
+        return false
+      }
+      return canInflatePngImageData(imageDataChunks, scanlineLayout)
     }
 
     isFirstChunk = false
@@ -240,7 +421,7 @@ function hasCompletePngStructure(buffer: Buffer): boolean {
   return false
 }
 
-function hasKnownImageMagicBytes(buffer: Buffer): boolean {
+async function hasKnownImageMagicBytes(buffer: Buffer): Promise<boolean> {
   if (buffer.length < 4) return false
   // PNG: validate the complete chunk envelope so truncated IDAT data cannot
   // pass solely because the signature and IHDR are intact.
@@ -250,7 +431,7 @@ function hasKnownImageMagicBytes(buffer: Buffer): boolean {
     buffer[2] === 0x4e &&
     buffer[3] === 0x47
   ) {
-    return hasCompletePngStructure(buffer)
+    return await hasCompletePngStructure(buffer)
   }
   // JPEG: FF D8 FF
   if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
@@ -1227,7 +1408,7 @@ export async function readImageWithTokenBudget(
   // Reject files whose extension says "image" but whose bytes are not a
   // complete recognized image. Otherwise malformed bytes can enter conversation
   // history and make every subsequent API call replay the same rejection.
-  if (!hasKnownImageMagicBytes(imageBuffer)) {
+  if (!(await hasKnownImageMagicBytes(imageBuffer))) {
     const firstBytesHex = imageBuffer
       .subarray(0, Math.min(16, imageBuffer.length))
       .toString('hex')

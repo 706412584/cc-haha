@@ -436,6 +436,59 @@ describe('WebSocket handler session isolation', () => {
     expect(second.close).not.toHaveBeenCalled()
   })
 
+  it('auto-approves Computer Use from the authoritative bypass session mode without a Desktop request', async () => {
+    const sessionId = `computer-use-bypass-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    const request = {
+      requestId: 'cu-bypass-request',
+      reason: 'Inspect PowerShell output',
+      apps: [
+        {
+          requestedName: 'Windows PowerShell',
+          resolved: {
+            bundleId: 'powershell',
+            displayName: 'Windows PowerShell',
+          },
+          isSentinel: true,
+          alreadyGranted: false,
+          proposedTier: 'click' as const,
+        },
+        {
+          requestedName: 'Missing App',
+          isSentinel: false,
+          alreadyGranted: false,
+          proposedTier: 'full' as const,
+        },
+      ],
+      requestedFlags: { clipboardRead: true },
+      screenshotFiltering: 'none' as const,
+    }
+    spyOn(conversationService, 'getSessionPermissionMode').mockReturnValue('bypassPermissions')
+
+    handleWebSocket.open(ws)
+    ws.sent.length = 0
+    const response = await computerUseApprovalService.requestApproval(sessionId, request)
+
+    expect(response).toEqual({
+      granted: [
+        expect.objectContaining({
+          bundleId: 'powershell',
+          displayName: 'Windows PowerShell',
+          tier: 'click',
+        }),
+      ],
+      denied: [{ bundleId: 'Missing App', reason: 'not_installed' }],
+      flags: {
+        clipboardRead: true,
+        clipboardWrite: false,
+        systemKeyCombos: false,
+      },
+      userConsented: true,
+    })
+    expect(computerUseApprovalService.getPendingRequests(sessionId)).toEqual([])
+    expect(ws.sent).toEqual([])
+  })
+
   it('tracks and replays pending Computer Use requests when a client reconnects', async () => {
     const sessionId = `computer-use-reconnect-${crypto.randomUUID()}`
     const first = makeClientSocket(sessionId)

@@ -13,7 +13,6 @@ import { notifyDesktop } from '../lib/desktopNotifications'
 import { t } from '../i18n'
 import { deriveSessionTitle, isPlaceholderSessionTitle } from '../lib/sessionTitle'
 import { hasRunningBackgroundTasks } from '../lib/backgroundTasks'
-import { buildComputerUseAllowResponse } from '../lib/computerUsePermissions'
 import { AGENT_LIFECYCLE_TYPES } from '../types/team'
 import type { ComposerAttachment } from '../lib/composerAttachments'
 import type { MessageEntry } from '../types/session'
@@ -2916,18 +2915,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         break
 
       case 'computer_use_permission_request': {
-        const permissionMode = useSessionStore.getState().sessions.find(
-          (session) => session.id === sessionId,
-        )?.permissionMode
-        if (permissionMode === 'bypassPermissions') {
-          get().respondToComputerUsePermission(
-            sessionId,
-            msg.requestId,
-            buildComputerUseAllowResponse(msg.request),
-          )
-          break
-        }
-
         notifyDesktop({
           dedupeKey: `computer-use-permission:${msg.requestId}`,
           cooldownScope: 'permission-prompt',

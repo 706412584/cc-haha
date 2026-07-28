@@ -6572,7 +6572,7 @@ describe('chatStore history mapping', () => {
     expect(refreshTasksMock).toHaveBeenNthCalledWith(2, 'session-b')
   })
 
-  it('auto-approves Computer Use requests in bypassPermissions mode without opening the modal', () => {
+  it('does not trust a stale Desktop bypass mode when the Server asks for Computer Use approval', () => {
     sessionStoreSnapshot.sessions = [
       {
         id: TEST_SESSION_ID,
@@ -6615,24 +6615,17 @@ describe('chatStore history mapping', () => {
       },
     })
 
-    expect(sendMock).toHaveBeenCalledWith(TEST_SESSION_ID, {
-      type: 'computer_use_permission_response',
-      requestId: 'cu-bypass',
-      response: {
-        granted: [],
-        denied: [{ bundleId: 'Windows PowerShell', reason: 'not_installed' }],
-        flags: {
-          clipboardRead: true,
-          clipboardWrite: true,
-          systemKeyCombos: true,
-        },
-        userConsented: true,
-      },
-    })
+    expect(sendMock).not.toHaveBeenCalledWith(
+      TEST_SESSION_ID,
+      expect.objectContaining({
+        type: 'computer_use_permission_response',
+        requestId: 'cu-bypass',
+      }),
+    )
     const session = useChatStore.getState().sessions[TEST_SESSION_ID]
-    expect(session?.pendingComputerUsePermission).toBeNull()
-    expect(session?.chatState).toBe('tool_executing')
-    expect(notifyDesktopMock).not.toHaveBeenCalled()
+    expect(session?.pendingComputerUsePermission?.requestId).toBe('cu-bypass')
+    expect(session?.chatState).toBe('permission_pending')
+    expect(notifyDesktopMock).toHaveBeenCalled()
   })
 
   it('tracks Computer Use approval requests separately from generic tool permissions', () => {

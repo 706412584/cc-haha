@@ -2842,6 +2842,7 @@ export const kr: Record<TranslationKey, string> = {
   'businessError.pdf_invalid': 'PDF 파일이 유효하지 않습니다. 텍스트로 변환하거나 다른 파일을 보내세요.',
   'businessError.image_too_large': '이미지가 선택한 모델에 비해 너무 큽니다. 크기를 조정하거나 더 작은 이미지를 보내세요.',
   'businessError.image_unsupported': '이 모델은 이미지를 지원하지 않습니다. 텍스트로 계속하거나, 비전 지원 모델로 전환하여 이미지를 다시 보내세요.',
+  'businessError.image_invalid': '이미지 데이터가 유효하지 않습니다. 이미지를 다시 만들거나 교체하거나 텍스트로 계속하세요.',
   'businessError.request_too_large': '요청이 선택한 모델에 비해 너무 큽니다. 큰 파일을 제거하거나 더 짧은 메시지로 다시 시도하세요.',
   'businessError.prompt_too_long': '프롬프트가 선택한 모델에 비해 너무 깁니다. 대화를 압축하거나 컨텍스트를 줄여 다시 시도하세요.',
   'businessError.auto_mode_unavailable': '자동 모드는 현재 요금제에서 사용할 수 없습니다.',

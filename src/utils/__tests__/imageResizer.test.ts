@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, mock, test } from 'bun:test'
 import { rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { deflateSync } from 'node:zlib'
+import { crc32 } from '../crc32.js'
 
 type ProcessorMode = 'metadata' | 'throw'
 
@@ -16,26 +18,35 @@ let originalPngDimensions: { width?: number; height?: number; format?: string } 
 let outputForOperations: (operations: Operation[]) => Buffer = () =>
   Buffer.from('resized-image')
 
-// Build a complete PNG chunk envelope around filler bytes. The image processor
-// is mocked in these tests, but FileRead still validates chunk boundaries.
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+
+function pngChunk(type: string, data: Buffer): Buffer {
+  const body = Buffer.concat([Buffer.from(type, 'ascii'), data])
+  const chunk = Buffer.alloc(12 + data.length)
+  chunk.writeUInt32BE(data.length, 0)
+  body.copy(chunk, 4)
+  chunk.writeUInt32BE(crc32(body), 8 + data.length)
+  return chunk
+}
+
 function makeFakePngBufferWithMagic(size: number, fillByte: number): Buffer {
-  const minimumSize = 57 // signature + IHDR + IDAT + IEND
-  if (size < minimumSize) throw new Error('fake PNG is too small')
-
-  const buf = Buffer.alloc(size, fillByte)
-  PNG_MAGIC.copy(buf, 0)
-  buf.writeUInt32BE(13, 8)
-  buf.write('IHDR', 12, 'ascii')
-
-  const idatOffset = 33
-  buf.writeUInt32BE(size - minimumSize, idatOffset)
-  buf.write('IDAT', idatOffset + 4, 'ascii')
-
-  const iendOffset = size - 12
-  buf.writeUInt32BE(0, iendOffset)
-  buf.write('IEND', iendOffset + 4, 'ascii')
-  return buf
+  const width = 250
+  const rowSize = width * 4 + 1
+  const height = Math.max(1, Math.floor((size - 100) / rowSize))
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(width, 0)
+  ihdr.writeUInt32BE(height, 4)
+  ihdr[8] = 8
+  ihdr[9] = 6
+  const pixels = Buffer.alloc(rowSize * height, fillByte)
+  for (let row = 0; row < height; row++) pixels[row * rowSize] = 0
+  const compressed = deflateSync(pixels, { level: 0 })
+  return Buffer.concat([
+    PNG_MAGIC,
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', compressed),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ])
 }
 
 type Operation =
