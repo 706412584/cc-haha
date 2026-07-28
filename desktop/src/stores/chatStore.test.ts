@@ -55,6 +55,7 @@ const {
       projectPath: string
       workDir: string | null
       workDirExists: boolean
+      permissionMode?: string
     }>,
   },
   cliTaskStoreSnapshot: {
@@ -6569,6 +6570,69 @@ describe('chatStore history mapping', () => {
     expect(refreshTasksMock).toHaveBeenCalledTimes(2)
     expect(refreshTasksMock).toHaveBeenNthCalledWith(1, 'session-a')
     expect(refreshTasksMock).toHaveBeenNthCalledWith(2, 'session-b')
+  })
+
+  it('auto-approves Computer Use requests in bypassPermissions mode without opening the modal', () => {
+    sessionStoreSnapshot.sessions = [
+      {
+        id: TEST_SESSION_ID,
+        title: 'Bypass session',
+        createdAt: '',
+        modifiedAt: '',
+        messageCount: 0,
+        projectPath: '',
+        workDir: null,
+        workDirExists: true,
+        permissionMode: 'bypassPermissions',
+      },
+    ]
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({ chatState: 'tool_executing' }),
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'computer_use_permission_request',
+      requestId: 'cu-bypass',
+      request: {
+        requestId: 'cu-bypass',
+        reason: 'Use Windows PowerShell',
+        apps: [
+          {
+            requestedName: 'Windows PowerShell',
+            isSentinel: false,
+            alreadyGranted: false,
+            proposedTier: 'click',
+          },
+        ],
+        requestedFlags: {
+          clipboardRead: true,
+          clipboardWrite: true,
+          systemKeyCombos: true,
+        },
+        screenshotFiltering: 'native',
+      },
+    })
+
+    expect(sendMock).toHaveBeenCalledWith(TEST_SESSION_ID, {
+      type: 'computer_use_permission_response',
+      requestId: 'cu-bypass',
+      response: {
+        granted: [],
+        denied: [{ bundleId: 'Windows PowerShell', reason: 'not_installed' }],
+        flags: {
+          clipboardRead: true,
+          clipboardWrite: true,
+          systemKeyCombos: true,
+        },
+        userConsented: true,
+      },
+    })
+    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.pendingComputerUsePermission).toBeNull()
+    expect(session?.chatState).toBe('tool_executing')
+    expect(notifyDesktopMock).not.toHaveBeenCalled()
   })
 
   it('tracks Computer Use approval requests separately from generic tool permissions', () => {

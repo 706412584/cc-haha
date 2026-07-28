@@ -439,14 +439,24 @@ describe('Settings > General tab', () => {
     expect(screen.getByLabelText('Skip WebFetch domain preflight')).toBeInTheDocument()
   })
 
-  it('offers all six palettes, paper grounds before ink ones', () => {
+  it('keeps all six current palettes and restores the four classic palettes', () => {
     render(<Settings />)
 
     fireEvent.click(screen.getByText('General'))
-    // The picker order is load-bearing: the four paper grounds come first, then
-    // the two ink ones, so the list reads light-to-dark rather than shuffled.
-    const order = ['Pure White', 'Paper', 'Warm Classic', 'Celadon', 'Ink Night', 'Ink Blue']
-      .map((name) => screen.getByRole('button', { name }))
+    // Current palettes stay first in their established order. Restored palettes
+    // follow as an explicit classic group rather than taking over old IDs.
+    const order = [
+      'Pure White',
+      'Paper',
+      'Warm Classic',
+      'Celadon',
+      'Ink Night',
+      'Ink Blue',
+      'Classic White',
+      'Classic Light',
+      'Eye Care',
+      'Classic Dark',
+    ].map((name) => screen.getByRole('button', { name }))
 
     for (const [index, chip] of order.slice(0, -1).entries()) {
       const next = order[index + 1]!
@@ -456,10 +466,19 @@ describe('Settings > General tab', () => {
       ).toBe(true)
     }
 
-    fireEvent.click(screen.getByRole('button', { name: 'Pure White' }))
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: 'Pure White' }))
+    })
     expect(useSettingsStore.getState().setTheme).toHaveBeenCalledWith('white')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Ink Blue' }))
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: 'Classic Light' }))
+    })
+    expect(useSettingsStore.getState().setTheme).toHaveBeenCalledWith('classic-light')
+
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: 'Ink Blue' }))
+    })
     expect(useSettingsStore.getState().setTheme).toHaveBeenCalledWith('ink-blue')
   })
 
@@ -510,7 +529,18 @@ describe('Settings > General tab', () => {
 
     expect(screen.getByText('Use in light mode')).toBeInTheDocument()
     expect(screen.getByText('Use in dark mode')).toBeInTheDocument()
-    for (const label of ['Pure White', 'Paper', 'Warm Classic', 'Celadon', 'Ink Night', 'Ink Blue']) {
+    for (const label of [
+      'Pure White',
+      'Paper',
+      'Warm Classic',
+      'Celadon',
+      'Classic White',
+      'Classic Light',
+      'Eye Care',
+      'Ink Night',
+      'Ink Blue',
+      'Classic Dark',
+    ]) {
       expect(screen.getByRole('button', { name: label }), label).toBeInTheDocument()
     }
   })

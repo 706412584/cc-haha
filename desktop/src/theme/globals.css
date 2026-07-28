@@ -2,18 +2,16 @@
 @plugin "@tailwindcss/typography";
 
 /* ─── Dark variant binding ────────────────────────────────────────
-   The app has six themes switched via `<html data-theme>`. Following the OS
-   is resolved in JS (src/theme/systemAppearance.ts) and lands on that same
-   attribute, so `data-theme` stays the single source of truth here. Without
-   this binding, Tailwind's default `dark:` compiles to
-   `prefers-color-scheme: dark` and would fire on the wrong theme — right by
-   accident for someone following the system, plainly wrong for anyone on a
-   fixed palette.
+   Themes are switched via `<html data-theme>`. Following the OS is resolved
+   in JS (src/theme/systemAppearance.ts) and lands on that same attribute, so
+   `data-theme` stays the single source of truth here. Without this binding,
+   Tailwind's default `dark:` compiles to `prefers-color-scheme: dark` and
+   would fire on the wrong fixed palette.
 
-   Two of the six sit on a dark ground — `dark` and `ink-blue` — so both are
-   listed. Binding only `dark` is how a `dark:` utility would silently render
-   its light branch on ink-blue. */
-@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *, [data-theme="ink-blue"], [data-theme="ink-blue"] *));
+   Three supported palettes sit on a dark ground, so all are listed explicitly.
+   Binding only `dark` is how a `dark:` utility would silently render its light
+   branch on any dark palette whose ID is not literally `dark`. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *, [data-theme="ink-blue"], [data-theme="ink-blue"] *, [data-theme="classic-dark"], [data-theme="classic-dark"] *));
 
 /* ─── Self-hosted fonts (no Google CDN dependency) ────────────── */
 
@@ -249,7 +247,8 @@
 }
 
 [data-theme="dark"] .settings-zoom-control,
-[data-theme="ink-blue"] .settings-zoom-control {
+[data-theme="ink-blue"] .settings-zoom-control,
+[data-theme="classic-dark"] .settings-zoom-control {
   --settings-zoom-track-empty: var(--color-surface-container-highest);
   --settings-zoom-thumb-bg: var(--color-surface-bright);
   --settings-zoom-thumb-border: var(--color-brand);
@@ -545,9 +544,9 @@
 }
 
 /* ─── Theme sources ───────────────────────────────────────────────
-   Six palettes from the 「纸 · 墨 · 印」 handoff. Each block carries only
-   raw color values; the semantic layer below turns them into the
-   `--color-*` tokens the components consume. Generated values
+   The six 「纸 · 墨 · 印」 palettes plus four restored classic palettes. Each
+   block carries only raw color values; the semantic layer below turns them
+   into the `--color-*` tokens the components consume. Generated values
    (`*-ink`, the heat ramp, the `*-rgb` triplets) are derived from these
    sources — see the header comment on the semantic layer. */
 
@@ -990,6 +989,294 @@
   --cc-scrim-rgb: 6, 6, 6;
 }
 
+/* 旧版纯白 classic-white */
+[data-theme="classic-white"] {
+  color-scheme: light;
+
+  --cc-bg: #FFFFFF;
+  --cc-s0: #F9FAFB;
+  --cc-s1: #EEF2F6;
+  --cc-s2: #F6F8FA;
+  --cc-bd: #DDE3EA;
+  --cc-bd2: #8B98A7;
+  --cc-bd-strong: #66717E;
+  --cc-t1: #111827;
+  --cc-t2: #4B5563;
+  --cc-t3: #66717E;
+
+  --cc-ac: #8F482F;
+  --cc-ac2: #AD5F45;
+  --cc-ac-soft: #FFF0EA;
+  --cc-ac-soft-hover: #FBE1D7;
+  --cc-ac-border: #D8A997;
+  --cc-ac-ink: #8F482F;
+  --cc-on-ac: #FFFFFF;
+
+  --cc-ok: #087E4F;
+  --cc-ok-soft: #DCFAE6;
+  --cc-ok-ink: #087E4F;
+  --cc-wn: #B54708;
+  --cc-wn-soft: #FEF0C7;
+  --cc-wn-ink: #845307;
+  --cc-er: #B42318;
+  --cc-er-soft: #FEE4E2;
+  --cc-er-soft-hover: #FECDCA;
+  --cc-er-ink: #B42318;
+  --cc-info: #0F5C8F;
+  --cc-info-soft: #D9ECFF;
+  --cc-info-ink: #0F5C8F;
+
+  --cc-teal: #0F766E;
+  --cc-teal-soft: #F3F8F7;
+  --cc-teal-border: #AECBC9;
+  --cc-teal-icon: #EDF7F6;
+
+  --cc-diff-add: #ECFDF3;
+  --cc-diff-add-gutter: #D1FADF;
+  --cc-diff-add-word: #ABEFC6;
+  --cc-diff-del: #FEF3F2;
+  --cc-diff-del-gutter: #FEE4E2;
+  --cc-diff-del-word: #FECDCA;
+  --cc-diff-mark: #FFFAEB;
+  --cc-diff-mark-gutter: #FEF0C7;
+  --cc-code: #FAFBFC;
+
+  --cc-heat-0: #EEF2F6;
+  --cc-heat-1: #FFF0EA;
+  --cc-heat-2: #FFDBD0;
+  --cc-heat-3: #FFB59D;
+  --cc-heat-4: #8F482F;
+
+  --cc-shadow-card: 0 1px 3px rgba(15, 23, 42, 0.04), 0 6px 24px rgba(15, 23, 42, 0.05);
+  --cc-shadow-composer: 0 1px 2px rgba(15, 23, 42, 0.05), 0 14px 44px rgba(15, 23, 42, 0.08);
+  --cc-shadow-overlay: 0 8px 24px rgba(15, 23, 42, 0.08), 0 24px 60px rgba(15, 23, 42, 0.12);
+
+  --cc-bg-rgb: 255, 255, 255;
+  --cc-s1-rgb: 238, 242, 246;
+  --cc-t1-rgb: 17, 24, 39;
+  --cc-t2-rgb: 75, 85, 99;
+  --cc-bd2-rgb: 139, 152, 167;
+  --cc-ac-rgb: 143, 72, 47;
+  --cc-er-rgb: 180, 35, 24;
+  --cc-scrim-rgb: 15, 23, 42;
+}
+
+/* 旧版浅色 classic-light */
+[data-theme="classic-light"] {
+  color-scheme: light;
+
+  --cc-bg: #FAF9F5;
+  --cc-s0: #F4F4F0;
+  --cc-s1: #E9E8E4;
+  --cc-s2: #EFEEEA;
+  --cc-bd: #DAC1BA;
+  --cc-bd2: #87736D;
+  --cc-bd-strong: #6B5C57;
+  --cc-t1: #1B1C1A;
+  --cc-t2: #54433E;
+  --cc-t3: #6B5C57;
+
+  --cc-ac: #8F482F;
+  --cc-ac2: #AD5F45;
+  --cc-ac-soft: #FFDBD0;
+  --cc-ac-soft-hover: #F5CABB;
+  --cc-ac-border: #FFB59D;
+  --cc-ac-ink: #8F3217;
+  --cc-on-ac: #FFFFFF;
+
+  --cc-ok: #16A34A;
+  --cc-ok-soft: #E8F5E2;
+  --cc-ok-ink: #256D37;
+  --cc-wn: #CA8A04;
+  --cc-wn-soft: #FFF3D6;
+  --cc-wn-ink: #7A5300;
+  --cc-er: #BA1A1A;
+  --cc-er-soft: #FFDAD6;
+  --cc-er-soft-hover: #F5B8B4;
+  --cc-er-ink: #BA1A1A;
+  --cc-info: #2D628F;
+  --cc-info-soft: #E4F1FF;
+  --cc-info-ink: #2D628F;
+
+  --cc-teal: #3B7068;
+  --cc-teal-soft: #F6FAF8;
+  --cc-teal-border: #BCCDC8;
+  --cc-teal-icon: #F3F8F7;
+
+  --cc-diff-add: #E8F5E2;
+  --cc-diff-add-gutter: #D4EDCA;
+  --cc-diff-add-word: #B8E4A8;
+  --cc-diff-del: #FDECEA;
+  --cc-diff-del-gutter: #F9D4D0;
+  --cc-diff-del-word: #F5B8B4;
+  --cc-diff-mark: #FFF5D6;
+  --cc-diff-mark-gutter: #FFECB3;
+  --cc-code: #FDFCF9;
+
+  --cc-heat-0: #EFEEEA;
+  --cc-heat-1: #FBE9E2;
+  --cc-heat-2: #FFDBD0;
+  --cc-heat-3: #FFB59D;
+  --cc-heat-4: #8F482F;
+
+  --cc-shadow-card: 0 1px 3px rgba(65, 54, 48, 0.04), 0 6px 24px rgba(65, 54, 48, 0.06);
+  --cc-shadow-composer: 0 1px 2px rgba(65, 54, 48, 0.05), 0 14px 44px rgba(65, 54, 48, 0.08);
+  --cc-shadow-overlay: 0 4px 20px rgba(27, 28, 26, 0.04), 0 12px 40px rgba(27, 28, 26, 0.08);
+
+  --cc-bg-rgb: 250, 249, 245;
+  --cc-s1-rgb: 233, 232, 228;
+  --cc-t1-rgb: 27, 28, 26;
+  --cc-t2-rgb: 84, 67, 62;
+  --cc-bd2-rgb: 135, 115, 109;
+  --cc-ac-rgb: 143, 72, 47;
+  --cc-er-rgb: 186, 26, 26;
+  --cc-scrim-rgb: 27, 28, 26;
+}
+
+/* 旧版护眼 eye-care */
+[data-theme="eye-care"] {
+  color-scheme: light;
+
+  --cc-bg: #EAF6EF;
+  --cc-s0: #F0F9F4;
+  --cc-s1: #DDEFE6;
+  --cc-s2: #F3FBF6;
+  --cc-bd: #C8DDD2;
+  --cc-bd2: #7C8B83;
+  --cc-bd-strong: #5C6B63;
+  --cc-t1: #17211C;
+  --cc-t2: #53625A;
+  --cc-t3: #5C6B63;
+
+  --cc-ac: #3F6F5A;
+  --cc-ac2: #4F7C65;
+  --cc-ac-soft: #DDF0E5;
+  --cc-ac-soft-hover: #CDE6D8;
+  --cc-ac-border: #B8DCC8;
+  --cc-ac-ink: #315D4A;
+  --cc-on-ac: #FFFFFF;
+
+  --cc-ok: #087E4F;
+  --cc-ok-soft: #DDF5E8;
+  --cc-ok-ink: #2F684F;
+  --cc-wn: #A66107;
+  --cc-wn-soft: #FEF0C7;
+  --cc-wn-ink: #845307;
+  --cc-er: #B42318;
+  --cc-er-soft: #FEE4E2;
+  --cc-er-soft-hover: #FECDCA;
+  --cc-er-ink: #B42318;
+  --cc-info: #2D6472;
+  --cc-info-soft: #DDF1F5;
+  --cc-info-ink: #2D6472;
+
+  --cc-teal: #2F7661;
+  --cc-teal-soft: #EAF6F0;
+  --cc-teal-border: #B2D2C4;
+  --cc-teal-icon: #DDF0E7;
+
+  --cc-diff-add: #ECFDF3;
+  --cc-diff-add-gutter: #D1FADF;
+  --cc-diff-add-word: #ABEFC6;
+  --cc-diff-del: #FEF3F2;
+  --cc-diff-del-gutter: #FEE4E2;
+  --cc-diff-del-word: #FECDCA;
+  --cc-diff-mark: #FFFAEB;
+  --cc-diff-mark-gutter: #FEF0C7;
+  --cc-code: #EEF8F2;
+
+  --cc-heat-0: #EAF3EE;
+  --cc-heat-1: #DDF0E5;
+  --cc-heat-2: #B8DCC8;
+  --cc-heat-3: #7EB392;
+  --cc-heat-4: #3F6F5A;
+
+  --cc-shadow-card: 0 1px 3px rgba(39, 70, 55, 0.04), 0 6px 24px rgba(39, 70, 55, 0.05);
+  --cc-shadow-composer: 0 1px 2px rgba(39, 70, 55, 0.05), 0 14px 44px rgba(39, 70, 55, 0.08);
+  --cc-shadow-overlay: 0 8px 24px rgba(39, 70, 55, 0.06), 0 24px 60px rgba(39, 70, 55, 0.10);
+
+  --cc-bg-rgb: 234, 246, 239;
+  --cc-s1-rgb: 221, 239, 230;
+  --cc-t1-rgb: 23, 33, 28;
+  --cc-t2-rgb: 83, 98, 90;
+  --cc-bd2-rgb: 124, 139, 131;
+  --cc-ac-rgb: 63, 111, 90;
+  --cc-er-rgb: 180, 35, 24;
+  --cc-scrim-rgb: 15, 35, 25;
+}
+
+/* 旧版深色 classic-dark */
+[data-theme="classic-dark"] {
+  color-scheme: dark;
+
+  --cc-bg: #0E0E0E;
+  --cc-s0: #1C1B1B;
+  --cc-s1: #2A2929;
+  --cc-s2: #201F1F;
+  --cc-bd: #40312C;
+  --cc-bd2: #8D7F7A;
+  --cc-bd-strong: #9B8E89;
+  --cc-t1: #E5E2E1;
+  --cc-t2: #B7AAA5;
+  --cc-t3: #A0948F;
+
+  --cc-ac: #FFB59F;
+  --cc-ac2: #FF6E40;
+  --cc-ac-soft: #3A2823;
+  --cc-ac-soft-hover: #4A3028;
+  --cc-ac-border: #674032;
+  --cc-ac-ink: #FFD9CF;
+  --cc-on-ac: #2C120B;
+
+  --cc-ok: #7EDB8B;
+  --cc-ok-soft: #243126;
+  --cc-ok-ink: #64B970;
+  --cc-wn: #F7C46C;
+  --cc-wn-soft: #352B1B;
+  --cc-wn-ink: #E6B457;
+  --cc-er: #FFB4AB;
+  --cc-er-soft: #42211F;
+  --cc-er-soft-hover: #5A2926;
+  --cc-er-ink: #FFB4AB;
+  --cc-info: #74E0F7;
+  --cc-info-soft: #173237;
+  --cc-info-ink: #74E0F7;
+
+  --cc-teal: #7DD3C7;
+  --cc-teal-soft: #1D2423;
+  --cc-teal-border: #334743;
+  --cc-teal-icon: #22302E;
+
+  --cc-diff-add: #243126;
+  --cc-diff-add-gutter: #2A3B2D;
+  --cc-diff-add-word: #314A35;
+  --cc-diff-del: #3A211E;
+  --cc-diff-del-gutter: #462724;
+  --cc-diff-del-word: #5A302B;
+  --cc-diff-mark: #332D3D;
+  --cc-diff-mark-gutter: #3D354B;
+  --cc-code: #0E0E0E;
+
+  --cc-heat-0: #242322;
+  --cc-heat-1: #3A2823;
+  --cc-heat-2: #674032;
+  --cc-heat-3: #A76549;
+  --cc-heat-4: #FFB59F;
+
+  --cc-shadow-card: 0 1px 3px rgba(0, 0, 0, 0.35), 0 6px 24px rgba(0, 0, 0, 0.35);
+  --cc-shadow-composer: 0 1px 2px rgba(0, 0, 0, 0.45), 0 14px 44px rgba(0, 0, 0, 0.50);
+  --cc-shadow-overlay: 0 16px 40px rgba(0, 0, 0, 0.42), 0 28px 80px rgba(0, 0, 0, 0.58);
+
+  --cc-bg-rgb: 14, 14, 14;
+  --cc-s1-rgb: 42, 41, 41;
+  --cc-t1-rgb: 229, 226, 225;
+  --cc-t2-rgb: 183, 170, 165;
+  --cc-bd2-rgb: 141, 127, 122;
+  --cc-ac-rgb: 255, 181, 159;
+  --cc-er-rgb: 255, 180, 171;
+  --cc-scrim-rgb: 6, 6, 6;
+}
+
 /* ─── Semantic layer ──────────────────────────────────────────────
    Every `--color-*` the app consumes is defined exactly once, here, in terms
    of the `--cc-*` source variables above. Adding a theme therefore means
@@ -1217,8 +1504,8 @@
   --color-diff-title-color: var(--cc-t3);
   --color-diff-title-border: var(--cc-bd);
 
-  /* Syntax highlighting. One ramp for the four paper themes; the two ink
-     themes override it below. */
+  /* Syntax highlighting. One ramp for the light themes; the ink themes
+     override it below. */
   --color-code-comment: #8A8478;
   --color-code-string: #437220;
   --color-code-keyword: #B8533B;
@@ -1294,7 +1581,8 @@
 
 /* Ink themes: lift the syntax ramp off the paper values. */
 [data-theme="dark"],
-[data-theme="ink-blue"] {  --color-code-comment: #8F8683;
+[data-theme="ink-blue"],
+[data-theme="classic-dark"] {  --color-code-comment: #8F8683;
   --color-code-string: #A8CE8C;
   --color-code-keyword: #E9926B;
   --color-code-function: #7FC7E8;

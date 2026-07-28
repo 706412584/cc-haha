@@ -27,8 +27,8 @@ import {
 // Minimal valid 1x1 PNG — magic bytes `89 50 4E 47 0D 0A 1A 0A` then a real IHDR.
 // Hand-crafted so we don't need sharp/node-canvas at test time.
 const TINY_PNG = Buffer.from(
-  '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da636060000000050001a5f64570000000049454e44ae426082',
-  'hex',
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  'base64',
 )
 
 // The actual bug payload: 43 bytes of JSON error body written into a `.png` file.
@@ -101,6 +101,18 @@ describe('readImageWithTokenBudget — magic byte validation', () => {
     await expect(
       readImageWithTokenBudget('/fake/empty.png'),
     ).rejects.toThrow(/empty/i)
+  })
+
+  test('rejects a PNG whose IDAT chunk is truncated despite valid magic bytes', async () => {
+    const truncatedPng = Buffer.from(TINY_PNG)
+    truncatedPng.writeUInt32BE(TINY_PNG.length, 33)
+    installFakeFs({
+      '/fake/truncated.png': truncatedPng,
+    })
+
+    await expect(
+      readImageWithTokenBudget('/fake/truncated.png'),
+    ).rejects.toBeInstanceOf(InvalidImageDataError)
   })
 
   test('accepts a real PNG with valid magic bytes', async () => {

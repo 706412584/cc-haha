@@ -187,11 +187,10 @@ export class MaxFileReadTokenExceededError extends Error {
 }
 
 /**
- * Thrown when a file with an image extension fails magic-byte validation —
- * e.g. an HTTP error body written into `*.png`. Surfacing this as a typed
- * error stops malformed bytes from reaching the model API (Bedrock would
- * reject with IMAGE_FORMAT_UNSUPPORTED, and the bad block would then be
- * replayed on every subsequent turn).
+ * Thrown when a file with an image extension is not a complete recognized
+ * image, such as an HTTP error body saved as `*.png` or a truncated PNG.
+ * Surfacing this as a typed error stops malformed bytes from reaching the
+ * model API and being replayed on every subsequent turn.
  */
 export class InvalidImageDataError extends Error {
   constructor(
@@ -207,21 +206,51 @@ export class InvalidImageDataError extends Error {
 }
 
 /**
- * Magic-byte check for the image formats Anthropic / Bedrock accept.
- * Returns true only when the buffer's first bytes match a known signature.
- * Unlike detectImageFormatFromBuffer (which defaults to 'image/png' on
- * unknown input), this returns a hard yes/no.
+ * Validation for the image formats Anthropic / Bedrock accept. PNG receives
+ * structural validation because a truncated file can retain valid magic bytes;
+ * other formats currently use their identifying signatures.
  */
+function hasCompletePngStructure(buffer: Buffer): boolean {
+  if (
+    buffer.length < 8 ||
+    !buffer.subarray(0, 8).equals(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    )
+  ) {
+    return false
+  }
+
+  let offset = 8
+  let isFirstChunk = true
+  while (offset + 12 <= buffer.length) {
+    const length = buffer.readUInt32BE(offset)
+    const chunkEnd = offset + 12 + length
+    if (chunkEnd > buffer.length) return false
+
+    const type = buffer.subarray(offset + 4, offset + 8).toString('ascii')
+    if (isFirstChunk && (type !== 'IHDR' || length !== 13)) return false
+    if (type === 'IEND') {
+      return length === 0 && chunkEnd === buffer.length
+    }
+
+    isFirstChunk = false
+    offset = chunkEnd
+  }
+
+  return false
+}
+
 function hasKnownImageMagicBytes(buffer: Buffer): boolean {
   if (buffer.length < 4) return false
-  // PNG: 89 50 4E 47
+  // PNG: validate the complete chunk envelope so truncated IDAT data cannot
+  // pass solely because the signature and IHDR are intact.
   if (
     buffer[0] === 0x89 &&
     buffer[1] === 0x50 &&
     buffer[2] === 0x4e &&
     buffer[3] === 0x47
   ) {
-    return true
+    return hasCompletePngStructure(buffer)
   }
   // JPEG: FF D8 FF
   if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
@@ -1195,12 +1224,9 @@ export async function readImageWithTokenBudget(
     throw new Error(`Image file is empty: ${filePath}`)
   }
 
-  // Reject files whose extension says "image" but whose bytes don't match any
-  // known image signature. Without this guard the bytes would still flow
-  // through the rest of the pipeline and reach the model API, where Bedrock
-  // would respond with IMAGE_FORMAT_UNSUPPORTED — and because the bad block
-  // stays in conversation history, every subsequent turn would replay the same
-  // error. See FileReadTool.imageValidation.test.ts for the regression case.
+  // Reject files whose extension says "image" but whose bytes are not a
+  // complete recognized image. Otherwise malformed bytes can enter conversation
+  // history and make every subsequent API call replay the same rejection.
   if (!hasKnownImageMagicBytes(imageBuffer)) {
     const firstBytesHex = imageBuffer
       .subarray(0, Math.min(16, imageBuffer.length))

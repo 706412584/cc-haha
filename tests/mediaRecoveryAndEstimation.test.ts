@@ -70,6 +70,81 @@ describe('media error recovery', () => {
     expect(serialized).toContain('describe this screenshot')
     expect(serialized).toContain('continue with text only')
   })
+
+  test('recovers legacy invalid-image API errors without a business error code', () => {
+    const toolResult = createUserMessage({
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: 'legacy-corrupt-image',
+          content: [imageBlock('legacy-corrupt-image-data')],
+        },
+      ],
+      uuid: '00000000-0000-4000-8000-000000000005',
+    })
+    const legacyError = createAssistantAPIErrorMessage({
+      content:
+        'API Error: 400 {"error":{"message":"Invalid PNG image.","type":"invalid_request_error"},"type":"error"}\n\nRetried 0 times.',
+      error: 'unknown',
+    })
+    const nextUser = createUserMessage({
+      content: 'continue after upgrading',
+      uuid: '00000000-0000-4000-8000-000000000006',
+    })
+
+    const serialized = JSON.stringify(
+      normalizeMessagesForAPI([toolResult, legacyError, nextUser]),
+    )
+
+    expect(serialized).not.toContain('legacy-corrupt-image-data')
+    expect(serialized).toContain('continue after upgrading')
+  })
+
+  test('strips an invalid image nested inside a tool result on the next turn', () => {
+    const toolResult = createUserMessage({
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: 'read-corrupt-image',
+          content: [imageBlock('corrupt-nested-image')],
+        },
+      ],
+      uuid: '00000000-0000-4000-8000-000000000005',
+    })
+    const laterToolResult = createUserMessage({
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: 'another-read',
+          content: 'another image could not be resized',
+          is_error: true,
+        },
+      ],
+      uuid: '00000000-0000-4000-8000-000000000006',
+    })
+    const invalid = createAssistantAPIErrorMessage({
+      content: 'localized invalid image text',
+      error: 'invalid_request',
+      businessErrorCode: BUSINESS_ERROR_CODES.IMAGE_INVALID,
+    })
+    const nextUser = createUserMessage({
+      content: 'continue with text only',
+      uuid: '00000000-0000-4000-8000-000000000007',
+    })
+
+    const normalized = normalizeMessagesForAPI([
+      toolResult,
+      laterToolResult,
+      invalid,
+      nextUser,
+    ])
+    const serialized = JSON.stringify(normalized)
+
+    expect(serialized).not.toContain('corrupt-nested-image')
+    expect(serialized).toContain('[media removed after API rejection]')
+    expect(serialized).toContain('read-corrupt-image')
+    expect(serialized).toContain('continue with text only')
+  })
 })
 
 describe('media context estimation', () => {

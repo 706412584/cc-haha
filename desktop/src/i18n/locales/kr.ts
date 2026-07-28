@@ -1560,13 +1560,17 @@ export const kr: Record<TranslationKey, string> = {
 
   // Settings > General
   'settings.general.appearanceTitle': '모양',
-  'settings.general.appearanceDescription': '종이와 먹의 여섯 가지 배색을 전환합니다.',
+  'settings.general.appearanceDescription': '현재 배색을 유지하면서 복원된 네 가지 클래식 배색도 선택할 수 있습니다.',
   'settings.general.appearance.paper': '지묵',
   'settings.general.appearance.warmClassic': '따뜻한 클래식',
   'settings.general.appearance.celadon': '청자',
   'settings.general.appearance.inkBlue': '먹빛 블루',
   'settings.general.appearance.dark': '먹빛 밤',
   'settings.general.appearance.white': '순백',
+  'settings.general.appearance.classicWhite': '이전 화이트',
+  'settings.general.appearance.classicLight': '이전 라이트',
+  'settings.general.appearance.eyeCare': '이전 눈 보호',
+  'settings.general.appearance.classicDark': '이전 다크',
   'settings.general.appearance.followSystem': '시스템 설정 따르기',
   'settings.general.appearance.followSystemHint': '시스템이 다크 모드로 바뀌면 먹빛 배색으로, 라이트 모드로 돌아오면 종이 배색으로 자동 전환합니다.',
   'settings.general.appearance.lightThemeLabel': '라이트 모드에서 사용',

@@ -1561,13 +1561,17 @@ export const zh: Record<TranslationKey, string> = {
 
   // Settings > General
   'settings.general.appearanceTitle': '配色主题',
-  'settings.general.appearanceDescription': '在纸、墨、印六套配色之间切换。',
+  'settings.general.appearanceDescription': '保留现有配色，并可切换到四套旧版经典配色。',
   'settings.general.appearance.paper': '纸墨',
   'settings.general.appearance.warmClassic': '经典暖色',
   'settings.general.appearance.celadon': '青瓷',
   'settings.general.appearance.inkBlue': '墨夜蓝',
   'settings.general.appearance.dark': '墨夜',
   'settings.general.appearance.white': '纯白',
+  'settings.general.appearance.classicWhite': '旧版纯白',
+  'settings.general.appearance.classicLight': '旧版浅色',
+  'settings.general.appearance.eyeCare': '旧版护眼',
+  'settings.general.appearance.classicDark': '旧版深色',
   'settings.general.appearance.followSystem': '跟随系统',
   'settings.general.appearance.followSystemHint': '系统切到深色模式时自动换成墨色配色，切回浅色时换回纸色配色。',
   'settings.general.appearance.lightThemeLabel': '浅色模式下使用',

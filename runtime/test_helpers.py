@@ -11,11 +11,14 @@ Usage:
 """
 from __future__ import annotations
 
+import ast
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch, MagicMock
 
 # Determine which helper to test based on current platform
@@ -33,7 +36,7 @@ class TestKeyMap(unittest.TestCase):
     def _load_key_map(self, helper_path: Path) -> dict[str, str]:
         """Extract KEY_MAP from a helper by importing it with mocked deps."""
         # Read the file and extract just the KEY_MAP dict
-        source = helper_path.read_text()
+        source = helper_path.read_text(encoding="utf-8")
         # Find KEY_MAP definition
         start = source.index("KEY_MAP = {")
         # Find the matching closing brace
@@ -126,7 +129,7 @@ class TestJSONProtocol(unittest.TestCase):
 
     def _parse_main_commands(self, helper_path: Path) -> list[str]:
         """Extract all command names from the main() dispatcher."""
-        source = helper_path.read_text()
+        source = helper_path.read_text(encoding="utf-8")
         commands = []
         for line in source.splitlines():
             stripped = line.strip()
@@ -199,7 +202,7 @@ class TestHelperOutputFormat(unittest.TestCase):
         for helper in [MAC_HELPER, WIN_HELPER]:
             if not helper.exists():
                 continue
-            source = helper.read_text()
+            source = helper.read_text(encoding="utf-8")
             self.assertIn("def json_output(", source,
                           f"{helper.name} missing json_output function")
             self.assertIn("def error_output(", source,
@@ -210,11 +213,54 @@ class TestHelperOutputFormat(unittest.TestCase):
         for helper in [MAC_HELPER, WIN_HELPER]:
             if not helper.exists():
                 continue
-            source = helper.read_text()
+            source = helper.read_text(encoding="utf-8")
             self.assertIn('if __name__ == "__main__":', source,
                           f"{helper.name} missing __main__ guard")
             self.assertIn("def main()", source,
                           f"{helper.name} missing main() function")
+
+
+class TestWinInstalledApps(unittest.TestCase):
+    """Windows app enumeration includes built-in shells absent from uninstall keys."""
+
+    def _load_installed_apps(self):
+        source = WIN_HELPER.read_text(encoding="utf-8")
+        module = ast.parse(source)
+        function = next(
+            node
+            for node in module.body
+            if isinstance(node, ast.FunctionDef) and node.name == "installed_apps"
+        )
+        namespace = {"Any": Any, "Path": Path, "os": __import__("os")}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(WIN_HELPER), "exec"), namespace)
+        return namespace["installed_apps"]
+
+    def test_includes_builtin_windows_powershell(self):
+        installed_apps = self._load_installed_apps()
+        fake_winreg = MagicMock()
+        fake_winreg.HKEY_LOCAL_MACHINE = 1
+        fake_winreg.HKEY_CURRENT_USER = 2
+        fake_winreg.OpenKey.side_effect = OSError
+
+        windows_dir = Path(tempfile.mkdtemp())
+        powershell = windows_dir / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        powershell.parent.mkdir(parents=True)
+        powershell.touch()
+
+        with patch.dict(sys.modules, {"winreg": fake_winreg}), patch.dict(
+            __import__("os").environ,
+            {"WINDIR": str(windows_dir)},
+        ):
+            apps = installed_apps()
+
+        self.assertIn(
+            {
+                "bundleId": "powershell",
+                "displayName": "Windows PowerShell",
+                "path": str(powershell),
+            },
+            apps,
+        )
 
 
 class TestWinHelperPermissions(unittest.TestCase):
@@ -226,7 +272,7 @@ class TestWinHelperPermissions(unittest.TestCase):
             self.skipTest("win_helper.py not found")
 
         # Extract and exec just the check_permissions function
-        source = WIN_HELPER.read_text()
+        source = WIN_HELPER.read_text(encoding="utf-8")
 
         # Find the function
         self.assertIn("def check_permissions()", source)
@@ -254,7 +300,7 @@ class TestMacHelperPermissions(unittest.TestCase):
         if not MAC_HELPER.exists():
             self.skipTest("mac_helper.py not found")
 
-        source = MAC_HELPER.read_text()
+        source = MAC_HELPER.read_text(encoding="utf-8")
 
         self.assertIn("def detect_accessibility_permission()", source)
         self.assertIn("AXIsProcessTrusted", source)
@@ -276,7 +322,7 @@ class TestMacHelperPermissions(unittest.TestCase):
         if not MAC_HELPER.exists():
             self.skipTest("mac_helper.py not found")
 
-        source = MAC_HELPER.read_text()
+        source = MAC_HELPER.read_text(encoding="utf-8")
         self.assertIn("def paste_clipboard()", source)
         self.assertIn('send_keystroke_via_osascript("v", ["command"])', source)
         self.assertIn('if parts == ["command", "v"]:', source)
@@ -288,7 +334,7 @@ class TestCrossPlatformFunctions(unittest.TestCase):
 
     def _get_function_body(self, helper_path: Path, func_name: str) -> str:
         """Extract a function's body (code lines only, no comments/blanks)."""
-        source = helper_path.read_text()
+        source = helper_path.read_text(encoding="utf-8")
         marker = f"def {func_name}("
         if marker not in source:
             return ""

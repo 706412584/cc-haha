@@ -221,6 +221,11 @@ export function getImageUnsupportedErrorMessage(): string {
     ? 'This model does not support images. Continue with text, or switch to a vision-capable model and send the image again.'
     : 'This model does not support images. Double press esc to go back, switch to a vision-capable model, or continue with text.'
 }
+export function getImageInvalidErrorMessage(): string {
+  return getIsNonInteractiveSession()
+    ? 'The image data was invalid. Re-create the image or continue with text.'
+    : 'The image data was invalid. Double press esc to go back, replace the image, or continue with text.'
+}
 export function getRequestTooLargeErrorMessage(): string {
   const limits = `max ${formatFileSize(PDF_TARGET_RAW_SIZE)}`
   return getIsNonInteractiveSession()
@@ -524,6 +529,21 @@ function buildAssistantMessageFromError(
     return createAssistantAPIErrorMessage({
       content: getImageTooLargeErrorMessage(),
       businessErrorCode: BUSINESS_ERROR_CODES.IMAGE_TOO_LARGE,
+    })
+  }
+
+  // Invalid image data must become a targeted synthetic error so later turns
+  // strip the rejected image instead of replaying the same 400 indefinitely.
+  if (
+    error instanceof APIError &&
+    (error.status === 400 || error.status === 422) &&
+    /invalid\s+(?:png|jpe?g|webp|gif)\s+image\b/i.test(error.message)
+  ) {
+    return createAssistantAPIErrorMessage({
+      content: getImageInvalidErrorMessage(),
+      error: 'invalid_request',
+      errorDetails: error.message,
+      businessErrorCode: BUSINESS_ERROR_CODES.IMAGE_INVALID,
     })
   }
 

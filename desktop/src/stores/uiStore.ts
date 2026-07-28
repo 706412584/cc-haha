@@ -120,8 +120,8 @@ export function applyTheme(
 ) {
   if (typeof document === 'undefined') return
   document.documentElement.setAttribute('data-theme', theme)
-  // Two of the six palettes sit on a dark ground, so this cannot test for the
-  // literal 'dark' key — ink-blue would render native scrollbars and form
+  // Multiple palettes sit on a dark ground, so this cannot test for the literal
+  // 'dark' key — the other dark IDs would render native scrollbars and form
   // controls in their light variant against a near-black page.
   document.documentElement.style.colorScheme = isDarkTheme(theme) ? 'dark' : 'light'
   notifyHostAppearance(theme, followSystem, lightTheme)}

@@ -8,7 +8,7 @@ import { cx } from '@/lib/cx'
  * were fitted, then rounded to symmetric values). Two things the raster could
  * not do:
  *
- * 1. Recolor. The PNG carried its own blue/cyan/orange under all six palettes
+ * 1. Recolor. The PNG carried its own blue/cyan/orange under every palette
  *    while everything around it moved. Here the C's take `--color-text-primary`
  *    and the accents take `--color-brand`, so every theme repaints the mark.
  * 2. Shrink. Four ideas — the two C's, the bar, the cursor and two sparkles —

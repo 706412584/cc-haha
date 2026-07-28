@@ -16,15 +16,25 @@ let originalPngDimensions: { width?: number; height?: number; format?: string } 
 let outputForOperations: (operations: Operation[]) => Buffer = () =>
   Buffer.from('resized-image')
 
-// PNG magic header (89 50 4E 47 0D 0A 1A 0A). `readImageWithTokenBudget`
-// validates magic bytes before doing anything else, so test fixtures that
-// pretend to be `.png` files must start with a real signature even when the
-// rest of the bytes are filler. The buffer's total length is preserved
-// because the test cases reason about size, not pixel content.
+// Build a complete PNG chunk envelope around filler bytes. The image processor
+// is mocked in these tests, but FileRead still validates chunk boundaries.
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 function makeFakePngBufferWithMagic(size: number, fillByte: number): Buffer {
+  const minimumSize = 57 // signature + IHDR + IDAT + IEND
+  if (size < minimumSize) throw new Error('fake PNG is too small')
+
   const buf = Buffer.alloc(size, fillByte)
   PNG_MAGIC.copy(buf, 0)
+  buf.writeUInt32BE(13, 8)
+  buf.write('IHDR', 12, 'ascii')
+
+  const idatOffset = 33
+  buf.writeUInt32BE(size - minimumSize, idatOffset)
+  buf.write('IDAT', idatOffset + 4, 'ascii')
+
+  const iendOffset = size - 12
+  buf.writeUInt32BE(0, iendOffset)
+  buf.write('IEND', iendOffset + 4, 'ascii')
   return buf
 }
 

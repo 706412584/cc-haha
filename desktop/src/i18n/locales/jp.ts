@@ -1560,13 +1560,17 @@ export const jp: Record<TranslationKey, string> = {
 
   // Settings > General
   'settings.general.appearanceTitle': '外観',
-  'settings.general.appearanceDescription': '紙と墨の 6 つの配色を切り替えます。',
+  'settings.general.appearanceDescription': '現在の配色を残したまま、復元した 4 つのクラシック配色も選べます。',
   'settings.general.appearance.paper': '紙墨',
   'settings.general.appearance.warmClassic': 'クラシックウォーム',
   'settings.general.appearance.celadon': '青磁',
   'settings.general.appearance.inkBlue': '墨夜ブルー',
   'settings.general.appearance.dark': '墨夜',
   'settings.general.appearance.white': '純白',
+  'settings.general.appearance.classicWhite': '旧版ホワイト',
+  'settings.general.appearance.classicLight': '旧版ライト',
+  'settings.general.appearance.eyeCare': '旧版アイケア',
+  'settings.general.appearance.classicDark': '旧版ダーク',
   'settings.general.appearance.followSystem': 'システムに合わせる',
   'settings.general.appearance.followSystemHint': 'システムがダークモードになると墨色の配色に、ライトモードに戻ると紙色の配色に自動で切り替わります。',
   'settings.general.appearance.lightThemeLabel': 'ライトモードで使用',

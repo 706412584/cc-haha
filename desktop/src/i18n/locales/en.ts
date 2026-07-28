@@ -1560,13 +1560,17 @@ Row 9, all 8 cells: continuing from straight down, turning left through lower-le
 
   // Settings > General
   'settings.general.appearanceTitle': 'Appearance',
-  'settings.general.appearanceDescription': 'Switch between the six paper and ink palettes.',
+  'settings.general.appearanceDescription': 'Switch between the current palettes and four restored classic palettes.',
   'settings.general.appearance.paper': 'Paper',
   'settings.general.appearance.warmClassic': 'Warm Classic',
   'settings.general.appearance.celadon': 'Celadon',
   'settings.general.appearance.inkBlue': 'Ink Blue',
   'settings.general.appearance.dark': 'Ink Night',
   'settings.general.appearance.white': 'Pure White',
+  'settings.general.appearance.classicWhite': 'Classic White',
+  'settings.general.appearance.classicLight': 'Classic Light',
+  'settings.general.appearance.eyeCare': 'Eye Care',
+  'settings.general.appearance.classicDark': 'Classic Dark',
   'settings.general.appearance.followSystem': 'Follow the system',
   'settings.general.appearance.followSystemHint': 'Switch to an ink palette when the system turns dark, and back to a paper one when it turns light.',
   'settings.general.appearance.lightThemeLabel': 'Use in light mode',

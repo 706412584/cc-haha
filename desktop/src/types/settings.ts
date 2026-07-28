@@ -5,32 +5,51 @@ export type PermissionMode = 'default' | 'acceptEdits' | 'auto' | 'plan' | 'bypa
 export type EffortLevel = 'low' | 'medium' | 'high' | 'max'
 export type ReasoningEffortLevel = EffortLevel | 'xhigh'
 /**
- * The six 「纸 · 墨 · 印」 palettes, in the order the appearance picker shows
- * them: four paper grounds, then two ink ones. Each name matches a
- * `[data-theme]` block in theme/globals.css.
+ * The current 「纸 · 墨 · 印」 palettes followed by the four restored classic
+ * palettes. Each name matches a `[data-theme]` block in theme/globals.css.
  *
- * `light` was the pre-redesign key for the warm workspace; it migrates to
- * `warm-classic` (see lib/persistenceMigrations.ts).
+ * `light` was the pre-redesign storage key; it still migrates to
+ * `warm-classic`, while the restored palette uses `classic-light` to avoid
+ * changing that migration's meaning.
  */
-export const THEME_MODES = ['white', 'paper', 'warm-classic', 'celadon', 'dark', 'ink-blue'] as const
+export const THEME_MODES = [
+  'white',
+  'paper',
+  'warm-classic',
+  'celadon',
+  'dark',
+  'ink-blue',
+  'classic-white',
+  'classic-light',
+  'eye-care',
+  'classic-dark',
+] as const
 export type ThemeMode = (typeof THEME_MODES)[number]
 
-/** The two themes on a dark ground. Drives `color-scheme` and Mermaid. */
-export const DARK_THEME_MODES = ['dark', 'ink-blue'] as const
+/** The themes on a dark ground. Drives `color-scheme` and Mermaid. */
+export const DARK_THEME_MODES = ['dark', 'ink-blue', 'classic-dark'] as const
 export type DarkThemeMode = (typeof DARK_THEME_MODES)[number]
 
 /**
- * The four paper grounds. Following the system only yields a dark/light
+ * The themes on a light ground. Following the system only yields a dark/light
  * signal, so each half carries its own preference — these are the values the
  * light half can resolve to.
  */
-export const LIGHT_THEME_MODES = ['white', 'paper', 'warm-classic', 'celadon'] as const
+export const LIGHT_THEME_MODES = [
+  'white',
+  'paper',
+  'warm-classic',
+  'celadon',
+  'classic-white',
+  'classic-light',
+  'eye-care',
+] as const
 export type LightThemeMode = (typeof LIGHT_THEME_MODES)[number]
 
 /**
  * Every palette belongs to exactly one half. This fails to compile if a
- * seventh theme is added without deciding which ground it sits on — the
- * appearance switch would otherwise silently never resolve to it.
+ * theme is added without deciding which ground it sits on — the appearance
+ * switch would otherwise silently never resolve to it.
  */
 const _everyThemeHasAGround: ThemeMode extends LightThemeMode | DarkThemeMode ? true : never = true
 void _everyThemeHasAGround
