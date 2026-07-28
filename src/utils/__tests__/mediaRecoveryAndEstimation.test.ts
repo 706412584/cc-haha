@@ -1,13 +1,13 @@
 import { describe, expect, test } from 'bun:test'
-import { BUSINESS_ERROR_CODES } from '../src/constants/businessErrors.js'
-import { getImageUnsupportedErrorMessage } from '../src/services/api/errors.js'
-import { roughTokenCountEstimationForAPIRequest } from '../src/services/tokenEstimation.js'
-import type { UserMessage } from '../src/types/message.js'
+import { BUSINESS_ERROR_CODES } from '../../constants/businessErrors.js'
+import { getImageUnsupportedErrorMessage } from '../../services/api/errors.js'
+import { roughTokenCountEstimationForAPIRequest } from '../../services/tokenEstimation.js'
+import type { UserMessage } from '../../types/message.js'
 import {
   createAssistantAPIErrorMessage,
   createUserMessage,
   normalizeMessagesForAPI,
-} from '../src/utils/messages.js'
+} from '../messages.js'
 
 const imageBlock = (data: string) => ({
   type: 'image' as const,
