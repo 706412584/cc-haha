@@ -365,7 +365,8 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
       activeId,
       activeProviderName,
       providers,
-      storeModel?.id,
+      storeModel,
+      effortLevel,
     )
     : null
 
