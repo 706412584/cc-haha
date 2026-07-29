@@ -314,7 +314,8 @@ export function EmptySession() {
           activeProviderId,
           activeProviderName,
           providers,
-          currentModel?.id,
+          currentModel,
+          useSettingsStore.getState().effortLevel,
         )
       const runtimeSelection = explicitDraftSelection ?? defaultActiveProviderSelection ?? undefined
       const sessionId = await createSession(

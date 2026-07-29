@@ -651,6 +651,7 @@ describe('EmptySession', () => {
     expect(useSessionRuntimeStore.getState().selections['draft-session']).toEqual({
       providerId: 'provider-minimax',
       modelId: 'MiniMax-M3[1m]',
+      effortLevel: 'max',
     })
     expect(mocks.wsSend.mock.calls[0]).toEqual([
       'draft-session',
@@ -659,6 +660,7 @@ describe('EmptySession', () => {
         requestId: expect.any(String),
         providerId: 'provider-minimax',
         modelId: 'MiniMax-M3[1m]',
+        effortLevel: 'max',
       },
     ])
     expect(mocks.wsSend.mock.calls[1]).toEqual(['draft-session', { type: 'prewarm_session' }])
@@ -670,6 +672,53 @@ describe('EmptySession', () => {
         type: 'user_message',
         content: 'draft question',
         attachments: [],
+      },
+    ])
+  })
+
+  it('does not materialize a default effort for models that explicitly disable it', async () => {
+    const model = {
+      id: 'grok-4.5',
+      name: 'Grok 4.5',
+      description: 'Grok frontier text model',
+      context: '500000',
+      supportedReasoningEfforts: [],
+    }
+    useSettingsStore.setState({
+      availableModels: [model],
+      currentModel: model,
+      effortLevel: 'max',
+      activeProviderName: 'Grok Official',
+    })
+    useProviderStore.setState({
+      providers: [],
+      activeId: 'grok-official',
+      providerOrder: ['claude-official', 'openai-official', 'grok-official'],
+      hasLoadedProviders: true,
+    })
+
+    render(<EmptySession />)
+
+    fireEvent.change(screen.getByRole('textbox'), {
+      target: { value: 'draft question', selectionStart: 14 },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /Run/i }))
+
+    await waitFor(() => {
+      expect(mocks.createSession).toHaveBeenCalledWith({ permissionMode: 'default' })
+    })
+
+    expect(useSessionRuntimeStore.getState().selections['draft-session']).toEqual({
+      providerId: 'grok-official',
+      modelId: 'grok-4.5',
+    })
+    expect(mocks.wsSend.mock.calls[0]).toEqual([
+      'draft-session',
+      {
+        type: 'set_runtime_config',
+        requestId: expect.any(String),
+        providerId: 'grok-official',
+        modelId: 'grok-4.5',
       },
     ])
   })
