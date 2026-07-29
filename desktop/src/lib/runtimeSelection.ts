@@ -35,16 +35,21 @@ export function resolveActiveProviderRuntimeSelection(
         : OFFICIAL_DEFAULT_MODEL_ID
   )
   const model = currentModel?.id === modelId ? currentModel : null
-  const supportedEfforts = model?.supportedReasoningEfforts
-  const selectedEffort = supportedEfforts?.length === 0
-    ? undefined
-    : model?.defaultReasoningEffort ?? effortLevel
+  const selectedEffort = resolveModelEffort(model, effortLevel)
 
   return {
     providerId: inferredProviderId,
     modelId,
     ...(selectedEffort ? { effortLevel: selectedEffort } : {}),
   }
+}
+
+function resolveModelEffort(
+  model: ModelInfo | null,
+  effortLevel?: ReasoningEffortLevel,
+): ReasoningEffortLevel | undefined {
+  if (model?.supportedReasoningEfforts?.length === 0) return undefined
+  return model?.defaultReasoningEffort ?? effortLevel
 }
 
 export function resolveDefaultRuntimeSelection(
@@ -54,15 +59,19 @@ export function resolveDefaultRuntimeSelection(
   currentModel: ModelInfo | null,
   effortLevel?: ReasoningEffortLevel,
 ): RuntimeSelection {
-  return resolveActiveProviderRuntimeSelection(
+  const activeSelection = resolveActiveProviderRuntimeSelection(
     activeId,
     activeProviderName,
     providers,
     currentModel,
     effortLevel,
-  ) ?? {
+  )
+  if (activeSelection) return activeSelection
+
+  const selectedEffort = resolveModelEffort(currentModel, effortLevel)
+  return {
     providerId: null,
     modelId: currentModel?.id || OFFICIAL_DEFAULT_MODEL_ID,
-    ...(effortLevel ? { effortLevel } : {}),
+    ...(selectedEffort ? { effortLevel: selectedEffort } : {}),
   }
 }
