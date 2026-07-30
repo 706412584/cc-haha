@@ -166,6 +166,16 @@ describe('Agent completion delivery', () => {
     })
     completeAgentTask({ agentId: task.agentId, content: [], totalToolUseCount: 0, totalDurationMs: 1, totalTokens: 0, usage: {} as never }, setAppState, task.epoch)
     enqueueAgentNotification({ taskId: task.agentId, description: task.description, status: 'completed', setAppState, epoch: task.epoch })
+    setAppState(prev => ({
+      ...prev,
+      tasks: {
+        ...prev.tasks,
+        [task.agentId]: {
+          ...(prev.tasks[task.agentId] as LocalAgentTaskState),
+          evictAfter: 0,
+        },
+      },
+    }))
 
     expect((await generateTaskAttachments(appState)).evictedTaskIds).toEqual([])
 
