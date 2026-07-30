@@ -681,7 +681,7 @@ export function isCurrentAgentCompletionCommand(command: QueuedCommand, state: A
   if (!completion) return true;
   if (completion.sessionId !== sessionId) return false;
   const task = state.tasks[completion.taskId];
-  if (isLocalAgentTask(task)) return task.epoch === completion.epoch;
+  if (isLocalAgentTask(task)) return task.epoch === completion.epoch
   return state.agentCompletionInbox.some(item =>
     item.taskId === completion.taskId &&
     item.epoch === completion.epoch &&
