@@ -3,7 +3,7 @@ import type { AppState } from '../state/AppState.js'
 import { IDLE_SPECULATION_STATE } from '../state/AppStateStore.js'
 import type { Command } from '../types/command.js'
 import { enqueue, enqueuePendingNotification, getCommandQueue, resetCommandQueue } from '../utils/messageQueueManager.js'
-import { completeAgentTask, enqueueAgentNotification, registerAsyncAgent } from '../tasks/LocalAgentTask/LocalAgentTask.js'
+import { completeAgentTask, enqueueAgentNotification, isCurrentAgentCompletionCommand, registerAsyncAgent } from '../tasks/LocalAgentTask/LocalAgentTask.js'
 import { filterCommandsForHeadlessMode, removeStaleHeadlessAgentCompletions, wakeHeadlessAgentContinuation } from './headless.js'
 import { flushAgentCompletionsAndProcessQueueIfReady } from '../utils/queueProcessor.js'
 
@@ -57,6 +57,7 @@ describe('removeStaleHeadlessAgentCompletions', () => {
   test('removes stale Agent completions while preserving non-Agent commands', () => {
     const state = {
       tasks: {},
+      agentCompletionInbox: [],
     } as unknown as AppState
     enqueuePendingNotification({
       mode: 'task-notification',
@@ -68,6 +69,34 @@ describe('removeStaleHeadlessAgentCompletions', () => {
     expect(removeStaleHeadlessAgentCompletions(state)).toHaveLength(1)
     expect(getCommandQueue().map(command => command.value)).toEqual(['keep me'])
     expect(removeStaleHeadlessAgentCompletions(state)).toEqual([])
+  })
+
+  test('treats an inbox-owned completion as current after its terminal task was evicted', () => {
+    const sessionId = 'agent-recovery-session'
+    const completion = {
+      version: 1 as const,
+      sequence: 7,
+      taskId: 'agent-evicted-before-ack',
+      epoch: 1,
+      notification: '<task-notification>completed</task-notification>',
+      delivery: 'queued' as const,
+    }
+    const command = {
+      mode: 'task-notification' as const,
+      value: completion.notification,
+      agentCompletion: {
+        taskId: completion.taskId,
+        epoch: completion.epoch,
+        sessionId,
+        sequence: completion.sequence,
+      },
+    }
+    const state = {
+      tasks: {},
+      agentCompletionInbox: [completion],
+    } as unknown as AppState
+
+    expect(isCurrentAgentCompletionCommand(command, state, sessionId)).toBe(true)
   })
 })
 

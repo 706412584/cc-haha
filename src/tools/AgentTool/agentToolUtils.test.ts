@@ -31,6 +31,11 @@ import { createAssistantMessage, createUserMessage } from '../../utils/messages.
 import { flushAgentCompletionsAndProcessQueueIfReady, processQueueIfReady } from '../../utils/queueProcessor.js'
 import { parseTaskNotificationXml } from '../../utils/taskNotificationPolicy.js'
 import {
+  applyTaskOffsetsAndEvictions,
+  evictTerminalTask,
+  generateTaskAttachments,
+} from '../../utils/task/framework.js'
+import {
   createAgentStallTransitionHandler,
   emitAgentToolActivitiesForMessage,
   extractAgentToolActivities,
@@ -90,6 +95,93 @@ describe('local Agent lifecycle epochs', () => {
 
     completeAgentTask({ agentId: second.agentId, content: [], totalToolUseCount: 0, totalDurationMs: 1, totalTokens: 0, usage: {} as never }, setAppState, second.epoch)
     expect(appState.tasks[second.agentId]?.status).toBe('completed')
+  })
+})
+
+describe('Agent completion delivery', () => {
+  afterEach(() => resetCommandQueue())
+
+  test('retains a terminal task while its completion is still awaiting acknowledgement', () => {
+    let appState = {
+      tasks: {},
+      agentCompletionInbox: [],
+      nextAgentCompletionSequence: 1,
+      speculation: IDLE_SPECULATION_STATE,
+    } as unknown as AppState
+    const setAppState = (updater: (prev: AppState) => AppState): void => {
+      appState = updater(appState)
+    }
+    const task = registerAsyncAgent({
+      agentId: 'agent-awaiting-completion-ack',
+      description: 'Await completion acknowledgement',
+      prompt: 'Finish after a long parent turn',
+      selectedAgent: { agentType: 'general-purpose' } as never,
+      setAppState,
+      toolUseId: 'tool-awaiting-completion-ack',
+    })
+
+    completeAgentTask({ agentId: task.agentId, content: [], totalToolUseCount: 0, totalDurationMs: 1, totalTokens: 0, usage: {} as never }, setAppState, task.epoch)
+    enqueueAgentNotification({ taskId: task.agentId, description: task.description, status: 'completed', setAppState, epoch: task.epoch })
+    setAppState(prev => ({
+      ...prev,
+      tasks: {
+        ...prev.tasks,
+        [task.agentId]: {
+          ...(prev.tasks[task.agentId] as LocalAgentTaskState),
+          evictAfter: 0,
+        },
+      },
+    }))
+
+    evictTerminalTask(task.agentId, setAppState)
+
+    expect(appState.tasks[task.agentId]).toBeDefined()
+    expect(appState.agentCompletionInbox).toHaveLength(1)
+
+    drainAgentCompletionInbox(setAppState)
+    const completionCommands = getCommandQueue().filter(command => command.agentCompletion)
+    ackAgentCompletionCommands(setAppState, completionCommands)
+    evictTerminalTask(task.agentId, setAppState)
+
+    expect(appState.agentCompletionInbox).toHaveLength(0)
+    expect(appState.tasks[task.agentId]).toBeUndefined()
+  })
+
+  test('keeps an inbox-owned terminal task out of deferred attachment eviction', async () => {
+    let appState = {
+      tasks: {},
+      agentCompletionInbox: [],
+      nextAgentCompletionSequence: 1,
+      speculation: IDLE_SPECULATION_STATE,
+    } as unknown as AppState
+    const setAppState = (updater: (prev: AppState) => AppState): void => {
+      appState = updater(appState)
+    }
+    const task = registerAsyncAgent({
+      agentId: 'agent-deferred-eviction',
+      description: 'Defer completion eviction',
+      prompt: 'Finish while attachment polling runs',
+      selectedAgent: { agentType: 'general-purpose' } as never,
+      setAppState,
+    })
+    completeAgentTask({ agentId: task.agentId, content: [], totalToolUseCount: 0, totalDurationMs: 1, totalTokens: 0, usage: {} as never }, setAppState, task.epoch)
+    enqueueAgentNotification({ taskId: task.agentId, description: task.description, status: 'completed', setAppState, epoch: task.epoch })
+    setAppState(prev => ({
+      ...prev,
+      tasks: {
+        ...prev.tasks,
+        [task.agentId]: {
+          ...(prev.tasks[task.agentId] as LocalAgentTaskState),
+          evictAfter: 0,
+        },
+      },
+    }))
+
+    expect((await generateTaskAttachments(appState)).evictedTaskIds).toEqual([])
+
+    applyTaskOffsetsAndEvictions(setAppState, {}, [task.agentId])
+
+    expect(appState.tasks[task.agentId]).toBeDefined()
   })
 })
 

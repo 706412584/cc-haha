@@ -40,6 +40,16 @@ export type TaskAttachment = {
 
 type SetAppState = (updater: (prev: AppState) => AppState) => void
 
+function hasUnacknowledgedAgentCompletion(
+  state: AppState,
+  task: TaskState,
+): boolean {
+  if (!('epoch' in task)) return false
+  return state.agentCompletionInbox.some(
+    completion => completion.taskId === task.id && completion.epoch === task.epoch,
+  )
+}
+
 /**
  * Update a task's state in AppState.
  * Helper function for task implementations.
@@ -156,6 +166,7 @@ export function evictTerminalTask(
     if (!task) return prev
     if (!isTerminalTaskStatus(task.status)) return prev
     if (!task.notified) return prev
+    if (hasUnacknowledgedAgentCompletion(prev, task)) return prev
     // Panel grace period — blocks eviction until deadline passes.
     // 'retain' in task narrows to LocalAgentTaskState (the only type with
     // that field); evictAfter is optional so 'evictAfter' in task would
@@ -194,7 +205,7 @@ export async function generateTaskAttachments(state: AppState): Promise<{
   const tasks = state.tasks ?? {}
 
   for (const taskState of Object.values(tasks)) {
-    if (taskState.notified) {
+    if (taskState.notified && !hasUnacknowledgedAgentCompletion(state, taskState)) {
       switch (taskState.status) {
         case 'completed':
         case 'failed':
@@ -263,6 +274,7 @@ export function applyTaskOffsetsAndEvictions(
       if (!fresh || !isTerminalTaskStatus(fresh.status) || !fresh.notified) {
         continue
       }
+      if (hasUnacknowledgedAgentCompletion(prev, fresh)) continue
       if ('retain' in fresh && (fresh.evictAfter ?? Infinity) > Date.now()) {
         continue
       }
