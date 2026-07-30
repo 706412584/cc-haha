@@ -30,6 +30,7 @@ import {
 import { createAssistantMessage, createUserMessage } from '../../utils/messages.js'
 import { flushAgentCompletionsAndProcessQueueIfReady, processQueueIfReady } from '../../utils/queueProcessor.js'
 import { parseTaskNotificationXml } from '../../utils/taskNotificationPolicy.js'
+import { evictTerminalTask } from '../../utils/task/framework.js'
 import {
   createAgentStallTransitionHandler,
   emitAgentToolActivitiesForMessage,
@@ -90,6 +91,55 @@ describe('local Agent lifecycle epochs', () => {
 
     completeAgentTask({ agentId: second.agentId, content: [], totalToolUseCount: 0, totalDurationMs: 1, totalTokens: 0, usage: {} as never }, setAppState, second.epoch)
     expect(appState.tasks[second.agentId]?.status).toBe('completed')
+  })
+})
+
+describe('Agent completion delivery', () => {
+  test('retains a terminal task while its completion is still awaiting acknowledgement', () => {
+    let appState = {
+      tasks: {},
+      agentCompletionInbox: [],
+      nextAgentCompletionSequence: 1,
+      speculation: IDLE_SPECULATION_STATE,
+    } as unknown as AppState
+    const setAppState = (updater: (prev: AppState) => AppState): void => {
+      appState = updater(appState)
+    }
+    const task = registerAsyncAgent({
+      agentId: 'agent-awaiting-completion-ack',
+      description: 'Await completion acknowledgement',
+      prompt: 'Finish after a long parent turn',
+      selectedAgent: { agentType: 'general-purpose' } as never,
+      setAppState,
+      toolUseId: 'tool-awaiting-completion-ack',
+    })
+
+    completeAgentTask({ agentId: task.agentId, content: [], totalToolUseCount: 0, totalDurationMs: 1, totalTokens: 0, usage: {} as never }, setAppState, task.epoch)
+    enqueueAgentNotification({ taskId: task.agentId, description: task.description, status: 'completed', setAppState, epoch: task.epoch })
+    setAppState(prev => ({
+      ...prev,
+      tasks: {
+        ...prev.tasks,
+        [task.agentId]: {
+          ...(prev.tasks[task.agentId] as LocalAgentTaskState),
+          evictAfter: 0,
+        },
+      },
+    }))
+
+    evictTerminalTask(task.agentId, setAppState)
+
+    expect(appState.tasks[task.agentId]).toBeDefined()
+    expect(appState.agentCompletionInbox).toHaveLength(1)
+
+    drainAgentCompletionInbox(setAppState)
+    const completionCommands = getCommandQueue().filter(command => command.agentCompletion)
+    ackAgentCompletionCommands(setAppState, completionCommands)
+    evictTerminalTask(task.agentId, setAppState)
+
+    expect(appState.agentCompletionInbox).toHaveLength(0)
+    expect(appState.tasks[task.agentId]).toBeUndefined()
+    resetCommandQueue()
   })
 })
 
