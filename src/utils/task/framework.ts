@@ -274,9 +274,7 @@ export function applyTaskOffsetsAndEvictions(
       if (!fresh || !isTerminalTaskStatus(fresh.status) || !fresh.notified) {
         continue
       }
-      if (hasUnacknowledgedAgentCompletion(prev, fresh)) {
-        continue
-      }
+      if (hasUnacknowledgedAgentCompletion(prev, fresh)) continue
       if ('retain' in fresh && (fresh.evictAfter ?? Infinity) > Date.now()) {
         continue
       }
