@@ -58,6 +58,7 @@ import {
 } from '../welcome/WelcomeTaskCards'
 import type { PermissionMode } from '../../types/settings'
 import { getSessionWorkspaceState } from '../../lib/sessionWorkspace'
+import { attachmentImageSource } from '../../lib/attachmentImages'
 
 type GitInfo = SessionGitInfo
 
@@ -374,6 +375,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
         name: attachment.name,
         type: attachment.type,
         mimeType: attachment.mimeType,
+        path: attachment.path,
         previewUrl: attachment.type === 'image' ? attachment.data : undefined,
         data: attachment.data,
       }))
@@ -1784,7 +1786,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
         <ImageAnnotationModal
           open={!!annotationTarget}
-          image={annotationTarget ? { src: annotationTarget.previewUrl || annotationTarget.data || '', name: annotationTarget.name } : null}
+          image={annotationTarget ? { src: attachmentImageSource(annotationTarget) ?? '', name: annotationTarget.name } : null}
           onClose={() => setAnnotationTarget(null)}
           onSave={saveAnnotatedImage}
         />

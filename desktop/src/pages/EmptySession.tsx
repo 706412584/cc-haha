@@ -54,6 +54,7 @@ import {
   resolveSlashUiAction,
 } from '../components/chat/composerUtils'
 import type { AttachmentRef, DisplayAttachmentRef } from '../types/chat'
+import { attachmentImageSource } from '../lib/attachmentImages'
 import type { PermissionMode } from '../types/settings'
 import type { SlashCommandOption } from '../components/chat/composerUtils'
 import { WelcomeTaskCards, type WelcomeTaskCard } from '../components/welcome/WelcomeTaskCards'
@@ -988,7 +989,7 @@ export function EmptySession() {
       <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} />
       <ImageAnnotationModal
         open={!!annotationTarget}
-        image={annotationTarget ? { src: annotationTarget.previewUrl || annotationTarget.data || '', name: annotationTarget.name } : null}
+        image={annotationTarget ? { src: attachmentImageSource(annotationTarget) ?? '', name: annotationTarget.name } : null}
         onClose={() => setAnnotationTarget(null)}
         onSave={saveAnnotatedImage}
       />

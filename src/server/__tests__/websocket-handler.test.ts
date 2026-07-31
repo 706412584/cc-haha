@@ -1449,6 +1449,63 @@ describe('WebSocket handler session isolation', () => {
     )
   })
 
+  it('restores the persisted pre-plan mode when Desktop approves a resumed plan', async () => {
+    const sessionId = `resumed-plan-approval-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    const respond = spyOn(conversationService, 'respondToPermission').mockReturnValue(true)
+    spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([{
+      requestId: 'exit-plan-1',
+      toolName: 'ExitPlanMode',
+      input: {},
+    }])
+    spyOn(sessionService, 'getSessionLaunchInfo').mockResolvedValue({
+      filePath: 'session.jsonl',
+      projectDir: 'project',
+      workDir: process.cwd(),
+      transcriptMessageCount: 1,
+      customTitle: null,
+      permissionMode: 'plan',
+      prePlanPermissionMode: 'bypassPermissions',
+    })
+
+    handleWebSocket.open(ws)
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'permission_response',
+      requestId: 'exit-plan-1',
+      allowed: true,
+      permissionUpdates: [{
+        type: 'addRules',
+        rules: [{ toolName: 'Bash', ruleContent: 'prompt: run tests' }],
+        behavior: 'allow',
+        destination: 'session',
+      }],
+    }))
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(respond).toHaveBeenCalledWith(
+      sessionId,
+      'exit-plan-1',
+      true,
+      undefined,
+      undefined,
+      undefined,
+      [
+        {
+          type: 'setMode',
+          mode: 'bypassPermissions',
+          destination: 'session',
+        },
+        {
+          type: 'addRules',
+          rules: [{ toolName: 'Bash', ruleContent: 'prompt: run tests' }],
+          behavior: 'allow',
+          destination: 'session',
+        },
+      ],
+    )
+  })
+
   it('broadcasts tool and Computer Use permission resolutions to every client', () => {
     const sessionId = `permission-resolution-${crypto.randomUUID()}`
     const first = makeClientSocket(sessionId)

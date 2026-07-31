@@ -2426,6 +2426,38 @@ describe('SessionService', () => {
     expect(launchInfo?.permissionMode).toBe('plan')
   })
 
+  it('should persist and clear the permission mode that preceded plan mode', async () => {
+    const workDir = path.join(tmpDir, 'pre-plan-permission-workdir')
+    await fs.mkdir(workDir, { recursive: true })
+    const { sessionId } = await service.createSession(
+      workDir,
+      undefined,
+      'bypassPermissions',
+    )
+
+    await service.appendSessionMetadata(sessionId, {
+      workDir,
+      permissionMode: 'plan',
+      prePlanPermissionMode: 'bypassPermissions',
+    })
+
+    expect(await service.getSessionLaunchInfo(sessionId)).toMatchObject({
+      permissionMode: 'plan',
+      prePlanPermissionMode: 'bypassPermissions',
+    })
+
+    await service.appendSessionMetadata(sessionId, {
+      workDir,
+      permissionMode: 'bypassPermissions',
+      prePlanPermissionMode: null,
+    })
+
+    expect(await service.getSessionLaunchInfo(sessionId)).toMatchObject({
+      permissionMode: 'bypassPermissions',
+    })
+    expect((await service.getSessionLaunchInfo(sessionId))?.prePlanPermissionMode).toBeUndefined()
+  })
+
   it('should round-trip auto through creation, list, metadata update, restore, and clear', async () => {
     const workDir = path.join(tmpDir, 'auto-permission-workdir')
     await fs.mkdir(workDir, { recursive: true })

@@ -623,7 +623,7 @@ export const handleWebSocket = {
         }
 
         case 'permission_response':
-          handlePermissionResponse(ws, message)
+          void handlePermissionResponse(ws, message)
           break
 
         case 'computer_use_permission_response':
@@ -1162,11 +1162,28 @@ async function handlePrewarmSession(ws: ServerWebSocket<WebSocketData>) {
     })
 }
 
-function handlePermissionResponse(
+async function handlePermissionResponse(
   ws: ServerWebSocket<WebSocketData>,
   message: Extract<ClientMessage, { type: 'permission_response' }>
 ) {
   const { sessionId } = ws.data
+  const pendingRequest = conversationService
+    .getPendingPermissionRequests(sessionId)
+    .find((request) => request.requestId === message.requestId)
+  let permissionUpdates = message.permissionUpdates
+  if (message.allowed && pendingRequest?.toolName === 'ExitPlanMode') {
+    const launchInfo = await sessionService.getSessionLaunchInfo(sessionId).catch(() => null)
+    const restoreMode = launchInfo?.permissionMode === 'plan'
+      ? launchInfo.prePlanPermissionMode
+      : undefined
+    if (restoreMode && isPermissionMode(restoreMode) && restoreMode !== 'plan') {
+      permissionUpdates = [
+        { type: 'setMode', mode: restoreMode, destination: 'session' },
+        ...(permissionUpdates ?? []),
+      ]
+    }
+  }
+
   const resolved = conversationService.respondToPermission(
     sessionId,
     message.requestId,
@@ -1174,7 +1191,7 @@ function handlePermissionResponse(
     message.rule,
     message.updatedInput,
     message.denyMessage,
-    message.permissionUpdates,
+    permissionUpdates,
   )
   if (resolved) {
     sendToSession(sessionId, {
@@ -1284,7 +1301,7 @@ async function applyPermissionModeToActiveSession(
       console.warn(`[WS] Ignored permission mode update for inactive session ${sessionId}`)
       return
     }
-    await commitConfirmedPermissionMode(sessionId, mode)
+    await commitConfirmedPermissionMode(sessionId, mode, undefined, currentMode)
   } catch (err) {
     if (shouldFallbackToPermissionRestart(mode, err)) {
       await restartSessionWithPermissionMode(ws, sessionId, mode)
@@ -1603,6 +1620,7 @@ async function restartSessionWithPermissionMode(
 ): Promise<void> {
   try {
     const workDir = conversationService.getSessionWorkDir(sessionId)
+    const previousMode = conversationService.getSessionPermissionMode(sessionId)
     conversationService.stopSession(sessionId)
 
     // Launch with the requested mode in-memory. Persist it only after startup
@@ -1614,7 +1632,12 @@ async function restartSessionWithPermissionMode(
     const sdkUrl = buildSdkWebSocketUrl(ws, sessionId)
     await conversationService.startSession(sessionId, workDir, sdkUrl, runtimeSettings)
 
-    await commitConfirmedPermissionMode(sessionId, mode, workDir)
+    await commitConfirmedPermissionMode(
+      sessionId,
+      mode,
+      workDir,
+      previousMode,
+    )
     sendToSession(sessionId, { type: 'status', state: 'idle' })
     console.log(`[WS] Restarted CLI for ${sessionId} with permission mode: ${mode}`)
   } catch (err) {
@@ -1643,8 +1666,14 @@ async function commitConfirmedPermissionMode(
   sessionId: string,
   mode: PermissionMode,
   knownWorkDir?: string | null,
+  previousMode?: string,
 ): Promise<void> {
-  const persisted = await persistSessionPermissionMode(sessionId, mode, knownWorkDir)
+  const persisted = await persistSessionPermissionMode(
+    sessionId,
+    mode,
+    knownWorkDir,
+    previousMode,
+  )
   if (!persisted) {
     throw new Error(`Unable to persist confirmed permission mode: ${mode}`)
   }
@@ -1656,6 +1685,7 @@ async function persistSessionPermissionMode(
   sessionId: string,
   mode: string,
   knownWorkDir?: string | null,
+  previousMode?: string,
 ): Promise<boolean> {
   const workDir =
     knownWorkDir ||
@@ -1664,9 +1694,19 @@ async function persistSessionPermissionMode(
 
   if (!workDir) return false
 
+  const launchInfo = await sessionService.getSessionLaunchInfo(sessionId).catch(() => null)
+  const priorMode = previousMode ?? launchInfo?.permissionMode
+  const prePlanPermissionMode = mode === 'plan'
+    ? priorMode && priorMode !== 'plan'
+      ? priorMode
+      : launchInfo?.prePlanPermissionMode
+    : launchInfo?.prePlanPermissionMode
+      ? null
+      : undefined
   await sessionService.appendSessionMetadata(sessionId, {
     workDir,
     permissionMode: mode,
+    ...(prePlanPermissionMode !== undefined ? { prePlanPermissionMode } : {}),
   })
   return true
 }
@@ -3793,7 +3833,7 @@ function handleCliPermissionModeBroadcast(sessionId: string, cliMsg: any): void 
   if (currentMode === mode) return
 
   if (!conversationService.recordSessionPermissionMode(sessionId, mode)) return
-  void persistSessionPermissionMode(sessionId, mode).catch((err) => {
+  void persistSessionPermissionMode(sessionId, mode, undefined, currentMode).catch((err) => {
     console.warn(`[WS] Failed to persist CLI permission mode broadcast for ${sessionId}:`, err)
   })
 }
