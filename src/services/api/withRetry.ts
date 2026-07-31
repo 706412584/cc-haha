@@ -6,7 +6,10 @@ import {
   APIUserAbortError,
 } from '@anthropic-ai/sdk'
 import type { QuerySource } from 'src/constants/querySource.js'
-import type { SystemAPIErrorMessage } from 'src/types/message.js'
+import type {
+  AssistantMessage,
+  SystemAPIErrorMessage,
+} from 'src/types/message.js'
 import { isAwsCredentialsProviderError } from 'src/utils/aws.js'
 import { logForDebugging } from 'src/utils/debug.js'
 import { logError } from 'src/utils/log.js'
@@ -213,12 +216,24 @@ export class FallbackTriggeredError extends Error {
  * path can surface a faithful API-error message.
  */
 export class RetriableStreamError extends Error {
+  public readonly bufferedMessages: readonly AssistantMessage[]
+  public readonly requestId?: string
+
   constructor(
     public readonly originalError: unknown,
-    public readonly requestId?: string,
+    bufferedMessagesOrRequestId: readonly AssistantMessage[] | string = [],
+    requestId?: string,
   ) {
     super(errorMessage(originalError))
     this.name = 'RetriableStreamError'
+    const bufferedMessages = Array.isArray(bufferedMessagesOrRequestId)
+      ? bufferedMessagesOrRequestId
+      : []
+    this.requestId = typeof bufferedMessagesOrRequestId === 'string'
+      ? bufferedMessagesOrRequestId
+      : requestId
+    this.bufferedMessages = bufferedMessages
+    Object.defineProperty(this, 'bufferedMessages', { enumerable: false })
     if (originalError instanceof Error && originalError.stack) {
       this.stack = originalError.stack
     }
@@ -364,8 +379,10 @@ export async function* withRetry<T>(
    * to the chat as a SystemAPIErrorMessage. Updates the
    * consecutive-same-error counter as a side effect. Always reports the
    * first occurrence of a *new* error key (it carries new info), and
-   * always reports rate-limit 429s (the wait-time info is what the user
-   * is waiting to see). Otherwise gates on the threshold.
+   * always reports capacity / rate-limit retries (429/503/529) because
+   * their delay + attempt progress is what the user is watching —
+   * Desktop StreamingIndicator only advances when each attempt yields.
+   * Otherwise gates on the threshold (keeps flaky 5xx bubbles quiet).
    */
   const shouldReportRetry = (error: unknown): boolean => {
     const key = errorIdentityKey(error)
@@ -378,9 +395,16 @@ export async function* withRetry<T>(
       // information for the user).
       return true
     }
-    // 429 rate-limit retries always report: the delay/wait info in the
-    // SystemAPIErrorMessage is the whole point of surfacing them.
-    if (error instanceof APIError && error.status === 429) return true
+    // Capacity / rate-limit retries always report: delay and attempt
+    // progress are the whole point of surfacing them. Suppressing
+    // identical 503s left the UI stuck on attempt 1 with an expired
+    // countdown while later sleeps continued silently.
+    if (
+      error instanceof APIError &&
+      (error.status === 429 || error.status === 503 || is529Error(error))
+    ) {
+      return true
+    }
     return consecutiveSameErrorCount >= reportThreshold
   }
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
@@ -595,16 +619,13 @@ export async function* withRetry<T>(
             )
             throw error
           }
-          // Ensure we have enough tokens for thinking + at least 1 output token
-          const minRequired =
-            (retryContext.thinkingConfig.type === 'enabled'
-              ? retryContext.thinkingConfig.budgetTokens
-              : 0) + 1
-          const adjustedMaxTokens = Math.max(
-            FLOOR_OUTPUT_TOKENS,
-            availableContext,
-            minRequired,
-          )
+          const adjustedMaxTokens = availableContext
+          if (
+            retryContext.maxTokensOverride !== undefined &&
+            adjustedMaxTokens >= retryContext.maxTokensOverride
+          ) {
+            throw new CannotRetryError(error, retryContext)
+          }
           retryContext.maxTokensOverride = adjustedMaxTokens
 
           logEvent('tengu_max_tokens_context_overflow_adjustment', {

@@ -17,7 +17,7 @@ import {
   type RepositoryContextResult,
 } from '../../api/sessions'
 import { useTranslation } from '../../i18n'
-import { DirectoryPicker } from '@/components/composite/DirectoryPicker'
+import { RecentProjectsPanel } from '@/components/composite/DirectoryPicker'
 import { useDismissable } from '@/hooks/useDismissable'
 import { useMobileViewport } from '../../hooks/useMobileViewport'
 import { isDesktopRuntime } from '../../lib/desktopRuntime'
@@ -41,12 +41,46 @@ type Props = {
 }
 
 const MENU_WIDTH = 400
-const ROOT_VIEW_HEIGHT = 340
-const BRANCH_VIEW_HEIGHT = 400
 const VIEWPORT_GUTTER = 12
 
-/** The nested directory picker portals its own menu outside this component. */
-const NESTED_PICKER_SELECTOR = '[data-testid="directory-picker-menu"]'
+/**
+ * `root` lists directory, branch and the worktree modes; `directory` and
+ * `branch` are its two drill-downs. The menu opens on `root` only when there
+ * is a repo to describe — see `viewOnOpen`.
+ */
+type MenuView = 'directory' | 'root' | 'branch'
+
+/** Approximate heights, used only to decide whether the menu flips upward. */
+const VIEW_HEIGHTS: Record<MenuView, number> = {
+  directory: 380,
+  root: 340,
+  branch: 400,
+}
+
+const GIT_MARK_PATH = 'M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z'
+
+/**
+ * Git mark for a repo, plain folder otherwise. The folder glyph reads smaller
+ * than the mark at the same nominal size, hence the separate `folderSize`.
+ */
+function RepoIcon({ isGit, size, folderSize = size }: { isGit: boolean; size: number; folderSize?: number }) {
+  if (isGit) {
+    return (
+      <svg width={size} height={size} viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" className="shrink-0 text-[var(--color-text-tertiary)]">
+        <path d={GIT_MARK_PATH} />
+      </svg>
+    )
+  }
+  return (
+    <span
+      aria-hidden="true"
+      className="material-symbols-outlined shrink-0 text-[var(--color-text-tertiary)]"
+      style={{ fontSize: folderSize }}
+    >
+      folder
+    </span>
+  )
+}
 
 /**
  * Decorative dot for the worktree cards. The cards carry `aria-checked`
@@ -95,7 +129,13 @@ export function RepositoryLaunchControls({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [menuOpen, setMenuOpen] = useState(false)
-  const [view, setView] = useState<'root' | 'branch'>('root')
+  const [view, setView] = useState<MenuView>('root')
+  /**
+   * Path just chosen from the directory view, held until its repository
+   * context lands. A repo reveals its branch and worktree rows in the root
+   * view; anything else has no next step, so the menu closes.
+   */
+  const [revealAfterPick, setRevealAfterPick] = useState<string | null>(null)
   const [branchFilter, setBranchFilter] = useState('')
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [menuPos, setMenuPos] = useState<{ top: number; left: number; direction: 'up' | 'down' } | null>(null)
@@ -113,10 +153,10 @@ export function RepositoryLaunchControls({
   const worktreeCurrentLabelId = useId()
   const worktreeIsolatedLabelId = useId()
 
-  const updateMenuPos = useCallback((forView: 'root' | 'branch') => {
+  const updateMenuPos = useCallback((forView: MenuView) => {
     if (!pillRef.current) return
     const rect = pillRef.current.getBoundingClientRect()
-    const height = forView === 'branch' ? BRANCH_VIEW_HEIGHT : ROOT_VIEW_HEIGHT
+    const height = VIEW_HEIGHTS[forView]
     const spaceAbove = rect.top
     const spaceBelow = window.innerHeight - rect.bottom
     const direction = spaceBelow >= height || spaceBelow >= spaceAbove ? 'down' : 'up'
@@ -181,23 +221,15 @@ export function RepositoryLaunchControls({
     setMenuOpen(false)
     setView('root')
     setBranchFilter('')
+    setRevealAfterPick(null)
   }, [])
 
-  // The directory picker nested in the root view portals its dropdown to
-  // `document.body`, so a click inside it reads as "outside" this menu and
-  // would tear down the very trigger that opened it.
-  const isNestedPickerTarget = useCallback((target: EventTarget | null) => {
-    const node = target as Node | null
-    if (!node) return false
-    const element = node instanceof Element ? node : node.parentElement
-    return !!element?.closest(NESTED_PICKER_SELECTOR)
-  }, [])
-
+  // The directory list is one of this menu's own views now, so there is no
+  // second portalled dropdown to exempt from outside-click handling.
   useDismissable({
     open: menuOpen,
     refs: [rootRef, menuRef],
     onDismiss: closeMenu,
-    isExempt: isNestedPickerTarget,
   })
 
   useEffect(() => {
@@ -242,13 +274,19 @@ export function RepositoryLaunchControls({
     ))
   }, [branchFilter, context])
 
-  const warningMessage = useMemo(() => {
+  const warning = useMemo(() => {
     if (context?.state !== 'ok' || !selectedBranch || useWorktree) return null
     if (selectedBranch.name !== context.currentBranch && context.dirty) {
-      return t('repoLaunch.dirtyWarning')
+      return {
+        message: t('repoLaunch.dirtyWarning'),
+        compactLabel: t('repoLaunch.dirtyWarningCompact'),
+      }
     }
     if (selectedBranch.name !== context.currentBranch && selectedBranch.checkedOut) {
-      return t('repoLaunch.checkedOutWarning')
+      return {
+        message: t('repoLaunch.checkedOutWarning'),
+        compactLabel: t('repoLaunch.checkedOutWarningCompact'),
+      }
     }
     return null
   }, [context, selectedBranch, t, useWorktree])
@@ -266,7 +304,18 @@ export function RepositoryLaunchControls({
 
   const handleWorkDirChange = (path: string) => {
     onWorkDirChange(path)
-    closeMenu()
+    if (path === workDir) {
+      // Re-picking the current directory fires no context request, so there is
+      // nothing to wait for.
+      if (isGitReady) setView('root')
+      else closeMenu()
+      return
+    }
+    // Hold the menu open on the root view. If the new directory turns out to
+    // be a repo, its branch and worktree rows appear right where the eye
+    // already is; if it does not, `revealAfterPick` closes the menu instead.
+    setRevealAfterPick(path)
+    setView('root')
   }
 
   const handleBranchKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
@@ -307,6 +356,19 @@ export function RepositoryLaunchControls({
   useEffect(() => {
     onLaunchReadyChange?.(isLaunchReady)
   }, [isLaunchReady, onLaunchReadyChange])
+
+  // Resolve a pending directory pick once its own context lands. The identity
+  // check matters: on the render right after the pick, `context` still
+  // describes the *previous* directory and `loading` has not flipped yet, so
+  // reading either one unguarded decides on the wrong repo.
+  useEffect(() => {
+    if (!revealAfterPick || loading) return
+    const settled = context?.workDir === revealAfterPick
+      || (!!error && workDir === revealAfterPick)
+    if (!settled) return
+    setRevealAfterPick(null)
+    if (context?.state !== 'ok') closeMenu()
+  }, [revealAfterPick, loading, context, error, workDir, closeMenu])
 
   const repoLabel = context?.repoName || basename(context?.repoRoot) || basename(workDir)
   const selectedBranchName = isGitReady ? (selectedBranch?.name ?? null) : null
@@ -351,6 +413,12 @@ export function RepositoryLaunchControls({
     'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)]',
     isMobileBrowser ? 'min-h-[56px] py-3' : 'py-2.5',
   ].join(' ')
+
+  // Both drill-downs head back the same way. The dropdown labels the crumb
+  // after the view you are in; the sheet, which has its own title bar, labels
+  // it after the view you are going to.
+  const dropdownBackClassName = 'inline-flex items-center gap-1 rounded-[var(--radius-sm)] px-1 py-0.5 text-[10px] font-bold uppercase tracking-widest text-[var(--color-outline)] transition-colors hover:text-[var(--color-text-secondary)]'
+  const sheetBackClassName = 'inline-flex items-center gap-1 self-start rounded-[var(--radius-md)] px-2 py-1 text-[12px] font-semibold text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)]'
 
   // The two modes are a single choice, so they read as radio cards rather than
   // a menu list: 1.5px edge that turns terracotta on the selected one.
@@ -432,14 +500,40 @@ export function RepositoryLaunchControls({
     </div>
   )
 
+  // Stands in for the branch row and the two worktree cards while the picked
+  // directory is being inspected, so the menu does not jump a couple hundred
+  // pixels taller the moment the context lands.
+  const revealSkeleton = (
+    <div aria-hidden="true" className="flex animate-pulse flex-col gap-1">
+      <div className="h-[52px] rounded-[var(--radius-lg)] bg-[var(--color-surface-container-low)]" />
+      <div className="mx-1.5 my-1 h-px bg-[var(--color-border-separator)]" />
+      <div className="h-[74px] rounded-[var(--radius-lg)] bg-[var(--color-surface-container-low)]" />
+      <div className="h-[74px] rounded-[var(--radius-lg)] bg-[var(--color-surface-container-low)]" />
+    </div>
+  )
+
   const rootView = (
     <div role="menu" aria-label={t('repoLaunch.launchLocation')} className="flex flex-col gap-1 p-1.5">
-      <DirectoryPicker
-        value={workDir}
-        onChange={handleWorkDirChange}
-        variant="menuitem"
-        isGitProject={isGitReady}
-      />
+      <button
+        type="button"
+        role="menuitem"
+        onClick={() => setView('directory')}
+        title={workDir || undefined}
+        className={rowClassName}
+      >
+        <RepoIcon isGit={isGitReady} size={18} />
+        <span className="min-w-0 flex-1">
+          <span className="block text-[13px] font-semibold text-[var(--color-text-primary)]">
+            {t('dirPicker.directory')}
+          </span>
+          <span className="block truncate text-[11px] text-[var(--color-text-tertiary)]">
+            {workDir ? repoLabel : t('dirPicker.selectProject')}
+          </span>
+        </span>
+        <ChevronRight size={16} className="shrink-0 text-[var(--color-text-tertiary)]" />
+      </button>
+
+      {revealAfterPick && revealSkeleton}
 
       {isGitReady && (
         <button
@@ -506,6 +600,22 @@ export function RepositoryLaunchControls({
     </div>
   )
 
+  const directoryList = (
+    <RecentProjectsPanel
+      value={workDir}
+      onSelect={handleWorkDirChange}
+      touch={isMobileBrowser}
+      showRecentHeading={!isMobileBrowser}
+    />
+  )
+
+  /**
+   * Only offered once there is a repo behind the pill. Without one the root
+   * view is a single directory row, so going "back" to it would land on the
+   * empty shell this view exists to skip.
+   */
+  const directoryBackLabel = isGitReady ? t('dirPicker.directory') : null
+
   const pill = (
     <button
       ref={pillRef}
@@ -517,19 +627,18 @@ export function RepositoryLaunchControls({
       aria-label={`${t('repoLaunch.launchLocation')}: ${summary || t('dirPicker.selectProject')}`}
       title={pillTitle}
       onClick={() => {
-        setMenuOpen((prev) => !prev)
-        setView('root')
+        const opening = !menuOpen
+        setMenuOpen(opening)
         setBranchFilter('')
+        setRevealAfterPick(null)
+        // Open on the view that has something in it. With no repo context
+        // there is no branch row and no worktree cards, so the root view would
+        // be a lone "Directory" line — one click spent on nothing.
+        if (opening) setView(isGitReady ? 'root' : 'directory')
       }}
       className={pillClassName}
     >
-      {isGitReady ? (
-        <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" className="shrink-0 text-[var(--color-text-tertiary)]">
-          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
-        </svg>
-      ) : (
-        <span aria-hidden="true" className="material-symbols-outlined shrink-0 text-[17px] text-[var(--color-text-tertiary)]">folder</span>
-      )}
+      <RepoIcon isGit={isGitReady} size={15} folderSize={17} />
 
       <span className="min-w-[1.75rem] shrink truncate">
         {repoLabel || t('dirPicker.selectProject')}
@@ -581,7 +690,22 @@ export function RepositoryLaunchControls({
       // width, never the width of "+" or the permission selector beside it.
       className={`flex min-w-0 flex-col ${isToolbar ? 'shrink gap-0' : 'gap-1.5'}`}
     >
-      {pill}
+      {isToolbar ? (
+        <div className="flex min-w-0 flex-row items-center gap-2">
+          {pill}
+          {warning && (
+            <div
+              role="status"
+              aria-label={warning.message}
+              title={warning.message}
+              className="inline-flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-[var(--radius-md)] bg-[var(--color-warning-container)] px-2 text-[11px] font-medium text-[var(--color-on-warning-container)]"
+            >
+              <AlertCircle size={13} aria-hidden="true" className="shrink-0 text-[var(--color-warning)]" />
+              <span className="hidden 2xl:inline">{warning.compactLabel}</span>
+            </div>
+          )}
+        </div>
+      ) : pill}
 
       {message && workDir && (
         <div className="flex items-center gap-2 px-1 text-[11px] text-[var(--color-text-tertiary)]">
@@ -590,10 +714,14 @@ export function RepositoryLaunchControls({
         </div>
       )}
 
-      {warningMessage && (
-        <div className="flex items-center gap-2 px-1 text-[11px] text-[var(--color-warning)]">
-          <AlertCircle size={13} className="shrink-0" />
-          <span>{warningMessage}</span>
+      {warning && !isToolbar && (
+        <div
+          role="status"
+          aria-label={warning.message}
+          className="flex items-center gap-2 px-1 text-[11px] text-[var(--color-warning)]"
+        >
+          <AlertCircle size={13} aria-hidden="true" className="shrink-0" />
+          <span>{warning.message}</span>
         </div>
       )}
 
@@ -602,7 +730,13 @@ export function RepositoryLaunchControls({
           <MobileBottomSheet
             open={menuOpen}
             onClose={closeMenu}
-            title={view === 'branch' ? t('repoLaunch.selectBranch') : t('repoLaunch.launchLocation')}
+            title={
+              view === 'branch'
+                ? t('repoLaunch.selectBranch')
+                : view === 'directory'
+                  ? t('dirPicker.directory')
+                  : t('repoLaunch.launchLocation')
+            }
             closeLabel={t('tabs.close')}
             panelRef={menuRef}
             id={menuId}
@@ -611,16 +745,25 @@ export function RepositoryLaunchControls({
                 <button
                   type="button"
                   onClick={() => setView('root')}
-                  className="inline-flex items-center gap-1 self-start rounded-[var(--radius-md)] px-2 py-1 text-[12px] font-semibold text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)]"
+                  className={sheetBackClassName}
                 >
                   <ChevronLeft size={14} />
                   {t('repoLaunch.launchLocation')}
                 </button>
                 {branchSearch}
               </div>
+            ) : view === 'directory' && directoryBackLabel ? (
+              <button
+                type="button"
+                onClick={() => setView('root')}
+                className={sheetBackClassName}
+              >
+                <ChevronLeft size={14} />
+                {t('repoLaunch.launchLocation')}
+              </button>
             ) : undefined}
           >
-            {view === 'branch' ? branchList : rootView}
+            {view === 'branch' ? branchList : view === 'directory' ? directoryList : rootView}
           </MobileBottomSheet>
         ) : menuPos && createPortal(
           <div ref={menuRef} id={menuId} className={menuClassName} style={menuStyle}>
@@ -630,7 +773,7 @@ export function RepositoryLaunchControls({
                   <button
                     type="button"
                     onClick={() => setView('root')}
-                    className="mb-2 inline-flex items-center gap-1 rounded-[var(--radius-sm)] px-1 py-0.5 text-[10px] font-bold uppercase tracking-widest text-[var(--color-outline)] transition-colors hover:text-[var(--color-text-secondary)]"
+                    className={`mb-2 ${dropdownBackClassName}`}
                   >
                     <ChevronLeft size={13} />
                     {t('repoLaunch.selectBranch')}
@@ -638,6 +781,22 @@ export function RepositoryLaunchControls({
                   {branchSearch}
                 </div>
                 {branchList}
+              </>
+            ) : view === 'directory' ? (
+              <>
+                {directoryBackLabel && (
+                  <div className="border-b border-[var(--color-border)] px-3 py-2.5">
+                    <button
+                      type="button"
+                      onClick={() => setView('root')}
+                      className={dropdownBackClassName}
+                    >
+                      <ChevronLeft size={13} />
+                      {directoryBackLabel}
+                    </button>
+                  </div>
+                )}
+                {directoryList}
               </>
             ) : (
               <>

@@ -4,6 +4,16 @@ import DOMPurify from 'dompurify'
 import katex from 'katex'
 import 'katex/dist/katex.min.css'
 import { marked, type Tokens } from 'marked'
+// The `md-code-link` variant below is spelled out literally so Tailwind can see
+// it; MarkdownRenderer.test.tsx asserts it against CODE_LINK_CLASS.
+import {
+  cjkAwareAutolink,
+  fileRefFromElement,
+  FILE_LINK_CLASS,
+  linkifyFilePaths,
+  renderCodespan,
+  unwrapFileLinks,
+} from '@/lib/markdownAutolink'
 import { CodeViewer } from '../chat/CodeViewer'
 import { MermaidRenderer } from '../chat/MermaidRenderer'
 import { copyTextToClipboard } from '@/lib/clipboard'
@@ -45,6 +55,15 @@ const MARKDOWN_SANITIZE_CONFIG = {
   ADD_ATTR: ['xlink:href'],
   FORBID_TAGS: ['style'],
   FORBID_ATTR: ['style'],
+  // Blob URLs are origin-bound object URLs. Remote network URLs are removed
+  // below after sanitization, before the markup reaches the renderer.
+  ALLOWED_URI_REGEXP: /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|blob):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
+}
+
+function isSafeMarkdownImageSource(value: string | null): boolean {
+  if (!value) return false
+  if (/^blob:/i.test(value)) return true
+  return /^data:image\/(?:avif|gif|jpe?g|png|webp);base64,[a-z0-9+/=\r\n]+$/i.test(value)
 }
 
 function normalizeCodeLanguage(language: string | undefined): string | undefined {
@@ -103,11 +122,16 @@ renderer.code = function ({ text, lang }: Tokens.Code) {
   return `<div data-codeblock-id="${id}"></div>`
 }
 
+renderer.codespan = renderCodespan
+
 marked.setOptions({
   breaks: true,
   gfm: true,
 })
 marked.use({ renderer })
+// gfm autolink is already on; this only corrects where a bare URL ends when the
+// surrounding text is Chinese. See lib/urlBoundary.ts.
+marked.use(cjkAwareAutolink)
 
 function findUnescapedDelimiter(text: string, delimiter: string, fromIndex: number): number {
   let index = text.indexOf(delimiter, fromIndex)
@@ -273,10 +297,40 @@ function renderMath(block: MathBlock): string {
   }
 }
 
-function enhanceMarkdownHtml(html: string, mathBlocks: MathBlock[]): string {
+/**
+ * Cheap necessary condition for "this text could contain a reference", so prose
+ * with none skips the DOM pass entirely, the way it did before #1146.
+ *
+ * Two alternatives because the two reference shapes look nothing alike: a path
+ * needs an extension dot (`app.ts`), while `owner/repo#123` has no dot at all.
+ */
+const REFERENCE_HINT_RE = /\.[A-Za-z0-9]{1,10}(?![A-Za-z0-9])|\/[\w.-]+#\d/
+
+/**
+ * Which file references this render may turn into links.
+ *
+ * The two are gated differently on purpose: an inline-code reference is already
+ * complete when it renders (an unclosed backtick is not a codespan), so it only
+ * needs a click handler — while a bare path additionally has to wait for the text
+ * to stop growing.
+ */
+type ReferenceLinking = { bare: boolean; inlineCode: boolean }
+
+function enhanceMarkdownHtml(
+  html: string,
+  mathBlocks: MathBlock[],
+  references: ReferenceLinking,
+): string {
   const cleanHtml = DOMPurify.sanitize(html, MARKDOWN_SANITIZE_CONFIG)
 
-  const needsDomEnhancement = mathBlocks.length > 0 || /<(?:a|table)\b/i.test(cleanHtml)
+  const wantsFilePathLinks = references.bare && REFERENCE_HINT_RE.test(cleanHtml)
+  // renderCodespan runs on marked's shared renderer and cannot know whether this
+  // surface can handle a click, so when it cannot, its anchors get stripped here.
+  const wantsFileLinkStripping = !references.inlineCode && cleanHtml.includes(FILE_LINK_CLASS)
+  const needsDomEnhancement = mathBlocks.length > 0
+    || wantsFilePathLinks
+    || wantsFileLinkStripping
+    || /<(?:a|table|img|source)\b/i.test(cleanHtml)
   if (!needsDomEnhancement) {
     return cleanHtml
   }
@@ -288,6 +342,13 @@ function enhanceMarkdownHtml(html: string, mathBlocks: MathBlock[]): string {
   const container = document.createElement('div')
   container.innerHTML = cleanHtml
   const mathById = new Map(mathBlocks.map((block) => [block.id, block]))
+
+  container.querySelectorAll<HTMLImageElement | HTMLSourceElement>('img, source').forEach((image) => {
+    if (!isSafeMarkdownImageSource(image.getAttribute('src'))) image.removeAttribute('src')
+    // srcset can trigger several independent fetches and is never needed for
+    // assistant Markdown. Keep it absent even when an img has a safe src.
+    image.removeAttribute('srcset')
+  })
 
   container.querySelectorAll<HTMLElement>('[data-math-id]').forEach((placeholder) => {
     const block = mathById.get(placeholder.dataset.mathId ?? '')
@@ -311,6 +372,11 @@ function enhanceMarkdownHtml(html: string, mathBlocks: MathBlock[]): string {
     link.setAttribute('target', '_blank')
     link.setAttribute('rel', 'noreferrer noopener')
   })
+
+  // Last, so it only ever sees text that is not already inside an anchor — and
+  // so the `target="_blank"` pass above cannot reach the file links it creates.
+  if (wantsFilePathLinks) linkifyFilePaths(container)
+  else if (wantsFileLinkStripping) unwrapFileLinks(container)
 
   return container.innerHTML
 }
@@ -410,13 +476,25 @@ export const __markdownParseCacheInternals = {
   },
 }
 
+/**
+ * `md-file-link` (#1146) is styled as a quieter sibling of a URL link: a dotted
+ * underline instead of solid, which distinguishes "opens in the workbench" from
+ * "leaves the app" without adding a third colour. It deliberately does NOT get
+ * `font-mono` — a monospaced run of ASCII inside Chinese prose is both jarring
+ * and wider, and the extra width was pushing long paths onto a second line. The
+ * inline-code form still reads as monospace because `prose-code` styles the
+ * `<code>` inside it.
+ */
 const BASE_PROSE_CLASSES = `markdown-prose prose prose-sm min-w-0 max-w-none break-words [overflow-wrap:anywhere] text-[var(--color-text-primary)]
   prose-headings:text-[var(--color-text-primary)] prose-headings:font-semibold prose-headings:font-[var(--font-headline)]
   prose-p:my-2 prose-p:leading-relaxed
   prose-p:break-words prose-p:[overflow-wrap:anywhere]
   prose-code:text-[13px] prose-code:text-[var(--color-code-fg)] prose-code:font-mono prose-code:bg-[var(--color-code-bg)] prose-code:border prose-code:border-[var(--color-border)] prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-[var(--radius-sm)] prose-code:before:hidden prose-code:after:hidden
   prose-pre:!bg-transparent prose-pre:!p-0 prose-pre:!shadow-none
-  prose-a:text-[var(--color-text-accent)] prose-a:no-underline prose-a:[overflow-wrap:anywhere] hover:prose-a:underline
+  prose-a:text-[var(--color-text-accent)] prose-a:[overflow-wrap:anywhere]
+  prose-a:underline prose-a:decoration-[1px] prose-a:underline-offset-[3px] prose-a:decoration-[var(--color-text-accent)] prose-a:hover:decoration-[2px]
+  [&_a.md-code-link]:no-underline [&_a.md-code-link_code]:text-[var(--color-text-accent)] [&_a.md-code-link:hover_code]:underline
+  [&_a.md-file-link]:cursor-pointer [&_a.md-file-link]:decoration-dotted [&_a.md-file-link:hover]:decoration-solid
   prose-strong:text-[var(--color-text-primary)]
   prose-ul:my-2 prose-ol:my-2 prose-ul:pl-5 prose-ol:pl-5 prose-ul:list-outside prose-ol:list-outside
   prose-li:my-0.5
@@ -480,8 +558,26 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({ content, varian
   )
 
   const parts = useMemo(() => {
+    // A reference may only become a link where a click can actually be handled.
+    // Most of this component's callers (release notes, agent prompts, thinking
+    // blocks, plan previews, the markdown file preview) pass no handler at all,
+    // and a link there would look live and do nothing. This also closes the
+    // streaming hole: MessageList's streaming renderer gets no sessionId, hence no
+    // handler, so a paragraph the model finished before calling a tool stays plain
+    // even though `chatState` has already moved off 'streaming'.
+    //
+    // Bare paths wait for the text to be final on top of that — a path has no
+    // closing delimiter, so mid-stream `desktop/src/lib/foo.ts` is itself a valid
+    // reference that changes again as `x` and `:42` arrive, flickering through
+    // three targets on one line.
+    const canOpenReferences = Boolean(onLinkClick)
+    const references: ReferenceLinking = {
+      bare: canOpenReferences && !streaming,
+      inlineCode: canOpenReferences,
+    }
+
     if (codeBlocks.length === 0) {
-      return [{ type: 'html' as const, content: enhanceMarkdownHtml(html, mathBlocks) }]
+      return [{ type: 'html' as const, content: enhanceMarkdownHtml(html, mathBlocks, references) }]
     }
 
     const result: MarkdownPart[] = []
@@ -494,27 +590,27 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({ content, varian
 
       const before = remaining.slice(0, idx)
       if (before) {
-        result.push({ type: 'html', content: enhanceMarkdownHtml(before, mathBlocks) })
+        result.push({ type: 'html', content: enhanceMarkdownHtml(before, mathBlocks, references) })
       }
       result.push({ type: 'code', block })
       remaining = remaining.slice(idx + marker.length)
     }
 
     if (remaining) {
-      result.push({ type: 'html', content: enhanceMarkdownHtml(remaining, mathBlocks) })
+      result.push({ type: 'html', content: enhanceMarkdownHtml(remaining, mathBlocks, references) })
     }
 
     return result
-  }, [html, codeBlocks, mathBlocks])
+  }, [html, codeBlocks, mathBlocks, streaming, onLinkClick])
 
   const handleClick = useCallback(async (event: ReactMouseEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement | null
     const button = target?.closest<HTMLButtonElement>('[data-copy-code]')
     if (!button) {
-      const link = target?.closest<HTMLAnchorElement>('a[href]')
+      const link = target?.closest<HTMLAnchorElement>('a[href], a[data-file-path]')
       if (!link || !onLinkClick) return
 
-      const handled = onLinkClick(link.getAttribute('href') ?? '', event)
+      const handled = onLinkClick(fileRefFromElement(link) ?? link.getAttribute('href') ?? '', event)
       if (handled) {
         event.preventDefault()
         event.stopPropagation()

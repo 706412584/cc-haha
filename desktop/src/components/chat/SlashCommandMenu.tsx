@@ -1,0 +1,219 @@
+import { forwardRef, type MutableRefObject } from 'react'
+import {
+  Bot,
+  Box,
+  Bug,
+  CircleDollarSign,
+  CircleGauge,
+  Command as CommandIcon,
+  Eraser,
+  GitCommitHorizontal,
+  GitPullRequest,
+  HelpCircle,
+  LogIn,
+  LogOut,
+  Package,
+  PanelTop,
+  Settings,
+  ShieldCheck,
+  Sparkles,
+  Target,
+  Terminal,
+  Wrench,
+  Zap,
+  type LucideIcon,
+} from 'lucide-react'
+import { useTranslation } from '@/i18n'
+import type { SlashCommandGroups } from './composerUtils'
+import type { SlashCommandSource } from '@/types/slashCommand'
+
+const SYSTEM_SLASH_COMMAND_ICONS: Record<string, LucideIcon> = {
+  agent: Bot,
+  mcp: Wrench,
+  skills: Package,
+  help: HelpCircle,
+  status: CircleGauge,
+  cost: CircleDollarSign,
+  context: PanelTop,
+  plugin: Package,
+  memory: Sparkles,
+  doctor: Wrench,
+  compact: Zap,
+  clear: Eraser,
+  goal: Target,
+  review: ShieldCheck,
+  commit: GitCommitHorizontal,
+  pr: GitPullRequest,
+  bug: Bug,
+  config: Settings,
+  login: LogIn,
+  logout: LogOut,
+  model: Bot,
+  permissions: ShieldCheck,
+  'terminal-setup': Terminal,
+  vim: CommandIcon,
+}
+
+function getSystemSlashCommandIcon(commandName: string): LucideIcon {
+  const rootCommand = commandName.trim().split(/\s+/, 1)[0] ?? ''
+  return SYSTEM_SLASH_COMMAND_ICONS[rootCommand] ?? CommandIcon
+}
+
+function getSkillSourceLabelKey(source: SlashCommandSource) {
+  switch (source) {
+    case 'project':
+      return 'chat.slashSkillProject' as const
+    case 'plugin':
+      return 'chat.slashSkillPlugin' as const
+    case 'user':
+      return 'chat.slashSkillPersonal' as const
+  }
+}
+
+export function getSlashCommandOptionId(menuId: string, index: number): string {
+  return `${menuId}-option-${index}`
+}
+
+type SlashCommandMenuProps = {
+  id: string
+  groups: SlashCommandGroups
+  selectedIndex: number
+  itemRefs: MutableRefObject<(HTMLElement | null)[]>
+  onSelect: (commandName: string) => void
+  onHighlight: (index: number) => void
+  showKeyboardHints: boolean
+}
+
+export const SlashCommandMenu = forwardRef<HTMLDivElement, SlashCommandMenuProps>(
+  function SlashCommandMenu(
+    {
+      id,
+      groups,
+      selectedIndex,
+      itemRefs,
+      onSelect,
+      onHighlight,
+      showKeyboardHints,
+    },
+    ref,
+  ) {
+    const t = useTranslation()
+
+    const renderSystemCommand = (command: SlashCommandGroups['system'][number], index: number) => {
+      const Icon = getSystemSlashCommandIcon(command.name)
+      return (
+        <div
+          id={getSlashCommandOptionId(id, index)}
+          key={command.name}
+          role="option"
+          tabIndex={-1}
+          aria-selected={index === selectedIndex}
+          ref={(element) => { itemRefs.current[index] = element }}
+          onClick={() => onSelect(command.name)}
+          onMouseEnter={() => onHighlight(index)}
+          className={`flex w-full cursor-default items-center gap-3 rounded-[var(--radius-md)] px-3 py-2 text-left transition-colors ${
+            index === selectedIndex
+              ? 'bg-[var(--color-surface-hover)]'
+              : 'hover:bg-[var(--color-surface-hover)]'
+          }`}
+        >
+          <Icon
+            aria-hidden="true"
+            className="h-4 w-4 shrink-0 text-[var(--color-text-secondary)]"
+            strokeWidth={1.8}
+          />
+          <span className="flex min-w-0 max-w-[52%] shrink-0 items-baseline gap-1.5">
+            <span className="shrink-0 text-sm font-medium text-[var(--color-text-primary)]">
+              {command.name}
+            </span>
+            {command.argumentHint ? (
+              <span className="min-w-0 truncate font-mono text-[11px] text-[var(--color-text-tertiary)]">
+                {command.argumentHint}
+              </span>
+            ) : null}
+          </span>
+          <span className="min-w-0 flex-1 truncate text-right text-xs text-[var(--color-text-tertiary)]">
+            {command.description}
+          </span>
+        </div>
+      )
+    }
+
+    return (
+      <div
+        ref={ref}
+        className="absolute bottom-full left-0 right-0 z-[var(--z-dropdown)] mb-2 overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-overlay)]"
+      >
+        <div
+          id={id}
+          role="listbox"
+          aria-label={t('chat.slashCommands')}
+          className="max-h-[420px] overflow-y-auto p-1.5"
+        >
+          {groups.system.map(renderSystemCommand)}
+
+          {groups.skills.length > 0 ? (
+            <div
+              role="group"
+              aria-label={t('chat.openSkills')}
+              className={groups.system.length > 0
+                ? 'mt-1 border-t border-[var(--color-border-separator)] pt-1'
+                : ''}
+            >
+              <div className="px-2.5 py-1.5 text-xs font-medium text-[var(--color-text-tertiary)]">
+                {t('chat.openSkills')}
+              </div>
+              {groups.skills.map((command, skillIndex) => {
+                const index = groups.system.length + skillIndex
+                return (
+                  <div
+                    id={getSlashCommandOptionId(id, index)}
+                    key={command.name}
+                    role="option"
+                    tabIndex={-1}
+                    aria-selected={index === selectedIndex}
+                    ref={(element) => { itemRefs.current[index] = element }}
+                    onClick={() => onSelect(command.name)}
+                    onMouseEnter={() => onHighlight(index)}
+                    className={`flex w-full cursor-default items-center gap-3 rounded-[var(--radius-md)] px-3 py-2 text-left transition-colors ${
+                      index === selectedIndex
+                        ? 'bg-[var(--color-surface-hover)]'
+                        : 'hover:bg-[var(--color-surface-hover)]'
+                    }`}
+                  >
+                    <Box
+                      aria-hidden="true"
+                      className="h-4 w-4 shrink-0 text-[var(--color-text-secondary)]"
+                      strokeWidth={1.8}
+                    />
+                    <span className="min-w-0 shrink-0 truncate text-sm font-medium text-[var(--color-text-primary)]">
+                      {command.name}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-right text-xs text-[var(--color-text-tertiary)]">
+                      {command.description}
+                    </span>
+                    {command.source ? (
+                      <span className="shrink-0 text-xs text-[var(--color-text-tertiary)]">
+                        {t(getSkillSourceLabelKey(command.source))}
+                      </span>
+                    ) : null}
+                  </div>
+                )
+              })}
+            </div>
+          ) : null}
+        </div>
+        {showKeyboardHints ? (
+          <div className="flex items-center gap-1.5 border-t border-[var(--color-border)] px-4 py-2 text-xs text-[var(--color-text-tertiary)]">
+            <kbd className="rounded border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-1.5 py-0.5 font-mono text-[10px]">Up/Down</kbd>
+            <span>{t('chat.navigate')}</span>
+            <kbd className="ml-2 rounded border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-1.5 py-0.5 font-mono text-[10px]">Enter</kbd>
+            <span>{t('chat.select')}</span>
+            <kbd className="ml-2 rounded border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-1.5 py-0.5 font-mono text-[10px]">Esc</kbd>
+            <span>{t('chat.dismiss')}</span>
+          </div>
+        ) : null}
+      </div>
+    )
+  },
+)

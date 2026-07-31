@@ -29,11 +29,21 @@ export type WorkspacePreviewState =
   | WorkspaceReadFileResult['state']
   | WorkspaceDiffResult['state']
 
+/**
+ * A line the code view should scroll to and mark.
+ *
+ * `nonce` exists so clicking the same `foo.ts:42` reference twice scrolls back
+ * to it: without it, re-opening an already-open tab at an unchanged line is a
+ * no-op state update and the view stays wherever the user had scrolled to.
+ */
+export type WorkspacePreviewReveal = { line: number; column?: number; nonce: number }
+
 export type WorkspacePreviewTab = {
   id: string
   path: string
   kind: WorkspacePreviewKind
   title: string
+  reveal?: WorkspacePreviewReveal
   language?: string
   content?: string
   dataUrl?: string
@@ -140,7 +150,13 @@ type WorkspacePanelStore = {
   loadStatus: (sessionId: string) => Promise<void>
   loadTree: (sessionId: string, path?: string) => Promise<void>
   toggleTreeNode: (sessionId: string, path: string) => Promise<void>
-  openPreview: (sessionId: string, path: string, kind: WorkspacePreviewKind, origin?: WorkspacePanelOrigin) => Promise<void>
+  openPreview: (
+    sessionId: string,
+    path: string,
+    kind: WorkspacePreviewKind,
+    origin?: WorkspacePanelOrigin,
+    reveal?: { line: number; column?: number },
+  ) => Promise<void>
   closePreview: (sessionId: string, tabId: string) => void
   closePreviewTabs: (sessionId: string, tabId: string, scope: WorkspacePreviewCloseScope) => void
   initBuffer: (init: WorkspaceBufferInit) => void
@@ -180,6 +196,13 @@ function nextRequestId(store: Map<string, number>, key: string) {
   const requestId = (store.get(key) ?? 0) + 1
   store.set(key, requestId)
   return requestId
+}
+
+let revealNonce = 0
+/** Monotonic so a repeat click on the same reference re-triggers the scroll. */
+function nextRevealNonce() {
+  revealNonce += 1
+  return revealNonce
 }
 
 function invalidateRequest(store: Map<string, number>, key: string) {
@@ -570,7 +593,7 @@ export const useWorkspacePanelStore = create<WorkspacePanelStore>((set, get) => 
     }
   },
 
-  openPreview: async (sessionId, path, kind, origin) => {
+  openPreview: async (sessionId, path, kind, origin, reveal) => {
     // Ensure the workspace panel is visible — openPreview is now triggered from places
     // where the panel may be closed (e.g. the chat "打开方式" menu / turn-changes card),
     // not only from inside the already-open file tree. Opening a file always switches the
@@ -590,9 +613,22 @@ export const useWorkspacePanelStore = create<WorkspacePanelStore>((set, get) => 
     const existing = get().previewTabsBySession[sessionId]?.find((tab) => tab.id === tabId)
 
     const requestId = nextRequestId(previewRequestIds, requestKey)
+    // Omitting a reveal must not clear the one already on the tab: reopening the
+    // same file from the tree should leave the marked line where it was.
+    const nextReveal: WorkspacePreviewReveal | undefined = reveal
+      ? { ...reveal, nonce: nextRevealNonce() }
+      : existing?.reveal
 
     if (existing) {
       set((state) => ({
+        previewTabsBySession: {
+          ...state.previewTabsBySession,
+          [sessionId]: upsertPreviewTab(
+            state.previewTabsBySession[sessionId] ?? [],
+            tabId,
+            (tab) => ({ ...tab, reveal: nextReveal }),
+          ),
+        },
         activePreviewTabIdBySession: {
           ...state.activePreviewTabIdBySession,
           [sessionId]: tabId,
@@ -623,6 +659,7 @@ export const useWorkspacePanelStore = create<WorkspacePanelStore>((set, get) => 
         kind,
         title: getPathTitle(path),
         state: 'loading',
+        ...(nextReveal ? { reveal: nextReveal } : {}),
       }
 
       set((state) => ({

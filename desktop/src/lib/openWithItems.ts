@@ -45,7 +45,7 @@ export function isPreviewableChangedFile(path: string): boolean {
 
 // ─── Open-with items ──────────────────────────────────────────────────────────
 
-export type OpenWithIcon = 'in-app-browser' | 'system' | 'ide' | 'file-manager' | 'preview'
+export type OpenWithIcon = 'in-app-browser' | 'system' | 'ide' | 'file-manager' | 'preview' | 'copy'
 
 export type OpenWithItem = {
   id: string
@@ -60,6 +60,9 @@ export type OpenWithDeps = {
   openSystem: (urlOrPath: string) => void
   openWorkspacePreview: (relPath: string) => void
   openTarget: (targetId: string, absolutePath: string) => void
+  /** Omit to leave the copy entries out (a URL context has nothing to copy). */
+  copyPath?: (absolutePath: string) => void
+  copyFileContent?: (path: string) => void
   t: (key: string, vars?: Record<string, string>) => string
 }
 
@@ -84,6 +87,17 @@ export function buildOpenWithItems(ctx: OpenWithContext, targets: OpenTarget[], 
   }
   for (const target of targets.filter((x) => x.kind === 'ide')) {
     items.push({ id: `ide:${target.id}`, label: deps.t('openWith.openInTarget', { target: target.label }), icon: 'ide', target, onSelect: () => deps.openTarget(target.id, ctx.absolutePath) })
+  }
+  // Copy entries sit between "open in…" and "reveal in…", matching the order the
+  // platform file managers use.
+  if (deps.copyPath) {
+    const copyPath = deps.copyPath
+    items.push({ id: 'copy-path', label: deps.t('openWith.copyPath'), icon: 'copy', onSelect: () => copyPath(ctx.absolutePath) })
+  }
+  if (deps.copyFileContent) {
+    const copyFileContent = deps.copyFileContent
+    const readPath = ctx.relPath ?? ctx.absolutePath
+    items.push({ id: 'copy-content', label: deps.t('openWith.copyFileContent'), icon: 'copy', onSelect: () => copyFileContent(readPath) })
   }
   for (const target of targets.filter((x) => x.kind === 'file_manager')) {
     items.push({ id: `fm:${target.id}`, label: deps.t('openWith.revealInTarget', { target: target.label }), icon: 'file-manager', target, onSelect: () => deps.openTarget(target.id, ctx.absolutePath) })

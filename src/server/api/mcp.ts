@@ -18,6 +18,8 @@ import {
   getClaudeCodeMcpConfigs,
   getMcpConfigByName,
   isMcpServerDisabled,
+  projectDirDeclaresMcpServers,
+  registerCwdProjectIfDeclaresMcpServers,
   removeMcpConfig,
   setMcpServerEnabled,
 } from '../../services/mcp/config.js'
@@ -504,6 +506,11 @@ function cleanupSecureStorage(name: string, config: ScopedMcpServerConfig) {
 }
 
 async function listServers(): Promise<Response> {
+  // Self-heal the project registry: .mcp.json files written before target
+  // registration existed (pre-GH#1126 desktop builds, hand-edited files)
+  // become rediscoverable the first time their project is browsed.
+  registerCwdProjectIfDeclaresMcpServers()
+
   const { servers } = await getAllMcpConfigs()
   const visibleServers = Object.entries(servers)
     .filter(([name, config]) => isVisibleServer(name, config))
@@ -513,10 +520,19 @@ async function listServers(): Promise<Response> {
   })
 }
 
-function listProjectPathsWithPrivateMcp(): Response {
+// Every project path the settings page must query to see all configured MCP
+// servers: local-scope servers live in the registry entry itself
+// (projects[path].mcpServers), project-scope servers live in the path's
+// .mcp.json on disk. Missing the latter made shared servers vanish from the
+// list after an app restart (GH #1126).
+function listProjectPathsWithConfiguredMcp(): Response {
   const projects = getGlobalConfig().projects ?? {}
   const projectPaths = Object.entries(projects)
-    .filter(([, projectConfig]) => Object.keys(projectConfig.mcpServers ?? {}).length > 0)
+    .filter(
+      ([projectPath, projectConfig]) =>
+        Object.keys(projectConfig.mcpServers ?? {}).length > 0 ||
+        projectDirDeclaresMcpServers(projectPath),
+    )
     .map(([projectPath]) => projectPath)
     .sort((a, b) => a.localeCompare(b))
 
@@ -894,7 +910,7 @@ export async function handleMcpApi(
       }
 
       if (req.method === 'GET' && serverName === 'project-paths' && !action) {
-        return listProjectPathsWithPrivateMcp()
+        return listProjectPathsWithConfiguredMcp()
       }
 
       if (req.method === 'GET' && serverName === 'config-files' && !action) {

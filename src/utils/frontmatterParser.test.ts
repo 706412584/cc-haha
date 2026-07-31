@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import { parseFrontmatter } from './frontmatterParser.js'
+import {
+  parseFrontmatter,
+  splitPathInFrontmatter,
+} from './frontmatterParser.js'
 
 describe('parseFrontmatter delimiters', () => {
   test('keeps indented delimiter text inside YAML block scalars', () => {
@@ -49,5 +52,21 @@ describe('parseFrontmatter delimiters', () => {
       tools: [],
     })
     expect(content).toBe('Keep the body intact.')
+  })
+})
+
+describe('splitPathInFrontmatter brace expansion', () => {
+  test('keeps an exponentially large pattern unexpanded', () => {
+    const pattern = Array.from({ length: 11 }, () => '{a,b}').join('/')
+
+    expect(splitPathInFrontmatter(pattern)).toEqual([pattern])
+  })
+
+  test('shares the expansion budget across comma-separated patterns', () => {
+    const pattern = Array.from({ length: 9 }, () => '{a,b}').join('/')
+    const expanded = splitPathInFrontmatter([pattern, pattern, pattern])
+
+    expect(expanded).toHaveLength(514)
+    expect(expanded.slice(-2)).toEqual([pattern, pattern])
   })
 })

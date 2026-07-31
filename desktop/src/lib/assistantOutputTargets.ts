@@ -1,3 +1,5 @@
+import { trimTrailingPunctuation } from './urlBoundary'
+
 export type AssistantOutputTargetKind =
   | 'local-html'
   | 'localhost-url'
@@ -71,6 +73,9 @@ type DirectoryTreeFileMatch = {
   position: number
 }
 
+// Stays localhost-only on purpose: cards are for the dev server / local output,
+// not for every remote link the assistant mentions. The tail is handed to the
+// shared trimTrailingPunctuation, which knows the full CJK terminator set.
 const localhostUrlPattern =
   /https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/[^\s`"'<>，。；、）\])}]*)?/gi
 const previewablePathPattern =
@@ -423,10 +428,6 @@ function isWithinWorkDir(candidatePath: string, workDir: string): boolean {
 
 function toPosixPath(value: string): string {
   return value.replace(/\\/g, '/')
-}
-
-function trimTrailingPunctuation(value: string): string {
-  return value.replace(/[`'")\]\}>,.;!?，。；、）】》]+$/g, '')
 }
 
 function extractMarkdownLinks(content: string): MarkdownLinkMatch[] {

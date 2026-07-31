@@ -19,6 +19,7 @@ const RECONNECT_MAX_DELAY_MS = 30_000
 const RECONNECT_GIVE_UP_MS = 600_000
 /** Server sends keepalives every 15s; treat connection as dead after 45s of silence. */
 const LIVENESS_TIMEOUT_MS = 45_000
+export const SSE_MAX_FRAME_BYTES = 1024 * 1024
 
 /**
  * HTTP status codes that indicate a permanent server-side rejection.
@@ -49,6 +50,23 @@ type SSEFrame = {
   data?: string
 }
 
+export class SSEFrameTooLargeError extends Error {
+  constructor() {
+    super(`SSE frame exceeds the ${SSE_MAX_FRAME_BYTES}-byte limit`)
+    this.name = 'SSEFrameTooLargeError'
+  }
+}
+
+function assertSSEFrameSize(buffer: string, start: number, end: number): void {
+  const codeUnits = end - start
+  if (codeUnits > SSE_MAX_FRAME_BYTES) {
+    throw new SSEFrameTooLargeError()
+  }
+  if (Buffer.byteLength(buffer.slice(start, end), 'utf8') > SSE_MAX_FRAME_BYTES) {
+    throw new SSEFrameTooLargeError()
+  }
+}
+
 /**
  * Incrementally parse SSE frames from a text buffer.
  * Returns parsed frames and the remaining (incomplete) buffer.
@@ -65,6 +83,7 @@ export function parseSSEFrames(buffer: string): {
   // SSE frames are delimited by double newlines
   let idx: number
   while ((idx = buffer.indexOf('\n\n', pos)) !== -1) {
+    assertSSEFrameSize(buffer, pos, idx)
     const rawFrame = buffer.slice(pos, idx)
     pos = idx + 2
 
@@ -112,6 +131,7 @@ export function parseSSEFrames(buffer: string): {
     }
   }
 
+  assertSSEFrameSize(buffer, pos, buffer.length)
   return { frames, remaining: buffer.slice(pos) }
 }
 
@@ -397,6 +417,16 @@ export class SSETransport implements Transport {
         }
       }
     } catch (error) {
+      if (error instanceof SSEFrameTooLargeError) {
+        logForDebugging(`SSETransport: ${error.message}`, { level: 'error' })
+        logForDiagnosticsNoPII('error', 'cli_sse_frame_too_large')
+        this.clearLivenessTimer()
+        this.state = 'closed'
+        this.abortController?.abort()
+        this.abortController = null
+        this.onCloseCallback?.()
+        return
+      }
       if (this.abortController?.signal.aborted) return
       logForDebugging(
         `SSETransport: Stream read error: ${errorMessage(error)}`,

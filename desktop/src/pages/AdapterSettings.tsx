@@ -13,7 +13,7 @@ type ImPlatform = 'telegram' | 'feishu' | 'wechat' | 'dingtalk' | 'whatsapp'
 type AdapterUnbindTarget = 'wechatAccount' | 'dingtalkBot' | 'whatsappAccount'
 
 const FEISHU_CREATE_BOT_URL = 'https://open.feishu.cn/page/openclaw?form=multiAgent'
-const IM_CONFIG_DOCS_URL = 'https://claudecode-haha.relakkesyang.org/im/'
+const IM_CONFIG_DOCS_URL = 'https://cchaha.ai/im/'
 
 export function AdapterSettings() {
   const t = useTranslation()
@@ -267,9 +267,9 @@ export function AdapterSettings() {
     setSaveStatus('idle')
     setSaveError('')
     try {
-      const patch: Record<string, unknown> = {}
-
-      if (defaultProjectDir) patch.defaultProjectDir = defaultProjectDir
+      const patch: Record<string, unknown> = {
+        defaultProjectDir,
+      }
 
       const tgUsers = tgAllowedUsers
         .split(',')
@@ -279,7 +279,7 @@ export function AdapterSettings() {
         .filter((n) => !isNaN(n))
 
       patch.telegram = {
-        botToken: tgBotToken || undefined,
+        botToken: tgBotToken,
         allowedUsers: tgUsers.length ? tgUsers : [],
       }
 
@@ -289,10 +289,10 @@ export function AdapterSettings() {
         .filter(Boolean)
 
       patch.feishu = {
-        appId: fsAppId || undefined,
-        appSecret: fsAppSecret || undefined,
-        encryptKey: fsEncryptKey || undefined,
-        verificationToken: fsVerificationToken || undefined,
+        appId: fsAppId,
+        appSecret: fsAppSecret,
+        encryptKey: fsEncryptKey,
+        verificationToken: fsVerificationToken,
         allowedUsers: fsUsers.length ? fsUsers : [],
         streamingCard: fsStreamingCard,
       }
@@ -303,7 +303,6 @@ export function AdapterSettings() {
         .filter(Boolean)
 
       patch.wechat = {
-        ...config.wechat,
         allowedUsers: wcUsers.length ? wcUsers : [],
       }
 
@@ -313,7 +312,6 @@ export function AdapterSettings() {
         .filter(Boolean)
 
       patch.whatsapp = {
-        ...config.whatsapp,
         allowedUsers: waUsers.length ? waUsers : [],
       }
 
@@ -323,11 +321,11 @@ export function AdapterSettings() {
         .filter(Boolean)
 
       patch.dingtalk = {
-        clientId: dtClientId || undefined,
-        clientSecret: dtClientSecret || undefined,
+        clientId: dtClientId,
+        clientSecret: dtClientSecret,
         allowedUsers: dtUsers.length ? dtUsers : [],
-        endpoint: dtEndpoint || undefined,
-        permissionCardTemplateId: dtPermissionCardTemplateId || undefined,
+        endpoint: dtEndpoint,
+        permissionCardTemplateId: dtPermissionCardTemplateId,
       }
 
       await updateConfig(patch)
@@ -613,7 +611,14 @@ export function AdapterSettings() {
         <label className="text-sm font-medium text-[var(--color-text-primary)]">
           {t('settings.adapters.defaultProject')}
         </label>
-        <DirectoryPicker value={defaultProjectDir} onChange={setDefaultProjectDir} />
+        <div className="flex items-center gap-2">
+          <DirectoryPicker value={defaultProjectDir} onChange={setDefaultProjectDir} />
+          {defaultProjectDir && (
+            <Button variant="ghost" size="sm" onClick={() => setDefaultProjectDir('')}>
+              {t('settings.adapters.clearDefaultProject')}
+            </Button>
+          )}
+        </div>
         <p className="text-xs text-[var(--color-text-tertiary)]">
           {t('settings.adapters.defaultProjectHint')}
         </p>

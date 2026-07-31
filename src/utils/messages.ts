@@ -2089,6 +2089,8 @@ export function normalizeMessagesForAPI(
   }
 
   const result: (UserMessage | AssistantMessage)[] = []
+  const assistantIndexByMessageId = new Map<string, number>()
+  let indexedResultLength = 0
   reorderedMessages
     .filter(
       (
@@ -2301,33 +2303,57 @@ export function normalizeMessagesForAPI(
             },
           }
 
-          // Find a previous assistant message with the same message ID and merge.
-          // Walk backwards, skipping tool results and different-ID assistants,
-          // since concurrent agents (teammates) can interleave streaming content
-          // blocks from multiple API responses with different message IDs.
-          for (let i = result.length - 1; i >= 0; i--) {
-            const msg = result[i]!
-
-            if (msg.type !== 'assistant' && !isToolResultMessage(msg)) {
-              break
+          // Index each result message once so interleaved assistant fragments
+          // can be merged without repeatedly scanning the full tool-result chain.
+          // A normal user message is a hard turn boundary, matching the previous
+          // backward scan's stopping condition.
+          for (; indexedResultLength < result.length; indexedResultLength++) {
+            const indexedMessage = result[indexedResultLength]!
+            if (indexedMessage.type === 'assistant') {
+              assistantIndexByMessageId.set(
+                indexedMessage.message.id,
+                indexedResultLength,
+              )
+            } else if (!isToolResultMessage(indexedMessage)) {
+              assistantIndexByMessageId.clear()
             }
+          }
 
-            if (msg.type === 'assistant') {
-              if (msg.message.id === normalizedMessage.message.id) {
-                result[i] = mergeAssistantMessages(msg, normalizedMessage)
-                return
-              }
-              continue
-            }
+          const existingIndex = assistantIndexByMessageId.get(
+            normalizedMessage.message.id,
+          )
+          const existingMessage =
+            existingIndex === undefined ? undefined : result[existingIndex]
+          if (
+            existingIndex !== undefined &&
+            existingMessage?.type === 'assistant'
+          ) {
+            result[existingIndex] = mergeAssistantMessages(
+              existingMessage,
+              normalizedMessage,
+            )
+            return
           }
 
           result.push(normalizedMessage)
           return
         }
         case 'attachment': {
-          const rawAttachmentMessage = normalizeAttachmentForAPI(
-            message.attachment,
-          )
+          let rawAttachmentMessage: UserMessage[]
+          try {
+            rawAttachmentMessage = normalizeAttachmentForAPI(message.attachment)
+          } catch (error) {
+            const attachmentType = (message as {
+              attachment?: { type?: unknown }
+            }).attachment?.type
+            logForDebugging(
+              `Dropping malformed attachment during API normalization: ${
+                typeof attachmentType === 'string' ? attachmentType : 'unknown'
+              }: ${error instanceof Error ? error.message : String(error)}`,
+              { level: 'warn' },
+            )
+            return
+          }
           const attachmentMessage = checkStatsigFeatureGate_CACHED_MAY_BE_STALE(
             'tengu_chair_sermon',
           )

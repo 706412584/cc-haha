@@ -210,15 +210,14 @@ async function initializeBrowserServerUrl(fallbackUrl: string) {
     !hasExplicitDefaultBaseUrl() &&
     !!sameOriginUrl &&
     requestedUrl === sameOriginUrl
-  const token = queryToken ?? stored.token
+  // A bearer token belongs to exactly one H5 server. A query-selected server
+  // must never inherit credentials paired with a different authority. The
+  // dev-only forceH5 escape hatch still permits stored loopback credentials.
+  const token = queryToken ?? (stored.serverUrl === requestedUrl ? stored.token : null)
   const browserH5Runtime = requiresH5AuthForServerUrl(requestedUrl) || forceH5
 
   setBaseUrl(requestedUrl)
   setAuthToken(browserH5Runtime ? token : null)
-  if (browserH5Runtime) {
-    rememberStoredH5ServerUrl(requestedUrl)
-  }
-
   try {
     await waitForHealth(requestedUrl)
   } catch (error) {
@@ -250,6 +249,9 @@ async function initializeBrowserServerUrl(fallbackUrl: string) {
   }
 
   if (!token) {
+    // Keep the existing recovery UX for a first-time connection, but never
+    // replace a paired server while withholding its token from a new one.
+    if (!stored.token) rememberStoredH5ServerUrl(requestedUrl)
     clearStoredH5Token()
     throw new H5ConnectionRequiredError(
       'Enter your H5 token to continue.',
@@ -264,6 +266,8 @@ async function initializeBrowserServerUrl(fallbackUrl: string) {
     clearStoredH5Token()
     throw normalizeBrowserH5Error(error, requestedUrl)
   }
+
+  rememberStoredH5ServerUrl(requestedUrl)
 
   if (queryToken && typeof window !== 'undefined') {
     try {

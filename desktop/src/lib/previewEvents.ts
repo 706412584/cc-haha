@@ -31,6 +31,7 @@ export async function subscribePreviewEvents(sessionId: string): Promise<() => v
       })
     }
     else if (msg.type === 'selection') {
+      if (!store.bySession[sessionId]?.pickerActive) return
       // 选区事件意味着页面侧已结束一次性拾取——同步关闭宿主侧 picker 态，避免按钮卡在按下态
       store.setPicker(sessionId, false)
       const p = msg.payload as (SelectionPayload & { screenshot?: { dataUrl?: string; kind?: string } }) | undefined

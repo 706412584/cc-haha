@@ -222,6 +222,7 @@ export const AskUserQuestionTool: Tool<InputSchema, Output> = buildTool({
     };
   },
   mapToolResultToToolResultBlockParam({
+    questions,
     answers,
     annotations
   }, toolUseID) {
@@ -236,9 +237,22 @@ export const AskUserQuestionTool: Tool<InputSchema, Output> = buildTool({
       }
       return parts.join(' ');
     }).join(', ');
+    const allQuestionsAnswered = questions.every(question =>
+      Object.prototype.hasOwnProperty.call(answers, question.question)
+    );
+    const answersOnlyUseOptions = Object.entries(answers).every(([questionText, answer]) => {
+      const question = questions.find(item => item.question === questionText);
+      if (!question) {
+        return false;
+      }
+      const selectedLabels = question.multiSelect ? answer.split(',').map(label => label.trim()).filter(Boolean) : [answer];
+      return selectedLabels.length > 0 && selectedLabels.every(label => question.options.some(option => option.label === label));
+    });
+    const hasUserNotes = Object.values(annotations ?? {}).some(annotation => Boolean(annotation.notes?.trim()));
+    const guidance = allQuestionsAnswered && answersOnlyUseOptions && !hasUserNotes ? "You can now continue with the user's answers in mind." : "Carefully consider the user's answers before proceeding. The answers may require that you pause, clarify, or change your approach.";
     return {
       type: 'tool_result',
-      content: `User has answered your questions: ${answersText}. You can now continue with the user's answers in mind.`,
+      content: `User has answered your questions: ${answersText}. ${guidance}`,
       tool_use_id: toolUseID
     };
   }

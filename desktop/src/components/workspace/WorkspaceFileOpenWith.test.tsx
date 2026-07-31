@@ -10,17 +10,26 @@ const hostOpenPath = vi.hoisted(() => vi.fn().mockResolvedValue(undefined))
 const browserOpen = vi.hoisted(() => vi.fn())
 const openPreview = vi.hoisted(() => vi.fn().mockResolvedValue(undefined))
 
-vi.mock('../../stores/openTargetStore', () => ({
-  useOpenTargetStore: (sel: (s: unknown) => unknown) =>
-    sel({
-      targets: [
-        { id: 'code', kind: 'ide', label: 'VS Code', icon: '', platform: 'darwin' },
-        { id: 'finder', kind: 'file_manager', label: 'Finder', icon: '', platform: 'darwin' },
-      ],
-      ensureTargets: () => {},
-      openTarget,
-    }),
+const openTargetState = vi.hoisted(() => ({
+  targets: [
+    { id: 'code', kind: 'ide', label: 'VS Code', icon: '', platform: 'darwin' },
+    { id: 'finder', kind: 'file_manager', label: 'Finder', icon: '', platform: 'darwin' },
+  ],
+  ensureTargets: () => {},
 }))
+
+// A zustand store is callable as a hook AND exposes getState; the shared menu
+// wiring in lib/openWithMenuItems uses the latter, the same way openPreviewLink
+// reads the browser/workspace stores.
+vi.mock('../../stores/openTargetStore', () => {
+  const state = { ...openTargetState, openTarget }
+  return {
+    useOpenTargetStore: Object.assign(
+      (sel: (s: unknown) => unknown) => sel(state),
+      { getState: () => state },
+    ),
+  }
+})
 
 vi.mock('@tauri-apps/plugin-shell', () => ({ open: shellOpen }))
 
@@ -61,17 +70,19 @@ describe('WorkspaceFileOpenWith', () => {
     }
   })
 
-  it('renders only IDE and file-manager items', () => {
+  it('renders the IDE, file-manager and copy-contents items', () => {
     const { getAllByRole } = render(
       <WorkspaceFileOpenWith absolutePath="/w/report.md" />,
     )
 
-    const menuItems = getAllByRole('menuitem')
-    expect(menuItems).toHaveLength(2)
-
-    const labels = menuItems.map((el) => el.textContent)
+    const labels = getAllByRole('menuitem').map((el) => el.textContent)
+    expect(labels).toHaveLength(3)
     expect(labels.some((l) => l?.includes('VS Code'))).toBe(true)
     expect(labels.some((l) => l?.includes('Finder'))).toBe(true)
+    // Added with #1146. "Copy path" is deliberately absent: WorkspacePanel
+    // already renders its own copy-path pair directly above this block.
+    expect(labels).toContain('openWith.copyFileContent')
+    expect(labels).not.toContain('openWith.copyPath')
     expect(labels.some((l) => l?.includes('openWith.systemDefault'))).toBe(false)
   })
 

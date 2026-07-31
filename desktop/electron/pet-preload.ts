@@ -4,7 +4,9 @@ import {
   validateElectronIpcPayload,
 } from './ipc/capabilities'
 import { ELECTRON_IPC_CHANNELS, type ElectronIpcChannel } from './ipc/channels'
-import type { DesktopHost } from '../src/lib/desktopHost/types'
+import { ELECTRON_EVENT_CHANNELS } from './ipc/channels'
+import type { DesktopHost, DesktopPetPanelPlacement } from '../src/lib/desktopHost/types'
+import type { Locale } from '../src/i18n/locale'
 
 function invoke<T>(channel: ElectronIpcChannel, payload?: unknown): Promise<T> {
   if (!isElectronIpcChannelAllowedForPetWindow(channel)) {
@@ -37,6 +39,19 @@ const petHost = {
     // server-enforced companion capability, never the desktop master token.
     getLocalAccessToken: () => invoke<string | null>(ELECTRON_IPC_CHANNELS.runtimeGetPetAccessToken),
   },
+  app: {
+    getLocalePreference: () =>
+      invoke<Locale | null>(ELECTRON_IPC_CHANNELS.appGetLocalePreference),
+    getPreferredSystemLanguages: () =>
+      invoke<string[]>(ELECTRON_IPC_CHANNELS.appGetPreferredSystemLanguages),
+    onLocaleChanged: (handler: (locale: Locale) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, locale: Locale) => handler(locale)
+      ipcRenderer.on(ELECTRON_EVENT_CHANNELS.appLocaleChanged, listener)
+      return Promise.resolve(() => {
+        ipcRenderer.removeListener(ELECTRON_EVENT_CHANNELS.appLocaleChanged, listener)
+      })
+    },
+  },
   appearance: {
     // The pet window is transparent and shares the renderer bootstrap, which
     // reports the applied theme. It has no native chrome to sync, and it must
@@ -49,11 +64,21 @@ const petHost = {
     showContextMenu: (closeLabel: string) =>
       invoke<boolean>(ELECTRON_IPC_CHANNELS.petsShowContextMenu, { closeLabel }),
     dragWindow: (payload: { phase: 'start' | 'move' | 'end', x: number, y: number }) =>
-      invoke<void>(ELECTRON_IPC_CHANNELS.petsDragWindow, payload),
+      invoke<DesktopPetPanelPlacement>(ELECTRON_IPC_CHANNELS.petsDragWindow, payload),
     setIgnoreMouseEvents: (ignore: boolean) =>
       invoke<void>(ELECTRON_IPC_CHANNELS.petsSetIgnoreMouseEvents, ignore),
     setInteractiveRegions: (regions: Array<{ x: number, y: number, width: number, height: number }>) =>
-      invoke<void>(ELECTRON_IPC_CHANNELS.petsSetInteractiveRegions, regions),
+      invoke<DesktopPetPanelPlacement>(ELECTRON_IPC_CHANNELS.petsSetInteractiveRegions, regions),
+    onPanelPlacementChanged: (handler: (placement: DesktopPetPanelPlacement) => void) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        placement: DesktopPetPanelPlacement,
+      ) => handler(placement)
+      ipcRenderer.on(ELECTRON_EVENT_CHANNELS.petPanelPlacementChanged, listener)
+      return Promise.resolve(() => {
+        ipcRenderer.removeListener(ELECTRON_EVENT_CHANNELS.petPanelPlacementChanged, listener)
+      })
+    },
     focusMainWindow: () => invoke<void>(ELECTRON_IPC_CHANNELS.petsFocusMainWindow),
     focusSession: (sessionId: string) =>
       invoke<void>(ELECTRON_IPC_CHANNELS.petsFocusSession, sessionId),

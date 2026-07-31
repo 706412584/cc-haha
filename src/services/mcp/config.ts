@@ -10,6 +10,7 @@ import { isClaudeInChromeMCPServer } from '../../utils/claudeInChrome/common.js'
 import {
   getCurrentProjectConfig,
   getGlobalConfig,
+  getProjectPathForConfig,
   saveCurrentProjectConfig,
   saveGlobalConfig,
 } from '../../utils/config.js'
@@ -17,7 +18,7 @@ import { getCwd } from '../../utils/cwd.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { getErrnoCode } from '../../utils/errors.js'
 import { getFsImplementation } from '../../utils/fsOperations.js'
-import { safeParseJSON } from '../../utils/json.js'
+import { safeParseJSON, safeParseJSONWithoutCache } from '../../utils/json.js'
 import { logError } from '../../utils/log.js'
 import { getPluginMcpServers } from '../../utils/plugins/mcpPluginIntegration.js'
 import { loadAllPluginsCacheOnly } from '../../utils/plugins/pluginLoader.js'
@@ -738,6 +739,13 @@ export async function addMcpConfig(
       } catch (error) {
         throw new Error(`Failed to write to .mcp.json: ${error}`)
       }
+
+      // Register the target project in the global config's project registry.
+      // A directory that has never hosted a session has no `projects` entry,
+      // and the desktop settings page discovers project-scoped servers by
+      // scanning registry keys — without this, a .mcp.json written to a fresh
+      // directory becomes invisible after an app restart (GH #1126).
+      registerCwdProjectIfDeclaresMcpServers()
       break
     }
 
@@ -966,12 +974,45 @@ function readRawMcpJsonFile(mcpJsonPath: string): Record<string, unknown> | null
     throw error
   }
 
-  const parsed = safeParseJSON(contents)
+  // Callers edit the returned object in place before writing it back, so it
+  // must be a fresh parse. Handing out the shared safeParseJSON cache entry
+  // here let a server removal mutate the cached value, and every .mcp.json
+  // with byte-identical content then parsed as already-deleted (GH #1126).
+  const parsed = safeParseJSONWithoutCache(contents)
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     return null
   }
 
   return parsed as Record<string, unknown>
+}
+
+/**
+ * True when the directory's own .mcp.json declares at least one MCP server.
+ * Reads the raw file so entries that fail schema validation still count — the
+ * desktop settings page must be able to rediscover them for the user to fix.
+ */
+export function projectDirDeclaresMcpServers(dir: string): boolean {
+  const mcpServers = readRawMcpJsonFile(join(dir, '.mcp.json'))?.mcpServers
+  return (
+    !!mcpServers &&
+    typeof mcpServers === 'object' &&
+    !Array.isArray(mcpServers) &&
+    Object.keys(mcpServers).length > 0
+  )
+}
+
+/**
+ * Ensure the cwd's project has a global-config registry entry when its
+ * .mcp.json declares servers. The registry is how the desktop settings page
+ * discovers which paths to query, so writes register their target eagerly and
+ * reads self-heal entries for .mcp.json files created before registration
+ * existed (or by other tools entirely). Idempotent and cheap when already
+ * registered. (GH #1126)
+ */
+export function registerCwdProjectIfDeclaresMcpServers(): void {
+  if (getGlobalConfig().projects?.[getProjectPathForConfig(getCwd())]) return
+  if (!projectDirDeclaresMcpServers(getCwd())) return
+  saveMcpProjectConfig(current => ({ ...current }))
 }
 
 /**

@@ -8,7 +8,10 @@ import {
   getProjectSearchFiles,
   handleFilesystemRoute,
 } from '../api/filesystem.js'
-import { clearFilesystemAccessRootsForTests } from '../services/filesystemAccessRoots.js'
+import {
+  clearFilesystemAccessRootsForTests,
+  registerFilesystemAccessRoot,
+} from '../services/filesystemAccessRoots.js'
 import { getRepositoryContext } from '../services/repositoryLaunchService.js'
 
 const cleanupDirs = new Set<string>()
@@ -118,6 +121,57 @@ describe('filesystem API', () => {
     expect(res.status).toBe(200)
     const body = await res.json() as { entries: Array<{ name: string }> }
     expect(body.entries.some((entry) => entry.name === 'note.txt')).toBe(true)
+  })
+
+  it('rejects final and intermediate file symlinks that escape a registered root', async () => {
+    if (process.platform === 'win32') return
+    const externalFixtureDir = await makeExternalFixtureDir()
+    if (!externalFixtureDir) return
+
+    cleanupDirs.add(externalFixtureDir)
+    const allowedRoot = path.join(externalFixtureDir, 'allowed')
+    const outsideRoot = path.join(externalFixtureDir, 'outside')
+    await fsp.mkdir(allowedRoot)
+    await fsp.mkdir(outsideRoot)
+    await fsp.writeFile(path.join(outsideRoot, 'secret.png'), Buffer.from('outside'))
+    await fsp.writeFile(path.join(allowedRoot, 'not-an-image.txt'), 'text')
+    await fsp.symlink(
+      path.join(outsideRoot, 'secret.png'),
+      path.join(allowedRoot, 'final-link.png'),
+    )
+    await fsp.symlink(outsideRoot, path.join(allowedRoot, 'linked-directory'), 'dir')
+    await fsp.symlink(
+      path.join(allowedRoot, 'not-an-image.txt'),
+      path.join(allowedRoot, 'pretend-image.png'),
+    )
+    registerFilesystemAccessRoot(allowedRoot)
+
+    for (const candidate of [
+      path.join(allowedRoot, 'final-link.png'),
+      path.join(allowedRoot, 'linked-directory', 'secret.png'),
+    ]) {
+      const res = await handleFilesystemRoute(
+        '/api/filesystem/file',
+        makeUrl('/api/filesystem/file', { path: candidate }),
+      )
+      expect(res.status).toBe(403)
+    }
+
+    const browseEscape = await handleFilesystemRoute(
+      '/api/filesystem/browse',
+      makeUrl('/api/filesystem/browse', {
+        path: path.join(allowedRoot, 'linked-directory'),
+      }),
+    )
+    expect(browseEscape.status).toBe(403)
+
+    const disguisedType = await handleFilesystemRoute(
+      '/api/filesystem/file',
+      makeUrl('/api/filesystem/file', {
+        path: path.join(allowedRoot, 'pretend-image.png'),
+      }),
+    )
+    expect(disguisedType.status).toBe(400)
   })
 
   it('fuzzy searches files and directories below the selected root', async () => {

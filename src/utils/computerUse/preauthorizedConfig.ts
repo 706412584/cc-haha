@@ -29,9 +29,9 @@ export type StoredComputerUseConfig = {
 export const DEFAULT_COMPUTER_USE_ENABLED = true
 
 export const DEFAULT_DESKTOP_GRANT_FLAGS: CuGrantFlags = {
-  clipboardRead: true,
-  clipboardWrite: true,
-  systemKeyCombos: true,
+  clipboardRead: false,
+  clipboardWrite: false,
+  systemKeyCombos: false,
 }
 
 const FAIL_CLOSED_GRANT_FLAGS: CuGrantFlags = {

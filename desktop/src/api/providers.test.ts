@@ -29,7 +29,7 @@ describe('providersApi.fetchModels', () => {
       ),
     )
 
-    const result = await providersApi.fetchModels({
+    const result = await providersApi.fetchUpstreamModels({
       // The user's broken case: plain HTTP relay with bare IP, which
       // the previous renderer-direct fetch path could not reach.
       baseUrl: 'http://47.116.22.0:3000',
@@ -76,7 +76,7 @@ describe('providersApi.fetchModels', () => {
     )
 
     await expect(
-      providersApi.fetchModels({
+      providersApi.fetchUpstreamModels({
         baseUrl: 'https://api.example.com',
         apiKey: 'sk-bad',
         apiFormat: 'openai_chat',

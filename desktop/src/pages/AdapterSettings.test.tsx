@@ -8,7 +8,7 @@ import { useSettingsStore } from '../stores/settingsStore'
 import type { AdapterFileConfig } from '../types/adapter'
 
 const FEISHU_CREATE_BOT_URL = 'https://open.feishu.cn/page/openclaw?form=multiAgent'
-const IM_CONFIG_DOCS_URL = 'https://claudecode-haha.relakkesyang.org/im/'
+const IM_CONFIG_DOCS_URL = 'https://cchaha.ai/im/'
 
 function renderAdapterSettings(
   config: AdapterFileConfig,
@@ -112,6 +112,136 @@ describe('AdapterSettings WeChat runtime status', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'WeChat' }))
 
     expect(screen.getByText('WeChat session expired. Scan again to rebind.')).toBeInTheDocument()
+  })
+})
+
+describe('AdapterSettings config saving', () => {
+  it('does not send WeChat binding-owned fields when saving editable settings', async () => {
+    const updateConfig = vi.fn(async (_patch: Partial<AdapterFileConfig>) => {})
+    renderAdapterSettings(
+      {
+        wechat: {
+          accountId: 'wx-account',
+          botToken: '****oken',
+          baseUrl: 'https://ilinkai.weixin.qq.com',
+          userId: 'wx-user',
+          allowedUsers: ['wx-allowed'],
+          pairedUsers: [{ userId: 'wx-user', displayName: 'WeChat User', pairedAt: 1 }],
+        },
+      },
+      { updateConfig },
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => {
+      expect(updateConfig).toHaveBeenCalledTimes(1)
+    })
+    const patch = updateConfig.mock.calls[0]![0]
+    expect(patch).toMatchObject({
+      wechat: {
+        allowedUsers: ['wx-allowed'],
+      },
+    })
+    expect(patch.wechat).toEqual({
+      allowedUsers: ['wx-allowed'],
+    })
+  })
+
+  it('does not send WhatsApp binding-owned fields when saving editable settings', async () => {
+    const updateConfig = vi.fn(async (_patch: Partial<AdapterFileConfig>) => {})
+    renderAdapterSettings(
+      {
+        whatsapp: {
+          accountJid: '15551234567@s.whatsapp.net',
+          authDir: '/tmp/whatsapp-auth',
+          allowedUsers: ['15550000000@s.whatsapp.net'],
+          pairedUsers: [{
+            userId: '15551234567@s.whatsapp.net',
+            displayName: 'WhatsApp User',
+            pairedAt: 1,
+          }],
+        },
+      },
+      { updateConfig },
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => {
+      expect(updateConfig).toHaveBeenCalledTimes(1)
+    })
+    const patch = updateConfig.mock.calls[0]![0]
+    expect(patch.whatsapp).toEqual({
+      allowedUsers: ['15550000000@s.whatsapp.net'],
+    })
+  })
+
+  it('submits empty strings when clearing editable configuration', async () => {
+    const updateConfig = vi.fn(async (_patch: Partial<AdapterFileConfig>) => {})
+    renderAdapterSettings(
+      {
+        defaultProjectDir: '/tmp/existing-project',
+        telegram: { botToken: '****oken' },
+        feishu: {
+          appId: 'cli_existing',
+          appSecret: '****cret',
+          encryptKey: '****-key',
+          verificationToken: '****oken',
+        },
+        dingtalk: {
+          clientId: 'ding-client',
+          clientSecret: '****cret',
+          endpoint: 'https://custom.example.com',
+          permissionCardTemplateId: 'permission-template',
+        },
+      },
+      { updateConfig },
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear default project' }))
+    fireEvent.change(screen.getByLabelText('Bot Token'), { target: { value: '' } })
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Feishu' }))
+    fireEvent.change(screen.getByLabelText('App ID'), { target: { value: '' } })
+    fireEvent.change(screen.getByLabelText('App Secret'), { target: { value: '' } })
+    fireEvent.change(screen.getByLabelText('Encrypt Key'), { target: { value: '' } })
+    fireEvent.change(screen.getByLabelText('Verification Token'), { target: { value: '' } })
+
+    fireEvent.click(screen.getByRole('tab', { name: 'DingTalk' }))
+    fireEvent.change(screen.getByLabelText('Client ID'), { target: { value: '' } })
+    fireEvent.change(screen.getByLabelText('Client Secret'), { target: { value: '' } })
+    fireEvent.change(screen.getByLabelText('Stream Endpoint'), { target: { value: '' } })
+    fireEvent.change(screen.getByLabelText('Permission Card Template ID'), { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => {
+      expect(updateConfig).toHaveBeenCalledTimes(1)
+    })
+    const patch = updateConfig.mock.calls[0]![0]
+    expect(patch).toMatchObject({
+      defaultProjectDir: '',
+      telegram: {
+        botToken: '',
+        allowedUsers: [],
+      },
+      feishu: {
+        appId: '',
+        appSecret: '',
+        encryptKey: '',
+        verificationToken: '',
+        allowedUsers: [],
+        streamingCard: false,
+      },
+      dingtalk: {
+        clientId: '',
+        clientSecret: '',
+        allowedUsers: [],
+        endpoint: '',
+        permissionCardTemplateId: '',
+      },
+    })
+
   })
 })
 

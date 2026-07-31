@@ -5,8 +5,7 @@ import { zh } from './locales/zh'
 import { zh as zhTW } from './locales/zh-TW'
 import { jp } from './locales/jp'
 import { kr } from './locales/kr'
-
-export type Locale = 'en' | 'zh' | 'zh-TW' | 'jp' | 'kr'
+import type { Locale } from './locale'
 
 const translations: Record<Locale, Record<string, string>> = {
   en,
@@ -65,3 +64,4 @@ export function t(key: TranslationKey, params?: Record<string, string | number>)
 }
 
 export type { TranslationKey }
+export type { Locale } from './locale'

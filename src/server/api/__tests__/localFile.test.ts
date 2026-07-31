@@ -1,8 +1,16 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import * as path from 'node:path'
 import { handleLocalFile, reconstructAbsolutePath } from '../localFile'
+import { isAllowedFilesystemPath } from '../filesystem'
 
 // Deterministic 256-byte payload (bytes 0..255) so range slices are checkable.
 const VIDEO_BYTES = Uint8Array.from({ length: 256 }, (_, i) => i)
@@ -25,6 +33,21 @@ function setupFiles() {
   writeFileSync(path.join(root, 'clip.mp4'), VIDEO_BYTES)
   writeFileSync(path.join(root, 'with space.html'), '<h1>spaced</h1>')
   return root
+}
+
+function makeExternalFixtureDir(): string | null {
+  const candidates = ['/var/tmp', '/private/var/tmp', '/Users/Shared']
+  for (const baseDir of candidates) {
+    try {
+      if (!statSync(baseDir).isDirectory()) continue
+      const fixture = mkdtempSync(path.join(baseDir, 'local-file-symlink-test-'))
+      if (!isAllowedFilesystemPath(fixture)) return fixture
+      rmSync(fixture, { recursive: true, force: true })
+    } catch {
+      // Try the next common writable directory outside the default allow-list.
+    }
+  }
+  return null
 }
 
 /** Build a /local-file/<abs> URL exactly the way the desktop helper does. */
@@ -62,6 +85,12 @@ describe('handleLocalFile', () => {
     expect(res.status).toBe(200)
     expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8')
     expect(res.headers.get('accept-ranges')).toBe('bytes')
+    const csp = res.headers.get('content-security-policy')
+    expect(csp).toContain('sandbox')
+    expect(csp).toContain('allow-same-origin')
+    expect(csp).toContain('allow-popups')
+    expect(csp).toContain("default-src 'none'")
+    expect(csp).toContain("connect-src 'none'")
     expect(await res.text()).toBe('<h1>ok</h1>')
   })
 
@@ -111,6 +140,30 @@ describe('handleLocalFile', () => {
   it.skipIf(process.platform === 'win32')('rejects /etc/passwd with 403 (sandbox escape)', async () => {
     const res = await handleLocalFile(localFileRequestUrl('/etc/passwd'))
     expect(res.status).toBe(403)
+  })
+
+  it('rejects final and intermediate symlinks that escape an allowed root', async () => {
+    if (process.platform === 'win32') return
+    const outside = makeExternalFixtureDir()
+    if (!outside) return
+    const root = setupFiles()
+    writeFileSync(path.join(outside, 'secret.txt'), 'outside')
+    symlinkSync(path.join(outside, 'secret.txt'), path.join(root, 'final-link.txt'))
+    symlinkSync(outside, path.join(root, 'linked-directory'), 'dir')
+
+    try {
+      const finalLink = await handleLocalFile(
+        localFileRequestUrl(path.join(root, 'final-link.txt')),
+      )
+      const intermediateLink = await handleLocalFile(
+        localFileRequestUrl(path.join(root, 'linked-directory', 'secret.txt')),
+      )
+
+      expect(finalLink.status).toBe(403)
+      expect(intermediateLink.status).toBe(403)
+    } finally {
+      rmSync(outside, { recursive: true, force: true })
+    }
   })
 
   it('404s a missing in-sandbox file', async () => {

@@ -304,6 +304,8 @@ export type SkillSlashCommand = {
   name: string
   description: string
   argumentHint?: string
+  kind: 'command' | 'skill'
+  source?: SkillSource
 }
 
 async function collectLegacySlashCommands(cwd: string): Promise<SkillSlashCommand[]> {
@@ -318,6 +320,7 @@ async function collectLegacySlashCommands(cwd: string): Promise<SkillSlashComman
       name: command.name,
       description: command.description || '',
       ...(command.argumentHint ? { argumentHint: command.argumentHint } : {}),
+      kind: 'command' as const,
     }))
 }
 
@@ -454,7 +457,12 @@ export async function listSkillSlashCommands(cwd?: string): Promise<SkillSlashCo
       continue
     }
     byName.set(skill.name, {
-      command: { name: skill.name, description: skill.description || '' },
+      command: {
+        name: skill.name,
+        description: skill.description || '',
+        kind: 'skill',
+        source: skill.source,
+      },
       flavor: skill.rootFlavor,
     })
   }

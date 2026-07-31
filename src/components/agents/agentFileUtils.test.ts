@@ -479,6 +479,85 @@ describe('agent file paths and persistence', () => {
     await expect(fs.stat(nestedFile)).rejects.toThrow()
   })
 
+  test.skipIf(process.platform === 'win32')('rejects updating a project agent through a final symlink', async () => {
+    const agentsDir = path.join(temporaryRoot, '.claude', 'agents')
+    const outsideFile = path.join(temporaryRoot, 'outside-agent.md')
+    const symlinkFile = path.join(agentsDir, 'linked-agent.md')
+    const originalContent = formatAgentAsMarkdown(
+      'linked-agent',
+      'Original outside description',
+      ['Read'],
+      'Keep this outside prompt.',
+    )
+    await fs.mkdir(agentsDir, { recursive: true })
+    await fs.writeFile(outsideFile, originalContent, 'utf-8')
+    await fs.symlink(outsideFile, symlinkFile)
+    const agent: CustomAgentDefinition = {
+      agentType: 'linked-agent',
+      whenToUse: 'Original outside description',
+      rawSystemPrompt: 'Keep this outside prompt.',
+      rawTools: ['Read'],
+      tools: ['Read'],
+      getSystemPrompt: () => 'Keep this outside prompt.',
+      source: 'projectSettings',
+      baseDir: agentsDir,
+      sourceFilePath: symlinkFile,
+    }
+
+    await expect(
+      updateAgentFile(
+        agent,
+        'Changed through project symlink',
+        getPersistedAgentTools(agent),
+        undefined,
+      ),
+    ).rejects.toThrow('symbolic link')
+    expect(await fs.readFile(outsideFile, 'utf-8')).toBe(originalContent)
+  })
+
+  test('rejects updating a project agent whose canonical path escapes its loaded directory', async () => {
+    const agentsDir = path.join(temporaryRoot, '.claude', 'agents')
+    const outsideDir = path.join(temporaryRoot, 'outside-agents')
+    const outsideFile = path.join(outsideDir, 'nested-agent.md')
+    const linkedDirectory = path.join(agentsDir, 'linked-directory')
+    const lexicalFile = path.join(linkedDirectory, 'nested-agent.md')
+    const originalContent = formatAgentAsMarkdown(
+      'nested-agent',
+      'Original outside description',
+      ['Read'],
+      'Keep this outside prompt.',
+    )
+    await fs.mkdir(agentsDir, { recursive: true })
+    await fs.mkdir(outsideDir, { recursive: true })
+    await fs.writeFile(outsideFile, originalContent, 'utf-8')
+    await fs.symlink(
+      outsideDir,
+      linkedDirectory,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    )
+    const agent: CustomAgentDefinition = {
+      agentType: 'nested-agent',
+      whenToUse: 'Original outside description',
+      rawSystemPrompt: 'Keep this outside prompt.',
+      rawTools: ['Read'],
+      tools: ['Read'],
+      getSystemPrompt: () => 'Keep this outside prompt.',
+      source: 'projectSettings',
+      baseDir: agentsDir,
+      sourceFilePath: lexicalFile,
+    }
+
+    await expect(
+      updateAgentFile(
+        agent,
+        'Changed through linked directory',
+        getPersistedAgentTools(agent),
+        undefined,
+      ),
+    ).rejects.toThrow('outside its agents directory')
+    expect(await fs.readFile(outsideFile, 'utf-8')).toBe(originalContent)
+  })
+
   test('rejects mutations of built-in agents', async () => {
     const builtInAgent: AgentDefinition = {
       agentType: 'explore',

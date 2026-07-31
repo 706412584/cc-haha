@@ -107,6 +107,26 @@ function mergeSavedOrderIntoDisplayOrder(providerOrder: string[], savedOrder: st
   })
 }
 
+function buildSavedProvider(input: CreateProviderInput): SavedProvider {
+  return {
+    id: crypto.randomUUID(),
+    presetId: input.presetId,
+    name: input.name,
+    apiKey: input.apiKey,
+    ...(input.authStrategy !== undefined && { authStrategy: input.authStrategy }),
+    baseUrl: input.baseUrl,
+    apiFormat: input.apiFormat ?? 'anthropic',
+    runtimeKind: input.runtimeKind ?? 'anthropic_compatible',
+    models: normalizeModelMapping(input.models),
+    ...(input.model1mSupport !== undefined && { model1mSupport: input.model1mSupport }),
+    ...(input.autoCompactWindow !== undefined && { autoCompactWindow: input.autoCompactWindow }),
+    ...(input.modelContextWindows !== undefined && { modelContextWindows: input.modelContextWindows }),
+    toolSearchEnabled: input.toolSearchEnabled ?? true,
+    ...(input.disableExperimentalBetas === true && { disableExperimentalBetas: true }),
+    ...(input.notes !== undefined && { notes: input.notes }),
+  }
+}
+
 function appendNewProviderToOrder(providerOrder: string[], providerId: string, existingProviders: SavedProvider[]): string[] {
   const existingProviderIds = new Set(existingProviders.map((provider) => provider.id))
   const lastSavedIndex = providerOrder.reduce(
@@ -221,28 +241,36 @@ export class ProviderService {
   async addProvider(input: CreateProviderInput): Promise<SavedProvider> {
     const index = await this.readIndex()
 
-    const provider: SavedProvider = {
-      id: crypto.randomUUID(),
-      presetId: input.presetId,
-      name: input.name,
-      apiKey: input.apiKey,
-      ...(input.authStrategy !== undefined && { authStrategy: input.authStrategy }),
-      baseUrl: input.baseUrl,
-      apiFormat: input.apiFormat ?? 'anthropic',
-      runtimeKind: input.runtimeKind ?? 'anthropic_compatible',
-      models: normalizeModelMapping(input.models),
-      ...(input.model1mSupport !== undefined && { model1mSupport: input.model1mSupport }),
-      ...(input.autoCompactWindow !== undefined && { autoCompactWindow: input.autoCompactWindow }),
-      ...(input.modelContextWindows !== undefined && { modelContextWindows: input.modelContextWindows }),
-      toolSearchEnabled: input.toolSearchEnabled ?? true,
-      ...(input.disableExperimentalBetas === true && { disableExperimentalBetas: true }),
-      ...(input.notes !== undefined && { notes: input.notes }),
-    }
+    const provider = buildSavedProvider(input)
 
     index.providerOrder = appendNewProviderToOrder(index.providerOrder, provider.id, index.providers)
     index.providers.push(provider)
     await this.writeIndex(index)
     return provider
+  }
+
+  /**
+   * Append several providers in one pass.
+   *
+   * Bulk imports (cc-switch) read the index once and write it once so a partial
+   * failure cannot leave half the batch behind. The persisted shape is identical
+   * to addProvider, so no storage migration is involved.
+   */
+  async importProviders(inputs: CreateProviderInput[]): Promise<SavedProvider[]> {
+    if (inputs.length === 0) return []
+
+    const index = await this.readIndex()
+
+    const imported: SavedProvider[] = []
+    for (const input of inputs) {
+      const provider = buildSavedProvider(input)
+      index.providerOrder = appendNewProviderToOrder(index.providerOrder, provider.id, index.providers)
+      index.providers.push(provider)
+      imported.push(provider)
+    }
+
+    await this.writeIndex(index)
+    return imported
   }
 
   async updateProvider(id: string, input: UpdateProviderInput): Promise<SavedProvider> {
@@ -627,13 +655,13 @@ export class ProviderService {
 
   async testProvider(
     id: string,
-    overrides?: { baseUrl?: string; modelId?: string; apiFormat?: ApiFormat; authStrategy?: ProviderAuthStrategy },
+    overrides?: { modelId?: string },
   ): Promise<ProviderTestResult> {
     const provider = await this.getProvider(id)
-    const baseUrl = overrides?.baseUrl || provider.baseUrl
+    const baseUrl = provider.baseUrl
     const modelId = overrides?.modelId || provider.models.main
-    const apiFormat = overrides?.apiFormat ?? provider.apiFormat ?? 'anthropic'
-    const authStrategy = overrides?.authStrategy ?? provider.authStrategy ?? getPresetAuthStrategy(provider.presetId)
+    const apiFormat = provider.apiFormat ?? 'anthropic'
+    const authStrategy = provider.authStrategy ?? getPresetAuthStrategy(provider.presetId)
     const presetDefaultEnv = getPresetDefaultEnv(provider.presetId)
     const apiKey = provider.apiKey
       || presetDefaultEnv.ANTHROPIC_AUTH_TOKEN

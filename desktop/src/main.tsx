@@ -5,6 +5,8 @@ import './theme/globals.css'
 import { initializeAppZoom } from './lib/appZoom'
 import { initializeTouchH5 } from './lib/touchH5'
 import { runDesktopPersistenceMigrations } from './lib/persistenceMigrations'
+import { getDesktopHost } from './lib/desktopHost'
+import { initializeLocale } from './i18n/locale'
 
 declare global {
   interface Window {
@@ -45,6 +47,7 @@ export async function bootstrapDesktopApp(
   loadModules: () => Promise<DesktopBootstrapModules> = loadDesktopBootstrapModules,
 ) {
   try {
+    await initializeLocale(getDesktopHost().app)
     const [{ App }, { ErrorBoundary }, { installClientDiagnosticsCapture }, { initializeTheme }] = await loadModules()
     initializeTheme()
     installClientDiagnosticsCapture()

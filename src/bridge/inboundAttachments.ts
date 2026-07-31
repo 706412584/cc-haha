@@ -11,9 +11,9 @@
  */
 
 import type { ContentBlockParam } from '@anthropic-ai/sdk/resources/messages.mjs'
-import axios from 'axios'
+import axios, { type AxiosRequestConfig } from 'axios'
 import { randomUUID } from 'crypto'
-import { mkdir, writeFile } from 'fs/promises'
+import { mkdir, unlink, writeFile } from 'fs/promises'
 import { basename, join } from 'path'
 import { z } from 'zod/v4'
 import { getSessionId } from '../bootstrap/state.js'
@@ -23,6 +23,10 @@ import { lazySchema } from '../utils/lazySchema.js'
 import { getBridgeAccessToken, getBridgeBaseUrl } from './bridgeConfig.js'
 
 const DOWNLOAD_TIMEOUT_MS = 30_000
+export const MAX_INBOUND_ATTACHMENTS = 10
+export const MAX_INBOUND_ATTACHMENT_BYTES = 30 * 1024 * 1024
+export const MAX_INBOUND_ATTACHMENT_TOTAL_BYTES = 60 * 1024 * 1024
+export const MAX_INBOUND_ATTACHMENT_CONCURRENCY = 2
 
 function debug(msg: string): void {
   logForDebugging(`[bridge:inbound-attach] ${msg}`)
@@ -34,16 +38,44 @@ const attachmentSchema = lazySchema(() =>
     file_name: z.string(),
   }),
 )
-const attachmentsArraySchema = lazySchema(() => z.array(attachmentSchema()))
+const attachmentsArraySchema = lazySchema(() =>
+  z.array(attachmentSchema()).max(MAX_INBOUND_ATTACHMENTS),
+)
 
 export type InboundAttachment = z.infer<ReturnType<typeof attachmentSchema>>
+
+export type InboundAttachmentDownloader = (
+  url: string,
+  config: AxiosRequestConfig,
+) => Promise<{ status: number; data: unknown }>
+
+type DownloadBudget = {
+  totalBytes: number
+  limitExceeded: boolean
+}
+
+const defaultDownloader: InboundAttachmentDownloader = (url, config) =>
+  axios.get(url, config)
+
+function toBuffer(data: unknown): Buffer {
+  if (typeof data === 'string') return Buffer.from(data)
+  if (data instanceof ArrayBuffer) return Buffer.from(data)
+  if (ArrayBuffer.isView(data)) {
+    return Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+  }
+  throw new Error('attachment response is not binary data')
+}
 
 /** Pull file_attachments off a loosely-typed inbound message. */
 export function extractInboundAttachments(msg: unknown): InboundAttachment[] {
   if (typeof msg !== 'object' || msg === null || !('file_attachments' in msg)) {
     return []
   }
-  const parsed = attachmentsArraySchema().safeParse(msg.file_attachments)
+  const raw = msg.file_attachments
+  if (!Array.isArray(raw) || raw.length > MAX_INBOUND_ATTACHMENTS) {
+    return []
+  }
+  const parsed = attachmentsArraySchema().safeParse(raw)
   return parsed.success ? parsed.data : []
 }
 
@@ -65,7 +97,11 @@ function uploadsDir(): string {
  * Fetch + write one attachment. Returns the absolute path on success,
  * undefined on any failure.
  */
-async function resolveOne(att: InboundAttachment): Promise<string | undefined> {
+async function resolveOne(
+  att: InboundAttachment,
+  budget: DownloadBudget,
+  download: InboundAttachmentDownloader,
+): Promise<string | undefined> {
   const token = getBridgeAccessToken()
   if (!token) {
     debug('skip: no oauth token')
@@ -79,35 +115,58 @@ async function resolveOne(att: InboundAttachment): Promise<string | undefined> {
     // FedStart URL degrades to "no @path" instead of crashing print.ts's
     // reader loop (which has no catch around the await).
     const url = `${getBridgeBaseUrl()}/api/oauth/files/${encodeURIComponent(att.file_uuid)}/content`
-    const response = await axios.get(url, {
+    const response = await download(url, {
       headers: { Authorization: `Bearer ${token}` },
       responseType: 'arraybuffer',
       timeout: DOWNLOAD_TIMEOUT_MS,
+      maxContentLength: MAX_INBOUND_ATTACHMENT_BYTES,
+      maxBodyLength: MAX_INBOUND_ATTACHMENT_BYTES,
       validateStatus: () => true,
     })
     if (response.status !== 200) {
       debug(`fetch ${att.file_uuid} failed: status=${response.status}`)
       return undefined
     }
-    data = Buffer.from(response.data)
+    data = toBuffer(response.data)
+    if (data.length > MAX_INBOUND_ATTACHMENT_BYTES) {
+      budget.limitExceeded = true
+      debug(`skip ${att.file_uuid}: exceeds per-file limit`)
+      return undefined
+    }
+    if (
+      budget.totalBytes + data.length >
+      MAX_INBOUND_ATTACHMENT_TOTAL_BYTES
+    ) {
+      budget.limitExceeded = true
+      debug(`skip ${att.file_uuid}: exceeds aggregate attachment limit`)
+      return undefined
+    }
+    budget.totalBytes += data.length
   } catch (e) {
+    if (/maxContentLength|larger than.*limit/i.test(String(e))) {
+      budget.limitExceeded = true
+    }
     debug(`fetch ${att.file_uuid} threw: ${e}`)
     return undefined
   }
 
-  // uuid-prefix makes collisions impossible across messages and within one
-  // (same filename, different files). 8 chars is enough — this isn't security.
+  // Keep a readable UUID prefix for diagnostics, but add a fresh suffix for
+  // every delivery. The same cloud attachment may be intentionally resent in
+  // one session, and staging must neither overwrite nor silently drop it.
   const safeName = sanitizeFileName(att.file_name)
   const prefix = (
     att.file_uuid.slice(0, 8) || randomUUID().slice(0, 8)
   ).replace(/[^a-zA-Z0-9_-]/g, '_')
   const dir = uploadsDir()
-  const outPath = join(dir, `${prefix}-${safeName}`)
+  const outPath = join(dir, `${prefix}-${randomUUID()}-${safeName}`)
 
   try {
-    await mkdir(dir, { recursive: true })
-    await writeFile(outPath, data)
+    await mkdir(dir, { recursive: true, mode: 0o700 })
+    await writeFile(outPath, data, { flag: 'wx', mode: 0o600 })
   } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EEXIST') {
+      await unlink(outPath).catch(() => {})
+    }
     debug(`write ${outPath} failed: ${e}`)
     return undefined
   }
@@ -122,11 +181,40 @@ async function resolveOne(att: InboundAttachment): Promise<string | undefined> {
  */
 export async function resolveInboundAttachments(
   attachments: InboundAttachment[],
+  options: { download?: InboundAttachmentDownloader } = {},
 ): Promise<string> {
   if (attachments.length === 0) return ''
+  if (attachments.length > MAX_INBOUND_ATTACHMENTS) {
+    debug(`skip: ${attachments.length} attachments exceeds item limit`)
+    return ''
+  }
   debug(`resolving ${attachments.length} attachment(s)`)
-  const paths = await Promise.all(attachments.map(resolveOne))
+  const budget: DownloadBudget = { totalBytes: 0, limitExceeded: false }
+  const paths: Array<string | undefined> = new Array(attachments.length)
+  let nextIndex = 0
+  const worker = async (): Promise<void> => {
+    while (!budget.limitExceeded) {
+      const index = nextIndex
+      nextIndex += 1
+      const attachment = attachments[index]
+      if (!attachment) return
+      paths[index] = await resolveOne(
+        attachment,
+        budget,
+        options.download ?? defaultDownloader,
+      )
+    }
+  }
+  const workerCount = Math.min(
+    MAX_INBOUND_ATTACHMENT_CONCURRENCY,
+    attachments.length,
+  )
+  await Promise.all(Array.from({ length: workerCount }, worker))
   const ok = paths.filter((p): p is string => p !== undefined)
+  if (budget.limitExceeded) {
+    await Promise.all(ok.map((filePath) => unlink(filePath).catch(() => {})))
+    return ''
+  }
   if (ok.length === 0) return ''
   // Quoted form — extractAtMentionedFiles truncates unquoted @refs at the
   // first space, which breaks any home dir with spaces (/Users/John Smith/).

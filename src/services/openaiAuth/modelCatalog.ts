@@ -4,6 +4,7 @@ import {
   OPENAI_CODEX_ORIGINATOR,
   OPENAI_CODEX_TOKEN_USER_AGENT,
 } from './client.js'
+import { createModelCatalogCache } from '../modelCatalogCache.js'
 import { ensureFreshOpenAITokens } from './index.js'
 import { getOpenAIOAuthTokens } from './storage.js'
 import {
@@ -21,11 +22,11 @@ export const OPENAI_CODEX_MODELS_ENDPOINT = new URL(
 
 const MODEL_CATALOG_TTL_MS = 5 * 60_000
 const MODEL_CATALOG_TIMEOUT_MS = 5_000
-let cachedCatalog: {
-  accountKey: string
-  expiresAt: number
-  models: OpenAIModelCatalogEntry[]
-} | null = null
+const MODEL_CATALOG_FAILURE_BACKOFF_MS = 60_000
+const catalogCache = createModelCatalogCache<OpenAIModelCatalogEntry[]>({
+  ttlMs: MODEL_CATALOG_TTL_MS,
+  failureBackoffMs: MODEL_CATALOG_FAILURE_BACKOFF_MS,
+})
 
 type RemoteReasoningLevel = {
   effort?: unknown
@@ -139,31 +140,20 @@ export async function getOpenAICodexModelCatalog(options?: {
   const accountKey = tokens
     ? tokens.accountId ?? tokens.email ?? 'authenticated-default'
     : 'logged-out'
-  if (
-    !options?.forceRefresh &&
-    cachedCatalog &&
-    cachedCatalog.accountKey === accountKey &&
-    cachedCatalog.expiresAt > Date.now()
-  ) {
-    return cachedCatalog.models
-  }
-
-  try {
-    const models = await fetchOpenAICodexModelCatalog(options?.fetchOverride)
-    if (models.length === 0) {
-      throw new Error('OpenAI models endpoint returned no visible models')
-    }
-    cachedCatalog = {
-      accountKey,
-      expiresAt: Date.now() + MODEL_CATALOG_TTL_MS,
-      models,
-    }
-    return models
-  } catch {
-    return OPENAI_CODEX_MODEL_CATALOG
-  }
+  return catalogCache.resolve({
+    accountKey,
+    fetchCatalog: async () => {
+      const models = await fetchOpenAICodexModelCatalog(options?.fetchOverride)
+      if (models.length === 0) {
+        throw new Error('OpenAI models endpoint returned no visible models')
+      }
+      return models
+    },
+    fallback: OPENAI_CODEX_MODEL_CATALOG,
+    ...(options?.forceRefresh ? { forceRefresh: true } : {}),
+  })
 }
 
 export function clearOpenAICodexModelCatalogCache(): void {
-  cachedCatalog = null
+  catalogCache.clear()
 }

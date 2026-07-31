@@ -1,9 +1,10 @@
 import { createRef } from 'react'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import '@testing-library/jest-dom'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ReasoningEffortPopover } from './ReasoningEffortPopover'
+import { useSettingsStore } from '../../stores/settingsStore'
 
 const options = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 const labels = {
@@ -13,6 +14,10 @@ const labels = {
   xhigh: '极高',
   max: '最大',
 }
+
+beforeEach(() => {
+  useSettingsStore.setState({ locale: 'zh' })
+})
 
 afterEach(cleanup)
 

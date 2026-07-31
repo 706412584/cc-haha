@@ -1,6 +1,6 @@
 import '@testing-library/jest-dom'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 beforeAll(() => {
   Object.defineProperty(globalThis, 'ResizeObserver', {
@@ -29,6 +29,10 @@ import { useBrowserPanelStore } from '../../stores/browserPanelStore'
 import { useWorkspacePanelStore } from '../../stores/workspacePanelStore'
 import { useOverlayStore } from '../../stores/overlayStore'
 import { useSettingsStore } from '../../stores/settingsStore'
+
+beforeEach(() => {
+  useSettingsStore.setState({ locale: 'zh' })
+})
 
 afterEach(() => {
   cleanup()

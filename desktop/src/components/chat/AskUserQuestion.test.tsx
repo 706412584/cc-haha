@@ -400,4 +400,88 @@ describe('AskUserQuestion', () => {
     expect(screen.queryByRole('button', { name: /submit/i })).toBeNull()
     expect(screen.getByText(/Tool permission request failed: AbortError/)).toBeTruthy()
   })
+
+  describe('chat about this', () => {
+    const SCOPE_INPUT = {
+      questions: [
+        {
+          question: 'Which scope?',
+          options: [{ label: 'Single page' }, { label: 'Tabs' }],
+        },
+      ],
+    }
+
+    // The whole point of the button: you reach for it precisely when none of
+    // the options fit, which is when nothing is selected. Gating it on
+    // `allAnswered` like Submit would make it unreachable in its own use case.
+    it('stays enabled with nothing selected, unlike submit', () => {
+      render(<AskUserQuestion toolUseId="tool-1" input={SCOPE_INPUT} />)
+
+      expect(screen.getByRole('button', { name: /submit/i })).toHaveProperty('disabled', true)
+      expect(screen.getByRole('button', { name: /chat about this/i })).toHaveProperty(
+        'disabled',
+        false,
+      )
+    })
+
+    it('denies the permission so the text reaches the model, rather than answering', () => {
+      render(<AskUserQuestion toolUseId="tool-1" input={SCOPE_INPUT} />)
+
+      fireEvent.click(screen.getByRole('button', { name: /chat about this/i }))
+
+      expect(sendMock).toHaveBeenCalledWith(ACTIVE_TAB, {
+        type: 'permission_response',
+        requestId: 'perm-1',
+        allowed: false,
+        denyMessage: '- "Which scope?"\n  (No answer provided)',
+      })
+    })
+
+    it('carries answers already filled in so the handoff does not discard them', () => {
+      render(<AskUserQuestion toolUseId="tool-1" input={SCOPE_INPUT} />)
+
+      fireEvent.click(screen.getByRole('button', { name: /^Tabs$/ }))
+      fireEvent.click(screen.getByRole('button', { name: /chat about this/i }))
+
+      expect(sendMock).toHaveBeenCalledWith(ACTIVE_TAB, {
+        type: 'permission_response',
+        requestId: 'perm-1',
+        allowed: false,
+        denyMessage: '- "Which scope?"\n  Answer: Tabs',
+      })
+    })
+
+    it('reports the handoff instead of claiming the question was answered', () => {
+      render(<AskUserQuestion toolUseId="tool-1" input={SCOPE_INPUT} />)
+
+      fireEvent.click(screen.getByRole('button', { name: /^Tabs$/ }))
+      fireEvent.click(screen.getByRole('button', { name: /chat about this/i }))
+
+      expect(screen.getByText(/Handed back to Claude/)).toBeTruthy()
+      expect(screen.queryByText(/Answered:/)).toBeNull()
+      expect(screen.queryByRole('button', { name: /chat about this/i })).toBeNull()
+    })
+
+    // Regression: the status badge is rendered from its own branch, so it kept
+    // reading "Answered" after a handoff even while the body said otherwise.
+    it('does not badge the handoff as answered', () => {
+      render(<AskUserQuestion toolUseId="tool-1" input={SCOPE_INPUT} />)
+
+      fireEvent.click(screen.getByRole('button', { name: /^Tabs$/ }))
+      fireEvent.click(screen.getByRole('button', { name: /chat about this/i }))
+
+      expect(screen.getByText('Handed off')).toBeTruthy()
+      expect(screen.queryByText('Answered')).toBeNull()
+    })
+
+    it('ignores a second click once the handoff is sent', () => {
+      render(<AskUserQuestion toolUseId="tool-1" input={SCOPE_INPUT} />)
+
+      const chatButton = screen.getByRole('button', { name: /chat about this/i })
+      fireEvent.click(chatButton)
+      fireEvent.click(chatButton)
+
+      expect(sendMock).toHaveBeenCalledTimes(1)
+    })
+  })
 })

@@ -65,6 +65,46 @@ describe('AssistantMessage link routing', () => {
     fireEvent.click(screen.getByRole('link', { name: '预览' }))
     expect(openBrowser).toHaveBeenCalledWith('s1', 'http://localhost:5173/')
   })
+
+  // #1145. Every case above this one leaves a space on both sides of the URL,
+  // which is exactly why the CJK-adjacency bug shipped: the anchor rendered, but
+  // its href carried the rest of the sentence, so the in-app browser opened a
+  // percent-encoded 404 instead of the dev server.
+  it('opens a clean URL when Chinese punctuation follows the bare link', () => {
+    render(
+      <AssistantMessage
+        sessionId="s1"
+        content={'打开 http://localhost:5173，然后刷新页面'}
+        isStreaming={false}
+      />,
+    )
+    fireEvent.click(screen.getByRole('link', { name: 'http://localhost:5173' }))
+    expect(openBrowser).toHaveBeenCalledWith('s1', 'http://localhost:5173/')
+  })
+
+  it('opens a clean URL when Han characters run straight into the link', () => {
+    render(
+      <AssistantMessage
+        sessionId="s1"
+        content={'服务在http://localhost:3000上运行'}
+        isStreaming={false}
+      />,
+    )
+    fireEvent.click(screen.getByRole('link', { name: 'http://localhost:3000' }))
+    expect(openBrowser).toHaveBeenCalledWith('s1', 'http://localhost:3000/')
+  })
+
+  it('routes an inline-code URL through the same preview handler', () => {
+    render(
+      <AssistantMessage
+        sessionId="s1"
+        content={'访问 `http://localhost:3000` 就能看到'}
+        isStreaming={false}
+      />,
+    )
+    fireEvent.click(screen.getByRole('link', { name: 'http://localhost:3000' }))
+    expect(openBrowser).toHaveBeenCalledWith('s1', 'http://localhost:3000/')
+  })
 })
 
 describe('AssistantMessage output-target cards', () => {

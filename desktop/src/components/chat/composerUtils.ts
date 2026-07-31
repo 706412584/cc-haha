@@ -1,5 +1,12 @@
 import type { SettingsTab } from '../../stores/uiStore'
 import type { TranslationKey } from '../../i18n'
+import type { SlashCommandOption } from '../../types/slashCommand'
+
+export type {
+  SlashCommandKind,
+  SlashCommandOption,
+  SlashCommandSource,
+} from '../../types/slashCommand'
 
 /** Map from slash command name to its i18n description key */
 const SLASH_CMD_DESCRIPTION_KEYS: Record<string, TranslationKey> = {
@@ -109,14 +116,36 @@ export function getLocalizedFallbackCommands(t: (key: TranslationKey) => string)
       name: cmd.name,
       description,
       ...(cmd.argumentHint && { argumentHint: cmd.argumentHint }),
+      kind: 'command',
     }
   })
 }
 
-export type SlashCommandOption = {
-  name: string
-  description: string
-  argumentHint?: string
+export type SlashCommandGroups = {
+  system: SlashCommandOption[]
+  skills: SlashCommandOption[]
+  ordered: SlashCommandOption[]
+}
+
+export function groupSlashCommands(
+  commands: ReadonlyArray<SlashCommandOption>,
+): SlashCommandGroups {
+  const system: SlashCommandOption[] = []
+  const skills: SlashCommandOption[] = []
+
+  for (const command of commands) {
+    if (command.kind === 'skill') {
+      skills.push(command)
+    } else {
+      system.push(command)
+    }
+  }
+
+  return {
+    system,
+    skills,
+    ordered: [...system, ...skills],
+  }
 }
 
 export type AgentSlashCommandSource = {
@@ -147,6 +176,7 @@ export function buildAgentSlashCommands(
       name: `agent ${agentType}`,
       description,
       argumentHint: '<prompt>',
+      kind: 'agent',
     })
   }
 
@@ -222,6 +252,12 @@ export function mergeSlashCommands(
       name: command.name,
       description,
       ...(argumentHint && { argumentHint }),
+      ...(command.kind || localized?.kind
+        ? { kind: command.kind ?? localized?.kind }
+        : {}),
+      ...(command.source || localized?.source
+        ? { source: command.source ?? localized?.source }
+        : {}),
     })
   }
 

@@ -14,6 +14,17 @@ export type ReassembledSse = {
 
 type JsonRecord = Record<string, unknown>
 
+const MAX_REASSEMBLED_STREAM_INDEX = 256
+
+function boundedStreamIndex(value: unknown): number | null {
+  return typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value >= 0 &&
+    value <= MAX_REASSEMBLED_STREAM_INDEX
+    ? value
+    : null
+}
+
 export function reassembleSseText(sseText: string): ReassembledSse | null {
   if (typeof sseText !== 'string' || !looksLikeSseText(sseText)) return null
   try {
@@ -83,7 +94,8 @@ function accumulate(state: { snapshot: JsonRecord | null }, eventType: string, d
       return
     } else if (eventType === 'content_block_start') {
       const content = ensureContentArray(state.snapshot)
-      const index = typeof data.index === 'number' && data.index >= 0 ? data.index : content.length
+      const index = boundedStreamIndex(data.index)
+      if (index === null) return
       while (content.length <= index) content.push({})
       content[index] = deepClone(isRecord(data.content_block) ? data.content_block : {})
     } else if (eventType === 'content_block_delta') {
@@ -98,9 +110,10 @@ function accumulate(state: { snapshot: JsonRecord | null }, eventType: string, d
         block._partial_json = stringOf(block._partial_json) + stringOf(delta.partial_json)
       }
     } else if (eventType === 'content_block_stop') {
-      const index = typeof data.index === 'number' ? data.index : 0
+      const index = boundedStreamIndex(data.index)
+      if (index === null) return
       const content = state.snapshot.content
-      if (Array.isArray(content) && index >= 0 && index < content.length) {
+      if (Array.isArray(content) && index < content.length) {
         const block = content[index]
         if (isRecord(block) && typeof block._partial_json === 'string') {
           try {
@@ -126,7 +139,8 @@ function accumulate(state: { snapshot: JsonRecord | null }, eventType: string, d
 }
 
 function contentBlockForDelta(snapshot: JsonRecord, rawIndex: unknown, delta: JsonRecord): JsonRecord {
-  const index = typeof rawIndex === 'number' && Number.isInteger(rawIndex) && rawIndex >= 0 ? rawIndex : 0
+  const index = boundedStreamIndex(rawIndex)
+  if (index === null) return {}
   const content = ensureContentArray(snapshot)
   while (content.length <= index) content.push(emptyContentBlockForDelta(delta))
   const existing = content[index]
@@ -190,7 +204,8 @@ function accumulateChatCompletionChunk(state: { snapshot: JsonRecord | null }, d
   const toolCallDeltas = Array.isArray(delta.tool_calls) ? delta.tool_calls : []
   for (const toolCallDelta of toolCallDeltas) {
     if (!isRecord(toolCallDelta)) continue
-    const index = typeof toolCallDelta.index === 'number' && toolCallDelta.index >= 0 ? toolCallDelta.index : 0
+    const index = boundedStreamIndex(toolCallDelta.index)
+    if (index === null) continue
     const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : (message.tool_calls = [])
     while (toolCalls.length <= index) {
       toolCalls.push({ id: '', type: 'function', function: { name: '', arguments: '' } })

@@ -1,11 +1,14 @@
 import { classifyPreviewLink } from './previewLinkRouter'
 import { shouldOfferStaticHtmlPreview } from './htmlPreviewPolicy'
 
+export type PreviewLinkReveal = { line: number; column?: number }
+
 export type PreviewLinkDeps = {
   sessionId: string
   serverBaseUrl: string
   openBrowser: (sessionId: string, url: string) => void
-  openFilePreview: (sessionId: string, path: string) => void
+  /** `reveal` carries the `:42` suffix through to the code view's scroll target. */
+  openFilePreview: (sessionId: string, path: string, reveal?: PreviewLinkReveal) => void
   openExternal: (url: string) => void
 }
 
@@ -53,6 +56,9 @@ export function localFileUrl(base: string, absPath: string): string {
 /** Returns true if handled (caller should preventDefault). */
 export function handlePreviewLink(href: string, deps: PreviewLinkDeps): boolean {
   const cls = classifyPreviewLink(href)
+  const reveal: PreviewLinkReveal | undefined = cls.line
+    ? { line: cls.line, ...(cls.column ? { column: cls.column } : {}) }
+    : undefined
   switch (cls.kind) {
     case 'browser-localhost':
       deps.openBrowser(deps.sessionId, cls.url!)
@@ -63,7 +69,7 @@ export function handlePreviewLink(href: string, deps: PreviewLinkDeps): boolean 
       // workspace, so serve them via the $HOME-sandboxed /local-file route.
       // Relative paths stay workspace-scoped via /preview-fs.
       if (!isAbsoluteLocalPath(filePath) && !shouldOfferStaticHtmlPreview(filePath)) {
-        deps.openFilePreview(deps.sessionId, filePath)
+        deps.openFilePreview(deps.sessionId, filePath, reveal)
         return true
       }
       const url = isAbsoluteLocalPath(filePath)
@@ -73,7 +79,7 @@ export function handlePreviewLink(href: string, deps: PreviewLinkDeps): boolean 
       return true
     }
     case 'file-preview':
-      deps.openFilePreview(deps.sessionId, cls.path!)
+      deps.openFilePreview(deps.sessionId, cls.path!, reveal)
       return true
     case 'remote':
       deps.openExternal(cls.url!)

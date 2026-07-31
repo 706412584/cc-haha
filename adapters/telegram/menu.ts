@@ -53,9 +53,9 @@ export const TELEGRAM_BOT_COMMANDS: TelegramBotCommand[] = [
   { command: 'stop', description: '停止当前生成' },
   { command: 'provider', description: '切换 Provider' },
   { command: 'model', description: '切换模型' },
-  { command: 'skills', description: '查看 Skills' },
+  { command: 'skills', description: '查看并调用 Skills' },
   { command: 'allow', description: '允许权限请求' },
-  { command: 'always', description: '永久允许权限请求' },
+  { command: 'always', description: '本会话永久允许' },
   { command: 'deny', description: '拒绝权限请求' },
 ]
 

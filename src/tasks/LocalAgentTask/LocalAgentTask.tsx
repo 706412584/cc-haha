@@ -51,6 +51,13 @@ export const MAX_AGENT_COMPLETION_INBOX = 64;
 export const MAX_AGENT_REGISTRY_SIZE = 64;
 export const MAX_AGENT_RUNTIME_SNAPSHOT_BYTES = 2_000_000;
 const MAX_PERSISTED_RUNTIME_TEXT_BYTES = 4_000;
+/**
+ * Pending completions older than this are dropped on session restore.
+ * Same-day crash recovery still delivers; multi-day-old inbox items no longer
+ * re-inject into the current turn (the v0.5.51 delivery reliability path
+ * previously rehydrated them with no age gate).
+ */
+export const AGENT_COMPLETION_RESTORE_TTL_MS = 24 * 60 * 60 * 1000;
 export type AgentRuntimeStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 export type PersistedAgentRuntimeTask = {
   id: string;
@@ -418,12 +425,40 @@ export function restoreAgentRuntimeSnapshot(snapshot: unknown): Pick<AppState, '
     tasks[raw.id] = task;
     if (interrupted) interruptedTasks.push(task);
   }
-  const inbox = record.inbox.filter(item => item && item.version === 1 && item.consumed !== true && typeof item.taskId === 'string' && Number.isSafeInteger(item.epoch) && item.epoch > 0 && Number.isSafeInteger(item.sequence) && item.sequence > 0 && typeof item.notification === 'string' && item.notification.length <= 1_000_000).slice(-MAX_AGENT_COMPLETION_INBOX).map(({
+  const now = Date.now();
+  const taskEndById = new Map<string, number>();
+  for (const raw of record.tasks) {
+    if (!raw || typeof raw !== 'object' || typeof raw.id !== 'string') continue;
+    const end = typeof raw.endTime === 'number' && Number.isFinite(raw.endTime)
+      ? raw.endTime
+      : typeof raw.startTime === 'number' && Number.isFinite(raw.startTime)
+        ? raw.startTime
+        : undefined;
+    if (end !== undefined) taskEndById.set(raw.id, end);
+  }
+  const inbox = record.inbox.filter(item => {
+    if (!(item && item.version === 1 && item.consumed !== true && typeof item.taskId === 'string' && Number.isSafeInteger(item.epoch) && item.epoch > 0 && Number.isSafeInteger(item.sequence) && item.sequence > 0 && typeof item.notification === 'string' && item.notification.length <= 1_000_000)) {
+      return false;
+    }
+    // Prefer explicit enqueuedAt; legacy snapshots fall back to the matching
+    // task's end/start time. Unknown age is kept (fail open for crash recovery
+    // of snapshots that predate both fields on short-lived sessions).
+    const enqueuedAt = typeof item.enqueuedAt === 'number' && Number.isFinite(item.enqueuedAt)
+      ? item.enqueuedAt
+      : taskEndById.get(item.taskId);
+    if (enqueuedAt !== undefined && now - enqueuedAt > AGENT_COMPLETION_RESTORE_TTL_MS) {
+      return false;
+    }
+    return true;
+  }).slice(-MAX_AGENT_COMPLETION_INBOX).map(({
     consumed: _consumed,
     delivery: _delivery,
     ...item
   }) => ({
     ...item,
+    ...(typeof item.enqueuedAt === 'number' && Number.isFinite(item.enqueuedAt)
+      ? { enqueuedAt: item.enqueuedAt }
+      : {}),
     delivery: 'pending' as const
   }));
   let nextSequence = Number.isSafeInteger(record.nextSequence) && record.nextSequence! > 0 ? record.nextSequence! : Math.max(0, ...inbox.map(item => item.sequence)) + 1;
@@ -438,7 +473,8 @@ export function restoreAgentRuntimeSnapshot(snapshot: unknown): Pick<AppState, '
       taskId: task.id,
       epoch: task.epoch,
       notification: `<${TASK_NOTIFICATION_TAG}>\n<${TASK_ID_TAG}>${task.id}</${TASK_ID_TAG}>${toolUseIdLine}\n<${TASK_TYPE_TAG}>local_agent</${TASK_TYPE_TAG}>\n<${OUTPUT_FILE_TAG}>${task.outputFile}</${OUTPUT_FILE_TAG}>\n<${STATUS_TAG}>failed</${STATUS_TAG}>\n<${SUMMARY_TAG}>Agent "${task.description}" interrupted during session recovery</${SUMMARY_TAG}>\n</${TASK_NOTIFICATION_TAG}>`,
-      delivery: 'pending'
+      delivery: 'pending',
+      enqueuedAt: now,
     });
     remainingInboxCapacity--;
   }
@@ -561,7 +597,8 @@ export function enqueueAgentNotification({
       taskId,
       epoch: task.epoch,
       notification: message,
-      delivery: 'pending' as const
+      delivery: 'pending' as const,
+      enqueuedAt: Date.now(),
     }];
     return {
       ...prev,

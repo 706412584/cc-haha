@@ -687,4 +687,55 @@ describe('TraceSession', () => {
 
     expect(await screen.findByRole('heading', { level: 1, name: 'Trace API title' })).toBeInTheDocument()
   })
+
+  it('offers a way back to the list when opened as a tab', async () => {
+    const onBack = vi.fn()
+    render(<TraceSession sessionId={SESSION_ID} onBack={onBack} pollIntervalMs={60_000} />)
+    await screen.findByTestId('trace-split-layout')
+
+    const back = within(screen.getByTestId('trace-header')).getByRole('button', { name: 'Back to list' })
+    fireEvent.click(back)
+
+    expect(onBack).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the way back available while the trace is still loading', async () => {
+    let releaseTrace: (value: TraceSessionData) => void = () => {}
+    vi.mocked(sessionsApi.getTrace).mockReturnValue(
+      new Promise<TraceSessionData>((resolve) => { releaseTrace = resolve }),
+    )
+    const onBack = vi.fn()
+
+    render(<TraceSession sessionId={SESSION_ID} onBack={onBack} pollIntervalMs={60_000} />)
+
+    expect(await screen.findByTestId('trace-skeleton')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Back to list' }))
+    expect(onBack).toHaveBeenCalledTimes(1)
+
+    releaseTrace(baseTrace)
+    await screen.findByTestId('trace-split-layout')
+  })
+
+  it('keeps the way back available when the trace fails to load', async () => {
+    // The failure state is exactly where being stranded hurts most: there is no
+    // content to act on, so the exit has to survive the error path.
+    vi.mocked(sessionsApi.getTrace).mockRejectedValue(new Error('boom'))
+    const onBack = vi.fn()
+
+    render(<TraceSession sessionId={SESSION_ID} onBack={onBack} pollIntervalMs={60_000} />)
+
+    expect(await screen.findByText('Failed to load trace')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Back to list' }))
+
+    expect(onBack).toHaveBeenCalledTimes(1)
+  })
+
+  it('hides the way back in the standalone window, which has no list behind it', async () => {
+    render(<TraceSession sessionId={SESSION_ID} standalone pollIntervalMs={60_000} />)
+    await screen.findByTestId('trace-split-layout')
+
+    expect(screen.queryByRole('button', { name: 'Back to list' })).not.toBeInTheDocument()
+    // The standalone window also drops "open in window" — it is already one.
+    expect(screen.queryByRole('button', { name: 'Open in separate window' })).not.toBeInTheDocument()
+  })
 })

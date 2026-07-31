@@ -30,6 +30,21 @@ type MemoryToolActivity = {
   files: MemoryToolFile[]
 }
 
+/**
+ * Wall-clock gap between the tool_use and its tool_result, used for the "524ms"
+ * badge (#1149). The CLI does not report a real execution duration over the wire
+ * — BashProgress never leaves the ink renderer — so this is the transcript
+ * timestamp delta and therefore includes any permission-approval wait.
+ */
+export function toolCallDurationMs(
+  toolCall: Pick<ToolCall, 'timestamp'>,
+  result?: Pick<ToolResult, 'timestamp'>,
+): number | undefined {
+  if (!result) return undefined
+  const elapsed = result.timestamp - toolCall.timestamp
+  return Number.isFinite(elapsed) && elapsed >= 0 ? elapsed : undefined
+}
+
 type Props = {
   sessionId?: string | null
   toolCalls: ToolCall[]
@@ -737,6 +752,7 @@ function ToolCallTree({
         isPending={toolCall.isPending}
         status={toolCall.status}
         partialInput={toolCall.partialInput}
+        durationMs={toolCallDurationMs(toolCall, result)}
       />
       {childToolCalls.length > 0 && (
         <div className={compact ? 'ml-4 border-l border-[var(--color-border)] pl-3' : 'mb-2 ml-16 border-l border-[var(--color-border)] pl-3'}>

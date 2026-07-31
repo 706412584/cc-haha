@@ -84,7 +84,9 @@ describe('AssistantOutputTargetCard', () => {
   it('routes Open to workspace preview for a markdown target', () => {
     render(<AssistantOutputTargetCard target={markdownTarget} sessionId="s1" />)
     fireEvent.click(screen.getByLabelText('assistantOutputs.open'))
-    expect(openPreviewFn).toHaveBeenCalledWith('s1', 'docs/readme.md', 'file')
+    // The trailing args are openPreview's optional `origin` and `reveal` (#1146);
+    // a card has no line number to reveal, hence undefined.
+    expect(openPreviewFn).toHaveBeenCalledWith('s1', 'docs/readme.md', 'file', undefined, undefined)
   })
 
   it('routes Open to the in-app browser for a localhost target', () => {

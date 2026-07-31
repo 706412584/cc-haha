@@ -2,7 +2,7 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { readFileSync } from 'node:fs'
-import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path, { join as joinPath } from 'node:path'
 
@@ -593,16 +593,21 @@ describe.skipIf(!compiledSidecarSmokeEnabled)('compiled sidecar local-index smok
   it('uses SQLite by default, serves one indexed session, and reopens the database', async () => {
     const repoRoot = path.resolve(import.meta.dirname, '../..')
     const desktopRoot = path.resolve(import.meta.dirname, '..')
-    const executable = resolveSidecarExecutable(
+    const builtExecutable = resolveSidecarExecutable(
       desktopRoot,
       resolveHostTriple(),
     )
-    await stat(executable)
+    await stat(builtExecutable)
 
     const rootDir = await mkdtemp(joinPath(tmpdir(), 'cc-haha-compiled-sidecar-smoke-'))
-    const homeDir = joinPath(rootDir, 'home')
+    const unicodeInstallDir = joinPath(rootDir, '中文 安装目录')
+    const executable = process.platform === 'win32'
+      ? joinPath(unicodeInstallDir, path.basename(builtExecutable))
+      : builtExecutable
+
+    const homeDir = joinPath(rootDir, '中文 用户目录')
     const configDir = joinPath(homeDir, '.claude')
-    const projectDir = joinPath(configDir, 'projects', '-tmp-compiled-sidecar-smoke')
+    const projectDir = joinPath(configDir, 'projects', '-tmp-中文-compiled-sidecar-smoke')
     const sessionId = 'compiled-sidecar-smoke-session'
     const localAccessToken = 'compiled-sidecar-smoke-local-access-token'
     const authenticationProofs: CompiledSidecarAuthProof[] = []
@@ -641,6 +646,10 @@ describe.skipIf(!compiledSidecarSmokeEnabled)('compiled sidecar local-index smok
 
     try {
       await mkdir(projectDir, { recursive: true })
+      if (process.platform === 'win32') {
+        await mkdir(unicodeInstallDir, { recursive: true })
+        await copyFile(builtExecutable, executable)
+      }
       await writeFile(
         joinPath(projectDir, `${sessionId}.jsonl`),
         `${JSON.stringify({

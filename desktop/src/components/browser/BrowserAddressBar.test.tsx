@@ -1,12 +1,17 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import '@testing-library/jest-dom'
 import { BrowserAddressBar } from './BrowserAddressBar'
+import { useSettingsStore } from '../../stores/settingsStore'
 
 const baseProps = {
   url: 'http://localhost:5173/', canGoBack: false, canGoForward: false,
   onNavigate: vi.fn(), onBack: vi.fn(), onForward: vi.fn(), onReload: vi.fn(),
 }
+
+beforeEach(() => {
+  useSettingsStore.setState({ locale: 'zh' })
+})
 
 afterEach(() => {
   cleanup()

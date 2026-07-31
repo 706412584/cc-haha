@@ -113,18 +113,31 @@ function getStoredSettingsTab(): SettingsTab {
   return 'providers'
 }
 
+/**
+ * Repaint the document for `theme`. Shared with the cross-window storage sync
+ * below so a palette change made in another window lands identically here —
+ * the `theme-color` meta in particular, which colors the iOS status bar and
+ * the Android address bar and would otherwise stay on the palette this window
+ * booted with.
+ */
+function paintDocumentTheme(theme: ThemeMode) {
+  document.documentElement.setAttribute('data-theme', theme)
+  // Two of the six palettes sit on a dark ground, so this cannot test for the
+  // literal 'dark' key — ink-blue would render native scrollbars and form
+  // controls in their light variant against a near-black page.
+  document.documentElement.style.colorScheme = isDarkTheme(theme) ? 'dark' : 'light'
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', THEME_BACKGROUNDS[theme])
+}
+
 export function applyTheme(
   theme: ThemeMode,
   followSystem = readStoredFollowSystemTheme(),
   lightTheme = readStoredLightTheme(),
 ) {
   if (typeof document === 'undefined') return
-  document.documentElement.setAttribute('data-theme', theme)
-  // Multiple palettes sit on a dark ground, so this cannot test for the literal
-  // 'dark' key — the other dark IDs would render native scrollbars and form
-  // controls in their light variant against a near-black page.
-  document.documentElement.style.colorScheme = isDarkTheme(theme) ? 'dark' : 'light'
-  notifyHostAppearance(theme, followSystem, lightTheme)}
+  paintDocumentTheme(theme)
+  notifyHostAppearance(theme, followSystem, lightTheme)
+}
 
 /**
  * Tell the Electron main process which theme ended up applied, so the native
@@ -198,10 +211,7 @@ export function initializeTheme() {
       systemAppearance: getSystemAppearance(),
     })
     useUIStore.setState({ theme, lightTheme, darkTheme, followSystemTheme })
-    if (typeof document !== 'undefined') {
-      document.documentElement.setAttribute('data-theme', theme)
-      document.documentElement.style.colorScheme = isDarkTheme(theme) ? 'dark' : 'light'
-    }
+    if (typeof document !== 'undefined') paintDocumentTheme(theme)
   })
 }
 

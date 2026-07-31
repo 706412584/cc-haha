@@ -750,6 +750,45 @@ describe('MessageList nested tool calls', () => {
     await waitFor(() => expect(scrollTop).toBe(600))
   })
 
+  // #1149 — end-to-end pin for the tool duration badge. Injecting `durationMs`
+  // straight into ToolCallBlock only proves formatDuration reaches the header;
+  // it leaves the whole wiring severable with every test green. This drives it
+  // from real transcript messages, so it fails if any link breaks: the
+  // toolResultByToolUseId projection dropping `timestamp`, or either
+  // ToolCallBlock call site dropping the `durationMs` prop.
+  it('derives the tool duration badge from the tool_use/tool_result timestamps', async () => {
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: [
+            { id: 'user-1', type: 'user_text', content: 'Run it', timestamp: 1 },
+            {
+              id: 'tool-use-1',
+              type: 'tool_use',
+              toolName: 'Bash',
+              toolUseId: 'bash-1',
+              input: { command: 'ls -la', description: 'List files' },
+              timestamp: 10_000,
+            },
+            {
+              id: 'tool-result-1',
+              type: 'tool_result',
+              toolUseId: 'bash-1',
+              content: 'file-a',
+              isError: false,
+              timestamp: 11_598,
+            },
+          ],
+        }),
+      },
+    })
+
+    const { container } = render(<MessageList />)
+
+    // 11_598 - 10_000 = 1598ms -> "1.6s"
+    await waitFor(() => expect(container.textContent).toContain('1.6s'))
+  })
+
   it('does not treat the last text marker as the transcript tail when tool output follows it', () => {
     useChatStore.setState({
       sessions: {
@@ -4239,7 +4278,7 @@ describe('MessageList nested tool calls', () => {
     expect(scrollTop).toBe(200)
   })
 
-  it('ignores one-pixel content resize jitter while pinned to active thinking output', async () => {
+  it('ignores stepwise two-pixel content resize oscillation while pinned to active thinking output', async () => {
     let resizeCallback: ResizeObserverCallback | null = null
     class TestResizeObserver {
       observe = vi.fn()
@@ -4309,12 +4348,14 @@ describe('MessageList nested tool calls', () => {
     expect(scrollTop).toBe(600)
 
     scrollTopWriteCount = 0
-    act(() => {
-      resizeCallback?.(makeResizeEntry(401), {} as ResizeObserver)
-    })
-    act(() => {
-      resizeCallback?.(makeResizeEntry(400), {} as ResizeObserver)
-    })
+    // WebView2 can reach the opposite edge of a 2px oscillation through
+    // adjacent 1px observations. The sticky follow baseline must not turn
+    // either edge into a bottom-scroll correction.
+    for (const height of [401, 402, 401, 400, 401, 402, 401, 400]) {
+      act(() => {
+        resizeCallback?.(makeResizeEntry(height), {} as ResizeObserver)
+      })
+    }
 
     expect(scrollTopWriteCount).toBe(0)
     expect(scrollTop).toBe(600)
@@ -4987,6 +5028,16 @@ describe('MessageList nested tool calls', () => {
               content: '这条回复应该停在左侧。',
               timestamp: assistantTimestamp,
             },
+            // Keeps the reply mid-turn: a turn-closing reply swaps its hover
+            // timestamp for the always-on completion stamp (#1151).
+            {
+              id: 'tool-1',
+              type: 'tool_use',
+              toolName: 'Read',
+              toolUseId: 'tool-use-1',
+              input: { file_path: '/tmp/a.ts' },
+              timestamp: assistantTimestamp + 1_000,
+            },
           ],
         }),
       },
@@ -5019,6 +5070,121 @@ describe('MessageList nested tool calls', () => {
     expect(userActions?.className).not.toContain('invisible')
     expect(userTime.getAttribute('title')).toBe(formatExactMessageTimestamp(userTimestamp, 'en'))
     expect(assistantTime.getAttribute('title')).toBe(formatExactMessageTimestamp(assistantTimestamp, 'en'))
+  })
+
+  describe('turn completion stamp (#1151)', () => {
+    const T0 = new Date('2026-07-30T07:08:22Z').getTime()
+    const MINUTE = 60_000
+
+    function turnMessages(): UIMessage[] {
+      return [
+        { id: 'user-1', type: 'user_text', content: '先问一个问题', timestamp: T0 },
+        { id: 'assistant-1', type: 'assistant_text', content: '先答第一轮。', timestamp: T0 + 30_000 },
+        { id: 'user-2', type: 'user_text', content: '再问一个问题', timestamp: T0 + 2 * MINUTE },
+        {
+          id: 'assistant-2',
+          type: 'assistant_text',
+          content: '第二轮跑了很久才答完。',
+          timestamp: T0 + 14 * MINUTE + 19_000,
+        },
+      ]
+    }
+
+    function shellFor(text: string) {
+      return screen.getByText(text).closest('[data-message-shell]') as HTMLElement | null
+    }
+
+    function stampFor(text: string) {
+      return shellFor(text)?.querySelector('[data-turn-completion]') as HTMLElement | null
+    }
+
+    it('closes a finished turn with its end time and duration, without hovering', () => {
+      useChatStore.setState({
+        sessions: { [ACTIVE_TAB]: makeSessionState({ messages: turnMessages() }) },
+      })
+
+      render(<MessageList />)
+
+      const stamp = stampFor('第二轮跑了很久才答完。')
+      expect(stamp?.textContent).toContain(`Done ${formatMessageHoverTime(T0 + 14 * MINUTE + 19_000, 'en')}`)
+      expect(stamp?.textContent).toContain('took 12m 19s')
+      // The stamp is the one piece that must survive without a pointer: it sits
+      // outside the hover-gated action bar.
+      expect(stamp?.closest('[data-message-actions]')).toBeNull()
+      expect(stamp?.className).not.toContain('opacity-0')
+    })
+
+    it('measures each turn from its own prompt', () => {
+      useChatStore.setState({
+        sessions: { [ACTIVE_TAB]: makeSessionState({ messages: turnMessages() }) },
+      })
+
+      render(<MessageList />)
+
+      expect(stampFor('先答第一轮。')?.textContent).toContain('took 30s')
+    })
+
+    it('drops the hover timestamp on a stamped reply so the time is not printed twice', () => {
+      useChatStore.setState({
+        sessions: { [ACTIVE_TAB]: makeSessionState({ messages: turnMessages() }) },
+      })
+
+      render(<MessageList />)
+
+      const closing = shellFor('第二轮跑了很久才答完。')
+      expect(closing?.querySelector('[data-turn-completion]')).not.toBeNull()
+      expect(
+        within(closing as HTMLElement).queryByText(formatMessageHoverTime(T0 + 14 * MINUTE + 19_000, 'en')),
+      ).toBeNull()
+    })
+
+    it('leaves prompts and mid-turn replies on the hover-only timestamp', () => {
+      useChatStore.setState({
+        sessions: {
+          [ACTIVE_TAB]: makeSessionState({
+            messages: [
+              { id: 'user-1', type: 'user_text', content: '接着改', timestamp: T0 },
+              { id: 'assistant-1', type: 'assistant_text', content: '接下来把两处调用点都接上：', timestamp: T0 + 10_000 },
+              {
+                id: 'tool-1',
+                type: 'tool_use',
+                toolName: 'Edit',
+                toolUseId: 'tool-use-1',
+                input: { file_path: '/tmp/a.ts' },
+                timestamp: T0 + 20_000,
+              },
+            ],
+          }),
+        },
+      })
+
+      render(<MessageList />)
+
+      // Caught in a real session: the last reply of the turn was an aside
+      // ("Now wire the duration at both call sites:") followed by edits, so a
+      // stamp there rendered above the work it introduced.
+      expect(stampFor('接下来把两处调用点都接上：')).toBeNull()
+      expect(stampFor('接着改')).toBeNull()
+      // Both still carry their own timestamp inside the hover-gated bar.
+      for (const [text, timestamp] of [['接着改', T0], ['接下来把两处调用点都接上：', T0 + 10_000]] as const) {
+        const bar = shellFor(text)?.querySelector('[data-message-actions]')
+        expect(bar?.className).toContain('opacity-0')
+        expect(within(bar as HTMLElement).getByText(formatMessageHoverTime(timestamp, 'en'))).toBeTruthy()
+      }
+    })
+
+    it('leaves the running turn unstamped while keeping earlier turns stamped', () => {
+      useChatStore.setState({
+        sessions: {
+          [ACTIVE_TAB]: makeSessionState({ messages: turnMessages(), chatState: 'tool_executing' }),
+        },
+      })
+
+      render(<MessageList />)
+
+      expect(stampFor('第二轮跑了很久才答完。')).toBeNull()
+      expect(stampFor('先答第一轮。')?.textContent).toContain('Done')
+    })
   })
 
   it('uses the document column for markdown-heavy assistant replies', () => {

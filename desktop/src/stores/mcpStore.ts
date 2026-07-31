@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { mcpApi } from '../api/mcp'
+import { sessionsApi } from '../api/sessions'
 import type { McpServerRecord, McpUpsertPayload } from '../types/mcp'
 
 type McpStore = {
@@ -8,6 +9,7 @@ type McpStore = {
   isLoading: boolean
   error: string | null
   fetchServers: (projectPaths?: string[], fallbackCwd?: string) => Promise<void>
+  fetchServersForKnownProjects: (currentWorkDir?: string) => Promise<void>
   createServer: (name: string, payload: McpUpsertPayload, cwd?: string) => Promise<McpServerRecord>
   updateServer: (server: McpServerRecord, payload: McpUpsertPayload, cwd?: string) => Promise<McpServerRecord>
   deleteServer: (server: McpServerRecord, cwd?: string) => Promise<void>
@@ -15,6 +17,26 @@ type McpStore = {
   reconnectServer: (server: McpServerRecord, cwd?: string) => Promise<McpServerRecord>
   refreshServerStatus: (server: McpServerRecord, cwd?: string) => Promise<McpServerRecord>
   selectServer: (server: McpServerRecord | null) => void
+}
+
+/**
+ * The full set of project paths whose MCP servers should appear in the list:
+ * the active session's cwd, recent session projects, and every path the
+ * server knows to hold MCP config (GH #1126). Callers that refresh the whole
+ * store must query this set — fetching a single cwd would overwrite the list
+ * with a one-project view.
+ */
+async function collectKnownProjectPaths(currentWorkDir?: string): Promise<string[]> {
+  const [recentProjectPaths, configuredMcpProjectPaths] = await Promise.all([
+    sessionsApi.getRecentProjects(8)
+      .then(({ projects }) => projects.map((project) => project.realPath))
+      .catch(() => []),
+    mcpApi.projectPaths()
+      .then(({ projectPaths }) => projectPaths)
+      .catch(() => []),
+  ])
+  return [currentWorkDir, ...recentProjectPaths, ...configuredMcpProjectPaths]
+    .filter((path): path is string => !!path)
 }
 
 function isProjectScoped(server: Pick<McpServerRecord, 'scope'>) {
@@ -56,7 +78,7 @@ function replaceServer(
 
 let fetchServersRequestId = 0
 
-export const useMcpStore = create<McpStore>((set) => ({
+export const useMcpStore = create<McpStore>((set, get) => ({
   servers: [],
   selectedServer: null,
   isLoading: false,
@@ -101,6 +123,14 @@ export const useMcpStore = create<McpStore>((set) => ({
         error: error instanceof Error ? error.message : 'Failed to load MCP servers',
       })
     }
+  },
+
+  fetchServersForKnownProjects: async (currentWorkDir) => {
+    const projectPaths = await collectKnownProjectPaths(currentWorkDir)
+    await get().fetchServers(
+      projectPaths.length ? projectPaths : undefined,
+      currentWorkDir,
+    )
   },
 
   createServer: async (name, payload, cwd) => {

@@ -10,6 +10,7 @@ import {
   uninstallMarketSkill,
 } from '../services/market/installService.js'
 import { ApiError } from '../middleware/errorHandler.js'
+import { MARKET_LIMITS } from '../services/market/types.js'
 
 let tmpHome: string
 let originalClaudeConfigDir: string | undefined
@@ -22,7 +23,12 @@ function sha256(content: string): string {
   return createHash('sha256').update(content, 'utf-8').digest('hex')
 }
 
-type FileSpec = { path: string; content: string; sha256?: string | null }
+type FileSpec = {
+  path: string
+  content: string
+  sha256?: string | null
+  advertisedSize?: number
+}
 
 /**
  * Stubs the ClawHub API surface used by install:
@@ -46,7 +52,7 @@ function stubClawhub(files: FileSpec[], opts: { corruptPath?: string } = {}) {
           license: 'MIT',
           files: files.map((f) => ({
             path: f.path,
-            size: Buffer.byteLength(f.content, 'utf-8'),
+            size: f.advertisedSize ?? Buffer.byteLength(f.content, 'utf-8'),
             sha256: f.sha256 === null ? undefined : (f.sha256 ?? sha256(f.content)),
           })),
         },
@@ -169,6 +175,42 @@ describe('installMarketSkill', () => {
     } catch (error) {
       expect((error as ApiError).code).toBe('MARKET_NOT_INSTALLABLE')
     }
+  })
+
+  it('rejects a downloaded file whose actual body exceeds the per-file limit', async () => {
+    const oversized = `${SKILL_MD}\n${'x'.repeat(MARKET_LIMITS.maxFileSize)}`
+    stubClawhub([{
+      path: 'SKILL.md',
+      content: oversized,
+      sha256: null,
+      advertisedSize: Buffer.byteLength(SKILL_MD),
+    }])
+
+    await expect(installMarketSkill('clawhub', 'demo'))
+      .rejects.toThrow('exceeds the actual size limit')
+
+    const target = path.join(tmpHome, '.claude', 'skills', 'demo')
+    expect(await fs.stat(target).catch(() => null)).toBeNull()
+  })
+
+  it('rejects actual aggregate bytes above the total limit and leaves no install', async () => {
+    const perFileBytes = Math.floor(MARKET_LIMITS.maxTotalSize / 5) + 1024
+    const files: FileSpec[] = Array.from({ length: 5 }, (_, index) => {
+      const prefix = index === 0 ? `${SKILL_MD}\n` : ''
+      return {
+        path: index === 0 ? 'SKILL.md' : `scripts/helper-${index}.txt`,
+        content: prefix + 'x'.repeat(perFileBytes - Buffer.byteLength(prefix)),
+        sha256: null,
+        advertisedSize: 1,
+      }
+    })
+    stubClawhub(files)
+
+    await expect(installMarketSkill('clawhub', 'demo'))
+      .rejects.toThrow('actual total size limit')
+
+    const target = path.join(tmpHome, '.claude', 'skills', 'demo')
+    expect(await fs.stat(target).catch(() => null)).toBeNull()
   })
 })
 

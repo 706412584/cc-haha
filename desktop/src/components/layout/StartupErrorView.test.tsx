@@ -1,8 +1,13 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import '@testing-library/jest-dom'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { splitStartupError, StartupErrorView } from './StartupErrorView'
+import { useSettingsStore } from '../../stores/settingsStore'
+
+beforeEach(() => {
+  useSettingsStore.setState({ locale: 'zh' })
+})
 
 describe('splitStartupError', () => {
   it('separates the timeout message from captured sidecar logs', () => {

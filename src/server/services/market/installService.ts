@@ -135,6 +135,7 @@ async function performInstall(source: MarketSource, slug: string): Promise<Insta
 
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'haha-market-install-'))
   try {
+    let actualTotalSize = 0
     for (const file of files) {
       if (!isSafeRelativeFilePath(file.path)) {
         throw new ApiError(422, `Unsafe file path in skill: ${file.path}`, MARKET_ERROR_CODES.notInstallable)
@@ -144,6 +145,21 @@ async function performInstall(source: MarketSource, slug: string): Promise<Insta
         fetched = await providers[source].fetchFile(slug, file.path)
       } catch (error) {
         throw toUpstreamApiError(error)
+      }
+      if (fetched.size > MARKET_LIMITS.maxFileSize) {
+        throw new ApiError(
+          422,
+          `Skill file exceeds the actual size limit: ${file.path}`,
+          MARKET_ERROR_CODES.notInstallable,
+        )
+      }
+      actualTotalSize += fetched.size
+      if (actualTotalSize > MARKET_LIMITS.maxTotalSize) {
+        throw new ApiError(
+          422,
+          `Skill files exceed the actual total size limit: ${slug}`,
+          MARKET_ERROR_CODES.notInstallable,
+        )
       }
       if (file.sha256 && sha256Hex(fetched.content) !== file.sha256.toLowerCase()) {
         throw new ApiError(

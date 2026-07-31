@@ -4230,10 +4230,20 @@ describe('Sessions API', () => {
     }
 
     expect(body.commands).toContainEqual(
-      expect.objectContaining({ name: 'user-skill', description: 'User skill description' }),
+      expect.objectContaining({
+        name: 'user-skill',
+        description: 'User skill description',
+        kind: 'skill',
+        source: 'user',
+      }),
     )
     expect(body.commands).toContainEqual(
-      expect.objectContaining({ name: 'project-skill', description: 'Project skill description' }),
+      expect.objectContaining({
+        name: 'project-skill',
+        description: 'Project skill description',
+        kind: 'skill',
+        source: 'project',
+      }),
     )
   })
 
@@ -4271,6 +4281,7 @@ describe('Sessions API', () => {
         name: 'user-probe',
         description: 'User custom slash command',
         argumentHint: '<topic>',
+        kind: 'command',
       }),
     )
     expect(body.commands).toContainEqual(
@@ -4278,6 +4289,7 @@ describe('Sessions API', () => {
         name: 'project-probe',
         description: 'Project custom slash command',
         argumentHint: '<topic>',
+        kind: 'command',
       }),
     )
   })
@@ -4286,6 +4298,11 @@ describe('Sessions API', () => {
     const sessionId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeef001'
     const workDir = path.join(tmpDir, 'workspace', 'app')
 
+    await writeSkill(
+      path.join(workDir, '.claude', 'skills'),
+      'project-skill-probe',
+      'Project skill description',
+    )
     await writeLegacySlashCommand(
       path.join(workDir, '.claude', 'commands'),
       'project-probe',
@@ -4299,7 +4316,10 @@ describe('Sessions API', () => {
 
     updateSessionSlashCommands(
       sessionId,
-      [{ name: 'builtin-probe', description: 'Cached CLI command', argumentHint: '<value>' }],
+      [
+        { name: 'builtin-probe', description: 'Cached CLI command', argumentHint: '<value>' },
+        { name: 'project-skill-probe', description: 'Cached CLI skill', argumentHint: '<topic>' },
+      ],
       { notifyClient: false },
     )
     clearCommandsCache()
@@ -4315,11 +4335,20 @@ describe('Sessions API', () => {
       name: 'builtin-probe',
       description: 'Cached CLI command',
       argumentHint: '<value>',
+      kind: 'command',
+    })
+    expect(body.commands).toContainEqual({
+      name: 'project-skill-probe',
+      description: 'Cached CLI skill',
+      argumentHint: '<topic>',
+      kind: 'skill',
+      source: 'project',
     })
     expect(body.commands).toContainEqual(
       expect.objectContaining({
         name: 'project-probe',
         description: 'Project custom slash command',
+        kind: 'command',
       }),
     )
   })
@@ -4409,6 +4438,8 @@ describe('Sessions API', () => {
       expect.objectContaining({
         name: 'superpowers:brainstorming',
         description: 'Superpowers brainstorming skill',
+        kind: 'skill',
+        source: 'plugin',
       }),
     )
   })

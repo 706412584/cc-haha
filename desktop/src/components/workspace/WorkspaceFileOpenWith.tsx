@@ -1,18 +1,12 @@
 import { useEffect } from 'react'
-import { ExternalLink } from 'lucide-react'
+import { Copy, ExternalLink } from 'lucide-react'
 import { useTranslation, type TranslationKey } from '../../i18n'
 import { useOpenTargetStore } from '../../stores/openTargetStore'
-import { buildOpenWithItems, type OpenWithItem, type OpenWithDeps } from '../../lib/openWithItems'
-import { getDesktopHost } from '../../lib/desktopHost'
+import type { OpenWithItem } from '../../lib/openWithItems'
+import { buildOpenWithMenuItems } from '../../lib/openWithMenuItems'
 import { getServerBaseUrl } from '../../lib/desktopRuntime'
 import { openWithContextForWorkspaceFile } from '../../lib/openWithContextForHref'
-import { useBrowserPanelStore } from '../../stores/browserPanelStore'
-import { useWorkspacePanelStore } from '../../stores/workspacePanelStore'
 import { TargetIcon } from '@/components/composite/TargetIcon'
-
-function openExternal(path: string) {
-  void getDesktopHost().shell.openPath(path).catch(() => {})
-}
 
 export function WorkspaceFileOpenWith({
   absolutePath,
@@ -28,31 +22,12 @@ export function WorkspaceFileOpenWith({
   const t = useTranslation()
   const targets = useOpenTargetStore((s) => s.targets)
   const ensureTargets = useOpenTargetStore((s) => s.ensureTargets)
-  const openTarget = useOpenTargetStore((s) => s.openTarget)
 
   useEffect(() => {
     void ensureTargets()
   }, [ensureTargets])
 
-  // Cast t: useTranslation returns (key: TranslationKey, params?: Record<string, string|number>) => string
-  // but OpenWithDeps.t expects (key: string, vars?: Record<string, string>) => string.
-  // All keys buildOpenWithItems calls are valid TranslationKeys, so the cast is safe.
-  const deps: OpenWithDeps = {
-    openInAppBrowser: (url) => {
-      if (!sessionId) return
-      useBrowserPanelStore.getState().open(sessionId, url)
-    },
-    openWorkspacePreview: (relPath) => {
-      if (!sessionId) return
-      void useWorkspacePanelStore.getState().openPreview(sessionId, relPath, 'file')
-    },
-    openSystem: (p) => openExternal(p),
-    openTarget: (id, p) => {
-      void openTarget(id, p)
-    },
-    t: (key, vars) => t(key as TranslationKey, vars),
-  }
-  const items: OpenWithItem[] = buildOpenWithItems(
+  const items: OpenWithItem[] = buildOpenWithMenuItems(
     sessionId && workspacePath
       ? openWithContextForWorkspaceFile(workspacePath, absolutePath, {
         sessionId,
@@ -60,7 +35,14 @@ export function WorkspaceFileOpenWith({
       })
       : { kind: 'file', absolutePath, previewable: false },
     targets,
-    deps,
+    {
+      sessionId: sessionId ?? '',
+      // Cast t: useTranslation takes TranslationKey, the builder takes string.
+      // Every key it looks up is a valid TranslationKey, so this is safe.
+      t: (key, vars) => t(key as TranslationKey, vars),
+      // The file-tree menu renders its own copy-path pair directly above this.
+      omitCopyPath: true,
+    },
   )
 
   if (items.length === 0) return null
@@ -85,6 +67,8 @@ export function WorkspaceFileOpenWith({
           >
             {item.target ? (
               <TargetIcon target={item.target} size={14} />
+            ) : item.icon === 'copy' ? (
+              <Copy size={14} strokeWidth={1.9} />
             ) : (
               <ExternalLink size={14} strokeWidth={1.9} />
             )}

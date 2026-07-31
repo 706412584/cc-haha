@@ -93,9 +93,21 @@ describe('handlePreviewLink', () => {
     const deps = makeDeps()
     const handled = handlePreviewLink('docs/report.md', deps)
     expect(handled).toBe(true)
-    expect(deps.openFilePreview).toHaveBeenCalledWith('s1', 'docs/report.md')
+    expect(deps.openFilePreview).toHaveBeenCalledWith('s1', 'docs/report.md', undefined)
     expect(deps.openBrowser).not.toHaveBeenCalled()
     expect(deps.openExternal).not.toHaveBeenCalled()
+  })
+
+  it('passes the line suffix through as a reveal target', () => {
+    // The `file_path:line_number` contract from src/constants/prompts.ts, end to
+    // end: the suffix has to survive classification and reach the code view.
+    const deps = makeDeps()
+    expect(handlePreviewLink('src/app.ts:42', deps)).toBe(true)
+    expect(deps.openFilePreview).toHaveBeenCalledWith('s1', 'src/app.ts', { line: 42 })
+
+    const withColumn = makeDeps()
+    handlePreviewLink('src/app.ts:42:8', withColumn)
+    expect(withColumn.openFilePreview).toHaveBeenCalledWith('s1', 'src/app.ts', { line: 42, column: 8 })
   })
 
   it('routes remote http(s) to openExternal with the url', () => {

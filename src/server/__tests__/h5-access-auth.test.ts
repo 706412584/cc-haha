@@ -394,6 +394,24 @@ describe('remote H5 auth and CORS integration', () => {
     await expect(desktopResponse.json()).resolves.toMatchObject({ status: 'ok' })
   })
 
+  test('rejects tokenless loopback browser origins when desktop local auth is configured', async () => {
+    process.env.CC_HAHA_LOCAL_ACCESS_TOKEN = 'desktop-local-secret'
+    await restartRemoteServer()
+
+    const browserResponse = await fetch(`${baseUrl}/api/status`, {
+      headers: { Origin: 'http://localhost:5173' },
+    })
+    expect(browserResponse.status).toBe(403)
+
+    const desktopResponse = await fetch(`${baseUrl}/api/status`, {
+      headers: {
+        Origin: 'http://localhost:5173',
+        Authorization: 'Bearer desktop-local-secret',
+      },
+    })
+    expect(desktopResponse.status).toBe(200)
+  })
+
   test('still requires the desktop process token for the H5 control plane', async () => {
     process.env.CC_HAHA_LOCAL_ACCESS_TOKEN = 'desktop-local-secret'
     await restartRemoteServer()
@@ -437,6 +455,66 @@ describe('remote H5 auth and CORS integration', () => {
       },
     })
     expect(navigationResponse.status).toBe(200)
+  })
+
+  test('serves same-capability preview assets without opening ordinary local APIs', async () => {
+    process.env.CC_HAHA_LOCAL_ACCESS_TOKEN = 'desktop-local-secret'
+    await restartRemoteServer()
+
+    const workDir = path.join(tmpDir, 'preview-workspace')
+    const previewDir = path.join(workDir, 'site')
+    await fs.mkdir(path.join(previewDir, 'assets'), { recursive: true })
+    await fs.writeFile(path.join(previewDir, 'index.html'), '<script type="module" src="./assets/app.js"></script>')
+    await fs.writeFile(path.join(previewDir, 'assets', 'app.js'), 'document.body.textContent = "preview-ready"')
+    const { sessionId } = await sessionService.createSession(workDir)
+    const previewDocumentUrl = `${baseUrl}/preview-fs/${sessionId}/site/index.html`
+    const previewAssetUrl = `${baseUrl}/preview-fs/${sessionId}/site/assets/app.js`
+    const previewHeaders = {
+      Origin: baseUrl,
+      Referer: previewDocumentUrl,
+      'Sec-Fetch-Site': 'same-origin',
+      'Sec-Fetch-Mode': 'cors',
+      'Sec-Fetch-Dest': 'script',
+    }
+
+    const previewAsset = await fetch(previewAssetUrl, { headers: previewHeaders })
+    expect(previewAsset.status).toBe(200)
+    await expect(previewAsset.text()).resolves.toContain('preview-ready')
+
+    const localSiteDir = path.join(tmpDir, 'local-site')
+    await fs.mkdir(path.join(localSiteDir, 'assets'), { recursive: true })
+    await fs.writeFile(path.join(localSiteDir, 'index.html'), '<script type="module" src="./assets/app.js"></script>')
+    await fs.writeFile(path.join(localSiteDir, 'assets', 'app.js'), 'document.body.textContent = "local-ready"')
+    registerFilesystemAccessRoot(localSiteDir)
+    const localDocumentUrl = localFileUrl(baseUrl, path.join(localSiteDir, 'index.html'))
+    const localAssetUrl = localFileUrl(baseUrl, path.join(localSiteDir, 'assets', 'app.js'))
+    const localAsset = await fetch(localAssetUrl, {
+      headers: {
+        ...previewHeaders,
+        Referer: localDocumentUrl,
+      },
+    })
+    expect(localAsset.status).toBe(200)
+    await expect(localAsset.text()).resolves.toContain('local-ready')
+
+    for (const pathname of [
+      '/api/status',
+      '/api/h5-access',
+      '/proxy/provider/v1/messages',
+    ]) {
+      const blocked = await fetch(`${baseUrl}${pathname}`, { headers: previewHeaders })
+      expect(blocked.status).toBe(403)
+    }
+
+    const externalAsset = await fetch(previewAssetUrl, {
+      headers: {
+        ...previewHeaders,
+        Origin: 'https://attacker.example',
+        Referer: 'https://attacker.example/',
+        'Sec-Fetch-Site': 'cross-site',
+      },
+    })
+    expect(externalAsset.status).toBe(403)
   })
 
   test('enforces the pet bearer capability allowlist before API routing', async () => {

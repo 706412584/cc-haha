@@ -34,4 +34,26 @@ describe('ProjectContextChip', () => {
     expect(screen.getByText('OpenCutSkill')).toBeInTheDocument()
     expect(screen.queryByText('worktree')).not.toBeInTheDocument()
   })
+
+  // The toolbar variant shares a row with the model and run controls, so a
+  // narrow composer column has to take width out of it. Asserted on the shrink
+  // factors rather than on rendered widths because jsdom lays nothing out — and
+  // when they matched, a narrow column truncated both halves at once and left
+  // `cc-…/…n`, where neither the project nor the branch could be read.
+  it('gives up branch width before project width in the toolbar row', () => {
+    render(
+      <ProjectContextChip
+        variant="toolbar"
+        workDir="/workspace/OpenCutSkill"
+        repoName="OpenCutSkill"
+        branch="feature/some-very-long-branch-name"
+      />,
+    )
+
+    const project = screen.getByText('OpenCutSkill')
+    const branch = screen.getByText('feature/some-very-long-branch-name').closest('span[dir="rtl"]')
+
+    expect(project).toHaveClass('shrink', 'truncate')
+    expect(branch).toHaveClass('shrink-[4]', 'truncate')
+  })
 })

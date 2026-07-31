@@ -29,7 +29,15 @@ const tokenCache = new Map<string, Token[]>();
 // Single regex: matches any MD marker or ordered-list start (N. at line start).
 // One pass instead of 10× includes scans.
 const MD_SYNTAX_RE = /[#*`|[>\-_~]|\n\n|^\d+\. |\n\d+\. /;
-function hasMarkdownSyntax(s: string): boolean {
+export function hasMarkdownSyntax(s: string): boolean {
+  // A URL anywhere in the content must reach the lexer, because the lexer is what
+  // turns it into a clickable OSC 8 hyperlink. A plain Chinese sentence carries
+  // none of the markers below, so "请访问 http://localhost:3000 查看效果" used to
+  // take the fast path and render the URL as dead text — while the same sentence
+  // in English usually contained a `-` and linked fine (#1145). Scanned over the
+  // whole string with indexOf rather than the 500-char sample: an assistant
+  // summary commonly puts its dev-server URL in the closing line.
+  if (s.includes('://')) return true;
   // Sample first 500 chars — if markdown exists it's usually early (headers,
   // code fence, list). Long tool outputs are mostly plain text tails.
   return MD_SYNTAX_RE.test(s.length > 500 ? s.slice(0, 500) : s);

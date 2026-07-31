@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { MessageEntry } from '../types/session'
-import type { BackgroundAgentTask } from '../types/chat'
 import { useSessionRuntimeStore } from './sessionRuntimeStore'
 
 const {
@@ -19,12 +18,12 @@ const {
   notifyDesktopMock,
   updateTabTitleMock,
   updateTabStatusMock,
-  openTabMock,
   updateSessionTitleMock,
   updateSessionMessageCountMock,
   updateSessionPermissionModeMock,
   sessionStoreSnapshot,
   cliTaskStoreSnapshot,
+  connectionStateHandlers,
 } = vi.hoisted(() => ({
   sendMock: vi.fn(),
   getMemberBySessionIdMock: vi.fn<(sessionId: string) => any>(() => null),
@@ -41,7 +40,6 @@ const {
   notifyDesktopMock: vi.fn(),
   updateTabTitleMock: vi.fn(),
   updateTabStatusMock: vi.fn(),
-  openTabMock: vi.fn(),
   updateSessionTitleMock: vi.fn(),
   updateSessionMessageCountMock: vi.fn(),
   updateSessionPermissionModeMock: vi.fn(),
@@ -55,13 +53,13 @@ const {
       projectPath: string
       workDir: string | null
       workDirExists: boolean
-      permissionMode?: string
     }>,
   },
   cliTaskStoreSnapshot: {
     tasks: [] as Array<{ id: string; subject: string; status: string; activeForm?: string }>,
     sessionId: null as string | null,
   },
+  connectionStateHandlers: new Map<string, (state: 'connecting' | 'connected' | 'reconnecting' | 'disconnected') => void>(),
 }))
 
 vi.mock('../lib/desktopNotifications', () => ({
@@ -72,8 +70,12 @@ vi.mock('../api/websocket', () => ({
   wsManager: {
     connect: vi.fn(),
     disconnect: vi.fn(),
+    onConnectionState: vi.fn((sessionId: string, handler: (state: 'connecting' | 'connected' | 'reconnecting' | 'disconnected') => void) => {
+      connectionStateHandlers.set(sessionId, handler)
+      handler('connecting')
+      return () => connectionStateHandlers.delete(sessionId)
+    }),
     onMessage: vi.fn(() => () => {}),
-    onConnectionState: vi.fn(() => () => {}),
     clearHandlers: vi.fn(),
     send: sendMock,
   },
@@ -83,7 +85,6 @@ vi.mock('../api/sessions', () => ({
   sessionsApi: {
     getMessages: vi.fn(async () => ({ messages: [] })),
     getSlashCommands: vi.fn(async () => ({ commands: [] })),
-    createProviderTransition: vi.fn(),
   },
 }))
 
@@ -104,7 +105,6 @@ vi.mock('./tabStore', () => ({
     getState: () => ({
       updateTabStatus: updateTabStatusMock,
       updateTabTitle: updateTabTitleMock,
-      openTab: openTabMock,
     }),
   },
 }))
@@ -116,7 +116,6 @@ vi.mock('./sessionStore', () => ({
       updateSessionTitle: updateSessionTitleMock,
       updateSessionMessageCount: updateSessionMessageCountMock,
       updateSessionPermissionMode: updateSessionPermissionModeMock,
-      fetchSessions: vi.fn(async () => {}),
     }),
   },
 }))
@@ -139,14 +138,13 @@ vi.mock('./cliTaskStore', () => ({
 import { sessionsApi } from '../api/sessions'
 import { useSettingsStore } from './settingsStore'
 import {
+  __resetCompactionThrashForTesting,
   mapHistoryMessagesToUiMessages,
   reconstructAgentNotifications,
   stripGeneratedImageMetadataLines,
-  __resetCompactionThrashForTesting,
   type PerSessionState,
   useChatStore,
 } from './chatStore'
-import { useWorkspacePanelStore } from './workspacePanelStore'
 
 const TEST_SESSION_ID = 'test-session-1'
 const initialState = useChatStore.getState()
@@ -174,7 +172,6 @@ function makeSession(overrides: Partial<PerSessionState> = {}): PerSessionState 
     agentTaskNotifications: {},
     backgroundAgentTasks: {},
     elapsedTimer: null,
-    messageQueue: [],
     ...overrides,
   }
 }
@@ -398,16 +395,18 @@ describe('chatStore history mapping', () => {
     notifyDesktopMock.mockReset()
     updateTabTitleMock.mockReset()
     updateTabStatusMock.mockReset()
-    openTabMock.mockReset()
     updateSessionTitleMock.mockReset()
     updateSessionMessageCountMock.mockReset()
+    connectionStateHandlers.clear()
     vi.mocked(sessionsApi.getMessages).mockReset()
     vi.mocked(sessionsApi.getMessages).mockResolvedValue({ messages: [] })
-    vi.mocked(sessionsApi.createProviderTransition).mockReset()
+    vi.mocked(sessionsApi.getSlashCommands).mockReset()
+    vi.mocked(sessionsApi.getSlashCommands).mockResolvedValue({ commands: [] })
     sessionStoreSnapshot.sessions = []
     cliTaskStoreSnapshot.tasks = []
     cliTaskStoreSnapshot.sessionId = null
-    useSessionRuntimeStore.setState({ selections: {}, coordinatorModes: {}, pipelineModes: {}, soloPipelineModes: {} })
+    useSessionRuntimeStore.setState({ selections: {} })
+    __resetCompactionThrashForTesting()
     localStorage.clear()
     useSettingsStore.setState({ locale: 'en' })
     useChatStore.setState({
@@ -541,43 +540,6 @@ describe('chatStore history mapping', () => {
       content: {
         answers: { 'Pick one?': 'A' },
       },
-    })
-  })
-
-  it('drops trailing thinking when compact history is mapped', () => {
-    const messages: MessageEntry[] = [
-      {
-        id: 'assistant-thinking',
-        type: 'assistant',
-        content: [
-          { type: 'thinking', thinking: 'Modifying layout elements' },
-        ],
-        timestamp: '2026-05-19T09:59:59.000Z',
-      },
-      {
-        id: 'compact-boundary',
-        type: 'system',
-        content: 'Conversation compacted',
-        timestamp: '2026-05-19T10:00:00.000Z',
-      },
-      {
-        id: 'compact-summary',
-        type: 'user',
-        content: [
-          'This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.',
-          '',
-          'Kept the layout changes and verification notes.',
-        ].join('\n'),
-        timestamp: '2026-05-19T10:00:01.000Z',
-      },
-    ]
-
-    const mapped = mapHistoryMessagesToUiMessages(messages)
-
-    expect(mapped.map((message) => message.type)).toEqual(['compact_summary'])
-    expect(mapped[0]).toMatchObject({
-      type: 'compact_summary',
-      summary: 'Kept the layout changes and verification notes.',
     })
   })
 
@@ -1271,248 +1233,6 @@ describe('chatStore history mapping', () => {
     })
   })
 
-  it('loadHistory restores terminal background_task UI messages when notifications are absent', async () => {
-    vi.mocked(sessionsApi.getMessages).mockResolvedValueOnce({
-      messages: [
-        {
-          id: 'bg-message-1',
-          type: 'background_task',
-          timestamp: '2026-04-06T00:00:10.000Z',
-          task: {
-            taskId: 'critic-task-1',
-            toolUseId: 'critic-tool-1',
-            status: 'completed',
-            description: 'Review the implementation',
-            taskType: 'local_agent',
-            workflowName: 'solo-council',
-            prompt: 'Check the diff',
-            summary: 'Review passed',
-            lastToolName: 'Read',
-            outputFile: '/tmp/critic.txt',
-            usage: { totalTokens: 321, toolUses: 4, durationMs: 12345 },
-            startedAt: 1000,
-            updatedAt: 2000,
-          } satisfies BackgroundAgentTask,
-        } as unknown as MessageEntry,
-      ],
-    })
-
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({ messages: [] }),
-      },
-    })
-
-    await useChatStore.getState().loadHistory(TEST_SESSION_ID)
-
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.backgroundAgentTasks?.['critic-task-1']).toMatchObject({
-      taskId: 'critic-task-1',
-      toolUseId: 'critic-tool-1',
-      status: 'completed',
-      description: 'Review the implementation',
-      taskType: 'local_agent',
-      workflowName: 'solo-council',
-      prompt: 'Check the diff',
-      summary: 'Review passed',
-      lastToolName: 'Read',
-      outputFile: '/tmp/critic.txt',
-      usage: { totalTokens: 321, toolUses: 4, durationMs: 12345 },
-      startedAt: 1000,
-      updatedAt: 2000,
-    })
-  })
-
-  it('reloadHistory restores terminal background_task UI messages when notifications are empty', async () => {
-    vi.mocked(sessionsApi.getMessages).mockResolvedValueOnce({
-      messages: [
-        {
-          id: 'bg-message-1',
-          type: 'background_task',
-          timestamp: '2026-04-06T00:00:10.000Z',
-          task: {
-            taskId: 'critic-task-1',
-            toolUseId: 'critic-tool-1',
-            status: 'failed',
-            description: 'Review the implementation',
-            taskType: 'local_agent',
-            workflowName: 'solo-council',
-            prompt: 'Check the diff',
-            summary: 'Review failed',
-            startedAt: 1000,
-            updatedAt: 2000,
-          } satisfies BackgroundAgentTask,
-        } as unknown as MessageEntry,
-      ],
-      taskNotifications: [],
-    })
-
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({
-          messages: [{ id: 'old', type: 'assistant_text', content: 'old', timestamp: 1 }],
-          backgroundAgentTasks: {},
-        }),
-      },
-    })
-
-    await useChatStore.getState().reloadHistory(TEST_SESSION_ID)
-
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.backgroundAgentTasks?.['critic-task-1']).toMatchObject({
-      taskId: 'critic-task-1',
-      toolUseId: 'critic-tool-1',
-      status: 'failed',
-      description: 'Review the implementation',
-      taskType: 'local_agent',
-      workflowName: 'solo-council',
-      prompt: 'Check the diff',
-      summary: 'Review failed',
-      startedAt: 1000,
-      updatedAt: 2000,
-    })
-  })
-
-  it('does not restore message-only running background_task entries after history restore', async () => {
-    vi.mocked(sessionsApi.getMessages).mockResolvedValueOnce({
-      messages: [
-        {
-          id: 'bg-running-message',
-          type: 'background_task',
-          timestamp: '2026-04-06T00:00:10.000Z',
-          task: {
-            taskId: 'stale-running-task',
-            toolUseId: 'stale-running-tool',
-            status: 'running',
-            description: 'Old running task',
-            taskType: 'local_agent',
-            startedAt: 1000,
-            updatedAt: 2000,
-          } satisfies BackgroundAgentTask,
-        } as unknown as MessageEntry,
-      ],
-    })
-
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({ messages: [] }),
-      },
-    })
-
-    await useChatStore.getState().loadHistory(TEST_SESSION_ID)
-
-    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
-    expect(session?.backgroundAgentTasks?.['stale-running-task']).toBeUndefined()
-    expect(session?.messages.some((message) => message.type === 'background_task')).toBe(false)
-  })
-
-  it('merges message-derived metadata with notification-derived terminal fields', async () => {
-    vi.mocked(sessionsApi.getMessages).mockResolvedValueOnce({
-      messages: [
-        {
-          id: 'bg-message-1',
-          type: 'background_task',
-          timestamp: '2026-04-06T00:00:10.000Z',
-          task: {
-            taskId: 'message-task-id',
-            toolUseId: 'shared-tool-id',
-            status: 'completed',
-            description: 'Review the implementation',
-            taskType: 'local_agent',
-            workflowName: 'solo-council',
-            prompt: 'Check the diff',
-            summary: 'Message summary',
-            outputFile: '/tmp/message-output.txt',
-            usage: { totalTokens: 100, toolUses: 2, durationMs: 3000 },
-            startedAt: 1000,
-            updatedAt: 2000,
-          } satisfies BackgroundAgentTask,
-        } as unknown as MessageEntry,
-      ],
-      taskNotifications: [
-        {
-          taskId: 'notification-task-id',
-          toolUseId: 'shared-tool-id',
-          status: 'failed',
-          summary: 'Notification summary',
-          outputFile: '/tmp/notification-output.txt',
-          usage: { totalTokens: 200, toolUses: 5, durationMs: 6000 },
-          timestamp: '2026-04-06T00:00:20.000Z',
-        },
-      ],
-    })
-
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({ messages: [] }),
-      },
-    })
-
-    await useChatStore.getState().loadHistory(TEST_SESSION_ID)
-
-    const task = useChatStore.getState().sessions[TEST_SESSION_ID]?.backgroundAgentTasks?.['notification-task-id']
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.backgroundAgentTasks?.['message-task-id']).toBeUndefined()
-    expect(task).toMatchObject({
-      taskId: 'notification-task-id',
-      toolUseId: 'shared-tool-id',
-      status: 'failed',
-      description: 'Review the implementation',
-      taskType: 'local_agent',
-      workflowName: 'solo-council',
-      prompt: 'Check the diff',
-      summary: 'Notification summary',
-      outputFile: '/tmp/notification-output.txt',
-      usage: { totalTokens: 200, toolUses: 5, durationMs: 6000 },
-      startedAt: 1000,
-      updatedAt: new Date('2026-04-06T00:00:20.000Z').getTime(),
-    })
-  })
-
-  it('preserves persisted background_task timestamps and falls back to the message timestamp', async () => {
-    const fallbackTimestamp = new Date('2026-04-06T00:00:30.000Z').getTime()
-    vi.mocked(sessionsApi.getMessages).mockResolvedValueOnce({
-      messages: [
-        {
-          id: 'bg-preserved-times',
-          type: 'background_task',
-          timestamp: '2026-04-06T00:00:10.000Z',
-          task: {
-            taskId: 'preserved-times-task',
-            status: 'completed',
-            startedAt: 111,
-            updatedAt: 222,
-          } satisfies BackgroundAgentTask,
-        } as unknown as MessageEntry,
-        {
-          id: 'bg-fallback-times',
-          type: 'background_task',
-          timestamp: '2026-04-06T00:00:30.000Z',
-          task: {
-            taskId: 'fallback-times-task',
-            status: 'stopped',
-            startedAt: Number.NaN,
-          } as BackgroundAgentTask,
-        } as unknown as MessageEntry,
-      ],
-    })
-
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({ messages: [] }),
-      },
-    })
-
-    await useChatStore.getState().loadHistory(TEST_SESSION_ID)
-
-    const tasks = useChatStore.getState().sessions[TEST_SESSION_ID]?.backgroundAgentTasks
-    expect(tasks?.['preserved-times-task']).toMatchObject({
-      startedAt: 111,
-      updatedAt: 222,
-    })
-    expect(tasks?.['fallback-times-task']).toMatchObject({
-      startedAt: fallbackTimestamp,
-      updatedAt: fallbackTimestamp,
-    })
-  })
-
   it('hydrates transcript ids for a just-completed live turn', async () => {
     vi.mocked(sessionsApi.getMessages).mockResolvedValueOnce({
       messages: [
@@ -1614,40 +1334,48 @@ describe('chatStore history mapping', () => {
     expect(notifyDesktopMock).not.toHaveBeenCalled()
   })
 
-  it('appends replayed assistant suffix text even when it is contained in the hydrated tail', () => {
+  // Same reconnect replay as above, one block type over. A thinking UIMessage
+  // carries no transcriptMessageId (types/chat.ts:291), so neither the
+  // appendAssistantTextMessage guard nor dropDuplicateTranscriptTextMessages
+  // can reach it — a replayed thinking block has nothing identifying it.
+  it('does not duplicate a hydrated thinking block when live output replays after reconnect', () => {
     useChatStore.setState({
       sessions: {
         [TEST_SESSION_ID]: makeSession({
+          chatState: 'idle',
           messages: [
             {
-              id: 'assistant-hydrated',
-              type: 'assistant_text',
-              content: 'Implemented the billing report and verified export behavior.',
-              transcriptMessageId: 'assistant-1',
+              id: 'live-user',
+              type: 'user_text',
+              content: 'live prompt',
+              transcriptMessageId: 'transcript-user-1',
               timestamp: 1,
             },
+            { id: 'live-thinking', type: 'thinking', content: 'weighing the options', timestamp: 2 },
+            {
+              id: 'live-assistant',
+              type: 'assistant_text',
+              content: 'live answer',
+              transcriptMessageId: 'transcript-assistant-1',
+              timestamp: 3,
+            },
           ],
-          chatState: 'streaming',
-          streamingText: 'verified export behavior.',
         }),
       },
     })
 
     useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'status',
-      state: 'idle',
+      type: 'thinking',
+      text: 'weighing the options',
     })
 
-    const messages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages ?? []
-    expect(messages.filter((message) => message.type === 'assistant_text')).toMatchObject([
-      {
-        transcriptMessageId: 'assistant-1',
-        content: 'Implemented the billing report and verified export behavior.',
-      },
-      {
-        content: 'verified export behavior.',
-      },
+    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.messages).toMatchObject([
+      { id: 'live-user', type: 'user_text' },
+      { id: 'live-thinking', type: 'thinking', content: 'weighing the options' },
+      { id: 'live-assistant', type: 'assistant_text', content: 'live answer' },
     ])
+    if (session?.elapsedTimer) clearInterval(session.elapsedTimer)
   })
 
   it('collapses duplicate assistant replies after transcript id hydration', async () => {
@@ -2051,13 +1779,13 @@ describe('chatStore history mapping', () => {
           connectionState: 'connected',
           streamingText: '',
           streamingToolInput: '',
-          streamingResponseChars: 0,
           activeToolUseId: null,
           activeToolName: null,
           activeThinkingId: null,
           pendingPermission: null,
           pendingComputerUsePermission: null,
           tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
           elapsedSeconds: 0,
           statusVerb: '',
           slashCommands: [],
@@ -2131,31 +1859,6 @@ describe('chatStore history mapping', () => {
     )
   })
 
-  it('replays Solo Pipeline mode immediately before sending a user turn', () => {
-    useSessionRuntimeStore.setState({ coordinatorModes: {}, pipelineModes: { [TEST_SESSION_ID]: 'solo' }, soloPipelineModes: { [TEST_SESSION_ID]: true } })
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
-      },
-    })
-
-    useChatStore.getState().sendMessage(TEST_SESSION_ID, '继续 solo')
-
-    expect(sendMock).toHaveBeenNthCalledWith(1, TEST_SESSION_ID, {
-      type: 'set_coordinator_mode',
-      enabled: false,
-    })
-    expect(sendMock).toHaveBeenNthCalledWith(2, TEST_SESSION_ID, {
-      type: 'set_pipeline_mode',
-      flavor: 'solo',
-    })
-    expect(sendMock).toHaveBeenNthCalledWith(3, TEST_SESSION_ID, {
-      type: 'user_message',
-      content: '继续 solo',
-      attachments: undefined,
-    })
-  })
-
   it('keeps queued message model context when editing the visible prompt text', () => {
     useChatStore.setState({
       sessions: {
@@ -2215,13 +1918,13 @@ describe('chatStore history mapping', () => {
           connectionState: 'connected',
           streamingText: '',
           streamingToolInput: '',
-          streamingResponseChars: 0,
           activeToolUseId: null,
           activeToolName: null,
           activeThinkingId: null,
           pendingPermission: null,
           pendingComputerUsePermission: null,
           tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
           elapsedSeconds: 0,
           statusVerb: '',
           slashCommands: [],
@@ -2283,103 +1986,6 @@ describe('chatStore history mapping', () => {
     )
   })
 
-  it('keeps previewUrl on optimistic display attachments but strips it from websocket payload', () => {
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
-      },
-    })
-
-    useChatStore.getState().sendMessage(
-      TEST_SESSION_ID,
-      'look at this',
-      [{
-        type: 'image',
-        name: 'chart.png',
-        path: 'C:\\Users\\Ada\\Pictures\\chart.png',
-        previewUrl: 'http://127.0.0.1:3456/api/filesystem/file?path=C%3A%5CUsers%5CAda%5CPictures%5Cchart.png',
-        mimeType: 'image/png',
-      } as any],
-      {
-        displayAttachments: [{
-          type: 'image',
-          name: 'chart.png',
-          path: 'C:\\Users\\Ada\\Pictures\\chart.png',
-          previewUrl: 'http://127.0.0.1:3456/api/filesystem/file?path=C%3A%5CUsers%5CAda%5CPictures%5Cchart.png',
-          mimeType: 'image/png',
-        }],
-      },
-    )
-
-    const messages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages ?? []
-    expect(messages[0]).toMatchObject({
-      type: 'user_text',
-      attachments: [{
-        type: 'image',
-        name: 'chart.png',
-        path: 'C:\\Users\\Ada\\Pictures\\chart.png',
-        previewUrl: 'http://127.0.0.1:3456/api/filesystem/file?path=C%3A%5CUsers%5CAda%5CPictures%5Cchart.png',
-        mimeType: 'image/png',
-      }],
-    })
-    expect(sendMock).toHaveBeenCalledWith(
-      TEST_SESSION_ID,
-      {
-        type: 'user_message',
-        content: 'look at this',
-        attachments: [{
-          type: 'image',
-          name: 'chart.png',
-          path: 'C:\\Users\\Ada\\Pictures\\chart.png',
-          data: undefined,
-          mimeType: 'image/png',
-          isDirectory: undefined,
-          lineStart: undefined,
-          lineEnd: undefined,
-          note: undefined,
-          quote: undefined,
-        }],
-      },
-    )
-    expect(JSON.stringify(sendMock.mock.calls[0]?.[1])).not.toContain('previewUrl')
-  })
-
-  it('preserves queued display previewUrl while stripping it when the queue drains', () => {
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({ chatState: 'thinking' }),
-      },
-    })
-
-    useChatStore.getState().enqueueMessage(
-      TEST_SESSION_ID,
-      'queued image',
-      [{ type: 'image', name: 'queued.png', path: '/tmp/queued.png', previewUrl: 'http://127.0.0.1:3456/api/filesystem/file?path=%2Ftmp%2Fqueued.png' } as any],
-      { displayAttachments: [{ type: 'image', name: 'queued.png', path: '/tmp/queued.png', previewUrl: 'http://127.0.0.1:3456/api/filesystem/file?path=%2Ftmp%2Fqueued.png' }] },
-    )
-
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messageQueue?.[0]?.displayAttachments?.[0]).toMatchObject({
-      previewUrl: 'http://127.0.0.1:3456/api/filesystem/file?path=%2Ftmp%2Fqueued.png',
-    })
-
-    useChatStore.setState((state) => ({
-      sessions: {
-        ...state.sessions,
-        [TEST_SESSION_ID]: {
-          ...state.sessions[TEST_SESSION_ID]!,
-          chatState: 'idle',
-        },
-      },
-    }))
-    useChatStore.getState().drainMessageQueue(TEST_SESSION_ID)
-
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages[0]).toMatchObject({
-      type: 'user_text',
-      attachments: [{ previewUrl: 'http://127.0.0.1:3456/api/filesystem/file?path=%2Ftmp%2Fqueued.png' }],
-    })
-    expect(JSON.stringify(sendMock.mock.calls.at(-1)?.[1])).not.toContain('previewUrl')
-  })
-
   it('stores server-materialized attachment prefixes for rewind matching', () => {
     useChatStore.setState({
       sessions: {
@@ -2389,13 +1995,13 @@ describe('chatStore history mapping', () => {
           connectionState: 'connected',
           streamingText: '',
           streamingToolInput: '',
-          streamingResponseChars: 0,
           activeToolUseId: null,
           activeToolName: null,
           activeThinkingId: null,
           pendingPermission: null,
           pendingComputerUsePermission: null,
           tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
           elapsedSeconds: 0,
           statusVerb: '',
           slashCommands: [],
@@ -2557,13 +2163,13 @@ describe('chatStore history mapping', () => {
           connectionState: 'connected',
           streamingText: '',
           streamingToolInput: '',
-          streamingResponseChars: 0,
           activeToolUseId: null,
           activeToolName: null,
           activeThinkingId: null,
           pendingPermission: null,
           pendingComputerUsePermission: null,
           tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
           elapsedSeconds: 0,
           statusVerb: '',
           slashCommands: [{ name: 'old-command', description: 'Old command' }],
@@ -2763,6 +2369,45 @@ describe('chatStore history mapping', () => {
     vi.useRealTimers()
   })
 
+  it('marks pending tool input as stopped when generation is stopped', () => {
+    vi.useFakeTimers()
+
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({ chatState: 'tool_executing' }),
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'content_start',
+      blockType: 'tool_use',
+      toolName: 'Write',
+      toolUseId: 'write-1',
+    })
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'content_delta',
+      toolInput: '{"file_path":"/private/tmp/story.md","content":"第一章',
+    })
+    vi.advanceTimersByTime(60)
+
+    useChatStore.getState().stopGeneration(TEST_SESSION_ID)
+
+    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.chatState).toBe('idle')
+    expect(session?.activeToolUseId).toBeNull()
+    expect(session?.activeToolName).toBeNull()
+    expect(session?.streamingToolInput).toBe('')
+    expect(session?.messages[0]).toMatchObject({
+      type: 'tool_use',
+      toolUseId: 'write-1',
+      isPending: false,
+      status: 'stopped',
+    })
+
+    vi.runOnlyPendingTimers()
+    vi.useRealTimers()
+  })
+
   it('refreshes merged slash commands when a live CLI update omits project commands', async () => {
     const cliCommand = { name: 'builtin-help', description: 'Built-in command' }
     const projectCommand = { name: 'project-probe', description: 'Project custom command' }
@@ -2793,6 +2438,46 @@ describe('chatStore history mapping', () => {
     expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.slashCommands).toEqual([
       cliCommand,
       projectCommand,
+    ])
+  })
+
+  it('keeps skill source metadata while a live CLI slash update is being reconciled', async () => {
+    const projectSkill = {
+      name: 'project-audit',
+      description: 'Project skill',
+      kind: 'skill' as const,
+      source: 'project' as const,
+    }
+
+    vi.mocked(sessionsApi.getSlashCommands).mockResolvedValueOnce({
+      commands: [projectSkill],
+    })
+
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          slashCommands: [projectSkill],
+        }),
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'system_notification',
+      subtype: 'slash_commands',
+      data: [{ name: 'project-audit', description: 'CLI description' }],
+    })
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.slashCommands).toContainEqual({
+      name: 'project-audit',
+      description: 'CLI description',
+      kind: 'skill',
+      source: 'project',
+    })
+
+    await Promise.resolve()
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.slashCommands).toEqual([
+      projectSkill,
     ])
   })
 
@@ -2835,7 +2520,7 @@ describe('chatStore history mapping', () => {
 
     expect(sendMock).toHaveBeenCalledWith(TEST_SESSION_ID, {
       type: 'set_runtime_config',
-      requestId: expect.stringMatching(/^[0-9a-f-]{36}$/i),
+      requestId: expect.any(String),
       providerId: 'provider-1',
       modelId: 'kimi-k2.6',
       effortLevel: 'high',
@@ -2845,7 +2530,7 @@ describe('chatStore history mapping', () => {
         TEST_SESSION_ID,
         {
           type: 'set_runtime_config',
-          requestId: expect.stringMatching(/^[0-9a-f-]{36}$/i),
+          requestId: expect.any(String),
           providerId: 'provider-1',
           modelId: 'kimi-k2.6',
           effortLevel: 'high',
@@ -2860,6 +2545,104 @@ describe('chatStore history mapping', () => {
 
     expect(sendMock).not.toHaveBeenCalledWith(TEST_SESSION_ID, {
       type: 'prewarm_session',
+    })
+  })
+
+  it('can observe a known empty session without prewarming it', () => {
+    sessionStoreSnapshot.sessions = [{
+      id: TEST_SESSION_ID,
+      title: 'Observed Session',
+      createdAt: '2026-06-20T10:00:00.000Z',
+      modifiedAt: '2026-06-20T10:00:00.000Z',
+      messageCount: 0,
+      projectPath: '/workspace/project',
+      workDir: '/workspace/project',
+      workDirExists: true,
+    }]
+
+    useChatStore.getState().connectToSession(TEST_SESSION_ID, { prewarm: false })
+
+    expect(sendMock).not.toHaveBeenCalledWith(TEST_SESSION_ID, {
+      type: 'prewarm_session',
+    })
+  })
+
+  it('can connect a read-only companion without applying saved runtime selection', () => {
+    sessionStoreSnapshot.sessions = [{
+      id: TEST_SESSION_ID,
+      title: 'Observed Session',
+      createdAt: '2026-06-20T10:00:00.000Z',
+      modifiedAt: '2026-06-20T10:00:00.000Z',
+      messageCount: 1,
+      projectPath: '/workspace/project',
+      workDir: '/workspace/project',
+      workDirExists: true,
+    }]
+    useSessionRuntimeStore.getState().setSelection(TEST_SESSION_ID, {
+      providerId: 'provider-1',
+      modelId: 'kimi-k2.6',
+      effortLevel: 'high',
+    })
+
+    useChatStore.getState().connectToSession(TEST_SESSION_ID, {
+      prewarm: false,
+      applyRuntimeSelection: false,
+    })
+
+    expect(sendMock).not.toHaveBeenCalledWith(TEST_SESSION_ID, expect.objectContaining({
+      type: 'set_runtime_config',
+    }))
+    expect(sendMock).not.toHaveBeenCalledWith(TEST_SESSION_ID, {
+      type: 'prewarm_session',
+    })
+  })
+
+  it('connects a scoped pet client without fetching transcript, commands, or tasks', () => {
+    useChatStore.getState().connectToSession(TEST_SESSION_ID, {
+      prewarm: false,
+      applyRuntimeSelection: false,
+      minimalBootstrap: true,
+    })
+
+    expect(fetchSessionTasksMock).not.toHaveBeenCalled()
+    expect(sessionsApi.getMessages).not.toHaveBeenCalled()
+    expect(sessionsApi.getSlashCommands).not.toHaveBeenCalled()
+  })
+
+  it('blocks sends across reconnects until a fresh authoritative snapshot arrives', () => {
+    useChatStore.getState().connectToSession(TEST_SESSION_ID, {
+      prewarm: false,
+      applyRuntimeSelection: false,
+    })
+    const onConnectionState = connectionStateHandlers.get(TEST_SESSION_ID)
+    expect(onConnectionState).toBeTypeOf('function')
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]).toMatchObject({
+      connectionState: 'connecting',
+      connectionSnapshotReady: false,
+    })
+
+    onConnectionState?.('connected')
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]).toMatchObject({
+      connectionState: 'connected',
+      connectionSnapshotReady: false,
+    })
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'permission_requests_snapshot',
+      toolRequestIds: [],
+      computerUseRequestIds: [],
+      turnActive: false,
+    })
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.connectionSnapshotReady).toBe(true)
+
+    onConnectionState?.('reconnecting')
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]).toMatchObject({
+      connectionState: 'reconnecting',
+      connectionSnapshotReady: false,
+    })
+    onConnectionState?.('connected')
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]).toMatchObject({
+      connectionState: 'connected',
+      connectionSnapshotReady: false,
     })
   })
 
@@ -2903,246 +2686,20 @@ describe('chatStore history mapping', () => {
     expect(sendMock).not.toHaveBeenCalledWith(TEST_SESSION_ID, { type: 'prewarm_session' })
   })
 
-  it('sends explicit runtime overrides with a valid UUID without committing before applied', () => {
-    useSessionRuntimeStore.getState().setSelection(TEST_SESSION_ID, {
-      providerId: 'provider-a',
-      modelId: 'source-model',
-    })
-
-    const requestId = useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, {
+  it('sends explicit runtime overrides over websocket', () => {
+    useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, {
       providerId: null,
       modelId: 'claude-opus-4-7',
       effortLevel: 'max',
     })
 
-    expect(requestId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
     expect(sendMock).toHaveBeenCalledWith(TEST_SESSION_ID, {
       type: 'set_runtime_config',
-      requestId,
+      requestId: expect.any(String),
       providerId: null,
       modelId: 'claude-opus-4-7',
       effortLevel: 'max',
     })
-    expect(useSessionRuntimeStore.getState().selections[TEST_SESSION_ID]).toEqual({
-      providerId: 'provider-a',
-      modelId: 'source-model',
-    })
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.pendingRuntimeConfig).toEqual({
-      requestId,
-      selection: {
-        providerId: null,
-        modelId: 'claude-opus-4-7',
-        effortLevel: 'max',
-      },
-    })
-  })
-
-  it('commits only the current applied runtime result and ignores stale or duplicate results', () => {
-    const sourceSelection = { providerId: 'provider-a', modelId: 'source-model' }
-    const firstSelection = { providerId: 'provider-a', modelId: 'first-model' }
-    const currentSelection = { providerId: 'provider-a', modelId: 'current-model', effortLevel: 'high' as const }
-    useSessionRuntimeStore.getState().setSelection(TEST_SESSION_ID, sourceSelection)
-
-    const staleRequestId = useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, firstSelection)
-    const currentRequestId = useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, currentSelection)
-
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'runtime_config_result',
-      requestId: staleRequestId,
-      result: 'applied',
-      selection: firstSelection,
-    })
-    expect(useSessionRuntimeStore.getState().selections[TEST_SESSION_ID]).toEqual(sourceSelection)
-
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'runtime_config_result',
-      requestId: currentRequestId,
-      result: 'applied',
-      selection: currentSelection,
-    })
-    expect(useSessionRuntimeStore.getState().selections[TEST_SESSION_ID]).toEqual(currentSelection)
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.pendingRuntimeConfig).toBeNull()
-
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'runtime_config_result',
-      requestId: currentRequestId,
-      result: 'applied',
-      selection: firstSelection,
-    })
-    expect(useSessionRuntimeStore.getState().selections[TEST_SESSION_ID]).toEqual(currentSelection)
-  })
-
-  it('surfaces only the current provider transition requirement without changing the source selection', () => {
-    const sourceSelection = { providerId: 'provider-a', modelId: 'source-model' }
-    const targetSelection = { providerId: 'provider-b', modelId: 'target-model' }
-    useSessionRuntimeStore.getState().setSelection(TEST_SESSION_ID, sourceSelection)
-
-    const staleRequestId = useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, {
-      providerId: 'provider-c',
-      modelId: 'stale-model',
-    })
-    const requestId = useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, targetSelection)
-    const required = {
-      type: 'runtime_config_result' as const,
-      requestId,
-      result: 'provider_transition_required' as const,
-      sourceSessionId: TEST_SESSION_ID,
-      sourceProviderId: 'provider-a',
-      targetSelection,
-      messageCount: 12,
-      transitionId: '11111111-1111-4111-8111-111111111111',
-    }
-
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      ...required,
-      requestId: staleRequestId,
-    })
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.pendingProviderTransition).toBeNull()
-
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, required)
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.pendingRuntimeConfig).toBeNull()
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.pendingProviderTransition).toEqual(required)
-    expect(useSessionRuntimeStore.getState().selections[TEST_SESSION_ID]).toEqual(sourceSelection)
-  })
-
-  it('cancels a provider transition without changing the source session', () => {
-    const sourceSelection = { providerId: 'provider-a', modelId: 'source-model' }
-    const targetSelection = { providerId: 'provider-b', modelId: 'target-model' }
-    useSessionRuntimeStore.getState().setSelection(TEST_SESSION_ID, sourceSelection)
-    const requestId = useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, targetSelection)
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'runtime_config_result',
-      requestId,
-      result: 'provider_transition_required',
-      sourceSessionId: TEST_SESSION_ID,
-      sourceProviderId: 'provider-a',
-      targetSelection,
-      messageCount: 8,
-      transitionId: '22222222-2222-4222-8222-222222222222',
-    })
-
-    useChatStore.getState().cancelProviderTransition(TEST_SESSION_ID)
-
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.pendingProviderTransition).toBeNull()
-    expect(useSessionRuntimeStore.getState().selections[TEST_SESSION_ID]).toEqual(sourceSelection)
-  })
-
-  it('confirms a provider transition once and reuses its server transition id', async () => {
-    const sourceSelection = { providerId: 'provider-a', modelId: 'source-model' }
-    const targetSelection = { providerId: 'provider-b', modelId: 'target-model', effortLevel: 'high' as const }
-    const transitionId = '33333333-3333-4333-8333-333333333333'
-    const createProviderTransition = vi.mocked(sessionsApi.createProviderTransition)
-    createProviderTransition.mockResolvedValue({
-      sessionId: transitionId,
-      workDir: '/workspace/project',
-      created: true,
-      targetSelection,
-    })
-    useSessionRuntimeStore.getState().setSelection(TEST_SESSION_ID, sourceSelection)
-    const requestId = useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, targetSelection)
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'runtime_config_result',
-      requestId,
-      result: 'provider_transition_required',
-      sourceSessionId: TEST_SESSION_ID,
-      sourceProviderId: 'provider-a',
-      targetSelection,
-      messageCount: 8,
-      transitionId,
-    })
-
-    const first = useChatStore.getState().confirmProviderTransition(TEST_SESSION_ID)
-    const second = useChatStore.getState().confirmProviderTransition(TEST_SESSION_ID)
-    await expect(first).resolves.toBe(transitionId)
-    await expect(second).resolves.toBe(transitionId)
-
-    expect(createProviderTransition).toHaveBeenCalledTimes(1)
-    expect(createProviderTransition).toHaveBeenCalledWith(TEST_SESSION_ID, {
-      transitionId,
-      targetSelection,
-    })
-    expect(openTabMock).toHaveBeenCalledWith(transitionId, 'New session', 'session')
-    expect(useSessionRuntimeStore.getState().selections[transitionId]).toEqual(targetSelection)
-    expect(useSessionRuntimeStore.getState().selections[TEST_SESSION_ID]).toEqual(sourceSelection)
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]).toBeDefined()
-  })
-
-  it('ignores a confirmed transition response after cancellation', async () => {
-    const targetSelection = { providerId: 'provider-b', modelId: 'target-model' }
-    const transitionId = '44444444-4444-4444-8444-444444444444'
-    let resolveTransition!: (value: Awaited<ReturnType<typeof sessionsApi.createProviderTransition>>) => void
-    vi.mocked(sessionsApi.createProviderTransition).mockReturnValue(new Promise((resolve) => {
-      resolveTransition = resolve
-    }))
-    const requestId = useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, targetSelection)
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'runtime_config_result', requestId, result: 'provider_transition_required',
-      sourceSessionId: TEST_SESSION_ID, sourceProviderId: 'provider-a', targetSelection,
-      messageCount: 8, transitionId,
-    })
-
-    const confirmation = useChatStore.getState().confirmProviderTransition(TEST_SESSION_ID)
-    useChatStore.getState().cancelProviderTransition(TEST_SESSION_ID)
-    resolveTransition({ sessionId: transitionId, workDir: '/workspace/project', created: true, targetSelection })
-
-    await expect(confirmation).resolves.toBeNull()
-    expect(openTabMock).not.toHaveBeenCalled()
-  })
-
-  it('does not let an in-flight transition swallow a newer confirmation', async () => {
-    const firstSelection = { providerId: 'provider-b', modelId: 'first-model' }
-    const secondSelection = { providerId: 'provider-c', modelId: 'second-model' }
-    const firstTransitionId = '55555555-5555-4555-8555-555555555555'
-    const secondTransitionId = '66666666-6666-4666-8666-666666666666'
-    let resolveFirst!: (value: Awaited<ReturnType<typeof sessionsApi.createProviderTransition>>) => void
-    vi.mocked(sessionsApi.createProviderTransition)
-      .mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve }))
-      .mockResolvedValueOnce({ sessionId: secondTransitionId, workDir: '/workspace/project', created: true, targetSelection: secondSelection })
-
-    const firstRequestId = useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, firstSelection)
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'runtime_config_result', requestId: firstRequestId, result: 'provider_transition_required',
-      sourceSessionId: TEST_SESSION_ID, sourceProviderId: 'provider-a', targetSelection: firstSelection,
-      messageCount: 8, transitionId: firstTransitionId,
-    })
-    const first = useChatStore.getState().confirmProviderTransition(TEST_SESSION_ID)
-
-    const secondRequestId = useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, secondSelection)
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'runtime_config_result', requestId: secondRequestId, result: 'provider_transition_required',
-      sourceSessionId: TEST_SESSION_ID, sourceProviderId: 'provider-a', targetSelection: secondSelection,
-      messageCount: 8, transitionId: secondTransitionId,
-    })
-    await expect(useChatStore.getState().confirmProviderTransition(TEST_SESSION_ID)).resolves.toBe(secondTransitionId)
-    resolveFirst({ sessionId: firstTransitionId, workDir: '/workspace/project', created: true, targetSelection: firstSelection })
-    await expect(first).resolves.toBeNull()
-
-    expect(openTabMock).toHaveBeenCalledTimes(1)
-    expect(openTabMock).toHaveBeenCalledWith(secondTransitionId, 'New session', 'session')
-  })
-
-  it('clears the current rejected runtime request and exposes a stable error', () => {
-    const sourceSelection = { providerId: 'provider-a', modelId: 'source-model' }
-    useSessionRuntimeStore.getState().setSelection(TEST_SESSION_ID, sourceSelection)
-    const requestId = useChatStore.getState().setSessionRuntime(TEST_SESSION_ID, {
-      providerId: 'provider-b',
-      modelId: 'target-model',
-    })
-
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'runtime_config_result',
-      requestId,
-      result: 'rejected',
-      code: 'RUNTIME_CONFIG_INVALID',
-      message: 'Selected runtime is unavailable.',
-    })
-
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.pendingRuntimeConfig).toBeNull()
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.runtimeConfigError).toEqual({
-      code: 'RUNTIME_CONFIG_INVALID',
-      message: 'Selected runtime is unavailable.',
-    })
-    expect(useSessionRuntimeStore.getState().selections[TEST_SESSION_ID]).toEqual(sourceSelection)
   })
 
   it('keeps AskUserQuestion permission requests out of the message list while tracking the pending request', () => {
@@ -3170,13 +2727,13 @@ describe('chatStore history mapping', () => {
           connectionState: 'connected',
           streamingText: '',
           streamingToolInput: '',
-          streamingResponseChars: 0,
           activeToolUseId: null,
           activeToolName: null,
           activeThinkingId: null,
           pendingPermission: null,
           pendingComputerUsePermission: null,
           tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
           elapsedSeconds: 0,
           statusVerb: '',
           slashCommands: [],
@@ -3596,85 +3153,6 @@ describe('chatStore history mapping', () => {
     expect(session?.pendingComputerUsePermissions?.['cu-1']?.request.reason).toBe('NEW request')
   })
 
-  it('surfaces a visible notice when an unanswered AskUserQuestion is cleared by turn end', () => {
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({
-          chatState: 'permission_pending',
-          pendingPermission: {
-            requestId: 'perm-ask-x',
-            toolName: 'AskUserQuestion',
-            toolUseId: 'tool-ask-x',
-            input: { questions: [] },
-          },
-        }),
-      },
-    })
-
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'message_complete',
-      usage: { input_tokens: 1, output_tokens: 1 },
-    })
-
-    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
-    expect(session?.pendingPermission).toBeNull()
-    const lastMessage = session?.messages[session.messages.length - 1]
-    expect(lastMessage).toMatchObject({ type: 'system' })
-    expect((lastMessage as { content: string }).content.length).toBeGreaterThan(0)
-  })
-
-  it('surfaces the dropped-question notice on an error turn end too', () => {
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({
-          chatState: 'permission_pending',
-          pendingPermission: {
-            requestId: 'perm-ask-y',
-            toolName: 'AskUserQuestion',
-            toolUseId: 'tool-ask-y',
-            input: { questions: [] },
-          },
-        }),
-      },
-    })
-
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'error',
-      message: 'tool failed',
-      code: 'tool_error',
-    })
-
-    const messages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages ?? []
-    const types = messages.map((m) => m.type)
-    // The system notice is added before the error entry.
-    expect(types).toContain('system')
-    expect(types[types.length - 1]).toBe('error')
-  })
-
-  it('does not add the dropped-question notice for non-AskUserQuestion permissions', () => {
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({
-          chatState: 'permission_pending',
-          pendingPermission: {
-            requestId: 'perm-bash',
-            toolName: 'Bash',
-            toolUseId: 'tool-bash',
-            input: {},
-          },
-        }),
-      },
-    })
-
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'message_complete',
-      usage: { input_tokens: 1, output_tokens: 1 },
-    })
-
-    const messages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages ?? []
-    expect(messages.some((m) => m.type === 'system')).toBe(false)
-  })
-
   it('sends permission mode updates to the active session only', () => {
     useChatStore.getState().setSessionPermissionMode('nonexistent-session', 'acceptEdits')
     expect(sendMock).not.toHaveBeenCalled()
@@ -3687,13 +3165,13 @@ describe('chatStore history mapping', () => {
           connectionState: 'connected',
           streamingText: '',
           streamingToolInput: '',
-          streamingResponseChars: 0,
           activeToolUseId: null,
           activeToolName: null,
           activeThinkingId: null,
           pendingPermission: null,
           pendingComputerUsePermission: null,
           tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
           elapsedSeconds: 0,
           statusVerb: '',
           slashCommands: [],
@@ -3718,224 +3196,18 @@ describe('chatStore history mapping', () => {
     expect(updateSessionPermissionModeMock).toHaveBeenCalledWith('session-1', 'acceptEdits')
   })
 
-  it('persists coordinator mode and only sends it to a live session', () => {
-    useSessionRuntimeStore.setState({ coordinatorModes: {} })
-
-    // No live session yet: the preference is persisted (replayed on connect) but
-    // nothing is pushed over the wire.
-    useChatStore.getState().setSessionCoordinatorMode('coord-session', true)
-    expect(useSessionRuntimeStore.getState().coordinatorModes['coord-session']).toBe(true)
-    expect(sendMock).not.toHaveBeenCalled()
-
+  it('does not send permission mode updates while the session turn is active', () => {
     useChatStore.setState({
       sessions: {
-        'coord-session': {
-          messages: [],
-          chatState: 'idle',
-          connectionState: 'connected',
-          streamingText: '',
-          streamingToolInput: '',
-          streamingResponseChars: 0,
-          activeToolUseId: null,
-          activeToolName: null,
-          activeThinkingId: null,
-          pendingPermission: null,
-          pendingComputerUsePermission: null,
-          tokenUsage: { input_tokens: 0, output_tokens: 0 },
-          elapsedSeconds: 0,
-          statusVerb: '',
-          slashCommands: [],
-          agentTaskNotifications: {},
-          elapsedTimer: null,
-        },
-      },
-    })
-    useChatStore.getState().setSessionCoordinatorMode('coord-session', false)
-
-    expect(useSessionRuntimeStore.getState().coordinatorModes['coord-session']).toBe(false)
-    expect(sendMock).toHaveBeenCalledWith('coord-session', {
-      type: 'set_coordinator_mode',
-      enabled: false,
-    })
-  })
-
-  it('persists Solo Pipeline mode and only sends it to a live session', () => {
-    useSessionRuntimeStore.setState({ coordinatorModes: {}, pipelineModes: {}, soloPipelineModes: {} })
-    sendMock.mockReset()
-
-    // No live session: persisted, not pushed.
-    useChatStore.getState().setSessionSoloPipelineMode('solo-session', true)
-    expect(useSessionRuntimeStore.getState().soloPipelineModes['solo-session']).toBe(true)
-    expect(sendMock).not.toHaveBeenCalled()
-
-    useChatStore.setState({
-      sessions: {
-        'solo-session': {
-          messages: [],
-          chatState: 'idle',
-          connectionState: 'connected',
-          streamingText: '',
-          streamingToolInput: '',
-          streamingResponseChars: 0,
-          activeToolUseId: null,
-          activeToolName: null,
-          activeThinkingId: null,
-          pendingPermission: null,
-          pendingComputerUsePermission: null,
-          tokenUsage: { input_tokens: 0, output_tokens: 0 },
-          elapsedSeconds: 0,
-          statusVerb: '',
-          slashCommands: [],
-          agentTaskNotifications: {},
-          elapsedTimer: null,
-        },
-      },
-    })
-    useChatStore.getState().setSessionSoloPipelineMode('solo-session', false)
-
-    expect(useSessionRuntimeStore.getState().soloPipelineModes['solo-session']).toBe(false)
-    expect(sendMock).toHaveBeenCalledWith('solo-session', {
-      type: 'set_pipeline_mode',
-      flavor: 'normal',
-    })
-  })
-
-  it('enabling Solo Pipeline mode clears coordinator mode for the same session', () => {
-    useSessionRuntimeStore.setState({
-      coordinatorModes: { 'mut-session': true },
-      pipelineModes: {},
-      soloPipelineModes: {},
-    })
-    sendMock.mockReset()
-    useChatStore.setState({
-      sessions: {
-        'mut-session': {
-          messages: [],
-          chatState: 'idle',
-          connectionState: 'connected',
-          streamingText: '',
-          streamingToolInput: '',
-          streamingResponseChars: 0,
-          activeToolUseId: null,
-          activeToolName: null,
-          activeThinkingId: null,
-          pendingPermission: null,
-          pendingComputerUsePermission: null,
-          tokenUsage: { input_tokens: 0, output_tokens: 0 },
-          elapsedSeconds: 0,
-          statusVerb: '',
-          slashCommands: [],
-          agentTaskNotifications: {},
-          elapsedTimer: null,
-        },
+        'session-1': makeSession({ chatState: 'thinking' }),
       },
     })
 
-    useChatStore.getState().setSessionSoloPipelineMode('mut-session', true)
+    useChatStore.getState().setSessionPermissionMode('session-1', 'acceptEdits')
 
-    // Local store: Solo on, coordinator off.
-    expect(useSessionRuntimeStore.getState().soloPipelineModes['mut-session']).toBe(true)
-    expect(useSessionRuntimeStore.getState().coordinatorModes['mut-session']).toBe(false)
-    // Wire: must broadcast both transitions so the server clears the
-    // previously-active coordinator flag and arms the Solo flag in lockstep.
-    expect(sendMock).toHaveBeenCalledWith('mut-session', {
-      type: 'set_coordinator_mode',
-      enabled: false,
-    })
-    expect(sendMock).toHaveBeenCalledWith('mut-session', {
-      type: 'set_pipeline_mode',
-      flavor: 'solo',
-    })
-  })
-
-  it('enabling RE pipeline mode clears coordinator and Solo for the same session', () => {
-    useSessionRuntimeStore.setState({
-      coordinatorModes: { 're-session': true },
-      pipelineModes: {},
-      soloPipelineModes: {},
-    })
-    sendMock.mockReset()
-    useChatStore.setState({
-      sessions: {
-        're-session': {
-          messages: [],
-          chatState: 'idle',
-          connectionState: 'connected',
-          streamingText: '',
-          streamingToolInput: '',
-          streamingResponseChars: 0,
-          activeToolUseId: null,
-          activeToolName: null,
-          activeThinkingId: null,
-          pendingPermission: null,
-          pendingComputerUsePermission: null,
-          tokenUsage: { input_tokens: 0, output_tokens: 0 },
-          elapsedSeconds: 0,
-          statusVerb: '',
-          slashCommands: [],
-          agentTaskNotifications: {},
-          elapsedTimer: null,
-        },
-      },
-    })
-
-    useChatStore.getState().setSessionPipelineMode('re-session', 're')
-
-    expect(useSessionRuntimeStore.getState().pipelineModes['re-session']).toBe('re')
-    expect(useSessionRuntimeStore.getState().soloPipelineModes['re-session']).toBe(false)
-    expect(useSessionRuntimeStore.getState().coordinatorModes['re-session']).toBe(false)
-    expect(sendMock).toHaveBeenCalledWith('re-session', {
-      type: 'set_coordinator_mode',
-      enabled: false,
-    })
-    expect(sendMock).toHaveBeenCalledWith('re-session', {
-      type: 'set_pipeline_mode',
-      flavor: 're',
-    })
-  })
-
-  it('enabling coordinator mode clears Solo Pipeline mode for the same session', () => {
-    useSessionRuntimeStore.setState({
-      coordinatorModes: {},
-      pipelineModes: { 'mut-session2': 'solo' },
-      soloPipelineModes: { 'mut-session2': true },
-    })
-    sendMock.mockReset()
-    useChatStore.setState({
-      sessions: {
-        'mut-session2': {
-          messages: [],
-          chatState: 'idle',
-          connectionState: 'connected',
-          streamingText: '',
-          streamingToolInput: '',
-          streamingResponseChars: 0,
-          activeToolUseId: null,
-          activeToolName: null,
-          activeThinkingId: null,
-          pendingPermission: null,
-          pendingComputerUsePermission: null,
-          tokenUsage: { input_tokens: 0, output_tokens: 0 },
-          elapsedSeconds: 0,
-          statusVerb: '',
-          slashCommands: [],
-          agentTaskNotifications: {},
-          elapsedTimer: null,
-        },
-      },
-    })
-
-    useChatStore.getState().setSessionCoordinatorMode('mut-session2', true)
-
-    expect(useSessionRuntimeStore.getState().coordinatorModes['mut-session2']).toBe(true)
-    expect(useSessionRuntimeStore.getState().soloPipelineModes['mut-session2']).toBe(false)
-    expect(sendMock).toHaveBeenCalledWith('mut-session2', {
-      type: 'set_pipeline_mode',
-      flavor: 'normal',
-    })
-    expect(sendMock).toHaveBeenCalledWith('mut-session2', {
-      type: 'set_coordinator_mode',
-      enabled: true,
+    expect(sendMock).not.toHaveBeenCalledWith('session-1', {
+      type: 'set_permission_mode',
+      mode: 'acceptEdits',
     })
   })
 
@@ -3977,13 +3249,13 @@ describe('chatStore history mapping', () => {
           connectionState: 'connected',
           streamingText: '',
           streamingToolInput: '',
-          streamingResponseChars: 0,
           activeToolUseId: null,
           activeToolName: null,
           activeThinkingId: null,
           pendingPermission: null,
           pendingComputerUsePermission: null,
           tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
           elapsedSeconds: 0,
           statusVerb: '',
           slashCommands: [],
@@ -4433,6 +3705,114 @@ describe('chatStore history mapping', () => {
     vi.useRealTimers()
   })
 
+  it('requests a background task stop and waits for the terminal event', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          chatState: 'idle',
+          backgroundAgentTasks: {
+            'bash-task-1': {
+              taskId: 'bash-task-1',
+              taskType: 'local_bash',
+              status: 'running',
+              startedAt: 1,
+              updatedAt: 1,
+            },
+          },
+        }),
+      },
+    })
+
+    useChatStore.getState().stopBackgroundTask(TEST_SESSION_ID, 'bash-task-1')
+
+    expect(sendMock).toHaveBeenCalledWith(TEST_SESSION_ID, {
+      type: 'stop_background_task',
+      taskId: 'bash-task-1',
+    })
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.stoppingBackgroundTaskIds).toEqual({
+      'bash-task-1': true,
+    })
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.backgroundAgentTasks?.['bash-task-1']?.status).toBe('running')
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'system_notification',
+      subtype: 'task_notification',
+      data: {
+        task_id: 'bash-task-1',
+        status: 'stopped',
+        summary: 'Sleep stopped',
+      },
+    })
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.backgroundAgentTasks?.['bash-task-1']?.status).toBe('stopped')
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.stoppingBackgroundTaskIds).toEqual({})
+  })
+
+  it('clears the pending stop marker when the server rejects the request', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          chatState: 'idle',
+          backgroundAgentTasks: {
+            'bash-task-1': {
+              taskId: 'bash-task-1',
+              taskType: 'local_bash',
+              status: 'running',
+              startedAt: 1,
+              updatedAt: 1,
+            },
+          },
+          stoppingBackgroundTaskIds: { 'bash-task-1': true },
+        }),
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'background_task_stop_failed',
+      taskId: 'bash-task-1',
+      message: 'Task is not running',
+    })
+
+    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.stoppingBackgroundTaskIds).toEqual({})
+    expect(session?.messages.at(-1)).toMatchObject({
+      type: 'error',
+      code: 'STOP_BACKGROUND_TASK_FAILED',
+      message: 'Task is not running',
+    })
+  })
+
+  it('does not surface a stop error when the task already finished naturally', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          chatState: 'idle',
+          messages: [{ id: 'done', type: 'assistant_text', content: 'Done', timestamp: 1 }],
+          backgroundAgentTasks: {
+            'bash-task-1': {
+              taskId: 'bash-task-1',
+              taskType: 'local_bash',
+              status: 'completed',
+              startedAt: 1,
+              updatedAt: 2,
+            },
+          },
+          stoppingBackgroundTaskIds: { 'bash-task-1': true },
+        }),
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'background_task_stop_failed',
+      taskId: 'bash-task-1',
+      message: 'Task is not running',
+    })
+
+    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.stoppingBackgroundTaskIds).toEqual({})
+    expect(session?.messages).toHaveLength(1)
+  })
+
   it('clears local desktop chat state when the server confirms /clear', () => {
     vi.useFakeTimers()
 
@@ -4524,13 +3904,13 @@ describe('chatStore history mapping', () => {
           connectionState: 'connected',
           streamingText: '',
           streamingToolInput: '',
-          streamingResponseChars: 0,
           activeToolUseId: null,
           activeToolName: null,
           activeThinkingId: null,
           pendingPermission: null,
           pendingComputerUsePermission: null,
           tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
           elapsedSeconds: 0,
           statusVerb: '',
           slashCommands: [],
@@ -4575,7 +3955,6 @@ describe('chatStore history mapping', () => {
   })
 
   it('attaches compact summary content to the latest compact card', () => {
-    __resetCompactionThrashForTesting()
     useChatStore.setState({
       sessions: {
         [TEST_SESSION_ID]: {
@@ -4584,13 +3963,13 @@ describe('chatStore history mapping', () => {
           connectionState: 'connected',
           streamingText: '',
           streamingToolInput: '',
-          streamingResponseChars: 0,
           activeToolUseId: null,
           activeToolName: null,
           activeThinkingId: null,
           pendingPermission: null,
           pendingComputerUsePermission: null,
           tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
           elapsedSeconds: 0,
           statusVerb: 'Compacting conversation',
           slashCommands: [],
@@ -4628,64 +4007,6 @@ describe('chatStore history mapping', () => {
     ])
   })
 
-  it('bumps compactCount when compact summary completes a compaction without a boundary', () => {
-    __resetCompactionThrashForTesting()
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: {
-          messages: [
-            { id: 'old-user', type: 'user_text', content: 'old context', timestamp: 1 },
-            { id: 'compact-card', type: 'compact_summary', title: 'Context compacted', phase: 'compacting', timestamp: 2 },
-          ],
-          compactCount: 0,
-          chatState: 'compacting',
-          connectionState: 'connected',
-          streamingText: '',
-          streamingToolInput: '',
-          streamingResponseChars: 0,
-          activeToolUseId: null,
-          activeToolName: null,
-          activeThinkingId: null,
-          pendingPermission: null,
-          pendingComputerUsePermission: null,
-          tokenUsage: { input_tokens: 0, output_tokens: 0 },
-          elapsedSeconds: 0,
-          statusVerb: 'Compacting conversation',
-          slashCommands: [],
-          agentTaskNotifications: {},
-          elapsedTimer: null,
-        },
-      },
-    })
-
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'system_notification',
-      subtype: 'compact_summary',
-      message: [
-        'This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.',
-        '',
-        'Implemented the billing report and verified export behavior.',
-      ].join('\n'),
-    })
-
-    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
-    expect(session?.compactCount).toBe(1)
-    expect(session?.chatState).toBe('thinking')
-    expect(session?.statusVerb).toBe('')
-    expect(session?.messages).toMatchObject([
-      {
-        id: 'old-user',
-        type: 'user_text',
-        content: 'old context',
-      },
-      {
-        type: 'compact_summary',
-        phase: 'complete',
-        summary: 'Implemented the billing report and verified export behavior.',
-      },
-    ])
-  })
-
   it('tracks compacting status as an active chat state', () => {
     useChatStore.setState({
       sessions: {
@@ -4697,13 +4018,13 @@ describe('chatStore history mapping', () => {
           connectionState: 'connected',
           streamingText: '',
           streamingToolInput: '',
-          streamingResponseChars: 0,
           activeToolUseId: null,
           activeToolName: null,
           activeThinkingId: null,
           pendingPermission: null,
           pendingComputerUsePermission: null,
           tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
           elapsedSeconds: 0,
           statusVerb: '',
           slashCommands: [],
@@ -4746,13 +4067,13 @@ describe('chatStore history mapping', () => {
           connectionState: 'connected',
           streamingText: '',
           streamingToolInput: '',
-          streamingResponseChars: 0,
           activeToolUseId: null,
           activeToolName: null,
           activeThinkingId: null,
           pendingPermission: null,
           pendingComputerUsePermission: null,
           tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
           elapsedSeconds: 0,
           statusVerb: '',
           slashCommands: [],
@@ -4816,40 +4137,6 @@ describe('chatStore history mapping', () => {
     })
   })
 
-  it('keeps an in-flight turn running when SESSION_TURN_ACTIVE is rejected', () => {
-    const timer = setInterval(() => {}, 60_000)
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({
-          chatState: 'streaming',
-          streamingText: 'partial answer',
-          statusVerb: 'Working',
-          elapsedTimer: timer,
-          elapsedSeconds: 4,
-        }),
-      },
-    })
-
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'error',
-      message: 'A user turn is already active for this session. Retry after it completes.',
-      code: 'SESSION_TURN_ACTIVE',
-      retryable: true,
-    })
-
-    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
-    expect(session?.chatState).toBe('streaming')
-    expect(session?.streamingText).toBe('partial answer')
-    expect(session?.statusVerb).toBe('Working')
-    expect(session?.elapsedTimer).toBe(timer)
-    expect(session?.messages.at(-1)).toMatchObject({
-      type: 'error',
-      code: 'SESSION_TURN_ACTIVE',
-    })
-    expect(updateTabStatusMock).not.toHaveBeenCalledWith(TEST_SESSION_ID, 'error')
-    clearInterval(timer)
-  })
-
   it('removes the transient compacting card when compacting status ends without a boundary', () => {
     useChatStore.setState({
       sessions: {
@@ -4861,13 +4148,13 @@ describe('chatStore history mapping', () => {
           connectionState: 'connected',
           streamingText: '',
           streamingToolInput: '',
-          streamingResponseChars: 0,
           activeToolUseId: null,
           activeToolName: null,
           activeThinkingId: null,
           pendingPermission: null,
           pendingComputerUsePermission: null,
           tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
           elapsedSeconds: 0,
           statusVerb: '',
           slashCommands: [],
@@ -5321,464 +4608,6 @@ describe('chatStore history mapping', () => {
     ]))
   })
 
-  it('continues assistant output after an agent task notification while other background tasks keep running', () => {
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({
-          chatState: 'idle',
-          backgroundAgentTasks: {
-            'serve-task-1': {
-              taskId: 'serve-task-1',
-              status: 'running',
-              taskType: 'local_bash',
-              description: 'Serve cultivation stone page locally',
-              startedAt: 1,
-              updatedAt: 2,
-            },
-          },
-        }),
-      },
-    })
-
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'system_notification',
-      subtype: 'task_notification',
-      data: {
-        task_id: 'agent-task-1',
-        tool_use_id: 'agent-tool-1',
-        status: 'completed',
-        task_type: 'local_agent',
-        summary: 'Verification complete.',
-      },
-    })
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'content_start',
-      blockType: 'text',
-    })
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'content_delta',
-      text: '验证已完成，我会继续上传。',
-    })
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'message_complete',
-      usage: { input_tokens: 12, output_tokens: 34 },
-    })
-
-    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
-    expect(session?.suppressNextTaskNotificationResponse).not.toBe(true)
-    expect(session?.messages).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: 'assistant_text', content: '验证已完成，我会继续上传。' }),
-    ]))
-    expect(session?.backgroundAgentTasks?.['serve-task-1']?.status).toBe('running')
-    expect(session?.backgroundAgentTasks?.['agent-task-1']?.status).toBe('completed')
-    expect(updateTabStatusMock).toHaveBeenLastCalledWith(TEST_SESSION_ID, 'running')
-  })
-
-  it('sends stop_background_task and marks the stopped task without clearing other running tasks', () => {
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({
-          chatState: 'idle',
-          backgroundAgentTasks: {
-            'serve-task-1': {
-              taskId: 'serve-task-1',
-              status: 'running',
-              taskType: 'local_bash',
-              description: 'Serve cultivation stone page locally',
-              startedAt: 1,
-              updatedAt: 2,
-            },
-            'agent-task-1': {
-              taskId: 'agent-task-1',
-              status: 'running',
-              taskType: 'local_agent',
-              description: 'Verify screenshots',
-              startedAt: 1,
-              updatedAt: 3,
-            },
-          },
-        }),
-      },
-    })
-
-    useChatStore.getState().stopBackgroundTask(TEST_SESSION_ID, 'agent-task-1')
-
-    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
-    expect(sendMock).toHaveBeenCalledWith(TEST_SESSION_ID, {
-      type: 'stop_background_task',
-      taskId: 'agent-task-1',
-    })
-    expect(session?.backgroundAgentTasks?.['agent-task-1']?.status).toBe('stopped')
-    expect(session?.backgroundAgentTasks?.['serve-task-1']?.status).toBe('running')
-    expect(updateTabStatusMock).toHaveBeenLastCalledWith(TEST_SESSION_ID, 'running')
-  })
-
-  it('marks the matching Agent card stopped before its terminal notification arrives', () => {
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({
-          chatState: 'idle',
-          messages: [{
-            id: 'agent-tool-message',
-            type: 'tool_use',
-            toolName: 'Agent',
-            toolUseId: 'agent-tool-1',
-            input: { description: 'Verify screenshots' },
-            timestamp: 1,
-          }],
-          agentTaskNotifications: {},
-          backgroundAgentTasks: {
-            'agent-task-1': {
-              taskId: 'agent-task-1',
-              toolUseId: 'agent-tool-1',
-              status: 'running',
-              taskType: 'local_agent',
-              description: 'Verify screenshots',
-              startedAt: 1,
-              updatedAt: 2,
-            },
-          },
-        }),
-      },
-    })
-
-    useChatStore.getState().stopBackgroundTask(TEST_SESSION_ID, 'agent-task-1')
-
-    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
-    expect(session?.agentTaskNotifications['agent-tool-1']).toMatchObject({
-      taskId: 'agent-task-1',
-      toolUseId: 'agent-tool-1',
-      status: 'stopped',
-    })
-    expect(session?.messages).toContainEqual(expect.objectContaining({
-      type: 'tool_use',
-      toolUseId: 'agent-tool-1',
-      status: 'stopped',
-    }))
-  })
-
-  it('keeps a stopped task out of running after an idempotent stop acknowledgement', () => {
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({
-          chatState: 'idle',
-          backgroundAgentTasks: {
-            'agent-task-1': {
-              taskId: 'agent-task-1',
-              status: 'running',
-              taskType: 'local_agent',
-              description: 'Verify screenshots',
-              startedAt: 1,
-              updatedAt: 2,
-            },
-          },
-        }),
-      },
-    })
-
-    useChatStore.getState().stopBackgroundTask(TEST_SESSION_ID, 'agent-task-1')
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.backgroundAgentTasks?.['agent-task-1']?.status)
-      .toBe('stopped')
-
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'background_task_stopped',
-      taskId: 'agent-task-1',
-    })
-
-    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
-    expect(session?.backgroundAgentTasks?.['agent-task-1']?.status).toBe('stopped')
-    expect(session?.stoppingBackgroundTaskIds?.['agent-task-1']).toBeUndefined()
-    expect(session?.messages.some(message => message.type === 'error')).toBe(false)
-    expect(updateTabStatusMock).toHaveBeenLastCalledWith(TEST_SESSION_ID, 'idle')
-  })
-
-  it('ignores a late running event while a background stop is pending', () => {
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({
-          chatState: 'idle',
-          backgroundAgentTasks: {
-            'agent-task-1': {
-              taskId: 'agent-task-1',
-              status: 'running',
-              taskType: 'local_agent',
-              description: 'Verify screenshots',
-              startedAt: 1,
-              updatedAt: 2,
-            },
-          },
-        }),
-      },
-    })
-
-    useChatStore.getState().stopBackgroundTask(TEST_SESSION_ID, 'agent-task-1')
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'system_notification',
-      subtype: 'task_progress',
-      data: {
-        task_id: 'agent-task-1',
-        status: 'running',
-        description: 'Late progress',
-      },
-    })
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'status',
-      state: 'tool_executing',
-      verb: 'Late progress',
-      taskId: 'agent-task-1',
-    })
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'background_task_stopped',
-      taskId: 'agent-task-1',
-    })
-
-    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
-    expect(session?.backgroundAgentTasks?.['agent-task-1']?.status).toBe('stopped')
-    expect(session?.backgroundAgentTasks?.['agent-task-1']?.description).toBe('Verify screenshots')
-    expect(session?.stoppingBackgroundTaskIds?.['agent-task-1']).toBeUndefined()
-    expect(session?.chatState).toBe('idle')
-    expect(session?.elapsedTimer).toBeNull()
-    expect(updateTabStatusMock).toHaveBeenLastCalledWith(TEST_SESSION_ID, 'idle')
-  })
-
-  it('allows a real stop failure after a late running event to roll back and report', () => {
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({
-          chatState: 'idle',
-          backgroundAgentTasks: {
-            'agent-task-1': {
-              taskId: 'agent-task-1',
-              status: 'running',
-              taskType: 'local_agent',
-              description: 'Verify screenshots',
-              startedAt: 1,
-              updatedAt: 2,
-            },
-          },
-        }),
-      },
-    })
-
-    useChatStore.getState().stopBackgroundTask(TEST_SESSION_ID, 'agent-task-1')
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'system_notification',
-      subtype: 'task_started',
-      data: {
-        task_id: 'agent-task-1',
-        status: 'running',
-        description: 'Late start',
-      },
-    })
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'background_task_stop_failed',
-      taskId: 'agent-task-1',
-      message: 'Timed out waiting for stop_task response',
-    })
-
-    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
-    expect(session?.backgroundAgentTasks?.['agent-task-1']?.status).toBe('running')
-    expect(session?.stoppingBackgroundTaskIds?.['agent-task-1']).toBeUndefined()
-    expect(session?.messages).toContainEqual(expect.objectContaining({
-      type: 'error',
-      message: 'Timed out waiting for stop_task response',
-      code: 'STOP_BACKGROUND_TASK_FAILED',
-    }))
-  })
-
-  it('keeps optimistic stopped state when CLI says the task is already gone', () => {
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({
-          chatState: 'idle',
-          messages: [{
-            id: 'agent-tool-message',
-            type: 'tool_use',
-            toolName: 'Agent',
-            toolUseId: 'agent-tool-1',
-            input: { description: 'Verify screenshots' },
-            timestamp: 1,
-          }],
-          agentTaskNotifications: {},
-          backgroundAgentTasks: {
-            'agent-task-1': {
-              taskId: 'agent-task-1',
-              toolUseId: 'agent-tool-1',
-              status: 'running',
-              taskType: 'local_agent',
-              description: 'Verify screenshots',
-              startedAt: 1,
-              updatedAt: 2,
-            },
-          },
-        }),
-      },
-    })
-    useChatStore.getState().stopBackgroundTask(TEST_SESSION_ID, 'agent-task-1')
-
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'background_task_stop_failed',
-      taskId: 'agent-task-1',
-      message: 'No task found with ID: agent-task-1',
-    })
-
-    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
-    expect(session?.backgroundAgentTasks?.['agent-task-1']?.status).toBe('stopped')
-    expect(session?.stoppingBackgroundTaskIds?.['agent-task-1']).toBeUndefined()
-    expect(session?.agentTaskNotifications['agent-tool-1']?.status).toBe('stopped')
-    expect(session?.messages).toContainEqual(expect.objectContaining({
-      type: 'tool_use',
-      toolUseId: 'agent-tool-1',
-      status: 'stopped',
-    }))
-    expect(session?.messages.some((message) =>
-      message.type === 'error' && message.code === 'STOP_BACKGROUND_TASK_FAILED',
-    )).toBe(false)
-  })
-
-  it('restores an Agent card to running when the stop request is rejected for a real failure', () => {
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({
-          chatState: 'idle',
-          messages: [{
-            id: 'agent-tool-message',
-            type: 'tool_use',
-            toolName: 'Agent',
-            toolUseId: 'agent-tool-1',
-            input: { description: 'Verify screenshots' },
-            timestamp: 1,
-          }],
-          agentTaskNotifications: {},
-          backgroundAgentTasks: {
-            'agent-task-1': {
-              taskId: 'agent-task-1',
-              toolUseId: 'agent-tool-1',
-              status: 'running',
-              taskType: 'local_agent',
-              description: 'Verify screenshots',
-              startedAt: 1,
-              updatedAt: 2,
-            },
-          },
-        }),
-      },
-    })
-    useChatStore.getState().stopBackgroundTask(TEST_SESSION_ID, 'agent-task-1')
-
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'background_task_stop_failed',
-      taskId: 'agent-task-1',
-      message: 'Timed out waiting for stop_task response',
-    })
-
-    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
-    expect(session?.backgroundAgentTasks?.['agent-task-1']?.status).toBe('running')
-    expect(updateTabStatusMock).toHaveBeenLastCalledWith(TEST_SESSION_ID, 'running')
-    expect(session?.agentTaskNotifications['agent-tool-1']).toBeUndefined()
-    expect(session?.messages).toContainEqual(expect.objectContaining({
-      type: 'tool_use',
-      toolUseId: 'agent-tool-1',
-      status: undefined,
-    }))
-  })
-
-  it('ignores a stale stop failure after a terminal notification wins the race', () => {
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({
-          chatState: 'idle',
-          messages: [],
-          backgroundAgentTasks: {
-            'agent-task-1': {
-              taskId: 'agent-task-1',
-              toolUseId: 'agent-tool-1',
-              status: 'running',
-              taskType: 'local_agent',
-              description: 'Verify screenshots',
-              startedAt: 1,
-              updatedAt: 2,
-            },
-          },
-        }),
-      },
-    })
-    useChatStore.getState().stopBackgroundTask(TEST_SESSION_ID, 'agent-task-1')
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'system_notification',
-      subtype: 'task_notification',
-      data: {
-        task_id: 'agent-task-1',
-        tool_use_id: 'agent-tool-1',
-        status: 'completed',
-        summary: 'Agent completed',
-      },
-    })
-    const before = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages.length
-
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'background_task_stop_failed',
-      taskId: 'agent-task-1',
-      message: 'Task is no longer available',
-    })
-
-    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
-    expect(session?.backgroundAgentTasks?.['agent-task-1']?.status).toBe('completed')
-    expect(session?.messages).toHaveLength(before ?? 0)
-  })
-
-  it('marks the tab idle after stopping the last running background task', () => {
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({
-          chatState: 'idle',
-          backgroundAgentTasks: {
-            'serve-task-1': {
-              taskId: 'serve-task-1',
-              status: 'running',
-              taskType: 'local_bash',
-              description: 'Serve cultivation stone page locally',
-              startedAt: 1,
-              updatedAt: 2,
-            },
-          },
-        }),
-      },
-    })
-
-    useChatStore.getState().stopBackgroundTask(TEST_SESSION_ID, 'serve-task-1')
-
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.backgroundAgentTasks?.['serve-task-1']?.status).toBe('stopped')
-    expect(updateTabStatusMock).toHaveBeenLastCalledWith(TEST_SESSION_ID, 'idle')
-  })
-
-  it('does not send stop_background_task for finished background tasks', () => {
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({
-          chatState: 'idle',
-          backgroundAgentTasks: {
-            'serve-task-1': {
-              taskId: 'serve-task-1',
-              status: 'stopped',
-              taskType: 'local_bash',
-              description: 'Serve cultivation stone page locally',
-              startedAt: 1,
-              updatedAt: 2,
-            },
-          },
-        }),
-      },
-    })
-
-    useChatStore.getState().stopBackgroundTask(TEST_SESSION_ID, 'serve-task-1')
-
-    expect(sendMock).not.toHaveBeenCalledWith(TEST_SESSION_ID, {
-      type: 'stop_background_task',
-      taskId: 'serve-task-1',
-    })
-  })
-
   it('suppresses assistant output for a task-notification-only follow-up turn', () => {
     useChatStore.setState({
       sessions: {
@@ -5835,91 +4664,6 @@ describe('chatStore history mapping', () => {
     ]))
     expect(session?.chatState).toBe('idle')
     expect(updateTabStatusMock).toHaveBeenLastCalledWith(TEST_SESSION_ID, 'idle')
-  })
-
-  it('keeps Run button idle across suppressed shell completion status flips', () => {
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({
-          chatState: 'idle',
-          backgroundAgentTasks: {
-            'pack-1': {
-              taskId: 'pack-1',
-              toolUseId: 'toolu_pack_1',
-              status: 'running',
-              description: 'electron-builder Windows NSIS installer',
-              startedAt: 1,
-              updatedAt: 2,
-            },
-            'pack-2': {
-              taskId: 'pack-2',
-              toolUseId: 'toolu_pack_2',
-              status: 'running',
-              description: 'Poll electron-builder progress',
-              startedAt: 1,
-              updatedAt: 2,
-            },
-          },
-        }),
-      },
-    })
-
-    // Terminal shell completion while foreground is already idle: UI should
-    // stay on Run, not flash Stop for each short model follow-up turn.
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'system_notification',
-      subtype: 'task_notification',
-      data: {
-        task_id: 'pack-1',
-        tool_use_id: 'toolu_pack_1',
-        status: 'completed',
-        summary: 'Background command "electron-builder Windows NSIS installer" completed (exit code 0)',
-        output_file: '/tmp/pack-1.output',
-      },
-    })
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.suppressNextTaskNotificationResponse).toBe(true)
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.chatState).toBe('idle')
-
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'status',
-      state: 'thinking',
-      attemptStart: true,
-    })
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.chatState).toBe('idle')
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.suppressNextTaskNotificationResponse).toBe(true)
-
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'thinking',
-      text: 'pack finished, nothing more to do',
-    })
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'status',
-      state: 'tool_executing',
-      verb: 'Working',
-    })
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'content_start',
-      blockType: 'text',
-    })
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'content_delta',
-      text: '安装包已完成。',
-    })
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'message_complete',
-      usage: { input_tokens: 4, output_tokens: 6 },
-    })
-
-    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
-    expect(session?.chatState).toBe('idle')
-    expect(session?.suppressNextTaskNotificationResponse).toBe(false)
-    expect(session?.messages).not.toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: 'thinking' }),
-      expect.objectContaining({ type: 'assistant_text' }),
-    ]))
-    // Tab can still reflect remaining background work without flipping the
-    // composer Stop/Run control (which keys off chatState only).
-    expect(updateTabStatusMock).toHaveBeenLastCalledWith(TEST_SESSION_ID, 'running')
   })
 
   it('does not suppress foreground skill output when a background task completes', () => {
@@ -6116,6 +4860,73 @@ describe('chatStore history mapping', () => {
     expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.streamingFallback).toBeNull()
   })
 
+  it('discards only the failed stream attempt before a safe retry', () => {
+    const completedTool = {
+      id: 'completed-tool',
+      type: 'tool_use' as const,
+      toolName: 'Read',
+      toolUseId: 'read-1',
+      input: { file_path: 'README.md' },
+      timestamp: 1,
+      isPending: false,
+    }
+    const completedResult = {
+      id: 'completed-result',
+      type: 'tool_result' as const,
+      toolUseId: 'read-1',
+      content: 'ok',
+      isError: false,
+      timestamp: 2,
+    }
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          messages: [
+            completedTool,
+            completedResult,
+            { id: 'failed-thinking', type: 'thinking', content: 'partial thought', timestamp: 3 },
+            {
+              id: 'failed-tool',
+              type: 'tool_use',
+              toolName: 'Write',
+              toolUseId: 'write-partial',
+              input: {},
+              timestamp: 4,
+              isPending: true,
+              partialInput: '{"file_path":',
+            },
+          ],
+          chatState: 'tool_executing',
+          streamingText: 'partial answer',
+          streamingToolInput: '{"file_path":',
+          activeToolUseId: 'write-partial',
+          activeToolName: 'Write',
+          activeThinkingId: 'failed-thinking',
+          streamingResponseChars: 200,
+          streamAttemptStartIndex: 2,
+          streamAttemptStartResponseChars: 80,
+        }),
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'streaming_fallback',
+      cause: 'stream_retry',
+    })
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]).toMatchObject({
+      messages: [completedTool, completedResult],
+      chatState: 'thinking',
+      streamingText: '',
+      streamingToolInput: '',
+      activeToolUseId: null,
+      activeToolName: null,
+      activeThinkingId: null,
+      streamingResponseChars: 80,
+      streamingFallback: null,
+    })
+  })
+
   it('keeps the fallback notice when idle and clears it on turn completion', () => {
     useChatStore.setState({
       sessions: {
@@ -6141,125 +4952,6 @@ describe('chatStore history mapping', () => {
       usage: { input_tokens: 1, output_tokens: 0 },
     })
     expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.streamingFallback).toBeNull()
-  })
-
-  it('shows a visible stream_retry banner without going idle, and stop clears it', () => {
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({
-          messages: [
-            { id: 'u1', type: 'user_text', content: 'hi', timestamp: 1 },
-            { id: 'a1', type: 'assistant_text', content: 'partial', timestamp: 2 },
-            {
-              id: 't1',
-              type: 'tool_use',
-              toolName: 'Bash',
-              toolUseId: 'tool-1',
-              input: {},
-              isPending: true,
-              timestamp: 3,
-            },
-          ],
-          chatState: 'streaming',
-          streamingText: 'partial',
-          streamAttemptStartIndex: 1,
-          streamAttemptStartResponseChars: 0,
-          streamingResponseChars: 7,
-        }),
-      },
-    })
-
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'streaming_fallback',
-      cause: 'stream_retry',
-      attempt: 2,
-      maxRetries: 4,
-      retryDelayMs: 1500,
-      errorMessage: 'OpenAI messages stream disconnected before completion',
-    })
-
-    const retrying = useChatStore.getState().sessions[TEST_SESSION_ID]
-    expect(retrying?.chatState).toBe('thinking')
-    expect(retrying?.streamingFallback).toBeNull()
-    expect(retrying?.apiRetry).toMatchObject({
-      attempt: 2,
-      maxRetries: 4,
-      retryDelayMs: 1500,
-      errorStatus: null,
-      errorType: 'stream_disconnect',
-      errorMessage: 'OpenAI messages stream disconnected before completion',
-    })
-    expect(retrying?.streamingText).toBe('')
-    expect(retrying?.messages.some((m) => m.type === 'assistant_text')).toBe(false)
-    expect(retrying?.messages.some((m) => m.type === 'tool_use' && m.isPending)).toBe(false)
-    expect(updateTabStatusMock).toHaveBeenLastCalledWith(TEST_SESSION_ID, 'running')
-
-    useChatStore.getState().stopGeneration(TEST_SESSION_ID)
-    const stopped = useChatStore.getState().sessions[TEST_SESSION_ID]
-    expect(stopped?.chatState).toBe('idle')
-    expect(stopped?.apiRetry).toBeNull()
-    expect(updateTabStatusMock).toHaveBeenLastCalledWith(TEST_SESSION_ID, 'idle')
-  })
-
-  it('ignores late retry updates until the server settles the stopped turn', () => {
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({
-          messages: [],
-          chatState: 'thinking',
-        }),
-      },
-    })
-
-    const store = useChatStore.getState()
-    store.stopGeneration(TEST_SESSION_ID)
-    store.handleServerMessage(TEST_SESSION_ID, {
-      type: 'api_retry',
-      attempt: 3,
-      maxRetries: 10,
-      retryDelayMs: 3_000,
-      errorStatus: null,
-    })
-    store.handleServerMessage(TEST_SESSION_ID, {
-      type: 'streaming_fallback',
-      cause: 'watchdog',
-    })
-
-    const stopped = useChatStore.getState().sessions[TEST_SESSION_ID]
-    expect(stopped?.chatState).toBe('idle')
-    expect(stopped?.apiRetry).toBeNull()
-    expect(stopped?.streamingFallback).toBeNull()
-
-    store.sendMessage(TEST_SESSION_ID, 'start a new turn')
-    store.handleServerMessage(TEST_SESSION_ID, {
-      type: 'status',
-      state: 'thinking',
-      attemptStart: true,
-    })
-    store.handleServerMessage(TEST_SESSION_ID, {
-      type: 'api_retry',
-      attempt: 4,
-      maxRetries: 10,
-      retryDelayMs: 3_000,
-      errorStatus: null,
-    })
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.apiRetry).toBeNull()
-
-    store.handleServerMessage(TEST_SESSION_ID, {
-      type: 'system_notification',
-      subtype: 'generation_stopped',
-    })
-    store.handleServerMessage(TEST_SESSION_ID, {
-      type: 'api_retry',
-      attempt: 1,
-      maxRetries: 10,
-      retryDelayMs: 1_000,
-      errorStatus: null,
-    })
-
-    const restarted = useChatStore.getState().sessions[TEST_SESSION_ID]
-    expect(restarted?.chatState).toBe('thinking')
-    expect(restarted?.apiRetry).toMatchObject({ attempt: 1 })
   })
 
   it('renders memory saved notifications as chat memory events', () => {
@@ -6427,13 +5119,13 @@ describe('chatStore history mapping', () => {
           connectionState: 'connected',
           streamingText: '上一次分析结果 **还在流式区域**',
           streamingToolInput: '',
-          streamingResponseChars: 0,
           activeToolUseId: null,
           activeToolName: null,
           activeThinkingId: null,
           pendingPermission: null,
           pendingComputerUsePermission: null,
           tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
           elapsedSeconds: 0,
           statusVerb: '',
           slashCommands: [],
@@ -6473,13 +5165,13 @@ describe('chatStore history mapping', () => {
           connectionState: 'connected',
           streamingText: '',
           streamingToolInput: '',
-          streamingResponseChars: 0,
           activeToolUseId: null,
           activeToolName: null,
           activeThinkingId: null,
           pendingPermission: null,
           pendingComputerUsePermission: null,
           tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
           elapsedSeconds: 0,
           statusVerb: '',
           slashCommands: [],
@@ -6572,62 +5264,6 @@ describe('chatStore history mapping', () => {
     expect(refreshTasksMock).toHaveBeenNthCalledWith(2, 'session-b')
   })
 
-  it('does not trust a stale Desktop bypass mode when the Server asks for Computer Use approval', () => {
-    sessionStoreSnapshot.sessions = [
-      {
-        id: TEST_SESSION_ID,
-        title: 'Bypass session',
-        createdAt: '',
-        modifiedAt: '',
-        messageCount: 0,
-        projectPath: '',
-        workDir: null,
-        workDirExists: true,
-        permissionMode: 'bypassPermissions',
-      },
-    ]
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({ chatState: 'tool_executing' }),
-      },
-    })
-
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'computer_use_permission_request',
-      requestId: 'cu-bypass',
-      request: {
-        requestId: 'cu-bypass',
-        reason: 'Use Windows PowerShell',
-        apps: [
-          {
-            requestedName: 'Windows PowerShell',
-            isSentinel: false,
-            alreadyGranted: false,
-            proposedTier: 'click',
-          },
-        ],
-        requestedFlags: {
-          clipboardRead: true,
-          clipboardWrite: true,
-          systemKeyCombos: true,
-        },
-        screenshotFiltering: 'native',
-      },
-    })
-
-    expect(sendMock).not.toHaveBeenCalledWith(
-      TEST_SESSION_ID,
-      expect.objectContaining({
-        type: 'computer_use_permission_response',
-        requestId: 'cu-bypass',
-      }),
-    )
-    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
-    expect(session?.pendingComputerUsePermission?.requestId).toBe('cu-bypass')
-    expect(session?.chatState).toBe('permission_pending')
-    expect(notifyDesktopMock).toHaveBeenCalled()
-  })
-
   it('tracks Computer Use approval requests separately from generic tool permissions', () => {
     useChatStore.setState({
       sessions: {
@@ -6637,13 +5273,13 @@ describe('chatStore history mapping', () => {
           connectionState: 'connected',
           streamingText: '',
           streamingToolInput: '',
-          streamingResponseChars: 0,
           activeToolUseId: null,
           activeToolName: null,
           activeThinkingId: null,
           pendingPermission: null,
           pendingComputerUsePermission: null,
           tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
           elapsedSeconds: 0,
           statusVerb: '',
           slashCommands: [],
@@ -6708,13 +5344,13 @@ describe('chatStore history mapping', () => {
           connectionState: 'connected',
           streamingText: '',
           streamingToolInput: '',
-          streamingResponseChars: 0,
           activeToolUseId: null,
           activeToolName: null,
           activeThinkingId: null,
           pendingPermission: null,
           pendingComputerUsePermission: null,
           tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
           elapsedSeconds: 0,
           statusVerb: '',
           slashCommands: [],
@@ -6821,6 +5457,36 @@ describe('chatStore history mapping', () => {
 
     expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.chatState).toBe('idle')
     expect(updateTabStatusMock).toHaveBeenCalledWith(TEST_SESSION_ID, 'idle')
+  })
+
+  it('refreshes unfinished Task V2 tool state once when the message completes', () => {
+    cliTaskStoreSnapshot.sessionId = TEST_SESSION_ID
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({ chatState: 'tool_executing' }),
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'tool_use_complete',
+      toolName: 'TaskUpdate',
+      toolUseId: 'task-update-1',
+      input: { taskId: '1', status: 'completed' },
+    })
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'message_complete',
+      usage: { input_tokens: 1, output_tokens: 2 },
+    })
+
+    expect(refreshTasksMock).toHaveBeenCalledTimes(1)
+    expect(refreshTasksMock).toHaveBeenCalledWith(TEST_SESSION_ID)
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'message_complete',
+      usage: { input_tokens: 1, output_tokens: 2 },
+    })
+
+    expect(refreshTasksMock).toHaveBeenCalledTimes(1)
   })
 
   it('flushes pending text before appending a thinking block', () => {
@@ -6959,318 +5625,6 @@ describe('chatStore history mapping', () => {
     expect(userMessages?.[0]).toMatchObject({ content: '', modelContent: prompt })
   })
 
-  it('dedupes a sent image message when replay replaces its attachment path prefix with image metadata', () => {
-    const prompt = '看到了 只不过默认好像是隐藏的需要点击顶部按钮才显示'
-    const imagePath = 'C:\\Users\\Relakkes\\.claude\\uploads\\sid\\activity-panel.png'
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
-      },
-    })
-
-    useChatStore.getState().sendMessage(
-      TEST_SESSION_ID,
-      prompt,
-      [{
-        type: 'image',
-        name: 'activity-panel.png',
-        path: imagePath,
-        mimeType: 'image/png',
-      }],
-    )
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'user_message_replay',
-      content: `${prompt}\n[Image source: ${imagePath}]`,
-    })
-
-    const userMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
-      .filter((message) => message.type === 'user_text')
-    expect(userMessages).toHaveLength(1)
-    expect(userMessages?.[0]).toMatchObject({
-      content: prompt,
-      modelContent: `@"${imagePath}" ${prompt}`,
-    })
-  })
-
-  it('dedupes a real three-image turn when replay uses generated upload filenames', () => {
-    const prompt = '帮我对比这三张截图里的布局差异'
-    const images = [
-      {
-        type: 'image' as const,
-        name: '首页.png',
-        path: 'C:\\Users\\Relakkes\\Pictures\\首页.png',
-        data: 'data:image/png;base64,AAAA',
-        mimeType: 'image/png',
-      },
-      {
-        type: 'image' as const,
-        name: '详情页.png',
-        path: 'C:\\Users\\Relakkes\\Pictures\\详情页.png',
-        data: 'data:image/png;base64,BBBB',
-        mimeType: 'image/png',
-      },
-      {
-        type: 'image' as const,
-        name: '设置页.png',
-        path: 'C:\\Users\\Relakkes\\Pictures\\设置页.png',
-        data: 'data:image/png;base64,CCCC',
-        mimeType: 'image/png',
-      },
-    ]
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
-      },
-    })
-
-    useChatStore.getState().sendMessage(TEST_SESSION_ID, prompt, images)
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'user_message_replay',
-      content: [
-        prompt,
-        '[Image source: C:\\Users\\Relakkes\\.claude\\uploads\\sid\\4dbf58f8-24f1-42e9-8dd8-b572cc2b9488-首页.png]',
-        '[Image source: C:\\Users\\Relakkes\\.claude\\uploads\\sid\\05559a7c-aeae-45f5-ac6b-7580ea22e45b-详情页.png]',
-        '[Image source: C:\\Users\\Relakkes\\.claude\\uploads\\sid\\13b18a3e-dd72-4b93-8fc8-ff518c64c132-设置页.png]',
-      ].join('\n'),
-    })
-
-    const userMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
-      .filter((message) => message.type === 'user_text')
-    expect(userMessages).toHaveLength(1)
-  })
-
-  it('dedupes three images when each generated upload prefix changes', () => {
-    const prompt = 'compare all three uploads'
-    const names = ['first.png', 'second.png', 'third.png']
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
-      },
-    })
-
-    useChatStore.getState().sendMessage(
-      TEST_SESSION_ID,
-      prompt,
-      names.map((name, index) => ({
-        type: 'image',
-        name,
-        path: `C:\\Users\\Relakkes\\.claude\\uploads\\sid\\old-${index}-${name}`,
-      })),
-    )
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'user_message_replay',
-      content: [
-        prompt,
-        ...names.map((name, index) =>
-          `[Image source: C:/Users/Relakkes/.claude/uploads/sid/new-${index}-${name}]`),
-      ].join('\n'),
-    })
-
-    const userMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
-      .filter((message) => message.type === 'user_text')
-    expect(userMessages).toHaveLength(1)
-  })
-
-  it('dedupes three pathless optimistic images by attachment name', () => {
-    const prompt = 'inspect these screenshots'
-    const names = ['alpha.png', 'beta.png', 'gamma.png']
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
-      },
-    })
-
-    useChatStore.getState().sendMessage(
-      TEST_SESSION_ID,
-      prompt,
-      names.map((name) => ({
-        type: 'image',
-        name,
-        data: 'data:image/png;base64,AAAA',
-        mimeType: 'image/png',
-      })),
-    )
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'user_message_replay',
-      content: [
-        prompt,
-        ...names.map((name) => `[Image source: /Users/test/.claude/uploads/sid/random-${name}]`),
-      ].join('\n'),
-    })
-
-    const userMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
-      .filter((message) => message.type === 'user_text')
-    expect(userMessages).toHaveLength(1)
-  })
-
-  it('dedupes three replayed images when their order changes', () => {
-    const prompt = 'review the image set'
-    const images = ['one.png', 'two.png', 'three.png'].map((name) => ({
-      type: 'image' as const,
-      name,
-      path: `/tmp/original/${name}`,
-    }))
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
-      },
-    })
-
-    useChatStore.getState().sendMessage(TEST_SESSION_ID, prompt, images)
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'user_message_replay',
-      content: [
-        prompt,
-        '[Image source: C:\\uploads\\new-three.png]',
-        '[Image source: C:\\uploads\\new-one.png]',
-        '[Image source: C:\\uploads\\new-two.png]',
-      ].join('\n'),
-    })
-
-    const userMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
-      .filter((message) => message.type === 'user_text')
-    expect(userMessages).toHaveLength(1)
-  })
-
-  it('keeps both three-image messages when one replayed image differs', () => {
-    const prompt = 'compare this image set'
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
-      },
-    })
-
-    useChatStore.getState().sendMessage(
-      TEST_SESSION_ID,
-      prompt,
-      ['one.png', 'two.png', 'three.png'].map((name) => ({
-        type: 'image',
-        name,
-        path: `/tmp/${name}`,
-      })),
-    )
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'user_message_replay',
-      content: [
-        prompt,
-        '[Image source: /uploads/random-one.png]',
-        '[Image source: /uploads/random-two.png]',
-        '[Image source: /uploads/random-different.png]',
-      ].join('\n'),
-    })
-
-    const userMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
-      .filter((message) => message.type === 'user_text')
-    expect(userMessages).toHaveLength(2)
-  })
-
-  it('does not reuse one replayed image to match duplicate attachment names', () => {
-    const prompt = 'inspect duplicate filenames'
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
-      },
-    })
-
-    useChatStore.getState().sendMessage(
-      TEST_SESSION_ID,
-      prompt,
-      [
-        { type: 'image', name: 'same.png', data: 'data:image/png;base64,AAAA' },
-        { type: 'image', name: 'same.png', data: 'data:image/png;base64,BBBB' },
-      ],
-    )
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'user_message_replay',
-      content: [
-        prompt,
-        '[Image source: /uploads/random-same.png]',
-        '[Image source: /uploads/random-different.png]',
-      ].join('\n'),
-    })
-
-    const userMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
-      .filter((message) => message.type === 'user_text')
-    expect(userMessages).toHaveLength(2)
-  })
-
-  it('keeps both image messages when replay has no image metadata', () => {
-    const prompt = 'compare this image'
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
-      },
-    })
-
-    useChatStore.getState().sendMessage(
-      TEST_SESSION_ID,
-      prompt,
-      [{ type: 'image', name: 'only.png', path: '/tmp/only.png' }],
-    )
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'user_message_replay',
-      content: prompt,
-    })
-
-    const userMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
-      .filter((message) => message.type === 'user_text')
-    expect(userMessages).toHaveLength(2)
-  })
-
-  it('keeps both image messages when the replayed image count differs', () => {
-    const prompt = 'compare the uploads'
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
-      },
-    })
-
-    useChatStore.getState().sendMessage(
-      TEST_SESSION_ID,
-      prompt,
-      ['one.png', 'two.png', 'three.png'].map((name) => ({
-        type: 'image',
-        name,
-        path: `/tmp/${name}`,
-      })),
-    )
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'user_message_replay',
-      content: [
-        prompt,
-        '[Image source: /uploads/random-one.png]',
-        '[Image source: /uploads/random-two.png]',
-      ].join('\n'),
-    })
-
-    const userMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
-      .filter((message) => message.type === 'user_text')
-    expect(userMessages).toHaveLength(2)
-  })
-
-  it('keeps a replay with the same text when it refers to a different image', () => {
-    const prompt = 'compare this screenshot'
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }),
-      },
-    })
-
-    useChatStore.getState().sendMessage(
-      TEST_SESSION_ID,
-      prompt,
-      [{ type: 'image', name: 'first.png', path: '/tmp/first.png' }],
-    )
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'user_message_replay',
-      content: `${prompt}\n[Image source: /tmp/second.png]`,
-    })
-
-    const userMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
-      .filter((message) => message.type === 'user_text')
-    expect(userMessages).toHaveLength(2)
-  })
-
   it('dedupes an image-bearing prompt when the replay appends detailed (macOS) image metadata', () => {
     const prompt = 'describe this screenshot for me'
     useChatStore.setState({
@@ -7294,6 +5648,175 @@ describe('chatStore history mapping', () => {
     expect(userMessages).toHaveLength(1)
   })
 
+  it('keeps an image-only replay before the assistant response', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          messages: [
+            {
+              id: 'live-user',
+              type: 'user_text',
+              content: '',
+              attachments: [{
+                type: 'image',
+                name: 'screenshot.png',
+                data: 'data:image/png;base64,AAAA',
+                mimeType: 'image/png',
+              }],
+              timestamp: 1,
+            },
+            {
+              id: 'assistant-answer',
+              type: 'assistant_text',
+              content: 'The screenshot shows a repository list.',
+              timestamp: 2,
+            },
+          ],
+          chatState: 'thinking',
+        }),
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'user_message_replay',
+      content: [
+        'Please analyze the attached image.',
+        '[Image source: /Users/me/.claude/uploads/session/screenshot.png]',
+      ].join('\n'),
+    })
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toMatchObject([
+      {
+        type: 'user_text',
+        content: '',
+        attachments: [{ type: 'image', name: 'screenshot.png' }],
+      },
+      {
+        type: 'assistant_text',
+        content: 'The screenshot shows a repository list.',
+      },
+    ])
+  })
+
+  it('dedupes a path-backed image after the server inlines it into replay content', () => {
+    const prompt = '检查这张截图'
+    const imagePath = 'C:\\Users\\tester\\Desktop\\screen.png'
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          messages: [
+            {
+              id: 'live-user',
+              type: 'user_text',
+              content: prompt,
+              modelContent: `@"${imagePath}" ${prompt}`,
+              attachments: [{
+                type: 'file',
+                name: 'screen.png',
+                path: imagePath,
+              }],
+              timestamp: 1,
+            },
+          ],
+          chatState: 'thinking',
+        }),
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'user_message_replay',
+      content: `${prompt}\n[Image source: ${imagePath}]`,
+    })
+
+    const userMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
+      .filter((message) => message.type === 'user_text')
+    expect(userMessages).toHaveLength(1)
+  })
+
+  it('dedupes a prompt when data-only files replay with server-materialized upload paths', () => {
+    const prompt = '检查这两个附件'
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          messages: [
+            {
+              id: 'live-user',
+              type: 'user_text',
+              content: prompt,
+              attachments: [
+                {
+                  type: 'file',
+                  name: 'PROJECT.md',
+                  data: 'data:text/markdown;base64,IyBQcm9qZWN0',
+                },
+                {
+                  type: 'file',
+                  name: 'server.pem',
+                  data: 'data:application/x-pem-file;base64,VEVTVA==',
+                },
+              ],
+              timestamp: 1,
+            },
+          ],
+          chatState: 'thinking',
+        }),
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'user_message_replay',
+      content: [
+        '@"C:\\Users\\tester\\.claude\\uploads\\sid\\5d3af295-b914-4d44-a686-d665dc46b189-PROJECT.md"',
+        '@"C:\\Users\\tester\\.claude\\uploads\\sid\\d81b63cd-978c-42ce-ad9a-3bcd049dc24e-server.pem"',
+        prompt,
+      ].join(' '),
+    })
+
+    const userMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
+      .filter((message) => message.type === 'user_text')
+    expect(userMessages).toHaveLength(1)
+    expect(userMessages?.[0]).toMatchObject({
+      content: prompt,
+      attachments: [
+        { name: 'PROJECT.md', data: 'data:text/markdown;base64,IyBQcm9qZWN0' },
+        { name: 'server.pem', data: 'data:application/x-pem-file;base64,VEVTVA==' },
+      ],
+    })
+  })
+
+  it('keeps a replay whose materialized upload filename does not match the current attachment', () => {
+    const prompt = '检查这个附件'
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          messages: [
+            {
+              id: 'live-user',
+              type: 'user_text',
+              content: prompt,
+              attachments: [{
+                type: 'file',
+                name: 'PROJECT.md',
+                data: 'data:text/markdown;base64,IyBQcm9qZWN0',
+              }],
+              timestamp: 1,
+            },
+          ],
+          chatState: 'thinking',
+        }),
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'user_message_replay',
+      content: `@"C:\\Users\\tester\\.claude\\uploads\\sid\\5d3af295-b914-4d44-a686-d665dc46b189-other.md" ${prompt}`,
+    })
+
+    const userMessages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages
+      .filter((message) => message.type === 'user_text')
+    expect(userMessages).toHaveLength(2)
+  })
+
   it('flushes pending text before appending an error message', () => {
     vi.useFakeTimers()
 
@@ -7309,13 +5832,17 @@ describe('chatStore history mapping', () => {
     })
     useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
       type: 'error',
-      message: 'provider failed',
-      code: 'provider_error',
+      message: 'API Error: Provider stream stalled after partial response - no new chunks for 240s',
+      code: 'STREAM_IDLE_TIMEOUT',
     })
 
     expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messages).toMatchObject([
       { type: 'assistant_text', content: 'partial answer before error' },
-      { type: 'error', message: 'provider failed' },
+      {
+        type: 'error',
+        message: 'API Error: Provider stream stalled after partial response - no new chunks for 240s',
+        code: 'STREAM_IDLE_TIMEOUT',
+      },
     ])
 
     vi.runOnlyPendingTimers()
@@ -7343,7 +5870,10 @@ describe('chatStore history mapping', () => {
 
     useChatStore.getState().stopGeneration('session-a')
 
-    expect(useChatStore.getState().sessions['session-a']?.streamingText).toBe('A-only response')
+    expect(useChatStore.getState().sessions['session-a']?.streamingText).toBe('')
+    expect(useChatStore.getState().sessions['session-a']?.messages).toMatchObject([
+      { type: 'assistant_text', content: 'A-only response' },
+    ])
     expect(useChatStore.getState().sessions['session-b']?.streamingText).toBe('')
 
     useChatStore.getState().handleServerMessage('session-b', {
@@ -7443,13 +5973,13 @@ describe('chatStore history mapping', () => {
           connectionState: 'connected',
           streamingText: '',
           streamingToolInput: '',
-          streamingResponseChars: 0,
           activeToolUseId: null,
           activeToolName: null,
           activeThinkingId: null,
           pendingPermission: null,
           pendingComputerUsePermission: null,
           tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
           elapsedSeconds: 0,
           statusVerb: '',
           slashCommands: [],
@@ -7546,13 +6076,13 @@ describe('chatStore history mapping', () => {
           connectionState: 'connected',
           streamingText: '',
           streamingToolInput: '',
-          streamingResponseChars: 0,
           activeToolUseId: null,
           activeToolName: null,
           activeThinkingId: null,
           pendingPermission: null,
           pendingComputerUsePermission: null,
           tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
           elapsedSeconds: 0,
           statusVerb: '',
           slashCommands: [],
@@ -7599,13 +6129,13 @@ describe('chatStore history mapping', () => {
           connectionState: 'connected',
           streamingText: '',
           streamingToolInput: '',
-          streamingResponseChars: 0,
           activeToolUseId: null,
           activeToolName: null,
           activeThinkingId: null,
           pendingPermission: null,
           pendingComputerUsePermission: null,
           tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
           elapsedSeconds: 0,
           statusVerb: '',
           slashCommands: [],
@@ -7632,13 +6162,13 @@ describe('chatStore history mapping', () => {
           connectionState: 'connected',
           streamingText: '用户已停止后的残余文本',
           streamingToolInput: '',
-          streamingResponseChars: 0,
           activeToolUseId: null,
           activeToolName: null,
           activeThinkingId: null,
           pendingPermission: null,
           pendingComputerUsePermission: null,
           tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
           elapsedSeconds: 0,
           statusVerb: '',
           slashCommands: [],
@@ -7665,7 +6195,6 @@ describe('chatStore history mapping', () => {
           connectionState: 'connected',
           streamingText: '',
           streamingToolInput: '',
-          streamingResponseChars: 0,
           activeToolUseId: null,
           activeToolName: null,
           activeThinkingId: null,
@@ -7681,6 +6210,7 @@ describe('chatStore history mapping', () => {
             },
           },
           tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
           elapsedSeconds: 0,
           statusVerb: '',
           slashCommands: [],
@@ -7739,13 +6269,13 @@ describe('chatStore history mapping', () => {
           connectionState: 'connected',
           streamingText: '',
           streamingToolInput: '',
-          streamingResponseChars: 0,
           activeToolUseId: null,
           activeToolName: null,
           activeThinkingId: null,
           pendingPermission: null,
           pendingComputerUsePermission: null,
           tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
           elapsedSeconds: 0,
           statusVerb: '',
           slashCommands: [],
@@ -7781,13 +6311,13 @@ describe('chatStore history mapping', () => {
           connectionState: 'connected',
           streamingText: '',
           streamingToolInput: '',
-          streamingResponseChars: 0,
           activeToolUseId: null,
           activeToolName: null,
           activeThinkingId: null,
           pendingPermission: null,
           pendingComputerUsePermission: null,
           tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
           elapsedSeconds: 0,
           statusVerb: '',
           slashCommands: [],
@@ -7879,409 +6409,208 @@ describe('chatStore history mapping', () => {
   })
 })
 
-describe('chatStore context-exhausted suggestion (方案3)', () => {
-  const SID = 'thrash-session'
+// A desktop window left open for hours re-renders a long-finished session as a
+// wall of collapsed "已思考" bubbles with no reply text between them. No new LLM
+// call happens — the finished turn's stream events are pushed at the renderer a
+// second time on top of already-hydrated history. appendAssistantTextMessage
+// guards against exactly that replay, `case 'thinking'` does not.
+type FinishedTurnStep =
+  | { kind: 'thinking'; text: string }
+  | { kind: 'text'; text: string }
+  | { kind: 'tool'; id: string; name: string }
 
-  beforeEach(() => {
-    sendMock.mockReset()
-    getMemberBySessionIdMock.mockReset()
-    getMemberBySessionIdMock.mockReturnValue(null)
-    useSessionRuntimeStore.setState({ selections: {}, coordinatorModes: {}, pipelineModes: {}, soloPipelineModes: {} })
-    useChatStore.setState({ ...initialState, sessions: {} })
-    // Reset the module-level compaction-thrash tracking for this session id.
-    useChatStore.getState().clearMessages(SID)
-  })
+// Verbatim block order of session fd09ae78-297a-427e-a849-5251731bf30c (Kimi
+// k3, a Computer Use run): 13 thinking blocks, 5 of them empty. Only the very
+// last assistant reply is elided — it is a long markdown table.
+const FINISHED_COMPUTER_USE_TURN: FinishedTurnStep[] = [
+  { kind: 'thinking', text: 'User wants Computer Use. I need to load the computer-use tools. Let me fetch the tool schemas first.' },
+  { kind: 'text', text: '我先加载 Computer Use 工具，然后严格按顺序执行。' },
+  { kind: 'tool', id: 'tool_aJGuYYOY4gzHHHFIaTus4M3e', name: 'ToolSearch' },
+  { kind: 'thinking', text: 'Start: get_app_state to find search box, then step 1 click it. User wants get_app_state after each step and report the search field content.' },
+  { kind: 'tool', id: 'tool_kosJoZ93D4WBqAWnmelI9Rik', name: 'mcp__computer-use__get_app_state' },
+  { kind: 'thinking', text: 'Search box at approx (410, 50). Step 1: single click.' },
+  { kind: 'text', text: '初始状态：搜索框为空（只有放大镜占位图标），位置约 (410, 50)。\n\n**第 1 步：单击搜索框**' },
+  { kind: 'tool', id: 'tool_KlLouIdZHyPcj0Jbmy5nfJOf', name: 'mcp__computer-use__click' },
+  { kind: 'thinking', text: '' },
+  { kind: 'tool', id: 'tool_lNWmFSm7Er61dyZJcWGkGH6b', name: 'mcp__computer-use__get_app_state' },
+  { kind: 'thinking', text: 'Step 1 done: search box still empty (only magnifier icon). Step 2: type "test".' },
+  { kind: 'text', text: '第 1 步后：搜索框里**为空**（只有放大镜占位图标，无文字）。\n\n**第 2 步：type_text 输入 "test"**' },
+  { kind: 'tool', id: 'tool_hTHyhielyvIaUIWN6YJDz2g5', name: 'mcp__computer-use__type_text' },
+  { kind: 'thinking', text: '' },
+  { kind: 'tool', id: 'tool_951Y0sQNx8tMZGGMS7XjVeOL', name: 'mcp__computer-use__get_app_state' },
+  { kind: 'thinking', text: 'Step 2 done: search box still empty — "test" did not appear. Report honestly. Step 3: type "abc".' },
+  { kind: 'text', text: '第 2 步后：搜索框里**为空** —— "test" 没有显示出来。\n\n**第 3 步：type_text 输入 "abc"**' },
+  { kind: 'tool', id: 'tool_Y1MzoPySfdwd7tNrFj389CEN', name: 'mcp__computer-use__type_text' },
+  { kind: 'thinking', text: 'Continue: get_app_state after step 3.' },
+  { kind: 'tool', id: 'tool_8TrKG2qCE6Q4bDYE5hMvngSW', name: 'mcp__computer-use__get_app_state' },
+  { kind: 'thinking', text: 'Step 3 done: still empty. Step 4: double-click search box.' },
+  { kind: 'text', text: '第 3 步后：搜索框里**依然为空** —— "abc" 也没有显示。\n\n**第 4 步：双击搜索框**' },
+  { kind: 'tool', id: 'tool_qguIh8LXvDxOn6wE4aSlys2K', name: 'mcp__computer-use__click' },
+  { kind: 'thinking', text: '' },
+  { kind: 'tool', id: 'tool_T4513oOu6to3GY1EeEPMLvFr', name: 'mcp__computer-use__get_app_state' },
+  { kind: 'thinking', text: '' },
+  { kind: 'text', text: '第 4 步后：搜索框里**仍然为空**，界面无任何变化。\n\n**第 5 步：type_text 输入 "xyz"**' },
+  { kind: 'tool', id: 'tool_XhJWl5aNuSPaUXctFQ91KSPM', name: 'mcp__computer-use__type_text' },
+  { kind: 'thinking', text: '' },
+  { kind: 'tool', id: 'tool_b2c5HshyO48rmbYqmlcGj94K', name: 'mcp__computer-use__get_app_state' },
+  { kind: 'thinking', text: 'Done. Report all 5 steps faithfully.' },
+  { kind: 'text', text: '5 步全部完成，如实汇报每步后搜索框的内容：' },
+]
 
-  function systemNoticeCount(sessionId: string): number {
-    const messages = useChatStore.getState().sessions[sessionId]?.messages ?? []
-    return messages.filter((m) => m.type === 'system').length
-  }
+const FIRST_THINKING = FINISHED_COMPUTER_USE_TURN[0] as { kind: 'thinking'; text: string }
+const LAST_THINKING = FINISHED_COMPUTER_USE_TURN[30] as { kind: 'thinking'; text: string }
 
-  function emitCompactBoundary(sessionId: string) {
-    useChatStore.getState().handleServerMessage(sessionId, {
-      type: 'system_notification',
-      subtype: 'compact_boundary',
-      message: 'Context compacted',
-      data: {},
-    })
-  }
-
-  it('suggests starting a new session after repeated rapid compactions', () => {
-    useChatStore.setState({ sessions: { [SID]: makeSession({ chatState: 'thinking' }) } })
-
-    emitCompactBoundary(SID) // 1st compaction — not rapid (no prior turn baseline)
-    expect(systemNoticeCount(SID)).toBe(0)
-
-    useChatStore.getState().sendMessage(SID, 'turn a')
-    emitCompactBoundary(SID) // 2nd, 1 turn apart → rapid
-    expect(systemNoticeCount(SID)).toBe(0)
-
-    useChatStore.getState().sendMessage(SID, 'turn b')
-    emitCompactBoundary(SID) // 3rd, 1 turn apart → threshold reached → suggest once
-    expect(systemNoticeCount(SID)).toBe(1)
-
-    // Continued thrash must not spam additional suggestions.
-    useChatStore.getState().sendMessage(SID, 'turn c')
-    emitCompactBoundary(SID)
-    expect(systemNoticeCount(SID)).toBe(1)
-  })
-
-  it('does not suggest when compactions are spread across real work', () => {
-    useChatStore.setState({ sessions: { [SID]: makeSession({ chatState: 'thinking' }) } })
-
-    emitCompactBoundary(SID)
-    for (let round = 0; round < 4; round += 1) {
-      // 3 user turns between compactions > the rapid window, so this is normal use.
-      useChatStore.getState().sendMessage(SID, `r${round}-a`)
-      useChatStore.getState().sendMessage(SID, `r${round}-b`)
-      useChatStore.getState().sendMessage(SID, `r${round}-c`)
-      emitCompactBoundary(SID)
+/** The CLI persists one transcript entry per content block; mirror that shape. */
+function buildFinishedTurnHistory(): MessageEntry[] {
+  const entries: MessageEntry[] = [{
+    id: 'cu-prompt',
+    type: 'user',
+    timestamp: '2026-07-28T15:00:00.000Z',
+    content: '用 Computer Use 操作网易云音乐，严格按顺序做，每步做完立刻 get_app_state。',
+  }]
+  FINISHED_COMPUTER_USE_TURN.forEach((step, index) => {
+    const timestamp = new Date(Date.UTC(2026, 6, 28, 15, 1, index)).toISOString()
+    if (step.kind === 'thinking') {
+      entries.push({ id: `cu-a-${index}`, type: 'assistant', timestamp, content: [{ type: 'thinking', thinking: step.text }] })
+      return
     }
-
-    expect(systemNoticeCount(SID)).toBe(0)
+    if (step.kind === 'text') {
+      entries.push({ id: `cu-a-${index}`, type: 'assistant', timestamp, content: [{ type: 'text', text: step.text }] })
+      return
+    }
+    entries.push({ id: `cu-a-${index}`, type: 'assistant', timestamp, content: [{ type: 'tool_use', name: step.name, id: step.id, input: {} }] })
+    entries.push({ id: `cu-u-${index}`, type: 'user', timestamp, content: [{ type: 'tool_result', tool_use_id: step.id, content: 'ok', is_error: false }] })
   })
-})
+  return entries
+}
 
-describe('chatStore message queue', () => {
-  beforeEach(() => {
+/**
+ * Push the finished turn at the renderer exactly as the server emits it. Both
+ * emit paths skip falsy thinking (`handler.ts` thinking_delta and the
+ * no-stream-events assistant fallback), so the five empty transcript blocks
+ * never reach the wire — `withEmptyThinking` exists only for the defensive case.
+ */
+function replayFinishedTurn(options: { withText: boolean; withEmptyThinking?: boolean }) {
+  const store = useChatStore.getState()
+  for (const step of FINISHED_COMPUTER_USE_TURN) {
+    if (step.kind === 'thinking') {
+      if (step.text || options.withEmptyThinking) {
+        store.handleServerMessage(TEST_SESSION_ID, { type: 'thinking', text: step.text })
+      }
+      continue
+    }
+    if (step.kind === 'text') {
+      if (options.withText) store.handleServerMessage(TEST_SESSION_ID, { type: 'content_delta', text: step.text })
+      continue
+    }
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'tool_use_complete',
+      toolName: step.name,
+      toolUseId: step.id,
+      input: {},
+    })
+    store.handleServerMessage(TEST_SESSION_ID, {
+      type: 'tool_result',
+      toolUseId: step.id,
+      content: 'ok',
+      isError: false,
+    })
+  }
+}
+
+function thinkingBlocks() {
+  return (useChatStore.getState().sessions[TEST_SESSION_ID]?.messages ?? [])
+    .filter((message) => message.type === 'thinking')
+    .map((message) => message.content)
+}
+
+describe('chatStore wake replay of a finished thinking turn', () => {
+  beforeEach(async () => {
     sendMock.mockReset()
+    notifyDesktopMock.mockReset()
+    updateTabStatusMock.mockReset()
     getMemberBySessionIdMock.mockReset()
     getMemberBySessionIdMock.mockReturnValue(null)
-    useSessionRuntimeStore.setState({ selections: {}, coordinatorModes: {}, pipelineModes: {}, soloPipelineModes: {} })
-    useChatStore.setState({ ...initialState, sessions: {} })
-  })
-
-  function findUserMessageSends() {
-    return sendMock.mock.calls.filter(
-      ([, payload]) => payload && (payload as { type?: string }).type === 'user_message',
-    )
-  }
-
-  it('enqueues a message while the agent is busy without sending it over the websocket', () => {
+    connectionStateHandlers.clear()
+    vi.mocked(sessionsApi.getMessages).mockReset()
+    vi.mocked(sessionsApi.getMessages).mockResolvedValue({ messages: buildFinishedTurnHistory() })
+    localStorage.clear()
+    useSettingsStore.setState({ locale: 'en' })
     useChatStore.setState({
-      sessions: { [TEST_SESSION_ID]: makeSession({ chatState: 'thinking' }) },
+      ...initialState,
+      sessions: { [TEST_SESSION_ID]: makeSession({ chatState: 'idle', messages: [] }) },
     })
-
-    useChatStore.getState().enqueueMessage(TEST_SESSION_ID, 'queued one')
-
-    const queue = useChatStore.getState().sessions[TEST_SESSION_ID]?.messageQueue ?? []
-    expect(queue).toHaveLength(1)
-    expect(queue[0]).toMatchObject({ content: 'queued one' })
-    expect(findUserMessageSends()).toHaveLength(0)
-  })
-
-  it('drains the next queued message when the session transitions to idle (status)', () => {
-    useChatStore.setState({
-      sessions: { [TEST_SESSION_ID]: makeSession({ chatState: 'thinking' }) },
-    })
-    useChatStore.getState().enqueueMessage(TEST_SESSION_ID, 'first')
-    useChatStore.getState().enqueueMessage(TEST_SESSION_ID, 'second')
-    expect(findUserMessageSends()).toHaveLength(0)
-
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, { type: 'status', state: 'idle' })
-
-    const sends = findUserMessageSends()
-    expect(sends).toHaveLength(1)
-    expect((sends[0]![1] as { content: string }).content).toBe('first')
-    // Only the first item drains; the second stays queued until the next idle.
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messageQueue).toHaveLength(1)
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messageQueue?.[0]?.content).toBe('second')
-  })
-
-  it('drains the next queued message on turn completion (message_complete)', () => {
-    useChatStore.setState({
-      sessions: { [TEST_SESSION_ID]: makeSession({ chatState: 'streaming' }) },
-    })
-    useChatStore.getState().enqueueMessage(TEST_SESSION_ID, 'follow up')
-
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'message_complete',
-      usage: { input_tokens: 1, output_tokens: 2 },
-    })
-
-    expect(findUserMessageSends()).toHaveLength(1)
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messageQueue).toHaveLength(0)
-  })
-
-  it('does not drain while a permission prompt is pending', () => {
-    useChatStore.setState({
-      sessions: {
-        [TEST_SESSION_ID]: makeSession({
-          chatState: 'idle',
-          pendingPermission: { requestId: 'p1', toolName: 'Bash', input: {} },
-        }),
-      },
-    })
-
-    useChatStore.getState().enqueueMessage(TEST_SESSION_ID, 'should wait')
-
-    expect(findUserMessageSends()).toHaveLength(0)
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messageQueue).toHaveLength(1)
-  })
-
-  it('immediately drains an enqueue when the session is already idle and connected', () => {
-    useChatStore.setState({
-      sessions: { [TEST_SESSION_ID]: makeSession({ chatState: 'idle' }) },
-    })
-
-    useChatStore.getState().enqueueMessage(TEST_SESSION_ID, 'go now')
-
-    expect(findUserMessageSends()).toHaveLength(1)
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messageQueue).toHaveLength(0)
-  })
-
-  it('supports remove, move-to-top, update and clear on the queue', () => {
-    useChatStore.setState({
-      sessions: { [TEST_SESSION_ID]: makeSession({ chatState: 'thinking' }) },
-    })
-    const store = useChatStore.getState()
-    store.enqueueMessage(TEST_SESSION_ID, 'a')
-    store.enqueueMessage(TEST_SESSION_ID, 'b')
-    store.enqueueMessage(TEST_SESSION_ID, 'c')
-
-    const ids = () => (useChatStore.getState().sessions[TEST_SESSION_ID]?.messageQueue ?? []).map((m) => m.content)
-    const queue0 = useChatStore.getState().sessions[TEST_SESSION_ID]?.messageQueue ?? []
-    const idB = queue0[1]!.id
-    const idC = queue0[2]!.id
-
-    store.moveQueuedMessageToTop(TEST_SESSION_ID, idC)
-    expect(ids()).toEqual(['c', 'a', 'b'])
-
-    store.updateQueuedMessage(TEST_SESSION_ID, idB, 'b-edited')
-    expect(ids()).toEqual(['c', 'a', 'b-edited'])
-
-    store.removeQueuedMessage(TEST_SESSION_ID, idC)
-    expect(ids()).toEqual(['a', 'b-edited'])
-
-    store.clearMessageQueue(TEST_SESSION_ID)
-    expect(ids()).toEqual([])
-  })
-
-  it('sends a queued message immediately while busy without stopping the running turn', () => {
-    useChatStore.setState({
-      sessions: { [TEST_SESSION_ID]: makeSession({ chatState: 'thinking' }) },
-    })
-    const store = useChatStore.getState()
-    store.enqueueMessage(TEST_SESSION_ID, 'a')
-    store.enqueueMessage(TEST_SESSION_ID, 'b')
-    expect(findUserMessageSends()).toHaveLength(0)
-
-    const queue0 = useChatStore.getState().sessions[TEST_SESSION_ID]?.messageQueue ?? []
-    const idB = queue0[1]!.id
-
-    useChatStore.getState().sendQueuedMessageNow(TEST_SESSION_ID, idB)
-
-    // Plain send: no stop_generation is issued, the message is sent immediately,
-    // and only the picked item is removed from the queue.
-    const stopSends = sendMock.mock.calls.filter(
-      ([, payload]) => payload && (payload as { type?: string }).type === 'stop_generation',
-    )
-    expect(stopSends).toHaveLength(0)
-    const sends = findUserMessageSends()
-    expect(sends).toHaveLength(1)
-    expect((sends[0]![1] as { content: string }).content).toBe('b')
-    const remaining = (useChatStore.getState().sessions[TEST_SESSION_ID]?.messageQueue ?? []).map((m) => m.content)
-    expect(remaining).toEqual(['a'])
-  })
-
-  it('sends a queued message immediately when already idle, without issuing a stop', () => {
-    useChatStore.setState({
-      sessions: { [TEST_SESSION_ID]: makeSession({ chatState: 'thinking' }) },
-    })
-    const store = useChatStore.getState()
-    store.enqueueMessage(TEST_SESSION_ID, 'a')
-    store.enqueueMessage(TEST_SESSION_ID, 'b')
-    // Stop leaves the session idle with the queue intact (drain paused).
-    store.stopGeneration(TEST_SESSION_ID)
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.chatState).toBe('idle')
-    sendMock.mockClear()
-
-    const queue = useChatStore.getState().sessions[TEST_SESSION_ID]?.messageQueue ?? []
-    const idB = queue[1]!.id
-    expect(queue.map((m) => m.content)).toEqual(['a', 'b'])
-
-    useChatStore.getState().sendQueuedMessageNow(TEST_SESSION_ID, idB)
-
-    const stopSends = sendMock.mock.calls.filter(
-      ([, payload]) => payload && (payload as { type?: string }).type === 'stop_generation',
-    )
-    expect(stopSends).toHaveLength(0)
-    const sends = findUserMessageSends()
-    expect(sends).toHaveLength(1)
-    expect((sends[0]![1] as { content: string }).content).toBe('b')
-    const remaining = (useChatStore.getState().sessions[TEST_SESSION_ID]?.messageQueue ?? []).map((m) => m.content)
-    expect(remaining).toEqual(['a'])
-  })
-
-  it('keeps the queue intact when the current generation is stopped', () => {
-    useChatStore.setState({
-      sessions: { [TEST_SESSION_ID]: makeSession({ chatState: 'streaming' }) },
-    })
-    useChatStore.getState().enqueueMessage(TEST_SESSION_ID, 'still queued')
-
-    useChatStore.getState().stopGeneration(TEST_SESSION_ID)
-
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messageQueue).toHaveLength(1)
-    expect(findUserMessageSends()).toHaveLength(0)
-  })
-
-  it('does not flush the queue on the idle(s) produced by a user Stop, then resumes after the next message', () => {
-    useChatStore.setState({
-      sessions: { [TEST_SESSION_ID]: makeSession({ chatState: 'streaming' }) },
-    })
-    useChatStore.getState().enqueueMessage(TEST_SESSION_ID, 'queued-1')
-    useChatStore.getState().enqueueMessage(TEST_SESSION_ID, 'queued-2')
-
-    // User clicks Stop. A Stop can emit multiple idle-like events (result +
-    // status); NONE of them may drain the queue, or the turn would "resume".
-    useChatStore.getState().stopGeneration(TEST_SESSION_ID)
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'message_complete',
-      usage: { input_tokens: 1, output_tokens: 1 },
-    })
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, { type: 'status', state: 'idle' })
-    expect(findUserMessageSends()).toHaveLength(0)
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messageQueue).toHaveLength(2)
-
-    // The user's priority message fires immediately (session idle → direct send).
-    useChatStore.getState().sendMessage(TEST_SESSION_ID, 'priority now')
-    const afterPriority = findUserMessageSends()
-    expect(afterPriority).toHaveLength(1)
-    expect((afterPriority[0]![1] as { content: string }).content).toBe('priority now')
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messageQueue).toHaveLength(2)
-
-    // When the priority turn completes, the queue resumes (one item drains).
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, { type: 'status', state: 'idle' })
-    const afterResume = findUserMessageSends()
-    expect(afterResume).toHaveLength(2)
-    expect((afterResume[1]![1] as { content: string }).content).toBe('queued-1')
-    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.messageQueue).toHaveLength(1)
-  })
-})
-
-describe('chatStore — agent file-edit bridge to workspace panel (Phase 4)', () => {
-  let notifySpy: ReturnType<typeof vi.spyOn>
-
-  beforeEach(() => {
-    // The store is a real Zustand instance; spy on the method we forward to.
-    notifySpy = vi.spyOn(useWorkspacePanelStore.getState(), 'notifyAgentFileEdit')
-    notifySpy.mockImplementation(() => {})
-    // Reset chat store to a clean slate per test.
-    useChatStore.setState({ sessions: {} })
+    await useChatStore.getState().loadHistory(TEST_SESSION_ID)
   })
 
   afterEach(() => {
-    notifySpy.mockRestore()
+    const timer = useChatStore.getState().sessions[TEST_SESSION_ID]?.elapsedTimer
+    if (timer) clearInterval(timer)
   })
 
-  it('forwards Edit tool success to notifyAgentFileEdit with the absolute path', () => {
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'tool_use_complete',
-      toolName: 'Edit',
-      toolUseId: 'tu-edit-1',
-      input: { file_path: '/repo/src/app.ts', old_string: 'a', new_string: 'b' },
-    })
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'tool_result',
-      toolUseId: 'tu-edit-1',
-      content: 'ok',
-      isError: false,
-    })
-
-    expect(notifySpy).toHaveBeenCalledWith(TEST_SESSION_ID, '/repo/src/app.ts')
+  it('hydrates the finished turn as eight non-empty thinking blocks', () => {
+    // Sanity check on the fixture: history mapping drops the five empty
+    // thinking blocks, so anything empty on screen came from the stream path.
+    expect(thinkingBlocks()).toHaveLength(8)
+    expect(thinkingBlocks().every((content) => content.trim().length > 0)).toBe(true)
   })
 
-  it('forwards Write tool success too', () => {
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'tool_use_complete',
-      toolName: 'Write',
-      toolUseId: 'tu-write-1',
-      input: { file_path: '/repo/src/new.ts', content: 'export {}' },
-    })
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'tool_result',
-      toolUseId: 'tu-write-1',
-      content: 'ok',
-      isError: false,
-    })
+  it('does not re-append hydrated thinking when a finished turn is replayed after wake', () => {
+    const before = thinkingBlocks()
 
-    expect(notifySpy).toHaveBeenCalledWith(TEST_SESSION_ID, '/repo/src/new.ts')
+    replayFinishedTurn({ withText: false })
+
+    expect(thinkingBlocks()).toEqual(before)
   })
 
-  it('forwards NotebookEdit using notebook_path instead of file_path', () => {
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'tool_use_complete',
-      toolName: 'NotebookEdit',
-      toolUseId: 'tu-nb-1',
-      input: { notebook_path: '/repo/notebook.ipynb', new_source: 'print(1)' },
-    })
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'tool_result',
-      toolUseId: 'tu-nb-1',
-      content: 'ok',
-      isError: false,
-    })
+  // Defensive. The transcript really does hold five empty thinking blocks and
+  // history mapping filters them, but no server emit path puts an empty
+  // thinking event on the wire today — so a collapsed "已思考" row on screen is
+  // not by itself proof that an empty block was streamed.
+  it('does not spawn empty thinking bubbles from replayed empty thinking events', () => {
+    replayFinishedTurn({ withText: false, withEmptyThinking: true })
 
-    expect(notifySpy).toHaveBeenCalledWith(TEST_SESSION_ID, '/repo/notebook.ipynb')
+    expect(thinkingBlocks().filter((content) => !content.trim())).toEqual([])
   })
 
-  it('does NOT fire when the tool result reports an error', () => {
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'tool_use_complete',
-      toolName: 'Edit',
-      toolUseId: 'tu-edit-fail',
-      input: { file_path: '/repo/src/app.ts', old_string: 'a', new_string: 'b' },
-    })
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'tool_result',
-      toolUseId: 'tu-edit-fail',
-      content: 'permission denied',
-      isError: true,
-    })
+  it('does not merge the turn tail into the turn head when the replay wraps around', () => {
+    replayFinishedTurn({ withText: false })
+    replayFinishedTurn({ withText: false })
 
-    expect(notifySpy).not.toHaveBeenCalled()
+    // The last thinking block of one replay round and the first of the next
+    // arrive back to back with nothing between them, so the merge branch glues
+    // two unrelated reasoning blocks into a single bubble.
+    expect(thinkingBlocks().filter((content) =>
+      content.includes(LAST_THINKING.text) && content.includes(FIRST_THINKING.text),
+    )).toEqual([])
   })
 
-  it('does NOT fire for non-file-editing tools (e.g. Bash)', () => {
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'tool_use_complete',
-      toolName: 'Bash',
-      toolUseId: 'tu-bash-1',
-      input: { command: 'echo hi' },
-    })
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'tool_result',
-      toolUseId: 'tu-bash-1',
-      content: 'hi',
-      isError: false,
-    })
+  it('does not grow the thinking wall with every extra replay round', () => {
+    const hydrated = thinkingBlocks().length
 
-    expect(notifySpy).not.toHaveBeenCalled()
+    replayFinishedTurn({ withText: false })
+    const afterFirst = thinkingBlocks().length
+    replayFinishedTurn({ withText: false })
+    const afterSecond = thinkingBlocks().length
+
+    expect({ afterFirst, afterSecond }).toEqual({
+      afterFirst: hydrated,
+      afterSecond: hydrated,
+    })
   })
 
-  it('drops the pending entry on consume so the same toolUseId only fires once', () => {
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'tool_use_complete',
-      toolName: 'Edit',
-      toolUseId: 'tu-edit-once',
-      input: { file_path: '/repo/a.ts', old_string: 'x', new_string: 'y' },
-    })
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'tool_result',
-      toolUseId: 'tu-edit-once',
-      content: 'ok',
-      isError: false,
-    })
-    expect(notifySpy).toHaveBeenCalledTimes(1)
+  // Secondary gap. The reported screenshot has no reply text between the
+  // bubbles, so the observed replay carries thinking only — but the existing
+  // appendAssistantTextMessage guard would not have held either: it only
+  // matches while the tail still is the hydrated assistant message.
+  it('does not re-append replayed reply text once the tail moves past the hydrated message', () => {
+    const assistantTextOf = () => (useChatStore.getState().sessions[TEST_SESSION_ID]?.messages ?? [])
+      .filter((message) => message.type === 'assistant_text')
+      .map((message) => message.content)
+    const before = assistantTextOf()
 
-    // A duplicate tool_result for the same id (defensive — should not happen
-    // on a healthy stream) must not double-fire.
-    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
-      type: 'tool_result',
-      toolUseId: 'tu-edit-once',
-      content: 'ok',
-      isError: false,
-    })
-    expect(notifySpy).toHaveBeenCalledTimes(1)
+    replayFinishedTurn({ withText: true })
+
+    expect(assistantTextOf()).toEqual(before)
   })
 })

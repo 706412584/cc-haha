@@ -402,12 +402,33 @@ describe('AppShell boot flow', () => {
 
     await screen.findByText('sidebar loaded')
     await waitFor(() => {
-      expect(mocks.openTraceTab).toHaveBeenCalledWith(
-        'session-deep-link',
-        'Trace: session-',
-      )
+      // No session in the store yet, so the id prefix is all the title we have.
+      expect(mocks.openTraceTab).toHaveBeenCalledWith('session-deep-link', 'session-')
     })
     expect(mocks.connectToSession).not.toHaveBeenCalled()
+  })
+
+  it('titles a deep-linked trace tab with the session once the store knows it', async () => {
+    useSessionStore.setState({
+      sessions: [{
+        id: 'session-deep-link',
+        title: 'Debug stuck agent',
+        createdAt: '2026-06-09T10:00:00.000Z',
+        modifiedAt: '2026-06-09T10:10:00.000Z',
+        messageCount: 2,
+        projectPath: '/tmp',
+        workDir: '/tmp',
+        workDirExists: true,
+      }],
+    })
+    window.history.pushState({}, '', '/?traceSessionId=session-deep-link')
+
+    render(<AppShell />)
+
+    await screen.findByText('sidebar loaded')
+    await waitFor(() => {
+      expect(mocks.openTraceTab).toHaveBeenCalledWith('session-deep-link', 'Debug stuck agent')
+    })
   })
 
   it('renders a dedicated trace window shell from traceWindow deep links', async () => {

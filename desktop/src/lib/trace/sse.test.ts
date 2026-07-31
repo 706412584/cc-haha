@@ -177,4 +177,50 @@ describe('reassembleSseText', () => {
     expect(reassembleSseText('data: [DONE]\n\n')).toBeNull()
     expect(reassembleSseText('data: {broken json\n\n')).toBeNull()
   })
+
+  it('does not allocate content arrays for oversized or fractional Anthropic indices', () => {
+    const stream = sse([
+      {
+        event: 'message_start',
+        data: JSON.stringify({ message: { role: 'assistant', content: [] } }),
+      },
+      {
+        event: 'content_block_start',
+        data: JSON.stringify({ index: 1_000_000, content_block: { type: 'text', text: 'large' } }),
+      },
+      {
+        event: 'content_block_delta',
+        data: JSON.stringify({ index: 1.5, delta: { type: 'text_delta', text: 'fractional' } }),
+      },
+    ])
+
+    expect(reassembleSseText(stream)?.message?.content).toEqual([])
+  })
+
+  it('does not allocate tool-call arrays for oversized OpenAI indices', () => {
+    const stream = sse([
+      {
+        data: JSON.stringify({
+          id: 'chatcmpl-hostile',
+          choices: [{
+            index: 0,
+            delta: {
+              role: 'assistant',
+              tool_calls: [{
+                index: 1_000_000,
+                id: 'call_hostile',
+                type: 'function',
+                function: { name: 'hostile', arguments: '{}' },
+              }],
+            },
+            finish_reason: null,
+          }],
+        }),
+      },
+    ])
+
+    expect(reassembleSseText(stream)?.message?.content).toEqual([
+      { type: 'text', text: '' },
+    ])
+  })
 })

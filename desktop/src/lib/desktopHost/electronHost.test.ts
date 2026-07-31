@@ -3,6 +3,41 @@ import { ELECTRON_EVENT_CHANNELS, ELECTRON_IPC_CHANNELS } from '../../../electro
 import { createElectronHost } from './electronHost'
 
 describe('electron desktop host', () => {
+  it('synchronizes locale preferences through narrow app IPC boundaries', async () => {
+    const invoke = vi.fn()
+      .mockResolvedValueOnce('jp')
+      .mockResolvedValueOnce(['zh-Hant-TW', 'en-US'])
+      .mockResolvedValueOnce(undefined)
+    const subscribe = vi.fn().mockResolvedValue(() => {})
+    const host = createElectronHost({
+      invoke,
+      subscribe,
+    })
+
+    await expect(host.app.getLocalePreference()).resolves.toBe('jp')
+    await expect(host.app.getPreferredSystemLanguages()).resolves.toEqual(['zh-Hant-TW', 'en-US'])
+    await host.app.setLocalePreference('kr')
+    const handler = vi.fn()
+    await host.app.onLocaleChanged(handler)
+
+    expect(invoke).toHaveBeenNthCalledWith(
+      1,
+      ELECTRON_IPC_CHANNELS.appGetLocalePreference,
+      undefined,
+    )
+    expect(invoke).toHaveBeenNthCalledWith(
+      2,
+      ELECTRON_IPC_CHANNELS.appGetPreferredSystemLanguages,
+      undefined,
+    )
+    expect(invoke).toHaveBeenNthCalledWith(
+      3,
+      ELECTRON_IPC_CHANNELS.appSetLocalePreference,
+      'kr',
+    )
+    expect(subscribe).toHaveBeenCalledWith(ELECTRON_EVENT_CHANNELS.appLocaleChanged, handler)
+  })
+
   it('wraps dialog, shell URL, and shell path calls in explicit IPC channels', async () => {
     const invoke = vi.fn().mockResolvedValue('/tmp/report.md')
     const host = createElectronHost({

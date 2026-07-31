@@ -6,7 +6,7 @@ import { Settings } from '../pages/Settings'
 import { useSettingsStore } from '../stores/settingsStore'
 import { useUIStore } from '../stores/uiStore'
 import { useUpdateStore } from '../stores/updateStore'
-import type { SavedProvider } from '../types/provider'
+import type { ProviderModelsResult, SavedProvider } from '../types/provider'
 import type { ProviderPreset } from '../types/providerPreset'
 import type { AppMode, ChatSendBehavior, PermissionMode, ThemeMode, UpdateProxySettings } from '../types/settings'
 import { browserHost } from '../lib/desktopHost/browserHost'
@@ -52,6 +52,9 @@ const providerStoreState = {
   createProvider: vi.fn(),
   updateProvider: vi.fn(),
   testConfig: vi.fn(),
+  scanCcSwitch: vi.fn(),
+  importCcSwitch: vi.fn(),
+  fetchModels: vi.fn(),
 }
 
 vi.mock('../api/agents', () => ({
@@ -157,6 +160,7 @@ function installElectronDesktopHost() {
       zoom: true,
     },
     app: {
+      ...browserHost.app,
       getVersion: vi.fn().mockResolvedValue('0.3.2'),
     },
     dialogs: {
@@ -216,6 +220,9 @@ describe('Settings > General tab', () => {
     providerStoreState.createProvider = vi.fn()
     providerStoreState.updateProvider = vi.fn()
     providerStoreState.testConfig = vi.fn()
+    providerStoreState.scanCcSwitch = vi.fn()
+    providerStoreState.importCcSwitch = vi.fn()
+    providerStoreState.fetchModels = vi.fn()
 
     useSettingsStore.setState({
       locale: 'en',
@@ -2573,6 +2580,319 @@ describe('Settings > Providers tab', () => {
     expect(apiKeyInput).toHaveAttribute('type', 'text')
     expect(within(dialog).getByRole('button', { name: 'Hide API Key' })).toBeInTheDocument()
   })
+
+  function setCustomPreset() {
+    providerStoreState.presets = [
+      {
+        id: 'custom',
+        name: 'Custom',
+        baseUrl: 'https://api.example.com/anthropic',
+        apiFormat: 'anthropic',
+        defaultModels: {
+          main: 'custom-main',
+          haiku: '',
+          sonnet: '',
+          opus: '',
+        },
+        needsApiKey: true,
+        websiteUrl: '',
+      },
+    ]
+  }
+
+  /** Opens the create form with a base URL and key already filled in. */
+  async function openProviderForm() {
+    setCustomPreset()
+
+    render(<Settings />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Add Provider|添加服务商/i }))
+    const dialog = screen.getByRole('dialog')
+    await waitFor(() => {
+      expect(dialog.querySelector('textarea')?.value).toContain('"ANTHROPIC_MODEL"')
+    })
+    fireEvent.change(within(dialog).getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } })
+    return dialog
+  }
+
+  async function openProviderFormWithModels(result: ProviderModelsResult) {
+    providerStoreState.fetchModels = vi.fn().mockResolvedValue(result)
+    return openProviderForm()
+  }
+
+  it('opens the cc-switch import dialog from the providers header', async () => {
+    providerStoreState.scanCcSwitch = vi.fn().mockResolvedValue({
+      available: false,
+      reason: 'not-found',
+      configDir: '/Users/tester/.cc-switch',
+      candidates: [],
+    })
+
+    render(<Settings />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Import from cc-switch|从 cc-switch 导入/i }))
+
+    await waitFor(() => {
+      expect(providerStoreState.scanCcSwitch).toHaveBeenCalled()
+    })
+    expect(await screen.findByText(/No cc-switch configuration was found/i)).toBeInTheDocument()
+  })
+
+  it('keeps the model fetch disabled until the base URL and API key are both filled in', () => {
+    setCustomPreset()
+
+    render(<Settings />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Add Provider|添加服务商/i }))
+    const dialog = screen.getByRole('dialog')
+    const fetchButton = within(dialog).getByRole('button', { name: /Fetch models|获取模型/i })
+
+    expect(fetchButton).toBeDisabled()
+    expect(within(dialog).getByText(/Fill in the base URL and API key first/i)).toBeInTheDocument()
+
+    fireEvent.change(within(dialog).getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } })
+
+    expect(fetchButton).toBeEnabled()
+  })
+
+  it('gives every model slot a picker once the model list is fetched', async () => {
+    const dialog = await openProviderFormWithModels({
+      ok: true,
+      endpoint: 'https://api.example.com/v1/models',
+      models: [
+        { id: 'gpt-5-mini', ownedBy: 'openai' },
+        { id: 'claude-sonnet-4-6', ownedBy: 'anthropic' },
+      ],
+    })
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /Fetch models|获取模型/i }))
+
+    await waitFor(() => {
+      expect(providerStoreState.fetchModels).toHaveBeenCalledWith({
+        baseUrl: 'https://api.example.com/anthropic',
+        apiKey: 'sk-test',
+      })
+    })
+    expect(await within(dialog).findByText(/Model list loaded \(2\)/i)).toBeInTheDocument()
+    expect(within(dialog).getAllByRole('button', { name: /from the fetched list/i })).toHaveLength(4)
+
+    // The picker supplements the field; a model id that is not on the list must
+    // still be typeable. Queried by role because the picker's own accessible
+    // name also contains the slot label.
+    const mainInput = within(dialog).getByRole('textbox', { name: /Main Model|主模型/i })
+    fireEvent.change(mainInput, { target: { value: 'typed-by-hand' } })
+    expect(mainInput).toHaveValue('typed-by-hand')
+  })
+
+  it('routes a picked model through the shared model change handler', async () => {
+    const dialog = await openProviderFormWithModels({
+      ok: true,
+      endpoint: 'https://api.example.com/v1/models',
+      models: [
+        { id: 'gpt-5-mini', ownedBy: 'openai' },
+        { id: 'claude-sonnet-4-6', ownedBy: 'anthropic' },
+      ],
+    })
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /Fetch models|获取模型/i }))
+    fireEvent.click(await within(dialog).findByRole('button', { name: /Main Model.*fetched list/i }))
+    fireEvent.click(within(dialog).getByRole('option', { name: /gpt-5-mini/i }))
+
+    expect(within(dialog).getByRole('textbox', { name: /Main Model|主模型/i })).toHaveValue('gpt-5-mini')
+    // Going through handleModelChange is what keeps the settings JSON in sync —
+    // a bare setState would leave the textarea on the old model id.
+    await waitFor(() => {
+      expect(dialog.querySelector('textarea')?.value).toContain('"ANTHROPIC_MODEL": "gpt-5-mini"')
+    })
+  })
+
+  it.each([
+    ['auth-failed' as const, /API key was rejected/i],
+    ['not-supported' as const, /does not publish a model list/i],
+    ['endpoint-not-found' as const, /No model list endpoint/i],
+    ['timeout' as const, /did not respond in time/i],
+  ])('explains a failed model fetch for errorCode=%s', async (errorCode, expected) => {
+    const dialog = await openProviderFormWithModels({
+      ok: false,
+      errorCode,
+      // Free text that must never steer the headline — that still comes from
+      // the code.
+      message: 'upstream said no',
+      endpointsTried: ['https://api.example.com/v1/models'],
+    })
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /Fetch models|获取模型/i }))
+
+    expect(await within(dialog).findByText(expected)).toBeInTheDocument()
+    // Changed from asserting the upstream text is hidden. Dropping it made a
+    // 200-cloaked auth failure read as "this provider has no model list"; the
+    // code still picks the headline, the raw text only rides along under it.
+    expect(within(dialog).getByText(/upstream said no/)).toBeInTheDocument()
+    expect(within(dialog).queryByRole('button', { name: /from the fetched list/i })).not.toBeInTheDocument()
+  })
+
+  it('surfaces the upstream message when a 200 response cloaks an auth failure', async () => {
+    // 智谱 answers HTTP 200 with {"code":1000,"msg":"身份验证失败。"}, which the
+    // server can only classify as `not-supported`. On the code alone the user is
+    // told to type model ids by hand, when the actual fix is the rejected key.
+    const dialog = await openProviderFormWithModels({
+      ok: false,
+      errorCode: 'not-supported',
+      message: '身份验证失败。',
+      httpStatus: 200,
+      endpointsTried: ['https://open.bigmodel.cn/api/anthropic/v1/models'],
+    })
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /Fetch models|获取模型/i }))
+
+    const alert = await within(dialog).findByRole('alert')
+    expect(alert).toHaveTextContent(/does not publish a model list/i)
+    expect(alert).toHaveTextContent('身份验证失败。')
+  })
+
+  it('renders the error on its own when the server sends no upstream message', async () => {
+    const dialog = await openProviderFormWithModels({
+      ok: false,
+      errorCode: 'network',
+      message: '   ',
+      endpointsTried: [],
+    })
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /Fetch models|获取模型/i }))
+
+    const alert = await within(dialog).findByRole('alert')
+    // No dangling "Provider response:" label with nothing behind it.
+    expect(alert.textContent).toBe('Could not reach the provider. Check the base URL and your network.')
+  })
+
+  it('does not echo an upstream message that already matches the explanation', async () => {
+    const dialog = await openProviderFormWithModels({
+      ok: false,
+      errorCode: 'timeout',
+      message: 'The provider did not respond in time.',
+      endpointsTried: ['https://api.example.com/v1/models'],
+    })
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /Fetch models|获取模型/i }))
+
+    const alert = await within(dialog).findByRole('alert')
+    expect(alert.textContent).toBe('The provider did not respond in time.')
+  })
+
+  it('discards a model list that arrives after the base URL changed', async () => {
+    let resolveFetch!: (result: ProviderModelsResult) => void
+    providerStoreState.fetchModels = vi.fn().mockReturnValue(
+      new Promise<ProviderModelsResult>((resolve) => {
+        resolveFetch = resolve
+      }),
+    )
+    const dialog = await openProviderForm()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /Fetch models|获取模型/i }))
+    await waitFor(() => {
+      expect(providerStoreState.fetchModels).toHaveBeenCalledTimes(1)
+    })
+
+    fireEvent.change(within(dialog).getByLabelText(/Base URL|接口地址/i), {
+      target: { value: 'https://other.example.com/anthropic' },
+    })
+
+    // The probe walks up to three candidate endpoints at 15s each, so landing
+    // after the edit is the ordinary case rather than a corner one.
+    await act(async () => {
+      resolveFetch({
+        ok: true,
+        endpoint: 'https://api.example.com/v1/models',
+        models: [{ id: 'gpt-5-mini', ownedBy: 'openai' }],
+      })
+    })
+
+    // These models belong to the base URL the user just replaced.
+    expect(within(dialog).queryByText(/Model list loaded/i)).not.toBeInTheDocument()
+    expect(within(dialog).queryByRole('button', { name: /from the fetched list/i })).not.toBeInTheDocument()
+    // ...and the discarded response must not leave the button spinning either.
+    expect(within(dialog).getByRole('button', { name: /Fetch models|获取模型/i })).toBeEnabled()
+  })
+
+  it('discards a failed model fetch that arrives after the base URL changed', async () => {
+    let resolveFetch!: (result: ProviderModelsResult) => void
+    providerStoreState.fetchModels = vi.fn().mockReturnValue(
+      new Promise<ProviderModelsResult>((resolve) => {
+        resolveFetch = resolve
+      }),
+    )
+    const dialog = await openProviderForm()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /Fetch models|获取模型/i }))
+    await waitFor(() => {
+      expect(providerStoreState.fetchModels).toHaveBeenCalledTimes(1)
+    })
+
+    fireEvent.change(within(dialog).getByLabelText(/Base URL|接口地址/i), {
+      target: { value: 'https://other.example.com/anthropic' },
+    })
+
+    await act(async () => {
+      resolveFetch({
+        ok: false,
+        errorCode: 'auth-failed',
+        message: 'stale key rejected',
+        endpointsTried: ['https://api.example.com/v1/models'],
+      })
+    })
+
+    // Blaming the key the user is halfway through replacing is its own bug.
+    expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: /Fetch models|获取模型/i })).toBeEnabled()
+  })
+
+  it('treats an empty model list as a neutral result rather than an error', async () => {
+    const dialog = await openProviderFormWithModels({
+      ok: true,
+      endpoint: 'https://api.example.com/v1/models',
+      models: [],
+    })
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /Fetch models|获取模型/i }))
+
+    expect(await within(dialog).findByText(/No models found/i)).toBeInTheDocument()
+    expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument()
+    expect(within(dialog).queryByRole('button', { name: /from the fetched list/i })).not.toBeInTheDocument()
+  })
+
+  it('drops a fetched model list once the base URL changes', async () => {
+    const dialog = await openProviderFormWithModels({
+      ok: true,
+      endpoint: 'https://api.example.com/v1/models',
+      models: [{ id: 'gpt-5-mini', ownedBy: 'openai' }],
+    })
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /Fetch models|获取模型/i }))
+    expect(await within(dialog).findByText(/Model list loaded \(1\)/i)).toBeInTheDocument()
+
+    fireEvent.change(within(dialog).getByLabelText(/Base URL|接口地址/i), {
+      target: { value: 'https://other.example.com/anthropic' },
+    })
+
+    // A list fetched from a different endpoint would be a lie about this one.
+    expect(within(dialog).queryByText(/Model list loaded/i)).not.toBeInTheDocument()
+    expect(within(dialog).queryByRole('button', { name: /from the fetched list/i })).not.toBeInTheDocument()
+  })
+
+  it('drops a fetched model list once the API key changes', async () => {
+    const dialog = await openProviderFormWithModels({
+      ok: true,
+      endpoint: 'https://api.example.com/v1/models',
+      models: [{ id: 'gpt-5-mini', ownedBy: 'openai' }],
+    })
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /Fetch models|获取模型/i }))
+    expect(await within(dialog).findByText(/Model list loaded \(1\)/i)).toBeInTheDocument()
+
+    fireEvent.change(within(dialog).getByPlaceholderText('sk-...'), { target: { value: 'sk-other' } })
+
+    expect(within(dialog).queryByText(/Model list loaded/i)).not.toBeInTheDocument()
+  })
 })
 
 describe('Settings > About tab', () => {
@@ -2627,6 +2947,7 @@ describe('Settings > About tab', () => {
         updates: true,
       },
       app: {
+        ...browserHost.app,
         getVersion: vi.fn().mockRejectedValue(new Error('version IPC failed')),
       },
     }

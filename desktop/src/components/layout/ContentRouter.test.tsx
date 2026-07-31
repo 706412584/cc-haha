@@ -39,7 +39,12 @@ vi.mock('../../pages/TerminalSettings', () => ({
 }))
 
 vi.mock('../../pages/TraceSession', () => ({
-  TraceSession: ({ sessionId }: { sessionId: string }) => <div data-testid="trace-session">trace:{sessionId}</div>,
+  TraceSession: ({ sessionId, onBack }: { sessionId: string; onBack?: () => void }) => (
+    <div data-testid="trace-session">
+      trace:{sessionId}
+      {onBack ? <button type="button" onClick={onBack}>back</button> : null}
+    </div>
+  ),
 }))
 
 vi.mock('../../pages/TraceList', () => ({
@@ -59,13 +64,15 @@ vi.mock('../workbench/WorkbenchTab', () => ({
 }))
 
 import { ContentRouter } from './ContentRouter'
-import { MARKET_TAB_ID, useTabStore } from '../../stores/tabStore'
+import { MARKET_TAB_ID, SETTINGS_TAB_ID, useTabStore } from '../../stores/tabStore'
+import { useUIStore } from '../../stores/uiStore'
 
 describe('ContentRouter tab surfaces', () => {
   afterEach(() => {
     cleanup()
     previewBridgeMock.close.mockClear()
     useTabStore.setState({ tabs: [], activeTabId: null })
+    useUIStore.setState({ pendingSettingsTab: null })
   })
 
   it('renders the active terminal tab as main content', () => {
@@ -145,6 +152,30 @@ describe('ContentRouter tab surfaces', () => {
 
     expect(screen.getByTestId('trace-session')).toHaveTextContent('trace:session-1')
     expect(screen.queryByTestId('active-session')).not.toBeInTheDocument()
+  })
+
+  it('walks a trace tab back to the list and closes the tab behind it', () => {
+    useTabStore.setState({
+      tabs: [
+        { sessionId: 'session-1', title: 'Chat', type: 'session', status: 'idle' },
+        {
+          sessionId: '__trace__session-1',
+          title: 'Chat',
+          type: 'trace',
+          status: 'idle',
+          traceSessionId: 'session-1',
+        },
+      ],
+      activeTabId: '__trace__session-1',
+    })
+
+    render(<ContentRouter />)
+    fireEvent.click(screen.getByRole('button', { name: 'back' }))
+
+    const { tabs, activeTabId } = useTabStore.getState()
+    expect(activeTabId).toBe(SETTINGS_TAB_ID)
+    expect(tabs.some((tab) => tab.sessionId === '__trace__session-1')).toBe(false)
+    expect(useUIStore.getState().pendingSettingsTab).toBe('trace')
   })
 
   it('renders the trace list tab without mounting the chat session surface', () => {

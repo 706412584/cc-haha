@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'bun:test'
-import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs'
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  truncateSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
 import { contentTypeForPath, handlePreviewFs, parseRange } from '../previewFs'
@@ -29,6 +36,7 @@ describe('contentTypeForPath', () => {
 
 // Deterministic 256-byte payload (bytes 0..255) so range slices are checkable.
 const VIDEO_BYTES = Uint8Array.from({ length: 256 }, (_, i) => i)
+const TRANSFORMED_HTML_LIMIT_BYTES = 10 * 1024 * 1024
 
 function setupWorkspace() {
   const root = mkdtempSync(path.join(tmpdir(), 'pfs-'))
@@ -83,6 +91,18 @@ describe('handlePreviewFs', () => {
     const res = await handlePreviewFs(new URL('http://127.0.0.1/preview-fs/s1/index.html'), resolve)
     expect(res.status).toBe(200)
     expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8')
+    const csp = res.headers.get('content-security-policy')
+    expect(csp).toContain('sandbox')
+    expect(csp).toContain('allow-same-origin')
+    expect(csp).toContain('allow-popups')
+    expect(csp).toContain("default-src 'none'")
+    expect(csp).toContain("script-src 'self' 'unsafe-inline'")
+    expect(csp).toContain("style-src 'self' 'unsafe-inline'")
+    expect(csp).toContain("img-src 'self' data: blob:")
+    expect(csp).toContain("font-src 'self' data:")
+    expect(csp).toContain("media-src 'self' blob:")
+    expect(csp).toContain("connect-src 'none'")
+    expect(csp).toContain("form-action 'none'")
     expect(await res.text()).toBe('<h1>ok</h1>')
   })
 
@@ -105,11 +125,80 @@ describe('handlePreviewFs', () => {
     expect(body).toContain('src="/preview-fs/s1/dist/assets/app.js"')
   })
 
+  it('keeps the preview sandbox policy on ranged HTML responses', async () => {
+    const root = setupWorkspace()
+    const res = await handlePreviewFs(
+      new URL('http://127.0.0.1/preview-fs/s1/index.html'),
+      async () => root,
+      new Headers({ Range: 'bytes=0-3' }),
+    )
+
+    expect(res.status).toBe(206)
+    const csp = res.headers.get('content-security-policy')
+    expect(csp).toContain('sandbox')
+    expect(csp).toContain('allow-same-origin')
+    expect(csp).toContain('allow-popups')
+  })
+
   it('blocks path traversal with 403', async () => {
     const root = setupWorkspace()
     const resolve = async () => root
     const res = await handlePreviewFs(new URL('http://127.0.0.1/preview-fs/s1/../../etc/passwd'), resolve)
     expect(res.status).toBe(403)
+  })
+
+  it('blocks final and intermediate symlinks that escape the workspace', async () => {
+    const fixture = mkdtempSync(path.join(tmpdir(), 'pfs-symlink-'))
+    const root = path.join(fixture, 'workspace')
+    const outside = path.join(fixture, 'outside')
+    mkdirSync(root)
+    mkdirSync(outside)
+    writeFileSync(path.join(outside, 'secret.txt'), 'outside')
+    if (process.platform !== 'win32') {
+      symlinkSync(path.join(outside, 'secret.txt'), path.join(root, 'final-link.txt'))
+    }
+    symlinkSync(
+      outside,
+      path.join(root, 'linked-directory'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    )
+
+    try {
+      const resolve = async () => root
+      if (process.platform !== 'win32') {
+        const finalLink = await handlePreviewFs(
+          new URL('http://127.0.0.1/preview-fs/s1/final-link.txt'),
+          resolve,
+        )
+        expect(finalLink.status).toBe(403)
+      }
+      const intermediateLink = await handlePreviewFs(
+        new URL('http://127.0.0.1/preview-fs/s1/linked-directory/secret.txt'),
+        resolve,
+      )
+
+      expect(intermediateLink.status).toBe(403)
+    } finally {
+      rmSync(fixture, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects HTML above the transformed-document limit before buffering it', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'pfs-large-html-'))
+    const largeHtml = path.join(root, 'large.html')
+    writeFileSync(largeHtml, '')
+    truncateSync(largeHtml, TRANSFORMED_HTML_LIMIT_BYTES + 1)
+
+    try {
+      const res = await handlePreviewFs(
+        new URL('http://127.0.0.1/preview-fs/s1/large.html'),
+        async () => root,
+      )
+
+      expect(res.status).toBe(413)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it('404 when session has no workdir', async () => {

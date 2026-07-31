@@ -135,6 +135,39 @@ describe('desktopRuntime browser H5 bootstrap', () => {
     expect(clientMocks.postVerify).not.toHaveBeenCalled()
   })
 
+  it('does not send a stored H5 token to a different query-selected server', async () => {
+    window.localStorage.setItem(H5_SERVER_URL_STORAGE_KEY, 'https://paired.example/app')
+    window.localStorage.setItem(H5_TOKEN_STORAGE_KEY, 'paired-server-token')
+    window.history.pushState({}, '', '/?serverUrl=https%3A%2F%2Fattacker.example%2Fapp')
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      healthOkResponse(),
+    ) as typeof fetch
+
+    await expect(initializeDesktopServerUrl()).rejects.toMatchObject({
+      name: 'H5ConnectionRequiredError',
+      serverUrl: 'https://attacker.example/app',
+      reason: 'missing-token',
+    } satisfies Partial<H5ConnectionRequiredError>)
+
+    expect(clientMocks.setAuthToken).toHaveBeenLastCalledWith(null)
+    expect(clientMocks.postVerify).not.toHaveBeenCalled()
+  })
+
+  it('reuses a stored H5 token only for its normalized server URL', async () => {
+    window.localStorage.setItem(H5_SERVER_URL_STORAGE_KEY, 'https://paired.example/app/')
+    window.localStorage.setItem(H5_TOKEN_STORAGE_KEY, 'paired-server-token')
+    window.history.pushState({}, '', '/?serverUrl=https%3A%2F%2Fpaired.example%2Fapp')
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      healthOkResponse(),
+    ) as typeof fetch
+    clientMocks.postVerify.mockResolvedValueOnce({ ok: true })
+
+    await expect(initializeDesktopServerUrl()).resolves.toBe('https://paired.example/app')
+
+    expect(clientMocks.setAuthToken).toHaveBeenLastCalledWith('paired-server-token')
+    expect(clientMocks.postVerify).toHaveBeenCalledWith('/api/h5-access/verify')
+  })
+
   it('uses the current browser origin when the H5 shell is served by the desktop server', async () => {
     globalThis.fetch = vi.fn().mockResolvedValue(
       healthOkResponse(),

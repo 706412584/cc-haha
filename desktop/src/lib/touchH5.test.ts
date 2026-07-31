@@ -391,6 +391,24 @@ describe('visual viewport fit', () => {
   })
 })
 
+describe('touch-H5 document contract', () => {
+  const html = readFileSync(join(__dirname, '../../index.html'), 'utf-8')
+
+  // iOS parses the viewport meta once, while the document loads. lockIOSViewport
+  // rewrites it later and cannot turn safe areas on retroactively — with the
+  // markup missing cover, every env(safe-area-inset-*) below stays 0px and the
+  // browser paints its own gray bar behind the status bar.
+  it('ships viewport-fit=cover in the markup rather than relying on the runtime rewrite', () => {
+    const viewport = html.match(/<meta name="viewport" content="([^"]*)"/)?.[1]
+    expect(viewport, 'index.html lost its viewport meta').toBeTruthy()
+    expect(viewport).toContain('viewport-fit=cover')
+  })
+
+  it('declares a theme-color meta for the browser chrome to pick up', () => {
+    expect(html).toMatch(/<meta name="theme-color" content="#[0-9A-Fa-f]{6}" \/>/)
+  })
+})
+
 describe('touch-H5 stylesheet contract', () => {
   const css = readFileSync(join(__dirname, '../theme/globals.css'), 'utf-8')
 

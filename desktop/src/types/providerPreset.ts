@@ -19,6 +19,8 @@ export type ProviderPreset = {
   apiKeyUrl?: string
   promoText?: string
   featured?: boolean
+  /** Retired preset: hidden from the "add provider" choices, still resolves saved providers. */
+  deprecated?: boolean
   authStrategy?: ProviderAuthStrategy
   defaultEnv?: Record<string, string>
   modelContextWindows?: Record<string, number>

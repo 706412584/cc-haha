@@ -12,15 +12,11 @@
  * relay content. Servers opt in by declaring
  * capabilities.experimental['claude/channel/permission'].
  *
- * Kenneth's "would this let Claude self-approve?": the approving party is
- * the human via the channel, not Claude. But the trust boundary isn't the
- * terminal — it's the allowlist (tengu_harbor_ledger). A compromised
- * channel server CAN fabricate "yes <id>" without the human seeing the
- * prompt. Accepted risk: a compromised channel already has unlimited
- * conversation-injection turns (social-engineer over time, wait for
- * acceptEdits, etc.); inject-then-self-approve is faster, not more
- * capable. The dialog slows a compromised channel; it doesn't stop one.
- * See PR discussion 2956440848.
+ * A channel server cannot independently prove that a human originated an
+ * approval notification because it both receives the request ID and emits the
+ * response. Channel responses therefore fail closed: deny remains available,
+ * while allow must be completed through a separately authenticated local or
+ * bridge approval surface.
  */
 
 import { jsonStringify } from '../../utils/slowOperations.js'
@@ -51,8 +47,8 @@ export type ChannelPermissionCallbacks = {
   ): () => void
   /** Resolve a pending request from a structured channel event
    *  (notifications/claude/channel/permission). Returns true if the ID
-   *  was pending — the server parsed the user's reply and emitted
-   *  {request_id, behavior}; we just match against the map. */
+   *  was pending and accepted. Channel allow responses are rejected because
+   *  the channel server cannot prove an independent human principal. */
   resolve(
     requestId: string,
     behavior: 'allow' | 'deny',
@@ -226,6 +222,11 @@ export function createChannelPermissionCallbacks(): ChannelPermissionCallbacks {
     },
 
     resolve(requestId, behavior, fromServer) {
+      // The same server receives the request ID and emits the response, so an
+      // allow event cannot prove that a separate human approved the action.
+      // Keep deny available as a safe remote stop signal.
+      if (behavior === 'allow') return false
+
       const key = requestId.toLowerCase()
       const resolver = pending.get(key)
       if (!resolver) return false

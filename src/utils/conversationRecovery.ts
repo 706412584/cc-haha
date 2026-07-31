@@ -19,6 +19,7 @@ import type {
 } from '../types/message.js'
 import { PERMISSION_MODES } from '../types/permissions.js'
 import { suppressNextSkillListing } from './attachments.js'
+import { logForDebugging } from './debug.js'
 import {
   copyFileHistoryForResume,
   type FileHistorySnapshot,
@@ -117,7 +118,7 @@ function migrateLegacyAttachmentTypes(message: Message): Message {
           : 'skillDir' in attachment
             ? (attachment.skillDir as string)
             : undefined
-    if (path) {
+    if (typeof path === 'string') {
       return {
         ...message,
         attachment: {
@@ -129,6 +130,99 @@ function migrateLegacyAttachmentTypes(message: Message): Message {
   }
 
   return message
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(item => typeof item === 'string')
+}
+
+function isWellFormedAttachmentPayload(message: Message): boolean {
+  if (message.type !== 'attachment') {
+    return true
+  }
+
+  const attachment = (message as { attachment?: unknown }).attachment
+  if (
+    typeof attachment !== 'object' ||
+    attachment === null ||
+    !('type' in attachment) ||
+    typeof attachment.type !== 'string'
+  ) {
+    return false
+  }
+
+  switch (attachment.type) {
+    case 'new_file':
+      return 'filename' in attachment && typeof attachment.filename === 'string'
+    case 'new_directory':
+      return 'path' in attachment && typeof attachment.path === 'string'
+    case 'invoked_skills':
+      return (
+        'skills' in attachment &&
+        Array.isArray(attachment.skills) &&
+        attachment.skills.every(
+          skill => typeof skill === 'object' && skill !== null,
+        )
+      )
+    case 'file':
+      return (
+        'filename' in attachment && typeof attachment.filename === 'string'
+      )
+    case 'directory':
+      return 'path' in attachment && typeof attachment.path === 'string'
+    case 'selected_lines_in_ide':
+      return (
+        'content' in attachment && typeof attachment.content === 'string'
+      )
+    case 'hook_success':
+    case 'skill_listing':
+      return 'content' in attachment && typeof attachment.content === 'string'
+    case 'hook_additional_context':
+      return (
+        'content' in attachment && isStringArray(attachment.content)
+      )
+    case 'deferred_tools_delta':
+      return (
+        'addedNames' in attachment &&
+        isStringArray(attachment.addedNames) &&
+        'addedLines' in attachment &&
+        isStringArray(attachment.addedLines) &&
+        'removedNames' in attachment &&
+        isStringArray(attachment.removedNames)
+      )
+    case 'mcp_instructions_delta':
+      return (
+        'addedNames' in attachment &&
+        isStringArray(attachment.addedNames) &&
+        'addedBlocks' in attachment &&
+        isStringArray(attachment.addedBlocks) &&
+        'removedNames' in attachment &&
+        isStringArray(attachment.removedNames)
+      )
+    case 'agent_listing_delta':
+      return (
+        'addedTypes' in attachment &&
+        isStringArray(attachment.addedTypes) &&
+        'addedLines' in attachment &&
+        isStringArray(attachment.addedLines) &&
+        'removedTypes' in attachment &&
+        isStringArray(attachment.removedTypes)
+      )
+    default:
+      return true
+  }
+}
+
+function dropMalformedAttachments(messages: Message[]): Message[] {
+  const filtered = messages.filter(isWellFormedAttachmentPayload)
+  const droppedCount = messages.length - filtered.length
+  if (droppedCount > 0) {
+    logForDebugging(
+      `resume: dropped ${droppedCount} attachment entries with a missing or malformed payload`,
+      { level: 'warn' },
+    )
+  }
+  return filtered
 }
 
 export type TeleportRemoteResponse = {
@@ -166,7 +260,7 @@ export function deserializeMessagesWithInterruptDetection(
 ): DeserializeResult {
   try {
     // Transform legacy attachment types before processing
-    const migratedMessages = serializedMessages.map(
+    const migratedMessages = dropMalformedAttachments(serializedMessages).map(
       migrateLegacyAttachmentTypes,
     )
 
@@ -553,12 +647,15 @@ export async function loadConversationForResume(
       checkResumeConsistency(messages)
     }
 
+    // Filter unsafe persisted payloads before any resume-side effects.
+    messages = dropMalformedAttachments(messages!)
+
     // Restore skill state from invoked_skills attachments before deserialization.
     // This ensures skills survive multiple compaction cycles after resume.
-    restoreSkillStateFromMessages(messages!)
+    restoreSkillStateFromMessages(messages)
 
     // Deserialize messages to handle unresolved tool uses and ensure proper format
-    const deserialized = deserializeMessagesWithInterruptDetection(messages!)
+    const deserialized = deserializeMessagesWithInterruptDetection(messages)
     messages = deserialized.messages
 
     // Process session start hooks for resume

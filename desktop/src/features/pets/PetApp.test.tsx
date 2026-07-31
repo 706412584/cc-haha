@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
   dragWindow: vi.fn(),
   setIgnoreMouseEvents: vi.fn(),
   setInteractiveRegions: vi.fn(),
+  onPanelPlacementChanged: vi.fn(),
 }))
 
 vi.mock('../../api/desktopUiPreferences', () => ({
@@ -56,6 +57,7 @@ vi.mock('../../lib/desktopHost', () => ({
       dragWindow: mocks.dragWindow,
       setIgnoreMouseEvents: mocks.setIgnoreMouseEvents,
       setInteractiveRegions: mocks.setInteractiveRegions,
+      onPanelPlacementChanged: mocks.onPanelPlacementChanged,
     },
   }),
 }))
@@ -145,6 +147,8 @@ describe('PetApp', () => {
     mocks.fetchSessions.mockResolvedValue(undefined)
     mocks.showContextMenu.mockResolvedValue(true)
     mocks.dragWindow.mockResolvedValue(undefined)
+    mocks.setInteractiveRegions.mockResolvedValue(undefined)
+    mocks.onPanelPlacementChanged.mockResolvedValue(() => undefined)
     mocks.focusMainWindow.mockResolvedValue(undefined)
     mocks.getChatStatus.mockImplementation(async (sessionId: string) => ({
       state: sessionId === 'session-running' ? 'thinking' : 'idle',
@@ -304,6 +308,49 @@ describe('PetApp', () => {
     expect(screen.getByRole('button', { name: 'pet.window.expandTasks:1' })).toBeInTheDocument()
     await waitFor(() => {
       expect(mocks.setInteractiveRegions.mock.calls.at(-1)?.[0]).toHaveLength(2)
+    })
+  })
+
+  it('moves the task card below the mascot when the host says there is no room above', async () => {
+    // The host clamps the mascot to the display edge through the window's
+    // transparent padding, which puts the card behind the macOS menu bar. It
+    // answers the region report with the side the card has to move to (#1140).
+    mocks.setInteractiveRegions.mockResolvedValue({ vertical: 'below' })
+    const { container } = render(<PetApp />)
+    await screen.findByRole('button', {
+      name: 'Build pet window, pet.window.status.running',
+    })
+
+    await waitFor(() => {
+      expect(container.querySelector('.pet-window-stack'))
+        .toHaveAttribute('data-panel-placement', 'below')
+    })
+    // The re-laid-out boxes have to go back, or the host holds the mascot
+    // against the pre-flip layout.
+    await waitFor(() => {
+      expect(mocks.setInteractiveRegions.mock.calls.length).toBeGreaterThan(1)
+    })
+  })
+
+  it('follows a placement the host pushes mid-drag, when no call is in flight', async () => {
+    // Dragging is driven by a cursor sampler in the host, not by renderer
+    // calls, so a flip decided mid-drag arrives as an event.
+    let push: ((placement: { vertical: 'above' | 'below' }) => void) | undefined
+    mocks.onPanelPlacementChanged.mockImplementation(async (handler: typeof push) => {
+      push = handler
+      return () => undefined
+    })
+    const { container } = render(<PetApp />)
+    await screen.findByRole('button', { name: 'pet.window.interact' })
+    await waitFor(() => expect(push).toBeDefined())
+
+    expect(container.querySelector('.pet-window-stack'))
+      .toHaveAttribute('data-panel-placement', 'above')
+
+    await waitFor(() => {
+      push?.({ vertical: 'below' })
+      expect(container.querySelector('.pet-window-stack'))
+        .toHaveAttribute('data-panel-placement', 'below')
     })
   })
 

@@ -1,4 +1,9 @@
-import { constants as fsConstants } from 'fs'
+import {
+  constants as fsConstants,
+  mkdirSync,
+  symlinkSync,
+  unlinkSync,
+} from 'fs'
 import {
   type FileHandle,
   mkdir,
@@ -10,7 +15,6 @@ import {
 import { join } from 'path'
 import { getSessionId } from '../../bootstrap/state.js'
 import { getErrnoCode } from '../errors.js'
-import { logForDebugging } from '../debug.js'
 import { readFileRange, tailFile } from '../fsOperations.js'
 import { logError } from '../log.js'
 import { getProjectTempDir } from '../permissions/filesystem.js'
@@ -58,6 +62,8 @@ export function getTaskOutputDir(): string {
 /** Test helper — clears the memoized dir. */
 export function _resetTaskOutputDirForTest(): void {
   _taskOutputDir = undefined
+  _symlinkCapable = undefined
+  outputPathRedirects.clear()
 }
 
 /**
@@ -68,10 +74,35 @@ async function ensureOutputDir(): Promise<void> {
 }
 
 /**
- * Get the output file path for a task
+ * taskId → the file that actually holds this task's output, for tasks whose
+ * .output could not be symlinked to it (see initTaskOutputAsSymlink).
+ *
+ * Agent tasks never write their .output file — it is a symlink to the agent
+ * transcript. When the symlink can't be created we can't fabricate the
+ * content either, so reads (and the path handed to the model) are redirected
+ * to the real file instead of pointing at a placeholder that stays empty
+ * forever (#1141).
+ */
+const outputPathRedirects = new Map<string, string>()
+
+/**
+ * The task's own file inside the tasks directory.
+ *
+ * Writes and deletes MUST use this, never getTaskOutputPath() — a redirected
+ * path points at a file this module doesn't own (an agent transcript), and
+ * truncating or unlinking it would destroy the agent's history.
+ */
+function getOwnedTaskOutputPath(taskId: string): string {
+  return join(getTaskOutputDir(), `${taskId}.output`)
+}
+
+/**
+ * Get the output file path for a task — the path to READ from, and the one
+ * handed to the model as `output_file`. Follows the redirect set up when a
+ * symlink couldn't be created.
  */
 export function getTaskOutputPath(taskId: string): string {
-  return join(getTaskOutputDir(), `${taskId}.output`)
+  return outputPathRedirects.get(taskId) ?? getOwnedTaskOutputPath(taskId)
 }
 
 // Tracks fire-and-forget promises (initTaskOutput, initTaskOutputAsSymlink,
@@ -105,7 +136,7 @@ export class DiskTaskOutput {
   #flushResolve: (() => void) | null = null
 
   constructor(taskId: string) {
-    this.#path = getTaskOutputPath(taskId)
+    this.#path = getOwnedTaskOutputPath(taskId)
   }
 
   append(content: string): void {
@@ -251,6 +282,7 @@ export async function _clearOutputsForTest(): Promise<void> {
     await Promise.allSettled([..._pendingOps])
   }
   outputs.clear()
+  outputPathRedirects.clear()
 }
 
 function getOrCreateOutput(taskId: string): DiskTaskOutput {
@@ -382,9 +414,12 @@ export async function cleanupTaskOutput(taskId: string): Promise<void> {
     output.cancel()
     outputs.delete(taskId)
   }
+  // Drop the redirect before unlinking so a redirected task can never route
+  // this delete at the agent transcript it was pointing to.
+  outputPathRedirects.delete(taskId)
 
   try {
-    await unlink(getTaskOutputPath(taskId))
+    await unlink(getOwnedTaskOutputPath(taskId))
   } catch (e) {
     const code = getErrnoCode(e)
     if (code === 'ENOENT') {
@@ -402,7 +437,7 @@ export function initTaskOutput(taskId: string): Promise<string> {
   return track(
     (async () => {
       await ensureOutputDir()
-      const outputPath = getTaskOutputPath(taskId)
+      const outputPath = getOwnedTaskOutputPath(taskId)
       // SECURITY: O_NOFOLLOW prevents symlink-following attacks from the sandbox.
       // O_EXCL ensures we create a new file and fail if something already exists at this path.
       // On Windows, use string flags — numeric O_EXCL can produce EINVAL through libuv.
@@ -422,45 +457,96 @@ export function initTaskOutput(taskId: string): Promise<string> {
 }
 
 /**
+ * Whether this machine lets us create file symlinks at all.
+ *
+ * Windows only grants SeCreateSymbolicLinkPrivilege to administrators unless
+ * Developer Mode is on, so symlink() throws EPERM for ordinary users. A
+ * junction is not a substitute — junctions only work for directories, and the
+ * link target here is a file (the agent transcript).
+ *
+ * Probed once, synchronously, because callers need the answer in the same tick
+ * (see initTaskOutputAsSymlink).
+ */
+let _symlinkCapable: boolean | undefined
+function canCreateSymlink(): boolean {
+  if (_symlinkCapable !== undefined) {
+    return _symlinkCapable
+  }
+  if (process.platform !== 'win32') {
+    _symlinkCapable = true
+    return true
+  }
+  const probeLink = join(getTaskOutputDir(), `.symlink-probe-${process.pid}`)
+  try {
+    mkdirSync(getTaskOutputDir(), { recursive: true })
+    // Target intentionally doesn't exist — a dangling link is enough to prove
+    // the privilege, and it matches how the real links are created (the
+    // transcript doesn't exist yet when the agent is registered).
+    symlinkSync(`${probeLink}.target`, probeLink, 'file')
+    _symlinkCapable = true
+  } catch {
+    _symlinkCapable = false
+  }
+  try {
+    unlinkSync(probeLink)
+  } catch {
+    // Nothing to clean up when the probe never created the link.
+  }
+  return _symlinkCapable
+}
+
+/** Test helper — forces the probed answer. */
+export function _setSymlinkCapableForTest(value: boolean | undefined): void {
+  _symlinkCapable = value
+}
+
+/**
  * Initialize output file as a symlink to another file (e.g., agent transcript).
  * Tries to create the symlink first; if a file already exists, removes it and retries.
+ *
+ * When symlinks are unavailable we register a redirect instead of leaving a
+ * placeholder behind. Agent tasks never append to their .output file — the
+ * symlink IS the delivery mechanism — so a placeholder would stay 0 bytes for
+ * the lifetime of the task and the agent's result would be silently lost
+ * (#1141).
  */
 export function initTaskOutputAsSymlink(
   taskId: string,
   targetPath: string,
 ): Promise<string> {
+  // Synchronous, because the caller (registerAsyncAgent) is sync and the model
+  // is handed getTaskOutputPath() in the same tick — a redirect registered from
+  // inside the async body below would land after the model already had the
+  // placeholder path.
+  if (!canCreateSymlink()) {
+    outputPathRedirects.set(taskId, targetPath)
+    return Promise.resolve(targetPath)
+  }
+
   return track(
     (async () => {
       try {
         await ensureOutputDir()
-        const outputPath = getTaskOutputPath(taskId)
+        const outputPath = getOwnedTaskOutputPath(taskId)
 
+        // 'file' is explicit because the target usually doesn't exist yet —
+        // the transcript appears once the agent starts producing output. Left
+        // to infer, Windows stats the missing target on every call.
         try {
-          await symlink(targetPath, outputPath)
-        } catch (error) {
-          if (getErrnoCode(error) !== 'EEXIST') {
-            throw error
-          }
+          await symlink(targetPath, outputPath, 'file')
+        } catch {
           await unlink(outputPath)
-          await symlink(targetPath, outputPath)
+          await symlink(targetPath, outputPath, 'file')
         }
 
         return outputPath
       } catch (error) {
-        const code = getErrnoCode(error)
-        if (code === 'EPERM' || code === 'EACCES') {
-          logForDebugging(
-            `[TaskOutput] Agent transcript symlink unavailable (${code}); falling back to pointer file`,
-          )
-        } else {
-          logError(error)
-        }
-        const output = getOrCreateOutput(taskId)
-        output.append(
-          `[Agent transcript symlink unavailable. Read the agent transcript directly: ${targetPath}]\n`,
-        )
-        await output.flush()
-        return getTaskOutputPath(taskId)
+        logError(error)
+        // Read-only mount, SELinux, a filesystem without symlink support —
+        // redirect reads at the real file. Still create the placeholder so the
+        // path stays valid for anyone who already captured it.
+        outputPathRedirects.set(taskId, targetPath)
+        return initTaskOutput(taskId)
       }
     })(),
   )

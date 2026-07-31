@@ -86,6 +86,7 @@ describe('updateStore', () => {
         updates: true,
       },
       app: {
+        ...browserHost.app,
         getVersion: vi.fn().mockResolvedValue('0.4.1'),
       },
       updates: {

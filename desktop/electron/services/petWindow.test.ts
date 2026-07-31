@@ -9,9 +9,11 @@ import {
   type PetWindowPosition,
   clampPetWindowPosition,
   getPetWindowBounds,
+  petPanelBounds,
   petWindowStatePath,
   petWindowOptions,
   readPetWindowPosition,
+  resolvePetPanelPlacement,
   writePetWindowPosition,
 } from './petWindow'
 
@@ -690,6 +692,320 @@ describe('Electron pet window service', () => {
       })
     },
   )
+
+  // Reaching the menu bar puts the window's own top edge above the work area,
+  // and the activity panel lives in exactly that strip of the window. The
+  // mascot arriving at the edge is the fix working; the panel arriving behind
+  // the menu bar with it is the bug (#1140).
+  //
+  // These boxes are the real layout: the stack is bottom-aligned with 12px of
+  // padding, the card sits 12px above the mascot, and the collapse control
+  // hangs 31px below the card's own bottom edge.
+  const panelDrag = {
+    workArea: { x: 0, y: 25, width: 800, height: 575 },
+    above: {
+      mascot: { x: 136, y: 240, width: 112, height: 128 },
+      card: { x: 16, y: 88, width: 352, height: 140 },
+      toggle: { x: 172, y: 234, width: 25, height: 25 },
+    },
+    // What the renderer reports once it has flipped: mascot at the top of the
+    // stack, card below it, control on the card's mascot-facing edge.
+    below: {
+      mascot: { x: 136, y: 12, width: 112, height: 128 },
+      card: { x: 16, y: 152, width: 352, height: 140 },
+      toggle: { x: 172, y: 121, width: 25, height: 25 },
+    },
+  }
+
+  function panelController(petWindow: ReturnType<typeof createFakeWindow>) {
+    const onPanelPlacementChanged = vi.fn()
+    // No cursor sampler, so the drag follows the payload coordinates the way
+    // the other edge tests drive it.
+    const controller = new PetWindowController({
+      createWindow: vi.fn(() => petWindow) as never,
+      getCurrentWorkArea: () => panelDrag.workArea,
+      getWorkAreaForPoint: () => panelDrag.workArea,
+      load: vi.fn().mockResolvedValue(undefined),
+      onPanelPlacementChanged,
+      platform: 'darwin',
+      preloadPath: '/app/electron-dist/preload.cjs',
+    })
+    return { controller, onPanelPlacementChanged }
+  }
+
+  it('flips the activity panel below the mascot at the menu bar and holds the mascot there', async () => {
+    const petWindow = createFakeWindow(
+      { x: 100, y: 120, width: PET_WINDOW_WIDTH, height: PET_WINDOW_HEIGHT },
+      { constrainTopTo: panelDrag.workArea.y },
+    )
+    const { controller, onPanelPlacementChanged } = panelController(petWindow)
+    await controller.show()
+    petWindow.applyConstructorOptions({ enableLargerThanScreen: true })
+
+    const { above, below, workArea } = panelDrag
+    // Away from the top edge the panel keeps its usual place above the mascot.
+    expect(controller.setInteractiveRegions(petWindow as never, [
+      above.mascot,
+      above.card,
+      above.toggle,
+    ])).toEqual({ vertical: 'above' })
+
+    controller.dragWindow(petWindow as never, { phase: 'start', x: 150, y: 180 })
+    const dragged = controller.dragWindow(petWindow as never, { phase: 'end', x: 150, y: -400 })
+
+    // The mascot still reaches the menu bar, which is the behaviour this must
+    // not regress: the window top is above the work area.
+    expect(petWindow.getBounds().y).toBe(workArea.y - above.mascot.y)
+    // The panel would be behind the menu bar there, so it has to change sides.
+    expect(petWindow.getBounds().y + above.card.y).toBeLessThan(workArea.y)
+    expect(dragged).toEqual({ vertical: 'below' })
+    expect(onPanelPlacementChanged).toHaveBeenCalledWith(petWindow, { vertical: 'below' })
+
+    // The renderer re-lays out and reports the flipped boxes.
+    expect(controller.setInteractiveRegions(petWindow as never, [
+      below.mascot,
+      below.card,
+      below.toggle,
+    ])).toEqual({ vertical: 'below' })
+
+    // Flipping moved the mascot up inside the window, so the window has to drop
+    // by the same amount: the mascot stays on the menu bar rather than jumping
+    // a panel-height down the screen.
+    expect(petWindow.getBounds().y + below.mascot.y).toBe(workArea.y)
+    // And the whole panel is now inside the work area.
+    expect(petWindow.getBounds().y + below.toggle.y).toBeGreaterThanOrEqual(workArea.y)
+  })
+
+  it('holds the mascot still through a flip that happens short of the menu bar', async () => {
+    // The panel runs out of room before the mascot reaches the edge, so most
+    // flips happen mid-screen where the clamp has nothing to say. Without the
+    // window absorbing the flip, the mascot snaps up to the work area top —
+    // the whole panel height away from where the pointer left it.
+    const petWindow = createFakeWindow(
+      { x: 100, y: 120, width: PET_WINDOW_WIDTH, height: PET_WINDOW_HEIGHT },
+      { constrainTopTo: panelDrag.workArea.y },
+    )
+    const { controller } = panelController(petWindow)
+    await controller.show()
+    petWindow.applyConstructorOptions({ enableLargerThanScreen: true })
+
+    const { above, below, workArea } = panelDrag
+    controller.setInteractiveRegions(petWindow as never, [above.mascot, above.card, above.toggle])
+
+    // Land the mascot 100px under the menu bar: clear of every clamp, but short
+    // of the ~183px the panel needs above it.
+    controller.dragWindow(petWindow as never, { phase: 'start', x: 150, y: 180 })
+    const dragged = controller.dragWindow(petWindow as never, { phase: 'end', x: 150, y: -55 })
+    const mascotScreenY = petWindow.getBounds().y + above.mascot.y
+    expect(mascotScreenY).toBe(workArea.y + 100)
+    expect(dragged).toEqual({ vertical: 'below' })
+
+    controller.setInteractiveRegions(petWindow as never, [below.mascot, below.card, below.toggle])
+
+    expect(petWindow.getBounds().y + below.mascot.y).toBe(mascotScreenY)
+    expect(petWindow.getBounds().y + below.toggle.y).toBeGreaterThanOrEqual(workArea.y)
+  })
+
+  it('keeps a drag tracking the pointer after the panel flips mid-drag', async () => {
+    vi.useFakeTimers()
+    try {
+      const petWindow = createFakeWindow(
+        { x: 100, y: 120, width: PET_WINDOW_WIDTH, height: PET_WINDOW_HEIGHT },
+        { constrainTopTo: panelDrag.workArea.y },
+      )
+      let cursor = { x: 150, y: 180 }
+      const onPanelPlacementChanged = vi.fn()
+      const controller = new PetWindowController({
+        createWindow: vi.fn(() => petWindow) as never,
+        getCursorScreenPoint: () => cursor,
+        getCurrentWorkArea: () => panelDrag.workArea,
+        getWorkAreaForPoint: () => panelDrag.workArea,
+        load: vi.fn().mockResolvedValue(undefined),
+        onPanelPlacementChanged,
+        platform: 'darwin',
+        preloadPath: '/app/electron-dist/preload.cjs',
+      })
+      await controller.show()
+      petWindow.applyConstructorOptions({ enableLargerThanScreen: true })
+
+      const { above, below, workArea } = panelDrag
+      controller.setInteractiveRegions(petWindow as never, [above.mascot, above.card, above.toggle])
+      controller.dragWindow(petWindow as never, { phase: 'start', x: 150, y: 180 })
+
+      // The renderer sends no move payloads — this process samples the cursor —
+      // so a flip decided mid-drag has no reply to ride back on and goes out as
+      // an event instead.
+      cursor = { x: 150, y: -55 }
+      vi.advanceTimersByTime(16)
+      expect(onPanelPlacementChanged).toHaveBeenCalledWith(petWindow, { vertical: 'below' })
+
+      controller.setInteractiveRegions(petWindow as never, [below.mascot, below.card, below.toggle])
+      expect(petWindow.getBounds().y + below.mascot.y).toBe(workArea.y + 100)
+
+      // Dragging 20px further has to move the mascot 20px further. The drag maps
+      // pointer travel from a window origin captured before the flip, so unless
+      // that origin absorbed the flip too this snaps back.
+      cursor = { x: 150, y: -75 }
+      vi.advanceTimersByTime(16)
+      expect(petWindow.getBounds().y + below.mascot.y).toBe(workArea.y + 80)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the flipped panel flipped instead of oscillating on the threshold', async () => {
+    const petWindow = createFakeWindow(
+      { x: 100, y: 120, width: PET_WINDOW_WIDTH, height: PET_WINDOW_HEIGHT },
+      { constrainTopTo: panelDrag.workArea.y },
+    )
+    const { controller } = panelController(petWindow)
+    await controller.show()
+    petWindow.applyConstructorOptions({ enableLargerThanScreen: true })
+
+    const { above, below } = panelDrag
+    controller.setInteractiveRegions(petWindow as never, [above.mascot, above.card, above.toggle])
+    controller.dragWindow(petWindow as never, { phase: 'start', x: 150, y: 180 })
+    controller.dragWindow(petWindow as never, { phase: 'end', x: 150, y: -400 })
+    controller.setInteractiveRegions(petWindow as never, [below.mascot, below.card, below.toggle])
+
+    // The flip itself frees the space it was testing for: the panel left the
+    // strip above the mascot. Re-reporting the flipped layout must not read
+    // that as room to flip back, or the panel changes sides every frame.
+    expect(controller.setInteractiveRegions(petWindow as never, [
+      below.mascot,
+      below.card,
+      below.toggle,
+    ])).toEqual({ vertical: 'below' })
+    expect(petWindow.getBounds().y + below.mascot.y).toBe(panelDrag.workArea.y)
+  })
+
+  it('reopens a flipped pet where the mascot was, not where the window was', async () => {
+    // The saved y belongs to the mascot offset it was saved with, and the panel
+    // being below the mascot puts that offset at the top of the window. The
+    // renderer always starts the panel above, so restoring the bare window
+    // position would drop the mascot by the whole panel height.
+    const { above, below, workArea } = panelDrag
+    const saved = { x: 100, y: workArea.y - below.mascot.y, region: below.mascot }
+    let petWindow: ReturnType<typeof createFakeWindow> | undefined
+    const controller = new PetWindowController({
+      createWindow: vi.fn((bounds) => {
+        petWindow = createFakeWindow(
+          bounds as { x: number, y: number, width: number, height: number },
+          { constrainTopTo: workArea.y },
+        )
+        petWindow.applyConstructorOptions({ enableLargerThanScreen: true })
+        return petWindow
+      }) as never,
+      getCurrentWorkArea: () => workArea,
+      getWorkAreaForPoint: () => workArea,
+      load: vi.fn().mockResolvedValue(undefined),
+      platform: 'darwin',
+      preloadPath: '/app/electron-dist/preload.cjs',
+      readPosition: () => saved,
+    })
+
+    await controller.show()
+    // First paint is the renderer's default layout, panel above the mascot.
+    const placement = controller.setInteractiveRegions(petWindow as never, [
+      above.mascot,
+      above.card,
+      above.toggle,
+    ])
+
+    expect(petWindow?.getBounds().y).toBe(workArea.y - above.mascot.y)
+    expect((petWindow?.getBounds().y ?? 0) + above.mascot.y).toBe(workArea.y)
+    // And it is still out of room up there, so it flips straight back.
+    expect(placement).toEqual({ vertical: 'below' })
+  })
+
+  it('leaves the panel above the mascot when only the mascot is reported', async () => {
+    // No panel on screen means nothing to protect, and the mascot has to keep
+    // its full reach.
+    const petWindow = createFakeWindow(
+      { x: 100, y: 120, width: PET_WINDOW_WIDTH, height: PET_WINDOW_HEIGHT },
+      { constrainTopTo: panelDrag.workArea.y },
+    )
+    const { controller, onPanelPlacementChanged } = panelController(petWindow)
+    await controller.show()
+    petWindow.applyConstructorOptions({ enableLargerThanScreen: true })
+
+    controller.setInteractiveRegions(petWindow as never, [panelDrag.above.mascot])
+    controller.dragWindow(petWindow as never, { phase: 'start', x: 150, y: 180 })
+    const dragged = controller.dragWindow(petWindow as never, { phase: 'end', x: 150, y: -400 })
+
+    expect(dragged).toEqual({ vertical: 'above' })
+    expect(onPanelPlacementChanged).not.toHaveBeenCalled()
+    expect(petWindow.getBounds().y).toBe(panelDrag.workArea.y - panelDrag.above.mascot.y)
+  })
+
+  it('measures the panel against the room above the mascot, not the window', () => {
+    const mascot = { x: 136, y: 240, width: 112, height: 128 }
+    const panel = { x: 16, y: 88, width: 352, height: 171 }
+    const workArea = { x: 0, y: 25, width: 800, height: 575 }
+    const above = { vertical: 'above' } as const
+
+    // 335px of room, 183px needed.
+    expect(resolvePetPanelPlacement({
+      windowPosition: { x: 100, y: 120 },
+      workArea,
+      mascot,
+      panel,
+      previous: above,
+    })).toEqual({ vertical: 'above' })
+
+    // Mascot on the menu bar: no room at all.
+    expect(resolvePetPanelPlacement({
+      windowPosition: { x: 100, y: workArea.y - mascot.y },
+      workArea,
+      mascot,
+      panel,
+      previous: above,
+    })).toEqual({ vertical: 'below' })
+
+    // One pixel short still flips; exactly enough does not.
+    expect(resolvePetPanelPlacement({
+      windowPosition: { x: 100, y: workArea.y - mascot.y + panel.height + 11 },
+      workArea,
+      mascot,
+      panel,
+      previous: above,
+    })).toEqual({ vertical: 'below' })
+    expect(resolvePetPanelPlacement({
+      windowPosition: { x: 100, y: workArea.y - mascot.y + panel.height + 12 },
+      workArea,
+      mascot,
+      panel,
+      previous: above,
+    })).toEqual({ vertical: 'above' })
+
+    // Coming back the other way costs extra, so a mascot parked on the boundary
+    // does not flutter.
+    expect(resolvePetPanelPlacement({
+      windowPosition: { x: 100, y: workArea.y - mascot.y + panel.height + 12 },
+      workArea,
+      mascot,
+      panel,
+      previous: { vertical: 'below' },
+    })).toEqual({ vertical: 'below' })
+    expect(resolvePetPanelPlacement({
+      windowPosition: { x: 100, y: workArea.y - mascot.y + panel.height + 36 },
+      workArea,
+      mascot,
+      panel,
+      previous: { vertical: 'below' },
+    })).toEqual({ vertical: 'above' })
+  })
+
+  it('bounds the panel by everything hanging off the mascot, not just the card', () => {
+    // The collapse control overhangs the card, and the badge replaces the card
+    // entirely. Taking regions[1] alone would under-measure both.
+    expect(petPanelBounds([
+      panelDrag.above.mascot,
+      panelDrag.above.card,
+      panelDrag.above.toggle,
+    ])).toEqual({ x: 16, y: 88, width: 352, height: 171 })
+    expect(petPanelBounds([panelDrag.above.mascot])).toBeNull()
+  })
 
   it('tracks the native cursor at 60 Hz without renderer move payloads', async () => {
     vi.useFakeTimers()

@@ -52,6 +52,41 @@ export type PetWindowDragPayload = PetWindowPosition & {
   phase: 'start' | 'move' | 'end'
 }
 
+/**
+ * Which side of the mascot the renderer should hang the activity panel on.
+ *
+ * Dragging clamps against the mascot alone so it can reach every display edge
+ * through the window's transparent padding, which by construction pushes the
+ * rest of the window off-screen. At the top edge that padding is where the
+ * panel lives, so it ends up behind the menu bar. Only this process knows the
+ * window position and the work area, so it picks the side and the renderer
+ * follows.
+ *
+ * Left and right are deliberately not handled here. The panel is wider than the
+ * mascot by more than the padding that remains beside it, so sliding it back
+ * on-screen inside a fixed-size window just moves the clipping from the display
+ * edge to the window edge. Fixing those needs the window itself to grow or
+ * move, which is a different change.
+ */
+export type PetPanelPlacement = {
+  vertical: 'above' | 'below'
+}
+
+export const PET_PANEL_DEFAULT_PLACEMENT: PetPanelPlacement = Object.freeze({
+  vertical: 'above',
+})
+
+/** Gap the renderer keeps between the panel and the mascot. */
+const PET_PANEL_GAP = 12
+
+/**
+ * Flipping is sticky, because the flip itself moves the window: the panel
+ * leaves the space above the mascot, the mascot moves up inside the window, and
+ * the window drops by that much to hold the mascot still. A bare "does it fit"
+ * test would then find room again and flip straight back, once per frame.
+ */
+const PET_PANEL_FLIP_HYSTERESIS = 24
+
 function isFiniteScreenCoordinate(value: unknown): value is number {
   return typeof value === 'number'
     && Number.isFinite(value)
@@ -191,6 +226,54 @@ export function clampPetWindowPosition(
   }
 }
 
+/**
+ * Bounding box of everything the renderer hangs off the mascot — the activity
+ * card, its collapse control, the task badge.
+ *
+ * The first region is the mascot itself: it is the drag anchor, so it is the
+ * one box that is *meant* to sit flush against a display edge. Everything after
+ * it has to stay on-screen to be readable, which is what this box represents.
+ */
+export function petPanelBounds(regions: Rectangle[]): Rectangle | null {
+  const attachments = regions.slice(1)
+  if (attachments.length === 0) return null
+  const left = Math.min(...attachments.map((region) => region.x))
+  const top = Math.min(...attachments.map((region) => region.y))
+  const right = Math.max(...attachments.map((region) => region.x + region.width))
+  const bottom = Math.max(...attachments.map((region) => region.y + region.height))
+  return { x: left, y: top, width: right - left, height: bottom - top }
+}
+
+/**
+ * The measurement is deliberately placement-independent: the panel's *height*
+ * is the same on either side of the mascot, and the mascot's screen position is
+ * held across a flip, so both sides of the comparison survive the flip they
+ * decide. Comparing against how much room the panel currently occupies above
+ * the mascot would instead be self-referential and oscillate.
+ */
+export function resolvePetPanelPlacement({
+  windowPosition,
+  workArea,
+  mascot,
+  panel,
+  previous,
+}: {
+  windowPosition: PetWindowPosition
+  workArea: Rectangle
+  mascot: Rectangle
+  panel: Rectangle | null
+  previous: PetPanelPlacement
+}): PetPanelPlacement {
+  if (!panel) return PET_PANEL_DEFAULT_PLACEMENT
+
+  const required = panel.height + PET_PANEL_GAP
+  const spaceAbove = windowPosition.y + mascot.y - workArea.y
+  const threshold = previous.vertical === 'above'
+    ? required
+    : required + PET_PANEL_FLIP_HYSTERESIS
+  return { vertical: spaceAbove >= threshold ? 'above' : 'below' }
+}
+
 type PetWindowExtent = { width: number; height: number }
 
 function isPositiveExtent(extent: Partial<PetWindowExtent> | undefined): boolean {
@@ -242,35 +325,33 @@ function normalizePetWindowRegion(region: Rectangle, extent: PetWindowExtent): R
 
 function unionPetWindowRegions(
   regions: Rectangle[],
-  extent: PetWindowExtent = {
-    width: PET_WINDOW_WIDTH,
-    height: PET_WINDOW_HEIGHT,
-  },
+  extent: PetWindowExtent,
 ): Rectangle | null {
   if (regions.length === 0) return null
-
-  let left = Number.POSITIVE_INFINITY
-  let top = Number.POSITIVE_INFINITY
-  let right = Number.NEGATIVE_INFINITY
-  let bottom = Number.NEGATIVE_INFINITY
-  for (const region of regions) {
-    const normalized = normalizePetWindowRegion(region, extent)
-    left = Math.min(left, normalized.x)
-    top = Math.min(top, normalized.y)
-    right = Math.max(right, normalized.x + normalized.width)
-    bottom = Math.max(bottom, normalized.y + normalized.height)
-  }
-  if (
-    !Number.isFinite(left)
-    || !Number.isFinite(top)
-    || !Number.isFinite(right)
-    || !Number.isFinite(bottom)
-    || right <= left
-    || bottom <= top
-  ) {
-    return null
-  }
+  const normalized = regions.map(region => normalizePetWindowRegion(region, extent))
+  const left = Math.min(...normalized.map(region => region.x))
+  const top = Math.min(...normalized.map(region => region.y))
+  const right = Math.max(...normalized.map(region => region.x + region.width))
+  const bottom = Math.max(...normalized.map(region => region.y + region.height))
   return { x: left, y: top, width: right - left, height: bottom - top }
+}
+
+function mascotRegionIndex(
+  regions: Rectangle[],
+  placement: PetPanelPlacement,
+): number {
+  if (regions.length <= 1) return 0
+  let selected = 0
+  for (let index = 1; index < regions.length; index += 1) {
+    const candidate = regions[index]!
+    const current = regions[selected]!
+    if (placement.vertical === 'above') {
+      if (candidate.y + candidate.height > current.y + current.height) selected = index
+    } else if (candidate.y < current.y) {
+      selected = index
+    }
+  }
+  return selected
 }
 
 export function getPetWindowBounds(
@@ -361,6 +442,11 @@ export type PetWindowControllerOptions = {
   getWorkAreaForPoint?(point: Point): Rectangle
   load(window: PetWindow): Promise<void>
   onCreated?(window: PetWindow): void
+  /**
+   * Dragging is driven by a cursor sampler in this process, not by renderer
+   * calls, so a placement that changes mid-drag has no reply to ride back on.
+   */
+  onPanelPlacementChanged?(window: PetWindow, placement: PetPanelPlacement): void
   platform?: NodeJS.Platform
   preloadPath: string
   readPosition?(): PetWindowState | null
@@ -378,6 +464,18 @@ export class PetWindowController {
   } | null = null
   private dragTimer: ReturnType<typeof setInterval> | null = null
   private visibleDragRegion: Rectangle | null = null
+  private panelBounds: Rectangle | null = null
+  private panelPlacement: PetPanelPlacement = PET_PANEL_DEFAULT_PLACEMENT
+  /**
+   * Screen y the mascot has to keep once the renderer reports its next layout.
+   *
+   * Set whenever the mascot is about to move inside the window while the user
+   * expects it to stay put on screen: a flip moves it by the panel's height, and
+   * a restart hands the renderer a saved position whose mascot offset belongs to
+   * whichever side the panel was on when it was saved. Both cases need the
+   * window to move the opposite way by the same amount.
+   */
+  private pendingMascotAnchorScreenY: number | null = null
   private pendingRestoredPosition: PetWindowState | null = null
   private readonly options: PetWindowControllerOptions
 
@@ -387,8 +485,16 @@ export class PetWindowController {
 
   private async create(): Promise<PetWindow> {
     const restoredPosition = this.options.readPosition?.() ?? null
-    this.visibleDragRegion = null
+    this.resetPanelState()
     this.pendingRestoredPosition = restoredPosition
+    // A saved position is only meaningful next to the mascot box it was saved
+    // with, and that box moves when the panel changes sides. The renderer always
+    // starts the panel above the mascot, so a position saved with it below would
+    // otherwise drop the mascot by the panel's height on the next launch.
+    // Restoring where the *mascot* was survives that, and a resized mascot too.
+    if (restoredPosition?.region) {
+      this.pendingMascotAnchorScreenY = restoredPosition.y + restoredPosition.region.y
+    }
     const currentWorkArea = restoredPosition && this.options.getWorkAreaForPoint
       ? this.options.getWorkAreaForPoint(petWindowAnchor(restoredPosition))
       : this.options.getCurrentWorkArea()
@@ -402,7 +508,7 @@ export class PetWindowController {
       this.finishDrag(window)
       if (this.window === window) {
         this.window = null
-        this.visibleDragRegion = null
+        this.resetPanelState()
         this.pendingRestoredPosition = null
       }
     })
@@ -416,7 +522,7 @@ export class PetWindowController {
       if (!window.isDestroyed()) window.destroy()
       if (this.window === window) {
         this.window = null
-        this.visibleDragRegion = null
+        this.resetPanelState()
         this.pendingRestoredPosition = null
       }
       throw error
@@ -461,8 +567,15 @@ export class PetWindowController {
     }
     window.destroy()
     this.window = null
-    this.visibleDragRegion = null
+    this.resetPanelState()
     this.pendingRestoredPosition = null
+  }
+
+  private resetPanelState(): void {
+    this.visibleDragRegion = null
+    this.panelBounds = null
+    this.panelPlacement = PET_PANEL_DEFAULT_PLACEMENT
+    this.pendingMascotAnchorScreenY = null
   }
 
   owns(window: PetWindow | null): boolean {
@@ -477,54 +590,111 @@ export class PetWindowController {
     window.setIgnoreMouseEvents(ignore, ignore ? { forward: true } : undefined)
   }
 
-  setInteractiveRegions(window: PetWindow, regions: Rectangle[]): void {
+  setInteractiveRegions(window: PetWindow, regions: Rectangle[]): PetPanelPlacement {
     if (!this.owns(window)) {
       throw new Error('Pet window IPC sender does not own the companion window')
     }
     const platform = this.options.platform ?? process.platform
     const extent = petWindowContentExtent(window)
-    // Clamp/drag against the union of every interactive region. Using only the
-    // first region (for example, the top task bubble) can push the mascot off
-    // screen while the bubble remains visible. Normalize against the live
-    // content extent so resized/custom pet layouts retain their full bounds.
-    const visibleRegion = unionPetWindowRegions(regions, extent)
-    if (visibleRegion) this.visibleDragRegion = visibleRegion
+    const mascotIndex = mascotRegionIndex(regions, this.panelPlacement)
+    const primaryRegion = regions[mascotIndex]
+    // The renderer historically reported the panel before the mascot, while
+    // the placement-aware layout reports the mascot first. Pick the mascot by
+    // its vertical edge instead of trusting array order.
+    const dragRegion = primaryRegion
+      ? normalizePetWindowRegion(primaryRegion, extent)
+      : null
+    if (dragRegion) this.visibleDragRegion = dragRegion
+    const panelRegions = regions.filter((_, index) => index !== mascotIndex)
+    const panel = unionPetWindowRegions(panelRegions, extent)
+    this.panelBounds = panel
 
-    // A saved edge position leaves transparent padding off-screen. Reapply it
-    // once the renderer reports the real interactive region on every platform.
-    if (visibleRegion) {
-      const requestedPosition = this.pendingRestoredPosition ?? window.getBounds()
+    // A saved edge position leaves the transparent padding off-screen, so
+    // creating the window re-clamps it against the whole window and walks the
+    // mascot inwards by the padding width. Restoring it needs the reported
+    // region, which only arrives here — and it arrives on every platform, so
+    // this runs on every platform too.
+    if (dragRegion) {
+      const bounds = window.getBounds()
+      const restoredPosition = this.pendingRestoredPosition
       this.pendingRestoredPosition = null
-      const anchor = petWindowAnchor({ ...requestedPosition, region: visibleRegion })
+      const requestedPosition = this.holdMascotAnchor(dragRegion, restoredPosition ?? bounds)
+      // The live region beats whatever was saved: the mascot may have been
+      // resized since, and this is the first measurement of the real one.
+      const anchor = petWindowAnchor({ ...requestedPosition, region: dragRegion })
       const workArea = this.options.getWorkAreaForPoint?.(anchor)
         ?? this.options.getCurrentWorkArea()
-      const nextPosition = clampPetWindowPosition(
-        requestedPosition,
-        workArea,
-        visibleRegion,
-      )
-      const bounds = window.getBounds()
+      const nextPosition = clampPetWindowPosition(requestedPosition, workArea, dragRegion)
       if (nextPosition.x !== bounds.x || nextPosition.y !== bounds.y) {
         movePetWindow(window, nextPosition)
       }
+      this.updatePanelPlacement(window, nextPosition, workArea, dragRegion)
     }
 
-    if (platform === 'darwin') return
+    if (platform === 'darwin') return this.panelPlacement
 
-    // Windows clips both hit-testing and painting to the shape. Pad and clamp
-    // each renderer region first, then union the native shape so stacked mascot
-    // + bubble regions stay together without producing out-of-bounds rectangles.
-    const paddedRegions = regions.map(region => normalizePetWindowRegion({
+    const paddedRegions = regions.map(region => ({
       x: region.x - PET_WINDOW_SHAPE_PADDING,
       y: region.y - PET_WINDOW_SHAPE_PADDING,
       width: region.width + PET_WINDOW_SHAPE_PADDING * 2,
       height: region.height + PET_WINDOW_SHAPE_PADDING * 2,
-    }, extent))
+    }))
     const shape = unionPetWindowRegions(paddedRegions, extent)
     if (shape) window.setShape([shape])
+    return this.panelPlacement
   }
 
-  dragWindow(window: PetWindow, payload: PetWindowDragPayload): void {
+  /**
+   * Rebases the window on the screen position the mascot has to keep.
+   *
+   * The reported region is the first news of where the mascot actually sits
+   * inside the window, so this is the point where a flip or a restore can be
+   * turned into a window move that leaves the mascot where the user last saw it.
+   */
+  private holdMascotAnchor(
+    mascot: Rectangle,
+    requestedPosition: PetWindowPosition,
+  ): PetWindowPosition {
+    const anchorScreenY = this.pendingMascotAnchorScreenY
+    if (anchorScreenY === null) return requestedPosition
+    this.pendingMascotAnchorScreenY = null
+
+    const compensated = { x: requestedPosition.x, y: anchorScreenY - mascot.y }
+    const drag = this.drag
+    if (drag) {
+      // A drag maps pointer travel from a fixed window origin, so the origin has
+      // to absorb the flip too — otherwise the next tick recomputes the pre-flip
+      // position and drags the mascot straight back.
+      drag.windowStart = {
+        ...drag.windowStart,
+        y: drag.windowStart.y + compensated.y - requestedPosition.y,
+      }
+    }
+    return compensated
+  }
+
+  private updatePanelPlacement(
+    window: PetWindow,
+    windowPosition: PetWindowPosition,
+    workArea: Rectangle,
+    mascot: Rectangle,
+  ): void {
+    const previous = this.panelPlacement
+    const next = resolvePetPanelPlacement({
+      windowPosition,
+      workArea,
+      mascot,
+      panel: this.panelBounds,
+      previous,
+    })
+    if (next.vertical === previous.vertical) return
+
+    this.pendingMascotAnchorScreenY = windowPosition.y + mascot.y
+    this.panelPlacement = next
+    this.options.onPanelPlacementChanged?.(window, next)
+  }
+
+  dragWindow(window: PetWindow, payload: PetWindowDragPayload): PetPanelPlacement {
     if (!this.owns(window)) {
       throw new Error('Pet window IPC sender does not own the companion window')
     }
@@ -548,7 +718,7 @@ export class PetWindowController {
       if (this.options.getCursorScreenPoint) {
         this.dragTimer = setInterval(() => this.sampleDragPosition(), PET_WINDOW_DRAG_INTERVAL_MS)
       }
-      return
+      return this.panelPlacement
     }
 
     const drag = this.drag
@@ -565,6 +735,7 @@ export class PetWindowController {
     if (payload.phase === 'end') {
       this.finishDrag(window)
     }
+    return this.panelPlacement
   }
 
   private readCursorScreenPoint(): PetWindowPosition | null {
@@ -606,6 +777,12 @@ export class PetWindowController {
 
     movePetWindow(drag.window, nextPosition)
     drag.lastPosition = nextPosition
+    // Dragging is the only way the mascot reaches an edge, so it is also where
+    // the panel runs out of room. Most ticks here come from the cursor sampler
+    // rather than a renderer call, so this reaches the renderer as an event.
+    if (this.visibleDragRegion) {
+      this.updatePanelPlacement(drag.window, nextPosition, workArea, this.visibleDragRegion)
+    }
   }
 
   private finishDrag(window?: PetWindow): void {

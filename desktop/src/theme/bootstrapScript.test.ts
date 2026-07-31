@@ -9,7 +9,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { afterEach, describe, expect, it } from 'vitest'
+import { beforeEach, afterEach, describe, expect, it } from 'vitest'
 
 import {
   DARK_THEME_MODES,
@@ -48,12 +48,13 @@ function extractBootstrapScript(): string {
 
 const bootstrapScript = extractBootstrapScript()
 
-function runBootstrapScript(): { theme: string | null; colorScheme: string } {
+function runBootstrapScript(): { theme: string | null; colorScheme: string; themeColor: string | null } {
   // eslint-disable-next-line no-new-func -- running the shipped script verbatim is the point
   new Function(bootstrapScript)()
   return {
     theme: document.documentElement.getAttribute('data-theme'),
     colorScheme: document.documentElement.style.colorScheme,
+    themeColor: document.querySelector('meta[name="theme-color"]')?.getAttribute('content') ?? null,
   }
 }
 
@@ -89,10 +90,19 @@ function resolveViaAppBundle(systemAppearance: SystemAppearance): ThemeMode {
   })
 }
 
+/** The shipped markup carries this meta; jsdom starts without it. */
+beforeEach(() => {
+  const meta = document.createElement('meta')
+  meta.setAttribute('name', 'theme-color')
+  meta.setAttribute('content', '#000000')
+  document.head.appendChild(meta)
+})
+
 afterEach(() => {
   window.localStorage.clear()
   document.documentElement.removeAttribute('data-theme')
   document.documentElement.style.colorScheme = ''
+  document.querySelector('meta[name="theme-color"]')?.remove()
   Reflect.deleteProperty(window as unknown as Record<string, unknown>, 'matchMedia')
 })
 
@@ -119,6 +129,27 @@ describe('index.html pre-hydration theme script', () => {
       )
       expect(rule.test(html), `index.html lost the ${theme} pre-paint background`).toBe(true)
     }
+  })
+
+  // The status bar sits on top of the page under viewport-fit=cover, so a
+  // theme-color left on the previous palette shows up as a mismatched band
+  // above the header — the exact artifact cover was added to remove.
+  it('colors the browser chrome with the resolved palette', () => {
+    for (const theme of THEME_MODES) {
+      stubMatchMedia(false)
+      seedStorage({ theme, follow: '0' })
+
+      expect(runBootstrapScript().themeColor, `${theme} left the browser chrome unpainted`)
+        .toBe(THEME_BACKGROUNDS[theme])
+    }
+  })
+
+  it('leaves the document alone when the markup carries no theme-color meta', () => {
+    document.querySelector('meta[name="theme-color"]')?.remove()
+    stubMatchMedia(false)
+    seedStorage({ theme: 'dark', follow: '0' })
+
+    expect(runBootstrapScript().theme).toBe('dark')
   })
 
   it('falls back to the default palette when no theme was resolved', () => {

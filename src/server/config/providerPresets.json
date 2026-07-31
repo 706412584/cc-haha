@@ -141,9 +141,7 @@
     },
     "needsApiKey": true,
     "websiteUrl": "https://jiekou.ai",
-    "apiKeyUrl": "https://jiekou.ai/referral?invited_code=OBNU3K",
-    "promoText": "接口AI为 cc-haha 的用户提供官方资源与稳定高性能体验，订阅包价格为官方 8 折；绑定 GitHub 后还可领取 3 美元优惠券。",
-    "featured": true,
+    "deprecated": true,
     "authStrategy": "auth_token",
     "defaultEnv": {
       "ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES": "none"
@@ -168,9 +166,7 @@
     },
     "needsApiKey": true,
     "websiteUrl": "https://www.shengsuanyun.com",
-    "apiKeyUrl": "https://www.shengsuanyun.com/?from=CH_LEJ88KWR",
-    "promoText": "胜算云为 cc-haha 的用户提供了特别福利，使用此链接注册的新用户可获 10 元模力及首充 10% 赠送！",
-    "featured": true,
+    "deprecated": true,
     "authStrategy": "auth_token",
     "defaultEnv": {
       "API_TIMEOUT_MS": "3000000",

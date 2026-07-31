@@ -32,6 +32,7 @@ import {
 import type { AgentTaskNotification, UIMessage } from '../../types/chat'
 import { formatTokenCount } from '../../lib/formatTokenCount'
 import { formatDurationMs, hasRunningBackgroundTasks as hasAnyRunningBackgroundTasks } from '../../lib/backgroundTasks'
+import { buildTurnCompletionByMessageId, type TurnCompletion } from '../../lib/turnCompletion'
 import { isTouchH5Document } from '../../lib/touchH5'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -971,9 +972,9 @@ const VIRTUAL_OVERSCAN_PX = 1200
 const VIRTUAL_DEFAULT_VIEWPORT_HEIGHT = 720
 const VIRTUAL_MIN_ITEM_HEIGHT = 48
 const VIRTUAL_MAX_ITEM_HEIGHT = 24_000
-// Windows WebView2 can report 1px oscillations for live chat content; don't
-// convert those into bottom-scroll corrections.
-const CONTENT_RESIZE_FOLLOW_MIN_DELTA_PX = 2
+// Windows WebView2 can report up to 2px oscillations for live chat content;
+// don't convert those into bottom-scroll corrections.
+const CONTENT_RESIZE_FOLLOW_JITTER_MAX_DELTA_PX = 2
 const USER_SCROLL_INTENT_WINDOW_MS = 500
 const CONVERSATION_NAVIGATION_MIN_ITEMS = 4
 const CONVERSATION_NAVIGATION_FULL_MIN_WIDTH_PX = 960
@@ -2052,7 +2053,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
         const previousFollowHeight = lastContentResizeFollowHeightRef.current
         if (
           previousFollowHeight !== null &&
-          Math.abs(nextHeight - previousFollowHeight) < CONTENT_RESIZE_FOLLOW_MIN_DELTA_PX
+          Math.abs(nextHeight - previousFollowHeight) <= CONTENT_RESIZE_FOLLOW_JITTER_MAX_DELTA_PX
         ) {
           return
         }
@@ -2103,6 +2104,10 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
   const completedTurnTargets = useMemo(
     () => getCompletedTurnTargets(deferredMessages),
     [deferredMessages],
+  )
+  const turnCompletionByMessageId = useMemo(
+    () => buildTurnCompletionByMessageId(deferredMessages, { turnActive: chatState !== 'idle' }),
+    [deferredMessages, chatState],
   )
   const latestCompletedTurnId =
     completedTurnTargets.length > 0
@@ -2697,6 +2702,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
             }
             branchAction={branchActionByMessageId.get(item.message.id)}
             turnChangedFiles={changedFilesByRenderIndex.get(index)}
+            turnCompletion={turnCompletionByMessageId.get(item.message.id)}
           />
         )}
 
@@ -2859,6 +2865,7 @@ export const MessageBlock = memo(function MessageBlock({
   toolResult,
   branchAction,
   turnChangedFiles,
+  turnCompletion,
 }: {
   sessionId?: string | null
   message: UIMessage
@@ -2871,6 +2878,7 @@ export const MessageBlock = memo(function MessageBlock({
     onBranch: () => void
   }
   turnChangedFiles?: string[]
+  turnCompletion?: TurnCompletion
 }) {
   const t = useTranslation()
 
@@ -2888,6 +2896,7 @@ export const MessageBlock = memo(function MessageBlock({
             attachments={message.attachments}
             branchAction={branchAction}
             timestamp={message.timestamp}
+            sessionId={sessionId ?? undefined}
           />
         </SelectableChatMessage>
       )
@@ -2905,6 +2914,7 @@ export const MessageBlock = memo(function MessageBlock({
             sessionId={sessionId ?? undefined}
             timestamp={message.timestamp}
             turnChangedFiles={turnChangedFiles}
+            turnCompletion={turnCompletion}
           />
         </SelectableChatMessage>
       )
@@ -2921,6 +2931,11 @@ export const MessageBlock = memo(function MessageBlock({
           />
         )
       }
+      // No durationMs prop here on purpose: buildRenderModel only emits a
+      // standalone tool_use item for AskUserQuestion, and this branch is reached
+      // only while such a call is still pending — so there is never a result to
+      // measure against. The badge is wired in ToolCallGroup, the path every
+      // other tool call takes.
       return (
         <ToolCallBlock
           status={message.status}

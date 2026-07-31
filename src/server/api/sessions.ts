@@ -907,25 +907,30 @@ function cleanupAdapterSessionMappings(sessionId: string): void {
 function mergeSessionSlashCommands(
   preferred: Array<{ name: string; description?: string; argumentHint?: string }>,
   fallback: SkillSlashCommand[],
-): Array<{ name: string; description: string; argumentHint?: string }> {
-  const merged = new Map<string, { name: string; description: string; argumentHint?: string }>()
+): SkillSlashCommand[] {
+  const fallbackByName = new Map(
+    fallback
+      .filter((command) => command.name)
+      .map((command) => [command.name, command] as const),
+  )
+  const merged = new Map<string, SkillSlashCommand>()
 
   for (const command of preferred) {
     if (!command.name) continue
+    const fallbackCommand = fallbackByName.get(command.name)
+    const argumentHint = command.argumentHint || fallbackCommand?.argumentHint
     merged.set(command.name, {
       name: command.name,
-      description: command.description || '',
-      ...(command.argumentHint ? { argumentHint: command.argumentHint } : {}),
+      description: command.description || fallbackCommand?.description || '',
+      ...(argumentHint ? { argumentHint } : {}),
+      kind: fallbackCommand?.kind ?? 'command',
+      ...(fallbackCommand?.source ? { source: fallbackCommand.source } : {}),
     })
   }
 
   for (const command of fallback) {
     if (!command.name || merged.has(command.name)) continue
-    merged.set(command.name, {
-      name: command.name,
-      description: command.description || '',
-      ...(command.argumentHint ? { argumentHint: command.argumentHint } : {}),
-    })
+    merged.set(command.name, command)
   }
 
   return [...merged.values()]

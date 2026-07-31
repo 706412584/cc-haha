@@ -11,10 +11,12 @@
     "postbuild": "node scripts/prepare-static-output.mjs",
     "preview": "vite preview --host 0.0.0.0",
     "check:docs": "node scripts/check-docs.mjs",
-    "check": "npm run check:docs"
+    "test": "node --test \"src/**/*.test.js\"",
+    "check": "npm run check:docs && npm test"
   },
   "dependencies": {
     "dompurify": "^3.3.0",
+    "highlight.js": "^11.11.1",
     "marked": "^17.0.5",
     "mermaid": "^11.14.0",
     "react": "^19.2.4",
