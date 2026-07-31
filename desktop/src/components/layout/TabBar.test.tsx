@@ -1001,6 +1001,56 @@ describe('TabBar', () => {
     expect(scrollByMock).toHaveBeenCalledWith({ left: 300, behavior: 'smooth' })
   })
 
+  it('keeps both chevron slots mounted while the strip overflows at an edge', async () => {
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useChatStore } = await import('../../stores/chatStore')
+
+    useTabStore.setState({
+      tabs: [
+        { sessionId: 'tab-1', title: 'First Session', type: 'session', status: 'idle' },
+        { sessionId: 'tab-2', title: 'Second Session', type: 'session', status: 'idle' },
+        { sessionId: 'tab-3', title: 'Third Session', type: 'session', status: 'idle' },
+      ],
+      activeTabId: 'tab-1',
+    })
+    useChatStore.setState({
+      sessions: {},
+      disconnectSession: vi.fn(),
+    } as Partial<ReturnType<typeof useChatStore.getState>>)
+
+    await act(async () => {
+      render(<TabBar />)
+    })
+
+    const scrollRegion = screen.getByTestId('tab-bar-scroll-region')
+    Object.defineProperty(scrollRegion, 'clientWidth', { configurable: true, get: () => 400 })
+    Object.defineProperty(scrollRegion, 'scrollWidth', { configurable: true, get: () => 1200 })
+    let scrollLeft = 0
+    Object.defineProperty(scrollRegion, 'scrollLeft', {
+      configurable: true,
+      get: () => scrollLeft,
+    })
+
+    fireEvent.scroll(scrollRegion)
+
+    const leftButton = document.querySelector<HTMLButtonElement>('button[aria-label="Scroll tabs left"]')
+    const rightButton = document.querySelector<HTMLButtonElement>('button[aria-label="Scroll tabs right"]')
+    expect(leftButton).toBeInTheDocument()
+    expect(leftButton).toBeDisabled()
+    expect(leftButton).toHaveClass('invisible')
+    expect(rightButton).toBeEnabled()
+    expect(rightButton).not.toHaveClass('invisible')
+
+    scrollLeft = 800
+    fireEvent.scroll(scrollRegion)
+
+    expect(leftButton).toBeEnabled()
+    expect(leftButton).not.toHaveClass('invisible')
+    expect(rightButton).toBeDisabled()
+    expect(rightButton).toHaveClass('invisible')
+  })
+
   it('scrolls the active tab into view when the active tab changes', async () => {
     const { TabBar } = await import('./TabBar')
     const { useTabStore } = await import('../../stores/tabStore')
@@ -1232,6 +1282,29 @@ describe('TabBar', () => {
       // chevron and leaving an end brings the other back, so a plain user
       // scroll fires this observer mid-flight. Realigning there snapped the
       // view straight back and made the left end unreachable.
+      fireStripResize()
+
+      expect(scrollIntoViewMock).not.toHaveBeenCalled()
+    })
+
+    it('leaves the strip alone once the user has moved it with the mouse wheel', async () => {
+      const { activeTab, strip } = await renderOverflowingStrip()
+      stubRect(activeTab, 640, 896)
+      let scrollLeft = 108
+      Object.defineProperty(strip, 'scrollLeft', {
+        configurable: true,
+        get: () => scrollLeft,
+        set: (value: number) => {
+          scrollLeft = value
+        },
+      })
+
+      fireEvent.wheel(strip, { deltaY: -60, deltaX: 0 })
+      expect(scrollLeft).toBe(48)
+      scrollIntoViewMock.mockClear()
+
+      // Moving away from the right edge brings its chevron back and narrows the
+      // strip. The resulting resize must not smooth-scroll back to the active tab.
       fireStripResize()
 
       expect(scrollIntoViewMock).not.toHaveBeenCalled()
