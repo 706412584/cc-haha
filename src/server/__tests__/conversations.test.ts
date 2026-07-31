@@ -5441,6 +5441,54 @@ describe('WebSocket Chat Integration', () => {
     }
   }, 20_000)
 
+  it('should persist the permission mode that preceded a CLI plan broadcast', async () => {
+    const createRes = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workDir: process.cwd(), permissionMode: 'bypassPermissions' }),
+    })
+    expect(createRes.status).toBe(201)
+    const { sessionId } = await createRes.json() as { sessionId: string }
+
+    const ws = new WebSocket(`${wsUrl}/ws/${sessionId}`)
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('Timed out starting plan broadcast session')), 10_000)
+        ws.onmessage = (event) => {
+          const msg = JSON.parse(event.data as string)
+          if (msg.type === 'connected') {
+            ws.send(JSON.stringify({ type: 'user_message', content: 'start plan broadcast session' }))
+          }
+          if (msg.type === 'message_complete') {
+            clearTimeout(timeout)
+            resolve()
+          }
+          if (msg.type === 'error') {
+            clearTimeout(timeout)
+            reject(new Error(msg.message))
+          }
+        }
+        ws.onerror = () => reject(new Error('WebSocket error starting plan broadcast session'))
+      })
+
+      conversationService.handleSdkPayload(sessionId, `${JSON.stringify({
+        type: 'system',
+        subtype: 'status',
+        status: null,
+        permissionMode: 'plan',
+      })}\n`)
+
+      await waitUntil(async () => {
+        const launchInfo = await sessionService.getSessionLaunchInfo(sessionId)
+        return launchInfo?.permissionMode === 'plan' &&
+          launchInfo.prePlanPermissionMode === 'bypassPermissions'
+      }, `persisted pre-plan permission mode for ${sessionId}`)
+    } finally {
+      ws.close()
+      conversationService.stopSession(sessionId)
+    }
+  }, 20_000)
+
   it('should ignore stale persisted runtime provider ids when resuming old sessions', async () => {
     const providerService = new ProviderService()
     const activeProvider = await providerService.addProvider({

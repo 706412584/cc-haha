@@ -421,16 +421,17 @@ export function buildProviderManagedEnv(
     ['sonnet', 'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES'],
     ['opus', 'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES'],
   ] as const
-  const matchedSlotCapabilities = matchingSlotCapabilities
+  const matchedSlot = matchingSlotCapabilities
     .find(([slot]) => models[slot].toLowerCase() === models.main.toLowerCase())
+  const matchedSlotCapabilities = matchedSlot
+    ? providerCapabilityEnv[matchedSlot[1]] ?? presetDefaultEnv[matchedSlot[1]]
+    : undefined
   const mainModelCapabilities = provider.presetId === 'custom'
     ? customProviderCapabilities
     : matchedSlotCapabilities
-      ? providerCapabilityEnv[matchedSlotCapabilities[1]]
-        ?? presetDefaultEnv[matchedSlotCapabilities[1]]
-      : models.main !== preset?.defaultModels.main
+      ?? (models.main !== preset?.defaultModels.main
         ? customProviderCapabilities
-        : presetDefaultEnv.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES
+        : presetDefaultEnv.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES)
 
   return {
     ...omitAuthEnv(presetDefaultEnv),

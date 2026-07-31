@@ -1401,6 +1401,50 @@ describe('ChatInput file mentions', () => {
     })
   })
 
+  it('loads a path-only image through the local file endpoint before annotation', async () => {
+    const imagePath = 'C:\\Users\\Nanmi\\Desktop\\path-only.png'
+    const fetchMock = vi.fn(async () => new Response(
+      new Blob(['png'], { type: 'image/png' }),
+      { status: 200 },
+    ))
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('Image', class {
+      naturalWidth = 400
+      naturalHeight = 300
+      onload: (() => void) | null = null
+      set src(_value: string) {
+        queueMicrotask(() => this.onload?.())
+      }
+    })
+    const context2d = {
+      clearRect: vi.fn(),
+      drawImage: vi.fn(),
+    } as unknown as CanvasRenderingContext2D
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation((
+      (contextId: string) => contextId === '2d' ? context2d : null
+    ) as HTMLCanvasElement['getContext'])
+
+    act(() => {
+      useChatStore.getState().queueComposerPrefill(sessionId, {
+        text: '',
+        mode: 'append',
+        attachments: [{
+          type: 'image',
+          name: 'path-only.png',
+          path: imagePath,
+          mimeType: 'image/png',
+        }],
+      })
+    })
+
+    render(<ChatInput compact />)
+    fireEvent.click(await screen.findByLabelText('Annotate path-only.png'))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining(`/api/filesystem/file?path=${encodeURIComponent(imagePath)}`),
+    ))
+  })
+
   it('previews and annotates a selected desktop JPG outside the filesystem allow-list', async () => {
     const createObjectURL = vi.fn(() => 'blob:selected-desktop-image')
     vi.stubGlobal('URL', { ...URL, createObjectURL })

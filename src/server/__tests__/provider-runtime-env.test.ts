@@ -5,6 +5,7 @@ import * as path from 'path'
 
 import {
   applyProviderRuntimeModel,
+  buildProviderManagedEnv,
   getManagedEnvKeys,
   mergeActiveProviderManagedEnv,
   readActiveProviderManagedEnv,
@@ -252,6 +253,27 @@ describe('providerRuntimeEnv', () => {
 
     expect(env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES).toBe(
       'thinking,effort,max_effort',
+    )
+  })
+
+  test('enables custom main-model capabilities when a duplicate slot has no capability declaration', () => {
+    const env = buildProviderManagedEnv({
+      id: 'provider-1',
+      presetId: 'jiekouai',
+      name: 'Local relay',
+      apiKey: 'provider-key',
+      baseUrl: 'http://127.0.0.1:18080',
+      apiFormat: 'anthropic',
+      models: {
+        main: 'grok-4.5',
+        haiku: 'grok-4.5-latest',
+        sonnet: 'composer-2.5',
+        opus: 'grok-4.5',
+      },
+    })
+
+    expect(env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES).toBe(
+      'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
     )
   })
 

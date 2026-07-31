@@ -169,6 +169,7 @@ export type SessionLaunchInfo = {
   transcriptMessageCount: number
   customTitle: string | null
   permissionMode?: string
+  prePlanPermissionMode?: string
   runtimeProviderId?: string | null
   runtimeModelId?: string
   effortLevel?: string
@@ -741,6 +742,7 @@ export class SessionService {
       workDir: string
       repository?: PreparedSessionWorkspace['repository']
       permissionMode?: string
+      prePlanPermissionMode?: string | null
       runtimeProviderId?: string | null
       runtimeModelId?: string
       effortLevel?: string
@@ -760,6 +762,12 @@ export class SessionService {
       metadata.permissionMode &&
       VALID_SESSION_PERMISSION_MODES.has(metadata.permissionMode) &&
       launchInfo.permissionMode !== metadata.permissionMode
+    ) {
+      return false
+    }
+    if (
+      metadata.prePlanPermissionMode !== undefined &&
+      launchInfo.prePlanPermissionMode !== (metadata.prePlanPermissionMode ?? undefined)
     ) {
       return false
     }
@@ -1442,6 +1450,23 @@ export class SessionService {
         VALID_SESSION_PERMISSION_MODES.has(permissionMode)
       ) {
         return permissionMode
+      }
+    }
+    return undefined
+  }
+
+  private resolvePrePlanPermissionModeFromEntries(entries: RawEntry[]): string | undefined {
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i]
+      if (entry?.type !== 'session-meta') continue
+      const prePlanPermissionMode = entry.prePlanPermissionMode
+      if (prePlanPermissionMode === null) return undefined
+      if (
+        typeof prePlanPermissionMode === 'string' &&
+        VALID_SESSION_PERMISSION_MODES.has(prePlanPermissionMode) &&
+        prePlanPermissionMode !== 'plan'
+      ) {
+        return prePlanPermissionMode
       }
     }
     return undefined
@@ -3981,6 +4006,7 @@ export class SessionService {
     const repository = this.resolveRepositoryFromEntries(entries)
     const worktreeSession = this.resolveWorktreeSessionFromEntries(entries)
     const permissionMode = this.resolvePermissionModeFromEntries(entries)
+    const prePlanPermissionMode = this.resolvePrePlanPermissionModeFromEntries(entries)
     let customTitle: string | null = null
     let runtimeProviderId: string | null | undefined
     let runtimeModelId: string | undefined
@@ -4037,6 +4063,7 @@ export class SessionService {
       transcriptMessageCount,
       customTitle,
       permissionMode,
+      ...(prePlanPermissionMode ? { prePlanPermissionMode } : {}),
       ...(runtimeProviderId !== undefined ? { runtimeProviderId } : {}),
       ...(runtimeModelId ? { runtimeModelId } : {}),
       ...(effortLevel ? { effortLevel } : {}),
@@ -4082,6 +4109,9 @@ export class SessionService {
     )
       ? preservedPermissionMode
       : this.resolvePermissionModeFromEntries(entries)
+    const prePlanPermissionMode = permissionMode === 'plan'
+      ? this.resolvePrePlanPermissionModeFromEntries(entries)
+      : undefined
     const now = new Date().toISOString()
 
     const initialEntry = {
@@ -4101,6 +4131,7 @@ export class SessionService {
       workDir,
       repository,
       ...(permissionMode ? { permissionMode } : {}),
+      ...(prePlanPermissionMode ? { prePlanPermissionMode } : {}),
       timestamp: now,
     }
 
@@ -4120,6 +4151,7 @@ export class SessionService {
       customTitle?: string | null
       repository?: PreparedSessionWorkspace['repository']
       permissionMode?: string
+      prePlanPermissionMode?: string | null
       runtimeProviderId?: string | null
       runtimeModelId?: string
       effortLevel?: string
@@ -4163,6 +4195,9 @@ export class SessionService {
       repository,
       ...(metadata.permissionMode && VALID_SESSION_PERMISSION_MODES.has(metadata.permissionMode)
         ? { permissionMode: metadata.permissionMode }
+        : {}),
+      ...(metadata.prePlanPermissionMode !== undefined
+        ? { prePlanPermissionMode: metadata.prePlanPermissionMode }
         : {}),
       ...(metadata.runtimeProviderId !== undefined
         ? { runtimeProviderId: metadata.runtimeProviderId }
