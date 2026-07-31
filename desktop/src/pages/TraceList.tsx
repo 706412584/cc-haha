@@ -2,8 +2,6 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { ExternalLink, RefreshCw, Trash2, Workflow } from 'lucide-react'
 import { tracesApi } from '../api/traces'
-import { SETTINGS_TAB_ID, useTabStore } from '../stores/tabStore'
-import { useUIStore } from '../stores/uiStore'
 import { useTranslation } from '../i18n'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
@@ -14,6 +12,8 @@ import { ErrorState } from '@/components/ui/ErrorState'
 import { SearchField } from '@/components/ui/SearchField'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { getDesktopHost } from '../lib/desktopHost'
+import { buildTraceWindowUrl } from '../lib/traceLaunch'
+import { openTraceCaptureSettings, openTraceDetail } from '../lib/traceNavigation'
 import type { TraceSessionList, TraceSessionListItem } from '../types/trace'
 
 type TraceListState =
@@ -160,7 +160,7 @@ export function TraceList() {
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-2">
-              <Button size="base" variant="secondary" onClick={() => openTraceSettings(t)}>
+              <Button size="base" variant="secondary" onClick={openTraceCaptureSettings}>
                 {t('trace.list.settings')}
               </Button>
               <Button size="base" variant="secondary" onClick={() => void load()}>
@@ -213,7 +213,14 @@ export function TraceList() {
                 silent: true,
               })}
               onOpenWindow={(sessionId) => {
-                if (host.trace) void host.trace.openWindow(sessionId)
+                // Matches TraceSession's own header button: outside the desktop
+                // shell there is no native window to ask for, so fall back to a
+                // browser tab rather than leaving the control dead.
+                if (host.trace) {
+                  void host.trace.openWindow(sessionId)
+                  return
+                }
+                window.open(buildTraceWindowUrl(sessionId), '_blank', 'noopener,noreferrer')
               }}
               onDelete={setDeleteTarget}
             />
@@ -310,12 +317,14 @@ function TraceRow({
   const t = useTranslation()
   const title = getTraceTitle(trace, t)
   const updatedAt = trace.summary.updatedAt ?? trace.fileUpdatedAt
+  // The tab is titled with the session alone; the tab bar's trace glyph says
+  // what kind of tab it is, so a prefix here would only eat the visible width.
+  const open = () => openTraceDetail(trace.sessionId, title)
   const failedCalls = trace.summary.failedCalls
   const visibleModels = trace.summary.models.slice(0, MAX_MODEL_CHIPS)
   const hiddenModels = trace.summary.models.length - visibleModels.length
   const totalTokens = trace.summary.totalInputTokens + trace.summary.totalOutputTokens
 
-  const open = () => openTrace(trace.sessionId, title, t)
   const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (event.key !== 'Enter' && event.key !== ' ') return
     event.preventDefault()
@@ -376,17 +385,9 @@ function TraceRow({
           <MetricCell label={t('trace.tokens')} value={formatCompact(totalTokens)} />
         </div>
       </button>
-      <div className="flex w-[92px] shrink-0 items-center justify-end gap-1 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
-        <IconButton
-          size="sm"
-          tone="secondary"
-          label={t('trace.open')}
-          icon={<Workflow className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />}
-          onClick={(event) => {
-            event.stopPropagation()
-            open()
-          }}
-        />
+      {/* Opening the trace is what the row itself does — the row actions are
+          only for the two things a click cannot express. */}
+      <div className="flex w-[62px] shrink-0 items-center justify-end gap-1 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
         <IconButton
           size="sm"
           tone="secondary"
@@ -454,17 +455,8 @@ function TraceListSkeleton({ label }: { label: string }) {
   )
 }
 
-function openTrace(sessionId: string, title: string, t: ReturnType<typeof useTranslation>) {
-  useTabStore.getState().openTraceTab(sessionId, `${t('trace.title')}: ${title}`)
-}
-
 function getTraceTitle(trace: TraceSessionListItem, t: ReturnType<typeof useTranslation>): string {
   return trace.session?.title || t('session.untitled')
-}
-
-function openTraceSettings(t: ReturnType<typeof useTranslation>) {
-  useUIStore.getState().setPendingSettingsTab('general')
-  useTabStore.getState().openTab(SETTINGS_TAB_ID, t('sidebar.settings'), 'settings')
 }
 
 /** `claude-sonnet-4-5-20250929` -> `sonnet-4-5`; non-Claude ids pass through. */

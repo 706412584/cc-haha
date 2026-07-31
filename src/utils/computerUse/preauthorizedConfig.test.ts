@@ -1,17 +1,24 @@
 import { describe, expect, test } from 'bun:test'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   buildPreAuthorizedAppGrants,
-  DEFAULT_DESKTOP_GRANT_FLAGS,
+  loadStoredComputerUseConfigResult,
   parseStoredComputerUseConfig,
   resolveStoredComputerUseConfig,
 } from './preauthorizedConfig.js'
 
 describe('resolveStoredComputerUseConfig', () => {
-  test('keeps desktop grant flags enabled by default even without authorized apps', () => {
+  test('keeps desktop grant flags disabled until explicitly granted', () => {
     expect(resolveStoredComputerUseConfig()).toEqual({
       enabled: true,
       authorizedApps: [],
-      grantFlags: DEFAULT_DESKTOP_GRANT_FLAGS,
+      grantFlags: {
+        clipboardRead: false,
+        clipboardWrite: false,
+        systemKeyCombos: false,
+      },
       pythonPath: null,
     })
   })
@@ -23,23 +30,52 @@ describe('resolveStoredComputerUseConfig', () => {
     })
   })
 
-  test('merges stored grant flags without discarding unspecified defaults', () => {
+  test('honors explicit grant flags without enabling unspecified grants', () => {
     expect(
       resolveStoredComputerUseConfig({
         grantFlags: {
-          clipboardRead: false,
+          clipboardRead: true,
         },
       }),
     ).toEqual({
       enabled: true,
       authorizedApps: [],
       grantFlags: {
-        clipboardRead: false,
-        clipboardWrite: true,
-        systemKeyCombos: true,
+        clipboardRead: true,
+        clipboardWrite: false,
+        systemKeyCombos: false,
       },
       pythonPath: null,
     })
+  })
+
+  test('fails closed when the stored config file is missing', async () => {
+    const configDir = await mkdtemp(join(tmpdir(), 'cc-haha-cu-config-'))
+    const originalConfigDir = process.env.CLAUDE_CONFIG_DIR
+    process.env.CLAUDE_CONFIG_DIR = configDir
+
+    try {
+      await expect(loadStoredComputerUseConfigResult()).resolves.toEqual({
+        config: {
+          enabled: true,
+          authorizedApps: [],
+          grantFlags: {
+            clipboardRead: false,
+            clipboardWrite: false,
+            systemKeyCombos: false,
+          },
+          pythonPath: null,
+        },
+        error: null,
+      })
+    } finally {
+      if (originalConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = originalConfigDir
+      }
+      await rm(configDir, { recursive: true, force: true })
+    }
   })
 
   test('normalizes a stored custom Python interpreter path', () => {

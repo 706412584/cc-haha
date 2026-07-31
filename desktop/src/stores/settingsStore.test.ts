@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/client'
+import type { Locale } from '../i18n/locale'
 import { browserHost } from '../lib/desktopHost/browserHost'
 
 function createDeferred<T>() {
@@ -12,24 +13,150 @@ function createDeferred<T>() {
   return { promise, resolve, reject }
 }
 
+function mockSystemLanguages(languages: string[], language = languages[0] ?? '') {
+  vi.spyOn(window.navigator, 'languages', 'get').mockReturnValue(languages)
+  vi.spyOn(window.navigator, 'language', 'get').mockReturnValue(language)
+}
+
 describe('settingsStore locale defaults', () => {
   beforeEach(() => {
+    vi.restoreAllMocks()
     vi.resetModules()
     window.localStorage.clear()
   })
 
-  it('defaults to Chinese when no locale is stored', async () => {
-    const { useSettingsStore } = await import('./settingsStore')
-
-    expect(useSettingsStore.getState().locale).toBe('zh')
+  afterEach(() => {
+    delete window.desktopHost
   })
 
-  it('keeps a stored locale override', async () => {
-    window.localStorage.setItem('cc-haha-locale', 'en')
+  it.each([
+    ['en-GB', 'en'],
+    ['zh-CN', 'zh'],
+    ['zh-SG', 'zh'],
+    ['zh-Hant', 'zh-TW'],
+    ['zh-HK', 'zh-TW'],
+    ['ja-JP', 'jp'],
+    ['ko-KR', 'kr'],
+  ] as const)('maps the system language %s to %s', async (systemLanguage, expectedLocale) => {
+    mockSystemLanguages([systemLanguage])
+
+    const { useSettingsStore } = await import('./settingsStore')
+
+    expect(useSettingsStore.getState().locale).toBe(expectedLocale)
+  })
+
+  it('uses the first supported language in the system preference list', async () => {
+    mockSystemLanguages(['fr-FR', 'ja-JP', 'en-US'])
+
+    const { useSettingsStore } = await import('./settingsStore')
+
+    expect(useSettingsStore.getState().locale).toBe('jp')
+  })
+
+  it('defaults to English when no system language is supported', async () => {
+    mockSystemLanguages(['fr-FR', 'de-DE'])
 
     const { useSettingsStore } = await import('./settingsStore')
 
     expect(useSettingsStore.getState().locale).toBe('en')
+  })
+
+  it('keeps a stored locale override', async () => {
+    mockSystemLanguages(['en-US'])
+    window.localStorage.setItem('cc-haha-locale', 'zh-TW')
+
+    const { useSettingsStore } = await import('./settingsStore')
+
+    expect(useSettingsStore.getState().locale).toBe('zh-TW')
+    expect(document.documentElement.lang).toBe('zh-TW')
+
+    useSettingsStore.getState().setLocale('jp')
+
+    expect(window.localStorage.getItem('cc-haha-locale')).toBe('jp')
+    expect(document.documentElement.lang).toBe('ja')
+  })
+
+  it('persists a manual desktop choice and restores it after a simulated restart', async () => {
+    mockSystemLanguages(['zh-CN'])
+    const setLocalePreference = vi.fn().mockResolvedValue(undefined)
+    window.desktopHost = {
+      ...browserHost,
+      kind: 'electron',
+      isDesktop: true,
+      app: {
+        ...browserHost.app,
+        setLocalePreference,
+      },
+    }
+
+    const firstLoad = await import('./settingsStore')
+    firstLoad.useSettingsStore.getState().setLocale('jp')
+
+    await vi.waitFor(() => {
+      expect(setLocalePreference).toHaveBeenCalledWith('jp')
+    })
+    expect(window.localStorage.getItem('cc-haha-locale')).toBe('jp')
+
+    vi.resetModules()
+    mockSystemLanguages(['ko-KR'])
+    const restarted = await import('./settingsStore')
+
+    expect(restarted.useSettingsStore.getState().locale).toBe('jp')
+    expect(document.documentElement.lang).toBe('ja')
+  })
+
+  it('keeps the local choice when desktop persistence fails', async () => {
+    mockSystemLanguages(['en-US'])
+    const persistenceError = new Error('disk unavailable')
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    window.desktopHost = {
+      ...browserHost,
+      kind: 'electron',
+      isDesktop: true,
+      app: {
+        ...browserHost.app,
+        setLocalePreference: vi.fn().mockRejectedValue(persistenceError),
+      },
+    }
+
+    const { useSettingsStore } = await import('./settingsStore')
+    useSettingsStore.getState().setLocale('kr')
+
+    await vi.waitFor(() => {
+      expect(consoleError).toHaveBeenCalledWith(
+        '[desktop] Failed to persist locale preference',
+        persistenceError,
+      )
+    })
+    expect(useSettingsStore.getState().locale).toBe('kr')
+    expect(window.localStorage.getItem('cc-haha-locale')).toBe('kr')
+  })
+
+  it('applies a locale event from another desktop window', async () => {
+    mockSystemLanguages(['en-US'])
+    let emitLocale: ((locale: Locale) => void) | undefined
+    window.desktopHost = {
+      ...browserHost,
+      kind: 'electron',
+      isDesktop: true,
+      app: {
+        ...browserHost.app,
+        getLocalePreference: vi.fn().mockResolvedValue('en'),
+        onLocaleChanged: vi.fn(async (handler) => {
+          emitLocale = handler
+          return () => {}
+        }),
+      },
+    }
+
+    const { useSettingsStore } = await import('./settingsStore')
+    const { initializeLocale } = await import('../i18n/locale')
+    await initializeLocale(window.desktopHost.app)
+
+    emitLocale?.('zh-TW')
+
+    expect(useSettingsStore.getState().locale).toBe('zh-TW')
+    expect(document.documentElement.lang).toBe('zh-TW')
   })
 })
 

@@ -27,6 +27,7 @@ const COMPOSERS = {
   PermissionModeSelector: source('../controls/PermissionModeSelector.tsx'),
   ModelSelector: source('../controls/ModelSelector.tsx'),
 }
+const SLASH_COMMAND_MENU = source('./SlashCommandMenu.tsx')
 
 /** Every className string that also carries a floating-panel background. */
 function overlayPanelClassNames(code: string): string[] {
@@ -50,15 +51,15 @@ describe('composer overlay chrome', () => {
   }
 
   it('renders the same slash-menu chrome in both composers', () => {
-    const slashMenu = (code: string) => {
-      const line = code.split('\n').find((candidate) => candidate.includes('absolute bottom-full left-0 right-0'))
-      expect(line).toBeDefined()
-      return line!
+    for (const [name, code] of Object.entries({
+      ChatInput: COMPOSERS.ChatInput,
+      EmptySession: COMPOSERS.EmptySession,
+    })) {
+      expect(code, `${name} must render the shared slash menu`).toContain('<SlashCommandMenu')
     }
 
     for (const token of [OVERLAY_RADIUS, 'border-[var(--color-border)]', 'bg-[var(--color-surface-container-lowest)]']) {
-      expect(slashMenu(COMPOSERS.ChatInput)).toContain(token)
-      expect(slashMenu(COMPOSERS.EmptySession)).toContain(token)
+      expect(SLASH_COMMAND_MENU).toContain(token)
     }
   })
 })

@@ -1,5 +1,6 @@
 <!doctype html>
-<html lang="zh-CN">  <head>
+<html lang="zh-CN">
+  <head>
     <meta charset="UTF-8" />
     <!--
       Conservative CSP: hardens default/object/base-uri without breaking the app.
@@ -13,14 +14,30 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob: https: http://127.0.0.1:* http://localhost:*; connect-src 'self' https: http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*; worker-src 'self' blob:; object-src 'none'; base-uri 'self'"
     />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      `viewport-fit=cover` MUST live here, in the markup. iOS WebKit reads the
+      viewport meta once while parsing the document; rewriting it later from JS
+      (touchH5.ts does, to pin the scale) never re-runs that decision. Without
+      cover the page is laid out inside the safe area, every
+      env(safe-area-inset-*) resolves to 0px, and the browser paints its own
+      gray bar behind the status bar instead of the app's own background.
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!--
+      Colors the iOS status bar / Android address bar. Kept in step with the
+      resolved palette by the theme script below and by applyTheme() at runtime,
+      so a dark palette does not sit under light browser chrome. Safari only
+      guesses from the page otherwise, and guesses gray here.
+    -->
+    <meta name="theme-color" content="#FFFFFF" />
     <title>Code Council</title>
     <!--
       The Electron window draws its own chrome, but this same document is what
       the H5 remote client loads in a phone browser, where a missing favicon
       means a blank tab and a screenshot for "add to home screen".
     -->
-    <link rel="icon" href="/app-icon.png" type="image/png" />    <!-- Fonts are self-hosted in /fonts/ and declared via @font-face in globals.css -->
+    <link rel="icon" href="/app-icon.png" type="image/png" />
+    <!-- Fonts are self-hosted in /fonts/ and declared via @font-face in globals.css -->
     <script>
       if (new URLSearchParams(window.location.search).get('petWindow') === '1') {
         document.documentElement.dataset.windowKind = 'pet'
@@ -47,6 +64,25 @@
           var DARK = ['dark', 'ink-blue', 'classic-dark']
           var has = function (list, value) { return list.indexOf(value) !== -1 }
           var isDark = function (value) { return has(DARK, value) }
+          // Mirrors THEME_BACKGROUNDS in src/theme/systemAppearance.ts; the
+          // <style> block below and bootstrapScript.test.ts hold all three
+          // copies to the same values.
+          var BACKGROUND = {
+            white: '#FFFFFF',
+            paper: '#FBF9F4',
+            'warm-classic': '#F6F0E1',
+            celadon: '#F5F8F5',
+            dark: '#201D17',
+            'ink-blue': '#1A1D24',
+            'classic-white': '#FFFFFF',
+            'classic-light': '#FAF9F5',
+            'eye-care': '#EAF6EF',
+            'classic-dark': '#0E0E0E'
+          }
+          var paintBrowserChrome = function (value) {
+            var meta = document.querySelector('meta[name="theme-color"]')
+            if (meta && BACKGROUND[value]) meta.setAttribute('content', BACKGROUND[value])
+          }
 
           var stored = read('cc-haha-theme')
           var theme = (has(LIGHT, stored) || isDark(stored)) ? stored : 'white'
@@ -74,6 +110,7 @@
 
           document.documentElement.setAttribute('data-theme', theme)
           document.documentElement.style.colorScheme = isDark(theme) ? 'dark' : 'light'
+          paintBrowserChrome(theme)
         } catch (_) {
           // `theme` is function-scoped, so a failure after it was resolved
           // still applies the user's stored choice rather than flashing white.

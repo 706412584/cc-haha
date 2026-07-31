@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import type { ComponentProps } from 'react'
+import { useState, type ComponentProps } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import '@testing-library/jest-dom'
 
@@ -28,23 +28,30 @@ vi.mock('../../api/sessions', () => ({
 }))
 
 // Must match the component's own import specifier, or the mock silently does
-// nothing and the real picker renders. It moved to composite/ in the directory
+// nothing and the real panel renders. It moved to composite/ in the directory
 // reshuffle and this path was left behind.
 vi.mock('@/components/composite/DirectoryPicker', () => ({
-  DirectoryPicker: ({ value }: { value: string }) => (
-    <button type="button" role="menuitem">Project {value}</button>
+  RecentProjectsPanel: ({ value, onSelect }: { value: string; onSelect: (path: string) => void }) => (
+    <div data-testid="recent-projects-panel">
+      <span>Current {value || 'none'}</span>
+      <button type="button" onClick={() => onSelect('/repo')}>Pick /repo</button>
+      <button type="button" onClick={() => onSelect('/tmp/plain')}>Pick /tmp/plain</button>
+    </div>
   ),
 }))
 
 vi.mock('../../i18n', () => ({
   useTranslation: () => (key: string) => ({
     'common.loading': 'Loading',
+    'dirPicker.directory': 'Directory',
     'dirPicker.selectProject': 'Select a project',
     'repoLaunch.branch': 'Branch',
     'repoLaunch.checkedOut': 'Checked out',
     'repoLaunch.checkedOutWarning': 'Branch is checked out elsewhere',
+    'repoLaunch.checkedOutWarningCompact': 'Branch already checked out',
     'repoLaunch.currentBranch': 'Current branch',
     'repoLaunch.dirtyWarning': 'Dirty worktree',
+    'repoLaunch.dirtyWarningCompact': 'Uncommitted changes',
     'repoLaunch.launchLocation': 'Location',
     'repoLaunch.localBranch': 'Local branch',
     'repoLaunch.missingWorkdir': 'Missing working directory',
@@ -96,6 +103,20 @@ const okRepositoryContext = {
   ],
 }
 
+function notGitContext(workDir: string) {
+  return {
+    state: 'not_git_repo' as const,
+    workDir,
+    repoRoot: null,
+    repoName: null,
+    currentBranch: null,
+    defaultBranch: null,
+    dirty: false,
+    branches: [],
+    worktrees: [],
+  }
+}
+
 function renderControls(props: Partial<ComponentProps<typeof RepositoryLaunchControls>> = {}) {
   const defaultProps: ComponentProps<typeof RepositoryLaunchControls> = {
     workDir: '/repo',
@@ -109,9 +130,37 @@ function renderControls(props: Partial<ComponentProps<typeof RepositoryLaunchCon
   return render(<RepositoryLaunchControls {...defaultProps} {...props} />)
 }
 
+/**
+ * The pill drives `workDir` through its parent, so anything that asserts what
+ * happens *after* a directory is picked needs the prop to actually come back
+ * down changed.
+ */
+function ControlledHarness({ initialWorkDir = '' }: { initialWorkDir?: string }) {
+  const [workDir, setWorkDir] = useState(initialWorkDir)
+  const [branch, setBranch] = useState<string | null>(null)
+
+  return (
+    <RepositoryLaunchControls
+      workDir={workDir}
+      onWorkDirChange={setWorkDir}
+      branch={branch}
+      onBranchChange={setBranch}
+      useWorktree={false}
+      onUseWorktreeChange={vi.fn()}
+    />
+  )
+}
+
 /** Opens the pill's root menu. */
 async function openPill() {
   const pill = await screen.findByRole('button', { name: 'Location: cc-haha / main' })
+  fireEvent.click(pill)
+  return pill
+}
+
+/** Opens the pill on a fresh session, where it lands on the directory list. */
+async function openEmptyPill() {
+  const pill = await screen.findByRole('button', { name: 'Location: Select a project' })
   fireEvent.click(pill)
   return pill
 }
@@ -166,7 +215,7 @@ describe('RepositoryLaunchControls', () => {
     await openPill()
 
     const menu = await screen.findByRole('menu', { name: 'Location' })
-    expect(within(menu).getByRole('menuitem', { name: /Project \/repo/ })).toBeInTheDocument()
+    expect(within(menu).getByRole('menuitem', { name: /Directory/ })).toBeInTheDocument()
     expect(within(menu).getByRole('menuitem', { name: /Branch/ })).toBeInTheDocument()
 
     const current = within(menu).getByRole('menuitemradio', { name: /Current worktree/ })
@@ -274,6 +323,35 @@ describe('RepositoryLaunchControls', () => {
     expect(pill).toHaveClass('h-10')
   })
 
+  it('keeps a dirty-branch warning compact and inline in the toolbar', async () => {
+    apiMocks.getRepositoryContext.mockResolvedValue({
+      ...okRepositoryContext,
+      dirty: true,
+    })
+
+    renderControls({ branch: 'feature/h5', placement: 'toolbar' })
+
+    const warning = await screen.findByRole('status', { name: 'Dirty worktree' })
+    expect(warning).toHaveTextContent('Uncommitted changes')
+    expect(warning).toHaveAttribute('title', 'Dirty worktree')
+    expect(within(warning).getByText('Uncommitted changes')).toHaveClass('hidden', '2xl:inline')
+    expect(warning.parentElement).toHaveClass('flex-row')
+    expect(screen.queryByText('Dirty worktree')).not.toBeInTheDocument()
+  })
+
+  it('keeps the complete dirty-branch explanation outside the toolbar', async () => {
+    apiMocks.getRepositoryContext.mockResolvedValue({
+      ...okRepositoryContext,
+      dirty: true,
+    })
+
+    renderControls({ branch: 'feature/h5', placement: 'outside' })
+
+    expect(await screen.findByRole('status', { name: 'Dirty worktree' }))
+      .toHaveTextContent('Dirty worktree')
+    expect(screen.queryByText('Uncommitted changes')).not.toBeInTheDocument()
+  })
+
   // The dropdown used to close on its own `mousedown` listener, which does not
   // fire reliably for touch input — the "tapping outside doesn't close the
   // menu" shape of bug on the H5 build. `useDismissable` listens on
@@ -300,24 +378,19 @@ describe('RepositoryLaunchControls', () => {
     expect(screen.getByRole('menu', { name: 'Location' })).toBeInTheDocument()
   })
 
-  // The nested directory picker portals its dropdown to the body, so without
-  // the `isExempt` escape hatch a click inside it reads as "outside" this menu
-  // and tears down the trigger that opened it.
-  it('stays open while the nested directory picker is being used', async () => {
+  // The directory list used to be a nested picker that portalled its own
+  // dropdown to the body, so a pointer down inside it read as "outside" this
+  // menu and needed an `isExempt` escape hatch to avoid tearing down the
+  // trigger that opened it. It is one of this menu's own views now.
+  it('stays open while the directory view is being used', async () => {
     renderControls()
     await openPill()
-    await screen.findByRole('menu', { name: 'Location' })
+    fireEvent.click(await screen.findByRole('menuitem', { name: /Directory/ }))
 
-    const pickerMenu = document.createElement('div')
-    pickerMenu.setAttribute('data-testid', 'directory-picker-menu')
-    const row = document.createElement('button')
-    pickerMenu.appendChild(row)
-    document.body.appendChild(pickerMenu)
+    const panel = await screen.findByTestId('recent-projects-panel')
+    fireEvent.pointerDown(panel)
 
-    fireEvent.pointerDown(row)
-
-    expect(screen.getByRole('menu', { name: 'Location' })).toBeInTheDocument()
-    pickerMenu.remove()
+    expect(screen.getByTestId('recent-projects-panel')).toBeInTheDocument()
   })
 
   it('closes the menu on Escape', async () => {
@@ -351,9 +424,125 @@ describe('RepositoryLaunchControls', () => {
     expect(within(pill).getByText('scratch')).toBeInTheDocument()
 
     fireEvent.click(pill)
-    const menu = await screen.findByRole('menu', { name: 'Location' })
-    // No branch or worktree rows without a repo — only the directory.
-    expect(within(menu).queryByRole('menuitem', { name: /Branch/ })).not.toBeInTheDocument()
-    expect(within(menu).queryByRole('menuitemradio')).not.toBeInTheDocument()
+    // No branch or worktree rows without a repo, so the root view would hold a
+    // lone directory row — the menu opens on the directory list instead.
+    expect(await screen.findByTestId('recent-projects-panel')).toBeInTheDocument()
+    expect(screen.queryByRole('menu', { name: 'Location' })).not.toBeInTheDocument()
+  })
+
+  /**
+   * The pill's menu was built around a repo it already had: directory, branch
+   * and worktree. In a fresh session `isGitReady` is false, both of the latter
+   * are gone, and the root view collapsed to a single "Directory" row that
+   * existed only to open a second dropdown. These pin the escape from it.
+   */
+  describe('directory view', () => {
+    it('opens straight on the directory list when no directory is picked yet', async () => {
+      renderControls({ workDir: '', branch: null })
+      await openEmptyPill()
+
+      expect(await screen.findByTestId('recent-projects-panel')).toBeInTheDocument()
+      expect(screen.queryByRole('menu', { name: 'Location' })).not.toBeInTheDocument()
+    })
+
+    it('offers no way back to the root view while it would still be empty', async () => {
+      renderControls({ workDir: '', branch: null })
+      await openEmptyPill()
+      await screen.findByTestId('recent-projects-panel')
+
+      // Going back would land on the single-row shell this view exists to skip.
+      expect(screen.queryByRole('button', { name: 'Directory' })).not.toBeInTheDocument()
+    })
+
+    it('drills into the directory view and back out again once there is a repo', async () => {
+      renderControls()
+      await openPill()
+      fireEvent.click(await screen.findByRole('menuitem', { name: /Directory/ }))
+
+      expect(await screen.findByTestId('recent-projects-panel')).toBeInTheDocument()
+      expect(screen.queryByRole('menu', { name: 'Location' })).not.toBeInTheDocument()
+
+      fireEvent.click(screen.getByRole('button', { name: 'Directory' }))
+
+      expect(await screen.findByRole('menu', { name: 'Location' })).toBeInTheDocument()
+      expect(screen.queryByTestId('recent-projects-panel')).not.toBeInTheDocument()
+    })
+
+    it('reveals branch and worktree in the root view after a repo is picked', async () => {
+      render(<ControlledHarness />)
+      await openEmptyPill()
+      fireEvent.click(await screen.findByRole('button', { name: 'Pick /repo' }))
+
+      // The menu stays open and swings back to the root view, where the rows
+      // that were missing a moment ago are now populated.
+      const menu = await screen.findByRole('menu', { name: 'Location' })
+      expect(await within(menu).findByRole('menuitem', { name: /Branch/ })).toBeInTheDocument()
+      expect(within(menu).getAllByRole('menuitemradio')).toHaveLength(2)
+    })
+
+    it('closes the menu when the picked directory turns out not to be a repo', async () => {
+      apiMocks.getRepositoryContext.mockResolvedValue({
+        state: 'not_git_repo',
+        workDir: '/tmp/plain',
+        repoRoot: null,
+        repoName: null,
+        currentBranch: null,
+        defaultBranch: null,
+        dirty: false,
+        branches: [],
+        worktrees: [],
+      })
+
+      render(<ControlledHarness />)
+      await openEmptyPill()
+      fireEvent.click(await screen.findByRole('button', { name: 'Pick /tmp/plain' }))
+
+      // Nothing left to reveal, so holding the menu open would just be a shell.
+      await waitFor(() => {
+        expect(screen.queryByRole('menu', { name: 'Location' })).not.toBeInTheDocument()
+      })
+      expect(screen.queryByTestId('recent-projects-panel')).not.toBeInTheDocument()
+    })
+
+    /**
+     * On the render right after a pick, `context` still describes the *old*
+     * directory and `loading` has not flipped to true yet. Resolving the
+     * pending pick against it decides on the wrong repo — and because the
+     * pending state is cleared at the same time, nothing ever corrects it.
+     * Both directions below fail in opposite ways without the identity check.
+     */
+    it('does not judge a plain folder by the repo it replaced', async () => {
+      apiMocks.getRepositoryContext.mockImplementation(async (dir: string) => (
+        dir === '/repo' ? okRepositoryContext : notGitContext(dir)
+      ))
+
+      render(<ControlledHarness initialWorkDir="/repo" />)
+      await openPill()
+      fireEvent.click(await screen.findByRole('menuitem', { name: /Directory/ }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Pick /tmp/plain' }))
+
+      // Reading the stale `ok` context here would hold the menu open on the
+      // old repo's branch and worktree rows.
+      await waitFor(() => {
+        expect(screen.queryByRole('menu', { name: 'Location' })).not.toBeInTheDocument()
+      })
+      expect(screen.queryByTestId('recent-projects-panel')).not.toBeInTheDocument()
+    })
+
+    it('does not judge a repo by the plain folder it replaced', async () => {
+      apiMocks.getRepositoryContext.mockImplementation(async (dir: string) => (
+        dir === '/repo' ? okRepositoryContext : notGitContext(dir)
+      ))
+
+      render(<ControlledHarness initialWorkDir="/tmp/plain" />)
+      fireEvent.click(await screen.findByRole('button', { name: 'Location: plain' }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Pick /repo' }))
+
+      // Reading the stale `not_git_repo` context here would close the menu on
+      // a repo that does have a branch and worktree modes to offer.
+      const menu = await screen.findByRole('menu', { name: 'Location' })
+      expect(await within(menu).findByRole('menuitem', { name: /Branch/ })).toBeInTheDocument()
+      expect(within(menu).getAllByRole('menuitemradio')).toHaveLength(2)
+    })
   })
 })

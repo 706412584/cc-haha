@@ -44,11 +44,18 @@ import { createEditBubble } from './editBubble'
   let activeBubble: { destroy: () => void } | null = null
   const picker = createPicker({ onSelect: () => {} })
 
-  const teardown = () => {
+  // 只做页面侧清理。宿主的 picker 授权由 selection / picker-exited 之一消费，
+  // 所以产出 selection 的路径必须走这个函数，绝不能再补发 picker-exited。
+  const closePicker = () => {
     activeBubble?.destroy()
     activeBubble = null
     pickerOn = false
     picker.exit()
+  }
+
+  // 本次拾取结束但没有产出 selection：通知宿主解除授权、复位按钮态。
+  const teardown = () => {
+    closePicker()
     bridge.send({ type: 'picker-exited' })
   }
 
@@ -88,7 +95,9 @@ import { createEditBubble } from './editBubble'
     pickerOn = false   // stop hovering; keep highlight on the selected element while the bubble is open
     if (!(el instanceof HTMLElement)) { teardown(); return }
     activeBubble = createEditBubble(el, {
-      onConfirm: (change) => { teardown(); void emitSelection(el, change) },
+      // selection 自带「本次拾取结束」的语义，宿主收到后会自行复位 picker 态。
+      // 若这里先发 picker-exited，宿主会把授权解除在前、selection 到达在后而丢弃它。
+      onConfirm: (change) => { closePicker(); void emitSelection(el, change) },
       onCancel: () => { teardown() },
     })
   }, true)

@@ -112,12 +112,20 @@ export class AdapterHttpClient {
   }
 
   async createSession(workDir: string): Promise<string> {
+    const allowedWorkDir = this.resolveAllowedProjectPath(workDir)
+    if (!allowedWorkDir) {
+      throw new Error('Failed to create session: workDir is outside the configured project roots')
+    }
+
     const { controller, timer } = this.createTimeoutController()
     try {
       const res = await this.request('/api/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workDir }),
+        body: JSON.stringify({
+          workDir: allowedWorkDir,
+          permissionMode: 'default',
+        }),
         signal: controller.signal,
       })
       if (!res.ok) {
@@ -142,7 +150,13 @@ export class AdapterHttpClient {
         const err = await res.json().catch(() => ({ message: res.statusText }))
         throw new Error(`Failed to check session: ${(err as any).message}`)
       }
-      return true
+      const data = (await res.json()) as {
+        status?: {
+          workDir?: string
+          permissionMode?: string
+        }
+      }
+      return this.isSafeRemoteSession(data.status)
     } finally {
       clearTimeout(timer)
     }
@@ -158,7 +172,9 @@ export class AdapterHttpClient {
         throw new Error(`Failed to list projects: ${res.statusText}`)
       }
       const data = (await res.json()) as { projects: RecentProject[] }
-      return data.projects
+      return data.projects.filter((project) =>
+        this.resolveAllowedProjectPath(project.realPath || project.projectPath),
+      )
     } finally {
       clearTimeout(timer)
     }
@@ -169,11 +185,10 @@ export class AdapterHttpClient {
    * Returns { project, ambiguous[] } — ambiguous is set when multiple projects match.
    */
   async matchProject(query: string): Promise<{ project?: RecentProject; ambiguous?: RecentProject[] }> {
-    const directPath = resolveExistingProjectPath(query)
-    if (directPath) {
-      if (!isPathWithinAllowedRoots(directPath, this.allowedProjectRoots)) {
-        return {}
-      }
+    const resolvedDirectPath = resolveExistingProjectPath(query)
+    if (resolvedDirectPath) {
+      const directPath = this.resolveAllowedProjectPath(resolvedDirectPath)
+      if (!directPath) return {}
 
       return {
         project: {
@@ -253,6 +268,10 @@ export class AdapterHttpClient {
     limit?: number
     offset?: number
   }): Promise<{ sessions: SessionListItem[]; total: number }> {
+    if (options?.project && !this.resolveAllowedProjectPath(options.project)) {
+      return { sessions: [], total: 0 }
+    }
+
     const params = new URLSearchParams()
     if (options?.project) params.set('project', options.project)
     if (options?.limit !== undefined) params.set('limit', String(options.limit))
@@ -268,7 +287,12 @@ export class AdapterHttpClient {
         const err = await res.json().catch(() => ({ message: res.statusText }))
         throw new Error(`Failed to list sessions: ${(err as any).message}`)
       }
-      return (await res.json()) as { sessions: SessionListItem[]; total: number }
+      const data = (await res.json()) as { sessions: SessionListItem[]; total: number }
+      const sessions = data.sessions.filter((session) => this.isSafeRemoteSession({
+        workDir: session.workDir,
+        permissionMode: session.permissionMode,
+      }))
+      return { sessions, total: sessions.length }
     } finally {
       clearTimeout(timer)
     }
@@ -335,7 +359,12 @@ export class AdapterHttpClient {
   }
 
   async listSkills(cwd: string): Promise<{ skills: SkillSummary[] }> {
-    const params = new URLSearchParams({ cwd })
+    const allowedCwd = this.resolveAllowedProjectPath(cwd)
+    if (!allowedCwd) {
+      throw new Error('Failed to list skills: cwd is outside the configured project roots')
+    }
+
+    const params = new URLSearchParams({ cwd: allowedCwd })
     const { controller, timer } = this.createTimeoutController()
     try {
       const res = await this.request(`/api/skills?${params.toString()}`, {
@@ -383,6 +412,24 @@ export class AdapterHttpClient {
     } finally {
       clearTimeout(timer)
     }
+  }
+
+  private resolveAllowedProjectPath(value: string | null | undefined): string | null {
+    if (!value) return null
+    const resolved = resolveExistingProjectPath(value)
+    if (!resolved || !isPathWithinAllowedRoots(resolved, this.allowedProjectRoots)) {
+      return null
+    }
+    return resolved
+  }
+
+  private isSafeRemoteSession(
+    status: { workDir?: string | null; permissionMode?: string } | undefined,
+  ): boolean {
+    if (!status?.workDir || status.permissionMode === 'bypassPermissions') {
+      return false
+    }
+    return Boolean(this.resolveAllowedProjectPath(status.workDir))
   }
 }
 

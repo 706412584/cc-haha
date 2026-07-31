@@ -46,6 +46,40 @@ function isImageTarget(target) {
   return /\.(?:avif|gif|jpe?g|png|svg|webp)$/i.test(withoutSuffix(target))
 }
 
+/**
+ * 语言分流的判定规则在两处各有一份：src/lib/locale.js（可测的模块）和 index.html 里的内联
+ * 副本（首帧就要跳，等不到模块加载）。两处漂移不会报错，只会让首页悄悄按旧规则分流，所以
+ * 在这里钉死：storage key 和中文判定正则必须逐字一致，且内联脚本必须只在根路径动手。
+ */
+async function checkLocaleRedirect() {
+  const problems = []
+  const moduleSource = await fs.readFile(path.join(paths.siteDir, 'src/lib/locale.js'), 'utf8')
+  const shellSource = await fs.readFile(path.join(paths.siteDir, 'index.html'), 'utf8')
+
+  const storageKey = moduleSource.match(/LOCALE_STORAGE_KEY\s*=\s*'([^']+)'/)?.[1]
+  const chineseTag = moduleSource.match(/const CHINESE_TAG\s*=\s*(\/.+\/i)/)?.[1]
+
+  if (!storageKey || !chineseTag) {
+    problems.push('src/lib/locale.js: 读不出 LOCALE_STORAGE_KEY 或 CHINESE_TAG，防漂移校验失效')
+    return problems
+  }
+
+  if (!shellSource.includes(`localStorage.getItem('${storageKey}')`)) {
+    problems.push(`index.html: 内联语言脚本没有用 '${storageKey}'，与 src/lib/locale.js 不一致`)
+  }
+
+  if (!shellSource.includes(chineseTag)) {
+    problems.push(`index.html: 内联语言脚本的中文判定与 src/lib/locale.js 的 ${chineseTag} 不一致`)
+  }
+
+  // 少了这道判断，/en/start 这类地址也会被卷进分流。
+  if (!shellSource.includes("window.location.pathname.replace(/\\/+$/, '') !== ''")) {
+    problems.push('index.html: 内联语言脚本缺少「只在根路径生效」的判断')
+  }
+
+  return problems
+}
+
 async function main() {
   const { records } = await generateDocsManifest()
   const routes = new Set([
@@ -55,7 +89,7 @@ async function main() {
     '/en/docs',
     ...records.map((record) => record.path),
   ])
-  const problems = []
+  const problems = [...await checkLocaleRedirect()]
   let checkedTargets = 0
 
   for (const record of records) {

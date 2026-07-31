@@ -39,6 +39,11 @@ import type {
   TokenUsage,
   PermissionUpdate,
 } from '../types/chat'
+import type {
+  SlashCommandKind,
+  SlashCommandOption,
+  SlashCommandSource,
+} from '../types/slashCommand'
 
 type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'reconnecting'
 type ToolCall = Extract<UIMessage, { type: 'tool_use' }>
@@ -150,7 +155,7 @@ export type PerSessionState = {
   apiRetry?: ApiRetryState | null
   // 流式恢复/非流式降级提示（活动回合状态，与 apiRetry 同清除时机）。
   streamingFallback?: StreamingFallbackState | null
-  slashCommands: Array<{ name: string; description: string; argumentHint?: string }>
+  slashCommands: SlashCommandOption[]
   agentTaskNotifications: Record<string, AgentTaskNotification>
   backgroundAgentTasks?: Record<string, BackgroundAgentTask>
   stoppingBackgroundTaskIds?: Record<string, boolean>
@@ -783,6 +788,21 @@ function appendAssistantTextMessage(
   ) {
     return messages
   }
+  // 上面那道只在尾部仍是那条 hydrated 消息时才够得着。整轮重放时，正文到达前
+  // 尾部早被 thinking / tool_result 顶掉了，于是重复的回复照样追加进来。
+  // 这里比的是"逐字相同"而不是子串：整段重发的正文会与某条 hydrated 回复完全一致，
+  // 而正常流式送来的是碎片（碎片几乎必然是某条历史回复的子串，用子串判定会误伤）。
+  if (
+    !transcriptMessageId &&
+    messages.some(
+      (message) =>
+        message.type === 'assistant_text' &&
+        message.transcriptMessageId &&
+        message.content.trim() === trimmedContent,
+    )
+  ) {
+    return messages
+  }
 
   const canMergeIntoLast =
     last?.type === 'assistant_text' &&
@@ -1194,14 +1214,30 @@ type SlashCommandState = PerSessionState['slashCommands'][number]
 
 function normalizeSlashCommand(command: unknown): SlashCommandState | null {
   if (!command || typeof command !== 'object') return null
-  const candidate = command as { name?: unknown; description?: unknown; argumentHint?: unknown }
+  const candidate = command as {
+    name?: unknown
+    description?: unknown
+    argumentHint?: unknown
+    kind?: unknown
+    source?: unknown
+  }
   if (typeof candidate.name !== 'string' || !candidate.name) return null
+  const kind: SlashCommandKind | undefined =
+    candidate.kind === 'command' || candidate.kind === 'skill' || candidate.kind === 'agent'
+      ? candidate.kind
+      : undefined
+  const source: SlashCommandSource | undefined =
+    candidate.source === 'user' || candidate.source === 'project' || candidate.source === 'plugin'
+      ? candidate.source
+      : undefined
   return {
     name: candidate.name,
     description: typeof candidate.description === 'string' ? candidate.description : '',
     ...(typeof candidate.argumentHint === 'string' && candidate.argumentHint
       ? { argumentHint: candidate.argumentHint }
       : {}),
+    ...(kind ? { kind } : {}),
+    ...(source ? { source } : {}),
   }
 }
 
@@ -1220,7 +1256,18 @@ function mergeSlashCommandUpdates(
     if (command.name) merged.set(command.name, command)
   }
   for (const command of incoming) {
-    if (command.name) merged.set(command.name, command)
+    if (!command.name) continue
+    const currentCommand = merged.get(command.name)
+    merged.set(command.name, {
+      ...currentCommand,
+      ...command,
+      ...(command.kind ?? currentCommand?.kind
+        ? { kind: command.kind ?? currentCommand?.kind }
+        : {}),
+      ...(command.source ?? currentCommand?.source
+        ? { source: command.source ?? currentCommand?.source }
+        : {}),
+    })
   }
   return [...merged.values()]
 }
@@ -1423,9 +1470,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   sendMessage: (sessionId, content, attachments, options) => {
-    // A fresh user send takes priority over any paused queue: clear the pause
-    // so this message fires now, and the queue resumes on the next idle.
+    // A fresh user send takes priority over any paused queue and starts a new
+    // turn, so late retry/fallback events from the stopped turn no longer apply.
     queueDrainPaused.delete(sessionId)
+    stoppedTurns.delete(sessionId)
     const isMemberSession = !!useTeamStore.getState().getMemberBySessionId(sessionId)
     const hideDisplayContent = !isMemberSession && options?.hideDisplayContent === true
     const userFacingContent =
@@ -1878,7 +1926,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           ...s.sessions,
           [sessionId]: {
             ...session,
-            streamingText: `${session.streamingText}${stoppedDelta}`,
+            messages: markPendingToolUseMessagesStopped(
+              `${session.streamingText}${stoppedDelta}`.trim()
+                ? appendAssistantTextMessage(
+                    session.messages,
+                    `${session.streamingText}${stoppedDelta}`,
+                    Date.now(),
+                  )
+                : session.messages,
+            ),
+            streamingText: '',
+            streamingToolInput: '',
+            activeToolUseId: null,
+            activeToolName: null,
+            activeThinkingId: null,
             chatState: 'idle',
             pendingPermission: null,
             pendingPermissions: {},
@@ -1901,51 +1962,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (!task || task.status !== 'running' || session?.stoppingBackgroundTaskIds?.[taskId]) return
 
     set((state) => ({
-      sessions: updateSessionIn(state.sessions, sessionId, (current) => {
-        const toolUseId = task.toolUseId
-        return {
-          messages: toolUseId
-            ? current.messages.map((message) =>
-                message.type === 'tool_use' && message.toolUseId === toolUseId
-                  ? { ...message, status: 'stopped' as const }
-                  : message,
-              )
-            : current.messages,
-          backgroundAgentTasks: current.backgroundAgentTasks
-            ? {
-                ...current.backgroundAgentTasks,
-                [taskId]: {
-                  ...current.backgroundAgentTasks[taskId]!,
-                  status: 'stopped',
-                },
-              }
-            : current.backgroundAgentTasks,
-          agentTaskNotifications: toolUseId && task.taskType === 'local_agent'
-            ? {
-                ...current.agentTaskNotifications,
-                [toolUseId]: {
-                  taskId,
-                  toolUseId,
-                  status: 'stopped',
-                  summary: task.summary ?? task.description,
-                  result: task.result,
-                  outputFile: task.outputFile,
-                  usage: task.usage,
-                },
-              }
-            : current.agentTaskNotifications,
-          stoppingBackgroundTaskIds: {
-            ...current.stoppingBackgroundTaskIds,
-            [taskId]: true,
-          },
-        }
-      }),
+      sessions: updateSessionIn(state.sessions, sessionId, (current) => ({
+        stoppingBackgroundTaskIds: {
+          ...current.stoppingBackgroundTaskIds,
+          [taskId]: true,
+        },
+      })),
     }))
-    const remainingTasks = get().sessions[sessionId]?.backgroundAgentTasks
-    const hasRunningTasks = Object.values(remainingTasks ?? {}).some(
-      (backgroundTask) => backgroundTask.status === 'running',
-    )
-    useTabStore.getState().updateTabStatus(sessionId, hasRunningTasks ? 'running' : 'idle')
     wsManager.send(sessionId, { type: 'stop_background_task', taskId })
   },
 
@@ -2745,7 +2768,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         if (receivedLiveDelta && get().sessions[sessionId]?.chatState !== 'idle') ensureElapsedTimer()
         break
 
-      case 'thinking':
+      case 'thinking': {
         if (get().sessions[sessionId]?.suppressNextTaskNotificationResponse) {
           consumePendingDelta(sessionId)
           update(() => ({
@@ -2755,11 +2778,28 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           }))
           break
         }
+        // 重放/空块都不该冒出一个新的「已思考」气泡，也不该把会话拖回 thinking 态
+        // 或者启动计时器 —— 那正是"打开一个早就结束的会话，它自己开始输出"的观感。
+        let skippedThinkingBlock = false
         update((s) => {
           const pendingText = `${s.streamingText}${consumePendingDelta(sessionId)}`
           const base = pendingText.trim()
             ? appendAssistantTextMessage(s.messages, pendingText, Date.now())
             : s.messages
+          // 服务端两个 thinking 发射点都做了非空过滤，但 `&& delta.thinking` 是真值
+          // 判断，纯空白仍能漏过来，落到下面就是一个点开什么都没有的空壳气泡。
+          if (!msg.text.trim()) {
+            skippedThinkingBlock = true
+            return { messages: base, streamingText: '' }
+          }
+          // 真正的重放源已在服务端按 uuid 挡掉（conversationService.isReplayedSdkMessage）。
+          // 这里再兜一道：thinking 没有 transcriptMessageId 之类的身份，任何漏网的
+          // 重放都只能靠"整块内容与已有 thinking 逐字相同"来认。流式 delta 是碎片，
+          // 不会命中；命中的必然是被整块重发的同一段思考。
+          if (base.some((message) => message.type === 'thinking' && message.content === msg.text)) {
+            skippedThinkingBlock = true
+            return { messages: base, streamingText: '' }
+          }
           const lastIndex = findStreamMergeTargetIndex(base)
           const last = lastIndex >= 0 ? base[lastIndex] : undefined
           if (last && last.type === 'thinking') {
@@ -2782,8 +2822,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             streamingResponseChars: s.streamingResponseChars + msg.text.length,
           }
         })
-        ensureElapsedTimer()
+        if (!skippedThinkingBlock) ensureElapsedTimer()
         break
+      }
 
       case 'tool_use_complete': {
         clearPendingToolInputDelta(sessionId)
@@ -2792,26 +2833,37 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         const toolUseId = msg.toolUseId || session?.activeToolUseId || ''
         const parentToolUseId = msg.parentToolUseId ?? getPendingToolParentUseId(sessionId, toolUseId)
         rememberPendingToolParentUseId(sessionId, toolUseId, parentToolUseId)
-        update((s) => ({
-          messages: toolUseId
-            ? upsertToolUseMessage(s.messages, toolUseId, (existing) => ({
-                id: existing?.id ?? nextId(),
-                type: 'tool_use',
-                toolName,
-                toolUseId,
-                input: msg.input,
-                timestamp: existing?.timestamp ?? Date.now(),
-                parentToolUseId,
-                isPending: false,
-              }))
-            : [...s.messages, {
-                id: nextId(), type: 'tool_use', toolName,
-                toolUseId,
-                input: msg.input, timestamp: Date.now(), parentToolUseId,
-                isPending: false,
-              }],
-          activeToolUseId: null, activeToolName: null, activeThinkingId: null, streamingToolInput: '',
-        }))
+        update((s) => {
+          // 流式路径上，工具块的 content_start 已经把待定正文冲刷成一条消息了
+          // （见 case 'content_start' 里 blockType !== 'text' 的分支）。但整块兜底
+          // 路径只发 tool_use_complete、不发 content_start —— 不在这里补一次冲刷，
+          // 工具调用前后的两段正文就会跨消息粘成一条。
+          const pendingText = `${s.streamingText}${consumePendingDelta(sessionId)}`
+          const base = pendingText.trim()
+            ? appendAssistantTextMessage(s.messages, pendingText, Date.now())
+            : s.messages
+          return {
+            messages: toolUseId
+              ? upsertToolUseMessage(base, toolUseId, (existing) => ({
+                  id: existing?.id ?? nextId(),
+                  type: 'tool_use',
+                  toolName,
+                  toolUseId,
+                  input: msg.input,
+                  timestamp: existing?.timestamp ?? Date.now(),
+                  parentToolUseId,
+                  isPending: false,
+                }))
+              : [...base, {
+                  id: nextId(), type: 'tool_use', toolName,
+                  toolUseId,
+                  input: msg.input, timestamp: Date.now(), parentToolUseId,
+                  isPending: false,
+                }],
+            streamingText: '',
+            activeToolUseId: null, activeToolName: null, activeThinkingId: null, streamingToolInput: '',
+          }
+        })
         if (toolName === 'TodoWrite' && Array.isArray((msg.input as any)?.todos)) {
           useCLITaskStore.getState().setTasksFromTodos((msg.input as any).todos, sessionId)
         } else if (TASK_TOOL_NAMES.has(toolName)) {
@@ -3213,43 +3265,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
 
       case 'background_task_stop_failed': {
-        let rolledBackToRunning = false
+        let stopFailedForRunningTask = false
         update((session) => {
           const stoppingBackgroundTaskIds = { ...session.stoppingBackgroundTaskIds }
           const stopWasRequested = stoppingBackgroundTaskIds[msg.taskId] === true
           delete stoppingBackgroundTaskIds[msg.taskId]
           const task = session.backgroundAgentTasks?.[msg.taskId]
-          // CLI already dropped the task (reclaimed after completion / never found).
-          // Keep the optimistic terminal UI instead of resurrecting a zombie "running".
-          if (isBackgroundTaskAlreadyGoneStopFailure(msg.message)) {
+          if (!stopWasRequested || task?.status !== 'running') {
             return { stoppingBackgroundTaskIds }
           }
-          const shouldRollbackOptimisticStop = stopWasRequested && task?.status === 'stopped'
-          if (!shouldRollbackOptimisticStop) {
-            return { stoppingBackgroundTaskIds }
-          }
-          rolledBackToRunning = true
-          const toolUseId = task.toolUseId
-          const backgroundAgentTasks = {
-            ...session.backgroundAgentTasks,
-            [msg.taskId]: { ...task, status: 'running' as const },
-          }
-          const agentTaskNotifications = toolUseId
-            ? { ...session.agentTaskNotifications }
-            : session.agentTaskNotifications
-          if (toolUseId) delete agentTaskNotifications[toolUseId]
+          stopFailedForRunningTask = true
           return {
             stoppingBackgroundTaskIds,
-            backgroundAgentTasks,
-            agentTaskNotifications,
             messages: [
-              ...(toolUseId
-                ? session.messages.map((message) =>
-                    message.type === 'tool_use' && message.toolUseId === toolUseId
-                      ? { ...message, status: undefined }
-                      : message,
-                  )
-                : session.messages),
+              ...session.messages,
               {
                 id: nextId(),
                 type: 'error',
@@ -3260,7 +3289,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             ],
           }
         })
-        if (rolledBackToRunning) {
+        if (stopFailedForRunningTask) {
           useTabStore.getState().updateTabStatus(sessionId, 'running')
         }
         break
@@ -3875,18 +3904,6 @@ function findToolUseMessage(messages: UIMessage[], toolUseId: string): ToolCall 
     message.toolUseId === toolUseId) ?? null
 }
 
-/** CLI already discarded the task — keep optimistic terminal UI, no error toast. */
-function isBackgroundTaskAlreadyGoneStopFailure(message: string | undefined): boolean {
-  const text = typeof message === 'string' ? message.trim() : ''
-  if (!text) return false
-  return (
-    text.startsWith('No task found with ID:') ||
-    /^Task .+ is not running \(status: .+\)/.test(text) ||
-    text === 'Task is not running' ||
-    text === 'Task is no longer available'
-  )
-}
-
 function getStoppedBackgroundTaskFromToolResult(
   messages: UIMessage[],
   toolUseId: string,
@@ -4483,6 +4500,46 @@ function extractRestoredUserDisplay(text: string): RestoredUserDisplay {
   }
 }
 
+// ConversationService stores data-only files as `${randomUUID()}-${sanitizedName}`
+// and omits successfully inlined images from the replayed text content.
+const MATERIALIZED_UPLOAD_NAME_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}-(.+)$/i
+const IMAGE_ONLY_REPLAY_FALLBACK = 'Please analyze the attached image.'
+
+function isLikelyInlineImageAttachment(attachment: UIAttachment): boolean {
+  if (attachment.type === 'image') return true
+  if (attachment.mimeType?.startsWith('image/')) return true
+  const candidate = attachment.path ?? attachment.name
+  return /\.(png|jpe?g|gif|webp)$/i.test(candidate)
+}
+
+function attachmentIdentities(attachment: UIAttachment): string[] {
+  return [attachment.path, attachment.name]
+    .filter((identity): identity is string => Boolean(identity))
+    .flatMap((identity) => {
+      const normalized = identity.replace(/\\/g, '/').replace(/^\.\//, '')
+      const basename = normalized.split('/').pop()
+      return basename && basename !== normalized ? [normalized, basename] : [normalized]
+    })
+}
+
+function replayAttachmentMatchesCurrent(
+  replayAttachment: UIAttachment,
+  currentAttachment: UIAttachment,
+): boolean {
+  const replayIdentities = attachmentIdentities(replayAttachment)
+  const currentIdentities = attachmentIdentities(currentAttachment)
+  if (replayIdentities.some((replayIdentity) =>
+    currentIdentities.some((currentIdentity) => pathsReferToSameFile(replayIdentity, currentIdentity)),
+  )) {
+    return true
+  }
+
+  const materializedName = replayAttachment.name.match(MATERIALIZED_UPLOAD_NAME_RE)?.[1]
+  if (!materializedName) return false
+  const currentName = currentAttachment.name.replace(/[^a-zA-Z0-9._-]/g, '_')
+  return Boolean(currentName) && materializedName === currentName
+}
+
 function imageAttachmentsMatchReplay(
   attachments: UIAttachment[],
   replayedImageSourcePaths: string[],
@@ -4491,14 +4548,7 @@ function imageAttachmentsMatchReplay(
 
   const consumedReplayIndexes = new Set<number>()
   return attachments.every((attachment) => {
-    const identities = [attachment.path, attachment.name]
-      .filter((identity): identity is string => Boolean(identity))
-      .flatMap((identity) => {
-        const normalized = identity.replace(/\\/g, '/').replace(/^\.\//, '')
-        const basename = normalized.split('/').pop()
-        return basename && basename !== normalized ? [normalized, basename] : [normalized]
-      })
-
+    const identities = attachmentIdentities(attachment)
     const replayIndex = replayedImageSourcePaths.findIndex((replayedPath, index) => {
       if (consumedReplayIndexes.has(index)) return false
       const normalizedReplayPath = replayedPath.replace(/\\/g, '/').replace(/^\.\//, '')
@@ -4513,6 +4563,54 @@ function imageAttachmentsMatchReplay(
     consumedReplayIndexes.add(replayIndex)
     return true
   })
+}
+
+function replayAttachmentsMatchCurrent(
+  replayAttachments: UIAttachment[],
+  currentAttachments: UIAttachment[],
+): boolean {
+  if (currentAttachments.length === 0) return false
+
+  const unmatchedCurrent = new Set(currentAttachments.map((_, index) => index))
+  for (const replayAttachment of replayAttachments) {
+    const matchingIndex = currentAttachments.findIndex((currentAttachment, index) =>
+      unmatchedCurrent.has(index) && replayAttachmentMatchesCurrent(replayAttachment, currentAttachment),
+    )
+    if (matchingIndex < 0) return false
+    unmatchedCurrent.delete(matchingIndex)
+  }
+
+  return [...unmatchedCurrent].every((index) =>
+    isLikelyInlineImageAttachment(currentAttachments[index]!),
+  )
+}
+
+function replayMatchesCurrentUserMessage(
+  message: Extract<UIMessage, { type: 'user_text' }>,
+  replayDisplay: RestoredUserDisplay,
+  replayModelContent: string,
+): boolean {
+  const currentModelContent = (message.modelContent ?? message.content).trim()
+  if (currentModelContent === replayModelContent) return true
+
+  const currentAttachments = message.attachments ?? []
+  if (
+    message.content.trim() === '' &&
+    replayDisplay.content.trim() === IMAGE_ONLY_REPLAY_FALLBACK &&
+    !replayDisplay.attachments?.length &&
+    currentAttachments.length > 0 &&
+    currentAttachments.every(isLikelyInlineImageAttachment)
+  ) {
+    return true
+  }
+
+  const currentDisplay = extractRestoredUserDisplay(currentModelContent)
+  if (currentDisplay.content.trim() !== replayDisplay.content.trim()) return false
+
+  return replayAttachmentsMatchCurrent(
+    replayDisplay.attachments ?? [],
+    currentAttachments,
+  )
 }
 
 export function appendReplayedUserMessage(
@@ -4623,8 +4721,11 @@ function findCurrentTurnUserMessageIndex(
     const imageAttachments = message.attachments?.filter(
       (attachment) => attachment.type === 'image',
     ) ?? []
+    const replayDisplay = extractRestoredUserDisplay(modelContent)
     const hasMatchingText = (message.modelContent ?? message.content).trim() === modelContent
     if (hasMatchingText && imageAttachments.length === 0) return index
+
+    if (replayMatchesCurrentUserMessage(message, replayDisplay, modelContent)) return index
 
     const isSameImageReplay =
       replayedImageSourcePaths.length > 0 &&

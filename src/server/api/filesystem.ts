@@ -12,7 +12,11 @@ import { execFileNoThrowWithCwd } from '../../utils/execFileNoThrow.js'
 import { findGitRoot, gitExe } from '../../utils/git.js'
 import { ripGrep } from '../../utils/ripgrep.js'
 import { getInitialSettings } from '../../utils/settings/settings.js'
-import { isWithinRegisteredFilesystemRoot } from '../services/filesystemAccessRoots.js'
+import {
+  canonicalizeFilesystemAccessPath,
+  isWithinRegisteredFilesystemRoot,
+} from '../services/filesystemAccessRoots.js'
+import { canonicalizeExistingFilesystemPath } from '../services/filesystemPathSecurity.js'
 import {
   isSameOrInsidePathForPlatform,
   normalizeDriveRootPathForPlatform,
@@ -74,10 +78,11 @@ function isVcsMetadataDirectoryName(name: string): boolean {
 }
 
 export function isAllowedFilesystemPath(targetPath: string): boolean {
-  const resolvedPath = path.resolve(normalizeDriveRootPathForPlatform(targetPath))
-  const homeDir = path.resolve(os.homedir())
+  const resolvedPath = canonicalizeFilesystemAccessPath(targetPath)
+  const homeDir = canonicalizeFilesystemAccessPath(os.homedir())
+  const temporaryDir = canonicalizeFilesystemAccessPath('/tmp')
 
-  if (isWithinRoot(resolvedPath, homeDir) || isWithinRoot(resolvedPath, '/tmp')) {
+  if (isWithinRoot(resolvedPath, homeDir) || isWithinRoot(resolvedPath, temporaryDir)) {
     return true
   }
 
@@ -86,7 +91,7 @@ export function isAllowedFilesystemPath(targetPath: string): boolean {
   }
 
   // macOS reports /tmp as /private/tmp via native folder pickers and realpath().
-  if (process.platform === 'darwin' && isWithinRoot(resolvedPath, '/private/tmp')) {
+  if (process.platform === 'darwin' && isWithinRoot(resolvedPath, canonicalizeFilesystemAccessPath('/private/tmp'))) {
     return true
   }
 
@@ -112,12 +117,18 @@ async function handleServeFile(url: URL): Promise<Response> {
   }
 
   const resolvedPath = path.resolve(normalizeDriveRootPathForPlatform(filePath))
-
-  if (!isAllowedFilesystemPath(resolvedPath)) {
+  const canonicalPath = await canonicalizeExistingFilesystemPath(resolvedPath)
+  if (!canonicalPath) {
+    if (!isAllowedFilesystemPath(resolvedPath)) {
+      return json({ error: 'Access denied: path outside allowed directory' }, 403)
+    }
+    return json({ error: 'File not found' }, 404)
+  }
+  if (!isAllowedFilesystemPath(canonicalPath)) {
     return json({ error: 'Access denied: path outside allowed directory' }, 403)
   }
 
-  const ext = path.extname(resolvedPath).toLowerCase()
+  const ext = path.extname(canonicalPath).toLowerCase()
   const mimeType = IMAGE_MIME_TYPES[ext]
 
   if (!mimeType) {
@@ -125,7 +136,7 @@ async function handleServeFile(url: URL): Promise<Response> {
   }
 
   try {
-    const stat = fs.statSync(resolvedPath)
+    const stat = fs.statSync(canonicalPath)
     if (!stat.isFile()) {
       return json({ error: 'Not a file' }, 400)
     }
@@ -134,7 +145,7 @@ async function handleServeFile(url: URL): Promise<Response> {
       return json({ error: 'File too large' }, 400)
     }
 
-    const data = fs.readFileSync(resolvedPath)
+    const data = fs.readFileSync(canonicalPath)
     return new Response(data, {
       status: 200,
       headers: {
@@ -151,8 +162,14 @@ async function handleServeFile(url: URL): Promise<Response> {
 async function handleBrowse(url: URL): Promise<Response> {
   const targetPath = url.searchParams.get('path') || os.homedir() || '/'
   const resolvedPath = path.resolve(normalizeDriveRootPathForPlatform(targetPath))
-
-  if (!isAllowedFilesystemPath(resolvedPath)) {
+  const canonicalPath = await canonicalizeExistingFilesystemPath(resolvedPath)
+  if (!canonicalPath) {
+    if (!isAllowedFilesystemPath(resolvedPath)) {
+      return json({ error: 'Access denied: path outside allowed directory' }, 403)
+    }
+    return json({ error: 'Cannot read directory: path not found', path: resolvedPath }, 404)
+  }
+  if (!isAllowedFilesystemPath(canonicalPath)) {
     return json({ error: 'Access denied: path outside allowed directory' }, 403)
   }
 
@@ -161,26 +178,26 @@ async function handleBrowse(url: URL): Promise<Response> {
   const maxResults = Math.min(parseInt(url.searchParams.get('maxResults') || '200', 10), 200)
 
   try {
-    const stat = fs.statSync(resolvedPath)
+    const stat = fs.statSync(canonicalPath)
     if (!stat.isDirectory()) {
-      return json({ error: 'Not a directory', path: resolvedPath }, 400)
+      return json({ error: 'Not a directory', path: canonicalPath }, 400)
     }
 
     if (searchQuery) {
-      const results = await searchFilesystemEntries(resolvedPath, searchQuery, {
+      const results = await searchFilesystemEntries(canonicalPath, searchQuery, {
         includeFiles,
         maxResults,
       })
 
       return json({
-        currentPath: resolvedPath,
-        parentPath: path.dirname(resolvedPath),
+        currentPath: canonicalPath,
+        parentPath: path.dirname(canonicalPath),
         entries: results,
         query: searchQuery,
       })
     }
 
-    const entries = fs.readdirSync(resolvedPath, { withFileTypes: true })
+    const entries = fs.readdirSync(canonicalPath, { withFileTypes: true })
 
     // Browse mode: show dot-prefixed project entries while keeping VCS internals hidden.
     const filtered = entries.filter((e) => {
@@ -191,7 +208,7 @@ async function handleBrowse(url: URL): Promise<Response> {
     const entries_list = filtered
       .map((e) => ({
         name: e.name,
-        path: path.join(resolvedPath, e.name),
+        path: path.join(canonicalPath, e.name),
         isDirectory: e.isDirectory(),
         relativePath: e.name,
       }))
@@ -201,12 +218,12 @@ async function handleBrowse(url: URL): Promise<Response> {
       })
 
     return json({
-      currentPath: resolvedPath,
-      parentPath: path.dirname(resolvedPath),
+      currentPath: canonicalPath,
+      parentPath: path.dirname(canonicalPath),
       entries: entries_list,
     })
   } catch (err) {
-    return json({ error: `Cannot read directory: ${err}`, path: resolvedPath }, 500)
+    return json({ error: `Cannot read directory: ${err}`, path: canonicalPath }, 500)
   }
 }
 

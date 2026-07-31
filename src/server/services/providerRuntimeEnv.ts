@@ -108,8 +108,7 @@ function isSavedProvider(value: unknown): value is SavedProvider {
   )
 }
 
-
-function normalizeToolSearchEnabled(value: unknown): boolean {
+export function normalizeToolSearchEnabled(value: unknown): boolean {
   if (typeof value === 'boolean') return value
   if (typeof value === 'number') return value !== 0
   if (typeof value === 'string') {
@@ -122,7 +121,7 @@ function normalizeToolSearchEnabled(value: unknown): boolean {
   return true
 }
 
-function normalizeDisableExperimentalBetas(value: unknown): boolean {
+export function normalizeDisableExperimentalBetas(value: unknown): boolean {
   if (typeof value === 'boolean') return value
   if (typeof value === 'number') return value !== 0
   if (typeof value === 'string') {
@@ -417,9 +416,21 @@ export function buildProviderManagedEnv(
   const providerCapabilityEnv = getProviderCapabilityEnv(provider, models)
   const preset = PROVIDER_PRESETS.find((entry) => entry.id === provider.presetId)
   const customProviderCapabilities = getCustomProviderModelCapabilities(provider, models)
-  const mainModelCapabilities = provider.presetId === 'custom' || models.main !== preset?.defaultModels.main
+  const matchingSlotCapabilities = [
+    ['haiku', 'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES'],
+    ['sonnet', 'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES'],
+    ['opus', 'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES'],
+  ] as const
+  const matchedSlotCapabilities = matchingSlotCapabilities
+    .find(([slot]) => models[slot].toLowerCase() === models.main.toLowerCase())
+  const mainModelCapabilities = provider.presetId === 'custom'
     ? customProviderCapabilities
-    : presetDefaultEnv.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES
+    : matchedSlotCapabilities
+      ? providerCapabilityEnv[matchedSlotCapabilities[1]]
+        ?? presetDefaultEnv[matchedSlotCapabilities[1]]
+      : models.main !== preset?.defaultModels.main
+        ? customProviderCapabilities
+        : presetDefaultEnv.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES
 
   return {
     ...omitAuthEnv(presetDefaultEnv),

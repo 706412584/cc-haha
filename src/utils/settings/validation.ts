@@ -219,16 +219,22 @@ export function validateSettingsFileContent(content: string):
 /**
  * Filters invalid permission rules from raw parsed JSON data before schema validation.
  * This prevents one bad rule from poisoning the entire settings file.
- * Returns warnings for each filtered rule.
+ * Returns the filtered data plus warnings for each filtered rule.
+ *
+ * Pure: never modifies the input. Callers hand us safeParseJSON output, which
+ * may be a shared cache entry — editing it in place poisoned every later
+ * parse of byte-identical settings content (same bug family as GH #1126).
  */
 export function filterInvalidPermissionRules(
   data: unknown,
   filePath: string,
-): ValidationError[] {
-  if (!data || typeof data !== 'object') return []
+): { data: unknown; warnings: ValidationError[] } {
+  if (!data || typeof data !== 'object') return { data, warnings: [] }
   const obj = data as Record<string, unknown>
-  if (!obj.permissions || typeof obj.permissions !== 'object') return []
-  const perms = obj.permissions as Record<string, unknown>
+  if (!obj.permissions || typeof obj.permissions !== 'object') {
+    return { data, warnings: [] }
+  }
+  const perms = { ...(obj.permissions as Record<string, unknown>) }
 
   const warnings: ValidationError[] = []
   for (const key of ['allow', 'deny', 'ask']) {
@@ -261,5 +267,5 @@ export function filterInvalidPermissionRules(
       return true
     })
   }
-  return warnings
+  return { data: { ...obj, permissions: perms }, warnings }
 }

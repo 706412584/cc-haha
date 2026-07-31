@@ -19,17 +19,13 @@ import { MobileBottomSheet } from '@/components/ui/MobileBottomSheet'
 type Props = {
   value: string
   onChange: (path: string) => void
-  /**
-   * `menuitem` renders the trigger as a full-width row for use inside another
-   * menu (the composer's run-location pill). Its dropdown still portals to the
-   * body, so the host menu must exempt `[data-testid="directory-picker-menu"]`
-   * from its own outside-click handling.
-   */
-  variant?: 'chip' | 'workbar' | 'menuitem'
+  variant?: 'chip' | 'workbar'
   isGitProject?: boolean
 }
 
 type DirEntry = { name: string; path: string; isDirectory: boolean }
+
+export type DirectoryPanelMode = 'recent' | 'browse'
 
 const DESKTOP_WORKTREE_MARKER = '/.claude/worktrees/'
 const DROPDOWN_WIDTH = 400
@@ -47,15 +43,265 @@ function projectNameFromPath(filePath: string) {
   return displayRoot.split('/').filter(Boolean).pop() || filePath
 }
 
-export function DirectoryPicker({ value, onChange, variant = 'chip', isGitProject = false }: Props) {
+type PanelProps = {
+  value: string
+  /**
+   * Fires for every way a directory can be chosen — a recent row, a browsed
+   * folder, or the native dialog. The recent-project cache is invalidated
+   * first so the next open reflects the new selection.
+   */
+  onSelect: (path: string) => void
+  /** Touch density: 56/72px rows instead of the pointer-sized ones. */
+  touch?: boolean
+  /** The dropdown labels its own list; the bottom sheet has a title bar. */
+  showRecentHeading?: boolean
+  /**
+   * Called before the native folder dialog takes over, for a host that has to
+   * collapse its own overlay first.
+   */
+  onBeforeNativeDialog?: () => void
+  onModeChange?: (mode: DirectoryPanelMode) => void
+  /**
+   * The host's trigger labels itself from the loaded projects, and this panel
+   * is the only thing that fetches them.
+   */
+  onProjectsChange?: (projects: RecentProject[]) => void
+}
+
+/**
+ * The directory list itself — recent projects, a browse mode and the native
+ * folder dialog — with no trigger and no positioning of its own.
+ *
+ * `DirectoryPicker` mounts it under its own dropdown; `RepositoryLaunchControls`
+ * renders it as one view of the run-location menu. That second caller is the
+ * reason this is not just inlined below: nesting a second portalled dropdown
+ * inside that menu is what made choosing a directory in a fresh session cost
+ * two clicks.
+ */
+export function RecentProjectsPanel({
+  value,
+  onSelect,
+  touch = false,
+  showRecentHeading = true,
+  onBeforeNativeDialog,
+  onModeChange,
+  onProjectsChange,
+}: PanelProps) {
   const t = useTranslation()
-  const [isOpen, setIsOpen] = useState(false)
-  const [mode, setMode] = useState<'recent' | 'browse'>('recent')
+  const [mode, setMode] = useState<DirectoryPanelMode>('recent')
   const [projects, setProjects] = useState<RecentProject[]>([])
   const [browseEntries, setBrowseEntries] = useState<DirEntry[]>([])
   const [browsePath, setBrowsePath] = useState('')
   const [browseParent, setBrowseParent] = useState('')
   const [loading, setLoading] = useState(false)
+
+  // Both callbacks fire from effects. Holding them in a ref means an inline
+  // arrow from the caller cannot re-trigger the project load on every render.
+  const onModeChangeRef = useRef(onModeChange)
+  const onProjectsChangeRef = useRef(onProjectsChange)
+  useEffect(() => {
+    onModeChangeRef.current = onModeChange
+    onProjectsChangeRef.current = onProjectsChange
+  })
+
+  useEffect(() => {
+    onModeChangeRef.current?.(mode)
+  }, [mode])
+
+  // The panel only exists while its host is open, so mounting is the load
+  // signal — no `isOpen` to thread through.
+  useEffect(() => {
+    if (mode !== 'recent') return
+    const cachedProjects = getCachedRecentProjects()
+    if (cachedProjects) {
+      setProjects(cachedProjects)
+      onProjectsChangeRef.current?.(cachedProjects)
+      return
+    }
+    setLoading(true)
+    sessionsApi.getRecentProjects()
+      .then(({ projects: p }) => {
+        setCachedRecentProjects(p)
+        setProjects(p)
+        onProjectsChangeRef.current?.(p)
+      })
+      .catch(() => setProjects([]))
+      .finally(() => setLoading(false))
+  }, [mode])
+
+  const loadBrowseDir = async (path?: string) => {
+    setLoading(true)
+    try {
+      const result = await filesystemApi.browse(path)
+      setBrowsePath(result.currentPath)
+      setBrowseParent(result.parentPath)
+      setBrowseEntries(result.entries)
+    } catch { /* API not available */ }
+    setLoading(false)
+  }
+
+  // Every selection path funnels through here, including the native dialog —
+  // which used to call `onChange` directly and so left a stale cache behind.
+  const handleSelect = (path: string) => {
+    invalidateRecentProjectsCache()
+    onSelect(path)
+  }
+
+  const handleChooseFolder = async () => {
+    const host = getDesktopHost()
+    if (host.isDesktop && host.capabilities.dialogs) {
+      // Desktop: native OS folder dialog
+      onBeforeNativeDialog?.()
+      try {
+        const selected = await host.dialogs.open({
+          directory: true,
+          multiple: false,
+          title: t('dirPicker.chooseProjectFolder'),
+        })
+        if (typeof selected === 'string' && selected.length > 0) handleSelect(selected)
+      } catch (err) {
+        console.error('[DirectoryPicker] Failed to open folder dialog:', err)
+      }
+    } else {
+      // Web browser: directory tree via backend API
+      setMode('browse')
+      loadBrowseDir(value || undefined)
+    }
+  }
+
+  if (mode === 'browse') {
+    return (
+      <>
+        <div className="flex flex-wrap items-center gap-1 border-b border-[var(--color-border)] px-3 py-2">
+          <Button variant="link" size="xs" className="mr-2" onClick={() => setMode('recent')}>
+            {'← ' + t('dirPicker.recent')}
+          </Button>
+          <button onClick={() => loadBrowseDir('/')} className="text-[10px] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]">/</button>
+          {browsePath.split('/').filter(Boolean).map((seg, i, arr) => (
+            <span key={i} className="flex items-center gap-1">
+              <span className="text-[10px] text-[var(--color-text-tertiary)]">/</span>
+              <button
+                onClick={() => loadBrowseDir('/' + arr.slice(0, i + 1).join('/'))}
+                className="text-[10px] text-[var(--color-text-accent)] hover:underline"
+              >{seg}</button>
+            </span>
+          ))}
+        </div>
+
+        <div className={`${touch ? '' : 'max-h-[240px]'} overflow-y-auto`}>
+          {loading ? (
+            <LoadingState label={t('common.loading')} variant="block" size="sm" />
+          ) : (
+            <>
+              {browseParent && browseParent !== browsePath && (
+                <button onClick={() => loadBrowseDir(browseParent)} className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-[var(--color-surface-hover)]">
+                  <span className="material-symbols-outlined text-[16px] text-[var(--color-text-tertiary)]">arrow_upward</span>
+                  <span className="text-xs text-[var(--color-text-secondary)]">..</span>
+                </button>
+              )}
+              {browseEntries.length === 0 ? (
+                <EmptyState description={t('dirPicker.noSubdirs')} variant="plain" size="sm" />
+              ) : browseEntries.map((entry) => (
+                <div
+                  key={entry.path}
+                  className="flex w-full items-center gap-2 px-3 py-2 hover:bg-[var(--color-surface-hover)]"
+                >
+                  <button
+                    type="button"
+                    onClick={() => loadBrowseDir(entry.path)}
+                    className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                  >
+                    <span className="material-symbols-outlined text-[16px] text-[var(--color-text-tertiary)]">folder</span>
+                    <span className="min-w-0 flex-1 truncate text-xs text-[var(--color-text-primary)]">{entry.name}</span>
+                  </button>
+                  <Button variant="link" size="xs" onClick={() => handleSelect(entry.path)}>
+                    {t('common.select')}
+                  </Button>
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+
+        <div className="flex items-center justify-between border-t border-[var(--color-border)] px-3 py-2">
+          <span className="truncate font-mono text-[10px] text-[var(--color-text-tertiary)]">{browsePath}</span>
+          <Button size="base" onClick={() => handleSelect(browsePath)}>
+            {t('dirPicker.useThisFolder')}
+          </Button>
+        </div>
+      </>
+    )
+  }
+
+  return (
+    <>
+      {showRecentHeading && (
+        <div className="px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-[var(--color-outline)]">
+          {t('dirPicker.recent')}
+        </div>
+      )}
+      <div className={`${touch ? '' : 'max-h-[300px]'} overflow-y-auto`}>
+        {loading ? (
+          <LoadingState label={t('common.loading')} variant="block" size="sm" />
+        ) : projects.length === 0 ? (
+          <EmptyState description={t('dirPicker.noRecent')} variant="plain" size="sm" />
+        ) : (
+          projects.map((project) => {
+            const isSelected = project.realPath === value
+            return (
+              <button
+                key={project.projectPath}
+                onClick={() => handleSelect(project.realPath)}
+                className={`flex w-full items-center gap-3 px-4 text-left transition-colors hover:bg-[var(--color-surface-hover)] ${
+                  touch ? 'min-h-[72px] py-3.5' : 'py-3'
+                } ${
+                  isSelected ? 'bg-[var(--color-surface-selected)]' : ''
+                }`}
+              >
+                {project.isGit ? (
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-secondary)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="w-5 flex-shrink-0">
+                    <circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" />
+                    <path d="M13 6h3a2 2 0 0 1 2 2v7" /><line x1="6" y1="9" x2="6" y2="21" />
+                  </svg>
+                ) : (
+                  <span className="material-symbols-outlined w-5 flex-shrink-0 text-center text-[20px] text-[var(--color-text-secondary)]">folder</span>
+                )}
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-semibold text-[var(--color-text-primary)]">
+                    {project.repoName || project.projectName}
+                  </div>
+                  <div className="truncate font-mono text-[11px] text-[var(--color-text-tertiary)]">
+                    {project.realPath}
+                  </div>
+                </div>
+                {isSelected && (
+                  <span className="material-symbols-outlined flex-shrink-0 text-[18px] text-[var(--color-brand)]" style={{ fontVariationSettings: "'FILL' 1" }}>
+                    check
+                  </span>
+                )}
+              </button>
+            )
+          })
+        )}
+      </div>
+      <div className="border-t border-[var(--color-border)]">
+        <button
+          onClick={handleChooseFolder}
+          className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
+        >
+          <span className="material-symbols-outlined text-[20px] text-[var(--color-text-tertiary)]">create_new_folder</span>
+          <span className="text-sm text-[var(--color-text-secondary)]">{t('dirPicker.chooseFolder')}</span>
+        </button>
+      </div>
+    </>
+  )
+}
+
+export function DirectoryPicker({ value, onChange, variant = 'chip', isGitProject = false }: Props) {
+  const t = useTranslation()
+  const [isOpen, setIsOpen] = useState(false)
+  const [mode, setMode] = useState<DirectoryPanelMode>('recent')
+  const [projects, setProjects] = useState<RecentProject[]>([])
   const [dropdownPos, setDropdownPos] = useState<{ top: number; left: number; width: number; direction: 'up' | 'down' } | null>(null)
   const ref = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
@@ -105,70 +351,15 @@ export function DirectoryPicker({ value, onChange, variant = 'chip', isGitProjec
     }
   }, [isOpen, updateDropdownPos])
 
-  // Load recent projects when opened (with client-side cache)
-  useEffect(() => {
-    if (!isOpen || mode !== 'recent') return
-    // Use cache if fresh
-    const cachedProjects = getCachedRecentProjects()
-    if (cachedProjects) {
-      setProjects(cachedProjects)
-      return
-    }
-    setLoading(true)
-    sessionsApi.getRecentProjects()
-      .then(({ projects: p }) => {
-        setCachedRecentProjects(p)
-        setProjects(p)
-      })
-      .catch(() => setProjects([]))
-      .finally(() => setLoading(false))
-  }, [isOpen, mode])
-
-  const loadBrowseDir = async (path?: string) => {
-    setLoading(true)
-    try {
-      const result = await filesystemApi.browse(path)
-      setBrowsePath(result.currentPath)
-      setBrowseParent(result.parentPath)
-      setBrowseEntries(result.entries)
-    } catch { /* API not available */ }
-    setLoading(false)
-  }
-
   const handleSelect = (path: string) => {
     onChange(path)
     setIsOpen(false)
     setMode('recent')
-    // Invalidate cache so next open reflects the new selection
-    invalidateRecentProjectsCache()
-  }
-
-  const handleChooseFolder = async () => {
-    const host = getDesktopHost()
-    if (host.isDesktop && host.capabilities.dialogs) {
-      // Desktop: native OS folder dialog
-      setIsOpen(false)
-      try {
-        const selected = await host.dialogs.open({
-          directory: true,
-          multiple: false,
-          title: t('dirPicker.chooseProjectFolder'),
-        })
-        if (typeof selected === 'string' && selected.length > 0) onChange(selected)
-      } catch (err) {
-        console.error('[DirectoryPicker] Failed to open folder dialog:', err)
-      }
-    } else {
-      // Web browser: directory tree via backend API
-      setMode('browse')
-      loadBrowseDir(value || undefined)
-    }
   }
 
   // Find selected project info
   const selectedProject = projects.find((p) => p.realPath === value)
   const isWorkbar = variant === 'workbar'
-  const isMenuItem = variant === 'menuitem'
   const selectedLabel = selectedProject?.repoName || selectedProject?.projectName || projectNameFromPath(value)
   const showGitIcon = selectedProject?.isGit || isGitProject
   const triggerClassName = isWorkbar
@@ -178,11 +369,9 @@ export function DirectoryPicker({ value, onChange, variant = 'chip', isGitProjec
     ? (isMobileBrowser ? 'min-h-11 ' : '') + 'group inline-flex h-9 min-w-0 items-center gap-2 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] px-3.5 text-[13.5px] font-medium leading-none text-[var(--color-text-primary)] transition-[background-color,color,border-color] duration-150 ease-out hover:border-[var(--color-outline)] hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-surface)] disabled:cursor-not-allowed disabled:opacity-50'
     : 'flex items-center gap-2 text-xs text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors'
 
-  const containerClassName = isMenuItem
-    ? ''
-    : isWorkbar
-      ? `relative min-w-0 ${isMobileBrowser ? 'flex-1' : 'max-w-[320px] shrink'}`
-      : 'relative'
+  const containerClassName = isWorkbar
+    ? `relative min-w-0 ${isMobileBrowser ? 'flex-1' : 'max-w-[320px] shrink'}`
+    : 'relative'
 
   const dropdownClassName = 'overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-dropdown)]'
   const dropdownStyle = {
@@ -195,161 +384,22 @@ export function DirectoryPicker({ value, onChange, variant = 'chip', isGitProjec
     zIndex: 'var(--z-dropdown)',
   }
   const dropdownTitle = mode === 'recent' ? t('dirPicker.recent') : t('dirPicker.chooseProjectFolder')
-  const dropdownContent = mode === 'recent' ? (
-    <>
-      {!isMobileBrowser && (
-        <div className="px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-[var(--color-outline)]">
-          {t('dirPicker.recent')}
-        </div>
-      )}
-      <div className={`${isMobileBrowser ? '' : 'max-h-[300px]'} overflow-y-auto`}>
-        {loading ? (
-          <LoadingState label={t('common.loading')} variant="block" size="sm" />
-        ) : projects.length === 0 ? (
-          <EmptyState description={t('dirPicker.noRecent')} variant="plain" size="sm" />
-        ) : (
-          projects.map((project) => {
-            const isSelected = project.realPath === value
-            return (
-              <button
-                key={project.projectPath}
-                onClick={() => handleSelect(project.realPath)}
-                className={`flex w-full items-center gap-3 px-4 text-left transition-colors hover:bg-[var(--color-surface-hover)] ${
-                  isMobileBrowser ? 'min-h-[72px] py-3.5' : 'py-3'
-                } ${
-                  isSelected ? 'bg-[var(--color-surface-selected)]' : ''
-                }`}
-              >
-                {project.isGit ? (
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-secondary)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="w-5 flex-shrink-0">
-                    <circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" />
-                    <path d="M13 6h3a2 2 0 0 1 2 2v7" /><line x1="6" y1="9" x2="6" y2="21" />
-                  </svg>
-                ) : (
-                  <span className="material-symbols-outlined w-5 flex-shrink-0 text-center text-[20px] text-[var(--color-text-secondary)]">folder</span>
-                )}
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-semibold text-[var(--color-text-primary)]">
-                    {project.repoName || project.projectName}
-                  </div>
-                  <div className="truncate font-mono text-[11px] text-[var(--color-text-tertiary)]">
-                    {project.realPath}
-                  </div>
-                </div>
-                {isSelected && (
-                  <span className="material-symbols-outlined flex-shrink-0 text-[18px] text-[var(--color-brand)]" style={{ fontVariationSettings: "'FILL' 1" }}>
-                    check
-                  </span>
-                )}
-              </button>
-            )
-          })
-        )}
-      </div>
-      <div className="border-t border-[var(--color-border)]">
-        <button
-          onClick={handleChooseFolder}
-          className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
-        >
-          <span className="material-symbols-outlined text-[20px] text-[var(--color-text-tertiary)]">create_new_folder</span>
-          <span className="text-sm text-[var(--color-text-secondary)]">{t('dirPicker.chooseFolder')}</span>
-        </button>
-      </div>
-    </>
-  ) : (
-    <>
-      <div className="flex flex-wrap items-center gap-1 border-b border-[var(--color-border)] px-3 py-2">
-        <Button variant="link" size="xs" className="mr-2" onClick={() => setMode('recent')}>
-          {'← ' + t('dirPicker.recent')}
-        </Button>
-        <button onClick={() => loadBrowseDir('/')} className="text-[10px] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]">/</button>
-        {browsePath.split('/').filter(Boolean).map((seg, i, arr) => (
-          <span key={i} className="flex items-center gap-1">
-            <span className="text-[10px] text-[var(--color-text-tertiary)]">/</span>
-            <button
-              onClick={() => loadBrowseDir('/' + arr.slice(0, i + 1).join('/'))}
-              className="text-[10px] text-[var(--color-text-accent)] hover:underline"
-            >{seg}</button>
-          </span>
-        ))}
-      </div>
-
-      <div className={`${isMobileBrowser ? '' : 'max-h-[240px]'} overflow-y-auto`}>
-        {loading ? (
-          <LoadingState label={t('common.loading')} variant="block" size="sm" />
-        ) : (
-          <>
-            {browseParent && browseParent !== browsePath && (
-              <button onClick={() => loadBrowseDir(browseParent)} className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-[var(--color-surface-hover)]">
-                <span className="material-symbols-outlined text-[16px] text-[var(--color-text-tertiary)]">arrow_upward</span>
-                <span className="text-xs text-[var(--color-text-secondary)]">..</span>
-              </button>
-            )}
-            {browseEntries.length === 0 ? (
-              <EmptyState description={t('dirPicker.noSubdirs')} variant="plain" size="sm" />
-            ) : browseEntries.map((entry) => (
-              <div
-                key={entry.path}
-                className="flex w-full items-center gap-2 px-3 py-2 hover:bg-[var(--color-surface-hover)]"
-              >
-                <button
-                  type="button"
-                  onClick={() => loadBrowseDir(entry.path)}
-                  className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                >
-                  <span className="material-symbols-outlined text-[16px] text-[var(--color-text-tertiary)]">folder</span>
-                  <span className="min-w-0 flex-1 truncate text-xs text-[var(--color-text-primary)]">{entry.name}</span>
-                </button>
-                <Button variant="link" size="xs" onClick={() => handleSelect(entry.path)}>
-                  {t('common.select')}
-                </Button>
-              </div>
-            ))}
-          </>
-        )}
-      </div>
-
-      <div className="flex items-center justify-between border-t border-[var(--color-border)] px-3 py-2">
-        <span className="truncate font-mono text-[10px] text-[var(--color-text-tertiary)]">{browsePath}</span>
-        <Button size="base" onClick={() => handleSelect(browsePath)}>
-          {t('dirPicker.useThisFolder')}
-        </Button>
-      </div>
-    </>
+  const dropdownContent = (
+    <RecentProjectsPanel
+      value={value}
+      onSelect={handleSelect}
+      touch={isMobileBrowser}
+      showRecentHeading={!isMobileBrowser}
+      onBeforeNativeDialog={() => setIsOpen(false)}
+      onModeChange={setMode}
+      onProjectsChange={setProjects}
+    />
   )
 
   return (
     <div ref={ref} className={containerClassName}>
       {/* Trigger — shows selected project chip or placeholder */}
-      {isMenuItem ? (
-        <button
-          ref={triggerRef}
-          type="button"
-          role="menuitem"
-          onClick={() => { setIsOpen(!isOpen); setMode('recent') }}
-          title={value || undefined}
-          className={`flex w-full items-center gap-3 px-3 text-left transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-brand)]/35 ${
-            isMobileBrowser ? 'min-h-[56px] py-3' : 'py-2.5'
-          }`}
-        >
-          {showGitIcon ? (
-            <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" className="shrink-0 text-[var(--color-text-tertiary)]">
-              <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
-            </svg>
-          ) : (
-            <span aria-hidden="true" className="material-symbols-outlined shrink-0 text-[18px] text-[var(--color-text-tertiary)]">folder</span>
-          )}
-          <span className="min-w-0 flex-1">
-            <span className="block text-[13px] font-semibold text-[var(--color-text-primary)]">
-              {t('dirPicker.directory')}
-            </span>
-            <span className="block truncate text-[11px] text-[var(--color-text-tertiary)]">
-              {value ? selectedLabel : t('dirPicker.selectProject')}
-            </span>
-          </span>
-          <span aria-hidden="true" className="material-symbols-outlined shrink-0 text-[16px] text-[var(--color-text-tertiary)]">chevron_right</span>
-        </button>
-      ) : value ? (
+      {value ? (
         <button
           ref={triggerRef}
           onClick={() => { setIsOpen(!isOpen); setMode('recent') }}

@@ -2,6 +2,7 @@ import {
   buildGrokIdentityHeaders,
   GROK_CLI_BASE_URL,
 } from './fetch.js'
+import { createModelCatalogCache } from '../modelCatalogCache.js'
 import { ensureFreshGrokTokens } from './refresh.js'
 import {
   GROK_DEFAULT_CONTEXT_WINDOW,
@@ -11,11 +12,11 @@ import {
 
 export const GROK_MODELS_ENDPOINT = `${GROK_CLI_BASE_URL}/models`
 const MODEL_CATALOG_TTL_MS = 5 * 60_000
-let cachedCatalog: {
-  accountKey: string
-  expiresAt: number
-  models: GrokModelCatalogEntry[]
-} | null = null
+const MODEL_CATALOG_FAILURE_BACKOFF_MS = 60_000
+const catalogCache = createModelCatalogCache<GrokModelCatalogEntry[]>({
+  ttlMs: MODEL_CATALOG_TTL_MS,
+  failureBackoffMs: MODEL_CATALOG_FAILURE_BACKOFF_MS,
+})
 
 export async function fetchGrokModelCatalog(
   fetchOverride: typeof fetch = globalThis.fetch,
@@ -47,31 +48,16 @@ export async function getGrokModelCatalog(options?: {
   accountKey?: string
 }): Promise<GrokModelCatalogEntry[]> {
   const accountKey = options?.accountKey ?? (options?.accessToken ? 'authenticated' : 'default')
-  if (
-    !options?.forceRefresh &&
-    cachedCatalog?.accountKey === accountKey &&
-    cachedCatalog.expiresAt > Date.now()
-  ) {
-    return cachedCatalog.models
-  }
-  try {
-    const models = await fetchGrokModelCatalog(
-      options?.fetchOverride,
-      options?.accessToken,
-    )
-    cachedCatalog = {
-      accountKey,
-      expiresAt: Date.now() + MODEL_CATALOG_TTL_MS,
-      models,
-    }
-    return models
-  } catch {
-    return GROK_MODEL_CATALOG
-  }
+  return catalogCache.resolve({
+    accountKey,
+    fetchCatalog: () => fetchGrokModelCatalog(options?.fetchOverride, options?.accessToken),
+    fallback: GROK_MODEL_CATALOG,
+    ...(options?.forceRefresh ? { forceRefresh: true } : {}),
+  })
 }
 
 export function clearGrokModelCatalogCache(): void {
-  cachedCatalog = null
+  catalogCache.clear()
 }
 
 function extractModelRows(body: unknown): unknown[] {

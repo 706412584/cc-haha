@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useDismissable } from '@/hooks/useDismissable'
 import { BrandSeal } from '@/components/composite/BrandSeal'
 import { Button } from '@/components/ui/Button'
@@ -26,6 +26,10 @@ import { ComposerDropOverlay } from '../components/chat/ComposerDropOverlay'
 import { ContextUsageIndicator } from '../components/chat/ContextUsageIndicator'
 import { FileSearchMenu, type FileSearchMenuHandle } from '../components/chat/FileSearchMenu'
 import { LocalSlashCommandPanel, type LocalSlashCommandName } from '../components/chat/LocalSlashCommandPanel'
+import {
+  getSlashCommandOptionId,
+  SlashCommandMenu,
+} from '../components/chat/SlashCommandMenu'
 import { useMobileViewport } from '../hooks/useMobileViewport'
 import { isDesktopRuntime } from '../lib/desktopRuntime'
 import { resolveActiveProviderRuntimeSelection } from '../lib/runtimeSelection'
@@ -43,6 +47,7 @@ import {
   getLocalizedFallbackCommands,
   filterSlashCommands,
   findSlashToken,
+  groupSlashCommands,
   insertSlashTrigger,
   mergeSlashCommands,
   replaceSlashCommand,
@@ -126,7 +131,8 @@ export function EmptySession() {
   const plusMenuRef = useRef<HTMLDivElement>(null)
   const slashMenuRef = useRef<HTMLDivElement>(null)
   const fileSearchRef = useRef<FileSearchMenuHandle>(null)
-  const slashItemRefs = useRef<(HTMLButtonElement | null)[]>([])
+  const slashItemRefs = useRef<(HTMLElement | null)[]>([])
+  const slashMenuId = useId()
   const createSession = useSessionStore((state) => state.createSession)
   const sendMessage = useChatStore((state) => state.sendMessage)
   const connectToSession = useChatStore((state) => state.connectToSession)
@@ -196,6 +202,10 @@ export function EmptySession() {
             .map((skill) => ({
               name: skill.name,
               description: skill.description,
+              kind: 'skill' as const,
+              ...(skill.source === 'user' || skill.source === 'project' || skill.source === 'plugin'
+                ? { source: skill.source }
+                : {}),
             })),
         )
       })
@@ -245,9 +255,11 @@ export function EmptySession() {
     setRepositoryLaunchReady(!newWorkDir)
   }
 
-  const filteredCommands = useMemo(() => {
-    return filterSlashCommands(allSlashCommands, slashFilter)
+  const filteredCommandGroups = useMemo(() => {
+    return groupSlashCommands(filterSlashCommands(allSlashCommands, slashFilter))
   }, [allSlashCommands, slashFilter])
+  const filteredCommands = filteredCommandGroups.ordered
+  const isSlashMenuVisible = slashMenuOpen && filteredCommands.length > 0
 
   const exactSlashCommand = useMemo(() => {
     const normalized = slashFilter.trim().toLowerCase()
@@ -823,35 +835,17 @@ export function EmptySession() {
                 </div>
               )}
 
-              {slashMenuOpen && filteredCommands.length > 0 && (
-                <div
+              {isSlashMenuVisible && (
+                <SlashCommandMenu
                   ref={slashMenuRef}
-                  className="absolute bottom-full left-0 right-0 z-[var(--z-dropdown)] mb-2 overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-dropdown)]"
-                >
-                  <div className="max-h-[260px] overflow-y-auto py-1">
-                    {filteredCommands.map((command, index) => (
-                      <button
-                        key={command.name}
-                        ref={(el) => { slashItemRefs.current[index] = el }}
-                        onClick={() => selectSlashCommand(command.name)}
-                        onMouseEnter={() => setSlashSelectedIndex(index)}
-                        className={`flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors ${
-                          index === slashSelectedIndex ? 'bg-[var(--color-surface-hover)]' : 'hover:bg-[var(--color-surface-hover)]'
-                        }`}
-                      >
-                        <span className="flex min-w-0 max-w-[52%] shrink-0 items-baseline gap-1.5">
-                          <span className="shrink-0 text-sm font-semibold text-[var(--color-text-primary)]">/{command.name}</span>
-                          {command.argumentHint ? (
-                            <span className="min-w-0 truncate font-mono text-[11px] text-[var(--color-text-tertiary)]">
-                              {command.argumentHint}
-                            </span>
-                          ) : null}
-                        </span>
-                        <span className="min-w-0 flex-1 truncate text-xs text-[var(--color-text-tertiary)]">{command.description}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                  id={slashMenuId}
+                  groups={filteredCommandGroups}
+                  selectedIndex={slashSelectedIndex}
+                  itemRefs={slashItemRefs}
+                  onSelect={selectSlashCommand}
+                  onHighlight={setSlashSelectedIndex}
+                  showKeyboardHints={!isMobileComposer}
+                />
               )}
 
               {attachments.length > 0 && (
@@ -870,6 +864,13 @@ export function EmptySession() {
                   onChange={(event) => handleInputChange(event.target.value, event.target.selectionStart ?? event.target.value.length)}
                   onKeyDown={handleKeyDown}
                   onPaste={handlePaste}
+                  role={isSlashMenuVisible ? 'combobox' : undefined}
+                  aria-autocomplete={isSlashMenuVisible ? 'list' : undefined}
+                  aria-expanded={isSlashMenuVisible ? true : undefined}
+                  aria-controls={isSlashMenuVisible ? slashMenuId : undefined}
+                  aria-activedescendant={isSlashMenuVisible
+                    ? getSlashCommandOptionId(slashMenuId, slashSelectedIndex)
+                    : undefined}
                   className={`flex-1 resize-none border-none bg-transparent leading-relaxed text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] ${
                     isMobileComposer ? 'max-h-[132px] min-h-[72px] py-1.5 text-base' : 'py-2'
                   }`}
@@ -949,19 +950,20 @@ export function EmptySession() {
                     compact={isMobileComposer}
                   />
                   <ModelSelector ref={modelSelectorRef} runtimeKey={DRAFT_RUNTIME_SELECTION_KEY} disabled={isSubmitting} compact={isMobileComposer} />
+                  {/* Kept identical to ChatInput's send button — same
+                      component, shape, size and icon. See the note there for
+                      why the label went away. */}
                   <Button
                     variant="primary"
                     size="base"
+                    shape="circle"
                     onClick={handleSubmit}
                     disabled={!canSubmit}
                     aria-label={t('common.run')}
-                    title={isMobileComposer ? t('common.run') : undefined}
-                    className={`shrink-0 ${isMobileComposer ? 'h-11 w-11' : 'w-[112px]'}`}
-                    icon={<span className="material-symbols-outlined text-[14px]">arrow_forward</span>}
-                    iconPosition="end"
-                  >
-                    {!isMobileComposer && t('common.run')}
-                  </Button>
+                    title={t('common.run')}
+                    className={`shrink-0 ${isMobileComposer ? 'h-11 w-11' : ''}`}
+                    icon={<span className="material-symbols-outlined text-[18px]">arrow_upward</span>}
+                  />
                 </div>
               </div>
             </div>

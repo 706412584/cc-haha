@@ -8,8 +8,11 @@ import {
   registerAuthorizedTelegramCommand,
   registerTelegramExtendedCommands,
   renderSelectionView,
+  resolveTelegramPermissionCallback,
   sessionToSelectionItem,
+  shouldProcessTelegramMessage,
   skillToSelectionItem,
+  telegramMessageDedupKey,
   tryHandleTelegramSelectionCallback,
 } from '../commands.js'
 
@@ -47,6 +50,7 @@ function createCommandContext(options?: {
 
 function createController(overrides?: Record<string, unknown>) {
   const sent: Array<{ chatId: number; text: string; options?: unknown }> = []
+  const sentUserMessages: Array<{ chatId: string; content: string }> = []
   const runtimeModels: string[] = []
   const bridgeEvents: string[] = []
   const deps = {
@@ -137,6 +141,10 @@ function createController(overrides?: Record<string, unknown>) {
     }),
     onBridgeServerMessage: mock((chatId: string) => bridgeEvents.push(`listen:${chatId}`)),
     waitForBridgeOpen: mock(async () => true),
+    sendUserMessage: mock((chatId: string, content: string) => {
+      sentUserMessages.push({ chatId, content })
+      return true
+    }),
     setRuntimeModel: mock((_chatId: string, modelId: string) => {
       runtimeModels.push(modelId)
     }),
@@ -147,6 +155,7 @@ function createController(overrides?: Record<string, unknown>) {
     controller: createTelegramCommandController(deps),
     deps,
     sent,
+    sentUserMessages,
     runtimeModels,
     bridgeEvents,
   }
@@ -262,6 +271,66 @@ describe('Telegram command controller helpers', () => {
 
     expect(action).not.toHaveBeenCalled()
     expect(denied.replies[0]).toContain('未授权')
+  })
+
+  it('only resolves pending permission callbacks from authorized users', () => {
+    const sendPermissionResponse = mock(() => true)
+    const pendingRequestIds = new Set(['req-1'])
+    const base = {
+      chatId: '42',
+      decision: { requestId: 'req-1', allowed: true },
+      pendingRequestIds,
+      sendPermissionResponse,
+    }
+
+    expect(resolveTelegramPermissionCallback({
+      ...base,
+      userId: 999,
+      isAllowedUser: () => false,
+    })).toBe('unauthorized')
+    expect(sendPermissionResponse).not.toHaveBeenCalled()
+
+    expect(resolveTelegramPermissionCallback({
+      ...base,
+      userId: 7,
+      decision: { requestId: 'expired', allowed: true },
+      isAllowedUser: () => true,
+    })).toBe('not_pending')
+    expect(sendPermissionResponse).not.toHaveBeenCalled()
+
+    const disconnectedPending = new Set(['req-2'])
+    expect(resolveTelegramPermissionCallback({
+      ...base,
+      userId: 7,
+      decision: { requestId: 'req-2', allowed: false },
+      pendingRequestIds: disconnectedPending,
+      isAllowedUser: () => true,
+      sendPermissionResponse: () => false,
+    })).toBe('send_failed')
+    expect(disconnectedPending.has('req-2')).toBe(true)
+
+    expect(resolveTelegramPermissionCallback({
+      ...base,
+      userId: 7,
+      isAllowedUser: () => true,
+    })).toBe('sent')
+    expect(sendPermissionResponse).toHaveBeenCalledWith('42', 'req-1', true, undefined)
+    expect(pendingRequestIds.has('req-1')).toBe(false)
+  })
+
+  it('scopes duplicate message keys to the Telegram chat', () => {
+    expect(telegramMessageDedupKey('42', 7)).toBe('telegram:42:7')
+    expect(telegramMessageDedupKey('43', 7)).not.toBe(telegramMessageDedupKey('42', 7))
+    const keys: string[] = []
+    const dedup = {
+      tryRecord: (key: string) => {
+        keys.push(key)
+        return true
+      },
+    }
+    expect(shouldProcessTelegramMessage(dedup, '42', undefined)).toBe(false)
+    expect(shouldProcessTelegramMessage(dedup, '42', 7)).toBe(true)
+    expect(keys).toEqual(['telegram:42:7'])
   })
 
   it('syncs official provider command and rejects unauthorized private chats', async () => {
@@ -421,8 +490,8 @@ describe('Telegram command controller helpers', () => {
     expect(callback.edits[0]).toContain('已切换模型')
   })
 
-  it('lists invocable skills and shows selected skill details', async () => {
-    const { controller, deps, sent } = createController()
+  it('lists invocable skills and sends the selected skill into the active agent session', async () => {
+    const { controller, deps, sent, sentUserMessages } = createController()
     await controller.handleSkillsCommand(createCommandContext().ctx)
 
     expect(deps.httpClient.listSkills).toHaveBeenCalledWith('/work/repo')
@@ -434,7 +503,43 @@ describe('Telegram command controller helpers', () => {
       action: 'pick',
       index: 0,
     })
-    expect(callback.edits[0]).toContain('Skill：Skill A')
+    expect(deps.ensureExistingSession).toHaveBeenCalledWith('42')
+    expect(sentUserMessages).toEqual([{ chatId: '42', content: '/skill-a' }])
+    expect(callback.edits[0]).toContain('已调用 Skill：Skill A')
+  })
+
+  it('does not claim a selected skill ran when the agent session is unavailable', async () => {
+    const unavailable = createController({
+      ensureExistingSession: mock(async () => null),
+    })
+    await unavailable.controller.handleSkillsCommand(createCommandContext().ctx)
+    expect(unavailable.sent.at(-1)?.text).toContain('当前项目可用 Skills')
+
+    const callback = createCommandContext()
+    await unavailable.controller.handleSelectionCallback(callback.ctx, {
+      kind: 'skill',
+      action: 'pick',
+      index: 0,
+    })
+
+    expect(unavailable.sentUserMessages).toEqual([])
+    expect(callback.edits[0]).toContain('会话已失效')
+  })
+
+  it('reports a disconnected bridge instead of dropping a selected skill', async () => {
+    const disconnected = createController({
+      sendUserMessage: mock(() => false),
+    })
+    await disconnected.controller.handleSkillsCommand(createCommandContext().ctx)
+
+    const callback = createCommandContext()
+    await disconnected.controller.handleSelectionCallback(callback.ctx, {
+      kind: 'skill',
+      action: 'pick',
+      index: 0,
+    })
+
+    expect(callback.edits[0]).toContain('发送失败')
   })
 
   it('resumes a historical project session through two callbacks', async () => {
@@ -585,6 +690,8 @@ describe('Telegram command controller helpers', () => {
 
   it('creates a controller from runtime dependencies', async () => {
     const events: string[] = []
+    let allowPermissionUser = true
+    let sendPermissionSucceeds = true
     const controller = createTelegramRuntimeCommandController({
       botApi: { sendMessage: mock(async () => {}) },
       httpClient: createController().deps.httpClient,
@@ -597,12 +704,20 @@ describe('Telegram command controller helpers', () => {
           void handler({ type: 'connected' })
         },
         waitForOpen: mock(async () => true),
+        sendUserMessage: (chatId, content) => {
+          events.push(`send:${chatId}:${content}`)
+          return true
+        },
+        sendPermissionResponse: (chatId, requestId, allowed, rule) => {
+          events.push(`permit:${chatId}:${requestId}:${allowed}:${rule ?? ''}`)
+          return sendPermissionSucceeds
+        },
       },
       sessionStore: {
         set: (chatId, sessionId, workDir) => events.push(`store:${chatId}:${sessionId}:${workDir}`),
         delete: (chatId) => events.push(`delete:${chatId}`),
       },
-      isAllowedUser: () => true,
+      isAllowedUser: () => allowPermissionUser,
       ensureExistingSession: mock(async () => ({ sessionId: 'active', workDir: '/work/repo' })),
       clearTransientChatState: (chatId) => events.push(`clear:${chatId}`),
       handleServerMessage: (chatId, msg) => {
@@ -623,8 +738,47 @@ describe('Telegram command controller helpers', () => {
       action: 'pick',
       index: 0,
     })
+    const permissionCtx = createCommandContext()
+    await controller.handlePermissionCallback(permissionCtx.ctx, {
+      requestId: 'req-1',
+      allowed: true,
+    }, new Map([['42', new Set(['req-1'])]]), (chatId) => events.push(`decrement:${chatId}`))
 
     expect(events).toContain('model:42:model-x')
     expect(events).toContain('message:42:connected')
+    expect(events).toContain('permit:42:req-1:true:')
+    expect(events).toContain('decrement:42')
+    expect(permissionCtx.edits[0]).toContain('已允许')
+
+    const missingIdentityCtx = createCommandContext()
+    delete (missingIdentityCtx.ctx as any).from
+    await expect(controller.handlePermissionCallback(missingIdentityCtx.ctx, {
+      requestId: 'missing-user',
+      allowed: true,
+    }, new Map(), () => {})).resolves.toBe('unauthorized')
+
+    allowPermissionUser = false
+    const unauthorizedCtx = createCommandContext()
+    await expect(controller.handlePermissionCallback(unauthorizedCtx.ctx, {
+      requestId: 'unauthorized',
+      allowed: true,
+    }, new Map([['42', new Set(['unauthorized'])]]), () => {})).resolves.toBe('unauthorized')
+    expect(unauthorizedCtx.answers).toContain('未授权')
+
+    allowPermissionUser = true
+    const expiredCtx = createCommandContext()
+    await expect(controller.handlePermissionCallback(expiredCtx.ctx, {
+      requestId: 'expired',
+      allowed: true,
+    }, new Map(), () => {})).resolves.toBe('not_pending')
+    expect(expiredCtx.answers).toContain('权限请求已失效')
+
+    sendPermissionSucceeds = false
+    const failedCtx = createCommandContext()
+    await expect(controller.handlePermissionCallback(failedCtx.ctx, {
+      requestId: 'send-failed',
+      allowed: false,
+    }, new Map([['42', new Set(['send-failed'])]]), () => {})).resolves.toBe('send_failed')
+    expect(failedCtx.answers).toContain('权限响应发送失败')
   })
 })

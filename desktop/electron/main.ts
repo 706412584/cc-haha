@@ -27,6 +27,7 @@ import {
   configureLocalServerRequestAuth,
   configurePreviewSessionPermissions,
   createPreviewSessionPartition,
+  isAllowlistedMainRendererMediaRequest,
   type PreviewLocalAccess,
 } from './services/previewSession'
 import {
@@ -35,6 +36,7 @@ import {
   setAppMode,
 } from './services/appMode'
 import { installMacOsChromiumKeychainPromptGuard } from './services/keychain'
+import { installStdioWriteFailureGuards } from './services/stdioGuards'
 import { applyWindowsAppUserModelId } from './services/appIdentity'
 import { installMainWindowNavigationGuards, installPreviewNavigationGuards } from './services/navigationGuards'
 import { installPreviewCleanupOnRendererNavigation } from './services/previewLifecycle'
@@ -57,6 +59,11 @@ import {
   writePetWindowPosition,
   type PetWindowDragPayload,
 } from './services/petWindow'
+import {
+  readLocalePreference,
+  writeLocalePreference,
+} from './services/localePreference'
+import type { Locale } from '../src/i18n/locale'
 import {
   createCustomPetCatalogLoader,
   createCustomPetFromAtlas,
@@ -90,6 +97,9 @@ const traceWindows = new Map<string, BrowserWindow>()
 let isQuitting = false
 let trayController: TrayController | null = null
 
+// Must run before anything logs: a Finder/Dock launch inherits unreadable
+// stdio, and an unguarded write failure there surfaces as a crash dialog.
+installStdioWriteFailureGuards()
 installMacOsChromiumKeychainPromptGuard(app)
 
 function appRoot() {
@@ -229,19 +239,19 @@ function getServerRuntime() {
   return serverRuntime
 }
 
-function resolveLocalServerAccess(): PreviewLocalAccess | null {
-  const runtime = getServerRuntime()
-  const serverUrl = runtime.getActiveServerUrl()
-  return serverUrl
-    ? { serverUrl, token: runtime.getLocalAccessToken() }
-    : null
-}
-
 function resolvePetServerAccess(): PreviewLocalAccess | null {
   const runtime = getServerRuntime()
   const serverUrl = runtime.getActiveServerUrl()
   return serverUrl
     ? { serverUrl, token: runtime.getPetAccessToken() }
+    : null
+}
+
+function resolveMainRendererServerAccess(): PreviewLocalAccess | null {
+  const runtime = getServerRuntime()
+  const serverUrl = runtime.getActiveServerUrl()
+  return serverUrl
+    ? { serverUrl, token: runtime.getLocalAccessToken() }
     : null
 }
 
@@ -292,10 +302,6 @@ function getPreviewService() {
         },
       })
       configurePreviewSessionPermissions(view.webContents.session)
-      configureLocalServerRequestAuth(
-        view.webContents.session.webRequest,
-        resolveLocalServerAccess,
-      )
       installPreviewNavigationGuards(view.webContents, { openExternal: openExternalUrl })
       return view
     },
@@ -324,6 +330,10 @@ function getPetWindowController() {
       installMainWindowNavigationGuards(window.webContents, { openExternal: openExternalUrl })
     },
     load: window => loadRendererEntry(window, { petWindow: '1' }),
+    onPanelPlacementChanged: (window, placement) => {
+      if (window.isDestroyed()) return
+      window.webContents.send(ELECTRON_EVENT_CHANNELS.petPanelPlacementChanged, placement)
+    },
   })
   return petWindowController
 }
@@ -376,6 +386,13 @@ function emitNotificationAction(payload: unknown) {
   mainWindow?.webContents.send(ELECTRON_EVENT_CHANNELS.notificationAction, payload)
 }
 
+function broadcastLocaleChanged(locale: Locale) {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (window.isDestroyed()) continue
+    window.webContents.send(ELECTRON_EVENT_CHANNELS.appLocaleChanged, locale)
+  }
+}
+
 async function handleCommandInvoke(payload: unknown): Promise<unknown> {
   const { command, args } = payload as { command: string, args?: Record<string, unknown> }
 
@@ -407,6 +424,22 @@ function registerIpcHandlers() {
     void getPreviewService().sendMessageToRenderer(event.sender, raw, mainWindow?.webContents)
   })
   registerHandler(ELECTRON_IPC_CHANNELS.appGetVersion, () => app.getVersion())
+  registerHandler(
+    ELECTRON_IPC_CHANNELS.appGetLocalePreference,
+    () => readLocalePreference(app),
+  )
+  registerHandler(ELECTRON_IPC_CHANNELS.appSetLocalePreference, (event, payload) => {
+    if (currentWindow(event) !== mainWindow) {
+      throw new Error('Only the main window can change the locale preference')
+    }
+    const locale = payload as Locale
+    writeLocalePreference(app, locale)
+    broadcastLocaleChanged(locale)
+  })
+  registerHandler(
+    ELECTRON_IPC_CHANNELS.appGetPreferredSystemLanguages,
+    () => app.getPreferredSystemLanguages(),
+  )
   registerHandler(ELECTRON_IPC_CHANNELS.runtimeGetServerUrl, () => getServerRuntime().getServerUrl())
   registerHandler(
     ELECTRON_IPC_CHANNELS.runtimeGetLocalAccessToken,
@@ -545,21 +578,19 @@ function registerIpcHandlers() {
       Menu,
     )
   })
-  registerHandler(ELECTRON_IPC_CHANNELS.petsDragWindow, (event, payload) => {
+  registerHandler(ELECTRON_IPC_CHANNELS.petsDragWindow, (event, payload) =>
     getPetWindowController().dragWindow(
       currentWindow(event),
       payload as PetWindowDragPayload,
-    )
-  })
+    ))
   registerHandler(ELECTRON_IPC_CHANNELS.petsSetIgnoreMouseEvents, (event, payload) => {
     getPetWindowController().setIgnoreMouseEvents(currentWindow(event), Boolean(payload))
   })
-  registerHandler(ELECTRON_IPC_CHANNELS.petsSetInteractiveRegions, (event, payload) => {
+  registerHandler(ELECTRON_IPC_CHANNELS.petsSetInteractiveRegions, (event, payload) =>
     getPetWindowController().setInteractiveRegions(
       currentWindow(event),
       payload as Electron.Rectangle[],
-    )
-  })
+    ))
   registerHandler(ELECTRON_IPC_CHANNELS.petsFocusMainWindow, (event) => {
     if (!getPetWindowController().owns(currentWindow(event))) {
       throw new Error('Pet window IPC sender does not own the companion window')
@@ -680,9 +711,12 @@ async function createMainWindow() {
   })
   configureLocalServerRequestAuth(
     mainWindow.webContents.session.webRequest,
-    resolveLocalServerAccess,
+    resolveMainRendererServerAccess,
+    details => isAllowlistedMainRendererMediaRequest(
+      details,
+      mainWindow!.webContents.id,
+    ),
   )
-
   installMainWindowNavigationGuards(mainWindow.webContents, { openExternal: openExternalUrl })
   installPreviewCleanupOnRendererNavigation(mainWindow.webContents, () => {
     previewService?.close()

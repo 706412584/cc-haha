@@ -282,6 +282,142 @@ describe('MCP API', () => {
     }
   })
 
+  it('lists project paths whose .mcp.json declares project-scoped MCP servers (GH #1126)', async () => {
+    const previousNodeEnv = process.env.NODE_ENV
+    // A directory that never hosted a session — the shape of the bug report.
+    const freshProject = path.join(tmpDir, 'fresh-project')
+    await fs.mkdir(freshProject, { recursive: true })
+    process.env.NODE_ENV = 'development'
+    clearConfigPathCaches()
+
+    try {
+      const create = makeRequest('POST', '/api/mcp', {
+        cwd: freshProject,
+        name: 'shared-tools',
+        scope: 'project',
+        config: {
+          type: 'stdio',
+          command: 'npx',
+          args: ['shared-mcp'],
+          env: {},
+        },
+      })
+      const createRes = await handleMcpApi(create.req, create.url, create.segments)
+      expect(createRes.status).toBe(201)
+
+      // The request the settings page replays after an app restart to decide
+      // which project paths to query. The target directory must show up here,
+      // or the saved server silently disappears from the UI.
+      const projectPaths = makeRequest('GET', '/api/mcp/project-paths')
+      const projectPathsRes = await handleMcpApi(projectPaths.req, projectPaths.url, projectPaths.segments)
+      expect(projectPathsRes.status).toBe(200)
+      const body = await projectPathsRes.json()
+
+      expect(body.projectPaths).toEqual([normalizePathForConfigKey(freshProject)])
+    } finally {
+      if (previousNodeEnv === undefined) {
+        delete process.env.NODE_ENV
+      } else {
+        process.env.NODE_ENV = previousNodeEnv
+      }
+      clearConfigPathCaches()
+    }
+  })
+
+  it('self-heals the registry for pre-existing .mcp.json files on first browse (GH #1126)', async () => {
+    const previousNodeEnv = process.env.NODE_ENV
+    // Simulates a target project configured by a build without target
+    // registration (or a hand-written .mcp.json): file exists, no registry entry.
+    const legacyProject = path.join(tmpDir, 'legacy-project')
+    await fs.mkdir(legacyProject, { recursive: true })
+    await fs.writeFile(
+      path.join(legacyProject, '.mcp.json'),
+      JSON.stringify({ mcpServers: { 'legacy-tools': { type: 'stdio', command: 'npx', args: ['x'] } } }),
+    )
+    process.env.NODE_ENV = 'development'
+    clearConfigPathCaches()
+
+    try {
+      const before = makeRequest('GET', '/api/mcp/project-paths')
+      const beforeRes = await handleMcpApi(before.req, before.url, before.segments)
+      expect((await beforeRes.json()).projectPaths).toEqual([])
+
+      // Browsing the project (the settings page's per-path list request)
+      // registers it, and it stays discoverable from then on.
+      const list = makeRequest('GET', `/api/mcp?cwd=${encodeURIComponent(legacyProject)}`)
+      const listRes = await handleMcpApi(list.req, list.url, list.segments)
+      expect(listRes.status).toBe(200)
+
+      const after = makeRequest('GET', '/api/mcp/project-paths')
+      const afterRes = await handleMcpApi(after.req, after.url, after.segments)
+      expect((await afterRes.json()).projectPaths).toEqual([
+        normalizePathForConfigKey(legacyProject),
+      ])
+    } finally {
+      if (previousNodeEnv === undefined) {
+        delete process.env.NODE_ENV
+      } else {
+        process.env.NODE_ENV = previousNodeEnv
+      }
+      clearConfigPathCaches()
+    }
+  })
+
+  it('keeps a project server discoverable after moving it to another target project (GH #1126)', async () => {
+    const previousNodeEnv = process.env.NODE_ENV
+    const projectA = path.join(tmpDir, 'move-src')
+    const projectB = path.join(tmpDir, 'move-dst')
+    await fs.mkdir(projectA, { recursive: true })
+    await fs.mkdir(projectB, { recursive: true })
+    process.env.NODE_ENV = 'development'
+    clearConfigPathCaches()
+
+    try {
+      const create = makeRequest('POST', '/api/mcp', {
+        cwd: projectA,
+        name: 'shared-tools',
+        scope: 'project',
+        config: {
+          type: 'stdio',
+          command: 'npx',
+          args: ['shared-mcp'],
+          env: {},
+        },
+      })
+      const createRes = await handleMcpApi(create.req, create.url, create.segments)
+      expect(createRes.status).toBe(201)
+
+      const update = makeRequest('PUT', '/api/mcp/shared-tools', {
+        cwd: projectB,
+        previousCwd: projectA,
+        scope: 'project',
+        config: {
+          type: 'stdio',
+          command: 'npx',
+          args: ['shared-mcp'],
+          env: {},
+        },
+      })
+      const updateRes = await handleMcpApi(update.req, update.url, update.segments)
+      expect(updateRes.status).toBe(200)
+
+      // The new target must be discoverable; the drained source (its
+      // .mcp.json is now empty) must not linger in the list.
+      const projectPaths = makeRequest('GET', '/api/mcp/project-paths')
+      const projectPathsRes = await handleMcpApi(projectPaths.req, projectPaths.url, projectPaths.segments)
+      const body = await projectPathsRes.json()
+
+      expect(body.projectPaths).toEqual([normalizePathForConfigKey(projectB)])
+    } finally {
+      if (previousNodeEnv === undefined) {
+        delete process.env.NODE_ENV
+      } else {
+        process.env.NODE_ENV = previousNodeEnv
+      }
+      clearConfigPathCaches()
+    }
+  })
+
   it('updates project MCP servers from their previous cwd into the selected target cwd', async () => {
     const projectA = path.join(tmpDir, 'project-a')
     const projectB = path.join(tmpDir, 'project-b')

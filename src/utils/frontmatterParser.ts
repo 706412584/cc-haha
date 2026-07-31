@@ -190,8 +190,20 @@ export function parseFrontmatter(
  * splitPathInFrontmatter(["a", "src/*.{ts,tsx}"]) // returns ["a", "src/*.ts", "src/*.tsx"]
  */
 export function splitPathInFrontmatter(input: string | string[]): string[] {
+  const budget = {
+    results: 0,
+    bytes: 0,
+    exhausted: false,
+  }
+  return splitPathInFrontmatterWithBudget(input, budget)
+}
+
+function splitPathInFrontmatterWithBudget(
+  input: string | string[],
+  budget: BraceExpansionBudget,
+): string[] {
   if (Array.isArray(input)) {
-    return input.flatMap(splitPathInFrontmatter)
+    return input.flatMap(value => splitPathInFrontmatterWithBudget(value, budget))
   }
   if (typeof input !== 'string') {
     return []
@@ -231,7 +243,13 @@ export function splitPathInFrontmatter(input: string | string[]): string[] {
   // Expand brace patterns in each part
   return parts
     .filter(p => p.length > 0)
-    .flatMap(pattern => expandBraces(pattern))
+    .flatMap(pattern => expandBraces(pattern, budget))
+}
+
+type BraceExpansionBudget = {
+  results: number
+  bytes: number
+  exhausted: boolean
 }
 
 /**
@@ -240,31 +258,54 @@ export function splitPathInFrontmatter(input: string | string[]): string[] {
  * expandBraces("src/*.{ts,tsx}") // returns ["src/*.ts", "src/*.tsx"]
  * expandBraces("{a,b}/{c,d}") // returns ["a/c", "a/d", "b/c", "b/d"]
  */
-function expandBraces(pattern: string): string[] {
-  // Find the first brace group
-  const braceMatch = pattern.match(/^([^{]*)\{([^}]+)\}(.*)$/)
-
-  if (!braceMatch) {
-    // No braces found, return pattern as-is
+function expandBraces(
+  pattern: string,
+  budget: BraceExpansionBudget,
+): string[] {
+  const maxResults = 1_000
+  const maxBytes = 4 * 1024 * 1024
+  if (budget.exhausted) {
     return [pattern]
   }
-
-  const prefix = braceMatch[1] || ''
-  const alternatives = braceMatch[2] || ''
-  const suffix = braceMatch[3] || ''
-
-  // Split alternatives by comma and expand each one
-  const parts = alternatives.split(',').map(alt => alt.trim())
-
-  // Recursively expand remaining braces in suffix
+  const pending = [pattern]
   const expanded: string[] = []
-  for (const part of parts) {
-    const combined = prefix + part + suffix
-    // Recursively handle additional brace groups
-    const furtherExpanded = expandBraces(combined)
-    expanded.push(...furtherExpanded)
+
+  while (pending.length > 0) {
+    const current = pending.pop()!
+    budget.bytes += current.length
+
+    const braceMatch = current.match(/^([^{]*)\{([^}]+)\}(.*)$/)
+    if (!braceMatch) {
+      expanded.push(current)
+      continue
+    }
+
+    const prefix = braceMatch[1] || ''
+    const alternatives = braceMatch[2] || ''
+    const suffix = braceMatch[3] || ''
+    const parts = alternatives.split(',').map(alt => alt.trim())
+    const projectedResults =
+      budget.results + expanded.length + pending.length + parts.length
+
+    if (
+      budget.bytes > maxBytes ||
+      projectedResults > maxResults ||
+      projectedResults * pattern.length > maxBytes - budget.bytes
+    ) {
+      budget.exhausted = true
+      logForDebugging(
+        `Brace pattern expansion exceeds the budget; using it unexpanded: ${pattern}`,
+        { level: 'warn' },
+      )
+      return [pattern]
+    }
+
+    for (let i = parts.length - 1; i >= 0; i--) {
+      pending.push(prefix + parts[i]! + suffix)
+    }
   }
 
+  budget.results += expanded.length
   return expanded
 }
 

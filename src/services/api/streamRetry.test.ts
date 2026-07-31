@@ -442,6 +442,52 @@ describe('withStreamRetry', () => {
     delete process.env[RETRY_ENV]
   })
 
+  test('yields completed text from only the final exhausted attempt', async () => {
+    process.env[RETRY_ENV] = '1'
+    let calls = 0
+    const attempt = () =>
+      // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
+      (async function* (): AsyncGenerator<any, void> {
+        calls++
+        throw new RetriableStreamError(
+          new Error('socket reset'),
+          [
+            {
+              type: 'assistant',
+              message: {
+                id: `response-${calls}`,
+                type: 'message',
+                role: 'assistant',
+                model: 'test-model',
+                content: [{ type: 'text', text: `partial-${calls}` }],
+                stop_reason: null,
+                stop_sequence: null,
+                usage: {
+                  input_tokens: 0,
+                  output_tokens: 0,
+                },
+              },
+              uuid: `partial-${calls}`,
+              timestamp: new Date().toISOString(),
+            },
+          ],
+        )
+      })()
+
+    const out = await collect(withStreamRetry(attempt, 'test-model', []))
+    const partials = out.filter(
+      message =>
+        message.type === 'assistant' &&
+        typeof message.uuid === 'string' &&
+        message.uuid.startsWith('partial-'),
+    )
+
+    expect(calls).toBe(2)
+    expect(partials.map(message => message.uuid)).toEqual(['partial-2'])
+    expect(out.at(-1)?.isApiErrorMessage).toBe(true)
+    delete process.env[RETRY_ENV]
+  })
+
   test('passes through a clean attempt without retrying', async () => {
     let calls = 0
     const attempt = () =>

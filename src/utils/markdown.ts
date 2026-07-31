@@ -7,9 +7,10 @@ import { stringWidth } from '../ink/stringWidth.js'
 import { supportsHyperlinks } from '../ink/supports-hyperlinks.js'
 import type { CliHighlight } from './cliHighlight.js'
 import { logForDebugging } from './debug.js'
-import { createHyperlink } from './hyperlink.js'
+import { createHyperlink, OSC8_END, OSC8_START } from './hyperlink.js'
 import { stripPromptXMLTags } from './messages.js'
 import type { ThemeName } from './theme.js'
+import { isBareUrlOnly, matchBareUrl } from './urlBoundary.js'
 
 // Use \n unconditionally — os.EOL is \r\n on Windows, and the extra \r
 // breaks the character-to-segment mapping in applyStylesToWrappedText,
@@ -28,6 +29,27 @@ export function configureMarked(): void {
     tokenizer: {
       del() {
         return undefined
+      },
+    },
+  })
+
+  // Replace the GFM autolink boundary with a CJK-aware one. Returning false
+  // hands the input back to the built-in tokenizer, which still covers
+  // schemeless `www.` links and bare email addresses. See urlBoundary.ts for
+  // why the built-in boundary is wrong in Chinese prose.
+  marked.use({
+    tokenizer: {
+      url(src: string) {
+        const url = matchBareUrl(src)
+        if (!url) return false
+        return {
+          type: 'link' as const,
+          raw: url,
+          href: url,
+          title: null,
+          text: url,
+          tokens: [{ type: 'text' as const, raw: url, text: url }],
+        }
       },
     },
   })
@@ -87,7 +109,16 @@ export function formatToken(
     }
     case 'codespan': {
       // inline code
-      return color('permission', theme)(token.text)
+      const rendered = color('permission', theme)(token.text)
+      // `codespan` runs before `url` in marked's inline loop, so "访问
+      // `http://localhost:3000`" produced an un-clickable span. Wrap the whole
+      // span in OSC 8 when it is nothing but a URL, keeping the code color
+      // instead of createHyperlink's blue. A command like `curl http://...`
+      // stays plain code.
+      if (!supportsHyperlinks() || !isBareUrlOnly(token.text)) {
+        return rendered
+      }
+      return `${OSC8_START}${token.text.trim()}${OSC8_END}${rendered}${OSC8_START}${OSC8_END}`
     }
     case 'em':
       return chalk.italic(

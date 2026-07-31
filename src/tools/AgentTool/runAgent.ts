@@ -436,7 +436,16 @@ export async function* runAgent({
   // Override permission mode if agent defines one
   // However, don't override if parent is in bypassPermissions or acceptEdits mode - those should always take precedence
   // For async agents, also set shouldAvoidPermissionPrompts since they can't show UI
-  const agentPermissionMode = agentDefinition.permissionMode
+  const requestedAgentPermissionMode = agentDefinition.permissionMode
+  // Selecting repository-defined behavior is not authorization to disable the
+  // parent session's permission checks.
+  const isRepositoryAgent =
+    agentDefinition.source === 'projectSettings' ||
+    agentDefinition.source === 'localSettings'
+  const agentPermissionMode =
+    isRepositoryAgent && requestedAgentPermissionMode === 'bypassPermissions'
+      ? undefined
+      : requestedAgentPermissionMode
   const agentGetAppState = () => {
     const state = toolUseContext.getAppState()
     let toolPermissionContext = state.toolPermissionContext

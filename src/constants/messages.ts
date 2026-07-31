@@ -19,3 +19,21 @@ export const PLAN_REJECTION_MESSAGE =
   'The user rejected this plan and chose to stay in plan mode. Do not start implementing. Revise the plan and present it again for approval.'
 export const PLAN_REJECTION_WITH_REASON_PREFIX =
   'The user rejected this plan and chose to stay in plan mode. Do not start implementing. Revise the plan to address this feedback and present it again for approval. The user said:\n'
+
+// AskUserQuestion's "chat about this" is the third denial shape: the user isn't
+// rejecting the tool, they want to talk the questions over before answering.
+// Both of the messages above send the wrong instruction here — REJECT_MESSAGE
+// tells the model to stop and wait, PLAN_REJECTION tells it to revise a plan —
+// so the model has to be told to open the conversation itself. Without that,
+// the button hands the user a silent turn and they have to prompt twice.
+// The wording is shared with the CLI's AskUserQuestionPermissionRequest so both
+// surfaces put the same instruction in front of the model.
+export const ASK_USER_QUESTION_CLARIFY_MESSAGE = `The user wants to clarify these questions.
+    This means they may have additional information, context or questions for you.
+    Take their response into account and then reformulate the questions if appropriate.
+    Start by asking them what they would like to clarify.`
+// Suffixed with the questions asked so far (and any answers already filled in),
+// so switching to a conversation doesn't throw away the partial answers.
+export const ASK_USER_QUESTION_CLARIFY_WITH_QUESTIONS_PREFIX = `${ASK_USER_QUESTION_CLARIFY_MESSAGE}
+
+    Questions asked:\n`

@@ -17,6 +17,12 @@ vi.mock('../chat/MermaidRenderer', () => ({
 }))
 
 import { MarkdownRenderer, __markdownParseCacheInternals } from './MarkdownRenderer'
+import { CODE_LINK_CLASS } from '../../lib/markdownAutolink'
+import { useSettingsStore } from '../../stores/settingsStore'
+
+beforeEach(() => {
+  useSettingsStore.setState({ locale: 'zh' })
+})
 
 function visibleMathText(container: HTMLElement): string {
   const clone = container.cloneNode(true) as HTMLElement
@@ -263,6 +269,40 @@ describe('MarkdownRenderer', () => {
     expect(link).toHaveAttribute('rel', expect.stringContaining('noopener'))
   })
 
+  it('removes automatic network image sources from untrusted markdown', () => {
+    const { container } = render(
+      <MarkdownRenderer
+        content={[
+          '![loopback](http://127.0.0.1:3456/api/status)',
+          '![remote](https://attacker.example/track.png)',
+          '<img alt="responsive" srcset="https://attacker.example/a.png 1x">',
+        ].join('\n')}
+      />,
+    )
+
+    const images = Array.from(container.querySelectorAll('img'))
+    expect(images).toHaveLength(3)
+    expect(images.every((image) => !image.hasAttribute('src'))).toBe(true)
+    expect(images.every((image) => !image.hasAttribute('srcset'))).toBe(true)
+  })
+
+  it('preserves local in-memory image sources in markdown', () => {
+    const { container } = render(
+      <MarkdownRenderer
+        content={[
+          '![inline](data:image/png;base64,AAAA)',
+          '![object-url](blob:https://desktop.invalid/1234)',
+        ].join('\n')}
+      />,
+    )
+
+    const images = Array.from(container.querySelectorAll('img'))
+    expect(images.map((image) => image.getAttribute('src'))).toEqual([
+      'data:image/png;base64,AAAA',
+      'blob:https://desktop.invalid/1234',
+    ])
+  })
+
   it('strips style tags from assistant text before injecting markdown html', () => {
     const { container } = render(
       <MarkdownRenderer
@@ -394,5 +434,103 @@ describe('MarkdownRenderer parse cache', () => {
       render(<MarkdownRenderer content={`entry ${i} content body`} />)
     }
     expect(__markdownParseCacheInternals.finalizedSize()).toBeLessThanOrEqual(200)
+  })
+})
+
+// Regression cover for #1145. marked's built-in GFM autolink only trims ASCII
+// trailing punctuation, so in Chinese prose the rest of the sentence used to end
+// up inside the href — the link rendered, but clicking it loaded a 404.
+describe('MarkdownRenderer bare-URL autolink', () => {
+  const anchorsOf = (container: HTMLElement) =>
+    [...container.querySelectorAll('a')].map((a) => ({
+      href: a.getAttribute('href'),
+      text: a.textContent,
+    }))
+
+  it.each([
+    ['开发服务器已启动：http://localhost:3000。', 'http://localhost:3000'],
+    ['打开 http://localhost:5173，然后刷新页面', 'http://localhost:5173'],
+    ['服务在http://localhost:3000上运行', 'http://localhost:3000'],
+    ['打开（http://localhost:3000）看看', 'http://localhost:3000'],
+    ['前端已启动，请访问 http://localhost:3000 查看效果', 'http://localhost:3000'],
+  ])('stops the href at the URL boundary in %j', (content, href) => {
+    const { container } = render(<MarkdownRenderer content={content} />)
+    expect(anchorsOf(container)).toEqual([{ href, text: href }])
+  })
+
+  it('leaves the trailing Chinese text outside the link', () => {
+    const { container } = render(
+      <MarkdownRenderer content={'打开 http://localhost:5173，然后刷新页面'} />,
+    )
+    expect(container.textContent).toContain('，然后刷新页面')
+    expect(container.querySelector('a')?.textContent).toBe('http://localhost:5173')
+  })
+
+  it('still autolinks schemeless www hosts through the built-in tokenizer', () => {
+    const { container } = render(<MarkdownRenderer content={'裸域名 www.example.com 呢'} />)
+    expect(anchorsOf(container)).toEqual([
+      { href: 'http://www.example.com', text: 'www.example.com' },
+    ])
+  })
+
+  it('does not nest a link when the markdown label is itself a URL', () => {
+    const { container } = render(
+      <MarkdownRenderer content={'见 [http://localhost:3000](http://localhost:3000/real)'} />,
+    )
+    expect(anchorsOf(container)).toEqual([
+      { href: 'http://localhost:3000/real', text: 'http://localhost:3000' },
+    ])
+  })
+
+  it('leaves URLs inside a fenced code block alone', () => {
+    const { container } = render(
+      <MarkdownRenderer content={'```log\n[INFO] 代理地址: http://127.0.0.1:15721\n```'} />,
+    )
+    expect(container.querySelectorAll('a')).toHaveLength(0)
+    expect(screen.getByTestId('code-viewer')).toBeInTheDocument()
+  })
+
+  it('links inline code that is nothing but a URL, keeping the code chip', () => {
+    const { container } = render(
+      <MarkdownRenderer content={'访问 `http://localhost:3000` 就能看到'} />,
+    )
+    const anchor = container.querySelector('a')
+    expect(anchor?.getAttribute('href')).toBe('http://localhost:3000')
+    expect(anchor?.className).toContain('md-code-link')
+    expect(anchor?.querySelector('code')?.textContent).toBe('http://localhost:3000')
+  })
+
+  it('leaves inline code that is a command as plain code', () => {
+    const { container } = render(
+      <MarkdownRenderer content={'跑 `curl http://localhost:3000` 试试'} />,
+    )
+    expect(container.querySelectorAll('a')).toHaveLength(0)
+    expect(container.querySelector('code')?.textContent).toBe('curl http://localhost:3000')
+  })
+
+  it('escapes markup inside a non-URL code span', () => {
+    const { container } = render(<MarkdownRenderer content={'用 `<script>x</script>` 试试'} />)
+    expect(container.querySelectorAll('script')).toHaveLength(0)
+    expect(container.querySelector('code')?.textContent).toBe('<script>x</script>')
+  })
+
+  // The accent is only ~2:1 against body text (see theme/contrast.test.ts), so
+  // color alone cannot mark a link — the resting underline is load-bearing here,
+  // not decoration.
+  it('gives links a resting underline so they read as clickable', () => {
+    const { container } = render(<MarkdownRenderer content={'看 http://localhost:3000'} />)
+    const root = container.firstChild as HTMLDivElement
+    expect(root.className).toContain('prose-a:underline')
+    expect(root.className).toContain('prose-a:decoration-[var(--color-text-accent)]')
+    expect(root.className).not.toContain('prose-a:no-underline')
+  })
+
+  // The prose variant spells the class out so Tailwind can see it; this ties that
+  // literal back to the constant the renderer actually emits.
+  it('styles the code-link class the renderer emits', () => {
+    const { container } = render(<MarkdownRenderer content={'看 `http://localhost:3000`'} />)
+    const root = container.firstChild as HTMLDivElement
+    expect(root.className).toContain(`[&_a.${CODE_LINK_CLASS}]:no-underline`)
+    expect(container.querySelector('a')?.className).toContain(CODE_LINK_CLASS)
   })
 })

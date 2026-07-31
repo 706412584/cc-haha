@@ -156,7 +156,9 @@ describe('chat blocks', () => {
     expect(container.textContent).not.toContain('const answer = 42')
   })
 
-  it('does not surface bash stdout in the transcript preview', () => {
+  // #1149: bash stdout used to be dropped entirely — the card showed the command
+  // three times and the result zero times. Output is now echoed into the terminal.
+  it('echoes bash stdout into the terminal card when expanded', () => {
     const { container } = render(
       <ToolCallBlock
         toolName="Bash"
@@ -171,7 +173,271 @@ describe('chat blocks', () => {
     fireEvent.click(screen.getByRole('button'))
 
     expect(container.textContent).toContain('ls -la')
-    expect(container.textContent).not.toContain('file-a')
+    expect(container.textContent).toContain('file-a')
+    expect(container.textContent).toContain('file-c')
+  })
+
+  // The whole point of #1149 is that things stop appearing twice. Deleting the
+  // shell guard in getVisibleResultText makes BOTH the terminal body and the
+  // generic result box render the same stdout, and every `toContain` assertion
+  // stays green through it — so assert the count, not the presence.
+  it('renders shell stdout exactly once', () => {
+    // Multi-line on purpose: the collapsed header summarises multi-line output as
+    // "N lines output" rather than echoing it, so the body is the only place the
+    // text may legitimately appear. (Single-line output DOES also show in the
+    // header — that is the deliberate "see the result without expanding" affordance.)
+    const { container } = render(
+      <ToolCallBlock
+        toolName="Bash"
+        input={{ command: 'ls -la', description: 'List files' }}
+        result={{ content: 'UNIQUE_STDOUT_MARKER\nsecond line', isError: false }}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button'))
+
+    const occurrences = (container.textContent?.match(/UNIQUE_STDOUT_MARKER/g) ?? []).length
+    expect(occurrences).toBe(1)
+  })
+
+  it('renders a shell error body exactly once, and never truncates it', () => {
+    // #625 made full tool error output visible; the success-path 12-line window
+    // must not quietly start applying to failures.
+    const error = Array.from({ length: 25 }, (_, index) => `detail line ${index + 1}`).join('\n')
+    const { container } = render(
+      <ToolCallBlock
+        toolName="Bash"
+        input={{ command: 'make', description: 'Build' }}
+        result={{ content: error, isError: true }}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button'))
+
+    expect((container.textContent?.match(/detail line 1\b/g) ?? []).length).toBe(1)
+    expect(container.textContent).toContain('detail line 25')
+    expect(screen.queryByRole('button', { name: /more lines/ })).toBeNull()
+  })
+
+  it('drops the duplicate Tool Input JSON when the command is already echoed', () => {
+    const { container } = render(
+      <ToolCallBlock
+        toolName="Bash"
+        input={{ command: 'ls -la', description: 'List files' }}
+        result={{ content: 'file-a', isError: false }}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button'))
+
+    expect(container.textContent).toContain('ls -la')
+    expect(container.textContent).not.toContain('Tool Input')
+  })
+
+  // ~20% of real Bash calls carry a `timeout`. Suppressing the JSON block only
+  // when command+description were the ONLY keys put the command back on screen
+  // three times for exactly those calls — the reported symptom, unfixed.
+  it('shows the extra shell input keys without re-printing the command', () => {
+    const { container } = render(
+      <ToolCallBlock
+        toolName="Bash"
+        input={{ command: 'sleep 30', description: 'Wait', timeout: 60000 }}
+        result={{ content: 'done', isError: false }}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button'))
+
+    expect(container.textContent).toContain('Tool Input')
+    expect(container.textContent).toContain('timeout')
+    // The command appears once (the `$` line), never inside the JSON block.
+    expect(container.querySelector('[data-code-viewer-content]')?.textContent)
+      .not.toContain('sleep 30')
+  })
+
+  // The CLI substitutes `(<Tool> completed with no output)` for empty results
+  // (src/utils/toolResultStorage.ts, inc-4586) — the desktop never sees ''. Real
+  // payload here, not a hand-built empty string.
+  it('reports no output for a command that printed nothing', () => {
+    const { container } = render(
+      <ToolCallBlock
+        toolName="Bash"
+        input={{ command: 'mv a b', description: 'Move' }}
+        result={{ content: '(Bash completed with no output)', isError: false }}
+      />,
+    )
+
+    // Visible collapsed, so the row never reads as "never ran".
+    expect(container.textContent).toContain('No output')
+    // The model-facing marker itself must never reach the user.
+    expect(container.textContent).not.toContain('completed with no output')
+
+    fireEvent.click(screen.getByRole('button'))
+
+    expect(container.textContent).toContain('mv a b')
+    expect(container.textContent).toContain('No output')
+    expect(container.textContent).not.toContain('completed with no output')
+  })
+
+  it('does not label an image-only shell result as having no output', () => {
+    const { container } = render(
+      <ToolCallBlock
+        toolName="Bash"
+        input={{ command: 'python plot.py', description: 'Plot' }}
+        result={{ content: [{ type: 'image', source: { data: 'x' } }], isError: false }}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button'))
+
+    // Nothing to print is not the same as the command printing nothing.
+    expect(container.textContent).toContain('python plot.py')
+    expect(container.textContent).not.toContain('No output')
+  })
+
+  it('keeps rendering the error body for a shell call whose input lacks a command', () => {
+    const { container } = render(
+      <ToolCallBlock
+        toolName="Bash"
+        input={{}}
+        result={{ content: 'InputValidationError: command is required', isError: true }}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button'))
+
+    // Without the terminal card there is no echo, so the generic result box has
+    // to take over — otherwise the expanded panel is blank.
+    expect(container.textContent).toContain('InputValidationError: command is required')
+  })
+
+  it('does not claim "no output" for a shell call that has not finished', () => {
+    const { container } = render(
+      <ToolCallBlock
+        toolName="Bash"
+        input={{ command: 'sleep 5', description: 'Wait' }}
+        isPending
+      />,
+    )
+
+    // A pending call has no result at all — that is not the same as a result
+    // whose output happened to be empty.
+    expect(container.textContent).not.toContain('No output')
+    expect(container.textContent).toContain('Preparing tool')
+  })
+
+  it('echoes PowerShell output through the same shell path', () => {
+    const { container } = render(
+      <ToolCallBlock
+        toolName="PowerShell"
+        input={{ command: 'Get-ChildItem', description: 'List files' }}
+        result={{ content: 'Mode  Name\n----  ----', isError: false }}
+      />,
+    )
+
+    // Collapsed header must name the command, same as Bash — a real-machine
+    // walkthrough caught PowerShell falling through to a bare tool name.
+    expect(container.textContent).toContain('Get-ChildItem')
+
+    fireEvent.click(screen.getByRole('button'))
+
+    expect(container.textContent).toContain('Mode  Name')
+    expect(container.textContent).not.toContain('Tool Input')
+  })
+
+  // Read stays out of the shell path: file content is not command output, and it
+  // is by far the bulkiest tool output — see #1149.
+  it('keeps Read file contents suppressed', () => {
+    const { container } = render(
+      <ToolCallBlock
+        toolName="Read"
+        input={{ file_path: '/tmp/example.ts' }}
+        result={{ content: 'const answer = 42\nconsole.log(answer)', isError: false }}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button'))
+
+    expect(container.textContent).not.toContain('const answer = 42')
+    expect(container.textContent).not.toContain('console.log(answer)')
+  })
+
+  it('collapses long shell output to a head window and expands on demand', () => {
+    const output = Array.from({ length: 40 }, (_, index) => `line-${index + 1}`).join('\n')
+    const { container } = render(
+      <ToolCallBlock
+        toolName="Bash"
+        input={{ command: 'seq 40', description: 'Count' }}
+        result={{ content: output, isError: false }}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button'))
+
+    // Head kept, tail withheld behind an explicit affordance.
+    expect(container.textContent).toContain('line-1')
+    expect(container.textContent).toContain('line-12')
+    expect(container.textContent).not.toContain('line-13')
+
+    fireEvent.click(screen.getByRole('button', { name: /28 more lines/ }))
+
+    expect(container.textContent).toContain('line-40')
+
+    // Regression: the toggle used to render only while lines were hidden, so
+    // expanding removed the control and the output could never be collapsed.
+    const collapseButton = screen.getByRole('button', { name: /Show less/ })
+    fireEvent.click(collapseButton)
+
+    expect(container.textContent).toContain('line-12')
+    expect(container.textContent).not.toContain('line-13')
+  })
+
+  it('renders shell output as plain preformatted text, not through CodeViewer', () => {
+    const { container } = render(
+      <ToolCallBlock
+        toolName="Bash"
+        input={{ command: 'ls', description: 'List' }}
+        result={{ content: 'file-a\nfile-b', isError: false }}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button'))
+
+    // Shell output has no language; routing it through CodeViewer would tokenize
+    // it twice (Prism, then Shiki) for nothing.
+    expect(container.querySelector('[data-shell-output]')).toBeTruthy()
+    expect(container.querySelector('[data-highlight-engine]')).toBeNull()
+  })
+
+  it('resolves terminal control sequences instead of printing them', () => {
+    const { container } = render(
+      <ToolCallBlock
+        toolName="Bash"
+        input={{ command: 'pip install x', description: 'Install' }}
+        result={{ content: 'Downloading\r 10%\r100%\n\x1b[2K\x1b[1ADone', isError: false }}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button'))
+
+    const output = container.querySelector('[data-shell-output]')?.textContent ?? ''
+    expect(output).toContain('100%')
+    expect(output).toContain('Done')
+    expect(output).not.toContain('[2K')
+    expect(output).not.toContain('Downloading')
+  })
+
+  it('shows the tool duration once a result has landed', () => {
+    const { container } = render(
+      <ToolCallBlock
+        toolName="Bash"
+        input={{ command: 'ls', description: 'List' }}
+        result={{ content: 'a', isError: false }}
+        durationMs={1598}
+      />,
+    )
+
+    expect(container.textContent).toContain('1.6s')
   })
 
   it('shows pending Write tool calls while input is still streaming', () => {

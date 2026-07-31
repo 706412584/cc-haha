@@ -83,7 +83,7 @@ function makeApiError(status: number, message: string): APIError {
 
 async function collectRetryYields(opts: {
   errorsBeforeOk: APIError[]
-}): Promise<{ yielded: number; finalValue: string }> {
+}): Promise<{ yielded: number; finalValue: string; attempts: number[] }> {
   let attempt = 0
   const generator = withRetry(
     async () => ({} as Anthropic),
@@ -102,6 +102,7 @@ async function collectRetryYields(opts: {
 
   let yielded = 0
   let finalValue = ''
+  const attempts: number[] = []
   for (;;) {
     const next = await generator.next()
     if (next.done) {
@@ -109,8 +110,11 @@ async function collectRetryYields(opts: {
       break
     }
     yielded += 1
+    if (typeof next.value.retryAttempt === 'number') {
+      attempts.push(next.value.retryAttempt)
+    }
   }
-  return { yielded, finalValue }
+  return { yielded, finalValue, attempts }
 }
 
 describe('withRetry same-error suppression', () => {
@@ -159,6 +163,33 @@ describe('withRetry same-error suppression', () => {
 
     expect(result.finalValue).toBe('ok')
     expect(result.yielded).toBe(1) // only the first-sighting yield
+  })
+
+  // Desktop StreamingIndicator countdown + attempt badge only update when
+  // each retry yields a SystemAPIErrorMessage. Suppressing identical 503s
+  // left the UI stuck on "1/N" with a stale/expired delay ("正在重试…")
+  // while later attempts were silent. Capacity/rate-limit errors always
+  // carry wait-time info the user is watching, so report every attempt.
+  test('always reports consecutive identical 503s so UI attempt/countdown can advance', async () => {
+    const err = makeApiError(503, 'Service Unavailable')
+    const result = await collectRetryYields({
+      errorsBeforeOk: [err, err, err],
+    })
+
+    expect(result.finalValue).toBe('ok')
+    expect(result.yielded).toBe(3)
+    expect(result.attempts).toEqual([1, 2, 3])
+  })
+
+  test('always reports consecutive identical 429s so wait-time info stays fresh', async () => {
+    const err = makeApiError(429, 'Rate limited')
+    const result = await collectRetryYields({
+      errorsBeforeOk: [err, err],
+    })
+
+    expect(result.finalValue).toBe('ok')
+    expect(result.yielded).toBe(2)
+    expect(result.attempts).toEqual([1, 2])
   })
 })
 
@@ -264,6 +295,101 @@ describe('CannotRetryError retry metadata', () => {
       expect((error as CannotRetryError).retryCount).toBe(2)
       expect(((error as CannotRetryError).originalError as APIError).requestID).toBe('req-create-final')
     }
+  })
+})
+
+describe('withRetry context overflow recovery', () => {
+  test('uses the available context even when the thinking budget is larger', async () => {
+    const overrides: Array<number | undefined> = []
+    const overflowMessage =
+      'input length and `max_tokens` exceed context limit: 190000 + 20000 > 200000'
+    const overflow = new APIError(
+      400,
+      {
+        type: 'error',
+        error: {
+          type: 'invalid_request_error',
+          message: overflowMessage,
+        },
+      },
+      overflowMessage,
+      undefined,
+    )
+
+    const generator = withRetry(
+      async () => ({} as Anthropic),
+      async (_client, attempt, context) => {
+        overrides.push(context.maxTokensOverride)
+        if (attempt === 1) {
+          throw overflow
+        }
+        return 'ok'
+      },
+      {
+        model: 'claude-opus-4-7',
+        thinkingConfig: { type: 'enabled', budgetTokens: 20_000 },
+        maxRetries: 1,
+      },
+    )
+
+    let finalValue: string | undefined
+    for (;;) {
+      const next = await generator.next()
+      if (next.done) {
+        finalValue = next.value
+        break
+      }
+    }
+
+    expect(finalValue).toBe('ok')
+    expect(overrides).toEqual([undefined, 9_000])
+  })
+
+  test('stops when the provider repeats the same overflow after adjustment', async () => {
+    let attempts = 0
+    const overflowMessage =
+      'input length and `max_tokens` exceed context limit: 190000 + 20000 > 200000'
+    const overflow = new APIError(
+      400,
+      {
+        type: 'error',
+        error: {
+          type: 'invalid_request_error',
+          message: overflowMessage,
+        },
+      },
+      overflowMessage,
+      undefined,
+    )
+
+    const generator = withRetry(
+      async () => ({} as Anthropic),
+      async () => {
+        attempts += 1
+        throw overflow
+      },
+      {
+        model: 'claude-opus-4-7',
+        thinkingConfig: { type: 'disabled' },
+        maxRetries: 5,
+      },
+    )
+
+    let thrown: unknown
+    try {
+      while (!(await generator.next()).done) {
+        // Drain retry status messages until the generator terminates.
+      }
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(thrown).toBeInstanceOf(CannotRetryError)
+    expect((thrown as CannotRetryError).originalError).toBe(overflow)
+    expect((thrown as CannotRetryError).retryContext.maxTokensOverride).toBe(
+      9_000,
+    )
+    expect(attempts).toBe(2)
   })
 })
 

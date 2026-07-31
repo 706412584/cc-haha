@@ -10,8 +10,8 @@
 //   { "tasks": [{ id, cron, prompt, createdAt, recurring?, permanent? }] }
 
 import { randomUUID } from 'crypto'
-import { readFileSync } from 'fs'
-import { mkdir, writeFile } from 'fs/promises'
+import { readFileSync, type Stats } from 'fs'
+import { lstat, mkdir, rename, unlink, writeFile } from 'fs/promises'
 import { join } from 'path'
 import {
   addSessionCronTask,
@@ -216,17 +216,75 @@ export async function writeCronTasks(
   dir?: string,
 ): Promise<void> {
   const root = dir ?? getProjectRoot()
-  await mkdir(join(root, '.claude'), { recursive: true })
+  const claudeDir = join(root, '.claude')
+  await mkdir(claudeDir, { recursive: true })
+  const originalDirectoryStats = await assertSafeCronDirectory(claudeDir)
   // Strip runtime-only flags — everything on disk is durable by definition,
   // and agentId is session-scoped (teammates don't persist across sessions).
   const body: CronFile = {
     tasks: tasks.map(({ durable: _durable, agentId: _agentId, ...rest }) => rest),
   }
-  await writeFile(
-    getCronFilePath(root),
-    jsonStringify(body, null, 2) + '\n',
-    'utf-8',
+  const targetPath = getCronFilePath(root)
+  const temporaryPath = join(
+    claudeDir,
+    `.scheduled_tasks.${process.pid}.${randomUUID()}.tmp`,
   )
+  try {
+    await writeFile(temporaryPath, jsonStringify(body, null, 2) + '\n', {
+      encoding: 'utf-8',
+      flag: 'wx',
+      mode: 0o600,
+    })
+    await assertSameCronDirectory(claudeDir, originalDirectoryStats)
+    await rename(temporaryPath, targetPath)
+    await assertSameCronDirectory(claudeDir, originalDirectoryStats)
+  } catch (error) {
+    if (
+      await isSameCronDirectory(claudeDir, originalDirectoryStats)
+    ) {
+      await unlink(temporaryPath).catch(() => {})
+    }
+    throw error
+  }
+}
+
+async function assertSafeCronDirectory(claudeDir: string): Promise<Stats> {
+  const stats = await lstat(claudeDir)
+  if (stats.isSymbolicLink()) {
+    throw new Error(
+      `Refusing to write scheduled tasks through symbolic link: ${claudeDir}`,
+    )
+  }
+  if (!stats.isDirectory()) {
+    throw new Error(
+      `Refusing to write scheduled tasks because the path is not a directory: ${claudeDir}`,
+    )
+  }
+  return stats
+}
+
+async function assertSameCronDirectory(
+  claudeDir: string,
+  expected: Stats,
+): Promise<void> {
+  const current = await assertSafeCronDirectory(claudeDir)
+  if (current.dev !== expected.dev || current.ino !== expected.ino) {
+    throw new Error(
+      `Refusing to write scheduled tasks because the directory changed: ${claudeDir}`,
+    )
+  }
+}
+
+async function isSameCronDirectory(
+  claudeDir: string,
+  expected: Stats,
+): Promise<boolean> {
+  try {
+    await assertSameCronDirectory(claudeDir, expected)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /**

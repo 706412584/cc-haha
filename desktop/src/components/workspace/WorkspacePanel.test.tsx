@@ -1833,6 +1833,94 @@ describe('WorkspacePanel', () => {
     expect(view.queryByTestId('workspace-code')).toBeNull()
   }, 60_000)
 
+  it('marks the revealed line when a reference carries one', async () => {
+    // #1146: clicking `src/app.ts:3` in the chat has to land on line 3, not just
+    // open the file.
+    await setWorkspaceState((state) => ({
+      ...state,
+      panelBySession: {
+        ...state.panelBySession,
+        'session-reveal-line': { isOpen: true, activeView: 'all' },
+      },
+      previewTabsBySession: {
+        ...state.previewTabsBySession,
+        'session-reveal-line': [{
+          id: 'file:src/app.ts',
+          path: 'src/app.ts',
+          kind: 'file',
+          title: 'app.ts',
+          content: 'const a = 1\nconst b = 2\nconst c = 3\nconst d = 4',
+          language: 'typescript',
+          previewType: 'text',
+          state: 'ok',
+          reveal: { line: 3, nonce: 1 },
+        }],
+      },
+      activePreviewTabIdBySession: {
+        ...state.activePreviewTabIdBySession,
+        'session-reveal-line': 'file:src/app.ts',
+      },
+    }))
+
+    const view = await renderPanel('session-reveal-line')
+    const code = view.getByTestId('workspace-code')
+
+    const revealed = code.querySelector('[data-workspace-line-number="3"]')
+    expect(revealed?.className).toContain('bg-[var(--color-brand-soft)]')
+    // The inset rule is the load-bearing part of the mark: every soft fill in the
+    // palette sits under 1.11 contrast against the code background. See
+    // theme/contrast.test.ts.
+    expect(revealed?.className).toContain('shadow-[inset_2px_0_0_var(--color-brand)]')
+    // Neighbours keep the plain hover treatment.
+    expect(code.querySelector('[data-workspace-line-number="2"]')?.className)
+      .toContain('hover:bg-[var(--color-surface-hover)]')
+  })
+
+  it('expands a truncated preview when the revealed line is past the fold', async () => {
+    // Without this the reference silently does nothing: the row it points at is
+    // not rendered at all while the preview is capped.
+    const longFile = Array.from(
+      { length: workspacePreviewLineLimitForTests + 10 },
+      (_, index) => `const line${index + 1} = ${index + 1}`,
+    ).join('\n')
+    const revealLine = workspacePreviewLineLimitForTests + 5
+
+    await setWorkspaceState((state) => ({
+      ...state,
+      panelBySession: {
+        ...state.panelBySession,
+        'session-reveal-past-fold': { isOpen: true, activeView: 'all' },
+      },
+      previewTabsBySession: {
+        ...state.previewTabsBySession,
+        'session-reveal-past-fold': [{
+          id: 'file:long.ts',
+          path: 'long.ts',
+          kind: 'file',
+          title: 'long.ts',
+          content: longFile,
+          language: 'typescript',
+          previewType: 'text',
+          state: 'ok',
+          reveal: { line: revealLine, nonce: 1 },
+        }],
+      },
+      activePreviewTabIdBySession: {
+        ...state.activePreviewTabIdBySession,
+        'session-reveal-past-fold': 'file:long.ts',
+      },
+    }))
+
+    const view = await renderPanel('session-reveal-past-fold')
+
+    await waitFor(() => {
+      expect(view.getByTestId('workspace-code').textContent).toContain(`const line${revealLine} = ${revealLine}`)
+    })
+    expect(view.getByTestId('workspace-code')
+      .querySelector(`[data-workspace-line-number="${revealLine}"]`)?.className)
+      .toContain('bg-[var(--color-brand-soft)]')
+  })
+
   it('renders image previews from workspace files', async () => {
     await setWorkspaceState((state) => ({
       ...state,

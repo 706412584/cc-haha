@@ -38,6 +38,7 @@ import { AttachmentStore } from '../common/attachment/attachment-store.js'
 import { checkAttachmentLimit } from '../common/attachment/attachment-limits.js'
 import { ImageBlockWatcher } from '../common/attachment/image-block-watcher.js'
 import type { PendingUpload } from '../common/attachment/attachment-types.js'
+import { materializePendingUploadImage } from '../common/attachment/safe-remote-image.js'
 import { isOutsideWorkDir } from './path-safety.js'
 
 // ---------- init ----------
@@ -141,33 +142,7 @@ async function dispatchOutboundImage(chatId: string, pending: PendingUpload): Pr
   if (cache.has(pending.id)) return // already uploaded within this chat
 
   try {
-    let buffer: Buffer
-    let mime = 'image/png'
-    switch (pending.source.kind) {
-      case 'base64': {
-        buffer = Buffer.from(pending.source.data, 'base64')
-        mime = pending.source.mime
-        break
-      }
-      case 'path': {
-        buffer = await fs.readFile(pending.source.path)
-        mime = pending.source.mime ?? 'image/png'
-        break
-      }
-      case 'url': {
-        const controller = new AbortController()
-        const timer = setTimeout(() => controller.abort(), 30_000)
-        try {
-          const resp = await fetch(pending.source.url, { signal: controller.signal })
-          if (!resp.ok) throw new Error(`fetch ${pending.source.url} -> ${resp.status}`)
-          buffer = Buffer.from(await resp.arrayBuffer())
-          mime = pending.source.mime ?? resp.headers.get('content-type') ?? 'image/png'
-        } finally {
-          clearTimeout(timer)
-        }
-        break
-      }
-    }
+    const { buffer, mime } = await materializePendingUploadImage(pending.source)
 
     const check = checkAttachmentLimit('image', buffer.length, mime)
     if (!check.ok) {

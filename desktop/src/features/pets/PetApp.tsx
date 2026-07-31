@@ -15,6 +15,7 @@ import {
 import { sessionsApi, type PetSessionRuntimeStatus } from '../../api/sessions'
 import { useTranslation } from '../../i18n'
 import { getDesktopHost } from '../../lib/desktopHost'
+import type { DesktopPetPanelPlacement } from '../../lib/desktopHost/types'
 import { initializeDesktopServerUrl } from '../../lib/desktopRuntime'
 import { useChatStore } from '../../stores/chatStore'
 import { useSessionStore } from '../../stores/sessionStore'
@@ -38,6 +39,10 @@ const SESSION_REFRESH_INTERVAL_MS = 5_000
 const STATUS_REFRESH_INTERVAL_MS = 2_000
 const CUSTOM_PET_REFRESH_INTERVAL_MS = 30_000
 const PET_DRAG_THRESHOLD_PX = 4
+// The host owns this: it is the only side that knows where the window sits on
+// which display. Until it answers, the panel keeps its usual spot above the
+// mascot.
+const DEFAULT_PANEL_PLACEMENT: DesktopPetPanelPlacement = { vertical: 'above' }
 
 type PetDragGesture = {
   pointerId: number
@@ -76,6 +81,9 @@ export function PetApp() {
   const [isMascotDragging, setIsMascotDragging] = useState(false)
   const [dragDirection, setDragDirection] = useState<'left' | 'right' | null>(null)
   const [lookDirection, setLookDirection] = useState<PetLookDirection | null | undefined>(undefined)
+  const [panelPlacement, setPanelPlacement] = useState<DesktopPetPanelPlacement>(
+    DEFAULT_PANEL_PLACEMENT,
+  )
   const preferencesRef = useRef<DesktopPetPreferences | null>(null)
   const pendingPreferencePatchesRef = useRef(new Map<number, Partial<DesktopPetPreferences>>())
   const nextPreferencePatchIdRef = useRef(0)
@@ -329,6 +337,29 @@ export function PetApp() {
     || Boolean(preferences?.showTaskPanel && activities.length > 0)
   const expanded = showActivityCard
 
+  // Ignoring an unchanged placement matters: the host answers every region
+  // report and every drag tick, and a fresh object each time would re-render the
+  // pet on every frame of a drag.
+  const applyPanelPlacement = useCallback((next: DesktopPetPanelPlacement | undefined) => {
+    if (!next) return
+    setPanelPlacement((current) => (current.vertical === next.vertical ? current : next))
+  }, [])
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    let cancelled = false
+    void getDesktopHost().pets.onPanelPlacementChanged(applyPanelPlacement)
+      .then((dispose) => {
+        if (cancelled) dispose()
+        else unlisten = dispose
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [applyPanelPlacement])
+
   useLayoutEffect(() => {
     if (!preferences) return
     const elements = [
@@ -348,7 +379,10 @@ export function PetApp() {
           height: Math.max(1, Math.ceil(rect.height)),
         }
       })
-      if (regions.length > 0) void getDesktopHost().pets.setInteractiveRegions(regions)
+      if (regions.length === 0) return
+      void getDesktopHost().pets.setInteractiveRegions(regions)
+        .then(applyPanelPlacement)
+        .catch(() => undefined)
     }
 
     updateRegions()
@@ -361,7 +395,18 @@ export function PetApp() {
       observer?.disconnect()
       window.removeEventListener('resize', updateRegions)
     }
-  }, [activities.length, expanded, preferences?.size, selectedPet, showActivityCard])
+  }, [
+    activities.length,
+    applyPanelPlacement,
+    expanded,
+    // A flip re-lays the window out without resizing anything in it, so
+    // ResizeObserver never fires and the reported boxes would keep describing
+    // the old side. The host needs the new ones to hold the mascot still.
+    panelPlacement.vertical,
+    preferences?.size,
+    selectedPet,
+    showActivityCard,
+  ])
 
   const isInteractivePoint = useCallback((x: number, y: number) => [
     mascotRef.current,
@@ -398,6 +443,7 @@ export function PetApp() {
       }, 0)
       void gesture.startPromise
         .then(() => getDesktopHost().pets.dragWindow({ phase: 'end', x, y }))
+        .then(applyPanelPlacement)
         .catch(() => undefined)
     }
 
@@ -414,7 +460,7 @@ export function PetApp() {
       setLookDirection(undefined)
       void getDesktopHost().pets.setIgnoreMouseEvents(true)
     }
-  }, [isInteractivePoint])
+  }, [applyPanelPlacement, isInteractivePoint])
 
   const releasePointerPassthrough = useCallback((nextTarget: EventTarget | null) => {
     if (dragGestureRef.current) return
@@ -453,6 +499,7 @@ export function PetApp() {
       <div
         ref={stackRef}
         className="pet-window-stack"
+        data-panel-placement={panelPlacement.vertical}
         onMouseEnter={() => void getDesktopHost().pets.setIgnoreMouseEvents(false)}
         onMouseMove={(event) => {
           if (dragGestureRef.current) return
@@ -542,12 +589,13 @@ export function PetApp() {
                 if (distance < PET_DRAG_THRESHOLD_PX) return
                 suppressNextMascotClickRef.current = true
                 setIsMascotDragging(true)
-                gesture.startPromise = Promise.resolve().then(() =>
-                  getDesktopHost().pets.dragWindow({
+                gesture.startPromise = Promise.resolve()
+                  .then(() => getDesktopHost().pets.dragWindow({
                     phase: 'start',
                     x: gesture.startScreenX,
                     y: gesture.startScreenY,
                   }))
+                  .then(applyPanelPlacement)
                 void gesture.startPromise.catch(() => undefined)
               }
               const directionDelta = event.screenX - gesture.directionScreenX

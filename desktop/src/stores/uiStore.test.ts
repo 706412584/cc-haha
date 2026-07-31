@@ -1,6 +1,25 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { THEME_BACKGROUNDS } from '../theme/systemAppearance'
+
 type Listener = (event: { matches: boolean }) => void
+
+/**
+ * The shipped index.html carries this meta; jsdom starts without it. It colors
+ * the iOS status bar and the Android address bar, which under viewport-fit=cover
+ * sit directly against the app's own background.
+ */
+function installThemeColorMeta() {
+  document.querySelector('meta[name="theme-color"]')?.remove()
+  const meta = document.createElement('meta')
+  meta.setAttribute('name', 'theme-color')
+  meta.setAttribute('content', '#000000')
+  document.head.appendChild(meta)
+}
+
+function readThemeColor(): string | null {
+  return document.querySelector('meta[name="theme-color"]')?.getAttribute('content') ?? null
+}
 
 /** jsdom ships no matchMedia; the theme layer treats its absence as light. */
 function stubMatchMedia(prefersDark: boolean) {
@@ -24,6 +43,7 @@ function stubMatchMedia(prefersDark: boolean) {
 
 afterEach(() => {
   Reflect.deleteProperty(window as unknown as Record<string, unknown>, 'matchMedia')
+  document.querySelector('meta[name="theme-color"]')?.remove()
 })
 
 describe('uiStore theme handling', () => {
@@ -32,6 +52,7 @@ describe('uiStore theme handling', () => {
     window.localStorage.clear()
     document.documentElement.removeAttribute('data-theme')
     document.documentElement.style.colorScheme = ''
+    installThemeColorMeta()
   })
 
   it('defaults new installs to the pure white paper theme', async () => {
@@ -94,6 +115,28 @@ describe('uiStore theme handling', () => {
     useUIStore.getState().setTheme('celadon')
     expect(document.documentElement.style.colorScheme).toBe('light')
   })
+
+  // Under viewport-fit=cover the page runs under the status bar, so a stale
+  // theme-color reads as a mismatched band above the header on every switch.
+  it('repaints the browser chrome for every palette', async () => {
+    const { useUIStore } = await import('./uiStore')
+    useUIStore.setState({ followSystemTheme: false })
+
+    for (const [theme, background] of Object.entries(THEME_BACKGROUNDS)) {
+      useUIStore.getState().setTheme(theme as keyof typeof THEME_BACKGROUNDS)
+      expect(readThemeColor(), `${theme} left the browser chrome unpainted`).toBe(background)
+    }
+  })
+
+  it('applies a theme even when the document carries no theme-color meta', async () => {
+    document.querySelector('meta[name="theme-color"]')?.remove()
+
+    const { useUIStore } = await import('./uiStore')
+    useUIStore.setState({ followSystemTheme: false })
+    useUIStore.getState().setTheme('dark')
+
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
+  })
 })
 
 describe('uiStore following the system appearance', () => {
@@ -102,6 +145,7 @@ describe('uiStore following the system appearance', () => {
     window.localStorage.clear()
     document.documentElement.removeAttribute('data-theme')
     document.documentElement.style.colorScheme = ''
+    installThemeColorMeta()
   })
 
   it('starts a fresh install on the dark theme when the OS is dark', async () => {
@@ -320,6 +364,9 @@ describe('uiStore following the system appearance', () => {
     expect(useUIStore.getState().theme).toBe('celadon')
     expect(useUIStore.getState().lightTheme).toBe('celadon')
     expect(document.documentElement.getAttribute('data-theme')).toBe('celadon')
+    // The window that performed the write repaints through applyTheme; this one
+    // only ever sees the storage event, so it needs the same repaint.
+    expect(readThemeColor()).toBe(THEME_BACKGROUNDS.celadon)
     teardownTheme()
   })
 

@@ -184,12 +184,12 @@ export function parseCommandOutputAsSettings(
   stdout: string,
   sourcePath: string,
 ): { settings: SettingsJson; errors: ValidationError[] } {
-  const data = safeParseJSON(stdout, false)
-  if (!data || typeof data !== 'object') {
+  const rawData = safeParseJSON(stdout, false)
+  if (!rawData || typeof rawData !== 'object') {
     return { settings: {}, errors: [] }
   }
 
-  const ruleWarnings = filterInvalidPermissionRules(data, sourcePath)
+  const { data, warnings: ruleWarnings } = filterInvalidPermissionRules(rawData, sourcePath)
   const parseResult = SettingsSchema().safeParse(data)
   if (!parseResult.success) {
     const errors = formatZodError(parseResult.error, sourcePath)

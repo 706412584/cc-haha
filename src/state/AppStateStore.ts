@@ -85,6 +85,12 @@ export type AgentCompletionInboxItem = {
   epoch: number
   notification: string
   delivery: 'pending' | 'queued'
+  /**
+   * Wall-clock ms when this completion entered the inbox. Used on session
+   * restore to drop multi-day-old pending items so they cannot re-enter the
+   * model queue and pollute a resumed turn. Optional for legacy snapshots.
+   */
+  enqueuedAt?: number
 }
 
 export type FooterItem =

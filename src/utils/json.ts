@@ -42,6 +42,11 @@ function parseJSONUncached(json: string, shouldLogError: boolean): CachedParse {
 const parseJSONCached = memoizeWithLRU(parseJSONUncached, json => json, 50)
 
 // Important: memoized for performance (LRU-bounded to 50 entries, small inputs only).
+// The cache hands the SAME object to every caller with an equal input string —
+// treat the result as immutable. A caller that needs to edit the parsed value
+// must use safeParseJSONWithoutCache, or its mutations poison the cache for
+// every later parse of byte-identical content (GH #1126: removing an MCP
+// server made same-content .mcp.json files in other projects parse as empty).
 export const safeParseJSON = Object.assign(
   function safeParseJSON(
     json: string | null | undefined,
@@ -56,6 +61,19 @@ export const safeParseJSON = Object.assign(
   },
   { cache: parseJSONCached.cache },
 )
+
+/**
+ * Like safeParseJSON, but always returns a fresh object the caller owns and
+ * may freely mutate. Never reads from or writes to the shared parse cache.
+ */
+export function safeParseJSONWithoutCache(
+  json: string | null | undefined,
+  shouldLogError: boolean = true,
+): unknown {
+  if (!json) return null
+  const result = parseJSONUncached(json, shouldLogError)
+  return result.ok ? result.value : null
+}
 
 /**
  * Safely parse JSON with comments (jsonc).

@@ -85,6 +85,10 @@ export function createElectronHost(bridge: ElectronHostBridge): DesktopHost {
     },
     app: {
       getVersion: () => invoke(ELECTRON_IPC_CHANNELS.appGetVersion),
+      getLocalePreference: () => invoke(ELECTRON_IPC_CHANNELS.appGetLocalePreference),
+      setLocalePreference: locale => invoke(ELECTRON_IPC_CHANNELS.appSetLocalePreference, locale),
+      getPreferredSystemLanguages: () => invoke(ELECTRON_IPC_CHANNELS.appGetPreferredSystemLanguages),
+      onLocaleChanged: handler => subscribe(ELECTRON_EVENT_CHANNELS.appLocaleChanged, handler),
     },
     commands: {
       invoke: (command, args) => invoke(ELECTRON_IPC_CHANNELS.commandInvoke, { command, args }),
@@ -135,6 +139,8 @@ export function createElectronHost(bridge: ElectronHostBridge): DesktopHost {
       focusSession: sessionId => invoke(ELECTRON_IPC_CHANNELS.petsFocusSession, sessionId),
       onNavigateSession: handler => subscribe(ELECTRON_EVENT_CHANNELS.petNavigateSession, handler),
       onVisibilityChanged: handler => subscribe(ELECTRON_EVENT_CHANNELS.petVisibilityChanged, handler),
+      onPanelPlacementChanged: handler =>
+        subscribe(ELECTRON_EVENT_CHANNELS.petPanelPlacementChanged, handler),
     },
     dialogs: {
       open: options => invoke(ELECTRON_IPC_CHANNELS.dialogOpen, options),

@@ -1,4 +1,5 @@
-import { mkdir, open, readFile, unlink } from 'fs/promises'
+import { constants as fsConstants } from 'fs'
+import { lstat, mkdir, open, readFile, realpath, unlink } from 'fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'path'
 import type { SettingSource } from 'src/utils/settings/constants.js'
 import { getManagedFilePath } from 'src/utils/settings/managedPath.js'
@@ -327,6 +328,50 @@ function getLoadedMarkdownFile(
   return { filePath, baseDir, relativePath }
 }
 
+function isRepositoryAgentSource(source: AgentDefinition['source']): boolean {
+  return source === 'projectSettings' || source === 'localSettings'
+}
+
+async function assertSafeRepositoryAgentMutation(
+  agent: AgentDefinition,
+  filePath: string,
+): Promise<boolean> {
+  if (!isRepositoryAgentSource(agent.source)) {
+    return false
+  }
+
+  const fileStats = await lstat(filePath)
+  if (fileStats.isSymbolicLink()) {
+    throw new Error(
+      `Cannot update project agent through a symbolic link: ${filePath}`,
+    )
+  }
+
+  const loadedMarkdownFile = getLoadedMarkdownFile(agent)
+  const baseDir =
+    loadedMarkdownFile?.baseDir ?? getAgentDirectoryPath(agent.source)
+  const [canonicalBaseDir, canonicalFilePath] = await Promise.all([
+    realpath(baseDir),
+    realpath(filePath),
+  ])
+  const canonicalRelativePath = relative(
+    canonicalBaseDir,
+    canonicalFilePath,
+  )
+  if (
+    !canonicalRelativePath ||
+    isAbsolute(canonicalRelativePath) ||
+    canonicalRelativePath === '..' ||
+    canonicalRelativePath.startsWith(`..${sep}`)
+  ) {
+    throw new Error(
+      `Cannot update project agent outside its agents directory: ${filePath}`,
+    )
+  }
+
+  return true
+}
+
 /**
  * Ensures the directory for an agent location exists
  */
@@ -402,6 +447,10 @@ export async function updateAgentFile(
   }
 
   const filePath = getActualAgentFilePath(agent)
+  const rejectFinalSymlink = await assertSafeRepositoryAgentMutation(
+    agent,
+    filePath,
+  )
   const currentContent = await readFile(filePath, 'utf-8')
   const content = updateAgentMarkdown(
     currentContent,
@@ -416,7 +465,7 @@ export async function updateAgentFile(
     newSystemPrompt,
   )
 
-  await writeFileAndFlush(filePath, content)
+  await writeFileAndFlush(filePath, content, 'w', rejectFinalSymlink)
   clearAgentDefinitionsCache()
 }
 
@@ -464,8 +513,15 @@ async function writeFileAndFlush(
   filePath: string,
   content: string,
   flag: 'w' | 'wx' = 'w',
+  rejectFinalSymlink = false,
 ): Promise<void> {
-  const handle = await open(filePath, flag)
+  const openFlag = rejectFinalSymlink
+    ? fsConstants.O_WRONLY |
+      fsConstants.O_TRUNC |
+      fsConstants.O_CREAT |
+      (process.platform === 'win32' ? 0 : (fsConstants.O_NOFOLLOW ?? 0))
+    : flag
+  const handle = await open(filePath, openFlag)
   try {
     await handle.writeFile(content, { encoding: 'utf-8' })
     await handle.datasync()

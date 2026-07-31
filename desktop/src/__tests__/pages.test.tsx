@@ -148,14 +148,14 @@ describe('Content-only pages render without errors', () => {
       target: { value: '/', selectionStart: 1 },
     })
 
-    expect(await screen.findByText('/lark-mail')).toBeInTheDocument()
-    expect(screen.getByText('/mcp')).toBeInTheDocument()
-    expect(screen.getByText('/skills')).toBeInTheDocument()
-    expect(screen.getByText('/help')).toBeInTheDocument()
-    expect(screen.getByText('/plugin')).toBeInTheDocument()
-    expect(screen.getByText('/context')).toBeInTheDocument()
-    expect(screen.queryByText('/plugins')).not.toBeInTheDocument()
-    expect(screen.queryByText('/internal-only')).not.toBeInTheDocument()
+    expect(await screen.findByText('lark-mail')).toBeInTheDocument()
+    expect(screen.getByText('mcp')).toBeInTheDocument()
+    expect(screen.getByText('skills')).toBeInTheDocument()
+    expect(screen.getByText('help')).toBeInTheDocument()
+    expect(screen.getByText('plugin')).toBeInTheDocument()
+    expect(screen.getByText('context')).toBeInTheDocument()
+    expect(screen.queryByText('plugins')).not.toBeInTheDocument()
+    expect(screen.queryByText('internal-only')).not.toBeInTheDocument()
   })
 
   it('EmptySession shows /goal as one command with argument hints, not pseudo subcommands', async () => {
@@ -167,7 +167,7 @@ describe('Content-only pages render without errors', () => {
       target: { value: '/goal', selectionStart: 5 },
     })
 
-    expect(await screen.findAllByText('/goal')).toHaveLength(2)
+    expect(await screen.findByRole('option', { name: /^goal / })).toBeInTheDocument()
     expect(screen.getByText('[<condition> | clear]')).toBeInTheDocument()
     expect(screen.getByText('Set a completion goal')).toBeInTheDocument()
     expect(screen.queryByText('/goal status')).not.toBeInTheDocument()

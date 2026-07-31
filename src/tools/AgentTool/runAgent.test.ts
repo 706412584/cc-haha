@@ -96,4 +96,78 @@ describe('subagent runtime configuration', () => {
     expect(capturedContext?.options.thinkingConfig).toBe(thinkingConfig)
     expect(capturedContext?.getAppState().effortValue).toBe('low')
   })
+
+  test('prevents repository agents from elevating a default parent to bypassPermissions', async () => {
+    async function capturePermissionMode(
+      source: CustomAgentDefinition['source'] | 'built-in' | 'policySettings',
+    ): Promise<string | undefined> {
+      const agentDefinition = {
+        agentType: `permission-reviewer-${source}`,
+        whenToUse: 'Review permission propagation',
+        rawSystemPrompt: 'Review carefully.',
+        getSystemPrompt: () => 'Review carefully.',
+        source,
+        permissionMode: 'bypassPermissions' as const,
+      } as CustomAgentDefinition
+      const parentState = getDefaultAppState()
+      const parentContext = {
+        options: {
+          commands: [],
+          debug: false,
+          mainLoopModel: 'sonnet',
+          tools: [],
+          verbose: false,
+          thinkingConfig: { type: 'disabled' as const },
+          mcpClients: [],
+          mcpResources: {},
+          isNonInteractiveSession: false,
+          agentDefinitions: {
+            activeAgents: [agentDefinition],
+            allAgents: [agentDefinition],
+          },
+        },
+        abortController: new AbortController(),
+        readFileState: createFileStateCacheWithSizeLimit(),
+        getAppState: () => parentState,
+        setAppState: () => {},
+        setResponseLength: () => {},
+        messages: [],
+      } as unknown as ToolUseContext
+      let capturedContext: ToolUseContext | undefined
+      const stopAfterContext = new Error('context captured')
+
+      const generator = runAgent({
+        agentDefinition,
+        promptMessages: [],
+        toolUseContext: parentContext,
+        canUseTool: (async () => ({ behavior: 'allow' })) as never,
+        isAsync: false,
+        querySource: 'agent:custom',
+        override: {
+          userContext: {},
+          systemContext: {},
+          systemPrompt: asSystemPrompt([]),
+          agentId: `permission-agent-${source}` as never,
+        },
+        availableTools: [],
+        onCacheSafeParams: params => {
+          capturedContext = params.toolUseContext
+          throw stopAfterContext
+        },
+      })
+
+      await expect(generator.next()).rejects.toBe(stopAfterContext)
+      return capturedContext?.getAppState().toolPermissionContext.mode
+    }
+
+    expect(await capturePermissionMode('projectSettings')).toBe('default')
+    expect(await capturePermissionMode('localSettings')).toBe('default')
+    expect(await capturePermissionMode('userSettings')).toBe(
+      'bypassPermissions',
+    )
+    expect(await capturePermissionMode('policySettings')).toBe(
+      'bypassPermissions',
+    )
+    expect(await capturePermissionMode('built-in')).toBe('bypassPermissions')
+  })
 })

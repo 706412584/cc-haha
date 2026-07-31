@@ -1,4 +1,10 @@
-import { appendFile, writeFile } from 'fs/promises'
+import {
+  appendFile,
+  readFile,
+  stat,
+  truncate,
+  writeFile,
+} from 'fs/promises'
 import { join } from 'path'
 import { getProjectRoot, getSessionId } from './bootstrap/state.js'
 import { registerCleanup } from './utils/cleanupRegistry.js'
@@ -105,6 +111,7 @@ function deserializeLogEntry(line: string): LogEntry {
 
 async function* makeLogEntryReader(): AsyncGenerator<LogEntry> {
   const currentSession = getSessionId()
+  const remainingSkippedTimestamps = new Map(skippedTimestampCounts)
 
   // Start with entries that have yet to be flushed to disk
   for (let i = pendingEntries.length - 1; i >= 0; i--) {
@@ -121,11 +128,17 @@ async function* makeLogEntryReader(): AsyncGenerator<LogEntry> {
         // removeLastFromHistory slow path: entry was flushed before removal,
         // so filter here so both getHistory (Up-arrow) and makeHistoryReader
         // (ctrl+r search) skip it consistently.
-        if (
-          entry.sessionId === currentSession &&
-          skippedTimestamps.has(entry.timestamp)
-        ) {
-          continue
+        if (entry.sessionId === currentSession) {
+          const remaining =
+            remainingSkippedTimestamps.get(entry.timestamp) ?? 0
+          if (remaining > 0) {
+            if (remaining === 1) {
+              remainingSkippedTimestamps.delete(entry.timestamp)
+            } else {
+              remainingSkippedTimestamps.set(entry.timestamp, remaining - 1)
+            }
+            continue
+          }
         }
         yield entry
       } catch (error) {
@@ -286,11 +299,36 @@ let lastAddedEntry: LogEntry | null = null
 // Timestamps of entries already flushed to disk that should be skipped when
 // reading. Used by removeLastFromHistory when the entry has raced past the
 // pending buffer. Session-scoped (module state resets on process restart).
-const skippedTimestamps = new Set<number>()
+const skippedTimestampCounts = new Map<number, number>()
+let inFlightEntries = new Set<LogEntry>()
+const removedInFlightEntries = new Set<LogEntry>()
+let historyWriterPoisoned = false
+
+function markTimestampSkipped(timestamp: number): void {
+  skippedTimestampCounts.set(
+    timestamp,
+    (skippedTimestampCounts.get(timestamp) ?? 0) + 1,
+  )
+}
+
+function commitHistoryEntries(entries: LogEntry[]): void {
+  for (const entry of entries) {
+    if (removedInFlightEntries.delete(entry)) {
+      markTimestampSkipped(entry.timestamp)
+    }
+  }
+  pendingEntries = pendingEntries.filter(entry => !inFlightEntries.has(entry))
+}
+
+function discardRemovedMarkers(entries: LogEntry[]): void {
+  for (const entry of entries) {
+    removedInFlightEntries.delete(entry)
+  }
+}
 
 // Core flush logic - writes pending entries to disk
 async function immediateFlushHistory(): Promise<void> {
-  if (pendingEntries.length === 0) {
+  if (pendingEntries.length === 0 || historyWriterPoisoned) {
     return
   }
 
@@ -313,13 +351,65 @@ async function immediateFlushHistory(): Promise<void> {
       },
     })
 
-    const jsonLines = pendingEntries.map(entry => jsonStringify(entry) + '\n')
-    pendingEntries = []
+    const entriesToWrite = [...pendingEntries]
+    inFlightEntries = new Set(entriesToWrite)
+    const payload = entriesToWrite
+      .map(entry => jsonStringify(entry) + '\n')
+      .join('')
+    const payloadBytes = Buffer.from(payload)
+    const originalSize = (await stat(historyPath)).size
 
-    await appendFile(historyPath, jsonLines.join(''), { mode: 0o600 })
+    try {
+      await appendFile(historyPath, payload, { mode: 0o600 })
+      commitHistoryEntries(entriesToWrite)
+    } catch (appendError) {
+      let tail: Buffer
+      try {
+        const contents = await readFile(historyPath)
+        tail = contents.subarray(originalSize)
+      } catch (reconcileError) {
+        historyWriterPoisoned = true
+        logForDebugging(
+          `Prompt history writer disabled after an indeterminate append failure: ${reconcileError}`,
+        )
+        return
+      }
+
+      if (
+        tail.length >= payloadBytes.length &&
+        tail.subarray(0, payloadBytes.length).equals(payloadBytes)
+      ) {
+        commitHistoryEntries(entriesToWrite)
+        return
+      }
+
+      if (
+        tail.length <= payloadBytes.length &&
+        payloadBytes.subarray(0, tail.length).equals(tail)
+      ) {
+        try {
+          await truncate(historyPath, originalSize)
+          discardRemovedMarkers(entriesToWrite)
+        } catch (rollbackError) {
+          historyWriterPoisoned = true
+          logForDebugging(
+            `Prompt history writer disabled after rollback failed: ${rollbackError}`,
+          )
+          return
+        }
+      } else {
+        historyWriterPoisoned = true
+        logForDebugging(
+          'Prompt history writer disabled after append produced an unexpected file tail',
+        )
+        return
+      }
+      throw appendError
+    }
   } catch (error) {
     logForDebugging(`Failed to write prompt history: ${error}`)
   } finally {
+    inFlightEntries.clear()
     if (release) {
       await release()
     }
@@ -327,7 +417,11 @@ async function immediateFlushHistory(): Promise<void> {
 }
 
 async function flushPromptHistory(retries: number): Promise<void> {
-  if (isWriting || pendingEntries.length === 0) {
+  if (
+    isWriting ||
+    pendingEntries.length === 0 ||
+    historyWriterPoisoned
+  ) {
     return
   }
 
@@ -435,8 +529,11 @@ export function addToHistory(command: HistoryEntry | string): void {
 
 export function clearPendingHistoryEntries(): void {
   pendingEntries = []
+  inFlightEntries.clear()
+  removedInFlightEntries.clear()
   lastAddedEntry = null
-  skippedTimestamps.clear()
+  skippedTimestampCounts.clear()
+  historyWriterPoisoned = false
 }
 
 /**
@@ -458,7 +555,10 @@ export function removeLastFromHistory(): void {
   const idx = pendingEntries.lastIndexOf(entry)
   if (idx !== -1) {
     pendingEntries.splice(idx, 1)
+    if (inFlightEntries.has(entry)) {
+      removedInFlightEntries.add(entry)
+    }
   } else {
-    skippedTimestamps.add(entry.timestamp)
+    markTimestampSkipped(entry.timestamp)
   }
 }

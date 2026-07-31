@@ -1,5 +1,8 @@
 export const ELECTRON_IPC_CHANNELS = {
   appGetVersion: 'desktop:app:get-version',
+  appGetLocalePreference: 'desktop:app:get-locale-preference',
+  appSetLocalePreference: 'desktop:app:set-locale-preference',
+  appGetPreferredSystemLanguages: 'desktop:app:get-preferred-system-languages',
   runtimeGetServerUrl: 'desktop:runtime:get-server-url',
   runtimeGetLocalAccessToken: 'desktop:runtime:get-local-access-token',
   runtimeGetPetAccessToken: 'desktop:runtime:get-pet-access-token',
@@ -70,6 +73,7 @@ export const ELECTRON_IPC_CHANNELS = {
 
 export const ELECTRON_EVENT_CHANNELS = {
   event: 'desktop:event',
+  appLocaleChanged: 'desktop:app:locale-changed',
   webviewDragDrop: 'desktop:webview:drag-drop',
   notificationAction: 'desktop:notification:action',
   updateDownloadEvent: 'desktop:update:download-event',
@@ -80,6 +84,7 @@ export const ELECTRON_EVENT_CHANNELS = {
   previewEvent: 'desktop:preview:event',
   petNavigateSession: 'desktop:pets:navigate-session',
   petVisibilityChanged: 'desktop:pets:visibility-changed',
+  petPanelPlacementChanged: 'desktop:pets:panel-placement-changed',
 } as const
 
 export const ELECTRON_INTERNAL_CHANNELS = {

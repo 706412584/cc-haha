@@ -29,6 +29,7 @@ import { H5ConnectionView } from './H5ConnectionView'
 import { useMobileViewport } from '../../hooks/useMobileViewport'
 import type { Tab } from '../../stores/tabStore'
 import { getTraceLaunchRequest } from '../../lib/traceLaunch'
+import { openTraceDetail } from '../../lib/traceNavigation'
 import { TraceList } from '../../pages/TraceList'
 import { TraceSession } from '../../pages/TraceSession'
 import { AgentOfficeModal } from '../../pages/AgentOffice'
@@ -139,9 +140,13 @@ export function AppShell() {
           await useTabStore.getState().restoreTabs()
           if (cancelled) return
           if (traceLaunch.sessionId) {
-            useTabStore.getState().openTraceTab(
+            // A deep link arrives before the session list is in the store often
+            // enough that the id prefix is the only title we can guarantee.
+            const launchedSession = useSessionStore.getState().sessions
+              .find((session) => session.id === traceLaunch.sessionId)
+            openTraceDetail(
               traceLaunch.sessionId,
-              `Trace: ${traceLaunch.sessionId.slice(0, 8)}`,
+              launchedSession?.title || traceLaunch.sessionId.slice(0, 8),
             )
             return
           }

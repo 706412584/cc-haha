@@ -8,6 +8,7 @@ import {
   fetchOpenAICodexModelCatalog,
   getOpenAICodexModelCatalog,
 } from './modelCatalog.js'
+import { OPENAI_CODEX_MODEL_CATALOG } from './models.js'
 import { clearOpenAIOAuthTokenCache } from './storage.js'
 
 describe('OpenAI Codex model catalog', () => {
@@ -102,5 +103,31 @@ describe('OpenAI Codex model catalog', () => {
       'gpt-5.6-terra',
       'gpt-5.6-luna',
     ])
+  })
+
+  test('answers without waiting on an unreachable endpoint', async () => {
+    // `/api/models` sits inside the gate that blocks the desktop first paint,
+    // so an endpoint that never answers must not hold the catalog call open.
+    const models = await getOpenAICodexModelCatalog({
+      fetchOverride: () => new Promise<Response>(() => {}),
+    })
+
+    expect(models).toEqual(OPENAI_CODEX_MODEL_CATALOG)
+  })
+
+  test('stops re-requesting an endpoint that just failed', async () => {
+    let calls = 0
+    const fetchOverride = async () => {
+      calls += 1
+      return new Response('unavailable', { status: 503 })
+    }
+
+    await getOpenAICodexModelCatalog({ fetchOverride })
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await getOpenAICodexModelCatalog({ fetchOverride })
+    await getOpenAICodexModelCatalog({ fetchOverride })
+    await new Promise((resolve) => setTimeout(resolve, 5))
+
+    expect(calls).toBe(1)
   })
 })

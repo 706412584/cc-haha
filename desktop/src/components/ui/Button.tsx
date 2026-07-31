@@ -33,9 +33,25 @@ export type ButtonVariant =
  */
 export type ButtonSize = 'xs' | 'sm' | 'base' | 'md' | 'lg'
 
+/**
+ * `circle` collapses the button to a round icon-only target: square, no
+ * horizontal padding, fully rounded.
+ *
+ * It is a shape on `Button` rather than a new tone on `IconButton` because
+ * what the composer's send button needs is the *primary* button — ink at rest,
+ * terracotta on hover, and above all an opaque disabled fill. `IconButton`
+ * dims to `opacity-50` instead, and half-transparent ink over the page ground
+ * reads as "still loading" rather than "not available" — the exact reason
+ * `DISABLED_FILL` exists below. Reproducing primary's colors on `IconButton`
+ * would have forked that definition in two, past the token contrast guards.
+ */
+export type ButtonShape = 'default' | 'circle'
+
 export type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: ButtonVariant
   size?: ButtonSize
+  /** `circle` requires `aria-label`: it renders the icon alone, with no text. */
+  shape?: ButtonShape
   /** Swaps `icon` for a spinner and disables the button. Also sets `aria-busy`. */
   loading?: boolean
   icon?: ReactNode
@@ -116,10 +132,34 @@ const SIZE_PX: Record<ButtonSize, string> = {
   lg: 'px-5',
 }
 
+/**
+ * Widths for `shape="circle"`, one per size's height in SIZE_CLASSES. A circle
+ * is only a circle while the two agree, so these are not free to drift.
+ */
+const SIZE_SQUARE: Record<ButtonSize, string> = {
+  xs: 'w-5',
+  sm: 'w-6',
+  base: 'w-8',
+  md: 'w-9',
+  lg: 'w-10',
+}
+
 const SPINNER_SIZE: Record<ButtonSize, number> = { xs: 11, sm: 12, base: 14, md: 16, lg: 16 }
 
+/**
+ * The radius lives here rather than in BASE_CLASSES for the same reason `link`
+ * pulls `px` out of the size class: emitting both `rounded-[var(--radius-md)]`
+ * and `rounded-full` would leave the winner to stylesheet order rather than to
+ * the shape that was asked for (see components/AGENTS.md §3.6). Exactly one
+ * radius may ever be emitted.
+ */
+const SHAPE_RADIUS: Record<ButtonShape, string> = {
+  default: 'rounded-[var(--radius-md)]',
+  circle: 'rounded-full',
+}
+
 const BASE_CLASSES = [
-  'inline-flex items-center justify-center rounded-[var(--radius-md)]',
+  'inline-flex items-center justify-center',
   'font-medium cursor-pointer',
   // The handoff pins one motion curve on every button: .16s on paint, .14s on
   // transform. `transition-colors` alone would leave the hover lift snapping.
@@ -151,6 +191,7 @@ const BASE_CLASSES = [
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button({
   variant = 'primary',
   size = 'md',
+  shape = 'default',
   loading = false,
   icon,
   iconPosition = 'start',
@@ -172,9 +213,12 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       aria-busy={loading || undefined}
       className={cx(
         BASE_CLASSES,
+        SHAPE_RADIUS[shape],
         VARIANT_CLASSES[variant],
         SIZE_CLASSES[size],
-        variant !== 'link' && SIZE_PX[size],
+        // A circle carries no label, so it takes a matching width instead of
+        // horizontal padding.
+        shape === 'circle' ? SIZE_SQUARE[size] : variant !== 'link' && SIZE_PX[size],
         block && 'w-full',
         className,
       )}

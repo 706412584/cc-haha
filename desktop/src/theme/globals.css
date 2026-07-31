@@ -563,6 +563,9 @@
   --cc-bd2: #D8D5CC;
   /* Control boundary — clears WCAG 1.4.11's 3:1 on the card lining. */
   --cc-bd-strong: #918E87;
+  /* Tab strip. Trough stays --cc-s0, so these two carry the shape. */
+  --cc-tab-edge: #D9D5CC;
+  --cc-tab-sep: #E3DFD6;
   --cc-t1: #1F1C17;
   --cc-t2: #5D5850;
   --cc-t3: #777269;
@@ -636,6 +639,9 @@
   --cc-bd2: #D5C9B0;
   /* Control boundary — clears WCAG 1.4.11's 3:1 on the card lining. */
   --cc-bd-strong: #938A76;
+  /* Tab strip. Trough stays --cc-s0, so these two carry the shape. */
+  --cc-tab-edge: #DBCFB5;
+  --cc-tab-sep: #E5D9BE;
   --cc-t1: #231D12;
   --cc-t2: #6E6350;
   --cc-t3: #796E5B;
@@ -709,6 +715,9 @@
   --cc-bd2: #C8B897;
   /* Control boundary — clears WCAG 1.4.11's 3:1 on the card lining. */
   --cc-bd-strong: #908369;
+  /* Tab strip. Trough stays --cc-s0, so these two carry the shape. */
+  --cc-tab-edge: #D6C5A2;
+  --cc-tab-sep: #E2CFAA;
   --cc-t1: #251E11;
   --cc-t2: #6E6146;
   --cc-t3: #746951;
@@ -782,6 +791,9 @@
   --cc-bd2: #C6D4C9;
   /* Control boundary — clears WCAG 1.4.11's 3:1 on the card lining. */
   --cc-bd-strong: #818D84;
+  /* Tab strip. Trough stays --cc-s0, so these two carry the shape. */
+  --cc-tab-edge: #C5D3C8;
+  --cc-tab-sep: #CEDCD1;
   --cc-t1: #1C231D;
   --cc-t2: #5D6B60;
   --cc-t3: #667268;
@@ -855,6 +867,11 @@
   --cc-bd2: #4C4433;
   /* Control boundary — clears WCAG 1.4.11's 3:1 on the card lining. */
   --cc-bd-strong: #756D5C;
+  /* Tab strip. Trough stays --cc-s0, so these two carry the shape. Both go
+     *lighter* than the trough here: an ink theme's paper is already so dark
+     that pure black is only 1.26:1 against it, so there is no room downward. */
+  --cc-tab-edge: #353024;
+  --cc-tab-sep: #2D281F;
   --cc-t1: #EDE6D6;
   --cc-t2: #A79B83;
   --cc-t3: #918777;
@@ -928,6 +945,11 @@
   --cc-bd2: #434A5B;
   /* Control boundary — clears WCAG 1.4.11's 3:1 on the card lining. */
   --cc-bd-strong: #6A707E;
+  /* Tab strip. Trough stays --cc-s0, so these two carry the shape. Both go
+     *lighter* than the trough here: an ink theme's paper is already so dark
+     that pure black is only 1.25:1 against it, so there is no room downward. */
+  --cc-tab-edge: #2C303C;
+  --cc-tab-sep: #252833;
   --cc-t1: #E8EAF0;
   --cc-t2: #9AA1B2;
   --cc-t3: #858B97;
@@ -1000,6 +1022,8 @@
   --cc-bd: #DDE3EA;
   --cc-bd2: #8B98A7;
   --cc-bd-strong: #66717E;
+  --cc-tab-edge: #D8DEE6;
+  --cc-tab-sep: #E3E7EC;
   --cc-t1: #111827;
   --cc-t2: #4B5563;
   --cc-t3: #66717E;
@@ -1072,6 +1096,8 @@
   --cc-bd: #DAC1BA;
   --cc-bd2: #87736D;
   --cc-bd-strong: #6B5C57;
+  --cc-tab-edge: #DDD0CB;
+  --cc-tab-sep: #E6DDD9;
   --cc-t1: #1B1C1A;
   --cc-t2: #54433E;
   --cc-t3: #6B5C57;
@@ -1144,6 +1170,8 @@
   --cc-bd: #C8DDD2;
   --cc-bd2: #7C8B83;
   --cc-bd-strong: #5C6B63;
+  --cc-tab-edge: #C8DDD2;
+  --cc-tab-sep: #D1E3DA;
   --cc-t1: #17211C;
   --cc-t2: #53625A;
   --cc-t3: #5C6B63;
@@ -1216,6 +1244,8 @@
   --cc-bd: #40312C;
   --cc-bd2: #8D7F7A;
   --cc-bd-strong: #9B8E89;
+  --cc-tab-edge: #40312C;
+  --cc-tab-sep: #342724;
   --cc-t1: #E5E2E1;
   --cc-t2: #B7AAA5;
   --cc-t3: #A0948F;
@@ -1322,6 +1352,18 @@
   --color-border-strong: var(--cc-bd-strong);
   --color-border-separator: var(--cc-bd);
   --color-border-focus: var(--cc-ac);
+  /* Tab strip outlines. The strip's trough deliberately stays the sidebar's
+     own ground, so the selected tab's fill is only 1.05–1.10:1 against it in
+     all six themes — far too little for a rounded corner to be *visible*, and
+     a curve nobody can see is not a curve. These two carry the shape instead:
+     `tab-edge` traces the selected tab at ~1.35:1 against the trough,
+     `tab-separator` is the hairline between two neighbouring idle tabs at
+     ~1.22:1. They cannot be folded into `--color-border`/`--color-outline`:
+     those are calibrated against paper, and on the trough they land at 1.12
+     (invisible) and 1.36–2.01 (a drawn box) respectively, in opposite
+     directions per theme family. */
+  --color-tab-edge: var(--cc-tab-edge);
+  --color-tab-separator: var(--cc-tab-sep);
 
   /* Text */
   --color-on-surface: var(--cc-t1);
@@ -1690,6 +1732,35 @@ button, input, textarea, select, a, [role="button"] {
 .tab-bar-interactive * {
   app-region: no-drag;
   -webkit-app-region: no-drag;
+}
+
+/* Chrome's hairline between two neighbouring idle tabs — the thing that keeps
+   a row of untitled sessions from reading as one continuous smear.
+   It belongs to the *gap*, not to either tab, so it has to vanish the moment
+   either side of that gap gets a fill: a line running alongside a rounded
+   corner reads as a crack in it. Only sibling combinators can express "the
+   tab after the hovered one", which is why this is here and not in a Tailwind
+   class list. `::after` on purpose — `::before` is taken by the drag-over
+   drop indicator. */
+.tab-strip-item::after {
+  content: '';
+  position: absolute;
+  left: -1px;
+  top: 50%;
+  width: 1px;
+  height: 16px;
+  transform: translateY(-50%);
+  background: var(--color-tab-separator);
+  pointer-events: none;
+}
+.tab-strip-item:first-child::after,
+.tab-strip-item:hover::after,
+.tab-strip-item[data-active='true']::after,
+.tab-strip-item[data-dragging='true']::after,
+.tab-strip-item:hover + .tab-strip-item::after,
+.tab-strip-item[data-active='true'] + .tab-strip-item::after,
+.tab-strip-item[data-dragging='true'] + .tab-strip-item::after {
+  content: none;
 }
 
 .glass-panel {
@@ -2238,30 +2309,6 @@ html[data-touch-h5] .app-shell--mobile .sidebar-panel {
   background: var(--color-outline-a92);
 }
 
-/* The header carries the wordmark in two forms and swaps on available width,
-   so a narrow sidebar never has to clip the name mid-letter. The query runs on
-   the title region rather than the panel because that is the box the wordmark
-   actually shares with the GitHub link and the collapse button. */
-.sidebar-title-region {
-  container: sidebar-title / inline-size;
-}
-
-.sidebar-wordmark-short {
-  display: none;
-}
-
-/* 230px of content box is the last step where the long form still clears the
-   GitHub link; one drag notch narrower and it would start losing letters. */
-@container sidebar-title (max-width: 230px) {
-  .sidebar-wordmark-long {
-    display: none;
-  }
-
-  .sidebar-wordmark-short {
-    display: inline;
-  }
-}
-
 .activity-summary-panel {
   container-type: inline-size;
 }
@@ -2602,6 +2649,15 @@ html[data-window-kind='pet'] #root {
   pointer-events: none;
 }
 
+/* Dragging clamps against the mascot alone so it can reach every display edge,
+   which by construction pushes the rest of the window off-screen. At the top
+   edge that is the menu bar eating the activity panel, so the host asks for the
+   panel below the mascot instead and the whole stack flips. */
+.pet-window-stack[data-panel-placement='below'] {
+  justify-content: flex-start;
+  padding: 12px 12px 0;
+}
+
 .pet-mascot-button {
   position: relative;
   z-index: 10;
@@ -2629,6 +2685,10 @@ html[data-window-kind='pet'] #root {
   flex: 0 0 auto;
   place-items: center;
   pointer-events: none;
+}
+
+.pet-window-stack[data-panel-placement='below'] .pet-mascot-wrap {
+  order: 1;
 }
 
 .pet-task-badge {
@@ -2775,6 +2835,12 @@ html[data-window-kind='pet'] #root {
 .pet-activity-card[data-expanded='true'] {
   border-radius: 22px;
   padding-right: 7px;
+}
+
+.pet-window-stack[data-panel-placement='below'] .pet-activity-card {
+  order: 2;
+  margin-top: 12px;
+  margin-bottom: 0;
 }
 
 html[data-theme='dark'] .pet-activity-card,
@@ -2945,6 +3011,13 @@ html[data-theme='ink-blue'] .pet-session-status {
 .pet-activity-card[data-expanded='true'] .pet-panel-toggle {
   top: auto;
   transform: translateX(50%);
+}
+
+/* Flipped, the control stays on the mascot-facing side of the card so the card,
+   the control, and the mascot remain one compact stack. */
+.pet-window-stack[data-panel-placement='below'] .pet-activity-card .pet-panel-toggle {
+  top: -31px;
+  bottom: auto;
 }
 
 .pet-panel-toggle:hover {

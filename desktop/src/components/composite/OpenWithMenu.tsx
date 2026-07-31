@@ -1,6 +1,6 @@
 import { createPortal } from 'react-dom'
 import { useCallback, useLayoutEffect, useRef, useState } from 'react'
-import { Globe, ExternalLink, FileText } from 'lucide-react'
+import { Globe, ExternalLink, FileText, Copy } from 'lucide-react'
 import { useDismissable } from '@/hooks/useDismissable'
 import { TargetIcon } from './TargetIcon'
 import type { OpenWithItem } from '../../lib/openWithItems'
@@ -19,6 +19,7 @@ function ItemIcon({ item }: { item: OpenWithItem }) {
   if ((item.icon === 'ide' || item.icon === 'file-manager') && item.target) return <TargetIcon target={item.target} size={20} />
   if (item.icon === 'in-app-browser') return <Globe size={18} strokeWidth={1.9} />
   if (item.icon === 'preview') return <FileText size={18} strokeWidth={1.9} />
+  if (item.icon === 'copy') return <Copy size={18} strokeWidth={1.9} />
   return <ExternalLink size={18} strokeWidth={1.9} />
 }
 

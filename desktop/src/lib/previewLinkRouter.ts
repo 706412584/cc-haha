@@ -1,4 +1,5 @@
 import { isLoopbackHostname } from './desktopRuntime'
+import { parseFilePathRef } from './filePathBoundary'
 
 export type PreviewLinkKind =
   | 'browser-localhost'
@@ -7,9 +8,17 @@ export type PreviewLinkKind =
   | 'remote'
   | 'ignored'
 
-export type PreviewLinkClass = { kind: PreviewLinkKind; path?: string; url?: string }
+export type PreviewLinkClass = {
+  kind: PreviewLinkKind
+  path?: string
+  url?: string
+  /** 1-based line to reveal, parsed from a `:42` / `#L42` suffix. */
+  line?: number
+  column?: number
+}
 
-const PREVIEWABLE_EXT = new Set(['md', 'markdown', 'txt', 'ts', 'tsx', 'js', 'jsx', 'json', 'css', 'py', 'rs', 'go', 'java', 'sh', 'yml', 'yaml', 'png', 'jpg', 'jpeg', 'gif', 'svg'])
+/** POSIX absolute (`/…`) or Windows drive (`X:\` / `X:/`). */
+const DRIVE_PATH_RE = /^[a-zA-Z]:[\\/]/
 
 function extOf(p: string): string {
   const m = /\.([a-z0-9]+)(?:[?#].*)?$/i.exec(p)
@@ -17,9 +26,36 @@ function extOf(p: string): string {
   return g ? g.toLowerCase() : ''
 }
 
+function classifyFileRef(raw: string): PreviewLinkClass {
+  // The extension gate lives in filePathBoundary so that whatever the prose
+  // renders as a link is guaranteed to have a route here. Before #1146 this
+  // module kept its own shorter list, which is why `.yml` and `.ps1` links
+  // resolved to `ignored` and clicking them did nothing at all.
+  const ref = parseFilePathRef(raw)
+  if (!ref) return { kind: 'ignored' }
+
+  const position = {
+    ...(ref.line ? { line: ref.line } : {}),
+    ...(ref.column ? { column: ref.column } : {}),
+  }
+  const ext = extOf(ref.path)
+
+  // HTML renders, so it belongs in a browser surface. Everything else opens in
+  // the workspace code view — the only surface that can scroll to a line, which
+  // is the whole point of the `file_path:line_number` reference format.
+  if (ext === 'html' || ext === 'htm') return { kind: 'browser-file', path: ref.path, ...position }
+
+  return { kind: 'file-preview', path: ref.path, ...position }
+}
+
 export function classifyPreviewLink(href: string): PreviewLinkClass {
   const raw = href.trim()
   if (!raw || raw.startsWith('#')) return { kind: 'ignored' }
+
+  // Before `new URL`: a Windows path parses as a URL whose protocol is the drive
+  // letter (`C:\src\app.ts` → `c:`), so it used to fall through to `ignored` and
+  // every path link was dead on Windows — the platform #1146 was filed from.
+  if (DRIVE_PATH_RE.test(raw)) return classifyFileRef(raw)
 
   try {
     const u = new URL(raw)
@@ -36,10 +72,5 @@ export function classifyPreviewLink(href: string): PreviewLinkClass {
     // not an absolute URL → treat as a path
   }
 
-  const ext = extOf(raw)
-  if (ext === 'html' || ext === 'htm') return { kind: 'browser-file', path: raw }
-  if (PREVIEWABLE_EXT.has(ext)) {
-    return raw.startsWith('/') ? { kind: 'browser-file', path: raw } : { kind: 'file-preview', path: raw }
-  }
-  return { kind: 'ignored' }
+  return classifyFileRef(raw)
 }

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle,
+  ArrowLeft,
   CheckCircle2,
   Copy,
   ExternalLink,
@@ -44,10 +45,16 @@ const TRACE_POLL_INTERVAL_MS = 1500
 export function TraceSession({
   sessionId,
   standalone = false,
+  onBack,
   pollIntervalMs = TRACE_POLL_INTERVAL_MS,
 }: {
   sessionId: string
   standalone?: boolean
+  /**
+   * Return to the trace list. Omitted in the standalone window, which has no
+   * list to go back to.
+   */
+  onBack?: () => void
   pollIntervalMs?: number
 }) {
   const t = useTranslation()
@@ -207,6 +214,7 @@ export function TraceSession({
           sessionId={sessionId}
           title={sessionTitle ?? t('session.untitled')}
           standalone={standalone}
+          onBack={onBack}
           onOpenWindow={openWindow}
           onRefresh={refresh}
           refreshing={refreshing}
@@ -224,6 +232,7 @@ export function TraceSession({
           sessionId={sessionId}
           title={sessionTitle ?? t('session.untitled')}
           standalone={standalone}
+          onBack={onBack}
           onOpenWindow={openWindow}
           onRefresh={refresh}
           refreshing={refreshing}
@@ -269,6 +278,7 @@ export function TraceSession({
         trace={trace}
         viewModel={viewModel}
         standalone={standalone}
+        onBack={onBack}
         onOpenWindow={openWindow}
         onRefresh={refresh}
         refreshing={refreshing}
@@ -320,6 +330,7 @@ function TraceHeader({
   trace,
   viewModel,
   standalone,
+  onBack,
   onOpenWindow,
   onRefresh,
   refreshing = false,
@@ -330,6 +341,7 @@ function TraceHeader({
   trace?: TraceSessionData
   viewModel?: TraceViewModel | null
   standalone?: boolean
+  onBack?: () => void
   onOpenWindow?: () => void
   onRefresh?: () => void
   refreshing?: boolean
@@ -345,6 +357,25 @@ function TraceHeader({
       data-testid="trace-header"
     >
       <div className="flex min-w-0 items-center gap-3.5">
+        {/*
+          A trace tab is a drill-down, so it owes the reader a way back up. The
+          hairline separates this navigation affordance from the identity block
+          beside it, the way a breadcrumb separates from a page title.
+        */}
+        {onBack ? (
+          <div className="flex shrink-0 items-center gap-3.5">
+            <Button
+              variant="ghost"
+              size="base"
+              onClick={onBack}
+              icon={<ArrowLeft size={15} strokeWidth={2} aria-hidden="true" />}
+              data-testid="trace-back"
+            >
+              {t('trace.backToList')}
+            </Button>
+            <span className="h-6 w-px bg-[var(--color-border)]" aria-hidden="true" />
+          </div>
+        ) : null}
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[var(--color-brand-soft)] text-[var(--color-on-brand-soft)]">
           <RadioTower size={17} strokeWidth={1.8} aria-hidden="true" />
         </span>
@@ -353,6 +384,7 @@ function TraceHeader({
             <h1
               className="min-w-0 truncate text-[17px] font-bold tracking-tight text-[var(--color-text-primary)]"
               style={{ fontFamily: 'var(--font-headline)' }}
+              title={title}
             >
               {title}
             </h1>

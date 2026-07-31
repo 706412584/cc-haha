@@ -3,10 +3,12 @@ import * as fs from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
 import {
+  clearGrokModelCatalogCache,
   fetchGrokModelCatalog,
   getGrokModelCatalog,
   GROK_MODELS_ENDPOINT,
 } from './modelCatalog.js'
+import { GROK_MODEL_CATALOG } from './models.js'
 import { GROK_CLI_VERSION } from './fetch.js'
 import { GROK_OAUTH_FILE_ENV_KEY } from './storage.js'
 
@@ -79,5 +81,33 @@ describe('Grok model catalog', () => {
     })
     expect(models[0]?.value).toBe('grok-4.5')
     expect(models.some((model) => model.value === 'grok-4.5')).toBe(true)
+  })
+
+  test('answers without waiting on an unreachable endpoint', async () => {
+    clearGrokModelCatalogCache()
+    // `/api/models` sits inside the gate that blocks the desktop first paint,
+    // so an endpoint that never answers must not hold the catalog call open.
+    const models = await getGrokModelCatalog({
+      accountKey: 'unreachable',
+      fetchOverride: () => new Promise<Response>(() => {}),
+    })
+    expect(models).toEqual(GROK_MODEL_CATALOG)
+  })
+
+  test('stops re-requesting an endpoint that just failed', async () => {
+    clearGrokModelCatalogCache()
+    let calls = 0
+    const fetchOverride = async () => {
+      calls += 1
+      return new Response('nope', { status: 503 })
+    }
+
+    await getGrokModelCatalog({ accountKey: 'flaky', fetchOverride })
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await getGrokModelCatalog({ accountKey: 'flaky', fetchOverride })
+    await getGrokModelCatalog({ accountKey: 'flaky', fetchOverride })
+    await new Promise((resolve) => setTimeout(resolve, 5))
+
+    expect(calls).toBe(1)
   })
 })

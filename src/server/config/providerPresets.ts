@@ -25,6 +25,17 @@ const ProviderPresetSchema = z.object({
   apiKeyUrl: z.string().optional(),
   promoText: z.string().optional(),
   featured: z.boolean().optional(),
+  // Retired sponsor/provider: filtered out of the "add provider" choices, but the entry
+  // MUST stay in this list — deleting it silently degrades providers already saved
+  // against it, because three things are resolved from the preset, never from the
+  // provider record:
+  //   1. defaultEnv — never persisted per provider, re-resolved on every run
+  //   2. getManagedEnvKeys() — builds the settings.json erase list from every preset's
+  //      defaultEnv keys, so dropping a preset leaks its keys into other providers
+  //   3. the provider card badge, which renders the preset's name
+  // Older records may also lack authStrategy / modelContextWindows entirely and fall
+  // back to the preset for those too.
+  deprecated: z.boolean().optional(),
   authStrategy: ProviderAuthStrategySchema.optional(),
   defaultEnv: z.record(z.string(), z.string()).optional(),
   modelContextWindows: z.record(
@@ -38,4 +49,5 @@ const ProviderPresetsSchema = z.array(ProviderPresetSchema)
 export type ModelMapping = z.infer<typeof ModelMappingSchema>
 export type ProviderPreset = z.infer<typeof ProviderPresetSchema>
 
+/** Every preset, including retired ones — use this to resolve a saved provider's presetId. */
 export const PROVIDER_PRESETS = ProviderPresetsSchema.parse(providerPresetsJson)

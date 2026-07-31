@@ -6,6 +6,7 @@ import { Ansi, Text } from '../../ink.js';
 import { createHyperlink } from '../../utils/hyperlink.js';
 import { jsonParse, jsonStringify } from '../../utils/slowOperations.js';
 import { renderTruncatedContent } from '../../utils/terminal.js';
+import { splitTextByUrls } from '../../utils/urlBoundary.js';
 import { MessageResponse } from '../MessageResponse.js';
 import { InVirtualListContext } from '../messageActions.js';
 import { useExpandShellOutput } from './ExpandShellOutputContext.js';
@@ -38,11 +39,13 @@ export function tryJsonFormatContent(content: string): string {
   return allLines.map(tryFormatJson).join('\n');
 }
 
-// Match http(s) URLs inside JSON string values. Conservative: no quotes,
-// no whitespace, no trailing comma/brace that'd be JSON structure.
-const URL_IN_JSON = /https?:\/\/[^\s"'<>\\]+/g;
+// Boundaries come from urlBoundary: the previous regex (`[^\s"'<>\\]+`) had the
+// same flaw as marked's GFM autolink and swallowed trailing Chinese text into the
+// link target.
 export function linkifyUrlsInText(content: string): string {
-  return content.replace(URL_IN_JSON, url => createHyperlink(url));
+  return splitTextByUrls(content)
+    .map(segment => segment.type === 'url' ? createHyperlink(segment.value) : segment.value)
+    .join('');
 }
 export function OutputLine(t0) {
   const $ = _c(11);

@@ -6,9 +6,13 @@ import type {
   CreateProviderInput,
   UpdateProviderInput,
   TestProviderConfigInput,
-  FetchModelsInput,
-  FetchModelsResponse,
   ProviderTestResult,
+  CcSwitchScanResult,
+  CcSwitchImportResult,
+  ProviderModelsInput,
+  ProviderModelsResult,
+  FetchUpstreamModelsInput,
+  FetchUpstreamModelsResult,
 } from '../types/provider'
 
 type ProvidersResponse = { providers: SavedProvider[]; activeId: string | null }
@@ -63,7 +67,7 @@ export const providersApi = {
     return api.put<ProvidersReorderResponse>('/api/providers/reorder', { orderedIds })
   },
 
-  test(id: string, overrides?: { baseUrl?: string; modelId?: string; apiFormat?: string; authStrategy?: string }) {
+  test(id: string, overrides?: { modelId?: string }) {
     return api.post<TestResultResponse>(`/api/providers/${id}/test`, overrides)
   },
 
@@ -71,12 +75,25 @@ export const providersApi = {
     return api.post<TestResultResponse>('/api/providers/test', input)
   },
 
-  /**
-   * Server-side proxy for the "Fetch Models" UI button. Bypasses
-   * mixed-content / CORS restrictions that block plain-HTTP relay
-   * URLs from being fetched directly in the renderer.
-   */
-  fetchModels(input: FetchModelsInput) {
-    return api.post<FetchModelsResponse>('/api/providers/fetch-models', input)
+
+  scanCcSwitch() {
+    return api.get<CcSwitchScanResult>('/api/providers/cc-switch/scan')
   },
+
+  importCcSwitch(sourceIds: string[]) {
+    return api.post<CcSwitchImportResult>('/api/providers/cc-switch/import', { sourceIds })
+  },
+
+  fetchModels(input: ProviderModelsInput) {
+    return api.post<ProviderModelsResult>('/api/providers/models', input)
+  },
+
+  /**
+   * Server-side proxy for the provider form. It returns the upstream payload
+   * verbatim so the existing model-entry normalizer can handle relay-specific
+   * response shapes without renderer CORS or mixed-content restrictions.
+   */
+  fetchUpstreamModels(input: FetchUpstreamModelsInput) {
+    return api.post<FetchUpstreamModelsResult>('/api/providers/fetch-models', input)
+  }
 }

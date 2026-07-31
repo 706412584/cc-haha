@@ -37,12 +37,12 @@ import {
 } from '@/components/settings/SettingsSection'
 import { Dropdown } from '@/components/ui/Dropdown'
 import { Switch } from '@/components/ui/Switch'
-import { ModelComboInput, extractModelEntries, type FetchedModelEntry } from '@/components/ui/ModelComboInput'
+import { groupProviderModels, providerModelsErrorKey } from '../lib/providerModels'
 import { PermissionModeSelector } from '../components/controls/PermissionModeSelector'
 import { isDarkThemeMode, isLightThemeMode } from '../types/settings'
 import type { ThemeMode, UpdateProxyMode, NetworkProxyMode, WebSearchMode, AppMode, ChatSendBehavior, OutputStyleSource } from '../types/settings'
 import type { Locale } from '../i18n'
-import type { SavedProvider, UpdateProviderInput, ProviderTestResult, ModelMapping, Model1mSupport, ApiFormat, ProviderAuthStrategy } from '../types/provider'
+import type { SavedProvider, UpdateProviderInput, ProviderTestResult, ModelMapping, Model1mSupport, ApiFormat, ProviderAuthStrategy, ProviderModelInfo, ProviderModelsErrorCode } from '../types/provider'
 import type { ProviderPreset } from '../types/providerPreset'
 import { AdapterSettings } from './AdapterSettings'
 import { useSessionStore } from '../stores/sessionStore'
@@ -64,6 +64,7 @@ import { ProjectRulesSettings } from './ProjectRulesSettings'
 import { PetSettings } from '../features/pets/PetSettings'
 import { useUIStore } from '../stores/uiStore'
 import { ClaudeOfficialLogin } from '../components/settings/ClaudeOfficialLogin'
+import { CcSwitchImportModal } from '../components/settings/CcSwitchImportModal'
 import { ChatGPTOfficialLogin } from '../components/settings/ChatGPTOfficialLogin'
 import { GrokOfficialLogin } from '../components/settings/GrokOfficialLogin'
 import { AgentManager } from '../components/settings/AgentManager'
@@ -234,7 +235,7 @@ export function Settings() {
         {/* Narrow enough that the rail is not a gutter of dead space, wide
             enough that the longest label in any locale — the Japanese
             "コンピューター操作" — still clears the truncation on TabButton. */}
-        <div className="settings-page__tabs w-[220px] flex-shrink-0 flex flex-col overflow-y-auto border-r border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-4">
+        <div className="settings-page__tabs w-[220px] flex-shrink-0 flex flex-col overflow-y-auto border-r border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-4">
           <div className="flex-1 flex flex-col gap-0.5">
             <TabButton icon="dns" label={t('settings.tab.providers')} active={activeTab === 'providers'} onClick={() => setActiveTab('providers')} />
             <TabButton icon="tune" label={t('settings.tab.general')} active={activeTab === 'general'} onClick={() => setActiveTab('general')} />
@@ -284,8 +285,16 @@ export function Settings() {
 }
 
 function TabButton({ icon, label, active, onClick }: { icon: string; label: string; active: boolean; onClick: () => void }) {
+  const ref = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    if (!active) return
+    ref.current?.scrollIntoView?.({ block: 'nearest' })
+  }, [active])
+
   return (
     <button
+      ref={ref}
       onClick={onClick}
       aria-current={active ? 'page' : undefined}
       className={`w-full flex items-center gap-3 rounded-[var(--radius-md)] px-3 py-2 text-[13.5px] text-left transition-[background-color,color] duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-surface-container-low)] ${
@@ -405,6 +414,7 @@ function ProviderSettings() {
   const t = useTranslation()
   const [editingProvider, setEditingProvider] = useState<SavedProvider | null>(null)
   const [showCreateModal, setShowCreateModal] = useState(false)
+  const [showCcSwitchImport, setShowCcSwitchImport] = useState(false)
   const [pendingDeleteProvider, setPendingDeleteProvider] = useState<SavedProvider | null>(null)
   const [isDeletingProvider, setIsDeletingProvider] = useState(false)
   const [testResults, setTestResults] = useState<Record<string, { loading: boolean; result?: ProviderTestResult }>>({})
@@ -491,13 +501,23 @@ function ProviderSettings() {
         title={t('settings.providers.title')}
         description={t('settings.providers.description')}
         action={(
-          <Button
-            size="base"
-            onClick={() => setShowCreateModal(true)}
-            icon={<span className="material-symbols-outlined text-[16px]">add</span>}
-          >
-            {t('settings.providers.addProvider')}
-          </Button>
+          <>
+            <Button
+              variant="secondary"
+              size="base"
+              onClick={() => setShowCcSwitchImport(true)}
+              icon={<span className="material-symbols-outlined text-[16px]">download</span>}
+            >
+              {t('settings.providers.ccSwitch.importButton')}
+            </Button>
+            <Button
+              size="base"
+              onClick={() => setShowCreateModal(true)}
+              icon={<span className="material-symbols-outlined text-[16px]">add</span>}
+            >
+              {t('settings.providers.addProvider')}
+            </Button>
+          </>
         )}
       />
 
@@ -671,6 +691,10 @@ function ProviderSettings() {
           <Spinner size={20} tone="brand" label={t('common.loading')} />
         </div>
       ) : null}
+
+      {showCcSwitchImport && (
+        <CcSwitchImportModal open onClose={() => setShowCcSwitchImport(false)} />
+      )}
 
       {/* Create Modal — conditionally rendered so state resets on close */}
       {showCreateModal && (
@@ -1283,7 +1307,7 @@ function openExternalUrl(url: string) {
 }
 
 function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderFormProps) {
-  const { createProvider, updateProvider, testConfig } = useProviderStore()
+  const { createProvider, updateProvider, testConfig, fetchModels } = useProviderStore()
   const addToast = useUIStore((s) => s.addToast)
   const t = useTranslation()
 
@@ -1331,9 +1355,11 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [testResult, setTestResult] = useState<ProviderTestResult | null>(null)
   const [isTesting, setIsTesting] = useState(false)
-  const [fetchedModels, setFetchedModels] = useState<FetchedModelEntry[]>([])
+  const [fetchedModels, setFetchedModels] = useState<ProviderModelInfo[] | null>(null)
+  const [modelsErrorCode, setModelsErrorCode] = useState<ProviderModelsErrorCode | null>(null)
+  const [modelsErrorMessage, setModelsErrorMessage] = useState<string | null>(null)
   const [isFetchingModels, setIsFetchingModels] = useState(false)
-  const [fetchModelsResult, setFetchModelsResult] = useState<{ kind: 'ok' | 'error'; message: string } | null>(null)
+  const modelsRequestRef = useRef(0)
   const [settingsJson, setSettingsJson] = useState('')
   const [settingsJsonError, setSettingsJsonError] = useState<string | null>(null)
   const jsonPastedRef = useRef(false)
@@ -1384,6 +1410,14 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
     })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedPreset.id, providerProxyBaseUrl])
+
+  useEffect(() => {
+    modelsRequestRef.current += 1
+    setFetchedModels(null)
+    setModelsErrorCode(null)
+    setModelsErrorMessage(null)
+    setIsFetchingModels(false)
+  }, [baseUrl, apiKey])
 
   const handlePresetChange = (preset: ProviderPreset) => {
     setSelectedPreset(preset)
@@ -1653,10 +1687,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
       let result: ProviderTestResult
       if (mode === 'edit' && provider && !apiKey.trim()) {
         result = await useProviderStore.getState().testProvider(provider.id, {
-          baseUrl: baseUrl.trim(),
           modelId: models.main.trim(),
-          apiFormat,
-          authStrategy,
         })
       } else {
         if (requiresApiKey && !apiKey.trim()) return
@@ -1676,67 +1707,50 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
     }
   }
 
+  const canFetchModels = Boolean(baseUrl.trim() && apiKey.trim())
   const handleFetchModels = async () => {
-    const trimmedBase = baseUrl.trim()
-    if (!trimmedBase) return
-    // Reuse the saved key when editing without entering a new one.
-    const effectiveKey = apiKey.trim() || (mode === 'edit' && provider?.apiKey) || ''
-    if (requiresApiKey && !effectiveKey) {
-      setFetchModelsResult({ kind: 'error', message: t('settings.providers.fetchModelsNeedKey') })
-      return
-    }
+    if (!canFetchModels || isFetchingModels) return
+    const requestId = modelsRequestRef.current + 1
+    modelsRequestRef.current = requestId
     setIsFetchingModels(true)
-    setFetchModelsResult(null)
+    setModelsErrorCode(null)
+    setModelsErrorMessage(null)
     try {
-      // Route through the local server. The previous implementation called
-      // `fetch(url)` directly here, which broke for any provider whose URL
-      // is plain `http://` (mixed-content blocked from the secure-context
-      // webview) or whose `/v1/models` returned no permissive CORS header.
-      // The server has neither restriction; it responds with the upstream
-      // JSON verbatim, which `extractModelEntries` already knows how to
-      // parse across OpenAI / Anthropic / OpenAI-compatible shapes.
-      const { providersApi } = await import('../api/providers')
-      const { data } = await providersApi.fetchModels({
-        baseUrl: trimmedBase,
-        apiKey: effectiveKey,
-        apiFormat,
-      })
-      const entries = extractModelEntries(data)
-      if (entries.length === 0) {
-        throw new Error('empty')
+      // `/api/providers/models` is a server-side upstream probe, so plain HTTP
+      // relays and providers without renderer CORS support remain reachable.
+      const result = await fetchModels({ baseUrl: baseUrl.trim(), apiKey: apiKey.trim() })
+      if (modelsRequestRef.current !== requestId) return
+      if (result.ok) {
+        setFetchedModels(result.models)
+      } else {
+        setFetchedModels(null)
+        setModelsErrorCode(result.errorCode)
+        setModelsErrorMessage(result.message?.trim() || null)
       }
-      setFetchedModels(entries)
-      // Auto-fill the context-window inputs for any slot whose model id is in the fetched
-      // list AND whose current input is empty (i.e. user hasn't manually overridden).
-      // Only fills if the upstream actually advertised a context window.
-      const byId = new Map(entries.map((e) => [e.id, e]))
-      setModelContextInputs((prev) => {
-        let next = prev
-        for (const slot of MODEL_SLOTS) {
-          const id = models[slot]?.trim()
-          if (!id) continue
-          const advertised = byId.get(id)?.contextWindow
-          if (!advertised) continue
-          if (prev[slot]?.trim()) continue
-          if (next === prev) next = { ...prev }
-          next[slot] = String(advertised)
-        }
-        return next
-      })
-      setFetchModelsResult({
-        kind: 'ok',
-        message: t('settings.providers.fetchModelsOk', { count: String(entries.length) }),
-      })
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      setFetchModelsResult({
-        kind: 'error',
-        message: t('settings.providers.fetchModelsFailed', { error: message }),
-      })
+    } catch {
+      if (modelsRequestRef.current !== requestId) return
+      setFetchedModels(null)
+      setModelsErrorCode('unknown')
+      setModelsErrorMessage(null)
     } finally {
-      setIsFetchingModels(false)
+      if (modelsRequestRef.current === requestId) setIsFetchingModels(false)
     }
   }
+  const modelsErrorText = modelsErrorCode ? t(providerModelsErrorKey(modelsErrorCode)) : null
+  const modelsErrorUpstream = modelsErrorMessage && modelsErrorMessage !== modelsErrorText
+    ? modelsErrorMessage
+    : null
+  const modelPickerItems = useMemo(
+    () => groupProviderModels(
+      fetchedModels ?? [],
+      t('settings.providers.fetchModelsGroupOther'),
+    ).flatMap((group) => group.models.map((model) => ({
+      value: model.id,
+      label: model.id,
+      description: group.group,
+    }))),
+    [fetchedModels, t],
+  )
 
   return (
     <Modal
@@ -1918,24 +1932,37 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
 
         {/* Model Mapping */}
         <div>
-          <div className="flex items-center justify-between mb-2">
+          <div className="mb-2 flex items-center justify-between gap-2">
             <label className="text-sm font-medium text-[var(--color-text-primary)]">{t('settings.providers.modelMapping')}</label>
             <Button
               variant="secondary"
-              size="sm"
+              size="base"
               onClick={handleFetchModels}
+              disabled={!canFetchModels}
               loading={isFetchingModels}
-              disabled={!baseUrl.trim() || (requiresApiKey && !apiKey.trim() && !(mode === 'edit' && provider?.apiKey))}
-              title={t('settings.providers.fetchModelsHint')}
+              icon={<span className="material-symbols-outlined text-[15px]">cloud_download</span>}
             >
               {t('settings.providers.fetchModels')}
             </Button>
           </div>
-          {fetchModelsResult && (
-            <p className={`text-[11px] mb-2 ${fetchModelsResult.kind === 'ok' ? 'text-[var(--color-success)]' : 'text-[var(--color-error)]'}`}>
-              {fetchModelsResult.message}
+          {!canFetchModels ? (
+            <p className="mb-2 text-[11px] text-[var(--color-text-tertiary)]">{t('settings.providers.fetchModelsHint')}</p>
+          ) : modelsErrorCode ? (
+            <div role="alert" className="mb-2 flex flex-col gap-0.5">
+              <p className="text-[11px] text-[var(--color-error)]">{modelsErrorText}</p>
+              {modelsErrorUpstream && (
+                <p className="break-words text-[11px] text-[var(--color-text-tertiary)]">
+                  {t('settings.providers.fetchModelsErrorUpstream')} {modelsErrorUpstream}
+                </p>
+              )}
+            </div>
+          ) : fetchedModels && fetchedModels.length === 0 ? (
+            <p className="mb-2 text-[11px] text-[var(--color-text-tertiary)]">{t('settings.providers.fetchModelsEmpty')}</p>
+          ) : fetchedModels ? (
+            <p className="mb-2 text-[11px] text-[var(--color-text-secondary)]">
+              {t('settings.providers.fetchModelsLoaded', { count: fetchedModels.length })}
             </p>
-          )}
+          ) : null}
           <div className="grid grid-cols-2 gap-2">
             {MODEL_SLOTS.map((slot) => {
               const labelKey = slot === 'main'
@@ -1946,16 +1973,30 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
                     ? 'settings.providers.sonnetModel'
                     : 'settings.providers.opusModel'
               const label = t(labelKey)
+              const pickLabel = t('settings.providers.fetchModelsPick', { label })
               return (
                 <div key={slot} className="min-w-0">
-                  <ModelComboInput
-                    label={label}
-                    required={slot === 'main'}
-                    value={models[slot]}
-                    onChange={(value) => handleModelChange(slot, value)}
-                    placeholder={slot === 'main' ? t('settings.providers.modelIdPlaceholder') : t('settings.providers.sameAsMain')}
-                    options={fetchedModels}
-                  />
+                  <div className="flex items-end gap-1.5">
+                    <Input
+                      containerClassName="min-w-0 flex-1"
+                      label={label}
+                      required={slot === 'main'}
+                      value={models[slot]}
+                      onChange={(e) => handleModelChange(slot, e.target.value)}
+                      placeholder={slot === 'main' ? t('settings.providers.modelIdPlaceholder') : t('settings.providers.sameAsMain')}
+                    />
+                    {modelPickerItems.length > 0 && (
+                      <Dropdown<string>
+                        items={modelPickerItems}
+                        value={models[slot]}
+                        onChange={(value) => handleModelChange(slot, value)}
+                        label={pickLabel}
+                        align="right"
+                        maxHeight={260}
+                        trigger={<IconButton icon="expand_more" label={pickLabel} size="xl" tone="secondary" bordered />}
+                      />
+                    )}
+                  </div>
                   <label className="mt-1 inline-flex h-6 w-fit cursor-pointer items-center gap-1.5 rounded-[var(--radius-sm)] px-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]">
                     <input
                       type="checkbox"

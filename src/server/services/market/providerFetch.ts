@@ -20,6 +20,52 @@ const DEFAULT_BASES: Record<MarketSource, string> = {
 
 const REQUEST_TIMEOUT_MS = 10_000
 
+function responseTooLarge(
+  source: MarketSource,
+  label: string,
+  maxBytes: number,
+): MarketUpstreamError {
+  return new MarketUpstreamError(
+    source,
+    MARKET_ERROR_CODES.upstreamBadResponse,
+    `${source} ${label} exceeds the actual size limit (${maxBytes} bytes)`,
+  )
+}
+
+export async function readResponseTextWithLimit(
+  source: MarketSource,
+  response: Response,
+  maxBytes: number,
+  label: string,
+): Promise<{ content: string; size: number }> {
+  const contentLength = Number(response.headers.get('content-length'))
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    throw responseTooLarge(source, label, maxBytes)
+  }
+  if (!response.body) return { content: '', size: 0 }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  const chunks: string[] = []
+  let total = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {})
+        throw responseTooLarge(source, label, maxBytes)
+      }
+      chunks.push(decoder.decode(value, { stream: true }))
+    }
+    chunks.push(decoder.decode())
+    return { content: chunks.join(''), size: total }
+  } finally {
+    reader.releaseLock()
+  }
+}
+
 export function getProviderBase(source: MarketSource): string {
   const envKey = source === 'clawhub' ? 'HAHA_MARKET_BASE_CLAWHUB' : 'HAHA_MARKET_BASE_SKILLHUB'
   return process.env[envKey] || DEFAULT_BASES[source]

@@ -6,6 +6,7 @@ import type {
   NotificationPermissionState,
 } from './types'
 import { buildTraceWindowUrl } from '../traceLaunch'
+import { readBrowserLanguages } from '../../i18n/locale'
 
 const browserCapabilities: DesktopHostCapabilities = {
   appMode: false,
@@ -50,6 +51,18 @@ export const browserHost: DesktopHost = {
   app: {
     async getVersion() {
       return '0.1.0'
+    },
+    async getLocalePreference() {
+      return null
+    },
+    async setLocalePreference() {
+      // Browser/H5 preferences stay in renderer localStorage.
+    },
+    async getPreferredSystemLanguages() {
+      return readBrowserLanguages()
+    },
+    async onLocaleChanged() {
+      return noopUnlisten
     },
   },
   commands: {
@@ -151,6 +164,9 @@ export const browserHost: DesktopHost = {
     },
     async focusSession() {
       unsupported('Focusing a pet session')
+    },
+    async onPanelPlacementChanged() {
+      return noopUnlisten
     },
     async onNavigateSession() {
       return noopUnlisten

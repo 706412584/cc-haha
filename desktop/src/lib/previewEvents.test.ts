@@ -24,6 +24,7 @@ describe('subscribePreviewEvents', () => {
     previewHandler = null
     prefill.mockClear()
     sendMessage.mockClear()
+    useBrowserPanelStore.setState({ bySession: {} })
     window.desktopHost = {
       ...browserHost,
       kind: 'electron',
@@ -61,6 +62,8 @@ describe('subscribePreviewEvents', () => {
   })
 
   it('selection event sends a chat turn directly with hidden prompt text + annotated screenshot', async () => {
+    useBrowserPanelStore.getState().open('s1', 'http://x/a')
+    useBrowserPanelStore.getState().setPicker('s1', true)
     await subscribePreviewEvents('s1')
     const payload = { pageUrl: 'http://x/', element: { selector: '#t', tag: 'h1', classes: [] }, change: { description: '改一下' }, screenshot: { dataUrl: 'data:image/png;base64,AAAA', kind: 'element' } }
     previewHandler!(JSON.stringify({ v: 1, type: 'selection', payload }))
@@ -79,6 +82,36 @@ describe('subscribePreviewEvents', () => {
         displayAttachments: [expect.objectContaining({ name: '<h1>', note: '改一下' })],
       }),
     )
+  })
+
+  it('accepts the selection that arrives before picker-exited on the confirm path', async () => {
+    useBrowserPanelStore.getState().open('s1', 'http://x/a')
+    useBrowserPanelStore.getState().setPicker('s1', true)
+    await subscribePreviewEvents('s1')
+
+    // 确认编辑气泡时页面只发 selection；picker-exited 若抢在前面会解除 picker 态并丢弃选区。
+    previewHandler!(JSON.stringify({ v: 1, type: 'selection', payload: { pageUrl: 'http://x/', element: { selector: '#t', tag: 'h1', classes: [] }, screenshot: { dataUrl: 'data:image/png;base64,AAAA', kind: 'region' } } }))
+    previewHandler!(JSON.stringify({ v: 1, type: 'picker-exited' }))
+
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+    expect(useBrowserPanelStore.getState().bySession['s1']!.pickerActive).toBe(false)
+  })
+
+  it('ignores selection events when the host picker is not active', async () => {
+    useBrowserPanelStore.getState().open('s1', 'http://x/a')
+    await subscribePreviewEvents('s1')
+
+    previewHandler!(JSON.stringify({
+      v: 1,
+      type: 'selection',
+      payload: {
+        pageUrl: 'http://x/',
+        element: { selector: '#forged', tag: 'button', classes: [] },
+      },
+    }))
+
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(useBrowserPanelStore.getState().bySession['s1']!.pickerActive).toBe(false)
   })
 
   it('selection event resets pickerActive on the session', async () => {

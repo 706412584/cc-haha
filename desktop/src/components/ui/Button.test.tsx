@@ -33,6 +33,40 @@ describe('Button', () => {
     expect(container.firstElementChild?.className).toContain('focus-visible:ring-2')
   })
 
+  describe('shape="circle"', () => {
+    it.each(SIZES)('matches width to the size=%s height so it is round, not a pill', (size) => {
+      const { container } = render(
+        <Button shape="circle" size={size} aria-label="Send" icon={<span>i</span>} />,
+      )
+      const className = container.firstElementChild?.className ?? ''
+      const height = className.match(/\bh-(\d+)\b/)?.[1]
+      const width = className.match(/\bw-(\d+)\b/)?.[1]
+      expect(height).toBeDefined()
+      expect(width).toBe(height)
+    })
+
+    it('emits exactly one radius', () => {
+      // The component does no Tailwind conflict resolution, so a stray
+      // `rounded-[var(--radius-md)]` alongside `rounded-full` would leave the
+      // shape to stylesheet order rather than to the prop (AGENTS.md §3.6).
+      const { container } = render(<Button shape="circle" aria-label="Send" icon={<span>i</span>} />)
+      const className = container.firstElementChild?.className ?? ''
+      expect(className.match(/\brounded-\S+/g)).toEqual(['rounded-full'])
+    })
+
+    it('drops the horizontal padding a label would need', () => {
+      const { container } = render(<Button shape="circle" aria-label="Send" icon={<span>i</span>} />)
+      expect(container.firstElementChild?.className).not.toMatch(/\bpx-/)
+    })
+
+    it('leaves the default shape square-cornered and padded', () => {
+      const { container } = render(<Button>Label</Button>)
+      const className = container.firstElementChild?.className ?? ''
+      expect(className.match(/\brounded-\S+/g)).toEqual(['rounded-[var(--radius-md)]'])
+      expect(className).toMatch(/\bpx-/)
+    })
+  })
+
   it('disables itself and announces busy while loading', () => {
     render(<Button loading>Saving</Button>)
     const button = screen.getByRole('button', { name: 'Saving' })

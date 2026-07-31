@@ -267,6 +267,11 @@ function createPluginCommand(
     const whenToUse = frontmatter.when_to_use as string | undefined
     const version = frontmatter.version as string | undefined
     const displayName = frontmatter.name as string | undefined
+    const pluginPrefix = `${pluginManifest.name}:`
+    const userFacingDisplayName =
+      displayName && isSkill && !displayName.startsWith(pluginPrefix)
+        ? `${pluginPrefix}${displayName}`
+        : displayName
 
     // Handle model configuration, resolving aliases like 'haiku', 'sonnet', 'opus'
     const model =
@@ -300,6 +305,10 @@ function createPluginCommand(
     return {
       type: 'prompt',
       name: commandName,
+      aliases:
+        displayName && isSkill && userFacingDisplayName !== displayName
+          ? [displayName]
+          : undefined,
       description,
       hasUserSpecifiedDescription: validatedDescription !== null,
       allowedTools,
@@ -321,7 +330,7 @@ function createPluginCommand(
       isHidden: !userInvocable,
       progressMessage: isSkill || config.isSkillMode ? 'loading' : 'running',
       userFacingName(): string {
-        return displayName || commandName
+        return userFacingDisplayName || commandName
       },
       async getPromptForCommand(args, context) {
         // For skills from skills/ directory, include base directory

@@ -204,17 +204,12 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
   }, [hiddenProjectKeys, orderedProjectGroups])
   const showInitialLoading = isLoading && sessions.length === 0
   const showRefreshLoading = showInitialLoading
-  const showIndexBuilding = indexStatus?.state === 'building' && sessions.length > 0
+  // Index building/ready/off are implementation details of how the list is
+  // loaded, not something the user acts on, so they stay silent in both the
+  // visible sidebar and the live region. Only `degraded` is announced: there
+  // the list really is served a different way, which the user can perceive.
   const showIndexDegraded = indexStatus?.state === 'degraded'
-  const indexAnnouncement = indexStatus
-    ? t(indexStatus.state === 'building'
-      ? 'sidebar.indexBuilding'
-      : indexStatus.state === 'ready'
-        ? 'sidebar.indexReady'
-        : indexStatus.state === 'degraded'
-          ? 'sidebar.indexDegraded'
-          : 'sidebar.indexOff')
-    : ''
+  const indexAnnouncement = showIndexDegraded ? t('sidebar.indexDegraded') : ''
   const filteredSessionIds = useMemo(() => filteredSessions.map((session) => session.id), [filteredSessions])
   const selectedCount = selectedSessionIds.size
   const sessionsById = useMemo(
@@ -901,7 +896,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
       <div
         data-testid="sidebar-title-region"
         data-desktop-drag-region
-        className={`sidebar-title-region px-3 pb-2 ${isDesktopRuntime && !isWindows ? 'pt-[44px]' : 'pt-3'}`}
+        className={`px-3 pb-2 ${isDesktopRuntime && !isWindows ? 'pt-[44px]' : 'pt-3'}`}
       >
         <div className={`flex ${expanded ? 'items-center justify-between gap-3' : 'flex-col items-center gap-2'}`}>
           {/* The mark only stands in for the wordmark on the rail. Expanded,
@@ -915,20 +910,13 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
               Collapsed, the mark is centered on the rail instead. */}
           <div className={`flex min-w-0 items-center ${expanded ? 'gap-2.5 pl-3' : 'justify-center'}`}>
             {!expanded ? <BrandSeal size="sm" /> : null}
-            {/* Two forms of one wordmark. Drag the sidebar under ~256px and
-                "Code Council" stops fitting; rather than clip it mid-letter
-                the header falls back to the short form. The swap is a container
-                query on the title region — see `.sidebar-wordmark-*` in globals.css. */}
+            {/* One form, at every width. The app goes by the short product name,
+                and mobile/desktop isolation is handled by the surrounding chrome. */}
             <span
               className={`sidebar-copy ${expanded ? 'sidebar-copy--visible' : 'sidebar-copy--hidden'} text-base font-bold tracking-tight text-[var(--color-text-primary)]`}
               style={{ fontFamily: 'var(--font-headline)' }}
             >
-              <span className="sidebar-wordmark-long">
-                Code <span className="text-[var(--color-brand)]">Council</span>
-              </span>
-              <span className="sidebar-wordmark-short">
-                Code <span className="text-[var(--color-brand)]">Co.</span>
-              </span>
+              cc-<span className="text-[var(--color-brand)]">haha</span>
             </span>
           </div>
           <div className={`flex items-center ${expanded ? 'gap-1.5' : 'flex-col gap-2'}`}>
@@ -1137,18 +1125,6 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
             <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
               {indexAnnouncement}
             </div>
-            {showIndexBuilding && (
-              <div
-                data-testid="sidebar-index-progress"
-                aria-hidden="true"
-                className="mx-4 mb-1 flex-none text-[11px] leading-5 text-[var(--color-text-tertiary)]"
-              >
-                {t('sidebar.indexBuildingProgress', {
-                  indexed: indexStatus.indexed,
-                  discovered: indexStatus.discovered,
-                })}
-              </div>
-            )}
             {showIndexDegraded && (
               <div
                 data-testid="sidebar-index-degraded"

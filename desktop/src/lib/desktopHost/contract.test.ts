@@ -73,6 +73,29 @@ describe('desktop host contract', () => {
     })).resolves.toBeUndefined()
   })
 
+  it('uses browser language preferences outside Electron', async () => {
+    const languages = vi.spyOn(window.navigator, 'languages', 'get').mockReturnValue(['ja-JP', 'en-US'])
+
+    await expect(browserHost.app.getPreferredSystemLanguages()).resolves.toEqual(['ja-JP', 'en-US'])
+    await expect(browserHost.app.getLocalePreference()).resolves.toBeNull()
+    await expect(browserHost.app.setLocalePreference('jp')).resolves.toBeUndefined()
+    await expect(browserHost.app.onLocaleChanged(vi.fn())).resolves.toEqual(expect.any(Function))
+
+    languages.mockRestore()
+  })
+
+  it('uses navigator.language when the browser language list is unavailable', async () => {
+    const languages = vi.spyOn(window.navigator, 'languages', 'get').mockImplementation(() => {
+      throw new Error('languages unavailable')
+    })
+    const language = vi.spyOn(window.navigator, 'language', 'get').mockReturnValue('ko-KR')
+
+    await expect(browserHost.app.getPreferredSystemLanguages()).resolves.toEqual(['ko-KR'])
+
+    languages.mockRestore()
+    language.mockRestore()
+  })
+
   it('detects the browser fallback when native host globals are absent', () => {
     expect(createDesktopHost({ electronHost: null })).toBe(browserHost)
   })

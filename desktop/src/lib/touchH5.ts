@@ -75,6 +75,11 @@ const IOS_VIEWPORT_CONTENT =
  * viewport scale also stops double-tap/pinch zoom from leaving the chat shell
  * in a half-zoomed state. Applied only on iOS — Android has no focus-zoom
  * behavior, so it keeps pinch-zoom accessibility.
+ *
+ * `viewport-fit=cover` is carried here only so this rewrite does not drop it:
+ * iOS decides safe-area behavior when it first parses the viewport meta, so
+ * setting cover from JS does nothing on its own. index.html ships it in the
+ * markup — that is the copy that actually takes effect.
  */
 function lockIOSViewport(doc: Document) {
   const viewport = doc.querySelector('meta[name="viewport"]')

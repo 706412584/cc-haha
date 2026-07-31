@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
-import css from './globals.css?raw'
+import rawCss from './globals.css?raw'
+
+const css = rawCss.replace(/\r\n/g, '\n')
 
 /**
  * Contrast guard for the status palette.
@@ -207,6 +209,150 @@ describe('primary action contrast', () => {
         Number(contrast(onContainer, container).toFixed(2)),
         `${theme}: --color-on-primary-container on --color-primary-container`,
       ).toBeGreaterThanOrEqual(AA_SMALL_TEXT)
+    })
+  }
+})
+
+/**
+ * Link affordance contrast.
+ *
+ * #1145 was reported as "the URL looks the same color as the body text and
+ * can't be clicked". Measuring the palette confirmed the first half exactly:
+ * `--color-text-accent` against `--color-text-primary` is only 1.95–2.55:1
+ * across the six themes, so in dense Chinese text a link with
+ * `prose-a:no-underline` is genuinely indistinguishable from prose.
+ *
+ * The underline therefore carries the whole affordance, and it has to be
+ * visible on its own. The first attempt used `--color-primary-fixed-dim`,
+ * which measures 1.49–1.76:1 against the page — invisible, and no structural
+ * test would have caught it.
+ */
+describe('revealed-line highlight', () => {
+  // #1146 marks the line a `foo.ts:42` reference points at. That mark IS the
+  // feedback that the jump landed, so an invisible one means the feature appears
+  // to do nothing — the #1145 trap, and equally invisible to structural tests.
+  //
+  // Measured across all six themes, EVERY soft/container fill lands between 1.02
+  // and 1.11 against `--color-code-bg` (warm-classic, the default, gives
+  // `--color-brand-soft` just 1.05). That is a property of a soft palette, not a
+  // bad token choice: no fill in it can carry this on its own. So the inset
+  // left rule in `--color-brand` is the load-bearing part and the tint is only
+  // support — which is what these two assertions pin down.
+  for (const [theme, selectors] of Object.entries(THEME_BLOCKS)) {
+    it(`keeps the reveal rule visible against the code background in ${theme}`, () => {
+      const surface = parseColor(resolve('--color-surface', selectors))
+      const codeBg = flatten(parseColor(resolve('--color-code-bg', selectors)), surface)
+      const rule = flatten(parseColor(resolve('--color-brand', selectors)), codeBg)
+
+      expect(
+        Number(contrast(rule, codeBg).toFixed(2)),
+        `${theme}: --color-brand inset rule on --color-code-bg`,
+      ).toBeGreaterThanOrEqual(AA_CONTROL_BOUNDARY)
+    })
+
+    it(`keeps code text readable on the reveal fill in ${theme}`, () => {
+      const surface = parseColor(resolve('--color-surface', selectors))
+      const codeBg = flatten(parseColor(resolve('--color-code-bg', selectors)), surface)
+      const revealFill = flatten(parseColor(resolve('--color-brand-soft', selectors)), codeBg)
+      const codeText = flatten(parseColor(resolve('--color-code-fg', selectors)), revealFill)
+
+      expect(
+        Number(contrast(codeText, revealFill).toFixed(2)),
+        `${theme}: --color-code-fg on the revealed line`,
+      ).toBeGreaterThanOrEqual(AA_SMALL_TEXT)
+    })
+  }
+})
+
+describe('link affordance contrast', () => {
+  const LINK_SURFACES = ['--color-surface', '--color-surface-user-msg'] as const
+
+  for (const [theme, selectors] of Object.entries(THEME_BLOCKS)) {
+    it(`keeps the link underline visible in ${theme}`, () => {
+      const surface = parseColor(resolve('--color-surface', selectors))
+
+      for (const surfaceToken of LINK_SURFACES) {
+        const fill = flatten(parseColor(resolve(surfaceToken, selectors)), surface)
+        const underline = flatten(parseColor(resolve('--color-text-accent', selectors)), fill)
+        expect(
+          Number(contrast(underline, fill).toFixed(2)),
+          `${theme}: --color-text-accent underline on ${surfaceToken}`,
+        ).toBeGreaterThanOrEqual(AA_CONTROL_BOUNDARY)
+      }
+    })
+
+    it(`keeps link text itself readable in ${theme}`, () => {
+      const surface = parseColor(resolve('--color-surface', selectors))
+      for (const surfaceToken of LINK_SURFACES) {
+        const fill = flatten(parseColor(resolve(surfaceToken, selectors)), surface)
+        const text = flatten(parseColor(resolve('--color-text-accent', selectors)), fill)
+        expect(
+          Number(contrast(text, fill).toFixed(2)),
+          `${theme}: --color-text-accent text on ${surfaceToken}`,
+        ).toBeGreaterThanOrEqual(AA_SMALL_TEXT)
+      }
+    })
+  }
+})
+
+describe('tab strip outlines', () => {
+  /**
+   * The tab strip's trough is deliberately the sidebar's own ground rather
+   * than a darkened Chrome-style band — that is what keeps the titlebar from
+   * reading as a separate stripe across the top of the window. The price is
+   * that the selected tab's paper fill sits at only 1.05–1.10:1 against it in
+   * every one of the six themes, so these two tokens are the entire reason the
+   * rounded shape is visible at all. A corner nobody can see is not a corner,
+   * and what is left when they fail is exactly the flat smear #1123 reported.
+   *
+   * Neither can be replaced by `--color-border` or `--color-outline`: both are
+   * calibrated against paper, and on the trough they land at 1.12:1
+   * (invisible) and 1.36–2.01:1 (a drawn box), in opposite directions between
+   * the light and ink families.
+   */
+  const TROUGH = '--color-surface-sidebar'
+  /** Enough to trace a 1px curve; below this the corner stops resolving. */
+  const EDGE_MIN = 1.3
+  /**
+   * The hairline between two idle tabs is bounded on both sides: too faint and
+   * a row of same-length titles smears back together, too strong and the strip
+   * turns into a table of cells.
+   */
+  const SEPARATOR_MIN = 1.18
+  const SEPARATOR_MAX = 1.35
+
+  for (const [theme, selectors] of Object.entries(THEME_BLOCKS)) {
+    it(`draws the selected tab's outline on the trough in ${theme}`, () => {
+      const trough = parseColor(resolve(TROUGH, selectors))
+      const edge = flatten(parseColor(resolve('--color-tab-edge', selectors)), trough)
+
+      expect(
+        Number(contrast(edge, trough).toFixed(2)),
+        `${theme}: --color-tab-edge on ${TROUGH}`,
+      ).toBeGreaterThanOrEqual(EDGE_MIN)
+    })
+
+    it(`carries that outline across the tab's own fill in ${theme}`, () => {
+      // The 1px border straddles the boundary: half of it lies over the tab's
+      // paper. If it vanishes there, the curve is drawn on its outer half only.
+      const paper = parseColor(resolve('--color-surface', selectors))
+      const edge = flatten(parseColor(resolve('--color-tab-edge', selectors)), paper)
+
+      expect(
+        Number(contrast(edge, paper).toFixed(2)),
+        `${theme}: --color-tab-edge on --color-surface`,
+      ).toBeGreaterThanOrEqual(1.2)
+    })
+
+    it(`keeps the hairline between idle tabs present but quiet in ${theme}`, () => {
+      const trough = parseColor(resolve(TROUGH, selectors))
+      const separator = flatten(parseColor(resolve('--color-tab-separator', selectors)), trough)
+      const ratio = Number(contrast(separator, trough).toFixed(2))
+
+      expect(ratio, `${theme}: --color-tab-separator on ${TROUGH} is too faint`)
+        .toBeGreaterThanOrEqual(SEPARATOR_MIN)
+      expect(ratio, `${theme}: --color-tab-separator on ${TROUGH} shouts`)
+        .toBeLessThanOrEqual(SEPARATOR_MAX)
     })
   }
 })

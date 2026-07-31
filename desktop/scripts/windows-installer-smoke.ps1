@@ -29,7 +29,7 @@ if ([string]::IsNullOrWhiteSpace($appPackageName)) {
 }
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "cc-haha-installer-smoke-$([Guid]::NewGuid().ToString('N'))"
-$installDir = Join-Path $testRoot 'Claude Code Haha'
+$installDir = Join-Path $testRoot '中文 安装目录\Claude Code Haha'
 $appData = Join-Path $testRoot 'AppData\Roaming'
 $localAppData = Join-Path $testRoot 'AppData\Local'
 $userProfile = Join-Path $testRoot 'UserProfile'
@@ -217,6 +217,162 @@ function Invoke-ProcessHelperExpectExit {
   [Console]::Out.WriteLine("$Stage completed with expected exit code $ExpectedExitCode.")
 }
 
+function Invoke-ProcessHelperCleanup {
+  param(
+    [Parameter(Mandatory = $true)][string]$Stage,
+    [Parameter(Mandatory = $true)][string[]]$Arguments
+  )
+
+  $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  [Console]::Out.WriteLine("$Stage starting...")
+  & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $processHelper @Arguments
+  if ($LASTEXITCODE -notin @(0, 1)) {
+    throw "$Stage expected process exit code 0 (killed) or 1 (already stopped), received $LASTEXITCODE."
+  }
+  [Console]::Out.WriteLine("$Stage completed with process exit code $LASTEXITCODE.")
+}
+
+function Write-InstalledApplicationDiagnostics {
+  param(
+    [Parameter(Mandatory = $true)][string]$WindowLog,
+    [Parameter(Mandatory = $true)][string]$HostDiagnostics
+  )
+
+  foreach ($path in @($WindowLog, $HostDiagnostics)) {
+    [Console]::Out.WriteLine("--- installed application diagnostic: $path ---")
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+      foreach ($line in @(Get-Content -LiteralPath $path -Tail 80 -ErrorAction SilentlyContinue)) {
+        [Console]::Out.WriteLine([string]$line)
+      }
+    } else {
+      [Console]::Out.WriteLine('  (missing)')
+    }
+    [Console]::Out.WriteLine('--- end ---')
+  }
+}
+
+function Invoke-InstalledApplicationSmoke {
+  param(
+    [Parameter(Mandatory = $true)][string]$FilePath,
+    [Parameter(Mandatory = $true)][string]$InstallDirectory,
+    [Parameter(Mandatory = $true)][string]$IsolatedUserProfile,
+    [int]$TimeoutSeconds = 60
+  )
+
+  $configDir = Join-Path $IsolatedUserProfile '.claude'
+  $serverStateFile = Join-Path $configDir 'desktop-server-state.json'
+  $windowLog = Join-Path $testRoot 'electron-window-smoke.jsonl'
+  $hostDiagnostics = Join-Path $configDir 'cc-haha\diagnostics\electron-host.log'
+  $smokeEnvironmentNames = @(
+    'CLAUDE_CONFIG_DIR',
+    'CC_HAHA_ELECTRON_WINDOW_SMOKE_LOG',
+    'HOME',
+    'CI',
+    'NO_PROXY',
+    'no_proxy'
+  )
+  $savedSmokeEnvironment = @{}
+  foreach ($name in $smokeEnvironmentNames) {
+    $savedSmokeEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+  }
+
+  $application = $null
+  try {
+    New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+    $env:CLAUDE_CONFIG_DIR = $configDir
+    $env:CC_HAHA_ELECTRON_WINDOW_SMOKE_LOG = $windowLog
+    $env:HOME = $IsolatedUserProfile
+    Remove-Item Env:CI -ErrorAction SilentlyContinue
+    $env:NO_PROXY = '127.0.0.1,localhost,::1'
+    $env:no_proxy = '127.0.0.1,localhost,::1'
+
+    [Console]::Out.WriteLine("Installed application Unicode-path smoke starting: $FilePath")
+    $application = Start-Process -FilePath $FilePath -PassThru
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $lastFailure = 'waiting for the Electron window, server state, and loopback responses'
+
+    while ((Get-Date) -lt $deadline) {
+      if ($application.HasExited) {
+        throw "Installed application exited before readiness with process exit code $($application.ExitCode)."
+      }
+
+      $windowReady = (Test-Path -LiteralPath $windowLog -PathType Leaf) -and
+        (Select-String -LiteralPath $windowLog -SimpleMatch '"reason":"after-final-show"' -Quiet)
+      if (-not $windowReady) {
+        $lastFailure = 'Electron did not record after-final-show'
+        Start-Sleep -Milliseconds 250
+        continue
+      }
+
+      if (-not (Test-Path -LiteralPath $serverStateFile -PathType Leaf)) {
+        $lastFailure = "server state file is missing: $serverStateFile"
+        Start-Sleep -Milliseconds 250
+        continue
+      }
+
+      try {
+        $serverState = Get-Content -LiteralPath $serverStateFile -Raw | ConvertFrom-Json
+        $port = [int]$serverState.lastPort
+        if ($port -lt 1 -or $port -gt 65535) {
+          throw "invalid server port $port"
+        }
+        $health = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$port/health" -TimeoutSec 2
+        $healthPayload = $health.Content | ConvertFrom-Json
+        if ($health.StatusCode -ne 200 -or $healthPayload.status -ne 'ok') {
+          throw "health returned HTTP $($health.StatusCode): $($health.Content)"
+        }
+        $root = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$port/" -TimeoutSec 2
+        if ($root.StatusCode -ne 200 -or $root.Content -notmatch '<html') {
+          throw "application root returned HTTP $($root.StatusCode) without HTML"
+        }
+        [Console]::Out.WriteLine(
+          "Installed application Unicode-path smoke passed (window shown; /health and / served from port $port).")
+        return
+      } catch {
+        $lastFailure = ([string]$_.Exception.Message) -replace '[\r\n]+', ' '
+      }
+
+      Start-Sleep -Milliseconds 250
+    }
+
+    throw "Installed application Unicode-path smoke timed out after $TimeoutSeconds seconds: $lastFailure"
+  } catch {
+    Write-InstalledApplicationDiagnostics -WindowLog $windowLog -HostDiagnostics $hostDiagnostics
+    throw
+  } finally {
+    try {
+      if ($null -ne $application) {
+        try {
+          Invoke-ProcessHelperCleanup `
+            -Stage 'Installed application Unicode-path smoke cleanup' `
+            -Arguments @(
+              '-InstallDir', $InstallDirectory,
+              '-ProcessName', 'Claude Code Haha.exe',
+              '-Action', 'KillForce',
+              '-InstallerPid', [string]$PID,
+              '-InstallerParentPid', '0'
+            )
+        } finally {
+          if (-not $application.WaitForExit(30000)) {
+            Stop-Process -Id $application.Id -Force -ErrorAction SilentlyContinue
+            throw 'Installed application did not exit after Unicode-path smoke cleanup.'
+          }
+          $application.Dispose()
+        }
+      }
+    } finally {
+      foreach ($name in $smokeEnvironmentNames) {
+        $value = $savedSmokeEnvironment[$name]
+        if ($null -eq $value) {
+          [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+        } else {
+          [Environment]::SetEnvironmentVariable($name, [string]$value, 'Process')
+        }
+      }
+    }
+  }
+}
+
 function Invoke-LegacyRecoveryDiagnostic {
   $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
   $arguments = @(
@@ -270,6 +426,10 @@ try {
   if (-not (Test-Path -LiteralPath $appExe -PathType Leaf)) {
     throw "Fresh install did not create the application executable: $appExe"
   }
+  Invoke-InstalledApplicationSmoke `
+    -FilePath $appExe `
+    -InstallDirectory $installDir `
+    -IsolatedUserProfile $userProfile
 
   $processProbeSource = Join-Path $env:SystemRoot 'System32\ping.exe'
   $siblingDir = "$installDir Tools"
@@ -371,7 +531,7 @@ try {
     throw 'Portable reinstall without CLR modified legacy data instead of failing closed.'
   }
 
-  [Console]::Out.WriteLine('Windows installer fresh-install, no-CLR default reinstall, and fail-closed portable reinstall smoke passed.')
+  [Console]::Out.WriteLine('Windows installer Unicode-path launch, fresh-install, no-CLR default reinstall, and fail-closed portable reinstall smoke passed.')
 } finally {
   foreach ($probeProcess in @($installProcess, $siblingProcess, $bundledHelperProcess)) {
     if ($null -ne $probeProcess) {

@@ -1,16 +1,20 @@
-import { createHash, type UUID } from 'crypto'
+import { createHash, randomUUID, type UUID } from 'crypto'
 import { diffLines } from 'diff'
-import type { Stats } from 'fs'
+import { constants as fsConstants, type Stats } from 'fs'
 import {
-  chmod,
   copyFile,
+  type FileHandle,
   link,
+  lstat,
   mkdir,
+  open,
   readFile,
+  realpath,
+  rename,
   stat,
   unlink,
 } from 'fs/promises'
-import { dirname, isAbsolute, join, relative } from 'path'
+import { dirname, isAbsolute, join, relative, resolve } from 'path'
 import {
   getIsNonInteractiveSession,
   getOriginalCwd,
@@ -52,6 +56,8 @@ export type FileHistoryState = {
 }
 
 const MAX_SNAPSHOTS = 100
+const O_NOFOLLOW = fsConstants.O_NOFOLLOW ?? 0
+const COPY_BUFFER_SIZE = 1024 * 1024
 export type DiffStats =
   | {
       filesChanged?: string[]
@@ -233,7 +239,7 @@ export async function fileHistoryMakeSnapshot(
           // Stat the file once; ENOENT means the tracked file was deleted.
           let fileStats: Stats | undefined
           try {
-            fileStats = await stat(filePath)
+            fileStats = await lstat(filePath)
           } catch (e: unknown) {
             if (!isENOENT(e)) throw e
           }
@@ -251,6 +257,15 @@ export async function fileHistoryMakeSnapshot(
               `FileHistory: Missing tracked file: ${trackingPath}`,
             )
             return
+          }
+          if (
+            fileStats.isSymbolicLink() ||
+            !fileStats.isFile() ||
+            fileStats.nlink > 1
+          ) {
+            throw new Error(
+              `FileHistory: Refusing to snapshot unsafe linked file: ${filePath}`,
+            )
           }
 
           // File exists - check if it needs to be backed up
@@ -561,24 +576,32 @@ async function applySnapshot(
 
       if (backupFileName === null) {
         // File did not exist at the target version; delete it if present.
-        try {
-          await unlink(filePath)
+        if (
+          await deleteTrackedFile(
+            filePath,
+            !isAbsolute(trackingPath),
+          )
+        ) {
           logForDebugging(`FileHistory: [Rewind] Deleted ${filePath}`)
           filesChanged.push(filePath)
-        } catch (e: unknown) {
-          if (!isENOENT(e)) throw e
-          // Already absent; nothing to do.
         }
         continue
       }
 
       // File should exist at a specific version. Restore only if it differs.
       if (await checkOriginFileChanged(filePath, backupFileName)) {
-        await restoreBackup(filePath, backupFileName)
-        logForDebugging(
-          `FileHistory: [Rewind] Restored ${filePath} from ${backupFileName}`,
-        )
-        filesChanged.push(filePath)
+        if (
+          await restoreBackup(
+            filePath,
+            backupFileName,
+            !isAbsolute(trackingPath),
+          )
+        ) {
+          logForDebugging(
+            `FileHistory: [Rewind] Restored ${filePath} from ${backupFileName}`,
+          )
+          filesChanged.push(filePath)
+        }
       }
     } catch (error) {
       logError(error)
@@ -607,10 +630,18 @@ export async function checkOriginFileChanged(
   let originalStats: Stats | null = originalStatsHint ?? null
   if (!originalStats) {
     try {
-      originalStats = await stat(originalFile)
+      originalStats = await lstat(originalFile)
     } catch (e: unknown) {
       if (!isENOENT(e)) return true
     }
+  }
+  if (
+    originalStats &&
+    (originalStats.isSymbolicLink() ||
+      !originalStats.isFile() ||
+      originalStats.nlink > 1)
+  ) {
+    return true
   }
   let backupStats: Stats | null = null
   try {
@@ -731,13 +762,100 @@ function getBackupFileName(filePath: string, version: number): string {
 }
 
 function resolveBackupPath(backupFileName: string, sessionId?: string): string {
+  assertSafePathSegment(backupFileName, 'backup file name')
+  return join(resolveBackupDirectory(sessionId), backupFileName)
+}
+
+function resolveBackupDirectory(sessionId?: string): string {
+  const resolvedSessionId = sessionId || getSessionId()
+  assertSafePathSegment(resolvedSessionId, 'session ID')
+  return join(getClaudeConfigHomeDir(), 'file-history', resolvedSessionId)
+}
+
+function assertSafePathSegment(segment: string, label: string): void {
+  if (
+    !segment ||
+    segment === '.' ||
+    segment === '..' ||
+    segment.includes('/') ||
+    segment.includes('\\')
+  ) {
+    throw new Error(`FileHistory: Refusing unsafe ${label}: ${segment}`)
+  }
+}
+
+type SafeDirectoryEntry = {
+  path: string
+  stats: Stats
+}
+
+async function ensureSafeBackupDirectory(
+  sessionId?: string,
+): Promise<SafeDirectoryEntry[]> {
   const configDir = getClaudeConfigHomeDir()
-  return join(
-    configDir,
-    'file-history',
-    sessionId || getSessionId(),
-    backupFileName,
-  )
+  await mkdir(configDir, { recursive: true })
+  const backupDirectory = resolveBackupDirectory(sessionId)
+  const relativeBackupDirectory = relative(configDir, backupDirectory)
+  const entries: SafeDirectoryEntry[] = []
+  let currentPath = configDir
+
+  for (const segment of relativeBackupDirectory.split(/[\\/]/)) {
+    assertSafePathSegment(segment, 'backup directory segment')
+    currentPath = join(currentPath, segment)
+    try {
+      await mkdir(currentPath)
+    } catch (error) {
+      if (getErrnoCode(error) !== 'EEXIST') throw error
+    }
+    const stats = await lstat(currentPath)
+    assertSafeDirectory(stats, currentPath)
+    entries.push({ path: currentPath, stats })
+  }
+  return entries
+}
+
+async function inspectSafeBackupDirectory(
+  sessionId?: string,
+): Promise<SafeDirectoryEntry[]> {
+  const configDir = getClaudeConfigHomeDir()
+  const backupDirectory = resolveBackupDirectory(sessionId)
+  const relativeBackupDirectory = relative(configDir, backupDirectory)
+  const entries: SafeDirectoryEntry[] = []
+  let currentPath = configDir
+
+  for (const segment of relativeBackupDirectory.split(/[\\/]/)) {
+    assertSafePathSegment(segment, 'backup directory segment')
+    currentPath = join(currentPath, segment)
+    const stats = await lstat(currentPath)
+    assertSafeDirectory(stats, currentPath)
+    entries.push({ path: currentPath, stats })
+  }
+  return entries
+}
+
+async function assertSafeDirectoryEntriesUnchanged(
+  entries: SafeDirectoryEntry[],
+): Promise<void> {
+  for (const entry of entries) {
+    const currentStats = await lstat(entry.path)
+    assertSafeDirectory(currentStats, entry.path)
+    if (!sameFileIdentity(entry.stats, currentStats)) {
+      throw new Error(
+        `FileHistory: Refusing a backup directory that changed: ${entry.path}`,
+      )
+    }
+  }
+}
+
+async function areSafeDirectoryEntriesUnchanged(
+  entries: SafeDirectoryEntry[],
+): Promise<boolean> {
+  try {
+    await assertSafeDirectoryEntriesUnchanged(entries)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -756,13 +874,25 @@ async function createBackup(
   const backupFileName = getBackupFileName(filePath, version)
   const backupPath = resolveBackupPath(backupFileName)
 
-  // Stat first: if the source is missing, record a null backup and skip the
-  // copy. Separates "source missing" from "backup dir missing" cleanly —
-  // sharing a catch for both meant a file deleted between copyFile-success
-  // and stat would leave an orphaned backup with a null state record.
-  let srcStats: Stats
+  let pathStats: Stats
   try {
-    srcStats = await stat(filePath)
+    pathStats = await lstat(filePath)
+  } catch (e: unknown) {
+    if (isENOENT(e)) {
+      return { backupFileName: null, version, backupTime: new Date() }
+    }
+    throw e
+  }
+  assertSafeRegularFile(pathStats, filePath, 'snapshot')
+
+  let source: FileHandle
+  try {
+    source = await open(
+      filePath,
+      process.platform === 'win32'
+        ? fsConstants.O_RDONLY
+        : fsConstants.O_RDONLY | O_NOFOLLOW,
+    )
   } catch (e: unknown) {
     if (isENOENT(e)) {
       return { backupFileName: null, version, backupTime: new Date() }
@@ -770,25 +900,55 @@ async function createBackup(
     throw e
   }
 
-  // copyFile preserves content and avoids reading the whole file into the JS
-  // heap (which the previous readFileSync+writeFileSync pipeline did, OOMing
-  // on large tracked files). Lazy mkdir: 99% of calls hit the fast path
-  // (directory already exists); on ENOENT, mkdir then retry.
+  let temporaryPath: string | undefined
+  let backupDirectoryEntries: SafeDirectoryEntry[] | undefined
   try {
-    await copyFile(filePath, backupPath)
-  } catch (e: unknown) {
-    if (!isENOENT(e)) throw e
-    await mkdir(dirname(backupPath), { recursive: true })
-    await copyFile(filePath, backupPath)
+    await assertTrackedPathStaysWithinProject(filePath)
+    const srcStats = await source.stat()
+    assertSafeRegularFile(srcStats, filePath, 'snapshot')
+    if (!sameFileIdentity(pathStats, srcStats)) {
+      throw new Error(
+        `FileHistory: Refusing to snapshot a file that changed while opening: ${filePath}`,
+      )
+    }
+
+    backupDirectoryEntries = await ensureSafeBackupDirectory()
+    temporaryPath = `${backupPath}.${randomUUID()}.tmp`
+    const destination = await open(
+      temporaryPath,
+      fsConstants.O_WRONLY |
+        fsConstants.O_CREAT |
+        fsConstants.O_EXCL |
+        (process.platform === 'win32' ? 0 : O_NOFOLLOW),
+      srcStats.mode,
+    )
+    try {
+      await copyBetweenFileHandles(source, destination)
+      await destination.chmod(srcStats.mode)
+      await destination.sync()
+    } finally {
+      await destination.close()
+    }
+    await assertSafeDirectoryEntriesUnchanged(backupDirectoryEntries)
+    const temporaryStats = await lstat(temporaryPath)
+    assertSafeRegularFile(temporaryStats, temporaryPath, 'snapshot')
+    await rename(temporaryPath, backupPath)
+    temporaryPath = undefined
+
+    logEvent('tengu_file_history_backup_file_created', {
+      version: version,
+      fileSize: srcStats.size,
+    })
+  } finally {
+    await source.close()
+    if (
+      temporaryPath &&
+      backupDirectoryEntries &&
+      (await areSafeDirectoryEntriesUnchanged(backupDirectoryEntries))
+    ) {
+      await unlink(temporaryPath).catch(() => {})
+    }
   }
-
-  // Preserve file permissions on the backup.
-  await chmod(backupPath, srcStats.mode)
-
-  logEvent('tengu_file_history_backup_file_created', {
-    version: version,
-    fileSize: srcStats.size,
-  })
 
   return {
     backupFileName,
@@ -804,36 +964,257 @@ async function createBackup(
 async function restoreBackup(
   filePath: string,
   backupFileName: string,
-): Promise<void> {
+  enforceProjectBoundary: boolean,
+): Promise<boolean> {
   const backupPath = resolveBackupPath(backupFileName)
+  const backupDirectoryEntries = await inspectSafeBackupDirectory()
 
-  // Stat first: if the backup is missing, log and bail before attempting
-  // the copy. Separates "backup missing" from "destination dir missing".
-  let backupStats: Stats
+  let backupPathStats: Stats
   try {
-    backupStats = await stat(backupPath)
+    backupPathStats = await lstat(backupPath)
+    assertSafeRegularFile(backupPathStats, backupPath, 'restore')
   } catch (e: unknown) {
     if (isENOENT(e)) {
       logEvent('tengu_file_history_rewind_restore_file_failed', {})
       logError(
         new Error(`FileHistory: [Rewind] Backup file not found: ${backupPath}`),
       )
-      return
+      return false
     }
     throw e
   }
 
-  // Lazy mkdir: 99% of calls hit the fast path (destination dir exists).
+  let source: FileHandle
   try {
-    await copyFile(backupPath, filePath)
+    source = await open(
+      backupPath,
+      process.platform === 'win32'
+        ? fsConstants.O_RDONLY
+        : fsConstants.O_RDONLY | O_NOFOLLOW,
+    )
   } catch (e: unknown) {
-    if (!isENOENT(e)) throw e
-    await mkdir(dirname(filePath), { recursive: true })
-    await copyFile(backupPath, filePath)
+    if (isENOENT(e)) {
+      logEvent('tengu_file_history_rewind_restore_file_failed', {})
+      logError(
+        new Error(`FileHistory: [Rewind] Backup file not found: ${backupPath}`),
+      )
+      return false
+    }
+    throw e
   }
 
-  // Restore the file permissions
-  await chmod(filePath, backupStats.mode)
+  try {
+    const backupStats = await source.stat()
+    if (!backupStats.isFile()) {
+      throw new Error(
+        `FileHistory: Refusing to restore from non-file backup: ${backupPath}`,
+      )
+    }
+    if (!sameFileIdentity(backupPathStats, backupStats)) {
+      throw new Error(
+        `FileHistory: Refusing a backup that changed while opening: ${backupPath}`,
+      )
+    }
+    await assertSafeDirectoryEntriesUnchanged(backupDirectoryEntries)
+    if (enforceProjectBoundary) {
+      await assertTrackedPathStaysWithinProject(filePath)
+    }
+    const parentPath = dirname(filePath)
+    await mkdir(parentPath, { recursive: true })
+    const parentStats = await lstat(parentPath)
+    assertSafeDirectory(parentStats, parentPath)
+    const originalTargetStats = await getSafeTargetStats(filePath, 'restore')
+    const temporaryPath = join(
+      parentPath,
+      `.${randomUUID()}.file-history-restore.tmp`,
+    )
+    let destination: FileHandle | undefined
+    try {
+      destination = await open(
+        temporaryPath,
+        fsConstants.O_WRONLY |
+          fsConstants.O_CREAT |
+          fsConstants.O_EXCL |
+          (process.platform === 'win32' ? 0 : O_NOFOLLOW),
+        backupStats.mode,
+      )
+      await copyBetweenFileHandles(source, destination)
+      await destination.chmod(backupStats.mode)
+      await destination.sync()
+      await destination.close()
+      destination = undefined
+
+      if (enforceProjectBoundary) {
+        await assertTrackedPathStaysWithinProject(filePath)
+      }
+      const currentParentStats = await lstat(parentPath)
+      assertSafeDirectory(currentParentStats, parentPath)
+      if (!sameFileIdentity(parentStats, currentParentStats)) {
+        throw new Error(
+          `FileHistory: Refusing to restore after the parent directory changed: ${filePath}`,
+        )
+      }
+      const currentTargetStats = await getSafeTargetStats(filePath, 'restore')
+      if (!sameOptionalFileIdentity(originalTargetStats, currentTargetStats)) {
+        throw new Error(
+          `FileHistory: Refusing to restore a file that changed concurrently: ${filePath}`,
+        )
+      }
+      const temporaryStats = await lstat(temporaryPath)
+      assertSafeRegularFile(temporaryStats, temporaryPath, 'restore')
+      await rename(temporaryPath, filePath)
+      return true
+    } finally {
+      await destination?.close().catch(() => {})
+      await unlink(temporaryPath).catch(() => {})
+    }
+  } finally {
+    await source.close()
+  }
+}
+
+async function deleteTrackedFile(
+  filePath: string,
+  enforceProjectBoundary: boolean,
+): Promise<boolean> {
+  if (enforceProjectBoundary) {
+    await assertTrackedPathStaysWithinProject(filePath)
+  }
+  const parentPath = dirname(filePath)
+  let parentStats: Stats
+  try {
+    parentStats = await lstat(parentPath)
+  } catch (error) {
+    if (isENOENT(error)) return false
+    throw error
+  }
+  assertSafeDirectory(parentStats, parentPath)
+  const targetStats = await getSafeTargetStats(filePath, 'delete')
+  if (!targetStats) return false
+
+  if (enforceProjectBoundary) {
+    await assertTrackedPathStaysWithinProject(filePath)
+  }
+  const currentParentStats = await lstat(parentPath)
+  assertSafeDirectory(currentParentStats, parentPath)
+  if (!sameFileIdentity(parentStats, currentParentStats)) {
+    throw new Error(
+      `FileHistory: Refusing to delete after the parent directory changed: ${filePath}`,
+    )
+  }
+  const currentTargetStats = await getSafeTargetStats(filePath, 'delete')
+  if (!sameOptionalFileIdentity(targetStats, currentTargetStats)) {
+    throw new Error(
+      `FileHistory: Refusing to delete a file that changed concurrently: ${filePath}`,
+    )
+  }
+  await unlink(filePath)
+  return true
+}
+
+function assertSafeDirectory(stats: Stats, path: string): void {
+  if (stats.isSymbolicLink() || !stats.isDirectory()) {
+    throw new Error(`FileHistory: Refusing unsafe directory: ${path}`)
+  }
+}
+
+function assertSafeRegularFile(
+  stats: Stats,
+  path: string,
+  operation: 'snapshot' | 'restore' | 'delete',
+): void {
+  if (stats.isSymbolicLink() || !stats.isFile() || stats.nlink > 1) {
+    throw new Error(
+      `FileHistory: Refusing to ${operation} unsafe linked file: ${path}`,
+    )
+  }
+}
+
+async function getSafeTargetStats(
+  path: string,
+  operation: 'restore' | 'delete',
+): Promise<Stats | null> {
+  try {
+    const stats = await lstat(path)
+    assertSafeRegularFile(stats, path, operation)
+    return stats
+  } catch (error) {
+    if (isENOENT(error)) return null
+    throw error
+  }
+}
+
+function sameFileIdentity(left: Stats, right: Stats): boolean {
+  return left.dev === right.dev && left.ino === right.ino
+}
+
+function sameOptionalFileIdentity(
+  left: Stats | null,
+  right: Stats | null,
+): boolean {
+  if (!left || !right) return left === right
+  return sameFileIdentity(left, right)
+}
+
+async function copyBetweenFileHandles(
+  source: FileHandle,
+  destination: FileHandle,
+): Promise<void> {
+  const buffer = Buffer.allocUnsafe(COPY_BUFFER_SIZE)
+  let position = 0
+  while (true) {
+    const { bytesRead } = await source.read(
+      buffer,
+      0,
+      buffer.length,
+      position,
+    )
+    if (bytesRead === 0) return
+
+    let written = 0
+    while (written < bytesRead) {
+      const { bytesWritten } = await destination.write(
+        buffer,
+        written,
+        bytesRead - written,
+        position + written,
+      )
+      written += bytesWritten
+    }
+    position += bytesRead
+  }
+}
+
+async function assertTrackedPathStaysWithinProject(
+  filePath: string,
+): Promise<void> {
+  const projectPath = resolve(getOriginalCwd())
+  const resolvedFilePath = resolve(filePath)
+  const lexicalRelative = relative(projectPath, resolvedFilePath)
+  if (lexicalRelative.startsWith('..') || isAbsolute(lexicalRelative)) {
+    return
+  }
+
+  const realProjectPath = await realpath(projectPath)
+  let existingParentPath = dirname(resolvedFilePath)
+  let realParentPath: string
+  while (true) {
+    try {
+      realParentPath = await realpath(existingParentPath)
+      break
+    } catch (error) {
+      if (!isENOENT(error)) throw error
+      const nextParent = dirname(existingParentPath)
+      if (nextParent === existingParentPath) throw error
+      existingParentPath = nextParent
+    }
+  }
+  const realRelative = relative(realProjectPath, realParentPath)
+  if (realRelative.startsWith('..') || isAbsolute(realRelative)) {
+    throw new Error(
+      `FileHistory: Refusing path whose parent escapes the project through a symbolic link: ${filePath}`,
+    )
+  }
 }
 
 /**

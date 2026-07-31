@@ -1,6 +1,7 @@
 import * as path from 'node:path'
 import { isAllowedFilesystemPath } from './filesystem.js'
 import { serveFileWithRange } from './previewFs.js'
+import { canonicalizeExistingFilesystemPath } from '../services/filesystemPathSecurity.js'
 import { normalizeDriveRootPathForPlatform } from '../services/windowsDrivePath.js'
 
 const PREFIX = '/local-file/'
@@ -83,10 +84,16 @@ export async function handleLocalFile(
   if (!absPath) return new Response('bad request', { status: 400 })
 
   const resolved = path.resolve(normalizeDriveRootPathForPlatform(absPath))
-
-  if (!isAllowedFilesystemPath(resolved)) {
+  const canonicalPath = await canonicalizeExistingFilesystemPath(resolved)
+  if (!canonicalPath) {
+    if (!isAllowedFilesystemPath(resolved)) {
+      return new Response('forbidden', { status: 403 })
+    }
+    return new Response('not found', { status: 404 })
+  }
+  if (!isAllowedFilesystemPath(canonicalPath)) {
     return new Response('forbidden', { status: 403 })
   }
 
-  return serveFileWithRange(resolved, reqHeaders)
+  return serveFileWithRange(canonicalPath, reqHeaders)
 }

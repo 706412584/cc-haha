@@ -535,6 +535,78 @@ describe('Agent runtime recovery', () => {
     expect(restored.agentCompletionInbox[1]?.notification).toContain('interrupted')
     expect(restored.nextAgentCompletionSequence).toBe(10)
   })
+
+  // Days-old pending inbox items used to re-enter the model queue on the
+  // same sessionId resume, polluting the current turn with historical
+  // Agent completions. Restore must drop completions past the TTL while
+  // still delivering recent unacked ones and fresh interrupted notices.
+  test('drops multi-day-old pending completions on restore so they do not pollute the resumed turn', () => {
+    const now = Date.now()
+    const twoDaysAgo = now - 2 * 24 * 60 * 60 * 1000
+    const fiveMinutesAgo = now - 5 * 60 * 1000
+    const restored = restoreAgentRuntimeSnapshot({
+      version: 1,
+      nextSequence: 5,
+      tasks: [{
+        id: 'agent-old-pending',
+        epoch: 1,
+        status: 'completed',
+        description: 'Old',
+        prompt: 'Old',
+        agentType: 'general-purpose',
+        startTime: twoDaysAgo,
+        endTime: twoDaysAgo + 1_000,
+        notified: true,
+      }, {
+        id: 'agent-recent-pending',
+        epoch: 1,
+        status: 'completed',
+        description: 'Recent',
+        prompt: 'Recent',
+        agentType: 'general-purpose',
+        startTime: fiveMinutesAgo,
+        endTime: fiveMinutesAgo + 1_000,
+        notified: true,
+      }, {
+        id: 'agent-still-running',
+        epoch: 1,
+        status: 'running',
+        description: 'Running',
+        prompt: 'Running',
+        agentType: 'general-purpose',
+        startTime: fiveMinutesAgo,
+      }],
+      inbox: [{
+        version: 1,
+        sequence: 1,
+        taskId: 'agent-old-pending',
+        epoch: 1,
+        notification: '<task-notification>stale-days-ago</task-notification>',
+        enqueuedAt: twoDaysAgo + 1_000,
+      }, {
+        version: 1,
+        sequence: 2,
+        taskId: 'agent-recent-pending',
+        epoch: 1,
+        notification: '<task-notification>fresh</task-notification>',
+        enqueuedAt: fiveMinutesAgo + 1_000,
+      }, {
+        // Legacy snapshot without enqueuedAt — age falls back to task endTime.
+        version: 1,
+        sequence: 3,
+        taskId: 'agent-old-pending',
+        epoch: 1,
+        notification: '<task-notification>legacy-stale</task-notification>',
+      }],
+    })
+
+    expect(restored.agentCompletionInbox.map(item => item.taskId)).toEqual([
+      'agent-recent-pending',
+      'agent-still-running',
+    ])
+    expect(restored.agentCompletionInbox[0]?.notification).toContain('fresh')
+    expect(restored.agentCompletionInbox[1]?.notification).toContain('interrupted')
+  })
 })
 
 describe('Agent runtime persistence', () => {

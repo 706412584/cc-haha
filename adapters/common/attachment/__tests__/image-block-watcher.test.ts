@@ -2,16 +2,15 @@ import { describe, it, expect } from 'bun:test'
 import { ImageBlockWatcher } from '../image-block-watcher.js'
 
 describe('ImageBlockWatcher', () => {
-  it('extracts a markdown image with http URL', () => {
+  it('extracts a markdown image with an http URL for policy-checked loading', () => {
     const w = new ImageBlockWatcher()
     const out = w.feed('Here is ![alt](https://example.com/foo.png) an image.')
-    expect(out.length).toBe(1)
-    const source = out[0]!.source
-    expect(source.kind).toBe('url')
-    if (source.kind === 'url') {
-      expect(source.url).toBe('https://example.com/foo.png')
-    }
-    expect(out[0]!.alt).toBe('alt')
+    expect(out).toHaveLength(1)
+    expect(out[0]).toEqual({
+      id: expect.any(String),
+      source: { kind: 'url', url: 'https://example.com/foo.png' },
+      alt: 'alt',
+    })
   })
 
   it('extracts a markdown image with absolute local path', () => {
@@ -46,8 +45,8 @@ describe('ImageBlockWatcher', () => {
 
   it('deduplicates the same image across multiple feeds', () => {
     const w = new ImageBlockWatcher()
-    const a = w.feed('![](https://x/y.png)')
-    const b = w.feed(' repeated ![](https://x/y.png) again')
+    const a = w.feed('![](/tmp/y.png)')
+    const b = w.feed(' repeated ![](/tmp/y.png) again')
     expect(a.length).toBe(1)
     expect(b.length).toBe(0)
   })

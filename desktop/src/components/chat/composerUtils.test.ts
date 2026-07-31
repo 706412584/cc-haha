@@ -5,6 +5,7 @@ import {
   filterSlashCommands,
   findSlashToken,
   getLocalizedFallbackCommands,
+  groupSlashCommands,
   insertSlashTrigger,
   mergeSlashCommands,
   replaceSlashCommand,
@@ -127,6 +128,7 @@ describe('composerUtils', () => {
         name: 'agent debugger',
         description: 'Debug failures (OPUS - userSettings)',
         argumentHint: '<prompt>',
+        kind: 'agent',
       },
     ])
   })
@@ -158,6 +160,36 @@ describe('composerUtils', () => {
       'superpowers:systematic-debugging',
       'lark-calendar',
       'agent-team-orchestrator',
+    ])
+  })
+
+  it('groups built-in app commands before personal skills without changing their relative order', () => {
+    const groups = groupSlashCommands([
+      { name: 'amazon-review-scraper', description: 'Collect Amazon reviews', kind: 'skill', source: 'user' },
+      { name: 'status', description: 'Show session status', kind: 'command' },
+      { name: 'agent debugger', description: 'Run the debugger agent', kind: 'agent' },
+      { name: 'audit', description: 'Audit product UX', kind: 'skill', source: 'project' },
+      { name: 'future-native-command', description: 'A CLI command unknown to this desktop build' },
+      { name: 'model', description: 'Switch model', kind: 'command' },
+    ])
+
+    expect(groups.system.map((command) => command.name)).toEqual([
+      'status',
+      'agent debugger',
+      'future-native-command',
+      'model',
+    ])
+    expect(groups.skills.map((command) => command.name)).toEqual([
+      'amazon-review-scraper',
+      'audit',
+    ])
+    expect(groups.ordered.map((command) => command.name)).toEqual([
+      'status',
+      'agent debugger',
+      'future-native-command',
+      'model',
+      'amazon-review-scraper',
+      'audit',
     ])
   })
 

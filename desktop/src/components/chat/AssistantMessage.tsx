@@ -1,21 +1,24 @@
-import { memo, useCallback, useEffect, useMemo } from 'react'
+import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
+import { OpenWithMenu } from '@/components/composite/OpenWithMenu'
+import { buildOpenWithMenuItemsForHref } from '../../lib/openWithMenuItems'
+import { fileRefFromElement } from '../../lib/markdownAutolink'
+import type { OpenWithItem } from '../../lib/openWithItems'
 import { MessageActionBar, type MessageBranchAction } from './MessageActionBar'
+import { TurnCompletionStamp } from './TurnCompletionStamp'
+import type { TurnCompletion } from '../../lib/turnCompletion'
 import { InlineImageGallery } from './InlineImageGallery'
 import { InlineVideoGallery } from './InlineVideoGallery'
 import { AssistantOutputTargetCard } from './AssistantOutputTargetCard'
 import { FakeToolUseNotice } from './FakeToolUseNotice'
-import { handlePreviewLink } from '../../lib/handlePreviewLink'
-import { getServerBaseUrl } from '../../lib/desktopRuntime'
-import { getDesktopHost } from '../../lib/desktopHost'
+import { openPreviewLink } from '../../lib/openPreviewLink'
 import { extractAssistantOutputTargets } from '../../lib/assistantOutputTargets'
 import { extractFakeToolUseBlocks } from '../../lib/fakeToolUseDetection'
-import { useBrowserPanelStore } from '../../stores/browserPanelStore'
 import { useWorkspacePanelStore } from '../../stores/workspacePanelStore'
 import { useProviderStore } from '../../stores/providerStore'
 import { useProviderCompatStore } from '../../stores/providerCompatStore'
-import { useTranslation } from '../../i18n'
+import { useTranslation, type TranslationKey } from '../../i18n'
 
 type Props = {
   content: string
@@ -26,11 +29,13 @@ type Props = {
   /** This turn's real changed files (absolute), used to anchor output chips onto
    *  files that were actually written instead of guessing from the prose. */
   turnChangedFiles?: string[]
+  /** Set only on the last reply of a finished turn: when it ended and how long it took. */
+  turnCompletion?: TurnCompletion
 }
 
 const MAX_CARDS = 3
 
-export const AssistantMessage = memo(function AssistantMessage({ content, isStreaming, branchAction, sessionId, timestamp, turnChangedFiles }: Props) {
+export const AssistantMessage = memo(function AssistantMessage({ content, isStreaming, branchAction, sessionId, timestamp, turnChangedFiles, turnCompletion }: Props) {
   const t = useTranslation()
   const workDir = useWorkspacePanelStore((s) => (sessionId ? s.statusBySession[sessionId]?.workDir : undefined))
   const activeProviderId = useProviderStore((s) => s.activeId)
@@ -62,25 +67,43 @@ export const AssistantMessage = memo(function AssistantMessage({ content, isStre
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [content, isStreaming, activeProviderId])
 
+  const [openWith, setOpenWith] = useState<{ items: OpenWithItem[]; anchor: DOMRect } | null>(null)
+
   const handleLinkClick = useCallback(
     (href: string, event: ReactMouseEvent<HTMLDivElement>): boolean => {
       if (!sessionId) return false
-      const handled = handlePreviewLink(href, {
-        sessionId,
-        serverBaseUrl: getServerBaseUrl(),
-        openBrowser: (id, url) => useBrowserPanelStore.getState().open(id, url),
-        openFilePreview: (id, path) => {
-          void useWorkspacePanelStore.getState().openPreview(id, path, 'file')
-        },
-        openExternal: (url) => {
-          void getDesktopHost().shell.open(url)
-            .catch(() => window.open(url, '_blank'))
-        },
-      })
+      const handled = openPreviewLink(href, sessionId)
       if (handled) event.preventDefault()
       return handled
     },
     [sessionId],
+  )
+
+  // Right-clicking a reference in the prose opens the same menu the output cards
+  // and the file tree use, so "open in VS Code" / "reveal in Finder" / "copy
+  // path" are reachable from the place the model actually names the file.
+  const handleContextMenu = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>) => {
+      if (!sessionId) return
+      const target = event.target as HTMLElement | null
+      const link = target?.closest<HTMLAnchorElement>('a[data-file-path], a[href]')
+      const href = fileRefFromElement(link) ?? link?.getAttribute('href')
+      if (!href) return
+
+      event.preventDefault()
+      const anchor = link!.getBoundingClientRect()
+      void (async () => {
+        const items = await buildOpenWithMenuItemsForHref(href, {
+          sessionId,
+          workDir,
+          // Cast t: useTranslation takes TranslationKey, the builder takes string.
+          // Every key it looks up is a valid TranslationKey, so this is safe.
+          t: (key, vars) => t(key as TranslationKey, vars),
+        })
+        if (items.length > 0) setOpenWith({ items, anchor })
+      })()
+    },
+    [sessionId, t, workDir],
   )
 
   const outputTargets = useMemo(
@@ -97,6 +120,7 @@ export const AssistantMessage = memo(function AssistantMessage({ content, isStre
   if (!cleanContent.trim() && fakeBlocks.length === 0) return null
 
   const documentLayout = shouldUseDocumentLayout(cleanContent)
+  const showTurnCompletion = !isStreaming && Boolean(turnCompletion)
 
   return (
     <div className="mb-5 flex justify-start">
@@ -109,9 +133,12 @@ export const AssistantMessage = memo(function AssistantMessage({ content, isStre
             : 'max-w-[88%] sm:max-w-[80%] lg:max-w-[720px]'
         }`}
       >
-        <div className={`rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface)] px-5 py-4 text-[14.5px] text-[var(--color-text-primary)] shadow-[var(--shadow-card)] ${
-          documentLayout ? 'w-full' : 'max-w-full'
-        }`}>
+        <div
+          onContextMenu={sessionId ? handleContextMenu : undefined}
+          className={`rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface)] px-5 py-4 text-[14.5px] text-[var(--color-text-primary)] shadow-[var(--shadow-card)] ${
+            documentLayout ? 'w-full' : 'max-w-full'
+          }`}
+        >
           <FakeToolUseNotice blocks={fakeBlocks} />
           <MarkdownRenderer
             content={cleanContent}
@@ -139,11 +166,23 @@ export const AssistantMessage = memo(function AssistantMessage({ content, isStre
           </div>
         )}
 
+        {openWith && (
+          <OpenWithMenu
+            items={openWith.items}
+            anchor={openWith.anchor}
+            onClose={() => setOpenWith(null)}
+          />
+        )}
+
+        {showTurnCompletion ? <TurnCompletionStamp completion={turnCompletion!} /> : null}
+
         <MessageActionBar
           copyText={isStreaming ? undefined : cleanContent}
           copyLabel={t('chat.copyReply')}          branchAction={branchAction}
           align="start"
-          timestamp={timestamp}
+          // The stamp above already carries this turn's end time; a hover chip
+          // repeating it a line below reads as two different times.
+          timestamp={showTurnCompletion ? undefined : timestamp}
         />
       </div>
     </div>

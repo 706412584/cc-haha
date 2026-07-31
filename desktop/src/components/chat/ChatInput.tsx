@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import { useState, useRef, useEffect, useCallback, useMemo, useId } from 'react'
 import { useDismissable } from '@/hooks/useDismissable'
 import { Button } from '@/components/ui/Button'
 import { IconButton } from '@/components/ui/IconButton'
@@ -28,6 +28,7 @@ import { RepositoryLaunchControls } from '@/components/chat/RepositoryLaunchCont
 import { FileSearchMenu, type FileSearchMenuHandle } from './FileSearchMenu'
 import { LocalSlashCommandPanel, type LocalSlashCommandName } from './LocalSlashCommandPanel'
 import { SkillPickerMenu, type SkillPickerHandle } from './SkillPickerMenu'
+import { getSlashCommandOptionId, SlashCommandMenu } from './SlashCommandMenu'
 import { ContextUsageIndicator } from './ContextUsageIndicator'
 import {
   appendAgentSlashCommands,
@@ -35,11 +36,13 @@ import {
   getLocalizedFallbackCommands,
   filterSlashCommands,
   findSlashTrigger,
+  groupSlashCommands,
   mergeSlashCommands,
   replaceSlashToken,
   resolveSlashUiAction,
 } from './composerUtils'
 import { useMobileViewport } from '../../hooks/useMobileViewport'
+import { useElementWidth } from '../../hooks/useElementWidth'
 import { isDesktopRuntime } from '../../lib/desktopRuntime'
 import {
   composerAttachmentToPayload,
@@ -66,6 +69,26 @@ type ChatInputProps = {
 }
 
 const EMPTY_WORKSPACE_REFERENCES: WorkspaceChatReference[] = []
+
+/**
+ * Both thresholds are the composer column's own width, never "is the workspace
+ * panel open". The panel is resizable and the window is not fixed, so its open
+ * state says nothing about the width the composer actually got — a maximised
+ * window with the panel open leaves the composer wider than a small window
+ * with no panel at all, yet the panel-keyed rule sent the wide one to the
+ * narrow layout and kept the narrow one wide.
+ *
+ * The number comes off the shipped toolbar with the longest mode label
+ * ("Ask permissions" / 询问权限): the leading group measures 193px and the
+ * trailing cluster 361px, which with the 32px round send button needs a 530px
+ * column.
+ *
+ * There used to be a second, wider threshold here that dropped the send
+ * button's label before the location went. The send button has no label to
+ * drop any more — it is the same 32px circle at every width — so the location
+ * is the only thing left that degrades.
+ */
+const TOOLBAR_LOCATION_MIN_WIDTH = 530
 
 function workspaceReferenceToAttachment(reference: WorkspaceChatReference): Attachment {
   return {
@@ -101,6 +124,10 @@ function insertComposerTokenAtRange(value: string, start: number, end: number, t
 export function ChatInput({ variant = 'default', compact = false }: ChatInputProps) {
   const t = useTranslation()
   const isMobileComposer = useMobileViewport() && !isDesktopRuntime()
+  // The shell, not the panel inside it: the panel's own `max-w` changes with
+  // the layout this measurement picks, which would make the observer chase
+  // itself across the threshold. The shell just fills the chat column.
+  const [shellRef, shellWidth] = useElementWidth<HTMLDivElement>()
   const [input, setInput] = useState('')
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [annotationTarget, setAnnotationTarget] = useState<Attachment | null>(null)
@@ -134,7 +161,8 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   const slashMenuRef = useRef<HTMLDivElement>(null)
   const fileSearchRef = useRef<FileSearchMenuHandle>(null)
   const skillPickerRef = useRef<SkillPickerHandle>(null)
-  const slashItemRefs = useRef<(HTMLButtonElement | null)[]>([])
+  const slashItemRefs = useRef<(HTMLElement | null)[]>([])
+  const slashMenuId = useId()
   const previousActiveTabIdRef = useRef<string | null>(null)
   const inputRef = useRef(input)
   const attachmentsRef = useRef(attachments)
@@ -224,15 +252,35 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   const isHeroComposer = variant === 'hero' && !isMemberSession && !compact
   const resolvedWorkDir = activeSession?.workDir || gitInfo?.workDir || undefined
   const showLaunchControls = !isMemberSession && messageCount === 0
-  const useCompactControls = compact || isMobileComposer
-  const iconOnlyAction = compact || isMobileComposer
+  // Two different questions, and they used to share one answer.
+  //
+  // `useCompactChrome` is about context: the shell's padding, its top divider
+  // and the toolbar's edge-to-edge band belong to the panel-beside-the-composer
+  // and mobile layouts regardless of how much room those layouts got.
+  //
+  // `useCompactControls` is about room, so it asks the column how wide it is.
+  // Until a measurement lands (jsdom, first paint) it defers to the caller's
+  // `compact`, which keeps the pre-measurement frame from flashing the wrong
+  // layout.
+  const useCompactChrome = compact || isMobileComposer
+  const fitsAtLeast = (minWidth: number) => shellWidth === null ? !compact : shellWidth >= minWidth
+  const useCompactControls = isMobileComposer || !fitsAtLeast(TOOLBAR_LOCATION_MIN_WIDTH)
   const activeLaunchWorkDir = showLaunchControls ? (launchWorkDir || resolvedWorkDir || '') : (resolvedWorkDir || '')
   // The run location lives in the toolbar on the wide desktop composer, and it
   // stays there for the whole session: editable while the session is still a
   // draft, read-only once the first message lands. It used to jump from inside
   // the panel to a chip below it at that moment.
-  const showLocationInToolbar = isHeroComposer && !useCompactControls && !isMemberSession
-  const embedLaunchControlsInHero = showLocationInToolbar && showLaunchControls
+  //
+  // Deliberately not keyed on `isHeroComposer`: ActiveSession only renders the
+  // hero variant while the session is empty, so keying on it moved the location
+  // out of the toolbar at the exact moment it was supposed to stay put — the
+  // first message swaps the variant and the draft state in the same render.
+  // The condition is the composer's width, not its variant — and now literally
+  // so. It used to read `compact`, which ActiveSession wires to "is the
+  // workspace panel open", so opening the panel dropped the location to a
+  // second line on columns with hundreds of pixels to spare.
+  const showLocationInToolbar = !useCompactControls && !isMemberSession
+  const embedLaunchControlsInToolbar = showLocationInToolbar && showLaunchControls
   const pendingSlashUiAction = !isMemberSession && input.trim().startsWith('/')
     ? resolveSlashUiAction(input.trim().slice(1))
     : null
@@ -510,9 +558,12 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     [agentSlashCommands, slashCommands, t],
   )
 
-  const filteredCommands = useMemo(() => {
-    return filterSlashCommands(allSlashCommands, slashFilter)
+  const filteredCommandGroups = useMemo(() => {
+    return groupSlashCommands(filterSlashCommands(allSlashCommands, slashFilter))
   }, [allSlashCommands, slashFilter])
+
+  const filteredCommands = filteredCommandGroups.ordered
+  const isSlashMenuVisible = !isMemberSession && slashMenuOpen && filteredCommands.length > 0
 
   const exactSlashCommand = useMemo(() => {
     const normalized = slashFilter.trim().toLowerCase()
@@ -1090,6 +1141,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
   return (
     <div
+      ref={shellRef}
       data-testid="chat-input-shell"
       data-session-id={activeTabId ?? undefined}
       className={
@@ -1321,54 +1373,17 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
             </div>
           )}
 
-          {!isMemberSession && slashMenuOpen && filteredCommands.length > 0 && (
-            <div
+          {isSlashMenuVisible && (
+            <SlashCommandMenu
               ref={slashMenuRef}
-              // `--radius-xl`, the card step: this is the same menu the
-              // zero-state composer renders, and it is the corner the context,
-              // effort, branch and worktree panels above this row already use.
-              className="absolute bottom-full left-0 right-0 z-[var(--z-dropdown)] mb-2 overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-overlay)]"
-            >
-              <div className="max-h-[300px] overflow-y-auto py-1">
-                {filteredCommands.map((command, index) => (
-                  <button
-                    key={command.name}
-                    ref={(el) => { slashItemRefs.current[index] = el }}
-                    onClick={() => selectSlashCommand(command.name)}
-                    onMouseEnter={() => setSlashSelectedIndex(index)}
-                    className={`flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors ${
-                      index === slashSelectedIndex
-                        ? 'bg-[var(--color-surface-hover)]'
-                        : 'hover:bg-[var(--color-surface-hover)]'
-                    }`}
-                  >
-                    <span className="flex min-w-0 max-w-[52%] shrink-0 items-baseline gap-1.5">
-                      <span className="shrink-0 text-sm font-semibold text-[var(--color-text-primary)]">
-                        /{command.name}
-                      </span>
-                      {command.argumentHint ? (
-                        <span className="min-w-0 truncate font-mono text-[11px] text-[var(--color-text-tertiary)]">
-                          {command.argumentHint}
-                        </span>
-                      ) : null}
-                    </span>
-                    <span className="min-w-0 flex-1 truncate text-xs text-[var(--color-text-tertiary)]">
-                      {command.description}
-                    </span>
-                  </button>
-                ))}
-              </div>
-              {!isMobileComposer ? (
-                <div className="flex items-center gap-1.5 border-t border-[var(--color-border)] px-4 py-2 text-xs text-[var(--color-text-tertiary)]">
-                  <kbd className="rounded border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-1.5 py-0.5 font-mono text-[10px]">Up/Down</kbd>
-                  <span>{t('chat.navigate')}</span>
-                  <kbd className="ml-2 rounded border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-1.5 py-0.5 font-mono text-[10px]">Enter</kbd>
-                  <span>{t('chat.select')}</span>
-                  <kbd className="ml-2 rounded border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-1.5 py-0.5 font-mono text-[10px]">Esc</kbd>
-                  <span>{t('chat.dismiss')}</span>
-                </div>
-              ) : null}
-            </div>
+              id={slashMenuId}
+              groups={filteredCommandGroups}
+              selectedIndex={slashSelectedIndex}
+              itemRefs={slashItemRefs}
+              onSelect={selectSlashCommand}
+              onHighlight={setSlashSelectedIndex}
+              showKeyboardHints={!isMobileComposer}
+            />
           )}
 
           {!isMemberSession && activeTabId && queuedUserMessages.length > 0 && (
@@ -1499,6 +1514,13 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
                 onPaste={handlePaste}
                 placeholder={composerPlaceholder}
                 disabled={isWorkspaceMissing}
+                role={isSlashMenuVisible ? 'combobox' : undefined}
+                aria-autocomplete={isSlashMenuVisible ? 'list' : undefined}
+                aria-expanded={isSlashMenuVisible ? true : undefined}
+                aria-controls={isSlashMenuVisible ? slashMenuId : undefined}
+                aria-activedescendant={isSlashMenuVisible
+                  ? getSlashCommandOptionId(slashMenuId, slashSelectedIndex)
+                  : undefined}
                 rows={2}
                 className="flex-1 resize-none border-none bg-transparent py-2 leading-relaxed text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] disabled:opacity-50"
               />
@@ -1514,18 +1536,46 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
               onPaste={handlePaste}
               placeholder={composerPlaceholder}
               disabled={isWorkspaceMissing}
+              role={isSlashMenuVisible ? 'combobox' : undefined}
+              aria-autocomplete={isSlashMenuVisible ? 'list' : undefined}
+              aria-expanded={isSlashMenuVisible ? true : undefined}
+              aria-controls={isSlashMenuVisible ? slashMenuId : undefined}
+              aria-activedescendant={isSlashMenuVisible
+                ? getSlashCommandOptionId(slashMenuId, slashSelectedIndex)
+                : undefined}
               rows={1}
-              className={`w-full resize-none bg-transparent text-sm leading-relaxed text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] disabled:opacity-50 ${
-                isMobileComposer ? 'mobile-composer-textarea min-h-[44px] py-2.5' : useCompactControls ? 'py-1.5' : 'py-2'
+              // `block`: a textarea is inline-block by default, so it carries a
+              // ~6px descender gap under it. The hero branch escapes it through
+              // its flex row; this one is a plain block child and was sitting
+              // 18px above the divider where the hero sits 12px.
+              className={`block w-full resize-none bg-transparent text-sm leading-relaxed text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] disabled:opacity-50 ${
+                isMobileComposer ? 'mobile-composer-textarea min-h-[44px] py-2.5' : useCompactChrome ? 'py-1.5' : 'py-2'
               }`}
             />
           )}
 
-          <div data-testid="chat-input-toolbar" className={isHeroComposer
-            ? 'flex items-center justify-between border-t border-[var(--color-border-separator)] pt-3'
-            : `mt-2 flex items-center justify-between border-t border-[var(--color-border-separator)] ${isMobileComposer ? 'mobile-composer-toolbar' : ''} ${
-              useCompactControls ? `-mx-3 -mb-3 px-2.5 py-2 ${isMobileComposer ? 'gap-1' : 'gap-2'}` : '-mx-4 -mb-4 px-3 py-3'
-            }`}>
+          {/*
+            The wide composer keeps one geometry for the whole session. The
+            draft and the live session used to render two different rows — the
+            draft's divider was inset inside the panel's padding, the live one
+            ran edge to edge over a `-mx-4 -mb-4` band — so the first message
+            shifted every control left by 4px and widened the divider by 34px.
+            The hero spacing wins because EmptySession renders the same row.
+            Its top gap comes from the panel's own `flex-col gap-3`, which the
+            live panel does not have, so that one repeats here as `mt-3`.
+            The narrow layouts keep the band: `p-3` leaves too little room to
+            spend on inset, and they never swap variants mid-session anyway.
+            The band is keyed to the chrome, not to the control layout — its
+            `-mx-3` has to cancel the panel's `p-3` exactly, and the panel is
+            padded by the same chrome rule.
+          */}
+          <div data-testid="chat-input-toolbar" className={`flex items-center justify-between border-t border-[var(--color-border-separator)] ${
+            isHeroComposer
+              ? 'pt-3'
+              : useCompactChrome
+                ? `mt-2 -mx-3 -mb-3 px-2.5 py-2 ${isMobileComposer ? 'mobile-composer-toolbar gap-1' : 'gap-2'}`
+                : 'mt-3 pt-3'
+          }`}>
             <div
               data-testid="chat-input-toolbar-leading"
               className={`flex min-w-0 items-center ${isMobileComposer ? 'mobile-composer-toolbar__tools shrink-0 gap-1' : 'gap-2'}`}
@@ -1637,7 +1687,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
                   <PermissionModeSelector compact={useCompactControls} />
 
                   {showLocationInToolbar && (
-                    embedLaunchControlsInHero ? (
+                    embedLaunchControlsInToolbar ? (
                       <RepositoryLaunchControls
                         workDir={activeLaunchWorkDir}
                         onWorkDirChange={handleLaunchWorkDirChange}
@@ -1689,37 +1739,42 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
                   fluid={isMobileComposer}
                 />
               )}
-              {/* Same component and same icon placement as EmptySession's run
-                  button. The two rendered mirror images of each other until it
-                  was spotted in a walkthrough — the arrow led here and trailed
-                  there, on what is the same button to the user. */}
+              {/* Same component, shape and icon as EmptySession's send button.
+                  The two rendered mirror images of each other until it was
+                  spotted in a walkthrough — the arrow led here and trailed
+                  there, on what is the same button to the user.
+
+                  A round icon-only target rather than a labelled pill: the
+                  label said "run" while every other composer control on the row
+                  is already icon-only, and the width it cost was the widest
+                  fixed block in a toolbar that has to fit a model picker and a
+                  location chip. The arrow points *up* — into the transcript the
+                  message is being sent to — which is also what makes it read as
+                  send without a word next to it. Dropping the label is why the
+                  name now lives only in `aria-label`, on both breakpoints. */}
               <Button
                 variant={!isMemberSession && isActive ? 'danger' : 'primary'}
                 size="base"
+                shape="circle"
                 onClick={!isMemberSession && isActive ? () => stopGeneration(activeTabId!) : handleSubmit}
                 disabled={!isMemberSession && isActive ? false : !canSubmit}
                 aria-label={!isMemberSession && isActive ? t('common.stop') : isMemberSession ? t('common.send') : t('common.run')}
                 title={
                   !isMemberSession && isActive
                     ? t('chat.stopTitle')
-                    : iconOnlyAction
-                      ? isMemberSession
-                        ? t('common.send')
-                        : t('common.run')
-                      : undefined
+                    : isMemberSession
+                      ? t('common.send')
+                      : t('common.run')
                 }
-                className={`shrink-0 ${
-                  iconOnlyAction ? (isMobileComposer ? 'h-11 w-11' : 'w-8') : 'w-[112px]'
-                }`}
+                // 44px on touch is the platform minimum for a primary target;
+                // the desktop circle stays at the size's own 32px.
+                className={`shrink-0 ${isMobileComposer ? 'h-11 w-11' : ''}`}
                 icon={(
-                  <span className="material-symbols-outlined text-[14px]">
-                    {!isMemberSession && isActive ? 'stop' : 'arrow_forward'}
+                  <span className="material-symbols-outlined text-[18px]">
+                    {!isMemberSession && isActive ? 'stop' : 'arrow_upward'}
                   </span>
                 )}
-                iconPosition="end"
-              >
-                {!iconOnlyAction && (!isMemberSession && isActive ? t('common.stop') : isMemberSession ? t('common.send') : t('common.run'))}
-              </Button>
+              />
             </div>
           </div>
 
@@ -1734,7 +1789,8 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
           onSave={saveAnnotatedImage}
         />
 
-        {!isMemberSession && !embedLaunchControlsInHero && (          <div className={useCompactControls ? 'mt-2 flex min-w-0 px-1' : 'mt-3 px-1'}>
+        {!isMemberSession && !showLocationInToolbar && (
+          <div className={useCompactControls ? 'mt-2 flex min-w-0 px-1' : 'mt-3 px-1'}>
             {messageCount > 0 ? (
               <ProjectContextChip
                 workDir={resolvedWorkDir}

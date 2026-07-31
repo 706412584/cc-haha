@@ -25,20 +25,29 @@ describe('AdapterHttpClient', () => {
 
   it('createSession calls POST /api/sessions', async () => {
     const mockSessionId = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'
-    globalThis.fetch = mock(() =>
-      Promise.resolve(new Response(JSON.stringify({ sessionId: mockSessionId }), {
-        status: 201,
-        headers: { 'Content-Type': 'application/json' },
-      }))
-    ) as any
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'im-root-'))
+    try {
+      client = new AdapterHttpClient('ws://127.0.0.1:3456', { allowedProjectRoots: [rootDir] })
+      globalThis.fetch = mock(() =>
+        Promise.resolve(new Response(JSON.stringify({ sessionId: mockSessionId }), {
+          status: 201,
+          headers: { 'Content-Type': 'application/json' },
+        }))
+      ) as any
 
-    const sessionId = await client.createSession('/path/to/project')
-    expect(sessionId).toBe(mockSessionId)
+      const sessionId = await client.createSession(rootDir)
+      expect(sessionId).toBe(mockSessionId)
 
-    const call = (globalThis.fetch as any).mock.calls[0]
-    expect(call[0]).toBe('http://127.0.0.1:3456/api/sessions')
-    const body = JSON.parse(call[1].body)
-    expect(body.workDir).toBe('/path/to/project')
+      const call = (globalThis.fetch as any).mock.calls[0]
+      expect(call[0]).toBe('http://127.0.0.1:3456/api/sessions')
+      const body = JSON.parse(call[1].body)
+      expect(body).toEqual({
+        workDir: fs.realpathSync(rootDir),
+        permissionMode: 'default',
+      })
+    } finally {
+      fs.rmSync(rootDir, { recursive: true, force: true })
+    }
   })
 
   it('authenticates requests with the desktop local access token', async () => {
@@ -54,18 +63,51 @@ describe('AdapterHttpClient', () => {
   })
 
   it('listRecentProjects calls GET /api/sessions/recent-projects', async () => {
-    const mockProjects = [
-      { projectName: 'my-app', realPath: '/home/user/my-app', sessionCount: 3 },
-    ]
-    globalThis.fetch = mock(() =>
-      Promise.resolve(new Response(JSON.stringify({ projects: mockProjects }), {
-        headers: { 'Content-Type': 'application/json' },
-      }))
-    ) as any
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'im-root-'))
+    const projectDir = fs.mkdtempSync(path.join(rootDir, 'project-'))
+    try {
+      client = new AdapterHttpClient('ws://127.0.0.1:3456', { allowedProjectRoots: [rootDir] })
+      const mockProjects = [
+        { projectName: 'my-app', realPath: projectDir, sessionCount: 3 },
+      ]
+      globalThis.fetch = mock(() =>
+        Promise.resolve(new Response(JSON.stringify({ projects: mockProjects }), {
+          headers: { 'Content-Type': 'application/json' },
+        }))
+      ) as any
 
-    const projects = await client.listRecentProjects()
-    expect(projects).toHaveLength(1)
-    expect(projects[0].projectName).toBe('my-app')
+      const projects = await client.listRecentProjects()
+      expect(projects).toHaveLength(1)
+      expect(projects[0].projectName).toBe('my-app')
+    } finally {
+      fs.rmSync(rootDir, { recursive: true, force: true })
+    }
+  })
+
+  it('filters recent projects before index, name, and fuzzy matching', async () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'im-root-'))
+    const allowedDir = fs.mkdtempSync(path.join(rootDir, 'allowed-'))
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'outside-'))
+    try {
+      client = new AdapterHttpClient('ws://127.0.0.1:3456', { allowedProjectRoots: [rootDir] })
+      globalThis.fetch = mock(() =>
+        Promise.resolve(Response.json({
+          projects: [
+            { projectName: 'secret', realPath: outsideDir, sessionCount: 2 },
+            { projectName: 'allowed', realPath: allowedDir, sessionCount: 1 },
+          ],
+        }))
+      ) as any
+
+      await expect(client.matchProject('1')).resolves.toMatchObject({
+        project: { projectName: 'allowed' },
+      })
+      await expect(client.matchProject('secret')).resolves.toEqual({})
+      await expect(client.matchProject(outsideDir)).resolves.toEqual({})
+    } finally {
+      fs.rmSync(rootDir, { recursive: true, force: true })
+      fs.rmSync(outsideDir, { recursive: true, force: true })
+    }
   })
 
   it('matchProject accepts an absolute local project path inside an allowed root without recent history', async () => {
@@ -132,6 +174,29 @@ describe('AdapterHttpClient', () => {
     )
   })
 
+  it('sessionExists rejects sessions outside the root or using bypassPermissions', async () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'im-root-'))
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'outside-'))
+    try {
+      client = new AdapterHttpClient('ws://127.0.0.1:3456', { allowedProjectRoots: [rootDir] })
+      globalThis.fetch = mock((url: string) => {
+        const unsafe = url.endsWith('/outside')
+        return Promise.resolve(Response.json({
+          status: {
+            workDir: unsafe ? outsideDir : rootDir,
+            permissionMode: unsafe ? 'default' : 'bypassPermissions',
+          },
+        }))
+      }) as any
+
+      await expect(client.sessionExists('outside')).resolves.toBe(false)
+      await expect(client.sessionExists('bypass')).resolves.toBe(false)
+    } finally {
+      fs.rmSync(rootDir, { recursive: true, force: true })
+      fs.rmSync(outsideDir, { recursive: true, force: true })
+    }
+  })
+
   it('getGitInfo calls GET /api/sessions/:id/git-info', async () => {
     globalThis.fetch = mock(() =>
       Promise.resolve(new Response(JSON.stringify({
@@ -172,33 +237,53 @@ describe('AdapterHttpClient', () => {
   })
 
   it('listSessions calls GET /api/sessions with project and pagination query', async () => {
-    globalThis.fetch = mock(() =>
-      Promise.resolve(new Response(JSON.stringify({
-        sessions: [
-          {
-            id: 'session-1',
-            title: 'Fix Telegram menu',
-            createdAt: '2026-06-09T00:00:00.000Z',
-            modifiedAt: '2026-06-09T01:00:00.000Z',
-            messageCount: 3,
-            projectPath: '-repo',
-            projectRoot: '/repo',
-            workDir: '/repo',
-            workDirExists: true,
-          },
-        ],
-        total: 1,
-      }), {
-        headers: { 'Content-Type': 'application/json' },
-      }))
-    ) as any
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'im-root-'))
+    try {
+      client = new AdapterHttpClient('ws://127.0.0.1:3456', { allowedProjectRoots: [rootDir] })
+      globalThis.fetch = mock(() =>
+        Promise.resolve(new Response(JSON.stringify({
+          sessions: [
+            {
+              id: 'session-1',
+              title: 'Fix Telegram menu',
+              createdAt: '2026-06-09T00:00:00.000Z',
+              modifiedAt: '2026-06-09T01:00:00.000Z',
+              messageCount: 3,
+              projectPath: rootDir,
+              projectRoot: rootDir,
+              workDir: rootDir,
+              workDirExists: true,
+              permissionMode: 'default',
+            },
+            {
+              id: 'unsafe-session',
+              title: 'Unsafe',
+              createdAt: '2026-06-09T00:00:00.000Z',
+              modifiedAt: '2026-06-09T01:00:00.000Z',
+              messageCount: 1,
+              projectPath: rootDir,
+              projectRoot: rootDir,
+              workDir: rootDir,
+              workDirExists: true,
+              permissionMode: 'bypassPermissions',
+            },
+          ],
+          total: 2,
+        }), {
+          headers: { 'Content-Type': 'application/json' },
+        }))
+      ) as any
 
-    const result = await client.listSessions({ project: '/repo', limit: 10, offset: 5 })
+      const result = await client.listSessions({ project: rootDir, limit: 10, offset: 5 })
 
-    expect(result.sessions[0]?.id).toBe('session-1')
-    expect((globalThis.fetch as any).mock.calls[0][0]).toBe(
-      'http://127.0.0.1:3456/api/sessions?project=%2Frepo&limit=10&offset=5',
-    )
+      expect(result.sessions.map((session) => session.id)).toEqual(['session-1'])
+      expect(result.total).toBe(1)
+      expect((globalThis.fetch as any).mock.calls[0][0]).toBe(
+        `http://127.0.0.1:3456/api/sessions?project=${encodeURIComponent(rootDir)}&limit=10&offset=5`,
+      )
+    } finally {
+      fs.rmSync(rootDir, { recursive: true, force: true })
+    }
   })
 
   it('lists and activates providers through the server provider API', async () => {
@@ -264,28 +349,34 @@ describe('AdapterHttpClient', () => {
   })
 
   it('lists skills for a cwd through the server skills API', async () => {
-    globalThis.fetch = mock(() =>
-      Promise.resolve(new Response(JSON.stringify({
-        skills: [
-          {
-            name: 'reviewer',
-            description: 'Review code',
-            source: 'user',
-            userInvocable: true,
-            contentLength: 120,
-            hasDirectory: true,
-          },
-        ],
-      }), {
-        headers: { 'Content-Type': 'application/json' },
-      }))
-    ) as any
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'im-root-'))
+    try {
+      client = new AdapterHttpClient('ws://127.0.0.1:3456', { allowedProjectRoots: [rootDir] })
+      globalThis.fetch = mock(() =>
+        Promise.resolve(new Response(JSON.stringify({
+          skills: [
+            {
+              name: 'reviewer',
+              description: 'Review code',
+              source: 'user',
+              userInvocable: true,
+              contentLength: 120,
+              hasDirectory: true,
+            },
+          ],
+        }), {
+          headers: { 'Content-Type': 'application/json' },
+        }))
+      ) as any
 
-    const result = await client.listSkills('/repo')
+      const result = await client.listSkills(rootDir)
 
-    expect(result.skills[0]?.name).toBe('reviewer')
-    expect((globalThis.fetch as any).mock.calls[0][0]).toBe(
-      'http://127.0.0.1:3456/api/skills?cwd=%2Frepo',
-    )
+      expect(result.skills[0]?.name).toBe('reviewer')
+      expect((globalThis.fetch as any).mock.calls[0][0]).toBe(
+        `http://127.0.0.1:3456/api/skills?cwd=${encodeURIComponent(fs.realpathSync(rootDir))}`,
+      )
+    } finally {
+      fs.rmSync(rootDir, { recursive: true, force: true })
+    }
   })
 })

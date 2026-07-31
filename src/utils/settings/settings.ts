@@ -18,7 +18,7 @@ import { writeFileSyncAndFlush_DEPRECATED } from '../file.js'
 import { readFileSync } from '../fileRead.js'
 import { getFsImplementation, safeResolvePath } from '../fsOperations.js'
 import { addFileGlobRuleToGitignore } from '../git/gitignore.js'
-import { safeParseJSON } from '../json.js'
+import { safeParseJSON, safeParseJSONWithoutCache } from '../json.js'
 import { logError } from '../log.js'
 import { getPlatform } from '../platform.js'
 import { clone, jsonStringify } from '../slowOperations.js'
@@ -210,11 +210,11 @@ function parseSettingsFileUncached(path: string): {
       return { settings: {}, errors: [] }
     }
 
-    const data = safeParseJSON(content, false)
+    const rawData = safeParseJSON(content, false)
 
     // Filter invalid permission rules before schema validation so one bad
     // rule doesn't cause the entire settings file to be rejected.
-    const ruleWarnings = filterInvalidPermissionRules(data, path)
+    const { data, warnings: ruleWarnings } = filterInvalidPermissionRules(rawData, path)
 
     const result = SettingsSchema().safeParse(data)
 
@@ -467,7 +467,11 @@ export function updateSettingsForSource(
         // File doesn't exist — fall through to merge with empty settings
       }
       if (content !== null) {
-        const rawData = safeParseJSON(content)
+        // Must be an uncached parse: the mergeWith below mutates this object
+        // (including nested refs), and editing a shared safeParseJSON cache
+        // entry would corrupt every later parse of byte-identical settings
+        // content (same bug family as GH #1126).
+        const rawData = safeParseJSONWithoutCache(content)
         if (rawData === null) {
           // JSON syntax error - return validation error instead of overwriting
           // safeParseJSON will already log the error, so we'll just return the error here

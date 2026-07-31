@@ -12,6 +12,7 @@ import { SubagentRunPage } from '../../pages/SubagentRunPage'
 import { WorkbenchTab } from '../workbench/WorkbenchTab'
 import { AgentOfficePage } from '../../pages/AgentOffice'
 import { previewBridge } from '../../lib/previewBridge'
+import { returnToTraceList } from '../../lib/traceNavigation'
 
 export function ContentRouter() {
   const activeTabId = useTabStore((s) => s.activeTabId)
@@ -34,8 +35,11 @@ export function ContentRouter() {
   } else if (activeTabType === 'market') {
     page = <Market />
   } else if (activeTabType === 'trace') {
-    const traceSessionId = tabs.find((t) => t.sessionId === activeTabId)?.traceSessionId
-    page = traceSessionId ? <TraceSession sessionId={traceSessionId} /> : <EmptySession />
+    const traceTabId = activeTabId
+    const traceSessionId = tabs.find((t) => t.sessionId === traceTabId)?.traceSessionId
+    page = traceSessionId
+      ? <TraceSession sessionId={traceSessionId} onBack={() => returnToTraceList(traceTabId)} />
+      : <EmptySession />
   } else if (activeTabType === 'traces') {
     page = <TraceList />
   } else if (activeTabType === 'subagent') {

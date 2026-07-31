@@ -2955,7 +2955,11 @@ async function* queryModel(
           )}`,
           { level: "warn" },
         );
-        throw new RetriableStreamError(streamingError, streamRequestId ?? undefined);
+        throw new RetriableStreamError(
+          streamingError,
+          assistantCommitBuffer.flush(),
+          streamRequestId ?? undefined,
+        );
       }
 
       // The socket under the stream died mid-response (stale pooled keep-alive
@@ -2988,7 +2992,11 @@ async function* queryModel(
           )}`,
           { level: "warn" },
         );
-        throw new RetriableStreamError(streamingError);
+        throw new RetriableStreamError(
+          streamingError,
+          assistantCommitBuffer.flush(),
+          streamRequestId ?? undefined,
+        );
       }
 
       // When the flag is enabled, skip the non-streaming fallback and let the
@@ -3018,7 +3026,11 @@ async function* queryModel(
           )}`,
           { level: "warn" },
         );
-        throw new RetriableStreamError(streamingError, streamRequestId ?? undefined);
+        throw new RetriableStreamError(
+          streamingError,
+          assistantCommitBuffer.flush(),
+          streamRequestId ?? undefined,
+        );
       }
 
       // The mid-stream non-streaming fallback causes double tool execution when
@@ -3312,6 +3324,7 @@ async function* queryModel(
           return;
         }
 
+        yield* assistantCommitBuffer.flush();
         yield getAssistantMessageFromError(error, errorModel, {
           messages,
           messagesForAPI,
@@ -3374,6 +3387,7 @@ async function* queryModel(
         return;
       }
 
+      yield* assistantCommitBuffer.flush();
       yield getAssistantMessageFromError(error, errorModel, {
         messages,
         messagesForAPI,

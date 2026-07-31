@@ -1874,6 +1874,114 @@ describe('ProviderService', () => {
         globalThis.fetch = originalFetch
       }
     })
+
+    test('rejects destination and auth overrides before testing with a saved key', async () => {
+      const originalFetch = globalThis.fetch
+      const calls: string[] = []
+      globalThis.fetch = mock(async (url: string | URL | Request) => {
+        calls.push(String(url))
+        return new Response('{}', { status: 200 })
+      }) as typeof fetch
+
+      try {
+        const svc = new ProviderService()
+        const provider = await svc.addProvider(sampleInput())
+        const { req, url, segments } = makeRequest(
+          'POST',
+          `/api/providers/${provider.id}/test`,
+          {
+            baseUrl: 'https://override.example.com',
+            apiFormat: 'openai_chat',
+            authStrategy: 'auth_token',
+          },
+        )
+
+        const response = await handleProvidersApi(req, url, segments)
+
+        expect(response.status).toBe(400)
+        expect(calls).toEqual([])
+      } finally {
+        globalThis.fetch = originalFetch
+      }
+    })
+
+    test('accepts a model-only override without changing a saved provider destination', async () => {
+      const originalFetch = globalThis.fetch
+      const calls: string[] = []
+      globalThis.fetch = mock(async (url: string | URL | Request) => {
+        calls.push(String(url))
+        return new Response(JSON.stringify({
+          type: 'message',
+          model: 'alternate-model',
+          content: [],
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }) as typeof fetch
+
+      try {
+        const svc = new ProviderService()
+        const provider = await svc.addProvider(sampleInput({
+          baseUrl: 'https://saved.example.com',
+        }))
+        const { req, url, segments } = makeRequest(
+          'POST',
+          `/api/providers/${provider.id}/test`,
+          { modelId: 'alternate-model' },
+        )
+
+        const response = await handleProvidersApi(req, url, segments)
+
+        expect(response.status).toBe(200)
+        expect(calls[0]).toContain('https://saved.example.com')
+      } finally {
+        globalThis.fetch = originalFetch
+      }
+    })
+
+    test('keeps explicit draft provider tests independent from saved credentials', async () => {
+      const originalFetch = globalThis.fetch
+      const calls: Array<{ url: string; authorization: string | null }> = []
+      globalThis.fetch = mock(async (url: string | URL | Request, init?: RequestInit) => {
+        calls.push({
+          url: String(url),
+          authorization: new Headers(init?.headers).get('authorization'),
+        })
+        return new Response(JSON.stringify({
+          type: 'message',
+          model: 'draft-model',
+          content: [],
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }) as typeof fetch
+
+      try {
+        const { req, url, segments } = makeRequest(
+          'POST',
+          '/api/providers/test',
+          {
+            baseUrl: 'https://draft.example.com',
+            apiKey: 'draft-explicit-key',
+            modelId: 'draft-model',
+            apiFormat: 'anthropic',
+            authStrategy: 'auth_token',
+          },
+        )
+
+        const response = await handleProvidersApi(req, url, segments)
+
+        expect(response.status).toBe(200)
+        expect(calls).toEqual([{
+          url: 'https://draft.example.com/v1/messages',
+          authorization: 'Bearer draft-explicit-key',
+        }])
+      } finally {
+        globalThis.fetch = originalFetch
+      }
+    })
   })
 
   describe('testProviderConfig', () => {

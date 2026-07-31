@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach, afterEach } from 'bun:test'
-import { mkdir, writeFile, rm } from 'fs/promises'
+import { mkdir, readdir, writeFile, rm, symlink } from 'fs/promises'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 
@@ -45,35 +45,33 @@ describe('updateCronTask integration', () => {
 describe('CronTaskMeta type coverage', () => {
   test('all UI fields are optional on CronTask', async () => {
     // Verify all new fields exist on the type by creating tasks with them
-    const { addCronTask } = await import('../cronTasks.js')
+    const { addCronTask, removeCronTasks } = await import('../cronTasks.js')
 
-    // Create a task with all metadata fields (durable=true writes to disk in test dir)
-    const tmpDir = join('/tmp', `cron-meta-test-${randomUUID().slice(0, 8)}`)
-    await mkdir(join(tmpDir, '.claude'), { recursive: true })
+    let id: string | undefined
+    try {
+      id = await addCronTask(
+        '0 9 * * *',
+        'test prompt',
+        true, // recurring
+        false, // session-only; this type test must not write project state
+        undefined, // agentId
+        {
+          name: 'test-name',
+          description: 'test description',
+          folder: '/test/folder',
+          model: 'claude-opus-4-7',
+          permissionMode: 'ask',
+          worktree: false,
+          frequency: 'daily',
+          scheduledTime: '09:00',
+        },
+      )
 
-    const id = await addCronTask(
-      '0 9 * * *',
-      'test prompt',
-      true, // recurring
-      true, // durable (writes to disk)
-      undefined, // agentId
-      {
-        name: 'test-name',
-        description: 'test description',
-        folder: '/test/folder',
-        model: 'claude-opus-4-7',
-        permissionMode: 'ask',
-        worktree: false,
-        frequency: 'daily',
-        scheduledTime: '09:00',
-      },
-    )
-
-    expect(typeof id).toBe('string')
-    expect(id.length).toBe(8) // Short ID
-
-    // Clean up
-    await rm(tmpDir, { recursive: true, force: true })
+      expect(typeof id).toBe('string')
+      expect(id.length).toBe(8) // Short ID
+    } finally {
+      if (id) await removeCronTasks([id])
+    }
   })
 })
 
@@ -200,5 +198,60 @@ describe('writeCronTasks strips runtime fields', () => {
     expect(parsed.tasks[0].name).toBe('test-task')
 
     await rm(tmpDir, { recursive: true, force: true })
+  })
+})
+
+describe('writeCronTasks symlink safety', () => {
+  test('refuses to write through a project .claude directory symlink', async () => {
+    const { writeCronTasks } = await import('../cronTasks.js')
+    const tmpDir = join('/tmp', `cron-symlink-${randomUUID().slice(0, 8)}`)
+    const projectDir = join(tmpDir, 'project')
+    const outsideDir = join(tmpDir, 'outside')
+    try {
+      await mkdir(projectDir, { recursive: true })
+      await mkdir(outsideDir, { recursive: true })
+      await symlink(
+        outsideDir,
+        join(projectDir, '.claude'),
+        process.platform === 'win32' ? 'junction' : 'dir',
+      )
+
+      const task = {
+        id: 'abcd1234',
+        cron: '0 9 * * *',
+        prompt: 'must stay inside the project',
+        createdAt: Date.now(),
+      }
+
+      await expect(writeCronTasks([task], projectDir)).rejects.toThrow(
+        'symbolic link',
+      )
+      expect(
+        await Bun.file(join(outsideDir, 'scheduled_tasks.json')).exists(),
+      ).toBe(false)
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  test('cleans up the temporary file when atomic replacement fails', async () => {
+    const { writeCronTasks } = await import('../cronTasks.js')
+    const tmpDir = join('/tmp', `cron-atomic-${randomUUID().slice(0, 8)}`)
+    const claudeDir = join(tmpDir, '.claude')
+    try {
+      await mkdir(join(claudeDir, 'scheduled_tasks.json'), { recursive: true })
+      const task = {
+        id: 'abcd1234',
+        cron: '0 9 * * *',
+        prompt: 'test',
+        createdAt: Date.now(),
+      }
+
+      await expect(writeCronTasks([task], tmpDir)).rejects.toThrow()
+
+      expect(await readdir(claudeDir)).toEqual(['scheduled_tasks.json'])
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true })
+    }
   })
 })

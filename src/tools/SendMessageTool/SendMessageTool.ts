@@ -36,6 +36,7 @@ import {
   createShutdownApprovedMessage,
   createShutdownRejectedMessage,
   createShutdownRequestMessage,
+  isStructuredProtocolMessage,
   writeToMailbox,
 } from '../../utils/teammateMailbox.js'
 import { resumeAgentBackground } from '../AgentTool/resumeAgent.js'
@@ -665,6 +666,14 @@ export const SendMessageTool: Tool<InputSchema, SendMessageToolOutput> =
         return { result: true }
       }
       if (typeof input.message === 'string') {
+        if (isStructuredProtocolMessage(input.message)) {
+          return {
+            result: false,
+            message:
+              'reserved team protocol messages must use the structured message path',
+            errorCode: 9,
+          }
+        }
         if (!input.summary || input.summary.trim().length === 0) {
           return {
             result: false,

@@ -15,6 +15,23 @@ const PROXY_TRACE_HEADERS = [
   'x-real-ip',
   'via',
 ] as const
+const PREVIEW_STATIC_DESTINATIONS = new Set([
+  'audio',
+  'font',
+  'image',
+  'manifest',
+  'script',
+  'style',
+  'track',
+  'video',
+  'worker',
+])
+const PREVIEW_REFERER_PARENT_EXTENSIONS = new Set([
+  '.css',
+  '.cjs',
+  '.js',
+  '.mjs',
+])
 
 export function normalizeHostname(hostname: string): string {
   return hostname.trim().replace(/^\[/, '').replace(/\]$/, '').toLowerCase()
@@ -59,6 +76,92 @@ function isLoopbackBrowserOrigin(origin: string): boolean {
   return isLoopbackHost(parsed.hostname)
 }
 
+function pathnameDirectory(pathname: string): string {
+  const slash = pathname.lastIndexOf('/')
+  return slash < 0 ? '/' : pathname.slice(0, slash + 1)
+}
+
+function pathnameExtension(pathname: string): string {
+  const fileName = pathname.slice(pathname.lastIndexOf('/') + 1)
+  const dot = fileName.lastIndexOf('.')
+  return dot < 0 ? '' : fileName.slice(dot).toLowerCase()
+}
+
+function filesystemCapabilityScope(pathname: string): {
+  kind: 'preview-fs' | 'local-file'
+  root: string
+} | null {
+  if (pathname.startsWith('/preview-fs/')) {
+    const sessionEnd = pathname.indexOf('/', '/preview-fs/'.length)
+    if (sessionEnd < 0) return null
+    return {
+      kind: 'preview-fs',
+      root: pathname.slice(0, sessionEnd + 1),
+    }
+  }
+  if (pathname.startsWith('/local-file/')) {
+    return { kind: 'local-file', root: '/local-file/' }
+  }
+  return null
+}
+
+/**
+ * Preview HTML is sandboxed but keeps its server origin so module scripts,
+ * styles, fonts and media can load. Trust only passive/static resource loads
+ * that stay below the referring document's filesystem directory. Ordinary
+ * fetch/XHR, navigations and every non-filesystem capability remain outside
+ * this exception.
+ */
+function isSameOriginFilesystemAsset(
+  request: Request,
+  url: URL,
+  origin: string | null,
+): boolean {
+  if (request.method !== 'GET' && request.method !== 'HEAD') return false
+  if (request.headers.get('Sec-Fetch-Site') !== 'same-origin') return false
+  if (!PREVIEW_STATIC_DESTINATIONS.has(request.headers.get('Sec-Fetch-Dest') ?? '')) {
+    return false
+  }
+  let refererUrl: URL
+  try {
+    refererUrl = new URL(request.headers.get('Referer') ?? '')
+  } catch {
+    return false
+  }
+  if (refererUrl.origin !== url.origin) return false
+  if (origin) {
+    try {
+      if (new URL(origin).origin !== url.origin) return false
+    } catch {
+      return false
+    }
+  }
+
+  const requestScope = filesystemCapabilityScope(url.pathname)
+  const refererScope = filesystemCapabilityScope(refererUrl.pathname)
+  if (
+    !requestScope ||
+    !refererScope ||
+    requestScope.kind !== refererScope.kind ||
+    requestScope.root !== refererScope.root
+  ) {
+    return false
+  }
+
+  const refererDirectory = pathnameDirectory(refererUrl.pathname)
+  if (url.pathname.startsWith(refererDirectory)) return true
+
+  // A stylesheet or module may load a sibling fonts/chunks directory. Permit
+  // one parent only for those nested dependency referrers; the HTML entry
+  // point itself never receives this broader scope.
+  if (!PREVIEW_REFERER_PARENT_EXTENSIONS.has(pathnameExtension(refererUrl.pathname))) {
+    return false
+  }
+  const parentDirectory = pathnameDirectory(refererDirectory.slice(0, -1))
+  return parentDirectory.startsWith(requestScope.root) &&
+    url.pathname.startsWith(parentDirectory)
+}
+
 /**
  * A cross-site subresource load (`<img>`, `<script>`, `no-cors` fetch) reaches
  * us without an `Origin` header, so it would otherwise be indistinguishable
@@ -80,9 +183,18 @@ function isCrossSiteSubresource(headers: Headers): boolean {
 function isLocalDesktopOrNavigationOrigin(
   request: Request,
   origin: string | null,
+  context: H5RequestContext,
 ): boolean {
   if (!origin) return !isCrossSiteSubresource(request.headers)
-  return LOCAL_DESKTOP_ORIGINS.has(origin) || isLoopbackBrowserOrigin(origin)
+  if (LOCAL_DESKTOP_ORIGINS.has(origin)) return true
+
+  // A configured process credential distinguishes the Electron renderer from
+  // arbitrary pages served by another loopback process. Keep tokenless
+  // navigation, OAuth callbacks and CLI/adapters working above, but never
+  // grant an Origin-bearing browser page that credential by locality alone.
+  if (context.localAccessTokenConfigured) return false
+
+  return isLoopbackBrowserOrigin(origin)
 }
 
 function hasProxyTraceHeaders(headers: Headers): boolean {
@@ -99,6 +211,18 @@ function isLocalTrustedRequest(
   // have: it identifies the app's own components (renderer, adapters, the CLI
   // subprocess) regardless of how they reach us.
   if (context.localAccessAuthorized === true) return true
+  if (isSameOriginFilesystemAsset(request, url, origin)) return true
+  if (
+    filesystemCapabilityScope(url.pathname) &&
+    request.headers.get('Sec-Fetch-Site') === 'same-origin' &&
+    PREVIEW_STATIC_DESTINATIONS.has(request.headers.get('Sec-Fetch-Dest') ?? '')
+  ) {
+    // Classic scripts, styles and images often omit Origin. Once Fetch
+    // Metadata identifies a browser filesystem subresource, it must satisfy
+    // the same Referer capability/directory boundary above instead of falling
+    // back to broad loopback trust.
+    return false
+  }
 
   // Its *absence* must not demote loopback, though. Plenty of legitimate local
   // traffic can never carry that token — the OAuth success page the system
@@ -113,7 +237,7 @@ function isLocalTrustedRequest(
 
   return isLoopbackHost(clientAddress) &&
     isLoopbackHost(url.hostname) &&
-    isLocalDesktopOrNavigationOrigin(request, origin)
+    isLocalDesktopOrNavigationOrigin(request, origin, context)
 }
 
 function isFilesystemCapabilityPath(pathname: string): boolean {

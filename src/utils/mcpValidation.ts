@@ -84,11 +84,18 @@ function getTruncationMessage(): string {
 The tool output was truncated. If this MCP server provides pagination or filtering tools, use them to retrieve specific portions of the data. If pagination is not available, inform the user that you are working with truncated output and results may be incomplete.`
 }
 
+function forceCopyString(content: string): string {
+  return Buffer.from(content, 'utf16le').toString('utf16le')
+}
+
 function truncateString(content: string, maxChars: number): string {
-  if (content.length <= maxChars) {
-    return content
+  let truncated =
+    content.length <= maxChars ? content : content.slice(0, maxChars)
+  const lastCodeUnit = truncated.charCodeAt(truncated.length - 1)
+  if (lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff) {
+    truncated = truncated.slice(0, -1)
   }
-  return content.slice(0, maxChars)
+  return forceCopyString(truncated)
 }
 
 async function truncateContentBlocks(
@@ -104,10 +111,13 @@ async function truncateContentBlocks(
       if (remainingChars <= 0) break
 
       if (block.text.length <= remainingChars) {
-        result.push(block)
+        result.push({ ...block, text: forceCopyString(block.text) })
         currentChars += block.text.length
       } else {
-        result.push({ type: 'text', text: block.text.slice(0, remainingChars) })
+        result.push({
+          type: 'text',
+          text: truncateString(block.text, remainingChars),
+        })
         break
       }
     } else if (isImageBlock(block)) {

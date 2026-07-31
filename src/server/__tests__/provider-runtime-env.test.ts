@@ -5,6 +5,7 @@ import * as path from 'path'
 
 import {
   applyProviderRuntimeModel,
+  getManagedEnvKeys,
   mergeActiveProviderManagedEnv,
   readActiveProviderManagedEnv,
 } from '../services/providerRuntimeEnv.js'
@@ -438,6 +439,63 @@ describe('providerRuntimeEnv', () => {
     expect(JSON.parse(zhipuEnv!.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS)).toMatchObject({
       'glm-5.2[1m]': 1000000,
       'glm-4.7': 200000,
+    })
+  })
+
+  // getManagedEnvKeys() is the erase list used to strip stale provider env out of
+  // cc-haha/settings.json. It is built by unioning every preset's defaultEnv keys, so
+  // deleting a preset outright would drop keys only that preset declares — they would
+  // then never be cleaned and would leak into every provider activated afterwards.
+  test('keeps the settings.json erase list covering retired presets env keys', () => {
+    const keys = getManagedEnvKeys()
+
+    // Declared only by the retired 胜算云 preset; a stale 50-minute API_TIMEOUT_MS
+    // leaking into other providers is exactly what this guards.
+    expect(keys).toContain('API_TIMEOUT_MS')
+    expect(keys).toContain('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC')
+  })
+
+  // Retiring a preset must not touch providers already saved against it. defaultEnv is
+  // never persisted per provider — it is resolved from the preset on every run, so
+  // deleting the entry would silently drop it. Older records may also lack
+  // authStrategy / modelContextWindows and fall back to the preset for those too.
+  test('keeps resolving preset runtime env for providers saved against a retired preset', async () => {
+    await writeJson(path.join(tmpDir, 'cc-haha', 'providers.json'), {
+      activeId: 'provider-shengsuanyun',
+      providers: [
+        {
+          id: 'provider-shengsuanyun',
+          presetId: 'shengsuanyun',
+          name: '胜算云',
+          apiKey: 'sk-shengsuanyun',
+          baseUrl: 'https://router.shengsuanyun.com/api',
+          apiFormat: 'anthropic',
+          models: {
+            main: 'anthropic/claude-sonnet-4.6',
+            haiku: 'anthropic/claude-haiku-4.5:thinking',
+            sonnet: 'anthropic/claude-sonnet-4.6',
+            opus: 'anthropic/claude-opus-4.7',
+          },
+        },
+      ],
+    })
+
+    const env = readActiveProviderManagedEnv(tmpDir)
+
+    expect(env).toMatchObject({
+      ANTHROPIC_BASE_URL: 'https://router.shengsuanyun.com/api',
+      ANTHROPIC_MODEL: 'anthropic/claude-sonnet-4.6',
+      // preset defaultEnv survives the retirement
+      API_TIMEOUT_MS: '3000000',
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: 'none',
+    })
+    // preset authStrategy (auth_token) survives: bearer token, blanked api key
+    expect(env?.ANTHROPIC_AUTH_TOKEN).toBe('sk-shengsuanyun')
+    expect(env?.ANTHROPIC_API_KEY).toBe('')
+    expect(JSON.parse(env!.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS)).toMatchObject({
+      'anthropic/claude-sonnet-4.6': 1000000,
+      'anthropic/claude-opus-4.7': 1000000,
     })
   })
 })

@@ -12,6 +12,27 @@ export type PreviewLocalAccess = {
   token: string
 }
 
+export type LocalServerRequestDetails = {
+  method?: string
+  resourceType?: string
+  url: string
+  webContentsId?: number
+}
+
+export type LocalServerRequestAuthorizer = (
+  details: LocalServerRequestDetails,
+) => boolean
+
+const MAIN_RENDERER_MEDIA_PATHS = [
+  '/api/desktop-ui/preferences/profile/avatar',
+  '/api/filesystem/file',
+]
+
+const MAIN_RENDERER_MEDIA_PREFIXES = [
+  '/api/open-targets/icons/',
+  '/preview-fs/',
+]
+
 function sameOrigin(left: string, right: string): boolean {
   try {
     return new URL(left).origin === new URL(right).origin
@@ -20,13 +41,47 @@ function sameOrigin(left: string, right: string): boolean {
   }
 }
 
+/**
+ * The packaged renderer is loaded from `file://`, so its intentional local
+ * images and videos look like cross-site browser subresources to the sidecar.
+ * Keep this allowlist limited to read-only media routes: arbitrary API fetches,
+ * scripts, styles, frames and preview-window traffic must remain unauthenticated.
+ */
+export function isAllowlistedMainRendererMediaRequest(
+  details: LocalServerRequestDetails,
+  mainRendererWebContentsId: number,
+): boolean {
+  if (details.webContentsId !== mainRendererWebContentsId) return false
+
+  const method = details.method?.toUpperCase()
+  if (method !== 'GET' && method !== 'HEAD') return false
+  if (details.resourceType !== 'image' && details.resourceType !== 'media') {
+    return false
+  }
+
+  let pathname: string
+  try {
+    pathname = new URL(details.url).pathname
+  } catch {
+    return false
+  }
+
+  return MAIN_RENDERER_MEDIA_PATHS.includes(pathname) ||
+    MAIN_RENDERER_MEDIA_PREFIXES.some((prefix) => pathname.startsWith(prefix))
+}
+
 export function configureLocalServerRequestAuth(
   webRequest: Pick<Session['webRequest'], 'onBeforeSendHeaders'>,
   resolveLocalAccess: () => PreviewLocalAccess | null,
+  shouldAuthorize: LocalServerRequestAuthorizer = () => true,
 ): void {
   webRequest.onBeforeSendHeaders((details, callback) => {
     const localAccess = resolveLocalAccess()
-    if (!localAccess || !sameOrigin(details.url, localAccess.serverUrl)) {
+    if (
+      !localAccess ||
+      !sameOrigin(details.url, localAccess.serverUrl) ||
+      !shouldAuthorize(details)
+    ) {
       callback({ requestHeaders: details.requestHeaders })
       return
     }

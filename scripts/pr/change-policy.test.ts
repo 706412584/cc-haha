@@ -35,6 +35,7 @@ describe('evaluateChangePolicy', () => {
       'docs/index.md',
       'site/src/App.tsx',
       'README.md',
+      'README.zh-CN.md',
     ])
 
     expect(result.blocked).toBe(false)
@@ -129,7 +130,7 @@ describe('evaluateChangePolicy', () => {
     const result = evaluateChangePolicy([
       '.github/CODEOWNERS',
       '.github/copilot-instructions.md',
-      'docs/guide/contributing.md',
+      'docs/internals/contributing.md',
     ])
 
     expect(result.checks.policy).toBe(true)

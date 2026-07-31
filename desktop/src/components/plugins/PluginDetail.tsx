@@ -38,7 +38,7 @@ export function PluginDetail() {
   const fetchSkillDetail = useSkillStore((s) => s.fetchSkillDetail)
   const fetchAgents = useAgentStore((s) => s.fetchAgents)
   const selectAgent = useAgentStore((s) => s.selectAgent)
-  const fetchServers = useMcpStore((s) => s.fetchServers)
+  const fetchServersForKnownProjects = useMcpStore((s) => s.fetchServersForKnownProjects)
   const selectServer = useMcpStore((s) => s.selectServer)
   const t = useTranslation()
   const [actionKey, setActionKey] = useState<string | null>(null)
@@ -172,7 +172,10 @@ export function PluginDetail() {
       return
     }
     openSettingsTab('mcp')
-    await fetchServers(undefined, currentWorkDir)
+    // Query the full known-project set. Fetching only currentWorkDir here
+    // used to overwrite the whole store with a one-project view, wiping other
+    // projects' servers from the settings list (GH #1126).
+    await fetchServersForKnownProjects(currentWorkDir)
 
     const state = useMcpStore.getState()
     const server = state.servers.find((entry) => entry.name === serverName)

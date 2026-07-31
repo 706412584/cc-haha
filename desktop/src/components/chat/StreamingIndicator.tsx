@@ -5,13 +5,7 @@ import { useChatStore } from '../../stores/chatStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useTranslation, type TranslationKey } from '../../i18n'
 import { formatTokenCount } from '../../lib/formatTokenCount'
-
-function formatElapsed(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`
-  const m = Math.floor(seconds / 60)
-  const s = seconds % 60
-  return `${m}m ${s}s`
-}
+import { formatDurationSeconds } from '../../lib/backgroundTasks'
 
 function translateServerVerb(
   t: (key: TranslationKey) => string,
@@ -119,7 +113,7 @@ export function StreamingIndicator() {
         </span>
         {elapsedSeconds > 0 && (
           <span className="text-[12.5px] text-[var(--color-text-tertiary)]">
-            {formatElapsed(elapsedSeconds)}
+            {formatDurationSeconds(elapsedSeconds, t)}
           </span>
         )}
       </div>
@@ -143,11 +137,12 @@ export function StreamingIndicator() {
     <div
       role="status"
       aria-live="polite"
-      className="mb-2 flex w-fit items-center gap-2 rounded-full border border-[var(--color-border)]/40 bg-[var(--color-surface-container-low)] px-3 py-1"
+      className="mb-2 flex w-fit items-center gap-[9px] rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-4 py-2 text-[13.5px] text-[var(--color-text-secondary)]"
     >
-      <span className="material-symbols-outlined text-[14px] text-[var(--color-brand)] animate-shimmer" aria-hidden="true">auto_awesome</span>
-      <span className="text-xs font-medium text-[var(--color-text-secondary)]">{verb}...</span>      {elapsedSeconds > 0 && (
-        <span>{formatElapsed(elapsedSeconds)}</span>
+      <span className="animate-pulse-dot text-[var(--color-brand)]" aria-hidden="true">✦</span>
+      <span className="font-medium text-[var(--color-text-primary)]">{verb}...</span>
+      {elapsedSeconds > 0 && (
+        <span>{formatDurationSeconds(elapsedSeconds, t)}</span>
       )}
       {streamingTokens > 0 && (
         <>

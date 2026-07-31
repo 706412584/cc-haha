@@ -10,10 +10,16 @@
  */
 
 import { parseFrontmatter } from '../../../utils/frontmatterParser.js'
-import { getProviderBase, providerFetch, providerFetchJson } from './providerFetch.js'
+import {
+  getProviderBase,
+  providerFetch,
+  providerFetchJson,
+  readResponseTextWithLimit,
+} from './providerFetch.js'
 import {
   detectMarketLanguage,
   MARKET_ERROR_CODES,
+  MARKET_LIMITS,
   MarketUpstreamError,
   skillId,
   type MarketProvider,
@@ -302,7 +308,11 @@ export const clawhubProvider: MarketProvider = {
         `clawhub file fetch failed (${res.status})`,
       )
     }
-    const content = await res.text()
-    return { content, size: Buffer.byteLength(content, 'utf-8') }
+    return await readResponseTextWithLimit(
+      'clawhub',
+      res,
+      MARKET_LIMITS.maxFileSize,
+      `file ${filePath}`,
+    )
   },
 }

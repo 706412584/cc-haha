@@ -136,7 +136,7 @@ describe('release update metadata merge', () => {
     expect(arm64.path).toBe('Claude-Code-Haha-0.3.2-arm64.AppImage')
   })
 
-  test('keeps Linux AppImage as primary update artifact when deb is also published', () => {
+  test('keeps Linux AppImage as primary update artifact when deb and rpm are also published', () => {
     const inputDir = tempDir()
     const outputDir = tempDir()
 
@@ -149,6 +149,9 @@ describe('release update metadata merge', () => {
         - url: Claude-Code-Haha-0.3.2-linux-x86_64.AppImage
           sha512: linux-appimage-checksum
           size: 111
+        - url: Claude-Code-Haha-0.3.2-linux-x86_64.rpm
+          sha512: linux-rpm-checksum
+          size: 333
       path: Claude-Code-Haha-0.3.2-linux-amd64.deb
       sha512: linux-deb-checksum
     `)
@@ -163,6 +166,7 @@ describe('release update metadata merge', () => {
     expect(x64.files.map(file => file.url)).toEqual([
       'Claude-Code-Haha-0.3.2-linux-x86_64.AppImage',
       'Claude-Code-Haha-0.3.2-linux-amd64.deb',
+      'Claude-Code-Haha-0.3.2-linux-x86_64.rpm',
     ])
     expect(x64.path).toBe('Claude-Code-Haha-0.3.2-linux-x86_64.AppImage')
     expect(x64.sha512).toBe('linux-appimage-checksum')

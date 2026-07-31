@@ -7,6 +7,8 @@ const viewportMocks = vi.hoisted(() => ({
   isMobile: false,
 }))
 
+const originalOffsetWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth')
+
 const mocks = vi.hoisted(() => ({
   create: vi.fn(),
   delete: vi.fn(),
@@ -74,7 +76,14 @@ vi.mock('../../lib/imageCompress', () => ({
 }))
 
 vi.mock('../controls/PermissionModeSelector', () => ({
-  PermissionModeSelector: () => <button type="button">Permissions</button>,
+  // Surfaces `compact` because that prop is the difference between the labelled
+  // pill and the bare icon the real selector renders, and the composer decides
+  // it from the column width.
+  PermissionModeSelector: ({ compact }: { compact?: boolean }) => (
+    <button type="button" data-testid="permission-mode-selector" data-compact={compact ? 'true' : 'false'}>
+      Permissions
+    </button>
+  ),
 }))
 
 vi.mock('../controls/ModelSelector', async () => {
@@ -249,7 +258,44 @@ describe('ChatInput file mentions', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals()
+    if (originalOffsetWidth) {
+      Object.defineProperty(HTMLElement.prototype, 'offsetWidth', originalOffsetWidth)
+    } else {
+      Reflect.deleteProperty(HTMLElement.prototype, 'offsetWidth')
+    }
   })
+
+  // jsdom lays nothing out, so the composer column's width has to be stated.
+  // Only the shell answers: that is the single node the composer measures, and
+  // a blanket stub would let an unrelated element satisfy the assertion.
+  function stubComposerColumnWidth(initialWidth: number) {
+    let width = initialWidth
+    const subscribers = new Set<() => void>()
+
+    Object.defineProperty(HTMLElement.prototype, 'offsetWidth', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.dataset.testid === 'chat-input-shell' ? width : 0
+      },
+    })
+
+    class StubResizeObserver {
+      constructor(private readonly callback: () => void) {}
+      observe() { subscribers.add(this.callback) }
+      unobserve() { subscribers.delete(this.callback) }
+      disconnect() { subscribers.delete(this.callback) }
+    }
+    vi.stubGlobal('ResizeObserver', StubResizeObserver)
+
+    return {
+      resizeTo(nextWidth: number) {
+        width = nextWidth
+        act(() => {
+          subscribers.forEach((notify) => notify())
+        })
+      },
+    }
+  }
 
   it('explains a cleaned worktree without calling the source project missing', () => {
     useSessionStore.setState({
@@ -473,8 +519,9 @@ describe('ChatInput file mentions', () => {
 
     await openLocationMenu()
     fireEvent.click(screen.getAllByTitle('/repo')[0]!)
-    await screen.findByTestId('directory-picker-menu')
-    fireEvent.click(screen.getByRole('button', { name: /Choose a different folder/ }))
+    // The directory list is a view of the location menu now, not a second
+    // dropdown portalled outside it.
+    fireEvent.click(await screen.findByRole('button', { name: /Choose a different folder/ }))
 
     await waitFor(() => {
       expect(mocks.create).toHaveBeenCalledWith({ workDir: '/other' })
@@ -807,16 +854,142 @@ describe('ChatInput file mentions', () => {
   // Sending the first message used to move the run location from inside the
   // panel to a chip below it. It stays in the toolbar now and only loses its
   // affordances, so nothing shifts under the cursor.
+  //
+  // The variant here is `default` on purpose: ActiveSession renders the hero
+  // composer only while the session is empty, so a live session is always the
+  // default one. Asserting this against `hero` passed while the shipped
+  // composer still dropped the chip below the panel.
   it('swaps the pill for a read-only chip in the same row once the session has messages', async () => {
     // beforeEach seeds one message, so this is a live session, not a draft.
-    render(<ChatInput variant="hero" />)
+    render(<ChatInput variant="default" />)
 
     const chip = await screen.findByTestId('run-location-readonly')
     expect(chip).toHaveTextContent('repo')
     expect(chip).toHaveTextContent('main')
 
     expect(screen.getByTestId('chat-input-toolbar')).toContainElement(chip)
+    expect(screen.getByTestId('chat-input-panel')).toContainElement(chip)
+    expect(screen.queryByTestId('run-location-outside')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^Location/ })).not.toBeInTheDocument()
+  })
+
+  // The narrow layouts never adopted the in-toolbar pill: there is no room for
+  // it beside the model selector, so they keep the location on its own line
+  // below the panel.
+  it('keeps the run location below the panel when the composer column is narrow', async () => {
+    stubComposerColumnWidth(360)
+
+    render(<ChatInput compact />)
+
+    const chip = await screen.findByTestId('run-location-outside')
+    expect(chip).toHaveTextContent('repo')
+    expect(screen.getByTestId('chat-input-panel')).not.toContainElement(chip)
+    expect(screen.queryByTestId('run-location-readonly')).not.toBeInTheDocument()
+  })
+
+  // The bug this replaces: `compact` is wired to "is the workspace panel open",
+  // so opening the panel dropped the location to a second line and shrank the
+  // permission mode to a bare icon even on a column with room to spare — the
+  // panel is resizable and the window is not fixed, so its open state says
+  // nothing about the width the composer actually got.
+  it('keeps the run location in the toolbar when a workspace panel leaves the column wide', async () => {
+    stubComposerColumnWidth(580)
+
+    render(<ChatInput compact />)
+
+    const chip = await screen.findByTestId('run-location-readonly')
+    expect(screen.getByTestId('chat-input-toolbar')).toContainElement(chip)
+    expect(screen.queryByTestId('run-location-outside')).not.toBeInTheDocument()
+
+    // The same width buys back the labelled permission pill.
+    expect(screen.getByTestId('permission-mode-selector')).toHaveAttribute('data-compact', 'false')
+  })
+
+  // The run button's word is the cheaper thing to drop — the icon keeps its
+  // `aria-label` and tooltip, while dropping the location costs a whole line
+  // and the directory the turn runs in. So the label goes first, at a width
+  // where keeping both would squeeze the location down to its ellipsis.
+  it('keeps the same circle when it turns into the stop button mid-turn', async () => {
+    // Send and stop are one control that swaps role, so the shape has to
+    // survive the swap — a round send that becomes a pill on stop would move
+    // the whole toolbar every time a turn starts. Only the fill and the glyph
+    // change.
+    stubComposerColumnWidth(700)
+
+    render(<ChatInput compact />)
+
+    const send = screen.getByRole('button', { name: 'Run' })
+    expect(send).toHaveClass('rounded-full', 'h-8', 'w-8')
+    expect(send).toHaveTextContent('arrow_upward')
+
+    await act(async () => {
+      useChatStore.setState({
+        sessions: {
+          ...useChatStore.getState().sessions,
+          [sessionId]: { ...useChatStore.getState().sessions[sessionId]!, chatState: 'streaming' },
+        },
+      })
+    })
+
+    const stop = screen.getByRole('button', { name: 'Stop' })
+    expect(stop).toHaveClass('rounded-full', 'h-8', 'w-8')
+    expect(stop).toHaveTextContent('stop')
+    expect(stop).not.toBeDisabled()
+  })
+
+  // This used to assert that the run button shed its label before the location
+  // moved. The button has no label to shed any more — it is one round icon at
+  // every width — so what needs pinning is that it does *not* change with the
+  // column, leaving the location as the only thing that degrades (next test).
+  it('keeps the send button a fixed circle as the column narrows', async () => {
+    const column = stubComposerColumnWidth(700)
+
+    render(<ChatInput compact />)
+
+    expect(await screen.findByTestId('run-location-readonly')).toBeInTheDocument()
+    const wide = screen.getByRole('button', { name: 'Run' })
+    expect(wide).not.toHaveTextContent('Run')
+    expect(wide).toHaveClass('rounded-full', 'h-8', 'w-8')
+
+    column.resizeTo(580)
+
+    expect(screen.getByTestId('run-location-readonly')).toBeInTheDocument()
+    const narrow = screen.getByRole('button', { name: 'Run' })
+    expect(narrow).not.toHaveTextContent('Run')
+    expect(narrow).toHaveClass('rounded-full', 'h-8', 'w-8')
+  })
+
+  it('moves the run location out of the toolbar as the column is dragged narrow', async () => {
+    const column = stubComposerColumnWidth(580)
+
+    render(<ChatInput compact />)
+
+    expect(await screen.findByTestId('run-location-readonly')).toBeInTheDocument()
+
+    column.resizeTo(360)
+
+    expect(await screen.findByTestId('run-location-outside')).toBeInTheDocument()
+    expect(screen.queryByTestId('run-location-readonly')).not.toBeInTheDocument()
+    expect(screen.getByTestId('permission-mode-selector')).toHaveAttribute('data-compact', 'true')
+
+    column.resizeTo(580)
+
+    expect(await screen.findByTestId('run-location-readonly')).toBeInTheDocument()
+    expect(screen.queryByTestId('run-location-outside')).not.toBeInTheDocument()
+  })
+
+  // The band cancels the panel's `p-3`, so it has to follow the panel's padding
+  // rather than the control layout. A wide column beside an open panel renders
+  // the wide toolbar inside a `p-3` panel; keying the band on the controls would
+  // have inset the divider by 12px there.
+  it('keeps the toolbar band matched to the panel padding when a wide column sits beside a panel', async () => {
+    stubComposerColumnWidth(580)
+
+    render(<ChatInput compact />)
+
+    await screen.findByTestId('run-location-readonly')
+    expect(screen.getByTestId('chat-input-panel')).toHaveClass('p-3')
+    expect(screen.getByTestId('chat-input-toolbar')).toHaveClass('-mx-3')
   })
 
   it('uses the persisted message count to keep reopened sessions in context mode while history loads', async () => {
@@ -1494,7 +1667,7 @@ describe('ChatInput file mentions', () => {
         selectionStart: 1,
       },
     })
-    expect(await screen.findByText('/mcp')).toBeInTheDocument()
+    expect(await screen.findByText('mcp')).toBeInTheDocument()
     expect(panel).toHaveClass('overflow-visible')
     expect(panel).not.toHaveClass('overflow-hidden')
 
@@ -1570,13 +1743,40 @@ describe('ChatInput file mentions', () => {
     const toolbar = screen.getByTestId('chat-input-toolbar')
 
     expect(toolbar).not.toHaveClass('absolute')
-    expect(toolbar).toHaveClass('mt-2')
+    expect(toolbar).toHaveClass('mt-3')
     expect(toolbar).not.toHaveClass('mobile-composer-toolbar')
     expect(input).not.toHaveClass('mobile-composer-textarea')
     expect(input).not.toHaveClass('pb-12')
     expect(input).not.toHaveClass('pb-14')
     expect(screen.getByTestId('chat-input-shell')).not.toHaveClass('mobile-composer-shell')
     expect(screen.getByTestId('chat-input-panel')).not.toHaveClass('mobile-composer-panel')
+  })
+
+  // The draft and the live session render the same composer, so the row that
+  // carries the location, the permission mode and the model has to sit in the
+  // same place in both. The live one used to weld itself to the panel edge
+  // with `-mx-4 -mb-4`, which pulled every control 4px left and stretched the
+  // divider across the panel the moment the first message landed.
+  it('keeps the wide composer toolbar inset when a draft turns into a live session', async () => {
+    const { unmount } = render(<ChatInput variant="hero" />)
+
+    const draftToolbar = screen.getByTestId('chat-input-toolbar')
+    expect(draftToolbar).toHaveClass('pt-3')
+    expect(draftToolbar.className).not.toMatch(/-m[xy]-\d/)
+    unmount()
+
+    const live = render(<ChatInput variant="default" />)
+
+    const liveToolbar = screen.getByTestId('chat-input-toolbar')
+    expect(liveToolbar).toHaveClass('pt-3')
+    expect(liveToolbar.className).not.toMatch(/-m[xy]-\d/)
+    live.unmount()
+
+    // The narrow composer keeps the band: `p-3` leaves too little room to
+    // spend on inset, and it never swaps variants mid-session.
+    render(<ChatInput compact />)
+
+    expect(screen.getByTestId('chat-input-toolbar')).toHaveClass('-mx-3')
   })
 
   it('uses Ctrl or Command Enter to send when that composer preference is selected', async () => {
@@ -1644,14 +1844,20 @@ describe('ChatInput file mentions', () => {
             {
               name: 'agent-team-orchestrator',
               description: 'Agent Teams can use Subagent orchestration.',
+              kind: 'skill',
+              source: 'user',
             },
             {
               name: 'lark-calendar',
               description: 'Includes suggestion helpers.',
+              kind: 'skill',
+              source: 'user',
             },
             {
               name: 'superpowers:brainstorming',
               description: 'Creative work planning.',
+              kind: 'skill',
+              source: 'user',
             },
           ],
         },
@@ -1670,10 +1876,72 @@ describe('ChatInput file mentions', () => {
 
     await waitFor(() => {
       const commandButtons = screen
-        .getAllByRole('button')
-        .filter((button) => button.textContent?.startsWith('/'))
-      expect(commandButtons[0]).toHaveTextContent('/superpowers:brainstorming')
+        .getAllByRole('option')
+        .filter((option) => option.textContent?.includes('Creative work planning.'))
+      expect(commandButtons[0]).toHaveTextContent('superpowers:brainstorming')
+      expect(commandButtons[0]).toHaveTextContent('Personal')
     })
+  })
+
+  it('groups commands before skills and shows each skill source accurately', async () => {
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          ...useChatStore.getState().sessions[sessionId]!,
+          slashCommands: [
+            {
+              name: 'future-native-command',
+              description: 'A CLI command unknown to this desktop build.',
+              kind: 'command',
+            },
+            {
+              name: 'audit',
+              description: 'Audit product UX.',
+              kind: 'skill',
+              source: 'project',
+            },
+            {
+              name: 'drawing:render',
+              description: 'Render an illustration.',
+              kind: 'skill',
+              source: 'plugin',
+            },
+          ],
+        },
+      },
+    })
+
+    render(<ChatInput />)
+
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(input, {
+      target: { value: '/', selectionStart: 1 },
+    })
+
+    const systemCommand = await screen.findByText('mcp')
+    const futureNativeCommand = screen.getByText('future-native-command')
+    const skillsHeading = screen.getByText('Skills')
+    const projectSkill = screen.getByText('audit')
+    const pluginSkill = screen.getByText('drawing:render')
+    const listbox = screen.getByRole('listbox', { name: 'Slash commands' })
+    const combobox = screen.getByRole('combobox')
+
+    expect(systemCommand.compareDocumentPosition(skillsHeading)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+    expect(futureNativeCommand.compareDocumentPosition(skillsHeading)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+    expect(skillsHeading.compareDocumentPosition(projectSkill)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+    expect(projectSkill.closest('[role="option"]')).toHaveTextContent('Project')
+    expect(pluginSkill.closest('[role="option"]')).toHaveTextContent('Plugin')
+    expect(combobox).toHaveAttribute('aria-controls', listbox.id)
+    expect(combobox).toHaveAttribute(
+      'aria-activedescendant',
+      screen.getAllByRole('option')[0]!.id,
+    )
   })
 
   it('offers active agents as slash entries that insert /agent with the selected type', async () => {
@@ -1701,7 +1969,7 @@ describe('ChatInput file mentions', () => {
       target: { value: '/debug', selectionStart: 6 },
     })
 
-    const agentOption = await screen.findByText('/agent debugger')
+    const agentOption = await screen.findByText('agent debugger')
     fireEvent.click(agentOption)
 
     expect(input).toHaveValue('/agent debugger ')
@@ -1735,7 +2003,7 @@ describe('ChatInput file mentions', () => {
       target: { value: '/agent', selectionStart: 6 },
     })
 
-    await screen.findByText('/agent debugger')
+    await screen.findByText('agent debugger')
     fireEvent.keyDown(input, { key: 'ArrowDown' })
     fireEvent.keyDown(input, { key: 'Enter' })
 

@@ -458,9 +458,11 @@ async function runInputActionGates(
   }
 
   if (!frontmost) {
-    // No frontmost app (rare — login window?). Let it through; the click
-    // will land somewhere and PixelCompare catches staleness.
-    return null;
+    return errorResult(
+      "The foreground application could not be identified. Refusing input " +
+        "until a granted application is brought to the front.",
+      "state_conflict",
+    );
   }
 
   const { hostBundleId } = adapter.executor.capabilities;

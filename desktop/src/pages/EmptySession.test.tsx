@@ -99,8 +99,8 @@ vi.mock('@tauri-apps/api/webview', () => ({
 }))
 
 vi.mock('@/components/composite/DirectoryPicker', () => ({
-  DirectoryPicker: ({ value, onChange }: { value: string; onChange: (path: string) => void }) => (
-    <button type="button" aria-label="Pick project" data-value={value} onClick={() => onChange('/workspace/project')}>
+  RecentProjectsPanel: ({ value, onSelect }: { value: string; onSelect: (path: string) => void }) => (
+    <button type="button" aria-label="Pick project" data-value={value} onClick={() => onSelect('/workspace/project')}>
       Pick project
     </button>
   ),
@@ -230,13 +230,21 @@ async function openLaunchMenu() {
 }
 
 /**
- * Picks the mocked project. The directory picker is no longer a standing
- * button on a bar under the composer — it is a row inside the run-location
- * pill's menu, so it has to be opened first.
+ * Picks the mocked project. The directory list is no longer a standing button
+ * on a bar under the composer — it is a view of the run-location pill's menu,
+ * which a fresh session opens directly onto.
  */
 async function pickProject() {
   await openLaunchMenu()
   fireEvent.click(await screen.findByRole('button', { name: 'Pick project' }))
+  // Picking a repo holds the menu open on the root view, where the branch and
+  // worktree rows have just appeared. Close it so callers start from a clean
+  // slate and open it themselves when they mean to.
+  fireEvent.keyDown(document, { key: 'Escape' })
+  await waitFor(() => {
+    expect(screen.queryByRole('menu', { name: 'Location' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Pick project' })).not.toBeInTheDocument()
+  })
 }
 
 describe('EmptySession', () => {
@@ -388,11 +396,60 @@ describe('EmptySession', () => {
     })
 
     await waitFor(() => {
-      const commandButtons = screen
-        .getAllByRole('button')
-        .filter((button) => button.textContent?.startsWith('/'))
-      expect(commandButtons[0]).toHaveTextContent('/superpowers:brainstorming')
+      const commandOptions = screen.getAllByRole('option')
+      expect(commandOptions[0]).toHaveTextContent('superpowers:brainstorming')
     })
+  })
+
+  it('uses the grouped accessible slash menu and preserves skill source labels', async () => {
+    mocks.listSkills.mockResolvedValueOnce({
+      skills: [
+        {
+          name: 'project-audit',
+          description: 'Audit this project.',
+          source: 'project',
+          userInvocable: true,
+        },
+        {
+          name: 'drawing:render',
+          description: 'Render with the drawing plugin.',
+          source: 'plugin',
+          userInvocable: true,
+        },
+      ],
+    })
+
+    render(<EmptySession />)
+
+    await waitFor(() => {
+      expect(mocks.listSkills).toHaveBeenCalledTimes(1)
+    })
+
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(input, {
+      target: { value: '/', selectionStart: 1 },
+    })
+
+    const listbox = await screen.findByRole('listbox', { name: 'Slash commands' })
+    const combobox = screen.getByRole('combobox')
+    const systemCommand = screen.getByText('mcp')
+    const skillsHeading = screen.getByText('Skills')
+    const projectSkill = screen.getByText('project-audit')
+    const pluginSkill = screen.getByText('drawing:render')
+
+    expect(systemCommand.compareDocumentPosition(skillsHeading)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+    expect(skillsHeading.compareDocumentPosition(projectSkill)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+    expect(projectSkill.closest('[role="option"]')).toHaveTextContent('Project')
+    expect(pluginSkill.closest('[role="option"]')).toHaveTextContent('Plugin')
+    expect(combobox).toHaveAttribute('aria-controls', listbox.id)
+    expect(combobox).toHaveAttribute(
+      'aria-activedescendant',
+      screen.getAllByRole('option')[0]!.id,
+    )
   })
 
   it('offers active agents as slash entries that insert /agent with the selected type', async () => {
@@ -420,7 +477,7 @@ describe('EmptySession', () => {
       target: { value: '/debug', selectionStart: 6 },
     })
 
-    const agentOption = await screen.findByText('/agent debugger')
+    const agentOption = await screen.findByText('agent debugger')
     fireEvent.click(agentOption)
 
     expect(input).toHaveValue('/agent debugger ')
@@ -477,7 +534,7 @@ describe('EmptySession', () => {
       target: { value: '/agent', selectionStart: 6 },
     })
 
-    await screen.findByText('/agent debugger')
+    await screen.findByText('agent debugger')
     fireEvent.keyDown(input, { key: 'ArrowDown' })
     fireEvent.keyDown(input, { key: 'Enter' })
 
@@ -986,7 +1043,7 @@ describe('EmptySession', () => {
         selectionStart: 1,
       },
     })
-    expect(await screen.findByText('/mcp')).toBeInTheDocument()
+    expect(await screen.findByText('mcp')).toBeInTheDocument()
     expect(panel).toHaveClass('overflow-visible')
     expect(panel).not.toHaveClass('overflow-hidden')
 
@@ -1017,15 +1074,15 @@ describe('EmptySession', () => {
 
     expect(screen.queryByText('Current project is not a Git repository.')).not.toBeInTheDocument()
 
-    // Without a repo the pill carries the folder alone, and its menu drops the
-    // branch and worktree rows entirely.
+    // Without a repo the pill carries the folder alone, and there are no
+    // branch or worktree rows to drop back to — so the menu opens straight on
+    // the directory list instead of a root view holding a single row.
     await openLaunchMenu()
-    const menu = await screen.findByRole('menu', { name: 'Location' })
-    expect(within(menu).queryByRole('menuitem', { name: /Branch/ })).not.toBeInTheDocument()
-    expect(within(menu).queryByRole('menuitemradio')).not.toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Pick project' })).toBeInTheDocument()
+    expect(screen.queryByRole('menu', { name: 'Location' })).not.toBeInTheDocument()
     fireEvent.keyDown(document, { key: 'Escape' })
     await waitFor(() => {
-      expect(screen.queryByRole('menu', { name: 'Location' })).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Pick project' })).not.toBeInTheDocument()
     })
 
     fireEvent.click(screen.getByRole('button', { name: /Run/i }))
@@ -1226,7 +1283,14 @@ describe('EmptySession', () => {
       expect(screen.getByText('main')).toBeInTheDocument()
     })
 
-    expect(screen.getByText('Selected branch is already checked out in another worktree. Direct launch may be blocked by Git; use "Isolated worktree" to avoid changing directories.')).toBeInTheDocument()
+    const warning = screen.getByRole('status', {
+      name: 'Selected branch is already checked out in another worktree. Direct launch may be blocked by Git; use "Isolated worktree" to avoid changing directories.',
+    })
+    expect(warning).toHaveTextContent('Branch already checked out')
+    expect(warning).toHaveAttribute(
+      'title',
+      'Selected branch is already checked out in another worktree. Direct launch may be blocked by Git; use "Isolated worktree" to avoid changing directories.',
+    )
 
     // Staying on the current worktree has to remain a live choice even when the
     // fallback branch is checked out elsewhere — it must not render disabled.
