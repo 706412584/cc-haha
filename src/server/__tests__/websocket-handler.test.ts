@@ -1506,6 +1506,40 @@ describe('WebSocket handler session isolation', () => {
     )
   })
 
+  it('reports failures while resolving async permission responses', async () => {
+    const sessionId = `permission-response-failure-${crypto.randomUUID()}`
+    const ws = makeClientSocket(sessionId)
+    spyOn(conversationService, 'getPendingPermissionRequests').mockReturnValue([{
+      requestId: 'exit-plan-failure',
+      toolName: 'ExitPlanMode',
+      input: {},
+    }])
+    spyOn(sessionService, 'getSessionLaunchInfo').mockRejectedValue(
+      new Error('metadata unavailable'),
+    )
+    spyOn(conversationService, 'respondToPermission').mockImplementation(() => {
+      throw new Error('permission transport unavailable')
+    })
+    const errorLog = spyOn(console, 'error').mockImplementation(() => {})
+
+    handleWebSocket.message(ws, JSON.stringify({
+      type: 'permission_response',
+      requestId: 'exit-plan-failure',
+      allowed: true,
+    }))
+    await new Promise<void>((resolve) => setImmediate(resolve))
+
+    expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
+      type: 'error',
+      message: 'The permission response could not be processed. Please retry.',
+      code: 'PERMISSION_RESPONSE_FAILED',
+    })
+    expect(errorLog).toHaveBeenCalledWith(
+      '[WS] Failed to process permission response:',
+      expect.objectContaining({ message: 'permission transport unavailable' }),
+    )
+  })
+
   it('broadcasts tool and Computer Use permission resolutions to every client', () => {
     const sessionId = `permission-resolution-${crypto.randomUUID()}`
     const first = makeClientSocket(sessionId)

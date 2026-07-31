@@ -141,10 +141,14 @@ vi.mock('../components/controls/ModelSelector', async () => {
 vi.mock('../components/chat/ImageAnnotationModal', () => ({
   ImageAnnotationModal: ({ open, image, onSave }: {
     open: boolean
-    image: { name: string } | null
+    image: { src: string; name: string } | null
     onSave: (dataUrl: string) => void
   }) => open && image ? (
-    <button type="button" onClick={() => onSave('data:image/png;base64,ANNOTATED')}>
+    <button
+      type="button"
+      data-image-src={image.src}
+      onClick={() => onSave('data:image/png;base64,ANNOTATED')}
+    >
       Save annotation for {image.name}
     </button>
   ) : null,
@@ -900,6 +904,56 @@ describe('EmptySession', () => {
         mimeType: 'image/png',
       })],
     })
+  })
+
+  it('resolves a path-only dropped image before opening annotation', async () => {
+    window.desktopHost = {
+      ...browserHost,
+      kind: 'electron',
+      isDesktop: true,
+      webview: {
+        ...browserHost.webview,
+        onDragDropEvent: async (handler) => {
+          mocks.webviewDragHandlers.push(handler as (event: { payload: unknown }) => void)
+          return mocks.webviewUnlisten
+        },
+      },
+    }
+    render(<EmptySession />)
+
+    const panel = screen.getByTestId('empty-session-composer-panel')
+    Object.defineProperty(panel, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({
+        left: 0,
+        top: 0,
+        right: 640,
+        bottom: 180,
+        width: 640,
+        height: 180,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }),
+    })
+    await waitFor(() => expect(mocks.webviewDragHandlers).toHaveLength(1))
+
+    const imagePath = 'C:\\Users\\Nanmi\\Desktop\\path-only.png'
+    act(() => {
+      mocks.webviewDragHandlers[0]?.({
+        payload: {
+          type: 'drop',
+          position: { x: 24, y: 24 },
+          paths: [imagePath],
+        },
+      })
+    })
+    fireEvent.click(await screen.findByLabelText('Annotate path-only.png'))
+
+    expect(screen.getByRole('button', { name: 'Save annotation for path-only.png' })).toHaveAttribute(
+      'data-image-src',
+      expect.stringContaining(`/api/filesystem/file?path=${encodeURIComponent(imagePath)}`),
+    )
   })
 
   it('closes image annotation when the target attachment is removed', async () => {

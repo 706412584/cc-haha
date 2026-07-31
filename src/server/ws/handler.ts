@@ -623,7 +623,14 @@ export const handleWebSocket = {
         }
 
         case 'permission_response':
-          void handlePermissionResponse(ws, message)
+          void handlePermissionResponse(ws, message).catch((err) => {
+            console.error('[WS] Failed to process permission response:', err)
+            sendError(
+              ws,
+              'The permission response could not be processed. Please retry.',
+              'PERMISSION_RESPONSE_FAILED',
+            )
+          })
           break
 
         case 'computer_use_permission_response':

@@ -4006,8 +4006,8 @@ export class SessionService {
     const repository = this.resolveRepositoryFromEntries(entries)
     const worktreeSession = this.resolveWorktreeSessionFromEntries(entries)
     const permissionMode = this.resolvePermissionModeFromEntries(entries)
+    const prePlanPermissionMode = this.resolvePrePlanPermissionModeFromEntries(entries)
     let customTitle: string | null = null
-    let prePlanPermissionMode: string | undefined
     let runtimeProviderId: string | null | undefined
     let runtimeModelId: string | undefined
     let effortLevel: string | undefined
@@ -4020,15 +4020,6 @@ export class SessionService {
       }
       if (entry.type === 'session-meta') {
         const record = entry as Record<string, unknown>
-        if (record.prePlanPermissionMode === null) {
-          prePlanPermissionMode = undefined
-        } else if (
-          typeof record.prePlanPermissionMode === 'string' &&
-          VALID_SESSION_PERMISSION_MODES.has(record.prePlanPermissionMode) &&
-          record.prePlanPermissionMode !== 'plan'
-        ) {
-          prePlanPermissionMode = record.prePlanPermissionMode
-        }
         if (record.runtimeProviderId === null || typeof record.runtimeProviderId === 'string') {
           runtimeProviderId = record.runtimeProviderId as string | null
         }
