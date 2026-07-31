@@ -20,8 +20,12 @@ if ($installers.Count -ne 1) {
 $installer = $installers[0].FullName
 $packageJson = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\package.json') -Raw | ConvertFrom-Json
 $productName = [string]$packageJson.build.productName
+$appPackageName = [string]$packageJson.name
 if ([string]::IsNullOrWhiteSpace($productName)) {
   throw 'desktop/package.json must define build.productName for installer smoke validation.'
+}
+if ([string]::IsNullOrWhiteSpace($appPackageName)) {
+  throw 'desktop/package.json must define name for installer smoke validation.'
 }
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "cc-haha-installer-smoke-$([Guid]::NewGuid().ToString('N'))"
@@ -228,7 +232,7 @@ function Invoke-LegacyRecoveryDiagnostic {
     '-CandidateInstallDir',
     $installDir,
     '-UserDataDir',
-    (Join-Path $appData 'Claude Code Haha'),
+    (Join-Path $appData $appPackageName),
     '-RecoveryRoot',
     (Join-Path $userProfile 'Claude Code Haha Data\Recovered'),
     '-ProcessName',
@@ -300,6 +304,20 @@ try {
   }
 
   Invoke-LegacyRecoveryDiagnostic
+
+  $managedConfigDir = Join-Path $userProfile '.claude'
+  $modeDir = Join-Path $appData $appPackageName
+  New-Item -ItemType Directory -Path $managedConfigDir, $modeDir -Force | Out-Null
+  [ordered]@{
+    mode = 'portable'
+    portable_dir = $managedConfigDir
+  } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $modeDir 'app-mode.json') -Encoding UTF8
+  $env:CLAUDE_CONFIG_DIR = $managedConfigDir
+  $env:CC_HAHA_APP_PORTABLE_DIR = '1'
+  Invoke-CheckedProcess -FilePath $installer -Stage 'App-managed auto-update reinstall' -Arguments @('--updated', '/S', '/currentuser', "/D=$installDir")
+  Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue
+  Remove-Item Env:CC_HAHA_APP_PORTABLE_DIR -ErrorAction SilentlyContinue
+
   Stop-Process -Id $siblingProcess.Id -Force
   $siblingProcess.WaitForExit()
   $siblingProcess.Dispose()
