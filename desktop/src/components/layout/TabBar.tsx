@@ -241,14 +241,11 @@ export function TabBar() {
   // and the tab could not be closed at all. Window resizes, sidebar drags and
   // the toolbar's own conditional buttons narrow the region the same way.
   const realignActiveTab = useCallback(() => {
-    // Once the user has driven the strip with a chevron, where it sits is what
-    // they asked for, and the active tab being half off the edge is an
-    // ordinary consequence of scrolling a row. Only reinstate the invariant
-    // when the position is still ours to choose. Width alone cannot stand in
-    // for this: a chevron retires when its end is reached and rejoins when it
-    // is left, so a plain user scroll narrows the strip mid-flight and looks
-    // exactly like the layout event this guards against — measured, the view
-    // snapped straight back and the left end became unreachable.
+    // Once the user has driven the strip with a chevron, wheel or trackpad,
+    // where it sits is what they asked for, and the active tab being half off
+    // the edge is an ordinary consequence of scrolling a row. Only reinstate
+    // the invariant when the position is still ours to choose; a resize alone
+    // cannot distinguish user movement from a layout change.
     if (userScrolledRef.current) return
 
     const el = scrollRef.current
@@ -318,17 +315,15 @@ export function TabBar() {
     const el = scrollRef.current
     if (!el) return
     const step = el.clientWidth * SCROLL_STEP_RATIO
-    // The chevrons are the only way to drive the strip by hand — it is
-    // `overflow-x-hidden`, so wheel and trackpad do not reach it — which makes
-    // this the one place that has to hand the position over to the user.
     userScrolledRef.current = true
     el.scrollBy({ left: direction === 'left' ? -step : step, behavior: 'smooth' })
   }
 
   const handleTabWheel = (event: React.WheelEvent<HTMLDivElement>) => {
-    if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return
     const el = scrollRef.current
     if (!el || el.scrollWidth <= el.clientWidth) return
+    userScrolledRef.current = true
+    if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return
     event.preventDefault()
     el.scrollLeft += event.deltaY
   }
@@ -532,8 +527,17 @@ export function TabBar() {
       className="flex min-h-[52px] items-stretch bg-[var(--color-surface-sidebar)] select-none"
     >
 
-      {canScrollLeft && (
-        <button type="button" onClick={() => scroll('left')} aria-label={t('tabs.scrollLeft')} className="flex h-[52px] w-7 flex-shrink-0 items-center justify-center text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)]">
+      {/* Keep both 28px slots mounted for the whole overflow lifecycle. Smooth
+          scrolling can swap which edge is reachable; mounting one while
+          unmounting the other changes the strip width and restarts alignment. */}
+      {(canScrollLeft || canScrollRight) && (
+        <button
+          type="button"
+          onClick={() => scroll('left')}
+          aria-label={t('tabs.scrollLeft')}
+          disabled={!canScrollLeft}
+          className={`flex h-[52px] w-7 flex-shrink-0 items-center justify-center text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)] ${canScrollLeft ? '' : 'invisible'}`}
+        >
           <span className="material-symbols-outlined text-[16px]">chevron_left</span>
         </button>
       )}
@@ -653,8 +657,14 @@ export function TabBar() {
         />
       )}
 
-      {canScrollRight && (
-        <button type="button" onClick={() => scroll('right')} aria-label={t('tabs.scrollRight')} className="flex h-[52px] w-7 flex-shrink-0 items-center justify-center text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)]">
+      {(canScrollLeft || canScrollRight) && (
+        <button
+          type="button"
+          onClick={() => scroll('right')}
+          aria-label={t('tabs.scrollRight')}
+          disabled={!canScrollRight}
+          className={`flex h-[52px] w-7 flex-shrink-0 items-center justify-center text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)] ${canScrollRight ? '' : 'invisible'}`}
+        >
           <span className="material-symbols-outlined text-[16px]">chevron_right</span>
         </button>
       )}
