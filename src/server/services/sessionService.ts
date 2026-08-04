@@ -108,16 +108,37 @@ export type SessionListShadowComparison = {
   }>
 }
 
+/** R1: read-path observability only — no behavior change. */
+export type JsonlParseMetric = {
+  cacheHit: boolean
+  mode: 'tail' | 'full'
+  fileBytes: number
+  readBytes: number
+  entryCount: number
+  durationMs: number
+  /** Whether this miss stored entries in the ≤16MiB read cache. */
+  cachedAfterRead: boolean
+  /** Basename only (usually sessionId.jsonl) — never a full user path. */
+  fileName: string
+}
+
 export type SessionServiceLocalIndexOptions = {
   now?: () => number
   indexFailureCooldownMs?: number
   shadowComparisonMinIntervalMs?: number
   recordShadowComparison?: (comparison: SessionListShadowComparison) => void
+  /** Optional override for tests; default writes a diagnostics event. */
+  recordJsonlParseMetric?: (metric: JsonlParseMetric) => void
   targetedEntryReader?: typeof readSessionEntriesByLocator
   sessionListCacheMaxEntries?: number
   sessionListSummaryCacheMaxEntries?: number
   /** Override full-file JSONL parse ceiling (bytes). Production default 50 MiB. */
   maxFullJsonlReadBytes?: number
+  /**
+   * R2: minimum interval between oversized console.warn for the same path.
+   * Default 5 minutes. Set 0 to warn every time (tests / emergency).
+   */
+  oversizedWarnMinIntervalMs?: number
 }
 
 export type SessionEntriesAtLinesResult = {
@@ -491,6 +512,10 @@ export class SessionService {
     entries: RawEntry[]
   }>()
   private readonly readJsonlInFlight = new Map<string, Promise<RawEntry[]>>()
+  private readonly recordJsonlParseMetric: (metric: JsonlParseMetric) => void
+  /** R2: rate-limit oversized console.warn per path so logs don't look like a storm. */
+  private readonly oversizedWarnLastAt = new Map<string, number>()
+  private readonly oversizedWarnMinIntervalMs: number
 
   constructor(
     localIndexGateway: LocalIndexGateway = localIndexCoordinator,
@@ -519,6 +544,18 @@ export class SessionService {
         details: comparison,
       })
     })
+    this.recordJsonlParseMetric =
+      options.recordJsonlParseMetric ??
+      ((metric) => {
+        void diagnosticsService.recordEvent({
+          type: 'session_jsonl_parse',
+          severity: metric.mode === 'tail' ? 'warn' : 'info',
+          summary: metric.cacheHit
+            ? `JSONL cache hit ${metric.fileName} (${metric.fileBytes} bytes)`
+            : `JSONL ${metric.mode} parse ${metric.fileName} read=${metric.readBytes}B in ${metric.durationMs}ms`,
+          details: metric,
+        })
+      })
     this.targetedEntryReader = options.targetedEntryReader ?? readSessionEntriesByLocator
     this.maxFullJsonlReadBytes =
       typeof options.maxFullJsonlReadBytes === 'number' &&
@@ -526,6 +563,29 @@ export class SessionService {
       options.maxFullJsonlReadBytes > 0
         ? Math.floor(options.maxFullJsonlReadBytes)
         : 50 * 1024 * 1024
+    this.oversizedWarnMinIntervalMs =
+      typeof options.oversizedWarnMinIntervalMs === 'number' &&
+      Number.isFinite(options.oversizedWarnMinIntervalMs) &&
+      options.oversizedWarnMinIntervalMs >= 0
+        ? Math.floor(options.oversizedWarnMinIntervalMs)
+        : 5 * 60 * 1000
+  }
+
+  /** R2: true if we should emit console.warn for this oversized path now. */
+  private shouldWarnOversized(filePath: string): boolean {
+    if (this.oversizedWarnMinIntervalMs <= 0) return true
+    const now = this.now()
+    const last = this.oversizedWarnLastAt.get(filePath)
+    if (last !== undefined && now - last < this.oversizedWarnMinIntervalMs) {
+      return false
+    }
+    this.oversizedWarnLastAt.set(filePath, now)
+    // Bound map growth: drop oldest-ish entries when large.
+    if (this.oversizedWarnLastAt.size > 200) {
+      const oldest = this.oversizedWarnLastAt.keys().next().value
+      if (oldest !== undefined) this.oversizedWarnLastAt.delete(oldest)
+    }
+    return true
   }
 
   private normalizeCacheCapacity(value: number | undefined, fallback: number): number {
@@ -867,7 +927,19 @@ export class SessionService {
 
     const cached = this.readJsonlCache.get(filePath)
     if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
-      return cached.entries.slice()
+      const started = performance.now()
+      const entries = cached.entries.slice()
+      this.emitJsonlParseMetric({
+        cacheHit: true,
+        mode: stat.size > this.maxFullJsonlReadBytes ? 'tail' : 'full',
+        fileBytes: stat.size,
+        readBytes: 0,
+        entryCount: entries.length,
+        durationMs: performance.now() - started,
+        cachedAfterRead: false,
+        fileName: path.basename(filePath),
+      })
+      return entries
     }
 
     const inFlight = this.readJsonlInFlight.get(filePath)
@@ -882,16 +954,42 @@ export class SessionService {
     }
   }
 
+  private emitJsonlParseMetric(metric: JsonlParseMetric): void {
+    try {
+      this.recordJsonlParseMetric({
+        ...metric,
+        durationMs: Math.round(metric.durationMs * 1000) / 1000,
+      })
+    } catch {
+      // Observability must never break transcript reads.
+    }
+  }
+
   private async readAndParseJsonl(
     filePath: string,
     stat: { mtimeMs: number; size: number },
   ): Promise<RawEntry[]> {
+    const started = performance.now()
+    const fileName = path.basename(filePath)
+
     if (stat.size > this.maxFullJsonlReadBytes) {
-      console.warn(
-        `[SessionService] oversized transcript ${filePath} (${stat.size} bytes); parsing last ${this.maxFullJsonlReadBytes} bytes only`,
-      )
+      if (this.shouldWarnOversized(filePath)) {
+        console.warn(
+          `[SessionService] oversized transcript ${filePath} (${stat.size} bytes); parsing last ${this.maxFullJsonlReadBytes} bytes only`,
+        )
+      }
       const entries = await this.readJsonlTail(filePath, this.maxFullJsonlReadBytes)
       this.invalidateReadCache(filePath)
+      this.emitJsonlParseMetric({
+        cacheHit: false,
+        mode: 'tail',
+        fileBytes: stat.size,
+        readBytes: Math.min(stat.size, this.maxFullJsonlReadBytes),
+        entryCount: entries.length,
+        durationMs: performance.now() - started,
+        cachedAfterRead: false,
+        fileName,
+      })
       return entries
     }
 
@@ -907,11 +1005,22 @@ export class SessionService {
     }
 
     const entries = this.parseJsonlContent(content)
-    if (stat.size <= this.readCacheMaxFileBytes) {
+    const cachedAfterRead = stat.size <= this.readCacheMaxFileBytes
+    if (cachedAfterRead) {
       this.storeReadCache(filePath, stat.mtimeMs, stat.size, entries)
     } else {
       this.invalidateReadCache(filePath)
     }
+    this.emitJsonlParseMetric({
+      cacheHit: false,
+      mode: 'full',
+      fileBytes: stat.size,
+      readBytes: stat.size,
+      entryCount: entries.length,
+      durationMs: performance.now() - started,
+      cachedAfterRead,
+      fileName,
+    })
     return entries
   }
 

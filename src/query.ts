@@ -75,6 +75,7 @@ import {
   getCommandsByMaxPriority,
   isSlashCommand,
 } from './utils/messageQueueManager.js'
+import { isEmptyThinkingOnlyAssistantMessage } from './utils/queryHelpers.js'
 import { notifyCommandLifecycle } from './utils/commandLifecycle.js'
 import { headlessProfilerCheckpoint } from './utils/headlessProfiler.js'
 import {
@@ -167,6 +168,11 @@ function* yieldMissingToolResultBlocks(
  * rules, ye will be punished with an entire day of debugging and hair pulling.
  */
 const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3
+// Thinking-only end_turn is usually an upstream soft-cut, not a real finish.
+// Auto-continue up to a small number of times so the desktop session stays
+// active instead of going idle. Bounded to avoid infinite loops when the
+// upstream keeps returning thinking-only completions.
+const MAX_EMPTY_THINKING_RECOVERY_LIMIT = 5
 
 /**
  * Is this a max_output_tokens error message? If so, the streaming loop should
@@ -211,6 +217,7 @@ type State = {
   toolUseContext: ToolUseContext
   autoCompactTracking: AutoCompactTrackingState | undefined
   maxOutputTokensRecoveryCount: number
+  emptyThinkingRecoveryCount: number
   hasAttemptedReactiveCompact: boolean
   maxOutputTokensOverride: number | undefined
   pendingToolUseSummary: Promise<ToolUseSummaryMessage | null> | undefined
@@ -304,6 +311,7 @@ async function* queryLoop(
     autoCompactTracking: undefined,
     stopHookActive: undefined,
     maxOutputTokensRecoveryCount: 0,
+    emptyThinkingRecoveryCount: 0,
     hasAttemptedReactiveCompact: false,
     turnCount: 1,
     pendingToolUseSummary: undefined,
@@ -345,6 +353,7 @@ async function* queryLoop(
       messages,
       autoCompactTracking,
       maxOutputTokensRecoveryCount,
+      emptyThinkingRecoveryCount,
       hasAttemptedReactiveCompact,
       maxOutputTokensOverride,
       pendingToolUseSummary,
@@ -1143,6 +1152,7 @@ async function* queryLoop(
               toolUseContext,
               autoCompactTracking: tracking,
               maxOutputTokensRecoveryCount,
+              emptyThinkingRecoveryCount,
               hasAttemptedReactiveCompact,
               maxOutputTokensOverride: undefined,
               pendingToolUseSummary: undefined,
@@ -1196,6 +1206,7 @@ async function* queryLoop(
             toolUseContext,
             autoCompactTracking: undefined,
             maxOutputTokensRecoveryCount,
+            emptyThinkingRecoveryCount,
             hasAttemptedReactiveCompact: true,
             maxOutputTokensOverride: undefined,
             pendingToolUseSummary: undefined,
@@ -1251,6 +1262,7 @@ async function* queryLoop(
             toolUseContext,
             autoCompactTracking: tracking,
             maxOutputTokensRecoveryCount,
+            emptyThinkingRecoveryCount,
             hasAttemptedReactiveCompact,
             maxOutputTokensOverride: ESCALATED_MAX_TOKENS,
             pendingToolUseSummary: undefined,
@@ -1279,6 +1291,7 @@ async function* queryLoop(
             toolUseContext,
             autoCompactTracking: tracking,
             maxOutputTokensRecoveryCount: maxOutputTokensRecoveryCount + 1,
+            emptyThinkingRecoveryCount,
             hasAttemptedReactiveCompact,
             maxOutputTokensOverride: undefined,
             pendingToolUseSummary: undefined,
@@ -1295,6 +1308,51 @@ async function* queryLoop(
 
         // Recovery exhausted — surface the withheld error now.
         yield lastMessage
+      }
+
+      // Thinking-only end_turn: upstream cut the stream after thinking with no
+      // text/tool_use. Keep the query loop alive and auto-continue (bounded) so
+      // the desktop session does not flip to idle with zero visible completion.
+      if (
+        isEmptyThinkingOnlyAssistantMessage(lastMessage) &&
+        emptyThinkingRecoveryCount < MAX_EMPTY_THINKING_RECOVERY_LIMIT
+      ) {
+        const attempt = emptyThinkingRecoveryCount + 1
+        logEvent('tengu_empty_thinking_recovery', {
+          attempt,
+        })
+        logForDebugging(
+          `Empty thinking-only completion recovered (attempt ${attempt}/${MAX_EMPTY_THINKING_RECOVERY_LIMIT})`,
+        )
+        const recoveryMessage = createUserMessage({
+          content:
+            `Your previous response only contained thinking and stopped before producing ` +
+            `any assistant text or tool calls. Continue from where you left off — no apology, ` +
+            `no recap. Prefer a concrete next action (tool call or brief progress text).`,
+          isMeta: true,
+        })
+        const next: State = {
+          messages: [
+            ...messagesForQuery,
+            ...assistantMessages,
+            recoveryMessage,
+          ],
+          toolUseContext,
+          autoCompactTracking: tracking,
+          maxOutputTokensRecoveryCount,
+          emptyThinkingRecoveryCount: attempt,
+          hasAttemptedReactiveCompact,
+          maxOutputTokensOverride: undefined,
+          pendingToolUseSummary: undefined,
+          stopHookActive: undefined,
+          turnCount,
+          transition: {
+            reason: 'empty_thinking_recovery',
+            attempt,
+          },
+        }
+        state = next
+        continue
       }
 
       // Skip stop hooks when the last message is an API error (rate limit,
@@ -1331,6 +1389,7 @@ async function* queryLoop(
           toolUseContext,
           autoCompactTracking: tracking,
           maxOutputTokensRecoveryCount: 0,
+          emptyThinkingRecoveryCount: 0,
           // Preserve the reactive compact guard — if compact already ran and
           // couldn't recover from prompt-too-long, retrying after a stop-hook
           // blocking error will produce the same result. Resetting to false
@@ -1372,6 +1431,7 @@ async function* queryLoop(
             toolUseContext,
             autoCompactTracking: tracking,
             maxOutputTokensRecoveryCount: 0,
+            emptyThinkingRecoveryCount: 0,
             hasAttemptedReactiveCompact: false,
             maxOutputTokensOverride: undefined,
             pendingToolUseSummary: undefined,
@@ -1766,6 +1826,7 @@ async function* queryLoop(
       autoCompactTracking: tracking,
       turnCount: nextTurnCount,
       maxOutputTokensRecoveryCount: 0,
+      emptyThinkingRecoveryCount: 0,
       hasAttemptedReactiveCompact: false,
       pendingToolUseSummary: nextPendingToolUseSummary,
       maxOutputTokensOverride: undefined,
