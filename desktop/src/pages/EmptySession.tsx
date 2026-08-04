@@ -5,8 +5,9 @@ import { Button } from '@/components/ui/Button'
 import { IconButton } from '@/components/ui/IconButton'
 import { ApiError } from '../api/client'
 import { agentsApi } from '../api/agents'
-import { providersApi } from '../api/providers'
 import { skillsApi } from '../api/skills'
+import { projectsApi } from '../api/projects'
+import { wsManager } from '../api/websocket'
 import { useTranslation } from '../i18n'
 import { useSessionStore } from '../stores/sessionStore'
 import { useChatStore } from '../stores/chatStore'
@@ -20,6 +21,7 @@ import { RepositoryLaunchControls } from '@/components/chat/RepositoryLaunchCont
 import { PermissionModeSelector } from '../components/controls/PermissionModeSelector'
 import { ModelSelector, type ModelSelectorHandle } from '../components/controls/ModelSelector'
 import { AttachmentGallery } from '../components/chat/AttachmentGallery'
+import { ImageAnnotationModal } from '../components/chat/ImageAnnotationModal'
 import { ComposerDropOverlay } from '../components/chat/ComposerDropOverlay'
 import { ContextUsageIndicator } from '../components/chat/ContextUsageIndicator'
 import { FileSearchMenu, type FileSearchMenuHandle } from '../components/chat/FileSearchMenu'
@@ -32,19 +34,13 @@ import { useMobileViewport } from '../hooks/useMobileViewport'
 import { isDesktopRuntime } from '../lib/desktopRuntime'
 import { resolveActiveProviderRuntimeSelection } from '../lib/runtimeSelection'
 import {
+  composerAttachmentToPayload,
   filesToComposerAttachments,
   getDataTransferFiles,
-  selectNativeFileAttachments,
   type ComposerAttachment,
 } from '../lib/composerAttachments'
 import { useComposerFileDrop } from '../components/chat/useComposerFileDrop'
 import { shouldSubmitOnEnter } from '../components/chat/sendShortcut'
-import { MentionComposer, type MentionComposerHandle } from '../components/chat/MentionComposer'
-import {
-  findMentionRanges,
-  insertMentionIntoText,
-  type ComposerMention,
-} from '../lib/composerMentions'
 import {
   appendAgentSlashCommands,
   buildAgentSlashCommands,
@@ -57,9 +53,13 @@ import {
   replaceSlashCommand,
   resolveSlashUiAction,
 } from '../components/chat/composerUtils'
-import type { AttachmentRef } from '../types/chat'
+import type { AttachmentRef, DisplayAttachmentRef } from '../types/chat'
+import { attachmentImageSource } from '../lib/attachmentImages'
 import type { PermissionMode } from '../types/settings'
 import type { SlashCommandOption } from '../components/chat/composerUtils'
+import { WelcomeTaskCards, type WelcomeTaskCard } from '../components/welcome/WelcomeTaskCards'
+import { RecentActivityCard } from '../components/welcome/RecentActivityCard'
+import { pickReusableEmptySession } from '../lib/sessionReuse'
 
 type Attachment = ComposerAttachment
 
@@ -104,15 +104,19 @@ function resolveCreateSessionErrorMessage(error: unknown, t: Translate): string 
 export function EmptySession() {
   const t = useTranslation()
   const [input, setInput] = useState('')
-  const [mentions, setMentions] = useState<ComposerMention[]>([])
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [workDir, setWorkDir] = useState('')
   const [selectedBranch, setSelectedBranch] = useState<string | null>(null)
   const [useWorktree, setUseWorktree] = useState(false)
   const [repositoryLaunchReady, setRepositoryLaunchReady] = useState(true)
   const [attachments, setAttachments] = useState<Attachment[]>([])
+  const [annotationTarget, setAnnotationTarget] = useState<Attachment | null>(null)
   const [plusMenuOpen, setPlusMenuOpen] = useState(false)
   const [slashMenuOpen, setSlashMenuOpen] = useState(false)
+  // Tracks whether a welcome-screen task card requested orchestration mode for
+  // the not-yet-created session. Applied right after createSession() resolves
+  // and before connectToSession() so the WS replay carries it.
+  const [draftOrchestrate, setDraftOrchestrate] = useState(false)
   const [fileSearchOpen, setFileSearchOpen] = useState(false)
   const [localSlashPanel, setLocalSlashPanel] = useState<LocalSlashCommandName | null>(null)
   const [atFilter, setAtFilter] = useState('')
@@ -121,8 +125,7 @@ export function EmptySession() {
   const [slashSelectedIndex, setSlashSelectedIndex] = useState(0)
   const [slashCommands, setSlashCommands] = useState<SlashCommandOption[]>([])
   const [agentSlashCommands, setAgentSlashCommands] = useState<SlashCommandOption[]>([])
-  const composerRef = useRef<MentionComposerHandle>(null)
-  const composerContainerRef = useRef<HTMLDivElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const modelSelectorRef = useRef<ModelSelectorHandle>(null)
@@ -152,7 +155,7 @@ export function EmptySession() {
   const isMobileComposer = useMobileViewport() && !isDesktopRuntime()
 
   useEffect(() => {
-    composerRef.current?.focus()
+    textareaRef.current?.focus()
   }, [])
 
   useDismissable({
@@ -163,19 +166,19 @@ export function EmptySession() {
 
   useDismissable({
     open: slashMenuOpen,
-    refs: [slashMenuRef, composerContainerRef],
+    refs: [slashMenuRef, textareaRef],
     onDismiss: () => setSlashMenuOpen(false),
   })
 
   useDismissable({
     open: !!localSlashPanel,
-    refs: [slashMenuRef, composerContainerRef],
+    refs: [slashMenuRef, textareaRef],
     onDismiss: () => setLocalSlashPanel(null),
   })
 
   useDismissable({
     open: fileSearchOpen,
-    refs: [composerContainerRef],
+    refs: [textareaRef],
     onDismiss: () => setFileSearchOpen(false),
     // See ChatInput: this menu is found by id, and its absence used to mean
     // "ignore the press".
@@ -289,7 +292,6 @@ export function EmptySession() {
     if (slashUiAction?.type === 'panel') {
       setLocalSlashPanel(slashUiAction.command as LocalSlashCommandName)
       setInput('')
-      setMentions([])
       setSlashMenuOpen(false)
       setFileSearchOpen(false)
       setPlusMenuOpen(false)
@@ -300,7 +302,6 @@ export function EmptySession() {
       useUIStore.getState().setPendingSettingsTab(slashUiAction.tab)
       useTabStore.getState().openTab(SETTINGS_TAB_ID, 'Settings', 'settings')
       setInput('')
-      setMentions([])
       setSlashMenuOpen(false)
       setFileSearchOpen(false)
       setPlusMenuOpen(false)
@@ -310,7 +311,6 @@ export function EmptySession() {
     if (slashUiAction?.type === 'model') {
       modelSelectorRef.current?.open()
       setInput('')
-      setMentions([])
       setSlashMenuOpen(false)
       setFileSearchOpen(false)
       setPlusMenuOpen(false)
@@ -319,13 +319,6 @@ export function EmptySession() {
 
     setIsSubmitting(true)
     try {
-      const authStatus = await providersApi.authStatus()
-      if (!authStatus.hasAuth) {
-        useUIStore.getState().setPendingSettingsTab('providers')
-        useTabStore.getState().openTab(SETTINGS_TAB_ID, t('sidebar.settings'), 'settings')
-        return
-      }
-
       const runtimeStore = useSessionRuntimeStore.getState()
       const explicitDraftSelection = runtimeStore.selections[DRAFT_RUNTIME_SELECTION_KEY]
       const defaultActiveProviderSelection = explicitDraftSelection
@@ -334,7 +327,8 @@ export function EmptySession() {
           activeProviderId,
           activeProviderName,
           providers,
-          currentModel?.id,
+          currentModel,
+          useSettingsStore.getState().effortLevel,
         )
       const runtimeSelection = explicitDraftSelection ?? defaultActiveProviderSelection ?? undefined
       const sessionId = await createSession(
@@ -354,23 +348,38 @@ export function EmptySession() {
       }
       setActiveView('code')
       useTabStore.getState().openTab(sessionId, 'New Session')
+      // If a welcome-screen card requested orchestration, persist it for this
+      // sessionId before the WS connects. chatStore.connectToSession will
+      // replay the persisted flag as a `set_coordinator_mode` message.
+      if (draftOrchestrate) {
+        useChatStore.getState().setSessionCoordinatorMode(sessionId, true)
+      }
       connectToSession(sessionId)
-      const attachmentPayload: AttachmentRef[] = attachments.map((attachment) => ({
+      const attachmentPayload: AttachmentRef[] = attachments.some(
+        (attachment) => attachment.sourceFile,
+      )
+        ? await Promise.all(attachments.map(composerAttachmentToPayload))
+        : attachments.map((attachment) => ({
+            type: attachment.type,
+            name: attachment.name,
+            path: attachment.path,
+            data: attachment.data,
+            mimeType: attachment.mimeType,
+          }))
+      const displayAttachmentPayload: DisplayAttachmentRef[] = attachments.map((attachment) => ({
         type: attachment.type,
         name: attachment.name,
         path: attachment.path,
         data: attachment.data,
+        previewUrl: attachment.previewUrl,
         mimeType: attachment.mimeType,
       }))
-      // Inline @-mentions go out as the `@"absolute path"` text the CLI parses,
-      // serialized from the live document; the bubble keeps the pill text.
-      const serializedText = (composerRef.current?.getModelContent() ?? input).trim()
-      if (serializedText || attachmentPayload.length > 0) {
-        sendMessage(sessionId, serializedText, attachmentPayload, { displayContent: text })
+      if (text || attachmentPayload.length > 0) {
+        sendMessage(sessionId, text, attachmentPayload, { displayAttachments: displayAttachmentPayload })
       }
       setInput('')
-      setMentions([])
       setAttachments([])
+      setDraftOrchestrate(false)
     } catch (error) {
       addToast({
         type: 'error',
@@ -381,10 +390,8 @@ export function EmptySession() {
     }
   }
 
-  const handleComposerChange = (value: string, nextMentions: ComposerMention[]) => {
+  const handleInputChange = (value: string, cursorPos: number) => {
     setInput(value)
-    setMentions(nextMentions)
-    const cursorPos = composerRef.current?.getSelectionOffsets().start ?? value.length
     const token = findSlashToken(value, cursorPos)
     if (!token) {
       setSlashMenuOpen(false)
@@ -393,8 +400,7 @@ export function EmptySession() {
       setSlashMenuOpen(true)
     }
 
-    // Detect @ trigger for file search, skipping an `@` that belongs to an
-    // existing mention pill.
+    // Detect @ trigger for file search
     const textBeforeCursor = value.slice(0, cursorPos)
     let pos = -1
     for (let i = textBeforeCursor.length - 1; i >= 0; i--) {
@@ -410,9 +416,6 @@ export function EmptySession() {
         break
       }
     }
-    if (pos >= 0 && findMentionRanges(value, nextMentions).some((range) => pos >= range.start && pos < range.end)) {
-      pos = -1
-    }
     if (pos < 0) {
       setFileSearchOpen(false)
       setAtFilter('')
@@ -425,9 +428,9 @@ export function EmptySession() {
     }
   }
 
-  const handleComposerKeyDown = (event: KeyboardEvent): boolean => {
+  const handleKeyDown = (event: React.KeyboardEvent) => {
     // Ignore key events during IME composition (e.g. Chinese input method)
-    if (event.isComposing || event.keyCode === 229) return false
+    if (event.nativeEvent.isComposing) return
 
     // Route file search navigation keys to FileSearchMenu
     if (fileSearchOpen) {
@@ -438,24 +441,24 @@ export function EmptySession() {
           setFileSearchOpen(false)
           setAtFilter('')
           setAtCursorPos(-1)
-          return true
+          return
         }
-        fileSearchRef.current?.handleKeyDown(event)
-        return true
+        fileSearchRef.current?.handleKeyDown(event.nativeEvent)
+        return
       }
-      return false
+      return
     }
 
     if (slashMenuOpen && filteredCommands.length > 0) {
       if (event.key === 'ArrowDown') {
         event.preventDefault()
         setSlashSelectedIndex((prev) => (prev + 1) % filteredCommands.length)
-        return true
+        return
       }
       if (event.key === 'ArrowUp') {
         event.preventDefault()
         setSlashSelectedIndex((prev) => (prev - 1 + filteredCommands.length) % filteredCommands.length)
-        return true
+        return
       }
       if (event.key === 'Enter' || event.key === 'Tab') {
         const selected = filteredCommands[slashSelectedIndex]
@@ -468,30 +471,28 @@ export function EmptySession() {
         ) {
           event.preventDefault()
           void handleSubmit()
-          return true
+          return
         }
         event.preventDefault()
         if (selected) selectSlashCommand(selected.name)
-        return true
+        return
       }
       if (event.key === 'Escape') {
         event.preventDefault()
         setSlashMenuOpen(false)
-        return true
+        return
       }
     }
 
     if (shouldSubmitOnEnter(event, chatSendBehavior)) {
       event.preventDefault()
-      void handleSubmit()
-      return true
+      handleSubmit()
     }
-    return false
   }
 
-  const handleComposerPaste = (event: ClipboardEvent): boolean => {
-    const files = event.clipboardData ? getDataTransferFiles(event.clipboardData) : []
-    if (files.length === 0) return false
+  const handlePaste = (event: React.ClipboardEvent) => {
+    const files = getDataTransferFiles(event.clipboardData)
+    if (files.length === 0) return
 
     event.preventDefault()
     void filesToComposerAttachments(files)
@@ -502,7 +503,6 @@ export function EmptySession() {
       .catch((error) => {
         console.warn('[attachments] Failed to read pasted files', error)
       })
-    return true
   }
 
   const appendFiles = useCallback((files: FileList | File[]) => {
@@ -531,21 +531,7 @@ export function EmptySession() {
 
   const openAttachmentPicker = useCallback(() => {
     setPlusMenuOpen(false)
-    if (!isDesktopRuntime()) {
-      fileInputRef.current?.click()
-      return
-    }
-
-    void selectNativeFileAttachments()
-      .then((nativeAttachments) => {
-        if (nativeAttachments) {
-          if (nativeAttachments.length > 0) {
-            setAttachments((prev) => [...prev, ...nativeAttachments])
-          }
-          return
-        }
-        fileInputRef.current?.click()
-      })
+    fileInputRef.current?.click()
   }, [])
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -558,30 +544,65 @@ export function EmptySession() {
 
   const removeAttachment = (id: string) => {
     setAttachments((prev) => prev.filter((attachment) => attachment.id !== id))
+    if (annotationTarget?.id === id) setAnnotationTarget(null)
+  }
+
+  const saveAnnotatedImage = (dataUrl: string) => {
+    if (!annotationTarget?.id) return
+    setAttachments((prev) => prev.map((attachment) => {
+      if (attachment.id !== annotationTarget.id) return attachment
+      return {
+        ...attachment,
+        name: attachment.name.replace(/(\.[^.]+)?$/, '-annotated.png'),
+        path: undefined,
+        data: dataUrl,
+        previewUrl: dataUrl,
+        mimeType: 'image/png',
+      }
+    }))
+    setAnnotationTarget(null)
   }
 
   const selectSlashCommand = (command: string) => {
-    const cursorPos = composerRef.current?.getSelectionOffsets().start ?? input.length
+    const el = textareaRef.current
+    if (!el) return
+    const cursorPos = el.selectionStart ?? input.length
     const replacement = replaceSlashCommand(input, cursorPos, command)
     if (!replacement) return
     setInput(replacement.value)
     setSlashMenuOpen(false)
     requestAnimationFrame(() => {
-      composerRef.current?.focus()
-      composerRef.current?.setSelectionOffsets(replacement.cursorPos)
+      el.focus()
+      el.setSelectionRange(replacement.cursorPos, replacement.cursorPos)
     })
   }
 
   const insertSlashCommand = () => {
-    const cursorPos = composerRef.current?.getSelectionOffsets().start ?? input.length
+    const el = textareaRef.current
+    const cursorPos = el?.selectionStart ?? input.length
     const replacement = insertSlashTrigger(input, cursorPos)
     setInput(replacement.value)
     setPlusMenuOpen(false)
     setSlashFilter('')
     setSlashMenuOpen(true)
     requestAnimationFrame(() => {
-      composerRef.current?.focus()
-      composerRef.current?.setSelectionOffsets(replacement.cursorPos)
+      textareaRef.current?.focus()
+      textareaRef.current?.setSelectionRange(replacement.cursorPos, replacement.cursorPos)
+    })
+  }
+
+  const applyTaskCard = (card: WelcomeTaskCard, promptText: string) => {
+    setInput(promptText)
+    setDraftOrchestrate(card.orchestrate)
+    setSlashMenuOpen(false)
+    setFileSearchOpen(false)
+    setPlusMenuOpen(false)
+    requestAnimationFrame(() => {
+      const el = textareaRef.current
+      if (!el) return
+      el.focus()
+      const len = el.value.length
+      el.setSelectionRange(len, len)
     })
   }
 
@@ -611,6 +632,122 @@ export function EmptySession() {
             {t('empty.subtitle')}
           </p>
         </div>
+        {!isMobileComposer && workDir && (
+          <RecentActivityCard
+            workDir={workDir}
+            onContinueSession={(sessionId) => {
+              setActiveView('code')
+              useTabStore.getState().openTab(sessionId, 'New Session')
+              connectToSession(sessionId)
+            }}
+            onAutoHandoff={async (previousSessionId, previousSessionTitle, fallbackText, setStage, options) => {
+              // 1. Resolve summary: tries cache first (fast), falls back to
+              //    LLM generation on miss. Returns null on any failure so
+              //    we can degrade to the zero-token textarea path without
+              //    surprising the user with errors.
+              setStage('reading-cache')
+              let summary = null
+              try {
+                const cached = await projectsApi.getSessionSummary(previousSessionId)
+                summary = cached.summary
+              } catch {
+                // GET error → fall through to generation path below.
+              }
+              if (!summary) {
+                setStage('generating-summary')
+                try {
+                  const fresh = await projectsApi.generateSessionSummary(previousSessionId)
+                  summary = fresh.summary
+                } catch {
+                  summary = null
+                }
+              }
+
+              if (!summary) {
+                // Provider down / generation failed → fall back to the old
+                // zero-token textarea-prefill path. User gets the visible
+                // hand-off paragraph and decides what to send.
+                setInput(fallbackText)
+                requestAnimationFrame(() => {
+                  const el = textareaRef.current
+                  if (!el) return
+                  el.focus()
+                  const len = el.value.length
+                  el.setSelectionRange(len, len)
+                })
+                return
+              }
+
+              setStage('starting-session')
+
+              // 2. Resolve the target sessionId. Prefer reusing an
+              //    existing empty session in the same workDir (the
+              //    classic stray-tab case where the user clicked
+              //    "New session in X" earlier, closed the tab, then
+              //    landed back on this welcome screen). Falls back to
+              //    creating a fresh session.
+              try {
+                const reuseSessionId = workDir
+                  ? pickReusableEmptySession(
+                      useSessionStore.getState().sessions,
+                      workDir,
+                      previousSessionId,
+                    )
+                  : null
+                const sessionId = reuseSessionId
+                  ?? (await createSession(
+                    workDir || undefined,
+                    selectedBranch
+                      ? { repository: { branch: selectedBranch, worktree: useWorktree }, permissionMode: draftPermissionMode }
+                      : { permissionMode: draftPermissionMode },
+                  ))
+                setActiveView('code')
+                useTabStore.getState().openTab(sessionId, 'New Session')
+                connectToSession(sessionId)
+
+                // Stash hand-off info on this new session so the chat
+                // header can render a "↗ continued from..." chip and the
+                // user knows the AI started with prior context.
+                useSessionRuntimeStore.getState().setHandoffInfo(sessionId, {
+                  previousSessionId,
+                  previousSessionTitle,
+                  approxTokens: Math.ceil(
+                    (summary.main.length + summary.recent.length) / 4,
+                  ),
+                  generatedAt: summary.generatedAt,
+                })
+
+                // 3. Stage the hand-off summary on this new session and
+                //    auto-send a short "continue" trigger message. The CLI
+                //    starts (or restarts) with --append-system-prompt
+                //    carrying the summary, so the AI begins with full
+                //    context without seeing a prefilled user message.
+                //
+                //    Race-condition note: wsManager.send tolerates a
+                //    not-yet-OPEN socket — it queues the message in
+                //    `pendingMessages` and flushes onopen. So this works
+                //    even when connectToSession() above hasn't completed
+                //    its WS upgrade yet. Don't change to gate on
+                //    isConnected() without re-checking that contract.
+                wsManager.send(sessionId, {
+                  type: 'set_handoff_summary',
+                  previousSessionId,
+                  ...(options?.deep ? { deep: true } : {}),
+                })
+                sendMessage(sessionId, t('empty.recentActivity.continueTriggerMessage'))
+                setInput('')
+              } catch (err) {
+                addToast({
+                  type: 'error',
+                  message: resolveCreateSessionErrorMessage(err, t),
+                })
+              }
+            }}
+          />
+        )}
+        {!isMobileComposer && (
+          <WelcomeTaskCards workDir={workDir || undefined} onApplyTask={applyTaskCard} />
+        )}
       </div>
 
       <div
@@ -653,28 +790,37 @@ export function EmptySession() {
                     setInput(newValue)
                     setAtFilter(relativePath)
                     requestAnimationFrame(() => {
-                      composerRef.current?.focus()
-                      composerRef.current?.setSelectionOffsets(newCursorPos)
+                      textareaRef.current?.focus()
+                      textareaRef.current?.setSelectionRange(newCursorPos, newCursorPos)
                     })
                   }}
-                  onSelect={(path, name, isDirectory) => {
-                    if (atCursorPos < 0) return
-                    const referenceName = name.split('/').filter(Boolean).pop() ?? name
-                    const tokenEnd = atCursorPos + 1 + atFilter.length
-                    const inserted = insertMentionIntoText(input, mentions, atCursorPos, tokenEnd, {
-                      label: isDirectory ? `${referenceName}/` : referenceName,
-                      path,
-                      isDirectory,
-                    })
-                    setInput(inserted.text)
-                    setMentions(inserted.mentions)
-                    setFileSearchOpen(false)
-                    setAtFilter('')
-                    setAtCursorPos(-1)
-                    void composerRef.current?.focus()
-                    requestAnimationFrame(() => {
-                      composerRef.current?.setSelectionOffsets(inserted.cursorPos)
-                    })
+                  onSelect={(path, name) => {
+                    if (atCursorPos >= 0) {
+                      const attachmentName = name.split('/').filter(Boolean).pop() ?? name
+                      const tokenEnd = atCursorPos + 1 + atFilter.length
+                      const beforeToken = input.slice(0, atCursorPos)
+                      const afterToken = beforeToken ? input.slice(tokenEnd) : input.slice(tokenEnd).replace(/^\s+/, '')
+                      const spacer = beforeToken && afterToken && !/\s$/.test(beforeToken) && !/^\s/.test(afterToken) ? ' ' : ''
+                      const newValue = `${beforeToken}${spacer}${afterToken}`
+                      const newCursorPos = atCursorPos + spacer.length
+                      setAttachments((prev) => [
+                        ...prev,
+                        {
+                          id: `att-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                          name: attachmentName,
+                          type: 'file',
+                          path,
+                        },
+                      ])
+                      setInput(newValue)
+                      setFileSearchOpen(false)
+                      setAtFilter('')
+                      setAtCursorPos(-1)
+                      void textareaRef.current?.focus()
+                      requestAnimationFrame(() => {
+                        textareaRef.current?.setSelectionRange(newCursorPos, newCursorPos)
+                      })
+                    }
                   }}
                 />
               )}
@@ -704,32 +850,34 @@ export function EmptySession() {
               )}
 
               {attachments.length > 0 && (
-                <AttachmentGallery attachments={attachments} variant="composer" onRemove={removeAttachment} />
+                <AttachmentGallery
+                  attachments={attachments}
+                  variant="composer"
+                  onRemove={removeAttachment}
+                  onAnnotate={(attachment) => setAnnotationTarget(attachment as Attachment)}
+                />
               )}
 
               <div className="flex items-start gap-3">
-                <MentionComposer
-                  ref={composerRef}
-                  rootRef={composerContainerRef}
+                <textarea
+                  ref={textareaRef}
                   value={input}
-                  mentions={mentions}
-                  onChange={handleComposerChange}
-                  onKeyDown={handleComposerKeyDown}
-                  onPaste={handleComposerPaste}
-                  placeholder={t('empty.placeholder')}
-                  className="flex-1"
-                  editorClassName={`overflow-y-auto leading-relaxed text-[var(--color-text-primary)] ${
-                    isMobileComposer ? 'max-h-[132px] min-h-[72px] py-1.5 text-base' : 'max-h-[200px] py-2'
+                  onChange={(event) => handleInputChange(event.target.value, event.target.selectionStart ?? event.target.value.length)}
+                  onKeyDown={handleKeyDown}
+                  onPaste={handlePaste}
+                  role={isSlashMenuVisible ? 'combobox' : undefined}
+                  aria-autocomplete={isSlashMenuVisible ? 'list' : undefined}
+                  aria-expanded={isSlashMenuVisible ? true : undefined}
+                  aria-controls={isSlashMenuVisible ? slashMenuId : undefined}
+                  aria-activedescendant={isSlashMenuVisible
+                    ? getSlashCommandOptionId(slashMenuId, slashSelectedIndex)
+                    : undefined}
+                  className={`flex-1 resize-none border-none bg-transparent leading-relaxed text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] ${
+                    isMobileComposer ? 'max-h-[132px] min-h-[72px] py-1.5 text-base' : 'py-2'
                   }`}
-                  aria={{
-                    role: isSlashMenuVisible ? 'combobox' : 'textbox',
-                    'aria-autocomplete': isSlashMenuVisible ? 'list' : undefined,
-                    'aria-expanded': isSlashMenuVisible ? 'true' : undefined,
-                    'aria-controls': isSlashMenuVisible ? slashMenuId : undefined,
-                    'aria-activedescendant': isSlashMenuVisible
-                      ? getSlashCommandOptionId(slashMenuId, slashSelectedIndex)
-                      : undefined,
-                  }}
+                  style={{ fontFamily: 'var(--font-body)' }}
+                  placeholder={t('empty.placeholder')}
+                  rows={2}
                 />
               </div>
 
@@ -839,6 +987,12 @@ export function EmptySession() {
       </div>
 
       <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} />
+      <ImageAnnotationModal
+        open={!!annotationTarget}
+        image={annotationTarget ? { src: attachmentImageSource(annotationTarget) ?? '', name: annotationTarget.name } : null}
+        onClose={() => setAnnotationTarget(null)}
+        onSave={saveAnnotatedImage}
+      />
     </div>
   )
 }

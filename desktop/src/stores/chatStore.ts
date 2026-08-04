@@ -6,18 +6,15 @@ import { useSessionStore } from './sessionStore'
 import { useCLITaskStore } from './cliTaskStore'
 import { useSessionRuntimeStore } from './sessionRuntimeStore'
 import { useTabStore } from './tabStore'
+import { useProviderCompatStore } from './providerCompatStore'
+import { useWorkspacePanelStore } from './workspacePanelStore'
 import { randomSpinnerVerb } from '../config/spinnerVerbs'
 import { notifyDesktop } from '../lib/desktopNotifications'
-import { deriveSessionTitle, isPlaceholderSessionTitle } from '../lib/sessionTitle'
 import { t } from '../i18n'
-import {
-  VISUAL_SELECTION_BATCH_PROMPT_HEADER,
-  VISUAL_SELECTION_PROMPT_FOOTER,
-} from '../lib/selectionComposer'
-import { hasRunningBackgroundTasks, hasRunningSubagentTasks } from '../lib/backgroundTasks'
+import { deriveSessionTitle, isPlaceholderSessionTitle } from '../lib/sessionTitle'
+import { hasRunningBackgroundTasks } from '../lib/backgroundTasks'
 import { AGENT_LIFECYCLE_TYPES } from '../types/team'
 import type { ComposerAttachment } from '../lib/composerAttachments'
-import type { ComposerMention } from '../lib/composerMentions'
 import type { MessageEntry } from '../types/session'
 import type { PermissionMode } from '../types/settings'
 import type { RuntimeSelection } from '../types/runtime'
@@ -31,12 +28,14 @@ import type {
   ChatState,
   ComputerUsePermissionRequest,
   ComputerUsePermissionResponse,
+  DisplayAttachmentRef,
   GoalEventAction,
   MemoryEventFile,
   StreamingFallbackState,
   UIAttachment,
   UIMessage,
   ServerMessage,
+  ProviderTransitionRequired,
   TokenUsage,
   PermissionUpdate,
 } from '../types/chat'
@@ -53,14 +52,6 @@ type CompactSummaryMessage = Extract<UIMessage, { type: 'compact_summary' }>
 export type ComposerDraftState = {
   input: string
   attachments: ComposerAttachment[]
-  /** Inline @-mention pills in the draft, in document order. */
-  mentions?: ComposerMention[]
-}
-
-export type RepositoryLaunchDraftState = {
-  workDir: string
-  branch: string | null
-  useWorktree: boolean
 }
 
 export type QueuedUserMessage = {
@@ -86,6 +77,15 @@ export type ComposerReferenceInsertion = {
 
 export type ComposerPrefillMode = 'replace' | 'append'
 
+export type QueuedMessage = {
+  id: string
+  content: string
+  attachments?: AttachmentRef[]
+  displayContent?: string
+  displayAttachments?: DisplayAttachmentRef[]
+  createdAt: number
+}
+
 export type PendingPermission = {
   requestId: string
   toolName: string
@@ -102,6 +102,16 @@ type PendingComputerUsePermission = {
 }
 
 type PendingComputerUsePermissions = Record<string, PendingComputerUsePermission>
+
+export type PendingRuntimeConfig = {
+  requestId: string
+  selection: RuntimeSelection
+}
+
+export type RuntimeConfigError = {
+  code: string
+  message: string
+}
 
 export type PerSessionState = {
   messages: UIMessage[]
@@ -131,8 +141,6 @@ export type PerSessionState = {
    * Optional: legacy persisted sessions predate the field.
    */
   compactCount?: number
-  /** Bumped when the server confirms the selected runtime is applied. */
-  runtimeConfigReadyCount?: number
   /**
    * Characters streamed by the assistant during the current turn (text,
    * thinking, tool input). ÷4 approximates output tokens for the streaming
@@ -151,9 +159,6 @@ export type PerSessionState = {
   agentTaskNotifications: Record<string, AgentTaskNotification>
   backgroundAgentTasks?: Record<string, BackgroundAgentTask>
   stoppingBackgroundTaskIds?: Record<string, boolean>
-  pendingBackgroundTaskStopFailures?: Record<string, string>
-  stopAllSubagentsRequested?: boolean
-  historyMutationEpoch?: number
   suppressNextTaskNotificationResponse?: boolean
   replaceHistoryOnCompletion?: boolean
   activeGoal?: ActiveGoalState | null
@@ -166,8 +171,12 @@ export type PerSessionState = {
   } | null
   composerInsertion?: ComposerReferenceInsertion | null
   composerDraft?: ComposerDraftState | null
-  repositoryLaunchDraft?: RepositoryLaunchDraftState | null
+  /** Per-session FIFO of messages queued while the agent is busy; drained on idle. */
+  messageQueue?: QueuedMessage[]
   queuedUserMessages?: QueuedUserMessage[]
+  pendingRuntimeConfig?: PendingRuntimeConfig | null
+  pendingProviderTransition?: ProviderTransitionRequired | null
+  runtimeConfigError?: RuntimeConfigError | null
 }
 
 const DEFAULT_SESSION_STATE: PerSessionState = {
@@ -188,7 +197,6 @@ const DEFAULT_SESSION_STATE: PerSessionState = {
   pendingComputerUsePermissions: {},
   tokenUsage: { input_tokens: 0, output_tokens: 0 },
   compactCount: 0,
-  runtimeConfigReadyCount: 0,
   streamingResponseChars: 0,
   elapsedSeconds: 0,
   statusVerb: '',
@@ -198,9 +206,6 @@ const DEFAULT_SESSION_STATE: PerSessionState = {
   agentTaskNotifications: {},
   backgroundAgentTasks: {},
   stoppingBackgroundTaskIds: {},
-  pendingBackgroundTaskStopFailures: {},
-  stopAllSubagentsRequested: false,
-  historyMutationEpoch: 0,
   suppressNextTaskNotificationResponse: false,
   replaceHistoryOnCompletion: false,
   activeGoal: null,
@@ -208,8 +213,11 @@ const DEFAULT_SESSION_STATE: PerSessionState = {
   composerPrefill: null,
   composerInsertion: null,
   composerDraft: null,
-  repositoryLaunchDraft: null,
+  messageQueue: [],
   queuedUserMessages: [],
+  pendingRuntimeConfig: null,
+  pendingProviderTransition: null,
+  runtimeConfigError: null,
 }
 
 function createDefaultSessionState(): PerSessionState {
@@ -217,6 +225,7 @@ function createDefaultSessionState(): PerSessionState {
     ...DEFAULT_SESSION_STATE,
     messages: [],
     tokenUsage: { input_tokens: 0, output_tokens: 0 },
+    messageQueue: [],
     queuedUserMessages: [],
   }
 }
@@ -305,7 +314,7 @@ type ChatStore = {
     sessionId: string,
     content: string,
     attachments?: AttachmentRef[],
-    options?: { displayContent?: string; displayAttachments?: AttachmentRef[]; hideDisplayContent?: boolean },
+    options?: { displayContent?: string; displayAttachments?: DisplayAttachmentRef[]; hideDisplayContent?: boolean },
   ) => void
   respondToPermission: (
     sessionId: string,
@@ -323,8 +332,13 @@ type ChatStore = {
     requestId: string,
     response: ComputerUsePermissionResponse,
   ) => void
-  setSessionRuntime: (sessionId: string, selection: RuntimeSelection) => void
+  setSessionRuntime: (sessionId: string, selection: RuntimeSelection) => string
+  cancelProviderTransition: (sessionId: string) => void
+  confirmProviderTransition: (sessionId: string) => Promise<string | null>
   setSessionPermissionMode: (sessionId: string, mode: PermissionMode) => void
+  setSessionCoordinatorMode: (sessionId: string, enabled: boolean) => void
+  setSessionPipelineMode: (sessionId: string, flavor: 'solo' | 're' | 'normal') => void
+  setSessionSoloPipelineMode: (sessionId: string, enabled: boolean) => void
   stopGeneration: (sessionId: string) => void
   stopBackgroundTask: (sessionId: string, taskId: string) => void
   loadHistory: (sessionId: string) => Promise<void>
@@ -347,8 +361,18 @@ type ChatStore = {
   clearComposerInsertion: (sessionId: string, nonce?: number) => void
   setComposerDraft: (sessionId: string, draft: ComposerDraftState) => void
   clearComposerDraft: (sessionId: string) => void
-  setRepositoryLaunchDraft: (sessionId: string, draft: RepositoryLaunchDraftState) => void
-  clearRepositoryLaunchDraft: (sessionId: string) => void
+  enqueueMessage: (
+    sessionId: string,
+    content: string,
+    attachments?: AttachmentRef[],
+    options?: { displayContent?: string; displayAttachments?: DisplayAttachmentRef[] },
+  ) => void
+  removeQueuedMessage: (sessionId: string, queuedId: string) => void
+  updateQueuedMessage: (sessionId: string, queuedId: string, content: string) => void
+  moveQueuedMessageToTop: (sessionId: string, queuedId: string) => void
+  sendQueuedMessageNow: (sessionId: string, queuedId: string) => void
+  clearMessageQueue: (sessionId: string) => void
+  drainMessageQueue: (sessionId: string) => void
   queueUserMessage: (
     sessionId: string,
     message: Omit<QueuedUserMessage, 'id' | 'createdAt'>,
@@ -362,8 +386,10 @@ type ChatStore = {
 
 const TASK_TOOL_NAMES = new Set(['TaskCreate', 'TaskUpdate', 'TaskGet', 'TaskList', 'TodoWrite'])
 const TASK_STOP_TOOL_NAMES = new Set(['TaskStop', 'KillShell'])
+const FILE_EDIT_TOOL_NAMES = new Set(['Edit', 'Write', 'NotebookEdit', 'MultiEdit'])
 const pendingTaskToolUseIdsBySession = new Map<string, Set<string>>()
 const pendingToolParentUseIdsBySession = new Map<string, Map<string, string>>()
+const pendingFileEditPathsBySession = new Map<string, Map<string, string>>()
 
 function addPendingTaskToolUseId(sessionId: string, toolUseId: string): void {
   const ids = pendingTaskToolUseIdsBySession.get(sessionId) ?? new Set<string>()
@@ -414,6 +440,42 @@ function consumePendingToolParentUseId(sessionId: string, toolUseId: string): st
   return parentToolUseId
 }
 
+/**
+ * Extract the absolute file path from a file-mutating tool's input.
+ * Edit / Write / MultiEdit use `file_path`; NotebookEdit uses `notebook_path`.
+ */
+function extractEditedFilePath(input: unknown): string | null {
+  if (!input || typeof input !== 'object') return null
+  const obj = input as { file_path?: unknown; notebook_path?: unknown }
+  const candidate =
+    typeof obj.file_path === 'string' && obj.file_path.length > 0
+      ? obj.file_path
+      : typeof obj.notebook_path === 'string' && obj.notebook_path.length > 0
+        ? obj.notebook_path
+        : null
+  return candidate
+}
+
+function rememberPendingFileEdit(sessionId: string, toolUseId: string, filePath: string): void {
+  if (!toolUseId) return
+  const paths = pendingFileEditPathsBySession.get(sessionId) ?? new Map<string, string>()
+  paths.set(toolUseId, filePath)
+  pendingFileEditPathsBySession.set(sessionId, paths)
+}
+
+function consumePendingFileEdit(sessionId: string, toolUseId: string): string | null {
+  const paths = pendingFileEditPathsBySession.get(sessionId)
+  const filePath = paths?.get(toolUseId)
+  if (!filePath) return null
+  paths!.delete(toolUseId)
+  if (paths!.size === 0) pendingFileEditPathsBySession.delete(sessionId)
+  return filePath
+}
+
+function clearPendingFileEdits(sessionId: string): void {
+  pendingFileEditPathsBySession.delete(sessionId)
+}
+
 function clearPendingToolParentUseIds(sessionId: string): void {
   pendingToolParentUseIdsBySession.delete(sessionId)
 }
@@ -428,6 +490,92 @@ const COMPACT_SUMMARY_CUTOFFS = [
 
 let msgCounter = 0
 const nextId = () => `msg-${++msgCounter}-${Date.now()}`
+
+// Builds a visible chat notice for when an AskUserQuestion prompt was cleared
+// by a turn-ending event (message_complete / error) before the user answered —
+// e.g. the model emitted a malformed AskUserQuestion call. Without this the
+// question card would just flash and vanish silently.
+function makeDroppedQuestionMessage(): UIMessage {
+  return {
+    id: nextId(),
+    type: 'system',
+    content: t('chat.questionDropped'),
+    timestamp: Date.now(),
+  }
+}
+
+// 方案3: detect context-compaction thrash on the desktop side. When compactions
+// keep firing only a turn or two apart, the context is effectively full and
+// compaction can no longer help — the same condition the CLI circuit breaker
+// trips on. We mirror it client-side and, once, append a visible suggestion to
+// start a fresh session. Kept as module-level state so PerSessionState (which
+// has concurrent in-progress edits) is not widened.
+const RAPID_COMPACTION_TURN_WINDOW = 2
+const RAPID_COMPACTION_SUGGEST_AFTER = 3
+type CompactionThrashState = {
+  userTurnsSinceCompact: number
+  rapidCount: number
+  suggested: boolean
+}
+const compactionThrashBySession = new Map<string, CompactionThrashState>()
+
+function getCompactionThrash(sessionId: string): CompactionThrashState {
+  let state = compactionThrashBySession.get(sessionId)
+  if (!state) {
+    // Start "infinitely far" from the last compaction so the first one is
+    // never counted as rapid.
+    state = { userTurnsSinceCompact: Number.POSITIVE_INFINITY, rapidCount: 0, suggested: false }
+    compactionThrashBySession.set(sessionId, state)
+  }
+  return state
+}
+
+// Call on each user turn so the boundary handler can tell rapid re-compaction
+// (thrash) from compactions spread across real work.
+function noteUserTurnForCompactionThrash(sessionId: string): void {
+  const state = getCompactionThrash(sessionId)
+  if (state.userTurnsSinceCompact === Number.POSITIVE_INFINITY) {
+    state.userTurnsSinceCompact = 1
+  } else {
+    state.userTurnsSinceCompact += 1
+  }
+}
+
+// Record a completed compaction; returns true exactly once, when rapid
+// re-compaction has crossed the threshold and we should suggest a new session.
+function registerCompactionAndShouldSuggest(sessionId: string): boolean {
+  const state = getCompactionThrash(sessionId)
+  if (state.userTurnsSinceCompact <= RAPID_COMPACTION_TURN_WINDOW) {
+    state.rapidCount += 1
+  } else {
+    state.rapidCount = 1
+  }
+  state.userTurnsSinceCompact = 0
+  if (state.rapidCount >= RAPID_COMPACTION_SUGGEST_AFTER && !state.suggested) {
+    state.suggested = true
+    return true
+  }
+  return false
+}
+
+function resetCompactionThrash(sessionId: string): void {
+  compactionThrashBySession.delete(sessionId)
+}
+
+/** @internal — exported for tests to avoid cross-test state pollution
+ *  in the module-level compaction-thrash map. */
+export function __resetCompactionThrashForTesting(): void {
+  compactionThrashBySession.clear()
+}
+
+function makeContextExhaustedMessage(): UIMessage {
+  return {
+    id: nextId(),
+    type: 'system',
+    content: t('chat.contextExhausted'),
+    timestamp: Date.now(),
+  }
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -535,6 +683,16 @@ const flushTimerBySession = new Map<string, ReturnType<typeof setTimeout>>()
 const pendingToolInputDeltaBySession = new Map<string, string>()
 const toolInputFlushTimerBySession = new Map<string, ReturnType<typeof setTimeout>>()
 
+// When the user clicks Stop, pause queue auto-draining until the user sends
+// their next message. Stop can produce multiple idle-like events (result +
+// status), so a one-shot skip is not enough — we stay paused and only clear it
+// when a fresh user message is sent (which then runs immediately, ahead of the
+// queue). The queue resumes on the idle after that message completes.
+const queueDrainPaused = new Set<string>()
+// Ignore retry/fallback events that were already in flight when Stop was sent.
+// A new user message clears the fence and starts a distinct turn.
+const stoppedTurns = new Set<string>()
+
 function consumePendingDelta(sessionId: string): string {
   const flushTimer = flushTimerBySession.get(sessionId)
   if (flushTimer) {
@@ -620,12 +778,13 @@ function appendAssistantTextMessage(
   const lastIndex = findStreamMergeTargetIndex(messages)
   const last = lastIndex >= 0 ? messages[lastIndex] : undefined
   // Wake/reconnect replay can resend persisted assistant text without a
-  // transcript id. Ignore chunks that are already present in the hydrated tail.
+  // transcript id. Only drop exact duplicates from the hydrated tail — a
+  // contained substring may still be a legitimate new suffix chunk.
   if (
     last?.type === 'assistant_text' &&
     last.transcriptMessageId &&
     !transcriptMessageId &&
-    last.content.trim().includes(trimmedContent)
+    last.content.trim() === trimmedContent
   ) {
     return messages
   }
@@ -718,13 +877,22 @@ function compactMetadataFromUnknown(data: unknown): Pick<CompactSummaryMessage, 
   }
 }
 
+function dropTailThinkingMessages(messages: UIMessage[]): UIMessage[] {
+  let end = messages.length
+  while (end > 0 && messages[end - 1]?.type === 'thinking') {
+    end -= 1
+  }
+  return end === messages.length ? messages : messages.slice(0, end)
+}
+
 function appendOrUpdateTailCompactSummary(
   messages: UIMessage[],
   update: Partial<Omit<CompactSummaryMessage, 'id' | 'type' | 'timestamp'>>,
   timestamp: number,
 ): UIMessage[] {
-  const existingIndex = messages.length - 1
-  const existingMessage = messages[existingIndex]
+  const compactMessages = dropTailThinkingMessages(messages)
+  const existingIndex = compactMessages.length - 1
+  const existingMessage = compactMessages[existingIndex]
   if (existingMessage?.type === 'compact_summary') {
     const existing = existingMessage
     const next: CompactSummaryMessage = {
@@ -734,14 +902,14 @@ function appendOrUpdateTailCompactSummary(
       timestamp: existing.timestamp,
     }
     return [
-      ...messages.slice(0, existingIndex),
+      ...compactMessages.slice(0, existingIndex),
       next,
-      ...messages.slice(existingIndex + 1),
+      ...compactMessages.slice(existingIndex + 1),
     ]
   }
 
   return [
-    ...messages,
+    ...compactMessages,
     {
       id: nextId(),
       type: 'compact_summary',
@@ -824,12 +992,6 @@ function isAgentBackgroundTask(task: Pick<BackgroundAgentTask, 'taskType' | 'sum
   }
   return /^Agent (?:(?:"[^"]+" )?(completed|was stopped)|(?:"[^"]+" )?failed(?::|$))/.test(
     task.summary ?? '',
-  )
-}
-
-function isCancellableSubagentTask(task: BackgroundAgentTask): boolean {
-  return task.status === 'running' && (
-    task.taskType === 'local_agent' || task.taskType === 'remote_agent'
   )
 }
 
@@ -928,142 +1090,13 @@ function dropDuplicateTranscriptTextMessages(messages: UIMessage[]): UIMessage[]
   return changed ? deduped : messages
 }
 
-type ParentLinkedToolMessage = Extract<
-  UIMessage,
-  { type: 'tool_use' | 'tool_result' }
->
-
-type ParentLinkedToolMergeRecord = {
-  toolUseId: string
-  messageTypes: Set<ParentLinkedToolMessage['type']>
-  liveMessages: Partial<
-    Record<ParentLinkedToolMessage['type'], ParentLinkedToolMessage>
-  >
-}
-
-function parentLinkedToolIdentity(message: UIMessage): {
-  parentToolUseId: string
-  originalToolUseId: string
-  messageType: ParentLinkedToolMessage['type']
-} | null {
-  if (
-    (message.type !== 'tool_use' && message.type !== 'tool_result') ||
-    !message.parentToolUseId
-  ) {
-    return null
-  }
-  return {
-    parentToolUseId: message.parentToolUseId,
-    originalToolUseId: message.originalToolUseId ?? message.toolUseId,
-    messageType: message.type,
-  }
-}
-
-function mergeRestoredParentToolMessages(
-  messages: UIMessage[],
-  restoredMessages: UIMessage[],
-): UIMessage[] {
-  const liveToolUseIds = new Set<string>()
-  const recordsByParent = new Map<
-    string,
-    Map<string, ParentLinkedToolMergeRecord>
-  >()
-
-  for (const message of messages) {
-    if (message.type === 'tool_use') liveToolUseIds.add(message.toolUseId)
-    const identity = parentLinkedToolIdentity(message)
-    if (!identity) continue
-    const toolMessage = message as ParentLinkedToolMessage
-
-    let parentRecords = recordsByParent.get(identity.parentToolUseId)
-    if (!parentRecords) {
-      parentRecords = new Map()
-      recordsByParent.set(identity.parentToolUseId, parentRecords)
-    }
-    const existing = parentRecords.get(identity.originalToolUseId)
-    if (existing) {
-      existing.messageTypes.add(identity.messageType)
-      existing.liveMessages[identity.messageType] = toolMessage
-    } else {
-      parentRecords.set(identity.originalToolUseId, {
-        toolUseId: toolMessage.toolUseId,
-        messageTypes: new Set([identity.messageType]),
-        liveMessages: { [identity.messageType]: toolMessage },
-      })
-    }
-  }
-
-  const insertBefore = new Map<UIMessage, ParentLinkedToolMessage[]>()
-  const insertAfter = new Map<UIMessage, ParentLinkedToolMessage[]>()
-  const unanchored: ParentLinkedToolMessage[] = []
-
-  for (const restoredMessage of restoredMessages) {
-    const identity = parentLinkedToolIdentity(restoredMessage)
-    if (!identity || !liveToolUseIds.has(identity.parentToolUseId)) continue
-
-    let parentRecords = recordsByParent.get(identity.parentToolUseId)
-    if (!parentRecords) {
-      parentRecords = new Map()
-      recordsByParent.set(identity.parentToolUseId, parentRecords)
-    }
-    const existing = parentRecords.get(identity.originalToolUseId)
-    if (existing?.messageTypes.has(identity.messageType)) continue
-
-    const restoredToolMessage = restoredMessage as ParentLinkedToolMessage
-    const toolUseId = existing?.toolUseId ?? restoredToolMessage.toolUseId
-    const recoveredMessage = toolUseId === restoredToolMessage.toolUseId
-      ? restoredToolMessage
-      : { ...restoredToolMessage, toolUseId }
-    const counterpart = identity.messageType === 'tool_use'
-      ? existing?.liveMessages.tool_result
-      : existing?.liveMessages.tool_use
-
-    if (counterpart) {
-      const insertionMap = identity.messageType === 'tool_use'
-        ? insertBefore
-        : insertAfter
-      const additions = insertionMap.get(counterpart) ?? []
-      additions.push(recoveredMessage)
-      insertionMap.set(counterpart, additions)
-    } else {
-      unanchored.push(recoveredMessage)
-    }
-
-    if (existing) {
-      existing.messageTypes.add(identity.messageType)
-    } else {
-      parentRecords.set(identity.originalToolUseId, {
-        toolUseId,
-        messageTypes: new Set([identity.messageType]),
-        liveMessages: {},
-      })
-    }
-  }
-
-  if (insertBefore.size === 0 && insertAfter.size === 0 && unanchored.length === 0) {
-    return messages
-  }
-
-  const merged: UIMessage[] = []
-  for (const message of messages) {
-    merged.push(...(insertBefore.get(message) ?? []))
-    merged.push(message)
-    merged.push(...(insertAfter.get(message) ?? []))
-  }
-  merged.push(...unanchored)
-  return merged
-}
-
 function mergeRestoredHistoryIntoLiveMessages(
   messages: UIMessage[],
   restoredMessages: UIMessage[],
 ): UIMessage[] {
   return mergeRestoredTerminalGoalEvents(
-    mergeRestoredParentToolMessages(
-      dropDuplicateTranscriptTextMessages(
-        mergeRestoredTranscriptMessageIds(messages, restoredMessages),
-      ),
-      restoredMessages,
+    dropDuplicateTranscriptTextMessages(
+      mergeRestoredTranscriptMessageIds(messages, restoredMessages),
     ),
     restoredMessages,
   )
@@ -1277,12 +1310,17 @@ async function fetchAndMapSessionHistory(sessionId: string) {
     ...reconstructAgentNotifications(messages),
     ...agentNotificationRecordFromList(taskNotifications ?? []),
   }
+  const restoredMessageBackgroundTasks = backgroundTaskRecordFromMessages(uiMessages)
+  const restoredNotificationBackgroundTasks = backgroundTaskRecordFromNotifications(Object.values(restoredNotifications))
   return {
     rawMessages: messages,
     uiMessages,
     activeGoal: deriveActiveGoalFromMessages(uiMessages),
     restoredNotifications,
-    restoredBackgroundTasks: backgroundTaskRecordFromNotifications(Object.values(restoredNotifications)),
+    restoredBackgroundTasks: mergeBackgroundAgentTaskRecords(
+      restoredMessageBackgroundTasks,
+      restoredNotificationBackgroundTasks,
+    ),
     lastTodos: extractLastTodoWriteFromHistory(messages),
     hasMessagesAfterTaskCompletion: hasUserMessagesAfterTaskCompletion(messages),
     tokenUsage: summarizeTokenUsageFromHistory(messages),
@@ -1290,27 +1328,10 @@ async function fetchAndMapSessionHistory(sessionId: string) {
 }
 
 const historyLoadsInFlight = new Map<string, Promise<void>>()
-const historyReloadGenerations = new Map<string, number>()
+const providerTransitionsInFlight = new Map<string, Promise<string | null>>()
 
-const HISTORY_LOAD_ABORT_RETRY_DELAY_MS = 150
-const HISTORY_LOAD_ABORT_MAX_RETRIES = 5
-const historyLoadAbortRetries = new Map<string, number>()
-
-// A history load aborted by a concurrent task mutation (epoch bump) used to be
-// silently dropped, leaving the session empty until the next mount/connect.
-// Retry while the session still has no messages, bounded so a stream of task
-// events cannot spin the fetch loop forever.
-function scheduleAbortedHistoryLoadRetry(get: () => ChatStore, sessionId: string): void {
-  const session = get().sessions[sessionId]
-  if (!session || session.messages.length > 0) return
-  const attempts = (historyLoadAbortRetries.get(sessionId) ?? 0) + 1
-  if (attempts > HISTORY_LOAD_ABORT_MAX_RETRIES) return
-  historyLoadAbortRetries.set(sessionId, attempts)
-  setTimeout(() => {
-    const current = get().sessions[sessionId]
-    if (!current || current.messages.length > 0 || current.historyStatus === 'loading') return
-    void get().loadHistory(sessionId)
-  }, HISTORY_LOAD_ABORT_RETRY_DELAY_MS)
+function providerTransitionKey(sessionId: string, transitionId: string): string {
+  return `${sessionId}:${transitionId}`
 }
 
 function shouldPrewarmSession(sessionId: string): boolean {
@@ -1350,10 +1371,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           messages: existing?.messages ?? [],
           activeGoal: existing?.activeGoal ?? null,
           composerDraft: existing?.composerDraft ?? null,
-          repositoryLaunchDraft: existing?.repositoryLaunchDraft ?? null,
+          messageQueue: existing?.messageQueue ?? [],
           queuedUserMessages: existing?.queuedUserMessages ?? [],
-          backgroundAgentTasks: existing?.backgroundAgentTasks ?? {},
-          agentTaskNotifications: existing?.agentTaskNotifications ?? {},
         },
       },
     }))
@@ -1363,13 +1382,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     wsManager.onConnectionState(sessionId, (connectionState) => {
       if (!get().sessions[sessionId]) return
       set((s) => ({
-        sessions: updateSessionIn(s.sessions, sessionId, (session) => ({
+        sessions: updateSessionIn(s.sessions, sessionId, () => ({
           connectionState,
           connectionSnapshotReady: false,
-          stoppingBackgroundTaskIds:
-            connectionState === 'connected' || session.stopAllSubagentsRequested
-              ? session.stoppingBackgroundTaskIds
-              : {},
         })),
       }))
     })
@@ -1385,7 +1400,29 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     const runtimeSelection = useSessionRuntimeStore.getState().selections[sessionId]
     if (runtimeSelection && options?.applyRuntimeSelection !== false) {
-      wsManager.send(sessionId, { type: 'set_runtime_config', ...runtimeSelection })
+      const persistedSelection = useSessionStore.getState().sessions.find(
+        (session) => session.id === sessionId,
+      )
+      const isAlreadyPersisted =
+        persistedSelection?.runtimeProviderId === runtimeSelection.providerId &&
+        persistedSelection.runtimeModelId === runtimeSelection.modelId &&
+        persistedSelection.effortLevel === runtimeSelection.effortLevel &&
+        persistedSelection.thinkingEnabled === runtimeSelection.thinkingEnabled
+      if (!isAlreadyPersisted) get().setSessionRuntime(sessionId, runtimeSelection)
+    }
+    // Replay the per-session orchestration toggle on (re)connect, before the
+    // first message, so the CLI launches with the right --append-system-prompt.
+    if (useSessionRuntimeStore.getState().coordinatorModes[sessionId]) {
+      wsManager.send(sessionId, { type: 'set_coordinator_mode', enabled: true })
+    }
+    // Same replay for pipeline flavor (solo / re). Mutually exclusive with
+    // coordinator mode at the action layer, so both replay branches will
+    // never both fire in the same connect.
+    {
+      const pipelineFlavor = useSessionRuntimeStore.getState().pipelineModes[sessionId]
+      if (pipelineFlavor === 'solo' || pipelineFlavor === 're') {
+        wsManager.send(sessionId, { type: 'set_pipeline_mode', flavor: pipelineFlavor })
+      }
     }
     if (
       options?.prewarm !== false &&
@@ -1422,6 +1459,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     clearPendingToolInputDelta(sessionId)
     clearPendingTaskToolUseIds(sessionId)
     clearPendingToolParentUseIds(sessionId)
+    clearPendingFileEdits(sessionId)
+    queueDrainPaused.delete(sessionId)
+    stoppedTurns.delete(sessionId)
     wsManager.disconnect(sessionId)
     set((s) => {
       const { [sessionId]: _, ...rest } = s.sessions
@@ -1430,6 +1470,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   sendMessage: (sessionId, content, attachments, options) => {
+    // A fresh user send takes priority over any paused queue and starts a new
+    // turn, so late retry/fallback events from the stopped turn no longer apply.
+    queueDrainPaused.delete(sessionId)
+    stoppedTurns.delete(sessionId)
     const isMemberSession = !!useTeamStore.getState().getMemberBySessionId(sessionId)
     const hideDisplayContent = !isMemberSession && options?.hideDisplayContent === true
     const userFacingContent =
@@ -1437,6 +1481,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         ? ''
         : options?.displayContent?.trim() || content.trim()
     const modelFacingContent = buildModelContent(content, attachments)
+    const serverAttachments = stripPreviewUrlsFromAttachments(attachments)
     const visibleAttachments = options?.displayAttachments ?? attachments
     const uiAttachments: UIAttachment[] | undefined =
       visibleAttachments && visibleAttachments.length > 0
@@ -1445,6 +1490,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             name: a.name || a.path || a.mimeType || a.type,
             path: a.path,
             data: a.data,
+            previewUrl: getDisplayAttachmentPreviewUrl(a),
             mimeType: a.mimeType,
             lineStart: a.lineStart,
             lineEnd: a.lineEnd,
@@ -1452,7 +1498,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             hunkId: a.hunkId,
             note: a.note,
             quote: a.quote,
-            selectionNumber: a.selectionNumber,
           }))
         : undefined
 
@@ -1513,7 +1558,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             ...session,
             messages: newMessages,
             chatState: 'thinking',
-            historyMutationEpoch: (session.historyMutationEpoch ?? 0) + 1,
             elapsedSeconds: 0,
             suppressNextTaskNotificationResponse: false,
             replaceHistoryOnCompletion: false,
@@ -1551,7 +1595,130 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       return
     }
 
-    wsManager.send(sessionId, { type: 'user_message', content, attachments })
+    // 方案3: count this as a real user turn so rapid re-compaction (thrash)
+    // can be told apart from compactions spread across genuine work.
+    noteUserTurnForCompactionThrash(sessionId)
+
+    // 每次真实用户回合前都把服务端运行模式对齐一次。
+    // 这样即使 renderer 重连或服务端清理了内存标记，UI 里仍开启的
+    // Solo/RE/协调模式也会在本轮消息前重新生效。
+    const runtimeModes = useSessionRuntimeStore.getState()
+    const coordinatorEnabled = runtimeModes.coordinatorModes[sessionId] ?? false
+    const pipelineFlavor = runtimeModes.pipelineModes[sessionId]
+    if (pipelineFlavor === 'solo' || pipelineFlavor === 're') {
+      wsManager.send(sessionId, { type: 'set_coordinator_mode', enabled: false })
+      wsManager.send(sessionId, { type: 'set_pipeline_mode', flavor: pipelineFlavor })
+    } else if (coordinatorEnabled) {
+      wsManager.send(sessionId, { type: 'set_pipeline_mode', flavor: 'normal' })
+      wsManager.send(sessionId, { type: 'set_coordinator_mode', enabled: true })
+    } else {
+      wsManager.send(sessionId, { type: 'set_coordinator_mode', enabled: false })
+      wsManager.send(sessionId, { type: 'set_pipeline_mode', flavor: 'normal' })
+    }
+    wsManager.send(sessionId, { type: 'user_message', content, attachments: serverAttachments })
+  },
+
+  enqueueMessage: (sessionId, content, attachments, options) => {
+    if (!content.trim() && !(attachments && attachments.length > 0)) return
+    const queued: QueuedMessage = {
+      id: nextId(),
+      content,
+      attachments,
+      displayContent: options?.displayContent,
+      displayAttachments: options?.displayAttachments,
+      createdAt: Date.now(),
+    }
+    set((s) => ({
+      sessions: updateSessionIn(s.sessions, sessionId, (session) => ({
+        messageQueue: [...(session.messageQueue ?? []), queued],
+      })),
+    }))
+    // In case the agent already went idle between the busy-check and enqueue,
+    // attempt an immediate drain (no-op if still busy).
+    get().drainMessageQueue(sessionId)
+  },
+
+  removeQueuedMessage: (sessionId, queuedId) => {
+    set((s) => ({
+      sessions: updateSessionIn(s.sessions, sessionId, (session) => ({
+        messageQueue: (session.messageQueue ?? []).filter((m) => m.id !== queuedId),
+      })),
+    }))
+  },
+
+  updateQueuedMessage: (sessionId, queuedId, content) => {
+    set((s) => ({
+      sessions: updateSessionIn(s.sessions, sessionId, (session) => ({
+        messageQueue: (session.messageQueue ?? []).map((m) =>
+          m.id === queuedId
+            ? { ...m, content, displayContent: content }
+            : m,
+        ),
+      })),
+    }))
+  },
+
+  moveQueuedMessageToTop: (sessionId, queuedId) => {
+    set((s) => ({
+      sessions: updateSessionIn(s.sessions, sessionId, (session) => {
+        const queue = session.messageQueue ?? []
+        const target = queue.find((m) => m.id === queuedId)
+        if (!target) return {}
+        return {
+          messageQueue: [target, ...queue.filter((m) => m.id !== queuedId)],
+        }
+      }),
+    }))
+  },
+
+  sendQueuedMessageNow: (sessionId, queuedId) => {
+    const session = get().sessions[sessionId]
+    const target = (session?.messageQueue ?? []).find((m) => m.id === queuedId)
+    if (!target) return
+    // Plain "send now": drop it from the queue and send it immediately. We do
+    // NOT stop the running turn, do NOT promote-and-wait, and do NOT inspect
+    // chatState — the caller decided to send, so we just send.
+    set((s) => ({
+      sessions: updateSessionIn(s.sessions, sessionId, (sess) => ({
+        messageQueue: (sess.messageQueue ?? []).filter((m) => m.id !== queuedId),
+      })),
+    }))
+    get().sendMessage(sessionId, target.content, target.attachments, {
+      displayContent: target.displayContent,
+      displayAttachments: target.displayAttachments,
+    })
+  },
+
+  clearMessageQueue: (sessionId) => {
+    set((s) => ({
+      sessions: updateSessionIn(s.sessions, sessionId, () => ({ messageQueue: [] })),
+    }))
+  },
+
+  drainMessageQueue: (sessionId) => {
+    const session = get().sessions[sessionId]
+    if (!session) return
+    // Paused by a user Stop: do not drain on any idle event. Stays paused (we
+    // do NOT clear it here) until the user sends their next message, which
+    // clears it. This survives the multiple idle events a Stop produces.
+    if (queueDrainPaused.has(sessionId)) return
+    // Only drain on a true idle turn boundary — never mid-stream, while a tool
+    // is running, or while a permission prompt is pending.
+    if (session.chatState !== 'idle') return
+    if (session.pendingPermission || session.pendingComputerUsePermission) return
+    if (session.connectionState !== 'connected') return
+    const queue = session.messageQueue ?? []
+    const next = queue[0]
+    if (!next) return
+    set((s) => ({
+      sessions: updateSessionIn(s.sessions, sessionId, (sess) => ({
+        messageQueue: (sess.messageQueue ?? []).slice(1),
+      })),
+    }))
+    get().sendMessage(sessionId, next.content, next.attachments, {
+      displayContent: next.displayContent,
+      displayAttachments: next.displayAttachments,
+    })
   },
 
   respondToPermission: (sessionId, requestId, allowed, options) => {
@@ -1610,10 +1777,74 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   setSessionRuntime: (sessionId, selection) => {
+    const requestId = crypto.randomUUID()
+    set((state) => ({
+      sessions: {
+        ...state.sessions,
+        [sessionId]: {
+          ...(state.sessions[sessionId] ?? createDefaultSessionState()),
+          pendingRuntimeConfig: { requestId, selection },
+          pendingProviderTransition: null,
+          runtimeConfigError: null,
+        },
+      },
+    }))
     wsManager.send(sessionId, {
       type: 'set_runtime_config',
+      requestId,
       ...selection,
     })
+    return requestId
+  },
+
+  cancelProviderTransition: (sessionId) => {
+    set((state) => ({
+      sessions: updateSessionIn(state.sessions, sessionId, () => ({
+        pendingProviderTransition: null,
+      })),
+    }))
+  },
+
+  confirmProviderTransition: (sessionId) => {
+    const transition = get().sessions[sessionId]?.pendingProviderTransition
+    if (!transition) return Promise.resolve(null)
+    const transitionKey = providerTransitionKey(sessionId, transition.transitionId)
+    const existing = providerTransitionsInFlight.get(transitionKey)
+    if (existing) return existing
+
+    const request = sessionsApi.createProviderTransition(sessionId, {
+      transitionId: transition.transitionId,
+      targetSelection: transition.targetSelection,
+    }).then((result) => {
+      if (get().sessions[sessionId]?.pendingProviderTransition?.transitionId !== transition.transitionId) {
+        return null
+      }
+      useSessionRuntimeStore.getState().setSelection(result.sessionId, result.targetSelection)
+      useTabStore.getState().openTab(result.sessionId, t('sidebar.newSession'), 'session')
+      void useSessionStore.getState().fetchSessions()
+      set((state) => ({
+        sessions: updateSessionIn(state.sessions, sessionId, () => ({
+          pendingProviderTransition: null,
+        })),
+      }))
+      return result.sessionId
+    }).catch((error) => {
+      if (get().sessions[sessionId]?.pendingProviderTransition?.transitionId === transition.transitionId) {
+        set((state) => ({
+          sessions: updateSessionIn(state.sessions, sessionId, () => ({
+            runtimeConfigError: {
+              code: 'PROVIDER_TRANSITION_FAILED',
+              message: error instanceof Error ? error.message : t('chat.providerTransitionFailed'),
+            },
+          })),
+        }))
+      }
+      return null
+    }).finally(() => {
+      providerTransitionsInFlight.delete(transitionKey)
+    })
+    providerTransitionsInFlight.set(transitionKey, request)
+    return request
   },
 
   setSessionPermissionMode: (sessionId, mode) => {
@@ -1622,9 +1853,65 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     wsManager.send(sessionId, { type: 'set_permission_mode', mode })
   },
 
+  setSessionCoordinatorMode: (sessionId, enabled) => {
+    // Persist the per-session preference (survives reconnect / app restart and
+    // is replayed on connect). Only push to a live session; otherwise the
+    // replay on next connect carries it.
+    useSessionRuntimeStore.getState().setCoordinatorMode(sessionId, enabled)
+    // Mutual exclusion: enabling coordinator clears any pipeline flavor for
+    // the same session. Server enforces the same in handleSetCoordinatorMode /
+    // handleSetPipelineMode; keep desktop store + wire symmetric for replay.
+    if (enabled && useSessionRuntimeStore.getState().pipelineModes[sessionId]) {
+      useSessionRuntimeStore.getState().setPipelineMode(sessionId, 'normal')
+      if (get().sessions[sessionId]) {
+        wsManager.send(sessionId, { type: 'set_pipeline_mode', flavor: 'normal' })
+      }
+    }
+    if (get().sessions[sessionId]) {
+      wsManager.send(sessionId, { type: 'set_coordinator_mode', enabled })
+    }
+  },
+
+  setSessionPipelineMode: (sessionId, flavor) => {
+    useSessionRuntimeStore.getState().setPipelineMode(sessionId, flavor)
+    if (
+      (flavor === 'solo' || flavor === 're') &&
+      useSessionRuntimeStore.getState().coordinatorModes[sessionId]
+    ) {
+      useSessionRuntimeStore.getState().setCoordinatorMode(sessionId, false)
+      if (get().sessions[sessionId]) {
+        wsManager.send(sessionId, { type: 'set_coordinator_mode', enabled: false })
+      }
+    }
+    if (get().sessions[sessionId]) {
+      wsManager.send(sessionId, { type: 'set_pipeline_mode', flavor })
+    }
+  },
+
+  setSessionSoloPipelineMode: (sessionId, enabled) => {
+    // Compatibility wrapper: boolean Solo toggle → pipeline flavor.
+    get().setSessionPipelineMode(sessionId, enabled ? 'solo' : 'normal')
+  },
+
   stopGeneration: (sessionId) => {
+    stoppedTurns.add(sessionId)
     wsManager.send(sessionId, { type: 'stop_generation' })
-    const bufferedText = consumePendingDelta(sessionId)
+    // Pause queue draining until the user sends their next message. Stop emits
+    // multiple idle events (result + status); staying paused (rather than a
+    // one-shot skip) prevents any queued message from auto-firing, so the turn
+    // truly stops. The next user message clears this and fires immediately.
+    if ((get().sessions[sessionId]?.messageQueue?.length ?? 0) > 0) {
+      queueDrainPaused.add(sessionId)
+    }
+    // Flush any throttled content_delta buffered for THIS session into its
+    // streamingText before going idle — otherwise the partial answer that
+    // arrived between the last flush tick and the stop is silently dropped.
+    // Must append to streamingText (not discard) and must be scoped to this
+    // sessionId so a concurrent session's buffer is never touched. Regressed
+    // when an earlier refactor reduced this to a bare consume; see
+    // chatStore.test.ts "flushes throttled deltas only for the stopped
+    // session".
+    const stoppedDelta = consumePendingDelta(sessionId)
     clearPendingToolInputDelta(sessionId)
     clearPendingTaskToolUseIds(sessionId)
     clearPendingToolParentUseIds(sessionId)
@@ -1634,29 +1921,26 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (!session) return s
       hasRunningBackgroundAgents = hasRunningBackgroundTasks(session.backgroundAgentTasks)
       if (session.elapsedTimer) clearInterval(session.elapsedTimer)
-      const stoppingBackgroundTaskIds = { ...session.stoppingBackgroundTaskIds }
-      for (const task of Object.values(session.backgroundAgentTasks ?? {})) {
-        if (isCancellableSubagentTask(task)) {
-          stoppingBackgroundTaskIds[task.taskId] = true
-        }
-      }
-      const pendingAssistantText = `${session.streamingText}${bufferedText}`
-      const messagesWithFlushedText = pendingAssistantText.trim()
-        ? appendAssistantTextMessage(session.messages, pendingAssistantText, Date.now())
-        : session.messages
       return {
         sessions: {
           ...s.sessions,
           [sessionId]: {
             ...session,
-            messages: markPendingToolUseMessagesStopped(messagesWithFlushedText),
-            chatState: 'idle',
+            messages: markPendingToolUseMessagesStopped(
+              `${session.streamingText}${stoppedDelta}`.trim()
+                ? appendAssistantTextMessage(
+                    session.messages,
+                    `${session.streamingText}${stoppedDelta}`,
+                    Date.now(),
+                  )
+                : session.messages,
+            ),
+            streamingText: '',
+            streamingToolInput: '',
             activeToolUseId: null,
             activeToolName: null,
             activeThinkingId: null,
-            streamingText: '',
-            streamingToolInput: '',
-            statusVerb: '',
+            chatState: 'idle',
             pendingPermission: null,
             pendingPermissions: {},
             pendingComputerUsePermission: null,
@@ -1664,8 +1948,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             apiRetry: null,
             streamingFallback: null,
             suppressNextTaskNotificationResponse: false,
-            stoppingBackgroundTaskIds,
-            stopAllSubagentsRequested: true,
             elapsedTimer: null,
           },
         },
@@ -1694,7 +1976,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const existingLoad = historyLoadsInFlight.get(sessionId)
     if (existingLoad) return existingLoad
 
-    const requestedMutationEpoch = get().sessions[sessionId]?.historyMutationEpoch ?? 0
     let load!: Promise<void>
     load = (async () => {
       try {
@@ -1717,74 +1998,39 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           hasMessagesAfterTaskCompletion,
           tokenUsage,
         } = await fetchAndMapSessionHistory(sessionId)
-        let historyApplied = false
         set((state) => {
           const session = state.sessions[sessionId]
           if (!session) return state
-          if ((session.historyMutationEpoch ?? 0) !== requestedMutationEpoch) {
-            const abortedLoadUpdate = buildAbortedHistoryLoadUpdate(session)
-            return Object.keys(abortedLoadUpdate).length > 0
-              ? {
-                  sessions: updateSessionIn(
-                    state.sessions,
-                    sessionId,
-                    () => abortedLoadUpdate,
-                  ),
-                }
-              : state
-          }
-          historyApplied = true
           if (session.messages.length > 0) {
-            return { sessions: updateSessionIn(state.sessions, sessionId, (s) => {
-              const backgroundAgentTasks = mergeBackgroundAgentTaskRecords(
-                s.backgroundAgentTasks ?? {},
-                restoredBackgroundTasks,
-              )
-              const messages = mergeRestoredHistoryIntoLiveMessages(
-                mergeBackgroundTaskMessages(s.messages, backgroundAgentTasks),
-                uiMessages,
-              )
-              return {
-                historyStatus: 'ready',
-                historyError: null,
-                activeGoal: activeGoal ?? s.activeGoal ?? null,
-                agentTaskNotifications: { ...restoredNotifications, ...s.agentTaskNotifications },
-                backgroundAgentTasks,
-                tokenUsage: tokenUsage ?? s.tokenUsage,
-                ...reconcilePendingBackgroundTaskStopFailures(
-                  s,
-                  backgroundAgentTasks,
-                  messages,
-                ),
-              }
-            }) }
-          }
-          return { sessions: updateSessionIn(state.sessions, sessionId, (s) => {
-            const backgroundAgentTasks = mergeBackgroundAgentTaskRecords(
-              s.backgroundAgentTasks ?? {},
-              restoredBackgroundTasks,
-            )
-            const messages = mergeBackgroundTaskMessages(uiMessages, backgroundAgentTasks)
-            return {
+            return { sessions: updateSessionIn(state.sessions, sessionId, (s) => ({
               historyStatus: 'ready',
               historyError: null,
-              activeGoal,
-              agentTaskNotifications: { ...restoredNotifications, ...s.agentTaskNotifications },
-              backgroundAgentTasks,
-              tokenUsage: tokenUsage ?? s.tokenUsage,
-              ...reconcilePendingBackgroundTaskStopFailures(
-                s,
-                backgroundAgentTasks,
-                messages,
+              activeGoal: activeGoal ?? s.activeGoal ?? null,
+              agentTaskNotifications: { ...s.agentTaskNotifications, ...restoredNotifications },
+              backgroundAgentTasks: mergeBackgroundAgentTaskRecords(
+                s.backgroundAgentTasks ?? {},
+                restoredBackgroundTasks,
               ),
-            }
-          }) }
+              tokenUsage: tokenUsage ?? s.tokenUsage,
+              messages: mergeRestoredHistoryIntoLiveMessages(
+                mergeBackgroundTaskMessages(s.messages, restoredBackgroundTasks),
+                uiMessages,
+              ),
+            })) }
+          }
+          return { sessions: updateSessionIn(state.sessions, sessionId, (s) => ({
+            historyStatus: 'ready',
+            historyError: null,
+            messages: mergeBackgroundTaskMessages(uiMessages, restoredBackgroundTasks),
+            activeGoal,
+            agentTaskNotifications: { ...s.agentTaskNotifications, ...restoredNotifications },
+            backgroundAgentTasks: mergeBackgroundAgentTaskRecords(
+              s.backgroundAgentTasks ?? {},
+              restoredBackgroundTasks,
+            ),
+            tokenUsage: tokenUsage ?? s.tokenUsage,
+          })) }
         })
-        if (!historyApplied) {
-          scheduleAbortedHistoryLoadRetry(get, sessionId)
-          return
-        }
-        historyLoadAbortRetries.delete(sessionId)
         if (lastTodos && lastTodos.length > 0) {
           const taskStore = useCLITaskStore.getState()
           if (taskStore.sessionId === sessionId && taskStore.tasks.length === 0) taskStore.setTasksFromTodos(lastTodos, sessionId)
@@ -1796,37 +2042,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }
       } catch (error) {
         // Session may not have messages yet
-        let loadAborted = false
         set((state) => {
           const session = state.sessions[sessionId]
           if (!session) return state
-          if ((session.historyMutationEpoch ?? 0) !== requestedMutationEpoch) {
-            loadAborted = true
-            const abortedLoadUpdate = buildAbortedHistoryLoadUpdate(session)
-            return Object.keys(abortedLoadUpdate).length > 0
-              ? {
-                  sessions: updateSessionIn(
-                    state.sessions,
-                    sessionId,
-                    () => abortedLoadUpdate,
-                  ),
-                }
-              : state
-          }
-          const pendingFailureUpdate = reconcilePendingBackgroundTaskStopFailures(
-            session,
-            session.backgroundAgentTasks ?? {},
-            session.messages,
-          )
           return {
             sessions: updateSessionIn(state.sessions, sessionId, () => ({
               historyStatus: 'error',
               historyError: error instanceof Error ? error.message : String(error),
-              ...pendingFailureUpdate,
             })),
           }
         })
-        if (loadAborted) scheduleAbortedHistoryLoadRetry(get, sessionId)
       } finally {
         if (historyLoadsInFlight.get(sessionId) === load) {
           historyLoadsInFlight.delete(sessionId)
@@ -1839,12 +2064,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   reloadHistory: async (sessionId, guard) => {
-    const reloadGeneration = (historyReloadGenerations.get(sessionId) ?? 0) + 1
-    historyReloadGenerations.set(sessionId, reloadGeneration)
     try {
-      const requestedMutationEpoch = get().sessions[sessionId]?.historyMutationEpoch ?? 0
-      const pendingLoad = historyLoadsInFlight.get(sessionId)
-      if (pendingLoad) await pendingLoad
       const {
         uiMessages,
         activeGoal,
@@ -1855,37 +2075,30 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         tokenUsage,
       } = await fetchAndMapSessionHistory(sessionId)
 
-      if (historyReloadGenerations.get(sessionId) !== reloadGeneration) return
-
       if (guard) {
         const current = get().sessions[sessionId]
         if (
           !current ||
           current.chatState !== 'idle' ||
-          (current.historyMutationEpoch ?? 0) !== requestedMutationEpoch
+          current.messages !== guard.messages ||
+          current.backgroundAgentTasks !== guard.backgroundAgentTasks
         ) {
           return
         }
       }
 
-      let historyApplied = false
       set((state) => {
         const session = state.sessions[sessionId]
         if (!session) return state
         if (session.elapsedTimer) clearInterval(session.elapsedTimer)
-        const backgroundAgentTasks = mergeBackgroundAgentTaskRecords(
-          session.backgroundAgentTasks ?? {},
-          restoredBackgroundTasks,
-        )
-        const messages = mergeBackgroundTaskMessages(uiMessages, backgroundAgentTasks)
-        historyApplied = true
         return {
           sessions: updateSessionIn(state.sessions, sessionId, () => ({
             historyStatus: 'ready',
             historyError: null,
+            messages: mergeBackgroundTaskMessages(uiMessages, restoredBackgroundTasks),
             activeGoal,
-            agentTaskNotifications: { ...restoredNotifications, ...session.agentTaskNotifications },
-            backgroundAgentTasks,
+            agentTaskNotifications: restoredNotifications,
+            backgroundAgentTasks: restoredBackgroundTasks,
             tokenUsage: tokenUsage ?? session.tokenUsage,
             chatState: 'idle',
             activeThinkingId: null,
@@ -1901,26 +2114,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             statusVerb: '',
             apiRetry: null,
             streamingFallback: null,
-            ...reconcilePendingBackgroundTaskStopFailures(
-              session,
-              backgroundAgentTasks,
-              messages,
-            ),
           })),
         }
       })
-
-      if (historyApplied) {
-        const reloadedSession = get().sessions[sessionId]
-        if (reloadedSession) {
-          const isRunning = reloadedSession.chatState !== 'idle' ||
-            hasRunningBackgroundTasks(reloadedSession.backgroundAgentTasks)
-          useTabStore.getState().updateTabStatus(
-            sessionId,
-            isRunning ? 'running' : 'idle',
-          )
-        }
-      }
 
       if (lastTodos && lastTodos.length > 0) {
         useCLITaskStore.getState().setTasksFromTodos(lastTodos, sessionId)
@@ -1931,23 +2127,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         useCLITaskStore.getState().markCompletedAndDismissed(sessionId)
       }
     } catch {
-      // A stop failure can arrive before the task history that identifies it.
-      // If that history request fails, surface the failure instead of leaving it
-      // cached forever waiting for a reconciliation that may never happen.
-      set((state) => {
-        const session = state.sessions[sessionId]
-        if (!session || Object.keys(session.pendingBackgroundTaskStopFailures ?? {}).length === 0) {
-          return state
-        }
-        return {
-          sessions: updateSessionIn(state.sessions, sessionId, (current) =>
-            reconcilePendingBackgroundTaskStopFailures(
-              current,
-              current.backgroundAgentTasks ?? {},
-              current.messages,
-            )),
-        }
-      })
+      // Session may not have messages yet
     }
   },
 
@@ -2012,29 +2192,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     set((state) => ({
       sessions: updateSessionIn(state.sessions, sessionId, () => ({
         composerDraft: null,
-      })),
-    }))
-  },
-
-  setRepositoryLaunchDraft: (sessionId, draft) => {
-    set((state) => {
-      const session = state.sessions[sessionId] ?? createDefaultSessionState()
-      return {
-        sessions: {
-          ...state.sessions,
-          [sessionId]: {
-            ...session,
-            repositoryLaunchDraft: draft,
-          },
-        },
-      }
-    })
-  },
-
-  clearRepositoryLaunchDraft: (sessionId) => {
-    set((state) => ({
-      sessions: updateSessionIn(state.sessions, sessionId, () => ({
-        repositoryLaunchDraft: null,
       })),
     }))
   },
@@ -2135,7 +2292,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   clearMessages: (sessionId) => {
     clearPendingTaskToolUseIds(sessionId)
     clearPendingToolParentUseIds(sessionId)
+    clearPendingFileEdits(sessionId)
     clearPendingToolInputDelta(sessionId)
+    resetCompactionThrash(sessionId)
     set((s) => ({ sessions: updateSessionIn(s.sessions, sessionId, () => ({
       messages: [],
       activeGoal: null,
@@ -2175,6 +2334,34 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     switch (msg.type) {
       case 'connected':
         break
+
+      case 'runtime_config_result': {
+        const pending = get().sessions[sessionId]?.pendingRuntimeConfig
+        if (!pending || pending.requestId !== msg.requestId) {
+          console.warn('[runtime-config] Ignoring stale or duplicate result', {
+            sessionId,
+            requestId: msg.requestId,
+            pendingRequestId: pending?.requestId,
+            result: msg.result,
+          })
+          break
+        }
+        if (msg.result === 'applied') {
+          useSessionRuntimeStore.getState().setSelection(sessionId, msg.selection)
+          update(() => ({ pendingRuntimeConfig: null }))
+        } else if (msg.result === 'provider_transition_required') {
+          update(() => ({
+            pendingRuntimeConfig: null,
+            pendingProviderTransition: msg,
+          }))
+        } else {
+          update(() => ({
+            pendingRuntimeConfig: null,
+            runtimeConfigError: { code: msg.code, message: msg.message },
+          }))
+        }
+        break
+      }
 
       case 'session_state': {
         const session = get().sessions[sessionId]
@@ -2227,20 +2414,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           break
         }
 
-        if (session.chatState === 'idle') {
-          if (
-            hasRunningSubagentTasks(session.backgroundAgentTasks) ||
-            session.stopAllSubagentsRequested
-          ) {
-            // A terminal task event may have been persisted while this renderer
-            // was offline. Reconcile it without overwriting a newly started turn.
-            void get().reloadHistory(sessionId, {
-              messages: session.messages,
-              backgroundAgentTasks: session.backgroundAgentTasks,
-            })
-          }
-          break
-        }
+        if (session.chatState === 'idle') break
 
         const text = `${session.streamingText}${consumePendingDelta(sessionId)}`
         clearPendingToolInputDelta(sessionId)
@@ -2285,6 +2459,19 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
 
       case 'status':
+        if (msg.taskId && get().sessions[sessionId]?.stoppingBackgroundTaskIds?.[msg.taskId]) {
+          break
+        }
+        // Shell/task-notification follow-up turns still emit message_start →
+        // status:thinking. When we already chose to suppress that turn's
+        // assistant chrome (foreground idle + no live output), keep chatState
+        // idle so the Run/Stop control does not flash for each completion.
+        if (
+          msg.state !== 'idle' &&
+          get().sessions[sessionId]?.suppressNextTaskNotificationResponse
+        ) {
+          break
+        }
         update((session) => {
           const pendingText = `${session.streamingText}${consumePendingDelta(sessionId)}`
           const hasPendingStreamText =
@@ -2333,6 +2520,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         if (msg.state !== 'idle') ensureElapsedTimer()
         if (msg.state === 'idle') {
           clearElapsedTimer()
+          get().drainMessageQueue(sessionId)
         }
         // Sync tab status
         useTabStore.getState().updateTabStatus(
@@ -2342,20 +2530,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             : 'running',
         )
         break
-
-      case 'runtime_config_applied': {
-        const selected = useSessionRuntimeStore.getState().selections[sessionId]
-        const matchesCurrentSelection = Boolean(selected) &&
-          (selected?.providerId ?? null) === msg.providerId &&
-          selected?.modelId === msg.modelId &&
-          selected?.effortLevel === msg.effortLevel
-        if (matchesCurrentSelection) {
-          update((session) => ({
-            runtimeConfigReadyCount: (session.runtimeConfigReadyCount ?? 0) + 1,
-          }))
-        }
-        break
-      }
 
       case 'permission_mode_changed': {
         // CLI 是权限模式的真相来源。这里把它恢复/切换后的权威值校正到本地镜像。
@@ -2383,13 +2557,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }
         if (session.suppressNextTaskNotificationResponse) {
           update(() => ({ suppressNextTaskNotificationResponse: false }))
-        }
-        // The server keeps a stopped-turn fence until it attributes a replay
-        // (or a pure local command's first output) to the replacement turn.
-        // Mirror that boundary instead of clearing the SubAgent stop latch on
-        // the optimistic send, which may still be rejected or remain pending.
-        if (session.stopAllSubagentsRequested) {
-          update(() => ({ stopAllSubagentsRequested: false }))
         }
         const pendingText = `${session.streamingText}${consumePendingDelta(sessionId)}`
         if (msg.blockType !== 'text' && pendingText.trim()) {
@@ -2419,7 +2586,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                     type: 'tool_use',
                     toolName,
                     toolUseId,
-                    originalToolUseId: msg.originalToolUseId ?? existing?.originalToolUseId,
                     input: existing?.input ?? {},
                     timestamp: existing?.timestamp ?? Date.now(),
                     parentToolUseId: msg.parentToolUseId ?? existing?.parentToolUseId,
@@ -2442,6 +2608,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
 
       case 'api_retry': {
+        if (stoppedTurns.has(sessionId)) break
         const attempt = Math.max(1, Math.trunc(msg.attempt))
         const maxRetries = Math.max(attempt, Math.trunc(msg.maxRetries))
         const retryDelayMs = Math.max(0, Math.trunc(msg.retryDelayMs))
@@ -2465,11 +2632,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
 
       case 'streaming_fallback': {
+        if (stoppedTurns.has(sessionId)) break
         if (msg.cause === 'stream_retry') {
+          // Discard only this attempt's in-flight partials, then show a visible
+          // retry banner (apiRetry). Must NOT go idle — user Stop is separate.
           consumePendingDelta(sessionId)
           clearPendingToolInputDelta(sessionId)
           clearPendingTaskToolUseIds(sessionId)
           clearPendingToolParentUseIds(sessionId)
+          const attempt = Math.max(1, Math.trunc(msg.attempt ?? 1))
+          const maxRetries = Math.max(attempt, Math.trunc(msg.maxRetries ?? attempt))
+          const retryDelayMs = Math.max(0, Math.trunc(msg.retryDelayMs ?? 0))
           update((session) => {
             const startIndex = Math.max(
               0,
@@ -2497,7 +2670,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               streamAttemptStartIndex: undefined,
               streamAttemptStartResponseChars: undefined,
               streamingFallback: null,
-              apiRetry: null,
+              apiRetry: {
+                attempt,
+                maxRetries,
+                retryDelayMs,
+                errorStatus: null,
+                errorType: 'stream_disconnect',
+                errorMessage: msg.errorMessage?.trim() || undefined,
+                receivedAt: Date.now(),
+              },
               chatState: 'thinking',
               statusVerb: '',
             }
@@ -2569,7 +2750,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                             type: 'tool_use',
                             toolName,
                             toolUseId: activeToolUseId,
-                            originalToolUseId: existing?.originalToolUseId,
                             input: buildPartialToolInputPreview(partialInput, existing?.input),
                             timestamp: existing?.timestamp ?? Date.now(),
                             parentToolUseId: existing?.parentToolUseId ?? getPendingToolParentUseId(sessionId, activeToolUseId),
@@ -2669,7 +2849,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                   type: 'tool_use',
                   toolName,
                   toolUseId,
-                  originalToolUseId: msg.originalToolUseId ?? existing?.originalToolUseId,
                   input: msg.input,
                   timestamp: existing?.timestamp ?? Date.now(),
                   parentToolUseId,
@@ -2678,7 +2857,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               : [...base, {
                   id: nextId(), type: 'tool_use', toolName,
                   toolUseId,
-                  originalToolUseId: msg.originalToolUseId,
                   input: msg.input, timestamp: Date.now(), parentToolUseId,
                   isPending: false,
                 }],
@@ -2686,11 +2864,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             activeToolUseId: null, activeToolName: null, activeThinkingId: null, streamingToolInput: '',
           }
         })
-        if (!parentToolUseId && toolName === 'TodoWrite' && Array.isArray((msg.input as any)?.todos)) {
+        if (toolName === 'TodoWrite' && Array.isArray((msg.input as any)?.todos)) {
           useCLITaskStore.getState().setTasksFromTodos((msg.input as any).todos, sessionId)
-        } else if (!parentToolUseId && TASK_TOOL_NAMES.has(toolName)) {
+        } else if (TASK_TOOL_NAMES.has(toolName)) {
           const useId = msg.toolUseId || session?.activeToolUseId
           if (useId) addPendingTaskToolUseId(sessionId, useId)
+        } else if (FILE_EDIT_TOOL_NAMES.has(toolName)) {
+          const useId = msg.toolUseId || session?.activeToolUseId
+          const editedPath = extractEditedFilePath(msg.input)
+          if (useId && editedPath) rememberPendingFileEdit(sessionId, useId, editedPath)
         }
         break
       }
@@ -2702,7 +2884,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         update((s) => {
           let messages: UIMessage[] = [...s.messages, {
             id: nextId(), type: 'tool_result', toolUseId: msg.toolUseId,
-            originalToolUseId: msg.originalToolUseId,
             content: msg.content, isError: msg.isError, timestamp: now, parentToolUseId,
           }]
           let backgroundAgentTasks = s.backgroundAgentTasks ?? {}
@@ -2719,16 +2900,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           return {
             messages,
             ...(stoppedTask ? { backgroundAgentTasks } : {}),
-            chatState: parentToolUseId
-              ? s.chatState
-              : hasPendingPermissionRequests(s)
-                ? 'permission_pending'
-                : 'thinking',
-            activeThinkingId: parentToolUseId ? s.activeThinkingId : null,
+            chatState: hasPendingPermissionRequests(s)
+              ? 'permission_pending'
+              : 'thinking',
+            activeThinkingId: null,
           }
         })
         if (consumePendingTaskToolUseId(sessionId, msg.toolUseId)) {
           useCLITaskStore.getState().refreshTasks(sessionId)
+        }
+        const editedPath = consumePendingFileEdit(sessionId, msg.toolUseId)
+        if (editedPath && !msg.isError) {
+          useWorkspacePanelStore.getState().notifyAgentFileEdit(sessionId, editedPath)
         }
         break
       }
@@ -2783,7 +2966,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         })
         break
 
-      case 'computer_use_permission_request':
+      case 'computer_use_permission_request': {
         notifyDesktop({
           dedupeKey: `computer-use-permission:${msg.requestId}`,
           cooldownScope: 'permission-prompt',
@@ -2814,6 +2997,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           }
         })
         break
+      }
 
       case 'permission_resolved':
         update((session) => {
@@ -2906,7 +3090,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           clearPendingToolInputDelta(sessionId)
           if (session.elapsedTimer) clearInterval(session.elapsedTimer)
           const hasRunningBackgroundAgents = hasRunningBackgroundTasks(session.backgroundAgentTasks)
-          update((current) => ({
+          update(() => ({
             tokenUsage: msg.usage,
             chatState: 'idle',
             activeThinkingId: null,
@@ -2921,7 +3105,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             streamingToolInput: '',
             suppressNextTaskNotificationResponse: false,
             replaceHistoryOnCompletion: false,
-            historyMutationEpoch: (current.historyMutationEpoch ?? 0) + 1,
           }))
           useTabStore.getState().updateTabStatus(sessionId, hasRunningBackgroundAgents ? 'running' : 'idle')
           reconcileCompletedTranscriptHistory(
@@ -2951,8 +3134,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         const finalMessages = markPendingToolUseMessagesStopped(completionMessages)
         const hasRunningBackgroundAgents = hasRunningBackgroundTasks(session.backgroundAgentTasks)
         if (session.elapsedTimer) clearInterval(session.elapsedTimer)
-        update((current) => ({
-          messages: finalMessages,
+        // If an AskUserQuestion prompt was still pending (e.g. a malformed
+        // question call that errored out), surface a visible notice before the
+        // card is cleared so it does not vanish silently.
+        const finalMessagesWithDroppedQuestionNotice = session.pendingPermission?.toolName === 'AskUserQuestion'
+          ? [...finalMessages, makeDroppedQuestionMessage()]
+          : finalMessages
+        update(() => ({
+          messages: finalMessagesWithDroppedQuestionNotice,
           tokenUsage: msg.usage,
           chatState: 'idle',
           activeThinkingId: null,
@@ -2964,7 +3153,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           apiRetry: null,
           streamingFallback: null,
           replaceHistoryOnCompletion: false,
-          historyMutationEpoch: (current.historyMutationEpoch ?? 0) + 1,
         }))
         useTabStore.getState().updateTabStatus(sessionId, hasRunningBackgroundAgents ? 'running' : 'idle')
         const notification = wasAgentRunning && appendedCompletionMessage
@@ -2984,6 +3172,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           sessionId,
           session.replaceHistoryOnCompletion === true,
         )
+        get().drainMessageQueue(sessionId)
         for (const queuedMessage of get().sessions[sessionId]?.queuedUserMessages ?? []) {
           get().sendQueuedUserMessage(sessionId, queuedMessage.id)
         }
@@ -3002,21 +3191,30 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             activeThinkingId: null,
             suppressNextTaskNotificationResponse: false,
             replaceHistoryOnCompletion: false,
-            stopAllSubagentsRequested: false,
-            historyMutationEpoch: (session.historyMutationEpoch ?? 0) + 1,
           }
         })
         break
       }
 
-      case 'error':
+      case 'error': {
+        const preserveActiveTurn =
+          msg.code === 'SESSION_TURN_ACTIVE'
+          && get().sessions[sessionId]?.chatState !== 'idle'
+
         update((s) => {
-          const pendingText = `${s.streamingText}${consumePendingDelta(sessionId)}`
+          const pendingText = preserveActiveTurn
+            ? ''
+            : `${s.streamingText}${consumePendingDelta(sessionId)}`
           let newMessages = s.messages
           if (pendingText.trim()) {
             newMessages = appendAssistantTextMessage(newMessages, pendingText, Date.now())
           }
-          newMessages = dropTailCompactingCompactSummary(newMessages)
+          if (!preserveActiveTurn) {
+            newMessages = dropTailCompactingCompactSummary(newMessages)
+            if (s.pendingPermission?.toolName === 'AskUserQuestion') {
+              newMessages = [...newMessages, makeDroppedQuestionMessage()]
+            }
+          }
           newMessages = [
             ...newMessages,
             {
@@ -3028,6 +3226,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               timestamp: Date.now(),
             },
           ]
+          if (preserveActiveTurn) {
+            return { messages: newMessages }
+          }
           return {
             messages: newMessages,
             chatState: 'idle',
@@ -3041,11 +3242,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             apiRetry: null,
             streamingFallback: null,
             suppressNextTaskNotificationResponse: false,
-            historyMutationEpoch: (s.historyMutationEpoch ?? 0) + 1,
           }
         })
-        useTabStore.getState().updateTabStatus(sessionId, 'error')
-        {
+        if (!preserveActiveTurn) {
+          useTabStore.getState().updateTabStatus(sessionId, 'error')
           const session = get().sessions[sessionId]
           if (session?.elapsedTimer) {
             clearInterval(session.elapsedTimer)
@@ -3053,40 +3253,47 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           }
         }
         break
+      }
 
-      case 'background_task_stop_failed':
+      case 'background_task_stopped': {
         update((session) => {
           const stoppingBackgroundTaskIds = { ...session.stoppingBackgroundTaskIds }
           delete stoppingBackgroundTaskIds[msg.taskId]
-          const task = session.backgroundAgentTasks?.[msg.taskId]
-          if (!task && session.historyStatus === 'loading') {
-            return {
-              stoppingBackgroundTaskIds,
-              pendingBackgroundTaskStopFailures: {
-                ...session.pendingBackgroundTaskStopFailures,
-                [msg.taskId]: msg.message,
-              },
-            }
-          }
-          const taskAlreadyFinished = task !== undefined && task.status !== 'running'
-          return {
-            stoppingBackgroundTaskIds,
-            ...(taskAlreadyFinished ? {} : {
-              messages: [
-                ...session.messages,
-                {
-                  id: nextId(),
-                  type: 'error',
-                  message: msg.message,
-                  code: 'STOP_BACKGROUND_TASK_FAILED',
-                  timestamp: Date.now(),
-                },
-              ],
-              historyMutationEpoch: (session.historyMutationEpoch ?? 0) + 1,
-            }),
-          }
+          return { stoppingBackgroundTaskIds }
         })
         break
+      }
+
+      case 'background_task_stop_failed': {
+        let stopFailedForRunningTask = false
+        update((session) => {
+          const stoppingBackgroundTaskIds = { ...session.stoppingBackgroundTaskIds }
+          const stopWasRequested = stoppingBackgroundTaskIds[msg.taskId] === true
+          delete stoppingBackgroundTaskIds[msg.taskId]
+          const task = session.backgroundAgentTasks?.[msg.taskId]
+          if (!stopWasRequested || task?.status !== 'running') {
+            return { stoppingBackgroundTaskIds }
+          }
+          stopFailedForRunningTask = true
+          return {
+            stoppingBackgroundTaskIds,
+            messages: [
+              ...session.messages,
+              {
+                id: nextId(),
+                type: 'error',
+                message: msg.message,
+                code: 'STOP_BACKGROUND_TASK_FAILED',
+                timestamp: Date.now(),
+              },
+            ],
+          }
+        })
+        if (stopFailedForRunningTask) {
+          useTabStore.getState().updateTabStatus(sessionId, 'running')
+        }
+        break
+      }
 
       case 'team_created':
         useTeamStore.getState().handleTeamCreated(msg.teamName)
@@ -3103,7 +3310,23 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         useSessionStore.getState().updateSessionTitle(msg.sessionId, msg.title)
         useTabStore.getState().updateTabTitle(msg.sessionId, msg.title)
         break
+      case 'provider_compat_event':
+        // Server-side observed a provider-level incompatibility. Today
+        // the only kind is 'thinking_incompatible'; route to the compat
+        // store which records it, fires a one-time toast, and surfaces
+        // the badge in Settings → Provider list.
+        if (msg.kind === 'thinking_incompatible') {
+          useProviderCompatStore.getState().recordThinkingIncompatible(
+            msg.providerId,
+            msg.reason ?? '',
+          )
+        }
+        break
       case 'system_notification':
+        if (msg.subtype === 'generation_stopped') {
+          stoppedTurns.delete(sessionId)
+          break
+        }
         if (msg.subtype === 'slash_commands' && Array.isArray(msg.data)) {
           const incomingCommands = normalizeSlashCommandList(msg.data)
           update((session) => ({
@@ -3149,16 +3372,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             backgroundAgentTasks: {},
             stoppingBackgroundTaskIds: {},
             agentTaskNotifications: {},
-            pendingBackgroundTaskStopFailures: {},
-            stopAllSubagentsRequested: false,
-            queuedUserMessages: [],
-            historyMutationEpoch: (session?.historyMutationEpoch ?? 0) + 1,
-            historyStatus: 'ready',
-            historyError: null,
           }))
           clearPendingDelta(sessionId)
           clearPendingTaskToolUseIds(sessionId)
           clearPendingToolParentUseIds(sessionId)
+          clearPendingFileEdits(sessionId)
           useCLITaskStore.getState().clearTasks(sessionId)
           useSessionStore.getState().updateSessionTitle(sessionId, 'New Session')
           useSessionStore.getState().updateSessionMessageCount(sessionId, 0)
@@ -3167,11 +3385,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }
         if (msg.subtype === 'compact_boundary') {
           const metadata = compactMetadataFromUnknown(msg.data)
-          update((session) => ({
-            chatState: session.chatState === 'compacting' ? 'thinking' : session.chatState,
-            statusVerb: session.chatState === 'compacting' ? '' : session.statusVerb,
-            compactCount: (session.compactCount ?? 0) + 1,
-            messages: appendOrUpdateTailCompactSummary(
+          const shouldSuggestNewSession = registerCompactionAndShouldSuggest(sessionId)
+          update((session) => {
+            const compacted = appendOrUpdateTailCompactSummary(
               session.messages,
               {
                 title: typeof msg.message === 'string' && msg.message.trim()
@@ -3181,24 +3397,41 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 ...metadata,
               },
               Date.now(),
-            ),
-          }))
+            )
+            return {
+              chatState: session.chatState === 'compacting' ? 'thinking' : session.chatState,
+              statusVerb: session.chatState === 'compacting' ? '' : session.statusVerb,
+              compactCount: (session.compactCount ?? 0) + 1,
+              messages: shouldSuggestNewSession
+                ? [...compacted, makeContextExhaustedMessage()]
+                : compacted,
+            }
+          })
         }
         if (msg.subtype === 'compact_summary') {
           const summary = extractCompactSummaryContent(msg.message)
           if (summary) {
-            update((session) => ({
-              messages: appendOrUpdateTailCompactSummary(
-                session.messages,
-                {
-                  title: 'Context compacted',
-                  phase: 'complete',
-                  summary,
-                  ...compactMetadataFromUnknown(msg.data),
-                },
-                Date.now(),
-              ),
-            }))
+            update((session) => {
+              const hadCompletedTailSummary = (() => {
+                const tail = session.messages[session.messages.length - 1]
+                return tail?.type === 'compact_summary' && tail.phase === 'complete'
+              })()
+              return {
+                chatState: session.chatState === 'compacting' ? 'thinking' : session.chatState,
+                statusVerb: session.chatState === 'compacting' ? '' : session.statusVerb,
+                ...(hadCompletedTailSummary ? {} : { compactCount: (session.compactCount ?? 0) + 1 }),
+                messages: appendOrUpdateTailCompactSummary(
+                  session.messages,
+                  {
+                    title: 'Context compacted',
+                    phase: 'complete',
+                    summary,
+                    ...compactMetadataFromUnknown(msg.data),
+                  },
+                  Date.now(),
+                ),
+              }
+            })
           }
         }
         if (msg.subtype === 'memory_saved') {
@@ -3225,7 +3458,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           if (goalEvent) {
             update((session) => ({
               activeGoal: applyGoalEventToActiveGoal(session.activeGoal ?? null, goalEvent, Date.now()),
-              stopAllSubagentsRequested: false,
               messages: [
                 ...session.messages,
                 {
@@ -3245,6 +3477,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             let shouldUpdateIdleTabStatus = false
             let hasRunningBackgroundAgentsAfterUpdate = false
             update((session) => {
+              if (session.stoppingBackgroundTaskIds?.[taskEvent.taskId]) return {}
               const backgroundAgentTasks = upsertBackgroundAgentTask(
                 session.backgroundAgentTasks ?? {},
                 taskEvent,
@@ -3253,20 +3486,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               shouldUpdateIdleTabStatus = session.chatState === 'idle'
               hasRunningBackgroundAgentsAfterUpdate = hasRunningBackgroundTasks(backgroundAgentTasks)
               const task = backgroundAgentTasks[taskEvent.taskId]
-              const stoppingBackgroundTaskIds = { ...session.stoppingBackgroundTaskIds }
-              if (
-                msg.subtype === 'task_started' &&
-                session.stopAllSubagentsRequested &&
-                task &&
-                isCancellableSubagentTask(task)
-              ) {
-                stoppingBackgroundTaskIds[task.taskId] = true
-              }
-              return {
-                ...buildBackgroundTaskSessionUpdate(session, backgroundAgentTasks, task, now),
-                stoppingBackgroundTaskIds,
-                historyMutationEpoch: (session.historyMutationEpoch ?? 0) + 1,
-              }
+              return buildBackgroundTaskSessionUpdate(session, backgroundAgentTasks, task, now)
             })
             if (shouldUpdateIdleTabStatus) {
               useTabStore.getState().updateTabStatus(
@@ -3299,6 +3519,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               hasRunningBackgroundAgentsAfterUpdate = hasRunningBackgroundTasks(backgroundAgentTasks)
               const task = backgroundAgentTasks[taskEvent.taskId]
               const suppressNotificationResponse =
+                !isAgentBackgroundTask(taskEvent) &&
                 (taskEvent.status === 'completed' ||
                   taskEvent.status === 'failed' ||
                   taskEvent.status === 'stopped') &&
@@ -3328,7 +3549,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                       }
                     : {}),
                 },
-                historyMutationEpoch: (session.historyMutationEpoch ?? 0) + 1,
               }
             })
             if (shouldUpdateIdleTabStatus) {
@@ -3346,6 +3566,28 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 }))
 
+function getDisplayAttachmentPreviewUrl(attachment: AttachmentRef | DisplayAttachmentRef): string | undefined {
+  return 'previewUrl' in attachment && typeof attachment.previewUrl === 'string'
+    ? attachment.previewUrl
+    : undefined
+}
+
+function stripPreviewUrlsFromAttachments(attachments?: AttachmentRef[]): AttachmentRef[] | undefined {
+  if (!attachments) return undefined
+  return attachments.map((attachment) => ({
+    type: attachment.type,
+    name: attachment.name,
+    path: attachment.path,
+    data: attachment.data,
+    mimeType: attachment.mimeType,
+    isDirectory: attachment.isDirectory,
+    lineStart: attachment.lineStart,
+    lineEnd: attachment.lineEnd,
+    note: attachment.note,
+    quote: attachment.quote,
+  }))
+}
+
 function updateOptimisticSessionTitle(sessionId: string, content: string): void {
   const title = deriveSessionTitle(content)
   if (!title) return
@@ -3359,8 +3601,8 @@ function updateOptimisticSessionTitle(sessionId: string, content: string): void 
 
 // ─── History mapping helpers ─────────
 
-type AssistantHistoryBlock = { type: string; text?: string; thinking?: string; name?: string; id?: string; original_tool_use_id?: string; input?: unknown }
-type UserHistoryBlock = { type: string; text?: string; tool_use_id?: string; original_tool_use_id?: string; content?: unknown; is_error?: boolean; source?: { data?: string; media_type?: string }; mimeType?: string; media_type?: string; name?: string }
+type AssistantHistoryBlock = { type: string; text?: string; thinking?: string; name?: string; id?: string; input?: unknown }
+type UserHistoryBlock = { type: string; text?: string; tool_use_id?: string; content?: unknown; is_error?: boolean; source?: { data?: string; media_type?: string }; mimeType?: string; media_type?: string; name?: string }
 
 const TASK_NOTIFICATION_RE = /^<task-notification>\s*[\s\S]*<\/task-notification>$/i
 const GOAL_EVENT_ACTIONS = new Set<GoalEventAction>([
@@ -3387,17 +3629,12 @@ const SIMPLE_IMAGE_SOURCE_RE = /^\[Image source: (.+)\]$/
 const DETAILED_IMAGE_SOURCE_RE = /^\[Image: source: (.+?)(?:, original \d+x\d+, displayed at \d+x\d+\. Multiply coordinates by \d+(?:\.\d+)? to map to original image\.)?\]$/
 const IMAGE_RESIZE_METADATA_RE = /^\[Image: original \d+x\d+, displayed at \d+x\d+\. Multiply coordinates by \d+(?:\.\d+)? to map to original image\.\]$/
 const VISUAL_SELECTION_PROMPT_HEADER = '请根据截图中编号 1 的蓝色标注修改本地前端。'
+const VISUAL_SELECTION_PROMPT_FOOTER = '请优先依据截图里的编号标注定位元素，selector 只作为辅助线索。'
 
-type VisualSelectionHistoryItem = {
-  number: number
+type VisualSelectionHistoryDisplay = {
   displayName: string
   selector?: string
   note?: string
-}
-
-type VisualSelectionHistoryDisplay = {
-  batch: boolean
-  items: VisualSelectionHistoryItem[]
 }
 
 function getHistoryImageMediaType(block: UserHistoryBlock): string {
@@ -3445,40 +3682,13 @@ export function stripGeneratedImageMetadataLines(text: string): string {
 
 function parseVisualSelectionHistoryPrompt(text: string): VisualSelectionHistoryDisplay | null {
   const lines = text.replace(/\r\n?/g, '\n').split('\n')
-  const header = lines[0]?.trim()
-  if (header === VISUAL_SELECTION_BATCH_PROMPT_HEADER) {
-    const items: VisualSelectionHistoryDisplay['items'] = []
-    for (let index = 1; index < lines.length; index += 1) {
-      const match = lines[index]?.trim().match(/^\[元素 (\d+)\]$/)
-      if (!match) continue
-      const number = Number(match[1])
-      const endMarker = `[元素 ${number} 结束]`
-      const block: string[] = []
-      index += 1
-      while (index < lines.length && lines[index]?.trim() !== endMarker) {
-        block.push(lines[index] ?? '')
-        index += 1
-      }
-      const parsedItem = parseVisualSelectionItem(block, number)
-      if (parsedItem) items.push(parsedItem)
-    }
-    return items.length ? { batch: true, items } : null
-  }
-  if (header !== VISUAL_SELECTION_PROMPT_HEADER) return null
+  if (lines[0]?.trim() !== VISUAL_SELECTION_PROMPT_HEADER) return null
 
-  const item = parseVisualSelectionItem(lines.slice(1), 1)
-  return item ? { batch: false, items: [item] } : null
-}
-
-function parseVisualSelectionItem(
-  lines: string[],
-  number: number,
-): VisualSelectionHistoryItem | null {
   let displayName: string | undefined
   let selector: string | undefined
   let note: string | undefined
 
-  for (let index = 0; index < lines.length; index += 1) {
+  for (let index = 1; index < lines.length; index += 1) {
     const line = lines[index]?.trim() ?? ''
     if (line.startsWith('目标元素：')) {
       displayName = line.slice('目标元素：'.length).trim()
@@ -3497,24 +3707,21 @@ function parseVisualSelectionItem(
     }
   }
 
-  return displayName ? {
-    number,
-    displayName,
-    ...(selector ? { selector } : {}),
-    ...(note ? { note } : {}),
-  } : null
+  return displayName
+    ? {
+        displayName,
+        ...(selector ? { selector } : {}),
+        ...(note ? { note } : {}),
+      }
+    : null
 }
 
 function applyVisualSelectionHistoryDisplay(attachments: UIAttachment[], display: VisualSelectionHistoryDisplay): void {
-  const imageAttachments = attachments.filter((attachment) => attachment.type === 'image')
-  display.items.forEach((item, index) => {
-    const imageAttachment = imageAttachments[index]
-    if (!imageAttachment) return
-    imageAttachment.name = item.displayName
-    if (item.selector) imageAttachment.quote = item.selector
-    if (item.note) imageAttachment.note = item.note
-    if (display.batch) imageAttachment.selectionNumber = item.number
-  })
+  const imageAttachment = attachments.find((attachment) => attachment.type === 'image')
+  if (!imageAttachment) return
+  imageAttachment.name = display.displayName
+  if (display.selector) imageAttachment.quote = display.selector
+  if (display.note) imageAttachment.note = display.note
 }
 
 function normalizeHistoryImageAttachment(block: UserHistoryBlock): UIAttachment {
@@ -3785,7 +3992,9 @@ function upsertBackgroundAgentTask(
   if (existingKey && existingKey !== event.taskId) {
     delete next[existingKey]
   }
-  const startsNewLifecycle = Boolean(existing && (
+  const eventStartedAt = Number.isFinite(event.startedAt) ? event.startedAt : undefined
+  const eventUpdatedAt = Number.isFinite(event.updatedAt) ? event.updatedAt : undefined
+  const startsNewLifecycle = Boolean(existing && existingKey === event.taskId && (
     (existing.status !== 'running' && event.status === 'running') ||
     (existing.status !== 'running' && event.status !== 'running' && hasTerminalTaskPayloadChanged(existing, event))
   ))
@@ -3804,8 +4013,10 @@ function upsertBackgroundAgentTask(
       lastToolName: event.lastToolName ?? existing?.lastToolName,
       outputFile: event.outputFile ?? existing?.outputFile,
       usage: event.usage ?? existing?.usage,
-      startedAt: startsNewLifecycle ? now : existing?.startedAt ?? now,
-      updatedAt: now,
+      startedAt: startsNewLifecycle
+        ? eventStartedAt ?? now
+        : existing?.startedAt ?? eventStartedAt ?? now,
+      updatedAt: eventUpdatedAt ?? now,
     },
   }
 }
@@ -3992,6 +4203,34 @@ function agentNotificationRecordFromList(
   )
 }
 
+function backgroundTaskRecordFromMessages(messages: UIMessage[]): Record<string, BackgroundAgentTask> {
+  return messages.reduce<Record<string, BackgroundAgentTask>>((tasks, message) => {
+    if (message.type !== 'background_task' || message.task.status === 'running') return tasks
+    const messageTimestamp = Number.isFinite(message.timestamp) ? message.timestamp : Date.now()
+    const startedAt = Number.isFinite(message.task.startedAt)
+      ? message.task.startedAt
+      : messageTimestamp
+    const updatedAt = Number.isFinite(message.task.updatedAt)
+      ? message.task.updatedAt
+      : messageTimestamp
+    return upsertBackgroundAgentTask(tasks, {
+      taskId: message.task.taskId,
+      toolUseId: message.task.toolUseId,
+      status: message.task.status,
+      description: message.task.description,
+      taskType: message.task.taskType,
+      workflowName: message.task.workflowName,
+      prompt: message.task.prompt,
+      summary: message.task.summary,
+      lastToolName: message.task.lastToolName,
+      outputFile: message.task.outputFile,
+      usage: message.task.usage,
+      startedAt,
+      updatedAt,
+    }, updatedAt)
+  }, {})
+}
+
 function backgroundTaskRecordFromNotifications(
   notifications: AgentTaskNotification[],
 ): Record<string, BackgroundAgentTask> {
@@ -4014,80 +4253,9 @@ function mergeBackgroundAgentTaskRecords(
   restored: Record<string, BackgroundAgentTask>,
 ): Record<string, BackgroundAgentTask> {
   return Object.values(restored).reduce(
-    (tasks, task) => {
-      const existing = tasks[task.taskId] ?? (task.toolUseId
-        ? Object.values(tasks).find((candidate) => candidate.toolUseId === task.toolUseId)
-        : undefined)
-      if (
-        existing?.status === 'running' &&
-        task.status !== 'running' &&
-        task.updatedAt < existing.startedAt
-      ) {
-        return tasks
-      }
-      return upsertBackgroundAgentTask(tasks, task, task.updatedAt)
-    },
+    (tasks, task) => upsertBackgroundAgentTask(tasks, task, task.updatedAt),
     current,
   )
-}
-
-function reconcilePendingBackgroundTaskStopFailures(
-  session: PerSessionState,
-  backgroundAgentTasks: Record<string, BackgroundAgentTask>,
-  messages: UIMessage[],
-): Pick<
-  PerSessionState,
-  | 'messages'
-  | 'pendingBackgroundTaskStopFailures'
-  | 'stoppingBackgroundTaskIds'
-  | 'historyMutationEpoch'
-> {
-  const pendingFailures = { ...session.pendingBackgroundTaskStopFailures }
-  const hasPendingFailures = Object.keys(pendingFailures).length > 0
-  const stoppingBackgroundTaskIds = { ...session.stoppingBackgroundTaskIds }
-  let nextMessages = messages
-
-  for (const [taskId, message] of Object.entries(pendingFailures)) {
-    const task = backgroundAgentTasks[taskId]
-    if (!task || task.status === 'running') {
-      nextMessages = [
-        ...nextMessages,
-        {
-          id: nextId(),
-          type: 'error',
-          message,
-          code: 'STOP_BACKGROUND_TASK_FAILED',
-          timestamp: Date.now(),
-        },
-      ]
-    }
-    delete pendingFailures[taskId]
-    delete stoppingBackgroundTaskIds[taskId]
-  }
-
-  return {
-    messages: nextMessages,
-    pendingBackgroundTaskStopFailures: pendingFailures,
-    stoppingBackgroundTaskIds,
-    historyMutationEpoch: (session.historyMutationEpoch ?? 0) + (hasPendingFailures ? 1 : 0),
-  }
-}
-
-function buildAbortedHistoryLoadUpdate(
-  session: PerSessionState,
-): Partial<PerSessionState> {
-  const hasPendingStopFailures =
-    Object.keys(session.pendingBackgroundTaskStopFailures ?? {}).length > 0
-  return {
-    ...(session.historyStatus === 'loading' ? { historyStatus: 'idle' as const } : {}),
-    ...(hasPendingStopFailures
-      ? reconcilePendingBackgroundTaskStopFailures(
-          session,
-          session.backgroundAgentTasks ?? {},
-          session.messages,
-        )
-      : {}),
-  }
 }
 
 const TEAMMATE_CONTENT_REGEX = /<teammate-message\s+teammate_id="([^"]+)"[^>]*>\n?([\s\S]*?)\n?<\/teammate-message>/g
@@ -4344,19 +4512,57 @@ function isLikelyInlineImageAttachment(attachment: UIAttachment): boolean {
   return /\.(png|jpe?g|gif|webp)$/i.test(candidate)
 }
 
+function attachmentIdentities(attachment: UIAttachment): string[] {
+  return [attachment.path, attachment.name]
+    .filter((identity): identity is string => Boolean(identity))
+    .flatMap((identity) => {
+      const normalized = identity.replace(/\\/g, '/').replace(/^\.\//, '')
+      const basename = normalized.split('/').pop()
+      return basename && basename !== normalized ? [normalized, basename] : [normalized]
+    })
+}
+
 function replayAttachmentMatchesCurrent(
   replayAttachment: UIAttachment,
   currentAttachment: UIAttachment,
 ): boolean {
-  if (pathsReferToSameFile(replayAttachment.path, currentAttachment.path)) return true
-  if (currentAttachment.path || !replayAttachment.path) return false
+  const replayIdentities = attachmentIdentities(replayAttachment)
+  const currentIdentities = attachmentIdentities(currentAttachment)
+  if (replayIdentities.some((replayIdentity) =>
+    currentIdentities.some((currentIdentity) => pathsReferToSameFile(replayIdentity, currentIdentity)),
+  )) {
+    return true
+  }
 
-  const replayName = getReferenceName(replayAttachment.path)
-  const materializedName = replayName.match(MATERIALIZED_UPLOAD_NAME_RE)?.[1]
+  const materializedName = replayAttachment.name.match(MATERIALIZED_UPLOAD_NAME_RE)?.[1]
   if (!materializedName) return false
-
   const currentName = currentAttachment.name.replace(/[^a-zA-Z0-9._-]/g, '_')
   return Boolean(currentName) && materializedName === currentName
+}
+
+function imageAttachmentsMatchReplay(
+  attachments: UIAttachment[],
+  replayedImageSourcePaths: string[],
+): boolean {
+  if (attachments.length !== replayedImageSourcePaths.length) return false
+
+  const consumedReplayIndexes = new Set<number>()
+  return attachments.every((attachment) => {
+    const identities = attachmentIdentities(attachment)
+    const replayIndex = replayedImageSourcePaths.findIndex((replayedPath, index) => {
+      if (consumedReplayIndexes.has(index)) return false
+      const normalizedReplayPath = replayedPath.replace(/\\/g, '/').replace(/^\.\//, '')
+      const replayBasename = normalizedReplayPath.split('/').pop() ?? normalizedReplayPath
+      return identities.some((identity) =>
+        pathsReferToSameFile(identity, normalizedReplayPath) ||
+        replayBasename === identity ||
+        replayBasename.endsWith(`-${identity}`),
+      )
+    })
+    if (replayIndex < 0) return false
+    consumedReplayIndexes.add(replayIndex)
+    return true
+  })
 }
 
 function replayAttachmentsMatchCurrent(
@@ -4379,16 +4585,6 @@ function replayAttachmentsMatchCurrent(
   )
 }
 
-// The server-side replay normalizes whitespace that the optimistic bubble
-// keeps verbatim: `readXmlTag` trims <command-args> and
-// formatCommandDisplayText re-joins name + args with a single space, so
-// `/ego-browser␣␣https://…` replays as `/ego-browser https://…`. HTML
-// collapses the extra space anyway, so a literal comparison would append a
-// visually identical duplicate bubble. Compare with whitespace runs collapsed.
-function collapseWhitespaceRuns(text: string): string {
-  return text.replace(/\s+/g, ' ').trim()
-}
-
 function replayMatchesCurrentUserMessage(
   message: Extract<UIMessage, { type: 'user_text' }>,
   replayDisplay: RestoredUserDisplay,
@@ -4396,11 +4592,6 @@ function replayMatchesCurrentUserMessage(
 ): boolean {
   const currentModelContent = (message.modelContent ?? message.content).trim()
   if (currentModelContent === replayModelContent) return true
-  if (
-    collapseWhitespaceRuns(currentModelContent) === collapseWhitespaceRuns(replayModelContent)
-  ) {
-    return true
-  }
 
   const currentAttachments = message.attachments ?? []
   if (
@@ -4414,11 +4605,7 @@ function replayMatchesCurrentUserMessage(
   }
 
   const currentDisplay = extractRestoredUserDisplay(currentModelContent)
-  if (
-    collapseWhitespaceRuns(currentDisplay.content) !== collapseWhitespaceRuns(replayDisplay.content)
-  ) {
-    return false
-  }
+  if (currentDisplay.content.trim() !== replayDisplay.content.trim()) return false
 
   return replayAttachmentsMatchCurrent(
     replayDisplay.attachments ?? [],
@@ -4435,13 +4622,23 @@ export function appendReplayedUserMessage(
   // optimistic message never had. Normalize them away (same as the history
   // mapping) so the dedupe below can match the already-rendered message instead
   // of appending the raw prompt — paths and all — as a duplicate bubble.
+  const replayedImageSourcePaths = content
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map(extractImageMetadataSourcePath)
+    .filter((path): path is string => Boolean(path))
   const sanitized = stripGeneratedImageMetadataLines(content) || content.trim()
   const parsed = extractRestoredUserDisplay(sanitized)
   const displayContent = parsed.content.trim()
   if (!displayContent && !parsed.attachments?.length) return messages
 
   const modelContent = parsed.modelContent ?? sanitized
-  const currentTurnUserIndex = findCurrentTurnUserMessageIndex(messages, modelContent, parsed)
+  const currentTurnUserIndex = findCurrentTurnUserMessageIndex(
+    messages,
+    modelContent,
+    displayContent,
+    replayedImageSourcePaths,
+  )
   if (currentTurnUserIndex >= 0) {
     const optimisticMessage = messages[currentTurnUserIndex]
     if (optimisticMessage?.type === 'user_text' && optimisticMessage.optimisticQueued) {
@@ -4507,21 +4704,34 @@ function mapQueuedDisplayAttachments(attachments?: AttachmentRef[]): UIAttachmen
     hunkId: attachment.hunkId,
     note: attachment.note,
     quote: attachment.quote,
-    selectionNumber: attachment.selectionNumber,
   }))
 }
 
 function findCurrentTurnUserMessageIndex(
   messages: UIMessage[],
   modelContent: string,
-  replayDisplay: RestoredUserDisplay,
+  displayContent?: string,
+  replayedImageSourcePaths: string[] = [],
 ): number {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]
     if (message?.type !== 'user_text') {
       continue
     }
-    return replayMatchesCurrentUserMessage(message, replayDisplay, modelContent) ? index : -1
+    const imageAttachments = message.attachments?.filter(
+      (attachment) => attachment.type === 'image',
+    ) ?? []
+    const replayDisplay = extractRestoredUserDisplay(modelContent)
+    const hasMatchingText = (message.modelContent ?? message.content).trim() === modelContent
+    if (hasMatchingText && imageAttachments.length === 0) return index
+
+    if (replayMatchesCurrentUserMessage(message, replayDisplay, modelContent)) return index
+
+    const isSameImageReplay =
+      replayedImageSourcePaths.length > 0 &&
+      imageAttachmentsMatchReplay(imageAttachments, replayedImageSourcePaths) &&
+      message.content.trim() === displayContent
+    return isSameImageReplay ? index : -1
   }
   return -1
 }
@@ -4669,6 +4879,19 @@ export function mapHistoryMessagesToUiMessages(
     }
 
     const timestamp = new Date(msg.timestamp).getTime()
+    const backgroundTaskMessage = msg as unknown as { id?: string; type?: string; task?: BackgroundAgentTask }
+    if (backgroundTaskMessage.type === 'background_task') {
+      const task = backgroundTaskMessage.task
+      if (task && task.status !== 'running') {
+        uiMessages.push({
+          id: backgroundTaskMessage.id || nextId(),
+          type: 'background_task',
+          task,
+          timestamp: Number.isFinite(timestamp) ? timestamp : Date.now(),
+        })
+      }
+      continue
+    }
     if (msg.type === 'system' && typeof msg.content === 'string') {
       if (msg.content.trim() === 'Conversation compacted' || msg.content.trim() === 'Context compacted') {
         const compactMessages = appendOrUpdateTailCompactSummary(
@@ -4768,12 +4991,12 @@ export function mapHistoryMessagesToUiMessages(
       continue
     }
     if ((msg.type === 'assistant' || msg.type === 'tool_use') && Array.isArray(msg.content)) {
-      for (const [blockIndex, block] of (msg.content as AssistantHistoryBlock[]).entries()) {
-        if (block.type === 'thinking' && block.thinking) uiMessages.push({ id: `${msg.id}-block-${blockIndex}`, type: 'thinking', content: block.thinking, timestamp })
+      for (const block of msg.content as AssistantHistoryBlock[]) {
+        if (block.type === 'thinking' && block.thinking) uiMessages.push({ id: nextId(), type: 'thinking', content: block.thinking, timestamp })
         else if (block.type === 'text' && block.text) {
           pushAssistantHistoryText(uiMessages, block.text, timestamp, msg.model, msg.id || undefined)
         }
-        else if (block.type === 'tool_use') uiMessages.push({ id: `${msg.id}-block-${blockIndex}`, type: 'tool_use', toolName: block.name ?? 'unknown', toolUseId: block.id ?? '', originalToolUseId: block.original_tool_use_id, input: block.input, timestamp, parentToolUseId: msg.parentToolUseId })
+        else if (block.type === 'tool_use') uiMessages.push({ id: nextId(), type: 'tool_use', toolName: block.name ?? 'unknown', toolUseId: block.id ?? '', input: block.input, timestamp, parentToolUseId: msg.parentToolUseId })
       }
       continue
     }
@@ -4783,7 +5006,7 @@ export function mapHistoryMessagesToUiMessages(
       const attachments: UIAttachment[] = []
       const imageSourcePaths: string[] = []
       const hasImageBlock = (msg.content as UserHistoryBlock[]).some((block) => block.type === 'image')
-      for (const [blockIndex, block] of (msg.content as UserHistoryBlock[]).entries()) {
+      for (const block of msg.content as UserHistoryBlock[]) {
         if (block.type === 'text' && block.text && isTeammateMessage(block.text)) {
           modelTextParts.push(block.text)
           if (!includeTeammateMessages) continue
@@ -4801,10 +5024,9 @@ export function mapHistoryMessagesToUiMessages(
         else if (block.type === 'image') attachments.push(normalizeHistoryImageAttachment(block))
         else if (block.type === 'file') attachments.push({ type: 'file', name: block.name || 'file' })
         else if (block.type === 'tool_result') uiMessages.push({
-          id: `${msg.id}-block-${blockIndex}`,
+          id: nextId(),
           type: 'tool_result',
           toolUseId: block.tool_use_id ?? '',
-          originalToolUseId: block.original_tool_use_id,
           content: normalizeHistoryToolResultContent(block.content, msg.toolUseResult),
           isError: !!block.is_error,
           timestamp,
@@ -4823,11 +5045,7 @@ export function mapHistoryMessagesToUiMessages(
           applyVisualSelectionHistoryDisplay(attachments, visualSelectionDisplay)
         }
         const parsed = extractRestoredUserDisplay(visibleText)
-        const userContent = visualSelectionDisplay
-          ? visualSelectionDisplay.batch
-            ? t('browser.selection.batchMessage', { count: visualSelectionDisplay.items.length })
-            : ''
-          : parsed.content
+        const userContent = visualSelectionDisplay ? '' : parsed.content
         const modelContent = visualSelectionDisplay || modelText !== visibleText ? modelText : parsed.modelContent
         const allAttachments = [...(parsed.attachments ?? []), ...attachments]
         uiMessages.push({
@@ -4869,7 +5087,6 @@ function extractLastTodoWriteFromHistory(messages: MessageEntry[]): Array<{ cont
   let todos: Array<{ content: string; status: string; activeForm?: string }> | null = null
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]!
-    if (msg.parentToolUseId) continue
     if ((msg.type === 'assistant' || msg.type === 'tool_use') && Array.isArray(msg.content)) {
       const blocks = msg.content as AssistantHistoryBlock[]
       for (let j = blocks.length - 1; j >= 0; j--) {
@@ -4890,7 +5107,7 @@ function extractLastTodoWriteFromHistory(messages: MessageEntry[]): Array<{ cont
   const allDone = todos.every((t) => t.status === 'completed')
   if (allDone) {
     for (let i = foundIndex + 1; i < messages.length; i++) {
-      if (messages[i]!.type === 'user' && !messages[i]!.parentToolUseId && messages[i]!.content) return null
+      if (messages[i]!.type === 'user' && messages[i]!.content) return null
     }
   }
   return todos
@@ -4902,15 +5119,12 @@ function hasUserMessagesAfterTaskCompletion(messages: MessageEntry[]): boolean {
   let lastTaskIndex = -1
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]!
-    if (msg.parentToolUseId) continue
     if ((msg.type === 'assistant' || msg.type === 'tool_use') && Array.isArray(msg.content)) {
       const blocks = msg.content as AssistantHistoryBlock[]
       if (blocks.some((b) => b.type === 'tool_use' && TASK_RELATED_TOOL_NAMES.has(b.name ?? ''))) { lastTaskIndex = i; break }
     }
   }
   if (lastTaskIndex < 0) return false
-  for (let i = lastTaskIndex + 1; i < messages.length; i++) {
-    if (messages[i]!.type === 'user' && !messages[i]!.parentToolUseId) return true
-  }
+  for (let i = lastTaskIndex + 1; i < messages.length; i++) { if (messages[i]!.type === 'user') return true }
   return false
 }

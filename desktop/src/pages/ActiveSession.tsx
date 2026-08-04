@@ -12,6 +12,9 @@ import {
 } from '../stores/tabStore'
 import { useSessionStore } from '../stores/sessionStore'
 import { useChatStore } from '../stores/chatStore'
+import { useSessionRuntimeStore } from '../stores/sessionRuntimeStore'
+import { projectsApi } from '../api/projects'
+import { wsManager } from '../api/websocket'
 import { useCLITaskStore } from '../stores/cliTaskStore'
 import { useTeamStore } from '../stores/teamStore'
 import { useWorkspacePanelStore } from '../stores/workspacePanelStore'
@@ -28,9 +31,16 @@ import { BrandSeal } from '@/components/composite/BrandSeal'
 import { MessageList } from '../components/chat/MessageList'
 import { ChatInput } from '../components/chat/ChatInput'
 import { ComputerUsePermissionModal } from '../components/chat/ComputerUsePermissionModal'
-import { WorkbenchPanel } from '../components/workbench/WorkbenchPanel'
+import { Modal } from '@/components/ui/Modal'
+import { SessionTaskBar } from '../components/chat/SessionTaskBar'
+import { SoloCouncilPanel } from '../components/chat/SoloCouncilPanel'
+import { BackgroundTasksBar } from '../components/chat/BackgroundTasksBar'
+import { SessionActivityButton } from '../components/activity/SessionActivityButton'
 import { SessionActivityPanel } from '../components/activity/SessionActivityPanel'
-import { buildSessionActivityModel, hasVisibleSessionActivity } from '../components/activity/sessionActivityModel'
+import { hasVisibleSessionActivity } from '../components/activity/sessionActivityModel'
+import { useSessionActivityModel } from '../components/activity/useSessionActivityModel'
+import { WorkbenchPanel } from '../components/workbench/WorkbenchPanel'
+import { TeamStatusBar } from '../components/teams/TeamStatusBar'
 import { TerminalSettings } from './TerminalSettings'
 import type { SessionListItem } from '../types/session'
 import type { ActiveGoalState, TokenUsage } from '../types/chat'
@@ -39,19 +49,26 @@ import { useMobileViewport } from '../hooks/useMobileViewport'
 import { isDesktopRuntime } from '../lib/desktopRuntime'
 import { formatTokenCount } from '../lib/formatTokenCount'
 import {
+  COMPOSER_PREFILL_EVENT,
+  WelcomeTaskCards,
+  type ComposerPrefillDetail,
+  type WelcomeTaskCard,
+} from '../components/welcome/WelcomeTaskCards'
+import { RecentActivityCard } from '../components/welcome/RecentActivityCard'
+import {
   createBackgroundTaskDismissKey,
   hasRunningBackgroundTasks as hasAnyRunningBackgroundTasks,
 } from '../lib/backgroundTasks'
 import { useActivityPanelStore } from '../stores/activityPanelStore'
+import { useSettingsStore } from '../stores/settingsStore'
 import { getSessionBrowsablePath, getSessionWorkspaceState } from '../lib/sessionWorkspace'
 
 const TASK_POLL_INTERVAL_MS = 1000
-const ACTIVITY_AUTOCLOSE_GRACE_MS = 2000
 const WORKSPACE_RESIZE_STEP = 32
 const TERMINAL_RESIZE_STEP = 24
 const CHAT_COLUMN_WITH_WORKSPACE_CLASS =
-  'min-w-[320px] flex-1 bg-[var(--color-surface)]'
-const EMPTY_DISMISSED_BACKGROUND_TASK_KEYS: readonly string[] = []
+  'min-w-[320px] flex-1 border-r border-[var(--color-border)] bg-[var(--color-surface)]'
+const EMPTY_DISMISSED_BACKGROUND_TASK_KEYS = new Set<string>()
 
 function isSessionTabState(activeTabId: string | null, activeTabType: TabType | null | undefined) {
   if (!activeTabId) return false
@@ -201,9 +218,9 @@ function WorkspaceResizeHandle({ panelRef }: { panelRef: RefObject<HTMLElement> 
           setWidth(renderedWidth - WORKSPACE_RESIZE_STEP)
         }
       }}
-      className="relative z-10 w-px shrink-0 cursor-col-resize bg-[var(--color-border)] outline-none transition-colors hover:bg-[var(--color-border-focus)] focus-visible:bg-[var(--color-border-focus)]"
+      className="group relative z-10 flex w-2 shrink-0 cursor-col-resize items-stretch justify-center bg-[var(--color-surface)] outline-none focus-visible:bg-[var(--color-surface-container)]"
     >
-      <div aria-hidden="true" className="absolute -inset-x-1 inset-y-0" />
+      <div className="my-3 w-px rounded-full bg-[var(--color-border)] transition-colors group-hover:bg-[var(--color-border-focus)] group-focus-visible:bg-[var(--color-border-focus)]" />
     </div>
   )
 }
@@ -292,27 +309,44 @@ export function ActiveSession() {
   const isMobileLayout = useMobileViewport() && !isDesktopRuntime()
   const workbenchPanelRef = useRef<HTMLElement>(null)
   const activeTabId = useTabStore((s) => s.activeTabId)
+  const [dismissedBackgroundTaskKeysBySession, setDismissedBackgroundTaskKeysBySession] = useState<Record<string, Set<string>>>({})
   const activeTabType = useTabStore((s) => s.tabs.find((tab) => tab.sessionId === s.activeTabId)?.type ?? null)
   const sessions = useSessionStore((s) => s.sessions)
   const connectToSession = useChatStore((s) => s.connectToSession)
   const stopBackgroundTask = useChatStore((s) => s.stopBackgroundTask)
   const sessionState = useChatStore((s) => activeTabId ? s.sessions[activeTabId] : undefined)
+  // Hand-off context attached to this session (if any). Drives a small chip
+  // in the header so the user remembers the AI started with summarized
+  // prior context. Set by the "Continue from here" flow on success.
+  const handoffInfoForActive = useSessionRuntimeStore((s) =>
+    activeTabId ? s.handoffInfo[activeTabId] : undefined,
+  )
+  // Live mode flags drive the always-visible status chip in the chat header
+  // so the user can see at a glance which session-level mode is active. The
+  // `+`-menu toggle in ChatInput is the entry point but only surfaces the
+  // current state inside that menu — the chip is the persistent affordance
+  // that the steering contract calls "明示当前模式" (must be explicit).
+  const coordinatorModeForActive = useSessionRuntimeStore((s) =>
+    activeTabId ? s.coordinatorModes[activeTabId] ?? false : false,
+  )
+  const pipelineModeForActive = useSessionRuntimeStore((s) =>
+    activeTabId ? s.pipelineModes[activeTabId] ?? 'normal' : 'normal',
+  )
+  const soloPipelineModeForActive = pipelineModeForActive === 'solo'
+  const rePipelineModeForActive = pipelineModeForActive === 're'
   const pendingComputerUsePermission = sessionState?.pendingComputerUsePermission ?? null
+  const pendingProviderTransition = sessionState?.pendingProviderTransition ?? null
+  const runtimeConfigError = sessionState?.runtimeConfigError ?? null
   const fetchSessionTasks = useCLITaskStore((s) => s.fetchSessionTasks)
   const trackedTaskSessionId = useCLITaskStore((s) => s.sessionId)
   const cliTasks = useCLITaskStore((s) => s.tasks)
-  const cliTasksCompletedAndDismissed = useCLITaskStore((s) => s.completedAndDismissed)
   const hasIncompleteTasks = cliTasks.some((task) => task.status !== 'completed')
+  const hasRunningTasks = cliTasks.some((task) => task.status === 'in_progress')
+  const unifiedActivityPanelEnabled = useSettingsStore((state) => state.unifiedActivityPanelEnabled)
   const isActivityPanelOpen = useActivityPanelStore((state) => activeTabId ? state.isOpen(activeTabId) : false)
-  const openActivityPanel = useActivityPanelStore((state) => state.open)
   const closeActivityPanel = useActivityPanelStore((state) => state.close)
-  const dismissBackgroundTaskKeys = useActivityPanelStore((state) => state.dismissBackgroundTaskKeys)
-  const pruneDismissedBackgroundTaskKeys = useActivityPanelStore((state) => state.pruneDismissedBackgroundTaskKeys)
-  const dismissedBackgroundTaskKeyList = useActivityPanelStore((state) =>
-    activeTabId
-      ? state.dismissedBackgroundTaskKeysBySession[activeTabId] ?? EMPTY_DISMISSED_BACKGROUND_TASK_KEYS
-      : EMPTY_DISMISSED_BACKGROUND_TASK_KEYS,
-  )
+  const dismissActivityBackgroundTaskKeys = useActivityPanelStore((state) => state.dismissBackgroundTaskKeys)
+  const pruneActivityBackgroundTaskKeys = useActivityPanelStore((state) => state.pruneDismissedBackgroundTaskKeys)
   const chatState = sessionState?.chatState ?? 'idle'
   const tokenUsage = sessionState?.tokenUsage ?? { input_tokens: 0, output_tokens: 0 }
   const hasRunningBackgroundTasks = hasAnyRunningBackgroundTasks(sessionState?.backgroundAgentTasks)
@@ -340,7 +374,6 @@ export function ActiveSession() {
       : undefined,
   )
   const terminalPanelHeight = useTerminalPanelStore((state) => state.height)
-  const activityVisibilityBySessionRef = useRef<Record<string, { hadAutoOpenActivity: boolean }>>({})
 
   useEffect(() => {
     if (activeTabId && !isMemberSession) {
@@ -380,11 +413,9 @@ export function ActiveSession() {
     () => Object.values(sessionState?.backgroundAgentTasks ?? {}),
     [sessionState?.backgroundAgentTasks],
   )
-  const dismissedBackgroundTaskKeys = useMemo(
-    () => new Set(dismissedBackgroundTaskKeyList),
-    [dismissedBackgroundTaskKeyList],
-  )
-  const agentTaskNotifications = sessionState?.agentTaskNotifications ?? {}
+  const dismissedBackgroundTaskKeys = activeTabId
+    ? dismissedBackgroundTaskKeysBySession[activeTabId] ?? EMPTY_DISMISSED_BACKGROUND_TASK_KEYS
+    : EMPTY_DISMISSED_BACKGROUND_TASK_KEYS
   const activeGoal = sessionState?.activeGoal ?? null
   const isEmpty = messages.length === 0 && !streamingText && (session?.messageCount ?? 0) === 0
   const compactEmptyHero = isEmpty && showTerminalPanel
@@ -403,99 +434,31 @@ export function ActiveSession() {
   const visibleMessageCount = messages.length > 0 ? messages.length : session?.messageCount ?? 0
   const headerTitle = session?.title || t('session.untitled')
 
-  const isActive = chatState !== 'idle' || hasRunningBackgroundTasks
+  const isActive = chatState !== 'idle' ||
+    (trackedTaskSessionId === activeTabId && hasRunningTasks) ||
+    hasRunningBackgroundTasks
   const totalTokens = getTokenUsageTotal(tokenUsage)
-  const cachedTokens = (tokenUsage.cache_read_tokens ?? 0) +
-    (tokenUsage.cache_creation_tokens ?? 0)
-  const activityTeamMembers = useMemo(() => {
-    if (!activeTeam || activeTeam.leadSessionId !== activeTabId) return []
-    return activeTeam.members.filter((member) =>
-      !activeTeam.leadAgentId || member.agentId !== activeTeam.leadAgentId
-    )
-  }, [activeTabId, activeTeam])
-
   useEffect(() => {
-    if (!activeTabId) return
-    pruneDismissedBackgroundTaskKeys(
+    if (!unifiedActivityPanelEnabled || !activeTabId) return
+    pruneActivityBackgroundTaskKeys(
       activeTabId,
       backgroundTasks.map((task) => createBackgroundTaskDismissKey(task)),
     )
-  }, [activeTabId, backgroundTasks, pruneDismissedBackgroundTaskKeys])
+  }, [activeTabId, backgroundTasks, pruneActivityBackgroundTaskKeys, unifiedActivityPanelEnabled])
 
-  const activityModel = useMemo(() => {
-    if (!activeTabId) return null
-    const includeCliTasks = trackedTaskSessionId === activeTabId
-
-    return buildSessionActivityModel({
-      sessionId: activeTabId,
-      messages,
-      tasks: includeCliTasks ? cliTasks : [],
-      completedAndDismissed: includeCliTasks ? cliTasksCompletedAndDismissed : false,
-      isForegroundTurnActive: chatState !== 'idle',
-      backgroundTasks,
-      dismissedBackgroundTaskKeys,
-      agentNotifications: Object.values(agentTaskNotifications),
-      teamMembers: activityTeamMembers,
-    })
-  }, [
-    activeTabId,
-    activityTeamMembers,
-    agentTaskNotifications,
-    backgroundTasks,
-    cliTasks,
-    cliTasksCompletedAndDismissed,
-    chatState,
-    dismissedBackgroundTaskKeys,
-    messages,
-    trackedTaskSessionId,
-  ])
+  const sharedActivity = useSessionActivityModel(activeTabId, unifiedActivityPanelEnabled)
+  const activityModel = unifiedActivityPanelEnabled && activeTabId
+    ? sharedActivity.model
+    : null
   const hasVisibleActivity = activityModel ? hasVisibleSessionActivity(activityModel) : false
-  const hasAutoOpenActivity = activityModel ? activityModel.badgeCount > 0 : false
-
-  useEffect(() => {
-    if (!activeTabId || isMemberSession || !isSessionTabState(activeTabId, activeTabType)) return
-
-    const state = activityVisibilityBySessionRef.current[activeTabId]
-    if (!state) {
-      activityVisibilityBySessionRef.current[activeTabId] = {
-        hadAutoOpenActivity: hasAutoOpenActivity,
-      }
-      return
-    }
-
-    if (!state.hadAutoOpenActivity && hasAutoOpenActivity && !isActivityPanelOpen) {
-      openActivityPanel(activeTabId)
-    }
-    state.hadAutoOpenActivity = hasAutoOpenActivity
-  }, [
-    activeTabId,
-    activeTabType,
-    hasAutoOpenActivity,
-    isActivityPanelOpen,
-    isMemberSession,
-    openActivityPanel,
-  ])
 
   useEffect(() => {
     if (!activeTabId || !isActivityPanelOpen || hasVisibleActivity) return
-    // Activity rows derive from volatile caches that are briefly empty during
-    // history loads, cli-task refetches and reconnect reloads. Closing the
-    // panel on the first empty beat made that flicker permanent (auto-open
-    // does not re-fire after a remount), so only close once the empty state
-    // survives a full history-ready grace period.
-    if (sessionState?.historyStatus === 'loading') return
-    const timer = setTimeout(() => {
-      const current = useChatStore.getState().sessions[activeTabId]
-      if (current?.historyStatus === 'loading') return
-      closeActivityPanel(activeTabId)
-    }, ACTIVITY_AUTOCLOSE_GRACE_MS)
-    return () => clearTimeout(timer)
-  }, [activeTabId, closeActivityPanel, hasVisibleActivity, isActivityPanelOpen, sessionState?.historyStatus])
-
-  useEffect(() => {
-    if (!activeTabId || !showWorkbench || !isActivityPanelOpen) return
     closeActivityPanel(activeTabId)
-  }, [activeTabId, closeActivityPanel, isActivityPanelOpen, showWorkbench])
+  }, [activeTabId, closeActivityPanel, hasVisibleActivity, isActivityPanelOpen])
+
+  // Workspace exclusivity is render-time only: keep the activity open state so
+  // closing the workbench restores the Activity rail without re-opening it.
 
   const handleOpenSubagentRun = useCallback((payload: { sessionId: string; taskId?: string; toolUseId: string; title: string }) => {
     useTabStore.getState().openSubagentTab(payload.sessionId, payload.toolUseId, payload.title, payload.taskId)
@@ -503,11 +466,11 @@ export function ActiveSession() {
   const handleOpenTeamMember = useCallback((member: TeamMember) => {
     useTeamStore.getState().openMemberSession(member)
   }, [])
-  const handleClearFinishedBackgroundTasks = useCallback((taskKeys: string[]) => {
+  const handleClearActivityBackgroundTasks = useCallback((taskKeys: string[]) => {
     if (!activeTabId || taskKeys.length === 0) return
-    dismissBackgroundTaskKeys(activeTabId, taskKeys)
-  }, [activeTabId, dismissBackgroundTaskKeys])
-  const handleStopBackgroundTask = useCallback((taskId: string) => {
+    dismissActivityBackgroundTaskKeys(activeTabId, taskKeys)
+  }, [activeTabId, dismissActivityBackgroundTaskKeys])
+  const handleStopActivityBackgroundTask = useCallback((taskId: string) => {
     if (!activeTabId) return
     stopBackgroundTask(activeTabId, taskId)
   }, [activeTabId, stopBackgroundTask])
@@ -520,6 +483,23 @@ export function ActiveSession() {
     if (diff < 86400000) return t('session.timeHours', { n: Math.floor(diff / 3600000) })
     return t('session.timeDays', { n: Math.floor(diff / 86400000) })
   }, [session?.modifiedAt, t])
+
+  useEffect(() => {
+    if (!activeTabId || dismissedBackgroundTaskKeys.size === 0) return
+    const currentTaskKeys = new Set(backgroundTasks.map(createBackgroundTaskDismissKey))
+    const nextDismissed = new Set([...dismissedBackgroundTaskKeys].filter((taskKey) => currentTaskKeys.has(taskKey)))
+    if (nextDismissed.size === dismissedBackgroundTaskKeys.size) return
+
+    setDismissedBackgroundTaskKeysBySession((current) => {
+      const next = { ...current }
+      if (nextDismissed.size === 0) {
+        delete next[activeTabId]
+      } else {
+        next[activeTabId] = nextDismissed
+      }
+      return next
+    })
+  }, [activeTabId, backgroundTasks, dismissedBackgroundTaskKeys])
 
   if (!activeTabId) return null
 
@@ -544,8 +524,7 @@ export function ActiveSession() {
             // 340px panel + 20px right inset leaves the 8px gap the handoff draws.
             isActivityRailOpen ? 'pr-[352px]' : '',
             showRightPanel ? CHAT_COLUMN_WITH_WORKSPACE_CLASS : isMobileLayout ? 'flex-1' : 'min-w-[360px] flex-1',
-          ].filter(Boolean).join(' ')}
-        >
+          ].filter(Boolean).join(' ')}        >
           {isMemberSession && (
             <div className="shrink-0 border-b border-[var(--color-border)] bg-[var(--color-surface-container)]">
               <div className="mx-auto max-w-[900px] flex items-center justify-between gap-4 px-8 py-2">
@@ -599,8 +578,7 @@ export function ActiveSession() {
               className={[
                 'brand-seal-glow flex min-h-0 flex-1 flex-col items-center justify-center overflow-hidden px-8 pt-8',
                 compactEmptyHero ? 'pb-6' : 'pb-32',
-              ].join(' ')}
-            >
+              ].join(' ')}            >
               <div className="flex max-w-[420px] flex-col items-center gap-[13px] text-center">
                 {isMemberSession ? (
                   <>
@@ -629,6 +607,104 @@ export function ActiveSession() {
                   </>
                 )}
               </div>
+              {!isMemberSession && !isMobileLayout && activeTabId && session?.workDir && (
+                <RecentActivityCard
+                  workDir={session.workDir}
+                  excludeSessionId={activeTabId}
+                  hideContinueSessionButton
+                  onContinueSession={(sessionId) => {
+                    useTabStore.getState().openTab(sessionId, 'New Session')
+                    connectToSession(sessionId)
+                  }}
+                  onAutoHandoff={async (previousSessionId, previousSessionTitle, fallbackText, setStage, options) => {
+                    // 1. Resolve summary (cached → generated → null). Any
+                    //    failure degrades silently to the zero-token
+                    //    textarea-prefill path.
+                    setStage('reading-cache')
+                    let summary = null
+                    try {
+                      const cached = await projectsApi.getSessionSummary(previousSessionId)
+                      summary = cached.summary
+                    } catch {
+                      // GET error → fall through to generation path below.
+                    }
+                    if (!summary) {
+                      setStage('generating-summary')
+                      try {
+                        const fresh = await projectsApi.generateSessionSummary(previousSessionId)
+                        summary = fresh.summary
+                      } catch {
+                        summary = null
+                      }
+                    }
+
+                    if (!summary) {
+                      // Zero-token fallback: write the static hand-off
+                      // paragraph into the composer via the existing
+                      // composer-prefill event.
+                      const detail: ComposerPrefillDetail = {
+                        sessionId: activeTabId,
+                        text: fallbackText,
+                      }
+                      window.dispatchEvent(
+                        new CustomEvent(COMPOSER_PREFILL_EVENT, { detail }),
+                      )
+                      return
+                    }
+
+                    setStage('starting-session')
+
+                    // Stash hand-off info on the active session so the
+                    // chat header can render a "↗ continued from..." chip.
+                    useSessionRuntimeStore.getState().setHandoffInfo(activeTabId, {
+                      previousSessionId,
+                      previousSessionTitle,
+                      approxTokens: Math.ceil(
+                        (summary.main.length + summary.recent.length) / 4,
+                      ),
+                      generatedAt: summary.generatedAt,
+                    })
+
+                    // 2. Stage hand-off on the live session and auto-send a
+                    //    short trigger message. Server reads cached summary
+                    //    via WS message, restarts CLI with --append-system-
+                    //    prompt, and the next user_message kicks off the AI
+                    //    turn with full context already in system prompt.
+                    wsManager.send(activeTabId, {
+                      type: 'set_handoff_summary',
+                      previousSessionId,
+                      ...(options?.deep ? { deep: true } : {}),
+                    })
+                    useChatStore.getState().sendMessage(
+                      activeTabId,
+                      t('empty.recentActivity.continueTriggerMessage'),
+                    )
+                  }}
+                />
+              )}
+              {!isMemberSession && !isMobileLayout && activeTabId && (
+                <WelcomeTaskCards
+                  workDir={session?.workDir || undefined}
+                  excludeSessionId={activeTabId}
+                  onApplyTask={(card: WelcomeTaskCard, promptText: string) => {
+                    // Push the starter prompt into ChatInput's draft via a
+                    // window event — ChatInput listens for this and sets its
+                    // textarea state when the sessionId matches the active tab.
+                    const detail: ComposerPrefillDetail = {
+                      sessionId: activeTabId,
+                      text: promptText,
+                    }
+                    window.dispatchEvent(new CustomEvent(COMPOSER_PREFILL_EVENT, { detail }))
+                    if (card.orchestrate) {
+                      // Session already exists here (we're in ActiveSession),
+                      // so this immediately persists the preference and
+                      // pushes the WS message if connected. Won't disable an
+                      // existing toggle — non-orchestration cards leave it.
+                      useChatStore.getState().setSessionCoordinatorMode(activeTabId, true)
+                    }
+                  }}
+                />
+              )}
             </div>
           ) : (
             <>
@@ -662,17 +738,8 @@ export function ActiveSession() {
                           </span>
                         ),
                         totalTokens > 0 && (
-                          <span
-                            key="tokens"
-                            className="shrink-0"
-                            title={t('session.apiTokenBreakdown', {
-                              total: totalTokens.toLocaleString(),
-                              input: tokenUsage.input_tokens.toLocaleString(),
-                              output: tokenUsage.output_tokens.toLocaleString(),
-                              cache: cachedTokens.toLocaleString(),
-                            })}
-                          >
-                            {t('session.apiTokens', { count: formatTokenCount(totalTokens) })}
+                          <span key="tokens" className="shrink-0" title={t('common.tokens', { count: totalTokens.toLocaleString() })}>
+                            {t('common.tokens', { count: formatTokenCount(totalTokens) })}
                           </span>
                         ),
                         lastUpdated && (
@@ -680,6 +747,37 @@ export function ActiveSession() {
                         ),
                         !showRightPanel && visibleMessageCount > 0 && (
                           <span key="messages" className="shrink-0">{t('session.messages', { count: visibleMessageCount })}</span>
+                        ),
+                        handoffInfoForActive && (
+                          <span
+                            key="handoff"
+                            data-testid="session-handoff-chip"
+                            title={t('session.handoffChipTooltip', {
+                              title: handoffInfoForActive.previousSessionTitle,
+                              tokens: handoffInfoForActive.approxTokens,
+                            })}
+                            className="inline-flex shrink-0 items-center gap-0.5 cursor-help text-[var(--color-primary)]"
+                          >
+                            {t('session.handoffChip', { tokens: handoffInfoForActive.approxTokens })}
+                          </span>
+                        ),
+                        coordinatorModeForActive && (
+                          <span key="coordinator" data-testid="session-coordinator-chip" title={t('session.coordinatorChipTooltip')} className="inline-flex shrink-0 items-center gap-1 cursor-help text-[var(--color-primary)]">
+                            <span className="material-symbols-outlined text-[12px]" aria-hidden="true">hub</span>
+                            {t('session.coordinatorChip')}
+                          </span>
+                        ),
+                        soloPipelineModeForActive && (
+                          <span key="solo" data-testid="session-solo-chip" title={t('session.soloPipelineChipTooltip')} className="inline-flex shrink-0 items-center gap-1 cursor-help text-[var(--color-primary)]">
+                            <span className="material-symbols-outlined text-[12px]" aria-hidden="true">linear_scale</span>
+                            {t('session.soloPipelineChip')}
+                          </span>
+                        ),
+                        rePipelineModeForActive && (
+                          <span key="re" data-testid="session-re-chip" title={t('session.rePipelineChipTooltip')} className="inline-flex shrink-0 items-center gap-1 cursor-help text-[var(--color-primary)]">
+                            <span className="material-symbols-outlined text-[12px]" aria-hidden="true">troubleshoot</span>
+                            {t('session.rePipelineChip')}
+                          </span>
                         ),
                       ]
                         .filter((part): part is ReactElement => Boolean(part))
@@ -711,6 +809,12 @@ export function ActiveSession() {
                       isRunning={isActive}
                       compact={showRightPanel}
                     />
+                    {soloPipelineModeForActive && activeTabId && (
+                      <SoloCouncilPanel
+                        sessionId={activeTabId}
+                        compact={showRightPanel}
+                      />
+                    )}
                   </div>
                 </div>
               )}
@@ -729,18 +833,47 @@ export function ActiveSession() {
             </>
           )}
 
-          {activityModel && hasVisibleActivity && isMobileLayout && !isMemberSession && isSessionTabState(activeTabId, activeTabType) ? (
-            <SessionActivityPanel
-              model={activityModel}
-              open={isActivityPanelOpen}
-              onClose={() => closeActivityPanel(activeTabId)}
-              onOpenSubagent={handleOpenSubagentRun}
-              onClearFinishedBackgroundTasks={handleClearFinishedBackgroundTasks}
-              onOpenMember={handleOpenTeamMember}
-              onStopBackgroundTask={handleStopBackgroundTask}
-              stoppingBackgroundTaskIds={stoppingBackgroundTaskIds}
-              placement="overlay"
+          {!unifiedActivityPanelEnabled && !isMemberSession && <SessionTaskBar />}
+
+          {!unifiedActivityPanelEnabled && <TeamStatusBar />}
+
+          {!unifiedActivityPanelEnabled && !isMemberSession && (
+            <BackgroundTasksBar
+              key={activeTabId}
+              tasks={backgroundTasks}
+              compact={showRightPanel}
+              dismissedFinishedTaskKeys={dismissedBackgroundTaskKeys}
+              onClearFinished={(taskKeys) => {
+                if (!activeTabId || taskKeys.length === 0) return
+                setDismissedBackgroundTaskKeysBySession((current) => ({
+                  ...current,
+                  [activeTabId]: new Set([
+                    ...(current[activeTabId] ?? EMPTY_DISMISSED_BACKGROUND_TASK_KEYS),
+                    ...taskKeys,
+                  ]),
+                }))
+              }}
+              onStopTask={(taskId) => stopBackgroundTask(activeTabId, taskId)}
             />
+          )}
+
+          {activityModel && hasVisibleActivity && isMobileLayout && !isMemberSession && isSessionTabState(activeTabId, activeTabType) ? (
+            <>
+              <div className="absolute right-3 top-3 z-30">
+                <SessionActivityButton sessionId={activeTabId} />
+              </div>
+              <SessionActivityPanel
+                model={activityModel}
+                open={isActivityPanelOpen}
+                onClose={() => closeActivityPanel(activeTabId)}
+                onOpenSubagent={handleOpenSubagentRun}
+                onClearFinishedBackgroundTasks={handleClearActivityBackgroundTasks}
+                onOpenMember={handleOpenTeamMember}
+                onStopBackgroundTask={handleStopActivityBackgroundTask}
+                stoppingBackgroundTaskIds={stoppingBackgroundTaskIds}
+                placement="overlay"
+              />
+            </>
           ) : null}
 
           <ChatInput
@@ -782,9 +915,9 @@ export function ActiveSession() {
             open={isActivityPanelOpen}
             onClose={() => closeActivityPanel(activeTabId)}
             onOpenSubagent={handleOpenSubagentRun}
-            onClearFinishedBackgroundTasks={handleClearFinishedBackgroundTasks}
+            onClearFinishedBackgroundTasks={handleClearActivityBackgroundTasks}
             onOpenMember={handleOpenTeamMember}
-            onStopBackgroundTask={handleStopBackgroundTask}
+            onStopBackgroundTask={handleStopActivityBackgroundTask}
             stoppingBackgroundTaskIds={stoppingBackgroundTaskIds}
             placement="rail"
           />
@@ -796,7 +929,7 @@ export function ActiveSession() {
             <aside
               ref={workbenchPanelRef}
               data-testid="workbench-panel"
-              className="flex h-full shrink-0 flex-col bg-[var(--color-surface)]"
+              className="flex h-full shrink-0 flex-col border-l border-[var(--color-border)] bg-[var(--color-surface)]"
               style={{ width: rightPanelWidth, maxWidth: '62%', minWidth: 'min(420px, 54%)' }}
             >
               <WorkbenchPanel sessionId={activeTabId} />
@@ -810,6 +943,45 @@ export function ActiveSession() {
           sessionId={activeTabId}
           request={pendingComputerUsePermission?.request ?? null}
         />
+      ) : null}
+
+      {!isMemberSession && activeTabId && pendingProviderTransition ? (
+        <Modal
+          open
+          onClose={() => useChatStore.getState().cancelProviderTransition(activeTabId)}
+          title={t('chat.providerTransitionTitle')}
+          footer={(
+            <>
+              <button
+                type="button"
+                onClick={() => useChatStore.getState().cancelProviderTransition(activeTabId)}
+                className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]"
+              >
+                {t('chat.providerTransitionCancel')}
+              </button>
+              <button
+                type="button"
+                onClick={() => void useChatStore.getState().confirmProviderTransition(activeTabId)}
+                className="rounded-lg bg-[var(--color-brand)] px-4 py-2 text-sm font-semibold text-white"
+              >
+                {t('chat.providerTransitionConfirm')}
+              </button>
+            </>
+          )}
+        >
+          <p className="text-sm text-[var(--color-text-secondary)]">
+            {t('chat.providerTransitionBody', { count: pendingProviderTransition.messageCount })}
+          </p>
+        </Modal>
+      ) : null}
+
+      {!isMemberSession && runtimeConfigError ? (
+        <div
+          role="alert"
+          className="absolute bottom-20 left-1/2 z-40 max-w-[min(520px,calc(100vw-32px))] -translate-x-1/2 rounded-lg border border-[var(--color-error)]/30 bg-[var(--color-surface-container-lowest)] px-4 py-3 text-sm text-[var(--color-error)] shadow-lg"
+        >
+          {runtimeConfigError.message}
+        </div>
       ) : null}
     </div>
   )

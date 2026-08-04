@@ -24,7 +24,10 @@ export type ClientMessage =
       response: ComputerUsePermissionResponse
     }
   | { type: 'set_permission_mode'; mode: PermissionMode }
-  | ({ type: 'set_runtime_config' } & RuntimeSelection)
+  | ({ type: 'set_runtime_config'; requestId: string } & RuntimeSelection)
+  | { type: 'set_coordinator_mode'; enabled: boolean }
+  | { type: 'set_pipeline_mode'; flavor: 'solo' | 're' | 'normal' }
+  | { type: 'set_handoff_summary'; previousSessionId: string; deep?: boolean }
   | { type: 'stop_generation' }
   | { type: 'stop_background_task'; taskId: string }
   | { type: 'ping' }
@@ -42,7 +45,11 @@ export type AttachmentRef = {
   hunkId?: string
   note?: string
   quote?: string
-  selectionNumber?: number
+}
+
+export type DisplayAttachmentRef = AttachmentRef & {
+  /** UI-only preview URL. Never send to the websocket/server/model payload. */
+  previewUrl?: string
 }
 
 export type PermissionUpdate =
@@ -68,6 +75,7 @@ export type UIAttachment = {
   name: string
   path?: string
   data?: string
+  previewUrl?: string
   mimeType?: string
   isDirectory?: boolean
   lineStart?: number
@@ -76,18 +84,48 @@ export type UIAttachment = {
   hunkId?: string
   note?: string
   quote?: string
-  selectionNumber?: number
 }
 
 // ─── Server → Client ──────────────────────────────────────────────
 
+export type RuntimeConfigResult =
+  | {
+      type: 'runtime_config_result'
+      requestId: string
+      result: 'applied'
+      selection: RuntimeSelection
+    }
+  | {
+      type: 'runtime_config_result'
+      requestId: string
+      result: 'provider_transition_required'
+      sourceSessionId: string
+      sourceProviderId: string | null
+      targetSelection: RuntimeSelection
+      messageCount: number
+      transitionId: string
+    }
+  | {
+      type: 'runtime_config_result'
+      requestId: string
+      result: 'rejected'
+      code: string
+      message: string
+    }
+
+export type ProviderTransitionRequired = Extract<
+  RuntimeConfigResult,
+  { result: 'provider_transition_required' }
+>
+
 export type ServerMessage =
+  | RuntimeConfigResult
   | { type: 'connected'; sessionId: string }
   | { type: 'session_state'; turnState: 'running' | 'idle' }
-  | { type: 'content_start'; blockType: 'text' | 'tool_use'; toolName?: string; toolUseId?: string; originalToolUseId?: string; parentToolUseId?: string }
+  | { type: 'content_start'; blockType: 'text' | 'tool_use'; toolName?: string; toolUseId?: string; parentToolUseId?: string }
   | { type: 'content_delta'; text?: string; toolInput?: string }
-  | { type: 'tool_use_complete'; toolName: string; toolUseId: string; originalToolUseId?: string; input: unknown; parentToolUseId?: string }
-  | { type: 'tool_result'; toolUseId: string; originalToolUseId?: string; content: unknown; isError: boolean; parentToolUseId?: string }
+  | { type: 'tool_use_complete'; toolName: string; toolUseId: string; input: unknown; parentToolUseId?: string }
+  | { type: 'tool_result'; toolUseId: string; content: unknown; isError: boolean; parentToolUseId?: string }
   | {
       type: 'permission_request'
       requestId: string
@@ -116,13 +154,7 @@ export type ServerMessage =
   | { type: 'user_message_replay'; content: string }
   | { type: 'message_complete'; usage: TokenUsage }
   | { type: 'thinking'; text: string }
-  | { type: 'status'; state: ChatState; verb?: string; attemptStart?: boolean }
-  | {
-      type: 'runtime_config_applied'
-      providerId: string | null
-      modelId: string
-      effortLevel?: string
-    }
+  | { type: 'status'; state: ChatState; verb?: string; attemptStart?: boolean; taskId?: string }
   // CLI 回传的权限模式变化（如 ExitPlanMode 退出 plan 后恢复、Shift+Tab）。
   // 桌面端据此把选择器校正回 CLI 的真实权限，避免本地影子值漂移。
   | { type: 'permission_mode_changed'; mode: PermissionMode }
@@ -136,9 +168,18 @@ export type ServerMessage =
       errorMessage?: string
     }
   // 流式请求失败后的恢复状态：可能安全重试流，也可能降级为非流式请求。
-  | { type: 'streaming_fallback'; cause: StreamingFallbackCause }
+  // stream_retry 可附带 attempt 元数据，供桌面显示断流重试横幅（与手动停止区分）。
+  | {
+      type: 'streaming_fallback'
+      cause: StreamingFallbackCause
+      attempt?: number
+      maxRetries?: number
+      retryDelayMs?: number
+      errorMessage?: string
+    }
   | { type: 'error'; message: string; code: string; retryable?: boolean; businessErrorCode?: string }
   | { type: 'background_task_stop_failed'; taskId: string; message: string }
+  | { type: 'background_task_stopped'; taskId: string }
   | { type: 'system_notification'; subtype: string; message?: string; data?: unknown }
   | { type: 'pong' }
   | { type: 'team_update'; teamName: string; members: TeamMemberStatus[] }
@@ -146,6 +187,21 @@ export type ServerMessage =
   | { type: 'team_deleted'; teamName: string }
   | { type: 'task_update'; taskId: string; status: string; progress?: string }
   | { type: 'session_title_updated'; sessionId: string; title: string }
+  /**
+   * Provider-level compatibility event. Sent when the server-side WS
+   * handler observes a provider rejecting an Anthropic-protocol field
+   * with a 4xx — current detection: thinking-incompatible Bedrock
+   * proxies returning "additionalModelRequestFields not supported".
+   * The desktop providerCompatStore records this against the
+   * provider id and shows a "思考不兼容" badge in Settings; cleared
+   * on next provider edit.
+   */
+  | {
+      type: 'provider_compat_event'
+      providerId: string
+      kind: 'thinking_incompatible'
+      reason?: string
+    }
 
 export type TokenUsage = {
   input_tokens: number
@@ -302,7 +358,6 @@ export type UIMessage =
       type: 'tool_use'
       toolName: string
       toolUseId: string
-      originalToolUseId?: string
       input: unknown
       timestamp: number
       parentToolUseId?: string
@@ -310,7 +365,7 @@ export type UIMessage =
       status?: 'stopped'
       partialInput?: string
     }
-  | { id: string; type: 'tool_result'; toolUseId: string; originalToolUseId?: string; content: unknown; isError: boolean; timestamp: number; parentToolUseId?: string }
+  | { id: string; type: 'tool_result'; toolUseId: string; content: unknown; isError: boolean; timestamp: number; parentToolUseId?: string }
   | { id: string; type: 'background_task'; task: BackgroundAgentTask; timestamp: number }
   | { id: string; type: 'system'; content: string; timestamp: number }
   | {

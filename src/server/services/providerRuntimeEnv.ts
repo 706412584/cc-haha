@@ -1,8 +1,8 @@
 import * as fs from 'fs'
 import * as path from 'path'
 
-import { getClaudeCodeModelCapabilities } from '../../shared/modelReasoning.js'
 import { MODEL_CONTEXT_WINDOWS_ENV_KEY } from '../../utils/model/modelContextWindows.js'
+import { isProviderManagedEnvVar } from '../../utils/managedEnvConstants.js'
 import { PROVIDER_PRESETS } from '../config/providerPresets.js'
 import type {
   ApiFormat,
@@ -36,7 +36,9 @@ export const MANAGED_PROVIDER_ENV_KEYS = [
   'ANTHROPIC_AUTH_TOKEN',
   'ENABLE_TOOL_SEARCH',
   'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS',
+  'CLAUDE_CODE_DISABLE_THINKING',
   'ANTHROPIC_MODEL',
+  'ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES',
   'ANTHROPIC_DEFAULT_FABLE_MODEL',
   'ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION',
   'ANTHROPIC_DEFAULT_FABLE_MODEL_NAME',
@@ -56,6 +58,11 @@ export const MANAGED_PROVIDER_ENV_KEYS = [
   GROK_OAUTH_FILE_ENV_KEY,
 ] as const
 
+const CUSTOM_PROVIDER_MODEL_CAPABILITIES =
+  'thinking,effort,adaptive_thinking,xhigh_effort,max_effort'
+const XIAOMI_MIMO_MODEL_CAPABILITIES = 'thinking'
+const KIMI_K3_MODEL_CAPABILITIES = 'thinking,required_thinking,effort,max_effort'
+const KIMI_CODING_FALLBACK_MODEL_CAPABILITIES = 'thinking,required_thinking'
 const AUTH_ENV_KEYS = new Set(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'])
 const MODEL_SLOTS = ['main', 'haiku', 'sonnet', 'opus'] as const
 
@@ -275,25 +282,59 @@ function getPresetModelContextWindows(presetId: string): Record<string, number> 
   return PROVIDER_PRESETS.find((preset) => preset.id === presetId)?.modelContextWindows ?? {}
 }
 
+function isXiaomiMimoProvider(provider: SavedProvider, models: SavedProvider['models']): boolean {
+  const baseUrl = provider.baseUrl.toLowerCase()
+  const modelIds = Object.values(models).map((model) => model.toLowerCase())
+  return (
+    baseUrl.includes('xiaomimimo.com') ||
+    modelIds.some((model) => /^mimo-v\d/i.test(model))
+  )
+}
+
+function getCustomProviderModelCapabilities(
+  provider: SavedProvider,
+  models: SavedProvider['models'],
+): string {
+  if (isXiaomiMimoProvider(provider, models)) {
+    return XIAOMI_MIMO_MODEL_CAPABILITIES
+  }
+  return CUSTOM_PROVIDER_MODEL_CAPABILITIES
+}
+
+function getKimiModelCapabilities(model: string): string {
+  const normalized = model
+    .trim()
+    .replace(/\[1m\]$/i, '')
+    .replace(/:1m$/i, '')
+    .toLowerCase()
+  return normalized === 'k3'
+    ? KIMI_K3_MODEL_CAPABILITIES
+    : KIMI_CODING_FALLBACK_MODEL_CAPABILITIES
+}
+
 function getProviderCapabilityEnv(
   provider: SavedProvider,
   models: SavedProvider['models'],
 ): Record<string, string> {
-  const apiFormat = provider.apiFormat ?? 'anthropic'
-  return {
-    ...(models.fable
-      ? {
-          ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES:
-            getClaudeCodeModelCapabilities(models.fable, apiFormat),
-        }
-      : {}),
-    ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES:
-      getClaudeCodeModelCapabilities(models.haiku, apiFormat),
-    ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES:
-      getClaudeCodeModelCapabilities(models.sonnet, apiFormat),
-    ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES:
-      getClaudeCodeModelCapabilities(models.opus, apiFormat),
+  if (provider.presetId === 'custom') {
+    const capabilities = getCustomProviderModelCapabilities(provider, models)
+    return {
+      ...(models.fable
+        ? { ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES: capabilities }
+        : {}),
+      ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES: capabilities,
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: capabilities,
+      ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES: capabilities,
+    }
   }
+  if (provider.presetId === 'kimi') {
+    return {
+      ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES: getKimiModelCapabilities(models.haiku),
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: getKimiModelCapabilities(models.sonnet),
+      ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES: getKimiModelCapabilities(models.opus),
+    }
+  }
+  return {}
 }
 
 export function buildProviderAuthEnv(
@@ -324,14 +365,25 @@ export function buildProviderAuthEnv(
   }
 }
 
-export function getManagedEnvKeys(): string[] {
-  const keys = new Set<string>(MANAGED_PROVIDER_ENV_KEYS)
-  for (const preset of PROVIDER_PRESETS) {
-    for (const key of Object.keys(preset.defaultEnv ?? {})) {
-      keys.add(key)
-    }
+const managedProviderEnvKeys = new Set<string>(
+  MANAGED_PROVIDER_ENV_KEYS.map((key) => key.toUpperCase()),
+)
+for (const preset of PROVIDER_PRESETS) {
+  for (const key of Object.keys(preset.defaultEnv ?? {})) {
+    managedProviderEnvKeys.add(key.toUpperCase())
   }
-  return [...keys]
+}
+
+export function getManagedEnvKeys(): string[] {
+  return [...managedProviderEnvKeys]
+}
+
+export function isManagedProviderEnvKey(key: string): boolean {
+  const normalizedKey = key.toUpperCase()
+  return (
+    managedProviderEnvKeys.has(normalizedKey) ||
+    isProviderManagedEnvVar(normalizedKey)
+  )
 }
 
 export function buildProviderManagedEnv(
@@ -362,18 +414,47 @@ export function buildProviderManagedEnv(
 
   const presetDefaultEnv = getPresetDefaultEnv(provider.presetId)
   const providerCapabilityEnv = getProviderCapabilityEnv(provider, models)
+  const preset = PROVIDER_PRESETS.find((entry) => entry.id === provider.presetId)
+  const customProviderCapabilities = getCustomProviderModelCapabilities(provider, models)
+  const matchingSlotCapabilities = [
+    ['haiku', 'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES'],
+    ['sonnet', 'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES'],
+    ['opus', 'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES'],
+  ] as const
+  const matchedSlot = matchingSlotCapabilities
+    .find(([slot]) => models[slot].toLowerCase() === models.main.toLowerCase())
+  const matchedSlotCapabilities = matchedSlot
+    ? providerCapabilityEnv[matchedSlot[1]] ?? presetDefaultEnv[matchedSlot[1]]
+    : undefined
+  const mainModelCapabilities = provider.presetId === 'custom'
+    ? customProviderCapabilities
+    : matchedSlotCapabilities
+      ?? (models.main !== preset?.defaultModels.main
+        ? customProviderCapabilities
+        : presetDefaultEnv.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES)
 
   return {
-    ...providerCapabilityEnv,
     ...omitAuthEnv(presetDefaultEnv),
+    ...providerCapabilityEnv,
+    ...(mainModelCapabilities
+      ? { ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES: mainModelCapabilities }
+      : {}),
     ...(provider.autoCompactWindow !== undefined && {
       CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(provider.autoCompactWindow),
     }),
     ...(Object.keys(modelContextWindows).length > 0 && {
       [MODEL_CONTEXT_WINDOWS_ENV_KEY]: JSON.stringify(modelContextWindows),
     }),
-    ...(apiFormat === 'anthropic' && {
-      ENABLE_TOOL_SEARCH: provider.toolSearchEnabled === false ? 'false' : 'true',
+    ...(!needsProxy && { ENABLE_TOOL_SEARCH: String(provider.toolSearchEnabled ?? true) }),
+    // Sticky compatibility flag: when cc-haha previously observed this
+    // provider rejecting Anthropic's `thinking` field with a 4xx (e.g.
+    // Bedrock proxies returning "additionalModelRequestFields not
+    // supported"), force `CLAUDE_CODE_DISABLE_THINKING=1` so subsequent
+    // sidecar launches skip thinking entirely. Cleared automatically by
+    // updateProvider() so editing config gives the new setup a fresh
+    // chance.
+    ...(provider.thinkingIncompatible === true && {
+      CLAUDE_CODE_DISABLE_THINKING: '1',
     }),
     ...(provider.disableExperimentalBetas === true && {
       CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
@@ -391,52 +472,81 @@ export function buildProviderManagedEnv(
   }
 }
 
-export function readActiveProviderManagedEnv(
-  configDir: string,
-  options?: { serverPort?: number },
-): Record<string, string> | null {
+export function applyProviderRuntimeModel(
+  env: Record<string, string>,
+  model: string,
+): void {
+  const normalizedModel = model.trim()
+  const activeCapabilities =
+    env.ANTHROPIC_MODEL?.toLowerCase() === normalizedModel.toLowerCase()
+      ? env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES
+      : undefined
+  env.ANTHROPIC_MODEL = normalizedModel
+
+  const matchingSlot = [
+    ['ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES'],
+    ['ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES'],
+    ['ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES'],
+  ].find(([modelKey]) => env[modelKey]?.toLowerCase() === normalizedModel.toLowerCase())
+
+  const capabilities = activeCapabilities ?? (matchingSlot ? env[matchingSlot[1]!] : undefined)
+  if (capabilities === undefined) {
+    delete env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES
+  } else {
+    env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES = capabilities
+  }
+}
+
+function readProvidersIndex(configDir: string): ProvidersIndex | null {
   try {
     const raw = fs.readFileSync(path.join(configDir, 'cc-haha', 'providers.json'), 'utf-8')
-    const index = normalizeProvidersIndex(JSON.parse(raw))
-    if (!index?.activeId) return null
-
-    if (isOpenAIOfficialProviderId(index.activeId)) {
-      return buildOpenAIOfficialRuntimeEnv()
-    }
-    if (isGrokOfficialProviderId(index.activeId)) {
-      return buildGrokOfficialRuntimeEnv()
-    }
-
-    const provider = index.providers.find((entry) => entry.id === index.activeId)
-    if (!provider) return null
-
-    return buildProviderManagedEnv(provider, {
-      serverPort: options?.serverPort,
-    })
+    return normalizeProvidersIndex(JSON.parse(raw))
   } catch {
     return null
   }
 }
 
+function buildActiveProviderManagedEnv(
+  index: ProvidersIndex,
+  options?: { serverPort?: number },
+): Record<string, string> | null {
+  if (!index.activeId) return null
+
+  if (isOpenAIOfficialProviderId(index.activeId)) {
+    return buildOpenAIOfficialRuntimeEnv()
+  }
+  if (isGrokOfficialProviderId(index.activeId)) {
+    return buildGrokOfficialRuntimeEnv()
+  }
+
+  const provider = index.providers.find((entry) => entry.id === index.activeId)
+  if (!provider) return null
+
+  return buildProviderManagedEnv(provider, {
+    serverPort: options?.serverPort,
+  })
+}
+
+export function readActiveProviderManagedEnv(
+  configDir: string,
+  options?: { serverPort?: number },
+): Record<string, string> | null {
+  const index = readProvidersIndex(configDir)
+  return index ? buildActiveProviderManagedEnv(index, options) : null
+}
+
 export function activeProviderNeedsProxy(configDir: string): boolean {
-  try {
-    const raw = fs.readFileSync(path.join(configDir, 'cc-haha', 'providers.json'), 'utf-8')
-    const index = normalizeProvidersIndex(JSON.parse(raw))
-    if (
-      !index?.activeId ||
-      isOpenAIOfficialProviderId(index.activeId) ||
-      isGrokOfficialProviderId(index.activeId)
-    ) {
-      return false
-    }
-
-    const provider = index.providers.find((entry) => entry.id === index.activeId)
-    if (!provider) return false
-
-    return (provider.apiFormat ?? 'anthropic') !== 'anthropic'
-  } catch {
+  const index = readProvidersIndex(configDir)
+  if (
+    !index?.activeId ||
+    isOpenAIOfficialProviderId(index.activeId) ||
+    isGrokOfficialProviderId(index.activeId)
+  ) {
     return false
   }
+
+  const provider = index.providers.find((entry) => entry.id === index.activeId)
+  return (provider?.apiFormat ?? 'anthropic') !== 'anthropic'
 }
 
 export function mergeActiveProviderManagedEnv(
@@ -444,17 +554,17 @@ export function mergeActiveProviderManagedEnv(
   configDir: string,
   options?: { serverPort?: number },
 ): Record<string, string> {
-  const activeProviderEnv = readActiveProviderManagedEnv(configDir, options)
-  if (!activeProviderEnv) {
-    return settingsEnv
-  }
+  const index = readProvidersIndex(configDir)
+  if (!index) return settingsEnv
 
   const cleanedEnv = { ...settingsEnv }
-  for (const key of getManagedEnvKeys()) {
-    delete cleanedEnv[key]
+  for (const key of Object.keys(cleanedEnv)) {
+    if (isManagedProviderEnvKey(key)) {
+      delete cleanedEnv[key]
+    }
   }
   return {
     ...cleanedEnv,
-    ...activeProviderEnv,
+    ...(buildActiveProviderManagedEnv(index, options) ?? {}),
   }
 }

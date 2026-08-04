@@ -34,6 +34,11 @@ type WorkspaceApiMocks = {
   searchWorkspaceMock: ReturnType<typeof vi.fn>
   getWorkspaceFileMock: ReturnType<typeof vi.fn>
   getWorkspaceDiffMock: ReturnType<typeof vi.fn>
+  saveWorkspaceFileMock: ReturnType<typeof vi.fn>
+  syncWorkspaceLspMock: ReturnType<typeof vi.fn>
+  getWorkspaceLspStateMock: ReturnType<typeof vi.fn>
+  getWorkspaceLspDiagnosticsMock: ReturnType<typeof vi.fn>
+  restartWorkspaceLspMock: ReturnType<typeof vi.fn>
 }
 
 var mocks: WorkspaceApiMocks | undefined
@@ -113,64 +118,6 @@ function findTextNodeContaining(container: Element, text: string) {
   throw new Error(`Unable to find text node containing ${text}`)
 }
 
-async function selectWorkspaceCodeText(
-  view: Awaited<ReturnType<typeof renderPanel>>,
-  startLine: number,
-  startText: string,
-  endLine: number,
-  endText: string,
-) {
-  const code = view.getByTestId('workspace-code')
-  const startRow = code.querySelector(`[data-workspace-line-number="${startLine}"]`)
-  const endRow = code.querySelector(`[data-workspace-line-number="${endLine}"]`)
-  if (!startRow || !endRow) throw new Error('Selection rows were not rendered')
-
-  Object.assign(code.parentElement?.parentElement ?? code, {
-    getBoundingClientRect: () => ({
-      left: 100,
-      top: 24,
-      right: 520,
-      bottom: 420,
-      width: 420,
-      height: 396,
-      x: 100,
-      y: 24,
-      toJSON: () => ({}),
-    }),
-  })
-
-  const startNode = findTextNodeContaining(startRow, startText)
-  const endNode = findTextNodeContaining(endRow, endText)
-  const startOffset = startNode.textContent?.indexOf(startText) ?? -1
-  const endOffset = (endNode.textContent?.indexOf(endText) ?? -1) + endText.length
-  const range = document.createRange()
-  range.setStart(startNode, startOffset)
-  range.setEnd(endNode, endOffset)
-  Object.assign(range, {
-    getBoundingClientRect: () => ({
-      left: 120,
-      top: 100,
-      right: 240,
-      bottom: 118,
-      width: 120,
-      height: 18,
-      x: 120,
-      y: 100,
-      toJSON: () => ({}),
-    }),
-  })
-
-  const selection = window.getSelection()
-  selection?.removeAllRanges()
-  selection?.addRange(range)
-
-  await act(async () => {
-    fireEvent.mouseUp(code, { clientX: 180, clientY: 122 })
-    await Promise.resolve()
-  })
-  await flushReactWork()
-}
-
 async function selectRenderedText(container: Element, text: string, target?: Element) {
   const textNode = findTextNodeContaining(container, text)
   const startOffset = textNode.textContent?.indexOf(text) ?? -1
@@ -215,17 +162,6 @@ async function selectRenderedText(container: Element, text: string, target?: Ele
   await flushReactWork()
 }
 
-function classNameContains(element: Element | null, needle: string) {
-  let current = element
-  while (current) {
-    if (typeof current.className === 'string' && current.className.includes(needle)) {
-      return true
-    }
-    current = current.parentElement
-  }
-  return false
-}
-
 type SvgMeasurementPrototype = SVGElement & {
   getBBox?: () => { x: number; y: number; width: number; height: number }
   getComputedTextLength?: () => number
@@ -263,6 +199,11 @@ vi.mock('../../api/sessions', () => ({
         searchWorkspaceMock: vi.fn(),
         getWorkspaceFileMock: vi.fn(),
         getWorkspaceDiffMock: vi.fn(),
+        saveWorkspaceFileMock: vi.fn(),
+        syncWorkspaceLspMock: vi.fn(),
+        getWorkspaceLspStateMock: vi.fn(),
+        getWorkspaceLspDiagnosticsMock: vi.fn(),
+        restartWorkspaceLspMock: vi.fn(),
       }
     }
 
@@ -272,6 +213,11 @@ vi.mock('../../api/sessions', () => ({
       searchWorkspace: mocks.searchWorkspaceMock,
       getWorkspaceFile: mocks.getWorkspaceFileMock,
       getWorkspaceDiff: mocks.getWorkspaceDiffMock,
+      saveWorkspaceFile: mocks.saveWorkspaceFileMock,
+      syncWorkspaceLsp: mocks.syncWorkspaceLspMock,
+      getWorkspaceLspState: mocks.getWorkspaceLspStateMock,
+      getWorkspaceLspDiagnostics: mocks.getWorkspaceLspDiagnosticsMock,
+      restartWorkspaceLsp: mocks.restartWorkspaceLspMock,
     }
   })(),
 }))
@@ -294,15 +240,69 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useWorkspaceChatContextStore } from '../../stores/workspaceChatContextStore'
 import { useWorkspacePanelStore } from '../../stores/workspacePanelStore'
+import { useTabStore } from '../../stores/tabStore'
 import { useUIStore } from '../../stores/uiStore'
-import { getServerBaseUrl } from '../../lib/desktopRuntime'
+import type { LspUnavailableReason } from '../../types/lsp'
 import { WorkspacePanel } from './WorkspacePanel'
+
+async function prepareUnavailableLspPreview(
+  sessionId: string,
+  reason: LspUnavailableReason,
+) {
+  await setWorkspaceState((state) => ({
+    ...state,
+    panelBySession: {
+      ...state.panelBySession,
+      [sessionId]: { isOpen: true, activeView: 'all', hasUserSelectedView: true },
+    },
+    statusBySession: {
+      ...state.statusBySession,
+      [sessionId]: {
+        state: 'ok',
+        workDir: '/repo',
+        repoName: 'repo',
+        branch: 'main',
+        isGitRepo: true,
+        changedFiles: [],
+      },
+    },
+    previewTabsBySession: {
+      ...state.previewTabsBySession,
+      [sessionId]: [{
+        id: 'file:src/app.ts',
+        path: 'src/app.ts',
+        kind: 'file',
+        title: 'app.ts',
+        language: 'typescript',
+        content: 'export const app = true',
+        state: 'ok',
+        size: 23,
+      }],
+    },
+    activePreviewTabIdBySession: {
+      ...state.activePreviewTabIdBySession,
+      [sessionId]: 'file:src/app.ts',
+    },
+    lspStateBySession: {
+      ...state.lspStateBySession,
+      [sessionId]: {
+        state: 'unavailable',
+        path: 'src/app.ts',
+        serverName: 'typescript-language-server',
+        command: 'typescript-language-server',
+        reason,
+      },
+    },
+  }))
+}
 
 describe('WorkspacePanel', () => {
   const workspaceInitialState = useWorkspacePanelStore.getInitialState()
   const workspaceChatInitialState = useWorkspaceChatContextStore.getInitialState()
   const settingsInitialState = useSettingsStore.getInitialState()
   const chatInitialState = useChatStore.getInitialState()
+  const tabInitialState = useTabStore.getInitialState()
+  const uiInitialState = useUIStore.getInitialState()
 
   beforeEach(async () => {
     vi.clearAllMocks()
@@ -310,6 +310,13 @@ describe('WorkspacePanel', () => {
     await setWorkspaceState(workspaceInitialState)
     useChatStore.setState(chatInitialState, true)
     useWorkspaceChatContextStore.setState(workspaceChatInitialState, true)
+    useTabStore.setState(tabInitialState, true)
+    useUIStore.setState({
+      ...uiInitialState,
+      activeSettingsTab: 'providers',
+      pendingSettingsTab: null,
+      toasts: [],
+    }, true)
     await setSettingsState({ ...settingsInitialState, locale: 'en' })
 
     getMocks().getWorkspaceStatusMock.mockImplementation(async (sessionId: string) =>
@@ -329,6 +336,27 @@ describe('WorkspacePanel', () => {
         entries: [],
       },
     )
+    getMocks().saveWorkspaceFileMock.mockResolvedValue({
+      ok: true,
+      hash: 'a'.repeat(64),
+      bytes: 0,
+      timestamp: Date.now(),
+    })
+    getMocks().syncWorkspaceLspMock.mockResolvedValue({
+      state: { state: 'ready', path: 'src/app.ts', serverName: 'custom:lsp', command: 'example-lsp' },
+    })
+    getMocks().getWorkspaceLspStateMock.mockResolvedValue({
+      state: { state: 'ready', path: 'src/app.ts', serverName: 'custom:lsp', command: 'example-lsp' },
+    })
+    getMocks().restartWorkspaceLspMock.mockResolvedValue({
+      state: { state: 'ready', path: 'src/app.ts', serverName: 'custom:lsp', command: 'example-lsp' },
+    })
+    getMocks().getWorkspaceLspDiagnosticsMock.mockResolvedValue({
+      state: 'ready',
+      diagnostics: [],
+      diagnosticsTotal: 0,
+      diagnosticsTruncated: false,
+    })
   })
 
   afterEach(async () => {
@@ -336,6 +364,8 @@ describe('WorkspacePanel', () => {
     await setWorkspaceState(workspaceInitialState)
     useChatStore.setState(chatInitialState, true)
     useWorkspaceChatContextStore.setState(workspaceChatInitialState, true)
+    useTabStore.setState(tabInitialState, true)
+    useUIStore.setState(uiInitialState, true)
     await setSettingsState(settingsInitialState)
     vi.restoreAllMocks()
   })
@@ -371,6 +401,7 @@ describe('WorkspacePanel', () => {
 
     await act(() => {
       useWorkspacePanelStore.getState().openPanel('session-changed')
+      useWorkspacePanelStore.getState().setActiveView('session-changed', 'changed')
     })
 
     const view = await renderPanel('session-changed')
@@ -426,7 +457,8 @@ describe('WorkspacePanel', () => {
     await waitFor(() => {
       expect(view.getByTestId('workspace-code').textContent).toContain('console.log("new")')
     })
-    expect(view.queryByRole('tablist', { name: 'Preview tabs' })).toBeNull()
+    expect(view.getByRole('tablist', { name: 'Preview tabs' })).toBeTruthy()
+    expect(view.getByLabelText('Close tab app.ts Diff')).toBeTruthy()
     const previewHeader = view.getByTestId('workspace-preview-header')
     expect(previewHeader.textContent).toContain('src/app.ts')
     expect(previewHeader.textContent).toContain('+4')
@@ -671,7 +703,7 @@ describe('WorkspacePanel', () => {
     expect(view.getByText('next.ts')).toBeTruthy()
   })
 
-  it('refreshes status on open and switches back to changed files when new changes exist', async () => {
+  it('R5: refreshes status on open without overriding the all-files view when new changes exist', async () => {
     getMocks().getWorkspaceStatusMock.mockResolvedValue({
       state: 'ok',
       workDir: '/repo',
@@ -720,10 +752,14 @@ describe('WorkspacePanel', () => {
     await waitFor(() => {
       expect(getMocks().getWorkspaceStatusMock).toHaveBeenCalledWith('session-stale-all')
     })
+    // R5: even when refreshed status reports new changed files, the active view stays on 'all'.
     await waitFor(() => {
-      expect(view.getByRole('button', { name: 'Changed files' })).toBeTruthy()
+      expect(useWorkspacePanelStore.getState().statusBySession['session-stale-all']?.changedFiles).toEqual([
+        expect.objectContaining({ path: 'src/Fresh.ts' }),
+      ])
     })
-    expect(view.container.querySelector('[data-workspace-file-path="src/Fresh.ts"]')).toBeTruthy()
+    expect(useWorkspacePanelStore.getState().getActiveView('session-stale-all')).toBe('all')
+    expect(view.getByRole('button', { name: 'All files' })).toBeTruthy()
   })
 
   it('loads workspace status when opened while the chat is running', async () => {
@@ -753,6 +789,7 @@ describe('WorkspacePanel', () => {
 
     await act(() => {
       useWorkspacePanelStore.getState().openPanel('session-running-open')
+      useWorkspacePanelStore.getState().setActiveView('session-running-open', 'changed')
     })
 
     const view = await renderPanel('session-running-open')
@@ -790,6 +827,7 @@ describe('WorkspacePanel', () => {
 
     await act(() => {
       useWorkspacePanelStore.getState().openPanel('session-non-git')
+      useWorkspacePanelStore.getState().setActiveView('session-non-git', 'changed')
     })
 
     const view = await renderPanel('session-non-git')
@@ -809,7 +847,7 @@ describe('WorkspacePanel', () => {
     })
   })
 
-  it('opens to all files when the current turn has no changed files', async () => {
+  it('R5: opens to all files by default regardless of changed-file count', async () => {
     const statusRequest = deferred<{
       state: 'ok'
       workDir: string
@@ -832,7 +870,8 @@ describe('WorkspacePanel', () => {
     })
 
     const view = await renderPanel('session-empty-tree')
-    expect(view.getByRole('button', { name: 'Changed files' })).toBeTruthy()
+    // R5: default view is 'all' — the toggle button should reflect that immediately.
+    expect(view.getByRole('button', { name: 'All files' })).toBeTruthy()
 
     await act(async () => {
       statusRequest.resolve({
@@ -961,7 +1000,8 @@ describe('WorkspacePanel', () => {
     await clickElement(view.getByRole('button', { name: 'Show file navigator' }))
     const searchInput = view.getByPlaceholderText('Search all files...') as HTMLInputElement
     expect(searchInput.value).toBe('MentalHealthTrendController')
-    expect(view.getByText('MentalHealthTrendController.java')).toBeTruthy()
+    const searchResults = view.getByRole('list', { name: 'File search results' })
+    expect(searchResults.textContent).toContain('MentalHealthTrendController.java')
     await waitFor(() => {
       expect(document.activeElement).toBe(searchInput)
     })
@@ -1128,10 +1168,8 @@ describe('WorkspacePanel', () => {
 
     const view = await renderPanel('session-tree')
 
-    expect(view.getByRole('button', { name: 'Changed files' })).toBeTruthy()
-
-    await clickElement(view.getByRole('button', { name: 'Changed files' }))
-    await clickElement(view.getByRole('menuitem', { name: 'All files' }))
+    // R5: default view is 'all', so the all-files tree loads without a manual toggle.
+    expect(view.getByRole('button', { name: 'All files' })).toBeTruthy()
 
     await waitFor(() => {
       expect(getMocks().getWorkspaceTreeMock).toHaveBeenCalledWith('session-tree', '')
@@ -1198,8 +1236,68 @@ describe('WorkspacePanel', () => {
     })
 
     await waitFor(() => {
-      expect(view.getByTestId('workspace-code').textContent).toContain('export const ready = true')
+      expect(view.getByTestId('workspace-editor-path').textContent).toContain('src/index.ts')
     })
+  })
+
+  it('opens Settings Plugins when the LSP prerequisite is missing', async () => {
+    const sessionId = 'session-lsp-install'
+    await prepareUnavailableLspPreview(sessionId, 'prereq-missing')
+    getMocks().syncWorkspaceLspMock.mockReturnValueOnce(new Promise(() => {}))
+
+    const view = await renderPanel(sessionId)
+    await clickElement(view.getByTestId('lsp-status-install'))
+
+    expect(useUIStore.getState().pendingSettingsTab).toBe('plugins')
+    expect(useTabStore.getState().activeTabId).toBe('__settings__')
+    expect(useTabStore.getState().tabs).toContainEqual(expect.objectContaining({
+      sessionId: '__settings__',
+      type: 'settings',
+    }))
+  })
+
+  it('refreshes LSP state and diagnostics after a successful retry', async () => {
+    const sessionId = 'session-lsp-retry'
+    await prepareUnavailableLspPreview(sessionId, 'crashed')
+    getMocks().syncWorkspaceLspMock.mockReturnValueOnce(new Promise(() => {}))
+
+    const view = await renderPanel(sessionId)
+    await clickElement(view.getByTestId('lsp-status-retry'))
+
+    await waitFor(() => {
+      expect(getMocks().restartWorkspaceLspMock).toHaveBeenCalledWith(sessionId, {
+        path: 'src/app.ts',
+      })
+      expect(getMocks().getWorkspaceLspStateMock).toHaveBeenCalledWith(
+        sessionId,
+        'src/app.ts',
+        undefined,
+      )
+      expect(getMocks().getWorkspaceLspDiagnosticsMock).toHaveBeenCalledWith(
+        sessionId,
+        'src/app.ts',
+        expect.objectContaining({ refresh: true }),
+      )
+    })
+  })
+
+  it('shows the restart failure without running refresh requests', async () => {
+    const sessionId = 'session-lsp-retry-failure'
+    await prepareUnavailableLspPreview(sessionId, 'spawn-failed')
+    getMocks().syncWorkspaceLspMock.mockReturnValueOnce(new Promise(() => {}))
+    getMocks().restartWorkspaceLspMock.mockRejectedValueOnce(new Error('LSP restart failed'))
+
+    const view = await renderPanel(sessionId)
+    await clickElement(view.getByTestId('lsp-status-retry'))
+
+    await waitFor(() => {
+      expect(useUIStore.getState().toasts).toContainEqual(expect.objectContaining({
+        type: 'error',
+        message: 'LSP restart failed',
+      }))
+    })
+    expect(getMocks().getWorkspaceLspStateMock).not.toHaveBeenCalled()
+    expect(getMocks().getWorkspaceLspDiagnosticsMock).not.toHaveBeenCalled()
   })
 
   it('renders multiple preview tabs and closes only the exact requested tab', async () => {
@@ -1501,19 +1599,20 @@ describe('WorkspacePanel', () => {
 
     const view = await renderPanel('session-dark-theme')
     const panel = view.getByTestId('workspace-panel')
+    const tabList = view.getByRole('tablist', { name: 'Preview tabs' })
     const previewHeader = view.getByTestId('workspace-preview-header')
-    const codeSurface = view.getByTestId('workspace-code')
+    const editorPath = await view.findByTestId('workspace-editor-path')
 
     expect(panel.className).toContain('bg-[var(--color-surface)]')
     expect(panel.className).not.toContain('bg-white')
-    expect(view.queryByRole('tablist', { name: 'Preview tabs' })).toBeNull()
+    expect(tabList.className).toContain('bg-[var(--color-surface-container-lowest)]')
+    expect(tabList.className).not.toContain('bg-white')
     expect(previewHeader.className).toContain('bg-[var(--color-surface)]')
     expect(previewHeader.className).not.toContain('bg-white')
     const addToChatLabel = Array.from(previewHeader.querySelectorAll('span'))
       .find((element) => element.textContent === 'Add to chat')
     expect(addToChatLabel?.className).toContain('hidden min-[960px]:inline')
-    expect(classNameContains(codeSurface, 'bg-[var(--color-code-bg)]')).toBe(true)
-    expect(classNameContains(codeSurface, 'bg-white')).toBe(false)
+    expect(editorPath.className).toContain('text-[var(--color-text)]')
   })
 
   it('syntax highlights Java source previews instead of rendering them as plain text', async () => {
@@ -1573,6 +1672,7 @@ describe('WorkspacePanel', () => {
     }))
 
     const view = await renderPanel(sessionId)
+    await clickElement(view.getByTestId('workspace-file-preview-toggle'))
     await waitFor(() => {
       expect(view.getByTestId('workspace-code').getAttribute('data-highlight-engine')).toBe('shiki')
     })
@@ -1695,11 +1795,8 @@ describe('WorkspacePanel', () => {
     expect(diffSurface.textContent).toContain(longDiffLine)
   })
 
-  it('can expand long file previews beyond the default rendered line cap', async () => {
-    const longFile = Array.from(
-      { length: workspacePreviewLineLimitForTests + 3 },
-      (_, index) => `const line${index + 1} = ${index + 1}`,
-    ).join('\n')
+  it('opens long file previews in the editor by default', async () => {
+    const longFile = Array.from({ length: 2300 }, (_, index) => `const line${index + 1} = ${index + 1}`).join('\n')
 
     await setWorkspaceState((state) => ({
       ...state,
@@ -1730,18 +1827,11 @@ describe('WorkspacePanel', () => {
     }))
 
     const view = await renderPanel('session-large-file-preview')
-    const highlightedCode = view.getByTestId('workspace-code').textContent ?? ''
 
-    expect(highlightedCode).toContain('const line1 = 1')
-    expect(highlightedCode).toContain('const line20 = 20')
-    expect(highlightedCode).not.toContain('const line21 = 21')
-    await clickElement(view.getByRole('button', { name: 'Show all loaded lines' }))
-
-    await waitFor(() => {
-      expect(view.getByTestId('workspace-code').textContent).toContain('const line23 = 23')
-    })
-    expect(view.getByRole('button', { name: 'Collapse preview' })).toBeTruthy()
-  })
+    expect(await view.findByTestId('workspace-editor-path')).toBeTruthy()
+    expect(view.getByTestId('workspace-editor-path').textContent).toContain('large-file.ts')
+    expect(view.queryByTestId('workspace-code')).toBeNull()
+  }, 60_000)
 
   it('marks the revealed line when a reference carries one', async () => {
     // #1146: clicking `src/app.ts:3` in the chat has to land on line 3, not just
@@ -1917,21 +2007,22 @@ describe('WorkspacePanel', () => {
     expect(view.getByText('Done')).toBeTruthy()
     expect(view.container.textContent).toContain('export const ok = true')
     expect(view.queryByTestId('workspace-code')).toBeNull()
+    expect(view.queryByTestId('workspace-editor-path')).toBeNull()
   })
 
-  it('resolves relative and remote markdown preview images to loadable URLs', async () => {
+  it('opens ordinary text files in the editor by default', async () => {
     await setWorkspaceState((state) => ({
       ...state,
       panelBySession: {
         ...state.panelBySession,
-        'session-markdown-images': {
+        'session-text-editor': {
           isOpen: true,
           activeView: 'all',
         },
       },
       statusBySession: {
         ...state.statusBySession,
-        'session-markdown-images': {
+        'session-text-editor': {
           state: 'ok',
           workDir: '/repo',
           repoName: 'repo',
@@ -1942,46 +2033,202 @@ describe('WorkspacePanel', () => {
       },
       previewTabsBySession: {
         ...state.previewTabsBySession,
-        'session-markdown-images': [{
-          id: 'file:docs/guide.md',
-          path: 'docs/guide.md',
+        'session-text-editor': [{
+          id: 'file:src/app.ts',
+          path: 'src/app.ts',
           kind: 'file',
-          title: 'guide.md',
-          language: 'markdown',
-          content: [
-            '# Guide',
-            '',
-            '![logo](assets/logo.png)',
-            '![banner](../shared/banner.png)',
-            '![badge](https://img.shields.io/badge/stars-1k.svg)',
-            '![absolute](/repo/docs/raw.png)',
-            '![inline](data:image/png;base64,AAAA)',
-          ].join('\n'),
+          title: 'app.ts',
+          language: 'typescript',
+          content: 'export const ok = true\n',
           state: 'ok',
-          size: 160,
+          size: 23,
         }],
       },
       activePreviewTabIdBySession: {
         ...state.activePreviewTabIdBySession,
-        'session-markdown-images': 'file:docs/guide.md',
+        'session-text-editor': 'file:src/app.ts',
       },
     }))
 
-    const view = await renderPanel('session-markdown-images')
+    const view = await renderPanel('session-text-editor')
 
-    const base = getServerBaseUrl()
-    const images = await waitFor(() => {
-      const found = Array.from(view.container.querySelectorAll('img'))
-      expect(found).toHaveLength(5)
-      return found
+    expect(await view.findByTestId('workspace-editor-path')).toBeTruthy()
+    expect(view.getByTestId('workspace-editor-path').textContent).toContain('src/app.ts')
+    expect(view.queryByTestId('workspace-code')).toBeNull()
+  })
+
+  it('switches markdown previews into edit mode', async () => {
+    await setWorkspaceState((state) => ({
+      ...state,
+      panelBySession: {
+        ...state.panelBySession,
+        'session-markdown-edit': {
+          isOpen: true,
+          activeView: 'all',
+        },
+      },
+      statusBySession: {
+        ...state.statusBySession,
+        'session-markdown-edit': {
+          state: 'ok',
+          workDir: '/repo',
+          repoName: 'repo',
+          branch: 'main',
+          isGitRepo: true,
+          changedFiles: [],
+        },
+      },
+      previewTabsBySession: {
+        ...state.previewTabsBySession,
+        'session-markdown-edit': [{
+          id: 'file:README.md',
+          path: 'README.md',
+          kind: 'file',
+          title: 'README.md',
+          language: 'markdown',
+          content: '# Editable Notes\n',
+          state: 'ok',
+          size: 17,
+        }],
+      },
+      activePreviewTabIdBySession: {
+        ...state.activePreviewTabIdBySession,
+        'session-markdown-edit': 'file:README.md',
+      },
+    }))
+
+    const view = await renderPanel('session-markdown-edit')
+
+    expect(view.getByRole('heading', { name: 'Editable Notes', level: 1 })).toBeTruthy()
+    await clickElement(view.getByTestId('workspace-markdown-edit-toggle'))
+
+    expect(await view.findByTestId('workspace-editor-path')).toBeTruthy()
+    expect(view.getByTestId('workspace-editor-path').textContent).toContain('README.md')
+  })
+
+  it('guards dirty tab closes from the preview tab button', async () => {
+    await setWorkspaceState((state) => ({
+      ...state,
+      panelBySession: {
+        ...state.panelBySession,
+        'session-dirty-close': {
+          isOpen: true,
+          activeView: 'all',
+        },
+      },
+      statusBySession: {
+        ...state.statusBySession,
+        'session-dirty-close': {
+          state: 'ok',
+          workDir: '/repo',
+          repoName: 'repo',
+          branch: 'main',
+          isGitRepo: true,
+          changedFiles: [],
+        },
+      },
+      previewTabsBySession: {
+        ...state.previewTabsBySession,
+        'session-dirty-close': [{
+          id: 'file:src/app.ts',
+          path: 'src/app.ts',
+          kind: 'file',
+          title: 'app.ts',
+          language: 'typescript',
+          content: 'export const ok = true\n',
+          state: 'ok',
+          size: 23,
+        }],
+      },
+      activePreviewTabIdBySession: {
+        ...state.activePreviewTabIdBySession,
+        'session-dirty-close': 'file:src/app.ts',
+      },
+    }))
+
+    const view = await renderPanel('session-dirty-close')
+    await waitFor(() => {
+      expect(useWorkspacePanelStore.getState().bufferStateByTabId['file:src/app.ts']).toBeDefined()
     })
-    expect(images.map((image) => image.getAttribute('src'))).toEqual([
-      `${base}/preview-fs/session-markdown-images/docs/assets/logo.png`,
-      `${base}/preview-fs/session-markdown-images/shared/banner.png`,
-      'https://img.shields.io/badge/stars-1k.svg',
-      `${base}/local-file/repo/docs/raw.png`,
-      'data:image/png;base64,AAAA',
-    ])
+    await act(async () => {
+      useWorkspacePanelStore.getState().setBufferState('file:src/app.ts', 'edited')
+      await Promise.resolve()
+    })
+
+    await clickElement(view.getByLabelText(/Close tab app\.ts file/i))
+
+    expect(view.getByTestId('unsaved-changes-modal')).toBeTruthy()
+    expect(useWorkspacePanelStore.getState().previewTabsBySession['session-dirty-close']).toHaveLength(1)
+
+    await clickElement(view.getByTestId('unsaved-changes-cancel'))
+    expect(useWorkspacePanelStore.getState().previewTabsBySession['session-dirty-close']).toHaveLength(1)
+  })
+
+  it('saves dirty tabs from the close guard before closing', async () => {
+    await setWorkspaceState((state) => ({
+      ...state,
+      panelBySession: {
+        ...state.panelBySession,
+        'session-dirty-save-close': {
+          isOpen: true,
+          activeView: 'all',
+        },
+      },
+      statusBySession: {
+        ...state.statusBySession,
+        'session-dirty-save-close': {
+          state: 'ok',
+          workDir: '/repo',
+          repoName: 'repo',
+          branch: 'main',
+          isGitRepo: true,
+          changedFiles: [],
+        },
+      },
+      previewTabsBySession: {
+        ...state.previewTabsBySession,
+        'session-dirty-save-close': [{
+          id: 'file:src/app.ts',
+          path: 'src/app.ts',
+          kind: 'file',
+          title: 'app.ts',
+          language: 'typescript',
+          content: 'export const ok = true\n',
+          state: 'ok',
+          size: 23,
+        }],
+      },
+      activePreviewTabIdBySession: {
+        ...state.activePreviewTabIdBySession,
+        'session-dirty-save-close': 'file:src/app.ts',
+      },
+    }))
+
+    const view = await renderPanel('session-dirty-save-close')
+    await waitFor(() => {
+      expect(useWorkspacePanelStore.getState().bufferStateByTabId['file:src/app.ts']).toBeDefined()
+    })
+    await act(async () => {
+      useWorkspacePanelStore.getState().setBufferState('file:src/app.ts', 'edited')
+      await Promise.resolve()
+    })
+
+    await clickElement(view.getByLabelText(/Close tab app\.ts file/i))
+    await clickElement(view.getByTestId('unsaved-changes-save'))
+
+    await waitFor(() => {
+      expect(getMocks().saveWorkspaceFileMock).toHaveBeenCalledWith('session-dirty-save-close', expect.objectContaining({
+        path: 'src/app.ts',
+        content: 'edited',
+      }))
+      expect(useWorkspacePanelStore.getState().previewTabsBySession['session-dirty-save-close']).toBeUndefined()
+      expect(getMocks().syncWorkspaceLspMock).toHaveBeenCalledWith('session-dirty-save-close', {
+        path: 'src/app.ts',
+        content: 'edited',
+        event: 'save',
+      })
+      expect(getMocks().getWorkspaceStatusMock).toHaveBeenCalled()
+    })
   })
 
   it('renders Mermaid diagrams in markdown file previews when labels contain HTML breaks and braces', async () => {
@@ -2399,7 +2646,7 @@ describe('WorkspacePanel', () => {
     }
   })
 
-  it('adds a line comment from a code preview to the chat context', async () => {
+  it('does not expose code-preview line comments for files opened in the editor', async () => {
     await setWorkspaceState((state) => ({
       ...state,
       panelBySession: {
@@ -2441,25 +2688,8 @@ describe('WorkspacePanel', () => {
 
     const view = await renderPanel('session-line-comment')
 
-    await clickElement(view.getByRole('button', { name: 'Comment line 1' }))
-    const textarea = view.getByPlaceholderText('Describe what should change here...')
-    await act(() => {
-      fireEvent.change(textarea, { target: { value: 'Rename this title' } })
-    })
-    await clickElement(view.getByRole('button', { name: 'Add comment' }))
-
-    expect(useWorkspaceChatContextStore.getState().referencesBySession['session-line-comment']).toMatchObject([
-      {
-        kind: 'code-comment',
-        path: 'src/App.tsx',
-        absolutePath: '/repo/src/App.tsx',
-        name: 'App.tsx',
-        lineStart: 1,
-        lineEnd: 1,
-        note: 'Rename this title',
-        quote: 'const title = "Todo"',
-      },
-    ])
+    expect(await view.findByTestId('workspace-editor-path')).toBeTruthy()
+    expect(view.queryByRole('button', { name: 'Comment line 1' })).toBeNull()
   })
 
   it('adds a Shift-selected line range comment from a code preview to the chat context', async () => {
@@ -2503,6 +2733,10 @@ describe('WorkspacePanel', () => {
     }))
 
     const view = await renderPanel('session-line-range-comment')
+    await clickElement(view.getByTestId('workspace-file-preview-toggle'))
+    await waitFor(() => {
+      expect(view.getByTestId('workspace-code').getAttribute('data-highlight-engine')).toBe('shiki')
+    })
     const firstLine = view.getByRole('button', { name: 'Comment line 1' })
     const secondLine = view.getByRole('button', { name: 'Comment line 2' })
     const thirdLine = view.getByRole('button', { name: 'Comment line 3' })
@@ -2579,18 +2813,13 @@ describe('WorkspacePanel', () => {
     const otherComposerShell = document.createElement('div')
     otherComposerShell.dataset.testid = 'chat-input-shell'
     otherComposerShell.dataset.sessionId = 'another-session'
-    const otherComposer = document.createElement('div')
-    otherComposer.setAttribute('data-composer-editor', 'true')
-    otherComposer.tabIndex = -1
-    otherComposerShell.append(otherComposer)
+    otherComposerShell.append(document.createElement('textarea'))
     document.body.append(otherComposerShell)
 
     const composerShell = document.createElement('div')
     composerShell.dataset.testid = 'chat-input-shell'
     composerShell.dataset.sessionId = 'session-diff-comment'
-    const composer = document.createElement('div')
-    composer.setAttribute('data-composer-editor', 'true')
-    composer.tabIndex = -1
+    const composer = document.createElement('textarea')
     composerShell.append(composer)
     document.body.append(composerShell)
 
@@ -2624,7 +2853,7 @@ describe('WorkspacePanel', () => {
     otherComposerShell.remove()
   })
 
-  it('adds selected code from a preview to the chat context without requiring a note', async () => {
+  it('does not expose code-preview selection actions for files opened in the editor', async () => {
     await setWorkspaceState((state) => ({
       ...state,
       panelBySession: {
@@ -2666,25 +2895,12 @@ describe('WorkspacePanel', () => {
 
     const view = await renderPanel('session-code-selection')
 
-    await selectWorkspaceCodeText(view, 1, 'const title = "Todo"', 2, 'export default title')
-    const addButtons = view.getAllByRole('button', { name: 'Add to chat' })
-    await clickElement(addButtons[addButtons.length - 1]!)
-
-    expect(useWorkspaceChatContextStore.getState().referencesBySession['session-code-selection']).toMatchObject([
-      {
-        kind: 'code-selection',
-        path: 'src/App.ts',
-        absolutePath: '/repo/src/App.ts',
-        name: 'App.ts',
-        lineStart: 1,
-        lineEnd: 2,
-        quote: 'const title = "Todo"\nexport default title',
-      },
-    ])
-    expect(useWorkspaceChatContextStore.getState().referencesBySession['session-code-selection']?.[0]?.note).toBeUndefined()
+    expect(await view.findByTestId('workspace-editor-path')).toBeTruthy()
+    expect(view.queryByTestId('workspace-code')).toBeNull()
+    expect(view.getAllByRole('button', { name: 'Add to chat' })).toHaveLength(1)
   })
 
-  it('keeps the selected-code action near the preview instead of the file tree', async () => {
+  it('keeps only the header add-to-chat action for files opened in the editor', async () => {
     await setWorkspaceState((state) => ({
       ...state,
       panelBySession: {
@@ -2726,21 +2942,12 @@ describe('WorkspacePanel', () => {
 
     const view = await renderPanel('session-selection-position')
 
-    await selectWorkspaceCodeText(view, 1, 'const title = "Todo"', 1, 'const title = "Todo"')
-    const addButtons = view.getAllByRole('button', { name: 'Add to chat' })
-    const floatingAddButton = addButtons[addButtons.length - 1]!
-
-    expect(floatingAddButton.style.left).toBe('101px')
-    expect(floatingAddButton.style.top).toBe('46px')
-
-    fireEvent.keyDown(view.getByTestId('workspace-code').parentElement?.parentElement ?? view.getByTestId('workspace-code'), {
-      key: 'Escape',
-    })
-    await flushReactWork()
-    expect(view.queryAllByRole('button', { name: 'Add to chat' })).toHaveLength(1)
+    expect(await view.findByTestId('workspace-editor-path')).toBeTruthy()
+    expect(view.queryByTestId('workspace-code')).toBeNull()
+    expect(view.getAllByRole('button', { name: 'Add to chat' })).toHaveLength(1)
   })
 
-  it('dismisses the selected-code action when clicking outside the popover', async () => {
+  it('does not render a selected-code popover for files opened in the editor', async () => {
     await setWorkspaceState((state) => ({
       ...state,
       panelBySession: {
@@ -2782,17 +2989,8 @@ describe('WorkspacePanel', () => {
 
     const view = await renderPanel('session-selection-dismiss')
 
-    await selectWorkspaceCodeText(view, 1, 'const title = "Todo"', 1, 'const title = "Todo"')
-    expect(view.getAllByRole('button', { name: 'Add to chat' })).toHaveLength(2)
-
-    await act(async () => {
-      fireEvent.pointerDown(document.body)
-      await Promise.resolve()
-    })
-    await flushReactWork()
-
+    expect(await view.findByTestId('workspace-editor-path')).toBeTruthy()
     expect(view.queryAllByRole('button', { name: 'Add to chat' })).toHaveLength(1)
-    expect(window.getSelection()?.toString()).toBe('')
   })
 
   it('adds selected markdown text from a preview to the chat context', async () => {

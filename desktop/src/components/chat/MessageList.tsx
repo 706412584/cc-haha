@@ -29,7 +29,7 @@ import {
   type ConversationNavigationItem,
   type ConversationNavigationMode,
 } from './ConversationNavigator'
-import type { AgentTaskNotification, BackgroundAgentTask, UIMessage } from '../../types/chat'
+import type { AgentTaskNotification, UIMessage } from '../../types/chat'
 import { formatTokenCount } from '../../lib/formatTokenCount'
 import { formatDurationMs, hasRunningBackgroundTasks as hasAnyRunningBackgroundTasks } from '../../lib/backgroundTasks'
 import { buildTurnCompletionByMessageId, type TurnCompletion } from '../../lib/turnCompletion'
@@ -56,7 +56,13 @@ type BackgroundTaskEvent = Extract<UIMessage, { type: 'background_task' }>
 type CompactSummaryEvent = Extract<UIMessage, { type: 'compact_summary' }>
 
 type RenderItem =
-  | { kind: 'tool_group'; toolCalls: ToolCall[]; id: string }
+  | {
+      kind: 'tool_group'
+      toolCalls: ToolCall[]
+      id: string
+      resultContentWeight: number
+      resultMetricSignature: string
+    }
   | { kind: 'message'; message: UIMessage }
 
 type RenderModel = {
@@ -109,18 +115,12 @@ function getElementForNode(node: Node | null): Element | null {
   return node.nodeType === Node.ELEMENT_NODE ? node as Element : node.parentElement
 }
 
-function getChatSelectionPosition(
-  range: Range,
-  root: HTMLElement,
-  selection: Selection,
-  pointer: { clientX: number; clientY: number },
-) {
+function getChatSelectionPosition(range: Range, root: HTMLElement, pointer: { clientX: number; clientY: number }) {
   return getSelectionPopoverPosition(range, root, {
     menuWidth: CHAT_SELECTION_MENU_WIDTH,
     menuHeight: CHAT_SELECTION_MENU_HEIGHT,
     offset: CHAT_SELECTION_MENU_OFFSET,
     fallbackPointer: pointer,
-    selectionFocus: { node: selection.focusNode, offset: selection.focusOffset },
   })
 }
 
@@ -143,7 +143,7 @@ function getChatSelectionFromContainer(
   if (!text) return null
 
   return {
-    ...getChatSelectionPosition(range, root, selection, pointer),
+    ...getChatSelectionPosition(range, root, pointer),
     text,
   }
 }
@@ -153,14 +153,6 @@ function getSelectionPointer(event: SelectionPointer): SelectionPointer {
     clientX: event.clientX,
     clientY: event.clientY,
   }
-}
-
-function isPrimarySelectionPointer(event: Pick<PointerEvent, 'button' | 'ctrlKey' | 'pointerType'>) {
-  return event.button === 0 && !(event.pointerType === 'mouse' && event.ctrlKey)
-}
-
-function isKeyboardSelectionKey(event: KeyboardEvent) {
-  return event.shiftKey && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)
 }
 
 function ChatSelectionMenu({
@@ -179,9 +171,7 @@ function ChatSelectionMenu({
     <button
       ref={popoverRef}
       type="button"
-      onMouseDown={(event) => {
-        if (event.button === 0 && !event.ctrlKey) event.preventDefault()
-      }}
+      onMouseDown={(event) => event.preventDefault()}
       onClick={onAdd}
       className="fixed z-[var(--z-popover)] inline-flex h-11 items-center gap-2 rounded-full border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-5 text-[15px] font-semibold text-[var(--color-text-primary)] shadow-[var(--shadow-overlay)] transition-colors hover:bg-[var(--color-surface)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
       style={{ left: selection.x, top: selection.y }}
@@ -454,9 +444,6 @@ function SelectableChatMessage({
   const rootRef = useRef<HTMLDivElement>(null)
   const selectionMenuRef = useRef<HTMLButtonElement>(null)
   const lastSelectionPointerRef = useRef<SelectionPointer | null>(null)
-  const selectionGestureEpochRef = useRef(0)
-  const selectionStartedInsideRef = useRef(false)
-  const selectionUpdateAuthorizedRef = useRef(false)
   const selectionUpdateFrameRef = useRef<number | null>(null)
   const addReference = useWorkspaceChatContextStore((state) => state.addReference)
   const [selectionMenu, setSelectionMenu] = useState<ChatSelectionState | null>(null)
@@ -465,21 +452,10 @@ function SelectableChatMessage({
     ? t('chat.assistantMessageReference')
     : t('chat.userMessageReference')
 
-  const cancelPendingSelectionMenuUpdate = useCallback(() => {
-    selectionGestureEpochRef.current += 1
-    if (selectionUpdateFrameRef.current !== null) {
-      window.cancelAnimationFrame(selectionUpdateFrameRef.current)
-      selectionUpdateFrameRef.current = null
-    }
-  }, [])
-
   useEffect(() => {
-    cancelPendingSelectionMenuUpdate()
     setSelectionMenu(null)
     lastSelectionPointerRef.current = null
-    selectionStartedInsideRef.current = false
-    selectionUpdateAuthorizedRef.current = false
-  }, [cancelPendingSelectionMenuUpdate, content, messageId])
+  }, [content, messageId])
 
   const dismissSelectionMenu = useCallback(() => {
     setSelectionMenu(null)
@@ -492,16 +468,9 @@ function SelectableChatMessage({
       window.cancelAnimationFrame(selectionUpdateFrameRef.current)
     }
 
-    const gestureEpoch = selectionGestureEpochRef.current
     selectionUpdateFrameRef.current = window.requestAnimationFrame(() => {
-      if (gestureEpoch !== selectionGestureEpochRef.current) {
-        selectionUpdateFrameRef.current = null
-        return
-      }
       selectionUpdateFrameRef.current = window.requestAnimationFrame(() => {
         selectionUpdateFrameRef.current = null
-        if (gestureEpoch !== selectionGestureEpochRef.current || !selectionUpdateAuthorizedRef.current) return
-
         const root = rootRef.current
         const rootRect = root?.getBoundingClientRect()
         const fallbackPointer = lastSelectionPointerRef.current ?? {
@@ -523,58 +492,38 @@ function SelectableChatMessage({
 
   useEffect(() => {
     const handlePointerDown = (event: PointerEvent) => {
-      cancelPendingSelectionMenuUpdate()
-      const root = rootRef.current
-      const target = event.target
-      const startsInside = isPrimarySelectionPointer(event)
-        && target instanceof Node
-        && Boolean(root?.contains(target))
-      selectionStartedInsideRef.current = startsInside
-      selectionUpdateAuthorizedRef.current = startsInside
-      if (startsInside) lastSelectionPointerRef.current = getSelectionPointer(event)
+      lastSelectionPointerRef.current = getSelectionPointer(event)
     }
 
     const handlePointerUp = (event: PointerEvent) => {
-      if (!selectionStartedInsideRef.current || !isPrimarySelectionPointer(event)) return
-      selectionStartedInsideRef.current = false
-      selectionUpdateAuthorizedRef.current = true
+      queueSelectionMenuUpdate(getSelectionPointer(event))
+    }
+
+    const handleMouseUp = (event: MouseEvent) => {
       queueSelectionMenuUpdate(getSelectionPointer(event))
     }
 
     const handleSelectionChange = () => {
-      if (selectionStartedInsideRef.current || !selectionUpdateAuthorizedRef.current) return
       queueSelectionMenuUpdate()
     }
 
-    const handleKeyUp = (event: KeyboardEvent) => {
-      if (!isKeyboardSelectionKey(event)) return
-      cancelPendingSelectionMenuUpdate()
-      lastSelectionPointerRef.current = null
-      selectionStartedInsideRef.current = false
-      selectionUpdateAuthorizedRef.current = true
+    const handleKeyUp = () => {
       queueSelectionMenuUpdate()
-    }
-
-    const handleContextMenu = () => {
-      cancelPendingSelectionMenuUpdate()
-      selectionStartedInsideRef.current = false
-      selectionUpdateAuthorizedRef.current = false
-      setSelectionMenu(null)
     }
 
     document.addEventListener('pointerdown', handlePointerDown, true)
     document.addEventListener('pointerup', handlePointerUp, true)
+    document.addEventListener('mouseup', handleMouseUp, true)
     document.addEventListener('selectionchange', handleSelectionChange)
     document.addEventListener('keyup', handleKeyUp, true)
-    document.addEventListener('contextmenu', handleContextMenu, true)
     return () => {
       document.removeEventListener('pointerdown', handlePointerDown, true)
       document.removeEventListener('pointerup', handlePointerUp, true)
+      document.removeEventListener('mouseup', handleMouseUp, true)
       document.removeEventListener('selectionchange', handleSelectionChange)
       document.removeEventListener('keyup', handleKeyUp, true)
-      document.removeEventListener('contextmenu', handleContextMenu, true)
     }
-  }, [cancelPendingSelectionMenuUpdate, queueSelectionMenuUpdate])
+  }, [queueSelectionMenuUpdate])
 
   useSelectionPopoverDismiss({
     active: Boolean(selectionMenu),
@@ -600,6 +549,13 @@ function SelectableChatMessage({
     <div
       ref={rootRef}
       data-chat-selectable-message={role}
+      onPointerDown={(event) => {
+        if (event.pointerType === 'mouse' && event.button !== 0) return
+        lastSelectionPointerRef.current = getSelectionPointer(event)
+      }}
+      onMouseUp={(event) => {
+        queueSelectionMenuUpdate(getSelectionPointer(event))
+      }}
       onKeyDown={(event) => {
         if (event.key === 'Escape') setSelectionMenu(null)
       }}
@@ -634,10 +590,18 @@ export function buildRenderModel(messages: UIMessage[], activeAskUserQuestionToo
 
   const flushGroup = () => {
     if (pendingToolCalls.length > 0) {
+      const resultMessages = pendingToolCalls
+        .map((toolCall) => toolResultMap.get(toolCall.toolUseId))
+        .filter((result): result is ToolResult => Boolean(result))
       items.push({
         kind: 'tool_group',
         toolCalls: [...pendingToolCalls],
         id: `group-${pendingToolCalls[0]!.id}`,
+        resultContentWeight: resultMessages.reduce(
+          (total, result) => total + getMessageContentWeight(result),
+          0,
+        ),
+        resultMetricSignature: resultMessages.map(getMessageMetricSignature).join('|'),
       })
       pendingToolCalls = []
     }
@@ -843,7 +807,6 @@ function buildTurnCardInsertionMap(
 
   const cardsByRenderIndex = new Map<number, TurnChangeCardModel[]>()
   turnChangeCards.forEach((card) => {
-    if (card.checkpoint.code.filesChanged.length === 0) return
     const renderIndex =
       lastResponseIndexByTurnId.get(card.target.messageId) ??
       userIndexByTurnId.get(card.target.messageId)
@@ -871,7 +834,9 @@ function buildChangedFilesByRenderIndex(
 ): Map<number, string[]> {
   const filesByTurnId = new Map<string, string[]>()
   for (const card of turnChangeCards) {
-    filesByTurnId.set(card.target.messageId, card.checkpoint.code.filesChanged)
+    if (card.checkpoint.code.filesChanged.length > 0) {
+      filesByTurnId.set(card.target.messageId, card.checkpoint.code.filesChanged)
+    }
   }
   if (filesByTurnId.size === 0) return new Map()
 
@@ -991,7 +956,9 @@ type MessageListProps = {
   mobileLayout?: boolean
 }
 
-const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 48
+const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 120
+const LIGHT_REVIEW_DISTANCE_PX = 600
+const LIGHT_REVIEW_AUTO_RESUME_MS = 5_000
 const SCROLL_BOTTOM_SENTINEL = 1_000_000_000
 const MAX_SCROLL_SNAPSHOTS = 100
 const VIRTUALIZE_MIN_RENDER_ITEMS = 120
@@ -1301,7 +1268,10 @@ function getMessageContentWeight(message: UIMessage): number {
 
 function getRenderItemContentWeight(item: RenderItem): number {
   if (item.kind === 'message') return getMessageContentWeight(item.message)
-  return item.toolCalls.reduce((total, toolCall) => total + getMessageContentWeight(toolCall), 0)
+  return item.toolCalls.reduce(
+    (total, toolCall) => total + getMessageContentWeight(toolCall),
+    item.resultContentWeight,
+  )
 }
 
 export function shouldVirtualizeRenderItems(
@@ -1383,9 +1353,9 @@ function getMessageMetricSignature(message: UIMessage): string {
     case 'system':
       return `${message.type}:${message.content.length}`
     case 'tool_use':
-      return `${message.type}:${message.toolName}:${message.toolUseId}:${message.partialInput?.length ?? 0}:${message.isPending ? 1 : 0}:${message.status ?? ''}`
+      return `${message.type}:${message.toolName}:${message.toolUseId}:${message.partialInput?.length ?? 0}:${message.isPending ? 1 : 0}`
     case 'tool_result':
-      return `${message.type}:${message.toolUseId}:${message.isError ? 1 : 0}`
+      return `${message.type}:${message.toolUseId}:${message.isError ? 1 : 0}:${getMessageContentWeight(message)}`
     case 'compact_summary':
       return `${message.type}:${message.phase ?? ''}:${message.title.length}:${message.summary?.length ?? 0}`
     case 'goal_event':
@@ -1405,7 +1375,10 @@ function getMessageMetricSignature(message: UIMessage): string {
 
 function getRenderItemMetricSignature(item: RenderItem): string {
   if (item.kind === 'message') return getMessageMetricSignature(item.message)
-  return item.toolCalls.map(getMessageMetricSignature).join('|')
+  return [
+    item.toolCalls.map(getMessageMetricSignature).join('|'),
+    item.resultMetricSignature,
+  ].filter(Boolean).join('|')
 }
 
 function findVirtualStartIndex(offsets: number[], target: number) {
@@ -1636,19 +1609,12 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
   const streamingToolInput = sessionState?.streamingToolInput ?? ''
   const activeThinkingId = sessionState?.activeThinkingId ?? null
   const agentTaskNotifications = sessionState?.agentTaskNotifications ?? EMPTY_AGENT_TASK_NOTIFICATIONS
-  const backgroundAgentTasks = sessionState?.backgroundAgentTasks
-  const agentTaskStatuses = useMemo<Record<string, BackgroundAgentTask['status']>>(() => {
-    const statuses: Record<string, BackgroundAgentTask['status']> = {}
-    for (const task of Object.values(backgroundAgentTasks ?? {})) {
-      if (task.toolUseId) statuses[task.toolUseId] = task.status
-    }
-    return statuses
-  }, [backgroundAgentTasks])
-  const hasRunningBackgroundTasks = hasAnyRunningBackgroundTasks(backgroundAgentTasks)
+  const hasRunningBackgroundTasks = hasAnyRunningBackgroundTasks(sessionState?.backgroundAgentTasks)
   const pendingPermissions = listPendingPermissions(sessionState)
   const activeAskUserQuestionToolUseId =
     pendingPermissions
       .find((permission) => permission.toolName === 'AskUserQuestion')?.toolUseId ?? null
+  const isSessionRunning = chatState !== 'idle'
   const hasPendingPermissionCard = pendingPermissions.some(
     (permission) => permission.toolName !== 'AskUserQuestion',
   )
@@ -1678,12 +1644,16 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
   const lastAutoScrollAtRef = useRef(0)
   const lastContentResizeFollowHeightRef = useRef<number | null>(null)
   const shouldAutoScrollRef = useRef(true)
+  const lastObservedScrollTopRef = useRef<number | null>(null)
+  const lastUserInteractionAtRef = useRef<number | null>(null)
+  const lightReviewResumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const isProgrammaticScrollingRef = useRef(false)
   const ignoreProgrammaticScrollUntilRef = useRef(0)
   const ignoreProgrammaticScrollTopRef = useRef<number | null>(null)
   const userScrollIntentUntilRef = useRef(0)
   const lastSessionIdRef = useRef<string | null | undefined>(undefined)
   const lastTailMessageIdBySessionRef = useRef(new Map<string, string | null>())
+  const lastAutoScrollMessageCountBySessionRef = useRef(new Map<string, number>())
   const t = useTranslation()
   const [turnChangeCards, setTurnChangeCards] = useState<TurnChangeCardModel[]>([])
   const [turnChangeLoadError, setTurnChangeLoadError] = useState<string | null>(null)
@@ -1692,14 +1662,13 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
   const [branchingMessageId, setBranchingMessageId] = useState<string | null>(null)
   const [rewindingTurnId, setRewindingTurnId] = useState<string | null>(null)
   const [turnUndoConfirmTargetId, setTurnUndoConfirmTargetId] = useState<string | null>(null)
-  const [isAwayFromLatest, setIsAwayFromLatest] = useState(false)
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false)
   const [virtualViewport, setVirtualViewport] = useState<VirtualViewport>({
     scrollTop: SCROLL_BOTTOM_SENTINEL,
     viewportHeight: VIRTUAL_DEFAULT_VIEWPORT_HEIGHT,
   })
   const [measuredItemsVersion, setMeasuredItemsVersion] = useState(0)
   const [highlightedNavigationItemKey, setHighlightedNavigationItemKey] = useState<string | null>(null)
-  const [programmaticNavigationItemId, setProgrammaticNavigationItemId] = useState<string | null>(null)
   const [activeConversationFindMatch, setActiveConversationFindMatch] = useState<ConversationFindMatch | null>(null)
   const conversationFindMatchesRef = useRef<ConversationFindMatch[]>([])
   const [messageListWidth, setMessageListWidth] = useState<number | null>(null)
@@ -1717,6 +1686,9 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
   useEffect(() => () => {
     if (measureFlushFrameRef.current !== null) {
       cancelAnimationFrame(measureFlushFrameRef.current)
+    }
+    if (lightReviewResumeTimerRef.current !== null) {
+      clearTimeout(lightReviewResumeTimerRef.current)
     }
     if (navigationHighlightTimerRef.current !== null) {
       window.clearTimeout(navigationHighlightTimerRef.current)
@@ -1778,6 +1750,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     if (container) {
       setScrollToBottomWithoutLayoutRead(container, behavior)
       requestedScrollTop = container.scrollTop
+      lastObservedScrollTopRef.current = requestedScrollTop
       ignoreProgrammaticScrollTopRef.current = requestedScrollTop
     }
     setVirtualViewport((current) => ({
@@ -1790,7 +1763,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
         wasAtBottom: true,
       })
     }
-    setIsAwayFromLatest(false)
+    setShowJumpToLatest(false)
     // Reset flag after the scroll event(s) from scrollIntoView have fired
     requestAnimationFrame(() => {
       const latestContainer = scrollContainerRef.current
@@ -1850,9 +1823,12 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     // prevent the jump-to-latest button from flickering during auto-scroll.
     const container = scrollContainerRef.current
     if (!container) return
+    const currentScrollTop = container.scrollTop
+    const previousScrollTop = lastObservedScrollTopRef.current
+    lastObservedScrollTopRef.current = currentScrollTop
     const matchesProgrammaticScrollTop =
       ignoreProgrammaticScrollTopRef.current !== null &&
-      Math.abs(container.scrollTop - ignoreProgrammaticScrollTopRef.current) < 1
+      Math.abs(currentScrollTop - ignoreProgrammaticScrollTopRef.current) < 1
     const shouldIgnoreRecentProgrammaticScroll =
       matchesProgrammaticScrollTop &&
       (
@@ -1863,9 +1839,6 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
       syncVirtualViewportFromContainer(container)
       return
     }
-    if (performance.now() < userScrollIntentUntilRef.current) {
-      setProgrammaticNavigationItemId(null)
-    }
     syncVirtualViewportFromContainer(container)
     const isAtBottom = isNearScrollBottom(container)
     const isPermissionLayoutShift =
@@ -1875,13 +1848,58 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
       performance.now() >= userScrollIntentUntilRef.current
     if (isPermissionLayoutShift) return
 
-    shouldAutoScrollRef.current = isAtBottom
-    setIsAwayFromLatest(!isAtBottom)
+    if (isAtBottom) {
+      shouldAutoScrollRef.current = true
+      setShowJumpToLatest(false)
+      if (lightReviewResumeTimerRef.current !== null) {
+        clearTimeout(lightReviewResumeTimerRef.current)
+        lightReviewResumeTimerRef.current = null
+      }
+    } else {
+      const userScrolledUp = previousScrollTop !== null && currentScrollTop < previousScrollTop - 1
+      if (userScrolledUp) {
+        shouldAutoScrollRef.current = false
+        lastUserInteractionAtRef.current = performance.now()
+        setShowJumpToLatest(true)
+        const distanceFromBottom = container.scrollHeight - currentScrollTop - container.clientHeight
+        if (isSessionRunning && distanceFromBottom <= LIGHT_REVIEW_DISTANCE_PX) {
+          if (lightReviewResumeTimerRef.current !== null) {
+            clearTimeout(lightReviewResumeTimerRef.current)
+          }
+          lightReviewResumeTimerRef.current = setTimeout(() => {
+            const latestContainer = scrollContainerRef.current
+            if (!latestContainer || shouldAutoScrollRef.current) return
+            const latestDistanceFromBottom = latestContainer.scrollHeight - latestContainer.scrollTop - latestContainer.clientHeight
+            const lastInteractionAt = lastUserInteractionAtRef.current
+            if (
+              latestDistanceFromBottom <= LIGHT_REVIEW_DISTANCE_PX &&
+              lastInteractionAt !== null &&
+              performance.now() - lastInteractionAt >= LIGHT_REVIEW_AUTO_RESUME_MS
+            ) {
+              scrollToBottom('smooth')
+            }
+          }, LIGHT_REVIEW_AUTO_RESUME_MS)
+        } else if (lightReviewResumeTimerRef.current !== null) {
+          clearTimeout(lightReviewResumeTimerRef.current)
+          lightReviewResumeTimerRef.current = null
+        }
+      } else if (shouldAutoScrollRef.current) {
+        setShowJumpToLatest(false)
+      } else {
+        setShowJumpToLatest(true)
+      }
+    }
 
     if (resolvedSessionId) {
       rememberSessionScroll(resolvedSessionId, container)
     }
-  }, [hasPendingPermissionCard, resolvedSessionId, syncVirtualViewportFromContainer])
+  }, [
+    hasPendingPermissionCard,
+    isSessionRunning,
+    resolvedSessionId,
+    scrollToBottom,
+    syncVirtualViewportFromContainer,
+  ])
 
   const markUserScrollIntent = useCallback(() => {
     userScrollIntentUntilRef.current = performance.now() + USER_SCROLL_INTENT_WINDOW_MS
@@ -1891,7 +1909,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     markUserScrollIntent()
     if (event.deltaY < 0) {
       shouldAutoScrollRef.current = false
-      setIsAwayFromLatest(true)
+      setShowJumpToLatest(true)
     }
   }, [markUserScrollIntent])
 
@@ -1911,16 +1929,20 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     markUserScrollIntent()
     if (isUpwardScrollKey) {
       shouldAutoScrollRef.current = false
-      setIsAwayFromLatest(true)
+      setShowJumpToLatest(true)
     }
   }, [markUserScrollIntent])
 
   useLayoutEffect(() => {
     if (lastSessionIdRef.current !== resolvedSessionId) {
+      if (lightReviewResumeTimerRef.current !== null) {
+        clearTimeout(lightReviewResumeTimerRef.current)
+        lightReviewResumeTimerRef.current = null
+      }
+      lastUserInteractionAtRef.current = null
       const snapshot = resolvedSessionId ? sessionScrollSnapshots.get(resolvedSessionId) : undefined
       shouldAutoScrollRef.current = snapshot?.wasAtBottom ?? true
       lastSessionIdRef.current = resolvedSessionId
-      setProgrammaticNavigationItemId(null)
       virtualItemHeightsRef.current = resolvedSessionId
         ? getHeightsForSession(resolvedSessionId)
         : new Map<string, number>()
@@ -1940,11 +1962,12 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
         ignoreProgrammaticScrollUntilRef.current = performance.now() + 250
         ignoreProgrammaticScrollTopRef.current = snapshot.scrollTop
         setScrollTopWithoutLayoutRead(container, snapshot.scrollTop)
+        lastObservedScrollTopRef.current = snapshot.scrollTop
         setVirtualViewport((current) => ({
           scrollTop: snapshot.scrollTop,
           viewportHeight: container.clientHeight || current.viewportHeight || VIRTUAL_DEFAULT_VIEWPORT_HEIGHT,
         }))
-        setIsAwayFromLatest(true)
+        setShowJumpToLatest(true)
       } else if (container) {
         // Switch to a session we were at the bottom of (or first visit): write
         // the bottom sentinel without going through scrollToBottom's read path,
@@ -1954,11 +1977,12 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
         lastAutoScrollAtRef.current = performance.now()
         shouldAutoScrollRef.current = true
         setScrollToBottomWithoutLayoutRead(container, 'auto')
+        lastObservedScrollTopRef.current = container.scrollTop
         setVirtualViewport((current) => ({
           scrollTop: SCROLL_BOTTOM_SENTINEL,
           viewportHeight: container.clientHeight || current.viewportHeight || VIRTUAL_DEFAULT_VIEWPORT_HEIGHT,
         }))
-        setIsAwayFromLatest(false)
+        setShowJumpToLatest(false)
         if (resolvedSessionId) {
           sessionScrollSnapshots.set(resolvedSessionId, {
             scrollTop: container.scrollTop,
@@ -1976,6 +2000,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
   const tailMessage = messages[messages.length - 1] ?? null
   const tailMessageId = tailMessage?.id ?? null
   const tailMessageType = tailMessage?.type ?? null
+  const tailMessageMetricSignature = tailMessage ? getMessageMetricSignature(tailMessage) : null
 
   useEffect(() => {
     if (!resolvedSessionId) return
@@ -1990,16 +2015,31 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
   }, [resolvedSessionId, scrollToBottom, tailMessageId, tailMessageType])
 
   useEffect(() => {
+    if (!resolvedSessionId) return
+
+    const previousMessageCount = lastAutoScrollMessageCountBySessionRef.current.get(resolvedSessionId)
+    lastAutoScrollMessageCountBySessionRef.current.set(resolvedSessionId, messages.length)
+    const messageCountChanged = previousMessageCount === undefined || previousMessageCount !== messages.length
+    if (!isSessionRunning && !messageCountChanged) return
+
     if (!shouldAutoScrollRef.current) {
-      setIsAwayFromLatest(true)
+      setShowJumpToLatest(true)
       return
     }
 
     scrollToBottom('auto')
-  }, [messages.length, resolvedSessionId, scrollToBottom, streamingText, streamingToolInput])
+  }, [
+    isSessionRunning,
+    messages.length,
+    resolvedSessionId,
+    scrollToBottom,
+    streamingText,
+    streamingToolInput,
+    tailMessageId,
+    tailMessageMetricSignature,
+  ])
 
   const handleJumpToLatest = useCallback(() => {
-    setProgrammaticNavigationItemId(null)
     scrollToBottom('auto')
   }, [scrollToBottom])
 
@@ -2079,8 +2119,8 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     [renderItems, visibleTurnChangeCards],
   )
   const changedFilesByRenderIndex = useMemo(
-    () => buildChangedFilesByRenderIndex(renderItems, turnChangeCards),
-    [renderItems, turnChangeCards],
+    () => buildChangedFilesByRenderIndex(renderItems, visibleTurnChangeCards),
+    [renderItems, visibleTurnChangeCards],
   )
   const renderItemKeys = useMemo(
     () => renderItems.map(getRenderItemKey),
@@ -2103,7 +2143,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     }),
     [renderItemKeys, renderItems],
   )
-  const conversationNavigationItems = useMemo(() => {
+  const conversationNavigationHistoryItems = useMemo(() => {
     const sources = renderItems.flatMap((item, renderIndex) => item.kind === 'message'
       ? [{
           message: item.message,
@@ -2114,6 +2154,26 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
 
     return buildConversationNavigationItems(sources)
   }, [renderItems])
+  const streamingConversationNavigationItem = useMemo(() => {
+    if (!streamingText.trim()) return null
+
+    return buildConversationNavigationItems([{
+      message: {
+        id: `${STREAMING_ASSISTANT_NAVIGATION_KEY}-${resolvedSessionId ?? 'session'}`,
+        type: 'assistant_text',
+        content: streamingText,
+        timestamp: 0,
+      },
+      renderIndex: renderItems.length,
+      renderItemKey: STREAMING_ASSISTANT_NAVIGATION_KEY,
+    }])[0] ?? null
+  }, [renderItems, resolvedSessionId, streamingText])
+  const conversationNavigationItems = useMemo(
+    () => streamingConversationNavigationItem
+      ? [...conversationNavigationHistoryItems, streamingConversationNavigationItem]
+      : conversationNavigationHistoryItems,
+    [conversationNavigationHistoryItems, streamingConversationNavigationItem],
+  )
   const virtualTranscriptWindow = useMemo(
     () => buildVirtualTranscriptWindow(
       renderItems,
@@ -2126,20 +2186,14 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     [measuredItemsVersion, renderItemKeys, renderItemMetrics, renderItems, virtualViewport],
   )
   const activeConversationNavigationItemId = useMemo(
-    () => isAwayFromLatest
-      ? getActiveConversationNavigationItemId(
-          conversationNavigationItems,
-          virtualTranscriptWindow.offsets,
-          virtualViewport.scrollTop,
-          virtualViewport.viewportHeight,
-        )
-      : null,
-    [conversationNavigationItems, isAwayFromLatest, virtualTranscriptWindow.offsets, virtualViewport],
+    () => getActiveConversationNavigationItemId(
+      conversationNavigationItems,
+      virtualTranscriptWindow.offsets,
+      virtualViewport.scrollTop,
+      virtualViewport.viewportHeight,
+    ),
+    [conversationNavigationItems, virtualTranscriptWindow.offsets, virtualViewport],
   )
-  const visibleConversationNavigationItemId =
-    programmaticNavigationItemId && conversationNavigationItems.some((item) => item.id === programmaticNavigationItemId)
-      ? programmaticNavigationItemId
-      : activeConversationNavigationItemId
   const conversationNavigationMode: ConversationNavigationMode =
     messageListWidth === null || messageListWidth >= CONVERSATION_NAVIGATION_FULL_MIN_WIDTH_PX
       ? 'full'
@@ -2229,7 +2283,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
             const target =
               targetByMessageId.get(checkpoint.target.targetUserMessageId) ??
               targetByUserMessageIndex.get(checkpoint.target.userMessageIndex)
-            if (!target || !checkpoint.code.available) {
+            if (!target || !checkpoint.code.available || checkpoint.code.filesChanged.length === 0) {
               return []
             }
             return [{
@@ -2376,8 +2430,9 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     if (!container) return
 
     const viewportHeight = container.clientHeight || virtualViewport.viewportHeight || VIRTUAL_DEFAULT_VIEWPORT_HEIGHT
-    userScrollIntentUntilRef.current = 0
-    setProgrammaticNavigationItemId(item.id)
+    const isTranscriptTail =
+      item.renderItemKey === STREAMING_ASSISTANT_NAVIGATION_KEY ||
+      item.renderIndex === renderItems.length - 1
     setHighlightedNavigationItemKey(item.renderItemKey)
 
     const scheduleHighlightClear = () => {
@@ -2390,6 +2445,12 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
       }, 1400)
     }
 
+    if (isTranscriptTail) {
+      scrollToBottom('auto')
+      requestAnimationFrame(scheduleHighlightClear)
+      return
+    }
+
     const targetScrollTop = getConversationNavigationTargetScrollTop(
       item,
       virtualTranscriptWindow.offsets,
@@ -2400,7 +2461,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     const isNearby = Math.abs(container.scrollTop - targetScrollTop) <= viewportHeight * 1.25
 
     shouldAutoScrollRef.current = false
-    setIsAwayFromLatest(true)
+    setShowJumpToLatest(true)
     ignoreProgrammaticScrollUntilRef.current = performance.now() + 250
     ignoreProgrammaticScrollTopRef.current = targetScrollTop
 
@@ -2431,6 +2492,8 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
       scheduleHighlightClear()
     })
   }, [
+    renderItems.length,
+    scrollToBottom,
     syncVirtualViewportFromContainer,
     virtualTranscriptWindow.offsets,
     virtualTranscriptWindow.totalHeight,
@@ -2451,7 +2514,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
 
     setActiveConversationFindMatch(match)
     shouldAutoScrollRef.current = false
-    setIsAwayFromLatest(true)
+    setShowJumpToLatest(true)
     ignoreProgrammaticScrollUntilRef.current = performance.now() + 250
     ignoreProgrammaticScrollTopRef.current = targetScrollTop
     setScrollTopWithoutLayoutRead(container, targetScrollTop)
@@ -2621,7 +2684,6 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
             resultMap={toolResultMap}
             childToolCallsByParent={childToolCallsByParent}
             agentTaskNotifications={agentTaskNotifications}
-            agentTaskStatuses={agentTaskStatuses}
             isStreaming={
               chatState === 'tool_executing' &&
               item.toolCalls.some((tc) => !toolResultMap.has(tc.toolUseId))
@@ -2671,6 +2733,11 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
         onPointerDown={markUserScrollIntent}
         onTouchStart={markUserScrollIntent}
         onKeyDown={handleKeyDownScrollIntent}
+        role="log"
+        aria-live="polite"
+        aria-label={t('chat.messageLog')}
+        aria-relevant="additions"
+        aria-atomic="false"
         className={`${CHAT_SCROLL_AREA_CLASS} h-full overflow-y-auto ${chatScrollPaddingClass}`}
       >
         <div
@@ -2710,7 +2777,10 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
           ) : null}
 
           {streamingText.trim() && (
-            <div data-chat-render-item-key={STREAMING_ASSISTANT_NAVIGATION_KEY}>
+            <div
+              data-chat-render-item-key={STREAMING_ASSISTANT_NAVIGATION_KEY}
+              className={highlightedNavigationItemKey === STREAMING_ASSISTANT_NAVIGATION_KEY ? 'chat-render-item--navigation-target' : ''}
+            >
               <AssistantMessage content={streamingText} isStreaming={chatState === 'streaming'} />
             </div>
           )}
@@ -2741,12 +2811,12 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
         <ConversationNavigator
           mode={conversationNavigationMode}
           items={conversationNavigationItems}
-          activeItemId={visibleConversationNavigationItemId}
+          activeItemId={activeConversationNavigationItemId}
           onNavigate={handleNavigateToConversationItem}
         />
       ) : null}
 
-      {isAwayFromLatest && (
+      {showJumpToLatest && (
         <Button
           variant="secondary"
           size="md"
@@ -2868,11 +2938,11 @@ export const MessageBlock = memo(function MessageBlock({
       // other tool call takes.
       return (
         <ToolCallBlock
+          status={message.status}
           toolName={message.toolName}
           input={message.input}
           result={toolResult}
           isPending={message.isPending}
-          status={message.status}
           partialInput={message.partialInput}
           agentTaskNotification={
             message.toolName === 'Agent'

@@ -16,8 +16,8 @@ type Props = {
   compact?: boolean
   /**
    * Bump to force an immediate refresh that bypasses the auto-refresh
-   * throttle and any stale in-flight request. Used after context compaction
-   * and after a replacement runtime confirms it has started.
+   * throttle and any in-flight (possibly pre-compact) request. Used after
+   * context compaction so the meter recovers right away (#743).
    */
   refreshNonce?: number
 }
@@ -28,9 +28,12 @@ const ACTIVE_REFRESH_MS = 30_000
 // racing a client abort that can strand loopback sockets on Windows.
 const CONTEXT_REQUEST_TIMEOUT_MS = 30_000
 const AUTO_REFRESH_MIN_INTERVAL_MS = 10_000
-// Right after a completed turn, compaction, or runtime restart the CLI can
-// still be settling, so retry the event-driven refresh once.
+// Right after a compaction the CLI may still be busy finishing the turn, so
+// the forced refresh can time out — retry once instead of keeping the stale
+// pre-compact percentage on screen.
 const FORCED_REFRESH_RETRY_MS = 5_000
+const FORCED_REFRESH_MAX_ATTEMPTS = 3
+const IDLE_RECOVERY_REFRESH_MS = 3_000
 
 function formatNumber(value: number | undefined) {
   return new Intl.NumberFormat().format(value ?? 0)
@@ -69,13 +72,8 @@ function isDocumentVisible() {
   return typeof document === 'undefined' || document.visibilityState !== 'hidden'
 }
 
-function shouldFetchContext(
-  sessionId: string | undefined,
-  draft: boolean,
-  messageCount: number,
-  chatState: ChatState,
-) {
-  return Boolean(sessionId) && !draft && (messageCount > 0 || chatState !== 'idle')
+function shouldFetchContext(sessionId: string | undefined, draft: boolean) {
+  return Boolean(sessionId) && !draft
 }
 
 export function ContextUsageIndicator({
@@ -93,25 +91,23 @@ export function ContextUsageIndicator({
   // panel rather than for touch, so the phone touch target keys off the
   // viewport instead — see the trigger's height below.
   const isMobileBrowser = useMobileViewport() && !isDesktopRuntime()
-  const contextEnabled = shouldFetchContext(sessionId, draft, messageCount, chatState)
   const [context, setContext] = useState<SessionContextSnapshot | null>(null)
   const [contextSource, setContextSource] = useState<'live' | 'estimate' | null>(null)
-  const [loading, setLoading] = useState(contextEnabled)
+  const [loading, setLoading] = useState(() => shouldFetchContext(sessionId, draft))
   const [error, setError] = useState<string | null>(null)
   const [updatedAt, setUpdatedAt] = useState<number | null>(null)
   const [inspectionModel, setInspectionModel] = useState<string | null>(null)
   const [mobileDetailsOpen, setMobileDetailsOpen] = useState(false)
   const requestSeq = useRef(0)
   const contextIdentityRef = useRef('')
-  const contextDataSessionIdRef = useRef<string | undefined>(undefined)
   const inFlightRequestRef = useRef<Promise<boolean> | null>(null)
   const inFlightIdentityRef = useRef<string | null>(null)
   const lastAutoRefreshAtRef = useRef(0)
-  const contextEnabledRef = useRef(contextEnabled)
-  contextEnabledRef.current = contextEnabled
+  const lastRefreshNonceRef = useRef(refreshNonce)
+  const lastNonIdleChatStateRef = useRef<ChatState>(chatState)
 
   const refresh = useCallback(async (mode: 'auto' | 'manual' | 'force' = 'manual'): Promise<boolean> => {
-    if (!contextEnabledRef.current || !sessionId) {
+    if (!sessionId || draft) {
       setLoading(false)
       return false
     }
@@ -148,6 +144,8 @@ export function ContextUsageIndicator({
         const nextContext = inspection.context ?? inspection.contextEstimate ?? null
         const nextSource = inspection.context ? 'live' : inspection.contextEstimate ? 'estimate' : null
         const usageModel = inspection.usage?.models.find((model) => firstNonEmpty(model.displayName, model.model)) ?? null
+        setContext(nextContext)
+        setContextSource(nextSource)
         setInspectionModel(firstNonEmpty(
           inspection.context?.model,
           inspection.contextEstimate?.model,
@@ -155,15 +153,8 @@ export function ContextUsageIndicator({
           usageModel?.displayName,
           usageModel?.model,
         ) ?? null)
-        if (nextContext) {
-          contextDataSessionIdRef.current = activeSessionId
-          setContext(nextContext)
-          setContextSource(nextSource)
-          setError(null)
-          setUpdatedAt(Date.now())
-        } else {
-          setError(inspection.errors?.context ?? null)
-        }
+        setError(nextContext ? null : inspection.errors?.context ?? null)
+        setUpdatedAt(Date.now())
         return nextContext !== null
       })
       .catch((err) => {
@@ -181,45 +172,36 @@ export function ContextUsageIndicator({
     inFlightRequestRef.current = request
     inFlightIdentityRef.current = activeContextIdentity
     return request
-  }, [runtimeSelectionKey, sessionId])
+  }, [draft, runtimeSelectionKey, sessionId])
 
-  const forceRefreshWithRetry = useCallback(() => {
-    if (!contextEnabledRef.current) return () => {}
+  // After a compaction the context shrinks server-side but nothing else
+  // re-reads it promptly (auto refreshes are throttled and stop once the
+  // session goes idle), leaving the pre-compact percentage on screen (#743).
+  // Force a fresh request, and retry a bounded number of times if the CLI is
+  // still busy or the inspection request times out.
+  useEffect(() => {
+    if (refreshNonce === lastRefreshNonceRef.current) return
+    lastRefreshNonceRef.current = refreshNonce
     let cancelled = false
     let retryTimer: ReturnType<typeof setTimeout> | null = null
-    void refresh('force').then((ok) => {
-      if (ok || cancelled) return
-      retryTimer = setTimeout(() => {
-        void refresh('force')
-      }, FORCED_REFRESH_RETRY_MS)
-    })
+    let attempts = 0
+
+    const attemptRefresh = () => {
+      attempts += 1
+      void refresh('force').then((ok) => {
+        if (ok || cancelled || attempts >= FORCED_REFRESH_MAX_ATTEMPTS) return
+        retryTimer = setTimeout(() => {
+          attemptRefresh()
+        }, FORCED_REFRESH_RETRY_MS * attempts)
+      })
+    }
+
+    attemptRefresh()
     return () => {
       cancelled = true
       if (retryTimer) clearTimeout(retryTimer)
     }
-  }, [refresh])
-
-  // Compaction and runtime replacement both change context outside the normal
-  // message flow. Their completion signals bump this nonce so the meter reads
-  // the authoritative process.
-  const lastRefreshNonceRef = useRef(refreshNonce)
-  useEffect(() => {
-    if (refreshNonce === lastRefreshNonceRef.current) return
-    lastRefreshNonceRef.current = refreshNonce
-    return forceRefreshWithRetry()
-  }, [forceRefreshWithRetry, refreshNonce])
-
-  // A new session usually mounts while its first turn is already running.
-  // The eager inspection then races the CLI, and message-count refreshes can
-  // be swallowed by the auto-refresh throttle. The terminal idle transition
-  // is the first reliable point to request that session's real context.
-  const lastChatStateRef = useRef(chatState)
-  useEffect(() => {
-    const previousChatState = lastChatStateRef.current
-    lastChatStateRef.current = chatState
-    if (chatState !== 'idle' || previousChatState === 'idle') return
-    return forceRefreshWithRetry()
-  }, [chatState, forceRefreshWithRetry])
+  }, [refresh, refreshNonce])
 
   useEffect(() => {
     const contextIdentity = `${sessionId}:${runtimeSelectionKey}`
@@ -228,45 +210,14 @@ export function ContextUsageIndicator({
     if (identityChanged) {
       requestSeq.current += 1
       lastAutoRefreshAtRef.current = 0
+      setContext(null)
+      setContextSource(null)
       setError(null)
+      setUpdatedAt(null)
       setInspectionModel(null)
-      if (contextDataSessionIdRef.current !== sessionId) {
-        contextDataSessionIdRef.current = undefined
-        setContext(null)
-        setContextSource(null)
-        setUpdatedAt(null)
-      }
     }
     void refresh('auto')
-  }, [refresh, runtimeSelectionKey, sessionId])
-
-  const lastContextEnabledRef = useRef(contextEnabled)
-  useEffect(() => {
-    const wasEnabled = lastContextEnabledRef.current
-    lastContextEnabledRef.current = contextEnabled
-    if (contextEnabled) {
-      if (!wasEnabled) void refresh('auto')
-      return
-    }
-    requestSeq.current += 1
-    inFlightRequestRef.current = null
-    inFlightIdentityRef.current = null
-    lastAutoRefreshAtRef.current = 0
-    contextDataSessionIdRef.current = undefined
-    setContext(null)
-    setContextSource(null)
-    setInspectionModel(null)
-    setUpdatedAt(null)
-    setError(null)
-    setLoading(false)
-  }, [contextEnabled, refresh])
-
-  const lastMessageCountRef = useRef(messageCount)
-  useEffect(() => {
-    if (lastMessageCountRef.current === messageCount) return
-    lastMessageCountRef.current = messageCount
-    void refresh('auto')
-  }, [messageCount, refresh])
+  }, [messageCount, refresh, runtimeSelectionKey, sessionId])
 
   useEffect(() => {
     if (typeof document === 'undefined') return
@@ -279,7 +230,19 @@ export function ContextUsageIndicator({
   }, [refresh])
 
   useEffect(() => {
-    if (chatState === 'idle') return
+    const previousState = lastNonIdleChatStateRef.current
+    lastNonIdleChatStateRef.current = chatState
+
+    if (chatState === 'idle') {
+      if (previousState !== 'idle') {
+        const timer = setTimeout(() => {
+          void refresh('force')
+        }, IDLE_RECOVERY_REFRESH_MS)
+        return () => clearTimeout(timer)
+      }
+      return
+    }
+
     const timer = setInterval(() => {
       void refresh('auto')
     }, ACTIVE_REFRESH_MS)
@@ -291,7 +254,7 @@ export function ContextUsageIndicator({
     return pickUsedContextCategory(context)
   }, [context])
 
-  const displayContext = contextEnabled && contextDataSessionIdRef.current === sessionId ? context : null
+  const displayContext = context
   const hasPlaceholderContext = !displayContext && (
     draft || (!loading && messageCount === 0 && (!error || isCliNotRunningError(error)))
   )
@@ -311,10 +274,7 @@ export function ContextUsageIndicator({
       : 'var(--color-surface-container-high)',
   }
   const displayPercent = displayContext ? formatPercent(percentage) : '--'
-  const displayInspectionModel = !context || contextDataSessionIdRef.current === sessionId
-    ? inspectionModel
-    : null
-  const displayModel = firstNonEmpty(displayContext?.model, displayInspectionModel, fallbackModelLabel)
+  const displayModel = firstNonEmpty(context?.model, inspectionModel, fallbackModelLabel)
   const ariaLabel = displayContext
     ? t('contextIndicator.ariaLabel', { percent: formatPercent(percentage) })
     : isPendingContext
