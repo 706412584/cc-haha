@@ -132,5 +132,4 @@ describe('Tooltip', () => {
 
     fireEvent.keyDown(screen.getByRole('button'), { key: 'a' })
     expect(onKeyDown).toHaveBeenCalled()
-  })
-})
+  })})

@@ -29,9 +29,14 @@ export type SessionListItem = {
   workDirExists: boolean
   workspaceState?: SessionWorkspaceState
   permissionMode?: string
+  /** Absolute path of the .jsonl file on disk. Optional so older servers /
+   *  test fixtures that omit it remain compatible; sidebar context-menu
+   *  actions fall back to a "not available" message when missing. */
+  filePath?: string
   runtimeProviderId?: string | null
   runtimeModelId?: string
   effortLevel?: ReasoningEffortLevel
+  thinkingEnabled?: boolean
 }
 
 export type SessionWorkspaceState = 'available' | 'worktree_removed' | 'missing'

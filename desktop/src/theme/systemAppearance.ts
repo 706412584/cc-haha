@@ -1,9 +1,9 @@
 /**
  * "Follow the system appearance" support for the desktop themes.
  *
- * The OS only hands us a dark/light signal, while the app ships six palettes —
- * four paper grounds and two ink ones. So each half carries its own
- * preference, and following the system is stored as four values that resolve
+ * The OS only hands us a dark/light signal, while the app ships multiple
+ * palettes on each ground. So each half carries its own preference, and
+ * following the system is stored as four values that resolve
  * into one applied theme:
  *
  *   followSystemTheme — is the switch on
@@ -56,6 +56,10 @@ export const THEME_BACKGROUNDS: Record<ThemeMode, string> = {
   celadon: '#F5F8F5',
   dark: '#201D17',
   'ink-blue': '#1A1D24',
+  'classic-white': '#FFFFFF',
+  'classic-light': '#FAF9F5',
+  'eye-care': '#EAF6EF',
+  'classic-dark': '#0E0E0E',
 }
 
 /**

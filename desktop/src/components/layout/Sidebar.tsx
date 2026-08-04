@@ -1,7 +1,8 @@
 import { forwardRef, useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef } from 'react'
-import { Check, ChevronDown, Clock, Folder, FolderOpen, FolderPlus, GitBranch, MoreHorizontal, Pin, PinOff, RefreshCw, RotateCcw, SquarePen, X } from 'lucide-react'
+import { Check, ChevronDown, Clock, Download, Folder, FolderOpen, FolderPlus, GitBranch, MoreHorizontal, Pin, PinOff, RefreshCw, RotateCcw, SquarePen, Trash2, Upload, X } from 'lucide-react'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useUIStore } from '../../stores/uiStore'
+import { useSettingsStore } from '../../stores/settingsStore'
 import { useTranslation, type TranslationKey } from '../../i18n'
 import { BrandSeal } from '@/components/composite/BrandSeal'
 import { Button } from '@/components/ui/Button'
@@ -18,6 +19,7 @@ import { useTabStore, SETTINGS_TAB_ID, SCHEDULED_TAB_ID, MARKET_TAB_ID } from '.
 import { useChatStore } from '../../stores/chatStore'
 import { useOpenTargetStore } from '../../stores/openTargetStore'
 import { desktopUiPreferencesApi, type SidebarProjectPreferences } from '../../api/desktopUiPreferences'
+import { projectsApi } from '../../api/projects'
 import { getDesktopHost } from '../../lib/desktopHost'
 import { hasRunningBackgroundTasks } from '../../lib/backgroundTasks'
 import { getSessionWorkspaceState } from '../../lib/sessionWorkspace'
@@ -65,6 +67,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
   const error = useSessionStore((s) => s.error)
   const indexStatus = useSessionStore((s) => s.indexStatus)
   const fetchSessions = useSessionStore((s) => s.fetchSessions)
+  const syncIndexes = useSessionStore((s) => s.syncIndexes)
   const deleteSession = useSessionStore((s) => s.deleteSession)
   const deleteSessions = useSessionStore((s) => s.deleteSessions)
   const isBatchMode = useSessionStore((s) => s.isBatchMode)
@@ -76,6 +79,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
   const deselectSessions = useSessionStore((s) => s.deselectSessions)
   const renameSession = useSessionStore((s) => s.renameSession)
   const addToast = useUIStore((s) => s.addToast)
+  const sessionContentSearchEnabled = useSettingsStore((s) => s.sessionContentSearchEnabled)
   const sidebarOpen = useUIStore((s) => s.sidebarOpen)
   const toggleSidebar = useUIStore((s) => s.toggleSidebar)
   const activeModal = useUIStore((s) => s.activeModal)
@@ -86,6 +90,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
   const chatSessions = useChatStore((s) => s.sessions)
   const closeTab = useTabStore((s) => s.closeTab)
   const disconnectSession = useChatStore((s) => s.disconnectSession)
+  const [searchQuery, setSearchQuery] = useState('')
   const [contextMenu, setContextMenu] = useState<{ id: string; x: number; y: number } | null>(null)
   const [projectContextMenu, setProjectContextMenu] = useState<{ key: string; x: number; y: number } | null>(null)
   const [projectHeaderMenu, setProjectHeaderMenu] = useState<{ type: SidebarHeaderMenuType; x: number; y: number } | null>(null)
@@ -93,6 +98,9 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
   const [pendingDeleteSessionId, setPendingDeleteSessionId] = useState<string | null>(null)
   const [pendingBatchDeleteSessionIds, setPendingBatchDeleteSessionIds] = useState<string[] | null>(null)
   const [isBatchDeleting, setIsBatchDeleting] = useState(false)
+  const [isBatchExporting, setIsBatchExporting] = useState(false)
+  const [pendingClearProjectKey, setPendingClearProjectKey] = useState<string | null>(null)
+  const [isClearingProject, setIsClearingProject] = useState(false)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const [lastSelectedSessionId, setLastSelectedSessionId] = useState<string | null>(null)
@@ -114,7 +122,10 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
   const sidebarPreferenceRevisionRef = useRef(0)
   const sessionScrollAreaRef = useRef<HTMLDivElement>(null)
   const pendingSessionScrollAnchorRef = useRef<SessionScrollAnchor | null>(null)
-  const refreshSessionsNow = useSessionListAutoRefresh(fetchSessions)
+  useSessionListAutoRefresh(fetchSessions)
+  const handleManualRefresh = useCallback(async () => {
+    await syncIndexes()
+  }, [syncIndexes])
 
   useEffect(() => useSessionStore.subscribe((nextState, previousState) => {
     if (nextState.sessions === previousState.sessions) return
@@ -174,8 +185,11 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
     onDismiss: closeAllSidebarMenus,
   })
 
-  // Title filtering moved into the global search modal (Cmd+K); the list shows all sessions.
-  const filteredSessions = sessions
+  const filteredSessions = useMemo(() => {
+    const query = searchQuery.trim().toLocaleLowerCase()
+    if (!query) return sessions
+    return sessions.filter((session) => session.title.toLocaleLowerCase().includes(query))
+  }, [searchQuery, sessions])
 
   const projectGroups = useMemo(() => groupByProject(filteredSessions, projectSortBy), [filteredSessions, projectSortBy])
   const orderedProjectGroups = useMemo(
@@ -493,6 +507,56 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
     }
   }, [addToast, hiddenProjectKeys, persistSidebarProjectPreferences, pinnedProjectKeys, projectOrder, projectOrganization, projectSortBy, t])
 
+  const requestClearProjectSessions = useCallback((project: ProjectGroup) => {
+    setProjectContextMenu(null)
+    setPendingClearProjectKey(project.key)
+  }, [])
+
+  const confirmClearProjectSessions = useCallback(async () => {
+    if (!pendingClearProjectKey) return
+    const project = orderedProjectGroups.find((group) => group.key === pendingClearProjectKey)
+    if (!project) {
+      setPendingClearProjectKey(null)
+      return
+    }
+    if (!project.workDir) {
+      addToast({
+        type: 'error',
+        message: t('sidebar.clearProjectSessionsNoWorkDir', { project: project.title }),
+      })
+      setPendingClearProjectKey(null)
+      return
+    }
+
+    setIsClearingProject(true)
+    try {
+      for (const session of project.sessions) {
+        closeTab(session.id)
+        disconnectSession(session.id)
+      }
+      const result = await projectsApi.clearSessions(project.workDir)
+      await fetchSessions()
+      addToast({
+        type: 'success',
+        message: t('sidebar.clearProjectSessionsSuccess', {
+          project: project.title,
+          count: result.deletedSessions,
+        }),
+      })
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: t('sidebar.clearProjectSessionsFailure', {
+          project: project.title,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      })
+    } finally {
+      setIsClearingProject(false)
+      setPendingClearProjectKey(null)
+    }
+  }, [addToast, closeTab, disconnectSession, fetchSessions, orderedProjectGroups, pendingClearProjectKey, t])
+
   const openProjectInFinder = useCallback(async (project: ProjectGroup) => {
     setProjectContextMenu(null)
     try {
@@ -520,6 +584,105 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
     setContextMenu(null)
     setPendingDeleteSessionId(id)
   }, [])
+
+  const handleCopySessionPath = useCallback(async (sessionId: string) => {
+    setContextMenu(null)
+    const session = sessions.find((candidate) => candidate.id === sessionId)
+    if (!session?.filePath) {
+      addToast({ type: 'error', message: t('sidebar.copySessionPathUnavailable') })
+      return
+    }
+    try {
+      await desktopHost.clipboard.writeText(session.filePath)
+      addToast({ type: 'success', message: t('sidebar.copySessionPathSuccess') })
+    } catch {
+      addToast({ type: 'error', message: t('common.copyFailed') })
+    }
+  }, [addToast, sessions, t])
+
+  const handleRevealSession = useCallback(async (sessionId: string) => {
+    setContextMenu(null)
+    const session = sessions.find((candidate) => candidate.id === sessionId)
+    if (!session?.filePath) {
+      addToast({ type: 'error', message: t('sidebar.copySessionPathUnavailable') })
+      return
+    }
+    const reveal = desktopHost.shell.showItemInFolder
+    if (!reveal) {
+      addToast({ type: 'error', message: t('sidebar.revealSessionUnsupported') })
+      return
+    }
+    try {
+      await reveal(session.filePath)
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: t('sidebar.revealSessionFailure', {
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      })
+    }
+  }, [addToast, sessions, t])
+
+  const handleExportSession = useCallback(async (sessionId: string) => {
+    setContextMenu(null)
+    const session = sessions.find((candidate) => candidate.id === sessionId)
+    const workDir = session?.workDir || session?.projectRoot || session?.projectPath
+    if (!workDir) {
+      addToast({ type: 'error', message: t('sidebar.exportSessionNoWorkDir') })
+      return
+    }
+    try {
+      const result = await projectsApi.exportSession(workDir, sessionId)
+      addToast({
+        type: 'success',
+        message: t('sidebar.exportSessionSuccess', { filename: result.filename }),
+      })
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: t('sidebar.exportSessionFailure', {
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      })
+    }
+  }, [addToast, sessions, t])
+
+  const importFileInputRef = useRef<HTMLInputElement | null>(null)
+  const importTargetWorkDirRef = useRef<string | null>(null)
+
+  const triggerImportSession = useCallback((project: ProjectGroup) => {
+    setProjectContextMenu(null)
+    if (!project.workDir) {
+      addToast({ type: 'error', message: t('sidebar.importSessionNoWorkDir') })
+      return
+    }
+    importTargetWorkDirRef.current = project.workDir
+    importFileInputRef.current?.click()
+  }, [addToast, t])
+
+  const handleImportFileChange = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    const workDir = importTargetWorkDirRef.current
+    event.target.value = ''
+    importTargetWorkDirRef.current = null
+    if (!file || !workDir) return
+    try {
+      const result = await projectsApi.importSession(workDir, file)
+      await fetchSessions()
+      addToast({
+        type: 'success',
+        message: t('sidebar.importSessionSuccess', { lines: result.nonEmptyLines }),
+      })
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: t('sidebar.importSessionFailure', {
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      })
+    }
+  }, [addToast, fetchSessions, t])
 
   const confirmDelete = useCallback(async () => {
     if (!pendingDeleteSessionId) return
@@ -550,6 +713,67 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
     setLastSelectedSessionId(null)
     setPendingBatchDeleteSessionIds(null)
   }, [exitBatchMode])
+
+  const handleBatchExport = useCallback(async () => {
+    const ids = [...selectedSessionIds]
+    if (ids.length === 0) return
+    if (ids.length === 1) {
+      await handleExportSession(ids[0]!)
+      handleExitBatchMode()
+      return
+    }
+
+    setIsBatchExporting(true)
+    addToast({ type: 'info', message: t('sidebar.batchExporting', { count: ids.length }) })
+    try {
+      const { zipSync } = await import('fflate')
+      const entries: Record<string, Uint8Array> = {}
+      for (const sessionId of ids) {
+        const session = sessions.find((candidate) => candidate.id === sessionId)
+        const workDir = session?.workDir || session?.projectRoot || session?.projectPath
+        if (!workDir) continue
+        try {
+          const { filename, blob } = await projectsApi.exportSessionBlob(workDir, sessionId)
+          entries[filename] = new Uint8Array(await blob.arrayBuffer())
+        } catch {
+          // Export the sessions that are still available; report failure only if none remain.
+        }
+      }
+      const exportedCount = Object.keys(entries).length
+      if (exportedCount === 0) {
+        addToast({
+          type: 'error',
+          message: t('sidebar.exportSessionFailure', { error: 'No sessions exported' }),
+        })
+        return
+      }
+      const zipData = zipSync(entries)
+      const zipBlob = new Blob([zipData], { type: 'application/zip' })
+      const filename = `sessions-export-${new Date().toISOString().slice(0, 10)}.zip`
+      const objectUrl = URL.createObjectURL(zipBlob)
+      const anchor = document.createElement('a')
+      anchor.href = objectUrl
+      anchor.download = filename
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
+      addToast({
+        type: 'success',
+        message: t('sidebar.exportSessionSuccess', { filename: `${filename} (${exportedCount} sessions)` }),
+      })
+      handleExitBatchMode()
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: t('sidebar.exportSessionFailure', {
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      })
+    } finally {
+      setIsBatchExporting(false)
+    }
+  }, [addToast, handleExitBatchMode, handleExportSession, selectedSessionIds, sessions, t])
 
   const requestBatchDelete = useCallback((ids: string[]) => {
     if (ids.length === 0) return
@@ -686,10 +910,8 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
               Collapsed, the mark is centered on the rail instead. */}
           <div className={`flex min-w-0 items-center ${expanded ? 'gap-2.5 pl-3' : 'justify-center'}`}>
             {!expanded ? <BrandSeal size="sm" /> : null}
-            {/* One form, at every width. The header used to carry "Claude Code
-                Haha" and swap to this below ~230px of title region, which meant
-                the app answered to two names depending on how the sidebar was
-                dragged. It goes by the short one. */}
+            {/* One form, at every width. The app goes by the short product name,
+                and mobile/desktop isolation is handled by the surrounding chrome. */}
             <span
               className={`sidebar-copy ${expanded ? 'sidebar-copy--visible' : 'sidebar-copy--hidden'} text-base font-bold tracking-tight text-[var(--color-text-primary)]`}
               style={{ fontFamily: 'var(--font-headline)' }}
@@ -698,17 +920,19 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
             </span>
           </div>
           <div className={`flex items-center ${expanded ? 'gap-1.5' : 'flex-col gap-2'}`}>
-            <a
-              href="https://github.com/NanmiCoder/cc-haha"
-              target="_blank"
-              rel="noopener noreferrer"
-              className={`sidebar-copy ${expanded ? 'sidebar-copy--visible' : 'sidebar-copy--hidden'} inline-flex items-center justify-center rounded-[var(--radius-sm)] p-1 text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]`}
-              title="GitHub"
-              tabIndex={expanded ? undefined : -1}
-              aria-hidden={!expanded}
-            >
-              <GitHubIcon />
-            </a>
+            {!isMobile ? (
+              <a
+                href="https://github.com/706412584/cc-haha"
+                target="_blank"
+                rel="noopener noreferrer"
+                className={`sidebar-copy ${expanded ? 'sidebar-copy--visible' : 'sidebar-copy--hidden'} inline-flex items-center justify-center rounded-[var(--radius-sm)] p-1 text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]`}
+                title="GitHub"
+                tabIndex={expanded ? undefined : -1}
+                aria-hidden={!expanded}
+              >
+                <GitHubIcon />
+              </a>
+            ) : null}
             {isMobile ? (
               <button
                 type="button"
@@ -792,23 +1016,35 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
             style={{ overflow: 'visible' }}
           >
             <div className="flex items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => openModal('globalSearch')}
-                className={`flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] border border-[var(--color-sidebar-search-border)] bg-[var(--color-sidebar-search-bg)] pl-3 pr-2 text-left text-[13px] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-sidebar-item-hover)] focus-visible:border-[var(--color-border-focus)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-surface-sidebar)] ${isMobile ? 'h-11' : 'h-9'}`}
-                aria-label={t('search.global.trigger')}
-                title={t('search.global.trigger')}
-              >
-                <span className="pointer-events-none flex shrink-0 items-center text-[var(--color-text-tertiary)]">
+              {isMobile || !sessionContentSearchEnabled ? (
+                <label className={`flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] border border-[var(--color-sidebar-search-border)] bg-[var(--color-sidebar-search-bg)] px-3 text-[13px] text-[var(--color-text-tertiary)] focus-within:border-[var(--color-border-focus)] focus-within:ring-2 focus-within:ring-[var(--color-border-focus)] ${isMobile ? 'h-11' : 'h-9'}`}>
                   <SearchIcon />
-                </span>
-                <span className="min-w-0 flex-1 truncate pl-2">{t('search.global.trigger')}</span>
-                <kbd className="pointer-events-none shrink-0 rounded border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-1 font-mono text-[10px] leading-tight text-[var(--color-text-tertiary)]">⌘K</kbd>
-              </button>
+                  <input
+                    value={searchQuery}
+                    onChange={(event) => setSearchQuery(event.target.value)}
+                    placeholder={t('sidebar.searchPlaceholder')}
+                    className="min-w-0 flex-1 bg-transparent text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)]"
+                  />
+                </label>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => openModal('globalSearch')}
+                  className="flex h-9 min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] border border-[var(--color-sidebar-search-border)] bg-[var(--color-sidebar-search-bg)] pl-3 pr-2 text-left text-[13px] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-sidebar-item-hover)] focus-visible:border-[var(--color-border-focus)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-surface-sidebar)]"
+                  aria-label={t('search.global.trigger')}
+                  title={t('search.global.trigger')}
+                >
+                  <span className="pointer-events-none flex shrink-0 items-center text-[var(--color-text-tertiary)]">
+                    <SearchIcon />
+                  </span>
+                  <span className="min-w-0 flex-1 truncate pl-2">{t('search.global.trigger')}</span>
+                  <kbd className="pointer-events-none shrink-0 rounded border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-1 font-mono text-[10px] leading-tight text-[var(--color-text-tertiary)]">⌘K</kbd>
+                </button>
+              )}
               <IconButton
                 icon={<RefreshCw className={`h-4 w-4 ${showRefreshLoading ? 'animate-spin' : ''}`} strokeWidth={1.9} aria-hidden="true" />}
                 label={t('sidebar.refreshSessions')}
-                onClick={() => void refreshSessionsNow()}
+                onClick={() => void handleManualRefresh()}
                 size={isMobile ? '2xl' : 'lg'}
                 tone="secondary"
                 surface="sidebar"
@@ -847,7 +1083,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                     tone="muted"
                   />
                 </div>
-                <div className="mt-2 grid grid-cols-2 gap-1.5">
+                <div className="mt-2 grid grid-cols-3 gap-1.5">
                   <Button
                     variant="secondary"
                     size="base"
@@ -863,6 +1099,17 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                     {filteredSessionIds.length > 0 && filteredSessionIds.every((id) => selectedSessionIds.has(id))
                       ? t('sidebar.batchDeselectAll')
                       : t('sidebar.batchSelectAll')}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="base"
+                    onClick={() => void handleBatchExport()}
+                    disabled={selectedCount === 0 || isBatchExporting}
+                    loading={isBatchExporting}
+                  >
+                    {isBatchExporting
+                      ? t('sidebar.batchExporting', { count: selectedCount })
+                      : t('sidebar.batchExportSelected', { count: selectedCount })}
                   </Button>
                   <Button
                     variant="danger"
@@ -904,7 +1151,11 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                 />
               )}
               {showInitialLoading ? (
-                <div className="px-3 py-4 text-center text-xs text-[var(--color-text-tertiary)]">
+                <div
+                  role="status"
+                  aria-label={t('common.loading')}
+                  className="px-3 py-4 text-center text-xs text-[var(--color-text-tertiary)]"
+                >
                   {t('common.loading')}
                 </div>
               ) : !error && filteredSessions.length === 0 && (
@@ -912,7 +1163,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                   <EmptyState variant="inline" title={t('sidebar.noSessions')} />
                 </div>
               )}
-              {orderedProjectGroups.length > 0 && (
+              {!isMobile && orderedProjectGroups.length > 0 && (
                 <ProjectHeaderActions
                   title={t('sidebar.projects')}
                   menuLabel={t('sidebar.projectMenu')}
@@ -1047,7 +1298,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                       </div>
                     </div>
                     {!projectCollapsed && (
-                      <div className="mt-0.5 pl-5">
+                      <div className="mt-0.5 pl-6">
                         <div
                           className={hasInternalScroll ? 'max-h-[420px] overflow-y-auto pr-1' : undefined}
                           data-testid={`sidebar-project-session-list-${domSafeProjectKey(project.key)}`}
@@ -1086,7 +1337,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                                   }}
                                   onContextMenu={(e) => handleContextMenu(e, session.id)}
                                   className={`
-                                    group/session w-full rounded-[var(--radius-md)] px-2 ${isMobile ? 'py-3' : 'py-1.5'} text-left text-[13px] transition-[background,filter,color,box-shadow] duration-200
+                                    group/session w-full rounded-[var(--radius-md)] px-2.5 ${isMobile ? 'py-3' : 'py-1.5'} text-left text-[13px] transition-[background,filter,color,box-shadow] duration-200
                                     focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--color-surface-sidebar)]
                                     ${selectedSessionIds.has(session.id)
                                       ? 'sidebar-session-row--selected bg-[var(--color-sidebar-item-active)] text-[var(--color-text-primary)] shadow-[var(--shadow-card)]'
@@ -1100,7 +1351,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                                   aria-pressed={isBatchMode ? selectedSessionIds.has(session.id) : undefined}
                                   title={session.title || 'Untitled'}
                                 >
-                                  <span className="flex min-w-0 items-center gap-1.5">
+                                  <span className="flex min-w-0 items-center gap-2">
                                     {isBatchMode ? (
                                       <span
                                         className={`flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-[5px] border transition-colors ${
@@ -1131,6 +1382,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                                       isWorktree={isWorktreeSession(session)}
                                       modifiedAt={session.modifiedAt}
                                       t={t}
+                                      hideTimestamp={isMobile}
                                     />
                                   </span>
                                 </button>
@@ -1209,6 +1461,26 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
           >
             {t('common.delete')}
           </button>
+          <button
+            onClick={() => void handleExportSession(contextMenu.id)}
+            className="w-full px-4 py-2 text-left text-[13px] text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)]"
+          >
+            {t('sidebar.exportSession')}
+          </button>
+          <button
+            onClick={() => void handleCopySessionPath(contextMenu.id)}
+            className="w-full px-4 py-2 text-left text-[13px] text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)]"
+          >
+            {t('sidebar.copySessionPath')}
+          </button>
+          {desktopHost.shell.showItemInFolder && (
+            <button
+              onClick={() => void handleRevealSession(contextMenu.id)}
+              className="w-full px-4 py-2 text-left text-[13px] text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)]"
+            >
+              {t('sidebar.revealSession')}
+            </button>
+          )}
         </div>
       )}
 
@@ -1238,11 +1510,34 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
               {t('sidebar.openInFinder')}
             </ProjectMenuItem>
             <ProjectMenuItem
+              icon={<Upload size={18} aria-hidden="true" />}
+              onClick={() => triggerImportSession(project)}
+            >
+              {t('sidebar.importSession')}
+            </ProjectMenuItem>
+            <ProjectMenuItem
+              icon={<Download size={18} aria-hidden="true" />}
+              onClick={() => {
+                setProjectContextMenu(null)
+                enterBatchMode()
+                selectSessions(project.sessions.map((session) => session.id))
+              }}
+            >
+              {t('sidebar.exportProjectSessions')}
+            </ProjectMenuItem>
+            <ProjectMenuItem
               icon={hidden ? <RotateCcw size={18} aria-hidden="true" /> : <X size={18} aria-hidden="true" />}
               onClick={() => toggleHiddenProject(project)}
               danger={!hidden}
             >
               {t(hidden ? 'sidebar.restoreProjectToSidebar' : 'sidebar.hideProjectFromSidebar')}
+            </ProjectMenuItem>
+            <ProjectMenuItem
+              icon={<Trash2 size={18} aria-hidden="true" />}
+              onClick={() => requestClearProjectSessions(project)}
+              danger
+            >
+              {t('sidebar.clearProjectSessions')}
             </ProjectMenuItem>
           </div>
         )
@@ -1331,6 +1626,36 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
         cancelLabel={t('common.cancel')}
         confirmVariant="danger"
         loading={isBatchDeleting}
+      />
+
+      <ConfirmDialog
+        open={pendingClearProjectKey !== null}
+        onClose={() => {
+          if (!isClearingProject) setPendingClearProjectKey(null)
+        }}
+        onConfirm={confirmClearProjectSessions}
+        title={t('sidebar.clearProjectSessions')}
+        body={(() => {
+          const project = pendingClearProjectKey
+            ? orderedProjectGroups.find((group) => group.key === pendingClearProjectKey)
+            : null
+          if (!project) return ''
+          return t('sidebar.clearProjectSessionsConfirm', {
+            project: project.title,
+            count: project.sessions.length,
+          })
+        })()}
+        confirmLabel={t('common.delete')}
+        cancelLabel={t('common.cancel')}
+        confirmVariant="danger"
+        loading={isClearingProject}
+      />
+      <input
+        ref={importFileInputRef}
+        type="file"
+        accept=".jsonl,application/x-ndjson,application/jsonl"
+        className="hidden"
+        onChange={handleImportFileChange}
       />
 
       <GlobalSearchModal open={activeModal === 'globalSearch'} onClose={closeModal} />
@@ -1989,18 +2314,20 @@ function SessionRowMeta({
   isWorktree,
   modifiedAt,
   t,
+  hideTimestamp = false,
 }: {
   isRunning: boolean
   isWorktree: boolean
   modifiedAt: string
   t: (key: TranslationKey, params?: Record<string, string | number>) => string
+  hideTimestamp?: boolean
 }) {
   const relativeTime = formatRelativeTime(modifiedAt, t)
   const updatedLabel = t('session.lastUpdated', { time: relativeTime })
 
   return (
     <span
-      className="ml-auto flex h-5 flex-shrink-0 items-center justify-end gap-1.5 whitespace-nowrap text-[10px] font-medium tabular-nums text-[var(--color-text-tertiary)]"
+      className="ml-auto flex h-5 min-w-[78px] flex-shrink-0 items-center justify-end gap-1.5 text-[10px] font-medium tabular-nums text-[var(--color-text-tertiary)]"
       title={updatedLabel}
     >
       {isRunning && (
@@ -2022,9 +2349,11 @@ function SessionRowMeta({
           <span className="sr-only">{t('sidebar.worktree')}</span>
         </span>
       )}
-      <span className="inline-flex min-w-[42px] flex-shrink-0 items-center justify-end">
-        <span>{relativeTime}</span>
-      </span>
+      {!hideTimestamp ? (
+        <span className="inline-flex min-w-[42px] flex-shrink-0 items-center justify-end">
+          <span>{relativeTime}</span>
+        </span>
+      ) : null}
     </span>
   )
 }

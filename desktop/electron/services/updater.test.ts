@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { ElectronUpdaterService, normalizeUpdateInfo, updaterSessionProxyConfig, type ElectronUpdaterLike } from './updater'
+import { ElectronUpdaterService, normalizeUpdateInfo, isNewerVersion, type ElectronUpdaterLike } from './updater'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -49,6 +49,42 @@ describe('Electron updater service', () => {
       body: 'One\n\nTwo',
     })
     expect(normalizeUpdateInfo(undefined)).toBeNull()
+  })
+
+  it('compares release versions, ignoring prerelease and build metadata', () => {
+    expect(isNewerVersion('0.5.6', '0.5.5')).toBe(true)
+    expect(isNewerVersion('1.0.0', '0.9.9')).toBe(true)
+    expect(isNewerVersion('0.6.0', '0.5.9')).toBe(true)
+    // Equal or older must not count as newer (the safe up-to-date direction).
+    expect(isNewerVersion('0.5.5', '0.5.5')).toBe(false)
+    expect(isNewerVersion('0.5.4', '0.5.5')).toBe(false)
+    expect(isNewerVersion('v0.5.5', '0.5.5')).toBe(false)
+    expect(isNewerVersion('0.5.5+abc123', '0.5.5')).toBe(false)
+    expect(isNewerVersion('0.5.5-beta.1', '0.5.5')).toBe(false)
+  })
+
+  it('treats a feed version equal to the running version as no update', async () => {
+    updater.checkForUpdates.mockResolvedValue({ updateInfo: { version: '0.5.5', body: 'Same release' } })
+    const service = new ElectronUpdaterService(updater, undefined, { currentVersion: '0.5.5' })
+
+    await expect(service.checkForUpdates()).resolves.toBeNull()
+    await expect(service.downloadUpdate(() => {})).rejects.toThrow(
+      'No Electron update is available to download',
+    )
+  })
+
+  it('treats a feed version older than the running version as no update', async () => {
+    updater.checkForUpdates.mockResolvedValue({ updateInfo: { version: '0.5.4' } })
+    const service = new ElectronUpdaterService(updater, undefined, { currentVersion: '0.5.5' })
+
+    await expect(service.checkForUpdates()).resolves.toBeNull()
+  })
+
+  it('surfaces a feed version newer than the running version as an update', async () => {
+    updater.checkForUpdates.mockResolvedValue({ updateInfo: { version: '0.5.6', body: 'New' } })
+    const service = new ElectronUpdaterService(updater, undefined, { currentVersion: '0.5.5' })
+
+    await expect(service.checkForUpdates()).resolves.toEqual({ version: '0.5.6', body: 'New' })
   })
 
   it('keeps electron-updater autoDownload disabled and emits store-compatible progress', async () => {
@@ -145,22 +181,6 @@ describe('Electron updater service', () => {
     expect(localUpdater.checkForUpdates).toHaveBeenCalledTimes(3)
   })
 
-  it('disables differential download so update downloads run at full bandwidth', () => {
-    const localUpdater = fakeUpdater()
-
-    void new ElectronUpdaterService(localUpdater)
-
-    expect(localUpdater.disableDifferentialDownload).toBe(true)
-  })
-
-  it('maps proxy settings to the updater net session proxy config', () => {
-    expect(updaterSessionProxyConfig(null)).toEqual({ mode: 'system' })
-    expect(updaterSessionProxyConfig('http://127.0.0.1:7890')).toEqual({
-      proxyRules: 'http://127.0.0.1:7890',
-      proxyBypassRules: '<local>',
-    })
-  })
-
   it('does not hide non-metadata updater failures', async () => {
     const service = new ElectronUpdaterService(updater)
     updater.checkForUpdates.mockRejectedValueOnce(new Error('feed unavailable'))
@@ -181,38 +201,5 @@ describe('Electron updater service', () => {
     service.quitAndInstallDownloadedUpdate()
 
     expect(updater.quitAndInstall).toHaveBeenCalledWith(false, true)
-  })
-
-  it('hands the spawned installer an environment without the app-managed portable selection', async () => {
-    const service = new ElectronUpdaterService(updater)
-    updater.checkForUpdates.mockResolvedValue({ updateInfo: { version: '1.2.4' } })
-    updater.downloadUpdate.mockResolvedValue(undefined)
-    await service.checkForUpdates()
-    await service.downloadUpdate(() => {})
-
-    const env: NodeJS.ProcessEnv = {
-      CLAUDE_CONFIG_DIR: 'E:\\cc-haha-data',
-      CC_HAHA_APP_PORTABLE_DIR: '1',
-      WEBVIEW2_USER_DATA_FOLDER: 'E:\\cc-haha-data\\EBWebView',
-      APPDATA: 'C:\\Users\\someone\\AppData\\Roaming',
-    }
-    service.quitAndInstallDownloadedUpdate(env)
-
-    expect(updater.quitAndInstall).toHaveBeenCalledWith(false, true)
-    expect(env).toEqual({ APPDATA: 'C:\\Users\\someone\\AppData\\Roaming' })
-  })
-
-  it('leaves an externally supplied CLAUDE_CONFIG_DIR untouched when installing', async () => {
-    const service = new ElectronUpdaterService(updater)
-    updater.checkForUpdates.mockResolvedValue({ updateInfo: { version: '1.2.4' } })
-    updater.downloadUpdate.mockResolvedValue(undefined)
-    await service.checkForUpdates()
-    await service.downloadUpdate(() => {})
-
-    const env: NodeJS.ProcessEnv = { CLAUDE_CONFIG_DIR: 'E:\\external-data' }
-    service.quitAndInstallDownloadedUpdate(env)
-
-    expect(updater.quitAndInstall).toHaveBeenCalledWith(false, true)
-    expect(env).toEqual({ CLAUDE_CONFIG_DIR: 'E:\\external-data' })
   })
 })

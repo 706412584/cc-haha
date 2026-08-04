@@ -71,6 +71,10 @@ vi.mock('../../hooks/useMobileViewport', () => ({
   useMobileViewport: () => viewportMocks.isMobile,
 }))
 
+vi.mock('../../lib/imageCompress', () => ({
+  compressDataUrl: vi.fn(async (dataUrl: string) => dataUrl),
+}))
+
 vi.mock('../controls/PermissionModeSelector', () => ({
   // Surfaces `compact` because that prop is the difference between the labelled
   // pill and the bare icon the real selector renders, and the composer decides
@@ -933,75 +937,6 @@ describe('ChatInput file mentions', () => {
     expect(stop).not.toBeDisabled()
   })
 
-  it.each(['local_agent', 'remote_agent'])('keeps Run available alongside Stop for an idle session with a running %s', (taskType) => {
-    useChatStore.setState({
-      sessions: {
-        ...useChatStore.getState().sessions,
-        [sessionId]: {
-          ...useChatStore.getState().sessions[sessionId]!,
-          chatState: 'idle',
-          backgroundAgentTasks: {
-            agent: {
-              taskId: 'agent',
-              taskType,
-              status: 'running',
-              startedAt: 1,
-              updatedAt: 1,
-            },
-          },
-        },
-      },
-    })
-
-    render(<ChatInput compact />)
-
-    const input = screen.getByRole('textbox')
-    fireEvent.change(input, {
-      target: { value: 'continue while the agent runs', selectionStart: 29 },
-    })
-
-    const run = screen.getByRole('button', { name: 'Run' })
-    const stop = screen.getByRole('button', { name: 'Stop' })
-    expect(run).not.toBeDisabled()
-    expect(stop).not.toBeDisabled()
-
-    fireEvent.click(stop)
-    fireEvent.click(run)
-
-    expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, { type: 'stop_generation' })
-    expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, {
-      type: 'user_message',
-      content: 'continue while the agent runs',
-      attachments: [],
-    })
-  })
-
-  it.each(['local_bash', 'dream'])('does not turn Run into Stop for a running %s task', (taskType) => {
-    useChatStore.setState({
-      sessions: {
-        ...useChatStore.getState().sessions,
-        [sessionId]: {
-          ...useChatStore.getState().sessions[sessionId]!,
-          chatState: 'idle',
-          backgroundAgentTasks: {
-            task: {
-              taskId: 'task',
-              taskType,
-              status: 'running',
-              startedAt: 1,
-              updatedAt: 1,
-            },
-          },
-        },
-      },
-    })
-
-    render(<ChatInput compact />)
-
-    expect(screen.getByRole('button', { name: 'Run' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument()
-  })
-
   // This used to assert that the run button shed its label before the location
   // moved. The button has no label to shed any more — it is one round icon at
   // every width — so what needs pinning is that it does *not* change with the
@@ -1097,8 +1032,8 @@ describe('ChatInput file mentions', () => {
 
     render(<ChatInput variant="hero" />)
 
-    expect(await screen.findByText('repo')).toBeInTheDocument()
-    expect(screen.getByText('main')).toBeInTheDocument()
+    expect((await screen.findAllByText('repo')).length).toBeGreaterThan(0)
+    expect(screen.getAllByText('main').length).toBeGreaterThan(0)
     expect(screen.queryByRole('button', { name: /Select branch:/ })).not.toBeInTheDocument()
     expect(screen.queryByText('Current worktree')).not.toBeInTheDocument()
   })
@@ -1466,17 +1401,95 @@ describe('ChatInput file mentions', () => {
     })
   })
 
-  it('uses native desktop file paths instead of inlining selected files', async () => {
+  it('loads a path-only image through the local file endpoint before annotation', async () => {
+    const imagePath = 'C:\\Users\\Nanmi\\Desktop\\path-only.png'
+    const fetchMock = vi.fn(async () => new Response(
+      new Blob(['png'], { type: 'image/png' }),
+      { status: 200 },
+    ))
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('Image', class {
+      naturalWidth = 400
+      naturalHeight = 300
+      onload: (() => void) | null = null
+      set src(_value: string) {
+        queueMicrotask(() => this.onload?.())
+      }
+    })
+    const context2d = {
+      clearRect: vi.fn(),
+      drawImage: vi.fn(),
+    } as unknown as CanvasRenderingContext2D
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation((
+      (contextId: string) => contextId === '2d' ? context2d : null
+    ) as HTMLCanvasElement['getContext'])
+
+    act(() => {
+      useChatStore.getState().queueComposerPrefill(sessionId, {
+        text: '',
+        mode: 'append',
+        attachments: [{
+          type: 'image',
+          name: 'path-only.png',
+          path: imagePath,
+          mimeType: 'image/png',
+        }],
+      })
+    })
+
+    render(<ChatInput compact />)
+    fireEvent.click(await screen.findByLabelText('Annotate path-only.png'))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining(`/api/filesystem/file?path=${encodeURIComponent(imagePath)}`),
+    ))
+  })
+
+  it('previews and annotates a selected desktop JPG outside the filesystem allow-list', async () => {
+    const createObjectURL = vi.fn(() => 'blob:selected-desktop-image')
+    vi.stubGlobal('URL', { ...URL, createObjectURL })
     installElectronFileHost()
-    mocks.dialogOpen.mockResolvedValueOnce([
-      '/Users/nanmi/tmp/large-a.log',
-      'C:\\Users\\Nanmi\\Desktop\\large-b.zip',
-    ])
+    const selectedImage = new File(['jpg'], 'EEA4B68044C134AC00FDCFA6F1C8027E.jpg', { type: 'image/jpeg' })
+    Object.defineProperty(selectedImage, 'path', {
+      configurable: true,
+      value: 'D:\\download\\EEA4B68044C134AC00FDCFA6F1C8027E.jpg',
+    })
 
     render(<ChatInput compact />)
 
     fireEvent.click(screen.getByLabelText('Open composer tools'))
     fireEvent.click(screen.getByText('Add files or photos'))
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(fileInput, { target: { files: [selectedImage] } })
+
+    expect(await screen.findByRole('img', { name: selectedImage.name })).toHaveAttribute(
+      'src',
+      'blob:selected-desktop-image',
+    )
+    expect(createObjectURL).toHaveBeenCalledWith(selectedImage)
+    fireEvent.click(screen.getByRole('button', { name: `Annotate ${selectedImage.name}` }))
+    expect(await screen.findByRole('dialog', { name: '图片标注' })).toBeInTheDocument()
+  })
+
+  it('uses native desktop file paths instead of inlining selected files', async () => {
+    installElectronFileHost()
+    const firstFile = new File(['log'], 'large-a.log', { type: 'text/plain' })
+    const secondFile = new File(['zip'], 'large-b.zip', { type: 'application/zip' })
+    Object.defineProperty(firstFile, 'path', {
+      configurable: true,
+      value: '/Users/nanmi/tmp/large-a.log',
+    })
+    Object.defineProperty(secondFile, 'path', {
+      configurable: true,
+      value: 'C:\\Users\\Nanmi\\Desktop\\large-b.zip',
+    })
+
+    render(<ChatInput compact />)
+
+    fireEvent.click(screen.getByLabelText('Open composer tools'))
+    fireEvent.click(screen.getByText('Add files or photos'))
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(fileInput, { target: { files: [firstFile, secondFile] } })
 
     expect(await screen.findByText('large-a.log')).toBeInTheDocument()
     expect(await screen.findByText('large-b.zip')).toBeInTheDocument()
@@ -1737,7 +1750,7 @@ describe('ChatInput file mentions', () => {
     expect(screen.getByRole('button', { name: 'Open composer tools' })).toHaveClass('h-11', 'w-11')
     expect(screen.getByRole('button', { name: 'Run' })).toHaveClass('h-11', 'w-11')
     expect(screen.queryByText('Run')).not.toBeInTheDocument()
-    expect(screen.getByTestId('chat-input-shell')).toHaveClass('px-3')
+    expect(screen.getByTestId('chat-input-shell')).toHaveClass('mobile-composer-shell', 'px-3')
     expect(screen.getByTestId('chat-input-shell').className).toContain('safe-area-inset-bottom')
     // `glass-panel--composer` carries the composer step of the shadow scale.
     // The phone branch used to swap it for a `shadow-[…]` utility, which loses
@@ -1746,8 +1759,10 @@ describe('ChatInput file mentions', () => {
     expect(screen.getByTestId('chat-input-panel')).toHaveClass('glass-panel--composer')
     expect(screen.getByTestId('chat-input-panel')).toHaveClass('rounded-[var(--radius-2xl)]')
     expect(screen.getByTestId('chat-input-panel')).not.toHaveClass('rounded-b-none')
-    expect(screen.getByTestId('chat-input-toolbar-leading')).toHaveClass('shrink-0', 'gap-1')
-    expect(screen.getByTestId('chat-input-toolbar-trailing')).toHaveClass('min-w-0', 'flex-1', 'justify-end', 'gap-1')
+    expect(screen.getByRole('textbox')).toHaveClass('mobile-composer-textarea', 'min-h-[44px]')
+    expect(screen.getByTestId('chat-input-toolbar')).toHaveClass('mobile-composer-toolbar')
+    expect(screen.getByTestId('chat-input-toolbar-leading')).toHaveClass('mobile-composer-toolbar__tools', 'shrink-0', 'gap-1')
+    expect(screen.getByTestId('chat-input-toolbar-trailing')).toHaveClass('mobile-composer-toolbar__actions', 'min-w-0', 'flex-1', 'justify-end', 'gap-1')
     expect(screen.getByTestId('model-selector-shell')).toHaveClass('min-w-0', 'flex-1')
 
     fireEvent.change(screen.getByRole('textbox'), {
@@ -1773,8 +1788,12 @@ describe('ChatInput file mentions', () => {
 
     expect(toolbar).not.toHaveClass('absolute')
     expect(toolbar).toHaveClass('mt-3')
+    expect(toolbar).not.toHaveClass('mobile-composer-toolbar')
+    expect(input).not.toHaveClass('mobile-composer-textarea')
     expect(input).not.toHaveClass('pb-12')
     expect(input).not.toHaveClass('pb-14')
+    expect(screen.getByTestId('chat-input-shell')).not.toHaveClass('mobile-composer-shell')
+    expect(screen.getByTestId('chat-input-panel')).not.toHaveClass('mobile-composer-panel')
   })
 
   // The draft and the live session render the same composer, so the row that

@@ -70,6 +70,11 @@ export function TraceSession({
   const lastSpanIdRef = useRef<string | null>(null)
 
   useEffect(() => {
+    setSelectedId(null)
+    lastSpanIdRef.current = null
+  }, [sessionId])
+
+  useEffect(() => {
     let cancelled = false
     let loadInFlight = false
     let revisionPollingAvailable = true
@@ -150,8 +155,6 @@ export function TraceSession({
       }
     }
 
-    setSelectedId(null)
-    lastSpanIdRef.current = null
     void load(false)
     const interval = window.setInterval(() => {
       void load(true)

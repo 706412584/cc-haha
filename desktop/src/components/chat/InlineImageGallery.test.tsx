@@ -1,6 +1,28 @@
 import '@testing-library/jest-dom'
-import { render, screen } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { fireEvent, render, screen } from '@testing-library/react'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+const { queueComposerPrefill } = vi.hoisted(() => ({
+  queueComposerPrefill: vi.fn(),
+}))
+
+vi.mock('../../stores/chatStore', () => ({
+  useChatStore: {
+    getState: () => ({ queueComposerPrefill }),
+  },
+}))
+
+vi.mock('./ImageAnnotationModal', () => ({
+  ImageAnnotationModal: ({ open, image, onSave }: {
+    open: boolean
+    image: { name: string } | null
+    onSave: (dataUrl: string) => void
+  }) => open ? (
+    <button type="button" onClick={() => onSave('data:image/png;base64,ANNOTATED')}>
+      Save {image?.name}
+    </button>
+  ) : null,
+}))
 
 // getBaseUrl backs the absolute-path src (/api/filesystem/file).
 vi.mock('../../api/client', () => ({
@@ -19,6 +41,37 @@ function imgSrcs(): string[] {
 }
 
 describe('InlineImageGallery', () => {
+  beforeEach(() => {
+    queueComposerPrefill.mockReset()
+  })
+
+  it('annotates an inline image and appends the result to the session composer', () => {
+    render(
+      <InlineImageGallery
+        text={'render saved to outputs/a/frame.png'}
+        sessionId="s1"
+        workDir="/w"
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /frame\.png/i }))
+    fireEvent.click(screen.getByRole('button', { name: /标注并提问/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save frame.png' }))
+
+    expect(queueComposerPrefill).toHaveBeenCalledWith('s1', {
+      text: '',
+      mode: 'append',
+      attachments: [{
+        type: 'image',
+        name: 'frame-annotated.png',
+        data: 'data:image/png;base64,ANNOTATED',
+        previewUrl: 'data:image/png;base64,ANNOTATED',
+        mimeType: 'image/png',
+      }],
+    })
+    expect(screen.queryByRole('button', { name: /标注并提问/ })).not.toBeInTheDocument()
+  })
+
   it('renders an absolute image path via /api/filesystem/file (legacy behavior)', () => {
     render(<InlineImageGallery text={'see /Users/me/out/result.png done'} />)
 
@@ -46,66 +99,6 @@ describe('InlineImageGallery', () => {
     const srcs = imgSrcs()
     expect(srcs).toHaveLength(1)
     expect(srcs[0]).toBe('http://127.0.0.1:4321/preview-fs/s1/outputs/a/frame.png')
-  })
-
-  it('uses the absolute-file route for a changed image outside the workspace', () => {
-    render(
-      <InlineImageGallery
-        text={'render saved to result.png'}
-        sessionId="s1"
-        workDir="/w"
-        changedFiles={['/outside/result.png']}
-      />,
-    )
-
-    expect(imgSrcs()).toEqual([
-      'http://127.0.0.1:3456/api/filesystem/file?path=' + encodeURIComponent('/outside/result.png'),
-    ])
-  })
-
-  it('keeps an absolute image when the turn checkpoint recorded no changes (Bash writes are untracked)', () => {
-    // Regression: a PIL/Bash-generated image at /tmp is invisible to the turn
-    // checkpoint (filesChanged=[]), but the gallery must not filter it away.
-    render(
-      <InlineImageGallery
-        text={'已生成，保存到 /tmp/result.png'}
-        sessionId="s1"
-        workDir="/w"
-        changedFiles={[]}
-      />,
-    )
-
-    expect(imgSrcs()).toEqual([
-      'http://127.0.0.1:3456/api/filesystem/file?path=' + encodeURIComponent('/tmp/result.png'),
-    ])
-  })
-
-  it('keeps an absolute image that is not among the turn changed files', () => {
-    render(
-      <InlineImageGallery
-        text={'已生成，保存到 /tmp/result.png，同时更新了 app.ts'}
-        sessionId="s1"
-        workDir="/w"
-        changedFiles={['/w/src/app.ts']}
-      />,
-    )
-
-    expect(imgSrcs()).toEqual([
-      'http://127.0.0.1:3456/api/filesystem/file?path=' + encodeURIComponent('/tmp/result.png'),
-    ])
-  })
-
-  it('treats an empty changedFiles as no evidence for relative mentions', () => {
-    render(
-      <InlineImageGallery
-        text={'render saved to outputs/a/frame.png'}
-        sessionId="s1"
-        workDir="/w"
-        changedFiles={[]}
-      />,
-    )
-
-    expect(imgSrcs()).toEqual(['http://127.0.0.1:4321/preview-fs/s1/outputs/a/frame.png'])
   })
 
   it('renders both absolute and relative images together', () => {

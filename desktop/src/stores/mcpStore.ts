@@ -1,12 +1,6 @@
 import { create } from 'zustand'
 import { mcpApi } from '../api/mcp'
 import { sessionsApi } from '../api/sessions'
-import {
-  dedupeMcpProjectPaths,
-  getMcpServerIdentityKey,
-  isSameMcpServer,
-  mcpProjectPathKey,
-} from '../lib/mcpIdentity'
 import type { McpServerRecord, McpUpsertPayload } from '../types/mcp'
 
 type McpStore = {
@@ -41,11 +35,8 @@ async function collectKnownProjectPaths(currentWorkDir?: string): Promise<string
       .then(({ projectPaths }) => projectPaths)
       .catch(() => []),
   ])
-  return dedupeMcpProjectPaths([
-    currentWorkDir,
-    ...recentProjectPaths,
-    ...configuredMcpProjectPaths,
-  ])
+  return [currentWorkDir, ...recentProjectPaths, ...configuredMcpProjectPaths]
+    .filter((path): path is string => !!path)
 }
 
 function isProjectScoped(server: Pick<McpServerRecord, 'scope'>) {
@@ -62,19 +53,14 @@ function attachProjectPath(server: McpServerRecord, cwd?: string) {
 
   return {
     ...server,
-    projectPath: server.projectPath ?? cwd,
+    projectPath: cwd ?? server.projectPath,
   }
 }
 
-function preserveCurrentContextActivity(
-  next: McpServerRecord,
-  previous: Pick<McpServerRecord, 'activeInCurrentContext'>,
-) {
-  return {
-    ...next,
-    activeInCurrentContext:
-      next.activeInCurrentContext ?? previous.activeInCurrentContext,
-  }
+function isSameServer(a: Pick<McpServerRecord, 'name' | 'scope' | 'projectPath'>, b: Pick<McpServerRecord, 'name' | 'scope' | 'projectPath'>) {
+  if (a.name !== b.name || a.scope !== b.scope) return false
+  if (!isProjectScoped(a) && !isProjectScoped(b)) return true
+  return (a.projectPath ?? '') === (b.projectPath ?? '')
 }
 
 function replaceServer(
@@ -84,18 +70,10 @@ function replaceServer(
   cwd?: string,
 ) {
   const normalizedNext = attachProjectPath(next, cwd)
-  const index = servers.findIndex((item) => isSameMcpServer(item, previous))
+  const index = servers.findIndex((item) => isSameServer(item, previous))
   if (index === -1) return [...servers, normalizedNext]
 
-  return servers.map((item, itemIndex) => (
-    itemIndex === index
-      ? {
-          ...normalizedNext,
-          activeInCurrentContext:
-            normalizedNext.activeInCurrentContext ?? item.activeInCurrentContext,
-        }
-      : item
-  ))
+  return servers.map((item, itemIndex) => (itemIndex === index ? normalizedNext : item))
 }
 
 let fetchServersRequestId = 0
@@ -110,21 +88,15 @@ export const useMcpStore = create<McpStore>((set, get) => ({
     const requestId = ++fetchServersRequestId
     set({ isLoading: true, error: null })
     try {
-      const normalizedPaths = dedupeMcpProjectPaths(projectPaths ?? [])
+      const normalizedPaths = Array.from(new Set((projectPaths ?? []).filter(Boolean)))
       const contexts = normalizedPaths.length > 0 ? normalizedPaths : [fallbackCwd].filter(Boolean)
-      const activeContextKey = mcpProjectPathKey(fallbackCwd)
 
       const responses = await Promise.all(
         (contexts.length > 0 ? contexts : [undefined]).map(async (cwd) => {
           const response = await mcpApi.list(cwd)
           return response.servers.map((server) => ({
             ...server,
-            projectPath:
-              server.scope === 'local' || server.scope === 'project'
-                ? server.projectPath ?? cwd
-                : undefined,
-            activeInCurrentContext:
-              activeContextKey.length > 0 && mcpProjectPathKey(cwd) === activeContextKey,
+            projectPath: server.scope === 'local' || server.scope === 'project' ? cwd : undefined,
           }))
         }),
       )
@@ -132,16 +104,12 @@ export const useMcpStore = create<McpStore>((set, get) => ({
       const deduped = new Map<string, McpServerRecord>()
       for (const group of responses) {
         for (const server of group) {
-          const key = getMcpServerIdentityKey(server)
-          const existing = deduped.get(key)
-          if (!existing || server.activeInCurrentContext) {
+          const key =
+            server.scope === 'local' || server.scope === 'project'
+              ? `${server.scope}:${server.projectPath}:${server.name}`
+              : `${server.scope}:${server.name}`
+          if (!deduped.has(key)) {
             deduped.set(key, server)
-          } else if (server.activeInCurrentContext !== existing.activeInCurrentContext) {
-            deduped.set(key, {
-              ...existing,
-              activeInCurrentContext:
-                existing.activeInCurrentContext || server.activeInCurrentContext,
-            })
           }
         }
       }
@@ -179,13 +147,10 @@ export const useMcpStore = create<McpStore>((set, get) => ({
   updateServer: async (server, payload, cwd) => {
     const previousCwd = isProjectScoped(server) ? server.projectPath : undefined
     const response = await mcpApi.update(server.name, payload, cwd, previousCwd)
-    const updated = preserveCurrentContextActivity(
-      attachProjectPath(response.server, cwd ?? server.projectPath),
-      server,
-    )
+    const updated = attachProjectPath(response.server, cwd ?? server.projectPath)
     set((state) => ({
       servers: replaceServer(state.servers, server, updated, cwd ?? server.projectPath),
-      selectedServer: state.selectedServer && isSameMcpServer(state.selectedServer, server) ? updated : state.selectedServer,
+      selectedServer: state.selectedServer && isSameServer(state.selectedServer, server) ? updated : state.selectedServer,
       error: null,
     }))
     return updated
@@ -194,9 +159,9 @@ export const useMcpStore = create<McpStore>((set, get) => ({
   deleteServer: async (server, cwd) => {
     await mcpApi.remove(server.name, server.scope, cwd)
     set((state) => ({
-      servers: state.servers.filter((item) => !isSameMcpServer(item, server)),
+      servers: state.servers.filter((item) => !isSameServer(item, server)),
       selectedServer:
-        state.selectedServer && isSameMcpServer(state.selectedServer, server)
+        state.selectedServer && isSameServer(state.selectedServer, server)
           ? null
           : state.selectedServer,
       error: null,
@@ -205,13 +170,10 @@ export const useMcpStore = create<McpStore>((set, get) => ({
 
   toggleServer: async (server, cwd, sessionId) => {
     const response = await mcpApi.toggle(server.name, cwd, sessionId)
-    const updated = preserveCurrentContextActivity(
-      attachProjectPath(response.server, cwd ?? server.projectPath),
-      server,
-    )
+    const updated = attachProjectPath(response.server, cwd ?? server.projectPath)
     set((state) => ({
       servers: replaceServer(state.servers, server, updated, cwd ?? server.projectPath),
-      selectedServer: state.selectedServer && isSameMcpServer(state.selectedServer, server) ? updated : state.selectedServer,
+      selectedServer: state.selectedServer && isSameServer(state.selectedServer, server) ? updated : state.selectedServer,
       error: null,
     }))
     return updated
@@ -219,13 +181,10 @@ export const useMcpStore = create<McpStore>((set, get) => ({
 
   reconnectServer: async (server, cwd) => {
     const response = await mcpApi.reconnect(server.name, cwd)
-    const updated = preserveCurrentContextActivity(
-      attachProjectPath(response.server, cwd ?? server.projectPath),
-      server,
-    )
+    const updated = attachProjectPath(response.server, cwd ?? server.projectPath)
     set((state) => ({
       servers: replaceServer(state.servers, server, updated, cwd ?? server.projectPath),
-      selectedServer: state.selectedServer && isSameMcpServer(state.selectedServer, server) ? updated : state.selectedServer,
+      selectedServer: state.selectedServer && isSameServer(state.selectedServer, server) ? updated : state.selectedServer,
       error: null,
     }))
     return updated
@@ -233,13 +192,10 @@ export const useMcpStore = create<McpStore>((set, get) => ({
 
   refreshServerStatus: async (server, cwd) => {
     const response = await mcpApi.status(server.name, cwd)
-    const updated = preserveCurrentContextActivity(
-      attachProjectPath(response.server, cwd ?? server.projectPath),
-      server,
-    )
+    const updated = attachProjectPath(response.server, cwd ?? server.projectPath)
     set((state) => ({
       servers: replaceServer(state.servers, server, updated, cwd ?? server.projectPath),
-      selectedServer: state.selectedServer && isSameMcpServer(state.selectedServer, server) ? updated : state.selectedServer,
+      selectedServer: state.selectedServer && isSameServer(state.selectedServer, server) ? updated : state.selectedServer,
       error: null,
     }))
     return updated

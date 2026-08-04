@@ -1,6 +1,5 @@
 import type { DesktopUpdateDownloadEvent } from '../../src/lib/desktopHost/types'
 import { existsSync } from 'node:fs'
-import { clearAppManagedPortableEnv } from './appMode'
 
 export type ElectronUpdateInfo = {
   version: string
@@ -38,6 +37,12 @@ export type ElectronUpdaterProxyController = {
 
 export type ElectronUpdaterRuntimeOptions = {
   updateConfigPath?: string
+  /**
+   * Currently running app version. When provided, a feed entry whose version
+   * is not strictly newer is treated as "no update", so an already-latest
+   * release is not surfaced as an available update. Omit to skip comparison.
+   */
+  currentVersion?: string
 }
 
 export type UpdaterSessionProxyConfig = {
@@ -67,6 +72,36 @@ export function normalizeUpdateInfo(info: ElectronUpdateInfo | undefined): Elect
   }
 }
 
+/**
+ * Parse the numeric X.Y.Z core of a version string, ignoring any prerelease
+ * (`-beta`) or build metadata (`+sha`) suffix. Missing segments default to 0.
+ * Electron release versions are clean semver, so a self-contained comparator
+ * avoids pulling a semver dependency into the electron main-process bundle.
+ */
+function parseVersionCore(version: string): [number, number, number] {
+  const core = version.trim().replace(/^v/i, '').split(/[-+]/, 1)[0] ?? ''
+  const parts = core.split('.')
+  const toInt = (value: string | undefined) => {
+    const parsed = Number.parseInt(value ?? '', 10)
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0
+  }
+  return [toInt(parts[0]), toInt(parts[1]), toInt(parts[2])]
+}
+
+/**
+ * Whether `candidate` is a strictly newer release than `current`. Equal or
+ * older versions return false so an "already latest" feed entry is not
+ * mislabeled as an available update. Prerelease/build suffixes are ignored:
+ * an equal numeric core counts as not newer (the safe up-to-date direction).
+ */
+export function isNewerVersion(candidate: string, current: string): boolean {
+  const [aMajor, aMinor, aPatch] = parseVersionCore(candidate)
+  const [bMajor, bMinor, bPatch] = parseVersionCore(current)
+  if (aMajor !== bMajor) return aMajor > bMajor
+  if (aMinor !== bMinor) return aMinor > bMinor
+  return aPatch > bPatch
+}
+
 function isMissingUpdateMetadataError(error: unknown): boolean {
   if (!error) return false
   const maybeError = typeof error === 'object'
@@ -91,6 +126,7 @@ export class ElectronUpdaterService {
   private readonly updater: ElectronUpdaterLike
   private readonly proxyController?: ElectronUpdaterProxyController
   private readonly updateConfigPath?: string
+  private readonly currentVersion?: string
   private pendingUpdate: ElectronUpdateMetadata | null = null
   private downloaded = false
   private proxyKey: string | null = null
@@ -103,6 +139,7 @@ export class ElectronUpdaterService {
     this.updater = updater
     this.proxyController = proxyController
     this.updateConfigPath = runtimeOptions.updateConfigPath
+    this.currentVersion = runtimeOptions.currentVersion
     this.updater.autoDownload = false
     // Differential download issues many small sequential range requests and is
     // RTT-bound against the GitHub CDN, so it downloads far below line speed.
@@ -134,7 +171,11 @@ export class ElectronUpdaterService {
       if (!isMissingUpdateMetadataError(error)) throw error
       result = null
     }
-    this.pendingUpdate = normalizeUpdateInfo(result?.updateInfo)
+    const normalized = normalizeUpdateInfo(result?.updateInfo)
+    this.pendingUpdate =
+      normalized && this.currentVersion && !isNewerVersion(normalized.version, this.currentVersion)
+        ? null
+        : normalized
     this.downloaded = false
     return this.pendingUpdate
   }
@@ -194,13 +235,8 @@ export class ElectronUpdaterService {
     return !!this.pendingUpdate && this.downloaded
   }
 
-  quitAndInstallDownloadedUpdate(env: NodeJS.ProcessEnv = process.env) {
+  quitAndInstallDownloadedUpdate() {
     this.stageDownloadedUpdate()
-    // The NSIS installer spawned here inherits this process's environment.
-    // Hand it the same clean environment a manually launched setup gets, so
-    // its legacy-data checks read the persisted app-mode.json instead of a
-    // process-local snapshot that may disagree with it (#1160).
-    clearAppManagedPortableEnv(env)
     this.updater.quitAndInstall(false, true)
   }
 }

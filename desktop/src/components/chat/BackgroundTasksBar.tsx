@@ -12,6 +12,7 @@ type BackgroundTasksBarProps = {
   compact?: boolean
   dismissedFinishedTaskKeys?: Set<string>
   onClearFinished?: (taskKeys: string[]) => void
+  onStopTask?: (taskId: string) => void
 }
 
 const EMPTY_DISMISSED_TASK_KEYS = new Set<string>()
@@ -21,18 +22,22 @@ export function BackgroundTasksBar({
   compact = false,
   dismissedFinishedTaskKeys,
   onClearFinished,
+  onStopTask,
 }: BackgroundTasksBarProps) {
   const t = useTranslation()
   const [open, setOpen] = useState(false)
   const dismissedTaskKeys = dismissedFinishedTaskKeys ?? EMPTY_DISMISSED_TASK_KEYS
 
-  const { runningTasks, finishedTasks } = useMemo(() => {
+  const { runningTasks, finishedAgentTasks, finishedOtherTasks } = useMemo(() => {
     const sorted = [...tasks].sort((a, b) => b.updatedAt - a.updatedAt)
+    const finished = sorted.filter((task) => task.status !== 'running')
     return {
       runningTasks: sorted.filter((task) => task.status === 'running'),
-      finishedTasks: sorted.filter((task) => task.status !== 'running'),
+      finishedAgentTasks: finished.filter(isAgentTask),
+      finishedOtherTasks: finished.filter((task) => !isAgentTask(task)),
     }
   }, [tasks])
+  const finishedTasks = [...finishedAgentTasks, ...finishedOtherTasks]
 
   const visibleFinishedTasks = finishedTasks.filter((task) =>
     !dismissedTaskKeys.has(createBackgroundTaskDismissKey(task))
@@ -119,13 +124,13 @@ export function BackgroundTasksBar({
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-            <TaskSection title={t('chat.backgroundTasks.running')} tasks={runningTasks} />
+            <TaskSection title={t('chat.backgroundTasks.watching')} tasks={runningTasks} onStopTask={onStopTask} />
 
             <div className="mt-5 flex items-center justify-between">
               <h3 className="text-[13px] font-semibold text-[var(--color-text-secondary)]">
-                {t('chat.backgroundTasks.finished')}
-                {visibleFinishedCount > 0 ? (
-                  <span className="ml-1 font-normal text-[var(--color-text-tertiary)]">{visibleFinishedCount}</span>
+                {t('chat.backgroundTasks.agentResults')}
+                {finishedAgentTasks.length > 0 ? (
+                  <span className="ml-1 font-normal text-[var(--color-text-tertiary)]">{finishedAgentTasks.length}</span>
                 ) : null}
               </h3>
               {visibleFinishedCount > 0 ? (
@@ -141,7 +146,15 @@ export function BackgroundTasksBar({
                 </Button>
               ) : null}
             </div>
-            <TaskList tasks={visibleFinishedTasks} />
+            <TaskList tasks={finishedAgentTasks.filter((task) => !dismissedTaskKeys.has(createBackgroundTaskDismissKey(task)))} />
+            {finishedOtherTasks.length > 0 ? (
+              <div className="mt-5">
+                <h3 className="mb-2 text-[13px] font-semibold text-[var(--color-text-secondary)]">
+                  {t('chat.backgroundTasks.finished')}
+                </h3>
+                <TaskList tasks={finishedOtherTasks.filter((task) => !dismissedTaskKeys.has(createBackgroundTaskDismissKey(task)))} />
+              </div>
+            ) : null}
           </div>
         </aside>
       ) : null}
@@ -149,30 +162,38 @@ export function BackgroundTasksBar({
   )
 }
 
-function TaskSection({ title, tasks }: { title: string; tasks: BackgroundAgentTask[] }) {
+function TaskSection({
+  title,
+  tasks,
+  onStopTask,
+}: {
+  title: string
+  tasks: BackgroundAgentTask[]
+  onStopTask?: (taskId: string) => void
+}) {
   if (tasks.length === 0) return null
 
   return (
     <section>
       <h3 className="mb-2 text-[13px] font-semibold text-[var(--color-text-secondary)]">{title}</h3>
-      <TaskList tasks={tasks} />
+      <TaskList tasks={tasks} onStopTask={onStopTask} />
     </section>
   )
 }
 
-function TaskList({ tasks }: { tasks: BackgroundAgentTask[] }) {
+function TaskList({ tasks, onStopTask }: { tasks: BackgroundAgentTask[]; onStopTask?: (taskId: string) => void }) {
   if (tasks.length === 0) return null
 
   return (
     <div className="space-y-2">
       {tasks.map((task) => (
-        <BackgroundTaskRow key={task.taskId} task={task} />
+        <BackgroundTaskRow key={task.taskId} task={task} onStopTask={onStopTask} />
       ))}
     </div>
   )
 }
 
-function BackgroundTaskRow({ task }: { task: BackgroundAgentTask }) {
+function BackgroundTaskRow({ task, onStopTask }: { task: BackgroundAgentTask; onStopTask?: (taskId: string) => void }) {
   const t = useTranslation()
   const title = task.description?.trim() ||
     task.summary?.trim() ||
@@ -202,6 +223,11 @@ function BackgroundTaskRow({ task }: { task: BackgroundAgentTask }) {
           <div className="truncate text-[13px] font-semibold text-[var(--color-text-primary)]" title={title}>
             {title}
           </div>
+          {task.status !== 'running' && task.result?.trim() ? (
+            <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-[12px] leading-5 text-[var(--color-text-secondary)]">
+              {task.result.trim()}
+            </p>
+          ) : null}
           <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-[var(--color-text-tertiary)]">
             <span className="inline-flex items-center gap-1 text-[var(--color-text-secondary)]">
               {getTaskStatusIcon(task.status)}
@@ -212,9 +238,23 @@ function BackgroundTaskRow({ task }: { task: BackgroundAgentTask }) {
             {tokenLabel ? <span>{tokenLabel}</span> : null}
           </div>
         </div>
+        {task.status === 'running' && onStopTask ? (
+          <button
+            type="button"
+            aria-label={t('chat.backgroundTasks.stopTask', { title })}
+            onClick={() => onStopTask(task.taskId)}
+            className="shrink-0 rounded-md px-2 py-1 text-[12px] font-medium text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-container)] hover:text-[var(--color-error)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
+          >
+            {t('common.stop')}
+          </button>
+        ) : null}
       </div>
     </div>
   )
+}
+
+function isAgentTask(task: BackgroundAgentTask): boolean {
+  return task.taskType === 'local_agent' || task.taskType === 'remote_agent'
 }
 
 function getTaskStatusIcon(status: BackgroundAgentTask['status']) {

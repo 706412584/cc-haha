@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import { Button } from '@/components/ui/Button'
 import { IconButton } from '@/components/ui/IconButton'
 import { Modal } from '@/components/ui/Modal'
 import { useOverlayStore } from '../../stores/overlayStore'
@@ -15,9 +16,10 @@ type Props = {
   activeIndex: number
   onClose: () => void
   onSelect: (index: number) => void
+  onAnnotate?: (image: GalleryImage) => void
 }
 
-export function ImageGalleryModal({ open, images, activeIndex, onClose, onSelect }: Props) {
+export function ImageGalleryModal({ open, images, activeIndex, onClose, onSelect, onAnnotate }: Props) {
   const t = useTranslation()
   const activeImage = images[activeIndex]
 
@@ -58,28 +60,24 @@ export function ImageGalleryModal({ open, images, activeIndex, onClose, onSelect
               {activeIndex + 1} / {images.length}
             </div>
           </div>
-          {images.length > 1 && (
-            <div className="flex items-center gap-2">
-              <IconButton
-                icon="chevron_left"
-                label={t('attachments.previousImage')}
-                size="lg"
-                tone="secondary"
-                shape="circle"
-                bordered
-                onClick={() => onSelect((activeIndex - 1 + images.length) % images.length)}
-              />
-              <IconButton
-                icon="chevron_right"
-                label={t('attachments.nextImage')}
-                size="lg"
-                tone="secondary"
-                shape="circle"
-                bordered
-                onClick={() => onSelect((activeIndex + 1) % images.length)}
-              />
-            </div>
-          )}
+          <div className="flex items-center gap-2">
+            {onAnnotate && (
+              <Button
+                variant="secondary"
+                size="md"
+                icon={<span className="material-symbols-outlined text-[18px]">edit</span>}
+                onClick={() => onAnnotate(activeImage)}
+              >
+                标注并提问
+              </Button>
+            )}
+            {images.length > 1 && (
+              <>
+                <IconButton icon="chevron_left" label={t('attachments.previousImage')} size="lg" tone="secondary" shape="circle" bordered onClick={() => onSelect((activeIndex - 1 + images.length) % images.length)} />
+                <IconButton icon="chevron_right" label={t('attachments.nextImage')} size="lg" tone="secondary" shape="circle" bordered onClick={() => onSelect((activeIndex + 1) % images.length)} />
+              </>
+            )}
+          </div>
         </div>
 
         <div className="flex max-h-[70vh] items-center justify-center overflow-hidden rounded-2xl bg-[#111]">

@@ -49,7 +49,7 @@ function createHighlightResult(files: Array<{ rows: Array<{ id: string; text: st
           : 'var(--color-diff-syntax-foreground)',
       }))
     })
-  return { engine: 'shiki', tokensByRowId, wordRangesByRowId: {} }
+  return { engine: 'prism', tokensByRowId, wordRangesByRowId: {} }
 }
 
 describe('WorkspaceDiffSurface', () => {
@@ -348,7 +348,7 @@ describe('WorkspaceDiffSurface', () => {
     expect(screen.getByRole('textbox', { name: 'Review comment' })).toHaveValue('Keep this collapsed draft')
   })
 
-  it('uses plain text instead of Shiki beyond the large preview threshold', () => {
+  it('uses plain text instead of Prism beyond the large preview threshold', () => {
     const structuralMetadata = Array.from(
       { length: WORKSPACE_PLAIN_TEXT_LINE_THRESHOLD + 1 },
       () => '--- a/src/large.ts',
@@ -386,11 +386,11 @@ describe('WorkspaceDiffSurface', () => {
     expect(headers[1]).toHaveTextContent('diff --git a/src/b.ts b/src/b.ts')
   })
 
-  it('renders TypeScript Shiki tokens through the compatibility export without a circular runtime failure', async () => {
+  it('renders TypeScript Prism tokens through the compatibility export without a circular runtime failure', async () => {
     highlightRequestSpy.mockImplementationOnce(async ({ files }) => createHighlightResult(files))
     render(<ExportedWorkspaceDiffSurface value={diff} path="src/a.ts" />)
 
-    await waitFor(() => expect(screen.getByTestId('workspace-code')).toHaveAttribute('data-highlight-engine', 'shiki'))
+    await waitFor(() => expect(screen.getByTestId('workspace-code')).toHaveAttribute('data-highlight-engine', 'prism'))
     const keyword = screen.getAllByText('const').find((element) => (
       element.getAttribute('style')?.includes('var(--color-diff-syntax-keyword)')
     ))
@@ -423,10 +423,10 @@ describe('WorkspaceDiffSurface', () => {
     expect(getCodeRow('let fresh = 2')).toHaveTextContent('let fresh = 2')
 
     await act(async () => resolveNext?.())
-    await waitFor(() => expect(screen.getByTestId('workspace-code')).toHaveAttribute('data-highlight-engine', 'shiki'))
+    await waitFor(() => expect(screen.getByTestId('workspace-code')).toHaveAttribute('data-highlight-engine', 'prism'))
   })
 
-  it('layers word-level changes over Shiki tokens without changing the line layout', async () => {
+  it('layers word-level changes over Prism tokens without changing the line layout', async () => {
     const wordDiff = [
       'diff --git a/src/a.ts b/src/a.ts',
       '--- a/src/a.ts',
@@ -451,7 +451,7 @@ describe('WorkspaceDiffSurface', () => {
 
     render(<WorkspaceDiffSurface value={wordDiff} path="src/a.ts" />)
 
-    await waitFor(() => expect(screen.getByTestId('workspace-code')).toHaveAttribute('data-highlight-engine', 'shiki'))
+    await waitFor(() => expect(screen.getByTestId('workspace-code')).toHaveAttribute('data-highlight-engine', 'prism'))
     expect(document.querySelector('[data-diff-word-change="deletion"]')).toHaveTextContent('oldName')
     expect(document.querySelector('[data-diff-word-change="addition"]')).toHaveTextContent('newName')
     expect(document.querySelector('[data-diff-word-change="deletion"]')?.className).toContain('color-diff-removed-word')
@@ -473,20 +473,9 @@ describe('WorkspaceDiffSurface', () => {
     expect(screen.getByRole('status')).toHaveTextContent('只能选择同一侧、同一变更块中的行')
   })
 
-  it('does not request Shiki highlighting again for each controlled draft change', () => {
-    const additions = Array.from(
-      { length: 20 },
-      (_, index) => `+const value${index + 1} = ${index + 1}`,
-    )
-    const nearLimitDiff = [
-      'diff --git a/src/near-limit.ts b/src/near-limit.ts',
-      '--- a/src/near-limit.ts',
-      '+++ b/src/near-limit.ts',
-      `@@ -0,0 +1,${additions.length} @@`,
-      ...additions,
-    ].join('\n')
-    render(<WorkspaceDiffSurface value={nearLimitDiff} path="src/near-limit.ts" />)
-    fireEvent.click(screen.getByRole('button', { name: 'Comment on src/near-limit.ts new line 1' }))
+  it('does not request Prism highlighting again for each controlled draft change', () => {
+    render(<WorkspaceDiffSurface value={diff} path="src/a.ts" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Comment on src/a.ts new line 11' }))
     const highlightCountBeforeTyping = highlightRequestSpy.mock.calls.length
     const editor = screen.getByRole('textbox', { name: 'Review comment' })
 

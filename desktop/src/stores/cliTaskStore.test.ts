@@ -70,10 +70,10 @@ describe('cliTaskStore', () => {
   })
 
   it('resets a completed task list locally before clearing it remotely', async () => {
-    let resolveReset: ((value: { ok: true }) => void) | null = null
+    let resolveReset: ((value: { ok: true, reset: true }) => void) | null = null
 
     vi.mocked(cliTasksApi.resetTaskList).mockImplementation(
-      () => new Promise<{ ok: true }>((resolve) => {
+      () => new Promise<{ ok: true, reset: true }>((resolve) => {
         resolveReset = resolve
       }),
     )
@@ -91,7 +91,24 @@ describe('cliTaskStore', () => {
 
     const resetPromise = useCLITaskStore.getState().resetCompletedTasks()
 
-    expect(vi.mocked(cliTasksApi.resetTaskList)).toHaveBeenCalledWith('session-1')
+    expect(vi.mocked(cliTasksApi.resetTaskList)).toHaveBeenCalledWith('session-1', [
+      {
+        id: '1',
+        subject: 'Keep current session isolated',
+        description: '',
+        status: 'completed',
+        blocks: [],
+        blockedBy: [],
+      },
+      {
+        id: '2',
+        subject: 'Second completed task',
+        description: '',
+        status: 'completed',
+        blocks: [],
+        blockedBy: [],
+      },
+    ])
     expect(useCLITaskStore.getState()).toMatchObject({
       tasks: [],
       resetting: true,
@@ -101,7 +118,7 @@ describe('cliTaskStore', () => {
     })
 
     expect(resolveReset).not.toBeNull()
-    resolveReset!({ ok: true })
+    resolveReset!({ ok: true, reset: true })
     await resetPromise
 
     expect(useCLITaskStore.getState().resetting).toBe(false)
@@ -113,7 +130,7 @@ describe('cliTaskStore', () => {
       { ...makeTask('session-1', 'completed'), id: '2', subject: 'Second completed task' },
     ]
 
-    vi.mocked(cliTasksApi.resetTaskList).mockResolvedValue({ ok: true })
+    vi.mocked(cliTasksApi.resetTaskList).mockResolvedValue({ ok: true, reset: true })
     vi.mocked(cliTasksApi.getTasksForList).mockResolvedValue({ tasks: completedTasks })
 
     useCLITaskStore.setState({
@@ -156,68 +173,13 @@ describe('cliTaskStore', () => {
     ])
   })
 
-  it('coalesces overlapping task polls for the same session', async () => {
-    let resolvePoll: ((value: { tasks: CLITask[] }) => void) | null = null
+  it('shares one in-flight task request per session across polling and refreshes', async () => {
+    let resolveRequest: ((value: { tasks: CLITask[] }) => void) | null = null
     vi.mocked(cliTasksApi.getTasksForList).mockImplementation(
-      () => new Promise((resolve) => {
-        resolvePoll = resolve
+      () => new Promise<{ tasks: CLITask[] }>((resolve) => {
+        resolveRequest = resolve
       }),
     )
-
-    const first = useCLITaskStore.getState().fetchSessionTasks('session-1')
-    const second = useCLITaskStore.getState().fetchSessionTasks('session-1')
-
-    expect(cliTasksApi.getTasksForList).toHaveBeenCalledTimes(1)
-    resolvePoll!({ tasks: [makeTask('session-1')] })
-    await Promise.all([first, second])
-
-    expect(useCLITaskStore.getState().tasks).toHaveLength(1)
-  })
-
-  it('ignores an older task response that finishes after a newer refresh', async () => {
-    let resolveOlder: ((value: { tasks: CLITask[] }) => void) | null = null
-    let resolveNewer: ((value: { tasks: CLITask[] }) => void) | null = null
-
-    vi.mocked(cliTasksApi.getTasksForList)
-      .mockImplementationOnce(() => new Promise((resolve) => {
-        resolveOlder = resolve
-      }))
-      .mockImplementationOnce(() => new Promise((resolve) => {
-        resolveNewer = resolve
-      }))
-
-    useCLITaskStore.setState({
-      sessionId: 'session-1',
-      tasks: [makeTask('session-1', 'pending')],
-      expanded: true,
-      completedAndDismissed: false,
-      dismissedCompletionKey: null,
-    })
-
-    const olderRequest = useCLITaskStore.getState().fetchSessionTasks('session-1')
-    const newerRequest = useCLITaskStore.getState().refreshTasks('session-1')
-
-    resolveNewer!({ tasks: [makeTask('session-1', 'completed')] })
-    await newerRequest
-    resolveOlder!({ tasks: [makeTask('session-1', 'in_progress')] })
-    await olderRequest
-
-    expect(useCLITaskStore.getState().tasks).toMatchObject([
-      { taskListId: 'session-1', status: 'completed' },
-    ])
-  })
-
-  it('applies an older successful response when a newer refresh fails', async () => {
-    let resolveOlder: ((value: { tasks: CLITask[] }) => void) | null = null
-    let rejectNewer: ((reason: Error) => void) | null = null
-
-    vi.mocked(cliTasksApi.getTasksForList)
-      .mockImplementationOnce(() => new Promise((resolve) => {
-        resolveOlder = resolve
-      }))
-      .mockImplementationOnce(() => new Promise((_, reject) => {
-        rejectNewer = reject
-      }))
 
     useCLITaskStore.setState({
       sessionId: 'session-1',
@@ -227,17 +189,249 @@ describe('cliTaskStore', () => {
       dismissedCompletionKey: null,
     })
 
-    const olderRequest = useCLITaskStore.getState().fetchSessionTasks('session-1')
-    const newerRequest = useCLITaskStore.getState().refreshTasks('session-1')
+    const firstPoll = useCLITaskStore.getState().fetchSessionTasks('session-1')
+    const secondPoll = useCLITaskStore.getState().fetchSessionTasks('session-1')
+    const toolRefresh = useCLITaskStore.getState().refreshTasks('session-1')
 
-    rejectNewer!(new Error('temporary failure'))
-    await newerRequest
-    resolveOlder!({ tasks: [makeTask('session-1', 'completed')] })
-    await olderRequest
+    expect(cliTasksApi.getTasksForList).toHaveBeenCalledTimes(1)
+
+    resolveRequest!({ tasks: [makeTask('session-1')] })
+    await Promise.all([firstPoll, secondPoll, toolRefresh])
 
     expect(useCLITaskStore.getState().tasks).toMatchObject([
-      { taskListId: 'session-1', status: 'completed' },
+      { taskListId: 'session-1', status: 'in_progress' },
     ])
+
+    vi.mocked(cliTasksApi.getTasksForList).mockResolvedValue({ tasks: [] })
+    await useCLITaskStore.getState().refreshTasks('session-1')
+
+    expect(cliTasksApi.getTasksForList).toHaveBeenCalledTimes(2)
+  })
+
+  it('releases a failed in-flight request so the next refresh can retry', async () => {
+    vi.mocked(cliTasksApi.getTasksForList)
+      .mockRejectedValueOnce(new Error('temporary failure'))
+      .mockResolvedValueOnce({ tasks: [makeTask('session-1')] })
+
+    useCLITaskStore.setState({
+      sessionId: 'session-1',
+      tasks: [],
+      expanded: false,
+      completedAndDismissed: false,
+      dismissedCompletionKey: null,
+    })
+
+    await useCLITaskStore.getState().refreshTasks('session-1')
+    await useCLITaskStore.getState().refreshTasks('session-1')
+
+    expect(cliTasksApi.getTasksForList).toHaveBeenCalledTimes(2)
+    expect(useCLITaskStore.getState().tasks).toMatchObject([
+      { taskListId: 'session-1', status: 'in_progress' },
+    ])
+  })
+
+  it('keeps requests for different sessions independent', async () => {
+    vi.mocked(cliTasksApi.getTasksForList).mockImplementation(
+      async (sessionId: string) => ({ tasks: [makeTask(sessionId)] }),
+    )
+
+    await Promise.all([
+      useCLITaskStore.getState().fetchSessionTasks('session-1'),
+      useCLITaskStore.getState().fetchSessionTasks('session-2'),
+    ])
+
+    expect(cliTasksApi.getTasksForList).toHaveBeenCalledTimes(2)
+    expect(cliTasksApi.getTasksForList).toHaveBeenCalledWith('session-1')
+    expect(cliTasksApi.getTasksForList).toHaveBeenCalledWith('session-2')
+  })
+
+  it('ignores an old response after leaving and re-entering the same session', async () => {
+    const resolvers = new Map<string, Array<(value: { tasks: CLITask[] }) => void>>()
+    vi.mocked(cliTasksApi.getTasksForList).mockImplementation(
+      (sessionId: string) => new Promise<{ tasks: CLITask[] }>((resolve) => {
+        const pending = resolvers.get(sessionId) ?? []
+        pending.push(resolve)
+        resolvers.set(sessionId, pending)
+      }),
+    )
+
+    const oldSessionA = useCLITaskStore.getState().fetchSessionTasks('session-a')
+    const sessionB = useCLITaskStore.getState().fetchSessionTasks('session-b')
+    const newSessionA = useCLITaskStore.getState().fetchSessionTasks('session-a')
+
+    expect(cliTasksApi.getTasksForList).toHaveBeenCalledTimes(3)
+
+    resolvers.get('session-a')?.[0]?.({
+      tasks: [{ ...makeTask('session-a'), subject: 'stale task' }],
+    })
+    await oldSessionA
+    expect(useCLITaskStore.getState().tasks).toEqual([])
+
+    resolvers.get('session-a')?.[1]?.({
+      tasks: [{ ...makeTask('session-a'), subject: 'current task' }],
+    })
+    resolvers.get('session-b')?.[0]?.({ tasks: [makeTask('session-b')] })
+    await Promise.all([sessionB, newSessionA])
+
+    expect(useCLITaskStore.getState().tasks).toMatchObject([
+      { taskListId: 'session-a', subject: 'current task' },
+    ])
+  })
+
+  it('does not reuse a request from before task tracking was cleared', async () => {
+    const resolvers: Array<(value: { tasks: CLITask[] }) => void> = []
+    vi.mocked(cliTasksApi.getTasksForList).mockImplementation(
+      () => new Promise<{ tasks: CLITask[] }>((resolve) => {
+        resolvers.push(resolve)
+      }),
+    )
+
+    const oldRequest = useCLITaskStore.getState().fetchSessionTasks('session-1')
+    useCLITaskStore.getState().clearTasks('session-1')
+    const newRequest = useCLITaskStore.getState().fetchSessionTasks('session-1')
+
+    expect(cliTasksApi.getTasksForList).toHaveBeenCalledTimes(2)
+
+    resolvers[0]?.({ tasks: [{ ...makeTask('session-1'), subject: 'stale task' }] })
+    await oldRequest
+    expect(useCLITaskStore.getState().tasks).toEqual([])
+
+    resolvers[1]?.({ tasks: [{ ...makeTask('session-1'), subject: 'current task' }] })
+    await newRequest
+    expect(useCLITaskStore.getState().tasks).toMatchObject([
+      { taskListId: 'session-1', subject: 'current task' },
+    ])
+  })
+
+  it('does not let an older poll overwrite a newer TodoWrite update', async () => {
+    let resolveRequest: ((value: { tasks: CLITask[] }) => void) | null = null
+    vi.mocked(cliTasksApi.getTasksForList).mockImplementation(
+      () => new Promise<{ tasks: CLITask[] }>((resolve) => {
+        resolveRequest = resolve
+      }),
+    )
+
+    const poll = useCLITaskStore.getState().fetchSessionTasks('session-1')
+    useCLITaskStore.getState().setTasksFromTodos([
+      { content: 'new task from tool', status: 'in_progress' },
+    ], 'session-1')
+
+    resolveRequest!({
+      tasks: [{ ...makeTask('session-1'), subject: 'stale task from poll' }],
+    })
+    await poll
+
+    expect(useCLITaskStore.getState().tasks).toMatchObject([
+      { taskListId: 'session-1', subject: 'new task from tool' },
+    ])
+  })
+
+  it('does not start task refreshes while a completed-list reset is pending', async () => {
+    let resolveReset: ((value: { ok: true, reset: true }) => void) | null = null
+    vi.mocked(cliTasksApi.resetTaskList).mockImplementation(
+      () => new Promise<{ ok: true, reset: true }>((resolve) => {
+        resolveReset = resolve
+      }),
+    )
+
+    useCLITaskStore.setState({
+      sessionId: 'session-1',
+      tasks: [makeTask('session-1', 'completed')],
+      expanded: true,
+      completedAndDismissed: false,
+      dismissedCompletionKey: null,
+    })
+
+    const reset = useCLITaskStore.getState().resetCompletedTasks('session-1')
+    await Promise.all([
+      useCLITaskStore.getState().fetchSessionTasks('session-1'),
+      useCLITaskStore.getState().refreshTasks('session-1'),
+    ])
+
+    expect(cliTasksApi.getTasksForList).not.toHaveBeenCalled()
+
+    resolveReset!({ ok: true, reset: true })
+    await reset
+    expect(useCLITaskStore.getState().resetting).toBe(false)
+  })
+
+  it('lets a new TodoWrite cycle supersede a pending completed-list reset', async () => {
+    let resolveReset: ((value: { ok: true, reset: true }) => void) | null = null
+    vi.mocked(cliTasksApi.resetTaskList).mockImplementation(
+      () => new Promise<{ ok: true, reset: true }>((resolve) => {
+        resolveReset = resolve
+      }),
+    )
+
+    useCLITaskStore.setState({
+      sessionId: 'session-1',
+      tasks: [makeTask('session-1', 'completed')],
+      expanded: false,
+      completedAndDismissed: false,
+      dismissedCompletionKey: null,
+    })
+
+    const reset = useCLITaskStore.getState().resetCompletedTasks('session-1')
+    useCLITaskStore.getState().setTasksFromTodos([
+      { content: 'new cycle', status: 'in_progress' },
+    ], 'session-1')
+
+    expect(useCLITaskStore.getState()).toMatchObject({
+      resetting: false,
+      tasks: [{ subject: 'new cycle', status: 'in_progress' }],
+    })
+
+    resolveReset!({ ok: true, reset: true })
+    await reset
+    expect(useCLITaskStore.getState().tasks).toMatchObject([
+      { subject: 'new cycle', status: 'in_progress' },
+    ])
+  })
+
+  it('refreshes preserved tasks when the server rejects a stale reset snapshot', async () => {
+    vi.mocked(cliTasksApi.resetTaskList).mockResolvedValue({ ok: true, reset: false })
+    vi.mocked(cliTasksApi.getTasksForList).mockResolvedValue({
+      tasks: [{ ...makeTask('session-1'), subject: 'new task from disk' }],
+    })
+
+    useCLITaskStore.setState({
+      sessionId: 'session-1',
+      tasks: [makeTask('session-1', 'completed')],
+      expanded: false,
+      completedAndDismissed: false,
+      dismissedCompletionKey: null,
+    })
+
+    await useCLITaskStore.getState().resetCompletedTasks('session-1')
+
+    expect(cliTasksApi.getTasksForList).toHaveBeenCalledWith('session-1')
+    expect(useCLITaskStore.getState()).toMatchObject({
+      resetting: false,
+      completedAndDismissed: false,
+      tasks: [{ subject: 'new task from disk', status: 'in_progress' }],
+    })
+  })
+
+  it('restores completed tasks when the remote reset request fails', async () => {
+    vi.mocked(cliTasksApi.resetTaskList).mockRejectedValue(new Error('reset failed'))
+    const completedTasks = [makeTask('session-1', 'completed')]
+
+    useCLITaskStore.setState({
+      sessionId: 'session-1',
+      tasks: completedTasks,
+      expanded: false,
+      completedAndDismissed: false,
+      dismissedCompletionKey: null,
+    })
+
+    await useCLITaskStore.getState().resetCompletedTasks('session-1')
+
+    expect(useCLITaskStore.getState()).toMatchObject({
+      tasks: completedTasks,
+      resetting: false,
+      completedAndDismissed: false,
+      dismissedCompletionKey: null,
+    })
   })
 
   it('preserves known tasks when polling fails transiently', async () => {

@@ -5,6 +5,7 @@ import {
   clearProxyEnv,
   createAdapterPlan,
   createServerPlan,
+  createTunnelPlan,
   ELECTRON_DIAGNOSTICS_FILE_ENV,
   formatStartupError,
   killSidecar,
@@ -12,17 +13,21 @@ import {
   preferredServerPorts,
   pushStartupLog,
   reserveServerPort,
+  resolveCloudflaredPath,
   sanitizeHostDiagnostic,
   SERVER_BIND_HOST,
   SERVER_CONTROL_HOST,
   SERVER_STARTUP_TIMEOUT_MS,
   spawnSidecar,
+  spawnTunnel,
   waitForServer,
+  waitForTunnelUrl,
   withAdapterProxyBridgeEnv,
   withSystemProxyBridgeEnv,
   withSystemProxyErrorEnv,
   windowsPowerShellOverride,
   writeLastServerPort,
+  type H5TunnelMode,
   type SidecarChild,
 } from './sidecarManager'
 import { readDesktopTerminalConfig, resolveDesktopTerminalShell } from './terminal'
@@ -31,14 +36,37 @@ import {
   type SystemProxyBridgeLike,
 } from './systemProxyBridge'
 
+export type TunnelStartOptions = {
+  mode: H5TunnelMode
+  token?: string | null
+  /** Public base URL to report for a named tunnel (the user's bound domain). */
+  namedUrl?: string | null
+}
+
+export type TunnelStatus = {
+  status: 'idle' | 'starting' | 'running' | 'error'
+  url: string | null
+  mode: H5TunnelMode | null
+  error: string | null
+}
+
+const TUNNEL_HEALTH_INITIAL_DELAY_MS = 15_000
+const TUNNEL_HEALTH_INTERVAL_MS = 30_000
+const TUNNEL_HEALTH_TIMEOUT_MS = 10_000
+const TUNNEL_HEALTH_FAILURE_THRESHOLD = 3
+
 type ServerRuntimeOptions = {
   desktopRoot: string
   appRoot?: string
   h5DistDir?: string
+  appVersion?: string
   diagnosticsFile?: string
   env?: NodeJS.ProcessEnv
   deps?: Partial<ServerRuntimeDeps>
   resolveSystemProxy?: (url: string) => Promise<string>
+  fetchFn?: typeof fetch
+  setTimeoutFn?: typeof setTimeout
+  clearTimeoutFn?: typeof clearTimeout
 }
 
 type ServerRuntimeDeps = {
@@ -76,6 +104,31 @@ type ActiveServer = {
   adapterChildren: SidecarChild[]
 }
 
+function parseWechatAdapterStatus(line: string): {
+  platform: 'wechat'
+  state: 'rebind_required'
+  code: 'session_expired'
+} | null {
+  try {
+    const event = JSON.parse(line) as Record<string, unknown>
+    if (
+      event.type === 'adapter_status' &&
+      event.adapter === 'wechat' &&
+      event.status === 'session_timeout' &&
+      event.code === -14
+    ) {
+      return {
+        platform: 'wechat',
+        state: 'rebind_required',
+        code: 'session_expired',
+      }
+    }
+  } catch {
+    // Normal adapter logs are not structured status events.
+  }
+  return null
+}
+
 function createServerStartState(child: SidecarChild): ServerStartState {
   let failure: Error | null = null
   let rejectFailure!: (error: Error) => void
@@ -102,31 +155,45 @@ export class ElectronServerRuntime {
   private readonly desktopRoot: string
   private readonly appRoot: string
   private readonly h5DistDir: string
+  private readonly appVersion?: string
   private readonly diagnosticsFile?: string
   private readonly baseEnv: NodeJS.ProcessEnv
   private readonly deps: ServerRuntimeDeps
   private readonly resolveSystemProxy?: (url: string) => Promise<string>
+  private readonly fetchFn: typeof fetch
+  private readonly setTimeoutFn: typeof setTimeout
+  private readonly clearTimeoutFn: typeof clearTimeout
   private readonly localAccessToken = randomBytes(32).toString('base64url')
   private readonly petAccessToken = randomBytes(32).toString('base64url')
   private sidecarEnvPromise: Promise<NodeJS.ProcessEnv> | null = null
   private systemProxyBridge: SystemProxyBridgeLike | null = null
   private server: ActiveServer | null = null
   private adapters: SidecarChild[] = []
+  private tunnel: { child: SidecarChild, mode: H5TunnelMode } | null = null
+  private tunnelState: TunnelStatus = { status: 'idle', url: null, mode: null, error: null }
+  private tunnelGeneration = 0
+  private tunnelHealthTimer: ReturnType<typeof setTimeout> | null = null
+  private tunnelHealthFailures = 0
   private startupError: string | null = null
   private restartAfterExit = false
   private startPromise: Promise<string> | null = null
   private lifecycleGeneration = 0
   private startingServer: ServerStartState | null = null
   private adapterRestartPromise: Promise<void> | null = null
+  private adapterGeneration = 0
 
   constructor(options: ServerRuntimeOptions) {
     this.desktopRoot = options.desktopRoot
     this.appRoot = options.appRoot ?? options.desktopRoot
     this.h5DistDir = options.h5DistDir ?? path.join(options.desktopRoot, 'dist')
+    this.appVersion = options.appVersion
     this.diagnosticsFile = options.diagnosticsFile
     this.baseEnv = options.env ?? process.env
     this.deps = { ...DEFAULT_SERVER_RUNTIME_DEPS, ...options.deps }
     this.resolveSystemProxy = options.resolveSystemProxy
+    this.fetchFn = options.fetchFn ?? ((input, init) => fetch(input, init))
+    this.setTimeoutFn = options.setTimeoutFn ?? setTimeout
+    this.clearTimeoutFn = options.clearTimeoutFn ?? clearTimeout
   }
 
   async startServer(): Promise<string> {
@@ -181,6 +248,7 @@ export class ElectronServerRuntime {
   }
 
   stopAll(sync = false) {
+    this.stopTunnelProcess(sync)
     ++this.lifecycleGeneration
     const starting = this.startingServer
     if (starting) {
@@ -199,6 +267,220 @@ export class ElectronServerRuntime {
       this.server = null
     }
     this.stopSystemProxyBridge()
+  }
+
+  getTunnelStatus(): TunnelStatus {
+    return { ...this.tunnelState }
+  }
+
+  /**
+   * Start a Cloudflare tunnel and report the resulting public URL to the running
+   * H5 server so it becomes the effective publicBaseUrl. Quick mode scrapes the
+   * trycloudflare URL from cloudflared's output; named mode uses the user's
+   * configured domain (namedUrl) since cloudflared does not print it.
+   */
+  async startTunnel(options: TunnelStartOptions): Promise<TunnelStatus> {
+    const serverUrl = await this.getServerUrl()
+    const port = Number(new URL(serverUrl).port) || 0
+
+    // Replace any existing tunnel so a mode switch / restart is clean.
+    this.stopTunnelProcess()
+    const generation = this.tunnelGeneration
+    this.tunnelState = { status: 'starting', url: null, mode: options.mode, error: null }
+
+    const cloudflaredPath = resolveCloudflaredPath()
+    if (!cloudflaredPath) {
+      this.tunnelState = {
+        status: 'error',
+        url: null,
+        mode: options.mode,
+        error: 'cloudflared not found. Install it from https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/',
+      }
+      await this.reportTunnel(serverUrl)
+      return this.getTunnelStatus()
+    }
+
+    try {
+      const env = await this.resolveSidecarBaseEnv()
+      if (generation !== this.tunnelGeneration) return this.getTunnelStatus()
+      const plan = createTunnelPlan({
+        cloudflaredPath,
+        port,
+        mode: options.mode,
+        token: options.token,
+        env,
+      })
+      const child = spawnTunnel(plan)
+      this.tunnel = { child, mode: options.mode }
+      this.captureLogs(child, `cloudflared:${options.mode}`)
+      child.on('exit', (code, signal) => {
+        if (generation !== this.tunnelGeneration || this.tunnel?.child !== child) return
+        this.clearTunnelHealthTimer()
+        this.tunnel = null
+        this.tunnelState = {
+          status: 'error',
+          url: null,
+          mode: options.mode,
+          error: `cloudflared exited unexpectedly (code=${code}, signal=${signal})`,
+        }
+        void this.clearTunnelOnServer(serverUrl).then(() => this.reportTunnel(serverUrl))
+      })
+
+      let url: string
+      if (options.mode === 'named') {
+        if (!options.namedUrl) {
+          throw new Error('A bound domain (public URL) is required for the named tunnel mode.')
+        }
+        url = options.namedUrl
+      } else {
+        url = await waitForTunnelUrl(child)
+      }
+
+      if (generation !== this.tunnelGeneration || this.tunnel?.child !== child) {
+        if (this.tunnel?.child !== child) killSidecar(child)
+        return this.getTunnelStatus()
+      }
+      this.tunnelState = { status: 'running', url, mode: options.mode, error: null }
+      await this.reportTunnel(serverUrl)
+      if (options.mode === 'quick') {
+        this.scheduleTunnelHealthCheck({ generation, child, serverUrl, tunnelUrl: url })
+      }
+      return this.getTunnelStatus()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.stopTunnelProcess()
+      this.tunnelState = { status: 'error', url: null, mode: options.mode, error: message }
+      await this.reportTunnel(serverUrl)
+      return this.getTunnelStatus()
+    }
+  }
+
+  async stopTunnel(): Promise<TunnelStatus> {
+    this.stopTunnelProcess()
+    this.tunnelState = { status: 'idle', url: null, mode: null, error: null }
+    if (this.server) {
+      // Use /tunnel/clear, NOT /tunnel/report — the report handler treats a
+      // missing/null url as "don't touch" (so a status-only heartbeat can't
+      // accidentally wipe a live URL). To truly clear the server-side runtime
+      // override after the user stops the tunnel, we have to call the explicit
+      // clear endpoint. Reporting idle without clearing leaves the old URL as
+      // the effective publicBaseUrl, so phones bookmark a dead address (CF 1033).
+      await this.clearTunnelOnServer(this.server.url)
+    }
+    return this.getTunnelStatus()
+  }
+
+  private stopTunnelProcess(sync = false) {
+    this.tunnelGeneration += 1
+    this.clearTunnelHealthTimer()
+    if (this.tunnel) {
+      const child = this.tunnel.child
+      this.tunnel = null
+      killSidecar(child, sync)
+    }
+  }
+
+  private clearTunnelHealthTimer() {
+    if (this.tunnelHealthTimer !== null) {
+      this.clearTimeoutFn(this.tunnelHealthTimer)
+      this.tunnelHealthTimer = null
+    }
+    this.tunnelHealthFailures = 0
+  }
+
+  private scheduleTunnelHealthCheck(context: {
+    generation: number
+    child: SidecarChild
+    serverUrl: string
+    tunnelUrl: string
+  }, delayMs = TUNNEL_HEALTH_INITIAL_DELAY_MS) {
+    this.tunnelHealthTimer = this.setTimeoutFn(
+      () => this.checkTunnelHealth(context),
+      delayMs,
+    )
+    this.tunnelHealthTimer.unref?.()
+  }
+
+  private async checkTunnelHealth(context: {
+    generation: number
+    child: SidecarChild
+    serverUrl: string
+    tunnelUrl: string
+  }): Promise<void> {
+    if (context.generation !== this.tunnelGeneration || this.tunnel?.child !== context.child) return
+
+    let failureReason: string | null = null
+    try {
+      const response = await this.fetchFn(new URL('/health', context.tunnelUrl), {
+        method: 'GET',
+        headers: { 'Cache-Control': 'no-cache' },
+        redirect: 'manual',
+        signal: AbortSignal.timeout(TUNNEL_HEALTH_TIMEOUT_MS),
+      })
+      if (!response.ok) failureReason = `HTTP ${response.status}`
+    } catch {
+      // The main-process fetch may not share Electron's system/PAC proxy while
+      // cloudflared does. A network error is therefore inconclusive: retry it,
+      // but only an actual non-2xx response may tear down a running tunnel.
+      if (context.generation === this.tunnelGeneration && this.tunnel?.child === context.child) {
+        this.scheduleTunnelHealthCheck(context, TUNNEL_HEALTH_INTERVAL_MS)
+      }
+      return
+    }
+
+    if (context.generation !== this.tunnelGeneration || this.tunnel?.child !== context.child) return
+    if (failureReason === null) {
+      this.tunnelHealthFailures = 0
+    } else {
+      this.tunnelHealthFailures += 1
+    }
+
+    if (this.tunnelHealthFailures < TUNNEL_HEALTH_FAILURE_THRESHOLD) {
+      this.scheduleTunnelHealthCheck(context, TUNNEL_HEALTH_INTERVAL_MS)
+      return
+    }
+
+    this.clearTunnelHealthTimer()
+    this.tunnel = null
+    killSidecar(context.child)
+    this.tunnelState = {
+      status: 'error',
+      url: null,
+      mode: 'quick',
+      error: `Cloudflare tunnel became unreachable after ${TUNNEL_HEALTH_FAILURE_THRESHOLD} consecutive health check failures (${failureReason}).`,
+    }
+    await this.clearTunnelOnServer(context.serverUrl)
+    await this.reportTunnel(context.serverUrl)
+  }
+
+  /** Wipe the server-side runtime tunnel override after the tunnel is stopped. */
+  private async clearTunnelOnServer(serverUrl: string): Promise<void> {
+    try {
+      await this.fetchFn(`${serverUrl}/api/h5-access/tunnel/clear`, {
+        method: 'POST',
+        headers: this.localServerHeaders(),
+      })
+    } catch (error) {
+      console.error('[desktop] failed to clear tunnel state on server', error)
+    }
+  }
+
+  /** Push the current tunnel state into the server's runtime override. */
+  private async reportTunnel(serverUrl: string): Promise<void> {
+    try {
+      await this.fetchFn(`${serverUrl}/api/h5-access/tunnel/report`, {
+        method: 'POST',
+        headers: this.localServerHeaders(),
+        body: JSON.stringify({
+          url: this.tunnelState.url,
+          status: this.tunnelState.status,
+          mode: this.tunnelState.mode ?? undefined,
+          error: this.tunnelState.error,
+        }),
+      })
+    } catch (error) {
+      console.error('[desktop] failed to report tunnel state to server', error)
+    }
   }
 
   private async startServerOnce(generation: number): Promise<string> {
@@ -278,6 +560,7 @@ export class ElectronServerRuntime {
     startState?: ServerStartState,
     activeServer?: ActiveServer,
   ): Promise<void> {
+    const generation = ++this.adapterGeneration
     const baseEnv = this.withLocalAccessToken(await this.resolveSidecarBaseEnv())
     const bridgeUrl = baseEnv.CC_HAHA_SYSTEM_PROXY_URL
     const env = bridgeUrl
@@ -289,6 +572,11 @@ export class ElectronServerRuntime {
       return true
     }
     if (!isCurrentGeneration()) return
+    void this.publishAdapterRuntimeStatus(serverUrl, {
+      platform: 'wechat',
+      state: 'starting',
+      generation,
+    })
     const ownedAdapters = startState?.adapterChildren
       ?? activeServer?.adapterChildren
     for (const [label, flag] of [
@@ -312,12 +600,52 @@ export class ElectronServerRuntime {
           killSidecar(child)
           break
         }
-        this.captureLogs(child, `claude-adapters:${label}`)
+        this.captureLogs(
+          child,
+          `claude-adapters:${label}`,
+          undefined,
+          undefined,
+          undefined,
+          label === 'wechat'
+            ? line => {
+                if (!isCurrentGeneration() || generation !== this.adapterGeneration) return
+                const status = parseWechatAdapterStatus(line)
+                if (!status) return
+                void this.publishAdapterRuntimeStatus(serverUrl, {
+                  ...status,
+                  generation,
+                })
+              }
+            : undefined,
+        )
         this.adapters.push(child)
         ownedAdapters?.push(child)
       } catch (error) {
         console.error(`[desktop] failed to start ${label} adapter sidecar`, error)
       }
+    }
+  }
+
+  private async publishAdapterRuntimeStatus(
+    serverUrl: string,
+    status: {
+      platform: 'wechat'
+      state: 'starting' | 'rebind_required'
+      code?: 'session_expired'
+      generation: number
+    },
+  ): Promise<void> {
+    try {
+      const response = await this.fetchFn(`${serverUrl}/api/adapters/runtime-status`, {
+        method: 'POST',
+        headers: this.localServerHeaders(),
+        body: JSON.stringify(status),
+      })
+      if (!response.ok && response.status !== 409) {
+        console.error(`[desktop] failed to publish adapter runtime status (${response.status})`)
+      }
+    } catch (error) {
+      console.error('[desktop] failed to publish adapter runtime status', error)
     }
   }
 
@@ -344,6 +672,13 @@ export class ElectronServerRuntime {
     }
   }
 
+  private localServerHeaders(): Record<string, string> {
+    return {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${this.localAccessToken}`,
+    }
+  }
+
   private removeOwnedAdapters(owned: SidecarChild[] | undefined, removed: SidecarChild[]) {
     if (!owned?.length || !removed.length) return
     const removedSet = new Set(removed)
@@ -361,9 +696,26 @@ export class ElectronServerRuntime {
     startupLogs?: string[],
     onExit?: (code: number | null, signal: NodeJS.Signals | null) => void,
     onError?: (error: Error) => void,
+    onStdoutLine?: (line: string) => void,
   ) {
+    let stdoutBuffer = ''
+    const emitStdoutLines = (chunk: string, flush = false) => {
+      if (!onStdoutLine) return
+      stdoutBuffer += chunk
+      const lines = stdoutBuffer.split(/\r?\n/)
+      stdoutBuffer = lines.pop() ?? ''
+      if (flush && stdoutBuffer) {
+        lines.push(stdoutBuffer)
+        stdoutBuffer = ''
+      }
+      for (const line of lines) {
+        if (line.trim()) onStdoutLine(line.trim())
+      }
+    }
     child.stdout.on('data', chunk => {
-      const line = String(chunk).trimEnd()
+      const chunkText = String(chunk)
+      emitStdoutLines(chunkText)
+      const line = chunkText.trimEnd()
       if (!line) return
       console.log(`[${label}] ${line}`)
       this.deps.appendHostDiagnostic(this.diagnosticsFile, `[${label}] [stdout] ${line}`)
@@ -377,6 +729,7 @@ export class ElectronServerRuntime {
       if (startupLogs) pushStartupLog(startupLogs, `[stderr] ${line}`)
     })
     child.on('exit', (code, signal) => {
+      emitStdoutLines('', true)
       const line = `sidecar exited (code=${code}, signal=${signal})`
       console.log(`[${label}] ${line}`)
       this.deps.appendHostDiagnostic(this.diagnosticsFile, `[${label}] [exit] ${line}`)
@@ -442,8 +795,10 @@ export class ElectronServerRuntime {
   }
 
   private async resolveSidecarBaseEnvOnce(): Promise<NodeJS.ProcessEnv> {
+    const applyRuntimeEnv = (env: NodeJS.ProcessEnv) =>
+      this.applyDesktopRuntimeEnv(this.applyPowerShellOverride(env))
     const baseEnv = clearProxyEnv(this.baseEnv)
-    if (!this.resolveSystemProxy) return this.applyPowerShellOverride(baseEnv)
+    if (!this.resolveSystemProxy) return applyRuntimeEnv(baseEnv)
 
     const bridge = this.deps.createSystemProxyBridge(this.resolveSystemProxy)
     this.systemProxyBridge = bridge
@@ -452,7 +807,7 @@ export class ElectronServerRuntime {
       if (this.systemProxyBridge !== bridge) {
         throw new Error('system proxy bridge startup was stopped')
       }
-      return this.applyPowerShellOverride(withSystemProxyBridgeEnv(baseEnv, bridgeUrl))
+      return applyRuntimeEnv(withSystemProxyBridgeEnv(baseEnv, bridgeUrl))
     } catch (error) {
       if (this.systemProxyBridge === bridge) {
         this.systemProxyBridge = null
@@ -460,7 +815,16 @@ export class ElectronServerRuntime {
       }
       const message = error instanceof Error ? error.message : String(error)
       console.error(`[desktop] failed to start system proxy bridge for sidecars: ${sanitizeHostDiagnostic(message)}`)
-      return this.applyPowerShellOverride(withSystemProxyErrorEnv(baseEnv, error))
+      return applyRuntimeEnv(withSystemProxyErrorEnv(baseEnv, error))
+    }
+  }
+
+  private applyDesktopRuntimeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+    if (!this.appVersion) return env
+    return {
+      ...env,
+      APP_VERSION: this.appVersion,
+      CC_HAHA_DESKTOP_VERSION: this.appVersion,
     }
   }
 

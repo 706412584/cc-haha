@@ -39,7 +39,7 @@ export function groupProviderModels(
 
   return [...groups.entries()]
     .map(([group, groupModels]) => ({ group, models: groupModels }))
-    .sort((a, b) => a.group.localeCompare(b.group, undefined, { sensitivity: 'base' }))
+    .sort((a, b) => a.group.localeCompare(b.group, 'en', { sensitivity: 'base' }))
 }
 
 /**

@@ -4,7 +4,6 @@ import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   applyStartupPortableMode,
-  clearAppManagedPortableEnv,
   determineStartupPortableDir,
   getAppMode,
   setAppMode,
@@ -121,22 +120,6 @@ describe('Electron app mode service', () => {
     })).toThrow('outside the application install directory')
   })
 
-  it('clears only an app-managed portable selection from a handed-off environment', () => {
-    const customDir = path.join(tempDir(), 'custom-data')
-    const managedEnv: NodeJS.ProcessEnv = {
-      CLAUDE_CONFIG_DIR: customDir,
-      CC_HAHA_APP_PORTABLE_DIR: '1',
-      WEBVIEW2_USER_DATA_FOLDER: path.join(customDir, 'EBWebView'),
-      APPDATA: 'C:\\Users\\someone\\AppData\\Roaming',
-    }
-    clearAppManagedPortableEnv(managedEnv)
-    expect(managedEnv).toEqual({ APPDATA: 'C:\\Users\\someone\\AppData\\Roaming' })
-
-    const externalEnv: NodeJS.ProcessEnv = { CLAUDE_CONFIG_DIR: customDir }
-    clearAppManagedPortableEnv(externalEnv)
-    expect(externalEnv).toEqual({ CLAUDE_CONFIG_DIR: customDir })
-  })
-
   it('drops inherited app-managed env so switching back to ~/.claude survives relaunch', () => {
     const fakeApp = app()
     writeMode(fakeApp, { mode: 'default', portable_dir: null })
@@ -243,7 +226,7 @@ describe('Electron app mode service', () => {
     const fakeApp = app()
     const installDir = path.dirname(fakeApp.getPath('exe'))
     const aliasedInstallDir = path.join(fakeApp.root, 'install-alias')
-    fs.symlinkSync(installDir, aliasedInstallDir, 'dir')
+    fs.symlinkSync(installDir, aliasedInstallDir, process.platform === 'win32' ? 'junction' : 'dir')
 
     expect(() => setAppMode(fakeApp, {
       mode: 'portable',

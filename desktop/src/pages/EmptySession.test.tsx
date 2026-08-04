@@ -14,7 +14,6 @@ const mocks = vi.hoisted(() => ({
   browse: vi.fn(),
   getTasksForList: vi.fn(),
   resetTaskList: vi.fn(),
-  getProviderAuthStatus: vi.fn(),
   wsClearHandlers: vi.fn(),
   wsConnect: vi.fn(),
   wsOnMessage: vi.fn(),
@@ -46,12 +45,6 @@ vi.mock('../api/skills', () => ({
 vi.mock('../api/agents', () => ({
   agentsApi: {
     list: mocks.listAgents,
-  },
-}))
-
-vi.mock('../api/providers', () => ({
-  providersApi: {
-    authStatus: mocks.getProviderAuthStatus,
   },
 }))
 
@@ -142,6 +135,43 @@ vi.mock('../components/controls/ModelSelector', async () => {
         </>
       )
     }),
+  }
+})
+
+vi.mock('../components/chat/ImageAnnotationModal', () => ({
+  ImageAnnotationModal: ({ open, image, onSave }: {
+    open: boolean
+    image: { src: string; name: string } | null
+    onSave: (dataUrl: string) => void
+  }) => open && image ? (
+    <button
+      type="button"
+      data-image-src={image.src}
+      onClick={() => onSave('data:image/png;base64,ANNOTATED')}
+    >
+      Save annotation for {image.name}
+    </button>
+  ) : null,
+}))
+
+vi.mock('../lib/composerAttachments', async () => {
+  const actual = await vi.importActual<typeof import('../lib/composerAttachments')>('../lib/composerAttachments')
+  return {
+    ...actual,
+    filesToComposerAttachments: async (files: FileList | File[]) => {
+      const entries = Array.from(files)
+      if (entries.length === 1 && entries[0]?.name === 'screenshot.jpg') {
+        return [{
+          id: 'selected-screenshot',
+          type: 'image' as const,
+          name: 'screenshot.jpg',
+          path: 'C:\\Users\\Nanmi\\Desktop\\screenshot.jpg',
+          mimeType: 'image/jpeg',
+          previewUrl: 'data:image/jpeg;base64,SELECTED',
+        }]
+      }
+      return actual.filesToComposerAttachments(files)
+    },
   }
 })
 
@@ -271,10 +301,6 @@ describe('EmptySession', () => {
     })
     mocks.getTasksForList.mockResolvedValue({ tasks: [] })
     mocks.resetTaskList.mockResolvedValue(undefined)
-    mocks.getProviderAuthStatus.mockResolvedValue({
-      hasAuth: true,
-      source: 'cc-haha-provider',
-    })
   })
 
   afterEach(() => {
@@ -625,6 +651,7 @@ describe('EmptySession', () => {
         'draft-session',
         {
           type: 'set_runtime_config',
+          requestId: expect.any(String),
           providerId: 'provider-explicit',
           modelId: 'model-explicit',
         },
@@ -685,30 +712,51 @@ describe('EmptySession', () => {
     expect(useSessionRuntimeStore.getState().selections['draft-session']).toEqual({
       providerId: 'provider-minimax',
       modelId: 'MiniMax-M3[1m]',
+      effortLevel: 'max',
     })
-    expect(mocks.wsSend.mock.calls.slice(0, 3)).toEqual([
-      [
-        'draft-session',
-        {
-          type: 'set_runtime_config',
-          providerId: 'provider-minimax',
-          modelId: 'MiniMax-M3[1m]',
-        },
-      ],
-      ['draft-session', { type: 'prewarm_session' }],
-      [
-        'draft-session',
-        {
-          type: 'user_message',
-          content: 'draft question',
-          attachments: [],
-        },
-      ],
+    expect(mocks.wsSend.mock.calls[0]).toEqual([
+      'draft-session',
+      {
+        type: 'set_runtime_config',
+        requestId: expect.any(String),
+        providerId: 'provider-minimax',
+        modelId: 'MiniMax-M3[1m]',
+        effortLevel: 'max',
+      },
+    ])
+    expect(mocks.wsSend.mock.calls[1]).toEqual(['draft-session', { type: 'prewarm_session' }])
+    const userMessageCallIndex = mocks.wsSend.mock.calls.findIndex(([, payload]) => payload.type === 'user_message')
+    expect(userMessageCallIndex).toBeGreaterThan(1)
+    expect(mocks.wsSend.mock.calls[userMessageCallIndex]).toEqual([
+      'draft-session',
+      {
+        type: 'user_message',
+        content: 'draft question',
+        attachments: [],
+      },
     ])
   })
 
-  it('opens provider settings instead of creating a session when no model authentication exists', async () => {
-    mocks.getProviderAuthStatus.mockResolvedValue({ hasAuth: false, source: 'none' })
+  it('does not materialize a default effort for models that explicitly disable it', async () => {
+    const model = {
+      id: 'grok-4.5',
+      name: 'Grok 4.5',
+      description: 'Grok frontier text model',
+      context: '500000',
+      supportedReasoningEfforts: [],
+    }
+    useSettingsStore.setState({
+      availableModels: [model],
+      currentModel: model,
+      effortLevel: 'max',
+      activeProviderName: 'Grok Official',
+    })
+    useProviderStore.setState({
+      providers: [],
+      activeId: 'grok-official',
+      providerOrder: ['claude-official', 'openai-official', 'grok-official'],
+      hasLoadedProviders: true,
+    })
 
     render(<EmptySession />)
 
@@ -718,46 +766,58 @@ describe('EmptySession', () => {
     fireEvent.click(screen.getByRole('button', { name: /Run/i }))
 
     await waitFor(() => {
-      expect(mocks.getProviderAuthStatus).toHaveBeenCalledTimes(1)
+      expect(mocks.createSession).toHaveBeenCalledWith({ permissionMode: 'default' })
     })
-    expect(mocks.createSession).not.toHaveBeenCalled()
-    expect(mocks.wsSend).not.toHaveBeenCalled()
-    expect(useUIStore.getState().pendingSettingsTab).toBe('providers')
-    expect(useTabStore.getState().activeTabId).toBe('__settings__')
+
+    expect(useSessionRuntimeStore.getState().selections['draft-session']).toEqual({
+      providerId: 'grok-official',
+      modelId: 'grok-4.5',
+    })
+    expect(mocks.wsSend.mock.calls[0]).toEqual([
+      'draft-session',
+      {
+        type: 'set_runtime_config',
+        requestId: expect.any(String),
+        providerId: 'grok-official',
+        modelId: 'grok-4.5',
+      },
+    ])
   })
 
   it('uses native desktop file paths for draft attachments', async () => {
     mocks.isTauriRuntime = true
+    const firstFile = new File(['log'], 'huge-a.log', { type: 'text/plain' })
+    const secondFile = new File(['zip'], 'huge-b.zip', { type: 'application/zip' })
+    Object.defineProperty(firstFile, 'path', {
+      configurable: true,
+      value: 'C:\\Users\\Nanmi\\Desktop\\huge-a.log',
+    })
+    Object.defineProperty(secondFile, 'path', {
+      configurable: true,
+      value: '/Users/nanmi/tmp/huge-b.zip',
+    })
     window.desktopHost = {
+      ...browserHost,
       kind: 'electron',
       isDesktop: true,
       capabilities: {
-        appMode: false,
+        ...browserHost.capabilities,
         dialogs: true,
-        notifications: false,
-        previewWebview: false,
-        shell: false,
-        terminal: false,
-        updates: false,
-        windowControls: false,
-        zoom: false,
       },
-      dialogs: {
-        open: mocks.dialogOpen,
+      files: {
+        getPathForFile: (file) => (file as File & { path?: string }).path ?? '',
       },
       webview: {
         onDragDropEvent: vi.fn().mockResolvedValue(mocks.webviewUnlisten),
       },
-    } as any
-    mocks.dialogOpen.mockResolvedValueOnce([
-      'C:\\Users\\Nanmi\\Desktop\\huge-a.log',
-      '/Users/nanmi/tmp/huge-b.zip',
-    ])
+    }
 
     render(<EmptySession />)
 
     fireEvent.click(screen.getByLabelText('Open composer tools'))
     fireEvent.click(screen.getByText('Add files or photos'))
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(fileInput, { target: { files: [firstFile, secondFile] } })
 
     expect(await screen.findByText('huge-a.log')).toBeInTheDocument()
     expect(await screen.findByText('huge-b.zip')).toBeInTheDocument()
@@ -788,6 +848,130 @@ describe('EmptySession', () => {
         }),
       ],
     })
+  })
+
+  it('replaces a selected desktop image with the saved annotation', async () => {
+    mocks.isTauriRuntime = true
+    const image = new File(['image'], 'screenshot.jpg', { type: 'image/jpeg' })
+    Object.defineProperty(image, 'path', {
+      configurable: true,
+      value: 'C:\\Users\\Nanmi\\Desktop\\screenshot.jpg',
+    })
+    window.desktopHost = {
+      ...browserHost,
+      kind: 'electron',
+      isDesktop: true,
+      capabilities: {
+        ...browserHost.capabilities,
+        dialogs: true,
+      },
+      files: {
+        getPathForFile: (file) => (file as File & { path?: string }).path ?? '',
+      },
+      webview: {
+        onDragDropEvent: vi.fn().mockResolvedValue(mocks.webviewUnlisten),
+      },
+    }
+
+    render(<EmptySession />)
+
+    fireEvent.click(screen.getByLabelText('Open composer tools'))
+    fireEvent.click(screen.getByText('Add files or photos'))
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(fileInput, { target: { files: [image] } })
+
+    expect(await screen.findByLabelText('Annotate screenshot.jpg')).toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('Annotate screenshot.jpg'))
+    fireEvent.click(await screen.findByRole('button', { name: 'Save annotation for screenshot.jpg' }))
+
+    expect(await screen.findByLabelText('Annotate screenshot-annotated.png')).toBeInTheDocument()
+    fireEvent.change(screen.getByRole('textbox'), {
+      target: { value: 'use the annotation', selectionStart: 'use the annotation'.length },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /Run/i }))
+
+    await waitFor(() => {
+      expect(mocks.createSession).toHaveBeenCalledWith({ permissionMode: 'default' })
+    })
+    expect(mocks.wsSend).toHaveBeenCalledWith('draft-session', {
+      type: 'user_message',
+      content: 'use the annotation',
+      attachments: [expect.objectContaining({
+        type: 'image',
+        name: 'screenshot-annotated.png',
+        path: undefined,
+        data: 'data:image/png;base64,ANNOTATED',
+        mimeType: 'image/png',
+      })],
+    })
+  })
+
+  it('resolves a path-only dropped image before opening annotation', async () => {
+    window.desktopHost = {
+      ...browserHost,
+      kind: 'electron',
+      isDesktop: true,
+      webview: {
+        ...browserHost.webview,
+        onDragDropEvent: async (handler) => {
+          mocks.webviewDragHandlers.push(handler as (event: { payload: unknown }) => void)
+          return mocks.webviewUnlisten
+        },
+      },
+    }
+    render(<EmptySession />)
+
+    const panel = screen.getByTestId('empty-session-composer-panel')
+    Object.defineProperty(panel, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({
+        left: 0,
+        top: 0,
+        right: 640,
+        bottom: 180,
+        width: 640,
+        height: 180,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }),
+    })
+    await waitFor(() => expect(mocks.webviewDragHandlers).toHaveLength(1))
+
+    const imagePath = 'C:\\Users\\Nanmi\\Desktop\\path-only.png'
+    act(() => {
+      mocks.webviewDragHandlers[0]?.({
+        payload: {
+          type: 'drop',
+          position: { x: 24, y: 24 },
+          paths: [imagePath],
+        },
+      })
+    })
+    fireEvent.click(await screen.findByLabelText('Annotate path-only.png'))
+
+    expect(screen.getByRole('button', { name: 'Save annotation for path-only.png' })).toHaveAttribute(
+      'data-image-src',
+      expect.stringContaining(`/api/filesystem/file?path=${encodeURIComponent(imagePath)}`),
+    )
+  })
+
+  it('closes image annotation when the target attachment is removed', async () => {
+    const image = new File(['image'], 'screenshot.jpg', { type: 'image/jpeg' })
+
+    render(<EmptySession />)
+
+    fireEvent.click(screen.getByLabelText('Open composer tools'))
+    fireEvent.click(screen.getByText('Add files or photos'))
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(fileInput, { target: { files: [image] } })
+
+    fireEvent.click(await screen.findByLabelText('Annotate screenshot.jpg'))
+    expect(screen.getByRole('button', { name: 'Save annotation for screenshot.jpg' })).toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('Remove screenshot.jpg'))
+
+    expect(screen.queryByRole('button', { name: 'Save annotation for screenshot.jpg' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Annotate screenshot.jpg')).not.toBeInTheDocument()
   })
 
   it('shows a drop affordance and sends dropped desktop files as path attachments', async () => {
@@ -1060,6 +1244,9 @@ describe('EmptySession', () => {
 
     expect(screen.queryByText('worktree-desktop-feature-a-12345678')).not.toBeInTheDocument()
 
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Run/i })).not.toBeDisabled()
+    })
     fireEvent.click(screen.getByRole('button', { name: /Run/i }))
 
     await waitFor(() => {
@@ -1179,5 +1366,135 @@ describe('EmptySession', () => {
         permissionMode: 'default',
       })
     })
+  })
+})
+
+describe('EmptySession welcome-screen task cards', () => {
+  const initialSessionState = useSessionStore.getInitialState()
+  const initialChatState = useChatStore.getInitialState()
+  const initialTabState = useTabStore.getInitialState()
+  const initialRuntimeState = useSessionRuntimeStore.getInitialState()
+  const initialUiState = useUIStore.getInitialState()
+  const initialPluginState = usePluginStore.getInitialState()
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.webviewDragHandlers.length = 0
+    mocks.isMobile = false
+    mocks.isTauriRuntime = false
+    useSettingsStore.setState({ locale: 'en', activeProviderName: null, permissionMode: 'default' })
+    useSessionStore.setState(initialSessionState, true)
+    useChatStore.setState(initialChatState, true)
+    useTabStore.setState(initialTabState, true)
+    useSessionRuntimeStore.setState(initialRuntimeState, true)
+    useUIStore.setState(initialUiState, true)
+    usePluginStore.setState(initialPluginState, true)
+
+    mocks.createSession.mockResolvedValue({ sessionId: 'draft-session' })
+    mocks.getRepositoryContext.mockResolvedValue(okRepositoryContext())
+    mocks.listSessions.mockResolvedValue({
+      sessions: [{
+        id: 'draft-session',
+        title: 'New Session',
+        createdAt: '2026-05-01T00:00:00.000Z',
+        modifiedAt: '2026-05-01T00:00:00.000Z',
+        messageCount: 0,
+        projectPath: '/workspace/project',
+        workDir: '/workspace/project',
+        workDirExists: true,
+      }],
+      total: 1,
+    })
+    mocks.getMessages.mockResolvedValue({ messages: [] })
+    mocks.getSlashCommands.mockResolvedValue({ commands: [] })
+    mocks.listSkills.mockResolvedValue({ skills: [] })
+    mocks.listAgents.mockResolvedValue({ activeAgents: [], allAgents: [] })
+    mocks.search.mockResolvedValue({
+      currentPath: '/workspace/project',
+      parentPath: null,
+      query: '',
+      entries: [],
+    })
+    mocks.getTasksForList.mockResolvedValue({ tasks: [] })
+    mocks.resetTaskList.mockResolvedValue(undefined)
+  })
+
+  afterEach(() => {
+    cleanup()
+    Reflect.deleteProperty(window, 'desktopHost')
+    useSessionStore.setState(initialSessionState, true)
+    useChatStore.setState(initialChatState, true)
+    useTabStore.setState(initialTabState, true)
+    useSessionRuntimeStore.setState(initialRuntimeState, true)
+    useUIStore.setState(initialUiState, true)
+    usePluginStore.setState(initialPluginState, true)
+  })
+
+  it('renders all four task cards on desktop', async () => {
+    render(<EmptySession />)
+
+    expect(await screen.findByTestId('welcome-task-cards')).toBeInTheDocument()
+    expect(screen.getByTestId('welcome-task-card-preMergeReview')).toBeInTheDocument()
+    expect(screen.getByTestId('welcome-task-card-investigateTest')).toBeInTheDocument()
+    expect(screen.getByTestId('welcome-task-card-writeTests')).toBeInTheDocument()
+    expect(screen.getByTestId('welcome-task-card-understandProject')).toBeInTheDocument()
+  })
+
+  it('hides the task cards on phone-sized H5 browsers (composer is dense enough already)', async () => {
+    mocks.isMobile = true
+    render(<EmptySession />)
+
+    await waitFor(() => {
+      expect(screen.queryByRole('textbox')).toBeInTheDocument()
+    })
+    expect(screen.queryByTestId('welcome-task-cards')).not.toBeInTheDocument()
+  })
+
+  it('clicking a card pre-fills the composer with the starter prompt', async () => {
+    render(<EmptySession />)
+
+    fireEvent.click(await screen.findByTestId('welcome-task-card-preMergeReview'))
+
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
+    expect(input.value).toContain('main')
+    expect(input.value.toLowerCase()).toContain('pr description')
+  })
+
+  it('orchestration cards persist coordinator mode for the new session before connect', async () => {
+    render(<EmptySession />)
+
+    fireEvent.click(await screen.findByTestId('welcome-task-card-preMergeReview'))
+    await pickProject()
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Location: project / main' })).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /Run/i }))
+
+    await waitFor(() => {
+      expect(mocks.createSession).toHaveBeenCalled()
+    })
+    await waitFor(() => {
+      expect(useSessionRuntimeStore.getState().coordinatorModes['draft-session']).toBe(true)
+    })
+  })
+
+  it('non-orchestration cards do NOT enable coordinator mode', async () => {
+    render(<EmptySession />)
+
+    fireEvent.click(await screen.findByTestId('welcome-task-card-writeTests'))
+    await pickProject()
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Location: project / main' })).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /Run/i }))
+
+    await waitFor(() => {
+      expect(mocks.createSession).toHaveBeenCalled()
+    })
+    // We never called setSessionCoordinatorMode for this card, so the key is
+    // absent in the runtime store.
+    expect(useSessionRuntimeStore.getState().coordinatorModes['draft-session']).toBeUndefined()
   })
 })

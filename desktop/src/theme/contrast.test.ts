@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
-import css from './globals.css?raw'
+import rawCss from './globals.css?raw'
+
+const css = rawCss.replace(/\r\n/g, '\n')
 
 /**
  * Contrast guard for the status palette.
@@ -22,16 +24,22 @@ type Rgb = { r: number; g: number; b: number; a: number }
  * then the shared `:root` semantic layer that maps `--color-*` onto those
  * sources, then `@theme` for anything Tailwind supplies statically.
  *
- * The two ink themes additionally override part of the semantic layer, so
- * their combined block is listed ahead of `:root`.
+ * The ink themes additionally override part of the semantic layer, so their
+ * combined block is listed ahead of `:root`.
  */
+const INK_THEME_BLOCK = '[data-theme="dark"],\n[data-theme="ink-blue"],\n[data-theme="classic-dark"]'
+
 const THEME_BLOCKS = {
   white: [':root,\n[data-theme="white"]', ':root', '@theme'],
   paper: ['[data-theme="paper"]', ':root', '@theme'],
   'warm-classic': ['[data-theme="warm-classic"]', ':root', '@theme'],
   celadon: ['[data-theme="celadon"]', ':root', '@theme'],
-  dark: ['[data-theme="dark"]', '[data-theme="dark"],\n[data-theme="ink-blue"]', ':root', '@theme'],
-  'ink-blue': ['[data-theme="ink-blue"]', '[data-theme="dark"],\n[data-theme="ink-blue"]', ':root', '@theme'],
+  dark: ['[data-theme="dark"]', INK_THEME_BLOCK, ':root', '@theme'],
+  'ink-blue': ['[data-theme="ink-blue"]', INK_THEME_BLOCK, ':root', '@theme'],
+  'classic-white': ['[data-theme="classic-white"]', ':root', '@theme'],
+  'classic-light': ['[data-theme="classic-light"]', ':root', '@theme'],
+  'eye-care': ['[data-theme="eye-care"]', ':root', '@theme'],
+  'classic-dark': ['[data-theme="classic-dark"]', INK_THEME_BLOCK, ':root', '@theme'],
 } as const
 
 /**

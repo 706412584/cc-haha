@@ -5,8 +5,9 @@ import { Button } from '@/components/ui/Button'
 import { IconButton } from '@/components/ui/IconButton'
 import { ApiError } from '../api/client'
 import { agentsApi } from '../api/agents'
-import { providersApi } from '../api/providers'
 import { skillsApi } from '../api/skills'
+import { projectsApi } from '../api/projects'
+import { wsManager } from '../api/websocket'
 import { useTranslation } from '../i18n'
 import { useSessionStore } from '../stores/sessionStore'
 import { useChatStore } from '../stores/chatStore'
@@ -20,6 +21,7 @@ import { RepositoryLaunchControls } from '@/components/chat/RepositoryLaunchCont
 import { PermissionModeSelector } from '../components/controls/PermissionModeSelector'
 import { ModelSelector, type ModelSelectorHandle } from '../components/controls/ModelSelector'
 import { AttachmentGallery } from '../components/chat/AttachmentGallery'
+import { ImageAnnotationModal } from '../components/chat/ImageAnnotationModal'
 import { ComposerDropOverlay } from '../components/chat/ComposerDropOverlay'
 import { ContextUsageIndicator } from '../components/chat/ContextUsageIndicator'
 import { FileSearchMenu, type FileSearchMenuHandle } from '../components/chat/FileSearchMenu'
@@ -32,9 +34,9 @@ import { useMobileViewport } from '../hooks/useMobileViewport'
 import { isDesktopRuntime } from '../lib/desktopRuntime'
 import { resolveActiveProviderRuntimeSelection } from '../lib/runtimeSelection'
 import {
+  composerAttachmentToPayload,
   filesToComposerAttachments,
   getDataTransferFiles,
-  selectNativeFileAttachments,
   type ComposerAttachment,
 } from '../lib/composerAttachments'
 import { useComposerFileDrop } from '../components/chat/useComposerFileDrop'
@@ -51,9 +53,13 @@ import {
   replaceSlashCommand,
   resolveSlashUiAction,
 } from '../components/chat/composerUtils'
-import type { AttachmentRef } from '../types/chat'
+import type { AttachmentRef, DisplayAttachmentRef } from '../types/chat'
+import { attachmentImageSource } from '../lib/attachmentImages'
 import type { PermissionMode } from '../types/settings'
 import type { SlashCommandOption } from '../components/chat/composerUtils'
+import { WelcomeTaskCards, type WelcomeTaskCard } from '../components/welcome/WelcomeTaskCards'
+import { RecentActivityCard } from '../components/welcome/RecentActivityCard'
+import { pickReusableEmptySession } from '../lib/sessionReuse'
 
 type Attachment = ComposerAttachment
 
@@ -104,8 +110,13 @@ export function EmptySession() {
   const [useWorktree, setUseWorktree] = useState(false)
   const [repositoryLaunchReady, setRepositoryLaunchReady] = useState(true)
   const [attachments, setAttachments] = useState<Attachment[]>([])
+  const [annotationTarget, setAnnotationTarget] = useState<Attachment | null>(null)
   const [plusMenuOpen, setPlusMenuOpen] = useState(false)
   const [slashMenuOpen, setSlashMenuOpen] = useState(false)
+  // Tracks whether a welcome-screen task card requested orchestration mode for
+  // the not-yet-created session. Applied right after createSession() resolves
+  // and before connectToSession() so the WS replay carries it.
+  const [draftOrchestrate, setDraftOrchestrate] = useState(false)
   const [fileSearchOpen, setFileSearchOpen] = useState(false)
   const [localSlashPanel, setLocalSlashPanel] = useState<LocalSlashCommandName | null>(null)
   const [atFilter, setAtFilter] = useState('')
@@ -308,13 +319,6 @@ export function EmptySession() {
 
     setIsSubmitting(true)
     try {
-      const authStatus = await providersApi.authStatus()
-      if (!authStatus.hasAuth) {
-        useUIStore.getState().setPendingSettingsTab('providers')
-        useTabStore.getState().openTab(SETTINGS_TAB_ID, t('sidebar.settings'), 'settings')
-        return
-      }
-
       const runtimeStore = useSessionRuntimeStore.getState()
       const explicitDraftSelection = runtimeStore.selections[DRAFT_RUNTIME_SELECTION_KEY]
       const defaultActiveProviderSelection = explicitDraftSelection
@@ -323,7 +327,8 @@ export function EmptySession() {
           activeProviderId,
           activeProviderName,
           providers,
-          currentModel?.id,
+          currentModel,
+          useSettingsStore.getState().effortLevel,
         )
       const runtimeSelection = explicitDraftSelection ?? defaultActiveProviderSelection ?? undefined
       const sessionId = await createSession(
@@ -343,19 +348,38 @@ export function EmptySession() {
       }
       setActiveView('code')
       useTabStore.getState().openTab(sessionId, 'New Session')
+      // If a welcome-screen card requested orchestration, persist it for this
+      // sessionId before the WS connects. chatStore.connectToSession will
+      // replay the persisted flag as a `set_coordinator_mode` message.
+      if (draftOrchestrate) {
+        useChatStore.getState().setSessionCoordinatorMode(sessionId, true)
+      }
       connectToSession(sessionId)
-      const attachmentPayload: AttachmentRef[] = attachments.map((attachment) => ({
+      const attachmentPayload: AttachmentRef[] = attachments.some(
+        (attachment) => attachment.sourceFile,
+      )
+        ? await Promise.all(attachments.map(composerAttachmentToPayload))
+        : attachments.map((attachment) => ({
+            type: attachment.type,
+            name: attachment.name,
+            path: attachment.path,
+            data: attachment.data,
+            mimeType: attachment.mimeType,
+          }))
+      const displayAttachmentPayload: DisplayAttachmentRef[] = attachments.map((attachment) => ({
         type: attachment.type,
         name: attachment.name,
         path: attachment.path,
         data: attachment.data,
+        previewUrl: attachment.previewUrl,
         mimeType: attachment.mimeType,
       }))
       if (text || attachmentPayload.length > 0) {
-        sendMessage(sessionId, text, attachmentPayload)
+        sendMessage(sessionId, text, attachmentPayload, { displayAttachments: displayAttachmentPayload })
       }
       setInput('')
       setAttachments([])
+      setDraftOrchestrate(false)
     } catch (error) {
       addToast({
         type: 'error',
@@ -507,21 +531,7 @@ export function EmptySession() {
 
   const openAttachmentPicker = useCallback(() => {
     setPlusMenuOpen(false)
-    if (!isDesktopRuntime()) {
-      fileInputRef.current?.click()
-      return
-    }
-
-    void selectNativeFileAttachments()
-      .then((nativeAttachments) => {
-        if (nativeAttachments) {
-          if (nativeAttachments.length > 0) {
-            setAttachments((prev) => [...prev, ...nativeAttachments])
-          }
-          return
-        }
-        fileInputRef.current?.click()
-      })
+    fileInputRef.current?.click()
   }, [])
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -534,6 +544,23 @@ export function EmptySession() {
 
   const removeAttachment = (id: string) => {
     setAttachments((prev) => prev.filter((attachment) => attachment.id !== id))
+    if (annotationTarget?.id === id) setAnnotationTarget(null)
+  }
+
+  const saveAnnotatedImage = (dataUrl: string) => {
+    if (!annotationTarget?.id) return
+    setAttachments((prev) => prev.map((attachment) => {
+      if (attachment.id !== annotationTarget.id) return attachment
+      return {
+        ...attachment,
+        name: attachment.name.replace(/(\.[^.]+)?$/, '-annotated.png'),
+        path: undefined,
+        data: dataUrl,
+        previewUrl: dataUrl,
+        mimeType: 'image/png',
+      }
+    }))
+    setAnnotationTarget(null)
   }
 
   const selectSlashCommand = (command: string) => {
@@ -564,6 +591,21 @@ export function EmptySession() {
     })
   }
 
+  const applyTaskCard = (card: WelcomeTaskCard, promptText: string) => {
+    setInput(promptText)
+    setDraftOrchestrate(card.orchestrate)
+    setSlashMenuOpen(false)
+    setFileSearchOpen(false)
+    setPlusMenuOpen(false)
+    requestAnimationFrame(() => {
+      const el = textareaRef.current
+      if (!el) return
+      el.focus()
+      const len = el.value.length
+      el.setSelectionRange(len, len)
+    })
+  }
+
   return (
     <div className="relative flex flex-1 flex-col overflow-hidden bg-[var(--color-surface)]">
       <div className={`brand-seal-glow flex flex-1 flex-col items-center justify-center ${
@@ -590,6 +632,122 @@ export function EmptySession() {
             {t('empty.subtitle')}
           </p>
         </div>
+        {!isMobileComposer && workDir && (
+          <RecentActivityCard
+            workDir={workDir}
+            onContinueSession={(sessionId) => {
+              setActiveView('code')
+              useTabStore.getState().openTab(sessionId, 'New Session')
+              connectToSession(sessionId)
+            }}
+            onAutoHandoff={async (previousSessionId, previousSessionTitle, fallbackText, setStage, options) => {
+              // 1. Resolve summary: tries cache first (fast), falls back to
+              //    LLM generation on miss. Returns null on any failure so
+              //    we can degrade to the zero-token textarea path without
+              //    surprising the user with errors.
+              setStage('reading-cache')
+              let summary = null
+              try {
+                const cached = await projectsApi.getSessionSummary(previousSessionId)
+                summary = cached.summary
+              } catch {
+                // GET error → fall through to generation path below.
+              }
+              if (!summary) {
+                setStage('generating-summary')
+                try {
+                  const fresh = await projectsApi.generateSessionSummary(previousSessionId)
+                  summary = fresh.summary
+                } catch {
+                  summary = null
+                }
+              }
+
+              if (!summary) {
+                // Provider down / generation failed → fall back to the old
+                // zero-token textarea-prefill path. User gets the visible
+                // hand-off paragraph and decides what to send.
+                setInput(fallbackText)
+                requestAnimationFrame(() => {
+                  const el = textareaRef.current
+                  if (!el) return
+                  el.focus()
+                  const len = el.value.length
+                  el.setSelectionRange(len, len)
+                })
+                return
+              }
+
+              setStage('starting-session')
+
+              // 2. Resolve the target sessionId. Prefer reusing an
+              //    existing empty session in the same workDir (the
+              //    classic stray-tab case where the user clicked
+              //    "New session in X" earlier, closed the tab, then
+              //    landed back on this welcome screen). Falls back to
+              //    creating a fresh session.
+              try {
+                const reuseSessionId = workDir
+                  ? pickReusableEmptySession(
+                      useSessionStore.getState().sessions,
+                      workDir,
+                      previousSessionId,
+                    )
+                  : null
+                const sessionId = reuseSessionId
+                  ?? (await createSession(
+                    workDir || undefined,
+                    selectedBranch
+                      ? { repository: { branch: selectedBranch, worktree: useWorktree }, permissionMode: draftPermissionMode }
+                      : { permissionMode: draftPermissionMode },
+                  ))
+                setActiveView('code')
+                useTabStore.getState().openTab(sessionId, 'New Session')
+                connectToSession(sessionId)
+
+                // Stash hand-off info on this new session so the chat
+                // header can render a "↗ continued from..." chip and the
+                // user knows the AI started with prior context.
+                useSessionRuntimeStore.getState().setHandoffInfo(sessionId, {
+                  previousSessionId,
+                  previousSessionTitle,
+                  approxTokens: Math.ceil(
+                    (summary.main.length + summary.recent.length) / 4,
+                  ),
+                  generatedAt: summary.generatedAt,
+                })
+
+                // 3. Stage the hand-off summary on this new session and
+                //    auto-send a short "continue" trigger message. The CLI
+                //    starts (or restarts) with --append-system-prompt
+                //    carrying the summary, so the AI begins with full
+                //    context without seeing a prefilled user message.
+                //
+                //    Race-condition note: wsManager.send tolerates a
+                //    not-yet-OPEN socket — it queues the message in
+                //    `pendingMessages` and flushes onopen. So this works
+                //    even when connectToSession() above hasn't completed
+                //    its WS upgrade yet. Don't change to gate on
+                //    isConnected() without re-checking that contract.
+                wsManager.send(sessionId, {
+                  type: 'set_handoff_summary',
+                  previousSessionId,
+                  ...(options?.deep ? { deep: true } : {}),
+                })
+                sendMessage(sessionId, t('empty.recentActivity.continueTriggerMessage'))
+                setInput('')
+              } catch (err) {
+                addToast({
+                  type: 'error',
+                  message: resolveCreateSessionErrorMessage(err, t),
+                })
+              }
+            }}
+          />
+        )}
+        {!isMobileComposer && (
+          <WelcomeTaskCards workDir={workDir || undefined} onApplyTask={applyTaskCard} />
+        )}
       </div>
 
       <div
@@ -692,7 +850,12 @@ export function EmptySession() {
               )}
 
               {attachments.length > 0 && (
-                <AttachmentGallery attachments={attachments} variant="composer" onRemove={removeAttachment} />
+                <AttachmentGallery
+                  attachments={attachments}
+                  variant="composer"
+                  onRemove={removeAttachment}
+                  onAnnotate={(attachment) => setAnnotationTarget(attachment as Attachment)}
+                />
               )}
 
               <div className="flex items-start gap-3">
@@ -824,6 +987,12 @@ export function EmptySession() {
       </div>
 
       <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} />
+      <ImageAnnotationModal
+        open={!!annotationTarget}
+        image={annotationTarget ? { src: attachmentImageSource(annotationTarget) ?? '', name: annotationTarget.name } : null}
+        onClose={() => setAnnotationTarget(null)}
+        onSave={saveAnnotatedImage}
+      />
     </div>
   )
 }

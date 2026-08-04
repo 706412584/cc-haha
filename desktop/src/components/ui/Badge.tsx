@@ -130,7 +130,7 @@ export function Badge({
   )
 }
 
-export type StatusDotProps = {
+export type StatusDotProps = Omit<HTMLAttributes<HTMLSpanElement>, 'children'> & {
   tone: Tone
   /** `sm` (6px) matches 23 of the 41 existing dots. */
   size?: 'sm' | 'md' | 'lg'
@@ -160,12 +160,20 @@ const DOT_TONE: Record<Tone, string> = {
 }
 
 /** A colored dot for live status. */
-export function StatusDot({ tone, size = 'sm', pulse = false, label, className }: StatusDotProps) {
+export function StatusDot({
+  tone,
+  size = 'sm',
+  pulse = false,
+  label,
+  className,
+  ...props
+}: StatusDotProps) {
   return (
     <span
-      role={label ? 'status' : undefined}
-      aria-label={label}
-      aria-hidden={label ? undefined : true}
+      {...props}
+      role={label ? 'status' : props.role}
+      aria-label={label ?? props['aria-label']}
+      aria-hidden={label || props['aria-label'] ? undefined : true}
       className={cx(
         'inline-block shrink-0 rounded-full',
         DOT_SIZE[size],

@@ -55,8 +55,7 @@ export function Skeleton({
       style={{
         width: width ?? (shape === 'circle' ? height ?? defaults.height : undefined),
         height: height ?? defaults.height,
-      }}
-    />
+      }}    />
   )
 }
 
@@ -162,5 +161,4 @@ export function SkeletonCards({
         </div>
       ))}
     </SkeletonGroup>
-  )
-}
+  )}

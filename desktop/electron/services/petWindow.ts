@@ -323,6 +323,37 @@ function normalizePetWindowRegion(region: Rectangle, extent: PetWindowExtent): R
   return { x, y, width: right - x, height: bottom - y }
 }
 
+function unionPetWindowRegions(
+  regions: Rectangle[],
+  extent: PetWindowExtent,
+): Rectangle | null {
+  if (regions.length === 0) return null
+  const normalized = regions.map(region => normalizePetWindowRegion(region, extent))
+  const left = Math.min(...normalized.map(region => region.x))
+  const top = Math.min(...normalized.map(region => region.y))
+  const right = Math.max(...normalized.map(region => region.x + region.width))
+  const bottom = Math.max(...normalized.map(region => region.y + region.height))
+  return { x: left, y: top, width: right - left, height: bottom - top }
+}
+
+function mascotRegionIndex(
+  regions: Rectangle[],
+  placement: PetPanelPlacement,
+): number {
+  if (regions.length <= 1) return 0
+  let selected = 0
+  for (let index = 1; index < regions.length; index += 1) {
+    const candidate = regions[index]!
+    const current = regions[selected]!
+    if (placement.vertical === 'above') {
+      if (candidate.y + candidate.height > current.y + current.height) selected = index
+    } else if (candidate.y < current.y) {
+      selected = index
+    }
+  }
+  return selected
+}
+
 export function getPetWindowBounds(
   workArea: Rectangle,
   restoredPosition?: PetWindowState | null,
@@ -565,16 +596,18 @@ export class PetWindowController {
     }
     const platform = this.options.platform ?? process.platform
     const extent = petWindowContentExtent(window)
-    const primaryRegion = regions[0]
-    // The window is mostly transparent padding around the mascot, so dragging
-    // has to clamp against the mascot on every platform. Clamping against the
-    // whole window stops the mascot short of the display edges.
+    const mascotIndex = mascotRegionIndex(regions, this.panelPlacement)
+    const primaryRegion = regions[mascotIndex]
+    // The renderer historically reported the panel before the mascot, while
+    // the placement-aware layout reports the mascot first. Pick the mascot by
+    // its vertical edge instead of trusting array order.
     const dragRegion = primaryRegion
       ? normalizePetWindowRegion(primaryRegion, extent)
       : null
     if (dragRegion) this.visibleDragRegion = dragRegion
-    const panel = petPanelBounds(regions)
-    this.panelBounds = panel ? normalizePetWindowRegion(panel, extent) : null
+    const panelRegions = regions.filter((_, index) => index !== mascotIndex)
+    const panel = unionPetWindowRegions(panelRegions, extent)
+    this.panelBounds = panel
 
     // A saved edge position leaves the transparent padding off-screen, so
     // creating the window re-clamps it against the whole window and walks the
@@ -600,13 +633,14 @@ export class PetWindowController {
 
     if (platform === 'darwin') return this.panelPlacement
 
-    const shape = regions.map((region) => normalizePetWindowRegion({
+    const paddedRegions = regions.map(region => ({
       x: region.x - PET_WINDOW_SHAPE_PADDING,
       y: region.y - PET_WINDOW_SHAPE_PADDING,
       width: region.width + PET_WINDOW_SHAPE_PADDING * 2,
       height: region.height + PET_WINDOW_SHAPE_PADDING * 2,
-    }, extent))
-    if (shape.length > 0) window.setShape(shape)
+    }))
+    const shape = unionPetWindowRegions(paddedRegions, extent)
+    if (shape) window.setShape([shape])
     return this.panelPlacement
   }
 

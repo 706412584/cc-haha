@@ -55,7 +55,7 @@ describe('uiStore theme handling', () => {
     installThemeColorMeta()
   })
 
-  it('defaults new installs to the pure white theme', async () => {
+  it('defaults new installs to the pure white paper theme', async () => {
     const { initializeTheme, useUIStore } = await import('./uiStore')
 
     expect(useUIStore.getState().theme).toBe('white')
@@ -64,7 +64,7 @@ describe('uiStore theme handling', () => {
     expect(document.documentElement.style.colorScheme).toBe('light')
   })
 
-  it('hydrates and applies the pure white theme as a light color scheme', async () => {
+  it('honours an existing stored preference over the new default (no upgrade clobber)', async () => {
     window.localStorage.setItem('cc-haha-theme', 'white')
 
     const { initializeTheme, useUIStore } = await import('./uiStore')
@@ -75,17 +75,28 @@ describe('uiStore theme handling', () => {
     expect(document.documentElement.style.colorScheme).toBe('light')
   })
 
-  it('cycles through all six palettes and wraps back to pure white', async () => {
+  it('cycles through all current and classic palettes and wraps back to pure white', async () => {
     const { useUIStore } = await import('./uiStore')
 
-    const cycle = ['paper', 'warm-classic', 'celadon', 'dark', 'ink-blue', 'white']
+    const cycle = [
+      'paper',
+      'warm-classic',
+      'celadon',
+      'dark',
+      'ink-blue',
+      'classic-white',
+      'classic-light',
+      'eye-care',
+      'classic-dark',
+      'white',
+    ]
     for (const expected of cycle) {
       useUIStore.getState().toggleTheme()
       expect(useUIStore.getState().theme).toBe(expected)
     }
   })
 
-  it('reports a dark color scheme for both ink palettes, not just the one named dark', async () => {
+  it('reports a dark color scheme for dark-ground palettes, not just the one named dark', async () => {
     // `ink-blue` is a dark ground under a name that does not contain "dark".
     // Testing `theme === 'dark'` leaves native scrollbars and form controls in
     // their light variant against a near-black page.
@@ -390,6 +401,14 @@ describe('uiStore settings tab persistence', () => {
     const recreated = await import('./uiStore')
 
     expect(recreated.useUIStore.getState().activeSettingsTab).toBe('general')
+  })
+
+  it('hydrates the Project Rules settings tab when it was persisted', async () => {
+    window.localStorage.setItem('cc-haha-active-settings-tab', 'projectRules')
+
+    const { useUIStore } = await import('./uiStore')
+
+    expect(useUIStore.getState().activeSettingsTab).toBe('projectRules')
   })
 
   it('persists the pets Settings tab', async () => {

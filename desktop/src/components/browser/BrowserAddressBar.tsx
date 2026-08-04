@@ -38,14 +38,12 @@ export function BrowserAddressBar({ url, canGoBack, canGoForward, loading = fals
         size="xs"
         aria-busy={loading}
         onClick={onReload}
-      />
-      <form className="min-w-0 flex-1" onSubmit={(e) => { e.preventDefault(); onNavigate(normalizeBrowserAddress(draft)) }}>
+      />      <form className="min-w-0 flex-1" onSubmit={(e) => { e.preventDefault(); onNavigate(normalizeBrowserAddress(draft)) }}>
         <input
           className="w-full rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1 font-mono text-xs text-[var(--color-text-primary)] outline-none transition-[border-color,box-shadow] duration-150 ease-out placeholder:font-[var(--font-body)] placeholder:text-[var(--color-text-tertiary)] hover:border-[var(--color-outline)] focus-visible:border-[var(--color-border-focus)] focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
-          placeholder={t('browser.addressPlaceholder')}
-          spellCheck={false}
+          placeholder={t('browser.addressPlaceholder')}          spellCheck={false}
         />
       </form>
       {rightActions && (

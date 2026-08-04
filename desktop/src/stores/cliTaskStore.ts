@@ -39,35 +39,30 @@ type CLITaskStore = {
   toggleExpanded: () => void
 }
 
-let taskRequestSequence = 0
-let taskRequestGeneration = 0
-const latestAppliedTaskRequestBySession = new Map<string, number>()
-const activeTaskPollBySession = new Map<string, Promise<void>>()
-
-type TaskRequest = {
-  requestId: number
+type InFlightTaskRequest = {
   generation: number
+  promise: Promise<{ tasks: CLITask[] }>
 }
 
-function beginTaskRequest(): TaskRequest {
-  return {
-    requestId: ++taskRequestSequence,
-    generation: taskRequestGeneration,
-  }
-}
+const inFlightTaskRequests = new Map<string, InFlightTaskRequest>()
+let trackingGeneration = 0
 
-function canApplyTaskResponse(sessionId: string, request: TaskRequest): boolean {
-  return request.generation === taskRequestGeneration
-    && request.requestId > (latestAppliedTaskRequestBySession.get(sessionId) ?? 0)
-}
+function getTasksForSession(
+  sessionId: string,
+  generation: number,
+): Promise<{ tasks: CLITask[] }> {
+  const pending = inFlightTaskRequests.get(sessionId)
+  if (pending?.generation === generation) return pending.promise
 
-function markTaskResponseApplied(sessionId: string, request: TaskRequest): void {
-  latestAppliedTaskRequestBySession.set(sessionId, request.requestId)
-}
-
-function invalidateTaskRequests(): void {
-  taskRequestGeneration += 1
-  latestAppliedTaskRequestBySession.clear()
+  const promise = cliTasksApi.getTasksForList(sessionId)
+  const request = { generation, promise }
+  inFlightTaskRequests.set(sessionId, request)
+  void promise.finally(() => {
+    if (inFlightTaskRequests.get(sessionId) === request) {
+      inFlightTaskRequests.delete(sessionId)
+    }
+  }).catch(() => {})
+  return promise
 }
 
 function buildCompletedTaskKey(tasks: CLITask[]): string | null {
@@ -119,8 +114,9 @@ export const useCLITaskStore = create<CLITaskStore>((set, get) => ({
   dismissedCompletionKey: null,
 
   fetchSessionTasks: async (sessionId) => {
+    let generation = trackingGeneration
     if (get().sessionId !== sessionId) {
-      invalidateTaskRequests()
+      generation = ++trackingGeneration
       set({
         sessionId,
         tasks: [],
@@ -130,69 +126,54 @@ export const useCLITaskStore = create<CLITaskStore>((set, get) => ({
         expanded: false,
       })
     }
+    if (get().resetting) return
 
-    const activePoll = activeTaskPollBySession.get(sessionId)
-    if (activePoll) return activePoll
-
-    const poll = (async () => {
-      const request = beginTaskRequest()
-      try {
-        const { tasks } = await cliTasksApi.getTasksForList(sessionId)
-        if (
-          canApplyTaskResponse(sessionId, request)
-          && get().sessionId === sessionId
-          && !get().resetting
-        ) {
-          markTaskResponseApplied(sessionId, request)
-          set((state) => ({
-            tasks,
-            ...resolveDismissState(tasks, state.dismissedCompletionKey),
-          }))
-        }
-      } catch {
-        // Preserve the last known task state across transient polling failures.
-      }
-    })()
-
-    activeTaskPollBySession.set(sessionId, poll)
     try {
-      await poll
-    } finally {
-      if (activeTaskPollBySession.get(sessionId) === poll) {
-        activeTaskPollBySession.delete(sessionId)
-      }
-    }
-  },
-
-  refreshTasks: async (targetSessionId) => {
-    const sessionId = targetSessionId ?? get().sessionId
-    if (!sessionId) return
-    const request = beginTaskRequest()
-    try {
-      const { tasks } = await cliTasksApi.getTasksForList(sessionId)
+      const { tasks } = await getTasksForSession(sessionId, generation)
       if (
-        canApplyTaskResponse(sessionId, request)
-        && get().sessionId === sessionId
-        && !get().resetting
+        trackingGeneration === generation &&
+        get().sessionId === sessionId &&
+        !get().resetting
       ) {
-        markTaskResponseApplied(sessionId, request)
         set((state) => ({
           tasks,
           ...resolveDismissState(tasks, state.dismissedCompletionKey),
         }))
       }
     } catch {
-      // ignore
+      // Preserve the last known task state across transient polling failures.
+    }
+  },
+
+  refreshTasks: async (targetSessionId) => {
+    const sessionId = targetSessionId ?? get().sessionId
+    if (!sessionId || get().resetting) return
+    const generation = trackingGeneration
+    try {
+      const { tasks } = await getTasksForSession(sessionId, generation)
+      if (
+        trackingGeneration === generation &&
+        get().sessionId === sessionId &&
+        !get().resetting
+      ) {
+        set((state) => ({
+          tasks,
+          ...resolveDismissState(tasks, state.dismissedCompletionKey),
+        }))
+      }
+    } catch {
+      // Preserve the last known task state across transient polling failures.
     }
   },
 
   setTasksFromTodos: (todos, targetSessionId) => {
     const sessionId = targetSessionId ?? get().sessionId
     if (!sessionId || get().sessionId !== sessionId) return
-    invalidateTaskRequests()
+    trackingGeneration += 1
     const tasks = mapTodosToTasks(todos, sessionId)
     set((state) => ({
       tasks,
+      resetting: false,
       ...resolveDismissState(tasks, state.dismissedCompletionKey),
     }))
   },
@@ -217,7 +198,7 @@ export const useCLITaskStore = create<CLITaskStore>((set, get) => ({
     const completionKey = buildCompletedTaskKey(tasks)
     if (!completionKey) return
 
-    invalidateTaskRequests()
+    const resetGeneration = ++trackingGeneration
     set({
       tasks: [],
       resetting: true,
@@ -227,9 +208,35 @@ export const useCLITaskStore = create<CLITaskStore>((set, get) => ({
     })
 
     try {
-      await cliTasksApi.resetTaskList(sessionId)
+      const { reset } = await cliTasksApi.resetTaskList(
+        sessionId,
+        tasks.map(({ taskListId: _, ...task }) => task),
+      )
+      if (
+        !reset &&
+        trackingGeneration === resetGeneration &&
+        get().sessionId === sessionId
+      ) {
+        set({ resetting: false })
+        await get().refreshTasks(sessionId)
+      }
+    } catch {
+      if (
+        trackingGeneration === resetGeneration &&
+        get().sessionId === sessionId
+      ) {
+        set({
+          tasks,
+          resetting: false,
+          completedAndDismissed: false,
+          dismissedCompletionKey: null,
+        })
+      }
     } finally {
-      if (get().sessionId === sessionId) {
+      if (
+        trackingGeneration === resetGeneration &&
+        get().sessionId === sessionId
+      ) {
         set({ resetting: false })
       }
     }
@@ -237,7 +244,7 @@ export const useCLITaskStore = create<CLITaskStore>((set, get) => ({
 
   clearTasks: (targetSessionId) => {
     if (targetSessionId && get().sessionId !== targetSessionId) return
-    invalidateTaskRequests()
+    trackingGeneration += 1
     set({
       sessionId: null,
       tasks: [],

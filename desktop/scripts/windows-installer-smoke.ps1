@@ -18,14 +18,23 @@ if ($installers.Count -ne 1) {
   throw "Expected exactly one Windows $Arch installer in $resolvedArtifactsDir, found $($installers.Count)."
 }
 $installer = $installers[0].FullName
+$packageJson = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\package.json') -Raw | ConvertFrom-Json
+$productName = [string]$packageJson.build.productName
+$appPackageName = [string]$packageJson.name
+if ([string]::IsNullOrWhiteSpace($productName)) {
+  throw 'desktop/package.json must define build.productName for installer smoke validation.'
+}
+if ([string]::IsNullOrWhiteSpace($appPackageName)) {
+  throw 'desktop/package.json must define name for installer smoke validation.'
+}
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "cc-haha-installer-smoke-$([Guid]::NewGuid().ToString('N'))"
 $installDir = Join-Path $testRoot '中文 安装目录\Claude Code Haha'
 $appData = Join-Path $testRoot 'AppData\Roaming'
 $localAppData = Join-Path $testRoot 'AppData\Local'
 $userProfile = Join-Path $testRoot 'UserProfile'
-$appExe = Join-Path $installDir 'Claude Code Haha.exe'
-$uninstaller = Join-Path $installDir 'Uninstall Claude Code Haha.exe'
+$appExe = Join-Path $installDir "$productName.exe"
+$uninstaller = Join-Path $installDir "Uninstall $productName.exe"
 $recoveryHelper = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\build\recover-legacy-install-data.ps1')).Path
 $processHelper = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\build\check-install-processes.ps1')).Path
 $siblingProcess = $null
@@ -379,11 +388,11 @@ function Invoke-LegacyRecoveryDiagnostic {
     '-CandidateInstallDir',
     $installDir,
     '-UserDataDir',
-    (Join-Path $appData 'Claude Code Haha'),
+    (Join-Path $appData $appPackageName),
     '-RecoveryRoot',
     (Join-Path $userProfile 'Claude Code Haha Data\Recovered'),
     '-ProcessName',
-    'Claude Code Haha.exe',
+    "$productName.exe",
     '-InstallerIdentitySafety',
     'trusted-user'
   )
@@ -455,6 +464,20 @@ try {
   }
 
   Invoke-LegacyRecoveryDiagnostic
+
+  $managedConfigDir = Join-Path $userProfile '.claude'
+  $modeDir = Join-Path $appData $appPackageName
+  New-Item -ItemType Directory -Path $managedConfigDir, $modeDir -Force | Out-Null
+  [ordered]@{
+    mode = 'portable'
+    portable_dir = $managedConfigDir
+  } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $modeDir 'app-mode.json') -Encoding UTF8
+  $env:CLAUDE_CONFIG_DIR = $managedConfigDir
+  $env:CC_HAHA_APP_PORTABLE_DIR = '1'
+  Invoke-CheckedProcess -FilePath $installer -Stage 'App-managed auto-update reinstall' -Arguments @('--updated', '/S', '/currentuser', "/D=$installDir")
+  Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue
+  Remove-Item Env:CC_HAHA_APP_PORTABLE_DIR -ErrorAction SilentlyContinue
+
   Stop-Process -Id $siblingProcess.Id -Force
   $siblingProcess.WaitForExit()
   $siblingProcess.Dispose()

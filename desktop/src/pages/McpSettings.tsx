@@ -6,8 +6,9 @@ import { LoadingState } from '@/components/ui/LoadingState'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { ErrorState } from '@/components/ui/ErrorState'
 import { IconButton } from '@/components/ui/IconButton'
+import { Spinner } from '@/components/ui/Spinner'
+import { ToggleSwitch } from '@/components/ui/ToggleSwitch'
 import { mcpStatusTone } from '@/lib/mcpStatus'
-import { getMcpServerIdentityKey } from '@/lib/mcpIdentity'
 import { DirectoryPicker } from '@/components/composite/DirectoryPicker'
 import { SettingsPageHeader } from '@/components/settings/SettingsSection'
 import { Input } from '@/components/ui/Input'
@@ -16,13 +17,19 @@ import { useTranslation } from '../i18n'
 import { useUIStore } from '../stores/uiStore'
 import { useMcpStore } from '../stores/mcpStore'
 import { useSessionStore } from '../stores/sessionStore'
-import type { McpServerRecord, McpUpsertPayload, McpWritableScope } from '../types/mcp'
+import { mcpApi } from '../api/mcp'
+import { getDesktopHost } from '../lib/desktopHost'
+import { MarketplacePage } from './McpMarketplace'
+import type { McpServerRecord, McpToolInfo, McpToolsResult, McpUpsertPayload, McpWritableScope } from '../types/mcp'
 
 type EditorMode =
   | { type: 'list' }
   | { type: 'create' }
   | { type: 'edit'; server: McpServerRecord }
   | { type: 'details'; server: McpServerRecord }
+  | { type: 'marketplace' }
+
+type DetailsTab = 'overview' | 'tools'
 
 type TransportKind = 'stdio' | 'http' | 'sse'
 
@@ -302,23 +309,20 @@ function scopeLabel(server: McpServerRecord, t: ReturnType<typeof useTranslation
   return t(`settings.mcp.scope.${group}`)
 }
 
-function isActiveInCurrentContext(server: McpServerRecord) {
-  return server.activeInCurrentContext !== false
-}
-
-function statusLabel(server: McpServerRecord, t: ReturnType<typeof useTranslation>) {
-  return isActiveInCurrentContext(server)
-    ? server.statusLabel
-    : t('settings.mcp.status.configured')
-}
-
-function StatusBadge({ server, t }: { server: McpServerRecord; t: ReturnType<typeof useTranslation> }) {
-  const activeInCurrentContext = isActiveInCurrentContext(server)
+function StatusBadge({ server }: { server: McpServerRecord }) {
   return (
-    <Badge tone={activeInCurrentContext ? mcpStatusTone(server.status) : 'neutral'} size="md" bordered className="font-semibold">
-      {statusLabel(server, t)}
+    <Badge tone={mcpStatusTone(server.status)} size="md" bordered className="font-semibold">
+      {server.statusLabel}
     </Badge>
   )
+}
+
+function getServerIdentityKey(server: Pick<McpServerRecord, 'name' | 'scope' | 'projectPath'>) {
+  if (server.scope === 'local' || server.scope === 'project') {
+    return `${server.scope}:${server.projectPath ?? ''}:${server.name}`
+  }
+
+  return `${server.scope}:${server.name}`
 }
 
 function ArraySection({
@@ -405,20 +409,22 @@ function ServerRow({
   isBusy,
   onOpen,
   onToggle,
+  onRefresh,
   t,
 }: {
   server: McpServerRecord
   isBusy: boolean
   onOpen: () => void
   onToggle: () => void
+  onRefresh: () => void
   t: ReturnType<typeof useTranslation>
 }) {
   return (
-    <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-4 px-6 py-5 border-t border-[var(--color-border)] first:border-t-0">
+    <div className="grid grid-cols-[minmax(0,1fr)_auto_auto_auto] items-center gap-4 px-6 py-5 border-t border-[var(--color-border)] first:border-t-0">
       <div className="min-w-0">
         <div className="flex items-center gap-3 mb-2 min-w-0">
           <div className="text-[1.05rem] font-semibold text-[var(--color-text-primary)] truncate">{server.name}</div>
-          <StatusBadge server={server} t={t} />
+          <StatusBadge server={server} />
         </div>
         <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-tertiary)]">
           <span className="rounded-full bg-[var(--color-surface-hover)] px-2 py-1 font-medium text-[var(--color-text-secondary)]">
@@ -437,16 +443,21 @@ function ServerRow({
           )}
           <span className="truncate">{redactSensitiveText(server.summary)}</span>
         </div>
-        {!isActiveInCurrentContext(server) && (
-          <div className="mt-2 text-xs text-[var(--color-text-tertiary)]">
-            {t('settings.mcp.status.configuredElsewhere')}
-          </div>
-        )}
-        {isActiveInCurrentContext(server) && server.statusDetail && (
+        {server.statusDetail && (
           <div className="mt-2 text-xs text-[var(--color-text-tertiary)] truncate">{server.statusDetail}</div>
         )}
       </div>
 
+      <IconButton
+        icon={server.status === 'checking' ? <Spinner size={16} /> : 'refresh'}
+        label={`Refresh ${server.name}`}
+        showTooltip={false}
+        size="xl"
+        shape="circle"
+        tone="secondary"
+        disabled={isBusy || server.status === 'checking'}
+        onClick={onRefresh}
+      />
       <IconButton
         icon="settings"
         label={t('settings.mcp.openServer', { name: server.name })}
@@ -468,6 +479,327 @@ function ServerRow({
   )
 }
 
+type ToolsLoadState =
+  | { status: 'loading' }
+  | { status: 'ready'; result: McpToolsResult }
+  | { status: 'error'; error: string }
+
+function ToolAnnotationBadges({
+  tool,
+  t,
+}: {
+  tool: McpToolInfo
+  t: ReturnType<typeof useTranslation>
+}) {
+  const flags: { key: string; label: string; tone: string }[] = []
+  if (tool.annotations.readOnlyHint) {
+    flags.push({
+      key: 'readOnly',
+      label: t('settings.mcp.tools.annotation.readOnly'),
+      tone: 'bg-[var(--color-inspector-success-bg)] text-[var(--color-inspector-success)]',
+    })
+  }
+  if (tool.annotations.destructiveHint) {
+    flags.push({
+      key: 'destructive',
+      label: t('settings.mcp.tools.annotation.destructive'),
+      tone: 'bg-[var(--color-inspector-danger-bg)] text-[var(--color-inspector-danger)]',
+    })
+  }
+  if (tool.annotations.openWorldHint) {
+    flags.push({
+      key: 'openWorld',
+      label: t('settings.mcp.tools.annotation.openWorld'),
+      tone: 'bg-[var(--color-surface-container-low)] text-[var(--color-warning)]',
+    })
+  }
+  if (tool.annotations.idempotentHint) {
+    flags.push({
+      key: 'idempotent',
+      label: t('settings.mcp.tools.annotation.idempotent'),
+      tone: 'bg-[var(--color-surface-hover)] text-[var(--color-text-secondary)]',
+    })
+  }
+
+  if (flags.length === 0) return null
+
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {flags.map((flag) => (
+        <span
+          key={flag.key}
+          className={`inline-flex items-center rounded-full border border-[var(--color-border)] px-2 py-[2px] text-[10px] font-medium ${flag.tone}`}
+        >
+          {flag.label}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+function McpToolRow({
+  tool,
+  onToggle,
+  isToggling,
+  t,
+}: {
+  tool: McpToolInfo
+  onToggle: () => void
+  isToggling: boolean
+  t: ReturnType<typeof useTranslation>
+}) {
+  const [open, setOpen] = useState(false)
+
+  const inputSchemaPreview = useMemo(() => {
+    try {
+      return JSON.stringify(tool.inputSchema ?? {}, null, 2)
+    } catch {
+      return ''
+    }
+  }, [tool.inputSchema])
+
+  return (
+    <li
+      className={`rounded-[var(--radius-lg)] border border-[var(--color-border)] p-4 transition-colors ${
+        tool.enabled
+          ? 'bg-[var(--color-surface)]'
+          : 'bg-[var(--color-surface-hover)] opacity-75'
+      }`}
+    >
+      <div className="flex items-start gap-3">
+        <button
+          type="button"
+          onClick={() => setOpen((value) => !value)}
+          className="flex flex-1 min-w-0 items-start justify-between gap-3 text-left"
+        >
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <code className="rounded bg-[var(--color-surface-hover)] px-2 py-[2px] font-mono text-xs text-[var(--color-text-primary)]">
+                {tool.name}
+              </code>
+              {tool.title && (
+                <span className="text-sm text-[var(--color-text-secondary)]">{tool.title}</span>
+              )}
+              {!tool.enabled && (
+                <span className="inline-flex items-center rounded-full border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-2 py-[2px] text-[10px] font-medium text-[var(--color-text-tertiary)]">
+                  {t('settings.mcp.tools.disabledHint')}
+                </span>
+              )}
+            </div>
+            {tool.description && (
+              <p className="mt-2 line-clamp-2 text-sm text-[var(--color-text-secondary)]">
+                {tool.description}
+              </p>
+            )}
+            <div className="mt-2">
+              <ToolAnnotationBadges tool={tool} t={t} />
+            </div>
+          </div>
+          <span
+            className="material-symbols-outlined mt-1 text-[20px] text-[var(--color-text-tertiary)] transition-transform"
+            style={{ transform: open ? 'rotate(180deg)' : 'none' }}
+          >
+            expand_more
+          </span>
+        </button>
+
+        <div onClick={(e) => e.stopPropagation()} className="ml-2 mt-[2px]">
+          <ToggleSwitch
+            checked={tool.enabled}
+            disabled={isToggling}
+            onChange={onToggle}
+          />
+        </div>
+      </div>
+
+      {open && (
+        <div className="mt-4 space-y-3 border-t border-[var(--color-border)] pt-4">
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-wide text-[var(--color-text-tertiary)]">
+              {t('settings.mcp.tools.qualifiedName')}
+            </div>
+            <code className="mt-1 block break-all font-mono text-xs text-[var(--color-text-primary)]">
+              {tool.qualifiedName}
+            </code>
+          </div>
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-wide text-[var(--color-text-tertiary)]">
+              {t('settings.mcp.tools.inputSchema')}
+            </div>
+            <pre className="mt-1 max-h-72 overflow-auto rounded-[var(--radius-md)] bg-[var(--color-surface-hover)] p-3 text-xs text-[var(--color-text-secondary)]">
+              {inputSchemaPreview}
+            </pre>
+          </div>
+        </div>
+      )}
+    </li>
+  )
+}
+
+function McpToolsTab({
+  serverName,
+  cwd,
+  serverEnabled,
+  t,
+}: {
+  serverName: string
+  cwd?: string
+  serverEnabled: boolean
+  t: ReturnType<typeof useTranslation>
+}) {
+  const [state, setState] = useState<ToolsLoadState>({ status: 'loading' })
+  const [refreshKey, setRefreshKey] = useState(0)
+  const [togglingTool, setTogglingTool] = useState<string | null>(null)
+  const addToast = useUIStore((s) => s.addToast)
+
+  useEffect(() => {
+    let cancelled = false
+
+    if (!serverEnabled) {
+      setState({
+        status: 'ready',
+        result: { serverName, status: 'disabled', tools: [] },
+      })
+      return () => {
+        cancelled = true
+      }
+    }
+
+    setState({ status: 'loading' })
+    mcpApi
+      .tools(serverName, cwd)
+      .then((result) => {
+        if (cancelled) return
+        setState({ status: 'ready', result })
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return
+        setState({
+          status: 'error',
+          error: error instanceof Error ? error.message : String(error),
+        })
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [serverName, cwd, serverEnabled, refreshKey])
+
+  const handleToggleTool = async (tool: McpToolInfo) => {
+    if (togglingTool) return
+    const nextEnabled = !tool.enabled
+    setTogglingTool(tool.name)
+    try {
+      await mcpApi.toggleTool(serverName, tool.name, nextEnabled, cwd)
+      // Optimistically patch the local state so the UI doesn't have to wait
+      // for a full refetch — the toggle endpoint is the source of truth and
+      // returns the post-toggle enabled flag.
+      setState((current) => {
+        if (current.status !== 'ready') return current
+        if (current.result.status !== 'connected') return current
+        return {
+          status: 'ready',
+          result: {
+            ...current.result,
+            tools: current.result.tools.map((existing) =>
+              existing.name === tool.name
+                ? { ...existing, enabled: nextEnabled }
+                : existing,
+            ),
+          },
+        }
+      })
+      addToast({
+        type: 'success',
+        message: t('settings.mcp.tools.toggleSuccess'),
+      })
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : t('settings.mcp.tools.toggleFailed'),
+      })
+    } finally {
+      setTogglingTool(null)
+    }
+  }
+
+  const isLoading = state.status === 'loading'
+  const result = state.status === 'ready' ? state.result : null
+
+  const headerLabel = result?.status === 'connected'
+    ? t('settings.mcp.tools.count', { count: result.tools.length })
+    : null
+
+  return (
+    <section className="rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface)] p-6">
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <div className="text-sm font-semibold text-[var(--color-text-primary)]">
+          {headerLabel ?? t('settings.mcp.tabs.tools')}
+        </div>
+        <Button
+          variant="secondary"
+          onClick={() => setRefreshKey((value) => value + 1)}
+          loading={isLoading && serverEnabled}
+          disabled={!serverEnabled}
+        >
+          <span className="material-symbols-outlined text-[16px]">refresh</span>
+          {t('settings.mcp.tools.refresh')}
+        </Button>
+      </div>
+
+      {state.status === 'loading' && (
+        <div className="py-8 text-center text-sm text-[var(--color-text-secondary)]">
+          {t('settings.mcp.tools.loading')}
+        </div>
+      )}
+
+      {state.status === 'error' && (
+        <div className="rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-inspector-danger-bg)] p-4 text-sm text-[var(--color-inspector-danger)]">
+          {t('settings.mcp.tools.error')}: {state.error}
+        </div>
+      )}
+
+      {result?.status === 'disabled' && (
+        <div className="py-6 text-center text-sm text-[var(--color-text-secondary)]">
+          {t('settings.mcp.tools.disabled')}
+        </div>
+      )}
+
+      {result?.status === 'needs-auth' && (
+        <div className="rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] p-4 text-sm text-[var(--color-warning)]">
+          {t('settings.mcp.tools.needsAuth')}
+        </div>
+      )}
+
+      {result?.status === 'failed' && (
+        <div className="rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-inspector-danger-bg)] p-4 text-sm text-[var(--color-inspector-danger)]">
+          {t('settings.mcp.tools.failed', { error: result.error ?? '' })}
+        </div>
+      )}
+
+      {result?.status === 'connected' && result.tools.length === 0 && (
+        <div className="py-6 text-center text-sm text-[var(--color-text-secondary)]">
+          {t('settings.mcp.tools.empty')}
+        </div>
+      )}
+
+      {result?.status === 'connected' && result.tools.length > 0 && (
+        <ul className="flex flex-col gap-3">
+          {result.tools.map((tool) => (
+            <McpToolRow
+              key={tool.qualifiedName}
+              tool={tool}
+              onToggle={() => void handleToggleTool(tool)}
+              isToggling={togglingTool === tool.name}
+              t={t}
+            />
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
 export function McpSettings() {
   const { servers, selectedServer, isLoading, error, fetchServersForKnownProjects, createServer, updateServer, deleteServer, toggleServer, reconnectServer, refreshServerStatus, selectServer } = useMcpStore()
   const addToast = useUIStore((s) => s.addToast)
@@ -475,6 +807,7 @@ export function McpSettings() {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const t = useTranslation()
   const [view, setView] = useState<EditorMode>({ type: 'list' })
+  const [detailsTab, setDetailsTab] = useState<DetailsTab>('overview')
   const [draft, setDraft] = useState<McpDraft>(createEmptyDraft)
   const [isSaving, setIsSaving] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
@@ -482,6 +815,7 @@ export function McpSettings() {
   const [pendingDeleteServer, setPendingDeleteServer] = useState<McpServerRecord | null>(null)
   const [isInitialLoading, setIsInitialLoading] = useState(true)
   const refreshInFlightRef = useRef(new Set<string>())
+  const retryAttemptedRef = useRef(new Set<string>())
 
   const activeSession = sessions.find((session) => session.id === activeSessionId)
   const currentWorkDir = activeSession?.workDir || undefined
@@ -517,11 +851,8 @@ export function McpSettings() {
 
   const stats = useMemo(() => ({
     total: servers.length,
-    connected: servers.filter((server) => isActiveInCurrentContext(server) && server.status === 'connected').length,
-    attention: servers.filter((server) => (
-      isActiveInCurrentContext(server) &&
-      (server.status === 'failed' || server.status === 'needs-auth')
-    )).length,
+    connected: servers.filter((server) => server.status === 'connected').length,
+    attention: servers.filter((server) => server.status === 'failed' || server.status === 'needs-auth').length,
   }), [servers])
   const showListLoading = (isInitialLoading || isLoading) && servers.length === 0
 
@@ -550,36 +881,74 @@ export function McpSettings() {
     }
   }, [selectedServer])
 
+  // Reset the inspector tab whenever the inspected server identity changes,
+  // covering both edit-form entry (canEdit servers) and read-only details
+  // entry (plugin / claudeai / managed servers). Reconnects/refreshes preserve
+  // identity, so the user-selected tab survives those updates.
+  useEffect(() => {
+    const inspectedKey =
+      view.type === 'details' || view.type === 'edit'
+        ? getServerIdentityKey(view.server)
+        : null
+    if (!inspectedKey) return
+    setDetailsTab('overview')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    view.type,
+    view.type === 'details' || view.type === 'edit'
+      ? getServerIdentityKey(view.server)
+      : '',
+  ])
+
   useEffect(() => {
     const pendingServers = servers.filter((server) => (
       server.enabled &&
-      isActiveInCurrentContext(server) &&
       server.status === 'checking' &&
-      !refreshInFlightRef.current.has(getMcpServerIdentityKey(server))
+      !refreshInFlightRef.current.has(getServerIdentityKey(server))
     ))
 
     if (pendingServers.length === 0) return
 
     let cancelled = false
     const queue = [...pendingServers]
-    const workerCount = Math.min(2, queue.length)
+    const workerCount = queue.length
 
     const runWorker = async () => {
       while (!cancelled) {
         const server = queue.shift()
         if (!server) return
 
-        const key = getMcpServerIdentityKey(server)
+        const key = getServerIdentityKey(server)
         refreshInFlightRef.current.add(key)
         try {
           const updated = await refreshServerStatus(server, resolveOperationCwd(server))
           if (cancelled) return
 
-          setView((current) => {
-            if (current.type !== 'details' && current.type !== 'edit') return current
-            if (getMcpServerIdentityKey(current.server) !== key) return current
-            return { ...current, server: updated }
-          })
+          // Auto-retry once for timeout failures (npx/uvx first-run downloads)
+          if (
+            updated.status === 'failed' &&
+            updated.statusDetail?.includes('timed out') &&
+            !retryAttemptedRef.current.has(key)
+          ) {
+            retryAttemptedRef.current.add(key)
+            refreshInFlightRef.current.delete(key)
+            await new Promise((r) => setTimeout(r, 5000))
+            if (cancelled) return
+            refreshInFlightRef.current.add(key)
+            const retried = await refreshServerStatus(updated, resolveOperationCwd(updated))
+            if (cancelled) return
+            setView((current) => {
+              if (current.type !== 'details' && current.type !== 'edit') return current
+              if (getServerIdentityKey(current.server) !== key) return current
+              return { ...current, server: retried }
+            })
+          } else {
+            setView((current) => {
+              if (current.type !== 'details' && current.type !== 'edit') return current
+              if (getServerIdentityKey(current.server) !== key) return current
+              return { ...current, server: updated }
+            })
+          }
         } catch {
           // Keep passive checks silent. Explicit reconnect remains the action that
           // surfaces failures to the user.
@@ -597,7 +966,7 @@ export function McpSettings() {
   }, [servers, refreshServerStatus, currentWorkDir])
 
   const handleToggle = async (server: McpServerRecord) => {
-    setBusyServerKey(getMcpServerIdentityKey(server))
+    setBusyServerKey(getServerIdentityKey(server))
     try {
       const updated = await toggleServer(server, resolveOperationCwd(server), activeSessionId ?? undefined)
       addToast({
@@ -614,6 +983,23 @@ export function McpSettings() {
     }
   }
 
+  const handleRefresh = async (server: McpServerRecord) => {
+    const key = getServerIdentityKey(server)
+    setBusyServerKey(key)
+    try {
+      const updated = await refreshServerStatus(server, resolveOperationCwd(server))
+      setView((current) => {
+        if (current.type !== 'details' && current.type !== 'edit') return current
+        if (getServerIdentityKey(current.server) !== key) return current
+        return { ...current, server: updated }
+      })
+    } catch {
+      // silent — status stays as-is
+    } finally {
+      setBusyServerKey(null)
+    }
+  }
+
   const handleReconnect = async (server: McpServerRecord) => {
     const optimistic = {
       ...server,
@@ -622,10 +1008,10 @@ export function McpSettings() {
       statusDetail: undefined,
     }
 
-    setBusyServerKey(getMcpServerIdentityKey(server))
+    setBusyServerKey(getServerIdentityKey(server))
     setView((current) => {
       if (current.type !== 'details' && current.type !== 'edit') return current
-      if (getMcpServerIdentityKey(current.server) !== getMcpServerIdentityKey(server)) return current
+      if (getServerIdentityKey(current.server) !== getServerIdentityKey(server)) return current
       return { ...current, server: optimistic }
     })
     try {
@@ -641,7 +1027,7 @@ export function McpSettings() {
     } catch (error) {
       setView((current) => {
         if (current.type !== 'details' && current.type !== 'edit') return current
-        if (getMcpServerIdentityKey(current.server) !== getMcpServerIdentityKey(server)) return current
+        if (getServerIdentityKey(current.server) !== getServerIdentityKey(server)) return current
         return { ...current, server }
       })
       addToast({
@@ -707,8 +1093,6 @@ export function McpSettings() {
         ? await updateServer(view.server, payload, operationCwd)
         : await createServer(draft.name.trim(), payload, operationCwd)
 
-      await fetchServersForKnownProjects(currentWorkDir)
-
       addToast({
         type: 'success',
         message: view.type === 'edit'
@@ -764,6 +1148,7 @@ export function McpSettings() {
 
   if (view.type === 'details') {
     const server = view.server
+    const operationCwd = resolveOperationCwd(server)
     return (
       <>
         <div className="max-w-5xl min-w-0">
@@ -780,47 +1165,100 @@ export function McpSettings() {
             {t('settings.mcp.form.back')}
           </Button>
 
-          <div className="flex items-start justify-between gap-4 mb-8">
+          <div className="flex items-start justify-between gap-4 mb-6">
             <div>
               <h2 className="text-[32px] font-semibold leading-tight text-[var(--color-text-primary)]" style={{ fontFamily: 'var(--font-headline)' }}>{server.name}</h2>
               <p className="mt-3 text-base text-[var(--color-text-secondary)]">{redactSensitiveText(server.summary)}</p>
               <div className="mt-4 flex flex-wrap items-center gap-3">
-                <StatusBadge server={server} t={t} />
-                {isActiveInCurrentContext(server) && server.statusDetail && (
+                <StatusBadge server={server} />
+                {server.statusDetail && (
                   <span className="text-sm text-[var(--color-text-tertiary)]">{server.statusDetail}</span>
-                )}
-                {!isActiveInCurrentContext(server) && (
-                  <span className="text-sm text-[var(--color-text-tertiary)]">
-                    {t('settings.mcp.status.configuredElsewhere')}
-                  </span>
                 )}
               </div>
             </div>
             {server.canReconnect && (
-              <Button variant="secondary" onClick={() => handleReconnect(server)} loading={busyServerKey === getMcpServerIdentityKey(server)}>
+              <Button variant="secondary" onClick={() => handleReconnect(server)} loading={busyServerKey === getServerIdentityKey(server)}>
                 <span className="material-symbols-outlined text-[16px]">sync</span>
                 {t('settings.mcp.form.reconnect')}
               </Button>
             )}
           </div>
 
-          <section className="rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface)] p-6">
-            <div className="grid gap-4 md:grid-cols-2">
-              <InfoPair label={t('settings.mcp.form.transport')} value={transportLabel(server.transport, t)} />
-              <InfoPair label={t('settings.mcp.form.scope')} value={scopeLabel(server, t)} />
-              <InfoPair label={t('settings.mcp.form.status')} value={statusLabel(server, t)} />
-              <InfoPair label={t('settings.mcp.form.location')} value={server.configLocation} />
-            </div>
-            <div className="mt-5">
-              <div className="text-sm font-semibold text-[var(--color-text-primary)] mb-2">{t('settings.mcp.form.rawConfig')}</div>
-              <pre className="overflow-x-auto rounded-[var(--radius-lg)] bg-[var(--color-surface-hover)] p-4 text-xs text-[var(--color-text-secondary)]">
-                {JSON.stringify(redactMcpDisplayValue(server.config), null, 2)}
-              </pre>
-            </div>
-          </section>
+          <div
+            className="mb-5 flex gap-1 border-b border-[var(--color-border)]"
+            role="tablist"
+            aria-label={t('settings.mcp.tabs.tools')}
+          >
+            {(['overview', 'tools'] as const).map((tab) => (
+              <button
+                key={tab}
+                type="button"
+                role="tab"
+                aria-selected={detailsTab === tab}
+                onClick={() => setDetailsTab(tab)}
+                className={`relative px-4 py-2 text-sm font-medium transition-colors ${
+                  detailsTab === tab
+                    ? 'text-[var(--color-text-primary)]'
+                    : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+                }`}
+              >
+                {tab === 'overview'
+                  ? t('settings.mcp.tabs.overview')
+                  : t('settings.mcp.tabs.tools')}
+                {detailsTab === tab && (
+                  <span className="absolute inset-x-2 -bottom-px h-[2px] bg-[var(--color-text-primary)]" />
+                )}
+              </button>
+            ))}
+          </div>
+
+          {detailsTab === 'overview' && (
+            <section className="rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface)] p-6">
+              <div className="grid gap-4 md:grid-cols-2">
+                <InfoPair label={t('settings.mcp.form.transport')} value={transportLabel(server.transport, t)} />
+                <InfoPair label={t('settings.mcp.form.scope')} value={scopeLabel(server, t)} />
+                <InfoPair label={t('settings.mcp.form.status')} value={server.statusLabel} />
+                <InfoPair label={t('settings.mcp.form.location')} value={server.configLocation} />
+              </div>
+              <div className="mt-5">
+                <div className="text-sm font-semibold text-[var(--color-text-primary)] mb-2">{t('settings.mcp.form.rawConfig')}</div>
+                <pre className="overflow-x-auto rounded-[var(--radius-lg)] bg-[var(--color-surface-hover)] p-4 text-xs text-[var(--color-text-secondary)]">
+                  {JSON.stringify(redactMcpDisplayValue(server.config), null, 2)}
+                </pre>
+              </div>
+            </section>
+          )}
+
+          {detailsTab === 'tools' && (
+            <McpToolsTab
+              serverName={server.name}
+              cwd={operationCwd}
+              serverEnabled={server.enabled}
+              t={t}
+            />
+          )}
         </div>
         {deleteModal}
       </>
+    )
+  }
+
+  if (view.type === 'marketplace') {
+    return (
+      <MarketplacePage
+        cwd={currentWorkDir}
+        onBack={() => setView({ type: 'list' })}
+        onInstalled={() => {
+          // Refresh the server list so the freshly-installed entry is visible
+          // when the user navigates back. Errors are swallowed because the
+          // marketplace toast already covers user-facing failure messaging.
+          void fetchServersForKnownProjects(currentWorkDir)
+        }}
+        onOpenInstalled={(server) => {
+          selectServer(server)
+          setView({ type: 'details', server })
+        }}
+      />
     )
   }
 
@@ -871,14 +1309,9 @@ export function McpSettings() {
               </p>
               {editing && targetServer && (
                 <div className="mt-4 flex flex-wrap items-center gap-3">
-                  <StatusBadge server={targetServer} t={t} />
-                  {isActiveInCurrentContext(targetServer) && targetServer.statusDetail && (
+                  <StatusBadge server={targetServer} />
+                  {targetServer.statusDetail && (
                     <span className="text-sm text-[var(--color-text-tertiary)]">{targetServer.statusDetail}</span>
-                  )}
-                  {!isActiveInCurrentContext(targetServer) && (
-                    <span className="text-sm text-[var(--color-text-tertiary)]">
-                      {t('settings.mcp.status.configuredElsewhere')}
-                    </span>
                   )}
                 </div>
               )}
@@ -886,7 +1319,7 @@ export function McpSettings() {
 
             <div className="flex items-center gap-3">
               {editing && targetServer?.canReconnect && (
-                <Button variant="secondary" onClick={() => handleReconnect(targetServer)} loading={busyServerKey === getMcpServerIdentityKey(targetServer)}>
+                <Button variant="secondary" onClick={() => handleReconnect(targetServer)} loading={busyServerKey === getServerIdentityKey(targetServer)}>
                   <span className="material-symbols-outlined text-[16px]">sync</span>
                   {t('settings.mcp.form.reconnect')}
                 </Button>
@@ -905,6 +1338,49 @@ export function McpSettings() {
             </div>
           </div>
 
+          {/*
+            Tab strip — only meaningful when an existing server is being inspected.
+            Creation flow (no server yet) skips it: there are no tools to list
+            until the server is saved and connected.
+          */}
+          {editing && targetServer && (
+            <div
+              className="mb-5 flex gap-1 border-b border-[var(--color-border)]"
+              role="tablist"
+              aria-label={t('settings.mcp.tabs.tools')}
+            >
+              {(['overview', 'tools'] as const).map((tab) => (
+                <button
+                  key={tab}
+                  type="button"
+                  role="tab"
+                  aria-selected={detailsTab === tab}
+                  onClick={() => setDetailsTab(tab)}
+                  className={`relative px-4 py-2 text-sm font-medium transition-colors ${
+                    detailsTab === tab
+                      ? 'text-[var(--color-text-primary)]'
+                      : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+                  }`}
+                >
+                  {tab === 'overview'
+                    ? t('settings.mcp.tabs.overview')
+                    : t('settings.mcp.tabs.tools')}
+                  {detailsTab === tab && (
+                    <span className="absolute inset-x-2 -bottom-px h-[2px] bg-[var(--color-text-primary)]" />
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {editing && targetServer && detailsTab === 'tools' ? (
+            <McpToolsTab
+              serverName={targetServer.name}
+              cwd={resolveOperationCwd(targetServer)}
+              serverEnabled={targetServer.enabled}
+              t={t}
+            />
+          ) : (
           <div className="space-y-4">
           <section className="rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface)] p-5">
             <Input
@@ -1089,6 +1565,7 @@ export function McpSettings() {
             </Button>
           </div>
         </div>
+        )}
         </div>
         {deleteModal}
       </>
@@ -1100,14 +1577,26 @@ export function McpSettings() {
       <SettingsPageHeader
         title={t('settings.mcp.title')}
         description={t('settings.mcp.description')}
-        action={(
+        action={(<div className="flex flex-wrap items-center gap-2">
+          <Button variant="secondary" size="base" onClick={() => {
+            void mcpApi.configFiles(currentWorkDir).then(({ files }) => {
+              const userFile = files.find((file) => file.scope === 'user')
+              if (userFile) void getDesktopHost().shell.openPath(userFile.path)
+            })
+          }} title={t('settings.mcp.editConfigTooltip')}>
+            <span className="material-symbols-outlined text-[16px]">edit_document</span>
+            {t('settings.mcp.editConfig')}
+          </Button>
+          <Button variant="secondary" size="base" onClick={() => setView({ type: 'marketplace' })}>
+            <span className="material-symbols-outlined text-[16px]">storefront</span>
+            {t('settings.mcp.marketplace.browse')}
+          </Button>
           <Button size="base" onClick={beginCreate}>
             <span className="material-symbols-outlined text-[16px]">add</span>
             {t('settings.mcp.addServer')}
           </Button>
-        )}
+        </div>)}
       />
-
       {showListLoading ? (
         <LoadingState label={t('common.loading')} variant="dashed" size="lg" />
       ) : (
@@ -1149,11 +1638,12 @@ export function McpSettings() {
                     <div className="rounded-[28px] border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
                       {groupServers.map((server) => (
                         <ServerRow
-                          key={getMcpServerIdentityKey(server)}
+                          key={getServerIdentityKey(server)}
                           server={server}
-                          isBusy={busyServerKey === getMcpServerIdentityKey(server)}
+                          isBusy={busyServerKey === getServerIdentityKey(server)}
                           onOpen={() => beginEdit(server)}
                           onToggle={() => void handleToggle(server)}
+                          onRefresh={() => void handleRefresh(server)}
                           t={t}
                         />
                       ))}

@@ -10,6 +10,16 @@ export type PairingState = {
   createdAt: number | null
 }
 
+export type AdapterRuntimeStatus = {
+  platform: 'wechat'
+  state: 'starting' | 'connected' | 'rebind_required'
+  code?: 'session_expired'
+  generation: number
+  updatedAt: string
+}
+
+export type AdapterRuntimeStatuses = Partial<Record<'wechat', AdapterRuntimeStatus>>
+
 export type AdapterFileConfig = {
   serverUrl?: string
   defaultProjectDir?: string

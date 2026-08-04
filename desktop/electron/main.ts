@@ -7,10 +7,10 @@ import {
   isElectronIpcChannelAllowedForPetWindow,
   validateElectronIpcPayload,
 } from './ipc/capabilities'
-import { ElectronServerRuntime } from './services/serverRuntime'
+import { ElectronServerRuntime, type TunnelStartOptions } from './services/serverRuntime'
 import { appendHostDiagnostic, electronHostDiagnosticsFile, sanitizeHostDiagnostic } from './services/sidecarManager'
 import { openDialog, saveDialog } from './services/dialogs'
-import { openExternalUrl, openSystemPath, openSystemSettingsUrl } from './services/shell'
+import { openExternalUrl, openSystemPath, openSystemSettingsUrl, showItemInFolder } from './services/shell'
 import {
   notificationPermissionState,
   requestNotificationPermission,
@@ -232,6 +232,7 @@ function getServerRuntime() {
     desktopRoot: unpackedRoot(),
     appRoot: appRoot(),
     h5DistDir: path.join(unpackedRoot(), 'dist'),
+    appVersion: app.getVersion(),
     diagnosticsFile: electronHostDiagnosticsFile(process.env),
     resolveSystemProxy: (url) => session.defaultSession.resolveProxy(url),
   })
@@ -264,6 +265,7 @@ function getUpdaterService() {
     },
   }, {
     updateConfigPath: !smokeUpdater && app.isPackaged ? path.join(process.resourcesPath, 'app-update.yml') : undefined,
+    currentVersion: app.getVersion(),
   })
   return updaterService
 }
@@ -452,6 +454,7 @@ function registerIpcHandlers() {
   registerHandler(ELECTRON_IPC_CHANNELS.clipboardWriteText, (_event, payload) => clipboard.writeText(String(payload)))
   registerHandler(ELECTRON_IPC_CHANNELS.shellOpen, (_event, payload) => openExternalUrl(String(payload)))
   registerHandler(ELECTRON_IPC_CHANNELS.shellOpenPath, (_event, payload) => openSystemPath(String(payload)))
+  registerHandler(ELECTRON_IPC_CHANNELS.shellShowItemInFolder, (_event, payload) => showItemInFolder(String(payload)))
   registerHandler(ELECTRON_IPC_CHANNELS.traceOpenWindow, (_event, payload) => openTraceWindow(String(payload)))
   registerHandler(ELECTRON_IPC_CHANNELS.petsList, () => listCustomPets())
   registerHandler(ELECTRON_IPC_CHANNELS.petsCreateFromImage, async (event, payload) => {
@@ -672,6 +675,9 @@ function registerIpcHandlers() {
     app.quit()
   })
   registerHandler(ELECTRON_IPC_CHANNELS.adaptersRestartSidecar, () => getServerRuntime().restartAdaptersSidecars())
+  registerHandler(ELECTRON_IPC_CHANNELS.tunnelStart, (_event, payload) => getServerRuntime().startTunnel(payload as TunnelStartOptions))
+  registerHandler(ELECTRON_IPC_CHANNELS.tunnelStop, () => getServerRuntime().stopTunnel())
+  registerHandler(ELECTRON_IPC_CHANNELS.tunnelGetStatus, () => getServerRuntime().getTunnelStatus())
   registerHandler(ELECTRON_IPC_CHANNELS.zoomSet, (event, payload) => currentWindow(event).webContents.setZoomFactor(normalizeZoomFactor(payload)))
   registerHandler(ELECTRON_IPC_CHANNELS.appearanceSetApplied, (_event, payload) => {
     if (!isAppliedAppearance(payload)) return

@@ -19,13 +19,15 @@ import { sessionsApi, type SessionGitInfo } from '../../api/sessions'
 import { agentsApi } from '../../api/agents'
 import { PermissionModeSelector } from '../controls/PermissionModeSelector'
 import { ModelSelector, type ModelSelectorHandle } from '../controls/ModelSelector'
-import type { AttachmentRef } from '../../types/chat'
+import type { AttachmentRef, DisplayAttachmentRef } from '../../types/chat'
 import { AttachmentGallery } from './AttachmentGallery'
+import { ImageAnnotationModal } from './ImageAnnotationModal'
 import { ComposerDropOverlay } from './ComposerDropOverlay'
 import { ProjectContextChip } from '@/components/chat/ProjectContextChip'
 import { RepositoryLaunchControls } from '@/components/chat/RepositoryLaunchControls'
 import { FileSearchMenu, type FileSearchMenuHandle } from './FileSearchMenu'
 import { LocalSlashCommandPanel, type LocalSlashCommandName } from './LocalSlashCommandPanel'
+import { SkillPickerMenu, type SkillPickerHandle } from './SkillPickerMenu'
 import { getSlashCommandOptionId, SlashCommandMenu } from './SlashCommandMenu'
 import { ContextUsageIndicator } from './ContextUsageIndicator'
 import {
@@ -43,16 +45,20 @@ import { useMobileViewport } from '../../hooks/useMobileViewport'
 import { useElementWidth } from '../../hooks/useElementWidth'
 import { isDesktopRuntime } from '../../lib/desktopRuntime'
 import {
+  composerAttachmentToPayload,
   filesToComposerAttachments,
   getDataTransferFiles,
-  selectNativeFileAttachments,
   type ComposerAttachment,
 } from '../../lib/composerAttachments'
 import { useComposerFileDrop } from './useComposerFileDrop'
 import { shouldSubmitOnEnter } from './sendShortcut'
+import {
+  COMPOSER_PREFILL_EVENT,
+  type ComposerPrefillDetail,
+} from '../welcome/WelcomeTaskCards'
 import type { PermissionMode } from '../../types/settings'
 import { getSessionWorkspaceState } from '../../lib/sessionWorkspace'
-import { hasRunningSubagentTasks } from '../../lib/backgroundTasks'
+import { attachmentImageSource } from '../../lib/attachmentImages'
 
 type GitInfo = SessionGitInfo
 
@@ -125,7 +131,10 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   const [shellRef, shellWidth] = useElementWidth<HTMLDivElement>()
   const [input, setInput] = useState('')
   const [attachments, setAttachments] = useState<Attachment[]>([])
+  const [annotationTarget, setAnnotationTarget] = useState<Attachment | null>(null)
   const [plusMenuOpen, setPlusMenuOpen] = useState(false)
+  const [skillPickerOpen, setSkillPickerOpen] = useState(false)
+  const [pluginPickerOpen, setPluginPickerOpen] = useState(false)
   const [slashMenuOpen, setSlashMenuOpen] = useState(false)
   const [fileSearchOpen, setFileSearchOpen] = useState(false)
   const [localSlashPanel, setLocalSlashPanel] = useState<LocalSlashCommandName | null>(null)
@@ -138,6 +147,9 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   const [launchBranch, setLaunchBranch] = useState<string | null>(null)
   const [launchUseWorktree, setLaunchUseWorktree] = useState(false)
   const [launchReady, setLaunchReady] = useState(true)
+  const [editingQueuedId, setEditingQueuedId] = useState<string | null>(null)
+  const [editingQueuedText, setEditingQueuedText] = useState('')
+  const [queueCollapsed, setQueueCollapsed] = useState(false)
   const [launchTransitioning, setLaunchTransitioning] = useState(false)
   const [editingQueuedMessageId, setEditingQueuedMessageId] = useState<string | null>(null)
   const [editingQueuedMessageText, setEditingQueuedMessageText] = useState('')
@@ -149,6 +161,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   const plusMenuRef = useRef<HTMLDivElement>(null)
   const slashMenuRef = useRef<HTMLDivElement>(null)
   const fileSearchRef = useRef<FileSearchMenuHandle>(null)
+  const skillPickerRef = useRef<SkillPickerHandle>(null)
   const slashItemRefs = useRef<(HTMLElement | null)[]>([])
   const slashMenuId = useId()
   const previousActiveTabIdRef = useRef<string | null>(null)
@@ -171,6 +184,10 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     stopGeneration,
     clearComposerPrefill,
     clearComposerInsertion,
+    removeQueuedMessage,
+    clearMessageQueue,
+    updateQueuedMessage,
+    sendQueuedMessageNow,
     queueUserMessage,
     updateQueuedUserMessage,
     removeQueuedUserMessage,
@@ -179,6 +196,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   const activeTabId = useTabStore((s) => s.activeTabId)
   const sessionState = useChatStore((s) => activeTabId ? s.sessions[activeTabId] : undefined)
   const chatState = sessionState?.chatState ?? 'idle'
+  const messageQueue = sessionState?.messageQueue ?? []
   const slashCommands = sessionState?.slashCommands ?? []
   const composerPrefill = sessionState?.composerPrefill ?? null
   const composerInsertion = sessionState?.composerInsertion ?? null
@@ -186,6 +204,14 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   const runtimeSelection = useSessionRuntimeStore((state) =>
     activeTabId ? state.selections[activeTabId] : undefined,
   )
+  const coordinatorMode = useSessionRuntimeStore((state) =>
+    activeTabId ? state.coordinatorModes[activeTabId] ?? false : false,
+  )
+  const pipelineMode = useSessionRuntimeStore((state) =>
+    activeTabId ? state.pipelineModes[activeTabId] ?? 'normal' : 'normal',
+  )
+  const soloPipelineMode = pipelineMode === 'solo'
+  const rePipelineMode = pipelineMode === 're'
   const currentModel = useSettingsStore((state) => state.currentModel)
   const chatSendBehavior = useSettingsStore((state) => state.chatSendBehavior)
   const runtimeSelectionKey = runtimeSelection
@@ -221,7 +247,6 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
   const isMemberSession = !!memberInfo
   const isActive = chatState !== 'idle'
-  const hasRunningSubagents = hasRunningSubagentTasks(sessionState?.backgroundAgentTasks)
   const workspaceState = getSessionWorkspaceState(activeSession)
   const isWorkspaceMissing = workspaceState !== 'available'
   const hasWorkspaceReferences = !isMemberSession && workspaceReferences.length > 0
@@ -313,6 +338,29 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     }
   }, [saveComposerDraft])
 
+  // Listen for welcome-screen task-card clicks dispatched from ActiveSession's
+  // empty welcome state. The card click can't directly mutate this component's
+  // useState, so it dispatches a window CustomEvent that we apply here when
+  // the sessionId matches the active tab. EmptySession doesn't need this — it
+  // owns its own composer textarea and updates state in-place.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<ComposerPrefillDetail>).detail
+      if (!detail || typeof detail.text !== 'string') return
+      if (!activeTabId || detail.sessionId !== activeTabId) return
+      setComposerInput(detail.text)
+      requestAnimationFrame(() => {
+        const el = textareaRef.current
+        if (!el) return
+        el.focus()
+        const len = el.value.length
+        el.setSelectionRange(len, len)
+      })
+    }
+    window.addEventListener(COMPOSER_PREFILL_EVENT, handler as EventListener)
+    return () => window.removeEventListener(COMPOSER_PREFILL_EVENT, handler as EventListener)
+  }, [activeTabId, setComposerInput])
+
   useEffect(() => {
     textareaRef.current?.focus()
   }, [isActive])
@@ -327,6 +375,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
         name: attachment.name,
         type: attachment.type,
         mimeType: attachment.mimeType,
+        path: attachment.path,
         previewUrl: attachment.type === 'image' ? attachment.data : undefined,
         data: attachment.data,
       }))
@@ -470,11 +519,19 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   })
 
   useDismissable({
+    open: skillPickerOpen || pluginPickerOpen,
+    refs: [panelRef],
+    onDismiss: () => {
+      setSkillPickerOpen(false)
+      setPluginPickerOpen(false)
+    },
+  })
+
+  useDismissable({
     open: slashMenuOpen,
     refs: [slashMenuRef, textareaRef],
     onDismiss: () => setSlashMenuOpen(false),
   })
-
   useDismissable({
     open: !!localSlashPanel,
     refs: [slashMenuRef, textareaRef],
@@ -697,11 +754,27 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
         ? t('chat.contextReferencesOnly', { count: workspaceReferences.length })
         : ''
     )
-    const uploadAttachmentPayload: AttachmentRef[] = attachments.map((attachment) => ({
+    const uploadAttachmentPayload: AttachmentRef[] = attachments.some(
+      (attachment) => attachment.sourceFile,
+    )
+      ? await Promise.all(attachments.map(composerAttachmentToPayload))
+      : attachments.map((attachment) => ({
+          type: attachment.type,
+          name: attachment.name,
+          path: attachment.path,
+          data: attachment.data,
+          mimeType: attachment.mimeType,
+          lineStart: attachment.lineStart,
+          lineEnd: attachment.lineEnd,
+          note: attachment.note,
+          quote: attachment.quote,
+        }))
+    const visibleUploadAttachmentPayload: DisplayAttachmentRef[] = attachments.map((attachment) => ({
       type: attachment.type,
       name: attachment.name,
       path: attachment.path,
       data: attachment.data,
+      previewUrl: attachment.previewUrl,
       mimeType: attachment.mimeType,
       lineStart: attachment.lineStart,
       lineEnd: attachment.lineEnd,
@@ -720,8 +793,8 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
         note: reference.note,
         quote: reference.quote,
       }))
-    const visibleAttachmentPayload: AttachmentRef[] = [
-      ...uploadAttachmentPayload,
+    const visibleAttachmentPayload: DisplayAttachmentRef[] = [
+      ...visibleUploadAttachmentPayload,
       ...workspaceReferences.map((reference) => ({
         type: 'file' as const,
         name: reference.name,
@@ -821,6 +894,23 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
       }
     }
 
+    // Route navigation keys to the skill / plugin picker when it is open.
+    if (skillPickerOpen || pluginPickerOpen) {
+      const key = event.key
+      if (key === 'ArrowDown' || key === 'ArrowUp' || key === 'Enter' || key === 'Escape') {
+        event.preventDefault()
+        if (key === 'Escape') {
+          setSkillPickerOpen(false)
+          setPluginPickerOpen(false)
+          return
+        }
+        skillPickerRef.current?.handleKeyDown(event.nativeEvent)
+        return
+      }
+      // Other keys (typing) keep flowing to the textarea.
+      return
+    }
+
     if (slashMenuOpen && filteredCommands.length > 0) {
       if (event.key === 'ArrowDown') {
         event.preventDefault()
@@ -884,8 +974,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
       })
       .catch((error) => {
         console.warn('[attachments] Failed to read pasted files', error)
-      })
-  }
+      })  }
 
   const appendFiles = useCallback((files: FileList | File[]) => {
     void filesToComposerAttachments(files)
@@ -914,22 +1003,8 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
   const openAttachmentPicker = useCallback(() => {
     setPlusMenuOpen(false)
-    if (!isDesktopRuntime()) {
-      fileInputRef.current?.click()
-      return
-    }
-
-    void selectNativeFileAttachments()
-      .then((nativeAttachments) => {
-        if (nativeAttachments) {
-          if (nativeAttachments.length > 0) {
-            setComposerAttachments((prev) => [...prev, ...nativeAttachments])
-          }
-          return
-        }
-        fileInputRef.current?.click()
-      })
-  }, [setComposerAttachments])
+    fileInputRef.current?.click()
+  }, [])
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (isMemberSession) return
@@ -943,6 +1018,23 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   const removeAttachment = (id: string) => {
     setComposerAttachments((prev) => prev.filter((attachment) => attachment.id !== id))
     if (activeTabId) removeWorkspaceReference(activeTabId, id)
+    if (annotationTarget?.id === id) setAnnotationTarget(null)
+  }
+
+  const saveAnnotatedImage = (dataUrl: string) => {
+    if (!annotationTarget?.id) return
+    setComposerAttachments((prev) => prev.map((attachment) => {
+      if (attachment.id !== annotationTarget.id) return attachment
+      return {
+        ...attachment,
+        name: attachment.name.replace(/(\.[^.]+)?$/, '-annotated.png'),
+        path: undefined,
+        data: dataUrl,
+        previewUrl: dataUrl,
+        mimeType: 'image/png',
+      }
+    }))
+    setAnnotationTarget(null)
   }
 
   const startEditingQueuedMessage = (messageId: string, content: string) => {
@@ -979,6 +1071,57 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     })
   }
 
+  // Open the inline skill picker menu from the + menu. The user picks a skill
+  // and we insert a "@skill:<name> " token into the composer at the cursor — a
+  // visible reference the agent can read as "use this skill, then …".
+  const openSkillPicker = () => {
+    if (isMemberSession) return
+    setPlusMenuOpen(false)
+    setSlashMenuOpen(false)
+    setFileSearchOpen(false)
+    setLocalSlashPanel(null)
+    setPluginPickerOpen(false)
+    setSkillPickerOpen(true)
+  }
+
+  // Same idea for plugins; "@plugin:<name> " tells the agent which plugin to use.
+  const openPluginPicker = () => {
+    if (isMemberSession) return
+    setPlusMenuOpen(false)
+    setSlashMenuOpen(false)
+    setFileSearchOpen(false)
+    setLocalSlashPanel(null)
+    setSkillPickerOpen(false)
+    setPluginPickerOpen(true)
+  }
+
+  const insertReferenceToken = (token: string) => {
+    const el = textareaRef.current
+    const cursorPos = el?.selectionStart ?? input.length
+    const before = input.slice(0, cursorPos)
+    const after = input.slice(cursorPos)
+    const needsLeadingSpace = before.length > 0 && !/\s$/.test(before)
+    const needsTrailingSpace = after.length > 0 && !/^\s/.test(after)
+    const insertion = `${needsLeadingSpace ? ' ' : ''}${token}${needsTrailingSpace ? ' ' : ' '}`
+    const next = `${before}${insertion}${after}`
+    const nextCursor = before.length + insertion.length
+    setComposerInput(next)
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus()
+      textareaRef.current?.setSelectionRange(nextCursor, nextCursor)
+    })
+  }
+
+  const handlePickSkill = (skillName: string) => {
+    insertReferenceToken(`@skill:${skillName}`)
+    setSkillPickerOpen(false)
+  }
+
+  const handlePickPlugin = (pluginName: string) => {
+    insertReferenceToken(`@plugin:${pluginName}`)
+    setPluginPickerOpen(false)
+  }
+
   const composerPlaceholder =
     isHeroComposer
       ? t('empty.placeholder')
@@ -992,6 +1135,11 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
   const addFilesLabel = isHeroComposer ? t('empty.addFiles') : t('chat.addFiles')
   const slashCommandsLabel = isHeroComposer ? t('empty.slashCommands') : t('chat.slashCommands')
+  const skillsLabel = t('chat.openSkills')
+  const pluginsLabel = t('chat.openPlugins')
+  const coordinatorModeLabel = t('chat.coordinatorMode')
+  const soloPipelineModeLabel = t('chat.soloPipelineMode')
+  const rePipelineModeLabel = t('chat.rePipelineMode')
 
   return (
     <div
@@ -1002,9 +1150,8 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
         isHeroComposer
           ? `bg-[var(--color-surface)] ${isMobileComposer ? 'px-4 pb-3' : 'px-8 pb-4'}`
           : compact
-            ? `border-t border-[var(--color-border)] bg-[var(--color-surface)] ${isMobileComposer ? 'px-3 pb-[calc(env(safe-area-inset-bottom)+10px)] pt-2' : 'px-3 py-3'}`
-            : `bg-[var(--color-surface)] ${isMobileComposer ? 'px-3 pb-[calc(env(safe-area-inset-bottom)+10px)] pt-2' : 'px-4 py-4'}`
-      }
+            ? `border-t border-[var(--color-border)]/70 bg-[var(--color-surface)] ${isMobileComposer ? 'mobile-composer-shell px-3 pb-[calc(env(safe-area-inset-bottom)+10px)] pt-2' : 'px-3 py-3'}`
+            : `bg-[var(--color-surface)] ${isMobileComposer ? 'mobile-composer-shell px-3 pb-[calc(env(safe-area-inset-bottom)+10px)] pt-2' : 'px-4 py-4'}`      }
     >
       <div
         className={
@@ -1017,6 +1164,111 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
               : `${isMobileComposer ? 'mx-0 max-w-none' : 'mx-auto max-w-[900px]'}`
         }
       >
+        {!isMemberSession && messageQueue.length > 0 && (
+          <div className="mb-2 overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)]">
+            <button
+              type="button"
+              onClick={() => setQueueCollapsed((v) => !v)}
+              className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left"
+            >
+              <span className="flex items-center gap-1.5 text-xs font-semibold text-[var(--color-text-secondary)]">
+                {isActive && (
+                  <span className="material-symbols-outlined animate-spin text-[14px] text-[var(--color-brand)]">progress_activity</span>
+                )}
+                {t('chat.queueTitle')}
+                <span className="rounded-full bg-[var(--color-surface-container-high)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-text-tertiary)]">
+                  {messageQueue.length}
+                </span>
+              </span>
+              <span className="flex items-center gap-1">
+                <span
+                  role="button"
+                  tabIndex={0}
+                  onClick={(e) => { e.stopPropagation(); activeTabId && clearMessageQueue(activeTabId) }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); activeTabId && clearMessageQueue(activeTabId) } }}
+                  className="mr-1 text-[11px] font-normal text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-text-secondary)] hover:underline"
+                >
+                  {t('chat.clearQueue')}
+                </span>
+                <span className="material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)]">
+                  {queueCollapsed ? 'expand_less' : 'expand_more'}
+                </span>
+              </span>
+            </button>
+            {!queueCollapsed && (
+              <div className="flex max-h-[168px] flex-col gap-1 overflow-y-auto px-2 pb-2">
+                {messageQueue.map((queued, index) => {
+                  const isEditing = editingQueuedId === queued.id
+                  const commitEdit = () => {
+                    const trimmed = editingQueuedText.trim()
+                    if (activeTabId && trimmed) {
+                      updateQueuedMessage(activeTabId, queued.id, trimmed)
+                    }
+                    setEditingQueuedId(null)
+                    setEditingQueuedText('')
+                  }
+                  return (
+                    <div
+                      key={queued.id}
+                      className="group flex items-center gap-2 rounded-md bg-[var(--color-surface)] px-2 py-1.5"
+                    >
+                      <span className="shrink-0 text-[10px] font-mono text-[var(--color-text-tertiary)]">{index + 1}.</span>
+                      {isEditing ? (
+                        <input
+                          autoFocus
+                          value={editingQueuedText}
+                          onChange={(e) => setEditingQueuedText(e.target.value)}
+                          onBlur={commitEdit}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') { e.preventDefault(); commitEdit() }
+                            else if (e.key === 'Escape') { e.preventDefault(); setEditingQueuedId(null); setEditingQueuedText('') }
+                          }}
+                          className="min-w-0 flex-1 rounded border border-[var(--color-border-focus)] bg-[var(--color-surface)] px-1.5 py-0.5 text-xs text-[var(--color-text-primary)] outline-none"
+                        />
+                      ) : (
+                        <span className="min-w-0 flex-1 truncate text-xs text-[var(--color-text-primary)]">
+                          {queued.displayContent || queued.content}
+                        </span>
+                      )}
+                      {!isEditing && (
+                        <button
+                          type="button"
+                          onClick={() => activeTabId && sendQueuedMessageNow(activeTabId, queued.id)}
+                          aria-label={t('chat.sendNow')}
+                          title={t('chat.sendNow')}
+                          className="flex shrink-0 items-center justify-center rounded p-0.5 text-[var(--color-text-tertiary)] opacity-0 transition-[color,background-color,opacity] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:opacity-100 group-hover:opacity-100"
+                        >
+                          <span className="material-symbols-outlined text-[16px]">send</span>
+                        </button>
+                      )}
+                      {!isEditing && (
+                        <button
+                          type="button"
+                          onClick={() => { setEditingQueuedId(queued.id); setEditingQueuedText(queued.displayContent || queued.content) }}
+                          aria-label={t('chat.editQueued')}
+                          title={t('chat.editQueued')}
+                          className="flex shrink-0 items-center justify-center rounded p-0.5 text-[var(--color-text-tertiary)] opacity-0 transition-[color,background-color,opacity] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:opacity-100 group-hover:opacity-100"
+                        >
+                          <span className="material-symbols-outlined text-[16px]">edit</span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => activeTabId && removeQueuedMessage(activeTabId, queued.id)}
+                        aria-label={t('chat.removeFromQueue')}
+                        title={t('chat.removeFromQueue')}
+                        className="flex shrink-0 items-center justify-center rounded p-0.5 text-[var(--color-text-tertiary)] opacity-0 transition-[color,background-color,opacity] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-error)] focus-visible:opacity-100 group-hover:opacity-100"
+                      >
+                        <span className="material-symbols-outlined text-[16px]">close</span>
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
         <div
           ref={panelRef}
           data-testid="chat-input-panel"
@@ -1031,9 +1283,8 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
             // line below — so nothing butts against the panel any more.
             ? `glass-panel glass-panel--composer relative flex flex-col gap-3 overflow-visible rounded-[var(--radius-2xl)] p-4 transition-colors ${isDragActive ? 'composer-drop-target-active' : ''}`
             : compact
-              ? `glass-panel glass-panel--composer relative overflow-visible rounded-[var(--radius-2xl)] p-3 transition-colors ${isDragActive ? 'composer-drop-target-active' : ''}`
-              : `glass-panel glass-panel--composer relative overflow-visible rounded-[var(--radius-2xl)] transition-colors ${isMobileComposer ? 'p-3' : 'p-4'} ${isDragActive ? 'composer-drop-target-active' : ''}`}
-          {...dragHandlers}
+              ? `glass-panel glass-panel--composer relative overflow-visible rounded-[var(--radius-2xl)] p-3 transition-colors ${isMobileComposer ? 'mobile-composer-panel' : ''} ${isDragActive ? 'composer-drop-target-active' : ''}`
+              : `glass-panel glass-panel--composer relative overflow-visible rounded-[var(--radius-2xl)] transition-colors ${isMobileComposer ? 'p-3' : 'p-4'} ${isMobileComposer ? 'mobile-composer-panel' : ''} ${isDragActive ? 'composer-drop-target-active' : ''}`}          {...dragHandlers}
         >
           {isDragActive && (
             <ComposerDropOverlay
@@ -1089,6 +1340,25 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
                     textareaRef.current?.setSelectionRange(newCursorPos, newCursorPos)
                   })
                 }
+              }}
+            />
+          )}
+
+          {!isMemberSession && (skillPickerOpen || pluginPickerOpen) && (
+            <SkillPickerMenu
+              ref={skillPickerRef}
+              mode={skillPickerOpen ? 'skill' : 'plugin'}
+              cwd={activeLaunchWorkDir || resolvedWorkDir || undefined}
+              onPick={(name) => {
+                if (skillPickerOpen) {
+                  handlePickSkill(name)
+                } else {
+                  handlePickPlugin(name)
+                }
+              }}
+              onClose={() => {
+                setSkillPickerOpen(false)
+                setPluginPickerOpen(false)
               }}
             />
           )}
@@ -1226,10 +1496,10 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
           {composerAttachments.length > 0 && (
             isHeroComposer ? (
-              <AttachmentGallery attachments={composerAttachments} variant="composer" onRemove={removeAttachment} />
+              <AttachmentGallery attachments={composerAttachments} variant="composer" onRemove={removeAttachment} onAnnotate={(attachment) => setAnnotationTarget(attachment as Attachment)} />
             ) : (
               <div className="px-3 pt-3">
-                <AttachmentGallery attachments={composerAttachments} variant="composer" onRemove={removeAttachment} />
+                <AttachmentGallery attachments={composerAttachments} variant="composer" onRemove={removeAttachment} onAnnotate={(attachment) => setAnnotationTarget(attachment as Attachment)} />
               </div>
             )
           )}
@@ -1281,7 +1551,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
               // its flex row; this one is a plain block child and was sitting
               // 18px above the divider where the hero sits 12px.
               className={`block w-full resize-none bg-transparent text-sm leading-relaxed text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] disabled:opacity-50 ${
-                useCompactChrome ? 'py-1.5' : 'py-2'
+                isMobileComposer ? 'mobile-composer-textarea min-h-[44px] py-2.5' : useCompactChrome ? 'py-1.5' : 'py-2'
               }`}
             />
           )}
@@ -1305,12 +1575,12 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
             isHeroComposer
               ? 'pt-3'
               : useCompactChrome
-                ? `mt-2 -mx-3 -mb-3 px-2.5 py-2 ${isMobileComposer ? 'gap-1' : 'gap-2'}`
+                ? `mt-2 -mx-3 -mb-3 px-2.5 py-2 ${isMobileComposer ? 'mobile-composer-toolbar gap-1' : 'gap-2'}`
                 : 'mt-3 pt-3'
           }`}>
             <div
               data-testid="chat-input-toolbar-leading"
-              className={`flex min-w-0 items-center ${isMobileComposer ? 'shrink-0 gap-1' : 'gap-2'}`}
+              className={`flex min-w-0 items-center ${isMobileComposer ? 'mobile-composer-toolbar__tools shrink-0 gap-1' : 'gap-2'}`}
             >
               {!isMemberSession && (
                 <>
@@ -1347,6 +1617,71 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
                           <span className="w-[24px] text-center text-[18px] font-bold text-[var(--color-text-secondary)]">/</span>
                           <span className="text-sm text-[var(--color-text-primary)]">{slashCommandsLabel}</span>
                         </button>
+                        <button
+                          onClick={openSkillPicker}
+                          className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
+                        >
+                          <span className="material-symbols-outlined text-[18px] text-[var(--color-text-secondary)]">auto_awesome</span>
+                          <span className="text-sm text-[var(--color-text-primary)]">{skillsLabel}</span>
+                        </button>
+                        <button
+                          onClick={openPluginPicker}
+                          className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
+                        >
+                          <span className="material-symbols-outlined text-[18px] text-[var(--color-text-secondary)]">extension</span>
+                          <span className="text-sm text-[var(--color-text-primary)]">{pluginsLabel}</span>
+                        </button>
+                        {activeTabId && (
+                          <button
+                            onClick={() => {
+                              useChatStore.getState().setSessionCoordinatorMode(activeTabId, !coordinatorMode)
+                              setPlusMenuOpen(false)
+                            }}
+                            className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
+                          >
+                            <span className={`material-symbols-outlined text-[18px] ${coordinatorMode ? 'text-[var(--color-primary)]' : 'text-[var(--color-text-secondary)]'}`}>hub</span>
+                            <span className="flex-1 text-sm text-[var(--color-text-primary)]">{coordinatorModeLabel}</span>
+                            {coordinatorMode && (
+                              <span className="material-symbols-outlined text-[18px] text-[var(--color-primary)]">check</span>
+                            )}
+                          </button>
+                        )}
+                        {activeTabId && (
+                          <button
+                            onClick={() => {
+                              useChatStore.getState().setSessionPipelineMode(
+                                activeTabId,
+                                soloPipelineMode ? 'normal' : 'solo',
+                              )
+                              setPlusMenuOpen(false)
+                            }}
+                            className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
+                          >
+                            <span className={`material-symbols-outlined text-[18px] ${soloPipelineMode ? 'text-[var(--color-primary)]' : 'text-[var(--color-text-secondary)]'}`}>linear_scale</span>
+                            <span className="flex-1 text-sm text-[var(--color-text-primary)]">{soloPipelineModeLabel}</span>
+                            {soloPipelineMode && (
+                              <span className="material-symbols-outlined text-[18px] text-[var(--color-primary)]">check</span>
+                            )}
+                          </button>
+                        )}
+                        {activeTabId && (
+                          <button
+                            onClick={() => {
+                              useChatStore.getState().setSessionPipelineMode(
+                                activeTabId,
+                                rePipelineMode ? 'normal' : 're',
+                              )
+                              setPlusMenuOpen(false)
+                            }}
+                            className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
+                          >
+                            <span className={`material-symbols-outlined text-[18px] ${rePipelineMode ? 'text-[var(--color-primary)]' : 'text-[var(--color-text-secondary)]'}`}>troubleshoot</span>
+                            <span className="flex-1 text-sm text-[var(--color-text-primary)]">{rePipelineModeLabel}</span>
+                            {rePipelineMode && (
+                              <span className="material-symbols-outlined text-[18px] text-[var(--color-primary)]">check</span>
+                            )}
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>
@@ -1385,8 +1720,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
             <div
               data-testid="chat-input-toolbar-trailing"
-              className={`flex min-w-0 items-center ${isMobileComposer ? 'flex-1 justify-end gap-1' : 'shrink-0 gap-2'}`}
-            >
+              className={`flex min-w-0 items-center ${isMobileComposer ? 'mobile-composer-toolbar__actions flex-1 justify-end gap-1' : 'gap-2'}`}            >
               {!isMemberSession && activeTabId && (
                 <ContextUsageIndicator
                   sessionId={activeTabId}
@@ -1395,10 +1729,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
                   runtimeSelectionKey={runtimeSelectionKey}
                   fallbackModelLabel={runtimeModelLabel}
                   compact={useCompactControls}
-                  refreshNonce={
-                    (sessionState?.compactCount ?? 0) +
-                    (sessionState?.runtimeConfigReadyCount ?? 0)
-                  }
+                  refreshNonce={sessionState?.compactCount ?? 0}
                 />
               )}
               {!isMemberSession && activeTabId && (
@@ -1410,22 +1741,6 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
                   fluid={isMobileComposer}
                 />
               )}
-              {!isMemberSession && !isActive && hasRunningSubagents ? (
-                <Button
-                  variant="danger"
-                  size="base"
-                  shape="circle"
-                  onClick={() => stopGeneration(activeTabId!)}
-                  aria-label={t('common.stop')}
-                  title={t('chat.stopTitle')}
-                  className={`shrink-0 ${isMobileComposer ? 'h-11 w-11' : ''}`}
-                  icon={(
-                    <span className="material-symbols-outlined text-[18px]">
-                      stop
-                    </span>
-                  )}
-                />
-              ) : null}
               {/* Same component, shape and icon as EmptySession's send button.
                   The two rendered mirror images of each other until it was
                   spotted in a walkthrough — the arrow led here and trailed
@@ -1468,6 +1783,13 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
         </div>
 
         <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} />
+
+        <ImageAnnotationModal
+          open={!!annotationTarget}
+          image={annotationTarget ? { src: attachmentImageSource(annotationTarget) ?? '', name: annotationTarget.name } : null}
+          onClose={() => setAnnotationTarget(null)}
+          onSave={saveAnnotatedImage}
+        />
 
         {!isMemberSession && !showLocationInToolbar && (
           <div className={useCompactControls ? 'mt-2 flex min-w-0 px-1' : 'mt-3 px-1'}>

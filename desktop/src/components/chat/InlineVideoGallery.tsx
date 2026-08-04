@@ -1,33 +1,7 @@
 import { useMemo } from 'react'
 import { extractAssistantOutputTargets } from '../../lib/assistantOutputTargets'
-import { isAbsoluteLocalPath, localFileUrl, previewFsUrl } from '../../lib/handlePreviewLink'
+import { previewFsUrl } from '../../lib/handlePreviewLink'
 import { getServerBaseUrl } from '../../lib/desktopRuntime'
-
-const VIDEO_EXTENSIONS = /\.(mp4|webm|mov|m4v)$/i
-
-function filePathComparisonKey(filePath: string): string {
-  const normalized = filePath.trim().replaceAll('\\', '/')
-  const isWindowsPath = /^[A-Za-z]:\//.test(normalized) || normalized.startsWith('//')
-  return isWindowsPath ? normalized.toLocaleLowerCase('en-US') : normalized
-}
-
-function targetPathComparisonKey(filePath: string, workDir?: string | null): string {
-  if (isAbsoluteLocalPath(filePath) || !workDir) return filePathComparisonKey(filePath)
-  return filePathComparisonKey(
-    `${workDir.replace(/[\\/]+$/, '')}/${filePath.replace(/^[\\/]+/, '')}`,
-  )
-}
-
-function isMentionedAbsoluteVideo(text: string, filePath: string): boolean {
-  if (!isAbsoluteLocalPath(filePath) || !VIDEO_EXTENSIONS.test(filePath)) return false
-
-  const normalizedPath = filePath.replaceAll('\\', '/')
-  const normalizedText = text.replaceAll('\\', '/')
-  const isWindowsPath = /^[A-Za-z]:\//.test(normalizedPath)
-  return isWindowsPath
-    ? normalizedText.toLocaleLowerCase('en-US').includes(normalizedPath.toLocaleLowerCase('en-US'))
-    : normalizedText.includes(normalizedPath)
-}
 
 type GalleryVideo = {
   src: string
@@ -43,58 +17,31 @@ type Props = {
    */
   sessionId?: string
   workDir?: string | null
-  changedFiles?: string[]
 }
 
 /**
  * Renders AI-output video paths (mp4/webm/mov/m4v) inline, mirroring
- * {@link InlineImageGallery}. Relative workspace paths use `/preview-fs`; absolute
- * paths confirmed by the turn checkpoint use `/local-file`. Videos are large, so
- * we use a vertical stack, `preload="metadata"`, and never autoplay.
+ * {@link InlineImageGallery}. Only relative workspace paths are surfaced (via the
+ * sandboxed target extractor + `/preview-fs`); videos are large so we use a
+ * vertical stack, `preload="metadata"`, and never autoplay.
  */
-export function InlineVideoGallery({ text, sessionId, workDir, changedFiles }: Props) {
+export function InlineVideoGallery({ text, sessionId, workDir }: Props) {
   const videos = useMemo<GalleryVideo[]>(() => {
     if (!sessionId) {
       return []
     }
 
-    // An empty changedFiles only means "no TRACKED file changed" (Bash writes are
-    // invisible to the checkpoint), so it is treated as "no evidence" and falls
-    // back to text-only extraction instead of filtering every mention away.
-    const changedFileEvidence =
-      changedFiles !== undefined && changedFiles.length === 0 ? undefined : changedFiles
-
     const base = getServerBaseUrl()
-    const targets = extractAssistantOutputTargets(text, { workDir, changedFiles: changedFileEvidence }).filter(
+    const targets = extractAssistantOutputTargets(text, { workDir }).filter(
       (target) => target.kind === 'video',
     )
-    const representedPathKeys = new Set(
-      targets.map((target) =>
-        targetPathComparisonKey(target.normalizedPath ?? target.href, workDir)
-      ),
-    )
+
     const seenSrc = new Set<string>()
     const result: GalleryVideo[] = []
 
-    for (const filePath of changedFiles ?? []) {
-      if (
-        !isMentionedAbsoluteVideo(text, filePath) ||
-        representedPathKeys.has(filePathComparisonKey(filePath))
-      ) {
-        continue
-      }
-
-      const src = localFileUrl(base, filePath)
-      if (seenSrc.has(src)) continue
-      seenSrc.add(src)
-      result.push({ src, name: filePath.split(/[\\/]/).pop() ?? '' })
-    }
-
     for (const target of targets) {
       const relPath = target.normalizedPath ?? target.href
-      const src = isAbsoluteLocalPath(relPath)
-        ? localFileUrl(base, relPath)
-        : previewFsUrl(base, sessionId, relPath)
+      const src = previewFsUrl(base, sessionId, relPath)
       if (seenSrc.has(src)) {
         continue
       }
@@ -103,7 +50,7 @@ export function InlineVideoGallery({ text, sessionId, workDir, changedFiles }: P
     }
 
     return result
-  }, [changedFiles, sessionId, text, workDir])
+  }, [sessionId, text, workDir])
 
   if (videos.length === 0) return null
 

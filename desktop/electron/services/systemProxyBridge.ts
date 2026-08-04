@@ -61,7 +61,7 @@ export class SystemProxyBridge implements SystemProxyBridgeLike {
   private server: http.Server | null = null
   private startPromise: Promise<string> | null = null
   private lifecycleGeneration = 0
-  private readonly clientSockets = new Set<net.Socket>()
+  private readonly clientSockets = new Set<Duplex>()
   private readonly outboundSockets = new Set<Duplex>()
 
   constructor(private readonly resolveSystemProxy: (url: string) => Promise<string>) {}
@@ -97,15 +97,13 @@ export class SystemProxyBridge implements SystemProxyBridgeLike {
       void this.handleHttpRequest(request, response)
     })
     server.on('connect', (request, clientSocket, head) => {
+      this.trackClientSocket(clientSocket)
       void this.handleConnect(request, clientSocket, head)
     })
     server.on('clientError', (_error, socket) => {
       socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n')
     })
-    server.on('connection', socket => {
-      this.clientSockets.add(socket)
-      socket.once('close', () => this.clientSockets.delete(socket))
-    })
+    server.on('connection', socket => this.trackClientSocket(socket))
     this.server = server
 
     try {
@@ -240,6 +238,12 @@ export class SystemProxyBridge implements SystemProxyBridgeLike {
   private async resolveRules(target: URL): Promise<SystemProxyRule[]> {
     if (isLoopbackHostname(target.hostname)) return [{ type: 'direct' }]
     return parseSystemProxyRules(await this.resolveSystemProxy(target.href))
+  }
+
+  private trackClientSocket(socket: Duplex): void {
+    if (this.clientSockets.has(socket)) return
+    this.clientSockets.add(socket)
+    socket.once('close', () => this.clientSockets.delete(socket))
   }
 
   private trackOutboundSocket(socket: Duplex): void {

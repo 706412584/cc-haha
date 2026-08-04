@@ -11,6 +11,7 @@ export const ELECTRON_IPC_CHANNELS = {
   clipboardWriteText: 'desktop:clipboard:write-text',
   shellOpen: 'desktop:shell:open',
   shellOpenPath: 'desktop:shell:open-path',
+  shellShowItemInFolder: 'desktop:shell:show-item-in-folder',
   traceOpenWindow: 'desktop:trace:open-window',
   petsList: 'desktop:pets:list',
   petsCreateFromImage: 'desktop:pets:create-from-image',
@@ -63,6 +64,9 @@ export const ELECTRON_IPC_CHANNELS = {
   appModePrepareRestart: 'desktop:app-mode:prepare-restart',
   appModeRestart: 'desktop:app-mode:restart',
   adaptersRestartSidecar: 'desktop:adapters:restart-sidecar',
+  tunnelStart: 'desktop:tunnel:start',
+  tunnelStop: 'desktop:tunnel:stop',
+  tunnelGetStatus: 'desktop:tunnel:get-status',
   zoomSet: 'desktop:zoom:set',
   appearanceSetApplied: 'desktop:appearance:set-applied',
 } as const

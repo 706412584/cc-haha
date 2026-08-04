@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   setActiveTab: vi.fn(),
   openTab: vi.fn(),
   openTraceTab: vi.fn(),
+  openOfficeTab: vi.fn(),
+  officeLifecycle: [] as string[],
   getDesktopUiPreferences: vi.fn(),
   updatePetPreferences: vi.fn(),
   tabState: {
@@ -62,6 +64,7 @@ vi.mock('../../stores/tabStore', () => {
     tabs: mocks.tabState.tabs,
     openTab: mocks.openTab,
     openTraceTab: mocks.openTraceTab,
+    openOfficeTab: mocks.openOfficeTab,
     setActiveTab: mocks.setActiveTab,
   })
   useTabStore.setState = (next: { activeTabId?: string | null }) => {
@@ -119,6 +122,24 @@ vi.mock('../../pages/TraceSession', () => ({
   ),
 }))
 
+vi.mock('../../pages/AgentOffice', async () => {
+  const { useEffect } = await import('react')
+  return {
+    AgentOfficeModal: ({ sessionId, onClose, onExpand }: { sessionId: string; onClose: () => void; onExpand: () => void }) => {
+      useEffect(() => () => {
+        mocks.officeLifecycle.push('unmounted')
+      }, [])
+      return (
+        <div role="dialog" aria-label="Agent Office">
+          <span>office:{sessionId}</span>
+          <button type="button" onClick={onExpand}>Expand Office</button>
+          <button type="button" onClick={onClose}>Close Office</button>
+        </div>
+      )
+    },
+  }
+})
+
 vi.mock('@/components/layout/Toast', () => ({
   ToastContainer: () => null,
 }))
@@ -171,13 +192,19 @@ describe('AppShell boot flow', () => {
     })
     mocks.openTab.mockReset()
     mocks.openTraceTab.mockReset()
+    mocks.openOfficeTab.mockReset()
+    mocks.openOfficeTab.mockImplementation(() => {
+      mocks.officeLifecycle.push('opened')
+      return '__office__session-1'
+    })
+    mocks.officeLifecycle = []
     mocks.setActiveTab.mockImplementation((sessionId: string) => {
       mocks.tabState.activeTabId = sessionId
     })
     mocks.tabState.activeTabId = null
     mocks.tabState.tabs = []
     useSessionStore.setState({ sessions: [], activeSessionId: null, isLoading: false, error: null })
-    useUIStore.setState({ sidebarOpen: true })
+    useUIStore.setState({ sidebarOpen: true, activeModal: null })
     Reflect.deleteProperty(window, 'desktopHost')
     window.history.pushState({}, '', '/')
   })
@@ -191,6 +218,34 @@ describe('AppShell boot flow', () => {
     expect(screen.getByText('tabs loaded')).toBeInTheDocument()
     expect(screen.getByText('content loaded')).toBeInTheDocument()
     expect(screen.getByText('updates loaded')).toBeInTheDocument()
+  })
+
+  it('unmounts the Office modal before expanding it into a tab', async () => {
+    mocks.isTauriRuntime = true
+    useUIStore.setState({ activeModal: 'agentOffice:session-1' })
+
+    render(<AppShell />)
+
+    expect(await screen.findByText('office:session-1')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Office' }))
+
+    await waitFor(() => {
+      expect(mocks.openOfficeTab).toHaveBeenCalledWith('session-1', 'agentOffice.title')
+    })
+    expect(useUIStore.getState().activeModal).toBeNull()
+    expect(mocks.officeLifecycle).toEqual(['unmounted', 'opened'])
+  })
+
+  it('uses the mobile shell when browser validation forces mobile mode', async () => {
+    window.history.pushState({}, '', '/?forceMobile=1')
+
+    render(<AppShell />)
+
+    await screen.findByText('content loaded')
+    expect(screen.queryByText('tabs loaded')).not.toBeInTheDocument()
+    expect(screen.getByTestId('mobile-settings-button')).toBeInTheDocument()
+    expect(screen.getByTestId('mobile-session-header')).toHaveTextContent('empty.title')
+    expect(screen.getByTestId('mobile-session-header')).not.toHaveTextContent('settings.title')
   })
 
   it('keeps the last real session as Settings project context', async () => {
@@ -583,13 +638,30 @@ describe('AppShell boot flow', () => {
     expect(header).toHaveTextContent('Analyze recent commits')
     expect(header).toHaveTextContent('session.active')
     expect(header).toHaveTextContent('session.messages')
-    // 44px — the hamburger is the primary mobile navigation target, and the
-    // platform minimum for primary touch targets is 44, not the 40 it shipped
-    // at (IconButton's own size doc had the two tiers reversed).
+    // 44px — these are primary mobile navigation targets.
     expect(screen.getByTestId('mobile-sidebar-toggle')).toHaveClass('h-11', 'w-11')
+    expect(screen.getByTestId('mobile-settings-button')).toBeInTheDocument()
   })
 
-  it('keeps browser H5 mobile on chat tabs when settings was restored as active', async () => {
+  it('opens settings from the mobile app header without rendering desktop tabs', async () => {
+    mocks.isMobile = true
+    mocks.tabState.activeTabId = 'session-mobile'
+    mocks.tabState.tabs = [
+      { sessionId: 'session-mobile', title: 'Existing session', type: 'session', status: 'idle' },
+    ]
+
+    render(<AppShell />)
+
+    await screen.findByText('content loaded')
+    expect(screen.queryByText('tabs loaded')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('mobile-settings-button'))
+
+    expect(mocks.openTab).toHaveBeenCalledWith('__settings__', 'settings.title', 'settings')
+    expect(useUIStore.getState().sidebarOpen).toBe(false)
+  })
+
+  it('allows browser H5 mobile to stay on the settings tab', async () => {
     mocks.isMobile = true
     mocks.tabState.activeTabId = '__settings__'
     mocks.tabState.tabs = [
@@ -601,8 +673,7 @@ describe('AppShell boot flow', () => {
 
     await screen.findByText('content loaded')
     expect(screen.queryByText('tabs loaded')).not.toBeInTheDocument()
-    await waitFor(() => {
-      expect(mocks.setActiveTab).toHaveBeenCalledWith('session-1')
-    })
+    expect(screen.getByTestId('mobile-session-header')).toHaveTextContent('Settings')
+    expect(mocks.setActiveTab).not.toHaveBeenCalled()
   })
 })

@@ -32,8 +32,7 @@ export type ExtractAssistantOutputTargetOptions = {
    * file is corrected to the actual changed path (so `index.html` resolves to the
    * `todo-app/index.html` that was really written), and a mentioned file that the
    * turn never changed is dropped instead of pointing at a non-existent path.
-   * Localhost URLs are unaffected. Omitted → fall back to text-only behavior;
-   * an empty array confirms the turn changed no files, so file targets are dropped.
+   * Localhost URLs are unaffected. Omitted/empty → fall back to text-only behavior.
    */
   changedFiles?: string[]
 }
@@ -232,10 +231,7 @@ export function extractAssistantOutputTargets(
   })
 
   for (const candidate of candidates) {
-    if (options.changedFiles === undefined && results.length >= limit) {
-      break
-    }
-    if (seen.has(candidate.key)) {
+    if (results.length >= limit || seen.has(candidate.key)) {
       continue
     }
 
@@ -243,8 +239,8 @@ export function extractAssistantOutputTargets(
     results.push(candidate.target)
   }
 
-  if (options.changedFiles !== undefined) {
-    return reconcileTargetsWithChangedFiles(results, options.changedFiles, workDir, limit)
+  if (options.changedFiles && options.changedFiles.length > 0) {
+    return reconcileTargetsWithChangedFiles(results, options.changedFiles, workDir)
   }
 
   return results
@@ -261,17 +257,13 @@ function reconcileTargetsWithChangedFiles(
   targets: AssistantOutputTarget[],
   changedFiles: string[],
   workDir: string | null,
-  limit: number,
 ): AssistantOutputTarget[] {
-  if (limit <= 0) return []
-
   const out: AssistantOutputTarget[] = []
   const seen = new Set<string>()
 
   for (const target of targets) {
     if (target.kind === 'localhost-url') {
       out.push(target)
-      if (out.length >= limit) break
       continue
     }
 
@@ -298,7 +290,6 @@ function reconcileTargetsWithChangedFiles(
       normalizedPath: corrected,
       subtitle: corrected,
     })
-    if (out.length >= limit) break
   }
 
   return out

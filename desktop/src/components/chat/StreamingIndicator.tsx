@@ -50,28 +50,32 @@ export function StreamingIndicator() {
 
   if (apiRetry) {
     const remainingMs = Math.max(0, apiRetry.retryDelayMs - (now - apiRetry.receivedAt))
+    const isStreamDisconnect = apiRetry.errorType === 'stream_disconnect'
     const statusText = apiRetry.errorStatus !== null
       ? t('chat.retry.httpStatus', { status: apiRetry.errorStatus })
-      : formatErrorType(apiRetry.errorType) ?? t('chat.retry.networkError')
+      : isStreamDisconnect
+        ? t('chat.retry.streamDisconnect')
+        : formatErrorType(apiRetry.errorType) ?? t('chat.retry.networkError')
     const detailText = apiRetry.errorMessage?.trim()
-
     return (
       <div
         data-testid="api-retry-indicator"
+        data-retry-kind={isStreamDisconnect ? 'stream_disconnect' : 'api'}
         role="status"
         aria-live="polite"
         className="mb-2 flex w-full max-w-[min(720px,100%)] flex-wrap items-center gap-2 rounded-[var(--radius-md)] border border-[var(--color-warning)] bg-[var(--color-warning-container)] px-3 py-2 text-xs text-[var(--color-on-warning-container)] shadow-[var(--shadow-card)]"
       >
         <RefreshCw size={14} strokeWidth={2.2} className="shrink-0 animate-spin text-[var(--color-warning)]" aria-hidden="true" />
-        <span className="font-medium">{t('chat.retry.title')}</span>
+        <span className="font-medium">
+          {t(isStreamDisconnect ? 'chat.retry.streamTitle' : 'chat.retry.title')}
+        </span>
         {/*
           Neutral rather than `tone="warning"`: these chips sit on the warning
           container itself, so a warning-tinted chip would disappear into it,
           and the warning accent as foreground on that fill measures 2.66:1 in
           the light theme (see components/AGENTS.md §3.2).
         */}
-        <Badge mono pill={false} bordered className="leading-none">
-          {t('chat.retry.attempt', { attempt: apiRetry.attempt, max: apiRetry.maxRetries })}
+        <Badge mono pill={false} bordered className="leading-none">          {t('chat.retry.attempt', { attempt: apiRetry.attempt, max: apiRetry.maxRetries })}
         </Badge>
         <Badge mono pill={false} bordered className="leading-none">
           {statusText}
@@ -130,7 +134,11 @@ export function StreamingIndicator() {
   }
 
   return (
-    <div className="mb-2 flex w-fit items-center gap-[9px] rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-4 py-2 text-[13.5px] text-[var(--color-text-secondary)]">
+    <div
+      role="status"
+      aria-live="polite"
+      className="mb-2 flex w-fit items-center gap-[9px] rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-4 py-2 text-[13.5px] text-[var(--color-text-secondary)]"
+    >
       <span className="animate-pulse-dot text-[var(--color-brand)]" aria-hidden="true">✦</span>
       <span className="font-medium text-[var(--color-text-primary)]">{verb}...</span>
       {elapsedSeconds > 0 && (

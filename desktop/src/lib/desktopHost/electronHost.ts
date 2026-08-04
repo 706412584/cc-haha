@@ -78,6 +78,11 @@ export function createElectronHost(bridge: ElectronHostBridge): DesktopHost {
       getServerUrl: () => invoke(ELECTRON_IPC_CHANNELS.runtimeGetServerUrl),
       getLocalAccessToken: () => invoke(ELECTRON_IPC_CHANNELS.runtimeGetLocalAccessToken),
     },
+    tunnel: {
+      start: options => invoke(ELECTRON_IPC_CHANNELS.tunnelStart, options),
+      stop: () => invoke(ELECTRON_IPC_CHANNELS.tunnelStop),
+      getStatus: () => invoke(ELECTRON_IPC_CHANNELS.tunnelGetStatus),
+    },
     app: {
       getVersion: () => invoke(ELECTRON_IPC_CHANNELS.appGetVersion),
       getLocalePreference: () => invoke(ELECTRON_IPC_CHANNELS.appGetLocalePreference),
@@ -109,6 +114,7 @@ export function createElectronHost(bridge: ElectronHostBridge): DesktopHost {
     shell: {
       open: target => invoke(ELECTRON_IPC_CHANNELS.shellOpen, target),
       openPath: path => invoke(ELECTRON_IPC_CHANNELS.shellOpenPath, path),
+      showItemInFolder: target => invoke(ELECTRON_IPC_CHANNELS.shellShowItemInFolder, target),
     },
     trace: {
       openWindow: sessionId => invoke(ELECTRON_IPC_CHANNELS.traceOpenWindow, sessionId),

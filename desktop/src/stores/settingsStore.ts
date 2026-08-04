@@ -5,6 +5,7 @@ import { modelsApi } from '../api/models'
 import { h5AccessApi } from '../api/h5Access'
 import { tracesApi } from '../api/traces'
 import {
+  type AgentOfficeSurface,
   type AppMode,
   type AppModeConfig,
   type ChatSendBehavior,
@@ -12,6 +13,7 @@ import {
   type DesktopTerminalStartupShell,
   type H5AccessDiagnostics,
   type H5AccessSettings,
+  type H5TunnelMode,
   type NetworkSettings,
   type OutputStyleOption,
   type OutputStylesResponse,
@@ -22,6 +24,7 @@ import {
   type UpdateProxyMode,
   type UpdateProxySettings,
   type WebSearchSettings,
+  type WorkspaceLspSettings,
 } from '../types/settings'
 import type { TraceCaptureSettings } from '../types/trace'
 import { getDesktopHost } from '../lib/desktopHost'
@@ -54,7 +57,10 @@ type SettingsStore = {
   currentModel: ModelInfo | null
   effortLevel: EffortLevel
   thinkingEnabled: boolean
+  thinkingAutoCollapse: boolean
   autoDreamEnabled: boolean
+  unifiedActivityPanelEnabled: boolean
+  agentOfficeSurface: AgentOfficeSurface
   autoModeOptInAccepted: boolean
   availableModels: ModelInfo[]
   activeProviderName: string | null
@@ -72,7 +78,9 @@ type SettingsStore = {
   outputStyleError: string | null
   skipWebFetchPreflight: boolean
   desktopNotificationsEnabled: boolean
+  sessionContentSearchEnabled: boolean
   desktopTerminal: DesktopTerminalSettings
+  workspaceLsp: WorkspaceLspSettings
   webSearch: WebSearchSettings
   updateProxy: UpdateProxySettings
   network: NetworkSettings
@@ -94,7 +102,10 @@ type SettingsStore = {
   setModel: (modelId: string) => Promise<void>
   setEffort: (level: EffortLevel) => Promise<void>
   setThinkingEnabled: (enabled: boolean) => Promise<void>
+  setThinkingAutoCollapse: (enabled: boolean) => Promise<void>
   setAutoDreamEnabled: (enabled: boolean) => Promise<void>
+  setUnifiedActivityPanelEnabled: (enabled: boolean) => Promise<void>
+  setAgentOfficeSurface: (surface: AgentOfficeSurface) => Promise<void>
   acceptAutoModeOptIn: () => Promise<void>
   setLocale: (locale: Locale) => void
   setTheme: (theme: ThemeMode) => Promise<void>
@@ -103,7 +114,9 @@ type SettingsStore = {
   setOutputStyle: (outputStyle: string, workDir?: string | null) => Promise<void>
   setSkipWebFetchPreflight: (enabled: boolean) => Promise<void>
   setDesktopNotificationsEnabled: (enabled: boolean) => Promise<void>
+  setSessionContentSearchEnabled: (enabled: boolean) => Promise<void>
   setDesktopTerminal: (settings: DesktopTerminalSettings) => Promise<void>
+  setWorkspaceLsp: (settings: WorkspaceLspSettings) => Promise<void>
   setWebSearch: (settings: WebSearchSettings) => Promise<void>
   setUpdateProxy: (settings: UpdateProxySettings) => Promise<void>
   setNetwork: (settings: NetworkSettings) => Promise<void>
@@ -116,7 +129,11 @@ type SettingsStore = {
     publicBaseUrl?: string | null
     fixedPort?: number | null
     disconnectGraceSeconds?: number | null
+    tunnelToken?: string | null
+    tunnelMode?: H5TunnelMode | null
   }) => Promise<void>
+  startH5Tunnel: (options: { mode: H5TunnelMode; token?: string | null; namedUrl?: string | null }) => Promise<void>
+  stopH5Tunnel: () => Promise<void>
   setResponseLanguage: (language: string) => Promise<void>
   fetchAppMode: () => Promise<void>
   setAppMode: (mode: AppMode, portableDir?: string | null) => Promise<void>
@@ -181,7 +198,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   currentModel: null,
   effortLevel: 'max',
   thinkingEnabled: true,
+  thinkingAutoCollapse: true,
   autoDreamEnabled: false,
+  unifiedActivityPanelEnabled: false,
+  agentOfficeSurface: 'modal',
   autoModeOptInAccepted: false,
   availableModels: [],
   activeProviderName: null,
@@ -195,7 +215,9 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   outputStyleError: null,
   skipWebFetchPreflight: true,
   desktopNotificationsEnabled: false,
+  sessionContentSearchEnabled: true,
   desktopTerminal: DEFAULT_DESKTOP_TERMINAL_SETTINGS,
+  workspaceLsp: {},
   webSearch: { mode: 'auto', tavilyApiKey: '', braveApiKey: '' },
   updateProxy: DEFAULT_UPDATE_PROXY_SETTINGS,
   network: DEFAULT_NETWORK_SETTINGS,
@@ -247,14 +269,18 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         currentModel: model,
         effortLevel: level,
         thinkingEnabled: userSettings.alwaysThinkingEnabled !== false,
+        thinkingAutoCollapse: userSettings.thinkingAutoCollapse !== false,
         autoDreamEnabled: userSettings.autoDreamEnabled === true,
+        unifiedActivityPanelEnabled: userSettings.unifiedActivityPanelEnabled === true,
+        agentOfficeSurface: userSettings.agentOfficeSurface === 'tab' ? 'tab' : 'modal',
         autoModeOptInAccepted: userSettings.skipAutoPermissionPrompt === true,
         chatSendBehavior: normalizeChatSendBehavior(userSettings.chatSendBehavior),
         outputStyle: normalizeOutputStyle(userSettings.outputStyle),
         skipWebFetchPreflight: userSettings.skipWebFetchPreflight !== false,
         desktopNotificationsEnabled: userSettings.desktopNotificationsEnabled === true,
+        sessionContentSearchEnabled: userSettings.sessionContentSearchEnabled !== false,
         desktopTerminal,
-        webSearch: normalizeWebSearchSettings(userSettings.webSearch),
+        workspaceLsp: normalizeWorkspaceLspSettings(userSettings.workspaceLsp),        webSearch: normalizeWebSearchSettings(userSettings.webSearch),
         updateProxy: normalizeUpdateProxySettings(userSettings.updateProxy),
         network: normalizeNetworkSettings(userSettings.network),
         traceCapture,
@@ -318,6 +344,16 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     }
   },
 
+  setThinkingAutoCollapse: async (enabled) => {
+    const prev = get().thinkingAutoCollapse
+    set({ thinkingAutoCollapse: enabled })
+    try {
+      await settingsApi.updateUser({ thinkingAutoCollapse: enabled })
+    } catch {
+      set({ thinkingAutoCollapse: prev })
+    }
+  },
+
   setAutoDreamEnabled: async (enabled) => {
     const prev = get().autoDreamEnabled
     set({ autoDreamEnabled: enabled })
@@ -325,6 +361,28 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       await settingsApi.updateUser({ autoDreamEnabled: enabled })
     } catch (error) {
       set({ autoDreamEnabled: prev })
+      throw error
+    }
+  },
+
+  setUnifiedActivityPanelEnabled: async (enabled) => {
+    const previous = get().unifiedActivityPanelEnabled
+    set({ unifiedActivityPanelEnabled: enabled })
+    try {
+      await settingsApi.updateUser({ unifiedActivityPanelEnabled: enabled })
+    } catch (error) {
+      set({ unifiedActivityPanelEnabled: previous })
+      throw error
+    }
+  },
+
+  setAgentOfficeSurface: async (surface) => {
+    const previous = get().agentOfficeSurface
+    set({ agentOfficeSurface: surface })
+    try {
+      await settingsApi.updateUser({ agentOfficeSurface: surface })
+    } catch (error) {
+      set({ agentOfficeSurface: previous })
       throw error
     }
   },
@@ -448,6 +506,20 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     }
   },
 
+  setSessionContentSearchEnabled: async (enabled) => {
+    const previous = get().sessionContentSearchEnabled
+    set({ sessionContentSearchEnabled: enabled })
+    try {
+      await settingsApi.updateUser({ sessionContentSearchEnabled: enabled })
+      if (!enabled && useUIStore.getState().activeModal === 'globalSearch') {
+        useUIStore.getState().closeModal()
+      }
+    } catch (error) {
+      set({ sessionContentSearchEnabled: previous })
+      throw error
+    }
+  },
+
   setDesktopTerminal: async (settings) => {
     const next = normalizeDesktopTerminalSettings(settings)
     const saveVersion = ++desktopTerminalSaveVersion
@@ -468,6 +540,18 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
     desktopTerminalSaveQueue = save
     await save
+  },
+
+  setWorkspaceLsp: async (settings) => {
+    const prev = get().workspaceLsp
+    const next = normalizeWorkspaceLspSettings(settings)
+    set({ workspaceLsp: next })
+    try {
+      await settingsApi.updateUser({ workspaceLsp: next })
+    } catch (error) {
+      set({ workspaceLsp: prev })
+      throw error
+    }
   },
 
   setWebSearch: async (webSearch) => {
@@ -575,6 +659,35 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       await refreshH5DiagnosticsSilent(set)
     } catch (error) {
       set({ h5AccessError: getErrorMessage(error, 'Failed to update H5 access settings.') })
+      throw error
+    }
+  },
+
+  startH5Tunnel: async (options) => {
+    set({ h5AccessError: null })
+    try {
+      await h5AccessApi.startTunnel(options)
+      // The main process reports the tunnel URL back to the server, so a
+      // diagnostics refresh picks up the new effective publicBaseUrl + status.
+      await refreshH5DiagnosticsSilent(set)
+      const error = get().h5AccessDiagnostics?.tunnel?.error
+      if (error) {
+        set({ h5AccessError: error })
+        throw new Error(error)
+      }
+    } catch (error) {
+      set({ h5AccessError: getErrorMessage(error, 'Failed to start the tunnel.') })
+      throw error
+    }
+  },
+
+  stopH5Tunnel: async () => {
+    set({ h5AccessError: null })
+    try {
+      await h5AccessApi.stopTunnel()
+      await refreshH5DiagnosticsSilent(set)
+    } catch (error) {
+      set({ h5AccessError: getErrorMessage(error, 'Failed to stop the tunnel.') })
       throw error
     }
   },
@@ -726,6 +839,54 @@ function normalizeDesktopTerminalSettings(
       ? settings.customShellPath
       : DEFAULT_DESKTOP_TERMINAL_SETTINGS.customShellPath,
   }
+}
+
+function normalizeWorkspaceLspSettings(
+  settings: WorkspaceLspSettings | undefined,
+): WorkspaceLspSettings {
+  const server = settings?.server
+  if (!server || typeof server !== 'object') return {}
+
+  const normalizedServer: NonNullable<WorkspaceLspSettings['server']> = {}
+  const name = typeof server.name === 'string' ? server.name.trim() : ''
+  if (name) normalizedServer.name = name
+
+  const pathValue = typeof server.path === 'string' ? server.path.trim() : ''
+  const commandValue = typeof server.command === 'string' ? server.command.trim() : ''
+  if (pathValue) normalizedServer.path = pathValue
+  if (!pathValue && commandValue && isBareWorkspaceLspCommand(commandValue)) {
+    normalizedServer.command = commandValue
+  }
+
+  if (Array.isArray(server.args)) {
+    normalizedServer.args = server.args.filter((arg): arg is string => typeof arg === 'string')
+  }
+
+  const extensionToLanguage = normalizeWorkspaceLspExtensionMap(server.extensionToLanguage)
+  if (extensionToLanguage) normalizedServer.extensionToLanguage = extensionToLanguage
+
+  return normalizedServer.path || normalizedServer.command || normalizedServer.extensionToLanguage
+    ? { server: normalizedServer }
+    : {}
+}
+
+function isBareWorkspaceLspCommand(command: string): boolean {
+  return !/[\s"'`$&|;<>()]/.test(command)
+}
+
+function normalizeWorkspaceLspExtensionMap(
+  mapping: Record<string, unknown> | undefined,
+): Record<string, string> | undefined {
+  if (!mapping || typeof mapping !== 'object' || Array.isArray(mapping)) return undefined
+  const normalized: Record<string, string> = {}
+  for (const [rawExt, rawLanguage] of Object.entries(mapping)) {
+    if (typeof rawLanguage !== 'string') continue
+    const ext = rawExt.startsWith('.') ? rawExt.toLowerCase() : `.${rawExt.toLowerCase()}`
+    const language = rawLanguage.trim()
+    if (!/^\.[A-Za-z0-9_+-]+$/.test(ext) || !language) continue
+    normalized[ext] = language
+  }
+  return Object.keys(normalized).length > 0 ? normalized : undefined
 }
 
 function normalizeH5AccessSettings(settings: H5AccessSettings | undefined): H5AccessSettings {

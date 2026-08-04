@@ -20,6 +20,7 @@ import { CSS } from '@dnd-kit/utilities'
 import { Copy, Eye, EyeOff, GripVertical, PowerOff, QrCode, RotateCw } from 'lucide-react'
 import { useSettingsStore, UI_ZOOM_DEFAULT, UI_ZOOM_MIN, UI_ZOOM_MAX, UI_ZOOM_STEP } from '../stores/settingsStore'
 import { useProviderStore } from '../stores/providerStore'
+import { useProviderCompatStore, PROVIDER_COMPAT_WARN_THRESHOLD } from '../stores/providerCompatStore'
 import { useTranslation, type TranslationKey } from '../i18n'
 import { Modal } from '@/components/ui/Modal'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -36,26 +37,13 @@ import {
 } from '@/components/settings/SettingsSection'
 import { Dropdown } from '@/components/ui/Dropdown'
 import { Switch } from '@/components/ui/Switch'
-import { Tooltip } from '@/components/ui/Tooltip'
+import { groupProviderModels, providerModelsErrorKey } from '../lib/providerModels'
 import { PermissionModeSelector } from '../components/controls/PermissionModeSelector'
 import { isDarkThemeMode, isLightThemeMode } from '../types/settings'
 import type { ThemeMode, UpdateProxyMode, NetworkProxyMode, WebSearchMode, AppMode, ChatSendBehavior, OutputStyleSource } from '../types/settings'
 import type { Locale } from '../i18n'
 import type { SavedProvider, UpdateProviderInput, ProviderTestResult, ModelMapping, Model1mSupport, ApiFormat, ProviderAuthStrategy, ProviderModelInfo, ProviderModelsErrorCode } from '../types/provider'
-import { groupProviderModels, providerModelsErrorKey } from '../lib/providerModels'
-import {
-  apply1mSupportToContextInput,
-  apply1mSupportToContextInputs,
-  getAutoCompactWindowErrorKey,
-  getModelContextWindowErrorKey,
-  MODEL_SLOTS,
-  parseAutoCompactWindowInput,
-  parseModelContextWindowsInput,
-  type ModelContextInputs,
-  type ModelSlot,
-} from '../lib/providerModelContext'
 import type { ProviderPreset } from '../types/providerPreset'
-import { normalizeProviderBaseUrl, presetMatchesBaseUrl, selectableProviderPresets } from '../config/providerPresets'
 import { AdapterSettings } from './AdapterSettings'
 import { useSessionStore } from '../stores/sessionStore'
 import { MarkdownRenderer } from '../components/markdown/MarkdownRenderer'
@@ -72,13 +60,14 @@ import { DiagnosticsSettings } from './DiagnosticsSettings'
 import { TraceList } from './TraceList'
 import { ActivitySettings } from './ActivitySettings'
 import { MemorySettings } from './MemorySettings'
+import { ProjectRulesSettings } from './ProjectRulesSettings'
 import { PetSettings } from '../features/pets/PetSettings'
 import { useUIStore } from '../stores/uiStore'
 import { ClaudeOfficialLogin } from '../components/settings/ClaudeOfficialLogin'
+import { CcSwitchImportModal } from '../components/settings/CcSwitchImportModal'
 import { ChatGPTOfficialLogin } from '../components/settings/ChatGPTOfficialLogin'
 import { GrokOfficialLogin } from '../components/settings/GrokOfficialLogin'
 import { AgentManager } from '../components/settings/AgentManager'
-import { CcSwitchImportModal } from '../components/settings/CcSwitchImportModal'
 import {
   BUILT_IN_PROVIDER_IDS,
   CLAUDE_OFFICIAL_PROVIDER_ID,
@@ -87,11 +76,11 @@ import {
 import { GROK_OFFICIAL_PROVIDER_ID } from '../constants/grokOfficialProvider'
 import { useUpdateStore } from '../stores/updateStore'
 import { getBaseUrl } from '../api/client'
+import { h5AccessApi } from '../api/h5Access'
 import { formatBytes } from '../lib/formatBytes'
 import { isDesktopRuntime } from '../lib/desktopRuntime'
 import { getDesktopHost } from '../lib/desktopHost'
 import { publicAssetPath } from '../lib/publicAsset'
-import { BrandSeal } from '../components/composite/BrandSeal'
 import { isBrowserSafePort } from '../lib/browserSafePort'
 import {
   getDesktopNotificationPermission,
@@ -108,11 +97,12 @@ import {
   stripProviderSettingsJsonEnv,
 } from '../lib/providerSettingsJson'
 import { copyTextToClipboard } from '@/lib/clipboard'
-
+import { useMobileViewport } from '../hooks/useMobileViewport'
 const NETWORK_TIMEOUT_MIN_SECONDS = 30
 const NETWORK_TIMEOUT_MAX_SECONDS = 1800
 const NETWORK_TIMEOUT_STEP_SECONDS = 30
 const SETTINGS_CHECKBOX_INPUT_CLASS = 'settings-checkbox-input peer'
+
 const BUILT_IN_OUTPUT_STYLE_TRANSLATION_KEYS = {
   default: {
     label: 'settings.general.outputStyleBuiltin.default.label',
@@ -230,6 +220,7 @@ export function Settings() {
   const setActiveTab = useUIStore((s) => s.setActiveSettingsTab)
   const pendingSettingsTab = useUIStore((s) => s.pendingSettingsTab)
   const t = useTranslation()
+  const isMobileSettings = useMobileViewport() && !isDesktopRuntime()
 
   useEffect(() => {
     if (!pendingSettingsTab) return
@@ -238,22 +229,13 @@ export function Settings() {
   }, [pendingSettingsTab, setActiveTab])
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden bg-[var(--color-surface)]">
-      <div className="flex-1 flex overflow-hidden">
+    <div data-testid="settings-page" className={`settings-page flex-1 flex flex-col overflow-hidden bg-[var(--color-surface)]${isMobileSettings ? ' settings-page--mobile' : ''}`}>
+      <div className="settings-page__layout flex-1 flex overflow-hidden">
         {/* Tab navigation */}
         {/* Narrow enough that the rail is not a gutter of dead space, wide
             enough that the longest label in any locale — the Japanese
-            "コンピューター操作" — still clears the truncation on TabButton.
-
-            Paper, separated by the rule, the way every other secondary panel
-            in the app is (the workbench, the diff split). It used to be
-            `--color-surface-container-low`, which is the same value the tab
-            strip's trough resolves to — so the Settings tab, the one tab whose
-            content this rail *is*, was the only selected tab in the app whose
-            paper fill met a different colour at its bottom edge. It read as a
-            white card stranded on a grey panel. Nothing else changed to fix
-            it: the tab is right, this was the odd one out. */}
-        <div className="w-[220px] flex-shrink-0 flex flex-col overflow-y-auto border-r border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-4">
+            "コンピューター操作" — still clears the truncation on TabButton. */}
+        <div className="settings-page__tabs w-[220px] flex-shrink-0 flex flex-col overflow-y-auto border-r border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-4">
           <div className="flex-1 flex flex-col gap-0.5">
             <TabButton icon="dns" label={t('settings.tab.providers')} active={activeTab === 'providers'} onClick={() => setActiveTab('providers')} />
             <TabButton icon="tune" label={t('settings.tab.general')} active={activeTab === 'general'} onClick={() => setActiveTab('general')} />
@@ -264,6 +246,7 @@ export function Settings() {
             <TabButton icon="smart_toy" label={t('settings.tab.agents')} active={activeTab === 'agents'} onClick={() => setActiveTab('agents')} />
             <TabButton icon="auto_awesome" label={t('settings.tab.skills')} active={activeTab === 'skills'} onClick={() => setActiveTab('skills')} />
             <TabButton icon="history_edu" label={t('settings.tab.memory')} active={activeTab === 'memory'} onClick={() => setActiveTab('memory')} />
+            <TabButton icon="description" label={t('settings.tab.projectRules')} active={activeTab === 'projectRules'} onClick={() => setActiveTab('projectRules')} />
             <TabButton icon="extension" label={t('settings.tab.plugins')} active={activeTab === 'plugins'} onClick={() => setActiveTab('plugins')} />
             <TabButton icon="pets" label={t('settings.tab.pets')} active={activeTab === 'pets'} onClick={() => setActiveTab('pets')} />
             <TabButton icon="mouse" label={t('settings.tab.computerUse')} active={activeTab === 'computerUse'} onClick={() => setActiveTab('computerUse')} />
@@ -288,6 +271,7 @@ export function Settings() {
           {activeTab === 'agents' && <AgentManager />}
           {activeTab === 'skills' && <SkillSettings />}
           {activeTab === 'memory' && <MemorySettings />}
+          {activeTab === 'projectRules' && <ProjectRulesSettings />}
           {activeTab === 'plugins' && <PluginSettings />}
           {activeTab === 'pets' && <PetSettings />}
           {activeTab === 'computerUse' && <ComputerUseSettings />}
@@ -303,10 +287,6 @@ export function Settings() {
 function TabButton({ icon, label, active, onClick }: { icon: string; label: string; active: boolean; onClick: () => void }) {
   const ref = useRef<HTMLButtonElement>(null)
 
-  // The rail is taller than its viewport, and Settings remounts whenever the
-  // tab is re-entered — from a trace tab's "back to list", say — with the
-  // scroll position reset to the top. Without this the selected section can be
-  // highlighted somewhere off-screen. `nearest` is a no-op when already visible.
   useEffect(() => {
     if (!active) return
     ref.current?.scrollIntoView?.({ block: 'nearest' })
@@ -317,9 +297,7 @@ function TabButton({ icon, label, active, onClick }: { icon: string; label: stri
       ref={ref}
       onClick={onClick}
       aria-current={active ? 'page' : undefined}
-      // `ring-offset` has to name the rail's own fill — it is painted, not
-      // transparent, so it tracks whatever the rail is.
-      className={`w-full flex items-center gap-3 rounded-[var(--radius-md)] px-3 py-2 text-[13.5px] text-left transition-[background-color,color] duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-surface)] ${
+      className={`w-full flex items-center gap-3 rounded-[var(--radius-md)] px-3 py-2 text-[13.5px] text-left transition-[background-color,color] duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-surface-container-low)] ${
         active
           ? 'bg-[var(--color-surface-hover)] text-[var(--color-text-primary)] font-medium'
           : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
@@ -426,6 +404,13 @@ function ProviderSettings() {
     testProvider,
   } = useProviderStore()
   const fetchSettings = useSettingsStore((s) => s.fetchAll)
+  // Compatibility events keyed by provider id. Subscribed at this scope so a
+  // toast-triggered count change re-renders the badge in the same Settings tab
+  // the user is already looking at.
+  const compatEvents = useProviderCompatStore((s) => s.events)
+  const thinkingIncompatibleProviderIds = useProviderCompatStore(
+    (s) => s.thinkingIncompatibleProviderIds,
+  )
   const t = useTranslation()
   const [editingProvider, setEditingProvider] = useState<SavedProvider | null>(null)
   const [showCreateModal, setShowCreateModal] = useState(false)
@@ -637,6 +622,30 @@ function ProviderSettings() {
                           {provider.apiFormat === 'openai_chat' ? 'OpenAI Chat' : 'OpenAI Responses'}
                         </Badge>
                       )}
+                      {(() => {
+                        const compat = compatEvents[provider.id]
+                        if (!compat || compat.count < PROVIDER_COMPAT_WARN_THRESHOLD) return null
+                        return (
+                          <span
+                            data-testid={`provider-compat-badge-${provider.id}`}
+                            title={t('providerCompat.badge.tooltip', { count: String(compat.count) })}
+                            className="inline-flex items-center gap-1 rounded border border-[var(--color-warning)]/30 bg-[var(--color-warning)]/10 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[var(--color-warning)]"
+                          >
+                            <span className="material-symbols-outlined text-[12px]" aria-hidden="true">warning</span>
+                            {t('providerCompat.badge.label')}
+                          </span>
+                        )
+                      })()}
+                      {thinkingIncompatibleProviderIds.has(provider.id) && (
+                        <span
+                          data-testid={`provider-thinking-badge-${provider.id}`}
+                          title={t('providerCompat.thinkingBadge.tooltip')}
+                          className="inline-flex items-center gap-1 rounded border border-[var(--color-warning)]/30 bg-[var(--color-warning)]/10 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[var(--color-warning)]"
+                        >
+                          <span className="material-symbols-outlined text-[12px]" aria-hidden="true">psychology_alt</span>
+                          {t('providerCompat.thinkingBadge.label')}
+                        </span>
+                      )}
                       {isActive && (
                         <Badge tone="brand" bordered>{t('settings.providers.default')}</Badge>
                       )}
@@ -683,6 +692,10 @@ function ProviderSettings() {
         </div>
       ) : null}
 
+      {showCcSwitchImport && (
+        <CcSwitchImportModal open onClose={() => setShowCcSwitchImport(false)} />
+      )}
+
       {/* Create Modal — conditionally rendered so state resets on close */}
       {showCreateModal && (
         <ProviderFormModal open={true} onClose={() => setShowCreateModal(false)} mode="create" presets={presets} />
@@ -691,11 +704,6 @@ function ProviderSettings() {
       {/* Edit Modal */}
       {editingProvider && (
         <ProviderFormModal key={editingProvider.id} open={true} onClose={() => setEditingProvider(null)} mode="edit" provider={editingProvider} presets={presets} />
-      )}
-
-      {/* cc-switch import — conditionally rendered so the scan reruns each time */}
-      {showCcSwitchImport && (
-        <CcSwitchImportModal open={true} onClose={() => setShowCcSwitchImport(false)} />
       )}
 
       <ConfirmDialog
@@ -827,6 +835,11 @@ function requirePreset(preset: ProviderPreset | undefined): ProviderPreset {
 const AUTO_COMPACT_WINDOW_ENV_KEY = 'CLAUDE_CODE_AUTO_COMPACT_WINDOW'
 const MODEL_CONTEXT_WINDOWS_ENV_KEY = 'CLAUDE_CODE_MODEL_CONTEXT_WINDOWS'
 const DISABLE_EXPERIMENTAL_BETAS_ENV_KEY = 'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'
+const MODEL_CONTEXT_WINDOW_MIN = 16000
+const MODEL_CONTEXT_WINDOW_MAX = 10000000
+const MODEL_1M_CONTEXT_WINDOW = 1000000
+const MODEL_SLOTS = ['main', 'haiku', 'sonnet', 'opus'] as const
+
 const DEFAULT_MODEL_1M_SUPPORT: Model1mSupport = {
   main: false,
   haiku: false,
@@ -835,6 +848,8 @@ const DEFAULT_MODEL_1M_SUPPORT: Model1mSupport = {
 }
 const DEFAULT_PROVIDER_AUTH_STRATEGY: ProviderAuthStrategy = 'auth_token'
 const AUTH_ENV_KEYS = new Set(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'])
+type ModelSlot = typeof MODEL_SLOTS[number]
+type ModelContextInputs = Record<ModelSlot, string>
 
 function formatContextWindow(value: number): string {
   return value.toLocaleString('en-US')
@@ -896,11 +911,30 @@ function inferAuthStrategyFromEnv(env: Record<string, string>): ProviderAuthStra
   return null
 }
 
-function getPresetContextInputValue(model: string | undefined, preset: ProviderPreset): string {
-  const trimmedModel = model?.trim()
-  if (!trimmedModel) return ''
-  const value = preset.modelContextWindows?.[trimmedModel]
-  return value !== undefined ? String(value) : ''
+function parseAutoCompactWindowInput(value: string): number | undefined {
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  const parsed = Number(trimmed)
+  if (!Number.isInteger(parsed)) return undefined
+  if (parsed < MODEL_CONTEXT_WINDOW_MIN || parsed > MODEL_CONTEXT_WINDOW_MAX) return undefined
+  return parsed
+}
+
+function getAutoCompactWindowErrorKey(value: string): 'number' | 'range' | null {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  const parsed = Number(trimmed)
+  if (!Number.isInteger(parsed)) return 'number'
+  if (parsed < MODEL_CONTEXT_WINDOW_MIN || parsed > MODEL_CONTEXT_WINDOW_MAX) return 'range'
+  return null
+}
+
+function parseModelContextWindowsInput(value: string): number | undefined {
+  return parseAutoCompactWindowInput(value)
+}
+
+function getModelContextWindowErrorKey(value: string): 'number' | 'range' | null {
+  return getAutoCompactWindowErrorKey(value)
 }
 
 function getModelContextInputValue(
@@ -910,9 +944,8 @@ function getModelContextInputValue(
 ): string {
   const trimmedModel = model?.trim()
   if (!trimmedModel) return ''
-  const saved = provider?.modelContextWindows?.[trimmedModel]
-  if (saved !== undefined) return String(saved)
-  return getPresetContextInputValue(trimmedModel, preset)
+  const value = provider?.modelContextWindows?.[trimmedModel] ?? preset.modelContextWindows?.[trimmedModel]
+  return value !== undefined ? String(value) : ''
 }
 
 function getModelContextInputs(
@@ -992,6 +1025,31 @@ function applyModel1mSupportMapping(
 
 function hasAnyModel1mSupport(model1mSupport: Model1mSupport): boolean {
   return MODEL_SLOTS.some((slot) => model1mSupport[slot])
+}
+
+function shouldFill1mContextWindow(value: string): boolean {
+  const parsed = parseModelContextWindowsInput(value)
+  return parsed === undefined || parsed < MODEL_1M_CONTEXT_WINDOW
+}
+
+function apply1mSupportToContextInput(
+  inputs: ModelContextInputs,
+  slot: ModelSlot,
+  enabled: boolean,
+): ModelContextInputs {
+  if (!enabled || !shouldFill1mContextWindow(inputs[slot])) return inputs
+  return { ...inputs, [slot]: String(MODEL_1M_CONTEXT_WINDOW) }
+}
+
+function apply1mSupportToContextInputs(
+  inputs: ModelContextInputs,
+  model1mSupport: Model1mSupport,
+): ModelContextInputs {
+  let nextInputs = inputs
+  for (const slot of MODEL_SLOTS) {
+    nextInputs = apply1mSupportToContextInput(nextInputs, slot, model1mSupport[slot])
+  }
+  return nextInputs
 }
 
 function normalizeModelMapping(models: ModelMapping): ModelMapping {
@@ -1250,25 +1308,21 @@ function openExternalUrl(url: string) {
 
 function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderFormProps) {
   const { createProvider, updateProvider, testConfig, fetchModels } = useProviderStore()
-  const fetchSettings = useSettingsStore((s) => s.fetchAll)
+  const addToast = useUIStore((s) => s.addToast)
   const t = useTranslation()
 
   const fallbackPreset = buildFallbackPreset(provider)
   const loadedPresets = presets.filter((p) => p.id !== 'official')
-  // Keeps retired presets, so editing a provider already saved against one still
-  // resolves the preset behind its presetId instead of falling back.
   const availablePresets = loadedPresets.length > 0 ? loadedPresets : [fallbackPreset]
-  // Retired presets must never be offered when adding a provider.
-  const selectablePresets = selectableProviderPresets(availablePresets)
-  const regularPresets = selectablePresets.filter((p) => !p.featured)
-  const featuredPresets = selectablePresets.filter((p) => p.featured)
+  const regularPresets = availablePresets.filter((p) => !p.featured)
+  const featuredPresets = availablePresets.filter((p) => p.featured)
   const presetDefaultEnvKeys = useMemo(
     () => presets.flatMap((preset) => Object.keys(preset.defaultEnv ?? {})),
     [presets],
   )
   const initialPreset = provider
     ? availablePresets.find((p) => p.id === provider.presetId) ?? fallbackPreset
-    : selectablePresets[0] ?? fallbackPreset
+    : availablePresets[0] ?? fallbackPreset
   const initialModels = stripModel1mMarkers(provider?.models ?? initialPreset.defaultModels)
   const initialModel1mSupport = getInitialModel1mSupport(
     provider?.models ?? initialPreset.defaultModels,
@@ -1309,23 +1363,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
   const [settingsJson, setSettingsJson] = useState('')
   const [settingsJsonError, setSettingsJsonError] = useState<string | null>(null)
   const jsonPastedRef = useRef(false)
-  const settingsJsonUserEditedRef = useRef(false)
   const providerProxyBaseUrl = useMemo(() => getProviderProxyBaseUrl(), [])
-  const currentProviderSettings = {
-    selectedPreset,
-    baseUrl,
-    apiFormat,
-    authStrategy,
-    apiKey,
-    models,
-    model1mSupport,
-    modelContextInputs,
-    autoCompactWindow,
-    toolSearchEnabled,
-    disableExperimentalBetas,
-  }
-  const providerSettingsRef = useRef(currentProviderSettings)
-  providerSettingsRef.current = currentProviderSettings
 
   // Load current settings.json and merge provider env vars
   useEffect(() => {
@@ -1334,24 +1372,8 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
       jsonPastedRef.current = false
       return
     }
-    let cancelled = false
     import('../api/providers').then(({ providersApi }) => {
-      if (cancelled) return
       providersApi.getSettings().then((settings) => {
-        if (cancelled || settingsJsonUserEditedRef.current) return
-        const {
-          selectedPreset,
-          baseUrl,
-          apiFormat,
-          authStrategy,
-          apiKey,
-          models,
-          model1mSupport,
-          modelContextInputs,
-          autoCompactWindow,
-          toolSearchEnabled,
-          disableExperimentalBetas,
-        } = providerSettingsRef.current
         const needsProxy = apiFormat !== 'anthropic'
         const autoCompactWindowEnv = autoCompactWindow.trim()
         const modelContextWindows = buildModelContextWindows(models, modelContextInputs)
@@ -1383,24 +1405,13 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
         }
         setSettingsJson(JSON.stringify(merged, null, 2))
       }).catch(() => {
-        if (!cancelled && !settingsJsonUserEditedRef.current) {
-          setSettingsJson((current) => current.trim() ? current : JSON.stringify({}, null, 2))
-        }
+        setSettingsJson(JSON.stringify({}, null, 2))
       })
     })
-    return () => {
-      cancelled = true
-    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedPreset.id, providerProxyBaseUrl])
 
-  // A fetched list only describes the endpoint and key it came from. cc-switch
-  // shipped this without a guard and kept offering the previous provider's
-  // models after the user pasted a new key, which reads as the picker lying.
   useEffect(() => {
-    // Bumping the token also disowns a probe that is still in flight: it walks
-    // up to three candidate endpoints at 15s each, so it can easily outlive the
-    // edit and re-fill the picker with the previous credentials' models.
     modelsRequestRef.current += 1
     setFetchedModels(null)
     setModelsErrorCode(null)
@@ -1409,7 +1420,6 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
   }, [baseUrl, apiKey])
 
   const handlePresetChange = (preset: ProviderPreset) => {
-    settingsJsonUserEditedRef.current = false
     setSelectedPreset(preset)
     setName(preset.name)
     setBaseUrl(preset.baseUrl)
@@ -1436,35 +1446,10 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
   const autoCompactWindowErrorKey = getAutoCompactWindowErrorKey(autoCompactWindow)
   const modelContextWindowErrorSlots = MODEL_SLOTS.filter((slot) => getModelContextWindowErrorKey(modelContextInputs[slot]))
   const canSubmit = name.trim() && baseUrl.trim() && (mode === 'edit' || !requiresApiKey || apiKey.trim()) && models.main.trim() && !settingsJsonError && !autoCompactWindowErrorKey && modelContextWindowErrorSlots.length === 0
-  const normalizedBaseUrl = normalizeProviderBaseUrl(baseUrl)
-  const isPresetDefaultEndpoint = normalizedBaseUrl === normalizeProviderBaseUrl(selectedPreset.baseUrl)
-  const apiKeyUrl = isPresetDefaultEndpoint ? selectedPreset.apiKeyUrl?.trim() : undefined
-  const promoText = isPresetDefaultEndpoint ? selectedPreset.promoText?.trim() : undefined
+  const apiKeyUrl = selectedPreset.apiKeyUrl?.trim()
   const displayedSettingsJson = showApiKey
     ? settingsJson
     : maskSettingsJsonSecrets(settingsJson)
-  const regionalEndpointItems = (selectedPreset.regionalEndpoints ?? []).map((endpoint) => ({
-    value: endpoint.baseUrl,
-    label: endpoint.region === 'cn_zh'
-      ? t('settings.providers.regionChina')
-      : endpoint.region === 'global_en'
-        ? t('settings.providers.regionGlobal')
-        : endpoint.region,
-    description: endpoint.baseUrl,
-    icon: (
-      <span className="material-symbols-outlined text-[17px]">
-        {endpoint.region === 'cn_zh' ? 'location_on' : endpoint.region === 'global_en' ? 'public' : 'link'}
-      </span>
-    ),
-  }))
-  const selectedRegionalEndpointUrl = regionalEndpointItems.find(
-    (option) => normalizeProviderBaseUrl(option.value) === normalizedBaseUrl,
-  )?.value ?? ''
-  // A hand-typed or pasted baseUrl may match no regional endpoint; the old
-  // native select went blank there, but the Dropdown trigger needs real text.
-  const selectedRegionalEndpointLabel = regionalEndpointItems.find(
-    (item) => item.value === selectedRegionalEndpointUrl,
-  )?.label ?? t('settings.providers.regionCustom')
   const apiFormatItems = [
     {
       value: 'anthropic' as const,
@@ -1577,9 +1562,6 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
       nextInputs,
       slot,
       nextModel1mSupport[slot],
-      // The field was just re-derived for the new model id, so there is nothing
-      // left over from a previous 1M tick to revert.
-      nextInputs[slot],
     )
     setModels(nextModels)
     setModel1mSupport(nextModel1mSupport)
@@ -1591,15 +1573,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
   }
   const handleModel1mSupportChange = (slot: ModelSlot, enabled: boolean) => {
     const nextModel1mSupport = { ...model1mSupport, [slot]: enabled }
-    // Rolls back to the preset window rather than the saved provider one: a
-    // provider saved while the box was ticked already holds the 1,000,000 the
-    // user is now taking back.
-    const nextInputs = apply1mSupportToContextInput(
-      modelContextInputs,
-      slot,
-      enabled,
-      getPresetContextInputValue(models[slot], selectedPreset),
-    )
+    const nextInputs = apply1mSupportToContextInput(modelContextInputs, slot, enabled)
     setModel1mSupport(nextModel1mSupport)
     setModelContextInputs(nextInputs)
     setSettingsJson((current) => updateSettingsJsonModelContextWindows(
@@ -1615,58 +1589,6 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
       buildModelContextWindows(models, nextInputs),
     ))
   }
-  const canFetchModels = Boolean(baseUrl.trim() && apiKey.trim())
-  const handleFetchModels = async () => {
-    if (!canFetchModels || isFetchingModels) return
-    const requestId = modelsRequestRef.current + 1
-    modelsRequestRef.current = requestId
-    setIsFetchingModels(true)
-    setModelsErrorCode(null)
-    setModelsErrorMessage(null)
-    try {
-      // Upstream failures arrive as a resolved `ok: false`, so the catch below
-      // only covers our own server being unreachable.
-      const result = await fetchModels({ baseUrl: baseUrl.trim(), apiKey: apiKey.trim() })
-      // The form moved on while we were probing — this answer describes a base
-      // URL or key the user no longer has typed in.
-      if (modelsRequestRef.current !== requestId) return
-      if (result.ok) {
-        setFetchedModels(result.models)
-      } else {
-        setFetchedModels(null)
-        setModelsErrorCode(result.errorCode)
-        setModelsErrorMessage(result.message?.trim() || null)
-      }
-    } catch {
-      if (modelsRequestRef.current !== requestId) return
-      setFetchedModels(null)
-      setModelsErrorCode('unknown')
-      setModelsErrorMessage(null)
-    } finally {
-      // The config-change effect already cleared the flag for a discarded
-      // request; clearing it again here would race a newer fetch.
-      if (modelsRequestRef.current === requestId) setIsFetchingModels(false)
-    }
-  }
-  const modelsErrorText = modelsErrorCode ? t(providerModelsErrorKey(modelsErrorCode)) : null
-  // The server keeps the upstream's own wording, which is the only thing that
-  // separates a 200-cloaked auth failure (智谱 answers `{"msg":"身份验证失败。"}`
-  // with HTTP 200, classified `not-supported`) from a provider that genuinely
-  // publishes no model list. Display-only: nothing branches on this text.
-  const modelsErrorUpstream = modelsErrorMessage && modelsErrorMessage !== modelsErrorText
-    ? modelsErrorMessage
-    : null
-  const modelPickerItems = useMemo(
-    () => groupProviderModels(
-      fetchedModels ?? [],
-      t('settings.providers.fetchModelsGroupOther'),
-    ).flatMap((group) => group.models.map((model) => ({
-      value: model.id,
-      label: model.id,
-      description: group.group,
-    }))),
-    [fetchedModels, t],
-  )
   const renderPresetButton = (preset: ProviderPreset) => (
     <SettingsPill
       key={preset.id}
@@ -1734,11 +1656,19 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
         }
         if (apiKey.trim()) input.apiKey = apiKey.trim()
         await updateProvider(provider.id, input)
+        // The user just changed something about this provider (URL, key,
+        // model, etc.). Reset its fake-tool_use counter so a previous
+        // incompatibility warning doesn't stick around — if the new config
+        // is still broken, we'll re-warn after the next 3 leaks.
+        useProviderCompatStore.getState().clearProvider(provider.id)
       }
-      await fetchSettings()
       onClose()
     } catch (err) {
       console.error('Failed to save provider:', err)
+      addToast({
+        type: 'error',
+        message: t('settings.providers.saveFailed'),
+      })
     } finally {
       setIsSubmitting(false)
     }
@@ -1755,11 +1685,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
     setTestResult(null)
     try {
       let result: ProviderTestResult
-      const savedConfigUnchanged = mode === 'edit' && provider && !apiKey.trim() &&
-        baseUrl.trim() === provider.baseUrl.trim() &&
-        apiFormat === provider.apiFormat &&
-        authStrategy === provider.authStrategy
-      if (savedConfigUnchanged && provider) {
+      if (mode === 'edit' && provider && !apiKey.trim()) {
         result = await useProviderStore.getState().testProvider(provider.id, {
           modelId: models.main.trim(),
         })
@@ -1780,6 +1706,51 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
       setIsTesting(false)
     }
   }
+
+  const canFetchModels = Boolean(baseUrl.trim() && apiKey.trim())
+  const handleFetchModels = async () => {
+    if (!canFetchModels || isFetchingModels) return
+    const requestId = modelsRequestRef.current + 1
+    modelsRequestRef.current = requestId
+    setIsFetchingModels(true)
+    setModelsErrorCode(null)
+    setModelsErrorMessage(null)
+    try {
+      // `/api/providers/models` is a server-side upstream probe, so plain HTTP
+      // relays and providers without renderer CORS support remain reachable.
+      const result = await fetchModels({ baseUrl: baseUrl.trim(), apiKey: apiKey.trim() })
+      if (modelsRequestRef.current !== requestId) return
+      if (result.ok) {
+        setFetchedModels(result.models)
+      } else {
+        setFetchedModels(null)
+        setModelsErrorCode(result.errorCode)
+        setModelsErrorMessage(result.message?.trim() || null)
+      }
+    } catch {
+      if (modelsRequestRef.current !== requestId) return
+      setFetchedModels(null)
+      setModelsErrorCode('unknown')
+      setModelsErrorMessage(null)
+    } finally {
+      if (modelsRequestRef.current === requestId) setIsFetchingModels(false)
+    }
+  }
+  const modelsErrorText = modelsErrorCode ? t(providerModelsErrorKey(modelsErrorCode)) : null
+  const modelsErrorUpstream = modelsErrorMessage && modelsErrorMessage !== modelsErrorText
+    ? modelsErrorMessage
+    : null
+  const modelPickerItems = useMemo(
+    () => groupProviderModels(
+      fetchedModels ?? [],
+      t('settings.providers.fetchModelsGroupOther'),
+    ).flatMap((group) => group.models.map((model) => ({
+      value: model.id,
+      label: model.id,
+      description: group.group,
+    }))),
+    [fetchedModels, t],
+  )
 
   return (
     <Modal
@@ -1817,26 +1788,6 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
         <Input label={t('settings.providers.name')} required value={name} onChange={(e) => setName(e.target.value)} placeholder={t('settings.providers.namePlaceholder')} />
 
         <Input label={t('settings.providers.notes')} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder={t('settings.providers.notesPlaceholder')} />
-
-        {regionalEndpointItems.length > 1 && (
-          <div>
-            <label className="text-sm font-medium text-[var(--color-text-primary)] mb-1 block">{t('settings.providers.endpointRegion')}</label>
-            <Dropdown<string>
-              items={regionalEndpointItems}
-              value={selectedRegionalEndpointUrl}
-              onChange={handleBaseUrlChange}
-              label={t('settings.providers.endpointRegion')}
-              width="100%"
-              className="block w-full"
-              trigger={
-                <Button variant="secondary" size="md" block className="h-10 gap-3">
-                  <span className="min-w-0 flex-1 truncate text-left">{selectedRegionalEndpointLabel}</span>
-                  <span className="material-symbols-outlined flex-shrink-0 text-[18px] text-[var(--color-text-secondary)]">expand_more</span>
-                </Button>
-              }
-            />
-          </div>
-        )}
 
         <Input label={t('settings.providers.baseUrl')} required value={baseUrl} onChange={(e) => handleBaseUrlChange(e.target.value)} placeholder={t('settings.providers.baseUrlPlaceholder')} className="font-mono text-[13px]" />
 
@@ -1889,7 +1840,10 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
           </div>
         )}
 
-        <label
+        {/* ToolSearch toggle hidden: third-party providers don't support
+            the beta header and forcing it causes tool_use format degradation.
+            CLI auto-detects first-party hosts via toolSearch.ts. */}
+        {false && <label
           className={`relative flex items-start gap-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-3 transition-colors ${
             toolSearchUnsupported
               ? 'cursor-not-allowed opacity-70'
@@ -1913,7 +1867,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
               {toolSearchDescription}
             </div>
           </div>
-        </label>
+        </label>}
 
         <label className="relative flex cursor-pointer items-start gap-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-3 transition-colors hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)]">
           <input
@@ -1960,7 +1914,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
           </div>
         </div>
 
-        {(apiKeyUrl || promoText) && (
+        {apiKeyUrl && (
           <div className="-mt-2 flex flex-col gap-1.5">
             {apiKeyUrl && (
               <button
@@ -1971,20 +1925,6 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
                 <span className="material-symbols-outlined text-[13px]">key</span>
                 {t('settings.providers.getApiKey')}
                 <span className="material-symbols-outlined text-[9px] opacity-60 transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5">arrow_outward</span>
-              </button>
-            )}
-            {promoText && (
-              <button
-                type="button"
-                onClick={() => apiKeyUrl && openExternalUrl(apiKeyUrl)}
-                disabled={!apiKeyUrl}
-                className="group flex w-full cursor-pointer items-start gap-1.5 rounded-[var(--radius-sm)] border border-[var(--color-primary-fixed-dim)] bg-[var(--color-brand-soft)] px-2.5 py-1.5 text-left text-[11px] leading-5 text-[var(--color-text-primary)] transition-colors hover:border-[var(--color-brand)] hover:bg-[var(--color-brand-soft-hover)] focus:outline-none focus:shadow-[var(--shadow-focus-ring)] disabled:cursor-default disabled:hover:border-[var(--color-primary-fixed-dim)] disabled:hover:bg-[var(--color-brand-soft)]"
-              >
-                <span className="material-symbols-outlined mt-0.5 text-[13px] text-[var(--color-brand)]">tips_and_updates</span>
-                <span>{promoText}</span>
-                {apiKeyUrl && (
-                  <span className="material-symbols-outlined ml-auto mt-1 text-[10px] text-[var(--color-brand)] opacity-45 transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5">arrow_outward</span>
-                )}
               </button>
             )}
           </div>
@@ -2045,7 +1985,6 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
                       onChange={(e) => handleModelChange(slot, e.target.value)}
                       placeholder={slot === 'main' ? t('settings.providers.modelIdPlaceholder') : t('settings.providers.sameAsMain')}
                     />
-                    {/* The picker only supplements the field — the id stays typeable. */}
                     {modelPickerItems.length > 0 && (
                       <Dropdown<string>
                         items={modelPickerItems}
@@ -2058,25 +1997,20 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
                       />
                     )}
                   </div>
-                  <Tooltip content={t('settings.providers.model1mSupportTooltip')} placement="bottom-start">
-                    <label className="mt-1 inline-flex h-6 w-fit cursor-pointer items-center gap-1.5 rounded-[var(--radius-sm)] px-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]">
-                      <input
-                        type="checkbox"
-                        checked={model1mSupport[slot]}
-                        onChange={(e) => handleModel1mSupportChange(slot, e.target.checked)}
-                        aria-label={`1M support: ${slot}`}
-                        className="h-3.5 w-3.5 rounded border-[var(--color-border)] text-[var(--color-brand)] accent-[var(--color-brand)] focus:ring-[var(--color-brand)]"
-                      />
-                      <span>{t('settings.providers.model1mSupportShort')}</span>
-                    </label>
-                  </Tooltip>
+                  <label className="mt-1 inline-flex h-6 w-fit cursor-pointer items-center gap-1.5 rounded-[var(--radius-sm)] px-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]">
+                    <input
+                      type="checkbox"
+                      checked={model1mSupport[slot]}
+                      onChange={(e) => handleModel1mSupportChange(slot, e.target.checked)}
+                      aria-label={`1M support: ${slot}`}
+                      className="h-3.5 w-3.5 rounded border-[var(--color-border)] text-[var(--color-brand)] accent-[var(--color-brand)] focus:ring-[var(--color-brand)]"
+                    />
+                    <span>{t('settings.providers.model1mSupportShort')}</span>
+                  </label>
                 </div>
               )
             })}
           </div>
-          <p className="mt-2 text-[11px] leading-5 text-[var(--color-text-tertiary)]">
-            {t('settings.providers.model1mSupportHint')}
-          </p>
         </div>
 
         <div className="rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)]">
@@ -2198,7 +2132,6 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
           <textarea
             value={displayedSettingsJson}
             onChange={(e) => {
-              settingsJsonUserEditedRef.current = true
               const raw = e.target.value
               try {
                 const parsed = restoreSettingsJsonSecrets(JSON.parse(raw), settingsJson, apiKey)
@@ -2207,16 +2140,13 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
                 // Auto-fill form fields from parsed JSON env
                 const env = parsed.env as Record<string, string> | undefined
                 if (env) {
-                  const baseUrl = env.ANTHROPIC_BASE_URL
-                  if (baseUrl) {
-                    setBaseUrl(baseUrl)
+                  if (env.ANTHROPIC_BASE_URL) {
+                    setBaseUrl(env.ANTHROPIC_BASE_URL)
                     // Auto-switch to matching preset or Custom
                     if (mode === 'create') {
-                      const matchedPreset = selectablePresets.find(
-                        (preset) => preset.id !== 'custom' && presetMatchesBaseUrl(preset, baseUrl),
-                      )
+                      const matchedPreset = availablePresets.find((p) => p.id !== 'custom' && p.baseUrl === env.ANTHROPIC_BASE_URL)
                       const targetPreset = requirePreset(
-                        matchedPreset ?? selectablePresets.find((p) => p.id === 'custom'),
+                        matchedPreset ?? availablePresets.find((p) => p.id === 'custom'),
                       )
                       if (targetPreset.id !== selectedPreset.id) {
                         jsonPastedRef.current = true
@@ -2309,10 +2239,16 @@ export function GeneralSettings() {
   const {
     thinkingEnabled,
     setThinkingEnabled,
+    thinkingAutoCollapse,
+    setThinkingAutoCollapse,
     permissionMode,
     setPermissionMode,
     autoDreamEnabled,
     setAutoDreamEnabled,
+    unifiedActivityPanelEnabled,
+    setUnifiedActivityPanelEnabled,
+    agentOfficeSurface,
+    setAgentOfficeSurface,
     locale,
     setLocale,
     setTheme,
@@ -2329,6 +2265,8 @@ export function GeneralSettings() {
     setSkipWebFetchPreflight,
     desktopNotificationsEnabled,
     setDesktopNotificationsEnabled,
+    sessionContentSearchEnabled,
+    setSessionContentSearchEnabled,
     webSearch,
     setWebSearch,
     network,
@@ -2471,12 +2409,6 @@ export function GeneralSettings() {
   }))
   const selectedOutputStyle =
     outputStyles.find((style) => style.value === outputStyle) ?? outputStyles[0]
-  const selectedOutputStyleLabel = selectedOutputStyle
-    ? getOutputStyleLabel(selectedOutputStyle, t)
-    : outputStyle
-  const selectedOutputStyleDescription = selectedOutputStyle
-    ? getOutputStyleDescription(selectedOutputStyle, t)
-    : ''
   const outputStyleScopeLabel = outputStyleScope === 'localSettings'
     ? t('settings.general.outputStyleScopeLocal')
     : t('settings.general.outputStyleScopeUser')
@@ -2491,6 +2423,10 @@ export function GeneralSettings() {
     { value: 'celadon', label: t('settings.general.appearance.celadon') },
     { value: 'dark', label: t('settings.general.appearance.dark') },
     { value: 'ink-blue', label: t('settings.general.appearance.inkBlue') },
+    { value: 'classic-white', label: t('settings.general.appearance.classicWhite') },
+    { value: 'classic-light', label: t('settings.general.appearance.classicLight') },
+    { value: 'eye-care', label: t('settings.general.appearance.eyeCare') },
+    { value: 'classic-dark', label: t('settings.general.appearance.classicDark') },
   ]
   // Split by ground, in the order THEMES already lists them, so the two rows
   // shown while following the system stay consistent with the flat picker.
@@ -2559,6 +2495,28 @@ export function GeneralSettings() {
       }
     } finally {
       setNotificationActionRunning(false)
+    }
+  }
+
+  const handleUnifiedActivityPanelToggle = async (enabled: boolean) => {
+    try {
+      await setUnifiedActivityPanelEnabled(enabled)
+    } catch {
+      addToast({
+        type: 'error',
+        message: t('settings.general.activityPanelSaveFailed'),
+      })
+    }
+  }
+
+  const handleAgentOfficeSurfaceChange = async (surface: 'modal' | 'tab') => {
+    try {
+      await setAgentOfficeSurface(surface)
+    } catch {
+      addToast({
+        type: 'error',
+        message: t('settings.general.agentOfficeSaveFailed'),
+      })
     }
   }
 
@@ -2957,7 +2915,6 @@ export function GeneralSettings() {
           ))}
         </div>
       </SettingsSection>
-
       {/* Response Language */}
       <h2
         className="text-[16.5px] font-semibold leading-tight text-[var(--color-text-primary)] mb-1"
@@ -3012,11 +2969,11 @@ export function GeneralSettings() {
                 <span className="block truncate font-medium">
                   {outputStylesLoading
                     ? t('settings.general.outputStyleLoading')
-                    : selectedOutputStyleLabel}
+                    : selectedOutputStyle?.label ?? outputStyle}
                 </span>
-                {selectedOutputStyleDescription && (
+                {selectedOutputStyle?.description && (
                   <span className="mt-0.5 block truncate text-xs text-[var(--color-text-tertiary)]">
-                    {selectedOutputStyleDescription}
+                    {getOutputStyleDescription(selectedOutputStyle, t)}
                   </span>
                 )}
               </span>
@@ -3089,7 +3046,86 @@ export function GeneralSettings() {
             </div>
           </div>
         </label>
+        <label className="mt-2 flex items-start gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3 cursor-pointer hover:border-[var(--color-border-focus)] transition-colors">
+          <input
+            type="checkbox"
+            aria-label={t('settings.general.thinkingAutoCollapse')}
+            checked={thinkingAutoCollapse}
+            onChange={(e) => void setThinkingAutoCollapse(e.target.checked)}
+            className="peer sr-only"
+          />
+          <SettingsCheckboxMark checked={thinkingAutoCollapse} />
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-[var(--color-text-primary)]">
+              {t('settings.general.thinkingAutoCollapse')}
+            </div>
+          </div>
+        </label>
       </div>
+
+      <div className="mt-8">
+        <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.activityPanelTitle')}</h2>
+        <p className="text-sm text-[var(--color-text-tertiary)] mb-3">{t('settings.general.activityPanelDescription')}</p>
+        <label className="relative flex items-start gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3 cursor-pointer hover:border-[var(--color-border-focus)] transition-colors">
+          <input
+            type="checkbox"
+            aria-label={t('settings.general.activityPanelEnabled')}
+            checked={unifiedActivityPanelEnabled}
+            onChange={(event) => void handleUnifiedActivityPanelToggle(event.target.checked)}
+            className={SETTINGS_CHECKBOX_INPUT_CLASS}
+          />
+          <SettingsCheckboxMark checked={unifiedActivityPanelEnabled} />
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-[var(--color-text-primary)]">
+              {t('settings.general.activityPanelEnabled')}
+            </div>
+            <div className="text-xs text-[var(--color-text-tertiary)] mt-1 leading-5">
+              {unifiedActivityPanelEnabled
+                ? t('settings.general.activityPanelHintOn')
+                : t('settings.general.activityPanelHintOff')}
+            </div>
+          </div>
+        </label>
+      </div>
+
+      {isDesktopRuntime() && (
+        <div className="mt-8">
+          <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.agentOfficeTitle')}</h2>
+          <p className="text-sm text-[var(--color-text-tertiary)] mb-3">{t('settings.general.agentOfficeDescription')}</p>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {(['modal', 'tab'] as const).map((surface) => (
+              <label
+                key={surface}
+                className="flex cursor-pointer items-start gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3 transition-colors hover:border-[var(--color-border-focus)]"
+              >
+                <input
+                  type="radio"
+                  name="agent-office-surface"
+                  value={surface}
+                  aria-label={t(surface === 'modal'
+                    ? 'settings.general.agentOfficeSurfaceModal'
+                    : 'settings.general.agentOfficeSurfaceTab')}
+                  checked={agentOfficeSurface === surface}
+                  onChange={() => void handleAgentOfficeSurfaceChange(surface)}
+                  className="mt-0.5 h-4 w-4 accent-[var(--color-brand)]"
+                />
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-[var(--color-text-primary)]">
+                    {t(surface === 'modal'
+                      ? 'settings.general.agentOfficeSurfaceModal'
+                      : 'settings.general.agentOfficeSurfaceTab')}
+                  </div>
+                  <div className="mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]">
+                    {t(surface === 'modal'
+                      ? 'settings.general.agentOfficeSurfaceModalHint'
+                      : 'settings.general.agentOfficeSurfaceTabHint')}
+                  </div>
+                </div>
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="mt-8">
         <h2 className="text-[16.5px] font-semibold leading-tight text-[var(--color-text-primary)] mb-1" style={{ fontFamily: 'var(--font-headline)' }}>{t('settings.general.autoDreamTitle')}</h2>
@@ -3392,6 +3428,29 @@ export function GeneralSettings() {
       </div>
 
       <div className="mt-8">
+        <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.sessionContentSearchTitle')}</h2>
+        <p className="text-sm text-[var(--color-text-tertiary)] mb-3">{t('settings.general.sessionContentSearchDescription')}</p>
+        <label className="relative flex items-start gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3 cursor-pointer hover:border-[var(--color-border-focus)] transition-colors">
+          <input
+            type="checkbox"
+            aria-label={t('settings.general.sessionContentSearchEnabled')}
+            checked={sessionContentSearchEnabled}
+            onChange={(event) => void setSessionContentSearchEnabled(event.target.checked)}
+            className={SETTINGS_CHECKBOX_INPUT_CLASS}
+          />
+          <SettingsCheckboxMark checked={sessionContentSearchEnabled} />
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-[var(--color-text-primary)]">
+              {t('settings.general.sessionContentSearchEnabled')}
+            </div>
+            <div className="text-xs text-[var(--color-text-tertiary)] mt-1 leading-5">
+              {t('settings.general.sessionContentSearchHint')}
+            </div>
+          </div>
+        </label>
+      </div>
+
+      <div className="mt-8">
         <h2 className="text-[16.5px] font-semibold leading-tight text-[var(--color-text-primary)] mb-1" style={{ fontFamily: 'var(--font-headline)' }}>{t('settings.general.webSearchTitle')}</h2>
         <p className="text-sm text-[var(--color-text-tertiary)] mb-3">{t('settings.general.webSearchDescription')}</p>
         <Card radius="xl" surface="low" padding="none" className="px-4 py-4">
@@ -3402,7 +3461,7 @@ export function GeneralSettings() {
                 onClick={() => setWebSearchDraft({ ...webSearchDraft, mode: value })}
                 className={`h-9 px-2 text-xs font-semibold rounded-[var(--radius-lg)] border transition-all truncate ${
                   (webSearchDraft.mode ?? 'auto') === value
-                    ? 'bg-[var(--color-brand)] text-[var(--color-on-primary)] border-[var(--color-brand)]'
+                    ? 'bg-[var(--color-brand)] text-white border-[var(--color-brand)]'
                     : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
                 }`}
                 title={label}
@@ -3660,11 +3719,7 @@ function getBuiltInOutputStyleTranslationKeys(style: {
 }
 
 function getOutputStyleLabel(
-  style: {
-    value: string
-    label: string
-    source: OutputStyleSource
-  },
+  style: { value: string; label: string; source: OutputStyleSource },
   t: (key: TranslationKey) => string,
 ) {
   const keys = getBuiltInOutputStyleTranslationKeys(style)
@@ -3672,11 +3727,7 @@ function getOutputStyleLabel(
 }
 
 function getOutputStyleDescription(
-  style: {
-    value: string
-    description: string
-    source: OutputStyleSource
-  },
+  style: { value: string; description: string; source: OutputStyleSource },
   t: (key: TranslationKey) => string,
 ) {
   const keys = getBuiltInOutputStyleTranslationKeys(style)
@@ -3710,10 +3761,13 @@ function H5AccessSettings() {
     h5Access,
     h5AccessDiagnostics,
     h5AccessError,
+    fetchH5Access,
     enableH5Access,
     disableH5Access,
     regenerateH5AccessToken,
     updateH5AccessSettings,
+    startH5Tunnel,
+    stopH5Tunnel,
   } = useSettingsStore()
   const t = useTranslation()
   const addToast = useUIStore((s) => s.addToast)
@@ -3724,6 +3778,14 @@ function H5AccessSettings() {
   const [h5EnableConfirmOpen, setH5EnableConfirmOpen] = useState(false)
   const [h5QrDataUrl, setH5QrDataUrl] = useState<string | null>(null)
   const [h5ActionRunning, setH5ActionRunning] = useState(false)
+  const [h5TunnelMode, setH5TunnelMode] = useState<'quick' | 'named'>('quick')
+  const [h5TunnelTokenDraft, setH5TunnelTokenDraft] = useState('')
+  const [h5TunnelTokenVisible, setH5TunnelTokenVisible] = useState(false)
+  // One-click tunnelling spawns cloudflared in the desktop main process, so it
+  // is only available inside the Electron shell, not a browser H5 session.
+  const h5TunnelAvailable = h5AccessApi.tunnelAvailable()
+  const h5TunnelState = h5AccessDiagnostics?.tunnel
+  const h5TunnelRunning = h5TunnelState?.status === 'running'
   const h5AccessUrl = h5Access.publicBaseUrl
   // The token is persisted server-side, so the QR code and copy actions stay
   // available across desktop restarts (issue #767).
@@ -3746,6 +3808,14 @@ function H5AccessSettings() {
   const h5FixedPortPendingRestart = h5Access.fixedPort != null &&
     h5ActivePort != null &&
     String(h5Access.fixedPort) !== h5ActivePort
+
+  useEffect(() => {
+    if (!h5TunnelAvailable || (h5TunnelState?.status !== 'starting' && h5TunnelState?.status !== 'running')) return
+    const interval = window.setInterval(() => {
+      void fetchH5Access()
+    }, 10_000)
+    return () => window.clearInterval(interval)
+  }, [fetchH5Access, h5TunnelAvailable, h5TunnelState?.status])
 
   useEffect(() => {
     setH5PublicBaseUrlDraft(extractH5AccessAddressDraft(h5Access.publicBaseUrl))
@@ -3814,6 +3884,29 @@ function H5AccessSettings() {
     addToast({
       type: copied ? 'success' : 'error',
       message: copied ? t('settings.general.h5AccessUrlCopied') : t('common.copyFailed'),
+    })
+  }
+
+  const handleH5TunnelToggle = async () => {
+    await runH5Action(async () => {
+      if (h5TunnelRunning) {
+        await stopH5Tunnel()
+        return
+      }
+      if (h5TunnelMode === 'named') {
+        const token = h5TunnelTokenDraft.trim()
+        if (token) {
+          // Persist the token so the named tunnel survives restarts.
+          await updateH5AccessSettings({ tunnelToken: token, tunnelMode: 'named' })
+        }
+        await startH5Tunnel({
+          mode: 'named',
+          token: token || undefined,
+          namedUrl: h5NextPublicBaseUrl || h5Access.publicBaseUrl || undefined,
+        })
+      } else {
+        await startH5Tunnel({ mode: 'quick' })
+      }
     })
   }
 
@@ -4011,6 +4104,87 @@ function H5AccessSettings() {
                 })}
               </div>
             )}
+
+            {h5TunnelAvailable && (
+              <div
+                data-testid="h5-access-tunnel"
+                className="mt-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-3 py-3"
+              >
+                <div className="text-sm font-medium text-[var(--color-text-primary)]">
+                  {t('settings.general.h5AccessTunnelTitle')}
+                </div>
+                <p className="mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]">
+                  {t('settings.general.h5AccessTunnelHint')}
+                </p>
+
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <select
+                    aria-label={t('settings.general.h5AccessTunnelMode')}
+                    className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5 text-sm text-[var(--color-text-primary)]"
+                    value={h5TunnelMode}
+                    disabled={h5TunnelRunning || h5ActionRunning}
+                    onChange={(event) => setH5TunnelMode(event.target.value === 'named' ? 'named' : 'quick')}
+                  >
+                    <option value="quick">{t('settings.general.h5AccessTunnelModeQuick')}</option>
+                    <option value="named">{t('settings.general.h5AccessTunnelModeNamed')}</option>
+                  </select>
+                  <Button
+                    size="sm"
+                    variant={h5TunnelRunning ? 'secondary' : 'primary'}
+                    loading={h5ActionRunning}
+                    onClick={() => void handleH5TunnelToggle()}
+                    data-testid="h5-access-tunnel-toggle"
+                  >
+                    {h5TunnelRunning
+                      ? t('settings.general.h5AccessTunnelStop')
+                      : t('settings.general.h5AccessTunnelStart')}
+                  </Button>
+                </div>
+
+                {h5TunnelMode === 'named' && !h5TunnelRunning && (
+                  <div className="mt-3">
+                    <Input
+                      id="h5-access-tunnel-token"
+                      label={t('settings.general.h5AccessTunnelToken')}
+                      type={h5TunnelTokenVisible ? 'text' : 'password'}
+                      value={h5TunnelTokenDraft}
+                      placeholder={h5TunnelState?.hasToken
+                        ? t('settings.general.h5AccessTunnelTokenStored')
+                        : t('settings.general.h5AccessTunnelTokenPlaceholder')}
+                      onChange={(event) => setH5TunnelTokenDraft(event.target.value)}
+                    />
+                    <button
+                      type="button"
+                      className="mt-1 text-xs text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)]"
+                      onClick={() => setH5TunnelTokenVisible((v) => !v)}
+                    >
+                      {h5TunnelTokenVisible
+                        ? t('settings.general.h5AccessHideToken')
+                        : t('settings.general.h5AccessShowToken')}
+                    </button>
+                  </div>
+                )}
+
+                {h5TunnelState && h5TunnelState.status !== 'idle' && (
+                  <div
+                    data-testid="h5-access-tunnel-status"
+                    className="mt-3 text-xs leading-5 text-[var(--color-text-secondary)]"
+                  >
+                    {h5TunnelState.status === 'starting' && t('settings.general.h5AccessTunnelStarting')}
+                    {h5TunnelState.status === 'running' && h5TunnelState.url && (
+                      <span className="break-all">
+                        {t('settings.general.h5AccessTunnelRunning')} {h5TunnelState.url}
+                      </span>
+                    )}
+                    {h5TunnelState.status === 'error' && (
+                      <span className="text-[var(--color-error)]">
+                        {h5TunnelState.error ?? t('settings.general.h5AccessTunnelError')}
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {h5AccessUrl && (
@@ -4171,7 +4345,7 @@ function SettingsCheckboxMark({ checked, disabled = false }: { checked: boolean;
       aria-hidden="true"
       className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-[var(--radius-md)] border transition-all peer-focus-visible:ring-2 peer-focus-visible:ring-[var(--color-border-focus)] ${
         checked
-          ? 'border-[var(--color-brand)] bg-[var(--color-brand)] text-[var(--color-on-primary)] shadow-[var(--shadow-button-primary)]'
+          ? 'border-[var(--color-brand)] bg-[var(--color-brand)] text-white shadow-[var(--shadow-button-primary)]'
           : 'border-[var(--color-border-focus)] bg-[var(--color-surface)] text-transparent'
       } ${disabled ? 'opacity-50' : ''}`}
     >
@@ -4232,10 +4406,15 @@ function PluginSettings() {
 
 // ─── About Settings ──────────────────────────────────────
 
-const GITHUB_REPO = 'https://github.com/NanmiCoder/cc-haha'
+// Project/repo + release/update source point at this fork. Original author
+// attribution (AUTHOR_GITHUB + social links) is intentionally preserved below.
+const GITHUB_REPO = 'https://github.com/706412584/cc-haha'
+const GITHUB_REPO_NAME = '706412584/cc-haha'
 const GITHUB_ISSUES = `${GITHUB_REPO}/issues`
 const GITHUB_RELEASES = `${GITHUB_REPO}/releases`
 const AUTHOR_GITHUB = 'https://github.com/NanmiCoder'
+// Fork maintainer (credited in addition to the original author).
+const FORK_AUTHOR_GITHUB = 'https://github.com/706412584'
 const SOCIAL_LINKS = [
   { name: 'Bilibili', icon: '/icons/bilibili.svg', url: 'https://space.bilibili.com/434377496', label: '程序员阿江-Relakkes' },
   { name: 'Douyin', icon: '/icons/douyin.svg', url: 'https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE', label: '程序员阿江-Relakkes' },
@@ -4372,10 +4551,10 @@ function AboutSettings() {
   })()
 
   return (
-    <div className="w-full min-w-0 max-w-2xl mx-auto flex flex-col items-center py-6">
+    <div className="w-full min-w-0 flex flex-col items-center py-6">
       {/* Logo + App Name + Version */}
-      <BrandSeal size="xl" className="mb-4" />
-      <h1 className="text-xl font-bold text-[var(--color-text-primary)]" style={{ fontFamily: 'var(--font-headline)' }}>Claude Code Haha</h1>
+      <img src={publicAssetPath('app-icon.png')} alt="Code Council" className="mb-4 h-20 w-20" />
+      <h1 className="text-xl font-bold text-[var(--color-text-primary)]" style={{ fontFamily: 'var(--font-headline)' }}>Code Council</h1>
       {version && (
         <div className="mt-1 flex items-center gap-2 text-xs text-[var(--color-text-tertiary)]">
           <span>{t('settings.about.version')} {version}</span>
@@ -4394,7 +4573,7 @@ function AboutSettings() {
         >
           <img src={publicAssetPath('icons/github.svg')} alt="GitHub" className="w-5 h-5 opacity-70" />
           <div className="flex-1 text-left">
-            <div className="text-sm font-medium text-[var(--color-text-primary)]">NanmiCoder/cc-haha</div>
+            <div className="text-sm font-medium text-[var(--color-text-primary)]">{GITHUB_REPO_NAME}</div>
             <div className="text-xs text-[var(--color-text-tertiary)]">{t('settings.about.starHint')}</div>
           </div>
         </button>
@@ -4600,6 +4779,22 @@ function AboutSettings() {
         >
           <img src={publicAssetPath('icons/github.svg')} alt="GitHub" className="w-4 h-4 opacity-60" />
           <span className="text-sm text-[var(--color-text-primary)]">程序员阿江-Relakkes</span>
+          <span className="text-xs text-[var(--color-text-tertiary)] ml-auto">GitHub</span>
+        </button>
+      </div>
+
+      {/* Fork maintainer (this build is a community fork; original author credited above) */}
+      <div className="w-full mt-4">
+        <h3 className="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-3">{t('settings.about.forkMaintainer')}</h3>
+        <button
+          onClick={() => openUrl(FORK_AUTHOR_GITHUB)}
+          className="w-full flex items-center gap-3 px-4 py-2.5 rounded-lg hover:bg-[var(--color-surface-hover)] transition-colors cursor-pointer"
+        >
+          <img src={publicAssetPath('icons/github.svg')} alt="GitHub" className="w-4 h-4 opacity-60" />
+          <div className="flex-1 text-left">
+            <div className="text-sm text-[var(--color-text-primary)]">706412584</div>
+            <div className="text-xs text-[var(--color-text-tertiary)]">{t('settings.about.forkMaintainerHint')}</div>
+          </div>
           <span className="text-xs text-[var(--color-text-tertiary)] ml-auto">GitHub</span>
         </button>
       </div>

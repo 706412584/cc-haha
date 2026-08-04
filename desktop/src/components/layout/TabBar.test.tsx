@@ -125,6 +125,7 @@ vi.mock('../../i18n', () => ({
       'tabs.closeAllConfirmStop': 'Stop All & Close',
       'tabs.sessionRunning': 'Session running',
       'tabs.openTerminal': 'Open Terminal',
+      'agentOffice.title': 'Agent Office',
       'tabs.showWorkspace': 'Show Workspace',
       'tabs.hideWorkspace': 'Hide Workspace',
       'tabs.showBrowser': 'Show Browser',
@@ -241,6 +242,7 @@ describe('TabBar', () => {
     const { useActivityPanelStore } = await import('../../stores/activityPanelStore')
     const { useCLITaskStore } = await import('../../stores/cliTaskStore')
     const { useTeamStore } = await import('../../stores/teamStore')
+    const { useSettingsStore } = await import('../../stores/settingsStore')
 
     useTabStore.setState({ tabs: [], activeTabId: null })
     useChatStore.setState({
@@ -265,9 +267,73 @@ describe('TabBar', () => {
       memberColors: new Map(),
       error: null,
     })
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: false })
 
     Reflect.deleteProperty(window, 'desktopHost')
     Reflect.deleteProperty(window, '__TAURI__')
+  })
+
+  it('opens Agent Office in the configured surface for the active session', async () => {
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useSessionStore } = await import('../../stores/sessionStore')
+    const { useSettingsStore } = await import('../../stores/settingsStore')
+    const { useUIStore } = await import('../../stores/uiStore')
+    const sessionId = 'session-1'
+
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Chat', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useSessionStore.setState({
+      sessions: [{ id: sessionId, title: 'Chat', workDir: '/tmp/project', workDirExists: true }],
+    } as Partial<ReturnType<typeof useSessionStore.getState>>)
+    useSettingsStore.setState({ agentOfficeSurface: 'modal' })
+
+    await act(async () => {
+      render(<TabBar />)
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Agent Office' }))
+    expect(useUIStore.getState().activeModal).toBe('agentOffice:session-1')
+    expect(useTabStore.getState().tabs.filter((tab) => tab.type === 'office')).toHaveLength(0)
+
+    act(() => {
+      useUIStore.getState().closeModal()
+      useSettingsStore.setState({ agentOfficeSurface: 'tab' })
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Agent Office' }))
+
+    expect(useTabStore.getState().activeTabId).toBe('__office__session-1')
+    expect(useTabStore.getState().tabs.filter((tab) => tab.type === 'office')).toHaveLength(1)
+  })
+
+  it('hides session-only toolbar actions while an Office tab is active', async () => {
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useSettingsStore } = await import('../../stores/settingsStore')
+
+    useTabStore.setState({
+      tabs: [
+        { sessionId: 'session-1', title: 'Chat', type: 'session', status: 'idle' },
+        {
+          sessionId: '__office__session-1',
+          title: 'Agent Office',
+          type: 'office',
+          status: 'idle',
+          sourceSessionId: 'session-1',
+        },
+      ],
+      activeTabId: '__office__session-1',
+    })
+    useSettingsStore.setState({ agentOfficeSurface: 'tab' })
+
+    await act(async () => {
+      render(<TabBar />)
+    })
+
+    expect(screen.queryByRole('button', { name: 'Agent Office' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Show Workspace' })).not.toBeInTheDocument()
   })
 
   it('hides the activity button for no-activity chat session tabs', async () => {
@@ -343,6 +409,7 @@ describe('TabBar', () => {
     const { useChatStore } = await import('../../stores/chatStore')
     const { useSessionStore } = await import('../../stores/sessionStore')
     const { useWorkspacePanelStore } = await import('../../stores/workspacePanelStore')
+    const { useSettingsStore } = await import('../../stores/settingsStore')
     const sessionId = 'session-1'
     const chatSession = makeChatSession('idle')
     chatSession.messages = [completedTodoWriteMessage()]
@@ -365,6 +432,12 @@ describe('TabBar', () => {
       render(<TabBar />)
     })
 
+    expect(screen.queryByRole('button', { name: /activity/i })).not.toBeInTheDocument()
+
+    act(() => {
+      useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
+    })
+
     expect(screen.getByRole('button', { name: /activity/i })).toBeInTheDocument()
     expect(screen.queryByTestId('session-activity-badge')).not.toBeInTheDocument()
 
@@ -381,6 +454,7 @@ describe('TabBar', () => {
     const { useChatStore } = await import('../../stores/chatStore')
     const { useSessionStore } = await import('../../stores/sessionStore')
     const { useActivityPanelStore } = await import('../../stores/activityPanelStore')
+    const { useSettingsStore } = await import('../../stores/settingsStore')
     const sessionId = 'session-1'
     const chatSession = makeChatSession('idle')
     chatSession.backgroundAgentTasks = {
@@ -417,6 +491,7 @@ describe('TabBar', () => {
       },
       disconnectSession: vi.fn(),
     } as Partial<ReturnType<typeof useChatStore.getState>>)
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
 
     await act(async () => {
       render(<TabBar />)
@@ -443,8 +518,10 @@ describe('TabBar', () => {
     const { useChatStore } = await import('../../stores/chatStore')
     const { useSessionStore } = await import('../../stores/sessionStore')
     const { useTeamStore } = await import('../../stores/teamStore')
+    const { useSettingsStore } = await import('../../stores/settingsStore')
     const sessionId = 'session-team'
 
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
     useTabStore.setState({
       tabs: [{ sessionId, title: 'Team Chat', type: 'session', status: 'idle' }],
       activeTabId: sessionId,
@@ -476,6 +553,47 @@ describe('TabBar', () => {
 
     expect(screen.getByRole('button', { name: /activity/i })).toBeInTheDocument()
     expect(screen.queryByTestId('session-activity-badge')).not.toBeInTheDocument()
+  })
+
+  it('hides the activity button for team member transcript sessions', async () => {
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useChatStore } = await import('../../stores/chatStore')
+    const { useSessionStore } = await import('../../stores/sessionStore')
+    const { useTeamStore } = await import('../../stores/teamStore')
+    const { useSettingsStore } = await import('../../stores/settingsStore')
+    const sessionId = 'team-member-session'
+    const chatSession = makeChatSession('idle')
+    chatSession.messages = [completedTodoWriteMessage()]
+
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Reviewer', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useSessionStore.setState({
+      sessions: [{ id: sessionId, title: 'Reviewer', workDir: '/tmp/project', workDirExists: true }],
+    } as Partial<ReturnType<typeof useSessionStore.getState>>)
+    useChatStore.setState({
+      sessions: { [sessionId]: chatSession },
+      disconnectSession: vi.fn(),
+    } as Partial<ReturnType<typeof useChatStore.getState>>)
+    useTeamStore.setState({
+      activeTeam: {
+        name: 'review-team',
+        leadAgentId: 'lead',
+        leadSessionId: 'lead-session',
+        members: [
+          { agentId: 'reviewer', role: 'Reviewer', status: 'running', sessionId },
+        ],
+      },
+    } as Partial<ReturnType<typeof useTeamStore.getState>>)
+
+    await act(async () => {
+      render(<TabBar />)
+    })
+
+    expect(screen.queryByRole('button', { name: /activity/i })).not.toBeInTheDocument()
   })
 
   it('hides team-only activity when the active team belongs to another session', async () => {
@@ -524,8 +642,10 @@ describe('TabBar', () => {
     const { useChatStore } = await import('../../stores/chatStore')
     const { useSessionStore } = await import('../../stores/sessionStore')
     const { useTeamStore } = await import('../../stores/teamStore')
+    const { useSettingsStore } = await import('../../stores/settingsStore')
     const sessionId = 'session-team'
 
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
     useTabStore.setState({
       tabs: [{ sessionId, title: 'Team Chat', type: 'session', status: 'idle' }],
       activeTabId: sessionId,
@@ -881,6 +1001,56 @@ describe('TabBar', () => {
     expect(scrollByMock).toHaveBeenCalledWith({ left: 300, behavior: 'smooth' })
   })
 
+  it('keeps both chevron slots mounted while the strip overflows at an edge', async () => {
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useChatStore } = await import('../../stores/chatStore')
+
+    useTabStore.setState({
+      tabs: [
+        { sessionId: 'tab-1', title: 'First Session', type: 'session', status: 'idle' },
+        { sessionId: 'tab-2', title: 'Second Session', type: 'session', status: 'idle' },
+        { sessionId: 'tab-3', title: 'Third Session', type: 'session', status: 'idle' },
+      ],
+      activeTabId: 'tab-1',
+    })
+    useChatStore.setState({
+      sessions: {},
+      disconnectSession: vi.fn(),
+    } as Partial<ReturnType<typeof useChatStore.getState>>)
+
+    await act(async () => {
+      render(<TabBar />)
+    })
+
+    const scrollRegion = screen.getByTestId('tab-bar-scroll-region')
+    Object.defineProperty(scrollRegion, 'clientWidth', { configurable: true, get: () => 400 })
+    Object.defineProperty(scrollRegion, 'scrollWidth', { configurable: true, get: () => 1200 })
+    let scrollLeft = 0
+    Object.defineProperty(scrollRegion, 'scrollLeft', {
+      configurable: true,
+      get: () => scrollLeft,
+    })
+
+    fireEvent.scroll(scrollRegion)
+
+    const leftButton = document.querySelector<HTMLButtonElement>('button[aria-label="Scroll tabs left"]')
+    const rightButton = document.querySelector<HTMLButtonElement>('button[aria-label="Scroll tabs right"]')
+    expect(leftButton).toBeInTheDocument()
+    expect(leftButton).toBeDisabled()
+    expect(leftButton).toHaveClass('invisible')
+    expect(rightButton).toBeEnabled()
+    expect(rightButton).not.toHaveClass('invisible')
+
+    scrollLeft = 800
+    fireEvent.scroll(scrollRegion)
+
+    expect(leftButton).toBeEnabled()
+    expect(leftButton).not.toHaveClass('invisible')
+    expect(rightButton).toBeDisabled()
+    expect(rightButton).toHaveClass('invisible')
+  })
+
   it('scrolls the active tab into view when the active tab changes', async () => {
     const { TabBar } = await import('./TabBar')
     const { useTabStore } = await import('../../stores/tabStore')
@@ -915,6 +1085,109 @@ describe('TabBar', () => {
       inline: 'nearest',
       behavior: 'smooth',
     })
+  })
+
+  it('exposes the scroll region with overflow-x-auto and a hidden scrollbar', async () => {
+    // Pins the CSS contract introduced when we enabled wheel scroll
+    // on the tab strip: the strip MUST scroll natively
+    // (overflow-x-auto) so vertical wheel input translated to
+    // scrollLeft actually moves it, but the visible scrollbar MUST
+    // stay hidden so the tab strip looks like a clean app chrome
+    // surface (mirrors the look of native browser tab bars).
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useChatStore } = await import('../../stores/chatStore')
+
+    useTabStore.setState({
+      tabs: [{ sessionId: 'tab-1', title: 'A', type: 'session', status: 'idle' }],
+      activeTabId: 'tab-1',
+    })
+    useChatStore.setState({
+      sessions: {},
+      disconnectSession: vi.fn(),
+    } as Partial<ReturnType<typeof useChatStore.getState>>)
+
+    await act(async () => {
+      render(<TabBar />)
+    })
+
+    const region = screen.getByTestId('tab-bar-scroll-region')
+    expect(region).toHaveClass('overflow-x-auto')
+    expect(region).toHaveClass('min-w-0')
+    expect(region.className).toContain('[scrollbar-width:none]')
+    expect(region.className).toContain('[&::-webkit-scrollbar]:hidden')
+  })
+
+  it('translates a vertical wheel into a horizontal scroll on the tab strip', async () => {
+    // The desktop wheel-scroll affordance: hover the tab strip,
+    // spin the mouse wheel, the strip moves horizontally. JSDOM's
+    // scrollLeft writes are persistent on the element, so we can
+    // assert directly on it.
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useChatStore } = await import('../../stores/chatStore')
+
+    useTabStore.setState({
+      tabs: [
+        { sessionId: 'tab-1', title: 'A', type: 'session', status: 'idle' },
+        { sessionId: 'tab-2', title: 'B', type: 'session', status: 'idle' },
+      ],
+      activeTabId: 'tab-1',
+    })
+    useChatStore.setState({
+      sessions: {},
+      disconnectSession: vi.fn(),
+    } as Partial<ReturnType<typeof useChatStore.getState>>)
+
+    await act(async () => {
+      render(<TabBar />)
+    })
+    const region = screen.getByTestId('tab-bar-scroll-region')
+    // Force the region into an "overflowing" geometry — JSDOM
+    // doesn't lay things out, so scrollWidth defaults to 0 and the
+    // handler short-circuits without our help.
+    Object.defineProperty(region, 'scrollWidth', { configurable: true, value: 800 })
+    Object.defineProperty(region, 'clientWidth', { configurable: true, value: 200 })
+    region.scrollLeft = 0
+
+    fireEvent.wheel(region, { deltaY: 120, deltaX: 0 })
+
+    expect(region.scrollLeft).toBe(120)
+  })
+
+  it('passes horizontal wheel input through untouched (trackpad sideways swipe)', async () => {
+    // Trackpad two-finger horizontal swipe already produces a
+    // deltaX-dominated wheel event the browser scrolls natively.
+    // We must NOT also mutate scrollLeft, or the strip jumps by 2x.
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useChatStore } = await import('../../stores/chatStore')
+
+    useTabStore.setState({
+      tabs: [
+        { sessionId: 'tab-1', title: 'A', type: 'session', status: 'idle' },
+        { sessionId: 'tab-2', title: 'B', type: 'session', status: 'idle' },
+      ],
+      activeTabId: 'tab-1',
+    })
+    useChatStore.setState({
+      sessions: {},
+      disconnectSession: vi.fn(),
+    } as Partial<ReturnType<typeof useChatStore.getState>>)
+
+    await act(async () => {
+      render(<TabBar />)
+    })
+    const region = screen.getByTestId('tab-bar-scroll-region')
+    Object.defineProperty(region, 'scrollWidth', { configurable: true, value: 800 })
+    Object.defineProperty(region, 'clientWidth', { configurable: true, value: 200 })
+    region.scrollLeft = 50
+
+    fireEvent.wheel(region, { deltaY: 10, deltaX: 80 })
+
+    // We did NOT add deltaY's 10 to scrollLeft — the deltaX-
+    // dominated event was a pass-through.
+    expect(region.scrollLeft).toBe(50)
   })
 
   describe('keeping the active tab whole while the strip resizes', () => {
@@ -1014,6 +1287,29 @@ describe('TabBar', () => {
       expect(scrollIntoViewMock).not.toHaveBeenCalled()
     })
 
+    it('leaves the strip alone once the user has moved it with the mouse wheel', async () => {
+      const { activeTab, strip } = await renderOverflowingStrip()
+      stubRect(activeTab, 640, 896)
+      let scrollLeft = 108
+      Object.defineProperty(strip, 'scrollLeft', {
+        configurable: true,
+        get: () => scrollLeft,
+        set: (value: number) => {
+          scrollLeft = value
+        },
+      })
+
+      fireEvent.wheel(strip, { deltaY: -60, deltaX: 0 })
+      expect(scrollLeft).toBe(48)
+      scrollIntoViewMock.mockClear()
+
+      // Moving away from the right edge brings its chevron back and narrows the
+      // strip. The resulting resize must not smooth-scroll back to the active tab.
+      fireStripResize()
+
+      expect(scrollIntoViewMock).not.toHaveBeenCalled()
+    })
+
     it('takes the strip back over when the user switches tabs', async () => {
       const { activeTab, strip, useTabStore } = await renderOverflowingStrip()
       stubRect(activeTab, 640, 896)
@@ -1040,6 +1336,7 @@ describe('TabBar', () => {
         behavior: 'smooth',
       })
     })
+
   })
 
   it('keeps the overflow button flush against window controls on Windows', async () => {
@@ -1065,8 +1362,10 @@ describe('TabBar', () => {
       render(<TabBar />)
     })
 
-    const scrollRegion = screen.getByTestId('tab-bar').querySelector('.overflow-x-hidden')
+    const scrollRegion = screen.getByTestId('tab-bar').querySelector('.overflow-x-auto')
     expect(scrollRegion).toBeInTheDocument()
+    expect(scrollRegion).toHaveClass('min-w-0')
+    expect(scrollRegion).toHaveClass('flex-1')
 
     Object.defineProperty(scrollRegion!, 'clientWidth', {
       configurable: true,

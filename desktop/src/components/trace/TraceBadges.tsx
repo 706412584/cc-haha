@@ -32,8 +32,8 @@ export function TypeIcon({ span, size = 14 }: { span: TraceSpan; size?: number }
  * tool invocations), tertiary for structure and lifecycle.
  *
  * The spec calls the message icons "blue-grey", but `--color-info` resolves to
- * the same clay as `--color-brand` in five of the six themes, which would erase
- * the LLM signal. Secondary ink is the closest thing that holds in all six.
+ * the same clay as `--color-brand` in most themes, which would erase the LLM
+ * signal. Secondary ink is the closest thing that holds across every palette.
  */
 function iconForSpan(span: TraceSpan, size: number): { icon: ReactNode; className: string } {
   const tertiary = 'text-[var(--color-text-tertiary)]'

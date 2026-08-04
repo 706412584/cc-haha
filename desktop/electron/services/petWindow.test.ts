@@ -482,6 +482,65 @@ describe('Electron pet window service', () => {
     },
   )
 
+  it('unions interactive regions so vertical drag cannot hide the mascot under the task bubble', async () => {
+    const workArea = { x: 0, y: 0, width: 1_920, height: 1_040 }
+    const mascotRegion = { x: 120, y: 232, width: 144, height: 156 }
+    const activityRegion = { x: 16, y: 48, width: 352, height: 160 }
+    // Activity listed first matches a layout where the top task bubble is
+    // measured before the bottom mascot; clamping to only that region would
+    // let repeated downward drags push the mascot off-screen.
+    const regions = [activityRegion, mascotRegion]
+
+    for (const platform of ['darwin', 'win32'] as const) {
+      const petWindow = createFakeWindow({
+        x: 100,
+        y: 420,
+        width: PET_WINDOW_WIDTH,
+        height: PET_WINDOW_HEIGHT,
+      })
+      const writePosition = vi.fn()
+      const controller = new PetWindowController({
+        createWindow: vi.fn(() => petWindow) as never,
+        getCurrentWorkArea: () => workArea,
+        getWorkAreaForPoint: () => workArea,
+        load: vi.fn().mockResolvedValue(undefined),
+        platform,
+        preloadPath: '/app/electron-dist/preload.cjs',
+        writePosition,
+      })
+      await controller.show()
+      controller.setInteractiveRegions(petWindow as never, regions)
+
+      let pointerY = 500
+      for (let step = 0; step < 5; step += 1) {
+        controller.dragWindow(petWindow as never, { phase: 'start', x: 180, y: pointerY })
+        pointerY += 80
+        controller.dragWindow(petWindow as never, { phase: 'end', x: 180, y: pointerY })
+      }
+
+      const finalY = writePosition.mock.calls.at(-1)?.[0]?.y as number
+      expect(finalY).toBeTypeOf('number')
+      const mascotBottom = finalY + mascotRegion.y + mascotRegion.height
+      const activityTop = finalY + activityRegion.y
+      expect(mascotBottom).toBeLessThanOrEqual(workArea.y + workArea.height)
+      expect(activityTop).toBeGreaterThanOrEqual(workArea.y)
+
+      if (platform === 'win32') {
+        const shape = petWindow.setShape.mock.calls.at(-1)?.[0] as Array<{
+          x: number
+          y: number
+          width: number
+          height: number
+        }>
+        expect(shape).toHaveLength(1)
+        expect(shape[0]!.y).toBeLessThanOrEqual(activityRegion.y)
+        expect(shape[0]!.y + shape[0]!.height).toBeGreaterThanOrEqual(
+          mascotRegion.y + mascotRegion.height,
+        )
+      }
+    }
+  })
+
   // The mascot sits at the bottom of a mostly transparent window, so reaching
   // the menu bar means the window's own top edge has to go *above* the work
   // area. macOS refuses that for a visible window unless it opted out, and the
@@ -1145,9 +1204,10 @@ describe('Electron pet window service', () => {
     ])
   })
 
-  it('shapes every reported region, not just the mascot', async () => {
+  it('unions every reported region into the native shape', async () => {
     // The task badge sits above the mascot and carries its own rect; dropping
-    // the tail of the list would make it unclickable.
+    // the tail of the list would make it unclickable, while separate shapes can
+    // split stacked companion content during native layout updates.
     const petWindow = createFakeWindow()
     const controller = new PetWindowController({
       createWindow: vi.fn(() => petWindow) as never,
@@ -1164,8 +1224,7 @@ describe('Electron pet window service', () => {
     ])
 
     expect(petWindow.setShape).toHaveBeenLastCalledWith([
-      { x: 132, y: 268, width: 120, height: 128 },
-      { x: 238, y: 28, width: 48, height: 48 },
+      { x: 132, y: 28, width: 154, height: 368 },
     ])
   })
 
