@@ -74,7 +74,6 @@ vi.mock('../api/sessions', async (importOriginal) => {
 
 // Import all pages
 import { EmptySession } from '../pages/EmptySession'
-import { getComposerElement, setComposerText } from '../components/chat/composerTestUtils'
 import { ActiveSession } from '../pages/ActiveSession'
 import { ScheduledTasks } from '../pages/ScheduledTasks'
 
@@ -145,7 +144,9 @@ describe('Content-only pages render without errors', () => {
 
     render(<EmptySession />)
 
-    setComposerText('/', 1)
+    fireEvent.change(screen.getByRole('textbox'), {
+      target: { value: '/', selectionStart: 1 },
+    })
 
     expect(await screen.findByText('lark-mail')).toBeInTheDocument()
     expect(screen.getByText('mcp')).toBeInTheDocument()
@@ -162,7 +163,9 @@ describe('Content-only pages render without errors', () => {
 
     render(<EmptySession />)
 
-    setComposerText('/goal', 5)
+    fireEvent.change(screen.getByRole('textbox'), {
+      target: { value: '/goal', selectionStart: 5 },
+    })
 
     expect(await screen.findByRole('option', { name: /^goal / })).toBeInTheDocument()
     expect(screen.getByText('[<condition> | clear]')).toBeInTheDocument()
@@ -178,7 +181,7 @@ describe('Content-only pages render without errors', () => {
       await Promise.resolve()
       await Promise.resolve()
     })
-    expect(container.querySelector('[data-composer-editor]')).toBeInTheDocument()
+    expect(container.querySelector('textarea')).toBeInTheDocument()
     expect(container.innerHTML).toContain('New session')
     expect(container.innerHTML).toContain('Ask anything')
   })
@@ -267,10 +270,11 @@ describe('Content-only pages render without errors', () => {
     const { container } = render(<ActiveSession />)
     // With empty messages, the hero is shown
     expect(container.innerHTML).toContain('New session')
-    // ChatInput renders the ProseMirror composer
-    const composer = container.querySelector('[data-composer-editor]')
-    expect(composer).toBeInTheDocument()
-    expect(composer).toHaveAttribute('data-placeholder', 'Ask anything...')
+    // ChatInput has a textarea
+    const textarea = container.querySelector('textarea')
+    expect(textarea).toBeInTheDocument()
+    expect(textarea).toHaveAttribute('placeholder', 'Ask anything...')
+    expect(textarea).toHaveAttribute('rows', '2')
     expect(container.innerHTML).not.toContain('Preview')
     // Cleanup
     resetPageStores()
@@ -325,8 +329,8 @@ describe('Content-only pages render without errors', () => {
 
     render(<ActiveSession />)
 
-    const composer = screen.getByRole('textbox')
-    expect(composer).toHaveAttribute('data-placeholder', 'Ask Claude to edit, debug or explain...')
+    const textarea = screen.getByPlaceholderText('Ask Claude to edit, debug or explain...')
+    expect(textarea).toHaveAttribute('rows', '1')
 
     resetPageStores()
   })
@@ -428,9 +432,9 @@ describe('Content-only pages render without errors', () => {
 
     render(<ActiveSession />)
 
-    const composer = getComposerElement()
-    setComposerText('/mcp', 4)
-    fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' })
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: '/mcp', selectionStart: 4 } })
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' })
 
     expect(sendMessage).not.toHaveBeenCalled()
     expect(await screen.findByText('Available MCP tools')).toBeInTheDocument()
@@ -499,9 +503,9 @@ describe('Content-only pages render without errors', () => {
 
     render(<ActiveSession />)
 
-    const composer = getComposerElement()
-    setComposerText('/skills', 7)
-    fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' })
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: '/skills', selectionStart: 7 } })
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' })
 
     expect(sendMessage).not.toHaveBeenCalled()
     expect(await screen.findByText('Available skills')).toBeInTheDocument()
@@ -556,9 +560,9 @@ describe('Content-only pages render without errors', () => {
 
     render(<ActiveSession />)
 
-    const composer = getComposerElement()
-    setComposerText('/plugin', 7)
-    fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' })
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: '/plugin', selectionStart: 7 } })
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' })
 
     expect(sendMessage).not.toHaveBeenCalled()
     expect(useTabStore.getState().activeTabId).toBe('__settings__')
@@ -619,9 +623,9 @@ describe('Content-only pages render without errors', () => {
 
     render(<ActiveSession />)
 
-    const composer = getComposerElement()
-    setComposerText('/help', 5)
-    fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' })
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: '/help', selectionStart: 5 } })
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' })
 
     expect(sendMessage).not.toHaveBeenCalled()
     expect(screen.getByText('Slash commands')).toBeInTheDocument()
@@ -677,9 +681,9 @@ describe('Content-only pages render without errors', () => {
     })
 
     const { container } = render(<ActiveSession />)
-    const composer = getComposerElement()
-    setComposerText('/status', 7)
-    fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' })
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: '/status', selectionStart: 7 } })
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' })
 
     expect(sendMessage).not.toHaveBeenCalled()
     expect(await screen.findByText('Session inspector')).toBeInTheDocument()
@@ -774,7 +778,7 @@ describe('Content-only pages render without errors', () => {
     resetPageStores()
   })
 
-  it('ActiveSession keeps a stable context placeholder while the first turn loads context', async () => {
+  it('ActiveSession keeps a stable context placeholder while context usage loads', async () => {
     const SESSION_ID = 'context-loading-session'
     vi.mocked(sessionsApi.getInspection).mockImplementationOnce(() => new Promise(() => {}))
 
@@ -798,7 +802,7 @@ describe('Content-only pages render without errors', () => {
       sessions: {
         [SESSION_ID]: {
           messages: [],
-          chatState: 'thinking',
+          chatState: 'idle',
           connectionState: 'connected',
           streamingText: '',
           streamingToolInput: '',
@@ -829,7 +833,19 @@ describe('Content-only pages render without errors', () => {
 
   it('ActiveSession treats an empty idle session without a running CLI as pending context', async () => {
     const SESSION_ID = 'context-empty-idle-session'
-    const inspectionCallsBeforeRender = vi.mocked(sessionsApi.getInspection).mock.calls.length
+    vi.mocked(sessionsApi.getInspection).mockResolvedValueOnce({
+      active: false,
+      status: {
+        sessionId: SESSION_ID,
+        workDir: '/workspace/project',
+        cwd: '/workspace/project',
+        permissionMode: 'bypassPermissions',
+        model: 'kimi-k2.6',
+      },
+      errors: {
+        context: 'CLI session is not running',
+      },
+    })
 
     useTabStore.setState({ tabs: [{ sessionId: SESSION_ID, title: 'Test', type: 'session' as const, status: 'idle' }], activeTabId: SESSION_ID })
     useSessionStore.setState({
@@ -875,14 +891,14 @@ describe('Content-only pages render without errors', () => {
 
     const indicator = await screen.findByLabelText('Context usage not calculated')
     expect(indicator).toHaveTextContent('--')
+    expect(screen.getAllByText('kimi-k2.6').length).toBeGreaterThan(0)
     expect(screen.getByText('Context usage will be calculated after the session starts.')).toBeInTheDocument()
     expect(screen.queryByText('CLI session is not running')).not.toBeInTheDocument()
-    expect(vi.mocked(sessionsApi.getInspection).mock.calls.length).toBe(inspectionCallsBeforeRender)
 
     resetPageStores()
   })
 
-  it('ActiveSession waits for the first turn before inspecting an empty live session', async () => {
+  it('ActiveSession shows initial context usage for an empty live session', async () => {
     const SESSION_ID = 'context-empty-live-session'
     vi.mocked(sessionsApi.getInspection).mockResolvedValueOnce({
       active: true,
@@ -952,29 +968,12 @@ describe('Content-only pages render without errors', () => {
       },
     })
 
-    const inspectionCallsBeforeRender = vi.mocked(sessionsApi.getInspection).mock.calls.length
     render(<ActiveSession />)
-
-    const pendingIndicator = await screen.findByLabelText('Context usage not calculated')
-    expect(pendingIndicator).toHaveTextContent('--')
-    expect(vi.mocked(sessionsApi.getInspection).mock.calls.length).toBe(inspectionCallsBeforeRender)
-
-    act(() => {
-      useChatStore.setState((state) => ({
-        sessions: {
-          ...state.sessions,
-          [SESSION_ID]: {
-            ...state.sessions[SESSION_ID]!,
-            chatState: 'thinking',
-          },
-        },
-      }))
-    })
 
     const indicator = await screen.findByLabelText('Context usage 22%')
     expect(indicator).toHaveTextContent('22%')
     expect(screen.getAllByText('kimi-k2.6').length).toBeGreaterThan(0)
-    expect(vi.mocked(sessionsApi.getInspection).mock.calls.length - inspectionCallsBeforeRender).toBe(1)
+    expect(screen.queryByText('Context usage will be calculated after the session starts.')).not.toBeInTheDocument()
 
     resetPageStores()
   })

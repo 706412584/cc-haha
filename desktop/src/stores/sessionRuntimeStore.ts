@@ -6,7 +6,6 @@ import {
   GROK_OFFICIAL_MODELS,
   GROK_OFFICIAL_PROVIDER_ID,
 } from '../constants/grokOfficialProvider'
-import { normalizeRuntimeSelection } from '../lib/runtimeSelection'
 
 const STORAGE_KEY = 'cc-haha-session-runtime'
 const COORDINATOR_STORAGE_KEY = 'cc-haha-session-coordinator'
@@ -95,12 +94,11 @@ function toSoloBooleanMap(
 }
 
 function normalizeSelection(selection: RuntimeSelection): RuntimeSelection {
-  const normalizedSelection = normalizeRuntimeSelection(selection)
   if (
-    normalizedSelection.providerId !== GROK_OFFICIAL_PROVIDER_ID ||
-    !RETIRED_GROK_MODEL_IDS.has(normalizedSelection.modelId)
+    selection.providerId !== GROK_OFFICIAL_PROVIDER_ID ||
+    !RETIRED_GROK_MODEL_IDS.has(selection.modelId)
   ) {
-    return normalizedSelection
+    return selection
   }
 
   const fallback = GROK_OFFICIAL_MODELS.find(

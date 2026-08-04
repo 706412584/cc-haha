@@ -103,7 +103,6 @@ vi.mock('../controls/ModelSelector', async () => {
 })
 
 import { ChatInput } from './ChatInput'
-import { getComposerElement, getComposerText, setComposerSelection, setComposerText } from './composerTestUtils'
 import { useChatStore } from '../../stores/chatStore'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useSettingsStore } from '../../stores/settingsStore'
@@ -316,12 +315,9 @@ describe('ChatInput file mentions', () => {
 
     render(<ChatInput />)
 
-    const editor = screen.getByRole('textbox')
-    expect(editor).toHaveAttribute(
-      'data-placeholder',
+    expect(screen.getByPlaceholderText(
       'This temporary workspace was cleaned up. Start a new session in the original project to continue.',
-    )
-    expect(editor).toHaveAttribute('contenteditable', 'false')
+    )).toBeDisabled()
   })
 
   it('passes diff metadata to the composer card and clears the reference after send', async () => {
@@ -432,25 +428,30 @@ describe('ChatInput file mentions', () => {
 
     render(<ChatInput variant="hero" />)
 
-    setComposerText('new tab draft', 13)
-    expect(getComposerText()).toBe('new tab draft')
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(input, {
+      target: { value: 'new tab draft', selectionStart: 13 },
+    })
+    expect(input.value).toBe('new tab draft')
 
     act(() => {
       useTabStore.setState({ activeTabId: historySessionId })
     })
 
     await waitFor(() => {
-      expect(getComposerText()).toBe('')
+      expect(input.value).toBe('')
     })
 
-    setComposerText('history tab draft', 17)
+    fireEvent.change(input, {
+      target: { value: 'history tab draft', selectionStart: 17 },
+    })
 
     act(() => {
       useTabStore.setState({ activeTabId: sessionId })
     })
 
     await waitFor(() => {
-      expect(getComposerText()).toBe('new tab draft')
+      expect(input.value).toBe('new tab draft')
     })
 
     act(() => {
@@ -458,7 +459,7 @@ describe('ChatInput file mentions', () => {
     })
 
     await waitFor(() => {
-      expect(getComposerText()).toBe('history tab draft')
+      expect(input.value).toBe('history tab draft')
     })
   })
 
@@ -511,7 +512,10 @@ describe('ChatInput file mentions', () => {
 
     render(<ChatInput variant="hero" />)
 
-    setComposerText('draft before switching project', 30)
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(input, {
+      target: { value: 'draft before switching project', selectionStart: 30 },
+    })
 
     await openLocationMenu()
     fireEvent.click(screen.getAllByTitle('/repo')[0]!)
@@ -525,28 +529,34 @@ describe('ChatInput file mentions', () => {
     await waitFor(() => {
       expect(useTabStore.getState().activeTabId).toBe('session-project-switch')
     })
-    expect(getComposerText()).toBe('draft before switching project')
+    expect(input.value).toBe('draft before switching project')
   })
 
   it('restores an unsent composer draft after the composer unmounts', async () => {
     const { unmount } = render(<ChatInput compact />)
 
-    setComposerText('keep this prompt while I inspect another tab', 43)
-    expect(getComposerText()).toBe('keep this prompt while I inspect another tab')
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(input, {
+      target: { value: 'keep this prompt while I inspect another tab', selectionStart: 43 },
+    })
+    expect(input.value).toBe('keep this prompt while I inspect another tab')
 
     unmount()
     render(<ChatInput compact />)
 
     await waitFor(() => {
-      expect(getComposerText()).toBe('keep this prompt while I inspect another tab')
+      expect(screen.getByRole('textbox')).toHaveValue('keep this prompt while I inspect another tab')
     })
   })
 
   it('appends a delayed browser screenshot without clearing an unsent draft after remount', async () => {
     const { unmount } = render(<ChatInput compact />)
 
-    setComposerText('draft written while the agent is still running', 44)
-    expect(getComposerText()).toBe('draft written while the agent is still running')
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(input, {
+      target: { value: 'draft written while the agent is still running', selectionStart: 44 },
+    })
+    expect(input.value).toBe('draft written while the agent is still running')
 
     unmount()
 
@@ -566,7 +576,7 @@ describe('ChatInput file mentions', () => {
     render(<ChatInput compact />)
 
     await waitFor(() => {
-      expect(getComposerText()).toBe('draft written while the agent is still running')
+      expect(screen.getByRole('textbox')).toHaveValue('draft written while the agent is still running')
       expect(screen.getByAltText('screenshot-full.png')).toBeInTheDocument()
     })
   })
@@ -632,13 +642,16 @@ describe('ChatInput file mentions', () => {
 
     render(<ChatInput compact />)
 
-    setComposerText('please adjust the current direction', 35)
-    fireEvent.keyDown(getComposerElement(), { key: 'Enter' })
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(input, {
+      target: { value: 'please adjust the current direction', selectionStart: 35 },
+    })
+    fireEvent.keyDown(input, { key: 'Enter' })
 
     expect(mocks.wsSend).not.toHaveBeenCalledWith(sessionId, expect.objectContaining({
       type: 'user_message',
     }))
-    expect(getComposerText()).toBe('')
+    expect(input.value).toBe('')
     expect(screen.getByTestId('pending-user-message')).toHaveTextContent('please adjust the current direction')
 
     fireEvent.click(screen.getByRole('button', { name: /Guide now/i }))
@@ -699,8 +712,11 @@ describe('ChatInput file mentions', () => {
 
     render(<ChatInput compact />)
 
-    setComposerText('first queued draft', 18)
-    fireEvent.keyDown(getComposerElement(), { key: 'Enter' })
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(input, {
+      target: { value: 'first queued draft', selectionStart: 18 },
+    })
+    fireEvent.keyDown(input, { key: 'Enter' })
 
     fireEvent.click(screen.getByRole('button', { name: /Edit queued message/i }))
     const editInput = screen.getByLabelText('Queued message text')
@@ -746,8 +762,11 @@ describe('ChatInput file mentions', () => {
 
     render(<ChatInput compact />)
 
-    setComposerText('continue after completion', 25)
-    fireEvent.keyDown(getComposerElement(), { key: 'Enter' })
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(input, {
+      target: { value: 'continue after completion', selectionStart: 25 },
+    })
+    fireEvent.keyDown(input, { key: 'Enter' })
 
     expect(screen.getByTestId('pending-user-message')).toHaveTextContent('continue after completion')
     expect(mocks.wsSend).not.toHaveBeenCalledWith(sessionId, expect.objectContaining({
@@ -918,72 +937,6 @@ describe('ChatInput file mentions', () => {
     expect(stop).not.toBeDisabled()
   })
 
-  it.each(['local_agent', 'remote_agent'])('keeps Run available alongside Stop for an idle session with a running %s', (taskType) => {
-    useChatStore.setState({
-      sessions: {
-        ...useChatStore.getState().sessions,
-        [sessionId]: {
-          ...useChatStore.getState().sessions[sessionId]!,
-          chatState: 'idle',
-          backgroundAgentTasks: {
-            agent: {
-              taskId: 'agent',
-              taskType,
-              status: 'running',
-              startedAt: 1,
-              updatedAt: 1,
-            },
-          },
-        },
-      },
-    })
-
-    render(<ChatInput compact />)
-
-    setComposerText('continue while the agent runs', 29)
-
-    const run = screen.getByRole('button', { name: 'Run' })
-    const stop = screen.getByRole('button', { name: 'Stop' })
-    expect(run).not.toBeDisabled()
-    expect(stop).not.toBeDisabled()
-
-    fireEvent.click(stop)
-    fireEvent.click(run)
-
-    expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, { type: 'stop_generation' })
-    expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, {
-      type: 'user_message',
-      content: 'continue while the agent runs',
-      attachments: [],
-    })
-  })
-
-  it.each(['local_bash', 'dream'])('does not turn Run into Stop for a running %s task', (taskType) => {
-    useChatStore.setState({
-      sessions: {
-        ...useChatStore.getState().sessions,
-        [sessionId]: {
-          ...useChatStore.getState().sessions[sessionId]!,
-          chatState: 'idle',
-          backgroundAgentTasks: {
-            task: {
-              taskId: 'task',
-              taskType,
-              status: 'running',
-              startedAt: 1,
-              updatedAt: 1,
-            },
-          },
-        },
-      },
-    })
-
-    render(<ChatInput compact />)
-
-    expect(screen.getByRole('button', { name: 'Run' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument()
-  })
-
   // This used to assert that the run button shed its label before the location
   // moved. The button has no label to shed any more — it is one round icon at
   // every width — so what needs pinning is that it does *not* change with the
@@ -1128,8 +1081,9 @@ describe('ChatInput file mentions', () => {
 
     await openBranchList()
     fireEvent.click(await screen.findByRole('option', { name: /feature\/a/ }))
-    setComposerText('run on feature branch', 21)
-    fireEvent.keyDown(getComposerElement(), { key: 'Enter' })
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(input, { target: { value: 'run on feature branch', selectionStart: 21 } })
+    fireEvent.keyDown(input, { key: 'Enter' })
 
     await waitFor(() => {
       expect(mocks.create).toHaveBeenCalledWith({
@@ -1189,8 +1143,9 @@ describe('ChatInput file mentions', () => {
 
     await openBranchList()
     fireEvent.click(await screen.findByRole('option', { name: /feature\/a/ }))
-    setComposerText('run with preserved permissions', 30)
-    fireEvent.keyDown(getComposerElement(), { key: 'Enter' })
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(input, { target: { value: 'run with preserved permissions', selectionStart: 30 } })
+    fireEvent.keyDown(input, { key: 'Enter' })
 
     await waitFor(() => {
       expect(mocks.create).toHaveBeenCalledWith({
@@ -1257,8 +1212,9 @@ describe('ChatInput file mentions', () => {
     // one click away — no second menu to open.
     fireEvent.click(await screen.findByRole('menuitemradio', { name: /Isolated worktree/ }))
     expect(await screen.findByText('Isolated')).toBeInTheDocument()
-    setComposerText('run in a worktree', 17)
-    fireEvent.keyDown(getComposerElement(), { key: 'Enter' })
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(input, { target: { value: 'run in a worktree', selectionStart: 17 } })
+    fireEvent.keyDown(input, { key: 'Enter' })
 
     await waitFor(() => {
       expect(mocks.create).toHaveBeenCalledWith({
@@ -1276,160 +1232,7 @@ describe('ChatInput file mentions', () => {
       .toBe('/repo/.claude/worktrees/desktop-feature-a-12345678')
   })
 
-  it('keeps an isolated worktree choice scoped to its empty session across tab switches and remounts', async () => {
-    const otherSessionId = 'other-empty-session'
-    const baseChatState = useChatStore.getState().sessions[sessionId]!
-    useTabStore.setState({
-      activeTabId: sessionId,
-      tabs: [
-        { sessionId, title: 'Repo A', type: 'session', status: 'idle' },
-        { sessionId: otherSessionId, title: 'Repo B', type: 'session', status: 'idle' },
-      ],
-    })
-    useSessionStore.setState({
-      sessions: [
-        {
-          id: sessionId,
-          title: 'Repo A',
-          createdAt: '2026-05-01T00:00:00.000Z',
-          modifiedAt: '2026-05-01T00:00:00.000Z',
-          messageCount: 0,
-          projectPath: '/repo-a',
-          workDir: '/repo-a',
-          workDirExists: true,
-        },
-        {
-          id: otherSessionId,
-          title: 'Repo B',
-          createdAt: '2026-05-01T00:00:00.000Z',
-          modifiedAt: '2026-05-01T00:00:00.000Z',
-          messageCount: 0,
-          projectPath: '/repo-b',
-          workDir: '/repo-b',
-          workDirExists: true,
-        },
-      ],
-      activeSessionId: sessionId,
-    })
-    useChatStore.setState({
-      sessions: {
-        [sessionId]: { ...baseChatState, messages: [] },
-        [otherSessionId]: { ...baseChatState, messages: [] },
-      },
-    })
-    mocks.getGitInfo.mockImplementation(async (activeSessionId: string) => {
-      const workDir = activeSessionId === otherSessionId ? '/repo-b' : '/repo-a'
-      return {
-        branch: 'main',
-        repoName: workDir.slice(1),
-        workDir,
-        changedFiles: 0,
-      }
-    })
-    mocks.getRepositoryContext.mockImplementation(async (workDir: string) => ({
-      ...okRepositoryContext(),
-      workDir,
-      repoRoot: workDir,
-      repoName: workDir.slice(1),
-    }))
-    mocks.create.mockResolvedValueOnce({
-      sessionId: 'created-restored-worktree',
-      workDir: '/repo-a/.claude/worktrees/desktop-main-restored',
-    })
-
-    const view = render(<ChatInput variant="hero" />)
-
-    await openLocationMenu()
-    fireEvent.click(await screen.findByRole('menuitemradio', { name: /Isolated worktree/ }))
-    expect(await screen.findByText('Isolated')).toBeInTheDocument()
-
-    act(() => {
-      useTabStore.setState({ activeTabId: otherSessionId })
-    })
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: /^Location: repo-b/ })).toBeInTheDocument()
-    })
-    expect(screen.queryByText('Isolated')).not.toBeInTheDocument()
-
-    act(() => {
-      useTabStore.setState({ activeTabId: sessionId })
-    })
-    expect(await screen.findByText('Isolated')).toBeInTheDocument()
-    expect(useChatStore.getState().sessions[sessionId]?.repositoryLaunchDraft?.useWorktree).toBe(true)
-    expect(useChatStore.getState().sessions[otherSessionId]?.repositoryLaunchDraft?.useWorktree).toBe(false)
-
-    view.unmount()
-    render(<ChatInput variant="hero" />)
-    expect(await screen.findByText('Isolated')).toBeInTheDocument()
-
-    setComposerText('keep the isolated worktree', 26)
-    fireEvent.keyDown(getComposerElement(), { key: 'Enter' })
-
-    await waitFor(() => {
-      expect(mocks.create).toHaveBeenCalledWith({
-        workDir: '/repo-a',
-        repository: { branch: 'main', worktree: true },
-      })
-    })
-  })
-
-  it('keeps mention pills in the unsent draft across session tab switches', async () => {
-    mocks.search.mockResolvedValueOnce({
-      currentPath: '/repo',
-      parentPath: '/',
-      query: 'backend',
-      entries: [
-        { name: 'backend', path: '/repo/backend', relativePath: 'backend', isDirectory: true },
-      ],
-    })
-    const historySessionId = 'history-session'
-    useTabStore.setState({
-      activeTabId: sessionId,
-      tabs: [
-        { sessionId, title: 'New session', type: 'session', status: 'idle' },
-        { sessionId: historySessionId, title: 'History session', type: 'session', status: 'idle' },
-      ],
-    })
-    useChatStore.setState({
-      sessions: {
-        [sessionId]: {
-          ...useChatStore.getState().sessions[sessionId]!,
-        },
-        [historySessionId]: {
-          ...useChatStore.getState().sessions[sessionId]!,
-        },
-      },
-    })
-
-    render(<ChatInput compact />)
-
-    setComposerText('总结一下 @backend 这个目录', '总结一下 @backend'.length)
-    fireEvent.click(await screen.findByRole('option', { name: /backend/i }))
-    await waitFor(() => {
-      expect(getComposerText()).toBe('总结一下 @backend/ 这个目录')
-    })
-
-    act(() => {
-      useTabStore.setState({ activeTabId: historySessionId })
-    })
-
-    await waitFor(() => {
-      expect(getComposerText()).toBe('')
-    })
-
-    act(() => {
-      useTabStore.setState({ activeTabId: sessionId })
-    })
-
-    // The pill, not just its text: path and directory attrs survive the round
-    // trip through the composer draft.
-    await waitFor(() => {
-      expect(getComposerText()).toBe('总结一下 @backend/ 这个目录')
-    })
-    expect(document.querySelector('.composer-mention')).toHaveAttribute('data-mention-path', '/repo/backend')
-  })
-
-  it('inserts a selected @ file as an inline mention pill and sends its absolute path', async () => {
+  it('turns a selected @ file into a chip without corrupting the typed path', async () => {
     mocks.search.mockResolvedValueOnce({
       currentPath: '/repo/backend/src',
       parentPath: '/repo/backend',
@@ -1441,38 +1244,59 @@ describe('ChatInput file mentions', () => {
 
     render(<ChatInput compact />)
 
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
     const mention = '@backend/src/conditions.py'
-    setComposerText(`${mention} 记一下这个文件讲了什么东西。`, mention.length)
+    fireEvent.change(input, {
+      target: {
+        value: `${mention} 记一下这个文件讲了什么东西。`,
+        selectionStart: mention.length,
+      },
+    })
 
     fireEvent.click(await screen.findByText('backend/src/conditions.py'))
 
-    // The trigger text becomes an inline pill — no attachment chip is added.
     await waitFor(() => {
-      expect(getComposerText()).toBe('@conditions.py 记一下这个文件讲了什么东西。')
+      expect(input.value).toBe('记一下这个文件讲了什么东西。')
     })
-    expect(document.querySelector('.composer-mention')).toHaveTextContent('@conditions.py')
-    expect(screen.queryByTestId('attachment-chip')).not.toBeInTheDocument()
+    expect(screen.getByText('conditions.py')).toBeInTheDocument()
 
-    fireEvent.keyDown(getComposerElement(), { key: 'Enter' })
+    fireEvent.keyDown(input, { key: 'Enter' })
 
     expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, {
       type: 'user_message',
-      content: '@"/repo/backend/src/conditions.py" 记一下这个文件讲了什么东西。',
-      attachments: [],
+      content: '记一下这个文件讲了什么东西。',
+      attachments: [{
+        type: 'file',
+        name: 'conditions.py',
+        path: '/repo/backend/src/conditions.py',
+        isDirectory: false,
+        lineStart: undefined,
+        lineEnd: undefined,
+        note: undefined,
+        quote: undefined,
+      }],
     })
     const messages = useChatStore.getState().sessions[sessionId]?.messages ?? []
     expect(messages[messages.length - 1]).toMatchObject({
       type: 'user_text',
-      content: '@conditions.py 记一下这个文件讲了什么东西。',
+      content: '记一下这个文件讲了什么东西。',
       modelContent: '@"/repo/backend/src/conditions.py" 记一下这个文件讲了什么东西。',
+      attachments: [{ name: 'conditions.py', path: '/repo/backend/src/conditions.py' }],
     })
-    expect(getComposerText()).toBe('')
   })
 
   it('inserts queued inline workspace citations at the current cursor and keeps file context attached', async () => {
     render(<ChatInput compact />)
 
-    setComposerText('请看实现', 2)
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(input, {
+      target: {
+        value: '请看实现',
+        selectionStart: 2,
+        selectionEnd: 2,
+      },
+    })
+    input.setSelectionRange(2, 2)
 
     act(() => {
       useChatStore.getState().queueComposerInsertion(sessionId, {
@@ -1487,7 +1311,7 @@ describe('ChatInput file mentions', () => {
     })
 
     await waitFor(() => {
-      expect(getComposerText()).toBe('请看 @"src/App.tsx" 实现')
+      expect(input.value).toBe('请看 @"src/App.tsx" 实现')
     })
     expect(screen.getByText('App.tsx')).toBeInTheDocument()
     expect(useWorkspaceChatContextStore.getState().referencesBySession[sessionId]).toMatchObject([
@@ -1499,7 +1323,7 @@ describe('ChatInput file mentions', () => {
       },
     ])
 
-    fireEvent.keyDown(getComposerElement(), { key: 'Enter' })
+    fireEvent.keyDown(input, { key: 'Enter' })
 
     expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, {
       type: 'user_message',
@@ -1524,7 +1348,7 @@ describe('ChatInput file mentions', () => {
     })
   })
 
-  it('inserts a selected @ directory as an inline mention pill and sends its absolute path', async () => {
+  it('turns a selected @ directory into a workspace chip and model path reference', async () => {
     mocks.search.mockResolvedValueOnce({
       currentPath: '/repo',
       parentPath: '/',
@@ -1536,97 +1360,44 @@ describe('ChatInput file mentions', () => {
 
     render(<ChatInput compact />)
 
-    setComposerText('@backend 讲一下这个目录。', '@backend'.length)
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(input, {
+      target: {
+        value: '@backend 讲一下这个目录。',
+        selectionStart: '@backend'.length,
+      },
+    })
 
     fireEvent.click(await screen.findByRole('option', { name: /backend/i }))
 
     await waitFor(() => {
-      expect(getComposerText()).toBe('@backend/ 讲一下这个目录。')
+      expect(input.value).toBe('讲一下这个目录。')
     })
-    const pill = document.querySelector('.composer-mention')
-    expect(pill).toHaveTextContent('@backend/')
-    expect(pill).toHaveAttribute('data-mention-path', '/repo/backend')
+    expect(screen.getByText('backend/')).toBeInTheDocument()
+    expect(screen.getByText('folder')).toBeInTheDocument()
 
-    fireEvent.keyDown(getComposerElement(), { key: 'Enter' })
+    fireEvent.keyDown(input, { key: 'Enter' })
 
     expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, {
       type: 'user_message',
-      content: '@"/repo/backend" 讲一下这个目录。',
-      attachments: [],
+      content: '讲一下这个目录。',
+      attachments: [{
+        type: 'file',
+        name: 'backend/',
+        path: '/repo/backend',
+        isDirectory: true,
+        lineStart: undefined,
+        lineEnd: undefined,
+        note: undefined,
+        quote: undefined,
+      }],
     })
     const messages = useChatStore.getState().sessions[sessionId]?.messages ?? []
     expect(messages[messages.length - 1]).toMatchObject({
       type: 'user_text',
-      content: '@backend/ 讲一下这个目录。',
+      content: '讲一下这个目录。',
       modelContent: '@"/repo/backend" 讲一下这个目录。',
-    })
-  })
-
-  it('serializes only the pill when the same token also exists as literal text', async () => {
-    mocks.search.mockResolvedValueOnce({
-      currentPath: '/repo',
-      parentPath: '/',
-      query: 'main',
-      entries: [
-        { name: 'main.ts', path: '/repo/src/main.ts', isDirectory: false },
-      ],
-    })
-
-    render(<ChatInput compact />)
-
-    // The first `@main.ts` is literal text the user typed; only the second
-    // one goes through the picker and becomes a pill.
-    setComposerText('@main.ts 对比 @main', '@main.ts 对比 @main'.length)
-    fireEvent.click(await screen.findByRole('option', { name: /main\.ts/ }))
-
-    await waitFor(() => {
-      expect(getComposerText()).toBe('@main.ts 对比 @main.ts ')
-    })
-    expect(document.querySelectorAll('.composer-mention')).toHaveLength(1)
-
-    fireEvent.keyDown(getComposerElement(), { key: 'Enter' })
-
-    // The literal occurrence stays verbatim; the pill — and only the pill —
-    // becomes the @"absolute path" form.
-    expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, {
-      type: 'user_message',
-      content: '@main.ts 对比 @"/repo/src/main.ts"',
-      attachments: [],
-    })
-  })
-
-  it('deletes a mention pill atomically with Backspace', async () => {
-    mocks.search.mockResolvedValueOnce({
-      currentPath: '/repo',
-      parentPath: '/',
-      query: 'backend',
-      entries: [
-        { name: 'backend', path: '/repo/backend', relativePath: 'backend', isDirectory: true },
-      ],
-    })
-
-    render(<ChatInput compact />)
-
-    setComposerText('看下 @backend 这个目录', '看下 @backend'.length)
-    fireEvent.click(await screen.findByRole('option', { name: /backend/i }))
-
-    await waitFor(() => {
-      expect(getComposerText()).toBe('看下 @backend/ 这个目录')
-    })
-
-    // Caret directly after the atom: one Backspace removes the whole pill —
-    // it can never be half-deleted character by character.
-    setComposerSelection('看下 @backend/'.length)
-    fireEvent.keyDown(getComposerElement(), { key: 'Backspace' })
-    expect(getComposerText()).toBe('看下  这个目录')
-    expect(document.querySelector('.composer-mention')).not.toBeInTheDocument()
-
-    // Nothing to serialize any more: the path is gone from the model text too.
-    fireEvent.keyDown(getComposerElement(), { key: 'Enter' })
-    expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, {
-      type: 'user_message',
-      content: '看下  这个目录',
-      attachments: [],
+      attachments: [{ name: 'backend/', path: '/repo/backend' }],
     })
   })
 
@@ -1723,8 +1494,13 @@ describe('ChatInput file mentions', () => {
     expect(await screen.findByText('large-a.log')).toBeInTheDocument()
     expect(await screen.findByText('large-b.zip')).toBeInTheDocument()
 
-    const input = getComposerElement()
-    setComposerText('analyze these', 'analyze these'.length)
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(input, {
+      target: {
+        value: 'analyze these',
+        selectionStart: 'analyze these'.length,
+      },
+    })
     fireEvent.keyDown(input, { key: 'Enter' })
 
     expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, {
@@ -1792,8 +1568,13 @@ describe('ChatInput file mentions', () => {
     expect(await screen.findByText('large-a.log')).toBeInTheDocument()
     expect(screen.queryByTestId('chat-input-drop-overlay')).not.toBeInTheDocument()
 
-    const input = getComposerElement()
-    setComposerText('analyze dropped file', 'analyze dropped file'.length)
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(input, {
+      target: {
+        value: 'analyze dropped file',
+        selectionStart: 'analyze dropped file'.length,
+      },
+    })
     fireEvent.keyDown(input, { key: 'Enter' })
 
     expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, {
@@ -1820,13 +1601,10 @@ describe('ChatInput file mentions', () => {
 
     render(<ChatInput compact />)
 
-    const input = getComposerElement()
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
     fireEvent.paste(input, {
       clipboardData: {
         files: [],
-        // ProseMirror reads text data before consulting our paste handler, so
-        // the stub has to answer like a real DataTransfer.
-        getData: () => '',
         items: [{
           kind: 'file',
           type: 'text/markdown',
@@ -1837,7 +1615,12 @@ describe('ChatInput file mentions', () => {
 
     expect(await screen.findByText('project-notes.md')).toBeInTheDocument()
 
-    setComposerText('review this document', 'review this document'.length)
+    fireEvent.change(input, {
+      target: {
+        value: 'review this document',
+        selectionStart: 'review this document'.length,
+      },
+    })
     fireEvent.keyDown(input, { key: 'Enter' })
 
     expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, {
@@ -1868,15 +1651,12 @@ describe('ChatInput file mentions', () => {
 
     render(<ChatInput compact />)
 
-    const input = getComposerElement()
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
     const file = new File(['image'], 'late.png', { type: 'image/png' })
 
     fireEvent.paste(input, {
       clipboardData: {
         files: [],
-        // ProseMirror reads text data before consulting our paste handler, so
-        // the stub has to answer like a real DataTransfer.
-        getData: () => '',
         items: [{
           kind: 'file',
           type: 'image/png',
@@ -1886,7 +1666,12 @@ describe('ChatInput file mentions', () => {
     })
     expect(pendingReaders).toHaveLength(1)
 
-    setComposerText('send now', 'send now'.length)
+    fireEvent.change(input, {
+      target: {
+        value: 'send now',
+        selectionStart: 'send now'.length,
+      },
+    })
     fireEvent.keyDown(input, { key: 'Enter' })
 
     expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, {
@@ -1918,13 +1703,24 @@ describe('ChatInput file mentions', () => {
     render(<ChatInput compact />)
 
     const panel = screen.getByTestId('chat-input-panel')
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
 
-    setComposerText('/', 1)
+    fireEvent.change(input, {
+      target: {
+        value: '/',
+        selectionStart: 1,
+      },
+    })
     expect(await screen.findByText('mcp')).toBeInTheDocument()
     expect(panel).toHaveClass('overflow-visible')
     expect(panel).not.toHaveClass('overflow-hidden')
 
-    setComposerText('@readme', 7)
+    fireEvent.change(input, {
+      target: {
+        value: '@readme',
+        selectionStart: 7,
+      },
+    })
     expect(await screen.findByText('README.md')).toBeInTheDocument()
     expect(panel).toHaveClass('overflow-visible')
     expect(panel).not.toHaveClass('overflow-hidden')
@@ -1947,7 +1743,9 @@ describe('ChatInput file mentions', () => {
       expect(mocks.getGitInfo).toHaveBeenCalledWith(sessionId)
     })
 
-    setComposerText('ship it', 7)
+    fireEvent.change(screen.getByRole('textbox'), {
+      target: { value: 'ship it', selectionStart: 7 },
+    })
 
     expect(screen.getByRole('button', { name: 'Open composer tools' })).toHaveClass('h-11', 'w-11')
     expect(screen.getByRole('button', { name: 'Run' })).toHaveClass('h-11', 'w-11')
@@ -1967,7 +1765,9 @@ describe('ChatInput file mentions', () => {
     expect(screen.getByTestId('chat-input-toolbar-trailing')).toHaveClass('mobile-composer-toolbar__actions', 'min-w-0', 'flex-1', 'justify-end', 'gap-1')
     expect(screen.getByTestId('model-selector-shell')).toHaveClass('min-w-0', 'flex-1')
 
-    setComposerText('@cond', 5)
+    fireEvent.change(screen.getByRole('textbox'), {
+      target: { value: '@cond', selectionStart: 5 },
+    })
 
     expect(await screen.findByText('conditions.py')).toBeInTheDocument()
     const fileSearchMenu = document.getElementById('file-search-menu')
@@ -2034,8 +1834,13 @@ describe('ChatInput file mentions', () => {
       expect(mocks.getGitInfo).toHaveBeenCalledWith(sessionId)
     })
 
-    const input = getComposerElement()
-    setComposerText('avoid accidental sends', 'avoid accidental sends'.length)
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(input, {
+      target: {
+        value: 'avoid accidental sends',
+        selectionStart: 'avoid accidental sends'.length,
+      },
+    })
 
     fireEvent.keyDown(input, { key: 'Enter' })
     expect(mocks.wsSend).not.toHaveBeenCalled()
@@ -2059,14 +1864,19 @@ describe('ChatInput file mentions', () => {
       expect(mocks.getGitInfo).toHaveBeenCalledWith(sessionId)
     })
 
-    const input = getComposerElement()
-    setComposerText('/model', 6)
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(input, {
+      target: {
+        value: '/model',
+        selectionStart: 6,
+      },
+    })
 
     fireEvent.keyDown(input, { key: 'Enter' })
 
     expect(mocks.wsSend).not.toHaveBeenCalled()
     expect(await screen.findByTestId('model-selector-dropdown')).toHaveTextContent('Model selector opened')
-    expect(getComposerText()).toBe('')
+    expect(input).toHaveValue('')
   })
 
   it('prioritizes active-session slash commands by command name when filtering', async () => {
@@ -2104,7 +1914,9 @@ describe('ChatInput file mentions', () => {
       expect(mocks.getGitInfo).toHaveBeenCalledWith(sessionId)
     })
 
-    setComposerText('/su', 3)
+    fireEvent.change(screen.getByRole('textbox'), {
+      target: { value: '/su', selectionStart: 3 },
+    })
 
     await waitFor(() => {
       const commandButtons = screen
@@ -2145,7 +1957,10 @@ describe('ChatInput file mentions', () => {
 
     render(<ChatInput />)
 
-    setComposerText('/', 1)
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(input, {
+      target: { value: '/', selectionStart: 1 },
+    })
 
     const systemCommand = await screen.findByText('mcp')
     const futureNativeCommand = screen.getByText('future-native-command')
@@ -2193,12 +2008,15 @@ describe('ChatInput file mentions', () => {
       expect(mocks.listAgents).toHaveBeenCalledWith('/repo')
     })
 
-    setComposerText('/debug', 6)
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(input, {
+      target: { value: '/debug', selectionStart: 6 },
+    })
 
     const agentOption = await screen.findByText('agent debugger')
     fireEvent.click(agentOption)
 
-    expect(getComposerText()).toBe('/agent debugger ')
+    expect(input).toHaveValue('/agent debugger ')
   })
 
   it('selects a highlighted agent entry from /agent without sending until the configured send shortcut is used', async () => {
@@ -2224,18 +2042,22 @@ describe('ChatInput file mentions', () => {
       expect(mocks.listAgents).toHaveBeenCalledWith('/repo')
     })
 
-    const input = getComposerElement()
-    setComposerText('/agent', 6)
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(input, {
+      target: { value: '/agent', selectionStart: 6 },
+    })
 
     await screen.findByText('agent debugger')
     fireEvent.keyDown(input, { key: 'ArrowDown' })
     fireEvent.keyDown(input, { key: 'Enter' })
 
-    expect(getComposerText()).toBe('/agent debugger ')
+    expect(input).toHaveValue('/agent debugger ')
     expect(mocks.wsSend).not.toHaveBeenCalled()
 
     const prompt = '/agent debugger investigate this failure'
-    setComposerText(prompt, prompt.length)
+    fireEvent.change(input, {
+      target: { value: prompt, selectionStart: prompt.length },
+    })
     fireEvent.keyDown(input, { key: 'Enter' })
     expect(mocks.wsSend).not.toHaveBeenCalled()
 

@@ -35,7 +35,6 @@ export type McpServerRecord = {
   canToggle: boolean
   config: McpEditableConfig
   projectPath?: string
-  activeInCurrentContext?: boolean
 }
 
 export type McpWritableScope = 'local' | 'project' | 'user'

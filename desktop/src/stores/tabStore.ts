@@ -59,7 +59,6 @@ type TabStore = {
   openOfficeTab: (sourceSessionId: string, title?: string) => string
   returnFromOffice: (tabId: string) => void
   openSubagentTab: (sourceSessionId: string, toolUseId: string, title?: string, taskId?: string) => string
-  returnFromSubagent: (tabId: string) => void
   closeTab: (sessionId: string) => void
   setActiveTab: (sessionId: string) => void
   updateTabTitle: (sessionId: string, title: string) => void
@@ -276,16 +275,6 @@ export const useTabStore = create<TabStore>((set, get) => ({
     })
     get().saveTabs()
     return tabId
-  },
-
-  returnFromSubagent: (tabId) => {
-    const tab = get().tabs.find((current) => current.sessionId === tabId)
-    if (tab?.type !== 'subagent') return
-
-    if (tab.sourceSessionId && get().tabs.some((current) => current.sessionId === tab.sourceSessionId)) {
-      get().setActiveTab(tab.sourceSessionId)
-    }
-    get().closeTab(tabId)
   },
 
   closeTab: (sessionId) => {

@@ -293,38 +293,6 @@ describe('AttachmentGallery', () => {
     expect(view.queryByRole('tooltip')).toBeNull()
   })
 
-  it('groups numbered selection screenshots into one compact batch mosaic', () => {
-    const view = render(
-      <AttachmentGallery
-        variant="message"
-        attachments={[
-          {
-            id: 'selection-1',
-            type: 'image',
-            name: '<h1>',
-            data: 'data:image/png;base64,AAAA',
-            note: 'Make the title lighter',
-            selectionNumber: 1,
-          },
-          {
-            id: 'selection-3',
-            type: 'image',
-            name: '<button>',
-            data: 'data:image/png;base64,BBBB',
-            note: 'Increase emphasis',
-            selectionNumber: 3,
-          },
-        ]}
-      />,
-    )
-
-    expect(view.getByTestId('preview-selection-batch')).toHaveAttribute('aria-label', '2 selected page changes')
-    expect(view.getByRole('button', { name: 'Selected element 1: <h1>' })).toHaveAttribute('data-selection-number', '1')
-    expect(view.getByRole('button', { name: 'Selected element 3: <button>' })).toHaveAttribute('data-selection-number', '3')
-    expect(view.getByText('Make the title lighter')).toBeInTheDocument()
-    expect(view.queryByRole('button', { name: 'Open <h1>' })).not.toBeInTheDocument()
-  })
-
   it('previews a path-only pasted image instead of a file chip', () => {
     const path = '/Users/nanmi/Desktop/6代码仓库.png'
     const view = render(

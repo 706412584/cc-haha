@@ -368,7 +368,7 @@ describe('Sidebar', () => {
     expect(screen.getByText('beta')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Alpha newest/ })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Alpha hidden/ })).not.toBeInTheDocument()
-    expect(screen.getByTestId('sidebar-project-session-list-workspace-alpha').parentElement).toHaveClass('pl-5')
+    expect(screen.getByTestId('sidebar-project-session-list-workspace-alpha').parentElement).toHaveClass('pl-6')
     expect(screen.getByRole('button', { name: 'Collapse alpha' })).toHaveAttribute('data-state', 'open')
     expect(screen.getByTestId('sidebar-project-icon-workspace-alpha')).toHaveAttribute('data-icon-state', 'open')
 
@@ -1050,9 +1050,6 @@ describe('Sidebar', () => {
     const idleRow = screen.getByRole('button', { name: /Idle Source/ })
     expect(within(idleRow).queryByLabelText('Session running')).not.toBeInTheDocument()
     expect(within(idleRow).getByText('20m ago')).toBeInTheDocument()
-    const idleMeta = within(idleRow).getByTitle('last updated 20m ago')
-    expect(idleMeta).toHaveClass('flex-shrink-0', 'whitespace-nowrap')
-    expect(idleMeta).not.toHaveClass('min-w-[78px]')
   })
 
   it('shows a toast when session creation fails', async () => {

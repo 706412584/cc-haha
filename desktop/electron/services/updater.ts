@@ -1,6 +1,5 @@
 import type { DesktopUpdateDownloadEvent } from '../../src/lib/desktopHost/types'
 import { existsSync } from 'node:fs'
-import { clearAppManagedPortableEnv } from './appMode'
 
 export type ElectronUpdateInfo = {
   version: string
@@ -236,13 +235,8 @@ export class ElectronUpdaterService {
     return !!this.pendingUpdate && this.downloaded
   }
 
-  quitAndInstallDownloadedUpdate(env: NodeJS.ProcessEnv = process.env) {
+  quitAndInstallDownloadedUpdate() {
     this.stageDownloadedUpdate()
-    // The NSIS installer spawned here inherits this process's environment.
-    // Hand it the same clean environment a manually launched setup gets, so
-    // its legacy-data checks read the persisted app-mode.json instead of a
-    // process-local snapshot that may disagree with it (#1160).
-    clearAppManagedPortableEnv(env)
     this.updater.quitAndInstall(false, true)
   }
 }
