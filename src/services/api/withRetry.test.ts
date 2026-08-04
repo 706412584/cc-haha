@@ -393,6 +393,50 @@ describe('withRetry context overflow recovery', () => {
   })
 })
 
+describe('context overflow wrapped in 401 (#1162)', () => {
+  test('does not retry when a gateway reports overflow as a 401', async () => {
+    let attempts = 0
+    const message = 'k3-256k supports only 256K context.'
+    const overflow401 = new APIError(
+      401,
+      {
+        type: 'error',
+        error: { type: 'authentication_error', message },
+      },
+      message,
+      undefined,
+    )
+
+    const generator = withRetry(
+      async () => ({} as Anthropic),
+      async () => {
+        attempts += 1
+        throw overflow401
+      },
+      {
+        model: 'k3-256k',
+        thinkingConfig: { type: 'disabled' },
+        maxRetries: 5,
+      },
+    )
+
+    let thrown: unknown
+    try {
+      while (!(await generator.next()).done) {
+        // Drain retry status messages until the generator terminates.
+      }
+    } catch (error) {
+      thrown = error
+    }
+
+    // Retrying replays the same oversized prompt — it must fail fast instead
+    // of burning through 10 attempts against an unrecoverable rejection.
+    expect(thrown).toBeInstanceOf(CannotRetryError)
+    expect((thrown as CannotRetryError).originalError).toBe(overflow401)
+    expect(attempts).toBe(1)
+  })
+})
+
 describe('isRetryableStreamError', () => {
   // The SDK embeds the serialized error body in `error.message`; mirror that so
   // the matcher sees the same shape it does in production.

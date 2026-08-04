@@ -14,7 +14,7 @@ import {
   type TaskType,
 } from '../../Task.js'
 import type { TaskState } from '../../tasks/types.js'
-import { enqueuePendingNotification, removeByFilter } from '../messageQueueManager.js'
+import { enqueuePendingNotification } from '../messageQueueManager.js'
 import { enqueueSdkEvent } from '../sdkEventQueue.js'
 import { getTaskOutputDelta, getTaskOutputPath } from './diskOutput.js'
 
@@ -39,16 +39,6 @@ export type TaskAttachment = {
 }
 
 type SetAppState = (updater: (prev: AppState) => AppState) => void
-
-function hasUnacknowledgedAgentCompletion(
-  state: AppState,
-  task: TaskState,
-): boolean {
-  if (!('epoch' in task)) return false
-  return state.agentCompletionInbox.some(
-    completion => completion.taskId === task.id && completion.epoch === task.epoch,
-  )
-}
 
 /**
  * Update a task's state in AppState.
@@ -84,9 +74,8 @@ export function updateTaskState<T extends TaskState>(
 /**
  * Register a new task in AppState.
  */
-export function registerTask<T extends TaskState>(task: T, setAppState: SetAppState): T {
+export function registerTask(task: TaskState, setAppState: SetAppState): void {
   let isReplacement = false
-  let registeredTask = task
   setAppState(prev => {
     const existing = prev.tasks[task.id]
     isReplacement = existing !== undefined
@@ -94,14 +83,14 @@ export function registerTask<T extends TaskState>(task: T, setAppState: SetAppSt
     // replaces the task; user's retain shouldn't reset). startTime keeps
     // the panel sort stable; messages + diskLoaded preserve the viewed
     // transcript across the replace (the user's just-appended prompt lives
-    // in messages and isn't on disk yet).
+    // in messages and isn't on disk yet). toolUseId keeps the task bound to
+    // the Agent card that spawned it — a resume triggered by another tool
+    // (SendMessage) would otherwise re-file it under that tool's call.
     const merged =
       existing && 'retain' in existing
         ? {
             ...task,
-            ...('epoch' in existing && 'epoch' in task
-              ? { epoch: existing.epoch + 1 }
-              : {}),
+            toolUseId: existing.toolUseId ?? task.toolUseId,
             retain: existing.retain,
             startTime: existing.startTime,
             messages: existing.messages,
@@ -109,31 +98,15 @@ export function registerTask<T extends TaskState>(task: T, setAppState: SetAppSt
             pendingMessages: existing.pendingMessages,
           }
         : task
-    registeredTask = merged as T
-    return {
-      ...prev,
-      tasks: { ...prev.tasks, [task.id]: merged },
-      ...(isReplacement && 'epoch' in merged
-        ? {
-            agentCompletionInbox: (prev.agentCompletionInbox ?? []).filter(
-              completion => completion.taskId !== task.id,
-            ),
-          }
-        : {}),
-    }
+    return { ...prev, tasks: { ...prev.tasks, [task.id]: merged } }
   })
 
-  // Replacement (resume) invalidates both persisted inbox entries and any
-  // completion that already crossed into the shared command queue.
-  if (isReplacement) {
-    if ('epoch' in registeredTask) {
-      removeByFilter(command =>
-        command.agentCompletion?.taskId === task.id &&
-        command.agentCompletion.epoch !== registeredTask.epoch,
-      )
-    }
-    return registeredTask
-  }
+  // Replacement (resume) — not a new start. Skip to avoid double-emit.
+  if (isReplacement) return
+
+  // Subagent shell activity is already grouped under its Agent tool call.
+  // Exposing it as a session task leaves the parent Activity row unowned.
+  if (task.type === 'local_bash' && task.agentId) return
 
   enqueueSdkEvent({
     type: 'system',
@@ -142,13 +115,14 @@ export function registerTask<T extends TaskState>(task: T, setAppState: SetAppSt
     tool_use_id: task.toolUseId,
     description: task.description,
     task_type: task.type,
+    remote_session_id:
+      task.type === 'remote_agent' ? task.sessionId : undefined,
     workflow_name:
       'workflowName' in task
         ? (task.workflowName as string | undefined)
         : undefined,
     prompt: 'prompt' in task ? (task.prompt as string) : undefined,
   })
-  return registeredTask
 }
 
 /**
@@ -166,7 +140,6 @@ export function evictTerminalTask(
     if (!task) return prev
     if (!isTerminalTaskStatus(task.status)) return prev
     if (!task.notified) return prev
-    if (hasUnacknowledgedAgentCompletion(prev, task)) return prev
     // Panel grace period — blocks eviction until deadline passes.
     // 'retain' in task narrows to LocalAgentTaskState (the only type with
     // that field); evictAfter is optional so 'evictAfter' in task would
@@ -205,7 +178,7 @@ export async function generateTaskAttachments(state: AppState): Promise<{
   const tasks = state.tasks ?? {}
 
   for (const taskState of Object.values(tasks)) {
-    if (taskState.notified && !hasUnacknowledgedAgentCompletion(state, taskState)) {
+    if (taskState.notified) {
       switch (taskState.status) {
         case 'completed':
         case 'failed':
@@ -274,7 +247,6 @@ export function applyTaskOffsetsAndEvictions(
       if (!fresh || !isTerminalTaskStatus(fresh.status) || !fresh.notified) {
         continue
       }
-      if (hasUnacknowledgedAgentCompletion(prev, fresh)) continue
       if ('retain' in fresh && (fresh.evictAfter ?? Infinity) > Date.now()) {
         continue
       }

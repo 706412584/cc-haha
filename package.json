@@ -8,8 +8,8 @@
     "claude-haha": "./bin/claude-haha"
   },
   "scripts": {
-    "claude-haha": "bun run ./bin/claude-haha",
-    "start": "bun run ./bin/claude-haha",
+    "claude-haha": "bun --no-env-file run ./bin/claude-haha",
+    "start": "bun --no-env-file run ./bin/claude-haha",
     "perf:local-index": "bun run scripts/perf/local-index-benchmark.ts",
     "perf:local-index:10k": "bun run scripts/perf/local-index-benchmark.ts --sessions 10000 --runs 20",
     "check:pr": "bun run scripts/pr/check-pr.ts",

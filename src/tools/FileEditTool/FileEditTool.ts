@@ -73,6 +73,7 @@ import {
   areFileEditsInputsEquivalent,
   findActualString,
   getPatchForEdit,
+  preserveIndentationStyle,
   preserveQuoteStyle,
 } from './utils.js'
 
@@ -342,6 +343,12 @@ export const FileEditTool = buildTool({
       }
     }
 
+    const actualNewString = preserveIndentationStyle(
+      old_string,
+      actualOldString,
+      preserveQuoteStyle(old_string, actualOldString, new_string),
+    )
+
     // Additional validation for Claude settings files
     const settingsValidationResult = validateInputForSettingsFileEdit(
       fullFilePath,
@@ -349,8 +356,8 @@ export const FileEditTool = buildTool({
       () => {
         // Simulate the edit to get the final content using the exact same logic as the tool
         return replace_all
-          ? file.replaceAll(actualOldString, new_string)
-          : file.replace(actualOldString, new_string)
+          ? file.replaceAll(actualOldString, actualNewString)
+          : file.replace(actualOldString, actualNewString)
       },
     )
 
@@ -471,11 +478,11 @@ export const FileEditTool = buildTool({
     const actualOldString =
       findActualString(originalFileContents, old_string) || old_string
 
-    // Preserve curly quotes in new_string when the file uses them
-    const actualNewString = preserveQuoteStyle(
+    // Preserve file typography and indentation in new_string when possible
+    const actualNewString = preserveIndentationStyle(
       old_string,
       actualOldString,
-      new_string,
+      preserveQuoteStyle(old_string, actualOldString, new_string),
     )
 
     // 4. Generate patch

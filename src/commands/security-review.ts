@@ -1,6 +1,11 @@
 import { parseFrontmatter } from '../utils/frontmatterParser.js'
 import { parseSlashCommandToolsFromFrontmatter } from '../utils/markdownConfigLoader.js'
 import { executeShellCommandsInPrompt } from '../utils/promptShellExecution.js'
+import type { ToolUseContext } from '../Tool.js'
+import {
+  resolveDefaultShell,
+  type ShellToolType,
+} from '../utils/shell/resolveDefaultShell.js'
 import { createMovedToPluginCommand } from './createMovedToPluginCommand.js'
 
 const SECURITY_REVIEW_MARKDOWN = `---
@@ -195,6 +200,55 @@ Begin your analysis now. Do this in 3 steps:
 
 Your final reply must contain the markdown report and nothing else.`
 
+export function getSecurityReviewMarkdown(shell: ShellToolType): string {
+  if (shell === 'bash') return SECURITY_REVIEW_MARKDOWN
+  return SECURITY_REVIEW_MARKDOWN.replaceAll('Bash(', 'PowerShell(')
+}
+
+export async function buildSecurityReviewPrompt(
+  context: ToolUseContext,
+  dependencies: {
+    resolveShell?: typeof resolveDefaultShell
+    execute?: typeof executeShellCommandsInPrompt
+  } = {},
+) {
+  const shell = (dependencies.resolveShell ?? resolveDefaultShell)()
+  if (!shell) {
+    throw new Error(
+      'No supported command shell is available. Install Git Bash or enable PowerShell.',
+    )
+  }
+  const parsed = parseFrontmatter(getSecurityReviewMarkdown(shell))
+  const allowedTools = parseSlashCommandToolsFromFrontmatter(
+    parsed.frontmatter['allowed-tools'],
+  )
+  const processedContent = await (
+    dependencies.execute ?? executeShellCommandsInPrompt
+  )(
+    parsed.content,
+    {
+      ...context,
+      getAppState() {
+        const appState = context.getAppState()
+        return {
+          ...appState,
+          toolPermissionContext: {
+            ...appState.toolPermissionContext,
+            alwaysAllowRules: {
+              ...appState.toolPermissionContext.alwaysAllowRules,
+              command: allowedTools,
+            },
+          },
+        }
+      },
+    },
+    'security-review',
+    shell,
+  )
+
+  return [{ type: 'text' as const, text: processedContent }]
+}
+
 export default createMovedToPluginCommand({
   name: 'security-review',
   description:
@@ -203,41 +257,6 @@ export default createMovedToPluginCommand({
   pluginName: 'security-review',
   pluginCommand: 'security-review',
   async getPromptWhileMarketplaceIsPrivate(_args, context) {
-    // Parse frontmatter from the markdown
-    const parsed = parseFrontmatter(SECURITY_REVIEW_MARKDOWN)
-
-    // Parse allowed tools from frontmatter
-    const allowedTools = parseSlashCommandToolsFromFrontmatter(
-      parsed.frontmatter['allowed-tools'],
-    )
-
-    // Execute bash commands in the prompt
-    const processedContent = await executeShellCommandsInPrompt(
-      parsed.content,
-      {
-        ...context,
-        getAppState() {
-          const appState = context.getAppState()
-          return {
-            ...appState,
-            toolPermissionContext: {
-              ...appState.toolPermissionContext,
-              alwaysAllowRules: {
-                ...appState.toolPermissionContext.alwaysAllowRules,
-                command: allowedTools,
-              },
-            },
-          }
-        },
-      },
-      'security-review',
-    )
-
-    return [
-      {
-        type: 'text',
-        text: processedContent,
-      },
-    ]
+    return buildSecurityReviewPrompt(context)
   },
 })

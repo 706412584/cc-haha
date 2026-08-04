@@ -9,7 +9,7 @@ import type { SessionId } from '../types/ids.js'
 import { drainSdkEvents } from '../utils/sdkEventQueue.js'
 import { stopTask } from './stopTask.js'
 
-function makeShellTaskHarness() {
+function makeShellTaskHarness(agentId?: string) {
   let killed = false
   let state = {
     tasks: {
@@ -33,6 +33,7 @@ function makeShellTaskHarness() {
         },
         lastReportedTotalLines: 0,
         isBackgrounded: true,
+        agentId,
       },
     },
   } as unknown as AppState
@@ -82,5 +83,18 @@ describe('stopTask SDK events', () => {
       summary: 'Sleep for 300 seconds',
       session_id: 'stop-task-sdk-events',
     }))
+  })
+
+  test('does not emit a session bookend for a subagent-owned shell task', async () => {
+    const harness = makeShellTaskHarness('subagent-1')
+
+    await stopTask('btask123', {
+      getAppState: () => harness.state,
+      setAppState: harness.setAppState,
+    })
+
+    expect(harness.killed).toBe(true)
+    expect(harness.state.tasks.btask123?.status).toBe('killed')
+    expect(drainSdkEvents()).toEqual([])
   })
 })

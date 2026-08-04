@@ -10,7 +10,6 @@ import type { ProviderModelsResult, SavedProvider } from '../types/provider'
 import type { ProviderPreset } from '../types/providerPreset'
 import type { AppMode, ChatSendBehavior, PermissionMode, ThemeMode, UpdateProxySettings } from '../types/settings'
 import { browserHost } from '../lib/desktopHost/browserHost'
-import { h5AccessApi } from '../api/h5Access'
 
 const MOCK_DELETE_PROVIDER = vi.fn()
 const MOCK_GET_SETTINGS = vi.fn()
@@ -34,9 +33,6 @@ const tauriDialogMock = vi.hoisted(() => ({
 const tauriProcessMock = vi.hoisted(() => ({
   relaunch: vi.fn(),
 }))
-const viewportMock = vi.hoisted(() => ({
-  isMobile: false,
-}))
 const providerStoreState = {
   providers: [] as SavedProvider[],
   providerOrder: [] as string[],
@@ -57,6 +53,27 @@ const providerStoreState = {
   fetchModels: vi.fn(),
 }
 
+const ZHIPU_REGIONAL_PRESET: ProviderPreset = {
+  id: 'zhipuglm',
+  name: 'Zhipu GLM',
+  baseUrl: 'https://open.bigmodel.cn/api/anthropic',
+  regionalEndpoints: [
+    { region: 'cn_zh', baseUrl: 'https://open.bigmodel.cn/api/anthropic' },
+    { region: 'global_en', baseUrl: 'https://api.z.ai/api/anthropic' },
+  ],
+  apiFormat: 'anthropic',
+  defaultModels: {
+    main: 'glm-5.2[1m]',
+    haiku: 'glm-4.7',
+    sonnet: 'glm-5.2[1m]',
+    opus: 'glm-5.2[1m]',
+  },
+  needsApiKey: true,
+  websiteUrl: 'https://open.bigmodel.cn',
+  apiKeyUrl: 'https://www.bigmodel.cn/api-keys',
+  promoText: 'Mainland China promotion',
+}
+
 vi.mock('../api/agents', () => ({
   agentsApi: {
     list: vi.fn().mockResolvedValue({ activeAgents: [], allAgents: [] }),
@@ -75,9 +92,6 @@ vi.mock('../api/providers', () => ({
 }))
 
 vi.mock('../lib/desktopNotifications', () => desktopNotificationsMock)
-vi.mock('../hooks/useMobileViewport', () => ({
-  useMobileViewport: () => viewportMock.isMobile,
-}))
 vi.mock('@/lib/clipboard', () => clipboardMock)
 vi.mock('@tauri-apps/api/core', () => tauriCoreMock)
 vi.mock('@tauri-apps/plugin-dialog', () => tauriDialogMock)
@@ -141,10 +155,6 @@ vi.mock('../components/chat/CodeViewer', () => ({
   CodeViewer: ({ code }: { code: string }) => <pre data-testid="code-viewer">{code}</pre>,
 }))
 
-function installBrowserHost() {
-  window.desktopHost = browserHost
-}
-
 function installElectronDesktopHost() {
   window.desktopHost = {
     ...browserHost,
@@ -183,7 +193,6 @@ describe('Settings > General tab', () => {
   beforeEach(() => {
     vi.useRealTimers()
     MOCK_DELETE_PROVIDER.mockReset()
-    viewportMock.isMobile = false
     desktopNotificationsMock.getDesktopNotificationPermission.mockReset()
     desktopNotificationsMock.getDesktopNotificationPlatform.mockReset()
     desktopNotificationsMock.notifyDesktop.mockReset()
@@ -230,10 +239,8 @@ describe('Settings > General tab', () => {
       autoModeOptInAccepted: false,
       thinkingEnabled: true,
       autoDreamEnabled: false,
-      unifiedActivityPanelEnabled: false,
       skipWebFetchPreflight: true,
       desktopNotificationsEnabled: true,
-      sessionContentSearchEnabled: true,
       traceCapture: { enabled: true, storageDir: '/Users/test/.claude/cc-haha/traces' },
       chatSendBehavior: 'enter',
       responseLanguage: '',
@@ -277,9 +284,6 @@ describe('Settings > General tab', () => {
       setAutoDreamEnabled: vi.fn().mockImplementation(async (enabled: boolean) => {
         useSettingsStore.setState({ autoDreamEnabled: enabled })
       }),
-      setUnifiedActivityPanelEnabled: vi.fn().mockImplementation(async (enabled: boolean) => {
-        useSettingsStore.setState({ unifiedActivityPanelEnabled: enabled })
-      }),
       setTheme: vi.fn().mockImplementation(async (theme: ThemeMode) => {
         useUIStore.setState({ theme })
       }),
@@ -294,9 +298,6 @@ describe('Settings > General tab', () => {
       }),
       setDesktopNotificationsEnabled: vi.fn().mockImplementation(async (enabled: boolean) => {
         useSettingsStore.setState({ desktopNotificationsEnabled: enabled })
-      }),
-      setSessionContentSearchEnabled: vi.fn().mockImplementation(async (enabled: boolean) => {
-        useSettingsStore.setState({ sessionContentSearchEnabled: enabled })
       }),
       setTraceCaptureEnabled: vi.fn().mockImplementation(async (enabled: boolean) => {
         const current = useSettingsStore.getState().traceCapture
@@ -410,30 +411,6 @@ describe('Settings > General tab', () => {
     expect(toggle).toBeChecked()
   })
 
-  it('keeps the desktop settings layout on desktop runtime', () => {
-    render(<Settings />)
-
-    const page = screen.getByTestId('settings-page')
-    expect(page).not.toHaveClass('settings-page--mobile')
-    expect(page.querySelector('.settings-page__tabs')).toHaveClass('w-[220px]', 'border-r')
-  })
-
-  it('uses a single-column settings layout on mobile H5', () => {
-    viewportMock.isMobile = true
-    installBrowserHost()
-
-    render(<Settings />)
-
-    const page = screen.getByTestId('settings-page')
-    expect(page).toHaveClass('settings-page--mobile')
-    expect(page.querySelector('.settings-page__layout')).toHaveClass('flex')
-    expect(page.querySelector('.settings-page__tabs')).toHaveClass('settings-page__tabs')
-
-    fireEvent.click(screen.getByText('General'))
-
-    expect(screen.getByLabelText('Skip WebFetch domain preflight')).toBeInTheDocument()
-  })
-
   it('keeps the selected settings tab when returning to Settings', () => {
     const { unmount } = render(<Settings />)
 
@@ -446,24 +423,14 @@ describe('Settings > General tab', () => {
     expect(screen.getByLabelText('Skip WebFetch domain preflight')).toBeInTheDocument()
   })
 
-  it('keeps all six current palettes and restores the four classic palettes', () => {
+  it('offers all six palettes, paper grounds before ink ones', () => {
     render(<Settings />)
 
     fireEvent.click(screen.getByText('General'))
-    // Current palettes stay first in their established order. Restored palettes
-    // follow as an explicit classic group rather than taking over old IDs.
-    const order = [
-      'Pure White',
-      'Paper',
-      'Warm Classic',
-      'Celadon',
-      'Ink Night',
-      'Ink Blue',
-      'Classic White',
-      'Classic Light',
-      'Eye Care',
-      'Classic Dark',
-    ].map((name) => screen.getByRole('button', { name }))
+    // The picker order is load-bearing: the four paper grounds come first, then
+    // the two ink ones, so the list reads light-to-dark rather than shuffled.
+    const order = ['Pure White', 'Paper', 'Warm Classic', 'Celadon', 'Ink Night', 'Ink Blue']
+      .map((name) => screen.getByRole('button', { name }))
 
     for (const [index, chip] of order.slice(0, -1).entries()) {
       const next = order[index + 1]!
@@ -473,19 +440,10 @@ describe('Settings > General tab', () => {
       ).toBe(true)
     }
 
-    act(() => {
-      fireEvent.click(screen.getByRole('button', { name: 'Pure White' }))
-    })
+    fireEvent.click(screen.getByRole('button', { name: 'Pure White' }))
     expect(useSettingsStore.getState().setTheme).toHaveBeenCalledWith('white')
 
-    act(() => {
-      fireEvent.click(screen.getByRole('button', { name: 'Classic Light' }))
-    })
-    expect(useSettingsStore.getState().setTheme).toHaveBeenCalledWith('classic-light')
-
-    act(() => {
-      fireEvent.click(screen.getByRole('button', { name: 'Ink Blue' }))
-    })
+    fireEvent.click(screen.getByRole('button', { name: 'Ink Blue' }))
     expect(useSettingsStore.getState().setTheme).toHaveBeenCalledWith('ink-blue')
   })
 
@@ -501,7 +459,12 @@ describe('Settings > General tab', () => {
     expect(activeItem).toHaveAttribute('aria-current', 'page')
 
     const rail = activeItem.parentElement?.parentElement
-    expect(rail?.className).toContain('w-[220px]')  })
+    expect(rail?.className).toContain('w-[195px]')
+    expect(rail?.className).toContain('pl-3')
+    expect(rail?.className).toContain('pr-1')
+    expect(activeItem.className).toContain('pl-3')
+    expect(activeItem.className).toContain('pr-2')
+  })
 
   it('marks the pure white appearance theme as selected', () => {
     useUIStore.setState({ theme: 'white' })
@@ -536,18 +499,7 @@ describe('Settings > General tab', () => {
 
     expect(screen.getByText('Use in light mode')).toBeInTheDocument()
     expect(screen.getByText('Use in dark mode')).toBeInTheDocument()
-    for (const label of [
-      'Pure White',
-      'Paper',
-      'Warm Classic',
-      'Celadon',
-      'Classic White',
-      'Classic Light',
-      'Eye Care',
-      'Ink Night',
-      'Ink Blue',
-      'Classic Dark',
-    ]) {
+    for (const label of ['Pure White', 'Paper', 'Warm Classic', 'Celadon', 'Ink Night', 'Ink Blue']) {
       expect(screen.getByRole('button', { name: label }), label).toBeInTheDocument()
     }
   })
@@ -933,56 +885,6 @@ describe('Settings > General tab', () => {
     expect(useSettingsStore.getState().setSkipWebFetchPreflight).toHaveBeenCalledWith(false)
   })
 
-  it('lets the user disable session content search from General settings', async () => {
-    render(<Settings />)
-
-    fireEvent.click(screen.getByText('General'))
-
-    const toggle = screen.getByLabelText('Enable session content search')
-    expect(toggle).toBeChecked()
-
-    await act(async () => {
-      fireEvent.click(toggle)
-    })
-
-    expect(useSettingsStore.getState().setSessionContentSearchEnabled).toHaveBeenCalledWith(false)
-    expect(toggle).not.toBeChecked()
-  })
-
-  it('lets the user enable the unified activity panel', async () => {
-    render(<Settings />)
-
-    fireEvent.click(screen.getByText('General'))
-    const toggle = screen.getByLabelText('Use unified activity panel')
-    expect(toggle).not.toBeChecked()
-
-    await act(async () => {
-      fireEvent.click(toggle)
-    })
-
-    expect(useSettingsStore.getState().setUnifiedActivityPanelEnabled).toHaveBeenCalledWith(true)
-    expect(toggle).toBeChecked()
-  })
-
-  it('reports a unified activity panel save failure without leaving the toggle enabled', async () => {
-    const setUnifiedActivityPanelEnabled = useSettingsStore.getState().setUnifiedActivityPanelEnabled
-    vi.mocked(setUnifiedActivityPanelEnabled).mockRejectedValueOnce(new Error('settings unavailable'))
-    render(<Settings />)
-
-    fireEvent.click(screen.getByText('General'))
-    const toggle = screen.getByLabelText('Use unified activity panel')
-
-    await act(async () => {
-      fireEvent.click(toggle)
-    })
-
-    expect(toggle).not.toBeChecked()
-    expect(useUIStore.getState().toasts.at(-1)).toMatchObject({
-      type: 'error',
-      message: 'Could not save the activity panel preference.',
-    })
-  })
-
   it('lets the user disable thinking mode for new sessions', () => {
     render(<Settings />)
 
@@ -1152,7 +1054,7 @@ describe('Settings > General tab', () => {
       expect(desktopNotificationsMock.requestDesktopNotificationPermission).toHaveBeenCalledTimes(1)
     })
     expect(desktopNotificationsMock.notifyDesktop).toHaveBeenCalledWith({
-      title: 'Code Council notifications are enabled',
+      title: 'Claude Code Haha notifications are enabled',
       body: 'Permission prompts and completed agent replies will now use system notifications.',
     })
   })
@@ -1234,8 +1136,8 @@ describe('Settings > General tab', () => {
     const section = screen.getByRole('region', { name: 'H5 Access' })
 
     fireEvent.click(within(section).getByLabelText('Enable H5 access'))
-    const dialog = screen.getByRole('dialog', { name: 'Enable H5 access?' })
-    expect(within(dialog).getByText(/desktop H5 app on your configured address/i)).toBeInTheDocument()
+    const dialog = screen.getByRole('dialog', { name: 'Enable LAN H5 access?' })
+    expect(within(dialog).getByText(/desktop H5 app on your LAN address and port/i)).toBeInTheDocument()
 
     await act(async () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Enable H5 access' }))
@@ -1265,7 +1167,7 @@ describe('Settings > General tab', () => {
     fireEvent.click(within(section).getByLabelText('Enable H5 access'))
 
     await act(async () => {
-      fireEvent.click(within(screen.getByRole('dialog', { name: 'Enable H5 access?' })).getByRole('button', { name: 'Enable H5 access' }))
+      fireEvent.click(within(screen.getByRole('dialog', { name: 'Enable LAN H5 access?' })).getByRole('button', { name: 'Enable H5 access' }))
     })
 
     await within(section).findByAltText('H5 access QR code')
@@ -1335,33 +1237,6 @@ describe('Settings > General tab', () => {
 
     fireEvent.click(within(section).getByRole('button', { name: 'Show token' }))
     expect(within(section).getByText('h5_persisted_token')).toBeInTheDocument()
-  })
-
-  it('keeps a tunnel URL path prefix in the QR launch URL', async () => {
-    useSettingsStore.setState({
-      h5Access: {
-        enabled: true,
-        token: 'h5_tunnel_token',
-        tokenPreview: 'h5_tunn...oken',
-        allowedOrigins: [],
-        publicBaseUrl: 'https://abcd-1234.ngrok-free.app/h5',
-        fixedPort: null,
-        disconnectGraceSeconds: null,
-      },
-    })
-    render(<Settings />)
-
-    fireEvent.click(screen.getByText('H5 Access'))
-    const section = screen.getByRole('region', { name: 'H5 Access' })
-
-    // The /h5 path prefix must survive into both the launch URL path and the
-    // embedded serverUrl query so a scanned QR reconnects through the tunnel.
-    expect(await within(section).findByAltText('H5 access QR code')).toBeInTheDocument()
-    expect(
-      within(section).getByText(
-        'https://abcd-1234.ngrok-free.app/h5?serverUrl=https%3A%2F%2Fabcd-1234.ngrok-free.app%2Fh5&h5Token=h5_tunnel_token',
-      ),
-    ).toBeInTheDocument()
   })
 
   it('saves a fixed port together with the host', async () => {
@@ -1549,7 +1424,7 @@ describe('Settings > General tab', () => {
     fireEvent.click(within(section).getByLabelText('Enable H5 access'))
 
     await act(async () => {
-      fireEvent.click(within(screen.getByRole('dialog', { name: 'Enable H5 access?' })).getByRole('button', { name: 'Enable H5 access' }))
+      fireEvent.click(within(screen.getByRole('dialog', { name: 'Enable LAN H5 access?' })).getByRole('button', { name: 'Enable H5 access' }))
     })
 
     fireEvent.click(within(section).getByRole('button', { name: 'Show token' }))
@@ -1974,6 +1849,83 @@ describe('Settings > Providers tab', () => {
     expect(within(dialog).getByLabelText(/Base URL/i)).toBeEnabled()
   })
 
+  it.each(['resolves', 'rejects'] as const)(
+    'keeps the selected regional endpoint when settings loading %s late',
+    async (outcome) => {
+      let settleSettings: (() => void) | undefined
+      MOCK_GET_SETTINGS.mockImplementationOnce(() => new Promise((resolve, reject) => {
+        settleSettings = () => outcome === 'resolves'
+          ? resolve({})
+          : reject(new Error('settings unavailable'))
+      }))
+      providerStoreState.presets = [ZHIPU_REGIONAL_PRESET]
+
+      render(<Settings />)
+      fireEvent.click(screen.getByRole('button', { name: /Add Provider/i }))
+
+      const dialog = screen.getByRole('dialog')
+      await waitFor(() => expect(settleSettings).toBeTypeOf('function'))
+      expect(within(dialog).queryByRole('combobox')).not.toBeInTheDocument()
+      const regionTrigger = within(dialog).getByRole('button', { name: /China mainland/ })
+      const baseUrlInput = within(dialog).getByLabelText(/Base URL/i)
+      expect(baseUrlInput).toHaveValue('https://open.bigmodel.cn/api/anthropic')
+      expect(within(dialog).getByRole('button', { name: /Get API Key/i })).toBeInTheDocument()
+      expect(within(dialog).getByText('Mainland China promotion')).toBeInTheDocument()
+
+      fireEvent.click(regionTrigger)
+      fireEvent.click(within(dialog).getByRole('option', { name: /Global/ }))
+
+      expect(baseUrlInput).toHaveValue('https://api.z.ai/api/anthropic')
+      expect(within(dialog).queryByRole('button', { name: /Get API Key/i })).not.toBeInTheDocument()
+      expect(within(dialog).queryByText('Mainland China promotion')).not.toBeInTheDocument()
+      await act(async () => settleSettings?.())
+      await waitFor(() => {
+        expect(dialog.querySelector('textarea')?.value).toContain(
+          '"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic"',
+        )
+      })
+    },
+  )
+
+  it('preserves pasted regional settings when the initial settings load finishes late', async () => {
+    let resolveSettings: (() => void) | undefined
+    MOCK_GET_SETTINGS.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveSettings = () => resolve({ fromDisk: true })
+    }))
+    providerStoreState.presets = [ZHIPU_REGIONAL_PRESET]
+
+    render(<Settings />)
+    fireEvent.click(screen.getByRole('button', { name: /Add Provider/i }))
+
+    const dialog = screen.getByRole('dialog')
+    await waitFor(() => expect(resolveSettings).toBeTypeOf('function'))
+    const settingsTextarea = dialog.querySelector('textarea') as HTMLTextAreaElement
+    fireEvent.change(settingsTextarea, {
+      target: {
+        value: JSON.stringify({
+          customSetting: 'keep-me',
+          env: {
+            ANTHROPIC_BASE_URL: 'https://api.z.ai/api/anthropic',
+            ANTHROPIC_MODEL: 'glm-global',
+          },
+        }),
+      },
+    })
+
+    expect(within(dialog).getByRole('button', { name: /Global/ })).toBeInTheDocument()
+    expect(within(dialog).getByLabelText(/Base URL/i)).toHaveValue('https://api.z.ai/api/anthropic')
+    await act(async () => resolveSettings?.())
+    await waitFor(() => {
+      expect(JSON.parse(settingsTextarea.value)).toMatchObject({
+        customSetting: 'keep-me',
+        env: {
+          ANTHROPIC_BASE_URL: 'https://api.z.ai/api/anthropic',
+          ANTHROPIC_MODEL: 'glm-global',
+        },
+      })
+    })
+  })
+
   it('uses the shared dropdown for API format in the provider form', () => {
     providerStoreState.presets = [
       {
@@ -1997,14 +1949,15 @@ describe('Settings > Providers tab', () => {
     fireEvent.click(screen.getByRole('button', { name: /Add Provider/i }))
 
     const dialog = screen.getByRole('dialog')
+    expect(within(dialog).queryByRole('combobox')).not.toBeInTheDocument()
 
-    fireEvent.click(within(dialog).getByRole('button', { name: /Anthropic Messages \(native protocol\)/i }))
-    fireEvent.click(within(dialog).getByRole('option', { name: /OpenAI Responses API \(local protocol translation\)/i }))
+    fireEvent.click(within(dialog).getByRole('button', { name: /Anthropic Messages \(native\)/i }))
+    fireEvent.click(within(dialog).getByRole('option', { name: /OpenAI Responses API \(proxy\)/i }))
 
-    expect(within(dialog).getByRole('button', { name: /OpenAI Responses API \(local protocol translation\)/i })).toBeInTheDocument()
-    expect(within(dialog).getByText(
-      'cc-haha translates the protocol locally without an additional third-party conversion service',
-    )).toBeInTheDocument()  })
+    // The panel is closed now; this finds the trigger, which reflects the pick.
+    expect(within(dialog).getByRole('button', { name: /OpenAI Responses API \(proxy\)/i })).toBeInTheDocument()
+    expect(within(dialog).getByText('Requests will be translated via the local proxy')).toBeInTheDocument()
+  })
 
   it('localizes the main model placeholder in the provider form', () => {
     useSettingsStore.setState({ locale: 'zh' })
@@ -2030,8 +1983,9 @@ describe('Settings > Providers tab', () => {
     fireEvent.click(screen.getByRole('button', { name: /添加服务商/i }))
 
     const dialog = screen.getByRole('dialog')
-    expect(within(dialog).getByPlaceholderText('模型 ID')).toBeInTheDocument()
-    expect(within(dialog).queryByPlaceholderText('Model ID')).not.toBeInTheDocument()
+    expect(within(dialog).getByPlaceholderText('例如： deepseek-v4-flash')).toBeInTheDocument()
+    expect(within(dialog).getByText('要填写 API Key 才能获取模型列表')).toBeInTheDocument()
+    expect(within(dialog).queryByPlaceholderText('e.g. deepseek-v4-flash')).not.toBeInTheDocument()
   })
 
   it('normalizes blank model mappings to the main model when saving a provider', async () => {
@@ -2198,53 +2152,6 @@ describe('Settings > Providers tab', () => {
     })
   })
 
-  it('closes the edit form without waiting for settings to refresh', async () => {
-    providerStoreState.updateProvider = vi.fn().mockResolvedValue(providerStoreState.providers[0])
-    useSettingsStore.setState({
-      fetchAll: vi.fn().mockReturnValue(new Promise(() => {})),
-    })
-
-    render(<Settings />)
-
-    fireEvent.click(screen.getAllByText('Edit')[0]!)
-    const dialog = screen.getByRole('dialog')
-    await waitFor(() => {
-      expect(dialog.querySelector('textarea')?.value).not.toBe('')
-    })
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
-
-    await waitFor(() => {
-      expect(providerStoreState.updateProvider).toHaveBeenCalledTimes(1)
-      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-    })
-  })
-
-  it('shows a visible error and unlocks the form when saving fails', async () => {
-    providerStoreState.updateProvider = vi.fn().mockRejectedValue(new Error('disk full'))
-    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
-
-    render(<Settings />)
-
-    fireEvent.click(screen.getAllByText('Edit')[0]!)
-    const dialog = screen.getByRole('dialog')
-    await waitFor(() => {
-      expect(dialog.querySelector('textarea')?.value).not.toBe('')
-    })
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
-
-    await waitFor(() => {
-      expect(useUIStore.getState().toasts).toEqual([
-        expect.objectContaining({
-          type: 'error',
-          message: 'Failed to save provider',
-        }),
-      ])
-      expect(within(dialog).getByRole('button', { name: 'Save' })).toBeEnabled()
-    })
-    expect(consoleError).toHaveBeenCalledWith('Failed to save provider:', expect.any(Error))
-    consoleError.mockRestore()
-  })
-
   it('keeps the provider form locked while save is in flight', async () => {
     let resolveCreate!: (provider: SavedProvider) => void
     providerStoreState.createProvider = vi.fn().mockImplementation(() => new Promise<SavedProvider>((resolve) => {
@@ -2324,7 +2231,7 @@ describe('Settings > Providers tab', () => {
       apiKey: 'sk-test',
       baseUrl: 'https://api.example.com/anthropic',
       apiFormat: 'anthropic',
-      toolSearchEnabled: true,
+      toolSearchEnabled: false,
       models: {
         main: 'custom-main',
         haiku: 'custom-main',
@@ -2353,18 +2260,37 @@ describe('Settings > Providers tab', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Add Provider/i }))
     const dialog = screen.getByRole('dialog')
+    const toolSearchCheckbox = within(dialog).getByRole('checkbox', { name: 'Enable Tool Search' })
 
-    // Toggle is hidden — it must not be reachable from the provider form.
-    expect(within(dialog).queryByRole('checkbox', { name: 'Enable Tool Search' })).toBeNull()
+    expect(toolSearchCheckbox).toBeChecked()
+    await waitFor(() => {
+      expect(within(dialog).getByDisplayValue((value) => (
+        typeof value === 'string' && value.includes('"ENABLE_TOOL_SEARCH": "true"')
+      ))).toBeInTheDocument()
+    })
+
+    fireEvent.click(toolSearchCheckbox)
+    expect(toolSearchCheckbox).not.toBeChecked()
+    await waitFor(() => {
+      expect(within(dialog).getByDisplayValue((value) => (
+        typeof value === 'string' && value.includes('"ENABLE_TOOL_SEARCH": "false"')
+      ))).toBeInTheDocument()
+    })
 
     fireEvent.change(within(dialog).getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } })
     fireEvent.click(within(dialog).getByRole('button', { name: /Save|Add/i }))
 
     await waitFor(() => {
       expect(providerStoreState.createProvider).toHaveBeenCalledWith(expect.objectContaining({
-        toolSearchEnabled: true,
+        toolSearchEnabled: false,
       }))
     })
+    expect(MOCK_UPDATE_SETTINGS).toHaveBeenCalledWith(expect.objectContaining({
+      env: expect.objectContaining({
+        EXISTING_ENV: '1',
+        ENABLE_TOOL_SEARCH: 'false',
+      }),
+    }))
   })
 
   it('defaults experimental beta headers on and persists a provider disable', async () => {
@@ -2519,35 +2445,6 @@ describe('Settings > Providers tab', () => {
     }))
   })
 
-  it('shows only the API key link for a provider preset with promotional copy', () => {
-    providerStoreState.presets = [
-      {
-        id: 'minimax',
-        name: 'MiniMax',
-        baseUrl: 'https://api.minimaxi.com/anthropic',
-        apiFormat: 'anthropic',
-        defaultModels: {
-          main: 'MiniMax-M2.7',
-          haiku: '',
-          sonnet: '',
-          opus: '',
-        },
-        needsApiKey: true,
-        websiteUrl: 'https://www.minimaxi.com',
-        apiKeyUrl: 'https://platform.minimaxi.com/user-center/basic-information/interface-key',
-        promoText: 'Sign up with this promotional offer',
-      },
-    ]
-
-    render(<Settings />)
-
-    fireEvent.click(screen.getByRole('button', { name: /Add Provider/i }))
-    const dialog = screen.getByRole('dialog')
-
-    expect(within(dialog).getByRole('button', { name: /Get API Key/ })).toBeInTheDocument()
-    expect(within(dialog).queryByText('Sign up with this promotional offer')).not.toBeInTheDocument()
-  })
-
   it('hides the API key by default and reveals it from the eye button', () => {
     providerStoreState.presets = [
       {
@@ -2638,7 +2535,7 @@ describe('Settings > Providers tab', () => {
     expect(await screen.findByText(/No cc-switch configuration was found/i)).toBeInTheDocument()
   })
 
-  it('keeps the model fetch disabled until the base URL and API key are both filled in', () => {
+  it('explains that an API key is required before models can be fetched', () => {
     setCustomPreset()
 
     render(<Settings />)
@@ -2648,11 +2545,12 @@ describe('Settings > Providers tab', () => {
     const fetchButton = within(dialog).getByRole('button', { name: /Fetch models|获取模型/i })
 
     expect(fetchButton).toBeDisabled()
-    expect(within(dialog).getByText(/Fill in the base URL and API key first/i)).toBeInTheDocument()
+    expect(within(dialog).getByText(/Enter an API key to fetch the model list/i)).toBeInTheDocument()
 
     fireEvent.change(within(dialog).getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } })
 
     expect(fetchButton).toBeEnabled()
+    expect(within(dialog).getByText(/only when the upstream provider publishes a model list endpoint/i)).toBeInTheDocument()
   })
 
   it('gives every model slot a picker once the model list is fetched', async () => {
@@ -2679,9 +2577,16 @@ describe('Settings > Providers tab', () => {
     // The picker supplements the field; a model id that is not on the list must
     // still be typeable. Queried by role because the picker's own accessible
     // name also contains the slot label.
-    const mainInput = within(dialog).getByRole('textbox', { name: /Main Model|主模型/i })
+    const mainInput = within(dialog).getByRole('combobox', { name: /Main Model|主模型/i })
+    fireEvent.change(mainInput, { target: { value: 'gpt-5-mini[1m]' } })
+    expect(mainInput).toHaveValue('gpt-5-mini')
+    expect(within(dialog).getByRole('option', { name: 'gpt-5-mini' })).toBeInTheDocument()
+    expect(within(dialog).queryByText(/No matching models/i)).not.toBeInTheDocument()
+
     fireEvent.change(mainInput, { target: { value: 'typed-by-hand' } })
     expect(mainInput).toHaveValue('typed-by-hand')
+    const noMatches = within(dialog).getByRole('option', { name: /No matching models/i })
+    expect(noMatches).toHaveAttribute('aria-disabled', 'true')
   })
 
   it('routes a picked model through the shared model change handler', async () => {
@@ -2695,15 +2600,74 @@ describe('Settings > Providers tab', () => {
     })
 
     fireEvent.click(within(dialog).getByRole('button', { name: /Fetch models|获取模型/i }))
-    fireEvent.click(await within(dialog).findByRole('button', { name: /Main Model.*fetched list/i }))
-    fireEvent.click(within(dialog).getByRole('option', { name: /gpt-5-mini/i }))
+    const mainCombobox = await within(dialog).findByRole('combobox', { name: /Main Model|主模型/i })
+    const pickerButton = within(dialog).getByRole('button', { name: /Main Model.*fetched list/i })
+    expect(pickerButton).toHaveAttribute('tabindex', '-1')
 
-    expect(within(dialog).getByRole('textbox', { name: /Main Model|主模型/i })).toHaveValue('gpt-5-mini')
+    fireEvent.click(mainCombobox)
+    expect(mainCombobox).toHaveAttribute('aria-expanded', 'true')
+    expect(within(dialog).getByRole('option', { name: /gpt-5-mini/i })).toHaveAttribute('tabindex', '-1')
+    fireEvent.keyDown(mainCombobox, { key: 'ArrowDown' })
+    fireEvent.keyDown(mainCombobox, { key: 'Enter' })
+
+    expect(mainCombobox).toHaveValue('gpt-5-mini')
+    expect(mainCombobox).toHaveAttribute('aria-expanded', 'false')
     // Going through handleModelChange is what keeps the settings JSON in sync —
     // a bare setState would leave the textarea on the old model id.
     await waitFor(() => {
       expect(dialog.querySelector('textarea')?.value).toContain('"ANTHROPIC_MODEL": "gpt-5-mini"')
     })
+  })
+
+  it('closes the previous model popup when keyboard focus moves to another field', async () => {
+    const dialog = await openProviderFormWithModels({
+      ok: true,
+      endpoint: 'https://api.example.com/v1/models',
+      models: [
+        { id: 'gpt-5-mini', ownedBy: 'openai' },
+        { id: 'claude-sonnet-4-6', ownedBy: 'anthropic' },
+      ],
+    })
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /Fetch models|获取模型/i }))
+    const comboboxes = await within(dialog).findAllByRole('combobox')
+    const mainCombobox = comboboxes[0]!
+    const haikuCombobox = comboboxes[1]!
+
+    fireEvent.focus(mainCombobox)
+    expect(mainCombobox).toHaveAttribute('aria-expanded', 'true')
+    expect(within(dialog).getAllByRole('listbox')).toHaveLength(1)
+
+    fireEvent.blur(mainCombobox, { relatedTarget: haikuCombobox })
+    fireEvent.focus(haikuCombobox)
+
+    expect(mainCombobox).toHaveAttribute('aria-expanded', 'false')
+    expect(haikuCombobox).toHaveAttribute('aria-expanded', 'true')
+    expect(within(dialog).getAllByRole('listbox')).toHaveLength(1)
+  })
+
+  it('limits a large catalog until the user narrows the model input', async () => {
+    const dialog = await openProviderFormWithModels({
+      ok: true,
+      endpoint: 'https://api.example.com/v1/models',
+      models: Array.from({ length: 101 }, (_, index) => ({
+        id: `model-${String(index).padStart(3, '0')}`,
+        ownedBy: 'openai',
+      })),
+    })
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /Fetch models|获取模型/i }))
+    const mainCombobox = await within(dialog).findByRole('combobox', { name: /Main Model|主模型/i })
+    fireEvent.click(mainCombobox)
+
+    expect(within(dialog).getAllByRole('option')).toHaveLength(100)
+    expect(within(dialog).getByText(/More models are available/i)).toBeInTheDocument()
+
+    fireEvent.change(mainCombobox, { target: { value: 'model-100' } })
+
+    expect(within(dialog).getAllByRole('option')).toHaveLength(1)
+    expect(within(dialog).getByRole('option', { name: 'model-100' })).toBeInTheDocument()
+    expect(within(dialog).queryByText(/More models are available/i)).not.toBeInTheDocument()
   })
 
   it.each([
@@ -2729,6 +2693,7 @@ describe('Settings > Providers tab', () => {
     // code still picks the headline, the raw text only rides along under it.
     expect(within(dialog).getByText(/upstream said no/)).toBeInTheDocument()
     expect(within(dialog).queryByRole('button', { name: /from the fetched list/i })).not.toBeInTheDocument()
+    expect(within(dialog).queryByRole('combobox')).not.toBeInTheDocument()
   })
 
   it('surfaces the upstream message when a 200 response cloaks an auth failure', async () => {
@@ -2879,7 +2844,7 @@ describe('Settings > Providers tab', () => {
     expect(within(dialog).queryByRole('button', { name: /from the fetched list/i })).not.toBeInTheDocument()
   })
 
-  it('drops a fetched model list once the API key changes', async () => {
+  it('drops an open model list when the API key changes and does not reopen it after refetching', async () => {
     const dialog = await openProviderFormWithModels({
       ok: true,
       endpoint: 'https://api.example.com/v1/models',
@@ -2888,10 +2853,18 @@ describe('Settings > Providers tab', () => {
 
     fireEvent.click(within(dialog).getByRole('button', { name: /Fetch models|获取模型/i }))
     expect(await within(dialog).findByText(/Model list loaded \(1\)/i)).toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('combobox', { name: /Main Model|主模型/i }))
+    expect(within(dialog).getByRole('listbox')).toBeInTheDocument()
 
     fireEvent.change(within(dialog).getByPlaceholderText('sk-...'), { target: { value: 'sk-other' } })
 
     expect(within(dialog).queryByText(/Model list loaded/i)).not.toBeInTheDocument()
+    expect(within(dialog).queryByRole('listbox')).not.toBeInTheDocument()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /Fetch models|获取模型/i }))
+    const mainCombobox = await within(dialog).findByRole('combobox', { name: /Main Model|主模型/i })
+    expect(mainCombobox).toHaveAttribute('aria-expanded', 'false')
+    expect(within(dialog).queryByRole('listbox')).not.toBeInTheDocument()
   })
 })
 
@@ -2920,13 +2893,6 @@ describe('Settings > About tab', () => {
       installUpdate: vi.fn().mockResolvedValue(undefined),
       dismissPrompt: vi.fn(),
     })
-  })
-
-  it('shows the current product name', async () => {
-    render(<Settings />)
-
-    expect(await screen.findByRole('heading', { name: 'Code Council' })).toBeInTheDocument()
-    expect(screen.getByAltText('Code Council')).toBeInTheDocument()
   })
 
   it('renders release notes with markdown formatting', async () => {
@@ -3047,110 +3013,5 @@ describe('Settings > About tab', () => {
       mode: 'system',
       url: 'http://127.0.0.1:7890',
     })
-  })
-
-  it('renders the one-click tunnel section with the live URL when a tunnel is running', async () => {
-    vi.spyOn(h5AccessApi, 'tunnelAvailable').mockReturnValue(true)
-    useSettingsStore.setState({
-      h5Access: {
-        enabled: true,
-        token: 'h5_tunnel_token',
-        tokenPreview: 'h5_tunn...oken',
-        allowedOrigins: [],
-        publicBaseUrl: 'https://abcd.trycloudflare.com',
-        fixedPort: null,
-        disconnectGraceSeconds: null,
-      },
-      h5AccessDiagnostics: {
-        storedHostStaleness: 'proxy',
-        storedPublicBaseUrl: null,
-        effectivePublicBaseUrl: 'https://abcd.trycloudflare.com',
-        suggestedHost: null,
-        localInterfaceHosts: [],
-        activePort: 3456,
-        tunnel: {
-          status: 'running',
-          url: 'https://abcd.trycloudflare.com',
-          mode: 'quick',
-          error: null,
-          hasToken: false,
-        },
-      },
-    })
-    render(<Settings />)
-
-    fireEvent.click(screen.getByText('H5 Access'))
-    const section = screen.getByRole('region', { name: 'H5 Access' })
-
-    expect(within(section).getByTestId('h5-access-tunnel')).toBeInTheDocument()
-    // The running tunnel URL is surfaced and the toggle offers to stop it.
-    expect(within(section).getByTestId('h5-access-tunnel-status')).toHaveTextContent('https://abcd.trycloudflare.com')
-    expect(within(section).getByTestId('h5-access-tunnel-toggle')).toHaveTextContent('Stop tunnel')
-  })
-
-  it('stops polling H5 tunnel diagnostics after the tunnel reaches an error state', async () => {
-    vi.useFakeTimers()
-    vi.spyOn(h5AccessApi, 'tunnelAvailable').mockReturnValue(true)
-    const fetchH5Access = vi.fn().mockImplementation(async () => {
-      useSettingsStore.setState({
-        h5AccessDiagnostics: {
-          storedHostStaleness: 'proxy',
-          storedPublicBaseUrl: null,
-          effectivePublicBaseUrl: null,
-          suggestedHost: null,
-          localInterfaceHosts: [],
-          activePort: 3456,
-          tunnel: {
-            status: 'error',
-            url: null,
-            mode: 'quick',
-            error: 'Cloudflare tunnel became unreachable after 3 consecutive health check failures (HTTP 524).',
-            hasToken: false,
-          },
-        },
-      })
-    })
-    useSettingsStore.setState({
-      h5Access: {
-        enabled: true,
-        token: 'h5_tunnel_token',
-        tokenPreview: 'h5_tunn...oken',
-        allowedOrigins: [],
-        publicBaseUrl: 'https://abcd.trycloudflare.com',
-        fixedPort: null,
-        disconnectGraceSeconds: null,
-      },
-      h5AccessDiagnostics: {
-        storedHostStaleness: 'proxy',
-        storedPublicBaseUrl: null,
-        effectivePublicBaseUrl: 'https://abcd.trycloudflare.com',
-        suggestedHost: null,
-        localInterfaceHosts: [],
-        activePort: 3456,
-        tunnel: {
-          status: 'running',
-          url: 'https://abcd.trycloudflare.com',
-          mode: 'quick',
-          error: null,
-          hasToken: false,
-        },
-      },
-      fetchH5Access,
-    })
-    render(<Settings />)
-
-    fireEvent.click(screen.getByText('H5 Access'))
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(10_000)
-    })
-    expect(fetchH5Access).toHaveBeenCalledTimes(1)
-    const section = screen.getByRole('region', { name: 'H5 Access' })
-    expect(within(section).getByTestId('h5-access-tunnel-status')).toHaveTextContent('Cloudflare tunnel became unreachable')
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(30_000)
-    })
-    expect(fetchH5Access).toHaveBeenCalledTimes(1)
   })
 })

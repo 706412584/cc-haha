@@ -1,21 +1,44 @@
 import type { Command } from '../commands.js'
+import type { ToolUseContext } from '../Tool.js'
 import { getAttributionTexts } from '../utils/attribution.js'
 import { executeShellCommandsInPrompt } from '../utils/promptShellExecution.js'
+import {
+  resolveDefaultShell,
+  type ShellToolType,
+} from '../utils/shell/resolveDefaultShell.js'
 import { getUndercoverInstructions, isUndercover } from '../utils/undercover.js'
 
-const ALLOWED_TOOLS = [
-  'Bash(git add:*)',
-  'Bash(git status:*)',
-  'Bash(git commit:*)',
+const ALLOWED_COMMANDS = [
+  'git add:*',
+  'git status:*',
+  'git commit:*',
 ]
 
-function getPromptContent(): string {
+export function getCommitAllowedTools(shell: ShellToolType | null): string[] {
+  if (!shell) return []
+  const toolName = shell === 'powershell' ? 'PowerShell' : 'Bash'
+  return ALLOWED_COMMANDS.map(command => `${toolName}(${command})`)
+}
+
+export function getPromptContent(shell: ShellToolType): string {
   const { commit: commitAttribution } = getAttributionTexts()
 
   let prefix = ''
   if (process.env.USER_TYPE === 'ant' && isUndercover()) {
     prefix = getUndercoverInstructions() + '\n'
   }
+
+  const attribution = commitAttribution ? `\n\n${commitAttribution}` : ''
+  const commitExample =
+    shell === 'powershell'
+      ? `$commitMessage = @'
+Commit message here.${attribution}
+'@
+git commit -m $commitMessage`
+      : `git commit -m "$(cat <<'EOF'
+Commit message here.${attribution}
+EOF
+)"`
 
   return `${prefix}## Context
 
@@ -43,49 +66,68 @@ Based on the above changes, create a single git commit:
    - Ensure the message accurately reflects the changes and their purpose (i.e. "add" means a wholly new feature, "update" means an enhancement to an existing feature, "fix" means a bug fix, etc.)
    - Draft a concise (1-2 sentences) commit message that focuses on the "why" rather than the "what"
 
-2. Stage relevant files and create the commit using HEREDOC syntax:
+2. Stage relevant files and create the commit using ${shell === 'powershell' ? 'a PowerShell here-string' : 'HEREDOC syntax'}:
 \`\`\`
-git commit -m "$(cat <<'EOF'
-Commit message here.${commitAttribution ? `\n\n${commitAttribution}` : ''}
-EOF
-)"
+${commitExample}
 \`\`\`
 
 You have the capability to call multiple tools in a single response. Stage and create the commit using a single message. Do not use any other tools or do anything else. Do not send any other text or messages besides these tool calls.`
+}
+
+export async function buildCommitPrompt(
+  context: ToolUseContext,
+  dependencies: {
+    resolveShell?: typeof resolveDefaultShell
+    execute?: typeof executeShellCommandsInPrompt
+  } = {},
+) {
+  const shell = (dependencies.resolveShell ?? resolveDefaultShell)()
+  if (!shell) {
+    throw new Error(
+      'No supported command shell is available. Install Git Bash or enable PowerShell.',
+    )
+  }
+  const allowedTools = getCommitAllowedTools(shell)
+  const promptContent = getPromptContent(shell)
+  const finalContent = await (
+    dependencies.execute ?? executeShellCommandsInPrompt
+  )(
+    promptContent,
+    {
+      ...context,
+      getAppState() {
+        const appState = context.getAppState()
+        return {
+          ...appState,
+          toolPermissionContext: {
+            ...appState.toolPermissionContext,
+            alwaysAllowRules: {
+              ...appState.toolPermissionContext.alwaysAllowRules,
+              command: allowedTools,
+            },
+          },
+        }
+      },
+    },
+    '/commit',
+    shell,
+  )
+
+  return [{ type: 'text' as const, text: finalContent }]
 }
 
 const command = {
   type: 'prompt',
   name: 'commit',
   description: 'Create a git commit',
-  allowedTools: ALLOWED_TOOLS,
+  get allowedTools() {
+    return getCommitAllowedTools(resolveDefaultShell())
+  },
   contentLength: 0, // Dynamic content
   progressMessage: 'creating commit',
   source: 'builtin',
   async getPromptForCommand(_args, context) {
-    const promptContent = getPromptContent()
-    const finalContent = await executeShellCommandsInPrompt(
-      promptContent,
-      {
-        ...context,
-        getAppState() {
-          const appState = context.getAppState()
-          return {
-            ...appState,
-            toolPermissionContext: {
-              ...appState.toolPermissionContext,
-              alwaysAllowRules: {
-                ...appState.toolPermissionContext.alwaysAllowRules,
-                command: ALLOWED_TOOLS,
-              },
-            },
-          }
-        },
-      },
-      '/commit',
-    )
-
-    return [{ type: 'text', text: finalContent }]
+    return buildCommitPrompt(context)
   },
 } satisfies Command
 

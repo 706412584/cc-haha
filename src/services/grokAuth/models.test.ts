@@ -4,6 +4,7 @@ import {
   GROK_MODEL_CATALOG,
   getGrokContextWindowForModel,
   resolveGrokModel,
+  resolveGrokReasoningEffort,
 } from './models.js'
 
 describe('Grok model catalog', () => {
@@ -22,5 +23,11 @@ describe('Grok model catalog', () => {
     expect(resolveGrokModel('unknown-model')).toBe(GROK_DEFAULT_MAIN_MODEL)
     expect(getGrokContextWindowForModel('grok-4.5')).toBe(500_000)
     expect(getGrokContextWindowForModel('unknown-model')).toBe(500_000)
+  })
+
+  test('normalizes reasoning effort through the selected model catalog', () => {
+    expect(resolveGrokReasoningEffort('grok-4.5', 'low')).toBe('low')
+    expect(resolveGrokReasoningEffort('grok-4.5', 'max')).toBe('high')
+    expect(resolveGrokReasoningEffort('grok-composer-2.5-fast', 'high')).toBeUndefined()
   })
 })

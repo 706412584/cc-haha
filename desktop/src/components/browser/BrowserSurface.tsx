@@ -1,5 +1,8 @@
-import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
-import { Camera, Minus, MousePointer2, Plus, RotateCcw } from 'lucide-react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Camera, Minus, MousePointer2, Plus, RotateCcw, Send, Trash2, Undo2 } from 'lucide-react'
+import { Badge } from '@/components/ui/Badge'
+import { Button } from '@/components/ui/Button'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { IconButton } from '@/components/ui/IconButton'
 import { Spinner } from '@/components/ui/Spinner'
 import { useTranslation } from '../../i18n'
@@ -10,6 +13,8 @@ import { classifyPreviewLink } from '../../lib/previewLinkRouter'
 import { isAbsoluteLocalPath, localFileUrl, previewFsUrl } from '../../lib/handlePreviewLink'
 import { previewBridge } from '../../lib/previewBridge'
 import { subscribePreviewEvents } from '../../lib/previewEvents'
+import { buildPreviewPickerMessage } from '../../lib/previewSelectionPicker'
+import { buildSelectionBatchMessage, formatElementLabel } from '../../lib/selectionComposer'
 import {
   BROWSER_ZOOM_STEP,
   DEFAULT_BROWSER_ZOOM,
@@ -19,7 +24,9 @@ import {
   useBrowserPanelStore,
 } from '../../stores/browserPanelStore'
 import { useOverlayStore } from '../../stores/overlayStore'
+import { usePreviewSelectionStore } from '../../stores/previewSelectionStore'
 import { useSettingsStore } from '../../stores/settingsStore'
+import { useChatStore } from '../../stores/chatStore'
 
 const LOCAL_PREVIEW_PATH_PREFIXES = ['/preview-fs/', '/local-file/']
 const LOCAL_PREVIEW_READY_TIMEOUT_MS = 2500
@@ -72,7 +79,10 @@ export function BrowserSurface({ sessionId }: { sessionId: string }) {
   const loadSeqRef = useRef(0)
   const requestedUrlRef = useRef<string | null>(null)
   const hasNativePreviewRef = useRef(false)
+  const selectionSendInFlightRef = useRef(false)
+  const [pendingNavigation, setPendingNavigation] = useState<{ run: () => void } | null>(null)
   const session = useBrowserPanelStore((s) => s.bySession[sessionId])
+  const selectionDraft = usePreviewSelectionStore((s) => s.bySession[sessionId])
   const appZoom = useSettingsStore((s) => s.uiZoom)
   const store = useBrowserPanelStore.getState()
   const overlayCount = useOverlayStore((s) => s.count)
@@ -139,6 +149,7 @@ export function BrowserSurface({ sessionId }: { sessionId: string }) {
       loadSeqRef.current += 1
       requestedUrlRef.current = null
       hasNativePreviewRef.current = false
+      usePreviewSelectionStore.getState().clear(sessionId)
       previewBridge.close()
     }
     // The visibility-sync effect below owns setVisible() — including the
@@ -200,11 +211,87 @@ export function BrowserSurface({ sessionId }: { sessionId: string }) {
 
   if (!session) return null
 
+  const selectedItems = selectionDraft?.items ?? []
+  const selectionCount = selectedItems.length
+  const lastSelection = selectedItems.at(-1)
+
+  const discardSelectionDraft = async () => {
+    const current = useBrowserPanelStore.getState().bySession[sessionId]
+    if (current?.pickerActive) {
+      useBrowserPanelStore.getState().setPicker(sessionId, false)
+      await previewBridge.message({ v: 1, type: 'exit-picker' })
+    }
+    await previewBridge.message({ v: 1, type: 'clear-selection-draft' })
+    usePreviewSelectionStore.getState().clear(sessionId)
+  }
+
+  const requestNavigation = (run: () => void) => {
+    if (usePreviewSelectionStore.getState().bySession[sessionId]?.items.length) {
+      setPendingNavigation({ run })
+      return
+    }
+    run()
+  }
+
   const openOrNavigate = (inputUrl: string) => {
     const url = resolveBrowserNavigationUrl(inputUrl, sessionId)
     if (!url) return
-    store.navigate(sessionId, url)
-    requestNativePreview(url)
+    requestNavigation(() => {
+      store.navigate(sessionId, url)
+      requestNativePreview(url)
+    })
+  }
+
+  const undoLastSelection = async () => {
+    const draft = usePreviewSelectionStore.getState().bySession[sessionId]
+    const last = draft?.items.at(-1)
+    if (!draft || !last) return
+    if (draft.items.length === 1 && useBrowserPanelStore.getState().bySession[sessionId]?.pickerActive) {
+      store.setPicker(sessionId, false)
+      await previewBridge.message({ v: 1, type: 'exit-picker' })
+    }
+    await previewBridge.message({ v: 1, type: 'undo-selection', itemId: last.id })
+    usePreviewSelectionStore.getState().undoLast(sessionId)
+  }
+
+  const sendSelectionBatch = async () => {
+    if (selectionSendInFlightRef.current) return
+    const draft = usePreviewSelectionStore.getState().bySession[sessionId]
+    if (!draft?.items.length) return
+    selectionSendInFlightRef.current = true
+    try {
+      if (useBrowserPanelStore.getState().bySession[sessionId]?.pickerActive) {
+        store.setPicker(sessionId, false)
+        await previewBridge.message({ v: 1, type: 'exit-picker' })
+      }
+
+      const batch = buildSelectionBatchMessage(draft.items)
+      const attachments = draft.items.flatMap((entry, index) => {
+        const data = entry.payload.screenshot?.dataUrl
+        if (!data) return []
+        const item = batch.items[index]!
+        return [{
+          type: 'image' as const,
+          name: item.displayName,
+          mimeType: 'image/png',
+          data,
+          note: item.note,
+          quote: item.selector,
+          selectionNumber: entry.number,
+        }]
+      })
+      useChatStore.getState().sendMessage(sessionId, batch.modelText, attachments, {
+        displayContent: t('browser.selection.batchMessage', { count: draft.items.length }),
+        displayAttachments: attachments,
+      })
+      try {
+        await previewBridge.message({ v: 1, type: 'commit-selection-draft' })
+      } finally {
+        usePreviewSelectionStore.getState().clear(sessionId)
+      }
+    } finally {
+      selectionSendInFlightRef.current = false
+    }
   }
 
   const setPreviewZoom = (nextZoom: number) => {
@@ -272,7 +359,15 @@ export function BrowserSurface({ sessionId }: { sessionId: string }) {
           const cur = useBrowserPanelStore.getState().bySession[sessionId]
           const next = !cur?.pickerActive
           store.setPicker(sessionId, next)
-          previewBridge.message({ v: 1, type: next ? 'enter-picker' : 'exit-picker' })
+          if (!next) {
+            void previewBridge.message({ v: 1, type: 'exit-picker' })
+            return
+          }
+          const draft = usePreviewSelectionStore.getState().bySession[sessionId]
+          void previewBridge.message(buildPreviewPickerMessage(
+            draft?.items.length ? 'batch' : 'single',
+            draft?.nextNumber ?? 1,
+          ))
         }}
       />
     </>
@@ -286,22 +381,24 @@ export function BrowserSurface({ sessionId }: { sessionId: string }) {
         canGoForward={session.canGoForward}
         loading={session.loading}
         onNavigate={openOrNavigate}
-        onBack={() => {
+        onBack={() => requestNavigation(() => {
           store.goBack(sessionId)
           store.setLoading(sessionId, true)
           const url = useBrowserPanelStore.getState().bySession[sessionId]!.url
           requestNativePreview(url)
-        }}
-        onForward={() => {
+        })}
+        onForward={() => requestNavigation(() => {
           store.goForward(sessionId)
           store.setLoading(sessionId, true)
           const url = useBrowserPanelStore.getState().bySession[sessionId]!.url
           requestNativePreview(url)
-        }}
+        })}
         onReload={() => {
           if (!session.url) return
-          store.setLoading(sessionId, true)
-          requestNativePreview(session.url, { force: true })
+          requestNavigation(() => {
+            store.setLoading(sessionId, true)
+            requestNativePreview(session.url, { force: true })
+          })
         }}
         rightActions={previewActions}
       />
@@ -317,14 +414,75 @@ export function BrowserSurface({ sessionId }: { sessionId: string }) {
           </div>
           <div
             data-testid="browser-preview-floating-controls"
-            className="pointer-events-none absolute inset-x-0 bottom-0 z-[var(--z-raised)] flex h-12 items-end justify-end px-3 pb-2"
+            className="pointer-events-none absolute inset-x-0 bottom-0 z-[var(--z-raised)] flex h-12 items-center justify-end gap-2 px-3 py-1"
           >
+            {selectionCount > 0 && (
+              <div
+                data-testid="browser-selection-draft"
+                role="region"
+                aria-label={t('browser.selection.draftCount', { count: selectionCount })}
+                aria-live="polite"
+                className="pointer-events-auto flex h-10 min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] px-2 shadow-[var(--shadow-overlay)]"
+              >
+                <Badge tone="brand" size="sm" pill={false} mono bordered>
+                  {selectionCount}
+                </Badge>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-xs font-semibold text-[var(--color-text-primary)]">
+                    {t('browser.selection.draftCount', { count: selectionCount })}
+                  </span>
+                  {lastSelection && (
+                    <span className="block truncate font-mono text-[10px] text-[var(--color-text-tertiary)]">
+                      #{lastSelection.number} {formatElementLabel(lastSelection.payload.element)}
+                    </span>
+                  )}
+                </span>
+                <IconButton
+                  icon={<Undo2 size={14} />}
+                  label={t('browser.selection.undo')}
+                  size="sm"
+                  tone="muted"
+                  onClick={() => { void undoLastSelection() }}
+                />
+                <IconButton
+                  icon={<Trash2 size={14} />}
+                  label={t('browser.selection.clear')}
+                  size="sm"
+                  tone="muted"
+                  onClick={() => { void discardSelectionDraft() }}
+                />
+                <Button
+                  variant="primary"
+                  size="base"
+                  icon={<Send size={13} />}
+                  onClick={() => { void sendSelectionBatch() }}
+                >
+                  {t('browser.selection.sendBatch', { count: selectionCount })}
+                </Button>
+              </div>
+            )}
             <div className="pointer-events-auto">
               {zoomControls}
             </div>
           </div>
         </div>
       </div>
+      <ConfirmDialog
+        open={pendingNavigation !== null}
+        onClose={() => setPendingNavigation(null)}
+        onConfirm={async () => {
+          const pending = pendingNavigation
+          if (!pending) return
+          await discardSelectionDraft()
+          setPendingNavigation(null)
+          pending.run()
+        }}
+        title={t('browser.selection.navigationTitle')}
+        body={t('browser.selection.navigationBody', { count: selectionCount })}
+        confirmLabel={t('browser.selection.navigationContinue')}
+        cancelLabel={t('browser.selection.cancel')}
+        confirmVariant="danger"
+      />
     </div>
   )
 }

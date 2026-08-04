@@ -65,7 +65,8 @@ export async function stopTask(
   // LocalShellTask.kill() atomically marks the task notified before returning.
   // Capture the pre-kill state so the desktop SDK bookend is not suppressed by
   // that implementation detail.
-  const shouldEmitShellTermination = isLocalShellTask(task) && !task.notified
+  const shouldEmitShellTermination =
+    isLocalShellTask(task) && !task.agentId && !task.notified
 
   await taskImpl.kill(taskId, setAppState)
 

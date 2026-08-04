@@ -90,6 +90,14 @@ export type TeamFile = {
   }>
 }
 
+export function isValidTeamFile(value: unknown): value is TeamFile {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    Array.isArray((value as Partial<TeamFile>).members)
+  )
+}
+
 export type Input = z.infer<ReturnType<typeof inputSchema>>
 // Export SpawnTeamOutput as Output for backward compatibility
 export type Output = SpawnTeamOutput
@@ -132,7 +140,8 @@ export function getTeamFilePath(teamName: string): string {
 export function readTeamFile(teamName: string): TeamFile | null {
   try {
     const content = readFileSync(getTeamFilePath(teamName), 'utf-8')
-    return jsonParse(content) as TeamFile
+    const parsed: unknown = jsonParse(content)
+    return isValidTeamFile(parsed) ? parsed : null
   } catch (e) {
     if (getErrnoCode(e) === 'ENOENT') return null
     logForDebugging(
@@ -190,17 +199,12 @@ export async function mutateTeamFileAsync(
   teamName: string,
   mutator: (teamFile: TeamFile) => TeamFile | void,
 ): Promise<TeamFile> {
-  const teamDir = getTeamDir(teamName)
   const teamFilePath = getTeamFilePath(teamName)
   const lockFilePath = `${teamFilePath}.lock`
 
-  await mkdir(teamDir, { recursive: true })
-  try {
-    await writeFile(teamFilePath, '{}', { encoding: 'utf-8', flag: 'wx' })
-  } catch (e) {
-    if (getErrnoCode(e) !== 'EEXIST') {
-      throw e
-    }
+  const existing = await readTeamFileAsync(teamName)
+  if (!isValidTeamFile(existing)) {
+    throw new Error(`Team "${teamName}" does not exist`)
   }
 
   const release = await lockfile.lock(teamFilePath, {
@@ -214,7 +218,7 @@ export async function mutateTeamFileAsync(
 
   try {
     const current = await readTeamFileAsync(teamName)
-    if (!current || !Array.isArray(current.members)) {
+    if (!isValidTeamFile(current)) {
       throw new Error(`Team "${teamName}" does not exist`)
     }
 

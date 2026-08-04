@@ -147,11 +147,13 @@ function parseConfiguredContextWindows(): Record<string, number> {
   }
 }
 
-function getConfiguredModelContextWindow(model: string): number | undefined {
+export function getConfiguredModelContextWindow(
+  model: string,
+): number | undefined {
   return findConfiguredModelContextWindow(model, parseConfiguredContextWindows())
 }
 
-function getBuiltInModelContextWindow(model: string): number | undefined {
+export function getBuiltInModelContextWindow(model: string): number | undefined {
   const normalizedModel = normalizeModelContextKey(model)
   const exact = DIRECT_MODEL_CONTEXT_WINDOWS[normalizedModel]
   if (exact !== undefined) {

@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { buildSelectionComposerText, buildSelectionDirectMessage } from './selectionComposer'
+import { buildSelectionBatchMessage, buildSelectionComposerText, buildSelectionDirectMessage } from './selectionComposer'
 
 it('renders only the user instruction + concrete changes (no selector/DOM/page noise)', () => {
   const text = buildSelectionComposerText({
@@ -45,4 +45,34 @@ it('builds a model prompt while keeping the visible selection label compact', ()
   expect(message.modelText).toContain('这个标题更轻一点')
   expect(message.displayName).toBe('<h1>')
   expect(message.note).toBe('这个标题更轻一点')
+})
+
+it('builds one numbered model prompt for a batch of selections', () => {
+  const message = buildSelectionBatchMessage([
+    {
+      id: 'one',
+      number: 1,
+      payload: {
+        pageUrl: 'http://localhost:5174/',
+        element: { selector: '#title', tag: 'h1', classes: [] } as never,
+        change: { description: '标题更轻一点' } as never,
+      },
+    },
+    {
+      id: 'three',
+      number: 3,
+      payload: {
+        pageUrl: 'http://localhost:5174/',
+        element: { selector: '#cta', tag: 'button', classes: [] } as never,
+        change: { description: '按钮更醒目' } as never,
+      },
+    },
+  ])
+
+  expect(message.modelText).toContain('[元素 1]')
+  expect(message.modelText).toContain('[元素 3]')
+  expect(message.modelText).not.toContain('[元素 2]')
+  expect(message.modelText).toContain('标题更轻一点')
+  expect(message.modelText).toContain('按钮更醒目')
+  expect(message.items.map((item) => item.displayName)).toEqual(['<h1>', '<button>'])
 })

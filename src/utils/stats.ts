@@ -454,6 +454,7 @@ async function processSessionFiles(
           sessionId: record.sessionId,
           requestId: record.requestId,
           messageId: (message.message as { id?: unknown } | undefined)?.id,
+          forkedFrom: record.forkedFrom,
         }
         if (!isBillableUsageRecord(identity)) return false
         const key = usageRecordKey(identity, suffix)

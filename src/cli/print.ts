@@ -39,14 +39,6 @@ import {
   parseAgentsFromJson,
 } from 'src/tools/AgentTool/loadAgentsDir.js'
 import type { Message, NormalizedUserMessage } from 'src/types/message.js'
-import {
-  flushAndDrainAgentCompletionInbox,
-  isCurrentAgentCompletionCommand,
-  ackAgentCompletionCommands,
-  requeueAgentCompletionCommands,
-  subscribeToAgentCompletionWake,
-} from 'src/tasks/LocalAgentTask/LocalAgentTask.js'
-import { removeStaleHeadlessAgentCompletions } from 'src/commands/headless.js'
 import type { QueuedCommand } from 'src/types/textInputTypes.js'
 import {
   dequeue,
@@ -249,6 +241,7 @@ import { executeNotificationHooks } from 'src/utils/hooks.js'
 import {
   parseTaskNotificationXml,
   shouldForwardTaskNotificationToModel,
+  TaskNotificationFollowUpBatch,
 } from 'src/utils/taskNotificationPolicy.js'
 import {
   ElicitRequestSchema,
@@ -1034,6 +1027,7 @@ function runHeadlessStreaming(
   let inputClosed = false
   let shutdownPromptInjected = false
   let heldBackResult: StdoutMessage | null = null
+  const deferredAgentNotifications = new TaskNotificationFollowUpBatch()
   let abortController: AbortController | undefined
   // Same queue sendRequest() enqueues to — one FIFO for everything.
   const output = structuredIO.outbound
@@ -1949,13 +1943,8 @@ function runHeadlessStreaming(
       // ask() call so messages that queued up during a long turn coalesce
       // into a single follow-up turn instead of N separate turns.
       const drainCommandQueue = async () => {
-        const isCurrentMainThreadCommand = (candidate: QueuedCommand) =>
-          isMainThread(candidate) &&
-          isCurrentAgentCompletionCommand(candidate, getAppState())
-        while ((command = dequeue(isCurrentMainThreadCommand))) {
-          const ownedCompletionCommands: QueuedCommand[] = [command]
-          try {
-            if (
+        while ((command = dequeue(isMainThread))) {
+          if (
             command.mode !== 'prompt' &&
             command.mode !== 'orphaned-permission' &&
             command.mode !== 'task-notification'
@@ -1973,7 +1962,6 @@ function runHeadlessStreaming(
             while (canBatchWith(command, peek(isMainThread))) {
               batch.push(dequeue(isMainThread)!)
             }
-            ownedCompletionCommands.push(...batch.slice(1))
             if (batch.length > 1) {
               command = {
                 ...command,
@@ -2066,10 +2054,10 @@ function runHeadlessStreaming(
                 structuredOutput: options.outputFormat === 'stream-json',
               })
             ) {
+              deferredAgentNotifications.defer(notificationText)
               for (const uuid of batchUuids) {
                 notifyCommandLifecycle(uuid, 'completed')
               }
-              ackAgentCompletionCommands(setAppState, ownedCompletionCommands)
               continue
             }
           }
@@ -2343,11 +2331,6 @@ function runHeadlessStreaming(
           logHeadlessProfilerTurn()
           logQueryProfileReport()
           headlessProfilerStartTurn()
-          ackAgentCompletionCommands(setAppState, ownedCompletionCommands)
-          } catch (error) {
-            requeueAgentCompletionCommands(setAppState, ownedCompletionCommands)
-            throw error
-          }
         }
       }
 
@@ -2362,7 +2345,6 @@ function runHeadlessStreaming(
         }
 
         runPhase = 'draining_commands'
-        removeStaleHeadlessAgentCompletions(getAppState())
         await drainCommandQueue()
 
         // Check for running background tasks before exiting.
@@ -2379,13 +2361,14 @@ function runHeadlessStreaming(
           const hasRunningBg = getRunningTasks(state).some(
             t => isBackgroundTask(t) && t.type !== 'in_process_teammate',
           )
-          const hasMainThreadQueued = peek(candidate =>
-            isMainThread(candidate) &&
-            isCurrentAgentCompletionCommand(candidate, state),
-          ) !== undefined
-          if (hasRunningBg || hasMainThreadQueued) {
+          const hasMainThreadQueued = peek(isMainThread) !== undefined
+          const agentFollowUp = deferredAgentNotifications.takeIfSettled(hasRunningBg || hasMainThreadQueued)
+          if (agentFollowUp) {
+            enqueue({ mode: 'prompt', value: agentFollowUp, priority: 'later', isMeta: true })
+          }
+          if (hasRunningBg || hasMainThreadQueued || agentFollowUp) {
             waitingForAgents = true
-            if (!hasMainThreadQueued) {
+            if (!hasMainThreadQueued && !agentFollowUp) {
               runPhase = 'waiting_for_agents'
               // No commands ready yet, wait for tasks to complete
               await sleep(100)
@@ -2458,12 +2441,6 @@ function runHeadlessStreaming(
         }
       }
       running = false
-      // A completion can arrive after query()'s last safe boundary but before
-      // this mutex is released. Persist it, drain it into the structured queue,
-      // then let the post-finally queue recheck start exactly one continuation.
-      if (getAppState().agentCompletionInbox.length > 0) {
-        await flushAndDrainAgentCompletionInbox(setAppState)
-      }
       // Start idle timer when we finish processing and are waiting for input
       idleTimeout.start()
     }
@@ -2675,19 +2652,6 @@ function runHeadlessStreaming(
       }
     }
   }
-
-  const unsubscribeAgentCompletionWake = subscribeToAgentCompletionWake(
-    async sessionId => {
-      if (inputClosed || sessionId !== getSessionId()) return
-      const drained = await flushAndDrainAgentCompletionInbox(
-        setAppState,
-        sessionId,
-        () => !running,
-      )
-      if (drained) void run()
-    },
-  )
-  registerCleanup(async () => unsubscribeAgentCompletionWake())
 
   // Set up UDS inbox callback so the query loop is kicked off
   // when a message arrives via the UDS socket in headless mode.
@@ -4966,11 +4930,7 @@ async function loadInitialMessages(
             }
           }
         }
-        await restoreSessionStateFromLog(result, setAppState, {
-          sessionId: String(result.sessionId ?? getSessionId()),
-          transcriptPath: result.fullPath,
-          forkSession: !!options.forkSession,
-        })
+        restoreSessionStateFromLog(result, setAppState)
 
         // Restore session metadata so it's re-appended on exit via reAppendSessionMetadata
         restoreSessionMetadata(
@@ -5170,11 +5130,7 @@ async function loadInitialMessages(
           await resetSessionFilePointer()
         }
       }
-      await restoreSessionStateFromLog(result, setAppState, {
-        sessionId: String(result.sessionId ?? getSessionId()),
-        transcriptPath: result.fullPath,
-        forkSession: !!options.forkSession,
-      })
+      restoreSessionStateFromLog(result, setAppState)
 
       // Restore session metadata so it's re-appended on exit via reAppendSessionMetadata
       restoreSessionMetadata(

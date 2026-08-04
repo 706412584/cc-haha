@@ -20,7 +20,7 @@ At the top of the panel is a **Files / Browser** switch:
 
 ## Changed files and All files
 
-![The "Changed files" list, each row with a status marker and line counts](../../images/app/workspace-changes.webp)
+![The "Changed files" list, each row with a status marker and line counts](../../images/app/en/workspace-changes.webp)
 
 In Files mode there are two views:
 
@@ -35,7 +35,7 @@ Any file can have its path copied, or be pushed back into the composer as contex
 
 ## Diff review: leaving a note on a line
 
-![Diff review with syntax highlighting, old and new side by side](../../images/app/workspace-diff.webp)
+![Diff review with syntax highlighting, old and new side by side](../../images/app/en/workspace-diff.webp)
 
 The diff keeps old and new lines with full syntax highlighting. The genuinely useful part is line-level comments:
 
@@ -66,7 +66,7 @@ The temporary worktree is cleaned up when you're done. History stays readable, b
 
 ## Built-in browser
 
-![The built-in browser previewing a page that was just edited](../../images/app/workspace-preview.webp)
+![The built-in browser previewing a page that was just edited](../../images/app/en/workspace-preview.webp)
 
 Switch the workspace panel to **Browser** and type a local dev address or any URL. Three buttons here exist specifically so Claude can see what you see:
 

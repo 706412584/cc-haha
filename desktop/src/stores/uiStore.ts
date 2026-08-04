@@ -29,7 +29,7 @@ const SIDEBAR_WIDTH_STORAGE_KEY = 'cc-haha-sidebar-width'
 
 export const SIDEBAR_MIN_WIDTH = 240
 export const SIDEBAR_MAX_WIDTH = 480
-export const SIDEBAR_DEFAULT_WIDTH = 300
+export const SIDEBAR_DEFAULT_WIDTH = 280
 
 export function clampSidebarWidth(width: number): number {
   return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(width)))

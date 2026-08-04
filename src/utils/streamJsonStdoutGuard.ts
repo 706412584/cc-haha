@@ -63,15 +63,35 @@ export function installStreamJsonStdoutGuard(): void {
   ): boolean {
     const text =
       typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf-8')
+    const callback = typeof encodingOrCb === 'function' ? encodingOrCb : cb
+    const encoding =
+      typeof chunk === 'string' && typeof encodingOrCb === 'string'
+        ? encodingOrCb
+        : undefined
 
     buffer += text
     let newlineIdx: number
-    let wrote = true
+    const lines: string[] = []
     while ((newlineIdx = buffer.indexOf('\n')) !== -1) {
-      const line = buffer.slice(0, newlineIdx)
+      lines.push(buffer.slice(0, newlineIdx))
       buffer = buffer.slice(newlineIdx + 1)
-      if (isJsonLine(line)) {
-        wrote = originalWrite!(line + '\n')
+    }
+
+    const validLines = lines.map(isJsonLine)
+    const callbackLineIndex = callback ? validLines.lastIndexOf(true) : -1
+    let wrote = true
+    for (const [index, line] of lines.entries()) {
+      if (validLines[index]) {
+        const lineCallback = index === callbackLineIndex ? callback : undefined
+        if (encoding) {
+          wrote = lineCallback
+            ? originalWrite!(line + '\n', encoding, lineCallback)
+            : originalWrite!(line + '\n', encoding)
+        } else {
+          wrote = lineCallback
+            ? originalWrite!(line + '\n', lineCallback)
+            : originalWrite!(line + '\n')
+        }
       } else {
         process.stderr.write(`${STDOUT_GUARD_MARKER} ${line}\n`)
         logForDebugging(
@@ -80,11 +100,10 @@ export function installStreamJsonStdoutGuard(): void {
       }
     }
 
-    // Fire the callback once buffering is done. We report success even when
-    // a line was diverted — the caller's intent (emit text) was honored,
-    // just on a different fd.
-    const callback = typeof encodingOrCb === 'function' ? encodingOrCb : cb
-    if (callback) {
+    // When at least one line reached stdout, its final write owns the callback
+    // so completion means the real stream has flushed all preceding lines.
+    // A fully buffered/diverted write has no downstream callback to wait for.
+    if (callback && callbackLineIndex === -1) {
       queueMicrotask(() => callback())
     }
     return wrote

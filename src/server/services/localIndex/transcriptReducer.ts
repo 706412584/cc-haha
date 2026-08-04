@@ -325,6 +325,7 @@ function usageIdentity(entry: ReducerEntry) {
     sessionId: entry.sessionId,
     requestId: entry.requestId,
     messageId: entry.message?.id,
+    forkedFrom: entry.forkedFrom,
   }
 }
 

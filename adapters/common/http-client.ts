@@ -122,10 +122,10 @@ export class AdapterHttpClient {
       const res = await this.request('/api/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          workDir: allowedWorkDir,
-          permissionMode: 'default',
-        }),
+        // Omit permissionMode on purpose: the server falls back to the user's
+        // global default mode at launch (ws/handler.ts). Hardcoding a mode here
+        // would pin every IM-created session regardless of the user's setting.
+        body: JSON.stringify({ workDir: allowedWorkDir }),
         signal: controller.signal,
       })
       if (!res.ok) {

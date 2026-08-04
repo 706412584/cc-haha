@@ -16,7 +16,7 @@ Both require your computer to be on with the app running. They expose the local 
 
 ## H5 Access
 
-![Settings → H5 Access: QR code and token](../../images/app/settings-h5.webp)
+![Settings → H5 Access: LAN access toggle and connection settings](../../images/app/en/settings-h5.webp)
 
 ### Turning it on
 
@@ -27,7 +27,7 @@ Both require your computer to be on with the app running. They expose the local 
 
 The scanned link carries the server address and the token. Once your phone's browser connects, it remembers the connection and later visits go straight in.
 
-![The mobile conversation view with a file-changes card](../../images/app/h5-session.webp)
+![The mobile conversation view with a file-changes card](../../images/app/en/h5-session.webp)
 
 ### The token is the credential
 
@@ -65,7 +65,7 @@ The desktop workspace, embedded terminal, native "open with", Computer Use autho
 
 ## IM Adapters
 
-![Settings → IM Adapters: pairing and the five platforms](../../images/app/settings-im.webp)
+![Settings → IM Adapters: pairing and the five platforms](../../images/app/en/settings-im.webp)
 
 **Settings → IM Adapters** supports five platforms, each connected differently:
 

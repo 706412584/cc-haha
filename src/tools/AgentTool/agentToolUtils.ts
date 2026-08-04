@@ -1,6 +1,6 @@
 import { feature } from 'bun:bundle'
 import { z } from 'zod/v4'
-import { clearInvokedSkillsForAgent, getSessionId } from '../../bootstrap/state.js'
+import { clearInvokedSkillsForAgent } from '../../bootstrap/state.js'
 import {
   ALL_AGENT_DISALLOWED_TOOLS,
   ASYNC_AGENT_ALLOWED_TOOLS,
@@ -22,7 +22,6 @@ import type {
 } from '../../Tool.js'
 import { toolMatchesName } from '../../Tool.js'
 import {
-  applyAgentStallStatus,
   completeAgentTask as completeAsyncAgent,
   createActivityDescriptionResolver,
   createProgressTracker,
@@ -38,8 +37,6 @@ import {
 } from '../../tasks/LocalAgentTask/LocalAgentTask.js'
 import { asAgentId } from '../../types/ids.js'
 import type { Message as MessageType } from '../../types/message.js'
-import type { StallStatus } from './agentStallDetector.js'
-import { getAgentTranscriptPath } from '../../utils/sessionStorage.js'
 import { isAgentSwarmsEnabled } from '../../utils/agentSwarmsEnabled.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { isInProtectedNamespace } from '../../utils/envUtils.js'
@@ -64,7 +61,6 @@ import { getTokenCountFromUsage } from '../../utils/tokens.js'
 import { EXIT_PLAN_MODE_V2_TOOL_NAME } from '../ExitPlanModeTool/constants.js'
 import { AGENT_TOOL_NAME, LEGACY_AGENT_TOOL_NAME } from './constants.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
-import { applySentinelCorrection } from './sentinelCheck.js'
 export type ResolvedAgentTools = {
   hasWildcard: boolean
   validTools: string[]
@@ -235,7 +231,7 @@ export const agentToolResultSchema = lazySchema(() =>
     agentId: z.string(),
     // Optional: older persisted sessions won't have this (resume replays
     // results verbatim without re-validation). Used to gate the sync
-    // result trailer — one-shot built-ins skip the terminal resume metadata.
+    // result trailer — one-shot built-ins skip the SendMessage hint.
     agentType: z.string().optional(),
     content: z.array(z.object({ type: z.literal('text'), text: z.string() })),
     totalToolUseCount: z.number(),
@@ -322,34 +318,6 @@ export function finalizeAgentTool(
     }
   }
 
-  // Sentinel consistency check: review-style subagents may slip and emit
-  // a positive verdict (e.g. REVIEW: APPROVE) while listing CRITICAL or
-  // HIGH findings, contradicting their own contract. Rewrite to the
-  // negative verdict in place so the parent agent doesn't merge based on
-  // a self-contradicting report. Operates only on the last text block
-  // because the verdict must be at the end of the output.
-  if (content.length > 0) {
-    const lastIdx = content.length - 1
-    const lastBlock = content[lastIdx]!
-    const sentinelResult = applySentinelCorrection(lastBlock.text)
-    if (sentinelResult.mismatch) {
-      content = [
-        ...content.slice(0, lastIdx),
-        { type: 'text' as const, text: sentinelResult.correctedText },
-      ]
-      logEvent('tengu_agent_sentinel_mismatch', {
-        agent_type:
-          agentType as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-        sentinel_kind:
-          sentinelResult.mismatch as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-        original_verdict:
-          sentinelResult.originalVerdict as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-        corrected_verdict:
-          sentinelResult.correctedVerdict as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-      })
-    }
-  }
-
   const totalTokens = getTokenCountFromUsage(lastAssistantMessage.message.usage)
   const totalToolUseCount = countToolUses(agentMessages)
 
@@ -398,10 +366,6 @@ export function getLastToolUseName(message: MessageType): string | undefined {
   if (message.type !== 'assistant') return undefined
   const block = message.message.content.findLast(b => b.type === 'tool_use')
   return block?.type === 'tool_use' ? block.name : undefined
-}
-
-export function getAgentProgressOutputPath(taskId: string): string {
-  return getAgentTranscriptPath(asAgentId(taskId))
 }
 
 /**
@@ -463,18 +427,17 @@ export function emitTaskProgress(
   toolUseId: string | undefined,
   description: string,
   startTime: number,
-  lastToolName?: string,
+  lastToolName: string,
 ): void {
   const progress = getProgressUpdate(tracker)
   emitTaskProgressEvent({
     taskId,
     toolUseId,
-    description: progress.lastActivity?.activityDescription ?? progress.summary ?? description,
+    description: progress.lastActivity?.activityDescription ?? description,
     startTime,
     totalTokens: progress.tokenCount,
     toolUses: progress.toolUseCount,
     lastToolName,
-    summary: progress.summary ?? (lastToolName ? undefined : description),
   })
 }
 
@@ -593,141 +556,24 @@ export function extractPartialResult(
 
 type SetAppState = (f: (prev: AppState) => AppState) => void
 
-const activeAgentLifecycles = new Map<string, Promise<void>>()
-const DEFAULT_AGENT_LIFECYCLE_QUIESCE_TIMEOUT_MS = 10_000
-
-function agentLifecycleKey(sessionId: string, taskId: string, epoch: number | undefined): string {
-  return `${sessionId}:${taskId}:${epoch ?? 0}`
-}
-
-export function registerLocalAgentLifecycle(
-  sessionId: string,
-  taskId: string,
-  epoch: number | undefined,
-  lifecycle: Promise<void>,
-): Promise<void> {
-  const key = agentLifecycleKey(sessionId, taskId, epoch)
-  const prior = activeAgentLifecycles.get(key)
-  const registered = prior ? Promise.allSettled([prior, lifecycle]).then(() => {}) : lifecycle
-  activeAgentLifecycles.set(key, registered)
-  void registered.then(
-    () => {
-      if (activeAgentLifecycles.get(key) === registered) activeAgentLifecycles.delete(key)
-    },
-    () => {
-      if (activeAgentLifecycles.get(key) === registered) activeAgentLifecycles.delete(key)
-    },
-  )
-  return registered
-}
-
-export function createSessionScopedAgentSetAppState(
-  sessionId: string,
-  taskId: string,
-  epoch: number | undefined,
-  setAppState: SetAppState,
-): SetAppState {
-  return updater => {
-    if (getSessionId() !== sessionId) return
-    setAppState(prev => {
-      if (getSessionId() !== sessionId) return prev
-      const task = prev.tasks[taskId]
-      if (epoch !== undefined && (!isLocalAgentTask(task) || task.epoch !== epoch)) return prev
-      return updater(prev)
-    })
-  }
-}
-
-export function createAgentStallTransitionHandler(
-  sessionId: string,
-  taskId: string,
-  epoch: number | undefined,
-  setAppState: SetAppState,
-): (status: StallStatus) => void {
-  const scopedSetAppState = createSessionScopedAgentSetAppState(
-    sessionId,
-    taskId,
-    epoch,
-    setAppState,
-  )
-  return status => {
-    const task = (() => {
-      let current: AppState['tasks'][string] | undefined
-      scopedSetAppState(prev => {
-        current = prev.tasks[taskId]
-        return prev
-      })
-      return current
-    })()
-    if (!isLocalAgentTask(task) || (epoch !== undefined && task.epoch !== epoch)) return
-    applyAgentStallStatus(taskId, status, scopedSetAppState, sessionId)
-  }
-}
-
-/**
- * Abort outgoing local Agents and wait until their lifecycle handlers stop
- * mutating task state. Session switches call this before flushing transcript
- * and runtime persistence so no old-session work can cross the boundary.
- */
-export async function quiesceLocalAgentLifecycles(
-  setAppState: SetAppState,
-  options: { sessionId?: string; timeoutMs?: number } = {},
-): Promise<void> {
-  const sessionId = options.sessionId ?? getSessionId()
-  const outgoing: Array<{ taskId: string; epoch: number }> = []
-  setAppState(prev => {
-    for (const task of Object.values(prev.tasks)) {
-      if (
-        isLocalAgentTask(task) &&
-        (task.status === 'running' || task.status === 'pending')
-      ) {
-        outgoing.push({ taskId: task.id, epoch: task.epoch })
-      }
-    }
-    return prev
-  })
-  for (const task of outgoing) {
-    killAsyncAgent(task.taskId, setAppState, task.epoch)
-  }
-  const lifecycles = outgoing.map(task =>
-    activeAgentLifecycles.get(agentLifecycleKey(sessionId, task.taskId, task.epoch)),
-  ).filter((lifecycle): lifecycle is Promise<void> => lifecycle !== undefined)
-  if (lifecycles.length === 0) return
-  const timeoutMs = options.timeoutMs ?? DEFAULT_AGENT_LIFECYCLE_QUIESCE_TIMEOUT_MS
-  let timeout: ReturnType<typeof setTimeout> | undefined
-  try {
-    await Promise.race([
-      Promise.all(lifecycles),
-      new Promise<never>((_, reject) => {
-        timeout = setTimeout(() => reject(new Error(
-          `Timed out after ${timeoutMs}ms quiescing ${lifecycles.length} local Agent lifecycle(s) for session ${sessionId}; session switch aborted`,
-        )), timeoutMs)
-      }),
-    ])
-  } finally {
-    if (timeout) clearTimeout(timeout)
-  }
-}
-
 /**
  * Drives a background agent from spawn to terminal notification.
  * Shared between AgentTool's async-from-start path and resumeAgentBackground.
  */
-async function runAsyncAgentLifecycleImpl({
+export async function runAsyncAgentLifecycle({
   taskId,
   abortController,
   makeStream,
   metadata,
   description,
   toolUseContext,
+  parentToolUseId,
   rootSetAppState,
   agentIdForCleanup,
   enableSummarization,
   getWorktreeResult,
-  epoch,
 }: {
   taskId: string
-  epoch?: number
   abortController: AbortController
   makeStream: (
     onCacheSafeParams: ((p: CacheSafeParams) => void) | undefined,
@@ -735,6 +581,10 @@ async function runAsyncAgentLifecycleImpl({
   metadata: Parameters<typeof finalizeAgentTool>[2]
   description: string
   toolUseContext: ToolUseContext
+  /** Agent card this run belongs to. Always the Agent call that spawned the
+   * agent — never the tool driving a resume, which has its own id and would
+   * otherwise adopt the agent's activity and completion notification. */
+  parentToolUseId: string | undefined
   rootSetAppState: SetAppState
   agentIdForCleanup: string
   enableSummarization: boolean
@@ -743,6 +593,7 @@ async function runAsyncAgentLifecycleImpl({
     worktreeBranch?: string
   }>
 }): Promise<void> {
+  const agentToolUseId = parentToolUseId
   let stopSummarization: (() => void) | undefined
   const agentMessages: MessageType[] = []
   try {
@@ -799,14 +650,14 @@ async function runAsyncAgentLifecycleImpl({
       emitAgentToolActivitiesForMessage(
         message,
         taskId,
-        toolUseContext.toolUseId,
+        agentToolUseId,
       )
       const lastToolName = getLastToolUseName(message)
-      if (message.type === 'assistant') {
+      if (lastToolName) {
         emitTaskProgress(
           tracker,
           taskId,
-          toolUseContext.toolUseId,
+          agentToolUseId,
           description,
           metadata.startTime,
           lastToolName,
@@ -821,9 +672,9 @@ async function runAsyncAgentLifecycleImpl({
     // Mark task completed FIRST so TaskOutput(block=true) unblocks
     // immediately, then notify the parent before any optional cleanup. The
     // parent session depends on this notification to resume its loop.
-    completeAsyncAgent(agentResult, rootSetAppState, epoch)
+    completeAsyncAgent(agentResult, rootSetAppState)
 
-    const notified = enqueueAgentNotification({
+    enqueueAgentNotification({
       taskId,
       description,
       status: 'completed',
@@ -834,13 +685,8 @@ async function runAsyncAgentLifecycleImpl({
         toolUses: agentResult.totalToolUseCount,
         durationMs: agentResult.totalDurationMs,
       },
-      outputPath: getAgentProgressOutputPath(taskId),
-      toolUseId: toolUseContext.toolUseId,
-      epoch,
+      toolUseId: agentToolUseId,
     })
-    if (!notified) {
-      logForDebugging('Agent completion backpressure: bounded inbox and command queue are full; completion remains unnotified for retry', { level: 'error' })
-    }
 
     void (async () => {
       try {
@@ -869,7 +715,7 @@ async function runAsyncAgentLifecycleImpl({
       // but only this catch handler has agentMessages, so the notification
       // must fire unconditionally. Transition status BEFORE worktree cleanup
       // so TaskOutput unblocks even if git hangs (gh-20236).
-      killAsyncAgent(taskId, rootSetAppState, epoch)
+      killAsyncAgent(taskId, rootSetAppState)
       logEvent('tengu_agent_tool_terminated', {
         agent_type:
           metadata.agentType as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -887,10 +733,8 @@ async function runAsyncAgentLifecycleImpl({
         description,
         status: 'killed',
         setAppState: rootSetAppState,
-        toolUseId: toolUseContext.toolUseId,
+        toolUseId: agentToolUseId,
         finalMessage: partialResult,
-        outputPath: getAgentProgressOutputPath(taskId),
-        epoch,
       })
       void getWorktreeResult().catch(cleanupError =>
         logForDebugging(
@@ -900,16 +744,14 @@ async function runAsyncAgentLifecycleImpl({
       return
     }
     const msg = errorMessage(error)
-    failAsyncAgent(taskId, msg, rootSetAppState, epoch)
+    failAsyncAgent(taskId, msg, rootSetAppState)
     enqueueAgentNotification({
       taskId,
       description,
       status: 'failed',
       error: msg,
       setAppState: rootSetAppState,
-      toolUseId: toolUseContext.toolUseId,
-      outputPath: getAgentProgressOutputPath(taskId),
-      epoch,
+      toolUseId: agentToolUseId,
     })
     void getWorktreeResult().catch(cleanupError =>
       logForDebugging(
@@ -920,25 +762,4 @@ async function runAsyncAgentLifecycleImpl({
     clearInvokedSkillsForAgent(agentIdForCleanup)
     clearDumpState(agentIdForCleanup)
   }
-}
-
-export function runAsyncAgentLifecycle(
-  options: Parameters<typeof runAsyncAgentLifecycleImpl>[0],
-): Promise<void> {
-  const sessionId = getSessionId()
-  const scopedOptions = {
-    ...options,
-    rootSetAppState: createSessionScopedAgentSetAppState(
-      sessionId,
-      options.taskId,
-      options.epoch,
-      options.rootSetAppState,
-    ),
-  }
-  return registerLocalAgentLifecycle(
-    sessionId,
-    options.taskId,
-    options.epoch,
-    runAsyncAgentLifecycleImpl(scopedOptions),
-  )
 }

@@ -194,6 +194,63 @@ describe('activity stats token accounting', () => {
     expect(totalForDate(stats.dailyModelTokens, today)).toBe(34)
   })
 
+  it('does not count usage copied from a parent session into a fork', async () => {
+    const today = dateKey(0)
+    const sourceUser = userEntry('source-user', at(today, '10:00:00'))
+    const sourceAssistant = assistantEntry(
+      'source-assistant',
+      at(today, '10:01:00'),
+      { input_tokens: 10, output_tokens: 2 },
+      { parentUuid: 'source-user' },
+    )
+
+    await writeJsonl(projectFile('source-session'), [
+      sourceUser,
+      sourceAssistant,
+    ])
+    await writeJsonl(projectFile('fork-session'), [
+      {
+        ...sourceUser,
+        sessionId: 'fork-session',
+        forkedFrom: {
+          sessionId: 'source-session',
+          messageUuid: 'source-user',
+        },
+      },
+      {
+        ...sourceAssistant,
+        sessionId: 'fork-session',
+        forkedFrom: {
+          sessionId: 'source-session',
+          messageUuid: 'source-assistant',
+        },
+      },
+      {
+        ...userEntry('fork-user', at(today, '10:02:00')),
+        parentUuid: 'source-assistant',
+        sessionId: 'fork-session',
+      },
+      {
+        ...assistantEntry(
+          'fork-assistant',
+          at(today, '10:03:00'),
+          { input_tokens: 5, output_tokens: 1 },
+          { parentUuid: 'fork-user' },
+        ),
+        sessionId: 'fork-session',
+      },
+    ])
+
+    const stats = await aggregateClaudeCodeStatsForRange('all')
+
+    expect(stats.totalSessions).toBe(2)
+    expect(totalForDate(stats.dailyModelTokens, today)).toBe(18)
+    expect(stats.modelUsage['claude-test']).toMatchObject({
+      inputTokens: 15,
+      outputTokens: 3,
+    })
+  })
+
   it('tracks tool and skill usage from main and subagent transcripts', async () => {
     const today = dateKey(0)
 
@@ -379,12 +436,12 @@ describe('activity stats token accounting', () => {
     }
   })
 
-  it('invalidates pre-v6 stats caches because cached aggregates lack tool usage', async () => {
+  it('invalidates pre-v7 stats caches because token aggregates may include inherited fork usage', async () => {
     await mkdir(tmpConfigDir, { recursive: true })
     await writeFile(
       join(tmpConfigDir, 'stats-cache.json'),
       JSON.stringify({
-        version: 5,
+        version: 6,
         lastComputedDate: dateKey(-1),
         dailyActivity: [{ date: dateKey(-1), messageCount: 1, sessionCount: 1, toolCallCount: 0 }],
         dailyModelTokens: [{ date: dateKey(-1), tokensByModel: { stale: 1 } }],
@@ -403,7 +460,7 @@ describe('activity stats token accounting', () => {
 
     const cache = await loadStatsCache()
 
-    expect(STATS_CACHE_VERSION).toBe(6)
+    expect(STATS_CACHE_VERSION).toBe(7)
     expect(cache.dailyModelTokens).toEqual([])
     expect(cache.toolUsage).toEqual({})
     expect(cache.skillUsage).toEqual({})

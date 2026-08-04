@@ -44,7 +44,7 @@ Claude Code Haha 自己不带模型，它只是那个替你干活的壳。装完
 内置预设（按弹窗里的排列）：
 
 - **DeepSeek** · **Zhipu GLM** · **Kimi** · **MiniMax** — 国内主流模型厂商，接口地址是各家的 Anthropic 兼容端点。
-- **TeamoRouter** — 中转类服务商，用它们的通道调 Claude 官方模型。
+- **TeamoRouter** · **玄枢API** — 中转类服务商，用它们的通道调 Claude 官方模型。
 - **LM Studio** · **Ollama** — 本地模型，见下一节。
 - **Custom** — 上面都没有，自己填。
 
@@ -67,7 +67,7 @@ Claude Code Haha 自己不带模型，它只是那个替你干活的壳。装完
 
 ## 「添加服务商」弹窗逐个字段
 
-![添加服务商弹窗：预设、接口地址、认证变量、API 密钥、模型映射](../images/app/settings-provider-add.webp)
+![添加服务商弹窗：预设、接口地址、认证变量、API 密钥、模型映射](../images/app/zh-CN/settings-provider-add.webp)
 
 **名称**（必填）— 显示在服务商列表里的名字。选了预设会自动填，可以改成你认得出的，比如「DeepSeek-工作号」。
 

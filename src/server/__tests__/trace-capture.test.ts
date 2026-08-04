@@ -1163,6 +1163,38 @@ describe('captureResponseTraceSnapshot', () => {
     expect(capture.snapshot.truncated).toBe(true)
   })
 
+  test('locks a Responses terminal event as complete without waiting for HTTP EOF', async () => {
+    let cancelled = false
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode([
+          'event: response.completed',
+          'data: {"type":"response.completed","response":{"status":"completed"}}',
+          '',
+          '',
+        ].join('\n')))
+        // Keep the HTTP body open forever after the logical terminal event.
+      },
+      cancel() {
+        cancelled = true
+      },
+    })
+    const response = new Response(stream, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    })
+    const controller = new AbortController()
+
+    const capture = await captureResponseTraceSnapshot(response, {
+      signal: controller.signal,
+    })
+    controller.abort(new Error('late SDK cleanup'))
+
+    expect(capture.aborted).toBe(false)
+    expect(capture.snapshot.preview).toContain('response.completed')
+    expect(cancelled).toBe(true)
+  })
+
   test('force-finishes after the grace period when cancel cannot wake a hung read', async () => {
     const encoder = new TextEncoder()
     let reads = 0

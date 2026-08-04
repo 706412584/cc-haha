@@ -3,7 +3,17 @@ import { beforeAll, beforeEach, describe, expect, it } from 'vitest'
 // 宿主两侧（主进程 pickerArmed、渲染进程 pickerActive）都把 picker-exited 当作
 // 「解除本次拾取授权」，并在其后丢弃 selection。这里跑的是真实注入脚本，用来锁住
 // 「确认时只发 selection、取消时才发 picker-exited」这条跨进程契约。
-type PostedMessage = { v: number; type: string; payload?: { element?: { tag?: string }; change?: Record<string, unknown> } }
+type PostedMessage = {
+  v: number
+  type: string
+  payload?: {
+    element?: { tag?: string }
+    change?: Record<string, unknown>
+    delivery?: 'send' | 'queue'
+    draftItemId?: string
+    selectionNumber?: number
+  }
+}
 
 const posted: PostedMessage[] = []
 
@@ -14,11 +24,12 @@ type AgentWindow = typeof window & {
 
 const agentWindow = window as AgentWindow
 
-function sendFromHost(type: 'enter-picker' | 'exit-picker'): void {
-  agentWindow.__PREVIEW_BRIDGE__!.handleHostRaw(JSON.stringify({ v: 1, type }))
+function sendFromHost(message: string | Record<string, unknown>): void {
+  const payload = typeof message === 'string' ? { type: message } : message
+  agentWindow.__PREVIEW_BRIDGE__!.handleHostRaw(JSON.stringify({ v: 1, ...payload }))
 }
 
-function bubbleButton(action: 'confirm' | 'cancel'): HTMLButtonElement {
+function bubbleButton(action: 'confirm' | 'queue' | 'cancel'): HTMLButtonElement {
   for (const host of document.documentElement.querySelectorAll('div')) {
     const button = host.shadowRoot?.querySelector<HTMLButtonElement>(`[data-action="${action}"]`)
     if (button) return button
@@ -45,6 +56,7 @@ beforeEach(() => {
     if (host.shadowRoot || host.dataset.previewSelectionAnnotationRoot) host.remove()
   }
   sendFromHost('exit-picker')   // 复位上一个用例可能残留的 picker 态
+  sendFromHost('clear-selection-draft')
   posted.length = 0
 })
 
@@ -94,5 +106,28 @@ describe('preview agent picker flow', () => {
     pick(document.getElementById('t')!)
 
     expect(types()).not.toContain('selection')
+  })
+
+  it('批量添加携带稳定编号，并能按 itemId 撤销页面上的实时预览', () => {
+    sendFromHost({ type: 'enter-picker', mode: 'batch', label: 3 })
+    const target = document.getElementById('t')!
+    pick(target)
+    const root = bubbleButton('queue').getRootNode() as ShadowRoot
+    const textInput = root.querySelector<HTMLInputElement>('[data-field="text"]')!
+    textInput.value = 'Queued'
+    textInput.dispatchEvent(new Event('input'))
+    bubbleButton('queue').click()
+
+    const selection = posted.find((message) => message.type === 'selection')!
+    expect(selection.payload).toMatchObject({
+      delivery: 'queue',
+      selectionNumber: 3,
+      change: { text: { from: 'Old', to: 'Queued' } },
+    })
+    expect(types()).not.toContain('picker-exited')
+    expect(target.textContent).toBe('Queued')
+
+    sendFromHost({ type: 'undo-selection', itemId: selection.payload!.draftItemId! })
+    expect(target.textContent).toBe('Old')
   })
 })

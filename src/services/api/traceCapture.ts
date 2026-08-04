@@ -778,6 +778,7 @@ export async function captureResponseTraceSnapshot(
 ): Promise<TraceResponseCapture> {
   const signal = options?.signal
   const contentType = response.headers.get('content-type') ?? ''
+  const isEventStream = contentType.toLowerCase().includes('text/event-stream')
   if (!response.body) {
     return { snapshot: createTraceBodySnapshot(null), aborted: false }
   }
@@ -791,6 +792,51 @@ export async function captureResponseTraceSnapshot(
   let interrupted = false
   let onAbort: (() => void) | undefined
   let graceTimer: ReturnType<typeof setTimeout> | undefined
+  let sseBuffer = ''
+  let sseEvent = ''
+  let sseDataLines: string[] = []
+
+  const observeResponsesTerminal = (chunk: string): boolean => {
+    if (!isEventStream) return false
+    sseBuffer += chunk
+    let newline = sseBuffer.indexOf('\n')
+    while (newline !== -1) {
+      const rawLine = sseBuffer.slice(0, newline)
+      sseBuffer = sseBuffer.slice(newline + 1)
+      const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine
+      if (line === '') {
+        let event = sseEvent
+        if (!event && sseDataLines.length > 0) {
+          try {
+            const data = JSON.parse(sseDataLines.join('\n')) as { type?: unknown }
+            if (typeof data.type === 'string') event = data.type
+          } catch {
+            // A malformed or non-JSON SSE event cannot be a Responses terminal.
+          }
+        }
+        sseEvent = ''
+        sseDataLines = []
+        if (
+          event === 'response.completed' ||
+          event === 'response.failed' ||
+          event === 'response.incomplete' ||
+          event === 'response.cancelled' ||
+          event === 'error'
+        ) {
+          return true
+        }
+      } else if (!line.startsWith(':')) {
+        const colon = line.indexOf(':')
+        const field = colon === -1 ? line : line.slice(0, colon)
+        let value = colon === -1 ? '' : line.slice(colon + 1)
+        if (value.startsWith(' ')) value = value.slice(1)
+        if (field === 'event') sseEvent = value
+        if (field === 'data') sseDataLines.push(value)
+      }
+      newline = sseBuffer.indexOf('\n')
+    }
+    return false
+  }
 
   const readAll = async (): Promise<'done'> => {
     while (true) {
@@ -800,13 +846,23 @@ export async function captureResponseTraceSnapshot(
         break
       }
       bytes += value.byteLength
+      const decoded = decoder.decode(value, { stream: true })
       if (text.length < TRACE_STREAM_CAPTURE_BYTES) {
-        text += decoder.decode(value, { stream: true })
+        text += decoded
       } else {
         truncated = true
       }
       if (bytes > TRACE_STREAM_CAPTURE_BYTES) {
         truncated = true
+      }
+      // OpenAI Responses defines its own terminal event. Treat that as the
+      // request's one-shot terminal state instead of waiting for HTTP EOF:
+      // callers commonly cancel/drop the body immediately after completed,
+      // and some upstreams keep the socket open indefinitely afterwards.
+      if (observeResponsesTerminal(decoded)) {
+        completed = true
+        void reader.cancel('Responses terminal event captured').catch(() => {})
+        break
       }
     }
     return 'done'

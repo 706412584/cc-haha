@@ -1,30 +1,50 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env -S bun --no-env-file
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-#Get your current working directory and export it as an environment variable.
-export CALLER_DIR="${CALLER_DIR:-$(pwd -W 2>/dev/null || pwd)}"
+import { existsSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-cd "$ROOT_DIR"
+const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+const callerDir = process.env.CALLER_DIR || process.cwd()
+const skipDotenv = process.env.CC_HAHA_SKIP_DOTENV === '1'
+const rootEnvPath = path.join(rootDir, '.env')
+const envFileArgs =
+  !skipDotenv && existsSync(rootEnvPath)
+    ? [`--env-file=${rootEnvPath}`]
+    : ['--no-env-file']
+const entrypoint =
+  process.env.CLAUDE_CODE_FORCE_RECOVERY_CLI === '1'
+    ? path.join(rootDir, 'src', 'localRecoveryCli.ts')
+    : path.join(rootDir, 'src', 'entrypoints', 'cli.tsx')
 
-# When spawned by the desktop/web server as a child CLI process,
-# skip .env loading — the server has already set the correct env
-# via cc-haha/settings.json. Loading .env would re-inject stale
-# provider keys (e.g., a MiniMax key as ANTHROPIC_API_KEY) that
-# override the active provider config.
-if [[ "${CC_HAHA_SKIP_DOTENV:-0}" == "1" ]]; then
-  # Bun auto-loads .env by default; explicitly point to /dev/null to suppress.
-  ENV_FILE_FLAG="--env-file=/dev/null"
-elif [[ -f .env ]]; then
-  ENV_FILE_FLAG="--env-file=.env"
-else
-  ENV_FILE_FLAG=""
-fi
+const command = [
+  process.execPath,
+  '--feature=TRANSCRIPT_CLASSIFIER',
+  ...envFileArgs,
+  entrypoint,
+  ...process.argv.slice(2),
+]
+const child = Bun.spawn(command, {
+  cwd: rootDir,
+  env: { ...process.env, CALLER_DIR: callerDir },
+  stdin: 'inherit',
+  stdout: 'inherit',
+  stderr: 'inherit',
+})
 
-# Force recovery CLI (simple readline REPL, no Ink TUI)
-if [[ "${CLAUDE_CODE_FORCE_RECOVERY_CLI:-0}" == "1" ]]; then
-  exec bun --feature=TRANSCRIPT_CLASSIFIER $ENV_FILE_FLAG ./src/localRecoveryCli.ts "$@"
-fi
+const forwardSignal = (signal: NodeJS.Signals) => {
+  try {
+    child.kill(signal)
+  } catch {
+    // The child may have completed between the signal and this handler.
+  }
+}
+const forwardInterrupt = () => forwardSignal('SIGINT')
+const forwardTerminate = () => forwardSignal('SIGTERM')
+process.on('SIGINT', forwardInterrupt)
+process.on('SIGTERM', forwardTerminate)
 
-# Default: full CLI with Ink TUI
-exec bun --feature=TRANSCRIPT_CLASSIFIER $ENV_FILE_FLAG ./src/entrypoints/cli.tsx "$@"
+const exitCode = await child.exited
+process.off('SIGINT', forwardInterrupt)
+process.off('SIGTERM', forwardTerminate)
+process.exit(exitCode)

@@ -132,7 +132,7 @@ describe('ContextUsageIndicator request behavior', () => {
     const { rerender } = render(
       <ContextUsageIndicator
         sessionId="session-1"
-        chatState="idle"
+        chatState="thinking"
         messageCount={0}
       />,
     )
@@ -145,7 +145,7 @@ describe('ContextUsageIndicator request behavior', () => {
     rerender(
       <ContextUsageIndicator
         sessionId="session-1"
-        chatState="idle"
+        chatState="thinking"
         messageCount={1}
       />,
     )
@@ -156,6 +156,37 @@ describe('ContextUsageIndicator request behavior', () => {
     expect(sessionsApiMock.getInspection).toHaveBeenCalledTimes(1)
   })
 
+  it('does not inspect context for a new session until its first turn starts', async () => {
+    sessionsApiMock.getInspection.mockResolvedValue(baseInspection)
+
+    const { rerender } = render(
+      <ContextUsageIndicator
+        sessionId="session-1"
+        chatState="idle"
+        messageCount={0}
+      />,
+    )
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(sessionsApiMock.getInspection).not.toHaveBeenCalled()
+    expect(screen.queryByLabelText('Context usage loading')).not.toBeInTheDocument()
+    expect(screen.getByTestId('context-usage-indicator')).toHaveTextContent('--')
+
+    rerender(
+      <ContextUsageIndicator
+        sessionId="session-1"
+        chatState="thinking"
+        messageCount={0}
+      />,
+    )
+
+    await waitFor(() => {
+      expect(sessionsApiMock.getInspection).toHaveBeenCalledTimes(1)
+    })
+  })
+
   it('starts a new auto inspection when the runtime identity changes', async () => {
     sessionsApiMock.getInspection.mockImplementation(() => new Promise(() => {}))
 
@@ -163,7 +194,7 @@ describe('ContextUsageIndicator request behavior', () => {
       <ContextUsageIndicator
         sessionId="session-1"
         chatState="idle"
-        messageCount={0}
+        messageCount={1}
         runtimeSelectionKey="deepseek:deepseek-chat"
       />,
     )
@@ -177,7 +208,7 @@ describe('ContextUsageIndicator request behavior', () => {
       <ContextUsageIndicator
         sessionId="session-1"
         chatState="idle"
-        messageCount={0}
+        messageCount={1}
         runtimeSelectionKey="deepseek:deepseek-reasoner"
       />,
     )
@@ -186,6 +217,166 @@ describe('ContextUsageIndicator request behavior', () => {
       await Promise.resolve()
     })
     expect(sessionsApiMock.getInspection).toHaveBeenCalledTimes(2)
+  })
+
+  it('loads context when a new session finishes its first turn', async () => {
+    sessionsApiMock.getInspection
+      .mockResolvedValueOnce({
+        active: true,
+        status: baseInspection.status,
+        errors: { context: 'Context is not ready' },
+      })
+      .mockResolvedValueOnce(baseInspection)
+
+    const { rerender } = render(
+      <ContextUsageIndicator
+        sessionId="session-1"
+        chatState="thinking"
+        messageCount={1}
+      />,
+    )
+
+    await waitFor(() => {
+      expect(sessionsApiMock.getInspection).toHaveBeenCalledTimes(1)
+    })
+    expect(screen.getByTestId('context-usage-indicator')).toHaveTextContent('--')
+
+    rerender(
+      <ContextUsageIndicator
+        sessionId="session-1"
+        chatState="idle"
+        messageCount={2}
+      />,
+    )
+
+    await waitFor(() => {
+      expect(sessionsApiMock.getInspection).toHaveBeenCalledTimes(2)
+      expect(screen.getByTestId('context-usage-indicator')).toHaveTextContent('21%')
+    })
+  })
+
+  it('keeps the last context visible while the switched runtime is still starting', async () => {
+    const nextInspection = deferred<typeof baseInspection>()
+    sessionsApiMock.getInspection
+      .mockResolvedValueOnce(baseInspection)
+      .mockReturnValueOnce(nextInspection.promise)
+
+    const { rerender } = render(
+      <ContextUsageIndicator
+        sessionId="session-1"
+        chatState="idle"
+        messageCount={1}
+        runtimeSelectionKey="deepseek:deepseek-chat"
+        fallbackModelLabel="deepseek-chat"
+      />,
+    )
+
+    await waitFor(() => {
+      expect(screen.getByTestId('context-usage-indicator')).toHaveTextContent('21%')
+    })
+
+    rerender(
+      <ContextUsageIndicator
+        sessionId="session-1"
+        chatState="idle"
+        messageCount={1}
+        runtimeSelectionKey="deepseek:deepseek-reasoner"
+        fallbackModelLabel="deepseek-reasoner"
+      />,
+    )
+
+    // A runtime switch restarts the CLI. Keep the last confirmed model and
+    // percentage together instead of relabeling stale usage as the new model.
+    expect(screen.getByTestId('context-usage-indicator')).toHaveTextContent('21%')
+    expect(screen.queryByLabelText('Context usage loading')).not.toBeInTheDocument()
+    expect(screen.getByText('kimi-k2.6')).toBeInTheDocument()
+    expect(screen.queryByText('deepseek-reasoner')).not.toBeInTheDocument()
+
+    await act(async () => {
+      nextInspection.resolve({
+        ...baseInspection,
+        status: { ...baseInspection.status, model: 'deepseek-reasoner' },
+        context: {
+          ...baseInspection.context,
+          model: 'deepseek-reasoner',
+          percentage: 12,
+        },
+      })
+      await nextInspection.promise
+    })
+
+    await waitFor(() => {
+      expect(screen.getByTestId('context-usage-indicator')).toHaveTextContent('12%')
+      expect(screen.getByText('deepseek-reasoner')).toBeInTheDocument()
+    })
+  })
+
+  it('keeps the last context until the replacement runtime signals a refresh', async () => {
+    sessionsApiMock.getInspection
+      .mockResolvedValueOnce(baseInspection)
+      .mockResolvedValueOnce({
+        active: true,
+        status: { ...baseInspection.status, model: 'deepseek-reasoner' },
+        errors: { context: 'CLI session stopped' },
+      })
+      .mockResolvedValueOnce({
+        ...baseInspection,
+        status: { ...baseInspection.status, model: 'deepseek-reasoner' },
+        context: {
+          ...baseInspection.context,
+          model: 'deepseek-reasoner',
+          percentage: 12,
+        },
+      })
+
+    const { rerender } = render(
+      <ContextUsageIndicator
+        sessionId="session-1"
+        chatState="idle"
+        messageCount={1}
+        runtimeSelectionKey="deepseek:deepseek-chat"
+        fallbackModelLabel="deepseek-chat"
+        refreshNonce={0}
+      />,
+    )
+    await waitFor(() => {
+      expect(screen.getByTestId('context-usage-indicator')).toHaveTextContent('21%')
+    })
+
+    rerender(
+      <ContextUsageIndicator
+        sessionId="session-1"
+        chatState="idle"
+        messageCount={1}
+        runtimeSelectionKey="deepseek:deepseek-reasoner"
+        fallbackModelLabel="deepseek-reasoner"
+        refreshNonce={0}
+      />,
+    )
+    await waitFor(() => {
+      expect(sessionsApiMock.getInspection).toHaveBeenCalledTimes(2)
+    })
+
+    expect(screen.getByTestId('context-usage-indicator')).toHaveTextContent('21%')
+    expect(screen.getByText('kimi-k2.6')).toBeInTheDocument()
+    expect(screen.queryByText('Context usage is unavailable for this session.')).not.toBeInTheDocument()
+
+    rerender(
+      <ContextUsageIndicator
+        sessionId="session-1"
+        chatState="idle"
+        messageCount={1}
+        runtimeSelectionKey="deepseek:deepseek-reasoner"
+        fallbackModelLabel="deepseek-reasoner"
+        refreshNonce={1}
+      />,
+    )
+
+    await waitFor(() => {
+      expect(sessionsApiMock.getInspection).toHaveBeenCalledTimes(3)
+      expect(screen.getByTestId('context-usage-indicator')).toHaveTextContent('12%')
+      expect(screen.getByText('deepseek-reasoner')).toBeInTheDocument()
+    })
   })
 
   it('ignores a stale inspection response after the runtime identity changes', async () => {
@@ -201,7 +392,7 @@ describe('ContextUsageIndicator request behavior', () => {
       <ContextUsageIndicator
         sessionId="session-1"
         chatState="idle"
-        messageCount={0}
+        messageCount={1}
         runtimeSelectionKey="deepseek:deepseek-chat"
       />,
     )
@@ -214,7 +405,7 @@ describe('ContextUsageIndicator request behavior', () => {
       <ContextUsageIndicator
         sessionId="session-1"
         chatState="idle"
-        messageCount={0}
+        messageCount={1}
         runtimeSelectionKey="deepseek:deepseek-reasoner"
       />,
     )
@@ -243,7 +434,7 @@ describe('ContextUsageIndicator request behavior', () => {
       <ContextUsageIndicator
         sessionId="session-1"
         chatState="idle"
-        messageCount={0}
+        messageCount={1}
         runtimeSelectionKey="deepseek:deepseek-chat"
       />,
     )
@@ -262,7 +453,7 @@ describe('ContextUsageIndicator request behavior', () => {
       <ContextUsageIndicator
         sessionId="session-1"
         chatState="idle"
-        messageCount={0}
+        messageCount={1}
         runtimeSelectionKey="deepseek:deepseek-reasoner"
       />,
     )
@@ -277,6 +468,45 @@ describe('ContextUsageIndicator request behavior', () => {
 
     expect(sessionsApiMock.getInspection).toHaveBeenCalledTimes(1)
     expect(screen.queryByText('90%')).not.toBeInTheDocument()
+  })
+
+  it('does not show context retained from a different session', async () => {
+    sessionsApiMock.getInspection
+      .mockResolvedValueOnce(baseInspection)
+      .mockResolvedValueOnce({
+        ...baseInspection,
+        status: { ...baseInspection.status, sessionId: 'session-2' },
+        context: {
+          ...baseInspection.context,
+          percentage: 7,
+        },
+      })
+
+    const { rerender } = render(
+      <ContextUsageIndicator
+        sessionId="session-1"
+        chatState="idle"
+        messageCount={1}
+      />,
+    )
+    await waitFor(() => {
+      expect(screen.getByTestId('context-usage-indicator')).toHaveTextContent('21%')
+    })
+
+    rerender(
+      <ContextUsageIndicator
+        sessionId="session-2"
+        chatState="idle"
+        messageCount={1}
+        fallbackModelLabel="session-2-model"
+      />,
+    )
+
+    expect(screen.getByTestId('context-usage-indicator')).not.toHaveTextContent('21%')
+    expect(screen.queryByText('kimi-k2.6')).not.toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.getByTestId('context-usage-indicator')).toHaveTextContent('7%')
+    })
   })
 
   it('forces a fresh inspection when refreshNonce bumps after a compaction (#743)', async () => {

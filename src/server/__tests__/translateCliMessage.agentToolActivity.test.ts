@@ -28,7 +28,8 @@ describe('translateCliMessage: agent_tool_activity', () => {
       {
         type: 'tool_use_complete',
         toolName: 'Bash',
-        toolUseId: 'toolu_child',
+        toolUseId: 'toolu_parent/toolu_child',
+        originalToolUseId: 'toolu_child',
         input: { command: 'ls' },
         parentToolUseId: 'toolu_parent',
       },
@@ -54,7 +55,8 @@ describe('translateCliMessage: agent_tool_activity', () => {
     expect(out).toEqual([
       {
         type: 'tool_result',
-        toolUseId: 'toolu_child',
+        toolUseId: 'toolu_parent/toolu_child',
+        originalToolUseId: 'toolu_child',
         content: 'done',
         isError: true,
         parentToolUseId: 'toolu_parent',

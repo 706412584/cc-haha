@@ -1770,6 +1770,7 @@ export const SDKTaskStartedMessageSchema = lazySchema(() =>
     tool_use_id: z.string().optional(),
     description: z.string(),
     task_type: z.string().optional(),
+    remote_session_id: z.string().optional(),
     workflow_name: z
       .string()
       .optional()

@@ -18,11 +18,11 @@ export async function processBashCommand(inputString: string, precedingInputBloc
   messages: (UserMessage | AttachmentMessage | SystemMessage)[];
   shouldQuery: boolean;
 }> {
-  // Shell routing (docs/design/ps-shell-selection.md §5.2): consult
-  // defaultShell, fall back to bash. isPowerShellToolEnabled() applies the
-  // same platform + env-var gate as tools.ts so input-box routing matches
-  // tool-list visibility. Computed up front so telemetry records the
-  // actual shell, not the raw setting.
+  // Shell routing (docs/design/ps-shell-selection.md §5.2) preserves the
+  // configured preference when available, then falls back to the installed
+  // shell. isPowerShellToolEnabled() applies the same platform + env-var gate
+  // as tools.ts so input-box routing matches tool-list visibility. Computed
+  // up front so telemetry records the actual shell, not the raw setting.
   const usePowerShell = isPowerShellToolEnabled() && resolveDefaultShell() === 'powershell';
   logEvent('tengu_input_bash', {
     powershell: usePowerShell

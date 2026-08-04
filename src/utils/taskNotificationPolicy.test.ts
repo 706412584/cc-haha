@@ -2,10 +2,11 @@ import { describe, expect, test } from 'bun:test'
 import {
   parseTaskNotificationXml,
   shouldForwardTaskNotificationToModel,
+  TaskNotificationFollowUpBatch,
 } from './taskNotificationPolicy.js'
 
 describe('task notification policy', () => {
-  test('keeps local agent terminal notifications as model input in structured output', () => {
+  test('defers local agent terminal notifications in structured output', () => {
     const notification = parseTaskNotificationXml(`<task-notification>
 <task-id>agent-1</task-id>
 <task-type>local_agent</task-type>
@@ -14,7 +15,7 @@ describe('task notification policy', () => {
 <summary>Agent "Probe" completed</summary>
 </task-notification>`)
 
-    expect(shouldForwardTaskNotificationToModel(notification, { structuredOutput: true })).toBe(true)
+    expect(shouldForwardTaskNotificationToModel(notification, { structuredOutput: true })).toBe(false)
   })
 
   test('keeps local agent notifications as model input for plain print mode', () => {
@@ -38,5 +39,21 @@ describe('task notification policy', () => {
 </task-notification>`)
 
     expect(shouldForwardTaskNotificationToModel(notification, { structuredOutput: true })).toBe(true)
+  })
+
+  test('combines deferred local agent completions into exactly one follow-up', () => {
+    const batch = new TaskNotificationFollowUpBatch()
+    const first = '<task-notification><task-id>agent-1</task-id></task-notification>'
+    const second = '<task-notification><task-id>agent-2</task-id></task-notification>'
+
+    batch.defer(first)
+    batch.defer(second)
+
+    expect(batch.hasPending()).toBe(true)
+    expect(batch.takeIfSettled(true)).toBeUndefined()
+    expect(batch.hasPending()).toBe(true)
+    expect(batch.takeIfSettled(false)).toBe(`${first}\n${second}`)
+    expect(batch.hasPending()).toBe(false)
+    expect(batch.takeIfSettled(false)).toBeUndefined()
   })
 })

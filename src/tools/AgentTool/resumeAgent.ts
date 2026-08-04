@@ -123,6 +123,15 @@ export async function resumeAgentBackground({
 
   const uiDescription = meta?.description ?? '(resumed)'
   const resumedModelOverride = resolveResumedAgentModelOverride(meta?.model)
+  // Re-attach to the Agent card that originally spawned this agent, preferring
+  // persisted metadata and falling back to the still-registered task. Never
+  // fall back to the resuming caller's own tool_use id: SendMessage routes
+  // stopped agents here, and adopting its id files the agent's tool activity
+  // and completion notification under the SendMessage card. Leaving this
+  // undefined only costs live activity streaming, which is what agents resumed
+  // from pre-existing metadata did anyway.
+  const spawningToolUseId =
+    meta?.toolUseId ?? appState.tasks[agentId]?.toolUseId
 
   let forkParentSystemPrompt: SystemPrompt | undefined
   if (isResumedFork) {
@@ -204,6 +213,7 @@ export async function resumeAgentBackground({
     // Re-persist so metadata survives runAgent's writeAgentMetadata overwrite
     worktreePath: resumedWorktreePath,
     description: meta?.description,
+    spawningToolUseId,
     contentReplacementState: resumedReplacementState,
   }
 
@@ -214,7 +224,7 @@ export async function resumeAgentBackground({
     prompt,
     selectedAgent,
     setAppState: rootSetAppState,
-    toolUseId: toolUseContext.toolUseId,
+    toolUseId: spawningToolUseId,
   })
 
   const metadata = {
@@ -265,6 +275,7 @@ export async function resumeAgentBackground({
         metadata,
         description: uiDescription,
         toolUseContext,
+        parentToolUseId: spawningToolUseId,
         rootSetAppState,
         agentIdForCleanup: agentId,
         enableSummarization:

@@ -19,7 +19,7 @@ The small line under the session title is metadata: project path, branch, model.
 
 ## Reading the conversation
 
-![A full session: a question, tool cards, a thinking block, a file edit with an inline diff](../../images/app/session-main.webp)
+![A full session: a question, tool cards, a thinking block, a file edit with an inline diff](../../images/app/en/session-main.webp)
 
 Claude doesn't just reply with a paragraph. Several kinds of card appear along the way:
 
@@ -32,7 +32,7 @@ In a long conversation, `⌘F` opens find-in-page and jumps between matches in t
 
 ## The permission prompt: which button?
 
-![The "Allow Claude to Edit index.html?" prompt with a preview of the change](../../images/app/session-permission.webp)
+![The "Allow Claude to Edit index.html?" prompt with a preview of the change](../../images/app/en/session-permission.webp)
 
 In the default permission mode, Claude stops and asks before editing a file or running a risky command. The dialog previews the change, then offers three buttons:
 
@@ -84,7 +84,7 @@ Tool activity from background subagents bubbles up here too, so you don't have t
 
 ## What the composer can do
 
-![The slash-command panel that opens when you type `/`](../../images/app/composer-slash.webp)
+![The slash-command panel that opens when you type `/`](../../images/app/en/composer-slash.webp)
 
 - **`/` slash commands** — type `/` for the command panel. `/status` for session state and usage, `/context` for context breakdown, `/compact` to compress, `/review` to review changes, `/commit`, `/memory` to open project memory, `/doctor` to open the diagnostics check.
 - **`@` file references** — type `@` for file search; the file you pick is attached to the message as a path.

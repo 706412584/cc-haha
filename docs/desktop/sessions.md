@@ -19,7 +19,7 @@ order: 1
 
 ## 读懂对话流
 
-![一条完整会话：用户提问、工具调用卡、思考块、文件编辑与内联 diff](../images/app/session-main.webp)
+![一条完整会话：用户提问、工具调用卡、思考块、文件编辑与内联 diff](../images/app/zh-CN/session-main.webp)
 
 Claude 干活时不是一句话回你，中间会插进来几种卡片：
 
@@ -32,7 +32,7 @@ Claude 干活时不是一句话回你，中间会插进来几种卡片：
 
 ## 权限弹窗：三个按钮怎么选
 
-![「允许 Claude Edit index.html?」权限询问卡，下方是变更预览](../images/app/session-permission.webp)
+![「允许 Claude Edit index.html?」权限询问卡，下方是变更预览](../images/app/zh-CN/session-permission.webp)
 
 默认权限模式下，Claude 每次要改文件或跑高风险命令，都会停下来问你。弹窗里会先给出这次改动的预览，然后是三个按钮：
 
@@ -84,7 +84,7 @@ Claude 每完成一轮，对话里会出现一张「{n} 个文件已更改」的
 
 ## 输入框能干的事
 
-![输入 `/` 弹出的斜杠命令面板](../images/app/composer-slash.webp)
+![输入 `/` 弹出的斜杠命令面板](../images/app/zh-CN/composer-slash.webp)
 
 - **`/` 斜杠命令** — 输入 `/` 弹出命令面板。`/status` 看会话状态和用量、`/context` 看上下文占用、`/compact` 压缩上下文、`/review` 审查改动、`/commit` 提交、`/memory` 打开项目记忆、`/doctor` 打开诊断检查。
 - **`@` 引用文件** — 输入 `@` 弹出文件搜索，选中的文件会以路径形式附到消息上。

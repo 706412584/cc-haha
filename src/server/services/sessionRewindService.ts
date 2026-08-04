@@ -1,6 +1,7 @@
 import type { UUID } from 'crypto'
-import { chmod, copyFile, mkdir, readFile, stat, unlink } from 'node:fs/promises'
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { constants } from 'node:fs'
+import { lstat, mkdir, open, readFile, realpath, stat, unlink, type FileHandle } from 'node:fs/promises'
+import { basename, dirname, isAbsolute, join, parse, relative, resolve } from 'node:path'
 import { createTwoFilesPatch, diffLines } from 'diff'
 import { ApiError } from '../middleware/errorHandler.js'
 import {
@@ -423,6 +424,77 @@ function isWithinBaseDir(absolutePath: string, baseDir: string): boolean {
   return relativePath === '' || (!relativePath.startsWith('..') && !isAbsolute(relativePath))
 }
 
+async function resolveThroughExistingAncestor(filePath: string): Promise<string | null> {
+  let existingPath = resolve(filePath)
+  const missingSegments: string[] = []
+
+  while (true) {
+    try {
+      return resolve(await realpath(existingPath), ...missingSegments)
+    } catch (error) {
+      const maybeErr = error as NodeJS.ErrnoException
+      if (maybeErr.code !== 'ENOENT') return null
+
+      const parentPath = dirname(existingPath)
+      if (parentPath === existingPath) return null
+      missingSegments.unshift(basename(existingPath))
+      existingPath = parentPath
+    }
+  }
+}
+
+function findTrackedPathRoot(firstPath: string, secondPath: string): string {
+  let rootPath = resolve(firstPath)
+  while (!isWithinBaseDir(secondPath, rootPath)) {
+    const parentPath = dirname(rootPath)
+    if (parentPath === rootPath) return parse(secondPath).root
+    rootPath = parentPath
+  }
+  return rootPath
+}
+
+function pathsMatch(firstPath: string, secondPath: string): boolean {
+  const first = resolve(firstPath)
+  const second = resolve(secondPath)
+  return process.platform === 'win32'
+    ? first.toLowerCase() === second.toLowerCase()
+    : first === second
+}
+
+async function isSafeTrackedPath(
+  checkpointBaseDir: string,
+  trackingPath: string,
+): Promise<boolean> {
+  const baseDir = resolve(checkpointBaseDir)
+  const absolutePath = resolve(expandTrackingPath(baseDir, trackingPath))
+
+  if (!isAbsolute(trackingPath) && !isWithinBaseDir(absolutePath, baseDir)) {
+    return false
+  }
+
+  const pathRoot = findTrackedPathRoot(baseDir, absolutePath)
+
+  const [canonicalPathRoot, canonicalPath] = await Promise.all([
+    resolveThroughExistingAncestor(pathRoot),
+    resolveThroughExistingAncestor(absolutePath),
+  ])
+  if (!canonicalPathRoot || !canonicalPath) return false
+
+  // Resolve the shared root once so system-level aliases above the workspace
+  // (for example /var -> /private/var on macOS) remain valid while links in a
+  // tracked path are rejected.
+  const expectedPath = resolve(canonicalPathRoot, relative(pathRoot, absolutePath))
+  if (!pathsMatch(canonicalPath, expectedPath)) return false
+
+  try {
+    const stats = await lstat(absolutePath)
+    return stats.isFile() && !stats.isSymbolicLink() && stats.nlink === 1
+  } catch (error) {
+    const maybeErr = error as NodeJS.ErrnoException
+    return maybeErr.code === 'ENOENT'
+  }
+}
+
 function normalizeTranscriptRelativePath(filePath: string): string {
   return normalizeComparablePath(filePath).replace(/^\/+/, '')
 }
@@ -782,17 +854,45 @@ async function hasFileChanged(
 async function restoreBackupFile(
   filePath: string,
   backupFilePath: string,
-): Promise<void> {
+): Promise<boolean> {
   const backupStats = await stat(backupFilePath)
+  const backupContent = await readFile(backupFilePath)
+  let targetFile: FileHandle
+
   try {
-    await copyFile(backupFilePath, filePath)
+    targetFile = await open(filePath, constants.O_WRONLY | constants.O_NOFOLLOW)
   } catch (error) {
     const maybeErr = error as NodeJS.ErrnoException
+    if (maybeErr.code === 'ELOOP') return false
     if (maybeErr.code !== 'ENOENT') throw error
+
     await mkdir(dirname(filePath), { recursive: true })
-    await copyFile(backupFilePath, filePath)
+    try {
+      targetFile = await open(
+        filePath,
+        constants.O_WRONLY |
+          constants.O_CREAT |
+          constants.O_EXCL |
+          constants.O_NOFOLLOW,
+        backupStats.mode,
+      )
+    } catch (createError) {
+      const maybeCreateErr = createError as NodeJS.ErrnoException
+      if (maybeCreateErr.code !== 'EEXIST') throw createError
+      return false
+    }
   }
-  await chmod(filePath, backupStats.mode)
+
+  try {
+    const targetStats = await targetFile.stat()
+    if (!targetStats.isFile() || targetStats.nlink !== 1) return false
+    await targetFile.truncate(0)
+    await targetFile.writeFile(backupContent)
+    await targetFile.chmod(backupStats.mode)
+    return true
+  } finally {
+    await targetFile.close()
+  }
 }
 
 async function buildCodePreview(
@@ -846,6 +946,7 @@ async function buildCodePreview(
     if (backupFileName === undefined) continue
 
     const absolutePath = expandTrackingPath(checkpointBaseDir, trackingPath)
+    if (!(await isSafeTrackedPath(checkpointBaseDir, trackingPath))) continue
 
     if (backupFileName === null) {
       const currentContent = await readFileOrNull(absolutePath)
@@ -955,15 +1056,19 @@ export async function listSessionTurnCheckpoints(
     const checkpointPreview = targetSnapshot
       ? await buildTurnCodePreview(sessionId, checkpointBaseDir, targetSnapshot, nextSnapshot)
       : null
-    const preview = checkpointPreview?.available && checkpointPreview.filesChanged.length > 0
-      ? checkpointPreview
-      : buildTranscriptTurnCodePreview(
-          activeMessages,
-          target.targetUserMessageId,
-          checkpointBaseDir,
-        )
+    let preview = checkpointPreview
+    if (!preview?.available || preview.filesChanged.length === 0) {
+      const transcriptPreview = buildTranscriptTurnCodePreview(
+        activeMessages,
+        target.targetUserMessageId,
+        checkpointBaseDir,
+      )
+      if (transcriptPreview.available) {
+        preview = transcriptPreview
+      }
+    }
 
-    if (!preview.available || preview.filesChanged.length === 0) continue
+    if (!preview?.available) continue
     checkpoints.push(buildTurnPreview(target, preview, checkpointBaseDir))
   }
 
@@ -1117,6 +1222,7 @@ export async function executeSessionRewind(
       if (backupFileName === undefined) continue
 
       const absolutePath = expandTrackingPath(checkpointBaseDir, trackingPath)
+      if (!(await isSafeTrackedPath(checkpointBaseDir, trackingPath))) continue
 
       if (backupFileName === null) {
         try {

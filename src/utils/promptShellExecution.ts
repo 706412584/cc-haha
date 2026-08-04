@@ -24,7 +24,18 @@ type PromptShellTool = Tool & {
   ): Promise<{ data: ShellOut }>
 }
 
-import { isPowerShellToolEnabled } from './shell/shellToolUtils.js'
+type PromptShellExecutionDependencies = {
+  availability?: ReturnType<typeof getShellToolAvailability>
+  bashTool?: PromptShellTool
+  powerShellTool?: PromptShellTool
+  checkPermission?: typeof hasPermissionsToUseTool
+  processResult?: typeof processToolResultBlock
+}
+
+import {
+  getShellToolAvailability,
+  resolveAvailableShellTool,
+} from './shell/shellToolUtils.js'
 
 // Lazy: this file is on the startup import chain (main → commands →
 // loadSkillsDir → here). A static import would load PowerShellTool.ts
@@ -71,16 +82,35 @@ export async function executeShellCommandsInPrompt(
   context: ToolUseContext,
   slashCommandName: string,
   shell?: FrontmatterShell,
+  dependencies: PromptShellExecutionDependencies = {},
 ): Promise<string> {
   let result = text
 
-  // Resolve the tool once. `shell === undefined` and `shell === 'bash'` both
-  // hit BashTool. PowerShell only when the runtime gate allows — a skill
-  // author's frontmatter choice doesn't override the user's opt-in/out.
+  // An explicit frontmatter shell is a syntax contract, so never silently run
+  // it through the other interpreter. Built-in commands pass their resolved
+  // shell explicitly; third-party skill/command content still defaults to Bash.
+  const requestedShell = shell ?? 'bash'
+  const resolvedShell = resolveAvailableShellTool({
+    preferredShell: requestedShell,
+    availability: dependencies.availability ?? getShellToolAvailability(),
+    allowFallback: false,
+  })
+  if (!resolvedShell) {
+    const installHint =
+      requestedShell === 'bash'
+        ? 'Install Git Bash or declare `shell: powershell` and use PowerShell syntax.'
+        : 'Install or enable PowerShell, or declare `shell: bash` and use Bash syntax.'
+    throw new MalformedCommandError(
+      `${requestedShell === 'bash' ? 'Bash' : 'PowerShell'} is required to execute commands in ${slashCommandName}. ${installHint}`,
+    )
+  }
   const shellTool: PromptShellTool =
-    shell === 'powershell' && isPowerShellToolEnabled()
-      ? getPowerShellTool()
-      : BashTool
+    resolvedShell === 'powershell'
+      ? dependencies.powerShellTool ?? getPowerShellTool()
+      : dependencies.bashTool ?? BashTool
+  const checkPermission =
+    dependencies.checkPermission ?? hasPermissionsToUseTool
+  const processResult = dependencies.processResult ?? processToolResultBlock
 
   // INLINE_PATTERN's lookbehind is ~100x slower than BLOCK_PATTERN on large
   // skill content (265µs vs 2µs @ 17KB). 93% of skills have no !` at all,
@@ -95,7 +125,7 @@ export async function executeShellCommandsInPrompt(
       if (command) {
         try {
           // Check permissions before executing
-          const permissionResult = await hasPermissionsToUseTool(
+          const permissionResult = await checkPermission(
             shellTool,
             { command },
             context,
@@ -114,7 +144,7 @@ export async function executeShellCommandsInPrompt(
 
           const { data } = await shellTool.call({ command }, context)
           // Reuse the same persistence flow as regular Bash tool calls
-          const toolResultBlock = await processToolResultBlock(
+          const toolResultBlock = await processResult(
             shellTool,
             data,
             randomUUID(),

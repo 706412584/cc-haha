@@ -23,6 +23,7 @@ let reconnectSpy: ReturnType<typeof spyOn> | undefined
 let hostPreflightSpy: ReturnType<typeof spyOn> | undefined
 let originalRequestControl: typeof conversationService.requestControl
 let originalHasSession: typeof conversationService.hasSession
+let originalGetSessionWorkDir: typeof conversationService.getSessionWorkDir
 
 function clearConfigPathCaches() {
   getGlobalClaudeFile.cache.clear?.()
@@ -80,6 +81,7 @@ describe('MCP API', () => {
     })
     originalRequestControl = conversationService.requestControl.bind(conversationService)
     originalHasSession = conversationService.hasSession.bind(conversationService)
+    originalGetSessionWorkDir = conversationService.getSessionWorkDir.bind(conversationService)
 
     connectSpy = spyOn(mcpClient, 'connectToServer').mockImplementation(async (name, config) => ({
       name,
@@ -106,6 +108,7 @@ describe('MCP API', () => {
     hostPreflightSpy = undefined
     conversationService.requestControl = originalRequestControl
     conversationService.hasSession = originalHasSession
+    conversationService.getSessionWorkDir = originalGetSessionWorkDir
     await teardown()
   })
 
@@ -190,6 +193,7 @@ describe('MCP API', () => {
     expect(createdBody.server.name).toBe('chrome-devtools')
     expect(createdBody.server.transport).toBe('stdio')
     expect(createdBody.server.status).toBe('checking')
+    expect(createdBody.server.projectPath).toBe(normalizePathForConfigKey(projectRoot))
 
     const list = makeRequest('GET', `/api/mcp?cwd=${encodeURIComponent(projectRoot)}`)
     const listRes = await handleMcpApi(list.req, list.url, list.segments)
@@ -200,6 +204,7 @@ describe('MCP API', () => {
     expect(listBody.servers[0].name).toBe('chrome-devtools')
     expect(listBody.servers[0].status).toBe('checking')
     expect(listBody.servers[0].config.command).toBe('npx')
+    expect(listBody.servers[0].projectPath).toBe(normalizePathForConfigKey(projectRoot))
     expect(connectSpy).not.toHaveBeenCalled()
   })
 
@@ -658,6 +663,7 @@ describe('MCP API', () => {
         scope: 'project',
         canRemove: true,
         configLocation: parentMcpJson,
+        projectPath: normalizePathForConfigKey(parent),
       }),
     )
 
@@ -825,6 +831,9 @@ describe('MCP API', () => {
 
     const requestControl = mock(async () => ({}))
     conversationService.hasSession = ((sessionId: string) => sessionId === 'session-1') as typeof conversationService.hasSession
+    conversationService.getSessionWorkDir = ((sessionId: string) => (
+      sessionId === 'session-1' ? projectRoot : ''
+    )) as typeof conversationService.getSessionWorkDir
     conversationService.requestControl = requestControl as typeof conversationService.requestControl
 
     const disable = makeRequest('POST', '/api/mcp/session-sync/toggle', {
@@ -839,6 +848,42 @@ describe('MCP API', () => {
       { subtype: 'mcp_toggle', serverName: 'session-sync', enabled: false },
       120_000,
     )
+  })
+
+  it('does not sync a project-specific toggle into a session from another project', async () => {
+    const otherProject = path.join(tmpDir, 'other-project')
+    await fs.mkdir(otherProject, { recursive: true })
+    const create = makeRequest('POST', '/api/mcp', {
+      cwd: projectRoot,
+      name: 'project-only',
+      scope: 'local',
+      config: {
+        type: 'stdio',
+        command: 'npx',
+        args: ['project-only-mcp'],
+        env: {},
+      },
+    })
+    await handleMcpApi(create.req, create.url, create.segments)
+
+    const requestControl = mock(async () => ({}))
+    conversationService.hasSession = ((sessionId: string) => sessionId === 'session-2') as typeof conversationService.hasSession
+    conversationService.getSessionWorkDir = ((sessionId: string) => (
+      sessionId === 'session-2' ? otherProject : ''
+    )) as typeof conversationService.getSessionWorkDir
+    conversationService.requestControl = requestControl as typeof conversationService.requestControl
+
+    const disable = makeRequest('POST', '/api/mcp/project-only/toggle', {
+      cwd: projectRoot,
+      sessionId: 'session-2',
+    })
+    const disableRes = await handleMcpApi(disable.req, disable.url, disable.segments)
+    const body = await disableRes.json()
+
+    expect(disableRes.status).toBe(200)
+    expect(body.server.enabled).toBe(false)
+    expect(body.sessionSync).toEqual({ applied: false, reason: 'different_project' })
+    expect(requestControl).not.toHaveBeenCalled()
   })
 
   it('reconnects plugin-scoped MCP servers exposed via the merged server list', async () => {

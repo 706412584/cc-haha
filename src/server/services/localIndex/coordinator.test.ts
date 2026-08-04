@@ -687,6 +687,72 @@ describe('local index coordinator', () => {
     }
   })
 
+  it('withholds persisted activity totals while a parser upgrade is waiting to rebuild', async () => {
+    const root = await createTempDir('coordinator-activity-parser-upgrade')
+    const configDir = join(root, 'config')
+    const databasePath = join(configDir, 'cc-haha', 'db', 'index-v1.sqlite')
+    const source = await createRealTranscript(
+      configDir,
+      '-repo',
+      'activity-upgrade',
+      'Initial',
+    )
+
+    const createIdleWatcher = (): ReconciliationWatcher => ({
+      async start() {},
+      async stop() {},
+      queueTranscriptPath() {},
+      queueFullSweep() {},
+      getMetrics: () => ({
+        queuedPaths: 0,
+        maxBatchSize: 0,
+        yielded: 0,
+        fullSweeps: 0,
+        watchFailures: 0,
+      }),
+    })
+    const previousVersion = SESSION_SUMMARY_PARSER_VERSION - 1
+    const previousCoordinator = createLocalIndexCoordinator({
+      resolveMode: () => ({ mode: 'on', warningCode: null }),
+      resolveScope: () => configDir,
+      resolveDatabasePath: () => databasePath,
+      createProjector: options => createSessionProjector({
+        ...options,
+        parserVersion: previousVersion,
+      }),
+      createWatcher: createIdleWatcher,
+    })
+
+    await previousCoordinator.start()
+    await waitFor(() => previousCoordinator.isActivityScopeReady())
+    await previousCoordinator.stop()
+
+    let runScheduledDiscovery: (() => void) | undefined
+    const upgradedCoordinator = createLocalIndexCoordinator({
+      resolveMode: () => ({ mode: 'on', warningCode: null }),
+      resolveScope: () => configDir,
+      resolveDatabasePath: () => databasePath,
+      schedule: operation => { runScheduledDiscovery = operation },
+      createWatcher: createIdleWatcher,
+    })
+
+    try {
+      await upgradedCoordinator.start()
+
+      expect(runScheduledDiscovery).toBeDefined()
+      expect(upgradedCoordinator.isActivityScopeReady()).toBe(false)
+      expect(upgradedCoordinator.getActivityStats('all')).toBeNull()
+
+      runScheduledDiscovery?.()
+      await waitFor(() => upgradedCoordinator.isActivityScopeReady())
+      expect(upgradedCoordinator.getActivityStats('all')?.totalMessages).toBe(1)
+      expect(upgradedCoordinator.getSessionEntryLocators?.(source.path)?.source.parserVersion)
+        .toBe(SESSION_SUMMARY_PARSER_VERSION)
+    } finally {
+      await upgradedCoordinator.stop()
+    }
+  })
+
   it('keeps retained rows degraded after watch failure and ignores late batches after stop', async () => {
     const index = createFakeIndex([candidate(1)])
     let watcherOptions!: ReconciliationWatcherOptions

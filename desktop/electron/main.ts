@@ -16,7 +16,7 @@ import {
   requestNotificationPermission,
   sendDesktopNotification,
 } from './services/notifications'
-import { installApplicationMenu } from './services/menu'
+import { installApplicationMenu, installRendererContextMenu } from './services/menu'
 import { acquireSingleInstanceLock } from './services/singleInstance'
 import { installTray, shouldInstallTray, type TrayController } from './services/tray'
 import { ElectronUpdaterService, updaterSessionProxyConfig } from './services/updater'
@@ -718,6 +718,7 @@ async function createMainWindow() {
     ),
   )
   installMainWindowNavigationGuards(mainWindow.webContents, { openExternal: openExternalUrl })
+  await installRendererContextMenu(mainWindow)
   installPreviewCleanupOnRendererNavigation(mainWindow.webContents, () => {
     previewService?.close()
   })

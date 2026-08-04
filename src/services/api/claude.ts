@@ -22,7 +22,6 @@ import type { Stream } from "@anthropic-ai/sdk/streaming.mjs";
 import { randomUUID } from "crypto";
 import {
   getAPIProvider,
-  hasAnthropicCompatibleThirdPartyConfig,
   isFirstPartyAnthropicBaseUrl,
 } from "src/utils/model/providers.js";
 import {
@@ -79,12 +78,10 @@ import {
   createSystemStreamingFallbackMessage,
   createUserMessage,
   ensureToolResultPairing,
-  mergeAssistantMessages,
   normalizeContentFromAPI,
   normalizeMessagesForAPI,
   stripAdvisorBlocks,
   stripCallerFieldFromAssistantMessage,
-  stripSignatureBlocks,
   stripToolReferenceBlocksFromUserMessage,
 } from "../../utils/messages.js";
 import {
@@ -188,6 +185,10 @@ import { headlessProfilerCheckpoint } from "src/utils/headlessProfiler.js";
 import { isMcpInstructionsDeltaEnabled } from "src/utils/mcpInstructionsDelta.js";
 import { calculateUSDCost } from "src/utils/modelCost.js";
 import { isOpenAIResponsesModel } from "src/services/openaiAuth/models.js";
+import {
+  canRetryOpenAICodexStreamWithBufferedContent,
+  resolveOpenAICodexFirstTokenTimeoutMs,
+} from "src/services/openaiAuth/streamPolicy.js";
 import { endQueryProfile, queryCheckpoint } from "src/utils/queryProfiler.js";
 import {
   modelSupportsAdaptiveThinking,
@@ -201,10 +202,7 @@ import {
   isDeferredToolsDeltaEnabled,
   isToolSearchEnabled,
 } from "src/utils/toolSearch.js";
-import {
-  API_MAX_MEDIA_BYTES_BUDGET,
-  API_MAX_MEDIA_PER_REQUEST,
-} from "../../constants/apiLimits.js";
+import { API_MAX_MEDIA_PER_REQUEST } from "../../constants/apiLimits.js";
 import { ADVISOR_BETA_HEADER } from "../../constants/betas.js";
 import {
   formatDeferredToolLine,
@@ -224,10 +222,7 @@ import {
   startSessionActivity,
   stopSessionActivity,
 } from "../../utils/sessionActivity.js";
-import {
-  EmptyStreamError,
-  shouldTriggerNonStreamingFallbackForEmptyStream,
-} from "./streamFallback.js";
+import { shouldTriggerNonStreamingFallbackForEmptyStream } from "./streamFallback.js";
 import { StreamAssistantCommitBuffer } from "./streamAssistantCommitBuffer.js";
 import {
   StreamWatchdogTimeoutError,
@@ -809,22 +804,10 @@ export async function queryModelWithoutStreaming({
         ),
       options.model,
       messages,
-      signal,
     );
   })) {
     if (message.type === "assistant") {
-      if (!assistantMessage) {
-        assistantMessage = message;
-      } else {
-        const merged = mergeAssistantMessages(assistantMessage, message);
-        assistantMessage = {
-          ...message,
-          message: {
-            ...message.message,
-            content: merged.message.content,
-          },
-        };
-      }
+      assistantMessage = message;
     }
   }
   if (!assistantMessage) {
@@ -869,7 +852,6 @@ export async function* queryModelWithStreaming({
         ),
       options.model,
       messages,
-      signal,
     );
   });
 }
@@ -1042,154 +1024,6 @@ function isToolResult(
   block: BetaContentBlockParam,
 ): block is BetaToolResultBlockParam {
   return block.type === "tool_result";
-}
-
-/**
- * Returns the base64 payload size (in bytes) for a media block, or 0 if the
- * block uses a URL/file source (which doesn't contribute to request body size).
- */
-function getMediaBase64Size(
-  block: BetaImageBlockParam | BetaRequestDocumentBlock,
-): number {
-  const source = block.source;
-  if ("type" in source && source.type === "base64" && "data" in source) {
-    return (source as { data: string }).data.length;
-  }
-  return 0;
-}
-
-/**
- * Tracked position of a media block in the message array, used to remove the
- * oldest items first when over budget.
- */
-interface MediaPosition {
-  msgIdx: number;
-  /** Index in the message's top-level content array */
-  blockIdx: number;
-  /** If inside a tool_result, index within tool_result.content; otherwise -1 */
-  nestedIdx: number;
-  size: number;
-}
-
-/**
- * Shrinks total base64 media payload to fit within `budgetBytes`.
- *
- * When the conversation accumulates large base64 images (from Read tool or
- * image-gen plugin), the total request can exceed the API's ~20 MB limit.
- * This function removes the OLDEST base64 media blocks first (replacing them
- * with a text placeholder) until total media size is within budget.
- *
- * URL-based images (size 0) are never removed — they don't affect request size.
- */
-export function shrinkMediaToSizeBudget(
-  messages: (UserMessage | AssistantMessage)[],
-  budgetBytes: number,
-): (UserMessage | AssistantMessage)[] {
-  // Pass 1: collect all media positions and their sizes
-  const positions: MediaPosition[] = [];
-  let totalSize = 0;
-
-  for (let msgIdx = 0; msgIdx < messages.length; msgIdx++) {
-    const content = messages[msgIdx].message.content;
-    if (!Array.isArray(content)) continue;
-
-    for (let blockIdx = 0; blockIdx < content.length; blockIdx++) {
-      const block = content[blockIdx];
-      if (isMedia(block)) {
-        const size = getMediaBase64Size(block);
-        if (size > 0) {
-          positions.push({ msgIdx, blockIdx, nestedIdx: -1, size });
-          totalSize += size;
-        }
-      }
-      if (isToolResult(block) && Array.isArray(block.content)) {
-        for (
-          let nestedIdx = 0;
-          nestedIdx < block.content.length;
-          nestedIdx++
-        ) {
-          const nested = block.content[nestedIdx];
-          if (isMedia(nested)) {
-            const size = getMediaBase64Size(nested);
-            if (size > 0) {
-              positions.push({ msgIdx, blockIdx, nestedIdx, size });
-              totalSize += size;
-            }
-          }
-        }
-      }
-    }
-  }
-
-  if (totalSize <= budgetBytes) return messages;
-
-  // Pass 2: mark oldest positions for removal until within budget
-  const toRemove = new Set<MediaPosition>();
-  for (const pos of positions) {
-    if (totalSize <= budgetBytes) break;
-    toRemove.add(pos);
-    totalSize -= pos.size;
-  }
-
-  // Pass 3: rebuild messages, replacing removed media with text placeholders
-  return messages.map((msg, msgIdx) => {
-    const content = msg.message.content;
-    if (!Array.isArray(content)) return msg;
-
-    let changed = false;
-    const newContent = content.map((block, blockIdx) => {
-      // Check top-level media
-      if (isMedia(block)) {
-        for (const pos of toRemove) {
-          if (
-            pos.msgIdx === msgIdx &&
-            pos.blockIdx === blockIdx &&
-            pos.nestedIdx === -1
-          ) {
-            changed = true;
-            return {
-              type: "text" as const,
-              text: "[media removed: conversation media budget exceeded]",
-            };
-          }
-        }
-        return block;
-      }
-
-      // Check nested media inside tool_results
-      if (isToolResult(block) && Array.isArray(block.content)) {
-        let nestedChanged = false;
-        const newNested = block.content.map((nested, nestedIdx) => {
-          if (isMedia(nested)) {
-            for (const pos of toRemove) {
-              if (
-                pos.msgIdx === msgIdx &&
-                pos.blockIdx === blockIdx &&
-                pos.nestedIdx === nestedIdx
-              ) {
-                nestedChanged = true;
-                return {
-                  type: "text" as const,
-                  text: "[media removed: conversation media budget exceeded]",
-                };
-              }
-            }
-          }
-          return nested;
-        });
-        if (nestedChanged) {
-          changed = true;
-          return { ...block, content: newNested };
-        }
-      }
-
-      return block;
-    });
-
-    return changed
-      ? { ...msg, message: { ...msg.message, content: newContent } }
-      : msg;
-  }) as (UserMessage | AssistantMessage)[];
 }
 
 /**
@@ -1555,9 +1389,6 @@ async function* queryModel(
   queryCheckpoint("query_message_normalization_start");
   let messagesForAPI = normalizeMessagesForAPI(messages, filteredTools);
   queryCheckpoint("query_message_normalization_end");
-  if (hasAnthropicCompatibleThirdPartyConfig()) {
-    messagesForAPI = stripSignatureBlocks(messagesForAPI);
-  }
 
   // Model-specific post-processing: strip tool-search-specific fields if the
   // selected model doesn't support tool search.
@@ -1605,14 +1436,6 @@ async function* queryModel(
   messagesForAPI = stripExcessMediaItems(
     messagesForAPI,
     API_MAX_MEDIA_PER_REQUEST,
-  );
-
-  // Shrink total base64 media payload to stay under the API's ~20 MB request
-  // size limit. Images accumulate in conversations (Read tool + image-gen)
-  // and are never evicted by toolResultStorage; this is the safety net.
-  messagesForAPI = shrinkMediaToSizeBudget(
-    messagesForAPI,
-    API_MAX_MEDIA_BYTES_BUDGET,
   );
 
   // Instrumentation: Track message count after normalization
@@ -1678,8 +1501,6 @@ async function* queryModel(
     skipGlobalCacheForSystemPrompt: needsToolBasedCacheMarker,
     querySource: options.querySource,
   });
-  const useBetas = betas.length > 0;
-
   // Build minimal context for detailed tracing (when beta tracing is enabled)
   // Note: The actual new_context message extraction is done in sessionTracing.ts using
   // hash-based tracking per querySource (agent) from the messagesForAPI array
@@ -2031,13 +1852,12 @@ async function* queryModel(
       system,
       tools: allTools,
       tool_choice: options.toolChoice,
-      ...(useBetas && { betas: betasParams }),
+      ...(betasParams.length > 0 && { betas: betasParams }),
       metadata: getAPIMetadata(),
       max_tokens: maxOutputTokens,
       thinking,
       ...(temperature !== undefined && { temperature }),
       ...(contextManagement &&
-        useBetas &&
         betasParams.includes(CONTEXT_MANAGEMENT_BETA_HEADER) && {
           context_management: contextManagement,
         }),
@@ -2059,7 +1879,7 @@ async function* queryModel(
       thinkingConfig,
     });
     const logMessagesLength = queryParams.messages.length;
-    const logBetas = useBetas ? (queryParams.betas ?? []) : [];
+    const logBetas = queryParams.betas ?? [];
     const logThinkingType = queryParams.thinking?.type ?? "disabled";
     const logEffortValue = queryParams.output_config?.effort;
     void options.getToolPermissionContext().then((permissionContext) => {
@@ -2206,10 +2026,18 @@ async function* queryModel(
     // healthy-but-slow requests long before the user's configured timeout.
     // Falls back to API_TIMEOUT_MS (the user's request-timeout knob), then to
     // the idle value so terminal CLI behavior is unchanged when unset.
-    const STREAM_FIRST_TOKEN_TIMEOUT_MS =
+    const configuredFirstTokenTimeoutMs =
       parseInt(process.env.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS || "", 10) ||
       parseInt(process.env.API_TIMEOUT_MS || "", 10) ||
       STREAM_IDLE_TIMEOUT_MS;
+    // ChatGPT Codex can emit encrypted reasoning items for minutes before any
+    // user-visible text. The OAuth fetch adapter marks only that direct path,
+    // so its larger pre-output budget does not change third-party providers.
+    const STREAM_FIRST_TOKEN_TIMEOUT_MS =
+      resolveOpenAICodexFirstTokenTimeoutMs(
+        streamResponse as Response | undefined,
+        configuredFirstTokenTimeoutMs,
+      );
     // The idle watchdog waits the first-token budget until the first chunk
     // arrives, then switches to the shorter mid-stream idle budget (#826).
     let currentStreamIdleTimeoutMs = STREAM_FIRST_TOKEN_TIMEOUT_MS;
@@ -2825,7 +2653,7 @@ async function* queryModel(
           request_id: (streamRequestId ??
             "unknown") as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
         });
-        throw new EmptyStreamError();
+        throw new Error("Stream ended without receiving any events");
       }
 
       // No tool boundary was crossed, so completed thinking/text blocks were
@@ -2955,11 +2783,7 @@ async function* queryModel(
           )}`,
           { level: "warn" },
         );
-        throw new RetriableStreamError(
-          streamingError,
-          assistantCommitBuffer.flush(),
-          streamRequestId ?? undefined,
-        );
+        throw new RetriableStreamError(streamingError, assistantCommitBuffer.flush());
       }
 
       // The socket under the stream died mid-response (stale pooled keep-alive
@@ -2973,7 +2797,6 @@ async function* queryModel(
         shouldRetryStreamAfterTransportDisconnect({
           error: streamingError,
           hasCrossedSideEffectBoundary:
-            streamWatchdogState.snapshot().serverToolUseStarted ||
             assistantCommitBuffer.hasCrossedSideEffectBoundary(),
           streamIdleAborted,
           signalAborted: signal.aborted,
@@ -2992,11 +2815,26 @@ async function* queryModel(
           )}`,
           { level: "warn" },
         );
-        throw new RetriableStreamError(
-          streamingError,
-          assistantCommitBuffer.flush(),
-          streamRequestId ?? undefined,
+        throw new RetriableStreamError(streamingError, assistantCommitBuffer.flush());
+      }
+
+      if (
+        (newMessages.length === 0 ||
+          canRetryOpenAICodexStreamWithBufferedContent(
+            streamResponse as Response | undefined,
+            assistantCommitBuffer.hasCrossedSideEffectBoundary(),
+          )) &&
+        !streamIdleAborted &&
+        !signal.aborted &&
+        isRetryableStreamError(streamingError)
+      ) {
+        logForDebugging(
+          `Transient mid-stream error before any output, will retry stream: ${errorMessage(
+            streamingError,
+          )}`,
+          { level: "warn" },
         );
+        throw new RetriableStreamError(streamingError, assistantCommitBuffer.flush());
       }
 
       // When the flag is enabled, skip the non-streaming fallback and let the
@@ -3010,34 +2848,6 @@ async function* queryModel(
           "tengu_disable_streaming_to_non_streaming_fallback",
           false,
         );
-
-      if (
-        newMessages.length === 0 &&
-        !streamIdleAborted &&
-        !signal.aborted &&
-        !streamWatchdogState.snapshot().serverToolUseStarted &&
-        !assistantCommitBuffer.hasCrossedSideEffectBoundary() &&
-        ((disableFallback && streamingError instanceof EmptyStreamError) ||
-          isRetryableStreamError(streamingError))
-      ) {
-        logForDebugging(
-          `Recoverable stream error before any output, will retry stream: ${errorMessage(
-            streamingError,
-          )}`,
-          { level: "warn" },
-        );
-        throw new RetriableStreamError(
-          streamingError,
-          assistantCommitBuffer.flush(),
-          streamRequestId ?? undefined,
-        );
-      }
-
-      // The mid-stream non-streaming fallback causes double tool execution when
-      // streaming tool execution is active: the partial stream starts a tool,
-      // then the non-streaming retry produces the same tool_use and runs it again.
-      // See inc-4258.
-      if (streamWatchdogState.snapshot().serverToolUseStarted || assistantCommitBuffer.hasCrossedSideEffectBoundary()) throw streamingError;
 
       if (disableFallback) {
         logForDebugging(
@@ -3328,10 +3138,6 @@ async function* queryModel(
         yield getAssistantMessageFromError(error, errorModel, {
           messages,
           messagesForAPI,
-          ...(fallbackError instanceof CannotRetryError && {
-            retryCount: fallbackError.retryCount,
-          }),
-          requestId,
         });
         releaseStreamResources();
         return;
@@ -3391,10 +3197,6 @@ async function* queryModel(
       yield getAssistantMessageFromError(error, errorModel, {
         messages,
         messagesForAPI,
-        ...(errorFromRetry instanceof CannotRetryError && {
-          retryCount: errorFromRetry.retryCount,
-        }),
-        requestId,
       });
       releaseStreamResources();
       return;

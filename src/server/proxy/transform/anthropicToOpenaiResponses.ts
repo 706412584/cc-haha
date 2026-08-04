@@ -14,11 +14,14 @@ import type {
 } from './types.js'
 import { stripLeadingBillingHeader } from './billingHeader.js'
 import { normalizeOpenAIReasoningEffort } from './effort.js'
+import { decodeOpenAIReasoningEnvelope } from './openaiReasoning.js'
 
 export type OpenAIResponsesTransformOptions = {
   /** Stable cache routing key, forwarded as `prompt_cache_key`. */
   cacheKey?: string
   passSamplingParams?: boolean
+  /** Restore only cc-haha namespaced OpenAI reasoning envelopes. */
+  preserveOpenAIReasoning?: boolean
 }
 
 /**
@@ -32,7 +35,7 @@ export function anthropicToOpenaiResponses(
 
   // Convert messages to input items
   for (const msg of body.messages) {
-    convertMessageToInputItems(msg, input)
+    convertMessageToInputItems(msg, input, options)
   }
 
   const result: OpenAIResponsesRequest = {
@@ -129,7 +132,11 @@ function convertContentBlock(
   }
 }
 
-function convertMessageToInputItems(msg: AnthropicMessage, output: OpenAIResponsesInputItem[]): void {
+function convertMessageToInputItems(
+  msg: AnthropicMessage,
+  output: OpenAIResponsesInputItem[],
+  options: OpenAIResponsesTransformOptions,
+): void {
   const content = msg.content
 
   // Simple string content
@@ -192,6 +199,10 @@ function convertMessageToInputItems(msg: AnthropicMessage, output: OpenAIRespons
         call_id: block.tool_use_id,
         output: resultOutput,
       })
+    } else if (block.type === 'redacted_thinking' && options.preserveOpenAIReasoning) {
+      flushContentParts()
+      const reasoning = decodeOpenAIReasoningEnvelope(block.data)
+      if (reasoning) output.push(reasoning)
     }
     // Skip thinking blocks
   }

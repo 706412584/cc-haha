@@ -22,6 +22,7 @@ import {
   isOpenAIOfficialProviderId,
 } from './openaiOfficialProvider.js'
 import { hahaOpenAIOAuthService } from './hahaOpenAIOAuthService.js'
+import { hahaOAuthService } from './hahaOAuthService.js'
 import {
   GROK_OFFICIAL_PROVIDER,
   isGrokOfficialProviderId,
@@ -528,17 +529,18 @@ export class ProviderService {
 
   /**
    * Check whether any usable auth exists:
-   *  1. A cc-haha provider is active → has auth
-   *  2. Original ~/.claude/settings.json has ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY → has auth
-   *  3. process.env already has ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN → has auth
-   *  4. None of the above → needs setup
+   *  1. The active cc-haha provider or built-in OAuth provider has auth
+   *  2. Claude Official has a desktop-managed OAuth token
+   *  3. process.env already has ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN
+   *  4. Original ~/.claude/settings.json contains one of those auth variables
+   *  5. None of the above → needs setup
    */
   async checkAuthStatus(): Promise<{
     hasAuth: boolean
-    source: 'cc-haha-provider' | 'openai-oauth' | 'grok-oauth' | 'original-settings' | 'env' | 'none'
+    source: 'cc-haha-provider' | 'claude-oauth' | 'openai-oauth' | 'grok-oauth' | 'original-settings' | 'env' | 'none'
     activeProvider?: string
   }> {
-    // 1. Check cc-haha active provider
+    // 1–2. Check the selected provider, including Claude Official (activeId=null).
     const index = await this.readIndex()
     if (index.activeId) {
       if (isOpenAIOfficialProviderId(index.activeId)) {
@@ -581,14 +583,23 @@ export class ProviderService {
           return { hasAuth: true, source: 'cc-haha-provider', activeProvider: provider.name }
         }
       }
+    } else {
+      const tokens = await hahaOAuthService.ensureFreshTokens()
+      if (tokens?.accessToken) {
+        return {
+          hasAuth: true,
+          source: 'claude-oauth',
+          activeProvider: 'Claude Official',
+        }
+      }
     }
 
-    // 2. Check process.env (covers .env file + inherited env)
+    // 3. Check process.env (covers .env file + inherited env)
     if (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN) {
       return { hasAuth: true, source: 'env' }
     }
 
-    // 3. Check original ~/.claude/settings.json
+    // 4. Check original ~/.claude/settings.json
     try {
       const originalPath = path.join(this.getConfigDir(), 'settings.json')
       const raw = await fs.readFile(originalPath, 'utf-8')

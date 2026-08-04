@@ -38,7 +38,7 @@ You can name one directly ("use Explore to find…") or let Claude decide who to
 
 ## Seeing what's installed
 
-![Settings → Agents: the agent browser grouped by source](../../images/app/settings-agents.webp)
+![Settings → Agents: the agent browser grouped by source](../../images/app/en/settings-agents.webp)
 
 Open **Settings → Agents**. Three cards at the top show total agents, how many are active, and how many sources are in play. Below that, agents are grouped by source in a fixed order:
 
@@ -53,7 +53,7 @@ Click any row for its detail page: model, effort, tool scope, and the full syste
 
 ## Writing your own
 
-![The Create Agent dialog: scope, model, effort, tools, system prompt](../../images/app/agent-create.webp)
+![The Create Agent dialog: scope, model, effort, tools, system prompt](../../images/app/en/agent-create.webp)
 
 Click **Create Agent** in the top right. The fields:
 

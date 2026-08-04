@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { enableConfigs } from '../../utils/config.js'
+import { get3PModelCapabilityOverride } from '../../utils/model/modelSupportOverrides.js'
 import { queryWithModel } from './claude.js'
 
 function sseEvent(name: string, data: unknown): string {
@@ -412,23 +413,28 @@ test.serial('sends effort when thinking is explicitly disabled', async () => {
 
 async function captureQueryRequest({
   model,
+  pinnedModel,
   capabilities,
   effortValue,
   configureCapabilityOverrides = true,
 }: {
   model: string
+  pinnedModel?: string
   capabilities?: string
   effortValue?: 'low'
   configureCapabilityOverrides?: boolean
 }): Promise<{
   content: unknown
   requests: Array<Record<string, unknown>>
+  requestHeaders: Array<Headers>
 }> {
   const requests: Array<Record<string, unknown>> = []
+  const requestHeaders: Array<Headers> = []
   const server = Bun.serve({
     hostname: '127.0.0.1',
     port: 0,
     async fetch(request) {
+      requestHeaders.push(new Headers(request.headers))
       requests.push(await request.json() as Record<string, unknown>)
       return new Response(successfulResponse(model), {
         headers: { 'content-type': 'text/event-stream' },
@@ -465,10 +471,11 @@ async function captureQueryRequest({
     delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES
     delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES
     if (configureCapabilityOverrides && capabilities !== undefined) {
-      process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = model
+      process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = pinnedModel ?? model
       process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES =
         capabilities
     }
+    clearCapabilityCache()
     enableConfigs()
 
     const result = await queryWithModel({
@@ -485,7 +492,7 @@ async function captureQueryRequest({
       },
     })
 
-    return { content: result.message.content, requests }
+    return { content: result.message.content, requests, requestHeaders }
   } finally {
     for (const key of ENV_KEYS) {
       const value = originalEnv[key]
@@ -495,6 +502,7 @@ async function captureQueryRequest({
     if (originalMacro === undefined) delete globals.MACRO
     else globals.MACRO = originalMacro
     server.stop(true)
+    clearCapabilityCache()
     await rm(configDir, { recursive: true, force: true })
   }
 }
@@ -523,6 +531,21 @@ test('keeps request effort when thinking is explicitly disabled', async () => {
   expect(requests[0]?.output_config).toEqual({ effort: 'low' })
 }, 10_000)
 
+test('sends effort through the final request when a pinned model adds a 1M marker', async () => {
+  const { requests, requestHeaders } = await captureQueryRequest({
+    model: 'deepseek-v4-flash',
+    pinnedModel: 'deepseek-v4-flash[1m]',
+    capabilities: 'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
+    effortValue: 'low',
+  })
+
+  expect(requests).toHaveLength(1)
+  expect(requests[0]?.model).toBe('deepseek-v4-flash')
+  expect(requests[0]?.output_config).toEqual({ effort: 'low' })
+  expect(requests[0]?.thinking).toEqual({ type: 'disabled' })
+  expect(requestHeaders[0]?.get('anthropic-beta')).toContain('effort-2025-11-24')
+}, 10_000)
+
 test('normalizes a disabled parent thinking mode to adaptive for Fable', async () => {
   const { requests } = await captureQueryRequest({
     model: 'claude-fable-5',
@@ -533,3 +556,9 @@ test('normalizes a disabled parent thinking mode to adaptive for Fable', async (
   expect(requests[0]?.thinking).toEqual({ type: 'adaptive' })
   expect(requests[0]?.thinking).not.toEqual({ type: 'disabled' })
 }, 10_000)
+
+function clearCapabilityCache() {
+  ;(get3PModelCapabilityOverride as typeof get3PModelCapabilityOverride & {
+    cache?: { clear?: () => void }
+  }).cache?.clear?.()
+}

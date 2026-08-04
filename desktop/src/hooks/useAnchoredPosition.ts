@@ -2,9 +2,14 @@ import { useCallback, useLayoutEffect, useState, type CSSProperties } from 'reac
 
 export type AnchoredPlacement = 'bottom-start' | 'bottom-end' | 'top-start' | 'top-end'
 
-export type UseAnchoredPositionOptions = {
+export type AnchoredRect = Pick<DOMRect, 'top' | 'right' | 'bottom' | 'left'>
+
+type AnchorSource =
+  | { anchorRef: { current: HTMLElement | null }; anchorRect?: never }
+  | { anchorRef?: never; anchorRect: AnchoredRect }
+
+export type UseAnchoredPositionOptions = AnchorSource & {
   open: boolean
-  anchorRef: { current: HTMLElement | null }
   floatingRef: { current: HTMLElement | null }
   placement?: AnchoredPlacement
   /** Gap between anchor and overlay, in pixels. */
@@ -42,6 +47,7 @@ const DEFAULT_MARGIN = 8
 export function useAnchoredPosition({
   open,
   anchorRef,
+  anchorRect,
   floatingRef,
   placement = 'bottom-start',
   offset = 6,
@@ -54,11 +60,10 @@ export function useAnchoredPosition({
   )
 
   const measure = useCallback(() => {
-    const anchor = anchorRef.current
+    const anchorBox = anchorRect ?? anchorRef?.current?.getBoundingClientRect()
     const floating = floatingRef.current
-    if (!anchor || !floating) return
+    if (!anchorBox || !floating) return
 
-    const anchorBox = anchor.getBoundingClientRect()
     const { width, height } = floating.getBoundingClientRect()
     const viewportWidth = window.innerWidth
     const viewportHeight = window.innerHeight
@@ -98,7 +103,19 @@ export function useAnchoredPosition({
     }
 
     setState({ top, left, placement: resolved, ready: true })
-  }, [anchorRef, floatingRef, placement, offset, viewportMargin, flip, shift])
+  }, [
+    anchorRect?.top,
+    anchorRect?.right,
+    anchorRect?.bottom,
+    anchorRect?.left,
+    anchorRef,
+    floatingRef,
+    placement,
+    offset,
+    viewportMargin,
+    flip,
+    shift,
+  ])
 
   useLayoutEffect(() => {
     if (!open) {

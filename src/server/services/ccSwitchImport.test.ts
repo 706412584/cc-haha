@@ -1292,14 +1292,20 @@ describe('cc-switch candidate mapping', () => {
   test('matches bundled presets by normalized base URL and falls back to custom', async () => {
     await writeFixtureDb([
       { id: 'kimi', sortIndex: 1, env: claudeEnv({ ANTHROPIC_BASE_URL: 'HTTPS://API.KIMI.COM/CODING/' }) },
-      { id: 'glm', sortIndex: 2, env: claudeEnv({ ANTHROPIC_BASE_URL: 'https://open.bigmodel.cn/api/anthropic' }) },
-      { id: 'unknown', sortIndex: 3, env: claudeEnv({ ANTHROPIC_BASE_URL: 'https://gateway.internal/anthropic' }) },
+      { id: 'glm-cn', sortIndex: 2, env: claudeEnv({ ANTHROPIC_BASE_URL: 'https://open.bigmodel.cn/api/anthropic' }) },
+      { id: 'glm-global', sortIndex: 3, env: claudeEnv({ ANTHROPIC_BASE_URL: 'https://api.z.ai/api/anthropic/' }) },
+      { id: 'minimax-cn', sortIndex: 4, env: claudeEnv({ ANTHROPIC_BASE_URL: 'https://api.minimaxi.com/anthropic/' }) },
+      { id: 'minimax-global', sortIndex: 5, env: claudeEnv({ ANTHROPIC_BASE_URL: 'https://api.minimax.io/anthropic' }) },
+      { id: 'unknown', sortIndex: 6, env: claudeEnv({ ANTHROPIC_BASE_URL: 'https://gateway.internal/anthropic' }) },
     ])
 
     const candidates = await scanCandidates()
 
     expect(candidateById(candidates, 'claude:kimi').presetId).toBe('kimi')
-    expect(candidateById(candidates, 'claude:glm').presetId).toBe('zhipuglm')
+    expect(candidateById(candidates, 'claude:glm-cn').presetId).toBe('zhipuglm')
+    expect(candidateById(candidates, 'claude:glm-global').presetId).toBe('zhipuglm')
+    expect(candidateById(candidates, 'claude:minimax-cn').presetId).toBe('minimax')
+    expect(candidateById(candidates, 'claude:minimax-global').presetId).toBe('minimax')
     expect(candidateById(candidates, 'claude:unknown').presetId).toBe('custom')
   })
 

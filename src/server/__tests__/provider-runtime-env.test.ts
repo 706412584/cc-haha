@@ -10,7 +10,6 @@ import {
   mergeActiveProviderManagedEnv,
   readActiveProviderManagedEnv,
 } from '../services/providerRuntimeEnv.js'
-import { resolveAppliedEffort } from '../../utils/effort.js'
 import { get3PModelCapabilityOverride } from '../../utils/model/modelSupportOverrides.js'
 
 let tmpDir: string
@@ -71,7 +70,7 @@ describe('providerRuntimeEnv', () => {
     expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
   })
 
-  test('derives native Anthropic provider env from the active provider index', async () => {
+  test('keeps Claude Code effort capabilities for an unlisted custom model', async () => {
     await writeJson(path.join(tmpDir, 'cc-haha', 'providers.json'), {
       activeId: 'provider-1',
       providers: [
@@ -133,7 +132,9 @@ describe('providerRuntimeEnv', () => {
       delete process.env.CLAUDE_CODE_EFFORT_LEVEL
       clearCapabilityCache()
 
-      expect(resolveAppliedEffort('active-main', 'xhigh')).toBe('xhigh')
+      expect(get3PModelCapabilityOverride('active-main', 'effort')).toBe(true)
+      expect(get3PModelCapabilityOverride('active-main', 'xhigh_effort')).toBe(true)
+      expect(get3PModelCapabilityOverride('active-main', 'max_effort')).toBe(true)
     } finally {
       for (const key of runtimeKeys) {
         const value = originalRuntimeEnv[key]
@@ -142,6 +143,39 @@ describe('providerRuntimeEnv', () => {
       }
       clearCapabilityCache()
     }
+  })
+
+  test('does not let legacy preset metadata disable compatible model effort', async () => {
+    await writeJson(path.join(tmpDir, 'cc-haha', 'providers.json'), {
+      activeId: 'provider-xuanshu',
+      providers: [
+        {
+          id: 'provider-xuanshu',
+          presetId: 'xuanshuapi',
+          name: 'XuanShu API',
+          apiKey: 'sk-xuanshu',
+          authStrategy: 'auth_token',
+          baseUrl: 'https://www.xuanshuapi.com',
+          apiFormat: 'anthropic',
+          models: {
+            main: 'claude-opus-5',
+            haiku: 'claude-haiku-4-5',
+            sonnet: 'claude-sonnet-5',
+            opus: 'claude-opus-5',
+          },
+        },
+      ],
+    })
+
+    const env = readActiveProviderManagedEnv(tmpDir)
+
+    expect(env).toMatchObject({
+      ANTHROPIC_MODEL: 'claude-opus-5',
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES:
+        'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
+      ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES:
+        'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
+    })
   })
 
   test('active provider env overrides stale proxy settings while preserving unrelated env', async () => {
@@ -390,7 +424,7 @@ describe('providerRuntimeEnv', () => {
       ANTHROPIC_API_KEY: 'sk-kimi',
       ANTHROPIC_MODEL: 'k3',
       ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES:
-        'thinking,required_thinking,effort,max_effort',
+        'thinking,required_thinking,effort,xhigh_effort,max_effort',
     })
     expect(kimiEnv?.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
     expect(JSON.parse(kimiEnv!.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS)).toMatchObject({
@@ -427,7 +461,8 @@ describe('providerRuntimeEnv', () => {
       ANTHROPIC_API_KEY: '',
       ANTHROPIC_AUTH_TOKEN: 'sk-kimi-legacy',
       ANTHROPIC_MODEL: 'kimi-k2.7-code',
-      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: 'thinking,required_thinking',
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES:
+        'thinking,required_thinking,effort,xhigh_effort,max_effort',
     })
 
     await writeJson(path.join(tmpDir, 'cc-haha', 'providers.json'), {
@@ -456,8 +491,14 @@ describe('providerRuntimeEnv', () => {
     expect(zhipuEnv).toMatchObject({
       ANTHROPIC_MODEL: 'glm-5.2[1m]',
       ANTHROPIC_DEFAULT_HAIKU_MODEL: 'glm-4.7',
-      CLAUDE_CODE_AUTO_COMPACT_WINDOW: '1000000',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES:
+        'thinking,effort,xhigh_effort,max_effort',
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES:
+        'thinking,effort,xhigh_effort,max_effort',
     })
+    // No provider-wide auto-compact window: it is model-agnostic and pinned
+    // small-context models at 1M so auto-compact never fired (#1162).
+    expect(zhipuEnv!.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
     expect(JSON.parse(zhipuEnv!.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS)).toMatchObject({
       'glm-5.2[1m]': 1000000,
       'glm-4.7': 200000,
@@ -510,7 +551,8 @@ describe('providerRuntimeEnv', () => {
       // preset defaultEnv survives the retirement
       API_TIMEOUT_MS: '3000000',
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
-      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: 'none',
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES:
+        'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
     })
     // preset authStrategy (auth_token) survives: bearer token, blanked api key
     expect(env?.ANTHROPIC_AUTH_TOKEN).toBe('sk-shengsuanyun')

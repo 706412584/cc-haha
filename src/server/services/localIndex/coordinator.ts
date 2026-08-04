@@ -23,6 +23,7 @@ import {
 } from './sessionIndex.js'
 import {
   createSessionProjector,
+  SESSION_SUMMARY_PARSER_VERSION,
   type SessionProjector,
   type SessionSourceCandidate,
 } from './sessionProjector.js'
@@ -40,7 +41,10 @@ import {
 } from './reconciliationWatcher.js'
 import type { LocalIndexMode, LocalIndexStatus } from './types.js'
 import type { ClaudeCodeStats, StatsDateRange } from '../../../utils/stats.js'
-import { writeActivityBackfillState } from './activityIndex.js'
+import {
+  markActivityBackfillBuilding,
+  writeActivityBackfillState,
+} from './activityIndex.js'
 
 export type LocalIndexSchedulingMetrics = {
   maxBatchSize: number
@@ -1130,6 +1134,22 @@ export function createLocalIndexCoordinator(
       const activeDatabase = openedDatabase
       const activeIndex = createIndex(activeDatabase)
       const persisted = activeIndex.getBackfillState(resolvedScope)
+      // A parser upgrade makes persisted activity aggregates semantically stale. Invalidate their
+      // readiness before exposing the index so reads fall back until the rebuild finishes.
+      if (
+        typeof activeIndex.getActivityBackfillState === 'function' &&
+        typeof activeIndex.listActivitySources === 'function'
+      ) {
+        const persistedActivity = activeIndex.getActivityBackfillState(resolvedScope)
+        const parserUpgradePending = persistedActivity?.state === 'ready' &&
+          activeIndex.listActivitySources().some(source =>
+            source.parserVersion !== SESSION_SUMMARY_PARSER_VERSION)
+        if (parserUpgradePending) {
+          activeDatabase.transaction(operation => {
+            markActivityBackfillBuilding(operation, resolvedScope, now())
+          })
+        }
+      }
       scope = resolvedScope
       databasePath = resolvedDatabasePath
       database = activeDatabase

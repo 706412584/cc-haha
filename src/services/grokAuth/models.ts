@@ -50,7 +50,18 @@ export function getGrokContextWindowForModel(modelId: string): number | null {
   return GROK_MODEL_CATALOG.find((model) => model.value === resolved)?.contextWindow ?? null
 }
 
-export function grokModelRejectsReasoningEffort(modelId: string): boolean {
+export function resolveGrokReasoningEffort(
+  modelId: string,
+  requestedEffort: unknown,
+): string | undefined {
   const resolved = resolveGrokModel(modelId)
-  return resolved === 'grok-composer-2.5-fast'
+  const model = GROK_MODEL_CATALOG.find((entry) => entry.value === resolved)
+  if (model?.supportsReasoningEffort === false) return undefined
+  if (
+    typeof requestedEffort === 'string' &&
+    model?.reasoningEfforts?.includes(requestedEffort)
+  ) {
+    return requestedEffort
+  }
+  return model?.reasoningEffort
 }

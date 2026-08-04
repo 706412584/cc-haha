@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { RefreshCw } from 'lucide-react'
+import { ArrowLeft, RefreshCw } from 'lucide-react'
 import {
   subagentsApi,
   type SubagentRunResponse,
@@ -8,9 +8,11 @@ import {
 import { buildRenderModel, MessageBlock } from '../components/chat/MessageList'
 import { ToolCallGroup } from '../components/chat/ToolCallGroup'
 import { Badge, type Tone as BadgeTone } from '@/components/ui/Badge'
+import { Button } from '@/components/ui/Button'
 import { IconButton } from '@/components/ui/IconButton'
 import { useTranslation } from '../i18n'
 import { mapHistoryMessagesToUiMessages, useChatStore } from '../stores/chatStore'
+import { SUBAGENT_TAB_PREFIX, useTabStore } from '../stores/tabStore'
 import type { AgentTaskNotification, UIMessage } from '../types/chat'
 
 type TranslationFn = ReturnType<typeof useTranslation>
@@ -39,6 +41,15 @@ export function SubagentRunPage({
     return liveTask?.taskId ?? session?.agentTaskNotifications?.[toolUseId]?.taskId
   })
   const resolvedTaskId = taskId ?? discoveredTaskId
+
+  const handleReturn = () => {
+    const store = useTabStore.getState()
+    const activeTab = store.tabs.find((tab) => tab.sessionId === store.activeTabId)
+    const tabId = activeTab?.type === 'subagent' && activeTab.subagentToolUseId === toolUseId
+      ? activeTab.sessionId
+      : `${SUBAGENT_TAB_PREFIX}${sourceSessionId}__${toolUseId}`
+    store.returnFromSubagent(tabId)
+  }
 
   const load = useCallback(async (options?: { resetData?: boolean }) => {
     const requestId = requestIdRef.current + 1
@@ -76,19 +87,30 @@ export function SubagentRunPage({
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-[var(--color-surface)] text-[var(--color-text-primary)]">
       <header className="flex shrink-0 items-start justify-between gap-4 border-b border-[var(--color-border)] px-5 py-3">
-        <div className="min-w-0">
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <h1
-              className="min-w-0 truncate text-[16.5px] font-semibold leading-tight text-[var(--color-text-primary)]"
-              style={{ fontFamily: 'var(--font-headline)' }}
-            >
-              {title}
-            </h1>
-            {data ? <StatusBadge status={data.status} t={t} /> : null}
+        <div className="flex min-w-0 items-start gap-2">
+          <Button
+            variant="ghost"
+            size="base"
+            onClick={handleReturn}
+            icon={<ArrowLeft size={15} strokeWidth={2} aria-hidden="true" />}
+            className="mt-0.5 shrink-0"
+          >
+            {t('subagentRun.backToParent')}
+          </Button>
+          <div className="min-w-0">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <h1
+                className="min-w-0 truncate text-[16.5px] font-semibold leading-tight text-[var(--color-text-primary)]"
+                style={{ fontFamily: 'var(--font-headline)' }}
+              >
+                {title}
+              </h1>
+              {data ? <StatusBadge status={data.status} t={t} /> : null}
+            </div>
+            <p className="mt-1 truncate font-mono text-[11px] text-[var(--color-text-tertiary)]">
+              {sourceSessionId} / {toolUseId}
+            </p>
           </div>
-          <p className="mt-1 truncate font-mono text-[11px] text-[var(--color-text-tertiary)]">
-            {sourceSessionId} / {toolUseId}
-          </p>
         </div>
         {/* The icon spins in place while loading rather than using IconButton's
             `loading` prop, which would swap RefreshCw for the generic Spinner. */}

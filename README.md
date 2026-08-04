@@ -32,28 +32,61 @@ Claude Code Haha is a **desktop Claude Code workspace** for macOS, Windows, and 
 
 ## Desktop Preview
 
-The Claude Code Haha desktop app brings sessions, multi-project navigation, branch / Worktree controls, file changes, diff review, permission approval, model setup, and remote access into one graphical workspace for daily development beyond the terminal.
-
-v0.5.0 shipped a full UI redesign — six colour themes that can follow your system's light/dark setting. All six shots below are from a real v0.5.0 build.
-
 <p align="center">
   <a href="https://github.com/NanmiCoder/cc-haha/releases"><img src="https://img.shields.io/badge/⬇_Download_Desktop-macOS_%7C_Windows_%7C_Linux-FF7A00?style=for-the-badge" alt="Download Desktop"></a>
-  &nbsp;
-  <a href="docs/en/start/install.md"><img src="https://img.shields.io/badge/📖_Install_Guide-Guide-gray?style=for-the-badge" alt="Install Guide"></a>
 </p>
 
 <table>
   <tr>
-    <td align="center" width="33%"><img src="docs/images/app/session-main.webp" alt="Desktop session view"><br><b>Say it once, watch it finish</b><br><sub>Tool calls and every edit stay in the thread</sub></td>
-    <td align="center" width="33%"><img src="docs/images/app/workspace-diff.webp" alt="Workspace diff review"><br><b>See exactly what changed</b><br><sub>Syntax-highlighted diffs; you decide what lands</sub></td>
-    <td align="center" width="33%"><img src="docs/images/app/workspace-preview.webp" alt="Built-in browser previewing the page that was just changed"><br><b>Verify on the spot</b><br><sub>Open your dev server inside the app</sub></td>
+    <td align="center" width="33.33%"><img src="docs/images/app/en/session-new.webp" alt="Empty desktop session before the first task"><br><b>Start with a clear, empty session</b><br><sub>Project and permissions stay visible</sub></td>
+    <td align="center" width="33.33%"><img src="docs/images/app/en/session-main.webp" alt="Real task running with the Activity panel open"><br><b>Follow the task as it runs</b><br><sub>Tool calls and stage-by-stage progress stay in view</sub></td>
+    <td align="center" width="33.33%"><img src="docs/images/app/en/workspace-diff.webp" alt="Workspace diff review"><br><b>See exactly what changed</b><br><sub>A focused, full-width syntax-highlighted diff</sub></td>
   </tr>
   <tr>
-    <td align="center" width="33%"><img src="docs/images/app/session-dark.webp" alt="Session view in the dark theme"><br><b>Six themes, follows the system</b><br><sub>Light and dark, six palettes in all</sub></td>
-    <td align="center" width="33%"><img src="docs/images/app/skill-market.webp" alt="Skill marketplace"><br><b>Missing a trick? Install it</b><br><sub>Source and safety status shown up front</sub></td>
-    <td align="center" width="33%"><img src="docs/images/app/pet-desktop.webp" alt="Desktop pet settings with the floating pet"><br><b>Company while it works</b><br><sub>Dada, Huhu, Bubu and Huihui follow the task</sub></td>
+    <td align="center" width="33.33%"><img src="docs/images/app/en/workspace-preview.webp" alt="Built-in browser previewing the page that was just changed"><br><b>Verify on the spot</b><br><sub>The real edited page in the built-in browser</sub></td>
+    <td align="center" width="33.33%"><img src="docs/images/app/en/model-picker.webp" alt="Model picker showing providers, presets, and local endpoints"><br><b>Choose the exact model</b><br><sub>Your providers, presets, and local endpoints in one list</sub></td>
+    <td align="center" width="33.33%"><img src="docs/images/app/en/skill-market.webp" alt="Skill marketplace"><br><b>Missing a trick? Install it</b><br><sub>Source and safety status shown up front</sub></td>
   </tr>
 </table>
+
+---
+
+## Sponsorship & Partnership
+
+This project is maintained in the author's spare time. Corporate or individual sponsorships are welcome to support ongoing development. Custom features, integrations, and business partnerships are also open for discussion.
+
+<table>
+  <thead>
+    <tr>
+      <th width="220">Sponsor</th>
+      <th align="left">Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td align="center" valign="middle">
+        <a href="https://teamorouter.com/?utm_source=cc_haha&utm_medium=referral&utm_campaign=ai_directory">
+          <img src="docs/images/sponsors/teamorouter-logo.svg" width="180" alt="TeamoRouter">
+        </a>
+      </td>
+      <td valign="middle">
+        Thanks to <a href="https://teamorouter.com/?utm_source=cc_haha&utm_medium=referral&utm_campaign=ai_directory">TeamoRouter</a> for sponsoring this project. TeamoRouter is an enterprise-grade Agentic LLM gateway: run Claude Code, Codex, Gemini CLI, and other popular AI agents through one unified API with no subscription and up to 90% off official pricing. It aggregates hundreds of official model providers (OpenAI, Anthropic, Vertex, Azure, AWS Bedrock) verified for Agent protocol compatibility, with near-official TTFT, a 99.6% SLA, and industry-leading cache hit rates. It also adds centralized billing, team management, BYOK, usage analytics, and one-click Teamo Desktop. New users who register through <a href="https://teamorouter.com/?utm_source=cc_haha&utm_medium=referral&utm_campaign=ai_directory">this link</a> get 10% off their first top-up.
+      </td>
+    </tr>
+    <tr>
+      <td align="center" valign="middle">
+        <a href="https://www.xuanshuapi.com/register?aff=CC-HAHA&promo=CC-HAHA">
+          <img src="docs/images/sponsors/xuanshuapi-logo.svg" width="120" alt="XuanShu API">
+        </a>
+      </td>
+      <td valign="middle">
+        Thanks to <a href="https://www.xuanshuapi.com/register?aff=CC-HAHA&promo=CC-HAHA">XuanShu API</a> for sponsoring this project. XuanShu API is an all-in-one, enterprise-grade AI gateway that gives you access to leading global models through a single unified API, and works out of the box with popular AI coding tools such as Claude Code, Codex, and Gemini CLI. Stability comes first: multi-account pool scheduling and automatic failover smooth out upstream account fluctuations. Model calls are priced as low as 25% of official rates, and balance top-ups get roughly a 20% bonus with no expiry. New users who register through <a href="https://www.xuanshuapi.com/register?aff=CC-HAHA&promo=CC-HAHA">this link</a> receive a $5 credit.
+      </td>
+    </tr>
+  </tbody>
+</table>
+
+📧 **Contact**: relakkes@gmail.com
 
 ---
 
@@ -109,45 +142,6 @@ Full documentation site: <https://cchaha.ai>
 
 ---
 
-## Sponsorship & Partnership
-
-This project is maintained in the author's spare time. Corporate or individual sponsorships are welcome to support ongoing development. Custom features, integrations, and business partnerships are also open for discussion.
-
-<table>
-  <thead>
-    <tr>
-      <th width="220">Sponsor</th>
-      <th align="left">Description</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td align="center" valign="middle">
-        <a href="https://teamorouter.com/?utm_source=cc_haha&utm_medium=referral&utm_campaign=ai_directory">
-          <img src="docs/images/sponsors/teamorouter-logo.svg" width="180" alt="TeamoRouter">
-        </a>
-      </td>
-      <td valign="middle">
-        Thanks to <a href="https://teamorouter.com/?utm_source=cc_haha&utm_medium=referral&utm_campaign=ai_directory">TeamoRouter</a> for sponsoring this project. TeamoRouter is an enterprise-grade Agentic LLM gateway for developers, AI teams, and businesses. Without any subscription, it lets you use Claude Code, Codex, Gemini CLI, and other popular AI agents through a single unified API, with API pricing at discounts of up to 90%. It aggregates hundreds of official model providers and trusted infrastructure partners — including OpenAI, Anthropic, Vertex, Azure, and AWS Bedrock — each verified for 100% Agent protocol compatibility, cache performance, and request traceability, delivering near-official TTFT, a 99.6% SLA, throughput up to 5,000 QPM, and industry-leading cache hit rates rather than reverse-engineered endpoints. It also offers centralized billing, team management, BYOK, smart routing, usage analytics, and dedicated support, and Teamo Desktop lets you use these AI agents with one-click setup. New users who register through <a href="https://teamorouter.com/?utm_source=cc_haha&utm_medium=referral&utm_campaign=ai_directory">this link</a> receive 10% off their first top-up.
-      </td>
-    </tr>
-  </tbody>
-</table>
-
-📧 **Contact**: relakkes@gmail.com
-
----
-
-## User Group
-
-Scan the QR code below to join the cc-haha user group on Feishu (Lark) — the conversation there is mostly in Chinese. For questions and bug reports in English, [Issues](https://github.com/NanmiCoder/cc-haha/issues) is the better place.
-
-<p align="center">
-  <img src="docs/images/community/feishu-group-qr.png" width="300" alt="cc-haha Feishu user group QR code">
-</p>
-
----
-
 ## ☕ Buy Me a Coffee
 
 If this project helps you, consider buying me a coffee — every bit of support keeps this project going ❤️
@@ -170,6 +164,16 @@ If this project helps you, consider buying me a coffee — every bit of support 
 </td>
 </tr>
 </table>
+
+---
+
+## User Group
+
+Scan the QR code below to join the cc-haha user group on Feishu (Lark) — the conversation there is mostly in Chinese. For questions and bug reports in English, [Issues](https://github.com/NanmiCoder/cc-haha/issues) is the better place.
+
+<p align="center">
+  <img src="docs/images/community/feishu-group-qr.png" width="300" alt="cc-haha Feishu user group QR code">
+</p>
 
 ---
 

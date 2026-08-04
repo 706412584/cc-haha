@@ -280,6 +280,12 @@ export type AgentMetadata = {
    * resumed agent's notification can show the original description instead
    * of a placeholder. Optional — older metadata files lack this field. */
   description?: string
+  /** tool_use id of the Agent call that spawned this agent. Resume must
+   * re-attach the agent to that original card — the resuming tool (e.g.
+   * SendMessage) has its own tool_use id, and using it would file the
+   * agent's activity and completion under the wrong card. Optional —
+   * older metadata files lack this field. */
+  toolUseId?: string
 }
 
 /**

@@ -4,6 +4,10 @@ import type {
   OpenAIResponsesResponse,
 } from '../transform/types.js'
 
+export type OpenAIResponsesCollectOptions = {
+  openAICodexOAuth?: boolean
+}
+
 type StreamFallbackState = {
   id: string
   createdAt: number
@@ -21,12 +25,14 @@ type StreamFallbackState = {
 export async function openaiResponsesStreamToAnthropicResponse(
   upstream: ReadableStream<Uint8Array>,
   model: string,
+  options: OpenAIResponsesCollectOptions = {},
 ): Promise<AnthropicResponse> {
   const decoder = new TextDecoder()
   const reader = upstream.getReader()
   let buffer = ''
   let currentEvent = ''
   let completedResponse: OpenAIResponsesResponse | null = null
+  let terminalError: Error | null = null
 
   const fallback: StreamFallbackState = {
     id: `resp_${Date.now()}`,
@@ -76,6 +82,25 @@ export async function openaiResponsesStreamToAnthropicResponse(
         if (isOpenAIResponsesResponse(response)) {
           completedResponse = response
         }
+      } else if (
+        options.openAICodexOAuth &&
+        currentEvent === 'response.incomplete' &&
+        readIncompleteReason(data) === 'max_output_tokens'
+      ) {
+        const response = data.response
+        if (isOpenAIResponsesResponse(response)) {
+          completedResponse = response
+        }
+      } else if (
+        options.openAICodexOAuth &&
+        (
+          currentEvent === 'response.failed' ||
+          currentEvent === 'response.incomplete' ||
+          currentEvent === 'response.cancelled' ||
+          currentEvent === 'error'
+        )
+      ) {
+        terminalError = new Error(readTerminalError(currentEvent, data))
       } else {
         updateFallbackState(currentEvent, data, fallback)
       }
@@ -83,10 +108,53 @@ export async function openaiResponsesStreamToAnthropicResponse(
     }
   }
 
+  if (terminalError) throw terminalError
+  if (options.openAICodexOAuth && !completedResponse) {
+    const error = new Error(
+      'OpenAI Responses stream closed before response.completed',
+    ) as Error & { code: string }
+    error.code = 'ERR_STREAM_PREMATURE_CLOSE'
+    throw error
+  }
+
   return openaiResponsesToAnthropic(
     completedResponse ?? buildFallbackResponse(fallback),
     model,
+    { preserveOpenAIReasoning: options.openAICodexOAuth },
   )
+}
+
+function readTerminalError(
+  event: string,
+  data: Record<string, unknown>,
+): string {
+  const response = isRecord(data.response) ? data.response : undefined
+  const error = isRecord(response?.error)
+    ? response.error
+    : isRecord(data.error)
+      ? data.error
+      : data
+  if (typeof error?.message === 'string' && error.message) return error.message
+  if (event === 'response.incomplete') {
+    const details = isRecord(response?.incomplete_details)
+      ? response.incomplete_details
+      : undefined
+    const reason = typeof details?.reason === 'string' ? details.reason : 'unknown'
+    return `OpenAI response was incomplete: ${reason}`
+  }
+  return `OpenAI stream ended with ${event}`
+}
+
+function readIncompleteReason(data: Record<string, unknown>): string {
+  const response = isRecord(data.response) ? data.response : undefined
+  const details = isRecord(response?.incomplete_details)
+    ? response.incomplete_details
+    : undefined
+  return typeof details?.reason === 'string' ? details.reason : 'unknown'
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
 }
 
 function updateFallbackState(

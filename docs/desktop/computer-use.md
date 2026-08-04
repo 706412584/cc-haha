@@ -15,7 +15,7 @@ order: 7
 
 ## 准备环境
 
-![设置 → Computer Use：环境检测、macOS 两项授权、已授权应用](../images/app/settings-computer-use.webp)
+![设置 → Computer Use：环境与 Python 运行时检测](../images/app/zh-CN/settings-computer-use.webp)
 
 打开 设置 → Computer Use，页面顶部是一排环境检查：
 

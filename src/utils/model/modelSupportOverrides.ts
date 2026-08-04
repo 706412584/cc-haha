@@ -1,3 +1,6 @@
+import memoize from 'lodash-es/memoize.js'
+import { MODEL_REASONING_CAPABILITY_TIERS } from '../../shared/modelReasoning.js'
+import { normalizeModelContextKey } from './modelContextWindows.js'
 import { getAPIProvider, isFirstPartyAnthropicBaseUrl } from './providers.js'
 
 export type ModelCapabilityOverride =
@@ -9,51 +12,29 @@ export type ModelCapabilityOverride =
   | 'adaptive_thinking'
   | 'interleaved_thinking'
 
-const TIERS = [
-  {
-    modelEnvVar: 'ANTHROPIC_MODEL',
-    capabilitiesEnvVar: 'ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES',
-  },
-  {
-    modelEnvVar: 'ANTHROPIC_DEFAULT_FABLE_MODEL',
-    capabilitiesEnvVar: 'ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES',
-  },
-  {
-    modelEnvVar: 'ANTHROPIC_DEFAULT_OPUS_MODEL',
-    capabilitiesEnvVar: 'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES',
-  },
-  {
-    modelEnvVar: 'ANTHROPIC_DEFAULT_SONNET_MODEL',
-    capabilitiesEnvVar: 'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES',
-  },
-  {
-    modelEnvVar: 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-    capabilitiesEnvVar: 'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES',
-  },
-] as const
-
 /**
  * Check whether a 3p model capability override is set for a model that matches one of
- * the pinned ANTHROPIC_DEFAULT_*_MODEL env vars.
+ * the pinned ANTHROPIC_DEFAULT_*_MODEL env vars. Context-window markers are transport
+ * annotations and must not change model identity.
  */
-export function get3PModelCapabilityOverride(
-  model: string,
-  capability: ModelCapabilityOverride,
-): boolean | undefined {
-  if (getAPIProvider() === 'firstParty' && isFirstPartyAnthropicBaseUrl()) {
+export const get3PModelCapabilityOverride = memoize(
+  (model: string, capability: ModelCapabilityOverride): boolean | undefined => {
+    if (getAPIProvider() === 'firstParty' && isFirstPartyAnthropicBaseUrl()) {
+      return undefined
+    }
+    const normalizedModel = normalizeModelContextKey(model)
+    for (const tier of MODEL_REASONING_CAPABILITY_TIERS) {
+      const pinned = process.env[tier.modelEnvVar]
+      const capabilities = process.env[tier.capabilitiesEnvVar]
+      if (!pinned || capabilities === undefined) continue
+      if (normalizedModel !== normalizeModelContextKey(pinned)) continue
+      return capabilities
+        .toLowerCase()
+        .split(',')
+        .map(s => s.trim())
+        .includes(capability)
+    }
     return undefined
-  }
-  const m = model.toLowerCase()
-  for (const tier of TIERS) {
-    const pinned = process.env[tier.modelEnvVar]
-    const capabilities = process.env[tier.capabilitiesEnvVar]
-    if (!pinned || capabilities === undefined) continue
-    if (m !== pinned.toLowerCase()) continue
-    return capabilities
-      .toLowerCase()
-      .split(',')
-      .map(s => s.trim())
-      .includes(capability)
-  }
-  return undefined
-}
+  },
+  (model, capability) => `${model.toLowerCase()}:${capability}`,
+)

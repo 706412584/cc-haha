@@ -74,22 +74,127 @@ export function findActualString(
   fileContent: string,
   searchString: string,
 ): string | null {
-  // First try exact match
-  if (fileContent.includes(searchString)) {
-    return searchString
-  }
-
-  // Try with normalized quotes
   const normalizedSearch = normalizeQuotes(searchString)
   const normalizedFile = normalizeQuotes(fileContent)
+  const startsWithIndentation = /^[ \t]+(?=\S)/.test(normalizedSearch)
 
-  const searchIndex = normalizedFile.indexOf(normalizedSearch)
-  if (searchIndex !== -1) {
-    // Find the actual string in the file that matches
-    return fileContent.substring(searchIndex, searchIndex + searchString.length)
+  // An exact match at the start of a line is stronger than a fuzzy candidate.
+  // A raw substring match is not enough here: four spaces also occur as a
+  // suffix of an eight-space indentation prefix.
+  if (startsWithIndentation) {
+    const exactLineMatch = normalizedFile.match(
+      new RegExp(`^${escapeRegExp(normalizedSearch)}`, 'm'),
+    )
+    if (exactLineMatch?.index !== undefined) {
+      return fileContent.substring(
+        exactLineMatch.index,
+        exactLineMatch.index + normalizedSearch.length,
+      )
+    }
+  } else if (fileContent.includes(searchString)) {
+    return searchString
+  } else {
+    const normalizedMatchIndex = normalizedFile.indexOf(normalizedSearch)
+    if (normalizedMatchIndex !== -1) {
+      return fileContent.substring(
+        normalizedMatchIndex,
+        normalizedMatchIndex + normalizedSearch.length,
+      )
+    }
+  }
+
+  // Models can reproduce indentation shown by Read as spaces even when the
+  // file contains tabs. Accept that difference only when the surrounding text
+  // identifies exactly one match; choosing between multiple indentation-only
+  // candidates could edit the wrong block.
+  const indentationPattern = buildIndentationInsensitivePattern(normalizedSearch)
+  if (indentationPattern) {
+    const matches = [...normalizedFile.matchAll(indentationPattern)]
+    if (matches.length === 1) {
+      const match = matches[0]!
+      return fileContent.substring(
+        match.index!,
+        match.index! + match[0].length,
+      )
+    }
+    if (matches.length > 1) return null
+  }
+
+  // Preserve legacy substring matching for a leading space in the middle of a
+  // line, where it is content rather than indentation.
+  if (fileContent.includes(searchString)) return searchString
+  const normalizedMatchIndex = normalizedFile.indexOf(normalizedSearch)
+  if (normalizedMatchIndex !== -1) {
+    return fileContent.substring(
+      normalizedMatchIndex,
+      normalizedMatchIndex + normalizedSearch.length,
+    )
   }
 
   return null
+}
+
+function buildIndentationInsensitivePattern(searchString: string): RegExp | null {
+  const lines = searchString.split('\n')
+  let hasIndentedContent = false
+
+  const pattern = lines
+    .map(line => {
+      const indentation = line.match(/^[ \t]+(?=\S)/)?.[0]
+      if (!indentation) {
+        return escapeRegExp(line)
+      }
+
+      hasIndentedContent = true
+      return `[ \\t]+${escapeRegExp(line.slice(indentation.length))}`
+    })
+    .join('\\n')
+
+  return hasIndentedContent ? new RegExp(`^${pattern}`, 'gm') : null
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * Preserve the file's leading whitespace when new_string retained the
+ * indentation supplied in old_string. Deliberate indentation changes in
+ * new_string are left untouched.
+ */
+export function preserveIndentationStyle(
+  oldString: string,
+  actualOldString: string,
+  newString: string,
+): string {
+  if (oldString === actualOldString) return newString
+
+  const oldLines = oldString.split('\n')
+  const actualLines = actualOldString.split('\n')
+  const newLines = newString.split('\n')
+  if (
+    oldLines.length !== actualLines.length ||
+    oldLines.length !== newLines.length
+  ) {
+    return newString
+  }
+
+  return newLines
+    .map((line, index) => {
+      const oldIndentation = oldLines[index]?.match(/^[ \t]*/)?.[0] ?? ''
+      const actualIndentation =
+        actualLines[index]?.match(/^[ \t]*/)?.[0] ?? ''
+      const newIndentation = line.match(/^[ \t]*/)?.[0] ?? ''
+
+      if (
+        oldIndentation === newIndentation &&
+        oldIndentation !== actualIndentation
+      ) {
+        return actualIndentation + line.slice(newIndentation.length)
+      }
+      return line
+    })
+    .join('\n')
 }
 
 /**

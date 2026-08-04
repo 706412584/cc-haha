@@ -15,7 +15,7 @@ macOS and Windows are supported. There is no Linux executor yet.
 
 ## Preparing the environment
 
-![Settings → Computer Use: environment checks, the two macOS permissions, authorized apps](../../images/app/settings-computer-use.webp)
+![Settings → Computer Use: environment and Python runtime checks](../../images/app/en/settings-computer-use.webp)
 
 Open **Settings → Computer Use**. The top of the page is a row of environment checks:
 

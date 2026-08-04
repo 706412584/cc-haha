@@ -24,6 +24,65 @@ describe('InlineVideoGallery', () => {
     expect(srcs[0]).toBe('http://127.0.0.1:4321/preview-fs/s1/outputs/demo.mp4')
   })
 
+  it('treats an empty changedFiles as no evidence for relative mentions', () => {
+    const { container } = render(
+      <InlineVideoGallery
+        text={'render saved to outputs/demo.mp4'}
+        sessionId="s1"
+        workDir="/w"
+        changedFiles={[]}
+      />,
+    )
+
+    expect(videoSrcs(container)).toEqual(['http://127.0.0.1:4321/preview-fs/s1/outputs/demo.mp4'])
+  })
+
+  it('uses the local-file route for a changed video outside the workspace', () => {
+    const { container } = render(
+      <InlineVideoGallery
+        text={'render saved to demo.mp4'}
+        sessionId="s1"
+        workDir="/w"
+        changedFiles={['/outside/demo.mp4']}
+      />,
+    )
+
+    expect(videoSrcs(container)).toEqual([
+      'http://127.0.0.1:4321/local-file/outside/demo.mp4',
+    ])
+  })
+
+  it.each([
+    ['/outside/direct.mp4', 'http://127.0.0.1:4321/local-file/outside/direct.mp4'],
+    ['D:\\outside\\direct.mp4', 'http://127.0.0.1:4321/local-file/D%3A/outside/direct.mp4'],
+  ])('renders a directly mentioned changed video at %s', (filePath, expectedSrc) => {
+    const { container } = render(
+      <InlineVideoGallery
+        text={`render saved to ${filePath}`}
+        sessionId="s1"
+        workDir="/w"
+        changedFiles={[filePath]}
+      />,
+    )
+
+    expect(videoSrcs(container)).toEqual([expectedSrc])
+  })
+
+  it('renders an absolute workspace video link only once', () => {
+    const { container } = render(
+      <InlineVideoGallery
+        text={'[clip](/w/out/demo.mp4)'}
+        sessionId="s1"
+        workDir="/w"
+        changedFiles={['/w/out/demo.mp4']}
+      />,
+    )
+
+    expect(videoSrcs(container)).toEqual([
+      'http://127.0.0.1:4321/preview-fs/s1/out/demo.mp4',
+    ])
+  })
+
   it('uses preload="metadata" and never autoplays', () => {
     const { container } = render(
       <InlineVideoGallery text={'clip at outputs/demo.mp4'} sessionId="s1" workDir="/w" />,
