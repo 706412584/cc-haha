@@ -253,6 +253,27 @@ describe('coverage gate helpers', () => {
     expect(failures).toEqual(['changed-lines: coverage 50% is below minimum 90%'])
   })
 
+  test('excludes blank and comment-only added lines from changed-line coverage', () => {
+    const changedLines = parseChangedLinesFromDiff([
+      'diff --git a/src/server/routes.ts b/src/server/routes.ts',
+      '--- a/src/server/routes.ts',
+      '+++ b/src/server/routes.ts',
+      '@@ -10,0 +11,8 @@',
+      '+/**',
+      '+ * Doc block for a helper that is exercised by tests.',
+      '+ */',
+      '+function helper() {',
+      '+',
+      '+  // Explain the statement below.',
+      '+  return 1',
+      '+}',
+    ].join('\n'))
+
+    // Only the signature, the return, and the closing brace are executable;
+    // the doc block, the blank line, and the inline comment are not.
+    expect([...changedLines.get('src/server/routes.ts')!]).toEqual([14, 17, 18])
+  })
+
   test('excludes non-instrumented desktop styles from changed-line coverage', () => {
     const changedLines = parseChangedLinesFromDiff([
       'diff --git a/desktop/src/theme/globals.css b/desktop/src/theme/globals.css',

@@ -607,6 +607,24 @@ function readGitFile(rootDir: string, ref: string, filePath: string) {
   return new TextDecoder().decode(proc.stdout)
 }
 
+// Bun's lcov reporter emits `DA:` records for blank and comment-only lines and
+// reports them as executable-but-uncovered, even inside functions that ran. A
+// hot method's own doc block therefore counts against the changed-lines gate:
+// across this repo's coverage run, 43,710 blank/comment lines were recorded as
+// uncovered and not one ever carried a hit. Excluding them here keeps the gate
+// measuring what it claims to measure — changed *executable* lines — so a
+// heavily commented diff is not penalized for its comments.
+function isNonExecutableSourceLine(text: string) {
+  const trimmed = text.trim()
+  return (
+    trimmed === '' ||
+    trimmed.startsWith('//') ||
+    trimmed.startsWith('/*') ||
+    trimmed.startsWith('*/') ||
+    trimmed.startsWith('*')
+  )
+}
+
 export function parseChangedLinesFromDiff(diff: string) {
   const changed = new Map<string, Set<number>>()
   let currentFile: string | null = null
@@ -628,12 +646,14 @@ export function parseChangedLinesFromDiff(diff: string) {
     if (!currentFile || nextLine === 0) continue
     if (rawLine.startsWith('+++')) continue
     if (rawLine.startsWith('+')) {
-      let lines = changed.get(currentFile)
-      if (!lines) {
-        lines = new Set()
-        changed.set(currentFile, lines)
+      if (!isNonExecutableSourceLine(rawLine.slice(1))) {
+        let lines = changed.get(currentFile)
+        if (!lines) {
+          lines = new Set()
+          changed.set(currentFile, lines)
+        }
+        lines.add(nextLine)
       }
-      lines.add(nextLine)
       nextLine += 1
       continue
     }
