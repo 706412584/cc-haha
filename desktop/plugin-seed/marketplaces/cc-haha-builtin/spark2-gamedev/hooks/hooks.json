@@ -1,4 +1,0 @@
-{
-  "description": "Build verification after WasiCore code changes",
-  "hooks": {}
-}

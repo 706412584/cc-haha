@@ -1,6 +1,0 @@
-{
-  "media-gen": {
-    "command": "node",
-    "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/media-gen-server.mjs"]
-  }
-}
