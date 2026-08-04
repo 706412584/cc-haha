@@ -50,7 +50,11 @@ import {
   type OverageDisabledReason,
 } from '../claudeAiLimits.js'
 import { shouldProcessRateLimits } from '../rateLimitMocking.js' // Used for /mock-limits command
-import { extractConnectionErrorDetails, formatAPIError } from './errorUtils.js'
+import {
+  extractConnectionErrorDetails,
+  formatAPIError,
+  hasAPIErrorType,
+} from './errorUtils.js'
 import { StreamWatchdogTimeoutError } from './streamWatchdog.js'
 
 export const API_ERROR_MESSAGE_PREFIX = 'API Error'
@@ -62,28 +66,6 @@ export function startsWithApiErrorPrefix(text: string): boolean {
   )
 }
 export const PROMPT_TOO_LONG_ERROR_MESSAGE = 'Prompt is too long'
-
-/**
- * Providers word context-overflow rejections differently, and some gateways
- * even wrap them in a 401 (e.g. Kimi's "k3-256k supports only 256K context").
- * Anything matched here is normalized to PROMPT_TOO_LONG_ERROR_MESSAGE so the
- * compact retry loop and the UI can key on one string — without this, a
- * third-party overflow surfaces as "Please run /login" and the session is
- * unrecoverable (#1162).
- */
-const CONTEXT_OVERFLOW_PATTERNS: RegExp[] = [
-  /prompt is too long/i,
-  /input is too long for requested model/i,
-  /context_length_exceeded/i,
-  /maximum context length/i,
-  /exceeds? the context window/i,
-  /context window exceeded/i,
-  /supports only \d+\s*k?\s*(?:tokens?\s+of\s+)?context/i,
-]
-
-export function isContextOverflowErrorText(text: string): boolean {
-  return CONTEXT_OVERFLOW_PATTERNS.some(pattern => pattern.test(text))
-}
 
 export function isPromptTooLongMessage(msg: AssistantMessage): boolean {
   if (!msg.isApiErrorMessage) {
@@ -97,6 +79,28 @@ export function isPromptTooLongMessage(msg: AssistantMessage): boolean {
     block =>
       block.type === 'text' &&
       block.text.startsWith(PROMPT_TOO_LONG_ERROR_MESSAGE),
+  )
+}
+
+/**
+ * Detect context-window-overflow rejections from Anthropic-compatible relays
+ * and proxies that do NOT use Anthropic's exact "prompt is too long" wording.
+ * Observed third-party gateway shape:
+ *   {"error":{"type":"context_too_large","message":"Your input exceeds the
+ *    context window of this model. Please adjust your input and try again."}}
+ * Semantically identical to prompt-too-long: deterministic (same transcript →
+ * same error) and only fixable by shrinking the input (/compact, /clear, or a
+ * larger-context model). We map it onto the same handling so the user gets the
+ * actionable "Context limit reached" guidance instead of a raw 400.
+ */
+export function isContextWindowExceededMessage(message: string): boolean {
+  const raw = message.toLowerCase()
+  return (
+    raw.includes('context_too_large') ||
+    raw.includes('exceeds the context window') ||
+    raw.includes('exceed the context window') ||
+    raw.includes('maximum context length') ||
+    raw.includes('context length exceeded')
   )
 }
 
@@ -216,6 +220,11 @@ export function getImageUnsupportedErrorMessage(): string {
   return getIsNonInteractiveSession()
     ? 'This model does not support images. Continue with text, or switch to a vision-capable model and send the image again.'
     : 'This model does not support images. Double press esc to go back, switch to a vision-capable model, or continue with text.'
+}
+export function getImageInvalidErrorMessage(): string {
+  return getIsNonInteractiveSession()
+    ? 'The image data was invalid. Re-create the image or continue with text.'
+    : 'The image data was invalid. Double press esc to go back, replace the image, or continue with text.'
 }
 export function getRequestTooLargeErrorMessage(): string {
   const limits = `max ${formatFileSize(PDF_TARGET_RAW_SIZE)}`
@@ -493,7 +502,7 @@ function isOpenAIImageUrlTextOnlySchemaError(raw: string): boolean {
   )
 }
 
-export function getAssistantMessageFromError(
+function buildAssistantMessageFromError(
   error: unknown,
   model: string,
   options?: {
@@ -523,6 +532,21 @@ export function getAssistantMessageFromError(
     })
   }
 
+  // Invalid image data must become a targeted synthetic error so later turns
+  // strip the rejected image instead of replaying the same 400 indefinitely.
+  if (
+    error instanceof APIError &&
+    (error.status === 400 || error.status === 422) &&
+    /invalid\s+(?:png|jpe?g|webp|gif)\s+image\b/i.test(error.message)
+  ) {
+    return createAssistantAPIErrorMessage({
+      content: getImageInvalidErrorMessage(),
+      error: 'invalid_request',
+      errorDetails: error.message,
+      businessErrorCode: BUSINESS_ERROR_CODES.IMAGE_INVALID,
+    })
+  }
+
   // Custom/Anthropic-compatible providers often reject image blocks with
   // provider-specific wording when the selected model is text-only. Convert it
   // to a known synthetic error so normalizeMessagesForAPI can strip the image
@@ -548,6 +572,14 @@ export function getAssistantMessageFromError(
     return createAssistantAPIErrorMessage({
       content: CUSTOM_OFF_SWITCH_MESSAGE,
       error: 'rate_limit',
+    })
+  }
+
+  if (hasAPIErrorType(error, 'upstream_error')) {
+    return createAssistantAPIErrorMessage({
+      content: `${API_ERROR_MESSAGE_PREFIX}: Upstream service is temporarily unavailable. Please try again.`,
+      error: 'server_error',
+      errorDetails: error.message,
     })
   }
 
@@ -646,11 +678,15 @@ export function getAssistantMessageFromError(
     })
   }
 
-  // Handle context-overflow errors (Vertex returns 413, direct API returns
-  // 400, some third-party gateways wrap them in a 401 with their own wording).
-  // This must stay ahead of the generic 401 handler below so a wrapped
-  // overflow isn't misreported as an authentication failure.
-  if (error instanceof Error && isContextOverflowErrorText(error.message)) {
+  // Handle prompt too long errors (Vertex returns 413, direct API returns 400)
+  // Use case-insensitive check since Vertex returns "Prompt is too long" (capitalized).
+  // Also catch context-window-overflow wording from third-party relays/proxies
+  // (e.g. type "context_too_large") which is the same class of error.
+  if (
+    error instanceof Error &&
+    (error.message.toLowerCase().includes('prompt is too long') ||
+      isContextWindowExceededMessage(error.message))
+  ) {
     // Content stays generic (UI matches on exact string). The raw error with
     // token counts goes into errorDetails — reactive compact's retry loop
     // parses the gap from there via getPromptTooLongTokenGap.
@@ -1037,6 +1073,28 @@ export function getAssistantMessageFromError(
   })
 }
 
+export function getAssistantMessageFromError(
+  error: unknown,
+  model: string,
+  options?: {
+    messages?: Message[]
+    messagesForAPI?: (UserMessage | AssistantMessage)[]
+    retryCount?: number
+    requestId?: string
+  },
+): AssistantMessage {
+  const message = buildAssistantMessageFromError(error, model, options)
+  if (options?.retryCount !== undefined) {
+    message.message.content = message.message.content.map(block =>
+      block.type === 'text'
+        ? { ...block, text: `${block.text}\n\nRetried ${options.retryCount} times.` }
+        : block,
+    )
+  }
+  if (options?.requestId) message.requestId = options.requestId
+  return message
+}
+
 /**
  * For 3P users, suggest a fallback model when the selected model is unavailable.
  * Returns a model name suggestion, or undefined if no suggestion is applicable.
@@ -1114,9 +1172,10 @@ export function classifyAPIError(error: unknown): string {
   // Prompt/content size errors
   if (
     error instanceof Error &&
-    error.message
+    (error.message
       .toLowerCase()
-      .includes(PROMPT_TOO_LONG_ERROR_MESSAGE.toLowerCase())
+      .includes(PROMPT_TOO_LONG_ERROR_MESSAGE.toLowerCase()) ||
+      isContextWindowExceededMessage(error.message))
   ) {
     return 'prompt_too_long'
   }
@@ -1278,6 +1337,9 @@ export function categorizeRetryableAPIError(
   }
   if (error.status === 401 || error.status === 403) {
     return 'authentication_failed'
+  }
+  if (hasAPIErrorType(error, 'api_error', 'upstream_error')) {
+    return 'server_error'
   }
   if (error.status !== undefined && error.status >= 408) {
     return 'server_error'

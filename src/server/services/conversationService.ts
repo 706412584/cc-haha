@@ -9,14 +9,17 @@
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { spawn, spawnSync } from 'node:child_process'
 import { ProviderService } from './providerService.js'
 import {
-  OPENAI_CODEX_OAUTH_FILE_ENV_KEY,
+  applyProviderRuntimeModel,
+  isManagedProviderEnvKey,
+} from './providerRuntimeEnv.js'
+import {
   OPENAI_OAUTH_PROVIDER_ENV_KEY,
   isOpenAIOfficialProviderId,
 } from './openaiOfficialProvider.js'
 import {
-  GROK_OAUTH_FILE_ENV_KEY,
   GROK_OAUTH_PROVIDER_ENV_KEY,
 } from './grokOfficialProvider.js'
 import {
@@ -45,6 +48,7 @@ import {
 } from '../../constants/messages.js'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 import { findCanonicalGitRoot } from '../../utils/git.js'
+import { ORCHESTRATION_SYSTEM_PROMPT } from '../orchestrationPrompt.js'
 import { sanitizePath } from '../../utils/path.js'
 import { getProcessEnvWithTerminalShellEnvironment } from '../../utils/terminalShellEnvironment.js'
 import { attributionHeaderEnvForModel } from './attributionHeaderPolicy.js'
@@ -67,6 +71,8 @@ const MAX_CAPTURED_SDK_SUMMARY = 20
 export const MAX_CAPTURED_SDK_MESSAGE_BYTES = 64 * 1024
 export const MAX_CAPTURED_SDK_TOTAL_BYTES = 512 * 1024
 const MAX_CAPTURED_SDK_DIAGNOSTIC_TEXT_BYTES = 4 * 1024
+/** Cap user-visible CLI exit detail so Bun panic dumps never flood chat. */
+export const MAX_RUNTIME_EXIT_DETAIL_BYTES = 4 * 1024
 const CONTROL_READY_POLL_MS = 50
 /**
  * 记住多少条已处理的 SDK 消息 uuid，用来挡掉 CLI 重连时的重放。
@@ -141,6 +147,29 @@ export function buildConversationCliSpawnOptions(
   } as const
 }
 
+type KillConversationProcessDeps = {
+  platform?: NodeJS.Platform
+  spawnAsync?: typeof spawn
+  spawnSyncFn?: typeof spawnSync
+}
+
+export function killConversationProcessTree(
+  proc: { pid?: number; kill(signal?: NodeJS.Signals): unknown },
+  signal?: NodeJS.Signals,
+  sync = false,
+  deps: KillConversationProcessDeps = {},
+): void {
+  const platform = deps.platform ?? process.platform
+  if (platform === 'win32' && proc.pid) {
+    const args = ['/F', '/T', '/PID', String(proc.pid)]
+    const options = { stdio: 'ignore', windowsHide: true } as const
+    if (sync) (deps.spawnSyncFn ?? spawnSync)('taskkill', args, options)
+    else (deps.spawnAsync ?? spawn)('taskkill', args, options)
+    return
+  }
+  proc.kill(signal)
+}
+
 type AttachmentRef = {
   type: 'file' | 'image'
   name?: string
@@ -151,16 +180,6 @@ type AttachmentRef = {
 }
 
 type UserContentBlock = Record<string, unknown>
-
-type SendMessageOptions = {
-  canSend?: () => boolean
-  messageUuid?: string
-  onCommitted?: () => void
-}
-
-type HandleSdkPayloadOptions = {
-  canAcceptPermissionRequest?: (message: any) => boolean
-}
 
 type MaterializedAttachments = {
   pathPrefix: string
@@ -187,6 +206,10 @@ function networkRoutingFingerprint(
 }
 
 type SessionProcess = {
+  // Identifies this specific spawned process. A `sessionId` is reused across
+  // restarts (e.g. provider/model switches), so callers that captured a stop
+  // intent for one process must not act on a later restart's process.
+  instanceId: string
   proc: ReturnType<typeof Bun.spawn>
   outputCallbacks: SessionOutputCallback[]
   workDir: string
@@ -223,7 +246,6 @@ type SessionProcess = {
       permissionSuggestions?: unknown[]
     }
   >
-  pendingControlRequests: Map<string, (reason: Error) => void>
 }
 
 export type PendingPermissionRequest = {
@@ -240,6 +262,24 @@ type SessionStartOptions = {
   effort?: string
   thinking?: 'enabled' | 'adaptive' | 'disabled'
   providerId?: string | null
+  coordinatorMode?: boolean
+  /**
+   * Active pipeline flavor. `solo` appends the delivery pipeline prompt;
+   * `re` appends the reverse-engineering pipeline prompt. Mutually
+   * exclusive with `coordinatorMode` — the WS handler enforces exclusion.
+   */
+  pipelineFlavor?: 'solo' | 're' | null
+  /**
+   * @deprecated Prefer `pipelineFlavor === 'solo'`.
+   */
+  soloPipelineMode?: boolean
+  /**
+   * If set, append this exact text to the system prompt via
+   * `--append-system-prompt`. Used by the welcome-screen "Continue from
+   * here" flow to inject a hand-off summary of the previous session.
+   * Stored separately from coordinatorMode so both can be active at once.
+   */
+  handoffSystemPrompt?: string
   resumeInterruptedTurn?: boolean
 }
 
@@ -252,6 +292,7 @@ export class ConversationStartupError extends Error {
       | 'CLI_SESSION_CONFLICT'
       | 'CLI_START_FAILED'
       | 'CLI_SPAWN_FAILED'
+      | 'PROVIDER_RESUME_MISMATCH'
       | 'SESSION_DELETED',
     readonly retryable = false,
   ) {
@@ -260,10 +301,26 @@ export class ConversationStartupError extends Error {
   }
 }
 
+/**
+ * Previously rejected resume when the historical provider differed from the
+ * target. That forced a blank new session for every cross-provider switch.
+ * In-session switches are supported again; incompatible thinking/signature
+ * blocks are sanitized at the model-context boundary instead.
+ */
+export function assertProviderResumeCompatible(_input: {
+  sessionId: string
+  transcriptMessageCount: number
+  persistedProviderId: string | null | undefined
+  targetProviderId: string | null | undefined
+}): void {
+  // no-op: cross-provider resume is allowed
+}
+
 export class ConversationService {
   private sessions = new Map<string, SessionProcess>()
   private deletedSessions = new Set<string>()
   private providerService = new ProviderService()
+  private instanceCounter = 0
   private pendingPermissionModeChanges = new Map<string, Map<string, number>>()
 
   private trackPendingPermissionModeChange(sessionId: string, mode: string, delta: 1 | -1): void {
@@ -339,6 +396,12 @@ export class ConversationService {
 
     const launchInfo = await sessionService.getSessionLaunchInfo(sessionId)
     const shouldResume = !!launchInfo && launchInfo.transcriptMessageCount > 0
+    assertProviderResumeCompatible({
+      sessionId,
+      transcriptMessageCount: launchInfo?.transcriptMessageCount ?? 0,
+      persistedProviderId: launchInfo?.runtimeProviderId,
+      targetProviderId: options?.providerId,
+    })
     const shouldReplacePlaceholder =
       !!launchInfo && launchInfo.transcriptMessageCount === 0
     const shouldCreateWorktree =
@@ -458,6 +521,7 @@ export class ConversationService {
       resolveSdkAttached = resolve
     })
     const session: SessionProcess = {
+      instanceId: `${sessionId}#${++this.instanceCounter}`,
       proc,
       outputCallbacks: [],
       workDir: launchWorkDir,
@@ -481,7 +545,6 @@ export class ConversationService {
       usesOfficialOAuth,
       officialOAuthToken: childEnv.CLAUDE_CODE_OAUTH_TOKEN ?? null,
       pendingPermissionRequests: new Map(),
-      pendingControlRequests: new Map(),
     }
     this.sessions.set(sessionId, session)
 
@@ -596,7 +659,6 @@ export class ConversationService {
     sessionId: string,
     content: string,
     attachments?: AttachmentRef[],
-    options?: SendMessageOptions,
   ): Promise<boolean> {
     const userContent = await this.buildUserContent(content, sessionId, attachments)
     let session = this.sessions.get(sessionId)
@@ -607,14 +669,8 @@ export class ConversationService {
     if (session) {
       await this.refreshOfficialOAuthTokenBeforeTurn(sessionId, session)
     }
-    // Building attachments, refreshing network settings, and refreshing OAuth
-    // can all suspend this call. Stop may revoke the owning desktop turn while
-    // one of those awaits is pending, so check ownership at the last possible
-    // point before writing the user message to the SDK socket.
-    if (options?.canSend && !options.canSend()) return false
-    const sent = this.sendSdkMessage(sessionId, {
+    return this.sendSdkMessage(sessionId, {
       type: 'user',
-      ...(options?.messageUuid ? { uuid: options.messageUuid } : {}),
       message: {
         role: 'user',
         content: userContent,
@@ -622,8 +678,6 @@ export class ConversationService {
       parent_tool_use_id: null,
       session_id: '',
     })
-    if (sent) options?.onCommitted?.()
-    return sent
   }
 
   private async refreshNetworkEnvironmentBeforeTurn(
@@ -858,10 +912,6 @@ export class ConversationService {
 
     const startedAt = Date.now()
     await this.waitForControlChannelReady(sessionId, timeoutMs, signal)
-    const session = this.sessions.get(sessionId)
-    if (!session) {
-      throw new Error('CLI session is not running')
-    }
     const responseTimeoutMs = Math.max(1, timeoutMs - (Date.now() - startedAt))
     const requestId = crypto.randomUUID()
     return new Promise((resolve, reject) => {
@@ -873,8 +923,7 @@ export class ConversationService {
         settled = true
         clearTimeout(timeout)
         signal?.removeEventListener('abort', handleAbort)
-        session.outputCallbacks = session.outputCallbacks.filter((entry) => entry !== handleOutput)
-        session.pendingControlRequests?.delete(requestId)
+        this.removeOutputCallback(sessionId, handleOutput)
         fn()
       }
 
@@ -907,18 +956,13 @@ export class ConversationService {
           `Timed out waiting for ${String(request.subtype ?? 'control')} response`,
         )))
       }, responseTimeoutMs)
-      session.outputCallbacks.push(handleOutput)
-      const pendingControlRequests = session.pendingControlRequests ?? new Map<string, (reason: Error) => void>()
-      session.pendingControlRequests = pendingControlRequests
-      pendingControlRequests.set(requestId, (reason) => {
-        finish(() => reject(reason))
-      })
+      this.onOutput(sessionId, handleOutput)
       signal?.addEventListener('abort', handleAbort, { once: true })
       if (signal?.aborted) {
         handleAbort()
         return
       }
-      const sent = this.sessions.get(sessionId) === session && this.sendSdkMessage(sessionId, {
+      const sent = this.sendSdkMessage(sessionId, {
         type: 'control_request',
         request_id: requestId,
         request,
@@ -1031,10 +1075,10 @@ export class ConversationService {
   handleSdkPayload(
     sessionId: string,
     rawPayload: string,
-    options?: HandleSdkPayloadOptions,
+    socket?: { send(data: string): void },
   ): void {
     const session = this.sessions.get(sessionId)
-    if (!session) return
+    if (!session || (socket && session.sdkSocket !== socket)) return
 
     const lines = rawPayload
       .split('\n')
@@ -1045,18 +1089,6 @@ export class ConversationService {
       try {
         const msg = JSON.parse(line)
         if (this.isReplayedSdkMessage(session, msg)) continue
-        if (
-          msg?.type === 'control_request' &&
-          msg.request?.subtype === 'can_use_tool' &&
-          typeof msg.request_id === 'string' &&
-          options?.canAcceptPermissionRequest?.(msg) === false
-        ) {
-          // Stop may win while a permission request is already queued on the
-          // SDK transport. Reject it at the service boundary so it is neither
-          // persisted as pending nor replayed to a reconnecting renderer.
-          this.respondToPermission(sessionId, msg.request_id, false)
-          continue
-        }
         this.retainSdkMessage(session, msg, Buffer.byteLength(line, 'utf-8'))
         const sdkError = this.extractSdkErrorEvent(msg)
         if (sdkError) {
@@ -1226,25 +1258,37 @@ export class ConversationService {
     return `${truncated}\n[truncated]`
   }
 
-  private cancelPendingControlRequests(
-    session: SessionProcess,
-    reason = new Error('CLI session stopped'),
-  ): void {
-    const pending = session.pendingControlRequests
-    if (!pending || pending.size === 0) return
-    for (const cancel of [...pending.values()]) {
-      cancel(reason)
-    }
-    pending.clear()
-  }
-
   stopSession(sessionId: string): void {
     const session = this.sessions.get(sessionId)
     if (!session) return
 
-    this.cancelPendingControlRequests(session)
     this.sessions.delete(sessionId)
     this.killProcess(sessionId, session)
+  }
+
+  /**
+   * Identifies the live process backing `sessionId`, or null if none is running.
+   * Capture this before scheduling a deferred kill so the kill can be skipped
+   * when a restart (provider/model switch) has since replaced the process.
+   */
+  getActiveInstanceId(sessionId: string): string | null {
+    return this.sessions.get(sessionId)?.instanceId ?? null
+  }
+
+  /**
+   * Force-kill a session only if it is still the same process instance that
+   * `instanceId` refers to. Returns true if it killed that instance. Used by
+   * the stop-generation force-kill fallback so a stale timer never kills a
+   * freshly restarted process (which would surface as a "CLI exited during
+   * startup with code 143" error).
+   */
+  stopSessionInstance(sessionId: string, instanceId: string): boolean {
+    const session = this.sessions.get(sessionId)
+    if (!session || session.instanceId !== instanceId) return false
+
+    this.sessions.delete(sessionId)
+    this.killProcess(sessionId, session)
+    return true
   }
 
   async stopSessionAndWait(
@@ -1254,7 +1298,6 @@ export class ConversationService {
     const session = this.sessions.get(sessionId)
     if (!session) return
 
-    this.cancelPendingControlRequests(session)
     this.sessions.delete(sessionId)
     await this.stopProcessAndWait(sessionId, session, timeoutMs)
   }
@@ -1271,9 +1314,6 @@ export class ConversationService {
     const activeSessions = Array.from(this.sessions.entries())
     if (activeSessions.length === 0) return
 
-    for (const [, session] of activeSessions) {
-      this.cancelPendingControlRequests(session)
-    }
     this.sessions.clear()
     await Promise.all(
       activeSessions.map(([sessionId, session]) =>
@@ -1287,14 +1327,14 @@ export class ConversationService {
     session: SessionProcess,
     timeoutMs: number,
   ): Promise<void> {
-    this.killProcess(sessionId, session, 'SIGTERM')
+    this.killProcess(sessionId, session, 'SIGTERM', true)
 
     const exited = await Promise.race([
       session.proc.exited.then(() => true, () => true),
       new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
     ])
     if (!exited) {
-      this.killProcess(sessionId, session, 'SIGKILL')
+      this.killProcess(sessionId, session, 'SIGKILL', true)
       await Promise.race([
         session.proc.exited.catch(() => undefined),
         new Promise<void>((resolve) => setTimeout(resolve, 500)),
@@ -1307,9 +1347,10 @@ export class ConversationService {
     sessionId: string,
     session: SessionProcess,
     signal?: NodeJS.Signals,
+    sync = false,
   ): void {
     try {
-      session.proc.kill(signal)
+      killConversationProcessTree(session.proc, signal, sync)
     } catch (error) {
       console.warn(
         `[ConversationService] Failed to kill CLI subprocess for ${sessionId}: ${
@@ -1427,10 +1468,6 @@ export class ConversationService {
 
     const activeSession = this.sessions.get(sessionId)
     if (activeSession?.proc === proc) {
-      this.cancelPendingControlRequests(
-        activeSession,
-        new Error('CLI session exited before the control request completed'),
-      )
       if (activeSession.startupPending) {
         activeSession.startupExitCode = code
         return
@@ -1499,6 +1536,41 @@ export class ConversationService {
       args.push('--thinking', options.thinking)
     }
 
+    if (options?.coordinatorMode) {
+      args.push('--append-system-prompt', ORCHESTRATION_SYSTEM_PROMPT)
+    }
+
+    // Pipeline flavors append a different prompt addendum than coordinator
+    // mode. The WS handler keeps modes mutually exclusive, so at most one
+    // pipeline branch fires here. `soloPipelineMode` is a deprecated alias
+    // for `pipelineFlavor === 'solo'`.
+    const pipelineFlavor =
+      options?.pipelineFlavor ??
+      (options?.soloPipelineMode ? ('solo' as const) : null)
+    if (pipelineFlavor === 'solo') {
+      // Lazy require to avoid pulling the prompt module into builds that
+      // don't enable the COORDINATOR_MODE feature flag (the flag gates
+      // coordinator / Solo / RE wiring at the moment).
+      const { getSoloPipelineSystemPrompt } =
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        require('../../coordinator/soloPipelinePrompt.js') as typeof import('../../coordinator/soloPipelinePrompt.js')
+      args.push('--append-system-prompt', getSoloPipelineSystemPrompt())
+    } else if (pipelineFlavor === 're') {
+      const { getReverseEngineeringPipelineSystemPrompt } =
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        require('../../coordinator/reverseEngineeringPipelinePrompt.js') as typeof import('../../coordinator/reverseEngineeringPipelinePrompt.js')
+      args.push(
+        '--append-system-prompt',
+        getReverseEngineeringPipelineSystemPrompt(),
+      )
+    }
+
+    // Hand-off context from the previous session (welcome screen "Continue
+    // from here"). Independent of orchestration; both can be active.
+    if (options?.handoffSystemPrompt) {
+      args.push('--append-system-prompt', options.handoffSystemPrompt)
+    }
+
     return args
   }
 
@@ -1516,34 +1588,6 @@ export class ConversationService {
     // If the user never configured a Desktop provider and only launched the
     // app/server with ANTHROPIC_* env vars, keep those env vars so Windows
     // dev-mode and env-only setups can still authenticate successfully.
-    const PROVIDER_ENV_KEYS = [
-      'ANTHROPIC_API_KEY',
-      'ANTHROPIC_BASE_URL',
-      'ANTHROPIC_AUTH_TOKEN',
-      'ENABLE_TOOL_SEARCH',
-      'ANTHROPIC_MODEL',
-      'ANTHROPIC_DEFAULT_FABLE_MODEL',
-      'ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION',
-      'ANTHROPIC_DEFAULT_FABLE_MODEL_NAME',
-      'ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES',
-      'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-      'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES',
-      'ANTHROPIC_DEFAULT_SONNET_MODEL',
-      'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES',
-      'ANTHROPIC_DEFAULT_OPUS_MODEL',
-      'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES',
-      'CC_HAHA_SEND_DISABLED_THINKING',
-      'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS',
-      'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
-      'CLAUDE_CODE_ATTRIBUTION_HEADER',
-      'CLAUDE_CODE_MODEL_CONTEXT_WINDOWS',
-      OPENAI_OAUTH_PROVIDER_ENV_KEY,
-      OPENAI_CODEX_OAUTH_FILE_ENV_KEY,
-      OPENAI_CODEX_REASONING_EFFORT_ENV_KEY,
-      GROK_OAUTH_PROVIDER_ENV_KEY,
-      GROK_OAUTH_FILE_ENV_KEY,
-    ] as const
-
     const cleanEnv = await getProcessEnvWithTerminalShellEnvironment()
     if (networkRuntimeMetadata) {
       networkRuntimeMetadata.firstTokenTimeoutDerived =
@@ -1557,8 +1601,14 @@ export class ConversationService {
     delete cleanEnv.CC_HAHA_TRACE_PROVIDER_NAME
     delete cleanEnv.CC_HAHA_TRACE_PROVIDER_FORMAT
     if (this.shouldStripInheritedProviderEnv(options?.providerId)) {
-      for (const key of PROVIDER_ENV_KEYS) {
-        delete cleanEnv[key]
+      for (const key of Object.keys(cleanEnv)) {
+        if (
+          isManagedProviderEnvKey(key) ||
+          key.toUpperCase() === 'CC_HAHA_SEND_DISABLED_THINKING' ||
+          key.toUpperCase() === OPENAI_CODEX_REASONING_EFFORT_ENV_KEY
+        ) {
+          delete cleanEnv[key]
+        }
       }
     }
 
@@ -1585,7 +1635,7 @@ export class ConversationService {
     )
     const traceCaptureEnabled = (await readTraceCaptureSettings()).enabled
     if (explicitProviderEnv && options?.model?.trim()) {
-      explicitProviderEnv.ANTHROPIC_MODEL = options.model.trim()
+      applyProviderRuntimeModel(explicitProviderEnv, options.model)
     }
     const attributionHeaderEnv = attributionHeaderEnvForModel(
       options?.model?.trim() ||
@@ -1646,12 +1696,6 @@ export class ConversationService {
             // arrives. Flush the completed turn first so the replacement can
             // reliably choose --resume and load the context (#1033).
             CLAUDE_CODE_EAGER_FLUSH: cleanEnv.CLAUDE_CODE_EAGER_FLUSH || '1',
-            // The CLI may keep processing internally after an SDK `result`
-            // (for example, a completed background Agent can enqueue one last
-            // model follow-up). Desktop cleanup must use the CLI's authoritative
-            // running/idle boundary or a disconnected renderer can kill that
-            // follow-up after the fixed idle grace period.
-            CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: '1',
             CC_HAHA_COMPUTER_USE_HOST_BUNDLE_ID: 'com.claude-code-haha.desktop',
           }
         : {}),
@@ -1792,31 +1836,14 @@ export class ConversationService {
       const raw = fs.readFileSync(settingsPath, 'utf-8')
       const parsed = JSON.parse(raw) as { env?: Record<string, string> }
       const env = parsed.env ?? {}
-      return [
-        'ANTHROPIC_API_KEY',
-        'ANTHROPIC_BASE_URL',
-        'ANTHROPIC_AUTH_TOKEN',
-        'ENABLE_TOOL_SEARCH',
-        'ANTHROPIC_MODEL',
-        'ANTHROPIC_DEFAULT_FABLE_MODEL',
-        'ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION',
-        'ANTHROPIC_DEFAULT_FABLE_MODEL_NAME',
-        'ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES',
-        'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-        'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES',
-        'ANTHROPIC_DEFAULT_SONNET_MODEL',
-        'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES',
-        'ANTHROPIC_DEFAULT_OPUS_MODEL',
-        'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES',
-        'CC_HAHA_SEND_DISABLED_THINKING',
-        'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
-        'CLAUDE_CODE_ATTRIBUTION_HEADER',
-        'CLAUDE_CODE_MODEL_CONTEXT_WINDOWS',
-        OPENAI_OAUTH_PROVIDER_ENV_KEY,
-        OPENAI_CODEX_OAUTH_FILE_ENV_KEY,
-        GROK_OAUTH_PROVIDER_ENV_KEY,
-        GROK_OAUTH_FILE_ENV_KEY,
-      ].some((key) => typeof env[key] === 'string' && env[key]!.trim().length > 0)
+      return Object.entries(env).some(
+        ([key, value]) =>
+          (isManagedProviderEnvKey(key) ||
+            key.toUpperCase() === 'CC_HAHA_SEND_DISABLED_THINKING' ||
+            key.toUpperCase() === OPENAI_CODEX_REASONING_EFFORT_ENV_KEY) &&
+          typeof value === 'string' &&
+          value.trim().length > 0,
+      )
     } catch {
       return false
     }
@@ -1947,7 +1974,7 @@ export class ConversationService {
       )
     }
 
-    const normalizedDetail = detail.trim()
+    const normalizedDetail = this.truncateUserVisibleErrorDetail(detail.trim())
     return new ConversationStartupError(
       normalizedDetail
         ? `CLI exited during startup (code ${exitCode}): ${normalizedDetail}`
@@ -1976,9 +2003,10 @@ export class ConversationService {
       this.extractStartupDetail(authStatus) ||
       capturedOutput
 
-    return detail
+    const message = detail
       ? `CLI process exited unexpectedly (code ${exitCode}): ${detail}`
       : `CLI process exited unexpectedly with code ${exitCode}; no CLI stderr/stdout or SDK error payload was captured before exit.`
+    return this.truncateUserVisibleErrorDetail(message)
   }
 
   private buildCapturedProcessOutputDetail(
@@ -1989,11 +2017,26 @@ export class ConversationService {
     const stderrText = (session.stderrLines ?? []).join('\n').trim()
     const stdoutText = (session.stdoutLines ?? []).join('\n').trim()
 
+    let detail = ''
     if (stderrText && stdoutText) {
-      return `stderr:\n${stderrText}\nstdout:\n${stdoutText}`
+      detail = `stderr:\n${stderrText}\nstdout:\n${stdoutText}`
+    } else {
+      detail = stderrText || stdoutText
     }
+    return this.truncateUserVisibleErrorDetail(detail)
+  }
 
-    return stderrText || stdoutText
+  private truncateUserVisibleErrorDetail(value: string): string {
+    if (!value) return value
+    if (Buffer.byteLength(value, 'utf-8') <= MAX_RUNTIME_EXIT_DETAIL_BYTES) {
+      return value
+    }
+    const prefixBytes = Buffer.from(value.slice(0, MAX_RUNTIME_EXIT_DETAIL_BYTES), 'utf-8')
+    const truncated = prefixBytes
+      .subarray(0, MAX_RUNTIME_EXIT_DETAIL_BYTES)
+      .toString('utf-8')
+      .replace(/\uFFFD$/, '')
+    return `${truncated}\n…[truncated]`
   }
 
   private redactProcessOutput(line: string): string {

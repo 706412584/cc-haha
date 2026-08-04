@@ -6,18 +6,21 @@ import {
   buildConversationCliSpawnOptions,
   ConversationService,
   DESKTOP_CLI_GRACEFUL_SHUTDOWN_TIMEOUT_MS,
+  killConversationProcessTree,
 } from '../services/conversationService.js'
 import { ProviderService } from '../services/providerService.js'
 import { updateTraceCaptureSettings } from '../services/traceCaptureService.js'
 import { resetTerminalShellEnvironmentCacheForTests } from '../../utils/terminalShellEnvironment.js'
 
 describe('ConversationService', () => {
+  const shellCaptureTest = process.platform === 'win32' ? test.skip : test
   let tmpDir: string
   let originalConfigDir: string | undefined
   let originalApiKey: string | undefined
   let originalAuthToken: string | undefined
   let originalBaseUrl: string | undefined
   let originalModel: string | undefined
+  let originalModelCapabilities: string | undefined
   let originalEntrypoint: string | undefined
   let originalOAuthToken: string | undefined
   let originalProviderManagedByHost: string | undefined
@@ -25,6 +28,7 @@ describe('ConversationService', () => {
   let originalDiagnosticsFile: string | undefined
   let originalAttributionHeader: string | undefined
   let originalDisableExperimentalBetas: string | undefined
+  let originalDisableThinking: string | undefined
   let originalResumeInterruptedTurn: string | undefined
   let originalTraceApiCalls: string | undefined
   let originalTraceProviderId: string | undefined
@@ -34,15 +38,25 @@ describe('ConversationService', () => {
   let originalPath: string | undefined
   let originalShell: string | undefined
   let originalZdotdir: string | undefined
+  let originalNvmDir: string | undefined
   let originalDisableTerminalShellEnv: string | undefined
+  let originalServerPort: number | undefined
 
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-haha-conversation-service-'))
+    // ProviderService.serverPort is a process-wide static; other server tests
+    // (e.g. conversations.test.ts starting a server on an OS-assigned port) can
+    // leave it set to a random value. Pin it to the default so the managed
+    // ANTHROPIC_BASE_URL assertions below are deterministic, and restore it
+    // afterwards.
+    originalServerPort = ProviderService.getServerPort()
+    ProviderService.setServerPort(3456)
     originalConfigDir = process.env.CLAUDE_CONFIG_DIR
     originalApiKey = process.env.ANTHROPIC_API_KEY
     originalAuthToken = process.env.ANTHROPIC_AUTH_TOKEN
     originalBaseUrl = process.env.ANTHROPIC_BASE_URL
     originalModel = process.env.ANTHROPIC_MODEL
+    originalModelCapabilities = process.env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES
     originalEntrypoint = process.env.CLAUDE_CODE_ENTRYPOINT
     originalOAuthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN
     originalProviderManagedByHost = process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST
@@ -50,6 +64,7 @@ describe('ConversationService', () => {
     originalDiagnosticsFile = process.env.CLAUDE_CODE_DIAGNOSTICS_FILE
     originalAttributionHeader = process.env.CLAUDE_CODE_ATTRIBUTION_HEADER
     originalDisableExperimentalBetas = process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
+    originalDisableThinking = process.env.CLAUDE_CODE_DISABLE_THINKING
     originalResumeInterruptedTurn = process.env.CLAUDE_CODE_RESUME_INTERRUPTED_TURN
     originalTraceApiCalls = process.env.CC_HAHA_TRACE_API_CALLS
     originalTraceProviderId = process.env.CC_HAHA_TRACE_PROVIDER_ID
@@ -59,6 +74,7 @@ describe('ConversationService', () => {
     originalPath = process.env.PATH
     originalShell = process.env.SHELL
     originalZdotdir = process.env.ZDOTDIR
+    originalNvmDir = process.env.NVM_DIR
     originalDisableTerminalShellEnv = process.env.CC_HAHA_DISABLE_TERMINAL_SHELL_ENV
 
     process.env.CLAUDE_CONFIG_DIR = tmpDir
@@ -75,12 +91,18 @@ describe('ConversationService', () => {
     delete process.env.CLAUDE_CODE_DIAGNOSTICS_FILE
     delete process.env.CLAUDE_CODE_ATTRIBUTION_HEADER
     delete process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
+    delete process.env.CLAUDE_CODE_DISABLE_THINKING
     delete process.env.CLAUDE_CODE_RESUME_INTERRUPTED_TURN
     delete process.env.CC_HAHA_TRACE_API_CALLS
     delete process.env.CC_HAHA_TRACE_PROVIDER_ID
     delete process.env.CC_HAHA_TRACE_PROVIDER_NAME
     delete process.env.CC_HAHA_TRACE_PROVIDER_FORMAT
     process.env.CC_HAHA_DISABLE_TERMINAL_SHELL_ENV = '1'
+    // The CI runner exports a real NVM_DIR (/home/runner/.nvm). buildChildEnv's
+    // shell-env merge lets inherited process env win over shell-captured values,
+    // so a leaked NVM_DIR would shadow the fake .zshrc value the shell-capture
+    // tests assert. Clear it; the per-test fake shell is the only intended source.
+    delete process.env.NVM_DIR
     resetTerminalShellEnvironmentCacheForTests()
   })
 
@@ -99,6 +121,12 @@ describe('ConversationService', () => {
 
     if (originalModel === undefined) delete process.env.ANTHROPIC_MODEL
     else process.env.ANTHROPIC_MODEL = originalModel
+
+    if (originalModelCapabilities === undefined) {
+      delete process.env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES
+    } else {
+      process.env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES = originalModelCapabilities
+    }
 
     if (originalEntrypoint === undefined) delete process.env.CLAUDE_CODE_ENTRYPOINT
     else process.env.CLAUDE_CODE_ENTRYPOINT = originalEntrypoint
@@ -120,6 +148,9 @@ describe('ConversationService', () => {
 
     if (originalDisableExperimentalBetas === undefined) delete process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
     else process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = originalDisableExperimentalBetas
+
+    if (originalDisableThinking === undefined) delete process.env.CLAUDE_CODE_DISABLE_THINKING
+    else process.env.CLAUDE_CODE_DISABLE_THINKING = originalDisableThinking
 
     if (originalResumeInterruptedTurn === undefined) delete process.env.CLAUDE_CODE_RESUME_INTERRUPTED_TURN
     else process.env.CLAUDE_CODE_RESUME_INTERRUPTED_TURN = originalResumeInterruptedTurn
@@ -148,10 +179,14 @@ describe('ConversationService', () => {
     if (originalZdotdir === undefined) delete process.env.ZDOTDIR
     else process.env.ZDOTDIR = originalZdotdir
 
+    if (originalNvmDir === undefined) delete process.env.NVM_DIR
+    else process.env.NVM_DIR = originalNvmDir
+
     if (originalDisableTerminalShellEnv === undefined) delete process.env.CC_HAHA_DISABLE_TERMINAL_SHELL_ENV
     else process.env.CC_HAHA_DISABLE_TERMINAL_SHELL_ENV = originalDisableTerminalShellEnv
 
     resetTerminalShellEnvironmentCacheForTests()
+    if (originalServerPort !== undefined) ProviderService.setServerPort(originalServerPort)
     await fs.rm(tmpDir, { recursive: true, force: true })
   })
 
@@ -275,9 +310,7 @@ describe('ConversationService', () => {
       const nonSdkEnv = (await service.buildChildEnv('/tmp')) as Record<string, string>
 
       expect(sdkEnv.CLAUDE_CODE_EAGER_FLUSH).toBe('1')
-      expect(sdkEnv.CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS).toBe('1')
       expect(nonSdkEnv.CLAUDE_CODE_EAGER_FLUSH).toBeUndefined()
-      expect(nonSdkEnv.CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS).toBeUndefined()
 
       process.env.CLAUDE_CODE_EAGER_FLUSH = '0'
       resetTerminalShellEnvironmentCacheForTests()
@@ -333,23 +366,21 @@ describe('ConversationService', () => {
     expect(env.CLAUDE_COWORK_MEMORY_PATH_OVERRIDE).not.toContain('myself_code')
   })
 
-  test.skipIf(process.platform === 'win32')(
-    'buildChildEnv inherits exported terminal shell variables for desktop CLI sessions',
-    async () => {
-      const shellPath = path.join(tmpDir, 'zsh')
-      const nodeBin = path.join(tmpDir, 'node-bin')
-      const nvmDir = path.join(tmpDir, '.nvm')
-      await fs.mkdir(nodeBin, { recursive: true })
-      await fs.mkdir(nvmDir, { recursive: true })
-      await writeFakeZsh(shellPath)
-      await fs.writeFile(
-        path.join(tmpDir, '.zshrc'),
-        [
-          `export NVM_DIR="${nvmDir}"`,
-          `export PATH="${nodeBin}:$PATH"`,
-          '',
-        ].join('\n'),
-      )
+  shellCaptureTest('buildChildEnv inherits exported terminal shell variables for desktop CLI sessions', async () => {
+    const shellPath = path.join(tmpDir, 'zsh')
+    const nodeBin = path.join(tmpDir, 'node-bin')
+    const nvmDir = path.join(tmpDir, '.nvm')
+    await fs.mkdir(nodeBin, { recursive: true })
+    await fs.mkdir(nvmDir, { recursive: true })
+    await writeFakeZsh(shellPath)
+    await fs.writeFile(
+      path.join(tmpDir, '.zshrc'),
+      [
+        `export NVM_DIR="${nvmDir}"`,
+        `export PATH="${nodeBin}:$PATH"`,
+        '',
+      ].join('\n'),
+    )
 
       delete process.env.CC_HAHA_DISABLE_TERMINAL_SHELL_ENV
       process.env.HOME = tmpDir
@@ -382,6 +413,42 @@ describe('ConversationService', () => {
     expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
     expect(env.ANTHROPIC_BASE_URL).toBeUndefined()
     expect(env.ANTHROPIC_MODEL).toBeUndefined()
+  })
+
+  test('strips inherited provider env when active model capabilities are configured', async () => {
+    const ccHahaDir = path.join(tmpDir, 'cc-haha')
+    await fs.mkdir(ccHahaDir, { recursive: true })
+    await fs.writeFile(
+      path.join(ccHahaDir, 'settings.json'),
+      JSON.stringify({
+        env: { ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES: 'none' },
+      }),
+      'utf-8',
+    )
+    process.env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES =
+      'thinking,effort,adaptive_thinking,max_effort'
+
+    const service = new ConversationService() as any
+    const env = (await service.buildChildEnv('/tmp')) as Record<string, string>
+
+    expect(env.ANTHROPIC_MODEL).toBeUndefined()
+    expect(env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES).toBeUndefined()
+  })
+
+  test('strips stale inherited thinking compatibility overrides for desktop providers', async () => {
+    const ccHahaDir = path.join(tmpDir, 'cc-haha')
+    await fs.mkdir(ccHahaDir, { recursive: true })
+    await fs.writeFile(
+      path.join(ccHahaDir, 'settings.json'),
+      JSON.stringify({ env: { CLAUDE_CODE_DISABLE_THINKING: '1' } }),
+      'utf-8',
+    )
+    process.env.CLAUDE_CODE_DISABLE_THINKING = '1'
+
+    const service = new ConversationService() as any
+    const env = (await service.buildChildEnv('/tmp')) as Record<string, string>
+
+    expect(env.CLAUDE_CODE_DISABLE_THINKING).toBeUndefined()
   })
 
   test('buildChildEnv injects General network timeout and manual proxy for CLI requests', async () => {
@@ -544,57 +611,6 @@ describe('ConversationService', () => {
     expect(JSON.parse(sent[0]!).type).toBe('update_environment_variables')
     expect(JSON.parse(sent[0]!).variables.CLAUDE_CODE_OAUTH_TOKEN).toBe('fresh-after-wake-token')
     expect(JSON.parse(sent[1]!).type).toBe('user')
-  })
-
-  test('sendMessage does not enqueue a user turn after its owner is cancelled', async () => {
-    const service = new ConversationService() as any
-    const sent: string[] = []
-    installNetworkTestSession(service, 'cancelled-user-turn', sent)
-    let canSend = true
-    let committed = false
-
-    const pendingSend = service.sendMessage(
-      'cancelled-user-turn',
-      'Do not enqueue this after Stop',
-      undefined,
-      {
-        canSend: () => canSend,
-        messageUuid: 'cancelled-turn-uuid',
-        onCommitted: () => {
-          committed = true
-        },
-      },
-    )
-    canSend = false
-
-    expect(await pendingSend).toBe(false)
-    expect(committed).toBe(false)
-    expect(sent.map((line) => JSON.parse(line).type)).not.toContain('user')
-  })
-
-  test('sendMessage commits the caller UUID with the SDK user payload', async () => {
-    const service = new ConversationService() as any
-    const sent: string[] = []
-    installNetworkTestSession(service, 'identified-user-turn', sent)
-    let committed = false
-
-    expect(await service.sendMessage(
-      'identified-user-turn',
-      'Identify this turn',
-      undefined,
-      {
-        messageUuid: 'identified-turn-uuid',
-        onCommitted: () => {
-          committed = true
-        },
-      },
-    )).toBe(true)
-
-    expect(committed).toBe(true)
-    expect(sent.map((line) => JSON.parse(line))).toContainEqual(expect.objectContaining({
-      type: 'user',
-      uuid: 'identified-turn-uuid',
-    }))
   })
 
   test('sendMessage hot-applies direct to system routing before the next user turn', async () => {
@@ -915,10 +931,94 @@ describe('ConversationService', () => {
     expect(env.ANTHROPIC_AUTH_TOKEN).toBe('provider-key')
     expect(env.ANTHROPIC_API_KEY).toBe('')
     expect(env.ANTHROPIC_MODEL).toBe('claude-sonnet-4-6')
-    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe(
+    expect(env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES).toBe('none')
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe('none')
+    expect(env.CLAUDE_CODE_ATTRIBUTION_HEADER).toBe('1')
+  })
+
+  test('buildChildEnv enables effort for a non-default model on an Anthropic-compatible preset', async () => {
+    const providerService = new ProviderService()
+    const provider = await providerService.addProvider({
+      presetId: 'jiekouai',
+      name: 'Local relay',
+      apiKey: 'provider-key',
+      baseUrl: 'http://127.0.0.1:18080',
+      apiFormat: 'anthropic',
+      models: {
+        main: 'gpt-5.6-sol',
+        haiku: 'grok-4.3',
+        sonnet: 'grok-4.5',
+        opus: 'grok-4.5',
+      },
+    })
+
+    const service = new ConversationService() as any
+    const env = (await service.buildChildEnv('/tmp', undefined, {
+      providerId: provider.id,
+      model: 'gpt-5.6-sol',
+      effort: 'max',
+    })) as Record<string, string>
+
+    expect(env.ANTHROPIC_BASE_URL).toBe('http://127.0.0.1:18080')
+    expect(env.ANTHROPIC_MODEL).toBe('gpt-5.6-sol')
+    expect(env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES).toBe(
       'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
     )
-    expect(env.CLAUDE_CODE_ATTRIBUTION_HEADER).toBe('1')
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe('none')
+  })
+
+  test('buildChildEnv switches active capabilities with the selected provider model', async () => {
+    const providerService = new ProviderService()
+    const provider = await providerService.addProvider({
+      presetId: 'jiekouai',
+      name: 'Mixed capabilities',
+      apiKey: 'provider-key',
+      baseUrl: 'https://api.jiekou.ai/anthropic',
+      apiFormat: 'anthropic',
+      models: {
+        main: 'gpt-5.6-sol',
+        haiku: 'claude-haiku-4-5-20251001',
+        sonnet: 'claude-sonnet-4-6',
+        opus: 'claude-opus-4-7',
+      },
+    })
+
+    const service = new ConversationService() as any
+    const env = (await service.buildChildEnv('/tmp', undefined, {
+      providerId: provider.id,
+      model: 'claude-sonnet-4-6',
+      effort: 'max',
+    })) as Record<string, string>
+
+    expect(env.ANTHROPIC_MODEL).toBe('claude-sonnet-4-6')
+    expect(env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES).toBe('none')
+  })
+
+  test('buildChildEnv drops main-model capabilities for unknown selected models', async () => {
+    const providerService = new ProviderService()
+    const provider = await providerService.addProvider({
+      presetId: 'custom',
+      name: 'Unknown model selection',
+      apiKey: 'provider-key',
+      baseUrl: 'https://api.example.com/anthropic',
+      apiFormat: 'anthropic',
+      models: {
+        main: 'main-model',
+        haiku: 'haiku-model',
+        sonnet: 'sonnet-model',
+        opus: 'opus-model',
+      },
+    })
+
+    const service = new ConversationService() as any
+    const env = (await service.buildChildEnv('/tmp', undefined, {
+      providerId: provider.id,
+      model: 'unknown-model',
+      effort: 'max',
+    })) as Record<string, string>
+
+    expect(env.ANTHROPIC_MODEL).toBe('unknown-model')
+    expect(env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES).toBeUndefined()
   })
 
   test('buildChildEnv lets General network timeout override provider preset timeouts', async () => {
@@ -1295,6 +1395,60 @@ describe('ConversationService', () => {
     expect(service.getActiveSessions()).toEqual([])
   })
 
+  test('kills the full CLI process tree on Windows', () => {
+    const calls: Array<{ command: string; args: string[] }> = []
+    let directKillCalled = false
+
+    killConversationProcessTree(
+      {
+        pid: 1234,
+        kill: () => {
+          directKillCalled = true
+        },
+      },
+      'SIGTERM',
+      false,
+      {
+        platform: 'win32',
+        spawnAsync: ((command: string, args: string[]) => {
+          calls.push({ command, args })
+          return {} as never
+        }) as never,
+      },
+    )
+
+    expect(directKillCalled).toBe(false)
+    expect(calls).toEqual([
+      { command: 'taskkill', args: ['/F', '/T', '/PID', '1234'] },
+    ])
+  })
+
+  test('uses synchronous tree kill when waiting for Windows CLI shutdown', () => {
+    const calls: Array<{ command: string; args: string[] }> = []
+
+    killConversationProcessTree(
+      {
+        pid: 5678,
+        kill: () => {
+          throw new Error('should not directly kill on Windows')
+        },
+      },
+      'SIGTERM',
+      true,
+      {
+        platform: 'win32',
+        spawnSyncFn: ((command: string, args: string[]) => {
+          calls.push({ command, args })
+          return {} as never
+        }) as never,
+      },
+    )
+
+    expect(calls).toEqual([
+      { command: 'taskkill', args: ['/F', '/T', '/PID', '5678'] },
+    ])
+  })
+
   test('default CLI shutdown wait covers the CLI graceful cleanup budget', () => {
     expect(DESKTOP_CLI_GRACEFUL_SHUTDOWN_TIMEOUT_MS).toBeGreaterThanOrEqual(6_000)
   })
@@ -1319,44 +1473,6 @@ describe('ConversationService', () => {
     }))
 
     expect(completionObserved).toBe(true)
-  })
-
-  test('rejects a permission request that arrives behind a stopped turn boundary', () => {
-    const service = new ConversationService() as any
-    const outbound: string[] = []
-    const forwarded: any[] = []
-    service.sessions.set('stopped-permission-boundary', {
-      outputCallbacks: [(message: any) => forwarded.push(message)],
-      seenSdkMessageUuids: new Set<string>(),
-      sdkMessages: [],
-      sdkSocket: { send: (message: string) => outbound.push(message) },
-      pendingOutbound: [],
-      initMessage: null,
-      pendingPermissionRequests: new Map(),
-    })
-
-    service.handleSdkPayload('stopped-permission-boundary', JSON.stringify({
-      type: 'control_request',
-      request_id: 'late-permission',
-      request: {
-        subtype: 'can_use_tool',
-        tool_name: 'Bash',
-        input: { command: 'echo stale' },
-      },
-    }), {
-      canAcceptPermissionRequest: () => false,
-    })
-
-    expect(service.getPendingPermissionRequests('stopped-permission-boundary')).toEqual([])
-    expect(forwarded).toEqual([])
-    expect(outbound).toHaveLength(1)
-    expect(JSON.parse(outbound[0]!)).toEqual(expect.objectContaining({
-      type: 'control_response',
-      response: expect.objectContaining({
-        request_id: 'late-permission',
-        response: expect.objectContaining({ behavior: 'deny' }),
-      }),
-    }))
   })
 
   // CLI 的 WebSocketTransport 每次重连成功都会把整个发送缓冲区重放一遍，并假定

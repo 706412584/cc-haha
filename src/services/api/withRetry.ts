@@ -46,11 +46,11 @@ import {
   checkMockRateLimitError,
   isMockRateLimitError,
 } from '../rateLimitMocking.js'
+import { REPEATED_529_ERROR_MESSAGE } from './errors.js'
 import {
-  isContextOverflowErrorText,
-  REPEATED_529_ERROR_MESSAGE,
-} from './errors.js'
-import { extractConnectionErrorDetails } from './errorUtils.js'
+  extractConnectionErrorDetails,
+  hasAPIErrorType,
+} from './errorUtils.js'
 
 const abortError = () => new APIUserAbortError()
 
@@ -58,6 +58,40 @@ const DEFAULT_MAX_RETRIES = 10
 const FLOOR_OUTPUT_TOKENS = 3000
 const MAX_529_RETRIES = 3
 export const BASE_DELAY_MS = 500
+
+/**
+ * Number of *consecutive identical* failures before we surface a retry to
+ * the chat as a SystemAPIErrorMessage. The first few transient retries are
+ * suppressed so the user does not see a wall of identical error bubbles
+ * for a flaky upstream that recovers on its own. Distinct errors are
+ * still yielded immediately — they carry new information.
+ *
+ * Configurable via CLAUDE_CODE_RETRY_REPORT_AFTER (positive integer, ≥1).
+ * The default of 3 means "two silent retries, then start reporting".
+ */
+const DEFAULT_RETRY_REPORT_THRESHOLD = 3
+
+function getRetryReportThreshold(): number {
+  const raw = process.env.CLAUDE_CODE_RETRY_REPORT_AFTER
+  if (!raw) return DEFAULT_RETRY_REPORT_THRESHOLD
+  const parsed = Number.parseInt(raw, 10)
+  if (!Number.isFinite(parsed) || parsed < 1) return DEFAULT_RETRY_REPORT_THRESHOLD
+  return parsed
+}
+
+/**
+ * Stable identity key for "is this the same error as last time?". Uses the
+ * error message plus (when present) the upstream HTTP status so a 401 and
+ * a 503 with the same generic body don't fold together. Falls back to
+ * String(error) for non-Error values so the comparison is always defined.
+ */
+function errorIdentityKey(error: unknown): string {
+  if (error instanceof Error) {
+    const status = error instanceof APIError ? `:${error.status ?? 'na'}` : ''
+    return `${error.name}${status}:${error.message}`
+  }
+  return String(error)
+}
 
 // Foreground query sources where the user IS blocking on the result — these
 // retry on 529. Everything else (summaries, titles, suggestions, classifiers)
@@ -150,6 +184,7 @@ export class CannotRetryError extends Error {
   constructor(
     public readonly originalError: unknown,
     public readonly retryContext: RetryContext,
+    public readonly retryCount = 0,
   ) {
     const message = errorMessage(originalError)
     super(message)
@@ -182,13 +217,21 @@ export class FallbackTriggeredError extends Error {
  */
 export class RetriableStreamError extends Error {
   public readonly bufferedMessages: readonly AssistantMessage[]
+  public readonly requestId?: string
 
   constructor(
     public readonly originalError: unknown,
-    bufferedMessages: readonly AssistantMessage[] = [],
+    bufferedMessagesOrRequestId: readonly AssistantMessage[] | string = [],
+    requestId?: string,
   ) {
     super(errorMessage(originalError))
     this.name = 'RetriableStreamError'
+    const bufferedMessages = Array.isArray(bufferedMessagesOrRequestId)
+      ? bufferedMessagesOrRequestId
+      : []
+    this.requestId = typeof bufferedMessagesOrRequestId === 'string'
+      ? bufferedMessagesOrRequestId
+      : requestId
     this.bufferedMessages = bufferedMessages
     Object.defineProperty(this, 'bufferedMessages', { enumerable: false })
     if (originalError instanceof Error && originalError.stack) {
@@ -200,11 +243,12 @@ export class RetriableStreamError extends Error {
 /**
  * Detect transient, server-side errors that the SDK surfaces *during streaming*
  * without a usable HTTP status. The upstream sends them inside a 200 SSE body as
- *   {"type":"error","error":{"type":"api_error"|"overloaded_error",...}}
+ *   {"type":"error","error":{"type":"api_error"|"overloaded_error"|"upstream_error",...}}
  * so `error.status` is undefined and every status-based check in shouldRetry()
- * falls through to `return false`. Per Anthropic semantics both are retryable:
- * `api_error` = "unexpected error internal to the server", `overloaded_error` =
- * capacity. Local/proxy providers (e.g. LM Studio) also wrap transient
+ * falls through to `return false`. These errors are retryable: `api_error` =
+ * unexpected server failure, `overloaded_error` = capacity, and
+ * `upstream_error` = a temporary dependency/provider failure. Local/proxy
+ * providers (e.g. LM Studio) also wrap transient
  * generation failures — such as a malformed tool_call the runtime rejects
  * mid-stream — as `api_error`, which a fresh attempt almost always clears.
  *
@@ -212,17 +256,21 @@ export class RetriableStreamError extends Error {
  * technique the overloaded-error check has always used (see shouldRetry).
  */
 export function isRetryableStreamError(error: unknown): boolean {
-  if (!(error instanceof APIError)) {
-    return false
+  if (error instanceof APIError && error.status !== undefined) return false
+  if (error instanceof APIConnectionError) {
+    const details = extractConnectionErrorDetails(error)
+    return !details?.isSSLError
   }
-  const message = error.message
-  if (!message) {
-    return false
-  }
-  return (
-    message.includes('"type":"api_error"') ||
-    message.includes('"type":"overloaded_error"')
-  )
+  if (hasAPIErrorType(
+    error,
+    'api_error',
+    'overloaded_error',
+    'upstream_error',
+  )) return true
+
+  const message = error instanceof Error ? error.message : String(error)
+  return message.includes('OpenAI messages stream disconnected before completion') &&
+    /["']type["']\s*:\s*["']api_error["']/.test(message)
 }
 
 /**
@@ -288,14 +336,15 @@ export function shouldRetryStreamAfterTransportDisconnect(input: {
 
 /**
  * Max times withStreamRetry() re-establishes a stream after a transient
- * mid-stream error (see RetriableStreamError). Small by default — a malformed
- * tool_call or a one-off blip usually clears on the first retry; this is not a
- * capacity backoff loop. Override with CLAUDE_STREAM_TRANSIENT_RETRY_MAX;
- * values are capped at 5 so a bad environment value cannot make it unbounded.
+ * mid-stream error (see RetriableStreamError). Defaults to 4 so statusless
+ * api_error responses and short socket disconnects get a meaningful recovery
+ * window instead of failing after one retry. Override with
+ * CLAUDE_STREAM_TRANSIENT_RETRY_MAX (set 0 to disable for providers that
+ * cannot tolerate a safe, pre-side-effect re-send).
  */
 export function getMaxStreamTransientRetries(): number {
   const raw = parseInt(process.env.CLAUDE_STREAM_TRANSIENT_RETRY_MAX || '', 10)
-  return Number.isFinite(raw) && raw >= 0 ? Math.min(raw, 5) : 2
+  return Number.isFinite(raw) && raw >= 0 ? raw : 4
 }
 
 export async function* withRetry<T>(
@@ -317,6 +366,47 @@ export async function* withRetry<T>(
   let consecutive529Errors = options.initialConsecutive529Errors ?? 0
   let lastError: unknown
   let persistentAttempt = 0
+  // Suppress noisy duplicate retry messages: yield to chat only after
+  // SAME_ERROR_REPORT_THRESHOLD identical failures in a row, so a flaky
+  // upstream that recovers in 1–2 retries does not splash the chat with
+  // identical error bubbles. Distinct errors yield immediately because
+  // they carry new information for the user.
+  const reportThreshold = getRetryReportThreshold()
+  let consecutiveSameErrorCount = 0
+  let prevErrorKey: string | undefined
+  /**
+   * Decide whether the current retry attempt's error should be surfaced
+   * to the chat as a SystemAPIErrorMessage. Updates the
+   * consecutive-same-error counter as a side effect. Always reports the
+   * first occurrence of a *new* error key (it carries new info), and
+   * always reports capacity / rate-limit retries (429/503/529) because
+   * their delay + attempt progress is what the user is watching —
+   * Desktop StreamingIndicator only advances when each attempt yields.
+   * Otherwise gates on the threshold (keeps flaky 5xx bubbles quiet).
+   */
+  const shouldReportRetry = (error: unknown): boolean => {
+    const key = errorIdentityKey(error)
+    if (key === prevErrorKey) {
+      consecutiveSameErrorCount += 1
+    } else {
+      prevErrorKey = key
+      consecutiveSameErrorCount = 1
+      // First sighting of a new error key — report immediately (new
+      // information for the user).
+      return true
+    }
+    // Capacity / rate-limit retries always report: delay and attempt
+    // progress are the whole point of surfacing them. Suppressing
+    // identical 503s left the UI stuck on attempt 1 with an expired
+    // countdown while later sleeps continued silently.
+    if (
+      error instanceof APIError &&
+      (error.status === 429 || error.status === 503 || is529Error(error))
+    ) {
+      return true
+    }
+    return consecutiveSameErrorCount >= reportThreshold
+  }
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     if (options.signal?.aborted) {
       throw new APIUserAbortError()
@@ -445,7 +535,7 @@ export async function* withRetry<T>(
           query_source:
             options.querySource as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
         })
-        throw new CannotRetryError(error, retryContext)
+        throw new CannotRetryError(error, retryContext, attempt - 1)
       }
 
       // Track consecutive 529 errors
@@ -484,6 +574,7 @@ export async function* withRetry<T>(
             throw new CannotRetryError(
               new Error(REPEATED_529_ERROR_MESSAGE),
               retryContext,
+              attempt - 1,
             )
           }
         }
@@ -493,7 +584,7 @@ export async function* withRetry<T>(
       const persistent =
         isPersistentRetryEnabled() && isTransientCapacityError(error)
       if (attempt > maxRetries && !persistent) {
-        throw new CannotRetryError(error, retryContext)
+        throw new CannotRetryError(error, retryContext, attempt - 1)
       }
 
       // AWS/GCP errors aren't always APIError, but can be retried
@@ -503,7 +594,7 @@ export async function* withRetry<T>(
         !handledCloudAuthError &&
         (!(error instanceof APIError) || !shouldRetry(error))
       ) {
-        throw new CannotRetryError(error, retryContext)
+        throw new CannotRetryError(error, retryContext, attempt - 1)
       }
 
       // Handle max tokens context overflow errors by adjusting max_tokens for the next attempt
@@ -609,11 +700,17 @@ export async function* withRetry<T>(
         // does not mark the session idle. Each yield surfaces as
         // {type:'system', subtype:'api_retry'} on stdout via QueryEngine.
         let remaining = delayMs
+        // Decide once per outer retry whether this error gets surfaced
+        // to chat (gated by the same-error threshold). Heartbeats during
+        // the sleep loop keep yielding so long persistent waits don't
+        // look like the session has died — but they only do so once we
+        // have crossed the threshold for this error.
+        const surfaceThisError = error instanceof APIError && shouldReportRetry(error)
         while (remaining > 0) {
           if (options.signal?.aborted) throw new APIUserAbortError()
-          if (error instanceof APIError) {
+          if (surfaceThisError) {
             yield createSystemAPIErrorMessage(
-              error,
+              error as APIError,
               remaining,
               reportedAttempt,
               maxRetries,
@@ -627,7 +724,7 @@ export async function* withRetry<T>(
         // persistentAttempt counter which keeps growing to the 5-min cap.
         if (attempt >= maxRetries) attempt = maxRetries
       } else {
-        if (error instanceof APIError) {
+        if (error instanceof APIError && shouldReportRetry(error)) {
           yield createSystemAPIErrorMessage(error, delayMs, attempt, maxRetries)
         }
         await sleep(delayMs, options.signal, { abortError })
@@ -635,7 +732,7 @@ export async function* withRetry<T>(
     }
   }
 
-  throw new CannotRetryError(lastError, retryContext)
+  throw new CannotRetryError(lastError, retryContext, maxRetries)
 }
 
 function getRetryAfter(error: unknown): string | null {
@@ -838,10 +935,10 @@ function shouldRetry(error: APIError): boolean {
     return true
   }
 
-  // Check for overloaded errors first by examining the message content
-  // The SDK sometimes fails to properly pass the 529 status code during streaming,
-  // so we need to check the error message directly
-  if (error.message?.includes('"type":"overloaded_error"')) {
+  // Stream creation can fail with the same statusless transient API body as
+  // stream consumption. Use the structured body matcher for api_error,
+  // overloaded_error, and upstream_error before status-based checks.
+  if (error.status === undefined && isRetryableStreamError(error)) {
     return true
   }
 
@@ -893,12 +990,6 @@ function shouldRetry(error: APIError): boolean {
   // Clear API key cache on 401 and allow retry.
   // OAuth token handling is done in the main retry loop via handleOAuth401Error.
   if (error.status === 401) {
-    // Some gateways wrap context-overflow rejections in a 401 (#1162).
-    // Retrying just replays the same oversized prompt — fail fast so the
-    // overflow surfaces and compaction can react instead.
-    if (isContextOverflowErrorText(error.message)) {
-      return false
-    }
     clearApiKeyHelperCache()
     return true
   }

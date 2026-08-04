@@ -2,12 +2,35 @@ import { describe, expect, test } from 'bun:test'
 import { APIError } from '@anthropic-ai/sdk'
 import { BUSINESS_ERROR_CODES } from '../../constants/businessErrors.js'
 import {
+  categorizeRetryableAPIError,
   getAssistantMessageFromError,
   getImageUnsupportedErrorMessage,
-  isContextOverflowErrorText,
+  isContextWindowExceededMessage,
   isUnsupportedImageInputErrorMessage,
   PROMPT_TOO_LONG_ERROR_MESSAGE,
 } from './errors.js'
+
+describe('invalid image API errors', () => {
+  test('maps malformed image rejections to a recoverable synthetic error', () => {
+    for (const format of ['PNG', 'JPEG', 'WebP', 'GIF']) {
+      const body = {
+        error: {
+          message: `Invalid ${format} image.`,
+          type: 'invalid_request_error',
+        },
+        type: 'error',
+      }
+      const msg = getAssistantMessageFromError(
+        new APIError(400, body, JSON.stringify(body), undefined),
+        'claude-test',
+      )
+
+      expect(msg.isApiErrorMessage).toBe(true)
+      expect(msg.businessErrorCode).toBe(BUSINESS_ERROR_CODES.IMAGE_INVALID)
+      expect(msg.errorDetails).toContain(`Invalid ${format} image.`)
+    }
+  })
+})
 
 describe('image unsupported API errors', () => {
   test('detects provider-specific text-only model image rejections', () => {
@@ -42,56 +65,87 @@ describe('image unsupported API errors', () => {
   })
 })
 
-describe('context overflow errors', () => {
-  test('matches provider-specific overflow wordings', () => {
-    const overflowMessages = [
-      'prompt is too long: 137500 tokens > 135000 maximum',
-      'Prompt is too long',
-      'input is too long for requested model',
-      "This model's maximum context length is 262144 tokens",
-      'context_length_exceeded',
-      '401 {"error":{"type":"authentication_error","message":"k3-256k supports only 256K context."}}',
-      'Request exceeds the context window of this model',
-    ]
-
-    for (const message of overflowMessages) {
-      expect(isContextOverflowErrorText(message)).toBe(true)
+describe('retried API error metadata', () => {
+  test('adds the bounded retry count and request ID to the final user-visible error', () => {
+    const previousApiKey = process.env.ANTHROPIC_API_KEY
+    process.env.ANTHROPIC_API_KEY = 'sk-ant-test'
+    try {
+      const body = { type: 'error', error: { type: 'api_error', message: 'temporary' } }
+      const error = new APIError(undefined, body, JSON.stringify(body), undefined)
+      const message = getAssistantMessageFromError(error, 'claude-test', {
+        retryCount: 2,
+        requestId: 'req-create-final',
+      })
+      expect(message.message.content[0]).toMatchObject({
+        type: 'text',
+        text: expect.stringContaining('Retried 2 times.'),
+      })
+      expect(message.requestId).toBe('req-create-final')
+      expect(String(message.errorDetails ?? '')).not.toContain('req-create-final')
+    } finally {
+      if (previousApiKey === undefined) delete process.env.ANTHROPIC_API_KEY
+      else process.env.ANTHROPIC_API_KEY = previousApiKey
     }
   })
+})
 
-  test('does not match unrelated or separately-handled errors', () => {
-    const negatives = [
-      'Invalid API key',
-      'OAuth token has been revoked',
-      'This model does not support image blocks',
-      // Handled by the max_tokens adjustment retry path, not the PTL path.
-      'input length and `max_tokens` exceed context limit: 190000 + 20000 > 200000',
-    ]
-
-    for (const message of negatives) {
-      expect(isContextOverflowErrorText(message)).toBe(false)
-    }
-  })
-
-  test('maps a 401-wrapped overflow to Prompt is too long, not a login prompt (#1162)', () => {
-    const message = 'k3-256k supports only 256K context.'
-    const error = new APIError(
-      401,
-      {
-        type: 'error',
-        error: { type: 'authentication_error', message },
+describe('temporary upstream API errors', () => {
+  test('keeps the raw upstream payload in diagnostics but shows a retryable message', () => {
+    const body = {
+      error: {
+        message: 'Upstream service temporarily unavailable',
+        type: 'upstream_error',
       },
-      message,
+      type: 'error',
+    }
+    const error = new APIError(
+      undefined,
+      body,
+      JSON.stringify(body),
       undefined,
     )
 
-    const msg = getAssistantMessageFromError(error, 'k3-256k')
+    const message = getAssistantMessageFromError(error, 'gpt-5.6-sol')
+
+    expect(message.isApiErrorMessage).toBe(true)
+    expect(message.error).toBe('server_error')
+    expect(message.message.content[0]).toMatchObject({
+      type: 'text',
+      text: 'API Error: Upstream service is temporarily unavailable. Please try again.',
+    })
+    expect(message.errorDetails).toContain('"type":"upstream_error"')
+    expect(categorizeRetryableAPIError(error)).toBe('server_error')
+  })
+})
+
+describe('context-window-overflow relay errors', () => {
+  test('detects third-party relay context-overflow wording', () => {
+    const overflowErrors = [
+      'API Error: 400 {"error":{"type":"context_too_large","message":"Your input exceeds the context window of this model. Please adjust your input and try again."}}',
+      'Your input exceeds the context window of this model.',
+      'context_too_large',
+      'This model maximum context length exceeded. Please reduce your prompt.',
+    ]
+    for (const message of overflowErrors) {
+      expect(isContextWindowExceededMessage(message)).toBe(true)
+    }
+    expect(isContextWindowExceededMessage('prompt is too long')).toBe(false)
+    expect(isContextWindowExceededMessage('some unrelated 400 error')).toBe(false)
+  })
+
+  test('maps relay context_too_large to the prompt-too-long handling', () => {
+    const raw =
+      'API Error: 400 {"error":{"type":"context_too_large","message":"Your input exceeds the context window of this model. Please adjust your input and try again."}}'
+    const msg = getAssistantMessageFromError(new Error(raw), 'gpt-5.5')
 
     expect(msg.isApiErrorMessage).toBe(true)
     expect(msg.businessErrorCode).toBe(BUSINESS_ERROR_CODES.PROMPT_TOO_LONG)
+    // Reuses the canonical content string so the TUI/desktop render the
+    // actionable "Context limit reached · /compact or /clear" guidance.
     expect(msg.message.content[0]).toMatchObject({
       type: 'text',
       text: PROMPT_TOO_LONG_ERROR_MESSAGE,
     })
+    expect(msg.errorDetails).toBe(raw)
   })
 })
