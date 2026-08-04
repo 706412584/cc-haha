@@ -60,6 +60,41 @@ const ASK_READ_FILE_STATE_CACHE_SIZE = 10
  *   (model chose to emit no content blocks)
  * - Last message is an explicit synthetic user interruption marker
  */
+/**
+ * Upstream sometimes ends a turn with only thinking / redacted_thinking and
+ * stop_reason=end_turn (no text, no tool_use). That looks like "thinking cut off
+ * then idle" in the desktop app. Detect so query can auto-continue once.
+ */
+export function isEmptyThinkingOnlyAssistantMessage(
+  message: Message | undefined,
+): boolean {
+  if (!message || message.type !== 'assistant') return false
+  if (message.isApiErrorMessage) return false
+
+  const content = message.message.content
+  if (!Array.isArray(content) || content.length === 0) return false
+
+  let sawThinking = false
+  for (const block of content) {
+    if (!block || typeof block !== 'object' || !('type' in block)) return false
+    if (block.type === 'thinking' || block.type === 'redacted_thinking') {
+      sawThinking = true
+      continue
+    }
+    // Any actionable / visible block means this was a real completion.
+    return false
+  }
+
+  if (!sawThinking) return false
+
+  const stopReason = message.message.stop_reason
+  // Streaming path often leaves stop_reason null on the assistant message
+  // itself (message_delta carries it separately). Treat null the same as
+  // end_turn when content is thinking-only — tool_use would have produced
+  // tool_use blocks and needsFollowUp would still be true.
+  return stopReason == null || stopReason === 'end_turn'
+}
+
 export function isResultSuccessful(
   message: Message | undefined,
   stopReason: string | null = null,
