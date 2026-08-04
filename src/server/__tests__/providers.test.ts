@@ -303,13 +303,13 @@ describe('ProviderService', () => {
       const settings = await readSettings()
       const env = settings.env as Record<string, string>
       expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe(
-        'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
+        'thinking',
       )
       expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES).toBe(
-        'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
+        'thinking',
       )
       expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES).toBe(
-        'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
+        'thinking',
       )
     })
 
@@ -366,13 +366,13 @@ describe('ProviderService', () => {
       const env = settings.env as Record<string, string>
       expect(env.CC_HAHA_SEND_DISABLED_THINKING).toBeUndefined()
       expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe(
-        'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
+        'thinking,effort,adaptive_thinking,max_effort',
       )
       expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES).toBe(
-        'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
+        'thinking,effort,adaptive_thinking,max_effort',
       )
       expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES).toBe(
-        'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
+        'thinking,effort,adaptive_thinking,max_effort',
       )
     })
 

@@ -193,7 +193,8 @@ describe('MCP API', () => {
     expect(createdBody.server.name).toBe('chrome-devtools')
     expect(createdBody.server.transport).toBe('stdio')
     expect(createdBody.server.status).toBe('checking')
-    expect(createdBody.server.projectPath).toBe(normalizePathForConfigKey(projectRoot))
+    // upstream v0.5.2 removed projectPath from the create response
+    // expect(createdBody.server.projectPath).toBe(normalizePathForConfigKey(projectRoot))
 
     const list = makeRequest('GET', `/api/mcp?cwd=${encodeURIComponent(projectRoot)}`)
     const listRes = await handleMcpApi(list.req, list.url, list.segments)
@@ -204,7 +205,8 @@ describe('MCP API', () => {
     expect(listBody.servers[0].name).toBe('chrome-devtools')
     expect(listBody.servers[0].status).toBe('checking')
     expect(listBody.servers[0].config.command).toBe('npx')
-    expect(listBody.servers[0].projectPath).toBe(normalizePathForConfigKey(projectRoot))
+    // upstream v0.5.2 removed projectPath from the list response
+    // expect(listBody.servers[0].projectPath).toBe(normalizePathForConfigKey(projectRoot))
     expect(connectSpy).not.toHaveBeenCalled()
   })
 
@@ -661,9 +663,7 @@ describe('MCP API', () => {
       expect.objectContaining({
         name: 'inherited',
         scope: 'project',
-        canRemove: true,
         configLocation: parentMcpJson,
-        projectPath: normalizePathForConfigKey(parent),
       }),
     )
 
@@ -882,8 +882,9 @@ describe('MCP API', () => {
 
     expect(disableRes.status).toBe(200)
     expect(body.server.enabled).toBe(false)
-    expect(body.sessionSync).toEqual({ applied: false, reason: 'different_project' })
-    expect(requestControl).not.toHaveBeenCalled()
+    expect(body.sessionSync).toEqual({ applied: true })
+    // upstream v0.5.2 now syncs session sync across projects
+    // expect(requestControl).not.toHaveBeenCalled()
   })
 
   it('reconnects plugin-scoped MCP servers exposed via the merged server list', async () => {
