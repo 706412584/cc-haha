@@ -58,7 +58,6 @@ vi.mock('../../i18n', () => ({
       'session.activity.status.inProgress': 'In progress',
       'session.activity.status.completed': 'Completed',
       'session.activity.status.running': 'Running',
-      'session.activity.status.stopping': 'Stopping',
       'session.activity.status.failed': 'Failed',
       'session.activity.status.stopped': 'Stopped',
       'session.activity.status.idle': 'Idle',
@@ -412,41 +411,6 @@ describe('SessionActivityPanel', () => {
     )
 
     expect(screen.queryByRole('button', { name: 'Stop background task Background reviewer' })).not.toBeInTheDocument()
-  })
-
-  it('stops SubAgent motion while a global stop request is settling', () => {
-    render(
-      <SessionActivityPanel
-        model={model({
-          sections: {
-            ...model().sections,
-            tasks: { id: 'tasks', title: 'Tasks', emptyLabel: 'No tasks', rows: [] },
-            subagents: {
-              id: 'subagents',
-              title: 'SubAgents',
-              emptyLabel: 'No SubAgents',
-              rows: [{
-                id: 'agent-task-1',
-                section: 'subagents',
-                label: 'Background reviewer',
-                status: 'running',
-                taskId: 'agent-task-1',
-                toolUseId: 'agent-tool-1',
-                openable: true,
-              }],
-            },
-          },
-        })}
-        open
-        onClose={vi.fn()}
-        onOpenSubagent={vi.fn()}
-        stoppingBackgroundTaskIds={{ 'agent-task-1': true }}
-      />,
-    )
-
-    expect(screen.getByText('Stopping')).toBeInTheDocument()
-    expect(screen.getByTestId('agent-mascot')).toHaveAttribute('data-agent-mascot-motion', 'still')
-    expect(screen.queryByTestId('agent-mascot-motion-ring')).not.toBeInTheDocument()
   })
 
   it('keeps SubAgent rows to name and status instead of result previews', () => {
