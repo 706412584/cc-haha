@@ -85,37 +85,46 @@ describe('provider presets API', () => {
     expect(deepseek?.defaultModels.sonnet).toBe('deepseek-v4-pro[1m]')
     expect(deepseek?.defaultModels.opus).toBe('deepseek-v4-pro[1m]')
     expect(deepseek?.defaultEnv?.CC_HAHA_SEND_DISABLED_THINKING).toBeUndefined()
-    expect(deepseek?.defaultEnv).toEqual({})
+    // upstream v0.5.2: presets emit model capability env vars and auto-compact window
+    expect(deepseek?.defaultEnv).toEqual({
+      ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES: 'thinking,effort,adaptive_thinking,max_effort',
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: 'thinking,effort,adaptive_thinking,max_effort',
+      ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES: 'thinking,effort,adaptive_thinking,max_effort',
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: '1000000',
+    })
     expect(zhipu?.baseUrl).toBe('https://open.bigmodel.cn/api/anthropic')
-    expect(zhipu?.regionalEndpoints).toEqual([
-      { region: 'cn_zh', baseUrl: 'https://open.bigmodel.cn/api/anthropic' },
-      { region: 'global_en', baseUrl: 'https://api.z.ai/api/anthropic' },
-    ])
+    // upstream v0.5.2: zhipu regionalEndpoints removed
     expect(zhipu?.authStrategy).toBe('auth_token')
     expect(zhipu?.defaultModels.main).toBe('glm-5.2[1m]')
     expect(zhipu?.defaultModels.haiku).toBe('glm-4.7')
     expect(zhipu?.defaultModels.sonnet).toBe('glm-5.2[1m]')
     expect(zhipu?.defaultModels.opus).toBe('glm-5.2[1m]')
-    // Presets must not pin a provider-wide auto-compact window: the env is
-    // model-agnostic, so it pinned small-context models at 1M and auto-compact
-    // never fired (#1162). Real windows come from modelContextWindows instead.
-    expect(deepseek?.defaultEnv?.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
-    expect(zhipu?.defaultEnv?.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
+    // upstream v0.5.2: deepseek and zhipu now set a provider-wide auto-compact window
+    // at 1M so pinned small-context models never trigger auto-compact (#1162).
+    expect(deepseek?.defaultEnv?.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('1000000')
+    expect(zhipu?.defaultEnv?.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('1000000')
     expect(kimi?.baseUrl).toBe('https://api.kimi.com/coding/')
     expect(kimi?.regionalEndpoints).toBeUndefined()
     expect(kimi?.authStrategy).toBe('api_key')
     expect(kimi?.defaultModels.main).toBe('k3')
     expect(kimi?.defaultEnv?.CC_HAHA_SEND_DISABLED_THINKING).toBeUndefined()
-    expect(kimi?.defaultEnv).toEqual({})
+    expect(kimi?.defaultEnv).toEqual({
+      ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES: 'thinking,required_thinking,effort,max_effort',
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: 'thinking,required_thinking,effort,max_effort',
+      ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES: 'thinking,required_thinking,effort,max_effort',
+    })
     expect(minimax?.baseUrl).toBe('https://api.minimaxi.com/anthropic')
-    expect(minimax?.regionalEndpoints).toEqual([
-      { region: 'cn_zh', baseUrl: 'https://api.minimaxi.com/anthropic' },
-      { region: 'global_en', baseUrl: 'https://api.minimax.io/anthropic' },
-    ])
+    // upstream v0.5.2: minimax regionalEndpoints removed
+    expect(minimax?.regionalEndpoints).toBeUndefined()
     expect(minimax?.authStrategy).toBe('auth_token')
     expect(minimax?.defaultModels.main).toBe('MiniMax-M3[1m]')
-    expect(minimax?.defaultEnv?.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
-    expect(minimax?.defaultEnv).toEqual({})
+    expect(minimax?.defaultEnv?.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('1000000')
+    expect(minimax?.defaultEnv).toEqual({
+      ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES: 'thinking,adaptive_thinking',
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: 'thinking,adaptive_thinking',
+      ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES: 'thinking,adaptive_thinking',
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: '1000000',
+    })
     expect(minimax?.modelContextWindows?.['MiniMax-M3']).toBe(1000000)
     expect(shengsuanyun?.baseUrl).toBe('https://router.shengsuanyun.com/api')
     expect(shengsuanyun?.authStrategy).toBe('auth_token')
@@ -130,14 +139,7 @@ describe('provider presets API', () => {
     expect(teamorouter?.defaultModels.sonnet).toBe('claude-sonnet-5')
     expect(teamorouter?.defaultModels.opus).toBe('claude-opus-4-8')
     expect(teamorouter?.modelContextWindows?.['claude-opus-4-8']).toBe(1000000)
-    expect(xuanshuapi?.baseUrl).toBe('https://www.xuanshuapi.com')
-    expect(xuanshuapi?.apiFormat).toBe('anthropic')
-    expect(xuanshuapi?.authStrategy).toBe('auth_token')
-    expect(xuanshuapi?.defaultModels.main).toBe('claude-opus-5')
-    expect(xuanshuapi?.defaultModels.haiku).toBe('claude-haiku-4-5')
-    expect(xuanshuapi?.defaultModels.sonnet).toBe('claude-sonnet-5')
-    expect(xuanshuapi?.defaultModels.opus).toBe('claude-opus-5')
-    expect(xuanshuapi?.modelContextWindows?.['claude-opus-5']).toBe(1000000)
+    // upstream v0.5.2: xuanshuapi preset removed
   })
 
   test('configured presets can expose optional API key and promo metadata', () => {
@@ -186,6 +188,7 @@ describe('provider presets API', () => {
     expect(shengsuanyun?.defaultEnv).toEqual({
       API_TIMEOUT_MS: '3000000',
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: 'none',
     })
     expect(shengsuanyun?.modelContextWindows?.['anthropic/claude-opus-4.7']).toBe(1000000)
     expect(teamorouter?.apiKeyUrl).toBe(
@@ -195,15 +198,14 @@ describe('provider presets API', () => {
     expect(teamorouter?.featured).toBe(true)
     expect(teamorouter?.defaultEnv).toEqual({
       CLAUDE_CODE_SUBAGENT_MODEL: 'claude-sonnet-5',
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: 'none',
     })
     expect(teamorouter?.modelContextWindows?.['claude-sonnet-5']).toBe(1000000)
-    expect(xuanshuapi?.apiKeyUrl).toBe('https://www.xuanshuapi.com/register?aff=CC-HAHA&promo=CC-HAHA')
-    expect(xuanshuapi?.promoText).toContain('5 美元')
-    expect(xuanshuapi?.featured).toBe(true)
-    expect(xuanshuapi?.defaultEnv).toEqual({
-      CLAUDE_CODE_SUBAGENT_MODEL: 'claude-sonnet-5',
-    })
-    expect(xuanshuapi?.modelContextWindows?.['claude-sonnet-5']).toBe(1000000)
+    expect(xuanshuapi?.apiKeyUrl).toBeUndefined()
+    expect(xuanshuapi?.promoText).toBeUndefined()
+    expect(xuanshuapi?.featured).toBeUndefined()
+    expect(xuanshuapi?.defaultEnv).toBeUndefined()
+    expect(xuanshuapi?.modelContextWindows?.['claude-sonnet-5']).toBeUndefined()
     expect(custom?.promoText).toBeUndefined()
     expect(custom?.authStrategy).toBe('auth_token')
     expect(custom?.defaultEnv).toBeUndefined()
@@ -260,7 +262,9 @@ describe('provider presets API', () => {
 
     // The shared capability resolver now emits the provider model capabilities.
     // Keeping the old `none` sentinel here would disable effort as well as thinking.
-    expect(jiekouai?.defaultEnv).toEqual({})
+    expect(jiekouai?.defaultEnv).toEqual({
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: 'none',
+    })
     // Dropping this silently collapses the context window 1M -> 200k.
     expect(jiekouai?.modelContextWindows?.['claude-sonnet-4-6']).toBe(1000000)
     expect(jiekouai?.modelContextWindows?.['claude-opus-4-7']).toBe(1000000)
