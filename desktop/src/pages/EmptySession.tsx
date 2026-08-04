@@ -39,12 +39,6 @@ import {
 } from '../lib/composerAttachments'
 import { useComposerFileDrop } from '../components/chat/useComposerFileDrop'
 import { shouldSubmitOnEnter } from '../components/chat/sendShortcut'
-import { MentionComposer, type MentionComposerHandle } from '../components/chat/MentionComposer'
-import {
-  findMentionRanges,
-  insertMentionIntoText,
-  type ComposerMention,
-} from '../lib/composerMentions'
 import {
   appendAgentSlashCommands,
   buildAgentSlashCommands,
@@ -104,7 +98,6 @@ function resolveCreateSessionErrorMessage(error: unknown, t: Translate): string 
 export function EmptySession() {
   const t = useTranslation()
   const [input, setInput] = useState('')
-  const [mentions, setMentions] = useState<ComposerMention[]>([])
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [workDir, setWorkDir] = useState('')
   const [selectedBranch, setSelectedBranch] = useState<string | null>(null)
@@ -121,8 +114,7 @@ export function EmptySession() {
   const [slashSelectedIndex, setSlashSelectedIndex] = useState(0)
   const [slashCommands, setSlashCommands] = useState<SlashCommandOption[]>([])
   const [agentSlashCommands, setAgentSlashCommands] = useState<SlashCommandOption[]>([])
-  const composerRef = useRef<MentionComposerHandle>(null)
-  const composerContainerRef = useRef<HTMLDivElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const modelSelectorRef = useRef<ModelSelectorHandle>(null)
@@ -152,7 +144,7 @@ export function EmptySession() {
   const isMobileComposer = useMobileViewport() && !isDesktopRuntime()
 
   useEffect(() => {
-    composerRef.current?.focus()
+    textareaRef.current?.focus()
   }, [])
 
   useDismissable({
@@ -163,19 +155,19 @@ export function EmptySession() {
 
   useDismissable({
     open: slashMenuOpen,
-    refs: [slashMenuRef, composerContainerRef],
+    refs: [slashMenuRef, textareaRef],
     onDismiss: () => setSlashMenuOpen(false),
   })
 
   useDismissable({
     open: !!localSlashPanel,
-    refs: [slashMenuRef, composerContainerRef],
+    refs: [slashMenuRef, textareaRef],
     onDismiss: () => setLocalSlashPanel(null),
   })
 
   useDismissable({
     open: fileSearchOpen,
-    refs: [composerContainerRef],
+    refs: [textareaRef],
     onDismiss: () => setFileSearchOpen(false),
     // See ChatInput: this menu is found by id, and its absence used to mean
     // "ignore the press".
@@ -289,7 +281,6 @@ export function EmptySession() {
     if (slashUiAction?.type === 'panel') {
       setLocalSlashPanel(slashUiAction.command as LocalSlashCommandName)
       setInput('')
-      setMentions([])
       setSlashMenuOpen(false)
       setFileSearchOpen(false)
       setPlusMenuOpen(false)
@@ -300,7 +291,6 @@ export function EmptySession() {
       useUIStore.getState().setPendingSettingsTab(slashUiAction.tab)
       useTabStore.getState().openTab(SETTINGS_TAB_ID, 'Settings', 'settings')
       setInput('')
-      setMentions([])
       setSlashMenuOpen(false)
       setFileSearchOpen(false)
       setPlusMenuOpen(false)
@@ -310,7 +300,6 @@ export function EmptySession() {
     if (slashUiAction?.type === 'model') {
       modelSelectorRef.current?.open()
       setInput('')
-      setMentions([])
       setSlashMenuOpen(false)
       setFileSearchOpen(false)
       setPlusMenuOpen(false)
@@ -362,14 +351,10 @@ export function EmptySession() {
         data: attachment.data,
         mimeType: attachment.mimeType,
       }))
-      // Inline @-mentions go out as the `@"absolute path"` text the CLI parses,
-      // serialized from the live document; the bubble keeps the pill text.
-      const serializedText = (composerRef.current?.getModelContent() ?? input).trim()
-      if (serializedText || attachmentPayload.length > 0) {
-        sendMessage(sessionId, serializedText, attachmentPayload, { displayContent: text })
+      if (text || attachmentPayload.length > 0) {
+        sendMessage(sessionId, text, attachmentPayload)
       }
       setInput('')
-      setMentions([])
       setAttachments([])
     } catch (error) {
       addToast({
@@ -381,10 +366,8 @@ export function EmptySession() {
     }
   }
 
-  const handleComposerChange = (value: string, nextMentions: ComposerMention[]) => {
+  const handleInputChange = (value: string, cursorPos: number) => {
     setInput(value)
-    setMentions(nextMentions)
-    const cursorPos = composerRef.current?.getSelectionOffsets().start ?? value.length
     const token = findSlashToken(value, cursorPos)
     if (!token) {
       setSlashMenuOpen(false)
@@ -393,8 +376,7 @@ export function EmptySession() {
       setSlashMenuOpen(true)
     }
 
-    // Detect @ trigger for file search, skipping an `@` that belongs to an
-    // existing mention pill.
+    // Detect @ trigger for file search
     const textBeforeCursor = value.slice(0, cursorPos)
     let pos = -1
     for (let i = textBeforeCursor.length - 1; i >= 0; i--) {
@@ -410,9 +392,6 @@ export function EmptySession() {
         break
       }
     }
-    if (pos >= 0 && findMentionRanges(value, nextMentions).some((range) => pos >= range.start && pos < range.end)) {
-      pos = -1
-    }
     if (pos < 0) {
       setFileSearchOpen(false)
       setAtFilter('')
@@ -425,9 +404,9 @@ export function EmptySession() {
     }
   }
 
-  const handleComposerKeyDown = (event: KeyboardEvent): boolean => {
+  const handleKeyDown = (event: React.KeyboardEvent) => {
     // Ignore key events during IME composition (e.g. Chinese input method)
-    if (event.isComposing || event.keyCode === 229) return false
+    if (event.nativeEvent.isComposing) return
 
     // Route file search navigation keys to FileSearchMenu
     if (fileSearchOpen) {
@@ -438,24 +417,24 @@ export function EmptySession() {
           setFileSearchOpen(false)
           setAtFilter('')
           setAtCursorPos(-1)
-          return true
+          return
         }
-        fileSearchRef.current?.handleKeyDown(event)
-        return true
+        fileSearchRef.current?.handleKeyDown(event.nativeEvent)
+        return
       }
-      return false
+      return
     }
 
     if (slashMenuOpen && filteredCommands.length > 0) {
       if (event.key === 'ArrowDown') {
         event.preventDefault()
         setSlashSelectedIndex((prev) => (prev + 1) % filteredCommands.length)
-        return true
+        return
       }
       if (event.key === 'ArrowUp') {
         event.preventDefault()
         setSlashSelectedIndex((prev) => (prev - 1 + filteredCommands.length) % filteredCommands.length)
-        return true
+        return
       }
       if (event.key === 'Enter' || event.key === 'Tab') {
         const selected = filteredCommands[slashSelectedIndex]
@@ -468,30 +447,28 @@ export function EmptySession() {
         ) {
           event.preventDefault()
           void handleSubmit()
-          return true
+          return
         }
         event.preventDefault()
         if (selected) selectSlashCommand(selected.name)
-        return true
+        return
       }
       if (event.key === 'Escape') {
         event.preventDefault()
         setSlashMenuOpen(false)
-        return true
+        return
       }
     }
 
     if (shouldSubmitOnEnter(event, chatSendBehavior)) {
       event.preventDefault()
-      void handleSubmit()
-      return true
+      handleSubmit()
     }
-    return false
   }
 
-  const handleComposerPaste = (event: ClipboardEvent): boolean => {
-    const files = event.clipboardData ? getDataTransferFiles(event.clipboardData) : []
-    if (files.length === 0) return false
+  const handlePaste = (event: React.ClipboardEvent) => {
+    const files = getDataTransferFiles(event.clipboardData)
+    if (files.length === 0) return
 
     event.preventDefault()
     void filesToComposerAttachments(files)
@@ -502,7 +479,6 @@ export function EmptySession() {
       .catch((error) => {
         console.warn('[attachments] Failed to read pasted files', error)
       })
-    return true
   }
 
   const appendFiles = useCallback((files: FileList | File[]) => {
@@ -561,27 +537,30 @@ export function EmptySession() {
   }
 
   const selectSlashCommand = (command: string) => {
-    const cursorPos = composerRef.current?.getSelectionOffsets().start ?? input.length
+    const el = textareaRef.current
+    if (!el) return
+    const cursorPos = el.selectionStart ?? input.length
     const replacement = replaceSlashCommand(input, cursorPos, command)
     if (!replacement) return
     setInput(replacement.value)
     setSlashMenuOpen(false)
     requestAnimationFrame(() => {
-      composerRef.current?.focus()
-      composerRef.current?.setSelectionOffsets(replacement.cursorPos)
+      el.focus()
+      el.setSelectionRange(replacement.cursorPos, replacement.cursorPos)
     })
   }
 
   const insertSlashCommand = () => {
-    const cursorPos = composerRef.current?.getSelectionOffsets().start ?? input.length
+    const el = textareaRef.current
+    const cursorPos = el?.selectionStart ?? input.length
     const replacement = insertSlashTrigger(input, cursorPos)
     setInput(replacement.value)
     setPlusMenuOpen(false)
     setSlashFilter('')
     setSlashMenuOpen(true)
     requestAnimationFrame(() => {
-      composerRef.current?.focus()
-      composerRef.current?.setSelectionOffsets(replacement.cursorPos)
+      textareaRef.current?.focus()
+      textareaRef.current?.setSelectionRange(replacement.cursorPos, replacement.cursorPos)
     })
   }
 
@@ -653,28 +632,37 @@ export function EmptySession() {
                     setInput(newValue)
                     setAtFilter(relativePath)
                     requestAnimationFrame(() => {
-                      composerRef.current?.focus()
-                      composerRef.current?.setSelectionOffsets(newCursorPos)
+                      textareaRef.current?.focus()
+                      textareaRef.current?.setSelectionRange(newCursorPos, newCursorPos)
                     })
                   }}
-                  onSelect={(path, name, isDirectory) => {
-                    if (atCursorPos < 0) return
-                    const referenceName = name.split('/').filter(Boolean).pop() ?? name
-                    const tokenEnd = atCursorPos + 1 + atFilter.length
-                    const inserted = insertMentionIntoText(input, mentions, atCursorPos, tokenEnd, {
-                      label: isDirectory ? `${referenceName}/` : referenceName,
-                      path,
-                      isDirectory,
-                    })
-                    setInput(inserted.text)
-                    setMentions(inserted.mentions)
-                    setFileSearchOpen(false)
-                    setAtFilter('')
-                    setAtCursorPos(-1)
-                    void composerRef.current?.focus()
-                    requestAnimationFrame(() => {
-                      composerRef.current?.setSelectionOffsets(inserted.cursorPos)
-                    })
+                  onSelect={(path, name) => {
+                    if (atCursorPos >= 0) {
+                      const attachmentName = name.split('/').filter(Boolean).pop() ?? name
+                      const tokenEnd = atCursorPos + 1 + atFilter.length
+                      const beforeToken = input.slice(0, atCursorPos)
+                      const afterToken = beforeToken ? input.slice(tokenEnd) : input.slice(tokenEnd).replace(/^\s+/, '')
+                      const spacer = beforeToken && afterToken && !/\s$/.test(beforeToken) && !/^\s/.test(afterToken) ? ' ' : ''
+                      const newValue = `${beforeToken}${spacer}${afterToken}`
+                      const newCursorPos = atCursorPos + spacer.length
+                      setAttachments((prev) => [
+                        ...prev,
+                        {
+                          id: `att-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                          name: attachmentName,
+                          type: 'file',
+                          path,
+                        },
+                      ])
+                      setInput(newValue)
+                      setFileSearchOpen(false)
+                      setAtFilter('')
+                      setAtCursorPos(-1)
+                      void textareaRef.current?.focus()
+                      requestAnimationFrame(() => {
+                        textareaRef.current?.setSelectionRange(newCursorPos, newCursorPos)
+                      })
+                    }
                   }}
                 />
               )}
@@ -708,28 +696,25 @@ export function EmptySession() {
               )}
 
               <div className="flex items-start gap-3">
-                <MentionComposer
-                  ref={composerRef}
-                  rootRef={composerContainerRef}
+                <textarea
+                  ref={textareaRef}
                   value={input}
-                  mentions={mentions}
-                  onChange={handleComposerChange}
-                  onKeyDown={handleComposerKeyDown}
-                  onPaste={handleComposerPaste}
-                  placeholder={t('empty.placeholder')}
-                  className="flex-1"
-                  editorClassName={`overflow-y-auto leading-relaxed text-[var(--color-text-primary)] ${
-                    isMobileComposer ? 'max-h-[132px] min-h-[72px] py-1.5 text-base' : 'max-h-[200px] py-2'
+                  onChange={(event) => handleInputChange(event.target.value, event.target.selectionStart ?? event.target.value.length)}
+                  onKeyDown={handleKeyDown}
+                  onPaste={handlePaste}
+                  role={isSlashMenuVisible ? 'combobox' : undefined}
+                  aria-autocomplete={isSlashMenuVisible ? 'list' : undefined}
+                  aria-expanded={isSlashMenuVisible ? true : undefined}
+                  aria-controls={isSlashMenuVisible ? slashMenuId : undefined}
+                  aria-activedescendant={isSlashMenuVisible
+                    ? getSlashCommandOptionId(slashMenuId, slashSelectedIndex)
+                    : undefined}
+                  className={`flex-1 resize-none border-none bg-transparent leading-relaxed text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] ${
+                    isMobileComposer ? 'max-h-[132px] min-h-[72px] py-1.5 text-base' : 'py-2'
                   }`}
-                  aria={{
-                    role: isSlashMenuVisible ? 'combobox' : 'textbox',
-                    'aria-autocomplete': isSlashMenuVisible ? 'list' : undefined,
-                    'aria-expanded': isSlashMenuVisible ? 'true' : undefined,
-                    'aria-controls': isSlashMenuVisible ? slashMenuId : undefined,
-                    'aria-activedescendant': isSlashMenuVisible
-                      ? getSlashCommandOptionId(slashMenuId, slashSelectedIndex)
-                      : undefined,
-                  }}
+                  style={{ fontFamily: 'var(--font-body)' }}
+                  placeholder={t('empty.placeholder')}
+                  rows={2}
                 />
               </div>
 

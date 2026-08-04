@@ -109,18 +109,12 @@ function getElementForNode(node: Node | null): Element | null {
   return node.nodeType === Node.ELEMENT_NODE ? node as Element : node.parentElement
 }
 
-function getChatSelectionPosition(
-  range: Range,
-  root: HTMLElement,
-  selection: Selection,
-  pointer: { clientX: number; clientY: number },
-) {
+function getChatSelectionPosition(range: Range, root: HTMLElement, pointer: { clientX: number; clientY: number }) {
   return getSelectionPopoverPosition(range, root, {
     menuWidth: CHAT_SELECTION_MENU_WIDTH,
     menuHeight: CHAT_SELECTION_MENU_HEIGHT,
     offset: CHAT_SELECTION_MENU_OFFSET,
     fallbackPointer: pointer,
-    selectionFocus: { node: selection.focusNode, offset: selection.focusOffset },
   })
 }
 
@@ -143,7 +137,7 @@ function getChatSelectionFromContainer(
   if (!text) return null
 
   return {
-    ...getChatSelectionPosition(range, root, selection, pointer),
+    ...getChatSelectionPosition(range, root, pointer),
     text,
   }
 }
@@ -153,14 +147,6 @@ function getSelectionPointer(event: SelectionPointer): SelectionPointer {
     clientX: event.clientX,
     clientY: event.clientY,
   }
-}
-
-function isPrimarySelectionPointer(event: Pick<PointerEvent, 'button' | 'ctrlKey' | 'pointerType'>) {
-  return event.button === 0 && !(event.pointerType === 'mouse' && event.ctrlKey)
-}
-
-function isKeyboardSelectionKey(event: KeyboardEvent) {
-  return event.shiftKey && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)
 }
 
 function ChatSelectionMenu({
@@ -179,9 +165,7 @@ function ChatSelectionMenu({
     <button
       ref={popoverRef}
       type="button"
-      onMouseDown={(event) => {
-        if (event.button === 0 && !event.ctrlKey) event.preventDefault()
-      }}
+      onMouseDown={(event) => event.preventDefault()}
       onClick={onAdd}
       className="fixed z-[var(--z-popover)] inline-flex h-11 items-center gap-2 rounded-full border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-5 text-[15px] font-semibold text-[var(--color-text-primary)] shadow-[var(--shadow-overlay)] transition-colors hover:bg-[var(--color-surface)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
       style={{ left: selection.x, top: selection.y }}
@@ -454,9 +438,6 @@ function SelectableChatMessage({
   const rootRef = useRef<HTMLDivElement>(null)
   const selectionMenuRef = useRef<HTMLButtonElement>(null)
   const lastSelectionPointerRef = useRef<SelectionPointer | null>(null)
-  const selectionGestureEpochRef = useRef(0)
-  const selectionStartedInsideRef = useRef(false)
-  const selectionUpdateAuthorizedRef = useRef(false)
   const selectionUpdateFrameRef = useRef<number | null>(null)
   const addReference = useWorkspaceChatContextStore((state) => state.addReference)
   const [selectionMenu, setSelectionMenu] = useState<ChatSelectionState | null>(null)
@@ -465,21 +446,10 @@ function SelectableChatMessage({
     ? t('chat.assistantMessageReference')
     : t('chat.userMessageReference')
 
-  const cancelPendingSelectionMenuUpdate = useCallback(() => {
-    selectionGestureEpochRef.current += 1
-    if (selectionUpdateFrameRef.current !== null) {
-      window.cancelAnimationFrame(selectionUpdateFrameRef.current)
-      selectionUpdateFrameRef.current = null
-    }
-  }, [])
-
   useEffect(() => {
-    cancelPendingSelectionMenuUpdate()
     setSelectionMenu(null)
     lastSelectionPointerRef.current = null
-    selectionStartedInsideRef.current = false
-    selectionUpdateAuthorizedRef.current = false
-  }, [cancelPendingSelectionMenuUpdate, content, messageId])
+  }, [content, messageId])
 
   const dismissSelectionMenu = useCallback(() => {
     setSelectionMenu(null)
@@ -492,16 +462,9 @@ function SelectableChatMessage({
       window.cancelAnimationFrame(selectionUpdateFrameRef.current)
     }
 
-    const gestureEpoch = selectionGestureEpochRef.current
     selectionUpdateFrameRef.current = window.requestAnimationFrame(() => {
-      if (gestureEpoch !== selectionGestureEpochRef.current) {
-        selectionUpdateFrameRef.current = null
-        return
-      }
       selectionUpdateFrameRef.current = window.requestAnimationFrame(() => {
         selectionUpdateFrameRef.current = null
-        if (gestureEpoch !== selectionGestureEpochRef.current || !selectionUpdateAuthorizedRef.current) return
-
         const root = rootRef.current
         const rootRect = root?.getBoundingClientRect()
         const fallbackPointer = lastSelectionPointerRef.current ?? {
@@ -523,58 +486,38 @@ function SelectableChatMessage({
 
   useEffect(() => {
     const handlePointerDown = (event: PointerEvent) => {
-      cancelPendingSelectionMenuUpdate()
-      const root = rootRef.current
-      const target = event.target
-      const startsInside = isPrimarySelectionPointer(event)
-        && target instanceof Node
-        && Boolean(root?.contains(target))
-      selectionStartedInsideRef.current = startsInside
-      selectionUpdateAuthorizedRef.current = startsInside
-      if (startsInside) lastSelectionPointerRef.current = getSelectionPointer(event)
+      lastSelectionPointerRef.current = getSelectionPointer(event)
     }
 
     const handlePointerUp = (event: PointerEvent) => {
-      if (!selectionStartedInsideRef.current || !isPrimarySelectionPointer(event)) return
-      selectionStartedInsideRef.current = false
-      selectionUpdateAuthorizedRef.current = true
+      queueSelectionMenuUpdate(getSelectionPointer(event))
+    }
+
+    const handleMouseUp = (event: MouseEvent) => {
       queueSelectionMenuUpdate(getSelectionPointer(event))
     }
 
     const handleSelectionChange = () => {
-      if (selectionStartedInsideRef.current || !selectionUpdateAuthorizedRef.current) return
       queueSelectionMenuUpdate()
     }
 
-    const handleKeyUp = (event: KeyboardEvent) => {
-      if (!isKeyboardSelectionKey(event)) return
-      cancelPendingSelectionMenuUpdate()
-      lastSelectionPointerRef.current = null
-      selectionStartedInsideRef.current = false
-      selectionUpdateAuthorizedRef.current = true
+    const handleKeyUp = () => {
       queueSelectionMenuUpdate()
-    }
-
-    const handleContextMenu = () => {
-      cancelPendingSelectionMenuUpdate()
-      selectionStartedInsideRef.current = false
-      selectionUpdateAuthorizedRef.current = false
-      setSelectionMenu(null)
     }
 
     document.addEventListener('pointerdown', handlePointerDown, true)
     document.addEventListener('pointerup', handlePointerUp, true)
+    document.addEventListener('mouseup', handleMouseUp, true)
     document.addEventListener('selectionchange', handleSelectionChange)
     document.addEventListener('keyup', handleKeyUp, true)
-    document.addEventListener('contextmenu', handleContextMenu, true)
     return () => {
       document.removeEventListener('pointerdown', handlePointerDown, true)
       document.removeEventListener('pointerup', handlePointerUp, true)
+      document.removeEventListener('mouseup', handleMouseUp, true)
       document.removeEventListener('selectionchange', handleSelectionChange)
       document.removeEventListener('keyup', handleKeyUp, true)
-      document.removeEventListener('contextmenu', handleContextMenu, true)
     }
-  }, [cancelPendingSelectionMenuUpdate, queueSelectionMenuUpdate])
+  }, [queueSelectionMenuUpdate])
 
   useSelectionPopoverDismiss({
     active: Boolean(selectionMenu),
@@ -600,6 +543,13 @@ function SelectableChatMessage({
     <div
       ref={rootRef}
       data-chat-selectable-message={role}
+      onPointerDown={(event) => {
+        if (event.pointerType === 'mouse' && event.button !== 0) return
+        lastSelectionPointerRef.current = getSelectionPointer(event)
+      }}
+      onMouseUp={(event) => {
+        queueSelectionMenuUpdate(getSelectionPointer(event))
+      }}
       onKeyDown={(event) => {
         if (event.key === 'Escape') setSelectionMenu(null)
       }}

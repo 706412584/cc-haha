@@ -168,7 +168,6 @@ export function TabBar() {
       messages: sessionState?.messages ?? [],
       tasks: includeCliTasks ? cliTasks : [],
       completedAndDismissed: includeCliTasks ? cliTasksCompletedAndDismissed : false,
-      isForegroundTurnActive: Boolean(sessionState && sessionState.chatState !== 'idle'),
       backgroundTasks: Object.values(sessionState?.backgroundAgentTasks ?? {}),
       dismissedBackgroundTaskKeys,
       agentNotifications: Object.values(sessionState?.agentTaskNotifications ?? {}),

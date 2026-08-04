@@ -703,7 +703,7 @@ describe('ActiveSession task polling', () => {
     }, { timeout: 4000 })
   })
 
-  it('auto-opens for current activity and seals unfinished tasks when the turn becomes idle', async () => {
+  it('auto-opens the activity panel when the current session first produces activity', async () => {
     const sessionId = 'activity-auto-open-session'
     const fetchSessionTasks = vi.fn().mockResolvedValue(undefined)
 
@@ -714,7 +714,7 @@ describe('ActiveSession task polling', () => {
         title: 'Auto Open Activity Session',
         createdAt: '2026-05-07T00:00:00.000Z',
         modifiedAt: '2026-05-07T00:00:00.000Z',
-        messageCount: 1,
+        messageCount: 0,
         projectPath: '/workspace/project',
         workDir: '/workspace/project',
         workDirExists: true,
@@ -731,7 +731,7 @@ describe('ActiveSession task polling', () => {
       sessions: {
         [sessionId]: {
           messages: [],
-          chatState: 'thinking',
+          chatState: 'idle',
           connectionState: 'connected',
           streamingText: '',
           streamingToolInput: '',
@@ -778,23 +778,6 @@ describe('ActiveSession task polling', () => {
     })
     expect(screen.getByTestId('session-activity-panel')).toHaveAttribute('data-placement', 'rail')
     expect(screen.getByText('Draft implementation plan')).toBeInTheDocument()
-    expect(within(screen.getByTestId('session-activity-panel')).getByLabelText('Task in progress')).toBeInTheDocument()
-
-    act(() => {
-      useChatStore.setState((state) => ({
-        sessions: {
-          ...state.sessions,
-          [sessionId]: {
-            ...state.sessions[sessionId]!,
-            chatState: 'idle',
-          },
-        },
-      }))
-    })
-
-    expect(within(screen.getByTestId('session-activity-panel')).getByLabelText('Stopped')).toBeInTheDocument()
-    expect(within(screen.getByTestId('session-activity-panel')).queryByLabelText('Task in progress')).not.toBeInTheDocument()
-    expect(screen.queryByText(/session active|会话活跃中/)).not.toBeInTheDocument()
   })
 
   it('renders completed historical TodoWrite activity in the rail', () => {

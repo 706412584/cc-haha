@@ -303,6 +303,7 @@ export function ActiveSession() {
   const cliTasks = useCLITaskStore((s) => s.tasks)
   const cliTasksCompletedAndDismissed = useCLITaskStore((s) => s.completedAndDismissed)
   const hasIncompleteTasks = cliTasks.some((task) => task.status !== 'completed')
+  const hasRunningTasks = cliTasks.some((task) => task.status === 'in_progress')
   const isActivityPanelOpen = useActivityPanelStore((state) => activeTabId ? state.isOpen(activeTabId) : false)
   const openActivityPanel = useActivityPanelStore((state) => state.open)
   const closeActivityPanel = useActivityPanelStore((state) => state.close)
@@ -403,7 +404,9 @@ export function ActiveSession() {
   const visibleMessageCount = messages.length > 0 ? messages.length : session?.messageCount ?? 0
   const headerTitle = session?.title || t('session.untitled')
 
-  const isActive = chatState !== 'idle' || hasRunningBackgroundTasks
+  const isActive = chatState !== 'idle' ||
+    (trackedTaskSessionId === activeTabId && hasRunningTasks) ||
+    hasRunningBackgroundTasks
   const totalTokens = getTokenUsageTotal(tokenUsage)
   const cachedTokens = (tokenUsage.cache_read_tokens ?? 0) +
     (tokenUsage.cache_creation_tokens ?? 0)
@@ -431,7 +434,6 @@ export function ActiveSession() {
       messages,
       tasks: includeCliTasks ? cliTasks : [],
       completedAndDismissed: includeCliTasks ? cliTasksCompletedAndDismissed : false,
-      isForegroundTurnActive: chatState !== 'idle',
       backgroundTasks,
       dismissedBackgroundTaskKeys,
       agentNotifications: Object.values(agentTaskNotifications),
@@ -444,7 +446,6 @@ export function ActiveSession() {
     backgroundTasks,
     cliTasks,
     cliTasksCompletedAndDismissed,
-    chatState,
     dismissedBackgroundTaskKeys,
     messages,
     trackedTaskSessionId,

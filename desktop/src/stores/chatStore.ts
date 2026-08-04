@@ -17,7 +17,6 @@ import {
 import { hasRunningBackgroundTasks, hasRunningSubagentTasks } from '../lib/backgroundTasks'
 import { AGENT_LIFECYCLE_TYPES } from '../types/team'
 import type { ComposerAttachment } from '../lib/composerAttachments'
-import type { ComposerMention } from '../lib/composerMentions'
 import type { MessageEntry } from '../types/session'
 import type { PermissionMode } from '../types/settings'
 import type { RuntimeSelection } from '../types/runtime'
@@ -53,14 +52,6 @@ type CompactSummaryMessage = Extract<UIMessage, { type: 'compact_summary' }>
 export type ComposerDraftState = {
   input: string
   attachments: ComposerAttachment[]
-  /** Inline @-mention pills in the draft, in document order. */
-  mentions?: ComposerMention[]
-}
-
-export type RepositoryLaunchDraftState = {
-  workDir: string
-  branch: string | null
-  useWorktree: boolean
 }
 
 export type QueuedUserMessage = {
@@ -166,7 +157,6 @@ export type PerSessionState = {
   } | null
   composerInsertion?: ComposerReferenceInsertion | null
   composerDraft?: ComposerDraftState | null
-  repositoryLaunchDraft?: RepositoryLaunchDraftState | null
   queuedUserMessages?: QueuedUserMessage[]
 }
 
@@ -208,7 +198,6 @@ const DEFAULT_SESSION_STATE: PerSessionState = {
   composerPrefill: null,
   composerInsertion: null,
   composerDraft: null,
-  repositoryLaunchDraft: null,
   queuedUserMessages: [],
 }
 
@@ -347,8 +336,6 @@ type ChatStore = {
   clearComposerInsertion: (sessionId: string, nonce?: number) => void
   setComposerDraft: (sessionId: string, draft: ComposerDraftState) => void
   clearComposerDraft: (sessionId: string) => void
-  setRepositoryLaunchDraft: (sessionId: string, draft: RepositoryLaunchDraftState) => void
-  clearRepositoryLaunchDraft: (sessionId: string) => void
   queueUserMessage: (
     sessionId: string,
     message: Omit<QueuedUserMessage, 'id' | 'createdAt'>,
@@ -1350,7 +1337,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           messages: existing?.messages ?? [],
           activeGoal: existing?.activeGoal ?? null,
           composerDraft: existing?.composerDraft ?? null,
-          repositoryLaunchDraft: existing?.repositoryLaunchDraft ?? null,
           queuedUserMessages: existing?.queuedUserMessages ?? [],
           backgroundAgentTasks: existing?.backgroundAgentTasks ?? {},
           agentTaskNotifications: existing?.agentTaskNotifications ?? {},
@@ -2012,29 +1998,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     set((state) => ({
       sessions: updateSessionIn(state.sessions, sessionId, () => ({
         composerDraft: null,
-      })),
-    }))
-  },
-
-  setRepositoryLaunchDraft: (sessionId, draft) => {
-    set((state) => {
-      const session = state.sessions[sessionId] ?? createDefaultSessionState()
-      return {
-        sessions: {
-          ...state.sessions,
-          [sessionId]: {
-            ...session,
-            repositoryLaunchDraft: draft,
-          },
-        },
-      }
-    })
-  },
-
-  clearRepositoryLaunchDraft: (sessionId) => {
-    set((state) => ({
-      sessions: updateSessionIn(state.sessions, sessionId, () => ({
-        repositoryLaunchDraft: null,
       })),
     }))
   },
@@ -2719,12 +2682,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           return {
             messages,
             ...(stoppedTask ? { backgroundAgentTasks } : {}),
-            chatState: parentToolUseId
-              ? s.chatState
-              : hasPendingPermissionRequests(s)
-                ? 'permission_pending'
-                : 'thinking',
-            activeThinkingId: parentToolUseId ? s.activeThinkingId : null,
+            chatState: hasPendingPermissionRequests(s)
+              ? 'permission_pending'
+              : 'thinking',
+            activeThinkingId: null,
           }
         })
         if (consumePendingTaskToolUseId(sessionId, msg.toolUseId)) {
@@ -4379,16 +4340,6 @@ function replayAttachmentsMatchCurrent(
   )
 }
 
-// The server-side replay normalizes whitespace that the optimistic bubble
-// keeps verbatim: `readXmlTag` trims <command-args> and
-// formatCommandDisplayText re-joins name + args with a single space, so
-// `/ego-browser␣␣https://…` replays as `/ego-browser https://…`. HTML
-// collapses the extra space anyway, so a literal comparison would append a
-// visually identical duplicate bubble. Compare with whitespace runs collapsed.
-function collapseWhitespaceRuns(text: string): string {
-  return text.replace(/\s+/g, ' ').trim()
-}
-
 function replayMatchesCurrentUserMessage(
   message: Extract<UIMessage, { type: 'user_text' }>,
   replayDisplay: RestoredUserDisplay,
@@ -4396,11 +4347,6 @@ function replayMatchesCurrentUserMessage(
 ): boolean {
   const currentModelContent = (message.modelContent ?? message.content).trim()
   if (currentModelContent === replayModelContent) return true
-  if (
-    collapseWhitespaceRuns(currentModelContent) === collapseWhitespaceRuns(replayModelContent)
-  ) {
-    return true
-  }
 
   const currentAttachments = message.attachments ?? []
   if (
@@ -4414,11 +4360,7 @@ function replayMatchesCurrentUserMessage(
   }
 
   const currentDisplay = extractRestoredUserDisplay(currentModelContent)
-  if (
-    collapseWhitespaceRuns(currentDisplay.content) !== collapseWhitespaceRuns(replayDisplay.content)
-  ) {
-    return false
-  }
+  if (currentDisplay.content.trim() !== replayDisplay.content.trim()) return false
 
   return replayAttachmentsMatchCurrent(
     replayDisplay.attachments ?? [],

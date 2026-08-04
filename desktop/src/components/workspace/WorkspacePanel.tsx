@@ -301,18 +301,12 @@ function getLineNumberFromNode(node: Node | null, root: HTMLElement) {
   return Number.isFinite(line) ? line : undefined
 }
 
-function getSelectionPosition(
-  range: Range,
-  root: HTMLElement,
-  selection: Selection,
-  pointer?: SelectionPointer,
-) {
+function getSelectionPosition(range: Range, root: HTMLElement, pointer?: SelectionPointer) {
   return getSelectionPopoverPosition(range, root, {
     menuWidth: SELECTION_MENU_WIDTH,
     menuHeight: SELECTION_MENU_HEIGHT,
     offset: SELECTION_MENU_OFFSET,
     fallbackPointer: pointer,
-    selectionFocus: { node: selection.focusNode, offset: selection.focusOffset },
   })
 }
 
@@ -347,7 +341,7 @@ function getTextSelectionFromContainer(
   const orderedEnd = startLine && endLine ? Math.max(startLine, endLine) : endLine
 
   return {
-    ...getSelectionPosition(range, root, selection, pointer),
+    ...getSelectionPosition(range, root, pointer),
     text,
     ...(orderedStart ? { startLine: orderedStart } : {}),
     ...(orderedEnd ? { endLine: orderedEnd } : {}),
@@ -378,9 +372,7 @@ function FloatingSelectionMenu({
     <button
       ref={popoverRef}
       type="button"
-      onMouseDown={(event) => {
-        if (event.button === 0 && !event.ctrlKey) event.preventDefault()
-      }}
+      onMouseDown={(event) => event.preventDefault()}
       onClick={onAdd}
       className="glass-panel fixed z-[var(--z-popover)] inline-flex h-11 items-center gap-2 rounded-full px-5 text-[15px] font-semibold text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
       style={{ left: selection.x, top: selection.y }}
@@ -622,10 +614,6 @@ function CodeSurface({
   }
 
   const handleSelectionMouseUp = (event: MouseEvent<HTMLDivElement>) => {
-    if (event.button !== 0 || event.ctrlKey) {
-      setSelectionMenu(null)
-      return
-    }
     const selection = getTextSelectionFromContainer(surfaceRef.current, undefined, event)
     if (!selection?.startLine || !selection.endLine || selection.startLine === selection.endLine) {
       setSelectionMenu(selection)
@@ -918,10 +906,6 @@ function MarkdownSurface({
   })
 
   const handleSelectionMouseUp = (event: MouseEvent<HTMLDivElement>) => {
-    if (event.button !== 0 || event.ctrlKey) {
-      setSelectionMenu(null)
-      return
-    }
     setSelectionMenu(getTextSelectionFromContainer(
       surfaceRef.current,
       (text) => getLineRangeForText(value, text),
@@ -1544,7 +1528,7 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
       const composer = Array.from(
         document.querySelectorAll<HTMLElement>('[data-testid="chat-input-shell"]'),
       ).find((element) => element.dataset.sessionId === sessionId)
-      composer?.querySelector<HTMLElement>('[data-composer-editor]')?.focus()
+      composer?.querySelector<HTMLTextAreaElement>('textarea:not([disabled])')?.focus()
     })
   }
 

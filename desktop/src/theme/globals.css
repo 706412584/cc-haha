@@ -1502,55 +1502,6 @@ button, input, textarea, select, a, [role="button"] {
   box-shadow: var(--shadow-focus-ring), var(--shadow-dropdown);
 }
 
-/* ProseMirror composer (MentionComposer). Paragraphs carry the line breaks,
-   so only space preservation needs `pre-wrap`. */
-.composer-pm {
-  outline: none;
-  font-family: var(--font-body);
-}
-
-.composer-pm p {
-  margin: 0;
-  white-space: pre-wrap;
-  overflow-wrap: break-word;
-}
-
-/* Floated zero-height placeholder: the empty paragraph keeps its own caret,
-   the hint text just borrows its line. */
-.composer-pm[data-empty="true"]::before {
-  content: attr(data-placeholder);
-  color: var(--color-text-tertiary);
-  float: left;
-  height: 0;
-  pointer-events: none;
-}
-
-/* Inline @-mention pill (an atom node in the document). */
-.composer-mention {
-  color: var(--color-success);
-  background: var(--color-success-container);
-  border-radius: var(--radius-md);
-  padding: 0 4px;
-  margin: 0 1px;
-  overflow-wrap: anywhere;
-}
-
-.composer-mention-icon {
-  font-size: 15px;
-  vertical-align: -3px;
-  margin-right: 1px;
-}
-
-/* The editor reports `contenteditable="false"` when the workspace is gone;
-   keep the old textarea's dimmed disabled look. */
-.composer-pm[contenteditable="false"] {
-  opacity: 0.5;
-}
-
-.composer-pm .ProseMirror-selectednode.composer-mention {
-  outline: 2px solid var(--color-border-focus);
-}
-
 .composer-drop-overlay {
   animation: composer-drop-fade 140ms ease-out, composer-drop-pulse 1.1s ease-in-out infinite;
 }

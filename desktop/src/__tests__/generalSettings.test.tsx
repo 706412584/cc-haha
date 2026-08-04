@@ -459,11 +459,7 @@ describe('Settings > General tab', () => {
     expect(activeItem).toHaveAttribute('aria-current', 'page')
 
     const rail = activeItem.parentElement?.parentElement
-    expect(rail?.className).toContain('w-[195px]')
-    expect(rail?.className).toContain('pl-3')
-    expect(rail?.className).toContain('pr-1')
-    expect(activeItem.className).toContain('pl-3')
-    expect(activeItem.className).toContain('pr-2')
+    expect(rail?.className).toContain('w-[220px]')
   })
 
   it('marks the pure white appearance theme as selected', () => {
@@ -1983,9 +1979,8 @@ describe('Settings > Providers tab', () => {
     fireEvent.click(screen.getByRole('button', { name: /添加服务商/i }))
 
     const dialog = screen.getByRole('dialog')
-    expect(within(dialog).getByPlaceholderText('例如： deepseek-v4-flash')).toBeInTheDocument()
-    expect(within(dialog).getByText('要填写 API Key 才能获取模型列表')).toBeInTheDocument()
-    expect(within(dialog).queryByPlaceholderText('e.g. deepseek-v4-flash')).not.toBeInTheDocument()
+    expect(within(dialog).getByPlaceholderText('模型 ID')).toBeInTheDocument()
+    expect(within(dialog).queryByPlaceholderText('Model ID')).not.toBeInTheDocument()
   })
 
   it('normalizes blank model mappings to the main model when saving a provider', async () => {
@@ -2535,7 +2530,7 @@ describe('Settings > Providers tab', () => {
     expect(await screen.findByText(/No cc-switch configuration was found/i)).toBeInTheDocument()
   })
 
-  it('explains that an API key is required before models can be fetched', () => {
+  it('keeps the model fetch disabled until the base URL and API key are both filled in', () => {
     setCustomPreset()
 
     render(<Settings />)
@@ -2545,12 +2540,11 @@ describe('Settings > Providers tab', () => {
     const fetchButton = within(dialog).getByRole('button', { name: /Fetch models|获取模型/i })
 
     expect(fetchButton).toBeDisabled()
-    expect(within(dialog).getByText(/Enter an API key to fetch the model list/i)).toBeInTheDocument()
+    expect(within(dialog).getByText(/Fill in the base URL and API key first/i)).toBeInTheDocument()
 
     fireEvent.change(within(dialog).getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } })
 
     expect(fetchButton).toBeEnabled()
-    expect(within(dialog).getByText(/only when the upstream provider publishes a model list endpoint/i)).toBeInTheDocument()
   })
 
   it('gives every model slot a picker once the model list is fetched', async () => {
@@ -2577,16 +2571,9 @@ describe('Settings > Providers tab', () => {
     // The picker supplements the field; a model id that is not on the list must
     // still be typeable. Queried by role because the picker's own accessible
     // name also contains the slot label.
-    const mainInput = within(dialog).getByRole('combobox', { name: /Main Model|主模型/i })
-    fireEvent.change(mainInput, { target: { value: 'gpt-5-mini[1m]' } })
-    expect(mainInput).toHaveValue('gpt-5-mini')
-    expect(within(dialog).getByRole('option', { name: 'gpt-5-mini' })).toBeInTheDocument()
-    expect(within(dialog).queryByText(/No matching models/i)).not.toBeInTheDocument()
-
+    const mainInput = within(dialog).getByRole('textbox', { name: /Main Model|主模型/i })
     fireEvent.change(mainInput, { target: { value: 'typed-by-hand' } })
     expect(mainInput).toHaveValue('typed-by-hand')
-    const noMatches = within(dialog).getByRole('option', { name: /No matching models/i })
-    expect(noMatches).toHaveAttribute('aria-disabled', 'true')
   })
 
   it('routes a picked model through the shared model change handler', async () => {
@@ -2600,74 +2587,15 @@ describe('Settings > Providers tab', () => {
     })
 
     fireEvent.click(within(dialog).getByRole('button', { name: /Fetch models|获取模型/i }))
-    const mainCombobox = await within(dialog).findByRole('combobox', { name: /Main Model|主模型/i })
-    const pickerButton = within(dialog).getByRole('button', { name: /Main Model.*fetched list/i })
-    expect(pickerButton).toHaveAttribute('tabindex', '-1')
+    fireEvent.click(await within(dialog).findByRole('button', { name: /Main Model.*fetched list/i }))
+    fireEvent.click(within(dialog).getByRole('option', { name: /gpt-5-mini/i }))
 
-    fireEvent.click(mainCombobox)
-    expect(mainCombobox).toHaveAttribute('aria-expanded', 'true')
-    expect(within(dialog).getByRole('option', { name: /gpt-5-mini/i })).toHaveAttribute('tabindex', '-1')
-    fireEvent.keyDown(mainCombobox, { key: 'ArrowDown' })
-    fireEvent.keyDown(mainCombobox, { key: 'Enter' })
-
-    expect(mainCombobox).toHaveValue('gpt-5-mini')
-    expect(mainCombobox).toHaveAttribute('aria-expanded', 'false')
+    expect(within(dialog).getByRole('textbox', { name: /Main Model|主模型/i })).toHaveValue('gpt-5-mini')
     // Going through handleModelChange is what keeps the settings JSON in sync —
     // a bare setState would leave the textarea on the old model id.
     await waitFor(() => {
       expect(dialog.querySelector('textarea')?.value).toContain('"ANTHROPIC_MODEL": "gpt-5-mini"')
     })
-  })
-
-  it('closes the previous model popup when keyboard focus moves to another field', async () => {
-    const dialog = await openProviderFormWithModels({
-      ok: true,
-      endpoint: 'https://api.example.com/v1/models',
-      models: [
-        { id: 'gpt-5-mini', ownedBy: 'openai' },
-        { id: 'claude-sonnet-4-6', ownedBy: 'anthropic' },
-      ],
-    })
-
-    fireEvent.click(within(dialog).getByRole('button', { name: /Fetch models|获取模型/i }))
-    const comboboxes = await within(dialog).findAllByRole('combobox')
-    const mainCombobox = comboboxes[0]!
-    const haikuCombobox = comboboxes[1]!
-
-    fireEvent.focus(mainCombobox)
-    expect(mainCombobox).toHaveAttribute('aria-expanded', 'true')
-    expect(within(dialog).getAllByRole('listbox')).toHaveLength(1)
-
-    fireEvent.blur(mainCombobox, { relatedTarget: haikuCombobox })
-    fireEvent.focus(haikuCombobox)
-
-    expect(mainCombobox).toHaveAttribute('aria-expanded', 'false')
-    expect(haikuCombobox).toHaveAttribute('aria-expanded', 'true')
-    expect(within(dialog).getAllByRole('listbox')).toHaveLength(1)
-  })
-
-  it('limits a large catalog until the user narrows the model input', async () => {
-    const dialog = await openProviderFormWithModels({
-      ok: true,
-      endpoint: 'https://api.example.com/v1/models',
-      models: Array.from({ length: 101 }, (_, index) => ({
-        id: `model-${String(index).padStart(3, '0')}`,
-        ownedBy: 'openai',
-      })),
-    })
-
-    fireEvent.click(within(dialog).getByRole('button', { name: /Fetch models|获取模型/i }))
-    const mainCombobox = await within(dialog).findByRole('combobox', { name: /Main Model|主模型/i })
-    fireEvent.click(mainCombobox)
-
-    expect(within(dialog).getAllByRole('option')).toHaveLength(100)
-    expect(within(dialog).getByText(/More models are available/i)).toBeInTheDocument()
-
-    fireEvent.change(mainCombobox, { target: { value: 'model-100' } })
-
-    expect(within(dialog).getAllByRole('option')).toHaveLength(1)
-    expect(within(dialog).getByRole('option', { name: 'model-100' })).toBeInTheDocument()
-    expect(within(dialog).queryByText(/More models are available/i)).not.toBeInTheDocument()
   })
 
   it.each([
@@ -2693,7 +2621,6 @@ describe('Settings > Providers tab', () => {
     // code still picks the headline, the raw text only rides along under it.
     expect(within(dialog).getByText(/upstream said no/)).toBeInTheDocument()
     expect(within(dialog).queryByRole('button', { name: /from the fetched list/i })).not.toBeInTheDocument()
-    expect(within(dialog).queryByRole('combobox')).not.toBeInTheDocument()
   })
 
   it('surfaces the upstream message when a 200 response cloaks an auth failure', async () => {
@@ -2844,7 +2771,7 @@ describe('Settings > Providers tab', () => {
     expect(within(dialog).queryByRole('button', { name: /from the fetched list/i })).not.toBeInTheDocument()
   })
 
-  it('drops an open model list when the API key changes and does not reopen it after refetching', async () => {
+  it('drops a fetched model list once the API key changes', async () => {
     const dialog = await openProviderFormWithModels({
       ok: true,
       endpoint: 'https://api.example.com/v1/models',
@@ -2853,18 +2780,10 @@ describe('Settings > Providers tab', () => {
 
     fireEvent.click(within(dialog).getByRole('button', { name: /Fetch models|获取模型/i }))
     expect(await within(dialog).findByText(/Model list loaded \(1\)/i)).toBeInTheDocument()
-    fireEvent.click(within(dialog).getByRole('combobox', { name: /Main Model|主模型/i }))
-    expect(within(dialog).getByRole('listbox')).toBeInTheDocument()
 
     fireEvent.change(within(dialog).getByPlaceholderText('sk-...'), { target: { value: 'sk-other' } })
 
     expect(within(dialog).queryByText(/Model list loaded/i)).not.toBeInTheDocument()
-    expect(within(dialog).queryByRole('listbox')).not.toBeInTheDocument()
-
-    fireEvent.click(within(dialog).getByRole('button', { name: /Fetch models|获取模型/i }))
-    const mainCombobox = await within(dialog).findByRole('combobox', { name: /Main Model|主模型/i })
-    expect(mainCombobox).toHaveAttribute('aria-expanded', 'false')
-    expect(within(dialog).queryByRole('listbox')).not.toBeInTheDocument()
   })
 })
 

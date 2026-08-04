@@ -3,7 +3,7 @@ import { useDismissable } from '@/hooks/useDismissable'
 import { Button } from '@/components/ui/Button'
 import { IconButton } from '@/components/ui/IconButton'
 import { useTranslation } from '../../i18n'
-import { useChatStore, type RepositoryLaunchDraftState } from '../../stores/chatStore'
+import { useChatStore } from '../../stores/chatStore'
 import { SETTINGS_TAB_ID, useTabStore } from '../../stores/tabStore'
 import { useUIStore } from '../../stores/uiStore'
 import { useSessionStore } from '../../stores/sessionStore'
@@ -50,12 +50,6 @@ import {
 } from '../../lib/composerAttachments'
 import { useComposerFileDrop } from './useComposerFileDrop'
 import { shouldSubmitOnEnter } from './sendShortcut'
-import { MentionComposer, type MentionComposerHandle } from './MentionComposer'
-import {
-  findMentionRanges,
-  insertMentionIntoText,
-  type ComposerMention,
-} from '../../lib/composerMentions'
 import type { PermissionMode } from '../../types/settings'
 import { getSessionWorkspaceState } from '../../lib/sessionWorkspace'
 import { hasRunningSubagentTasks } from '../../lib/backgroundTasks'
@@ -130,7 +124,6 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   // itself across the threshold. The shell just fills the chat column.
   const [shellRef, shellWidth] = useElementWidth<HTMLDivElement>()
   const [input, setInput] = useState('')
-  const [mentions, setMentions] = useState<ComposerMention[]>([])
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [plusMenuOpen, setPlusMenuOpen] = useState(false)
   const [slashMenuOpen, setSlashMenuOpen] = useState(false)
@@ -141,13 +134,15 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   const [slashFilter, setSlashFilter] = useState('')
   const [slashSelectedIndex, setSlashSelectedIndex] = useState(0)
   const [agentSlashCommands, setAgentSlashCommands] = useState<ReturnType<typeof buildAgentSlashCommands>>([])
+  const [launchWorkDir, setLaunchWorkDir] = useState('')
+  const [launchBranch, setLaunchBranch] = useState<string | null>(null)
+  const [launchUseWorktree, setLaunchUseWorktree] = useState(false)
   const [launchReady, setLaunchReady] = useState(true)
   const [launchTransitioning, setLaunchTransitioning] = useState(false)
   const [editingQueuedMessageId, setEditingQueuedMessageId] = useState<string | null>(null)
   const [editingQueuedMessageText, setEditingQueuedMessageText] = useState('')
   const composingRef = useRef(false)
-  const composerRef = useRef<MentionComposerHandle>(null)
-  const composerContainerRef = useRef<HTMLDivElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const modelSelectorRef = useRef<ModelSelectorHandle>(null)
@@ -158,16 +153,11 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   const slashMenuId = useId()
   const previousActiveTabIdRef = useRef<string | null>(null)
   const inputRef = useRef(input)
-  const mentionsRef = useRef(mentions)
   const attachmentsRef = useRef(attachments)
   const pasteGenerationRef = useRef(0)
-  const setComposerInput = useCallback((value: string, nextMentions?: ComposerMention[]) => {
+  const setComposerInput = useCallback((value: string) => {
     inputRef.current = value
     setInput(value)
-    if (nextMentions !== undefined) {
-      mentionsRef.current = nextMentions
-      setMentions(nextMentions)
-    }
   }, [])
   const setComposerAttachments = useCallback((value: Attachment[] | ((previous: Attachment[]) => Attachment[])) => {
     setAttachments((previous) => {
@@ -188,10 +178,6 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   } = useChatStore()
   const activeTabId = useTabStore((s) => s.activeTabId)
   const sessionState = useChatStore((s) => activeTabId ? s.sessions[activeTabId] : undefined)
-  const repositoryLaunchDraft = sessionState?.repositoryLaunchDraft
-  const launchWorkDir = repositoryLaunchDraft?.workDir ?? ''
-  const launchBranch = repositoryLaunchDraft?.branch ?? null
-  const launchUseWorktree = repositoryLaunchDraft?.useWorktree ?? false
   const chatState = sessionState?.chatState ?? 'idle'
   const slashCommands = sessionState?.slashCommands ?? []
   const composerPrefill = sessionState?.composerPrefill ?? null
@@ -217,29 +203,10 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   const addWorkspaceReference = useWorkspaceChatContextStore((s) => s.addReference)
   const removeWorkspaceReference = useWorkspaceChatContextStore((s) => s.removeReference)
   const clearWorkspaceReferences = useWorkspaceChatContextStore((s) => s.clearReferences)
-  const updateRepositoryLaunchDraft = useCallback((
-    update: (current: RepositoryLaunchDraftState) => RepositoryLaunchDraftState,
-  ) => {
-    if (!activeTabId) return
-    const chatStore = useChatStore.getState()
-    const current = chatStore.sessions[activeTabId]?.repositoryLaunchDraft ?? {
-      workDir: '',
-      branch: null,
-      useWorktree: false,
-    }
-    chatStore.setRepositoryLaunchDraft(activeTabId, update(current))
-  }, [activeTabId])
-  const setLaunchBranch = useCallback((branch: string | null) => {
-    updateRepositoryLaunchDraft((current) => ({ ...current, branch }))
-  }, [updateRepositoryLaunchDraft])
-  const setLaunchUseWorktree = useCallback((useWorktree: boolean) => {
-    updateRepositoryLaunchDraft((current) => ({ ...current, useWorktree }))
-  }, [updateRepositoryLaunchDraft])
   const saveComposerDraft = useCallback((sessionId: string) => {
     const draft = {
       input: inputRef.current,
       attachments: attachmentsRef.current,
-      mentions: mentionsRef.current,
     }
     const chatStore = useChatStore.getState()
     if (draft.input.length === 0 && draft.attachments.length === 0) {
@@ -325,7 +292,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
     const nextDraft = activeTabId ? useChatStore.getState().sessions[activeTabId]?.composerDraft : undefined
     invalidatePendingPastes()
-    setComposerInput(nextDraft?.input ?? '', nextDraft?.mentions ?? [])
+    setComposerInput(nextDraft?.input ?? '')
     setComposerAttachments(nextDraft?.attachments ?? [])
     setPlusMenuOpen(false)
     setSlashMenuOpen(false)
@@ -347,11 +314,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   }, [saveComposerDraft])
 
   useEffect(() => {
-    mentionsRef.current = mentions
-  }, [mentions])
-
-  useEffect(() => {
-    composerRef.current?.focus()
+    textareaRef.current?.focus()
   }, [isActive])
 
   useEffect(() => {
@@ -371,7 +334,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     if (composerPrefill.mode === 'append') {
       setComposerAttachments((previous) => [...previous, ...nextAttachments])
     } else {
-      setComposerInput(composerPrefill.text, [])
+      setComposerInput(composerPrefill.text)
       setComposerAttachments(nextAttachments)
     }
     setPlusMenuOpen(false)
@@ -382,9 +345,11 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     setAtCursorPos(-1)
 
     requestAnimationFrame(() => {
-      composerRef.current?.focus()
+      const el = textareaRef.current
+      el?.focus()
       if (composerPrefill.mode !== 'append') {
-        composerRef.current?.setSelectionOffsets(composerPrefill.text.length)
+        const cursor = composerPrefill.text.length
+        el?.setSelectionRange(cursor, cursor)
       }
     })
     clearComposerPrefill(activeTabId, composerPrefill.nonce)
@@ -399,10 +364,10 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   useEffect(() => {
     if (!composerInsertion || !activeTabId || isMemberSession) return
 
+    const el = textareaRef.current
     const currentInput = inputRef.current
-    const offsets = composerRef.current?.getSelectionOffsets()
-    const start = offsets?.start ?? currentInput.length
-    const end = offsets?.end ?? start
+    const start = el?.selectionStart ?? currentInput.length
+    const end = el?.selectionEnd ?? start
     const next = insertComposerTokenAtRange(currentInput, start, end, composerInsertion.text)
 
     if (composerInsertion.reference) {
@@ -416,8 +381,8 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     clearComposerInsertion(activeTabId, composerInsertion.nonce)
 
     requestAnimationFrame(() => {
-      composerRef.current?.focus()
-      composerRef.current?.setSelectionOffsets(next.cursorPos)
+      textareaRef.current?.focus()
+      textareaRef.current?.setSelectionRange(next.cursorPos, next.cursorPos)
     })
   }, [
     activeTabId,
@@ -480,18 +445,23 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   }, [isMemberSession, resolvedWorkDir])
 
   useEffect(() => {
-    if (!activeTabId || !showLaunchControls) return
+    if (!showLaunchControls) return
     const nextWorkDir = activeSession?.workDir || gitInfo?.workDir || ''
-    const chatStore = useChatStore.getState()
-    const current = chatStore.sessions[activeTabId]?.repositoryLaunchDraft
-    if (current?.workDir === nextWorkDir) return
-    chatStore.setRepositoryLaunchDraft(activeTabId, {
-      workDir: nextWorkDir,
-      branch: null,
-      useWorktree: false,
+    setLaunchWorkDir((current) => {
+      if (current === nextWorkDir) return current
+      setLaunchBranch(null)
+      setLaunchUseWorktree(false)
+      setLaunchReady(!nextWorkDir)
+      return nextWorkDir
     })
-    setLaunchReady(!nextWorkDir)
   }, [activeSession?.workDir, activeTabId, gitInfo?.workDir, showLaunchControls])
+
+  useEffect(() => {
+    const el = textareaRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${Math.min(el.scrollHeight, 200)}px`
+  }, [input])
 
   useDismissable({
     open: plusMenuOpen,
@@ -501,19 +471,19 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
   useDismissable({
     open: slashMenuOpen,
-    refs: [slashMenuRef, composerContainerRef],
+    refs: [slashMenuRef, textareaRef],
     onDismiss: () => setSlashMenuOpen(false),
   })
 
   useDismissable({
     open: !!localSlashPanel,
-    refs: [slashMenuRef, composerContainerRef],
+    refs: [slashMenuRef, textareaRef],
     onDismiss: () => setLocalSlashPanel(null),
   })
 
   useDismissable({
     open: fileSearchOpen,
-    refs: [composerContainerRef],
+    refs: [textareaRef],
     onDismiss: () => setFileSearchOpen(false),
     // This menu is looked up by id rather than held in a ref. Returning true
     // when it is absent preserves the original behavior: with no menu in the
@@ -569,9 +539,8 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     setSlashMenuOpen(true)
   }, [])
 
-  // Detect @ trigger (file search). The scan runs on the projected text; an
-  // `@` that belongs to an existing mention pill never counts as a trigger.
-  const detectAtTrigger = useCallback((value: string, cursorPos: number, currentMentions: ComposerMention[]) => {
+  // Detect @ trigger (file search)
+  const detectAtTrigger = useCallback((value: string, cursorPos: number) => {
     const textBeforeCursor = value.slice(0, cursorPos)
     let pos = -1
 
@@ -589,10 +558,6 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
       }
     }
 
-    if (pos >= 0 && findMentionRanges(value, currentMentions).some((range) => pos >= range.start && pos < range.end)) {
-      pos = -1
-    }
-
     if (pos < 0) {
       setFileSearchOpen(false)
       setAtFilter('')
@@ -608,24 +573,28 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     setFileSearchOpen(true)
   }, [])
 
-  const handleComposerChange = (text: string, nextMentions: ComposerMention[]) => {
-    setComposerInput(text, nextMentions)
+  const handleInputChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const value = event.target.value
     if (isMemberSession) {
+      setComposerInput(value)
       return
     }
-    const cursorPos = composerRef.current?.getSelectionOffsets().start ?? text.length
-    detectSlashTrigger(text, cursorPos)
-    detectAtTrigger(text, cursorPos, nextMentions)
+    const cursorPos = event.target.selectionStart ?? value.length
+    setComposerInput(value)
+    detectSlashTrigger(value, cursorPos)
+    detectAtTrigger(value, cursorPos)
   }
 
   const selectSlashCommand = useCallback((command: string) => {
-    const cursorPos = composerRef.current?.getSelectionOffsets().start ?? input.length
+    const el = textareaRef.current
+    if (!el) return
+    const cursorPos = el.selectionStart ?? input.length
     const replacement = replaceSlashToken(input, cursorPos, command)
     setComposerInput(replacement.value)
     setSlashMenuOpen(false)
     requestAnimationFrame(() => {
-      composerRef.current?.focus()
-      composerRef.current?.setSelectionOffsets(replacement.cursorPos)
+      el.focus()
+      el.setSelectionRange(replacement.cursorPos, replacement.cursorPos)
     })
   }, [input])
 
@@ -638,14 +607,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     const sessionStore = useSessionStore.getState()
     const { createSession, deleteSession } = sessionStore
     const { replaceTabSession } = useTabStore.getState()
-    const chatStore = useChatStore.getState()
-    const {
-      disconnectSession,
-      connectToSession,
-      setComposerDraft,
-      setRepositoryLaunchDraft,
-    } = chatStore
-    const repositoryLaunchDraft = chatStore.sessions[oldId]?.repositoryLaunchDraft
+    const { disconnectSession, connectToSession, setComposerDraft } = useChatStore.getState()
     const permissionMode = sessionStore.sessions.find((session) => session.id === oldId)
       ?.permissionMode as PermissionMode | undefined
     const createOptions = repository || permissionMode
@@ -664,9 +626,6 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
         attachments: attachmentsRef.current,
       })
     }
-    if (repositoryLaunchDraft) {
-      setRepositoryLaunchDraft(newId, repositoryLaunchDraft)
-    }
     useSessionRuntimeStore.getState().moveSelection(oldId, newId)
     disconnectSession(oldId)
     replaceTabSession(oldId, newId)
@@ -676,11 +635,9 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   }, [activeTabId])
 
   const handleLaunchWorkDirChange = useCallback(async (newWorkDir: string) => {
-    updateRepositoryLaunchDraft(() => ({
-      workDir: newWorkDir,
-      branch: null,
-      useWorktree: false,
-    }))
+    setLaunchWorkDir(newWorkDir)
+    setLaunchBranch(null)
+    setLaunchUseWorktree(false)
     setLaunchReady(!newWorkDir)
     if (!activeTabId) return
 
@@ -695,7 +652,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     } finally {
       setLaunchTransitioning(false)
     }
-  }, [activeTabId, replaceEmptySession, t, updateRepositoryLaunchDraft])
+  }, [activeTabId, replaceEmptySession, t])
 
   const handleSubmit = async () => {
     const text = input.trim()
@@ -703,7 +660,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
     if (pendingSlashUiAction?.type === 'panel') {
       setLocalSlashPanel(pendingSlashUiAction.command as LocalSlashCommandName)
-      setComposerInput('', [])
+      setComposerInput('')
       setSlashMenuOpen(false)
       setFileSearchOpen(false)
       setPlusMenuOpen(false)
@@ -713,7 +670,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     if (pendingSlashUiAction?.type === 'settings') {
       useUIStore.getState().setPendingSettingsTab(pendingSlashUiAction.tab)
       useTabStore.getState().openTab(SETTINGS_TAB_ID, 'Settings', 'settings')
-      setComposerInput('', [])
+      setComposerInput('')
       setSlashMenuOpen(false)
       setFileSearchOpen(false)
       setPlusMenuOpen(false)
@@ -722,7 +679,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
     if (pendingSlashUiAction?.type === 'model') {
       modelSelectorRef.current?.open()
-      setComposerInput('', [])
+      setComposerInput('')
       setSlashMenuOpen(false)
       setFileSearchOpen(false)
       setPlusMenuOpen(false)
@@ -734,11 +691,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     const workspaceReferencePrompt = !isMemberSession
       ? formatWorkspaceReferencePrompt(workspaceReferences)
       : ''
-    // Inline @-mentions travel as the `@"absolute path"` text the CLI already
-    // parses. Serialized from the live document — only the doc knows which
-    // `@label` is a pill and which is literal text the user typed.
-    const serializedText = (composerRef.current?.getModelContent() ?? input).trim()
-    const contentForModel = [workspaceReferencePrompt, serializedText].filter(Boolean).join('\n\n')
+    const contentForModel = [workspaceReferencePrompt, text].filter(Boolean).join('\n\n')
     const displayContent = text || (
       workspaceReferences.length > 0
         ? t('chat.contextReferencesOnly', { count: workspaceReferences.length })
@@ -824,15 +777,10 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
       })
     }
     invalidatePendingPastes()
-    setComposerInput('', [])
+    setComposerInput('')
     setComposerAttachments([])
-    const chatStore = useChatStore.getState()
-    chatStore.clearComposerDraft(activeTabId!)
-    chatStore.clearRepositoryLaunchDraft(activeTabId!)
-    if (targetSessionId !== activeTabId) {
-      chatStore.clearComposerDraft(targetSessionId)
-      chatStore.clearRepositoryLaunchDraft(targetSessionId)
-    }
+    useChatStore.getState().clearComposerDraft(activeTabId!)
+    if (targetSessionId !== activeTabId) useChatStore.getState().clearComposerDraft(targetSessionId)
     if (!isMemberSession) {
       clearWorkspaceReferences(activeTabId!)
       if (targetSessionId !== activeTabId) clearWorkspaceReferences(targetSessionId)
@@ -843,9 +791,9 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     setLocalSlashPanel(null)
   }
 
-  const handleComposerKeyDown = (event: KeyboardEvent): boolean => {
+  const handleKeyDown = (event: React.KeyboardEvent) => {
     // Ignore key events during IME composition (e.g. Chinese input method)
-    if (composingRef.current || event.isComposing || event.keyCode === 229) return false
+    if (composingRef.current || event.nativeEvent.isComposing || event.keyCode === 229) return
 
     // Route file search navigation keys to FileSearchMenu
     if (fileSearchOpen) {
@@ -856,20 +804,20 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
           setFileSearchOpen(false)
           setAtFilter('')
           setAtCursorPos(-1)
-          return true
+          return
         }
-        fileSearchRef.current?.handleKeyDown(event)
-        return true
+        fileSearchRef.current?.handleKeyDown(event.nativeEvent)
+        return
       }
-      // Other keys (typing) should go to the editor - let ProseMirror handle them
-      return false
+      // Other keys (typing) should go to the textarea - let it propagate
+      return
     }
 
     if (localSlashPanel) {
       if (event.key === 'Escape') {
         event.preventDefault()
         setLocalSlashPanel(null)
-        return true
+        return
       }
     }
 
@@ -877,12 +825,12 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
       if (event.key === 'ArrowDown') {
         event.preventDefault()
         setSlashSelectedIndex((prev) => (prev + 1) % filteredCommands.length)
-        return true
+        return
       }
       if (event.key === 'ArrowUp') {
         event.preventDefault()
         setSlashSelectedIndex((prev) => (prev - 1 + filteredCommands.length) % filteredCommands.length)
-        return true
+        return
       }
       if (event.key === 'Enter') {
         const selected = filteredCommands[slashSelectedIndex]
@@ -893,38 +841,36 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
           shouldSubmitOnEnter(event, chatSendBehavior)
         ) {
           event.preventDefault()
-          void handleSubmit()
-          return true
+          handleSubmit()
+          return
         }
         event.preventDefault()
         if (selected) selectSlashCommand(selected.name)
-        return true
+        return
       }
       if (event.key === 'Tab') {
         event.preventDefault()
         const selected = filteredCommands[slashSelectedIndex]
         if (selected) selectSlashCommand(selected.name)
-        return true
+        return
       }
       if (event.key === 'Escape') {
         event.preventDefault()
         setSlashMenuOpen(false)
-        return true
+        return
       }
     }
 
     if (shouldSubmitOnEnter(event, chatSendBehavior)) {
       event.preventDefault()
-      void handleSubmit()
-      return true
+      handleSubmit()
     }
-    return false
   }
 
-  const handleComposerPaste = (event: ClipboardEvent): boolean => {
-    if (isMemberSession) return false
-    const files = event.clipboardData ? getDataTransferFiles(event.clipboardData) : []
-    if (files.length === 0) return false
+  const handlePaste = (event: React.ClipboardEvent) => {
+    if (isMemberSession) return
+    const files = getDataTransferFiles(event.clipboardData)
+    if (files.length === 0) return
 
     event.preventDefault()
     const pasteGeneration = pasteGenerationRef.current
@@ -939,7 +885,6 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
       .catch((error) => {
         console.warn('[attachments] Failed to read pasted files', error)
       })
-    return true
   }
 
   const appendFiles = useCallback((files: FileList | File[]) => {
@@ -1021,15 +966,16 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
   const insertSlashCommand = () => {
     if (isMemberSession) return
-    const cursorPos = composerRef.current?.getSelectionOffsets().start ?? input.length
+    const el = textareaRef.current
+    const cursorPos = el?.selectionStart ?? input.length
     const replacement = replaceSlashToken(input, cursorPos, '', { trailingSpace: false })
     setComposerInput(replacement.value)
     setPlusMenuOpen(false)
     setSlashFilter('')
     setSlashMenuOpen(true)
     requestAnimationFrame(() => {
-      composerRef.current?.focus()
-      composerRef.current?.setSelectionOffsets(replacement.cursorPos)
+      textareaRef.current?.focus()
+      textareaRef.current?.setSelectionRange(replacement.cursorPos, replacement.cursorPos)
     })
   }
 
@@ -1112,27 +1058,37 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
                 setComposerInput(newValue)
                 setAtFilter(relativePath)
                 requestAnimationFrame(() => {
-                  composerRef.current?.focus()
-                  composerRef.current?.setSelectionOffsets(newCursorPos)
+                  textareaRef.current?.focus()
+                  textareaRef.current?.setSelectionRange(newCursorPos, newCursorPos)
                 })
               }}
               onSelect={(path, name, isDirectory) => {
-                if (atCursorPos < 0) return
-                const referenceName = name.split('/').filter(Boolean).pop() ?? name
-                const tokenEnd = atCursorPos + 1 + atFilter.length
-                const inserted = insertMentionIntoText(input, mentions, atCursorPos, tokenEnd, {
-                  label: isDirectory ? `${referenceName}/` : referenceName,
-                  path,
-                  isDirectory,
-                })
-                setComposerInput(inserted.text, inserted.mentions)
-                setFileSearchOpen(false)
-                setAtFilter('')
-                setAtCursorPos(-1)
-                void composerRef.current?.focus()
-                requestAnimationFrame(() => {
-                  composerRef.current?.setSelectionOffsets(inserted.cursorPos)
-                })
+                if (atCursorPos >= 0) {
+                  const referenceName = name.split('/').filter(Boolean).pop() ?? name
+                  const tokenEnd = atCursorPos + 1 + atFilter.length
+                  const beforeToken = input.slice(0, atCursorPos)
+                  const afterToken = beforeToken ? input.slice(tokenEnd) : input.slice(tokenEnd).replace(/^\s+/, '')
+                  const spacer = beforeToken && afterToken && !/\s$/.test(beforeToken) && !/^\s/.test(afterToken) ? ' ' : ''
+                  const newValue = `${beforeToken}${spacer}${afterToken}`
+                  const newCursorPos = atCursorPos + spacer.length
+                  if (activeTabId) {
+                    addWorkspaceReference(activeTabId, {
+                      kind: 'file',
+                      path,
+                      absolutePath: path,
+                      name: isDirectory ? `${referenceName}/` : referenceName,
+                      isDirectory,
+                    })
+                  }
+                  setComposerInput(newValue)
+                  setFileSearchOpen(false)
+                  setAtFilter('')
+                  setAtCursorPos(-1)
+                  void textareaRef.current?.focus()
+                  requestAnimationFrame(() => {
+                    textareaRef.current?.setSelectionRange(newCursorPos, newCursorPos)
+                  })
+                }
               }}
             />
           )}
@@ -1280,56 +1236,53 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
           {isHeroComposer ? (
             <div className="flex items-start gap-3">
-              <MentionComposer
-                ref={composerRef}
-                rootRef={composerContainerRef}
+              <textarea
+                ref={textareaRef}
                 value={input}
-                mentions={mentions}
-                onChange={handleComposerChange}
-                onKeyDown={handleComposerKeyDown}
-                onPaste={handleComposerPaste}
+                onChange={handleInputChange}
+                onKeyDown={handleKeyDown}
                 onCompositionStart={() => { composingRef.current = true }}
                 onCompositionEnd={() => { composingRef.current = false }}
+                onPaste={handlePaste}
                 placeholder={composerPlaceholder}
                 disabled={isWorkspaceMissing}
-                className="flex-1"
-                editorClassName="max-h-[200px] overflow-y-auto py-2 leading-relaxed text-[var(--color-text-primary)]"
-                aria={{
-                  role: isSlashMenuVisible ? 'combobox' : 'textbox',
-                  'aria-autocomplete': isSlashMenuVisible ? 'list' : undefined,
-                  'aria-expanded': isSlashMenuVisible ? 'true' : undefined,
-                  'aria-controls': isSlashMenuVisible ? slashMenuId : undefined,
-                  'aria-activedescendant': isSlashMenuVisible
-                    ? getSlashCommandOptionId(slashMenuId, slashSelectedIndex)
-                    : undefined,
-                }}
+                role={isSlashMenuVisible ? 'combobox' : undefined}
+                aria-autocomplete={isSlashMenuVisible ? 'list' : undefined}
+                aria-expanded={isSlashMenuVisible ? true : undefined}
+                aria-controls={isSlashMenuVisible ? slashMenuId : undefined}
+                aria-activedescendant={isSlashMenuVisible
+                  ? getSlashCommandOptionId(slashMenuId, slashSelectedIndex)
+                  : undefined}
+                rows={2}
+                className="flex-1 resize-none border-none bg-transparent py-2 leading-relaxed text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] disabled:opacity-50"
               />
             </div>
           ) : (
-            <MentionComposer
-              ref={composerRef}
-              rootRef={composerContainerRef}
+            <textarea
+              ref={textareaRef}
               value={input}
-              mentions={mentions}
-              onChange={handleComposerChange}
-              onKeyDown={handleComposerKeyDown}
-              onPaste={handleComposerPaste}
+              onChange={handleInputChange}
+              onKeyDown={handleKeyDown}
               onCompositionStart={() => { composingRef.current = true }}
               onCompositionEnd={() => { composingRef.current = false }}
+              onPaste={handlePaste}
               placeholder={composerPlaceholder}
               disabled={isWorkspaceMissing}
-              editorClassName={`max-h-[200px] overflow-y-auto text-sm leading-relaxed text-[var(--color-text-primary)] ${
+              role={isSlashMenuVisible ? 'combobox' : undefined}
+              aria-autocomplete={isSlashMenuVisible ? 'list' : undefined}
+              aria-expanded={isSlashMenuVisible ? true : undefined}
+              aria-controls={isSlashMenuVisible ? slashMenuId : undefined}
+              aria-activedescendant={isSlashMenuVisible
+                ? getSlashCommandOptionId(slashMenuId, slashSelectedIndex)
+                : undefined}
+              rows={1}
+              // `block`: a textarea is inline-block by default, so it carries a
+              // ~6px descender gap under it. The hero branch escapes it through
+              // its flex row; this one is a plain block child and was sitting
+              // 18px above the divider where the hero sits 12px.
+              className={`block w-full resize-none bg-transparent text-sm leading-relaxed text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] disabled:opacity-50 ${
                 useCompactChrome ? 'py-1.5' : 'py-2'
               }`}
-              aria={{
-                role: isSlashMenuVisible ? 'combobox' : 'textbox',
-                'aria-autocomplete': isSlashMenuVisible ? 'list' : undefined,
-                'aria-expanded': isSlashMenuVisible ? 'true' : undefined,
-                'aria-controls': isSlashMenuVisible ? slashMenuId : undefined,
-                'aria-activedescendant': isSlashMenuVisible
-                  ? getSlashCommandOptionId(slashMenuId, slashSelectedIndex)
-                  : undefined,
-              }}
             />
           )}
 

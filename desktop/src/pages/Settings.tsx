@@ -79,7 +79,6 @@ import { ChatGPTOfficialLogin } from '../components/settings/ChatGPTOfficialLogi
 import { GrokOfficialLogin } from '../components/settings/GrokOfficialLogin'
 import { AgentManager } from '../components/settings/AgentManager'
 import { CcSwitchImportModal } from '../components/settings/CcSwitchImportModal'
-import { ModelIdCombobox } from '../components/settings/ModelIdCombobox'
 import {
   BUILT_IN_PROVIDER_IDS,
   CLAUDE_OFFICIAL_PROVIDER_ID,
@@ -242,11 +241,9 @@ export function Settings() {
     <div className="flex-1 flex flex-col overflow-hidden bg-[var(--color-surface)]">
       <div className="flex-1 flex overflow-hidden">
         {/* Tab navigation */}
-        {/* The 195px handoff puts the rail's divider on the Settings tab's left
-            edge instead of leaving the two seams visibly offset. Its trailing
-            gutter is deliberately tighter than its leading gutter; together
-            with TabButton's tighter trailing padding, that keeps the Japanese
-            "コンピューター操作" clear without moving the row contents left.
+        {/* Narrow enough that the rail is not a gutter of dead space, wide
+            enough that the longest label in any locale — the Japanese
+            "コンピューター操作" — still clears the truncation on TabButton.
 
             Paper, separated by the rule, the way every other secondary panel
             in the app is (the workbench, the diff split). It used to be
@@ -256,7 +253,7 @@ export function Settings() {
             paper fill met a different colour at its bottom edge. It read as a
             white card stranded on a grey panel. Nothing else changed to fix
             it: the tab is right, this was the odd one out. */}
-        <div className="w-[195px] flex-shrink-0 flex flex-col overflow-y-auto border-r border-[var(--color-border)] bg-[var(--color-surface)] py-4 pl-3 pr-1">
+        <div className="w-[220px] flex-shrink-0 flex flex-col overflow-y-auto border-r border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-4">
           <div className="flex-1 flex flex-col gap-0.5">
             <TabButton icon="dns" label={t('settings.tab.providers')} active={activeTab === 'providers'} onClick={() => setActiveTab('providers')} />
             <TabButton icon="tune" label={t('settings.tab.general')} active={activeTab === 'general'} onClick={() => setActiveTab('general')} />
@@ -322,7 +319,7 @@ function TabButton({ icon, label, active, onClick }: { icon: string; label: stri
       aria-current={active ? 'page' : undefined}
       // `ring-offset` has to name the rail's own fill — it is painted, not
       // transparent, so it tracks whatever the rail is.
-      className={`w-full flex items-center gap-2.5 rounded-[var(--radius-md)] py-2 pl-3 pr-2 text-[13.5px] text-left transition-[background-color,color] duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-surface)] ${
+      className={`w-full flex items-center gap-3 rounded-[var(--radius-md)] px-3 py-2 text-[13.5px] text-left transition-[background-color,color] duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-surface)] ${
         active
           ? 'bg-[var(--color-surface-hover)] text-[var(--color-text-primary)] font-medium'
           : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
@@ -1618,9 +1615,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
       buildModelContextWindows(models, nextInputs),
     ))
   }
-  const hasModelsBaseUrl = Boolean(baseUrl.trim())
-  const hasModelsApiKey = Boolean(apiKey.trim())
-  const canFetchModels = hasModelsBaseUrl && hasModelsApiKey
+  const canFetchModels = Boolean(baseUrl.trim() && apiKey.trim())
   const handleFetchModels = async () => {
     if (!canFetchModels || isFetchingModels) return
     const requestId = modelsRequestRef.current + 1
@@ -1661,11 +1656,15 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
   const modelsErrorUpstream = modelsErrorMessage && modelsErrorMessage !== modelsErrorText
     ? modelsErrorMessage
     : null
-  const modelPickerGroups = useMemo(
+  const modelPickerItems = useMemo(
     () => groupProviderModels(
       fetchedModels ?? [],
       t('settings.providers.fetchModelsGroupOther'),
-    ),
+    ).flatMap((group) => group.models.map((model) => ({
+      value: model.id,
+      label: model.id,
+      description: group.group,
+    }))),
     [fetchedModels, t],
   )
   const renderPresetButton = (preset: ProviderPreset) => (
@@ -2006,9 +2005,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
               {t('settings.providers.fetchModels')}
             </Button>
           </div>
-          {!hasModelsApiKey ? (
-            <p className="mb-2 text-[11px] text-[var(--color-text-tertiary)]">{t('settings.providers.fetchModelsApiKeyHint')}</p>
-          ) : !hasModelsBaseUrl ? (
+          {!canFetchModels ? (
             <p className="mb-2 text-[11px] text-[var(--color-text-tertiary)]">{t('settings.providers.fetchModelsHint')}</p>
           ) : modelsErrorCode ? (
             <div role="alert" className="mb-2 flex flex-col gap-0.5">
@@ -2025,9 +2022,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
             <p className="mb-2 text-[11px] text-[var(--color-text-secondary)]">
               {t('settings.providers.fetchModelsLoaded', { count: fetchedModels.length })}
             </p>
-          ) : (
-            <p className="mb-2 text-[11px] text-[var(--color-text-tertiary)]">{t('settings.providers.fetchModelsSupportHint')}</p>
-          )}
+          ) : null}
           <div className="grid grid-cols-2 gap-2">
             {MODEL_SLOTS.map((slot) => {
               const labelKey = slot === 'main'
@@ -2041,17 +2036,28 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
               const pickLabel = t('settings.providers.fetchModelsPick', { label })
               return (
                 <div key={slot} className="min-w-0">
-                  <ModelIdCombobox
-                    label={label}
-                    required={slot === 'main'}
-                    value={models[slot]}
-                    onChange={(value) => handleModelChange(slot, value)}
-                    placeholder={slot === 'main' ? t('settings.providers.modelIdPlaceholder') : t('settings.providers.sameAsMain')}
-                    groups={modelPickerGroups}
-                    pickerLabel={pickLabel}
-                    noMatchesLabel={t('model.noMatches')}
-                    moreResultsLabel={t('settings.providers.fetchModelsMoreResults')}
-                  />
+                  <div className="flex items-end gap-1.5">
+                    <Input
+                      containerClassName="min-w-0 flex-1"
+                      label={label}
+                      required={slot === 'main'}
+                      value={models[slot]}
+                      onChange={(e) => handleModelChange(slot, e.target.value)}
+                      placeholder={slot === 'main' ? t('settings.providers.modelIdPlaceholder') : t('settings.providers.sameAsMain')}
+                    />
+                    {/* The picker only supplements the field — the id stays typeable. */}
+                    {modelPickerItems.length > 0 && (
+                      <Dropdown<string>
+                        items={modelPickerItems}
+                        value={models[slot]}
+                        onChange={(value) => handleModelChange(slot, value)}
+                        label={pickLabel}
+                        align="right"
+                        maxHeight={260}
+                        trigger={<IconButton icon="expand_more" label={pickLabel} size="xl" tone="secondary" bordered />}
+                      />
+                    )}
+                  </div>
                   <Tooltip content={t('settings.providers.model1mSupportTooltip')} placement="bottom-start">
                     <label className="mt-1 inline-flex h-6 w-fit cursor-pointer items-center gap-1.5 rounded-[var(--radius-sm)] px-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]">
                       <input
