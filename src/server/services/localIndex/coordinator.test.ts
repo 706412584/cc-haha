@@ -124,6 +124,81 @@ function rowFromCandidate(item: SessionSourceCandidate): IndexedSessionRow {
   }
 }
 
+function stubWatcher(): ReconciliationWatcher {
+  return {
+    async start() {},
+    async stop() {},
+    queueTranscriptPath() {},
+    queueFullSweep() {},
+    getMetrics: () => ({
+      queuedPaths: 0,
+      maxBatchSize: 0,
+      yielded: 0,
+      fullSweeps: 0,
+      watchFailures: 0,
+    }),
+  }
+}
+
+/**
+ * A projector that commits every candidate into the fake index unless `override` returns a retry
+ * for it, which lets a test isolate how one source's outcome affects global index state.
+ */
+function createRecordingProjector(
+  index: SessionIndex,
+  override: (item: SessionSourceCandidate) =>
+    { kind: 'retry'; reason: 'source-too-large' | 'transient-io' | 'changed-during-read' } | null,
+): SessionProjector {
+  return {
+    async projectSource(item, progress = { discovered: 0, indexed: 0 }) {
+      const retry = override(item)
+      if (retry) return retry
+      ;(index as unknown as {
+        _upsert(item: SessionSourceCandidate, progress: ProjectionProgress): void
+      })._upsert(item, progress)
+      return {
+        kind: 'indexed',
+        action: 'full',
+        projection: {
+          summary: {
+            title: item.sessionId,
+            createdAt: item.fallbackCreatedAt,
+            modifiedAt: item.fallbackModifiedAt,
+            messageCount: 1,
+            workDir: item.fallbackWorkDir,
+          },
+          indexedBytes: 1,
+          pendingTailBytes: 0,
+          malformedLineCount: 0,
+        },
+        work: { maxBufferedChunks: 1, maxBufferedBytes: 1 },
+      }
+    },
+    async deleteSource(path) {
+      ;(index as unknown as { _delete(path: string): void })._delete(path)
+      return { kind: 'deleted' }
+    },
+  } as SessionProjector
+}
+
+function coordinatorDependencies(
+  configDir: string,
+  index: SessionIndex,
+  projector: SessionProjector,
+  discovered: SessionSourceCandidate[],
+): Parameters<typeof createLocalIndexCoordinator>[0] {
+  return {
+    resolveMode: () => ({ mode: 'on', warningCode: null }),
+    resolveScope: () => configDir,
+    resolveDatabasePath: () => join(configDir, 'cc-haha', 'db', 'index-v1.sqlite'),
+    openDatabase: () => fakeDatabase(() => {}),
+    createIndex: () => index,
+    createProjector: () => projector,
+    discoverSources: async () => discovered,
+    createWatcher: () => stubWatcher(),
+  }
+}
+
 function createFakeIndex(seed: SessionSourceCandidate[] = []): SessionIndex {
   const sources = new Map(seed.map(item => [item.path, sourceFromCandidate(item)]))
   const rows = new Map(seed.map(item => [item.path, rowFromCandidate(item)]))
@@ -2017,6 +2092,140 @@ describe('local index coordinator', () => {
 
     expect(discoveryCalls).toBe(0)
     expect(closeCount).toBe(1)
+  })
+
+  it('keeps the index usable when one source exceeds the size ceiling', async () => {
+    const root = await createTempDir('coordinator-source-too-large')
+    const configDir = join(root, 'config')
+    const good = await createRealTranscript(configDir, '-repo', 'good', 'Good')
+    const huge = await createRealTranscript(configDir, '-repo', 'huge', 'Huge')
+    const index = createFakeIndex()
+    const projector = createRecordingProjector(index, item =>
+      item.sessionId === 'huge'
+        ? { kind: 'retry', reason: 'source-too-large' }
+        : null)
+    const coordinator = createLocalIndexCoordinator(
+      coordinatorDependencies(configDir, index, projector, [good, huge]),
+    )
+
+    await coordinator.start()
+    // An oversized source is a bounded per-source limitation, not unfinished reconciliation: the
+    // sweep still settles on `ready` so session reads keep using the index for every other file.
+    await waitFor(() => coordinator.getPublicStatus().state === 'ready')
+    expect(coordinator.getPublicStatus()).toMatchObject({
+      state: 'ready',
+      degradedSources: 0,
+      // Still reported for diagnostics: one source is only partially represented.
+      lastErrorCode: 'LOCAL_INDEX_SOURCE_TOO_LARGE',
+    })
+    expect(coordinator.isSessionScopeReady()).toBe(true)
+    expect(coordinator.listSessions({ limit: 10 }).sessions.map(row => row.id))
+      .toEqual(['good'])
+    await coordinator.stop()
+  })
+
+  it('does not let an oversized source degrade a targeted reconciliation', async () => {
+    const root = await createTempDir('coordinator-source-too-large-targeted')
+    const configDir = join(root, 'config')
+    const good = await createRealTranscript(configDir, '-repo', 'good', 'Good')
+    const index = createFakeIndex()
+    let watcherOptions!: ReconciliationWatcherOptions
+    const projector = createRecordingProjector(index, item =>
+      item.sessionId === 'huge'
+        ? { kind: 'retry', reason: 'source-too-large' }
+        : null)
+    const coordinator = createLocalIndexCoordinator({
+      ...coordinatorDependencies(configDir, index, projector, [good]),
+      createWatcher: options => {
+        watcherOptions = options
+        return stubWatcher()
+      },
+    })
+
+    await coordinator.start()
+    await waitFor(() => coordinator.getPublicStatus().state === 'ready')
+
+    const huge = await createRealTranscript(configDir, '-repo', 'huge', 'Huge')
+    await watcherOptions.onBatch({ paths: [huge.path], fullSweep: false })
+
+    expect(coordinator.getPublicStatus()).toMatchObject({
+      state: 'ready',
+      degradedSources: 0,
+      lastErrorCode: 'LOCAL_INDEX_SOURCE_TOO_LARGE',
+    })
+    expect(coordinator.isSessionScopeReady()).toBe(true)
+    await coordinator.stop()
+  })
+
+  it('does not resurrect a degraded index from a persisted oversized source', async () => {
+    const root = await createTempDir('coordinator-source-too-large-restart')
+    const configDir = join(root, 'config')
+    const good = await createRealTranscript(configDir, '-repo', 'good', 'Good')
+    const huge = await createRealTranscript(configDir, '-repo', 'huge', 'Huge')
+    const index = createFakeIndex([good])
+    // A source row left behind by the previous release: recorded `degraded` purely because it
+    // exceeded the ceiling, alongside a backfill state carrying the same code.
+    const persistedSources: SessionSourceRecord[] = [
+      { ...sourceFromCandidate(good) },
+      {
+        ...sourceFromCandidate(huge),
+        state: 'degraded',
+        lastErrorCode: 'LOCAL_INDEX_SOURCE_TOO_LARGE',
+      },
+    ]
+    index.listSources = () => persistedSources
+    index.getBackfillState = () => ({
+      scope: configDir,
+      state: 'degraded',
+      watermark: huge.path,
+      discovered: 2,
+      indexed: 1,
+      degraded: 1,
+      lastErrorCode: 'LOCAL_INDEX_SOURCE_TOO_LARGE',
+      updatedAtMs: Date.now(),
+    })
+    const projector = createRecordingProjector(index, item =>
+      item.sessionId === 'huge'
+        ? { kind: 'retry', reason: 'source-too-large' }
+        : null)
+    const coordinator = createLocalIndexCoordinator({
+      ...coordinatorDependencies(configDir, index, projector, [good, huge]),
+      schedule: () => {},
+    })
+
+    await coordinator.start()
+    // Before any sweep runs, startup rehydration alone must not report a degraded index.
+    expect(coordinator.getPublicStatus()).toMatchObject({
+      state: 'building',
+      degradedSources: 1,
+    })
+    expect(coordinator.getPublicStatus().state).not.toBe('degraded')
+    await coordinator.stop()
+  })
+
+  it('still degrades the index for a genuine per-source read failure', async () => {
+    const root = await createTempDir('coordinator-source-transient-io')
+    const configDir = join(root, 'config')
+    const good = await createRealTranscript(configDir, '-repo', 'good', 'Good')
+    const flaky = await createRealTranscript(configDir, '-repo', 'flaky', 'Flaky')
+    const index = createFakeIndex()
+    const projector = createRecordingProjector(index, item =>
+      item.sessionId === 'flaky'
+        ? { kind: 'retry', reason: 'transient-io' }
+        : null)
+    const coordinator = createLocalIndexCoordinator(
+      coordinatorDependencies(configDir, index, projector, [good, flaky]),
+    )
+
+    await coordinator.start()
+    await waitFor(() => coordinator.getPublicStatus().lastErrorCode !== null)
+    expect(coordinator.getPublicStatus()).toMatchObject({
+      state: 'degraded',
+      degradedSources: 1,
+      lastErrorCode: 'LOCAL_INDEX_TRANSIENT_IO',
+    })
+    expect(coordinator.isSessionScopeReady()).toBe(false)
+    await coordinator.stop()
   })
 
   it.each(['project-directory', 'transcript-stat'] as const)(

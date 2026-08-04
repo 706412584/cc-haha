@@ -1417,6 +1417,150 @@ describe('ConversationService', () => {
     }
   })
 
+  it('should produce identical inspection snapshots when resuming an appended transcript', async () => {
+    const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
+    const previousNodeEnv = process.env.NODE_ENV
+    const tmpConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-inspect-resume-'))
+    const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-workdir-inspect-resume-'))
+    process.env.CLAUDE_CONFIG_DIR = tmpConfigDir
+    process.env.NODE_ENV = 'development'
+
+    try {
+      const warmService = new SessionService()
+      const { sessionId } = await warmService.createSession(workDir)
+      const found = await warmService.findSessionFile(sessionId)
+      expect(found).not.toBeNull()
+
+      const turn = (index: number, model: string, cost: number) => [
+        JSON.stringify({
+          type: 'user',
+          uuid: crypto.randomUUID(),
+          timestamp: `2026-07-20T12:0${index}:00.000Z`,
+          cwd: workDir,
+          message: {
+            role: 'user',
+            content: [{ type: 'text', text: `问题 ${index} 包含多字节字符以覆盖分块边界` }],
+          },
+        }),
+        JSON.stringify({
+          type: 'assistant',
+          uuid: crypto.randomUUID(),
+          timestamp: `2026-07-20T12:0${index}:01.000Z`,
+          cwd: workDir,
+          costUSD: cost,
+          message: {
+            role: 'assistant',
+            model,
+            content: [{ type: 'text', text: `回答 ${index}` }],
+            usage: {
+              input_tokens: 100 * index,
+              output_tokens: 20 * index,
+              cache_read_input_tokens: 5 * index,
+              cache_creation_input_tokens: 3 * index,
+            },
+          },
+        }),
+      ].join('\n') + '\n'
+
+      await fs.appendFile(found!.filePath, turn(1, 'claude-sonnet-4-6', 0.01))
+      // Warms the resume cache at the current byte offset.
+      const firstSnapshot = await warmService.getInspectionTranscriptSnapshot(sessionId)
+      expect(firstSnapshot?.usage.totalCostUSD).toBeGreaterThan(0)
+
+      await fs.appendFile(found!.filePath, turn(2, 'claude-opus-4-8', 0.02))
+      // A record the CLI is still writing: no trailing newline yet.
+      const partial = turn(3, 'claude-sonnet-4-6', 0.04)
+      const splitAt = Math.floor(partial.length / 2)
+      await fs.appendFile(found!.filePath, partial.slice(0, splitAt))
+
+      const resumedMidWrite = await warmService.getInspectionTranscriptSnapshot(sessionId)
+      const coldMidWrite = await new SessionService().getInspectionTranscriptSnapshot(sessionId)
+      expect(resumedMidWrite).toEqual(coldMidWrite)
+
+      await fs.appendFile(found!.filePath, partial.slice(splitAt))
+
+      const resumedComplete = await warmService.getInspectionTranscriptSnapshot(sessionId)
+      const coldComplete = await new SessionService().getInspectionTranscriptSnapshot(sessionId)
+      expect(resumedComplete).toEqual(coldComplete)
+      // The previously partial record is picked up once it is whole.
+      expect(resumedComplete!.usage.totalCostUSD).toBeGreaterThan(
+        resumedMidWrite!.usage.totalCostUSD,
+      )
+      expect(resumedComplete!.usage.models.length).toBe(2)
+    } finally {
+      if (previousConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = previousConfigDir
+      }
+      if (previousNodeEnv === undefined) {
+        delete process.env.NODE_ENV
+      } else {
+        process.env.NODE_ENV = previousNodeEnv
+      }
+      await fs.rm(tmpConfigDir, { recursive: true, force: true })
+      await fs.rm(workDir, { recursive: true, force: true })
+    }
+  })
+
+  it('should re-fold the inspection snapshot when a transcript is truncated', async () => {
+    const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
+    const previousNodeEnv = process.env.NODE_ENV
+    const tmpConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-inspect-truncate-'))
+    const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-workdir-inspect-truncate-'))
+    process.env.CLAUDE_CONFIG_DIR = tmpConfigDir
+    process.env.NODE_ENV = 'development'
+
+    try {
+      const svc = new SessionService()
+      const { sessionId } = await svc.createSession(workDir)
+      const found = await svc.findSessionFile(sessionId)
+      expect(found).not.toBeNull()
+
+      const baseline = await fs.readFile(found!.filePath, 'utf8')
+      const assistantLine = JSON.stringify({
+        type: 'assistant',
+        uuid: crypto.randomUUID(),
+        timestamp: '2026-07-20T12:00:01.000Z',
+        cwd: workDir,
+        costUSD: 0.5,
+        message: {
+          role: 'assistant',
+          model: 'claude-sonnet-4-6',
+          content: [{ type: 'text', text: 'expensive turn' }],
+          usage: { input_tokens: 1000, output_tokens: 200 },
+        },
+      }) + '\n'
+
+      await fs.appendFile(found!.filePath, assistantLine)
+      const before = await svc.getInspectionTranscriptSnapshot(sessionId)
+      expect(before?.usage.totalCostUSD).toBeGreaterThan(0)
+      expect(before?.usage.totalInputTokens).toBe(1000)
+
+      // Rewrite shorter than the folded offset: the cached aggregate is stale.
+      await fs.writeFile(found!.filePath, baseline)
+
+      // The expensive turn is gone, so a correct re-fold reports no usage at
+      // all — carrying the cached aggregate forward would keep reporting it.
+      const after = await svc.getInspectionTranscriptSnapshot(sessionId)
+      expect(after?.usage).toBeNull()
+      expect(after).toEqual(await new SessionService().getInspectionTranscriptSnapshot(sessionId))
+    } finally {
+      if (previousConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = previousConfigDir
+      }
+      if (previousNodeEnv === undefined) {
+        delete process.env.NODE_ENV
+      } else {
+        process.env.NODE_ENV = previousNodeEnv
+      }
+      await fs.rm(tmpConfigDir, { recursive: true, force: true })
+      await fs.rm(workDir, { recursive: true, force: true })
+    }
+  })
+
   it('should use active provider model context windows for transcript estimates', async () => {
     const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
     const previousNodeEnv = process.env.NODE_ENV
