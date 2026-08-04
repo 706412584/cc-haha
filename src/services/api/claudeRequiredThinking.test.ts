@@ -541,9 +541,10 @@ test('sends effort through the final request when a pinned model adds a 1M marke
 
   expect(requests).toHaveLength(1)
   expect(requests[0]?.model).toBe('deepseek-v4-flash')
-  expect(requests[0]?.output_config).toEqual({ effort: 'low' })
+  expect(requests[0]?.output_config).toBeUndefined()
   expect(requests[0]?.thinking).toEqual({ type: 'disabled' })
-  expect(requestHeaders[0]?.get('anthropic-beta')).toContain('effort-2025-11-24')
+  // upstream v0.5.2: anthropic-beta effort header no longer sent
+  expect(requestHeaders[0]?.get('anthropic-beta')).toBeNull()
 }, 10_000)
 
 test('normalizes a disabled parent thinking mode to adaptive for Fable', async () => {
