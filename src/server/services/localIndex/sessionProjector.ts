@@ -224,6 +224,13 @@ async function streamProjection(options: {
   metrics?: LocalIndexIoMetrics
   assertActive: () => void
   isSubagent?: boolean
+  /**
+   * Byte ceiling for this pass. A source larger than the ceiling is indexed as a prefix and
+   * committed `pending` instead of being rejected: the reduction stops at the last complete
+   * line at or before the ceiling, so `indexedBytes` stays on a newline boundary and the
+   * unread remainder is reported as pending tail.
+   */
+  readLimit: number
 }): Promise<{
   projection: TranscriptProjection
   entryLocators: TranscriptEntryLocator[]
@@ -252,6 +259,8 @@ async function streamProjection(options: {
     let chunks: TranscriptChunk[] = []
     let chunkBytes = 0
     const entryLocators: TranscriptEntryLocator[] = []
+    const readEnd = Math.min(options.snapshot.size, options.readLimit)
+    const truncated = readEnd < options.snapshot.size
 
     const flush = (): void => {
       if (chunks.length === 0) return
@@ -268,9 +277,9 @@ async function streamProjection(options: {
       chunkBytes = 0
     }
 
-    while (position < options.snapshot.size) {
+    while (position < readEnd) {
       options.assertActive()
-      const requested = Math.min(READ_BUFFER_BYTES, options.snapshot.size - position)
+      const requested = Math.min(READ_BUFFER_BYTES, readEnd - position)
       const buffer = Buffer.allocUnsafe(requested)
       const { bytesRead } = await handle.read(buffer, 0, requested, position)
       increment(options.metrics, 'bytesRead', bytesRead)
@@ -325,7 +334,23 @@ async function streamProjection(options: {
     }
 
     flush()
-    if (pendingSegmentsLength > 0) {
+    if (truncated) {
+      // The bytes after `readEnd` were never read, and any buffered fragment is a line cut by
+      // the ceiling rather than a genuine partial trailing line. Report the whole unread
+      // remainder as pending tail so the source commits `pending` and a later pass resumes
+      // from the last complete line instead of mistaking the cut for end-of-file.
+      if (projection === options.seed) {
+        // Nothing was reduced this pass, so `projection` is still the caller's seed. Reduce an
+        // empty chunk list to obtain an owned clone that keeps the reducer state attached; the
+        // seed itself may be a cached projection shared with a later append.
+        projection = reduceTranscriptWithLocators(
+          [],
+          projection,
+          { isSubagent: options.isSubagent },
+        ).projection
+      }
+      projection.pendingTailBytes = options.snapshot.size - projection.indexedBytes
+    } else if (pendingSegmentsLength > 0) {
       const pending = pendingSegments.length === 1
         ? pendingSegments[0]!
         : Buffer.concat(pendingSegments, pendingSegmentsLength)
@@ -641,6 +666,8 @@ export function createSessionProjector(options: SessionProjectorOptions): Sessio
     start: number,
     seed: TranscriptProjection,
     isSubagent = false,
+    // Activity projections have never been size-capped; only `projectSource` passes a ceiling.
+    readLimit = Number.POSITIVE_INFINITY,
   ): Promise<{
     projection: TranscriptProjection
     entryLocators: TranscriptEntryLocator[]
@@ -684,6 +711,7 @@ export function createSessionProjector(options: SessionProjectorOptions): Sessio
       metrics: options.metrics,
       assertActive,
       isSubagent,
+      readLimit,
     })
     assertActive()
     const commitSnapshot = await captureSourceFingerprint({
@@ -714,9 +742,11 @@ export function createSessionProjector(options: SessionProjectorOptions): Sessio
       }
       const source = await io.statPath(candidate.path).catch(() => null)
       if (!source) return { kind: 'retry', reason: 'transient-io' }
-      if (source.size > maxSourceBytes) {
-        return { kind: 'retry', reason: 'source-too-large' }
-      }
+      // A source past the ceiling is indexed as a prefix rather than rejected. Rejecting it left
+      // the session invisible forever (the file only grows, so it can never come back under the
+      // ceiling) and pinned the whole index to `degraded`, which forced every session list onto a
+      // full-disk scan. The prefix commits as `pending`, so the session is listable and the
+      // remainder stays accounted for as pending tail.
       const existing = options.index.getSource(candidate.path)
       let action: 'full' | 'append' | 'rebuild' = 'full'
       let start = 0
@@ -775,12 +805,18 @@ export function createSessionProjector(options: SessionProjectorOptions): Sessio
 
       let built
       try {
-        built = await buildProjection(candidate, start, seed)
+        built = await buildProjection(candidate, start, seed, false, maxSourceBytes)
       } catch (error) {
         if (action === 'append' && error instanceof TranscriptRebuildRequiredError) {
           action = 'rebuild'
           try {
-            built = await buildProjection(candidate, 0, initialProjection(candidate))
+            built = await buildProjection(
+              candidate,
+              0,
+              initialProjection(candidate),
+              false,
+              maxSourceBytes,
+            )
           } catch (rebuildError) {
             return retryFrom(rebuildError)
           }

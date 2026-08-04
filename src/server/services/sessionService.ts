@@ -439,12 +439,90 @@ function providerModelLooksRelated(
   ))
 }
 
-function safeJsonLength(value: unknown): number {
-  if (value === undefined) return 0
-  try {
-    return JSON.stringify(value)?.length ?? 0
-  } catch {
-    return 0
+/**
+ * Accumulator for the getInspectionTranscriptSnapshot fold.
+ *
+ * Every field is monotonic with respect to appended transcript records — sums
+ * only grow, scalars are last-wins, firstUsageAt/lastUsageAt are min/max, and
+ * `models` is upserted per model. That is what makes resuming from a byte
+ * offset equivalent to re-reading the whole file.
+ */
+type InspectionFoldState = {
+  latestWorkDir: string | null
+  latestCwd: string | null
+  repository: PreparedSessionWorkspace['repository'] | undefined
+  worktreeSession: PersistedWorktreeSession | null | undefined
+  permissionMode: string | undefined
+  runtimeProviderId: string | null | undefined
+  runtimeModelId: string | undefined
+  effortLevel: string | undefined
+  customTitle: string | null
+  transcriptMessageCount: number
+  metadata: TranscriptMetadataSnapshot
+  models: Map<string, TranscriptUsageSnapshot['models'][number]>
+  totalCostUSD: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalCacheReadInputTokens: number
+  totalCacheCreationInputTokens: number
+  totalWebSearchRequests: number
+  hasUnknownModelCost: boolean
+  firstUsageAt: number | null
+  lastUsageAt: number | null
+  latestContextUsage: {
+    model: string
+    inputTokens: number
+    outputTokens: number
+    cacheReadInputTokens: number
+    cacheCreationInputTokens: number
+  } | null
+  estimatedTokensFromMessages: number
+  transcriptHasMediaInput: boolean
+}
+
+function createInspectionFoldState(): InspectionFoldState {
+  return {
+    latestWorkDir: null,
+    latestCwd: null,
+    repository: undefined,
+    worktreeSession: undefined,
+    permissionMode: undefined,
+    runtimeProviderId: undefined,
+    runtimeModelId: undefined,
+    effortLevel: undefined,
+    customTitle: null,
+    transcriptMessageCount: 0,
+    metadata: {},
+    models: new Map(),
+    totalCostUSD: 0,
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    totalCacheReadInputTokens: 0,
+    totalCacheCreationInputTokens: 0,
+    totalWebSearchRequests: 0,
+    hasUnknownModelCost: false,
+    firstUsageAt: null,
+    lastUsageAt: null,
+    latestContextUsage: null,
+    estimatedTokensFromMessages: 0,
+    transcriptHasMediaInput: false,
+  }
+}
+
+/**
+ * Isolate a fold state so cache and caller never share mutable structure.
+ * Callers mutate `models` entries after the fold (contextWindow lookup), which
+ * would otherwise corrupt the cached aggregate for the next resume.
+ */
+function cloneInspectionFoldState(state: InspectionFoldState): InspectionFoldState {
+  return {
+    ...state,
+    metadata: { ...state.metadata },
+    repository: state.repository ? { ...state.repository } : state.repository,
+    latestContextUsage: state.latestContextUsage ? { ...state.latestContextUsage } : null,
+    models: new Map(
+      [...state.models.entries()].map(([key, value]) => [key, { ...value }]),
+    ),
   }
 }
 
@@ -512,6 +590,37 @@ export class SessionService {
     entries: RawEntry[]
   }>()
   private readonly readJsonlInFlight = new Map<string, Promise<RawEntry[]>>()
+  /**
+   * Resumable fold state for getInspectionTranscriptSnapshot, keyed by path.
+   *
+   * The snapshot is a fold over an append-only transcript whose every
+   * accumulator is monotonic (sums, min/max, last-wins scalars, Map upserts),
+   * so resuming from a byte offset yields the same result as a full re-parse.
+   * Holds small aggregates, not file content. Bounded to a handful of entries
+   * because only sessions under active inspection are polled.
+   */
+  private readonly inspectionFoldCache = new Map<string, {
+    offset: number
+    fold: InspectionFoldState
+  }>()
+  private readonly inspectionFoldCacheMaxEntries = 8
+  /**
+   * Resume point for the session-list summary fold, keyed by transcript path.
+   *
+   * `sessionListSummaryCache` already skips files whose (mtime, size) are
+   * unchanged, so the files that reach `scanSessionListSummary` on a sidebar
+   * refresh are the ones being appended to right now — the active session. On a
+   * multi-hundred-MB transcript that full re-parse is seconds of CPU per
+   * refresh. Holding the reducer's projection lets the next scan fold only the
+   * appended bytes.
+   */
+  private readonly sessionSummaryFoldCache = new Map<string, {
+    size: number
+    mtimeMs: number
+    projection: TranscriptProjection
+    fallbackModifiedAt: string
+  }>()
+  private readonly sessionSummaryFoldCacheMaxEntries = 8
   private readonly recordJsonlParseMetric: (metric: JsonlParseMetric) => void
   /** R2: rate-limit oversized console.warn per path so logs don't look like a storm. */
   private readonly oversizedWarnLastAt = new Map<string, number>()
@@ -1173,42 +1282,117 @@ export class SessionService {
     filePath: string,
     onEntry: (entry: RawEntry) => void,
   ): Promise<void> {
-    const stream = createReadStream(filePath, { encoding: 'utf8' })
-    const lines = createInterface({
-      input: stream,
-      crlfDelay: Infinity,
-    })
+    // Whole-file read: a last line with no trailing newline is still a record.
+    await this.streamJsonlFileFrom(filePath, 0, onEntry, true)
+  }
+
+  /**
+   * Stream JSONL records starting at a byte offset.
+   *
+   * Returns `consumed`, the offset just past the last complete (newline
+   * terminated) line. Transcripts are append-only, so a caller that remembers
+   * this offset can resume and see only new records instead of re-parsing the
+   * whole file. That matters on multi-hundred-MB transcripts, where a full
+   * re-parse costs seconds and is triggered per message by inspection/sidebar
+   * refreshes.
+   *
+   * With `includeTrailingPartial`, a final line lacking a newline is still
+   * parsed — but it is excluded from `consumed` and flagged via
+   * `consumedTrailingPartial`, because a resuming caller must re-read it once
+   * it is complete and so must not fold it into a cached aggregate.
+   */
+  private async streamJsonlFileFrom(
+    filePath: string,
+    startOffset: number,
+    onEntry: (entry: RawEntry) => void,
+    includeTrailingPartial = false,
+  ): Promise<{ consumed: number; consumedTrailingPartial: boolean }> {
+    let consumed = startOffset
+    let consumedTrailingPartial = false
+    const stream = createReadStream(filePath, { start: startOffset })
+    // Buffer-based splitting: a multi-byte character can straddle a chunk
+    // boundary, so decoding each chunk to a string independently would corrupt
+    // it. CJK transcripts are the common case here.
+    let pending: Buffer[] = []
+    let pendingLength = 0
+
+    const handleLine = (line: Buffer): void => {
+      const trimmed = line.toString('utf8').trim()
+      if (!trimmed) return
+      try {
+        onEntry(JSON.parse(trimmed) as RawEntry)
+      } catch {
+        // skip malformed lines
+      }
+    }
 
     try {
-      for await (const line of lines) {
-        const trimmed = line.trim()
-        if (!trimmed) continue
-        try {
-          onEntry(JSON.parse(trimmed) as RawEntry)
-        } catch {
-          // skip malformed lines
+      for await (const chunk of stream) {
+        let buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        let newlineIndex = buffer.indexOf(0x0a)
+        while (newlineIndex !== -1) {
+          const segment = buffer.subarray(0, newlineIndex)
+          let line: Buffer
+          if (pendingLength > 0) {
+            pending.push(segment)
+            line = Buffer.concat(pending, pendingLength + segment.length)
+            pending = []
+            pendingLength = 0
+          } else {
+            line = segment
+          }
+          consumed += line.length + 1
+          handleLine(line)
+          buffer = buffer.subarray(newlineIndex + 1)
+          newlineIndex = buffer.indexOf(0x0a)
         }
+        if (buffer.length > 0) {
+          pending.push(buffer)
+          pendingLength += buffer.length
+        }
+      }
+
+      // A file whose final record has no trailing newline. It is parsed but not
+      // counted as consumed: the writer may still be appending to this line, so
+      // a resuming caller has to re-read it once it is terminated.
+      if (includeTrailingPartial && pendingLength > 0) {
+        const line = pending.length === 1
+          ? pending[0]!
+          : Buffer.concat(pending, pendingLength)
+        consumedTrailingPartial = true
+        handleLine(line)
       }
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
         throw err
       }
     } finally {
-      lines.close()
       stream.destroy()
     }
+
+    return { consumed, consumedTrailingPartial }
   }
 
+  /**
+   * Fold a transcript into its session-list summary, resuming from the last
+   * scan when the file has only grown.
+   *
+   * `reduceTranscript` resumes only from the exact projection object it
+   * produced (it keeps reducer state in a WeakMap keyed by that object), so the
+   * cache holds the projection itself rather than a serialized copy.
+   */
   private async scanSessionListSummary(
     filePath: string,
     projectDir: string,
-    stat: { birthtime: Date; mtime: Date },
+    stat: { birthtime: Date; mtime: Date; mtimeMs: number; size: number },
   ): Promise<SessionListSummary> {
-    let projection: TranscriptProjection = {
+    const fallbackModifiedAt = stat.mtime.toISOString()
+    const seed = this.takeSessionSummaryFoldSeed(filePath, stat)
+    let projection: TranscriptProjection = seed?.projection ?? {
       summary: {
         title: 'Untitled Session',
         createdAt: stat.birthtime.toISOString(),
-        modifiedAt: stat.mtime.toISOString(),
+        modifiedAt: fallbackModifiedAt,
         messageCount: 0,
         workDir: this.desanitizePath(projectDir),
       },
@@ -1216,11 +1400,12 @@ export class SessionService {
       pendingTailBytes: 0,
       malformedLineCount: 0,
     }
-    const stream = createReadStream(filePath)
+    const startOffset = seed?.projection.indexedBytes ?? 0
+    const stream = createReadStream(filePath, { start: startOffset })
     let lineSegments: Buffer[] = []
     let lineSegmentsLength = 0
-    let lineByteStart = 0
-    let bytesRead = 0
+    let lineByteStart = startOffset
+    let bytesRead = startOffset
     let chunks: TranscriptChunk[] = []
 
     const flushChunks = () => {
@@ -1272,6 +1457,9 @@ export class SessionService {
       }
 
       flushChunks()
+      // Only complete lines are resumable: the writer may still be appending to
+      // a trailing partial, so it is folded in after the seed is stored.
+      this.storeSessionSummaryFoldSeed(filePath, stat, projection, fallbackModifiedAt)
       if (lineSegmentsLength > 0) {
         const pending = lineSegments.length === 1
           ? lineSegments[0]!
@@ -1286,7 +1474,58 @@ export class SessionService {
       stream.destroy()
     }
 
-    return projection.summary
+    const summary = projection.summary
+    // A transcript with no parseable timestamps falls back to the stat mtime the
+    // reducer was seeded with. On a resume that seed is the *first* scan's
+    // mtime, so refresh it or the sidebar would sort on a stale value.
+    return seed && summary.modifiedAt === seed.fallbackModifiedAt
+      ? { ...summary, modifiedAt: fallbackModifiedAt }
+      : summary
+  }
+
+  /**
+   * Cached projection to resume a session-list summary scan from, if the file
+   * has only been appended to since it was produced.
+   *
+   * Returns undefined on a shrink or an mtime that moved backwards — both mean
+   * the transcript was rewritten, so the append-only assumption is broken and
+   * the cached fold is wrong.
+   */
+  private takeSessionSummaryFoldSeed(
+    filePath: string,
+    stat: { size: number; mtimeMs: number },
+  ): {
+    projection: TranscriptProjection
+    fallbackModifiedAt: string
+  } | undefined {
+    const cached = this.sessionSummaryFoldCache.get(filePath)
+    if (!cached) return undefined
+    // Drop the entry either way: on a resume the fresh projection replaces it,
+    // and on a rewrite it is worthless.
+    this.sessionSummaryFoldCache.delete(filePath)
+    if (stat.size < cached.projection.indexedBytes) return undefined
+    if (stat.mtimeMs < cached.mtimeMs) return undefined
+    return cached
+  }
+
+  private storeSessionSummaryFoldSeed(
+    filePath: string,
+    stat: { size: number; mtimeMs: number },
+    projection: TranscriptProjection,
+    fallbackModifiedAt: string,
+  ): void {
+    this.sessionSummaryFoldCache.delete(filePath)
+    this.sessionSummaryFoldCache.set(filePath, {
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      projection,
+      fallbackModifiedAt,
+    })
+    while (this.sessionSummaryFoldCache.size > this.sessionSummaryFoldCacheMaxEntries) {
+      const oldest = this.sessionSummaryFoldCache.keys().next().value
+      if (oldest === undefined) break
+      this.sessionSummaryFoldCache.delete(oldest)
+    }
   }
 
   /**
@@ -1946,18 +2185,6 @@ export class SessionService {
     }
 
     return false
-  }
-
-  private isVisibleTranscriptMessageEntry(entry: RawEntry): boolean {
-    if (!entry.message?.role || entry.isMeta) return false
-    if (
-      entry.type !== 'user' &&
-      entry.type !== 'assistant' &&
-      entry.type !== 'system'
-    ) {
-      return false
-    }
-    return !this.shouldHideTranscriptEntry(entry)
   }
 
   private isGoalLocalCommandOutput(output: string): boolean {
@@ -2959,32 +3186,90 @@ export class SessionService {
     }
   }
 
+  /**
+   * Resume point for the inspection fold, or a fresh state.
+   *
+   * Only resumes when the file has grown from the cached size. A shrink means
+   * the transcript was rewritten/replaced, so any cached aggregate is wrong and
+   * we re-fold from zero.
+   */
+  private async takeInspectionFoldSeed(
+    filePath: string,
+  ): Promise<{ offset: number; fold: InspectionFoldState }> {
+    const cached = this.inspectionFoldCache.get(filePath)
+    if (!cached) return { offset: 0, fold: createInspectionFoldState() }
+
+    let size: number
+    try {
+      size = (await fs.stat(filePath)).size
+    } catch {
+      this.inspectionFoldCache.delete(filePath)
+      return { offset: 0, fold: createInspectionFoldState() }
+    }
+
+    // Shrunk below what we already folded: the file was truncated or replaced,
+    // so the append-only assumption no longer holds and the aggregate is stale.
+    if (size < cached.offset) {
+      this.inspectionFoldCache.delete(filePath)
+      return { offset: 0, fold: createInspectionFoldState() }
+    }
+
+    // Clone: the caller mutates models entries (contextWindow) after folding.
+    return { offset: cached.offset, fold: cloneInspectionFoldState(cached.fold) }
+  }
+
+  private storeInspectionFoldState(
+    filePath: string,
+    offset: number,
+    fold: InspectionFoldState,
+  ): void {
+    this.inspectionFoldCache.delete(filePath)
+    this.inspectionFoldCache.set(filePath, {
+      size: offset,
+      offset,
+      fold: cloneInspectionFoldState(fold),
+    })
+    while (this.inspectionFoldCache.size > this.inspectionFoldCacheMaxEntries) {
+      const oldest = this.inspectionFoldCache.keys().next().value
+      if (oldest === undefined) break
+      this.inspectionFoldCache.delete(oldest)
+    }
+  }
+
   async getInspectionTranscriptSnapshot(sessionId: string): Promise<SessionInspectionTranscriptSnapshot | null> {
     const found = await this.findSessionFile(sessionId)
     if (!found) return null
 
-    let latestWorkDir: string | null = null
-    let latestCwd: string | null = null
-    let repository: PreparedSessionWorkspace['repository'] | undefined
-    let worktreeSession: PersistedWorktreeSession | null | undefined
-    let permissionMode: string | undefined
-    let runtimeProviderId: string | null | undefined
-    let runtimeModelId: string | undefined
-    let effortLevel: string | undefined
-    let customTitle: string | null = null
-    let transcriptMessageCount = 0
-    const metadata: TranscriptMetadataSnapshot = {}
+    // Resume the fold from the last known byte offset when the transcript has
+    // only grown. Every accumulator below is monotonic over an append-only
+    // file, so this yields the same result as re-parsing from byte 0 — which on
+    // a multi-hundred-MB transcript costs seconds and is triggered on every
+    // inspection poll during an active conversation.
+    const seed = await this.takeInspectionFoldSeed(found.filePath)
+    const startOffset = seed.offset
 
-    const models = new Map<string, TranscriptUsageSnapshot['models'][number]>()
-    let totalCostUSD = 0
-    let totalInputTokens = 0
-    let totalOutputTokens = 0
-    let totalCacheReadInputTokens = 0
-    let totalCacheCreationInputTokens = 0
-    let totalWebSearchRequests = 0
-    let hasUnknownModelCost = false
-    let firstUsageAt: number | null = null
-    let lastUsageAt: number | null = null
+    let latestWorkDir: string | null = seed.fold.latestWorkDir
+    let latestCwd: string | null = seed.fold.latestCwd
+    let repository: PreparedSessionWorkspace['repository'] | undefined = seed.fold.repository
+    let worktreeSession: PersistedWorktreeSession | null | undefined = seed.fold.worktreeSession
+    let permissionMode: string | undefined = seed.fold.permissionMode
+    let runtimeProviderId: string | null | undefined = seed.fold.runtimeProviderId
+    let runtimeModelId: string | undefined = seed.fold.runtimeModelId
+    let effortLevel: string | undefined = seed.fold.effortLevel
+    let customTitle: string | null = seed.fold.customTitle
+    let transcriptMessageCount = seed.fold.transcriptMessageCount
+    const metadata: TranscriptMetadataSnapshot = seed.fold.metadata
+
+    const models = seed.fold.models
+    let totalCostUSD = seed.fold.totalCostUSD
+    let totalInputTokens = seed.fold.totalInputTokens
+    let totalOutputTokens = seed.fold.totalOutputTokens
+    let totalCacheReadInputTokens = seed.fold.totalCacheReadInputTokens
+    let totalCacheCreationInputTokens = seed.fold.totalCacheCreationInputTokens
+    let totalWebSearchRequests = seed.fold.totalWebSearchRequests
+    let hasUnknownModelCost = seed.fold.hasUnknownModelCost
+    let firstUsageAt: number | null = seed.fold.firstUsageAt
+    let lastUsageAt: number | null = seed.fold.lastUsageAt
 
     let latestContextUsage: {
       model: string
@@ -2992,11 +3277,11 @@ export class SessionService {
       outputTokens: number
       cacheReadInputTokens: number
       cacheCreationInputTokens: number
-    } | null = null
-    let estimatedTokensFromMessages = 0
-    let transcriptHasMediaInput = false
+    } | null = seed.fold.latestContextUsage
+    let estimatedTokensFromMessages = seed.fold.estimatedTokensFromMessages
+    let transcriptHasMediaInput = seed.fold.transcriptHasMediaInput
 
-    await this.streamJsonlFile(found.filePath, (entry) => {
+    const { consumed: consumedOffset } = await this.streamJsonlFileFrom(found.filePath, startOffset, (entry) => {
       if (typeof entry.message?.model === 'string') {
         metadata.model = entry.message.model
       }
@@ -3161,6 +3446,34 @@ export class SessionService {
       }
     })
 
+    // Snapshot the fold before the contextWindow lookup below mutates `models`.
+    this.storeInspectionFoldState(found.filePath, consumedOffset, {
+      latestWorkDir,
+      latestCwd,
+      repository,
+      worktreeSession,
+      permissionMode,
+      runtimeProviderId,
+      runtimeModelId,
+      effortLevel,
+      customTitle,
+      transcriptMessageCount,
+      metadata,
+      models,
+      totalCostUSD,
+      totalInputTokens,
+      totalOutputTokens,
+      totalCacheReadInputTokens,
+      totalCacheCreationInputTokens,
+      totalWebSearchRequests,
+      hasUnknownModelCost,
+      firstUsageAt,
+      lastUsageAt,
+      latestContextUsage,
+      estimatedTokensFromMessages,
+      transcriptHasMediaInput,
+    })
+
     const workDir = latestWorkDir || latestCwd || this.desanitizePath(found.projectDir) || process.cwd()
     const launchInfo: SessionLaunchInfo = {
       filePath: found.filePath,
@@ -3318,6 +3631,46 @@ export class SessionService {
     }
   }
 
+  /**
+   * Whether a page read while the index is still `building` can stand in for the
+   * file scan.
+   *
+   * Discovery sorts candidates only within a batch and walks project
+   * directories in readdir order, so a partially built index holds an arbitrary
+   * subset of sessions — the first page can silently omit sessions that are
+   * newer than everything in it. Only a row count that already covers every
+   * discovered transcript is safe to serve; anything short of that falls back to
+   * the file scan, which is complete by construction.
+   *
+   * Counting is a readdir per project directory (~6ms for 30 directories), and
+   * only while building, so it is far cheaper than the summary scan it guards.
+   */
+  /**
+   * Whether a `building` index holds a row for every transcript on disk.
+   *
+   * While building, `status.discovered` only counts what the sweep has walked so
+   * far, so `indexed/discovered` stays near 1 and says nothing about coverage.
+   * Worse, discovery sorts by mtime only *within* a 25-file batch and visits
+   * project directories in readdir order, so a partial index is an arbitrary
+   * subset — page 1 can silently omit genuinely newer sessions.
+   *
+   * The denominator is a readdir of the project directories (no file reads),
+   * which measured ~6ms here, so we pay it rather than serve a wrong ordering.
+   */
+  private async indexedPageCoversDiscoveredFiles(
+    indexedTotal: number,
+    project?: string,
+  ): Promise<boolean> {
+    // An empty index during building is never authoritative.
+    if (indexedTotal === 0) return false
+    try {
+      const discovered = await this.discoverSessionFiles(project)
+      return indexedTotal >= discovered.length
+    } catch {
+      return false
+    }
+  }
+
   private async tryListSessionsFromIndex(options?: {
     project?: string
     limit?: number
@@ -3343,7 +3696,10 @@ export class SessionService {
 
       const status = this.localIndexGateway.getPublicStatus()
       if (requireReady && status.state !== 'ready') return null
-      if (status.state === 'building' && indexedPage.sessions.length === 0) {
+      if (status.state === 'building' && !await this.indexedPageCoversDiscoveredFiles(
+        indexedPage.total,
+        options?.project,
+      )) {
         return null
       }
 
@@ -3755,73 +4111,60 @@ export class SessionService {
     return this.entriesToMessages(entries)
   }
 
+  /**
+   * Cheap change-detection token for a session's transcript set.
+   *
+   * Callers (trace polling, every 1500ms) only compare this for equality — the
+   * value is opaque. So identity comes from (mtimeMs, size) of the parent
+   * transcript plus every subagent transcript, which is a few stat() calls
+   * instead of parsing the whole JSONL. The old implementation streamed the
+   * full parent file plus one extra full stream per linked subagent; on a
+   * 488MB transcript that single call cost ~1.6s, exceeding the poll interval
+   * and pinning a core.
+   *
+   * Any append changes size (and mtime), so this stays sensitive to new
+   * messages. It is deliberately a superset of the old signal: it also covers
+   * subagent files not yet linked by a tool_result in the parent.
+   */
   async getSessionMessagesSignature(sessionId: string): Promise<string | null> {
     const found = await this.findSessionFile(sessionId)
     if (!found) return null
 
-    let count = 0
-    let last = ''
-    const agentToolUseIds = new Set<string>()
-    const resultLinks = new Map<string, string>()
-    await this.streamJsonlFile(found.filePath, (entry) => {
-      const agentToolUseId = this.extractAgentToolUseId(entry)
-      if (agentToolUseId) {
-        agentToolUseIds.add(agentToolUseId)
-      }
-      if (entry.message?.role === 'user' && Array.isArray(entry.message.content)) {
-        for (const block of entry.message.content as ContentBlock[]) {
-          if (
-            block.type !== 'tool_result' ||
-            typeof block.tool_use_id !== 'string' ||
-            !agentToolUseIds.has(block.tool_use_id)
-          ) {
-            continue
-          }
-          const agentId = this.extractAgentIdFromResultText(
-            this.extractTextFromContent(block.content),
-          )
-          if (agentId) {
-            resultLinks.set(block.tool_use_id, agentId)
-          }
-        }
-      }
-      if (!this.isVisibleTranscriptMessageEntry(entry)) return
-      count += 1
-      const contentLength = safeJsonLength(entry.content) + safeJsonLength(entry.message?.content)
-      last = [
-        entry.uuid ?? entry.messageId ?? '',
-        entry.type ?? '',
-        entry.timestamp ?? '',
-        entry.parentUuid ?? '',
-        entry.parent_tool_use_id ?? '',
-        contentLength,
-      ].join(':')
-    })
+    const parts: string[] = []
+    try {
+      const stat = await fs.stat(found.filePath)
+      parts.push(`${stat.mtimeMs}:${stat.size}`)
+    } catch {
+      // Transcript vanished between discovery and stat — treat as empty rather
+      // than throwing, so trace polling degrades instead of erroring.
+      parts.push('missing')
+    }
 
-    const subagentSignatures = await Promise.all(
-      [...resultLinks.entries()].map(async ([parentToolUseId, agentId]) => {
-        let childCount = 0
-        let childLast = ''
-        await this.streamJsonlFile(this.subagentTranscriptPath(found.projectDir, sessionId, agentId), (entry) => {
-          if (!this.isVisibleTranscriptMessageEntry(entry)) return
-          childCount += 1
-          const contentLength = safeJsonLength(entry.content) + safeJsonLength(entry.message?.content)
-          childLast = [
-            parentToolUseId,
-            agentId,
-            entry.uuid ?? entry.messageId ?? '',
-            entry.type ?? '',
-            entry.timestamp ?? '',
-            entry.parentUuid ?? '',
-            entry.parent_tool_use_id ?? '',
-            contentLength,
-          ].join(':')
-        })
-        return `${parentToolUseId}:${agentId}:${childCount}:${childLast}`
-      }),
+    const subagentsDir = path.join(
+      this.getProjectsDir(),
+      found.projectDir,
+      sessionId,
+      'subagents',
     )
+    let subagentFiles: string[] = []
+    try {
+      subagentFiles = (await fs.readdir(subagentsDir))
+        .filter(name => name.endsWith('.jsonl'))
+        .sort()
+    } catch {
+      // No subagents directory is the common case.
+    }
 
-    return `${count}:${last}:${subagentSignatures.join('|')}`
+    for (const name of subagentFiles) {
+      try {
+        const stat = await fs.stat(path.join(subagentsDir, name))
+        parts.push(`${name}:${stat.mtimeMs}:${stat.size}`)
+      } catch {
+        // Skip files that disappeared mid-scan.
+      }
+    }
+
+    return parts.join('|')
   }
 
   /**

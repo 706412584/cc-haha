@@ -1081,7 +1081,9 @@ describe('SearchService.searchSessions', () => {
     const pending = service.searchSessions('cancelled while running', {
       signal: controller.signal,
     })
-    await new Promise(resolve => setTimeout(resolve, 0))
+    // Wait for the mock to be called before aborting, or the signal never
+    // propagates. A fixed setTimeout is fragile under CI load.
+    await waitFor(() => commandSignal !== undefined)
     controller.abort()
 
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
@@ -1168,3 +1170,16 @@ describe('SearchService.searchSessions', () => {
     expect(truncated).toBe(false)
   })
 })
+
+async function waitFor(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs = 5000,
+): Promise<void> {
+  const startedAt = Date.now()
+  while (!(await predicate())) {
+    if (Date.now() - startedAt > timeoutMs) {
+      throw new Error(`condition not met within ${timeoutMs}ms`)
+    }
+    await Bun.sleep(10)
+  }
+}

@@ -96,11 +96,15 @@ describe('prompt history persistence', () => {
 
     await waitFor(() => appendCalls === 1)
     const historyPath = join(configDir, 'history.jsonl')
+    // The injected partial append writes half a line and is then rolled back,
+    // so `FIRST_SENTINEL` is briefly visible in a doomed prefix. Wait for a
+    // newline-terminated record instead, or this races the rollback window and
+    // reads the truncated file.
     await waitFor(async () => {
       const contents = await fsPromises
         .readFile(historyPath, 'utf8')
         .catch(() => '')
-      return contents.includes('FIRST_SENTINEL')
+      return contents.includes('FIRST_SENTINEL') && contents.endsWith('\n')
     })
 
     const contents = await fsPromises.readFile(historyPath, 'utf8')

@@ -969,6 +969,71 @@ describe('SessionService', () => {
     expect(reduced.pendingTailBytes).toBe(Buffer.byteLength(incompleteTail))
   })
 
+  it('should produce identical summaries whether a scan resumes or re-reads the file', async () => {
+    const sessionId = '10000005-aaaa-bbbb-cccc-eeeeeeeeeeee'
+    const projectDir = '-tmp-summary-resume'
+    const dir = path.join(tmpDir, 'projects', projectDir)
+    const filePath = path.join(dir, `${sessionId}.jsonl`)
+    type Scanner = {
+      scanSessionListSummary: (
+        targetPath: string,
+        targetProject: string,
+        targetStat: { birthtime: Date; mtime: Date; mtimeMs: number; size: number },
+      ) => Promise<SessionListSummary>
+    }
+    const scan = async (target: SessionService): Promise<SessionListSummary> => {
+      const stat = await fs.stat(filePath)
+      return (target as unknown as Scanner)
+        .scanSessionListSummary(filePath, projectDir, stat)
+    }
+
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(filePath, `${JSON.stringify({
+      type: 'session-meta',
+      isMeta: true,
+      workDir: '/repo/resume',
+      permissionMode: 'acceptEdits',
+      timestamp: '2026-07-01T01:00:00.000Z',
+    })}\n${JSON.stringify({
+      ...makeUserEntry('多字节标题跨越分块边界'),
+      timestamp: '2026-07-01T01:01:00.000Z',
+    })}\n`, 'utf-8')
+
+    const warm = new SessionService()
+    // Warms the resume cache at the current byte offset.
+    await scan(warm)
+
+    const appended = `${JSON.stringify({
+      ...makeAssistantEntry('第二轮回答'),
+      timestamp: '2026-07-01T02:00:00.000Z',
+    })}\n`
+    // A record the CLI is still writing: no trailing newline yet.
+    const partial = JSON.stringify({
+      ...makeAssistantEntry('mid-write'),
+      timestamp: '2026-07-01T03:00:00.000Z',
+    })
+    await fs.appendFile(filePath, `${appended}${partial.slice(0, 20)}`)
+
+    expect(await scan(warm)).toEqual(await scan(new SessionService()))
+
+    await fs.appendFile(filePath, `${partial.slice(20)}\n`)
+    const resumedComplete = await scan(warm)
+    expect(resumedComplete).toEqual(await scan(new SessionService()))
+    // One user + two assistant turns; the session-meta line is not a message.
+    expect(resumedComplete.messageCount).toBe(3)
+
+    // A rewrite shorter than the folded offset breaks the append-only
+    // assumption, so the cached fold must be discarded rather than resumed.
+    await fs.writeFile(filePath, `${JSON.stringify({
+      ...makeUserEntry('rewritten'),
+      timestamp: '2026-07-05T01:00:00.000Z',
+    })}\n`, 'utf-8')
+    const afterRewrite = await scan(warm)
+    expect(afterRewrite).toEqual(await scan(new SessionService()))
+    expect(afterRewrite.messageCount).toBe(1)
+    expect(afterRewrite.title).toBe('rewritten')
+  })
+
   it('should scan a multibuffer CRLF line once without splitting UTF-8 metadata', async () => {
     const sessionId = '10000004-aaaa-bbbb-cccc-eeeeeeeeeeee'
     const projectDir = '-tmp-multibuffer-reducer'

@@ -83,40 +83,104 @@ async function sourceHash(path: string): Promise<string> {
 }
 
 describe('session projector', () => {
-  it('rejects an oversized source before opening or reducing its contents', async () => {
+  it('indexes an oversized source as a pending prefix instead of rejecting it', async () => {
     const root = await createTempDir('projector-source-limit')
+    const first = line(user('First title', '2026-01-01T00:00:00.000Z'))
+    const second = line(assistant('2026-01-01T00:01:00.000Z'))
+    const third = line(assistant('2026-01-01T00:02:00.000Z'))
     const candidate = await createCandidate({
       root,
       projectPath: '-repo-a',
       sessionId: 'oversized',
-      content: line(user('Never read', '2026-01-01T00:00:00.000Z')),
+      content: [first, second, third].join(''),
     })
+    const totalBytes = Buffer.byteLength(first + second + third)
+    // A ceiling that lands inside the second line: the prefix must stop at the last complete
+    // line at or before it, so only the first line is indexed.
+    const maxSourceBytes = Buffer.byteLength(first) + 1
     const database = openLocalIndexDatabase({ path: join(root, 'index.sqlite') })
     const index = createSessionIndex(database)
-    let openCalls = 0
     const projector = createSessionProjector({
       database,
       index,
       scope: root,
-      maxSourceBytes: 128,
-      fileIo: {
-        async statPath() {
-          return { size: 129 } as Awaited<ReturnType<typeof stat>>
-        },
-        async openReadonly(path, flags) {
-          openCalls += 1
-          return open(path, flags)
-        },
-      },
+      maxSourceBytes,
     })
 
     try {
-      expect(await projector.projectSource(candidate)).toEqual({
-        kind: 'retry',
-        reason: 'source-too-large',
-      })
-      expect(openCalls).toBe(0)
-      expect(index.getSource(candidate.path)).toBeNull()
+      const result = await projector.projectSource(candidate)
+      expect(result.kind).toBe('indexed')
+      if (result.kind !== 'indexed') throw new Error('expected an indexed result')
+      expect(result.projection.indexedBytes).toBe(Buffer.byteLength(first))
+      expect(result.projection.pendingTailBytes).toBe(
+        totalBytes - Buffer.byteLength(first),
+      )
+
+      // The session is listable from the indexed prefix rather than absent from the index.
+      const source = index.getSource(candidate.path)
+      expect(source?.state).toBe('pending')
+      expect(source?.size).toBe(totalBytes)
+      expect(source?.indexedBytes).toBe(Buffer.byteLength(first))
+      expect(source?.lastErrorCode).toBeNull()
+      const listed = index.listSessions()
+      expect(listed.total).toBe(1)
+      expect(listed.sessions[0]?.title).toBe('First title')
+
+      // Locators never point past the indexed boundary, so partial pages stay servable.
+      const page = index.getSessionEntryLocators(candidate.path)
+      expect(page).not.toBeNull()
+      for (const locator of page!.entries) {
+        expect(locator.byteStart + locator.byteLength)
+          .toBeLessThanOrEqual(page!.source.indexedBytes)
+      }
+    } finally {
+      database.close()
+    }
+  })
+
+  it('keeps a capped prefix stable and still tracks a growing oversized source', async () => {
+    const root = await createTempDir('projector-source-limit-grow')
+    const first = line(user('First title', '2026-01-01T00:00:00.000Z'))
+    const second = line(assistant('2026-01-01T00:01:00.000Z'))
+    const candidate = await createCandidate({
+      root,
+      projectPath: '-repo-a',
+      sessionId: 'grows',
+      content: [first, second].join(''),
+    })
+    const prefixBytes = Buffer.byteLength(first)
+    const database = openLocalIndexDatabase({ path: join(root, 'index.sqlite') })
+    const index = createSessionIndex(database)
+    const projector = createSessionProjector({
+      database,
+      index,
+      scope: root,
+      maxSourceBytes: prefixBytes,
+    })
+
+    try {
+      expect((await projector.projectSource(candidate)).kind).toBe('indexed')
+      expect(index.getSource(candidate.path)?.state).toBe('pending')
+      expect(index.getSource(candidate.path)?.indexedBytes).toBe(prefixBytes)
+
+      // Re-projecting an unchanged source is idempotent: the boundary does not move.
+      expect((await projector.projectSource(candidate)).kind).toBe('indexed')
+      expect(index.getSource(candidate.path)?.indexedBytes).toBe(prefixBytes)
+
+      // Growth past the ceiling keeps producing an indexed (not failed) result. The prefix stays
+      // put because nothing below the ceiling is left to read, and the source stays `pending`
+      // with the whole unread remainder accounted for.
+      await appendFile(candidate.path, line(assistant('2026-01-01T00:03:00.000Z')))
+      const grown = statSync(candidate.path)
+      utimesSync(candidate.path, grown.atime, new Date(grown.mtimeMs + 2_000))
+      const afterGrowth = await projector.projectSource(candidate)
+      expect(afterGrowth.kind).toBe('indexed')
+      const source = index.getSource(candidate.path)
+      expect(source?.state).toBe('pending')
+      expect(source?.indexedBytes).toBe(prefixBytes)
+      expect(source?.size).toBe(statSync(candidate.path).size)
+      expect(source?.lastErrorCode).toBeNull()
+      expect(index.listSessions().total).toBe(1)
     } finally {
       database.close()
     }

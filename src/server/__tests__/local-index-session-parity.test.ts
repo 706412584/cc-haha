@@ -935,7 +935,7 @@ describe('SessionService local-index routing parity', () => {
     expect((await findService.findSessionFile(SESSION_A))?.filePath).toBe(filePath)
   })
 
-  it('retains partial building rows across restart, avoids an empty page, then reaches file parity', async () => {
+  it('falls back while a building index covers only some transcripts on disk', async () => {
     const projectDir = '-tmp-project'
     const fileA = await writeSession(
       projectDir,
@@ -960,16 +960,31 @@ describe('SessionService local-index routing parity', () => {
       indexed: 1,
       lastUpdatedAt: '2026-07-15T00:00:00.000Z',
     }
+    // Only one of the two transcripts is indexed. Serving this page would drop
+    // File B, so the list has to come from files until coverage is complete.
     gateway.page = {
       sessions: [indexedRow(fileA, projectDir, SESSION_A, 'File A')],
       total: 1,
     }
 
     const restarted = new SessionService(gateway)
-    expect((await restarted.listSessions()).sessions.map(session => session.title)).toEqual(['File A'])
+    expect((await restarted.listSessions()).sessions.map(session => session.title))
+      .toEqual(['File A', 'File B'])
 
     gateway.page = { sessions: [], total: 0 }
-    expect((await restarted.listSessions()).sessions.map(session => session.title)).toEqual(['File A', 'File B'])
+    expect((await restarted.listSessions()).sessions.map(session => session.title))
+      .toEqual(['File A', 'File B'])
+
+    // Still building, but every transcript now has a row: the index is usable.
+    gateway.page = {
+      sessions: [
+        indexedRow(fileA, projectDir, SESSION_A, 'Indexed A'),
+        indexedRow(fileB, projectDir, SESSION_B, 'Indexed B'),
+      ],
+      total: 2,
+    }
+    expect((await restarted.listSessions()).sessions.map(session => session.title))
+      .toEqual(['Indexed A', 'Indexed B'])
 
     gateway.status = {
       ...gateway.status,
@@ -977,13 +992,7 @@ describe('SessionService local-index routing parity', () => {
       indexed: 2,
       lastUpdatedAt: '2026-07-15T00:01:00.000Z',
     }
-    gateway.page = {
-      sessions: [
-        indexedRow(fileA, projectDir, SESSION_A, 'File A'),
-        indexedRow(fileB, projectDir, SESSION_B, 'File B'),
-      ],
-      total: 2,
-    }
-    expect((await restarted.listSessions()).sessions.map(session => session.title)).toEqual(['File A', 'File B'])
+    expect((await restarted.listSessions()).sessions.map(session => session.title))
+      .toEqual(['Indexed A', 'Indexed B'])
   })
 })

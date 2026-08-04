@@ -141,6 +141,24 @@ function stableDatabaseError(error: unknown): { code: string } {
   return { code: classifyLocalIndexFailure(error) }
 }
 
+export const LOCAL_INDEX_SOURCE_TOO_LARGE = 'LOCAL_INDEX_SOURCE_TOO_LARGE'
+
+/**
+ * Codes that describe a bounded, per-source limitation rather than a reconciliation failure.
+ *
+ * A failure means "reconciliation did not finish and should be retried", so it degrades the whole
+ * index and blocks index reads until it clears. An oversized source is not that: it is a known,
+ * expected property of one file that no retry can change, because a transcript only grows. Treating
+ * it as a failure permanently pinned the index to `degraded` and forced every session list onto a
+ * full-disk scan, so these codes are tracked per source and deliberately excluded from
+ * `outstandingReconciliationFailures`.
+ */
+const SOURCE_LIMITATION_CODES = new Set<string>([LOCAL_INDEX_SOURCE_TOO_LARGE])
+
+function isSourceLimitationCode(code: string | null | undefined): boolean {
+  return typeof code === 'string' && SOURCE_LIMITATION_CODES.has(code)
+}
+
 function desanitizeProjectPath(projectPath: string): string {
   const windowsDrivePath = projectPath.match(/^([a-zA-Z])--(.+)$/)
   if (windowsDrivePath) {
@@ -460,6 +478,9 @@ export function createLocalIndexCoordinator(
   let watcherHealthy = true
   let storageLimited = false
   let failedPaths = new Map<string, string>()
+  // Per-source limitations are tracked separately from `failedPaths` so they stay visible as
+  // `lastErrorCode` without counting as outstanding reconciliation work.
+  let limitedPaths = new Map<string, string>()
   let fullSweepFailureCode: string | null = null
   let lifecycleRevision = 0
   let startPromise: Promise<void> | undefined
@@ -494,6 +515,16 @@ export function createLocalIndexCoordinator(
   const latestFailedPathCode = (exceptPath?: string): string | null => {
     let latest: string | null = null
     for (const [path, code] of failedPaths) {
+      if (path !== exceptPath) latest = code
+    }
+    return latest
+  }
+
+  const latestPathCode = (exceptPath?: string): string | null => {
+    const failed = latestFailedPathCode(exceptPath)
+    if (failed) return failed
+    let latest: string | null = null
+    for (const [path, code] of limitedPaths) {
       if (path !== exceptPath) latest = code
     }
     return latest
@@ -701,6 +732,7 @@ export function createLocalIndexCoordinator(
     const knownPaths = new Set(existingPaths)
     const committedPaths = new Set(existingPaths)
     const sweepFailedPaths = new Map<string, string>()
+    const sweepLimitedPaths = new Map<string, string>()
     let genericFailureCount = 0
     let genericFailureCode: string | null = null
     let degraded = 0
@@ -713,12 +745,21 @@ export function createLocalIndexCoordinator(
       discovered: knownPaths.size,
       indexed: committedPaths.size,
       degradedSources: outstandingReconciliationFailures(),
-      lastErrorCode: latestFailedPathCode() ?? fullSweepFailureCode,
+      lastErrorCode: latestPathCode() ?? fullSweepFailureCode,
+    }
+
+    // A bounded per-source limitation stays reportable as `lastErrorCode` but leaves `state` and
+    // `degradedSources` alone, so one unindexable file cannot stall the sweep or block reads.
+    const recordLimitation = (code: string, path: string): void => {
+      sweepLimitedPaths.set(resolve(path), code)
+      status = { ...status, lastErrorCode: code }
     }
 
     const recordFailure = (code: string, path?: string): void => {
-      if (path) sweepFailedPaths.set(resolve(path), code)
-      else {
+      if (path) {
+        sweepFailedPaths.set(resolve(path), code)
+        sweepLimitedPaths.delete(resolve(path))
+      } else {
         genericFailureCount += 1
         genericFailureCode = code
       }
@@ -776,13 +817,16 @@ export function createLocalIndexCoordinator(
             })
             if (!isActiveGeneration()) return
             if (result.kind === 'retry') {
-              recordFailure(result.reason === 'changed-during-read'
-                ? 'LOCAL_INDEX_SOURCE_CHANGED'
-                : result.reason === 'source-too-large'
-                  ? 'LOCAL_INDEX_SOURCE_TOO_LARGE'
+              if (result.reason === 'source-too-large') {
+                recordLimitation(LOCAL_INDEX_SOURCE_TOO_LARGE, candidate.path)
+              } else {
+                recordFailure(result.reason === 'changed-during-read'
+                  ? 'LOCAL_INDEX_SOURCE_CHANGED'
                   : 'LOCAL_INDEX_TRANSIENT_IO', candidate.path)
+              }
             } else {
               committedPaths.add(candidate.path)
+              sweepLimitedPaths.delete(resolve(candidate.path))
               status = {
                 ...status,
                 indexed: committedPaths.size,
@@ -879,9 +923,11 @@ export function createLocalIndexCoordinator(
 
       if (complete) {
         failedPaths = sweepFailedPaths
+        limitedPaths = sweepLimitedPaths
         fullSweepFailureCode = genericFailureCode
       } else {
         for (const [path, code] of sweepFailedPaths) failedPaths.set(path, code)
+        for (const [path, code] of sweepLimitedPaths) limitedPaths.set(path, code)
         fullSweepFailureCode = genericFailureCode ?? 'LOCAL_INDEX_DISCOVERY_INCOMPLETE'
       }
       try {
@@ -917,7 +963,9 @@ export function createLocalIndexCoordinator(
         ...status,
         state: outstandingFailures === 0 && watcherHealthy ? 'ready' : 'degraded',
         degradedSources: outstandingFailures,
-        lastErrorCode: latestFailedPathCode() ?? fullSweepFailureCode ??
+        // A limitation code is still surfaced here for diagnostics even when the sweep settles on
+        // `ready`: the index is usable, but one source is only partially represented.
+        lastErrorCode: latestPathCode() ?? fullSweepFailureCode ??
           (watcherHealthy ? null : 'LOCAL_INDEX_WATCH_FAILED'),
         lastUpdatedAt: new Date(now()).toISOString(),
       }
@@ -956,7 +1004,7 @@ export function createLocalIndexCoordinator(
       ...status,
       state: outstandingReconciliationFailures() > 0 ? 'degraded' : 'building',
       degradedSources: outstandingReconciliationFailures(),
-      lastErrorCode: latestFailedPathCode() ?? fullSweepFailureCode,
+      lastErrorCode: latestPathCode() ?? fullSweepFailureCode,
     }
 
     for (const path of paths) {
@@ -966,7 +1014,7 @@ export function createLocalIndexCoordinator(
       const remainingFailureCount = failedPaths.size -
         (failedPaths.has(normalizedPath) ? 1 : 0) +
         (fullSweepFailureCode ? 1 : 0)
-      const remainingFailureCode = latestFailedPathCode(normalizedPath) ??
+      const remainingFailureCode = latestPathCode(normalizedPath) ??
         fullSweepFailureCode
       try {
         let candidate: SessionSourceCandidate | null
@@ -993,6 +1041,7 @@ export function createLocalIndexCoordinator(
             }
           }
           failedPaths.delete(normalizedPath)
+          limitedPaths.delete(normalizedPath)
           continue
         }
         const projected = await activeProjector.projectSource(candidate, {
@@ -1006,16 +1055,22 @@ export function createLocalIndexCoordinator(
           throw { code: projected.reason === 'changed-during-read'
             ? 'LOCAL_INDEX_SOURCE_CHANGED'
             : projected.reason === 'source-too-large'
-              ? 'LOCAL_INDEX_SOURCE_TOO_LARGE'
+              ? LOCAL_INDEX_SOURCE_TOO_LARGE
               : 'LOCAL_INDEX_TRANSIENT_IO' }
         }
         failedPaths.delete(normalizedPath)
+        limitedPaths.delete(normalizedPath)
       } catch (error) {
         if (!isActiveGeneration()) return
-        failedPaths.set(
-          normalizedPath,
-          errorCode(error, 'LOCAL_INDEX_RECONCILE_FAILED'),
-        )
+        const code = errorCode(error, 'LOCAL_INDEX_RECONCILE_FAILED')
+        if (isSourceLimitationCode(code)) {
+          // Reportable, but not outstanding work: retrying cannot make the source smaller.
+          limitedPaths.set(normalizedPath, code)
+          failedPaths.delete(normalizedPath)
+        } else {
+          failedPaths.set(normalizedPath, code)
+          limitedPaths.delete(normalizedPath)
+        }
       }
     }
     if (!isActiveGeneration()) return
@@ -1027,7 +1082,7 @@ export function createLocalIndexCoordinator(
       discovered: count,
       indexed: count,
       degradedSources: outstandingFailures,
-      lastErrorCode: latestFailedPathCode() ?? fullSweepFailureCode ??
+      lastErrorCode: latestPathCode() ?? fullSweepFailureCode ??
         (watcherHealthy ? null : 'LOCAL_INDEX_WATCH_FAILED'),
       lastUpdatedAt: new Date(now()).toISOString(),
     }
@@ -1098,22 +1153,36 @@ export function createLocalIndexCoordinator(
           scope === resolvedScope,
       })
       const activeProjector = projector
-      failedPaths = new Map(activeIndex.listSources()
+      // Rehydrating persisted source state must not resurrect a degraded index from a bounded
+      // limitation. Rows recorded as degraded purely because they exceeded the size ceiling are
+      // restored into `limitedPaths`, so they stay reportable without counting as outstanding work.
+      const persistedDegraded = activeIndex.listSources()
         .filter(source => source.state === 'degraded')
         .map(source => [
           resolve(source.path),
           source.lastErrorCode ?? 'SOURCE_PARSE_DEGRADED',
-        ]))
-      fullSweepFailureCode = persisted?.state === 'degraded' && failedPaths.size === 0
+        ] as const)
+      failedPaths = new Map(
+        persistedDegraded.filter(([, code]) => !isSourceLimitationCode(code)),
+      )
+      limitedPaths = new Map(
+        persistedDegraded.filter(([, code]) => isSourceLimitationCode(code)),
+      )
+      const persistedSweepCode = persisted?.state === 'degraded' && failedPaths.size === 0
         ? persisted.lastErrorCode ?? 'LOCAL_INDEX_DISCOVERY_INCOMPLETE'
         : null
+      // A persisted sweep code that only describes a limitation is not unfinished reconciliation,
+      // so it must not become a `fullSweepFailureCode` and force `degraded` on every restart.
+      fullSweepFailureCode = isSourceLimitationCode(persistedSweepCode)
+        ? null
+        : persistedSweepCode
       status = initialBuildingStatus(mode, persisted)
       if (outstandingReconciliationFailures() > 0) {
         status = {
           ...status,
           state: 'degraded',
           degradedSources: outstandingReconciliationFailures(),
-          lastErrorCode: latestFailedPathCode() ?? fullSweepFailureCode,
+          lastErrorCode: latestPathCode() ?? fullSweepFailureCode,
         }
       }
       started = true
