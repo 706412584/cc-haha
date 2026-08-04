@@ -138,7 +138,6 @@ async function waitForCompiledSidecar(options: {
 }): Promise<void> {
   const deadline = Date.now() + options.deadlineMs
   let authProbeComplete = false
-  let indexSyncRequested = false
   let lastFailure = 'no response received'
   while (Date.now() < deadline) {
     const exited = await Promise.race([
@@ -212,36 +211,18 @@ async function waitForCompiledSidecar(options: {
         total?: number
         index?: { mode?: string; state?: string; indexed?: number }
       }
-      const sessionVisible =
-        body.total === 1 &&
-        Boolean(body.sessions?.some(session => session.id === options.expectedSessionId))
-      // Startup no longer auto-rebuilds session indexes. Trigger the same manual
-      // sync path the desktop refresh control uses once the process is serving.
-      if (sessionVisible && !indexSyncRequested) {
-        const syncResponse = await fetchBeforeCompiledSidecarDeadline(
-          `${options.baseUrl}/api/sessions/sync-indexes`,
-          {
-            method: 'POST',
-            headers: authorizedHeaders,
-          },
-          deadline,
-        )
-        if (!syncResponse.ok) {
-          throw new Error(`sync-indexes returned ${syncResponse.status}`)
-        }
-        indexSyncRequested = true
-      }
       if (
-        sessionVisible &&
         body.index?.mode === 'on' &&
         body.index.state === 'ready' &&
-        body.index.indexed === 1
+        body.index.indexed === 1 &&
+        body.total === 1 &&
+        body.sessions?.some(session => session.id === options.expectedSessionId)
       ) {
         return
       }
       lastFailure = `sessions not ready: ${JSON.stringify(body)}`
     } catch (error) {
-      // Startup and index sync are asynchronous; keep polling until the deadline.
+      // Startup and backfill are asynchronous; keep polling until the deadline.
       lastFailure = error instanceof Error ? error.message : String(error)
     }
     const remainingMs = deadline - Date.now()
@@ -389,23 +370,6 @@ describe('build-sidecars Windows x64 target mapping', () => {
 
   it('starts the development CLI with the transcript classifier feature', () => {
     expect(readCliLauncher()).toContain('--feature=TRANSCRIPT_CLASSIFIER')
-  })
-
-  it('keeps the restricted compiled LSP launcher in the sidecar entrypoint', () => {
-    const source = readFileSync(
-      path.resolve(import.meta.dirname, '../sidecars/claude-sidecar.ts'),
-      'utf8',
-    )
-    const routing = readFileSync(
-      path.resolve(import.meta.dirname, '../sidecars/launcherRouting.ts'),
-      'utf8',
-    )
-    expect(source).toContain("mode === 'lsp'")
-    expect(source).toContain('validateLspEntry(entry, packageRoot)')
-    expect(routing).toContain("rawArgs[0] !== '--package-root'")
-    expect(routing).toContain("rawArgs[2] !== '--entry'")
-    expect(routing).not.toContain("'-e'")
-    expect(routing).not.toContain("'--eval'")
   })
 
   it('wires the opt-in compiled sidecar smoke into the native gate', () => {

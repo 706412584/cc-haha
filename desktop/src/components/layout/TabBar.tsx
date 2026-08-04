@@ -4,7 +4,6 @@ import {
   SCHEDULED_TAB_ID,
   SETTINGS_TAB_ID,
   MARKET_TAB_ID,
-  OFFICE_TAB_PREFIX,
   SUBAGENT_TAB_PREFIX,
   TERMINAL_TAB_PREFIX,
   TRACE_LIST_TAB_ID,
@@ -29,10 +28,8 @@ import { getDesktopHost } from '../../lib/desktopHost'
 import { hasRunningBackgroundTasks } from '../../lib/backgroundTasks'
 import { WindowControls, showWindowControls } from './WindowControls'
 import { OpenProjectMenu } from './OpenProjectMenu'
-import { Building2, Folder, FolderOpen, SquareTerminal } from 'lucide-react'
+import { Folder, FolderOpen, SquareTerminal } from 'lucide-react'
 import { ActionDialog } from '@/components/ui/ActionDialog'
-import { useSettingsStore } from '../../stores/settingsStore'
-import { useUIStore } from '../../stores/uiStore'
 import { buildSessionActivityModel, hasVisibleSessionActivity } from '../activity/sessionActivityModel'
 import { SessionActivityButton } from '../activity/SessionActivityButton'
 import { useActivityPanelStore } from '../../stores/activityPanelStore'
@@ -97,8 +94,7 @@ function isSessionTabId(tabId: string | null) {
     !tabId.startsWith(TERMINAL_TAB_PREFIX) &&
     !tabId.startsWith(TRACE_TAB_PREFIX) &&
     !tabId.startsWith(WORKBENCH_TAB_PREFIX) &&
-    !tabId.startsWith(SUBAGENT_TAB_PREFIX) &&
-    !tabId.startsWith(OFFICE_TAB_PREFIX)
+    !tabId.startsWith(SUBAGENT_TAB_PREFIX)
 }
 
 export function TabBar() {
@@ -139,11 +135,6 @@ export function TabBar() {
   const isTerminalPanelOpen = useTerminalPanelStore((state) =>
     activeTabId && isActiveSessionTab ? state.isPanelOpen(activeTabId) : false,
   )
-  const agentOfficeSurface = useSettingsStore((state) => state.agentOfficeSurface)
-  const unifiedActivityPanelEnabled = useSettingsStore((state) => state.unifiedActivityPanelEnabled)
-  const isActiveMemberSession = useTeamStore((state) =>
-    activeTabId ? Boolean(state.getMemberBySessionId(activeTabId)) : false,
-  )
   const cliTasks = useCLITaskStore((state) => state.tasks)
   const cliTasksSessionId = useCLITaskStore((state) => state.sessionId)
   const cliTasksCompletedAndDismissed = useCLITaskStore((state) => state.completedAndDismissed)
@@ -177,6 +168,7 @@ export function TabBar() {
       messages: sessionState?.messages ?? [],
       tasks: includeCliTasks ? cliTasks : [],
       completedAndDismissed: includeCliTasks ? cliTasksCompletedAndDismissed : false,
+      isForegroundTurnActive: Boolean(sessionState && sessionState.chatState !== 'idle'),
       backgroundTasks: Object.values(sessionState?.backgroundAgentTasks ?? {}),
       dismissedBackgroundTaskKeys,
       agentNotifications: Object.values(sessionState?.agentTaskNotifications ?? {}),
@@ -186,11 +178,7 @@ export function TabBar() {
       hasVisibleActivity: hasVisibleSessionActivity(model),
     }
   }))
-  const showActivityButton = unifiedActivityPanelEnabled &&
-    activeTabId &&
-    !isActiveMemberSession &&
-    activityState.hasVisibleActivity &&
-    !isWorkbenchOpen
+  const showActivityButton = activeTabId && activityState.hasVisibleActivity && !isWorkbenchOpen
 
   const moveTab = useTabStore((s) => s.moveTab)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -241,11 +229,14 @@ export function TabBar() {
   // and the tab could not be closed at all. Window resizes, sidebar drags and
   // the toolbar's own conditional buttons narrow the region the same way.
   const realignActiveTab = useCallback(() => {
-    // Once the user has driven the strip with a chevron, wheel or trackpad,
-    // where it sits is what they asked for, and the active tab being half off
-    // the edge is an ordinary consequence of scrolling a row. Only reinstate
-    // the invariant when the position is still ours to choose; a resize alone
-    // cannot distinguish user movement from a layout change.
+    // Once the user has driven the strip with a chevron, where it sits is what
+    // they asked for, and the active tab being half off the edge is an
+    // ordinary consequence of scrolling a row. Only reinstate the invariant
+    // when the position is still ours to choose. Width alone cannot stand in
+    // for this: a chevron retires when its end is reached and rejoins when it
+    // is left, so a plain user scroll narrows the strip mid-flight and looks
+    // exactly like the layout event this guards against — measured, the view
+    // snapped straight back and the left end became unreachable.
     if (userScrolledRef.current) return
 
     const el = scrollRef.current
@@ -315,17 +306,11 @@ export function TabBar() {
     const el = scrollRef.current
     if (!el) return
     const step = el.clientWidth * SCROLL_STEP_RATIO
+    // The chevrons are the only way to drive the strip by hand — it is
+    // `overflow-x-hidden`, so wheel and trackpad do not reach it — which makes
+    // this the one place that has to hand the position over to the user.
     userScrolledRef.current = true
     el.scrollBy({ left: direction === 'left' ? -step : step, behavior: 'smooth' })
-  }
-
-  const handleTabWheel = (event: React.WheelEvent<HTMLDivElement>) => {
-    const el = scrollRef.current
-    if (!el || el.scrollWidth <= el.clientWidth) return
-    userScrolledRef.current = true
-    if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return
-    event.preventDefault()
-    el.scrollLeft += event.deltaY
   }
 
   const closeTabWithCleanup = useCallback((tab: Tab) => {
@@ -527,17 +512,8 @@ export function TabBar() {
       className="flex min-h-[52px] items-stretch bg-[var(--color-surface-sidebar)] select-none"
     >
 
-      {/* Keep both 28px slots mounted for the whole overflow lifecycle. Smooth
-          scrolling can swap which edge is reachable; mounting one while
-          unmounting the other changes the strip width and restarts alignment. */}
-      {(canScrollLeft || canScrollRight) && (
-        <button
-          type="button"
-          onClick={() => scroll('left')}
-          aria-label={t('tabs.scrollLeft')}
-          disabled={!canScrollLeft}
-          className={`flex h-[52px] w-7 flex-shrink-0 items-center justify-center text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)] ${canScrollLeft ? '' : 'invisible'}`}
-        >
+      {canScrollLeft && (
+        <button type="button" onClick={() => scroll('left')} aria-label={t('tabs.scrollLeft')} className="flex h-[52px] w-7 flex-shrink-0 items-center justify-center text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)]">
           <span className="material-symbols-outlined text-[16px]">chevron_left</span>
         </button>
       )}
@@ -552,9 +528,8 @@ export function TabBar() {
           than as a corner clipped by the window frame. The strip, not the tab,
           owns the giveback, so it stays inside the window drag region.
         */
-        className="min-w-0 flex-1 flex items-stretch gap-[2px] overflow-x-auto pt-[6px] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        className="flex-1 flex items-stretch gap-[2px] overflow-x-hidden pt-[6px]"
         onDragOver={(e) => e.preventDefault()}
-        onWheel={handleTabWheel}
       >
         {tabs.map((tab, index) => {
           const displayTitle = tab.type === 'settings'
@@ -593,21 +568,6 @@ export function TabBar() {
       <div className="relative flex shrink-0 items-center gap-1 px-2 before:absolute before:left-0 before:top-1/2 before:h-4 before:w-px before:-translate-y-1/2 before:bg-[var(--color-tab-separator)]">
         {showActivityButton && activeTabId && (
           <SessionActivityButton sessionId={activeTabId} />
-        )}
-        {isDesktopRuntime && isActiveSessionTab && activeTabId && (
-          <IconButton
-            icon={<Building2 size={17} strokeWidth={1.9} />}
-            label={t('agentOffice.title')}
-            onClick={() => {
-              if (agentOfficeSurface === 'tab') {
-                useTabStore.getState().openOfficeTab(activeTabId, t('agentOffice.title'))
-                return
-              }
-              useUIStore.getState().openModal(`agentOffice:${activeTabId}`)
-            }}
-            size="md"
-            tone="muted"
-          />
         )}
         {isDesktopRuntime && isActiveSessionTab && (
           <OpenProjectMenu path={openProjectPath} />
@@ -657,14 +617,8 @@ export function TabBar() {
         />
       )}
 
-      {(canScrollLeft || canScrollRight) && (
-        <button
-          type="button"
-          onClick={() => scroll('right')}
-          aria-label={t('tabs.scrollRight')}
-          disabled={!canScrollRight}
-          className={`flex h-[52px] w-7 flex-shrink-0 items-center justify-center text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)] ${canScrollRight ? '' : 'invisible'}`}
-        >
+      {canScrollRight && (
+        <button type="button" onClick={() => scroll('right')} aria-label={t('tabs.scrollRight')} className="flex h-[52px] w-7 flex-shrink-0 items-center justify-center text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)]">
           <span className="material-symbols-outlined text-[16px]">chevron_right</span>
         </button>
       )}

@@ -4,6 +4,4 @@ export type RuntimeSelection = {
   providerId: string | null
   modelId: string
   effortLevel?: ReasoningEffortLevel
-  // Per-session override for thinking mode. Undefined means inherit from global setting.
-  thinkingEnabled?: boolean
 }

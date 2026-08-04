@@ -396,15 +396,28 @@ function Get-UnsafeLegacySource {
   }
 
   if ($activeOutsideInstall -and $ActiveConfigManaged -eq '1') {
+    # The app-managed active directory lives outside every install directory,
+    # so removing the old version cannot touch it. A persisted mode that is
+    # missing, stale, or unresolvable here (the mode was switched without a
+    # restart, or the installer's APPDATA differs from the app's known-folder
+    # view) must not block the upgrade: fall back to treating the directory as
+    # externally managed. Install-contained legacy data is still guarded by
+    # the external-active check below.
     $systemMode = Read-AppMode -ConfigDir $UserDataDir
-    if ($null -eq $systemMode -or
-        $systemMode.Mode -ne 'portable' -or
-        [string]::IsNullOrWhiteSpace([string]$systemMode.PortableDir)) {
-      throw 'App-managed CLAUDE_CONFIG_DIR has no matching persisted custom mode. Restart the old app before upgrading so its active and saved data directories agree.'
-    }
-    $persistedActive = Resolve-LegacyConfiguredPath -Value $systemMode.PortableDir -Source 'system app-mode.json'
-    if (-not (Test-SamePath -Left $active -Right $persistedActive)) {
-      throw "App-managed CLAUDE_CONFIG_DIR does not match persisted custom mode. Active: $active; persisted: $persistedActive"
+    if ($null -ne $systemMode) {
+      if ($systemMode.Mode -ne 'portable' -or
+          [string]::IsNullOrWhiteSpace([string]$systemMode.PortableDir)) {
+        $systemMode = $null
+      } else {
+        try {
+          $persistedActive = Resolve-LegacyConfiguredPath -Value $systemMode.PortableDir -Source 'system app-mode.json'
+          if (-not (Test-SamePath -Left $active -Right $persistedActive)) {
+            $systemMode = $null
+          }
+        } catch {
+          $systemMode = $null
+        }
+      }
     }
   } elseif ($activeOutsideInstall) {
     $systemMode = $null
@@ -1007,6 +1020,49 @@ function Run-SelfTest {
       $managedExternalInvalidFailed = $_.Exception.Message.Contains('cannot be read safely')
     }
     Assert-SelfTest -Condition $managedExternalInvalidFailed -Message 'invalid metadata bypassed app-managed external mode validation'
+
+    $staleModeInstall = Join-Path $testRoot 'stale mode install'
+    $staleModeActive = Join-Path $testRoot 'stale mode active data'
+    $staleModeUserData = Join-Path $testRoot 'stale mode app data'
+    New-Item -ItemType Directory -Path $staleModeInstall -Force | Out-Null
+    New-Item -ItemType Directory -Path $staleModeActive -Force | Out-Null
+    Write-TestMode -Dir $staleModeUserData -Value @{ mode = 'default'; portable_dir = $null }
+    $staleModeResult = Invoke-LegacyRecovery `
+      -InstallDirs @($staleModeInstall) -UserDataDir $staleModeUserData `
+      -RecoveryRoot (Join-Path $testRoot 'stale mode recovery') -ProcessName $ProcessName `
+      -ActiveConfigDir $staleModeActive -ActiveConfigManaged '1' -SkipProcessCheck
+    Assert-SelfTest -Condition ($null -eq $staleModeResult) -Message 'stale persisted mode blocked an upgrade whose active data directory is outside every install directory'
+
+    $mismatchInstall = Join-Path $testRoot 'mismatch mode install'
+    $mismatchActive = Join-Path $testRoot 'mismatch active data'
+    $mismatchPersisted = Join-Path $testRoot 'mismatch persisted data'
+    $mismatchUserData = Join-Path $testRoot 'mismatch app data'
+    New-Item -ItemType Directory -Path $mismatchInstall -Force | Out-Null
+    New-Item -ItemType Directory -Path $mismatchActive -Force | Out-Null
+    New-Item -ItemType Directory -Path $mismatchPersisted -Force | Out-Null
+    Write-TestMode -Dir $mismatchUserData -Value @{ mode = 'portable'; portable_dir = $mismatchPersisted }
+    $mismatchResult = Invoke-LegacyRecovery `
+      -InstallDirs @($mismatchInstall) -UserDataDir $mismatchUserData `
+      -RecoveryRoot (Join-Path $testRoot 'mismatch recovery') -ProcessName $ProcessName `
+      -ActiveConfigDir $mismatchActive -ActiveConfigManaged '1' -SkipProcessCheck
+    Assert-SelfTest -Condition ($null -eq $mismatchResult) -Message 'mismatched persisted custom mode blocked an upgrade whose active data directory is outside every install directory'
+
+    $missingModeInstall = Join-Path $testRoot 'missing mode install'
+    $missingModeLegacy = Join-Path $missingModeInstall 'CLAUDE_CONFIG_DIR'
+    $missingModeActive = Join-Path $testRoot 'missing mode active data'
+    New-Item -ItemType Directory -Path $missingModeLegacy -Force | Out-Null
+    New-Item -ItemType Directory -Path $missingModeActive -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $missingModeLegacy 'settings.json') -Value 'missing-mode-data' -NoNewline
+    $missingModeFailed = $false
+    try {
+      Invoke-LegacyRecovery `
+        -InstallDirs @($missingModeInstall) -UserDataDir (Join-Path $testRoot 'missing mode app data') `
+        -RecoveryRoot (Join-Path $testRoot 'missing mode recovery') -ProcessName $ProcessName `
+        -ActiveConfigDir $missingModeActive -ActiveConfigManaged '1' -SkipProcessCheck | Out-Null
+    } catch {
+      $missingModeFailed = $_.Exception.Message.Contains('install-contained legacy data still exists')
+    }
+    Assert-SelfTest -Condition $missingModeFailed -Message 'missing persisted mode skipped the install-contained legacy data guard'
 
     $externalInstall = Join-Path $testRoot 'external install'
     $externalLegacy = Join-Path $externalInstall 'CLAUDE_CONFIG_DIR'

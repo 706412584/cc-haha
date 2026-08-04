@@ -155,13 +155,13 @@ export const SlashCommandMenu = forwardRef<HTMLDivElement, SlashCommandMenuProps
           {groups.skills.length > 0 ? (
             <div
               role="group"
-              aria-label={t('chat.openSkills')}
+              aria-label={t('sidebar.skills')}
               className={groups.system.length > 0
                 ? 'mt-1 border-t border-[var(--color-border-separator)] pt-1'
                 : ''}
             >
               <div className="px-2.5 py-1.5 text-xs font-medium text-[var(--color-text-tertiary)]">
-                {t('chat.openSkills')}
+                {t('sidebar.skills')}
               </div>
               {groups.skills.map((command, skillIndex) => {
                 const index = groups.system.length + skillIndex

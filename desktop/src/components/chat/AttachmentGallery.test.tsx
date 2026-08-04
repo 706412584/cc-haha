@@ -236,25 +236,6 @@ describe('AttachmentGallery', () => {
     expect(onRemove).toHaveBeenCalledWith('selection-1')
   })
 
-  it('renders image attachments from previewUrl without using the local path as img src', () => {
-    const view = render(
-      <AttachmentGallery
-        variant="message"
-        attachments={[{
-          id: 'image-preview',
-          type: 'image',
-          name: 'chart.png',
-          path: 'C:\\Users\\Ada\\Pictures\\chart.png',
-          previewUrl: 'http://127.0.0.1:3456/api/filesystem/file?path=C%3A%5CUsers%5CAda%5CPictures%5Cchart.png',
-        }]}
-      />,
-    )
-
-    const image = view.getByAltText('chart.png')
-    expect(image).toHaveAttribute('src', 'http://127.0.0.1:3456/api/filesystem/file?path=C%3A%5CUsers%5CAda%5CPictures%5Cchart.png')
-    expect(image).not.toHaveAttribute('src', 'C:\\Users\\Ada\\Pictures\\chart.png')
-  })
-
   it('shows a compact element chip for annotated selection images and exposes the note on hover', () => {
     const view = render(
       <AttachmentGallery
@@ -291,6 +272,38 @@ describe('AttachmentGallery', () => {
 
     fireEvent.mouseLeave(noteChip)
     expect(view.queryByRole('tooltip')).toBeNull()
+  })
+
+  it('groups numbered selection screenshots into one compact batch mosaic', () => {
+    const view = render(
+      <AttachmentGallery
+        variant="message"
+        attachments={[
+          {
+            id: 'selection-1',
+            type: 'image',
+            name: '<h1>',
+            data: 'data:image/png;base64,AAAA',
+            note: 'Make the title lighter',
+            selectionNumber: 1,
+          },
+          {
+            id: 'selection-3',
+            type: 'image',
+            name: '<button>',
+            data: 'data:image/png;base64,BBBB',
+            note: 'Increase emphasis',
+            selectionNumber: 3,
+          },
+        ]}
+      />,
+    )
+
+    expect(view.getByTestId('preview-selection-batch')).toHaveAttribute('aria-label', '2 selected page changes')
+    expect(view.getByRole('button', { name: 'Selected element 1: <h1>' })).toHaveAttribute('data-selection-number', '1')
+    expect(view.getByRole('button', { name: 'Selected element 3: <button>' })).toHaveAttribute('data-selection-number', '3')
+    expect(view.getByText('Make the title lighter')).toBeInTheDocument()
+    expect(view.queryByRole('button', { name: 'Open <h1>' })).not.toBeInTheDocument()
   })
 
   it('previews a path-only pasted image instead of a file chip', () => {

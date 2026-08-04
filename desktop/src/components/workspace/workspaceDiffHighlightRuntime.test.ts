@@ -21,7 +21,7 @@ const files = parseWorkspaceDiff([
 ].join('\n'))
 
 const highlighted = {
-  engine: 'prism' as const,
+  engine: 'shiki' as const,
   tokensByRowId: {},
   wordRangesByRowId: {},
 }
@@ -120,7 +120,7 @@ describe.sequential('workspaceDiffHighlightRuntime', () => {
     expect(highlightWorkspaceDiffSpy).not.toHaveBeenCalled()
   })
 
-  it('falls back to plain text without replaying syntax highlighting when the worker crashes', async () => {
+  it('falls back to plain text without replaying Shiki when the worker crashes', async () => {
     class FailingWorker {
       onmessage: ((event: MessageEvent) => void) | null = null
       onerror: (() => void) | null = null
@@ -142,7 +142,7 @@ describe.sequential('workspaceDiffHighlightRuntime', () => {
     expect(highlightWorkspaceDiffSpy).not.toHaveBeenCalled()
   })
 
-  it('cleans up unreadable worker messages without replaying syntax highlighting', async () => {
+  it('cleans up unreadable worker messages without replaying Shiki', async () => {
     class UnreadableWorker {
       onmessage: ((event: MessageEvent) => void) | null = null
       onerror: (() => void) | null = null
@@ -164,7 +164,7 @@ describe.sequential('workspaceDiffHighlightRuntime', () => {
     expect(highlightWorkspaceDiffSpy).not.toHaveBeenCalled()
   })
 
-  it('cleans up a synchronous postMessage failure without replaying syntax highlighting', async () => {
+  it('cleans up a synchronous postMessage failure without replaying Shiki', async () => {
     class ThrowingWorker {
       onmessage: ((event: MessageEvent) => void) | null = null
       onerror: (() => void) | null = null

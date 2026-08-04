@@ -1,21 +1,148 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { MenuItemConstructorOptions } from 'electron'
 import { ELECTRON_EVENT_CHANNELS } from '../ipc/channels'
-import { buildApplicationMenuTemplate, installApplicationMenu } from './menu'
-import { buildElectronModuleMock, getElectronServiceMocks, resetElectronServiceMocks } from './__electronMock'
+import {
+  buildApplicationMenuTemplate,
+  buildRendererContextMenuTemplate,
+  installApplicationMenu,
+  installRendererContextMenu,
+} from './menu'
 
-const getElectronMenuMocks = getElectronServiceMocks
+const menuMocksKey = '__electronMenuMocks'
 
-vi.mock('electron', () => buildElectronModuleMock())
+function createElectronMenuMocks() {
+  const popup = vi.fn()
+  return {
+    buildFromTemplate: vi.fn((template: unknown) => ({ template, popup })),
+    popup,
+    setApplicationMenu: vi.fn(),
+  }
+}
+
+function getElectronMenuMocks() {
+  const store = globalThis as Record<string, unknown>
+  const existing = store[menuMocksKey] as ReturnType<typeof createElectronMenuMocks> | undefined
+  if (existing) return existing
+  const created = createElectronMenuMocks()
+  store[menuMocksKey] = created
+  return created
+}
+
+function rendererContextMenuParams({
+  isEditable = false,
+  selectionText = '',
+  editFlags = {},
+}: {
+  isEditable?: boolean
+  selectionText?: string
+  editFlags?: Partial<{
+    canUndo: boolean
+    canRedo: boolean
+    canCut: boolean
+    canCopy: boolean
+    canPaste: boolean
+    canSelectAll: boolean
+  }>
+} = {}) {
+  return {
+    isEditable,
+    selectionText,
+    editFlags: {
+      canUndo: false,
+      canRedo: false,
+      canCut: false,
+      canCopy: false,
+      canPaste: false,
+      canSelectAll: false,
+      ...editFlags,
+    },
+  }
+}
+
+vi.mock('electron', () => {
+  const mocks = getElectronMenuMocks()
+  return {
+    Menu: {
+      buildFromTemplate: mocks.buildFromTemplate,
+      setApplicationMenu: mocks.setApplicationMenu,
+    },
+  }
+})
 
 describe('Electron application menu service', () => {
   afterEach(() => {
-    resetElectronServiceMocks()
+    const mocks = getElectronMenuMocks()
+    mocks.buildFromTemplate.mockClear()
+    mocks.popup.mockClear()
+    mocks.setApplicationMenu.mockClear()
+  })
+
+  it('offers native Copy for selected renderer text', () => {
+    expect(buildRendererContextMenuTemplate(rendererContextMenuParams({
+      selectionText: 'selected reply',
+      editFlags: { canCopy: true },
+    }))).toEqual([
+      { role: 'copy', enabled: true },
+    ])
+  })
+
+  it('offers native editing actions for editable renderer fields', () => {
+    const template = buildRendererContextMenuTemplate(rendererContextMenuParams({
+      isEditable: true,
+      selectionText: 'draft',
+      editFlags: {
+        canUndo: true,
+        canCut: true,
+        canCopy: true,
+        canPaste: true,
+        canSelectAll: true,
+      },
+    }))
+
+    expect(template.map(item => item.role ?? item.type)).toEqual([
+      'undo',
+      'redo',
+      'separator',
+      'cut',
+      'copy',
+      'paste',
+      'separator',
+      'selectAll',
+    ])
+    expect(template.find(item => item.role === 'redo')?.enabled).toBe(false)
+  })
+
+  it('opens the renderer context menu only when native actions are available', async () => {
+    const menuMocks = getElectronMenuMocks()
+    let contextMenuHandler: ((event: unknown, params: ReturnType<typeof rendererContextMenuParams>) => void) | undefined
+    const window = {
+      isDestroyed: () => false,
+      webContents: {
+        on: vi.fn((event: string, handler: typeof contextMenuHandler) => {
+          if (event === 'context-menu') contextMenuHandler = handler
+        }),
+      },
+    }
+
+    await installRendererContextMenu(window as never)
+
+    expect(window.webContents.on).toHaveBeenCalledWith('context-menu', expect.any(Function))
+    contextMenuHandler?.({}, rendererContextMenuParams())
+    expect(menuMocks.buildFromTemplate).not.toHaveBeenCalled()
+
+    contextMenuHandler?.({}, rendererContextMenuParams({
+      selectionText: 'selected reply',
+      editFlags: { canCopy: true },
+    }))
+    expect(menuMocks.buildFromTemplate).toHaveBeenCalledWith([
+      { role: 'copy', enabled: true },
+    ])
+    expect(menuMocks.popup).toHaveBeenCalledWith({ window })
   })
 
   it('emits native navigation destinations from macOS app menu items', () => {
     const onNavigate = vi.fn()
-    const template = buildApplicationMenuTemplate('Code Council', onNavigate, 'darwin')
+    const template = buildApplicationMenuTemplate('Claude Code Haha', onNavigate, 'darwin')
     const appMenu = template[0]
     expect(appMenu).toBeDefined()
     const submenu = appMenu!.submenu as MenuItemConstructorOptions[]
@@ -33,10 +160,10 @@ describe('Electron application menu service', () => {
 
   it('routes macOS Hide through the provided safe hide action', () => {
     const hide = vi.fn()
-    const template = buildApplicationMenuTemplate('Code Council', vi.fn(), 'darwin', { hide })
+    const template = buildApplicationMenuTemplate('Claude Code Haha', vi.fn(), 'darwin', { hide })
     const appMenu = template[0]
     const submenu = appMenu!.submenu as MenuItemConstructorOptions[]
-    const hideItem = submenu.find(item => item.label === 'Hide Code Council')
+    const hideItem = submenu.find(item => item.label === 'Hide Claude Code Haha')
 
     expect(hideItem).toBeDefined()
     expect(hideItem?.accelerator).toBe('Command+H')
@@ -47,7 +174,7 @@ describe('Electron application menu service', () => {
 
   it('routes the Window close accelerator through the provided close action', () => {
     const close = vi.fn()
-    const template = buildApplicationMenuTemplate('Code Council', vi.fn(), 'darwin', { close })
+    const template = buildApplicationMenuTemplate('Claude Code Haha', vi.fn(), 'darwin', { close })
     const closeItem = template
       .flatMap(item => (item.submenu as MenuItemConstructorOptions[] | undefined) ?? [])
       .find(item => item.label === 'Close Window')
@@ -61,7 +188,7 @@ describe('Electron application menu service', () => {
 
   it('routes the View fullscreen accelerator through the provided fullscreen action', () => {
     const toggleFullScreen = vi.fn()
-    const template = buildApplicationMenuTemplate('Code Council', vi.fn(), 'darwin', { toggleFullScreen })
+    const template = buildApplicationMenuTemplate('Claude Code Haha', vi.fn(), 'darwin', { toggleFullScreen })
     const fullScreenItem = template
       .flatMap(item => (item.submenu as MenuItemConstructorOptions[] | undefined) ?? [])
       .find(item => item.label === 'Toggle Full Screen')
@@ -74,7 +201,7 @@ describe('Electron application menu service', () => {
   })
 
   it('uses F11 for custom fullscreen on non-macOS platforms', () => {
-    const template = buildApplicationMenuTemplate('Code Council', vi.fn(), 'linux', {})
+    const template = buildApplicationMenuTemplate('Claude Code Haha', vi.fn(), 'linux', {})
     const fullScreenItem = template
       .flatMap(item => (item.submenu as MenuItemConstructorOptions[] | undefined) ?? [])
       .find(item => item.label === 'Toggle Full Screen')
@@ -83,7 +210,7 @@ describe('Electron application menu service', () => {
   })
 
   it('keeps a settings entry available on non-macOS platforms', () => {
-    const template = buildApplicationMenuTemplate('Code Council', vi.fn(), 'win32')
+    const template = buildApplicationMenuTemplate('Claude Code Haha', vi.fn(), 'win32')
     const fileMenu = template[0]
     expect(fileMenu).toBeDefined()
     const fileSubmenu = fileMenu!.submenu as MenuItemConstructorOptions[]
@@ -98,15 +225,15 @@ describe('Electron application menu service', () => {
     const send = vi.fn()
 
     await installApplicationMenu(
-      { name: 'Code Council' } as never,
+      { name: 'Claude Code Haha' } as never,
       () => ({ webContents: { send } }) as never,
       'darwin',
     )
 
     expect(menuMocks.buildFromTemplate).toHaveBeenCalledTimes(1)
-    expect(menuMocks.setApplicationMenu).toHaveBeenCalledWith({
+    expect(menuMocks.setApplicationMenu).toHaveBeenCalledWith(expect.objectContaining({
       template: menuMocks.buildFromTemplate.mock.calls[0]?.[0],
-    })
+    }))
 
     const template = menuMocks.buildFromTemplate.mock.calls[0]?.[0] as MenuItemConstructorOptions[]
     const settingsItem = template
@@ -124,7 +251,7 @@ describe('Electron application menu service', () => {
     menuMocks.setApplicationMenu.mockClear()
 
     await installApplicationMenu(
-      { name: 'Code Council' } as never,
+      { name: 'Claude Code Haha' } as never,
       () => ({ webContents: { send: vi.fn() } }) as never,
       'win32',
     )
@@ -140,15 +267,15 @@ describe('Electron application menu service', () => {
     const send = vi.fn()
 
     await installApplicationMenu(
-      { name: 'Code Council' } as never,
+      { name: 'Claude Code Haha' } as never,
       () => ({ webContents: { send } }) as never,
       'linux',
     )
 
     expect(menuMocks.buildFromTemplate).toHaveBeenCalledTimes(1)
-    expect(menuMocks.setApplicationMenu).toHaveBeenCalledWith({
+    expect(menuMocks.setApplicationMenu).toHaveBeenCalledWith(expect.objectContaining({
       template: menuMocks.buildFromTemplate.mock.calls[0]?.[0],
-    })
+    }))
   })
 
   it('installs hide as a safe fullscreen-aware window hide before app hide', async () => {
@@ -168,7 +295,7 @@ describe('Electron application menu service', () => {
     const menuMocks = getElectronMenuMocks()
 
     await installApplicationMenu(
-      { name: 'Code Council', hide: appHide } as never,
+      { name: 'Claude Code Haha', hide: appHide } as never,
       () => window as never,
       'darwin',
     )
@@ -176,7 +303,7 @@ describe('Electron application menu service', () => {
     const template = menuMocks.buildFromTemplate.mock.calls[0]?.[0] as MenuItemConstructorOptions[]
     const hideItem = template
       .flatMap(item => (item.submenu as MenuItemConstructorOptions[] | undefined) ?? [])
-      .find(item => item.label === 'Hide Code Council')
+      .find(item => item.label === 'Hide Claude Code Haha')
 
     hideItem?.click?.({} as never, {} as never, {} as never)
     expect(window.setFullScreen).toHaveBeenCalledWith(false)
@@ -199,7 +326,7 @@ describe('Electron application menu service', () => {
     const menuMocks = getElectronMenuMocks()
 
     await installApplicationMenu(
-      { name: 'Code Council' } as never,
+      { name: 'Claude Code Haha' } as never,
       () => window as never,
       'darwin',
     )

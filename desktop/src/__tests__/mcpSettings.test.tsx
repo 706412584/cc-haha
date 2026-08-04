@@ -427,6 +427,45 @@ describe('McpSettings', () => {
     })
   })
 
+  it('shows another project server as configured without probing or counting it as connected', async () => {
+    const refreshServerStatus = vi.fn()
+    useMcpStore.setState({
+      servers: [{
+        name: 'maya',
+        scope: 'project',
+        transport: 'stdio',
+        enabled: true,
+        status: 'connected',
+        statusLabel: 'Connected',
+        configLocation: '/workspace/maya/.mcp.json',
+        summary: 'python maya_server.py',
+        canEdit: true,
+        canRemove: true,
+        canReconnect: true,
+        canToggle: true,
+        projectPath: '/workspace/maya',
+        activeInCurrentContext: false,
+        config: { type: 'stdio', command: 'python', args: ['maya_server.py'], env: {} },
+      }],
+      refreshServerStatus,
+    })
+
+    await renderLoadedMcpSettings()
+
+    expect(screen.getByText('Configured')).toBeInTheDocument()
+    expect(screen.getByText('Not loaded in the current chat. Open a chat in this project to use it.')).toBeInTheDocument()
+    expect(screen.queryByText('Connected')).not.toBeInTheDocument()
+    expect(screen.getByText('Connected in current chat').parentElement?.parentElement).toHaveTextContent('0')
+    expect(refreshServerStatus).not.toHaveBeenCalled()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Open maya' }))
+    })
+
+    expect(screen.getByText('Not loaded in the current chat. Open a chat in this project to use it.')).toBeInTheDocument()
+    expect(screen.queryByText('Connected')).not.toBeInTheDocument()
+  })
+
   it('opens the delete confirmation modal from the edit view and deletes with the active cwd', async () => {
     const deleteServer = vi.fn().mockResolvedValue(undefined)
     const server = {

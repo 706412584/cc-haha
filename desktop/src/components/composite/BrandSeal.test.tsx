@@ -25,7 +25,7 @@ describe('BrandSeal', () => {
     }
   })
 
-  it('paints from tokens so every palette recolors it', () => {
+  it('paints from tokens so all six palettes recolor it', () => {
     // This is why the vector replaced the raster app icon: a bitmap kept its
     // own blue and orange under every theme while the chrome around it moved.
     const { container } = render(<BrandSeal size="xl" />)

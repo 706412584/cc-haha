@@ -19,10 +19,8 @@ export function AdapterSettings() {
   const t = useTranslation()
   const {
     config,
-    runtimeStatus,
     isLoading,
     fetchConfig,
-    fetchRuntimeStatus,
     updateConfig,
     generatePairingCode,
     startWechatLogin,
@@ -103,15 +101,7 @@ export function AdapterSettings() {
 
   useEffect(() => {
     fetchConfig()
-    fetchRuntimeStatus()
   }, [])
-
-  useEffect(() => {
-    if (activeIm !== 'wechat') return
-    void fetchRuntimeStatus()
-    const timer = window.setInterval(() => void fetchRuntimeStatus(), 5000)
-    return () => window.clearInterval(timer)
-  }, [activeIm, fetchRuntimeStatus])
 
   // Sync form state when config is loaded
   useEffect(() => {
@@ -494,7 +484,6 @@ export function AdapterSettings() {
   const isPairingActive = pairingExpiry ? Date.now() < pairingExpiry : false
   const minutesLeft = pairingExpiry ? Math.max(0, Math.ceil((pairingExpiry - Date.now()) / 60000)) : 0
   const hasSavedFeishuCredentials = Boolean(config.feishu?.appId && config.feishu?.appSecret)
-  const wechatNeedsRebind = runtimeStatus.wechat?.state === 'rebind_required'
 
   if (isLoading) {
     return (
@@ -739,7 +728,8 @@ export function AdapterSettings() {
 
         {activeIm === 'wechat' && (
           <div className="p-4 space-y-4">
-            <div className="rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] p-4 space-y-3">              <div className="flex items-center justify-between gap-4">
+            <div className="rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] p-4 space-y-3">
+              <div className="flex items-center justify-between gap-4">
                 <div>
                   <div className="text-sm font-medium text-[var(--color-text-primary)]">
                     {config.wechat?.accountId ? t('settings.adapters.wechatConnected') : t('settings.adapters.wechatNotConnected')}
@@ -773,13 +763,7 @@ export function AdapterSettings() {
                 </div>
               )}
 
-              {!wechatQrUrl && wechatNeedsRebind && (
-                <p className="text-sm text-[var(--color-warning)]">
-                  {t('settings.adapters.wechatSessionExpired')}
-                </p>
-              )}
-
-              {!wechatQrUrl && !wechatNeedsRebind && wechatStatus && (
+              {!wechatQrUrl && wechatStatus && (
                 <p className="text-sm text-[var(--color-text-secondary)]">{wechatStatus}</p>
               )}
             </div>

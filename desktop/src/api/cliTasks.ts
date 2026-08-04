@@ -21,15 +21,9 @@ export const cliTasksApi = {
     return api.get<TaskResponse>(`/api/tasks/lists/${encodeURIComponent(taskListId)}/${taskId}`)
   },
 
-  /** Clear persisted tasks only if they still match the completed snapshot */
-  resetTaskList(
-    taskListId: string,
-    expectedTasks: Array<Omit<CLITask, 'taskListId'>>,
-  ) {
-    return api.post<{ ok: true; reset: boolean }>(
-      `/api/tasks/lists/${encodeURIComponent(taskListId)}/reset`,
-      { expectedTasks },
-    )
+  /** Clear all persisted tasks for a completed task list */
+  resetTaskList(taskListId: string) {
+    return api.post<{ ok: true }>(`/api/tasks/lists/${encodeURIComponent(taskListId)}/reset`)
   },
 
   /** List all tasks across all task lists */

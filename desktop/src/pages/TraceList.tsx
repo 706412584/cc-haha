@@ -10,7 +10,6 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { ErrorState } from '@/components/ui/ErrorState'
 import { SearchField } from '@/components/ui/SearchField'
-import { Skeleton } from '@/components/ui/Skeleton'
 import { getDesktopHost } from '../lib/desktopHost'
 import { buildTraceWindowUrl } from '../lib/traceLaunch'
 import { openTraceCaptureSettings, openTraceDetail } from '../lib/traceNavigation'
@@ -440,13 +439,13 @@ function TraceListSkeleton({ label }: { label: string }) {
         {Array.from({ length: 6 }, (_, index) => (
           <div key={index} className="flex h-14 items-center gap-4 px-6">
             <div className="min-w-0 flex-1">
-              <Skeleton shape="line" width="48%" height="12px" />
-              <Skeleton shape="line" width="72%" height="10px" className="mt-2" />
+              <div className="h-3 w-48 max-w-full animate-pulse rounded bg-[var(--color-surface-container-high)]" />
+              <div className="mt-2 h-2.5 w-72 max-w-full animate-pulse rounded bg-[var(--color-surface-container-low)]" />
             </div>
             <div className="flex shrink-0 items-center gap-3">
-              <Skeleton shape="line" width="40px" height="12px" />
-              <Skeleton shape="line" width="48px" height="12px" />
-              <Skeleton shape="line" width="48px" height="12px" />
+              <div className="h-3 w-10 animate-pulse rounded bg-[var(--color-surface-container-high)]" />
+              <div className="h-3 w-12 animate-pulse rounded bg-[var(--color-surface-container-high)]" />
+              <div className="h-3 w-12 animate-pulse rounded bg-[var(--color-surface-container-high)]" />
             </div>
           </div>
         ))}

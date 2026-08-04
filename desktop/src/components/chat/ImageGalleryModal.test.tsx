@@ -23,34 +23,6 @@ beforeEach(reset)
 afterEach(reset)
 
 describe('ImageGalleryModal · overlay suppression', () => {
-  it('offers annotation only when requested and returns the active image', () => {
-    const onAnnotate = vi.fn()
-    const { rerender } = render(
-      <ImageGalleryModal
-        open
-        images={images}
-        activeIndex={0}
-        onClose={() => {}}
-        onSelect={() => {}}
-      />,
-    )
-
-    expect(screen.queryByRole('button', { name: /标注并提问/ })).not.toBeInTheDocument()
-
-    rerender(
-      <ImageGalleryModal
-        open
-        images={images}
-        activeIndex={0}
-        onClose={() => {}}
-        onSelect={() => {}}
-        onAnnotate={onAnnotate}
-      />,
-    )
-    fireEvent.click(screen.getByRole('button', { name: /标注并提问/ }))
-    expect(onAnnotate).toHaveBeenCalledWith(images[0])
-  })
-
   it('increments overlay count while open and decrements on unmount', () => {
     expect(useOverlayStore.getState().count).toBe(0)
 

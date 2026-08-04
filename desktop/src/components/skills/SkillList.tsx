@@ -17,7 +17,6 @@ import {
 import { useSkillStore } from '../../stores/skillStore'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useTranslation } from '../../i18n'
-import type { TranslationKey } from '../../i18n'
 import { Badge } from '@/components/ui/Badge'
 import { Card } from '@/components/ui/Card'
 import { EmptyState } from '@/components/ui/EmptyState'
@@ -49,47 +48,9 @@ function estimateTokens(contentLength: number) {
   return Math.ceil(contentLength / 4)
 }
 
-// Localized labels for built-in catalog skills. Keyed by the stable catalog
-// `name` / `category`; falls back to the server-provided English value when a
-// key is absent (e.g. a newly added catalog entry without translations yet).
-const CATALOG_DESC_KEY: Record<string, TranslationKey> = {
-  'coderabbit-review': 'settings.skills.catalog.coderabbit-review.desc',
-  'circleci-cli': 'settings.skills.catalog.circleci-cli.desc',
-  'react-best-practices': 'settings.skills.catalog.react-best-practices.desc',
-  'frontend-testing-debugging': 'settings.skills.catalog.frontend-testing-debugging.desc',
-  'stripe-best-practices': 'settings.skills.catalog.stripe-best-practices.desc',
-  'supabase-best-practices': 'settings.skills.catalog.supabase-best-practices.desc',
-  'temporal-developer': 'settings.skills.catalog.temporal-developer.desc',
-  'karpathy-guidelines': 'settings.skills.catalog.karpathy-guidelines.desc',
-  'mattpocock-grilling': 'settings.skills.catalog.mattpocock-grilling.desc',
-  'mattpocock-tdd': 'settings.skills.catalog.mattpocock-tdd.desc',
-  'mattpocock-diagnosing-bugs': 'settings.skills.catalog.mattpocock-diagnosing-bugs.desc',
-}
-
-const CATEGORY_LABEL_KEY: Record<string, TranslationKey> = {
-  'Code Review': 'settings.skills.category.codeReview',
-  'CI/CD': 'settings.skills.category.cicd',
-  Frontend: 'settings.skills.category.frontend',
-  Payments: 'settings.skills.category.payments',
-  Database: 'settings.skills.category.database',
-  Workflows: 'settings.skills.category.workflows',
-  Workflow: 'settings.skills.category.workflow',
-  Productivity: 'settings.skills.category.productivity',
-  Engineering: 'settings.skills.category.engineering',
-}
-
 export function SkillList() {
-  const {
-    skills,
-    isLoading,
-    error,
-    fetchSkills,
-    fetchSkillDetail,
-    catalog,
-    installingName,
-    fetchCatalog,
-    installSkill,
-  } = useSkillStore()
+  const { skills, isLoading, error, fetchSkills, fetchSkillDetail } =
+    useSkillStore()
   const sessions = useSessionStore((s) => s.sessions)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const t = useTranslation()
@@ -101,10 +62,6 @@ export function SkillList() {
   useEffect(() => {
     fetchSkills(currentWorkDir)
   }, [fetchSkills, currentWorkDir])
-
-  useEffect(() => {
-    fetchCatalog()
-  }, [fetchCatalog])
 
   const filteredSkills = useMemo(() => {
     if (!normalizedSearchQuery) return skills
@@ -135,21 +92,6 @@ export function SkillList() {
     return result
   }, [filteredSkills])
 
-  const filteredCatalog = useMemo(() => {
-    // Defensive: zustand store always seeds `catalog: []`, but a partial
-    // store mock or an unexpected initialization race (e.g. SSR/hydration
-    // timing) could surface `undefined`. Guarding here keeps the entire
-    // Skills page from white-screening with `Cannot read properties of
-    // undefined (reading 'length')` at the .length check below.
-    const list = catalog ?? []
-    if (!normalizedSearchQuery) return list
-    return list.filter((entry) =>
-      [entry.name, entry.displayName, entry.description, entry.category].some(
-        (field) => field?.toLocaleLowerCase().includes(normalizedSearchQuery),
-      ),
-    )
-  }, [catalog, normalizedSearchQuery])
-
   const totalTokens = useMemo(
     () => filteredSkills.reduce((sum, skill) => sum + estimateTokens(skill.contentLength), 0),
     [filteredSkills],
@@ -168,6 +110,16 @@ export function SkillList() {
     // Was a bare red line of text with no role, so a screen reader only found
     // the failure by walking into it.
     return <ErrorState title={error} />
+  }
+
+  if (skills.length === 0) {
+    return (
+      <EmptyState
+        icon={<Sparkles size={20} strokeWidth={1.6} aria-hidden="true" />}
+        title={t('settings.skills.empty')}
+        description={t('settings.skills.emptyHint')}
+      />
+    )
   }
 
   return (
@@ -250,103 +202,12 @@ export function SkillList() {
         </div>
       </Card>
 
-      {filteredCatalog.length > 0 && (
-        <Card as="section" radius="xl" surface="base" padding="none" className="min-w-0 overflow-hidden">
-          <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-[var(--color-border)] bg-[var(--color-surface-container-low)]">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 mb-1">
-                <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-[var(--color-primary-fixed)] text-[var(--color-brand)]">
-                  <span className="material-symbols-outlined text-[16px]">download</span>
-                </span>
-                <h4 className="text-sm font-semibold text-[var(--color-text-primary)]">
-                  {t('settings.skills.recommended.title')}
-                </h4>
-                <span className="text-xs text-[var(--color-text-tertiary)]">
-                  {filteredCatalog.length}
-                </span>
-              </div>
-              <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">
-                {t('settings.skills.recommended.description')}
-              </p>
-            </div>
-          </div>
-
-          <div className="grid gap-2 p-2 sm:grid-cols-2">
-            {filteredCatalog.map((entry) => {
-              const isInstalling = installingName === entry.name
-              const descKey = CATALOG_DESC_KEY[entry.name]
-              const catKey = CATEGORY_LABEL_KEY[entry.category]
-              return (
-                <div
-                  key={entry.name}
-                  className="flex flex-col gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3 min-w-0"
-                >
-                  <div className="flex items-start gap-3 min-w-0">
-                    <span className="mt-0.5 material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)]">
-                      auto_awesome
-                    </span>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-sm font-semibold text-[var(--color-text-primary)] break-all">
-                          {entry.displayName}
-                        </span>
-                        <span className="rounded-full bg-[var(--color-surface-container-high)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-text-tertiary)]">
-                          {catKey ? t(catKey) : entry.category}
-                        </span>
-                      </div>
-                      <p className="mt-1 text-xs leading-5 text-[var(--color-text-secondary)] break-words">
-                        {descKey ? t(descKey) : entry.description}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex items-center justify-end">
-                    {entry.installed ? (
-                      <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--color-success)]">
-                        <span className="material-symbols-outlined text-[16px]">check_circle</span>
-                        {t('settings.skills.recommended.installed')}
-                      </span>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => installSkill(entry.name, currentWorkDir)}
-                        disabled={isInstalling}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)] disabled:opacity-60 disabled:cursor-default"
-                      >
-                        {isInstalling ? (
-                          <>
-                            <span className="animate-spin w-3.5 h-3.5 border-2 border-[var(--color-brand)] border-t-transparent rounded-full" />
-                            {t('settings.skills.recommended.installing')}
-                          </>
-                        ) : (
-                          <>
-                            <span className="material-symbols-outlined text-[16px]">download</span>
-                            {t('settings.skills.recommended.install')}
-                          </>
-                        )}
-                      </button>
-                    )}
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        </Card>
-      )}
-
-      {filteredSkills.length === 0 && normalizedSearchQuery && (
+      {filteredSkills.length === 0 && (
         <EmptyState
           icon={<SearchX size={20} strokeWidth={1.6} aria-hidden="true" />}
           title={t('settings.skills.noSearchResults')}
           description={t('settings.skills.noSearchResultsHint')}
           action={{ label: t('settings.skills.clearSearch'), onClick: () => setSearchQuery('') }}
-        />
-      )}
-
-      {skills.length === 0 && !normalizedSearchQuery && (
-        <EmptyState
-          icon={<Sparkles size={20} strokeWidth={1.6} aria-hidden="true" />}
-          title={t('settings.skills.empty')}
-          description={t('settings.skills.emptyHint')}
         />
       )}
 

@@ -9,7 +9,7 @@ beforeAll(() => {
   })
 })
 
-const { bridge } = vi.hoisted(() => ({
+const { bridge, sendMessage } = vi.hoisted(() => ({
   bridge: {
     open: vi.fn(),
     navigate: vi.fn(),
@@ -19,8 +19,12 @@ const { bridge } = vi.hoisted(() => ({
     close: vi.fn(),
     message: vi.fn(),
   },
+  sendMessage: vi.fn(),
 }))
 vi.mock('../../lib/previewBridge', () => ({ previewBridge: bridge }))
+vi.mock('../../stores/chatStore', () => ({
+  useChatStore: { getState: () => ({ sendMessage }) },
+}))
 vi.mock('@tauri-apps/api/event', () => ({ listen: () => Promise.resolve(() => {}) }))
 
 import { BrowserSurface } from './BrowserSurface'
@@ -29,6 +33,7 @@ import { useBrowserPanelStore } from '../../stores/browserPanelStore'
 import { useWorkspacePanelStore } from '../../stores/workspacePanelStore'
 import { useOverlayStore } from '../../stores/overlayStore'
 import { useSettingsStore } from '../../stores/settingsStore'
+import { usePreviewSelectionStore } from '../../stores/previewSelectionStore'
 
 beforeEach(() => {
   useSettingsStore.setState({ locale: 'zh' })
@@ -42,7 +47,9 @@ afterEach(() => {
   // browserPanelStore.open() now also opens the unified workbench; keep it isolated.
   useWorkspacePanelStore.setState(useWorkspacePanelStore.getInitialState(), true)
   useOverlayStore.setState(useOverlayStore.getInitialState(), true)
+  usePreviewSelectionStore.setState({ bySession: {} })
   useSettingsStore.setState({ uiZoom: 1 })
+  sendMessage.mockReset()
   setBaseUrl(getDefaultBaseUrl())
 })
 
@@ -216,7 +223,12 @@ describe('BrowserSurface', () => {
     render(<BrowserSurface sessionId="s1" />)
     fireEvent.click(screen.getByLabelText('选择元素'))
     expect(useBrowserPanelStore.getState().bySession['s1']!.pickerActive).toBe(true)
-    expect(bridge.message).toHaveBeenCalledWith({ v: 1, type: 'enter-picker' })
+    expect(bridge.message).toHaveBeenCalledWith(expect.objectContaining({
+      v: 1,
+      type: 'enter-picker',
+      mode: 'single',
+      label: 1,
+    }))
     fireEvent.click(screen.getByLabelText('选择元素'))
     expect(useBrowserPanelStore.getState().bySession['s1']!.pickerActive).toBe(false)
     expect(bridge.message).toHaveBeenLastCalledWith({ v: 1, type: 'exit-picker' })
@@ -338,5 +350,86 @@ describe('BrowserSurface', () => {
     // Popping the last one → re-shown.
     act(() => { useOverlayStore.getState().pop() })
     expect(bridge.setVisible).toHaveBeenLastCalledWith(true)
+  })
+
+  it('shows a compact batch rail with stable numbering and undo/clear actions', async () => {
+    useBrowserPanelStore.getState().open('s1', 'http://localhost:5173/')
+    usePreviewSelectionStore.getState().add('s1', {
+      pageUrl: 'http://localhost:5173/',
+      draftItemId: 'one',
+      element: { selector: '#title', tag: 'h1', classes: [] } as never,
+    })
+    usePreviewSelectionStore.getState().add('s1', {
+      pageUrl: 'http://localhost:5173/',
+      draftItemId: 'two',
+      element: { selector: '#cta', tag: 'button', classes: [] } as never,
+    })
+    render(<BrowserSurface sessionId="s1" />)
+
+    const rail = screen.getByTestId('browser-selection-draft')
+    expect(rail).toHaveTextContent('已选 2 个')
+    expect(rail).toHaveTextContent('#2 <button>')
+
+    fireEvent.click(screen.getByLabelText('撤销上一个选择'))
+    expect(bridge.message).toHaveBeenCalledWith({ v: 1, type: 'undo-selection', itemId: 'two' })
+    await waitFor(() => {
+      expect(screen.getByTestId('browser-selection-draft')).toHaveTextContent('#1 <h1>')
+    })
+
+    fireEvent.click(screen.getByLabelText('清空选择'))
+    await waitFor(() => expect(screen.queryByTestId('browser-selection-draft')).not.toBeInTheDocument())
+    expect(bridge.message).toHaveBeenCalledWith({ v: 1, type: 'clear-selection-draft' })
+  })
+
+  it('sends all selected screenshots as one numbered chat turn', async () => {
+    useBrowserPanelStore.getState().open('s1', 'http://localhost:5173/')
+    for (const [id, tag, data] of [
+      ['one', 'h1', 'data:image/png;base64,AAAA'],
+      ['two', 'button', 'data:image/png;base64,BBBB'],
+    ] as const) {
+      usePreviewSelectionStore.getState().add('s1', {
+        pageUrl: 'http://localhost:5173/',
+        draftItemId: id,
+        element: { selector: `#${id}`, tag, classes: [] } as never,
+        change: { description: `${id} note` } as never,
+        screenshot: { dataUrl: data, kind: 'region' },
+      })
+    }
+    render(<BrowserSurface sessionId="s1" />)
+
+    fireEvent.click(screen.getByRole('button', { name: '发送 2 个' }))
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      's1',
+      expect.stringContaining('[元素 2]'),
+      [
+        expect.objectContaining({ name: '<h1>', selectionNumber: 1, data: 'data:image/png;base64,AAAA' }),
+        expect.objectContaining({ name: '<button>', selectionNumber: 2, data: 'data:image/png;base64,BBBB' }),
+      ],
+      expect.objectContaining({ displayContent: '2 个页面修改' }),
+    )
+    await waitFor(() => expect(screen.queryByTestId('browser-selection-draft')).not.toBeInTheDocument())
+    expect(bridge.message).toHaveBeenCalledWith({ v: 1, type: 'commit-selection-draft' })
+  })
+
+  it('protects a selection batch before navigating to another page', async () => {
+    useBrowserPanelStore.getState().open('s1', 'http://localhost:5173/')
+    usePreviewSelectionStore.getState().add('s1', {
+      pageUrl: 'http://localhost:5173/',
+      draftItemId: 'one',
+      element: { selector: '#title', tag: 'h1', classes: [] } as never,
+    })
+    render(<BrowserSurface sessionId="s1" />)
+
+    const input = screen.getByRole('textbox')
+    fireEvent.change(input, { target: { value: 'http://localhost:3000/' } })
+    fireEvent.submit(input.closest('form')!)
+
+    expect(screen.getByText('离开本次批量选择？')).toBeInTheDocument()
+    expect(bridge.navigate).not.toHaveBeenCalledWith('http://localhost:3000/')
+    fireEvent.click(screen.getByRole('button', { name: '丢弃并继续' }))
+
+    await waitFor(() => expect(bridge.navigate).toHaveBeenCalledWith('http://localhost:3000/'))
+    expect(bridge.message).toHaveBeenCalledWith({ v: 1, type: 'clear-selection-draft' })
   })
 })

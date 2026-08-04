@@ -203,12 +203,6 @@ const updateCheckOptions: Validator = value => {
   return value.proxy === undefined || (typeof value.proxy === 'string' && value.proxy.trim().length > 0)
 }
 
-const tunnelStartPayload: Validator = value =>
-  isRecord(value)
-  && (value.mode === 'quick' || value.mode === 'named')
-  && (value.token === undefined || value.token === null || typeof value.token === 'string')
-  && (value.namedUrl === undefined || value.namedUrl === null || typeof value.namedUrl === 'string')
-
 const localePreference: Validator = value =>
   value === 'en'
   || value === 'zh'
@@ -229,7 +223,6 @@ export const ELECTRON_IPC_VALIDATORS = {
   [ELECTRON_IPC_CHANNELS.clipboardWriteText]: stringPayload,
   [ELECTRON_IPC_CHANNELS.shellOpen]: stringPayload,
   [ELECTRON_IPC_CHANNELS.shellOpenPath]: stringPayload,
-  [ELECTRON_IPC_CHANNELS.shellShowItemInFolder]: stringPayload,
   [ELECTRON_IPC_CHANNELS.traceOpenWindow]: sessionIdPayload,
   [ELECTRON_IPC_CHANNELS.petsList]: noPayload,
   [ELECTRON_IPC_CHANNELS.petsCreateFromImage]: petCreateFromAtlas,
@@ -282,9 +275,6 @@ export const ELECTRON_IPC_VALIDATORS = {
   [ELECTRON_IPC_CHANNELS.appModePrepareRestart]: noPayload,
   [ELECTRON_IPC_CHANNELS.appModeRestart]: noPayload,
   [ELECTRON_IPC_CHANNELS.adaptersRestartSidecar]: noPayload,
-  [ELECTRON_IPC_CHANNELS.tunnelStart]: tunnelStartPayload,
-  [ELECTRON_IPC_CHANNELS.tunnelStop]: noPayload,
-  [ELECTRON_IPC_CHANNELS.tunnelGetStatus]: noPayload,
   [ELECTRON_IPC_CHANNELS.zoomSet]: zoomPayload,
   [ELECTRON_IPC_CHANNELS.appearanceSetApplied]: appliedAppearance,
 } satisfies Record<ElectronIpcChannel, Validator>

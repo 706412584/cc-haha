@@ -15,7 +15,7 @@ describe('Electron window smoke diagnostics', () => {
     try {
       writeWindowSmokeSnapshot({
         getBounds: () => ({ x: 10, y: 20, width: 1280, height: 820 }),
-        getTitle: () => 'Code Council',
+        getTitle: () => 'Claude Code Companion',
         isDestroyed: () => false,
         isFocused: () => true,
         isFullScreen: () => false,
@@ -34,7 +34,7 @@ describe('Electron window smoke diagnostics', () => {
       const payload = JSON.parse(readFileSync(logPath, 'utf8'))
       expect(payload).toMatchObject({
         reason: 'did-finish-load',
-        title: 'Code Council',
+        title: 'Claude Code Companion',
         visible: true,
         focused: true,
         minimized: false,

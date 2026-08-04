@@ -1,17 +1,12 @@
 import type { BackgroundAgentTask, AgentTaskNotification, BackgroundAgentTaskUsage } from '../../types/chat'
 import type { TaskSummaryItem, UIMessage } from '../../types/chat'
-import type { QueuedMessage } from '../../stores/chatStore'
 import type { CLITask, TaskStatus } from '../../types/cliTask'
 import type { TeamMember } from '../../types/team'
 import { createBackgroundTaskDismissKey } from '../../lib/backgroundTasks'
-import {
-  parseOrchestrationMetadata,
-  type OrchestrationMetadata,
-} from '../../../../src/tasks/orchestrationMetadata'
 
 export type ActivityStatus = TaskStatus | BackgroundAgentTask['status'] | TeamMember['status']
 
-export type ActivitySectionId = 'output' | 'tasks' | 'queue' | 'team' | 'backgroundTasks' | 'subagents' | 'sources'
+export type ActivitySectionId = 'output' | 'tasks' | 'team' | 'backgroundTasks' | 'subagents' | 'sources'
 
 export type ActivityRow = {
   id: string
@@ -28,27 +23,12 @@ export type ActivityRow = {
   outputFile?: string
   usage?: BackgroundAgentTaskUsage
   updatedAt?: number | string
-  recentEvents?: Array<{
-    id: string
-    toolName: string
-    description?: string
-    timestamp: number
-  }>
   member?: TeamMember
   taskHistory?: {
     completed: number
     total: number
     turnCount: number
   }
-  owner?: string
-  blocks?: string[]
-  blockedBy?: string[]
-  orchestration?: OrchestrationMetadata
-  agentName?: string
-  queuedMessageId?: string
-  relatedTaskIds?: string[]
-  stale?: boolean
-  ownedTask?: Pick<ActivityRow, 'id' | 'label' | 'status' | 'taskId' | 'blockedBy'>
   openable: boolean
 }
 
@@ -70,16 +50,15 @@ export type BuildSessionActivityModelInput = {
   messages?: UIMessage[]
   tasks: CLITask[]
   completedAndDismissed: boolean
+  isForegroundTurnActive?: boolean
   backgroundTasks: BackgroundAgentTask[]
   dismissedBackgroundTaskKeys?: Set<string>
   agentNotifications: AgentTaskNotification[]
   teamMembers?: TeamMember[]
-  queuedMessages?: QueuedMessage[]
 }
 
 export const VISIBLE_ACTIVITY_SECTION_ORDER = [
   'tasks',
-  'queue',
   'team',
   'backgroundTasks',
   'subagents',
@@ -91,7 +70,6 @@ const BADGE_STATUSES = new Set<ActivityStatus>(['pending', 'in_progress', 'runni
 const SECTION_META: Record<ActivitySectionId, Pick<ActivitySection, 'title' | 'emptyLabel'>> = {
   output: { title: 'Output', emptyLabel: 'No output' },
   tasks: { title: 'Tasks', emptyLabel: 'No tasks' },
-  queue: { title: 'Queue', emptyLabel: 'No queued messages' },
   team: { title: 'Team', emptyLabel: 'No team members' },
   backgroundTasks: { title: 'Background Tasks', emptyLabel: 'No background tasks' },
   subagents: { title: 'SubAgents', emptyLabel: 'No SubAgents' },
@@ -102,7 +80,6 @@ function createEmptySections(): Record<ActivitySectionId, ActivitySection> {
   return {
     output: createSection('output'),
     tasks: createSection('tasks'),
-    queue: createSection('queue'),
     team: createSection('team'),
     backgroundTasks: createSection('backgroundTasks'),
     subagents: createSection('subagents'),
@@ -161,10 +138,6 @@ function buildTaskRow(task: CLITask): ActivityRow {
     status: task.status,
     description: task.description,
     taskId: task.id,
-    owner: task.owner,
-    blocks: task.blocks,
-    blockedBy: task.blockedBy,
-    orchestration: parseOrchestrationMetadata(task.metadata) ?? undefined,
     openable: false,
   }
 }
@@ -222,10 +195,6 @@ function mergeTaskRows(existing: ActivityRow, row: ActivityRow): ActivityRow {
     description: nextDescription.length > existingDescription.length ? nextDescription : existing.description,
     summary: existing.summary || row.summary,
     taskId: existing.taskId || row.taskId,
-    owner: row.owner ?? existing.owner,
-    blocks: row.blocks ?? existing.blocks,
-    blockedBy: row.blockedBy ?? existing.blockedBy,
-    orchestration: row.orchestration ?? existing.orchestration,
     updatedAt: row.updatedAt ?? existing.updatedAt,
   }
 }
@@ -251,7 +220,10 @@ type TaskMessageTurn = {
 type TaskTurnRows = {
   turn: TaskMessageTurn
   rows: ActivityRow[]
+  confirmedStatuses: Map<string, TaskStatus>
 }
+
+type BuiltTaskRows = Pick<TaskTurnRows, 'rows' | 'confirmedStatuses'>
 
 function splitMessagesIntoTurns(messages: UIMessage[]): TaskMessageTurn[] {
   const turns: TaskMessageTurn[] = []
@@ -282,9 +254,9 @@ function splitMessagesIntoTurns(messages: UIMessage[]): TaskMessageTurn[] {
   return turns
 }
 
-function normalizeTaskStatus(status: unknown): TaskSummaryItem['status'] {
+function parseTaskStatus(status: unknown): TaskSummaryItem['status'] | undefined {
   if (status === 'completed' || status === 'in_progress' || status === 'pending') return status
-  return 'pending'
+  return undefined
 }
 
 function taskIdFromInput(input: Record<string, unknown>): string {
@@ -295,18 +267,61 @@ function isDeletedStatus(input: Record<string, unknown>): boolean {
   return stringField(input, 'status') === 'deleted'
 }
 
+function collectToolResults(
+  messages: UIMessage[],
+): Map<string, Extract<UIMessage, { type: 'tool_result' }>> {
+  const resultsByToolUseId = new Map<string, Extract<UIMessage, { type: 'tool_result' }>>()
+  for (const message of messages) {
+    if (message.type === 'tool_result') {
+      resultsByToolUseId.set(message.toolUseId, message)
+    }
+  }
+  return resultsByToolUseId
+}
+
+function collectSubagentCreatedTaskIds(messages: UIMessage[]): Set<string> {
+  const taskIds = new Set<string>()
+  const resultsByToolUseId = collectToolResults(messages)
+
+  for (const message of messages) {
+    if (
+      message.type !== 'tool_use' ||
+      message.toolName !== 'TaskCreate' ||
+      !message.parentToolUseId
+    ) {
+      continue
+    }
+
+    const result = resultsByToolUseId.get(message.toolUseId)
+    if (!result || result.isError) continue
+    const createdTask = parseCreatedTaskResult(result.content)
+    if (createdTask) taskIds.add(createdTask.id)
+  }
+
+  return taskIds
+}
+
+function keepSessionLevelTaskMessage(message: UIMessage): boolean {
+  return !(
+    (message.type === 'tool_use' || message.type === 'tool_result') &&
+    message.parentToolUseId
+  )
+}
+
 /**
  * TaskUpdate 的 deleted 是删除动作而非状态，删除可能发生在创建它的那一轮之后，
  * 所以要跨轮次收集，避免已删任务留在历史统计里。
  */
 function collectDeletedTaskIds(messages: UIMessage[]): Set<string> {
   const deletedTaskIds = new Set<string>()
+  const resultsByToolUseId = collectToolResults(messages)
 
   for (const message of messages) {
     if (message.type !== 'tool_use' || message.toolName !== 'TaskUpdate') continue
 
     const input = isRecordValue(message.input) ? message.input : {}
     if (!isDeletedStatus(input)) continue
+    if (!isSuccessfulTaskUpdate(input, resultsByToolUseId.get(message.toolUseId))) continue
 
     const taskId = taskIdFromInput(input)
     if (taskId) deletedTaskIds.add(taskId)
@@ -324,6 +339,20 @@ function parseCreatedTaskResult(content: unknown): { id: string; subject?: strin
     id: match[1],
     subject: match[2]?.trim(),
   }
+}
+
+function parseUpdatedTaskResult(content: unknown): { id: string } | null {
+  const match = extractTextContent(content).trimStart().match(/^Updated task #([^\s]+)(?:\s|$)/i)
+  return match?.[1] ? { id: match[1] } : null
+}
+
+function isSuccessfulTaskUpdate(
+  input: Record<string, unknown>,
+  result: Extract<UIMessage, { type: 'tool_result' }> | undefined,
+): boolean {
+  if (!result || result.isError) return false
+  const taskId = taskIdFromInput(input)
+  return Boolean(taskId && parseUpdatedTaskResult(result.content)?.id === taskId)
 }
 
 function buildTaskToolRow(
@@ -433,11 +462,6 @@ function stripAgentMetadata(text: string): string {
     .trim()
 }
 
-function agentToolName(toolCall: Extract<UIMessage, { type: 'tool_use' }>): string | undefined {
-  const input = isRecordValue(toolCall.input) ? toolCall.input : {}
-  return stringField(input, 'name') || undefined
-}
-
 function agentToolLabel(toolCall: Extract<UIMessage, { type: 'tool_use' }>): string {
   const input = isRecordValue(toolCall.input) ? toolCall.input : {}
   return compactText(
@@ -450,38 +474,12 @@ function agentToolLabel(toolCall: Extract<UIMessage, { type: 'tool_use' }>): str
   )
 }
 
-function toolEventDescription(message: Extract<UIMessage, { type: 'tool_use' }>): string | undefined {
-  const input = isRecordValue(message.input) ? message.input : {}
-  const description = compactText(
-    stringField(input, 'description') ||
-      stringField(input, 'command') ||
-      stringField(input, 'file_path') ||
-      stringField(input, 'query') ||
-      stringField(input, 'pattern'),
-    120,
-  )
-  return description || undefined
-}
-
 function buildAgentRowsFromMessages(messages: UIMessage[]): ActivityRow[] {
   const resultsByToolUseId = new Map<string, Extract<UIMessage, { type: 'tool_result' }>>()
-  const childEventsByAgentId = new Map<string, ActivityRow['recentEvents']>()
   for (const message of messages) {
     if (message.type === 'tool_result') {
       resultsByToolUseId.set(message.toolUseId, message)
-      continue
     }
-    if (message.type !== 'tool_use' || !message.parentToolUseId || message.toolName === 'Agent') continue
-    const events = childEventsByAgentId.get(message.parentToolUseId) ?? []
-    const nextEvents = [...events, {
-      id: message.toolUseId,
-      toolName: message.toolName,
-      description: toolEventDescription(message),
-      timestamp: message.timestamp,
-    }]
-      .sort((first, second) => first.timestamp - second.timestamp)
-      .slice(-3)
-    childEventsByAgentId.set(message.parentToolUseId, nextEvents)
   }
 
   const rows: ActivityRow[] = []
@@ -490,7 +488,6 @@ function buildAgentRowsFromMessages(messages: UIMessage[]): ActivityRow[] {
 
     const result = resultsByToolUseId.get(message.toolUseId)
     const resultText = result ? stripAgentMetadata(extractTextContent(result.content)) : ''
-    const recentEvents = childEventsByAgentId.get(message.toolUseId)
     rows.push({
       id: message.toolUseId,
       section: 'subagents',
@@ -505,9 +502,7 @@ function buildAgentRowsFromMessages(messages: UIMessage[]): ActivityRow[] {
       summary: resultText ? compactText(resultText) : undefined,
       toolUseId: message.toolUseId,
       taskType: 'local_agent',
-      agentName: agentToolName(message),
-      updatedAt: result?.timestamp ?? recentEvents?.at(-1)?.timestamp ?? message.timestamp,
-      recentEvents,
+      updatedAt: result?.timestamp ?? message.timestamp,
       openable: true,
     })
   }
@@ -515,15 +510,13 @@ function buildAgentRowsFromMessages(messages: UIMessage[]): ActivityRow[] {
   return rows
 }
 
-function buildTaskRowsFromTaskTools(messages: UIMessage[]): ActivityRow[] {
-  const resultsByToolUseId = new Map<string, Extract<UIMessage, { type: 'tool_result' }>>()
-  for (const message of messages) {
-    if (message.type === 'tool_result') {
-      resultsByToolUseId.set(message.toolUseId, message)
-    }
-  }
+function buildTaskRowsFromTaskTools(
+  messages: UIMessage[],
+  resultsByToolUseId = collectToolResults(messages),
+): BuiltTaskRows {
 
   const rowsByTaskId = new Map<string, ActivityRow>()
+  const confirmedStatuses = new Map<string, TaskStatus>()
   let createIndex = 0
 
   for (const message of messages) {
@@ -543,16 +536,21 @@ function buildTaskRowsFromTaskTools(messages: UIMessage[]): ActivityRow[] {
       const input = isRecordValue(message.input) ? message.input : {}
       const taskId = taskIdFromInput(input)
       if (!taskId) continue
+      // TaskUpdate reports benign failures such as "Task not found" with
+      // isError=false, so only its positive result is authoritative.
+      if (!isSuccessfulTaskUpdate(input, resultsByToolUseId.get(message.toolUseId))) continue
 
       // deleted 不是一种任务状态：CLI 侧 TaskUpdateTool 会真的删掉任务文件
       if (isDeletedStatus(input)) {
         rowsByTaskId.delete(taskId)
+        confirmedStatuses.delete(taskId)
         continue
       }
 
       const existing = rowsByTaskId.get(taskId)
       const activeForm = stringField(input, 'activeForm')
       const subject = stringField(input, 'subject')
+      const status = parseTaskStatus(input.status) ?? existing?.status ?? 'pending'
       rowsByTaskId.set(taskId, {
         ...(existing ?? {
           id: taskId,
@@ -561,43 +559,68 @@ function buildTaskRowsFromTaskTools(messages: UIMessage[]): ActivityRow[] {
           taskId,
           openable: false,
         }),
-        status: normalizeTaskStatus(input.status),
+        status,
         ...(activeForm && activeForm !== (existing?.label ?? subject) ? { description: activeForm } : {}),
       })
+      const confirmedStatus = parseTaskStatus(input.status)
+      if (confirmedStatus) confirmedStatuses.set(taskId, confirmedStatus)
     }
   }
 
-  return Array.from(rowsByTaskId.values())
+  return {
+    rows: Array.from(rowsByTaskId.values()),
+    confirmedStatuses,
+  }
 }
 
-function buildTaskRowsFromTurnMessages(messages: UIMessage[]): ActivityRow[] {
+function buildTaskRowsFromTurnMessages(
+  messages: UIMessage[],
+  resultsByToolUseId = collectToolResults(messages),
+): BuiltTaskRows {
   let latestSummary: Extract<UIMessage, { type: 'task_summary' }> | undefined
   let latestTodoWrite: Extract<UIMessage, { type: 'tool_use' }> | undefined
-  let latestTaskToolTimestamp = -Infinity
+  let latestTodoWriteIndex = -1
+  let latestTaskToolIndex = -1
 
-  for (const message of messages) {
+  for (const [index, message] of messages.entries()) {
     if (message.type === 'task_summary') {
       latestSummary = message
     } else if (message.type === 'tool_use' && message.toolName === 'TodoWrite') {
       latestTodoWrite = message
-    } else if (message.type === 'tool_use' && (message.toolName === 'TaskCreate' || message.toolName === 'TaskUpdate')) {
-      latestTaskToolTimestamp = Math.max(latestTaskToolTimestamp, message.timestamp)
+      latestTodoWriteIndex = index
+    } else if (message.type === 'tool_use' && message.toolName === 'TaskCreate') {
+      latestTaskToolIndex = index
+    } else if (message.type === 'tool_use' && message.toolName === 'TaskUpdate') {
+      const input = isRecordValue(message.input) ? message.input : {}
+      if (isSuccessfulTaskUpdate(input, resultsByToolUseId.get(message.toolUseId))) {
+        latestTaskToolIndex = index
+      }
     }
   }
 
   if (latestSummary?.tasks.length) {
-    return dedupeTaskRows(latestSummary.tasks.map(buildTaskSummaryRow))
+    return {
+      rows: dedupeTaskRows(latestSummary.tasks.map(buildTaskSummaryRow)),
+      confirmedStatuses: new Map(),
+    }
   }
 
   const input = latestTodoWrite?.input
-  if (latestTodoWrite && isRecordValue(input) && Array.isArray(input.todos) && latestTodoWrite.timestamp >= latestTaskToolTimestamp) {
-    return dedupeTaskRows(input.todos.map(buildTodoTaskRow))
+  if (latestTodoWrite && isRecordValue(input) && Array.isArray(input.todos) && latestTodoWriteIndex >= latestTaskToolIndex) {
+    return {
+      rows: dedupeTaskRows(input.todos.map(buildTodoTaskRow)),
+      confirmedStatuses: new Map(),
+    }
   }
 
-  return buildTaskRowsFromTaskTools(messages)
+  return buildTaskRowsFromTaskTools(messages, resultsByToolUseId)
 }
 
-function mergeTaskRowsById(baseRows: ActivityRow[], liveRows: ActivityRow[]): ActivityRow[] {
+function mergeTaskRowsById(
+  baseRows: ActivityRow[],
+  liveRows: ActivityRow[],
+  confirmedStatuses: Map<string, TaskStatus>,
+): ActivityRow[] {
   const liveRowsById = new Map<string, ActivityRow>()
   for (const row of liveRows) {
     if (row.taskId || row.id) {
@@ -611,7 +634,9 @@ function mergeTaskRowsById(baseRows: ActivityRow[], liveRows: ActivityRow[]): Ac
     const liveRow = liveRowsById.get(id)
     if (!liveRow) return row
     usedLiveIds.add(id)
-    return mergeTaskRows(row, liveRow)
+    const mergedRow = mergeTaskRows(row, liveRow)
+    const confirmedStatus = confirmedStatuses.get(id)
+    return confirmedStatus ? { ...mergedRow, status: confirmedStatus } : mergedRow
   })
 
   for (const row of liveRows) {
@@ -645,12 +670,24 @@ function buildHistoricalTasksRow(groups: TaskTurnRows[]): ActivityRow | null {
 }
 
 function buildTaskRowsFromMessages(messages: UIMessage[], liveTasks: CLITask[]): ActivityRow[] {
+  const subagentCreatedTaskIds = collectSubagentCreatedTaskIds(messages)
+  const sessionMessages = messages.filter(keepSessionLevelTaskMessage)
   const deletedTaskIds = collectDeletedTaskIds(messages)
-  const isLiveRow = (row: ActivityRow) => (row.taskId ? !deletedTaskIds.has(row.taskId) : true)
+  const resultsByToolUseId = collectToolResults(sessionMessages)
+  const isSessionTaskRow = (row: ActivityRow) => row.taskId
+    ? !deletedTaskIds.has(row.taskId) && !subagentCreatedTaskIds.has(row.taskId)
+    : true
   // 任务列表要等 tool_result 到达后才异步刷新，这中间 liveTasks 里还留着已删的任务
-  const liveRows = liveTasks.filter((task) => !deletedTaskIds.has(task.id)).map(buildTaskRow)
-  const taskTurnRows = splitMessagesIntoTurns(messages)
-    .map((turn) => ({ turn, rows: buildTaskRowsFromTurnMessages(turn.messages).filter(isLiveRow) }))
+  const liveRows = liveTasks.map(buildTaskRow).filter(isSessionTaskRow)
+  const taskTurnRows = splitMessagesIntoTurns(sessionMessages)
+    .map((turn) => {
+      const builtRows = buildTaskRowsFromTurnMessages(turn.messages, resultsByToolUseId)
+      return {
+        turn,
+        rows: builtRows.rows.filter(isSessionTaskRow),
+        confirmedStatuses: builtRows.confirmedStatuses,
+      }
+    })
     .filter((group) => group.rows.length > 0)
 
   if (taskTurnRows.length === 0) {
@@ -659,23 +696,20 @@ function buildTaskRowsFromMessages(messages: UIMessage[], liveTasks: CLITask[]):
 
   const currentGroup = taskTurnRows[taskTurnRows.length - 1]!
   const earlierGroups = taskTurnRows.slice(0, -1)
-  const currentRows = dedupeTaskRows(mergeTaskRowsById(currentGroup.rows, liveRows))
+  const currentRows = dedupeTaskRows(mergeTaskRowsById(
+    currentGroup.rows,
+    liveRows,
+    currentGroup.confirmedStatuses,
+  ))
   const historicalRow = buildHistoricalTasksRow(earlierGroups)
 
   return historicalRow ? [...currentRows, historicalRow] : currentRows
 }
 
-function latestActivityTimestamp(
-  first: ActivityRow['updatedAt'],
-  second: ActivityRow['updatedAt'],
-): ActivityRow['updatedAt'] {
-  const toMillis = (value: ActivityRow['updatedAt']) =>
-    typeof value === 'number' ? value : Date.parse(value ?? '')
-  const firstMillis = toMillis(first)
-  const secondMillis = toMillis(second)
-  if (!Number.isFinite(firstMillis)) return second
-  if (!Number.isFinite(secondMillis)) return first
-  return secondMillis > firstMillis ? second : first
+function sealUnfinishedTaskRows(rows: ActivityRow[]): ActivityRow[] {
+  return rows.map((row) => row.status === 'pending' || row.status === 'in_progress'
+    ? { ...row, status: 'stopped' }
+    : row)
 }
 
 function mergeSubagentRow(existing: ActivityRow | undefined, row: ActivityRow): ActivityRow {
@@ -696,10 +730,8 @@ function mergeSubagentRow(existing: ActivityRow | undefined, row: ActivityRow): 
     dismissKey: existing.dismissKey ?? row.dismissKey,
     outputFile: existing.outputFile ?? row.outputFile,
     usage: existing.usage ?? row.usage,
-    updatedAt: latestActivityTimestamp(existing.updatedAt, row.updatedAt),
-    recentEvents: row.recentEvents ?? existing.recentEvents,
+    updatedAt: row.updatedAt ?? existing.updatedAt,
     member: existing.member ?? row.member,
-    agentName: existing.agentName ?? row.agentName,
     openable: existing.openable || row.openable,
   }
 }
@@ -738,37 +770,13 @@ function buildOutputRow(key: string, outputFile: string): ActivityRow {
   }
 }
 
-function queuedTaskIds(content: string): string[] {
-  const match = content.match(/^Task IDs:\s*(.+)$/im)
-  if (!match?.[1]) return []
-  return Array.from(new Set(match[1].split(',').map(id => id.trim()).filter(Boolean)))
-}
-
-function buildQueueRow(message: QueuedMessage, tasksById: Map<string, CLITask>): ActivityRow {
-  const relatedTaskIds = queuedTaskIds(message.content)
-  return {
-    id: message.id,
-    section: 'queue',
-    label: message.displayContent?.trim() || compactText(message.content),
-    status: 'pending',
-    description: message.displayContent ? compactText(message.content) : undefined,
-    queuedMessageId: message.id,
-    relatedTaskIds,
-    stale: relatedTaskIds.some((id) => {
-      const task = tasksById.get(id)
-      return !task || task.status === 'completed'
-    }),
-    updatedAt: message.createdAt,
-    openable: false,
-  }
-}
-
 export function buildSessionActivityModel(input: BuildSessionActivityModelInput): SessionActivityModel {
   const sections = createEmptySections()
   let badgeCount = 0
-  sections.tasks.rows = buildTaskRowsFromMessages(input.messages ?? [], input.tasks)
-  const tasksById = new Map(input.tasks.map(task => [task.id, task]))
-  sections.queue.rows = (input.queuedMessages ?? []).map(message => buildQueueRow(message, tasksById))
+  const taskRows = buildTaskRowsFromMessages(input.messages ?? [], input.tasks)
+  sections.tasks.rows = input.isForegroundTurnActive === false
+    ? sealUnfinishedTaskRows(taskRows)
+    : taskRows
   for (const row of sections.tasks.rows) {
     if (isBadgeStatus(row.status)) {
       badgeCount += 1
@@ -858,15 +866,7 @@ export function buildSessionActivityModel(input: BuildSessionActivityModelInput)
     }
   }
 
-  const taskRowsByOwner = new Map(
-    sections.tasks.rows
-      .filter(row => row.owner)
-      .map(row => [row.owner!, row]),
-  )
-  sections.subagents.rows = Array.from(subagentRowsByKey.values()).map(row => ({
-    ...row,
-    ownedTask: row.agentName ? taskRowsByOwner.get(row.agentName) : undefined,
-  }))
+  sections.subagents.rows = Array.from(subagentRowsByKey.values())
   sections.output.rows = Array.from(outputRowsByKey.values())
 
   for (const row of sections.subagents.rows) {

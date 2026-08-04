@@ -17,7 +17,13 @@ type SelectionRect = {
 
 type SelectionGeometry = {
   rect: SelectionRect | DOMRect
+  clientRects: DOMRect[]
   isMultiLine: boolean
+}
+
+type SelectionFocus = {
+  node: Node | null
+  offset: number
 }
 
 function clampValue(value: number, min: number, max: number) {
@@ -52,6 +58,7 @@ function getRangeSelectionGeometry(range: Range): SelectionGeometry | null {
     const maxLineHeight = Math.max(...clientRects.map((rect) => rect.height))
     return {
       rect: boundingRect && isUsableRect(boundingRect) ? boundingRect : unionRect,
+      clientRects,
       isMultiLine: clientRects.length > 1 || unionRect.height > maxLineHeight * 1.6,
     }
   }
@@ -59,11 +66,62 @@ function getRangeSelectionGeometry(range: Range): SelectionGeometry | null {
   if (boundingRect && isUsableRect(boundingRect)) {
     return {
       rect: boundingRect,
+      clientRects: [],
       isMultiLine: boundingRect.height > 32,
     }
   }
 
   return null
+}
+
+function getSelectionFocusRect(
+  range: Range,
+  root: HTMLElement,
+  geometry: SelectionGeometry,
+  focus?: SelectionFocus,
+  fallbackPointer?: { clientX: number; clientY: number },
+) {
+  if (!geometry.isMultiLine) return geometry.rect
+
+  if (focus?.node && root.contains(focus.node)) {
+    try {
+      const focusRange = document.createRange()
+      focusRange.setStart(focus.node, focus.offset)
+      focusRange.collapse(true)
+      const focusRect = typeof focusRange.getBoundingClientRect === 'function'
+        ? focusRange.getBoundingClientRect()
+        : null
+      if (focusRect && isUsableRect(focusRect)) return focusRect
+    } catch {
+      // The selection can change between selectionchange and the queued layout read.
+    }
+  }
+
+  if (geometry.clientRects.length === 0) return geometry.rect
+  if (focus?.node === range.startContainer && focus.offset === range.startOffset) {
+    return geometry.clientRects[0]!
+  }
+  if (focus?.node === range.endContainer && focus.offset === range.endOffset) {
+    return geometry.clientRects[geometry.clientRects.length - 1]!
+  }
+  if (!fallbackPointer) return geometry.clientRects[geometry.clientRects.length - 1]!
+
+  return geometry.clientRects.reduce((closest, rect) => {
+    const distanceToRect = (candidate: DOMRect) => {
+      const dx = fallbackPointer.clientX < candidate.left
+        ? candidate.left - fallbackPointer.clientX
+        : fallbackPointer.clientX > candidate.right
+          ? fallbackPointer.clientX - candidate.right
+          : 0
+      const dy = fallbackPointer.clientY < candidate.top
+        ? candidate.top - fallbackPointer.clientY
+        : fallbackPointer.clientY > candidate.bottom
+          ? fallbackPointer.clientY - candidate.bottom
+          : 0
+      return dx * dx + dy * dy
+    }
+    return distanceToRect(rect) < distanceToRect(closest) ? rect : closest
+  })
 }
 
 export function clearWindowSelection() {
@@ -78,11 +136,13 @@ export function getSelectionPopoverPosition(
     menuHeight,
     offset,
     fallbackPointer,
+    selectionFocus,
   }: {
     menuWidth: number
     menuHeight: number
     offset: number
     fallbackPointer?: { clientX: number; clientY: number }
+    selectionFocus?: SelectionFocus
   },
 ) {
   const geometry = getRangeSelectionGeometry(range)
@@ -102,6 +162,9 @@ export function getSelectionPopoverPosition(
     width: 0,
     height: 0,
   }
+  const anchorRect = geometry
+    ? getSelectionFocusRect(range, root, geometry, selectionFocus, fallbackPointer)
+    : selectionRect
   const viewportWidth = window.innerWidth || document.documentElement.clientWidth || rootRect.right + VIEWPORT_MARGIN
   const viewportHeight = window.innerHeight || document.documentElement.clientHeight || rootRect.bottom + VIEWPORT_MARGIN
   const minX = VIEWPORT_MARGIN
@@ -112,15 +175,15 @@ export function getSelectionPopoverPosition(
     x: clampValue(position.x, minX, maxX),
     y: clampValue(position.y, minY, maxY),
   })
-  const centerX = selectionRect.left + selectionRect.width / 2
-  const centerY = selectionRect.top + selectionRect.height / 2
+  const centerX = anchorRect.left + anchorRect.width / 2
+  const centerY = anchorRect.top + anchorRect.height / 2
   const above = {
     x: centerX - menuWidth / 2,
-    y: selectionRect.top - menuHeight - offset,
+    y: anchorRect.top - menuHeight - offset,
   }
 
   const right = {
-    x: selectionRect.right + offset,
+    x: anchorRect.right + offset,
     y: centerY - menuHeight / 2,
   }
   if (geometry?.isMultiLine && right.x + menuWidth <= viewportWidth - VIEWPORT_MARGIN) return clampPosition(right)
@@ -131,7 +194,7 @@ export function getSelectionPopoverPosition(
 
   const below = {
     x: centerX - menuWidth / 2,
-    y: selectionRect.bottom + offset,
+    y: anchorRect.bottom + offset,
   }
   if (below.y + menuHeight <= viewportHeight - VIEWPORT_MARGIN) return clampPosition(below)
 
@@ -156,13 +219,22 @@ export function useSelectionPopoverDismiss({
     }
 
     const handlePointerDown = (event: PointerEvent) => {
+      const isContextMenuPointer = event.button === 2 || (event.pointerType === 'mouse' && event.ctrlKey)
       const popover = popoverRef.current
       const target = event.target
-      if (popover && target instanceof Node && popover.contains(target)) {
+      if (popover && target instanceof Node && popover.contains(target) && !isContextMenuPointer) {
+        return
+      }
+      if (isContextMenuPointer) {
+        onDismiss()
         return
       }
 
       dismiss()
+    }
+
+    const handleContextMenu = () => {
+      onDismiss()
     }
 
     const handleScroll = () => {
@@ -170,9 +242,11 @@ export function useSelectionPopoverDismiss({
     }
 
     document.addEventListener('pointerdown', handlePointerDown, true)
+    document.addEventListener('contextmenu', handleContextMenu, true)
     document.addEventListener('scroll', handleScroll, true)
     return () => {
       document.removeEventListener('pointerdown', handlePointerDown, true)
+      document.removeEventListener('contextmenu', handleContextMenu, true)
       document.removeEventListener('scroll', handleScroll, true)
     }
   }, [active, onDismiss, popoverRef])

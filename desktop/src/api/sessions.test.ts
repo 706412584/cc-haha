@@ -57,6 +57,26 @@ describe('sessionsApi', () => {
     expect(init).toMatchObject({ method: 'GET' })
   })
 
+  it('reads pet activity without opening a websocket session', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      state: 'thinking',
+      activityState: 'waiting',
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    const result = await sessionsApi.getChatStatus('session-1')
+
+    expect(result.state).toBe('thinking')
+    expect(result.activityState).toBe('waiting')
+    expect(fetchMock).toHaveBeenCalledOnce()
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(url).toBe('http://127.0.0.1:3456/api/sessions/session-1/chat/status')
+    expect(init).toMatchObject({ method: 'GET' })
+  })
+
   it('searches the session workspace with an encoded query', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch')
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
@@ -107,28 +127,5 @@ describe('sessionsApi', () => {
       discovered: 12,
       indexed: 4,
     })
-  })
-
-  it('posts manual session index sync requests', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch')
-    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
-      sessionIndex: { state: 'ready' },
-      searchEnabled: true,
-      searchIndex: { state: 'ready' },
-    }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    }))
-
-    const result = await sessionsApi.syncIndexes() as {
-      sessionIndex: { state: string }
-      searchEnabled: boolean
-    }
-
-    expect(result.searchEnabled).toBe(true)
-    expect(result.sessionIndex.state).toBe('ready')
-    const [url, init] = fetchMock.mock.calls[0]!
-    expect(url).toBe('http://127.0.0.1:3456/api/sessions/sync-indexes')
-    expect(init).toMatchObject({ method: 'POST' })
   })
 })

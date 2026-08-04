@@ -127,13 +127,13 @@ Function CcHahaCanSkipLegacyRecovery
   StrCpy $R0 "0"
 
   IfFileExists "$ccHahaPerUserInstallLocation\CLAUDE_CONFIG_DIR\*.*" cc_haha_skip_recovery_done 0
-  IfFileExists "$R1\${APP_PACKAGE_NAME}\app-mode.json" cc_haha_check_default_mode 0
+  IfFileExists "$R1\Claude Code Haha\app-mode.json" cc_haha_check_default_mode 0
   StrCpy $R0 "1"
   Goto cc_haha_skip_recovery_done
 
   cc_haha_check_default_mode:
     ClearErrors
-    FileOpen $R2 "$R1\${APP_PACKAGE_NAME}\app-mode.json" r
+    FileOpen $R2 "$R1\Claude Code Haha\app-mode.json" r
     IfErrors cc_haha_skip_recovery_done 0
     FileRead $R2 $R3
     StrCmp $R3 '{$\n' 0 cc_haha_close_mode_file
@@ -218,7 +218,7 @@ Function CcHahaRecoverLegacy
   ${EndIf}
 
   DetailPrint "Checking registered installations for legacy Claude Code Haha data..."
-  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\recover-legacy-install-data.ps1" -PerUserInstallDir "$4" -PerMachineInstallDir "$5" -CandidateInstallDir "$9" -UserDataDir "$2\${APP_PACKAGE_NAME}" -RecoveryRoot "$3\Claude Code Haha Data\Recovered" -ProcessName "${PRODUCT_FILENAME}.exe" -ActiveConfigDir "$6" -ActiveConfigManaged "$7" -InstallerIdentitySafety "$8"'
+  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\recover-legacy-install-data.ps1" -PerUserInstallDir "$4" -PerMachineInstallDir "$5" -CandidateInstallDir "$9" -UserDataDir "$2\Claude Code Haha" -RecoveryRoot "$3\Claude Code Haha Data\Recovered" -ProcessName "${PRODUCT_FILENAME}.exe" -ActiveConfigDir "$6" -ActiveConfigManaged "$7" -InstallerIdentitySafety "$8"'
   Pop $0
   Pop $1
 FunctionEnd

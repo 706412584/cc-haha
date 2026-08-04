@@ -1,7 +1,5 @@
 import { api } from './client'
-import { getDesktopHost } from '../lib/desktopHost'
-import type { DesktopTunnelStartOptions, DesktopTunnelStatus } from '../lib/desktopHost/types'
-import type { H5AccessDiagnostics, H5AccessSettings, H5TunnelMode } from '../types/settings'
+import type { H5AccessDiagnostics, H5AccessSettings } from '../types/settings'
 
 export type { H5AccessDiagnostics, H5AccessSettings } from '../types/settings'
 
@@ -37,40 +35,7 @@ export const h5AccessApi = {
     publicBaseUrl?: string | null
     fixedPort?: number | null
     disconnectGraceSeconds?: number | null
-    tunnelToken?: string | null
-    tunnelMode?: H5TunnelMode | null
   }) {
     return api.put<H5AccessStatus>('/api/h5-access', input)
-  },
-
-  /**
-   * Tunnel control runs in the desktop main process (it spawns cloudflared),
-   * so these go through the desktop host bridge rather than the HTTP API.
-   * Returns null when not running inside the desktop shell (e.g. a browser H5
-   * session), where one-click tunnelling is unavailable.
-   */
-  tunnelAvailable(): boolean {
-    return !!getDesktopHost().tunnel
-  },
-
-  startTunnel(options: DesktopTunnelStartOptions): Promise<DesktopTunnelStatus> {
-    const host = getDesktopHost()
-    if (!host.tunnel) {
-      throw new Error('One-click tunnelling is only available in the desktop app.')
-    }
-    return host.tunnel.start(options)
-  },
-
-  stopTunnel(): Promise<DesktopTunnelStatus> {
-    const host = getDesktopHost()
-    if (!host.tunnel) {
-      throw new Error('One-click tunnelling is only available in the desktop app.')
-    }
-    return host.tunnel.stop()
-  },
-
-  getTunnelStatus(): Promise<DesktopTunnelStatus> | null {
-    const host = getDesktopHost()
-    return host.tunnel ? host.tunnel.getStatus() : null
   },
 }

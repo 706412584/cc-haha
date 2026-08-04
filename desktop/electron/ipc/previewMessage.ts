@@ -3,7 +3,7 @@ const MAX_PREVIEW_TEXT_LENGTH = 32_768
 
 export type PreviewAgentMessage =
   | { v: 1, type: 'ready' }
-  | { v: 1, type: 'picker-exited' }
+  | { v: 1, type: 'picker-exited', reason?: 'cancel-current' | 'host' | 'invalid-target' }
   | { v: 1, type: 'navigated', url: string, title: string }
   | { v: 1, type: 'error', message: string }
   | { v: 1, type: 'screenshot', dataUrl: string, kind: 'full' | 'viewport' | 'element' }
@@ -51,8 +51,15 @@ export function parsePreviewAgentMessage(raw: string): PreviewAgentMessage | nul
 
   switch (parsed.type) {
     case 'ready':
+      return { v: 1, type: 'ready' }
     case 'picker-exited':
-      return { v: 1, type: parsed.type }
+      if (
+        parsed.reason !== undefined &&
+        parsed.reason !== 'cancel-current' &&
+        parsed.reason !== 'host' &&
+        parsed.reason !== 'invalid-target'
+      ) return null
+      return { v: 1, type: 'picker-exited', ...(parsed.reason ? { reason: parsed.reason } : {}) }
     case 'navigated':
       if (!isBoundedString(parsed.url) || !isBoundedString(parsed.title)) return null
       try {

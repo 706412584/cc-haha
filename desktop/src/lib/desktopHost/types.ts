@@ -149,8 +149,24 @@ export type PreviewCaptureMessage = {
 
 export type PreviewPickerMessage = {
   v: 1
-  type: 'enter-picker' | 'exit-picker'
-}
+} & (
+  | {
+      type: 'enter-picker'
+      mode?: 'single' | 'batch'
+      label?: number
+      copy?: {
+        cancel: string
+        send: string
+        queueAndContinue: string
+        add: string
+        descriptionPlaceholder: string
+      }
+    }
+  | { type: 'exit-picker' }
+  | { type: 'undo-selection'; itemId: string }
+  | { type: 'clear-selection-draft' }
+  | { type: 'commit-selection-draft' }
+)
 
 export type PreviewHostMessage = PreviewCaptureMessage | PreviewPickerMessage
 
@@ -249,27 +265,6 @@ export type AppModeSetInput = {
   portableDir: string | null
 }
 
-export type PortableDirDetection = {
-  defaultPortableDir: string | null
-  hasData: boolean
-}
-
-export type DesktopTunnelMode = 'quick' | 'named'
-
-export type DesktopTunnelStatus = {
-  status: 'idle' | 'starting' | 'running' | 'error'
-  url: string | null
-  mode: DesktopTunnelMode | null
-  error: string | null
-}
-
-export type DesktopTunnelStartOptions = {
-  mode: DesktopTunnelMode
-  token?: string | null
-  namedUrl?: string | null
-}
-
-
 export type DesktopHost = {
   kind: DesktopHostKind
   isDesktop: boolean
@@ -277,11 +272,6 @@ export type DesktopHost = {
   runtime: {
     getServerUrl(): Promise<string>
     getLocalAccessToken(): Promise<string | null>
-  }
-  tunnel?: {
-    start(options: DesktopTunnelStartOptions): Promise<DesktopTunnelStatus>
-    stop(): Promise<DesktopTunnelStatus>
-    getStatus(): Promise<DesktopTunnelStatus>
   }
   app: {
     getVersion(): Promise<string>
@@ -309,8 +299,6 @@ export type DesktopHost = {
   shell: {
     open(target: string): Promise<void>
     openPath(path: string): Promise<void>
-    /** Reveal a file in the OS file manager with the file itself selected. */
-    showItemInFolder?(target: string): Promise<void>
   }
   trace?: {
     openWindow(sessionId: string): Promise<void>

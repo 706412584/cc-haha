@@ -20,7 +20,7 @@ describe('workspaceDiffHighlight worker', () => {
   })
 
   it('posts successful and failed highlight responses with the request id', async () => {
-    const result = { engine: 'prism', tokensByRowId: {}, wordRangesByRowId: {} }
+    const result = { engine: 'shiki', tokensByRowId: {}, wordRangesByRowId: {} }
     highlightWorkspaceDiffSpy.mockResolvedValueOnce(result)
     await workerScope.onmessage?.({
       data: { id: 7, files: [], path: 'src/a.ts' },

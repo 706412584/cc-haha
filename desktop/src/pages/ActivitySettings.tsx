@@ -72,7 +72,7 @@ const DATE_LOCALES: Record<Locale, string> = {
 }
 const DEFAULT_PROFILE: DesktopProfilePreferences = {
   displayName: 'cc-haha',
-  subtitle: 'github.com/706412584/cc-haha',
+  subtitle: 'github.com/NanmiCoder/cc-haha',
   avatarFile: null,
   avatarUpdatedAt: null,
 }

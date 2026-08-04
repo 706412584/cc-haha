@@ -1,7 +1,6 @@
 import { create } from 'zustand'
 import { pluginsApi } from '../api/plugins'
 import type {
-  CatalogPlugin,
   PluginDetail,
   PluginListResponse,
   PluginReloadSummary,
@@ -23,12 +22,6 @@ type PluginStore = {
   isDetailLoading: boolean
   isApplying: boolean
   error: string | null
-
-  catalog: CatalogPlugin[]
-  isCatalogLoading: boolean
-  installingCatalogId: string | null
-  isAddingMarketplace: boolean
-
   fetchPlugins: (cwd?: string) => Promise<void>
   fetchPluginDetail: (id: string, cwd?: string) => Promise<void>
   reloadPlugins: (cwd?: string, sessionId?: string) => Promise<PluginReloadSummary>
@@ -38,18 +31,6 @@ type PluginStore = {
   bulkDisablePlugins: (plugins: PluginActionTarget[], cwd?: string, sessionId?: string) => Promise<number>
   updatePlugin: (id: string, scope?: PluginScope, cwd?: string, sessionId?: string) => Promise<string>
   uninstallPlugin: (id: string, scope?: PluginScope, keepData?: boolean, cwd?: string, sessionId?: string) => Promise<string>
-  fetchCatalog: () => Promise<void>
-  installCatalogPlugin: (
-    id: string,
-    marketplace: string,
-    cwd?: string,
-    sessionId?: string,
-  ) => Promise<string>
-  addMarketplaceFromInput: (
-    input: string,
-    cwd?: string,
-    sessionId?: string,
-  ) => Promise<{ name: string; alreadyMaterialized: boolean }>
   clearSelection: () => void
 }
 
@@ -71,11 +52,6 @@ export const usePluginStore = create<PluginStore>((set, get) => ({
   isDetailLoading: false,
   isApplying: false,
   error: null,
-
-  catalog: [],
-  isCatalogLoading: false,
-  installingCatalogId: null,
-  isAddingMarketplace: false,
 
   fetchPlugins: async (cwd) => {
     const requestVersion = ++listRequestVersion
@@ -238,55 +214,6 @@ export const usePluginStore = create<PluginStore>((set, get) => ({
     )
   },
 
-  fetchCatalog: async () => {
-    set({ isCatalogLoading: true })
-    try {
-      const { catalog } = await pluginsApi.catalog()
-      set({ catalog, isCatalogLoading: false })
-    } catch (err) {
-      set({
-        isCatalogLoading: false,
-        error: err instanceof Error ? err.message : String(err),
-      })
-    }
-  },
-
-  installCatalogPlugin: async (id, marketplace, cwd, sessionId) => {
-    set({ installingCatalogId: id, error: null })
-    try {
-      const { message } = await pluginsApi.installCatalog({ id, marketplace })
-      // Apply the change to the running process so the new plugin's components
-      // (skills, MCP servers, hooks) become live without a manual reload.
-      const { summary } = await pluginsApi.reload(cwd, sessionId)
-      // Refresh both lists so the catalog card flips to "Installed" and the
-      // newly installed plugin appears in the regular Installed section.
-      await Promise.all([get().fetchCatalog(), get().fetchPlugins(cwd)])
-      set({ installingCatalogId: null, lastReloadSummary: summary })
-      return message
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      set({ installingCatalogId: null, error: message })
-      throw err
-    }
-  },
-
-  addMarketplaceFromInput: async (input, cwd, sessionId) => {
-    set({ isAddingMarketplace: true, error: null })
-    try {
-      const result = await pluginsApi.addMarketplace(input)
-      // Reload + refetch so the new marketplace shows in the Installed
-      // marketplaces panel and any plugins it brings in are surfaced.
-      const { summary } = await pluginsApi.reload(cwd, sessionId)
-      await get().fetchPlugins(cwd)
-      set({ isAddingMarketplace: false, lastReloadSummary: summary })
-      return { name: result.name, alreadyMaterialized: result.alreadyMaterialized }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      set({ isAddingMarketplace: false, error: message })
-      throw err
-    }
-  },
-
   clearSelection: () => {
     detailRequestVersion += 1
     set({
@@ -294,7 +221,8 @@ export const usePluginStore = create<PluginStore>((set, get) => ({
       selectedPluginContext: null,
       isDetailLoading: false,
     })
-  },}))
+  },
+}))
 
 let listRequestVersion = 0
 let detailRequestVersion = 0

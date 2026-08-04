@@ -2,7 +2,7 @@ import { createBridge } from './bridge'
 import { captureToDataUrl, createAnnotationOverlay } from './screenshot'
 import { createPicker } from './picker'
 import { buildElementMetadata } from './metadata'
-import { createEditBubble } from './editBubble'
+import { createEditBubble, type EditBubbleCopy } from './editBubble'
 
 ;(() => {
   ;(window as unknown as { __PREVIEW_AGENT__?: boolean }).__PREVIEW_AGENT__ = true
@@ -41,7 +41,12 @@ import { createEditBubble } from './editBubble'
   })
 
   let pickerOn = false
-  let activeBubble: { destroy: () => void } | null = null
+  let pickerMode: 'single' | 'batch' = 'single'
+  let pickerLabel = 1
+  let pickerCopy: EditBubbleCopy | undefined
+  let itemSequence = 0
+  let activeBubble: { destroy: () => void; revert: () => void } | null = null
+  const queuedReverts = new Map<string, () => void>()
   const picker = createPicker({ onSelect: () => {} })
 
   // 只做页面侧清理。宿主的 picker 授权由 selection / picker-exited 之一消费，
@@ -54,15 +59,21 @@ import { createEditBubble } from './editBubble'
   }
 
   // 本次拾取结束但没有产出 selection：通知宿主解除授权、复位按钮态。
-  const teardown = () => {
+  const teardown = (reason: 'cancel-current' | 'host' | 'invalid-target') => {
+    activeBubble?.revert()
     closePicker()
-    bridge.send({ type: 'picker-exited' })
+    bridge.send({ type: 'picker-exited', reason })
   }
 
-  const emitSelection = async (el: Element, change?: unknown) => {
+  const emitSelection = async (
+    el: Element,
+    change: unknown,
+    delivery: 'send' | 'queue',
+    draftItemId?: string,
+  ) => {
     try {
       clearSelectionOverlay()
-      const overlay = createAnnotationOverlay(el, 1)
+      const overlay = createAnnotationOverlay(el, pickerLabel)
       selectionOverlayCleanup = () => { overlay.remove() }
       selectionOverlayTimer = window.setTimeout(clearSelectionOverlay, 5000)
       bridge.send({
@@ -72,14 +83,43 @@ import { createEditBubble } from './editBubble'
           sourceHint: document.title || undefined,
           element: buildElementMetadata(el),
           change,
+          delivery,
+          selectionNumber: pickerLabel,
+          ...(draftItemId ? { draftItemId } : {}),
           screenshot: { kind: 'region' },
         },
       })
-    } catch (e) { bridge.reportError(String(e)) }
+    } catch (e) {
+      if (draftItemId) {
+        queuedReverts.get(draftItemId)?.()
+        queuedReverts.delete(draftItemId)
+      }
+      bridge.reportError(String(e))
+    }
   }
 
-  bridge.on('enter-picker', () => { pickerOn = true; picker.enter() })
-  bridge.on('exit-picker', () => { teardown() })
+  bridge.on('enter-picker', (message) => {
+    pickerMode = message.mode ?? 'single'
+    pickerLabel = message.label ?? 1
+    pickerCopy = message.copy
+    pickerOn = true
+    picker.enter()
+  })
+  bridge.on('exit-picker', () => { teardown('host') })
+  bridge.on('undo-selection', (message) => {
+    queuedReverts.get(message.itemId)?.()
+    queuedReverts.delete(message.itemId)
+    clearSelectionOverlay()
+  })
+  bridge.on('clear-selection-draft', () => {
+    for (const revert of [...queuedReverts.values()].reverse()) revert()
+    queuedReverts.clear()
+    clearSelectionOverlay()
+  })
+  bridge.on('commit-selection-draft', () => {
+    queuedReverts.clear()
+    clearSelectionOverlay()
+  })
 
   document.addEventListener('mousemove', (e) => {
     if (!pickerOn) return
@@ -93,12 +133,21 @@ import { createEditBubble } from './editBubble'
     picker.select()
     const el = picker.current()
     pickerOn = false   // stop hovering; keep highlight on the selected element while the bubble is open
-    if (!(el instanceof HTMLElement)) { teardown(); return }
+    if (!(el instanceof HTMLElement)) { teardown('invalid-target'); return }
     activeBubble = createEditBubble(el, {
       // selection 自带「本次拾取结束」的语义，宿主收到后会自行复位 picker 态。
       // 若这里先发 picker-exited，宿主会把授权解除在前、selection 到达在后而丢弃它。
-      onConfirm: (change) => { closePicker(); void emitSelection(el, change) },
-      onCancel: () => { teardown() },
+      onConfirm: (change) => { closePicker(); void emitSelection(el, change, 'send') },
+      onQueue: (change) => {
+        const itemId = `preview-selection-${++itemSequence}`
+        const revert = activeBubble?.revert
+        closePicker()
+        if (revert) queuedReverts.set(itemId, revert)
+        void emitSelection(el, change, 'queue', itemId)
+      },
+      onCancel: () => { teardown('cancel-current') },
+      mode: pickerMode,
+      copy: pickerCopy,
     })
   }, true)
 

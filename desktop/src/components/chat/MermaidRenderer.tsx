@@ -203,7 +203,7 @@ function getMermaidThemeColors(theme: ThemeMode): MermaidThemeColors {
   const isDark = isDarkTheme(theme)
   // The fallbacks only apply when the probe cannot resolve a token (jsdom, or
   // a diagram rendered before first paint); the live values come from
-  // `data-theme`, so every palette is covered by the same six token reads.
+  // `data-theme`, so all six palettes are covered by the six token reads.
   return {
     textColor: resolveThemeColor('--color-text-primary', isDark ? '#EDE6D6' : '#1F1C17'),
     mutedTextColor: resolveThemeColor('--color-text-secondary', isDark ? '#A79B83' : '#5D5850'),

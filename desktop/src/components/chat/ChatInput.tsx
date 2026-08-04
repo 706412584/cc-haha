@@ -3,7 +3,7 @@ import { useDismissable } from '@/hooks/useDismissable'
 import { Button } from '@/components/ui/Button'
 import { IconButton } from '@/components/ui/IconButton'
 import { useTranslation } from '../../i18n'
-import { useChatStore } from '../../stores/chatStore'
+import { useChatStore, type RepositoryLaunchDraftState } from '../../stores/chatStore'
 import { SETTINGS_TAB_ID, useTabStore } from '../../stores/tabStore'
 import { useUIStore } from '../../stores/uiStore'
 import { useSessionStore } from '../../stores/sessionStore'
@@ -19,15 +19,13 @@ import { sessionsApi, type SessionGitInfo } from '../../api/sessions'
 import { agentsApi } from '../../api/agents'
 import { PermissionModeSelector } from '../controls/PermissionModeSelector'
 import { ModelSelector, type ModelSelectorHandle } from '../controls/ModelSelector'
-import type { AttachmentRef, DisplayAttachmentRef } from '../../types/chat'
+import type { AttachmentRef } from '../../types/chat'
 import { AttachmentGallery } from './AttachmentGallery'
-import { ImageAnnotationModal } from './ImageAnnotationModal'
 import { ComposerDropOverlay } from './ComposerDropOverlay'
 import { ProjectContextChip } from '@/components/chat/ProjectContextChip'
 import { RepositoryLaunchControls } from '@/components/chat/RepositoryLaunchControls'
 import { FileSearchMenu, type FileSearchMenuHandle } from './FileSearchMenu'
 import { LocalSlashCommandPanel, type LocalSlashCommandName } from './LocalSlashCommandPanel'
-import { SkillPickerMenu, type SkillPickerHandle } from './SkillPickerMenu'
 import { getSlashCommandOptionId, SlashCommandMenu } from './SlashCommandMenu'
 import { ContextUsageIndicator } from './ContextUsageIndicator'
 import {
@@ -45,20 +43,22 @@ import { useMobileViewport } from '../../hooks/useMobileViewport'
 import { useElementWidth } from '../../hooks/useElementWidth'
 import { isDesktopRuntime } from '../../lib/desktopRuntime'
 import {
-  composerAttachmentToPayload,
   filesToComposerAttachments,
   getDataTransferFiles,
+  selectNativeFileAttachments,
   type ComposerAttachment,
 } from '../../lib/composerAttachments'
 import { useComposerFileDrop } from './useComposerFileDrop'
 import { shouldSubmitOnEnter } from './sendShortcut'
+import { MentionComposer, type MentionComposerHandle } from './MentionComposer'
 import {
-  COMPOSER_PREFILL_EVENT,
-  type ComposerPrefillDetail,
-} from '../welcome/WelcomeTaskCards'
+  findMentionRanges,
+  insertMentionIntoText,
+  type ComposerMention,
+} from '../../lib/composerMentions'
 import type { PermissionMode } from '../../types/settings'
 import { getSessionWorkspaceState } from '../../lib/sessionWorkspace'
-import { attachmentImageSource } from '../../lib/attachmentImages'
+import { hasRunningSubagentTasks } from '../../lib/backgroundTasks'
 
 type GitInfo = SessionGitInfo
 
@@ -130,11 +130,9 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   // itself across the threshold. The shell just fills the chat column.
   const [shellRef, shellWidth] = useElementWidth<HTMLDivElement>()
   const [input, setInput] = useState('')
+  const [mentions, setMentions] = useState<ComposerMention[]>([])
   const [attachments, setAttachments] = useState<Attachment[]>([])
-  const [annotationTarget, setAnnotationTarget] = useState<Attachment | null>(null)
   const [plusMenuOpen, setPlusMenuOpen] = useState(false)
-  const [skillPickerOpen, setSkillPickerOpen] = useState(false)
-  const [pluginPickerOpen, setPluginPickerOpen] = useState(false)
   const [slashMenuOpen, setSlashMenuOpen] = useState(false)
   const [fileSearchOpen, setFileSearchOpen] = useState(false)
   const [localSlashPanel, setLocalSlashPanel] = useState<LocalSlashCommandName | null>(null)
@@ -143,34 +141,33 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   const [slashFilter, setSlashFilter] = useState('')
   const [slashSelectedIndex, setSlashSelectedIndex] = useState(0)
   const [agentSlashCommands, setAgentSlashCommands] = useState<ReturnType<typeof buildAgentSlashCommands>>([])
-  const [launchWorkDir, setLaunchWorkDir] = useState('')
-  const [launchBranch, setLaunchBranch] = useState<string | null>(null)
-  const [launchUseWorktree, setLaunchUseWorktree] = useState(false)
   const [launchReady, setLaunchReady] = useState(true)
-  const [editingQueuedId, setEditingQueuedId] = useState<string | null>(null)
-  const [editingQueuedText, setEditingQueuedText] = useState('')
-  const [queueCollapsed, setQueueCollapsed] = useState(false)
   const [launchTransitioning, setLaunchTransitioning] = useState(false)
   const [editingQueuedMessageId, setEditingQueuedMessageId] = useState<string | null>(null)
   const [editingQueuedMessageText, setEditingQueuedMessageText] = useState('')
   const composingRef = useRef(false)
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const composerRef = useRef<MentionComposerHandle>(null)
+  const composerContainerRef = useRef<HTMLDivElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const modelSelectorRef = useRef<ModelSelectorHandle>(null)
   const plusMenuRef = useRef<HTMLDivElement>(null)
   const slashMenuRef = useRef<HTMLDivElement>(null)
   const fileSearchRef = useRef<FileSearchMenuHandle>(null)
-  const skillPickerRef = useRef<SkillPickerHandle>(null)
   const slashItemRefs = useRef<(HTMLElement | null)[]>([])
   const slashMenuId = useId()
   const previousActiveTabIdRef = useRef<string | null>(null)
   const inputRef = useRef(input)
+  const mentionsRef = useRef(mentions)
   const attachmentsRef = useRef(attachments)
   const pasteGenerationRef = useRef(0)
-  const setComposerInput = useCallback((value: string) => {
+  const setComposerInput = useCallback((value: string, nextMentions?: ComposerMention[]) => {
     inputRef.current = value
     setInput(value)
+    if (nextMentions !== undefined) {
+      mentionsRef.current = nextMentions
+      setMentions(nextMentions)
+    }
   }, [])
   const setComposerAttachments = useCallback((value: Attachment[] | ((previous: Attachment[]) => Attachment[])) => {
     setAttachments((previous) => {
@@ -184,10 +181,6 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     stopGeneration,
     clearComposerPrefill,
     clearComposerInsertion,
-    removeQueuedMessage,
-    clearMessageQueue,
-    updateQueuedMessage,
-    sendQueuedMessageNow,
     queueUserMessage,
     updateQueuedUserMessage,
     removeQueuedUserMessage,
@@ -195,8 +188,11 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   } = useChatStore()
   const activeTabId = useTabStore((s) => s.activeTabId)
   const sessionState = useChatStore((s) => activeTabId ? s.sessions[activeTabId] : undefined)
+  const repositoryLaunchDraft = sessionState?.repositoryLaunchDraft
+  const launchWorkDir = repositoryLaunchDraft?.workDir ?? ''
+  const launchBranch = repositoryLaunchDraft?.branch ?? null
+  const launchUseWorktree = repositoryLaunchDraft?.useWorktree ?? false
   const chatState = sessionState?.chatState ?? 'idle'
-  const messageQueue = sessionState?.messageQueue ?? []
   const slashCommands = sessionState?.slashCommands ?? []
   const composerPrefill = sessionState?.composerPrefill ?? null
   const composerInsertion = sessionState?.composerInsertion ?? null
@@ -204,14 +200,6 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   const runtimeSelection = useSessionRuntimeStore((state) =>
     activeTabId ? state.selections[activeTabId] : undefined,
   )
-  const coordinatorMode = useSessionRuntimeStore((state) =>
-    activeTabId ? state.coordinatorModes[activeTabId] ?? false : false,
-  )
-  const pipelineMode = useSessionRuntimeStore((state) =>
-    activeTabId ? state.pipelineModes[activeTabId] ?? 'normal' : 'normal',
-  )
-  const soloPipelineMode = pipelineMode === 'solo'
-  const rePipelineMode = pipelineMode === 're'
   const currentModel = useSettingsStore((state) => state.currentModel)
   const chatSendBehavior = useSettingsStore((state) => state.chatSendBehavior)
   const runtimeSelectionKey = runtimeSelection
@@ -229,10 +217,29 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   const addWorkspaceReference = useWorkspaceChatContextStore((s) => s.addReference)
   const removeWorkspaceReference = useWorkspaceChatContextStore((s) => s.removeReference)
   const clearWorkspaceReferences = useWorkspaceChatContextStore((s) => s.clearReferences)
+  const updateRepositoryLaunchDraft = useCallback((
+    update: (current: RepositoryLaunchDraftState) => RepositoryLaunchDraftState,
+  ) => {
+    if (!activeTabId) return
+    const chatStore = useChatStore.getState()
+    const current = chatStore.sessions[activeTabId]?.repositoryLaunchDraft ?? {
+      workDir: '',
+      branch: null,
+      useWorktree: false,
+    }
+    chatStore.setRepositoryLaunchDraft(activeTabId, update(current))
+  }, [activeTabId])
+  const setLaunchBranch = useCallback((branch: string | null) => {
+    updateRepositoryLaunchDraft((current) => ({ ...current, branch }))
+  }, [updateRepositoryLaunchDraft])
+  const setLaunchUseWorktree = useCallback((useWorktree: boolean) => {
+    updateRepositoryLaunchDraft((current) => ({ ...current, useWorktree }))
+  }, [updateRepositoryLaunchDraft])
   const saveComposerDraft = useCallback((sessionId: string) => {
     const draft = {
       input: inputRef.current,
       attachments: attachmentsRef.current,
+      mentions: mentionsRef.current,
     }
     const chatStore = useChatStore.getState()
     if (draft.input.length === 0 && draft.attachments.length === 0) {
@@ -247,6 +254,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
   const isMemberSession = !!memberInfo
   const isActive = chatState !== 'idle'
+  const hasRunningSubagents = hasRunningSubagentTasks(sessionState?.backgroundAgentTasks)
   const workspaceState = getSessionWorkspaceState(activeSession)
   const isWorkspaceMissing = workspaceState !== 'available'
   const hasWorkspaceReferences = !isMemberSession && workspaceReferences.length > 0
@@ -317,7 +325,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
     const nextDraft = activeTabId ? useChatStore.getState().sessions[activeTabId]?.composerDraft : undefined
     invalidatePendingPastes()
-    setComposerInput(nextDraft?.input ?? '')
+    setComposerInput(nextDraft?.input ?? '', nextDraft?.mentions ?? [])
     setComposerAttachments(nextDraft?.attachments ?? [])
     setPlusMenuOpen(false)
     setSlashMenuOpen(false)
@@ -338,31 +346,12 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     }
   }, [saveComposerDraft])
 
-  // Listen for welcome-screen task-card clicks dispatched from ActiveSession's
-  // empty welcome state. The card click can't directly mutate this component's
-  // useState, so it dispatches a window CustomEvent that we apply here when
-  // the sessionId matches the active tab. EmptySession doesn't need this — it
-  // owns its own composer textarea and updates state in-place.
   useEffect(() => {
-    const handler = (event: Event) => {
-      const detail = (event as CustomEvent<ComposerPrefillDetail>).detail
-      if (!detail || typeof detail.text !== 'string') return
-      if (!activeTabId || detail.sessionId !== activeTabId) return
-      setComposerInput(detail.text)
-      requestAnimationFrame(() => {
-        const el = textareaRef.current
-        if (!el) return
-        el.focus()
-        const len = el.value.length
-        el.setSelectionRange(len, len)
-      })
-    }
-    window.addEventListener(COMPOSER_PREFILL_EVENT, handler as EventListener)
-    return () => window.removeEventListener(COMPOSER_PREFILL_EVENT, handler as EventListener)
-  }, [activeTabId, setComposerInput])
+    mentionsRef.current = mentions
+  }, [mentions])
 
   useEffect(() => {
-    textareaRef.current?.focus()
+    composerRef.current?.focus()
   }, [isActive])
 
   useEffect(() => {
@@ -375,7 +364,6 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
         name: attachment.name,
         type: attachment.type,
         mimeType: attachment.mimeType,
-        path: attachment.path,
         previewUrl: attachment.type === 'image' ? attachment.data : undefined,
         data: attachment.data,
       }))
@@ -383,7 +371,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     if (composerPrefill.mode === 'append') {
       setComposerAttachments((previous) => [...previous, ...nextAttachments])
     } else {
-      setComposerInput(composerPrefill.text)
+      setComposerInput(composerPrefill.text, [])
       setComposerAttachments(nextAttachments)
     }
     setPlusMenuOpen(false)
@@ -394,11 +382,9 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     setAtCursorPos(-1)
 
     requestAnimationFrame(() => {
-      const el = textareaRef.current
-      el?.focus()
+      composerRef.current?.focus()
       if (composerPrefill.mode !== 'append') {
-        const cursor = composerPrefill.text.length
-        el?.setSelectionRange(cursor, cursor)
+        composerRef.current?.setSelectionOffsets(composerPrefill.text.length)
       }
     })
     clearComposerPrefill(activeTabId, composerPrefill.nonce)
@@ -413,10 +399,10 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   useEffect(() => {
     if (!composerInsertion || !activeTabId || isMemberSession) return
 
-    const el = textareaRef.current
     const currentInput = inputRef.current
-    const start = el?.selectionStart ?? currentInput.length
-    const end = el?.selectionEnd ?? start
+    const offsets = composerRef.current?.getSelectionOffsets()
+    const start = offsets?.start ?? currentInput.length
+    const end = offsets?.end ?? start
     const next = insertComposerTokenAtRange(currentInput, start, end, composerInsertion.text)
 
     if (composerInsertion.reference) {
@@ -430,8 +416,8 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     clearComposerInsertion(activeTabId, composerInsertion.nonce)
 
     requestAnimationFrame(() => {
-      textareaRef.current?.focus()
-      textareaRef.current?.setSelectionRange(next.cursorPos, next.cursorPos)
+      composerRef.current?.focus()
+      composerRef.current?.setSelectionOffsets(next.cursorPos)
     })
   }, [
     activeTabId,
@@ -494,23 +480,18 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   }, [isMemberSession, resolvedWorkDir])
 
   useEffect(() => {
-    if (!showLaunchControls) return
+    if (!activeTabId || !showLaunchControls) return
     const nextWorkDir = activeSession?.workDir || gitInfo?.workDir || ''
-    setLaunchWorkDir((current) => {
-      if (current === nextWorkDir) return current
-      setLaunchBranch(null)
-      setLaunchUseWorktree(false)
-      setLaunchReady(!nextWorkDir)
-      return nextWorkDir
+    const chatStore = useChatStore.getState()
+    const current = chatStore.sessions[activeTabId]?.repositoryLaunchDraft
+    if (current?.workDir === nextWorkDir) return
+    chatStore.setRepositoryLaunchDraft(activeTabId, {
+      workDir: nextWorkDir,
+      branch: null,
+      useWorktree: false,
     })
+    setLaunchReady(!nextWorkDir)
   }, [activeSession?.workDir, activeTabId, gitInfo?.workDir, showLaunchControls])
-
-  useEffect(() => {
-    const el = textareaRef.current
-    if (!el) return
-    el.style.height = 'auto'
-    el.style.height = `${Math.min(el.scrollHeight, 200)}px`
-  }, [input])
 
   useDismissable({
     open: plusMenuOpen,
@@ -519,28 +500,20 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   })
 
   useDismissable({
-    open: skillPickerOpen || pluginPickerOpen,
-    refs: [panelRef],
-    onDismiss: () => {
-      setSkillPickerOpen(false)
-      setPluginPickerOpen(false)
-    },
+    open: slashMenuOpen,
+    refs: [slashMenuRef, composerContainerRef],
+    onDismiss: () => setSlashMenuOpen(false),
   })
 
   useDismissable({
-    open: slashMenuOpen,
-    refs: [slashMenuRef, textareaRef],
-    onDismiss: () => setSlashMenuOpen(false),
-  })
-  useDismissable({
     open: !!localSlashPanel,
-    refs: [slashMenuRef, textareaRef],
+    refs: [slashMenuRef, composerContainerRef],
     onDismiss: () => setLocalSlashPanel(null),
   })
 
   useDismissable({
     open: fileSearchOpen,
-    refs: [textareaRef],
+    refs: [composerContainerRef],
     onDismiss: () => setFileSearchOpen(false),
     // This menu is looked up by id rather than held in a ref. Returning true
     // when it is absent preserves the original behavior: with no menu in the
@@ -596,8 +569,9 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     setSlashMenuOpen(true)
   }, [])
 
-  // Detect @ trigger (file search)
-  const detectAtTrigger = useCallback((value: string, cursorPos: number) => {
+  // Detect @ trigger (file search). The scan runs on the projected text; an
+  // `@` that belongs to an existing mention pill never counts as a trigger.
+  const detectAtTrigger = useCallback((value: string, cursorPos: number, currentMentions: ComposerMention[]) => {
     const textBeforeCursor = value.slice(0, cursorPos)
     let pos = -1
 
@@ -615,6 +589,10 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
       }
     }
 
+    if (pos >= 0 && findMentionRanges(value, currentMentions).some((range) => pos >= range.start && pos < range.end)) {
+      pos = -1
+    }
+
     if (pos < 0) {
       setFileSearchOpen(false)
       setAtFilter('')
@@ -630,28 +608,24 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     setFileSearchOpen(true)
   }, [])
 
-  const handleInputChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const value = event.target.value
+  const handleComposerChange = (text: string, nextMentions: ComposerMention[]) => {
+    setComposerInput(text, nextMentions)
     if (isMemberSession) {
-      setComposerInput(value)
       return
     }
-    const cursorPos = event.target.selectionStart ?? value.length
-    setComposerInput(value)
-    detectSlashTrigger(value, cursorPos)
-    detectAtTrigger(value, cursorPos)
+    const cursorPos = composerRef.current?.getSelectionOffsets().start ?? text.length
+    detectSlashTrigger(text, cursorPos)
+    detectAtTrigger(text, cursorPos, nextMentions)
   }
 
   const selectSlashCommand = useCallback((command: string) => {
-    const el = textareaRef.current
-    if (!el) return
-    const cursorPos = el.selectionStart ?? input.length
+    const cursorPos = composerRef.current?.getSelectionOffsets().start ?? input.length
     const replacement = replaceSlashToken(input, cursorPos, command)
     setComposerInput(replacement.value)
     setSlashMenuOpen(false)
     requestAnimationFrame(() => {
-      el.focus()
-      el.setSelectionRange(replacement.cursorPos, replacement.cursorPos)
+      composerRef.current?.focus()
+      composerRef.current?.setSelectionOffsets(replacement.cursorPos)
     })
   }, [input])
 
@@ -664,7 +638,14 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     const sessionStore = useSessionStore.getState()
     const { createSession, deleteSession } = sessionStore
     const { replaceTabSession } = useTabStore.getState()
-    const { disconnectSession, connectToSession, setComposerDraft } = useChatStore.getState()
+    const chatStore = useChatStore.getState()
+    const {
+      disconnectSession,
+      connectToSession,
+      setComposerDraft,
+      setRepositoryLaunchDraft,
+    } = chatStore
+    const repositoryLaunchDraft = chatStore.sessions[oldId]?.repositoryLaunchDraft
     const permissionMode = sessionStore.sessions.find((session) => session.id === oldId)
       ?.permissionMode as PermissionMode | undefined
     const createOptions = repository || permissionMode
@@ -683,6 +664,9 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
         attachments: attachmentsRef.current,
       })
     }
+    if (repositoryLaunchDraft) {
+      setRepositoryLaunchDraft(newId, repositoryLaunchDraft)
+    }
     useSessionRuntimeStore.getState().moveSelection(oldId, newId)
     disconnectSession(oldId)
     replaceTabSession(oldId, newId)
@@ -692,9 +676,11 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   }, [activeTabId])
 
   const handleLaunchWorkDirChange = useCallback(async (newWorkDir: string) => {
-    setLaunchWorkDir(newWorkDir)
-    setLaunchBranch(null)
-    setLaunchUseWorktree(false)
+    updateRepositoryLaunchDraft(() => ({
+      workDir: newWorkDir,
+      branch: null,
+      useWorktree: false,
+    }))
     setLaunchReady(!newWorkDir)
     if (!activeTabId) return
 
@@ -709,7 +695,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     } finally {
       setLaunchTransitioning(false)
     }
-  }, [activeTabId, replaceEmptySession, t])
+  }, [activeTabId, replaceEmptySession, t, updateRepositoryLaunchDraft])
 
   const handleSubmit = async () => {
     const text = input.trim()
@@ -717,7 +703,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
     if (pendingSlashUiAction?.type === 'panel') {
       setLocalSlashPanel(pendingSlashUiAction.command as LocalSlashCommandName)
-      setComposerInput('')
+      setComposerInput('', [])
       setSlashMenuOpen(false)
       setFileSearchOpen(false)
       setPlusMenuOpen(false)
@@ -727,7 +713,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     if (pendingSlashUiAction?.type === 'settings') {
       useUIStore.getState().setPendingSettingsTab(pendingSlashUiAction.tab)
       useTabStore.getState().openTab(SETTINGS_TAB_ID, 'Settings', 'settings')
-      setComposerInput('')
+      setComposerInput('', [])
       setSlashMenuOpen(false)
       setFileSearchOpen(false)
       setPlusMenuOpen(false)
@@ -736,7 +722,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
     if (pendingSlashUiAction?.type === 'model') {
       modelSelectorRef.current?.open()
-      setComposerInput('')
+      setComposerInput('', [])
       setSlashMenuOpen(false)
       setFileSearchOpen(false)
       setPlusMenuOpen(false)
@@ -748,33 +734,21 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     const workspaceReferencePrompt = !isMemberSession
       ? formatWorkspaceReferencePrompt(workspaceReferences)
       : ''
-    const contentForModel = [workspaceReferencePrompt, text].filter(Boolean).join('\n\n')
+    // Inline @-mentions travel as the `@"absolute path"` text the CLI already
+    // parses. Serialized from the live document — only the doc knows which
+    // `@label` is a pill and which is literal text the user typed.
+    const serializedText = (composerRef.current?.getModelContent() ?? input).trim()
+    const contentForModel = [workspaceReferencePrompt, serializedText].filter(Boolean).join('\n\n')
     const displayContent = text || (
       workspaceReferences.length > 0
         ? t('chat.contextReferencesOnly', { count: workspaceReferences.length })
         : ''
     )
-    const uploadAttachmentPayload: AttachmentRef[] = attachments.some(
-      (attachment) => attachment.sourceFile,
-    )
-      ? await Promise.all(attachments.map(composerAttachmentToPayload))
-      : attachments.map((attachment) => ({
-          type: attachment.type,
-          name: attachment.name,
-          path: attachment.path,
-          data: attachment.data,
-          mimeType: attachment.mimeType,
-          lineStart: attachment.lineStart,
-          lineEnd: attachment.lineEnd,
-          note: attachment.note,
-          quote: attachment.quote,
-        }))
-    const visibleUploadAttachmentPayload: DisplayAttachmentRef[] = attachments.map((attachment) => ({
+    const uploadAttachmentPayload: AttachmentRef[] = attachments.map((attachment) => ({
       type: attachment.type,
       name: attachment.name,
       path: attachment.path,
       data: attachment.data,
-      previewUrl: attachment.previewUrl,
       mimeType: attachment.mimeType,
       lineStart: attachment.lineStart,
       lineEnd: attachment.lineEnd,
@@ -793,8 +767,8 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
         note: reference.note,
         quote: reference.quote,
       }))
-    const visibleAttachmentPayload: DisplayAttachmentRef[] = [
-      ...visibleUploadAttachmentPayload,
+    const visibleAttachmentPayload: AttachmentRef[] = [
+      ...uploadAttachmentPayload,
       ...workspaceReferences.map((reference) => ({
         type: 'file' as const,
         name: reference.name,
@@ -850,10 +824,15 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
       })
     }
     invalidatePendingPastes()
-    setComposerInput('')
+    setComposerInput('', [])
     setComposerAttachments([])
-    useChatStore.getState().clearComposerDraft(activeTabId!)
-    if (targetSessionId !== activeTabId) useChatStore.getState().clearComposerDraft(targetSessionId)
+    const chatStore = useChatStore.getState()
+    chatStore.clearComposerDraft(activeTabId!)
+    chatStore.clearRepositoryLaunchDraft(activeTabId!)
+    if (targetSessionId !== activeTabId) {
+      chatStore.clearComposerDraft(targetSessionId)
+      chatStore.clearRepositoryLaunchDraft(targetSessionId)
+    }
     if (!isMemberSession) {
       clearWorkspaceReferences(activeTabId!)
       if (targetSessionId !== activeTabId) clearWorkspaceReferences(targetSessionId)
@@ -864,9 +843,9 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     setLocalSlashPanel(null)
   }
 
-  const handleKeyDown = (event: React.KeyboardEvent) => {
+  const handleComposerKeyDown = (event: KeyboardEvent): boolean => {
     // Ignore key events during IME composition (e.g. Chinese input method)
-    if (composingRef.current || event.nativeEvent.isComposing || event.keyCode === 229) return
+    if (composingRef.current || event.isComposing || event.keyCode === 229) return false
 
     // Route file search navigation keys to FileSearchMenu
     if (fileSearchOpen) {
@@ -877,50 +856,33 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
           setFileSearchOpen(false)
           setAtFilter('')
           setAtCursorPos(-1)
-          return
+          return true
         }
-        fileSearchRef.current?.handleKeyDown(event.nativeEvent)
-        return
+        fileSearchRef.current?.handleKeyDown(event)
+        return true
       }
-      // Other keys (typing) should go to the textarea - let it propagate
-      return
+      // Other keys (typing) should go to the editor - let ProseMirror handle them
+      return false
     }
 
     if (localSlashPanel) {
       if (event.key === 'Escape') {
         event.preventDefault()
         setLocalSlashPanel(null)
-        return
+        return true
       }
-    }
-
-    // Route navigation keys to the skill / plugin picker when it is open.
-    if (skillPickerOpen || pluginPickerOpen) {
-      const key = event.key
-      if (key === 'ArrowDown' || key === 'ArrowUp' || key === 'Enter' || key === 'Escape') {
-        event.preventDefault()
-        if (key === 'Escape') {
-          setSkillPickerOpen(false)
-          setPluginPickerOpen(false)
-          return
-        }
-        skillPickerRef.current?.handleKeyDown(event.nativeEvent)
-        return
-      }
-      // Other keys (typing) keep flowing to the textarea.
-      return
     }
 
     if (slashMenuOpen && filteredCommands.length > 0) {
       if (event.key === 'ArrowDown') {
         event.preventDefault()
         setSlashSelectedIndex((prev) => (prev + 1) % filteredCommands.length)
-        return
+        return true
       }
       if (event.key === 'ArrowUp') {
         event.preventDefault()
         setSlashSelectedIndex((prev) => (prev - 1 + filteredCommands.length) % filteredCommands.length)
-        return
+        return true
       }
       if (event.key === 'Enter') {
         const selected = filteredCommands[slashSelectedIndex]
@@ -931,36 +893,38 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
           shouldSubmitOnEnter(event, chatSendBehavior)
         ) {
           event.preventDefault()
-          handleSubmit()
-          return
+          void handleSubmit()
+          return true
         }
         event.preventDefault()
         if (selected) selectSlashCommand(selected.name)
-        return
+        return true
       }
       if (event.key === 'Tab') {
         event.preventDefault()
         const selected = filteredCommands[slashSelectedIndex]
         if (selected) selectSlashCommand(selected.name)
-        return
+        return true
       }
       if (event.key === 'Escape') {
         event.preventDefault()
         setSlashMenuOpen(false)
-        return
+        return true
       }
     }
 
     if (shouldSubmitOnEnter(event, chatSendBehavior)) {
       event.preventDefault()
-      handleSubmit()
+      void handleSubmit()
+      return true
     }
+    return false
   }
 
-  const handlePaste = (event: React.ClipboardEvent) => {
-    if (isMemberSession) return
-    const files = getDataTransferFiles(event.clipboardData)
-    if (files.length === 0) return
+  const handleComposerPaste = (event: ClipboardEvent): boolean => {
+    if (isMemberSession) return false
+    const files = event.clipboardData ? getDataTransferFiles(event.clipboardData) : []
+    if (files.length === 0) return false
 
     event.preventDefault()
     const pasteGeneration = pasteGenerationRef.current
@@ -974,7 +938,9 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
       })
       .catch((error) => {
         console.warn('[attachments] Failed to read pasted files', error)
-      })  }
+      })
+    return true
+  }
 
   const appendFiles = useCallback((files: FileList | File[]) => {
     void filesToComposerAttachments(files)
@@ -1003,8 +969,22 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
   const openAttachmentPicker = useCallback(() => {
     setPlusMenuOpen(false)
-    fileInputRef.current?.click()
-  }, [])
+    if (!isDesktopRuntime()) {
+      fileInputRef.current?.click()
+      return
+    }
+
+    void selectNativeFileAttachments()
+      .then((nativeAttachments) => {
+        if (nativeAttachments) {
+          if (nativeAttachments.length > 0) {
+            setComposerAttachments((prev) => [...prev, ...nativeAttachments])
+          }
+          return
+        }
+        fileInputRef.current?.click()
+      })
+  }, [setComposerAttachments])
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     if (isMemberSession) return
@@ -1018,23 +998,6 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   const removeAttachment = (id: string) => {
     setComposerAttachments((prev) => prev.filter((attachment) => attachment.id !== id))
     if (activeTabId) removeWorkspaceReference(activeTabId, id)
-    if (annotationTarget?.id === id) setAnnotationTarget(null)
-  }
-
-  const saveAnnotatedImage = (dataUrl: string) => {
-    if (!annotationTarget?.id) return
-    setComposerAttachments((prev) => prev.map((attachment) => {
-      if (attachment.id !== annotationTarget.id) return attachment
-      return {
-        ...attachment,
-        name: attachment.name.replace(/(\.[^.]+)?$/, '-annotated.png'),
-        path: undefined,
-        data: dataUrl,
-        previewUrl: dataUrl,
-        mimeType: 'image/png',
-      }
-    }))
-    setAnnotationTarget(null)
   }
 
   const startEditingQueuedMessage = (messageId: string, content: string) => {
@@ -1058,68 +1021,16 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
   const insertSlashCommand = () => {
     if (isMemberSession) return
-    const el = textareaRef.current
-    const cursorPos = el?.selectionStart ?? input.length
+    const cursorPos = composerRef.current?.getSelectionOffsets().start ?? input.length
     const replacement = replaceSlashToken(input, cursorPos, '', { trailingSpace: false })
     setComposerInput(replacement.value)
     setPlusMenuOpen(false)
     setSlashFilter('')
     setSlashMenuOpen(true)
     requestAnimationFrame(() => {
-      textareaRef.current?.focus()
-      textareaRef.current?.setSelectionRange(replacement.cursorPos, replacement.cursorPos)
+      composerRef.current?.focus()
+      composerRef.current?.setSelectionOffsets(replacement.cursorPos)
     })
-  }
-
-  // Open the inline skill picker menu from the + menu. The user picks a skill
-  // and we insert a "@skill:<name> " token into the composer at the cursor — a
-  // visible reference the agent can read as "use this skill, then …".
-  const openSkillPicker = () => {
-    if (isMemberSession) return
-    setPlusMenuOpen(false)
-    setSlashMenuOpen(false)
-    setFileSearchOpen(false)
-    setLocalSlashPanel(null)
-    setPluginPickerOpen(false)
-    setSkillPickerOpen(true)
-  }
-
-  // Same idea for plugins; "@plugin:<name> " tells the agent which plugin to use.
-  const openPluginPicker = () => {
-    if (isMemberSession) return
-    setPlusMenuOpen(false)
-    setSlashMenuOpen(false)
-    setFileSearchOpen(false)
-    setLocalSlashPanel(null)
-    setSkillPickerOpen(false)
-    setPluginPickerOpen(true)
-  }
-
-  const insertReferenceToken = (token: string) => {
-    const el = textareaRef.current
-    const cursorPos = el?.selectionStart ?? input.length
-    const before = input.slice(0, cursorPos)
-    const after = input.slice(cursorPos)
-    const needsLeadingSpace = before.length > 0 && !/\s$/.test(before)
-    const needsTrailingSpace = after.length > 0 && !/^\s/.test(after)
-    const insertion = `${needsLeadingSpace ? ' ' : ''}${token}${needsTrailingSpace ? ' ' : ' '}`
-    const next = `${before}${insertion}${after}`
-    const nextCursor = before.length + insertion.length
-    setComposerInput(next)
-    requestAnimationFrame(() => {
-      textareaRef.current?.focus()
-      textareaRef.current?.setSelectionRange(nextCursor, nextCursor)
-    })
-  }
-
-  const handlePickSkill = (skillName: string) => {
-    insertReferenceToken(`@skill:${skillName}`)
-    setSkillPickerOpen(false)
-  }
-
-  const handlePickPlugin = (pluginName: string) => {
-    insertReferenceToken(`@plugin:${pluginName}`)
-    setPluginPickerOpen(false)
   }
 
   const composerPlaceholder =
@@ -1135,11 +1046,6 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
   const addFilesLabel = isHeroComposer ? t('empty.addFiles') : t('chat.addFiles')
   const slashCommandsLabel = isHeroComposer ? t('empty.slashCommands') : t('chat.slashCommands')
-  const skillsLabel = t('chat.openSkills')
-  const pluginsLabel = t('chat.openPlugins')
-  const coordinatorModeLabel = t('chat.coordinatorMode')
-  const soloPipelineModeLabel = t('chat.soloPipelineMode')
-  const rePipelineModeLabel = t('chat.rePipelineMode')
 
   return (
     <div
@@ -1150,8 +1056,9 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
         isHeroComposer
           ? `bg-[var(--color-surface)] ${isMobileComposer ? 'px-4 pb-3' : 'px-8 pb-4'}`
           : compact
-            ? `border-t border-[var(--color-border)]/70 bg-[var(--color-surface)] ${isMobileComposer ? 'mobile-composer-shell px-3 pb-[calc(env(safe-area-inset-bottom)+10px)] pt-2' : 'px-3 py-3'}`
-            : `bg-[var(--color-surface)] ${isMobileComposer ? 'mobile-composer-shell px-3 pb-[calc(env(safe-area-inset-bottom)+10px)] pt-2' : 'px-4 py-4'}`      }
+            ? `border-t border-[var(--color-border)] bg-[var(--color-surface)] ${isMobileComposer ? 'px-3 pb-[calc(env(safe-area-inset-bottom)+10px)] pt-2' : 'px-3 py-3'}`
+            : `bg-[var(--color-surface)] ${isMobileComposer ? 'px-3 pb-[calc(env(safe-area-inset-bottom)+10px)] pt-2' : 'px-4 py-4'}`
+      }
     >
       <div
         className={
@@ -1164,111 +1071,6 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
               : `${isMobileComposer ? 'mx-0 max-w-none' : 'mx-auto max-w-[900px]'}`
         }
       >
-        {!isMemberSession && messageQueue.length > 0 && (
-          <div className="mb-2 overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)]">
-            <button
-              type="button"
-              onClick={() => setQueueCollapsed((v) => !v)}
-              className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left"
-            >
-              <span className="flex items-center gap-1.5 text-xs font-semibold text-[var(--color-text-secondary)]">
-                {isActive && (
-                  <span className="material-symbols-outlined animate-spin text-[14px] text-[var(--color-brand)]">progress_activity</span>
-                )}
-                {t('chat.queueTitle')}
-                <span className="rounded-full bg-[var(--color-surface-container-high)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-text-tertiary)]">
-                  {messageQueue.length}
-                </span>
-              </span>
-              <span className="flex items-center gap-1">
-                <span
-                  role="button"
-                  tabIndex={0}
-                  onClick={(e) => { e.stopPropagation(); activeTabId && clearMessageQueue(activeTabId) }}
-                  onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); activeTabId && clearMessageQueue(activeTabId) } }}
-                  className="mr-1 text-[11px] font-normal text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-text-secondary)] hover:underline"
-                >
-                  {t('chat.clearQueue')}
-                </span>
-                <span className="material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)]">
-                  {queueCollapsed ? 'expand_less' : 'expand_more'}
-                </span>
-              </span>
-            </button>
-            {!queueCollapsed && (
-              <div className="flex max-h-[168px] flex-col gap-1 overflow-y-auto px-2 pb-2">
-                {messageQueue.map((queued, index) => {
-                  const isEditing = editingQueuedId === queued.id
-                  const commitEdit = () => {
-                    const trimmed = editingQueuedText.trim()
-                    if (activeTabId && trimmed) {
-                      updateQueuedMessage(activeTabId, queued.id, trimmed)
-                    }
-                    setEditingQueuedId(null)
-                    setEditingQueuedText('')
-                  }
-                  return (
-                    <div
-                      key={queued.id}
-                      className="group flex items-center gap-2 rounded-md bg-[var(--color-surface)] px-2 py-1.5"
-                    >
-                      <span className="shrink-0 text-[10px] font-mono text-[var(--color-text-tertiary)]">{index + 1}.</span>
-                      {isEditing ? (
-                        <input
-                          autoFocus
-                          value={editingQueuedText}
-                          onChange={(e) => setEditingQueuedText(e.target.value)}
-                          onBlur={commitEdit}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') { e.preventDefault(); commitEdit() }
-                            else if (e.key === 'Escape') { e.preventDefault(); setEditingQueuedId(null); setEditingQueuedText('') }
-                          }}
-                          className="min-w-0 flex-1 rounded border border-[var(--color-border-focus)] bg-[var(--color-surface)] px-1.5 py-0.5 text-xs text-[var(--color-text-primary)] outline-none"
-                        />
-                      ) : (
-                        <span className="min-w-0 flex-1 truncate text-xs text-[var(--color-text-primary)]">
-                          {queued.displayContent || queued.content}
-                        </span>
-                      )}
-                      {!isEditing && (
-                        <button
-                          type="button"
-                          onClick={() => activeTabId && sendQueuedMessageNow(activeTabId, queued.id)}
-                          aria-label={t('chat.sendNow')}
-                          title={t('chat.sendNow')}
-                          className="flex shrink-0 items-center justify-center rounded p-0.5 text-[var(--color-text-tertiary)] opacity-0 transition-[color,background-color,opacity] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:opacity-100 group-hover:opacity-100"
-                        >
-                          <span className="material-symbols-outlined text-[16px]">send</span>
-                        </button>
-                      )}
-                      {!isEditing && (
-                        <button
-                          type="button"
-                          onClick={() => { setEditingQueuedId(queued.id); setEditingQueuedText(queued.displayContent || queued.content) }}
-                          aria-label={t('chat.editQueued')}
-                          title={t('chat.editQueued')}
-                          className="flex shrink-0 items-center justify-center rounded p-0.5 text-[var(--color-text-tertiary)] opacity-0 transition-[color,background-color,opacity] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:opacity-100 group-hover:opacity-100"
-                        >
-                          <span className="material-symbols-outlined text-[16px]">edit</span>
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => activeTabId && removeQueuedMessage(activeTabId, queued.id)}
-                        aria-label={t('chat.removeFromQueue')}
-                        title={t('chat.removeFromQueue')}
-                        className="flex shrink-0 items-center justify-center rounded p-0.5 text-[var(--color-text-tertiary)] opacity-0 transition-[color,background-color,opacity] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-error)] focus-visible:opacity-100 group-hover:opacity-100"
-                      >
-                        <span className="material-symbols-outlined text-[16px]">close</span>
-                      </button>
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-        )}
-
         <div
           ref={panelRef}
           data-testid="chat-input-panel"
@@ -1283,8 +1085,9 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
             // line below — so nothing butts against the panel any more.
             ? `glass-panel glass-panel--composer relative flex flex-col gap-3 overflow-visible rounded-[var(--radius-2xl)] p-4 transition-colors ${isDragActive ? 'composer-drop-target-active' : ''}`
             : compact
-              ? `glass-panel glass-panel--composer relative overflow-visible rounded-[var(--radius-2xl)] p-3 transition-colors ${isMobileComposer ? 'mobile-composer-panel' : ''} ${isDragActive ? 'composer-drop-target-active' : ''}`
-              : `glass-panel glass-panel--composer relative overflow-visible rounded-[var(--radius-2xl)] transition-colors ${isMobileComposer ? 'p-3' : 'p-4'} ${isMobileComposer ? 'mobile-composer-panel' : ''} ${isDragActive ? 'composer-drop-target-active' : ''}`}          {...dragHandlers}
+              ? `glass-panel glass-panel--composer relative overflow-visible rounded-[var(--radius-2xl)] p-3 transition-colors ${isDragActive ? 'composer-drop-target-active' : ''}`
+              : `glass-panel glass-panel--composer relative overflow-visible rounded-[var(--radius-2xl)] transition-colors ${isMobileComposer ? 'p-3' : 'p-4'} ${isDragActive ? 'composer-drop-target-active' : ''}`}
+          {...dragHandlers}
         >
           {isDragActive && (
             <ComposerDropOverlay
@@ -1309,56 +1112,27 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
                 setComposerInput(newValue)
                 setAtFilter(relativePath)
                 requestAnimationFrame(() => {
-                  textareaRef.current?.focus()
-                  textareaRef.current?.setSelectionRange(newCursorPos, newCursorPos)
+                  composerRef.current?.focus()
+                  composerRef.current?.setSelectionOffsets(newCursorPos)
                 })
               }}
               onSelect={(path, name, isDirectory) => {
-                if (atCursorPos >= 0) {
-                  const referenceName = name.split('/').filter(Boolean).pop() ?? name
-                  const tokenEnd = atCursorPos + 1 + atFilter.length
-                  const beforeToken = input.slice(0, atCursorPos)
-                  const afterToken = beforeToken ? input.slice(tokenEnd) : input.slice(tokenEnd).replace(/^\s+/, '')
-                  const spacer = beforeToken && afterToken && !/\s$/.test(beforeToken) && !/^\s/.test(afterToken) ? ' ' : ''
-                  const newValue = `${beforeToken}${spacer}${afterToken}`
-                  const newCursorPos = atCursorPos + spacer.length
-                  if (activeTabId) {
-                    addWorkspaceReference(activeTabId, {
-                      kind: 'file',
-                      path,
-                      absolutePath: path,
-                      name: isDirectory ? `${referenceName}/` : referenceName,
-                      isDirectory,
-                    })
-                  }
-                  setComposerInput(newValue)
-                  setFileSearchOpen(false)
-                  setAtFilter('')
-                  setAtCursorPos(-1)
-                  void textareaRef.current?.focus()
-                  requestAnimationFrame(() => {
-                    textareaRef.current?.setSelectionRange(newCursorPos, newCursorPos)
-                  })
-                }
-              }}
-            />
-          )}
-
-          {!isMemberSession && (skillPickerOpen || pluginPickerOpen) && (
-            <SkillPickerMenu
-              ref={skillPickerRef}
-              mode={skillPickerOpen ? 'skill' : 'plugin'}
-              cwd={activeLaunchWorkDir || resolvedWorkDir || undefined}
-              onPick={(name) => {
-                if (skillPickerOpen) {
-                  handlePickSkill(name)
-                } else {
-                  handlePickPlugin(name)
-                }
-              }}
-              onClose={() => {
-                setSkillPickerOpen(false)
-                setPluginPickerOpen(false)
+                if (atCursorPos < 0) return
+                const referenceName = name.split('/').filter(Boolean).pop() ?? name
+                const tokenEnd = atCursorPos + 1 + atFilter.length
+                const inserted = insertMentionIntoText(input, mentions, atCursorPos, tokenEnd, {
+                  label: isDirectory ? `${referenceName}/` : referenceName,
+                  path,
+                  isDirectory,
+                })
+                setComposerInput(inserted.text, inserted.mentions)
+                setFileSearchOpen(false)
+                setAtFilter('')
+                setAtCursorPos(-1)
+                void composerRef.current?.focus()
+                requestAnimationFrame(() => {
+                  composerRef.current?.setSelectionOffsets(inserted.cursorPos)
+                })
               }}
             />
           )}
@@ -1496,63 +1270,66 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
           {composerAttachments.length > 0 && (
             isHeroComposer ? (
-              <AttachmentGallery attachments={composerAttachments} variant="composer" onRemove={removeAttachment} onAnnotate={(attachment) => setAnnotationTarget(attachment as Attachment)} />
+              <AttachmentGallery attachments={composerAttachments} variant="composer" onRemove={removeAttachment} />
             ) : (
               <div className="px-3 pt-3">
-                <AttachmentGallery attachments={composerAttachments} variant="composer" onRemove={removeAttachment} onAnnotate={(attachment) => setAnnotationTarget(attachment as Attachment)} />
+                <AttachmentGallery attachments={composerAttachments} variant="composer" onRemove={removeAttachment} />
               </div>
             )
           )}
 
           {isHeroComposer ? (
             <div className="flex items-start gap-3">
-              <textarea
-                ref={textareaRef}
+              <MentionComposer
+                ref={composerRef}
+                rootRef={composerContainerRef}
                 value={input}
-                onChange={handleInputChange}
-                onKeyDown={handleKeyDown}
+                mentions={mentions}
+                onChange={handleComposerChange}
+                onKeyDown={handleComposerKeyDown}
+                onPaste={handleComposerPaste}
                 onCompositionStart={() => { composingRef.current = true }}
                 onCompositionEnd={() => { composingRef.current = false }}
-                onPaste={handlePaste}
                 placeholder={composerPlaceholder}
                 disabled={isWorkspaceMissing}
-                role={isSlashMenuVisible ? 'combobox' : undefined}
-                aria-autocomplete={isSlashMenuVisible ? 'list' : undefined}
-                aria-expanded={isSlashMenuVisible ? true : undefined}
-                aria-controls={isSlashMenuVisible ? slashMenuId : undefined}
-                aria-activedescendant={isSlashMenuVisible
-                  ? getSlashCommandOptionId(slashMenuId, slashSelectedIndex)
-                  : undefined}
-                rows={2}
-                className="flex-1 resize-none border-none bg-transparent py-2 leading-relaxed text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] disabled:opacity-50"
+                className="flex-1"
+                editorClassName="max-h-[200px] overflow-y-auto py-2 leading-relaxed text-[var(--color-text-primary)]"
+                aria={{
+                  role: isSlashMenuVisible ? 'combobox' : 'textbox',
+                  'aria-autocomplete': isSlashMenuVisible ? 'list' : undefined,
+                  'aria-expanded': isSlashMenuVisible ? 'true' : undefined,
+                  'aria-controls': isSlashMenuVisible ? slashMenuId : undefined,
+                  'aria-activedescendant': isSlashMenuVisible
+                    ? getSlashCommandOptionId(slashMenuId, slashSelectedIndex)
+                    : undefined,
+                }}
               />
             </div>
           ) : (
-            <textarea
-              ref={textareaRef}
+            <MentionComposer
+              ref={composerRef}
+              rootRef={composerContainerRef}
               value={input}
-              onChange={handleInputChange}
-              onKeyDown={handleKeyDown}
+              mentions={mentions}
+              onChange={handleComposerChange}
+              onKeyDown={handleComposerKeyDown}
+              onPaste={handleComposerPaste}
               onCompositionStart={() => { composingRef.current = true }}
               onCompositionEnd={() => { composingRef.current = false }}
-              onPaste={handlePaste}
               placeholder={composerPlaceholder}
               disabled={isWorkspaceMissing}
-              role={isSlashMenuVisible ? 'combobox' : undefined}
-              aria-autocomplete={isSlashMenuVisible ? 'list' : undefined}
-              aria-expanded={isSlashMenuVisible ? true : undefined}
-              aria-controls={isSlashMenuVisible ? slashMenuId : undefined}
-              aria-activedescendant={isSlashMenuVisible
-                ? getSlashCommandOptionId(slashMenuId, slashSelectedIndex)
-                : undefined}
-              rows={1}
-              // `block`: a textarea is inline-block by default, so it carries a
-              // ~6px descender gap under it. The hero branch escapes it through
-              // its flex row; this one is a plain block child and was sitting
-              // 18px above the divider where the hero sits 12px.
-              className={`block w-full resize-none bg-transparent text-sm leading-relaxed text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] disabled:opacity-50 ${
-                isMobileComposer ? 'mobile-composer-textarea min-h-[44px] py-2.5' : useCompactChrome ? 'py-1.5' : 'py-2'
+              editorClassName={`max-h-[200px] overflow-y-auto text-sm leading-relaxed text-[var(--color-text-primary)] ${
+                useCompactChrome ? 'py-1.5' : 'py-2'
               }`}
+              aria={{
+                role: isSlashMenuVisible ? 'combobox' : 'textbox',
+                'aria-autocomplete': isSlashMenuVisible ? 'list' : undefined,
+                'aria-expanded': isSlashMenuVisible ? 'true' : undefined,
+                'aria-controls': isSlashMenuVisible ? slashMenuId : undefined,
+                'aria-activedescendant': isSlashMenuVisible
+                  ? getSlashCommandOptionId(slashMenuId, slashSelectedIndex)
+                  : undefined,
+              }}
             />
           )}
 
@@ -1575,12 +1352,12 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
             isHeroComposer
               ? 'pt-3'
               : useCompactChrome
-                ? `mt-2 -mx-3 -mb-3 px-2.5 py-2 ${isMobileComposer ? 'mobile-composer-toolbar gap-1' : 'gap-2'}`
+                ? `mt-2 -mx-3 -mb-3 px-2.5 py-2 ${isMobileComposer ? 'gap-1' : 'gap-2'}`
                 : 'mt-3 pt-3'
           }`}>
             <div
               data-testid="chat-input-toolbar-leading"
-              className={`flex min-w-0 items-center ${isMobileComposer ? 'mobile-composer-toolbar__tools shrink-0 gap-1' : 'gap-2'}`}
+              className={`flex min-w-0 items-center ${isMobileComposer ? 'shrink-0 gap-1' : 'gap-2'}`}
             >
               {!isMemberSession && (
                 <>
@@ -1617,71 +1394,6 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
                           <span className="w-[24px] text-center text-[18px] font-bold text-[var(--color-text-secondary)]">/</span>
                           <span className="text-sm text-[var(--color-text-primary)]">{slashCommandsLabel}</span>
                         </button>
-                        <button
-                          onClick={openSkillPicker}
-                          className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
-                        >
-                          <span className="material-symbols-outlined text-[18px] text-[var(--color-text-secondary)]">auto_awesome</span>
-                          <span className="text-sm text-[var(--color-text-primary)]">{skillsLabel}</span>
-                        </button>
-                        <button
-                          onClick={openPluginPicker}
-                          className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
-                        >
-                          <span className="material-symbols-outlined text-[18px] text-[var(--color-text-secondary)]">extension</span>
-                          <span className="text-sm text-[var(--color-text-primary)]">{pluginsLabel}</span>
-                        </button>
-                        {activeTabId && (
-                          <button
-                            onClick={() => {
-                              useChatStore.getState().setSessionCoordinatorMode(activeTabId, !coordinatorMode)
-                              setPlusMenuOpen(false)
-                            }}
-                            className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
-                          >
-                            <span className={`material-symbols-outlined text-[18px] ${coordinatorMode ? 'text-[var(--color-primary)]' : 'text-[var(--color-text-secondary)]'}`}>hub</span>
-                            <span className="flex-1 text-sm text-[var(--color-text-primary)]">{coordinatorModeLabel}</span>
-                            {coordinatorMode && (
-                              <span className="material-symbols-outlined text-[18px] text-[var(--color-primary)]">check</span>
-                            )}
-                          </button>
-                        )}
-                        {activeTabId && (
-                          <button
-                            onClick={() => {
-                              useChatStore.getState().setSessionPipelineMode(
-                                activeTabId,
-                                soloPipelineMode ? 'normal' : 'solo',
-                              )
-                              setPlusMenuOpen(false)
-                            }}
-                            className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
-                          >
-                            <span className={`material-symbols-outlined text-[18px] ${soloPipelineMode ? 'text-[var(--color-primary)]' : 'text-[var(--color-text-secondary)]'}`}>linear_scale</span>
-                            <span className="flex-1 text-sm text-[var(--color-text-primary)]">{soloPipelineModeLabel}</span>
-                            {soloPipelineMode && (
-                              <span className="material-symbols-outlined text-[18px] text-[var(--color-primary)]">check</span>
-                            )}
-                          </button>
-                        )}
-                        {activeTabId && (
-                          <button
-                            onClick={() => {
-                              useChatStore.getState().setSessionPipelineMode(
-                                activeTabId,
-                                rePipelineMode ? 'normal' : 're',
-                              )
-                              setPlusMenuOpen(false)
-                            }}
-                            className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
-                          >
-                            <span className={`material-symbols-outlined text-[18px] ${rePipelineMode ? 'text-[var(--color-primary)]' : 'text-[var(--color-text-secondary)]'}`}>troubleshoot</span>
-                            <span className="flex-1 text-sm text-[var(--color-text-primary)]">{rePipelineModeLabel}</span>
-                            {rePipelineMode && (
-                              <span className="material-symbols-outlined text-[18px] text-[var(--color-primary)]">check</span>
-                            )}
-                          </button>
-                        )}
                       </div>
                     )}
                   </div>
@@ -1720,7 +1432,8 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
 
             <div
               data-testid="chat-input-toolbar-trailing"
-              className={`flex min-w-0 items-center ${isMobileComposer ? 'mobile-composer-toolbar__actions flex-1 justify-end gap-1' : 'gap-2'}`}            >
+              className={`flex min-w-0 items-center ${isMobileComposer ? 'flex-1 justify-end gap-1' : 'shrink-0 gap-2'}`}
+            >
               {!isMemberSession && activeTabId && (
                 <ContextUsageIndicator
                   sessionId={activeTabId}
@@ -1729,7 +1442,10 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
                   runtimeSelectionKey={runtimeSelectionKey}
                   fallbackModelLabel={runtimeModelLabel}
                   compact={useCompactControls}
-                  refreshNonce={sessionState?.compactCount ?? 0}
+                  refreshNonce={
+                    (sessionState?.compactCount ?? 0) +
+                    (sessionState?.runtimeConfigReadyCount ?? 0)
+                  }
                 />
               )}
               {!isMemberSession && activeTabId && (
@@ -1741,6 +1457,22 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
                   fluid={isMobileComposer}
                 />
               )}
+              {!isMemberSession && !isActive && hasRunningSubagents ? (
+                <Button
+                  variant="danger"
+                  size="base"
+                  shape="circle"
+                  onClick={() => stopGeneration(activeTabId!)}
+                  aria-label={t('common.stop')}
+                  title={t('chat.stopTitle')}
+                  className={`shrink-0 ${isMobileComposer ? 'h-11 w-11' : ''}`}
+                  icon={(
+                    <span className="material-symbols-outlined text-[18px]">
+                      stop
+                    </span>
+                  )}
+                />
+              ) : null}
               {/* Same component, shape and icon as EmptySession's send button.
                   The two rendered mirror images of each other until it was
                   spotted in a walkthrough — the arrow led here and trailed
@@ -1783,13 +1515,6 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
         </div>
 
         <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} />
-
-        <ImageAnnotationModal
-          open={!!annotationTarget}
-          image={annotationTarget ? { src: attachmentImageSource(annotationTarget) ?? '', name: annotationTarget.name } : null}
-          onClose={() => setAnnotationTarget(null)}
-          onSave={saveAnnotatedImage}
-        />
 
         {!isMemberSession && !showLocationInToolbar && (
           <div className={useCompactControls ? 'mt-2 flex min-w-0 px-1' : 'mt-3 px-1'}>

@@ -1,36 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { CatalogSkill, SkillDetail, SkillMeta } from '../types/skill'
 
-const mocks = vi.hoisted(() => ({
-  list: vi.fn(),
-  detail: vi.fn(),
-  catalog: vi.fn(),
-  install: vi.fn(),
-}))
+const listMock = vi.hoisted(() => vi.fn())
+const detailMock = vi.hoisted(() => vi.fn())
 
 vi.mock('../api/skills', () => ({
-  skillsApi: mocks,
+  skillsApi: {
+    list: listMock,
+    detail: detailMock,
+  },
 }))
 
+import type { SkillDetail, SkillMeta } from '../types/skill'
 import { useSkillStore } from './skillStore'
-
-const catalogEntry: CatalogSkill = {
-  name: 'coderabbit-review',
-  displayName: 'CodeRabbit Review',
-  description: 'Run CodeRabbit review',
-  category: 'Code Review',
-  source: 'openai/plugins (MIT)',
-  installed: false,
-}
-
-const installedMeta: SkillMeta = {
-  name: 'coderabbit-review',
-  description: 'Run CodeRabbit review',
-  source: 'user',
-  userInvocable: true,
-  contentLength: 100,
-  hasDirectory: true,
-}
 
 function makeSkill(name: string): SkillMeta {
   return {
@@ -74,55 +55,13 @@ describe('skillStore', () => {
       isLoading: false,
       isDetailLoading: false,
       error: null,
-      catalog: [],
-      isCatalogLoading: false,
-      installingName: null,
     })
-  })
-
-  it('fetchCatalog populates the catalog', async () => {
-    mocks.catalog.mockResolvedValue({ catalog: [catalogEntry] })
-
-    await useSkillStore.getState().fetchCatalog()
-
-    expect(mocks.catalog).toHaveBeenCalledTimes(1)
-    expect(useSkillStore.getState().catalog).toEqual([catalogEntry])
-    expect(useSkillStore.getState().isCatalogLoading).toBe(false)
-  })
-
-  it('installs then refreshes catalog and installed skills', async () => {
-    mocks.install.mockResolvedValue({ ok: true, installed: true })
-    mocks.catalog.mockResolvedValue({ catalog: [{ ...catalogEntry, installed: true }] })
-    mocks.list.mockResolvedValue({ skills: [installedMeta] })
-
-    await useSkillStore.getState().installSkill('coderabbit-review', '/work/dir')
-
-    expect(mocks.install).toHaveBeenCalledWith('coderabbit-review')
-    expect(mocks.catalog).toHaveBeenCalledTimes(1)
-    expect(mocks.list).toHaveBeenCalledWith('/work/dir')
-    expect(useSkillStore.getState()).toMatchObject({
-      installingName: null,
-      catalog: [{ ...catalogEntry, installed: true }],
-      skills: [installedMeta],
-    })
-  })
-
-  it('records an install error and clears installingName', async () => {
-    mocks.install.mockRejectedValue(new Error('disk full'))
-
-    await useSkillStore.getState().installSkill('coderabbit-review')
-
-    expect(useSkillStore.getState()).toMatchObject({
-      error: 'disk full',
-      installingName: null,
-    })
-    expect(mocks.catalog).not.toHaveBeenCalled()
   })
 
   it('ignores a slower skill list from the previous project', async () => {
     const oldRequest = deferred<{ skills: SkillMeta[] }>()
     const newRequest = deferred<{ skills: SkillMeta[] }>()
-    mocks.list.mockImplementation((cwd: string) =>
+    listMock.mockImplementation((cwd: string) =>
       cwd.endsWith('old') ? oldRequest.promise : newRequest.promise,
     )
 
@@ -147,7 +86,7 @@ describe('skillStore', () => {
       skills: [makeSkill('old-skill')],
       skillsContext: '/workspace/old',
     })
-    mocks.list.mockReturnValue(nextRequest.promise)
+    listMock.mockReturnValue(nextRequest.promise)
 
     const fetch = useSkillStore.getState().fetchSkills('/workspace/new')
 
@@ -164,7 +103,7 @@ describe('skillStore', () => {
   it('keeps the newest detail when an older request resolves last', async () => {
     const oldRequest = deferred<{ detail: SkillDetail }>()
     const newRequest = deferred<{ detail: SkillDetail }>()
-    mocks.detail.mockImplementation((_source: string, name: string) =>
+    detailMock.mockImplementation((_source: string, name: string) =>
       name === 'old-skill' ? oldRequest.promise : newRequest.promise,
     )
 
@@ -193,7 +132,7 @@ describe('skillStore', () => {
 
   it('does not reopen a detail after the user returns to the list', async () => {
     const request = deferred<{ detail: SkillDetail }>()
-    mocks.detail.mockReturnValue(request.promise)
+    detailMock.mockReturnValue(request.promise)
 
     const fetch = useSkillStore.getState().fetchSkillDetail(
       'user',

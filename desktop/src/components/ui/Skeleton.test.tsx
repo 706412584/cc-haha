@@ -73,5 +73,6 @@ describe('SkeletonCards', () => {
     const { container: withAvatar } = render(<SkeletonCards label="Loading" count={1} withAvatar />)
 
     expect(withAvatar.querySelectorAll('[aria-hidden="true"]').length)
-      .toBeGreaterThan(without.querySelectorAll('[aria-hidden="true"]').length)  })
+      .toBeGreaterThan(without.querySelectorAll('[aria-hidden="true"]').length)
+  })
 })

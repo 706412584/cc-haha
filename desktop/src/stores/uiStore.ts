@@ -29,7 +29,7 @@ const SIDEBAR_WIDTH_STORAGE_KEY = 'cc-haha-sidebar-width'
 
 export const SIDEBAR_MIN_WIDTH = 240
 export const SIDEBAR_MAX_WIDTH = 480
-export const SIDEBAR_DEFAULT_WIDTH = 300
+export const SIDEBAR_DEFAULT_WIDTH = 280
 
 export function clampSidebarWidth(width: number): number {
   return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(width)))
@@ -54,7 +54,6 @@ const SETTINGS_TABS = [
   'agents',
   'skills',
   'memory',
-  'projectRules',
   'plugins',
   'pets',
   'computerUse',
@@ -99,7 +98,8 @@ function getInitialAppliedTheme(): ThemeMode {
     lightTheme: readStoredLightTheme(),
     darkTheme: readStoredDarkTheme(),
     systemAppearance: getSystemAppearance(),
-  })}
+  })
+}
 
 function isSettingsTab(value: unknown): value is SettingsTab {
   return typeof value === 'string' && (SETTINGS_TABS as readonly string[]).includes(value)
@@ -220,7 +220,8 @@ export function teardownTheme() {
   stopSystemAppearanceWatch?.()
   stopSystemAppearanceWatch = null
   stopStorageSync?.()
-  stopStorageSync = null}
+  stopStorageSync = null
+}
 
 export type Toast = {
   id: string
@@ -245,7 +246,6 @@ export type SettingsTab =
   | 'computerUse'
   | 'trace'
   | 'diagnostics'
-  | 'projectRules'
   | 'about'
 
 type ActiveView = 'code' | 'scheduled' | 'terminal' | 'history' | 'settings'
@@ -318,7 +318,8 @@ export const useUIStore = create<UIStore>((set) => ({
       applyTheme(applied, state.followSystemTheme, lightTheme)
       persistThemeState({ theme: applied, lightTheme, darkTheme, followSystem: state.followSystemTheme })
       return { theme: applied, lightTheme, darkTheme }
-    })  },
+    })
+  },
 
   // Turning the switch off freezes whatever is on screen rather than snapping
   // back to an older manual pick.
@@ -352,7 +353,8 @@ export const useUIStore = create<UIStore>((set) => ({
       const darkTheme = isDarkThemeMode(next) ? next : state.darkTheme
       applyTheme(next, false, lightTheme)
       persistThemeState({ theme: next, lightTheme, darkTheme, followSystem: false })
-      return { theme: next, lightTheme, darkTheme, followSystemTheme: false }    })
+      return { theme: next, lightTheme, darkTheme, followSystemTheme: false }
+    })
   },
 
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),

@@ -22,7 +22,7 @@ import type { McpServerRecord } from '../../types/mcp'
 import type { SkillMeta } from '../../types/skill'
 import type { SlashCommandOption } from './composerUtils'
 
-export type LocalSlashCommandName = 'mcp' | 'skills' | 'help' | 'status' | 'cost' | 'context' | 'model'
+export type LocalSlashCommandName = 'mcp' | 'skills' | 'help' | 'status' | 'cost' | 'context'
 
 type Props = {
   command: LocalSlashCommandName
@@ -1075,7 +1075,6 @@ function HelpPanel({
 export function LocalSlashCommandPanel({ command, sessionId, cwd, commands, onClose }: Props) {
   if (command === 'mcp') return <McpPanel cwd={cwd} onClose={onClose} />
   if (command === 'skills') return <SkillsPanel cwd={cwd} onClose={onClose} />
-  if (command === 'model') return null
   if (command === 'status' || command === 'cost' || command === 'context') {
     return <SessionInspectorPanel command={command} sessionId={sessionId} commands={commands} onClose={onClose} />
   }

@@ -73,14 +73,6 @@ vi.mock('../../i18n', () => ({
       'common.cancel': 'Cancel',
       'common.delete': 'Delete',
       'common.rename': 'Rename',
-      'common.copyFailed': 'Copy failed.',
-      'sidebar.exportSession': 'Export as JSONL',
-      'sidebar.copySessionPath': 'Copy file path',
-      'sidebar.copySessionPathSuccess': 'Session file path copied.',
-      'sidebar.copySessionPathUnavailable': 'Session file path is unavailable.',
-      'sidebar.revealSession': 'Open in file manager',
-      'sidebar.revealSessionUnsupported': 'Opening in file manager is not supported in this environment.',
-      'sidebar.revealSessionFailure': 'Failed to open file manager: {error}',
       'sidebar.timeGroup.today': 'Today',
       'sidebar.timeGroup.yesterday': 'Yesterday',
       'sidebar.timeGroup.last7days': 'Last 7 Days',
@@ -120,7 +112,6 @@ vi.mock('../../i18n', () => ({
 import { Sidebar } from './Sidebar'
 import { useChatStore } from '../../stores/chatStore'
 import { useSessionStore } from '../../stores/sessionStore'
-import { useSettingsStore } from '../../stores/settingsStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useUIStore } from '../../stores/uiStore'
 import type { SessionListItem } from '../../types/session'
@@ -204,7 +195,6 @@ describe('Sidebar', () => {
   const connectToSession = vi.fn()
   const disconnectSession = vi.fn()
   const fetchSessions = vi.fn()
-  const syncIndexes = vi.fn()
   const createSession = vi.fn()
   const deleteSession = vi.fn()
   const deleteSessions = vi.fn()
@@ -214,8 +204,6 @@ describe('Sidebar', () => {
     connectToSession.mockReset()
     disconnectSession.mockReset()
     fetchSessions.mockReset()
-    syncIndexes.mockReset()
-    syncIndexes.mockResolvedValue(undefined)
     createSession.mockReset()
     deleteSession.mockReset()
     deleteSessions.mockReset()
@@ -255,7 +243,6 @@ describe('Sidebar', () => {
       isBatchMode: false,
       selectedSessionIds: new Set(),
       fetchSessions,
-      syncIndexes,
       createSession,
       deleteSession,
       deleteSessions,
@@ -268,7 +255,6 @@ describe('Sidebar', () => {
       sidebarOpen: true,
       addToast,
     } as Partial<ReturnType<typeof useUIStore.getState>>)
-    useSettingsStore.setState({ sessionContentSearchEnabled: true })
   })
 
   afterEach(() => {
@@ -300,40 +286,15 @@ describe('Sidebar', () => {
       { sessionId: 'session-new-1', title: 'New Session', type: 'session', status: 'idle' },
     ])
     expect(useTabStore.getState().activeTabId).toBe('session-new-1')
-    expect(screen.getByText('haha').closest('.sidebar-copy')).toHaveTextContent('cc-haha')
     expect(screen.getByRole('complementary')).not.toHaveAttribute('data-desktop-drag-region')
     expect(screen.getByTestId('sidebar-title-region')).toHaveAttribute('data-desktop-drag-region')
   })
 
-  it('keeps desktop sidebar controls while simplifying them on mobile', () => {
-    const now = new Date('2026-05-15T10:00:00.000Z').toISOString()
-    useSessionStore.setState({
-      sessions: [makeSession('alpha-1', 'Alpha Session', '/workspace/alpha', now)],
-    })
-
-    const { rerender } = render(<Sidebar />)
-
-    expect(screen.getByRole('link', { name: 'GitHub' })).toHaveAttribute('href', 'https://github.com/706412584/cc-haha')
-    expect(screen.getByRole('button', { name: 'Search chats' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Batch manage' })).toBeInTheDocument()
-    expect(screen.getByTestId('sidebar-projects-header')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'New session in alpha' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /Alpha Session/ })).toHaveTextContent('5/15')
-
-    rerender(<Sidebar isMobile />)
-
-    expect(screen.queryByRole('link')).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Search chats' })).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Batch manage' })).toHaveClass('h-11', 'w-11')
-    expect(screen.queryByTestId('sidebar-projects-header')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'New session in alpha' })).toHaveClass('h-11', 'w-11')
-    expect(screen.getByRole('button', { name: 'Refresh sessions' })).toBeInTheDocument()
-    expect(screen.getByPlaceholderText('Search sessions')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /Alpha Session/ })).not.toHaveTextContent('5/15')
-  })
-
-  // The header used to render multiple names and hide one with a container query,
-  // so the app answered to different names depending on sidebar width.
+  // The header used to render both "Claude Code Haha" and "cc-haha" and hide
+  // one with a container query, so the app answered to two names depending on
+  // how far the sidebar had been dragged. Only the short one ships now — and
+  // the long one must not linger in the DOM, since a display-hidden copy still
+  // reaches screen readers and in-page search.
   it('renders one wordmark and it is the short one', () => {
     render(<Sidebar />)
 
@@ -341,7 +302,6 @@ describe('Sidebar', () => {
 
     expect(region).toHaveTextContent('cc-haha')
     expect(region).not.toHaveTextContent('Claude Code')
-    expect(region).not.toHaveTextContent('Code Council')
   })
 
   it('groups sessions by project and expands overflow rows', () => {
@@ -368,7 +328,7 @@ describe('Sidebar', () => {
     expect(screen.getByText('beta')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Alpha newest/ })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Alpha hidden/ })).not.toBeInTheDocument()
-    expect(screen.getByTestId('sidebar-project-session-list-workspace-alpha').parentElement).toHaveClass('pl-6')
+    expect(screen.getByTestId('sidebar-project-session-list-workspace-alpha').parentElement).toHaveClass('pl-5')
     expect(screen.getByRole('button', { name: 'Collapse alpha' })).toHaveAttribute('data-state', 'open')
     expect(screen.getByTestId('sidebar-project-icon-workspace-alpha')).toHaveAttribute('data-icon-state', 'open')
 
@@ -378,7 +338,7 @@ describe('Sidebar', () => {
     expect(screen.getByRole('button', { name: 'Collapse display' })).toBeInTheDocument()
   })
 
-  it('syncs indexes from the manual refresh without replacing automatic list refreshes', async () => {
+  it('lets a manual session refresh supersede a stuck automatic refresh', async () => {
     fetchSessions.mockReturnValue(new Promise(() => {}))
 
     render(<Sidebar />)
@@ -386,22 +346,7 @@ describe('Sidebar', () => {
     await waitFor(() => expect(fetchSessions).toHaveBeenCalledTimes(1))
     fireEvent.click(screen.getByRole('button', { name: 'Refresh sessions' }))
 
-    await waitFor(() => expect(syncIndexes).toHaveBeenCalledTimes(1))
-    expect(fetchSessions).toHaveBeenCalledTimes(1)
-  })
-
-  it('keeps title filtering while hiding content search when disabled', () => {
-    useSettingsStore.setState({ sessionContentSearchEnabled: false })
-    useSessionStore.setState({
-      sessions: [makeSession('alpha-1', 'Alpha Session', '/workspace/alpha', '2026-05-15T10:00:00.000Z')],
-    })
-
-    render(<Sidebar />)
-
-    expect(screen.queryByRole('button', { name: 'Search chats' })).not.toBeInTheDocument()
-    const titleFilter = screen.getByPlaceholderText('Search sessions')
-    fireEvent.change(titleFilter, { target: { value: 'alpha' } })
-    expect(screen.getByRole('button', { name: /Alpha Session/ })).toBeInTheDocument()
+    await waitFor(() => expect(fetchSessions).toHaveBeenCalledTimes(2))
   })
 
   it('keeps the session refresh control usable when a background refresh is still loading existing sessions', async () => {
@@ -419,7 +364,7 @@ describe('Sidebar', () => {
     expect(refreshButton.querySelector('svg')).not.toHaveClass('animate-spin')
 
     fireEvent.click(refreshButton)
-    await waitFor(() => expect(syncIndexes).toHaveBeenCalled())
+    await waitFor(() => expect(fetchSessions).toHaveBeenCalled())
   })
 
   it('exposes the full session title as a row tooltip when the label is truncated', () => {
@@ -1050,6 +995,9 @@ describe('Sidebar', () => {
     const idleRow = screen.getByRole('button', { name: /Idle Source/ })
     expect(within(idleRow).queryByLabelText('Session running')).not.toBeInTheDocument()
     expect(within(idleRow).getByText('20m ago')).toBeInTheDocument()
+    const idleMeta = within(idleRow).getByTitle('last updated 20m ago')
+    expect(idleMeta).toHaveClass('flex-shrink-0', 'whitespace-nowrap')
+    expect(idleMeta).not.toHaveClass('min-w-[78px]')
   })
 
   it('shows a toast when session creation fails', async () => {
@@ -1355,10 +1303,7 @@ describe('Sidebar', () => {
 
     render(<Sidebar />)
 
-    // Phase 1 UX swapped the "Loading..." string for a Skeleton grid.
-    // Each Skeleton exposes role="status" + aria-label="Loading" — assert
-    // at least one is rendered and that the empty-state copy stays hidden.
-    expect(screen.getAllByRole('status', { name: /loading/i }).length).toBeGreaterThan(0)
+    expect(screen.getByText('Loading...')).toBeInTheDocument()
     expect(screen.queryByText('No sessions')).not.toBeInTheDocument()
   })
 
@@ -1487,7 +1432,7 @@ describe('Sidebar', () => {
 
     render(<Sidebar />)
 
-    expect(screen.getAllByRole('status', { name: /loading/i }).length).toBeGreaterThan(0)
+    expect(screen.getByText('Loading...')).toBeInTheDocument()
     expect(screen.queryByText('No sessions')).not.toBeInTheDocument()
     expect(screen.queryByTestId('sidebar-index-progress')).not.toBeInTheDocument()
   })
@@ -1685,7 +1630,7 @@ describe('Sidebar', () => {
     expect(screen.getByTestId('sidebar-index-degraded')).toHaveAttribute('aria-hidden', 'true')
   })
 
-  it('syncs indexes manually and refreshes the session list through low-frequency visible polling', async () => {
+  it('refreshes sessions manually and through low-frequency visible polling', async () => {
     vi.useFakeTimers()
 
     render(<Sidebar />)
@@ -1699,20 +1644,19 @@ describe('Sidebar', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Refresh sessions' }))
       await Promise.resolve()
     })
-    expect(syncIndexes).toHaveBeenCalledTimes(1)
-    expect(fetchSessions).toHaveBeenCalledTimes(1)
+    expect(fetchSessions).toHaveBeenCalledTimes(2)
 
     await act(async () => {
       window.dispatchEvent(new Event('focus'))
       await Promise.resolve()
     })
-    expect(fetchSessions).toHaveBeenCalledTimes(1)
+    expect(fetchSessions).toHaveBeenCalledTimes(2)
 
     await act(async () => {
       vi.advanceTimersByTime(30_000)
       await Promise.resolve()
     })
-    expect(fetchSessions).toHaveBeenCalledTimes(2)
+    expect(fetchSessions).toHaveBeenCalledTimes(3)
   })
 
   it('does not overlap automatic session refreshes when the previous request is still pending', async () => {
@@ -1769,100 +1713,6 @@ describe('Sidebar', () => {
     })
   })
 
-  it('copies the session jsonl file path from the right-click menu', async () => {
-    const writeTextSpy = vi.fn().mockResolvedValue(undefined)
-    const originalClipboard = navigator.clipboard
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: { writeText: writeTextSpy },
-    })
-
-    useSessionStore.setState({
-      sessions: [
-        {
-          id: 'session-9',
-          title: 'Tunnel Session',
-          createdAt: new Date().toISOString(),
-          modifiedAt: new Date().toISOString(),
-          messageCount: 1,
-          projectPath: '/workspace/project',
-          workDir: '/workspace/project',
-          workDirExists: true,
-          filePath: '/home/u/.claude/projects/-workspace-project/session-9.jsonl',
-        },
-      ],
-    })
-
-    render(<Sidebar />)
-    fireEvent.contextMenu(screen.getByRole('button', { name: /Tunnel Session/ }))
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Copy file path' }))
-    })
-
-    expect(writeTextSpy).toHaveBeenCalledWith('/home/u/.claude/projects/-workspace-project/session-9.jsonl')
-
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: originalClipboard,
-    })
-  })
-
-  it('hides the "open in file manager" entry when the host cannot reveal files', async () => {
-    // The default test host is browserHost, whose shell slot has no
-    // showItemInFolder — so the menu item must not render. This keeps the
-    // sidebar feature-detection contract honest.
-    useSessionStore.setState({
-      sessions: [
-        {
-          id: 'session-10',
-          title: 'Local Only Session',
-          createdAt: new Date().toISOString(),
-          modifiedAt: new Date().toISOString(),
-          messageCount: 1,
-          projectPath: '/workspace/project',
-          workDir: '/workspace/project',
-          workDirExists: true,
-          filePath: '/home/u/.claude/projects/-workspace-project/session-10.jsonl',
-        },
-      ],
-    })
-    render(<Sidebar />)
-    fireEvent.contextMenu(screen.getByRole('button', { name: /Local Only Session/ }))
-
-    expect(screen.getByRole('button', { name: 'Copy file path' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Open in file manager' })).toBeNull()
-  })
-
-  it('reports a friendly error when the session has no file path on disk', async () => {
-    useSessionStore.setState({
-      sessions: [
-        {
-          id: 'session-11',
-          title: 'Pathless Session',
-          createdAt: new Date().toISOString(),
-          modifiedAt: new Date().toISOString(),
-          messageCount: 1,
-          projectPath: '/workspace/project',
-          workDir: '/workspace/project',
-          workDirExists: true,
-          // filePath intentionally omitted to simulate an older server payload.
-        },
-      ],
-    })
-    render(<Sidebar />)
-    fireEvent.contextMenu(screen.getByRole('button', { name: /Pathless Session/ }))
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Copy file path' }))
-    })
-
-    expect(addToast).toHaveBeenCalledWith({
-      type: 'error',
-      message: 'Session file path is unavailable.',
-    })
-  })
-
   // The whole drawer is touch-only: it has no hover, and nothing can be focused
   // through `pointer-events: none`. Every control gated on `group-hover` was
   // therefore either dead or an invisible tap target, and the 53 tests above
@@ -1896,10 +1746,15 @@ describe('Sidebar', () => {
       expect(actions.parentElement).not.toHaveClass('pointer-events-none')
     })
 
-    it('does not render desktop project header actions in the mobile drawer', () => {
+    it('stops rendering the projects header actions as an invisible tap target', () => {
       renderWithProject(true)
 
-      expect(screen.queryByRole('button', { name: 'Project menu' })).not.toBeInTheDocument()
+      // These kept `pointer-events` while sitting at `opacity: 0` — visually
+      // absent on a phone, yet still firing on tap.
+      const menu = screen.getByRole('button', { name: 'Project menu' })
+      expect(menu).toHaveClass('h-11', 'w-11')
+      expect(menu.parentElement).toHaveClass('opacity-100')
+      expect(menu.parentElement).not.toHaveClass('opacity-0')
     })
 
     it('raises the search row and overflow toggle to the touch minimum', () => {
@@ -1907,8 +1762,8 @@ describe('Sidebar', () => {
 
       expect(screen.getByRole('button', { name: 'Refresh sessions' })).toHaveClass('h-11', 'w-11')
       expect(screen.getByRole('button', { name: 'Batch manage' })).toHaveClass('h-11', 'w-11')
-      // The title filter shares the row and keeps the same touch height.
-      expect(screen.getByPlaceholderText('Search sessions').parentElement).toHaveClass('h-11')
+      // Same flex row as the two above; at h-9 it left the row ragged.
+      expect(screen.getAllByRole('button', { name: 'Search chats' })[0]).toHaveClass('h-11')
     })
   })
 })

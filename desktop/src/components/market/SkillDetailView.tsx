@@ -39,8 +39,6 @@ export type SkillDetailViewProps = {
   banner?: ReactNode
   meta: SkillDetailMetaItem[]
   description: string
-  /** Additional content appended to the overview without affecting market callers. */
-  overviewContent?: ReactNode
   /**
    * Frontmatter the caller already parsed. Used when `description` arrives with
    * its YAML block stripped upstream, so the overview can still show it.
@@ -216,9 +214,9 @@ export function SkillDetailView(props: SkillDetailViewProps) {
               >
                 {overview.body.trim() ? (
                   <MarkdownRenderer content={overview.body} variant="document" className="mx-auto max-w-[72ch]" />
-                ) : !props.overviewContent ? (                  <p className="py-6 text-center text-sm text-[var(--color-text-tertiary)]">{t('market.detail.noDescription')}</p>
-                ) : null}
-                {props.overviewContent}
+                ) : (
+                  <p className="py-6 text-center text-sm text-[var(--color-text-tertiary)]">{t('market.detail.noDescription')}</p>
+                )}
               </section>
             )}
 

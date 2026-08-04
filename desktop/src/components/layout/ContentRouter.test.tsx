@@ -249,24 +249,6 @@ describe('ContentRouter tab surfaces', () => {
     expect(screen.queryByTestId('active-session')).not.toBeInTheDocument()
   })
 
-  it('renders Office tabs for their source session instead of mounting chat', () => {
-    useTabStore.setState({
-      tabs: [{
-        sessionId: '__office__session-1',
-        title: 'Agent Office',
-        type: 'office',
-        status: 'idle',
-        sourceSessionId: 'session-1',
-      }],
-      activeTabId: '__office__session-1',
-    })
-
-    render(<ContentRouter />)
-
-    expect(screen.getByTestId('agent-office-page')).toHaveTextContent('session-1')
-    expect(screen.queryByTestId('active-session')).not.toBeInTheDocument()
-  })
-
   it('renders workbench tabs as main content instead of mounting the chat session surface', () => {
     useTabStore.setState({
       tabs: [{

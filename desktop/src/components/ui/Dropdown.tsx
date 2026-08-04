@@ -229,7 +229,6 @@ export function Dropdown<T extends string>({
           aria-activedescendant={activeIndex >= 0 ? `${listId}-${activeIndex}` : undefined}
           tabIndex={-1}
           onKeyDown={handleListKeyDown}
-          onWheel={(event) => event.stopPropagation()}
           className={cx(
             // 17px — overlays are cards, not card innards. One value here
             // settles the corner for every Dropdown menu in the app.

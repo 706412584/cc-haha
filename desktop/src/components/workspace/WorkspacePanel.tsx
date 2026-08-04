@@ -20,7 +20,6 @@ import {
 } from '../../stores/workspacePanelStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useWorkspaceChatContextStore } from '../../stores/workspaceChatContextStore'
-import { SETTINGS_TAB_ID, useTabStore } from '../../stores/tabStore'
 import { useUIStore } from '../../stores/uiStore'
 import { Button } from '@/components/ui/Button'
 import { IconButton } from '@/components/ui/IconButton'
@@ -28,6 +27,8 @@ import { useDismissable } from '@/hooks/useDismissable'
 import { copyTextToClipboard } from '@/lib/clipboard'
 import { clearWindowSelection, getSelectionPopoverPosition, useSelectionPopoverDismiss } from '../../hooks/useSelectionPopoverDismiss'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
+import { createWorkspaceMarkdownImageResolver } from '../../lib/markdownImages'
+import { getServerBaseUrl } from '../../lib/desktopRuntime'
 import {
   getFileExtension,
   normalizePrismLanguage,
@@ -37,10 +38,6 @@ import {
   type WorkspaceDiffCommentSelection,
 } from './WorkspaceCodeSurface'
 import { WorkspaceFileOpenWith } from './WorkspaceFileOpenWith'
-import { WorkspaceEditor, saveWorkspaceBuffer } from './WorkspaceEditor'
-import { UnsavedChangesModal } from './UnsavedChangesModal'
-import { LspStatusIndicator } from './LspStatusIndicator'
-import { errorCountFromDiagnostics, toLegacyLspState } from '../../lib/lspStateMap'
 import { getFileIdentity, getWorkspaceStatusLabel, type WorkspaceFileIdentity } from './fileIdentity'
 import type { WorkspaceDiffHighlightToken } from './workspaceDiffHighlighter'
 
@@ -79,37 +76,6 @@ type FileContextMenuState = {
   isDirectory: boolean
   x: number
   y: number
-}
-
-type FilePreviewMode = 'preview' | 'edit'
-
-type PendingPreviewClose = {
-  tabId: string
-  scope: WorkspacePreviewCloseScope
-  dirtyTabIds: string[]
-}
-
-function getClosingPreviewTabIds(
-  tabs: WorkspacePreviewTab[],
-  tabId: string,
-  scope: WorkspacePreviewCloseScope,
-) {
-  const index = tabs.findIndex((tab) => tab.id === tabId)
-  if (index < 0) return [tabId]
-
-  switch (scope) {
-    case 'others':
-      return tabs.filter((tab) => tab.id !== tabId).map((tab) => tab.id)
-    case 'left':
-      return tabs.slice(0, index).map((tab) => tab.id)
-    case 'right':
-      return tabs.slice(index + 1).map((tab) => tab.id)
-    case 'all':
-      return tabs.map((tab) => tab.id)
-    case 'current':
-    default:
-      return [tabId]
-  }
 }
 
 const FILE_STATUS_META: Record<WorkspaceFileStatus, { label: string; className: string }> = {
@@ -335,12 +301,18 @@ function getLineNumberFromNode(node: Node | null, root: HTMLElement) {
   return Number.isFinite(line) ? line : undefined
 }
 
-function getSelectionPosition(range: Range, root: HTMLElement, pointer?: SelectionPointer) {
+function getSelectionPosition(
+  range: Range,
+  root: HTMLElement,
+  selection: Selection,
+  pointer?: SelectionPointer,
+) {
   return getSelectionPopoverPosition(range, root, {
     menuWidth: SELECTION_MENU_WIDTH,
     menuHeight: SELECTION_MENU_HEIGHT,
     offset: SELECTION_MENU_OFFSET,
     fallbackPointer: pointer,
+    selectionFocus: { node: selection.focusNode, offset: selection.focusOffset },
   })
 }
 
@@ -375,7 +347,7 @@ function getTextSelectionFromContainer(
   const orderedEnd = startLine && endLine ? Math.max(startLine, endLine) : endLine
 
   return {
-    ...getSelectionPosition(range, root, pointer),
+    ...getSelectionPosition(range, root, selection, pointer),
     text,
     ...(orderedStart ? { startLine: orderedStart } : {}),
     ...(orderedEnd ? { endLine: orderedEnd } : {}),
@@ -406,7 +378,9 @@ function FloatingSelectionMenu({
     <button
       ref={popoverRef}
       type="button"
-      onMouseDown={(event) => event.preventDefault()}
+      onMouseDown={(event) => {
+        if (event.button === 0 && !event.ctrlKey) event.preventDefault()
+      }}
       onClick={onAdd}
       className="glass-panel fixed z-[var(--z-popover)] inline-flex h-11 items-center gap-2 rounded-full px-5 text-[15px] font-semibold text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
       style={{ left: selection.x, top: selection.y }}
@@ -648,6 +622,10 @@ function CodeSurface({
   }
 
   const handleSelectionMouseUp = (event: MouseEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || event.ctrlKey) {
+      setSelectionMenu(null)
+      return
+    }
     const selection = getTextSelectionFromContainer(surfaceRef.current, undefined, event)
     if (!selection?.startLine || !selection.endLine || selection.startLine === selection.endLine) {
       setSelectionMenu(selection)
@@ -896,14 +874,34 @@ function CodeSurface({
 
 function MarkdownSurface({
   value,
+  path,
+  sessionId,
+  workDir,
   onAddSelection,
 }: {
   value: string
+  path: string
+  sessionId: string
+  workDir?: string | null
   onAddSelection: (selection: WorkspaceTextSelection) => void
 }) {
   const surfaceRef = useRef<HTMLDivElement>(null)
   const selectionMenuRef = useRef<HTMLButtonElement>(null)
   const [selectionMenu, setSelectionMenu] = useState<FloatingSelectionMenuState | null>(null)
+
+  // The document is user-owned local content, so its images are trusted:
+  // relative paths resolve against the file's directory (served sandboxed via
+  // /preview-fs or /local-file) and remote URLs are left to CSP. Untrusted
+  // assistant Markdown gets no resolver and keeps the blob:/data:-only policy.
+  const resolveImageSrc = useMemo(
+    () => createWorkspaceMarkdownImageResolver({
+      baseUrl: getServerBaseUrl(),
+      sessionId,
+      filePath: path,
+      workDir,
+    }),
+    [path, sessionId, workDir],
+  )
 
   useEffect(() => {
     setSelectionMenu(null)
@@ -920,6 +918,10 @@ function MarkdownSurface({
   })
 
   const handleSelectionMouseUp = (event: MouseEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || event.ctrlKey) {
+      setSelectionMenu(null)
+      return
+    }
     setSelectionMenu(getTextSelectionFromContainer(
       surfaceRef.current,
       (text) => getLineRangeForText(value, text),
@@ -951,6 +953,7 @@ function MarkdownSurface({
         <MarkdownRenderer
           content={value}
           variant="document"
+          resolveImageSrc={resolveImageSrc}
           className="workspace-markdown-preview prose-p:text-[14px] prose-p:leading-7 prose-h1:text-[24px] prose-h2:text-[18px] prose-h3:text-[15px] prose-code:text-[12px] prose-pre:my-4"
         />
       </div>
@@ -1266,11 +1269,6 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
   const [isNavigatorOpen, setIsNavigatorOpen] = useState(forceVisible)
   const [previewTabContextMenu, setPreviewTabContextMenu] = useState<{ tabId: string; x: number; y: number } | null>(null)
   const [fileContextMenu, setFileContextMenu] = useState<FileContextMenuState | null>(null)
-  const [unsupportedEditorPaths, setUnsupportedEditorPaths] = useState<Set<string>>(() => new Set())
-  const [filePreviewModes, setFilePreviewModes] = useState<Record<string, FilePreviewMode>>({})
-  const [pendingPreviewClose, setPendingPreviewClose] = useState<PendingPreviewClose | null>(null)
-  const [isSavingPendingClose, setIsSavingPendingClose] = useState(false)
-  const [pendingCloseError, setPendingCloseError] = useState<string | null>(null)
   const previewTabContextMenuRef = useRef<HTMLDivElement>(null)
   const fileContextMenuRef = useRef<HTMLDivElement>(null)
   const width = useWorkspacePanelStore((state) => state.width)
@@ -1294,12 +1292,8 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
   const loadTree = useWorkspacePanelStore((state) => state.loadTree)
   const toggleTreeNode = useWorkspacePanelStore((state) => state.toggleTreeNode)
   const openPreview = useWorkspacePanelStore((state) => state.openPreview)
+  const closePreview = useWorkspacePanelStore((state) => state.closePreview)
   const closePreviewTabs = useWorkspacePanelStore((state) => state.closePreviewTabs)
-  const initBuffer = useWorkspacePanelStore((state) => state.initBuffer)
-  const syncLsp = useWorkspacePanelStore((state) => state.syncLsp)
-  const loadLspState = useWorkspacePanelStore((state) => state.loadLspState)
-  const loadLspDiagnostics = useWorkspacePanelStore((state) => state.loadLspDiagnostics)
-  const bufferStateByTabId = useWorkspacePanelStore((state) => state.bufferStateByTabId)
   const closePanel = useWorkspacePanelStore((state) => state.closePanel)
   const addWorkspaceReference = useWorkspaceChatContextStore((state) => state.addReference)
   const chatState = useChatStore((state) => state.sessions[sessionId]?.chatState ?? 'idle')
@@ -1370,13 +1364,6 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
   const activePreviewError = useWorkspacePanelStore((state) =>
     activePreviewRequestKey ? state.errors.previewByTabId[activePreviewRequestKey] ?? null : null,
   )
-  const activeLspKey = activePreviewTab?.kind === 'file'
-    ? makeTreeStateKey(sessionId, activePreviewTab.path)
-    : null
-  const activeLspDiagnostics = useWorkspacePanelStore((state) =>
-    activeLspKey ? state.lspDiagnosticsBySessionPath[activeLspKey] : undefined,
-  )
-  const lspState = useWorkspacePanelStore((state) => state.lspStateBySession[sessionId])
   const activePreviewRefreshState = useWorkspacePanelStore((state) =>
     activePreviewRequestKey ? state.errors.previewRefreshStateByTabId[activePreviewRequestKey] ?? null : null,
   )
@@ -1557,7 +1544,7 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
       const composer = Array.from(
         document.querySelectorAll<HTMLElement>('[data-testid="chat-input-shell"]'),
       ).find((element) => element.dataset.sessionId === sessionId)
-      composer?.querySelector<HTMLTextAreaElement>('textarea:not([disabled])')?.focus()
+      composer?.querySelector<HTMLElement>('[data-composer-editor]')?.focus()
     })
   }
 
@@ -1592,83 +1579,10 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
     setFileContextMenu({ path, isDirectory, x: event.clientX, y: event.clientY })
   }
 
-  const handleWorkspaceFileSaved = () => {
-    void loadStatus(sessionId)
-    if (activeView === 'all') {
-      void loadTree(sessionId, '')
-    }
-  }
-
-  const requestClosePreviewTabs = (tabId: string, scope: WorkspacePreviewCloseScope) => {
-    const closingTabIds = getClosingPreviewTabIds(previewTabs, tabId, scope)
-    const dirtyTabIds = closingTabIds.filter((id) => bufferStateByTabId[id]?.isDirty)
-    if (dirtyTabIds.length === 0) {
-      closePreviewTabs(sessionId, tabId, scope)
-      return
-    }
-
-    setPendingCloseError(null)
-    setPendingPreviewClose({ tabId, scope, dirtyTabIds })
-  }
-
-  const handlePendingCloseCancel = () => {
-    setPendingPreviewClose(null)
-    setPendingCloseError(null)
-  }
-
-  const handlePendingCloseDiscard = () => {
-    if (!pendingPreviewClose) return
-    closePreviewTabs(sessionId, pendingPreviewClose.tabId, pendingPreviewClose.scope)
-    setPendingPreviewClose(null)
-    setPendingCloseError(null)
-  }
-
-  const handlePendingCloseSave = async () => {
-    if (!pendingPreviewClose) return
-    setIsSavingPendingClose(true)
-    setPendingCloseError(null)
-
-    for (const tabId of pendingPreviewClose.dirtyTabIds) {
-      const buffer = bufferStateByTabId[tabId]
-      if (!buffer?.isDirty) continue
-      const result = await saveWorkspaceBuffer(sessionId, buffer, initBuffer)
-      if (!result.ok) {
-        setPendingCloseError(result.message)
-        setIsSavingPendingClose(false)
-        return
-      }
-      try {
-        void syncLsp(sessionId, { path: buffer.path, content: buffer.currentContent, event: 'save' }).catch(() => undefined)
-      } catch {
-        // Preserve close behavior when LSP save sync is unavailable.
-      }
-    }
-
-    closePreviewTabs(sessionId, pendingPreviewClose.tabId, pendingPreviewClose.scope)
-    setPendingPreviewClose(null)
-    setPendingCloseError(null)
-    setIsSavingPendingClose(false)
-    handleWorkspaceFileSaved()
-  }
-
-  const handlePendingCloseTimeout = () => {
-    setPendingPreviewClose(null)
-    setPendingCloseError('Close prompt timed out — buffers kept dirty')
-  }
-
   const handleClosePreviewTabs = (scope: WorkspacePreviewCloseScope) => {
     if (!previewTabContextMenu) return
-    requestClosePreviewTabs(previewTabContextMenu.tabId, scope)
+    closePreviewTabs(sessionId, previewTabContextMenu.tabId, scope)
     setPreviewTabContextMenu(null)
-  }
-
-  const handleUnsupportedEditorEncoding = (path: string) => {
-    setUnsupportedEditorPaths((current) => {
-      if (current.has(path)) return current
-      const next = new Set(current)
-      next.add(path)
-      return next
-    })
   }
 
   const copyWorkspacePath = async (path: string, mode: 'relative' | 'absolute' = 'relative') => {
@@ -1869,14 +1783,9 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
       )
     }
 
-    const kindLabel = getPreviewKindLabel(t, activePreviewTab.kind)
     const state = activePreviewTab.state ?? 'loading'
     const refreshErrorMessage = activePreviewError
       || (activePreviewRefreshState ? getInlineStateMessage(t, activePreviewRefreshState) : null)
-    const activeFilePreviewMode = activePreviewTab.kind === 'file'
-      ? filePreviewModes[activePreviewTab.id]
-        ?? (isMarkdownPreview(activePreviewTab) || activePreviewTab.reveal ? 'preview' : 'edit')
-      : 'preview'
 
     return (
       <div
@@ -1899,40 +1808,6 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
             </span>
           )}
           <div className="ml-auto flex shrink-0 items-center gap-0.5">
-            {activePreviewTab.kind === 'file' && (
-              <LspStatusIndicator
-                state={toLegacyLspState(
-                  lspState,
-                  errorCountFromDiagnostics(activeLspDiagnostics?.diagnostics),
-                  sessionId,
-                )}
-                diagnostics={activeLspDiagnostics?.diagnostics ?? []}
-                onInstallClick={() => {
-                  useUIStore.getState().setPendingSettingsTab('plugins')
-                  useTabStore.getState().openTab(SETTINGS_TAB_ID, 'Settings', 'settings')
-                }}
-                onRetryClick={() => {
-                  void sessionsApi
-                    .restartWorkspaceLsp(sessionId, { path: activePreviewTab.path })
-                    .then(async () => {
-                      await loadLspState(sessionId, activePreviewTab.path)
-                      await loadLspDiagnostics(sessionId, activePreviewTab.path, true)
-                    })
-                    .catch((error) => {
-                      addToast({
-                        type: 'error',
-                        message: error instanceof Error ? error.message : 'Failed to restart language server',
-                      })
-                    })
-                }}
-                onDiagnosticOpen={(diagnostic) => {
-                  void openPreview(sessionId, diagnostic.path, 'file')
-                }}
-              />
-            )}
-            <span className="shrink-0 rounded-[5px] border border-[var(--color-border)] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]">
-              {kindLabel}
-            </span>
             <Button
               variant="ghost"
               size="base"
@@ -1966,6 +1841,16 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
               pressed={isNavigatorVisible}
               showTooltip={false}
             />
+            {previewTabs.length === 1 && (
+              <IconButton
+                icon={<X size={16} strokeWidth={1.9} aria-hidden="true" />}
+                label={`${t('workspace.closeTab')} ${activePreviewTab.title} ${getPreviewKindLabel(t, activePreviewTab.kind)}`}
+                onClick={() => closePreview(sessionId, activePreviewTab.id)}
+                size="md"
+                tone="muted"
+                showTooltip={false}
+              />
+            )}
             {!embedded && (
               <IconButton
                 icon={<X size={16} strokeWidth={1.9} aria-hidden="true" />}
@@ -2017,56 +1902,14 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
             hideSingleFileHeader
             onAddComment={(selection, note) => addDiffCommentToChat(activePreviewTab.path, selection, note)}
           />
-        ) : state === 'ok' && activePreviewTab.kind === 'file' ? (
-          <div className="flex min-h-0 flex-1 flex-col">
-            {!unsupportedEditorPaths.has(activePreviewTab.path) && (
-              <div className="flex h-9 shrink-0 items-center justify-end gap-1 border-b border-[var(--color-border)] px-3">
-                {(['preview', 'edit'] as const).map((mode) => {
-                  const activeMode = activeFilePreviewMode
-                  return (
-                    <button
-                      key={mode}
-                      type="button"
-                      data-testid={`workspace-${isMarkdownPreview(activePreviewTab) ? 'markdown' : 'file'}-${mode}-toggle`}
-                      onClick={() => setFilePreviewModes((current) => ({ ...current, [activePreviewTab.id]: mode }))}
-                      className={`rounded-[6px] px-2.5 py-1 text-[12px] transition-colors ${
-                        activeMode === mode
-                          ? 'bg-[var(--color-surface-selected)] text-[var(--color-text-primary)]'
-                          : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
-                      }`}
-                    >
-                      {mode === 'preview' ? t('workspace.preview') : t('workspace.edit')}
-                    </button>
-                  )
-                })}
-              </div>
-            )}
-            {!unsupportedEditorPaths.has(activePreviewTab.path)
-              && activeFilePreviewMode === 'edit' ? (
-                <WorkspaceEditor
-                  sessionId={sessionId}
-                  tab={activePreviewTab}
-                  onUnsupportedEncoding={handleUnsupportedEditorEncoding}
-                  onSaved={handleWorkspaceFileSaved}
-                  onClose={() => closePreviewTabs(sessionId, activePreviewTab.id, 'current')}
-                />
-              ) : isMarkdownPreview(activePreviewTab) ? (
-                <MarkdownSurface
-                  value={bufferStateByTabId[activePreviewTab.id]?.currentContent ?? activePreviewTab.content ?? ''}
-                  onAddSelection={(selection) => addSelectionToChat(activePreviewTab.path, selection)}
-                />
-              ) : (
-                <CodeSurface
-                  value={bufferStateByTabId[activePreviewTab.id]?.currentContent ?? activePreviewTab.content ?? ''}
-                  language={activePreviewTab.language ?? 'text'}
-                  reveal={activePreviewTab.reveal}
-                  onAddLineComment={(lineStart, lineEnd, note, quote) => (
-                    addLineCommentToChat(activePreviewTab.path, lineStart, lineEnd, note, quote)
-                  )}
-                  onAddSelection={(selection) => addSelectionToChat(activePreviewTab.path, selection)}
-                />
-              )}
-          </div>
+        ) : state === 'ok' && isMarkdownPreview(activePreviewTab) ? (
+          <MarkdownSurface
+            value={activePreviewTab.content ?? ''}
+            path={activePreviewTab.path}
+            sessionId={sessionId}
+            workDir={status?.workDir}
+            onAddSelection={(selection) => addSelectionToChat(activePreviewTab.path, selection)}
+          />
         ) : state === 'ok' ? (
           <CodeSurface
             value={activePreviewTab.content ?? ''}
@@ -2094,7 +1937,7 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
         <div
           role="tablist"
           aria-label={t('workspace.previewTabs')}
-          className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto bg-[var(--color-surface-container-lowest)]"
+          className="flex min-w-0 flex-1 items-end gap-3 overflow-x-auto bg-[var(--color-surface)]"
         >
           {previewTabs.length === 0 ? (
             <div className="flex items-center gap-2 px-1.5 text-[12px] text-[var(--color-text-tertiary)]">
@@ -2130,16 +1973,14 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
                     ) : (
                       <FileTypeBadge name={tab.title} subtle={!isActive} />
                     )}
-                    <span className="min-w-0 flex-1 truncate">
-                      {bufferStateByTabId[tab.id]?.isDirty ? '● ' : ''}{tab.title}
-                    </span>
+                    <span className="min-w-0 flex-1 truncate">{tab.title}</span>
                   </button>
                   <span className="shrink-0 opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100">
                     <IconButton
                       icon="close"
                       label={`${t('workspace.closeTab')} ${tab.title} ${kindLabel}`}
                       onClick={() => {
-                        requestClosePreviewTabs(tab.id, 'current')
+                        closePreview(sessionId, tab.id)
                       }}
                       size="2xs"
                       tone="muted"
@@ -2148,8 +1989,8 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
                   </span>
                 </div>
               )
-          })
-        )}
+            })
+          )}
         </div>
       </div>
 
@@ -2223,7 +2064,7 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
       >
         {hasPreviewTabs && (
           <div data-testid="workspace-preview-column" className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-[var(--color-surface)]">
-            {renderPreviewTabs()}
+            {previewTabs.length > 1 ? renderPreviewTabs() : null}
             {renderPreviewContent()}
           </div>
         )}
@@ -2320,27 +2161,6 @@ export function WorkspacePanel({ sessionId, embedded = false, forceVisible = fal
           </div>
         )}
       </div>
-
-      {pendingCloseError && (
-        <div
-          role="alert"
-          className="fixed bottom-5 left-1/2 z-[61] -translate-x-1/2 rounded-[10px] border border-[var(--color-error-border)] bg-[var(--color-error-surface)] px-3 py-2 text-[12px] text-[var(--color-error-text)] shadow-[var(--shadow-dropdown)]"
-        >
-          {pendingCloseError}
-        </div>
-      )}
-
-      <UnsavedChangesModal
-        open={pendingPreviewClose !== null}
-        filePath={pendingPreviewClose?.dirtyTabIds.length === 1
-          ? bufferStateByTabId[pendingPreviewClose.dirtyTabIds[0]!]?.path ?? 'Unsaved file'
-          : `${pendingPreviewClose?.dirtyTabIds.length ?? 0} unsaved files`}
-        isSaving={isSavingPendingClose}
-        onDiscard={handlePendingCloseDiscard}
-        onSave={handlePendingCloseSave}
-        onCancel={handlePendingCloseCancel}
-        onTimeout={handlePendingCloseTimeout}
-      />
 
       {fileContextMenu && (
         <div

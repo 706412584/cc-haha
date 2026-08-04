@@ -733,6 +733,9 @@ describe('Electron preview service', () => {
 
   it('parses only bounded preview agent message shapes', () => {
     expect(parsePreviewAgentMessage('{"v":1,"type":"ready"}')).toEqual({ v: 1, type: 'ready' })
+    expect(parsePreviewAgentMessage('{"v":1,"type":"picker-exited","reason":"cancel-current"}'))
+      .toEqual({ v: 1, type: 'picker-exited', reason: 'cancel-current' })
+    expect(parsePreviewAgentMessage('{"v":1,"type":"picker-exited","reason":"unknown"}')).toBeNull()
     expect(parsePreviewAgentMessage(JSON.stringify({
       v: 1,
       type: 'navigated',

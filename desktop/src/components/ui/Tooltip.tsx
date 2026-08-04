@@ -120,5 +120,6 @@ export function Tooltip({
         </div>,
         document.body,
       )}
-    </>  )
+    </>
+  )
 }

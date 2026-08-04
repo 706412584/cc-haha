@@ -96,7 +96,8 @@ const diffStyles = {
   diffContainer: {
     borderRadius: '0',
     fontSize: '13px',
-    lineHeight: '1.7',    fontFamily: 'var(--font-mono)',
+    lineHeight: '1.7',
+    fontFamily: 'var(--font-mono)',
   },
   line: {
     padding: '0',

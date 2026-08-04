@@ -1,8 +1,6 @@
-import { getApiUrl } from '../api/client'
 import { isInlineImagePath } from './attachmentImages'
 import { isDesktopRuntime } from './desktopRuntime'
 import { getDesktopHost } from './desktopHost'
-import { compressDataUrl } from './imageCompress'
 
 export type ComposerAttachment = {
   id: string
@@ -12,7 +10,6 @@ export type ComposerAttachment = {
   mimeType?: string
   previewUrl?: string
   data?: string
-  sourceFile?: File
   isDirectory?: boolean
   lineStart?: number
   lineEnd?: number
@@ -22,35 +19,8 @@ export type ComposerAttachment = {
   quote?: string
 }
 
-const IMAGE_PATH_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp'])
-const IMAGE_PATH_MIME_TYPES: Record<string, string> = {
-  png: 'image/png',
-  jpg: 'image/jpeg',
-  jpeg: 'image/jpeg',
-  gif: 'image/gif',
-  webp: 'image/webp',
-}
-
 function nextAttachmentId() {
   return `att-${Date.now()}-${Math.random().toString(36).slice(2)}`
-}
-
-function getPathExtension(filePath: string): string {
-  const fileName = getFileNameFromPath(filePath)
-  const dotIndex = fileName.lastIndexOf('.')
-  return dotIndex >= 0 ? fileName.slice(dotIndex + 1).toLowerCase() : ''
-}
-
-export function isPreviewableImagePath(filePath: string): boolean {
-  return IMAGE_PATH_EXTENSIONS.has(getPathExtension(filePath))
-}
-
-export function getFilesystemPreviewUrl(filePath: string): string {
-  return getApiUrl(`/api/filesystem/file?path=${encodeURIComponent(filePath)}`)
-}
-
-function getImageMimeTypeForPath(filePath: string): string | undefined {
-  return IMAGE_PATH_MIME_TYPES[getPathExtension(filePath)]
 }
 
 export function getFileNameFromPath(filePath: string): string {
@@ -59,7 +29,6 @@ export function getFileNameFromPath(filePath: string): string {
 }
 
 export function pathToComposerAttachment(filePath: string): ComposerAttachment {
-  const isImage = isPreviewableImagePath(filePath)
   return {
     id: nextAttachmentId(),
     // Path-only attachments still have to be classified, otherwise a pasted image
@@ -68,8 +37,6 @@ export function pathToComposerAttachment(filePath: string): ComposerAttachment {
     type: isInlineImagePath(filePath) ? 'image' : 'file',
     name: getFileNameFromPath(filePath),
     path: filePath,
-    mimeType: isImage ? getImageMimeTypeForPath(filePath) : undefined,
-    previewUrl: isImage ? getFilesystemPreviewUrl(filePath) : undefined,
   }
 }
 
@@ -103,10 +70,33 @@ export async function dataTransferToComposerAttachments(dataTransfer: DataTransf
   return filesToComposerAttachments(getDataTransferFiles(dataTransfer))
 }
 
+export async function selectNativeFileAttachments(): Promise<ComposerAttachment[] | null> {
+  const host = getDesktopHost()
+  if (!host.isDesktop || !host.capabilities.dialogs) return null
+
+  try {
+    const selected = await host.dialogs.open({
+      multiple: true,
+      directory: false,
+    })
+    const paths = normalizeDialogSelection(selected)
+    return pathsToComposerAttachments(paths)
+  } catch (error) {
+    console.warn('[attachments] Native file picker failed; falling back to browser file input', error)
+    return null
+  }
+}
+
 export async function filesToComposerAttachments(files: FileList | File[]): Promise<ComposerAttachment[]> {
   const entries = Array.from(files)
   const attachments = await Promise.all(entries.map(fileToComposerAttachment))
   return attachments.filter((attachment): attachment is ComposerAttachment => !!attachment)
+}
+
+function normalizeDialogSelection(selected: string | string[] | null): string[] {
+  if (!selected) return []
+  const paths = Array.isArray(selected) ? selected : [selected]
+  return paths.filter((filePath) => typeof filePath === 'string' && filePath.length > 0)
 }
 
 function getNativeFilePath(file: File): string | undefined {
@@ -117,72 +107,18 @@ function getNativeFilePath(file: File): string | undefined {
 async function fileToComposerAttachment(file: File): Promise<ComposerAttachment | null> {
   const nativePath = isDesktopRuntime() ? getNativeFilePath(file) : undefined
   if (nativePath) {
-    const attachment = pathToComposerAttachment(nativePath)
-    if (attachment.type !== 'image') return attachment
-
-    try {
-      return {
-        ...attachment,
-        // The selected File is already user-authorized. A blob URL lets Chromium
-        // decode it only when rendered instead of synchronously copying it to
-        // Base64 and re-encoding the full image on the renderer thread.
-        // Keep `data` empty: the model payload remains path-only.
-        previewUrl: URL.createObjectURL(file),
-      }
-    } catch {
-      return { ...attachment, previewUrl: undefined }
-    }
+    return pathToComposerAttachment(nativePath)
   }
 
   const isImage = file.type.startsWith('image/')
-  if (isImage && isDesktopRuntime()) {
-    let previewUrl: string | undefined
-    try {
-      previewUrl = URL.createObjectURL(file)
-    } catch {
-      previewUrl = undefined
-    }
-    return {
-      id: nextAttachmentId(),
-      name: file.name,
-      type: 'image',
-      mimeType: file.type || undefined,
-      previewUrl,
-      sourceFile: file,
-    }
-  }
-
-  const rawData = await readFileAsDataUrl(file)
-  const data = isImage ? await compressDataUrl(rawData) : rawData
+  const data = await readFileAsDataUrl(file)
   return {
     id: nextAttachmentId(),
     name: file.name,
     type: isImage ? 'image' : 'file',
-    mimeType: isImage ? 'image/jpeg' : (file.type || undefined),
+    mimeType: file.type || undefined,
     previewUrl: isImage ? data : undefined,
     data,
-  }
-}
-
-export async function composerAttachmentToPayload(
-  attachment: ComposerAttachment,
-): Promise<Omit<ComposerAttachment, 'id' | 'previewUrl' | 'sourceFile'>> {
-  const data = attachment.data ?? (
-    attachment.sourceFile ? await readFileAsDataUrl(attachment.sourceFile) : undefined
-  )
-  return {
-    type: attachment.type,
-    name: attachment.name,
-    path: attachment.path,
-    data,
-    mimeType: attachment.mimeType,
-    isDirectory: attachment.isDirectory,
-    lineStart: attachment.lineStart,
-    lineEnd: attachment.lineEnd,
-    diffSide: attachment.diffSide,
-    hunkId: attachment.hunkId,
-    note: attachment.note,
-    quote: attachment.quote,
   }
 }
 

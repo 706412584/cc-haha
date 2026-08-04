@@ -17,17 +17,12 @@
  * launcher-only 参数。
  */
 
-import {
-  parseLauncherArgs,
-  parseLspLauncherArgs,
-  resolveSidecarInvocation,
-  validateLspEntry,
-} from './launcherRouting'
+import { parseLauncherArgs, resolveSidecarInvocation } from './launcherRouting'
 
 const rawArgs = process.argv.slice(2)
 const invocation = resolveSidecarInvocation(rawArgs)
 if (!invocation.mode) {
-  console.error('claude-sidecar: missing mode argument (expected "server", "cli", "adapters" or "lsp")')
+  console.error('claude-sidecar: missing mode argument (expected "server", "cli" or "adapters")')
   process.exit(2)
 }
 const mode = invocation.mode
@@ -35,8 +30,6 @@ const restArgs = invocation.restArgs
 
 if (mode === 'adapters') {
   await runAdapters(restArgs)
-} else if (mode === 'lsp') {
-  await runLsp(restArgs)
 } else {
   const { appRoot, args } = parseLauncherArgs(restArgs, invocation.defaultAppRoot)
 
@@ -53,16 +46,9 @@ if (mode === 'adapters') {
   } else if (mode === 'cli') {
     await import('../../src/entrypoints/cli.tsx')
   } else {
-    console.error(`claude-sidecar: unknown mode "${mode}"`)
+    console.error(`claude-sidecar: unknown mode "${mode}" (expected "server", "cli" or "adapters")`)
     process.exit(2)
   }
-}
-
-async function runLsp(rawArgs: string[]): Promise<void> {
-  const { packageRoot, entry, args } = parseLspLauncherArgs(rawArgs)
-  const canonicalEntry = await validateLspEntry(entry, packageRoot)
-  process.argv = [process.argv[0]!, canonicalEntry, ...args]
-  await import(canonicalEntry)
 }
 
 async function runAdapters(rawArgs: string[]): Promise<void> {

@@ -79,7 +79,7 @@ describe('Settings section navigation', () => {
     render(<Settings />)
 
     const rail = screen.getByRole('button', { name: 'Providers' })
-      .closest('div[class*="w-[220px]"]')
+      .closest('div[class*="w-[195px]"]')
 
     // This rail is what sits directly under the Settings tab, and the tab is
     // filled with paper precisely so its bottom edge runs unbroken into the

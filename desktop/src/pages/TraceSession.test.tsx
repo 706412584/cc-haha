@@ -197,7 +197,6 @@ describe('TraceSession', () => {
 
   afterEach(() => {
     cleanup()
-    vi.useRealTimers()
     vi.clearAllMocks()
     useSessionStore.setState({ sessions: [], activeSessionId: null, isLoading: false, error: null })
     useSettingsStore.setState({ locale: 'en' })
@@ -489,17 +488,15 @@ describe('TraceSession', () => {
       .mockResolvedValueOnce({ messages: pendingMessages })
       .mockReturnValue(refreshedMessages)
 
-    await renderReady()
+    await renderReady(20)
 
-    let tree = within(screen.getByTestId('trace-tree'))
+    const tree = within(screen.getByTestId('trace-tree'))
     fireEvent.click(tree.getByText('Bash'))
     expect(within(screen.getByTestId('trace-detail')).queryByText('file.txt')).not.toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh trace' }))
     await waitFor(() => expect(sessionsApi.getMessages).toHaveBeenCalledTimes(2))
     resolveRefreshedMessages({ messages: baseMessages })
-    const refreshedDetail = within(await screen.findByTestId('trace-detail'))
-    expect(await refreshedDetail.findByText('file.txt')).toBeInTheDocument()
+    expect(await within(screen.getByTestId('trace-detail')).findByText('file.txt')).toBeInTheDocument()
   })
 
   it('applies poll updates when a call changes without changing row counts', async () => {

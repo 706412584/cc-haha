@@ -162,31 +162,4 @@ describe('StreamingIndicator', () => {
     expect(banner.textContent).toContain('retrying now')
     expect(banner.textContent).not.toContain('waiting')
   })
-
-  it('uses stream-disconnect copy and data-retry-kind for mid-stream reconnect banners', () => {
-    useChatStore.setState({
-      sessions: {
-        [ACTIVE_TAB]: makeSession({
-          chatState: 'thinking',
-          apiRetry: {
-            attempt: 1,
-            maxRetries: 4,
-            retryDelayMs: 2000,
-            errorStatus: null,
-            errorType: 'stream_disconnect',
-            errorMessage: 'OpenAI messages stream disconnected before completion',
-            receivedAt: Date.now(),
-          },
-        }),
-      },
-    })
-
-    render(<StreamingIndicator />)
-
-    const banner = screen.getByTestId('api-retry-indicator')
-    expect(banner.getAttribute('data-retry-kind')).toBe('stream_disconnect')
-    expect(banner.textContent).toContain('Stream disconnected, retrying')
-    expect(banner.textContent).toContain('stream disconnect')
-    expect(banner.textContent).toContain('retry 1/4')
-  })
 })

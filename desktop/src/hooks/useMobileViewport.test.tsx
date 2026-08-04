@@ -50,14 +50,9 @@ function createMatchMediaController(initialMatches = false, legacy = false) {
 
 describe('useMobileViewport', () => {
   const originalMatchMedia = window.matchMedia
-  const originalUserAgent = navigator.userAgent
 
   afterEach(() => {
     cleanup()
-    Object.defineProperty(navigator, 'userAgent', {
-      value: originalUserAgent,
-      configurable: true,
-    })
     if (originalMatchMedia) {
       window.matchMedia = originalMatchMedia
     } else {
@@ -96,35 +91,6 @@ describe('useMobileViewport', () => {
 
   it('reads the initial media query before first paint', () => {
     const controller = createMatchMediaController(true)
-    window.matchMedia = controller.matchMedia as typeof window.matchMedia
-
-    render(<Probe />)
-
-    expect(screen.getByTestId('viewport-state')).toHaveTextContent('mobile')
-  })
-
-  it('treats Android browser user agents as mobile even with a wide layout viewport', () => {
-    Object.defineProperty(navigator, 'userAgent', {
-      value: 'Mozilla/5.0 (Linux; Android 10; SKW-A0) AppleWebKit/537.36 Chrome/81.0.4044.138 Mobile Safari/537.36',
-      configurable: true,
-    })
-    const controller = createMatchMediaController(false)
-    window.matchMedia = controller.matchMedia as typeof window.matchMedia
-
-    render(<Probe />)
-
-    expect(screen.getByTestId('viewport-state')).toHaveTextContent('mobile')
-
-    act(() => {
-      controller.emit(false)
-    })
-
-    expect(screen.getByTestId('viewport-state')).toHaveTextContent('mobile')
-  })
-
-  it('allows Android validation URLs to force the mobile viewport', () => {
-    window.history.replaceState(null, '', '/?forceMobile=1')
-    const controller = createMatchMediaController(false)
     window.matchMedia = controller.matchMedia as typeof window.matchMedia
 
     render(<Probe />)

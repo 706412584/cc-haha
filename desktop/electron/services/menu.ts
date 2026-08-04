@@ -3,6 +3,20 @@ import { ELECTRON_EVENT_CHANNELS } from '../ipc/channels'
 import { hideWindowSafely, toggleWindowFullScreen } from './windows'
 
 export type NativeMenuDestination = 'about' | 'settings'
+
+type RendererContextMenuParams = {
+  isEditable: boolean
+  selectionText: string
+  editFlags: {
+    canUndo: boolean
+    canRedo: boolean
+    canCut: boolean
+    canCopy: boolean
+    canPaste: boolean
+    canSelectAll: boolean
+  }
+}
+
 type ApplicationMenuActions = {
   hide?: () => void
   close?: () => void
@@ -76,6 +90,38 @@ export function buildApplicationMenuTemplate(
   ]
 }
 
+export function buildRendererContextMenuTemplate(
+  params: RendererContextMenuParams,
+): MenuItemConstructorOptions[] {
+  if (params.isEditable) {
+    return [
+      { role: 'undo', enabled: params.editFlags.canUndo },
+      { role: 'redo', enabled: params.editFlags.canRedo },
+      { type: 'separator' },
+      { role: 'cut', enabled: params.editFlags.canCut },
+      { role: 'copy', enabled: params.editFlags.canCopy },
+      { role: 'paste', enabled: params.editFlags.canPaste },
+      { type: 'separator' },
+      { role: 'selectAll', enabled: params.editFlags.canSelectAll },
+    ]
+  }
+
+  if (params.selectionText.length > 0) {
+    return [{ role: 'copy', enabled: params.editFlags.canCopy }]
+  }
+
+  return []
+}
+
+export async function installRendererContextMenu(window: BrowserWindow) {
+  const { Menu } = await import('electron')
+  window.webContents.on('context-menu', (_event, params) => {
+    const template = buildRendererContextMenuTemplate(params)
+    if (template.length === 0 || window.isDestroyed()) return
+    Menu.buildFromTemplate(template).popup({ window })
+  })
+}
+
 export async function installApplicationMenu(
   app: App,
   getMainWindow: () => BrowserWindow | null,
@@ -87,7 +133,7 @@ export async function installApplicationMenu(
     return
   }
 
-  const template = buildApplicationMenuTemplate(app.name || 'Code Council', destination => {
+  const template = buildApplicationMenuTemplate(app.name || 'Claude Code Haha', destination => {
     getMainWindow()?.webContents.send(ELECTRON_EVENT_CHANNELS.nativeMenuNavigate, destination)
   }, platform, {
     hide: () => {

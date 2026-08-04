@@ -71,7 +71,7 @@ async function closeVite(server: ViteDevServer) {
 }
 
 async function main() {
-  const desktopRoot = fileURLToPath(new URL('..', import.meta.url))
+  const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
   const childEnv = createElectronDevEnv()
   const rendererUrl = childEnv.ELECTRON_RENDERER_URL
   process.env.NO_PROXY = childEnv.NO_PROXY

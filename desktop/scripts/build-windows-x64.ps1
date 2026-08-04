@@ -127,10 +127,6 @@ try {
   }
 
   Write-Step 'Building renderer and Electron main/preload bundles...'
-  & bun run build:plugin-seed
-  if ($LASTEXITCODE -ne 0) {
-    throw "[build-windows-x64] build:plugin-seed failed (exit $LASTEXITCODE)"
-  }
   & bun run build
   if ($LASTEXITCODE -ne 0) {
     throw "[build-windows-x64] renderer build failed (exit $LASTEXITCODE)"
@@ -153,8 +149,9 @@ try {
   }
 
   $args = @('electron-builder', '--win', 'nsis', '--x64', '--publish', 'never')
-  if ($BuilderArgs) {
-    $args += $BuilderArgs
+  $remainingArgs = @($BuilderArgs)
+  if ($remainingArgs.Count -gt 0) {
+    $args += $remainingArgs
   }
 
   Write-Step 'Packaging Electron app...'

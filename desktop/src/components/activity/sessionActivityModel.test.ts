@@ -39,6 +39,20 @@ const notification = (overrides: Partial<AgentTaskNotification>): AgentTaskNotif
   ...overrides,
 })
 
+const successfulTaskUpdateResult = (
+  toolUseId: string,
+  taskId: string,
+  timestamp: number,
+  updatedFields = 'status',
+): Extract<UIMessage, { type: 'tool_result' }> => ({
+  id: `${toolUseId}-result`,
+  type: 'tool_result',
+  toolUseId,
+  content: `Updated task #${taskId} ${updatedFields}`,
+  isError: false,
+  timestamp,
+})
+
 const agentMessages: UIMessage[] = [
   {
     id: 'agent-tool-1',
@@ -134,134 +148,6 @@ describe('buildSessionActivityModel', () => {
     expect(hasVisibleSessionActivity(model)).toBe(true)
     expect(getVisibleActivitySections(model).map((section) => section.id)).toEqual(['subagents'])
     expect(model.badgeCount).toBe(0)
-  })
-
-  it('preserves task orchestration fields and named Agent identity for exact ownership matching', () => {
-    const model = buildSessionActivityModel({
-      sessionId: 'session-1',
-      messages: [{
-        id: 'agent-tool',
-        type: 'tool_use',
-        toolName: 'Agent',
-        toolUseId: 'agent-tool',
-        input: { name: 'workspace-agent', description: 'Implement workspace controls' },
-        timestamp: 1000,
-      }],
-      tasks: [task({
-        id: 'owned-task',
-        owner: 'workspace-agent',
-        blocks: ['release-task'],
-        blockedBy: ['schema-task'],
-        metadata: {
-          orchestration: {
-            schemaVersion: 1,
-            fileScope: ['desktop/src/components/agentOffice/**'],
-            wave: 2,
-            execution: 'background-agent',
-            verification: 'Run Agent Office tests',
-          },
-        },
-      })],
-      completedAndDismissed: false,
-      backgroundTasks: [],
-      agentNotifications: [],
-    })
-
-    expect(model.sections.tasks.rows[0]).toMatchObject({
-      owner: 'workspace-agent',
-      blocks: ['release-task'],
-      blockedBy: ['schema-task'],
-      orchestration: {
-        schemaVersion: 1,
-        wave: 2,
-        execution: 'background-agent',
-      },
-    })
-    expect(model.sections.subagents.rows[0]).toMatchObject({
-      agentName: 'workspace-agent',
-      label: 'Implement workspace controls',
-      ownedTask: {
-        id: 'owned-task',
-        label: 'Write tests',
-        status: 'pending',
-      },
-    })
-  })
-
-  it('keeps live owner, dependencies, and orchestration metadata when transcript task rows exist', () => {
-    const model = buildSessionActivityModel({
-      sessionId: 'session-1',
-      messages: [
-        {
-          id: 'create-task',
-          type: 'tool_use',
-          toolName: 'TaskCreate',
-          toolUseId: 'create-task',
-          input: { subject: 'Owned task', description: 'Transcript description' },
-          timestamp: 1000,
-        },
-        {
-          id: 'create-result',
-          type: 'tool_result',
-          toolUseId: 'create-task',
-          content: 'Task #7 created successfully: Owned task',
-          isError: false,
-          timestamp: 1100,
-        },
-      ],
-      tasks: [task({
-        id: '7',
-        subject: 'Owned task',
-        owner: 'named-agent',
-        blocks: ['8'],
-        blockedBy: ['6'],
-        metadata: {
-          orchestration: {
-            schemaVersion: 1,
-            fileScope: ['desktop/src/pages/AgentOffice.tsx'],
-            wave: 2,
-            execution: 'background-agent',
-            verification: 'Run Office tests',
-          },
-        },
-      })],
-      completedAndDismissed: false,
-      backgroundTasks: [],
-      agentNotifications: [],
-    })
-
-    expect(model.sections.tasks.rows[0]).toMatchObject({
-      taskId: '7',
-      owner: 'named-agent',
-      blocks: ['8'],
-      blockedBy: ['6'],
-      orchestration: { wave: 2, execution: 'background-agent' },
-    })
-  })
-
-  it('projects queued task requests and marks queues stale when their tasks are gone or completed', () => {
-    const model = buildSessionActivityModel({
-      sessionId: 'session-1',
-      tasks: [task({ id: '1', status: 'completed' })],
-      completedAndDismissed: false,
-      backgroundTasks: [],
-      agentNotifications: [],
-      queuedMessages: [{
-        id: 'queue-1',
-        content: 'Process tasks\nTask IDs: 1, 2',
-        displayContent: '处理两个任务',
-        createdAt: 1000,
-      }],
-    })
-
-    expect(model.sections.queue.rows[0]).toMatchObject({
-      id: 'queue-1',
-      label: '处理两个任务',
-      status: 'pending',
-      queuedMessageId: 'queue-1',
-      relatedTaskIds: ['1', '2'],
-      stale: true,
-    })
   })
 
   it('counts running and failed rows as visible while preserving badge attention semantics', () => {
@@ -504,109 +390,6 @@ describe('buildSessionActivityModel', () => {
     expect(model.badgeCount).toBe(1)
   })
 
-  it('captures the latest three child tool calls for a running SubAgent', () => {
-    const model = buildSessionActivityModel({
-      sessionId: 'session-1',
-      messages: [
-        {
-          id: 'agent-live', type: 'tool_use', toolName: 'Agent', toolUseId: 'agent-live',
-          input: { description: '实时审查' }, timestamp: 100,
-        },
-        {
-          id: 'read-1', type: 'tool_use', toolName: 'Read', toolUseId: 'read-1',
-          parentToolUseId: 'agent-live', input: { file_path: '/tmp/a.ts' }, timestamp: 110,
-        },
-        {
-          id: 'edit-1', type: 'tool_use', toolName: 'Edit', toolUseId: 'edit-1',
-          parentToolUseId: 'agent-live', input: { file_path: '/tmp/a.ts' }, timestamp: 120,
-        },
-        {
-          id: 'grep-1', type: 'tool_use', toolName: 'Grep', toolUseId: 'grep-1',
-          parentToolUseId: 'agent-live', input: { pattern: 'TODO' }, timestamp: 130,
-        },
-        {
-          id: 'bash-1', type: 'tool_use', toolName: 'Bash', toolUseId: 'bash-1',
-          parentToolUseId: 'agent-live', input: { description: 'Run focused tests' }, timestamp: 140,
-        },
-      ],
-      tasks: [],
-      completedAndDismissed: false,
-      backgroundTasks: [],
-      agentNotifications: [],
-    })
-
-    expect(model.sections.subagents.rows).toEqual([
-      expect.objectContaining({
-        id: 'agent-live',
-        status: 'running',
-        updatedAt: 140,
-        recentEvents: [
-          { id: 'edit-1', toolName: 'Edit', description: '/tmp/a.ts', timestamp: 120 },
-          { id: 'grep-1', toolName: 'Grep', description: 'TODO', timestamp: 130 },
-          { id: 'bash-1', toolName: 'Bash', description: 'Run focused tests', timestamp: 140 },
-        ],
-      }),
-    ])
-
-    const merged = buildSessionActivityModel({
-      sessionId: 'session-1',
-      messages: [
-        {
-          id: 'agent-live', type: 'tool_use', toolName: 'Agent', toolUseId: 'agent-live',
-          input: { description: '实时审查' }, timestamp: 100,
-        },
-        {
-          id: 'bash-1', type: 'tool_use', toolName: 'Bash', toolUseId: 'bash-1',
-          parentToolUseId: 'agent-live', input: { description: 'Run focused tests' }, timestamp: 140,
-        },
-      ],
-      tasks: [],
-      completedAndDismissed: false,
-      backgroundTasks: [{
-        taskId: 'task-live', toolUseId: 'agent-live', status: 'running', description: '实时审查',
-        taskType: 'local_agent', startedAt: 90, updatedAt: 120,
-      }],
-      agentNotifications: [],
-    })
-
-    expect(merged.sections.subagents.rows[0]).toEqual(expect.objectContaining({
-      updatedAt: 140,
-      recentEvents: [
-        { id: 'bash-1', toolName: 'Bash', description: 'Run focused tests', timestamp: 140 },
-      ],
-    }))
-
-    const outOfOrder = buildSessionActivityModel({
-      sessionId: 'session-1',
-      messages: [
-        {
-          id: 'agent-live', type: 'tool_use', toolName: 'Agent', toolUseId: 'agent-live',
-          input: { description: '实时审查' }, timestamp: 100,
-        },
-        {
-          id: 'newer', type: 'tool_use', toolName: 'Bash', toolUseId: 'newer',
-          parentToolUseId: 'agent-live', input: { description: 'newer' }, timestamp: 250,
-        },
-        {
-          id: 'older', type: 'tool_use', toolName: 'Grep', toolUseId: 'older',
-          parentToolUseId: 'agent-live', input: { pattern: 'older' }, timestamp: 150,
-        },
-      ],
-      tasks: [],
-      completedAndDismissed: false,
-      backgroundTasks: [],
-      agentNotifications: [],
-    })
-
-    expect(outOfOrder.sections.subagents.rows[0]).toEqual(expect.objectContaining({
-      updatedAt: 250,
-      recentEvents: [
-        { id: 'older', toolName: 'Grep', description: 'older', timestamp: 150 },
-        { id: 'newer', toolName: 'Bash', description: 'newer', timestamp: 250 },
-      ],
-    }))
-  })
-
   it('restores task rows from the latest TodoWrite message', () => {
     const model = buildSessionActivityModel({
       sessionId: 'session-1',
@@ -740,14 +523,16 @@ describe('buildSessionActivityModel', () => {
           input: { taskId: '1', status: 'completed' },
           timestamp: 1004,
         },
+        successfulTaskUpdateResult('task-update-call-1', '1', 1005),
         {
           id: 'task-update-2',
           type: 'tool_use',
           toolName: 'TaskUpdate',
           toolUseId: 'task-update-call-2',
           input: { taskId: '2', status: 'in_progress', activeForm: '正在补充边界测试' },
-          timestamp: 1005,
+          timestamp: 1006,
         },
+        successfulTaskUpdateResult('task-update-call-2', '2', 1007),
       ],
       tasks: [],
       completedAndDismissed: false,
@@ -770,6 +555,426 @@ describe('buildSessionActivityModel', () => {
       }),
     ])
     expect(model.badgeCount).toBe(1)
+  })
+
+  it('does not let a stale live task list regress a successful TaskUpdate', () => {
+    const model = buildSessionActivityModel({
+      sessionId: 'session-1',
+      messages: [
+        {
+          id: 'task-create-1',
+          type: 'tool_use',
+          toolName: 'TaskCreate',
+          toolUseId: 'task-create-call-1',
+          input: { subject: '完成当前任务' },
+          timestamp: 1000,
+        },
+        {
+          id: 'task-create-result-1',
+          type: 'tool_result',
+          toolUseId: 'task-create-call-1',
+          content: 'Task #1 created successfully: 完成当前任务',
+          isError: false,
+          timestamp: 1001,
+        },
+        {
+          id: 'task-update-1',
+          type: 'tool_use',
+          toolName: 'TaskUpdate',
+          toolUseId: 'task-update-call-1',
+          input: { taskId: '1', status: 'completed' },
+          timestamp: 1002,
+        },
+        successfulTaskUpdateResult('task-update-call-1', '1', 1003),
+      ],
+      tasks: [task({ id: '1', subject: '完成当前任务', status: 'in_progress' })],
+      completedAndDismissed: false,
+      isForegroundTurnActive: true,
+      backgroundTasks: [],
+      agentNotifications: [],
+    })
+
+    expect(model.sections.tasks.rows).toEqual([
+      expect.objectContaining({ id: '1', status: 'completed' }),
+    ])
+    expect(model.badgeCount).toBe(0)
+  })
+
+  it('lets confirmed updates reopen tasks while live state advances untouched tasks', () => {
+    const model = buildSessionActivityModel({
+      sessionId: 'session-1',
+      messages: [
+        {
+          id: 'task-create-1',
+          type: 'tool_use',
+          toolName: 'TaskCreate',
+          toolUseId: 'task-create-call-1',
+          input: { subject: '重新执行验收' },
+          timestamp: 1000,
+        },
+        {
+          id: 'task-create-result-1',
+          type: 'tool_result',
+          toolUseId: 'task-create-call-1',
+          content: 'Task #1 created successfully: 重新执行验收',
+          isError: false,
+          timestamp: 1001,
+        },
+        {
+          id: 'task-create-2',
+          type: 'tool_use',
+          toolName: 'TaskCreate',
+          toolUseId: 'task-create-call-2',
+          input: { subject: '等待后台完成' },
+          timestamp: 1002,
+        },
+        {
+          id: 'task-create-result-2',
+          type: 'tool_result',
+          toolUseId: 'task-create-call-2',
+          content: 'Task #2 created successfully: 等待后台完成',
+          isError: false,
+          timestamp: 1003,
+        },
+        {
+          id: 'task-update-1',
+          type: 'tool_use',
+          toolName: 'TaskUpdate',
+          toolUseId: 'task-update-call-1',
+          input: { taskId: '1', status: 'in_progress' },
+          timestamp: 1004,
+        },
+        successfulTaskUpdateResult('task-update-call-1', '1', 1005),
+      ],
+      tasks: [
+        task({ id: '1', subject: '重新执行验收', status: 'completed' }),
+        task({ id: '2', subject: '等待后台完成', status: 'completed' }),
+      ],
+      completedAndDismissed: false,
+      isForegroundTurnActive: true,
+      backgroundTasks: [],
+      agentNotifications: [],
+    })
+
+    expect(model.sections.tasks.rows).toEqual([
+      expect.objectContaining({ id: '1', status: 'in_progress' }),
+      expect.objectContaining({ id: '2', status: 'completed' }),
+    ])
+    expect(model.badgeCount).toBe(1)
+  })
+
+  it('keeps parent-linked SubAgent tasks out of the session task section', () => {
+    const model = buildSessionActivityModel({
+      sessionId: 'session-1',
+      messages: [
+        {
+          id: 'root-task-create',
+          type: 'tool_use',
+          toolName: 'TaskCreate',
+          toolUseId: 'root-task-create-call',
+          input: { subject: '审查最近七天全部 Git 提交' },
+          timestamp: 1000,
+        },
+        {
+          id: 'root-task-create-result',
+          type: 'tool_result',
+          toolUseId: 'root-task-create-call',
+          content: 'Task #1 created successfully: 审查最近七天全部 Git 提交',
+          isError: false,
+          timestamp: 1001,
+        },
+        {
+          id: 'agent-tool',
+          type: 'tool_use',
+          toolName: 'Agent',
+          toolUseId: 'agent-tool-call',
+          input: { description: '审查提交潜在回归' },
+          timestamp: 1002,
+        },
+        {
+          id: 'child-task-create',
+          type: 'tool_use',
+          toolName: 'TaskCreate',
+          toolUseId: 'agent-tool-call/child-task-create-call',
+          originalToolUseId: 'child-task-create-call',
+          input: { subject: '审查最近七天全部提交' },
+          parentToolUseId: 'agent-tool-call',
+          timestamp: 1003,
+        },
+        {
+          id: 'child-task-create-result',
+          type: 'tool_result',
+          toolUseId: 'agent-tool-call/child-task-create-call',
+          originalToolUseId: 'child-task-create-call',
+          content: 'Task #2 created successfully: 审查最近七天全部提交',
+          isError: false,
+          parentToolUseId: 'agent-tool-call',
+          timestamp: 1004,
+        },
+      ],
+      tasks: [
+        task({ id: '1', subject: '审查最近七天全部 Git 提交' }),
+        task({ id: '2', subject: '审查最近七天全部提交' }),
+      ],
+      completedAndDismissed: false,
+      backgroundTasks: [],
+      agentNotifications: [],
+    })
+
+    expect(model.sections.tasks.rows).toEqual([
+      expect.objectContaining({
+        id: '1',
+        label: '审查最近七天全部 Git 提交',
+      }),
+    ])
+    expect(model.badgeCount).toBe(2)
+  })
+
+  it('does not restore parent-linked SubAgent TodoWrite rows as session tasks', () => {
+    const model = buildSessionActivityModel({
+      sessionId: 'session-1',
+      messages: [{
+        id: 'child-todo',
+        type: 'tool_use',
+        toolName: 'TodoWrite',
+        toolUseId: 'agent-tool-call/child-todo-call',
+        originalToolUseId: 'child-todo-call',
+        input: {
+          todos: [{ content: '子代理内部检查项', status: 'in_progress' }],
+        },
+        parentToolUseId: 'agent-tool-call',
+        timestamp: 1000,
+      }],
+      tasks: [],
+      completedAndDismissed: false,
+      backgroundTasks: [],
+      agentNotifications: [],
+    })
+
+    expect(model.sections.tasks.rows).toEqual([])
+    expect(model.badgeCount).toBe(0)
+  })
+
+  it('keeps the last successful status when a later TaskUpdate fails', () => {
+    const model = buildSessionActivityModel({
+      sessionId: 'session-1',
+      messages: [
+        {
+          id: 'task-create-1',
+          type: 'tool_use',
+          toolName: 'TaskCreate',
+          toolUseId: 'task-create-call-1',
+          input: { subject: '补充活动面板回归测试' },
+          timestamp: 1000,
+        },
+        {
+          id: 'task-create-result-1',
+          type: 'tool_result',
+          toolUseId: 'task-create-call-1',
+          content: 'Task #2 created successfully: 补充活动面板回归测试',
+          isError: false,
+          timestamp: 1001,
+        },
+        {
+          id: 'task-update-completed',
+          type: 'tool_use',
+          toolName: 'TaskUpdate',
+          toolUseId: 'task-update-completed-call',
+          input: { taskId: '2', status: 'completed' },
+          timestamp: 1002,
+        },
+        {
+          id: 'task-update-completed-result',
+          type: 'tool_result',
+          toolUseId: 'task-update-completed-call',
+          content: 'Updated task #2 status\n\nTask completed. Call TaskList now to find your next available task.',
+          isError: false,
+          timestamp: 1003,
+        },
+        {
+          id: 'task-update-reopen',
+          type: 'tool_use',
+          toolName: 'TaskUpdate',
+          toolUseId: 'task-update-reopen-call',
+          input: { taskId: '2', status: 'in_progress', activeForm: '正在重新检查活动面板' },
+          timestamp: 1004,
+        },
+        {
+          id: 'task-update-reopen-result',
+          type: 'tool_result',
+          toolUseId: 'task-update-reopen-call',
+          content: 'Task not found',
+          // TaskUpdate deliberately reports this as a non-error so sibling
+          // tool calls are not cancelled.
+          isError: false,
+          timestamp: 1005,
+        },
+      ],
+      tasks: [],
+      completedAndDismissed: false,
+      backgroundTasks: [],
+      agentNotifications: [],
+    })
+
+    expect(model.sections.tasks.rows).toEqual([
+      expect.objectContaining({
+        id: '2',
+        label: '补充活动面板回归测试',
+        status: 'completed',
+      }),
+    ])
+    expect(model.badgeCount).toBe(0)
+  })
+
+  it('does not apply a stopped, unconfirmed TaskUpdate optimistically', () => {
+    const model = buildSessionActivityModel({
+      sessionId: 'session-1',
+      messages: [
+        {
+          id: 'task-create-1',
+          type: 'tool_use',
+          toolName: 'TaskCreate',
+          toolUseId: 'task-create-call-1',
+          input: { subject: '核对最终状态' },
+          timestamp: 1000,
+        },
+        {
+          id: 'task-create-result-1',
+          type: 'tool_result',
+          toolUseId: 'task-create-call-1',
+          content: 'Task #1 created successfully: 核对最终状态',
+          isError: false,
+          timestamp: 1001,
+        },
+        {
+          id: 'task-update-completed',
+          type: 'tool_use',
+          toolName: 'TaskUpdate',
+          toolUseId: 'task-update-completed-call',
+          input: { taskId: '1', status: 'completed' },
+          timestamp: 1002,
+        },
+        successfulTaskUpdateResult('task-update-completed-call', '1', 1003),
+        {
+          id: 'task-update-reopen',
+          type: 'tool_use',
+          toolName: 'TaskUpdate',
+          toolUseId: 'task-update-reopen-call',
+          input: { taskId: '1', status: 'in_progress' },
+          timestamp: 1004,
+          status: 'stopped',
+        },
+      ],
+      tasks: [],
+      completedAndDismissed: false,
+      backgroundTasks: [],
+      agentNotifications: [],
+    })
+
+    expect(model.sections.tasks.rows).toEqual([
+      expect.objectContaining({ id: '1', status: 'completed' }),
+    ])
+    expect(model.badgeCount).toBe(0)
+  })
+
+  it('matches a TaskUpdate result that arrives after an optimistic queued message', () => {
+    const model = buildSessionActivityModel({
+      sessionId: 'session-1',
+      messages: [
+        {
+          id: 'task-create-1',
+          type: 'tool_use',
+          toolName: 'TaskCreate',
+          toolUseId: 'task-create-call-1',
+          input: { subject: '完成当前任务' },
+          timestamp: 1000,
+        },
+        {
+          id: 'task-create-result-1',
+          type: 'tool_result',
+          toolUseId: 'task-create-call-1',
+          content: 'Task #1 created successfully: 完成当前任务',
+          isError: false,
+          timestamp: 1001,
+        },
+        {
+          id: 'task-update-completed',
+          type: 'tool_use',
+          toolName: 'TaskUpdate',
+          toolUseId: 'task-update-completed-call',
+          input: { taskId: '1', status: 'completed' },
+          timestamp: 1002,
+        },
+        {
+          id: 'queued-user-message',
+          type: 'user_text',
+          content: '完成后继续检查下一项',
+          timestamp: 1003,
+          optimisticQueued: true,
+        },
+        successfulTaskUpdateResult('task-update-completed-call', '1', 1004),
+      ],
+      tasks: [],
+      completedAndDismissed: false,
+      backgroundTasks: [],
+      agentNotifications: [],
+    })
+
+    expect(model.sections.tasks.rows).toEqual([
+      expect.objectContaining({ id: '1', label: '完成当前任务', status: 'completed' }),
+    ])
+    expect(model.badgeCount).toBe(0)
+  })
+
+  it('preserves status when a successful TaskUpdate changes another field', () => {
+    const model = buildSessionActivityModel({
+      sessionId: 'session-1',
+      messages: [
+        {
+          id: 'task-create-1',
+          type: 'tool_use',
+          toolName: 'TaskCreate',
+          toolUseId: 'task-create-call-1',
+          input: { subject: '保留完成状态' },
+          timestamp: 1000,
+        },
+        {
+          id: 'task-create-result-1',
+          type: 'tool_result',
+          toolUseId: 'task-create-call-1',
+          content: 'Task #1 created successfully: 保留完成状态',
+          isError: false,
+          timestamp: 1001,
+        },
+        {
+          id: 'task-update-completed',
+          type: 'tool_use',
+          toolName: 'TaskUpdate',
+          toolUseId: 'task-update-completed-call',
+          input: { taskId: '1', status: 'completed' },
+          timestamp: 1002,
+        },
+        successfulTaskUpdateResult('task-update-completed-call', '1', 1003),
+        {
+          id: 'task-update-owner',
+          type: 'tool_use',
+          toolName: 'TaskUpdate',
+          toolUseId: 'task-update-owner-call',
+          input: { taskId: '1', owner: 'reviewer' },
+          timestamp: 1004,
+        },
+        successfulTaskUpdateResult('task-update-owner-call', '1', 1005, 'owner'),
+      ],
+      tasks: [],
+      completedAndDismissed: false,
+      backgroundTasks: [],
+      agentNotifications: [],
+    })
+
+    expect(model.sections.tasks.rows).toEqual([
+      expect.objectContaining({ id: '1', status: 'completed' }),
+    ])
+    expect(model.badgeCount).toBe(0)
   })
 
   it('drops tasks deleted by TaskUpdate instead of showing them as pending', () => {
@@ -816,14 +1021,16 @@ describe('buildSessionActivityModel', () => {
           input: { taskId: '2', status: 'completed' },
           timestamp: 1004,
         },
+        successfulTaskUpdateResult('task-update-call-1', '2', 1005),
         {
           id: 'task-update-2',
           type: 'tool_use',
           toolName: 'TaskUpdate',
           toolUseId: 'task-update-call-2',
           input: { taskId: '1', status: 'deleted' },
-          timestamp: 1005,
+          timestamp: 1006,
         },
+        successfulTaskUpdateResult('task-update-call-2', '1', 1007, 'deleted'),
       ],
       tasks: [task({ id: '2', subject: '给 summarize 加空数组保护', status: 'completed' })],
       completedAndDismissed: false,
@@ -835,6 +1042,55 @@ describe('buildSessionActivityModel', () => {
       expect.objectContaining({ id: '2', label: '给 summarize 加空数组保护', status: 'completed' }),
     ])
     expect(model.badgeCount).toBe(0)
+  })
+
+  it('keeps a task when its TaskUpdate deletion fails', () => {
+    const model = buildSessionActivityModel({
+      sessionId: 'session-1',
+      messages: [
+        {
+          id: 'task-create-1',
+          type: 'tool_use',
+          toolName: 'TaskCreate',
+          toolUseId: 'task-create-call-1',
+          input: { subject: '保留仍然存在的任务' },
+          timestamp: 1000,
+        },
+        {
+          id: 'task-create-result-1',
+          type: 'tool_result',
+          toolUseId: 'task-create-call-1',
+          content: 'Task #1 created successfully: 保留仍然存在的任务',
+          isError: false,
+          timestamp: 1001,
+        },
+        {
+          id: 'task-update-delete',
+          type: 'tool_use',
+          toolName: 'TaskUpdate',
+          toolUseId: 'task-update-delete-call',
+          input: { taskId: '1', status: 'deleted' },
+          timestamp: 1002,
+        },
+        {
+          id: 'task-update-delete-result',
+          type: 'tool_result',
+          toolUseId: 'task-update-delete-call',
+          content: 'Failed to delete task',
+          isError: false,
+          timestamp: 1003,
+        },
+      ],
+      tasks: [],
+      completedAndDismissed: false,
+      backgroundTasks: [],
+      agentNotifications: [],
+    })
+
+    expect(model.sections.tasks.rows).toEqual([
+      expect.objectContaining({ id: '1', label: '保留仍然存在的任务', status: 'pending' }),
+    ])
+    expect(model.badgeCount).toBe(1)
   })
 
   it('does not invent a row for a TaskUpdate deletion without a matching TaskCreate', () => {
@@ -855,6 +1111,7 @@ describe('buildSessionActivityModel', () => {
           input: { taskId: '7', status: 'deleted' },
           timestamp: 1001,
         },
+        successfulTaskUpdateResult('task-update-call-1', '7', 1002, 'deleted'),
       ],
       tasks: [],
       completedAndDismissed: false,
@@ -911,6 +1168,7 @@ describe('buildSessionActivityModel', () => {
           input: { taskId: '1', status: 'completed' },
           timestamp: 1005,
         },
+        successfulTaskUpdateResult('task-update-call-1', '1', 1006),
         { id: 'user-2', type: 'user_text', content: 'README 不写了，继续做活动面板', timestamp: 2000 },
         {
           id: 'task-update-2',
@@ -920,13 +1178,14 @@ describe('buildSessionActivityModel', () => {
           input: { taskId: '2', status: 'deleted' },
           timestamp: 2001,
         },
+        successfulTaskUpdateResult('task-update-call-2', '2', 2002, 'deleted'),
         {
           id: 'task-create-3',
           type: 'tool_use',
           toolName: 'TaskCreate',
           toolUseId: 'task-create-call-3',
           input: { subject: '实现活动面板' },
-          timestamp: 2002,
+          timestamp: 2003,
         },
         {
           id: 'task-create-result-3',
@@ -934,7 +1193,7 @@ describe('buildSessionActivityModel', () => {
           toolUseId: 'task-create-call-3',
           content: 'Task #3 created successfully: 实现活动面板',
           isError: false,
-          timestamp: 2003,
+          timestamp: 2004,
         },
       ],
       tasks: [],
@@ -966,13 +1225,14 @@ describe('buildSessionActivityModel', () => {
           input: { taskId: '1', status: 'deleted' },
           timestamp: 1000,
         },
+        successfulTaskUpdateResult('task-update-call-1', '1', 1001, 'deleted'),
         {
           id: 'task-create-1',
           type: 'tool_use',
           toolName: 'TaskCreate',
           toolUseId: 'task-create-call-1',
           input: { subject: '补充边界测试' },
-          timestamp: 1001,
+          timestamp: 1002,
         },
         {
           id: 'task-create-result-1',
@@ -980,7 +1240,7 @@ describe('buildSessionActivityModel', () => {
           toolUseId: 'task-create-call-1',
           content: 'Task #2 created successfully: 补充边界测试',
           isError: false,
-          timestamp: 1002,
+          timestamp: 1003,
         },
       ],
       // tool_result 后才异步 refreshTasks，这一刻的列表还没剔掉已删任务
@@ -997,6 +1257,88 @@ describe('buildSessionActivityModel', () => {
       expect.objectContaining({ id: '2', label: '补充边界测试', status: 'pending' }),
     ])
     expect(model.badgeCount).toBe(1)
+  })
+
+  it('keeps TodoWrite rows authoritative over a later failed TaskUpdate', () => {
+    const model = buildSessionActivityModel({
+      sessionId: 'session-1',
+      messages: [
+        {
+          id: 'todo-1',
+          type: 'tool_use',
+          toolName: 'TodoWrite',
+          toolUseId: 'todo-call-1',
+          input: {
+            todos: [{ content: '继续验证桌面活动面板', status: 'in_progress' }],
+          },
+          timestamp: 1000,
+        },
+        {
+          id: 'task-update-1',
+          type: 'tool_use',
+          toolName: 'TaskUpdate',
+          toolUseId: 'task-update-call-1',
+          input: { taskId: '1', status: 'completed' },
+          timestamp: 1001,
+        },
+        {
+          id: 'task-update-result-1',
+          type: 'tool_result',
+          toolUseId: 'task-update-call-1',
+          content: 'Task not found',
+          isError: false,
+          timestamp: 1002,
+        },
+      ],
+      tasks: [],
+      completedAndDismissed: false,
+      backgroundTasks: [],
+      agentNotifications: [],
+    })
+
+    expect(model.sections.tasks.rows).toEqual([
+      expect.objectContaining({
+        label: '继续验证桌面活动面板',
+        status: 'in_progress',
+      }),
+    ])
+    expect(model.badgeCount).toBe(1)
+  })
+
+  it('uses message order when TodoWrite and a successful TaskUpdate share a timestamp', () => {
+    const model = buildSessionActivityModel({
+      sessionId: 'session-1',
+      messages: [
+        {
+          id: 'todo-1',
+          type: 'tool_use',
+          toolName: 'TodoWrite',
+          toolUseId: 'todo-call-1',
+          input: {
+            todos: [{ content: '完成历史兼容验证', status: 'in_progress' }],
+          },
+          timestamp: 1000,
+        },
+        {
+          id: 'task-update-1',
+          type: 'tool_use',
+          toolName: 'TaskUpdate',
+          toolUseId: 'task-update-call-1',
+          input: { taskId: '1', subject: '完成历史兼容验证', status: 'completed' },
+          timestamp: 1000,
+        },
+        successfulTaskUpdateResult('task-update-call-1', '1', 1000),
+      ],
+      tasks: [],
+      completedAndDismissed: false,
+      backgroundTasks: [],
+      agentNotifications: [],
+    })
+
+    expect(model.sections.tasks.rows).toEqual([
+      expect.objectContaining({ id: '1', label: '完成历史兼容验证', status: 'completed' }),
+    ])
+    expect(model.badgeCount).toBe(0)
   })
 
   it('prefers task summary rows over earlier TodoWrite rows', () => {
@@ -1154,6 +1496,80 @@ describe('buildSessionActivityModel', () => {
         status: 'stopped',
         taskHistory: { completed: 1, total: 2, turnCount: 1 },
       }),
+    ])
+    expect(model.badgeCount).toBe(0)
+  })
+
+  it('seals unfinished current tasks when the foreground turn becomes idle', () => {
+    const model = buildSessionActivityModel({
+      sessionId: 'session-1',
+      messages: [
+        { id: 'user-1', type: 'user_text', content: '执行任务后暂停', timestamp: 1000 },
+        {
+          id: 'task-create-1',
+          type: 'tool_use',
+          toolName: 'TaskCreate',
+          toolUseId: 'task-create-call-1',
+          input: { subject: '只读确认 README.md 存在' },
+          timestamp: 1001,
+        },
+        {
+          id: 'task-create-result-1',
+          type: 'tool_result',
+          toolUseId: 'task-create-call-1',
+          content: 'Task #1 created successfully: 只读确认 README.md 存在',
+          isError: false,
+          timestamp: 1002,
+        },
+        {
+          id: 'task-create-2',
+          type: 'tool_use',
+          toolName: 'TaskCreate',
+          toolUseId: 'task-create-call-2',
+          input: { subject: '等待后续指令' },
+          timestamp: 1003,
+        },
+        {
+          id: 'task-create-result-2',
+          type: 'tool_result',
+          toolUseId: 'task-create-call-2',
+          content: 'Task #2 created successfully: 等待后续指令',
+          isError: false,
+          timestamp: 1004,
+        },
+        {
+          id: 'task-update-1',
+          type: 'tool_use',
+          toolName: 'TaskUpdate',
+          toolUseId: 'task-update-call-1',
+          input: { taskId: '1', status: 'completed' },
+          timestamp: 1005,
+        },
+        successfulTaskUpdateResult('task-update-call-1', '1', 1006),
+        {
+          id: 'task-update-2',
+          type: 'tool_use',
+          toolName: 'TaskUpdate',
+          toolUseId: 'task-update-call-2',
+          input: { taskId: '2', status: 'in_progress' },
+          timestamp: 1007,
+        },
+        successfulTaskUpdateResult('task-update-call-2', '2', 1008),
+        { id: 'assistant-1', type: 'assistant_text', content: '已暂停，等待后续指令', timestamp: 1009 },
+      ],
+      tasks: [
+        task({ id: '1', subject: '只读确认 README.md 存在', status: 'completed' }),
+        task({ id: '2', subject: '等待后续指令', status: 'in_progress' }),
+      ],
+      completedAndDismissed: false,
+      isForegroundTurnActive: false,
+      backgroundTasks: [],
+      agentNotifications: [],
+    })
+
+    expect(model.sections.tasks.rows).toEqual([
+      expect.objectContaining({ id: '1', status: 'completed' }),
+      expect.objectContaining({ id: '2', status: 'stopped' }),
     ])
     expect(model.badgeCount).toBe(0)
   })

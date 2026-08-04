@@ -22,7 +22,6 @@ import {
   clearProxyEnv,
   createAdapterPlan,
   createServerPlan,
-  createTunnelPlan,
   electronHostDiagnosticsFile,
   httpToWebSocketUrl,
   HOST_DIAGNOSTICS_BYTE_LIMIT,
@@ -35,7 +34,6 @@ import {
   readLastServerPort,
   reserveLocalPort,
   reserveServerPort,
-  resolveCloudflaredPath,
   resolveBundledRipgrepExecutable,
   resolveHostTriple,
   resolveWindowsTaskkillExecutable,
@@ -45,7 +43,6 @@ import {
   SYSTEM_PROXY_ERROR_ENV,
   spawnSidecar,
   waitForServer,
-  waitForTunnelUrl,
   withAdapterProxyBridgeEnv,
   withSystemProxyBridgeEnv,
   withSystemProxyErrorEnv,
@@ -198,10 +195,9 @@ describe('Electron sidecar manager', () => {
   it('passes portable config and adapter server URL through the sidecar env', () => {
     const configDir = mkdtempSync(path.join(tmpdir(), 'cc-haha-config-'))
     try {
-      const env = buildSidecarEnv({ CLAUDE_CONFIG_DIR: configDir }, '/app/dist', '/app/desktop')
+      const env = buildSidecarEnv({ CLAUDE_CONFIG_DIR: configDir }, '/app/dist')
       expect(env.CLAUDE_CONFIG_DIR).toBe(configDir)
       expect(env.XDG_CACHE_HOME).toBe(path.join(configDir, 'Cache'))
-      expect(env.CLAUDE_CODE_PLUGIN_SEED_DIR).toBe(path.join('/app/desktop', 'plugin-seed'))
 
       const adapter = createAdapterPlan({
         desktopRoot: '/app/desktop',
@@ -687,99 +683,6 @@ describe('Electron sidecar manager', () => {
 
     // Invalid entries are skipped without throwing.
     await expect(reserveServerPort('127.0.0.1', [0, -1, 1.5, 70000])).resolves.toBeGreaterThan(0)
-  })
-
-  it('builds a quick tunnel plan pointing at the local server port', () => {
-    const plan = createTunnelPlan({
-      cloudflaredPath: '/usr/local/bin/cloudflared',
-      port: 28670,
-      mode: 'quick',
-      env: {},
-    })
-    expect(plan.command).toBe('/usr/local/bin/cloudflared')
-    expect(plan.args).toEqual([
-      'tunnel',
-      '--no-autoupdate',
-      '--url',
-      'http://127.0.0.1:28670',
-    ])
-  })
-
-  it('builds a named tunnel plan using the Cloudflare token', () => {
-    const plan = createTunnelPlan({
-      cloudflaredPath: 'cloudflared.exe',
-      port: 28670,
-      mode: 'named',
-      token: 'cf-token-123',
-      env: {},
-    })
-    expect(plan.args).toEqual([
-      'tunnel',
-      '--no-autoupdate',
-      'run',
-      '--token',
-      'cf-token-123',
-    ])
-  })
-
-  it('rejects a named tunnel plan without a token', () => {
-    expect(() => createTunnelPlan({
-      cloudflaredPath: 'cloudflared',
-      port: 28670,
-      mode: 'named',
-      env: {},
-    })).toThrow(/token is required/i)
-  })
-
-  it('resolves an explicit cloudflared override only when it exists', () => {
-    expect(resolveCloudflaredPath({ CLOUDFLARED_PATH: '/opt/cf' }, {
-      existsSyncFn: ((p: string) => p === '/opt/cf') as typeof import('node:fs').existsSync,
-      platform: 'linux',
-    })).toBe('/opt/cf')
-
-    expect(resolveCloudflaredPath({ CLOUDFLARED_PATH: '/missing' }, {
-      existsSyncFn: (() => false) as typeof import('node:fs').existsSync,
-      platform: 'linux',
-    })).toBeNull()
-  })
-
-  it('falls back to a bare cloudflared command name when no install path matches', () => {
-    expect(resolveCloudflaredPath({}, {
-      existsSyncFn: (() => false) as typeof import('node:fs').existsSync,
-      platform: 'win32',
-    })).toBe('cloudflared.exe')
-    expect(resolveCloudflaredPath({}, {
-      existsSyncFn: (() => false) as typeof import('node:fs').existsSync,
-      platform: 'linux',
-    })).toBe('cloudflared')
-  })
-
-  it('waitForTunnelUrl resolves with the trycloudflare URL from stderr', async () => {
-    const child = Object.assign(new EventEmitter(), {
-      stdout: new EventEmitter(),
-      stderr: new EventEmitter(),
-    }) as unknown as SidecarChild
-    const promise = waitForTunnelUrl(child, { timeoutMs: 1000 })
-    child.stderr.emit('data', 'INF |  https://random-words-42.trycloudflare.com  |\n')
-    await expect(promise).resolves.toBe('https://random-words-42.trycloudflare.com')
-  })
-
-  it('waitForTunnelUrl rejects when cloudflared exits before printing a URL', async () => {
-    const child = Object.assign(new EventEmitter(), {
-      stdout: new EventEmitter(),
-      stderr: new EventEmitter(),
-    }) as unknown as SidecarChild
-    const promise = waitForTunnelUrl(child, { timeoutMs: 1000 })
-    child.emit('exit', 1)
-    await expect(promise).rejects.toThrow(/exited before printing/i)
-  })
-
-  it('waitForTunnelUrl rejects on timeout', async () => {
-    const child = Object.assign(new EventEmitter(), {
-      stdout: new EventEmitter(),
-      stderr: new EventEmitter(),
-    }) as unknown as SidecarChild
-    await expect(waitForTunnelUrl(child, { timeoutMs: 20 })).rejects.toThrow(/Timed out/i)
   })
 
   it('skips preferred ports blocked by browser fetch', async () => {

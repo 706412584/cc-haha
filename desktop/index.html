@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <!--
@@ -30,7 +30,7 @@
       guesses from the page otherwise, and guesses gray here.
     -->
     <meta name="theme-color" content="#FFFFFF" />
-    <title>Code Council</title>
+    <title>Claude Code Haha</title>
     <!--
       The Electron window draws its own chrome, but this same document is what
       the H5 remote client loads in a phone browser, where a missing favicon
@@ -58,10 +58,10 @@
           var read = function (key) {
             try { return window.localStorage.getItem(key) } catch (_) { return null }
           }
-          // Supported palettes, split by ground. Keep in step with
+          // The six palettes, split by ground. Keep in step with
           // LIGHT_THEME_MODES / DARK_THEME_MODES in src/types/settings.ts.
-          var LIGHT = ['white', 'paper', 'warm-classic', 'celadon', 'classic-white', 'classic-light', 'eye-care']
-          var DARK = ['dark', 'ink-blue', 'classic-dark']
+          var LIGHT = ['white', 'paper', 'warm-classic', 'celadon']
+          var DARK = ['dark', 'ink-blue']
           var has = function (list, value) { return list.indexOf(value) !== -1 }
           var isDark = function (value) { return has(DARK, value) }
           // Mirrors THEME_BACKGROUNDS in src/theme/systemAppearance.ts; the
@@ -73,11 +73,7 @@
             'warm-classic': '#F6F0E1',
             celadon: '#F5F8F5',
             dark: '#201D17',
-            'ink-blue': '#1A1D24',
-            'classic-white': '#FFFFFF',
-            'classic-light': '#FAF9F5',
-            'eye-care': '#EAF6EF',
-            'classic-dark': '#0E0E0E'
+            'ink-blue': '#1A1D24'
           }
           var paintBrowserChrome = function (value) {
             var meta = document.querySelector('meta[name="theme-color"]')
@@ -116,7 +112,7 @@
           // still applies the user's stored choice rather than flashing white.
           document.documentElement.setAttribute('data-theme', theme || 'white')
           document.documentElement.style.colorScheme =
-            (theme === 'dark' || theme === 'ink-blue' || theme === 'classic-dark') ? 'dark' : 'light'
+            (theme === 'dark' || theme === 'ink-blue') ? 'dark' : 'light'
         }
       })()
     </script>
@@ -135,10 +131,6 @@
       html[data-theme="celadon"] { background: #F5F8F5; }
       html[data-theme="dark"] { background: #201D17; }
       html[data-theme="ink-blue"] { background: #1A1D24; }
-      html[data-theme="classic-white"] { background: #FFFFFF; }
-      html[data-theme="classic-light"] { background: #FAF9F5; }
-      html[data-theme="eye-care"] { background: #EAF6EF; }
-      html[data-theme="classic-dark"] { background: #0E0E0E; }
       html[data-window-kind="pet"],
       html[data-window-kind="pet"] body,
       html[data-window-kind="pet"] #root { background: transparent !important; }

@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { skillsApi } from '../api/skills'
-import type { SkillMeta, SkillDetail, CatalogSkill } from '../types/skill'
+import type { SkillMeta, SkillDetail } from '../types/skill'
 
 export type SkillDetailReturnTab = 'skills' | 'plugins'
 
@@ -14,10 +14,6 @@ type SkillStore = {
   isDetailLoading: boolean
   error: string | null
 
-  catalog: CatalogSkill[]
-  isCatalogLoading: boolean
-  installingName: string | null
-
   fetchSkills: (cwd?: string) => Promise<void>
   fetchSkillDetail: (
     source: string,
@@ -25,8 +21,6 @@ type SkillStore = {
     cwd?: string,
     returnTab?: SkillDetailReturnTab,
   ) => Promise<void>
-  fetchCatalog: () => Promise<void>
-  installSkill: (name: string, cwd?: string) => Promise<void>
   clearSelection: () => void
 }
 
@@ -37,7 +31,7 @@ function contextKey(cwd?: string) {
   return cwd ?? ''
 }
 
-export const useSkillStore = create<SkillStore>((set, get) => ({
+export const useSkillStore = create<SkillStore>((set) => ({
   skills: [],
   skillsContext: null,
   selectedSkill: null,
@@ -46,10 +40,6 @@ export const useSkillStore = create<SkillStore>((set, get) => ({
   isLoading: false,
   isDetailLoading: false,
   error: null,
-
-  catalog: [],
-  isCatalogLoading: false,
-  installingName: null,
 
   fetchSkills: async (cwd) => {
     const requestId = ++latestListRequestId
@@ -97,35 +87,6 @@ export const useSkillStore = create<SkillStore>((set, get) => ({
         error: err instanceof Error ? err.message : String(err),
         isDetailLoading: false,
       })
-    }
-  },
-
-  fetchCatalog: async () => {
-    set({ isCatalogLoading: true })
-    try {
-      const { catalog } = await skillsApi.catalog()
-      set({ catalog, isCatalogLoading: false })
-    } catch (err) {
-      set({
-        error: err instanceof Error ? err.message : String(err),
-        isCatalogLoading: false,
-      })
-    }
-  },
-
-  installSkill: async (name, cwd) => {
-    set({ installingName: name, error: null })
-    try {
-      await skillsApi.install(name)
-      // Refresh both the installable catalog and the installed-skills list so
-      // the newly installed skill appears and its catalog card flips to installed.
-      await Promise.all([get().fetchCatalog(), get().fetchSkills(cwd)])
-    } catch (err) {
-      set({
-        error: err instanceof Error ? err.message : String(err),
-      })
-    } finally {
-      set({ installingName: null })
     }
   },
 

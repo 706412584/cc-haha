@@ -1,10 +1,17 @@
 import '@testing-library/jest-dom'
 import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { OpenWithMenu } from './OpenWithMenu'
 import type { OpenWithItem } from '../../lib/openWithItems'
 
 const anchor = { top: 100, bottom: 110, left: 20, right: 120 }
+const originalViewport = { width: window.innerWidth, height: window.innerHeight }
+
+afterEach(() => {
+  Object.defineProperty(window, 'innerWidth', { value: originalViewport.width, configurable: true })
+  Object.defineProperty(window, 'innerHeight', { value: originalViewport.height, configurable: true })
+  vi.restoreAllMocks()
+})
 
 function makeItems(onSelect1 = vi.fn(), onSelect2 = vi.fn(), onSelect3 = vi.fn()): OpenWithItem[] {
   return [
@@ -76,6 +83,34 @@ describe('OpenWithMenu', () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
+  it('aligns its right edge with the anchor to avoid a right-side native preview', () => {
+    Object.defineProperty(window, 'innerWidth', { value: 1200, configurable: true })
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      height: 160, width: 300, top: 0, left: 0, right: 0, bottom: 0, x: 0, y: 0, toJSON: () => ({}),
+    } as DOMRect)
+    const rightEdge = 900
+
+    render(<OpenWithMenu items={makeItems()} anchor={{ top: 100, bottom: 110, left: 700, right: rightEdge }} onClose={vi.fn()} />)
+
+    const menu = screen.getByRole('menu')
+    expect(menu.style.left).toBe('600px')
+    expect(Number.parseFloat(menu.style.left) + 300).toBe(rightEdge)
+    expect(menu.className).toContain('max-w-[min(300px,calc(100vw-16px))]')
+  })
+
+  it('keeps a left-shifted menu inside the compact chat column', () => {
+    Object.defineProperty(window, 'innerWidth', { value: 1000, configurable: true })
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      height: 160, width: 300, top: 0, left: 0, right: 0, bottom: 0, x: 0, y: 0, toJSON: () => ({}),
+    } as DOMRect)
+
+    render(<OpenWithMenu items={makeItems()} anchor={{ top: 100, bottom: 110, left: 40, right: 100 }} onClose={vi.fn()} />)
+
+    const menuLeft = Number.parseFloat(screen.getByRole('menu').style.left)
+    expect(menuLeft).toBe(8)
+    expect(menuLeft + 300).toBeLessThan(320)
+  })
+
   describe('triggerEl exclusion (re-click-trigger toggle support)', () => {
     it('does NOT call onClose when mousedown lands inside triggerEl', () => {
       // Set up a trigger element + a child within it in the document.
@@ -139,13 +174,12 @@ describe('OpenWithMenu', () => {
     // The trigger often sits right above the composer; the menu must not render off-screen below it.
     Object.defineProperty(window, 'innerHeight', { value: 300, configurable: true })
     Object.defineProperty(window, 'innerWidth', { value: 1000, configurable: true })
-    const rectSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
       height: 200, width: 220, top: 0, left: 0, right: 0, bottom: 0, x: 0, y: 0, toJSON: () => ({}),
     } as DOMRect)
     // anchor near the bottom: top:260/bottom:270. Down would be 276, 276+200=476 > 300-8 ⇒ flip up.
     render(<OpenWithMenu items={makeItems()} anchor={{ top: 260, bottom: 270, left: 20, right: 120 }} onClose={vi.fn()} />)
     // flipped top = anchor.top - height - 6 = 260 - 200 - 6 = 54
     expect(screen.getByRole('menu').style.top).toBe('54px')
-    rectSpy.mockRestore()
   })
 })

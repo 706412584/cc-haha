@@ -9,6 +9,7 @@ import { buildOpenWithItems, describeFileType, type OpenWithItem } from '../../l
 import { useOpenTargetStore } from '../../stores/openTargetStore'
 import { useUIStore } from '../../stores/uiStore'
 import { OpenWithMenu } from '@/components/composite/OpenWithMenu'
+import { Badge } from '@/components/ui/Badge'
 import { IconButton } from '@/components/ui/IconButton'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { ImageGalleryModal } from './ImageGalleryModal'
@@ -28,6 +29,7 @@ export type AttachmentPreview = {
   hunkId?: string
   note?: string
   quote?: string
+  selectionNumber?: number
 }
 
 const FILE_ICON_ACCENTS: Record<string, string> = {
@@ -55,10 +57,9 @@ type Props = {
   attachments: AttachmentPreview[]
   variant?: 'composer' | 'message'
   onRemove?: (id: string) => void
-  onAnnotate?: (attachment: AttachmentPreview) => void
 }
 
-export function AttachmentGallery({ attachments, variant = 'message', onRemove, onAnnotate }: Props) {
+export function AttachmentGallery({ attachments, variant = 'message', onRemove }: Props) {
   const t = useTranslation()
   const [activeImageIndex, setActiveImageIndex] = useState<number | null>(null)
   const [openWith, setOpenWith] = useState<{ items: OpenWithItem[]; anchor: DOMRect; triggerEl: HTMLElement } | null>(null)
@@ -90,6 +91,8 @@ export function AttachmentGallery({ attachments, variant = 'message', onRemove, 
   if (attachments.length === 0) return null
 
   const isComposer = variant === 'composer'
+  const isSelectionBatch = !isComposer && attachments.length > 1 && attachments.every((attachment) =>
+    attachment.type === 'image' && typeof attachment.selectionNumber === 'number')
 
   const showOpenFailure = (name: string) => {
     useUIStore.getState().addToast({
@@ -140,6 +143,67 @@ export function AttachmentGallery({ attachments, variant = 'message', onRemove, 
 
   return (
     <>
+      {isSelectionBatch ? (
+        <div
+          data-testid="preview-selection-batch"
+          aria-label={t('attachments.selectionBatch', { count: attachments.length })}
+          className="grid w-full max-w-[520px] grid-cols-2 gap-px overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-border)] shadow-[var(--shadow-card)]"
+        >
+          {attachments.map((attachment, index) => {
+            const src = attachmentImageSource(attachment)
+            if (!src || unloadableImageSources.has(src)) return null
+            const isLastOddItem = attachments.length % 2 === 1 && index === attachments.length - 1
+            const note = attachment.note?.trim()
+            return (
+              <button
+                key={attachment.id || `${attachment.name}-${index}`}
+                type="button"
+                data-selection-number={attachment.selectionNumber}
+                aria-label={t('attachments.selectionItem', {
+                  number: attachment.selectionNumber!,
+                  name: attachment.name,
+                })}
+                title={note || attachment.name}
+                onClick={() => setActiveImageIndex(images.findIndex((image) => image.src === src))}
+                className={[
+                  'group/selection min-w-0 bg-[var(--color-surface-container-low)] text-left',
+                  'focus-visible:relative focus-visible:z-[1] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)]',
+                  isLastOddItem ? 'col-span-2' : '',
+                ].join(' ')}
+              >
+                <span className="relative block h-28 overflow-hidden bg-[var(--color-surface)]">
+                  <img
+                    src={src}
+                    alt=""
+                    onError={() => markImageUnloadable(src)}
+                    className="h-full w-full object-cover transition-transform duration-150 group-hover/selection:scale-[1.015] motion-reduce:transition-none"
+                  />
+                  <Badge
+                    tone="brand"
+                    size="sm"
+                    pill={false}
+                    mono
+                    bordered
+                    className="absolute left-2 top-2 shadow-[var(--shadow-card)]"
+                  >
+                    {attachment.selectionNumber}
+                  </Badge>
+                </span>
+                <span className="flex min-h-11 min-w-0 items-center gap-2 border-t border-[var(--color-border)] px-2.5 py-1.5">
+                  <span className="shrink-0 font-mono text-[11px] font-semibold text-[var(--color-text-secondary)]">
+                    {attachment.name}
+                  </span>
+                  {note && (
+                    <span className="min-w-0 truncate text-[11px] text-[var(--color-text-tertiary)]">
+                      {note}
+                    </span>
+                  )}
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      ) : (
       <div className={isComposer ? 'flex flex-wrap items-center gap-2' : 'flex flex-wrap justify-end gap-2'}>
         {attachments.map((attachment, index) => {
           const imageSrc = attachment.type === 'image' ? attachmentImageSource(attachment) : undefined
@@ -210,20 +274,6 @@ export function AttachmentGallery({ attachments, variant = 'message', onRemove, 
                       <span className="min-w-0 truncate">{attachment.name}</span>
                     </span>
                   </Tooltip>
-                )}
-                {isComposer && onAnnotate && (
-                  <button
-                    type="button"
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      onAnnotate(attachment)
-                    }}
-                    className="absolute -bottom-1 -left-1 flex h-6 w-6 items-center justify-center rounded-full bg-[var(--color-surface-container-high)] text-[var(--color-text-secondary)] shadow-sm ring-1 ring-[var(--color-border)] transition-colors hover:text-[var(--color-brand)]"
-                    aria-label={`Annotate ${attachment.name}`}
-                    title="标注图片"
-                  >
-                    <span className="material-symbols-outlined text-[15px]">draw</span>
-                  </button>
                 )}
                 {onRemove && attachment.id && (
                   <button
@@ -388,6 +438,7 @@ export function AttachmentGallery({ attachments, variant = 'message', onRemove, 
           )
         })}
       </div>
+      )}
 
       {activeImageIndex !== null && activeImageIndex >= 0 && (
         <ImageGalleryModal

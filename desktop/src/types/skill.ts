@@ -55,12 +55,3 @@ export type SkillDetail = {
   /** Present when the skill was installed from the Skills Market. */
   marketMeta?: SkillMarketMeta
 }
-
-export type CatalogSkill = {
-  name: string
-  displayName: string
-  description: string
-  category: string
-  source: string
-  installed: boolean
-}

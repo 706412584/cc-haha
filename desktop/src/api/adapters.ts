@@ -1,5 +1,5 @@
 import { api } from './client'
-import type { AdapterFileConfig, AdapterRuntimeStatuses } from '../types/adapter'
+import type { AdapterFileConfig } from '../types/adapter'
 
 export type DingtalkRegistrationBegin = {
   deviceCode: string
@@ -39,10 +39,6 @@ export const adaptersApi = {
 
   updateConfig(patch: Partial<AdapterFileConfig>) {
     return api.put<AdapterFileConfig>('/api/adapters', patch)
-  },
-
-  getRuntimeStatus() {
-    return api.get<AdapterRuntimeStatuses>('/api/adapters/runtime-status')
   },
 
   startWechatLogin() {

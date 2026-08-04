@@ -129,31 +129,8 @@ describe('desktop persistence migrations', () => {
     expect(window.localStorage.getItem('cc-haha-light-theme')).toBe('warm-classic')
   })
 
-  test('keeps the restored classic-light ID separate from the retired light key', () => {
-    window.localStorage.setItem('cc-haha-theme', 'classic-light')
-    window.localStorage.setItem('cc-haha-light-theme', 'classic-light')
-
-    const report = runDesktopPersistenceMigrations()
-
-    expect(report.migratedKeys).not.toContain('cc-haha-theme')
-    expect(report.migratedKeys).not.toContain('cc-haha-light-theme')
-    expect(window.localStorage.getItem('cc-haha-theme')).toBe('classic-light')
-    expect(window.localStorage.getItem('cc-haha-light-theme')).toBe('classic-light')
-  })
-
-  test('preserves every supported current and classic palette', () => {
-    for (const theme of [
-      'white',
-      'paper',
-      'warm-classic',
-      'celadon',
-      'dark',
-      'ink-blue',
-      'classic-white',
-      'classic-light',
-      'eye-care',
-      'classic-dark',
-    ]) {
+  test('preserves every palette introduced by the redesign', () => {
+    for (const theme of ['white', 'paper', 'warm-classic', 'celadon', 'dark', 'ink-blue']) {
       window.localStorage.setItem('cc-haha-theme', theme)
 
       const report = runDesktopPersistenceMigrations()

@@ -239,79 +239,6 @@ export function TerminalSettings({
         const activeFit = fit
         activeTerminal.loadAddon(activeFit)
         activeTerminal.open(host)
-        // Clipboard wiring. xterm itself ships no copy/paste — without this,
-        // Ctrl+C only sends SIGINT and there's no way to lift selected text out.
-        // Conventions follow VS Code / GNOME Terminal on Windows + Linux:
-        //   - Ctrl+Shift+C / Ctrl+Insert  → copy current selection
-        //   - Ctrl+Shift+V / Shift+Insert → paste clipboard into the PTY
-        //   - Ctrl+C with an active selection → copy (then clear selection) so the
-        //     muscle-memory shortcut works; with no selection it falls through to
-        //     the shell as SIGINT, unchanged.
-        //   - right-click → copy selection if any, else paste
-        const writeToPty = (data: string) => {
-          const sessionId = runtime.nativeSessionId
-          if (sessionId) void terminalApi.write(sessionId, data).catch(() => {})
-        }
-        const copySelection = (): boolean => {
-          const selection = activeTerminal.getSelection()
-          if (!selection) return false
-          void navigator.clipboard?.writeText(selection).catch(() => {})
-          return true
-        }
-        const pasteClipboard = () => {
-          void navigator.clipboard?.readText().then((text) => {
-            if (text) writeToPty(text)
-          }).catch(() => {})
-        }
-
-        activeTerminal.attachCustomKeyEventHandler((event) => {
-          if (event.type !== 'keydown') return true
-          const ctrl = event.ctrlKey
-          const shift = event.shiftKey
-          const key = event.key
-
-          if (ctrl && shift && (key === 'C' || key === 'c')) {
-            copySelection()
-            return false
-          }
-          if (ctrl && shift && (key === 'V' || key === 'v')) {
-            pasteClipboard()
-            return false
-          }
-          // Ctrl+Insert / Shift+Insert mirror the classic activeTerminal bindings.
-          if (ctrl && key === 'Insert') {
-            copySelection()
-            return false
-          }
-          if (shift && key === 'Insert') {
-            pasteClipboard()
-            return false
-          }
-          // Bare Ctrl+C: copy when something is selected, else let SIGINT through.
-          if (ctrl && !shift && (key === 'C' || key === 'c') && activeTerminal.hasSelection()) {
-            copySelection()
-            activeTerminal.clearSelection()
-            return false
-          }
-          return true
-        })
-
-        // startTerminal can run again (restart button) against the *same* host
-        // node, so remove any contextmenu handler bound by a previous run before
-        // attaching a fresh one — otherwise they stack and fire N times.
-        const hostWithHandler = host as HTMLDivElement & {
-          __ccCopyMenuHandler?: (event: MouseEvent) => void
-        }
-        if (hostWithHandler.__ccCopyMenuHandler) {
-          host.removeEventListener('contextmenu', hostWithHandler.__ccCopyMenuHandler)
-        }
-        const contextMenuHandler = (event: MouseEvent) => {
-          event.preventDefault()
-          if (!copySelection()) pasteClipboard()
-        }
-        hostWithHandler.__ccCopyMenuHandler = contextMenuHandler
-        host.addEventListener('contextmenu', contextMenuHandler)
-
         if (!isCurrentStart()) {
           activeTerminal.dispose()
           return
@@ -657,10 +584,15 @@ export function TerminalSettings({
               <StatusDot tone={STATUS_TONE[status]} pulse={status === 'running'} />
               {t(STATUS_LABEL_KEYS[status])}
             </span>
+            {/* Info lives on the left: its tooltip is anchored to the icon's
+                left edge and opens down-right, so from here it always lands
+                inside the panel instead of being clipped by the right edge. */}
+            <span className="inline-flex shrink-0 items-center pl-1">
+              <TerminalHelpHint compact={docked} surface={terminalHeaderSurface} />
+            </span>
           </div>
 
           <div className="flex shrink-0 items-center gap-0.5">
-            <TerminalHelpHint compact={docked} surface={terminalHeaderSurface} />
             {onOpenInTab && (
               <IconButton
                 icon="open_in_new"

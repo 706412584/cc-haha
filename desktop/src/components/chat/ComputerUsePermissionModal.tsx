@@ -2,7 +2,6 @@ import { useMemo, useState } from 'react'
 import { useTranslation } from '../../i18n'
 import { computerUseApi } from '../../api/computerUse'
 import { useChatStore } from '../../stores/chatStore'
-import { buildComputerUseAllowResponse } from '../../lib/computerUsePermissions'
 import type {
   ComputerUsePermissionRequest,
   ComputerUsePermissionResponse,
@@ -28,6 +27,43 @@ function denyAllResponse(): ComputerUsePermissionResponse {
     denied: [],
     flags: { ...DEFAULT_GRANT_FLAGS },
     userConsented: false,
+  }
+}
+
+function buildAllowResponse(
+  request: ComputerUsePermissionRequest,
+): ComputerUsePermissionResponse {
+  const now = Date.now()
+  const granted = request.apps.flatMap((app) => {
+    if (!app.resolved || app.alreadyGranted) return []
+    return [{
+      bundleId: app.resolved.bundleId,
+      displayName: app.resolved.displayName,
+      grantedAt: now,
+      tier: app.proposedTier,
+    }]
+  })
+
+  const denied = request.apps.flatMap((app) => {
+    if (app.resolved) return []
+    return [{
+      bundleId: app.requestedName,
+      reason: 'not_installed' as const,
+    }]
+  })
+
+  const flags = {
+    ...DEFAULT_GRANT_FLAGS,
+    ...Object.fromEntries(
+      Object.entries(request.requestedFlags).filter(([, value]) => value === true),
+    ),
+  }
+
+  return {
+    granted,
+    denied,
+    flags,
+    userConsented: true,
   }
 }
 
@@ -64,7 +100,7 @@ export function ComputerUsePermissionModal({ sessionId, request }: Props) {
     respondToComputerUsePermission(
       sessionId,
       request.requestId,
-      buildComputerUseAllowResponse(request),
+      buildAllowResponse(request),
     )
   }
 

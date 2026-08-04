@@ -14,7 +14,6 @@ function deferred<T>() {
 describe('adapterStore IM pairing behavior', () => {
   const adaptersApi = {
     getConfig: vi.fn(),
-    getRuntimeStatus: vi.fn(),
     updateConfig: vi.fn(),
     startWechatLogin: vi.fn(),
     pollWechatLogin: vi.fn(),
@@ -36,47 +35,6 @@ describe('adapterStore IM pairing behavior', () => {
     Reflect.deleteProperty(window, 'desktopHost')
     Reflect.deleteProperty(window, '__TAURI_INTERNALS__')
     Reflect.deleteProperty(window, '__TAURI__')
-  })
-
-  it('loads runtime status separately from persisted config', async () => {
-    const runtimeStatus = {
-      wechat: {
-        platform: 'wechat' as const,
-        state: 'rebind_required' as const,
-        code: 'session_expired' as const,
-        generation: 2,
-        updatedAt: '2026-07-17T00:00:00.000Z',
-      },
-    }
-    adaptersApi.getRuntimeStatus.mockResolvedValue(runtimeStatus)
-    const { useAdapterStore } = await import('./adapterStore')
-
-    await useAdapterStore.getState().fetchRuntimeStatus()
-
-    expect(useAdapterStore.getState().runtimeStatus).toEqual(runtimeStatus)
-    expect(useAdapterStore.getState().config).toEqual({})
-  })
-
-  it('clears expired runtime status after successful WeChat binding', async () => {
-    const nextConfig = { wechat: { accountId: 'wx-account' } }
-    adaptersApi.pollWechatLogin.mockResolvedValue(nextConfig)
-    const { useAdapterStore } = await import('./adapterStore')
-    useAdapterStore.setState({
-      runtimeStatus: {
-        wechat: {
-          platform: 'wechat',
-          state: 'rebind_required',
-          code: 'session_expired',
-          generation: 2,
-          updatedAt: '2026-07-17T00:00:00.000Z',
-        },
-      },
-    })
-
-    await expect(useAdapterStore.getState().pollWechatLogin('session')).resolves.toEqual({
-      connected: true,
-    })
-    expect(useAdapterStore.getState().runtimeStatus).toEqual({})
   })
 
   it('restarts adapter sidecar through an injected desktop host after config changes', async () => {
