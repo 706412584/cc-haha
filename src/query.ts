@@ -1315,7 +1315,8 @@ async function* queryLoop(
       // the desktop session does not flip to idle with zero visible completion.
       if (
         isEmptyThinkingOnlyAssistantMessage(lastMessage) &&
-        emptyThinkingRecoveryCount < MAX_EMPTY_THINKING_RECOVERY_LIMIT
+        emptyThinkingRecoveryCount < MAX_EMPTY_THINKING_RECOVERY_LIMIT &&
+        !toolUseContext.abortController.signal.aborted
       ) {
         const attempt = emptyThinkingRecoveryCount + 1
         logEvent('tengu_empty_thinking_recovery', {
