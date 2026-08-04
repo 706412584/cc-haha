@@ -1,30 +1,50 @@
 import type { Command } from '../commands.js'
+import type { ToolUseContext } from '../Tool.js'
 import {
   getAttributionTexts,
   getEnhancedPRAttribution,
 } from '../utils/attribution.js'
 import { getDefaultBranch } from '../utils/git.js'
 import { executeShellCommandsInPrompt } from '../utils/promptShellExecution.js'
+import {
+  resolveDefaultShell,
+  type ShellToolType,
+} from '../utils/shell/resolveDefaultShell.js'
 import { getUndercoverInstructions, isUndercover } from '../utils/undercover.js'
 
-const ALLOWED_TOOLS = [
-  'Bash(git checkout --branch:*)',
-  'Bash(git checkout -b:*)',
-  'Bash(git add:*)',
-  'Bash(git status:*)',
-  'Bash(git push:*)',
-  'Bash(git commit:*)',
-  'Bash(gh pr create:*)',
-  'Bash(gh pr edit:*)',
-  'Bash(gh pr view:*)',
-  'Bash(gh pr merge:*)',
+const ALLOWED_COMMANDS = [
+  'git checkout --branch:*',
+  'git checkout -b:*',
+  'git add:*',
+  'git status:*',
+  'git push:*',
+  'git commit:*',
+  'gh pr create:*',
+  'gh pr edit:*',
+  'gh pr view:*',
+  'gh pr merge:*',
+]
+
+const NON_SHELL_ALLOWED_TOOLS = [
   'ToolSearch',
   'mcp__slack__send_message',
   'mcp__claude_ai_Slack__slack_send_message',
 ]
 
-function getPromptContent(
+export function getCommitPushPrAllowedTools(
+  shell: ShellToolType | null,
+): string[] {
+  if (!shell) return [...NON_SHELL_ALLOWED_TOOLS]
+  const toolName = shell === 'powershell' ? 'PowerShell' : 'Bash'
+  return [
+    ...ALLOWED_COMMANDS.map(command => `${toolName}(${command})`),
+    ...NON_SHELL_ALLOWED_TOOLS,
+  ]
+}
+
+export function getPromptContent(
   defaultBranch: string,
+  shell: ShellToolType,
   prAttribution?: string,
 ): string {
   const { commit: commitAttribution, pr: defaultPrAttribution } =
@@ -54,6 +74,45 @@ function getPromptContent(
     slackStep = ''
   }
 
+  const commitAttributionText = commitAttribution
+    ? `\n\n${commitAttribution}`
+    : ''
+  const prAttributionText = effectivePrAttribution
+    ? `\n\n${effectivePrAttribution}`
+    : ''
+  const prViewCommand =
+    shell === 'powershell'
+      ? 'gh pr view --json number 2>$null; if ($LASTEXITCODE -ne 0) { exit 0 }'
+      : 'gh pr view --json number 2>/dev/null || true'
+  const commitExample =
+    shell === 'powershell'
+      ? `$commitMessage = @'
+Commit message here.${commitAttributionText}
+'@
+git commit -m $commitMessage`
+      : `git commit -m "$(cat <<'EOF'
+Commit message here.${commitAttributionText}
+EOF
+)"`
+  const prExample =
+    shell === 'powershell'
+      ? `$prBody = @'
+## Summary
+<1-3 bullet points>
+
+## Test plan
+[Bulleted markdown checklist of TODOs for testing the pull request...]${changelogSection}${prAttributionText}
+'@
+gh pr create --title "Short, descriptive title" --body $prBody`
+      : `gh pr create --title "Short, descriptive title" --body "$(cat <<'EOF'
+## Summary
+<1-3 bullet points>
+
+## Test plan
+[Bulleted markdown checklist of TODOs for testing the pull request...]${changelogSection}${prAttributionText}
+EOF
+)"`
+
   return `${prefix}## Context
 
 - \`SAFEUSER\`: ${safeUser}
@@ -62,7 +121,7 @@ function getPromptContent(
 - \`git diff HEAD\`: !\`git diff HEAD\`
 - \`git branch --show-current\`: !\`git branch --show-current\`
 - \`git diff ${defaultBranch}...HEAD\`: !\`git diff ${defaultBranch}...HEAD\`
-- \`gh pr view --json number 2>/dev/null || true\`: !\`gh pr view --json number 2>/dev/null || true\`
+- \`${prViewCommand}\`: !\`${prViewCommand}\`
 
 ## Git Safety Protocol
 
@@ -79,25 +138,15 @@ Analyze all changes that will be included in the pull request, making sure to lo
 
 Based on the above changes:
 1. Create a new branch if on ${defaultBranch} (use SAFEUSER from context above for the branch name prefix, falling back to whoami if SAFEUSER is empty, e.g., \`username/feature-name\`)
-2. Create a single commit with an appropriate message using heredoc syntax${commitAttribution ? `, ending with the attribution text shown in the example below` : ''}:
+2. Create a single commit with an appropriate message using ${shell === 'powershell' ? 'a PowerShell here-string' : 'heredoc syntax'}${commitAttribution ? `, ending with the attribution text shown in the example below` : ''}:
 \`\`\`
-git commit -m "$(cat <<'EOF'
-Commit message here.${commitAttribution ? `\n\n${commitAttribution}` : ''}
-EOF
-)"
+${commitExample}
 \`\`\`
 3. Push the branch to origin
-4. If a PR already exists for this branch (check the gh pr view output above), update the PR title and body using \`gh pr edit\` to reflect the current diff${addReviewerArg}. Otherwise, create a pull request using \`gh pr create\` with heredoc syntax for the body${reviewerArg}.
+4. If a PR already exists for this branch (check the gh pr view output above), update the PR title and body using \`gh pr edit\` to reflect the current diff${addReviewerArg}. Otherwise, create a pull request using \`gh pr create\` with ${shell === 'powershell' ? 'a PowerShell here-string' : 'heredoc syntax'} for the body${reviewerArg}.
    - IMPORTANT: Keep PR titles short (under 70 characters). Use the body for details.
 \`\`\`
-gh pr create --title "Short, descriptive title" --body "$(cat <<'EOF'
-## Summary
-<1-3 bullet points>
-
-## Test plan
-[Bulleted markdown checklist of TODOs for testing the pull request...]${changelogSection}${effectivePrAttribution ? `\n\n${effectivePrAttribution}` : ''}
-EOF
-)"
+${prExample}
 \`\`\`
 
 You have the capability to call multiple tools in a single response. You MUST do all of the above in a single message.${slackStep}
@@ -105,53 +154,78 @@ You have the capability to call multiple tools in a single response. You MUST do
 Return the PR URL when you're done, so the user can see it.`
 }
 
+export async function buildCommitPushPrPrompt(
+  args: string,
+  context: ToolUseContext,
+  dependencies: {
+    resolveShell?: typeof resolveDefaultShell
+    execute?: typeof executeShellCommandsInPrompt
+    getBranch?: typeof getDefaultBranch
+    getPrAttribution?: typeof getEnhancedPRAttribution
+  } = {},
+) {
+  const shell = (dependencies.resolveShell ?? resolveDefaultShell)()
+  if (!shell) {
+    throw new Error(
+      'No supported command shell is available. Install Git Bash or enable PowerShell.',
+    )
+  }
+  const allowedTools = getCommitPushPrAllowedTools(shell)
+  const [defaultBranch, prAttribution] = await Promise.all([
+    (dependencies.getBranch ?? getDefaultBranch)(),
+    (dependencies.getPrAttribution ?? getEnhancedPRAttribution)(
+      context.getAppState,
+    ),
+  ])
+  let promptContent = getPromptContent(defaultBranch, shell, prAttribution)
+
+  const trimmedArgs = args?.trim()
+  if (trimmedArgs) {
+    promptContent += `\n\n## Additional instructions from user\n\n${trimmedArgs}`
+  }
+
+  const finalContent = await (
+    dependencies.execute ?? executeShellCommandsInPrompt
+  )(
+    promptContent,
+    {
+      ...context,
+      getAppState() {
+        const appState = context.getAppState()
+        return {
+          ...appState,
+          toolPermissionContext: {
+            ...appState.toolPermissionContext,
+            alwaysAllowRules: {
+              ...appState.toolPermissionContext.alwaysAllowRules,
+              command: allowedTools,
+            },
+          },
+        }
+      },
+    },
+    '/commit-push-pr',
+    shell,
+  )
+
+  return [{ type: 'text' as const, text: finalContent }]
+}
+
 const command = {
   type: 'prompt',
   name: 'commit-push-pr',
   description: 'Commit, push, and open a PR',
-  allowedTools: ALLOWED_TOOLS,
+  get allowedTools() {
+    return getCommitPushPrAllowedTools(resolveDefaultShell())
+  },
   get contentLength() {
     // Use 'main' as estimate for content length calculation
-    return getPromptContent('main').length
+    return getPromptContent('main', resolveDefaultShell() ?? 'bash').length
   },
   progressMessage: 'creating commit and PR',
   source: 'builtin',
   async getPromptForCommand(args, context) {
-    // Get default branch and enhanced PR attribution
-    const [defaultBranch, prAttribution] = await Promise.all([
-      getDefaultBranch(),
-      getEnhancedPRAttribution(context.getAppState),
-    ])
-    let promptContent = getPromptContent(defaultBranch, prAttribution)
-
-    // Append user instructions if args provided
-    const trimmedArgs = args?.trim()
-    if (trimmedArgs) {
-      promptContent += `\n\n## Additional instructions from user\n\n${trimmedArgs}`
-    }
-
-    const finalContent = await executeShellCommandsInPrompt(
-      promptContent,
-      {
-        ...context,
-        getAppState() {
-          const appState = context.getAppState()
-          return {
-            ...appState,
-            toolPermissionContext: {
-              ...appState.toolPermissionContext,
-              alwaysAllowRules: {
-                ...appState.toolPermissionContext.alwaysAllowRules,
-                command: ALLOWED_TOOLS,
-              },
-            },
-          }
-        },
-      },
-      '/commit-push-pr',
-    )
-
-    return [{ type: 'text', text: finalContent }]
+    return buildCommitPushPrPrompt(args, context)
   },
 } satisfies Command
 

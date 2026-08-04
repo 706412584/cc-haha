@@ -67,3 +67,32 @@ export function shouldForwardTaskNotificationToModel(
 ): boolean {
   return true
 }
+
+/**
+ * Collects structured-output local-agent completions until the whole active
+ * agent group settles. The CLI can then re-enter the model once with every
+ * result instead of once per agent (duplicate replies) or never (stalled
+ * coordinator turns).
+ */
+export class TaskNotificationFollowUpBatch {
+  private notifications: string[] = []
+
+  defer(notificationText: string): void {
+    if (notificationText.length > 0) {
+      this.notifications.push(notificationText)
+    }
+  }
+
+  hasPending(): boolean {
+    return this.notifications.length > 0
+  }
+
+  takeIfSettled(hasRunningBackgroundTasks: boolean): string | undefined {
+    if (hasRunningBackgroundTasks || this.notifications.length === 0) {
+      return undefined
+    }
+    const followUp = this.notifications.join('\n')
+    this.notifications = []
+    return followUp
+  }
+}

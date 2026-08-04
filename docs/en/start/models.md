@@ -44,7 +44,7 @@ With an API key in hand, this is the fastest route. Click "Add Provider", pick s
 The built-in presets, as they appear in the dialog:
 
 - **DeepSeek** · **Zhipu GLM** · **Kimi** · **MiniMax** — major Chinese model vendors; the base URLs point at each one's Anthropic-compatible endpoint.
-- **TeamoRouter** — a routing service that gives you access to official Claude models through its own gateway.
+- **TeamoRouter** · **XuanShu API** — routing services that give you access to official Claude models through their own gateways.
 - **LM Studio** · **Ollama** — local models; see the next section.
 - **Custom** — anything not listed above.
 
@@ -67,7 +67,7 @@ Whether a local model can actually sustain an agent workflow comes down to its t
 
 ## The Add Provider dialog, field by field
 
-![Add Provider dialog: preset, base URL, auth variable, API key, model mapping](../../images/app/settings-provider-add.webp)
+![Add Provider dialog: preset, base URL, auth variable, API key, model mapping](../../images/app/en/settings-provider-add.webp)
 
 **Name** (required) — how this provider appears in the list. A preset fills it in; rename it to something you'll recognize, like "DeepSeek — work account".
 

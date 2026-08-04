@@ -34,6 +34,12 @@ import {
   isGrokOfficialProviderId,
 } from '../services/grokOfficialProvider.js'
 import { hahaGrokOAuthService } from '../services/hahaGrokOAuthService.js'
+import { getPresetDefaultEnv } from '../services/providerRuntimeEnv.js'
+import {
+  getModelReasoningCapabilityOverride,
+  resolveModelReasoningProfile,
+  type ModelReasoningApiFormat,
+} from '../../shared/modelReasoning.js'
 
 // ─── Fallback models (used when no provider is configured) ────────────────────
 
@@ -100,52 +106,55 @@ function addUniqueModel(
   models.push(model)
 }
 
-function buildProviderModelList(models: {
-  main: string
-  haiku: string
-  sonnet: string
-  opus: string
-  fable?: string
-}): ApiModelInfo[] {
+function buildProviderModelList(
+  models: {
+    main: string
+    haiku: string
+    sonnet: string
+    opus: string
+    fable?: string
+  },
+  apiFormat?: ModelReasoningApiFormat,
+  presetDefaultEnv: Record<string, string> = {},
+): ApiModelInfo[] {
   const modelList: ApiModelInfo[] = []
 
-  addUniqueModel(modelList, {
-    id: models.main,
-    name: models.main,
-    description: 'Main model',
-    context: '',
-  })
+  const buildModel = (id: string, description: string): ApiModelInfo => {
+    const reasoningProfile = apiFormat
+      ? resolveModelReasoningProfile(
+          id,
+          apiFormat,
+          getModelReasoningCapabilityOverride(id, models, presetDefaultEnv),
+        )
+      : undefined
+    return {
+      id,
+      name: id,
+      description,
+      context: '',
+      ...(apiFormat
+        ? {
+            supportedReasoningEfforts: [...(reasoningProfile?.supportedReasoningEfforts ?? [])],
+          }
+        : {}),
+      ...(reasoningProfile?.defaultReasoningEffort
+        ? { defaultReasoningEffort: reasoningProfile.defaultReasoningEffort }
+        : {}),
+    }
+  }
+
+  addUniqueModel(modelList, buildModel(models.main, 'Main model'))
   addUniqueModel(modelList, models.haiku
-    ? {
-        id: models.haiku,
-        name: models.haiku,
-        description: 'Haiku model',
-        context: '',
-      }
+    ? buildModel(models.haiku, 'Haiku model')
     : null)
   addUniqueModel(modelList, models.sonnet
-    ? {
-        id: models.sonnet,
-        name: models.sonnet,
-        description: 'Sonnet model',
-        context: '',
-      }
+    ? buildModel(models.sonnet, 'Sonnet model')
     : null)
   addUniqueModel(modelList, models.opus
-    ? {
-        id: models.opus,
-        name: models.opus,
-        description: 'Opus model',
-        context: '',
-      }
+    ? buildModel(models.opus, 'Opus model')
     : null)
   addUniqueModel(modelList, models.fable
-    ? {
-        id: models.fable,
-        name: models.fable,
-        description: 'Fable model',
-        context: '',
-      }
+    ? buildModel(models.fable, 'Fable model')
     : null)
 
   return modelList
@@ -297,7 +306,11 @@ async function handleModelsList(): Promise<Response> {
 
   const activeProvider = activeId ? providers.find((p) => p.id === activeId) : null
   if (activeProvider) {
-    const modelList = buildProviderModelList(activeProvider.models)
+    const modelList = buildProviderModelList(
+      activeProvider.models,
+      activeProvider.apiFormat,
+      getPresetDefaultEnv(activeProvider.presetId),
+    )
     return Response.json({
       models: modelList,
       provider: { id: activeProvider.id, name: activeProvider.name },
@@ -359,7 +372,11 @@ async function handleCurrentModel(req: Request): Promise<Response> {
       : isGrokProviderActive
         ? await getGrokModelList()
         : activeProvider
-          ? buildProviderModelList(activeProvider.models)
+          ? buildProviderModelList(
+              activeProvider.models,
+              activeProvider.apiFormat,
+              getPresetDefaultEnv(activeProvider.presetId),
+            )
           : await getStandaloneModelList()
 
     const modelEntry = availableModels.find((m) => m.id === lookupId)

@@ -282,6 +282,7 @@ export async function* runAgent({
   useExactTools,
   worktreePath,
   description,
+  spawningToolUseId,
   transcriptSubdir,
   onQueryProgress,
   onStallTransition,
@@ -336,6 +337,10 @@ export async function* runAgent({
   /** Original task description from AgentTool input. Persisted to metadata
    * so a resumed agent's notification can show the original description. */
   description?: string
+  /** tool_use id of the Agent call that spawned this agent. Persisted to
+   * metadata so resume can re-attach to the original Agent card instead of
+   * the resuming tool's own call. */
+  spawningToolUseId?: string
   /** Optional subdirectory under subagents/ to group this agent's transcript
    * with related ones (e.g. workflows/<runId> for workflow subagents). */
   transcriptSubdir?: string
@@ -779,6 +784,7 @@ export async function* runAgent({
     ...(model && { model }),
     ...(worktreePath && { worktreePath }),
     ...(description && { description }),
+    ...(spawningToolUseId && { toolUseId: spawningToolUseId }),
   }).catch(_err => logForDebugging(`Failed to write agent metadata: ${_err}`))
 
   // Track the last recorded message UUID for parent chain continuity

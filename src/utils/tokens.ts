@@ -52,6 +52,22 @@ export function getTokenCountFromUsage(usage: Usage): number {
   )
 }
 
+/**
+ * Zero-token usage is used in a few recovery/compaction paths as a placeholder
+ * for "stale or unavailable" (see stripStaleUsageFromPreservedMessages), and
+ * some third-party proxies emit all-zero usage objects mid-stream. Treat those
+ * as "no usage data", never as a real token count — anchoring a threshold
+ * check on one makes a full context window look empty (#1162).
+ */
+export function isPlaceholderZeroUsage(usage: Usage): boolean {
+  return (
+    usage.input_tokens === 0 &&
+    usage.output_tokens === 0 &&
+    (usage.cache_creation_input_tokens ?? 0) === 0 &&
+    (usage.cache_read_input_tokens ?? 0) === 0
+  )
+}
+
 export function tokenCountFromLastAPIResponse(messages: Message[]): number {
   let i = messages.length - 1
   while (i >= 0) {
@@ -145,29 +161,15 @@ export function getCurrentUsage(messages: Message[]): {
     const message = messages[i]
     const usage = message ? getTokenUsage(message) : undefined
     if (usage) {
-      const normalizedUsage = {
-        input_tokens: usage.input_tokens,
-        output_tokens: usage.output_tokens,
-        cache_creation_input_tokens: usage.cache_creation_input_tokens ?? 0,
-        cache_read_input_tokens: usage.cache_read_input_tokens ?? 0,
-      }
-
-      // Zero-token usage is used in a few recovery/compaction paths as a
-      // placeholder for "stale or unavailable", not as a real token count.
-      if (
-        normalizedUsage.input_tokens === 0 &&
-        normalizedUsage.output_tokens === 0 &&
-        normalizedUsage.cache_creation_input_tokens === 0 &&
-        normalizedUsage.cache_read_input_tokens === 0
-      ) {
+      if (isPlaceholderZeroUsage(usage)) {
         continue
       }
 
       return {
-        input_tokens: normalizedUsage.input_tokens,
-        output_tokens: normalizedUsage.output_tokens,
-        cache_creation_input_tokens: normalizedUsage.cache_creation_input_tokens,
-        cache_read_input_tokens: normalizedUsage.cache_read_input_tokens,
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cache_creation_input_tokens: usage.cache_creation_input_tokens ?? 0,
+        cache_read_input_tokens: usage.cache_read_input_tokens ?? 0,
       }
     }
   }
@@ -246,7 +248,11 @@ export function tokenCountWithEstimation(messages: readonly Message[]): number {
   while (i >= 0) {
     const message = messages[i]
     const usage = message ? getTokenUsage(message) : undefined
-    if (message && usage) {
+    // Placeholder all-zero usage must not anchor the count: it would report
+    // the whole conversation as ~empty and auto-compact would never fire.
+    // Skip it so the anchor falls back to an earlier real usage (the skipped
+    // messages are then covered by the rough estimation slice below).
+    if (message && usage && !isPlaceholderZeroUsage(usage)) {
       // Walk back past any earlier sibling records split from the same API
       // response (same message.id) so interleaved tool_results between them
       // are included in the estimation slice.

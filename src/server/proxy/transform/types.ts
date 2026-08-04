@@ -6,7 +6,14 @@
 
 // ─── OpenAI Chat Completions ────────────────────────────────
 
-export type OpenAIReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
+export type OpenAIReasoningEffort =
+  | 'none'
+  | 'minimal'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max'
 
 export type OpenAIChatMessage = {
   role: 'system' | 'user' | 'assistant' | 'tool'
@@ -125,6 +132,7 @@ export type OpenAIResponsesInputItem =
   | { type: 'message'; role: 'user' | 'assistant' | 'system'; content: string | OpenAIResponsesInputContentPart[] }
   | { type: 'function_call'; call_id: string; name: string; arguments: unknown }
   | { type: 'function_call_output'; call_id: string; output: string | OpenAIResponsesInputContentPart[] }
+  | OpenAIResponsesReasoningItem
 
 export type OpenAIResponsesRequest = {
   model: string
@@ -143,13 +151,22 @@ export type OpenAIResponsesRequest = {
   }>
   tool_choice?: unknown
   reasoning?: { effort?: OpenAIReasoningEffort }
+  include?: string[]
   prompt_cache_key?: string
+}
+
+export type OpenAIResponsesReasoningItem = {
+  type: 'reasoning'
+  id?: string
+  summary?: Array<{ type: string; text: string }>
+  content?: Array<{ type: string; text: string }>
+  encrypted_content?: string
 }
 
 export type OpenAIResponsesOutputItem =
   | { type: 'message'; role: string; content: Array<{ type: string; text?: string; refusal?: string }> }
   | { type: 'function_call'; id: string; call_id: string; name: string; arguments: unknown }
-  | { type: 'reasoning'; id: string; summary?: Array<{ type: string; text: string }> }
+  | OpenAIResponsesReasoningItem
 
 export type OpenAIResponsesResponse = {
   id: string
@@ -169,6 +186,7 @@ export type AnthropicContentBlock =
   | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown>; cache_control?: unknown }
   | { type: 'tool_result'; tool_use_id: string; content: string | AnthropicContentBlock[]; is_error?: boolean; cache_control?: unknown }
   | { type: 'thinking'; thinking: string; signature?: string }
+  | { type: 'redacted_thinking'; data: string }
 
 export type AnthropicMessage = {
   role: 'user' | 'assistant'

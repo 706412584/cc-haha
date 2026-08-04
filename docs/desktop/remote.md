@@ -16,7 +16,7 @@ order: 9
 
 ## H5 访问
 
-![设置 → H5 访问：二维码与令牌](../images/app/settings-h5.webp)
+![设置 → H5 访问：局域网访问开关与连接参数](../images/app/zh-CN/settings-h5.webp)
 
 ### 开启
 
@@ -27,7 +27,7 @@ order: 9
 
 扫出来的链接里带着服务器地址和令牌，手机浏览器打开后会把连接信息存下来，之后直接打开就能用。
 
-![手机端的对话界面与文件变更卡](../images/app/h5-session.webp)
+![手机端的对话界面与文件变更卡](../images/app/zh-CN/h5-session.webp)
 
 ### 令牌是访问凭据
 
@@ -65,7 +65,7 @@ H5 默认关闭，它也不是公开服务。开启前先确认你在自己信�
 
 ## IM 接入
 
-![设置 → IM 接入：配对管理与五个平台](../images/app/settings-im.webp)
+![设置 → IM 接入：配对管理与五个平台](../images/app/zh-CN/settings-im.webp)
 
 设置 → IM 接入 支持五个平台，接入方式各不相同：
 

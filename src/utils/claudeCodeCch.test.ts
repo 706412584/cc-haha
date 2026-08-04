@@ -13,7 +13,7 @@ describe('xxHash64Seeded', () => {
 
 describe('signClaudeCodeCCHInString', () => {
   test('replaces Anthropic system billing placeholder with deterministic 5 hex signature', () => {
-    const body = '{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.92.693; cc_entrypoint=cli; cch=00000;"}],"messages":[{"role":"user","content":"hello from proxy"}]}'
+    const body = '{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.220.693; cc_entrypoint=cli; cch=00000;"}],"messages":[{"role":"user","content":"hello from proxy"}]}'
     const signed = signClaudeCodeCCHInString(body)
 
     expect(signed).toMatch(/cch=[0-9a-f]{5};/)
@@ -21,17 +21,17 @@ describe('signClaudeCodeCCHInString', () => {
   })
 
   test('does not touch cch placeholder outside structured billing block', () => {
-    const body = '{"messages":[{"role":"user","content":"please keep x-anthropic-billing-header: cc_version=2.1.92.abc; cc_entrypoint=cli; cch=00000; literal"}]}'
+    const body = '{"messages":[{"role":"user","content":"please keep x-anthropic-billing-header: cc_version=2.1.220.abc; cc_entrypoint=cli; cch=00000; literal"}]}'
     expect(signClaudeCodeCCHInString(body)).toBe(body)
   })
 
   test('does not leave partial signatures when multiple placeholders exist', () => {
-    const body = '{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.92.abc; cc_entrypoint=cli; cch=00000;"},{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.92.def; cc_entrypoint=cli; cch=00000;"}],"messages":[{"role":"user","content":"hi"}]}'
+    const body = '{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.220.abc; cc_entrypoint=cli; cch=00000;"},{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.220.def; cc_entrypoint=cli; cch=00000;"}],"messages":[{"role":"user","content":"hi"}]}'
     expect(signClaudeCodeCCHInString(body)).toBe(body)
   })
 
   test('does not partially sign when user text also contains a placeholder', () => {
-    const body = '{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.92.abc; cc_entrypoint=cli; cch=00000;"}],"messages":[{"role":"user","content":"literal x-anthropic-billing-header: cc_version=2.1.92.user; cc_entrypoint=cli; cch=00000;"}]}'
+    const body = '{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.220.abc; cc_entrypoint=cli; cch=00000;"}],"messages":[{"role":"user","content":"literal x-anthropic-billing-header: cc_version=2.1.220.user; cc_entrypoint=cli; cch=00000;"}]}'
     expect(signClaudeCodeCCHInString(body)).toBe(body)
   })
 })

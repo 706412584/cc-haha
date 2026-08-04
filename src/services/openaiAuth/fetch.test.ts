@@ -92,10 +92,12 @@ describe('buildOpenAICodexFetch', () => {
     expect(upstreamCalls).toHaveLength(1)
     expect(upstreamCalls[0].url).toBe(OPENAI_CODEX_API_ENDPOINT)
     expect(upstreamCalls[0].headers.authorization).toBe('Bearer access-for-chatgpt')
+    expect(upstreamCalls[0].headers.accept).toBe('text/event-stream')
     expect(upstreamCalls[0].headers['chatgpt-account-id']).toBe('acct_fetch')
     expect(upstreamCalls[0].headers.originator).toBe('codex_cli_rs')
     expect(upstreamCalls[0].body.model).toBe('gpt-5.5')
     expect(upstreamCalls[0].body.reasoning).toEqual({ effort: 'medium' })
+    expect(upstreamCalls[0].body.include).toEqual(['reasoning.encrypted_content'])
     expect(upstreamCalls[0].proxy).toBe('http://127.0.0.1:17890')
     expect(response.status).toBe(200)
     await expect(response.json()).resolves.toMatchObject({
@@ -145,6 +147,114 @@ describe('buildOpenAICodexFetch', () => {
       model: 'gpt-5.5',
       content: [{ type: 'text', text: 'streamed ok' }],
     })
+  })
+
+  test('marks streaming responses as OpenAI OAuth and preserves encrypted reasoning', async () => {
+    const upstreamBodies: Array<Record<string, unknown>> = []
+    const fetchOverride: typeof fetch = async (_input, init) => {
+      upstreamBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      return new Response([
+        'event: response.created',
+        'data: {"response":{"id":"resp_reasoning","model":"gpt-5.6-terra","status":"in_progress"}}',
+        '',
+        'event: response.output_item.done',
+        'data: {"output_index":0,"item":{"type":"reasoning","id":"rs_fetch","summary":[],"encrypted_content":"opaque"}}',
+        '',
+        'event: response.completed',
+        'data: {"response":{"id":"resp_reasoning","object":"response","created_at":1779118000,"model":"gpt-5.6-terra","status":"completed","output":[],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}',
+        '',
+      ].join('\n'), {
+        headers: { 'Content-Type': 'text/event-stream' },
+      })
+    }
+    const openAIFetch = buildOpenAICodexFetch(fetchOverride, 'compact')
+
+    const response = await openAIFetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'gpt-5.6-terra',
+        max_tokens: 64,
+        stream: true,
+        messages: [{ role: 'user', content: 'Compact this' }],
+      }),
+    })
+    const body = await response.text()
+
+    expect(response.headers.get('x-cc-haha-openai-codex-stream')).toBe('1')
+    expect(upstreamBodies[0].include).toEqual(['reasoning.encrypted_content'])
+    expect(body).toContain('redacted_thinking')
+    expect(body).toContain('opaque')
+  })
+
+  test('does not propagate SDK cleanup abort after response.completed', async () => {
+    const requestController = new AbortController()
+    let upstreamSignal: AbortSignal | null | undefined
+    const fetchOverride: typeof fetch = async (_input, init) => {
+      upstreamSignal = init?.signal
+      return new Response([
+        'event: response.created',
+        'data: {"response":{"id":"resp_terminal","model":"gpt-5.6-terra","status":"in_progress"}}',
+        '',
+        'event: response.completed',
+        'data: {"response":{"id":"resp_terminal","object":"response","created_at":1779118000,"model":"gpt-5.6-terra","status":"completed","output":[],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}',
+        '',
+      ].join('\n'), {
+        headers: { 'Content-Type': 'text/event-stream' },
+      })
+    }
+    const openAIFetch = buildOpenAICodexFetch(fetchOverride, 'test')
+
+    const response = await openAIFetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      signal: requestController.signal,
+      body: JSON.stringify({
+        model: 'gpt-5.6-terra',
+        max_tokens: 64,
+        stream: true,
+        messages: [{ role: 'user', content: 'Say ok' }],
+      }),
+    })
+    await response.text()
+    requestController.abort(new Error('SDK stream cleanup'))
+
+    expect(upstreamSignal).not.toBe(requestController.signal)
+    expect(upstreamSignal?.aborted).toBe(false)
+  })
+
+  test('still propagates cancellation before a Responses terminal event', async () => {
+    const requestController = new AbortController()
+    let upstreamSignal: AbortSignal | null | undefined
+    const fetchOverride: typeof fetch = async (_input, init) => {
+      upstreamSignal = init?.signal
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode([
+            'event: response.created',
+            'data: {"response":{"id":"resp_cancel","model":"gpt-5.6-terra","status":"in_progress"}}',
+            '',
+            '',
+          ].join('\n')))
+        },
+      }), {
+        headers: { 'Content-Type': 'text/event-stream' },
+      })
+    }
+    const openAIFetch = buildOpenAICodexFetch(fetchOverride, 'test')
+    const response = await openAIFetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      signal: requestController.signal,
+      body: JSON.stringify({
+        model: 'gpt-5.6-terra',
+        max_tokens: 64,
+        stream: true,
+        messages: [{ role: 'user', content: 'Say ok' }],
+      }),
+    })
+    const reader = response.body!.getReader()
+    await reader.read()
+    await reader.cancel('consumer stopped')
+
+    expect(upstreamSignal?.aborted).toBe(true)
   })
 
   test('applies defaults and validates request and session efforts for the final request', async () => {
@@ -202,7 +312,7 @@ describe('buildOpenAICodexFetch', () => {
       { effort: 'xhigh' },
       { effort: 'max' },
       { effort: 'medium' },
-      { effort: 'high' },
+      { effort: 'xhigh' },
     ])
   })
 

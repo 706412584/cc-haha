@@ -1,4 +1,5 @@
-const DEEPSEEK_THINKING_CAPABILITIES = 'thinking,effort,adaptive_thinking,max_effort'
+const DEEPSEEK_THINKING_CAPABILITIES =
+  'thinking,effort,adaptive_thinking,xhigh_effort,max_effort'
 
 const DEEPSEEK_CAPABILITY_ENV_KEYS = [
   'ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES',

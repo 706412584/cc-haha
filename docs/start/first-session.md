@@ -13,7 +13,7 @@ order: 3
 
 点侧边栏的「新建会话」，或按 `Cmd/Ctrl + N`。
 
-![空会话首屏，底部输入框里有权限模式、运行位置和模型三颗按钮](../images/app/session-new.webp)
+![空会话首屏，底部输入框里有权限模式、运行位置和模型三颗按钮](../images/app/zh-CN/session-new.webp)
 
 看输入框底部这一排：`+` 是附件，往右依次是**权限模式**、**运行位置**、**模型 + 推理强度**，最右边是「运行」。
 
@@ -25,7 +25,7 @@ order: 3
 
 点权限模式按钮，五个档位摊开在你面前。
 
-![五档权限模式菜单](../images/app/permission-modes.webp)
+![五档权限模式菜单](../images/app/zh-CN/permission-modes.webp)
 
 | 模式 | App 里的说明 |
 |---|---|
@@ -68,7 +68,7 @@ order: 3
 
 ## 4. 看它干活
 
-![完整一轮：工具调用折叠卡、思考、权限询问卡、内联 diff](../images/app/session-main.webp)
+![完整一轮：工具调用折叠卡、思考、权限询问卡、内联 diff](../images/app/zh-CN/session-main.webp)
 
 它会先摸清情况再动手，你能看到几种不同的卡片：
 

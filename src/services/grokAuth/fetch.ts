@@ -4,7 +4,7 @@ import { openaiResponsesStreamToAnthropic } from '../../server/proxy/streaming/o
 import { openaiResponsesStreamToAnthropicResponse } from '../../server/proxy/streaming/openaiResponsesStreamToAnthropicResponse.js'
 import type { AnthropicRequest } from '../../server/proxy/transform/types.js'
 import { ensureFreshGrokTokens, forceRefreshGrokTokens } from './refresh.js'
-import { grokModelRejectsReasoningEffort, resolveGrokModel } from './models.js'
+import { resolveGrokModel, resolveGrokReasoningEffort } from './models.js'
 import { getGrokOAuthTokens } from './storage.js'
 
 export const GROK_CLI_BASE_URL = 'https://cli-chat-proxy.grok.com/v1'
@@ -52,7 +52,16 @@ export function buildGrokFetch(
     )
     transformedBody.model = requestedModel
     transformedBody.stream = true
-    if (grokModelRejectsReasoningEffort(requestedModel)) {
+    const reasoningEffort = resolveGrokReasoningEffort(
+      requestedModel,
+      transformedBody.reasoning?.effort,
+    )
+    if (reasoningEffort) {
+      transformedBody.reasoning = {
+        ...(transformedBody.reasoning ?? {}),
+        effort: reasoningEffort,
+      }
+    } else {
       delete transformedBody.reasoning
     }
 

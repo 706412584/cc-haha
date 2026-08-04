@@ -270,13 +270,13 @@ describe('persistent storage upgrade migrations', () => {
     }
     expect(migrated.env?.CC_HAHA_SEND_DISABLED_THINKING).toBeUndefined()
     expect(migrated.env?.ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES).toBe(
-      'thinking,effort,adaptive_thinking,max_effort',
+      'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
     )
     expect(migrated.env?.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe(
-      'thinking,effort,adaptive_thinking,max_effort',
+      'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
     )
     expect(migrated.env?.ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES).toBe(
-      'thinking,effort,adaptive_thinking,max_effort',
+      'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
     )
     expect(migrated.env?.USER_CUSTOM_ENV).toBe('keep-me')
 

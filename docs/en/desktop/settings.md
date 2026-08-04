@@ -19,7 +19,7 @@ You'll come here once during setup and rarely again. Full steps in [Connecting a
 
 The tab you'll open most often — everything about how the app feels.
 
-![Settings → General: color themes, language, output style, default permissions](../../images/app/settings-general.webp)
+![Settings → General: color themes, language, output style, default permissions](../../images/app/en/settings-general.webp)
 
 - **Color theme** — six of them: Pure White (default), Paper, Warm Classic, Celadon, Ink Night, Ink Blue. There's also **Follow the system**, which lets you pick which theme to use in light mode and which in dark mode.
 - **Language** — the interface language.
@@ -35,7 +35,7 @@ The tab you'll open most often — everything about how the app feels.
 - **UI Zoom** — scale the whole interface, also bound to `⌘+` / `⌘-`, with `⌘0` back to 100%.
 - **Data Storage Location** — an advanced, rarely-touched setting. Defaults to the system directory `~/.claude`, or point it at an absolute path of your own. After switching, sessions, skills, MCP, plugins, and provider config are all read from the new directory; it needs a restart, and the two directories are never merged or migrated automatically.
 
-![The same session in the Ink Night dark theme](../../images/app/session-dark.webp)
+Product screenshots in this guide consistently use the **Pure White** theme so the interface can be compared without palette changes.
 
 ## H5 Access
 
@@ -91,7 +91,7 @@ Let Claude read the screen, click, and type. Unusable until you install the runt
 
 ## Token usage
 
-![Settings → Token usage: heatmap and stat cards](../../images/app/settings-usage.webp)
+![Settings → Token usage: heatmap and stat cards](../../images/app/en/settings-usage.webp)
 
 A usage dashboard computed from the Claude Code session records on this machine. Everything is calculated locally and nothing is uploaded.
 

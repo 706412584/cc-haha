@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'bun:test'
-import { estimateCostUSD, resolveModelCosts } from './usageAccounting.js'
+import {
+  estimateCostUSD,
+  isBillableUsageRecord,
+  resolveModelCosts,
+} from './usageAccounting.js'
 
 const ONE_MILLION = 1_000_000
 
@@ -66,6 +70,27 @@ describe('resolveModelCosts', () => {
     expect(resolveModelCosts('claude-opus-5', 'standard')?.inputTokens).toBe(5)
     // Sonnet has no fast mode — a stray `speed` must not change what it costs.
     expect(resolveModelCosts('claude-sonnet-5', 'fast')?.inputTokens).toBe(3)
+  })
+})
+
+describe('isBillableUsageRecord', () => {
+  it('rejects usage inherited from the source transcript of a fork', () => {
+    expect(isBillableUsageRecord({
+      messageId: 'msg_inherited',
+      requestId: 'req_inherited',
+      forkedFrom: {
+        sessionId: 'source-session',
+        messageUuid: 'source-assistant',
+      },
+    })).toBe(false)
+  })
+
+  it('does not reject an unrelated or malformed provenance value', () => {
+    expect(isBillableUsageRecord({ messageId: 'msg_new' })).toBe(true)
+    expect(isBillableUsageRecord({
+      messageId: 'msg_new',
+      forkedFrom: { sessionId: 'source-session' },
+    })).toBe(true)
   })
 })
 

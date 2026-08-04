@@ -318,6 +318,18 @@ export function writeActivityBackfillState(
   state.updatedAtMs)
 }
 
+export function markActivityBackfillBuilding(
+  operation: LocalIndexWriteOperation,
+  scope: string,
+  updatedAtMs: number,
+): void {
+  operation.run(`
+    UPDATE activity_backfill_state
+    SET state = 'building', updated_at_ms = ?
+    WHERE scope = ?
+  `, updatedAtMs, scope)
+}
+
 export function createActivityIndex(
   database: LocalIndexDatabase,
   options: { shotStatsEnabled?: boolean } = {},

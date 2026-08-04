@@ -37,6 +37,9 @@ const spawnInProcessTeammateMock = mock(async (_config: unknown) => ({
 const startInProcessTeammateMock = mock((_config: unknown) => {})
 const execFileNoThrowModule = await import('../../utils/execFileNoThrow.js')
 const taskFrameworkModule = await import('../../utils/task/framework.js')
+const teamHelpersModule = await import('../../utils/swarm/teamHelpers.js')
+const mutateTeamFileAsyncActual = teamHelpersModule.mutateTeamFileAsync
+const readTeamFileAsyncActual = teamHelpersModule.readTeamFileAsync
 
 mock.module('../../utils/swarm/backends/registry.js', () => ({
   detectAndGetBackend: async () => ({
@@ -73,13 +76,20 @@ mock.module('../../utils/swarm/spawnInProcess.js', () => ({
 }))
 
 mock.module('../../utils/swarm/teamHelpers.js', () => ({
+  ...teamHelpersModule,
   mutateTeamFileAsync: async (
-    _teamName: string,
+    teamName: string,
     mutate: (teamFile: { members: unknown[] }) => void,
   ) => {
+    if (teamName !== 'review-team') {
+      return mutateTeamFileAsyncActual(teamName, mutate)
+    }
     mutate({ members: [] })
   },
-  readTeamFileAsync: async () => null,
+  readTeamFileAsync: async (teamName: string) =>
+    teamName === 'review-team'
+      ? null
+      : readTeamFileAsyncActual(teamName),
   sanitizeAgentName: (name: string) => name.replaceAll('@', '-'),
   sanitizeName: (name: string) =>
     name.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase(),

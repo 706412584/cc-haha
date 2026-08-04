@@ -41,9 +41,10 @@ describe('AdapterHttpClient', () => {
       const call = (globalThis.fetch as any).mock.calls[0]
       expect(call[0]).toBe('http://127.0.0.1:3456/api/sessions')
       const body = JSON.parse(call[1].body)
+      // permissionMode must be omitted so the server can fall back to the
+      // user's global default mode at launch (#1169).
       expect(body).toEqual({
         workDir: fs.realpathSync(rootDir),
-        permissionMode: 'default',
       })
     } finally {
       fs.rmSync(rootDir, { recursive: true, force: true })

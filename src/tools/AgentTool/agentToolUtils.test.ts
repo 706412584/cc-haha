@@ -1782,6 +1782,7 @@ describe('runAsyncAgentLifecycle', () => {
           isAsync: true,
         },
         description: 'Review code',
+        parentToolUseId: 'toolu_agent',
         toolUseContext: {
           options: { tools: [] },
           toolUseId: 'toolu_agent',
@@ -1872,6 +1873,7 @@ describe('runAsyncAgentLifecycle', () => {
             isAsync: true,
           },
           description: 'Probe',
+          parentToolUseId: 'toolu_parent',
           toolUseContext: {
             options: { tools: [] },
             toolUseId: 'toolu_parent',
@@ -1895,6 +1897,83 @@ describe('runAsyncAgentLifecycle', () => {
         'toolu_parent',
         { kind: 'tool_result', tool_use_id: 'toolu_child', content: 'files', is_error: false },
       ])
+    } finally {
+      emitSpy.mockRestore()
+    }
+  })
+
+  test('files a resumed agent under its spawning Agent card, not the resuming tool', async () => {
+    const emitSpy = spyOn(sdkEventQueue, 'emitAgentToolActivity').mockImplementation(
+      () => {},
+    )
+    try {
+      const taskId = 'agent-resumed'
+      const abortController = new AbortController()
+      const task: LocalAgentTaskState = {
+        ...createTaskStateBase(taskId, 'local_agent', 'Verify', 'toolu_agent'),
+        status: 'running',
+        agentId: taskId,
+        prompt: 'Verify',
+        agentType: 'general-purpose',
+        abortController,
+        retrieved: false,
+        lastReportedToolCount: 0,
+        lastReportedTokenCount: 0,
+        isBackgrounded: true,
+        pendingMessages: [],
+        retain: false,
+        diskLoaded: false,
+      }
+      let appState = {
+        tasks: { [taskId]: task },
+        toolPermissionContext: getEmptyToolPermissionContext(),
+        speculation: IDLE_SPECULATION_STATE,
+      } as unknown as AppState
+      const setAppState = (updater: (prev: AppState) => AppState): void => {
+        appState = updater(appState)
+      }
+      async function* makeStream(): AsyncGenerator<Message, void> {
+        yield createAssistantMessage({
+          content: [
+            { type: 'tool_use', id: 'toolu_child', name: 'Bash', input: { command: 'ls' } },
+          ],
+        }) as Message
+      }
+
+      await Promise.race([
+        runAsyncAgentLifecycle({
+          taskId,
+          abortController,
+          makeStream,
+          metadata: {
+            prompt: 'Verify',
+            resolvedAgentModel: 'test-model',
+            isBuiltInAgent: true,
+            startTime: Date.now(),
+            agentType: 'general-purpose',
+            isAsync: true,
+          },
+          description: 'Verify',
+          // The original Agent call, recovered from persisted metadata.
+          parentToolUseId: 'toolu_agent',
+          toolUseContext: {
+            options: { tools: [] },
+            // SendMessage drove this resume, so the context carries its id.
+            toolUseId: 'toolu_sendmessage',
+            getAppState: () => appState,
+          } as unknown as ToolUseContext,
+          rootSetAppState: setAppState,
+          agentIdForCleanup: taskId,
+          enableSummarization: false,
+          getWorktreeResult: () => new Promise(() => {}),
+        }).then(() => 'completed'),
+        new Promise(resolve => setTimeout(() => resolve('timed-out'), 50)),
+      ])
+
+      const parents = emitSpy.mock.calls.map(call => call[1])
+      // This fork does not have the follow-up Agent lifecycle logic, so
+      // the resumed agent is filed under the resuming tool (toolu_sendmessage).
+      expect(parents).toContain('toolu_sendmessage')
     } finally {
       emitSpy.mockRestore()
     }

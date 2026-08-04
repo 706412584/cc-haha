@@ -21,7 +21,7 @@ order: 5
 
 ## 新建任务的每个字段
 
-![「新建定时任务」弹窗：名称、描述、提示词、频率与通知](../images/app/schedule-create.webp)
+![「新建定时任务」弹窗：名称、描述、提示词、频率与通知](../images/app/zh-CN/schedule-create.webp)
 
 - **名称**（必填）— 列表里显示的标识，建议用短横线风格，比如 `daily-code-review`。
 - **描述**（必填）— 一句话说明这个任务干什么，方便以后自己认出来。

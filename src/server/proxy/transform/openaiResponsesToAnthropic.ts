@@ -12,16 +12,25 @@ import type {
 } from './types.js'
 import { parseOpenAIToolArguments } from './toolArguments.js'
 import { openaiUsageToAnthropic } from './usage.js'
+import { encodeOpenAIReasoningEnvelope } from './openaiReasoning.js'
+
+export type OpenAIResponsesToAnthropicOptions = {
+  preserveOpenAIReasoning?: boolean
+}
 
 /**
  * Convert OpenAI Responses API response to Anthropic Messages response.
  */
-export function openaiResponsesToAnthropic(response: OpenAIResponsesResponse, model: string): AnthropicResponse {
+export function openaiResponsesToAnthropic(
+  response: OpenAIResponsesResponse,
+  model: string,
+  options: OpenAIResponsesToAnthropicOptions = {},
+): AnthropicResponse {
   const content: AnthropicContentBlock[] = []
   let hasToolUse = false
 
   for (const item of response.output || []) {
-    convertOutputItem(item, content)
+    convertOutputItem(item, content, options)
     if (item.type === 'function_call') hasToolUse = true
   }
 
@@ -42,7 +51,11 @@ export function openaiResponsesToAnthropic(response: OpenAIResponsesResponse, mo
   }
 }
 
-function convertOutputItem(item: OpenAIResponsesOutputItem, content: AnthropicContentBlock[]): void {
+function convertOutputItem(
+  item: OpenAIResponsesOutputItem,
+  content: AnthropicContentBlock[],
+  options: OpenAIResponsesToAnthropicOptions,
+): void {
   switch (item.type) {
     case 'message': {
       for (const part of item.content || []) {
@@ -64,6 +77,13 @@ function convertOutputItem(item: OpenAIResponsesOutputItem, content: AnthropicCo
       break
     }
     case 'reasoning': {
+      if (options.preserveOpenAIReasoning) {
+        const data = encodeOpenAIReasoningEnvelope(item)
+        if (data) {
+          content.push({ type: 'redacted_thinking', data })
+          break
+        }
+      }
       if (item.summary) {
         for (const s of item.summary) {
           if (s.text) {

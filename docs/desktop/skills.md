@@ -13,7 +13,7 @@ order: 4
 
 ## 技能市场
 
-![技能市场：卡片列表、安全徽标和来源筛选](../images/app/skill-market.webp)
+![技能市场：卡片列表、安全徽标和来源筛选](../images/app/zh-CN/skill-market.webp)
 
 点侧边栏的「技能市场」。它同时聚合 **ClawHub** 和 **SkillHub** 两个来源，列表往下滚会自动加载更多，没有「加载更多」按钮。
 

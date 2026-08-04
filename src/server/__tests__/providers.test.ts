@@ -258,7 +258,7 @@ describe('ProviderService', () => {
       await expect(fs.readFile(path.join(tmpDir, 'cc-haha', 'settings.json'), 'utf-8')).rejects.toThrow()
     })
 
-    test('custom providers declare thinking and effort capability passthrough for user-defined models', async () => {
+    test('custom providers keep thinking compatibility without narrowing CLI effort', async () => {
       const svc = new ProviderService()
       const provider = await svc.addProvider(sampleInput({
         models: {
@@ -285,7 +285,7 @@ describe('ProviderService', () => {
       )
     })
 
-    test('Xiaomi MiMo custom providers declare thinking without effort passthrough', async () => {
+    test('Xiaomi MiMo custom Anthropic providers keep the compatibility effort fallback', async () => {
       const svc = new ProviderService()
       const provider = await svc.addProvider(sampleInput({
         name: 'Xiaomi MiMo Custom',
@@ -302,9 +302,15 @@ describe('ProviderService', () => {
 
       const settings = await readSettings()
       const env = settings.env as Record<string, string>
-      expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe('thinking')
-      expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES).toBe('thinking')
-      expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES).toBe('thinking')
+      expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe(
+        'thinking',
+      )
+      expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES).toBe(
+        'thinking',
+      )
+      expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES).toBe(
+        'thinking',
+      )
     })
 
     test('custom providers can mark main and role models as 1M-capable', async () => {
@@ -539,6 +545,29 @@ describe('ProviderService', () => {
           hasAuth: true,
           source: 'openai-oauth',
           activeProvider: 'ChatGPT Official',
+        })
+      })
+
+      test('auth status reports Claude Official from the desktop Claude token file', async () => {
+        await fs.mkdir(path.join(tmpDir, 'cc-haha'), { recursive: true })
+        await fs.writeFile(
+          path.join(tmpDir, 'cc-haha', 'oauth.json'),
+          JSON.stringify({
+            accessToken: 'claude-access',
+            refreshToken: 'claude-refresh',
+            expiresAt: Date.now() + 60 * 60_000,
+            scopes: [],
+            subscriptionType: 'pro',
+          }),
+          'utf-8',
+        )
+
+        const svc = new ProviderService()
+
+        await expect(svc.checkAuthStatus()).resolves.toMatchObject({
+          hasAuth: true,
+          source: 'claude-oauth',
+          activeProvider: 'Claude Official',
         })
       })
 
@@ -1660,7 +1689,7 @@ describe('ProviderService', () => {
             model: 'gpt-4',
             max_tokens: 64,
             system: [
-              { type: 'text', text: 'x-anthropic-billing-header: cc_version=2.1.92.693; cc_entrypoint=cli; cch=00000;' },
+              { type: 'text', text: 'x-anthropic-billing-header: cc_version=2.1.220.693; cc_entrypoint=cli; cch=00000;' },
               { type: 'text', text: 'You are a helpful assistant.' },
             ],
             messages: [{ role: 'user', content: 'hello from proxy' }],

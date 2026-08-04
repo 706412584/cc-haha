@@ -17,8 +17,8 @@ import type {
   ToolUsageMap,
 } from './stats.js'
 
-export const STATS_CACHE_VERSION = 6
-const MIN_MIGRATABLE_VERSION = 6
+export const STATS_CACHE_VERSION = 7
+const MIN_MIGRATABLE_VERSION = 7
 const STATS_CACHE_FILENAME = 'stats-cache.json'
 
 /**
@@ -110,10 +110,10 @@ function getEmptyCache(): PersistedStatsCache {
  * Migrate an older cache to the current schema.
  * Returns null if the version is unknown or too old to migrate.
  *
- * Daily activity accounting changed in v5, and v6 added historical tool/skill
- * usage. Older caches are intentionally rejected so the next aggregation
- * recomputes fields that cannot be reconstructed from aggregate-only cache
- * files without undercounting.
+ * Daily activity accounting changed in v5, v6 added historical tool/skill usage,
+ * and v7 excludes token usage copied into fork transcripts. Older caches are
+ * intentionally rejected so the next aggregation recomputes fields that cannot
+ * be reconstructed from aggregate-only cache files.
  */
 function migrateStatsCache(
   parsed: Partial<PersistedStatsCache> & { version: number },

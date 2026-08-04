@@ -10,6 +10,7 @@ type TaskStartedEvent = {
   tool_use_id?: string
   description: string
   task_type?: string
+  remote_session_id?: string
   workflow_name?: string
   prompt?: string
 }
@@ -138,7 +139,9 @@ export function drainSdkEvents(): Array<
 /**
  * Emit a task_notification SDK event for a task reaching a terminal state.
  *
- * registerTask() always emits task_started; this is the closing bookend.
+ * registerTask() emits task_started for session-visible tasks; this is their
+ * closing bookend. Agent-owned shell tasks stay scoped to their Agent tool call
+ * and intentionally do not enter the session task event stream.
  * Call this from any exit path that sets a task terminal WITHOUT going
  * through enqueuePendingNotification-with-<task-id> (print.ts parses that
  * XML into the same SDK event, so paths that do both would double-emit).

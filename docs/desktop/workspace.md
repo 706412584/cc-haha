@@ -20,7 +20,7 @@ order: 2
 
 ## 已更改文件 / 所有文件
 
-![工作区「已更改文件」列表，每行带状态标记和增删行数](../images/app/workspace-changes.webp)
+![工作区「已更改文件」列表，每行带状态标记和增删行数](../images/app/zh-CN/workspace-changes.webp)
 
 文件模式下有两个视图：
 
@@ -35,7 +35,7 @@ order: 2
 
 ## Diff 评审：给某一行留话
 
-![Diff 评审界面，左右对照并带语法高亮](../images/app/workspace-diff.webp)
+![Diff 评审界面，左右对照并带语法高亮](../images/app/zh-CN/workspace-diff.webp)
 
 Diff 保留旧行和新行，带语法高亮。真正有用的是行级评论：
 
@@ -66,7 +66,7 @@ Diff 保留旧行和新行，带语法高亮。真正有用的是行级评论：
 
 ## 内置浏览器
 
-![内置浏览器预览刚改完的页面](../images/app/workspace-preview.webp)
+![内置浏览器预览刚改完的页面](../images/app/zh-CN/workspace-preview.webp)
 
 把工作区切到「浏览器」，地址栏里填本地开发地址或者任意网址就能预览。这里有三个专门为「让 Claude 看见」设计的按钮：
 

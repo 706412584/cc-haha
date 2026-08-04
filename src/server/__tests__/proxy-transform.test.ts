@@ -12,7 +12,7 @@ import { openaiUsageToAnthropic } from '../proxy/transform/usage.js'
 import { resolvePromptCacheKey } from '../proxy/promptCacheKey.js'
 import type { AnthropicRequest, OpenAIChatResponse, OpenAIResponsesResponse } from '../proxy/transform/types.js'
 
-const BILLING_HEADER = 'x-anthropic-billing-header: cc_version=2.1.92.693; cc_entrypoint=cli; cch=00000;'
+const BILLING_HEADER = 'x-anthropic-billing-header: cc_version=2.1.220.693; cc_entrypoint=cli; cch=00000;'
 
 // ─── anthropicToOpenaiChat ──────────────────────────────────────
 
@@ -197,6 +197,17 @@ describe('anthropicToOpenaiChat', () => {
     expect(result.reasoning_effort).toBe('high')
   })
 
+  test('preserves provider-specific effort values for the upstream compatibility layer', () => {
+    const req: AnthropicRequest = {
+      model: 'deepseek-v4-pro',
+      max_tokens: 100,
+      messages: [{ role: 'user', content: 'Hi' }],
+      output_config: { effort: 'medium' },
+    }
+
+    expect(anthropicToOpenaiChat(req).reasoning_effort).toBe('medium')
+  })
+
   test('preserves xhigh output_config effort for OpenAI-compatible chat providers', () => {
     const req: AnthropicRequest = {
       model: 'gpt-5.6-luna',
@@ -209,7 +220,7 @@ describe('anthropicToOpenaiChat', () => {
     expect(result.reasoning_effort).toBe('xhigh')
   })
 
-  test('clamps max output_config effort to high for OpenAI-compatible chat providers', () => {
+  test('preserves max output_config effort for OpenAI-compatible chat providers', () => {
     const req: AnthropicRequest = {
       model: 'longcat',
       max_tokens: 100,
@@ -218,7 +229,7 @@ describe('anthropicToOpenaiChat', () => {
     }
 
     const result = anthropicToOpenaiChat(req)
-    expect(result.reasoning_effort).toBe('high')
+    expect(result.reasoning_effort).toBe('max')
   })
 
   test('assistant message with tool_use', () => {
@@ -729,6 +740,28 @@ describe('anthropicToOpenaiResponses', () => {
     expect(result.reasoning).toEqual({ effort: 'high' })
   })
 
+  test('OpenAI OAuth mode restores namespaced redacted thinking as encrypted reasoning input', () => {
+    const req = {
+      model: 'gpt-5.6-terra',
+      max_tokens: 100,
+      messages: [{
+        role: 'assistant',
+        content: [{
+          type: 'redacted_thinking',
+          data: 'cc-haha:openai-reasoning:v1:{"id":"rs_1","summary":[],"encrypted_content":"encrypted-reasoning"}',
+        }],
+      }],
+    } as AnthropicRequest
+
+    expect(anthropicToOpenaiResponses(req).input).toEqual([])
+    expect(anthropicToOpenaiResponses(req, { preserveOpenAIReasoning: true }).input).toEqual([{
+      type: 'reasoning',
+      id: 'rs_1',
+      summary: [],
+      encrypted_content: 'encrypted-reasoning',
+    }])
+  })
+
   test('output_config effort → reasoning effort', () => {
     const req: AnthropicRequest = {
       model: 'gpt-5.5',
@@ -754,7 +787,7 @@ describe('anthropicToOpenaiResponses', () => {
     expect(result.reasoning).toEqual({ effort: 'xhigh' })
   })
 
-  test('clamps max output_config effort for Responses API', () => {
+  test('preserves max output_config effort for Responses API', () => {
     const req: AnthropicRequest = {
       model: 'gpt-5.5',
       max_tokens: 100,
@@ -763,7 +796,7 @@ describe('anthropicToOpenaiResponses', () => {
     }
 
     const result = anthropicToOpenaiResponses(req)
-    expect(result.reasoning).toEqual({ effort: 'high' })
+    expect(result.reasoning).toEqual({ effort: 'max' })
   })
 
   test('stop_sequences dropped', () => {
@@ -950,6 +983,56 @@ describe('openaiResponsesToAnthropic', () => {
       expect(result.content[0].thinking).toBe('Thinking...')
     }
     expect(result.content[1].type).toBe('text')
+  })
+
+  test('OpenAI OAuth mode preserves encrypted reasoning as namespaced redacted thinking', () => {
+    const res: OpenAIResponsesResponse = {
+      id: 'resp_reasoning_encrypted',
+      object: 'response',
+      created_at: 0,
+      model: 'gpt-5.6-terra',
+      status: 'completed',
+      output: [{
+        type: 'reasoning',
+        id: 'rs_encrypted',
+        summary: [],
+        encrypted_content: 'opaque-reasoning',
+      }],
+    }
+
+    const result = openaiResponsesToAnthropic(
+      res,
+      'gpt-5.6-terra',
+      { preserveOpenAIReasoning: true },
+    )
+
+    expect(result.content[0]).toMatchObject({ type: 'redacted_thinking' })
+    if (result.content[0].type === 'redacted_thinking') {
+      expect(result.content[0].data).toContain('opaque-reasoning')
+    }
+  })
+
+  test('OpenAI OAuth mode falls back to reasoning summary without encrypted content', () => {
+    const res: OpenAIResponsesResponse = {
+      id: 'resp_reasoning_summary',
+      object: 'response',
+      created_at: 0,
+      model: 'gpt-5.6-terra',
+      status: 'completed',
+      output: [{
+        type: 'reasoning',
+        id: 'rs_summary',
+        summary: [{ type: 'summary_text', text: 'safe summary' }],
+      }],
+    }
+
+    const result = openaiResponsesToAnthropic(
+      res,
+      'gpt-5.6-terra',
+      { preserveOpenAIReasoning: true },
+    )
+
+    expect(result.content).toEqual([{ type: 'thinking', thinking: 'safe summary' }])
   })
 
   test('status incomplete → max_tokens', () => {

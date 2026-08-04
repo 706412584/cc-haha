@@ -40,6 +40,10 @@ import { runCleanupFunctions } from './cleanupRegistry.js'
 import { logForDebugging } from './debug.js'
 import { logForDiagnosticsNoPII } from './diagLogs.js'
 import { isEnvTruthy } from './envUtils.js'
+import {
+  flushProcessOutput,
+  getProcessOutputDrainTimeoutMs,
+} from './process.js'
 import { getCurrentSessionTitle, sessionIdExists } from './sessionStorage.js'
 import { sleep } from './sleep.js'
 import { profileReport } from './startupProfiler.js'
@@ -410,17 +414,19 @@ export async function gracefulShutdown(
     './hooks.js'
   )
   const sessionEndTimeoutMs = getSessionEndHookTimeoutMs()
+  const outputDrainTimeoutMs = getProcessOutputDrainTimeoutMs()
 
   // Failsafe: guarantee process exits even if cleanup hangs (e.g., MCP connections).
   // Runs cleanupTerminalModes first so a hung cleanup doesn't leave the terminal dirty.
-  // Budget = max(5s, hook budget + 3.5s headroom for cleanup + analytics flush).
+  // Budget = max(5s, hook budget + 3.5s headroom for cleanup + analytics flush),
+  // plus a bounded drain budget that scales with output already queued.
   failsafeTimer = setTimeout(
     code => {
       cleanupTerminalModes()
       printResumeHint()
       forceExit(code)
     },
-    Math.max(5000, sessionEndTimeoutMs + 3500),
+    Math.max(5000, sessionEndTimeoutMs + 3500) + outputDrainTimeoutMs,
     exitCode,
   )
   failsafeTimer.unref()
@@ -518,6 +524,8 @@ export async function gracefulShutdown(
       // stderr may be closed (e.g., SSH disconnect). Ignore write errors.
     }
   }
+
+  await flushProcessOutput(outputDrainTimeoutMs)
 
   forceExit(exitCode)
 }

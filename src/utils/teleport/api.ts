@@ -3,7 +3,10 @@ import { randomUUID } from 'crypto'
 import { getOauthConfig } from 'src/constants/oauth.js'
 import { getOrganizationUUID } from 'src/services/oauth/client.js'
 import z from 'zod/v4'
-import { getClaudeAIOAuthTokens } from '../auth.js'
+import {
+  checkAndRefreshOAuthTokenIfNeeded,
+  getClaudeAIOAuthTokens,
+} from '../auth.js'
 import { logForDebugging } from '../debug.js'
 import { parseGitHubRepository } from '../detectRepository.js'
 import { errorMessage, toError } from '../errors.js'
@@ -195,6 +198,74 @@ export async function prepareApiRequest(): Promise<{
   }
 
   return { accessToken, orgUUID }
+}
+
+const REMOTE_SESSION_ID_PATTERN = /^[A-Za-z0-9_-]+$/
+
+/**
+ * Archive a remote Agent session and reject unless the API confirms it.
+ * 409 is success because the archive operation is intentionally idempotent.
+ */
+export async function archiveRemoteSession(
+  sessionId: string,
+  options?: { timeoutMs?: number },
+): Promise<void> {
+  if (!REMOTE_SESSION_ID_PATTERN.test(sessionId)) {
+    throw new Error('Invalid remote session id')
+  }
+
+  const timeoutMs = options?.timeoutMs ?? 10_000
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error('Remote session archive timeout must be positive')
+  }
+
+  const deadline = Date.now() + timeoutMs
+  const controller = new AbortController()
+  const timeoutError = () => new Error(
+    `Remote session archive timed out after ${timeoutMs}ms`,
+  )
+  const ensureWithinDeadline = () => {
+    if (controller.signal.aborted || Date.now() >= deadline) throw timeoutError()
+  }
+
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  const deadlinePromise = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => {
+      reject(timeoutError())
+      controller.abort()
+    }, timeoutMs)
+    if (typeof timeout === 'object') timeout.unref?.()
+  })
+  const archive = (async () => {
+    await checkAndRefreshOAuthTokenIfNeeded()
+    ensureWithinDeadline()
+    const { accessToken, orgUUID } = await prepareApiRequest()
+    ensureWithinDeadline()
+    const url = `${getOauthConfig().BASE_API_URL}/v1/sessions/${sessionId}/archive`
+    const response = await axios.post(url, {}, {
+      headers: {
+        ...getOAuthHeaders(accessToken),
+        'anthropic-beta': CCR_BYOC_BETA,
+        'x-organization-uuid': orgUUID,
+      },
+      timeout: timeoutMs,
+      signal: controller.signal,
+      validateStatus: () => true,
+    })
+
+    if (response.status === 200 || response.status === 409) {
+      logForDebugging(`[archiveRemoteSession] archived ${sessionId}`)
+      return
+    }
+
+    throw new Error(`Failed to archive remote session: HTTP ${response.status}`)
+  })()
+
+  try {
+    await Promise.race([archive, deadlinePromise])
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout)
+  }
 }
 
 /**

@@ -38,7 +38,7 @@ order: 3
 
 ## 看已经装了哪些
 
-![设置 → Agents：按来源分组的 Agent 浏览器](../images/app/settings-agents.webp)
+![设置 → Agents：按来源分组的 Agent 浏览器](../images/app/zh-CN/settings-agents.webp)
 
 打开 设置 → Agents。顶部三张卡是总数、生效中、来源类型数，下面按来源分组：
 
@@ -53,7 +53,7 @@ order: 3
 
 ## 捏一个自己的
 
-![「创建 Agent」弹窗：作用域、模型、思考强度、工具、系统提示词](../images/app/agent-create.webp)
+![「创建 Agent」弹窗：作用域、模型、思考强度、工具、系统提示词](../images/app/zh-CN/agent-create.webp)
 
 点右上角「创建 Agent」，要填的字段：
 

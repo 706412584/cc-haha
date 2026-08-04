@@ -20,7 +20,7 @@ order: 8
 3. 从「内置宠物」里挑一个。
 4. 打开「显示桌面宠物」。
 
-![设置 → 宠物：四只内置宠物与外观参数](../images/app/settings-pets.webp)
+![设置 → 宠物：四只内置宠物与外观参数](../images/app/zh-CN/settings-pets.webp)
 
 ## 四只内置宠物
 
@@ -35,7 +35,7 @@ order: 8
 
 ## 和它互动
 
-![桌宠悬浮在桌面上](../images/app/pet-desktop.webp)
+![桌宠悬浮在桌面上](../images/app/zh-CN/pet-desktop.webp)
 
 - **悬停** — 空闲时它会跳一下，视线跟着你的指针转。
 - **单击** — 唤起主窗口，同时挥个手。注意它只是把窗口叫出来，不会自动跳进某条会话。

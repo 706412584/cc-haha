@@ -5,12 +5,14 @@ import type { QuerySource } from '../../constants/querySource.js'
 import type { ToolUseContext } from '../../Tool.js'
 import type { Message } from '../../types/message.js'
 import { getGlobalConfig } from '../../utils/config.js'
-import { getContextWindowForModel } from '../../utils/context.js'
+import { getContextWindowForModel, has1mContext } from '../../utils/context.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { isEnvTruthy } from '../../utils/envUtils.js'
 import { hasExactErrorMessage } from '../../utils/errors.js'
 import type { CacheSafeParams } from '../../utils/forkedAgent.js'
 import { logError } from '../../utils/log.js'
+import { getOpenAICodexContextWindowForModel } from '../../services/openaiAuth/models.js'
+import { getConfiguredOrBuiltInModelContextWindow } from '../../utils/model/modelContextWindows.js'
 import { tokenCountWithEstimation } from '../../utils/tokens.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../analytics/growthbook.js'
 import { getMaxOutputTokensForModel } from '../api/claude.js'
@@ -41,7 +43,19 @@ export function getEffectiveContextWindowSize(model: string): number {
   if (autoCompactWindow) {
     const parsed = parseInt(autoCompactWindow, 10)
     if (!isNaN(parsed) && parsed > 0) {
-      contextWindow = parsed
+      // For models with a known window (configured, built-in, [1m], or Codex
+      // catalog) the global override can only lower it — a 1M value left over
+      // from another provider's preset must not pin a smaller model above its
+      // provider's hard cap, where auto-compact never fires (#1162). Unknown
+      // models resolve to the 200K default, and this env is the only way to
+      // declare their real window, so there it applies directly.
+      const hasKnownWindow =
+        has1mContext(model) ||
+        getConfiguredOrBuiltInModelContextWindow(model) !== undefined ||
+        getOpenAICodexContextWindowForModel(model) != null
+      contextWindow = hasKnownWindow
+        ? Math.min(contextWindow, parsed)
+        : parsed
     }
   }
 

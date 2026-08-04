@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -10,7 +19,12 @@ import {
 } from '../../bootstrap/state.js'
 import { resetGitFileWatcher } from '../git/gitFilesystem.js'
 import { resetSettingsCache } from '../settings/settingsCache.js'
-import { createAgentWorktree, worktreeBranchName } from '../worktree.js'
+import {
+  cleanupStaleAgentWorktrees,
+  createAgentWorktree,
+  removeAgentWorktree,
+  worktreeBranchName,
+} from '../worktree.js'
 
 let tempDir: string
 let repoDir: string
@@ -45,6 +59,21 @@ function writeRepoFile(relativePath: string, content: string): void {
 function commit(message: string): void {
   runGit(repoDir, ['add', '.'])
   runGit(repoDir, ['commit', '-m', message])
+}
+
+function commitExternalWorktreesSymlink(): string {
+  const externalDir = join(tempDir, 'external-worktrees')
+  mkdirSync(externalDir)
+  mkdirSync(join(repoDir, '.claude'), { recursive: true })
+  writeRepoFile('.claude/README.md', 'worktree configuration\n')
+  symlinkSync(
+    externalDir,
+    join(repoDir, '.claude', 'worktrees'),
+    process.platform === 'win32' ? 'junction' : 'dir',
+  )
+  commit('add external worktrees symlink')
+  runGit(repoDir, ['push', 'origin', 'main'])
+  return externalDir
 }
 
 describe('createAgentWorktree', () => {
@@ -94,7 +123,8 @@ describe('createAgentWorktree', () => {
 
   test('creates agent worktree branches without upstream tracking config', async () => {
     const slug = 'agent-race-proof'
-    const { worktreeBranch } = await createAgentWorktree(slug)
+    const { gitRoot, worktreeBranch, worktreePath } =
+      await createAgentWorktree(slug)
 
     expect(worktreeBranch).toBe(worktreeBranchName(slug))
 
@@ -113,5 +143,75 @@ describe('createAgentWorktree', () => {
     expect(upstreamRemote.stdout.trim()).toBe('')
     expect(upstreamMerge.exitCode).not.toBe(0)
     expect(upstreamMerge.stdout.trim()).toBe('')
+
+    expect(
+      await removeAgentWorktree(worktreePath, worktreeBranch, gitRoot),
+    ).toBe(true)
+    expect(existsSync(worktreePath)).toBe(false)
+  })
+
+  test('refuses a repository-committed worktrees symlink before creating outside the repository', async () => {
+    const externalDir = commitExternalWorktreesSymlink()
+
+    await expect(createAgentWorktree('agent-symlink-escape')).rejects.toThrow(
+      'Refusing to use unsafe worktree path',
+    )
+
+    expect(await cleanupStaleAgentWorktrees(new Date())).toBe(0)
+    expect(readdirSync(externalDir)).toEqual([])
+  })
+
+  test('refuses to remove a worktree through a repository worktrees symlink', async () => {
+    const externalDir = commitExternalWorktreesSymlink()
+    const slug = 'agent-a1234567'
+    const branch = worktreeBranchName(slug)
+    const linkedWorktreePath = join(repoDir, '.claude', 'worktrees', slug)
+    const externalWorktreePath = join(externalDir, slug)
+    runGit(repoDir, [
+      'worktree',
+      'add',
+      '-b',
+      branch,
+      linkedWorktreePath,
+      'HEAD',
+    ])
+    writeFileSync(join(externalWorktreePath, 'keep.txt'), 'must remain\n')
+
+    expect(
+      await removeAgentWorktree(linkedWorktreePath, branch, repoDir),
+    ).toBe(false)
+    expect(readFileSync(join(externalWorktreePath, 'keep.txt'), 'utf8')).toBe(
+      'must remain\n',
+    )
+  })
+
+  test('stale cleanup skips a symlinked worktree entry and rejects non-child removal paths', async () => {
+    const externalDir = join(tempDir, 'external-agent-worktree')
+    const worktreesDir = join(repoDir, '.claude', 'worktrees')
+    const slug = 'agent-a1234567'
+    const linkedWorktreePath = join(worktreesDir, slug)
+    mkdirSync(externalDir, { recursive: true })
+    mkdirSync(worktreesDir, { recursive: true })
+    writeFileSync(join(externalDir, 'keep.txt'), 'must remain\n')
+    symlinkSync(
+      externalDir,
+      linkedWorktreePath,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    )
+
+    expect(
+      await cleanupStaleAgentWorktrees(new Date(Date.now() + 60_000)),
+    ).toBe(0)
+    expect(readFileSync(join(externalDir, 'keep.txt'), 'utf8')).toBe(
+      'must remain\n',
+    )
+
+    expect(
+      await removeAgentWorktree(
+        join(repoDir, '.claude', 'not-worktrees', slug),
+        worktreeBranchName(slug),
+        repoDir,
+      ),
+    ).toBe(false)
   })
 })

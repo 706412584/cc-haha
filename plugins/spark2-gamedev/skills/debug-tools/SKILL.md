@@ -127,9 +127,64 @@ For the same open project, replacing `GameEntry.dll` does not require restarting
 
 When overriding framework DLLs such as `GameGraph.dll` during editor debugging, set `project/use_local_appbundle_config.txt` to `2` and copy the replacement DLLs into `AppBundle/managed` and `ui/AppBundle/managed`. Value `2` keeps the normal editor/update wasm runtime and base AppBundle, but loads same-name local DLL overrides. Use value `3` only for a full local AppBundle run where DLLs, BCL payload, and wasm files all come from the project AppBundle and the editor/update payload is skipped.
 
-## Runtime MCP Inspection
+## Calling Editor MCP Tools From Agent (Bash Fallback)
 
-After `debug_start` or `debug_start_no_compile`, call runtime tools through the outer MCP bridge:
+When `debug_start` / `debug_stop` / `runtime_call_tool` are not registered as direct MCP tool calls in the agent's tool list, call them via HTTP JSON-RPC to the editor MCP port (default 8765):
+
+```powershell
+# Stop current debug session
+$body = '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"debug_stop","arguments":{}}}';
+$resp = Invoke-WebRequest -Uri 'http://127.0.0.1:8765' -Method POST -Body $body -ContentType 'application/json' -UseBasicParsing;
+$resp.Content
+
+# Start new debug session (full compile)
+$body = '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"debug_start","arguments":{}}}';
+$resp = Invoke-WebRequest -Uri 'http://127.0.0.1:8765' -Method POST -Body $body -ContentType 'application/json' -UseBasicParsing;
+$resp.Content
+```
+
+`debug_start` returns `{"state":"queued",...}` immediately — compile has not finished. Do NOT ping runtime right after.
+
+## Two Distinct Runtime MCP Paths (Critical)
+
+There are two completely different channels, and mixing them up causes silent failures:
+
+| Channel | Port | Tool | Use for |
+|---------|------|------|---------|
+| **Editor-internal debug** | 8765 (editor MCP) | `runtime_call_tool` via editor MCP | Games launched by editor debug button / `debug_start` |
+| **Standalone client-only** | 18765 (TCP) | `Invoke-SceRuntimeMcp.ps1` or `spar_f1fc566c8f084d91` SCE Bridge | Games launched by `Start-SceClientOnlyDebug.ps1` |
+
+**DO NOT** call `Invoke-SceRuntimeMcp.ps1 -Ping -Wait` for editor-internal debug sessions — port 18765 is never opened by the embedded client. It will always time out.
+
+For editor-internal sessions, runtime inspection uses the editor MCP's `runtime_call_tool`:
+
+```json
+{
+  "tool": "runtime_call_tool",
+  "arguments": {
+    "name": "debug.ping",
+    "arguments": {},
+    "port": 18765,
+    "timeout_ms": 5000
+  }
+}
+```
+
+Or via Bash fallback:
+
+```powershell
+$body = '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"runtime_call_tool","arguments":{"name":"debug.ping","arguments":{},"port":18765,"timeout_ms":5000}}}';
+Invoke-WebRequest -Uri 'http://127.0.0.1:8765' -Method POST -Body $body -ContentType 'application/json' -UseBasicParsing | Select-Object -Expand Content
+```
+
+## Stop → Start Sequence Rules
+
+1. Call `debug_stop` and verify response before calling `debug_start`.
+2. After `debug_start` returns `queued`, **wait for compile to finish** (watch for new log files under `logs/server/`) before pinging runtime.
+3. **Never immediately stop then start** in the same turn — the previous session may still be shutting down when the new one starts compiling.
+4. After compile completes (new `core-game-server-*.log` appears), wait ~5s for the client Wasmtime to init before calling `runtime_call_tool`.
+
+
 
 ```json
 {

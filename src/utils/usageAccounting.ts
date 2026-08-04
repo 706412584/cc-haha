@@ -127,6 +127,7 @@ export type UsageRecordIdentity = {
   sessionId?: unknown
   requestId?: unknown
   messageId?: unknown
+  forkedFrom?: unknown
 }
 
 /** `1.0.24`, `2.3.4-beta` — anything else marks a log written by something that isn't Claude Code. */
@@ -144,11 +145,29 @@ function isSemverPrefix(value: string): boolean {
  * activity signals rather than billing ones.
  */
 export function isBillableUsageRecord(identity: UsageRecordIdentity): boolean {
+  if (isForkInheritedUsageRecord(identity)) return false
   if (typeof identity.version === 'string' && !isSemverPrefix(identity.version)) return false
   for (const value of [identity.sessionId, identity.requestId, identity.messageId]) {
     if (typeof value === 'string' && value.length === 0) return false
   }
   return true
+}
+
+/**
+ * Conversation branches copy the selected prefix into a new transcript so the fork keeps its
+ * context. Those lines retain their original usage and carry this provenance marker; the API calls
+ * belong to the source session and must not be attributed to the fork a second time.
+ */
+export function isForkInheritedUsageRecord(record: { forkedFrom?: unknown }): boolean {
+  const forkedFrom = record.forkedFrom
+  if (!forkedFrom || typeof forkedFrom !== 'object') return false
+  const source = forkedFrom as { sessionId?: unknown; messageUuid?: unknown }
+  return (
+    typeof source.sessionId === 'string' &&
+    source.sessionId.length > 0 &&
+    typeof source.messageUuid === 'string' &&
+    source.messageUuid.length > 0
+  )
 }
 
 /**

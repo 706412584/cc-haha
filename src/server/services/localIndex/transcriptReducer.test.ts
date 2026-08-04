@@ -490,6 +490,43 @@ describe('reduceTranscript activity usage', () => {
     expect(modelTotals(result)[0]).toMatchObject({ inputTokens: 2000, outputTokens: 400 })
   })
 
+  it('does not attribute inherited fork history to the fork usage total', () => {
+    const chunks = completeChunks([
+      ...assistantBlockLines({
+        messageId: 'msg_inherited',
+        requestId: 'req_inherited',
+        timestamp: '2026-01-01T10:00:00.000Z',
+        usage: STANDARD_USAGE,
+        blocks: [{ type: 'text', text: 'copied from the source session' }],
+        extra: {
+          sessionId: 'fork-session',
+          forkedFrom: {
+            sessionId: 'source-session',
+            messageUuid: 'source-assistant',
+          },
+        },
+      }),
+      ...assistantBlockLines({
+        messageId: 'msg_new',
+        requestId: 'req_new',
+        timestamp: '2026-01-01T10:05:00.000Z',
+        usage: { input_tokens: 7, output_tokens: 3 },
+        blocks: [{ type: 'text', text: 'generated in the fork' }],
+        extra: { sessionId: 'fork-session' },
+      }),
+    ])
+
+    const result = reduceTranscript(chunks, initialProjection())
+
+    expect(modelTotals(result)).toEqual([{
+      model: 'claude-opus-5',
+      inputTokens: 7,
+      outputTokens: 3,
+      cacheReadInputTokens: 0,
+      cacheCreationInputTokens: 0,
+    }])
+  })
+
   it('keeps deduplicating across an incremental read', () => {
     const [firstLine, ...restLines] = assistantBlockLines({
       messageId: 'msg_split',
