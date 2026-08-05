@@ -23,4 +23,23 @@ describe('desktop index startup diagnostics', () => {
     expect(html).toContain('Startup resource failed to load:')
     expect(html).toContain('Desktop app did not finish bootstrapping within')
   })
+
+  // A composer attachment dragged in from outside the workspace is previewed from
+  // `URL.createObjectURL(file)`, and the annotation editor has to `fetch()` that same
+  // blob URL to get pixels onto its canvas. `img-src blob:` alone let the thumbnail
+  // render while CSP silently blocked the fetch, so the editor opened black.
+  // Both directives must stay in sync.
+  it('allows blob: in every directive that reads an attachment preview', () => {
+    const csp = html.match(/Content-Security-Policy"\s*\n?\s*content="([^"]+)"/)?.[1]
+    expect(csp).toBeDefined()
+
+    for (const directive of ['img-src', 'connect-src']) {
+      const value = csp!
+        .split(';')
+        .map((part) => part.trim())
+        .find((part) => part.startsWith(`${directive} `))
+      expect(value, `${directive} missing from CSP`).toBeDefined()
+      expect(value, `${directive} must allow blob:`).toContain('blob:')
+    }
+  })
 })

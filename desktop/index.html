@@ -7,12 +7,16 @@
       script/style keep 'unsafe-inline' + 'unsafe-eval' on purpose - Emotion CSS-in-JS
       injects runtime <style> tags, the startup watchdog below is inline, and shiki/
       mermaid/Vite rely on eval. connect-src stays permissive (localhost sidecar + ws +
-      https) so renderer fetches and dev HMR keep working. Tighten only after verifying
-      on a packaged build.
+      https) so renderer fetches and dev HMR keep working. It must also list `blob:`:
+      composer image attachments are held as `URL.createObjectURL` blobs, and the
+      annotation editor `fetch()`es that blob back to rasterize it onto a canvas.
+      `img-src blob:` alone only covers rendering the preview, so omitting it here
+      makes previews work while the annotation canvas stays blank. Tighten only after
+      verifying on a packaged build.
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob: https: http://127.0.0.1:* http://localhost:*; connect-src 'self' https: http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*; worker-src 'self' blob:; object-src 'none'; base-uri 'self'"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob: https: http://127.0.0.1:* http://localhost:*; connect-src 'self' blob: https: http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*; worker-src 'self' blob:; object-src 'none'; base-uri 'self'"
     />
     <!--
       `viewport-fit=cover` MUST live here, in the markup. iOS WebKit reads the
