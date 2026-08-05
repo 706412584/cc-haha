@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
 import { Modal } from '@/components/ui/Modal'
-import { getAuthToken } from '../../api/client'
 import { useOverlayStore } from '../../stores/overlayStore'
 
 type Tool = 'rect' | 'arrow' | 'text'
@@ -32,10 +31,7 @@ type TextDrag = {
 
 async function imageSourceToDataUrl(src: string): Promise<string> {
   if (src.startsWith('data:')) return src
-  const headers: Record<string, string> = {}
-  const token = getAuthToken()
-  if (token) headers.Authorization = `Bearer ${token}`
-  const response = await fetch(src, { headers })
+  const response = await fetch(src)
   if (!response.ok) throw new Error(`Failed to load image: HTTP ${response.status}`)
   const blob = await response.blob()
   return new Promise((resolve, reject) => {

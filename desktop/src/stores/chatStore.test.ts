@@ -53,6 +53,7 @@ const {
       projectPath: string
       workDir: string | null
       workDirExists: boolean
+      permissionMode?: string
     }>,
   },
   cliTaskStoreSnapshot: {
