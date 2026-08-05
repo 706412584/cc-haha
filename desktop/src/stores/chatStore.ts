@@ -1410,6 +1410,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         persistedSelection.thinkingEnabled === runtimeSelection.thinkingEnabled
       if (!isAlreadyPersisted) get().setSessionRuntime(sessionId, runtimeSelection)
     }
+    // Replay the per-session permission mode on (re)connect so the CLI
+    // starts with the user's chosen mode even if the session metadata file
+    // hasn't been flushed yet (race between create API and prewarm read).
+    {
+      const sessionItem = useSessionStore.getState().sessions.find(
+        (s) => s.id === sessionId,
+      )
+      const mode = sessionItem?.permissionMode as PermissionMode | undefined
+      if (mode && mode !== 'default') {
+        wsManager.send(sessionId, { type: 'set_permission_mode', mode })
+      }
+    }
     // Replay the per-session orchestration toggle on (re)connect, before the
     // first message, so the CLI launches with the right --append-system-prompt.
     if (useSessionRuntimeStore.getState().coordinatorModes[sessionId]) {
