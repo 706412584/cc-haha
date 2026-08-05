@@ -449,6 +449,56 @@ describe('chatStore history mapping', () => {
     expect(sendMock).toHaveBeenCalledWith(TEST_SESSION_ID, { type: 'prewarm_session' })
   })
 
+  // A new session created with an explicit permission mode used to rely purely on
+  // the server reading it back out of the session metadata file. When the CLI is
+  // prewarmed before that write lands, getRuntimeSettings falls back to the global
+  // default and echoes it back as `permission_mode_changed` — the user's "跳过权限"
+  // silently became Settings' 自动接受. Replaying the mode on connect (the same way
+  // coordinator/pipeline modes already are) closes that window.
+  it('replays a non-default session permission mode on connect', () => {
+    sessionStoreSnapshot.sessions = [{
+      id: TEST_SESSION_ID,
+      title: 'New Session',
+      createdAt: '2026-06-20T10:00:00.000Z',
+      modifiedAt: '2026-06-20T10:00:00.000Z',
+      messageCount: 0,
+      projectPath: '/workspace/project',
+      workDir: '/workspace/project',
+      workDirExists: true,
+      permissionMode: 'bypassPermissions',
+    }]
+
+    useChatStore.getState().connectToSession(TEST_SESSION_ID)
+
+    expect(sendMock).toHaveBeenCalledWith(TEST_SESSION_ID, {
+      type: 'set_permission_mode',
+      mode: 'bypassPermissions',
+    })
+  })
+
+  // 'default' means "no explicit choice", so replaying it would overwrite whatever
+  // the CLI legitimately resolved (e.g. a project-level setting) with a weaker mode.
+  it('does not replay the permission mode when the session has no explicit choice', () => {
+    sessionStoreSnapshot.sessions = [{
+      id: TEST_SESSION_ID,
+      title: 'New Session',
+      createdAt: '2026-06-20T10:00:00.000Z',
+      modifiedAt: '2026-06-20T10:00:00.000Z',
+      messageCount: 0,
+      projectPath: '/workspace/project',
+      workDir: '/workspace/project',
+      workDirExists: true,
+      permissionMode: 'default',
+    }]
+
+    useChatStore.getState().connectToSession(TEST_SESSION_ID)
+
+    expect(sendMock).not.toHaveBeenCalledWith(
+      TEST_SESSION_ID,
+      expect.objectContaining({ type: 'set_permission_mode' }),
+    )
+  })
+
   it('preserves thinking blocks when restoring transcript history', () => {
     const messages: MessageEntry[] = [
       {
