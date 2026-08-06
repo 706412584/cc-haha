@@ -54,7 +54,6 @@ import {
   killAsyncAgent,
   loadAgentRuntimeSnapshot,
   reconcileAgentCompletionInbox,
-  requeueAgentCompletionCommands,
   persistAgentRuntimeSnapshot,
   registerAsyncAgent,
   restoreAgentRuntimeSnapshot,

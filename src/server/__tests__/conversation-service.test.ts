@@ -984,9 +984,10 @@ describe('ConversationService', () => {
     expect(env.ANTHROPIC_AUTH_TOKEN).toBe('provider-key')
     expect(env.ANTHROPIC_API_KEY).toBe('')
     expect(env.ANTHROPIC_MODEL).toBe('claude-sonnet-4-6')
-    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe(
-      'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
-    )
+    // Retired/third-party presets keep capabilities in preset defaultEnv
+    // (shengsuanyun pins sonnet to "none"); do not invent Claude-code caps.
+    expect(env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES).toBe('none')
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe('none')
     expect(env.CLAUDE_CODE_ATTRIBUTION_HEADER).toBe('1')
   })
 
@@ -1543,6 +1544,7 @@ describe('ConversationService', () => {
       pendingPermissionRequests: new Map(),
     })
 
+    // 3rd arg is the SDK socket (stale-connection filter); options is 4th.
     service.handleSdkPayload('stopped-permission-boundary', JSON.stringify({
       type: 'control_request',
       request_id: 'late-permission',
@@ -1551,7 +1553,7 @@ describe('ConversationService', () => {
         tool_name: 'Bash',
         input: { command: 'echo stale' },
       },
-    }), {
+    }), service.sessions.get('stopped-permission-boundary').sdkSocket, {
       canAcceptPermissionRequest: () => false,
     })
 

@@ -10,7 +10,6 @@ import { createHash } from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import * as os from 'node:os'
-import { createInterface } from 'node:readline'
 import { ApiError } from '../middleware/errorHandler.js'
 import { sanitizePath as sanitizePortablePath } from '../../utils/sessionStoragePortable.js'
 import type { FileHistorySnapshot } from '../../utils/fileHistory.js'
@@ -612,8 +611,12 @@ export class SessionService {
     mtimeMs: number
     size: number
     entries: RawEntry[]
+    parseComplete: boolean
   }>()
-  private readonly readJsonlInFlight = new Map<string, Promise<RawEntry[]>>()
+  private readonly readJsonlInFlight = new Map<
+    string,
+    Promise<{ entries: RawEntry[]; exists: boolean; parseComplete: boolean }>
+  >()
   /**
    * Resumable fold state for getInspectionTranscriptSnapshot, keyed by path.
    *
@@ -768,13 +771,14 @@ export class SessionService {
     mtimeMs: number,
     size: number,
     entries: RawEntry[],
+    parseComplete: boolean = true,
   ): void {
     const previous = this.readJsonlCache.get(filePath)
     if (previous) {
       this.readCacheTotalBytes -= previous.size
       this.readJsonlCache.delete(filePath)
     }
-    this.readJsonlCache.set(filePath, { mtimeMs, size, entries })
+    this.readJsonlCache.set(filePath, { mtimeMs, size, entries, parseComplete })
     this.readCacheTotalBytes += size
     while (this.readCacheTotalBytes > this.readCacheMaxTotalBytes) {
       const oldest = this.readJsonlCache.keys().next().value
@@ -1075,16 +1079,32 @@ export class SessionService {
         cachedAfterRead: false,
         fileName: path.basename(filePath),
       })
-      return entries
+      return {
+        entries,
+        exists: true,
+        parseComplete: cached.parseComplete,
+      }
     }
 
     const inFlight = this.readJsonlInFlight.get(filePath)
-    if (inFlight) return (await inFlight).slice()
+    if (inFlight) {
+      const result = await inFlight
+      return {
+        entries: result.entries.slice(),
+        exists: result.exists,
+        parseComplete: result.parseComplete,
+      }
+    }
 
     const readPromise = this.readAndParseJsonl(filePath, stat)
     this.readJsonlInFlight.set(filePath, readPromise)
     try {
-      return (await readPromise).slice()
+      const result = await readPromise
+      return {
+        entries: result.entries.slice(),
+        exists: result.exists,
+        parseComplete: result.parseComplete,
+      }
     } finally {
       this.readJsonlInFlight.delete(filePath)
     }
@@ -1104,7 +1124,7 @@ export class SessionService {
   private async readAndParseJsonl(
     filePath: string,
     stat: { mtimeMs: number; size: number },
-  ): Promise<RawEntry[]> {
+  ): Promise<{ entries: RawEntry[]; exists: boolean; parseComplete: boolean }> {
     const started = performance.now()
     const fileName = path.basename(filePath)
 
@@ -1126,7 +1146,8 @@ export class SessionService {
         cachedAfterRead: false,
         fileName,
       })
-      return entries
+      // Tail window is intentionally incomplete evidence for rewind/history.
+      return { entries, exists: true, parseComplete: false }
     }
 
     let content: string
@@ -1135,15 +1156,15 @@ export class SessionService {
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         this.invalidateReadCache(filePath)
-        return []
+        return { entries: [], exists: false, parseComplete: false }
       }
       throw err
     }
 
-    const entries = this.parseJsonlContent(content)
+    const { entries, parseComplete } = this.parseJsonlContent(content)
     const cachedAfterRead = stat.size <= this.readCacheMaxFileBytes
     if (cachedAfterRead) {
-      this.storeReadCache(filePath, stat.mtimeMs, stat.size, entries)
+      this.storeReadCache(filePath, stat.mtimeMs, stat.size, entries, parseComplete)
     } else {
       this.invalidateReadCache(filePath)
     }
@@ -1157,10 +1178,13 @@ export class SessionService {
       cachedAfterRead,
       fileName,
     })
-    return entries
+    return { entries, exists: true, parseComplete }
   }
 
-  private parseJsonlContent(content: string): RawEntry[] {
+  private parseJsonlContent(content: string): {
+    entries: RawEntry[]
+    parseComplete: boolean
+  } {
     const entries: RawEntry[] = []
     let parseComplete = true
     for (const line of content.split('\n')) {
@@ -1172,7 +1196,7 @@ export class SessionService {
         parseComplete = false
       }
     }
-    return { entries, exists: true, parseComplete }
+    return { entries, parseComplete }
   }
 
   private async readJsonlFile(filePath: string): Promise<RawEntry[]> {
@@ -1199,7 +1223,7 @@ export class SessionService {
         if (firstNewline === -1) return []
         text = text.slice(firstNewline + 1)
       }
-      return this.parseJsonlContent(text)
+      return this.parseJsonlContent(text).entries
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         return []

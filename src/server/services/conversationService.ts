@@ -26,13 +26,6 @@ import {
   OPENAI_CODEX_REASONING_EFFORT_ENV_KEY,
   isOpenAIReasoningEffort,
 } from '../../services/openaiAuth/models.js'
-import {
-  IMAGE_GENERATION_API_KEY_ENV_KEY,
-  IMAGE_GENERATION_BASE_URL_ENV_KEY,
-  IMAGE_GENERATION_MODEL_ENV_KEY,
-  IMAGE_GENERATION_PROVIDER_ID_ENV_KEY,
-  IMAGE_GENERATION_PROVIDER_KIND_ENV_KEY,
-} from '../../services/imageGeneration/config.js'
 import { sessionService } from './sessionService.js'
 import { diagnosticsService } from './diagnosticsService.js'
 import {

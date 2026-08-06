@@ -2,7 +2,6 @@ import { describe, expect, test } from 'bun:test'
 import { APIError } from '@anthropic-ai/sdk'
 import { BUSINESS_ERROR_CODES } from '../../constants/businessErrors.js'
 import {
-  categorizeRetryableAPIError,
   getAssistantMessageFromError,
   getImageUnsupportedErrorMessage,
   isContextOverflowErrorText,

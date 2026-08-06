@@ -9,7 +9,6 @@ import {
   __markPrewarmedForTests,
   __resetWebSocketHandlerStateForTests,
   __setCachedSessionSummaryReaderForTests,
-  __drainWebSocketRuntimeTransitionsForTests,
   __resolveRuntimeRestartWorkDirForTests,
   closeSessionConnection,
   getActiveSessionIds,

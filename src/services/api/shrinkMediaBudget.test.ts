@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { shrinkMediaToSizeBudget } from './claude.js'
-import type { UserMessage, AssistantMessage } from '../../types/message.js'
+import type { UserMessage } from '../../types/message.js'
 
 /**
  * Helper: create a base64 image block with a payload of the given byte length.

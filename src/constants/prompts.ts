@@ -9,7 +9,6 @@ import { getSessionStartDate } from './common.js'
 import { getInitialSettings } from '../utils/settings/settings.js'
 import {
   AGENT_TOOL_NAME,
-  VERIFICATION_AGENT_TYPE,
 } from '../tools/AgentTool/constants.js'
 import { FILE_WRITE_TOOL_NAME } from '../tools/FileWriteTool/prompt.js'
 import { FILE_READ_TOOL_NAME } from '../tools/FileReadTool/prompt.js'

@@ -1,7 +1,6 @@
 import * as fs from 'fs'
 import * as path from 'path'
 
-import { getClaudeCodeModelCapabilities } from '../../shared/modelReasoning.js'
 import { MODEL_CONTEXT_WINDOWS_ENV_KEY } from '../../utils/model/modelContextWindows.js'
 import { isProviderManagedEnvVar } from '../../utils/managedEnvConstants.js'
 import {

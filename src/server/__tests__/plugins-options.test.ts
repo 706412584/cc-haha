@@ -1,6 +1,5 @@
-import { describe, expect, it, mock, spyOn } from 'bun:test'
+import { describe, expect, it } from 'bun:test'
 import { handlePluginsApi } from '../api/plugins.js'
-import * as pluginOptionsStorage from '../../utils/plugins/pluginOptionsStorage.js'
 
 function makeRequest(method: string, urlStr: string, body?: unknown) {
   const url = new URL(urlStr, 'http://localhost:3456')

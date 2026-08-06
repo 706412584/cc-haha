@@ -10,7 +10,6 @@ import type { ServerWebSocket } from 'bun'
 import type {
   ClientMessage,
   PermissionMode,
-  RuntimeSelection,
   RuntimeConfigResult,
   ServerMessage,
   TokenUsage,
@@ -96,7 +95,6 @@ import {
   scopedToolUseId,
   extractAssistantText,
   normalizeAskUserQuestionToolResult,
-  classifyRuntimeErrorCode,
   toApiRetryServerMessage,
   toStreamingFallbackServerMessage,
   extractLocalCommandOutput,
@@ -709,7 +707,9 @@ export const handleWebSocket = {
         return
       }
       const payload = typeof rawMessage === 'string' ? rawMessage : rawMessage.toString()
-      conversationService.handleSdkPayload(sessionId, payload, {
+      // socket is required for stale-connection filtering (upstream);
+      // options gates late permission requests behind a stopped turn (local).
+      conversationService.handleSdkPayload(sessionId, payload, ws, {
         canAcceptPermissionRequest: (message) =>
           canAcceptPermissionRequestDuringStop(sessionId, message),
       })
