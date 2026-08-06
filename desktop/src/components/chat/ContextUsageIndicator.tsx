@@ -35,7 +35,6 @@ const AUTO_REFRESH_MIN_INTERVAL_MS = 10_000
 // still be settling, so retry the event-driven refresh once.
 const FORCED_REFRESH_RETRY_MS = 5_000
 const FORCED_REFRESH_MAX_ATTEMPTS = 3
-const IDLE_RECOVERY_REFRESH_MS = 3_000
 
 const POPOVER_WIDTH = 340
 const POPOVER_GAP = 8
@@ -311,7 +310,6 @@ export function ContextUsageIndicator({
   }, [refresh])
 
   useEffect(() => {
-    const previousState = lastNonIdleChatStateRef.current
     lastNonIdleChatStateRef.current = chatState
 
     // Idle transitions are recovered by the forceRefreshWithRetry effect above.
