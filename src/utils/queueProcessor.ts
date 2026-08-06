@@ -67,8 +67,15 @@ export function processQueueIfReady({
   // false with the queue unchanged → the React effect never re-fires and any
   // queued user prompt stalls permanently.
   const appState = getAppState?.()
+  // A user pause (Esc) must not be undone by a background Agent finishing.
+  // queryGuard going idle means either "turn ended normally" or "user stopped
+  // it", so the notification path needs this explicit latch to tell them
+  // apart. Notifications stay queued (not dropped) and ride along with the
+  // user's next real turn.
+  const userPaused = appState?.userPausedAt !== undefined
   const isMainThread = (cmd: QueuedCommand) =>
     cmd.agentId === undefined &&
+    !(userPaused && cmd.mode === 'task-notification') &&
     (appState === undefined || isCurrentAgentCompletionCommand(cmd, appState))
 
   const next = peek(isMainThread)

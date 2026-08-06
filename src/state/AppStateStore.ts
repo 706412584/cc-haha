@@ -179,6 +179,12 @@ export type AppState = DeepImmutable<{
   // Name → AgentId registry populated by Agent tool when `name` is provided.
   // Latest-wins on collision. Used by SendMessage to route by name.
   agentNameRegistry: Map<string, AgentId>
+  // Set when the user deliberately stops the turn (Esc / Ctrl+C), cleared on
+  // their next submit. Distinguishes "user paused" from "turn ended normally":
+  // both leave QueryGuard idle, but only the latter may be auto-resumed by a
+  // background Agent's task-notification. Without this, a completion arriving
+  // after Esc immediately starts a new turn and the pause never takes effect.
+  userPausedAt?: number
   // Task ID that has been foregrounded - its messages are shown in main view
   foregroundedTaskId?: string
   // Task ID of in-process teammate whose transcript is being viewed (undefined = leader's view)
