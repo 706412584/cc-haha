@@ -305,6 +305,7 @@ describe('dead imports in owned source', () => {
     // Fixtures prove the analyser works on code shaped like a fixture. This proves
     // it works on these files, whose import style it has to actually match — the
     // failure that would otherwise leave the check green and blind.
+    // Full-tree plant+scan is intentionally heavier than the default 5s budget.
     for (const file of scannedFiles) {
       const source = readFileSync(join(ROOT, file), 'utf8')
       const planted = `import { plantedDeadImport } from './__nonexistent.js'\n${source}`
@@ -313,7 +314,7 @@ describe('dead imports in owned source', () => {
         `planted a dead import into ${file} and the check did not report it`,
       ).toContain('plantedDeadImport')
     }
-  })
+  }, 60_000)
 
   it('has no import that nothing references', () => {
     const reported = dead

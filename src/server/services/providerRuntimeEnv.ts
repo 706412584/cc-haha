@@ -73,7 +73,7 @@ export const MANAGED_PROVIDER_ENV_KEYS = [
 const CUSTOM_PROVIDER_MODEL_CAPABILITIES =
   'thinking,effort,adaptive_thinking,xhigh_effort,max_effort'
 const XIAOMI_MIMO_MODEL_CAPABILITIES = 'thinking'
-const KIMI_K3_MODEL_CAPABILITIES = 'thinking,required_thinking,effort,max_effort'
+const KIMI_K3_MODEL_CAPABILITIES = 'thinking,required_thinking,effort,xhigh_effort,max_effort'
 const KIMI_CODING_FALLBACK_MODEL_CAPABILITIES = 'thinking,required_thinking'
 const AUTH_ENV_KEYS = new Set(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'])
 const MODEL_SLOTS = ['main', 'haiku', 'sonnet', 'opus'] as const

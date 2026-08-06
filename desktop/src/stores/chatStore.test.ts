@@ -140,6 +140,7 @@ import { sessionsApi } from '../api/sessions'
 import { useSettingsStore } from './settingsStore'
 import {
   __resetCompactionThrashForTesting,
+  __resetHistoryLoadStateForTesting,
   mapHistoryMessagesToUiMessages,
   reconstructAgentNotifications,
   stripGeneratedImageMetadataLines,
@@ -408,6 +409,7 @@ describe('chatStore history mapping', () => {
     cliTaskStoreSnapshot.sessionId = null
     useSessionRuntimeStore.setState({ selections: {} })
     __resetCompactionThrashForTesting()
+    __resetHistoryLoadStateForTesting()
     localStorage.clear()
     useSettingsStore.setState({ locale: 'en' })
     useChatStore.setState({
@@ -8389,6 +8391,7 @@ describe('chatStore wake replay of a finished thinking turn', () => {
     getMemberBySessionIdMock.mockReset()
     getMemberBySessionIdMock.mockReturnValue(null)
     connectionStateHandlers.clear()
+    __resetHistoryLoadStateForTesting()
     vi.mocked(sessionsApi.getMessages).mockReset()
     vi.mocked(sessionsApi.getMessages).mockResolvedValue({ messages: buildFinishedTurnHistory() })
     localStorage.clear()

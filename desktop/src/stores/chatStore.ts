@@ -594,6 +594,13 @@ export function __resetCompactionThrashForTesting(): void {
   compactionThrashBySession.clear()
 }
 
+/** @internal — clear in-flight history load bookkeeping between tests. */
+export function __resetHistoryLoadStateForTesting(): void {
+  historyLoadsInFlight.clear()
+  historyReloadGenerations.clear()
+  historyLoadAbortRetries.clear()
+}
+
 function makeContextExhaustedMessage(): UIMessage {
   return {
     id: nextId(),
@@ -3661,33 +3668,42 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
 
       case 'background_task_stop_failed': {
-        let stopFailedForRunningTask = false
+        // Cold reconnect can deliver the stop failure before task history has
+        // hydrated the matching background task. Cache it until loadHistory /
+        // reloadHistory can reconcile; if the task already finished, suppress
+        // the stale failure; otherwise surface it and bump historyMutationEpoch
+        // so any in-flight idle reconciliation is discarded.
         update((session) => {
           const stoppingBackgroundTaskIds = { ...session.stoppingBackgroundTaskIds }
-          const stopWasRequested = stoppingBackgroundTaskIds[msg.taskId] === true
           delete stoppingBackgroundTaskIds[msg.taskId]
           const task = session.backgroundAgentTasks?.[msg.taskId]
-          if (!stopWasRequested || task?.status !== 'running') {
-            return { stoppingBackgroundTaskIds }
+          if (!task && session.historyStatus === 'loading') {
+            return {
+              stoppingBackgroundTaskIds,
+              pendingBackgroundTaskStopFailures: {
+                ...session.pendingBackgroundTaskStopFailures,
+                [msg.taskId]: msg.message,
+              },
+            }
           }
-          stopFailedForRunningTask = true
+          const taskAlreadyFinished = task !== undefined && task.status !== 'running'
           return {
             stoppingBackgroundTaskIds,
-            messages: [
-              ...session.messages,
-              {
-                id: nextId(),
-                type: 'error',
-                message: msg.message,
-                code: 'STOP_BACKGROUND_TASK_FAILED',
-                timestamp: Date.now(),
-              },
-            ],
+            ...(taskAlreadyFinished ? {} : {
+              messages: [
+                ...session.messages,
+                {
+                  id: nextId(),
+                  type: 'error',
+                  message: msg.message,
+                  code: 'STOP_BACKGROUND_TASK_FAILED',
+                  timestamp: Date.now(),
+                },
+              ],
+              historyMutationEpoch: (session.historyMutationEpoch ?? 0) + 1,
+            }),
           }
         })
-        if (stopFailedForRunningTask) {
-          useTabStore.getState().updateTabStatus(sessionId, 'running')
-        }
         break
       }
 
