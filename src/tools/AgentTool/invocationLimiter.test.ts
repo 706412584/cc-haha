@@ -15,6 +15,10 @@ import { getSessionId } from '../../bootstrap/state.js'
 describe('invocationLimiter', () => {
   beforeEach(() => {
     _resetLimiterState()
+    // Shell/CI may pre-set these; clear before every default-cap assertion.
+    delete process.env.CLAUDE_CODE_AGENT_LIMITER_OFF
+    delete process.env.CLAUDE_CODE_AGENT_LIMIT_VERIFICATION
+    delete process.env.CLAUDE_CODE_AGENT_LIMIT_CODE_REVIEWER
   })
 
   afterEach(() => {

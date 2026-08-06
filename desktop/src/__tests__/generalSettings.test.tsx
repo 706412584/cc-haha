@@ -436,7 +436,7 @@ describe('Settings > General tab', () => {
 
     const page = screen.getByTestId('settings-page')
     expect(page).not.toHaveClass('settings-page--mobile')
-    expect(page.querySelector('.settings-page__tabs')).toHaveClass('w-[220px]', 'border-r')
+    expect(page.querySelector('.settings-page__tabs')).toHaveClass('w-[195px]', 'border-r')
   })
 
   it('uses a single-column settings layout on mobile H5', () => {
@@ -2137,9 +2137,9 @@ describe('Settings > Providers tab', () => {
     fireEvent.click(screen.getByRole('button', { name: /添加服务商/i }))
 
     const dialog = screen.getByRole('dialog')
-    expect(within(dialog).getByPlaceholderText('例如： deepseek-v4-flash')).toBeInTheDocument()
+    expect(within(dialog).getByPlaceholderText('模型 ID')).toBeInTheDocument()
     expect(within(dialog).getByText('要填写 API Key 才能获取模型列表')).toBeInTheDocument()
-    expect(within(dialog).queryByPlaceholderText('e.g. deepseek-v4-flash')).not.toBeInTheDocument()
+    expect(within(dialog).queryByPlaceholderText('Model ID')).not.toBeInTheDocument()
   })
 
   it('normalizes blank model mappings to the main model when saving a provider', async () => {
@@ -2627,7 +2627,7 @@ describe('Settings > Providers tab', () => {
     }))
   })
 
-  it('shows only the API key link for a provider preset with promotional copy', () => {
+  it('shows the API key link and promotional copy for a provider preset', () => {
     providerStoreState.presets = [
       {
         id: 'minimax',
@@ -2653,7 +2653,7 @@ describe('Settings > Providers tab', () => {
     const dialog = screen.getByRole('dialog')
 
     expect(within(dialog).getByRole('button', { name: /Get API Key/ })).toBeInTheDocument()
-    expect(within(dialog).queryByText('Sign up with this promotional offer')).not.toBeInTheDocument()
+    expect(within(dialog).getByText('Sign up with this promotional offer')).toBeInTheDocument()
   })
 
   it('hides the API key by default and reveals it from the eye button', () => {

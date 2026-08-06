@@ -314,15 +314,9 @@ export function ContextUsageIndicator({
     const previousState = lastNonIdleChatStateRef.current
     lastNonIdleChatStateRef.current = chatState
 
-    if (chatState === 'idle') {
-      if (previousState !== 'idle') {
-        const timer = setTimeout(() => {
-          void refresh('force')
-        }, IDLE_RECOVERY_REFRESH_MS)
-        return () => clearTimeout(timer)
-      }
-      return
-    }
+    // Idle transitions are recovered by the forceRefreshWithRetry effect above.
+    // Keep a poll only while the turn is actively consuming context.
+    if (chatState === 'idle') return
 
     const timer = setInterval(() => {
       void refresh('auto')

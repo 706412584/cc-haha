@@ -17,22 +17,25 @@ import { useSessionStore } from '../../stores/sessionStore'
 import { useUIStore } from '../../stores/uiStore'
 import { isDesktopRuntime } from '../../lib/desktopRuntime'
 import { getDesktopHost } from '../../lib/desktopHost'
-import { getDesktopNotificationPermission, notifyDesktop, getDesktopNotificationPlatform, openDesktopNotificationSettings, requestDesktopNotificationPermission, type DesktopNotificationPermission } from '../../lib/desktopNotifications'
-import { SETTINGS_CHECKBOX_INPUT_CLASS, SettingsCheckboxMark, isValidHttpProxyUrl } from '../settings/shared'
+import {
+  getDesktopNotificationPermission,
+  notifyDesktop,
+  getDesktopNotificationPlatform,
+  openDesktopNotificationSettings,
+  requestDesktopNotificationPermission,
+  type DesktopNotificationPermission,
+} from '../../lib/desktopNotifications'
+import { SETTINGS_CHECKBOX_INPUT_CLASS, SettingsCheckboxMark, isValidHttpProxyUrl } from './shared'
 
 /**
- * The General settings panel — the largest of the seven, and the one most often
- * edited.
- *
- * Moved verbatim out of `Settings.tsx`. It carries the four output-style label
- * helpers and the network-timeout bounds because nothing else in that file used
- * them; the checkbox mark and the proxy-URL validator stayed behind in `./shared`,
- * which is what more than one panel reaches for.
+ * The General settings panel — moved out of the Settings.tsx monolith.
+ * Keeps local product surfaces (agent office, activity panel, output style, etc.).
  */
 
 const NETWORK_TIMEOUT_MIN_SECONDS = 30
 const NETWORK_TIMEOUT_MAX_SECONDS = 1800
 const NETWORK_TIMEOUT_STEP_SECONDS = 30
+
 const BUILT_IN_OUTPUT_STYLE_TRANSLATION_KEYS = {
   default: {
     label: 'settings.general.outputStyleBuiltin.default.label',
@@ -52,10 +55,16 @@ export function GeneralSettings() {
   const {
     thinkingEnabled,
     setThinkingEnabled,
+    thinkingAutoCollapse,
+    setThinkingAutoCollapse,
     permissionMode,
     setPermissionMode,
     autoDreamEnabled,
     setAutoDreamEnabled,
+    unifiedActivityPanelEnabled,
+    setUnifiedActivityPanelEnabled,
+    agentOfficeSurface,
+    setAgentOfficeSurface,
     locale,
     setLocale,
     setTheme,
@@ -72,6 +81,8 @@ export function GeneralSettings() {
     setSkipWebFetchPreflight,
     desktopNotificationsEnabled,
     setDesktopNotificationsEnabled,
+    sessionContentSearchEnabled,
+    setSessionContentSearchEnabled,
     webSearch,
     setWebSearch,
     network,
@@ -180,6 +191,7 @@ export function GeneralSettings() {
     { value: 'kr', label: '한국어' },
   ]
 
+
   const RESPONSE_LANGUAGES: Array<{ value: string; label: string }> = [
     { value: '', label: t('settings.general.responseLangDefault') },
     { value: 'english', label: 'English' },
@@ -213,12 +225,6 @@ export function GeneralSettings() {
   }))
   const selectedOutputStyle =
     outputStyles.find((style) => style.value === outputStyle) ?? outputStyles[0]
-  const selectedOutputStyleLabel = selectedOutputStyle
-    ? getOutputStyleLabel(selectedOutputStyle, t)
-    : outputStyle
-  const selectedOutputStyleDescription = selectedOutputStyle
-    ? getOutputStyleDescription(selectedOutputStyle, t)
-    : ''
   const outputStyleScopeLabel = outputStyleScope === 'localSettings'
     ? t('settings.general.outputStyleScopeLocal')
     : t('settings.general.outputStyleScopeUser')
@@ -233,6 +239,10 @@ export function GeneralSettings() {
     { value: 'celadon', label: t('settings.general.appearance.celadon') },
     { value: 'dark', label: t('settings.general.appearance.dark') },
     { value: 'ink-blue', label: t('settings.general.appearance.inkBlue') },
+    { value: 'classic-white', label: t('settings.general.appearance.classicWhite') },
+    { value: 'classic-light', label: t('settings.general.appearance.classicLight') },
+    { value: 'eye-care', label: t('settings.general.appearance.eyeCare') },
+    { value: 'classic-dark', label: t('settings.general.appearance.classicDark') },
   ]
   // Split by ground, in the order THEMES already lists them, so the two rows
   // shown while following the system stay consistent with the flat picker.
@@ -301,6 +311,28 @@ export function GeneralSettings() {
       }
     } finally {
       setNotificationActionRunning(false)
+    }
+  }
+
+  const handleUnifiedActivityPanelToggle = async (enabled: boolean) => {
+    try {
+      await setUnifiedActivityPanelEnabled(enabled)
+    } catch {
+      addToast({
+        type: 'error',
+        message: t('settings.general.activityPanelSaveFailed'),
+      })
+    }
+  }
+
+  const handleAgentOfficeSurfaceChange = async (surface: 'modal' | 'tab') => {
+    try {
+      await setAgentOfficeSurface(surface)
+    } catch {
+      addToast({
+        type: 'error',
+        message: t('settings.general.agentOfficeSaveFailed'),
+      })
     }
   }
 
@@ -699,7 +731,6 @@ export function GeneralSettings() {
           ))}
         </div>
       </SettingsSection>
-
       {/* Response Language */}
       <h2
         className="text-[16.5px] font-semibold leading-tight text-[var(--color-text-primary)] mb-1"
@@ -754,11 +785,11 @@ export function GeneralSettings() {
                 <span className="block truncate font-medium">
                   {outputStylesLoading
                     ? t('settings.general.outputStyleLoading')
-                    : selectedOutputStyleLabel}
+                    : selectedOutputStyle?.label ?? outputStyle}
                 </span>
-                {selectedOutputStyleDescription && (
+                {selectedOutputStyle?.description && (
                   <span className="mt-0.5 block truncate text-xs text-[var(--color-text-tertiary)]">
-                    {selectedOutputStyleDescription}
+                    {getOutputStyleDescription(selectedOutputStyle, t)}
                   </span>
                 )}
               </span>
@@ -831,7 +862,86 @@ export function GeneralSettings() {
             </div>
           </div>
         </label>
+        <label className="mt-2 flex items-start gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3 cursor-pointer hover:border-[var(--color-border-focus)] transition-colors">
+          <input
+            type="checkbox"
+            aria-label={t('settings.general.thinkingAutoCollapse')}
+            checked={thinkingAutoCollapse}
+            onChange={(e) => void setThinkingAutoCollapse(e.target.checked)}
+            className="peer sr-only"
+          />
+          <SettingsCheckboxMark checked={thinkingAutoCollapse} />
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-[var(--color-text-primary)]">
+              {t('settings.general.thinkingAutoCollapse')}
+            </div>
+          </div>
+        </label>
       </div>
+
+      <div className="mt-8">
+        <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.activityPanelTitle')}</h2>
+        <p className="text-sm text-[var(--color-text-tertiary)] mb-3">{t('settings.general.activityPanelDescription')}</p>
+        <label className="relative flex items-start gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3 cursor-pointer hover:border-[var(--color-border-focus)] transition-colors">
+          <input
+            type="checkbox"
+            aria-label={t('settings.general.activityPanelEnabled')}
+            checked={unifiedActivityPanelEnabled}
+            onChange={(event) => void handleUnifiedActivityPanelToggle(event.target.checked)}
+            className={SETTINGS_CHECKBOX_INPUT_CLASS}
+          />
+          <SettingsCheckboxMark checked={unifiedActivityPanelEnabled} />
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-[var(--color-text-primary)]">
+              {t('settings.general.activityPanelEnabled')}
+            </div>
+            <div className="text-xs text-[var(--color-text-tertiary)] mt-1 leading-5">
+              {unifiedActivityPanelEnabled
+                ? t('settings.general.activityPanelHintOn')
+                : t('settings.general.activityPanelHintOff')}
+            </div>
+          </div>
+        </label>
+      </div>
+
+      {isDesktopRuntime() && (
+        <div className="mt-8">
+          <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.agentOfficeTitle')}</h2>
+          <p className="text-sm text-[var(--color-text-tertiary)] mb-3">{t('settings.general.agentOfficeDescription')}</p>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {(['modal', 'tab'] as const).map((surface) => (
+              <label
+                key={surface}
+                className="flex cursor-pointer items-start gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3 transition-colors hover:border-[var(--color-border-focus)]"
+              >
+                <input
+                  type="radio"
+                  name="agent-office-surface"
+                  value={surface}
+                  aria-label={t(surface === 'modal'
+                    ? 'settings.general.agentOfficeSurfaceModal'
+                    : 'settings.general.agentOfficeSurfaceTab')}
+                  checked={agentOfficeSurface === surface}
+                  onChange={() => void handleAgentOfficeSurfaceChange(surface)}
+                  className="mt-0.5 h-4 w-4 accent-[var(--color-brand)]"
+                />
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-[var(--color-text-primary)]">
+                    {t(surface === 'modal'
+                      ? 'settings.general.agentOfficeSurfaceModal'
+                      : 'settings.general.agentOfficeSurfaceTab')}
+                  </div>
+                  <div className="mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]">
+                    {t(surface === 'modal'
+                      ? 'settings.general.agentOfficeSurfaceModalHint'
+                      : 'settings.general.agentOfficeSurfaceTabHint')}
+                  </div>
+                </div>
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="mt-8">
         <h2 className="text-[16.5px] font-semibold leading-tight text-[var(--color-text-primary)] mb-1" style={{ fontFamily: 'var(--font-headline)' }}>{t('settings.general.autoDreamTitle')}</h2>
@@ -1134,6 +1244,29 @@ export function GeneralSettings() {
       </div>
 
       <div className="mt-8">
+        <h2 className="text-base font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.sessionContentSearchTitle')}</h2>
+        <p className="text-sm text-[var(--color-text-tertiary)] mb-3">{t('settings.general.sessionContentSearchDescription')}</p>
+        <label className="relative flex items-start gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3 cursor-pointer hover:border-[var(--color-border-focus)] transition-colors">
+          <input
+            type="checkbox"
+            aria-label={t('settings.general.sessionContentSearchEnabled')}
+            checked={sessionContentSearchEnabled}
+            onChange={(event) => void setSessionContentSearchEnabled(event.target.checked)}
+            className={SETTINGS_CHECKBOX_INPUT_CLASS}
+          />
+          <SettingsCheckboxMark checked={sessionContentSearchEnabled} />
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-[var(--color-text-primary)]">
+              {t('settings.general.sessionContentSearchEnabled')}
+            </div>
+            <div className="text-xs text-[var(--color-text-tertiary)] mt-1 leading-5">
+              {t('settings.general.sessionContentSearchHint')}
+            </div>
+          </div>
+        </label>
+      </div>
+
+      <div className="mt-8">
         <h2 className="text-[16.5px] font-semibold leading-tight text-[var(--color-text-primary)] mb-1" style={{ fontFamily: 'var(--font-headline)' }}>{t('settings.general.webSearchTitle')}</h2>
         <p className="text-sm text-[var(--color-text-tertiary)] mb-3">{t('settings.general.webSearchDescription')}</p>
         <Card radius="xl" surface="low" padding="none" className="px-4 py-4">
@@ -1144,7 +1277,7 @@ export function GeneralSettings() {
                 onClick={() => setWebSearchDraft({ ...webSearchDraft, mode: value })}
                 className={`h-9 px-2 text-xs font-semibold rounded-[var(--radius-lg)] border transition-all truncate ${
                   (webSearchDraft.mode ?? 'auto') === value
-                    ? 'bg-[var(--color-brand)] text-[var(--color-on-primary)] border-[var(--color-brand)]'
+                    ? 'bg-[var(--color-brand)] text-white border-[var(--color-brand)]'
                     : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
                 }`}
                 title={label}
@@ -1402,11 +1535,7 @@ function getBuiltInOutputStyleTranslationKeys(style: {
 }
 
 function getOutputStyleLabel(
-  style: {
-    value: string
-    label: string
-    source: OutputStyleSource
-  },
+  style: { value: string; label: string; source: OutputStyleSource },
   t: (key: TranslationKey) => string,
 ) {
   const keys = getBuiltInOutputStyleTranslationKeys(style)
@@ -1414,11 +1543,7 @@ function getOutputStyleLabel(
 }
 
 function getOutputStyleDescription(
-  style: {
-    value: string
-    description: string
-    source: OutputStyleSource
-  },
+  style: { value: string; description: string; source: OutputStyleSource },
   t: (key: TranslationKey) => string,
 ) {
   const keys = getBuiltInOutputStyleTranslationKeys(style)

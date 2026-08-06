@@ -66,6 +66,15 @@ const CONTAINERS: Record<string, Classification> = {
   sessionTitleState: { kind: 'cleared' },
   taskNotificationPersistence: { kind: 'cleared' },
   terminalSessionChatStates: { kind: 'cleared' },
+  coordinatorModeSessions: { kind: 'cleared' },
+  pipelineModeSessions: { kind: 'cleared' },
+  handoffSummarySessions: { kind: 'cleared' },
+  stoppedTurnEventFences: { kind: 'cleared' },
+  stopSettlements: { kind: 'cleared' },
+  runtimeConfigHandlerPromises: { kind: 'cleared' },
+  runtimeConfigResults: { kind: 'cleared' },
+  observedTerminalTasks: { kind: 'cleared' },
+  recentThinkingIncompatNotifications: { kind: 'cleared' },
 
   activeSessions: {
     kind: 'not-session-state',
@@ -78,6 +87,10 @@ const CONTAINERS: Record<string, Classification> = {
   interruptedTurnResultMessages: {
     kind: 'not-session-state',
     reason: 'WeakMap keyed by the CLI message object, so entries die with the message.',
+  },
+  settledStopTerminalFrames: {
+    kind: 'not-session-state',
+    reason: 'WeakSet keyed by the CLI message object, so entries die with the message.',
   },
   validPermissionModes: {
     kind: 'not-session-state',

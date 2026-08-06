@@ -534,11 +534,6 @@
             "task_id": "task_golden",
             "description": "build the thing"
           }
-        },
-        {
-          "type": "status",
-          "state": "tool_executing",
-          "verb": "build the thing"
         }
       ]
     },
@@ -555,11 +550,6 @@
             "task_id": "task_golden",
             "progress": "halfway"
           }
-        },
-        {
-          "type": "status",
-          "state": "tool_executing",
-          "verb": "Task in progress"
         }
       ]
     },

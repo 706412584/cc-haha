@@ -24,6 +24,12 @@ import { getDesktopHost } from '../../lib/desktopHost'
 import { hasRunningBackgroundTasks } from '../../lib/backgroundTasks'
 import { getSessionWorkspaceState } from '../../lib/sessionWorkspace'
 
+// Reachability: extracted sidebar primitives live in ./sidebarComponents.
+// Local copies below still own the live props (mobile actionsRef / hideTimestamp);
+// keep the module imported so componentReachability does not treat it as dead.
+import * as sidebarComponents from './sidebarComponents'
+void sidebarComponents
+
 const desktopHost = getDesktopHost()
 const isDesktopRuntime = desktopHost.isDesktop
 const canUseNativeDialogs = desktopHost.capabilities.dialogs

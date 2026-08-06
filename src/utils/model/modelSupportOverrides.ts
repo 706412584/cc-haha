@@ -1,4 +1,3 @@
-import memoize from 'lodash-es/memoize.js'
 import { MODEL_REASONING_CAPABILITY_TIERS } from '../../shared/modelReasoning.js'
 import { normalizeModelContextKey } from './modelContextWindows.js'
 import { getAPIProvider, isFirstPartyAnthropicBaseUrl } from './providers.js'
@@ -13,28 +12,40 @@ export type ModelCapabilityOverride =
   | 'interleaved_thinking'
 
 /**
- * Check whether a 3p model capability override is set for a model that matches one of
- * the pinned ANTHROPIC_DEFAULT_*_MODEL env vars. Context-window markers are transport
- * annotations and must not change model identity.
+ * Active model first, then the shared tier pins. `ANTHROPIC_MODEL` must win when the
+ * same id is also pinned on a default tier — otherwise a stale sonnet/haiku
+ * capability string can clamp max/xhigh after a provider switch. Context-window
+ * markers are transport annotations and must not change model identity.
+ *
+ * Not memoized: provider switches rewrite these env vars in-process, and a cache
+ * keyed only on the model id would keep the previous provider's answer.
  */
-export const get3PModelCapabilityOverride = memoize(
-  (model: string, capability: ModelCapabilityOverride): boolean | undefined => {
-    if (getAPIProvider() === 'firstParty' && isFirstPartyAnthropicBaseUrl()) {
-      return undefined
-    }
-    const normalizedModel = normalizeModelContextKey(model)
-    for (const tier of MODEL_REASONING_CAPABILITY_TIERS) {
-      const pinned = process.env[tier.modelEnvVar]
-      const capabilities = process.env[tier.capabilitiesEnvVar]
-      if (!pinned || capabilities === undefined) continue
-      if (normalizedModel !== normalizeModelContextKey(pinned)) continue
-      return capabilities
-        .toLowerCase()
-        .split(',')
-        .map(s => s.trim())
-        .includes(capability)
-    }
-    return undefined
+const CAPABILITY_TIERS = [
+  {
+    modelEnvVar: 'ANTHROPIC_MODEL',
+    capabilitiesEnvVar: 'ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES',
   },
-  (model, capability) => `${model.toLowerCase()}:${capability}`,
-)
+  ...MODEL_REASONING_CAPABILITY_TIERS,
+] as const
+
+export function get3PModelCapabilityOverride(
+  model: string,
+  capability: ModelCapabilityOverride,
+): boolean | undefined {
+  if (getAPIProvider() === 'firstParty' && isFirstPartyAnthropicBaseUrl()) {
+    return undefined
+  }
+  const normalizedModel = normalizeModelContextKey(model)
+  for (const tier of CAPABILITY_TIERS) {
+    const pinned = process.env[tier.modelEnvVar]
+    const capabilities = process.env[tier.capabilitiesEnvVar]
+    if (!pinned || capabilities === undefined) continue
+    if (normalizedModel !== normalizeModelContextKey(pinned)) continue
+    return capabilities
+      .toLowerCase()
+      .split(',')
+      .map(s => s.trim())
+      .includes(capability)
+  }
+  return undefined
+}

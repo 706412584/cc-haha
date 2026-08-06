@@ -817,12 +817,15 @@ describe('ModelSelector', () => {
       await Promise.resolve()
     })
 
-    expect(useSessionRuntimeStore.getState().selections['session-openai']).toBeUndefined()
-    expect(setSessionRuntime).toHaveBeenCalledWith('session-openai', {
+    const expectedSelection = {
       providerId: OPENAI_OFFICIAL_PROVIDER_ID,
       modelId: 'gpt-5.5',
-      effortLevel: 'medium',
-    })
+      effortLevel: 'medium' as const,
+    }
+    expect(useSessionRuntimeStore.getState().selections['session-openai']).toEqual(
+      expectedSelection,
+    )
+    expect(setSessionRuntime).toHaveBeenCalledWith('session-openai', expectedSelection)
   })
 
   it('uses each ChatGPT model reasoning catalog and resets unsupported effort to its default', async () => {
@@ -883,10 +886,12 @@ describe('ModelSelector', () => {
     await clickByRole(/GPT-5\.6-Sol/i)
     await clickByRole(/GPT-5\.5/)
 
+    // Switching models must reset unsupported effort (max → medium default)
+    // and mirror the session-scoped selection immediately.
     expect(useSessionRuntimeStore.getState().selections['session-openai-effort']).toEqual({
       providerId: OPENAI_OFFICIAL_PROVIDER_ID,
-      modelId: 'gpt-5.6-sol',
-      effortLevel: 'max',
+      modelId: 'gpt-5.5',
+      effortLevel: 'medium',
     })
 
     expect(screen.getByRole('button', { name: 'Effort: Medium' })).toBeInTheDocument()
@@ -897,8 +902,8 @@ describe('ModelSelector', () => {
 
     expect(useSessionRuntimeStore.getState().selections['session-openai-effort']).toEqual({
       providerId: OPENAI_OFFICIAL_PROVIDER_ID,
-      modelId: 'gpt-5.6-sol',
-      effortLevel: 'max',
+      modelId: 'gpt-5.5',
+      effortLevel: 'xhigh',
     })
   })
 
@@ -1000,7 +1005,10 @@ describe('ModelSelector', () => {
       await Promise.resolve()
     })
 
-    expect(useSessionRuntimeStore.getState().selections['session-grok']).toBeUndefined()
+    expect(useSessionRuntimeStore.getState().selections['session-grok']).toEqual({
+      providerId: 'grok-official',
+      modelId: 'grok-4.5',
+    })
     expect(screen.queryByRole('button', { name: /Effort:/i })).not.toBeInTheDocument()
   })
 

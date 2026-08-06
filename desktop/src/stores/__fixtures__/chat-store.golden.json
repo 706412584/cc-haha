@@ -991,7 +991,7 @@
             "parentToolUseId": "toolu_parent_agent"
           }
         ],
-        "chatState": "thinking",
+        "chatState": "tool_executing",
         "streamingText": "",
         "streamingToolInput": "",
         "activeToolUseId": null,

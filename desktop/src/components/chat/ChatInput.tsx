@@ -1589,7 +1589,11 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
               placeholder={composerPlaceholder}
               disabled={isWorkspaceMissing}
               editorClassName={`max-h-[200px] overflow-y-auto text-sm leading-relaxed text-[var(--color-text-primary)] ${
-                useCompactChrome ? 'py-1.5' : 'py-2'
+                isMobileComposer
+                  ? 'mobile-composer-textarea min-h-[44px] py-1.5'
+                  : useCompactChrome
+                    ? 'py-1.5'
+                    : 'py-2'
               }`}
               aria={{
                 role: isSlashMenuVisible ? 'combobox' : 'textbox',

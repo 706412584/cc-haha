@@ -180,7 +180,27 @@ export function toStreamingFallbackServerMessage(cliMsg: any): ServerMessage {
     typeof cliMsg.cause === 'string' && STREAMING_FALLBACK_CAUSES.has(cliMsg.cause as StreamingFallbackCause)
       ? (cliMsg.cause as StreamingFallbackCause)
       : 'unknown'
-  return { type: 'streaming_fallback', cause }
+  // stream_retry 会附带 attempt 元数据，供桌面重连横幅展示；兼容 camelCase / snake_case。
+  const attempt = normalizeRetryCount(cliMsg.attempt)
+  const maxRetries = normalizeRetryCount(cliMsg.maxRetries ?? cliMsg.max_retries)
+  const retryDelayMs = normalizeRetryCount(cliMsg.retryDelayMs ?? cliMsg.retry_delay_ms)
+  const errorMessage =
+    (typeof cliMsg.errorMessage === 'string' && cliMsg.errorMessage.trim()
+      ? cliMsg.errorMessage.trim()
+      : undefined) ??
+    (typeof cliMsg.error_message === 'string' && cliMsg.error_message.trim()
+      ? cliMsg.error_message.trim()
+      : undefined) ??
+    readRetryErrorString(cliMsg.error, ['message', 'error'])
+
+  return {
+    type: 'streaming_fallback',
+    cause,
+    ...(attempt !== null ? { attempt } : {}),
+    ...(maxRetries !== null ? { maxRetries } : {}),
+    ...(retryDelayMs !== null ? { retryDelayMs } : {}),
+    ...(errorMessage ? { errorMessage } : {}),
+  }
 }
 
 export function extractLocalCommandOutput(

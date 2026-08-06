@@ -718,6 +718,9 @@ describe('MessageList nested tool calls', () => {
       set: (value: number) => { scrollTop = value },
     })
 
+    // User intent first: without a prior scrollTop baseline, auto-scroll mode
+    // would treat non-bottom as programmatic and keep isAwayFromLatest false.
+    fireEvent.wheel(scroller, { deltaY: -40 })
     fireEvent.scroll(scroller)
     expect(screen.getByRole('button', { name: /Turn 1 of 4: First prompt/ }).getAttribute('aria-current')).toBe('location')
 

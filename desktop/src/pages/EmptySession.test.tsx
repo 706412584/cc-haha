@@ -749,9 +749,7 @@ describe('EmptySession', () => {
 
     render(<EmptySession />)
 
-    fireEvent.change(screen.getByRole('textbox'), {
-      target: { value: 'draft question', selectionStart: 14 },
-    })
+    setComposerText('draft question', 14)
     fireEvent.click(screen.getByRole('button', { name: /Run/i }))
 
     await waitFor(() => {
@@ -889,9 +887,7 @@ describe('EmptySession', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Save annotation for screenshot.jpg' }))
 
     expect(await screen.findByLabelText('Annotate screenshot-annotated.png')).toBeInTheDocument()
-    fireEvent.change(screen.getByRole('textbox'), {
-      target: { value: 'use the annotation', selectionStart: 'use the annotation'.length },
-    })
+    setComposerText('use the annotation', 'use the annotation'.length)
     fireEvent.click(screen.getByRole('button', { name: /Run/i }))
 
     await waitFor(() => {
@@ -1468,9 +1464,9 @@ describe('EmptySession welcome-screen task cards', () => {
 
     fireEvent.click(await screen.findByTestId('welcome-task-card-preMergeReview'))
 
-    const input = screen.getByRole('textbox') as HTMLTextAreaElement
-    expect(input.value).toContain('main')
-    expect(input.value.toLowerCase()).toContain('pr description')
+    const text = getComposerText()
+    expect(text).toContain('main')
+    expect(text.toLowerCase()).toContain('pr description')
   })
 
   it('orchestration cards persist coordinator mode for the new session before connect', async () => {

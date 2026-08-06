@@ -73,6 +73,15 @@ vi.mock('../../hooks/useMobileViewport', () => ({
   useMobileViewport: () => viewportMocks.isMobile,
 }))
 
+const runtimeMocks = vi.hoisted(() => ({
+  isDesktopRuntime: false,
+}))
+
+vi.mock('../../lib/desktopRuntime', async () => {
+  const actual = await vi.importActual<typeof import('../../lib/desktopRuntime')>('../../lib/desktopRuntime')
+  return { ...actual, isDesktopRuntime: () => runtimeMocks.isDesktopRuntime }
+})
+
 vi.mock('../../lib/imageCompress', () => ({
   compressDataUrl: vi.fn(async (dataUrl: string) => dataUrl),
 }))
@@ -199,6 +208,7 @@ describe('ChatInput file mentions', () => {
     Reflect.deleteProperty(window, 'desktopHost')
     delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
     viewportMocks.isMobile = false
+    runtimeMocks.isDesktopRuntime = false
     useSettingsStore.setState({ locale: 'en' })
     useChatStore.setState(initialChatState, true)
     useSessionStore.setState(initialSessionState, true)
@@ -1709,6 +1719,7 @@ describe('ChatInput file mentions', () => {
   })
 
   it('previews and annotates a selected desktop JPG outside the filesystem allow-list', async () => {
+    runtimeMocks.isDesktopRuntime = true
     const createObjectURL = vi.fn(() => 'blob:selected-desktop-image')
     vi.stubGlobal('URL', { ...URL, createObjectURL })
     installElectronFileHost()
@@ -1735,6 +1746,7 @@ describe('ChatInput file mentions', () => {
   })
 
   it('uses native desktop file paths instead of inlining selected files', async () => {
+    runtimeMocks.isDesktopRuntime = true
     installElectronFileHost()
     const firstFile = new File(['log'], 'large-a.log', { type: 'text/plain' })
     const secondFile = new File(['zip'], 'large-b.zip', { type: 'application/zip' })
@@ -1845,6 +1857,7 @@ describe('ChatInput file mentions', () => {
   })
 
   it('pastes copied desktop files into the active session as path-only attachments', async () => {
+    runtimeMocks.isDesktopRuntime = true
     installElectronFileHost()
     const copiedFile = new File(['# Project notes'], 'ignored-name.md', { type: 'text/markdown' })
     Object.defineProperty(copiedFile, 'path', {

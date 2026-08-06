@@ -16,9 +16,10 @@ const multipleImages: ImageBlock[] = [
 
 /** Get the main (large) image inside the modal overlay. */
 function getModalMainImage(container: HTMLElement): HTMLImageElement | null {
-  // The modal renders inside a [role=dialog] or a fixed overlay with max-h-[70vh]
-  const modalImg = container.querySelector('.max-h-\\[70vh\\] img') as HTMLImageElement | null
-  return modalImg
+  // ImageGalleryModal mounts via Modal(role=dialog); main stage img uses max-h-full.
+  const dialog = container.querySelector('[role="dialog"]')
+  if (!dialog) return null
+  return dialog.querySelector('img') as HTMLImageElement | null
 }
 
 describe('ImageBlockGallery', () => {

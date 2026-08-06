@@ -275,7 +275,10 @@ function ActivityStatusIndicator({
   animated?: boolean
   hideLabel?: boolean
 }) {
-  const isRunning = animated && (status === 'running' || status === 'in_progress')
+  // Subagent rows suppress pulse (mascot owns the motion) but still mark the
+  // live-status dot for tests and assistive tooling.
+  const isLiveStatus = status === 'running' || status === 'in_progress'
+  const isPulsing = animated && isLiveStatus
 
   return (
     <span className="inline-flex shrink-0 items-center gap-1.5 text-[11px] font-medium text-[var(--color-text-tertiary)]">
@@ -284,8 +287,8 @@ function ActivityStatusIndicator({
           fifteen other dots in the app already run it. */}
       <StatusDot
         tone={getStatusTone(status)}
-        pulse={isRunning}
-        data-testid={isRunning ? 'activity-live-dot' : undefined}
+        pulse={isPulsing}
+        data-testid={isLiveStatus ? 'activity-live-dot' : undefined}
       />
       {hideLabel ? null : label}
     </span>

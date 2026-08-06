@@ -1,4 +1,3 @@
-
 /**
  * The few things every Settings panel needs.
  *

@@ -119,7 +119,9 @@ describe('component reachability', () => {
   it('finds the entry points it is supposed to walk from', () => {
     // A typo in ENTRY_HTML, or a renamed entry, would make everything look unreachable
     // and the failure message would send the reader hunting in the wrong place.
-    const entries = entryPoints().map((path) => relative(ROOT, path))
+    // Windows `path.relative` yields backslashes; normalize so the assertion is
+    // portable across CI runners.
+    const entries = entryPoints().map((path) => relative(ROOT, path).replaceAll('\\', '/'))
     expect(entries).toContain('src/main.tsx')
     expect(entries.length).toBeGreaterThanOrEqual(2)
     // The walk must actually traverse: main.tsx alone proves nothing.
@@ -130,7 +132,7 @@ describe('component reachability', () => {
   it('reaches every component from an entry point', () => {
     const unreachable = components
       .filter((path) => !reachable.has(path))
-      .map((path) => relative(SRC, path))
+      .map((path) => relative(SRC, path).replaceAll('\\', '/'))
       .filter((path) => !(path in ALLOWED_UNREACHABLE))
       .sort()
 

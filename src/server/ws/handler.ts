@@ -3187,6 +3187,12 @@ function cleanupSessionRuntimeState(
   lastResolvedStartupWorkDirs.delete(sessionId)
   taskNotificationPersistence.delete(sessionId)
   observedTerminalTasks.delete(sessionId)
+  const thinkingIncompatPrefix = `${sessionId}|`
+  for (const key of recentThinkingIncompatNotifications) {
+    if (key.startsWith(thinkingIncompatPrefix)) {
+      recentThinkingIncompatNotifications.delete(key)
+    }
+  }
   clearPrewarmState(sessionId)
 }
 
@@ -3484,9 +3490,13 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
         const messageId = typeof cliMsg.message.id === 'string'
           ? cliMsg.message.id
           : undefined
-        const receivedMatchingStream = messageId
-          ? streamState.streamedAssistantMessageIds.has(messageId)
-          : streamState.unidentifiedStreamScopes.delete(streamScope)
+        // stream_retry 期间的 buffered assistant 必须抑制；否则 clear 了
+        // stream id 后会把失败流的残片当完整回复吐给前端。
+        const receivedMatchingStream = streamState.suppressBufferedAssistant || (
+          messageId
+            ? streamState.streamedAssistantMessageIds.has(messageId)
+            : streamState.unidentifiedStreamScopes.delete(streamScope)
+        )
         if (messageId) streamState.unidentifiedStreamScopes.delete(streamScope)
         if (
           messageId &&
@@ -3534,9 +3544,12 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
           }
         }
 
-        // Reset flags for next turn
+        // Reset flags for next turn. Do NOT clear pendingToolBlocks wholesale —
+        // parallel subagent scopes can share a session, and one assistant
+        // must not drop another scope's deferred tool_use completions.
+        // Consumed keys are deleted above; abandoned ones clear on fallback.
         streamState.hasReceivedStreamEvents = false
-        streamState.pendingToolBlocks.clear()
+        streamState.suppressBufferedAssistant = false
         return messages
       }
       return []
@@ -3867,7 +3880,13 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
       if (subtype === 'streaming_fallback') {
         if (stoppedTurnEventFences.has(sessionId)) return []
         streamState.hasReceivedStreamEvents = false
+        // stream_retry 后仍可能收到失败流的 buffered assistant；非 retry 的
+        // fallback（watchdog 等）则要接受随后的完整 assistant，因此清掉
+        // 已登记的 stream id，避免把 partial stream 当成 complete stream。
         streamState.suppressBufferedAssistant = cliMsg.cause === 'stream_retry'
+        streamState.streamedAssistantMessageIds.clear()
+        streamState.unidentifiedStreamScopes.clear()
+        streamState.activeMessageIdsByScope.clear()
         streamState.activeBlockTypes.clear()
         streamState.activeToolBlocks.clear()
         streamState.pendingToolBlocks.clear()

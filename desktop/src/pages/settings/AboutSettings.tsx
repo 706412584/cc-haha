@@ -10,26 +10,27 @@ import { useUpdateStore } from '../../stores/updateStore'
 import { formatBytes } from '../../lib/formatBytes'
 import { getDesktopHost } from '../../lib/desktopHost'
 import { publicAssetPath } from '../../lib/publicAsset'
-import { BrandSeal } from '../../components/composite/BrandSeal'
-import { isValidHttpProxyUrl } from '../settings/shared'
+import { isValidHttpProxyUrl } from './shared'
 
 /**
- * The About panel: version, update channel and the project's links.
- *
- * Moved verbatim out of `Settings.tsx`. Its repo/social constants come along because
- * nothing else in that file referenced them; `isValidHttpProxyUrl` stayed in
- * `./shared`, since the General panel needs it too.
+ * About / updates panel — fork branding preserved from the current monolith.
  */
 
-const GITHUB_REPO = 'https://github.com/NanmiCoder/cc-haha'
+// Project/repo + release/update source point at this fork. Original author
+// attribution (AUTHOR_GITHUB + social links) is intentionally preserved below.
+const GITHUB_REPO = 'https://github.com/706412584/cc-haha'
+const GITHUB_REPO_NAME = '706412584/cc-haha'
 const GITHUB_ISSUES = `${GITHUB_REPO}/issues`
 const GITHUB_RELEASES = `${GITHUB_REPO}/releases`
 const AUTHOR_GITHUB = 'https://github.com/NanmiCoder'
+// Fork maintainer (credited in addition to the original author).
+const FORK_AUTHOR_GITHUB = 'https://github.com/706412584'
 const SOCIAL_LINKS = [
   { name: 'Bilibili', icon: '/icons/bilibili.svg', url: 'https://space.bilibili.com/434377496', label: '程序员阿江-Relakkes' },
   { name: 'Douyin', icon: '/icons/douyin.svg', url: 'https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE', label: '程序员阿江-Relakkes' },
   { name: 'Xiaohongshu', icon: '/icons/xiaohongshu.svg', url: 'https://www.xiaohongshu.com/user/profile/5f58bd990000000001003753', label: '程序员阿江-Relakkes' },
 ] as const
+
 
 export function AboutSettings() {
   const t = useTranslation()
@@ -152,10 +153,10 @@ export function AboutSettings() {
   })()
 
   return (
-    <div className="w-full min-w-0 max-w-2xl mx-auto flex flex-col items-center py-6">
+    <div className="w-full min-w-0 flex flex-col items-center py-6">
       {/* Logo + App Name + Version */}
-      <BrandSeal size="xl" className="mb-4" />
-      <h1 className="text-xl font-bold text-[var(--color-text-primary)]" style={{ fontFamily: 'var(--font-headline)' }}>Claude Code Haha</h1>
+      <img src={publicAssetPath('app-icon.png')} alt="Code Council" className="mb-4 h-20 w-20" />
+      <h1 className="text-xl font-bold text-[var(--color-text-primary)]" style={{ fontFamily: 'var(--font-headline)' }}>Code Council</h1>
       {version && (
         <div className="mt-1 flex items-center gap-2 text-xs text-[var(--color-text-tertiary)]">
           <span>{t('settings.about.version')} {version}</span>
@@ -174,7 +175,7 @@ export function AboutSettings() {
         >
           <img src={publicAssetPath('icons/github.svg')} alt="GitHub" className="w-5 h-5 opacity-70" />
           <div className="flex-1 text-left">
-            <div className="text-sm font-medium text-[var(--color-text-primary)]">NanmiCoder/cc-haha</div>
+            <div className="text-sm font-medium text-[var(--color-text-primary)]">{GITHUB_REPO_NAME}</div>
             <div className="text-xs text-[var(--color-text-tertiary)]">{t('settings.about.starHint')}</div>
           </div>
         </button>
@@ -380,6 +381,22 @@ export function AboutSettings() {
         >
           <img src={publicAssetPath('icons/github.svg')} alt="GitHub" className="w-4 h-4 opacity-60" />
           <span className="text-sm text-[var(--color-text-primary)]">程序员阿江-Relakkes</span>
+          <span className="text-xs text-[var(--color-text-tertiary)] ml-auto">GitHub</span>
+        </button>
+      </div>
+
+      {/* Fork maintainer (this build is a community fork; original author credited above) */}
+      <div className="w-full mt-4">
+        <h3 className="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-3">{t('settings.about.forkMaintainer')}</h3>
+        <button
+          onClick={() => openUrl(FORK_AUTHOR_GITHUB)}
+          className="w-full flex items-center gap-3 px-4 py-2.5 rounded-[var(--radius-lg)] hover:bg-[var(--color-surface-hover)] transition-colors cursor-pointer"
+        >
+          <img src={publicAssetPath('icons/github.svg')} alt="GitHub" className="w-4 h-4 opacity-60" />
+          <div className="flex-1 text-left">
+            <div className="text-sm text-[var(--color-text-primary)]">706412584</div>
+            <div className="text-xs text-[var(--color-text-tertiary)]">{t('settings.about.forkMaintainerHint')}</div>
+          </div>
           <span className="text-xs text-[var(--color-text-tertiary)] ml-auto">GitHub</span>
         </button>
       </div>

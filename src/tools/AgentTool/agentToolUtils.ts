@@ -748,7 +748,9 @@ async function runAsyncAgentLifecycleImpl({
     worktreeBranch?: string
   }>
 }): Promise<void> {
-  const agentToolUseId = parentToolUseId
+  // Tests and initial Agent spawns often only set toolUseContext.toolUseId;
+  // resume paths pass an explicit parentToolUseId which must win.
+  const agentToolUseId = parentToolUseId ?? toolUseContext.toolUseId
   let stopSummarization: (() => void) | undefined
   const agentMessages: MessageType[] = []
   try {
