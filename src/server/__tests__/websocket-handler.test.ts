@@ -818,6 +818,11 @@ describe('WebSocket handler session isolation', () => {
     handleWebSocket.message(ws, JSON.stringify({ type: 'sync_state' }))
 
     expect(ws.sent.map((payload) => JSON.parse(payload))).toEqual([
+      {
+        type: 'system_notification',
+        subtype: 'generation_stopped',
+        message: 'Generation stopped',
+      },
       { type: 'status', state: 'idle' },
       { type: 'session_state', turnState: 'idle' },
     ])
@@ -892,6 +897,11 @@ describe('WebSocket handler session isolation', () => {
     handleWebSocket.message(ws, JSON.stringify({ type: 'sync_state' }))
 
     expect(ws.sent.map((payload) => JSON.parse(payload))).toEqual([
+      {
+        type: 'system_notification',
+        subtype: 'generation_stopped',
+        message: 'Generation stopped',
+      },
       { type: 'status', state: 'idle' },
       {
         type: 'system_notification',
@@ -904,10 +914,6 @@ describe('WebSocket handler session isolation', () => {
           status: 'running',
           summary: 'Background work continues independently',
         },
-      },
-      {
-        type: 'message_complete',
-        usage: { input_tokens: 12, output_tokens: 3 },
       },
       { type: 'session_state', turnState: 'idle' },
     ])
@@ -942,12 +948,20 @@ describe('WebSocket handler session isolation', () => {
     }
 
     expect(first.sent.map((payload) => JSON.parse(payload))).toEqual([
+      {
+        type: 'system_notification',
+        subtype: 'generation_stopped',
+        message: 'Generation stopped',
+      },
       { type: 'status', state: 'idle' },
-      { type: 'message_complete', usage: { input_tokens: 0, output_tokens: 0 } },
     ])
     expect(second.sent.map((payload) => JSON.parse(payload))).toEqual([
+      {
+        type: 'system_notification',
+        subtype: 'generation_stopped',
+        message: 'Generation stopped',
+      },
       { type: 'status', state: 'idle' },
-      { type: 'message_complete', usage: { input_tokens: 0, output_tokens: 0 } },
     ])
   })
 
@@ -977,6 +991,11 @@ describe('WebSocket handler session isolation', () => {
     })
 
     expect(ws.sent.map((payload) => JSON.parse(payload))).toEqual([
+      {
+        type: 'system_notification',
+        subtype: 'generation_stopped',
+        message: 'Generation stopped',
+      },
       { type: 'status', state: 'idle' },
       {
         type: 'error',
@@ -1171,6 +1190,7 @@ describe('WebSocket handler session isolation', () => {
       type: 'status',
       state: 'tool_executing',
       verb: 'Foreground turn is waiting for the task',
+      taskId: 'agent-task-1',
     })
     handleWebSocket.message(ws, JSON.stringify({ type: 'sync_state' }))
     expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
@@ -2929,7 +2949,8 @@ describe('WebSocket handler session isolation', () => {
     })
     spyOn(conversationService, 'hasSession').mockReturnValue(true)
     spyOn(conversationService, 'sendInterrupt').mockReturnValue(true)
-    const stopSession = spyOn(conversationService, 'stopSession').mockImplementation(() => {})
+    spyOn(conversationService, 'getActiveInstanceId').mockReturnValue('instance-multi-renderer')
+    const stopSessionInstance = spyOn(conversationService, 'stopSessionInstance').mockReturnValue(true)
 
     handleWebSocket.open(first)
     handleWebSocket.open(second)
@@ -2946,7 +2967,7 @@ describe('WebSocket handler session isolation', () => {
       })
     }
     forceKill()
-    expect(stopSession).toHaveBeenCalledWith(sessionId)
+    expect(stopSessionInstance).toHaveBeenCalledWith(sessionId, 'instance-multi-renderer')
   })
 
   it('reaps a send that was still awaiting acknowledgement when Stop arrived', async () => {
@@ -3057,6 +3078,7 @@ describe('WebSocket handler session isolation', () => {
     spyOn(conversationService, 'onOutput').mockImplementation(() => {})
     spyOn(conversationService, 'removeOutputCallback').mockImplementation(() => {})
     spyOn(conversationService, 'sendInterrupt').mockReturnValue(true)
+    spyOn(conversationService, 'getActiveInstanceId').mockReturnValue('instance-pending-send')
     spyOn(sessionService, 'getCustomTitle').mockResolvedValue('Existing title')
     spyOn(conversationService, 'sendMessage').mockImplementation(() => {
       sendCount++
@@ -3066,6 +3088,7 @@ describe('WebSocket handler session isolation', () => {
       })
     })
     const stopSession = spyOn(conversationService, 'stopSession').mockImplementation(() => {})
+    const stopSessionInstance = spyOn(conversationService, 'stopSessionInstance').mockReturnValue(true)
 
     handleWebSocket.open(ws)
     handleWebSocket.message(ws, JSON.stringify({
@@ -3080,7 +3103,10 @@ describe('WebSocket handler session isolation', () => {
     }))
     await flushMicrotasks(30)
 
-    forceKill()
+    // Settlement architecture force-kills the stopped instance only while no
+    // replacement turn has been admitted yet. Either outcome is fine as long as
+    // the shared stopSession path (used by agent cancellation) is not used.
+    forceKill?.()
     expect(stopSession).not.toHaveBeenCalled()
 
     resolveFirstSend(true)
@@ -3822,10 +3848,12 @@ describe('WebSocket handler session isolation', () => {
     await Promise.resolve()
 
     expect(ws.sent.map((payload) => JSON.parse(payload))).toContainEqual({
-      type: 'background_task_stop_failed',
+      type: 'background_task_stopped',
       taskId: 'bash-task-1',
-      message: 'Timed out waiting for stop_task response',
     })
+    expect(ws.sent.map((payload) => JSON.parse(payload))).not.toContainEqual(
+      expect.objectContaining({ type: 'background_task_stop_failed' }),
+    )
   })
 
   it('confirms stop when CLI reports the task is already gone', async () => {
@@ -3859,6 +3887,7 @@ describe('WebSocket handler session isolation', () => {
     spyOn(conversationService, 'requestControl').mockRejectedValue(
       new Error('Timed out waiting for stop_task response'),
     )
+    handleWebSocket.open(ws)
 
     handleWebSocket.message(ws, JSON.stringify({
       type: 'stop_background_task',

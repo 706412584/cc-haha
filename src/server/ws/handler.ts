@@ -249,7 +249,7 @@ const runtimeOverrides = new Map<string, RuntimeOverride>()
 const activeUserTurns = new Map<string, ActiveUserTurnState>()
 const stopSettlements = new Map<string, StopSettlement>()
 const settledStopTerminalFrames = new WeakSet<object>()
-const activeBackgroundTaskIds = new Map<string, Set<string>>()
+// activeBackgroundTaskIds lives in agentTaskState — do not redeclare/shadow it here.
 const activeCliRuns = new Set<string>()
 const pendingInterruptedTurnResults = new Map<string, number>()
 const interruptedTurnResultMessages = new WeakMap<object, string>()
@@ -733,37 +733,66 @@ export const handleWebSocket = {
       switch (message.type) {
         case 'user_message': {
           const activeTurn: ActiveUserTurnState = { messageSent: false }
+          const incomingSlashCommand = getDesktopSlashCommand(message.content)
+          const isClearCommand =
+            incomingSlashCommand?.commandName === 'clear' &&
+            !incomingSlashCommand.args.trim()
           if (!sessionActivityCoordinator.tryBeginUserTurn(ws.data.sessionId)) {
-            const existingTurn = activeUserTurns.get(ws.data.sessionId)
-            if (existingTurn?.messageSent && conversationService.hasSession(ws.data.sessionId)) {
-              void conversationService
-                .sendMessage(ws.data.sessionId, message.content, message.attachments)
-                .then((sent) => {
-                  if (sent) return
-                  sendMessage(ws, {
-                    type: 'error',
-                    message: 'CLI process is not running. The session may have ended or the process crashed.',
-                    code: 'CLI_NOT_RUNNING',
-                  })
+            // /clear must interrupt an in-flight admission (e.g. turn waiting on
+            // CLI startup). Cancel the existing token, then re-acquire so clear
+            // still serializes through the coordinator.
+            if (isClearCommand) {
+              const existingTurn = activeUserTurns.get(ws.data.sessionId)
+              if (existingTurn) {
+                existingTurn.cancelled = true
+                existingTurn.stopped = true
+                existingTurn.removeCompletionCallback?.()
+                existingTurn.removeTitleCallback?.()
+                clearActiveUserTurn(ws.data.sessionId, existingTurn)
+              } else {
+                sessionActivityCoordinator.endUserTurn(ws.data.sessionId)
+              }
+              if (!sessionActivityCoordinator.tryBeginUserTurn(ws.data.sessionId)) {
+                sendMessage(ws, {
+                  type: 'error',
+                  message: 'A user turn is already active for this session. Retry after it completes.',
+                  code: 'SESSION_TURN_ACTIVE',
+                  retryable: true,
                 })
-                .catch((err) => {
-                  console.error(`[WS] Mid-turn user message inject failed:`, err)
-                  sendMessage(ws, {
-                    type: 'error',
-                    message: 'The follow-up message could not be delivered. Please retry.',
-                    code: 'USER_TURN_INJECT_FAILED',
-                    retryable: true,
+                break
+              }
+            } else {
+              const existingTurn = activeUserTurns.get(ws.data.sessionId)
+              if (existingTurn?.messageSent && conversationService.hasSession(ws.data.sessionId)) {
+                void conversationService
+                  .sendMessage(ws.data.sessionId, message.content, message.attachments)
+                  .then((sent) => {
+                    if (sent) return
+                    sendMessage(ws, {
+                      type: 'error',
+                      message: 'CLI process is not running. The session may have ended or the process crashed.',
+                      code: 'CLI_NOT_RUNNING',
+                    })
                   })
-                })
+                  .catch((err) => {
+                    console.error(`[WS] Mid-turn user message inject failed:`, err)
+                    sendMessage(ws, {
+                      type: 'error',
+                      message: 'The follow-up message could not be delivered. Please retry.',
+                      code: 'USER_TURN_INJECT_FAILED',
+                      retryable: true,
+                    })
+                  })
+                break
+              }
+              sendMessage(ws, {
+                type: 'error',
+                message: 'A user turn is already active for this session. Retry after it completes.',
+                code: 'SESSION_TURN_ACTIVE',
+                retryable: true,
+              })
               break
             }
-            sendMessage(ws, {
-              type: 'error',
-              message: 'A user turn is already active for this session. Retry after it completes.',
-              code: 'SESSION_TURN_ACTIVE',
-              retryable: true,
-            })
-            break
           }
           handleUserMessage(ws, message, activeTurn).catch((err) => {
             const sessionId = ws.data.sessionId
@@ -954,17 +983,34 @@ async function waitForStopSettlement(sessionId: string): Promise<void> {
   if (settlement) await settlement.promise
 }
 
-function settleStoppedGeneration(sessionId: string): void {
-  if (!sessionStopRequested.delete(sessionId)) return
-  stoppedTurnEventFences.delete(sessionId)
+/**
+ * Unlock follow-up admissions and notify renderers that Stop was accepted.
+ * Keeps `sessionStopRequested` / `stoppedTurnEventFences` latched so late
+ * foreground frames stay suppressed until `clearStoppedTurnLatch`.
+ */
+function releaseStopSettlement(sessionId: string): void {
   const settlement = stopSettlements.get(sessionId)
+  if (!settlement) return
   stopSettlements.delete(sessionId)
-  settlement?.resolve()
+  settlement.resolve()
   sendToSession(sessionId, {
     type: 'system_notification',
     subtype: 'generation_stopped',
     message: 'Generation stopped',
   })
+}
+
+function clearStoppedTurnLatch(sessionId: string): void {
+  sessionStopRequested.delete(sessionId)
+  stoppedTurnEventFences.delete(sessionId)
+}
+
+/** Release waiters (if any) and drop the late-output latch. */
+function settleStoppedGeneration(sessionId: string): void {
+  const hadLatch = sessionStopRequested.has(sessionId) || stopSettlements.has(sessionId)
+  if (!hadLatch) return
+  releaseStopSettlement(sessionId)
+  clearStoppedTurnLatch(sessionId)
 }
 
 async function handleUserMessage(
@@ -974,13 +1020,10 @@ async function handleUserMessage(
 ) {
   const { sessionId } = ws.data
 
-  // A replacement turn waits outside activeUserTurns so the stopped process can
-  // still be force-killed. With no pending Stop, registration remains synchronous.
-  if (stopSettlements.has(sessionId)) {
-    await waitForStopSettlement(sessionId)
-  }
-
   const desktopSlashCommand = getDesktopSlashCommand(message.content)
+
+  // Reject invalid /clear before waiting on stop settlement so a latched Stop
+  // cannot trap argument validation behind an unresolved force-kill timer.
   if (desktopSlashCommand?.commandName === 'clear' && desktopSlashCommand.args.trim()) {
     sendMessage(ws, {
       type: 'error',
@@ -988,21 +1031,34 @@ async function handleUserMessage(
       code: 'INVALID_SLASH_COMMAND_ARGS',
     })
     sendMessage(ws, { type: 'status', state: 'idle' })
-    clearActiveUserTurn(sessionId, activeTurn)
+    // Coordinator token was acquired in message() — release it explicitly.
+    sessionActivityCoordinator.endUserTurn(sessionId)
     return
   }
 
+  // A replacement turn waits outside activeUserTurns so the stopped process can
+  // still be force-killed. With no pending Stop, registration remains synchronous.
+  if (stopSettlements.has(sessionId)) {
+    await waitForStopSettlement(sessionId)
+  }
+
+  // Register immediately after the coordinator token is acquired so clear/error
+  // paths can release both activeUserTurns and sessionActivityCoordinator.
+  // Without this, /clear never calls endUserTurn and blocks later admissions.
+  activeUserTurns.set(sessionId, activeTurn)
+
   if (desktopSlashCommand?.commandName === 'clear') {
-    try {
-      await handleDesktopClearCommand(ws)
-    } finally {
-      clearActiveUserTurn(sessionId, activeTurn)
-    }
+    // Enqueue clear on the runtime-transition lane, then release the user-turn
+    // token so a follow-up message can admit and wait behind that lane instead
+    // of being rejected as SESSION_TURN_ACTIVE.
+    const clearPromise = handleDesktopClearCommand(ws)
+    clearActiveUserTurn(sessionId, activeTurn)
+    await clearPromise
     return
   }
 
   await waitForRuntimeConfigHandlers(sessionId)
-  if (activeTurn.stopped) {
+  if (activeTurn.stopped || activeTurn.cancelled) {
     clearActiveUserTurn(sessionId, activeTurn)
     return
   }
@@ -1300,11 +1356,22 @@ function stopRuntimeStartedByCancelledAdmission(
   sessionId: string,
   activeTurn: ActiveUserTurnState,
 ): void {
-  if (
-    activeTurn.cancelled &&
-    !activeUserTurns.has(sessionId) &&
-    conversationService.hasSession(sessionId)
-  ) {
+  // A replacement admission already owns the runtime — never kill it from a
+  // late continuation of the cancelled turn.
+  if (activeUserTurns.has(sessionId)) return
+  if (!conversationService.hasSession(sessionId)) return
+
+  if (activeTurn.stopped) {
+    // Stop interrupted a send that had entered the runtime (sendStarted) but
+    // never committed (messageSent). With no replacement owning the process,
+    // reap the orphan; committed stops stay on interrupt + instance force-kill.
+    if (activeTurn.sendStarted && !activeTurn.messageSent) {
+      conversationService.stopSession(sessionId)
+    }
+    return
+  }
+
+  if (activeTurn.cancelled) {
     conversationService.stopSession(sessionId)
   }
 }
@@ -2167,9 +2234,33 @@ function handleStopGeneration(ws: ServerWebSocket<WebSocketData>) {
   const agentTasks = [...(activeAgentTasks.get(sessionId)?.values() ?? [])]
   console.log(`[WS] Stop generation requested for session: ${sessionId}`)
 
-  if (stoppedTurn) {
-    sessionStopRequested.add(sessionId)
+  // Idempotent only when nothing remains to cancel. A second Stop against an
+  // admitted replacement (or remaining Agents) must still revoke that work.
+  if (
+    sessionStopRequested.has(sessionId) &&
+    !stoppedTurn &&
+    agentTasks.length === 0
+  ) {
+    sendMessage(ws, { type: 'status', state: 'idle' })
+    return
   }
+
+  // Foreground latch is only for user-turn cancellation. Agent-only Stop must
+  // not suppress independent non-Agent permissions / bash task notifications.
+  const armForegroundLatch = Boolean(stoppedTurn)
+  if (armForegroundLatch) {
+    const alreadyLatched = sessionStopRequested.has(sessionId)
+    sessionStopRequested.add(sessionId)
+    stoppedTurnEventFences.add(sessionId)
+    if (!alreadyLatched || !stopSettlements.has(sessionId)) {
+      let resolveSettlement!: () => void
+      const settlement = new Promise<void>((resolve) => {
+        resolveSettlement = resolve
+      })
+      stopSettlements.set(sessionId, { promise: settlement, resolve: resolveSettlement })
+    }
+  }
+
   if (stoppedTurn || agentTasks.length > 0) {
     const computerUseRequestIds = computerUseApprovalService
       .getPendingRequests(sessionId)
@@ -2184,77 +2275,109 @@ function handleStopGeneration(ws: ServerWebSocket<WebSocketData>) {
       })
     }
   }
-  agentStopRequestedSessions.add(sessionId)
-  legacyQueuedSessionChats.delete(sessionId)
-  terminalSessionChatStates.delete(sessionId)
-  interruptedSessionChats.add(sessionId)
 
-  // A turn can be registered while title metadata, CLI startup, or the send
-  // acknowledgement is still pending. Revoke that admission token so the
-  // suspended handler cannot resume after Stop and enqueue work (or clear the
-  // Agent stop latch) behind the user's explicit cancellation.
-  if (stoppedTurn && !stoppedTurn.messageSent) {
-    stoppedTurn.cancelled = true
-    stoppedTurn.replacementAfterStop = false
-    clearActiveUserTurn(sessionId, stoppedTurn)
-  } else if (stoppedTurn) {
+  agentStopRequestedSessions.add(sessionId)
+  if (stoppedTurn) {
+    stoppedTurn.stopped = true
     stoppedTurn.cancelled = true
     stoppedTurn.replacementAfterStop = false
   }
+  stoppedTurn?.removeCompletionCallback?.()
+  stoppedTurn?.removeTitleCallback?.()
+  discardActiveTitleTurn(sessionId, stoppedTurn?.titleTurnNumber ?? null)
+  const streamState = sessionStreamStates.get(sessionId)
+  if (streamState) {
+    resetCurrentStreamAttempt(streamState)
+    streamState.pendingLocalCommand = undefined
+    streamState.lastApiError = undefined
+  }
+  legacyQueuedSessionChats.delete(sessionId)
+  terminalSessionChatStates.delete(sessionId)
+  interruptedSessionChats.add(sessionId)
+  if (stoppedTurn) clearActiveUserTurn(sessionId, stoppedTurn)
+  else sessionActivityCoordinator.endUserTurn(sessionId)
 
   void Promise.allSettled(
     agentTasks.map((task) => requestStopTrackedAgentTask(sessionId, task, ws)),
   )
 
-  if (
-    stoppedTurn &&
-    conversationService.hasSession(sessionId) &&
-    (!stoppedTurn.messageSent || !stoppedTurn.interruptBoundaryPending)
-  ) {
-    // First try graceful interrupt via SDK control message
-    if (stoppedTurn.messageSent) addPendingInterruptedTurnResult(sessionId)
-    const interruptSent = conversationService.sendInterrupt(sessionId)
-    if (stoppedTurn.messageSent) {
-      if (interruptSent) {
-        stoppedTurn.interruptBoundaryPending = true
-      } else {
-        removePendingInterruptedTurnResult(sessionId)
-      }
-    }
+  const foregroundInFlight = Boolean(
+    stoppedTurn && (stoppedTurn.messageSent || stoppedTurn.sendStarted),
+  )
+  const agentsInFlight = agentTasks.length > 0
+
+  // Unlock replacement admissions + emit generation_stopped as soon as a
+  // foreground Stop is accepted. Keep the late-output latch until interrupt
+  // result / force-kill / replacement replay clears it.
+  if (armForegroundLatch) {
+    releaseStopSettlement(sessionId)
   }
 
-  if ((stoppedTurn || agentTasks.length > 0) && conversationService.hasSession(sessionId)) {
-    // Force-kill if still running after 3 seconds
-    setTimeout(() => {
-      const stoppedForegroundStillCurrent = Boolean(
-        stoppedTurn &&
-        stoppedTurn.cancelled &&
-        (
-          activeUserTurns.get(sessionId) === stoppedTurn ||
-          (
-            stoppedTurn.sendStarted === true &&
-            !stoppedTurn.messageSent &&
-            !activeUserTurns.has(sessionId)
+  if (foregroundInFlight || agentsInFlight) {
+    if (conversationService.hasSession(sessionId)) {
+      // First try graceful interrupt via SDK control message for the foreground
+      // turn. Agent-only stops still arm the force-kill fallback below.
+      if (foregroundInFlight && stoppedTurn) {
+        if (stoppedTurn.messageSent) addPendingInterruptedTurnResult(sessionId)
+        const interruptSent = conversationService.sendInterrupt(sessionId)
+        if (stoppedTurn.messageSent && !interruptSent) {
+          removePendingInterruptedTurnResult(sessionId)
+        }
+      }
+
+      // Force-kill if still running after 3 seconds. Capture the exact process
+      // instance now: if the user switches provider/model in the meantime, the
+      // restart replaces this process with a new one, and we must not kill that
+      // new process during its startup (which would surface as "CLI exited
+      // during startup with code 143"). Also keep the stopped-turn identity so a
+      // replacement turn on the same process is not force-killed either.
+      const instanceId = conversationService.getActiveInstanceId(sessionId)
+      setTimeout(() => {
+        // A replacement admission owns the runtime now — never kill it from the
+        // previous stop's fallback timer.
+        if (activeUserTurns.has(sessionId)) {
+          if (armForegroundLatch) clearStoppedTurnLatch(sessionId)
+          return
+        }
+
+        const stoppedAgentsStillActive =
+          agentStopRequestedSessions.has(sessionId) &&
+          [...(activeAgentTasks.get(sessionId)?.values() ?? [])].some(
+            (task) => !task.localStopConfirmed,
           )
-        ),
-      )
-      const stoppedAgentsStillActive =
-        agentStopRequestedSessions.has(sessionId) &&
-        activeUserTurns.get(sessionId)?.replacementAfterStop !== true &&
-        [...(activeAgentTasks.get(sessionId)?.values() ?? [])].some(
-          (task) => !task.localStopConfirmed,
-        )
-      if (
-        (stoppedForegroundStillCurrent || stoppedAgentsStillActive) &&
-        conversationService.hasSession(sessionId)
-      ) {
-        console.log(`[WS] Force-killing CLI subprocess for session: ${sessionId}`)
-        forceStopSharedRuntimeForAgentCancellation(sessionId)
-        void emitAuthoritativeStoppedForActiveAgents(sessionId)
-      }
-    }, 3_000)
+
+        if (armForegroundLatch && sessionStopRequested.has(sessionId) && instanceId) {
+          if (conversationService.stopSessionInstance(sessionId, instanceId)) {
+            if (stoppedAgentsStillActive) {
+              void emitAuthoritativeStoppedForActiveAgents(sessionId)
+            }
+            clearStoppedTurnLatch(sessionId)
+            console.log(`[WS] Force-killing CLI subprocess for session: ${sessionId}`)
+          }
+          return
+        }
+
+        if (stoppedAgentsStillActive) {
+          // Agent-only (or no instance id): shared runtime must go down so hung
+          // Agents cannot outlive the user's Stop.
+          forceStopSharedRuntimeForAgentCancellation(sessionId)
+          void emitAuthoritativeStoppedForActiveAgents(sessionId)
+          if (armForegroundLatch) clearStoppedTurnLatch(sessionId)
+          console.log(`[WS] Force-killing CLI subprocess for session: ${sessionId}`)
+          return
+        }
+
+        if (armForegroundLatch) clearStoppedTurnLatch(sessionId)
+      }, 3_000)
+    } else if (armForegroundLatch) {
+      clearStoppedTurnLatch(sessionId)
+    }
+  } else if (armForegroundLatch) {
+    clearStoppedTurnLatch(sessionId)
   }
 
+  // Broadcast idle to every renderer watching this session so multi-client
+  // desktops / H5 / pet stay in sync with the stop latch.
   sendToSession(sessionId, { type: 'status', state: 'idle' })
 }
 
@@ -2288,16 +2411,27 @@ async function requestStopBackgroundTask(
     return
   }
 
+  const confirmStopped = () => sendMessage(ws, {
+    type: 'background_task_stopped',
+    taskId,
+  })
+
   try {
     await conversationService.requestControl(sessionId, {
       subtype: 'stop_task',
       task_id: taskId,
     })
-    sendMessage(ws, {
-      type: 'background_task_stopped',
-      taskId,
-    })
+    confirmStopped()
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (
+      message === 'CLI session is not running' ||
+      !conversationService.hasSession(sessionId) ||
+      isBackgroundTaskAlreadyGoneMessage(message)
+    ) {
+      confirmStopped()
+      return
+    }
     reportBackgroundTaskStopFailure(sessionId, ws, taskId, error)
   }
 }
@@ -2893,7 +3027,7 @@ function bindTitleSessionOutput(
     if (!shouldProcess() && !(cliMsg?.type === 'result' && cliMsg?.is_error)) {
       return
     }
-    if (sessionTitleState.get(sessionId)?.activeTurn?.count !== titleTurnNumber) {
+    if (sessionTitleState.get(sessionId)?.activeTurn?.count !== activeTurn.titleTurnNumber) {
       return
     }
 
@@ -3015,6 +3149,13 @@ function cleanupSessionRuntimeState(
   options?: { preserveRetryableAgentStops?: boolean },
 ) {
   cancelSessionDisconnectWatcher(sessionId)
+  // Broadcast stopped task bookends BEFORE clearAgentRuntimeState wipes the
+  // tracking maps; otherwise closeSessionConnection cannot notify renderers.
+  if (hasActiveClients(sessionId)) {
+    broadcastStoppedBackgroundTasks(sessionId, 'Session closed')
+  } else {
+    activeBackgroundTaskIds.delete(sessionId)
+  }
   clearAgentRuntimeState(sessionId, {
     preserveRetryableStops: options?.preserveRetryableAgentStops,
   })
@@ -3034,11 +3175,6 @@ function cleanupSessionRuntimeState(
   stopSettlements.delete(sessionId)
   stopSettlement?.resolve()
   pendingInterruptedTurnResults.delete(sessionId)
-  if (hasActiveClients(sessionId)) {
-    broadcastStoppedBackgroundTasks(sessionId, 'Session closed')
-  } else {
-    activeBackgroundTaskIds.delete(sessionId)
-  }
   terminalSessionChatStates.delete(sessionId)
   legacyQueuedSessionChats.delete(sessionId)
   interruptedSessionChats.delete(sessionId)
@@ -4447,6 +4583,48 @@ function bindClientSessionOutput(
     closeLateNonAgentTaskAfterRuntimeExit(sessionId, taskLifecycle)
     closeStoppedAgentsAfterRuntimeExit(sessionId, cliMsg)
     if (taskLifecycle?.suppressForward) return
+
+    // Local settlement fence: a stopped turn's terminal result must drop the
+    // late-output latch and must not re-enter the chat stream as message_complete.
+    // generation_stopped was already emitted when Stop was accepted.
+    if (
+      cliMsg?.type === 'result' &&
+      sessionStopRequested.has(sessionId) &&
+      activeUserTurns.get(sessionId)?.replacementAfterStop !== true
+    ) {
+      if (cliMsg && typeof cliMsg === 'object') {
+        settledStopTerminalFrames.add(cliMsg)
+      }
+      clearStoppedTurnLatch(sessionId)
+      return
+    }
+    if (
+      cliMsg?.type === 'result' &&
+      (
+        sessionStopRequested.has(sessionId) ||
+        activeUserTurns.get(sessionId)?.replacementAfterStop === true
+      ) &&
+      (
+        pendingInterruptedTurnResults.has(sessionId) ||
+        interruptedTurnResultMessages.get(cliMsg) === sessionId
+      )
+    ) {
+      if (cliMsg && typeof cliMsg === 'object') {
+        settledStopTerminalFrames.add(cliMsg)
+      }
+      // consumeInterruptedTurnResult already ran above; keep the latch while
+      // the replacement still awaits its own replay attribution.
+      return
+    }
+    if (
+      cliMsg?.type === 'result' &&
+      cliMsg &&
+      typeof cliMsg === 'object' &&
+      settledStopTerminalFrames.has(cliMsg)
+    ) {
+      return
+    }
+
     const replacementAwaitingBoundary =
       activeUserTurns.get(sessionId)?.replacementAfterStop === true
     const stoppedTurnTerminalResult =
@@ -4460,9 +4638,8 @@ function bindClientSessionOutput(
     ) {
       // Until the interrupted result and the replacement's own replay establish
       // an ordering boundary, unscoped output may still belong to the old
-      // generation. Once that boundary settles, only its terminal result may
-      // pass to every renderer. Task lifecycle must pass so Stop can close
-      // Agents, and permission resolutions must pass so open prompts can close.
+      // generation. Task lifecycle must pass so Stop can close Agents, and
+      // permission resolutions must pass so open prompts can close.
       return
     }
     if (options?.shouldForward && !options.shouldForward(cliMsg)) {
@@ -4531,8 +4708,12 @@ function shouldSuppressCliOutputDuringStop(
   if (cliMsg?.type === 'control_cancel_request' || cliMsg?.type === 'control_response') {
     return false
   }
+  // While a foreground Stop latch is up, suppress ALL unscoped output including
+  // late tool permissions — they belong to the cancelled generation.
   if (hasStoppedTurnBoundary(sessionId)) return true
   if (!agentStopRequestedSessions.has(sessionId)) return false
+  // Agent-only stop (no foreground latch): still allow non-agent permissions,
+  // but drop agent-scoped permission prompts and agent progress.
   if (cliMsg?.type === 'control_request') {
     return isAgentScopedPermissionRequest(cliMsg)
   }
@@ -4620,6 +4801,14 @@ async function getGrokReasoningEfforts(modelId: string): Promise<{
     ...(model?.reasoningEffort ? { defaultEffort: model.reasoningEffort } : {}),
     supportedEfforts: model?.reasoningEfforts ?? [],
   }
+}
+
+export async function isRuntimeEffortSupported(
+  providerId: string | null | undefined,
+  modelId: string,
+  effort: string,
+): Promise<boolean> {
+  return (await resolveRuntimeEffort(providerId, modelId, effort)).valid
 }
 
 async function resolveRuntimeEffort(
