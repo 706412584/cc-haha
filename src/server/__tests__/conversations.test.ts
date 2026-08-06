@@ -34,6 +34,7 @@ import { ProviderService } from '../services/providerService.js'
 import { diagnosticsService } from '../services/diagnosticsService.js'
 import { __cleanupWebSocketRuntimeStateForTests, __drainWebSocketRuntimeTransitionsForTests, __resetWebSocketHandlerStateForTests, __runFailingRuntimeConfigHandlerForTests, __setDisconnectCleanupDisabledForTests } from '../ws/handler.js'
 import { resetTerminalShellEnvironmentCacheForTests } from '../../utils/terminalShellEnvironment.js'
+import * as openAIModelCatalog from '../../services/openaiAuth/modelCatalog.js'
 
 async function rmWithRetry(targetPath: string): Promise<void> {
   const attempts = process.platform === 'win32' ? 5 : 1
@@ -230,7 +231,48 @@ describe('ConversationService', () => {
     expect(removeAbortListener).toHaveBeenCalledWith('abort', expect.any(Function))
   })
 
-  it('should keep the replacement SDK socket attached when the old socket closes late', async () => {
+  it('should reject an in-flight control request when its CLI session is stopped', async () => {
+    const svc = new ConversationService()
+    const sid = crypto.randomUUID()
+    const sent: unknown[] = []
+    const session: any = {
+      proc: { kill() {}, exited: Promise.resolve(0) },
+      outputCallbacks: [],
+      workDir: process.cwd(),
+      permissionMode: 'default',
+      sdkToken: 'token',
+      sdkSocket: {
+        send(data: string) {
+          sent.push(JSON.parse(data))
+        },
+      },
+      pendingOutbound: [],
+      startupPending: false,
+      startupExitCode: null,
+      stdoutLines: [],
+      stderrLines: [],
+      outputDrain: Promise.resolve(),
+      sdkMessages: [],
+      initMessage: null,
+      pendingPermissionRequests: new Map(),
+    }
+    ;(svc as any).sessions.set(sid, session)
+
+    const request = svc.requestControl(
+      sid,
+      { subtype: 'get_context_usage' },
+      50,
+    )
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(sent).toHaveLength(1)
+
+    svc.stopSession(sid)
+
+    await expect(request).rejects.toThrow('CLI session stopped')
+    expect(session.outputCallbacks).toHaveLength(0)
+  })
+
+  it('should ignore a stale SDK disconnect after a replacement socket attaches', () => {
     const svc = new ConversationService()
     const sid = crypto.randomUUID()
     const oldSent: string[] = []
@@ -4248,6 +4290,196 @@ describe('WebSocket Chat Integration', () => {
     }
   }, 20_000)
 
+  it('should not send a turn to the custom runtime while OpenAI runtime validation is pending', async () => {
+    const providerService = new ProviderService()
+    const customProvider = await providerService.addProvider({
+      presetId: 'custom',
+      name: 'Custom Images Before OpenAI',
+      apiKey: 'custom-chat-key',
+      baseUrl: 'https://custom-chat.example.test',
+      apiFormat: 'anthropic',
+      models: {
+        main: 'custom-main',
+        haiku: 'custom-main',
+        sonnet: 'custom-main',
+        opus: 'custom-main',
+      },
+      imageGeneration: {
+        model: 'custom-image-model',
+        baseUrl: 'https://custom-images.example.test/v1',
+        apiKey: 'custom-image-key',
+      },
+    })
+    await providerService.activateProvider(customProvider.id)
+
+    const createRes = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workDir: process.cwd() }),
+    })
+    expect(createRes.status).toBe(201)
+    const { sessionId } = await createRes.json() as { sessionId: string }
+
+    const originalStartSession = conversationService.startSession.bind(conversationService)
+    const originalSendMessage = conversationService.sendMessage.bind(conversationService)
+    const startCalls: Array<{
+      providerId: string | null | undefined
+      model: string | undefined
+      imageProviderKind: string | undefined
+    }> = []
+    const sendCalls: Array<{
+      content: string
+      activeProviderId: string | null | undefined
+    }> = []
+
+    conversationService.startSession = (async function patchedStartSession(
+      sid: string,
+      workDir: string,
+      sdkUrl: string,
+      options?: { permissionMode?: string; model?: string; effort?: string; thinking?: 'enabled' | 'adaptive' | 'disabled'; providerId?: string | null },
+    ) {
+      const env = await (conversationService as any).buildChildEnv(
+        workDir,
+        sdkUrl,
+        options,
+      ) as Record<string, string>
+      startCalls.push({
+        providerId: options?.providerId,
+        model: options?.model,
+        imageProviderKind: env.CC_HAHA_IMAGE_PROVIDER_KIND,
+      })
+      return originalStartSession(sid, workDir, sdkUrl, options)
+    }) as typeof conversationService.startSession
+
+    conversationService.sendMessage = (function patchedSendMessage(
+      sid: string,
+      content: string,
+      attachments?: any,
+    ) {
+      sendCalls.push({
+        content,
+        activeProviderId: startCalls.at(-1)?.providerId,
+      })
+      return originalSendMessage(sid, content, attachments)
+    }) as typeof conversationService.sendMessage
+
+    let markValidationStarted!: () => void
+    const validationStarted = new Promise<void>((resolve) => {
+      markValidationStarted = resolve
+    })
+    let releaseValidation!: () => void
+    const validationGate = new Promise<Awaited<ReturnType<typeof openAIModelCatalog.getOpenAICodexModelCatalog>>>((resolve) => {
+      releaseValidation = () => resolve([{
+        value: 'gpt-5.6-sol',
+        label: 'GPT-5.6 Sol',
+        description: 'Test model',
+        defaultReasoningEffort: 'medium',
+        supportedReasoningEfforts: ['low', 'medium', 'high'],
+      }])
+    })
+    const modelCatalogSpy = spyOn(
+      openAIModelCatalog,
+      'getOpenAICodexModelCatalog',
+    ).mockImplementation(() => {
+      markValidationStarted()
+      return validationGate
+    })
+
+    const ws = new WebSocket(`${wsUrl}/ws/${sessionId}`)
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error(`Timed out connecting runtime validation session ${sessionId}`))
+        }, 5_000)
+        ws.onmessage = (event) => {
+          const msg = JSON.parse(event.data as string)
+          if (msg.type === 'connected') {
+            clearTimeout(timeout)
+            ws.send(JSON.stringify({ type: 'prewarm_session' }))
+            resolve()
+          }
+        }
+        ws.onerror = () => {
+          clearTimeout(timeout)
+          reject(new Error(`WebSocket error for runtime validation session ${sessionId}`))
+        }
+      })
+
+      await waitUntil(
+        () => startCalls.length === 1 && conversationService.hasSession(sessionId),
+        `prewarmed custom runtime for ${sessionId}`,
+      )
+      expect(startCalls[0]).toEqual({
+        providerId: customProvider.id,
+        model: undefined,
+        imageProviderKind: 'openai_images',
+      })
+
+      const completion = new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error(`Timed out waiting for OpenAI runtime turn ${sessionId}`))
+        }, 15_000)
+        ws.onmessage = (event) => {
+          const msg = JSON.parse(event.data as string)
+          if (msg.type === 'error') {
+            clearTimeout(timeout)
+            reject(new Error(msg.message))
+            return
+          }
+          if (msg.type === 'message_complete') {
+            clearTimeout(timeout)
+            resolve()
+          }
+        }
+      })
+
+      ws.send(JSON.stringify({
+        type: 'set_runtime_config',
+        providerId: 'openai-official',
+        modelId: 'gpt-5.6-sol',
+        effortLevel: 'low',
+      }))
+      ws.send(JSON.stringify({
+        type: 'set_runtime_config',
+        providerId: 'openai-official',
+        modelId: 'gpt-5.6-sol',
+        effortLevel: 'low',
+      }))
+      ws.send(JSON.stringify({
+        type: 'user_message',
+        content: 'generate only after OpenAI runtime validation',
+      }))
+
+      await validationStarted
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(startCalls).toHaveLength(1)
+      expect(sendCalls).toHaveLength(0)
+
+      releaseValidation()
+      await completion
+
+      expect(startCalls).toHaveLength(2)
+      expect(startCalls[1]).toEqual({
+        providerId: 'openai-official',
+        model: 'gpt-5.6-sol',
+        imageProviderKind: 'openai_oauth',
+      })
+      expect(sendCalls).toEqual([{
+        content: 'generate only after OpenAI runtime validation',
+        activeProviderId: 'openai-official',
+      }])
+    } finally {
+      releaseValidation()
+      modelCatalogSpy.mockRestore()
+      ws.close()
+      conversationService.startSession = originalStartSession
+      conversationService.sendMessage = originalSendMessage
+      conversationService.stopSession(sessionId)
+      await providerService.activateOfficial()
+      await providerService.deleteProvider(customProvider.id)
+    }
+  }, 20_000)
+
   it('should keep the session idle in the UI while applying a runtime-only model switch', async () => {
     const providerService = new ProviderService()
     const provider = await providerService.addProvider({
@@ -4334,7 +4566,11 @@ describe('WebSocket Chat Integration', () => {
       }))
 
       await waitUntil(
-        async () => messages.slice(switchStartIndex).some((msg) => msg.type === 'status' && msg.state === 'idle'),
+        async () => {
+          const switchMessages = messages.slice(switchStartIndex)
+          return switchMessages.some((msg) => msg.type === 'runtime_config_applied') &&
+            switchMessages.some((msg) => msg.type === 'status' && msg.state === 'idle')
+        },
         `idle runtime switch completion for ${sessionId}`,
       )
 
@@ -4352,6 +4588,15 @@ describe('WebSocket Chat Integration', () => {
           .filter((msg) => msg.type === 'status')
           .map((msg) => msg.state),
       ).toEqual(['idle'])
+      expect(
+        messages
+          .slice(switchStartIndex)
+          .find((msg) => msg.type === 'runtime_config_applied'),
+      ).toMatchObject({
+        type: 'runtime_config_applied',
+        providerId: provider.id,
+        modelId: 'idle-sonnet',
+      })
       expect(messages.slice(switchStartIndex).some((msg) => msg.type === 'error')).toBe(false)
     } finally {
       ws.close()
@@ -5785,6 +6030,248 @@ describe('WebSocket Chat Integration', () => {
     }
   }, 20_000)
 
+  it('should accept xhigh for GPT-5.6 and pass it to the OpenAI runtime', async () => {
+    const providerService = new ProviderService()
+    await providerService.activateProvider('openai-official')
+
+    const createRes = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workDir: process.cwd() }),
+    })
+    const { sessionId } = await createRes.json() as { sessionId: string }
+    const originalStartSession = conversationService.startSession.bind(conversationService)
+    const startCalls: Array<{ options?: { model?: string; effort?: string; providerId?: string | null } }> = []
+    conversationService.startSession = (async function patchedStartSession(
+      sid: string,
+      workDir: string,
+      sdkUrl: string,
+      options?: { permissionMode?: string; model?: string; effort?: string; thinking?: 'enabled' | 'adaptive' | 'disabled'; providerId?: string | null },
+    ) {
+      startCalls.push({ options })
+      return originalStartSession(sid, workDir, sdkUrl, options)
+    }) as typeof conversationService.startSession
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const ws = new WebSocket(`${wsUrl}/ws/${sessionId}`)
+        const timeout = setTimeout(() => {
+          ws.close()
+          reject(new Error('Timed out waiting for GPT-5.6 xhigh runtime turn'))
+        }, 10_000)
+
+        ws.onmessage = (event) => {
+          const message = JSON.parse(event.data as string)
+          if (message.type === 'connected') {
+            ws.send(JSON.stringify({
+              type: 'set_runtime_config',
+              providerId: 'openai-official',
+              modelId: 'gpt-5.6-sol',
+              effortLevel: 'xhigh',
+            }))
+            ws.send(JSON.stringify({ type: 'user_message', content: 'use xhigh' }))
+          } else if (message.type === 'error') {
+            clearTimeout(timeout)
+            ws.close()
+            reject(new Error(message.message))
+          } else if (message.type === 'message_complete') {
+            clearTimeout(timeout)
+            ws.close()
+            resolve()
+          }
+        }
+        ws.onerror = () => reject(new Error('WebSocket failed for GPT-5.6 xhigh runtime'))
+      })
+
+      expect(startCalls[0]?.options).toMatchObject({
+        providerId: 'openai-official',
+        model: 'gpt-5.6-sol',
+        effort: 'xhigh',
+      })
+    } finally {
+      conversationService.startSession = originalStartSession
+      conversationService.stopSession(sessionId)
+      await providerService.activateOfficial()
+    }
+  }, 20_000)
+
+  it('should pass an inherited xhigh effort to a K3 provider without remapping it', async () => {
+    const providerService = new ProviderService()
+    const provider = await providerService.addProvider({
+      presetId: 'kimi',
+      name: `Kimi K3 ${crypto.randomUUID()}`,
+      apiKey: 'test-kimi-key',
+      authStrategy: 'api_key',
+      baseUrl: 'https://api.kimi.com/coding/',
+      apiFormat: 'anthropic',
+      models: {
+        main: 'k3',
+        haiku: 'k3',
+        sonnet: 'k3',
+        opus: 'k3',
+      },
+    })
+    const sessionId = `chat-k3-effort-${crypto.randomUUID()}`
+    const originalStartSession = conversationService.startSession.bind(conversationService)
+    const startCalls: Array<{
+      options?: { model?: string; effort?: string; providerId?: string | null }
+    }> = []
+    conversationService.startSession = (async function patchedStartSession(
+      sid: string,
+      workDir: string,
+      sdkUrl: string,
+      options?: { permissionMode?: string; model?: string; effort?: string; thinking?: 'enabled' | 'adaptive' | 'disabled'; providerId?: string | null },
+    ) {
+      startCalls.push({ options })
+      return originalStartSession(sid, workDir, sdkUrl, options)
+    }) as typeof conversationService.startSession
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const ws = new WebSocket(`${wsUrl}/ws/${sessionId}`)
+        const timeout = setTimeout(() => {
+          ws.close()
+          reject(new Error('Timed out waiting for K3 runtime turn'))
+        }, 10_000)
+
+        ws.onmessage = (event) => {
+          const message = JSON.parse(event.data as string)
+          if (message.type === 'connected') {
+            ws.send(JSON.stringify({
+              type: 'set_runtime_config',
+              providerId: provider.id,
+              modelId: 'k3',
+              effortLevel: 'xhigh',
+            }))
+            ws.send(JSON.stringify({ type: 'user_message', content: 'use K3 xhigh effort' }))
+          } else if (message.type === 'error') {
+            clearTimeout(timeout)
+            ws.close()
+            reject(new Error(message.message))
+          } else if (message.type === 'message_complete') {
+            clearTimeout(timeout)
+            ws.close()
+            resolve()
+          }
+        }
+        ws.onerror = () => reject(new Error('WebSocket failed for K3 runtime'))
+      })
+
+      expect(startCalls.find((call) => call.options?.providerId === provider.id)?.options).toMatchObject({
+        providerId: provider.id,
+        model: 'k3',
+        effort: 'xhigh',
+      })
+    } finally {
+      conversationService.startSession = originalStartSession
+      conversationService.stopSession(sessionId)
+      await providerService.deleteProvider(provider.id)
+    }
+  }, 20_000)
+
+  it('should preserve xhigh for an unlisted Claude model on a compatible provider', async () => {
+    const providerService = new ProviderService()
+    const provider = await providerService.addProvider({
+      presetId: 'xuanshuapi',
+      name: `XuanShu Claude ${crypto.randomUUID()}`,
+      apiKey: 'test-xuanshu-key',
+      authStrategy: 'auth_token',
+      baseUrl: 'https://www.xuanshuapi.com',
+      apiFormat: 'anthropic',
+      models: {
+        main: 'claude-opus-5',
+        haiku: 'claude-haiku-4-5',
+        sonnet: 'claude-sonnet-5',
+        opus: 'claude-opus-5',
+      },
+    })
+    const sessionId = `chat-claude-effort-${crypto.randomUUID()}`
+    const originalStartSession = conversationService.startSession.bind(conversationService)
+    const startCalls: Array<{
+      options?: { model?: string; effort?: string; providerId?: string | null }
+    }> = []
+    conversationService.startSession = (async function patchedStartSession(
+      sid: string,
+      workDir: string,
+      sdkUrl: string,
+      options?: { permissionMode?: string; model?: string; effort?: string; thinking?: 'enabled' | 'adaptive' | 'disabled'; providerId?: string | null },
+    ) {
+      startCalls.push({ options })
+      return originalStartSession(sid, workDir, sdkUrl, options)
+    }) as typeof conversationService.startSession
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const ws = new WebSocket(`${wsUrl}/ws/${sessionId}`)
+        const timeout = setTimeout(() => {
+          ws.close()
+          reject(new Error('Timed out waiting for Claude effort runtime turn'))
+        }, 10_000)
+
+        ws.onmessage = (event) => {
+          const message = JSON.parse(event.data as string)
+          if (message.type === 'connected') {
+            ws.send(JSON.stringify({
+              type: 'set_runtime_config',
+              providerId: provider.id,
+              modelId: 'claude-opus-5',
+              effortLevel: 'xhigh',
+            }))
+            ws.send(JSON.stringify({ type: 'user_message', content: 'use Claude xhigh effort' }))
+          } else if (message.type === 'error') {
+            clearTimeout(timeout)
+            ws.close()
+            reject(new Error(message.message))
+          } else if (message.type === 'message_complete') {
+            clearTimeout(timeout)
+            ws.close()
+            resolve()
+          }
+        }
+        ws.onerror = () => reject(new Error('WebSocket failed for Claude effort runtime'))
+      })
+
+      expect(startCalls.at(-1)?.options).toMatchObject({
+        providerId: provider.id,
+        model: 'claude-opus-5',
+        effort: 'xhigh',
+      })
+    } finally {
+      conversationService.startSession = originalStartSession
+      conversationService.stopSession(sessionId)
+      await providerService.deleteProvider(provider.id)
+    }
+  }, 20_000)
+
+  it('should reject a reasoning effort that the selected ChatGPT model does not support', async () => {
+    const sessionId = `chat-openai-invalid-effort-${crypto.randomUUID()}`
+    await new Promise<void>((resolve, reject) => {
+      const ws = new WebSocket(`${wsUrl}/ws/${sessionId}`)
+      const timeout = setTimeout(() => {
+        ws.close()
+        reject(new Error('Timed out waiting for invalid OpenAI effort rejection'))
+      }, 5_000)
+
+      ws.onmessage = (event) => {
+        const message = JSON.parse(event.data as string)
+        if (message.type === 'connected') {
+          ws.send(JSON.stringify({
+            type: 'set_runtime_config',
+            providerId: 'openai-official',
+            modelId: 'gpt-5.5',
+            effortLevel: 'max',
+          }))
+        } else if (message.type === 'error') {
+          clearTimeout(timeout)
+          expect(message).toMatchObject({ code: 'RUNTIME_CONFIG_INVALID' })
+          ws.close()
+          resolve()
+        }
+      }
+      ws.onerror = () => reject(new Error('WebSocket failed for invalid OpenAI effort'))
+    })
+  }, 10_000)
+
   it('should resume streaming to a reconnected client during an active turn', async () => {
     await withMockStreamDelay(150, async () => {
       const sessionId = `chat-reconnect-${crypto.randomUUID()}`
@@ -5940,10 +6427,10 @@ describe('WebSocket Chat Integration', () => {
       baseUrl: 'http://127.0.0.1:1/anthropic',
       apiFormat: 'anthropic',
       models: {
-        main: 'model-a-main',
-        haiku: 'model-a-haiku',
-        sonnet: 'model-a-sonnet',
-        opus: 'model-a-opus',
+        main: 'deepseek-v4-pro',
+        haiku: 'deepseek-v4-flash',
+        sonnet: 'deepseek-v4-pro',
+        opus: 'deepseek-v4-pro',
       },
     })
     const providerB = await providerService.addProvider({
@@ -5953,10 +6440,10 @@ describe('WebSocket Chat Integration', () => {
       baseUrl: 'http://127.0.0.1:1/anthropic',
       apiFormat: 'anthropic',
       models: {
-        main: 'model-b-main',
-        haiku: 'model-b-haiku',
-        sonnet: 'model-b-sonnet',
-        opus: 'model-b-opus',
+        main: 'k3',
+        haiku: 'k3',
+        sonnet: 'k3',
+        opus: 'k3',
       },
     })
 
@@ -6003,7 +6490,7 @@ describe('WebSocket Chat Integration', () => {
               type: 'set_runtime_config',
             requestId: crypto.randomUUID(),
               providerId: providerA.id,
-              modelId: 'model-a-sonnet',
+              modelId: 'deepseek-v4-pro',
               effortLevel: 'medium',
             }))
             ws.send(JSON.stringify({ type: 'user_message', content: 'first turn' }))
@@ -6025,7 +6512,7 @@ describe('WebSocket Chat Integration', () => {
               type: 'set_runtime_config',
             requestId: crypto.randomUUID(),
               providerId: providerB.id,
-              modelId: 'model-b-opus',
+              modelId: 'k3',
               effortLevel: 'max',
             }))
             return
@@ -6065,7 +6552,7 @@ describe('WebSocket Chat Integration', () => {
         sessionId,
         options: {
           providerId: providerA.id,
-          model: 'model-a-sonnet',
+          model: 'deepseek-v4-pro',
           effort: 'medium',
         },
       })
@@ -6073,7 +6560,7 @@ describe('WebSocket Chat Integration', () => {
         sessionId,
         options: {
           providerId: providerB.id,
-          model: 'model-b-opus',
+          model: 'k3',
           effort: 'max',
         },
       })

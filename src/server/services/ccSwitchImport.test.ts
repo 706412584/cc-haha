@@ -1303,11 +1303,9 @@ describe('cc-switch candidate mapping', () => {
 
     expect(candidateById(candidates, 'claude:kimi').presetId).toBe('kimi')
     expect(candidateById(candidates, 'claude:glm-cn').presetId).toBe('zhipuglm')
-    // upstream v0.5.2: zhipu global endpoint (api.z.ai) no longer in presets
-    expect(candidateById(candidates, 'claude:glm-global').presetId).toBe('custom')
+    expect(candidateById(candidates, 'claude:glm-global').presetId).toBe('zhipuglm')
     expect(candidateById(candidates, 'claude:minimax-cn').presetId).toBe('minimax')
-    // upstream v0.5.2: minimax global endpoint (api.minimax.io) no longer in presets
-    expect(candidateById(candidates, 'claude:minimax-global').presetId).toBe('custom')
+    expect(candidateById(candidates, 'claude:minimax-global').presetId).toBe('minimax')
     expect(candidateById(candidates, 'claude:unknown').presetId).toBe('custom')
   })
 

@@ -8,6 +8,8 @@ import { useTranslation } from '../../i18n'
 import type { TranslationKey } from '../../i18n'
 import { InlineImageGallery } from './InlineImageGallery'
 import { ImageGalleryModal } from './ImageGalleryModal'
+import { ImageGenerationBlock } from './ImageGenerationBlock'
+import { isImageGenerationToolName } from './imageGenerationTools'
 import type { AgentTaskNotification } from '../../types/chat'
 import {
   PlanPreviewCard,
@@ -171,6 +173,18 @@ export const ToolCallBlock = memo(function ToolCallBlock({ toolName, input, resu
         isPending={isPending}
         expanded={expanded}
         onToggle={() => setExpanded((value) => !value)}
+      />
+    )
+  }
+
+  if (isImageGenerationToolName(toolName)) {
+    return (
+      <ImageGenerationBlock
+        input={input}
+        result={result}
+        compact={compact}
+        isPending={isPending}
+        durationMs={durationMs}
       />
     )
   }

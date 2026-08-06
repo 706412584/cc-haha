@@ -100,6 +100,34 @@ describe('createEditBubble', () => {
     bubble.destroy()
   })
 
+  it('offers add-and-continue in single mode, then a single add action in batch mode', () => {
+    const el = document.getElementById('t')!
+    const onQueue = vi.fn()
+    const single = createEditBubble(el, { onConfirm: vi.fn(), onQueue, onCancel: vi.fn() })
+    expect($(single, '[data-action="queue"]').textContent).toBe('添加并继续')
+    expect(single.host.shadowRoot!.querySelector('[data-action="confirm"]')).not.toBeNull()
+    $(single, '[data-action="queue"]').click()
+    expect(onQueue).toHaveBeenCalled()
+    single.destroy()
+
+    const batch = createEditBubble(el, { onConfirm: vi.fn(), onQueue, onCancel: vi.fn(), mode: 'batch' })
+    expect($(batch, '[data-action="queue"]').textContent).toBe('添加')
+    expect(batch.host.shadowRoot!.querySelector('[data-action="confirm"]')).toBeNull()
+    batch.destroy()
+  })
+
+  it('exposes a revert handle for queued live edits', () => {
+    const el = document.getElementById('t')!
+    const bubble = createEditBubble(el, { onConfirm: vi.fn(), onCancel: vi.fn() })
+    const textInput = $(bubble, '[data-field="text"]')
+    textInput.value = 'Queued preview'
+    textInput.dispatchEvent(new Event('input'))
+    expect(el.textContent).toBe('Queued preview')
+    bubble.revert()
+    expect(el.textContent).toBe('Old')
+    bubble.destroy()
+  })
+
   it('颜色行给出取色器色块，初值按 hex 展示', () => {
     const el = document.getElementById('t')!
     vi.spyOn(window, 'getComputedStyle').mockReturnValue({ color: 'rgb(26, 29, 41)', backgroundColor: 'rgba(0, 0, 0, 0)', opacity: '1', fontFamily: 'Arial' } as unknown as CSSStyleDeclaration)

@@ -149,8 +149,24 @@ export type PreviewCaptureMessage = {
 
 export type PreviewPickerMessage = {
   v: 1
-  type: 'enter-picker' | 'exit-picker'
-}
+} & (
+  | {
+      type: 'enter-picker'
+      mode?: 'single' | 'batch'
+      label?: number
+      copy?: {
+        cancel: string
+        send: string
+        queueAndContinue: string
+        add: string
+        descriptionPlaceholder: string
+      }
+    }
+  | { type: 'exit-picker' }
+  | { type: 'undo-selection'; itemId: string }
+  | { type: 'clear-selection-draft' }
+  | { type: 'commit-selection-draft' }
+)
 
 export type PreviewHostMessage = PreviewCaptureMessage | PreviewPickerMessage
 

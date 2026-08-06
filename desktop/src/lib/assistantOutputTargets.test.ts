@@ -319,6 +319,18 @@ describe('extractAssistantOutputTargets with changedFiles reconciliation', () =>
     expect(byKind.get('local-html')?.normalizedPath).toBe('app/index.html')
   })
 
+  it('applies the limit after dropping stale file mentions', () => {
+    const targets = extractAssistantOutputTargets('旧文件 old.html，服务在 http://localhost:5173/', {
+      workDir: '/work',
+      changedFiles: [],
+      limit: 1,
+    })
+
+    expect(targets).toMatchObject([
+      { kind: 'localhost-url', href: 'http://localhost:5173/' },
+    ])
+  })
+
   it('rewrites a changed file outside the workdir to its absolute posix path', () => {
     const targets = extractAssistantOutputTargets('已创建 todo.html', {
       workDir: 'C:/Users/me/tmp/session',
@@ -333,13 +345,26 @@ describe('extractAssistantOutputTargets with changedFiles reconciliation', () =>
     })
   })
 
-  it('falls back to text-only behavior when changedFiles is empty', () => {
+  it('drops file mentions when changedFiles explicitly confirms no files changed', () => {
+    const targets = extractAssistantOutputTargets(
+      '我正准备查看 test123.md，服务地址是 http://localhost:5173/',
+      {
+        workDir: '/private/tmp',
+        changedFiles: [],
+      },
+    )
+
+    expect(targets).toHaveLength(1)
+    expect(targets).toMatchObject([
+      { kind: 'localhost-url', href: 'http://localhost:5173/' },
+    ])
+  })
+
+  it('falls back to text-only behavior when changedFiles is unavailable', () => {
     const targets = extractAssistantOutputTargets('已创建 `index.html`', {
       workDir: '/private/tmp',
-      changedFiles: [],
     })
 
-    // No reconciliation → original bare-path behavior (mention kept as-is).
     expect(targets).toMatchObject([{ kind: 'local-html', normalizedPath: 'index.html' }])
   })
 

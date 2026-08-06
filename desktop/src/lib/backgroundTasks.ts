@@ -11,6 +11,13 @@ export function hasRunningBackgroundTasks(tasks?: Record<string, BackgroundAgent
   )
 }
 
+export function hasRunningSubagentTasks(tasks?: Record<string, BackgroundAgentTask>): boolean {
+  return Object.values(tasks ?? {}).some(
+    (task) => task.status === 'running' &&
+      (task.taskType === 'local_agent' || task.taskType === 'remote_agent'),
+  )
+}
+
 export function createBackgroundTaskDismissKey(task: BackgroundAgentTask): string {
   return `${task.taskId}:${task.status}:${task.startedAt}`
 }

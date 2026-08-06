@@ -58,6 +58,9 @@ describe('providerRuntimeEnv', () => {
     expect(env).toMatchObject({
       CC_HAHA_GROK_OAUTH_PROVIDER: '1',
       GROK_OAUTH_FILE: path.join(tmpDir, 'cc-haha', 'grok-oauth.json'),
+      CC_HAHA_IMAGE_PROVIDER_KIND: 'grok_oauth',
+      CC_HAHA_IMAGE_PROVIDER_ID: 'grok-official',
+      CC_HAHA_IMAGE_MODEL: 'grok-imagine-image-quality',
       ANTHROPIC_MODEL: 'grok-4.5',
       ANTHROPIC_DEFAULT_HAIKU_MODEL: 'grok-4.5',
       ANTHROPIC_DEFAULT_SONNET_MODEL: 'grok-4.5',
@@ -68,6 +71,74 @@ describe('providerRuntimeEnv', () => {
     expect(env.OPENAI_CODEX_OAUTH_FILE).toBeUndefined()
     expect(env.ANTHROPIC_API_KEY).toBeUndefined()
     expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
+  })
+
+  test('routes custom image generation through its own optional credentials', async () => {
+    await writeJson(path.join(tmpDir, 'cc-haha', 'providers.json'), {
+      activeId: 'provider-images',
+      providers: [{
+        id: 'provider-images',
+        presetId: 'custom',
+        name: 'Sub2API',
+        apiKey: 'chat-secret',
+        baseUrl: 'https://chat.example.test',
+        apiFormat: 'anthropic',
+        models: {
+          main: 'chat-model',
+          haiku: 'chat-model',
+          sonnet: 'chat-model',
+          opus: 'chat-model',
+        },
+        imageGeneration: {
+          model: '  upstream-image-model  ',
+          baseUrl: '  https://images.example.test/v1  ',
+          apiKey: '  image-secret  ',
+        },
+      }],
+    })
+
+    const env = readActiveProviderManagedEnv(tmpDir)
+    expect(env).toMatchObject({
+      CC_HAHA_IMAGE_PROVIDER_KIND: 'openai_images',
+      CC_HAHA_IMAGE_PROVIDER_ID: 'provider-images',
+      CC_HAHA_IMAGE_BASE_URL: 'https://images.example.test/v1',
+      CC_HAHA_IMAGE_API_KEY: 'image-secret',
+      CC_HAHA_IMAGE_MODEL: 'upstream-image-model',
+    })
+  })
+
+  test('clears stale image routing when the next active provider has no image capability', async () => {
+    await writeJson(path.join(tmpDir, 'cc-haha', 'providers.json'), {
+      activeId: 'provider-chat-only',
+      providers: [{
+        id: 'provider-chat-only',
+        presetId: 'custom',
+        name: 'Chat only',
+        apiKey: 'chat-secret',
+        baseUrl: 'https://chat.example.test',
+        apiFormat: 'anthropic',
+        models: {
+          main: 'chat-model',
+          haiku: 'chat-model',
+          sonnet: 'chat-model',
+          opus: 'chat-model',
+        },
+      }],
+    })
+
+    const env = mergeActiveProviderManagedEnv({
+      CC_HAHA_IMAGE_PROVIDER_KIND: 'openai_images',
+      CC_HAHA_IMAGE_PROVIDER_ID: 'stale-provider',
+      CC_HAHA_IMAGE_BASE_URL: 'https://stale.example.test/v1',
+      CC_HAHA_IMAGE_API_KEY: 'stale-secret',
+      CC_HAHA_IMAGE_MODEL: 'stale-model',
+    }, tmpDir)
+
+    expect(env.CC_HAHA_IMAGE_PROVIDER_KIND).toBeUndefined()
+    expect(env.CC_HAHA_IMAGE_PROVIDER_ID).toBeUndefined()
+    expect(env.CC_HAHA_IMAGE_BASE_URL).toBeUndefined()
+    expect(env.CC_HAHA_IMAGE_API_KEY).toBeUndefined()
+    expect(env.CC_HAHA_IMAGE_MODEL).toBeUndefined()
   })
 
   test('keeps Claude Code effort capabilities for an unlisted custom model', async () => {
@@ -171,7 +242,9 @@ describe('providerRuntimeEnv', () => {
 
     expect(env).toMatchObject({
       ANTHROPIC_MODEL: 'claude-opus-5',
-      ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES:
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES:
+        'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
+      ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES:
         'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
     })
   })
@@ -422,7 +495,7 @@ describe('providerRuntimeEnv', () => {
       ANTHROPIC_API_KEY: 'sk-kimi',
       ANTHROPIC_MODEL: 'k3',
       ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES:
-        'thinking,required_thinking,effort,max_effort',
+        'thinking,required_thinking,effort,xhigh_effort,max_effort',
     })
     expect(kimiEnv?.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
     expect(JSON.parse(kimiEnv!.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS)).toMatchObject({
@@ -460,7 +533,7 @@ describe('providerRuntimeEnv', () => {
       ANTHROPIC_AUTH_TOKEN: 'sk-kimi-legacy',
       ANTHROPIC_MODEL: 'kimi-k2.7-code',
       ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES:
-        'thinking,required_thinking',
+        'thinking,required_thinking,effort,xhigh_effort,max_effort',
     })
 
     await writeJson(path.join(tmpDir, 'cc-haha', 'providers.json'), {
@@ -489,12 +562,14 @@ describe('providerRuntimeEnv', () => {
     expect(zhipuEnv).toMatchObject({
       ANTHROPIC_MODEL: 'glm-5.2[1m]',
       ANTHROPIC_DEFAULT_HAIKU_MODEL: 'glm-4.7',
-      ANTHROPIC_DEFAULT_SONNET_MODEL: 'glm-5.2[1m]',
-      ANTHROPIC_DEFAULT_OPUS_MODEL: 'glm-5.2[1m]',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES:
+        'thinking,effort,xhigh_effort,max_effort',
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES:
+        'thinking,effort,xhigh_effort,max_effort',
     })
-    // upstream v0.5.2: zhipu preset now sets a provider-wide auto-compact window
-    // for pinned small-context models at 1M so auto-compact never fires (#1162).
-    expect(zhipuEnv!.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('1000000')
+    // No provider-wide auto-compact window: it is model-agnostic and pinned
+    // small-context models at 1M so auto-compact never fired (#1162).
+    expect(zhipuEnv!.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
     expect(JSON.parse(zhipuEnv!.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS)).toMatchObject({
       'glm-5.2[1m]': 1000000,
       'glm-4.7': 200000,

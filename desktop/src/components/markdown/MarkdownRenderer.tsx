@@ -14,6 +14,7 @@ import {
   renderCodespan,
   unwrapFileLinks,
 } from '@/lib/markdownAutolink'
+import { isSafeMarkdownImageSource } from '@/lib/markdownImages'
 import { CodeViewer } from '../chat/CodeViewer'
 import { MermaidRenderer } from '../chat/MermaidRenderer'
 import { copyTextToClipboard } from '@/lib/clipboard'
@@ -26,6 +27,14 @@ type Props = {
   cache?: boolean
   streaming?: boolean
   onLinkClick?: (href: string, event: ReactMouseEvent<HTMLDivElement>) => boolean | void
+  /**
+   * Trusted surfaces (the workspace Markdown file preview) resolve every image
+   * source through this callback — relative paths against the document,
+   * remote URLs left to CSP. Returning null strips the image. When absent the
+   * surface is treated as untrusted assistant output and only blob:/data:
+   * sources survive, which blocks tracking pixels and loopback probes.
+   */
+  resolveImageSrc?: (src: string) => string | null
 }
 
 type CodeBlock = {
@@ -58,12 +67,6 @@ const MARKDOWN_SANITIZE_CONFIG = {
   // Blob URLs are origin-bound object URLs. Remote network URLs are removed
   // below after sanitization, before the markup reaches the renderer.
   ALLOWED_URI_REGEXP: /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|blob):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
-}
-
-function isSafeMarkdownImageSource(value: string | null): boolean {
-  if (!value) return false
-  if (/^blob:/i.test(value)) return true
-  return /^data:image\/(?:avif|gif|jpe?g|png|webp);base64,[a-z0-9+/=\r\n]+$/i.test(value)
 }
 
 function normalizeCodeLanguage(language: string | undefined): string | undefined {
@@ -320,6 +323,7 @@ function enhanceMarkdownHtml(
   html: string,
   mathBlocks: MathBlock[],
   references: ReferenceLinking,
+  resolveImageSrc?: (src: string) => string | null,
 ): string {
   const cleanHtml = DOMPurify.sanitize(html, MARKDOWN_SANITIZE_CONFIG)
 
@@ -344,7 +348,17 @@ function enhanceMarkdownHtml(
   const mathById = new Map(mathBlocks.map((block) => [block.id, block]))
 
   container.querySelectorAll<HTMLImageElement | HTMLSourceElement>('img, source').forEach((image) => {
-    if (!isSafeMarkdownImageSource(image.getAttribute('src'))) image.removeAttribute('src')
+    const src = image.getAttribute('src')
+    if (resolveImageSrc) {
+      // Trusted surface: the caller maps relative/remote sources to loadable
+      // URLs (or null to strip). Resolution happens here, after sanitization,
+      // so raw HTML <img> tags get the same treatment as Markdown images.
+      const resolved = src ? resolveImageSrc(src) : null
+      if (resolved) image.setAttribute('src', resolved)
+      else image.removeAttribute('src')
+    } else if (!isSafeMarkdownImageSource(src)) {
+      image.removeAttribute('src')
+    }
     // srcset can trigger several independent fetches and is never needed for
     // assistant Markdown. Keep it absent even when an img has a safe src.
     image.removeAttribute('srcset')
@@ -547,7 +561,7 @@ function getProseClasses(variant: 'default' | 'document' | 'compact', className?
     .join(' ')
 }
 
-export const MarkdownRenderer = memo(function MarkdownRenderer({ content, variant = 'default', className, cache = true, streaming = false, onLinkClick }: Props) {
+export const MarkdownRenderer = memo(function MarkdownRenderer({ content, variant = 'default', className, cache = true, streaming = false, onLinkClick, resolveImageSrc }: Props) {
   const { html, codeBlocks, mathBlocks } = useMemo(
     () => cache ? getCachedMarkdownParse(content, streaming) : parseMarkdown(content),
     [cache, content, streaming],
@@ -577,7 +591,7 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({ content, varian
     }
 
     if (codeBlocks.length === 0) {
-      return [{ type: 'html' as const, content: enhanceMarkdownHtml(html, mathBlocks, references) }]
+      return [{ type: 'html' as const, content: enhanceMarkdownHtml(html, mathBlocks, references, resolveImageSrc) }]
     }
 
     const result: MarkdownPart[] = []
@@ -590,18 +604,18 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({ content, varian
 
       const before = remaining.slice(0, idx)
       if (before) {
-        result.push({ type: 'html', content: enhanceMarkdownHtml(before, mathBlocks, references) })
+        result.push({ type: 'html', content: enhanceMarkdownHtml(before, mathBlocks, references, resolveImageSrc) })
       }
       result.push({ type: 'code', block })
       remaining = remaining.slice(idx + marker.length)
     }
 
     if (remaining) {
-      result.push({ type: 'html', content: enhanceMarkdownHtml(remaining, mathBlocks, references) })
+      result.push({ type: 'html', content: enhanceMarkdownHtml(remaining, mathBlocks, references, resolveImageSrc) })
     }
 
     return result
-  }, [html, codeBlocks, mathBlocks, streaming, onLinkClick])
+  }, [html, codeBlocks, mathBlocks, streaming, onLinkClick, resolveImageSrc])
 
   const handleClick = useCallback(async (event: ReactMouseEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement | null

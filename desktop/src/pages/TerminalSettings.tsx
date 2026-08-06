@@ -657,10 +657,15 @@ export function TerminalSettings({
               <StatusDot tone={STATUS_TONE[status]} pulse={status === 'running'} />
               {t(STATUS_LABEL_KEYS[status])}
             </span>
+            {/* Info lives on the left: its tooltip is anchored to the icon's
+                left edge and opens down-right, so from here it always lands
+                inside the panel instead of being clipped by the right edge. */}
+            <span className="inline-flex shrink-0 items-center pl-1">
+              <TerminalHelpHint compact={docked} surface={terminalHeaderSurface} />
+            </span>
           </div>
 
           <div className="flex shrink-0 items-center gap-0.5">
-            <TerminalHelpHint compact={docked} surface={terminalHeaderSurface} />
             {onOpenInTab && (
               <IconButton
                 icon="open_in_new"

@@ -72,6 +72,17 @@ describe('InlineImageGallery', () => {
     expect(screen.queryByRole('button', { name: /标注并提问/ })).not.toBeInTheDocument()
   })
 
+  it('suppresses host-managed ImageGen paths when their dedicated card owns the image', () => {
+    render(
+      <InlineImageGallery
+        text={'已生成：/Users/me/.claude/cc-haha/generated-images/session/result.png'}
+        suppressManagedGeneratedImages
+      />,
+    )
+
+    expect(screen.queryByRole('img')).not.toBeInTheDocument()
+  })
+
   it('renders an absolute image path via /api/filesystem/file (legacy behavior)', () => {
     render(<InlineImageGallery text={'see /Users/me/out/result.png done'} />)
 
@@ -99,6 +110,66 @@ describe('InlineImageGallery', () => {
     const srcs = imgSrcs()
     expect(srcs).toHaveLength(1)
     expect(srcs[0]).toBe('http://127.0.0.1:4321/preview-fs/s1/outputs/a/frame.png')
+  })
+
+  it('uses the absolute-file route for a changed image outside the workspace', () => {
+    render(
+      <InlineImageGallery
+        text={'render saved to result.png'}
+        sessionId="s1"
+        workDir="/w"
+        changedFiles={['/outside/result.png']}
+      />,
+    )
+
+    expect(imgSrcs()).toEqual([
+      'http://127.0.0.1:3456/api/filesystem/file?path=' + encodeURIComponent('/outside/result.png'),
+    ])
+  })
+
+  it('keeps an absolute image when the turn checkpoint recorded no changes (Bash writes are untracked)', () => {
+    // Regression: a PIL/Bash-generated image at /tmp is invisible to the turn
+    // checkpoint (filesChanged=[]), but the gallery must not filter it away.
+    render(
+      <InlineImageGallery
+        text={'已生成，保存到 /tmp/result.png'}
+        sessionId="s1"
+        workDir="/w"
+        changedFiles={[]}
+      />,
+    )
+
+    expect(imgSrcs()).toEqual([
+      'http://127.0.0.1:3456/api/filesystem/file?path=' + encodeURIComponent('/tmp/result.png'),
+    ])
+  })
+
+  it('keeps an absolute image that is not among the turn changed files', () => {
+    render(
+      <InlineImageGallery
+        text={'已生成，保存到 /tmp/result.png，同时更新了 app.ts'}
+        sessionId="s1"
+        workDir="/w"
+        changedFiles={['/w/src/app.ts']}
+      />,
+    )
+
+    expect(imgSrcs()).toEqual([
+      'http://127.0.0.1:3456/api/filesystem/file?path=' + encodeURIComponent('/tmp/result.png'),
+    ])
+  })
+
+  it('treats an empty changedFiles as no evidence for relative mentions', () => {
+    render(
+      <InlineImageGallery
+        text={'render saved to outputs/a/frame.png'}
+        sessionId="s1"
+        workDir="/w"
+        changedFiles={[]}
+      />,
+    )
+
+    expect(imgSrcs()).toEqual(['http://127.0.0.1:4321/preview-fs/s1/outputs/a/frame.png'])
   })
 
   it('renders both absolute and relative images together', () => {

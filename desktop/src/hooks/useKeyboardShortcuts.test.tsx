@@ -1,9 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/react'
 import { APP_ZOOM_STORAGE_KEY } from '../lib/appZoom'
 import { useSettingsStore } from '../stores/settingsStore'
 import { useUIStore } from '../stores/uiStore'
 import { useKeyboardShortcuts } from './useKeyboardShortcuts'
+import { useChatStore, type PerSessionState } from '../stores/chatStore'
+import { useTabStore } from '../stores/tabStore'
 
 function ShortcutHost() {
   useKeyboardShortcuts()
@@ -15,6 +17,30 @@ function setNavigatorPlatform(platform: string) {
     configurable: true,
     value: platform,
   })
+}
+
+function makeIdleSession(overrides: Partial<PerSessionState> = {}): PerSessionState {
+  return {
+    messages: [],
+    chatState: 'idle',
+    connectionState: 'connected',
+    streamingText: '',
+    streamingToolInput: '',
+    activeToolUseId: null,
+    activeToolName: null,
+    activeThinkingId: null,
+    pendingPermission: null,
+    pendingComputerUsePermission: null,
+    tokenUsage: { input_tokens: 0, output_tokens: 0 },
+    streamingResponseChars: 0,
+    elapsedSeconds: 0,
+    statusVerb: '',
+    slashCommands: [],
+    agentTaskNotifications: {},
+    backgroundAgentTasks: {},
+    elapsedTimer: null,
+    ...overrides,
+  }
 }
 
 describe('useKeyboardShortcuts app zoom', () => {
@@ -115,5 +141,91 @@ describe('useKeyboardShortcuts app zoom', () => {
     })
     fireEvent.keyDown(document, { key: 'k', ctrlKey: true })
     expect(useUIStore.getState().activeModal).toBeNull()
+  })
+})
+
+describe('useKeyboardShortcuts generation stop', () => {
+  const sessionId = 'session-with-background-work'
+  const initialChatState = useChatStore.getInitialState()
+  const initialTabState = useTabStore.getInitialState()
+  let stopGeneration: ReturnType<typeof vi.fn>
+
+  beforeEach(() => {
+    stopGeneration = vi.fn()
+    useTabStore.setState({
+      activeTabId: sessionId,
+      tabs: [{ sessionId, title: 'Session', type: 'session', status: 'running' }],
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    useChatStore.setState(initialChatState, true)
+    useTabStore.setState(initialTabState, true)
+  })
+
+  it.each([
+    ['Cmd', 'local_agent', { metaKey: true }],
+    ['Ctrl', 'remote_agent', { ctrlKey: true }],
+  ] as const)('uses %s+. to stop an idle session with a running %s', (_label, taskType, modifier) => {
+    useChatStore.setState({
+      stopGeneration,
+      sessions: {
+        [sessionId]: makeIdleSession({
+          backgroundAgentTasks: {
+            agent: {
+              taskId: 'agent',
+              taskType,
+              status: 'running',
+              startedAt: 1,
+              updatedAt: 1,
+            },
+          },
+        }),
+      },
+    })
+    render(<ShortcutHost />)
+
+    const event = new KeyboardEvent('keydown', {
+      key: '.',
+      bubbles: true,
+      cancelable: true,
+      ...modifier,
+    })
+    document.dispatchEvent(event)
+
+    expect(event.defaultPrevented).toBe(true)
+    expect(stopGeneration).toHaveBeenCalledWith(sessionId)
+  })
+
+  it.each(['local_bash', 'dream'])('does not stop an idle session for a running %s task', (taskType) => {
+    useChatStore.setState({
+      stopGeneration,
+      sessions: {
+        [sessionId]: makeIdleSession({
+          backgroundAgentTasks: {
+            task: {
+              taskId: 'task',
+              taskType,
+              status: 'running',
+              startedAt: 1,
+              updatedAt: 1,
+            },
+          },
+        }),
+      },
+    })
+    render(<ShortcutHost />)
+
+    const event = new KeyboardEvent('keydown', {
+      key: '.',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    })
+    document.dispatchEvent(event)
+
+    expect(event.defaultPrevented).toBe(false)
+    expect(stopGeneration).not.toHaveBeenCalled()
   })
 })

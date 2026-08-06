@@ -45,8 +45,6 @@ import type { Locale } from '../i18n'
 import type { SavedProvider, UpdateProviderInput, ProviderTestResult, ModelMapping, Model1mSupport, ApiFormat, ProviderAuthStrategy, ProviderModelInfo, ProviderModelsErrorCode } from '../types/provider'
 import type { ProviderPreset } from '../types/providerPreset'
 import { AdapterSettings } from './AdapterSettings'
-import { useSessionStore } from '../stores/sessionStore'
-import { MarkdownRenderer } from '../components/markdown/MarkdownRenderer'
 import { useSkillStore } from '../stores/skillStore'
 import { SkillList } from '../components/skills/SkillList'
 import { SkillDetail } from '../components/skills/SkillDetail'
@@ -68,6 +66,10 @@ import { CcSwitchImportModal } from '../components/settings/CcSwitchImportModal'
 import { ChatGPTOfficialLogin } from '../components/settings/ChatGPTOfficialLogin'
 import { GrokOfficialLogin } from '../components/settings/GrokOfficialLogin'
 import { AgentManager } from '../components/settings/AgentManager'
+import { H5AccessSettings } from './settings/H5AccessSettings'
+import { GeneralSettings } from './settings/GeneralSettings'
+import { AboutSettings } from './settings/AboutSettings'
+import { ProviderSettings } from './settings/ProviderSettings'
 import {
   BUILT_IN_PROVIDER_IDS,
   CLAUDE_OFFICIAL_PROVIDER_ID,
@@ -76,12 +78,10 @@ import {
 import { GROK_OFFICIAL_PROVIDER_ID } from '../constants/grokOfficialProvider'
 import { useUpdateStore } from '../stores/updateStore'
 import { getBaseUrl } from '../api/client'
-import { h5AccessApi } from '../api/h5Access'
 import { formatBytes } from '../lib/formatBytes'
 import { isDesktopRuntime } from '../lib/desktopRuntime'
 import { getDesktopHost } from '../lib/desktopHost'
 import { publicAssetPath } from '../lib/publicAsset'
-import { isBrowserSafePort } from '../lib/browserSafePort'
 import {
   getDesktopNotificationPermission,
   notifyDesktop,
@@ -98,122 +98,6 @@ import {
 } from '../lib/providerSettingsJson'
 import { copyTextToClipboard } from '@/lib/clipboard'
 import { useMobileViewport } from '../hooks/useMobileViewport'
-const NETWORK_TIMEOUT_MIN_SECONDS = 30
-const NETWORK_TIMEOUT_MAX_SECONDS = 1800
-const NETWORK_TIMEOUT_STEP_SECONDS = 30
-const SETTINGS_CHECKBOX_INPUT_CLASS = 'settings-checkbox-input peer'
-
-const BUILT_IN_OUTPUT_STYLE_TRANSLATION_KEYS = {
-  default: {
-    label: 'settings.general.outputStyleBuiltin.default.label',
-    description: 'settings.general.outputStyleBuiltin.default.description',
-  },
-  Explanatory: {
-    label: 'settings.general.outputStyleBuiltin.explanatory.label',
-    description: 'settings.general.outputStyleBuiltin.explanatory.description',
-  },
-  Learning: {
-    label: 'settings.general.outputStyleBuiltin.learning.label',
-    description: 'settings.general.outputStyleBuiltin.learning.description',
-  },
-} satisfies Record<string, { label: TranslationKey; description: TranslationKey }>
-
-function buildH5LaunchUrl(baseUrl: string | null, token: string | null): string | null {
-  if (!baseUrl) return null
-
-  try {
-    const url = new URL(baseUrl)
-    if (token) {
-      url.searchParams.set('serverUrl', baseUrl)
-      url.searchParams.set('h5Token', token)
-    }
-    return url.toString().replace(/\/$/, '')
-  } catch {
-    return token
-      ? `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}serverUrl=${encodeURIComponent(baseUrl)}&h5Token=${encodeURIComponent(token)}`
-      : baseUrl
-  }
-}
-
-function isLanH5BaseUrl(url: URL): boolean {
-  return url.protocol === 'http:' &&
-    !!url.port &&
-    (
-      url.hostname === 'localhost' ||
-      url.hostname === '127.0.0.1' ||
-      url.hostname.startsWith('10.') ||
-      url.hostname.startsWith('192.168.') ||
-      /^172\.(1[6-9]|2\d|3[0-1])\./.test(url.hostname) ||
-      url.hostname.startsWith('169.254.')
-    )
-}
-
-function extractH5AccessAddressDraft(baseUrl: string | null): string {
-  if (!baseUrl) return ''
-
-  try {
-    const url = new URL(baseUrl)
-    return isLanH5BaseUrl(url) ? url.hostname : baseUrl
-  } catch {
-    return baseUrl
-  }
-}
-
-function extractHostnameFromUrl(value: string | null): string | null {
-  if (!value) return null
-  try {
-    return new URL(value).hostname || null
-  } catch {
-    return null
-  }
-}
-
-function extractH5AccessPort(baseUrl: string | null): string | null {
-  if (!baseUrl) return null
-
-  try {
-    const url = new URL(baseUrl)
-    return url.port || null
-  } catch {
-    return null
-  }
-}
-
-// Mirrors the server-side fixedPort range (h5AccessService MIN/MAX_FIXED_PORT).
-function parseH5FixedPortDraft(draft: string): number | null | 'invalid' {
-  const trimmed = draft.trim()
-  if (!trimmed) return null
-  if (!/^\d{1,5}$/.test(trimmed)) return 'invalid'
-  const port = Number(trimmed)
-  return port >= 1024 && port <= 65535 && isBrowserSafePort(port) ? port : 'invalid'
-}
-
-// Mirrors the server-side disconnect grace range (h5AccessService
-// MIN/MAX_DISCONNECT_GRACE_SECONDS). Empty = use the built-in 30s default.
-function parseH5GraceDraft(draft: string): number | null | 'invalid' {
-  const trimmed = draft.trim()
-  if (!trimmed) return null
-  if (!/^\d{1,5}$/.test(trimmed)) return 'invalid'
-  const seconds = Number(trimmed)
-  return seconds >= 5 && seconds <= 86400 ? seconds : 'invalid'
-}
-
-function buildH5PublicBaseUrlFromHostDraft(draft: string, currentBaseUrl: string | null): string | null {
-  const trimmed = draft.trim()
-  if (!trimmed) return null
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) return trimmed
-
-  try {
-    const current = currentBaseUrl ? new URL(currentBaseUrl) : null
-    if (!current) return trimmed
-
-    const port = current.port ? `:${current.port}` : ''
-    const path = current.pathname === '/' ? '' : current.pathname.replace(/\/+$/, '')
-    return `${current.protocol}//${trimmed}${port}${path}`
-  } catch {
-    return trimmed
-  }
-}
 
 export function Settings() {
   const activeTab = useUIStore((s) => s.activeSettingsTab)
@@ -232,10 +116,26 @@ export function Settings() {
     <div data-testid="settings-page" className={`settings-page flex-1 flex flex-col overflow-hidden bg-[var(--color-surface)]${isMobileSettings ? ' settings-page--mobile' : ''}`}>
       <div className="settings-page__layout flex-1 flex overflow-hidden">
         {/* Tab navigation */}
-        {/* Narrow enough that the rail is not a gutter of dead space, wide
-            enough that the longest label in any locale — the Japanese
-            "コンピューター操作" — still clears the truncation on TabButton. */}
-        <div className="settings-page__tabs w-[220px] flex-shrink-0 flex flex-col overflow-y-auto border-r border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-4">
+        {/* The rail keeps the Settings tab's 195px width for a same-width paper
+            handoff when that tab sits at the leading edge of the strip. It does
+            *not* chase the tab's live horizontal offset: the rail is page chrome,
+            not a geometric extension of a scrollable tab chip, so following
+            reorder/scroll lefts shoved the whole navigation mid-panel. Its
+            tighter trailing gutter keeps the Japanese "コンピューター操作"
+            clear at this width without moving the row contents left.
+
+            Paper, separated by the rule, the way every other secondary panel
+            in the app is (the workbench, the diff split). It used to be
+            `--color-surface-container-low`, which is the same value the tab
+            strip's trough resolves to — so the Settings tab, the one tab whose
+            content this rail *is*, was the only selected tab in the app whose
+            paper fill met a different colour at its bottom edge. It read as a
+            white card stranded on a grey panel. Nothing else changed to fix
+            it: the tab is right, this was the odd one out. */}
+        <div
+          data-testid="settings-navigation"
+          className="w-[195px] flex-shrink-0 flex flex-col overflow-y-auto border-r border-[var(--color-border)] bg-[var(--color-surface)] py-4 pl-3 pr-1"
+        >
           <div className="flex-1 flex flex-col gap-0.5">
             <TabButton icon="dns" label={t('settings.tab.providers')} active={activeTab === 'providers'} onClick={() => setActiveTab('providers')} />
             <TabButton icon="tune" label={t('settings.tab.general')} active={activeTab === 'general'} onClick={() => setActiveTab('general')} />
@@ -297,7 +197,9 @@ function TabButton({ icon, label, active, onClick }: { icon: string; label: stri
       ref={ref}
       onClick={onClick}
       aria-current={active ? 'page' : undefined}
-      className={`w-full flex items-center gap-3 rounded-[var(--radius-md)] px-3 py-2 text-[13.5px] text-left transition-[background-color,color] duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-surface-container-low)] ${
+      // `ring-offset` has to name the rail's own fill — it is painted, not
+      // transparent, so it tracks whatever the rail is.
+      className={`w-full flex items-center gap-2.5 rounded-[var(--radius-md)] py-2 pl-3 pr-2 text-[13.5px] text-left transition-[background-color,color] duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-surface)] ${
         active
           ? 'bg-[var(--color-surface-hover)] text-[var(--color-text-primary)] font-medium'
           : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'

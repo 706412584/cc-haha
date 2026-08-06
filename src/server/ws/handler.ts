@@ -13,9 +13,9 @@ import type {
   RuntimeSelection,
   RuntimeConfigResult,
   ServerMessage,
-  StreamingFallbackCause,
   TokenUsage,
 } from './events.js'
+import { RUNTIME_CONFIG_APPLIED_EVENT } from './events.js'
 import * as os from 'node:os'
 import {
   ConversationStartupError,
@@ -24,7 +24,6 @@ import {
 import { computerUseApprovalService } from '../services/computerUseApprovalService.js'
 import {
   sessionService,
-  type SessionTaskNotification,
 } from '../services/sessionService.js'
 import {
   formatHandoffSystemPrompt,
@@ -33,6 +32,7 @@ import {
 } from '../services/sessionSummaryService.js'
 import { SettingsService } from '../services/settingsService.js'
 import { ProviderService } from '../services/providerService.js'
+import { getPresetDefaultEnv } from '../services/providerRuntimeEnv.js'
 import { isOpenAIOfficialProviderId } from '../services/openaiOfficialProvider.js'
 import { isGrokOfficialProviderId } from '../services/grokOfficialProvider.js'
 import { getOpenAICodexModelCatalog } from '../../services/openaiAuth/modelCatalog.js'
@@ -44,6 +44,11 @@ import {
 import { GROK_DEFAULT_MAIN_MODEL } from '../../services/grokAuth/models.js'
 import { getGrokModelCatalog } from '../../services/grokAuth/modelCatalog.js'
 import { hahaGrokOAuthService } from '../services/hahaGrokOAuthService.js'
+import {
+  getModelReasoningCapabilityOverride,
+  isModelReasoningEffort,
+  normalizeModelReasoningEffort,
+} from '../../shared/modelReasoning.js'
 import { diagnosticsService } from '../services/diagnosticsService.js'
 import {
   buildConversationTitleInput,
@@ -54,15 +59,7 @@ import {
   type TitleConversationTurn,
 } from '../services/titleService.js'
 import { parseSlashCommand } from '../../utils/slashCommandParsing.js'
-import {
-  COMMAND_NAME_TAG,
-  LOCAL_COMMAND_STDERR_TAG,
-  LOCAL_COMMAND_STDOUT_TAG,
-} from '../../constants/xml.js'
-import {
-  getCommandMetadataDisplayText,
-  shouldHideCommandMetadataContent,
-} from '../../utils/commandMetadata.js'
+import { archiveRemoteSession } from '../../utils/teleport/api.js'
 import { shouldCreateWorktreeForSessionLaunch } from '../services/repositoryLaunchService.js'
 import { getDisconnectGraceMs } from './disconnectGraceConfig.js'
 import { sessionActivityCoordinator } from '../services/sessionActivityCoordinator.js'
@@ -70,6 +67,62 @@ import {
   isPetClientMessageAllowed,
   toPetServerMessage,
 } from '../petAccessPolicy.js'
+import {
+  activeBackgroundTaskIds,
+  activeAgentTasks,
+  activeNonAgentTasks,
+  authoritativeStoppedTaskIds,
+  agentStopRequestedSessions,
+  runtimeExitStoppedSessions,
+  getCliBackgroundTaskLifecycle,
+  isAgentTaskType,
+  untrackCliBackgroundTask,
+  clearAgentRuntimeState,
+  markTaskAuthoritativelyStopped,
+  hasActiveBackgroundTasks,
+  clearAgentStopFinalizationRetry,
+  markActiveAgentsStopping,
+} from './agentTaskState.js'
+import type {
+  ActiveAgentTaskState,
+  CliBackgroundTaskLifecycle,
+} from './agentTaskState.js'
+import {
+  ROOT_STREAM_SCOPE,
+  extractAssistantStreamTextForTitle,
+  extractAssistantMessageTextForTitle,
+  cliParentToolUseId,
+  cliStreamScope,
+  scopedToolUseId,
+  extractAssistantText,
+  normalizeAskUserQuestionToolResult,
+  classifyRuntimeErrorCode,
+  toApiRetryServerMessage,
+  toStreamingFallbackServerMessage,
+  extractLocalCommandOutput,
+  isCompactLocalCommandOutput,
+  extractLocalCommand,
+  extractGoalEvent,
+  looksLikeGoalCommandOutput,
+  getCompactBoundaryMessage,
+  isCompactSummaryMessageContent,
+  extractReplayUserText,
+  normalizeCliTaskNotification,
+} from './cliMessageParsing.js'
+import {
+  resetCurrentStreamAttempt,
+  streamBlockKey,
+  rememberActiveBlockScope,
+  forgetActiveBlockScope,
+  resolveActiveBlockKey,
+  pendingToolBlockKey,
+  rememberToolParentUseId,
+  forgetToolParentUseId,
+  consumeToolParentUseId,
+} from './streamBlocks.js'
+import type {
+  SessionStreamState,
+} from './streamBlocks.js'
 
 const settingsService = new SettingsService()
 const providerService = new ProviderService()
@@ -110,8 +163,9 @@ const sessionCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const sessionDisconnectWatchers = new Map<string, () => void>()
 
 /**
- * Track sessions where user requested stop — suppress the CLI_ERROR that
- * follows an interrupt so the frontend doesn't show "处理过程中发生错误".
+ * Track sessions where user requested stop. Until a replacement turn begins
+ * or the runtime is cleaned up, this keeps late foreground output from
+ * reviving the renderer and suppresses the CLI_ERROR produced by the interrupt.
  */
 const sessionStopRequested = new Set<string>()
 // Reject stale retry/fallback frames until the stopped turn is explicitly settled.
@@ -123,6 +177,7 @@ const stoppedTurnEventFences = new Set<string>()
 const sessionTitleState = new Map<string, {
   userMessageCount: number
   hasCustomTitle: boolean
+  hasExistingTranscript: boolean
   firstUserMessage: string
   completedTurns: TitleConversationTurn[]
   activeTurn?: TitleConversationTurn & { count: number }
@@ -175,6 +230,11 @@ type ActiveUserTurnState = {
   titleTurnNumber?: number
   removeCompletionCallback?: () => void
   removeTitleCallback?: () => void
+  interruptBoundaryPending?: boolean
+  replacementAfterStop?: boolean
+  expectedReplayUuid?: string
+  expectedLocalCommand?: NonNullable<ReturnType<typeof parseSlashCommand>>
+  cancelled?: boolean
 }
 
 type StopSettlement = {
@@ -182,11 +242,18 @@ type StopSettlement = {
   resolve: () => void
 }
 
+
+
+
 const runtimeOverrides = new Map<string, RuntimeOverride>()
 const activeUserTurns = new Map<string, ActiveUserTurnState>()
 const stopSettlements = new Map<string, StopSettlement>()
 const settledStopTerminalFrames = new WeakSet<object>()
 const activeBackgroundTaskIds = new Map<string, Set<string>>()
+const activeCliRuns = new Set<string>()
+const pendingInterruptedTurnResults = new Map<string, number>()
+const interruptedTurnResultMessages = new WeakMap<object, string>()
+const sessionClearInProgress = new Set<string>()
 const deferredRuntimeRestarts = new Map<string, RuntimeOverride>()
 const deferredPermissionModes = new Map<string, PermissionMode>()
 
@@ -236,43 +303,50 @@ function settleSessionChatActivity(sessionId: string, cliMsg: any): void {
   terminalSessionChatStates.delete(sessionId)
 }
 
-type CliBackgroundTaskLifecycle = {
-  taskId: string
-  running: boolean
-}
 
-function getCliBackgroundTaskLifecycle(cliMsg: any): CliBackgroundTaskLifecycle | null {
-  if (cliMsg?.type !== 'system') return null
-  const taskId = typeof cliMsg.task_id === 'string' ? cliMsg.task_id.trim() : ''
-  if (!taskId) return null
 
-  if (cliMsg.subtype === 'task_started') {
-    return { taskId, running: true }
-  }
 
-  if (cliMsg.subtype === 'task_notification' && cliMsg.status === 'running') {
-    return { taskId, running: true }
-  }
 
-  if (
-    cliMsg.subtype === 'task_notification' &&
-    (cliMsg.status === 'completed' ||
-      cliMsg.status === 'failed' ||
-      cliMsg.status === 'stopped' ||
-      cliMsg.status === 'killed')
-  ) {
-    return { taskId, running: false }
-  }
 
-  return null
-}
 
 function trackCliBackgroundTaskLifecycle(
   sessionId: string,
   cliMsg: any,
 ): CliBackgroundTaskLifecycle | null {
+  const rawTaskId = cliMsg?.type === 'system' && typeof cliMsg.task_id === 'string'
+    ? cliMsg.task_id.trim()
+    : ''
+  if (rawTaskId && authoritativeStoppedTaskIds.get(sessionId)?.has(rawTaskId)) {
+    // The lifecycle parser intentionally ignores progress and tool-activity
+    // messages. Check the raw task id first so no late task-scoped event can
+    // revive an Agent after its durable stopped bookend has been published.
+    return {
+      taskId: rawTaskId,
+      running: false,
+      status: 'stopped',
+      suppressForward: true,
+    }
+  }
+
   const lifecycle = getCliBackgroundTaskLifecycle(cliMsg)
   if (!lifecycle) return null
+
+  const existingAgentTask = activeAgentTasks.get(sessionId)?.get(lifecycle.taskId)
+  if (
+    lifecycle.running &&
+    existingAgentTask?.stopIntent &&
+    existingAgentTask.localStopConfirmed
+  ) {
+    // Once the local task has acknowledged Stop, any queued start/progress
+    // event is stale. Do not let it revive Activity or cancel idle cleanup
+    // while strict archive/bookend finalization is being retried.
+    return {
+      ...lifecycle,
+      running: false,
+      status: 'stopped',
+      suppressForward: true,
+    }
+  }
 
   if (lifecycle.running) {
     let taskIds = activeBackgroundTaskIds.get(sessionId)
@@ -281,17 +355,99 @@ function trackCliBackgroundTaskLifecycle(
       activeBackgroundTaskIds.set(sessionId, taskIds)
     }
     taskIds.add(lifecycle.taskId)
+    if (isAgentTaskType(lifecycle.taskType)) {
+      let sessionAgentTasks = activeAgentTasks.get(sessionId)
+      if (!sessionAgentTasks) {
+        sessionAgentTasks = new Map()
+        activeAgentTasks.set(sessionId, sessionAgentTasks)
+      }
+      const existing = sessionAgentTasks.get(lifecycle.taskId)
+      if (existing) {
+        existing.toolUseId = lifecycle.toolUseId ?? existing.toolUseId
+        if (lifecycle.remoteSessionId) existing.remoteSessionId = lifecycle.remoteSessionId
+        if (lifecycle.description) existing.description = lifecycle.description
+      } else {
+        sessionAgentTasks.set(lifecycle.taskId, {
+          taskId: lifecycle.taskId,
+          taskType: lifecycle.taskType,
+          toolUseId: lifecycle.toolUseId ?? lifecycle.taskId,
+          ...(lifecycle.remoteSessionId
+            ? { remoteSessionId: lifecycle.remoteSessionId }
+            : {}),
+          ...(lifecycle.description ? { description: lifecycle.description } : {}),
+          stopIntent: false,
+          stopRequested: false,
+          localStopConfirmed: false,
+          bookendPending: false,
+          finalizationRetryCount: 0,
+        })
+      }
+    } else {
+      let sessionNonAgentTasks = activeNonAgentTasks.get(sessionId)
+      if (!sessionNonAgentTasks) {
+        sessionNonAgentTasks = new Map()
+        activeNonAgentTasks.set(sessionId, sessionNonAgentTasks)
+      }
+      sessionNonAgentTasks.set(lifecycle.taskId, {
+        taskId: lifecycle.taskId,
+        ...(lifecycle.taskType ? { taskType: lifecycle.taskType } : {}),
+        toolUseId: lifecycle.toolUseId ?? lifecycle.taskId,
+        ...(lifecycle.description ? { description: lifecycle.description } : {}),
+      })
+    }
     return lifecycle
   }
 
-  const taskIds = activeBackgroundTaskIds.get(sessionId)
-  taskIds?.delete(lifecycle.taskId)
-  if (taskIds?.size === 0) activeBackgroundTaskIds.delete(sessionId)
+  const sessionAgentTasks = activeAgentTasks.get(sessionId)
+  const agentTask = sessionAgentTasks?.get(lifecycle.taskId)
+  if (agentTask?.stopIntent) {
+    // A terminal event proves the local Agent process/poller has stopped. Turn
+    // it into the same durable synthetic bookend used by the control response
+    // so a renderer that disconnected during Stop can reconcile from history.
+    // Remote Agents additionally remain gated on strict archive confirmation.
+    agentTask.localStopConfirmed = true
+    void emitAuthoritativeAgentStopped(sessionId, agentTask)
+    return { ...lifecycle, suppressForward: true }
+  }
+
+  untrackCliBackgroundTask(sessionId, lifecycle.taskId)
   return lifecycle
 }
 
-function hasActiveBackgroundTasks(sessionId: string): boolean {
-  return (activeBackgroundTaskIds.get(sessionId)?.size ?? 0) > 0
+
+function trackCliRunState(sessionId: string, cliMsg: any): 'running' | 'idle' | null {
+  if (
+    cliMsg?.type === 'result' &&
+    cliMsg.is_error === true &&
+    !conversationService.hasSession(sessionId)
+  ) {
+    // ConversationService removes a crashed subprocess before publishing its
+    // synthetic terminal result. No CLI idle event can follow that exit.
+    activeCliRuns.delete(sessionId)
+    return 'idle'
+  }
+  if (cliMsg?.type !== 'system' || cliMsg.subtype !== 'session_state_changed') {
+    return null
+  }
+  if (cliMsg.state === 'running') {
+    activeCliRuns.add(sessionId)
+    return 'running'
+  }
+  if (cliMsg.state === 'idle') {
+    activeCliRuns.delete(sessionId)
+    return 'idle'
+  }
+  return null
+}
+
+function hasActiveCliRun(sessionId: string): boolean {
+  return activeCliRuns.has(sessionId)
+}
+
+function hasActiveSessionWork(sessionId: string): boolean {
+  return hasPendingOrActiveUserTurn(sessionId) ||
+    hasActiveCliRun(sessionId) ||
+    hasActiveBackgroundTasks(sessionId)
 }
 
 // Drain active background tasks and synthesize stopped events for desktop UI.
@@ -355,7 +511,11 @@ export function getSessionChatActivityState(sessionId: string): SessionChatActiv
   ) {
     return 'waiting'
   }
-  if (activeUserTurns.has(sessionId) || hasActiveBackgroundTasks(sessionId)) return 'running'
+  if (
+    activeUserTurns.has(sessionId) ||
+    hasActiveCliRun(sessionId) ||
+    hasActiveBackgroundTasks(sessionId)
+  ) return 'running'
   return terminalSessionChatStates.get(sessionId)
     ?? (legacyQueuedSessionChats.has(sessionId) ? 'running' : 'idle')
 }
@@ -417,7 +577,7 @@ const prewarmPendingSessions = new Set<string>()
 const prewarmedSessions = new Set<string>()
 const prewarmIdleTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const DEFAULT_PREWARM_IDLE_TIMEOUT_MS = 5 * 60_000
-const VALID_CLAUDE_EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'max'])
+const VALID_CLAUDE_EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
 
 async function sendRepositoryStartupStatus(
   ws: ServerWebSocket<WebSocketData>,
@@ -482,6 +642,7 @@ const clientOutputCallbacks = new Map<
 >()
 const taskNotificationPersistence = new Map<string, Map<string, Promise<void>>>()
 const observedTerminalTasks = new Map<string, Set<string>>()
+const sessionTranscriptEpochs = new Map<string, number>()
 
 export const handleWebSocket = {
   open(ws: ServerWebSocket<WebSocketData>) {
@@ -534,15 +695,24 @@ export const handleWebSocket = {
       type: 'permission_requests_snapshot',
       toolRequestIds,
       computerUseRequestIds,
-      turnActive:
-        hasPendingOrActiveUserTurn(sessionId) && !sessionStopRequested.has(sessionId),
+      turnActive: hasLiveUserTurnForClient(sessionId),
     })
+    replayAgentStopFailures(ws, sessionId)
   },
 
   message(ws: ServerWebSocket<WebSocketData>, rawMessage: string | Buffer) {
     if (ws.data.channel === 'sdk') {
+      const { sessionId, sdkToken } = ws.data
+      if (!conversationService.authorizeSdkConnection(sessionId, sdkToken)) {
+        console.warn(`[WS] Rejected stale SDK message for session: ${sessionId}`)
+        ws.close(1008, 'Stale SDK token')
+        return
+      }
       const payload = typeof rawMessage === 'string' ? rawMessage : rawMessage.toString()
-      conversationService.handleSdkPayload(ws.data.sessionId, payload, ws)
+      conversationService.handleSdkPayload(sessionId, payload, {
+        canAcceptPermissionRequest: (message) =>
+          canAcceptPermissionRequestDuringStop(sessionId, message),
+      })
       return
     }
 
@@ -605,7 +775,13 @@ export const handleWebSocket = {
               details: err,
             })
             console.error(`[WS] Unhandled error in handleUserMessage:`, err)
-            if (activeUserTurns.get(sessionId) === activeTurn) {
+            // A queued/newer turn may have replaced this handler while an
+            // earlier await was pending. Only the handler that still owns the
+            // active-turn token may terminate the desktop state.
+            if (
+              activeUserTurns.get(sessionId) === activeTurn &&
+              !activeTurn.cancelled
+            ) {
               failSessionChatActivity(sessionId)
               clearActiveUserTurn(sessionId, activeTurn)
               const titleState = sessionTitleState.get(sessionId)
@@ -664,7 +840,7 @@ export const handleWebSocket = {
         case 'sync_state':
           sendMessage(ws, {
             type: 'session_state',
-            turnState: hasPendingOrActiveUserTurn(ws.data.sessionId)
+            turnState: hasLiveUserTurnForClient(ws.data.sessionId)
               ? 'running'
               : 'idle',
           })
@@ -716,7 +892,7 @@ export const handleWebSocket = {
     // running must finish (issue #764) — never kill it just because a renderer
     // closed. Defer cleanup until all active work completes, then apply the
     // idle grace period. Sessions that are already idle go straight to the timer.
-    if (hasPendingOrActiveUserTurn(sessionId) || hasActiveBackgroundTasks(sessionId)) {
+    if (hasActiveSessionWork(sessionId)) {
       // A turn blocked on permission cannot finish without user input. Keep the
       // completion watcher for early cleanup, but also enforce the existing
       // pending-permission maximum so an abandoned prompt cannot pin the CLI.
@@ -803,10 +979,6 @@ async function handleUserMessage(
   if (stopSettlements.has(sessionId)) {
     await waitForStopSettlement(sessionId)
   }
-  activeUserTurns.set(sessionId, activeTurn)
-
-  beginSessionChatActivity(sessionId)
-  clearPrewarmState(sessionId)
 
   const desktopSlashCommand = getDesktopSlashCommand(message.content)
   if (desktopSlashCommand?.commandName === 'clear' && desktopSlashCommand.args.trim()) {
@@ -835,15 +1007,27 @@ async function handleUserMessage(
     return
   }
 
+  // Keep a stopped-turn fence until the replacement replay proves that later
+  // output belongs to this turn, while allowing validated input to start its
+  // own activity lifecycle.
+  beginSessionChatActivity(sessionId)
+  clearPrewarmState(sessionId)
+
   // Send thinking status
   sendMessage(ws, { type: 'status', state: 'thinking', verb: 'Thinking' })
 
+  activeTurn.expectedReplayUuid = crypto.randomUUID()
+  activeTurn.expectedLocalCommand = desktopSlashCommand ?? undefined
+  activeTurn.replacementAfterStop =
+    sessionStopRequested.has(sessionId) || agentStopRequestedSessions.has(sessionId)
+  activeUserTurns.set(sessionId, activeTurn)
+
   const initialRuntimeTransition = await waitForRuntimeTransitionBeforeUserTurn(ws, sessionId)
-  if (activeTurn.stopped) {
-    clearActiveUserTurn(sessionId, activeTurn)
-    return
-  }
-  if (!initialRuntimeTransition.ok) {
+  if (
+    !initialRuntimeTransition.ok ||
+    activeUserTurns.get(sessionId) !== activeTurn ||
+    activeTurn.cancelled
+  ) {
     clearActiveUserTurn(sessionId, activeTurn)
     return
   }
@@ -854,9 +1038,15 @@ async function handleUserMessage(
   // Track and emit the first placeholder title before CLI startup/streaming.
   let titleState = sessionTitleState.get(sessionId)
   if (!titleState) {
+    const hasCustomTitle = !!(await sessionService.getCustomTitle(sessionId))
+    const launchInfo = hasCustomTitle
+      ? null
+      : await sessionService.getSessionLaunchInfo(sessionId)
+    if (activeUserTurns.get(sessionId) !== activeTurn || activeTurn.cancelled) return
     titleState = {
       userMessageCount: 0,
-      hasCustomTitle: !!(await sessionService.getCustomTitle(sessionId)),
+      hasCustomTitle,
+      hasExistingTranscript: (launchInfo?.transcriptMessageCount ?? 0) > 0,
       firstUserMessage: '',
       completedTurns: [],
       startedGenerationKeys: new Set<string>(),
@@ -884,13 +1074,16 @@ async function handleUserMessage(
   try {
     await ensureCliSessionStarted(ws, sessionId, 'user_message')
   } catch (err) {
+    if (activeUserTurns.get(sessionId) !== activeTurn || activeTurn.cancelled) return
     const errMsg = err instanceof Error ? err.message : String(err)
     const code =
       err instanceof ConversationStartupError ? err.code : 'CLI_START_FAILED'
     console.error(`[WS] CLI start failed for ${sessionId}: ${errMsg}`)
+    const diagnosticMessage = await buildSessionStartupDiagnosticMessage(sessionId, errMsg)
+    if (activeUserTurns.get(sessionId) !== activeTurn || activeTurn.cancelled) return
     sendMessage(ws, {
       type: 'error',
-      message: await buildSessionStartupDiagnosticMessage(sessionId, errMsg),
+      message: diagnosticMessage,
       code,
       retryable:
         err instanceof ConversationStartupError ? err.retryable : false,
@@ -905,12 +1098,17 @@ async function handleUserMessage(
     return
   }
 
-  const startupRuntimeTransition = await waitForRuntimeTransitionBeforeUserTurn(ws, sessionId)
-  if (activeTurn.stopped) {
-    clearActiveUserTurn(sessionId, activeTurn)
+  if (activeUserTurns.get(sessionId) !== activeTurn || activeTurn.cancelled) {
+    stopRuntimeStartedByCancelledAdmission(sessionId, activeTurn)
     return
   }
-  if (startupRuntimeTransition.ok) {
+
+  const startupRuntimeTransition = await waitForRuntimeTransitionBeforeUserTurn(ws, sessionId)
+  if (
+    startupRuntimeTransition.ok &&
+    activeUserTurns.get(sessionId) === activeTurn &&
+    !activeTurn.cancelled
+  ) {
     if (startupRuntimeTransition.waited) {
       sendMessage(ws, { type: 'status', state: 'thinking', verb: 'Thinking' })
     }
@@ -928,8 +1126,7 @@ async function handleUserMessage(
   activeTurn.titleTurnNumber = titleTurnNumber ?? undefined
   const removeTitleOutputCallback = titleTurnNumber === null
     ? null
-    : bindTitleSessionOutput(ws, sessionId, titleTurnNumber, () => userMessageSent)
-  activeTurn.removeTitleCallback = removeTitleOutputCallback ?? undefined
+    : bindTitleSessionOutput(ws, sessionId, activeTurn, () => userMessageSent)
 
   bindAllClientSessionOutputs(sessionId, {
     shouldForward: (cliMsg) => {
@@ -958,34 +1155,29 @@ async function handleUserMessage(
   refreshDisconnectedTurnCleanupWatcher(sessionId)
 
   activeTurn.sendStarted = true
-  const instanceBeforeSend = conversationService.getActiveInstanceId(sessionId)
   const sent = await conversationService.sendMessage(
     sessionId,
     message.content,
-    message.attachments
+    message.attachments,
+    {
+      canSend: () =>
+        activeUserTurns.get(sessionId) === activeTurn && !activeTurn.cancelled,
+      messageUuid: activeTurn.expectedReplayUuid,
+      onCommitted: () => {
+        activeTurn.messageSent = true
+      },
+    },
   )
-  if (activeTurn.stopped) {
-    removeActiveTurnOutputCallback()
+  if (activeUserTurns.get(sessionId) !== activeTurn || activeTurn.cancelled) {
+    // Once onCommitted has run the SDK owns this turn and will still emit its
+    // terminal result. Keep the completion callback long enough to consume
+    // that boundary; only an admission revoked before the socket write is safe
+    // to detach immediately.
+    if (!activeTurn.messageSent) removeActiveTurnOutputCallback()
     removeTitleOutputCallback?.()
-    clearActiveUserTurn(sessionId, activeTurn)
     discardActiveTitleTurn(sessionId, titleTurnNumber)
-    if (sent) {
-      activeTurn.messageSent = true
-      conversationService.sendInterrupt(sessionId)
-      if (instanceBeforeSend) {
-        setTimeout(() => {
-          if (
-            sessionStopRequested.has(sessionId) &&
-            conversationService.stopSessionInstance(sessionId, instanceBeforeSend)
-          ) {
-            settleStoppedGeneration(sessionId)
-          }
-        }, 3_000)
-      } else {
-        settleStoppedGeneration(sessionId)
-      }
-    } else {
-      settleStoppedGeneration(sessionId)
+    if (!activeTurn.messageSent) {
+      stopRuntimeStartedByCancelledAdmission(sessionId, activeTurn)
     }
     return
   }
@@ -1014,12 +1206,137 @@ function clearActiveUserTurn(sessionId: string, activeTurn: ActiveUserTurnState)
   sessionActivityCoordinator.endUserTurn(sessionId)
 }
 
+function matchesActiveTurnReplay(activeTurn: ActiveUserTurnState, cliMsg: any): boolean {
+  return cliMsg?.type === 'user' &&
+    cliMsg.isReplay === true &&
+    typeof cliMsg.uuid === 'string' &&
+    cliMsg.uuid === activeTurn.expectedReplayUuid
+}
+
+function matchesActiveTurnLocalCommand(
+  activeTurn: ActiveUserTurnState,
+  cliMsg: any,
+): boolean {
+  return Boolean(
+    activeTurn.expectedLocalCommand &&
+    isMatchingCurrentTurnLocalCommand(cliMsg, activeTurn.expectedLocalCommand),
+  )
+}
+
+function addPendingInterruptedTurnResult(sessionId: string): void {
+  pendingInterruptedTurnResults.set(
+    sessionId,
+    (pendingInterruptedTurnResults.get(sessionId) ?? 0) + 1,
+  )
+}
+
+function removePendingInterruptedTurnResult(sessionId: string): void {
+  const count = pendingInterruptedTurnResults.get(sessionId) ?? 0
+  if (count <= 1) {
+    pendingInterruptedTurnResults.delete(sessionId)
+    return
+  }
+  pendingInterruptedTurnResults.set(sessionId, count - 1)
+}
+
+function forceStopSharedRuntimeForAgentCancellation(sessionId: string): void {
+  // A killed runtime cannot emit the foreground turn's interrupted result.
+  // Remove that boundary before admitting a replacement (including a local
+  // slash command), otherwise its result can be consumed as the dead turn's.
+  pendingInterruptedTurnResults.delete(sessionId)
+  runtimeExitStoppedSessions.add(sessionId)
+  conversationService.stopSession(sessionId)
+  const stoppedTurn = activeUserTurns.get(sessionId)
+  if (
+    stoppedTurn?.cancelled &&
+    stoppedTurn.replacementAfterStop !== true
+  ) {
+    clearActiveUserTurn(sessionId, stoppedTurn)
+  }
+  void emitStoppedForNonAgentTasksAfterRuntimeExit(sessionId)
+}
+
+function consumeInterruptedTurnResult(sessionId: string, cliMsg: any): boolean {
+  if (!cliMsg || typeof cliMsg !== 'object' || cliMsg.type !== 'result') return false
+  if (interruptedTurnResultMessages.get(cliMsg) === sessionId) return true
+  if (!pendingInterruptedTurnResults.has(sessionId)) return false
+  removePendingInterruptedTurnResult(sessionId)
+  interruptedTurnResultMessages.set(cliMsg, sessionId)
+  return true
+}
+
+function acknowledgeActiveTurnReplay(sessionId: string, cliMsg: any): boolean {
+  const activeTurn = activeUserTurns.get(sessionId)
+  const replayMatches = activeTurn
+    ? matchesActiveTurnReplay(activeTurn, cliMsg)
+    : false
+  const localCommandMatches = activeTurn && !pendingInterruptedTurnResults.has(sessionId)
+    ? matchesActiveTurnLocalCommand(activeTurn, cliMsg)
+    : false
+  if (
+    !activeTurn ||
+    activeTurn.cancelled ||
+    activeTurn.replacementAfterStop !== true ||
+    activeTurn.sendStarted !== true ||
+    (!replayMatches && !localCommandMatches)
+  ) {
+    return false
+  }
+
+  // The SDK preserves the outbound user-message UUID on normal replays. Pure
+  // local slash commands instead expose their parsed command marker after the
+  // interrupted result boundary. Either signal proves output now belongs to
+  // this replacement turn.
+  activeTurn.replacementAfterStop = false
+  activeTurn.messageSent = true
+  pendingInterruptedTurnResults.delete(sessionId)
+  sessionStopRequested.delete(sessionId)
+  agentStopRequestedSessions.delete(sessionId)
+  runtimeExitStoppedSessions.delete(sessionId)
+  return true
+}
+
+function stopRuntimeStartedByCancelledAdmission(
+  sessionId: string,
+  activeTurn: ActiveUserTurnState,
+): void {
+  if (
+    activeTurn.cancelled &&
+    !activeUserTurns.has(sessionId) &&
+    conversationService.hasSession(sessionId)
+  ) {
+    conversationService.stopSession(sessionId)
+  }
+}
+
 function bindActiveUserTurnCompletion(
   ws: ServerWebSocket<WebSocketData>,
   sessionId: string,
   activeTurn: ActiveUserTurnState,
 ): () => void {
   const callback = (cliMsg: any) => {
+    const interruptedResult = consumeInterruptedTurnResult(sessionId, cliMsg)
+    if (activeTurn.cancelled) {
+      if (cliMsg?.type === 'result') {
+        const stillOwnsTurn = activeUserTurns.get(sessionId) === activeTurn
+        if (
+          stillOwnsTurn &&
+          interruptedResult &&
+          pendingInterruptedTurnResults.has(sessionId)
+        ) {
+          return
+        }
+        conversationService.removeOutputCallback(sessionId, callback)
+        if (stillOwnsTurn) {
+          settleSessionChatActivity(sessionId, cliMsg)
+          clearActiveUserTurn(sessionId, activeTurn)
+        }
+      }
+      return
+    }
+
+    acknowledgeActiveTurnReplay(sessionId, cliMsg)
+    if (activeTurn.replacementAfterStop || interruptedResult) return
     if (
       cliMsg?.type !== 'result' ||
       (!activeTurn.messageSent && !cliMsg.is_error)
@@ -1085,39 +1402,97 @@ function applyDeferredRuntimeRestartAfterActiveTurn(
 async function handleDesktopClearCommand(
   ws: ServerWebSocket<WebSocketData>,
 ) {
+  const turnToCancel = activeUserTurns.get(ws.data.sessionId)
+  if (turnToCancel) turnToCancel.cancelled = true
+  await enqueueRuntimeTransition(ws.data.sessionId, () =>
+    performDesktopClearCommand(ws, turnToCancel),
+  )
+}
+
+async function performDesktopClearCommand(
+  ws: ServerWebSocket<WebSocketData>,
+  turnToCancel: ActiveUserTurnState | undefined,
+) {
   const { sessionId } = ws.data
 
   const workDir = conversationService.getSessionWorkDir(sessionId)
   const permissionMode = conversationService.hasSession(sessionId)
     ? conversationService.getSessionPermissionMode(sessionId)
     : undefined
+  const agentTasks = [...(activeAgentTasks.get(sessionId)?.values() ?? [])]
+  markActiveAgentsStopping(sessionId)
+  sessionClearInProgress.add(sessionId)
+  if (turnToCancel) clearActiveUserTurn(sessionId, turnToCancel)
+  const activeTitleState = sessionTitleState.get(sessionId)
+  if (activeTitleState) activeTitleState.activeTurn = undefined
+  const pendingStartup = sessionStartupPromises.get(sessionId)
   conversationService.stopSession(sessionId)
+  pendingInterruptedTurnResults.delete(sessionId)
+  // Clearing replaces the transcript, so do not enqueue terminal bookends that
+  // could finish after the replacement write and repopulate the cleared file.
+  // Detach callbacks before clearing, then archive the captured remote handles
+  // on an independent bounded retry path after the transcript replacement.
   conversationService.clearOutputCallbacks(sessionId)
-  sessionSlashCommands.delete(sessionId)
-  sessionTitleState.delete(sessionId)
-  cleanupStreamState(sessionId)
+  clearPrewarmState(sessionId)
+
+  if (pendingStartup) {
+    await pendingStartup.catch(() => undefined)
+    // The startup may have created a runtime after the first stopSession call.
+    // Keep the clear transition locked until that stale admission is drained.
+    conversationService.stopSession(sessionId)
+    conversationService.clearOutputCallbacks(sessionId)
+    clearPrewarmState(sessionId)
+  }
 
   try {
     await sessionService.clearSessionTranscript(sessionId, workDir || undefined, permissionMode)
   } catch (err) {
+    sessionClearInProgress.delete(sessionId)
+    resumeAgentFinalizationAfterFailedClear(sessionId, agentTasks)
+    runtimeExitStoppedSessions.add(sessionId)
+    await emitStoppedForNonAgentTasksAfterRuntimeExit(sessionId)
     const errMsg = err instanceof Error ? err.message : String(err)
-    sendMessage(ws, {
+    sendToSession(sessionId, {
       type: 'error',
       message: errMsg,
       code: 'SESSION_CLEAR_FAILED',
     })
-    sendMessage(ws, { type: 'status', state: 'idle' })
+    sendToSession(sessionId, { type: 'status', state: 'idle' })
     return
   }
 
-  sendMessage(ws, {
+  sessionTranscriptEpochs.set(
+    sessionId,
+    (sessionTranscriptEpochs.get(sessionId) ?? 0) + 1,
+  )
+
+  clearAgentRuntimeState(sessionId)
+  taskNotificationPersistence.delete(sessionId)
+  sessionSlashCommands.delete(sessionId)
+  sessionTitleState.delete(sessionId)
+  cleanupStreamState(sessionId)
+  sessionClearInProgress.delete(sessionId)
+
+  sendToSession(sessionId, {
     type: 'system_notification',
     subtype: 'session_cleared',
     message: 'Conversation cleared',
   })
-  sendMessage(ws, {
+  sendToSession(sessionId, {
     type: 'message_complete',
     usage: { input_tokens: 0, output_tokens: 0 },
+  })
+  void stopAgentsForSessionClear(sessionId, agentTasks).then((agentStopResults) => {
+    agentStopResults.forEach((stopped, index) => {
+      if (stopped) return
+      const task = agentTasks[index]
+      if (!task) return
+      sendToSession(sessionId, {
+        type: 'background_task_stop_failed',
+        taskId: task.taskId,
+        message: 'Conversation cleared, but one or more background Agents could not be fully stopped.',
+      })
+    })
   })
 }
 
@@ -1492,132 +1867,100 @@ async function handleSetRuntimeConfig(
   message: Extract<ClientMessage, { type: 'set_runtime_config' }>
 ) {
   const { sessionId } = ws.data
-  const requestId = typeof message.requestId === 'string' ? message.requestId : ''
-  const sendResult = (result: RuntimeConfigResult) => {
-    if (isUuid(requestId)) {
-      let sessionResults = runtimeConfigResults.get(sessionId)
-      if (!sessionResults) {
-        sessionResults = new Map()
-        runtimeConfigResults.set(sessionId, sessionResults)
-      }
-      sessionResults.set(requestId, result)
-      while (sessionResults.size > MAX_RUNTIME_CONFIG_RESULTS_PER_SESSION) {
-        sessionResults.delete(sessionResults.keys().next().value!)
-      }
-    }
-    sendMessage(ws, result)
-  }
-  const reject = (code: string, reason: string) => {
-    sendResult({
-      type: 'runtime_config_result',
-      requestId,
-      result: 'rejected',
-      code,
-      message: reason,
+  const requestedModelId = typeof message.modelId === 'string' ? message.modelId.trim() : ''
+  if (!requestedModelId) {
+    sendMessage(ws, {
+      type: 'error',
+      message: 'Runtime model selection is invalid.',
+      code: 'RUNTIME_CONFIG_INVALID',
     })
-  }
-
-  if (!isUuid(requestId)) {
-    reject('RUNTIME_CONFIG_REQUEST_INVALID', 'Runtime config request id is invalid.')
     return
   }
+  const requestedEffort =
+    typeof message.effortLevel === 'string' ? message.effortLevel.trim() : undefined
 
-  const cachedResult = runtimeConfigResults.get(sessionId)?.get(requestId)
-  if (cachedResult) {
-    sendMessage(ws, cachedResult)
-    return
-  }
-
-  try {
-    let modelId = typeof message.modelId === 'string' ? message.modelId.trim() : ''
-    if (!modelId) {
-      reject('RUNTIME_CONFIG_INVALID', 'Runtime model selection is invalid.')
-      return
-    }
+  // Register the transition before remote model-catalog or provider validation.
+  // A user message arriving in that async admission window must wait for the
+  // selected runtime instead of entering the previous provider's CLI process.
+  await enqueueRuntimeTransition(sessionId, async () => {
+    let modelId = requestedModelId
     if (isGrokOfficialProviderId(message.providerId)) {
       modelId = (await getGrokReasoningEfforts(modelId)).modelId
     }
-    const effortLevel =
-      typeof message.effortLevel === 'string' ? message.effortLevel.trim() : undefined
-    if (
-      effortLevel !== undefined &&
-      !(await isRuntimeEffortSupported(message.providerId, modelId, effortLevel))
-    ) {
-      reject('RUNTIME_CONFIG_INVALID', 'Runtime effort selection is invalid.')
+    const effortResolution = requestedEffort === undefined
+      ? { valid: true, effort: undefined }
+      : await resolveRuntimeEffort(message.providerId, modelId, requestedEffort)
+    if (!effortResolution.valid) {
+      sendMessage(ws, {
+        type: 'error',
+        message: 'Runtime effort selection is invalid.',
+        code: 'RUNTIME_CONFIG_INVALID',
+      })
       return
     }
-    const thinkingEnabled =
-      typeof message.thinkingEnabled === 'boolean' ? message.thinkingEnabled : undefined
-    const providerId = message.providerId ?? null
-    const providerRevision = await resolveProviderRevision(providerId)
-    const selection: RuntimeSelection = {
-      providerId,
+
+    const nextOverride = {
+      providerId: message.providerId ?? null,
       modelId,
-      ...(effortLevel ? { effortLevel } : {}),
-      ...(thinkingEnabled !== undefined ? { thinkingEnabled } : {}),
-    }
-    const nextOverride: RuntimeOverride = {
-      providerId,
-      modelId,
-      ...(effortLevel ? { effort: effortLevel } : {}),
-      ...(thinkingEnabled !== undefined ? { thinkingEnabled } : {}),
-      ...(providerRevision > 0 ? { providerRevision } : {}),
+      ...(effortResolution.effort ? { effort: effortResolution.effort } : {}),
     }
     const prevOverride = runtimeOverrides.get(sessionId)
-
-    if (!runtimeOverridesMatch(prevOverride, nextOverride)) {
-      runtimeOverrides.set(sessionId, nextOverride)
-      runtimeOverrideVersions.set(
-        sessionId,
-        (runtimeOverrideVersions.get(sessionId) ?? 0) + 1,
-      )
-
-      if (shouldDeferRuntimeRestartForActiveTurn(sessionId)) {
-        deferredRuntimeRestarts.set(sessionId, nextOverride)
-        await persistSessionRuntimeConfig(sessionId, nextOverride)
-      } else {
-        const pendingStartup = sessionStartupPromises.get(sessionId)
-        if (pendingStartup) {
-          const startupRuntimeVersion = sessionStartupRuntimeVersions.get(sessionId) ?? 0
-          const currentRuntimeVersion = runtimeOverrideVersions.get(sessionId) ?? 0
-          if (startupRuntimeVersion >= currentRuntimeVersion) {
-            await persistSessionRuntimeConfig(sessionId, nextOverride)
-          } else {
-            await enqueueRuntimeTransition(sessionId, async () => {
-              await persistSessionRuntimeConfig(sessionId, nextOverride)
-              await pendingStartup.catch(() => undefined)
-              const currentOverride = runtimeOverrides.get(sessionId)
-              if (
-                runtimeOverridesMatch(currentOverride, nextOverride) &&
-                conversationService.hasSession(sessionId)
-              ) {
-                await scheduleRestartSessionWithRuntimeConfig(ws, sessionId)
-              }
-            })
-          }
-        } else if (conversationService.hasSession(sessionId)) {
-          await enqueueRuntimeTransition(sessionId, async () => {
-            await persistSessionRuntimeConfig(sessionId, nextOverride)
-            await scheduleRestartSessionWithRuntimeConfig(ws, sessionId)
-          })
-        } else {
-          await persistSessionRuntimeConfig(sessionId, nextOverride)
-        }
-      }
+    if (
+      prevOverride &&
+      prevOverride.providerId === nextOverride.providerId &&
+      prevOverride.modelId === nextOverride.modelId &&
+      prevOverride.effort === nextOverride.effort
+    ) {
+      return
     }
 
-    sendResult({
-      type: 'runtime_config_result',
-      requestId,
-      result: 'applied',
-      selection,
-    })
-  } catch (error) {
-    reject(
-      'RUNTIME_CONFIG_FAILED',
-      error instanceof Error ? error.message : 'Runtime config could not be applied.',
+    runtimeOverrides.set(sessionId, nextOverride)
+    runtimeOverrideVersions.set(
+      sessionId,
+      (runtimeOverrideVersions.get(sessionId) ?? 0) + 1,
     )
-  }
+
+    if (shouldDeferRuntimeRestartForActiveTurn(sessionId)) {
+      deferredRuntimeRestarts.set(sessionId, nextOverride)
+      await persistSessionRuntimeConfig(sessionId, nextOverride)
+      return
+    }
+
+    if (conversationService.hasSession(sessionId)) {
+      await persistSessionRuntimeConfig(sessionId, nextOverride)
+      await restartSessionWithRuntimeConfig(ws, sessionId)
+      return
+    }
+
+    const pendingStartup = sessionStartupPromises.get(sessionId)
+    if (pendingStartup) {
+      const startupRuntimeVersion = sessionStartupRuntimeVersions.get(sessionId) ?? 0
+      const currentRuntimeVersion = runtimeOverrideVersions.get(sessionId) ?? 0
+      if (startupRuntimeVersion >= currentRuntimeVersion) {
+        await persistSessionRuntimeConfig(sessionId, nextOverride)
+        await pendingStartup
+        broadcastAppliedRuntimeConfig(sessionId)
+        return
+      }
+
+      await persistSessionRuntimeConfig(sessionId, nextOverride)
+      await pendingStartup.catch(() => undefined)
+      const currentOverride = runtimeOverrides.get(sessionId)
+      if (
+        currentOverride?.providerId !== nextOverride.providerId ||
+        currentOverride.modelId !== nextOverride.modelId ||
+        currentOverride.effort !== nextOverride.effort ||
+        !conversationService.hasSession(sessionId)
+      ) {
+        return
+      }
+      await restartSessionWithRuntimeConfig(ws, sessionId)
+      return
+    }
+
+    await persistSessionRuntimeConfig(sessionId, nextOverride)
+    broadcastAppliedRuntimeConfig(sessionId)
+  })
 }
 
 async function restartSessionWithPermissionMode(
@@ -1628,7 +1971,11 @@ async function restartSessionWithPermissionMode(
   try {
     const workDir = conversationService.getSessionWorkDir(sessionId)
     const previousMode = conversationService.getSessionPermissionMode(sessionId)
+    markActiveAgentsStopping(sessionId)
+    runtimeExitStoppedSessions.add(sessionId)
     conversationService.stopSession(sessionId)
+    await emitAuthoritativeStoppedForActiveAgents(sessionId)
+    await emitStoppedForNonAgentTasksAfterRuntimeExit(sessionId)
 
     // Launch with the requested mode in-memory. Persist it only after startup
     // succeeds so a failed bypass restart cannot leave dangerous metadata.
@@ -1638,6 +1985,9 @@ async function restartSessionWithPermissionMode(
     }
     const sdkUrl = buildSdkWebSocketUrl(ws, sessionId)
     await conversationService.startSession(sessionId, workDir, sdkUrl, runtimeSettings)
+    if (!agentStopRequestedSessions.has(sessionId)) {
+      runtimeExitStoppedSessions.delete(sessionId)
+    }
 
     await commitConfirmedPermissionMode(
       sessionId,
@@ -1737,18 +2087,45 @@ async function persistSessionRuntimeConfig(
   })
 }
 
+function broadcastAppliedRuntimeConfig(sessionId: string): void {
+  const runtime = runtimeOverrides.get(sessionId)
+  if (!runtime) return
+  sendToSession(sessionId, {
+    type: RUNTIME_CONFIG_APPLIED_EVENT,
+    providerId: runtime.providerId,
+    modelId: runtime.modelId,
+    ...(runtime.effort ? { effortLevel: runtime.effort } : {}),
+  })
+}
+
+async function resolveRuntimeRestartWorkDir(sessionId: string): Promise<string> {
+  const activeWorkDir = conversationService.getSessionWorkDir(sessionId)
+  if (activeWorkDir) return activeWorkDir
+
+  const persistedWorkDir = await sessionService.getSessionWorkDir(sessionId).catch(() => null)
+  if (persistedWorkDir) return persistedWorkDir
+
+  throw new Error(`Unable to resolve working directory for session: ${sessionId}`)
+}
+
 async function restartSessionWithRuntimeConfig(
   ws: ServerWebSocket<WebSocketData>,
   sessionId: string,
 ): Promise<void> {
   try {
-    const workDir = conversationService.getSessionWorkDir(sessionId)
+    const workDir = await resolveRuntimeRestartWorkDir(sessionId)
+    markActiveAgentsStopping(sessionId)
+    runtimeExitStoppedSessions.add(sessionId)
     conversationService.stopSession(sessionId)
+    await emitAuthoritativeStoppedForActiveAgents(sessionId)
+    await emitStoppedForNonAgentTasksAfterRuntimeExit(sessionId)
 
     const runtimeSettings = await getRuntimeSettings(sessionId)
     const sdkUrl = buildSdkWebSocketUrl(ws, sessionId)
     await conversationService.startSession(sessionId, workDir, sdkUrl, runtimeSettings)
+    runtimeExitStoppedSessions.delete(sessionId)
 
+    broadcastAppliedRuntimeConfig(sessionId)
     sendMessage(ws, { type: 'status', state: 'idle' })
     console.log(`[WS] Restarted CLI for ${sessionId} with runtime override`)
   } catch (err) {
@@ -1784,6 +2161,103 @@ function isBackgroundTaskAlreadyGoneMessage(message: string): boolean {
   )
 }
 
+function handleStopGeneration(ws: ServerWebSocket<WebSocketData>) {
+  const { sessionId } = ws.data
+  const stoppedTurn = activeUserTurns.get(sessionId)
+  const agentTasks = [...(activeAgentTasks.get(sessionId)?.values() ?? [])]
+  console.log(`[WS] Stop generation requested for session: ${sessionId}`)
+
+  if (stoppedTurn) {
+    sessionStopRequested.add(sessionId)
+  }
+  if (stoppedTurn || agentTasks.length > 0) {
+    const computerUseRequestIds = computerUseApprovalService
+      .getPendingRequests(sessionId)
+      .map((request) => request.requestId)
+    computerUseApprovalService.cancelSession(sessionId)
+    for (const requestId of computerUseRequestIds) {
+      sendToSession(sessionId, {
+        type: 'permission_resolved',
+        requestId,
+        permissionType: 'computer_use',
+        allowed: false,
+      })
+    }
+  }
+  agentStopRequestedSessions.add(sessionId)
+  legacyQueuedSessionChats.delete(sessionId)
+  terminalSessionChatStates.delete(sessionId)
+  interruptedSessionChats.add(sessionId)
+
+  // A turn can be registered while title metadata, CLI startup, or the send
+  // acknowledgement is still pending. Revoke that admission token so the
+  // suspended handler cannot resume after Stop and enqueue work (or clear the
+  // Agent stop latch) behind the user's explicit cancellation.
+  if (stoppedTurn && !stoppedTurn.messageSent) {
+    stoppedTurn.cancelled = true
+    stoppedTurn.replacementAfterStop = false
+    clearActiveUserTurn(sessionId, stoppedTurn)
+  } else if (stoppedTurn) {
+    stoppedTurn.cancelled = true
+    stoppedTurn.replacementAfterStop = false
+  }
+
+  void Promise.allSettled(
+    agentTasks.map((task) => requestStopTrackedAgentTask(sessionId, task, ws)),
+  )
+
+  if (
+    stoppedTurn &&
+    conversationService.hasSession(sessionId) &&
+    (!stoppedTurn.messageSent || !stoppedTurn.interruptBoundaryPending)
+  ) {
+    // First try graceful interrupt via SDK control message
+    if (stoppedTurn.messageSent) addPendingInterruptedTurnResult(sessionId)
+    const interruptSent = conversationService.sendInterrupt(sessionId)
+    if (stoppedTurn.messageSent) {
+      if (interruptSent) {
+        stoppedTurn.interruptBoundaryPending = true
+      } else {
+        removePendingInterruptedTurnResult(sessionId)
+      }
+    }
+  }
+
+  if ((stoppedTurn || agentTasks.length > 0) && conversationService.hasSession(sessionId)) {
+    // Force-kill if still running after 3 seconds
+    setTimeout(() => {
+      const stoppedForegroundStillCurrent = Boolean(
+        stoppedTurn &&
+        stoppedTurn.cancelled &&
+        (
+          activeUserTurns.get(sessionId) === stoppedTurn ||
+          (
+            stoppedTurn.sendStarted === true &&
+            !stoppedTurn.messageSent &&
+            !activeUserTurns.has(sessionId)
+          )
+        ),
+      )
+      const stoppedAgentsStillActive =
+        agentStopRequestedSessions.has(sessionId) &&
+        activeUserTurns.get(sessionId)?.replacementAfterStop !== true &&
+        [...(activeAgentTasks.get(sessionId)?.values() ?? [])].some(
+          (task) => !task.localStopConfirmed,
+        )
+      if (
+        (stoppedForegroundStillCurrent || stoppedAgentsStillActive) &&
+        conversationService.hasSession(sessionId)
+      ) {
+        console.log(`[WS] Force-killing CLI subprocess for session: ${sessionId}`)
+        forceStopSharedRuntimeForAgentCancellation(sessionId)
+        void emitAuthoritativeStoppedForActiveAgents(sessionId)
+      }
+    }, 3_000)
+  }
+
+  sendToSession(sessionId, { type: 'status', state: 'idle' })
+}
+
 async function handleStopBackgroundTask(
   ws: ServerWebSocket<WebSocketData>,
   message: Extract<ClientMessage, { type: 'stop_background_task' }>,
@@ -1800,99 +2274,490 @@ async function handleStopBackgroundTask(
     return
   }
 
-  const confirmStopped = () => sendMessage(ws, {
-    type: 'background_task_stopped',
-    taskId,
-  })
+  await requestStopBackgroundTask(ws, taskId)
+}
+
+async function requestStopBackgroundTask(
+  ws: ServerWebSocket<WebSocketData>,
+  taskId: string,
+): Promise<void> {
+  const { sessionId } = ws.data
+  const trackedAgent = activeAgentTasks.get(sessionId)?.get(taskId)
+  if (trackedAgent) {
+    await requestStopTrackedAgentTask(sessionId, trackedAgent, ws)
+    return
+  }
 
   try {
     await conversationService.requestControl(sessionId, {
       subtype: 'stop_task',
       task_id: taskId,
     })
-    confirmStopped()
+    sendMessage(ws, {
+      type: 'background_task_stopped',
+      taskId,
+    })
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    if (observedTerminalTasks.get(sessionId)?.has(taskId)) {
-      confirmStopped()
-      return
+    reportBackgroundTaskStopFailure(sessionId, ws, taskId, error)
+  }
+}
+
+const AGENT_STOP_CONTROL_TIMEOUT_MS = 3_000
+const AUTHORITATIVE_STOP_PERSIST_ATTEMPTS = 3
+const AUTHORITATIVE_STOP_PERSIST_TIMEOUT_MS = 1_000
+const AGENT_STOP_FINALIZATION_RETRY_DELAYS_MS = [250, 500] as const
+
+async function requestStopTrackedAgentTask(
+  sessionId: string,
+  task: ActiveAgentTaskState,
+  ws?: ServerWebSocket<WebSocketData>,
+): Promise<void> {
+  const current = activeAgentTasks.get(sessionId)?.get(task.taskId)
+  if (!current) return
+  current.stopIntent = true
+  if (current.stopRequested) {
+    if (!conversationService.hasSession(sessionId)) {
+      current.localStopConfirmed = true
+      await emitAuthoritativeAgentStopped(sessionId, current, ws)
     }
+    return
+  }
+
+  clearAgentStopFinalizationRetry(current)
+  current.finalizationRetryCount = 0
+  current.stopFailureMessage = undefined
+  current.stopRequested = true
+  if (current.localStopConfirmed) {
+    await emitAuthoritativeAgentStopped(sessionId, current, ws)
+    return
+  }
+
+  // Start strict remote cancellation immediately instead of waiting for the
+  // CLI control channel. The CLI stop closes the local poller; the archive
+  // result remains the authority for whether a remote Agent is terminal.
+  const remoteArchiveAttempt = current.taskType === 'remote_agent'
+    ? ensureRemoteAgentArchive(sessionId, current)
+    : undefined
+
+  if (!conversationService.hasSession(sessionId)) {
+    current.localStopConfirmed = true
+    await emitAuthoritativeAgentStopped(sessionId, current, ws)
+    return
+  }
+
+  let controlError: unknown
+  try {
+    await conversationService.requestControl(sessionId, {
+      subtype: 'stop_task',
+      task_id: current.taskId,
+    }, AGENT_STOP_CONTROL_TIMEOUT_MS)
+  } catch (error) {
+    controlError = error
+  }
+
+  const latest = activeAgentTasks.get(sessionId)?.get(current.taskId)
+  if (latest !== current) return
+  if (controlError === undefined || !conversationService.hasSession(sessionId)) {
+    current.localStopConfirmed = true
+  }
+
+  if (current.taskType === 'remote_agent') {
+    // A force-kill or a newer retry may have replaced this archive attempt.
+    if (current.remoteArchive !== remoteArchiveAttempt) return
+    const finalized = await emitAuthoritativeAgentStopped(sessionId, current, ws)
     if (
-      message === 'CLI session is not running' ||
-      !conversationService.hasSession(sessionId) ||
-      isBackgroundTaskAlreadyGoneMessage(message)
+      !finalized &&
+      !current.localStopConfirmed &&
+      shouldForceStopLatchedAgent(sessionId) &&
+      activeAgentTasks.get(sessionId)?.get(current.taskId) === current &&
+      conversationService.hasSession(sessionId)
     ) {
-      confirmStopped()
-      return
+      forceStopSharedRuntimeForAgentCancellation(sessionId)
+      current.localStopConfirmed = true
     }
+    return
+  }
+
+  if (current.localStopConfirmed) {
+    await emitAuthoritativeAgentStopped(sessionId, current, ws)
+    return
+  }
+
+  if (
+    shouldForceStopLatchedAgent(sessionId) &&
+    conversationService.hasSession(sessionId)
+  ) {
+    forceStopSharedRuntimeForAgentCancellation(sessionId)
+    current.localStopConfirmed = true
+    await emitAuthoritativeAgentStopped(sessionId, current, ws)
+    return
+  }
+
+  current.stopRequested = false
+  reportAgentStopFailure(sessionId, ws, current, controlError)
+}
+
+function shouldForceStopLatchedAgent(sessionId: string): boolean {
+  return agentStopRequestedSessions.has(sessionId) &&
+    activeUserTurns.get(sessionId)?.replacementAfterStop !== true
+}
+
+function ensureRemoteAgentArchive(
+  sessionId: string,
+  task: ActiveAgentTaskState,
+): Promise<boolean> {
+  if (task.taskType !== 'remote_agent') return Promise.resolve(true)
+  if (task.remoteArchive) return task.remoteArchive
+  if (!task.remoteSessionId) {
+    task.remoteArchiveError = 'Remote session id is missing'
+    console.warn(`[WS] Cannot archive remote Agent ${task.taskId} for ${sessionId}: ${task.remoteArchiveError}`)
+    task.remoteArchive = Promise.resolve(false)
+    return task.remoteArchive
+  }
+
+  task.remoteArchiveError = undefined
+  task.remoteArchive = archiveRemoteSession(task.remoteSessionId, { timeoutMs: 1_500 })
+    .then(() => true)
+    .catch((error) => {
+      task.remoteArchiveError = error instanceof Error ? error.message : String(error)
+      console.warn(
+        `[WS] Failed to archive remote Agent ${task.taskId} for ${sessionId}: ${task.remoteArchiveError}`,
+      )
+      return false
+    })
+  return task.remoteArchive
+}
+
+function reportBackgroundTaskStopFailure(
+  sessionId: string,
+  ws: ServerWebSocket<WebSocketData> | undefined,
+  taskId: string,
+  error: unknown,
+): void {
+  const message = error instanceof Error ? error.message : String(error)
+  console.warn(
+    `[WS] Failed to stop background task ${taskId} for ${sessionId}: ${message}`,
+  )
+  const payload: ServerMessage = {
+    type: 'background_task_stop_failed',
+    taskId,
+    message,
+  }
+  if (ws && activeSessions.get(sessionId)?.has(ws)) {
+    sendMessage(ws, payload)
+    return
+  }
+  for (const client of activeSessions.get(sessionId) ?? []) {
+    sendMessage(client, payload)
+  }
+}
+
+function reportAgentStopFailure(
+  sessionId: string,
+  _ws: ServerWebSocket<WebSocketData> | undefined,
+  task: ActiveAgentTaskState,
+  error: unknown,
+): void {
+  task.stopFailureMessage = error instanceof Error ? error.message : String(error)
+  // Every renderer that issued a concurrent Stop has optimistic local state.
+  // Broadcast Agent failures session-wide so no secondary view remains stuck
+  // in Stopping while the first request owns the shared finalization attempt.
+  reportBackgroundTaskStopFailure(sessionId, undefined, task.taskId, error)
+}
+
+function replayAgentStopFailures(
+  ws: ServerWebSocket<WebSocketData>,
+  sessionId: string,
+): void {
+  for (const task of activeAgentTasks.get(sessionId)?.values() ?? []) {
+    if (!task.stopFailureMessage) continue
     sendMessage(ws, {
       type: 'background_task_stop_failed',
-      taskId,
-      message,
+      taskId: task.taskId,
+      message: task.stopFailureMessage,
     })
   }
 }
 
-function handleStopGeneration(ws: ServerWebSocket<WebSocketData>) {
-  const { sessionId } = ws.data
-  const stoppedTurn = activeUserTurns.get(sessionId)
-  console.log(`[WS] Stop generation requested for session: ${sessionId}`)
+function scheduleAgentStopFinalizationRetry(
+  sessionId: string,
+  task: ActiveAgentTaskState,
+): void {
+  if (!task.localStopConfirmed || task.finalizationRetryTimer !== undefined) return
+  const delayMs = AGENT_STOP_FINALIZATION_RETRY_DELAYS_MS[task.finalizationRetryCount]
+  if (delayMs !== undefined) {
+    task.finalizationRetryCount += 1
+    task.finalizationRetryTimer = setTimeout(() => {
+      task.finalizationRetryTimer = undefined
+      const current = activeAgentTasks.get(sessionId)?.get(task.taskId)
+      if (
+        current !== task ||
+        !current.stopIntent ||
+        !current.localStopConfirmed ||
+        current.bookendPending
+      ) {
+        return
+      }
+      current.stopFailureMessage = undefined
+      void emitAuthoritativeAgentStopped(sessionId, current)
+    }, delayMs)
+    if (typeof task.finalizationRetryTimer === 'object') {
+      task.finalizationRetryTimer.unref?.()
+    }
+  }
+  scheduleDisconnectedSessionCleanupIfIdle(sessionId)
+}
 
-  if (sessionStopRequested.has(sessionId)) {
-    sendMessage(ws, { type: 'status', state: 'idle' })
+function stopLateAgentTaskIfRequested(
+  sessionId: string,
+  lifecycle: CliBackgroundTaskLifecycle | null,
+): void {
+  if (
+    !lifecycle?.running ||
+    !isAgentTaskType(lifecycle.taskType) ||
+    !agentStopRequestedSessions.has(sessionId)
+  ) {
     return
   }
+  const task = activeAgentTasks.get(sessionId)?.get(lifecycle.taskId)
+  // The output callback that observes a late task is not necessarily the
+  // client that clicked Stop. Omit a socket so failures broadcast to every
+  // connected view and each renderer can clear its optimistic Stopping state.
+  if (task) void requestStopTrackedAgentTask(sessionId, task)
+}
 
-  sessionStopRequested.add(sessionId)
-  stoppedTurnEventFences.add(sessionId)
-  let resolveSettlement!: () => void
-  const settlement = new Promise<void>((resolve) => {
-    resolveSettlement = resolve
-  })
-  stopSettlements.set(sessionId, { promise: settlement, resolve: resolveSettlement })
-  if (stoppedTurn) stoppedTurn.stopped = true
-  stoppedTurn?.removeCompletionCallback?.()
-  stoppedTurn?.removeTitleCallback?.()
-  discardActiveTitleTurn(sessionId, stoppedTurn?.titleTurnNumber ?? null)
-  resetStoppedTurnStreamState(sessionId)
-  legacyQueuedSessionChats.delete(sessionId)
-  terminalSessionChatStates.delete(sessionId)
-  interruptedSessionChats.add(sessionId)
-  if (stoppedTurn) clearActiveUserTurn(sessionId, stoppedTurn)
-  else sessionActivityCoordinator.endUserTurn(sessionId)
-
-  if (!stoppedTurn || (!stoppedTurn.messageSent && !stoppedTurn.sendStarted)) {
-    settleStoppedGeneration(sessionId)
-  } else if (conversationService.hasSession(sessionId)) {
-    // First try graceful interrupt via SDK control message
-    conversationService.sendInterrupt(sessionId)
-
-    // Force-kill if still running after 3 seconds. Capture the exact process
-    // instance now: if the user switches provider/model in the meantime, the
-    // restart replaces this process with a new one, and we must not kill that
-    // new process during its startup (which would surface as "CLI exited
-    // during startup with code 143"). Also keep the stopped-turn identity so a
-    // replacement turn on the same process is not force-killed either.
-    const instanceId = conversationService.getActiveInstanceId(sessionId)
-    if (instanceId) {
-      setTimeout(() => {
-        if (
-          sessionStopRequested.has(sessionId) &&
-          !activeUserTurns.has(sessionId) &&
-          conversationService.stopSessionInstance(sessionId, instanceId)
-        ) {
-          settleStoppedGeneration(sessionId)
-          console.log(`[WS] Force-killing CLI subprocess for session: ${sessionId}`)
-        }
-      }, 3_000)
-    } else {
-      settleStoppedGeneration(sessionId)
-    }
-  } else {
-    settleStoppedGeneration(sessionId)
+function closeLateNonAgentTaskAfterRuntimeExit(
+  sessionId: string,
+  lifecycle: CliBackgroundTaskLifecycle | null,
+): void {
+  if (
+    !lifecycle?.running ||
+    isAgentTaskType(lifecycle.taskType) ||
+    !runtimeExitStoppedSessions.has(sessionId)
+  ) {
+    return
   }
+  void emitStoppedForNonAgentTasksAfterRuntimeExit(sessionId)
+}
 
-  sendMessage(ws, { type: 'status', state: 'idle' })
+function emitAuthoritativeAgentStopped(
+  sessionId: string,
+  task: ActiveAgentTaskState,
+  ws?: ServerWebSocket<WebSocketData>,
+): Promise<boolean> {
+  const current = activeAgentTasks.get(sessionId)?.get(task.taskId)
+  if (!current) return Promise.resolve(false)
+  if (sessionClearInProgress.has(sessionId)) return Promise.resolve(false)
+  if (current.finalization) return current.finalization
+  if (current.bookendPending) return Promise.resolve(false)
+  current.bookendPending = true
+
+  const finalization = (async (): Promise<boolean> => {
+    const remoteArchiveAttempt = current.taskType === 'remote_agent'
+      ? ensureRemoteAgentArchive(sessionId, current)
+      : undefined
+    const stopConfirmed = remoteArchiveAttempt
+      ? await remoteArchiveAttempt
+      : true
+
+    if (activeAgentTasks.get(sessionId)?.get(current.taskId) !== current) return false
+    if (
+      remoteArchiveAttempt &&
+      current.remoteArchive !== remoteArchiveAttempt
+    ) {
+      current.bookendPending = false
+      return false
+    }
+
+    if (!stopConfirmed) {
+      current.bookendPending = false
+      current.stopRequested = false
+      current.remoteArchive = undefined
+      reportAgentStopFailure(
+        sessionId,
+        ws,
+        current,
+        new Error(current.remoteArchiveError ?? 'Remote Agent stop could not be confirmed'),
+      )
+      scheduleAgentStopFinalizationRetry(sessionId, current)
+      return false
+    }
+
+    if (current.taskType === 'remote_agent') {
+      current.localStopConfirmed = true
+    }
+
+    const cliMsg = {
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: current.taskId,
+      tool_use_id: current.toolUseId,
+      task_type: current.taskType,
+      ...(current.description ? { description: current.description } : {}),
+      status: 'stopped',
+      summary: current.description
+        ? `${current.description} stopped`
+        : 'Background Agent stopped',
+      timestamp: new Date().toISOString(),
+    }
+
+    let persisted = false
+    for (let attempt = 0; attempt < AUTHORITATIVE_STOP_PERSIST_ATTEMPTS; attempt++) {
+      if (
+        sessionClearInProgress.has(sessionId) ||
+        activeAgentTasks.get(sessionId)?.get(current.taskId) !== current
+      ) {
+        current.bookendPending = false
+        return false
+      }
+      const persistence = persistCliTaskNotification(sessionId, cliMsg, {
+        propagateFailure: true,
+        timeoutMs: AUTHORITATIVE_STOP_PERSIST_TIMEOUT_MS,
+      })
+      if (!persistence) {
+        persisted = true
+        break
+      }
+      try {
+        await persistence
+        persisted = true
+        break
+      } catch {
+        // The persistence cache drops rejected writes, so the next bounded
+        // attempt performs a real retry rather than awaiting the same promise.
+      }
+    }
+
+    if (activeAgentTasks.get(sessionId)?.get(current.taskId) !== current) return false
+    if (!persisted) {
+      current.bookendPending = false
+      current.stopRequested = false
+      reportAgentStopFailure(
+        sessionId,
+        ws,
+        current,
+        new Error('Agent stopped, but its terminal state could not be saved'),
+      )
+      scheduleAgentStopFinalizationRetry(sessionId, current)
+      return false
+    }
+
+    current.stopFailureMessage = undefined
+    markTaskAuthoritativelyStopped(sessionId, current.taskId)
+    untrackCliBackgroundTask(sessionId, current.taskId)
+    forwardCliMessageToSessionClients(sessionId, cliMsg)
+    scheduleDisconnectedSessionCleanupIfIdle(sessionId)
+    return true
+  })().catch((error): boolean => {
+    if (activeAgentTasks.get(sessionId)?.get(current.taskId) !== current) return false
+    current.bookendPending = false
+    current.stopRequested = false
+    reportAgentStopFailure(sessionId, ws, current, error)
+    scheduleAgentStopFinalizationRetry(sessionId, current)
+    return false
+  })
+
+  current.finalization = finalization
+  void finalization.then(() => {
+    if (current.finalization === finalization) current.finalization = undefined
+  })
+  return finalization
+}
+
+function resumeAgentFinalizationAfterFailedClear(
+  sessionId: string,
+  tasks: ActiveAgentTaskState[],
+): void {
+  const pendingFinalizations = tasks.flatMap((task) =>
+    task.finalization ? [task.finalization] : [])
+  void Promise.allSettled(pendingFinalizations).then(() => {
+    for (const task of tasks) {
+      const current = activeAgentTasks.get(sessionId)?.get(task.taskId)
+      if (current !== task) continue
+      clearAgentStopFinalizationRetry(current)
+      current.stopIntent = true
+      current.stopRequested = true
+      current.localStopConfirmed = true
+      current.bookendPending = false
+      current.stopFailureMessage = undefined
+      void emitAuthoritativeAgentStopped(sessionId, current)
+    }
+  })
+}
+
+function emitAuthoritativeStoppedForActiveAgents(sessionId: string): Promise<boolean[]> {
+  const tasks = [...(activeAgentTasks.get(sessionId)?.values() ?? [])]
+  return Promise.all(tasks.map((task) => {
+    task.stopIntent = true
+    task.stopRequested = true
+    task.localStopConfirmed = true
+    return emitAuthoritativeAgentStopped(sessionId, task)
+  }))
+}
+
+function emitStoppedForNonAgentTasksAfterRuntimeExit(sessionId: string): Promise<void[]> {
+  const tasks = [...(activeNonAgentTasks.get(sessionId)?.values() ?? [])]
+  return Promise.all(tasks.map(async (task) => {
+    if (activeNonAgentTasks.get(sessionId)?.get(task.taskId) !== task) return
+    // Killing the shared CLI also terminates Bash/Dream/workflow work. Claim
+    // each task before awaiting persistence so concurrent force-stop paths
+    // cannot publish duplicate terminal bookends.
+    markTaskAuthoritativelyStopped(sessionId, task.taskId)
+    untrackCliBackgroundTask(sessionId, task.taskId)
+    const cliMsg = {
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: task.taskId,
+      tool_use_id: task.toolUseId,
+      ...(task.taskType ? { task_type: task.taskType } : {}),
+      ...(task.description ? { description: task.description } : {}),
+      status: 'stopped',
+      summary: `${task.description ?? task.taskId} stopped because the runtime exited`,
+      timestamp: new Date().toISOString(),
+    }
+    await (persistCliTaskNotification(sessionId, cliMsg) ?? Promise.resolve())
+    forwardCliMessageToSessionClients(sessionId, cliMsg)
+  }))
+}
+
+async function stopAgentsForSessionClear(
+  sessionId: string,
+  tasks: ActiveAgentTaskState[],
+): Promise<boolean[]> {
+  return Promise.all(tasks.map(async (task) => {
+    if (task.taskType === 'local_agent') return true
+    if (!task.remoteSessionId) {
+      console.warn(
+        `[WS] Cannot archive remote Agent ${task.taskId} for ${sessionId}: Remote session id is missing`,
+      )
+      return false
+    }
+
+    for (let attempt = 0; attempt <= AGENT_STOP_FINALIZATION_RETRY_DELAYS_MS.length; attempt++) {
+      const archived = await ensureRemoteAgentArchive(sessionId, task)
+      if (archived) return true
+
+      task.remoteArchive = undefined
+      const retryDelayMs = AGENT_STOP_FINALIZATION_RETRY_DELAYS_MS[attempt]
+      if (retryDelayMs === undefined) break
+      await new Promise<void>((resolve) => setTimeout(resolve, retryDelayMs))
+    }
+    return false
+  }))
+}
+
+
+function closeStoppedAgentsAfterRuntimeExit(sessionId: string, cliMsg: any): void {
+  if (
+    cliMsg?.type === 'result' &&
+    cliMsg.is_error &&
+    agentStopRequestedSessions.has(sessionId) &&
+    !conversationService.hasSession(sessionId)
+  ) {
+    runtimeExitStoppedSessions.add(sessionId)
+    void emitAuthoritativeStoppedForActiveAgents(sessionId)
+    void emitStoppedForNonAgentTasksAfterRuntimeExit(sessionId)
+  }
 }
 
 // ============================================================================
@@ -1908,7 +2773,7 @@ function triggerTitleGeneration(
   completedTurnCount?: number,
 ): void {
   const state = sessionTitleState.get(sessionId)
-  if (!state || state.hasCustomTitle) return
+  if (!state || state.hasCustomTitle || state.hasExistingTranscript) return
 
   const count = phase === 'turn-complete'
     ? completedTurnCount ?? state.userMessageCount
@@ -2002,10 +2867,29 @@ function sendSessionTitleUpdated(
 function bindTitleSessionOutput(
   ws: ServerWebSocket<WebSocketData>,
   sessionId: string,
-  titleTurnNumber: number,
+  activeTurn: ActiveUserTurnState,
   shouldProcess: () => boolean,
 ): () => void {
   const callback = (cliMsg: any) => {
+    const interruptedResult = consumeInterruptedTurnResult(sessionId, cliMsg)
+    acknowledgeActiveTurnReplay(sessionId, cliMsg)
+    if (
+      activeUserTurns.get(sessionId) !== activeTurn ||
+      activeTurn.cancelled
+    ) {
+      if (cliMsg?.type === 'result') {
+        const stillOwnsTurn = activeUserTurns.get(sessionId) === activeTurn
+        if (
+          !stillOwnsTurn ||
+          !interruptedResult ||
+          !pendingInterruptedTurnResults.has(sessionId)
+        ) {
+          conversationService.removeOutputCallback(sessionId, callback)
+        }
+      }
+      return
+    }
+    if (activeTurn.replacementAfterStop || interruptedResult) return
     if (!shouldProcess() && !(cliMsg?.type === 'result' && cliMsg?.is_error)) {
       return
     }
@@ -2056,36 +2940,7 @@ function appendAssistantTextForTitle(sessionId: string, cliMsg: any): void {
   }
 }
 
-function extractAssistantStreamTextForTitle(cliMsg: any): string | null {
-  const event = cliMsg?.event
-  if (
-    cliMsg?.type !== 'stream_event' ||
-    event?.type !== 'content_block_delta' ||
-    event.delta?.type !== 'text_delta' ||
-    typeof event.delta.text !== 'string'
-  ) {
-    return null
-  }
-  return event.delta.text
-}
 
-function extractAssistantMessageTextForTitle(cliMsg: any): string | null {
-  if (cliMsg?.type !== 'assistant') return null
-  const content = cliMsg.message?.content
-  if (typeof content === 'string') return content
-  if (!Array.isArray(content)) return null
-  const text = content
-    .flatMap((block) => {
-      if (!block || typeof block !== 'object') return []
-      const typedBlock = block as { type?: unknown; text?: unknown }
-      return typedBlock.type === 'text' && typeof typedBlock.text === 'string'
-        ? [typedBlock.text]
-        : []
-    })
-    .join('\n')
-    .trim()
-  return text || null
-}
 
 function completeActiveTitleTurn(sessionId: string): number | null {
   const state = sessionTitleState.get(sessionId)
@@ -2112,25 +2967,7 @@ function discardActiveTitleTurn(sessionId: string, count: number | null): void {
 // CLI message translation
 // ============================================================================
 
-/**
- * Per-session streaming state to avoid cross-session interference.
- * Each session tracks its own dedup flag, active block types, and tool blocks.
- */
-type SessionStreamState = {
-  hasReceivedStreamEvents: boolean
-  activeBlockTypes: Map<number, 'text' | 'tool_use' | 'thinking'>
-  activeToolBlocks: Map<number, { toolName: string; toolUseId: string; inputJson: string; parentToolUseId?: string }>
-  pendingLocalCommand?: { name: string; args: string }
-  /** Tool blocks whose input JSON failed to parse in content_block_stop.
-   *  The assistant message carries the complete input — defer to that. */
-  pendingToolBlocks: Map<string, { toolName: string; toolUseId: string; parentToolUseId?: string }>
-  toolParentUseIds: Map<string, string>
-  lastApiError?: {
-    message: string
-    code: string
-  }
-  suppressBufferedAssistant: boolean
-}
+/** Per-session state for correlating raw stream events with buffered messages. */
 
 const sessionStreamStates = new Map<string, SessionStreamState>()
 
@@ -2138,7 +2975,10 @@ function getStreamState(sessionId: string): SessionStreamState {
   let state = sessionStreamStates.get(sessionId)
   if (!state) {
     state = {
-      hasReceivedStreamEvents: false,
+      streamedAssistantMessageIds: new Set(),
+      unidentifiedStreamScopes: new Set(),
+      activeMessageIdsByScope: new Map(),
+      activeBlockScopesByIndex: new Map(),
       activeBlockTypes: new Map(),
       activeToolBlocks: new Map(),
       pendingLocalCommand: undefined,
@@ -2152,51 +2992,32 @@ function getStreamState(sessionId: string): SessionStreamState {
   return state
 }
 
-function resetStoppedTurnStreamState(sessionId: string): void {
-  const state = sessionStreamStates.get(sessionId)
-  if (!state) return
-  state.hasReceivedStreamEvents = false
-  state.activeBlockTypes.clear()
-  state.activeToolBlocks.clear()
-  state.pendingLocalCommand = undefined
-  state.pendingToolBlocks.clear()
-  state.toolParentUseIds.clear()
-  state.lastApiError = undefined
-  state.suppressBufferedAssistant = false
-}
 
-function cliParentToolUseId(cliMsg: any): string | undefined {
-  return typeof cliMsg.parent_tool_use_id === 'string' && cliMsg.parent_tool_use_id.length > 0
-    ? cliMsg.parent_tool_use_id
-    : undefined
-}
 
-function rememberToolParentUseId(
-  streamState: SessionStreamState,
-  toolUseId: string | undefined,
-  parentToolUseId: string | undefined,
-): void {
-  if (!toolUseId || !parentToolUseId) return
-  streamState.toolParentUseIds.set(toolUseId, parentToolUseId)
-}
 
-function consumeToolParentUseId(
-  streamState: SessionStreamState,
-  toolUseId: string | undefined,
-): string | undefined {
-  if (!toolUseId) return undefined
-  const parentToolUseId = streamState.toolParentUseIds.get(toolUseId)
-  streamState.toolParentUseIds.delete(toolUseId)
-  return parentToolUseId
-}
+
+
+
+
+
+
+
+
+
 
 /** Clean up stream state when session disconnects */
 function cleanupStreamState(sessionId: string) {
   sessionStreamStates.delete(sessionId)
 }
 
-function cleanupSessionRuntimeState(sessionId: string) {
+function cleanupSessionRuntimeState(
+  sessionId: string,
+  options?: { preserveRetryableAgentStops?: boolean },
+) {
   cancelSessionDisconnectWatcher(sessionId)
+  clearAgentRuntimeState(sessionId, {
+    preserveRetryableStops: options?.preserveRetryableAgentStops,
+  })
   cleanupStreamState(sessionId)
   sessionSlashCommands.delete(sessionId)
   sessionTitleState.delete(sessionId)
@@ -2206,11 +3027,13 @@ function cleanupSessionRuntimeState(sessionId: string) {
   handoffSummarySessions.delete(sessionId)
   activeUserTurns.delete(sessionId)
   sessionActivityCoordinator.clear(sessionId)
+  activeCliRuns.delete(sessionId)
   sessionStopRequested.delete(sessionId)
   stoppedTurnEventFences.delete(sessionId)
   const stopSettlement = stopSettlements.get(sessionId)
   stopSettlements.delete(sessionId)
   stopSettlement?.resolve()
+  pendingInterruptedTurnResults.delete(sessionId)
   if (hasActiveClients(sessionId)) {
     broadcastStoppedBackgroundTasks(sessionId, 'Session closed')
   } else {
@@ -2295,33 +3118,8 @@ function cacheSessionInitMetadata(sessionId: string, cliMsg: any) {
   }
 }
 
-function extractAssistantText(cliMsg: any): string {
-  const content = cliMsg?.message?.content
-  if (!Array.isArray(content)) return ''
-  const textBlock = content.find(
-    (block: unknown): block is { type: string; text: string } =>
-      !!block &&
-      typeof block === 'object' &&
-      (block as { type?: unknown }).type === 'text' &&
-      typeof (block as { text?: unknown }).text === 'string',
-  )
-  return textBlock?.text || ''
-}
 
-function readObject(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
-  return value as Record<string, unknown>
-}
 
-function normalizeAskUserQuestionToolResult(content: unknown, toolUseResult: unknown): unknown {
-  const result = readObject(toolUseResult)
-  const answers = readObject(result?.answers)
-  if (!result || !answers || !Array.isArray(result.questions)) return content
-  return {
-    questions: result.questions,
-    answers,
-  }
-}
 
 function isDuplicateOfLastApiError(
   lastApiError: SessionStreamState['lastApiError'],
@@ -2493,6 +3291,7 @@ async function ensureCliSessionStarted(
     await sendRepositoryStartupStatus(ws, sessionId, reason)
     console.log(`[WS] Starting CLI for ${sessionId} due to ${reason}`)
     await conversationService.startSession(sessionId, workDir, sdkUrl, startupSettings)
+    runtimeExitStoppedSessions.delete(sessionId)
   })()
 
   sessionStartupPromises.set(sessionId, startup)
@@ -2539,46 +3338,63 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
         }]
       }
 
-      // If we already received stream_events, text/thinking were already sent.
-      // Only extract tool_use blocks (stream_event's content_block_stop lacks complete tool info).
+      // Raw stream events and the buffered assistant carry the same message ID.
+      // Deduplicate that exact API message rather than the whole session or
+      // parent Agent lifetime, where unrelated subagent progress can interleave.
       if (cliMsg.message?.content && Array.isArray(cliMsg.message.content)) {
         const messages: ServerMessage[] = []
+        const parentToolUseId = cliParentToolUseId(cliMsg)
+        const streamScope = cliStreamScope(cliMsg)
+        const messageId = typeof cliMsg.message.id === 'string'
+          ? cliMsg.message.id
+          : undefined
+        const receivedMatchingStream = messageId
+          ? streamState.streamedAssistantMessageIds.has(messageId)
+          : streamState.unidentifiedStreamScopes.delete(streamScope)
+        if (messageId) streamState.unidentifiedStreamScopes.delete(streamScope)
+        if (
+          messageId &&
+          streamState.activeMessageIdsByScope.get(streamScope) === messageId
+        ) {
+          streamState.activeMessageIdsByScope.delete(streamScope)
+        }
 
         for (const block of cliMsg.message.content) {
-          if (streamState.hasReceivedStreamEvents || streamState.suppressBufferedAssistant) {
+          if (receivedMatchingStream) {
             // Stream events handled most blocks — but any tool_use whose
             // input JSON failed to parse in content_block_stop was deferred.
             // Emit those now with the complete input from the assistant message.
-            if (block.type === 'tool_use' && streamState.pendingToolBlocks.has(block.id)) {
-              const pending = streamState.pendingToolBlocks.get(block.id)!
-              streamState.pendingToolBlocks.delete(block.id)
+            const pendingKey = block.type === 'tool_use'
+              ? pendingToolBlockKey(parentToolUseId, block.id)
+              : undefined
+            if (pendingKey && streamState.pendingToolBlocks.has(pendingKey)) {
+              const pending = streamState.pendingToolBlocks.get(pendingKey)!
+              streamState.pendingToolBlocks.delete(pendingKey)
               rememberToolParentUseId(streamState, block.id, pending.parentToolUseId)
               messages.push({
                 type: 'tool_use_complete',
                 toolName: pending.toolName || block.name,
-                toolUseId: block.id,
+                toolUseId: scopedToolUseId(pending.parentToolUseId, block.id),
+                ...(pending.parentToolUseId ? { originalToolUseId: block.id } : {}),
                 input: block.input,
                 parentToolUseId: pending.parentToolUseId,
               })
             }
-          } else {
-            // No stream events received — this is the only source, process everything
-            if (block.type === 'thinking' && block.thinking) {
-              messages.push({ type: 'thinking', text: block.thinking })
-            } else if (block.type === 'text' && block.text) {
-              messages.push({ type: 'content_start', blockType: 'text' })
-              messages.push({ type: 'content_delta', text: block.text })
-            } else if (block.type === 'tool_use') {
-              const parentToolUseId = cliParentToolUseId(cliMsg)
-              rememberToolParentUseId(streamState, block.id, parentToolUseId)
-              messages.push({
-                type: 'tool_use_complete',
-                toolName: block.name,
-                toolUseId: block.id,
-                input: block.input,
-                parentToolUseId,
-              })
-            }
+          } else if (block.type === 'tool_use') {
+            rememberToolParentUseId(streamState, block.id, parentToolUseId)
+            messages.push({
+              type: 'tool_use_complete',
+              toolName: block.name,
+              toolUseId: scopedToolUseId(parentToolUseId, block.id),
+              ...(parentToolUseId ? { originalToolUseId: block.id } : {}),
+              input: block.input,
+              parentToolUseId,
+            })
+          } else if (!parentToolUseId && block.type === 'thinking' && block.thinking) {
+            messages.push({ type: 'thinking', text: block.thinking, complete: true })
+          } else if (!parentToolUseId && block.type === 'text' && block.text) {
+            messages.push({ type: 'content_start', blockType: 'text' })
+            messages.push({ type: 'content_delta', text: block.text })
           }
         }
 
@@ -2634,12 +3450,18 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
       if (cliMsg.message?.content && Array.isArray(cliMsg.message.content)) {
         for (const block of cliMsg.message.content) {
           if (block.type === 'tool_result') {
-            const rememberedParentToolUseId = consumeToolParentUseId(streamState, block.tool_use_id)
-            const parentToolUseId =
-              cliParentToolUseId(cliMsg) ?? rememberedParentToolUseId
+            const directParentToolUseId = cliParentToolUseId(cliMsg)
+            const parentToolUseId = directParentToolUseId ??
+              consumeToolParentUseId(streamState, block.tool_use_id)
+            forgetToolParentUseId(
+              streamState,
+              block.tool_use_id,
+              directParentToolUseId,
+            )
             messages.push({
               type: 'tool_result',
-              toolUseId: block.tool_use_id,
+              toolUseId: scopedToolUseId(parentToolUseId, block.tool_use_id),
+              ...(parentToolUseId ? { originalToolUseId: block.tool_use_id } : {}),
               content: normalizeAskUserQuestionToolResult(block.content, cliMsg.toolUseResult),
               isError: !!block.is_error,
               parentToolUseId,
@@ -2660,13 +3482,22 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
     }
 
     case 'stream_event': {
-      streamState.hasReceivedStreamEvents = true
       const event = cliMsg.event
       if (!event) return []
 
       switch (event.type) {
         case 'message_start': {
-          streamState.suppressBufferedAssistant = true
+          const scope = cliStreamScope(cliMsg)
+          const messageId = typeof event.message?.id === 'string'
+            ? event.message.id
+            : undefined
+          if (messageId) {
+            streamState.streamedAssistantMessageIds.add(messageId)
+            streamState.activeMessageIdsByScope.set(scope, messageId)
+            streamState.unidentifiedStreamScopes.delete(scope)
+          } else {
+            streamState.unidentifiedStreamScopes.add(scope)
+          }
           return [{ type: 'status', state: 'thinking', attemptStart: true }]
         }
 
@@ -2674,13 +3505,21 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
           const contentBlock = event.content_block
           if (!contentBlock) return []
 
+          const scope = cliStreamScope(cliMsg)
+          if (!streamState.activeMessageIdsByScope.has(scope)) {
+            streamState.unidentifiedStreamScopes.add(scope)
+          }
           const index = event.index ?? 0
+          const blockKey = streamBlockKey(scope, index)
+          rememberActiveBlockScope(streamState, index, scope)
 
           if (contentBlock.type === 'tool_use') {
-            const parentToolUseId = cliParentToolUseId(cliMsg)
-            streamState.activeBlockTypes.set(index, 'tool_use')
+            const parentToolUseId = cliParentToolUseId(cliMsg) ?? (
+              scope === ROOT_STREAM_SCOPE ? undefined : scope
+            )
+            streamState.activeBlockTypes.set(blockKey, 'tool_use')
             // Track tool info so content_block_stop can emit complete data
-            streamState.activeToolBlocks.set(index, {
+            streamState.activeToolBlocks.set(blockKey, {
               toolName: contentBlock.name || '',
               toolUseId: contentBlock.id || '',
               inputJson: '',
@@ -2690,17 +3529,18 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
               type: 'content_start',
               blockType: 'tool_use',
               toolName: contentBlock.name,
-              toolUseId: contentBlock.id,
+              toolUseId: scopedToolUseId(parentToolUseId, contentBlock.id || ''),
+              ...(parentToolUseId ? { originalToolUseId: contentBlock.id } : {}),
               parentToolUseId,
             }]
           }
 
           if (contentBlock.type === 'thinking' || contentBlock.type === 'redacted_thinking') {
-            streamState.activeBlockTypes.set(index, 'thinking')
+            streamState.activeBlockTypes.set(blockKey, 'thinking')
             return [{ type: 'status', state: 'thinking', verb: 'Thinking' }]
           }
 
-          streamState.activeBlockTypes.set(index, 'text')
+          streamState.activeBlockTypes.set(blockKey, 'text')
           return [{ type: 'content_start', blockType: 'text' }]
         }
 
@@ -2714,8 +3554,12 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
           if (delta.type === 'input_json_delta' && delta.partial_json) {
             // Accumulate tool input JSON
             const index = event.index ?? 0
-            const toolBlock = streamState.activeToolBlocks.get(index)
-            if (toolBlock) toolBlock.inputJson += delta.partial_json
+            const activeBlock = resolveActiveBlockKey(streamState, cliMsg, index)
+            const toolBlock = activeBlock
+              ? streamState.activeToolBlocks.get(activeBlock.key)
+              : undefined
+            if (!toolBlock) return []
+            toolBlock.inputJson += delta.partial_json
             return [{ type: 'content_delta', toolInput: delta.partial_json }]
           }
           if (delta.type === 'thinking_delta' && delta.thinking) {
@@ -2726,12 +3570,15 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
 
         case 'content_block_stop': {
           const index = event.index ?? 0
-          const blockType = streamState.activeBlockTypes.get(index)
-          streamState.activeBlockTypes.delete(index)
+          const activeBlock = resolveActiveBlockKey(streamState, cliMsg, index)
+          if (!activeBlock) return []
+          const blockType = streamState.activeBlockTypes.get(activeBlock.key)
+          streamState.activeBlockTypes.delete(activeBlock.key)
+          forgetActiveBlockScope(streamState, index, activeBlock.scope)
 
           if (blockType === 'tool_use') {
-            const toolBlock = streamState.activeToolBlocks.get(index)
-            streamState.activeToolBlocks.delete(index)
+            const toolBlock = streamState.activeToolBlocks.get(activeBlock.key)
+            streamState.activeToolBlocks.delete(activeBlock.key)
             if (toolBlock) {
               const parentToolUseId =
                 cliParentToolUseId(cliMsg) ?? toolBlock.parentToolUseId
@@ -2743,7 +3590,8 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
                 return [{
                   type: 'tool_use_complete',
                   toolName: toolBlock.toolName,
-                  toolUseId: toolBlock.toolUseId,
+                  toolUseId: scopedToolUseId(parentToolUseId, toolBlock.toolUseId),
+                  ...(parentToolUseId ? { originalToolUseId: toolBlock.toolUseId } : {}),
                   input: parsedInput,
                   parentToolUseId,
                 }]
@@ -2756,11 +3604,14 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
               console.debug(
                 `[WS] Tool input JSON parse failed for ${toolBlock.toolName} (${toolBlock.toolUseId}), deferring to assistant message`,
               )
-              streamState.pendingToolBlocks.set(toolBlock.toolUseId, {
-                toolName: toolBlock.toolName,
-                toolUseId: toolBlock.toolUseId,
-                parentToolUseId,
-              })
+              streamState.pendingToolBlocks.set(
+                pendingToolBlockKey(parentToolUseId, toolBlock.toolUseId),
+                {
+                  toolName: toolBlock.toolName,
+                  toolUseId: toolBlock.toolUseId,
+                  parentToolUseId,
+                },
+              )
             }
           }
           return []
@@ -2831,6 +3682,15 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
       const usage = translateCliUsage(cliMsg.usage)
 
       if (cliMsg.is_error) {
+        // If the user requested stop, this "error" is just the interrupt
+        // result — don't show it as an error in the chat UI.
+        if (
+          interruptedTurnResultMessages.get(cliMsg) === sessionId ||
+          sessionStopRequested.has(sessionId)
+        ) {
+          return [{ type: 'message_complete', usage }]
+        }
+
         const resultMessage =
           (typeof cliMsg.result === 'string' && cliMsg.result) ||
           (Array.isArray(cliMsg.errors) && cliMsg.errors.length > 0
@@ -2981,7 +3841,19 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
           message: cliMsg.message || cliMsg.description || 'Task started',
           data: cliMsg,
         }
-        if (cliMsg.task_type === 'dream') return [notification]
+        // AutoDream is detached maintenance work. Keep it visible in Activity,
+        // but do not revive the already-completed foreground turn. A late Agent
+        // spawned after Stop is also visible until its stop bookend arrives.
+        // The same applies to independent non-Agent task lifecycle after Stop:
+        // Activity still needs the event, but chat must remain idle.
+        if (
+          cliMsg.task_type === 'dream' ||
+          sessionStopRequested.has(sessionId) ||
+          agentStopRequestedSessions.has(sessionId) ||
+          !hasLiveUserTurnForClient(sessionId)
+        ) {
+          return [notification]
+        }
         return [
           notification,
           {
@@ -2993,13 +3865,15 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
         ]
       }
       if (subtype === 'task_progress') {
+        const notification: ServerMessage = {
+          type: 'system_notification',
+          subtype: 'task_progress',
+          message: cliMsg.message || cliMsg.summary || cliMsg.description || 'Task in progress',
+          data: cliMsg,
+        }
+        if (!hasLiveUserTurnForClient(sessionId)) return [notification]
         return [
-          {
-            type: 'system_notification',
-            subtype: 'task_progress',
-            message: cliMsg.message || cliMsg.summary || cliMsg.description || 'Task in progress',
-            data: cliMsg,
-          },
+          notification,
           {
             type: 'status',
             state: 'tool_executing',
@@ -3020,7 +3894,8 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
           return [{
             type: 'tool_use_complete',
             toolName: activity.tool_name,
-            toolUseId: activity.tool_use_id,
+            toolUseId: scopedToolUseId(parentToolUseId, activity.tool_use_id),
+            originalToolUseId: activity.tool_use_id,
             input: activity.input,
             parentToolUseId,
           }]
@@ -3028,7 +3903,8 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
         if (activity?.kind === 'tool_result') {
           return [{
             type: 'tool_result',
-            toolUseId: activity.tool_use_id,
+            toolUseId: scopedToolUseId(parentToolUseId, activity.tool_use_id),
+            originalToolUseId: activity.tool_use_id,
             content: activity.content,
             isError: activity.is_error === true,
             parentToolUseId,
@@ -3067,96 +3943,12 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
 // Helpers
 // ============================================================================
 
-function finiteNumber(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null
-}
 
-function normalizeRetryCount(value: unknown): number | null {
-  const numeric = finiteNumber(value)
-  if (numeric === null) return null
-  return Math.max(0, Math.trunc(numeric))
-}
 
-function readRetryErrorRecord(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
-  return value as Record<string, unknown>
-}
 
-function readRetryErrorString(value: unknown, keys: string[]): string | undefined {
-  const record = readRetryErrorRecord(value)
-  if (!record) return undefined
-  for (const key of keys) {
-    const candidate = record[key]
-    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim()
-  }
-  return undefined
-}
 
-function toApiRetryServerMessage(cliMsg: any): ServerMessage | null {
-  const attempt = normalizeRetryCount(cliMsg.attempt)
-  const maxRetries = normalizeRetryCount(cliMsg.max_retries)
-  const retryDelayMs = normalizeRetryCount(cliMsg.retry_delay_ms)
-  if (attempt === null || maxRetries === null || retryDelayMs === null) return null
 
-  const embeddedError = readRetryErrorRecord(cliMsg.error)
-  const embeddedStatus = embeddedError ? finiteNumber(embeddedError.status) : null
-  const rawStatus = cliMsg.error_status === null
-    ? null
-    : finiteNumber(cliMsg.error_status) ?? embeddedStatus
-  const errorType = typeof cliMsg.error === 'string' && cliMsg.error.trim()
-    ? cliMsg.error.trim()
-    : readRetryErrorString(cliMsg.error, ['type', 'code', 'name'])
-  const errorMessage = readRetryErrorString(cliMsg.error, ['message', 'error'])
 
-  return {
-    type: 'api_retry',
-    attempt,
-    maxRetries,
-    retryDelayMs,
-    errorStatus: rawStatus === null ? null : Math.trunc(rawStatus),
-    ...(errorType ? { errorType } : {}),
-    ...(errorMessage ? { errorMessage } : {}),
-  }
-}
-
-const STREAMING_FALLBACK_CAUSES: ReadonlySet<StreamingFallbackCause> = new Set([
-  'watchdog',
-  'stream_error',
-  '404_stream_creation',
-  'stream_retry',
-])
-
-function toStreamingFallbackServerMessage(cliMsg: any): ServerMessage {
-  // 未识别的 cause 兜底为 unknown 而不是丢消息：提示本身比成因重要。
-  const cause: StreamingFallbackCause =
-    typeof cliMsg.cause === 'string' && STREAMING_FALLBACK_CAUSES.has(cliMsg.cause as StreamingFallbackCause)
-      ? (cliMsg.cause as StreamingFallbackCause)
-      : 'unknown'
-  const attempt =
-    typeof cliMsg.attempt === 'number' && Number.isFinite(cliMsg.attempt)
-      ? Math.max(1, Math.trunc(cliMsg.attempt))
-      : undefined
-  const maxRetries =
-    typeof cliMsg.maxRetries === 'number' && Number.isFinite(cliMsg.maxRetries)
-      ? Math.max(0, Math.trunc(cliMsg.maxRetries))
-      : undefined
-  const retryDelayMs =
-    typeof cliMsg.retryDelayMs === 'number' && Number.isFinite(cliMsg.retryDelayMs)
-      ? Math.max(0, Math.trunc(cliMsg.retryDelayMs))
-      : undefined
-  const errorMessage =
-    typeof cliMsg.errorMessage === 'string' && cliMsg.errorMessage.trim()
-      ? cliMsg.errorMessage.trim().slice(0, 240)
-      : undefined
-  return {
-    type: 'streaming_fallback',
-    cause,
-    ...(attempt !== undefined ? { attempt } : {}),
-    ...(maxRetries !== undefined ? { maxRetries } : {}),
-    ...(retryDelayMs !== undefined ? { retryDelayMs } : {}),
-    ...(errorMessage ? { errorMessage } : {}),
-  }
-}
 
 function sendMessage(ws: ServerWebSocket<WebSocketData>, message: ServerMessage) {
   const outgoing = ws.data.clientKind === 'pet'
@@ -3209,6 +4001,11 @@ function hasPendingOrActiveUserTurn(sessionId: string): boolean {
   return activeUserTurns.has(sessionId)
 }
 
+function hasLiveUserTurnForClient(sessionId: string): boolean {
+  const activeTurn = activeUserTurns.get(sessionId)
+  return Boolean(activeTurn && !activeTurn.cancelled)
+}
+
 /**
  * Start the idle grace timer for a disconnected, idle session. If no client
  * reconnects before it fires, the CLI subprocess is stopped.
@@ -3230,7 +4027,7 @@ function scheduleDisconnectCleanup(sessionId: string): void {
       .getPendingPermissionRequests(sessionId).length > 0
     if (
       !permissionBoundExpired &&
-      (hasPendingOrActiveUserTurn(sessionId) || hasActiveBackgroundTasks(sessionId))
+      hasActiveSessionWork(sessionId)
     ) {
       console.log(`[WS] Session ${sessionId} became active during its idle grace period; keeping CLI alive`)
       watchTurnCompletionForCleanup(sessionId)
@@ -3239,9 +4036,22 @@ function scheduleDisconnectCleanup(sessionId: string): void {
 
     console.log(`[WS] Session ${sessionId} not reconnected after ${cleanupDelayMs}ms, stopping CLI subprocess`)
     conversationService.stopSession(sessionId)
-    cleanupSessionRuntimeState(sessionId)
+    cleanupSessionRuntimeState(sessionId, { preserveRetryableAgentStops: true })
   }, cleanupDelayMs)
   sessionCleanupTimers.set(sessionId, cleanupTimer)
+}
+
+function scheduleDisconnectedSessionCleanupIfIdle(sessionId: string): void {
+  if (
+    hasActiveClients(sessionId) ||
+    hasActiveSessionWork(sessionId)
+  ) {
+    return
+  }
+
+  cancelSessionDisconnectWatcher(sessionId)
+  scheduleDisconnectCleanup(sessionId)
+  watchTurnCompletionForCleanup(sessionId)
 }
 
 /**
@@ -3253,8 +4063,15 @@ function watchTurnCompletionForCleanup(sessionId: string): void {
   cancelSessionDisconnectWatcher(sessionId)
 
   const onComplete = (cliMsg: any) => {
+    const cliRunState = trackCliRunState(sessionId, cliMsg)
     const taskLifecycle = trackCliBackgroundTaskLifecycle(sessionId, cliMsg)
-    if (taskLifecycle?.running && !hasActiveClients(sessionId)) {
+    stopLateAgentTaskIfRequested(sessionId, taskLifecycle)
+    closeLateNonAgentTaskAfterRuntimeExit(sessionId, taskLifecycle)
+    closeStoppedAgentsAfterRuntimeExit(sessionId, cliMsg)
+    if (
+      (cliRunState === 'running' || taskLifecycle?.running) &&
+      !hasActiveClients(sessionId)
+    ) {
       // A pending permission uses a hard 30-minute disconnect bound. A late
       // background task may outlive (or never emit) its terminal notification,
       // so it must not turn that bound into an unbounded watcher. Ordinary idle
@@ -3279,10 +4096,16 @@ function watchTurnCompletionForCleanup(sessionId: string): void {
     }
 
     const foregroundTurnCompleted = cliMsg?.type === 'result'
+    const cliRunCompleted = cliRunState === 'idle'
     const backgroundTaskCompleted = taskLifecycle?.running === false
-    if (!foregroundTurnCompleted && !backgroundTaskCompleted) return
+    if (!foregroundTurnCompleted && !cliRunCompleted && !backgroundTaskCompleted) return
+    if (hasActiveCliRun(sessionId)) return
     if (hasActiveBackgroundTasks(sessionId)) return
-    if (!foregroundTurnCompleted && hasPendingOrActiveUserTurn(sessionId)) return
+    if (
+      !foregroundTurnCompleted &&
+      !cliRunCompleted &&
+      hasPendingOrActiveUserTurn(sessionId)
+    ) return
 
     cancelSessionDisconnectWatcher(sessionId)
     // All observed work finished while still disconnected — fall back to the
@@ -3307,7 +4130,7 @@ function watchTurnCompletionForCleanup(sessionId: string): void {
 function refreshDisconnectedTurnCleanupWatcher(sessionId: string): void {
   if (
     hasActiveClients(sessionId) ||
-    (!hasPendingOrActiveUserTurn(sessionId) && !hasActiveBackgroundTasks(sessionId))
+    !hasActiveSessionWork(sessionId)
   ) return
 
   const pendingTimer = sessionCleanupTimers.get(sessionId)
@@ -3370,6 +4193,7 @@ function getTitleInputForUserMessage(
   content: string,
   command: ReturnType<typeof parseSlashCommand>,
 ): string | null {
+  if (command?.commandName === 'compact') return null
   if (command?.commandName !== 'goal') return content
 
   const args = command.args.trim()
@@ -3437,183 +4261,16 @@ function isLocalCommandOutputMessage(cliMsg: any): boolean {
   ) !== null
 }
 
-function extractLocalCommandOutput(
-  content: unknown,
-  options: { allowUntagged?: boolean } = {},
-): string | null {
-  const raw = typeof content === 'string'
-    ? content
-    : Array.isArray(content)
-      ? content
-        .flatMap((block) => {
-          if (!block || typeof block !== 'object') return []
-          const text = (block as { text?: unknown }).text
-          return typeof text === 'string' ? [text] : []
-        })
-        .join('\n')
-      : ''
 
-  if (!raw) return null
 
-  const stdout = extractTaggedContent(raw, LOCAL_COMMAND_STDOUT_TAG)
-  if (stdout !== null) return stdout
 
-  const stderr = extractTaggedContent(raw, LOCAL_COMMAND_STDERR_TAG)
-  if (stderr !== null) return stderr
 
-  if (options.allowUntagged) {
-    const normalized = raw.trim()
-    return normalized || null
-  }
 
-  return null
-}
 
-function isCompactLocalCommandOutput(output: string): boolean {
-  return output.trim() === 'Compacted'
-}
 
-function extractTaggedContent(raw: string, tag: string): string | null {
-  const match = raw.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`))
-  return match?.[1]?.trim() ?? null
-}
 
-function extractLocalCommand(content: unknown): { name: string; args: string } | null {
-  const raw = typeof content === 'string'
-    ? content
-    : Array.isArray(content)
-      ? content
-        .flatMap((block) => {
-          if (!block || typeof block !== 'object') return []
-          const text = (block as { text?: unknown }).text
-          return typeof text === 'string' ? [text] : []
-        })
-        .join('\n')
-      : ''
 
-  const name = extractTaggedContent(raw, COMMAND_NAME_TAG)
-  if (!name) return null
-  return {
-    name: name.replace(/^\//, ''),
-    args: extractTaggedContent(raw, 'command-args') ?? '',
-  }
-}
 
-type GoalEventData = {
-  action: 'created' | 'replaced' | 'status' | 'paused' | 'resumed' | 'completed' | 'cleared' | 'message'
-  status?: string
-  objective?: string
-  budget?: string
-  elapsed?: string
-  continuations?: string
-  message?: string
-}
-
-function extractGoalEvent(
-  output: string,
-  command?: { name: string; args: string },
-): GoalEventData | null {
-  if (command && command.name !== 'goal') return null
-
-  const trimmed = output.trim()
-  if (!trimmed) return null
-
-  if (trimmed === 'Goal cleared.' || trimmed.startsWith('Goal cleared:')) {
-    return { action: 'cleared', message: trimmed }
-  }
-  if (trimmed === 'Goal marked complete.') {
-    return { action: 'completed', message: trimmed }
-  }
-  if (trimmed === 'No active goal.') {
-    return { action: 'message', message: trimmed }
-  }
-  if (trimmed.startsWith('Goal continuing:')) {
-    return {
-      action: 'status',
-      status: 'continuing',
-      message: trimmed,
-    }
-  }
-
-  if (trimmed.startsWith('Goal set:')) {
-    const objective = trimmed.slice('Goal set:'.length).trim()
-    return {
-      action: 'created',
-      status: 'active',
-      objective: objective || undefined,
-      message: trimmed,
-    }
-  }
-
-  return command?.name === 'goal' ? { action: 'message', message: trimmed } : null
-}
-
-function looksLikeGoalCommandOutput(output: string): boolean {
-  const trimmed = output.trim()
-  return (
-    trimmed.startsWith('Goal set:') ||
-    trimmed.startsWith('Goal continuing:') ||
-    trimmed.startsWith('Goal cleared:') ||
-    trimmed === 'Goal cleared.' ||
-    trimmed === 'Goal marked complete.' ||
-    trimmed === 'No active goal.'
-  )
-}
-
-function getCompactBoundaryMessage(cliMsg: any): string {
-  const message = typeof cliMsg?.message === 'string' ? cliMsg.message.trim() : ''
-  if (message) return message
-
-  const content = typeof cliMsg?.content === 'string' ? cliMsg.content.trim() : ''
-  if (content) return content
-
-  return 'Context compacted'
-}
-
-function isCompactSummaryMessageContent(content: unknown): content is string {
-  return (
-    typeof content === 'string' &&
-    content.trim().startsWith(
-      'This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.',
-    )
-  )
-}
-
-function hasToolResultBlock(content: unknown): boolean {
-  return Array.isArray(content) &&
-    content.some((block) =>
-      Boolean(block) &&
-      typeof block === 'object' &&
-      (block as { type?: unknown }).type === 'tool_result')
-}
-
-function extractReplayUserText(cliMsg: any): string | null {
-  if (cliMsg?.isReplay !== true) return null
-  const content = cliMsg.message?.content
-  const commandDisplayText = getCommandMetadataDisplayText(content)
-  if (commandDisplayText) return commandDisplayText
-  if (shouldHideCommandMetadataContent(content)) return null
-  if (isCompactSummaryMessageContent(content)) return null
-  if (hasToolResultBlock(content)) return null
-  if (extractLocalCommandOutput(content)) return null
-
-  const text = typeof content === 'string'
-    ? content
-    : Array.isArray(content)
-      ? content
-        .flatMap((block) => {
-          if (!block || typeof block !== 'object') return []
-          const typedBlock = block as { type?: unknown; text?: unknown }
-          return typedBlock.type === 'text' && typeof typedBlock.text === 'string'
-            ? [typedBlock.text]
-            : []
-        })
-        .join('\n')
-      : ''
-
-  const trimmed = text.trim()
-  return trimmed || null
-}
 
 function addActiveClient(
   sessionId: string,
@@ -3651,36 +4308,34 @@ function removeClientOutputCallback(ws: ServerWebSocket<WebSocketData>): void {
   clientOutputCallbacks.delete(ws)
 }
 
-function normalizeCliTaskNotification(cliMsg: any): SessionTaskNotification | null {
-  if (cliMsg?.type !== 'system' || cliMsg.subtype !== 'task_notification') return null
-  const toolUseId = typeof cliMsg.tool_use_id === 'string' && cliMsg.tool_use_id
-    ? cliMsg.tool_use_id
-    : null
-  const rawStatus = cliMsg.status
-  const status = rawStatus === 'killed' ? 'stopped' : rawStatus
-  if (
-    !toolUseId ||
-    (status !== 'completed' && status !== 'failed' && status !== 'stopped')
-  ) {
-    return null
-  }
 
-  const optionalString = (value: unknown) =>
-    typeof value === 'string' && value ? value : undefined
-  return {
-    taskId: optionalString(cliMsg.task_id) ?? toolUseId,
-    toolUseId,
-    status,
-    ...(optionalString(cliMsg.summary) ? { summary: optionalString(cliMsg.summary) } : {}),
-    ...(optionalString(cliMsg.result) ? { result: optionalString(cliMsg.result) } : {}),
-    ...(optionalString(cliMsg.output_file) ? { outputFile: optionalString(cliMsg.output_file) } : {}),
-    timestamp: optionalString(cliMsg.timestamp) ?? new Date().toISOString(),
-  }
+function boundTaskNotificationPersistence(
+  persistence: Promise<void>,
+  timeoutMs: number,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Timed out saving task notification after ${timeoutMs}ms`))
+    }, timeoutMs)
+    if (typeof timer === 'object') timer.unref?.()
+
+    persistence.then(
+      () => {
+        clearTimeout(timer)
+        resolve()
+      },
+      (error) => {
+        clearTimeout(timer)
+        reject(error)
+      },
+    )
+  })
 }
 
 function persistCliTaskNotification(
   sessionId: string,
   cliMsg: any,
+  options?: { propagateFailure?: boolean; timeoutMs?: number },
 ): Promise<void> | null {
   const notification = normalizeCliTaskNotification(cliMsg)
   if (!notification) return null
@@ -3696,7 +4351,11 @@ function persistCliTaskNotification(
   const existing = sessionWrites.get(eventKey)
   if (existing) return existing
 
-  const write = sessionService.appendSessionTaskNotification(sessionId, notification)
+  const persistence = sessionService.appendSessionTaskNotification(sessionId, notification)
+  const boundedPersistence = options?.timeoutMs === undefined
+    ? persistence
+    : boundTaskNotificationPersistence(persistence, options.timeoutMs)
+  const write = boundedPersistence
     .catch((error) => {
       sessionWrites?.delete(eventKey)
       console.warn(
@@ -3704,12 +4363,55 @@ function persistCliTaskNotification(
           error instanceof Error ? error.message : String(error)
         }`,
       )
+      if (options?.propagateFailure) throw error
     })
   sessionWrites.set(eventKey, write)
   return write
 }
 
 export const __persistCliTaskNotificationForTests = persistCliTaskNotification
+
+function persistThenForwardCliMessage(
+  sessionId: string,
+  cliMsg: any,
+  forward: () => void,
+): void {
+  const persistence = persistCliTaskNotification(sessionId, cliMsg)
+  if (!persistence) {
+    forward()
+    return
+  }
+
+  void persistence
+    .then(forward)
+    .catch((error) => {
+      console.warn(
+        `[WS] Failed to forward persisted task notification for ${sessionId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      )
+    })
+}
+
+function forwardCliMessageToClient(
+  sessionId: string,
+  ws: ServerWebSocket<WebSocketData>,
+  cliMsg: any,
+): void {
+  handleCliPermissionModeBroadcast(sessionId, cliMsg)
+  const serverMsgs = translateCliMessage(cliMsg, sessionId)
+  for (const msg of serverMsgs) sendMessage(ws, msg)
+}
+
+function forwardCliMessageToSessionClients(sessionId: string, cliMsg: any): void {
+  const clients = activeSessions.get(sessionId)
+  if (!clients || clients.size === 0) return
+  handleCliPermissionModeBroadcast(sessionId, cliMsg)
+  const serverMsgs = translateCliMessage(cliMsg, sessionId)
+  for (const ws of clients) {
+    for (const msg of serverMsgs) sendMessage(ws, msg)
+  }
+}
 
 function bindAllClientSessionOutputs(
   sessionId: string,
@@ -3736,25 +4438,33 @@ function bindClientSessionOutput(
   removeClientOutputCallback(ws)
 
   const callback = (cliMsg: any) => {
-    if (
+    consumeInterruptedTurnResult(sessionId, cliMsg)
+    acknowledgeActiveTurnReplay(sessionId, cliMsg)
+    const transcriptEpoch = sessionTranscriptEpochs.get(sessionId) ?? 0
+    trackCliRunState(sessionId, cliMsg)
+    const taskLifecycle = trackCliBackgroundTaskLifecycle(sessionId, cliMsg)
+    stopLateAgentTaskIfRequested(sessionId, taskLifecycle)
+    closeLateNonAgentTaskAfterRuntimeExit(sessionId, taskLifecycle)
+    closeStoppedAgentsAfterRuntimeExit(sessionId, cliMsg)
+    if (taskLifecycle?.suppressForward) return
+    const replacementAwaitingBoundary =
+      activeUserTurns.get(sessionId)?.replacementAfterStop === true
+    const stoppedTurnTerminalResult =
       cliMsg?.type === 'result' &&
-      sessionStopRequested.has(sessionId)
+      sessionStopRequested.has(sessionId) &&
+      !replacementAwaitingBoundary &&
+      !pendingInterruptedTurnResults.has(sessionId)
+    if (
+      shouldSuppressCliOutputDuringStop(sessionId, cliMsg, taskLifecycle) &&
+      !stoppedTurnTerminalResult
     ) {
-      if (cliMsg && typeof cliMsg === 'object') {
-        settledStopTerminalFrames.add(cliMsg)
-      }
-      settleStoppedGeneration(sessionId)
+      // Until the interrupted result and the replacement's own replay establish
+      // an ordering boundary, unscoped output may still belong to the old
+      // generation. Once that boundary settles, only its terminal result may
+      // pass to every renderer. Task lifecycle must pass so Stop can close
+      // Agents, and permission resolutions must pass so open prompts can close.
       return
     }
-    if (
-      cliMsg?.type === 'result' &&
-      cliMsg &&
-      typeof cliMsg === 'object' &&
-      settledStopTerminalFrames.has(cliMsg)
-    ) {
-      return
-    }
-    trackCliBackgroundTaskLifecycle(sessionId, cliMsg)
     if (options?.shouldForward && !options.shouldForward(cliMsg)) {
       return
     }
@@ -3768,11 +4478,11 @@ function bindClientSessionOutput(
     }
 
     const forward = () => {
+      if ((sessionTranscriptEpochs.get(sessionId) ?? 0) !== transcriptEpoch) return
+      if (!activeSessions.get(sessionId)?.has(ws)) return
       handleCliPermissionModeBroadcast(sessionId, cliMsg)
       const serverMsgs = translateCliMessage(cliMsg, sessionId)
-      for (const msg of serverMsgs) {
-        sendMessage(ws, msg)
-      }
+      for (const msg of serverMsgs) sendMessage(ws, msg)
 
       // Provider-level compatibility detection: if any of the messages
       // we just translated is an `error` whose payload matches the
@@ -3787,38 +4497,51 @@ function bindClientSessionOutput(
       )
     }
 
-    const terminalNotification = normalizeCliTaskNotification(cliMsg)
-    if (terminalNotification) {
-      let terminalTasks = observedTerminalTasks.get(sessionId)
-      if (!terminalTasks) {
-        terminalTasks = new Set()
-        observedTerminalTasks.set(sessionId, terminalTasks)
-      }
-      terminalTasks.add(terminalNotification.taskId)
-    }
-
-    const persistence = persistCliTaskNotification(sessionId, cliMsg)
-    if (persistence) {
-      void Promise.resolve(persistence).then(
-        () => {
-          if (activeSessions.get(sessionId)?.has(ws)) forward()
-        },
-        (error) => {
-          console.warn(
-            `[WS] Failed to persist task notification for ${sessionId}: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          )
-          if (activeSessions.get(sessionId)?.has(ws)) forward()
-        },
-      )
-      return
-    }
-    forward()
+    persistThenForwardCliMessage(sessionId, cliMsg, forward)
   }
 
   clientOutputCallbacks.set(ws, { sessionId, callback })
   conversationService.onOutput(sessionId, callback)
+}
+
+function hasStoppedTurnBoundary(sessionId: string): boolean {
+  return sessionStopRequested.has(sessionId) ||
+    activeUserTurns.get(sessionId)?.replacementAfterStop === true
+}
+
+function isAgentScopedPermissionRequest(cliMsg: any): boolean {
+  return cliMsg?.type === 'control_request' &&
+    cliMsg.request?.subtype === 'can_use_tool' &&
+    typeof cliMsg.request.agent_id === 'string' &&
+    cliMsg.request.agent_id.trim().length > 0
+}
+
+function canAcceptPermissionRequestDuringStop(sessionId: string, cliMsg: any): boolean {
+  if (hasStoppedTurnBoundary(sessionId)) return false
+  if (!agentStopRequestedSessions.has(sessionId)) return true
+  return !isAgentScopedPermissionRequest(cliMsg)
+}
+
+function shouldSuppressCliOutputDuringStop(
+  sessionId: string,
+  cliMsg: any,
+  taskLifecycle: CliBackgroundTaskLifecycle | null,
+): boolean {
+  if (taskLifecycle !== null) return false
+  if (cliMsg?.type === 'control_cancel_request' || cliMsg?.type === 'control_response') {
+    return false
+  }
+  if (hasStoppedTurnBoundary(sessionId)) return true
+  if (!agentStopRequestedSessions.has(sessionId)) return false
+  if (cliMsg?.type === 'control_request') {
+    return isAgentScopedPermissionRequest(cliMsg)
+  }
+  if (cliMsg?.type === 'system' && cliMsg.subtype === 'task_progress') {
+    const taskId = typeof cliMsg.task_id === 'string' ? cliMsg.task_id.trim() : ''
+    return isAgentTaskType(cliMsg.task_type) ||
+      Boolean(taskId && activeAgentTasks.get(sessionId)?.has(taskId))
+  }
+  return true
 }
 
 function getCliPermissionModeBroadcast(cliMsg: any): PermissionMode | null {
@@ -3899,25 +4622,51 @@ async function getGrokReasoningEfforts(modelId: string): Promise<{
   }
 }
 
-export async function isRuntimeEffortSupported(
+async function resolveRuntimeEffort(
   providerId: string | null | undefined,
   modelId: string,
   effort: string,
-): Promise<boolean> {
+): Promise<{ valid: boolean; effort?: string }> {
   if (isGrokOfficialProviderId(providerId)) {
     const { supportedEfforts } = await getGrokReasoningEfforts(modelId)
     return supportedEfforts.includes(effort)
+      ? { valid: true, effort }
+      : { valid: false }
   }
-  if (!isOpenAIOfficialProviderId(providerId)) {
+  if (providerId === null || providerId === undefined) {
     return VALID_CLAUDE_EFFORT_LEVELS.has(effort)
+      ? { valid: true, effort }
+      : { valid: false }
   }
-  if (!isOpenAIReasoningEffort(effort)) {
-    return false
+  if (isOpenAIOfficialProviderId(providerId)) {
+    if (!isOpenAIReasoningEffort(effort)) {
+      return { valid: false }
+    }
+
+    const catalog = await getOpenAICodexModelCatalog()
+    const model = getOpenAIModelCatalogEntry(modelId, catalog)
+    return !model || model.supportedReasoningEfforts.includes(effort)
+      ? { valid: true, effort }
+      : { valid: false }
   }
 
-  const catalog = await getOpenAICodexModelCatalog()
-  const model = getOpenAIModelCatalogEntry(modelId, catalog)
-  return !model || model.supportedReasoningEfforts.includes(effort)
+  if (!isModelReasoningEffort(effort)) return { valid: false }
+  const provider = await providerService.getProvider(providerId).catch(() => null)
+  if (!provider) return { valid: false }
+  const normalizedEffort = normalizeModelReasoningEffort(
+    modelId,
+    effort,
+    provider.apiFormat ?? 'anthropic',
+    getModelReasoningCapabilityOverride(
+      modelId,
+      provider.models,
+      getPresetDefaultEnv(provider.presetId),
+    ),
+  )
+  return {
+    valid: true,
+    ...(normalizedEffort ? { effort: normalizedEffort } : {}),
+  }
 }
 
 function isKnownRuntimeProviderId(
@@ -4383,11 +5132,15 @@ export function getActiveSessionIds(): string[] {
 export function __clearWebSocketDisconnectTimersForTests(): void {
   for (const timer of sessionCleanupTimers.values()) clearTimeout(timer)
   for (const remove of sessionDisconnectWatchers.values()) remove()
+  for (const tasks of activeAgentTasks.values()) {
+    for (const task of tasks.values()) clearAgentStopFinalizationRetry(task)
+  }
   activeSessions.clear()
   activePetClient = null
   clientOutputCallbacks.clear()
   taskNotificationPersistence.clear()
   observedTerminalTasks.clear()
+  sessionTranscriptEpochs.clear()
   sessionCleanupTimers.clear()
   sessionDisconnectWatchers.clear()
 }
@@ -4441,7 +5194,15 @@ export function __resetWebSocketHandlerStateForTests(): void {
   prewarmedSessions.clear()
   prewarmIdleTimers.clear()
   activeUserTurns.clear()
+  activeCliRuns.clear()
   activeBackgroundTaskIds.clear()
+  activeAgentTasks.clear()
+  activeNonAgentTasks.clear()
+  authoritativeStoppedTaskIds.clear()
+  agentStopRequestedSessions.clear()
+  runtimeExitStoppedSessions.clear()
+  pendingInterruptedTurnResults.clear()
+  sessionClearInProgress.clear()
   sessionStopRequested.clear()
   stoppedTurnEventFences.clear()
   for (const settlement of stopSettlements.values()) settlement.resolve()
@@ -4449,6 +5210,8 @@ export function __resetWebSocketHandlerStateForTests(): void {
   terminalSessionChatStates.clear()
   legacyQueuedSessionChats.clear()
   interruptedSessionChats.clear()
+  runtimeTransitionPromises.clear()
+  sessionStartupPromises.clear()
 }
 
 export function __markPrewarmPendingForTests(sessionId: string): void {
@@ -4468,6 +5231,32 @@ export function __markActiveTurnForTests(sessionId: string): void {
 export function __registerPendingUserTurnForTests(sessionId: string): void {
   beginSessionChatActivity(sessionId)
   activeUserTurns.set(sessionId, { messageSent: false })
+}
+
+/** Test hook: hold user admission in the shared CLI-startup seam. */
+export function __registerPendingSessionStartupForTests(
+  sessionId: string,
+  startup: Promise<void>,
+): void {
+  sessionStartupPromises.set(sessionId, startup)
+  const clearStartup = () => {
+    if (sessionStartupPromises.get(sessionId) === startup) {
+      sessionStartupPromises.delete(sessionId)
+    }
+  }
+  void startup.then(clearStartup, clearStartup)
+}
+
+/** Test hook: put a deterministic barrier ahead of user/clear admission. */
+export function __enqueueRuntimeTransitionForTests(
+  sessionId: string,
+  transition: Promise<void>,
+): Promise<void> {
+  return enqueueRuntimeTransition(sessionId, () => transition)
+}
+
+export function __resolveRuntimeRestartWorkDirForTests(sessionId: string): Promise<string> {
+  return resolveRuntimeRestartWorkDir(sessionId)
 }
 
 /** Test hook: settle a registered turn through the same CLI-result seam. */

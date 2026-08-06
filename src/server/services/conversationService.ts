@@ -26,6 +26,13 @@ import {
   OPENAI_CODEX_REASONING_EFFORT_ENV_KEY,
   isOpenAIReasoningEffort,
 } from '../../services/openaiAuth/models.js'
+import {
+  IMAGE_GENERATION_API_KEY_ENV_KEY,
+  IMAGE_GENERATION_BASE_URL_ENV_KEY,
+  IMAGE_GENERATION_MODEL_ENV_KEY,
+  IMAGE_GENERATION_PROVIDER_ID_ENV_KEY,
+  IMAGE_GENERATION_PROVIDER_KIND_ENV_KEY,
+} from '../../services/imageGeneration/config.js'
 import { sessionService } from './sessionService.js'
 import { diagnosticsService } from './diagnosticsService.js'
 import {
@@ -181,6 +188,16 @@ type AttachmentRef = {
 
 type UserContentBlock = Record<string, unknown>
 
+type SendMessageOptions = {
+  canSend?: () => boolean
+  messageUuid?: string
+  onCommitted?: () => void
+}
+
+type HandleSdkPayloadOptions = {
+  canAcceptPermissionRequest?: (message: any) => boolean
+}
+
 type MaterializedAttachments = {
   pathPrefix: string
   imageBlocks: UserContentBlock[]
@@ -246,6 +263,7 @@ type SessionProcess = {
       permissionSuggestions?: unknown[]
     }
   >
+  pendingControlRequests: Map<string, (reason: Error) => void>
 }
 
 export type PendingPermissionRequest = {
@@ -545,6 +563,7 @@ export class ConversationService {
       usesOfficialOAuth,
       officialOAuthToken: childEnv.CLAUDE_CODE_OAUTH_TOKEN ?? null,
       pendingPermissionRequests: new Map(),
+      pendingControlRequests: new Map(),
     }
     this.sessions.set(sessionId, session)
 
@@ -659,6 +678,7 @@ export class ConversationService {
     sessionId: string,
     content: string,
     attachments?: AttachmentRef[],
+    options?: SendMessageOptions,
   ): Promise<boolean> {
     const userContent = await this.buildUserContent(content, sessionId, attachments)
     let session = this.sessions.get(sessionId)
@@ -669,8 +689,14 @@ export class ConversationService {
     if (session) {
       await this.refreshOfficialOAuthTokenBeforeTurn(sessionId, session)
     }
-    return this.sendSdkMessage(sessionId, {
+    // Building attachments, refreshing network settings, and refreshing OAuth
+    // can all suspend this call. Stop may revoke the owning desktop turn while
+    // one of those awaits is pending, so check ownership at the last possible
+    // point before writing the user message to the SDK socket.
+    if (options?.canSend && !options.canSend()) return false
+    const sent = this.sendSdkMessage(sessionId, {
       type: 'user',
+      ...(options?.messageUuid ? { uuid: options.messageUuid } : {}),
       message: {
         role: 'user',
         content: userContent,
@@ -678,6 +704,8 @@ export class ConversationService {
       parent_tool_use_id: null,
       session_id: '',
     })
+    if (sent) options?.onCommitted?.()
+    return sent
   }
 
   private async refreshNetworkEnvironmentBeforeTurn(
@@ -912,6 +940,10 @@ export class ConversationService {
 
     const startedAt = Date.now()
     await this.waitForControlChannelReady(sessionId, timeoutMs, signal)
+    const session = this.sessions.get(sessionId)
+    if (!session) {
+      throw new Error('CLI session is not running')
+    }
     const responseTimeoutMs = Math.max(1, timeoutMs - (Date.now() - startedAt))
     const requestId = crypto.randomUUID()
     return new Promise((resolve, reject) => {
@@ -923,7 +955,8 @@ export class ConversationService {
         settled = true
         clearTimeout(timeout)
         signal?.removeEventListener('abort', handleAbort)
-        this.removeOutputCallback(sessionId, handleOutput)
+        session.outputCallbacks = session.outputCallbacks.filter((entry) => entry !== handleOutput)
+        session.pendingControlRequests?.delete(requestId)
         fn()
       }
 
@@ -956,13 +989,18 @@ export class ConversationService {
           `Timed out waiting for ${String(request.subtype ?? 'control')} response`,
         )))
       }, responseTimeoutMs)
-      this.onOutput(sessionId, handleOutput)
+      session.outputCallbacks.push(handleOutput)
+      const pendingControlRequests = session.pendingControlRequests ?? new Map<string, (reason: Error) => void>()
+      session.pendingControlRequests = pendingControlRequests
+      pendingControlRequests.set(requestId, (reason) => {
+        finish(() => reject(reason))
+      })
       signal?.addEventListener('abort', handleAbort, { once: true })
       if (signal?.aborted) {
         handleAbort()
         return
       }
-      const sent = this.sendSdkMessage(sessionId, {
+      const sent = this.sessions.get(sessionId) === session && this.sendSdkMessage(sessionId, {
         type: 'control_request',
         request_id: requestId,
         request,
@@ -1076,6 +1114,7 @@ export class ConversationService {
     sessionId: string,
     rawPayload: string,
     socket?: { send(data: string): void },
+    options?: HandleSdkPayloadOptions,
   ): void {
     const session = this.sessions.get(sessionId)
     if (!session || (socket && session.sdkSocket !== socket)) return
@@ -1089,6 +1128,18 @@ export class ConversationService {
       try {
         const msg = JSON.parse(line)
         if (this.isReplayedSdkMessage(session, msg)) continue
+        if (
+          msg?.type === 'control_request' &&
+          msg.request?.subtype === 'can_use_tool' &&
+          typeof msg.request_id === 'string' &&
+          options?.canAcceptPermissionRequest?.(msg) === false
+        ) {
+          // Stop may win while a permission request is already queued on the
+          // SDK transport. Reject it at the service boundary so it is neither
+          // persisted as pending nor replayed to a reconnecting renderer.
+          this.respondToPermission(sessionId, msg.request_id, false)
+          continue
+        }
         this.retainSdkMessage(session, msg, Buffer.byteLength(line, 'utf-8'))
         const sdkError = this.extractSdkErrorEvent(msg)
         if (sdkError) {
@@ -1258,10 +1309,23 @@ export class ConversationService {
     return `${truncated}\n[truncated]`
   }
 
+  private cancelPendingControlRequests(
+    session: SessionProcess,
+    reason = new Error('CLI session stopped'),
+  ): void {
+    const pending = session.pendingControlRequests
+    if (!pending || pending.size === 0) return
+    for (const cancel of [...pending.values()]) {
+      cancel(reason)
+    }
+    pending.clear()
+  }
+
   stopSession(sessionId: string): void {
     const session = this.sessions.get(sessionId)
     if (!session) return
 
+    this.cancelPendingControlRequests(session)
     this.sessions.delete(sessionId)
     this.killProcess(sessionId, session)
   }
@@ -1298,6 +1362,7 @@ export class ConversationService {
     const session = this.sessions.get(sessionId)
     if (!session) return
 
+    this.cancelPendingControlRequests(session)
     this.sessions.delete(sessionId)
     await this.stopProcessAndWait(sessionId, session, timeoutMs)
   }
@@ -1314,6 +1379,9 @@ export class ConversationService {
     const activeSessions = Array.from(this.sessions.entries())
     if (activeSessions.length === 0) return
 
+    for (const [, session] of activeSessions) {
+      this.cancelPendingControlRequests(session)
+    }
     this.sessions.clear()
     await Promise.all(
       activeSessions.map(([sessionId, session]) =>
@@ -1468,6 +1536,10 @@ export class ConversationService {
 
     const activeSession = this.sessions.get(sessionId)
     if (activeSession?.proc === proc) {
+      this.cancelPendingControlRequests(
+        activeSession,
+        new Error('CLI session exited before the control request completed'),
+      )
       if (activeSession.startupPending) {
         activeSession.startupExitCode = code
         return
@@ -1696,6 +1768,12 @@ export class ConversationService {
             // arrives. Flush the completed turn first so the replacement can
             // reliably choose --resume and load the context (#1033).
             CLAUDE_CODE_EAGER_FLUSH: cleanEnv.CLAUDE_CODE_EAGER_FLUSH || '1',
+            // The CLI may keep processing internally after an SDK `result`
+            // (for example, a completed background Agent can enqueue one last
+            // model follow-up). Desktop cleanup must use the CLI's authoritative
+            // running/idle boundary or a disconnected renderer can kill that
+            // follow-up after the fixed idle grace period.
+            CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: '1',
             CC_HAHA_COMPUTER_USE_HOST_BUNDLE_ID: 'com.claude-code-haha.desktop',
           }
         : {}),
@@ -2293,7 +2371,10 @@ export class ConversationService {
         this.sanitizeAttachmentName(attachment.name, attachment.type, normalizedExt),
         normalizedExt,
       )
-      const sourcePath = source.sourcePath ?? this.writeUploadAttachment(
+      // Always stage the normalized bytes. ImageGen only accepts session uploads
+      // and prior generated outputs, so an attachment can be edited without
+      // granting the tool arbitrary filesystem read/upload access.
+      const sourcePath = this.writeUploadAttachment(
         uploadDir,
         storedName,
         resized.buffer,

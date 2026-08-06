@@ -186,6 +186,23 @@ describe('AssistantMessage output-target cards', () => {
     expect(screen.queryByText('assistantOutputs.kind.image')).toBeNull()
   })
 
+  it('treats an empty turnChangedFiles as no evidence and keeps legacy inline media', () => {
+    // The checkpoint only sees TRACKED file changes — Bash-written files are
+    // invisible to it — so an empty list must not hide mentioned media. Broken
+    // references still self-hide via the <img>/<video> onError handlers.
+    const { container } = render(
+      <AssistantMessage
+        sessionId="s1"
+        content={'旧图 /work/old.png、相对图 outputs/relative.png、旧视频 outputs/old.mp4'}
+        isStreaming={false}
+        turnChangedFiles={[]}
+      />,
+    )
+
+    expect(screen.queryAllByRole('img')).toHaveLength(2)
+    expect(container.querySelector('video')).not.toBeNull()
+  })
+
   it('still renders md/html/localhost cards when those references are present', () => {
     render(
       <AssistantMessage

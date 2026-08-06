@@ -1,8 +1,16 @@
 import * as fs from 'fs'
 import * as path from 'path'
 
+import { getClaudeCodeModelCapabilities } from '../../shared/modelReasoning.js'
 import { MODEL_CONTEXT_WINDOWS_ENV_KEY } from '../../utils/model/modelContextWindows.js'
 import { isProviderManagedEnvVar } from '../../utils/managedEnvConstants.js'
+import {
+  IMAGE_GENERATION_API_KEY_ENV_KEY,
+  IMAGE_GENERATION_BASE_URL_ENV_KEY,
+  IMAGE_GENERATION_MODEL_ENV_KEY,
+  IMAGE_GENERATION_PROVIDER_ID_ENV_KEY,
+  IMAGE_GENERATION_PROVIDER_KIND_ENV_KEY,
+} from '../../services/imageGeneration/config.js'
 import { PROVIDER_PRESETS } from '../config/providerPresets.js'
 import type {
   ApiFormat,
@@ -56,13 +64,13 @@ export const MANAGED_PROVIDER_ENV_KEYS = [
   OPENAI_CODEX_OAUTH_FILE_ENV_KEY,
   GROK_OAUTH_PROVIDER_ENV_KEY,
   GROK_OAUTH_FILE_ENV_KEY,
+  IMAGE_GENERATION_PROVIDER_KIND_ENV_KEY,
+  IMAGE_GENERATION_PROVIDER_ID_ENV_KEY,
+  IMAGE_GENERATION_BASE_URL_ENV_KEY,
+  IMAGE_GENERATION_API_KEY_ENV_KEY,
+  IMAGE_GENERATION_MODEL_ENV_KEY,
 ] as const
 
-const CUSTOM_PROVIDER_MODEL_CAPABILITIES =
-  'thinking,effort,adaptive_thinking,xhigh_effort,max_effort'
-const XIAOMI_MIMO_MODEL_CAPABILITIES = 'thinking'
-const KIMI_K3_MODEL_CAPABILITIES = 'thinking,required_thinking,effort,max_effort'
-const KIMI_CODING_FALLBACK_MODEL_CAPABILITIES = 'thinking,required_thinking'
 const AUTH_ENV_KEYS = new Set(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'])
 const MODEL_SLOTS = ['main', 'haiku', 'sonnet', 'opus'] as const
 
@@ -88,6 +96,17 @@ function isProviderModel1mSupport(value: unknown): value is SavedProvider['model
   )
 }
 
+function isImageGenerationConfig(
+  value: unknown,
+): value is NonNullable<SavedProvider['imageGeneration']> {
+  return (
+    isRecord(value) &&
+    typeof value.model === 'string' &&
+    (value.baseUrl === undefined || typeof value.baseUrl === 'string') &&
+    (value.apiKey === undefined || typeof value.apiKey === 'string')
+  )
+}
+
 function isSavedProvider(value: unknown): value is SavedProvider {
   if (!isRecord(value)) return false
   const runtimeKind = value.runtimeKind
@@ -104,7 +123,8 @@ function isSavedProvider(value: unknown): value is SavedProvider {
       runtimeKind === 'grok_oauth'
     ) &&
     isProviderModels(value.models) &&
-    (value.model1mSupport === undefined || isProviderModel1mSupport(value.model1mSupport))
+    (value.model1mSupport === undefined || isProviderModel1mSupport(value.model1mSupport)) &&
+    (value.imageGeneration === undefined || isImageGenerationConfig(value.imageGeneration))
   )
 }
 
@@ -156,6 +176,20 @@ function normalizeModel1mSupport(
   return MODEL_SLOTS.some((slot) => normalized[slot]) ? normalized : undefined
 }
 
+export function normalizeImageGeneration(
+  value: SavedProvider['imageGeneration'] | undefined,
+): SavedProvider['imageGeneration'] | undefined {
+  const model = value?.model.trim()
+  if (!model) return undefined
+  const baseUrl = value?.baseUrl?.trim()
+  const apiKey = value?.apiKey?.trim()
+  return {
+    model,
+    ...(baseUrl ? { baseUrl } : {}),
+    ...(apiKey ? { apiKey } : {}),
+  }
+}
+
 function applyModel1mSupport(model: string, enabled: boolean | undefined): string {
   const trimmed = model.trim()
   if (!enabled) return trimmed
@@ -178,11 +212,13 @@ function applyModel1mSupportMapping(
 export function normalizeSavedProvider(provider: SavedProvider): SavedProvider {
   const {
     disableExperimentalBetas: rawDisableExperimentalBetas,
+    imageGeneration: rawImageGeneration,
     model1mSupport: rawModel1mSupport,
     ...rest
   } = provider
   const rawProvider = provider as SavedProvider & Record<string, unknown>
   const model1mSupport = normalizeModel1mSupport(rawModel1mSupport)
+  const imageGeneration = normalizeImageGeneration(rawImageGeneration)
   return {
     ...rest,
     apiFormat: provider.apiFormat ?? 'anthropic',
@@ -191,6 +227,22 @@ export function normalizeSavedProvider(provider: SavedProvider): SavedProvider {
     toolSearchEnabled: normalizeToolSearchEnabled(rawProvider.toolSearchEnabled),
     ...(normalizeDisableExperimentalBetas(rawDisableExperimentalBetas) ? { disableExperimentalBetas: true } : {}),
     ...(model1mSupport !== undefined ? { model1mSupport } : {}),
+    ...(imageGeneration !== undefined ? { imageGeneration } : {}),
+  }
+}
+
+function buildImageGenerationManagedEnv(
+  provider: SavedProvider,
+): Record<string, string> {
+  const imageGeneration = normalizeImageGeneration(provider.imageGeneration)
+  if (!imageGeneration) return {}
+
+  return {
+    [IMAGE_GENERATION_PROVIDER_KIND_ENV_KEY]: 'openai_images',
+    [IMAGE_GENERATION_PROVIDER_ID_ENV_KEY]: provider.id,
+    [IMAGE_GENERATION_BASE_URL_ENV_KEY]: imageGeneration.baseUrl ?? provider.baseUrl,
+    [IMAGE_GENERATION_API_KEY_ENV_KEY]: imageGeneration.apiKey ?? provider.apiKey,
+    [IMAGE_GENERATION_MODEL_ENV_KEY]: imageGeneration.model,
   }
 }
 
@@ -282,59 +334,25 @@ function getPresetModelContextWindows(presetId: string): Record<string, number> 
   return PROVIDER_PRESETS.find((preset) => preset.id === presetId)?.modelContextWindows ?? {}
 }
 
-function isXiaomiMimoProvider(provider: SavedProvider, models: SavedProvider['models']): boolean {
-  const baseUrl = provider.baseUrl.toLowerCase()
-  const modelIds = Object.values(models).map((model) => model.toLowerCase())
-  return (
-    baseUrl.includes('xiaomimimo.com') ||
-    modelIds.some((model) => /^mimo-v\d/i.test(model))
-  )
-}
-
-function getCustomProviderModelCapabilities(
-  provider: SavedProvider,
-  models: SavedProvider['models'],
-): string {
-  if (isXiaomiMimoProvider(provider, models)) {
-    return XIAOMI_MIMO_MODEL_CAPABILITIES
-  }
-  return CUSTOM_PROVIDER_MODEL_CAPABILITIES
-}
-
-function getKimiModelCapabilities(model: string): string {
-  const normalized = model
-    .trim()
-    .replace(/\[1m\]$/i, '')
-    .replace(/:1m$/i, '')
-    .toLowerCase()
-  return normalized === 'k3'
-    ? KIMI_K3_MODEL_CAPABILITIES
-    : KIMI_CODING_FALLBACK_MODEL_CAPABILITIES
-}
-
 function getProviderCapabilityEnv(
   provider: SavedProvider,
   models: SavedProvider['models'],
 ): Record<string, string> {
-  if (provider.presetId === 'custom') {
-    const capabilities = getCustomProviderModelCapabilities(provider, models)
-    return {
-      ...(models.fable
-        ? { ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES: capabilities }
-        : {}),
-      ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES: capabilities,
-      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: capabilities,
-      ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES: capabilities,
-    }
+  const apiFormat = provider.apiFormat ?? 'anthropic'
+  return {
+    ...(models.fable
+      ? {
+          ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES:
+            getClaudeCodeModelCapabilities(models.fable, apiFormat),
+        }
+      : {}),
+    ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES:
+      getClaudeCodeModelCapabilities(models.haiku, apiFormat),
+    ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES:
+      getClaudeCodeModelCapabilities(models.sonnet, apiFormat),
+    ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES:
+      getClaudeCodeModelCapabilities(models.opus, apiFormat),
   }
-  if (provider.presetId === 'kimi') {
-    return {
-      ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES: getKimiModelCapabilities(models.haiku),
-      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: getKimiModelCapabilities(models.sonnet),
-      ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES: getKimiModelCapabilities(models.opus),
-    }
-  }
-  return {}
 }
 
 export function buildProviderAuthEnv(
@@ -434,8 +452,8 @@ export function buildProviderManagedEnv(
         : presetDefaultEnv.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES)
 
   return {
-    ...omitAuthEnv(presetDefaultEnv),
     ...providerCapabilityEnv,
+    ...omitAuthEnv(presetDefaultEnv),
     ...(mainModelCapabilities
       ? { ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES: mainModelCapabilities }
       : {}),
@@ -469,6 +487,7 @@ export function buildProviderManagedEnv(
     ANTHROPIC_DEFAULT_SONNET_MODEL: runtimeModels.sonnet,
     ANTHROPIC_DEFAULT_OPUS_MODEL: runtimeModels.opus,
     ...attributionHeaderEnvForModel(runtimeModels.main),
+    ...buildImageGenerationManagedEnv(provider),
   }
 }
 

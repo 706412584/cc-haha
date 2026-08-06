@@ -9,7 +9,6 @@
 
 import * as Lark from '@larksuiteoapi/node-sdk'
 import * as path from 'node:path'
-import * as fs from 'node:fs/promises'
 import { WsBridge, type ServerMessage, type AttachmentRef } from '../common/ws-bridge.js'
 import { MessageDedup } from '../common/message-dedup.js'
 import { StreamingCard } from './streaming-card.js'
@@ -19,7 +18,6 @@ import {
   formatImHelp,
   formatImStatus,
   formatPermissionRequest,
-  splitMessage,
 } from '../common/format.js'
 import {
   formatPermissionDecisionStatus,
@@ -31,7 +29,6 @@ import { SessionStore } from '../common/session-store.js'
 import { AdapterHttpClient, type RecentProject } from '../common/http-client.js'
 import { restoreStoredSessionBinding } from '../common/session-recovery.js'
 import { isAllowedUser, tryPair } from '../common/pairing.js'
-import { optimizeMarkdownForFeishu } from './markdown-style.js'
 import { extractInboundPayload } from './extract-payload.js'
 import { FeishuMediaService } from './media.js'
 import { AttachmentStore } from '../common/attachment/attachment-store.js'

@@ -46,7 +46,10 @@ import {
   checkMockRateLimitError,
   isMockRateLimitError,
 } from '../rateLimitMocking.js'
-import { REPEATED_529_ERROR_MESSAGE } from './errors.js'
+import {
+  isContextOverflowErrorText,
+  REPEATED_529_ERROR_MESSAGE,
+} from './errors.js'
 import {
   extractConnectionErrorDetails,
   hasAPIErrorType,
@@ -990,6 +993,12 @@ function shouldRetry(error: APIError): boolean {
   // Clear API key cache on 401 and allow retry.
   // OAuth token handling is done in the main retry loop via handleOAuth401Error.
   if (error.status === 401) {
+    // Some gateways wrap context-overflow rejections in a 401 (#1162).
+    // Retrying just replays the same oversized prompt — fail fast so the
+    // overflow surfaces and compaction can react instead.
+    if (isContextOverflowErrorText(error.message)) {
+      return false
+    }
     clearApiKeyHelperCache()
     return true
   }

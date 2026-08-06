@@ -48,7 +48,7 @@ vi.mock('../lib/desktopRuntime', () => ({
   isDesktopRuntime: () => desktopRuntimeMock.isDesktop,
 }))
 
-import { GeneralSettings } from './Settings'
+import { GeneralSettings } from './settings/GeneralSettings'
 import { useSessionStore } from '../stores/sessionStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import { useUIStore } from '../stores/uiStore'

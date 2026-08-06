@@ -303,6 +303,43 @@ describe('MarkdownRenderer', () => {
     ])
   })
 
+  it('resolves every image source through resolveImageSrc when provided', () => {
+    const { container } = render(
+      <MarkdownRenderer
+        content={[
+          '![relative](assets/logo.png)',
+          '![remote](https://img.shields.io/badge/stars-1k.svg)',
+          '<img alt="raw-html" src="./raw.png">',
+        ].join('\n')}
+        resolveImageSrc={(src) => `resolved:${src}`}
+      />,
+    )
+
+    const images = Array.from(container.querySelectorAll('img'))
+    expect(images.map((image) => image.getAttribute('src'))).toEqual([
+      'resolved:assets/logo.png',
+      'resolved:https://img.shields.io/badge/stars-1k.svg',
+      'resolved:./raw.png',
+    ])
+  })
+
+  it('strips the image when resolveImageSrc returns null', () => {
+    const { container } = render(
+      <MarkdownRenderer
+        content={[
+          '![kept](keep.png)',
+          '![dropped](drop.png)',
+        ].join('\n')}
+        resolveImageSrc={(src) => (src === 'drop.png' ? null : `resolved:${src}`)}
+      />,
+    )
+
+    const images = Array.from(container.querySelectorAll('img'))
+    expect(images).toHaveLength(2)
+    expect(images[0]!.getAttribute('src')).toBe('resolved:keep.png')
+    expect(images[1]!.hasAttribute('src')).toBe(false)
+  })
+
   it('strips style tags from assistant text before injecting markdown html', () => {
     const { container } = render(
       <MarkdownRenderer

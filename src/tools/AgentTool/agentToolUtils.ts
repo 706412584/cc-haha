@@ -720,6 +720,7 @@ async function runAsyncAgentLifecycleImpl({
   metadata,
   description,
   toolUseContext,
+  parentToolUseId,
   rootSetAppState,
   agentIdForCleanup,
   enableSummarization,
@@ -735,6 +736,10 @@ async function runAsyncAgentLifecycleImpl({
   metadata: Parameters<typeof finalizeAgentTool>[2]
   description: string
   toolUseContext: ToolUseContext
+  /** Agent card this run belongs to. Always the Agent call that spawned the
+   * agent — never the tool driving a resume, which has its own id and would
+   * otherwise adopt the agent's activity and completion notification. */
+  parentToolUseId: string | undefined
   rootSetAppState: SetAppState
   agentIdForCleanup: string
   enableSummarization: boolean
@@ -743,6 +748,7 @@ async function runAsyncAgentLifecycleImpl({
     worktreeBranch?: string
   }>
 }): Promise<void> {
+  const agentToolUseId = parentToolUseId
   let stopSummarization: (() => void) | undefined
   const agentMessages: MessageType[] = []
   try {
@@ -799,14 +805,14 @@ async function runAsyncAgentLifecycleImpl({
       emitAgentToolActivitiesForMessage(
         message,
         taskId,
-        toolUseContext.toolUseId,
+        agentToolUseId,
       )
       const lastToolName = getLastToolUseName(message)
       if (message.type === 'assistant') {
         emitTaskProgress(
           tracker,
           taskId,
-          toolUseContext.toolUseId,
+          agentToolUseId,
           description,
           metadata.startTime,
           lastToolName,
@@ -835,7 +841,7 @@ async function runAsyncAgentLifecycleImpl({
         durationMs: agentResult.totalDurationMs,
       },
       outputPath: getAgentProgressOutputPath(taskId),
-      toolUseId: toolUseContext.toolUseId,
+      toolUseId: agentToolUseId,
       epoch,
     })
     if (!notified) {
@@ -887,7 +893,7 @@ async function runAsyncAgentLifecycleImpl({
         description,
         status: 'killed',
         setAppState: rootSetAppState,
-        toolUseId: toolUseContext.toolUseId,
+        toolUseId: agentToolUseId,
         finalMessage: partialResult,
         outputPath: getAgentProgressOutputPath(taskId),
         epoch,
@@ -907,7 +913,7 @@ async function runAsyncAgentLifecycleImpl({
       status: 'failed',
       error: msg,
       setAppState: rootSetAppState,
-      toolUseId: toolUseContext.toolUseId,
+      toolUseId: agentToolUseId,
       outputPath: getAgentProgressOutputPath(taskId),
       epoch,
     })

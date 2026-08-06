@@ -14,10 +14,16 @@ const ModelMappingSchema = z.object({
   opus: z.string(),
 })
 
+const ProviderRegionalEndpointSchema = z.object({
+  region: z.string().min(1),
+  baseUrl: z.string().url(),
+})
+
 const ProviderPresetSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   baseUrl: z.string(),
+  regionalEndpoints: z.array(ProviderRegionalEndpointSchema).min(1).optional(),
   apiFormat: ApiFormatSchema,
   defaultModels: ModelMappingSchema,
   needsApiKey: z.boolean(),

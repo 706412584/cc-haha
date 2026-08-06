@@ -1,7 +1,12 @@
 import { useBrowserPanelStore } from '../stores/browserPanelStore'
 import { useChatStore } from '../stores/chatStore'
+import { MAX_PREVIEW_SELECTIONS, usePreviewSelectionStore } from '../stores/previewSelectionStore'
+import { useUIStore } from '../stores/uiStore'
+import { t } from '../i18n'
 import { getDesktopHost } from './desktopHost'
 import { buildSelectionDirectMessage, type SelectionPayload } from './selectionComposer'
+import { previewBridge } from './previewBridge'
+import { buildPreviewPickerMessage } from './previewSelectionPicker'
 
 function kindLabel(kind?: string): string {
   if (kind === 'viewport') return 'viewport'
@@ -14,14 +19,36 @@ export async function subscribePreviewEvents(sessionId: string): Promise<() => v
   if (!host.capabilities.previewWebview) return () => {}
 
   return host.preview.onEvent((payload) => {
-    let msg: { type?: string; url?: string; title?: string; dataUrl?: string; kind?: string; payload?: unknown }
+    let msg: {
+      type?: string
+      url?: string
+      title?: string
+      dataUrl?: string
+      kind?: string
+      reason?: string
+      payload?: unknown
+    }
     try {
       msg = typeof payload === 'string'
         ? JSON.parse(payload)
         : payload as typeof msg
     } catch { return }
     const store = useBrowserPanelStore.getState()
-    if (msg.type === 'navigated' && msg.url) store.setNavigated(sessionId, msg.url, msg.title ?? '')
+    if (msg.type === 'navigated' && msg.url) {
+      // A page navigation destroys the injected agent and its reversible live edits,
+      // so a draft from the previous document must never follow the new page.
+      const discardedCount = usePreviewSelectionStore.getState().bySession[sessionId]?.items.length ?? 0
+      if (discardedCount > 0) {
+        void previewBridge.message({ v: 1, type: 'clear-selection-draft' })
+        useUIStore.getState().addToast({
+          type: 'warning',
+          message: t('browser.selection.navigationDiscarded', { count: discardedCount }),
+        })
+      }
+      usePreviewSelectionStore.getState().clear(sessionId)
+      store.setPicker(sessionId, false)
+      store.setNavigated(sessionId, msg.url, msg.title ?? '')
+    }
     else if (msg.type === 'ready') store.setReady(sessionId)
     else if (msg.type === 'screenshot' && msg.dataUrl) {
       useChatStore.getState().queueComposerPrefill(sessionId, {
@@ -34,8 +61,23 @@ export async function subscribePreviewEvents(sessionId: string): Promise<() => v
       if (!store.bySession[sessionId]?.pickerActive) return
       // 选区事件意味着页面侧已结束一次性拾取——同步关闭宿主侧 picker 态，避免按钮卡在按下态
       store.setPicker(sessionId, false)
-      const p = msg.payload as (SelectionPayload & { screenshot?: { dataUrl?: string; kind?: string } }) | undefined
+      const p = msg.payload as SelectionPayload | undefined
       if (!p || typeof p !== 'object' || !p.element) return
+      if (p.delivery === 'queue') {
+        const item = usePreviewSelectionStore.getState().add(sessionId, p)
+        if (!item) return
+        const draft = usePreviewSelectionStore.getState().bySession[sessionId]!
+        if (draft.items.length < MAX_PREVIEW_SELECTIONS) {
+          store.setPicker(sessionId, true)
+          void previewBridge.message(buildPreviewPickerMessage('batch', draft.nextNumber))
+        } else {
+          useUIStore.getState().addToast({
+            type: 'info',
+            message: t('browser.selection.limitReached', { count: MAX_PREVIEW_SELECTIONS }),
+          })
+        }
+        return
+      }
       const selection = buildSelectionDirectMessage(p)
       const attachments = p.screenshot?.dataUrl
         ? [{
@@ -55,6 +97,11 @@ export async function subscribePreviewEvents(sessionId: string): Promise<() => v
     }
     else if (msg.type === 'picker-exited') {
       store.setPicker(sessionId, false)
+      const draft = usePreviewSelectionStore.getState().bySession[sessionId]
+      if (msg.reason === 'cancel-current' && draft?.items.length) {
+        store.setPicker(sessionId, true)
+        void previewBridge.message(buildPreviewPickerMessage('batch', draft.nextNumber))
+      }
     }
     else if (msg.type === 'error') {
       console.warn('[preview-agent]', msg)
