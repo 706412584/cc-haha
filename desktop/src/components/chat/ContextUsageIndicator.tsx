@@ -126,7 +126,6 @@ export function ContextUsageIndicator({
   const inFlightRequestRef = useRef<Promise<boolean> | null>(null)
   const inFlightIdentityRef = useRef<string | null>(null)
   const lastAutoRefreshAtRef = useRef(0)
-  const lastNonIdleChatStateRef = useRef<ChatState>(chatState)
   const contextEnabledRef = useRef(contextEnabled)
   contextEnabledRef.current = contextEnabled
 
@@ -310,8 +309,6 @@ export function ContextUsageIndicator({
   }, [refresh])
 
   useEffect(() => {
-    lastNonIdleChatStateRef.current = chatState
-
     // Idle transitions are recovered by the forceRefreshWithRetry effect above.
     // Keep a poll only while the turn is actively consuming context.
     if (chatState === 'idle') return
