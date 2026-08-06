@@ -2523,7 +2523,9 @@ export const jp: Record<TranslationKey, string> = {
   'toolGroup.fetchedMany': '{count} 件のページを取得しました',
 
   // ─── Tasks ──────────────────────────────────────
+  'tasks.title': 'タスク',
   'tasks.completed': '完了したタスク',
+  'tasks.dismissCompleted': '完了したタスクを非表示',
   'tasks.newTask': '＋ 新しいタスク',
   'tasks.emptyTitle': 'スケジュールされたタスクはまだありません',
   'tasks.emptyDesc': '繰り返しタスクを作成して、エンジニアリングのワークフローを自動化しましょう。',
@@ -2701,14 +2703,17 @@ export const jp: Record<TranslationKey, string> = {
   'fileSearch.fileTag': 'ファイル',
   'fileSearch.openFolder': 'フォルダを開く',
 
+
   // ─── Teams ──────────────────────────────────────
   'teams.backToLeader': '\u2190 \u30ea\u30fc\u30c0\u30fc\u306b\u623b\u308b',
   'teams.viewing': '\u8868\u793a\u4e2d:',
   'teams.transcript': '記録',
   'teams.noMessages': 'メッセージはまだありません',
+  'teams.team': 'チーム:',
   'teams.members': 'メンバー',
   'teams.working': '作業中...',
   'teams.thinking': '思考中...',
+  'teams.running': '実行中',
   'teams.leader': 'team-lead',
   'teams.memberPlaceholder': 'このメンバーに直接メッセージを送信...',
   'teams.memberSessionHint': 'ここでのメッセージはこのメンバーに直接届き、記録の更新を見ながらやり取りできます。',

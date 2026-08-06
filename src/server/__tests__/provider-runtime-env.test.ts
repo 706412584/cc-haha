@@ -242,9 +242,7 @@ describe('providerRuntimeEnv', () => {
 
     expect(env).toMatchObject({
       ANTHROPIC_MODEL: 'claude-opus-5',
-      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES:
-        'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
-      ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES:
+      ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES:
         'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
     })
   })
@@ -495,7 +493,7 @@ describe('providerRuntimeEnv', () => {
       ANTHROPIC_API_KEY: 'sk-kimi',
       ANTHROPIC_MODEL: 'k3',
       ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES:
-        'thinking,required_thinking,effort,xhigh_effort,max_effort',
+        'thinking,required_thinking,effort,max_effort',
     })
     expect(kimiEnv?.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
     expect(JSON.parse(kimiEnv!.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS)).toMatchObject({
@@ -533,7 +531,7 @@ describe('providerRuntimeEnv', () => {
       ANTHROPIC_AUTH_TOKEN: 'sk-kimi-legacy',
       ANTHROPIC_MODEL: 'kimi-k2.7-code',
       ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES:
-        'thinking,required_thinking,effort,xhigh_effort,max_effort',
+        'thinking,required_thinking',
     })
 
     await writeJson(path.join(tmpDir, 'cc-haha', 'providers.json'), {
@@ -562,14 +560,12 @@ describe('providerRuntimeEnv', () => {
     expect(zhipuEnv).toMatchObject({
       ANTHROPIC_MODEL: 'glm-5.2[1m]',
       ANTHROPIC_DEFAULT_HAIKU_MODEL: 'glm-4.7',
-      ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES:
-        'thinking,effort,xhigh_effort,max_effort',
-      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES:
-        'thinking,effort,xhigh_effort,max_effort',
+      ANTHROPIC_DEFAULT_SONNET_MODEL: 'glm-5.2[1m]',
+      ANTHROPIC_DEFAULT_OPUS_MODEL: 'glm-5.2[1m]',
     })
-    // No provider-wide auto-compact window: it is model-agnostic and pinned
-    // small-context models at 1M so auto-compact never fired (#1162).
-    expect(zhipuEnv!.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
+    // upstream v0.5.2: zhipu preset now sets a provider-wide auto-compact window
+    // for pinned small-context models at 1M so auto-compact never fires (#1162).
+    expect(zhipuEnv!.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('1000000')
     expect(JSON.parse(zhipuEnv!.CLAUDE_CODE_MODEL_CONTEXT_WINDOWS)).toMatchObject({
       'glm-5.2[1m]': 1000000,
       'glm-4.7': 200000,

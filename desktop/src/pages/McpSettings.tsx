@@ -900,7 +900,7 @@ export function McpSettings() {
   useEffect(() => {
     const inspectedKey =
       view.type === 'details' || view.type === 'edit'
-        ? getServerIdentityKey(view.server)
+        ? getMcpServerIdentityKey(view.server)
         : null
     if (!inspectedKey) return
     setDetailsTab('overview')
@@ -908,7 +908,7 @@ export function McpSettings() {
   }, [
     view.type,
     view.type === 'details' || view.type === 'edit'
-      ? getServerIdentityKey(view.server)
+      ? getMcpServerIdentityKey(view.server)
       : '',
   ])
 
@@ -997,13 +997,13 @@ export function McpSettings() {
   }
 
   const handleRefresh = async (server: McpServerRecord) => {
-    const key = getServerIdentityKey(server)
+    const key = getMcpServerIdentityKey(server)
     setBusyServerKey(key)
     try {
       const updated = await refreshServerStatus(server, resolveOperationCwd(server))
       setView((current) => {
         if (current.type !== 'details' && current.type !== 'edit') return current
-        if (getServerIdentityKey(current.server) !== key) return current
+        if (getMcpServerIdentityKey(current.server) !== key) return current
         return { ...current, server: updated }
       })
     } catch {

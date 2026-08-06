@@ -2523,7 +2523,9 @@ export const kr: Record<TranslationKey, string> = {
   'toolGroup.fetchedMany': '페이지 {count}개를 가져왔습니다',
 
   // ─── Tasks ──────────────────────────────────────
+  'tasks.title': '작업',
   'tasks.completed': '완료된 작업',
+  'tasks.dismissCompleted': '완료된 작업 숨기기',
   'tasks.newTask': '＋ 새 작업',
   'tasks.emptyTitle': '아직 예약된 작업이 없습니다',
   'tasks.emptyDesc': '반복 작업을 만들어 엔지니어링 워크플로를 자동화하세요.',
@@ -2701,14 +2703,17 @@ export const kr: Record<TranslationKey, string> = {
   'fileSearch.fileTag': '파일',
   'fileSearch.openFolder': '폴더 열기',
 
+
   // ─── Teams ──────────────────────────────────────
   'teams.backToLeader': '\u2190 \ub9ac\ub354\ub85c \ub3cc\uc544\uac00\uae30',
   'teams.viewing': '\ubcf4\ub294 \uc911:',
   'teams.transcript': '기록',
   'teams.noMessages': '아직 메시지가 없습니다',
+  'teams.team': '팀:',
   'teams.members': '멤버',
   'teams.working': '작업 중...',
   'teams.thinking': '사고 중...',
+  'teams.running': '실행 중',
   'teams.leader': 'team-lead',
   'teams.memberPlaceholder': '이 팀원에게 직접 메시지 보내기...',
   'teams.memberSessionHint': '여기서 보내는 메시지는 이 팀원에게 바로 전달되며, 기록이 업데이트되는 것을 보면서 주고받을 수 있습니다.',

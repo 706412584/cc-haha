@@ -385,11 +385,9 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
       if (!activeTabId || detail.sessionId !== activeTabId) return
       setComposerInput(detail.text)
       requestAnimationFrame(() => {
-        const el = textareaRef.current
-        if (!el) return
-        el.focus()
-        const len = el.value.length
-        el.setSelectionRange(len, len)
+        composerRef.current?.focus()
+        const len = detail.text.length
+        composerRef.current?.setSelectionOffsets(len)
       })
     }
     window.addEventListener(COMPOSER_PREFILL_EVENT, handler as EventListener)
@@ -956,13 +954,13 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
         if (key === 'Escape') {
           setSkillPickerOpen(false)
           setPluginPickerOpen(false)
-          return
+          return true
         }
-        skillPickerRef.current?.handleKeyDown(event.nativeEvent)
-        return
+        skillPickerRef.current?.handleKeyDown(event)
+        return true
       }
-      // Other keys (typing) keep flowing to the textarea.
-      return
+      // Other keys (typing) keep flowing to the editor.
+      return false
     }
 
     if (slashMenuOpen && filteredCommands.length > 0) {
@@ -1153,8 +1151,7 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
   }
 
   const insertReferenceToken = (token: string) => {
-    const el = textareaRef.current
-    const cursorPos = el?.selectionStart ?? input.length
+    const cursorPos = composerRef.current?.getSelectionOffsets().start ?? input.length
     const before = input.slice(0, cursorPos)
     const after = input.slice(cursorPos)
     const needsLeadingSpace = before.length > 0 && !/\s$/.test(before)
@@ -1164,8 +1161,8 @@ export function ChatInput({ variant = 'default', compact = false }: ChatInputPro
     const nextCursor = before.length + insertion.length
     setComposerInput(next)
     requestAnimationFrame(() => {
-      textareaRef.current?.focus()
-      textareaRef.current?.setSelectionRange(nextCursor, nextCursor)
+      composerRef.current?.focus()
+      composerRef.current?.setSelectionOffsets(nextCursor)
     })
   }
 

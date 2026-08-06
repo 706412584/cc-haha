@@ -2524,7 +2524,9 @@ export const zh: Record<TranslationKey, string> = {
   'toolGroup.fetchedMany': '获取了 {count} 个页面',
 
   // ─── Tasks ──────────────────────────────────────
+  'tasks.title': '任务',
   'tasks.completed': '已完成的任务',
+  'tasks.dismissCompleted': '隐藏已完成任务',
   'tasks.newTask': '＋ 新建任务',
   'tasks.emptyTitle': '暂无定时任务',
   'tasks.emptyDesc': '创建定时任务来自动化你的工程工作流。',
@@ -2702,14 +2704,17 @@ export const zh: Record<TranslationKey, string> = {
   'fileSearch.fileTag': '文件',
   'fileSearch.openFolder': '打开目录',
 
+
   // ─── Teams ──────────────────────────────────────
   'teams.backToLeader': '\u2190 返回主控',
   'teams.viewing': '查看:',
   'teams.transcript': '记录',
   'teams.noMessages': '暂无消息',
+  'teams.team': '团队:',
   'teams.members': '名成员',
   'teams.working': '正在工作中...',
   'teams.thinking': '正在思考中...',
+  'teams.running': '运行中',
   'teams.leader': '主控',
   'teams.memberPlaceholder': '直接给这个 Agent 发消息...',
   'teams.memberSessionHint': '这里发送的消息会直接投递给该 Agent，同时继续刷新它的 transcript。',

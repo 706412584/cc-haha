@@ -1,6 +1,6 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { BookMarked, ChevronDown, ChevronRight, CircleCheck, Settings } from 'lucide-react'
-import { ToolCallBlock } from './ToolCallBlock'
+import { ImageBlockGallery, ToolCallBlock, type ImageBlock } from './ToolCallBlock'
 import { ImageGenerationGroup, type ImageGenerationItem } from './ImageGenerationBlock'
 import { isImageGenerationToolName } from './imageGenerationTools'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
@@ -62,17 +62,6 @@ function imageGenerationItems(
     }
   })
 }
-
-function useExpandableCardState() {
-  const [expanded, setExpanded] = useState(false)
-
-  const toggleExpanded = useCallback(() => {
-    setExpanded((value) => !value)
-  }, [])
-
-  return { expanded, toggleExpanded }
-}
-
 
 type Props = {
   sessionId?: string | null
@@ -474,6 +463,7 @@ function AgentToolGroup({
   agentTaskNotifications,
   agentTaskStatuses,
   showOpenRun = true,
+  isStreaming,
 }: Props) {
   const t = useTranslation()
   const statuses = toolCalls.map((toolCall) =>
@@ -481,6 +471,7 @@ function AgentToolGroup({
       hasResult: resultMap.has(toolCall.toolUseId),
       isError: !!resultMap.get(toolCall.toolUseId)?.isError,
       isLaunchResult: isAgentLaunchResult(resultMap.get(toolCall.toolUseId)?.content),
+      isStreaming: !!isStreaming && !resultMap.has(toolCall.toolUseId),
       childCount: (childToolCallsByParent.get(toolCall.toolUseId) ?? []).length,
       taskStatus: agentTaskNotifications[toolCall.toolUseId]?.status ?? agentTaskStatuses?.[toolCall.toolUseId],
     }),
@@ -571,6 +562,7 @@ function AgentToolGroup({
                   agentTaskNotification={agentTaskNotifications[toolCall.toolUseId]}
                   agentTaskStatus={agentTaskStatuses?.[toolCall.toolUseId]}
                   showOpenRun={showOpenRun}
+                  isStreaming={!!isStreaming && !resultMap.has(toolCall.toolUseId)}
                 />
               </div>
             ))}
@@ -641,6 +633,7 @@ function AgentCallCard({
   agentTaskNotification,
   agentTaskStatus,
   showOpenRun = true,
+  isStreaming = false,
 }: {
   sessionId?: string | null
   toolCall: ToolCall
@@ -649,6 +642,7 @@ function AgentCallCard({
   agentTaskNotification?: AgentTaskNotification
   agentTaskStatus?: BackgroundAgentTask['status']
   showOpenRun?: boolean
+  isStreaming?: boolean
 }) {
   const [expanded, setExpanded] = useState(false)
   const [previewOpen, setPreviewOpen] = useState(false)
@@ -664,6 +658,7 @@ function AgentCallCard({
     hasResult: !!result,
     isError: !!result?.isError,
     isLaunchResult,
+    isStreaming,
     childCount: childToolCalls.length,
     taskStatus: agentTaskNotification?.status ?? agentTaskStatus,
   })
@@ -978,12 +973,14 @@ function getAgentStatus({
   hasResult,
   isError,
   isLaunchResult,
+  isStreaming,
   childCount,
   taskStatus,
 }: {
   hasResult: boolean
   isError: boolean
   isLaunchResult: boolean
+  isStreaming: boolean
   childCount: number
   taskStatus?: AgentTaskStatus
 }): AgentStatus {

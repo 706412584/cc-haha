@@ -2554,7 +2554,9 @@ Row 9, all 8 cells: continuing from straight down, turning left through lower-le
   'toolGroup.fetchedMany': 'fetched {count} pages',
 
   // ─── Tasks ──────────────────────────────────────
+  'tasks.title': 'Tasks',
   'tasks.completed': 'Tasks completed',
+  'tasks.dismissCompleted': 'Hide completed tasks',
   'tasks.newTask': '+ New task',
   'tasks.emptyTitle': 'No scheduled tasks yet',
   'tasks.emptyDesc': 'Create a recurring task to automate your engineering workflows.',
@@ -2732,14 +2734,17 @@ Row 9, all 8 cells: continuing from straight down, turning left through lower-le
   'fileSearch.fileTag': 'file',
   'fileSearch.openFolder': 'Open folder',
 
+
   // ─── Teams ──────────────────────────────────────
   'teams.backToLeader': '\u2190 Back to Leader',
   'teams.viewing': 'Viewing:',
   'teams.transcript': 'transcript',
   'teams.noMessages': 'No messages yet',
+  'teams.team': 'Team:',
   'teams.members': 'members',
   'teams.working': 'Working...',
   'teams.thinking': 'Thinking...',
+  'teams.running': 'running',
   'teams.leader': 'team-lead',
   'teams.memberPlaceholder': 'Message this teammate directly...',
   'teams.memberSessionHint': 'Messages here go straight to this teammate while you watch its transcript update.',

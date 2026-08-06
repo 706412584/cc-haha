@@ -2522,7 +2522,9 @@ export const zh: Record<TranslationKey, string> = {
   'toolGroup.fetchedMany': '獲取了 {count} 個頁面',
 
   // ─── Tasks ──────────────────────────────────────
+  'tasks.title': '任務',
   'tasks.completed': '已完成的任務',
+  'tasks.dismissCompleted': '隱藏已完成任務',
   'tasks.newTask': '＋ 新建任務',
   'tasks.emptyTitle': '暫無定時任務',
   'tasks.emptyDesc': '建立定時任務來自動化你的工程工作流。',
@@ -2700,14 +2702,17 @@ export const zh: Record<TranslationKey, string> = {
   'fileSearch.fileTag': '檔案',
   'fileSearch.openFolder': '開啟目錄',
 
+
   // ─── Teams ──────────────────────────────────────
   'teams.backToLeader': '\u2190 返回主控',
   'teams.viewing': '檢視:',
   'teams.transcript': '記錄',
   'teams.noMessages': '暫無訊息',
+  'teams.team': '團隊:',
   'teams.members': '名成員',
   'teams.working': '正在工作中...',
   'teams.thinking': '正在思考中...',
+  'teams.running': '執行中',
   'teams.leader': '主控',
   'teams.memberPlaceholder': '直接給這個 Agent 發訊息...',
   'teams.memberSessionHint': '這裡傳送的訊息會直接投遞給該 Agent，同時繼續重新整理它的 transcript。',

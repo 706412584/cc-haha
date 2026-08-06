@@ -12,7 +12,6 @@ import { randomSpinnerVerb } from '../config/spinnerVerbs'
 import { notifyDesktop } from '../lib/desktopNotifications'
 import { t } from '../i18n'
 import { deriveSessionTitle, isPlaceholderSessionTitle } from '../lib/sessionTitle'
-import { t } from '../i18n'
 import {
   VISUAL_SELECTION_BATCH_PROMPT_HEADER,
   VISUAL_SELECTION_PROMPT_FOOTER,
@@ -2142,10 +2141,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           stoppingBackgroundTaskIds[task.taskId] = true
         }
       }
-      const pendingAssistantText = `${session.streamingText}${bufferedText}`
-      const messagesWithFlushedText = pendingAssistantText.trim()
-        ? appendAssistantTextMessage(session.messages, pendingAssistantText, Date.now())
-        : session.messages
       return {
         sessions: {
           ...s.sessions,
@@ -3660,33 +3655,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         update((session) => {
           const stoppingBackgroundTaskIds = { ...session.stoppingBackgroundTaskIds }
           delete stoppingBackgroundTaskIds[msg.taskId]
-          const task = session.backgroundAgentTasks?.[msg.taskId]
-          if (!task && session.historyStatus === 'loading') {
-            return {
-              stoppingBackgroundTaskIds,
-              pendingBackgroundTaskStopFailures: {
-                ...session.pendingBackgroundTaskStopFailures,
-                [msg.taskId]: msg.message,
-              },
-            }
-          }
-          const taskAlreadyFinished = task !== undefined && task.status !== 'running'
-          return {
-            stoppingBackgroundTaskIds,
-            ...(taskAlreadyFinished ? {} : {
-              messages: [
-                ...session.messages,
-                {
-                  id: nextId(),
-                  type: 'error',
-                  message: msg.message,
-                  code: 'STOP_BACKGROUND_TASK_FAILED',
-                  timestamp: Date.now(),
-                },
-              ],
-              historyMutationEpoch: (session.historyMutationEpoch ?? 0) + 1,
-            }),
-          }
+          return { stoppingBackgroundTaskIds }
         })
         break
       }

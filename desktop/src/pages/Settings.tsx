@@ -66,10 +66,6 @@ import { CcSwitchImportModal } from '../components/settings/CcSwitchImportModal'
 import { ChatGPTOfficialLogin } from '../components/settings/ChatGPTOfficialLogin'
 import { GrokOfficialLogin } from '../components/settings/GrokOfficialLogin'
 import { AgentManager } from '../components/settings/AgentManager'
-import { H5AccessSettings } from './settings/H5AccessSettings'
-import { GeneralSettings } from './settings/GeneralSettings'
-import { AboutSettings } from './settings/AboutSettings'
-import { ProviderSettings } from './settings/ProviderSettings'
 import {
   BUILT_IN_PROVIDER_IDS,
   CLAUDE_OFFICIAL_PROVIDER_ID,
@@ -77,11 +73,14 @@ import {
 } from '../constants/openaiOfficialProvider'
 import { GROK_OFFICIAL_PROVIDER_ID } from '../constants/grokOfficialProvider'
 import { useUpdateStore } from '../stores/updateStore'
+import { useSessionStore } from '../stores/sessionStore'
 import { getBaseUrl } from '../api/client'
+import { h5AccessApi } from '../api/h5Access'
 import { formatBytes } from '../lib/formatBytes'
 import { isDesktopRuntime } from '../lib/desktopRuntime'
 import { getDesktopHost } from '../lib/desktopHost'
 import { publicAssetPath } from '../lib/publicAsset'
+import { isBrowserSafePort } from '../lib/browserSafePort'
 import {
   getDesktopNotificationPermission,
   notifyDesktop,
@@ -98,6 +97,124 @@ import {
 } from '../lib/providerSettingsJson'
 import { copyTextToClipboard } from '@/lib/clipboard'
 import { useMobileViewport } from '../hooks/useMobileViewport'
+import { MarkdownRenderer } from '../components/markdown/MarkdownRenderer'
+
+const NETWORK_TIMEOUT_MIN_SECONDS = 30
+const NETWORK_TIMEOUT_MAX_SECONDS = 1800
+const NETWORK_TIMEOUT_STEP_SECONDS = 30
+const SETTINGS_CHECKBOX_INPUT_CLASS = 'settings-checkbox-input peer'
+
+const BUILT_IN_OUTPUT_STYLE_TRANSLATION_KEYS = {
+  default: {
+    label: 'settings.general.outputStyleBuiltin.default.label',
+    description: 'settings.general.outputStyleBuiltin.default.description',
+  },
+  Explanatory: {
+    label: 'settings.general.outputStyleBuiltin.explanatory.label',
+    description: 'settings.general.outputStyleBuiltin.explanatory.description',
+  },
+  Learning: {
+    label: 'settings.general.outputStyleBuiltin.learning.label',
+    description: 'settings.general.outputStyleBuiltin.learning.description',
+  },
+} satisfies Record<string, { label: TranslationKey; description: TranslationKey }>
+
+function buildH5LaunchUrl(baseUrl: string | null, token: string | null): string | null {
+  if (!baseUrl) return null
+
+  try {
+    const url = new URL(baseUrl)
+    if (token) {
+      url.searchParams.set('serverUrl', baseUrl)
+      url.searchParams.set('h5Token', token)
+    }
+    return url.toString().replace(/\/$/, '')
+  } catch {
+    return token
+      ? `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}serverUrl=${encodeURIComponent(baseUrl)}&h5Token=${encodeURIComponent(token)}`
+      : baseUrl
+  }
+}
+
+function isLanH5BaseUrl(url: URL): boolean {
+  return url.protocol === 'http:' &&
+    !!url.port &&
+    (
+      url.hostname === 'localhost' ||
+      url.hostname === '127.0.0.1' ||
+      url.hostname.startsWith('10.') ||
+      url.hostname.startsWith('192.168.') ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(url.hostname) ||
+      url.hostname.startsWith('169.254.')
+    )
+}
+
+function extractH5AccessAddressDraft(baseUrl: string | null): string {
+  if (!baseUrl) return ''
+
+  try {
+    const url = new URL(baseUrl)
+    return isLanH5BaseUrl(url) ? url.hostname : baseUrl
+  } catch {
+    return baseUrl
+  }
+}
+
+function extractHostnameFromUrl(value: string | null): string | null {
+  if (!value) return null
+  try {
+    return new URL(value).hostname || null
+  } catch {
+    return null
+  }
+}
+
+function extractH5AccessPort(baseUrl: string | null): string | null {
+  if (!baseUrl) return null
+
+  try {
+    const url = new URL(baseUrl)
+    return url.port || null
+  } catch {
+    return null
+  }
+}
+
+// Mirrors the server-side fixedPort range (h5AccessService MIN/MAX_FIXED_PORT).
+function parseH5FixedPortDraft(draft: string): number | null | 'invalid' {
+  const trimmed = draft.trim()
+  if (!trimmed) return null
+  if (!/^\d{1,5}$/.test(trimmed)) return 'invalid'
+  const port = Number(trimmed)
+  return port >= 1024 && port <= 65535 && isBrowserSafePort(port) ? port : 'invalid'
+}
+
+// Mirrors the server-side disconnect grace range (h5AccessService
+// MIN/MAX_DISCONNECT_GRACE_SECONDS). Empty = use the built-in 30s default.
+function parseH5GraceDraft(draft: string): number | null | 'invalid' {
+  const trimmed = draft.trim()
+  if (!trimmed) return null
+  if (!/^\d{1,5}$/.test(trimmed)) return 'invalid'
+  const seconds = Number(trimmed)
+  return seconds >= 5 && seconds <= 86400 ? seconds : 'invalid'
+}
+
+function buildH5PublicBaseUrlFromHostDraft(draft: string, currentBaseUrl: string | null): string | null {
+  const trimmed = draft.trim()
+  if (!trimmed) return null
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) return trimmed
+
+  try {
+    const current = currentBaseUrl ? new URL(currentBaseUrl) : null
+    if (!current) return trimmed
+
+    const port = current.port ? `:${current.port}` : ''
+    const path = current.pathname === '/' ? '' : current.pathname.replace(/\/+$/, '')
+    return `${current.protocol}//${trimmed}${port}${path}`
+  } catch {
+    return trimmed
+  }
+}
 
 export function Settings() {
   const activeTab = useUIStore((s) => s.activeSettingsTab)

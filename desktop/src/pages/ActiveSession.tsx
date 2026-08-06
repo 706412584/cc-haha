@@ -62,7 +62,7 @@ import {
 import { useActivityPanelStore } from '../stores/activityPanelStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import { getSessionBrowsablePath, getSessionWorkspaceState } from '../lib/sessionWorkspace'
-import type { AgentTaskNotification, UIMessage } from '../types/chat'
+import type { UIMessage } from '../types/chat'
 
 /**
  * Stable fallbacks for optional session state. A `?? []` / `?? {}` literal allocates a
@@ -72,7 +72,6 @@ import type { AgentTaskNotification, UIMessage } from '../types/chat'
  * MessageList.tsx; the same pattern was still here.
  */
 const EMPTY_MESSAGES: UIMessage[] = []
-const EMPTY_AGENT_TASK_NOTIFICATIONS: Record<string, AgentTaskNotification> = {}
 
 const TASK_POLL_INTERVAL_MS = 1000
 const ACTIVITY_AUTOCLOSE_GRACE_MS = 2000
@@ -428,7 +427,6 @@ export function ActiveSession() {
   const dismissedBackgroundTaskKeys = activeTabId
     ? dismissedBackgroundTaskKeysBySession[activeTabId] ?? EMPTY_DISMISSED_BACKGROUND_TASK_KEYS
     : EMPTY_DISMISSED_BACKGROUND_TASK_KEYS
-  const agentTaskNotifications = sessionState?.agentTaskNotifications ?? EMPTY_AGENT_TASK_NOTIFICATIONS
   const activeGoal = sessionState?.activeGoal ?? null
   const isEmpty = messages.length === 0 && !streamingText && (session?.messageCount ?? 0) === 0
   const compactEmptyHero = isEmpty && showTerminalPanel
@@ -447,17 +445,12 @@ export function ActiveSession() {
   const visibleMessageCount = messages.length > 0 ? messages.length : session?.messageCount ?? 0
   const headerTitle = session?.title || t('session.untitled')
 
-  const isActive = chatState !== 'idle' || hasRunningBackgroundTasks
+  const isActive = chatState !== 'idle' ||
+    (trackedTaskSessionId === activeTabId && hasRunningTasks) ||
+    hasRunningBackgroundTasks
   const totalTokens = getTokenUsageTotal(tokenUsage)
   const cachedTokens = (tokenUsage.cache_read_tokens ?? 0) +
     (tokenUsage.cache_creation_tokens ?? 0)
-  const activityTeamMembers = useMemo(() => {
-    if (!activeTeam || activeTeam.leadSessionId !== activeTabId) return []
-    return activeTeam.members.filter((member) =>
-      !activeTeam.leadAgentId || member.agentId !== activeTeam.leadAgentId
-    )
-  }, [activeTabId, activeTeam])
-
 
   useEffect(() => {
     if (!unifiedActivityPanelEnabled || !activeTabId) return

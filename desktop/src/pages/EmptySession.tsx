@@ -60,7 +60,7 @@ import {
   replaceSlashCommand,
   resolveSlashUiAction,
 } from '../components/chat/composerUtils'
-import type { AttachmentRef, DisplayAttachmentRef } from '../types/chat'
+import type { AttachmentRef } from '../types/chat'
 import { attachmentImageSource } from '../lib/attachmentImages'
 import type { PermissionMode } from '../types/settings'
 import type { SlashCommandOption } from '../components/chat/composerUtils'
@@ -385,14 +385,6 @@ export function EmptySession() {
             data: attachment.data,
             mimeType: attachment.mimeType,
           }))
-      const displayAttachmentPayload: DisplayAttachmentRef[] = attachments.map((attachment) => ({
-        type: attachment.type,
-        name: attachment.name,
-        path: attachment.path,
-        data: attachment.data,
-        previewUrl: attachment.previewUrl,
-        mimeType: attachment.mimeType,
-      }))
       // Inline @-mentions go out as the `@"absolute path"` text the CLI parses,
       // serialized from the live document; the bubble keeps the pill text.
       const serializedText = (composerRef.current?.getModelContent() ?? input).trim()
@@ -627,11 +619,9 @@ export function EmptySession() {
     setFileSearchOpen(false)
     setPlusMenuOpen(false)
     requestAnimationFrame(() => {
-      const el = textareaRef.current
-      if (!el) return
-      el.focus()
-      const len = el.value.length
-      el.setSelectionRange(len, len)
+      composerRef.current?.focus()
+      const len = promptText.length
+      composerRef.current?.setSelectionOffsets(len)
     })
   }
 
@@ -698,11 +688,9 @@ export function EmptySession() {
                 // hand-off paragraph and decides what to send.
                 setInput(fallbackText)
                 requestAnimationFrame(() => {
-                  const el = textareaRef.current
-                  if (!el) return
-                  el.focus()
-                  const len = el.value.length
-                  el.setSelectionRange(len, len)
+                  composerRef.current?.focus()
+                  const len = fallbackText.length
+                  composerRef.current?.setSelectionOffsets(len)
                 })
                 return
               }
