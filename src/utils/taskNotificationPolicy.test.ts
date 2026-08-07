@@ -56,4 +56,31 @@ describe('task notification policy', () => {
     expect(batch.hasPending()).toBe(false)
     expect(batch.takeIfSettled(false)).toBeUndefined()
   })
+
+  test('parses optional mutation outcome without requiring it on legacy notifications', () => {
+    const withOutcome = parseTaskNotificationXml(`<task-notification>
+<task-id>agent-1</task-id>
+<task-type>local_agent</task-type>
+<output-file>/tmp/agent-1.out</output-file>
+<status>completed</status>
+<summary>Agent "Probe" completed (no file edits) · tool_uses=12</summary>
+<outcome><file_edits>0</file_edits><file_edit_errors>0</file_edit_errors></outcome>
+</task-notification>`)
+
+    expect(withOutcome.outcome).toEqual({
+      file_edits: 0,
+      file_edit_errors: 0,
+    })
+    expect(withOutcome.summary).toContain('no file edits')
+
+    const legacy = parseTaskNotificationXml(`<task-notification>
+<task-id>agent-1</task-id>
+<output-file>/tmp/agent-1.out</output-file>
+<status>completed</status>
+<summary>Agent "Probe" completed</summary>
+</task-notification>`)
+
+    expect(legacy.outcome).toBeUndefined()
+    expect(legacy.summary).toBe('Agent "Probe" completed')
+  })
 })

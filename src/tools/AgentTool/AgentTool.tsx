@@ -1246,6 +1246,14 @@ export const AgentTool = buildTool({
                         toolUses: agentResult.totalToolUseCount,
                         durationMs: agentResult.totalDurationMs
                       },
+                      outcome:
+                        agentResult.fileEdits !== undefined &&
+                        agentResult.fileEditErrors !== undefined
+                          ? {
+                              fileEdits: agentResult.fileEdits,
+                              fileEditErrors: agentResult.fileEditErrors
+                            }
+                          : undefined,
                       outputPath: getAgentProgressOutputPath(backgroundedTaskId),
                       toolUseId: toolUseContext.toolUseId,
                       epoch: backgroundedEpoch

@@ -36,6 +36,7 @@ import {
   generateTaskAttachments,
 } from '../../utils/task/framework.js'
 import {
+  countAgentOutcome,
   createAgentStallTransitionHandler,
   emitAgentToolActivitiesForMessage,
   extractAgentToolActivities,
@@ -99,6 +100,105 @@ describe('local Agent lifecycle epochs', () => {
 
 describe('Agent completion delivery', () => {
   afterEach(() => resetCommandQueue())
+
+  test('includes mutation outcome in completed notification summary and XML', () => {
+    let appState = {
+      tasks: {},
+      agentCompletionInbox: [],
+      nextAgentCompletionSequence: 1,
+      speculation: IDLE_SPECULATION_STATE,
+    } as unknown as AppState
+    const setAppState = (updater: (prev: AppState) => AppState): void => {
+      appState = updater(appState)
+    }
+    const noEditTask = registerAsyncAgent({
+      agentId: 'agent-no-file-edits',
+      description: 'No edits',
+      prompt: 'Research only',
+      selectedAgent: { agentType: 'general-purpose' } as never,
+      setAppState,
+    })
+    completeAgentTask(
+      {
+        agentId: noEditTask.agentId,
+        content: [],
+        totalToolUseCount: 12,
+        totalDurationMs: 1,
+        totalTokens: 0,
+        fileEdits: 0,
+        fileEditErrors: 0,
+        usage: {} as never,
+      },
+      setAppState,
+      noEditTask.epoch,
+    )
+    expect(
+      enqueueAgentNotification({
+        taskId: noEditTask.agentId,
+        description: noEditTask.description,
+        status: 'completed',
+        setAppState,
+        usage: { totalTokens: 0, toolUses: 12, durationMs: 1 },
+        outcome: { fileEdits: 0, fileEditErrors: 0 },
+        epoch: noEditTask.epoch,
+      }),
+    ).toBe(true)
+
+    const noEditXml = appState.agentCompletionInbox[0]!.notification
+    const noEditParsed = parseTaskNotificationXml(noEditXml)
+    expect(noEditParsed.summary).toBe(
+      'Agent "No edits" completed (no file edits) · tool_uses=12',
+    )
+    expect(noEditParsed.outcome).toEqual({
+      file_edits: 0,
+      file_edit_errors: 0,
+    })
+    expect(noEditParsed.status).toBe('completed')
+
+    const editedTask = registerAsyncAgent({
+      agentId: 'agent-with-file-edits',
+      description: 'With edits',
+      prompt: 'Edit files',
+      selectedAgent: { agentType: 'general-purpose' } as never,
+      setAppState,
+    })
+    completeAgentTask(
+      {
+        agentId: editedTask.agentId,
+        content: [],
+        totalToolUseCount: 4,
+        totalDurationMs: 1,
+        totalTokens: 0,
+        fileEdits: 3,
+        fileEditErrors: 0,
+        usage: {} as never,
+      },
+      setAppState,
+      editedTask.epoch,
+    )
+    expect(
+      enqueueAgentNotification({
+        taskId: editedTask.agentId,
+        description: editedTask.description,
+        status: 'completed',
+        setAppState,
+        usage: { totalTokens: 0, toolUses: 4, durationMs: 1 },
+        outcome: { fileEdits: 3, fileEditErrors: 0 },
+        epoch: editedTask.epoch,
+      }),
+    ).toBe(true)
+
+    const editedXml = appState.agentCompletionInbox[1]!.notification
+    const editedParsed = parseTaskNotificationXml(editedXml)
+    expect(editedParsed.summary).toBe(
+      'Agent "With edits" completed (file_edits=3) · tool_uses=4',
+    )
+    expect(editedParsed.outcome).toEqual({
+      file_edits: 3,
+      file_edit_errors: 0,
+    })
+    expect(editedParsed.summary).not.toContain('no file edits')
+  })
 
   test('retains a terminal task while its completion is still awaiting acknowledgement', () => {
     let appState = {
@@ -2089,5 +2189,80 @@ describe('emitAgentToolActivitiesForMessage', () => {
     } finally {
       emitSpy.mockRestore()
     }
+  })
+})
+
+describe('countAgentOutcome', () => {
+  test('marks no file edits when the agent only read or searched', () => {
+    const messages = [
+      createAssistantMessage({
+        content: [
+          { type: 'tool_use', id: 'toolu_read', name: 'Read', input: { file_path: '/a' } },
+          { type: 'tool_use', id: 'toolu_grep', name: 'Grep', input: { pattern: 'x' } },
+        ],
+      }) as Message,
+      createUserMessage({
+        content: [
+          { type: 'tool_result', tool_use_id: 'toolu_read', content: 'a', is_error: false },
+          { type: 'tool_result', tool_use_id: 'toolu_grep', content: 'match', is_error: false },
+        ],
+      }) as Message,
+    ]
+
+    expect(countAgentOutcome(messages)).toEqual({
+      fileEdits: 0,
+      fileEditErrors: 0,
+      toolUses: 2,
+    })
+  })
+
+  test('counts successful Edit/Write/NotebookEdit results as file edits', () => {
+    const messages = [
+      createAssistantMessage({
+        content: [
+          { type: 'tool_use', id: 'toolu_edit', name: 'Edit', input: {} },
+          { type: 'tool_use', id: 'toolu_write', name: 'Write', input: {} },
+          { type: 'tool_use', id: 'toolu_nb', name: 'NotebookEdit', input: {} },
+          { type: 'tool_use', id: 'toolu_bash', name: 'Bash', input: { command: 'ls' } },
+        ],
+      }) as Message,
+      createUserMessage({
+        content: [
+          { type: 'tool_result', tool_use_id: 'toolu_edit', content: 'ok', is_error: false },
+          { type: 'tool_result', tool_use_id: 'toolu_write', content: 'ok', is_error: false },
+          { type: 'tool_result', tool_use_id: 'toolu_nb', content: 'ok', is_error: false },
+          { type: 'tool_result', tool_use_id: 'toolu_bash', content: 'files', is_error: false },
+        ],
+      }) as Message,
+    ]
+
+    expect(countAgentOutcome(messages)).toEqual({
+      fileEdits: 3,
+      fileEditErrors: 0,
+      toolUses: 4,
+    })
+  })
+
+  test('counts failed mutation tools as errors without successful file edits', () => {
+    const messages = [
+      createAssistantMessage({
+        content: [
+          { type: 'tool_use', id: 'toolu_edit', name: 'Edit', input: {} },
+          { type: 'tool_use', id: 'toolu_write', name: 'Write', input: {} },
+        ],
+      }) as Message,
+      createUserMessage({
+        content: [
+          { type: 'tool_result', tool_use_id: 'toolu_edit', content: 'boom', is_error: true },
+          { type: 'tool_result', tool_use_id: 'toolu_write', content: 'boom', is_error: true },
+        ],
+      }) as Message,
+    ]
+
+    expect(countAgentOutcome(messages)).toEqual({
+      fileEdits: 0,
+      fileEditErrors: 2,
+      toolUses: 2,
+    })
   })
 })

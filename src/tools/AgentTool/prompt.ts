@@ -67,6 +67,8 @@ const BACKGROUND_ORCHESTRATION_RULE = [
   '',
   'When a terminal Agent notification corresponds to a TaskCreate item assigned to that Agent, reconcile the task-list state in the same turn. Only mark the linked item completed when the Agent reports that its assigned work is fully complete; otherwise return it to pending with the remaining scope recorded.',
   '',
+  'When a completion notification shows `no file edits` / `file_edits=0` but the task was expected to modify files, do not mark the TaskCreate item completed — return it to pending and re-delegate or verify. Treat `status=completed` as lifecycle completion only, not proof of workspace mutation.',
+  '',
   'After an agent completes, fails, stops, is killed, or is cancelled, keep it terminal by default. Synthesize its result and launch a fresh agent for follow-up work when delegation is still warranted. Only use SendMessage to resume a terminal agent when the current user message explicitly asks to resume that specific agent.',
 ].join('\n')
 
