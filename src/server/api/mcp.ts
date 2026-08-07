@@ -1,4 +1,4 @@
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import {
   clearMcpClientConfig,
   clearServerTokensFromLocalStorage,
@@ -15,7 +15,6 @@ import {
   addMcpConfig,
   findProjectMcpConfigPath,
   getAllMcpConfigs,
-  getClaudeCodeMcpConfigs,
   getMcpConfigByName,
   isMcpServerDisabled,
   projectDirDeclaresMcpServers,
@@ -44,8 +43,9 @@ import type {
 } from '../../services/mcp/types.js'
 import { describeMcpConfigFilePath, ensureConfigScope } from '../../services/mcp/utils.js'
 import { getGlobalClaudeFile } from '../../utils/env.js'
-import { enableConfigs, getGlobalConfig } from '../../utils/config.js'
+import { enableConfigs, getGlobalConfig, getProjectPathForConfig } from '../../utils/config.js'
 import { getCwd, runWithCwdOverride } from '../../utils/cwd.js'
+import { normalizePathForConfigKey } from '../../utils/path.js'
 import { ApiError, errorResponse } from '../middleware/errorHandler.js'
 import { conversationService } from '../services/conversationService.js'
 
@@ -122,6 +122,7 @@ type McpServerDto = {
   canReconnect: boolean
   canToggle: boolean
   config: McpEditableConfigDto
+  projectPath?: string
 }
 
 type McpMutationBody = {
@@ -134,8 +135,14 @@ type McpMutationBody = {
 
 type McpSessionSyncDto = {
   applied: boolean
-  reason?: 'not_running' | 'failed'
+  reason?: 'not_running' | 'different_project' | 'failed'
   error?: string
+}
+
+type McpServerIdentity = {
+  name: string
+  scope: string
+  projectPath?: string
 }
 
 const EDITABLE_SCOPES = new Set<ConfigScope>(['local', 'project', 'user'])
@@ -163,7 +170,7 @@ function parseScopeParam(value: string | null): ConfigScope {
 
 async function syncMcpToggleToSession(
   sessionId: string | undefined,
-  serverName: string,
+  server: McpServerIdentity,
   enabled: boolean,
 ): Promise<McpSessionSyncDto | undefined> {
   if (!sessionId) return undefined
@@ -171,10 +178,24 @@ async function syncMcpToggleToSession(
     return { applied: false, reason: 'not_running' }
   }
 
+  if (server.scope === 'local' || server.scope === 'project' || server.scope === 'user') {
+    const sessionWorkDir = conversationService.getSessionWorkDir(sessionId)
+    const sessionServer = sessionWorkDir
+      ? runWithCwdOverride(sessionWorkDir, () => {
+          const config = getMcpConfigByName(server.name)
+          return config ? getServerIdentity(server.name, config) : null
+        })
+      : null
+
+    if (!sessionServer || !isSameServerIdentity(sessionServer, server)) {
+      return { applied: false, reason: 'different_project' }
+    }
+  }
+
   try {
     await conversationService.requestControl(
       sessionId,
-      { subtype: 'mcp_toggle', serverName, enabled },
+      { subtype: 'mcp_toggle', serverName: server.name, enabled },
       120_000,
     )
     return { applied: true }
@@ -241,6 +262,33 @@ function describeServerConfigLocation(name: string, scope: ConfigScope): string 
   }
 
   return describeMcpConfigFilePath(scope)
+}
+
+function describeServerProjectPath(name: string, scope: string): string | undefined {
+  if (scope === 'project') {
+    const configPath = findProjectMcpConfigPath(name)
+    return configPath ? normalizePathForConfigKey(dirname(configPath)) : undefined
+  }
+  if (scope === 'local') {
+    return normalizePathForConfigKey(getProjectPathForConfig(getCwd()))
+  }
+  return undefined
+}
+
+function getServerIdentity(name: string, config: ScopedMcpServerConfig): McpServerIdentity {
+  return {
+    name,
+    scope: config.scope,
+    projectPath: describeServerProjectPath(name, config.scope),
+  }
+}
+
+function isSameServerIdentity(left: McpServerIdentity, right: McpServerIdentity): boolean {
+  return (
+    left.name === right.name &&
+    left.scope === right.scope &&
+    (left.projectPath ?? '') === (right.projectPath ?? '')
+  )
 }
 
 function getSummary(config: ScopedMcpServerConfig): string {
@@ -392,6 +440,7 @@ function buildServerDto(
     canReconnect: enabled,
     canToggle: true,
     config: serializeEditableConfig(config),
+    projectPath: describeServerProjectPath(name, config.scope),
   }
 }
 
@@ -806,9 +855,10 @@ async function toggleServer(name: string, sessionId?: string): Promise<Response>
   }
 
   clearStatusCache(name)
+  const serverIdentity = getServerIdentity(name, existing)
   const enabled = isMcpServerDisabled(name)
   setMcpServerEnabled(name, enabled)
-  const sessionSync = await syncMcpToggleToSession(sessionId, name, enabled)
+  const sessionSync = await syncMcpToggleToSession(sessionId, serverIdentity, enabled)
 
   if (!enabled) {
     await clearServerCache(name, existing).catch(() => {})

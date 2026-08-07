@@ -54,7 +54,6 @@ import {
   killAsyncAgent,
   loadAgentRuntimeSnapshot,
   reconcileAgentCompletionInbox,
-  requeueAgentCompletionCommands,
   persistAgentRuntimeSnapshot,
   registerAsyncAgent,
   restoreAgentRuntimeSnapshot,
@@ -1926,6 +1925,8 @@ describe('runAsyncAgentLifecycle', () => {
       }
       let appState = {
         tasks: { [taskId]: task },
+        agentCompletionInbox: [],
+        nextAgentCompletionSequence: 1,
         toolPermissionContext: getEmptyToolPermissionContext(),
         speculation: IDLE_SPECULATION_STATE,
       } as unknown as AppState
@@ -1971,9 +1972,14 @@ describe('runAsyncAgentLifecycle', () => {
       ])
 
       const parents = emitSpy.mock.calls.map(call => call[1])
-      // This fork does not have the follow-up Agent lifecycle logic, so
-      // the resumed agent is filed under the resuming tool (toolu_sendmessage).
-      expect(parents).toContain('toolu_sendmessage')
+      expect(parents).toContain('toolu_agent')
+      expect(parents).not.toContain('toolu_sendmessage')
+      // Completions land in the inbox first; drain to the command queue like
+      // the parent session does between turns.
+      drainAgentCompletionInbox(setAppState)
+      expect(String(getCommandQueue()[0]?.value)).toContain(
+        '<tool-use-id>toolu_agent</tool-use-id>',
+      )
     } finally {
       emitSpy.mockRestore()
     }

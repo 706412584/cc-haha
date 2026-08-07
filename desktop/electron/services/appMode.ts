@@ -93,6 +93,18 @@ function externallyControlled(env: NodeJS.ProcessEnv): boolean {
   return Boolean(env.CLAUDE_CONFIG_DIR && env.CC_HAHA_APP_PORTABLE_DIR !== '1')
 }
 
+// The app-managed portable selection is process-local derived state; the
+// persisted app-mode.json stays the source of truth. Strip it before this
+// environment reaches another process (app.relaunch(), the NSIS installer
+// spawned by quitAndInstall()), otherwise the child would trust a snapshot
+// that may no longer match the persisted mode (#1160).
+export function clearAppManagedPortableEnv(env: NodeJS.ProcessEnv = process.env): void {
+  if (env.CC_HAHA_APP_PORTABLE_DIR !== '1') return
+  delete env.CLAUDE_CONFIG_DIR
+  delete env.CC_HAHA_APP_PORTABLE_DIR
+  delete env.WEBVIEW2_USER_DATA_FOLDER
+}
+
 export function determineStartupPortableDir(
   app: AppModeAppLike,
   env: NodeJS.ProcessEnv = process.env,
@@ -115,11 +127,7 @@ export function applyStartupPortableMode(
 ): string | null {
   // app.relaunch() inherits process.env. Discard the previous app-managed
   // selection so the persisted two-mode record remains authoritative.
-  if (env.CC_HAHA_APP_PORTABLE_DIR === '1') {
-    delete env.CLAUDE_CONFIG_DIR
-    delete env.CC_HAHA_APP_PORTABLE_DIR
-    delete env.WEBVIEW2_USER_DATA_FOLDER
-  }
+  clearAppManagedPortableEnv(env)
   if (env.CLAUDE_CONFIG_DIR) {
     env.CLAUDE_CONFIG_DIR = normalizedCustomDir(app, env.CLAUDE_CONFIG_DIR)
     return null

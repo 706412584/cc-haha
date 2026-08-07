@@ -12,6 +12,7 @@ vi.mock('../api/subagents', () => ({
 
 import { subagentsApi } from '../api/subagents'
 import { useChatStore } from '../stores/chatStore'
+import { useTabStore } from '../stores/tabStore'
 import { SubagentRunPage } from './SubagentRunPage'
 
 const TRANSCRIPT_TIMESTAMP = '2026-07-03T10:20:11.000Z'
@@ -59,12 +60,27 @@ describe('SubagentRunPage', () => {
   beforeEach(() => {
     useSettingsStore.setState({ locale: 'en' })
     useChatStore.setState({ sessions: {} })
+    useTabStore.setState({ tabs: [], activeTabId: null })
+    localStorage.clear()
   })
 
   afterEach(() => {
     cleanup()
     vi.useRealTimers()
     vi.mocked(subagentsApi.getRunByTool).mockReset()
+  })
+
+  it('returns to the parent session and closes its own tab via the back button', async () => {
+    vi.mocked(subagentsApi.getRunByTool).mockResolvedValue(subagentRun())
+    useTabStore.getState().openTab('session-1', 'Parent session')
+    useTabStore.getState().openSubagentTab('session-1', 'tool-1', 'Kuhn')
+
+    render(<SubagentRunPage sourceSessionId="session-1" toolUseId="tool-1" taskId="agent-1" title="Kuhn" />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Back to parent session' }))
+
+    expect(useTabStore.getState().activeTabId).toBe('session-1')
+    expect(useTabStore.getState().tabs.map((tab) => tab.sessionId)).toEqual(['session-1'])
   })
 
   it('renders SubAgent run details', async () => {
@@ -190,6 +206,71 @@ describe('SubagentRunPage', () => {
     expect(screen.getByTestId('subagent-conversation')).toHaveTextContent('Read')
     expect(screen.getByTestId('subagent-conversation')).toHaveTextContent('example.ts')
     expect(screen.getByTestId('subagent-conversation')).toHaveTextContent('export const ready = true')
+  })
+
+  it('keeps an expanded tool call open after a live run refresh', async () => {
+    const firstRefresh = deferred<SubagentRunResponse>()
+    const liveRun = (updatedAt: string) => subagentRun({
+      status: 'running',
+      prompt: 'Inspect live tools',
+      updatedAt,
+      messages: [
+        {
+          id: 'child-tool-use',
+          type: 'tool_use',
+          content: [
+            {
+              type: 'tool_use',
+              id: 'child-bash-1',
+              name: 'Bash',
+              input: { command: 'pwd' },
+            },
+            {
+              type: 'tool_use',
+              id: 'child-glob-1',
+              name: 'Glob',
+              input: { pattern: '*' },
+            },
+          ],
+          timestamp: TRANSCRIPT_TIMESTAMP,
+        },
+        {
+          id: 'child-tool-results',
+          type: 'tool_result',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'child-bash-1',
+              content: '/workspace',
+            },
+            {
+              type: 'tool_result',
+              tool_use_id: 'child-glob-1',
+              content: 'src',
+            },
+          ],
+          timestamp: TRANSCRIPT_TIMESTAMP,
+        },
+      ],
+    })
+
+    vi.mocked(subagentsApi.getRunByTool)
+      .mockResolvedValueOnce(liveRun(TRANSCRIPT_TIMESTAMP))
+      .mockReturnValueOnce(firstRefresh.promise)
+
+    render(<SubagentRunPage sourceSessionId="session-1" toolUseId="tool-1" title="SubAgent" />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /ran a command, found files/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Bash.*pwd/i }))
+    expect(document.querySelector('[data-shell-output]')).toHaveTextContent('/workspace')
+
+    await waitFor(() => expect(subagentsApi.getRunByTool).toHaveBeenCalledTimes(2), { timeout: 2500 })
+    await act(async () => {
+      firstRefresh.resolve(liveRun('2026-07-03T10:20:13.000Z'))
+      await firstRefresh.promise
+    })
+
+    expect(document.querySelector('[data-shell-output]')).toHaveTextContent('/workspace')
   })
 
   it('discovers a live task id that arrives after the detail tab opens', async () => {

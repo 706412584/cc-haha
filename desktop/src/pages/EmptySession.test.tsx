@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   browse: vi.fn(),
   getTasksForList: vi.fn(),
   resetTaskList: vi.fn(),
+  getProviderAuthStatus: vi.fn(),
   wsClearHandlers: vi.fn(),
   wsConnect: vi.fn(),
   wsOnMessage: vi.fn(),
@@ -45,6 +46,12 @@ vi.mock('../api/skills', () => ({
 vi.mock('../api/agents', () => ({
   agentsApi: {
     list: mocks.listAgents,
+  },
+}))
+
+vi.mock('../api/providers', () => ({
+  providersApi: {
+    authStatus: mocks.getProviderAuthStatus,
   },
 }))
 
@@ -187,6 +194,7 @@ import { useUIStore } from '../stores/uiStore'
 import { usePluginStore } from '../stores/pluginStore'
 import type { RepositoryContextResult } from '../api/sessions'
 import { browserHost } from '../lib/desktopHost/browserHost'
+import { getComposerElement, getComposerText, setComposerText } from '../components/chat/composerTestUtils'
 
 function okRepositoryContext(overrides: Partial<RepositoryContextResult> = {}): RepositoryContextResult {
   return {
@@ -301,6 +309,10 @@ describe('EmptySession', () => {
     })
     mocks.getTasksForList.mockResolvedValue({ tasks: [] })
     mocks.resetTaskList.mockResolvedValue(undefined)
+    mocks.getProviderAuthStatus.mockResolvedValue({
+      hasAuth: true,
+      source: 'cc-haha-provider',
+    })
   })
 
   afterEach(() => {
@@ -395,9 +407,7 @@ describe('EmptySession', () => {
       expect(mocks.listSkills).toHaveBeenCalledTimes(1)
     })
 
-    fireEvent.change(screen.getByRole('textbox'), {
-      target: { value: '/su', selectionStart: 3 },
-    })
+    setComposerText('/su', 3)
 
     await waitFor(() => {
       const commandOptions = screen.getAllByRole('option')
@@ -429,10 +439,7 @@ describe('EmptySession', () => {
       expect(mocks.listSkills).toHaveBeenCalledTimes(1)
     })
 
-    const input = screen.getByRole('textbox') as HTMLTextAreaElement
-    fireEvent.change(input, {
-      target: { value: '/', selectionStart: 1 },
-    })
+    setComposerText('/', 1)
 
     const listbox = await screen.findByRole('listbox', { name: 'Slash commands' })
     const combobox = screen.getByRole('combobox')
@@ -476,15 +483,12 @@ describe('EmptySession', () => {
       expect(mocks.listAgents).toHaveBeenCalledWith(undefined)
     })
 
-    const input = screen.getByRole('textbox') as HTMLTextAreaElement
-    fireEvent.change(input, {
-      target: { value: '/debug', selectionStart: 6 },
-    })
+    setComposerText('/debug', 6)
 
     const agentOption = await screen.findByText('agent debugger')
     fireEvent.click(agentOption)
 
-    expect(input).toHaveValue('/agent debugger ')
+    expect(getComposerText()).toBe('/agent debugger ')
   })
 
   it('opens the draft model selector for /model without creating or sending a session', async () => {
@@ -494,20 +498,15 @@ describe('EmptySession', () => {
 
     render(<EmptySession />)
 
-    const input = screen.getByRole('textbox') as HTMLTextAreaElement
-    fireEvent.change(input, {
-      target: {
-        value: '/model',
-        selectionStart: 6,
-      },
-    })
+    const input = getComposerElement()
+    setComposerText('/model', 6)
 
     fireEvent.keyDown(input, { key: 'Enter' })
 
     expect(mocks.createSession).not.toHaveBeenCalled()
     expect(mocks.wsSend).not.toHaveBeenCalled()
     expect(await screen.findByTestId('model-selector-dropdown')).toHaveTextContent('Model selector opened')
-    expect(input).toHaveValue('')
+    expect(getComposerText()).toBe('')
   })
 
   it('selects a highlighted agent entry from /agent without creating a session', async () => {
@@ -533,16 +532,14 @@ describe('EmptySession', () => {
       expect(mocks.listAgents).toHaveBeenCalledWith(undefined)
     })
 
-    const input = screen.getByRole('textbox') as HTMLTextAreaElement
-    fireEvent.change(input, {
-      target: { value: '/agent', selectionStart: 6 },
-    })
+    const input = getComposerElement()
+    setComposerText('/agent', 6)
 
     await screen.findByText('agent debugger')
     fireEvent.keyDown(input, { key: 'ArrowDown' })
     fireEvent.keyDown(input, { key: 'Enter' })
 
-    expect(input).toHaveValue('/agent debugger ')
+    expect(getComposerText()).toBe('/agent debugger ')
     expect(mocks.createSession).not.toHaveBeenCalled()
     expect(mocks.wsSend).not.toHaveBeenCalled()
   })
@@ -575,9 +572,7 @@ describe('EmptySession', () => {
   it('creates a session with the selected project and branch when submitted', async () => {
     render(<EmptySession />)
 
-    fireEvent.change(screen.getByRole('textbox'), {
-      target: { value: 'draft question', selectionStart: 14 },
-    })
+    setComposerText('draft question', 14)
     await pickProject()
 
     expect(mocks.createSession).not.toHaveBeenCalled()
@@ -631,9 +626,7 @@ describe('EmptySession', () => {
 
     render(<EmptySession />)
 
-    fireEvent.change(screen.getByRole('textbox'), {
-      target: { value: 'draft question', selectionStart: 14 },
-    })
+    setComposerText('draft question', 14)
 
     fireEvent.click(screen.getByRole('button', { name: /Run/i }))
 
@@ -664,9 +657,7 @@ describe('EmptySession', () => {
     render(<EmptySession />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Permission mode: default' }))
-    fireEvent.change(screen.getByRole('textbox'), {
-      target: { value: 'run automatically', selectionStart: 17 },
-    })
+    setComposerText('run automatically', 17)
     fireEvent.click(screen.getByRole('button', { name: /Run/i }))
 
     await waitFor(() => {
@@ -699,9 +690,7 @@ describe('EmptySession', () => {
 
     render(<EmptySession />)
 
-    fireEvent.change(screen.getByRole('textbox'), {
-      target: { value: 'draft question', selectionStart: 14 },
-    })
+    setComposerText('draft question', 14)
 
     fireEvent.click(screen.getByRole('button', { name: /Run/i }))
 
@@ -760,9 +749,7 @@ describe('EmptySession', () => {
 
     render(<EmptySession />)
 
-    fireEvent.change(screen.getByRole('textbox'), {
-      target: { value: 'draft question', selectionStart: 14 },
-    })
+    setComposerText('draft question', 14)
     fireEvent.click(screen.getByRole('button', { name: /Run/i }))
 
     await waitFor(() => {
@@ -782,6 +769,23 @@ describe('EmptySession', () => {
         modelId: 'grok-4.5',
       },
     ])
+  })
+
+  it('opens provider settings instead of creating a session when no model authentication exists', async () => {
+    mocks.getProviderAuthStatus.mockResolvedValue({ hasAuth: false, source: 'none' })
+
+    render(<EmptySession />)
+
+    setComposerText('draft question', 14)
+    fireEvent.click(screen.getByRole('button', { name: /Run/i }))
+
+    await waitFor(() => {
+      expect(mocks.getProviderAuthStatus).toHaveBeenCalledTimes(1)
+    })
+    expect(mocks.createSession).not.toHaveBeenCalled()
+    expect(mocks.wsSend).not.toHaveBeenCalled()
+    expect(useUIStore.getState().pendingSettingsTab).toBe('providers')
+    expect(useTabStore.getState().activeTabId).toBe('__settings__')
   })
 
   it('uses native desktop file paths for draft attachments', async () => {
@@ -822,9 +826,7 @@ describe('EmptySession', () => {
     expect(await screen.findByText('huge-a.log')).toBeInTheDocument()
     expect(await screen.findByText('huge-b.zip')).toBeInTheDocument()
 
-    fireEvent.change(screen.getByRole('textbox'), {
-      target: { value: 'check these files', selectionStart: 'check these files'.length },
-    })
+    setComposerText('check these files', 'check these files'.length)
     fireEvent.click(screen.getByRole('button', { name: /Run/i }))
 
     await waitFor(() => {
@@ -885,9 +887,7 @@ describe('EmptySession', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Save annotation for screenshot.jpg' }))
 
     expect(await screen.findByLabelText('Annotate screenshot-annotated.png')).toBeInTheDocument()
-    fireEvent.change(screen.getByRole('textbox'), {
-      target: { value: 'use the annotation', selectionStart: 'use the annotation'.length },
-    })
+    setComposerText('use the annotation', 'use the annotation'.length)
     fireEvent.click(screen.getByRole('button', { name: /Run/i }))
 
     await waitFor(() => {
@@ -998,9 +998,7 @@ describe('EmptySession', () => {
     expect(await screen.findByText('session-context.log')).toBeInTheDocument()
     expect(screen.queryByTestId('empty-session-drop-overlay')).not.toBeInTheDocument()
 
-    fireEvent.change(screen.getByRole('textbox'), {
-      target: { value: 'use this context', selectionStart: 'use this context'.length },
-    })
+    setComposerText('use this context', 'use this context'.length)
     fireEvent.click(screen.getByRole('button', { name: /Run/i }))
 
     await waitFor(() => {
@@ -1041,9 +1039,12 @@ describe('EmptySession', () => {
 
     render(<EmptySession />)
 
-    fireEvent.paste(screen.getByRole('textbox'), {
+    fireEvent.paste(getComposerElement(), {
       clipboardData: {
         files: [],
+        // ProseMirror reads text data before consulting our paste handler, so
+        // the stub has to answer like a real DataTransfer.
+        getData: () => '',
         items: [{
           kind: 'file',
           type: 'application/json',
@@ -1054,9 +1055,7 @@ describe('EmptySession', () => {
 
     expect(await screen.findByText('project-context.json')).toBeInTheDocument()
 
-    fireEvent.change(screen.getByRole('textbox'), {
-      target: { value: 'use this context', selectionStart: 'use this context'.length },
-    })
+    setComposerText('use this context', 'use this context'.length)
     fireEvent.click(screen.getByRole('button', { name: /Run/i }))
 
     await waitFor(() => {
@@ -1076,6 +1075,39 @@ describe('EmptySession', () => {
     })
   })
 
+  it('sends a selected @ directory as an inline @"path" in the first draft message', async () => {
+    mocks.search.mockResolvedValueOnce({
+      currentPath: '/workspace/project',
+      parentPath: null,
+      query: 'backend',
+      entries: [
+        { name: 'backend', path: '/workspace/project/backend', relativePath: 'backend', isDirectory: true },
+      ],
+    })
+
+    render(<EmptySession />)
+
+    setComposerText('@backend 讲一下这个目录。', '@backend'.length)
+    fireEvent.click(await screen.findByRole('option', { name: /backend/i }))
+
+    await waitFor(() => {
+      expect(getComposerText()).toBe('@backend/ 讲一下这个目录。')
+    })
+    expect(document.querySelector('.composer-mention')).toHaveTextContent('@backend/')
+
+    fireEvent.click(screen.getByRole('button', { name: /Run/i }))
+
+    await waitFor(() => {
+      expect(mocks.createSession).toHaveBeenCalled()
+    })
+    expect(mocks.wsSend).toHaveBeenCalledWith('draft-session', {
+      type: 'user_message',
+      content: '@"/workspace/project/backend" 讲一下这个目录。',
+      attachments: [],
+    })
+    expect(getComposerText()).toBe('')
+  })
+
   it('keeps slash and @ popovers visible above the empty-session drop target', async () => {
     mocks.search.mockResolvedValueOnce({
       currentPath: '/workspace/project',
@@ -1089,24 +1121,13 @@ describe('EmptySession', () => {
     render(<EmptySession />)
 
     const panel = screen.getByTestId('empty-session-composer-panel')
-    const input = screen.getByRole('textbox') as HTMLTextAreaElement
 
-    fireEvent.change(input, {
-      target: {
-        value: '/',
-        selectionStart: 1,
-      },
-    })
+    setComposerText('/', 1)
     expect(await screen.findByText('mcp')).toBeInTheDocument()
     expect(panel).toHaveClass('overflow-visible')
     expect(panel).not.toHaveClass('overflow-hidden')
 
-    fireEvent.change(input, {
-      target: {
-        value: '@readme',
-        selectionStart: 7,
-      },
-    })
+    setComposerText('@readme', 7)
     expect(await screen.findByText('README.md')).toBeInTheDocument()
     expect(panel).toHaveClass('overflow-visible')
     expect(panel).not.toHaveClass('overflow-hidden')
@@ -1117,9 +1138,7 @@ describe('EmptySession', () => {
 
     render(<EmptySession />)
 
-    fireEvent.change(screen.getByRole('textbox'), {
-      target: { value: 'draft question', selectionStart: 14 },
-    })
+    setComposerText('draft question', 14)
     await pickProject()
 
     await waitFor(() => {
@@ -1157,9 +1176,7 @@ describe('EmptySession', () => {
 
     render(<EmptySession />)
 
-    fireEvent.change(screen.getByRole('textbox'), {
-      target: { value: 'draft question', selectionStart: 14 },
-    })
+    setComposerText('draft question', 14)
     await pickProject()
 
     await waitFor(() => {
@@ -1185,9 +1202,7 @@ describe('EmptySession', () => {
 
     render(<EmptySession />)
 
-    fireEvent.change(screen.getByRole('textbox'), {
-      target: { value: 'draft question', selectionStart: 14 },
-    })
+    setComposerText('draft question', 14)
     await pickProject()
 
     await waitFor(() => {
@@ -1233,9 +1248,7 @@ describe('EmptySession', () => {
 
     render(<EmptySession />)
 
-    fireEvent.change(screen.getByRole('textbox'), {
-      target: { value: 'draft question', selectionStart: 14 },
-    })
+    setComposerText('draft question', 14)
     await pickProject()
 
     await waitFor(() => {
@@ -1280,9 +1293,7 @@ describe('EmptySession', () => {
 
     render(<EmptySession />)
 
-    fireEvent.change(screen.getByRole('textbox'), {
-      target: { value: 'draft question', selectionStart: 14 },
-    })
+    setComposerText('draft question', 14)
     await pickProject()
 
     const pill = await screen.findByRole('button', { name: `Location: project / ${longBranch}` })
@@ -1328,9 +1339,7 @@ describe('EmptySession', () => {
 
     render(<EmptySession />)
 
-    fireEvent.change(screen.getByRole('textbox'), {
-      target: { value: 'draft question', selectionStart: 14 },
-    })
+    setComposerText('draft question', 14)
     await pickProject()
 
     await waitFor(() => {
@@ -1455,9 +1464,9 @@ describe('EmptySession welcome-screen task cards', () => {
 
     fireEvent.click(await screen.findByTestId('welcome-task-card-preMergeReview'))
 
-    const input = screen.getByRole('textbox') as HTMLTextAreaElement
-    expect(input.value).toContain('main')
-    expect(input.value.toLowerCase()).toContain('pr description')
+    const text = getComposerText()
+    expect(text).toContain('main')
+    expect(text.toLowerCase()).toContain('pr description')
   })
 
   it('orchestration cards persist coordinator mode for the new session before connect', async () => {

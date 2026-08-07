@@ -59,6 +59,7 @@ export function CurrentTurnChangeCard({
   const visibleFiles = canCollapse && !showAllFiles
     ? files.slice(0, COLLAPSED_COUNT)
     : files
+  const restoreAvailable = checkpoint.restoreAvailable !== false
 
   const openChangedFile = useCallback((event: ReactMouseEvent<HTMLButtonElement>, fileEntry: ChangedFileEntry) => {
     const renderItem = event.currentTarget.closest<HTMLElement>('[data-chat-render-item-key]')
@@ -117,9 +118,11 @@ export function CurrentTurnChangeCard({
   const cardLabel = isLatest
     ? t('chat.turnChangesLatestCardLabel')
     : t('chat.turnChangesHistoricalCardLabel')
-  const subtitle = isLatest
-    ? t('chat.turnChangesLatestSubtitle')
-    : t('chat.turnChangesCurrentWorkspaceDiff')
+  const subtitle = !restoreAvailable
+    ? t('chat.turnChangesPreviewOnlySubtitle')
+    : isLatest
+      ? t('chat.turnChangesLatestSubtitle')
+      : t('chat.turnChangesCurrentWorkspaceDiff')
   const undoLabel = isLatest
     ? t('chat.turnChangesLatestUndo')
     : t('chat.turnChangesHistoricalUndo')
@@ -154,12 +157,18 @@ export function CurrentTurnChangeCard({
           variant="secondary"
           size="base"
           loading={isUndoing}
+          disabled={!restoreAvailable}
           onClick={onUndo}
-          aria-label={undoAria}
+          aria-label={restoreAvailable ? undoAria : t('chat.turnChangesRestoreUnavailable')}
+          title={restoreAvailable ? undefined : t('chat.turnChangesRestoreUnavailable')}
           className="shrink-0"
           icon={<span className="material-symbols-outlined text-[15px]" aria-hidden="true">undo</span>}
         >
-          {isUndoing ? t('chat.turnChangesUndoing') : undoLabel}
+          {isUndoing
+            ? t('chat.turnChangesUndoing')
+            : restoreAvailable
+              ? undoLabel
+              : t('chat.turnChangesRestoreUnavailable')}
         </Button>
       </div>
 

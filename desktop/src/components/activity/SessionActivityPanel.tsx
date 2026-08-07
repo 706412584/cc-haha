@@ -242,9 +242,17 @@ function getTaskProgress(rows: ActivityRow[]): { completed: number; total: numbe
   return { completed, total: rows.length, percent: Math.round((completed / rows.length) * 100) }
 }
 
-function ActivityRowIcon({ row, sessionId }: { row: ActivityRow; sessionId: string }) {
+function ActivityRowIcon({
+  row,
+  sessionId,
+  status = row.status,
+}: {
+  row: ActivityRow
+  sessionId: string
+  status?: ActivityRow['status']
+}) {
   if (row.section === 'subagents') {
-    return <AgentMascot seed={`${sessionId}:${row.toolUseId ?? row.taskId ?? row.id}`} status={row.status} />
+    return <AgentMascot seed={`${sessionId}:${row.toolUseId ?? row.taskId ?? row.id}`} status={status} />
   }
 
   const Icon = getRowIcon(row)
@@ -267,7 +275,10 @@ function ActivityStatusIndicator({
   animated?: boolean
   hideLabel?: boolean
 }) {
-  const isRunning = animated && (status === 'running' || status === 'in_progress')
+  // Subagent rows suppress pulse (mascot owns the motion) but still mark the
+  // live-status dot for tests and assistive tooling.
+  const isLiveStatus = status === 'running' || status === 'in_progress'
+  const isPulsing = animated && isLiveStatus
 
   return (
     <span className="inline-flex shrink-0 items-center gap-1.5 text-[11px] font-medium text-[var(--color-text-tertiary)]">
@@ -276,8 +287,8 @@ function ActivityStatusIndicator({
           fifteen other dots in the app already run it. */}
       <StatusDot
         tone={getStatusTone(status)}
-        pulse={isRunning}
-        data-testid={isRunning ? 'activity-live-dot' : undefined}
+        pulse={isPulsing}
+        data-testid={isLiveStatus ? 'activity-live-dot' : undefined}
       />
       {hideLabel ? null : label}
     </span>
@@ -340,6 +351,8 @@ function ActivityRowView({
   const [now, setNow] = useState(() => Date.now())
   const isTask = row.section === 'tasks'
   const isRunningSubagent = row.section === 'subagents' && row.status === 'running'
+  const isStoppingSubagent = isRunningSubagent && Boolean(stoppingBackgroundTask)
+  const displayStatus: ActivityRow['status'] = isStoppingSubagent ? 'pending' : row.status
   useEffect(() => {
     if (!isRunningSubagent || !row.updatedAt) return
     const timer = window.setInterval(() => setNow(Date.now()), 10_000)
@@ -349,6 +362,9 @@ function ActivityRowView({
   const latestEvent = row.recentEvents?.at(-1)
   const hideRunningLabel = isRunningSubagent && Boolean(latestEvent || recentActivity)
   const showStatusIndicator = !isTask
+  const statusLabel = isStoppingSubagent
+    ? t('session.activity.status.stopping')
+    : getActivityStatusLabel(row.status, t)
   const label = row.taskHistory
     ? t('session.activity.tasks.earlier')
     : row.label
@@ -368,7 +384,7 @@ function ActivityRowView({
       {isTask ? (
         <TaskStatusMarker status={row.status} t={t} />
       ) : (
-        <ActivityRowIcon row={row} sessionId={sessionId} />
+        <ActivityRowIcon row={row} sessionId={sessionId} status={displayStatus} />
       )}
       <span className="min-w-0 flex-1 truncate text-left">
         <span
@@ -399,9 +415,9 @@ function ActivityRowView({
       </span>
       {showStatusIndicator ? (
         <ActivityStatusIndicator
-          status={row.status}
-          label={getActivityStatusLabel(row.status, t)}
-          animated
+          status={displayStatus}
+          label={statusLabel}
+          animated={row.section !== 'subagents'}
           hideLabel={hideRunningLabel}
         />
       ) : null}
@@ -435,28 +451,30 @@ function ActivityRowView({
 
   if (row.section === 'subagents' && row.openable && row.toolUseId) {
     const hasRecentEvents = Boolean(row.recentEvents?.length)
-    const statusLabel = getActivityStatusLabel(row.status, t)
+    const openButton = (
+      <button
+        type="button"
+        aria-label={t('session.activity.toggleRecent', { name: row.label })}
+        aria-expanded={subagentExpanded}
+        onClick={() => setSubagentExpanded((current) => !current)}
+        disabled={!hasRecentEvents}
+        className={`${interactiveRowClassName} min-w-0 flex-1 disabled:cursor-default`}
+      >
+        {content}
+        {hasRecentEvents ? (
+          <ChevronDown
+            size={13}
+            strokeWidth={2.2}
+            className={`shrink-0 text-[var(--color-text-tertiary)] transition-transform ${subagentExpanded ? 'rotate-180' : ''}`}
+            aria-hidden="true"
+          />
+        ) : null}
+      </button>
+    )
     return (
       <div className="w-full rounded-lg hover:bg-[var(--color-surface-hover)]">
         <div className="flex min-w-0 items-center gap-1">
-          <button
-            type="button"
-            aria-label={t('session.activity.toggleRecent', { name: row.label })}
-            aria-expanded={subagentExpanded}
-            onClick={() => setSubagentExpanded((current) => !current)}
-            disabled={!hasRecentEvents}
-            className={`${interactiveRowClassName} min-w-0 flex-1 disabled:cursor-default`}
-          >
-            {content}
-            {hasRecentEvents ? (
-              <ChevronDown
-                size={13}
-                strokeWidth={2.2}
-                className={`shrink-0 text-[var(--color-text-tertiary)] transition-transform ${subagentExpanded ? 'rotate-180' : ''}`}
-                aria-hidden="true"
-              />
-            ) : null}
-          </button>
+          {openButton}
           <button
             type="button"
             aria-label={`${t('session.activity.openRun', { name: row.label })} · ${statusLabel}`}
@@ -471,6 +489,7 @@ function ActivityRowView({
           >
             {t('session.activity.fullRun')}
           </button>
+          {stopButton}
         </div>
         {subagentExpanded && row.recentEvents ? (
           <ol className="mx-2 mb-2 space-y-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-2.5 py-2">

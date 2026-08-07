@@ -103,6 +103,36 @@ describe('tabStore', () => {
     expect(useTabStore.getState().tabs.map((tab) => tab.sessionId)).toEqual(['session-a', 'session-b'])
   })
 
+  it('returns a subagent tab to its source session before closing it', () => {
+    useTabStore.getState().openTab('session-a', 'Session A')
+    useTabStore.getState().openTab('session-b', 'Session B')
+    const tabId = useTabStore.getState().openSubagentTab('session-b', 'tool-1', 'SubAgent run')
+
+    useTabStore.getState().returnFromSubagent(tabId)
+
+    expect(useTabStore.getState().activeTabId).toBe('session-b')
+    expect(useTabStore.getState().tabs.map((tab) => tab.sessionId)).toEqual(['session-a', 'session-b'])
+  })
+
+  it('closes a subagent tab even when its source session is gone', () => {
+    useTabStore.getState().openTab('session-a', 'Session A')
+    const tabId = useTabStore.getState().openSubagentTab('session-missing', 'tool-1', 'SubAgent run')
+
+    useTabStore.getState().returnFromSubagent(tabId)
+
+    expect(useTabStore.getState().tabs.map((tab) => tab.sessionId)).toEqual(['session-a'])
+    expect(useTabStore.getState().activeTabId).toBe('session-a')
+  })
+
+  it('ignores returnFromSubagent for non-subagent tabs', () => {
+    useTabStore.getState().openTab('session-a', 'Session A')
+
+    useTabStore.getState().returnFromSubagent('session-a')
+
+    expect(useTabStore.getState().tabs.map((tab) => tab.sessionId)).toEqual(['session-a'])
+    expect(useTabStore.getState().activeTabId).toBe('session-a')
+  })
+
   it('defaults a workbench origin to its source session and keeps it ephemeral', () => {
     useTabStore.getState().openTab('session-a', 'Session A')
     const tabId = useTabStore.getState().openWorkbenchTab('session-a', 'Workbench')

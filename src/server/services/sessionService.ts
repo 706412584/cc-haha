@@ -10,7 +10,6 @@ import { createHash } from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import * as os from 'node:os'
-import { createInterface } from 'node:readline'
 import { ApiError } from '../middleware/errorHandler.js'
 import { sanitizePath as sanitizePortablePath } from '../../utils/sessionStoragePortable.js'
 import type { FileHistorySnapshot } from '../../utils/fileHistory.js'
@@ -68,6 +67,7 @@ import type {
 } from './localIndex/sessionIndex.js'
 import type { LocalIndexStatus } from './localIndex/types.js'
 import { diagnosticsService } from './diagnosticsService.js'
+import { isForkInheritedUsageRecord } from '../../utils/usageAccounting.js'
 
 // ============================================================================
 // Types
@@ -230,6 +230,17 @@ export type MessageEntry = {
   parentUuid?: string
   parentToolUseId?: string
   isSidechain?: boolean
+  cwd?: string
+}
+
+export type SessionMessagesWithEvidence = {
+  messages: MessageEntry[]
+  transcriptEvidenceComplete: boolean
+}
+
+type SubagentMessagesResult = {
+  messages: MessageEntry[]
+  subagentEvidenceComplete: boolean
 }
 
 export type SessionTaskNotification = {
@@ -319,6 +330,7 @@ type RawEntry = {
   parent_tool_use_id?: string | null
   isSidechain?: boolean
   isMeta?: boolean
+  forkedFrom?: unknown
   cwd?: string
   message?: {
     role?: string
@@ -552,6 +564,17 @@ function getSharedSessionMutationState(
 
 export class SessionService {
   private providerService = new ProviderService()
+  private readonly pendingTaskNotificationWrites = new Map<
+    string,
+    Set<{
+      controller: AbortController
+      promise: Promise<void>
+      notification: SessionTaskNotification
+      persisted: boolean
+    }>
+  >()
+  private readonly taskNotificationMutationEpochs = new Map<string, number>()
+  private readonly clearingTaskNotificationSessions = new Set<string>()
 
   private readonly localIndexGateway: LocalIndexGateway
   private readonly now: () => number
@@ -588,8 +611,12 @@ export class SessionService {
     mtimeMs: number
     size: number
     entries: RawEntry[]
+    parseComplete: boolean
   }>()
-  private readonly readJsonlInFlight = new Map<string, Promise<RawEntry[]>>()
+  private readonly readJsonlInFlight = new Map<
+    string,
+    Promise<{ entries: RawEntry[]; exists: boolean; parseComplete: boolean }>
+  >()
   /**
    * Resumable fold state for getInspectionTranscriptSnapshot, keyed by path.
    *
@@ -744,13 +771,14 @@ export class SessionService {
     mtimeMs: number,
     size: number,
     entries: RawEntry[],
+    parseComplete: boolean = true,
   ): void {
     const previous = this.readJsonlCache.get(filePath)
     if (previous) {
       this.readCacheTotalBytes -= previous.size
       this.readJsonlCache.delete(filePath)
     }
-    this.readJsonlCache.set(filePath, { mtimeMs, size, entries })
+    this.readJsonlCache.set(filePath, { mtimeMs, size, entries, parseComplete })
     this.readCacheTotalBytes += size
     while (this.readCacheTotalBytes > this.readCacheMaxTotalBytes) {
       const oldest = this.readJsonlCache.keys().next().value
@@ -1022,14 +1050,17 @@ export class SessionService {
   // JSONL parsing
   // --------------------------------------------------------------------------
 
-  private async readJsonlFile(filePath: string): Promise<RawEntry[]> {
+  private async readJsonlFileWithDiagnostics(filePath: string): Promise<{
+    entries: RawEntry[]
+    exists: boolean
+    parseComplete: boolean
+  }> {
     let stat: { mtimeMs: number; size: number }
     try {
       stat = await fs.stat(filePath)
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        this.invalidateReadCache(filePath)
-        return []
+        return { entries: [], exists: false, parseComplete: false }
       }
       throw err
     }
@@ -1048,16 +1079,32 @@ export class SessionService {
         cachedAfterRead: false,
         fileName: path.basename(filePath),
       })
-      return entries
+      return {
+        entries,
+        exists: true,
+        parseComplete: cached.parseComplete,
+      }
     }
 
     const inFlight = this.readJsonlInFlight.get(filePath)
-    if (inFlight) return (await inFlight).slice()
+    if (inFlight) {
+      const result = await inFlight
+      return {
+        entries: result.entries.slice(),
+        exists: result.exists,
+        parseComplete: result.parseComplete,
+      }
+    }
 
     const readPromise = this.readAndParseJsonl(filePath, stat)
     this.readJsonlInFlight.set(filePath, readPromise)
     try {
-      return (await readPromise).slice()
+      const result = await readPromise
+      return {
+        entries: result.entries.slice(),
+        exists: result.exists,
+        parseComplete: result.parseComplete,
+      }
     } finally {
       this.readJsonlInFlight.delete(filePath)
     }
@@ -1077,7 +1124,7 @@ export class SessionService {
   private async readAndParseJsonl(
     filePath: string,
     stat: { mtimeMs: number; size: number },
-  ): Promise<RawEntry[]> {
+  ): Promise<{ entries: RawEntry[]; exists: boolean; parseComplete: boolean }> {
     const started = performance.now()
     const fileName = path.basename(filePath)
 
@@ -1099,7 +1146,8 @@ export class SessionService {
         cachedAfterRead: false,
         fileName,
       })
-      return entries
+      // Tail window is intentionally incomplete evidence for rewind/history.
+      return { entries, exists: true, parseComplete: false }
     }
 
     let content: string
@@ -1108,15 +1156,15 @@ export class SessionService {
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         this.invalidateReadCache(filePath)
-        return []
+        return { entries: [], exists: false, parseComplete: false }
       }
       throw err
     }
 
-    const entries = this.parseJsonlContent(content)
+    const { entries, parseComplete } = this.parseJsonlContent(content)
     const cachedAfterRead = stat.size <= this.readCacheMaxFileBytes
     if (cachedAfterRead) {
-      this.storeReadCache(filePath, stat.mtimeMs, stat.size, entries)
+      this.storeReadCache(filePath, stat.mtimeMs, stat.size, entries, parseComplete)
     } else {
       this.invalidateReadCache(filePath)
     }
@@ -1130,21 +1178,29 @@ export class SessionService {
       cachedAfterRead,
       fileName,
     })
-    return entries
+    return { entries, exists: true, parseComplete }
   }
 
-  private parseJsonlContent(content: string): RawEntry[] {
+  private parseJsonlContent(content: string): {
+    entries: RawEntry[]
+    parseComplete: boolean
+  } {
     const entries: RawEntry[] = []
+    let parseComplete = true
     for (const line of content.split('\n')) {
       const trimmed = line.trim()
       if (!trimmed) continue
       try {
         entries.push(JSON.parse(trimmed) as RawEntry)
       } catch {
-        // skip malformed lines
+        parseComplete = false
       }
     }
-    return entries
+    return { entries, parseComplete }
+  }
+
+  private async readJsonlFile(filePath: string): Promise<RawEntry[]> {
+    return (await this.readJsonlFileWithDiagnostics(filePath)).entries
   }
 
   /** Read last maxBytes; drop the first partial line if the window starts mid-record. */
@@ -1167,7 +1223,7 @@ export class SessionService {
         if (firstNewline === -1) return []
         text = text.slice(firstNewline + 1)
       }
-      return this.parseJsonlContent(text)
+      return this.parseJsonlContent(text).entries
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         return []
@@ -1751,8 +1807,20 @@ export class SessionService {
     }
   }
 
-  private async appendJsonlEntry(filePath: string, entry: Record<string, unknown>): Promise<void> {
+  private async appendJsonlEntry(
+    filePath: string,
+    entry: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const line = JSON.stringify(entry) + '\n'
+    if (signal) {
+      await fs.writeFile(filePath, line, {
+        encoding: 'utf-8',
+        flag: 'a',
+        signal,
+      })
+      return
+    }
     await fs.appendFile(filePath, line, 'utf-8')
     this.invalidateReadCache(filePath)
   }
@@ -2016,7 +2084,9 @@ export class SessionService {
       type = 'system'
     }
 
-    const usage = normalizeMessageUsage(msg.usage)
+    const usage = isForkInheritedUsageRecord(entry)
+      ? undefined
+      : normalizeMessageUsage(msg.usage)
 
     return {
       id: entry.uuid || crypto.randomUUID(),
@@ -2029,6 +2099,7 @@ export class SessionService {
       parentUuid: entry.parentUuid ?? undefined,
       parentToolUseId,
       isSidechain: entry.isSidechain,
+      ...(typeof entry.cwd === 'string' && entry.cwd.trim() ? { cwd: entry.cwd } : {}),
     }
   }
 
@@ -2236,7 +2307,7 @@ export class SessionService {
     for (const block of content as Array<Record<string, unknown>>) {
       if (
         block.type === 'tool_use' &&
-        block.name === 'Agent' &&
+        (block.name === 'Agent' || block.name === 'Task') &&
         typeof block.id === 'string'
       ) {
         return block.id
@@ -2252,7 +2323,9 @@ export class SessionService {
     }
 
     return (message.content as ContentBlock[])
-      .filter((block) => block.type === 'tool_use' && block.name === 'Agent')
+      .filter((block) =>
+        block.type === 'tool_use' && (block.name === 'Agent' || block.name === 'Task')
+      )
       .flatMap((block) => (typeof block.id === 'string' ? [block.id] : []))
   }
 
@@ -2307,10 +2380,18 @@ export class SessionService {
     return (content as ContentBlock[]).map((block) => {
       if (!block || typeof block !== 'object') return block
       if (block.type === 'tool_use' && typeof block.id === 'string') {
-        return { ...block, id: `${namespace}/${block.id}` }
+        return {
+          ...block,
+          id: `${namespace}/${block.id}`,
+          original_tool_use_id: block.id,
+        }
       }
       if (block.type === 'tool_result' && typeof block.tool_use_id === 'string') {
-        return { ...block, tool_use_id: `${namespace}/${block.tool_use_id}` }
+        return {
+          ...block,
+          tool_use_id: `${namespace}/${block.tool_use_id}`,
+          original_tool_use_id: block.tool_use_id,
+        }
       }
       return block
     })
@@ -2336,9 +2417,9 @@ export class SessionService {
     sessionId: string,
     parentToolUseId: string,
     agentId: string,
-  ): Promise<MessageEntry[]> {
+  ): Promise<SubagentMessagesResult> {
     const filePath = this.subagentTranscriptPath(projectDir, sessionId, agentId)
-    const entries = await this.readJsonlFile(filePath)
+    const { entries, exists, parseComplete } = await this.readJsonlFileWithDiagnostics(filePath)
     const namespace = `${parentToolUseId}/${agentId}`
     const messages: MessageEntry[] = []
 
@@ -2364,25 +2445,118 @@ export class SessionService {
       }
     }
 
-    return messages
+    return {
+      messages,
+      subagentEvidenceComplete: exists && parseComplete,
+    }
   }
 
   private async appendSubagentToolMessages(
     projectDir: string,
     sessionId: string,
     messages: MessageEntry[],
-  ): Promise<MessageEntry[]> {
-    const resultLinks = this.extractAgentResultLinks(messages)
-    if (resultLinks.size === 0) {
-      return messages
+  ): Promise<SubagentMessagesResult> {
+    const maxSubagentDepth = 16
+    const maxSubagentTranscripts = 128
+    const maxSubagentMessages = 20_000
+    type PendingLink = {
+      parentToolUseId: string
+      agentId: string
+      depth: number
+      ancestry: Set<string>
+    }
+    const transcriptIdentity = (agentId: string) => {
+      const transcriptPath = path.resolve(
+        this.subagentTranscriptPath(projectDir, sessionId, agentId),
+      )
+      return process.platform === 'win32' ? transcriptPath.toLowerCase() : transcriptPath
     }
 
-    const childMessages = await Promise.all(
-      [...resultLinks.entries()].map(([parentToolUseId, agentId]) =>
-        this.loadSubagentToolMessages(projectDir, sessionId, parentToolUseId, agentId),
-      ),
-    )
-    return [...messages, ...childMessages.flat()]
+    const allMessages = [...messages]
+    const loadedLinks = new Set<string>()
+    let loadedTranscriptCount = 0
+    let loadedMessageCount = 0
+    let subagentEvidenceComplete = true
+    const initialResultLinks = this.extractAgentResultLinks(messages)
+    if (messages.some((message) =>
+      this.extractAgentToolUseIdsFromMessage(message).some((id) => !initialResultLinks.has(id))
+    )) {
+      subagentEvidenceComplete = false
+    }
+    let pendingLinks: PendingLink[] = [...initialResultLinks.entries()]
+      .map(([parentToolUseId, agentId]) => ({
+        parentToolUseId,
+        agentId,
+        depth: 1,
+        ancestry: new Set<string>(),
+      }))
+
+    while (pendingLinks.length > 0) {
+      const newLinks = pendingLinks.filter(({ parentToolUseId, agentId, depth, ancestry }) => {
+        const identity = transcriptIdentity(agentId)
+        if (ancestry.has(identity)) {
+          return false
+        }
+        if (depth > maxSubagentDepth || loadedTranscriptCount >= maxSubagentTranscripts) {
+          subagentEvidenceComplete = false
+          return false
+        }
+        const key = `${parentToolUseId}\u0000${agentId}`
+        if (loadedLinks.has(key)) return false
+        loadedLinks.add(key)
+        loadedTranscriptCount += 1
+        return true
+      })
+      if (newLinks.length === 0) break
+
+      const loadedChildren = await Promise.all(
+        newLinks.map(async (link) => ({
+          link,
+          result: await this.loadSubagentToolMessages(
+            projectDir,
+            sessionId,
+            link.parentToolUseId,
+            link.agentId,
+          ),
+        })),
+      )
+      pendingLinks = []
+      for (const { link, result } of loadedChildren) {
+        const childMessages = result.messages
+        if (!result.subagentEvidenceComplete) subagentEvidenceComplete = false
+        const remainingMessageCapacity = maxSubagentMessages - loadedMessageCount
+        if (remainingMessageCapacity <= 0) {
+          subagentEvidenceComplete = false
+          break
+        }
+        const acceptedMessages = childMessages.slice(0, remainingMessageCapacity)
+        if (acceptedMessages.length < childMessages.length) {
+          subagentEvidenceComplete = false
+        }
+        loadedMessageCount += acceptedMessages.length
+        allMessages.push(...acceptedMessages)
+
+        const ancestry = new Set(link.ancestry)
+        ancestry.add(transcriptIdentity(link.agentId))
+        const childResultLinks = this.extractAgentResultLinks(acceptedMessages)
+        if (acceptedMessages.some((message) =>
+          this.extractAgentToolUseIdsFromMessage(message)
+            .some((id) => !childResultLinks.has(id))
+        )) {
+          subagentEvidenceComplete = false
+        }
+        for (const [parentToolUseId, agentId] of childResultLinks) {
+          pendingLinks.push({
+            parentToolUseId,
+            agentId,
+            depth: link.depth + 1,
+            ancestry,
+          })
+        }
+      }
+    }
+
+    return { messages: allMessages, subagentEvidenceComplete }
   }
 
   private resolveParentToolUseId(
@@ -3084,6 +3258,7 @@ export class SessionService {
 
     for (const entry of entries) {
       currentRuntimeHint = this.applyRuntimeContextMetadata(currentRuntimeHint, entry)
+      if (isForkInheritedUsageRecord(entry)) continue
       const usage = entry.message?.usage
       const model = entry.message?.model
       if (!usage || typeof model !== 'string') continue
@@ -3378,6 +3553,10 @@ export class SessionService {
         cacheReadInputTokens,
         cacheCreationInputTokens,
       }
+
+      // Inherited fork history still describes the current context, but its API usage belongs to
+      // the source session and must not be included in this fork's cumulative usage or cost.
+      if (isForkInheritedUsageRecord(entry)) return
 
       if (
         inputTokens === 0 &&
@@ -4027,7 +4206,7 @@ export class SessionService {
     const stat = await fs.stat(filePath)
     const entries = await this.readJsonlFile(filePath)
 
-    const messages = await this.appendSubagentToolMessages(
+    const { messages } = await this.appendSubagentToolMessages(
       projectDir,
       sessionId,
       this.entriesToMessages(entries),
@@ -4083,17 +4262,29 @@ export class SessionService {
    * Get only the messages for a session (lighter than full detail).
    */
   async getSessionMessages(sessionId: string): Promise<MessageEntry[]> {
+    return (await this.getSessionMessagesWithEvidence(sessionId)).messages
+  }
+
+  async getSessionMessagesWithEvidence(
+    sessionId: string,
+  ): Promise<SessionMessagesWithEvidence> {
     const found = await this.findSessionFile(sessionId)
     if (!found) {
       throw ApiError.notFound(`Session not found: ${sessionId}`)
     }
 
-    const entries = await this.readJsonlFile(found.filePath)
-    return await this.appendSubagentToolMessages(
+    const rootTranscript = await this.readJsonlFileWithDiagnostics(found.filePath)
+    const subagentResult = await this.appendSubagentToolMessages(
       found.projectDir,
       sessionId,
-      this.entriesToMessages(entries),
+      this.entriesToMessages(rootTranscript.entries),
     )
+    return {
+      messages: subagentResult.messages,
+      transcriptEvidenceComplete: rootTranscript.exists &&
+        rootTranscript.parseComplete &&
+        subagentResult.subagentEvidenceComplete,
+    }
   }
 
   async getSubagentTranscriptMessages(
@@ -4537,63 +4728,87 @@ export class SessionService {
     fallbackWorkDir?: string,
     preservedPermissionMode?: string,
   ): Promise<void> {
-    let found = await this.findSessionFile(sessionId)
-    if (!found && fallbackWorkDir) {
-      const resolvedPath = path.resolve(normalizeDriveRootPathForPlatform(fallbackWorkDir))
-      const absWorkDir = await fs.realpath(resolvedPath).catch(() => resolvedPath)
-      const dirPath = path.join(this.getProjectsDir(), this.sanitizePath(absWorkDir))
-      await fs.mkdir(dirPath, { recursive: true })
-      found = {
-        filePath: path.join(dirPath, `${sessionId}.jsonl`),
-        projectDir: this.sanitizePath(absWorkDir),
+    const nextEpoch = (this.taskNotificationMutationEpochs.get(sessionId) ?? 0) + 1
+    this.taskNotificationMutationEpochs.set(sessionId, nextEpoch)
+    this.clearingTaskNotificationSessions.add(sessionId)
+    const pendingWrites = [...(this.pendingTaskNotificationWrites.get(sessionId) ?? [])]
+    for (const pending of pendingWrites) pending.controller.abort()
+
+    try {
+      await Promise.allSettled(pendingWrites.map((pending) => pending.promise))
+
+      let found = await this.findSessionFile(sessionId)
+      if (!found && fallbackWorkDir) {
+        const resolvedPath = path.resolve(normalizeDriveRootPathForPlatform(fallbackWorkDir))
+        const absWorkDir = await fs.realpath(resolvedPath).catch(() => resolvedPath)
+        const dirPath = path.join(this.getProjectsDir(), this.sanitizePath(absWorkDir))
+        await fs.mkdir(dirPath, { recursive: true })
+        found = {
+          filePath: path.join(dirPath, `${sessionId}.jsonl`),
+          projectDir: this.sanitizePath(absWorkDir),
+        }
       }
-    }
-    if (!found) {
-      throw ApiError.notFound(`Session not found: ${sessionId}`)
-    }
+      if (!found) {
+        throw ApiError.notFound(`Session not found: ${sessionId}`)
+      }
 
-    const entries = await this.readJsonlFile(found.filePath)
-    const workDir = this.resolveWorkDirFromEntries(entries, found.projectDir) || fallbackWorkDir || process.cwd()
-    const repository = this.resolveRepositoryFromEntries(entries)
-    const permissionMode = (
-      preservedPermissionMode &&
-      VALID_SESSION_PERMISSION_MODES.has(preservedPermissionMode)
-    )
-      ? preservedPermissionMode
-      : this.resolvePermissionModeFromEntries(entries)
-    const prePlanPermissionMode = permissionMode === 'plan'
-      ? this.resolvePrePlanPermissionModeFromEntries(entries)
-      : undefined
-    const now = new Date().toISOString()
+      const entries = await this.readJsonlFile(found.filePath)
+      const workDir = this.resolveWorkDirFromEntries(entries, found.projectDir) || fallbackWorkDir || process.cwd()
+      const repository = this.resolveRepositoryFromEntries(entries)
+      const permissionMode = (
+        preservedPermissionMode &&
+        VALID_SESSION_PERMISSION_MODES.has(preservedPermissionMode)
+      )
+        ? preservedPermissionMode
+        : this.resolvePermissionModeFromEntries(entries)
+      const prePlanPermissionMode = permissionMode === 'plan'
+        ? this.resolvePrePlanPermissionModeFromEntries(entries)
+        : undefined
+      const now = new Date().toISOString()
 
-    const initialEntry = {
-      type: 'file-history-snapshot',
-      messageId: crypto.randomUUID(),
-      snapshot: {
+      const initialEntry = {
+        type: 'file-history-snapshot',
         messageId: crypto.randomUUID(),
-        trackedFileBackups: {},
+        snapshot: {
+          messageId: crypto.randomUUID(),
+          trackedFileBackups: {},
+          timestamp: now,
+        },
+        isSnapshotUpdate: false,
+      }
+
+      const metaEntry = {
+        type: 'session-meta',
+        isMeta: true,
+        workDir,
+        repository,
+        ...(permissionMode ? { permissionMode } : {}),
+        ...(prePlanPermissionMode ? { prePlanPermissionMode } : {}),
         timestamp: now,
-      },
-      isSnapshotUpdate: false,
-    }
+      }
 
-    const metaEntry = {
-      type: 'session-meta',
-      isMeta: true,
-      workDir,
-      repository,
-      ...(permissionMode ? { permissionMode } : {}),
-      ...(prePlanPermissionMode ? { prePlanPermissionMode } : {}),
-      timestamp: now,
+      await fs.writeFile(
+        found.filePath,
+        `${JSON.stringify(initialEntry)}\n${JSON.stringify(metaEntry)}\n`,
+        'utf-8',
+      )
+      this.invalidateSessionListCache()
+    } catch (error) {
+      // Clear aborts old-generation appends so none can land after a successful
+      // transcript replacement. If replacement itself fails, restore any
+      // terminal notification that the barrier interrupted; otherwise a
+      // previously persisted running Agent can reappear after restart.
+      this.clearingTaskNotificationSessions.delete(sessionId)
+      await Promise.allSettled(
+        pendingWrites
+          .filter((pending) => !pending.persisted)
+          .map((pending) =>
+            this.appendSessionTaskNotification(sessionId, pending.notification)),
+      )
+      throw error
+    } finally {
+      this.clearingTaskNotificationSessions.delete(sessionId)
     }
-
-    await fs.writeFile(
-      found.filePath,
-      `${JSON.stringify(initialEntry)}\n${JSON.stringify(metaEntry)}\n`,
-      'utf-8',
-    )
-    this.invalidateReadCache(found.filePath)
-    this.invalidateSessionListCache()
   }
 
   async appendSessionMetadata(
@@ -4754,8 +4969,17 @@ export class SessionService {
       filteredEntries.length > 0
         ? filteredEntries.map((entry) => JSON.stringify(entry)).join('\n') + '\n'
         : ''
-    await fs.writeFile(found.filePath, content, 'utf-8')
-    this.invalidateReadCache(found.filePath)
+    const transcriptStats = await fs.stat(found.filePath)
+    const tempFilePath = `${found.filePath}.rewind-${crypto.randomUUID()}.tmp`
+    try {
+      await fs.writeFile(tempFilePath, content, {
+        encoding: 'utf-8',
+        mode: transcriptStats.mode,
+      })
+      await fs.rename(tempFilePath, found.filePath)
+    } finally {
+      await fs.rm(tempFilePath, { force: true })
+    }
     this.invalidateSessionListCache()
 
     return {
@@ -4815,17 +5039,50 @@ export class SessionService {
       notification.timestamp ?? new Date(this.now()).toISOString(),
     )
     if (!normalized) return
+    if (this.clearingTaskNotificationSessions.has(sessionId)) return
 
-    const found = await this.findSessionFile(sessionId)
-    if (!found) return
+    const epoch = this.taskNotificationMutationEpochs.get(sessionId) ?? 0
+    const controller = new AbortController()
+    const pending = {
+      controller,
+      promise: Promise.resolve(),
+      notification: normalized,
+      persisted: false,
+    }
+    const write = (async () => {
+      const found = await this.findSessionFile(sessionId)
+      if (
+        !found ||
+        controller.signal.aborted ||
+        this.clearingTaskNotificationSessions.has(sessionId) ||
+        (this.taskNotificationMutationEpochs.get(sessionId) ?? 0) !== epoch
+      ) {
+        return
+      }
 
-    await this.appendJsonlEntry(found.filePath, {
-      type: PERSISTED_TASK_NOTIFICATION_ENTRY_TYPE,
-      isMeta: true,
-      taskNotification: normalized,
-      timestamp: normalized.timestamp,
-    })
-    this.invalidateSessionListCache()
+      await this.appendJsonlEntry(found.filePath, {
+        type: PERSISTED_TASK_NOTIFICATION_ENTRY_TYPE,
+        isMeta: true,
+        taskNotification: normalized,
+        timestamp: normalized.timestamp,
+      }, controller.signal)
+      pending.persisted = true
+      this.invalidateSessionListCache()
+    })()
+    pending.promise = write
+
+    let writes = this.pendingTaskNotificationWrites.get(sessionId)
+    if (!writes) {
+      writes = new Set()
+      this.pendingTaskNotificationWrites.set(sessionId, writes)
+    }
+    writes.add(pending)
+    try {
+      await write
+    } finally {
+      writes.delete(pending)
+      if (writes.size === 0) this.pendingTaskNotificationWrites.delete(sessionId)
+    }
   }
 
   async getSessionTaskNotifications(

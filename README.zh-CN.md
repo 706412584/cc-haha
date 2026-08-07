@@ -83,6 +83,26 @@ Claude Code Haha 是一个**桌面端 Claude Code 工作台**：把会话、多�
         感谢 <a href="https://www.xuanshuapi.com/register?aff=CC-HAHA&promo=CC-HAHA">玄枢API</a> 赞助本项目！玄枢API 是一站式企业级 AI 网关，通过一个统一 API 即可接入 Claude Code、Codex、Gemini CLI 等热门 AI 编程工具，调用全球顶尖模型。平台以稳定为前提，通过多账号池调度与自动故障切换屏蔽上游账号波动；模型调用低至官方定价 2.5 折，余额充值再享约 8 折优惠且不设有效期。新用户通过 <a href="https://www.xuanshuapi.com/register?aff=CC-HAHA&promo=CC-HAHA">专属链接</a> 注册即赠 5 美元额度。
       </td>
     </tr>
+    <tr>
+      <td align="center" valign="middle">
+        <a href="https://api.fenno.ai/s/WD8c">
+          <img src="docs/images/sponsors/fennoai-logo.svg" width="180" alt="FennoAI">
+        </a>
+      </td>
+      <td valign="middle">
+        感谢 <a href="https://api.fenno.ai/s/WD8c">FennoAI</a> 赞助本项目！FennoAI 是一家面向企业研发团队和开发者的高稳定、高性能 API 中转服务商，兼容 OpenAI 与 Anthropic 协议，可无缝接入 Codex、Claude Code、OpenCode 等主流 AI 编程工具。平台具备企业级稳定性，可支撑千亿 Token/日的调用规模，并支持境内外主体公对公结算及开票，满足企业级研发与采购需求。作为 cc-haha 用户专属福利，通过 <a href="https://api.fenno.ai/s/WD8c">专属链接</a> 购买订阅，仅需 1.99 美元即可获得价值 50 美元的 Coding Plan 额度；同时支持邀请奖励，邀请好友购买最高可获得 20% 返佣，邀请越多，奖励越高。
+      </td>
+    </tr>
+    <tr>
+      <td align="center" valign="middle">
+        <a href="https://s.qiniu.com/IZbyya">
+          <img src="docs/images/sponsors/qiniuai-logo.svg" width="180" alt="七牛云 AI">
+        </a>
+      </td>
+      <td valign="middle">
+        感谢 <a href="https://s.qiniu.com/IZbyya">七牛云 AI</a> 赞助本项目！七牛云 AI 是七牛云（02567.HK）旗下企业级大模型 MaaS 平台，一站式调用全球 150+ 主流模型，兼容全球主流模型厂商协议，覆盖文本、图像、音频、视频、文件处理等全模态处理能力，服务超过 169 万企业及开发者用户。作为 cc-haha 用户专属福利，通过 <a href="https://s.qiniu.com/IZbyya">专属链接</a> 注册，企业用户免费领 1200 万 Token，开发者免费领 300 万 Token。
+      </td>
+    </tr>
   </tbody>
 </table>
 
@@ -205,10 +225,6 @@ cp .env.example .env
 
 如果这个项目对你有帮助，欢迎点一个 ⭐ Star，让更多人发现 Claude Code Haha。
 
-<a href="https://www.star-history.com/#NanmiCoder/cc-haha&Date">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=NanmiCoder/cc-haha&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=NanmiCoder/cc-haha&type=Date" />
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=NanmiCoder/cc-haha&type=Date" />
-  </picture>
+<a href="https://www.repostars.dev/?repos=NanmiCoder%2Fcc-haha&theme=ocean">
+  <img alt="Star History Chart" src="https://www.repostars.dev/api/embed?repo=NanmiCoder%2Fcc-haha&theme=ocean" />
 </a>

@@ -310,7 +310,9 @@ describe('ConversationService', () => {
       const nonSdkEnv = (await service.buildChildEnv('/tmp')) as Record<string, string>
 
       expect(sdkEnv.CLAUDE_CODE_EAGER_FLUSH).toBe('1')
+      expect(sdkEnv.CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS).toBe('1')
       expect(nonSdkEnv.CLAUDE_CODE_EAGER_FLUSH).toBeUndefined()
+      expect(nonSdkEnv.CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS).toBeUndefined()
 
       process.env.CLAUDE_CODE_EAGER_FLUSH = '0'
       resetTerminalShellEnvironmentCacheForTests()
@@ -611,6 +613,57 @@ describe('ConversationService', () => {
     expect(JSON.parse(sent[0]!).type).toBe('update_environment_variables')
     expect(JSON.parse(sent[0]!).variables.CLAUDE_CODE_OAUTH_TOKEN).toBe('fresh-after-wake-token')
     expect(JSON.parse(sent[1]!).type).toBe('user')
+  })
+
+  test('sendMessage does not enqueue a user turn after its owner is cancelled', async () => {
+    const service = new ConversationService() as any
+    const sent: string[] = []
+    installNetworkTestSession(service, 'cancelled-user-turn', sent)
+    let canSend = true
+    let committed = false
+
+    const pendingSend = service.sendMessage(
+      'cancelled-user-turn',
+      'Do not enqueue this after Stop',
+      undefined,
+      {
+        canSend: () => canSend,
+        messageUuid: 'cancelled-turn-uuid',
+        onCommitted: () => {
+          committed = true
+        },
+      },
+    )
+    canSend = false
+
+    expect(await pendingSend).toBe(false)
+    expect(committed).toBe(false)
+    expect(sent.map((line) => JSON.parse(line).type)).not.toContain('user')
+  })
+
+  test('sendMessage commits the caller UUID with the SDK user payload', async () => {
+    const service = new ConversationService() as any
+    const sent: string[] = []
+    installNetworkTestSession(service, 'identified-user-turn', sent)
+    let committed = false
+
+    expect(await service.sendMessage(
+      'identified-user-turn',
+      'Identify this turn',
+      undefined,
+      {
+        messageUuid: 'identified-turn-uuid',
+        onCommitted: () => {
+          committed = true
+        },
+      },
+    )).toBe(true)
+
+    expect(committed).toBe(true)
+    expect(sent.map((line) => JSON.parse(line))).toContainEqual(expect.objectContaining({
+      type: 'user',
+      uuid: 'identified-turn-uuid',
+    }))
   })
 
   test('sendMessage hot-applies direct to system routing before the next user turn', async () => {
@@ -931,6 +984,8 @@ describe('ConversationService', () => {
     expect(env.ANTHROPIC_AUTH_TOKEN).toBe('provider-key')
     expect(env.ANTHROPIC_API_KEY).toBe('')
     expect(env.ANTHROPIC_MODEL).toBe('claude-sonnet-4-6')
+    // Retired/third-party presets keep capabilities in preset defaultEnv
+    // (shengsuanyun pins sonnet to "none"); do not invent Claude-code caps.
     expect(env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES).toBe('none')
     expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe('none')
     expect(env.CLAUDE_CODE_ATTRIBUTION_HEADER).toBe('1')
@@ -1473,6 +1528,45 @@ describe('ConversationService', () => {
     }))
 
     expect(completionObserved).toBe(true)
+  })
+
+  test('rejects a permission request that arrives behind a stopped turn boundary', () => {
+    const service = new ConversationService() as any
+    const outbound: string[] = []
+    const forwarded: any[] = []
+    service.sessions.set('stopped-permission-boundary', {
+      outputCallbacks: [(message: any) => forwarded.push(message)],
+      seenSdkMessageUuids: new Set<string>(),
+      sdkMessages: [],
+      sdkSocket: { send: (message: string) => outbound.push(message) },
+      pendingOutbound: [],
+      initMessage: null,
+      pendingPermissionRequests: new Map(),
+    })
+
+    // 3rd arg is the SDK socket (stale-connection filter); options is 4th.
+    service.handleSdkPayload('stopped-permission-boundary', JSON.stringify({
+      type: 'control_request',
+      request_id: 'late-permission',
+      request: {
+        subtype: 'can_use_tool',
+        tool_name: 'Bash',
+        input: { command: 'echo stale' },
+      },
+    }), service.sessions.get('stopped-permission-boundary').sdkSocket, {
+      canAcceptPermissionRequest: () => false,
+    })
+
+    expect(service.getPendingPermissionRequests('stopped-permission-boundary')).toEqual([])
+    expect(forwarded).toEqual([])
+    expect(outbound).toHaveLength(1)
+    expect(JSON.parse(outbound[0]!)).toEqual(expect.objectContaining({
+      type: 'control_response',
+      response: expect.objectContaining({
+        request_id: 'late-permission',
+        response: expect.objectContaining({ behavior: 'deny' }),
+      }),
+    }))
   })
 
   // CLI 的 WebSocketTransport 每次重连成功都会把整个发送缓冲区重放一遍，并假定

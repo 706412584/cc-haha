@@ -98,6 +98,32 @@ describe('useAnchoredPosition', () => {
     expect(result.style.left).toBe(120)
   })
 
+  it('positions from snapshot anchor geometry', () => {
+    const captured: { current: Result | null } = { current: null }
+
+    function Harness() {
+      const floatingRef = useRef<HTMLDivElement | null>(null)
+      captured.current = useAnchoredPosition({
+        open: true,
+        anchorRect: { top: 100, bottom: 130, left: 200, right: 300 },
+        floatingRef,
+        placement: 'bottom-end',
+      })
+      return (
+        <div
+          ref={(element) => {
+            floatingRef.current = element
+            if (element) stubRect(element, { width: 180, height: 120 })
+          }}
+        />
+      )
+    }
+
+    render(<Harness />)
+    expect(captured.current!.style.top).toBe(136)
+    expect(captured.current!.style.left).toBe(120)
+  })
+
   it('flips above the anchor when it would overflow the bottom', () => {
     const result = renderAnchored({
       anchor: { top: 700, bottom: 740, left: 200, right: 300 },

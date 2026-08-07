@@ -188,6 +188,10 @@ import { headlessProfilerCheckpoint } from "src/utils/headlessProfiler.js";
 import { isMcpInstructionsDeltaEnabled } from "src/utils/mcpInstructionsDelta.js";
 import { calculateUSDCost } from "src/utils/modelCost.js";
 import { isOpenAIResponsesModel } from "src/services/openaiAuth/models.js";
+import {
+  canRetryOpenAICodexStreamWithBufferedContent,
+  resolveOpenAICodexFirstTokenTimeoutMs,
+} from "src/services/openaiAuth/streamPolicy.js";
 import { endQueryProfile, queryCheckpoint } from "src/utils/queryProfiler.js";
 import {
   modelSupportsAdaptiveThinking,
@@ -1678,8 +1682,6 @@ async function* queryModel(
     skipGlobalCacheForSystemPrompt: needsToolBasedCacheMarker,
     querySource: options.querySource,
   });
-  const useBetas = betas.length > 0;
-
   // Build minimal context for detailed tracing (when beta tracing is enabled)
   // Note: The actual new_context message extraction is done in sessionTracing.ts using
   // hash-based tracking per querySource (agent) from the messagesForAPI array
@@ -2031,13 +2033,12 @@ async function* queryModel(
       system,
       tools: allTools,
       tool_choice: options.toolChoice,
-      ...(useBetas && { betas: betasParams }),
+      ...(betasParams.length > 0 && { betas: betasParams }),
       metadata: getAPIMetadata(),
       max_tokens: maxOutputTokens,
       thinking,
       ...(temperature !== undefined && { temperature }),
       ...(contextManagement &&
-        useBetas &&
         betasParams.includes(CONTEXT_MANAGEMENT_BETA_HEADER) && {
           context_management: contextManagement,
         }),
@@ -2059,7 +2060,7 @@ async function* queryModel(
       thinkingConfig,
     });
     const logMessagesLength = queryParams.messages.length;
-    const logBetas = useBetas ? (queryParams.betas ?? []) : [];
+    const logBetas = queryParams.betas ?? [];
     const logThinkingType = queryParams.thinking?.type ?? "disabled";
     const logEffortValue = queryParams.output_config?.effort;
     void options.getToolPermissionContext().then((permissionContext) => {
@@ -2206,10 +2207,18 @@ async function* queryModel(
     // healthy-but-slow requests long before the user's configured timeout.
     // Falls back to API_TIMEOUT_MS (the user's request-timeout knob), then to
     // the idle value so terminal CLI behavior is unchanged when unset.
-    const STREAM_FIRST_TOKEN_TIMEOUT_MS =
+    const configuredFirstTokenTimeoutMs =
       parseInt(process.env.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS || "", 10) ||
       parseInt(process.env.API_TIMEOUT_MS || "", 10) ||
       STREAM_IDLE_TIMEOUT_MS;
+    // ChatGPT Codex can emit encrypted reasoning items for minutes before any
+    // user-visible text. The OAuth fetch adapter marks only that direct path,
+    // so its larger pre-output budget does not change third-party providers.
+    const STREAM_FIRST_TOKEN_TIMEOUT_MS =
+      resolveOpenAICodexFirstTokenTimeoutMs(
+        streamResponse as Response | undefined,
+        configuredFirstTokenTimeoutMs,
+      );
     // The idle watchdog waits the first-token budget until the first chunk
     // arrives, then switches to the shorter mid-stream idle budget (#826).
     let currentStreamIdleTimeoutMs = STREAM_FIRST_TOKEN_TIMEOUT_MS;
@@ -2988,6 +2997,29 @@ async function* queryModel(
         }
         logForDebugging(
           `Mid-stream transport disconnect before any tool output, will retry stream: ${errorMessage(
+            streamingError,
+          )}`,
+          { level: "warn" },
+        );
+        throw new RetriableStreamError(
+          streamingError,
+          assistantCommitBuffer.flush(),
+          streamRequestId ?? undefined,
+        );
+      }
+
+      if (
+        (newMessages.length === 0 ||
+          canRetryOpenAICodexStreamWithBufferedContent(
+            streamResponse as Response | undefined,
+            assistantCommitBuffer.hasCrossedSideEffectBoundary(),
+          )) &&
+        !streamIdleAborted &&
+        !signal.aborted &&
+        isRetryableStreamError(streamingError)
+      ) {
+        logForDebugging(
+          `Transient mid-stream error before any output, will retry stream: ${errorMessage(
             streamingError,
           )}`,
           { level: "warn" },

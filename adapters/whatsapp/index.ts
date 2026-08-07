@@ -5,7 +5,6 @@
  * then run: bun run whatsapp
  */
 
-import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import {
   normalizeMessageContent,

@@ -67,6 +67,28 @@ export function startsWithApiErrorPrefix(text: string): boolean {
 }
 export const PROMPT_TOO_LONG_ERROR_MESSAGE = 'Prompt is too long'
 
+/**
+ * Providers word context-overflow rejections differently, and some gateways
+ * even wrap them in a 401 (e.g. Kimi's "k3-256k supports only 256K context").
+ * Anything matched here is normalized to PROMPT_TOO_LONG_ERROR_MESSAGE so the
+ * compact retry loop and the UI can key on one string — without this, a
+ * third-party overflow surfaces as "Please run /login" and the session is
+ * unrecoverable (#1162).
+ */
+const CONTEXT_OVERFLOW_PATTERNS: RegExp[] = [
+  /prompt is too long/i,
+  /input is too long for requested model/i,
+  /context_length_exceeded/i,
+  /maximum context length/i,
+  /exceeds? the context window/i,
+  /context window exceeded/i,
+  /supports only \d+\s*k?\s*(?:tokens?\s+of\s+)?context/i,
+]
+
+export function isContextOverflowErrorText(text: string): boolean {
+  return CONTEXT_OVERFLOW_PATTERNS.some(pattern => pattern.test(text))
+}
+
 export function isPromptTooLongMessage(msg: AssistantMessage): boolean {
   if (!msg.isApiErrorMessage) {
     return false
@@ -678,13 +700,17 @@ function buildAssistantMessageFromError(
     })
   }
 
-  // Handle prompt too long errors (Vertex returns 413, direct API returns 400)
-  // Use case-insensitive check since Vertex returns "Prompt is too long" (capitalized).
-  // Also catch context-window-overflow wording from third-party relays/proxies
-  // (e.g. type "context_too_large") which is the same class of error.
+  // Handle context-overflow errors (Vertex returns 413, direct API returns
+  // 400, some third-party gateways wrap them in a 401 with their own wording).
+  // This must stay ahead of the generic 401 handler below so a wrapped
+  // overflow isn't misreported as an authentication failure.
+  // isContextOverflowErrorText covers Anthropic's "prompt is too long" plus the
+  // common relay wordings; isContextWindowExceededMessage keeps the extra
+  // third-party gateway shapes (e.g. type "context_too_large") we handle for
+  // #1162 that the shared pattern set doesn't yet include.
   if (
     error instanceof Error &&
-    (error.message.toLowerCase().includes('prompt is too long') ||
+    (isContextOverflowErrorText(error.message) ||
       isContextWindowExceededMessage(error.message))
   ) {
     // Content stays generic (UI matches on exact string). The raw error with

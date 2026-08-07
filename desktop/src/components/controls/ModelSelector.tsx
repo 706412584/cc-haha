@@ -1,5 +1,6 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { BUNDLED_PROVIDER_PRESETS } from '../../config/providerPresets'
 import { OFFICIAL_MODELS } from '../../constants/modelCatalog'
 import {
   OPENAI_OFFICIAL_MODELS,
@@ -16,7 +17,10 @@ import type { ModelInfo, ReasoningEffortLevel } from '../../types/settings'
 import { useDismissable } from '@/hooks/useDismissable'
 import { useMobileViewport } from '../../hooks/useMobileViewport'
 import { isDesktopRuntime } from '../../lib/desktopRuntime'
-import { resolveDefaultRuntimeSelection } from '../../lib/runtimeSelection'
+import {
+  normalizeRuntimeSelection,
+  resolveDefaultRuntimeSelection,
+} from '../../lib/runtimeSelection'
 import { useHahaOAuthStore } from '../../stores/hahaOAuthStore'
 import { useHahaOpenAIOAuthStore } from '../../stores/hahaOpenAIOAuthStore'
 import { useHahaGrokOAuthStore } from '../../stores/hahaGrokOAuthStore'
@@ -25,7 +29,16 @@ import {
   GROK_OFFICIAL_PROVIDER_ID,
 } from '../../constants/grokOfficialProvider'
 import { MobileBottomSheet } from '@/components/ui/MobileBottomSheet'
+import { SearchField } from '@/components/ui/SearchField'
 import { ReasoningEffortPopover } from './ReasoningEffortPopover'
+import { useUIStore } from '../../stores/uiStore'
+import { SETTINGS_TAB_ID, useTabStore } from '../../stores/tabStore'
+import {
+  getModelReasoningCapabilityOverride,
+  isModelReasoningEffort,
+  normalizeModelReasoningEffort,
+  resolveModelReasoningProfile,
+} from '../../../../src/shared/modelReasoning'
 
 type ProviderChoice = {
   providerId: string | null
@@ -62,6 +75,20 @@ const DROPDOWN_GAP = 8
 const VIEWPORT_MARGIN = 16
 const DROPDOWN_MAX_HEIGHT = 420
 const DROPDOWN_MIN_HEIGHT = 180
+const PROVIDER_PRESET_DEFAULT_ENVS = new Map(
+  BUNDLED_PROVIDER_PRESETS.map(preset => [preset.id, preset.defaultEnv ?? {}]),
+)
+
+function getProviderModelCapabilityOverride(
+  provider: SavedProvider,
+  modelId: string,
+): string | undefined {
+  return getModelReasoningCapabilityOverride(
+    modelId,
+    provider.models,
+    PROVIDER_PRESET_DEFAULT_ENVS.get(provider.presetId) ?? {},
+  )
+}
 
 function officialChoices(
   providerId: string | null,
@@ -113,12 +140,23 @@ function buildProviderModels(
     byId.set(entry.id, { id: entry.id, labels: [entry.label] })
   }
 
-  return [...byId.values()].map((entry) => ({
-    id: entry.id,
-    name: entry.id,
-    description: entry.labels.join(' · '),
-    context: '',
-  }))
+  return [...byId.values()].map((entry) => {
+    const reasoningProfile = resolveModelReasoningProfile(
+      entry.id,
+      provider.apiFormat,
+      getProviderModelCapabilityOverride(provider, entry.id),
+    )
+    return {
+      id: entry.id,
+      name: entry.id,
+      description: entry.labels.join(' · '),
+      context: '',
+      supportedReasoningEfforts: [...(reasoningProfile?.supportedReasoningEfforts ?? [])],
+      ...(reasoningProfile?.defaultReasoningEffort
+        ? { defaultReasoningEffort: reasoningProfile.defaultReasoningEffort }
+        : {}),
+    }
+  })
 }
 
 function buildProviderChoices(
@@ -177,6 +215,11 @@ function buildProviderChoices(
   return choices
 }
 
+function modelMatchesSearch(model: ModelInfo, query: string): boolean {
+  return [model.id, model.name, model.description]
+    .some(value => value.toLocaleLowerCase().includes(query))
+}
+
 export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function ModelSelector({
   value,
   onChange,
@@ -200,6 +243,7 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
   const {
     providers,
     activeId,
+    hasLoadedProviders,
     isLoading: providersLoading,
     fetchProviders,
   } = useProviderStore()
@@ -217,6 +261,7 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
   )
   const [open, setOpen] = useState(false)
   const [effortOpen, setEffortOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
   const [dropdownPosition, setDropdownPosition] = useState<DropdownPosition | null>(null)
   const ref = useRef<HTMLDivElement>(null)
   const effortButtonRef = useRef<HTMLButtonElement>(null)
@@ -246,10 +291,15 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
   const canEditRuntimeEffort = runtimeKey !== undefined
 
   useEffect(() => {
-    if (!isRuntimeScoped || providersLoading || requestedProvidersRef.current) return
+    if (
+      !isRuntimeScoped ||
+      hasLoadedProviders ||
+      providersLoading ||
+      requestedProvidersRef.current
+    ) return
     requestedProvidersRef.current = true
     void fetchProviders()
-  }, [fetchProviders, isRuntimeScoped, providersLoading])
+  }, [fetchProviders, hasLoadedProviders, isRuntimeScoped, providersLoading])
 
   useEffect(() => {
     if (!isRuntimeScoped || !open || requestedOAuthStatusRef.current) return
@@ -258,17 +308,6 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
     void fetchOpenAIOAuthStatus()
     void fetchGrokOAuthStatus()
   }, [fetchClaudeOAuthStatus, fetchGrokOAuthStatus, fetchOpenAIOAuthStatus, isRuntimeScoped, open])
-
-  const openSelector = useCallback(() => {
-    if (!disabled) {
-      setEffortOpen(false)
-      setOpen(true)
-    }
-  }, [disabled])
-
-  useImperativeHandle(selectorRef, () => ({
-    open: openSelector,
-  }), [openSelector])
 
   const closeSelector = useCallback(() => setOpen(false), [])
 
@@ -321,6 +360,10 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
   }, [open, updateDropdownPosition])
 
   useEffect(() => {
+    if (!open && searchQuery) setSearchQuery('')
+  }, [open, searchQuery])
+
+  useEffect(() => {
     if (!open) return
     window.addEventListener('resize', updateDropdownPosition)
     window.addEventListener('scroll', updateDropdownPosition, true)
@@ -355,12 +398,30 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
     ),
     [activeId, availableModels, providers, roleLabels, t, claudeOAuthStatus, grokOAuthStatus, openAIOAuthStatus],
   )
+  const normalizedSearchQuery = searchQuery.trim().toLocaleLowerCase()
+  const filteredProviderChoices = useMemo(() => {
+    if (!normalizedSearchQuery) return providerChoices
+
+    return providerChoices.flatMap((choice) => {
+      const providerMatches = choice.providerName.toLocaleLowerCase().includes(normalizedSearchQuery)
+      const models = providerMatches
+        ? choice.models
+        : choice.models.filter(model => modelMatchesSearch(model, normalizedSearchQuery))
+      return models.length > 0 ? [{ ...choice, models }] : []
+    })
+  }, [normalizedSearchQuery, providerChoices])
+  const filteredAvailableModels = useMemo(
+    () => normalizedSearchQuery
+      ? availableModels.filter(model => modelMatchesSearch(model, normalizedSearchQuery))
+      : availableModels,
+    [availableModels, normalizedSearchQuery],
+  )
 
   const selectedModel = isControlled
     ? availableModels.find((model) => model.id === value) || null
     : storeModel
 
-  const activeRuntimeSelection = isRuntimeScoped
+  const requestedRuntimeSelection = isRuntimeScoped
     ? controlledRuntimeSelection ?? pendingRuntimeSelection ?? runtimeSelection ?? resolveDefaultRuntimeSelection(
       activeId,
       activeProviderName,
@@ -368,6 +429,11 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
       storeModel,
       effortLevel,
     )
+    : null
+  const activeRuntimeSelection = requestedRuntimeSelection && providerChoices.some(
+    (choice) => choice.providerId === requestedRuntimeSelection.providerId,
+  )
+    ? requestedRuntimeSelection
     : null
 
   const selectedProviderChoice = activeRuntimeSelection
@@ -384,18 +450,22 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
       }
     : null
 
+  const needsProviderConfiguration = isRuntimeScoped && providerChoices.length === 0
   const buttonModelLabel = isRuntimeScoped
-    ? selectedRuntimeModel?.name ?? storeModel?.name ?? t('model.selectModel')
+    ? selectedRuntimeModel?.name
+      ?? (needsProviderConfiguration ? t('model.configureProvider') : t('model.selectModel'))
     : selectedModel?.name ?? t('model.selectModel')
   const buttonProviderLabel = isRuntimeScoped
-    ? selectedProviderChoice?.providerName ?? activeProviderName ?? t('settings.providers.officialName')
+    ? selectedProviderChoice?.providerName ?? null
     : null
   const supportedRuntimeEfforts = selectedRuntimeModel?.supportedReasoningEfforts
-  const selectedRuntimeEffort = supportedRuntimeEfforts?.length === 0
-    ? undefined
-    : activeRuntimeSelection?.effortLevel
-      ?? selectedRuntimeModel?.defaultReasoningEffort
-      ?? effortLevel
+  const selectedRuntimeEffort = selectedRuntimeModel
+    ? supportedRuntimeEfforts?.length === 0
+      ? undefined
+      : activeRuntimeSelection?.effortLevel
+        ?? selectedRuntimeModel.defaultReasoningEffort
+        ?? effortLevel
+    : undefined
   const runtimeEffortOptions = supportedRuntimeEfforts === undefined
     ? EFFORT_OPTIONS.filter((option) => option.value !== 'xhigh')
     : EFFORT_OPTIONS.filter((option) => supportedRuntimeEfforts.includes(option.value))
@@ -403,13 +473,88 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
   const selectedRuntimeThinkingEnabled =
     activeRuntimeSelection?.thinkingEnabled ?? globalThinkingEnabled
 
-  const handleRuntimeSelect = (selection: RuntimeSelection, options?: { keepOpen?: boolean }) => {
-    onRuntimeSelectionChange?.(selection)
-    if (runtimeKey) {
-      if (runtimeKey === DRAFT_RUNTIME_SELECTION_KEY) {
-        useSessionRuntimeStore.getState().setSelection(runtimeKey, selection)
+  const navigateToProviderSettings = useCallback(() => {
+    setOpen(false)
+    useUIStore.getState().setPendingSettingsTab('providers')
+    useTabStore.getState().openTab(SETTINGS_TAB_ID, t('sidebar.settings'), 'settings')
+  }, [t])
+
+  const openSelector = useCallback(() => {
+    if (disabled) return
+    setEffortOpen(false)
+
+    if (!isRuntimeScoped || providerChoices.length > 0) {
+      setOpen(true)
+      return
+    }
+
+    const claudeStatus = useHahaOAuthStore.getState().status
+    const openAIStatus = useHahaOpenAIOAuthStore.getState().status
+    const grokStatus = useHahaGrokOAuthStore.getState().status
+    const statuses = [claudeStatus, openAIStatus, grokStatus]
+    const providerState = useProviderStore.getState()
+    if (providerState.providers.length > 0) {
+      setOpen(true)
+      return
+    }
+    if (statuses.some((status) => status?.loggedIn === true)) {
+      setOpen(true)
+      return
+    }
+    if (providerState.hasLoadedProviders && statuses.every((status) => status !== null)) {
+      navigateToProviderSettings()
+      return
+    }
+
+    void (async () => {
+      const latestProviderState = useProviderStore.getState()
+      if (!latestProviderState.hasLoadedProviders) {
+        await latestProviderState.fetchProviders()
+      }
+      if (useProviderStore.getState().providers.length > 0) {
+        setOpen(true)
+        return
+      }
+
+      requestedOAuthStatusRef.current = true
+      await Promise.all([
+        fetchClaudeOAuthStatus(),
+        fetchOpenAIOAuthStatus(),
+        fetchGrokOAuthStatus(),
+      ])
+      const hasOfficialLogin = [
+        useHahaOAuthStore.getState().status,
+        useHahaOpenAIOAuthStore.getState().status,
+        useHahaGrokOAuthStore.getState().status,
+      ].some((status) => status?.loggedIn === true)
+      if (hasOfficialLogin) {
+        setOpen(true)
       } else {
-        useChatStore.getState().setSessionRuntime(runtimeKey, selection)
+        navigateToProviderSettings()
+      }
+    })()
+  }, [
+    disabled,
+    fetchClaudeOAuthStatus,
+    fetchGrokOAuthStatus,
+    fetchOpenAIOAuthStatus,
+    isRuntimeScoped,
+    navigateToProviderSettings,
+    providerChoices.length,
+  ])
+
+  useImperativeHandle(selectorRef, () => ({
+    open: openSelector,
+  }), [openSelector])
+
+  const handleRuntimeSelect = (selection: RuntimeSelection, options?: { keepOpen?: boolean }) => {
+    const apiFormat = providers.find((provider) => provider.id === selection.providerId)?.apiFormat
+    const normalizedSelection = normalizeRuntimeSelection(selection, apiFormat)
+    onRuntimeSelectionChange?.(normalizedSelection)
+    if (runtimeKey) {
+      useSessionRuntimeStore.getState().setSelection(runtimeKey, normalizedSelection)
+      if (runtimeKey !== DRAFT_RUNTIME_SELECTION_KEY) {
+        useChatStore.getState().setSessionRuntime(runtimeKey, normalizedSelection)
       }
     }
     if (!options?.keepOpen) {
@@ -433,18 +578,49 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
     }, { keepOpen: true })
   }
 
+  const hasMatchingModels = isRuntimeScoped
+    ? filteredProviderChoices.length > 0
+    : filteredAvailableModels.length > 0
+  const searchField = (
+    <SearchField
+      value={searchQuery}
+      onChange={setSearchQuery}
+      label={t('model.searchPlaceholder')}
+      placeholder={t('model.searchPlaceholder')}
+      clearLabel={t('model.clearSearch')}
+      size={isMobileBrowser ? 'xl' : 'md'}
+      autoFocus={!isMobileBrowser}
+    />
+  )
+
   const dropdownContent = (
     <>
-      <div className={`overflow-y-auto ${isMobileBrowser ? 'p-1' : 'p-1.5'}`} style={{ maxHeight: isMobileBrowser ? undefined : dropdownPosition?.maxHeight }}>
-        {!isMobileBrowser && (
-          <div className="mb-1 px-3 pt-1.5 text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-tertiary)]">
+      {/* The header stays OUTSIDE the scroll region: a sticky header inside
+          `overflow-y-auto` depends on the engine compositing it above the
+          scrolling layer, and on the desktop shell scrolled items paint
+          through it (and above the panel edge). As a sibling above the
+          scrollport, the list is hard-clipped below the header instead. */}
+      {!isMobileBrowser && (
+        <div className="flex-none border-b border-[var(--color-border)] px-3.5 pb-2 pt-3">
+          <div className="mb-2 px-1 text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-tertiary)]">
             {t('model.configuration')}
+          </div>
+          {searchField}
+        </div>
+      )}
+      <div className={`overflow-y-auto ${isMobileBrowser ? 'p-1' : 'min-h-0 flex-1 p-1.5'}`}>
+        {!hasMatchingModels && (
+          <div
+            role="status"
+            className={`flex items-center justify-center px-4 text-center text-sm text-[var(--color-text-tertiary)] ${isMobileBrowser ? 'min-h-28' : 'min-h-24'}`}
+          >
+            {t('model.noMatches')}
           </div>
         )}
 
         {isRuntimeScoped ? (
           <div className="space-y-3">
-            {providerChoices.map((choice) => (
+            {filteredProviderChoices.map((choice) => (
               <div key={choice.providerId ?? 'official'} className="space-y-1.5">
                 <div className="flex items-center justify-between gap-2 px-3 pt-1">
                   <span className="truncate text-xs font-semibold text-[var(--color-text-tertiary)]">
@@ -468,12 +644,35 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
                         onClick={() => {
                           const supportedEfforts = model.supportedReasoningEfforts
                           const explicitEffort = activeRuntimeSelection?.effortLevel
+                          const selectedProvider = providers.find(
+                            (provider) => provider.id === choice.providerId,
+                          )
+                          const normalizedProviderEffort = explicitEffort &&
+                            isModelReasoningEffort(explicitEffort)
+                            ? normalizeModelReasoningEffort(
+                                model.id,
+                                explicitEffort,
+                                selectedProvider?.apiFormat,
+                                selectedProvider
+                                  ? getProviderModelCapabilityOverride(selectedProvider, model.id)
+                                  : undefined,
+                              )
+                            : undefined
+                          const supportedProviderEffort = normalizedProviderEffort && (
+                            supportedEfforts === undefined ||
+                            supportedEfforts.includes(normalizedProviderEffort)
+                          )
+                            ? normalizedProviderEffort
+                            : undefined
                           const nextEffort = supportedEfforts === undefined
                             ? explicitEffort ?? effortLevel
                             : supportedEfforts.length
-                              ? explicitEffort && supportedEfforts.includes(explicitEffort)
+                              ? supportedProviderEffort
+                                ?? (explicitEffort && supportedEfforts.includes(explicitEffort)
                                 ? explicitEffort
-                                : model.defaultReasoningEffort ?? supportedEfforts[0]
+                                : supportedEfforts.includes(effortLevel)
+                                  ? effortLevel
+                                  : model.defaultReasoningEffort ?? supportedEfforts[0])
                               : undefined
                           handleRuntimeSelect({
                             providerId: choice.providerId,
@@ -517,7 +716,7 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
           </div>
         ) : (
           <div className="space-y-1">
-            {availableModels.map((model) => {
+            {filteredAvailableModels.map((model) => {
               const isSelected = model.id === selectedModel?.id
               return (
                 <button
@@ -636,7 +835,8 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
         title={t('model.configuration')}
         closeLabel={t('tabs.close')}
         ariaLabel={t('model.configuration')}
-        contentClassName="p-3"
+        headerExtra={searchField}
+        contentClassName="p-1"
         panelRef={dropdownRef}
         testId="model-selector-dropdown"
       >
@@ -646,12 +846,13 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
       <div
         ref={dropdownRef}
         data-testid="model-selector-dropdown"
-        className="fixed z-[var(--z-dropdown)] rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-overlay)]"
+        className="fixed z-[var(--z-dropdown)] flex flex-col overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-overlay)]"
         style={{
           top: dropdownPosition.top,
           bottom: dropdownPosition.bottom,
           left: dropdownPosition.left,
           width: dropdownPosition.width,
+          maxHeight: dropdownPosition.maxHeight,
         }}
       >
         {dropdownContent}
@@ -676,12 +877,15 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
         <button
           onClick={() => {
             if (disabled) return
-            setEffortOpen(false)
-            setOpen(!open)
+            if (open) {
+              setOpen(false)
+              return
+            }
+            openSelector()
           }}
           disabled={disabled}
-          aria-label={buttonProviderLabel ? `${buttonModelLabel}, ${buttonProviderLabel}` : undefined}
-          title={buttonProviderLabel ? `${buttonProviderLabel} · ${buttonModelLabel}` : undefined}
+          aria-label={buttonProviderLabel ? `${buttonModelLabel}, ${buttonProviderLabel}` : buttonModelLabel}
+          title={buttonProviderLabel ? `${buttonProviderLabel} · ${buttonModelLabel}` : buttonModelLabel}
           // `focus-visible:rounded-*` restores the other pair of corners while
           // focused. The ring traces `border-radius`, so on the half-rounded
           // halves of this segmented control it otherwise drew a box that was
@@ -698,7 +902,9 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
               {buttonProviderLabel}
             </span>
           )}
-          <span className="material-symbols-outlined flex-shrink-0 text-[12px] text-[var(--color-text-tertiary)]">expand_more</span>
+          <span className="material-symbols-outlined flex-shrink-0 text-[12px] text-[var(--color-text-tertiary)]">
+            {needsProviderConfiguration ? 'arrow_forward' : 'expand_more'}
+          </span>
         </button>
 
         {canEditRuntimeEffort && selectedRuntimeEffort && runtimeEffortOptions.length > 0 && (

@@ -12,4 +12,20 @@ describe('preview-agent protocol', () => {
     expect(parseHostMessage('not json')).toBeNull()
     expect(parseHostMessage('{"v":1,"type":"nope"}')).toBeNull()
   })
+
+  it('validates batch picker context and draft commands', () => {
+    const copy = {
+      cancel: 'Cancel',
+      send: 'Send',
+      queueAndContinue: 'Add & continue',
+      add: 'Add',
+      descriptionPlaceholder: 'Describe changes…',
+    }
+    expect(parseHostMessage(JSON.stringify({ v: 1, type: 'enter-picker', mode: 'batch', label: 4, copy })))
+      .toEqual({ type: 'enter-picker', mode: 'batch', label: 4, copy })
+    expect(parseHostMessage('{"v":1,"type":"undo-selection","itemId":"item-4"}'))
+      .toEqual({ type: 'undo-selection', itemId: 'item-4' })
+    expect(parseHostMessage('{"v":1,"type":"enter-picker","mode":"forever"}')).toBeNull()
+    expect(parseHostMessage('{"v":1,"type":"undo-selection","itemId":""}')).toBeNull()
+  })
 })

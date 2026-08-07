@@ -1,3 +1,5 @@
+import { MODEL_REASONING_CAPABILITY_TIERS } from '../../shared/modelReasoning.js'
+import { normalizeModelContextKey } from './modelContextWindows.js'
 import { getAPIProvider, isFirstPartyAnthropicBaseUrl } from './providers.js'
 
 export type ModelCapabilityOverride =
@@ -9,33 +11,23 @@ export type ModelCapabilityOverride =
   | 'adaptive_thinking'
   | 'interleaved_thinking'
 
-const TIERS = [
+/**
+ * Active model first, then the shared tier pins. `ANTHROPIC_MODEL` must win when the
+ * same id is also pinned on a default tier — otherwise a stale sonnet/haiku
+ * capability string can clamp max/xhigh after a provider switch. Context-window
+ * markers are transport annotations and must not change model identity.
+ *
+ * Not memoized: provider switches rewrite these env vars in-process, and a cache
+ * keyed only on the model id would keep the previous provider's answer.
+ */
+const CAPABILITY_TIERS = [
   {
     modelEnvVar: 'ANTHROPIC_MODEL',
     capabilitiesEnvVar: 'ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES',
   },
-  {
-    modelEnvVar: 'ANTHROPIC_DEFAULT_FABLE_MODEL',
-    capabilitiesEnvVar: 'ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES',
-  },
-  {
-    modelEnvVar: 'ANTHROPIC_DEFAULT_OPUS_MODEL',
-    capabilitiesEnvVar: 'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES',
-  },
-  {
-    modelEnvVar: 'ANTHROPIC_DEFAULT_SONNET_MODEL',
-    capabilitiesEnvVar: 'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES',
-  },
-  {
-    modelEnvVar: 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-    capabilitiesEnvVar: 'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES',
-  },
+  ...MODEL_REASONING_CAPABILITY_TIERS,
 ] as const
 
-/**
- * Check whether a 3p model capability override is set for a model that matches one of
- * the pinned ANTHROPIC_DEFAULT_*_MODEL env vars.
- */
 export function get3PModelCapabilityOverride(
   model: string,
   capability: ModelCapabilityOverride,
@@ -43,12 +35,12 @@ export function get3PModelCapabilityOverride(
   if (getAPIProvider() === 'firstParty' && isFirstPartyAnthropicBaseUrl()) {
     return undefined
   }
-  const m = model.toLowerCase()
-  for (const tier of TIERS) {
+  const normalizedModel = normalizeModelContextKey(model)
+  for (const tier of CAPABILITY_TIERS) {
     const pinned = process.env[tier.modelEnvVar]
     const capabilities = process.env[tier.capabilitiesEnvVar]
     if (!pinned || capabilities === undefined) continue
-    if (m !== pinned.toLowerCase()) continue
+    if (normalizedModel !== normalizeModelContextKey(pinned)) continue
     return capabilities
       .toLowerCase()
       .split(',')

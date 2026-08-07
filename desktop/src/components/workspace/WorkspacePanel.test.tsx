@@ -242,6 +242,7 @@ import { useWorkspaceChatContextStore } from '../../stores/workspaceChatContextS
 import { useWorkspacePanelStore } from '../../stores/workspacePanelStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useUIStore } from '../../stores/uiStore'
+import { getServerBaseUrl } from '../../lib/desktopRuntime'
 import type { LspUnavailableReason } from '../../types/lsp'
 import { WorkspacePanel } from './WorkspacePanel'
 
@@ -2231,6 +2232,71 @@ describe('WorkspacePanel', () => {
     })
   })
 
+  it('resolves relative and remote markdown preview images to loadable URLs', async () => {
+    await setWorkspaceState((state) => ({
+      ...state,
+      panelBySession: {
+        ...state.panelBySession,
+        'session-markdown-images': {
+          isOpen: true,
+          activeView: 'all',
+        },
+      },
+      statusBySession: {
+        ...state.statusBySession,
+        'session-markdown-images': {
+          state: 'ok',
+          workDir: '/repo',
+          repoName: 'repo',
+          branch: 'main',
+          isGitRepo: true,
+          changedFiles: [],
+        },
+      },
+      previewTabsBySession: {
+        ...state.previewTabsBySession,
+        'session-markdown-images': [{
+          id: 'file:docs/guide.md',
+          path: 'docs/guide.md',
+          kind: 'file',
+          title: 'guide.md',
+          language: 'markdown',
+          content: [
+            '# Guide',
+            '',
+            '![logo](assets/logo.png)',
+            '![banner](../shared/banner.png)',
+            '![badge](https://img.shields.io/badge/stars-1k.svg)',
+            '![absolute](/repo/docs/raw.png)',
+            '![inline](data:image/png;base64,AAAA)',
+          ].join('\n'),
+          state: 'ok',
+          size: 160,
+        }],
+      },
+      activePreviewTabIdBySession: {
+        ...state.activePreviewTabIdBySession,
+        'session-markdown-images': 'file:docs/guide.md',
+      },
+    }))
+
+    const view = await renderPanel('session-markdown-images')
+
+    const base = getServerBaseUrl()
+    const images = await waitFor(() => {
+      const found = Array.from(view.container.querySelectorAll('img'))
+      expect(found).toHaveLength(5)
+      return found
+    })
+    expect(images.map((image) => image.getAttribute('src'))).toEqual([
+      `${base}/preview-fs/session-markdown-images/docs/assets/logo.png`,
+      `${base}/preview-fs/session-markdown-images/shared/banner.png`,
+      'https://img.shields.io/badge/stars-1k.svg',
+      `${base}/local-file/repo/docs/raw.png`,
+      'data:image/png;base64,AAAA',
+    ])
+  })
+
   it('renders Mermaid diagrams in markdown file previews when labels contain HTML breaks and braces', async () => {
     await setWorkspaceState((state) => ({
       ...state,
@@ -2813,13 +2879,18 @@ describe('WorkspacePanel', () => {
     const otherComposerShell = document.createElement('div')
     otherComposerShell.dataset.testid = 'chat-input-shell'
     otherComposerShell.dataset.sessionId = 'another-session'
-    otherComposerShell.append(document.createElement('textarea'))
+    const otherComposer = document.createElement('div')
+    otherComposer.setAttribute('data-composer-editor', 'true')
+    otherComposer.tabIndex = -1
+    otherComposerShell.append(otherComposer)
     document.body.append(otherComposerShell)
 
     const composerShell = document.createElement('div')
     composerShell.dataset.testid = 'chat-input-shell'
     composerShell.dataset.sessionId = 'session-diff-comment'
-    const composer = document.createElement('textarea')
+    const composer = document.createElement('div')
+    composer.setAttribute('data-composer-editor', 'true')
+    composer.tabIndex = -1
     composerShell.append(composer)
     document.body.append(composerShell)
 

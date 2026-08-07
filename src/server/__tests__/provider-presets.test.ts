@@ -70,6 +70,8 @@ describe('provider presets API', () => {
     const shengsuanyun = PROVIDER_PRESETS.find((preset) => preset.id === 'shengsuanyun')
     const teamorouter = PROVIDER_PRESETS.find((preset) => preset.id === 'teamorouter')
     const xuanshuapi = PROVIDER_PRESETS.find((preset) => preset.id === 'xuanshuapi')
+    const fennoai = PROVIDER_PRESETS.find((preset) => preset.id === 'fennoai')
+    const qiniuai = PROVIDER_PRESETS.find((preset) => preset.id === 'qiniuai')
 
     expect(lmstudio?.baseUrl).toBe('http://localhost:1234')
     expect(lmstudio?.apiFormat).toBe('anthropic')
@@ -85,7 +87,6 @@ describe('provider presets API', () => {
     expect(deepseek?.defaultModels.sonnet).toBe('deepseek-v4-pro[1m]')
     expect(deepseek?.defaultModels.opus).toBe('deepseek-v4-pro[1m]')
     expect(deepseek?.defaultEnv?.CC_HAHA_SEND_DISABLED_THINKING).toBeUndefined()
-    // upstream v0.5.2: presets emit model capability env vars and auto-compact window
     expect(deepseek?.defaultEnv).toEqual({
       ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES: 'thinking,effort,adaptive_thinking,max_effort',
       ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: 'thinking,effort,adaptive_thinking,max_effort',
@@ -93,14 +94,18 @@ describe('provider presets API', () => {
       CLAUDE_CODE_AUTO_COMPACT_WINDOW: '1000000',
     })
     expect(zhipu?.baseUrl).toBe('https://open.bigmodel.cn/api/anthropic')
-    // upstream v0.5.2: zhipu regionalEndpoints removed
+    expect(zhipu?.regionalEndpoints).toEqual([
+      { region: 'cn_zh', baseUrl: 'https://open.bigmodel.cn/api/anthropic' },
+      { region: 'global_en', baseUrl: 'https://api.z.ai/api/anthropic' },
+    ])
     expect(zhipu?.authStrategy).toBe('auth_token')
     expect(zhipu?.defaultModels.main).toBe('glm-5.2[1m]')
     expect(zhipu?.defaultModels.haiku).toBe('glm-4.7')
     expect(zhipu?.defaultModels.sonnet).toBe('glm-5.2[1m]')
     expect(zhipu?.defaultModels.opus).toBe('glm-5.2[1m]')
-    // upstream v0.5.2: deepseek and zhipu now set a provider-wide auto-compact window
-    // at 1M so pinned small-context models never trigger auto-compact (#1162).
+    // Presets must not pin a provider-wide auto-compact window: the env is
+    // model-agnostic, so it pinned small-context models at 1M and auto-compact
+    // never fired (#1162). Real windows come from modelContextWindows instead.
     expect(deepseek?.defaultEnv?.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('1000000')
     expect(zhipu?.defaultEnv?.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('1000000')
     expect(kimi?.baseUrl).toBe('https://api.kimi.com/coding/')
@@ -109,13 +114,15 @@ describe('provider presets API', () => {
     expect(kimi?.defaultModels.main).toBe('k3')
     expect(kimi?.defaultEnv?.CC_HAHA_SEND_DISABLED_THINKING).toBeUndefined()
     expect(kimi?.defaultEnv).toEqual({
-      ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES: 'thinking,required_thinking,effort,max_effort',
-      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: 'thinking,required_thinking,effort,max_effort',
-      ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES: 'thinking,required_thinking,effort,max_effort',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES: 'thinking,required_thinking,effort,xhigh_effort,max_effort',
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: 'thinking,required_thinking,effort,xhigh_effort,max_effort',
+      ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES: 'thinking,required_thinking,effort,xhigh_effort,max_effort',
     })
     expect(minimax?.baseUrl).toBe('https://api.minimaxi.com/anthropic')
-    // upstream v0.5.2: minimax regionalEndpoints removed
-    expect(minimax?.regionalEndpoints).toBeUndefined()
+    expect(minimax?.regionalEndpoints).toEqual([
+      { region: 'cn_zh', baseUrl: 'https://api.minimaxi.com/anthropic' },
+      { region: 'global_en', baseUrl: 'https://api.minimax.io/anthropic' },
+    ])
     expect(minimax?.authStrategy).toBe('auth_token')
     expect(minimax?.defaultModels.main).toBe('MiniMax-M3[1m]')
     expect(minimax?.defaultEnv?.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('1000000')
@@ -139,7 +146,35 @@ describe('provider presets API', () => {
     expect(teamorouter?.defaultModels.sonnet).toBe('claude-sonnet-5')
     expect(teamorouter?.defaultModels.opus).toBe('claude-opus-4-8')
     expect(teamorouter?.modelContextWindows?.['claude-opus-4-8']).toBe(1000000)
-    // upstream v0.5.2: xuanshuapi preset removed
+    expect(xuanshuapi?.baseUrl).toBe('https://www.xuanshuapi.com')
+    expect(xuanshuapi?.apiFormat).toBe('anthropic')
+    expect(xuanshuapi?.authStrategy).toBe('auth_token')
+    expect(xuanshuapi?.defaultModels.main).toBe('claude-opus-5')
+    expect(xuanshuapi?.defaultModels.haiku).toBe('claude-haiku-4-5')
+    expect(xuanshuapi?.defaultModels.sonnet).toBe('claude-sonnet-5')
+    expect(xuanshuapi?.defaultModels.opus).toBe('claude-opus-5')
+    expect(xuanshuapi?.modelContextWindows?.['claude-opus-5']).toBe(1000000)
+    // Both endpoints below are the Anthropic-compatible root: Claude Code appends
+    // /v1/messages itself, so a /v1 or /anthropic suffix here would 404.
+    expect(fennoai?.baseUrl).toBe('https://api.fenno.ai')
+    expect(fennoai?.apiFormat).toBe('anthropic')
+    expect(fennoai?.authStrategy).toBe('auth_token')
+    expect(qiniuai?.baseUrl).toBe('https://api.qnaigc.com')
+    expect(qiniuai?.apiFormat).toBe('anthropic')
+    expect(qiniuai?.authStrategy).toBe('auth_token')
+    // Both gateways front a catalog that shifts on their side, so the preset ships
+    // no model ids: the user fetches the live list and picks. Pinning a default
+    // here would hand out a model their plan may not even carry.
+    for (const preset of [fennoai, qiniuai]) {
+      expect(preset?.defaultModels).toEqual({ main: '', haiku: '', sonnet: '', opus: '' })
+      // A pinned subagent model would reintroduce exactly that guess.
+      expect(preset?.defaultEnv).toEqual({})
+    }
+    // The window table stays: it is keyed by model id, so it keeps paying off
+    // once the user picks one — including ids the built-in table cannot resolve
+    // (claude-opus-5, and every namespaced 七牛云 id).
+    expect(fennoai?.modelContextWindows?.['claude-opus-5']).toBe(1000000)
+    expect(qiniuai?.modelContextWindows?.['deepseek/deepseek-v4-pro']).toBe(1000000)
   })
 
   test('configured presets can expose optional API key and promo metadata', () => {
@@ -152,6 +187,8 @@ describe('provider presets API', () => {
     const shengsuanyun = PROVIDER_PRESETS.find((preset) => preset.id === 'shengsuanyun')
     const teamorouter = PROVIDER_PRESETS.find((preset) => preset.id === 'teamorouter')
     const xuanshuapi = PROVIDER_PRESETS.find((preset) => preset.id === 'xuanshuapi')
+    const fennoai = PROVIDER_PRESETS.find((preset) => preset.id === 'fennoai')
+    const qiniuai = PROVIDER_PRESETS.find((preset) => preset.id === 'qiniuai')
     const custom = PROVIDER_PRESETS.find((preset) => preset.id === 'custom')
 
     expect(lmstudio?.needsApiKey).toBe(false)
@@ -201,11 +238,28 @@ describe('provider presets API', () => {
       ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: 'none',
     })
     expect(teamorouter?.modelContextWindows?.['claude-sonnet-5']).toBe(1000000)
-    expect(xuanshuapi?.apiKeyUrl).toBeUndefined()
-    expect(xuanshuapi?.promoText).toBeUndefined()
-    expect(xuanshuapi?.featured).toBeUndefined()
-    expect(xuanshuapi?.defaultEnv).toBeUndefined()
-    expect(xuanshuapi?.modelContextWindows?.['claude-sonnet-5']).toBeUndefined()
+    expect(xuanshuapi?.apiKeyUrl).toBe('https://www.xuanshuapi.com/register?aff=CC-HAHA&promo=CC-HAHA')
+    expect(xuanshuapi?.promoText).toContain('5 美元')
+    expect(xuanshuapi?.featured).toBe(true)
+    expect(xuanshuapi?.defaultEnv).toEqual({
+      CLAUDE_CODE_SUBAGENT_MODEL: 'claude-sonnet-5',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES: 'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: 'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
+      ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES: 'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
+      ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES: 'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
+    })
+    expect(xuanshuapi?.modelContextWindows?.['claude-sonnet-5']).toBe(1000000)
+    expect(fennoai?.apiKeyUrl).toBe('https://api.fenno.ai/s/WD8c')
+    expect(fennoai?.promoText).toContain('1.99 美元')
+    expect(fennoai?.featured).toBe(true)
+    expect(fennoai?.modelContextWindows?.['claude-sonnet-5']).toBe(1000000)
+    expect(fennoai?.modelContextWindows?.['claude-haiku-4-5']).toBe(200000)
+    expect(qiniuai?.apiKeyUrl).toBe('https://s.qiniu.com/IZbyya')
+    expect(qiniuai?.promoText).toContain('Token')
+    expect(qiniuai?.featured).toBe(true)
+    expect(qiniuai?.modelContextWindows?.['deepseek/deepseek-v4-flash']).toBe(1000000)
+    expect(qiniuai?.modelContextWindows?.['z-ai/glm-5.2']).toBe(1000000)
+    expect(qiniuai?.modelContextWindows?.['moonshotai/kimi-k3']).toBe(262144)
     expect(custom?.promoText).toBeUndefined()
     expect(custom?.authStrategy).toBe('auth_token')
     expect(custom?.defaultEnv).toBeUndefined()

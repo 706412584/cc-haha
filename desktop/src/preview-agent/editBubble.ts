@@ -4,7 +4,28 @@ import { buildSelector } from './selector'
 
 export type EditableSnapshot = { text: string; color: string; background: string; opacity: string; fontFamily: string }
 export type EditBubbleChange = EditDiff & { description?: string }
-type Deps = { onConfirm: (change: EditBubbleChange) => void; onCancel: () => void }
+export type EditBubbleCopy = {
+  cancel: string
+  send: string
+  queueAndContinue: string
+  add: string
+  descriptionPlaceholder: string
+}
+type Deps = {
+  onConfirm: (change: EditBubbleChange) => void
+  onQueue?: (change: EditBubbleChange) => void
+  onCancel: () => void
+  mode?: 'single' | 'batch'
+  copy?: EditBubbleCopy
+}
+
+const DEFAULT_COPY: EditBubbleCopy = {
+  cancel: '取消',
+  send: '发送',
+  queueAndContinue: '添加并继续',
+  add: '添加',
+  descriptionPlaceholder: '描述这些更改…',
+}
 
 const VIEWPORT_MARGIN = 8
 const BUBBLE_GAP = 8
@@ -149,14 +170,16 @@ const STYLE = `
 }
 
 .footer {
-  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  display: flex; align-items: center; justify-content: flex-end; gap: 8px;
   padding: 9px 14px; margin-top: 8px; border-top: 1px solid var(--border);
 }
 /* 内容被压缩到需要滚动时，给页脚一道投影，提示上方还有没看完的行 */
 .bubble[data-scrollable="true"] .footer { box-shadow: 0 -7px 12px -8px rgba(15, 18, 25, .45); }
 .btn { border: none; border-radius: 999px; font: inherit; font-size: 12.5px; cursor: pointer; transition: background .12s ease, color .12s ease; }
-.btn-ghost { padding: 7px 14px; background: transparent; color: var(--muted); }
+.btn-ghost { margin-right: auto; padding: 7px 14px; background: transparent; color: var(--muted); }
 .btn-ghost:hover { background: var(--field-bg); color: var(--fg); }
+.btn-secondary { padding: 7px 14px; border: 1px solid var(--field-border); background: var(--bg); color: var(--fg); }
+.btn-secondary:hover { background: var(--field-bg); border-color: var(--muted); }
 .btn-primary { padding: 7px 18px; background: var(--accent); color: #fff; font-weight: 500; }
 .btn-primary:hover { background: #1f6bf0; }
 `
@@ -382,9 +405,10 @@ function buildFontRow(initial: string, onCommit: (value: string) => void): HTMLE
   return row
 }
 
-export function createEditBubble(target: HTMLElement, deps: Deps): { host: HTMLElement; destroy: () => void } {
+export function createEditBubble(target: HTMLElement, deps: Deps): { host: HTMLElement; destroy: () => void; revert: () => void } {
   const original = snapshotEditableStyles(target)
   const current: EditableSnapshot = { ...original }
+  const copy = deps.copy ?? DEFAULT_COPY
   let description = ''
 
   const commit = (key: keyof EditableSnapshot, value: string) => {
@@ -417,7 +441,7 @@ export function createEditBubble(target: HTMLElement, deps: Deps): { host: HTMLE
   const describe = el('textarea', 'describe')
   describe.setAttribute('data-field', 'description')
   describe.rows = 1
-  describe.placeholder = '描述这些更改…'
+  describe.placeholder = copy.descriptionPlaceholder
   describe.addEventListener('input', () => {
     description = describe.value
     autoGrow(describe, TEXT_AREA_MAX_HEIGHT)
@@ -456,25 +480,37 @@ export function createEditBubble(target: HTMLElement, deps: Deps): { host: HTMLE
   const cancelBtn = el('button', 'btn btn-ghost')
   cancelBtn.type = 'button'
   cancelBtn.setAttribute('data-action', 'cancel')
-  cancelBtn.textContent = '取消'
+  cancelBtn.textContent = copy.cancel
+  const queueBtn = el('button', deps.mode === 'batch' ? 'btn btn-primary' : 'btn btn-secondary')
+  queueBtn.type = 'button'
+  queueBtn.setAttribute('data-action', 'queue')
+  queueBtn.textContent = deps.mode === 'batch' ? copy.add : copy.queueAndContinue
   const confirmBtn = el('button', 'btn btn-primary')
   confirmBtn.type = 'button'
   confirmBtn.setAttribute('data-action', 'confirm')
-  confirmBtn.textContent = '发送'
+  confirmBtn.textContent = copy.send
 
   const cancel = () => { applyEdit(target, original); deps.onCancel() }
   const confirm = () => deps.onConfirm({ ...computeChange(original, current), description: description || undefined })
+  const queue = () => deps.onQueue?.({ ...computeChange(original, current), description: description || undefined })
   cancelBtn.addEventListener('click', cancel)
+  queueBtn.addEventListener('click', queue)
   confirmBtn.addEventListener('click', confirm)
 
   // 键盘快捷键就地消化，避免漏给页面自己的监听器造成误触
   wrap.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); cancel(); return }
-    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); event.stopPropagation(); confirm() }
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault()
+      event.stopPropagation()
+      if (deps.mode === 'batch') queue()
+      else confirm()
+    }
   })
 
   footer.appendChild(cancelBtn)
-  footer.appendChild(confirmBtn)
+  if (deps.onQueue) footer.appendChild(queueBtn)
+  if (deps.mode !== 'batch') footer.appendChild(confirmBtn)
   wrap.appendChild(head)
   wrap.appendChild(describe)
   wrap.appendChild(body)
@@ -495,5 +531,9 @@ export function createEditBubble(target: HTMLElement, deps: Deps): { host: HTMLE
   refreshScrollHint()
   describe.focus({ preventScroll: true })   // 页面不该因为浮层拿焦点而跳位
 
-  return { host, destroy: () => { host.remove() } }
+  return {
+    host,
+    destroy: () => { host.remove() },
+    revert: () => { applyEdit(target, original) },
+  }
 }

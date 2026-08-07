@@ -94,7 +94,9 @@ export function registerTask<T extends TaskState>(task: T, setAppState: SetAppSt
     // replaces the task; user's retain shouldn't reset). startTime keeps
     // the panel sort stable; messages + diskLoaded preserve the viewed
     // transcript across the replace (the user's just-appended prompt lives
-    // in messages and isn't on disk yet).
+    // in messages and isn't on disk yet). toolUseId keeps the task bound to
+    // the Agent card that spawned it — a resume triggered by another tool
+    // (SendMessage) would otherwise re-file it under that tool's call.
     const merged =
       existing && 'retain' in existing
         ? {
@@ -102,6 +104,7 @@ export function registerTask<T extends TaskState>(task: T, setAppState: SetAppSt
             ...('epoch' in existing && 'epoch' in task
               ? { epoch: existing.epoch + 1 }
               : {}),
+            toolUseId: existing.toolUseId ?? task.toolUseId,
             retain: existing.retain,
             startTime: existing.startTime,
             messages: existing.messages,
@@ -135,6 +138,10 @@ export function registerTask<T extends TaskState>(task: T, setAppState: SetAppSt
     return registeredTask
   }
 
+  // Subagent shell activity is already grouped under its Agent tool call.
+  // Exposing it as a session task leaves the parent Activity row unowned.
+  if (task.type === 'local_bash' && task.agentId) return
+
   enqueueSdkEvent({
     type: 'system',
     subtype: 'task_started',
@@ -142,6 +149,8 @@ export function registerTask<T extends TaskState>(task: T, setAppState: SetAppSt
     tool_use_id: task.toolUseId,
     description: task.description,
     task_type: task.type,
+    remote_session_id:
+      task.type === 'remote_agent' ? task.sessionId : undefined,
     workflow_name:
       'workflowName' in task
         ? (task.workflowName as string | undefined)

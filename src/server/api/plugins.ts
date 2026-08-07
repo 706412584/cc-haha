@@ -7,8 +7,6 @@ import {
   clearKnownLanguageServerCache,
   getKnownLanguageServerStatuses,
 } from '../services/knownLanguageServers.js'
-import { conversationService } from '../services/conversationService.js'
-import { updateSessionSlashCommands } from '../ws/handler.js'
 import {
   loadPluginOptions,
   savePluginOptions,

@@ -91,7 +91,10 @@ import type { SessionTurnCheckpoint } from '../../api/sessions'
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
-function makeCheckpoint(filesChanged: string[]): SessionTurnCheckpoint {
+function makeCheckpoint(
+  filesChanged: string[],
+  restoreAvailable?: boolean,
+): SessionTurnCheckpoint {
   return {
     code: {
       available: true,
@@ -107,11 +110,16 @@ function makeCheckpoint(filesChanged: string[]): SessionTurnCheckpoint {
     conversation: {
       messagesRemoved: 0,
     },
+    ...(restoreAvailable === undefined ? {} : { restoreAvailable }),
   }
 }
 
-function renderCard(filesChanged: string[], isLatest = true) {
-  const checkpoint = makeCheckpoint(filesChanged)
+function renderCard(
+  filesChanged: string[],
+  isLatest = true,
+  restoreAvailable?: boolean,
+) {
+  const checkpoint = makeCheckpoint(filesChanged, restoreAvailable)
   return render(
     <CurrentTurnChangeCard
       sessionId="s1"
@@ -179,6 +187,16 @@ describe('CurrentTurnChangeCard – rich file row (icon / name / type)', () => {
   it('renders the extension badge for an HTML file', () => {
     renderCard(['/w/proj/index.html'])
     expect(screen.getByText(/HTML/)).toBeInTheDocument()
+  })
+
+  it('keeps incomplete checkpoint files visible but disables unsafe rewind', () => {
+    renderCard(['/w/proj/src/main.ts', '/outside/generated.ts'], true, false)
+
+    expect(screen.getByText('main.ts')).toBeInTheDocument()
+    expect(screen.getByText('generated.ts')).toBeInTheDocument()
+    expect(screen.getByText('chat.turnChangesPreviewOnlySubtitle')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'chat.turnChangesRestoreUnavailable' }))
+      .toBeDisabled()
   })
 })
 

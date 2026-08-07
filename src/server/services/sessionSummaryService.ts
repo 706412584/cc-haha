@@ -18,7 +18,6 @@
 
 import { promises as fs } from 'node:fs'
 import { createReadStream } from 'node:fs'
-import path from 'node:path'
 import { createInterface } from 'node:readline'
 import { ProviderService } from './providerService.js'
 import { sessionService } from './sessionService.js'

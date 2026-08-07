@@ -29,7 +29,7 @@ import {
   type ConversationNavigationItem,
   type ConversationNavigationMode,
 } from './ConversationNavigator'
-import type { AgentTaskNotification, UIMessage } from '../../types/chat'
+import type { AgentTaskNotification, BackgroundAgentTask, UIMessage } from '../../types/chat'
 import { formatTokenCount } from '../../lib/formatTokenCount'
 import { formatDurationMs, hasRunningBackgroundTasks as hasAnyRunningBackgroundTasks } from '../../lib/backgroundTasks'
 import { buildTurnCompletionByMessageId, type TurnCompletion } from '../../lib/turnCompletion'
@@ -115,12 +115,18 @@ function getElementForNode(node: Node | null): Element | null {
   return node.nodeType === Node.ELEMENT_NODE ? node as Element : node.parentElement
 }
 
-function getChatSelectionPosition(range: Range, root: HTMLElement, pointer: { clientX: number; clientY: number }) {
+function getChatSelectionPosition(
+  range: Range,
+  root: HTMLElement,
+  selection: Selection,
+  pointer: { clientX: number; clientY: number },
+) {
   return getSelectionPopoverPosition(range, root, {
     menuWidth: CHAT_SELECTION_MENU_WIDTH,
     menuHeight: CHAT_SELECTION_MENU_HEIGHT,
     offset: CHAT_SELECTION_MENU_OFFSET,
     fallbackPointer: pointer,
+    selectionFocus: { node: selection.focusNode, offset: selection.focusOffset },
   })
 }
 
@@ -143,7 +149,7 @@ function getChatSelectionFromContainer(
   if (!text) return null
 
   return {
-    ...getChatSelectionPosition(range, root, pointer),
+    ...getChatSelectionPosition(range, root, selection, pointer),
     text,
   }
 }
@@ -153,6 +159,14 @@ function getSelectionPointer(event: SelectionPointer): SelectionPointer {
     clientX: event.clientX,
     clientY: event.clientY,
   }
+}
+
+function isPrimarySelectionPointer(event: Pick<PointerEvent, 'button' | 'ctrlKey' | 'pointerType'>) {
+  return event.button === 0 && !(event.pointerType === 'mouse' && event.ctrlKey)
+}
+
+function isKeyboardSelectionKey(event: KeyboardEvent) {
+  return event.shiftKey && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)
 }
 
 function ChatSelectionMenu({
@@ -171,7 +185,9 @@ function ChatSelectionMenu({
     <button
       ref={popoverRef}
       type="button"
-      onMouseDown={(event) => event.preventDefault()}
+      onMouseDown={(event) => {
+        if (event.button === 0 && !event.ctrlKey) event.preventDefault()
+      }}
       onClick={onAdd}
       className="fixed z-[var(--z-popover)] inline-flex h-11 items-center gap-2 rounded-full border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-5 text-[15px] font-semibold text-[var(--color-text-primary)] shadow-[var(--shadow-overlay)] transition-colors hover:bg-[var(--color-surface)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
       style={{ left: selection.x, top: selection.y }}
@@ -444,6 +460,9 @@ function SelectableChatMessage({
   const rootRef = useRef<HTMLDivElement>(null)
   const selectionMenuRef = useRef<HTMLButtonElement>(null)
   const lastSelectionPointerRef = useRef<SelectionPointer | null>(null)
+  const selectionGestureEpochRef = useRef(0)
+  const selectionStartedInsideRef = useRef(false)
+  const selectionUpdateAuthorizedRef = useRef(false)
   const selectionUpdateFrameRef = useRef<number | null>(null)
   const addReference = useWorkspaceChatContextStore((state) => state.addReference)
   const [selectionMenu, setSelectionMenu] = useState<ChatSelectionState | null>(null)
@@ -452,10 +471,21 @@ function SelectableChatMessage({
     ? t('chat.assistantMessageReference')
     : t('chat.userMessageReference')
 
+  const cancelPendingSelectionMenuUpdate = useCallback(() => {
+    selectionGestureEpochRef.current += 1
+    if (selectionUpdateFrameRef.current !== null) {
+      window.cancelAnimationFrame(selectionUpdateFrameRef.current)
+      selectionUpdateFrameRef.current = null
+    }
+  }, [])
+
   useEffect(() => {
+    cancelPendingSelectionMenuUpdate()
     setSelectionMenu(null)
     lastSelectionPointerRef.current = null
-  }, [content, messageId])
+    selectionStartedInsideRef.current = false
+    selectionUpdateAuthorizedRef.current = false
+  }, [cancelPendingSelectionMenuUpdate, content, messageId])
 
   const dismissSelectionMenu = useCallback(() => {
     setSelectionMenu(null)
@@ -468,9 +498,16 @@ function SelectableChatMessage({
       window.cancelAnimationFrame(selectionUpdateFrameRef.current)
     }
 
+    const gestureEpoch = selectionGestureEpochRef.current
     selectionUpdateFrameRef.current = window.requestAnimationFrame(() => {
+      if (gestureEpoch !== selectionGestureEpochRef.current) {
+        selectionUpdateFrameRef.current = null
+        return
+      }
       selectionUpdateFrameRef.current = window.requestAnimationFrame(() => {
         selectionUpdateFrameRef.current = null
+        if (gestureEpoch !== selectionGestureEpochRef.current || !selectionUpdateAuthorizedRef.current) return
+
         const root = rootRef.current
         const rootRect = root?.getBoundingClientRect()
         const fallbackPointer = lastSelectionPointerRef.current ?? {
@@ -492,38 +529,58 @@ function SelectableChatMessage({
 
   useEffect(() => {
     const handlePointerDown = (event: PointerEvent) => {
-      lastSelectionPointerRef.current = getSelectionPointer(event)
+      cancelPendingSelectionMenuUpdate()
+      const root = rootRef.current
+      const target = event.target
+      const startsInside = isPrimarySelectionPointer(event)
+        && target instanceof Node
+        && Boolean(root?.contains(target))
+      selectionStartedInsideRef.current = startsInside
+      selectionUpdateAuthorizedRef.current = startsInside
+      if (startsInside) lastSelectionPointerRef.current = getSelectionPointer(event)
     }
 
     const handlePointerUp = (event: PointerEvent) => {
-      queueSelectionMenuUpdate(getSelectionPointer(event))
-    }
-
-    const handleMouseUp = (event: MouseEvent) => {
+      if (!selectionStartedInsideRef.current || !isPrimarySelectionPointer(event)) return
+      selectionStartedInsideRef.current = false
+      selectionUpdateAuthorizedRef.current = true
       queueSelectionMenuUpdate(getSelectionPointer(event))
     }
 
     const handleSelectionChange = () => {
+      if (selectionStartedInsideRef.current || !selectionUpdateAuthorizedRef.current) return
       queueSelectionMenuUpdate()
     }
 
-    const handleKeyUp = () => {
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (!isKeyboardSelectionKey(event)) return
+      cancelPendingSelectionMenuUpdate()
+      lastSelectionPointerRef.current = null
+      selectionStartedInsideRef.current = false
+      selectionUpdateAuthorizedRef.current = true
       queueSelectionMenuUpdate()
+    }
+
+    const handleContextMenu = () => {
+      cancelPendingSelectionMenuUpdate()
+      selectionStartedInsideRef.current = false
+      selectionUpdateAuthorizedRef.current = false
+      setSelectionMenu(null)
     }
 
     document.addEventListener('pointerdown', handlePointerDown, true)
     document.addEventListener('pointerup', handlePointerUp, true)
-    document.addEventListener('mouseup', handleMouseUp, true)
     document.addEventListener('selectionchange', handleSelectionChange)
     document.addEventListener('keyup', handleKeyUp, true)
+    document.addEventListener('contextmenu', handleContextMenu, true)
     return () => {
       document.removeEventListener('pointerdown', handlePointerDown, true)
       document.removeEventListener('pointerup', handlePointerUp, true)
-      document.removeEventListener('mouseup', handleMouseUp, true)
       document.removeEventListener('selectionchange', handleSelectionChange)
       document.removeEventListener('keyup', handleKeyUp, true)
+      document.removeEventListener('contextmenu', handleContextMenu, true)
     }
-  }, [queueSelectionMenuUpdate])
+  }, [cancelPendingSelectionMenuUpdate, queueSelectionMenuUpdate])
 
   useSelectionPopoverDismiss({
     active: Boolean(selectionMenu),
@@ -549,13 +606,6 @@ function SelectableChatMessage({
     <div
       ref={rootRef}
       data-chat-selectable-message={role}
-      onPointerDown={(event) => {
-        if (event.pointerType === 'mouse' && event.button !== 0) return
-        lastSelectionPointerRef.current = getSelectionPointer(event)
-      }}
-      onMouseUp={(event) => {
-        queueSelectionMenuUpdate(getSelectionPointer(event))
-      }}
       onKeyDown={(event) => {
         if (event.key === 'Escape') setSelectionMenu(null)
       }}
@@ -807,6 +857,7 @@ function buildTurnCardInsertionMap(
 
   const cardsByRenderIndex = new Map<number, TurnChangeCardModel[]>()
   turnChangeCards.forEach((card) => {
+    if (card.checkpoint.code.filesChanged.length === 0) return
     const renderIndex =
       lastResponseIndexByTurnId.get(card.target.messageId) ??
       userIndexByTurnId.get(card.target.messageId)
@@ -834,9 +885,7 @@ function buildChangedFilesByRenderIndex(
 ): Map<number, string[]> {
   const filesByTurnId = new Map<string, string[]>()
   for (const card of turnChangeCards) {
-    if (card.checkpoint.code.filesChanged.length > 0) {
-      filesByTurnId.set(card.target.messageId, card.checkpoint.code.filesChanged)
-    }
+    filesByTurnId.set(card.target.messageId, card.checkpoint.code.filesChanged)
   }
   if (filesByTurnId.size === 0) return new Map()
 
@@ -875,7 +924,9 @@ function isSessionTurnCheckpoint(value: unknown): value is SessionTurnCheckpoint
     typeof checkpoint.target?.userMessageIndex === 'number' &&
     Boolean(checkpoint.code) &&
     typeof checkpoint.code?.available === 'boolean' &&
-    Array.isArray(checkpoint.code?.filesChanged)
+    Array.isArray(checkpoint.code?.filesChanged) &&
+    (checkpoint.restoreAvailable === undefined ||
+      typeof checkpoint.restoreAvailable === 'boolean')
   )
 }
 
@@ -1605,11 +1656,20 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
   const addToast = useUIStore((s) => s.addToast)
   const messages = sessionState?.messages ?? EMPTY_MESSAGES
   const chatState = sessionState?.chatState ?? 'idle'
+  const historyMutationEpoch = sessionState?.historyMutationEpoch ?? 0
   const streamingText = sessionState?.streamingText ?? ''
   const streamingToolInput = sessionState?.streamingToolInput ?? ''
   const activeThinkingId = sessionState?.activeThinkingId ?? null
   const agentTaskNotifications = sessionState?.agentTaskNotifications ?? EMPTY_AGENT_TASK_NOTIFICATIONS
-  const hasRunningBackgroundTasks = hasAnyRunningBackgroundTasks(sessionState?.backgroundAgentTasks)
+  const backgroundAgentTasks = sessionState?.backgroundAgentTasks
+  const agentTaskStatuses = useMemo<Record<string, BackgroundAgentTask['status']>>(() => {
+    const statuses: Record<string, BackgroundAgentTask['status']> = {}
+    for (const task of Object.values(backgroundAgentTasks ?? {})) {
+      if (task.toolUseId) statuses[task.toolUseId] = task.status
+    }
+    return statuses
+  }, [backgroundAgentTasks])
+  const hasRunningBackgroundTasks = hasAnyRunningBackgroundTasks(backgroundAgentTasks)
   const pendingPermissions = listPendingPermissions(sessionState)
   const activeAskUserQuestionToolUseId =
     pendingPermissions
@@ -1662,13 +1722,14 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
   const [branchingMessageId, setBranchingMessageId] = useState<string | null>(null)
   const [rewindingTurnId, setRewindingTurnId] = useState<string | null>(null)
   const [turnUndoConfirmTargetId, setTurnUndoConfirmTargetId] = useState<string | null>(null)
-  const [showJumpToLatest, setShowJumpToLatest] = useState(false)
+  const [isAwayFromLatest, setIsAwayFromLatest] = useState(false)
   const [virtualViewport, setVirtualViewport] = useState<VirtualViewport>({
     scrollTop: SCROLL_BOTTOM_SENTINEL,
     viewportHeight: VIRTUAL_DEFAULT_VIEWPORT_HEIGHT,
   })
   const [measuredItemsVersion, setMeasuredItemsVersion] = useState(0)
   const [highlightedNavigationItemKey, setHighlightedNavigationItemKey] = useState<string | null>(null)
+  const [programmaticNavigationItemId, setProgrammaticNavigationItemId] = useState<string | null>(null)
   const [activeConversationFindMatch, setActiveConversationFindMatch] = useState<ConversationFindMatch | null>(null)
   const conversationFindMatchesRef = useRef<ConversationFindMatch[]>([])
   const [messageListWidth, setMessageListWidth] = useState<number | null>(null)
@@ -1763,7 +1824,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
         wasAtBottom: true,
       })
     }
-    setShowJumpToLatest(false)
+    setIsAwayFromLatest(false)
     // Reset flag after the scroll event(s) from scrollIntoView have fired
     requestAnimationFrame(() => {
       const latestContainer = scrollContainerRef.current
@@ -1839,6 +1900,9 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
       syncVirtualViewportFromContainer(container)
       return
     }
+    if (performance.now() < userScrollIntentUntilRef.current) {
+      setProgrammaticNavigationItemId(null)
+    }
     syncVirtualViewportFromContainer(container)
     const isAtBottom = isNearScrollBottom(container)
     const isPermissionLayoutShift =
@@ -1850,7 +1914,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
 
     if (isAtBottom) {
       shouldAutoScrollRef.current = true
-      setShowJumpToLatest(false)
+      setIsAwayFromLatest(false)
       if (lightReviewResumeTimerRef.current !== null) {
         clearTimeout(lightReviewResumeTimerRef.current)
         lightReviewResumeTimerRef.current = null
@@ -1860,7 +1924,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
       if (userScrolledUp) {
         shouldAutoScrollRef.current = false
         lastUserInteractionAtRef.current = performance.now()
-        setShowJumpToLatest(true)
+        setIsAwayFromLatest(true)
         const distanceFromBottom = container.scrollHeight - currentScrollTop - container.clientHeight
         if (isSessionRunning && distanceFromBottom <= LIGHT_REVIEW_DISTANCE_PX) {
           if (lightReviewResumeTimerRef.current !== null) {
@@ -1884,9 +1948,9 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
           lightReviewResumeTimerRef.current = null
         }
       } else if (shouldAutoScrollRef.current) {
-        setShowJumpToLatest(false)
+        setIsAwayFromLatest(false)
       } else {
-        setShowJumpToLatest(true)
+        setIsAwayFromLatest(true)
       }
     }
 
@@ -1909,7 +1973,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     markUserScrollIntent()
     if (event.deltaY < 0) {
       shouldAutoScrollRef.current = false
-      setShowJumpToLatest(true)
+      setIsAwayFromLatest(true)
     }
   }, [markUserScrollIntent])
 
@@ -1929,7 +1993,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     markUserScrollIntent()
     if (isUpwardScrollKey) {
       shouldAutoScrollRef.current = false
-      setShowJumpToLatest(true)
+      setIsAwayFromLatest(true)
     }
   }, [markUserScrollIntent])
 
@@ -1943,6 +2007,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
       const snapshot = resolvedSessionId ? sessionScrollSnapshots.get(resolvedSessionId) : undefined
       shouldAutoScrollRef.current = snapshot?.wasAtBottom ?? true
       lastSessionIdRef.current = resolvedSessionId
+      setProgrammaticNavigationItemId(null)
       virtualItemHeightsRef.current = resolvedSessionId
         ? getHeightsForSession(resolvedSessionId)
         : new Map<string, number>()
@@ -1967,7 +2032,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
           scrollTop: snapshot.scrollTop,
           viewportHeight: container.clientHeight || current.viewportHeight || VIRTUAL_DEFAULT_VIEWPORT_HEIGHT,
         }))
-        setShowJumpToLatest(true)
+        setIsAwayFromLatest(true)
       } else if (container) {
         // Switch to a session we were at the bottom of (or first visit): write
         // the bottom sentinel without going through scrollToBottom's read path,
@@ -1982,7 +2047,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
           scrollTop: SCROLL_BOTTOM_SENTINEL,
           viewportHeight: container.clientHeight || current.viewportHeight || VIRTUAL_DEFAULT_VIEWPORT_HEIGHT,
         }))
-        setShowJumpToLatest(false)
+        setIsAwayFromLatest(false)
         if (resolvedSessionId) {
           sessionScrollSnapshots.set(resolvedSessionId, {
             scrollTop: container.scrollTop,
@@ -2023,7 +2088,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     if (!isSessionRunning && !messageCountChanged) return
 
     if (!shouldAutoScrollRef.current) {
-      setShowJumpToLatest(true)
+      setIsAwayFromLatest(true)
       return
     }
 
@@ -2040,6 +2105,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
   ])
 
   const handleJumpToLatest = useCallback(() => {
+    setProgrammaticNavigationItemId(null)
     scrollToBottom('auto')
   }, [scrollToBottom])
 
@@ -2119,8 +2185,8 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     [renderItems, visibleTurnChangeCards],
   )
   const changedFilesByRenderIndex = useMemo(
-    () => buildChangedFilesByRenderIndex(renderItems, visibleTurnChangeCards),
-    [renderItems, visibleTurnChangeCards],
+    () => buildChangedFilesByRenderIndex(renderItems, turnChangeCards),
+    [renderItems, turnChangeCards],
   )
   const renderItemKeys = useMemo(
     () => renderItems.map(getRenderItemKey),
@@ -2143,7 +2209,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     }),
     [renderItemKeys, renderItems],
   )
-  const conversationNavigationHistoryItems = useMemo(() => {
+  const conversationNavigationItems = useMemo(() => {
     const sources = renderItems.flatMap((item, renderIndex) => item.kind === 'message'
       ? [{
           message: item.message,
@@ -2154,26 +2220,6 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
 
     return buildConversationNavigationItems(sources)
   }, [renderItems])
-  const streamingConversationNavigationItem = useMemo(() => {
-    if (!streamingText.trim()) return null
-
-    return buildConversationNavigationItems([{
-      message: {
-        id: `${STREAMING_ASSISTANT_NAVIGATION_KEY}-${resolvedSessionId ?? 'session'}`,
-        type: 'assistant_text',
-        content: streamingText,
-        timestamp: 0,
-      },
-      renderIndex: renderItems.length,
-      renderItemKey: STREAMING_ASSISTANT_NAVIGATION_KEY,
-    }])[0] ?? null
-  }, [renderItems, resolvedSessionId, streamingText])
-  const conversationNavigationItems = useMemo(
-    () => streamingConversationNavigationItem
-      ? [...conversationNavigationHistoryItems, streamingConversationNavigationItem]
-      : conversationNavigationHistoryItems,
-    [conversationNavigationHistoryItems, streamingConversationNavigationItem],
-  )
   const virtualTranscriptWindow = useMemo(
     () => buildVirtualTranscriptWindow(
       renderItems,
@@ -2186,14 +2232,20 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     [measuredItemsVersion, renderItemKeys, renderItemMetrics, renderItems, virtualViewport],
   )
   const activeConversationNavigationItemId = useMemo(
-    () => getActiveConversationNavigationItemId(
-      conversationNavigationItems,
-      virtualTranscriptWindow.offsets,
-      virtualViewport.scrollTop,
-      virtualViewport.viewportHeight,
-    ),
-    [conversationNavigationItems, virtualTranscriptWindow.offsets, virtualViewport],
+    () => isAwayFromLatest
+      ? getActiveConversationNavigationItemId(
+          conversationNavigationItems,
+          virtualTranscriptWindow.offsets,
+          virtualViewport.scrollTop,
+          virtualViewport.viewportHeight,
+        )
+      : null,
+    [conversationNavigationItems, isAwayFromLatest, virtualTranscriptWindow.offsets, virtualViewport],
   )
+  const visibleConversationNavigationItemId =
+    programmaticNavigationItemId && conversationNavigationItems.some((item) => item.id === programmaticNavigationItemId)
+      ? programmaticNavigationItemId
+      : activeConversationNavigationItemId
   const conversationNavigationMode: ConversationNavigationMode =
     messageListWidth === null || messageListWidth >= CONVERSATION_NAVIGATION_FULL_MIN_WIDTH_PX
       ? 'full'
@@ -2283,7 +2335,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
             const target =
               targetByMessageId.get(checkpoint.target.targetUserMessageId) ??
               targetByUserMessageIndex.get(checkpoint.target.userMessageIndex)
-            if (!target || !checkpoint.code.available || checkpoint.code.filesChanged.length === 0) {
+            if (!target || !checkpoint.code.available) {
               return []
             }
             return [{
@@ -2309,7 +2361,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     return () => {
       cancelled = true
     }
-  }, [chatState, completedTurnTargets, hasRunningBackgroundTasks, isMemberSession, latestCompletedTurnId, resolvedSessionId])
+  }, [chatState, completedTurnTargets, hasRunningBackgroundTasks, historyMutationEpoch, isMemberSession, latestCompletedTurnId, resolvedSessionId])
 
   const handleUndoCurrentTurn = useCallback(async () => {
     if (!resolvedSessionId || !confirmTurnCard || rewindingTurnId || hasRunningBackgroundTasks) return
@@ -2430,9 +2482,8 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     if (!container) return
 
     const viewportHeight = container.clientHeight || virtualViewport.viewportHeight || VIRTUAL_DEFAULT_VIEWPORT_HEIGHT
-    const isTranscriptTail =
-      item.renderItemKey === STREAMING_ASSISTANT_NAVIGATION_KEY ||
-      item.renderIndex === renderItems.length - 1
+    userScrollIntentUntilRef.current = 0
+    setProgrammaticNavigationItemId(item.id)
     setHighlightedNavigationItemKey(item.renderItemKey)
 
     const scheduleHighlightClear = () => {
@@ -2445,12 +2496,6 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
       }, 1400)
     }
 
-    if (isTranscriptTail) {
-      scrollToBottom('auto')
-      requestAnimationFrame(scheduleHighlightClear)
-      return
-    }
-
     const targetScrollTop = getConversationNavigationTargetScrollTop(
       item,
       virtualTranscriptWindow.offsets,
@@ -2461,7 +2506,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     const isNearby = Math.abs(container.scrollTop - targetScrollTop) <= viewportHeight * 1.25
 
     shouldAutoScrollRef.current = false
-    setShowJumpToLatest(true)
+    setIsAwayFromLatest(true)
     ignoreProgrammaticScrollUntilRef.current = performance.now() + 250
     ignoreProgrammaticScrollTopRef.current = targetScrollTop
 
@@ -2492,8 +2537,6 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
       scheduleHighlightClear()
     })
   }, [
-    renderItems.length,
-    scrollToBottom,
     syncVirtualViewportFromContainer,
     virtualTranscriptWindow.offsets,
     virtualTranscriptWindow.totalHeight,
@@ -2514,7 +2557,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
 
     setActiveConversationFindMatch(match)
     shouldAutoScrollRef.current = false
-    setShowJumpToLatest(true)
+    setIsAwayFromLatest(true)
     ignoreProgrammaticScrollUntilRef.current = performance.now() + 250
     ignoreProgrammaticScrollTopRef.current = targetScrollTop
     setScrollTopWithoutLayoutRead(container, targetScrollTop)
@@ -2684,6 +2727,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
             resultMap={toolResultMap}
             childToolCallsByParent={childToolCallsByParent}
             agentTaskNotifications={agentTaskNotifications}
+            agentTaskStatuses={agentTaskStatuses}
             isStreaming={
               chatState === 'tool_executing' &&
               item.toolCalls.some((tc) => !toolResultMap.has(tc.toolUseId))
@@ -2777,10 +2821,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
           ) : null}
 
           {streamingText.trim() && (
-            <div
-              data-chat-render-item-key={STREAMING_ASSISTANT_NAVIGATION_KEY}
-              className={highlightedNavigationItemKey === STREAMING_ASSISTANT_NAVIGATION_KEY ? 'chat-render-item--navigation-target' : ''}
-            >
+            <div data-chat-render-item-key={STREAMING_ASSISTANT_NAVIGATION_KEY}>
               <AssistantMessage content={streamingText} isStreaming={chatState === 'streaming'} />
             </div>
           )}
@@ -2811,12 +2852,12 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
         <ConversationNavigator
           mode={conversationNavigationMode}
           items={conversationNavigationItems}
-          activeItemId={activeConversationNavigationItemId}
+          activeItemId={visibleConversationNavigationItemId}
           onNavigate={handleNavigateToConversationItem}
         />
       ) : null}
 
-      {showJumpToLatest && (
+      {isAwayFromLatest && (
         <Button
           variant="secondary"
           size="md"

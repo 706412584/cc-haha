@@ -9,6 +9,7 @@ import { IconButton } from '@/components/ui/IconButton'
 import { Spinner } from '@/components/ui/Spinner'
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch'
 import { mcpStatusTone } from '@/lib/mcpStatus'
+import { getMcpServerIdentityKey } from '@/lib/mcpIdentity'
 import { DirectoryPicker } from '@/components/composite/DirectoryPicker'
 import { SettingsPageHeader } from '@/components/settings/SettingsSection'
 import { Input } from '@/components/ui/Input'
@@ -309,20 +310,23 @@ function scopeLabel(server: McpServerRecord, t: ReturnType<typeof useTranslation
   return t(`settings.mcp.scope.${group}`)
 }
 
-function StatusBadge({ server }: { server: McpServerRecord }) {
-  return (
-    <Badge tone={mcpStatusTone(server.status)} size="md" bordered className="font-semibold">
-      {server.statusLabel}
-    </Badge>
-  )
+function isActiveInCurrentContext(server: McpServerRecord) {
+  return server.activeInCurrentContext !== false
 }
 
-function getServerIdentityKey(server: Pick<McpServerRecord, 'name' | 'scope' | 'projectPath'>) {
-  if (server.scope === 'local' || server.scope === 'project') {
-    return `${server.scope}:${server.projectPath ?? ''}:${server.name}`
-  }
+function statusLabel(server: McpServerRecord, t: ReturnType<typeof useTranslation>) {
+  return isActiveInCurrentContext(server)
+    ? server.statusLabel
+    : t('settings.mcp.status.configured')
+}
 
-  return `${server.scope}:${server.name}`
+function StatusBadge({ server, t }: { server: McpServerRecord; t: ReturnType<typeof useTranslation> }) {
+  const activeInCurrentContext = isActiveInCurrentContext(server)
+  return (
+    <Badge tone={activeInCurrentContext ? mcpStatusTone(server.status) : 'neutral'} size="md" bordered className="font-semibold">
+      {statusLabel(server, t)}
+    </Badge>
+  )
 }
 
 function ArraySection({
@@ -424,7 +428,7 @@ function ServerRow({
       <div className="min-w-0">
         <div className="flex items-center gap-3 mb-2 min-w-0">
           <div className="text-[1.05rem] font-semibold text-[var(--color-text-primary)] truncate">{server.name}</div>
-          <StatusBadge server={server} />
+          <StatusBadge server={server} t={t} />
         </div>
         <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-tertiary)]">
           <span className="rounded-full bg-[var(--color-surface-hover)] px-2 py-1 font-medium text-[var(--color-text-secondary)]">
@@ -443,7 +447,12 @@ function ServerRow({
           )}
           <span className="truncate">{redactSensitiveText(server.summary)}</span>
         </div>
-        {server.statusDetail && (
+        {!isActiveInCurrentContext(server) && (
+          <div className="mt-2 text-xs text-[var(--color-text-tertiary)]">
+            {t('settings.mcp.status.configuredElsewhere')}
+          </div>
+        )}
+        {isActiveInCurrentContext(server) && server.statusDetail && (
           <div className="mt-2 text-xs text-[var(--color-text-tertiary)] truncate">{server.statusDetail}</div>
         )}
       </div>
@@ -851,8 +860,11 @@ export function McpSettings() {
 
   const stats = useMemo(() => ({
     total: servers.length,
-    connected: servers.filter((server) => server.status === 'connected').length,
-    attention: servers.filter((server) => server.status === 'failed' || server.status === 'needs-auth').length,
+    connected: servers.filter((server) => isActiveInCurrentContext(server) && server.status === 'connected').length,
+    attention: servers.filter((server) => (
+      isActiveInCurrentContext(server) &&
+      (server.status === 'failed' || server.status === 'needs-auth')
+    )).length,
   }), [servers])
   const showListLoading = (isInitialLoading || isLoading) && servers.length === 0
 
@@ -888,7 +900,7 @@ export function McpSettings() {
   useEffect(() => {
     const inspectedKey =
       view.type === 'details' || view.type === 'edit'
-        ? getServerIdentityKey(view.server)
+        ? getMcpServerIdentityKey(view.server)
         : null
     if (!inspectedKey) return
     setDetailsTab('overview')
@@ -896,15 +908,16 @@ export function McpSettings() {
   }, [
     view.type,
     view.type === 'details' || view.type === 'edit'
-      ? getServerIdentityKey(view.server)
+      ? getMcpServerIdentityKey(view.server)
       : '',
   ])
 
   useEffect(() => {
     const pendingServers = servers.filter((server) => (
       server.enabled &&
+      isActiveInCurrentContext(server) &&
       server.status === 'checking' &&
-      !refreshInFlightRef.current.has(getServerIdentityKey(server))
+      !refreshInFlightRef.current.has(getMcpServerIdentityKey(server))
     ))
 
     if (pendingServers.length === 0) return
@@ -918,7 +931,7 @@ export function McpSettings() {
         const server = queue.shift()
         if (!server) return
 
-        const key = getServerIdentityKey(server)
+        const key = getMcpServerIdentityKey(server)
         refreshInFlightRef.current.add(key)
         try {
           const updated = await refreshServerStatus(server, resolveOperationCwd(server))
@@ -939,13 +952,13 @@ export function McpSettings() {
             if (cancelled) return
             setView((current) => {
               if (current.type !== 'details' && current.type !== 'edit') return current
-              if (getServerIdentityKey(current.server) !== key) return current
+              if (getMcpServerIdentityKey(current.server) !== key) return current
               return { ...current, server: retried }
             })
           } else {
             setView((current) => {
               if (current.type !== 'details' && current.type !== 'edit') return current
-              if (getServerIdentityKey(current.server) !== key) return current
+              if (getMcpServerIdentityKey(current.server) !== key) return current
               return { ...current, server: updated }
             })
           }
@@ -966,7 +979,7 @@ export function McpSettings() {
   }, [servers, refreshServerStatus, currentWorkDir])
 
   const handleToggle = async (server: McpServerRecord) => {
-    setBusyServerKey(getServerIdentityKey(server))
+    setBusyServerKey(getMcpServerIdentityKey(server))
     try {
       const updated = await toggleServer(server, resolveOperationCwd(server), activeSessionId ?? undefined)
       addToast({
@@ -984,13 +997,13 @@ export function McpSettings() {
   }
 
   const handleRefresh = async (server: McpServerRecord) => {
-    const key = getServerIdentityKey(server)
+    const key = getMcpServerIdentityKey(server)
     setBusyServerKey(key)
     try {
       const updated = await refreshServerStatus(server, resolveOperationCwd(server))
       setView((current) => {
         if (current.type !== 'details' && current.type !== 'edit') return current
-        if (getServerIdentityKey(current.server) !== key) return current
+        if (getMcpServerIdentityKey(current.server) !== key) return current
         return { ...current, server: updated }
       })
     } catch {
@@ -1008,10 +1021,10 @@ export function McpSettings() {
       statusDetail: undefined,
     }
 
-    setBusyServerKey(getServerIdentityKey(server))
+    setBusyServerKey(getMcpServerIdentityKey(server))
     setView((current) => {
       if (current.type !== 'details' && current.type !== 'edit') return current
-      if (getServerIdentityKey(current.server) !== getServerIdentityKey(server)) return current
+      if (getMcpServerIdentityKey(current.server) !== getMcpServerIdentityKey(server)) return current
       return { ...current, server: optimistic }
     })
     try {
@@ -1027,7 +1040,7 @@ export function McpSettings() {
     } catch (error) {
       setView((current) => {
         if (current.type !== 'details' && current.type !== 'edit') return current
-        if (getServerIdentityKey(current.server) !== getServerIdentityKey(server)) return current
+        if (getMcpServerIdentityKey(current.server) !== getMcpServerIdentityKey(server)) return current
         return { ...current, server }
       })
       addToast({
@@ -1092,6 +1105,8 @@ export function McpSettings() {
       const saved = view.type === 'edit'
         ? await updateServer(view.server, payload, operationCwd)
         : await createServer(draft.name.trim(), payload, operationCwd)
+
+      await fetchServersForKnownProjects(currentWorkDir)
 
       addToast({
         type: 'success',
@@ -1170,14 +1185,19 @@ export function McpSettings() {
               <h2 className="text-[32px] font-semibold leading-tight text-[var(--color-text-primary)]" style={{ fontFamily: 'var(--font-headline)' }}>{server.name}</h2>
               <p className="mt-3 text-base text-[var(--color-text-secondary)]">{redactSensitiveText(server.summary)}</p>
               <div className="mt-4 flex flex-wrap items-center gap-3">
-                <StatusBadge server={server} />
-                {server.statusDetail && (
+                <StatusBadge server={server} t={t} />
+                {isActiveInCurrentContext(server) && server.statusDetail && (
                   <span className="text-sm text-[var(--color-text-tertiary)]">{server.statusDetail}</span>
+                )}
+                {!isActiveInCurrentContext(server) && (
+                  <span className="text-sm text-[var(--color-text-tertiary)]">
+                    {t('settings.mcp.status.configuredElsewhere')}
+                  </span>
                 )}
               </div>
             </div>
             {server.canReconnect && (
-              <Button variant="secondary" onClick={() => handleReconnect(server)} loading={busyServerKey === getServerIdentityKey(server)}>
+              <Button variant="secondary" onClick={() => handleReconnect(server)} loading={busyServerKey === getMcpServerIdentityKey(server)}>
                 <span className="material-symbols-outlined text-[16px]">sync</span>
                 {t('settings.mcp.form.reconnect')}
               </Button>
@@ -1309,9 +1329,14 @@ export function McpSettings() {
               </p>
               {editing && targetServer && (
                 <div className="mt-4 flex flex-wrap items-center gap-3">
-                  <StatusBadge server={targetServer} />
-                  {targetServer.statusDetail && (
+                  <StatusBadge server={targetServer} t={t} />
+                  {isActiveInCurrentContext(targetServer) && targetServer.statusDetail && (
                     <span className="text-sm text-[var(--color-text-tertiary)]">{targetServer.statusDetail}</span>
+                  )}
+                  {!isActiveInCurrentContext(targetServer) && (
+                    <span className="text-sm text-[var(--color-text-tertiary)]">
+                      {t('settings.mcp.status.configuredElsewhere')}
+                    </span>
                   )}
                 </div>
               )}
@@ -1319,7 +1344,7 @@ export function McpSettings() {
 
             <div className="flex items-center gap-3">
               {editing && targetServer?.canReconnect && (
-                <Button variant="secondary" onClick={() => handleReconnect(targetServer)} loading={busyServerKey === getServerIdentityKey(targetServer)}>
+                <Button variant="secondary" onClick={() => handleReconnect(targetServer)} loading={busyServerKey === getMcpServerIdentityKey(targetServer)}>
                   <span className="material-symbols-outlined text-[16px]">sync</span>
                   {t('settings.mcp.form.reconnect')}
                 </Button>
@@ -1638,9 +1663,9 @@ export function McpSettings() {
                     <div className="rounded-[28px] border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
                       {groupServers.map((server) => (
                         <ServerRow
-                          key={getServerIdentityKey(server)}
+                          key={getMcpServerIdentityKey(server)}
                           server={server}
-                          isBusy={busyServerKey === getServerIdentityKey(server)}
+                          isBusy={busyServerKey === getMcpServerIdentityKey(server)}
                           onOpen={() => beginEdit(server)}
                           onToggle={() => void handleToggle(server)}
                           onRefresh={() => void handleRefresh(server)}

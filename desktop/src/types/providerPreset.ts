@@ -8,10 +8,16 @@ export type ModelMapping = {
   opus: string
 }
 
+export type ProviderRegionalEndpoint = {
+  region: string
+  baseUrl: string
+}
+
 export type ProviderPreset = {
   id: string
   name: string
   baseUrl: string
+  regionalEndpoints?: ProviderRegionalEndpoint[]
   apiFormat: ApiFormat
   defaultModels: ModelMapping
   needsApiKey: boolean

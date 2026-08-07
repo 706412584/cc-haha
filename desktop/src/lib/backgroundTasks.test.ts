@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import type { BackgroundAgentTask } from '../types/chat'
-import { formatDurationMs, formatDurationSeconds, hasRunningBackgroundTasks } from './backgroundTasks'
+import {
+  formatDurationMs,
+  formatDurationSeconds,
+  hasRunningBackgroundTasks,
+  hasRunningSubagentTasks,
+} from './backgroundTasks'
 import { translate } from '../i18n'
 
 function task(
@@ -28,6 +33,26 @@ describe('hasRunningBackgroundTasks', () => {
       shell: task('shell', { taskType: 'local_bash' }),
       dream: task('dream', { taskType: 'dream' }),
     })).toBe(true)
+  })
+})
+
+describe('hasRunningSubagentTasks', () => {
+  it.each(['local_agent', 'remote_agent'])('reports a running %s as stoppable', (taskType) => {
+    expect(hasRunningSubagentTasks({
+      agent: task('agent', { taskType }),
+    })).toBe(true)
+  })
+
+  it.each(['local_bash', 'dream', undefined])('does not treat %s as a stoppable SubAgent', (taskType) => {
+    expect(hasRunningSubagentTasks({
+      task: task('task', { taskType }),
+    })).toBe(false)
+  })
+
+  it('ignores an Agent that already reached a terminal status', () => {
+    expect(hasRunningSubagentTasks({
+      agent: task('agent', { taskType: 'local_agent', status: 'stopped' }),
+    })).toBe(false)
   })
 })
 

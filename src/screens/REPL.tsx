@@ -2116,6 +2116,14 @@ export function REPL({
     if (feature('PROACTIVE') || feature('KAIROS')) {
       proactiveModule?.pauseProactive();
     }
+    // Latch the user pause so a background Agent finishing right after Esc
+    // can't drag the session back into a new turn. queryGuard alone can't
+    // express this — forceEnd() makes idle look identical to a normal turn
+    // end. Cleared in onSubmit when the user hands control back.
+    setAppState(prev => prev.userPausedAt === undefined ? {
+      ...prev,
+      userPausedAt: Date.now()
+    } : prev);
     queryGuard.forceEnd();
     skipIdleCheckRef.current = false;
 
@@ -3160,6 +3168,14 @@ export function REPL({
     if (feature('PROACTIVE') || feature('KAIROS')) {
       proactiveModule?.resumeProactive();
     }
+
+    // The user is driving again — release the Esc pause latch so Agent
+    // completion notifications retained during the pause ride along with
+    // this turn instead of staying stuck in the queue.
+    setAppState(prev => prev.userPausedAt !== undefined ? {
+      ...prev,
+      userPausedAt: undefined
+    } : prev);
 
     // Handle immediate commands - these bypass the queue and execute right away
     // even while Claude is processing. Commands opt-in via `immediate: true`.

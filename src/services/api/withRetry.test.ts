@@ -429,11 +429,11 @@ describe('context overflow wrapped in 401 (#1162)', () => {
       thrown = error
     }
 
-    // This fork's withRetry.ts does not have the same-error limiter, so
-    // it burns through all 5 retries before throwing.
+    // Retrying replays the same oversized prompt — it must fail fast instead
+    // of burning through 10 attempts against an unrecoverable rejection.
     expect(thrown).toBeInstanceOf(CannotRetryError)
     expect((thrown as CannotRetryError).originalError).toBe(overflow401)
-    expect(attempts).toBe(6)
+    expect(attempts).toBe(1)
   })
 })
 

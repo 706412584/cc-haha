@@ -14,7 +14,7 @@ export type ConversationNavigationItem = {
   id: string
   renderItemKey: string
   renderIndex: number
-  role: 'user' | 'assistant'
+  turnNumber: number
   preview: string
   attachmentCount: number
 }
@@ -26,35 +26,39 @@ const NAVIGATION_MODE_STYLES: Record<ConversationNavigationMode, {
   lane: string
   button: string
   restingWidth: number
+  activeWidth: number
   expandedWidth: number
 }> = {
   full: {
     position: 'left-2',
-    lane: 'w-16',
-    button: 'w-16 pl-1.5',
-    restingWidth: 12,
-    expandedWidth: 52,
+    lane: 'w-10',
+    button: 'w-10 pl-1',
+    restingWidth: 7,
+    activeWidth: 14,
+    expandedWidth: 22,
   },
   compact: {
     position: 'left-1',
-    lane: 'w-9',
-    button: 'w-9 pl-1',
-    restingWidth: 10,
-    expandedWidth: 32,
+    lane: 'w-7',
+    button: 'w-7 pl-0.5',
+    restingWidth: 6,
+    activeWidth: 12,
+    expandedWidth: 18,
   },
   edge: {
     position: 'left-0',
-    lane: 'w-6',
-    button: 'w-6 pl-0.5',
-    restingWidth: 6,
-    expandedWidth: 20,
+    lane: 'w-5',
+    button: 'w-5 pl-0.5',
+    restingWidth: 4,
+    activeWidth: 10,
+    expandedWidth: 12,
   },
 }
 
-const NAVIGATION_ITEM_HEIGHT_PX = 16
-const NAVIGATION_ITEM_GAP_PX = 2
-const NAVIGATION_LANE_PADDING_PX = 8
-const NAVIGATION_WAVE_RADIUS_ITEMS = 4
+const NAVIGATION_ITEM_HEIGHT_PX = 12
+const NAVIGATION_ITEM_GAP_PX = 1
+const NAVIGATION_LANE_PADDING_PX = 6
+const NAVIGATION_WAVE_RADIUS_ITEMS = 2
 
 function getMarkerWidth(
   restingWidth: number,
@@ -86,20 +90,25 @@ function normalizePreview(content: string) {
 export function buildConversationNavigationItems(
   sources: ConversationNavigationSource[],
 ): ConversationNavigationItem[] {
-  return sources.flatMap(({ message, renderItemKey, renderIndex }) => {
-    if (message.type !== 'user_text' && message.type !== 'assistant_text') return []
-    const preview = normalizePreview(message.content)
-    if (!preview) return []
+  const items: ConversationNavigationItem[] = []
 
-    return [{
+  for (const { message, renderItemKey, renderIndex } of sources) {
+    if (message.type !== 'user_text') continue
+    const attachmentPreview = message.attachments?.map((attachment) => attachment.name).join(', ') ?? ''
+    const preview = normalizePreview(message.content) || normalizePreview(attachmentPreview)
+    if (!preview) continue
+
+    items.push({
       id: message.id,
       renderItemKey,
       renderIndex,
-      role: message.type === 'user_text' ? 'user' : 'assistant',
+      turnNumber: items.length + 1,
       preview,
-      attachmentCount: message.type === 'user_text' ? message.attachments?.length ?? 0 : 0,
-    }]
-  })
+      attachmentCount: message.attachments?.length ?? 0,
+    })
+  }
+
+  return items
 }
 
 export function ConversationNavigator({
@@ -145,7 +154,7 @@ export function ConversationNavigator({
       className={`absolute top-1/2 z-30 flex max-h-[64%] -translate-y-1/2 flex-col overflow-visible ${modeStyles.position}`}
     >
       <div
-        className={`conversation-navigation-scroll flex max-h-full flex-col items-start gap-0.5 overflow-y-auto overflow-x-hidden py-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${modeStyles.lane}`}
+        className={`conversation-navigation-scroll flex max-h-full flex-col items-start gap-px overflow-y-auto overflow-x-hidden py-1.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${modeStyles.lane}`}
         onMouseMove={(event) => {
           const rect = event.currentTarget.getBoundingClientRect()
           const firstItemCenter = NAVIGATION_LANE_PADDING_PX + NAVIGATION_ITEM_HEIGHT_PX / 2
@@ -157,17 +166,19 @@ export function ConversationNavigator({
         onMouseLeave={() => setPointerIndex(null)}
       >
         {items.map((item, itemIndex) => {
-          const roleLabel = item.role === 'user'
-            ? t('chat.userMessageReference')
-            : t('chat.assistantMessageReference')
+          const turnLabel = t('chat.conversationNavigator.turn', {
+            current: item.turnNumber,
+            total: items.length,
+          })
           const isActive = item.id === activeItemId
           const isInteractionTarget = interactionIndex !== null && Math.round(interactionIndex) === itemIndex
-          const markerWidth = getMarkerWidth(
+          const restingMarkerWidth = getMarkerWidth(
             modeStyles.restingWidth,
             modeStyles.expandedWidth,
             itemIndex,
             interactionIndex,
           )
+          const markerWidth = isActive ? modeStyles.activeWidth : restingMarkerWidth
 
           return (
             <div key={item.id} className="relative flex shrink-0 items-center">
@@ -177,8 +188,8 @@ export function ConversationNavigator({
                   else markerRefs.current.delete(item.id)
                 }}
                 type="button"
-                data-role={item.role}
-                aria-label={`${roleLabel}: ${item.preview}`}
+                data-turn-number={item.turnNumber}
+                aria-label={`${turnLabel}: ${item.preview}`}
                 aria-current={isActive ? 'location' : undefined}
                 aria-describedby={previewItemId === item.id ? 'conversation-navigation-preview' : undefined}
                 onMouseEnter={(event) => openPreview(item.id, event.currentTarget)}
@@ -194,21 +205,22 @@ export function ConversationNavigator({
                   setPreviewItemId(null)
                 }}
                 onClick={() => onNavigate(item)}
-                className={`group flex h-4 items-center rounded-[var(--radius-sm)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] ${modeStyles.button}`}
+                className={`group flex h-3 items-center rounded-[var(--radius-sm)] focus-visible:outline-none ${modeStyles.button}`}
               >
                 <span
                   aria-hidden="true"
                   className={[
-                    'block h-0.5 rounded-full transition-[width,background-color,opacity] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none',
-                    isInteractionTarget
-                      ? 'bg-[var(--color-text-primary)] opacity-100'
-                      : isActive
-                      ? 'bg-[var(--color-brand)] opacity-100'
-                      : item.role === 'user'
-                        ? 'bg-[var(--color-text-secondary)] opacity-75 group-hover:bg-[var(--color-text-primary)] group-hover:opacity-100 group-focus-visible:bg-[var(--color-text-primary)] group-focus-visible:opacity-100'
-                        : 'bg-[var(--color-outline)] opacity-65 group-hover:bg-[var(--color-text-secondary)] group-hover:opacity-100 group-focus-visible:bg-[var(--color-text-secondary)] group-focus-visible:opacity-100',
+                    'block origin-left rounded-full transition-[transform,background-color,opacity] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] group-focus-visible:ring-1 group-focus-visible:ring-[var(--color-border-focus)] group-focus-visible:ring-offset-1 group-focus-visible:ring-offset-[var(--color-surface)] motion-reduce:transition-none',
+                    isActive
+                      ? 'h-0.5 bg-[var(--color-brand)] opacity-100'
+                      : isInteractionTarget
+                      ? 'h-px bg-[var(--color-text-primary)] opacity-100'
+                      : 'h-px bg-[var(--color-text-secondary)] opacity-65 group-hover:bg-[var(--color-text-primary)] group-hover:opacity-100 group-focus-visible:bg-[var(--color-text-primary)] group-focus-visible:opacity-100',
                   ].join(' ')}
-                  style={{ width: markerWidth }}
+                  style={{
+                    width: modeStyles.restingWidth,
+                    transform: `scaleX(${markerWidth / modeStyles.restingWidth})`,
+                  }}
                 />
               </button>
 
@@ -225,7 +237,10 @@ export function ConversationNavigator({
           style={{ left: previewPosition.left, top: previewPosition.top }}
         >
           <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-            {previewItem.role === 'user' ? t('chat.userMessageReference') : t('chat.assistantMessageReference')}
+            {t('chat.conversationNavigator.turn', {
+              current: previewItem.turnNumber,
+              total: items.length,
+            })}
           </div>
           <p className="line-clamp-3 text-[13px] leading-5 text-[var(--color-text-primary)]">
             {previewItem.preview}

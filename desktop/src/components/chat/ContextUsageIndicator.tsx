@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { sessionsApi, type SessionContextSnapshot } from '../../api/sessions'
 import { useTranslation } from '../../i18n'
 import type { ChatState } from '../../types/chat'
 import { useMobileViewport } from '../../hooks/useMobileViewport'
+import { useDismissable } from '../../hooks/useDismissable'
 import { isDesktopRuntime } from '../../lib/desktopRuntime'
 import { MobileBottomSheet } from '@/components/ui/MobileBottomSheet'
+import { ContextUsageDetails, type ContextUsageDetailsStatus } from './ContextUsageDetails'
 
 type Props = {
   sessionId?: string
@@ -16,8 +19,8 @@ type Props = {
   compact?: boolean
   /**
    * Bump to force an immediate refresh that bypasses the auto-refresh
-   * throttle and any in-flight (possibly pre-compact) request. Used after
-   * context compaction so the meter recovers right away (#743).
+   * throttle and any stale in-flight request. Used after context compaction
+   * and after a replacement runtime confirms it has started.
    */
   refreshNonce?: number
 }
@@ -28,15 +31,22 @@ const ACTIVE_REFRESH_MS = 30_000
 // racing a client abort that can strand loopback sockets on Windows.
 const CONTEXT_REQUEST_TIMEOUT_MS = 30_000
 const AUTO_REFRESH_MIN_INTERVAL_MS = 10_000
-// Right after a compaction the CLI may still be busy finishing the turn, so
-// the forced refresh can time out — retry once instead of keeping the stale
-// pre-compact percentage on screen.
+// Right after a completed turn, compaction, or runtime restart the CLI can
+// still be settling, so retry the event-driven refresh once.
 const FORCED_REFRESH_RETRY_MS = 5_000
 const FORCED_REFRESH_MAX_ATTEMPTS = 3
-const IDLE_RECOVERY_REFRESH_MS = 3_000
 
-function formatNumber(value: number | undefined) {
-  return new Intl.NumberFormat().format(value ?? 0)
+const POPOVER_WIDTH = 340
+const POPOVER_GAP = 8
+const VIEWPORT_MARGIN = 16
+const POPOVER_MAX_HEIGHT = 420
+
+type PopoverPosition = {
+  top?: number
+  bottom?: number
+  left: number
+  width: number
+  maxHeight: number
 }
 
 function formatPercent(value: number | undefined) {
@@ -72,8 +82,13 @@ function isDocumentVisible() {
   return typeof document === 'undefined' || document.visibilityState !== 'hidden'
 }
 
-function shouldFetchContext(sessionId: string | undefined, draft: boolean) {
-  return Boolean(sessionId) && !draft
+function shouldFetchContext(
+  sessionId: string | undefined,
+  draft: boolean,
+  messageCount: number,
+  chatState: ChatState,
+) {
+  return Boolean(sessionId) && !draft && (messageCount > 0 || chatState !== 'idle')
 }
 
 export function ContextUsageIndicator({
@@ -91,23 +106,35 @@ export function ContextUsageIndicator({
   // panel rather than for touch, so the phone touch target keys off the
   // viewport instead — see the trigger's height below.
   const isMobileBrowser = useMobileViewport() && !isDesktopRuntime()
+  // Narrow composer (Workbench / small window) and real H5 share the sheet
+  // presentation so the breakdown is never clipped by chat-column overflow.
+  const preferSheet = compact || isMobileBrowser
+  const contextEnabled = shouldFetchContext(sessionId, draft, messageCount, chatState)
   const [context, setContext] = useState<SessionContextSnapshot | null>(null)
   const [contextSource, setContextSource] = useState<'live' | 'estimate' | null>(null)
-  const [loading, setLoading] = useState(() => shouldFetchContext(sessionId, draft))
+  const [loading, setLoading] = useState(contextEnabled)
   const [error, setError] = useState<string | null>(null)
   const [updatedAt, setUpdatedAt] = useState<number | null>(null)
   const [inspectionModel, setInspectionModel] = useState<string | null>(null)
-  const [mobileDetailsOpen, setMobileDetailsOpen] = useState(false)
+  const [detailsOpen, setDetailsOpen] = useState(false)
+  const [popoverPosition, setPopoverPosition] = useState<PopoverPosition | null>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const popoverRef = useRef<HTMLDivElement>(null)
   const requestSeq = useRef(0)
   const contextIdentityRef = useRef('')
+  const contextDataSessionIdRef = useRef<string | undefined>(undefined)
   const inFlightRequestRef = useRef<Promise<boolean> | null>(null)
   const inFlightIdentityRef = useRef<string | null>(null)
   const lastAutoRefreshAtRef = useRef(0)
-  const lastRefreshNonceRef = useRef(refreshNonce)
-  const lastNonIdleChatStateRef = useRef<ChatState>(chatState)
+  const contextEnabledRef = useRef(contextEnabled)
+  contextEnabledRef.current = contextEnabled
+
+  const closeDetails = useCallback(() => {
+    setDetailsOpen(false)
+  }, [])
 
   const refresh = useCallback(async (mode: 'auto' | 'manual' | 'force' = 'manual'): Promise<boolean> => {
-    if (!sessionId || draft) {
+    if (!contextEnabledRef.current || !sessionId) {
       setLoading(false)
       return false
     }
@@ -144,8 +171,6 @@ export function ContextUsageIndicator({
         const nextContext = inspection.context ?? inspection.contextEstimate ?? null
         const nextSource = inspection.context ? 'live' : inspection.contextEstimate ? 'estimate' : null
         const usageModel = inspection.usage?.models.find((model) => firstNonEmpty(model.displayName, model.model)) ?? null
-        setContext(nextContext)
-        setContextSource(nextSource)
         setInspectionModel(firstNonEmpty(
           inspection.context?.model,
           inspection.contextEstimate?.model,
@@ -153,8 +178,15 @@ export function ContextUsageIndicator({
           usageModel?.displayName,
           usageModel?.model,
         ) ?? null)
-        setError(nextContext ? null : inspection.errors?.context ?? null)
-        setUpdatedAt(Date.now())
+        if (nextContext) {
+          contextDataSessionIdRef.current = activeSessionId
+          setContext(nextContext)
+          setContextSource(nextSource)
+          setError(null)
+          setUpdatedAt(Date.now())
+        } else {
+          setError(inspection.errors?.context ?? null)
+        }
         return nextContext !== null
       })
       .catch((err) => {
@@ -172,16 +204,10 @@ export function ContextUsageIndicator({
     inFlightRequestRef.current = request
     inFlightIdentityRef.current = activeContextIdentity
     return request
-  }, [draft, runtimeSelectionKey, sessionId])
+  }, [runtimeSelectionKey, sessionId])
 
-  // After a compaction the context shrinks server-side but nothing else
-  // re-reads it promptly (auto refreshes are throttled and stop once the
-  // session goes idle), leaving the pre-compact percentage on screen (#743).
-  // Force a fresh request, and retry a bounded number of times if the CLI is
-  // still busy or the inspection request times out.
-  useEffect(() => {
-    if (refreshNonce === lastRefreshNonceRef.current) return
-    lastRefreshNonceRef.current = refreshNonce
+  const forceRefreshWithRetry = useCallback(() => {
+    if (!contextEnabledRef.current) return () => {}
     let cancelled = false
     let retryTimer: ReturnType<typeof setTimeout> | null = null
     let attempts = 0
@@ -201,7 +227,29 @@ export function ContextUsageIndicator({
       cancelled = true
       if (retryTimer) clearTimeout(retryTimer)
     }
-  }, [refresh, refreshNonce])
+  }, [refresh])
+
+  // Compaction and runtime replacement both change context outside the normal
+  // message flow. Their completion signals bump this nonce so the meter reads
+  // the authoritative process.
+  const lastRefreshNonceRef = useRef(refreshNonce)
+  useEffect(() => {
+    if (refreshNonce === lastRefreshNonceRef.current) return
+    lastRefreshNonceRef.current = refreshNonce
+    return forceRefreshWithRetry()
+  }, [forceRefreshWithRetry, refreshNonce])
+
+  // A new session usually mounts while its first turn is already running.
+  // The eager inspection then races the CLI, and message-count refreshes can
+  // be swallowed by the auto-refresh throttle. The terminal idle transition
+  // is the first reliable point to request that session's real context.
+  const lastChatStateRef = useRef(chatState)
+  useEffect(() => {
+    const previousChatState = lastChatStateRef.current
+    lastChatStateRef.current = chatState
+    if (chatState !== 'idle' || previousChatState === 'idle') return
+    return forceRefreshWithRetry()
+  }, [chatState, forceRefreshWithRetry])
 
   useEffect(() => {
     const contextIdentity = `${sessionId}:${runtimeSelectionKey}`
@@ -210,14 +258,45 @@ export function ContextUsageIndicator({
     if (identityChanged) {
       requestSeq.current += 1
       lastAutoRefreshAtRef.current = 0
-      setContext(null)
-      setContextSource(null)
       setError(null)
-      setUpdatedAt(null)
       setInspectionModel(null)
+      if (contextDataSessionIdRef.current !== sessionId) {
+        contextDataSessionIdRef.current = undefined
+        setContext(null)
+        setContextSource(null)
+        setUpdatedAt(null)
+      }
     }
     void refresh('auto')
-  }, [messageCount, refresh, runtimeSelectionKey, sessionId])
+  }, [refresh, runtimeSelectionKey, sessionId])
+
+  const lastContextEnabledRef = useRef(contextEnabled)
+  useEffect(() => {
+    const wasEnabled = lastContextEnabledRef.current
+    lastContextEnabledRef.current = contextEnabled
+    if (contextEnabled) {
+      if (!wasEnabled) void refresh('auto')
+      return
+    }
+    requestSeq.current += 1
+    inFlightRequestRef.current = null
+    inFlightIdentityRef.current = null
+    lastAutoRefreshAtRef.current = 0
+    contextDataSessionIdRef.current = undefined
+    setContext(null)
+    setContextSource(null)
+    setInspectionModel(null)
+    setUpdatedAt(null)
+    setError(null)
+    setLoading(false)
+  }, [contextEnabled, refresh])
+
+  const lastMessageCountRef = useRef(messageCount)
+  useEffect(() => {
+    if (lastMessageCountRef.current === messageCount) return
+    lastMessageCountRef.current = messageCount
+    void refresh('auto')
+  }, [messageCount, refresh])
 
   useEffect(() => {
     if (typeof document === 'undefined') return
@@ -230,18 +309,9 @@ export function ContextUsageIndicator({
   }, [refresh])
 
   useEffect(() => {
-    const previousState = lastNonIdleChatStateRef.current
-    lastNonIdleChatStateRef.current = chatState
-
-    if (chatState === 'idle') {
-      if (previousState !== 'idle') {
-        const timer = setTimeout(() => {
-          void refresh('force')
-        }, IDLE_RECOVERY_REFRESH_MS)
-        return () => clearTimeout(timer)
-      }
-      return
-    }
+    // Idle transitions are recovered by the forceRefreshWithRetry effect above.
+    // Keep a poll only while the turn is actively consuming context.
+    if (chatState === 'idle') return
 
     const timer = setInterval(() => {
       void refresh('auto')
@@ -249,12 +319,18 @@ export function ContextUsageIndicator({
     return () => clearInterval(timer)
   }, [chatState, messageCount, refresh])
 
+  // If the presentation mode flips (Workbench drag, H5 resize), drop any open
+  // shell so we don't leave a desktop popover stranded on a sheet layout.
+  useEffect(() => {
+    setDetailsOpen(false)
+  }, [preferSheet])
+
   const details = useMemo(() => {
     if (!context) return []
     return pickUsedContextCategory(context)
   }, [context])
 
-  const displayContext = context
+  const displayContext = contextEnabled && contextDataSessionIdRef.current === sessionId ? context : null
   const hasPlaceholderContext = !displayContext && (
     draft || (!loading && messageCount === 0 && (!error || isCliNotRunningError(error)))
   )
@@ -274,7 +350,11 @@ export function ContextUsageIndicator({
       : 'var(--color-surface-container-high)',
   }
   const displayPercent = displayContext ? formatPercent(percentage) : '--'
-  const displayModel = firstNonEmpty(context?.model, inspectionModel, fallbackModelLabel)
+  const displayInspectionModel = !context || contextDataSessionIdRef.current === sessionId
+    ? inspectionModel
+    : null
+  const displayModel = firstNonEmpty(displayContext?.model, displayInspectionModel, fallbackModelLabel)
+  const modelLabel = displayModel ?? t('contextIndicator.modelUnknown')
   const ariaLabel = displayContext
     ? t('contextIndicator.ariaLabel', { percent: formatPercent(percentage) })
     : isPendingContext
@@ -283,22 +363,118 @@ export function ContextUsageIndicator({
       ? t('contextIndicator.loadingAria')
       : t('contextIndicator.unavailableAria')
 
+  const detailsStatus: ContextUsageDetailsStatus = displayContext
+    ? 'ready'
+    : isPendingContext
+      ? 'pending'
+      : loading
+        ? 'loading'
+        : 'unavailable'
+
+  const detailLabels = useMemo(() => ({
+    title: t('contextIndicator.title'),
+    used: t('contextIndicator.used'),
+    free: t('contextIndicator.free'),
+    window: t('contextIndicator.window'),
+    estimate: t('contextIndicator.estimate'),
+    pendingDetail: t('contextIndicator.pendingDetail'),
+    loading: t('contextIndicator.loading'),
+    unavailableDetail: t('contextIndicator.unavailableDetail'),
+  }), [t])
+
+  const detailsBody = (
+    <ContextUsageDetails
+      variant={preferSheet ? 'sheet' : 'popover'}
+      modelLabel={modelLabel}
+      percentageLabel={displayContext ? formatPercent(percentage) : '--'}
+      usedTokens={usedTokens}
+      freeTokens={freeTokens}
+      maxTokens={maxTokens}
+      categories={details}
+      updatedAtLabel={displayContext ? formatUpdatedAt(updatedAt, t) : undefined}
+      estimate={contextSource === 'estimate'}
+      status={detailsStatus}
+      labels={detailLabels}
+    />
+  )
+
+  const updatePopoverPosition = useCallback(() => {
+    const anchor = triggerRef.current
+    if (!anchor) return
+
+    const rect = anchor.getBoundingClientRect()
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight
+    const width = Math.min(POPOVER_WIDTH, Math.max(0, viewportWidth - VIEWPORT_MARGIN * 2))
+    const left = Math.min(
+      Math.max(VIEWPORT_MARGIN, rect.right - width),
+      Math.max(VIEWPORT_MARGIN, viewportWidth - width - VIEWPORT_MARGIN),
+    )
+
+    // Prefer above the composer (the historical hover direction). Fall below
+    // only when the top side is too short to keep the breakdown readable.
+    const spaceAbove = rect.top - POPOVER_GAP - VIEWPORT_MARGIN
+    const spaceBelow = viewportHeight - rect.bottom - POPOVER_GAP - VIEWPORT_MARGIN
+    const placeAbove = spaceAbove >= 180 || spaceAbove >= spaceBelow
+    const availableHeight = Math.max(160, placeAbove ? spaceAbove : spaceBelow)
+    const maxHeight = Math.min(POPOVER_MAX_HEIGHT, availableHeight)
+
+    setPopoverPosition({
+      top: placeAbove ? undefined : rect.bottom + POPOVER_GAP,
+      bottom: placeAbove
+        ? Math.max(VIEWPORT_MARGIN, viewportHeight - rect.top + POPOVER_GAP)
+        : undefined,
+      left,
+      width,
+      maxHeight,
+    })
+  }, [])
+
+  useLayoutEffect(() => {
+    if (!detailsOpen || preferSheet) {
+      setPopoverPosition(null)
+      return
+    }
+    updatePopoverPosition()
+  }, [detailsOpen, preferSheet, updatePopoverPosition, detailsStatus, details.length, displayPercent, modelLabel])
+
+  useEffect(() => {
+    if (!detailsOpen || preferSheet) return
+    window.addEventListener('resize', updatePopoverPosition)
+    window.addEventListener('scroll', updatePopoverPosition, true)
+    return () => {
+      window.removeEventListener('resize', updatePopoverPosition)
+      window.removeEventListener('scroll', updatePopoverPosition, true)
+    }
+  }, [detailsOpen, preferSheet, updatePopoverPosition])
+
+  useDismissable({
+    open: detailsOpen && !preferSheet,
+    refs: [popoverRef],
+    triggerRef,
+    onDismiss: closeDetails,
+    stopEscapePropagation: true,
+  })
+
+  const handleTriggerClick = () => {
+    setDetailsOpen((open) => !open)
+    void refresh('manual')
+  }
+
   return (
-    <div className="group/context relative pointer-events-auto">
+    <div className="relative pointer-events-auto">
       <button
+        ref={triggerRef}
         type="button"
         aria-label={ariaLabel}
-        onClick={() => {
-          if (compact) {
-            setMobileDetailsOpen(true)
-          }
-          void refresh('manual')
-        }}
+        aria-expanded={detailsOpen}
+        aria-haspopup="dialog"
+        onClick={handleTriggerClick}
         title={t('contextIndicator.title')}
         data-testid="context-usage-indicator"
         className={`flex shrink-0 items-center gap-[7px] rounded-full border border-[var(--color-border)] bg-transparent text-[var(--color-text-secondary)] transition-[background-color,color,border-color] duration-150 ease-out hover:border-[var(--color-outline)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-surface-container-lowest)] ${
           isMobileBrowser ? 'h-11' : 'h-8'
-        } ${compact ? 'px-2' : 'px-3'}`}
+        } ${compact ? 'px-2' : 'px-3'} ${detailsOpen ? 'border-[var(--color-outline)] bg-[var(--color-surface-hover)] text-[var(--color-text-primary)]' : ''}`}
       >
         <span className="relative grid h-[18px] w-[18px] shrink-0 place-items-center rounded-full">
           {loading && !displayContext ? (
@@ -321,160 +497,42 @@ export function ContextUsageIndicator({
         </span>
       </button>
 
-      <div className={`pointer-events-none absolute bottom-full right-0 z-[var(--z-popover)] mb-2 w-[340px] max-w-[calc(100vw-2rem)] translate-y-1 rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-[22px] py-5 text-left opacity-0 shadow-[var(--shadow-overlay)] transition-all duration-150 group-hover/context:translate-y-0 group-hover/context:opacity-100 group-focus-within/context:translate-y-0 group-focus-within/context:opacity-100 ${
-        compact ? 'hidden' : ''
-      }`}>
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="text-xs font-semibold tracking-[0.08em] text-[var(--color-text-tertiary)]">
-              {t('contextIndicator.title')}
-            </div>
-            <div className="mt-1 truncate text-base font-bold text-[var(--color-text-primary)]">
-              {displayModel ?? t('contextIndicator.modelUnknown')}
-            </div>
-          </div>
-          {/* The headline serif carries the one large number on the panel —
-              the same treatment the handoff gives every hero statistic. */}
-          <div
-            className="shrink-0 text-[27px] font-bold leading-none text-[var(--color-text-primary)]"
-            style={{ fontFamily: 'var(--font-headline)' }}
-          >
-            {displayContext ? formatPercent(percentage) : '--'}
-          </div>
-        </div>
+      {!preferSheet && detailsOpen && popoverPosition && createPortal(
+        <div
+          ref={popoverRef}
+          role="dialog"
+          aria-label={t('contextIndicator.title')}
+          data-testid="context-usage-popover"
+          className="fixed z-[var(--z-popover)] overflow-y-auto rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-[22px] py-5 text-left shadow-[var(--shadow-overlay)]"
+          style={{
+            top: popoverPosition.top,
+            bottom: popoverPosition.bottom,
+            left: popoverPosition.left,
+            width: popoverPosition.width,
+            maxHeight: popoverPosition.maxHeight,
+          }}
+        >
+          {detailsBody}
+        </div>,
+        document.body,
+      )}
 
-        {displayContext ? (
-          <>
-            <div className="mt-4 grid grid-cols-2 gap-2">
-              <div>
-                <div className="text-[12.5px] text-[var(--color-text-tertiary)]">{t('contextIndicator.used')}</div>
-                <div className="mt-[3px] font-mono text-sm font-medium text-[var(--color-text-primary)]">{formatNumber(usedTokens)}</div>
-              </div>
-              <div>
-                <div className="text-[12.5px] text-[var(--color-text-tertiary)]">{t('contextIndicator.free')}</div>
-                <div className="mt-[3px] font-mono text-sm font-medium text-[var(--color-text-primary)]">{formatNumber(freeTokens)}</div>
-              </div>
-              <div className="col-span-2 mt-1">
-                <div className="text-[12.5px] text-[var(--color-text-tertiary)]">{t('contextIndicator.window')}</div>
-                <div className="mt-[3px] font-mono text-sm font-medium text-[var(--color-text-primary)]">{maxTokens > 0 ? formatNumber(maxTokens) : '--'}</div>
-              </div>
-            </div>
-            {details.length > 0 && (
-              <div className="mt-[18px] flex flex-col gap-3">
-                {details.map((category) => {
-                  const percent = maxTokens > 0 ? Math.max(0.5, Math.min(100, (category.tokens / maxTokens) * 100)) : 0
-                  return (
-                    <div key={category.name}>
-                      <div className="flex items-baseline justify-between gap-3">
-                        <span className="min-w-0 truncate text-[13.5px] text-[var(--color-text-primary)]">{category.name}</span>
-                        <span className="shrink-0 font-mono text-[13px] text-[var(--color-text-secondary)]">{formatNumber(category.tokens)}</span>
-                      </div>
-                      {/* One terracotta scale for every row. The per-category
-                          colors that used to fill these bars came from the API
-                          payload and read as six unrelated statuses. */}
-                      <div className="mt-[7px] h-[3px] overflow-hidden rounded-full bg-[var(--color-surface-hover)]">
-                        <div className="h-full rounded-full bg-[var(--color-brand)]" style={{ width: `${percent}%` }} />
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-            <div className="mt-4 text-xs text-[var(--color-text-tertiary)]">
-              {formatUpdatedAt(updatedAt, t)}
-              {contextSource === 'estimate' && (
-                <span className="ml-2 inline-flex rounded-full border border-[var(--color-border)] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em]">
-                  {t('contextIndicator.estimate')}
-                </span>
-              )}
-            </div>
-          </>
-        ) : isPendingContext ? (
-          <div className="mt-4 text-sm leading-6 text-[var(--color-text-secondary)]">
-            {t('contextIndicator.pendingDetail')}
-          </div>
-        ) : (
-          <div className="mt-4 text-sm leading-6 text-[var(--color-text-secondary)]">
-            {loading ? t('contextIndicator.loading') : t('contextIndicator.unavailableDetail')}
-          </div>
-        )}
-      </div>
-
-      {compact && (
+      {preferSheet && (
         <MobileBottomSheet
-          open={mobileDetailsOpen}
-          onClose={() => setMobileDetailsOpen(false)}
+          open={detailsOpen}
+          onClose={closeDetails}
           title={t('contextIndicator.title')}
           closeLabel={t('tabs.close')}
           ariaLabel={t('contextIndicator.title')}
+          testId="context-usage-sheet"
           headerExtra={(
             <div className="truncate text-base font-semibold text-[var(--color-text-primary)]">
-              {displayModel ?? t('contextIndicator.modelUnknown')}
+              {modelLabel}
             </div>
           )}
           contentClassName="p-4"
         >
-          <div className="flex items-end justify-between gap-4">
-            <div
-              className="text-4xl font-bold leading-none text-[var(--color-text-primary)]"
-              style={{ fontFamily: 'var(--font-headline)' }}
-            >
-              {displayContext ? formatPercent(percentage) : '--'}
-            </div>
-            {contextSource === 'estimate' && (
-              <span className="mb-1 rounded-full border border-[var(--color-border)] px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-                {t('contextIndicator.estimate')}
-              </span>
-            )}
-          </div>
-
-          {displayContext ? (
-            <div className="mt-5">
-              <div className="grid grid-cols-3 gap-2 font-mono text-xs">
-                <div className="rounded-[var(--radius-lg)] bg-[var(--color-surface-container)] p-3">
-                  <div className="text-[var(--color-text-tertiary)]">{t('contextIndicator.used')}</div>
-                  <div className="mt-1 text-[var(--color-text-primary)]">{formatNumber(usedTokens)}</div>
-                </div>
-                <div className="rounded-[var(--radius-lg)] bg-[var(--color-surface-container)] p-3">
-                  <div className="text-[var(--color-text-tertiary)]">{t('contextIndicator.free')}</div>
-                  <div className="mt-1 text-[var(--color-text-primary)]">{formatNumber(freeTokens)}</div>
-                </div>
-                <div className="rounded-[var(--radius-lg)] bg-[var(--color-surface-container)] p-3">
-                  <div className="text-[var(--color-text-tertiary)]">{t('contextIndicator.window')}</div>
-                  <div className="mt-1 text-[var(--color-text-primary)]">{maxTokens > 0 ? formatNumber(maxTokens) : '--'}</div>
-                </div>
-              </div>
-              {details.length > 0 && (
-                <div className="mt-5 space-y-3">
-                  {details.map((category) => {
-                    const percent = maxTokens > 0 ? Math.max(0.5, Math.min(100, (category.tokens / maxTokens) * 100)) : 0
-                    return (
-                      <div key={category.name}>
-                        <div className="flex items-center justify-between gap-3 text-xs">
-                          <span className="min-w-0 truncate text-[var(--color-text-secondary)]">{category.name}</span>
-                          <span className="shrink-0 font-mono text-[var(--color-text-tertiary)]">{formatNumber(category.tokens)}</span>
-                        </div>
-                        <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-[var(--color-surface-hover)]">
-                          <div className="h-full rounded-full bg-[var(--color-brand)]" style={{ width: `${percent}%` }} />
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-              <div className="mt-4 text-[11px] text-[var(--color-text-tertiary)]">
-                {formatUpdatedAt(updatedAt, t)}
-              </div>
-            </div>
-          ) : (
-            <div className="mt-5 rounded-[var(--radius-lg)] bg-[var(--color-surface-container)] p-4 text-sm leading-6 text-[var(--color-text-secondary)]">
-              {isPendingContext
-                ? t('contextIndicator.pendingDetail')
-                : loading
-                  ? t('contextIndicator.loading')
-                  : t('contextIndicator.unavailableDetail')}
-            </div>
-          )}
+          {detailsBody}
         </MobileBottomSheet>
       )}
     </div>
