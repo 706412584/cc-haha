@@ -22,6 +22,11 @@ export type ParsedTaskNotification = {
     tool_uses: number
     duration_ms: number
   }
+  /** Optional mutation outcome from agent completion notifications. */
+  outcome?: {
+    file_edits: number
+    file_edit_errors: number
+  }
 }
 
 function getTagValue(text: string, tag: string): string | undefined {
@@ -41,6 +46,9 @@ export function parseTaskNotificationXml(text: string): ParsedTaskNotification {
   const totalTokens = getTagValue(usageContent, 'total_tokens')
   const toolUses = getTagValue(usageContent, 'tool_uses')
   const durationMs = getTagValue(usageContent, 'duration_ms')
+  const outcomeContent = getTagValue(text, 'outcome') ?? ''
+  const fileEdits = getTagValue(outcomeContent, 'file_edits')
+  const fileEditErrors = getTagValue(outcomeContent, 'file_edit_errors')
 
   return {
     taskId: getTagValue(text, TASK_ID_TAG) ?? '',
@@ -56,6 +64,13 @@ export function parseTaskNotificationXml(text: string): ParsedTaskNotification {
             total_tokens: parseInt(totalTokens, 10),
             tool_uses: parseInt(toolUses, 10),
             duration_ms: durationMs ? parseInt(durationMs, 10) : 0,
+          }
+        : undefined,
+    outcome:
+      fileEdits !== undefined
+        ? {
+            file_edits: parseInt(fileEdits, 10),
+            file_edit_errors: fileEditErrors ? parseInt(fileEditErrors, 10) : 0,
           }
         : undefined,
   }

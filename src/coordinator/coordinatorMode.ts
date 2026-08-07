@@ -195,11 +195,16 @@ Format:
   <tool_uses>N</tool_uses>
   <duration_ms>N</duration_ms>
 </usage>
+<outcome>
+  <file_edits>N</file_edits>
+  <file_edit_errors>N</file_edit_errors>
+</outcome>
 </task-notification>
 \`\`\`
 
-- \`<result>\` and \`<usage>\` are optional sections
-- The \`<summary>\` describes the outcome: "completed", "failed: {error}", or "was stopped"
+- \`<result>\`, \`<usage>\`, and \`<outcome>\` are optional sections
+- The \`<summary>\` describes the outcome: "completed", "completed (no file edits)", "failed: {error}", or "was stopped"
+- \`<outcome>\` reports objective Edit/Write/NotebookEdit counts from the worker transcript. \`status=completed\` is lifecycle only — if the task was expected to modify files and summary/outcome shows no file edits, return the work to pending and re-delegate or verify
 - The \`<task-id>\` value is the agent ID. Keep it only for a user-authorized resume of that terminal worker.
 
 ### Example

@@ -241,6 +241,10 @@ export const agentToolResultSchema = lazySchema(() =>
     totalToolUseCount: z.number(),
     totalDurationMs: z.number(),
     totalTokens: z.number(),
+    // Optional so older persisted sessions / partial completeAgentTask
+    // fixtures keep validating. Present on live finalize paths.
+    fileEdits: z.number().optional(),
+    fileEditErrors: z.number().optional(),
     usage: z.object({
       input_tokens: z.number(),
       output_tokens: z.number(),
@@ -265,6 +269,14 @@ export const agentToolResultSchema = lazySchema(() =>
 
 export type AgentToolResult = z.input<ReturnType<typeof agentToolResultSchema>>
 
+export type AgentMutationOutcome = {
+  fileEdits: number
+  fileEditErrors: number
+  toolUses: number
+}
+
+const MUTATION_TOOL_NAMES = new Set(['Edit', 'Write', 'NotebookEdit'])
+
 export function countToolUses(messages: MessageType[]): number {
   let count = 0
   for (const m of messages) {
@@ -277,6 +289,46 @@ export function countToolUses(messages: MessageType[]): number {
     }
   }
   return count
+}
+
+/**
+ * Count mutation outcomes from agent transcript messages.
+ * Only Edit/Write/NotebookEdit count as file mutations; success vs error
+ * is taken from the matching tool_result.is_error flag.
+ */
+export function countAgentOutcome(messages: MessageType[]): AgentMutationOutcome {
+  const mutationIds = new Set<string>()
+  for (const m of messages) {
+    if (m.type !== 'assistant') continue
+    for (const block of m.message.content) {
+      if (block.type === 'tool_use' && MUTATION_TOOL_NAMES.has(block.name)) {
+        mutationIds.add(block.id)
+      }
+    }
+  }
+
+  let fileEdits = 0
+  let fileEditErrors = 0
+  for (const m of messages) {
+    if (m.type !== 'user') continue
+    const content = m.message.content
+    if (!Array.isArray(content)) continue
+    for (const block of content) {
+      if (block.type !== 'tool_result') continue
+      if (!mutationIds.has(block.tool_use_id)) continue
+      if (block.is_error) {
+        fileEditErrors++
+      } else {
+        fileEdits++
+      }
+    }
+  }
+
+  return {
+    fileEdits,
+    fileEditErrors,
+    toolUses: countToolUses(messages),
+  }
 }
 
 export function finalizeAgentTool(
@@ -351,7 +403,8 @@ export function finalizeAgentTool(
   }
 
   const totalTokens = getTokenCountFromUsage(lastAssistantMessage.message.usage)
-  const totalToolUseCount = countToolUses(agentMessages)
+  const outcome = countAgentOutcome(agentMessages)
+  const totalToolUseCount = outcome.toolUses
 
   logEvent('tengu_agent_tool_completed', {
     agent_type:
@@ -386,6 +439,8 @@ export function finalizeAgentTool(
     totalDurationMs: Date.now() - startTime,
     totalTokens,
     totalToolUseCount,
+    fileEdits: outcome.fileEdits,
+    fileEditErrors: outcome.fileEditErrors,
     usage: lastAssistantMessage.message.usage,
   }
 }
@@ -842,6 +897,14 @@ async function runAsyncAgentLifecycleImpl({
         toolUses: agentResult.totalToolUseCount,
         durationMs: agentResult.totalDurationMs,
       },
+      outcome:
+        agentResult.fileEdits !== undefined &&
+        agentResult.fileEditErrors !== undefined
+          ? {
+              fileEdits: agentResult.fileEdits,
+              fileEditErrors: agentResult.fileEditErrors,
+            }
+          : undefined,
       outputPath: getAgentProgressOutputPath(taskId),
       toolUseId: agentToolUseId,
       epoch,

@@ -538,12 +538,30 @@ type AgentNotificationInput = {
     toolUses: number;
     durationMs: number;
   };
+  /** Optional mutation outcome from agent transcript (Edit/Write/NotebookEdit). */
+  outcome?: {
+    fileEdits: number;
+    fileEditErrors: number;
+  };
   toolUseId?: string;
   worktreePath?: string;
   worktreeBranch?: string;
   outputPath?: string;
   epoch?: number;
 };
+
+function formatCompletedSummary(description: string, usage?: AgentNotificationInput['usage'], outcome?: AgentNotificationInput['outcome']): string {
+  const base = `Agent "${description}" completed`;
+  if (!outcome) {
+    return base;
+  }
+  const editPart = outcome.fileEdits === 0 ? 'no file edits' : `file_edits=${outcome.fileEdits}`;
+  const toolUses = usage?.toolUses;
+  if (toolUses === undefined) {
+    return `${base} (${editPart})`;
+  }
+  return `${base} (${editPart}) · tool_uses=${toolUses}`;
+}
 
 /**
  * Enqueue an agent notification to the message queue.
@@ -556,24 +574,26 @@ export function enqueueAgentNotification({
   setAppState,
   finalMessage,
   usage,
+  outcome,
   toolUseId,
   worktreePath,
   worktreeBranch,
   outputPath,
   epoch
 }: AgentNotificationInput): boolean {
-  const summary = status === 'completed' ? `Agent "${description}" completed` : status === 'failed' ? `Agent "${description}" failed: ${error || 'Unknown error'}` : `Agent "${description}" was stopped`;
+  const summary = status === 'completed' ? formatCompletedSummary(description, usage, outcome) : status === 'failed' ? `Agent "${description}" failed: ${error || 'Unknown error'}` : `Agent "${description}" was stopped`;
   const notificationOutputPath = outputPath ?? getTaskOutputPath(taskId);
   const toolUseIdLine = toolUseId ? `\n<${TOOL_USE_ID_TAG}>${toolUseId}</${TOOL_USE_ID_TAG}>` : '';
   const resultSection = finalMessage ? `\n<result>${finalMessage}</result>` : '';
   const usageSection = usage ? `\n<usage><total_tokens>${usage.totalTokens}</total_tokens><tool_uses>${usage.toolUses}</tool_uses><duration_ms>${usage.durationMs}</duration_ms></usage>` : '';
+  const outcomeSection = outcome ? `\n<outcome><file_edits>${outcome.fileEdits}</file_edits><file_edit_errors>${outcome.fileEditErrors}</file_edit_errors></outcome>` : '';
   const worktreeSection = worktreePath ? `\n<${WORKTREE_TAG}><${WORKTREE_PATH_TAG}>${worktreePath}</${WORKTREE_PATH_TAG}>${worktreeBranch ? `<${WORKTREE_BRANCH_TAG}>${worktreeBranch}</${WORKTREE_BRANCH_TAG}>` : ''}</${WORKTREE_TAG}>` : '';
   const message = `<${TASK_NOTIFICATION_TAG}>
 <${TASK_ID_TAG}>${taskId}</${TASK_ID_TAG}>${toolUseIdLine}
 <${TASK_TYPE_TAG}>local_agent</${TASK_TYPE_TAG}>
 <${OUTPUT_FILE_TAG}>${notificationOutputPath}</${OUTPUT_FILE_TAG}>
 <${STATUS_TAG}>${status}</${STATUS_TAG}>
-<${SUMMARY_TAG}>${summary}</${SUMMARY_TAG}>${resultSection}${usageSection}${worktreeSection}
+<${SUMMARY_TAG}>${summary}</${SUMMARY_TAG}>${resultSection}${usageSection}${outcomeSection}${worktreeSection}
 </${TASK_NOTIFICATION_TAG}>`;
   let enqueued = false;
   const sessionId = getSessionId();
@@ -650,6 +670,14 @@ function retryUnnotifiedAgentCompletions(setAppState: SetAppState, sessionId: st
         toolUses: task.result.totalToolUseCount,
         durationMs: task.result.totalDurationMs
       } : undefined,
+      outcome:
+        task.result?.fileEdits !== undefined &&
+        task.result.fileEditErrors !== undefined
+          ? {
+              fileEdits: task.result.fileEdits,
+              fileEditErrors: task.result.fileEditErrors
+            }
+          : undefined,
       toolUseId: task.toolUseId,
       outputPath: task.outputFile,
       epoch: task.epoch
