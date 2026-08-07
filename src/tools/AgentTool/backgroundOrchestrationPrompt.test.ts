@@ -90,6 +90,15 @@ describe('background agent orchestration guidance', () => {
       'Only mark the linked item completed when the Agent reports that its assigned work is fully complete',
     )
     expect(prompt).toContain(
+      'When a completion notification shows `no file edits` / `file_edits=0` but the task was expected to modify files',
+    )
+    expect(prompt).toContain(
+      'return it to pending and re-delegate or verify',
+    )
+    expect(prompt).toContain(
+      'Treat `status=completed` as lifecycle completion only, not proof of workspace mutation',
+    )
+    expect(prompt).toContain(
       'After an agent completes, fails, stops, is killed, or is cancelled, keep it terminal by default',
     )
     expect(prompt).toContain(

@@ -92,4 +92,15 @@ describe('getCoordinatorSystemPrompt', () => {
     expect(prompt).not.toContain('worker finished research, now give it')
     expect(prompt).not.toContain('worker just reported test failures')
   })
+
+  it('treats empty mutation outcomes as lifecycle-only and requires re-delegation', () => {
+    const prompt = getCoordinatorSystemPrompt()
+
+    expect(prompt).toContain('completed (no file edits)')
+    expect(prompt).toContain('<outcome>')
+    expect(prompt).toContain('<file_edits>N</file_edits>')
+    expect(prompt).toContain(
+      'status=completed` is lifecycle only — if the task was expected to modify files and summary/outcome shows no file edits, return the work to pending and re-delegate or verify',
+    )
+  })
 })

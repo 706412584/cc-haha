@@ -88,43 +88,50 @@ describe('bundled provider presets', () => {
 
     const selectableIds = selectableProviderPresets(BUNDLED_PROVIDER_PRESETS).map((p) => p.id)
     expect(selectableIds).not.toContain('shengsuanyun')
-    expect(selectableIds).toContain('teamorouter')
-    expect(selectableIds).toContain('xuanshuapi')
-    expect(selectableIds).toContain('fennoai')
-    expect(selectableIds).toContain('qiniuai')
+    expect(selectableIds).toContain('jiekouai')
     expect(selectableIds).toContain('custom')
   })
 
   // Both gateways mount the Anthropic protocol on the bare host; a /v1 or
   // /anthropic suffix here would double up with the path Claude Code appends.
-  it('points the sponsored gateways at their Anthropic-compatible roots', () => {
+  // Keep runtime roots resolvable even after the sponsor chips are retired.
+  it('keeps retired sponsored gateways resolvable at Anthropic-compatible roots', () => {
     const fennoai = BUNDLED_PROVIDER_PRESETS.find((preset) => preset.id === 'fennoai')
     const qiniuai = BUNDLED_PROVIDER_PRESETS.find((preset) => preset.id === 'qiniuai')
 
+    expect(fennoai?.deprecated).toBe(true)
     expect(fennoai?.baseUrl).toBe('https://api.fenno.ai')
     expect(fennoai && presetMatchesBaseUrl(fennoai, ' HTTPS://API.Fenno.AI/ ')).toBe(true)
+    expect(qiniuai?.deprecated).toBe(true)
     expect(qiniuai?.baseUrl).toBe('https://api.qnaigc.com')
     expect(qiniuai && presetMatchesBaseUrl(qiniuai, ' HTTPS://API.QNAIGC.COM/ ')).toBe(true)
   })
 
-  // The picker groups featured presets into their own row; losing the flag would
-  // silently demote the sponsors into the generic list.
-  it('keeps the sponsored gateways in the featured row', () => {
-    const featuredIds = BUNDLED_PROVIDER_PRESETS.filter((preset) => preset.featured).map((p) => p.id)
+  it('hides the sponsored featured row while keeping 接口AI selectable without promo', () => {
+    const featuredIds = BUNDLED_PROVIDER_PRESETS
+      .filter((preset) => preset.featured && !preset.deprecated)
+      .map((p) => p.id)
+    expect(featuredIds).toEqual([])
 
-    expect(featuredIds).toContain('fennoai')
-    expect(featuredIds).toContain('qiniuai')
-  })
+    for (const id of ['teamorouter', 'xuanshuapi', 'fennoai', 'qiniuai']) {
+      const preset = BUNDLED_PROVIDER_PRESETS.find((candidate) => candidate.id === id)
+      expect(preset?.deprecated).toBe(true)
+      expect(preset?.apiKeyUrl).toBeUndefined()
+      expect(preset?.promoText).toBeUndefined()
+      expect(preset?.featured).toBeUndefined()
+    }
 
-  it('keeps the retired 接口AI preset resolvable but not selectable', () => {
     const jiekouai = BUNDLED_PROVIDER_PRESETS.find((preset) => preset.id === 'jiekouai')
-
-    expect(jiekouai?.deprecated).toBe(true)
+    expect(jiekouai?.deprecated).toBeUndefined()
     expect(jiekouai?.apiKeyUrl).toBeUndefined()
     expect(jiekouai?.promoText).toBeUndefined()
     expect(jiekouai?.featured).toBeUndefined()
 
-    expect(selectableProviderPresets(BUNDLED_PROVIDER_PRESETS).map((p) => p.id))
-      .not.toContain('jiekouai')
+    const selectableIds = selectableProviderPresets(BUNDLED_PROVIDER_PRESETS).map((p) => p.id)
+    expect(selectableIds).toContain('jiekouai')
+    expect(selectableIds).not.toContain('teamorouter')
+    expect(selectableIds).not.toContain('xuanshuapi')
+    expect(selectableIds).not.toContain('fennoai')
+    expect(selectableIds).not.toContain('qiniuai')
   })
 })

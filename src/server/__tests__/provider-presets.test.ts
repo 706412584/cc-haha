@@ -228,19 +228,18 @@ describe('provider presets API', () => {
       ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: 'none',
     })
     expect(shengsuanyun?.modelContextWindows?.['anthropic/claude-opus-4.7']).toBe(1000000)
-    expect(teamorouter?.apiKeyUrl).toBe(
-      'https://teamorouter.com/?utm_source=cc_haha&utm_medium=referral&utm_campaign=ai_directory',
-    )
-    expect(teamorouter?.promoText).toContain('10% 折扣')
-    expect(teamorouter?.featured).toBe(true)
+    // Local product policy: hide sponsored featured chips, keep runtime tombstones.
+    for (const preset of [teamorouter, xuanshuapi, fennoai, qiniuai]) {
+      expect(preset?.deprecated).toBe(true)
+      expect(preset?.apiKeyUrl).toBeUndefined()
+      expect(preset?.promoText).toBeUndefined()
+      expect(preset?.featured).toBeUndefined()
+    }
     expect(teamorouter?.defaultEnv).toEqual({
       CLAUDE_CODE_SUBAGENT_MODEL: 'claude-sonnet-5',
       ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: 'none',
     })
     expect(teamorouter?.modelContextWindows?.['claude-sonnet-5']).toBe(1000000)
-    expect(xuanshuapi?.apiKeyUrl).toBe('https://www.xuanshuapi.com/register?aff=CC-HAHA&promo=CC-HAHA')
-    expect(xuanshuapi?.promoText).toContain('5 美元')
-    expect(xuanshuapi?.featured).toBe(true)
     expect(xuanshuapi?.defaultEnv).toEqual({
       CLAUDE_CODE_SUBAGENT_MODEL: 'claude-sonnet-5',
       ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES: 'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
@@ -249,14 +248,8 @@ describe('provider presets API', () => {
       ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES: 'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
     })
     expect(xuanshuapi?.modelContextWindows?.['claude-sonnet-5']).toBe(1000000)
-    expect(fennoai?.apiKeyUrl).toBe('https://api.fenno.ai/s/WD8c')
-    expect(fennoai?.promoText).toContain('1.99 美元')
-    expect(fennoai?.featured).toBe(true)
     expect(fennoai?.modelContextWindows?.['claude-sonnet-5']).toBe(1000000)
     expect(fennoai?.modelContextWindows?.['claude-haiku-4-5']).toBe(200000)
-    expect(qiniuai?.apiKeyUrl).toBe('https://s.qiniu.com/IZbyya')
-    expect(qiniuai?.promoText).toContain('Token')
-    expect(qiniuai?.featured).toBe(true)
     expect(qiniuai?.modelContextWindows?.['deepseek/deepseek-v4-flash']).toBe(1000000)
     expect(qiniuai?.modelContextWindows?.['z-ai/glm-5.2']).toBe(1000000)
     expect(qiniuai?.modelContextWindows?.['moonshotai/kimi-k3']).toBe(262144)
@@ -299,7 +292,7 @@ describe('provider presets API', () => {
   })
 
   test('retired presets keep the runtime config saved providers resolve from them', () => {
-    for (const id of ['shengsuanyun', 'jiekouai']) {
+    for (const id of ['shengsuanyun', 'teamorouter', 'xuanshuapi', 'fennoai', 'qiniuai']) {
       const preset = PROVIDER_PRESETS.find((candidate) => candidate.id === id)
 
       expect(preset?.deprecated).toBe(true)
@@ -311,9 +304,13 @@ describe('provider presets API', () => {
     }
   })
 
-  test('retired 接口AI preset keeps runtime metadata without the obsolete Sonnet sentinel', () => {
+  test('接口AI stays selectable without promo while keeping runtime metadata', () => {
     const jiekouai = PROVIDER_PRESETS.find((preset) => preset.id === 'jiekouai')
 
+    expect(jiekouai?.deprecated).toBeUndefined()
+    expect(jiekouai?.apiKeyUrl).toBeUndefined()
+    expect(jiekouai?.promoText).toBeUndefined()
+    expect(jiekouai?.featured).toBeUndefined()
     // The shared capability resolver now emits the provider model capabilities.
     // Keeping the old `none` sentinel here would disable effort as well as thinking.
     expect(jiekouai?.defaultEnv).toEqual({
