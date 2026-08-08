@@ -2698,8 +2698,6 @@ Row 9, all 8 cells: continuing from straight down, turning left through lower-le
   'model.selectModel': 'Select model',
   'model.configureProvider': 'Configure model provider',
   'model.configuration': 'Model Configuration',
-  'model.searchPlaceholder': 'Search models',
-  'model.clearSearch': 'Clear model search',
   'model.noMatches': 'No matching models',
   'model.effort': 'Effort',
   'model.thinking': 'Thinking',
