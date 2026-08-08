@@ -266,10 +266,12 @@ async function handleOpenaiChat(
   networkSettings: NetworkSettings,
   traceContext: ProxyTraceContext | null,
 ): Promise<Response> {
-  const deepSeekCompatible = shouldUseDeepSeekReasoningCompat(baseUrl)
   const transformed = anthropicToOpenaiChat(body, {
-    roundTripReasoningContent: deepSeekCompatible,
-    passThinkingToggle: deepSeekCompatible,
+    // Third-party Anthropic-compatible endpoints may hide reasoning behind
+    // the OpenAI `thinking` toggle and `reasoning_content` — always pass them
+    // through so the upstream returns the thinking we already asked for.
+    roundTripReasoningContent: true,
+    passThinkingToggle: true,
     imageContentMode: shouldUseTextOnlyOpenAIChatContent(baseUrl) ? 'text_only' : 'vision',
   })
   const url = `${baseUrl}/v1/chat/completions`
