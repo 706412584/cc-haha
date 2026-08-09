@@ -922,7 +922,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
               className={`sidebar-copy ${expanded ? 'sidebar-copy--visible' : 'sidebar-copy--hidden'} text-base font-bold tracking-tight text-[var(--color-text-primary)]`}
               style={{ fontFamily: 'var(--font-headline)' }}
             >
-              cc-<span className="text-[var(--color-brand)]">haha</span>
+              Code <span className="text-[var(--color-brand)]">Council</span>
             </span>
           </div>
           <div className={`flex items-center ${expanded ? 'gap-1.5' : 'flex-col gap-2'}`}>

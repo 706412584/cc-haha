@@ -9,7 +9,7 @@ order: 4
 
 Find your symptom below. Each entry is "what you see → why → what to do".
 
-First, one check: make sure you're on the latest stable build from [GitHub Releases](https://github.com/NanmiCoder/cc-haha/releases/latest). A lot of problems on older versions are already fixed.
+First, one check: make sure you're on the latest stable build from [GitHub Releases](https://github.com/706412584/cc-haha/releases/latest). A lot of problems on older versions are already fixed.
 
 ## Won't install
 
@@ -58,7 +58,7 @@ First, one check: make sure you're on the latest stable build from [GitHub Relea
 
 1. Fully quit the app (not just close the window) and reopen it.
 2. Still blank? Reinstall the same version over the top. Sessions and configuration live under `~/.claude`, not in the application directory, so nothing is lost.
-3. Still blank after that, it's failing during startup. File an issue at [GitHub Issues](https://github.com/NanmiCoder/cc-haha/issues) with your OS version, CPU architecture, and installer filename.
+3. Still blank after that, it's failing during startup. File an issue at [GitHub Issues](https://github.com/706412584/cc-haha/issues) with your OS version, CPU architecture, and installer filename.
 
 :::warning
 Never delete `~/.claude` while troubleshooting. Your sessions, provider configuration, skills, agents, and memory are all in there, and they don't come back.
@@ -201,7 +201,7 @@ Full details in [Computer Use](../desktop/computer-use.md).
 Go to Settings → Diagnostics:
 
 1. Click "Copy issue report" for a structured snapshot of the current state.
-2. Search [GitHub Issues](https://github.com/NanmiCoder/cc-haha/issues) for the same problem before opening a new one.
+2. Search [GitHub Issues](https://github.com/706412584/cc-haha/issues) for the same problem before opening a new one.
 3. If the report alone isn't enough to diagnose it, click "Export Bundle" and attach that too.
 
 Including these makes a fix much faster: app version, OS and CPU architecture, installer filename, which kind of provider you're using (**never paste an API key**), the shortest reproduction steps, the full error text, and whether the problem is in the desktop app, on the phone, or in the CLI.

@@ -11,7 +11,7 @@ Install and go. You don't need Node.js, Python, or Claude Code — the CLI engin
 
 ## Pick the right package
 
-Everything lives on [GitHub Releases](https://github.com/NanmiCoder/cc-haha/releases/latest). Choose by operating system and CPU architecture:
+Everything lives on [GitHub Releases](https://github.com/706412584/cc-haha/releases/latest). Choose by operating system and CPU architecture:
 
 | Your system | Download |
 |---|---|
@@ -91,7 +91,7 @@ On ARM64 machines, use the corresponding `linux-arm64` file.
 If you want to modify the code, debug the engine, or just use the CLI in a terminal:
 
 ```bash
-git clone https://github.com/NanmiCoder/cc-haha.git
+git clone https://github.com/706412584/cc-haha.git
 cd cc-haha
 bun install
 cp .env.example .env

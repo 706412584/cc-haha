@@ -1,19 +1,19 @@
-# Claude Code Haha
+# Code Council
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/logo-horizontal-dark.png">
-    <img src="docs/images/logo-horizontal.png" alt="Claude Code Haha" width="480">
+    <img src="docs/images/logo-horizontal.png" alt="Code Council" width="480">
   </picture>
 </p>
 
 <div align="center">
 
-[![GitHub Stars](https://img.shields.io/github/stars/NanmiCoder/cc-haha?style=social)](https://github.com/NanmiCoder/cc-haha/stargazers)
-[![GitHub Forks](https://img.shields.io/github/forks/NanmiCoder/cc-haha?style=social)](https://github.com/NanmiCoder/cc-haha/network/members)
-[![GitHub Issues](https://img.shields.io/github/issues/NanmiCoder/cc-haha)](https://github.com/NanmiCoder/cc-haha/issues)
-[![GitHub Pull Requests](https://img.shields.io/github/issues-pr/NanmiCoder/cc-haha)](https://github.com/NanmiCoder/cc-haha/pulls)
-[![License](https://img.shields.io/badge/License-MIT-blue)](https://github.com/NanmiCoder/cc-haha/blob/main/LICENSE)
+[![GitHub Stars](https://img.shields.io/github/stars/706412584/cc-haha?style=social)](https://github.com/706412584/cc-haha/stargazers)
+[![GitHub Forks](https://img.shields.io/github/forks/706412584/cc-haha?style=social)](https://github.com/706412584/cc-haha/network/members)
+[![GitHub Issues](https://img.shields.io/github/issues/706412584/cc-haha)](https://github.com/706412584/cc-haha/issues)
+[![GitHub Pull Requests](https://img.shields.io/github/issues-pr/706412584/cc-haha)](https://github.com/706412584/cc-haha/pulls)
+[![License](https://img.shields.io/badge/License-MIT-blue)](https://github.com/706412584/cc-haha/blob/main/LICENSE)
 [![中文](https://img.shields.io/badge/🇨🇳_简体中文-当前-blue)](README.zh-CN.md)
 [![English](https://img.shields.io/badge/🇺🇸_English-Available-green)](README.md)
 [![Docs](https://img.shields.io/badge/📖_文档站点-Visit-FF7A00)](https://cchaha.ai)
@@ -22,10 +22,10 @@
 
 </div>
 
-Claude Code Haha 是一个**桌面端 Claude Code 工作台**：把会话、多项目、分支 / Worktree、工作区改动与 Diff 审阅、权限审批、模型配置、Computer Use、H5 远程访问、IM 接入和定时任务集中到一个 macOS / Windows / Linux APP 里。
+**Code Council** 是基于开源 Claude Code 构建的定制版桌面工作台，适用于 macOS、Windows 和 Linux。在上游基础上增加了中转服务商韧性、更智能的重试逻辑、精细化 UX 改进和经过筛选的 Provider 预设——不含任何赞助广告与推广链接。
 
 <p align="center">
-  <a href="#桌面端预览">桌面端预览</a> · <a href="#安装桌面端">安装桌面端</a> · <a href="#桌面端亮点">桌面端亮点</a> · <a href="#更多文档">更多文档</a> · <a href="#赞助与合作">赞助与合作</a> · <a href="#用户交流群">用户交流群</a>
+  <a href="#桌面端预览">桌面端预览</a> · <a href="#安装桌面端">安装桌面端</a> · <a href="#code-council-定制内容">定制内容</a> · <a href="#桌面端亮点">桌面端亮点</a> · <a href="#更多文档">更多文档</a>
 </p>
 
 ---
@@ -33,7 +33,7 @@ Claude Code Haha 是一个**桌面端 Claude Code 工作台**：把会话、多�
 ## 桌面端预览
 
 <p align="center">
-  <a href="https://github.com/NanmiCoder/cc-haha/releases"><img src="https://img.shields.io/badge/⬇_下载桌面端-macOS_%7C_Windows_%7C_Linux-FF7A00?style=for-the-badge" alt="下载桌面端"></a>
+  <a href="https://github.com/706412584/cc-haha/releases"><img src="https://img.shields.io/badge/⬇_下载桌面端-macOS_%7C_Windows_%7C_Linux-FF7A00?style=for-the-badge" alt="下载桌面端"></a>
 </p>
 
 <table>
@@ -51,74 +51,37 @@ Claude Code Haha 是一个**桌面端 Claude Code 工作台**：把会话、多�
 
 ---
 
-## 赞助与合作
+## Code Council 定制内容
 
-本项目由个人利用业余时间维护，欢迎企业或个人赞助支持持续开发，也可洽谈定制、集成或商务合作。
+以下是 Code Council 在上游 Claude Code 基础上的定制改动：
 
-<table>
-  <thead>
-    <tr>
-      <th width="220">赞助商</th>
-      <th align="left">介绍</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td align="center" valign="middle">
-        <a href="https://teamorouter.com/?utm_source=cc_haha&utm_medium=referral&utm_campaign=ai_directory">
-          <img src="docs/images/sponsors/teamorouter-logo.svg" width="180" alt="TeamoRouter">
-        </a>
-      </td>
-      <td valign="middle">
-        感谢 <a href="https://teamorouter.com/?utm_source=cc_haha&utm_medium=referral&utm_campaign=ai_directory">TeamoRouter</a> 赞助本项目！TeamoRouter 是面向开发者、AI 团队与企业的企业级 Agentic LLM 网关：无需订阅，通过一个统一 API 即可使用 Claude Code、Codex、Gemini CLI 等热门 AI Agent，价格最高可享 90% 折扣。平台聚合 OpenAI、Anthropic、Vertex、Azure、AWS Bedrock 等数百家官方模型提供商，全部经过 Agent 协议兼容验证，官方直连、非逆向，提供接近官方的 TTFT、99.6% SLA 与行业领先的缓存命中率；同时支持集中账单、团队管理、BYOK、用量分析，并可用 Teamo Desktop 一键接入。新用户通过 <a href="https://teamorouter.com/?utm_source=cc_haha&utm_medium=referral&utm_campaign=ai_directory">专属链接</a> 注册，首次充值可享 10% 折扣。
-      </td>
-    </tr>
-    <tr>
-      <td align="center" valign="middle">
-        <a href="https://www.xuanshuapi.com/register?aff=CC-HAHA&promo=CC-HAHA">
-          <img src="docs/images/sponsors/xuanshuapi-logo.svg" width="120" alt="玄枢API">
-        </a>
-      </td>
-      <td valign="middle">
-        感谢 <a href="https://www.xuanshuapi.com/register?aff=CC-HAHA&promo=CC-HAHA">玄枢API</a> 赞助本项目！玄枢API 是一站式企业级 AI 网关，通过一个统一 API 即可接入 Claude Code、Codex、Gemini CLI 等热门 AI 编程工具，调用全球顶尖模型。平台以稳定为前提，通过多账号池调度与自动故障切换屏蔽上游账号波动；模型调用低至官方定价 2.5 折，余额充值再享约 8 折优惠且不设有效期。新用户通过 <a href="https://www.xuanshuapi.com/register?aff=CC-HAHA&promo=CC-HAHA">专属链接</a> 注册即赠 5 美元额度。
-      </td>
-    </tr>
-    <tr>
-      <td align="center" valign="middle">
-        <a href="https://api.fenno.ai/s/WD8c">
-          <img src="docs/images/sponsors/fennoai-logo.svg" width="180" alt="FennoAI">
-        </a>
-      </td>
-      <td valign="middle">
-        感谢 <a href="https://api.fenno.ai/s/WD8c">FennoAI</a> 赞助本项目！FennoAI 是一家面向企业研发团队和开发者的高稳定、高性能 API 中转服务商，兼容 OpenAI 与 Anthropic 协议，可无缝接入 Codex、Claude Code、OpenCode 等主流 AI 编程工具。平台具备企业级稳定性，可支撑千亿 Token/日的调用规模，并支持境内外主体公对公结算及开票，满足企业级研发与采购需求。作为 cc-haha 用户专属福利，通过 <a href="https://api.fenno.ai/s/WD8c">专属链接</a> 购买订阅，仅需 1.99 美元即可获得价值 50 美元的 Coding Plan 额度；同时支持邀请奖励，邀请好友购买最高可获得 20% 返佣，邀请越多，奖励越高。
-      </td>
-    </tr>
-    <tr>
-      <td align="center" valign="middle">
-        <a href="https://s.qiniu.com/IZbyya">
-          <img src="docs/images/sponsors/qiniuai-logo.svg" width="180" alt="七牛云 AI">
-        </a>
-      </td>
-      <td valign="middle">
-        感谢 <a href="https://s.qiniu.com/IZbyya">七牛云 AI</a> 赞助本项目！七牛云 AI 是七牛云（02567.HK）旗下企业级大模型 MaaS 平台，一站式调用全球 150+ 主流模型，兼容全球主流模型厂商协议，覆盖文本、图像、音频、视频、文件处理等全模态处理能力，服务超过 169 万企业及开发者用户。作为 cc-haha 用户专属福利，通过 <a href="https://s.qiniu.com/IZbyya">专属链接</a> 注册，企业用户免费领 1200 万 Token，开发者免费领 300 万 Token。
-      </td>
-    </tr>
-  </tbody>
-</table>
+### 中转服务商韧性
 
-📧 **联系邮箱**：relakkes@gmail.com
+- **`get_channel_failed` 自动重试**：cchh 等中转服务商通道分配失败时，客户端自动重试（最多 10 次指数退避）而非直接报错。重试耗尽后显示友好消息「中转服务商通道繁忙，请稍后重试」。
+- **`api_error` 5xx 自动重试**：中转服务商将瞬时上游故障包装为带 5xx 状态码的 `api_error` 时，现在也会静默重试，与无状态码流错误的处理逻辑保持一致。4xx 的确定性 `api_error` 不重试。
+- **Proxy 层 thinking 透传**：OpenAI Chat 格式的第三方 Provider 始终透传 `thinking` toggle 和 `reasoning_content`，避免上游网关静默丢弃推理内容。
+- **`xhigh` 推理档位保留**：K3/兼容模型的 `xhigh` 推理档位在每次上游合并中均予以保留，不会被静默回落。
+
+### UX 修复
+
+- **Esc 暂停不被任务通知唤醒**：用户按 Esc 暂停后，后台 Agent 的 `task-notification` 不会立刻开新一轮主对话。通知保留在队列中，随用户下一次真实输入一并送达。
+- **后台子代理完成可信度**：完成通知现在报告实际文件编辑次数（`file_edits=N`），编排层可据此判断 Agent 是否真的写了文件，而不是只信任一个空的 "completed" 状态。
+- **冷重连后 stop 路径稳定**：修复冷重连后停止失败导致 Agent「已停但仍像在跑」的悬挂状态。
+
+### Provider 预设
+
+- **赞助推广位全部移除**：TeamoRouter、玄枢API、FennoAI、七牛云AI 改为 `deprecated` 墓碑，不再展示推广链接和 featured 位。已配置用户仍可正常使用。
+- **接口AI 恢复**：作为可选预设提供，不带任何广告文案。
 
 ---
 
 ## 安装桌面端
 
-1. 前往 [Releases](https://github.com/NanmiCoder/cc-haha/releases) 下载 macOS / Windows / Linux 桌面端安装包。
+1. 前往 [Releases](https://github.com/706412584/cc-haha/releases) 下载 macOS / Windows / Linux 桌面端安装包。
 2. 首次启动后，在桌面端设置里配置模型提供商、API Key 和默认模型。
-3. 正式 macOS Release 需要经过签名和公证；如果安装的是 draft/unsigned 临时包，首次打开可能仍需手动放行。Windows 未签名安装包可能出现 SmartScreen 提示，点「更多信息」→「仍要运行」即可。详见 [桌面端安装指南](docs/start/install.md)。
+3. Windows 未签名安装包可能出现 SmartScreen 提示，点「更多信息」→「仍要运行」即可。详见 [桌面端安装指南](docs/start/install.md)。
 
 ## 从源码启动 CLI
-
-适合想调试底层 CLI、服务端或自行开发的用户：
 
 ```bash
 bun install
@@ -162,41 +125,6 @@ cp .env.example .env
 
 ---
 
-## ☕ 请作者喝杯咖啡
-
-如果这个项目对您有帮助，欢迎打赏支持，您的每一份支持都是我持续更新的动力 ❤️
-
-<table>
-<tr>
-<td align="center" width="33%">
-<img src="docs/images/donate/wechat_pay.jpeg" width="250" alt="微信赞赏"><br>
-<b>微信赞赏</b>
-</td>
-<td align="center" width="33%">
-<img src="docs/images/donate/zfb_pay.png" width="250" alt="支付宝"><br>
-<b>支付宝</b>
-</td>
-<td align="center" width="33%">
-<a href="https://buymeacoffee.com/relakkes" target="_blank">
-<img src="docs/images/donate/bmc_button.png" width="250" alt="Buy Me a Coffee">
-</a><br>
-<b>Buy Me a Coffee</b>
-</td>
-</tr>
-</table>
-
----
-
-## 用户交流群
-
-使用过程中有问题、想反馈 Bug，或者想看看别人怎么用，欢迎扫码加入 cc-haha 飞书用户群。也可以直接来 [Issues](https://github.com/NanmiCoder/cc-haha/issues) 提问。
-
-<p align="center">
-  <img src="docs/images/community/feishu-group-qr.png" width="300" alt="cc-haha 飞书用户群二维码">
-</p>
-
----
-
 ## 技术栈
 
 | 类别 | 技术 |
@@ -214,17 +142,17 @@ cp .env.example .env
 
 感谢以下开源项目和社区实践为本项目提供参考与启发：
 
+- [Claude Code](https://github.com/anthropics/claude-code)：本项目基于的上游开源项目。
 - [React](https://github.com/facebook/react)：前端工程与组件化 UI 生态。
 - [Electron](https://github.com/electron/electron)：跨端桌面应用能力与工程实践。
 - [cc-switch](https://github.com/farion1231/cc-switch)：模型供应商配置能力参考。
-- [LINUX DO](https://linux.do/)：新的理想型开发者社区。
 
 ---
 
 ## ⭐ Star History
 
-如果这个项目对你有帮助，欢迎点一个 ⭐ Star，让更多人发现 Claude Code Haha。
+如果这个项目对你有帮助，欢迎点一个 ⭐ Star，让更多人发现 Code Council。
 
-<a href="https://www.repostars.dev/?repos=NanmiCoder%2Fcc-haha&theme=ocean">
-  <img alt="Star History Chart" src="https://www.repostars.dev/api/embed?repo=NanmiCoder%2Fcc-haha&theme=ocean" />
+<a href="https://www.repostars.dev/?repos=706412584%2Fcc-haha&theme=ocean">
+  <img alt="Star History Chart" src="https://www.repostars.dev/api/embed?repo=706412584%2Fcc-haha&theme=ocean" />
 </a>

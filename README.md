@@ -1,19 +1,19 @@
-# Claude Code Haha
+# Code Council
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/logo-horizontal-dark.png">
-    <img src="docs/images/logo-horizontal.png" alt="Claude Code Haha" width="480">
+    <img src="docs/images/logo-horizontal.png" alt="Code Council" width="480">
   </picture>
 </p>
 
 <div align="center">
 
-[![GitHub Stars](https://img.shields.io/github/stars/NanmiCoder/cc-haha?style=social)](https://github.com/NanmiCoder/cc-haha/stargazers)
-[![GitHub Forks](https://img.shields.io/github/forks/NanmiCoder/cc-haha?style=social)](https://github.com/NanmiCoder/cc-haha/network/members)
-[![GitHub Issues](https://img.shields.io/github/issues/NanmiCoder/cc-haha)](https://github.com/NanmiCoder/cc-haha/issues)
-[![GitHub Pull Requests](https://img.shields.io/github/issues-pr/NanmiCoder/cc-haha)](https://github.com/NanmiCoder/cc-haha/pulls)
-[![License](https://img.shields.io/badge/License-MIT-blue)](https://github.com/NanmiCoder/cc-haha/blob/main/LICENSE)
+[![GitHub Stars](https://img.shields.io/github/stars/706412584/cc-haha?style=social)](https://github.com/706412584/cc-haha/stargazers)
+[![GitHub Forks](https://img.shields.io/github/forks/706412584/cc-haha?style=social)](https://github.com/706412584/cc-haha/network/members)
+[![GitHub Issues](https://img.shields.io/github/issues/706412584/cc-haha)](https://github.com/706412584/cc-haha/issues)
+[![GitHub Pull Requests](https://img.shields.io/github/issues-pr/706412584/cc-haha)](https://github.com/706412584/cc-haha/pulls)
+[![License](https://img.shields.io/badge/License-MIT-blue)](https://github.com/706412584/cc-haha/blob/main/LICENSE)
 [![English](https://img.shields.io/badge/🇺🇸_English-Current-blue)](README.md)
 [![中文](https://img.shields.io/badge/🇨🇳_简体中文-Available-green)](README.zh-CN.md)
 [![Docs](https://img.shields.io/badge/📖_Documentation-Visit-FF7A00)](https://cchaha.ai)
@@ -22,10 +22,10 @@
 
 </div>
 
-Claude Code Haha is a **desktop Claude Code workspace** for macOS, Windows, and Linux: sessions, projects, branch / Worktree launch, workspace changes and diff review, permission approval, model setup, Computer Use, H5 remote access, IM integration, and scheduled tasks in one app.
+**Code Council** is a customized desktop Claude Code workspace for macOS, Windows, and Linux, built on top of the open-source Claude Code. It adds relay-provider resilience, smarter retry logic, refined UX, and curated provider presets — all without sponsored placements or promotional links.
 
 <p align="center">
-  <a href="#desktop-preview">Desktop Preview</a> · <a href="#install-the-desktop-app">Install</a> · <a href="#desktop-highlights">Highlights</a> · <a href="#more-documentation">More Docs</a> · <a href="#sponsorship--partnership">Sponsorship</a> · <a href="#user-group">User Group</a>
+  <a href="#desktop-preview">Desktop Preview</a> · <a href="#install-the-desktop-app">Install</a> · <a href="#code-council-customizations">Customizations</a> · <a href="#desktop-highlights">Highlights</a> · <a href="#more-documentation">More Docs</a>
 </p>
 
 ---
@@ -33,7 +33,7 @@ Claude Code Haha is a **desktop Claude Code workspace** for macOS, Windows, and 
 ## Desktop Preview
 
 <p align="center">
-  <a href="https://github.com/NanmiCoder/cc-haha/releases"><img src="https://img.shields.io/badge/⬇_Download_Desktop-macOS_%7C_Windows_%7C_Linux-FF7A00?style=for-the-badge" alt="Download Desktop"></a>
+  <a href="https://github.com/706412584/cc-haha/releases"><img src="https://img.shields.io/badge/⬇_Download_Desktop-macOS_%7C_Windows_%7C_Linux-FF7A00?style=for-the-badge" alt="Download Desktop"></a>
 </p>
 
 <table>
@@ -51,74 +51,37 @@ Claude Code Haha is a **desktop Claude Code workspace** for macOS, Windows, and 
 
 ---
 
-## Sponsorship & Partnership
+## Code Council Customizations
 
-This project is maintained in the author's spare time. Corporate or individual sponsorships are welcome to support ongoing development. Custom features, integrations, and business partnerships are also open for discussion.
+These are the changes Code Council makes on top of upstream Claude Code:
 
-<table>
-  <thead>
-    <tr>
-      <th width="220">Sponsor</th>
-      <th align="left">Description</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td align="center" valign="middle">
-        <a href="https://teamorouter.com/?utm_source=cc_haha&utm_medium=referral&utm_campaign=ai_directory">
-          <img src="docs/images/sponsors/teamorouter-logo.svg" width="180" alt="TeamoRouter">
-        </a>
-      </td>
-      <td valign="middle">
-        Thanks to <a href="https://teamorouter.com/?utm_source=cc_haha&utm_medium=referral&utm_campaign=ai_directory">TeamoRouter</a> for sponsoring this project. TeamoRouter is an enterprise-grade Agentic LLM gateway: run Claude Code, Codex, Gemini CLI, and other popular AI agents through one unified API with no subscription and up to 90% off official pricing. It aggregates hundreds of official model providers (OpenAI, Anthropic, Vertex, Azure, AWS Bedrock) verified for Agent protocol compatibility, with near-official TTFT, a 99.6% SLA, and industry-leading cache hit rates. It also adds centralized billing, team management, BYOK, usage analytics, and one-click Teamo Desktop. New users who register through <a href="https://teamorouter.com/?utm_source=cc_haha&utm_medium=referral&utm_campaign=ai_directory">this link</a> get 10% off their first top-up.
-      </td>
-    </tr>
-    <tr>
-      <td align="center" valign="middle">
-        <a href="https://www.xuanshuapi.com/register?aff=CC-HAHA&promo=CC-HAHA">
-          <img src="docs/images/sponsors/xuanshuapi-logo.svg" width="120" alt="XuanShu API">
-        </a>
-      </td>
-      <td valign="middle">
-        Thanks to <a href="https://www.xuanshuapi.com/register?aff=CC-HAHA&promo=CC-HAHA">XuanShu API</a> for sponsoring this project. XuanShu API is an all-in-one, enterprise-grade AI gateway that gives you access to leading global models through a single unified API, and works out of the box with popular AI coding tools such as Claude Code, Codex, and Gemini CLI. Stability comes first: multi-account pool scheduling and automatic failover smooth out upstream account fluctuations. Model calls are priced as low as 25% of official rates, and balance top-ups get roughly a 20% bonus with no expiry. New users who register through <a href="https://www.xuanshuapi.com/register?aff=CC-HAHA&promo=CC-HAHA">this link</a> receive a $5 credit.
-      </td>
-    </tr>
-    <tr>
-      <td align="center" valign="middle">
-        <a href="https://api.fenno.ai/s/WD8c">
-          <img src="docs/images/sponsors/fennoai-logo.svg" width="180" alt="FennoAI">
-        </a>
-      </td>
-      <td valign="middle">
-        Thanks to <a href="https://api.fenno.ai/s/WD8c">FennoAI</a> for sponsoring this project. FennoAI is a high-stability, high-performance API relay service for enterprise engineering teams and individual developers. It speaks both the OpenAI and Anthropic protocols, so it drops straight into Codex, Claude Code, OpenCode, and other mainstream AI coding tools. The platform is built for enterprise-grade stability at hundreds of billions of tokens per day, and supports corporate settlement and invoicing for both domestic and overseas entities. As a cc-haha user perk, buying a subscription through <a href="https://api.fenno.ai/s/WD8c">this link</a> gets you $50 of Coding Plan credit for $1.99. Referrals earn up to 20% commission — the more you invite, the more you get.
-      </td>
-    </tr>
-    <tr>
-      <td align="center" valign="middle">
-        <a href="https://s.qiniu.com/IZbyya">
-          <img src="docs/images/sponsors/qiniuai-logo.svg" width="180" alt="Qiniu Cloud AI">
-        </a>
-      </td>
-      <td valign="middle">
-        Thanks to <a href="https://s.qiniu.com/IZbyya">Qiniu Cloud AI</a> for sponsoring this project. Qiniu Cloud AI is the enterprise-grade LLM MaaS platform from Qiniu Cloud (02567.HK): one entry point to 150+ leading models worldwide, compatible with the major vendors' protocols, covering text, image, audio, video, and file processing across every modality, and serving more than 1.69 million enterprises and developers. As a cc-haha user perk, registering through <a href="https://s.qiniu.com/IZbyya">this link</a> gets enterprise users 12M free tokens and developers 3M free tokens.
-      </td>
-    </tr>
-  </tbody>
-</table>
+### Relay Provider Resilience
 
-📧 **Contact**: relakkes@gmail.com
+- **`get_channel_failed` auto-retry**: when a relay/proxy provider (e.g. cchh) returns a channel-allocation failure, the client automatically retries up to 10 times with exponential back-off instead of surfacing an error immediately. On exhaustion, a friendly message is shown: "中转服务商通道繁忙，请稍后重试".
+- **`api_error` 5xx auto-retry**: relay providers that wrap transient upstream failures in an `api_error` body with a 5xx HTTP status are now silently retried, matching the same logic as statusless stream errors. Deterministic 4xx `api_error` responses are not retried.
+- **Proxy `thinking` passthrough**: OpenAI-format third-party providers always receive the `thinking` toggle and `reasoning_content` fields, preventing silent drops of reasoning by upstream gateways.
+- **`xhigh` reasoning tier preserved**: the `xhigh` inference level for K3/compatible models is retained across upstream merges and never silently downgraded.
+
+### UX Fixes
+
+- **Esc pause is respected**: pressing Esc to pause no longer gets overridden by background agent `task-notification` events. Notifications are queued and delivered with the user's next real input.
+- **Background agent completion fidelity**: completion notifications report actual file-edit counts (`file_edits=N`) so orchestrators can tell whether an agent actually wrote anything, instead of trusting a bare "completed" status.
+- **Cold-reconnect stop stability**: the stop signal path after a reconnect is hardened so agents no longer appear to keep running after being stopped.
+
+### Provider Presets
+
+- **Promoted/sponsored slots removed**: TeamoRouter, 玄枢API, FennoAI, and 七牛云AI are retired to `deprecated` tombstones — no promotional links or featured placement. Already-configured users can still run them.
+- **接口AI restored**: available as an optional preset without any advertising copy.
 
 ---
 
 ## Install the Desktop App
 
-1. Download the macOS / Windows / Linux desktop installer from [Releases](https://github.com/NanmiCoder/cc-haha/releases).
+1. Download the macOS / Windows / Linux desktop installer from [Releases](https://github.com/706412584/cc-haha/releases).
 2. On first launch, configure your model provider, API key, and default model in Settings.
-3. Public macOS releases require signing and notarization. Draft or unsigned temporary builds may still need one-time manual approval. Unsigned Windows installers may show SmartScreen; click "More info" -> "Run anyway". See the [desktop installation guide](docs/en/start/install.md).
+3. Unsigned Windows installers may show SmartScreen; click "More info" → "Run anyway". See the [desktop installation guide](docs/en/start/install.md).
 
 ## Run the CLI from Source
-
-For users who want to debug the underlying CLI, server, or local development flow:
 
 ```bash
 bun install
@@ -141,7 +104,6 @@ See [environment variables](docs/en/cli/env.md) and [CLI setup](docs/en/cli/inde
 - **Skill marketplace**: discover, preview, and install third-party skills from ClawHub / SkillHub, with source and safety status shown up front.
 - **Session activity panel**: track task progress, background tasks, SubAgents, and sources in one side panel.
 - **Computer Use**: let the agent take screenshots, click, type, and control desktop apps after authorization.
-- **Desktop pets**: Dada, Huhu, Bubu, and Huihui change what they do with the task at hand — or raise one of your own (off by default).
 - **H5 remote access**: scan a QR code to continue the session in your phone browser; locking the screen won't kill a running task.
 - **IM integration**: chat, switch projects, and approve actions through Telegram / Feishu / WeChat / DingTalk / WhatsApp.
 - **Scheduled tasks and usage stats**: run planned tasks in their own sessions and track local token usage trends.
@@ -162,41 +124,6 @@ Full documentation site: <https://cchaha.ai>
 
 ---
 
-## ☕ Buy Me a Coffee
-
-If this project helps you, consider buying me a coffee — every bit of support keeps this project going ❤️
-
-<table>
-<tr>
-<td align="center" width="33%">
-<img src="docs/images/donate/wechat_pay.jpeg" width="250" alt="WeChat Pay"><br>
-<b>WeChat Pay</b>
-</td>
-<td align="center" width="33%">
-<img src="docs/images/donate/zfb_pay.png" width="250" alt="Alipay"><br>
-<b>Alipay</b>
-</td>
-<td align="center" width="33%">
-<a href="https://buymeacoffee.com/relakkes" target="_blank">
-<img src="docs/images/donate/bmc_button.png" width="250" alt="Buy Me a Coffee">
-</a><br>
-<b>Buy Me a Coffee</b>
-</td>
-</tr>
-</table>
-
----
-
-## User Group
-
-Scan the QR code below to join the cc-haha user group on Feishu (Lark) — the conversation there is mostly in Chinese. For questions and bug reports in English, [Issues](https://github.com/NanmiCoder/cc-haha/issues) is the better place.
-
-<p align="center">
-  <img src="docs/images/community/feishu-group-qr.png" width="300" alt="cc-haha Feishu user group QR code">
-</p>
-
----
-
 ## Tech Stack
 
 | Category | Technology |
@@ -214,17 +141,15 @@ Scan the QR code below to join the cc-haha user group on Feishu (Lark) — the c
 
 Thanks to the following open-source projects and community practices for reference and inspiration:
 
+- [Claude Code](https://github.com/anthropics/claude-code): the upstream project this is built on.
 - [React](https://github.com/facebook/react): frontend engineering and component-based UI ecosystem.
 - [Electron](https://github.com/electron/electron): cross-platform desktop app capabilities and engineering practices.
 - [cc-switch](https://github.com/farion1231/cc-switch): reference for model provider configuration.
-- [LINUX DO](https://linux.do/): a new ideal developer community.
 
 ---
 
 ## ⭐ Star History
 
-If this project helps you, please support it with a ⭐ Star so more people can discover Claude Code Haha.
-
-<a href="https://www.repostars.dev/?repos=NanmiCoder%2Fcc-haha&theme=ocean">
-  <img alt="Star History Chart" src="https://www.repostars.dev/api/embed?repo=NanmiCoder%2Fcc-haha&theme=ocean" />
+<a href="https://www.repostars.dev/?repos=706412584%2Fcc-haha&theme=ocean">
+  <img alt="Star History Chart" src="https://www.repostars.dev/api/embed?repo=706412584%2Fcc-haha&theme=ocean" />
 </a>

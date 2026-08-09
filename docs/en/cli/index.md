@@ -16,7 +16,7 @@ The CLI runs from source only. There is no separate installer for it.
 Install [Git](https://git-scm.com/downloads) and [Bun](https://bun.sh) first, then:
 
 ```bash
-git clone https://github.com/NanmiCoder/cc-haha.git
+git clone https://github.com/706412584/cc-haha.git
 cd cc-haha
 bun install
 ```
