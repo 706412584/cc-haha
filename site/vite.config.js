@@ -60,6 +60,7 @@ function docsManifestPlugin() {
 }
 
 export default defineConfig({
+  base: '/cc-haha/',
   plugins: [docsManifestPlugin()],
   build: {
     outDir: 'dist',

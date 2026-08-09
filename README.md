@@ -16,7 +16,7 @@
 [![License](https://img.shields.io/badge/License-MIT-blue)](https://github.com/706412584/cc-haha/blob/main/LICENSE)
 [![中文](https://img.shields.io/badge/🇨🇳_简体中文-当前-blue)](README.zh-CN.md)
 [![English](https://img.shields.io/badge/🇺🇸_English-Available-green)](README.md)
-[![Docs](https://img.shields.io/badge/📖_文档站点-Visit-FF7A00)](https://cchaha.ai)
+[![Docs](https://img.shields.io/badge/📖_文档站点-Visit-FF7A00)](https://706412584.github.io/cc-haha/)
 
 **简体中文** · [English](README.zh-CN.md)
 
@@ -126,7 +126,7 @@ cp .env.example .env
 
 ## 更多文档
 
-完整文档站：<https://cchaha.ai>
+完整文档站：<https://706412584.github.io/cc-haha/>
 
 | 分区 | 文档 |
 |------|------|

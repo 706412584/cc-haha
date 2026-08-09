@@ -16,7 +16,7 @@
 [![License](https://img.shields.io/badge/License-MIT-blue)](https://github.com/706412584/cc-haha/blob/main/LICENSE)
 [![English](https://img.shields.io/badge/🇺🇸_English-Current-blue)](README.zh-CN.md)
 [![中文](https://img.shields.io/badge/🇨🇳_简体中文-Available-green)](README.md)
-[![Docs](https://img.shields.io/badge/📖_Documentation-Visit-FF7A00)](https://cchaha.ai)
+[![Docs](https://img.shields.io/badge/📖_Documentation-Visit-FF7A00)](https://706412584.github.io/cc-haha/)
 
 **English** · [简体中文](README.md)
 
@@ -125,7 +125,7 @@ See [environment variables](docs/en/cli/env.md) and [CLI setup](docs/en/cli/inde
 
 ## More Documentation
 
-Full documentation site: <https://cchaha.ai>
+Full documentation site: <https://706412584.github.io/cc-haha/>
 
 | Section | Documents |
 |------|------|
