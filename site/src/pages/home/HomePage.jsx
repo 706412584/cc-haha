@@ -8,7 +8,7 @@ import { content, mascotAccents, mascots } from './content'
 import './home.css'
 
 const SOURCE_COMMANDS = [
-  'git clone https://github.com/NanmiCoder/cc-haha.git',
+  'git clone https://github.com/706412584/cc-haha.git',
   'cd cc-haha && bun install',
   './bin/claude-haha'
 ]

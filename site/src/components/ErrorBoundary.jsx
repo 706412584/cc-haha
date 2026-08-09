@@ -45,7 +45,7 @@ export default class ErrorBoundary extends Component {
           </button>
           <a
             className="btn btn--ghost"
-            href="https://github.com/NanmiCoder/cc-haha/issues"
+            href="https://github.com/706412584/cc-haha/issues"
             rel="noreferrer"
             target="_blank"
           >
