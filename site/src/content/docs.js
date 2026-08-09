@@ -39,7 +39,7 @@ export function toSiteHref(href) {
   return `${SITE_BASE}${route}${suffix}`
 }
 
-function withoutSiteBase(pathname) {
+export function withoutSiteBase(pathname) {
   const route = cleanRoute(pathname)
   if (SITE_BASE === '/') return route
   if (route === SITE_BASE) return '/'

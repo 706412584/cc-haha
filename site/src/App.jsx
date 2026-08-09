@@ -1,11 +1,11 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
 import HomePage from './pages/home/HomePage'
-import { resolveLegacyRoute, toSiteHref } from './content/docs'
+import { resolveLegacyRoute, toSiteHref, withoutSiteBase } from './content/docs'
 
 const DocPage = lazy(() => import('./components/DocPage'))
 
 function currentPath() {
-  return window.location.pathname.replace(/\/+$/, '') || '/'
+  return withoutSiteBase(window.location.pathname)
 }
 
 function NotFound({ pathname }) {
