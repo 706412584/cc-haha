@@ -55,10 +55,23 @@
 
 These are the changes Code Council makes on top of upstream Claude Code:
 
+### Additional Features
+
+- **Full provider preset UI**: rewritten provider management with preset chips, an official-account card, settings.json inline editor with JSON validation, and a one-click connectivity test. Presets for DeepSeek, Kimi, Zhipu GLM, MiniMax, Azure OpenAI Codex, and custom endpoints ship out of the box.
+- **IM adapters — Telegram & Feishu**: paired DM-only integrations for both platforms: send messages, switch projects, and approve tool calls from your phone. Pairing is validated at the adapter layer so public bots can't be hijacked.
+- **Flexible scheduled tasks**: cron-based task scheduler with a GUI editor, "Run now" button, per-run execution logs, and edit/delete support. Tasks run in isolated sessions.
+- **Agent Teams & backend REST API**: a local HTTP + WebSocket server exposing sessions, tasks, and real-time push events — lets external tools and browser clients interact with running agents.
+- **VS Code-quality syntax highlighting**: code blocks rendered with [Shiki](https://shiki.matsu.io/) instead of highlight.js — same tokenizer as VS Code, correct for every language.
+- **GitHub PR-style diffs**: diff viewer rewritten with react-diff-viewer-continued — side-by-side and unified modes, line-level highlighting matching GitHub's PR view.
+- **Collapsible tool call groups**: consecutive tool calls are folded into a compact expandable summary so long agent runs stay readable without losing detail.
+- **`@`-file search popup**: type `@` in the composer to get an inline file/directory picker with real-time fuzzy search, navigable by keyboard.
+- **i18n (English / Chinese)**: full UI localisation with a locale switcher; all system strings, modals, and tool labels covered.
+- **Self-hosted fonts**: fonts are bundled locally — no Google Fonts CDN requests, works fully offline and in air-gapped environments.
+
 ### Relay Provider Resilience
 
-- **`get_channel_failed` auto-retry**: when a relay/proxy provider (e.g. cchh) returns a channel-allocation failure, the client automatically retries up to 10 times with exponential back-off instead of surfacing an error immediately. On exhaustion, a friendly message is shown: "中转服务商通道繁忙，请稍后重试".
-- **`api_error` 5xx auto-retry**: relay providers that wrap transient upstream failures in an `api_error` body with a 5xx HTTP status are now silently retried, matching the same logic as statusless stream errors. Deterministic 4xx `api_error` responses are not retried.
+- **`get_channel_failed` auto-retry**: when a relay/proxy provider (e.g. cchh) returns a channel-allocation failure, the client automatically retries up to 10 times with exponential back-off. On exhaustion a friendly message is shown instead of a raw error.
+- **`api_error` 5xx auto-retry**: relay providers that wrap transient upstream failures in an `api_error` body with a 5xx HTTP status are silently retried. Deterministic 4xx responses are not retried.
 - **Proxy `thinking` passthrough**: OpenAI-format third-party providers always receive the `thinking` toggle and `reasoning_content` fields, preventing silent drops of reasoning by upstream gateways.
 - **`xhigh` reasoning tier preserved**: the `xhigh` inference level for K3/compatible models is retained across upstream merges and never silently downgraded.
 

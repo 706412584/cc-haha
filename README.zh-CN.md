@@ -55,10 +55,23 @@
 
 以下是 Code Council 在上游 Claude Code 基础上的定制改动：
 
+### 新增功能
+
+- **完整的 Provider 预设 UI**：重写 Provider 管理，支持预设 Chip 选择、官方账号卡片、settings.json 内联编辑器（带 JSON 校验）和一键连通性测试。内置 DeepSeek、Kimi、智谱 GLM、MiniMax、Azure OpenAI Codex 等预设以及自定义端点。
+- **IM 适配器（Telegram + 飞书）**：仅限私聊的双平台接入，可从手机发消息、切换项目、审批工具调用。适配器层做了配对校验，防止公开 Bot 被劫持。
+- **灵活定时任务**：基于 Cron 的任务调度，带图形化编辑器、立即执行按钮、每次运行的执行日志，支持编辑与删除。任务在独立会话中运行。
+- **Agent Teams 与后端 REST API**：本地 HTTP + WebSocket 服务，暴露会话、任务和实时推送事件接口，允许外部工具和浏览器客户端与运行中的 Agent 交互。
+- **VS Code 级语法高亮**：代码块改用 [Shiki](https://shiki.matsu.io/) 渲染，与 VS Code 使用同一 tokenizer，每种语言都正确着色。
+- **GitHub PR 风格 Diff**：Diff 查看器改用 react-diff-viewer-continued 重写，支持并排和统一模式，行级高亮与 GitHub PR 视图一致。
+- **工具调用分组折叠**：连续工具调用自动折叠为紧凑的可展开摘要，长 Agent 会话保持可读而不丢失细节。
+- **`@` 文件搜索弹窗**：在输入框中输入 `@` 弹出实时模糊搜索的文件/目录选择器，支持键盘导航。
+- **i18n（中文 / English）**：完整 UI 国际化，含语言切换；覆盖全部系统字符串、弹窗与工具标签。
+- **字体本地化**：字体随包内置，无 Google Fonts CDN 请求，完全离线和隔离网络环境均可正常使用。
+
 ### 中转服务商韧性
 
-- **`get_channel_failed` 自动重试**：cchh 等中转服务商通道分配失败时，客户端自动重试（最多 10 次指数退避）而非直接报错。重试耗尽后显示友好消息「中转服务商通道繁忙，请稍后重试」。
-- **`api_error` 5xx 自动重试**：中转服务商将瞬时上游故障包装为带 5xx 状态码的 `api_error` 时，现在也会静默重试，与无状态码流错误的处理逻辑保持一致。4xx 的确定性 `api_error` 不重试。
+- **`get_channel_failed` 自动重试**：cchh 等中转服务商通道分配失败时，客户端自动重试（最多 10 次指数退避）而非直接报错。重试耗尽后显示友好消息而非原始报错。
+- **`api_error` 5xx 自动重试**：中转服务商将瞬时上游故障包装为带 5xx 状态码的 `api_error` 时，现在也会静默重试。4xx 的确定性错误不重试。
 - **Proxy 层 thinking 透传**：OpenAI Chat 格式的第三方 Provider 始终透传 `thinking` toggle 和 `reasoning_content`，避免上游网关静默丢弃推理内容。
 - **`xhigh` 推理档位保留**：K3/兼容模型的 `xhigh` 推理档位在每次上游合并中均予以保留，不会被静默回落。
 
