@@ -37,6 +37,8 @@ jobs:
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
+        with:
+          enablement: true
 
       - name: Install site dependencies
         run: npm --prefix site ci
