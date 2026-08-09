@@ -954,6 +954,14 @@ function shouldRetry(error: APIError): boolean {
     return true
   }
 
+  // Some relay/proxy providers wrap transient upstream failures in an api_error
+  // body (e.g. "Upstream request failed"). These arrive with a 5xx HTTP status
+  // so they skip the statusless isRetryableStreamError branch above.
+  // Only retry on 5xx — 4xx api_error (e.g. 400 bad input) is deterministic.
+  if (hasAPIErrorType(error, 'api_error') && error.status !== undefined && error.status >= 500) {
+    return true
+  }
+
   // Check for max tokens context overflow errors that we can handle
   if (parseMaxTokensContextOverflowError(error)) {
     return true
