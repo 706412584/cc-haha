@@ -269,6 +269,7 @@ export function isRetryableStreamError(error: unknown): boolean {
     'api_error',
     'overloaded_error',
     'upstream_error',
+    'get_channel_failed',
   )) return true
 
   const message = error instanceof Error ? error.message : String(error)
@@ -942,6 +943,14 @@ function shouldRetry(error: APIError): boolean {
   // stream consumption. Use the structured body matcher for api_error,
   // overloaded_error, and upstream_error before status-based checks.
   if (error.status === undefined && isRetryableStreamError(error)) {
+    return true
+  }
+
+  // cchh/relay providers signal channel-allocation failure with a
+  // get_channel_failed body. Channel capacity is transient — a fresh attempt
+  // usually succeeds once a channel frees up. Retry regardless of the HTTP
+  // status the relay wrapped it in.
+  if (hasAPIErrorType(error, 'get_channel_failed')) {
     return true
   }
 

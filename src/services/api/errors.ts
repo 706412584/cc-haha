@@ -605,6 +605,14 @@ function buildAssistantMessageFromError(
     })
   }
 
+  if (hasAPIErrorType(error, 'get_channel_failed')) {
+    return createAssistantAPIErrorMessage({
+      content: `${API_ERROR_MESSAGE_PREFIX}: 中转服务商通道繁忙，请稍后重试`,
+      error: 'server_error',
+      errorDetails: error.message,
+    })
+  }
+
   if (
     error instanceof APIError &&
     error.status === 429 &&
