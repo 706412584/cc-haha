@@ -91,7 +91,6 @@ runtime/__pycache__
 .codex-logs/
 
 # Local AI assistant artifacts (graph, notes)
-CLAUDE.md
 .mavis/
 .opencode/
 graphify-out/
