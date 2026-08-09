@@ -2187,11 +2187,6 @@ async function* queryModel(
     usage = EMPTY_USAGE;
     stopReason = null;
     isAdvisorInProgress = false;
-    // Track whether a real thinking block has arrived from upstream.
-    // When a relay/gateway strips thinking format (returning thoughts as
-    // plain text blocks), we promote the first text block to thinking so
-    // the UI renders it correctly.
-    let hasSeenThinkingBlock = false;
 
     // Streaming idle timeout watchdog: abort the stream if no chunks arrive
     // for STREAM_IDLE_TIMEOUT_MS. Unlike the stall detection below (which only
@@ -2455,34 +2450,17 @@ async function* queryModel(
                 }
                 break;
               case "text":
-                // When thinking was requested but the upstream gateway returns
-                // thoughts as a plain text block (no thinking block), promote
-                // the first text block (index 0) to a thinking block so the UI
-                // renders it in the thinking panel instead of as a message.
-                if (
-                  thinkingConfig.type !== "disabled" &&
-                  part.index === 0 &&
-                  !hasSeenThinkingBlock
-                ) {
-                  contentBlocks[part.index] = {
-                    type: "thinking" as const,
-                    thinking: "",
-                    signature: "",
-                  };
-                } else {
-                  contentBlocks[part.index] = {
-                    ...part.content_block,
-                    // awkwardly, the sdk sometimes returns text as part of a
-                    // content_block_start message, then returns the same text
-                    // again in a content_block_delta message. we ignore it here
-                    // since there doesn't seem to be a way to detect when a
-                    // content_block_delta message duplicates the text.
-                    text: "",
-                  };
-                }
+                contentBlocks[part.index] = {
+                  ...part.content_block,
+                  // awkwardly, the sdk sometimes returns text as part of a
+                  // content_block_start message, then returns the same text
+                  // again in a content_block_delta message. we ignore it here
+                  // since there doesn't seem to be a way to detect when a
+                  // content_block_delta message duplicates the text.
+                  text: "",
+                };
                 break;
               case "thinking":
-                hasSeenThinkingBlock = true;
                 contentBlocks[part.index] = {
                   ...part.content_block,
                   // also awkward
@@ -2566,12 +2544,6 @@ async function* queryModel(
                   contentBlock.input += delta.partial_json;
                   break;
                 case "text_delta":
-                  // Promoted thinking block: upstream sent text_delta but we
-                  // rewrote the block as thinking. Accumulate into .thinking.
-                  if (contentBlock.type === "thinking") {
-                    (contentBlock as { thinking: string }).thinking += delta.text;
-                    break;
-                  }
                   if (contentBlock.type !== "text") {
                     logEvent("tengu_streaming_error", {
                       error_type:
