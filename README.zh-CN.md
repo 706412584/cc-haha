@@ -14,87 +14,87 @@
 [![GitHub Issues](https://img.shields.io/github/issues/706412584/cc-haha)](https://github.com/706412584/cc-haha/issues)
 [![GitHub Pull Requests](https://img.shields.io/github/issues-pr/706412584/cc-haha)](https://github.com/706412584/cc-haha/pulls)
 [![License](https://img.shields.io/badge/License-MIT-blue)](https://github.com/706412584/cc-haha/blob/main/LICENSE)
-[![中文](https://img.shields.io/badge/🇨🇳_简体中文-当前-blue)](README.zh-CN.md)
-[![English](https://img.shields.io/badge/🇺🇸_English-Available-green)](README.md)
-[![Docs](https://img.shields.io/badge/📖_文档站点-Visit-FF7A00)](https://cchaha.ai)
+[![English](https://img.shields.io/badge/🇺🇸_English-Current-blue)](README.zh-CN.md)
+[![中文](https://img.shields.io/badge/🇨🇳_简体中文-Available-green)](README.md)
+[![Docs](https://img.shields.io/badge/📖_Documentation-Visit-FF7A00)](https://cchaha.ai)
 
-[English](README.md) · **简体中文**
+**English** · [简体中文](README.md)
 
 </div>
 
-**Code Council** 是基于开源 Claude Code 构建的定制版桌面工作台，适用于 macOS、Windows 和 Linux。在上游基础上增加了中转服务商韧性、更智能的重试逻辑、精细化 UX 改进和经过筛选的 Provider 预设——不含任何赞助广告与推广链接。
+**Code Council** is a customized desktop Claude Code workspace for macOS, Windows, and Linux, built on top of the open-source Claude Code. It adds relay-provider resilience, smarter retry logic, refined UX, and curated provider presets — all without sponsored placements or promotional links.
 
 <p align="center">
-  <a href="#桌面端预览">桌面端预览</a> · <a href="#安装桌面端">安装桌面端</a> · <a href="#code-council-定制内容">定制内容</a> · <a href="#桌面端亮点">桌面端亮点</a> · <a href="#更多文档">更多文档</a>
+  <a href="#desktop-preview">Desktop Preview</a> · <a href="#install-the-desktop-app">Install</a> · <a href="#code-council-customizations">Customizations</a> · <a href="#desktop-highlights">Highlights</a> · <a href="#more-documentation">More Docs</a>
 </p>
 
 ---
 
-## 桌面端预览
+## Desktop Preview
 
 <p align="center">
-  <a href="https://github.com/706412584/cc-haha/releases"><img src="https://img.shields.io/badge/⬇_下载桌面端-macOS_%7C_Windows_%7C_Linux-FF7A00?style=for-the-badge" alt="下载桌面端"></a>
+  <a href="https://github.com/706412584/cc-haha/releases"><img src="https://img.shields.io/badge/⬇_Download_Desktop-macOS_%7C_Windows_%7C_Linux-FF7A00?style=for-the-badge" alt="Download Desktop"></a>
 </p>
 
 <table>
   <tr>
-    <td align="center" width="33.33%"><img src="docs/images/app/zh-CN/session-new.webp" alt="第一次任务前的空会话"><br><b>从清爽的空会话开始</b><br><sub>项目和权限都在首屏</sub></td>
-    <td align="center" width="33.33%"><img src="docs/images/app/zh-CN/session-main.webp" alt="打开活动面板的真实执行中任务"><br><b>跟着任务一步步往前</b><br><sub>工具调用与阶段进度都留在眼前</sub></td>
-    <td align="center" width="33.33%"><img src="docs/images/app/zh-CN/workspace-diff.webp" alt="工作区 Diff 评审"><br><b>改了什么，逐行看清楚</b><br><sub>放大的高亮 Diff，文字和代码更清楚</sub></td>
+    <td align="center" width="33.33%"><img src="docs/images/app/en/session-new.webp" alt="Empty desktop session before the first task"><br><b>Start with a clear, empty session</b><br><sub>Project and permissions stay visible</sub></td>
+    <td align="center" width="33.33%"><img src="docs/images/app/en/session-main.webp" alt="Real task running with the Activity panel open"><br><b>Follow the task as it runs</b><br><sub>Tool calls and stage-by-stage progress stay in view</sub></td>
+    <td align="center" width="33.33%"><img src="docs/images/app/en/workspace-diff.webp" alt="Workspace diff review"><br><b>See exactly what changed</b><br><sub>A focused, full-width syntax-highlighted diff</sub></td>
   </tr>
   <tr>
-    <td align="center" width="33.33%"><img src="docs/images/app/zh-CN/workspace-preview.webp" alt="内置浏览器预览刚改完的页面"><br><b>改完当场验证</b><br><sub>内置浏览器打开真实本地页面</sub></td>
-    <td align="center" width="33.33%"><img src="docs/images/app/zh-CN/model-picker.webp" alt="显示服务商、预设和本地端点的模型选择器"><br><b>每条会话自选模型</b><br><sub>自己的服务商、预设和本地端点都在一个列表里</sub></td>
-    <td align="center" width="33.33%"><img src="docs/images/app/zh-CN/skill-market.webp" alt="技能市场"><br><b>缺什么手艺装什么</b><br><sub>来源和安全状态摆在明处</sub></td>
+    <td align="center" width="33.33%"><img src="docs/images/app/en/workspace-preview.webp" alt="Built-in browser previewing the page that was just changed"><br><b>Verify on the spot</b><br><sub>The real edited page in the built-in browser</sub></td>
+    <td align="center" width="33.33%"><img src="docs/images/app/en/model-picker.webp" alt="Model picker showing providers, presets, and local endpoints"><br><b>Choose the exact model</b><br><sub>Your providers, presets, and local endpoints in one list</sub></td>
+    <td align="center" width="33.33%"><img src="docs/images/app/en/skill-market.webp" alt="Skill marketplace"><br><b>Missing a trick? Install it</b><br><sub>Source and safety status shown up front</sub></td>
   </tr>
 </table>
 
 ---
 
-## Code Council 定制内容
+## Code Council Customizations
 
-以下是 Code Council 在上游 Claude Code 基础上的定制改动：
+These are the changes Code Council makes on top of upstream Claude Code:
 
-### 新增功能
+### Additional Features
 
-- **完整的 Provider 预设 UI**：重写 Provider 管理，支持预设 Chip 选择、官方账号卡片、settings.json 内联编辑器（带 JSON 校验）和一键连通性测试。内置 DeepSeek、Kimi、智谱 GLM、MiniMax、Azure OpenAI Codex 等预设以及自定义端点。
-- **IM 适配器（Telegram + 飞书）**：仅限私聊的双平台接入，可从手机发消息、切换项目、审批工具调用。适配器层做了配对校验，防止公开 Bot 被劫持。
-- **灵活定时任务**：基于 Cron 的任务调度，带图形化编辑器、立即执行按钮、每次运行的执行日志，支持编辑与删除。任务在独立会话中运行。
-- **Agent Teams 与后端 REST API**：本地 HTTP + WebSocket 服务，暴露会话、任务和实时推送事件接口，允许外部工具和浏览器客户端与运行中的 Agent 交互。
-- **VS Code 级语法高亮**：代码块改用 [Shiki](https://shiki.matsu.io/) 渲染，与 VS Code 使用同一 tokenizer，每种语言都正确着色。
-- **GitHub PR 风格 Diff**：Diff 查看器改用 react-diff-viewer-continued 重写，支持并排和统一模式，行级高亮与 GitHub PR 视图一致。
-- **工具调用分组折叠**：连续工具调用自动折叠为紧凑的可展开摘要，长 Agent 会话保持可读而不丢失细节。
-- **`@` 文件搜索弹窗**：在输入框中输入 `@` 弹出实时模糊搜索的文件/目录选择器，支持键盘导航。
-- **i18n（中文 / English）**：完整 UI 国际化，含语言切换；覆盖全部系统字符串、弹窗与工具标签。
-- **字体本地化**：字体随包内置，无 Google Fonts CDN 请求，完全离线和隔离网络环境均可正常使用。
+- **Full provider preset UI**: rewritten provider management with preset chips, an official-account card, settings.json inline editor with JSON validation, and a one-click connectivity test. Presets for DeepSeek, Kimi, Zhipu GLM, MiniMax, Azure OpenAI Codex, and custom endpoints ship out of the box.
+- **IM adapters — Telegram & Feishu**: paired DM-only integrations for both platforms: send messages, switch projects, and approve tool calls from your phone. Pairing is validated at the adapter layer so public bots can't be hijacked.
+- **Flexible scheduled tasks**: cron-based task scheduler with a GUI editor, "Run now" button, per-run execution logs, and edit/delete support. Tasks run in isolated sessions.
+- **Agent Teams & backend REST API**: a local HTTP + WebSocket server exposing sessions, tasks, and real-time push events — lets external tools and browser clients interact with running agents.
+- **VS Code-quality syntax highlighting**: code blocks rendered with [Shiki](https://shiki.matsu.io/) instead of highlight.js — same tokenizer as VS Code, correct for every language.
+- **GitHub PR-style diffs**: diff viewer rewritten with react-diff-viewer-continued — side-by-side and unified modes, line-level highlighting matching GitHub's PR view.
+- **Collapsible tool call groups**: consecutive tool calls are folded into a compact expandable summary so long agent runs stay readable without losing detail.
+- **`@`-file search popup**: type `@` in the composer to get an inline file/directory picker with real-time fuzzy search, navigable by keyboard.
+- **i18n (English / Chinese)**: full UI localisation with a locale switcher; all system strings, modals, and tool labels covered.
+- **Self-hosted fonts**: fonts are bundled locally — no Google Fonts CDN requests, works fully offline and in air-gapped environments.
 
-### 中转服务商韧性
+### Relay Provider Resilience
 
-- **`get_channel_failed` 自动重试**：cchh 等中转服务商通道分配失败时，客户端自动重试（最多 10 次指数退避）而非直接报错。重试耗尽后显示友好消息而非原始报错。
-- **`api_error` 5xx 自动重试**：中转服务商将瞬时上游故障包装为带 5xx 状态码的 `api_error` 时，现在也会静默重试。4xx 的确定性错误不重试。
-- **Proxy 层 thinking 透传**：OpenAI Chat 格式的第三方 Provider 始终透传 `thinking` toggle 和 `reasoning_content`，避免上游网关静默丢弃推理内容。
-- **`xhigh` 推理档位保留**：K3/兼容模型的 `xhigh` 推理档位在每次上游合并中均予以保留，不会被静默回落。
+- **`get_channel_failed` auto-retry**: when a relay/proxy provider (e.g. cchh) returns a channel-allocation failure, the client automatically retries up to 10 times with exponential back-off. On exhaustion a friendly message is shown instead of a raw error.
+- **`api_error` 5xx auto-retry**: relay providers that wrap transient upstream failures in an `api_error` body with a 5xx HTTP status are silently retried. Deterministic 4xx responses are not retried.
+- **Proxy `thinking` passthrough**: OpenAI-format third-party providers always receive the `thinking` toggle and `reasoning_content` fields, preventing silent drops of reasoning by upstream gateways.
+- **`xhigh` reasoning tier preserved**: the `xhigh` inference level for K3/compatible models is retained across upstream merges and never silently downgraded.
 
-### UX 修复
+### UX Fixes
 
-- **Esc 暂停不被任务通知唤醒**：用户按 Esc 暂停后，后台 Agent 的 `task-notification` 不会立刻开新一轮主对话。通知保留在队列中，随用户下一次真实输入一并送达。
-- **后台子代理完成可信度**：完成通知现在报告实际文件编辑次数（`file_edits=N`），编排层可据此判断 Agent 是否真的写了文件，而不是只信任一个空的 "completed" 状态。
-- **冷重连后 stop 路径稳定**：修复冷重连后停止失败导致 Agent「已停但仍像在跑」的悬挂状态。
+- **Esc pause is respected**: pressing Esc to pause no longer gets overridden by background agent `task-notification` events. Notifications are queued and delivered with the user's next real input.
+- **Background agent completion fidelity**: completion notifications report actual file-edit counts (`file_edits=N`) so orchestrators can tell whether an agent actually wrote anything, instead of trusting a bare "completed" status.
+- **Cold-reconnect stop stability**: the stop signal path after a reconnect is hardened so agents no longer appear to keep running after being stopped.
 
-### Provider 预设
+### Provider Presets
 
-- **赞助推广位全部移除**：TeamoRouter、玄枢API、FennoAI、七牛云AI 改为 `deprecated` 墓碑，不再展示推广链接和 featured 位。已配置用户仍可正常使用。
-- **接口AI 恢复**：作为可选预设提供，不带任何广告文案。
+- **Promoted/sponsored slots removed**: TeamoRouter, 玄枢API, FennoAI, and 七牛云AI are retired to `deprecated` tombstones — no promotional links or featured placement. Already-configured users can still run them.
+- **接口AI restored**: available as an optional preset without any advertising copy.
 
 ---
 
-## 安装桌面端
+## Install the Desktop App
 
-1. 前往 [Releases](https://github.com/706412584/cc-haha/releases) 下载 macOS / Windows / Linux 桌面端安装包。
-2. 首次启动后，在桌面端设置里配置模型提供商、API Key 和默认模型。
-3. Windows 未签名安装包可能出现 SmartScreen 提示，点「更多信息」→「仍要运行」即可。详见 [桌面端安装指南](docs/start/install.md)。
+1. Download the macOS / Windows / Linux desktop installer from [Releases](https://github.com/706412584/cc-haha/releases).
+2. On first launch, configure your model provider, API key, and default model in Settings.
+3. Unsigned Windows installers may show SmartScreen; click "More info" → "Run anyway". See the [desktop installation guide](docs/en/start/install.md).
 
-## 从源码启动 CLI
+## Run the CLI from Source
 
 ```bash
 bun install
@@ -102,69 +102,66 @@ cp .env.example .env
 ./bin/claude-haha
 ```
 
-更多配置见 [环境变量](docs/cli/env.md) 和 [命令行安装与启动](docs/cli/index.md)。
+See [environment variables](docs/en/cli/env.md) and [CLI setup](docs/en/cli/index.md) for more configuration options.
 
 ---
 
-## 桌面端亮点
+## Desktop Highlights
 
-- **多会话工作台**：标签页、项目切换、终端入口和会话历史集中管理，侧边栏宽度可拖拽。
-- **分支 / Worktree 启动**：新会话可以选择仓库分支，并决定用当前工作树还是隔离 Worktree。
-- **改动逐个文件审阅**：右侧工作区列出本轮改动，点开就是带语法高亮的 Diff，整轮可撤销。
-- **五档权限模式**：从「询问权限」到「跳过权限」，危险命令、工具调用和 AI 反问都在桌面端审批。
-- **模型自选**：Claude / ChatGPT / Grok 官方账号可直接登录；DeepSeek、Kimi、智谱 GLM 等第三方 API 有现成预设；LM Studio、Ollama 的本地模型也接得上。
-- **六套配色主题**：纯白、纸墨、经典暖色、青瓷、墨夜、墨夜蓝，可跟随系统深浅色自动切换。
-- **技能市场**：发现、预览、安装 ClawHub / SkillHub 的第三方技能，来源和安全状态摆在明处。
-- **会话活动面板**：集中查看任务进度、后台任务、SubAgent 与来源。
-- **Computer Use**：让 Agent 在授权后截图、点击、输入并控制桌面应用。
-- **桌面宠物**：搭搭、弧弧、补补、回回随任务状态换动作，也能自己做一只（默认关闭）。
-- **H5 远程访问**：扫码用手机浏览器接入当前会话，锁屏切后台都不打断正在跑的任务。
-- **IM 接入**：通过 Telegram / 飞书 / 微信 / 钉钉 / WhatsApp 远程对话、切换项目和审批权限。
-- **定时任务与用量统计**：创建计划任务在独立会话执行，并查看本机 Token 使用趋势。
+- **Multi-session workspace**: tabs, project switching, terminal entry, and session history in one place, with a resizable sidebar.
+- **Branch / Worktree launch**: choose a repository branch and decide whether to use the current working tree or an isolated Worktree.
+- **Review edits file by file**: the workspace lists this turn's changes; open any file for a syntax-highlighted diff, or undo the whole turn.
+- **Five permission modes**: from "ask every time" to "skip permissions" — risky commands, tool calls, and follow-up questions are all approved in the GUI.
+- **Bring your own model**: sign in to Claude, ChatGPT, or Grok; use presets for DeepSeek, Kimi, Zhipu GLM and others; or point it at LM Studio and Ollama running locally.
+- **Six colour themes**: white, paper, warm classic, celadon, ink night, and ink blue — optionally following your system's light/dark setting.
+- **Skill marketplace**: discover, preview, and install third-party skills from ClawHub / SkillHub, with source and safety status shown up front.
+- **Session activity panel**: track task progress, background tasks, SubAgents, and sources in one side panel.
+- **Computer Use**: let the agent take screenshots, click, type, and control desktop apps after authorization.
+- **H5 remote access**: scan a QR code to continue the session in your phone browser; locking the screen won't kill a running task.
+- **IM integration**: chat, switch projects, and approve actions through Telegram / Feishu / WeChat / DingTalk / WhatsApp.
+- **Scheduled tasks and usage stats**: run planned tasks in their own sessions and track local token usage trends.
 
 ---
 
-## 更多文档
+## More Documentation
 
-完整文档站：<https://cchaha.ai>
+Full documentation site: <https://cchaha.ai>
 
-| 分区 | 文档 |
+| Section | Documents |
 |------|------|
-| **开始使用** | [这是什么](docs/start/index.md) · [下载与安装](docs/start/install.md) · [连接模型服务](docs/start/models.md) · [跑通第一条会话](docs/start/first-session.md) · [故障排查](docs/start/troubleshooting.md) |
-| **桌面端功能** | [功能总览](docs/desktop/index.md) · [Computer Use](docs/desktop/computer-use.md) · [桌面宠物](docs/desktop/pets.md) · [手机 H5 与 IM 接力](docs/desktop/remote.md) |
-| **IM 接入** | [总览与配对流程](docs/im/index.md) · [飞书](docs/im/feishu.md) · [Telegram](docs/im/telegram.md) · [微信](docs/im/wechat.md) · [钉钉](docs/im/dingtalk.md) · [WhatsApp](docs/im/whatsapp.md) |
-| **命令行** | [安装与启动](docs/cli/index.md) · [命令参考](docs/cli/reference.md) · [环境变量](docs/cli/env.md) |
-| **深入原理** | [桌面端架构](docs/internals/desktop.md) · [多 Agent 系统](docs/internals/agent.md) · [Skills 系统](docs/internals/skills.md) · [记忆系统](docs/internals/memory.md) · [Computer Use 架构](docs/internals/computer-use.md) · [本地 Server 与 API](docs/internals/server.md) · [Channel 系统](docs/internals/channel.md) · [项目结构](docs/internals/structure.md) · [参与贡献与质量门禁](docs/internals/contributing.md) |
+| **Getting started** | [What this is](docs/en/start/index.md) · [Download and install](docs/en/start/install.md) · [Connect a model provider](docs/en/start/models.md) · [Your first session](docs/en/start/first-session.md) · [Troubleshooting](docs/en/start/troubleshooting.md) |
+| **Desktop features** | [Feature overview](docs/en/desktop/index.md) · [Computer Use](docs/en/desktop/computer-use.md) · [Desktop pets](docs/en/desktop/pets.md) · [Phone H5 and IM relay](docs/en/desktop/remote.md) |
+| **IM integrations** | [Overview and pairing](docs/en/im/index.md) · [Feishu](docs/en/im/feishu.md) · [Telegram](docs/en/im/telegram.md) · [WeChat](docs/en/im/wechat.md) · [DingTalk](docs/en/im/dingtalk.md) · [WhatsApp](docs/en/im/whatsapp.md) |
+| **CLI** | [Install and run](docs/en/cli/index.md) · [Command reference](docs/en/cli/reference.md) · [Environment variables](docs/en/cli/env.md) |
+| **Internals** | [Desktop architecture](docs/en/internals/desktop.md) · [Multi-agent system](docs/en/internals/agent.md) · [Skills system](docs/en/internals/skills.md) · [Memory system](docs/en/internals/memory.md) · [Computer Use architecture](docs/en/internals/computer-use.md) · [Local server and API](docs/en/internals/server.md) · [Channel system](docs/en/internals/channel.md) · [Project structure](docs/en/internals/structure.md) · [Contributing and quality gates](docs/en/internals/contributing.md) |
 
 ---
 
-## 技术栈
+## Tech Stack
 
-| 类别 | 技术 |
+| Category | Technology |
 |------|------|
-| 语言 | TypeScript |
-| 桌面 APP | Electron |
-| 桌面 UI | React + Vite |
-| 本地运行时 | [Bun](https://bun.sh) |
-| 终端 UI | React + [Ink](https://github.com/vadimdemedes/ink) |
-| CLI 解析 | Commander.js |
+| Language | TypeScript |
+| Desktop app | Electron |
+| Desktop UI | React + Vite |
+| Local runtime | [Bun](https://bun.sh) |
+| Terminal UI | React + [Ink](https://github.com/vadimdemedes/ink) |
+| CLI parsing | Commander.js |
 | API | Anthropic SDK |
-| 协议 | MCP, LSP |
+| Protocols | MCP, LSP |
 
-## 致谢
+## Acknowledgements
 
-感谢以下开源项目和社区实践为本项目提供参考与启发：
+Thanks to the following open-source projects and community practices for reference and inspiration:
 
-- [Claude Code](https://github.com/anthropics/claude-code)：本项目基于的上游开源项目。
-- [React](https://github.com/facebook/react)：前端工程与组件化 UI 生态。
-- [Electron](https://github.com/electron/electron)：跨端桌面应用能力与工程实践。
-- [cc-switch](https://github.com/farion1231/cc-switch)：模型供应商配置能力参考。
+- [Claude Code](https://github.com/anthropics/claude-code): the upstream project this is built on.
+- [React](https://github.com/facebook/react): frontend engineering and component-based UI ecosystem.
+- [Electron](https://github.com/electron/electron): cross-platform desktop app capabilities and engineering practices.
+- [cc-switch](https://github.com/farion1231/cc-switch): reference for model provider configuration.
 
 ---
 
 ## ⭐ Star History
-
-如果这个项目对你有帮助，欢迎点一个 ⭐ Star，让更多人发现 Code Council。
 
 <a href="https://www.repostars.dev/?repos=706412584%2Fcc-haha&theme=ocean">
   <img alt="Star History Chart" src="https://www.repostars.dev/api/embed?repo=706412584%2Fcc-haha&theme=ocean" />
