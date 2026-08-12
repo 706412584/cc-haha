@@ -4887,6 +4887,11 @@ function pushAssistantHistoryThinking(
   // 与流式路径（case 'thinking'）保持同等防护：纯空白块不产生空壳气泡。
   if (!content.trim()) return
 
+  // 全局去重：与流式路径（case 'thinking' L3189）保持一致的逻辑，
+  // 任何已存在的 thinking 块如果内容完全相同，丢弃重放块。
+  // 流式 delta 是碎片不会命中；命中的必然是被整块重发的同一段思考。
+  if (messages.some((message) => message.type === 'thinking' && message.content === content)) return
+
   const last = messages[messages.length - 1]
   if (last?.type === 'thinking') {
     // 流式落盘的快照会让同一段思考在 jsonl 里以"整块重发"或"前缀增长"的

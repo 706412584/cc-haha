@@ -3049,7 +3049,7 @@ async function* queryModel(
         !signal.aborted &&
         !streamWatchdogState.snapshot().serverToolUseStarted &&
         !assistantCommitBuffer.hasCrossedSideEffectBoundary() &&
-        ((disableFallback && streamingError instanceof EmptyStreamError) ||
+        (streamingError instanceof EmptyStreamError ||
           isRetryableStreamError(streamingError))
       ) {
         logForDebugging(

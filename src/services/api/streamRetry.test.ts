@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
 import Anthropic, { APIConnectionError, APIError } from '@anthropic-ai/sdk'
 import { withStreamRetry } from './streamRetry.js'
+import { EmptyStreamError } from './streamFallback.js'
 import {
   isRetryableStreamError,
   RetriableStreamError,
@@ -406,6 +407,33 @@ describe('withStreamRetry', () => {
     const last = failed.at(-1)
     expect(last?.type).toBe('assistant')
     expect(last?.isApiErrorMessage).toBe(true)
+    delete process.env[RETRY_ENV]
+  })
+
+  test('retries an EmptyStreamError wrapped as RetriableStreamError', async () => {
+    process.env[RETRY_ENV] = '1'
+    let calls = 0
+    const attempt = () =>
+      // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
+      (async function* (): AsyncGenerator<any, void> {
+        calls++
+        if (calls === 1) {
+          // Simulate the claude.ts fix: EmptyStreamError is thrown as RetriableStreamError
+          throw new RetriableStreamError(new EmptyStreamError())
+        }
+        yield { type: 'assistant', message: { content: [] }, uuid: 'recovered' }
+      })()
+
+    const out = await collect(withStreamRetry(attempt, 'test-model', []))
+
+    expect(calls).toBe(2)
+    expect(out.at(-1)?.uuid).toBe('recovered')
+    expect(out.some(m => m.isApiErrorMessage)).toBe(false)
+    expect(out).toContainEqual(expect.objectContaining({
+      type: 'system',
+      subtype: 'streaming_fallback',
+      cause: 'stream_retry',
+    }))
     delete process.env[RETRY_ENV]
   })
 

@@ -605,6 +605,38 @@ describe('chatStore history mapping', () => {
     expect(mapped[2]).toMatchObject({ id: 'assistant-final-block-0', content: 'tests pass' })
   })
 
+  // 与流式路径（case 'thinking' L3189）保持一致的全局去重：远离的 thinking 块如果内容
+  // 完全相同也应丢弃，而非另起一个气泡。流式落盘的快照会让同一段思考在 jsonl 里以
+  // 整块重发的形态出现，中间可能隔着工具调用。
+  it('deduplicates a non-adjacent thinking block with identical content from history mapping', () => {
+    const messages: MessageEntry[] = [
+      {
+        id: 'assistant-first',
+        type: 'assistant',
+        timestamp: '2026-08-01T00:00:00.000Z',
+        content: [{ type: 'thinking', thinking: 'plan the change' }],
+      },
+      {
+        id: 'assistant-tool',
+        type: 'assistant',
+        timestamp: '2026-08-01T00:00:01.000Z',
+        content: [{ type: 'tool_use', name: 'Bash', id: 'bash-1', input: { command: 'pwd' } }],
+      },
+      // 与第一条 thinking 逐字相同，应丢弃（非相邻、中间隔了工具调用）
+      {
+        id: 'assistant-replay',
+        type: 'assistant',
+        timestamp: '2026-08-01T00:00:02.000Z',
+        content: [{ type: 'thinking', thinking: 'plan the change' }],
+      },
+    ]
+
+    const mapped = mapHistoryMessagesToUiMessages(messages)
+
+    expect(mapped.map((message) => message.type)).toEqual(['thinking', 'tool_use'])
+    expect(mapped[0]).toMatchObject({ id: 'assistant-first-block-0', content: 'plan the change' })
+  })
+
   it('maps AskUserQuestion transcript answers from toolUseResult metadata', () => {
     const messages: MessageEntry[] = [
       {
