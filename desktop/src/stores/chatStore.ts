@@ -808,6 +808,19 @@ function findStreamMergeTargetIndex(messages: UIMessage[]): number {
   return -1
 }
 
+function findCurrentTurnThinkingIndex(messages: UIMessage[]): number {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]!
+    if (message.type === 'user_text') return -1
+    if (message.type === 'thinking') return index
+  }
+  return -1
+}
+
+function containsFinishedThinkingBlock(content: string, block: string): boolean {
+  return content.split('\n\n').includes(block)
+}
+
 function appendAssistantTextMessage(
   messages: UIMessage[],
   content: string,
@@ -3186,22 +3199,26 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           // 这里再兜一道：thinking 没有 transcriptMessageId 之类的身份，任何漏网的
           // 重放都只能靠"整块内容与已有 thinking 逐字相同"来认。流式 delta 是碎片，
           // 不会命中；命中的必然是被整块重发的同一段思考。
-          if (base.some((message) => message.type === 'thinking' && message.content === msg.text)) {
+          if (base.some((message) =>
+              message.type === 'thinking' &&
+              (message.content === msg.text || containsFinishedThinkingBlock(message.content, msg.text))
+            )) {
             skippedThinkingBlock = true
             return { messages: base, streamingText: '' }
           }
-          const lastIndex = findStreamMergeTargetIndex(base)
-          const last = lastIndex >= 0 ? base[lastIndex] : undefined
-          if (last && last.type === 'thinking') {
+          const thinkingIndex = findCurrentTurnThinkingIndex(base)
+          const thinking = thinkingIndex >= 0 ? base[thinkingIndex] : undefined
+          if (thinking?.type === 'thinking') {
             const updated = [...base]
-            updated[lastIndex] = {
-              ...last,
-              content: joinThinkingContent(last.content, msg.text, msg.complete === true),
+            const interrupted = thinkingIndex !== findStreamMergeTargetIndex(base)
+            updated[thinkingIndex] = {
+              ...thinking,
+              content: joinThinkingContent(thinking.content, msg.text, msg.complete === true || interrupted),
             }
             return {
               messages: updated,
               chatState: 'thinking',
-              activeThinkingId: last.id,
+              activeThinkingId: thinking.id,
               streamingText: '',
               streamingResponseChars: s.streamingResponseChars + msg.text.length,
             }
@@ -4890,19 +4907,22 @@ function pushAssistantHistoryThinking(
   // 全局去重：与流式路径（case 'thinking' L3189）保持一致的逻辑，
   // 任何已存在的 thinking 块如果内容完全相同，丢弃重放块。
   // 流式 delta 是碎片不会命中；命中的必然是被整块重发的同一段思考。
-  if (messages.some((message) => message.type === 'thinking' && message.content === content)) return
+  if (messages.some((message) =>
+    message.type === 'thinking' &&
+    (message.content === content || containsFinishedThinkingBlock(message.content, content))
+  )) return
 
-  const last = messages[messages.length - 1]
-  if (last?.type === 'thinking') {
-    // 流式落盘的快照会让同一段思考在 jsonl 里以"整块重发"或"前缀增长"的
-    // 形态重复出现，逐字相同直接丢弃，前缀包含则用更全的新块替换旧块。
-    // 合并时保留首个块的确定性 id，保证轮询重映射时 React key 稳定。
-    if (last.content === content) return
-    if (content.startsWith(last.content)) {
-      last.content = content
+  const thinkingIndex = findCurrentTurnThinkingIndex(messages)
+  const thinking = thinkingIndex >= 0 ? messages[thinkingIndex] : undefined
+  if (thinking?.type === 'thinking') {
+    // 一个用户轮次中的每次工具续跑都可能生成新的 thinking 块。界面只保留一个
+    // 「已思考」入口，把这些块合并进去，避免长工具链刷出整墙同名气泡。
+    if (thinking.content === content) return
+    if (content.startsWith(thinking.content)) {
+      thinking.content = content
       return
     }
-    last.content = joinThinkingContent(last.content, content, true)
+    thinking.content = joinThinkingContent(thinking.content, content, true)
     return
   }
 
