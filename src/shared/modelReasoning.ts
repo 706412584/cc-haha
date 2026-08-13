@@ -137,21 +137,33 @@ function normalizeReasoningModelId(modelId: string): string {
     .replace(/:1m$/i, '')
     .toLowerCase()
   const namespaceSeparator = normalized.lastIndexOf('/')
-  return namespaceSeparator >= 0
+  const unqualified = namespaceSeparator >= 0
     ? normalized.slice(namespaceSeparator + 1)
     : normalized
+  return unqualified.replace(/(\d)\.(\d)/g, '$1-$2')
 }
 
 export function getModelReasoningCapabilityOverride(
   modelId: string,
   models: Partial<Record<(typeof MODEL_REASONING_CAPABILITY_TIERS)[number]['slot'], string>>,
   env: Readonly<Record<string, string | undefined>>,
+  presetModels?: Partial<Record<(typeof MODEL_REASONING_CAPABILITY_TIERS)[number]['slot'], string>>,
 ): string | undefined {
-  const normalizedModelId = modelId.trim().toLowerCase()
+  const normalizedModelId = normalizeReasoningModelId(modelId)
   for (const tier of MODEL_REASONING_CAPABILITY_TIERS) {
-    const mappedModel = models[tier.slot]?.trim().toLowerCase()
+    const mappedModel = models[tier.slot]
+      ? normalizeReasoningModelId(models[tier.slot]!)
+      : undefined
+    const presetModel = presetModels?.[tier.slot]
+      ? normalizeReasoningModelId(presetModels[tier.slot]!)
+      : undefined
     const capabilities = env[tier.capabilitiesEnvVar]
-    if (mappedModel === normalizedModelId && capabilities !== undefined) {
+    const capabilityStillApplies = presetModel === undefined || presetModel === mappedModel
+    if (
+      mappedModel === normalizedModelId &&
+      capabilityStillApplies &&
+      capabilities !== undefined
+    ) {
       return capabilities
     }
   }

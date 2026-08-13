@@ -670,6 +670,47 @@ describe('ModelSelector', () => {
     })
   })
 
+  it('keeps effort selectable when an 接口AI preset slot is remapped to a GPT model', async () => {
+    useSettingsStore.setState({
+      locale: 'en',
+      availableModels: [],
+      currentModel: null,
+      activeProviderName: 'Local GPT 2',
+      effortLevel: 'high',
+    })
+    useProviderStore.setState({
+      providers: [{
+        id: 'local-gpt-provider',
+        presetId: 'jiekouai',
+        name: 'Local GPT 2',
+        apiKey: '***',
+        baseUrl: 'http://127.0.0.1:18080',
+        apiFormat: 'anthropic',
+        models: {
+          main: 'gpt-5.6-sol',
+          haiku: 'gpt-5.5',
+          sonnet: 'gpt-5.6-terra',
+          opus: 'gpt-5.4-mini',
+        },
+      }],
+      activeId: 'local-gpt-provider',
+      hasLoadedProviders: true,
+      isLoading: false,
+    })
+    useSessionRuntimeStore.getState().setSelection('session-local-gpt', {
+      providerId: 'local-gpt-provider',
+      modelId: 'gpt-5.6-terra',
+      effortLevel: 'high',
+    })
+
+    render(<ModelSelector runtimeKey="session-local-gpt" />)
+
+    expect(screen.getByRole('button', { name: 'Effort: High' })).toBeInTheDocument()
+    await clickByRole(/gpt-5\.6-terra/i)
+    expect(within(screen.getByTestId('model-selector-dropdown')).getByText('Effort')).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: /^(Low|Medium|High|X-High|Max)$/ })).toHaveLength(5)
+  })
+
   it('keeps effort selectable for OpenAI Responses models from compatible providers', async () => {
     useSettingsStore.setState({
       locale: 'en',

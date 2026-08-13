@@ -507,7 +507,7 @@ describe('ConversationService', () => {
     }
   })
 
-  test('buildChildEnv ties the first-token watchdog to the user request timeout so slow prefill is not killed early (#826)', async () => {
+  test('buildChildEnv limits the default first-token watchdog so empty-stream retries advance', async () => {
     const prev = process.env.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS
     delete process.env.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS
     await fs.writeFile(
@@ -519,13 +519,8 @@ describe('ConversationService', () => {
       const service = new ConversationService() as any
       const env = (await service.buildChildEnv('/tmp')) as Record<string, string>
 
-      // The user's "请求超时" must reach the first-token watchdog, not only the
-      // SDK client timeout (which on a stream is cleared the moment response
-      // headers arrive). Otherwise a local/3P model that needs minutes to emit
-      // its first token gets killed by the 240s idle watchdog no matter how high
-      // the configured timeout is (#826).
-      expect(env.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS).toBe('600000')
-      expect(env.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS).toBe(env.API_TIMEOUT_MS)
+      expect(env.API_TIMEOUT_MS).toBe('600000')
+      expect(env.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS).toBe('120000')
     } finally {
       if (prev === undefined) delete process.env.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS
       else process.env.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS = prev
@@ -1019,7 +1014,9 @@ describe('ConversationService', () => {
     expect(env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES).toBe(
       'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
     )
-    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe('none')
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe(
+      'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
+    )
   })
 
   test('buildChildEnv switches active capabilities with the selected provider model', async () => {

@@ -354,7 +354,7 @@ describe('chatStore background agent activity interleaving', () => {
     expect(assistantText[0]).toMatchObject({ content: 'First half. Second half.' })
   })
 
-  it('still starts a new thinking block after the main agent runs its own tool', () => {
+  it('keeps one thinking block across main-agent tool continuations', () => {
     const store = useChatStore.getState()
 
     store.handleServerMessage(TEST_SESSION_ID, { type: 'thinking', text: 'Before the tool.' })
@@ -374,11 +374,8 @@ describe('chatStore background agent activity interleaving', () => {
 
     const messages = useChatStore.getState().sessions[TEST_SESSION_ID]?.messages ?? []
     const thinking = messages.filter((message) => message.type === 'thinking')
-    expect(thinking).toHaveLength(2)
-    expect(thinking.map((message) => message.content)).toEqual([
-      'Before the tool.',
-      'After the tool.',
-    ])
+    expect(thinking).toHaveLength(1)
+    expect(thinking[0]?.content).toBe('Before the tool.\n\nAfter the tool.')
   })
 })
 
@@ -575,7 +572,7 @@ describe('chatStore history mapping', () => {
         timestamp: '2026-04-06T00:00:04.000Z',
         content: [{ type: 'thinking', thinking: 'then run tests' }],
       },
-      // 被工具打断后的新思考：保持独立
+      // 被工具打断后的新思考：仍并入当前用户轮次唯一的 thinking 气泡
       {
         id: 'assistant-tools',
         type: 'assistant',
@@ -594,15 +591,43 @@ describe('chatStore history mapping', () => {
 
     const mapped = mapHistoryMessagesToUiMessages(messages)
 
-    expect(mapped.map((message) => message.type)).toEqual(['thinking', 'tool_use', 'thinking'])
+    expect(mapped.map((message) => message.type)).toEqual(['thinking', 'tool_use'])
     expect(mapped[0]).toMatchObject({
       id: 'assistant-snap-1-block-0',
-      // Two finished thoughts merge into one bubble, but they are still two thoughts:
-      // the original expectation here was 'carefullythen', which pinned the missing
-      // separator as correct rather than reading it as the bug it was.
-      content: 'plan the fix carefully\n\nthen run tests',
+      content: 'plan the fix carefully\n\nthen run tests\n\ntests pass',
     })
-    expect(mapped[2]).toMatchObject({ id: 'assistant-final-block-0', content: 'tests pass' })
+  })
+
+  // 与流式路径（case 'thinking' L3189）保持一致的全局去重：远离的 thinking 块如果内容
+  // 完全相同也应丢弃，而非另起一个气泡。流式落盘的快照会让同一段思考在 jsonl 里以
+  // 整块重发的形态出现，中间可能隔着工具调用。
+  it('deduplicates a non-adjacent thinking block with identical content from history mapping', () => {
+    const messages: MessageEntry[] = [
+      {
+        id: 'assistant-first',
+        type: 'assistant',
+        timestamp: '2026-08-01T00:00:00.000Z',
+        content: [{ type: 'thinking', thinking: 'plan the change' }],
+      },
+      {
+        id: 'assistant-tool',
+        type: 'assistant',
+        timestamp: '2026-08-01T00:00:01.000Z',
+        content: [{ type: 'tool_use', name: 'Bash', id: 'bash-1', input: { command: 'pwd' } }],
+      },
+      // 与第一条 thinking 逐字相同，应丢弃（非相邻、中间隔了工具调用）
+      {
+        id: 'assistant-replay',
+        type: 'assistant',
+        timestamp: '2026-08-01T00:00:02.000Z',
+        content: [{ type: 'thinking', thinking: 'plan the change' }],
+      },
+    ]
+
+    const mapped = mapHistoryMessagesToUiMessages(messages)
+
+    expect(mapped.map((message) => message.type)).toEqual(['thinking', 'tool_use'])
+    expect(mapped[0]).toMatchObject({ id: 'assistant-first-block-0', content: 'plan the change' })
   })
 
   it('maps AskUserQuestion transcript answers from toolUseResult metadata', () => {
@@ -8408,11 +8433,11 @@ describe('chatStore wake replay of a finished thinking turn', () => {
     if (timer) clearInterval(timer)
   })
 
-  it('hydrates the finished turn as eight non-empty thinking blocks', () => {
-    // Sanity check on the fixture: history mapping drops the five empty
-    // thinking blocks, so anything empty on screen came from the stream path.
-    expect(thinkingBlocks()).toHaveLength(8)
-    expect(thinkingBlocks().every((content) => content.trim().length > 0)).toBe(true)
+  it('hydrates the finished turn as one non-empty thinking block', () => {
+    expect(thinkingBlocks()).toHaveLength(1)
+    expect(thinkingBlocks()[0]?.trim().length).toBeGreaterThan(0)
+    expect(thinkingBlocks()[0]).toContain(FIRST_THINKING.text)
+    expect(thinkingBlocks()[0]).toContain(LAST_THINKING.text)
   })
 
   it('does not re-append hydrated thinking when a finished turn is replayed after wake', () => {
@@ -8433,16 +8458,13 @@ describe('chatStore wake replay of a finished thinking turn', () => {
     expect(thinkingBlocks().filter((content) => !content.trim())).toEqual([])
   })
 
-  it('does not merge the turn tail into the turn head when the replay wraps around', () => {
+  it('does not duplicate thinking content when the replay wraps around', () => {
     replayFinishedTurn({ withText: false })
     replayFinishedTurn({ withText: false })
 
-    // The last thinking block of one replay round and the first of the next
-    // arrive back to back with nothing between them, so the merge branch glues
-    // two unrelated reasoning blocks into a single bubble.
-    expect(thinkingBlocks().filter((content) =>
-      content.includes(LAST_THINKING.text) && content.includes(FIRST_THINKING.text),
-    )).toEqual([])
+    const content = thinkingBlocks()[0] ?? ''
+    expect(content.split(FIRST_THINKING.text)).toHaveLength(2)
+    expect(content.split(LAST_THINKING.text)).toHaveLength(2)
   })
 
   it('does not grow the thinking wall with every extra replay round', () => {

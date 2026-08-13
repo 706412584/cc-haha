@@ -74,6 +74,36 @@ describe('model reasoning capability pass-through', () => {
     )).toBeUndefined()
   })
 
+  test('ignores a preset slot capability after that slot is mapped to another model', () => {
+    const models = {
+      main: 'gpt-5.6-sol',
+      haiku: 'gpt-5.5',
+      sonnet: 'gpt-5.6-terra',
+      opus: 'gpt-5.4-mini',
+    }
+    const presetModels = {
+      main: 'claude-sonnet-4-6',
+      haiku: 'claude-haiku-4-5-20251001',
+      sonnet: 'claude-sonnet-4-6',
+      opus: 'claude-opus-4-7',
+    }
+    const env = {
+      ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: 'none',
+    }
+
+    expect(getModelReasoningCapabilityOverride(
+      'gpt-5.6-terra',
+      models,
+      env,
+      presetModels,
+    )).toBeUndefined()
+    expect(resolveModelReasoningProfile(
+      'gpt-5.6-terra',
+      'anthropic',
+      getModelReasoningCapabilityOverride('gpt-5.6-terra', models, env, presetModels),
+    )?.supportedReasoningEfforts).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+  })
+
   test('uses explicit capabilities only to validate, never to remap effort', () => {
     const capabilities = 'thinking,effort,adaptive_thinking'
 

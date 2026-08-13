@@ -380,6 +380,31 @@ describe('providerRuntimeEnv', () => {
     )
   })
 
+  test('replaces stale preset slot capabilities when models are customized', () => {
+    const env = buildProviderManagedEnv({
+      id: 'provider-1',
+      presetId: 'jiekouai',
+      name: 'Local GPT relay',
+      apiKey: 'provider-key',
+      baseUrl: 'http://127.0.0.1:18080',
+      apiFormat: 'anthropic',
+      models: {
+        main: 'gpt-5.6-sol',
+        haiku: 'gpt-5.5',
+        sonnet: 'gpt-5.6-terra',
+        opus: 'gpt-5.4-mini',
+      },
+    })
+
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe(
+      'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
+    )
+    applyProviderRuntimeModel(env, 'gpt-5.6-terra')
+    expect(env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES).toBe(
+      'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
+    )
+  })
+
   test('injects CLAUDE_CODE_DISABLE_THINKING when the provider is flagged thinkingIncompatible', async () => {
     await writeJson(path.join(tmpDir, 'cc-haha', 'providers.json'), {
       activeId: 'provider-1',

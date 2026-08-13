@@ -1735,15 +1735,11 @@ export class ConversationService {
       // no completion (#766: "卡住" with slowly growing tokens). This independent
       // cap frees such a stream after a fixed duration regardless of trickle.
       CLAUDE_STREAM_MAX_DURATION_MS: cleanEnv.CLAUDE_STREAM_MAX_DURATION_MS || '600000',
-      // Time-to-first-token budget: how long to wait for the FIRST streamed
-      // chunk after response headers arrive. The idle timer above is the wrong
-      // knob for slow prefill — it kills healthy local/3P models that take
-      // minutes to emit their first token (#826). Tie this to the user's
-      // request-timeout setting (API_TIMEOUT_MS, from networkEnv) so raising
-      // "请求超时" actually extends how long we wait for the first token. The
-      // CLI switches to the shorter idle budget once tokens start flowing.
+      // A retry that receives response headers but no SSE events must not sit on
+      // the full request timeout before the next attempt. Keep explicit overrides,
+      // but cap the Desktop default first-event wait at two minutes.
       CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS:
-        cleanEnv.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS || networkEnv.API_TIMEOUT_MS,
+        cleanEnv.CLAUDE_STREAM_FIRST_TOKEN_TIMEOUT_MS || '120000',
       // When a stream does get aborted, retry as streaming instead of falling
       // back to non-streaming: a non-streaming request must wait for the FULL
       // generation before the first response byte, so slow providers can never

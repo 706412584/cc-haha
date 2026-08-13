@@ -32,6 +32,7 @@ import {
 import { SettingsService } from '../services/settingsService.js'
 import { ProviderService } from '../services/providerService.js'
 import { getPresetDefaultEnv } from '../services/providerRuntimeEnv.js'
+import { PROVIDER_PRESETS } from '../config/providerPresets.js'
 import { isOpenAIOfficialProviderId } from '../services/openaiOfficialProvider.js'
 import { isGrokOfficialProviderId } from '../services/grokOfficialProvider.js'
 import { getOpenAICodexModelCatalog } from '../../services/openaiAuth/modelCatalog.js'
@@ -4869,6 +4870,7 @@ async function resolveRuntimeEffort(
       modelId,
       provider.models,
       getPresetDefaultEnv(provider.presetId),
+      PROVIDER_PRESETS.find((preset) => preset.id === provider.presetId)?.defaultModels,
     ),
   )
   return {
