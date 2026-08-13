@@ -146,12 +146,19 @@ export function getModelReasoningCapabilityOverride(
   modelId: string,
   models: Partial<Record<(typeof MODEL_REASONING_CAPABILITY_TIERS)[number]['slot'], string>>,
   env: Readonly<Record<string, string | undefined>>,
+  presetModels?: Partial<Record<(typeof MODEL_REASONING_CAPABILITY_TIERS)[number]['slot'], string>>,
 ): string | undefined {
   const normalizedModelId = modelId.trim().toLowerCase()
   for (const tier of MODEL_REASONING_CAPABILITY_TIERS) {
     const mappedModel = models[tier.slot]?.trim().toLowerCase()
+    const presetModel = presetModels?.[tier.slot]?.trim().toLowerCase()
     const capabilities = env[tier.capabilitiesEnvVar]
-    if (mappedModel === normalizedModelId && capabilities !== undefined) {
+    const capabilityStillApplies = presetModel === undefined || presetModel === mappedModel
+    if (
+      mappedModel === normalizedModelId &&
+      capabilityStillApplies &&
+      capabilities !== undefined
+    ) {
       return capabilities
     }
   }

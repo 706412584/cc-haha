@@ -20,6 +20,7 @@ import type {
 import {
   BUILT_IN_PROVIDER_IDS,
 } from '../types/provider.js'
+import { getClaudeCodeModelCapabilities } from '../../shared/modelReasoning.js'
 import {
   ATTRIBUTION_HEADER_ENV_KEY,
   attributionHeaderEnvForModel,
@@ -390,9 +391,25 @@ function getProviderCapabilityEnv(
       ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES: getKimiModelCapabilities(models.opus),
     }
   }
-  // Non-custom presets keep capabilities in preset defaultEnv (or none).
-  // Do not invent Claude-code capabilities for retired/third-party presets.
-  return {}
+
+  const preset = PROVIDER_PRESETS.find((entry) => entry.id === provider.presetId)
+  const capabilityEnv: Record<string, string> = {}
+  const slots = [
+    ['fable', 'ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES'],
+    ['haiku', 'ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES'],
+    ['sonnet', 'ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES'],
+    ['opus', 'ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES'],
+  ] as const
+  for (const [slot, envKey] of slots) {
+    const configuredModel = models[slot]
+    if (configuredModel && configuredModel !== preset?.defaultModels[slot]) {
+      capabilityEnv[envKey] = getClaudeCodeModelCapabilities(
+        configuredModel,
+        provider.apiFormat ?? 'anthropic',
+      )
+    }
+  }
+  return capabilityEnv
 }
 
 export function buildProviderAuthEnv(

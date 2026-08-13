@@ -35,6 +35,7 @@ import {
 } from '../services/grokOfficialProvider.js'
 import { hahaGrokOAuthService } from '../services/hahaGrokOAuthService.js'
 import { getPresetDefaultEnv } from '../services/providerRuntimeEnv.js'
+import { PROVIDER_PRESETS } from '../config/providerPresets.js'
 import {
   getModelReasoningCapabilityOverride,
   resolveModelReasoningProfile,
@@ -116,6 +117,7 @@ function buildProviderModelList(
   },
   apiFormat?: ModelReasoningApiFormat,
   presetDefaultEnv: Record<string, string> = {},
+  presetModels?: Partial<Record<'main' | 'fable' | 'haiku' | 'sonnet' | 'opus', string>>,
 ): ApiModelInfo[] {
   const modelList: ApiModelInfo[] = []
 
@@ -124,7 +126,7 @@ function buildProviderModelList(
       ? resolveModelReasoningProfile(
           id,
           apiFormat,
-          getModelReasoningCapabilityOverride(id, models, presetDefaultEnv),
+          getModelReasoningCapabilityOverride(id, models, presetDefaultEnv, presetModels),
         )
       : undefined
     return {
@@ -310,6 +312,7 @@ async function handleModelsList(): Promise<Response> {
       activeProvider.models,
       activeProvider.apiFormat,
       getPresetDefaultEnv(activeProvider.presetId),
+      PROVIDER_PRESETS.find((preset) => preset.id === activeProvider.presetId)?.defaultModels,
     )
     return Response.json({
       models: modelList,
@@ -376,6 +379,7 @@ async function handleCurrentModel(req: Request): Promise<Response> {
               activeProvider.models,
               activeProvider.apiFormat,
               getPresetDefaultEnv(activeProvider.presetId),
+              PROVIDER_PRESETS.find((preset) => preset.id === activeProvider.presetId)?.defaultModels,
             )
           : await getStandaloneModelList()
 

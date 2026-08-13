@@ -74,18 +74,20 @@ const DROPDOWN_GAP = 8
 const VIEWPORT_MARGIN = 16
 const DROPDOWN_MAX_HEIGHT = 420
 const DROPDOWN_MIN_HEIGHT = 180
-const PROVIDER_PRESET_DEFAULT_ENVS = new Map(
-  BUNDLED_PROVIDER_PRESETS.map(preset => [preset.id, preset.defaultEnv ?? {}]),
+const PROVIDER_PRESETS_BY_ID = new Map(
+  BUNDLED_PROVIDER_PRESETS.map(preset => [preset.id, preset]),
 )
 
 function getProviderModelCapabilityOverride(
   provider: SavedProvider,
   modelId: string,
 ): string | undefined {
+  const preset = PROVIDER_PRESETS_BY_ID.get(provider.presetId)
   return getModelReasoningCapabilityOverride(
     modelId,
     provider.models,
-    PROVIDER_PRESET_DEFAULT_ENVS.get(provider.presetId) ?? {},
+    preset?.defaultEnv ?? {},
+    preset?.defaultModels,
   )
 }
 
