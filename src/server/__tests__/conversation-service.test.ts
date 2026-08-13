@@ -1014,7 +1014,9 @@ describe('ConversationService', () => {
     expect(env.ANTHROPIC_MODEL_SUPPORTED_CAPABILITIES).toBe(
       'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
     )
-    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe('none')
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe(
+      'thinking,effort,adaptive_thinking,xhigh_effort,max_effort',
+    )
   })
 
   test('buildChildEnv switches active capabilities with the selected provider model', async () => {

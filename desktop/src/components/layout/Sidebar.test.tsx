@@ -300,7 +300,7 @@ describe('Sidebar', () => {
       { sessionId: 'session-new-1', title: 'New Session', type: 'session', status: 'idle' },
     ])
     expect(useTabStore.getState().activeTabId).toBe('session-new-1')
-    expect(screen.getByText('haha').closest('.sidebar-copy')).toHaveTextContent('cc-haha')
+    expect(screen.getByText('Council').closest('.sidebar-copy')).toHaveTextContent('Code Council')
     expect(screen.getByRole('complementary')).not.toHaveAttribute('data-desktop-drag-region')
     expect(screen.getByTestId('sidebar-title-region')).toHaveAttribute('data-desktop-drag-region')
   })
@@ -332,16 +332,14 @@ describe('Sidebar', () => {
     expect(screen.getByRole('button', { name: /Alpha Session/ })).not.toHaveTextContent('5/15')
   })
 
-  // The header used to render multiple names and hide one with a container query,
-  // so the app answered to different names depending on sidebar width.
-  it('renders one wordmark and it is the short one', () => {
+  it('renders the Code Council wordmark consistently', () => {
     render(<Sidebar />)
 
     const region = screen.getByTestId('sidebar-title-region')
 
-    expect(region).toHaveTextContent('cc-haha')
+    expect(region).toHaveTextContent('Code Council')
     expect(region).not.toHaveTextContent('Claude Code')
-    expect(region).not.toHaveTextContent('Code Council')
+    expect(region).not.toHaveTextContent('cc-haha')
   })
 
   it('groups sessions by project and expands overflow rows', () => {
@@ -1266,7 +1264,7 @@ describe('Sidebar', () => {
 
     // Scope to the wordmark's own row — the GitHub link in the same header is
     // also an svg and would answer a looser query.
-    const brandRow = () => screen.getByText('haha').closest('div')
+    const brandRow = () => screen.getByText('Council').closest('div')
 
     // Expanded, the name carries the brand and the mark beside it is clutter.
     expect(brandRow()?.querySelector('svg')).toBeNull()
