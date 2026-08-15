@@ -11,7 +11,6 @@ import {
   getTask,
   getTaskListId,
   isTodoV2Enabled,
-  type TaskStatus,
   listTasks,
   type Task,
   TaskStatusSchema,
