@@ -5196,9 +5196,13 @@ async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSettings> 
         ? effort
         : grokEffort.defaultEffort
     } else if (runtimeOverride.providerId === null) {
-      runtimeOverride.modelId = await resolveClaudeOfficialRuntimeModel(
+      const resolved = await resolveClaudeOfficialRuntimeModel(
         runtimeOverride.modelId,
-      ) ?? runtimeOverride.modelId
+      )
+      if (resolved) {
+        resolvedModelId = resolved
+        runtimeOverride.modelId = resolved
+      }
     }
 
     return {
