@@ -187,6 +187,7 @@ describe('provider presets API', () => {
     const kimi = PROVIDER_PRESETS.find((preset) => preset.id === 'kimi')
     const minimax = PROVIDER_PRESETS.find((preset) => preset.id === 'minimax')
     const shengsuanyun = PROVIDER_PRESETS.find((preset) => preset.id === 'shengsuanyun')
+    const teamorouter = PROVIDER_PRESETS.find((preset) => preset.id === 'teamorouter')
     const xuanshuapi = PROVIDER_PRESETS.find((preset) => preset.id === 'xuanshuapi')
     const fennoai = PROVIDER_PRESETS.find((preset) => preset.id === 'fennoai')
     const qiniuai = PROVIDER_PRESETS.find((preset) => preset.id === 'qiniuai')
@@ -258,7 +259,7 @@ describe('provider presets API', () => {
     expect(atlascloud?.apiKeyUrl).toBe(
       'https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=cc-haha',
     )
-    expect(atlascloud?.featured).toBe(true)
+    expect(atlascloud?.featured).toBeUndefined()
     expect(custom?.promoText).toBeUndefined()
     expect(custom?.authStrategy).toBe('auth_token')
     expect(custom?.defaultEnv).toBeUndefined()
@@ -338,10 +339,6 @@ describe('provider presets API', () => {
       expect(preset.promoText).toBeUndefined()
       expect(preset.featured).toBeUndefined()
     }
-  })
-
-  test('removed TeamoRouter preset is absent from the server catalog', () => {
-    expect(PROVIDER_PRESETS.some((preset) => preset.id === 'teamorouter')).toBe(false)
   })
 
   test('provider presets carry docs-backed context windows for current coding models', () => {
