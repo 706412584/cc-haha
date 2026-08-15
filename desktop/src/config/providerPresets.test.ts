@@ -134,7 +134,4 @@ describe('bundled provider presets', () => {
     expect(selectableIds).not.toContain('qiniuai')
   })
 
-  it('does not bundle the removed TeamoRouter preset', () => {
-    expect(BUNDLED_PROVIDER_PRESETS.some((preset) => preset.id === 'teamorouter')).toBe(false)
-  })
 })

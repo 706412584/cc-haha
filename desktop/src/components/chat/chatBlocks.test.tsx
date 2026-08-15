@@ -27,15 +27,18 @@ describe('chat blocks', () => {
   it('does not animate inactive historical thinking blocks', () => {
     const { container } = render(<ThinkingBlock content="old reasoning" isActive={false} />)
 
-    // Auto-collapsed by default; click to expand
-    fireEvent.click(screen.getByRole('button', { name: /Thought/ }))
-
-    expect(container.textContent).toContain('old reasoning')
+    // collapsed: content not in expanded panel
+    expect(container.querySelector('[data-thinking-content="expanded"]')).toBeNull()
     expect(container.querySelector('.thinking-cursor')).toBeNull()
 
+    // click to expand
     fireEvent.click(screen.getByRole('button', { name: /Thought/ }))
+    expect(container.querySelector('[data-thinking-content="expanded"]')).not.toBeNull()
+    expect(container.querySelector('.thinking-cursor')).toBeNull()
 
-    expect(container.textContent).not.toContain('old reasoning')
+    // click to collapse again
+    fireEvent.click(screen.getByRole('button', { name: /Thought/ }))
+    expect(container.querySelector('[data-thinking-content="expanded"]')).toBeNull()
     expect(container.querySelector('.thinking-cursor')).toBeNull()
   })
 
@@ -325,7 +328,7 @@ describe('chat blocks', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Thought/ }))
 
-    expect(container.textContent).not.toContain('important')
+    expect(container.querySelector('[data-thinking-content="expanded"]')).toBeNull()
     expect(container.querySelector('strong')).toBeNull()
     expect(container.querySelector('li')).toBeNull()
   })
@@ -346,8 +349,8 @@ describe('chat blocks', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Thought/ }))
 
-    expect(container.textContent).not.toContain('line-1')
-    expect(container.textContent).not.toContain('line-11')
+    expect(container.querySelector('[data-thinking-content="expanded"]')).toBeNull()
+    expect(container.querySelector('[data-thinking-content="expanded"]')).toBeNull()
   })
 
   it('shows a media agent image through the real Agent group path', () => {
