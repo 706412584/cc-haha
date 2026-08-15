@@ -75,7 +75,7 @@ type RenderItem =
    * thinking blocks included — and `toolCalls` is the tools-only projection the
    * agent/image/memory renderers still work from.
    */
-  | { kind: 'tool_group'; toolCalls: ToolCall[]; steps: ActivityStep[]; id: string }
+  | { kind: 'tool_group'; toolCalls: ToolCall[]; steps: ActivityStep[]; id: string; resultContentWeight: number; resultMetricSignature: string }
   | { kind: 'message'; message: UIMessage }
   /**
    * Stands in for the TeamCreate call so the transcript records that this turn
@@ -819,11 +819,16 @@ export function buildRenderModel(
     }
 
     const toolCalls = steps.flatMap((step) => (step.kind === 'tool' ? [step.toolCall] : []))
+    const resultMessages = toolCalls
+      .map((tc) => toolResultMap.get(tc.toolUseId))
+      .filter((r): r is ToolResult => Boolean(r))
     items.push({
       kind: 'tool_group',
       toolCalls,
       steps,
       id: `group-${toolCalls[0]!.id}`,
+      resultContentWeight: resultMessages.reduce((total, result) => total + getMessageContentWeight(result), 0),
+      resultMetricSignature: resultMessages.map(getMessageMetricSignature).join('|'),
     })
   }
   const appendRootToolCall = (toolCall: ToolCall) => {
@@ -2294,6 +2299,7 @@ export function MessageList({
     messageCount: messages.length,
     streamingText,
     streamingToolInput,
+    tailMessageMetricSignature: null as string | null,
   })
   const t = useTranslation()
   const [turnChangeCards, setTurnChangeCards] = useState<TurnChangeCardModel[]>([])
@@ -2706,6 +2712,7 @@ export function MessageList({
   const tailMessage = messages[messages.length - 1] ?? null
   const tailMessageId = tailMessage?.id ?? null
   const tailMessageType = tailMessage?.type ?? null
+  const tailMessageMetricSignature = tailMessage ? getMessageMetricSignature(tailMessage) : null
 
   useEffect(() => {
     if (!resolvedSessionId) return
@@ -2733,6 +2740,7 @@ export function MessageList({
       messageCount: messages.length,
       streamingText,
       streamingToolInput,
+      tailMessageMetricSignature,
     }
     // Session restoration already owns the initial/switch scroll. Only live
     // transitions within the same session enter the coalesced follow path.
@@ -2741,7 +2749,8 @@ export function MessageList({
       (
         previousInput.messageCount === messages.length &&
         previousInput.streamingText === streamingText &&
-        previousInput.streamingToolInput === streamingToolInput
+        previousInput.streamingToolInput === streamingToolInput &&
+        previousInput.tailMessageMetricSignature === tailMessageMetricSignature
       )
     ) {
       return
@@ -2751,7 +2760,7 @@ export function MessageList({
       return
     }
 
-    requestLiveFollow()
+    scrollToBottom()
   }, [
     isSessionRunning,
     messages.length,
@@ -2759,6 +2768,9 @@ export function MessageList({
     resolvedSessionId,
     streamingText,
     streamingToolInput,
+    scrollToBottom,
+    tailMessageId,
+    tailMessageMetricSignature,
   ])
 
   const handleJumpToLatest = useCallback(() => {
@@ -2791,7 +2803,7 @@ export function MessageList({
     observer.observe(content)
 
     return () => observer.disconnect()
-  }, [requestLiveFollow, shouldFollowContentResize])
+  }, [requestLiveFollow, scrollToBottom, shouldFollowContentResize])
 
   // Touch-H5 only: the visual-viewport fit (touchH5.ts) shrinks the scroll
   // container when the soft keyboard opens. If the user was reading the tail,

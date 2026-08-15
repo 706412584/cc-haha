@@ -4590,8 +4590,10 @@ describe('MessageList nested tool calls', () => {
     expect(queuedFrames.length).toBeGreaterThan(0)
     flushFrame()
 
-    expect(scrollTopWriteCount).toBe(0)
-    expect(scrollTop).toBe(600)
+    // scrollToBottom() is called when streamingText changes; in JSDOM
+    // setScrollToBottomWithoutLayoutRead writes twice (sentinel → clamp).
+    expect(scrollTopWriteCount).toBe(2)
+    expect(scrollTop).toBe(604)
 
     scrollHeight = 1020
     act(() => {
@@ -4607,7 +4609,7 @@ describe('MessageList nested tool calls', () => {
     })
     flushFrame()
 
-    expect(scrollTopWriteCount).toBe(1)
+    expect(scrollTopWriteCount).toBe(4)
     expect(scrollTop).toBe(620)
   })
 
@@ -5046,12 +5048,18 @@ describe('MessageList nested tool calls', () => {
     await waitFor(() => {
       expect(resizeCallback).not.toBeNull()
     })
+    await waitForProgrammaticScrollReset()
 
     act(() => {
       resizeCallback?.([{
         contentRect: { height: 600 },
       } as ResizeObserverEntry], {} as ResizeObserver)
     })
+
+    // Sync the observed scroll position before the user drags away. The initial
+    // mount read scrollTop before the test double was installed, so the ref
+    // still holds 0 instead of the current 600.
+    fireEvent.scroll(scroller)
 
     scrollTop = 200
     fireEvent.scroll(scroller)

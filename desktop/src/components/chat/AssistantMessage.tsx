@@ -192,7 +192,9 @@ export const AssistantMessage = memo(function AssistantMessage({ content, isStre
           />
         )}
 
-        {/* Only the reply that closes a turn gets an always-visible compact footer. */}
+        {/* Only the reply that closes a turn or has a branch action gets an action bar.
+            Mid-turn replies carry none — reserving 36px for a bar nobody uses on a step
+            outweighs the text itself. */}
         {showTurnCompletion ? (
           <MessageActionBar
             copyText={cleanContent}
@@ -202,14 +204,14 @@ export const AssistantMessage = memo(function AssistantMessage({ content, isStre
             alwaysVisible
             metadata={<TurnCompletionStamp completion={turnCompletion!} />}
           />
-        ) : (
+        ) : branchAction ? (
           <MessageActionBar
             copyText={isStreaming ? undefined : cleanContent}
             copyLabel={t('chat.copyReply')}
             branchAction={branchAction}
             align="start"
           />
-        )}
+        ) : null}
       </div>
     </div>
   )
