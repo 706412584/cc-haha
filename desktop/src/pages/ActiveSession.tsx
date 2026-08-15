@@ -1,5 +1,5 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ReactElement, RefObject } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { RefObject } from 'react'
 import { GitFork, Target } from 'lucide-react'
 import {
   SCHEDULED_TAB_ID,
@@ -49,7 +49,6 @@ import {
   type OpenSubagentPayload,
 } from '../components/activity/SessionActivityPanel'
 import { buildMainSessionActivityModel, hasVisibleSessionActivity } from '../components/activity/sessionActivityModel'
-import { useSessionActivityModel } from '../components/activity/useSessionActivityModel'
 import { WorkbenchPanel } from '../components/workbench/WorkbenchPanel'
 import { TeamStatusBar } from '../components/teams/TeamStatusBar'
 import { AgentTeamsStrip } from '../components/agentTeams/AgentTeamsSummary'
@@ -92,8 +91,6 @@ const TASK_POLL_INTERVAL_MS = 1000
 const ACTIVITY_AUTOCLOSE_GRACE_MS = 2000
 const WORKSPACE_RESIZE_STEP = 32
 const TERMINAL_RESIZE_STEP = 24
-const CHAT_COLUMN_WITH_WORKSPACE_CLASS =
-  'min-w-[320px] flex-1 border-r border-[var(--color-border)] bg-[var(--color-surface)]'
 const EMPTY_DISMISSED_BACKGROUND_TASK_KEYS: readonly string[] = []
 const EMPTY_AGENT_TASK_NOTIFICATIONS: Record<string, AgentTaskNotification> = {}
 

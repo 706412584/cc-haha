@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { BookMarked, ChevronDown, ChevronRight, CircleCheck, Settings } from 'lucide-react'
 import { ToolCallBlock, type ToolCallChrome, ImageBlockGallery, type ImageBlock } from './ToolCallBlock'
 import { ActivityGroup } from './ActivityGroup'
@@ -546,55 +546,6 @@ function AgentToolGroup({
   )
 }
 
-/** Separated so the useState hook is never called conditionally. */
-function ToolCallGroupMulti({ toolCalls, resultMap, childToolCallsByParent, isStreaming }: Props) {
-  const t = useTranslation()
-  const summary = generateSummary(toolCalls, t)
-  const errorPresent = groupHasErrors(toolCalls, resultMap, childToolCallsByParent)
-  const hasUnresolvedTools = hasUnresolvedToolCalls(toolCalls, resultMap, childToolCallsByParent)
-  const isRunning = !!isStreaming || hasUnresolvedTools
-  const hasNestedToolCalls = toolCalls.some((tc) => (childToolCallsByParent.get(tc.toolUseId)?.length ?? 0) > 0)
-  const shouldAutoOpen = isRunning || hasNestedToolCalls
-  const { expanded, toggleExpanded } = useEdgeAutoExpanded(false, shouldAutoOpen)
-
-  return (
-    <div className="mb-2 overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)]">
-      <button
-        type="button"
-        onClick={toggleExpanded}
-        className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
-      >
-        <span className="shrink-0 text-[11px] leading-none text-[var(--color-text-tertiary)]" aria-hidden="true">
-          {expanded ? '▾' : '▸'}
-        </span>
-        <span className="flex-1 truncate text-[14px] font-semibold text-[var(--color-text-primary)]">
-          {summary}
-        </span>
-        {!isRunning && !errorPresent && (
-          <CircleCheck size={19} strokeWidth={1.6} className="shrink-0 text-[var(--color-success)]" aria-hidden="true" />
-        )}
-        {!isRunning && errorPresent && (
-          <span className="material-symbols-outlined shrink-0 text-[17px] text-[var(--color-error)]">error</span>
-        )}
-        {isRunning && <StatusDot tone="brand" pulse />}
-      </button>
-
-      {expanded && (
-        <div className="flex flex-col gap-2.5 border-t border-[var(--color-border)] px-3.5 py-2.5">
-          {toolCalls.map((tc) => (
-            <ToolCallTree
-              key={tc.id}
-              toolCall={tc}
-              resultMap={resultMap}
-              childToolCallsByParent={childToolCallsByParent}
-              compact
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
 function AgentCallCard({
   sessionId,
   onOpenAgentRun,

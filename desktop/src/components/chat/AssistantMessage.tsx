@@ -208,7 +208,6 @@ export const AssistantMessage = memo(function AssistantMessage({ content, isStre
             copyLabel={t('chat.copyReply')}
             branchAction={branchAction}
             align="start"
-            timestamp={timestamp}
           />
         )}
       </div>

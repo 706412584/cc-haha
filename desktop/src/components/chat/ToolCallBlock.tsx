@@ -1,5 +1,5 @@
 import { memo, useMemo, useState } from 'react'
-import { CircleStop, CircleX, LoaderCircle } from 'lucide-react'
+import { CircleX, LoaderCircle } from 'lucide-react'
 import { activitySegmentIcon } from './activityGroupModel'
 import { CodeViewer } from './CodeViewer'
 import { DiffViewer } from './DiffViewer'
@@ -123,13 +123,6 @@ export function resolveShellOutputKind(content: unknown, toolName: string): Shel
   return hasUnrenderableBlocks ? { kind: 'opaque' } : { kind: 'empty' }
 }
 
-type ContentStats = {
-  lines: number
-  chars: number
-  visibleLines?: number
-  windowed?: boolean
-}
-
 export const ToolCallBlock = memo(function ToolCallBlock({ toolName, input, result, compact = false, chrome = 'card', isPending = false, status, partialInput, defaultExpanded = false, durationMs }: Props) {
   const isRow = chrome === 'row'
   const isExitPlanTool = isExitPlanModeTool(toolName)
@@ -156,11 +149,6 @@ export const ToolCallBlock = memo(function ToolCallBlock({ toolName, input, resu
     ? t('tool.stopped')
     : ''
 
-  const liveStats = useMemo(
-    () => getToolContentStats(toolName, obj, isPending ? partialInput : undefined),
-    [isPending, obj, partialInput, toolName],
-  )
-  const liveStatsSummary = liveStats ? formatContentStats(liveStats, t) : ''
   const preview = useMemo(
     () => renderPreview(toolName, obj, result, t, isRow),
     [isRow, obj, result, toolName, t],
@@ -888,7 +876,6 @@ function renderDetails(
       if (writerContent !== null) {
         return renderWriterPreview(writerContent, t, embedded)
       }
-      }
     }
     return renderPartialInput(partialInput, t, embedded)
   }
@@ -925,6 +912,16 @@ function renderDetails(
       <CodeViewer code={text} language="json" maxLines={18} />
     </div>
   )
+}
+
+function formatPartialJsonInput(source: string): string {
+  const trimmed = source.trim()
+  if (!trimmed) return source
+  try {
+    return JSON.stringify(JSON.parse(trimmed), null, 2)
+  } catch {
+    return source
+  }
 }
 
 function extractPartialJsonStringField(source: string, field: string): string | null {

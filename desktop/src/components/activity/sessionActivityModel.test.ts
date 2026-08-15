@@ -3027,6 +3027,46 @@ describe('buildSessionActivityModel', () => {
 
     expect(model.sections.tasks.rows).toEqual([])
   })
+})
+
+describe('workflow section', () => {
+  const AGENTS = [
+    { type: 'workflow_agent', index: 1, label: 'survey response.js', state: 'done', phaseIndex: 1, phaseTitle: 'Survey', agentId: 'a11', tokens: 24_100 },
+    { type: 'workflow_agent', index: 2, label: 'survey request.js', state: 'done', phaseIndex: 1, phaseTitle: 'Survey', agentId: 'a12' },
+    { type: 'workflow_agent', index: 3, label: 'check response #1', state: 'progress', phaseIndex: 2, phaseTitle: 'Cross-check', agentId: 'a13' },
+    { type: 'workflow_agent', index: 4, label: 'check response #2', state: 'start', phaseIndex: 2, phaseTitle: 'Cross-check' },
+  ]
+
+  function run(overrides: Record<string, unknown> = {}) {
+    return {
+      taskId: 'w1',
+      sessionId: 'session-1',
+      workflowName: 'route-survey',
+      status: 'running',
+      startedAt: 0,
+      updatedAt: 0,
+      agentCount: 4,
+      totalTokens: 0,
+      toolCalls: 0,
+      progress: [
+        { type: 'workflow_phase', index: 1, title: 'Survey' },
+        { type: 'workflow_phase', index: 2, title: 'Cross-check' },
+        ...AGENTS,
+      ],
+      ...overrides,
+    } as never
+  }
+
+  function build() {
+    return buildSessionActivityModel({
+      sessionId: 'session-1',
+      tasks: [],
+      completedAndDismissed: false,
+      backgroundTasks: [],
+      agentNotifications: [],
+      workflowRuns: [run()],
+    })
+  }
 
   it('lays each phase out as a header followed by its agents', () => {
     const rows = build().sections.workflow.rows

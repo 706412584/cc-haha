@@ -145,9 +145,9 @@ export const VISIBLE_ACTIVITY_SECTION_ORDER = [
   // A running workflow is the turn's whole shape, so it sits above the
   // individual agents it spawned rather than among them.
   'workflow',
+  'backgroundTasks',
   'subagents',
   'team',
-  'backgroundTasks',
   'sources',
 ] as const satisfies readonly ActivitySectionId[]
 
@@ -1262,10 +1262,28 @@ export function buildSessionActivityModel(input: BuildSessionActivityModelInput)
   const sections = createEmptySections()
   let badgeCount = 0
   const includeTeamActivity = input.includeTeamActivity !== false
-  const runMessages = projectMessagesToRun(input.messages ?? [], input.runScope ?? 'session')
+  const allMessages = input.messages ?? []
+  const runMessages = projectMessagesToRun(allMessages, input.runScope ?? 'session')
+  // Child-agent TaskCreate calls have parentToolUseId set. Collect those
+  // task IDs so live task list entries created by subagents are not shown
+  // in the main session task section.
+  const childAgentTaskIds = new Set<string>()
+  const childResultsById = collectToolResults(allMessages)
+  for (const message of allMessages) {
+    if (
+      message.type === 'tool_use' &&
+      message.toolName === 'TaskCreate' &&
+      message.parentToolUseId
+    ) {
+      const result = parseCreatedTaskResult(childResultsById.get(message.toolUseId)?.content)
+      const input = isRecordValue(message.input) ? message.input : {}
+      const taskId = result?.id || stringField(input, 'taskId') || stringField(input, 'id')
+      if (taskId) childAgentTaskIds.add(taskId)
+    }
+  }
   const runTaskRows = buildTaskRowsFromMessages(
     runMessages,
-    input.tasks,
+    input.tasks.filter(task => !childAgentTaskIds.has(task.id)),
     input.taskScope ?? 'run',
     input.teamTaskWindows ?? [],
   )
@@ -1314,7 +1332,7 @@ export function buildSessionActivityModel(input: BuildSessionActivityModelInput)
     ]).filter((name): name is string => Boolean(name)),
   )
   const teamLaunchRowsByMember = new Map<string, ActivityRow>()
-  for (const row of buildAgentRowsFromMessages(runMessages, input.teamTaskWindows ?? [])) {
+  for (const row of buildAgentRowsFromMessages(allMessages, input.teamTaskWindows ?? [])) {
     if (row.section === 'team') {
       if (!includeTeamActivity) continue
       if (row.teamMemberName && knownTeamMemberNames.has(row.teamMemberName)) continue
