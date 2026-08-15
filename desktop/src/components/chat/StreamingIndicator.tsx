@@ -16,6 +16,28 @@ function translateServerVerb(
   return translated === key ? verb : translated
 }
 
+/**
+ * What the turn is currently doing, in the user's language.
+ *
+ * This is the only place in the UI that reports the verb, the elapsed time and
+ * the tokens so far — the composer keeps just a Stop button. Do not delete this
+ * component on the assumption the composer covers it, and do not fold it into
+ * the turn rail either: during `isPreparingTurn` the session is still being
+ * created, so the transcript holds no render items and there is no rail to hang
+ * it on. That gap is exactly what regressed once before.
+ */
+export function resolveTurnStatusVerb(
+  t: (key: TranslationKey) => string,
+  chatState: string,
+  statusVerb: string,
+): string {
+  if (statusVerb) return translateServerVerb(t, statusVerb)
+  if (chatState === 'thinking') return t('serverVerb.Thinking')
+  if (chatState === 'compacting') return t('serverVerb.Compacting conversation')
+  if (chatState === 'tool_executing') return t('serverVerb.Running')
+  return t('serverVerb.Working')
+}
+
 function formatRetrySeconds(ms: number): number {
   return Math.max(0, Math.ceil(ms / 1000))
 }
@@ -33,7 +55,9 @@ export function StreamingIndicator() {
   const [now, setNow] = useState(() => Date.now())
   const activeTabId = useTabStore((s) => s.activeTabId)
   const sessionState = useChatStore((s) => activeTabId ? s.sessions[activeTabId] : undefined)
-  const chatState = sessionState?.chatState ?? 'idle'
+  const chatState = sessionState?.isPreparingTurn
+    ? 'thinking'
+    : sessionState?.chatState ?? 'idle'
   const statusVerb = sessionState?.statusVerb ?? ''
   const apiRetry = sessionState?.apiRetry ?? null
   const streamingFallback = sessionState?.streamingFallback ?? null
@@ -102,7 +126,7 @@ export function StreamingIndicator() {
         data-testid="streaming-fallback-indicator"
         role="status"
         aria-live="polite"
-        className="mb-2 flex w-fit items-center gap-[9px] rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-4 py-2 text-[13.5px] text-[var(--color-text-secondary)]"
+        className="flex w-fit items-center gap-[9px] py-1 text-[13.5px] text-[var(--color-text-secondary)]"
       >
         <RefreshCw size={13} strokeWidth={2.2} className="shrink-0 animate-spin text-[var(--color-text-secondary)]" aria-hidden="true" />
         <span className="font-medium text-[var(--color-text-primary)]">
@@ -120,24 +144,17 @@ export function StreamingIndicator() {
     )
   }
 
-  let verb: string
-  if (statusVerb) {
-    verb = translateServerVerb(t, statusVerb)
-  } else {
-    verb = chatState === 'thinking'
-      ? t('serverVerb.Thinking')
-      : chatState === 'compacting'
-        ? t('serverVerb.Compacting conversation')
-      : chatState === 'tool_executing'
-        ? t('serverVerb.Running')
-        : t('serverVerb.Working')
-  }
+  const verb = resolveTurnStatusVerb(t, chatState, statusVerb)
 
   return (
     <div
+      data-testid="turn-status-indicator"
       role="status"
       aria-live="polite"
-      className="mb-2 flex w-fit items-center gap-[9px] rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-4 py-2 text-[13.5px] text-[var(--color-text-secondary)]"
+      // Bare line, not a pill: it now sits at the end of the live turn rail, and
+      // the rail already says "still going". A bordered chip here would read as
+      // a second, competing status object next to the one that is lit.
+      className="flex w-fit items-center gap-[9px] py-1 text-[13.5px] text-[var(--color-text-secondary)]"
     >
       <span className="animate-pulse-dot text-[var(--color-brand)]" aria-hidden="true">✦</span>
       <span className="font-medium text-[var(--color-text-primary)]">{verb}...</span>

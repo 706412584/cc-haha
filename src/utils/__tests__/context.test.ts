@@ -71,4 +71,26 @@ describe('calculateCurrentContextTokenTotal', () => {
       output_tokens: 5_000,
     }, 200_000, { hasMediaInput: true, usageTrust: 'high' })).toBe(200_000)
   })
+
+  test('includes canonical messages added after the provider usage anchor', () => {
+    expect(calculateCurrentContextTokenTotal(100_000, {
+      input_tokens: 290_000,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 10_000,
+      output_tokens: 1_000,
+    }, 353_400, { canonicalTokens: 310_000 })).toBe(310_000)
+  })
+
+  test('does not restore ignored low-trust media usage through canonical tokens', () => {
+    expect(calculateCurrentContextTokenTotal(30_000, {
+      input_tokens: 220_000,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+      output_tokens: 1_000,
+    }, 200_000, {
+      hasMediaInput: true,
+      usageTrust: 'low',
+      canonicalTokens: 221_000,
+    })).toBe(30_000)
+  })
 })

@@ -5,6 +5,8 @@ const apiCreateMock = vi.hoisted(() => vi.fn())
 const apiUpdateMock = vi.hoisted(() => vi.fn())
 const apiDeleteMock = vi.hoisted(() => vi.fn())
 const apiReloadMock = vi.hoisted(() => vi.fn())
+const apiSetOverrideMock = vi.hoisted(() => vi.fn())
+const apiClearOverrideMock = vi.hoisted(() => vi.fn())
 
 vi.mock('../api/agents', () => ({
   agentsApi: {
@@ -13,6 +15,8 @@ vi.mock('../api/agents', () => ({
     update: apiUpdateMock,
     delete: apiDeleteMock,
     reload: apiReloadMock,
+    setOverride: apiSetOverrideMock,
+    clearOverride: apiClearOverrideMock,
   },
 }))
 
@@ -26,6 +30,22 @@ function makeAgent(overrides: Partial<AgentDefinition> = {}): AgentDefinition {
     source: 'userSettings',
     isActive: true,
     editable: true,
+    ...overrides,
+  }
+}
+
+function makeBuiltInAgent(overrides: Partial<AgentDefinition> = {}): AgentDefinition {
+  return {
+    agentType: 'Explore',
+    description: 'Explore the codebase',
+    source: 'built-in',
+    isActive: true,
+    // Built-ins are never file-editable; only model and effort can change.
+    editable: false,
+    overridable: true,
+    defaults: { model: 'haiku' },
+    model: 'haiku',
+    modelDisplay: 'haiku',
     ...overrides,
   }
 }
@@ -724,7 +744,7 @@ describe('agentStore', () => {
     expect(useAgentStore.getState().mutationWarning).toBeNull()
   })
 
-  it('reports reload error counts without turning a saved update into a failure', async () => {
+  it('does not treat unrelated component reload errors as an agent apply failure', async () => {
     const updatedAgent = makeAgent({ description: 'Updated' })
     apiUpdateMock.mockResolvedValue({ agent: updatedAgent })
     apiListMock.mockResolvedValue({
@@ -750,8 +770,8 @@ describe('agentStore', () => {
         'session-1',
       ),
     ).resolves.toBe(updatedAgent)
-    expect(useAgentStore.getState().mutationWarning).toBe(
-      'The active CLI session reloaded with 2 agent loading errors.',
+    await vi.waitFor(() =>
+      expect(useAgentStore.getState().mutationWarning).toBeNull(),
     )
   })
 
@@ -766,6 +786,230 @@ describe('agentStore', () => {
       selectedAgent,
       isMutating: false,
       mutationError: 'Delete denied',
+    })
+  })
+
+  it('rebinds the selected built-in agent after an override', async () => {
+    const before = makeBuiltInAgent()
+    const after = makeBuiltInAgent({
+      model: 'sonnet',
+      modelDisplay: 'sonnet',
+      override: { model: 'sonnet', source: 'userSettings' },
+    })
+    useAgentStore.setState({ selectedAgent: before, allAgents: [before], activeAgents: [before] })
+    apiSetOverrideMock.mockResolvedValue({ agent: after })
+    apiListMock.mockResolvedValue({ activeAgents: [after], allAgents: [after] })
+
+    await expect(
+      useAgentStore
+        .getState()
+        .setAgentOverride('Explore', { cwd: '/workspace/current', model: 'sonnet' }),
+    ).resolves.toBe(after)
+
+    expect(apiSetOverrideMock).toHaveBeenCalledWith('Explore', {
+      cwd: '/workspace/current',
+      model: 'sonnet',
+    })
+    // Built-ins carry no scope or target, so the lookup has to match on
+    // source alone — findEditableAgent would never return one.
+    expect(useAgentStore.getState()).toMatchObject({
+      selectedAgent: after,
+      allAgents: [after],
+      isMutating: false,
+      mutationError: null,
+    })
+  })
+
+  it('takes the reset result from the server instead of reconstructing a default', async () => {
+    const overridden = makeBuiltInAgent({
+      model: 'sonnet',
+      override: { model: 'sonnet', source: 'userSettings' },
+    })
+    // The shipped default differs per agent and per build, so the store must
+    // never guess it — whatever the server returns is the answer.
+    const shipped = makeBuiltInAgent({ model: 'haiku', modelDisplay: 'haiku' })
+    useAgentStore.setState({ selectedAgent: overridden, allAgents: [overridden] })
+    apiClearOverrideMock.mockResolvedValue({ agent: shipped })
+    apiListMock.mockResolvedValue({ activeAgents: [shipped], allAgents: [shipped] })
+
+    await expect(
+      useAgentStore.getState().clearAgentOverride('Explore', '/workspace/current'),
+    ).resolves.toBe(shipped)
+
+    expect(apiClearOverrideMock).toHaveBeenCalledWith('Explore', '/workspace/current')
+    expect(useAgentStore.getState().selectedAgent?.model).toBe('haiku')
+    expect(useAgentStore.getState().selectedAgent?.override).toBeUndefined()
+  })
+
+  it('reports a real override reload failure and clears it after retry succeeds', async () => {
+    const after = makeBuiltInAgent({ model: 'sonnet' })
+    apiSetOverrideMock.mockResolvedValue({ agent: after })
+    apiListMock.mockResolvedValue({ activeAgents: [after], allAgents: [after] })
+    apiReloadMock.mockResolvedValueOnce({
+      ok: true,
+      session: {
+        applied: false,
+        reason: 'failed',
+        commands: 0,
+        agents: 0,
+        plugins: 0,
+        mcpServers: 0,
+        errors: 0,
+        error: 'CLI control channel closed',
+      },
+    }).mockResolvedValueOnce({
+      ok: true,
+      session: {
+        applied: true,
+        commands: 0,
+        agents: 1,
+        plugins: 0,
+        mcpServers: 0,
+        // Shared reloads report plugin/hook errors here. They do not mean the
+        // built-in override failed to reach the running session.
+        errors: 2,
+      },
+    })
+
+    await useAgentStore
+      .getState()
+      .setAgentOverride('Explore', { cwd: '/workspace/current', model: 'sonnet' }, 'session-1')
+
+    expect(apiReloadMock).toHaveBeenCalledWith('session-1')
+    await vi.waitFor(() =>
+      expect(useAgentStore.getState().mutationWarning).toBe(
+        'CLI control channel closed',
+      ),
+    )
+
+    await useAgentStore.getState().retryMutationRefresh(
+      '/workspace/current',
+      'session-1',
+    )
+
+    expect(apiReloadMock).toHaveBeenCalledTimes(2)
+    expect(useAgentStore.getState().mutationWarning).toBeNull()
+  })
+
+  it('clears a stale reload failure when resetting the override succeeds', async () => {
+    const overridden = makeBuiltInAgent({
+      model: 'sonnet',
+      override: { model: 'sonnet', source: 'userSettings' },
+    })
+    const shipped = makeBuiltInAgent()
+    let listedAgent = overridden
+    apiSetOverrideMock.mockResolvedValue({ agent: overridden })
+    apiClearOverrideMock.mockImplementation(async () => {
+      listedAgent = shipped
+      return { agent: shipped }
+    })
+    apiListMock.mockImplementation(async () => ({
+      activeAgents: [listedAgent],
+      allAgents: [listedAgent],
+    }))
+    apiReloadMock.mockResolvedValueOnce({
+      ok: true,
+      session: {
+        applied: false,
+        reason: 'failed',
+        commands: 0,
+        agents: 0,
+        plugins: 0,
+        mcpServers: 0,
+        errors: 0,
+        error: 'CLI control channel closed',
+      },
+    }).mockResolvedValueOnce({
+      ok: true,
+      session: {
+        applied: true,
+        commands: 0,
+        agents: 1,
+        plugins: 0,
+        mcpServers: 0,
+        errors: 2,
+      },
+    })
+
+    await useAgentStore.getState().setAgentOverride(
+      'Explore',
+      { cwd: '/workspace/current', model: 'sonnet' },
+      'session-1',
+    )
+    await vi.waitFor(() =>
+      expect(useAgentStore.getState().mutationWarning).toBe(
+        'CLI control channel closed',
+      ),
+    )
+
+    await useAgentStore.getState().clearAgentOverride(
+      'Explore',
+      '/workspace/current',
+      'session-1',
+    )
+
+    await vi.waitFor(() =>
+      expect(useAgentStore.getState()).toMatchObject({
+        selectedAgent: shipped,
+        mutationWarning: null,
+      }),
+    )
+  })
+
+  it('keeps a successful override when the refreshed list fails to arrive', async () => {
+    const after = makeBuiltInAgent({ model: 'sonnet' })
+    apiSetOverrideMock.mockResolvedValue({ agent: after })
+    apiListMock.mockRejectedValue(new Error('Network down'))
+
+    await expect(
+      useAgentStore.getState().setAgentOverride('Explore', { model: 'sonnet' }),
+    ).resolves.toBe(after)
+
+    // The write already landed on disk; dropping it from the list would show
+    // the user a stale model that no longer matches settings.json.
+    expect(useAgentStore.getState()).toMatchObject({
+      allAgents: [after],
+      selectedAgent: after,
+      isMutating: false,
+    })
+    expect(useAgentStore.getState().mutationWarning).toContain('Network down')
+  })
+
+  it('does not let an override refresh overwrite a later project switch', async () => {
+    const mutationRefresh = deferred<{ activeAgents: AgentDefinition[]; allAgents: AgentDefinition[] }>()
+    const overridden = makeBuiltInAgent({ model: 'sonnet' })
+    const currentAgent = makeAgent({ agentType: 'current-project', source: 'projectSettings' })
+    apiSetOverrideMock.mockResolvedValue({ agent: overridden })
+    apiListMock
+      .mockReturnValueOnce(mutationRefresh.promise)
+      .mockResolvedValueOnce({ activeAgents: [currentAgent], allAgents: [currentAgent] })
+
+    const mutation = useAgentStore.getState().setAgentOverride('Explore', { model: 'sonnet' })
+    await vi.waitFor(() => expect(apiListMock).toHaveBeenCalledTimes(1))
+    await useAgentStore.getState().fetchAgents('/workspace/current-project')
+    mutationRefresh.resolve({ activeAgents: [overridden], allAgents: [overridden] })
+    await mutation
+
+    // The override's own refresh resolved last but describes an older project.
+    expect(useAgentStore.getState()).toMatchObject({
+      allAgents: [currentAgent],
+      isMutating: false,
+    })
+  })
+
+  it('exposes an override failure without losing the selection', async () => {
+    const selectedAgent = makeBuiltInAgent()
+    useAgentStore.setState({ selectedAgent })
+    apiSetOverrideMock.mockRejectedValue(new Error('Agent customization is restricted'))
+
+    await expect(
+      useAgentStore.getState().setAgentOverride('Explore', { model: 'sonnet' }),
+    ).rejects.toThrow('Agent customization is restricted')
+
+    expect(useAgentStore.getState()).toMatchObject({
+      selectedAgent,
+      isMutating: false,
+      mutationError: 'Agent customization is restricted',
     })
   })
 

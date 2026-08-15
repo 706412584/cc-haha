@@ -11,10 +11,10 @@ describe('TurnCompletionStamp', () => {
     useSettingsStore.setState({ locale: 'en' })
   })
 
-  it('reads as an end time plus how long the turn took', () => {
+  it('reads as a compact clock time plus how long the turn took', () => {
     render(<TurnCompletionStamp completion={{ completedAt: COMPLETED_AT, durationMs: 739_000 }} />)
 
-    const stamp = screen.getByText(`Done ${formatMessageHoverTime(COMPLETED_AT, 'en')}`)
+    const stamp = screen.getByText(formatMessageHoverTime(COMPLETED_AT, 'en'))
     expect(stamp).toBeTruthy()
     expect(screen.getByText('took 12m 19s')).toBeTruthy()
   })
@@ -22,14 +22,14 @@ describe('TurnCompletionStamp', () => {
   it('shows the end time alone when the duration is not trustworthy', () => {
     const { container } = render(<TurnCompletionStamp completion={{ completedAt: COMPLETED_AT }} />)
 
-    expect(screen.getByText(`Done ${formatMessageHoverTime(COMPLETED_AT, 'en')}`)).toBeTruthy()
+    expect(screen.getByText(formatMessageHoverTime(COMPLETED_AT, 'en'))).toBeTruthy()
     expect(container.querySelector('[data-turn-completion-duration]')).toBeNull()
   })
 
   it('carries the exact timestamp as a title for the rounded clock label', () => {
     render(<TurnCompletionStamp completion={{ completedAt: COMPLETED_AT, durationMs: 1_000 }} />)
 
-    expect(screen.getByText(`Done ${formatMessageHoverTime(COMPLETED_AT, 'en')}`).getAttribute('title')).toBe(
+    expect(screen.getByText(formatMessageHoverTime(COMPLETED_AT, 'en')).getAttribute('title')).toBe(
       formatExactMessageTimestamp(COMPLETED_AT, 'en'),
     )
   })
@@ -38,7 +38,6 @@ describe('TurnCompletionStamp', () => {
     useSettingsStore.setState({ locale: 'zh' })
     const { container } = render(<TurnCompletionStamp completion={{ completedAt: COMPLETED_AT, durationMs: 739_000 }} />)
 
-    expect(container.textContent).toContain('完成于')
     expect(container.textContent).toContain('耗时 12 分 19 秒')
   })
 
@@ -48,10 +47,11 @@ describe('TurnCompletionStamp', () => {
     expect(container.firstElementChild).toBeNull()
   })
 
-  it('stays outside the hover-gated action bar styling', () => {
-    // The whole point of the stamp is that it survives without a pointer.
+  it('does not add a second row or its own hover gate', () => {
     const { container } = render(<TurnCompletionStamp completion={{ completedAt: COMPLETED_AT }} />)
 
+    expect(container.firstElementChild?.tagName).toBe('SPAN')
+    expect(container.firstElementChild?.className).not.toContain('mt-')
     expect(container.firstElementChild?.className).not.toContain('opacity-0')
     expect(container.firstElementChild?.className).not.toContain('group-hover')
   })

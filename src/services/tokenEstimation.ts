@@ -10,6 +10,7 @@ import { getModelBetas } from '../utils/betas.js'
 import { getVertexRegionForModel, isEnvTruthy } from '../utils/envUtils.js'
 import { logError } from '../utils/log.js'
 import { normalizeAttachmentForAPI } from '../utils/messages.js'
+import { parseOpenAIReasoningEnvelope } from '../utils/openAIReasoningEnvelope.js'
 import {
   createBedrockRuntimeClient,
   getInferenceProfileBackingModel,
@@ -443,6 +444,12 @@ function roughTokenCountEstimationForBlock(
     return roughTokenCountEstimation(block.thinking)
   }
   if (block.type === 'redacted_thinking') {
+    const openAIReasoning = parseOpenAIReasoningEnvelope(block.data)
+    if (openAIReasoning) {
+      return roughTokenCountEstimation(
+        openAIReasoning.summary.map(entry => entry.text).join('\n'),
+      )
+    }
     return roughTokenCountEstimation(block.data)
   }
   // server_tool_use, web_search_tool_result, mcp_tool_use, etc. —

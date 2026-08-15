@@ -5,6 +5,7 @@ import {
   createAssistantMessage,
   createUserMessage,
   normalizeMessagesForAPI,
+  stripSignatureBlocksAfterModelChange,
 } from './messages.js'
 
 function assistant(
@@ -116,5 +117,53 @@ describe('normalizeMessagesForAPI assistant fragment indexing', () => {
           .join(''),
       ),
     ).toEqual(['before', 'after'])
+  })
+})
+
+describe('stripSignatureBlocksAfterModelChange', () => {
+  test('removes protected thinking from history produced by another model', () => {
+    const previous = assistant('response-a', [
+      { type: 'redacted_thinking', data: 'encrypted reasoning' },
+      { type: 'thinking', thinking: 'visible reasoning', signature: 'model-bound' },
+      { type: 'text', text: 'Keep this answer.' },
+    ])
+    previous.message.model = 'gpt-luna'
+
+    const messages = [previous, createUserMessage({ content: 'Continue' })]
+    const result = stripSignatureBlocksAfterModelChange(messages, 'deepseek-v4-flash')
+
+    expect(result).not.toBe(messages)
+    expect(result[0]?.type).toBe('assistant')
+    if (result[0]?.type === 'assistant') {
+      expect(result[0].message.content).toEqual([
+        { type: 'text', text: 'Keep this answer.' },
+      ])
+    }
+    expect(previous.message.content.map(block => block.type)).toEqual([
+      'redacted_thinking',
+      'thinking',
+      'text',
+    ])
+  })
+
+  test('preserves protected thinking when the model has not changed', () => {
+    const previous = assistant('response-a', [
+      { type: 'redacted_thinking', data: 'encrypted reasoning' },
+      { type: 'text', text: 'Keep all blocks.' },
+    ])
+    previous.message.model = 'deepseek-v4-flash'
+    const messages = [previous, createUserMessage({ content: 'Continue' })]
+
+    expect(
+      stripSignatureBlocksAfterModelChange(messages, 'deepseek-v4-flash[1m]'),
+    ).toBe(messages)
+  })
+
+  test('leaves history without protected thinking untouched', () => {
+    const messages = [createUserMessage({ content: 'Continue' })]
+
+    expect(
+      stripSignatureBlocksAfterModelChange(messages, 'deepseek-v4-flash'),
+    ).toBe(messages)
   })
 })

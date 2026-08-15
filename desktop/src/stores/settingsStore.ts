@@ -58,6 +58,7 @@ type SettingsStore = {
   effortLevel: EffortLevel
   thinkingEnabled: boolean
   thinkingAutoCollapse: boolean
+  workflowKeywordTriggerEnabled: boolean
   autoDreamEnabled: boolean
   unifiedActivityPanelEnabled: boolean
   agentOfficeSurface: AgentOfficeSurface
@@ -103,6 +104,7 @@ type SettingsStore = {
   setEffort: (level: EffortLevel) => Promise<void>
   setThinkingEnabled: (enabled: boolean) => Promise<void>
   setThinkingAutoCollapse: (enabled: boolean) => Promise<void>
+  setWorkflowKeywordTriggerEnabled: (enabled: boolean) => Promise<void>
   setAutoDreamEnabled: (enabled: boolean) => Promise<void>
   setUnifiedActivityPanelEnabled: (enabled: boolean) => Promise<void>
   setAgentOfficeSurface: (surface: AgentOfficeSurface) => Promise<void>
@@ -199,6 +201,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   effortLevel: 'max',
   thinkingEnabled: true,
   thinkingAutoCollapse: true,
+  workflowKeywordTriggerEnabled: true,
   autoDreamEnabled: false,
   unifiedActivityPanelEnabled: false,
   agentOfficeSurface: 'modal',
@@ -278,6 +281,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         effortLevel: level,
         thinkingEnabled: userSettings.alwaysThinkingEnabled !== false,
         thinkingAutoCollapse: userSettings.thinkingAutoCollapse !== false,
+        workflowKeywordTriggerEnabled: userSettings.workflowKeywordTriggerEnabled !== false,
         autoDreamEnabled: userSettings.autoDreamEnabled === true,
         unifiedActivityPanelEnabled: userSettings.unifiedActivityPanelEnabled === true,
         agentOfficeSurface: userSettings.agentOfficeSurface === 'tab' ? 'tab' : 'modal',
@@ -359,6 +363,17 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       await settingsApi.updateUser({ thinkingAutoCollapse: enabled })
     } catch {
       set({ thinkingAutoCollapse: prev })
+    }
+  },
+
+  setWorkflowKeywordTriggerEnabled: async (enabled) => {
+    const prev = get().workflowKeywordTriggerEnabled
+    set({ workflowKeywordTriggerEnabled: enabled })
+    try {
+      await settingsApi.updateUser({ workflowKeywordTriggerEnabled: enabled })
+    } catch (error) {
+      set({ workflowKeywordTriggerEnabled: prev })
+      throw error
     }
   },
 

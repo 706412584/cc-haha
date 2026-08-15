@@ -40,6 +40,45 @@ describe('sessionsApi', () => {
     })
   })
 
+  it('deduplicates concurrent Git info requests for the same session', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+    let resolveFetch!: (response: Response) => void
+    fetchMock.mockReturnValueOnce(new Promise<Response>((resolve) => {
+      resolveFetch = resolve
+    }))
+
+    const first = sessionsApi.getGitInfo('session-1')
+    const second = sessionsApi.getGitInfo('session-1')
+
+    expect(fetchMock).toHaveBeenCalledOnce()
+    resolveFetch(new Response(JSON.stringify({
+      branch: 'main',
+      repoName: 'repo',
+      workDir: '/repo',
+      changedFiles: 0,
+      worktree: null,
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    const [firstResult, secondResult] = await Promise.all([first, second])
+    expect(firstResult).toEqual(secondResult)
+
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      branch: 'main',
+      repoName: 'repo',
+      workDir: '/repo',
+      changedFiles: 1,
+      worktree: null,
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+    await sessionsApi.getGitInfo('session-1')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   it('fetches a single trace call from the call detail endpoint', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch')
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({

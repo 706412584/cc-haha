@@ -15,6 +15,7 @@ import {
   getOpenAIModelCatalogEntry,
   isOpenAIResponsesModel,
 } from 'src/services/openaiAuth/models.js'
+import { GROK_MODEL_CATALOG } from 'src/services/grokAuth/models.js'
 
 export type EffortLevel = RuntimeEffortLevel | 'xhigh'
 
@@ -39,6 +40,11 @@ function shouldTrustBuiltInClaudeCapabilityList(): boolean {
   )
 }
 
+function getGrokCatalogEntry(model: string): (typeof GROK_MODEL_CATALOG)[number] | undefined {
+  const normalized = model.trim().toLowerCase()
+  return GROK_MODEL_CATALOG.find((entry) => entry.value === normalized)
+}
+
 // @[MODEL LAUNCH]: Add the new model to the allowlist if it supports the effort parameter.
 export function modelSupportsEffort(model: string): boolean {
   const m = model.toLowerCase()
@@ -51,6 +57,10 @@ export function modelSupportsEffort(model: string): boolean {
   }
   if (isOpenAIResponsesModel(model)) {
     return true
+  }
+  const grokEntry = getGrokCatalogEntry(model)
+  if (grokEntry) {
+    return grokEntry.supportsReasoningEffort !== false
   }
   // Supported by a subset of Claude 4 models
   if (shouldTrustBuiltInClaudeCapabilityList() && (
@@ -94,6 +104,10 @@ export function modelSupportsXHighEffort(model: string): boolean {
     const entry = getOpenAIModelCatalogEntry(model)
     return entry?.supportedReasoningEfforts.includes('xhigh') ?? true
   }
+  const grokEntry = getGrokCatalogEntry(model)
+  if (grokEntry) {
+    return grokEntry.reasoningEfforts?.includes('xhigh') ?? false
+  }
   const m = model.toLowerCase()
   return shouldTrustBuiltInClaudeCapabilityList() && (
     m.includes('opus-4-7') ||
@@ -113,6 +127,10 @@ export function modelSupportsMaxEffort(model: string): boolean {
   if (isOpenAIResponsesModel(model)) {
     const entry = getOpenAIModelCatalogEntry(model)
     return entry?.supportedReasoningEfforts.includes('max') ?? true
+  }
+  const grokEntry = getGrokCatalogEntry(model)
+  if (grokEntry) {
+    return grokEntry.reasoningEfforts?.includes('max') ?? false
   }
   const m = model.toLowerCase()
   if (shouldTrustBuiltInClaudeCapabilityList() && (

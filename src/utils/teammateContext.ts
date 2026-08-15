@@ -32,10 +32,24 @@ export type TeammateContext = {
   planModeRequired: boolean
   /** Leader's session ID (for transcript correlation) */
   parentSessionId: string
+  /** Immutable Team creation tuple used only to isolate live UI routing. */
+  streamScopeId?: string
   /** Discriminator - always true for in-process teammates */
   isInProcess: true
   /** Abort controller for lifecycle management (linked to parent) */
   abortController: AbortController
+}
+
+export function createTeamStreamScopeId(team: {
+  name: string
+  leadSessionId?: string
+  createdAt: number
+}): string {
+  return JSON.stringify([
+    team.name,
+    team.leadSessionId ?? '',
+    Number.isFinite(team.createdAt) ? team.createdAt : 0,
+  ])
 }
 
 const teammateContextStorage = new AsyncLocalStorage<TeammateContext>()

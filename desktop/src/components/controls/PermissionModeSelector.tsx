@@ -10,10 +10,25 @@ import { useTranslation } from '../../i18n'
 import type { PermissionMode } from '../../types/settings'
 import { useMobileViewport } from '../../hooks/useMobileViewport'
 import { isDesktopRuntime } from '../../lib/desktopRuntime'
-import { Badge } from '@/components/ui/Badge'
+import { Badge, StatusDot, type Tone } from '@/components/ui/Badge'
 import { MobileBottomSheet } from '@/components/ui/MobileBottomSheet'
 import { ActionDialog } from '@/components/ui/ActionDialog'
 import { AutoModeOptInDialog } from './AutoModeOptInDialog'
+
+/**
+ * The trigger states the mode as a risk-coloured dot rather than repeating the
+ * menu's glyph: on the composer toolbar the reader needs "how much can it do
+ * without me" at a glance, and a colour answers that faster than a symbol. The
+ * per-mode glyphs stay in the menu, where there is room to tell them apart.
+ */
+const MODE_DOT_TONE: Record<PermissionMode, Tone> = {
+  plan: 'neutral',
+  default: 'neutral',
+  acceptEdits: 'warning',
+  auto: 'brand',
+  bypassPermissions: 'danger',
+  dontAsk: 'danger',
+}
 
 const MODE_ICONS: Record<PermissionMode, string> = {
   default: 'verified_user',
@@ -269,9 +284,13 @@ export function PermissionModeSelector({ workDir: workDirProp, compact = false, 
           isTurnActive ? 'opacity-50 cursor-not-allowed' : 'hover:border-[var(--color-outline)] hover:bg-[var(--color-surface-hover)]'
         } ${compactButtonClass}`}
       >
-        <span className={`material-symbols-outlined text-[var(--color-text-secondary)] ${currentMode === 'auto' ? 'text-[12px]' : 'text-[14px]'}`}>
-          {MODE_ICONS[currentMode]}
-        </span>
+        {compact ? (
+          <span className={`material-symbols-outlined text-[var(--color-text-secondary)] ${currentMode === 'auto' ? 'text-[12px]' : 'text-[14px]'}`}>
+            {MODE_ICONS[currentMode]}
+          </span>
+        ) : (
+          <StatusDot tone={MODE_DOT_TONE[currentMode]} data-testid="permission-mode-dot" />
+        )}
         {!compact && (
           <>
             <span>{MODE_LABELS[currentMode]}</span>

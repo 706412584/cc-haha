@@ -1,12 +1,53 @@
-import { describe, expect, it } from 'bun:test'
+import { afterEach, describe, expect, it } from 'bun:test'
 import {
+  __markActiveTurnForTests,
+  __resetWebSocketHandlerStateForTests,
   createCurrentTurnLocalCommandForwarder,
   shouldFallbackToPermissionRestart,
   translateCliMessage,
 } from '../ws/handler.js'
 import { parseSlashCommand } from '../../utils/slashCommandParsing.js'
 
+afterEach(() => {
+  __resetWebSocketHandlerStateForTests()
+})
+
 describe('WebSocket memory events', () => {
+  it('forwards nested task ownership without marking the main turn as tool executing', () => {
+    const sessionId = 'nested-task-owner-session'
+    __markActiveTurnForTests(sessionId)
+    const rootMessages = translateCliMessage({
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'root-agent',
+      task_type: 'local_agent',
+      description: 'Root work',
+    }, sessionId)
+    const messages = translateCliMessage({
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'nested-agent',
+      task_type: 'local_agent',
+      owner_agent_id: 'parent-agent',
+      description: 'Nested work',
+    }, sessionId)
+
+    expect(rootMessages).toContainEqual({
+      type: 'status',
+      state: 'tool_executing',
+      verb: 'Root work',
+    })
+    expect(messages).toEqual([{
+      type: 'system_notification',
+      subtype: 'task_started',
+      message: 'Nested work',
+      data: expect.objectContaining({
+        task_id: 'nested-agent',
+        owner_agent_id: 'parent-agent',
+      }),
+    }])
+  })
+
   it('forwards assistant business error codes to the desktop client', () => {
     expect(translateCliMessage({
       type: 'assistant',

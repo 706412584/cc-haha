@@ -30,9 +30,12 @@ import {
   REJECT_MESSAGE_WITH_REASON_PREFIX,
 } from '../../constants/messages.js'
 import { SessionService, sessionService } from '../services/sessionService.js'
+import { createRepositoryBranch } from '../services/repositoryLaunchService.js'
 import { ProviderService } from '../services/providerService.js'
 import { diagnosticsService } from '../services/diagnosticsService.js'
 import { __cleanupWebSocketRuntimeStateForTests, __drainWebSocketRuntimeTransitionsForTests, __resetWebSocketHandlerStateForTests, __runFailingRuntimeConfigHandlerForTests, __setDisconnectCleanupDisabledForTests } from '../ws/handler.js'
+import { SettingsService } from '../services/settingsService.js'
+import { hahaOAuthService } from '../services/hahaOAuthService.js'
 import { resetTerminalShellEnvironmentCacheForTests } from '../../utils/terminalShellEnvironment.js'
 import * as openAIModelCatalog from '../../services/openaiAuth/modelCatalog.js'
 
@@ -1603,6 +1606,127 @@ describe('ConversationService', () => {
     }
   })
 
+  it('should reset context estimates at compact boundaries and ignore encrypted reasoning bytes', async () => {
+    const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
+    const previousNodeEnv = process.env.NODE_ENV
+    const tmpConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-transcript-compact-context-'))
+    const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-workdir-compact-context-'))
+    process.env.CLAUDE_CONFIG_DIR = tmpConfigDir
+    process.env.NODE_ENV = 'development'
+
+    try {
+      const svc = new SessionService()
+      const { sessionId } = await svc.createSession(workDir)
+      const found = await svc.findSessionFile(sessionId)
+      expect(found).not.toBeNull()
+
+      const encryptedReasoning =
+        `cc-haha:openai-reasoning:v1:${JSON.stringify({
+          summary: [],
+          encrypted_content: 'x'.repeat(400_000),
+        })}`
+      const entries = [
+        {
+          type: 'assistant',
+          uuid: crypto.randomUUID(),
+          timestamp: '2026-08-07T00:00:00.000Z',
+          cwd: workDir,
+          message: {
+            role: 'assistant',
+            model: 'gpt-5.6-terra',
+            content: [{ type: 'redacted_thinking', data: encryptedReasoning }],
+            usage: {
+              input_tokens: 8_000,
+              output_tokens: 1_000,
+              cache_read_input_tokens: 331_000,
+              cache_creation_input_tokens: 0,
+            },
+          },
+        },
+        {
+          type: 'system',
+          subtype: 'compact_boundary',
+          uuid: crypto.randomUUID(),
+          timestamp: '2026-08-07T00:00:01.000Z',
+          content: 'Conversation compacted',
+        },
+        {
+          type: 'user',
+          uuid: crypto.randomUUID(),
+          timestamp: '2026-08-07T00:00:02.000Z',
+          cwd: workDir,
+          message: {
+            role: 'user',
+            content: [{ type: 'text', text: 'summary'.repeat(100) }],
+          },
+        },
+        {
+          type: 'assistant',
+          uuid: crypto.randomUUID(),
+          timestamp: '2026-08-07T00:00:03.000Z',
+          cwd: workDir,
+          message: {
+            role: 'assistant',
+            model: 'gpt-5.6-terra',
+            content: [{ type: 'text', text: 'continued' }],
+            usage: {
+              input_tokens: 8_000,
+              output_tokens: 100,
+              cache_read_input_tokens: 2_000,
+              cache_creation_input_tokens: 0,
+            },
+          },
+        },
+        {
+          type: 'assistant',
+          uuid: crypto.randomUUID(),
+          timestamp: '2026-08-07T00:00:04.000Z',
+          cwd: workDir,
+          message: {
+            role: 'assistant',
+            model: 'gpt-5.6-terra',
+            content: [{ type: 'redacted_thinking', data: encryptedReasoning }],
+            usage: {
+              input_tokens: 0,
+              output_tokens: 0,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+            },
+          },
+        },
+      ]
+      await fs.appendFile(
+        found!.filePath,
+        entries.map(entry => JSON.stringify(entry)).join('\n') + '\n',
+      )
+
+      const contextEstimate = await svc.getTranscriptContextEstimate(sessionId)
+      const inspectionSnapshot = await svc.getInspectionTranscriptSnapshot(sessionId)
+
+      expect(contextEstimate?.model).toBe('gpt-5.6-terra')
+      expect(contextEstimate?.totalTokens).toBe(10_100)
+      expect(contextEstimate?.percentage).toBe(3)
+      expect(contextEstimate?.categories.reduce(
+        (sum, category) => sum + category.tokens,
+        0,
+      )).toBe(contextEstimate?.rawMaxTokens)
+      expect(inspectionSnapshot?.contextEstimate).toEqual(contextEstimate)
+    } finally {
+      if (previousConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = previousConfigDir
+      }
+      if (previousNodeEnv === undefined) {
+        delete process.env.NODE_ENV
+      } else {
+        process.env.NODE_ENV = previousNodeEnv
+      }
+      await fs.rm(tmpConfigDir, { recursive: true, force: true })
+      await fs.rm(workDir, { recursive: true, force: true })
+    }
+  })
+
   it('should use active provider model context windows for transcript estimates', async () => {
     const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
     const previousNodeEnv = process.env.NODE_ENV
@@ -2778,6 +2902,26 @@ describe('WebSocket Chat Integration', () => {
     expect(statusVerbs).toContain('Creating worktree')
   })
 
+  it('starts the mock SDK on a newly created same-HEAD branch', async () => {
+    const repoDir = await createCleanGitRepo()
+    const created = await createRepositoryBranch(repoDir, {
+      name: 'qa/launch-picker',
+      from: 'main',
+    })
+    await fs.writeFile(path.join(repoDir, 'README.md'), 'main\nlocal change\n')
+    const { sessionId } = await sessionService.createSession(repoDir, {
+      branch: created.branch,
+      worktree: false,
+    })
+
+    expect(git(repoDir, 'branch', '--show-current')).toBe('main\n')
+    await runTurn(sessionId, 'Report the current branch')
+
+    expect(git(repoDir, 'branch', '--show-current')).toBe('qa/launch-picker\n')
+    expect(await fs.readFile(path.join(repoDir, 'README.md'), 'utf8'))
+      .toBe('main\nlocal change\n')
+  })
+
   it('does not emit worktree startup status for an already materialized worktree session', async () => {
     const repoDir = await createCleanGitRepo()
     const { sessionId } = await sessionService.createSession(repoDir, {
@@ -3788,6 +3932,75 @@ describe('WebSocket Chat Integration', () => {
       ws.close()
       conversationService.startSession = originalStartSession
       conversationService.stopSession(sessionId)
+    }
+  }, 20_000)
+
+  it('should migrate a persisted opus[1m] Claude OAuth Pro session before starting the CLI', async () => {
+    const providerService = new ProviderService()
+    await providerService.activateOfficial()
+    await hahaOAuthService.saveTokens({
+      accessToken: 'persisted-pro-access',
+      refreshToken: 'persisted-pro-refresh',
+      expiresAt: Date.now() + 60 * 60_000,
+      scopes: ['user:inference'],
+      subscriptionType: 'pro',
+    })
+    const settingsService = new SettingsService()
+    const previousSettings = await settingsService.getUserSettings()
+    await settingsService.updateUserSettings({ model: 'opus[1m]' })
+
+    const createRes = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workDir: process.cwd() }),
+    })
+    expect(createRes.status).toBe(201)
+    const { sessionId } = await createRes.json() as { sessionId: string }
+    await sessionService.appendSessionMetadata(sessionId, {
+      workDir: process.cwd(),
+      runtimeProviderId: null,
+      runtimeModelId: 'opus[1m]',
+    })
+
+    const originalStartSession = conversationService.startSession.bind(conversationService)
+    const startCalls: Array<{
+      sessionId: string
+      options: { model?: string; providerId?: string | null } | undefined
+    }> = []
+    conversationService.startSession = (async function patchedStartSession(
+      sid: string,
+      workDir: string,
+      sdkUrl: string,
+      options?: { permissionMode?: string; model?: string; effort?: string; thinking?: 'enabled' | 'adaptive' | 'disabled'; providerId?: string | null },
+    ) {
+      startCalls.push({ sessionId: sid, options })
+      return originalStartSession(sid, workDir, sdkUrl, options)
+    }) as typeof conversationService.startSession
+
+    try {
+      const messages = await runTurn(sessionId, 'resume the migrated Claude session')
+      expect(messages.some((message) => message.type === 'message_complete')).toBe(true)
+      expect(startCalls).toHaveLength(1)
+      expect(startCalls[0]).toMatchObject({
+        sessionId,
+        options: {
+          providerId: null,
+          model: 'claude-sonnet-5',
+        },
+      })
+      await expect(sessionService.getSessionLaunchInfo(sessionId)).resolves.toMatchObject({
+        runtimeProviderId: null,
+        runtimeModelId: 'claude-sonnet-5',
+      })
+    } finally {
+      conversationService.startSession = originalStartSession
+      conversationService.stopSession(sessionId)
+      await hahaOAuthService.deleteTokens()
+      await fs.writeFile(
+        path.join(tmpDir, 'settings.json'),
+        JSON.stringify(previousSettings, null, 2),
+        'utf-8',
+      )
     }
   }, 20_000)
 

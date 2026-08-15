@@ -13,7 +13,7 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     css: true,
-    setupFiles: ['src/test-setup.ts'],
+    setupFiles: ['src/test-setup.ts', './src/test/webStorage.ts'],
     exclude: [
       '**/node_modules/**',
       '**/dist/**',
@@ -27,6 +27,7 @@ export default defineConfig({
         'src/**/*.d.ts',
         'src/types/**',
         'src/mocks/**',
+        'src/test/**',
         'src/vite-env.d.ts',
       ],
     },

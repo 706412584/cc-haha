@@ -1,8 +1,13 @@
+import { useEffect } from 'react'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import '@testing-library/jest-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useUIStore } from '../../stores/uiStore'
 import { useSessionStore } from '../../stores/sessionStore'
+import {
+  hydrateProjectDisplayNames,
+  resolveProjectDisplayName,
+} from '../../stores/projectDisplayNameStore'
 
 const mocks = vi.hoisted(() => ({
   initializeDesktopServerUrl: vi.fn(),
@@ -93,7 +98,27 @@ vi.mock('../../i18n', () => ({
 }))
 
 vi.mock('./Sidebar', () => ({
-  Sidebar: () => <aside>sidebar loaded</aside>,
+  Sidebar: ({
+    desktopUiPreferencesRequest,
+    onDesktopUiPreferencesConsumed,
+  }: {
+    desktopUiPreferencesRequest?: Promise<unknown> | null
+    onDesktopUiPreferencesConsumed?: (request: Promise<unknown>) => void
+  }) => {
+    useEffect(() => {
+      if (!desktopUiPreferencesRequest) return
+      let cancelled = false
+      void desktopUiPreferencesRequest
+        .finally(() => {
+          if (!cancelled) onDesktopUiPreferencesConsumed?.(desktopUiPreferencesRequest)
+        })
+        .catch(() => undefined)
+      return () => {
+        cancelled = true
+      }
+    }, [desktopUiPreferencesRequest, onDesktopUiPreferencesConsumed])
+    return <aside>sidebar loaded</aside>
+  },
 }))
 
 vi.mock('./ContentRouter', () => ({
@@ -153,6 +178,9 @@ import { AppShell } from './AppShell'
 describe('AppShell boot flow', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    act(() => {
+      hydrateProjectDisplayNames({}, Number.MAX_SAFE_INTEGER)
+    })
     mocks.isTauriRuntime = false
     mocks.isMobile = false
     mocks.initializeDesktopServerUrl.mockResolvedValue('http://127.0.0.1:3456')
@@ -164,6 +192,7 @@ describe('AppShell boot flow', () => {
         schemaVersion: 3,
         sidebar: {},
         profile: {},
+        projectDisplayNames: {},
         pet: {
           enabled: false,
           selectedPetId: 'dada-code',
@@ -180,6 +209,7 @@ describe('AppShell boot flow', () => {
         schemaVersion: 3,
         sidebar: {},
         profile: {},
+        projectDisplayNames: {},
         pet: {
           enabled: false,
           selectedPetId: 'dada-code',
@@ -281,7 +311,7 @@ describe('AppShell boot flow', () => {
     mocks.tabState.activeTabId = 'team-member:synthetic'
     mocks.tabState.tabs = [
       ...mocks.tabState.tabs,
-      { sessionId: 'team-member:synthetic', title: 'Teammate', type: 'session', status: 'idle' },
+      { sessionId: 'team-member:synthetic', title: 'Teammate', type: 'team-member', status: 'idle' },
     ]
     rerender(<AppShell />)
     expect(useSessionStore.getState().activeSessionId).toBe('session-1')
@@ -314,7 +344,7 @@ describe('AppShell boot flow', () => {
     mocks.tabState.tabs = [
       { sessionId: 'session-older', title: 'Older project session', type: 'session', status: 'idle' },
       { sessionId: '__settings__', title: 'Settings', type: 'settings', status: 'idle' },
-      { sessionId: 'team-member:synthetic', title: 'Teammate', type: 'session', status: 'idle' },
+      { sessionId: 'team-member:synthetic', title: 'Teammate', type: 'team-member', status: 'idle' },
       { sessionId: 'session-recent', title: 'Recent project session', type: 'session', status: 'idle' },
     ]
 
@@ -353,6 +383,16 @@ describe('AppShell boot flow', () => {
     await waitFor(() => {
       expect(mocks.restoreTabs).toHaveBeenCalled()
     })
+    expect(screen.queryByText('app.serverFailed')).not.toBeInTheDocument()
+  })
+
+  it('keeps the app usable when desktop UI preferences are unavailable', async () => {
+    mocks.getDesktopUiPreferences.mockRejectedValueOnce(new Error('preferences unavailable'))
+
+    render(<AppShell />)
+
+    expect(await screen.findByText('sidebar loaded')).toBeInTheDocument()
+    expect(screen.getByText('content loaded')).toBeInTheDocument()
     expect(screen.queryByText('app.serverFailed')).not.toBeInTheDocument()
   })
 
@@ -477,6 +517,7 @@ describe('AppShell boot flow', () => {
         schemaVersion: 3,
         sidebar: {},
         profile: {},
+        projectDisplayNames: {},
         pet: {
           enabled: true,
           selectedPetId: 'dada-code',
@@ -575,6 +616,44 @@ describe('AppShell boot flow', () => {
 
     expect(await screen.findByText('app.serverFailed')).toBeInTheDocument()
     expect(screen.queryByText('h5 connection view')).not.toBeInTheDocument()
+  })
+
+  it('hydrates project display names before the closed H5 drawer mounts Sidebar', async () => {
+    mocks.isMobile = true
+    mocks.getDesktopUiPreferences.mockResolvedValueOnce({
+      exists: true,
+      preferences: {
+        schemaVersion: 5,
+        sidebar: {},
+        profile: {},
+        projectDisplayNames: { '/workspace/project': 'Mobile alias' },
+        pet: {
+          enabled: false,
+          selectedPetId: 'dada-code',
+          size: 144,
+          collapsed: false,
+          motionEnabled: true,
+          lastSessionId: null,
+        },
+      },
+    })
+
+    render(<AppShell />)
+
+    await screen.findByText('content loaded')
+    expect(screen.queryByText('sidebar loaded')).not.toBeInTheDocument()
+    await waitFor(() => {
+      expect(resolveProjectDisplayName('/workspace/project')).toBe('Mobile alias')
+    })
+    expect(mocks.getDesktopUiPreferences).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('mobile-sidebar-toggle'))
+      await Promise.resolve()
+    })
+
+    expect(screen.getByText('sidebar loaded')).toBeInTheDocument()
+    expect(mocks.getDesktopUiPreferences).toHaveBeenCalledTimes(1)
   })
 
   it('renders a mobile drawer toggle and backdrop in browser H5 mode', async () => {

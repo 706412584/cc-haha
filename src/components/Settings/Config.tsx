@@ -36,6 +36,7 @@ import { useIsInsideModal } from '../../context/modalContext.js';
 import { SearchBox } from '../SearchBox.js';
 import { isSupportedTerminal, hasAccessToIDEExtensionDiffFeature } from '../../utils/ide.js';
 import { getInitialSettings, getSettingsForSource, updateSettingsForSource } from '../../utils/settings/settings.js';
+import { getWorkflowSizeGuidelineFromSettings, WORKFLOW_SIZE_GUIDELINES } from '../../utils/workflows/enabled.js';
 import { getUserMsgOptIn, setUserMsgOptIn } from '../../bootstrap/state.js';
 import { DEFAULT_OUTPUT_STYLE_NAME } from 'src/constants/outputStyles.js';
 import { isEnvTruthy, isRunningOnHomespace } from 'src/utils/envUtils.js';
@@ -429,6 +430,58 @@ export function Config({
       });
       logEvent('tengu_file_history_snapshots_setting_changed', {
         enabled: enabled_3
+      });
+    }
+  }] : []), {
+    id: 'workflows',
+    label: 'Dynamic workflows',
+    value: settingsData?.disableWorkflows === true ? false : settingsData?.enableWorkflows ?? true,
+    type: 'boolean' as const,
+    onChange(workflowsEnabled: boolean) {
+      // Writes `enableWorkflows` and clears `disableWorkflows`: the two keys
+      // are separate so managed settings can hard-disable the feature without
+      // stomping the user's own toggle underneath.
+      updateSettingsForSource('userSettings', {
+        enableWorkflows: workflowsEnabled ? undefined : false,
+        disableWorkflows: undefined
+      });
+      setSettingsData(getInitialSettings());
+      logEvent('tengu_workflows_setting_changed', {
+        enabled: workflowsEnabled
+      });
+    }
+  }, {
+    id: 'workflowKeywordTriggerEnabled',
+    label: 'Ultracode keyword trigger',
+    value: settingsData?.workflowKeywordTriggerEnabled ?? true,
+    type: 'boolean' as const,
+    onChange(keywordEnabled: boolean) {
+      updateSettingsForSource('userSettings', {
+        workflowKeywordTriggerEnabled: keywordEnabled ? undefined : false
+      });
+      setSettingsData(getInitialSettings());
+      logEvent('tengu_workflow_keyword_trigger_setting_changed', {
+        enabled: keywordEnabled
+      });
+    }
+  }, ...(getWorkflowSizeGuidelineFromSettings() === undefined ? [{
+    id: 'workflowSizeGuideline',
+    label: 'Dynamic workflow size',
+    value: globalConfig.workflowSizeGuideline ?? 'medium (default)',
+    options: [...WORKFLOW_SIZE_GUIDELINES],
+    type: 'enum' as const,
+    onChange(size: string) {
+      const guideline = ((WORKFLOW_SIZE_GUIDELINES as readonly string[]).includes(size) ? size : 'unrestricted') as (typeof WORKFLOW_SIZE_GUIDELINES)[number];
+      saveGlobalConfig(currentWf => currentWf.workflowSizeGuideline === guideline ? currentWf : {
+        ...currentWf,
+        workflowSizeGuideline: guideline
+      });
+      setGlobalConfig({
+        ...getGlobalConfig(),
+        workflowSizeGuideline: guideline
+      });
+      logEvent('tengu_workflow_size_guideline_changed', {
+        size: guideline as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS
       });
     }
   }] : []), {

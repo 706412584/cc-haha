@@ -5,6 +5,7 @@ import { sessionsApi, type RecentProject } from '../../api/sessions'
 import { filesystemApi } from '../../api/filesystem'
 import { useTranslation } from '../../i18n'
 import { useMobileViewport } from '../../hooks/useMobileViewport'
+import { useProjectDisplayName } from '../../stores/projectDisplayNameStore'
 import { getDesktopHost } from '../../lib/desktopHost'
 import {
   getCachedRecentProjects,
@@ -41,6 +42,55 @@ function projectNameFromPath(filePath: string) {
     ? filePath.slice(0, filePath.indexOf(DESKTOP_WORKTREE_MARKER))
     : filePath
   return displayRoot.split('/').filter(Boolean).pop() || filePath
+}
+
+function RecentProjectItem({
+  project,
+  value,
+  touch,
+  onSelect,
+}: {
+  project: RecentProject
+  value: string
+  touch: boolean
+  onSelect: (path: string) => void
+}) {
+  const displayName = useProjectDisplayName(project.realPath)
+  const isSelected = project.realPath === value
+  const label = displayName || project.repoName || project.projectName
+
+  return (
+    <button
+      onClick={() => onSelect(project.realPath)}
+      className={`flex w-full items-center gap-3 px-4 text-left transition-colors hover:bg-[var(--color-surface-hover)] ${
+        touch ? 'min-h-[72px] py-3.5' : 'py-3'
+      } ${
+        isSelected ? 'bg-[var(--color-surface-selected)]' : ''
+      }`}
+    >
+      {project.isGit ? (
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-secondary)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="w-5 flex-shrink-0">
+          <circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" />
+          <path d="M13 6h3a2 2 0 0 1 2 2v7" /><line x1="6" y1="9" x2="6" y2="21" />
+        </svg>
+      ) : (
+        <span className="material-symbols-outlined w-5 flex-shrink-0 text-center text-[20px] text-[var(--color-text-secondary)]">folder</span>
+      )}
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-semibold text-[var(--color-text-primary)]">
+          {label}
+        </div>
+        <div className="truncate font-mono text-[11px] text-[var(--color-text-tertiary)]">
+          {project.realPath}
+        </div>
+      </div>
+      {isSelected && (
+        <span className="material-symbols-outlined flex-shrink-0 text-[18px] text-[var(--color-brand)]" style={{ fontVariationSettings: "'FILL' 1" }}>
+          check
+        </span>
+      )}
+    </button>
+  )
 }
 
 type PanelProps = {
@@ -246,42 +296,15 @@ export function RecentProjectsPanel({
         ) : projects.length === 0 ? (
           <EmptyState description={t('dirPicker.noRecent')} variant="plain" size="sm" />
         ) : (
-          projects.map((project) => {
-            const isSelected = project.realPath === value
-            return (
-              <button
-                key={project.projectPath}
-                onClick={() => handleSelect(project.realPath)}
-                className={`flex w-full items-center gap-3 px-4 text-left transition-colors hover:bg-[var(--color-surface-hover)] ${
-                  touch ? 'min-h-[72px] py-3.5' : 'py-3'
-                } ${
-                  isSelected ? 'bg-[var(--color-surface-selected)]' : ''
-                }`}
-              >
-                {project.isGit ? (
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-secondary)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="w-5 flex-shrink-0">
-                    <circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" />
-                    <path d="M13 6h3a2 2 0 0 1 2 2v7" /><line x1="6" y1="9" x2="6" y2="21" />
-                  </svg>
-                ) : (
-                  <span className="material-symbols-outlined w-5 flex-shrink-0 text-center text-[20px] text-[var(--color-text-secondary)]">folder</span>
-                )}
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-semibold text-[var(--color-text-primary)]">
-                    {project.repoName || project.projectName}
-                  </div>
-                  <div className="truncate font-mono text-[11px] text-[var(--color-text-tertiary)]">
-                    {project.realPath}
-                  </div>
-                </div>
-                {isSelected && (
-                  <span className="material-symbols-outlined flex-shrink-0 text-[18px] text-[var(--color-brand)]" style={{ fontVariationSettings: "'FILL' 1" }}>
-                    check
-                  </span>
-                )}
-              </button>
-            )
-          })
+          projects.map((project) => (
+            <RecentProjectItem
+              key={project.projectPath}
+              project={project}
+              value={value}
+              touch={touch}
+              onSelect={handleSelect}
+            />
+          ))
         )}
       </div>
       <div className="border-t border-[var(--color-border)]">
@@ -359,8 +382,10 @@ export function DirectoryPicker({ value, onChange, variant = 'chip', isGitProjec
 
   // Find selected project info
   const selectedProject = projects.find((p) => p.realPath === value)
+  const selectedProjectKey = selectedProject?.realPath ?? value
+  const selectedDisplayName = useProjectDisplayName(selectedProjectKey)
   const isWorkbar = variant === 'workbar'
-  const selectedLabel = selectedProject?.repoName || selectedProject?.projectName || projectNameFromPath(value)
+  const selectedLabel = selectedDisplayName || selectedProject?.repoName || selectedProject?.projectName || projectNameFromPath(value)
   const showGitIcon = selectedProject?.isGit || isGitProject
   const triggerClassName = isWorkbar
     ? 'max-w-full ' + (isMobileBrowser ? 'min-h-11 ' : '') + 'group inline-flex h-9 min-w-0 items-center gap-2 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] px-3.5 text-[13.5px] font-medium leading-none text-[var(--color-text-primary)] transition-[background-color,color,border-color] duration-150 ease-out hover:border-[var(--color-outline)] hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-surface)] disabled:cursor-not-allowed disabled:opacity-50'

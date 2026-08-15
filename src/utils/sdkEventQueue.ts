@@ -12,7 +12,9 @@ type TaskStartedEvent = {
   task_type?: string
   remote_session_id?: string
   workflow_name?: string
+  workflow_run_id?: string
   prompt?: string
+  owner_agent_id?: string
 }
 
 type TaskProgressEvent = {
@@ -28,10 +30,12 @@ type TaskProgressEvent = {
   }
   last_tool_name?: string
   summary?: string
+  workflow_run_id?: string
   // Delta batch of workflow state changes. Clients upsert by
   // `${type}:${index}` then group by phaseIndex to rebuild the phase tree,
   // same fold as collectFromEvents + groupByPhase in PhaseProgress.tsx.
   workflow_progress?: SdkWorkflowProgress[]
+  owner_agent_id?: string
 }
 
 // Emitted when a foreground agent completes without being backgrounded.
@@ -48,11 +52,13 @@ type TaskNotificationSdkEvent = {
   output_file: string
   summary: string
   result?: string
+  workflow_run_id?: string
   usage?: {
     total_tokens: number
     tool_uses: number
     duration_ms: number
   }
+  owner_agent_id?: string
 }
 
 // Mirrors notifySessionStateChanged. The CCR bridge already receives this
@@ -98,6 +104,19 @@ type AgentToolActivityEvent = {
   // Parent Agent tool_use id — the card this activity belongs under.
   tool_use_id: string
   activity: AgentToolActivity
+  owner_agent_id?: string
+}
+
+export type AgentRunMessageEvent = {
+  type: 'system'
+  subtype: 'agent_run_message'
+  run_agent_id: string
+  stream_id: string
+  target_agent_id: string
+  target_agent_scope_id?: string
+  event_kind: 'message' | 'complete' | 'cancelled' | 'error'
+  message?: unknown
+  error?: string
 }
 
 export type SdkEvent =
@@ -106,9 +125,29 @@ export type SdkEvent =
   | TaskNotificationSdkEvent
   | SessionStateChangedEvent
   | AgentToolActivityEvent
+  | AgentRunMessageEvent
 
 const MAX_QUEUE_SIZE = 1000
 const queue: SdkEvent[] = []
+type EnvelopedAgentRunMessage = AgentRunMessageEvent & {
+  uuid: UUID
+  session_id: string
+}
+let agentRunMessageSink: ((event: EnvelopedAgentRunMessage) => void) | undefined
+
+/**
+ * Agent runs execute below the main query generator, so their token deltas
+ * cannot wait for the next drainSdkEvents() call. The headless printer binds
+ * this sink to its existing outbound FIFO while it is alive.
+ */
+export function setAgentRunMessageSink(
+  sink: ((event: EnvelopedAgentRunMessage) => void) | undefined,
+): () => void {
+  agentRunMessageSink = sink
+  return () => {
+    if (agentRunMessageSink === sink) agentRunMessageSink = undefined
+  }
+}
 
 export function enqueueSdkEvent(event: SdkEvent): void {
   // SDK events are only consumed (drained) in headless/streaming mode.
@@ -116,10 +155,48 @@ export function enqueueSdkEvent(event: SdkEvent): void {
   if (!getIsNonInteractiveSession()) {
     return
   }
+  if (event.subtype === 'agent_run_message') {
+    if (agentRunMessageSink) {
+      agentRunMessageSink({
+        ...event,
+        uuid: randomUUID(),
+        session_id: getSessionId(),
+      })
+    }
+    return
+  }
   if (queue.length >= MAX_QUEUE_SIZE) {
     queue.shift()
   }
   queue.push(event)
+}
+
+export function emitAgentRunMessage(
+  route: {
+    runAgentId: string
+    streamId: string
+    targetAgentId?: string
+    targetAgentScopeId?: string
+  },
+  event:
+    | { kind: 'message'; message: unknown }
+    | { kind: 'complete' }
+    | { kind: 'cancelled' }
+    | { kind: 'error'; error: string },
+): void {
+  enqueueSdkEvent({
+    type: 'system',
+    subtype: 'agent_run_message',
+    run_agent_id: route.runAgentId,
+    stream_id: route.streamId,
+    target_agent_id: route.targetAgentId ?? route.runAgentId,
+    ...(route.targetAgentScopeId
+      ? { target_agent_scope_id: route.targetAgentScopeId }
+      : {}),
+    event_kind: event.kind,
+    ...(event.kind === 'message' ? { message: event.message } : {}),
+    ...(event.kind === 'error' ? { error: event.error } : {}),
+  })
 }
 
 export function drainSdkEvents(): Array<
@@ -156,7 +233,9 @@ export function emitTaskTerminatedSdk(
     toolUseId?: string
     summary?: string
     outputFile?: string
+    workflowRunId?: string
     usage?: { total_tokens: number; tool_uses: number; duration_ms: number }
+    ownerAgentId?: string
   },
 ): void {
   enqueueSdkEvent({
@@ -167,7 +246,9 @@ export function emitTaskTerminatedSdk(
     status,
     output_file: opts?.outputFile ?? '',
     summary: opts?.summary ?? '',
+    workflow_run_id: opts?.workflowRunId,
     usage: opts?.usage,
+    ...(opts?.ownerAgentId ? { owner_agent_id: opts.ownerAgentId } : {}),
   })
 }
 
@@ -183,6 +264,7 @@ export function emitAgentToolActivity(
   taskId: string,
   parentToolUseId: string,
   activity: AgentToolActivity,
+  ownerAgentId?: string,
 ): void {
   enqueueSdkEvent({
     type: 'system',
@@ -190,5 +272,6 @@ export function emitAgentToolActivity(
     task_id: taskId,
     tool_use_id: parentToolUseId,
     activity,
+    ...(ownerAgentId ? { owner_agent_id: ownerAgentId } : {}),
   })
 }

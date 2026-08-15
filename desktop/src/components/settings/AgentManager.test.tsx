@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import '@testing-library/jest-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -7,6 +7,8 @@ const apiCreateMock = vi.hoisted(() => vi.fn())
 const apiUpdateMock = vi.hoisted(() => vi.fn())
 const apiDeleteMock = vi.hoisted(() => vi.fn())
 const apiReloadMock = vi.hoisted(() => vi.fn())
+const apiSetOverrideMock = vi.hoisted(() => vi.fn())
+const apiClearOverrideMock = vi.hoisted(() => vi.fn())
 const recentProjectsMock = vi.hoisted(() => vi.fn())
 
 vi.mock('../../api/agents', async (importOriginal) => {
@@ -19,6 +21,8 @@ vi.mock('../../api/agents', async (importOriginal) => {
       update: apiUpdateMock,
       delete: apiDeleteMock,
       reload: apiReloadMock,
+      setOverride: apiSetOverrideMock,
+      clearOverride: apiClearOverrideMock,
     },
   }
 })
@@ -65,6 +69,23 @@ function makeAgent(overrides: Partial<AgentDefinition> = {}): AgentDefinition {
   }
 }
 
+function makeBuiltInAgent(overrides: Partial<AgentDefinition> = {}): AgentDefinition {
+  return {
+    agentType: 'Explore',
+    description: 'Explore the codebase',
+    source: 'built-in',
+    baseDir: 'built-in',
+    isActive: true,
+    // Built-ins are never file-editable; only model and effort can change.
+    editable: false,
+    overridable: true,
+    defaults: { model: 'haiku' },
+    model: 'haiku',
+    modelDisplay: 'haiku',
+    ...overrides,
+  }
+}
+
 function setProjectSession(cwd?: string) {
   useSessionStore.setState({
     sessions: cwd ? [{
@@ -88,11 +109,15 @@ async function renderManager(response: AgentListResponse = EMPTY_RESPONSE) {
 }
 
 function chooseAgentSelect(label: string, option: string) {
-  // The trigger is a button; the entries inside the panel are listbox options.
-  // They used to be buttons, which is invalid inside a `role="listbox"` and
-  // left the dropdown without arrow-key navigation.
-  fireEvent.click(screen.getByRole('button', { name: label }))
-  fireEvent.click(screen.getByRole('option', { name: option }))
+  const select = screen.getByRole('combobox', { name: label })
+  const selectedOption = within(select).getByRole('option', { name: option }) as HTMLOptionElement
+  fireEvent.change(select, { target: { value: selectedOption.value } })
+}
+
+function chooseAgentModel(option: string | RegExp) {
+  fireEvent.click(screen.getByRole('button', { name: 'Model' }))
+  const picker = screen.getByTestId('model-selector-dropdown')
+  fireEvent.click(within(picker).getByRole('button', { name: option }))
 }
 
 describe('AgentManager', () => {
@@ -110,7 +135,23 @@ describe('AgentManager', () => {
       },
     })
     recentProjectsMock.mockResolvedValue({ projects: [] })
-    useSettingsStore.setState({ locale: 'en' })
+    useSettingsStore.setState({
+      locale: 'en',
+      availableModels: [
+        {
+          id: 'provider/custom-model',
+          name: 'Provider Custom',
+          description: 'Current provider model',
+          context: '200k',
+        },
+        {
+          id: 'deepseek-v4-pro',
+          name: 'DeepSeek V4 Pro',
+          description: 'Current provider model',
+          context: '200k',
+        },
+      ],
+    })
     setProjectSession('/workspace/project')
     useAgentStore.setState({
       activeAgents: [],
@@ -144,17 +185,19 @@ describe('AgentManager', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create Agent' }))
     fireEvent.click(screen.getByRole('button', { name: 'Project' }))
     expect(screen.getByRole('button', { name: 'Select a project...' })).toBeInTheDocument()
-    expect(document.querySelector('select')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Select a project...' }).tagName).toBe('BUTTON')
     fireEvent.click(screen.getByRole('button', { name: 'Select a project...' }))
     fireEvent.click(await screen.findByRole('button', { name: /Selected Project/ }))
     expect(screen.getByText('Target project: /workspace/selected')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Model' }))
-    const modelMenuOption = screen.getByRole('option', { name: 'fable' })
+    const modelPicker = screen.getByTestId('model-selector-dropdown')
+    const modelMenuOption = within(modelPicker).getByRole('button', { name: /fable/i })
     expect(modelMenuOption).toBeInTheDocument()
-    expect(modelMenuOption.parentElement).toHaveClass('bottom-full')
+    expect(screen.getByRole('dialog', { name: 'Create Agent' })).not.toContainElement(modelPicker)
+    expect(modelPicker).toHaveClass('fixed', 'z-[var(--z-dropdown)]')
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.getByRole('heading', { name: 'Create Agent' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'fable' })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('model-selector-dropdown')).not.toBeInTheDocument()
     expect(screen.getByLabelText('System prompt').parentElement).toHaveTextContent('System prompt*')
   })
 
@@ -232,7 +275,7 @@ describe('AgentManager', () => {
     expect(apiListMock).toHaveBeenNthCalledWith(3, '/workspace/b')
   })
 
-  it('creates an underscore slug with custom model and effort, then selects the refreshed agent', async () => {
+  it('creates an underscore slug with a configured provider model and effort, then selects the refreshed agent', async () => {
     const created = makeAgent({
       source: 'projectSettings',
       model: 'provider/custom-model',
@@ -257,8 +300,7 @@ describe('AgentManager', () => {
     fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'code_reviewer' } })
     fireEvent.change(screen.getByLabelText(/^Description/), { target: { value: 'Review code' } })
     fireEvent.change(screen.getByLabelText('System prompt'), { target: { value: 'Review carefully.' } })
-    chooseAgentSelect('Model', 'Custom model ID')
-    fireEvent.change(screen.getByLabelText(/^Custom model ID/), { target: { value: 'provider/custom-model' } })
+    chooseAgentModel(/Provider Custom/)
     chooseAgentSelect('Reasoning effort', 'xhigh')
     chooseAgentSelect('Tools', 'Custom list')
     fireEvent.click(screen.getByRole('checkbox', { name: /Read/ }))
@@ -424,7 +466,7 @@ describe('AgentManager', () => {
     render(<AgentManager />)
     await waitFor(() => expect(apiListMock).toHaveBeenCalledTimes(1))
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
-    chooseAgentSelect('Model', 'Inherit from parent')
+    chooseAgentModel(/Inherit from parent/)
     chooseAgentSelect('Reasoning effort', 'Inherit from parent')
     chooseAgentSelect('Tools', 'All tools')
     chooseAgentSelect('Color', 'Default')
@@ -445,6 +487,27 @@ describe('AgentManager', () => {
     expect(screen.getAllByText('Inherit').length).toBeGreaterThanOrEqual(2)
   })
 
+  it('preserves a saved model ID that the current provider no longer lists', async () => {
+    const agent = makeAgent({ model: 'legacy/provider-model' })
+    apiListMock.mockResolvedValue({ activeAgents: [agent], allAgents: [agent] })
+    apiUpdateMock.mockResolvedValue({ agent })
+    useAgentStore.setState({ selectedAgent: agent, activeAgents: [agent], allAgents: [agent] })
+
+    render(<AgentManager />)
+    await waitFor(() => expect(apiListMock).toHaveBeenCalledTimes(1))
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Model' }))
+    const picker = screen.getByTestId('model-selector-dropdown')
+    expect(within(picker).getByRole('button', { name: /legacy\/provider-model.*not listed by the current provider/i })).toBeInTheDocument()
+    fireEvent.click(within(picker).getByRole('button', { name: /legacy\/provider-model/i }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(apiUpdateMock).toHaveBeenCalledWith(
+      'code_reviewer',
+      expect.objectContaining({ model: 'legacy/provider-model' }),
+    ))
+  })
+
   it('preserves an explicit empty tools list when editing only the description', async () => {
     const agent = makeAgent({ tools: [] })
     const updated = makeAgent({ tools: [], description: 'Updated review' })
@@ -459,7 +522,7 @@ describe('AgentManager', () => {
     render(<AgentManager />)
     await waitFor(() => expect(useAgentStore.getState().availableTools).toContain('Read'))
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
-    expect(screen.getByRole('button', { name: 'Tools' })).toHaveTextContent('No tools')
+    expect(screen.getByRole('combobox', { name: 'Tools' })).toHaveValue('none')
     fireEvent.change(screen.getByLabelText(/^Description/), { target: { value: 'Updated review' } })
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
@@ -508,7 +571,7 @@ describe('AgentManager', () => {
     render(<AgentManager />)
     await waitFor(() => expect(apiListMock).toHaveBeenCalledTimes(1))
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
-    expect(screen.getByRole('button', { name: 'Reasoning effort' })).toHaveTextContent('7')
+    expect(screen.getByRole('combobox', { name: 'Reasoning effort' })).toHaveValue('7')
     fireEvent.change(screen.getByLabelText(/^Description/), { target: { value: 'Updated review' } })
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
@@ -610,6 +673,304 @@ describe('AgentManager', () => {
     expect(screen.getByRole('alert')).not.toHaveTextContent('Agent already exists')
     expect(apiCreateMock.mock.calls[0]?.[0]).not.toHaveProperty('tools')
     expect(screen.getByRole('dialog', { name: 'Create Agent' })).toBeInTheDocument()
+  })
+
+  it('offers edit and delete on the row itself without nesting buttons', async () => {
+    const agent = makeAgent()
+    await renderManager({ activeAgents: [agent], allAgents: [agent] })
+
+    const editButton = screen.getByRole('button', { name: 'Edit code_reviewer' })
+    expect(editButton).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Delete code_reviewer' })).toBeInTheDocument()
+
+    // The structural assertion is the one that matters: nested buttons still
+    // render and still fire in jsdom, so behaviour alone cannot catch them.
+    const row = editButton.closest('div.group')
+    expect(row).not.toBeNull()
+    expect(row!.querySelector('button button')).toBeNull()
+  })
+
+  it('keeps the row body clickable now that it is no longer the outer element', async () => {
+    const agent = makeAgent()
+    await renderManager({ activeAgents: [agent], allAgents: [agent] })
+
+    fireEvent.click(screen.getByText('code_reviewer'))
+
+    expect(await screen.findByRole('button', { name: 'Back to list' })).toBeInTheDocument()
+    expect(useAgentStore.getState().selectedAgent?.agentType).toBe('code_reviewer')
+  })
+
+  it('deletes straight from the row with that row exact target', async () => {
+    const agent = makeAgent({ source: 'projectSettings' })
+    apiListMock
+      .mockResolvedValueOnce({ activeAgents: [agent], allAgents: [agent] })
+      .mockResolvedValueOnce(EMPTY_RESPONSE)
+    apiDeleteMock.mockResolvedValue(undefined)
+
+    render(<AgentManager />)
+    await waitFor(() => expect(apiListMock).toHaveBeenCalledTimes(1))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete code_reviewer' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Agent' }))
+
+    await waitFor(() => expect(apiDeleteMock).toHaveBeenCalledWith(
+      'code_reviewer',
+      'project',
+      '/workspace/project',
+      'nested/custom-agent-file.md',
+    ))
+  })
+
+  it('offers no row actions on sources that can be neither edited nor overridden', async () => {
+    const plugin = makeAgent({
+      agentType: 'plugin_agent',
+      source: 'plugin',
+      editable: false,
+      target: undefined,
+    })
+    await renderManager({ activeAgents: [plugin], allAgents: [plugin] })
+
+    expect(screen.queryByRole('button', { name: 'Edit plugin_agent' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Delete plugin_agent' })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Adjust the model/ })).toBeNull()
+  })
+
+  it('offers a built-in row model adjustment but never a delete', async () => {
+    const builtIn = makeBuiltInAgent()
+    await renderManager({ activeAgents: [builtIn], allAgents: [builtIn] })
+
+    expect(
+      screen.getByRole('button', { name: 'Adjust the model and effort for Explore' }),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Delete Explore' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Edit Explore' })).toBeNull()
+  })
+
+  it('saves and resets an override through the active same-project session without a warning', async () => {
+    const shipped = makeBuiltInAgent()
+    const overridden = makeBuiltInAgent({
+      model: 'deepseek-v4-pro',
+      modelDisplay: 'deepseek-v4-pro',
+      override: { model: 'deepseek-v4-pro', source: 'userSettings' },
+    })
+    let listedAgent = shipped
+    apiListMock.mockImplementation(async () => ({
+      activeAgents: [listedAgent],
+      allAgents: [listedAgent],
+    }))
+    apiSetOverrideMock.mockImplementation(async () => {
+      listedAgent = overridden
+      return { agent: overridden }
+    })
+    apiClearOverrideMock.mockImplementation(async () => {
+      listedAgent = shipped
+      return { agent: shipped }
+    })
+    apiReloadMock.mockImplementation(async (sessionId: string) => ({
+      ok: true,
+      session: sessionId === 'running-session'
+        ? {
+            applied: true,
+            commands: 0,
+            agents: 1,
+            plugins: 0,
+            mcpServers: 0,
+            // These are shared plugin/hook errors, not an Agent apply result.
+            errors: 2,
+          }
+        : {
+            applied: false,
+            reason: 'not_running' as const,
+            commands: 0,
+            agents: 0,
+            plugins: 0,
+            mcpServers: 0,
+            errors: 0,
+          },
+    }))
+    useSessionStore.setState({
+      sessions: [
+        {
+          id: 'stale-session',
+          title: 'Older project session',
+          createdAt: '',
+          modifiedAt: '',
+          messageCount: 1,
+          projectPath: '/workspace/project',
+          workDir: '/workspace/project',
+          workDirExists: true,
+        },
+        {
+          id: 'running-session',
+          title: 'Running project session',
+          createdAt: '',
+          modifiedAt: '',
+          messageCount: 1,
+          projectPath: '/workspace/project',
+          workDir: '/workspace/project',
+          workDirExists: true,
+        },
+      ],
+      activeSessionId: 'running-session',
+    })
+
+    render(<AgentManager />)
+    await waitFor(() => expect(apiListMock).toHaveBeenCalledTimes(1))
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Adjust the model and effort for Explore' }),
+    )
+    chooseAgentModel(/DeepSeek V4 Pro/)
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(apiReloadMock).toHaveBeenCalledWith('running-session'))
+    expect(apiReloadMock).not.toHaveBeenCalledWith('stale-session')
+    await waitFor(() => expect(useAgentStore.getState()).toMatchObject({
+      selectedAgent: overridden,
+      mutationWarning: null,
+    }))
+    expect(screen.queryByText(
+      'The change was saved, but the latest agent configuration could not be fully applied.',
+    )).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Adjust model' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Reset to built-in default' }))
+
+    await waitFor(() => expect(apiReloadMock).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(useAgentStore.getState()).toMatchObject({
+      selectedAgent: shipped,
+      mutationWarning: null,
+    }))
+    expect(screen.queryByText(
+      'The change was saved, but the latest agent configuration could not be fully applied.',
+    )).toBeNull()
+  })
+
+  it('separates the built-in default from inherit and sends null for the default', async () => {
+    const builtIn = makeBuiltInAgent()
+    await renderManager({ activeAgents: [builtIn], allAgents: [builtIn] })
+    apiSetOverrideMock.mockResolvedValue({ agent: builtIn })
+    apiListMock.mockResolvedValue({ activeAgents: [builtIn], allAgents: [builtIn] })
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Adjust the model and effort for Explore' }),
+    )
+
+    // Both entries must exist. For Explore the shipped default is haiku while
+    // inherit means "follow the main session" — collapsing them would make
+    // inherit unreachable, and the default label is read from the server.
+    fireEvent.click(screen.getByRole('button', { name: 'Model' }))
+    const modelPicker = screen.getByTestId('model-selector-dropdown')
+    expect(within(modelPicker).getByRole('button', { name: /Built-in default \(haiku\)/ })).toBeInTheDocument()
+    expect(within(modelPicker).getByRole('button', { name: /Inherit from parent/ })).toBeInTheDocument()
+    fireEvent.click(within(modelPicker).getByRole('button', { name: /Built-in default \(haiku\)/ }))
+
+    chooseAgentSelect('Reasoning effort', 'high')
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    // `null`, never the literal 'haiku': writing today's default into
+    // settings.json would freeze it there forever.
+    await waitFor(() => expect(apiSetOverrideMock).toHaveBeenCalledWith('Explore', {
+      cwd: '/workspace/project',
+      model: null,
+      effort: 'high',
+    }))
+  })
+
+  it('sends inherit as a real value when the user picks it', async () => {
+    const builtIn = makeBuiltInAgent()
+    await renderManager({ activeAgents: [builtIn], allAgents: [builtIn] })
+    apiSetOverrideMock.mockResolvedValue({ agent: builtIn })
+    apiListMock.mockResolvedValue({ activeAgents: [builtIn], allAgents: [builtIn] })
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Adjust the model and effort for Explore' }),
+    )
+    chooseAgentModel(/Inherit from parent/)
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(apiSetOverrideMock).toHaveBeenCalledWith('Explore', {
+      cwd: '/workspace/project',
+      model: 'inherit',
+      effort: null,
+    }))
+  })
+
+  it('resets a built-in through the server instead of writing the default back', async () => {
+    const overridden = makeBuiltInAgent({
+      model: 'sonnet',
+      modelDisplay: 'sonnet',
+      override: { model: 'sonnet', source: 'userSettings' },
+    })
+    await renderManager({ activeAgents: [overridden], allAgents: [overridden] })
+    apiClearOverrideMock.mockResolvedValue({ agent: makeBuiltInAgent() })
+    apiListMock.mockResolvedValue({ activeAgents: [overridden], allAgents: [overridden] })
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Adjust the model and effort for Explore' }),
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Reset to built-in default' }))
+
+    await waitFor(() => expect(apiClearOverrideMock).toHaveBeenCalledWith(
+      'Explore',
+      '/workspace/project',
+    ))
+    // Reset must clear the setting, not write the current default back as a
+    // value — that would pin today's default into settings.json permanently.
+    expect(apiSetOverrideMock).not.toHaveBeenCalled()
+    // A running session caches agent definitions, so the write alone is not
+    // enough for the change to take effect.
+    expect(apiReloadMock).toHaveBeenCalledWith('session-1')
+  })
+
+  it('locks the controls when the override comes from managed settings', async () => {
+    const managed = makeBuiltInAgent({
+      model: 'opus',
+      override: { model: 'opus', source: 'policySettings' },
+    })
+    await renderManager({ activeAgents: [managed], allAgents: [managed] })
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Adjust the model and effort for Explore' }),
+    )
+
+    expect(screen.getByRole('button', { name: 'Model' })).toBeDisabled()
+    expect(screen.getByRole('combobox', { name: 'Reasoning effort' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+    // Resetting would write to the user file, which cannot win over a policy.
+    expect(screen.queryByRole('button', { name: 'Reset to built-in default' })).toBeNull()
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Set by Managed settings and not editable here.',
+    )
+  })
+
+  it('warns that a shadowed built-in will not take effect yet', async () => {
+    // Editing a built-in that a same-named user agent shadows would look like
+    // it worked and change nothing at spawn time.
+    const shadowed = makeBuiltInAgent({ overriddenBy: 'userSettings', isActive: false })
+    await renderManager({ activeAgents: [], allAgents: [shadowed] })
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Adjust the model and effort for Explore' }),
+    )
+
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'An agent of the same name from User is active',
+    )
+  })
+
+  it('keeps the override modal open when saving fails', async () => {
+    const builtIn = makeBuiltInAgent()
+    await renderManager({ activeAgents: [builtIn], allAgents: [builtIn] })
+    apiSetOverrideMock.mockRejectedValue(new Error('AGENT_CUSTOMIZATION_LOCKED'))
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Adjust the model and effort for Explore' }),
+    )
+    chooseAgentModel(/^sonnet/i)
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Failed to save the override')
+    expect(screen.getByRole('alert')).not.toHaveTextContent('AGENT_CUSTOMIZATION_LOCKED')
+    expect(screen.getByRole('dialog', { name: 'Adjust built-in agent' })).toBeInTheDocument()
   })
 
   it('localizes load failures without exposing raw server errors', async () => {

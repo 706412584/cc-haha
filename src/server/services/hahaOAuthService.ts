@@ -67,6 +67,7 @@ const OAUTH_CALLBACK_PATH = '/callback'
 
 export class HahaOAuthService {
   private sessions = new Map<string, OAuthSession>()
+  private tokenRefreshes = new Map<string, Promise<StoredOAuthTokens | null>>()
   private refreshFn: RefreshFn = refreshOAuthToken
   private fetchProfileFn: FetchProfileFn = fetchProfileInfo
 
@@ -241,25 +242,75 @@ export class HahaOAuthService {
 
     if (!tokens.refreshToken) return null
 
-    try {
-      const networkSettings = await loadNetworkSettings()
-      const refreshed = await this.refreshFn(tokens.refreshToken, {
-        scopes: tokens.scopes,
-        proxyUrl: getNetworkProxyUrl(networkSettings),
-      })
-      const updated: StoredOAuthTokens = {
-        accessToken: refreshed.accessToken,
-        refreshToken: refreshed.refreshToken ?? tokens.refreshToken,
-        expiresAt: refreshed.expiresAt,
-        scopes: refreshed.scopes,
-        subscriptionType: refreshed.subscriptionType ?? tokens.subscriptionType,
+    return this.refreshTokensOnce(tokens)
+  }
+
+  async recoverFromUnauthorized(
+    failedAccessToken: string,
+  ): Promise<StoredOAuthTokens | null> {
+    const rejectedToken = failedAccessToken.trim()
+    if (!rejectedToken) return null
+    return this.refreshRejectedToken(rejectedToken)
+  }
+
+  private async refreshRejectedToken(
+    rejectedToken: string,
+  ): Promise<StoredOAuthTokens | null> {
+    const tokens = await this.loadTokens()
+    if (!tokens) return null
+
+    // Another session may already have rotated the shared token while this
+    // 401 event was in flight. Reuse that value instead of rotating again.
+    if (tokens.accessToken !== rejectedToken) return tokens
+    if (!tokens.refreshToken) return null
+
+    return this.refreshTokensOnce(tokens)
+  }
+
+  private async refreshTokensOnce(
+    tokens: StoredOAuthTokens,
+  ): Promise<StoredOAuthTokens | null> {
+    const pending = this.tokenRefreshes.get(tokens.accessToken)
+    if (pending) return pending
+
+    const refresh = (async () => {
+      try {
+        return await this.refreshStoredTokens(tokens)
+      } catch (err) {
+        logTokenRefreshFailure('[HahaOAuthService]', err)
+        return null
       }
-      await this.saveTokens(updated)
-      return updated
-    } catch (err) {
-      logTokenRefreshFailure('[HahaOAuthService]', err)
-      return null
+    })()
+    this.tokenRefreshes.set(tokens.accessToken, refresh)
+    try {
+      return await refresh
+    } finally {
+      if (this.tokenRefreshes.get(tokens.accessToken) === refresh) {
+        this.tokenRefreshes.delete(tokens.accessToken)
+      }
     }
+  }
+
+  private async refreshStoredTokens(
+    tokens: StoredOAuthTokens,
+  ): Promise<StoredOAuthTokens> {
+    if (!tokens.refreshToken) {
+      throw new Error('Claude OAuth refresh token is unavailable')
+    }
+    const networkSettings = await loadNetworkSettings()
+    const refreshed = await this.refreshFn(tokens.refreshToken, {
+      scopes: tokens.scopes,
+      proxyUrl: getNetworkProxyUrl(networkSettings),
+    })
+    const updated: StoredOAuthTokens = {
+      accessToken: refreshed.accessToken,
+      refreshToken: refreshed.refreshToken ?? tokens.refreshToken,
+      expiresAt: refreshed.expiresAt,
+      scopes: refreshed.scopes,
+      subscriptionType: refreshed.subscriptionType ?? tokens.subscriptionType,
+    }
+    await this.saveTokens(updated)
+    return updated
   }
 
   async ensureFreshAccessToken(): Promise<string | null> {

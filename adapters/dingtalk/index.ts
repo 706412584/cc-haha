@@ -11,7 +11,7 @@ import { WsBridge, type ServerMessage, type AttachmentRef } from '../common/ws-b
 import { MessageDedup } from '../common/message-dedup.js'
 import { MessageBuffer } from '../common/message-buffer.js'
 import { enqueue } from '../common/chat-queue.js'
-import { getConfiguredWorkDir, loadConfig } from '../common/config.js'
+import { loadConfig } from '../common/config.js'
 import { formatImHelp, formatImStatus, formatPermissionRequest, splitMessage } from '../common/format.js'
 import {
   formatPermissionDecisionStatus,
@@ -20,7 +20,12 @@ import {
   type PermissionDecision,
 } from '../common/permission.js'
 import { SessionStore } from '../common/session-store.js'
-import { AdapterHttpClient, type RecentProject } from '../common/http-client.js'
+import { type RecentProject } from '../common/http-client.js'
+import { createAdapterClient } from '../common/adapter-client.js'
+import {
+  formatProjectSelectionOutcome,
+  ProjectSelectionController,
+} from '../common/project-selection-router.js'
 import { restoreStoredSessionBinding } from '../common/session-recovery.js'
 import { isAllowedUser, tryPair } from '../common/pairing.js'
 import { AttachmentStore } from '../common/attachment/attachment-store.js'
@@ -54,17 +59,21 @@ if (!config.dingtalk.clientId || !config.dingtalk.clientSecret) {
   console.error('[DingTalk] Missing DINGTALK_CLIENT_ID / DINGTALK_CLIENT_SECRET. Bind with QR auth in Desktop Settings or set env.')
   process.exit(1)
 }
-const defaultWorkDir = getConfiguredWorkDir(config, config.dingtalk)
+const { httpClient, defaultWorkDir } = createAdapterClient(config, config.dingtalk)
 
 const bridge = new WsBridge(config.serverUrl, 'dingtalk')
 const dedup = new MessageDedup()
 const sessionStore = new SessionStore()
-const httpClient = new AdapterHttpClient(config.serverUrl, { allowedProjectRoots: [defaultWorkDir] })
 const attachmentStore = new AttachmentStore()
 const media = new DingTalkMediaService(attachmentStore)
 const aiCards = new DingTalkAiCardService(getAccessToken, config.dingtalk.clientId)
 const sessionWebhooks = new Map<string, string>()
-const pendingProjectSelection = new Map<string, boolean>()
+const projectSelectionController = new ProjectSelectionController({
+  httpClient,
+  defaultWorkDir,
+  prepareNewSession,
+  createSession: createSessionForChat,
+})
 const runtimeStates = new Map<string, ChatRuntimeState>()
 const aiCardBuffers = new Map<string, MessageBuffer>()
 const aiCardTargets = new Map<string, DingTalkAiCardTarget>()
@@ -323,47 +332,22 @@ function formatProjectList(projects: RecentProject[]): string {
 
 async function showProjectPicker(chatId: string): Promise<void> {
   try {
-    const projects = await httpClient.listRecentProjects()
+    const projects = await projectSelectionController.listProjects(chatId)
     if (projects.length === 0) {
       await sendText(chatId, `没有找到最近的项目。发送 /new 会使用默认工作目录：${defaultWorkDir}\n也可以发送 /new /path/to/project 指定项目。`)
       return
     }
-    pendingProjectSelection.set(chatId, true)
     await sendText(chatId, formatProjectList(projects))
   } catch (err) {
     await sendText(chatId, `❌ 无法获取项目列表: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 
-async function startNewSession(chatId: string, query?: string): Promise<void> {
+function prepareNewSession(chatId: string): void {
   bridge.resetSession(chatId)
   sessionStore.delete(chatId)
   clearTransientChatState(chatId)
-  pendingProjectSelection.delete(chatId)
   runtimeStates.delete(chatId)
-
-  if (query) {
-    try {
-      const { project, ambiguous } = await httpClient.matchProject(query)
-      if (project) {
-        const ok = await createSessionForChat(chatId, project.realPath)
-        if (ok) await sendText(chatId, `✅ 已新建会话：**${project.projectName}**${project.branch ? ` (${project.branch})` : ''}`)
-        return
-      }
-      if (ambiguous) {
-        const list = ambiguous.map((project, index) => `${index + 1}. **${project.projectName}** — ${project.realPath}`).join('\n')
-        await sendText(chatId, `匹配到多个项目，请更精确：\n\n${list}`)
-        return
-      }
-      await sendText(chatId, `未找到匹配 "${query}" 的项目。发送 /projects 查看完整列表。`)
-    } catch (err) {
-      await sendText(chatId, `❌ ${err instanceof Error ? err.message : String(err)}`)
-    }
-    return
-  }
-
-  const ok = await createSessionForChat(chatId, defaultWorkDir)
-  if (ok) await sendText(chatId, '✅ 已新建会话，可以开始对话了。')
 }
 
 async function handleServerMessage(chatId: string, msg: ServerMessage): Promise<void> {
@@ -485,14 +469,12 @@ async function routeUserMessage(chatId: string, text: string, attachments: Attac
 
     if (!hasAttachments && handlePermissionCommand(chatId, trimmed)) return
 
-    if (!hasAttachments && pendingProjectSelection.has(chatId)) {
-      if (trimmed) await startNewSession(chatId, trimmed)
-      return
-    }
-
-    if (!hasAttachments && (trimmed === '/new' || trimmed === '新会话' || trimmed.startsWith('/new '))) {
-      const arg = trimmed.startsWith('/new ') ? trimmed.slice(5).trim() : ''
-      await startNewSession(chatId, arg || undefined)
+    const projectOutcome = !hasAttachments
+      ? await projectSelectionController.handleInput(chatId, trimmed)
+      : null
+    if (projectOutcome) {
+      const response = formatProjectSelectionOutcome(projectOutcome)
+      if (response) await sendText(chatId, response)
       return
     }
     if (!hasAttachments && (trimmed === '/help' || trimmed === '帮助')) {

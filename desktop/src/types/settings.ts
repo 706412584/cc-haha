@@ -197,6 +197,7 @@ export type UserSettings = {
   modelContext?: string
   effort?: EffortLevel
   alwaysThinkingEnabled?: boolean
+  workflowKeywordTriggerEnabled?: boolean
   autoDreamEnabled?: boolean
   unifiedActivityPanelEnabled?: boolean
   agentOfficeSurface?: AgentOfficeSurface

@@ -1,6 +1,7 @@
 /**
  * TeamWatcher -- monitors ~/.claude/teams/ for changes and pushes
- * real-time updates to all connected WebSocket clients.
+ * real-time updates to the team's lead desktop session. Legacy team files
+ * without a leadSessionId fall back to all connected clients.
  *
  * Uses polling (setInterval) rather than fs.watch for cross-platform reliability.
  * Detects three kinds of events:
@@ -12,8 +13,14 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
+import * as crypto from 'node:crypto'
 import { sendToSession, getActiveSessionIds } from '../ws/handler.js'
 import type { ServerMessage, TeamMemberStatus } from '../ws/events.js'
+import {
+  teamIncarnationId,
+  teamService,
+  type TeamService,
+} from './teamService.js'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -22,18 +29,43 @@ function getTeamsDir(): string {
   return path.join(configDir, 'teams')
 }
 
+type WatchedTeamIdentity = {
+  teamName: string
+  incarnationId: string
+  createdAt: number
+  leadSessionId?: string
+}
+
 // ─── TeamWatcher ──────────────────────────────────────────────────────────
 
 export class TeamWatcher {
   private intervalId: ReturnType<typeof setInterval> | null = null
-  private lastSnapshots = new Map<string, string>() // teamName -> raw JSON content
+  private checkPromise: Promise<void> | null = null
+  private lastSnapshots = new Map<string, string>() // teamName -> raw config JSON
+  private lastWorkbenchFingerprints = new Map<string, string>()
+  private lastLeadSessionIds = new Map<string, string>()
+  private lastTeamIdentities = new Map<string, WatchedTeamIdentity>()
+
+  constructor(
+    private readonly emit: (message: ServerMessage, leadSessionId?: string) => void = (message, leadSessionId) => {
+      if (leadSessionId) {
+        sendToSession(leadSessionId, message)
+        return
+      }
+      for (const id of getActiveSessionIds()) sendToSession(id, message)
+    },
+    private readonly archive: Pick<
+      TeamService,
+      'getWorkbench' | 'markWorkbenchArchiveDeleted'
+    > = teamService,
+  ) {}
 
   /** Start polling for team changes. */
   start(intervalMs = 3000): void {
     if (this.intervalId) return // already running
     // Run an initial check immediately, then start the interval
-    this.check()
-    this.intervalId = setInterval(() => this.check(), intervalMs)
+    void this.scheduleCheck()
+    this.intervalId = setInterval(() => void this.scheduleCheck(), intervalMs)
   }
 
   /** Stop polling. */
@@ -45,18 +77,30 @@ export class TeamWatcher {
   }
 
   /** Visible for testing -- force a single poll cycle. */
-  checkNow(): void {
-    this.check()
+  checkNow(): Promise<void> {
+    return this.scheduleCheck()
   }
 
   /** Clear internal snapshot state (useful in tests). */
   reset(): void {
     this.lastSnapshots.clear()
+    this.lastWorkbenchFingerprints.clear()
+    this.lastLeadSessionIds.clear()
+    this.lastTeamIdentities.clear()
   }
 
   // ── Core polling logic ─────────────────────────────────────────────────
 
-  private check(): void {
+  private scheduleCheck(): Promise<void> {
+    if (this.checkPromise) return this.checkPromise
+    const current = this.check().finally(() => {
+      if (this.checkPromise === current) this.checkPromise = null
+    })
+    this.checkPromise = current
+    return current
+  }
+
+  private async check(): Promise<void> {
     const teamsDir = getTeamsDir()
 
     let entries: fs.Dirent[]
@@ -66,9 +110,21 @@ export class TeamWatcher {
       // teams directory doesn't exist yet -- nothing to watch
       // If we previously knew about teams, they are now all "deleted"
       for (const [name] of this.lastSnapshots) {
-        this.broadcast({ type: 'team_deleted', teamName: name })
+        const identity = this.lastTeamIdentities.get(name)
+        await this.archive.markWorkbenchArchiveDeleted(
+          identity?.teamName ?? name,
+          identity?.leadSessionId ?? this.lastLeadSessionIds.get(name),
+          identity?.incarnationId,
+        ).catch(() => {})
+        this.broadcast(
+          { type: 'team_deleted', teamName: name, ...identity },
+          identity?.leadSessionId ?? this.lastLeadSessionIds.get(name),
+        )
       }
       this.lastSnapshots.clear()
+      this.lastWorkbenchFingerprints.clear()
+      this.lastLeadSessionIds.clear()
+      this.lastTeamIdentities.clear()
       return
     }
 
@@ -89,40 +145,198 @@ export class TeamWatcher {
       }
 
       const lastContent = this.lastSnapshots.get(teamName)
+      const currentIdentity = this.readTeamIdentity(teamName, content)
+      const previousIdentity = this.lastTeamIdentities.get(teamName)
+      const leadSessionId = currentIdentity?.leadSessionId ??
+        previousIdentity?.leadSessionId ??
+        this.lastLeadSessionIds.get(teamName)
+      const workbenchFingerprint = this.buildWorkbenchFingerprint(
+        teamsDir,
+        teamName,
+        content,
+      )
 
       if (lastContent === undefined) {
         // New team detected
         this.lastSnapshots.set(teamName, content)
-        this.broadcast({ type: 'team_created', teamName })
+        this.lastWorkbenchFingerprints.set(teamName, workbenchFingerprint)
+        if (leadSessionId) this.lastLeadSessionIds.set(teamName, leadSessionId)
+        if (currentIdentity) this.lastTeamIdentities.set(teamName, currentIdentity)
+        this.broadcast({ type: 'team_created', teamName, ...currentIdentity }, leadSessionId)
+        await this.archive.getWorkbench(teamName).catch(() => {})
       } else if (content !== lastContent) {
+        if (
+          previousIdentity &&
+          currentIdentity &&
+          previousIdentity.incarnationId !== currentIdentity.incarnationId
+        ) {
+          await this.archive.markWorkbenchArchiveDeleted(
+            previousIdentity.teamName,
+            previousIdentity.leadSessionId,
+            previousIdentity.incarnationId,
+          ).catch(() => {})
+          this.broadcast(
+            { type: 'team_deleted', teamName, ...previousIdentity },
+            previousIdentity.leadSessionId,
+          )
+          this.lastSnapshots.set(teamName, content)
+          this.lastWorkbenchFingerprints.set(teamName, workbenchFingerprint)
+          this.lastTeamIdentities.set(teamName, currentIdentity)
+          if (currentIdentity.leadSessionId) {
+            this.lastLeadSessionIds.set(teamName, currentIdentity.leadSessionId)
+          } else {
+            this.lastLeadSessionIds.delete(teamName)
+          }
+          this.broadcast(
+            { type: 'team_created', teamName, ...currentIdentity },
+            currentIdentity.leadSessionId,
+          )
+          await this.archive.getWorkbench(teamName).catch(() => {})
+          continue
+        }
         // Team config changed -- extract member statuses and broadcast
         this.lastSnapshots.set(teamName, content)
         try {
           const config = JSON.parse(content)
+          if (leadSessionId) this.lastLeadSessionIds.set(teamName, leadSessionId)
+          if (currentIdentity) this.lastTeamIdentities.set(teamName, currentIdentity)
           const members = this.extractMemberStatuses(config)
           // Merge inbox-discovered members that are missing from config
           const inboxMembers = this.discoverInboxMembers(teamsDir, teamName, config)
           const subagentMembers = this.discoverSubagentMembers(teamsDir, config)
           const allMembers = [...members, ...inboxMembers, ...subagentMembers]
-          this.broadcast({ type: 'team_update', teamName, members: allMembers })
+          this.broadcast({
+            type: 'team_update',
+            teamName,
+            members: allMembers,
+            ...currentIdentity,
+          }, leadSessionId)
         } catch {
           // JSON parse failed (likely truncated write) — try to recover partial members
           const recovered = this.recoverPartialMembers(content)
           if (recovered.length > 0) {
-            this.broadcast({ type: 'team_update', teamName, members: recovered })
+            this.broadcast({
+              type: 'team_update',
+              teamName,
+              members: recovered,
+              ...previousIdentity,
+            }, leadSessionId)
           }
           // If nothing recoverable, skip broadcast entirely — don't send empty members
         }
       }
-      // else: content unchanged, nothing to do
+
+      if (
+        lastContent !== undefined &&
+        this.lastWorkbenchFingerprints.get(teamName) !== workbenchFingerprint
+      ) {
+        this.lastWorkbenchFingerprints.set(teamName, workbenchFingerprint)
+        await this.archive.getWorkbench(teamName).catch(() => {})
+        this.broadcast({
+          type: 'team_workbench_updated',
+          teamName,
+          ...currentIdentity,
+        }, leadSessionId)
+      }
     }
 
     // Check for deleted teams (were in lastSnapshots but no longer on disk)
     for (const [name] of this.lastSnapshots) {
       if (!currentTeamNames.has(name)) {
+        const identity = this.lastTeamIdentities.get(name)
+        const leadSessionId = identity?.leadSessionId ?? this.lastLeadSessionIds.get(name)
+        await this.archive.markWorkbenchArchiveDeleted(
+          identity?.teamName ?? name,
+          leadSessionId,
+          identity?.incarnationId,
+        ).catch(() => {})
         this.lastSnapshots.delete(name)
-        this.broadcast({ type: 'team_deleted', teamName: name })
+        this.lastWorkbenchFingerprints.delete(name)
+        this.lastLeadSessionIds.delete(name)
+        this.lastTeamIdentities.delete(name)
+        this.broadcast({ type: 'team_deleted', teamName: name, ...identity }, leadSessionId)
       }
+    }
+  }
+
+  /**
+   * Config writes are only one part of Agent Teams activity. Task ownership and
+   * dependencies live under tasks/, while direct messages live under inboxes/.
+   * Hash all three read-only surfaces so the desktop can invalidate its joined
+   * workbench snapshot without receiving file paths or partial file contents.
+   */
+  private buildWorkbenchFingerprint(
+    teamsDir: string,
+    teamName: string,
+    configContent: string,
+  ): string {
+    const hash = crypto.createHash('sha256')
+    hash.update(configContent)
+    const configDir = path.dirname(teamsDir)
+    this.updateHashFromJsonDirectory(
+      hash,
+      path.join(configDir, 'tasks', teamName),
+    )
+    this.updateHashFromJsonDirectory(
+      hash,
+      path.join(teamsDir, teamName, 'inboxes'),
+    )
+    return hash.digest('hex')
+  }
+
+  private updateHashFromJsonDirectory(
+    hash: crypto.Hash,
+    directory: string,
+  ): void {
+    let files: string[]
+    try {
+      files = fs.readdirSync(directory).filter((file) => file.endsWith('.json')).sort()
+    } catch {
+      hash.update('\u0000missing')
+      return
+    }
+
+    for (const file of files) {
+      hash.update('\u0000' + file + '\u0000')
+      try {
+        hash.update(fs.readFileSync(path.join(directory, file)))
+      } catch {
+        hash.update('unreadable')
+      }
+    }
+  }
+
+  private readTeamIdentity(
+    teamName: string,
+    content: string,
+  ): WatchedTeamIdentity | undefined {
+    try {
+      const config = JSON.parse(content) as Record<string, unknown>
+      const createdAt = typeof config.createdAt === 'number'
+        ? config.createdAt
+        : Number(config.createdAt)
+      if (!Number.isFinite(createdAt)) return undefined
+      const leadSessionId = typeof config.leadSessionId === 'string' && config.leadSessionId
+        ? config.leadSessionId
+        : undefined
+      const canonicalTeamName = typeof config.name === 'string' && config.name
+        ? config.name
+        : teamName
+      const identity = {
+        teamName: canonicalTeamName,
+        createdAt,
+        ...(leadSessionId ? { leadSessionId } : {}),
+      }
+      return {
+        ...identity,
+        incarnationId: teamIncarnationId({
+          name: canonicalTeamName,
+          createdAt,
+          leadSessionId,
+        }),
+      }
+    } catch {
+      return undefined
     }
   }
 
@@ -146,6 +360,11 @@ export class TeamWatcher {
         agentId: (m.agentId as string) || '',
         role: (m.name as string) || (m.agentType as string) || 'member',
         status,
+        // Only the runner's own turn markers are cheap enough to read on every
+        // poll. Without one, say nothing so the last full team read stands.
+        ...(typeof m.isActive === 'boolean'
+          ? { activity: (m.isActive ? 'active' : 'idle') as const }
+          : {}),
         currentTask: (m.currentTask as string) || undefined,
       }
     })
@@ -185,6 +404,8 @@ export class TeamWatcher {
           agentId: `${name}@${teamName}`,
           role: name,
           status: 'running', // assume running — they have an inbox
+          // An inbox proves the member exists, never that it is mid-turn.
+          activity: 'unknown',
         })
       }
 
@@ -231,9 +452,9 @@ export class TeamWatcher {
 
         for (const file of files) {
           if (!file.endsWith('.jsonl')) continue
-          const inferredName = this.extractSubagentName(
-            path.join(subagentsDir, file),
-          )
+          const filePath = path.join(subagentsDir, file)
+          const inferredName = this.extractSubagentMetadataName(filePath) ??
+            this.extractSubagentName(filePath)
           if (
             inferredName &&
             inferredName !== 'team-lead' &&
@@ -244,6 +465,7 @@ export class TeamWatcher {
               agentId: `${inferredName}@${teamName}`,
               role: inferredName,
               status: 'running',
+              activity: 'unknown',
             })
           }
         }
@@ -292,6 +514,18 @@ export class TeamWatcher {
     return members
   }
 
+  private extractSubagentMetadataName(filePath: string): string | null {
+    try {
+      const metadataPath = filePath.replace(/\.jsonl$/, '.meta.json')
+      const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf-8')) as Record<string, unknown>
+      return typeof metadata.agentType === 'string' && metadata.agentType.trim()
+        ? metadata.agentType
+        : null
+    } catch {
+      return null
+    }
+  }
+
   private extractSubagentName(filePath: string): string | null {
     try {
       const head = fs.readFileSync(filePath, 'utf-8').slice(0, 8192)
@@ -311,12 +545,7 @@ export class TeamWatcher {
         }
       }
 
-      const match =
-        head.match(/"agentName"\s*:\s*"([^"]+)"/) ||
-        head.match(/"name"\s*:\s*"([^"]+)"/) ||
-        head.match(/\*\*([a-zA-Z0-9_-]+)\*\*/)
-
-      return match?.[1] ?? null
+      return null
     } catch {
       return null
     }
@@ -324,11 +553,8 @@ export class TeamWatcher {
 
   // ── Broadcasting ───────────────────────────────────────────────────────
 
-  private broadcast(message: ServerMessage): void {
-    const sessionIds = getActiveSessionIds()
-    for (const id of sessionIds) {
-      sendToSession(id, message)
-    }
+  private broadcast(message: ServerMessage, leadSessionId?: string): void {
+    this.emit(message, leadSessionId)
   }
 }
 

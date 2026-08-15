@@ -449,6 +449,14 @@ export type AppState = DeepImmutable<{
   advisorModel?: string
   // Effort value
   effortValue?: EffortValue
+  // Ultracode: xhigh effort plus standing dynamic-workflow orchestration.
+  // Session-scoped and never persisted — /effort ultracode sets it, a new
+  // session starts without it.
+  ultracode?: boolean
+  // Set by opt+w in the composer: the user typed `ultracode` but does not want
+  // this turn orchestrated. Cleared as soon as the keyword leaves the input,
+  // so it never leaks into the next prompt.
+  suppressWorkflowKeyword?: boolean
   // Set synchronously in launchUltraplan before the detached flow starts.
   // Prevents duplicate launches during the ~5s window before
   // ultraplanSessionUrl is set by teleportToRemote. Cleared by launchDetached
@@ -589,6 +597,8 @@ export function getDefaultAppState(): AppState {
     authVersion: 0,
     initialMessage: null,
     effortValue: undefined,
+    ultracode: false,
+    suppressWorkflowKeyword: false,
     activeOverlays: new Set<string>(),
     fastMode: false,
   }

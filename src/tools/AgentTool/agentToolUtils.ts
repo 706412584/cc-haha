@@ -505,10 +505,11 @@ export function emitAgentToolActivitiesForMessage(
   message: MessageType,
   taskId: string,
   parentToolUseId: string | undefined,
+  ownerAgentId?: string,
 ): void {
   if (!parentToolUseId) return
   for (const activity of extractAgentToolActivities(message)) {
-    emitAgentToolActivity(taskId, parentToolUseId, activity)
+    emitAgentToolActivity(taskId, parentToolUseId, activity, ownerAgentId)
   }
 }
 
@@ -519,6 +520,7 @@ export function emitTaskProgress(
   description: string,
   startTime: number,
   lastToolName?: string,
+  ownerAgentId?: string,
 ): void {
   const progress = getProgressUpdate(tracker)
   emitTaskProgressEvent({
@@ -530,6 +532,7 @@ export function emitTaskProgress(
     toolUses: progress.toolUseCount,
     lastToolName,
     summary: progress.summary ?? (lastToolName ? undefined : description),
+    ownerAgentId,
   })
 }
 
@@ -781,6 +784,7 @@ async function runAsyncAgentLifecycleImpl({
   enableSummarization,
   getWorktreeResult,
   epoch,
+  ownerAgentId,
 }: {
   taskId: string
   epoch?: number
@@ -802,6 +806,8 @@ async function runAsyncAgentLifecycleImpl({
     worktreePath?: string
     worktreeBranch?: string
   }>
+  /** Stable lifecycle owner resolved when the run was spawned or resumed. */
+  ownerAgentId?: string
 }): Promise<void> {
   // Tests and initial Agent spawns often only set toolUseContext.toolUseId;
   // resume paths pass an explicit parentToolUseId which must win.
@@ -863,6 +869,7 @@ async function runAsyncAgentLifecycleImpl({
         message,
         taskId,
         agentToolUseId,
+        ownerAgentId,
       )
       const lastToolName = getLastToolUseName(message)
       if (message.type === 'assistant') {
@@ -873,6 +880,7 @@ async function runAsyncAgentLifecycleImpl({
           description,
           metadata.startTime,
           lastToolName,
+          ownerAgentId,
         )
       }
     }

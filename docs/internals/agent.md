@@ -350,7 +350,7 @@ Agent Teams 支持两种执行后端：
 | **用户** | `~/.claude/agents/*.md` | 在所有项目中可用 |
 | **项目** | `<项目目录>/.claude/agents/*.md` | 只在当前项目中可用；同名时覆盖用户 Agent |
 
-用户和项目 Agent 可以在桌面端创建、编辑和删除，保存结果会直接写回对应的 Markdown 文件。内置、插件、托管策略和 CLI 参数等其他来源也会显示在列表中，但只能查看，不能从桌面端改写其来源文件。
+用户和项目 Agent 可以在桌面端创建、编辑和删除，保存结果会直接写回对应的 Markdown 文件。内置、插件、托管策略和 CLI 参数等其他来源也会显示在列表中，但只能查看，不能从桌面端改写其来源文件。内置 Agent 是一个例外：它的模型和推理强度可以单独覆盖，但覆盖写在 settings.json 而不是来源文件里，`source` 仍然是 `built-in`，详见下文「覆盖内置 Agent 的模型与推理强度」。
 
 当桌面端连接着当前运行会话时，创建、编辑或删除 Agent 会原地热重载该会话，下一次 spawn 立即使用新定义。如果没有可用的运行时，或热重载失败，文件保存仍然成功；桌面端会显示不阻塞操作的警告，并在下次启动时自动读取已保存的定义。
 
@@ -410,14 +410,39 @@ maxTurns: 10
 1. `CLAUDE_CODE_SUBAGENT_MODEL` 的具体模型值（设为 `inherit` 时不锁定模型）
 2. 本次 `Agent({ ..., model: "..." })` 调用指定的模型
 3. Agent Markdown frontmatter 中的 `model`
-4. 主会话模型
+4. settings.json 中 `builtInAgentOverrides` 指定的 `model`（仅内置 Agent）
+5. 主会话模型
 
 推理强度的解析优先级从高到低为：
 
 1. `CLAUDE_CODE_EFFORT_LEVEL`
 2. Agent Markdown frontmatter 中的 `effort`
-3. 当前会话的 effort
-4. 模型默认值
+3. settings.json 中 `builtInAgentOverrides` 指定的 `effort`（仅内置 Agent）
+4. 当前会话的 effort
+5. 模型默认值
+
+### 覆盖内置 Agent 的模型与推理强度
+
+内置 Agent 没有 Markdown 文件，因此它的 `model` / `effort` 通过 settings.json 的 `builtInAgentOverrides` 调整，key 是 spawn 时用的 agentType（大小写敏感）：
+
+```json
+{
+  "builtInAgentOverrides": {
+    "Explore": { "model": "sonnet", "effort": "low" },
+    "general-purpose": { "effort": "high" }
+  }
+}
+```
+
+几条容易踩的规则：
+
+- **只有这两个字段可改。** 系统提示词、工具范围和颜色仍由内置定义决定，覆盖不会改变 `source`，因此内置 Agent 的工具特权保持不变。
+- **清除覆盖 = 删掉字段**，不是写 `inherit`。各内置 Agent 的默认值互不相同（`Explore` 默认 `haiku`、`Plan` 默认 `inherit`、`general-purpose` 不写 `model`），所以 `model: "inherit"` 是一个正常取值，含义是跟随主会话，与"恢复默认"不同。
+- **未知的 agentType 会被忽略但不会被清理。** 内置 Agent 集合随 feature flag 和 entrypoint 变化，自动清理会在开关翻转时销毁有效配置。
+- 组织策略 `strictPluginOnlyCustomization` 包含 `agents` 时，用户级和项目级的覆盖在**解析阶段**就会被忽略，只有 managed 来源生效。
+- 与 Agent Markdown 文件一样，改完 settings.json 不会自动作用于已经在跑的会话；桌面端保存时会触发一次会话重载，手工改文件则需要重启会话或 `/reload-plugins`。
+
+对应的桌面端入口见[子 Agent 与任务拆分](../desktop/agents.md)。
 
 `Agent` 工具没有单次调用的 `effort` 参数，因此应在 Agent 定义或会话层设置。`low`、`medium`、`high`、`xhigh`、`max` 是否可用取决于解析后的真实模型及提供商能力；Claude 模型会向下回退到可用档位，其他提供商按各自的模型目录规范化，不支持 effort 的模型不会应用该字段。
 

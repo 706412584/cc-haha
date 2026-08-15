@@ -61,6 +61,27 @@ describe('agent effort values', () => {
     }
   })
 
+  test('resolves Grok effort from the bundled Grok catalog', () => {
+    const originalOverride = process.env.CLAUDE_CODE_EFFORT_LEVEL
+    delete process.env.CLAUDE_CODE_EFFORT_LEVEL
+    try {
+      expect(modelSupportsEffort('grok-4.6')).toBe(true)
+      expect(modelSupportsXHighEffort('grok-4.6')).toBe(true)
+      expect(resolveAppliedEffort('grok-4.6', 'xhigh')).toBe('xhigh')
+      expect(resolveAppliedEffort('grok-4.6', 'max')).toBe('high')
+      expect(modelSupportsXHighEffort('grok-4.5')).toBe(false)
+      expect(resolveAppliedEffort('grok-4.5', 'xhigh')).toBe('high')
+      expect(modelSupportsEffort('grok-composer-2.5-fast')).toBe(false)
+      expect(resolveAppliedEffort('grok-composer-2.5-fast', 'xhigh')).toBe('high')
+    } finally {
+      if (originalOverride === undefined) {
+        delete process.env.CLAUDE_CODE_EFFORT_LEVEL
+      } else {
+        process.env.CLAUDE_CODE_EFFORT_LEVEL = originalOverride
+      }
+    }
+  })
+
   test('lets request-scoped Agent effort override session env only when marked', () => {
     const originalOverride = process.env.CLAUDE_CODE_EFFORT_LEVEL
     try {

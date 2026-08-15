@@ -92,6 +92,18 @@ export type SessionListItem = {
   thinkingEnabled?: boolean
 }
 
+export type SubagentTranscriptFragment = {
+  agentId: string
+  messages: MessageEntry[]
+  taskNotifications: SessionTaskNotification[]
+  modifiedAt: number
+}
+
+export type SubagentTranscript = {
+  messages: MessageEntry[]
+  taskNotifications: SessionTaskNotification[]
+}
+
 export type SessionWorkspaceState = 'available' | 'worktree_removed' | 'missing'
 
 export type SessionListShadowComparison = {
@@ -246,11 +258,22 @@ type SubagentMessagesResult = {
 export type SessionTaskNotification = {
   taskId: string
   toolUseId: string
+  /** Transcript owner for nested lifecycle events. Undefined is root/legacy. */
+  ownerAgentId?: string
   status: 'completed' | 'failed' | 'stopped'
+  workflowRunId?: string
   summary?: string
   result?: string
   outputFile?: string
   timestamp?: string
+}
+
+/** Canonical terminal identity within a session. Child agents may reuse the
+ * same raw leaf tool id, so toolUseId alone is not a stable dedupe key. */
+export function sessionTaskNotificationIdentity(
+  notification: Pick<SessionTaskNotification, 'ownerAgentId' | 'toolUseId'>,
+): string {
+  return JSON.stringify([notification.ownerAgentId ?? null, notification.toolUseId])
 }
 
 export type TranscriptUsageSnapshot = {
@@ -364,6 +387,108 @@ type RawEntry = {
 }
 
 type RawMessageUsage = NonNullable<RawEntry['message']>['usage']
+
+type TranscriptContextAccumulator = {
+  latestModel: string | null
+  latestUsage: {
+    model: string
+    inputTokens: number
+    outputTokens: number
+    cacheReadInputTokens: number
+    cacheCreationInputTokens: number
+  } | null
+  estimatedTokensFromMessages: number
+  estimatedTokensAfterUsage: number
+  transcriptHasMediaInput: boolean
+}
+
+function createTranscriptContextAccumulator(): TranscriptContextAccumulator {
+  return {
+    latestModel: null,
+    latestUsage: null,
+    estimatedTokensFromMessages: 0,
+    estimatedTokensAfterUsage: 0,
+    transcriptHasMediaInput: false,
+  }
+}
+
+function accumulateTranscriptContext(
+  state: TranscriptContextAccumulator,
+  entry: RawEntry,
+): void {
+  if (entry.type === 'system' && entry.subtype === 'compact_boundary') {
+    state.latestUsage = null
+    state.estimatedTokensFromMessages = 0
+    state.estimatedTokensAfterUsage = 0
+    state.transcriptHasMediaInput = false
+  }
+
+  if (typeof entry.message?.model === 'string') {
+    state.latestModel = entry.message.model
+  }
+
+  if (
+    entry.type === 'user' ||
+    entry.type === 'assistant' ||
+    entry.type === 'attachment'
+  ) {
+    const tokens = roughTokenCountEstimationForMessage(entry)
+    state.estimatedTokensFromMessages += tokens
+    state.estimatedTokensAfterUsage += tokens
+    if (!state.transcriptHasMediaInput && hasMediaInput([entry])) {
+      state.transcriptHasMediaInput = true
+    }
+  }
+
+  const usage = entry.message?.usage
+  const model = entry.message?.model
+  if (!usage || typeof model !== 'string') return
+
+  const inputTokens =
+    typeof usage.input_tokens === 'number' ? usage.input_tokens : 0
+  const outputTokens =
+    typeof usage.output_tokens === 'number' ? usage.output_tokens : 0
+  const cacheReadInputTokens =
+    typeof usage.cache_read_input_tokens === 'number'
+      ? usage.cache_read_input_tokens
+      : 0
+  const cacheCreationInputTokens =
+    typeof usage.cache_creation_input_tokens === 'number'
+      ? usage.cache_creation_input_tokens
+      : 0
+
+  if (
+    inputTokens === 0 &&
+    outputTokens === 0 &&
+    cacheReadInputTokens === 0 &&
+    cacheCreationInputTokens === 0
+  ) {
+    return
+  }
+
+  state.latestUsage = {
+    model,
+    inputTokens,
+    outputTokens,
+    cacheReadInputTokens,
+    cacheCreationInputTokens,
+  }
+  state.estimatedTokensAfterUsage = 0
+}
+
+function resolveTranscriptContextUsage(
+  state: TranscriptContextAccumulator,
+): NonNullable<TranscriptContextAccumulator['latestUsage']> | null {
+  if (state.latestUsage) return state.latestUsage
+  if (!state.latestModel) return null
+  return {
+    model: state.latestModel,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadInputTokens: 0,
+    cacheCreationInputTokens: 0,
+  }
+}
 
 function normalizeMessageUsage(usage: RawMessageUsage): MessageUsage | undefined {
   if (!usage) return undefined
@@ -489,6 +614,7 @@ type InspectionFoldState = {
     cacheCreationInputTokens: number
   } | null
   estimatedTokensFromMessages: number
+  estimatedTokensAfterUsage: number
   transcriptHasMediaInput: boolean
 }
 
@@ -517,6 +643,7 @@ function createInspectionFoldState(): InspectionFoldState {
     lastUsageAt: null,
     latestContextUsage: null,
     estimatedTokensFromMessages: 0,
+    estimatedTokensAfterUsage: 0,
     transcriptHasMediaInput: false,
   }
 }
@@ -2184,7 +2311,8 @@ export class SessionService {
     if (!xml) return null
 
     const toolUseId = this.readXmlTag(xml, 'tool-use-id')
-    const status = this.readXmlTag(xml, 'status')
+    const rawStatus = this.readXmlTag(xml, 'status')
+    const status = rawStatus === 'killed' ? 'stopped' : rawStatus
     if (
       !toolUseId ||
       (status !== 'completed' && status !== 'failed' && status !== 'stopped')
@@ -2193,13 +2321,17 @@ export class SessionService {
     }
 
     const taskId = this.readXmlTag(xml, 'task-id') || toolUseId
+    const workflowRunId = this.readXmlTag(xml, 'workflow-run-id')
     const summary = this.readXmlTag(xml, 'summary')
     const result = this.readXmlTag(xml, 'result')
     const outputFile = this.readXmlTag(xml, 'output-file')
+    const ownerAgentId = this.readXmlTag(xml, 'owner-agent-id')
     return {
       taskId,
       toolUseId,
+      ...(ownerAgentId ? { ownerAgentId } : {}),
       status,
+      ...(workflowRunId ? { workflowRunId } : {}),
       ...(summary ? { summary } : {}),
       ...(result ? { result } : {}),
       ...(outputFile ? { outputFile } : {}),
@@ -2228,10 +2360,15 @@ export class SessionService {
       typeof notification[key] === 'string' && notification[key]
         ? notification[key] as string
         : undefined
+    const workflowRunId = optionalString('workflowRunId')
     return {
       taskId: optionalString('taskId') ?? toolUseId,
       toolUseId,
+      ...(optionalString('ownerAgentId')
+        ? { ownerAgentId: optionalString('ownerAgentId') }
+        : {}),
       status,
+      ...(workflowRunId ? { workflowRunId } : {}),
       ...(optionalString('summary') ? { summary: optionalString('summary') } : {}),
       ...(optionalString('result') ? { result: optionalString('result') } : {}),
       ...(optionalString('outputFile') ? { outputFile: optionalString('outputFile') } : {}),
@@ -3095,11 +3232,14 @@ export class SessionService {
       cacheCreationInputTokens: number
     },
     estimatedTokensFromMessages: number,
+    estimatedTokensAfterUsage: number,
     transcriptHasMediaInput: boolean,
     launchInfo?: ProviderContextWindowHint | null,
   ): Promise<TranscriptContextEstimate> {
     const rawMaxTokens = await this.getTranscriptContextWindow(sessionId, latest.model, launchInfo)
     const promptTokens = latest.inputTokens + latest.cacheReadInputTokens + latest.cacheCreationInputTokens
+    const providerTokens = promptTokens + latest.outputTokens
+    const hasProviderUsage = providerTokens > 0
     const estimatedTokens = estimatedTokensFromMessages || promptTokens
     const contextBudget = calculateContextBudget({
       estimatedTokens,
@@ -3115,7 +3255,16 @@ export class SessionService {
       }),
       hasMediaInput: transcriptHasMediaInput,
     })
-    const totalTokens = contextBudget.usedTokens
+    const totalTokens =
+      hasProviderUsage && !contextBudget.ignoredUsageReason
+        ? Math.min(
+            Math.max(
+              contextBudget.usedTokens,
+              providerTokens + estimatedTokensAfterUsage,
+            ),
+            rawMaxTokens,
+          )
+        : contextBudget.usedTokens
     const percentage = rawMaxTokens > 0 ? Math.round((totalTokens / rawMaxTokens) * 100) : 0
     const usageCategories: TranscriptContextEstimate['categories'] = [
       { name: 'Input tokens', tokens: latest.inputTokens, color: '#8f3217' },
@@ -3124,9 +3273,9 @@ export class SessionService {
       { name: 'Output tokens', tokens: latest.outputTokens, color: '#2f7d32' },
     ]
     const contextCategories: TranscriptContextEstimate['categories'] =
-      contextBudget.ignoredUsageReason === 'low_trust_media_usage'
-        ? [{ name: 'Estimated context', tokens: totalTokens, color: '#8f3217' }]
-        : usageCategories
+      totalTokens === providerTokens
+        ? usageCategories
+        : [{ name: 'Estimated context', tokens: totalTokens, color: '#8f3217' }]
     const categories: TranscriptContextEstimate['categories'] = [
       ...contextCategories,
       { name: 'Free space', tokens: Math.max(0, rawMaxTokens - totalTokens), color: '#a1a1aa', isDeferred: true },
@@ -3173,68 +3322,21 @@ export class SessionService {
     if (!found) return null
 
     const entries = await this.readJsonlFile(found.filePath)
-    let latest: {
-      model: string
-      inputTokens: number
-      outputTokens: number
-      cacheReadInputTokens: number
-      cacheCreationInputTokens: number
-    } | null = null
-    let estimatedTokensFromMessages = 0
-    let transcriptHasMediaInput = false
+    const contextState = createTranscriptContextAccumulator()
 
     for (const entry of entries) {
-      if (entry.type === 'system' && entry.subtype === 'compact_boundary') {
-        estimatedTokensFromMessages = 0
-        transcriptHasMediaInput = false
-        if (latest) {
-          latest = {
-            ...latest,
-            inputTokens: 0,
-            outputTokens: 0,
-            cacheReadInputTokens: 0,
-            cacheCreationInputTokens: 0,
-          }
-        }
-        continue
-      }
-
-      if (
-        entry.type === 'user' ||
-        entry.type === 'assistant' ||
-        entry.type === 'attachment'
-      ) {
-        estimatedTokensFromMessages += roughTokenCountEstimationForMessage(entry)
-        if (!transcriptHasMediaInput && hasMediaInput([entry])) {
-          transcriptHasMediaInput = true
-        }
-      }
-
-      const usage = entry.message?.usage
-      const model = entry.message?.model
-      if (!usage || typeof model !== 'string') continue
-
-      const inputTokens = typeof usage.input_tokens === 'number' ? usage.input_tokens : 0
-      const outputTokens = typeof usage.output_tokens === 'number' ? usage.output_tokens : 0
-      const cacheReadInputTokens = typeof usage.cache_read_input_tokens === 'number' ? usage.cache_read_input_tokens : 0
-      const cacheCreationInputTokens = typeof usage.cache_creation_input_tokens === 'number' ? usage.cache_creation_input_tokens : 0
-
-      latest = {
-        model,
-        inputTokens,
-        outputTokens,
-        cacheReadInputTokens,
-        cacheCreationInputTokens,
-      }
+      accumulateTranscriptContext(contextState, entry)
     }
 
+    const latest = resolveTranscriptContextUsage(contextState)
     if (!latest) return null
 
     return await this.buildTranscriptContextEstimate(
       sessionId,
       latest,
-      estimatedTokensFromMessages,
-      transcriptHasMediaInput,
+      contextState.estimatedTokensFromMessages,
+      contextState.estimatedTokensAfterUsage,
+      contextState.transcriptHasMediaInput,
       this.resolveRuntimeContextMetadataFromEntries(entries),
     )
   }
@@ -3446,15 +3548,13 @@ export class SessionService {
     let firstUsageAt: number | null = seed.fold.firstUsageAt
     let lastUsageAt: number | null = seed.fold.lastUsageAt
 
-    let latestContextUsage: {
-      model: string
-      inputTokens: number
-      outputTokens: number
-      cacheReadInputTokens: number
-      cacheCreationInputTokens: number
-    } | null = seed.fold.latestContextUsage
-    let estimatedTokensFromMessages = seed.fold.estimatedTokensFromMessages
-    let transcriptHasMediaInput = seed.fold.transcriptHasMediaInput
+    const contextState = createTranscriptContextAccumulator()
+    contextState.latestUsage = seed.fold.latestContextUsage
+      ? { ...seed.fold.latestContextUsage }
+      : null
+    contextState.estimatedTokensFromMessages = seed.fold.estimatedTokensFromMessages
+    contextState.estimatedTokensAfterUsage = seed.fold.estimatedTokensAfterUsage
+    contextState.transcriptHasMediaInput = seed.fold.transcriptHasMediaInput
 
     const { consumed: consumedOffset } = await this.streamJsonlFileFrom(found.filePath, startOffset, (entry) => {
       if (typeof entry.message?.model === 'string') {
@@ -3523,16 +3623,7 @@ export class SessionService {
         transcriptMessageCount += 1
       }
 
-      if (
-        entry.type === 'user' ||
-        entry.type === 'assistant' ||
-        entry.type === 'attachment'
-      ) {
-        estimatedTokensFromMessages += roughTokenCountEstimationForMessage(entry)
-        if (!transcriptHasMediaInput && hasMediaInput([entry])) {
-          transcriptHasMediaInput = true
-        }
-      }
+      accumulateTranscriptContext(contextState, entry)
 
       const usage = entry.message?.usage
       const model = entry.message?.model
@@ -3545,14 +3636,6 @@ export class SessionService {
       const webSearchRequests = typeof usage.server_tool_use?.web_search_requests === 'number'
         ? usage.server_tool_use.web_search_requests
         : 0
-
-      latestContextUsage = {
-        model,
-        inputTokens,
-        outputTokens,
-        cacheReadInputTokens,
-        cacheCreationInputTokens,
-      }
 
       // Inherited fork history still describes the current context, but its API usage belongs to
       // the source session and must not be included in this fork's cumulative usage or cost.
@@ -3648,9 +3731,10 @@ export class SessionService {
       hasUnknownModelCost,
       firstUsageAt,
       lastUsageAt,
-      latestContextUsage,
-      estimatedTokensFromMessages,
-      transcriptHasMediaInput,
+      latestContextUsage: contextState.latestUsage,
+      estimatedTokensFromMessages: contextState.estimatedTokensFromMessages,
+      estimatedTokensAfterUsage: contextState.estimatedTokensAfterUsage,
+      transcriptHasMediaInput: contextState.transcriptHasMediaInput,
     })
 
     const workDir = latestWorkDir || latestCwd || this.desanitizePath(found.projectDir) || process.cwd()
@@ -3697,12 +3781,14 @@ export class SessionService {
           totalWebSearchRequests,
           models: Array.from(models.values()),
         }
+    const latestContextUsage = resolveTranscriptContextUsage(contextState)
     const contextEstimate = latestContextUsage
       ? await this.buildTranscriptContextEstimate(
           sessionId,
           latestContextUsage,
-          estimatedTokensFromMessages,
-          transcriptHasMediaInput,
+          contextState.estimatedTokensFromMessages,
+          contextState.estimatedTokensAfterUsage,
+          contextState.transcriptHasMediaInput,
           launchInfo,
         )
       : null
@@ -4291,6 +4377,13 @@ export class SessionService {
     sessionId: string,
     agentId: string,
   ): Promise<MessageEntry[]> {
+    return (await this.getSubagentTranscript(sessionId, agentId)).messages
+  }
+
+  async getSubagentTranscript(
+    sessionId: string,
+    agentId: string,
+  ): Promise<SubagentTranscript> {
     const found = await this.findSessionFile(sessionId)
     if (!found) {
       throw ApiError.notFound(`Session not found: ${sessionId}`)
@@ -4299,7 +4392,128 @@ export class SessionService {
     const entries = await this.readJsonlFile(
       this.subagentTranscriptPath(found.projectDir, sessionId, agentId),
     )
-    return this.entriesToMessages(entries)
+    return {
+      messages: this.entriesToMessages(entries),
+      taskNotifications: this.taskNotificationsFromEntries(entries),
+    }
+  }
+
+  /**
+   * Resolve which subagent transcript belongs to an Agent tool call.
+   *
+   * The sidecar metadata is written before the agent's query loop starts, so
+   * this resolves while the run is still in flight. The parent transcript's
+   * `tool_result` — the other way to recover an agent id — only lands once the
+   * agent has finished, which left live runs pointing at no transcript at all.
+   * `expectedOwnerAgentId` is the physical parent transcript id; null denotes
+   * a root-owned tool call.
+   */
+  async findSubagentAgentIdByToolUseId(
+    sessionId: string,
+    toolUseId: string,
+    expectedOwnerAgentId: string | null,
+  ): Promise<string | null> {
+    const found = await this.findSessionFile(sessionId)
+    if (!found) {
+      throw ApiError.notFound(`Session not found: ${sessionId}`)
+    }
+
+    const subagentsDir = path.join(
+      this.getProjectsDir(),
+      found.projectDir,
+      sessionId,
+      'subagents',
+    )
+    const files = await fs.readdir(subagentsDir).catch(() => [])
+    const candidates: Array<{ agentId: string; ownerAgentId?: string }> = []
+    let metadataComplete = true
+
+    for (const metadataFile of files.filter((file) => file.endsWith('.meta.json'))) {
+      try {
+        const metadata = JSON.parse(
+          await fs.readFile(path.join(subagentsDir, metadataFile), 'utf8'),
+        ) as Record<string, unknown>
+        if (metadata.toolUseId !== toolUseId) continue
+        const ownerAgentId = typeof metadata.ownerAgentId === 'string' && metadata.ownerAgentId
+          ? metadata.ownerAgentId
+          : undefined
+        candidates.push({
+          agentId: metadataFile.replace(/^agent-/, '').replace(/\.meta\.json$/, ''),
+          ...(ownerAgentId ? { ownerAgentId } : {}),
+        })
+      } catch {
+        // A half-written sidecar must not hide the other candidates.
+        metadataComplete = false
+      }
+    }
+
+    const exact = candidates.filter(candidate => expectedOwnerAgentId === null
+      ? candidate.ownerAgentId === undefined
+      : candidate.ownerAgentId === expectedOwnerAgentId)
+    if (exact.length === 1) return exact[0]!.agentId
+    if (exact.length > 1) return null
+
+    // Metadata written before ownerAgentId existed can still resolve a nested
+    // call, but only when the raw leaf identifies one sidecar in the complete
+    // session. Picking the first of several legacy candidates recreates the
+    // cross-parent collision this owner join is meant to prevent.
+    if (
+      expectedOwnerAgentId !== null &&
+      metadataComplete &&
+      candidates.length === 1 &&
+      candidates[0]!.ownerAgentId === undefined
+    ) {
+      return candidates[0]!.agentId
+    }
+
+    return null
+  }
+
+  async getSubagentTranscriptFragmentsByAgentType(
+    sessionId: string,
+    agentType: string,
+  ): Promise<SubagentTranscriptFragment[]> {
+    const found = await this.findSessionFile(sessionId)
+    if (!found) {
+      throw ApiError.notFound(`Session not found: ${sessionId}`)
+    }
+
+    const subagentsDir = path.join(
+      this.getProjectsDir(),
+      found.projectDir,
+      sessionId,
+      'subagents',
+    )
+    const files = await fs.readdir(subagentsDir).catch(() => [])
+    const fragments: SubagentTranscriptFragment[] = []
+
+    for (const metadataFile of files.filter((file) => file.endsWith('.meta.json'))) {
+      try {
+        const metadata = JSON.parse(
+          await fs.readFile(path.join(subagentsDir, metadataFile), 'utf8'),
+        ) as Record<string, unknown>
+        if (metadata.agentType !== agentType) continue
+
+        const transcriptFile = metadataFile.replace(/\.meta\.json$/, '.jsonl')
+        const transcriptPath = path.join(subagentsDir, transcriptFile)
+        const [entries, stat] = await Promise.all([
+          this.readJsonlFile(transcriptPath),
+          fs.stat(transcriptPath),
+        ])
+        fragments.push({
+          agentId: transcriptFile.replace(/^agent-/, '').replace(/\.jsonl$/, ''),
+          messages: this.entriesToMessages(entries),
+          taskNotifications: this.taskNotificationsFromEntries(entries),
+          modifiedAt: stat.mtimeMs,
+        })
+      } catch {
+        // A partially persisted fragment must not hide the other resumable runs.
+      }
+    }
+
+    return fragments.sort((left, right) => (
+      left.modifiedAt - right.modifiedAt || left.agentId.localeCompare(right.agentId)
+    ))
   }
 
   /**
@@ -5097,6 +5311,12 @@ export class SessionService {
       found,
       ['user', PERSISTED_TASK_NOTIFICATION_ENTRY_TYPE],
     ) ?? await this.readJsonlFile(found.filePath)
+    return this.taskNotificationsFromEntries(entries)
+  }
+
+  private taskNotificationsFromEntries(
+    entries: RawEntry[],
+  ): SessionTaskNotification[] {
     const notifications = new Map<string, SessionTaskNotification>()
     for (const entry of entries) {
       const notification = entry.type === PERSISTED_TASK_NOTIFICATION_ENTRY_TYPE
@@ -5104,7 +5324,9 @@ export class SessionService {
         : entry.message?.role === 'user'
           ? this.parseTaskNotificationContent(entry.message.content, entry.timestamp)
           : null
-      if (notification) notifications.set(notification.toolUseId, notification)
+      if (notification) {
+        notifications.set(sessionTaskNotificationIdentity(notification), notification)
+      }
     }
     return [...notifications.values()]
   }

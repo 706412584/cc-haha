@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Check, ChevronDown, ChevronRight, Circle, FileText, LoaderCircle, Square, Terminal, Users, X } from 'lucide-react'
+import { Check, ChevronDown, ChevronRight, Circle, FileText, LoaderCircle, Square, Terminal, Users, X, Zap } from 'lucide-react'
 import { Badge, StatusDot, type Tone } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { IconButton } from '@/components/ui/IconButton'
@@ -17,6 +17,9 @@ export type OpenSubagentPayload = {
   taskId?: string
   toolUseId: string
   title: string
+  teamName?: string
+  teamMemberName?: string
+  teamStartedAt?: number
 }
 
 type SessionActivityPanelPlacement = 'overlay' | 'rail'
@@ -84,6 +87,8 @@ function getSectionTitle(sectionId: ActivitySectionId, t: TranslationFn): string
       return t('session.activity.section.queue')
     case 'team':
       return t('session.activity.section.team')
+    case 'workflow':
+      return t('session.activity.section.workflow')
     case 'backgroundTasks':
       return t('session.activity.section.backgroundTasks')
     case 'subagents':
@@ -96,7 +101,7 @@ function getSectionTitle(sectionId: ActivitySectionId, t: TranslationFn): string
 }
 
 function getSectionRowsClassName(sectionId: ActivitySectionId, rowCount: number): string {
-  const base = 'space-y-1.5'
+  const base = 'space-y-0.5'
   if (rowCount === 0) return base
 
   switch (sectionId) {
@@ -105,6 +110,8 @@ function getSectionRowsClassName(sectionId: ActivitySectionId, rowCount: number)
     case 'queue':
       return base
     case 'team':
+      return base
+    case 'workflow':
       return base
     case 'backgroundTasks':
       return base
@@ -215,6 +222,8 @@ function getRowIcon(row: ActivityRow) {
   switch (row.section) {
     case 'team':
       return Users
+    case 'workflow':
+      return Zap
     case 'backgroundTasks':
       return Terminal
     case 'subagents':
@@ -235,11 +244,37 @@ function getStatusTone(status: ActivityRow['status']): Tone {
   return 'neutral'
 }
 
-/** Visible rows only, so the ratio always matches what the section shows. */
+/** A canonical Team DAG owns the section ratio when present. Run-local rows
+ * remain visible beside it without changing the shared workbench progress. */
 function getTaskProgress(rows: ActivityRow[]): { completed: number; total: number; percent: number } | null {
   if (rows.length === 0) return null
-  const completed = rows.filter((row) => row.status === 'completed').length
-  return { completed, total: rows.length, percent: Math.round((completed / rows.length) * 100) }
+  const teamRows = rows.filter((row) => row.teamTaskListId !== undefined)
+  const progressRows = teamRows.length > 0 ? teamRows : rows
+  const completed = progressRows.filter((row) => row.status === 'completed').length
+  return {
+    completed,
+    total: progressRows.length,
+    percent: Math.round((completed / progressRows.length) * 100),
+  }
+}
+
+/**
+ * The tile's fill states what happened without spending a word on it, which is
+ * what lets the row itself stay one line. Tone pairs come from the token scale
+ * (see components/AGENTS.md §3.2) — never a raw accent as foreground on its own
+ * container.
+ */
+function getRowIconToneClass(status: ActivityRow['status']): string {
+  if (status === 'running' || status === 'in_progress') {
+    return 'bg-[var(--color-brand-soft)] text-[var(--color-on-brand-soft)]'
+  }
+  if (status === 'completed' || status === 'idle') {
+    return 'bg-[var(--color-success-container)] text-[var(--color-on-success-container)]'
+  }
+  if (status === 'failed' || status === 'error') {
+    return 'bg-[var(--color-error-container)] text-[var(--color-on-error-container)]'
+  }
+  return 'bg-[var(--color-surface-container)] text-[var(--color-text-secondary)]'
 }
 
 function ActivityRowIcon({
@@ -251,14 +286,22 @@ function ActivityRowIcon({
   sessionId: string
   status?: ActivityRow['status']
 }) {
-  if (row.section === 'subagents') {
+  // Workflow agents get the same mascot as any other subagent — they are the
+  // same thing, and giving them a different glyph would imply otherwise.
+  if (row.section === 'subagents' || (row.section === 'workflow' && row.group)) {
     return <AgentMascot seed={`${sessionId}:${row.toolUseId ?? row.taskId ?? row.id}`} status={status} />
   }
 
   const Icon = getRowIcon(row)
 
+  // 30px to match `AgentMascot`, so a SubAgent row and a background-task row
+  // start their text on the same column.
   return (
-    <span className="inline-flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[var(--radius-md)] text-[var(--color-text-tertiary)]">
+    <span
+      data-testid="activity-row-icon"
+      data-tone-status={status}
+      className={`inline-flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-[var(--radius-md)] ${getRowIconToneClass(status)}`}
+    >
       <Icon size={15} strokeWidth={2} aria-hidden="true" />
     </span>
   )
@@ -327,6 +370,41 @@ function BackgroundTaskStopButton({
   )
 }
 
+/**
+ * A phase heading inside the workflow section.
+ *
+ * Deliberately not a card: the section is already a bordered list, and boxing
+ * each phase inside it turned three stages into three nested frames. A rule
+ * plus the settled count carries the grouping on its own.
+ */
+function WorkflowPhaseHeader({
+  label,
+  status,
+  done,
+  total,
+}: {
+  label: string
+  status: ActivityRow['status']
+  done: number
+  total: number
+}) {
+  return (
+    <div
+      data-testid="workflow-phase-header"
+      data-status={status}
+      className="flex items-center gap-2 px-2 pb-1 pt-2.5 first:pt-1"
+    >
+      <span className="truncate text-[11px] font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">
+        {label}
+      </span>
+      <span className="h-px flex-1 bg-[var(--color-border)]" aria-hidden="true" />
+      <span className="shrink-0 font-mono text-[11px] tabular-nums text-[var(--color-text-tertiary)]">
+        {done}/{total}
+      </span>
+    </div>
+  )
+}
+
 function ActivityRowView({
   row,
   sessionId,
@@ -349,6 +427,19 @@ function ActivityRowView({
   const t = useTranslation()
   const [subagentExpanded, setSubagentExpanded] = useState(false)
   const [now, setNow] = useState(() => Date.now())
+  // A workflow phase is a heading over its agents, not a row you can open.
+  // Rendering it as one made a fan-out read as a flat list where the stage
+  // boundaries were invisible.
+  if (row.groupProgress) {
+    return (
+      <WorkflowPhaseHeader
+        label={row.label}
+        status={row.status}
+        done={row.groupProgress.done}
+        total={row.groupProgress.total}
+      />
+    )
+  }
   const isTask = row.section === 'tasks'
   const isRunningSubagent = row.section === 'subagents' && row.status === 'running'
   const isStoppingSubagent = isRunningSubagent && Boolean(stoppingBackgroundTask)
@@ -364,7 +455,9 @@ function ActivityRowView({
   const showStatusIndicator = !isTask
   const statusLabel = isStoppingSubagent
     ? t('session.activity.status.stopping')
-    : getActivityStatusLabel(row.status, t)
+    : row.cached
+      ? t('workflows.agent.cached')
+      : getActivityStatusLabel(row.status, t)
   const label = row.taskHistory
     ? t('session.activity.tasks.earlier')
     : row.label
@@ -374,6 +467,10 @@ function ActivityRowView({
       total: row.taskHistory.total,
       turns: row.taskHistory.turnCount,
     })
+    // Tasks only. SubAgent / team / background rows deliberately stay one line:
+    // their `description` is free-form agent prose, not the compact identity
+    // string the prototype's second line shows, and three tests pin that a row
+    // never previews it. Details live in the expandable panel instead.
     : isTask && row.description && row.description !== row.label
       ? row.description
       : isTask && row.summary && row.summary !== row.label
@@ -388,14 +485,14 @@ function ActivityRowView({
       )}
       <span className="min-w-0 flex-1 truncate text-left">
         <span
-          className={`block truncate font-semibold leading-5 ${isTask ? 'text-[14px]' : 'text-[13px]'} ${isTask && row.status === 'completed' ? 'text-[var(--color-text-secondary)] line-through decoration-[var(--color-text-tertiary)]' : 'text-[var(--color-text-primary)]'}`}
+          className={`block truncate text-[13px] font-medium leading-5 ${isTask && row.status === 'completed' ? 'text-[var(--color-text-tertiary)] line-through decoration-[var(--color-text-tertiary)]' : 'text-[var(--color-text-primary)]'}`}
           title={label}
         >
           {label}
         </span>
         {detail ? (
           <span
-            className={`mt-0.5 block truncate leading-4 text-[var(--color-text-tertiary)] ${isTask ? 'text-[12.5px]' : 'text-[12px]'}`}
+            className="mt-px block truncate text-[11.5px] leading-4 text-[var(--color-text-tertiary)]"
             title={detail}
           >
             {detail}
@@ -427,7 +524,7 @@ function ActivityRowView({
     </>
   )
   const interactiveRowClassName =
-    'flex min-w-0 items-center gap-3 rounded-[var(--radius-md)] px-2.5 py-2.5 text-left transition-[background-color,transform] duration-150 ease-out hover:bg-[var(--color-surface-hover)] active:translate-y-px motion-reduce:active:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]'
+    'flex min-w-0 items-center gap-2.5 rounded-[var(--radius-md)] px-2 py-1.5 text-left transition-[background-color,transform] duration-150 ease-out hover:bg-[var(--color-surface-hover)] active:translate-y-px motion-reduce:active:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]'
   const stopButton = row.section === 'backgroundTasks' && onStopBackgroundTask ? (
     <BackgroundTaskStopButton
       row={row}
@@ -449,19 +546,38 @@ function ActivityRowView({
     )
   }
 
-  if (row.section === 'subagents' && row.openable && row.toolUseId) {
+  if (row.section === 'subagents' || row.section === 'workflow') {
+    if (!row.openable || !row.toolUseId) {
+      return <div className="flex items-center gap-2.5 rounded-[var(--radius-md)] px-2 py-1.5">{content}</div>
+    }
+
     const hasRecentEvents = Boolean(row.recentEvents?.length)
     const openButton = (
       <button
         type="button"
-        aria-label={t('session.activity.toggleRecent', { name: row.label })}
-        aria-expanded={subagentExpanded}
-        onClick={() => setSubagentExpanded((current) => !current)}
-        disabled={!hasRecentEvents}
-        className={`${interactiveRowClassName} min-w-0 flex-1 disabled:cursor-default`}
+        aria-label={row.section === 'subagents'
+          ? t('session.activity.toggleRecent', { name: row.label })
+          : `${t('session.activity.openRun', { name: row.label })} · ${statusLabel}`}
+        aria-expanded={row.section === 'subagents' ? subagentExpanded : undefined}
+        onClick={() => {
+          if (row.section === 'subagents' && hasRecentEvents) {
+            setSubagentExpanded((current) => !current)
+            return
+          }
+          onOpenSubagent({
+            sessionId,
+            ...(row.taskId ? { taskId: row.taskId } : {}),
+            toolUseId: row.toolUseId!,
+            title: row.label,
+            ...(row.teamName ? { teamName: row.teamName } : {}),
+            ...(row.teamMemberName ? { teamMemberName: row.teamMemberName } : {}),
+            ...(row.teamStartedAt !== undefined ? { teamStartedAt: row.teamStartedAt } : {}),
+          })
+        }}
+        className={`${interactiveRowClassName} ${stopButton ? 'flex-1' : 'w-full'} ${row.group ? 'pl-3' : ''}`}
       >
         {content}
-        {hasRecentEvents ? (
+        {row.section === 'subagents' && hasRecentEvents ? (
           <ChevronDown
             size={13}
             strokeWidth={2.2}
@@ -471,6 +587,9 @@ function ActivityRowView({
         ) : null}
       </button>
     )
+
+    if (row.section === 'workflow') return openButton
+
     return (
       <div className="w-full rounded-lg hover:bg-[var(--color-surface-hover)]">
         <div className="flex min-w-0 items-center gap-1">
@@ -484,6 +603,9 @@ function ActivityRowView({
               ...(row.taskId ? { taskId: row.taskId } : {}),
               toolUseId: row.toolUseId!,
               title: row.label,
+              ...(row.teamName ? { teamName: row.teamName } : {}),
+              ...(row.teamMemberName ? { teamMemberName: row.teamMemberName } : {}),
+              ...(row.teamStartedAt !== undefined ? { teamStartedAt: row.teamStartedAt } : {}),
             })}
             className="mr-2 shrink-0 rounded-md px-2 py-1 text-[10px] font-medium text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-container)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
           >
@@ -529,7 +651,7 @@ function ActivityRowView({
   if (stopButton) {
     return (
       <div className="flex w-full items-center gap-1">
-        <div className="flex min-w-0 flex-1 items-center gap-3 rounded-[var(--radius-md)] px-2.5 py-2.5">
+        <div className="flex min-w-0 flex-1 items-center gap-2.5 rounded-[var(--radius-md)] px-2 py-1.5">
           {content}
         </div>
         {stopButton}
@@ -538,7 +660,7 @@ function ActivityRowView({
   }
 
   return (
-    <div className="flex items-center gap-3 rounded-[var(--radius-md)] px-2.5 py-2.5">
+    <div className="flex items-center gap-2.5 rounded-[var(--radius-md)] px-2 py-1.5">
       {content}
     </div>
   )
@@ -574,7 +696,7 @@ function BackgroundTaskDetail({ row }: { row: ActivityRow }) {
   if (details.length === 0) return null
 
   return (
-    <div className="mx-2.5 mb-1.5 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] p-3">
+    <div className="mx-2 mb-1.5 rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] p-3">
       <div className="mb-2 text-[11px] font-semibold text-[var(--color-text-tertiary)]">
         {t('session.activity.details.title')}
       </div>
@@ -713,9 +835,9 @@ export function SessionActivityPanel({
               aria-label={sectionTitle}
               className={index > 0 ? 'border-t border-[var(--color-border)] pt-3' : undefined}
             >
-              <div className="mb-2 flex items-center justify-between gap-2 px-2.5">
+              <div className="mb-1.5 flex items-center justify-between gap-2 px-2">
                 <div className="flex min-w-0 items-center gap-2">
-                  <h3 className="text-[13.5px] font-semibold text-[var(--color-text-secondary)]">
+                  <h3 className="text-[12px] font-semibold text-[var(--color-text-secondary)]">
                     {sectionTitle}
                   </h3>
                   {section.rows.length > 0 ? (

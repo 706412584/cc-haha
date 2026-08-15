@@ -5,6 +5,12 @@ import { Spinner } from './Spinner'
 
 export type ButtonVariant =
   | 'primary'
+  /**
+   * Solid terracotta at rest, for the single unmissable action on a surface —
+   * the composer's send key. See the note on its entry in `VARIANT_CLASSES` for
+   * why this is separate from `primary` rather than replacing it.
+   */
+  | 'accent'
   | 'secondary'
   | 'tonal'
   /**
@@ -79,6 +85,13 @@ const VARIANT_CLASSES: Record<ButtonVariant, string> = {
   // marks the accent everywhere, an ink block is what reads as "the button".
   primary:
     `bg-[var(--color-btn-primary-bg)] text-[var(--color-btn-primary-fg)] shadow-[var(--shadow-button-primary)] hover:bg-[var(--color-brand)] hover:-translate-y-px active:translate-y-0 active:scale-[0.97] ${DISABLED_FILL}`,
+  // Terracotta at rest. `primary`'s ink block is right where a button sits among
+  // other buttons; `accent` is for the one control on a surface that has no
+  // competition and has to be found instantly — the composer's send key. Using
+  // it anywhere terracotta already marks something else is what `primary`
+  // exists to avoid.
+  accent:
+    `bg-[var(--color-brand)] text-[var(--color-on-primary)] shadow-[var(--shadow-button-primary)] hover:bg-[var(--color-brand-hover)] hover:-translate-y-px active:translate-y-0 active:scale-[0.97] ${DISABLED_FILL}`,
   secondary:
     `bg-[var(--color-surface)] text-[var(--color-text-primary)] border border-[var(--color-border)] hover:border-[var(--color-outline)] hover:bg-[var(--color-surface-hover)] active:scale-[0.98] ${DISABLED_FILL}`,
   tonal:

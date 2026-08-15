@@ -4,7 +4,7 @@ import { lazySchema } from '../../utils/lazySchema.js'
 import {
   getTaskListId,
   isTodoV2Enabled,
-  listTasks,
+  readTaskListSnapshot,
   TaskStatusSchema,
 } from '../../utils/tasks.js'
 import { TASK_LIST_TOOL_NAME } from './constants.js'
@@ -24,6 +24,8 @@ const outputSchema = lazySchema(() =>
         blockedBy: z.array(z.string()),
       }),
     ),
+    taskListSnapshotAt: z.string().optional(),
+    taskListSnapshotRevision: z.number().int().nonnegative().optional(),
   }),
 )
 type OutputSchema = ReturnType<typeof outputSchema>
@@ -62,10 +64,11 @@ export const TaskListTool = buildTool({
   renderToolUseMessage() {
     return null
   },
-  async call() {
-    const taskListId = getTaskListId()
+  async call(_input, context) {
+    const taskListId = getTaskListId(context?.agentId)
 
-    const allTasks = (await listTasks(taskListId)).filter(
+    const snapshot = await readTaskListSnapshot(taskListId)
+    const allTasks = snapshot.tasks.filter(
       t => !t.metadata?._internal,
     )
 
@@ -85,6 +88,8 @@ export const TaskListTool = buildTool({
     return {
       data: {
         tasks,
+        taskListSnapshotAt: snapshot.capturedAt,
+        taskListSnapshotRevision: snapshot.revision,
       },
     }
   },

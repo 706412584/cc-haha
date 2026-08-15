@@ -105,7 +105,7 @@ export const OPENAI_CODEX_MODEL_CATALOG: OpenAIModelCatalogEntry[] = [
     descriptionForModel: 'GPT-5.4 - strong general-purpose model',
     defaultReasoningEffort: 'medium',
     supportedReasoningEfforts: GPT_5_5_REASONING_EFFORTS,
-    contextWindow: OPENAI_CODEX_STANDARD_EFFECTIVE_CONTEXT_WINDOW,
+    contextWindow: OPENAI_CODEX_LARGE_EFFECTIVE_CONTEXT_WINDOW,
   },
   {
     value: 'gpt-5.5',

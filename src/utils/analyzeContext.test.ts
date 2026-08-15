@@ -56,4 +56,82 @@ describe('analyzeContextUsage', () => {
       { name: 'directory', tokens: expect.any(Number) },
     ])
   })
+
+  test('keeps OpenAI encrypted reasoning aligned with canonical provider usage', async () => {
+    const { analyzeContextUsage } = await import('./analyzeContext.js')
+    const responseId = 'msg_openai_reasoning'
+    const zeroUsage = {
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+    }
+    const messages = [
+      {
+        type: 'assistant',
+        message: {
+          id: responseId,
+          role: 'assistant',
+          model: 'gpt-5.6-terra',
+          content: [
+            {
+              type: 'redacted_thinking',
+              data: `cc-haha:openai-reasoning:v1:${JSON.stringify({
+                id: 'rs_test',
+                summary: [],
+                encrypted_content: 'x'.repeat(400_000),
+              })}`,
+            },
+          ],
+          usage: zeroUsage,
+        },
+      },
+      {
+        type: 'assistant',
+        message: {
+          id: responseId,
+          role: 'assistant',
+          model: 'gpt-5.6-terra',
+          content: [{ type: 'text', text: 'done' }],
+          usage: {
+            input_tokens: 8_000,
+            output_tokens: 1_000,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 292_000,
+          },
+        },
+      },
+    ] as never
+
+    const result = await analyzeContextUsage(
+      messages,
+      'gpt-5.6-terra',
+      async () => ({ mode: 'default' }),
+      [],
+      { activeAgents: [], allAgents: [] },
+      undefined,
+      undefined,
+      undefined,
+      messages,
+      { estimateOnly: true },
+    )
+
+    expect(result.totalTokens).toBe(301_000)
+    expect(result.percentage).toBe(85)
+
+    const usedCategories = result.categories.filter(category =>
+      !category.isDeferred &&
+      category.name !== 'Autocompact buffer' &&
+      category.name !== 'Compact buffer' &&
+      category.name !== 'Free space')
+    expect(usedCategories.reduce((sum, category) => sum + category.tokens, 0))
+      .toBe(result.totalTokens)
+
+    const reserved = result.categories.find(category =>
+      category.name === 'Autocompact buffer' ||
+      category.name === 'Compact buffer')?.tokens ?? 0
+    const free = result.categories.find(category =>
+      category.name === 'Free space')?.tokens ?? 0
+    expect(result.totalTokens + reserved + free).toBe(result.rawMaxTokens)
+  })
 })

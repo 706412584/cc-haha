@@ -60,6 +60,11 @@ export function CurrentTurnChangeCard({
     ? files.slice(0, COLLAPSED_COUNT)
     : files
   const restoreAvailable = checkpoint.restoreAvailable !== false
+  // Undo restores every file listed above, but a turn that also ran a writing
+  // shell command may have touched files no checkpoint captured. Say so instead
+  // of withholding the undo — the listed files are still exactly reversible.
+  const unverifiedChangeSources = checkpoint.unverifiedChangeSources ?? []
+  const hasUnverifiedChanges = restoreAvailable && unverifiedChangeSources.length > 0
 
   const openChangedFile = useCallback((event: ReactMouseEvent<HTMLButtonElement>, fileEntry: ChangedFileEntry) => {
     const renderItem = event.currentTarget.closest<HTMLElement>('[data-chat-render-item-key]')
@@ -119,10 +124,14 @@ export function CurrentTurnChangeCard({
     ? t('chat.turnChangesLatestCardLabel')
     : t('chat.turnChangesHistoricalCardLabel')
   const subtitle = !restoreAvailable
-    ? t('chat.turnChangesPreviewOnlySubtitle')
-    : isLatest
-      ? t('chat.turnChangesLatestSubtitle')
-      : t('chat.turnChangesCurrentWorkspaceDiff')
+    ? t('chat.turnChangesConversationOnlySubtitle')
+    : hasUnverifiedChanges
+      ? t('chat.turnChangesPartialCoverageSubtitle', {
+          sources: unverifiedChangeSources.join(', '),
+        })
+      : isLatest
+        ? t('chat.turnChangesLatestSubtitle')
+        : t('chat.turnChangesCurrentWorkspaceDiff')
   const undoLabel = isLatest
     ? t('chat.turnChangesLatestUndo')
     : t('chat.turnChangesHistoricalUndo')
@@ -132,7 +141,10 @@ export function CurrentTurnChangeCard({
 
   return (
     <section
-      className="mx-auto mb-5 w-full max-w-[900px] overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface)] shadow-[var(--shadow-card)]"
+      // Follows the message it belongs to inside the same rail box, so it takes a
+      // top margin and no width of its own — `max-w-[900px]` here would have
+      // overflowed the column once the rail indented it.
+      className="mt-2 w-full overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface)] shadow-[var(--shadow-card)]"
       aria-label={cardLabel}
     >
       <div className="flex items-center justify-between gap-3 border-b border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3">
@@ -148,27 +160,29 @@ export function CurrentTurnChangeCard({
               -{checkpoint.code.deletions}
             </span>
           </div>
-          <div className="mt-0.5 text-xs text-[var(--color-text-tertiary)]">
+          <div
+            className={`mt-0.5 text-xs ${
+              hasUnverifiedChanges
+                ? 'text-[var(--color-warning)]'
+                : 'text-[var(--color-text-tertiary)]'
+            }`}
+          >
             {subtitle}
           </div>
         </div>
 
+        {/* Never disabled: rolling the conversation back is always possible, even
+            when the files are not restorable. The dialog picks what to touch. */}
         <Button
           variant="secondary"
           size="base"
           loading={isUndoing}
-          disabled={!restoreAvailable}
           onClick={onUndo}
-          aria-label={restoreAvailable ? undoAria : t('chat.turnChangesRestoreUnavailable')}
-          title={restoreAvailable ? undefined : t('chat.turnChangesRestoreUnavailable')}
+          aria-label={undoAria}
           className="shrink-0"
           icon={<span className="material-symbols-outlined text-[15px]" aria-hidden="true">undo</span>}
         >
-          {isUndoing
-            ? t('chat.turnChangesUndoing')
-            : restoreAvailable
-              ? undoLabel
-              : t('chat.turnChangesRestoreUnavailable')}
+          {isUndoing ? t('chat.turnChangesUndoing') : undoLabel}
         </Button>
       </div>
 

@@ -9,6 +9,7 @@ import * as path from 'node:path'
 import * as os from 'node:os'
 import { SessionService, sessionService } from '../services/sessionService.js'
 import {
+  createRepositoryBranch,
   getRepositoryContext,
   prepareSessionWorkspace,
 } from '../services/repositoryLaunchService.js'
@@ -2784,6 +2785,232 @@ describe('SessionService', () => {
     expect(context.branches.some((branch) => branch.name.startsWith('worktree-desktop-'))).toBe(false)
   })
 
+  // --------------------------------------------------------------------------
+  // createRepositoryBranch
+  // --------------------------------------------------------------------------
+
+  it('should create a branch at the selected base without moving HEAD', async () => {
+    const workDir = await createCleanGitRepo(tmpDir)
+
+    const result = await createRepositoryBranch(workDir, {
+      name: 'feature/new-rail',
+      from: 'feature/rail',
+    })
+
+    expect(result.branch).toBe('feature/new-rail')
+    expect(result.baseRef).toBe('feature/rail')
+    expect(git(workDir, 'rev-parse', 'feature/new-rail'))
+      .toBe(git(workDir, 'rev-parse', 'feature/rail'))
+    // Picking a branch in the launch controls has never checked it out on the
+    // spot; the switch happens when the session starts, behind the dirty and
+    // already-checked-out guards. Creating the ref must not jump that queue.
+    expect(git(workDir, 'branch', '--show-current')).toBe('main\n')
+    expect(result.context.branches.some((branch) => (
+      branch.name === 'feature/new-rail' && branch.local && !branch.current
+    ))).toBe(true)
+  })
+
+  it('should start a branch at HEAD when no base is given', async () => {
+    const workDir = await createCleanGitRepo(tmpDir)
+
+    const result = await createRepositoryBranch(workDir, { name: 'from-head' })
+
+    expect(result.baseRef).toBe('HEAD')
+    expect(git(workDir, 'rev-parse', 'from-head')).toBe(git(workDir, 'rev-parse', 'HEAD'))
+  })
+
+  it('should leave uncommitted work untouched when creating a branch', async () => {
+    const workDir = await createCleanGitRepo(tmpDir)
+    await fs.writeFile(path.join(workDir, 'README.md'), 'main\nwork in progress\n')
+
+    await createRepositoryBranch(workDir, { name: 'wip', from: 'main' })
+
+    expect(git(workDir, 'status', '--porcelain')).toBe(' M README.md\n')
+    expect(await fs.readFile(path.join(workDir, 'README.md'), 'utf-8'))
+      .toBe('main\nwork in progress\n')
+  })
+
+  it('should report the commit each branch points at alongside HEAD', async () => {
+    const workDir = await createCleanGitRepo(tmpDir)
+    await createRepositoryBranch(workDir, { name: 'same-commit', from: 'main' })
+
+    const context = await getRepositoryContext(workDir)
+    const head = git(workDir, 'rev-parse', 'HEAD').trim()
+
+    // Without these the UI cannot tell a switch that rewrites files from one
+    // that only moves the ref, and warns about uncommitted changes for both.
+    expect(context.headCommit).toBe(head)
+    expect(context.branches.find((branch) => branch.name === 'same-commit')?.commit).toBe(head)
+    expect(context.branches.find((branch) => branch.name === 'feature/rail')?.commit)
+      .toBe(git(workDir, 'rev-parse', 'feature/rail').trim())
+  })
+
+  it('should reject a branch name that already exists', async () => {
+    const workDir = await createCleanGitRepo(tmpDir)
+
+    await expect(createRepositoryBranch(workDir, { name: 'feature/rail' }))
+      .rejects.toMatchObject({ code: 'REPOSITORY_BRANCH_EXISTS' })
+  })
+
+  it('should start a branch from a remote-only base at the remote commit', async () => {
+    const originDir = await createCleanGitRepo(tmpDir)
+    const workDir = path.join(tmpDir, `clone-${Date.now()}`)
+    git(tmpDir, 'clone', '--quiet', originDir, workDir)
+    git(workDir, 'config', 'user.email', 'clone@example.com')
+    git(workDir, 'config', 'user.name', 'Clone')
+
+    const result = await createRepositoryBranch(workDir, {
+      name: 'local-rail',
+      from: 'feature/rail',
+    })
+
+    // Resolving the base to its plain name instead of the tracking ref would
+    // silently branch off HEAD, which is a different commit.
+    expect(result.baseRef).toBe('origin/feature/rail')
+    expect(git(workDir, 'rev-parse', 'local-rail'))
+      .toBe(git(workDir, 'rev-parse', 'origin/feature/rail'))
+    expect(git(workDir, 'rev-parse', 'local-rail'))
+      .not.toBe(git(workDir, 'rev-parse', 'HEAD'))
+  })
+
+  it('should refuse to shadow a remote-only branch with a local one', async () => {
+    const originDir = await createCleanGitRepo(tmpDir)
+    const workDir = path.join(tmpDir, `shadow-${Date.now()}`)
+    git(tmpDir, 'clone', '--quiet', originDir, workDir)
+
+    // The picker lists `feature/rail` as a selectable remote branch, and picking
+    // it launches `switch --track -c feature/rail origin/feature/rail`. Creating
+    // a second local branch under that name off `main` wins the name and makes
+    // the launch silently run on main's content instead.
+    await expect(createRepositoryBranch(workDir, { name: 'feature/rail', from: 'main' }))
+      .rejects.toMatchObject({ code: 'REPOSITORY_BRANCH_EXISTS' })
+    expect(git(workDir, 'for-each-ref', '--format=%(refname:short)', 'refs/heads').trim())
+      .toBe('main')
+  })
+
+  it('should not create a hidden desktop worktree branch', async () => {
+    const workDir = await createCleanGitRepo(tmpDir)
+
+    // `listBranches` filters this prefix out, so such a branch would exist on
+    // disk and appear in no context the app ever renders — unselectable, and
+    // undeletable from the app.
+    await expect(createRepositoryBranch(workDir, { name: 'worktree-desktop-sneaky' }))
+      .rejects.toMatchObject({ code: 'REPOSITORY_BRANCH_NAME_INVALID' })
+    expect(git(workDir, 'for-each-ref', '--format=%(refname:short)', 'refs/heads').trim().split('\n'))
+      .toEqual(['feature/rail', 'main'])
+  })
+
+  it('should reject a branch name past the length cap', async () => {
+    const workDir = await createCleanGitRepo(tmpDir)
+
+    await expect(createRepositoryBranch(workDir, { name: 'a'.repeat(201) }))
+      .rejects.toMatchObject({ code: 'REPOSITORY_BRANCH_NAME_INVALID' })
+    await expect(createRepositoryBranch(workDir, { name: 'a'.repeat(200) }))
+      .resolves.toMatchObject({ branch: 'a'.repeat(200) })
+  })
+
+  it('should not let a flag-shaped base branch reach git as an option', async () => {
+    const workDir = await createCleanGitRepo(tmpDir)
+    // `git branch` refuses to create this, but a ref written out of band is
+    // listed like any other and can be picked as the base.
+    git(workDir, 'update-ref', 'refs/heads/-x', 'feature/rail')
+
+    const context = await getRepositoryContext(workDir)
+    expect(context.branches.some((branch) => branch.name === '-x')).toBe(true)
+
+    const result = await createRepositoryBranch(workDir, { name: 'from-dash', from: '-x' })
+    expect(result.baseRef).toBe('-x')
+    expect(git(workDir, 'rev-parse', 'from-dash')).toBe(git(workDir, 'rev-parse', 'feature/rail'))
+  })
+
+  it('should map a case-folded collision onto the already-exists code', async () => {
+    const workDir = await createCleanGitRepo(tmpDir)
+    const created = await createRepositoryBranch(workDir, { name: 'Main' })
+      .then(() => 'created' as const, (error: { code?: string }) => error.code)
+
+    // macOS and Windows fold the ref path, so git rejects this even though the
+    // branch list has no exact match. Case-sensitive filesystems create it
+    // happily, and both outcomes are correct — a raw English `fatal:` in a form
+    // translated into five locales is not.
+    expect(['created', 'REPOSITORY_BRANCH_EXISTS']).toContain(created)
+  })
+
+  it('should reject branch creation in a repository with no commits', async () => {
+    const workDir = path.join(tmpDir, `unborn-${Date.now()}`)
+    await fs.mkdir(workDir, { recursive: true })
+    git(workDir, 'init')
+    git(workDir, 'checkout', '-b', 'main')
+
+    // The picker renders normally here — `state: 'ok'`, one branch from the
+    // current-branch fallback — so "Create branch…" is offered and used to fail
+    // with untranslated `fatal: not a valid object name`.
+    const context = await getRepositoryContext(workDir)
+    expect(context.state).toBe('ok')
+    expect(context.headCommit).toBeNull()
+
+    await expect(createRepositoryBranch(workDir, { name: 'first', from: 'main' }))
+      .rejects.toMatchObject({ code: 'REPOSITORY_NO_COMMITS' })
+  })
+
+  it('should branch from the picked worktree HEAD, not the main checkout', async () => {
+    const workDir = await createCleanGitRepo(tmpDir)
+    const linked = path.join(tmpDir, `linked-${Date.now()}`)
+    git(workDir, 'worktree', 'add', linked, 'feature/rail')
+
+    const context = await getRepositoryContext(linked)
+    const result = await createRepositoryBranch(linked, { name: 'from-linked' })
+
+    // `repoRoot` resolves a linked worktree back to the main checkout, where
+    // HEAD is a different commit than the one `headCommit` just reported.
+    expect(result.baseRef).toBe('HEAD')
+    expect(git(linked, 'rev-parse', 'from-linked')).toBe(`${context.headCommit}\n`)
+    expect(git(linked, 'rev-parse', 'from-linked'))
+      .not.toBe(git(workDir, 'rev-parse', 'HEAD'))
+  })
+
+  it.each([
+    ['a space', 'bad name'],
+    ['a double dot', 'bad..name'],
+    ['a trailing slash', 'bad/'],
+    ['a lock suffix', 'bad.lock'],
+    ['nothing at all', '   '],
+  ])('should reject a branch name with %s', async (_label, name) => {
+    const workDir = await createCleanGitRepo(tmpDir)
+
+    await expect(createRepositoryBranch(workDir, { name }))
+      .rejects.toMatchObject({ code: 'REPOSITORY_BRANCH_NAME_INVALID' })
+    expect(git(workDir, 'for-each-ref', '--format=%(refname:short)', 'refs/heads').trim().split('\n'))
+      .toEqual(['feature/rail', 'main'])
+  })
+
+  it('should not let a branch name starting with a dash reach git as a flag', async () => {
+    const workDir = await createCleanGitRepo(tmpDir)
+
+    // `-D` / `--delete` would be read as "delete a branch" by any call that
+    // interpolates the name before `--`.
+    await expect(createRepositoryBranch(workDir, { name: '--delete' }))
+      .rejects.toMatchObject({ code: 'REPOSITORY_BRANCH_NAME_INVALID' })
+    await expect(createRepositoryBranch(workDir, { name: '-D' }))
+      .rejects.toMatchObject({ code: 'REPOSITORY_BRANCH_NAME_INVALID' })
+    expect(git(workDir, 'for-each-ref', '--format=%(refname:short)', 'refs/heads').trim().split('\n'))
+      .toEqual(['feature/rail', 'main'])
+  })
+
+  it('should reject a base branch the repository does not have', async () => {
+    const workDir = await createCleanGitRepo(tmpDir)
+
+    await expect(createRepositoryBranch(workDir, { name: 'ok-name', from: 'missing/branch' }))
+      .rejects.toMatchObject({ code: 'REPOSITORY_BRANCH_NOT_FOUND' })
+  })
+
+  it('should reject branch creation outside a Git repository', async () => {
+    const workDir = path.join(tmpDir, `not-git-branch-${Date.now()}`)
+    await fs.mkdir(workDir, { recursive: true })
+
+    await expect(createRepositoryBranch(workDir, { name: 'ok-name' }))
+      .rejects.toMatchObject({ code: 'REPOSITORY_NOT_GIT' })
+  })
+
   it('should keep stale worktree records when their paths cannot be resolved', async () => {
     const workDir = await createCleanGitRepo(tmpDir)
     const staleWorktreeName = `stale-worktree-${Date.now()}`
@@ -3621,6 +3848,42 @@ describe('Sessions API', () => {
     expect(body.worktrees.some((worktree) => worktree.path === realWorkDir && worktree.current)).toBe(true)
   })
 
+  it('POST /api/sessions/repository-branch should create a branch and return the refreshed context', async () => {
+    const workDir = await createCleanGitRepo(tmpDir)
+    const res = await fetch(`${baseUrl}/api/sessions/repository-branch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workDir, name: 'feature/from-api', from: 'feature/rail' }),
+    })
+    expect(res.status).toBe(201)
+
+    const body = (await res.json()) as {
+      branch: string
+      baseRef: string
+      context: { state: string; branches: Array<{ name: string; local: boolean }> }
+    }
+    expect(body.branch).toBe('feature/from-api')
+    expect(body.baseRef).toBe('feature/rail')
+    expect(body.context.state).toBe('ok')
+    expect(body.context.branches.some((branch) => (
+      branch.name === 'feature/from-api' && branch.local
+    ))).toBe(true)
+    expect(git(workDir, 'branch', '--show-current')).toBe('main\n')
+  })
+
+  it('POST /api/sessions/repository-branch should surface a rejected name as a stable error code', async () => {
+    const workDir = await createCleanGitRepo(tmpDir)
+    const res = await fetch(`${baseUrl}/api/sessions/repository-branch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workDir, name: 'feature/rail' }),
+    })
+    expect(res.status).toBe(400)
+    // The desktop form translates this code; a changed spelling silently
+    // downgrades it to the untranslated generic failure.
+    expect((await res.json()).error).toBe('REPOSITORY_BRANCH_EXISTS')
+  })
+
   it('GET /api/sessions/recent-projects should keep pending repository launches on the source project', async () => {
     const workDir = await createCleanGitRepo(tmpDir)
     const createRes = await fetch(`${baseUrl}/api/sessions`, {
@@ -3789,6 +4052,37 @@ describe('Sessions API', () => {
     ])
   })
 
+  it('GET /api/sessions/:id/messages exposes persisted terminal ownership', async () => {
+    const sessionId = 'abababab-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+    await writeSessionFile('-tmp-api-owned-terminal', sessionId, [
+      makeSnapshotEntry(),
+      {
+        type: 'cc-haha-task-notification',
+        isMeta: true,
+        taskNotification: {
+          taskId: 'nested-workflow-task',
+          toolUseId: 'Workflow:0',
+          ownerAgentId: 'parent-agent',
+          status: 'completed',
+          summary: 'Nested workflow completed',
+        },
+        timestamp: '2026-08-10T00:00:01.000Z',
+      },
+    ])
+
+    const res = await fetch(`${baseUrl}/api/sessions/${sessionId}/messages`)
+    expect(res.status).toBe(200)
+    const body = await res.json() as { taskNotifications: unknown[] }
+    expect(body.taskNotifications).toEqual([{
+      taskId: 'nested-workflow-task',
+      toolUseId: 'Workflow:0',
+      ownerAgentId: 'parent-agent',
+      status: 'completed',
+      summary: 'Nested workflow completed',
+      timestamp: '2026-08-10T00:00:01.000Z',
+    }])
+  })
+
   it('GET /api/sessions/:id/subagents/by-tool/:toolUseId should return a resolved run', async () => {
     const sessionId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
     const projectDir = '-tmp-api-subagent-run'
@@ -3817,6 +4111,21 @@ describe('Sessions API', () => {
         uuid: crypto.randomUUID(),
         timestamp: '2026-01-01T00:00:05.000Z',
       },
+      {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: '<task-notification>\n<task-id>child-shell-task</task-id>\n<tool-use-id>child-shell.call</tool-use-id>\n<status>killed</status>\n<summary>Child shell stopped</summary>\n</task-notification>',
+        },
+        uuid: crypto.randomUUID(),
+        timestamp: '2026-01-01T00:00:06.000Z',
+      },
+      {
+        type: 'assistant',
+        message: { role: 'assistant', content: 'Internal notification response' },
+        uuid: crypto.randomUUID(),
+        timestamp: '2026-01-01T00:00:07.000Z',
+      },
     ])
 
     const res = await fetch(`${baseUrl}/api/sessions/${sessionId}/subagents/by-tool/tool-1`)
@@ -3829,6 +4138,7 @@ describe('Sessions API', () => {
       description?: string
       prompt?: string
       messages: unknown[]
+      taskNotifications: unknown[]
       source: string
     }
     expect(body).toMatchObject({
@@ -3840,6 +4150,15 @@ describe('Sessions API', () => {
       source: 'subagent-jsonl',
     })
     expect(body.messages).toHaveLength(2)
+    expect(JSON.stringify(body.messages)).not.toContain('<task-notification>')
+    expect(JSON.stringify(body.messages)).not.toContain('Internal notification response')
+    expect(body.taskNotifications).toEqual([{
+      taskId: 'child-shell-task',
+      toolUseId: 'child-shell.call',
+      status: 'stopped',
+      summary: 'Child shell stopped',
+      timestamp: '2026-01-01T00:00:06.000Z',
+    }])
   })
 
   it('GET /api/sessions/:id/subagents/by-tool/:toolUseId should use a live task id while running', async () => {
@@ -3894,6 +4213,104 @@ describe('Sessions API', () => {
       source: 'subagent-jsonl',
     })
     expect(body.messages).toHaveLength(2)
+  })
+
+  it('POST /api/sessions/:id/subagents/by-tool/:toolUseId/messages should resume the resolved agent', async () => {
+    const sessionId = 'fefefefe-bbbb-cccc-dddd-eeeeeeeeeeee'
+    const agentId = 'resumable-agent-1'
+    await writeSessionFile('-tmp-api-subagent-message', sessionId, [
+      makeSnapshotEntry(),
+      makeAssistantToolUseEntry([{
+        id: 'tool-1',
+        name: 'Agent',
+        input: { description: 'Review the route', prompt: 'Inspect the server API' },
+      }]),
+      makeToolResultUserEntry('tool-1', `review complete\nagentId: ${agentId}`),
+    ])
+    const requestControl = spyOn(conversationService, 'requestControl').mockResolvedValue({
+      agent_id: agentId,
+      delivery: 'resumed',
+    })
+    const hasSession = spyOn(conversationService, 'hasSession').mockReturnValue(false)
+    const startSession = spyOn(conversationService, 'startSession').mockResolvedValue()
+
+    try {
+      const res = await fetch(
+        `${baseUrl}/api/sessions/${sessionId}/subagents/by-tool/tool-1/messages`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ content: 'Please review the new patch.' }),
+        },
+      )
+
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({
+        ok: true,
+        agent_id: agentId,
+        delivery: 'resumed',
+      })
+      expect(requestControl).toHaveBeenCalledWith(sessionId, {
+        subtype: 'send_agent_message',
+        agent_id: agentId,
+        content: 'Please review the new patch.',
+      })
+      expect(startSession).toHaveBeenCalledWith(
+        sessionId,
+        expect.any(String),
+        expect.stringMatching(new RegExp(
+          `^ws://127\\.0\\.0\\.1:${new URL(baseUrl).port}/sdk/${sessionId}\\?token=`,
+        )),
+        expect.objectContaining({ resumeInterruptedTurn: false }),
+      )
+    } finally {
+      startSession.mockRestore()
+      hasSession.mockRestore()
+      requestControl.mockRestore()
+    }
+  })
+
+  it('POST /api/sessions/:id/subagents/by-tool/:toolUseId/messages should reuse a running parent CLI', async () => {
+    const sessionId = 'abababab-bbbb-cccc-dddd-eeeeeeeeeeee'
+    const agentId = 'running-parent-agent'
+    await writeSessionFile('-tmp-api-running-parent-subagent-message', sessionId, [
+      makeSnapshotEntry(),
+      makeAssistantToolUseEntry([{
+        id: 'tool-running',
+        name: 'Agent',
+        input: { description: 'Continue the agent', prompt: 'Stay available' },
+      }]),
+      makeToolResultUserEntry('tool-running', `ready\nagentId: ${agentId}`),
+    ])
+    const hasSession = spyOn(conversationService, 'hasSession').mockReturnValue(true)
+    const startSession = spyOn(conversationService, 'startSession').mockResolvedValue()
+    const requestControl = spyOn(conversationService, 'requestControl').mockResolvedValue({
+      agent_id: agentId,
+      delivery: 'queued',
+    })
+
+    try {
+      const res = await fetch(
+        `${baseUrl}/api/sessions/${sessionId}/subagents/by-tool/tool-running/messages`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ content: 'Continue from the same context.' }),
+        },
+      )
+
+      expect(res.status).toBe(200)
+      expect(startSession).not.toHaveBeenCalled()
+      expect(requestControl).toHaveBeenCalledWith(sessionId, {
+        subtype: 'send_agent_message',
+        agent_id: agentId,
+        content: 'Continue from the same context.',
+      })
+    } finally {
+      requestControl.mockRestore()
+      startSession.mockRestore()
+      hasSession.mockRestore()
+    }
   })
 
   it('POST /api/sessions/:id/subagents/by-tool/:toolUseId should return 405', async () => {
@@ -3976,6 +4393,34 @@ describe('Sessions API', () => {
     } finally {
       sessionsMap.delete(sessionId)
     }
+  })
+
+  it('GET /api/sessions/:id/git-info should not report the source checkout as a planned worktree', async () => {
+    const workDir = await createCleanGitRepo(tmpDir)
+    const { sessionId } = await sessionService.createSession(
+      workDir,
+      { branch: 'feature/rail', worktree: true },
+    )
+    const launchInfo = await sessionService.getSessionLaunchInfo(sessionId)
+    const plannedPath = launchInfo?.repository?.worktreePath
+    expect(plannedPath).toBeTruthy()
+
+    const res = await fetch(`${baseUrl}/api/sessions/${sessionId}/git-info`)
+    expect(res.status).toBe(200)
+
+    const body = (await res.json()) as {
+      workDir: string
+      worktree: {
+        path: string | null
+        plannedPath: string | null
+      } | null
+    }
+    expect(body.workDir).toBe(launchInfo?.workDir)
+    expect(body.worktree).toMatchObject({
+      path: null,
+      plannedPath,
+    })
+    expect(body.worktree?.plannedPath).not.toBe(body.workDir)
   })
 
   it('GET /api/sessions/:id/git-info should keep the visible launch branch while including isolated worktree identity', async () => {
@@ -6025,6 +6470,7 @@ describe('Sessions API', () => {
         },
         workDir: fixture.workDir,
         restoreAvailable: true,
+        unverifiedChangeSources: [],
       },
       {
         target: {
@@ -6041,6 +6487,7 @@ describe('Sessions API', () => {
         },
         workDir: fixture.workDir,
         restoreAvailable: true,
+        unverifiedChangeSources: [],
       },
       {
         target: {
@@ -6057,6 +6504,7 @@ describe('Sessions API', () => {
         },
         workDir: fixture.workDir,
         restoreAvailable: true,
+        unverifiedChangeSources: [],
       },
     ])
   })
@@ -7540,7 +7988,7 @@ describe('Sessions API', () => {
     expect(await fs.readFile(droppedFile, 'utf-8')).toBe(before)
   })
 
-  it('should mark unknown successful write-capable tools as incomplete evidence', async () => {
+  it('should restore snapshot-covered files while reporting a writing shell command as unverified', async () => {
     const sessionId = '99999999-bbbb-cccc-dddd-000000000018'
     const workDir = path.join(tmpDir, 'unknown-write-tool')
     const capturedFile = path.join(workDir, 'captured.txt')
@@ -7567,6 +8015,255 @@ describe('Sessions API', () => {
     ])
 
     const listRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/turn-checkpoints`)
+    const body = await listRes.json() as {
+      checkpoints: Array<{ restoreAvailable?: boolean; unverifiedChangeSources?: string[] }>
+    }
+    expect(body.checkpoints[0]?.restoreAvailable).toBe(true)
+    expect(body.checkpoints[0]?.unverifiedChangeSources).toEqual(['Bash'])
+
+    const rewindRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/rewind`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targetUserMessageId: userId }),
+    })
+    expect(rewindRes.status).toBe(200)
+    expect(await rewindRes.json()).toMatchObject({ unverifiedChangeSources: ['Bash'] })
+    // The snapshot-covered file is undone; the shell-written file is untouched,
+    // which is exactly what the unverified source is warning about.
+    expect(await fs.readFile(capturedFile, 'utf-8')).toBe('before\n')
+    expect(await fs.readFile(shellFile, 'utf-8')).toBe('written by shell\n')
+  })
+
+  it('should keep a Bash-only first turn rewindable without touching the shell-written file', async () => {
+    const sessionId = '99999999-bbbb-cccc-dddd-000000000033'
+    const workDir = path.join(tmpDir, 'bash-only-empty-checkpoint')
+    const shellFile = path.join(workDir, 'shell-only.txt')
+    const userId = crypto.randomUUID()
+    await fs.mkdir(workDir, { recursive: true })
+    await fs.writeFile(shellFile, 'written by shell\n')
+    await writeSessionFile('-tmp-bash-only-empty-checkpoint', sessionId, [
+      makeSessionMetaEntry(workDir),
+      // Real prompt submission records a snapshot even when no structured file
+      // tool has anything to track. That empty checkpoint must still carry the
+      // Bash coverage warning through to the desktop.
+      makeFileHistorySnapshotEntry(userId, {}),
+      { ...makeUserEntry('write only with Bash', userId), cwd: workDir, sessionId },
+      makeAssistantToolUseEntry([{
+        id: 'Bash:write-only-file',
+        name: 'Bash',
+        input: { command: `printf 'written by shell\\n' > ${shellFile}` },
+      }], userId),
+      makeToolResultUserEntry('Bash:write-only-file', '', undefined, undefined, sessionId),
+      makeAssistantEntry('BASH_ONLY_DONE', userId),
+    ])
+
+    const listRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/turn-checkpoints`)
+    expect(listRes.status).toBe(200)
+    const listBody = await listRes.json() as {
+      checkpoints: Array<{
+        target: { targetUserMessageId: string }
+        code: { available: boolean; filesChanged: string[] }
+        restoreAvailable?: boolean
+        unverifiedChangeSources?: string[]
+      }>
+    }
+    expect(listBody.checkpoints).toHaveLength(1)
+    expect(listBody.checkpoints[0]).toMatchObject({
+      target: { targetUserMessageId: userId },
+      code: { available: true, filesChanged: [] },
+      restoreAvailable: true,
+      unverifiedChangeSources: ['Bash'],
+    })
+
+    const rewindRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/rewind`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targetUserMessageId: userId, mode: 'conversation' }),
+    })
+    expect(rewindRes.status).toBe(200)
+    expect(await rewindRes.json()).toMatchObject({
+      mode: 'conversation',
+      unverifiedChangeSources: ['Bash'],
+    })
+    expect(await fs.readFile(shellFile, 'utf-8')).toBe('written by shell\n')
+
+    const messagesRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/messages`)
+    const messagesBody = await messagesRes.json() as { messages: Array<{ id: string }> }
+    expect(messagesBody.messages.some((message) => message.id === userId)).toBe(false)
+  })
+
+  it('should keep restore available and unflagged when the turn only ran a read-only shell command', async () => {
+    const sessionId = '99999999-bbbb-cccc-dddd-0000000f0001'
+    const workDir = path.join(tmpDir, 'repro-1192-readonly-bash')
+    const editedFile = path.join(workDir, 'src.ts')
+    const userId = crypto.randomUUID()
+    const backupName = 'repro-1192-src@v1'
+    await fs.mkdir(workDir, { recursive: true })
+    await fs.writeFile(editedFile, 'after\n')
+    await writeFileHistoryBackup(sessionId, backupName, 'before\n')
+    await writeSessionFile('-tmp-repro-1192-readonly-bash', sessionId, [
+      makeSessionMetaEntry(workDir),
+      makeFileHistorySnapshotEntry(userId, {
+        'src.ts': { backupFileName: backupName, version: 1, backupTime: '2026-01-01T00:00:00.000Z' },
+      }),
+      { ...makeUserEntry('edit then check status', userId), cwd: workDir, sessionId },
+      makeAssistantToolUseEntry([{
+        id: 'Edit:src',
+        name: 'Edit',
+        input: { file_path: editedFile, old_string: 'before', new_string: 'after' },
+      }], userId),
+      makeToolResultUserEntry('Edit:src', 'Updated successfully.', undefined, undefined, sessionId),
+      makeAssistantToolUseEntry([{
+        id: 'Bash:git-status',
+        name: 'Bash',
+        input: { command: 'git status --short' },
+      }], userId),
+      makeToolResultUserEntry('Bash:git-status', ' M src.ts', undefined, undefined, sessionId),
+      makeAssistantEntry('Done.', userId),
+    ])
+
+    const listRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/turn-checkpoints`)
+    const body = await listRes.json() as {
+      checkpoints: Array<{
+        code: { filesChanged: string[] }
+        restoreAvailable?: boolean
+        unverifiedChangeSources?: string[]
+      }>
+    }
+    expect(body.checkpoints[0]).toMatchObject({
+      code: { filesChanged: [editedFile] },
+      restoreAvailable: true,
+      // `git status` is provably read-only, so it must not even be reported.
+      unverifiedChangeSources: [],
+    })
+
+    const rewindRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/rewind`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targetUserMessageId: userId }),
+    })
+    expect(rewindRes.status).toBe(200)
+    expect(await fs.readFile(editedFile, 'utf-8')).toBe('before\n')
+  })
+
+  it('should keep restore available when the turn ran a tool with no file-change extractor', async () => {
+    const sessionId = '99999999-bbbb-cccc-dddd-0000000f0002'
+    const workDir = path.join(tmpDir, 'repro-1192-taskcreate')
+    const editedFile = path.join(workDir, 'src.ts')
+    const userId = crypto.randomUUID()
+    const backupName = 'repro-1192-task-src@v1'
+    await fs.mkdir(workDir, { recursive: true })
+    await fs.writeFile(editedFile, 'after\n')
+    await writeFileHistoryBackup(sessionId, backupName, 'before\n')
+    await writeSessionFile('-tmp-repro-1192-taskcreate', sessionId, [
+      makeSessionMetaEntry(workDir),
+      makeFileHistorySnapshotEntry(userId, {
+        'src.ts': { backupFileName: backupName, version: 1, backupTime: '2026-01-01T00:00:00.000Z' },
+      }),
+      { ...makeUserEntry('track then edit', userId), cwd: workDir, sessionId },
+      makeAssistantToolUseEntry([{
+        id: 'TaskCreate:1',
+        name: 'TaskCreate',
+        input: { tasks: [{ content: 'do it', activeForm: 'doing it' }] },
+      }], userId),
+      makeToolResultUserEntry('TaskCreate:1', 'Created.', undefined, undefined, sessionId),
+      makeAssistantToolUseEntry([{
+        id: 'TaskUpdate:1',
+        name: 'TaskUpdate',
+        input: { taskId: 't1', status: 'completed' },
+      }], userId),
+      makeToolResultUserEntry('TaskUpdate:1', 'Updated.', undefined, undefined, sessionId),
+      makeAssistantToolUseEntry([{
+        id: 'Edit:src',
+        name: 'Edit',
+        input: { file_path: editedFile, old_string: 'before', new_string: 'after' },
+      }], userId),
+      makeToolResultUserEntry('Edit:src', 'Updated successfully.', undefined, undefined, sessionId),
+      makeAssistantEntry('Done.', userId),
+    ])
+
+    const listRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/turn-checkpoints`)
+    const body = await listRes.json() as {
+      checkpoints: Array<{ restoreAvailable?: boolean; unverifiedChangeSources?: string[] }>
+    }
+    expect(body.checkpoints[0]?.restoreAvailable).toBe(true)
+    // TaskCreate can spawn shell/agent work that writes files, so it is reported;
+    // TaskUpdate only touches task metadata, so it must not add noise.
+    expect(body.checkpoints[0]?.unverifiedChangeSources).toEqual(['TaskCreate'])
+  })
+
+  it('should deduplicate and cap the reported unverified change sources', async () => {
+    const sessionId = '99999999-bbbb-cccc-dddd-0000000f0003'
+    const workDir = path.join(tmpDir, 'repro-1192-many-sources')
+    const editedFile = path.join(workDir, 'src.ts')
+    const userId = crypto.randomUUID()
+    const backupName = 'repro-1192-many-src@v1'
+    await fs.mkdir(workDir, { recursive: true })
+    await fs.writeFile(editedFile, 'after\n')
+    await writeFileHistoryBackup(sessionId, backupName, 'before\n')
+    // 10 distinct unknown tools plus a repeat, to prove both the dedup and the cap.
+    const unknownTools = [
+      'ToolA', 'ToolB', 'ToolC', 'ToolD', 'ToolE',
+      'ToolF', 'ToolG', 'ToolH', 'ToolI', 'ToolJ', 'ToolA',
+    ]
+    await writeSessionFile('-tmp-repro-1192-many-sources', sessionId, [
+      makeSessionMetaEntry(workDir),
+      makeFileHistorySnapshotEntry(userId, {
+        'src.ts': { backupFileName: backupName, version: 1, backupTime: '2026-01-01T00:00:00.000Z' },
+      }),
+      { ...makeUserEntry('many tools', userId), cwd: workDir, sessionId },
+      ...unknownTools.flatMap((name, index) => [
+        makeAssistantToolUseEntry([{ id: `${name}:${index}`, name, input: { x: 1 } }], userId),
+        makeToolResultUserEntry(`${name}:${index}`, 'ok', undefined, undefined, sessionId),
+      ]),
+      makeAssistantToolUseEntry([{
+        id: 'Edit:src',
+        name: 'Edit',
+        input: { file_path: editedFile, old_string: 'before', new_string: 'after' },
+      }], userId),
+      makeToolResultUserEntry('Edit:src', 'Updated successfully.', undefined, undefined, sessionId),
+      makeAssistantEntry('Done.', userId),
+    ])
+
+    const listRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/turn-checkpoints`)
+    const body = await listRes.json() as {
+      checkpoints: Array<{ restoreAvailable?: boolean; unverifiedChangeSources?: string[] }>
+    }
+    expect(body.checkpoints[0]?.restoreAvailable).toBe(true)
+    expect(body.checkpoints[0]?.unverifiedChangeSources).toEqual([
+      'ToolA', 'ToolB', 'ToolC', 'ToolD', 'ToolE', 'ToolF', 'ToolG', 'ToolH',
+    ])
+  })
+
+  it('should keep blocking restore when the transcript itself cannot be read', async () => {
+    // Guards the split introduced for issue #1192: an unknown *tool* only
+    // downgrades coverage, but an unreadable *transcript* still blocks, because
+    // then even the reported file list may be wrong.
+    const sessionId = '99999999-bbbb-cccc-dddd-0000000f0004'
+    const workDir = path.join(tmpDir, 'repro-1192-broken-transcript')
+    const editedFile = path.join(workDir, 'src.ts')
+    const userId = crypto.randomUUID()
+    const backupName = 'repro-1192-broken@v1'
+    await fs.mkdir(workDir, { recursive: true })
+    await fs.writeFile(editedFile, 'after\n')
+    await writeFileHistoryBackup(sessionId, backupName, 'before\n')
+    const projectDir = '-tmp-repro-1192-broken-transcript'
+    await writeSessionFile(projectDir, sessionId, [
+      makeSessionMetaEntry(workDir),
+      makeFileHistorySnapshotEntry(userId, {
+        'src.ts': { backupFileName: backupName, version: 1, backupTime: '2026-01-01T00:00:00.000Z' },
+      }),
+      { ...makeUserEntry('edit src', userId), cwd: workDir, sessionId },
+      makeAssistantToolUseEntry([{
+        id: 'Edit:src',
+        name: 'Edit',
+        input: { file_path: editedFile, old_string: 'before', new_string: 'after' },
+      }], userId),
+      makeToolResultUserEntry('Edit:src', 'Updated successfully.', undefined, undefined, sessionId),
+      makeAssistantEntry('Done.', userId),
+    ])
+    const transcriptPath = path.join(tmpDir, 'projects', projectDir, `${sessionId}.jsonl`)
+    await fs.appendFile(transcriptPath, '{"type":"assistant","truncated\n')
+
+    const listRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/turn-checkpoints`)
     const body = await listRes.json() as { checkpoints: Array<{ restoreAvailable?: boolean }> }
     expect(body.checkpoints[0]?.restoreAvailable).toBe(false)
     const rewindRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/rewind`, {
@@ -7574,7 +8271,125 @@ describe('Sessions API', () => {
       body: JSON.stringify({ targetUserMessageId: userId }),
     })
     expect(rewindRes.status).toBe(400)
-    expect(await fs.readFile(shellFile, 'utf-8')).toBe('written by shell\n')
+    expect(await fs.readFile(editedFile, 'utf-8')).toBe('after\n')
+  })
+
+  it('should roll back the conversation alone when the files cannot be restored', async () => {
+    // The whole point of the mode: an unreadable transcript blocks the file
+    // restore, but the user must still be able to back out of their prompt.
+    const sessionId = '99999999-bbbb-cccc-dddd-0000000f0005'
+    const workDir = path.join(tmpDir, 'repro-1192-conversation-only')
+    const editedFile = path.join(workDir, 'src.ts')
+    const firstUserId = crypto.randomUUID()
+    const secondUserId = crypto.randomUUID()
+    const backupName = 'repro-1192-convonly@v1'
+    await fs.mkdir(workDir, { recursive: true })
+    await fs.writeFile(editedFile, 'after\n')
+    await writeFileHistoryBackup(sessionId, backupName, 'before\n')
+    const projectDir = '-tmp-repro-1192-conversation-only'
+    await writeSessionFile(projectDir, sessionId, [
+      makeSessionMetaEntry(workDir),
+      makeFileHistorySnapshotEntry(firstUserId, {
+        'src.ts': { backupFileName: backupName, version: 1, backupTime: '2026-01-01T00:00:00.000Z' },
+      }),
+      { ...makeUserEntry('first prompt', firstUserId), cwd: workDir, sessionId },
+      makeAssistantEntry('First done.', firstUserId),
+      { ...makeUserEntry('second prompt', secondUserId), cwd: workDir, sessionId },
+      makeAssistantToolUseEntry([{
+        id: 'Edit:src',
+        name: 'Edit',
+        input: { file_path: editedFile, old_string: 'before', new_string: 'after' },
+      }], secondUserId),
+      makeToolResultUserEntry('Edit:src', 'Updated successfully.', undefined, undefined, sessionId),
+      makeAssistantEntry('Second done.', secondUserId),
+    ])
+    const transcriptPath = path.join(tmpDir, 'projects', projectDir, `${sessionId}.jsonl`)
+    await fs.appendFile(transcriptPath, '{"type":"assistant","truncated\n')
+
+    // Default mode still refuses, and changes nothing.
+    const bothRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/rewind`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targetUserMessageId: secondUserId }),
+    })
+    expect(bothRes.status).toBe(400)
+    expect(await fs.readFile(editedFile, 'utf-8')).toBe('after\n')
+
+    const conversationRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/rewind`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targetUserMessageId: secondUserId, mode: 'conversation' }),
+    })
+    expect(conversationRes.status).toBe(200)
+    expect(await conversationRes.json()).toMatchObject({
+      mode: 'conversation',
+      // Reported honestly: the files were left alone because we could not
+      // restore them, not because the user declined.
+      restoreAvailable: false,
+    })
+    // Files untouched...
+    expect(await fs.readFile(editedFile, 'utf-8')).toBe('after\n')
+    // ...conversation actually trimmed back to before the second prompt.
+    const messagesRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/messages`)
+    const messages = await messagesRes.json() as { messages: Array<{ id: string }> }
+    expect(messages.messages.some((message) => message.id === secondUserId)).toBe(false)
+    expect(messages.messages.some((message) => message.id === firstUserId)).toBe(true)
+  })
+
+  it('should leave files alone in conversation mode even when they are restorable', async () => {
+    const sessionId = '99999999-bbbb-cccc-dddd-0000000f0006'
+    const workDir = path.join(tmpDir, 'repro-1192-conversation-opt-out')
+    const editedFile = path.join(workDir, 'src.ts')
+    const userId = crypto.randomUUID()
+    const backupName = 'repro-1192-optout@v1'
+    await fs.mkdir(workDir, { recursive: true })
+    await fs.writeFile(editedFile, 'after\n')
+    await writeFileHistoryBackup(sessionId, backupName, 'before\n')
+    await writeSessionFile('-tmp-repro-1192-conversation-opt-out', sessionId, [
+      makeSessionMetaEntry(workDir),
+      makeFileHistorySnapshotEntry(userId, {
+        'src.ts': { backupFileName: backupName, version: 1, backupTime: '2026-01-01T00:00:00.000Z' },
+      }),
+      { ...makeUserEntry('edit src', userId), cwd: workDir, sessionId },
+      makeAssistantToolUseEntry([{
+        id: 'Edit:src',
+        name: 'Edit',
+        input: { file_path: editedFile, old_string: 'before', new_string: 'after' },
+      }], userId),
+      makeToolResultUserEntry('Edit:src', 'Updated successfully.', undefined, undefined, sessionId),
+      makeAssistantEntry('Done.', userId),
+    ])
+
+    const res = await fetch(`${baseUrl}/api/sessions/${sessionId}/rewind`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targetUserMessageId: userId, mode: 'conversation' }),
+    })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ mode: 'conversation', restoreAvailable: true })
+    expect(await fs.readFile(editedFile, 'utf-8')).toBe('after\n')
+  })
+
+  it('should echo the default mode and reject an unknown one', async () => {
+    const sessionId = '99999999-bbbb-cccc-dddd-0000000f0007'
+    const workDir = path.join(tmpDir, 'repro-1192-mode-validation')
+    const userId = crypto.randomUUID()
+    await fs.mkdir(workDir, { recursive: true })
+    await writeSessionFile('-tmp-repro-1192-mode-validation', sessionId, [
+      makeSessionMetaEntry(workDir),
+      { ...makeUserEntry('hello', userId), cwd: workDir, sessionId },
+      makeAssistantEntry('Hi.', userId),
+    ])
+
+    const badRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/rewind`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targetUserMessageId: userId, mode: 'code' }),
+    })
+    expect(badRes.status).toBe(400)
+
+    const defaultRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/rewind`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targetUserMessageId: userId }),
+    })
+    expect(defaultRes.status).toBe(200)
+    expect(await defaultRes.json()).toMatchObject({ mode: 'both' })
   })
 
   it('should reject unsafe backup file names without reading outside file history', async () => {
@@ -7896,7 +8711,7 @@ describe('Sessions API', () => {
     expect(await fs.readFile(outsideFile, 'utf-8')).toBe('after\n')
   })
 
-  it('should treat errored write-capable tools as incomplete evidence', async () => {
+  it('should report errored write-capable tools as unverified without blocking restore', async () => {
     const sessionId = '99999999-bbbb-cccc-dddd-000000000029'
     const workDir = path.join(tmpDir, 'errored-write-tool')
     const targetFile = path.join(workDir, 'target.txt')
@@ -7915,8 +8730,11 @@ describe('Sessions API', () => {
       makeAssistantEntry('Failed.', userId),
     ])
     const res = await fetch(`${baseUrl}/api/sessions/${sessionId}/turn-checkpoints`)
-    const body = await res.json() as { checkpoints: Array<{ restoreAvailable?: boolean }> }
-    expect(body.checkpoints[0]?.restoreAvailable).toBe(false)
+    const body = await res.json() as {
+      checkpoints: Array<{ restoreAvailable?: boolean; unverifiedChangeSources?: string[] }>
+    }
+    expect(body.checkpoints[0]?.restoreAvailable).toBe(true)
+    expect(body.checkpoints[0]?.unverifiedChangeSources).toEqual(['Bash'])
   })
 
   it('should reject a symlinked file-history session directory', async () => {
@@ -7999,6 +8817,92 @@ describe('Sessions API', () => {
 
     const remainingMessages = await service.getSessionMessages(fixture.sessionId)
     expect(remainingMessages).toHaveLength(0)
+  })
+
+  // Files created by the FIRST turn (the mirror of the fixture above, which
+  // creates its file in the third turn). Rewinding back to turn 1 has to delete
+  // them, because "before turn 1" is a state in which they did not exist.
+  async function writeFirstTurnCreatesFilesFixture(sessionId: string) {
+    const workDir = path.join(tmpDir, `first-turn-creates-${sessionId}`)
+    const fileA = path.join(workDir, 'a.ts')
+    const fileB = path.join(workDir, 'b.ts')
+    const fileC = path.join(workDir, 'c.ts')
+    const ids = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()]
+    await fs.mkdir(workDir, { recursive: true })
+    // Disk holds the third-turn content.
+    await fs.writeFile(fileA, 'a v3\n')
+    await fs.writeFile(fileB, 'b v3\n')
+    await fs.writeFile(fileC, 'c v3\n')
+    await writeFileHistoryBackup(sessionId, 'a@v2', 'a v1\n')
+    await writeFileHistoryBackup(sessionId, 'b@v2', 'b v1\n')
+    await writeFileHistoryBackup(sessionId, 'a@v3', 'a v2\n')
+    await writeFileHistoryBackup(sessionId, 'b@v3', 'b v2\n')
+    await writeFileHistoryBackup(sessionId, 'c@v2', 'c v2\n')
+    const stamp = '2026-01-01T00:00:00.000Z'
+    await writeSessionFile(`-tmp-first-turn-creates-${sessionId}`, sessionId, [
+      makeSessionMetaEntry(workDir),
+      // Turn 1 creates a.ts and b.ts — neither existed before it.
+      makeFileHistorySnapshotEntry(ids[0]!, {
+        'a.ts': { backupFileName: null, version: 1, backupTime: stamp },
+        'b.ts': { backupFileName: null, version: 1, backupTime: stamp },
+      }),
+      { ...makeUserEntry('create a and b', ids[0]), cwd: workDir, sessionId },
+      makeAssistantEntry('Created.', ids[0]),
+      // Turn 2 edits both and creates c.ts.
+      makeFileHistorySnapshotEntry(ids[1]!, {
+        'a.ts': { backupFileName: 'a@v2', version: 2, backupTime: stamp },
+        'b.ts': { backupFileName: 'b@v2', version: 2, backupTime: stamp },
+        'c.ts': { backupFileName: null, version: 1, backupTime: stamp },
+      }),
+      { ...makeUserEntry('edit a, b and create c', ids[1]), cwd: workDir, sessionId },
+      makeAssistantEntry('Done.', ids[1]),
+      // Turn 3 edits a.ts, b.ts and c.ts again.
+      makeFileHistorySnapshotEntry(ids[2]!, {
+        'a.ts': { backupFileName: 'a@v3', version: 3, backupTime: stamp },
+        'b.ts': { backupFileName: 'b@v3', version: 3, backupTime: stamp },
+        'c.ts': { backupFileName: 'c@v2', version: 2, backupTime: stamp },
+      }),
+      { ...makeUserEntry('edit again', ids[2]), cwd: workDir, sessionId },
+      makeAssistantEntry('Done.', ids[2]),
+    ])
+    return { workDir, fileA, fileB, fileC, ids }
+  }
+
+  it('POST /api/sessions/:id/rewind should return to the start of the third turn without touching earlier turns', async () => {
+    const sessionId = 'aaaaaaaa-9999-1111-2222-333333333333'
+    const f = await writeFirstTurnCreatesFilesFixture(sessionId)
+
+    const res = await fetch(`${baseUrl}/api/sessions/${sessionId}/rewind`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targetUserMessageId: f.ids[2] }),
+    })
+    expect(res.status).toBe(200)
+
+    // Back to the state captured when turn 3's prompt was submitted.
+    expect(await fs.readFile(f.fileA, 'utf-8')).toBe('a v2\n')
+    expect(await fs.readFile(f.fileB, 'utf-8')).toBe('b v2\n')
+    // c.ts existed before turn 3, so it survives with its pre-turn-3 content.
+    expect(await fs.readFile(f.fileC, 'utf-8')).toBe('c v2\n')
+  })
+
+  it('POST /api/sessions/:id/rewind should delete first-turn-created files when rewinding all the way back', async () => {
+    const sessionId = 'aaaaaaaa-9999-4444-5555-666666666666'
+    const f = await writeFirstTurnCreatesFilesFixture(sessionId)
+
+    const res = await fetch(`${baseUrl}/api/sessions/${sessionId}/rewind`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targetUserMessageId: f.ids[0] }),
+    })
+    expect(res.status).toBe(200)
+
+    // a.ts and b.ts did not exist before turn 1 — undo removes them outright.
+    await expect(fs.stat(f.fileA)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(fs.stat(f.fileB)).rejects.toMatchObject({ code: 'ENOENT' })
+    // c.ts was created two turns later and is removed as well: the restore plan
+    // spans every tracked path, not just the ones in the target snapshot.
+    await expect(fs.stat(f.fileC)).rejects.toMatchObject({ code: 'ENOENT' })
+
+    expect(await service.getSessionMessages(sessionId)).toHaveLength(0)
   })
 
   it('POST /api/sessions/:id/rewind should keep the first turn and remove later file changes when rewinding the second turn of a three-turn history', async () => {

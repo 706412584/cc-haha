@@ -33,6 +33,7 @@ import {
   isTeammate,
 } from '../../utils/teammate.js'
 import {
+  createMailboxMessageId,
   createShutdownApprovedMessage,
   createShutdownRejectedMessage,
   createShutdownRequestMessage,
@@ -217,6 +218,8 @@ async function handleBroadcast(
   }
 
   const senderColor = getTeammateColor()
+  const messageId = createMailboxMessageId()
+  const timestamp = new Date().toISOString()
 
   const recipients: string[] = []
   for (const member of teamFile.members) {
@@ -240,10 +243,11 @@ async function handleBroadcast(
     await writeToMailbox(
       recipientName,
       {
+        id: messageId,
         from: senderName,
         text: content,
         summary,
-        timestamp: new Date().toISOString(),
+        timestamp,
         color: senderColor,
       },
       teamName,

@@ -216,6 +216,38 @@ describe('HahaOAuthService — ensureFreshAccessToken', () => {
     expect(loaded?.accessToken).toBe('new-fresh-token')
   })
 
+  test('deduplicates concurrent expiry refreshes from parallel model requests', async () => {
+    await service.saveTokens({
+      accessToken: 'expiring-shared-token',
+      refreshToken: 'refresh-shared-token',
+      expiresAt: Date.now() + 60_000,
+      scopes: ['user:inference'],
+      subscriptionType: 'pro',
+    })
+    let refreshCalls = 0
+    service.setRefreshFn(async () => {
+      refreshCalls += 1
+      await Promise.resolve()
+      return {
+        accessToken: 'expiry-recovered-token',
+        refreshToken: 'refresh-next',
+        expiresAt: Date.now() + 60 * 60_000,
+        scopes: ['user:inference'],
+        subscriptionType: 'pro',
+        rateLimitTier: null,
+      }
+    })
+
+    const [first, second] = await Promise.all([
+      service.ensureFreshTokens(),
+      service.ensureFreshTokens(),
+    ])
+
+    expect(first?.accessToken).toBe('expiry-recovered-token')
+    expect(second?.accessToken).toBe('expiry-recovered-token')
+    expect(refreshCalls).toBe(1)
+  })
+
   test('returns null when refresh fails', async () => {
     await service.saveTokens({
       accessToken: 'expired',
@@ -229,5 +261,84 @@ describe('HahaOAuthService — ensureFreshAccessToken', () => {
     })
 
     expect(await service.ensureFreshAccessToken()).toBeNull()
+  })
+
+  test('forces a refresh after a server-side 401 even when the token is not locally expired', async () => {
+    await service.saveTokens({
+      accessToken: 'rejected-by-server',
+      refreshToken: 'refresh-xxx',
+      expiresAt: Date.now() + 30 * 60_000,
+      scopes: ['user:inference'],
+      subscriptionType: 'max',
+    })
+    service.setRefreshFn(async () => ({
+      accessToken: 'accepted-after-refresh',
+      refreshToken: null,
+      expiresAt: Date.now() + 60 * 60_000,
+      scopes: ['user:inference'],
+      subscriptionType: null,
+      rateLimitTier: null,
+    }))
+
+    const refreshed = await service.recoverFromUnauthorized('rejected-by-server')
+
+    expect(refreshed).toMatchObject({
+      accessToken: 'accepted-after-refresh',
+      refreshToken: 'refresh-xxx',
+      subscriptionType: 'max',
+    })
+    expect(await service.loadTokens()).toEqual(refreshed)
+  })
+
+  test('reuses a token already rotated by another session instead of refreshing it again', async () => {
+    await service.saveTokens({
+      accessToken: 'already-rotated',
+      refreshToken: 'refresh-xxx',
+      expiresAt: Date.now() + 30 * 60_000,
+      scopes: ['user:inference'],
+      subscriptionType: 'pro',
+    })
+    let refreshCalls = 0
+    service.setRefreshFn(async () => {
+      refreshCalls += 1
+      throw new Error('refresh should not be called')
+    })
+
+    const refreshed = await service.recoverFromUnauthorized('older-rejected-token')
+
+    expect(refreshed?.accessToken).toBe('already-rotated')
+    expect(refreshCalls).toBe(0)
+  })
+
+  test('deduplicates concurrent recovery for the same rejected token', async () => {
+    await service.saveTokens({
+      accessToken: 'shared-rejected-token',
+      refreshToken: 'refresh-xxx',
+      expiresAt: Date.now() + 30 * 60_000,
+      scopes: ['user:inference'],
+      subscriptionType: 'pro',
+    })
+    let refreshCalls = 0
+    service.setRefreshFn(async () => {
+      refreshCalls += 1
+      await Promise.resolve()
+      return {
+        accessToken: 'shared-recovered-token',
+        refreshToken: 'refresh-next',
+        expiresAt: Date.now() + 60 * 60_000,
+        scopes: ['user:inference'],
+        subscriptionType: 'pro',
+        rateLimitTier: null,
+      }
+    })
+
+    const [first, second] = await Promise.all([
+      service.recoverFromUnauthorized('shared-rejected-token'),
+      service.recoverFromUnauthorized('shared-rejected-token'),
+    ])
+
+    expect(first?.accessToken).toBe('shared-recovered-token')
+    expect(second?.accessToken).toBe('shared-recovered-token')
+    expect(refreshCalls).toBe(1)
   })
 })

@@ -460,6 +460,37 @@ export const SettingsSchema = lazySchema(() =>
         .boolean()
         .optional()
         .describe('Disable all hooks and statusLine execution'),
+      // Dynamic workflows: the Workflow tool, /workflows, and saved workflow
+      // commands. Honored in managed settings as an org-wide kill switch.
+      disableWorkflows: z
+        .boolean()
+        .optional()
+        .describe(
+          'Disable dynamic workflows: the Workflow tool, bundled workflow commands, ' +
+            'and saved workflows in .claude/workflows.',
+        ),
+      enableWorkflows: z
+        .boolean()
+        .optional()
+        .describe(
+          'Explicitly enable dynamic workflows. Only consulted when they are not ' +
+            'disabled; `disableWorkflows` and CLAUDE_CODE_DISABLE_WORKFLOWS win.',
+        ),
+      workflowKeywordTriggerEnabled: z
+        .boolean()
+        .optional()
+        .describe(
+          'Enable the "ultracode" keyword trigger: including the keyword in a prompt ' +
+            'opts that turn into the Workflow tool. Set to false to disable the trigger. Default: true.',
+        ),
+      workflowSizeGuideline: z
+        .enum(['unrestricted', 'small', 'medium', 'large'])
+        .optional()
+        .describe(
+          'How many subagents Claude should aim for when writing a dynamic workflow. ' +
+            'small < 5, medium < 15, large < 50, unrestricted lets Claude size it to the task. ' +
+            'Advice to the model, not a runtime cap.',
+        ),
       // Opt out of the cross-client `.agents/skills` convention (agentskills.io),
       // which is scanned alongside `.claude/skills` by default.
       disableAgentSkillsDirectory: z
@@ -777,6 +808,42 @@ export const SettingsSchema = lazySchema(() =>
         .describe(
           'Name of an agent (built-in or custom) to use for the main thread. ' +
             "Applies the agent's system prompt, tool restrictions, and model.",
+        ),
+      builtInAgentOverrides: z
+        .record(
+          z.string(),
+          z
+            .object({
+              // Any non-empty string, matching the Markdown `model` frontmatter
+              // parser — third-party model IDs are not aliases.
+              model: z.string().trim().min(1).optional().catch(undefined),
+              // Agent-level effort takes the full level set, unlike the
+              // session-level `effortLevel` above. Levels are inlined rather
+              // than imported from utils/effort.js: that module reads settings,
+              // so importing it here would close a types -> effort -> settings
+              // -> types cycle. BUILT_IN_AGENT_OVERRIDE_EFFORT_LEVELS in
+              // tools/AgentTool/builtInAgentOverrides.ts asserts they match.
+              effort: z
+                .union([
+                  z.enum(['low', 'medium', 'high', 'xhigh', 'max']),
+                  z.number().int(),
+                ])
+                .optional()
+                .catch(undefined),
+            })
+            // Per-field .catch keeps one bad value from discarding its sibling;
+            // passthrough leaves room for future per-agent fields.
+            .passthrough()
+            .catch({}),
+        )
+        .optional()
+        // A malformed value here must not invalidate the whole settings file:
+        // parseSettingsFileUncached drops every setting when the schema throws.
+        .catch(undefined)
+        .describe(
+          'Per-agent model/effort overrides for built-in agents. Keys are the ' +
+            'agentType as spawned (e.g. "Explore"), case-sensitive. Other ' +
+            'built-in fields stay read-only.',
         ),
       companyAnnouncements: z
         .array(z.string())

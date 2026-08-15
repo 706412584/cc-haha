@@ -3,12 +3,16 @@ import { Highlight, type PrismTheme } from 'prism-react-renderer'
 import { CopyButton } from '@/components/ui/CopyButton'
 import { useTranslation } from '../../i18n'
 
+export type CodeViewerChrome = 'card' | 'embedded'
+
 type Props = {
   code: string
   language?: string
   maxLines?: number
   showLineNumbers?: boolean
   wrapLongLines?: boolean
+  chrome?: CodeViewerChrome
+  label?: string
 }
 
 const warmPrismTheme: PrismTheme = {
@@ -282,9 +286,18 @@ function CodeArea({
   )
 }
 
-export function CodeViewer({ code, language, maxLines = 20, showLineNumbers = false, wrapLongLines = false }: Props) {
+export function CodeViewer({
+  code,
+  language,
+  maxLines = 20,
+  showLineNumbers = false,
+  wrapLongLines = false,
+  chrome = 'card',
+  label,
+}: Props) {
   const t = useTranslation()
   const [expanded, setExpanded] = useState(false)
+  const isEmbedded = chrome === 'embedded'
 
   const allLines = code.split('\n')
   const isTruncated = !expanded && allLines.length > maxLines
@@ -296,16 +309,35 @@ export function CodeViewer({ code, language, maxLines = 20, showLineNumbers = fa
   const showExpandToggle = allLines.length > maxLines
 
   return (
-    <div className="overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-code-bg)]">
+    <div
+      data-code-viewer-chrome={chrome}
+      className={
+        isEmbedded
+          ? 'overflow-hidden bg-[var(--color-code-bg)]'
+          : 'overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-code-bg)]'
+      }
+    >
       {/* Header */}
       <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-surface-container)] px-3 py-1.5 text-[11px] text-[var(--color-text-tertiary)]">
-        <div className="flex items-center gap-3">
-          <span className="font-semibold uppercase tracking-[0.14em]">{languageLabel}</span>
+        <div className="flex items-center gap-2.5">
+          {label ? (
+            <>
+              <span className="font-semibold uppercase tracking-[0.14em]">{label}</span>
+              <span aria-hidden="true">·</span>
+            </>
+          ) : null}
+          <span className={`${label ? 'font-medium' : 'font-semibold'} uppercase tracking-[0.14em]`}>
+            {languageLabel}
+          </span>
           <span>{lineCountLabel}</span>
         </div>
         <CopyButton
           text={code}
-          className="rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-2 py-1 text-[11px] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-container-high)] hover:text-[var(--color-text-primary)]"
+          className={
+            isEmbedded
+              ? 'rounded-[var(--radius-sm)] px-2 py-1 text-[11px] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-container-high)] hover:text-[var(--color-text-primary)]'
+              : 'rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-2 py-1 text-[11px] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-container-high)] hover:text-[var(--color-text-primary)]'
+          }
         />
       </div>
 

@@ -67,6 +67,32 @@ describe('agentsApi', () => {
     expect(apiDeleteMock).toHaveBeenCalledWith('/api/agents/reviewer?scope=user')
   })
 
+  it('sends an override to the sub-resource, keeping explicit nulls', () => {
+    // `null` is the wire form of "clear this field"; dropping it would silently
+    // turn a reset into a no-op.
+    agentsApi.setOverride('Explore', { cwd: '/workspace/one', model: null, effort: 'low' })
+
+    expect(apiPutMock).toHaveBeenCalledWith('/api/agents/Explore/override', {
+      cwd: '/workspace/one',
+      model: null,
+      effort: 'low',
+    })
+  })
+
+  it('URL-encodes the override clear path and cwd', () => {
+    agentsApi.clearOverride('reviewer/name?', '/workspace/project one')
+
+    expect(apiDeleteMock).toHaveBeenCalledWith(
+      '/api/agents/reviewer%2Fname%3F/override?cwd=%2Fworkspace%2Fproject+one',
+    )
+  })
+
+  it('omits an empty cwd from an override clear', () => {
+    agentsApi.clearOverride('Explore')
+
+    expect(apiDeleteMock).toHaveBeenCalledWith('/api/agents/Explore/override')
+  })
+
   it('reloads the exact active session with the control timeout', () => {
     agentsApi.reload('session/one?')
 

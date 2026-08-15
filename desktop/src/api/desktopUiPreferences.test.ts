@@ -4,6 +4,7 @@ import { desktopUiPreferencesApi, getProfileAvatarUrl } from './desktopUiPrefere
 
 const preferences = {
   schemaVersion: 3,
+  projectDisplayNames: {},
   profile: {
     displayName: 'cc-haha',
     subtitle: 'github.com/NanmiCoder/cc-haha',
@@ -54,6 +55,62 @@ describe('desktopUiPreferencesApi', () => {
       expect.objectContaining({
         method: 'PUT',
         body: JSON.stringify(pet),
+      }),
+    )
+  })
+
+  it('updates project display names and sends null to reset one', async () => {
+    setBaseUrl('http://127.0.0.1:49237')
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        ok: true,
+        projectKey: '/workspace/apps/../project',
+        displayName: 'Project alias',
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        ok: true,
+        projectKey: '/workspace/apps/../project',
+        displayName: null,
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+
+    await expect(desktopUiPreferencesApi.updateProjectDisplayName(
+      '/workspace/apps/../project',
+      'Project alias',
+    )).resolves.toEqual({
+      ok: true,
+      projectKey: '/workspace/apps/../project',
+      displayName: 'Project alias',
+    })
+    await expect(desktopUiPreferencesApi.updateProjectDisplayName(
+      '/workspace/apps/../project',
+      null,
+    )).resolves.toEqual({
+      ok: true,
+      projectKey: '/workspace/apps/../project',
+      displayName: null,
+    })
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      'http://127.0.0.1:49237/api/desktop-ui/preferences/project-display-name',
+      expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({ projectKey: '/workspace/apps/../project', displayName: 'Project alias' }),
+      }),
+    )
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      'http://127.0.0.1:49237/api/desktop-ui/preferences/project-display-name',
+      expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({ projectKey: '/workspace/apps/../project', displayName: null }),
       }),
     )
   })

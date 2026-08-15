@@ -3,14 +3,47 @@ import { getDefaultAppState } from '../../state/AppStateStore.js'
 import type { ToolUseContext } from '../../Tool.js'
 import { createFileStateCacheWithSizeLimit } from '../../utils/fileStateCache.js'
 import { asSystemPrompt } from '../../utils/systemPromptType.js'
+import { createUserMessage } from '../../utils/messages.js'
 import type { CustomAgentDefinition } from './loadAgentsDir.js'
 import {
+  resolvePersistedAgentType,
   runAgent,
+  selectInitialTranscriptMessages,
   resolveSubagentEffortValue,
   resolveSubagentThinkingConfig,
 } from './runAgent.js'
 
 describe('subagent runtime configuration', () => {
+  test('keeps a resumed teammate identity while allowing ordinary agents to use their runtime type', () => {
+    expect(
+      resolvePersistedAgentType('id-worker-a', 'general-purpose'),
+    ).toBe('id-worker-a')
+    expect(resolvePersistedAgentType(undefined, 'Explore')).toBe('Explore')
+    expect(resolvePersistedAgentType('  ', 'general-purpose')).toBe(
+      'general-purpose',
+    )
+  })
+
+  test('records only new continuation messages while keeping the persisted parent chain', () => {
+    const persisted = createUserMessage({ content: 'old turn' })
+    const continuation = createUserMessage({ content: 'new turn' })
+
+    expect(selectInitialTranscriptMessages(
+      [persisted, continuation],
+      1,
+    )).toEqual({
+      messages: [continuation],
+      startingParentUuid: persisted.uuid,
+    })
+    expect(selectInitialTranscriptMessages(
+      [persisted, continuation],
+      undefined,
+    )).toEqual({
+      messages: [persisted, continuation],
+      startingParentUuid: undefined,
+    })
+  })
+
   test('inherits the parent thinking configuration for regular and fork agents', () => {
     const disabled = { type: 'disabled' } as const
     const enabled = { type: 'enabled', budgetTokens: 4096 } as const

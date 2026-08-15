@@ -1,15 +1,22 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test'
 import { existsSync } from 'fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { dirname, join } from 'path'
+import { getDefaultAppState } from '../../state/AppStateStore.js'
+import type { ToolUseContext } from '../../Tool.js'
+import * as localAgentTask from '../../tasks/LocalAgentTask/LocalAgentTask.js'
+import { createAssistantMessage } from '../../utils/messages.js'
 import {
   getTeamFilePath,
   mutateTeamFileAsync,
   readTeamFile,
   type TeamFile,
 } from '../../utils/swarm/teamHelpers.js'
-import { assertAgentTeamExists, inputSchema } from './AgentTool.js'
+import * as agentToolUtils from './agentToolUtils.js'
+import { AgentTool, assertAgentTeamExists, inputSchema } from './AgentTool.js'
+import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js'
+import * as runAgentModule from './runAgent.js'
 
 const originalConfigDir = process.env.CLAUDE_CONFIG_DIR
 let configDir = ''
@@ -20,6 +27,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  mock.restore()
   if (originalConfigDir === undefined) {
     delete process.env.CLAUDE_CONFIG_DIR
   } else {
@@ -114,5 +122,76 @@ describe('AgentTool team spawn preflight', () => {
     expect(JSON.parse(await readFile(teamFilePath, 'utf-8')).description).toBe(
       'updated',
     )
+  })
+})
+
+describe('AgentTool nested lifecycle ownership', () => {
+  test('threads the immediate parent through registration, execution, and persistence', async () => {
+    const appState = {
+      ...getDefaultAppState(),
+      agentDefinitions: {
+        activeAgents: [GENERAL_PURPOSE_AGENT],
+        allAgents: [GENERAL_PURPOSE_AGENT],
+      },
+    }
+    const toolUseContext = {
+      options: {
+        mainLoopModel: 'sonnet',
+        tools: [],
+        mcpClients: [],
+        agentDefinitions: appState.agentDefinitions,
+      },
+      getAppState: () => appState,
+      setAppState: () => {},
+      messages: [],
+      agentId: 'parent-agent-run',
+      toolUseId: 'toolu_parent_agent',
+    } as unknown as ToolUseContext
+    const taskAbortController = new AbortController()
+    const registerSpy = spyOn(localAgentTask, 'registerAsyncAgent').mockReturnValue({
+      agentId: 'nested-agent-run',
+      abortController: taskAbortController,
+    } as never)
+    let lifecycleParams: Parameters<typeof agentToolUtils.runAsyncAgentLifecycle>[0] | undefined
+    const lifecycleSpy = spyOn(agentToolUtils, 'runAsyncAgentLifecycle').mockImplementation(
+      async params => {
+        lifecycleParams = params
+      },
+    )
+    const runAgentSpy = spyOn(runAgentModule, 'runAgent').mockImplementation(
+      (async function* () {}) as typeof runAgentModule.runAgent,
+    )
+
+    const result = await AgentTool.call(
+      {
+        description: 'Verify owner propagation',
+        prompt: 'Check every nested lifecycle boundary.',
+        subagent_type: GENERAL_PURPOSE_AGENT.agentType,
+        run_in_background: true,
+      },
+      toolUseContext,
+      (async () => ({ behavior: 'allow' })) as never,
+      createAssistantMessage({ content: 'Launch the nested agent.' }),
+    )
+
+    expect(result.data).toMatchObject({
+      isAsync: true,
+      agentId: 'nested-agent-run',
+    })
+    expect(registerSpy).toHaveBeenCalledWith(expect.objectContaining({
+      toolUseId: 'toolu_parent_agent',
+      ownerAgentId: 'parent-agent-run',
+    }))
+    expect(lifecycleSpy).toHaveBeenCalledWith(expect.objectContaining({
+      taskId: 'nested-agent-run',
+      parentToolUseId: 'toolu_parent_agent',
+      ownerAgentId: 'parent-agent-run',
+    }))
+
+    lifecycleParams?.makeStream(() => {})
+    expect(runAgentSpy).toHaveBeenCalledWith(expect.objectContaining({
+      spawningToolUseId: 'toolu_parent_agent',
+      ownerAgentId: 'parent-agent-run',
+    }))
   })
 })

@@ -2,6 +2,7 @@ import { feature } from 'bun:bundle'
 import { getIsNonInteractiveSession } from '../../bootstrap/state.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js'
 import { isEnvTruthy } from '../../utils/envUtils.js'
+import { applyBuiltInAgentOverrides } from './builtInAgentOverrides.js'
 import { CLAUDE_CODE_GUIDE_AGENT } from './built-in/claudeCodeGuideAgent.js'
 import { CODE_REVIEWER_AGENT } from './built-in/codeReviewerAgent.js'
 import { COMMIT_PR_AGENT } from './built-in/commitPrAgent.js'
@@ -43,7 +44,15 @@ function isVerificationAgentEnabled(): boolean {
   return false
 }
 
-export function getBuiltInAgents(): AgentDefinition[] {
+/**
+ * The built-in agent set as shipped, before any user configuration is applied.
+ *
+ * Callers that need the effective definitions want `getBuiltInAgents()`. This
+ * one exists so the agents API can report what "built-in default" means for a
+ * given agent — that differs per agent and per build (Explore defaults to
+ * haiku externally but inherit for ants), so it can never be hardcoded.
+ */
+export function getBuiltInAgentsWithoutOverrides(): AgentDefinition[] {
   // Allow disabling all built-in agents via env var (useful for SDK users who want a blank slate)
   // Only applies in noninteractive mode (SDK/API usage)
   if (
@@ -101,4 +110,20 @@ export function getBuiltInAgents(): AgentDefinition[] {
   }
 
   return agents
+}
+
+/**
+ * Built-in agents with the user's `builtInAgentOverrides` applied.
+ *
+ * This is the single choke point every consumer of built-in agents goes
+ * through (loadAgentsDir has the only three call sites), so applying the
+ * override here makes the effective model reach spawning, `/agents`, and the
+ * desktop list without any of them knowing an override exists.
+ *
+ * Applied after the early returns above on purpose: the SDK blank-slate opt-out
+ * must stay empty, and coordinator mode exposes a different agentType set that
+ * these overrides are not addressed to.
+ */
+export function getBuiltInAgents(): AgentDefinition[] {
+  return applyBuiltInAgentOverrides(getBuiltInAgentsWithoutOverrides())
 }

@@ -1750,6 +1750,7 @@ export const SDKTaskNotificationMessageSchema = lazySchema(() =>
     output_file: z.string(),
     summary: z.string(),
     result: z.string().optional(),
+    workflow_run_id: z.string().optional(),
     usage: z
       .object({
         total_tokens: z.number(),
@@ -1757,6 +1758,7 @@ export const SDKTaskNotificationMessageSchema = lazySchema(() =>
         duration_ms: z.number(),
       })
       .optional(),
+    owner_agent_id: z.string().optional(),
     uuid: UUIDPlaceholder(),
     session_id: z.string(),
   }),
@@ -1777,7 +1779,9 @@ export const SDKTaskStartedMessageSchema = lazySchema(() =>
       .describe(
         "meta.name from the workflow script (e.g. 'spec'). Only set when task_type is 'local_workflow'.",
       ),
+    workflow_run_id: z.string().optional(),
     prompt: z.string().optional(),
+    owner_agent_id: z.string().optional(),
     uuid: UUIDPlaceholder(),
     session_id: z.string(),
   }),
@@ -1812,6 +1816,8 @@ export const SDKTaskProgressMessageSchema = lazySchema(() =>
     }),
     last_tool_name: z.string().optional(),
     summary: z.string().optional(),
+    workflow_run_id: z.string().optional(),
+    owner_agent_id: z.string().optional(),
     uuid: UUIDPlaceholder(),
     session_id: z.string(),
   }),

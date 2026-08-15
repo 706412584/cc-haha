@@ -6,14 +6,14 @@ import { buildTool, type ToolDef } from '../../Tool.js'
 import { isAgentSwarmsEnabled } from '../../utils/agentSwarmsEnabled.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { jsonStringify } from '../../utils/slowOperations.js'
-import { TEAM_LEAD_NAME } from '../../utils/swarm/constants.js'
 import {
   cleanupTeamDirectories,
+  getRegisteredTeamLifecycle,
   readTeamFile,
   unregisterTeamForSessionCleanup,
 } from '../../utils/swarm/teamHelpers.js'
 import { clearTeammateColors } from '../../utils/swarm/teammateLayoutManager.js'
-import { clearLeaderTeamName } from '../../utils/tasks.js'
+import { clearLeaderTeamName, type Task } from '../../utils/tasks.js'
 import { TEAM_DELETE_TOOL_NAME } from './constants.js'
 import { getPrompt } from './prompt.js'
 import { renderToolResultMessage, renderToolUseMessage } from './UI.js'
@@ -25,6 +25,9 @@ export type Output = {
   success: boolean
   message: string
   team_name?: string
+  finalTasks?: Task[]
+  taskListSnapshotAt?: string
+  taskListSnapshotRevision?: number
 }
 
 export type Input = z.infer<InputSchema>
@@ -73,34 +76,47 @@ export const TeamDeleteTool: Tool<InputSchema, Output> = buildTool({
     const appState = getAppState()
     const teamName = appState.teamContext?.teamName
 
+    let finalTasks: Task[] | undefined
+    let taskListSnapshotAt: string | undefined
+    let taskListSnapshotRevision: number | undefined
+
     if (teamName) {
       // Read team config to check for active members
       const teamFile = readTeamFile(teamName)
       if (teamFile) {
-        // Filter out the team lead - only count non-lead members
+        // An idle teammate is still alive and polling its mailbox. Deleting
+        // the Team while it remains registered lets that old actor wake after
+        // a same-name recreation and mutate the new generation's task list.
+        // Shutdown approval removes teammates from the config; only that
+        // durable transition makes cleanup safe.
         const nonLeadMembers = teamFile.members.filter(
-          m => m.name !== TEAM_LEAD_NAME,
+          m => m.agentId !== teamFile.leadAgentId,
         )
 
-        // Separate truly active members from idle/dead ones
-        // Members with isActive === false are idle (finished their turn or crashed)
-        const activeMembers = nonLeadMembers.filter(m => m.isActive !== false)
-
-        if (activeMembers.length > 0) {
-          const memberNames = activeMembers.map(m => m.name).join(', ')
+        if (nonLeadMembers.length > 0) {
+          const memberNames = nonLeadMembers.map(m => m.name).join(', ')
           return {
             data: {
               success: false,
-              message: `Cannot cleanup team with ${activeMembers.length} active member(s): ${memberNames}. Use requestShutdown to gracefully terminate teammates first.`,
+              message: `Cannot cleanup team with ${nonLeadMembers.length} registered teammate(s): ${memberNames}. Use requestShutdown and wait for shutdown approval first.`,
               team_name: teamName,
             },
           }
         }
       }
 
-      await cleanupTeamDirectories(teamName)
+      const finalTaskSnapshot = await cleanupTeamDirectories(
+        teamName,
+        getRegisteredTeamLifecycle(teamName),
+      )
+      finalTasks = finalTaskSnapshot.tasks.filter(task => !task.metadata?._internal)
+      taskListSnapshotAt = finalTaskSnapshot.capturedAt
+      taskListSnapshotRevision = finalTaskSnapshot.revision
       // Already cleaned — don't try again on gracefulShutdown.
-      unregisterTeamForSessionCleanup(teamName)
+      unregisterTeamForSessionCleanup(teamName, {
+        generation: finalTaskSnapshot.generation,
+        identity: finalTaskSnapshot.identity,
+      })
 
       // Clear color assignments so new teams start fresh
       clearTeammateColors()
@@ -130,6 +146,9 @@ export const TeamDeleteTool: Tool<InputSchema, Output> = buildTool({
           ? `Cleaned up directories and worktrees for team "${teamName}"`
           : 'No team name found, nothing to clean up',
         team_name: teamName,
+        finalTasks,
+        taskListSnapshotAt,
+        taskListSnapshotRevision,
       },
     }
   },

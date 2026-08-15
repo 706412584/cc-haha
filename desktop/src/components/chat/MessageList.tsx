@@ -1,14 +1,14 @@
-import { useRef, useEffect, useMemo, memo, useState, useCallback, useDeferredValue, useLayoutEffect, type ReactNode } from 'react'
+import { useRef, useEffect, useMemo, memo, useState, useCallback, useDeferredValue, useLayoutEffect, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { ArrowDown, BookMarked, Bot, CheckCircle2, ChevronDown, ChevronRight, CircleStop, FileStack, LoaderCircle, MessageCircle, Settings, Target, XCircle } from 'lucide-react'
 import { ApiError } from '../../api/client'
-import { sessionsApi, type SessionTurnCheckpoint } from '../../api/sessions'
+import { sessionsApi, type SessionRewindMode, type SessionTurnCheckpoint } from '../../api/sessions'
 import { listPendingPermissions, useChatStore } from '../../stores/chatStore'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useWorkspaceChatContextStore } from '../../stores/workspaceChatContextStore'
 import { useWorkspacePanelStore, type WorkspacePanelOrigin } from '../../stores/workspacePanelStore'
 import { SETTINGS_TAB_ID, useTabStore } from '../../stores/tabStore'
-import { useTeamStore } from '../../stores/teamStore'
+import { teamTaskWindowsForSnapshot, useTeamStore } from '../../stores/teamStore'
 import { useUIStore } from '../../stores/uiStore'
 import { useTranslation } from '../../i18n'
 import type { TranslationKey } from '../../i18n/locales/en'
@@ -16,13 +16,21 @@ import { UserMessage } from './UserMessage'
 import { AssistantMessage } from './AssistantMessage'
 import { ThinkingBlock } from './ThinkingBlock'
 import { ToolCallBlock } from './ToolCallBlock'
-import { ToolCallGroup } from './ToolCallGroup'
+import { ToolCallGroup, type OpenAgentRunPayload } from './ToolCallGroup'
+import type { ActivityStep } from './activityGroupModel'
 import { ToolResultBlock } from './ToolResultBlock'
 import { PermissionDialog } from './PermissionDialog'
 import { AskUserQuestion } from './AskUserQuestion'
 import { StreamingIndicator } from './StreamingIndicator'
 import { InlineTaskSummary } from './InlineTaskSummary'
 import { CurrentTurnChangeCard } from './CurrentTurnChangeCard'
+import { AgentTeamsInlineCard } from '../agentTeams/AgentTeamsSummary'
+import { MEMBER_AVATARS, memberAccentColor } from '../agentTeams/agentTeamsAvatars'
+import {
+  getMemberAvatarKey,
+  resolveTeamMemberIdentity,
+  snapshotWithHistoricalMembers,
+} from '../agentTeams/agentTeamsModel'
 import {
   buildConversationNavigationItems,
   ConversationNavigator,
@@ -30,12 +38,18 @@ import {
   type ConversationNavigationMode,
 } from './ConversationNavigator'
 import type { AgentTaskNotification, BackgroundAgentTask, UIMessage } from '../../types/chat'
+import type { TeamDetail, TeamWorkbenchSnapshot } from '../../types/team'
 import { formatTokenCount } from '../../lib/formatTokenCount'
 import { formatDurationMs, hasRunningBackgroundTasks as hasAnyRunningBackgroundTasks } from '../../lib/backgroundTasks'
 import { buildTurnCompletionByMessageId, type TurnCompletion } from '../../lib/turnCompletion'
 import { isTouchH5Document } from '../../lib/touchH5'
+import {
+  EMPTY_TEAM_LIFECYCLE_CURSOR,
+  isTeamLifecycleScopedAt,
+  updateTeamLifecycleCursor,
+} from '../../lib/teamLifecycleScope'
 import { Button } from '@/components/ui/Button'
-import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { ActionDialog, type ActionDialogAction } from '@/components/ui/ActionDialog'
 import { clearWindowSelection, getSelectionPopoverPosition, useSelectionPopoverDismiss } from '../../hooks/useSelectionPopoverDismiss'
 import {
   getHeightsForSession,
@@ -56,14 +70,25 @@ type BackgroundTaskEvent = Extract<UIMessage, { type: 'background_task' }>
 type CompactSummaryEvent = Extract<UIMessage, { type: 'compact_summary' }>
 
 type RenderItem =
-  | {
-      kind: 'tool_group'
-      toolCalls: ToolCall[]
-      id: string
-      resultContentWeight: number
-      resultMetricSignature: string
-    }
+  /**
+   * One contiguous activity run. `steps` is the run in transcript order —
+   * thinking blocks included — and `toolCalls` is the tools-only projection the
+   * agent/image/memory renderers still work from.
+   */
+  | { kind: 'tool_group'; toolCalls: ToolCall[]; steps: ActivityStep[]; id: string }
   | { kind: 'message'; message: UIMessage }
+  /**
+   * Stands in for the TeamCreate call so the transcript records that this turn
+   * handed work to a team, without expanding into the workbench inline.
+   */
+  | {
+      kind: 'team_card'
+      id: string
+      teamName: string
+      startedAt: number
+      endedAt?: number
+      coordinationToolCalls: ToolCall[]
+    }
 
 type RenderModel = {
   renderItems: RenderItem[]
@@ -629,41 +654,229 @@ function appendChildToolCall(
   }
 }
 
-export function buildRenderModel(messages: UIMessage[], activeAskUserQuestionToolUseId?: string | null): RenderModel {
+function hasTeamMessageRouting(value: unknown): boolean {
+  if (typeof value === 'string') {
+    try {
+      return hasTeamMessageRouting(JSON.parse(value))
+    } catch {
+      return false
+    }
+  }
+  if (Array.isArray(value)) return value.some(hasTeamMessageRouting)
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  const routing = record.routing
+  if (routing && typeof routing === 'object') {
+    const route = routing as Record<string, unknown>
+    if (typeof route.sender === 'string' && typeof route.target === 'string') return true
+  }
+  return 'content' in record && hasTeamMessageRouting(record.content)
+}
+
+function getSendMessageTarget(value: unknown): string | null {
+  if (typeof value === 'string') {
+    try {
+      return getSendMessageTarget(JSON.parse(value))
+    } catch {
+      return null
+    }
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const target = (value as Record<string, unknown>).to
+  return typeof target === 'string' ? target : null
+}
+
+function isTeamCoordinationSendMessage(
+  input: unknown,
+  result: unknown,
+  teamMemberNames: ReadonlySet<string> | undefined,
+  allowRosterFallback: boolean,
+): boolean {
+  if (hasTeamMessageRouting(result)) return true
+  if (!allowRosterFallback) return false
+  const target = getSendMessageTarget(input)
+  return target === '*' || Boolean(target && teamMemberNames?.has(target))
+}
+
+function parseRecordValue(value: unknown): Record<string, unknown> | null {
+  if (isRecordValue(value)) return value
+  if (typeof value !== 'string') return null
+  const text = value.trim()
+  if (!text.startsWith('{')) return null
+  try {
+    const parsed = JSON.parse(text) as unknown
+    return isRecordValue(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function nestedStringField(value: unknown, field: string): string {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const nested = nestedStringField(item, field)
+      if (nested) return nested
+    }
+    return ''
+  }
+  const record = parseRecordValue(value)
+  if (!record) return ''
+  const direct = record[field]
+  if (typeof direct === 'string' && direct.trim()) return direct.trim()
+  for (const child of [record.content, record.text]) {
+    const nested = nestedStringField(child, field)
+    if (nested) return nested
+  }
+  return ''
+}
+
+function explicitSuccessFlag(value: unknown): boolean | undefined {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const nested = explicitSuccessFlag(item)
+      if (nested !== undefined) return nested
+    }
+    return undefined
+  }
+  const record = parseRecordValue(value)
+  if (!record) return undefined
+  if (typeof record.success === 'boolean') return record.success
+  if ('content' in record) return explicitSuccessFlag(record.content)
+  if ('text' in record) return explicitSuccessFlag(record.text)
+  return undefined
+}
+
+function canSummarizeCoordinationResult(result: ToolResult | undefined): boolean {
+  return !result || (!result.isError && explicitSuccessFlag(result.content) !== false)
+}
+
+function lifecycleToolSucceeded(result: ToolResult | undefined): boolean {
+  return Boolean(result) && canSummarizeCoordinationResult(result)
+}
+
+function teamNameFromCreate(toolCall: ToolCall, result: ToolResult | undefined): string {
+  const input = parseRecordValue(toolCall.input)
+  // TeamCreate can uniquify a requested name. The successful result owns the
+  // durable identity that the workbench will expose.
+  for (const value of [nestedStringField(result?.content, 'team_name'), input?.team_name]) {
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return 'Agent Teams'
+}
+
+function isExplicitTeamAgent(
+  input: unknown,
+  result: ToolResult | undefined,
+  teamActive: boolean,
+): boolean {
+  const inputRecord = parseRecordValue(input)
+  const inputTeamName = inputRecord?.team_name
+  if (typeof inputTeamName === 'string' && inputTeamName.trim()) return true
+  const inputName = inputRecord?.name
+  if (teamActive && typeof inputName === 'string' && inputName.trim()) return true
+
+  if (nestedStringField(result?.content, 'status') === 'teammate_spawned') return true
+  if (typeof result?.content !== 'string') return false
+  return /^\s*team_name:\s*\S+/m.test(result.content) && /^\s*name:\s*\S+/m.test(result.content)
+}
+
+export function buildRenderModel(
+  messages: UIMessage[],
+  activeAskUserQuestionToolUseId?: string | null,
+  options: {
+    hideTeamCoordinationTools?: boolean
+    teamMemberNames?: ReadonlySet<string>
+    teamTaskWindows?: Array<{ startedAt: number; endedAt?: number }>
+    teamName?: string
+    teamStartedAt?: number
+  } = {},
+): RenderModel {
   const items: RenderItem[] = []
   const toolResultMap = new Map<string, ToolResult>()
   const childToolCallsByParent = new Map<string, ToolCall[]>()
   const toolUseIds = new Set<string>()
   const lastUnresolvedAskUserQuestionIndexByToolUseId = new Map<string, number>()
   let lastUnresolvedAskUserQuestionIndex: number | null = null
-  let pendingToolCalls: ToolCall[] = []
+  let transcriptTeamCursor = EMPTY_TEAM_LIFECYCLE_CURSOR
+  let activeTeamCard: Extract<RenderItem, { kind: 'team_card' }> | undefined
+  let pendingSteps: ActivityStep[] = []
+  let pendingToolCount = 0
+  let pendingAgentCount = 0
 
   const flushGroup = () => {
-    if (pendingToolCalls.length > 0) {
-      const resultMessages = pendingToolCalls
-        .map((toolCall) => toolResultMap.get(toolCall.toolUseId))
-        .filter((result): result is ToolResult => Boolean(result))
-      items.push({
-        kind: 'tool_group',
-        toolCalls: [...pendingToolCalls],
-        id: `group-${pendingToolCalls[0]!.id}`,
-        resultContentWeight: resultMessages.reduce(
-          (total, result) => total + getMessageContentWeight(result),
-          0,
-        ),
-        resultMetricSignature: resultMessages.map(getMessageMetricSignature).join('|'),
-      })
-      pendingToolCalls = []
+    if (pendingSteps.length === 0) return
+    const steps = pendingSteps
+    const toolCount = pendingToolCount
+    pendingSteps = []
+    pendingToolCount = 0
+    pendingAgentCount = 0
+
+    if (toolCount === 0) {
+      for (const step of steps) {
+        if (step.kind === 'thinking') items.push({ kind: 'message', message: step.message })
+      }
+      return
     }
+
+    const toolCalls = steps.flatMap((step) => (step.kind === 'tool' ? [step.toolCall] : []))
+    items.push({
+      kind: 'tool_group',
+      toolCalls,
+      steps,
+      id: `group-${toolCalls[0]!.id}`,
+    })
   }
   const appendRootToolCall = (toolCall: ToolCall) => {
     const nextIsAgent = toolCall.toolName === 'Agent'
-    const pendingIsAgentGroup = pendingToolCalls.every((pendingToolCall) => pendingToolCall.toolName === 'Agent')
+    // Agent runs render as their own dispatch cards, so they never mix with
+    // ordinary steps — including the thinking that preceded the dispatch.
+    const pendingIsAgentGroup = pendingToolCount > 0 && pendingAgentCount === pendingToolCount
+    const pendingBlocksAgent = nextIsAgent && pendingSteps.length > pendingAgentCount
 
-    if (pendingToolCalls.length > 0 && pendingIsAgentGroup !== nextIsAgent) {
+    if (pendingBlocksAgent || (pendingToolCount > 0 && pendingIsAgentGroup !== nextIsAgent)) {
       flushGroup()
     }
-    pendingToolCalls.push(toolCall)
+    pendingSteps.push({ kind: 'tool', toolCall })
+    pendingToolCount += 1
+    if (nextIsAgent) pendingAgentCount += 1
+  }
+  const appendThinking = (message: Extract<UIMessage, { type: 'thinking' }>) => {
+    if (pendingToolCount > 0 && pendingAgentCount === pendingToolCount) flushGroup()
+    pendingSteps.push({ kind: 'thinking', message })
+  }
+  const ensureTeamCardForCoordination = (
+    message: ToolCall,
+    result: ToolResult | undefined,
+  ) => {
+    const input = parseRecordValue(message.input)
+    const outputTeamName = nestedStringField(result?.content, 'team_name')
+    const inputTeamName = typeof input?.team_name === 'string'
+      ? input.team_name.trim()
+      : ''
+    const explicitTeamName = outputTeamName || inputTeamName
+    if (
+      activeTeamCard &&
+      (!explicitTeamName || activeTeamCard.teamName === explicitTeamName)
+    ) return activeTeamCard
+    if (activeTeamCard) activeTeamCard = undefined
+
+    const scopedTeamName = options.teamName?.trim() || ''
+    const teamName = explicitTeamName || scopedTeamName
+    if (!teamName) return undefined
+    const usesDurableScope = !explicitTeamName || explicitTeamName === scopedTeamName
+
+    flushGroup()
+    activeTeamCard = {
+      kind: 'team_card',
+      id: `team-card-scope-${message.id}`,
+      teamName,
+      startedAt: usesDurableScope
+        ? options.teamStartedAt ?? message.timestamp
+        : message.timestamp,
+      coordinationToolCalls: [],
+    }
+    items.push(activeTeamCard)
+    return activeTeamCard
   }
 
   for (const msg of messages) {
@@ -674,6 +887,11 @@ export function buildRenderModel(messages: UIMessage[], activeAskUserQuestionToo
       toolResultMap.set(msg.toolUseId, msg)
     }
   }
+  const hasTeamLifecycleEvidence = Boolean(options.teamTaskWindows?.length) || messages.some((msg) => (
+    msg.type === 'tool_use' &&
+    (msg.toolName === 'TeamCreate' || msg.toolName === 'TeamDelete') &&
+    lifecycleToolSucceeded(toolResultMap.get(msg.toolUseId))
+  ))
   messages.forEach((msg, index) => {
     if (
       msg.type === 'tool_use' &&
@@ -706,6 +924,99 @@ export function buildRenderModel(messages: UIMessage[], activeAskUserQuestionToo
         appendChildToolCall(childToolCallsByParent, msg.parentToolUseId, msg)
         continue
       }
+      const toolResult = toolResultMap.get(msg.toolUseId)
+      let summarizedTeamDelete = false
+      if (options.hideTeamCoordinationTools) {
+        if (msg.toolName === 'TeamCreate' && lifecycleToolSucceeded(toolResult)) {
+          transcriptTeamCursor = updateTeamLifecycleCursor(
+            true,
+            msg.timestamp,
+          )
+        } else if (msg.toolName === 'TeamDelete' && lifecycleToolSucceeded(toolResult)) {
+          transcriptTeamCursor = updateTeamLifecycleCursor(
+            false,
+            msg.timestamp,
+          )
+          const deletedTeamCard = ensureTeamCardForCoordination(msg, toolResult)
+          if (deletedTeamCard) {
+            deletedTeamCard.endedAt = msg.timestamp
+            deletedTeamCard.coordinationToolCalls.push(msg)
+            summarizedTeamDelete = true
+          }
+          // A later lifecycle can be present only in the durable workbench
+          // window after transcript compaction. Do not attach that run's
+          // coordination audit to the card from the lifecycle just deleted.
+          activeTeamCard = undefined
+        }
+
+        const isTeamScopedAtMessage = isTeamLifecycleScopedAt(
+          msg.timestamp,
+          transcriptTeamCursor,
+          options.teamTaskWindows,
+        )
+        const isTeamTask =
+          (msg.toolName === 'TaskCreate' || msg.toolName === 'TaskUpdate') &&
+          isTeamScopedAtMessage
+        const explicitTeamAgent = msg.toolName === 'Agent' &&
+          isExplicitTeamAgent(msg.input, toolResult, isTeamScopedAtMessage)
+        const ambiguousTeamAgent = msg.toolName === 'Agent' &&
+          isTeamScopedAtMessage &&
+          !explicitTeamAgent &&
+          msg.isPending === true
+        const isTeamAgent = msg.toolName === 'Agent' && (
+          explicitTeamAgent
+        )
+        const isTeamMessage = msg.toolName === 'SendMessage' && (
+          isTeamScopedAtMessage ||
+          isTeamCoordinationSendMessage(
+            msg.input,
+            toolResult?.content,
+            options.teamMemberNames,
+            !hasTeamLifecycleEvidence,
+          )
+        )
+
+        // During an active Team lifecycle, a streamed Agent without
+        // teammate identity is not yet classifiable: it can settle as a direct
+        // SubAgent if `name` stays absent, or as a teammate once that identity
+        // arrives. Keep it out of both projections during that partial state.
+        if (ambiguousTeamAgent) continue
+
+        // These records remain untouched in `messages` and `toolResultMap`.
+        // The lead transcript projects them through the inline team card while
+        // the workbench owns the roster, DAG, and communication presentation.
+        // A failed coordination call stays visible because it changes what the
+        // turn means and is not represented by successful workbench state.
+        if (
+          (isTeamTask || isTeamAgent || isTeamMessage) &&
+          canSummarizeCoordinationResult(toolResult)
+        ) {
+          const teamCard = ensureTeamCardForCoordination(msg, toolResult)
+          if (teamCard) {
+            teamCard.coordinationToolCalls.push(msg)
+            continue
+          }
+        }
+      }
+      if (summarizedTeamDelete) continue
+      // The raw TeamCreate call and its JSON result say nothing a reader can
+      // use; the team card in its place links to the workbench that does.
+      if (
+        options.hideTeamCoordinationTools &&
+        msg.toolName === 'TeamCreate' &&
+        canSummarizeCoordinationResult(toolResult)
+      ) {
+        flushGroup()
+        activeTeamCard = {
+          kind: 'team_card',
+          id: `team-card-${msg.id}`,
+          teamName: teamNameFromCreate(msg, toolResult),
+          startedAt: msg.timestamp,
+          coordinationToolCalls: [],
+        }
+        items.push(activeTeamCard)
+        continue
+      }
       if (msg.toolName === 'AskUserQuestion') {
         const isResolved = toolResultMap.has(msg.toolUseId)
         const lastUnresolvedIndex = lastUnresolvedAskUserQuestionIndexByToolUseId.get(msg.toolUseId)
@@ -732,6 +1043,16 @@ export function buildRenderModel(messages: UIMessage[], activeAskUserQuestionToo
       } else {
         appendRootToolCall(msg)
       }
+    } else if (msg.type === 'thinking') {
+      appendThinking(msg)
+    } else if (msg.type === 'background_task' && msg.task.status === 'completed') {
+      // The activity panel already lists every background task — agent-like ones
+      // under SubAgents, the rest under Background Tasks — with live status and a
+      // way into the full run. A card here repeating a finished one just buries
+      // the conversation under status reports, and a long team session emits
+      // dozens. Anything that did NOT finish cleanly still gets a card: a failure
+      // or a stop changes what the turn means, and the panel can be closed.
+      continue
     } else {
       flushGroup()
       items.push({ kind: 'message', message: msg })
@@ -740,6 +1061,77 @@ export function buildRenderModel(messages: UIMessage[], activeAskUserQuestionToo
 
   flushGroup()
   return { renderItems: items, toolResultMap, childToolCallsByParent }
+}
+
+function coordinationToolSummary(toolCall: ToolCall): string | null {
+  const input = parseRecordValue(toolCall.input)
+  if (!input) return null
+  const values = toolCall.toolName === 'TaskCreate'
+    ? [input.subject]
+    : toolCall.toolName === 'TaskUpdate'
+      ? [input.taskId, input.status, input.owner]
+      : toolCall.toolName === 'Agent'
+        ? [input.name, input.description]
+        : toolCall.toolName === 'SendMessage'
+          ? [input.to, input.message]
+          : []
+  const summary = values
+    .filter((value): value is string => typeof value === 'string' && Boolean(value.trim()))
+    .join(' · ')
+  return summary || null
+}
+
+function TeamCoordinationAudit({ toolCalls }: { toolCalls: ToolCall[] }) {
+  const t = useTranslation()
+  if (toolCalls.length === 0) return null
+
+  return (
+    <details
+      data-testid="agent-teams-coordination-audit"
+      className="mx-2 border-x border-b border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-3 py-1.5 text-[11px] text-[var(--color-text-secondary)]"
+    >
+      <summary className="cursor-pointer select-none font-medium text-[var(--color-text-secondary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]">
+        {t('agentTeams.inline.coordination', { count: toolCalls.length })}
+      </summary>
+      <ol className="mt-2 space-y-1 border-t border-[var(--color-border)] pt-2">
+        {toolCalls.map((toolCall) => {
+          const summary = coordinationToolSummary(toolCall)
+          return (
+            <li key={toolCall.toolUseId} className="flex min-w-0 items-start gap-2">
+              <code className="shrink-0 font-mono text-[10px] font-semibold text-[var(--color-text-tertiary)]">
+                {toolCall.toolName}
+              </code>
+              {summary ? <span className="min-w-0 break-words">{summary}</span> : null}
+            </li>
+          )
+        })}
+      </ol>
+    </details>
+  )
+}
+
+function teamTimestamp(value: string | number | undefined): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
+  if (!value) return undefined
+  const numeric = Number(value)
+  if (Number.isFinite(numeric)) return numeric
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+function snapshotForTeamCard(
+  snapshot: TeamWorkbenchSnapshot | undefined,
+  item: Extract<RenderItem, { kind: 'team_card' }>,
+): TeamWorkbenchSnapshot | undefined {
+  if (!snapshot || snapshot.team.name !== item.teamName) return undefined
+  const startedAt = teamTimestamp(snapshot.team.createdAt)
+  if (startedAt === undefined) return snapshot
+  if (item.endedAt !== undefined && item.endedAt < startedAt) return undefined
+
+  // The TeamCreate tool and server lifecycle event are emitted by separate
+  // transports, so allow a small clock/order gap while still refusing to bind
+  // an older card to a newer incarnation that reused the same team name.
+  return Math.abs(item.startedAt - startedAt) <= 5_000 ? snapshot : undefined
 }
 
 function isTurnResponseMessage(message: UIMessage) {
@@ -857,7 +1249,12 @@ function buildTurnCardInsertionMap(
 
   const cardsByRenderIndex = new Map<number, TurnChangeCardModel[]>()
   turnChangeCards.forEach((card) => {
-    if (card.checkpoint.code.filesChanged.length === 0) return
+    // An unverified-only turn has no structured files to list, but still needs
+    // the card for conversation rewind and the warning about changes left on disk.
+    if (
+      card.checkpoint.code.filesChanged.length === 0 &&
+      (card.checkpoint.unverifiedChangeSources?.length ?? 0) === 0
+    ) return
     const renderIndex =
       lastResponseIndexByTurnId.get(card.target.messageId) ??
       userIndexByTurnId.get(card.target.messageId)
@@ -905,6 +1302,72 @@ function buildChangedFilesByRenderIndex(
   return filesByRenderIndex
 }
 
+/**
+ * Where a render item sits inside its turn, which is what decides its spacing.
+ *
+ * `none` is the user bubble: it opens an exchange, so it carries the large gap
+ * that separates one turn from the last. Everything else is a response and takes
+ * the tight within-turn gap. The names still read positionally because the
+ * boundaries are what the spacing is derived from — see `.chat-turn-rail*`,
+ * which owns the actual values and deliberately draws nothing.
+ */
+export type TurnRailPosition = 'none' | 'start' | 'middle' | 'end' | 'solo'
+
+/**
+ * Rail position for every render item, indexed alongside `renderItems`.
+ *
+ * Deliberately breaks on EVERY `user_text`, unlike the three turn walks above
+ * (`buildTurnCardInsertionMap`, `buildChangedFilesByRenderIndex`,
+ * `getBranchableMessageTargets`) which skip `pending` ones. Those answer "which
+ * turn owns this checkpoint", and a member session's pending echo must not steal
+ * ownership. This answers "where does the line stop", and a pending message still
+ * renders as a visible right-aligned bubble (see the `user_text` case in
+ * `MessageBlock`) — a bubble mid-column is a break whatever it means for
+ * attribution. Do not "fix" this to match the others.
+ */
+export function buildTurnRailPositions(
+  renderItems: RenderItem[],
+  options: { hasTrailingStreamingItem?: boolean } = {},
+): TurnRailPosition[] {
+  const positions: TurnRailPosition[] = new Array<TurnRailPosition>(renderItems.length).fill('none')
+  let runStart = -1
+
+  /** Label the open run [runStart, endExclusive). `continues` = the streaming
+   *  block will pick the line up below, so the run must not cap itself. */
+  const closeRun = (endExclusive: number, continues: boolean) => {
+    if (runStart < 0) return
+    const last = endExclusive - 1
+    for (let index = runStart; index <= last; index += 1) {
+      positions[index] = index === runStart ? 'start' : 'middle'
+    }
+    if (!continues) positions[last] = runStart === last ? 'solo' : 'end'
+    runStart = -1
+  }
+
+  renderItems.forEach((item, index) => {
+    if (item.kind === 'message' && item.message.type === 'user_text') {
+      closeRun(index, false)
+      positions[index] = 'none'
+      return
+    }
+    if (runStart < 0) runStart = index
+  })
+
+  closeRun(renderItems.length, Boolean(options.hasTrailingStreamingItem))
+
+  return positions
+}
+
+/**
+ * Rail position for the live streaming reply, which renders outside the virtual
+ * list. It caps whatever run the transcript left open, or stands alone when the
+ * user has just sent and nothing else has landed yet.
+ */
+export function trailingStreamingRailPosition(positions: TurnRailPosition[]): TurnRailPosition {
+  const last = positions[positions.length - 1]
+  return last === 'start' || last === 'middle' ? 'end' : 'solo'
+}
+
 function getApiErrorMessage(error: unknown) {
   return error instanceof ApiError
     ? typeof error.body === 'object' && error.body && 'message' in error.body
@@ -926,7 +1389,10 @@ function isSessionTurnCheckpoint(value: unknown): value is SessionTurnCheckpoint
     typeof checkpoint.code?.available === 'boolean' &&
     Array.isArray(checkpoint.code?.filesChanged) &&
     (checkpoint.restoreAvailable === undefined ||
-      typeof checkpoint.restoreAvailable === 'boolean')
+      typeof checkpoint.restoreAvailable === 'boolean') &&
+    (checkpoint.unverifiedChangeSources === undefined ||
+      (Array.isArray(checkpoint.unverifiedChangeSources) &&
+        checkpoint.unverifiedChangeSources.every((source) => typeof source === 'string')))
   )
 }
 
@@ -1005,6 +1471,7 @@ type MessageListProps = {
   sessionId?: string | null
   compact?: boolean
   mobileLayout?: boolean
+  onOpenAgentRun?: (payload: OpenAgentRunPayload) => void
 }
 
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 120
@@ -1021,12 +1488,28 @@ const TOUCH_H5_VIRTUALIZE_MIN_RENDER_ITEMS = 60
 const TOUCH_H5_VIRTUALIZE_MIN_CONTENT_CHARS = 60_000
 const VIRTUAL_OVERSCAN_PX = 1200
 const VIRTUAL_DEFAULT_VIEWPORT_HEIGHT = 720
-const VIRTUAL_MIN_ITEM_HEIGHT = 48
+/** Floor for both estimated AND measured item heights, so it has to sit under
+ *  the shortest real item — a collapsed activity line at ~34px. Set above that
+ *  and every such row is recorded too tall forever: the clamp is applied to the
+ *  ResizeObserver's reading too, so no amount of measuring corrects it. */
+const VIRTUAL_MIN_ITEM_HEIGHT = 24
 const VIRTUAL_MAX_ITEM_HEIGHT = 24_000
-// Windows WebView2 can report up to 2px oscillations for live chat content;
+// Chromium on Windows can report up to 2px oscillations for live chat content;
 // don't convert those into bottom-scroll corrections.
 const CONTENT_RESIZE_FOLLOW_JITTER_MAX_DELTA_PX = 2
+// Native scroll anchoring and fractional DPI can leave the WebView a few CSS
+// pixels shy of its computed bottom. Rewriting that correction on every live
+// delta makes the two owners fight and turns the rounding into visible bounce.
+const LIVE_FOLLOW_BOTTOM_GAP_TOLERANCE_PX = 4
 const USER_SCROLL_INTENT_WINDOW_MS = 500
+/**
+ * Backstop for the disclosure suppression window. The window normally ends at
+ * the next animation frame (see `handleDisclosureToggle`); this only bounds it
+ * if that frame never runs, so a dropped rAF cannot leave follow off forever.
+ */
+const DISCLOSURE_FOLLOW_SUPPRESS_MS = 400
+/** Collapse toggles inside the transcript, matched via event delegation. */
+const CHAT_DISCLOSURE_SELECTOR = '[data-chat-disclosure="true"]'
 const CONVERSATION_NAVIGATION_MIN_ITEMS = 4
 const CONVERSATION_NAVIGATION_FULL_MIN_WIDTH_PX = 960
 const CONVERSATION_NAVIGATION_COMPACT_MIN_WIDTH_PX = 560
@@ -1050,6 +1533,17 @@ const CHAT_SCROLL_AREA_CLASS = [
 const CHAT_RENDER_ITEM_CLASS = [
   'chat-render-item',
 ].join(' ')
+
+/**
+ * Carries the turn rail. Kept separate from `chat-render-item` on purpose: the
+ * streaming reply and the turn status line also sit on the rail but are not
+ * transcript items, and `.chat-render-item` is counted exactly in tests.
+ */
+const CHAT_TURN_RAIL_CLASS = 'chat-turn-rail'
+
+function turnRailClass(position: TurnRailPosition): string {
+  return `${CHAT_TURN_RAIL_CLASS} chat-turn-rail--${position}`
+}
 
 export function isRenderItemFullyVisibleInChatScroller(renderItem: HTMLElement) {
   const scroller = renderItem.closest<HTMLElement>('.chat-scroll-area')
@@ -1132,14 +1626,7 @@ function setScrollTopWithoutLayoutRead(element: HTMLElement, scrollTop: number) 
   element.scrollTop = Math.max(0, scrollTop)
 }
 
-function setScrollToBottomWithoutLayoutRead(element: HTMLElement, behavior: ScrollBehavior) {
-  if (typeof element.scrollTo === 'function') {
-    try {
-      element.scrollTo({ top: SCROLL_BOTTOM_SENTINEL, behavior })
-    } catch {
-      element.scrollTo(0, SCROLL_BOTTOM_SENTINEL)
-    }
-  }
+function setScrollToBottomWithoutLayoutRead(element: HTMLElement) {
   element.scrollTop = SCROLL_BOTTOM_SENTINEL
 
   // Browsers clamp the large value to the true bottom without needing us to
@@ -1155,7 +1642,8 @@ function clampNumber(value: number, min: number, max: number) {
 }
 
 function getRenderItemKey(item: RenderItem) {
-  return item.kind === 'tool_group' ? item.id : item.message.id
+  if (item.kind === 'tool_group' || item.kind === 'team_card') return item.id
+  return item.message.id
 }
 
 function findConversationMatches(
@@ -1319,9 +1807,11 @@ function getMessageContentWeight(message: UIMessage): number {
 
 function getRenderItemContentWeight(item: RenderItem): number {
   if (item.kind === 'message') return getMessageContentWeight(item.message)
-  return item.toolCalls.reduce(
-    (total, toolCall) => total + getMessageContentWeight(toolCall),
-    item.resultContentWeight,
+  // The team card is a fixed-height summary, so it contributes no text weight.
+  if (item.kind === 'team_card') return 0
+  return item.steps.reduce(
+    (total, step) => total + getMessageContentWeight(step.kind === 'tool' ? step.toolCall : step.message),
+    0,
   )
 }
 
@@ -1363,14 +1853,21 @@ function estimateTextHeight(content: string, baseHeight: number) {
   return clampNumber(estimated, VIRTUAL_MIN_ITEM_HEIGHT, VIRTUAL_MAX_ITEM_HEIGHT)
 }
 
+/* Base heights are the non-text chrome of one item, measured as a border box so
+ * they match what the ResizeObserver reports. Post-rail that is:
+ *   prompt   24 rail padding-top (the turn gap) + 8 padding-bottom
+ *            + 26 bubble padding + 36 action bar = 94
+ *   reply    8 rail padding-bottom + 36 action bar = 44 (the card is gone)
+ * The action bar is 36 (mt-2 + h-7) and always reserves its space — it must not
+ * collapse on hover, or the transcript shifts under the reader's cursor. */
 function estimateMessageHeight(message: UIMessage): number {
   switch (message.type) {
     case 'user_text':
-      return estimateTextHeight(message.content, message.attachments?.length ? 140 : 74)
+      return estimateTextHeight(message.content, message.attachments?.length ? 160 : 94)
     case 'assistant_text':
-      return estimateTextHeight(message.content, 96)
+      return estimateTextHeight(message.content, 44)
     case 'thinking':
-      return estimateTextHeight(message.content, 88)
+      return estimateTextHeight(message.content, 40)
     case 'tool_use':
       return clampNumber(92 + Math.ceil(getMessageContentWeight(message) / 120) * 18, 72, 2200)
     case 'tool_result':
@@ -1389,8 +1886,29 @@ function estimateMessageHeight(message: UIMessage): number {
   }
 }
 
-function estimateRenderItemHeight(item: RenderItem): number {
+/** A collapsed activity group is one header line, however many steps it holds:
+ *  py-1 (8) + a 12.5px line (~18) + the turn's padding-bottom (8).
+ *
+ *  A group only renders its rows while it is still running, and a running group
+ *  sits at the scroll anchor where items are mounted and measured — so estimates
+ *  are only ever consulted for the settled, collapsed form, which is this line. */
+const ACTIVITY_GROUP_COLLAPSED_HEIGHT = 34
+/** Avatar row plus two text lines, plus the turn's padding-bottom. */
+const TEAM_CARD_HEIGHT = 86
+/** Collapsed coordination disclosure below the card adds one compact row. */
+const TEAM_CARD_WITH_AUDIT_HEIGHT = 116
+
+export function estimateRenderItemHeight(item: RenderItem): number {
   if (item.kind === 'message') return estimateMessageHeight(item.message)
+  if (item.kind === 'team_card') {
+    return item.coordinationToolCalls.length > 0
+      ? TEAM_CARD_WITH_AUDIT_HEIGHT
+      : TEAM_CARD_HEIGHT
+  }
+  // Agent dispatch groups keep their taller per-agent cards; everything else
+  // collapses to the single-line activity header.
+  const isAgentGroup = item.toolCalls.length > 0 && item.toolCalls.every((toolCall) => toolCall.toolName === 'Agent')
+  if (!isAgentGroup) return ACTIVITY_GROUP_COLLAPSED_HEIGHT
   const textWeight = getRenderItemContentWeight(item)
   return clampNumber(92 + item.toolCalls.length * 78 + Math.ceil(textWeight / 140) * 16, 88, 2600)
 }
@@ -1426,10 +1944,12 @@ function getMessageMetricSignature(message: UIMessage): string {
 
 function getRenderItemMetricSignature(item: RenderItem): string {
   if (item.kind === 'message') return getMessageMetricSignature(item.message)
-  return [
-    item.toolCalls.map(getMessageMetricSignature).join('|'),
-    item.resultMetricSignature,
-  ].filter(Boolean).join('|')
+  if (item.kind === 'team_card') {
+    return `team_card:${item.id}:${item.coordinationToolCalls.length}`
+  }
+  return item.steps
+    .map((step) => getMessageMetricSignature(step.kind === 'tool' ? step.toolCall : step.message))
+    .join('|')
 }
 
 function findVirtualStartIndex(offsets: number[], target: number) {
@@ -1598,11 +2118,13 @@ const MeasuredRenderItem = memo(function MeasuredRenderItem({
   itemKey,
   onHeightChange,
   highlighted,
+  railPosition,
   children,
 }: {
   itemKey: string
   onHeightChange: (itemKey: string, height: number) => void
   highlighted: boolean
+  railPosition: TurnRailPosition
   children: ReactNode
 }) {
   const itemRef = useRef<HTMLDivElement>(null)
@@ -1614,8 +2136,15 @@ const MeasuredRenderItem = memo(function MeasuredRenderItem({
     if (typeof ResizeObserver === 'undefined') return undefined
     const observer = new ResizeObserver((entries) => {
       const entry = entries[0]
-      if (entry && Number.isFinite(entry.contentRect.height) && entry.contentRect.height > 0) {
-        onHeightChange(itemKey, Math.ceil(entry.contentRect.height))
+      if (!entry) return
+      // Border box, not `contentRect`: the rail's padding is the gap between
+      // turns, so a content-box read would under-measure every item by that gap
+      // and the virtualizer's offsets would drift low over a long transcript.
+      // `borderBoxSize` predates every browser we ship on; the fallback is for
+      // environments that stub ResizeObserver with `contentRect` alone.
+      const height = entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height
+      if (Number.isFinite(height) && height > 0) {
+        onHeightChange(itemKey, Math.ceil(height))
       }
     })
     observer.observe(node)
@@ -1627,14 +2156,20 @@ const MeasuredRenderItem = memo(function MeasuredRenderItem({
       ref={itemRef}
       data-virtual-message-item={itemKey}
       data-chat-render-item-key={itemKey}
-      className={`${CHAT_RENDER_ITEM_CLASS} ${highlighted ? 'chat-render-item--navigation-target' : ''}`}
+      data-turn-rail={railPosition}
+      className={`${CHAT_RENDER_ITEM_CLASS} ${turnRailClass(railPosition)} ${highlighted ? 'chat-render-item--navigation-target' : ''}`}
     >
       {children}
     </div>
   )
 })
 
-export function MessageList({ sessionId, compact = false, mobileLayout = false }: MessageListProps = {}) {
+export function MessageList({
+  sessionId,
+  compact = false,
+  mobileLayout = false,
+  onOpenAgentRun,
+}: MessageListProps = {}) {
   const activeTabId = useTabStore((s) => s.activeTabId)
   const resolvedSessionId = sessionId ?? activeTabId
   const isWorkspacePanelOpen = useWorkspacePanelStore((state) =>
@@ -1650,16 +2185,53 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
   const stopGeneration = useChatStore((s) => s.stopGeneration)
   const reloadHistory = useChatStore((s) => s.reloadHistory)
   const queueComposerPrefill = useChatStore((s) => s.queueComposerPrefill)
-  const isMemberSession = useTeamStore((s) =>
-    resolvedSessionId ? Boolean(s.getMemberBySessionId(resolvedSessionId)) : false,
+  const memberSessionTeam = useTeamStore((s) => (
+    resolvedSessionId ? s.getTeamByMemberSessionId(resolvedSessionId) : null
+  ))
+  const isMemberSession = Boolean(memberSessionTeam)
+  const isAgentRunTab = useTabStore((s) => s.tabs.some((tab) => (
+    tab.sessionId === resolvedSessionId &&
+    (tab.type === 'subagent' || tab.type === 'team-member')
+  )))
+  const isDirectAgentSession = isMemberSession || isAgentRunTab
+  const teamWorkbench = useTeamStore((s) =>
+    resolvedSessionId ? s.workbenchesBySession[resolvedSessionId] : undefined,
   )
+  const activeTeamName = useTeamStore((s) => (
+    resolvedSessionId ? s.teamNameBySession[resolvedSessionId] : undefined
+  ))
+  const activeTeamStartedAt = useTeamStore((s) => (
+    resolvedSessionId ? s.activeTeamStartedAtBySession[resolvedSessionId] : undefined
+  ))
+  const teamSnapshot = useMemo(() => {
+    const snapshots = teamWorkbench?.snapshots
+    return snapshots?.length
+      ? snapshotWithHistoricalMembers(snapshots, snapshots.length - 1)
+      : undefined
+  }, [teamWorkbench?.snapshots])
+  const teamTaskWindows = useMemo(
+    () => teamTaskWindowsForSnapshot(teamSnapshot, activeTeamStartedAt),
+    [activeTeamStartedAt, teamSnapshot],
+  )
+  const openTeamWorkbench = useCallback((leadSessionId: string, teamName: string) => {
+    useTabStore.getState().openTeamWorkbenchTab(leadSessionId, teamName)
+  }, [])
+  const teamMemberNames = useMemo(() => {
+    if (!teamSnapshot) return undefined
+    return new Set(teamSnapshot.team.members.flatMap((member) =>
+      member.name ? [member.name] : [],
+    ))
+  }, [teamSnapshot])
   const addToast = useUIStore((s) => s.addToast)
   const messages = sessionState?.messages ?? EMPTY_MESSAGES
   const chatState = sessionState?.chatState ?? 'idle'
+  const isPreparingTurn = Boolean(sessionState?.isPreparingTurn)
   const historyMutationEpoch = sessionState?.historyMutationEpoch ?? 0
   const streamingText = sessionState?.streamingText ?? ''
   const streamingToolInput = sessionState?.streamingToolInput ?? ''
   const activeThinkingId = sessionState?.activeThinkingId ?? null
+  const hasApiRetry = Boolean(sessionState?.apiRetry)
+  const hasStreamingFallback = Boolean(sessionState?.streamingFallback)
   const agentTaskNotifications = sessionState?.agentTaskNotifications ?? EMPTY_AGENT_TASK_NOTIFICATIONS
   const backgroundAgentTasks = sessionState?.backgroundAgentTasks
   const agentTaskStatuses = useMemo<Record<string, BackgroundAgentTask['status']>>(() => {
@@ -1679,6 +2251,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     (permission) => permission.toolName !== 'AskUserQuestion',
   )
   const shouldFollowContentResize =
+    isPreparingTurn ||
     streamingText.trim().length > 0 ||
     chatState === 'streaming' ||
     chatState === 'compacting' ||
@@ -1696,6 +2269,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
   )
   const pendingMeasuredHeightsRef = useRef(false)
   const measureFlushFrameRef = useRef<number | null>(null)
+  const liveFollowFrameRef = useRef<number | null>(null)
   const navigationHighlightTimerRef = useRef<number | null>(null)
   const workspaceOriginRestoreFrameRef = useRef<number | null>(null)
   const conversationFindRefreshTimerRef = useRef<number | null>(null)
@@ -1711,9 +2285,16 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
   const ignoreProgrammaticScrollUntilRef = useRef(0)
   const ignoreProgrammaticScrollTopRef = useRef<number | null>(null)
   const userScrollIntentUntilRef = useRef(0)
+  const disclosureLayoutUntilRef = useRef(0)
   const lastSessionIdRef = useRef<string | null | undefined>(undefined)
   const lastTailMessageIdBySessionRef = useRef(new Map<string, string | null>())
   const lastAutoScrollMessageCountBySessionRef = useRef(new Map<string, number>())
+  const lastLiveFollowInputRef = useRef({
+    sessionId: resolvedSessionId,
+    messageCount: messages.length,
+    streamingText,
+    streamingToolInput,
+  })
   const t = useTranslation()
   const [turnChangeCards, setTurnChangeCards] = useState<TurnChangeCardModel[]>([])
   const [turnChangeLoadError, setTurnChangeLoadError] = useState<string | null>(null)
@@ -1734,7 +2315,8 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
   const conversationFindMatchesRef = useRef<ConversationFindMatch[]>([])
   const [messageListWidth, setMessageListWidth] = useState<number | null>(null)
   const branchActionsDisabled =
-    isMemberSession ||
+    isDirectAgentSession ||
+    isPreparingTurn ||
     chatState !== 'idle' ||
     hasRunningBackgroundTasks ||
     streamingText.trim().length > 0 ||
@@ -1750,6 +2332,9 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     }
     if (lightReviewResumeTimerRef.current !== null) {
       clearTimeout(lightReviewResumeTimerRef.current)
+    }
+    if (liveFollowFrameRef.current !== null) {
+      cancelAnimationFrame(liveFollowFrameRef.current)
     }
     if (navigationHighlightTimerRef.current !== null) {
       window.clearTimeout(navigationHighlightTimerRef.current)
@@ -1801,18 +2386,16 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     })
   }, [])
 
-  const scrollToBottom = useCallback((behavior: ScrollBehavior) => {
+  const scrollToBottom = useCallback(() => {
     shouldAutoScrollRef.current = true
     isProgrammaticScrollingRef.current = true
     ignoreProgrammaticScrollUntilRef.current = performance.now() + 250
     lastAutoScrollAtRef.current = performance.now()
     const container = scrollContainerRef.current
-    let requestedScrollTop: number | null = null
     if (container) {
-      setScrollToBottomWithoutLayoutRead(container, behavior)
-      requestedScrollTop = container.scrollTop
-      lastObservedScrollTopRef.current = requestedScrollTop
-      ignoreProgrammaticScrollTopRef.current = requestedScrollTop
+      setScrollToBottomWithoutLayoutRead(container)
+      lastObservedScrollTopRef.current = container.scrollTop
+      ignoreProgrammaticScrollTopRef.current = container.scrollTop
     }
     setVirtualViewport((current) => ({
       scrollTop: SCROLL_BOTTOM_SENTINEL,
@@ -1825,26 +2408,45 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
       })
     }
     setIsAwayFromLatest(false)
-    // Reset flag after the scroll event(s) from scrollIntoView have fired
+    // Keep this path to one native scroll write. A second write in the next
+    // frame can fight Chromium's scroll anchoring at fractional Windows DPI.
     requestAnimationFrame(() => {
-      const latestContainer = scrollContainerRef.current
-      if (
-        shouldAutoScrollRef.current &&
-        latestContainer &&
-        (
-          requestedScrollTop === null ||
-          latestContainer.scrollTop === requestedScrollTop
-        )
-      ) {
-        setScrollToBottomWithoutLayoutRead(latestContainer, 'auto')
-        if (resolvedSessionId) {
-          sessionScrollSnapshots.set(resolvedSessionId, {
-            scrollTop: latestContainer.scrollTop,
-            wasAtBottom: true,
-          })
-        }
-      }
       isProgrammaticScrollingRef.current = false
+    })
+  }, [resolvedSessionId])
+
+  const requestLiveFollow = useCallback(() => {
+    if (!shouldAutoScrollRef.current || liveFollowFrameRef.current !== null) return
+
+    liveFollowFrameRef.current = requestAnimationFrame(() => {
+      liveFollowFrameRef.current = null
+      const container = scrollContainerRef.current
+      if (!container || !shouldAutoScrollRef.current) return
+
+      const bottomScrollTop = getBottomScrollTop(container)
+      const bottomGap = bottomScrollTop - container.scrollTop
+      if (Math.abs(bottomGap) > LIVE_FOLLOW_BOTTOM_GAP_TOLERANCE_PX) {
+        isProgrammaticScrollingRef.current = true
+        ignoreProgrammaticScrollUntilRef.current = performance.now() + 250
+        lastAutoScrollAtRef.current = performance.now()
+        setScrollTopWithoutLayoutRead(container, bottomScrollTop)
+        ignoreProgrammaticScrollTopRef.current = container.scrollTop
+        setVirtualViewport((current) => ({
+          scrollTop: container.scrollTop,
+          viewportHeight: container.clientHeight || current.viewportHeight || VIRTUAL_DEFAULT_VIEWPORT_HEIGHT,
+        }))
+        requestAnimationFrame(() => {
+          isProgrammaticScrollingRef.current = false
+        })
+      }
+
+      if (resolvedSessionId) {
+        sessionScrollSnapshots.set(resolvedSessionId, {
+          scrollTop: container.scrollTop,
+          wasAtBottom: true,
+        })
+      }
+      setIsAwayFromLatest(false)
     })
   }, [resolvedSessionId])
 
@@ -1861,7 +2463,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
 
     virtualItemHeightsRef.current.set(itemKey, measuredHeight)
     if (hasPendingPermissionCard && shouldAutoScrollRef.current) {
-      scrollToBottom('auto')
+      requestLiveFollow()
     }
 
     if (typeof requestAnimationFrame === 'undefined') {
@@ -1877,7 +2479,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
         flushMeasuredHeightVersion()
       })
     }
-  }, [flushMeasuredHeightVersion, hasPendingPermissionCard, scrollToBottom])
+  }, [flushMeasuredHeightVersion, hasPendingPermissionCard, requestLiveFollow])
 
   const updateAutoScrollState = useCallback(() => {
     // Ignore scroll events triggered by our own programmatic scrolling to
@@ -1940,7 +2542,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
               lastInteractionAt !== null &&
               performance.now() - lastInteractionAt >= LIGHT_REVIEW_AUTO_RESUME_MS
             ) {
-              scrollToBottom('smooth')
+              scrollToBottom()
             }
           }, LIGHT_REVIEW_AUTO_RESUME_MS)
         } else if (lightReviewResumeTimerRef.current !== null) {
@@ -1964,6 +2566,41 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     scrollToBottom,
     syncVirtualViewportFromContainer,
   ])
+
+  /**
+   * Expanding a collapsed block is the reader rearranging their own view, not
+   * the model producing output — so the live-follow must not treat the height
+   * jump as new content and yank the transcript to the bottom (#1177). Browser
+   * scroll anchoring already keeps the clicked row where it is; this only has to
+   * stop `requestLiveFollow` from overriding it for that one frame.
+   *
+   * Deliberately not `userScrollIntentUntilRef`: that one is set by any
+   * pointerdown on the scroller, so reusing it would suppress content-resize
+   * follow on every stray click and turn "no jump" into "randomly stops
+   * following".
+   */
+  const handleDisclosureToggle = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+    const target = event.target
+    if (!(target instanceof Element) || !target.closest(CHAT_DISCLOSURE_SELECTOR)) return
+
+    disclosureLayoutUntilRef.current = performance.now() + DISCLOSURE_FOLLOW_SUPPRESS_MS
+
+    // Suppression only covers the resize frame. Once the block is open the
+    // container is no longer at the bottom, and the next streamed token would
+    // pull it back down and throw the reader out again — so re-decide whether
+    // we are still following, exactly as a wheel gesture would.
+    requestAnimationFrame(() => {
+      // The expansion's resize has landed by now, so hand follow back before the
+      // next token arrives — suppression must never outlive the reader's click.
+      disclosureLayoutUntilRef.current = 0
+      const container = scrollContainerRef.current
+      if (!container) return
+      const atBottom = isNearScrollBottom(container)
+      shouldAutoScrollRef.current = atBottom
+      setIsAwayFromLatest(!atBottom)
+      syncVirtualViewportFromContainer(container)
+    })
+  }, [syncVirtualViewportFromContainer])
 
   const markUserScrollIntent = useCallback(() => {
     userScrollIntentUntilRef.current = performance.now() + USER_SCROLL_INTENT_WINDOW_MS
@@ -2020,6 +2657,10 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
         cancelAnimationFrame(measureFlushFrameRef.current)
         measureFlushFrameRef.current = null
       }
+      if (liveFollowFrameRef.current !== null) {
+        cancelAnimationFrame(liveFollowFrameRef.current)
+        liveFollowFrameRef.current = null
+      }
       setMeasuredItemsVersion((version) => version + 1)
 
       const container = scrollContainerRef.current
@@ -2041,7 +2682,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
         ignoreProgrammaticScrollTopRef.current = null
         lastAutoScrollAtRef.current = performance.now()
         shouldAutoScrollRef.current = true
-        setScrollToBottomWithoutLayoutRead(container, 'auto')
+        setScrollToBottomWithoutLayoutRead(container)
         lastObservedScrollTopRef.current = container.scrollTop
         setVirtualViewport((current) => ({
           scrollTop: SCROLL_BOTTOM_SENTINEL,
@@ -2057,7 +2698,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
       } else {
         // No container yet (initial mount before ref settles): fall back to the
         // existing scrollToBottom path which is safe pre-mount.
-        scrollToBottom('auto')
+        scrollToBottom()
       }
     }
   }, [resolvedSessionId, scrollToBottom])
@@ -2065,7 +2706,6 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
   const tailMessage = messages[messages.length - 1] ?? null
   const tailMessageId = tailMessage?.id ?? null
   const tailMessageType = tailMessage?.type ?? null
-  const tailMessageMetricSignature = tailMessage ? getMessageMetricSignature(tailMessage) : null
 
   useEffect(() => {
     if (!resolvedSessionId) return
@@ -2075,7 +2715,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     if (previousTailMessageId === undefined || previousTailMessageId === tailMessageId) return
 
     if (tailMessageType === 'user_text') {
-      scrollToBottom('auto')
+      scrollToBottom()
     }
   }, [resolvedSessionId, scrollToBottom, tailMessageId, tailMessageType])
 
@@ -2087,26 +2727,43 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     const messageCountChanged = previousMessageCount === undefined || previousMessageCount !== messages.length
     if (!isSessionRunning && !messageCountChanged) return
 
+    const previousInput = lastLiveFollowInputRef.current
+    lastLiveFollowInputRef.current = {
+      sessionId: resolvedSessionId,
+      messageCount: messages.length,
+      streamingText,
+      streamingToolInput,
+    }
+    // Session restoration already owns the initial/switch scroll. Only live
+    // transitions within the same session enter the coalesced follow path.
+    if (
+      previousInput.sessionId !== resolvedSessionId ||
+      (
+        previousInput.messageCount === messages.length &&
+        previousInput.streamingText === streamingText &&
+        previousInput.streamingToolInput === streamingToolInput
+      )
+    ) {
+      return
+    }
     if (!shouldAutoScrollRef.current) {
       setIsAwayFromLatest(true)
       return
     }
 
-    scrollToBottom('auto')
+    requestLiveFollow()
   }, [
     isSessionRunning,
     messages.length,
+    requestLiveFollow,
     resolvedSessionId,
-    scrollToBottom,
     streamingText,
     streamingToolInput,
-    tailMessageId,
-    tailMessageMetricSignature,
   ])
 
   const handleJumpToLatest = useCallback(() => {
     setProgrammaticNavigationItemId(null)
-    scrollToBottom('auto')
+    scrollToBottom()
   }, [scrollToBottom])
 
   useEffect(() => {
@@ -2127,12 +2784,14 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
       }
       if (!shouldFollowContentResize) return
       if (!shouldAutoScrollRef.current) return
-      scrollToBottom('auto')
+      // The reader just opened something: the growth is theirs, not the model's.
+      if (performance.now() < disclosureLayoutUntilRef.current) return
+      requestLiveFollow()
     })
     observer.observe(content)
 
     return () => observer.disconnect()
-  }, [scrollToBottom, shouldFollowContentResize])
+  }, [requestLiveFollow, shouldFollowContentResize])
 
   // Touch-H5 only: the visual-viewport fit (touchH5.ts) shrinks the scroll
   // container when the soft keyboard opens. If the user was reading the tail,
@@ -2145,16 +2804,31 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
 
     const observer = new ResizeObserver(() => {
       if (!shouldAutoScrollRef.current) return
-      scrollToBottom('auto')
+      requestLiveFollow()
     })
     observer.observe(container)
 
     return () => observer.disconnect()
-  }, [scrollToBottom])
+  }, [requestLiveFollow])
 
   const { toolResultMap, childToolCallsByParent, renderItems } = useMemo(
-    () => buildRenderModel(messages, activeAskUserQuestionToolUseId),
-    [activeAskUserQuestionToolUseId, messages],
+    () => buildRenderModel(messages, activeAskUserQuestionToolUseId, {
+      hideTeamCoordinationTools: !isDirectAgentSession,
+      teamMemberNames,
+      teamTaskWindows,
+      teamName: activeTeamName ?? teamSnapshot?.team.name,
+      teamStartedAt: activeTeamStartedAt,
+    }),
+    [
+      activeAskUserQuestionToolUseId,
+      activeTeamName,
+      activeTeamStartedAt,
+      isDirectAgentSession,
+      messages,
+      teamMemberNames,
+      teamSnapshot?.team.name,
+      teamTaskWindows,
+    ],
   )
   // Defer the per-message branchable / completed-turn computations so the first
   // commit on tab switch can render the virtualization window without doing two
@@ -2188,6 +2862,20 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     () => buildChangedFilesByRenderIndex(renderItems, turnChangeCards),
     [renderItems, turnChangeCards],
   )
+  const hasTrailingStreamingItem = streamingText.trim().length > 0
+  const turnRailPositions = useMemo(
+    () => buildTurnRailPositions(renderItems, { hasTrailingStreamingItem }),
+    [renderItems, hasTrailingStreamingItem],
+  )
+  const streamingRailPosition = trailingStreamingRailPosition(turnRailPositions)
+  // The rail is the progress indicator: whichever segment the turn is currently
+  // working in carries the running state, so it sits next to the work it
+  // describes instead of in a separate strip somewhere else on screen.
+  const showsTurnStatusLine = hasApiRetry
+    || hasStreamingFallback
+    || isPreparingTurn
+    || chatState === 'tool_executing'
+    || (chatState === 'thinking' && !activeThinkingId)
   const renderItemKeys = useMemo(
     () => renderItems.map(getRenderItemKey),
     [renderItems],
@@ -2275,6 +2963,28 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     () => visibleTurnChangeCards.find((card) => card.target.messageId === turnUndoConfirmTargetId) ?? null,
     [turnUndoConfirmTargetId, visibleTurnChangeCards],
   )
+  // Undo is not reversible, so the dialog — not just the card — has to say which
+  // changes it will leave behind when the checkpoint could not cover them all.
+  const confirmUnverifiedSources = confirmTurnCard?.checkpoint.unverifiedChangeSources ?? []
+  const confirmCanRestoreCode = confirmTurnCard?.checkpoint.restoreAvailable !== false
+  const confirmBodyText = confirmTurnCard?.isLatest
+    ? t('chat.turnChangesLatestConfirmBody')
+    : t('chat.turnChangesHistoricalConfirmBody')
+  const confirmCaution = !confirmCanRestoreCode
+    ? t('chat.turnChangesConversationOnlyConfirmBody')
+    : confirmUnverifiedSources.length > 0
+      ? t('chat.turnChangesPartialCoverageConfirmBody', {
+          sources: confirmUnverifiedSources.join(', '),
+        })
+      : null
+  const confirmBody = confirmCaution === null
+    ? confirmBodyText
+    : (
+        <div className="space-y-2 text-sm leading-6 text-[var(--color-text-secondary)]">
+          {confirmCanRestoreCode ? <p>{confirmBodyText}</p> : null}
+          <p className="text-[var(--color-warning)]">{confirmCaution}</p>
+        </div>
+      )
 
   useEffect(() => {
     const liveKeys = new Set(renderItemKeys)
@@ -2294,7 +3004,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
   }, [renderItemKeys])
 
   useEffect(() => {
-    if (!resolvedSessionId || completedTurnTargets.length === 0 || isMemberSession) {
+    if (!resolvedSessionId || completedTurnTargets.length === 0 || isDirectAgentSession) {
       setTurnChangeCards([])
       setTurnChangeLoadError(null)
       setIsLoadingTurnChangeCards(false)
@@ -2361,9 +3071,9 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     return () => {
       cancelled = true
     }
-  }, [chatState, completedTurnTargets, hasRunningBackgroundTasks, historyMutationEpoch, isMemberSession, latestCompletedTurnId, resolvedSessionId])
+  }, [chatState, completedTurnTargets, hasRunningBackgroundTasks, historyMutationEpoch, isDirectAgentSession, latestCompletedTurnId, resolvedSessionId])
 
-  const handleUndoCurrentTurn = useCallback(async () => {
+  const handleUndoCurrentTurn = useCallback(async (mode: SessionRewindMode = 'both') => {
     if (!resolvedSessionId || !confirmTurnCard || rewindingTurnId || hasRunningBackgroundTasks) return
 
     const target = confirmTurnCard.target
@@ -2385,6 +3095,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
         targetUserMessageId: checkpointTarget.targetUserMessageId,
         userMessageIndex: checkpointTarget.userMessageIndex,
         expectedContent: target.expectedContent,
+        mode,
       })
 
       await reloadHistory(resolvedSessionId)
@@ -2393,15 +3104,23 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
         attachments: target.attachments,
       })
 
+      // Each branch has to match what actually happened on disk: nothing was
+      // restored in conversation mode, and in `both` mode a turn that also wrote
+      // off-checkpoint left changes behind. A plain success would overstate both.
+      const messageCount = result.conversation.messagesRemoved
+      const leftBehind = mode === 'both' ? result.unverifiedChangeSources ?? [] : []
       addToast({
-        type: 'success',
-        message: result.code.available
-          ? t('chat.rewindSuccessWithCode', {
-              count: result.conversation.messagesRemoved,
-            })
-          : t('chat.rewindSuccessConversationOnly', {
-              count: result.conversation.messagesRemoved,
-            }),
+        type: leftBehind.length > 0 ? 'warning' : 'success',
+        message: mode === 'conversation'
+          ? t('chat.rewindSuccessConversationOnly', { count: messageCount })
+          : leftBehind.length > 0
+            ? t('chat.rewindSuccessPartialCoverage', {
+                count: messageCount,
+                sources: leftBehind.join(', '),
+              })
+            : result.code.available
+              ? t('chat.rewindSuccessWithCode', { count: messageCount })
+              : t('chat.rewindSuccessConversationOnly', { count: messageCount }),
       })
 
       setTurnUndoConfirmTargetId(null)
@@ -2426,6 +3145,33 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
     stopGeneration,
     t,
   ])
+
+  // Rolling the conversation back never depends on the checkpoint, so it stays
+  // on offer even when restoring the files is impossible — that is the only
+  // action left in that case, and losing it entirely was the whole complaint.
+  const confirmActions: ActionDialogAction[] = [
+    {
+      label: t('common.cancel'),
+      onClick: () => setTurnUndoConfirmTargetId(null),
+      variant: 'secondary',
+    },
+    {
+      label: t('chat.turnChangesUndoConversationOnly'),
+      onClick: () => { void handleUndoCurrentTurn('conversation') },
+      variant: confirmCanRestoreCode ? 'secondary' : 'danger',
+      loading: Boolean(rewindingTurnId),
+    },
+    ...(confirmCanRestoreCode
+      ? [{
+          label: confirmTurnCard?.isLatest
+            ? t('chat.turnChangesLatestConfirmUndo')
+            : t('chat.turnChangesHistoricalConfirmUndo'),
+          onClick: () => { void handleUndoCurrentTurn('both') },
+          variant: 'danger' as const,
+          loading: Boolean(rewindingTurnId),
+        }]
+      : []),
+  ]
 
   const handleBranchMessage = useCallback(async (target: BranchableMessageTarget) => {
     if (!resolvedSessionId || branchingMessageId) return
@@ -2723,20 +3469,51 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
         {item.kind === 'tool_group' ? (
           <ToolCallGroup
             sessionId={resolvedSessionId}
+            onOpenAgentRun={onOpenAgentRun}
             toolCalls={item.toolCalls}
+            steps={item.steps}
             resultMap={toolResultMap}
             childToolCallsByParent={childToolCallsByParent}
             agentTaskNotifications={agentTaskNotifications}
             agentTaskStatuses={agentTaskStatuses}
+            activeThinkingId={activeThinkingId}
             isStreaming={
               chatState === 'tool_executing' &&
               item.toolCalls.some((tc) => !toolResultMap.has(tc.toolUseId))
             }
+            // Only the tail of a live turn can still grow. Everything above it
+            // is finished, whatever any individual tool's state looks like this
+            // instant — which is why this, and not `isStreaming`, decides
+            // whether a run stands open.
+            isLive={chatState !== 'idle' && index === renderItems.length - 1 && !hasTrailingStreamingItem}
           />
+        ) : item.kind === 'team_card' ? (
+          resolvedSessionId ? (() => {
+            const cardSnapshot = snapshotForTeamCard(teamSnapshot, item)
+            const fallbackPhase = item.endedAt !== undefined || teamTaskWindows.some((window) => (
+              item.startedAt >= window.startedAt &&
+              window.endedAt !== undefined &&
+              item.startedAt <= window.endedAt
+            )) ? 'completed' : 'forming'
+            return (
+            <AgentTeamsInlineCard
+              snapshot={cardSnapshot}
+              teamName={item.teamName}
+              fallbackPhase={fallbackPhase}
+              phaseOverride={item.endedAt !== undefined ? 'completed' : undefined}
+              onOpen={cardSnapshot
+                ? () => openTeamWorkbench(resolvedSessionId, cardSnapshot.team.name)
+                : undefined}
+            >
+              <TeamCoordinationAudit toolCalls={item.coordinationToolCalls} />
+            </AgentTeamsInlineCard>
+            )
+          })() : null
         ) : (
           <MessageBlock
             sessionId={resolvedSessionId}
             message={item.message}
+            team={memberSessionTeam ?? undefined}
             activeThinkingId={activeThinkingId}
             agentTaskNotifications={agentTaskNotifications}
             toolResult={
@@ -2773,6 +3550,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
       <div
         ref={scrollContainerRef}
         onScroll={updateAutoScrollState}
+        onClickCapture={handleDisclosureToggle}
         onWheel={handleWheelScrollIntent}
         onPointerDown={markUserScrollIntent}
         onTouchStart={markUserScrollIntent}
@@ -2786,7 +3564,11 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
       >
         <div
           ref={scrollContentRef}
-          className={compact ? 'mx-auto max-w-full' : 'mx-auto max-w-[900px]'}
+          // The reading measure holds whether or not a right-hand panel is
+          // open — `compact` only tightens padding. Dropping to `max-w-full`
+          // was what made the transcript lose its centred structure the moment
+          // the agent-teams workbench appeared.
+          className="mx-auto max-w-[900px]"
         >
           {virtualTranscriptWindow.enabled ? (
             <VirtualSpacer height={virtualTranscriptWindow.beforeHeight} position="top" />
@@ -2795,6 +3577,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
           {virtualTranscriptWindow.items.map(({ item, index }) => {
             const itemKey = getRenderItemKey(item)
             const content = renderTranscriptItem(item, index)
+            const railPosition = turnRailPositions[index] ?? 'none'
 
             return virtualTranscriptWindow.enabled ? (
               <MeasuredRenderItem
@@ -2802,6 +3585,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
                 itemKey={itemKey}
                 onHeightChange={handleVirtualItemHeightChange}
                 highlighted={highlightedNavigationItemKey === itemKey}
+                railPosition={railPosition}
               >
                 {content}
               </MeasuredRenderItem>
@@ -2809,7 +3593,8 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
               <div
                 key={itemKey}
                 data-chat-render-item-key={itemKey}
-                className={`${CHAT_RENDER_ITEM_CLASS} chat-render-item--cv ${highlightedNavigationItemKey === itemKey ? 'chat-render-item--navigation-target' : ''}`}
+                data-turn-rail={railPosition}
+                className={`${CHAT_RENDER_ITEM_CLASS} chat-render-item--cv ${turnRailClass(railPosition)} ${highlightedNavigationItemKey === itemKey ? 'chat-render-item--navigation-target' : ''}`}
               >
                 {content}
               </div>
@@ -2821,7 +3606,11 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
           ) : null}
 
           {streamingText.trim() && (
-            <div data-chat-render-item-key={STREAMING_ASSISTANT_NAVIGATION_KEY}>
+            <div
+              data-chat-render-item-key={STREAMING_ASSISTANT_NAVIGATION_KEY}
+              data-turn-rail={streamingRailPosition}
+              className={turnRailClass(streamingRailPosition)}
+            >
               <AssistantMessage content={streamingText} isStreaming={chatState === 'streaming'} />
             </div>
           )}
@@ -2833,9 +3622,16 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
           {/* Show StreamingIndicator when:
               - tool_executing: background work is running
               - thinking but no active ThinkingBlock yet: the gap between
-                sending a message and receiving the first thinking delta */}
-          {(chatState === 'tool_executing' || (chatState === 'thinking' && !activeThinkingId)) && (
-            <StreamingIndicator />
+                sending a message and receiving the first thinking delta
+              The live status stays in the transcript, next to the output it is
+              describing — it is part of the conversation, not composer chrome. */}
+          {showsTurnStatusLine && (
+            // On the rail, so the lit line runs all the way down to the status
+            // it explains — except while preparing a turn, when no transcript
+            // item exists yet and the status has to stand on its own.
+            <div className={renderItems.length === 0 ? undefined : turnRailClass('end')}>
+              <StreamingIndicator />
+            </div>
           )}
 
           {!isLoadingTurnChangeCards && visibleTurnChangeCards.length === 0 && turnChangeLoadError && (
@@ -2873,25 +3669,19 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
         </Button>
       )}
 
-      <ConfirmDialog
+      <ActionDialog
         open={Boolean(confirmTurnCard)}
         onClose={() => {
           if (!rewindingTurnId) {
             setTurnUndoConfirmTargetId(null)
           }
         }}
-        onConfirm={handleUndoCurrentTurn}
         title={confirmTurnCard?.isLatest
           ? t('chat.turnChangesLatestConfirmTitle')
           : t('chat.turnChangesHistoricalConfirmTitle')}
-        body={confirmTurnCard?.isLatest
-          ? t('chat.turnChangesLatestConfirmBody')
-          : t('chat.turnChangesHistoricalConfirmBody')}
-        confirmLabel={confirmTurnCard?.isLatest
-          ? t('chat.turnChangesLatestConfirmUndo')
-          : t('chat.turnChangesHistoricalConfirmUndo')}
-        cancelLabel={t('common.cancel')}
-        confirmVariant="danger"
+        body={confirmBody}
+        actions={confirmActions}
+        width={520}
         loading={Boolean(rewindingTurnId)}
       />
     </div>
@@ -2901,6 +3691,7 @@ export function MessageList({ sessionId, compact = false, mobileLayout = false }
 export const MessageBlock = memo(function MessageBlock({
   sessionId,
   message,
+  team,
   activeThinkingId,
   agentTaskNotifications,
   toolResult,
@@ -2910,6 +3701,7 @@ export const MessageBlock = memo(function MessageBlock({
 }: {
   sessionId?: string | null
   message: UIMessage
+  team?: TeamDetail
   activeThinkingId: string | null
   agentTaskNotifications: Record<string, AgentTaskNotification>
   toolResult?: { content: unknown; isError: boolean } | null
@@ -2922,6 +3714,18 @@ export const MessageBlock = memo(function MessageBlock({
   turnCompletion?: TurnCompletion
 }) {
   const t = useTranslation()
+  const teammateVisual = message.type === 'user_text' && message.teammateFrom && team
+    ? (() => {
+        const { member, isLead } = resolveTeamMemberIdentity(team, message.teammateFrom)
+        const avatarKey = getMemberAvatarKey(member, isLead)
+        const memberIndex = Math.max(0, team.members.findIndex((candidate) => candidate.agentId === member.agentId))
+        return {
+          avatarKey,
+          avatarSrc: MEMBER_AVATARS[avatarKey],
+          accent: memberAccentColor(member.color, memberIndex),
+        }
+      })()
+    : null
 
   switch (message.type) {
     case 'user_text':
@@ -2938,6 +3742,10 @@ export const MessageBlock = memo(function MessageBlock({
             branchAction={branchAction}
             timestamp={message.timestamp}
             sessionId={sessionId ?? undefined}
+            teammateFrom={message.teammateFrom}
+            teammateAvatarSrc={teammateVisual?.avatarSrc}
+            teammateAvatarKey={teammateVisual?.avatarKey}
+            teammateAccent={teammateVisual?.accent}
           />
         </SelectableChatMessage>
       )
@@ -2953,13 +3761,14 @@ export const MessageBlock = memo(function MessageBlock({
             content={message.content}
             branchAction={branchAction}
             sessionId={sessionId ?? undefined}
-            timestamp={message.timestamp}
             turnChangedFiles={turnChangedFiles}
             turnCompletion={turnCompletion}
           />
         </SelectableChatMessage>
       )
     case 'thinking':
+      // No wrapper padding: the row's own `-mx-2 … px-2` already lands its text
+      // on the column's left edge, the same as one inside a run.
       return <ThinkingBlock content={message.content} isActive={message.id === activeThinkingId} />
     case 'tool_use':
       if (message.toolName === 'AskUserQuestion' && !message.isPending) {

@@ -27,6 +27,13 @@ import {
   type ThinkingConfig,
 } from './thinking.js'
 
+export async function resolveAgentMessageToolUseContext(
+  saved: CacheSafeParams | null,
+  buildFallback: () => Promise<CacheSafeParams>,
+): Promise<ToolUseContext> {
+  return (saved ?? await buildFallback()).toolUseContext
+}
+
 /**
  * Fetch the three context pieces that form the API cache-key prefix:
  * systemPrompt parts, userContext, systemContext.

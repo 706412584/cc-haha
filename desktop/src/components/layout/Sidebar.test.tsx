@@ -1,14 +1,27 @@
+import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import '@testing-library/jest-dom'
+import type {
+  DesktopUiPreferencesResponse,
+  SidebarProjectPreferences,
+} from '../../api/desktopUiPreferences'
 
 const desktopUiPreferencesApiMock = vi.hoisted(() => ({
-  getPreferences: vi.fn(),
   updateSidebarPreferences: vi.fn(),
+  updateProjectDisplayName: vi.fn(),
 }))
 
 vi.mock('../../api/desktopUiPreferences', () => ({
   desktopUiPreferencesApi: desktopUiPreferencesApiMock,
+}))
+
+const repositoryContextMock = vi.hoisted(() => vi.fn())
+
+vi.mock('../../api/sessions', () => ({
+  sessionsApi: {
+    getRepositoryContext: repositoryContextMock,
+  },
 }))
 
 const openTargetStoreMock = vi.hoisted(() => ({
@@ -49,6 +62,8 @@ vi.mock('../../i18n', () => ({
       'sidebar.sortByCreatedAt': 'Created time',
       'sidebar.sortByUpdatedAt': 'Updated time',
       'sidebar.newBlankProject': 'New blank project',
+      'sidebar.newBlankSession': 'New blank session',
+      'sidebar.projectEditor.editTitle': 'Edit project',
       'sidebar.useExistingFolder': 'Use existing folder',
       'sidebar.chooseProjectFolderUnavailable': 'Folder selection is only available in the desktop app.',
       'sidebar.projectActions': 'Project actions for {project}',
@@ -117,12 +132,92 @@ vi.mock('../../i18n', () => ({
   },
 }))
 
+vi.mock('./ProjectEditorModal', () => ({
+  ProjectEditorModal: (props: {
+    open: boolean
+    mode: 'create' | 'edit'
+    sourceFolder?: string
+    logicalRoot?: string
+    initialName?: string
+    suggestedName?: string
+    loading?: boolean
+    error?: string | null
+    onClose: () => void
+    onSourceFolderChange?: (path: string) => void
+    onSubmit: (submission: { name: string; sourceFolder: string; logicalRoot: string }) => void | Promise<void>
+    onRestoreFolderName?: () => void | Promise<void>
+    onRemoveFromSidebar?: () => void | Promise<void>
+  }) => {
+    if (!props.open) return null
+    const sourceFolder = props.sourceFolder ?? props.logicalRoot ?? ''
+    const logicalRoot = props.logicalRoot ?? sourceFolder
+    const name = props.mode === 'create' ? 'Created project' : 'Edited project'
+
+    return (
+      <div
+        role="dialog"
+        aria-label={`${props.mode} project editor`}
+        data-testid="project-editor-modal"
+        data-source-folder={sourceFolder}
+        data-logical-root={logicalRoot}
+        data-initial-name={props.initialName ?? ''}
+        data-suggested-name={props.suggestedName ?? ''}
+        data-loading={props.loading ? 'true' : 'false'}
+      >
+        {props.mode === 'create' && (
+          <>
+            <button type="button" onClick={() => props.onSourceFolderChange?.('/workspace/repository/packages/app')}>
+              Choose project source
+            </button>
+            <button type="button" onClick={() => props.onSourceFolderChange?.('/workspace/other')}>
+              Choose other project source
+            </button>
+          </>
+        )}
+        <button
+          type="button"
+          onClick={() => void props.onSubmit({ name, sourceFolder, logicalRoot })}
+        >
+          Submit {props.mode} project
+        </button>
+        {props.suggestedName && (
+          <button
+            type="button"
+            onClick={() => void props.onSubmit({
+              name: props.suggestedName!.trim().replace(/\s+/g, ' '),
+              sourceFolder,
+              logicalRoot,
+            })}
+          >
+            Submit folder project name
+          </button>
+        )}
+        {props.onRestoreFolderName && (
+          <button type="button" onClick={() => void props.onRestoreFolderName?.()}>
+            Restore folder name
+          </button>
+        )}
+        {props.onRemoveFromSidebar && (
+          <button type="button" onClick={() => void props.onRemoveFromSidebar?.()}>
+            Remove project from sidebar
+          </button>
+        )}
+        <button type="button" onClick={props.onClose}>Close project editor</button>
+      </div>
+    )
+  },
+}))
+
 import { Sidebar } from './Sidebar'
 import { useChatStore } from '../../stores/chatStore'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useUIStore } from '../../stores/uiStore'
+import {
+  captureProjectDisplayNameHydrationRevision,
+  hydrateProjectDisplayNames,
+} from '../../stores/projectDisplayNameStore'
 import type { SessionListItem } from '../../types/session'
 import type { PerSessionState } from '../../stores/chatStore'
 
@@ -178,6 +273,80 @@ function makeChatSessionState(overrides: Partial<PerSessionState> = {}): PerSess
   }
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
+function makeDesktopUiPreferencesResponse({
+  exists = true,
+  sidebar = {
+    projectOrder: [],
+    pinnedProjects: [],
+    hiddenProjects: [],
+    projectOrganization: 'recentProject',
+    projectSortBy: 'updatedAt',
+  },
+  projectDisplayNames = {},
+}: {
+  exists?: boolean
+  sidebar?: SidebarProjectPreferences
+  projectDisplayNames?: Record<string, string>
+} = {}): DesktopUiPreferencesResponse {
+  return {
+    exists,
+    preferences: {
+      schemaVersion: 5,
+      sidebar,
+      projectDisplayNames,
+      profile: {
+        displayName: 'cc-haha',
+        subtitle: 'github.com/NanmiCoder/cc-haha',
+        avatarFile: null,
+        avatarUpdatedAt: null,
+      },
+      pet: {
+        enabled: false,
+        selectedPetId: 'dada-code',
+        size: 144,
+        showTaskPanel: true,
+        collapsed: false,
+        motionEnabled: true,
+        lastSessionId: null,
+      },
+    },
+  }
+}
+
+function SidebarDrawerHarness({ request }: { request: Promise<DesktopUiPreferencesResponse> }) {
+  const [open, setOpen] = useState(true)
+  const [preferencesRequest, setPreferencesRequest] = useState<
+    Promise<DesktopUiPreferencesResponse> | null
+  >(request)
+
+  return (
+    <>
+      <button type="button" onClick={() => setOpen((current) => !current)}>
+        {open ? 'Close drawer harness' : 'Open drawer harness'}
+      </button>
+      {open && (
+        <Sidebar
+          isMobile
+          desktopUiPreferencesRequest={preferencesRequest}
+          onDesktopUiPreferencesConsumed={(consumedRequest) => {
+            setPreferencesRequest((current) => current === consumedRequest ? null : current)
+          }}
+        />
+      )}
+    </>
+  )
+}
+
 function makeDataTransfer() {
   const data = new Map<string, string>()
   return {
@@ -220,9 +389,18 @@ describe('Sidebar', () => {
     deleteSession.mockReset()
     deleteSessions.mockReset()
     addToast.mockReset()
-    desktopUiPreferencesApiMock.getPreferences.mockReset()
     desktopUiPreferencesApiMock.updateSidebarPreferences.mockReset()
-    desktopUiPreferencesApiMock.getPreferences.mockRejectedValue(new Error('server unavailable'))
+    desktopUiPreferencesApiMock.updateProjectDisplayName.mockReset()
+    desktopUiPreferencesApiMock.updateProjectDisplayName.mockImplementation((projectKey: string, displayName: string | null) => Promise.resolve({
+      ok: true,
+      projectKey,
+      displayName,
+    }))
+    repositoryContextMock.mockReset()
+    repositoryContextMock.mockImplementation(async (workDir: string) => ({ repoRoot: null, workDir }))
+    act(() => {
+      hydrateProjectDisplayNames({}, Number.MAX_SAFE_INTEGER)
+    })
     desktopUiPreferencesApiMock.updateSidebarPreferences.mockResolvedValue({
       ok: true,
       preferences: {
@@ -274,6 +452,9 @@ describe('Sidebar', () => {
   afterEach(() => {
     vi.useRealTimers()
     cleanup()
+    act(() => {
+      hydrateProjectDisplayNames({}, Number.MAX_SAFE_INTEGER)
+    })
     useTabStore.setState({ tabs: [], activeTabId: null })
     window.localStorage.removeItem(PROJECT_ORDER_STORAGE_KEY)
     window.localStorage.removeItem(PROJECT_PINNED_STORAGE_KEY)
@@ -578,15 +759,463 @@ describe('Sidebar', () => {
 
     expect(screen.getByTestId('sidebar-projects-header')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'New project' }))
-    expect(screen.getByRole('menuitem', { name: 'New blank project' })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: 'New blank session' })).toBeInTheDocument()
 
     await act(async () => {
-      fireEvent.click(screen.getByRole('menuitem', { name: 'New blank project' }))
+      fireEvent.click(screen.getByRole('menuitem', { name: 'New blank session' }))
     })
 
     await waitFor(() => {
       expect(createSession).toHaveBeenCalledWith(undefined)
       expect(connectToSession).toHaveBeenCalledWith('session-blank-project')
+    })
+  })
+
+  it('keeps project controls available when there are no projects', () => {
+    render(<Sidebar />)
+
+    expect(screen.getByTestId('sidebar-projects-header')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'New project' }))
+    expect(screen.getByRole('menuitem', { name: 'New blank session' })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: 'Use existing folder' })).toBeInTheDocument()
+  })
+
+  it('uses hydrated display names while preserving the project path used by actions', async () => {
+    act(() => {
+      hydrateProjectDisplayNames(
+        { '/workspace/alpha': 'Custom alpha' },
+        captureProjectDisplayNameHydrationRevision(),
+      )
+    })
+    createSession.mockResolvedValue('custom-alpha-new')
+    useSessionStore.setState({
+      sessions: [makeSession('alpha-1', 'Alpha Session', '/workspace/alpha', new Date().toISOString())],
+    })
+
+    render(<Sidebar />)
+
+    await waitFor(() => expect(screen.getByText('Custom alpha')).toBeInTheDocument())
+    const header = screen.getByRole('button', { name: 'Collapse Custom alpha' })
+    expect(header).toHaveAttribute('title', '/workspace/alpha')
+
+    fireEvent.click(screen.getByRole('button', { name: 'New session in Custom alpha' }))
+    await waitFor(() => expect(createSession).toHaveBeenCalledWith('/workspace/alpha'))
+  })
+
+  it('creates a named project at its resolved root while launching the selected source folder', async () => {
+    repositoryContextMock.mockResolvedValue({ repoRoot: '/workspace/repository' })
+    createSession.mockResolvedValue('created-project-session')
+
+    render(<Sidebar />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'New project' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Use existing folder' }))
+
+    const editor = screen.getByTestId('project-editor-modal')
+    expect(editor).toHaveAttribute('data-source-folder', '')
+    fireEvent.click(screen.getByRole('button', { name: 'Choose project source' }))
+
+    await waitFor(() => expect(repositoryContextMock).toHaveBeenCalledWith('/workspace/repository/packages/app'))
+    await waitFor(() => {
+      expect(editor).toHaveAttribute('data-source-folder', '/workspace/repository/packages/app')
+      expect(editor).toHaveAttribute('data-logical-root', '/workspace/repository')
+      expect(editor).toHaveAttribute('data-suggested-name', 'repository')
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Submit create project' }))
+    await waitFor(() => {
+      expect(desktopUiPreferencesApiMock.updateProjectDisplayName).toHaveBeenCalledWith(
+        '/workspace/repository',
+        'Created project',
+      )
+      expect(createSession).toHaveBeenCalledWith('/workspace/repository/packages/app')
+      expect(connectToSession).toHaveBeenCalledWith('created-project-session')
+    })
+    expect(createSession.mock.invocationCallOrder[0]).toBeLessThan(
+      desktopUiPreferencesApiMock.updateProjectDisplayName.mock.invocationCallOrder[0]!,
+    )
+    expect(repositoryContextMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('opens the session before repository context resolves and falls back after lookup failure', async () => {
+    const repositoryContext = createDeferred<{ repoRoot: string | null; workDir?: string }>()
+    repositoryContextMock.mockReturnValueOnce(repositoryContext.promise)
+    createSession.mockResolvedValue('created-project-session')
+
+    render(<Sidebar />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'New project' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Use existing folder' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Choose project source' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Submit create project' }))
+
+    await waitFor(() => {
+      expect(createSession).toHaveBeenCalledWith('/workspace/repository/packages/app')
+      expect(connectToSession).toHaveBeenCalledWith('created-project-session')
+      expect(screen.queryByTestId('project-editor-modal')).not.toBeInTheDocument()
+    })
+    expect(desktopUiPreferencesApiMock.updateProjectDisplayName).not.toHaveBeenCalled()
+
+    await act(async () => {
+      repositoryContext.reject(new Error('repository context unavailable'))
+      await repositoryContext.promise.catch(() => undefined)
+    })
+
+    await waitFor(() => expect(desktopUiPreferencesApiMock.updateProjectDisplayName).toHaveBeenCalledWith(
+      '/workspace/repository/packages/app',
+      'Created project',
+    ))
+  })
+
+  it('resets instead of persisting a redundant alias when creating with the folder name', async () => {
+    repositoryContextMock.mockResolvedValue({
+      repoRoot: '/workspace/repository',
+      workDir: '/workspace/repository/packages/app',
+    })
+    createSession.mockResolvedValue('created-project-session')
+
+    render(<Sidebar />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'New project' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Use existing folder' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Choose project source' }))
+    await waitFor(() => expect(screen.getByTestId('project-editor-modal')).toHaveAttribute(
+      'data-suggested-name',
+      'repository',
+    ))
+    fireEvent.click(screen.getByRole('button', { name: 'Submit folder project name' }))
+
+    await waitFor(() => {
+      expect(connectToSession).toHaveBeenCalledWith('created-project-session')
+      expect(screen.queryByTestId('project-editor-modal')).not.toBeInTheDocument()
+    })
+    expect(desktopUiPreferencesApiMock.updateProjectDisplayName).toHaveBeenCalledWith(
+      '/workspace/repository',
+      null,
+    )
+  })
+
+  it('opens the session before reporting a project display-name save failure', async () => {
+    let rejectDisplayNameSave!: (error: Error) => void
+    const displayNameSave = new Promise<never>((_resolve, reject) => {
+      rejectDisplayNameSave = reject
+    })
+    repositoryContextMock.mockResolvedValue({
+      repoRoot: '/workspace/repository',
+      workDir: '/workspace/repository/packages/app',
+    })
+    createSession.mockResolvedValue('created-project-session')
+    desktopUiPreferencesApiMock.updateProjectDisplayName.mockReturnValueOnce(displayNameSave)
+
+    render(<Sidebar />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'New project' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Use existing folder' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Choose project source' }))
+    await waitFor(() => expect(repositoryContextMock).toHaveBeenCalled())
+    fireEvent.click(screen.getByRole('button', { name: 'Submit create project' }))
+
+    await waitFor(() => {
+      expect(createSession).toHaveBeenCalledWith('/workspace/repository/packages/app')
+      expect(connectToSession).toHaveBeenCalledWith('created-project-session')
+      expect(screen.queryByTestId('project-editor-modal')).not.toBeInTheDocument()
+    })
+    expect(addToast).not.toHaveBeenCalled()
+
+    await act(async () => {
+      rejectDisplayNameSave(new Error('Display name save failed'))
+      await displayNameSave.catch(() => undefined)
+    })
+
+    await waitFor(() => expect(addToast).toHaveBeenCalledWith({
+      type: 'error',
+      message: 'Display name save failed',
+    }))
+    expect(deleteSession).not.toHaveBeenCalled()
+    expect(deleteSessions).not.toHaveBeenCalled()
+  })
+
+  it('does not persist an orphan display name when session creation fails', async () => {
+    repositoryContextMock.mockResolvedValue({
+      repoRoot: '/workspace/repository',
+      workDir: '/workspace/repository/packages/app',
+    })
+    createSession.mockRejectedValueOnce(new Error('Session creation failed'))
+
+    render(<Sidebar />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'New project' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Use existing folder' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Choose project source' }))
+    await waitFor(() => expect(repositoryContextMock).toHaveBeenCalled())
+    fireEvent.click(screen.getByRole('button', { name: 'Submit create project' }))
+
+    await waitFor(() => {
+      expect(createSession).toHaveBeenCalledWith('/workspace/repository/packages/app')
+      expect(screen.getByTestId('project-editor-modal')).toBeInTheDocument()
+    })
+    expect(desktopUiPreferencesApiMock.updateProjectDisplayName).not.toHaveBeenCalled()
+    expect(connectToSession).not.toHaveBeenCalled()
+  })
+
+  it('uses the resolved non-git workDir as the project display-name key', async () => {
+    repositoryContextMock.mockResolvedValue({
+      repoRoot: null,
+      workDir: '/real/workspace/project',
+    })
+    createSession.mockResolvedValue('created-project-session')
+
+    render(<Sidebar />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'New project' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Use existing folder' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Choose project source' }))
+
+    await waitFor(() => {
+      const editor = screen.getByTestId('project-editor-modal')
+      expect(editor).toHaveAttribute('data-source-folder', '/workspace/repository/packages/app')
+      expect(editor).toHaveAttribute('data-logical-root', '/real/workspace/project')
+      expect(editor).toHaveAttribute('data-suggested-name', 'project')
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Submit create project' }))
+    await waitFor(() => {
+      expect(desktopUiPreferencesApiMock.updateProjectDisplayName).toHaveBeenCalledWith(
+        '/real/workspace/project',
+        'Created project',
+      )
+      expect(createSession).toHaveBeenCalledWith('/workspace/repository/packages/app')
+    })
+  })
+
+  it('keeps the latest logical root when an earlier lookup finishes late', async () => {
+    let resolveFirstLookup: (value: { repoRoot: string | null }) => void = () => undefined
+    const firstLookup = new Promise<{ repoRoot: string | null }>((resolve) => {
+      resolveFirstLookup = resolve
+    })
+    repositoryContextMock
+      .mockImplementationOnce(() => firstLookup)
+      .mockResolvedValueOnce({ repoRoot: '/workspace/other' })
+
+    render(<Sidebar />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'New project' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Use existing folder' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Choose project source' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Choose other project source' }))
+
+    await waitFor(() => expect(repositoryContextMock).toHaveBeenNthCalledWith(2, '/workspace/other'))
+    await waitFor(() => {
+      const editor = screen.getByTestId('project-editor-modal')
+      expect(editor).toHaveAttribute('data-source-folder', '/workspace/other')
+      expect(editor).toHaveAttribute('data-logical-root', '/workspace/other')
+      expect(editor).toHaveAttribute('data-suggested-name', 'other')
+    })
+
+    await act(async () => {
+      resolveFirstLookup({ repoRoot: '/workspace/repository' })
+      await Promise.resolve()
+    })
+
+    const editor = screen.getByTestId('project-editor-modal')
+    expect(editor).toHaveAttribute('data-source-folder', '/workspace/other')
+    expect(editor).toHaveAttribute('data-logical-root', '/workspace/other')
+    expect(editor).toHaveAttribute('data-suggested-name', 'other')
+  })
+
+  it('edits, resets, and removes a project without changing its real path or sessions', async () => {
+    act(() => {
+      hydrateProjectDisplayNames(
+        { '/workspace/alpha': 'Custom alpha' },
+        captureProjectDisplayNameHydrationRevision(),
+      )
+    })
+    useSessionStore.setState({
+      sessions: [makeSession('alpha-1', 'Alpha Session', '/workspace/alpha', new Date().toISOString())],
+    })
+
+    render(<Sidebar />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Project actions for Custom alpha' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit project' }))
+    const editor = screen.getByTestId('project-editor-modal')
+    expect(editor).toHaveAttribute('data-logical-root', '/workspace/alpha')
+    expect(editor).toHaveAttribute('data-initial-name', 'Custom alpha')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Submit edit project' }))
+    await waitFor(() => {
+      expect(desktopUiPreferencesApiMock.updateProjectDisplayName).toHaveBeenNthCalledWith(
+        1,
+        '/workspace/alpha',
+        'Edited project',
+      )
+      expect(screen.getByText('Edited project')).toBeInTheDocument()
+    })
+    expect(screen.getByRole('button', { name: 'Collapse Edited project' })).toHaveAttribute('title', '/workspace/alpha')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Project actions for Edited project' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit project' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Restore folder name' }))
+    await waitFor(() => {
+      expect(desktopUiPreferencesApiMock.updateProjectDisplayName).toHaveBeenNthCalledWith(
+        2,
+        '/workspace/alpha',
+        null,
+      )
+      expect(screen.getByText('alpha')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close project editor' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Project actions for alpha' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit project' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Remove project from sidebar' }))
+
+    await waitFor(() => expect(screen.queryByTestId('sidebar-project-group-workspace-alpha')).not.toBeInTheDocument())
+    expect(deleteSession).not.toHaveBeenCalled()
+    expect(deleteSessions).not.toHaveBeenCalled()
+  })
+
+  it('resets the alias when an edit saves the default folder name', async () => {
+    act(() => {
+      hydrateProjectDisplayNames(
+        { '/workspace/alpha': 'Custom alpha' },
+        captureProjectDisplayNameHydrationRevision(),
+      )
+    })
+    useSessionStore.setState({
+      sessions: [makeSession('alpha-1', 'Alpha Session', '/workspace/alpha', new Date().toISOString())],
+    })
+
+    render(<Sidebar />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Project actions for Custom alpha' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit project' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Submit folder project name' }))
+
+    await waitFor(() => {
+      expect(desktopUiPreferencesApiMock.updateProjectDisplayName).toHaveBeenCalledWith(
+        '/workspace/alpha',
+        null,
+      )
+      expect(screen.getByText('alpha')).toBeInTheDocument()
+    })
+  })
+
+  it('resets the default name before a stale alias hydration finishes', async () => {
+    const hydrationRevision = captureProjectDisplayNameHydrationRevision()
+    useSessionStore.setState({
+      sessions: [makeSession('alpha-1', 'Alpha Session', '/workspace/alpha', new Date().toISOString())],
+    })
+
+    render(<Sidebar />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Project actions for alpha' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit project' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Submit folder project name' }))
+
+    await waitFor(() => expect(desktopUiPreferencesApiMock.updateProjectDisplayName).toHaveBeenCalledWith(
+      '/workspace/alpha',
+      null,
+    ))
+
+    act(() => {
+      hydrateProjectDisplayNames(
+        { '/workspace/alpha': 'Stale custom alpha' },
+        hydrationRevision,
+      )
+    })
+
+    expect(screen.getByText('alpha')).toBeInTheDocument()
+    expect(screen.queryByText('Stale custom alpha')).not.toBeInTheDocument()
+  })
+
+  it('recognizes a normalized whitespace basename as the default project name', async () => {
+    const projectKey = '/workspace/My  project '
+    act(() => {
+      hydrateProjectDisplayNames(
+        { [projectKey]: 'Custom project' },
+        captureProjectDisplayNameHydrationRevision(),
+      )
+    })
+    useSessionStore.setState({
+      sessions: [makeSession('project-1', 'Project Session', projectKey, new Date().toISOString())],
+    })
+
+    render(<Sidebar />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Project actions for Custom project' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit project' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Submit folder project name' }))
+
+    await waitFor(() => expect(desktopUiPreferencesApiMock.updateProjectDisplayName).toHaveBeenCalledWith(
+      projectKey,
+      null,
+    ))
+  })
+
+  it('keeps remove-from-sidebar idempotent after delayed preferences hide the project', async () => {
+    const preferencesResponse = createDeferred<DesktopUiPreferencesResponse>()
+    useSessionStore.setState({
+      sessions: [makeSession('alpha-1', 'Alpha Session', '/workspace/alpha', new Date().toISOString())],
+    })
+
+    render(<Sidebar desktopUiPreferencesRequest={preferencesResponse.promise} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Project actions for alpha' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit project' }))
+
+    await act(async () => {
+      preferencesResponse.resolve(makeDesktopUiPreferencesResponse({
+        sidebar: {
+          projectOrder: [],
+          pinnedProjects: [],
+          hiddenProjects: ['/workspace/alpha'],
+          projectOrganization: 'recentProject',
+          projectSortBy: 'updatedAt',
+        },
+      }))
+      await preferencesResponse.promise
+    })
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('sidebar-project-group-workspace-alpha')).not.toBeInTheDocument()
+      expect(screen.getByTestId('project-editor-modal')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Remove project from sidebar' }))
+
+    await waitFor(() => expect(screen.queryByTestId('project-editor-modal')).not.toBeInTheDocument())
+    expect(screen.queryByTestId('sidebar-project-group-workspace-alpha')).not.toBeInTheDocument()
+    expect(desktopUiPreferencesApiMock.updateSidebarPreferences).not.toHaveBeenCalled()
+  })
+
+  it('sorts same-named projects by their stable real-path keys', async () => {
+    act(() => {
+      hydrateProjectDisplayNames(
+        {
+          '/workspace/alpha': 'Same name',
+          '/workspace/beta': 'Same name',
+        },
+        captureProjectDisplayNameHydrationRevision(),
+      )
+    })
+    useSessionStore.setState({
+      sessions: [
+        makeSession('alpha-1', 'Alpha Session', '/workspace/alpha', '2026-05-01T00:00:00.000Z'),
+        makeSession('beta-1', 'Beta Session', '/workspace/beta', '2026-05-02T00:00:00.000Z'),
+      ],
+    })
+
+    render(<Sidebar />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Project menu' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Organize sidebar' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'By project' }))
+
+    await waitFor(() => {
+      expect(screen.getAllByTestId(/^sidebar-project-group-/).map((group) => group.getAttribute('data-testid'))).toEqual([
+        'sidebar-project-group-workspace-alpha',
+        'sidebar-project-group-workspace-beta',
+      ])
     })
   })
 
@@ -668,6 +1297,7 @@ describe('Sidebar', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Project actions for alpha' }))
 
+    expect(screen.getByRole('menuitem', { name: 'Edit project' })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: 'Pin Project' })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: 'Open in Finder' })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: 'Hide from Sidebar' })).toBeInTheDocument()
@@ -818,19 +1448,15 @@ describe('Sidebar', () => {
   })
 
   it('uses server sidebar preferences across browser and desktop storage contexts', async () => {
-    desktopUiPreferencesApiMock.getPreferences.mockResolvedValueOnce({
-      exists: true,
-      preferences: {
-        schemaVersion: 1,
-        sidebar: {
-          projectOrder: ['/workspace/beta', '/workspace/alpha'],
-          pinnedProjects: ['/workspace/beta'],
-          hiddenProjects: ['/workspace/alpha'],
-          projectOrganization: 'recentProject',
-          projectSortBy: 'updatedAt',
-        },
+    const preferencesRequest = Promise.resolve(makeDesktopUiPreferencesResponse({
+      sidebar: {
+        projectOrder: ['/workspace/beta', '/workspace/alpha'],
+        pinnedProjects: ['/workspace/beta'],
+        hiddenProjects: ['/workspace/alpha'],
+        projectOrganization: 'recentProject',
+        projectSortBy: 'updatedAt',
       },
-    })
+    }))
     const now = new Date().toISOString()
     useSessionStore.setState({
       sessions: [
@@ -839,11 +1465,18 @@ describe('Sidebar', () => {
       ],
     })
 
-    render(<Sidebar />)
+    const onPreferencesConsumed = vi.fn()
+    render(
+      <Sidebar
+        desktopUiPreferencesRequest={preferencesRequest}
+        onDesktopUiPreferencesConsumed={onPreferencesConsumed}
+      />,
+    )
 
     await waitFor(() => {
       expect(screen.queryByText('alpha')).not.toBeInTheDocument()
       expect(screen.getByText('beta')).toBeInTheDocument()
+      expect(onPreferencesConsumed).toHaveBeenCalledWith(preferencesRequest)
     })
     expect(JSON.parse(window.localStorage.getItem(PROJECT_ORDER_STORAGE_KEY) ?? '[]')).toEqual([
       '/workspace/beta',
@@ -853,20 +1486,44 @@ describe('Sidebar', () => {
     expect(JSON.parse(window.localStorage.getItem(PROJECT_HIDDEN_STORAGE_KEY) ?? '[]')).toEqual(['/workspace/alpha'])
   })
 
-  it('migrates cached local sidebar preferences when the server file is missing after update', async () => {
-    desktopUiPreferencesApiMock.getPreferences.mockResolvedValueOnce({
-      exists: false,
-      preferences: {
-        schemaVersion: 1,
-        sidebar: {
-          projectOrder: [],
-          pinnedProjects: [],
-          hiddenProjects: [],
-          projectOrganization: 'recentProject',
-          projectSortBy: 'updatedAt',
-        },
-      },
+  it('invalidates stale bootstrap preferences before a mobile drawer remount', async () => {
+    const preferencesResponse = createDeferred<DesktopUiPreferencesResponse>()
+    useSessionStore.setState({
+      sessions: [makeSession('alpha-1', 'Alpha Session', '/workspace/alpha', new Date().toISOString())],
     })
+
+    render(<SidebarDrawerHarness request={preferencesResponse.promise} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Project actions for alpha' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Hide from Sidebar' }))
+    await waitFor(() => {
+      expect(screen.queryByTestId('sidebar-project-group-workspace-alpha')).not.toBeInTheDocument()
+      expect(desktopUiPreferencesApiMock.updateSidebarPreferences).toHaveBeenCalledWith({
+        projectOrder: [],
+        pinnedProjects: [],
+        hiddenProjects: ['/workspace/alpha'],
+        projectOrganization: 'recentProject',
+        projectSortBy: 'updatedAt',
+      })
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close drawer harness' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Open drawer harness' }))
+    expect(screen.queryByTestId('sidebar-project-group-workspace-alpha')).not.toBeInTheDocument()
+
+    await act(async () => {
+      preferencesResponse.resolve(makeDesktopUiPreferencesResponse())
+      await preferencesResponse.promise
+    })
+
+    expect(screen.queryByTestId('sidebar-project-group-workspace-alpha')).not.toBeInTheDocument()
+    expect(JSON.parse(window.localStorage.getItem(PROJECT_HIDDEN_STORAGE_KEY) ?? '[]')).toEqual([
+      '/workspace/alpha',
+    ])
+  })
+
+  it('migrates cached local sidebar preferences when the server file is missing after update', async () => {
+    const preferencesRequest = Promise.resolve(makeDesktopUiPreferencesResponse({ exists: false }))
     window.localStorage.setItem(PROJECT_HIDDEN_STORAGE_KEY, JSON.stringify(['/workspace/beta']))
     useSessionStore.setState({
       sessions: [
@@ -875,7 +1532,7 @@ describe('Sidebar', () => {
       ],
     })
 
-    render(<Sidebar />)
+    render(<Sidebar desktopUiPreferencesRequest={preferencesRequest} />)
 
     await waitFor(() => {
       expect(desktopUiPreferencesApiMock.updateSidebarPreferences).toHaveBeenCalledWith({

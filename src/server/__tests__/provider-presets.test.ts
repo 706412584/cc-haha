@@ -68,7 +68,7 @@ describe('provider presets API', () => {
     const kimi = PROVIDER_PRESETS.find((preset) => preset.id === 'kimi')
     const minimax = PROVIDER_PRESETS.find((preset) => preset.id === 'minimax')
     const shengsuanyun = PROVIDER_PRESETS.find((preset) => preset.id === 'shengsuanyun')
-    const teamorouter = PROVIDER_PRESETS.find((preset) => preset.id === 'teamorouter')
+    const atlascloud = PROVIDER_PRESETS.find((preset) => preset.id === 'atlascloud')
     const xuanshuapi = PROVIDER_PRESETS.find((preset) => preset.id === 'xuanshuapi')
     const fennoai = PROVIDER_PRESETS.find((preset) => preset.id === 'fennoai')
     const qiniuai = PROVIDER_PRESETS.find((preset) => preset.id === 'qiniuai')
@@ -138,14 +138,16 @@ describe('provider presets API', () => {
     expect(shengsuanyun?.defaultModels.main).toBe('anthropic/claude-sonnet-4.6')
     expect(shengsuanyun?.defaultModels.haiku).toBe('anthropic/claude-haiku-4.5:thinking')
     expect(shengsuanyun?.modelContextWindows?.['anthropic/claude-sonnet-4.6']).toBe(1000000)
-    expect(teamorouter?.baseUrl).toBe('https://api.teamorouter.com')
-    expect(teamorouter?.apiFormat).toBe('anthropic')
-    expect(teamorouter?.authStrategy).toBe('auth_token')
-    expect(teamorouter?.defaultModels.main).toBe('claude-opus-4-8')
-    expect(teamorouter?.defaultModels.haiku).toBe('claude-haiku-4-5')
-    expect(teamorouter?.defaultModels.sonnet).toBe('claude-sonnet-5')
-    expect(teamorouter?.defaultModels.opus).toBe('claude-opus-4-8')
-    expect(teamorouter?.modelContextWindows?.['claude-opus-4-8']).toBe(1000000)
+    expect(atlascloud?.baseUrl).toBe('https://api.atlascloud.ai')
+    expect(atlascloud?.apiFormat).toBe('openai_chat')
+    expect(atlascloud?.authStrategy).toBe('api_key')
+    expect(atlascloud?.defaultModels).toEqual({
+      main: 'deepseek-ai/deepseek-v4-pro',
+      haiku: 'deepseek-ai/deepseek-v4-pro',
+      sonnet: 'deepseek-ai/deepseek-v4-pro',
+      opus: 'deepseek-ai/deepseek-v4-pro',
+    })
+    expect(atlascloud?.modelContextWindows?.['deepseek-ai/deepseek-v4-pro']).toBe(1000000)
     expect(xuanshuapi?.baseUrl).toBe('https://www.xuanshuapi.com')
     expect(xuanshuapi?.apiFormat).toBe('anthropic')
     expect(xuanshuapi?.authStrategy).toBe('auth_token')
@@ -185,10 +187,10 @@ describe('provider presets API', () => {
     const kimi = PROVIDER_PRESETS.find((preset) => preset.id === 'kimi')
     const minimax = PROVIDER_PRESETS.find((preset) => preset.id === 'minimax')
     const shengsuanyun = PROVIDER_PRESETS.find((preset) => preset.id === 'shengsuanyun')
-    const teamorouter = PROVIDER_PRESETS.find((preset) => preset.id === 'teamorouter')
     const xuanshuapi = PROVIDER_PRESETS.find((preset) => preset.id === 'xuanshuapi')
     const fennoai = PROVIDER_PRESETS.find((preset) => preset.id === 'fennoai')
     const qiniuai = PROVIDER_PRESETS.find((preset) => preset.id === 'qiniuai')
+    const atlascloud = PROVIDER_PRESETS.find((preset) => preset.id === 'atlascloud')
     const custom = PROVIDER_PRESETS.find((preset) => preset.id === 'custom')
 
     expect(lmstudio?.needsApiKey).toBe(false)
@@ -253,6 +255,10 @@ describe('provider presets API', () => {
     expect(qiniuai?.modelContextWindows?.['deepseek/deepseek-v4-flash']).toBe(1000000)
     expect(qiniuai?.modelContextWindows?.['z-ai/glm-5.2']).toBe(1000000)
     expect(qiniuai?.modelContextWindows?.['moonshotai/kimi-k3']).toBe(262144)
+    expect(atlascloud?.apiKeyUrl).toBe(
+      'https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=cc-haha',
+    )
+    expect(atlascloud?.featured).toBe(true)
     expect(custom?.promoText).toBeUndefined()
     expect(custom?.authStrategy).toBe('auth_token')
     expect(custom?.defaultEnv).toBeUndefined()
@@ -332,6 +338,10 @@ describe('provider presets API', () => {
       expect(preset.promoText).toBeUndefined()
       expect(preset.featured).toBeUndefined()
     }
+  })
+
+  test('removed TeamoRouter preset is absent from the server catalog', () => {
+    expect(PROVIDER_PRESETS.some((preset) => preset.id === 'teamorouter')).toBe(false)
   })
 
   test('provider presets carry docs-backed context windows for current coding models', () => {

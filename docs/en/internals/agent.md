@@ -350,7 +350,7 @@ In the desktop app, open **Settings → Agents**. The desktop app and CLI use th
 | **User** | `~/.claude/agents/*.md` | Available in every project |
 | **Project** | `<project-directory>/.claude/agents/*.md` | Available only in the current project; overrides a user Agent with the same name |
 
-User and project Agents can be created, edited, and deleted from the desktop app, and saving writes directly to the corresponding Markdown file. Other sources, including built-in Agents, plugins, managed policy, and CLI arguments, also appear in the list but are read-only because the desktop app does not own their source files.
+User and project Agents can be created, edited, and deleted from the desktop app, and saving writes directly to the corresponding Markdown file. Other sources, including built-in Agents, plugins, managed policy, and CLI arguments, also appear in the list but are read-only because the desktop app does not own their source files. Built-in Agents are one exception: their model and reasoning effort can be overridden individually, but the override lives in settings.json rather than in a source file and `source` stays `built-in`. See "Overriding a Built-in Agent's Model and Effort" below.
 
 When the desktop app is connected to the active session, creating, editing, or deleting an Agent hot-reloads that session in place, so the next spawn uses the new definition immediately. If no runtime is available or the reload fails, the file is still saved; the desktop app shows a non-blocking warning, and the saved definition is loaded on the next launch.
 
@@ -410,14 +410,39 @@ Model resolution uses this precedence, from highest to lowest:
 1. A concrete model in `CLAUDE_CODE_SUBAGENT_MODEL` (`inherit` does not pin the model)
 2. The model supplied to this `Agent({ ..., model: "..." })` call
 3. `model` in the Agent Markdown frontmatter
-4. The primary conversation model
+4. `model` from `builtInAgentOverrides` in settings.json (built-in Agents only)
+5. The primary conversation model
 
 Reasoning effort resolution uses this precedence, from highest to lowest:
 
 1. `CLAUDE_CODE_EFFORT_LEVEL`
 2. `effort` in the Agent Markdown frontmatter
-3. The current session effort
-4. The model default
+3. `effort` from `builtInAgentOverrides` in settings.json (built-in Agents only)
+4. The current session effort
+5. The model default
+
+### Overriding a Built-in Agent's Model and Effort
+
+Built-in Agents have no Markdown file, so their `model` and `effort` are adjusted through `builtInAgentOverrides` in settings.json. Keys are the agentType used to spawn them, and are case-sensitive:
+
+```json
+{
+  "builtInAgentOverrides": {
+    "Explore": { "model": "sonnet", "effort": "low" },
+    "general-purpose": { "effort": "high" }
+  }
+}
+```
+
+A few rules that are easy to get wrong:
+
+- **Only these two fields are writable.** The system prompt, tool scope, and color still come from the built-in definition, and the override does not change `source` — so a built-in Agent keeps its built-in tool privileges.
+- **Clearing an override means deleting the field**, not writing `inherit`. Built-in defaults differ per agent (`Explore` defaults to `haiku`, `Plan` to `inherit`, and `general-purpose` omits `model`), so `model: "inherit"` is a normal value meaning "follow the primary session" — distinct from "restore the default".
+- **Unknown agentTypes are ignored but never pruned.** The built-in set varies with feature flags and entrypoint, so automatic cleanup would destroy a valid configuration whenever a flag flipped.
+- When the managed `strictPluginOnlyCustomization` policy includes `agents`, user- and project-level overrides are ignored **at load time**, and only managed sources apply.
+- As with Agent Markdown files, editing settings.json does not affect an already-running session. The desktop app triggers a session reload when it saves; editing the file by hand requires restarting the session or `/reload-plugins`.
+
+For the desktop entry point, see [Subagents and Task Splitting](../desktop/agents.md).
 
 The `Agent` tool has no per-call `effort` parameter, so set it in the Agent definition or at the session level. Availability of `low`, `medium`, `high`, `xhigh`, and `max` depends on the resolved model and provider capabilities. Claude models fall back to a lower supported level, other providers normalize through their model catalogs, and models without effort support do not apply the field.
 

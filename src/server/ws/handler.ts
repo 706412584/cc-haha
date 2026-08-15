@@ -8,6 +8,7 @@
 
 import type { ServerWebSocket } from 'bun'
 import type {
+  AgentRunStreamMessage,
   ClientMessage,
   PermissionMode,
   RuntimeConfigResult,
@@ -44,6 +45,7 @@ import {
 import { GROK_DEFAULT_MAIN_MODEL } from '../../services/grokAuth/models.js'
 import { getGrokModelCatalog } from '../../services/grokAuth/modelCatalog.js'
 import { hahaGrokOAuthService } from '../services/hahaGrokOAuthService.js'
+import { resolveClaudeOfficialRuntimeModel } from '../services/claudeOfficialRuntime.js'
 import {
   getModelReasoningCapabilityOverride,
   isModelReasoningEffort,
@@ -365,6 +367,7 @@ function trackCliBackgroundTaskLifecycle(
         existing.toolUseId = lifecycle.toolUseId ?? existing.toolUseId
         if (lifecycle.remoteSessionId) existing.remoteSessionId = lifecycle.remoteSessionId
         if (lifecycle.description) existing.description = lifecycle.description
+        if (lifecycle.ownerAgentId) existing.ownerAgentId = lifecycle.ownerAgentId
       } else {
         sessionAgentTasks.set(lifecycle.taskId, {
           taskId: lifecycle.taskId,
@@ -374,6 +377,7 @@ function trackCliBackgroundTaskLifecycle(
             ? { remoteSessionId: lifecycle.remoteSessionId }
             : {}),
           ...(lifecycle.description ? { description: lifecycle.description } : {}),
+          ...(lifecycle.ownerAgentId ? { ownerAgentId: lifecycle.ownerAgentId } : {}),
           stopIntent: false,
           stopRequested: false,
           localStopConfirmed: false,
@@ -387,12 +391,21 @@ function trackCliBackgroundTaskLifecycle(
         sessionNonAgentTasks = new Map()
         activeNonAgentTasks.set(sessionId, sessionNonAgentTasks)
       }
-      sessionNonAgentTasks.set(lifecycle.taskId, {
-        taskId: lifecycle.taskId,
-        ...(lifecycle.taskType ? { taskType: lifecycle.taskType } : {}),
-        toolUseId: lifecycle.toolUseId ?? lifecycle.taskId,
-        ...(lifecycle.description ? { description: lifecycle.description } : {}),
-      })
+      const existing = sessionNonAgentTasks.get(lifecycle.taskId)
+      if (existing) {
+        existing.toolUseId = lifecycle.toolUseId ?? existing.toolUseId
+        if (lifecycle.taskType) existing.taskType = lifecycle.taskType
+        if (lifecycle.description) existing.description = lifecycle.description
+        if (lifecycle.ownerAgentId) existing.ownerAgentId = lifecycle.ownerAgentId
+      } else {
+        sessionNonAgentTasks.set(lifecycle.taskId, {
+          taskId: lifecycle.taskId,
+          ...(lifecycle.taskType ? { taskType: lifecycle.taskType } : {}),
+          toolUseId: lifecycle.toolUseId ?? lifecycle.taskId,
+          ...(lifecycle.description ? { description: lifecycle.description } : {}),
+          ...(lifecycle.ownerAgentId ? { ownerAgentId: lifecycle.ownerAgentId } : {}),
+        })
+      }
     }
     return lifecycle
   }
@@ -1187,7 +1200,11 @@ async function handleUserMessage(
 
   bindAllClientSessionOutputs(sessionId, {
     shouldForward: (cliMsg) => {
-      if (userMessageSent || (cliMsg.type === 'result' && cliMsg.is_error)) {
+      if (
+        userMessageSent ||
+        (cliMsg.type === 'result' && cliMsg.is_error) ||
+        isAgentRunMessageFrame(cliMsg)
+      ) {
         return true
       }
       return shouldForwardCurrentTurnLocalCommand(cliMsg)
@@ -2729,6 +2746,7 @@ function emitAuthoritativeAgentStopped(
       tool_use_id: current.toolUseId,
       task_type: current.taskType,
       ...(current.description ? { description: current.description } : {}),
+      ...(current.ownerAgentId ? { owner_agent_id: current.ownerAgentId } : {}),
       status: 'stopped',
       summary: current.description
         ? `${current.description} stopped`
@@ -2846,6 +2864,7 @@ function emitStoppedForNonAgentTasksAfterRuntimeExit(sessionId: string): Promise
       tool_use_id: task.toolUseId,
       ...(task.taskType ? { task_type: task.taskType } : {}),
       ...(task.description ? { description: task.description } : {}),
+      ...(task.ownerAgentId ? { owner_agent_id: task.ownerAgentId } : {}),
       status: 'stopped',
       summary: `${task.description ?? task.taskId} stopped because the runtime exited`,
       timestamp: new Date().toISOString(),
@@ -3127,22 +3146,96 @@ function getStreamState(sessionId: string): SessionStreamState {
   return state
 }
 
+function isAgentRunStreamMessage(
+  message: ServerMessage,
+): message is AgentRunStreamMessage {
+  return message.type === 'content_start' ||
+    message.type === 'content_delta' ||
+    message.type === 'tool_use_complete' ||
+    message.type === 'tool_result' ||
+    message.type === 'thinking' ||
+    message.type === 'status' ||
+    message.type === 'api_retry' ||
+    message.type === 'streaming_fallback' ||
+    message.type === 'error'
+}
 
+function translateAgentRunMessage(
+  cliMsg: any,
+  sessionId: string,
+): ServerMessage[] {
+  const runAgentId = typeof cliMsg.run_agent_id === 'string'
+    ? cliMsg.run_agent_id.trim()
+    : ''
+  const streamId = typeof cliMsg.stream_id === 'string'
+    ? cliMsg.stream_id.trim()
+    : ''
+  const targetAgentId = typeof cliMsg.target_agent_id === 'string'
+    ? cliMsg.target_agent_id.trim()
+    : ''
+  const targetAgentScopeId = typeof cliMsg.target_agent_scope_id === 'string'
+    ? cliMsg.target_agent_scope_id.trim()
+    : ''
+  if (!runAgentId || !streamId || !targetAgentId) return []
 
+  const route = {
+    runAgentId,
+    streamId,
+    targetAgentId,
+    ...(targetAgentScopeId ? { targetAgentScopeId } : {}),
+  }
+  const streamSessionId = `${sessionId}\u0000agent-run:${streamId}`
 
+  if (cliMsg.event_kind === 'complete') {
+    sessionStreamStates.delete(streamSessionId)
+    return [{
+      type: 'agent_run_event',
+      ...route,
+      event: { type: 'status', state: 'idle' },
+    }]
+  }
+  if (cliMsg.event_kind === 'cancelled') {
+    sessionStreamStates.delete(streamSessionId)
+    return [
+      {
+        type: 'agent_run_event',
+        ...route,
+        event: { type: 'streaming_fallback', cause: 'stream_retry' },
+      },
+      {
+        type: 'agent_run_event',
+        ...route,
+        event: { type: 'status', state: 'idle' },
+      },
+    ]
+  }
+  if (cliMsg.event_kind === 'error') {
+    sessionStreamStates.delete(streamSessionId)
+    return [{
+      type: 'agent_run_event',
+      ...route,
+      event: {
+        type: 'error',
+        message: typeof cliMsg.error === 'string' ? cliMsg.error : 'Agent run failed',
+        code: 'AGENT_RUN_ERROR',
+      },
+    }]
+  }
+  if (cliMsg.event_kind !== 'message' || !cliMsg.message) return []
 
-
-
-
-
-
-
-
+  return translateCliMessage(cliMsg.message, streamSessionId)
+    .filter(isAgentRunStreamMessage)
+    .map(event => ({ type: 'agent_run_event', ...route, event }))
+}
 
 
 /** Clean up stream state when session disconnects */
 function cleanupStreamState(sessionId: string) {
   sessionStreamStates.delete(sessionId)
+  const agentPrefix = `${sessionId}\u0000agent-run:`
+  for (const key of sessionStreamStates.keys()) {
+    if (key.startsWith(agentPrefix)) sessionStreamStates.delete(key)
+  }
 }
 
 function cleanupSessionRuntimeState(
@@ -3448,7 +3541,59 @@ async function ensureCliSessionStarted(
   }
 }
 
+export async function ensureCliSessionStartedForControl(
+  sessionId: string,
+  requestUrl: URL,
+): Promise<void> {
+  const pendingStartup = sessionStartupPromises.get(sessionId)
+  if (pendingStartup) {
+    await pendingStartup
+    return
+  }
+
+  if (conversationService.hasSession(sessionId)) return
+
+  const startupRuntimeVersion = runtimeOverrideVersions.get(sessionId) ?? 0
+  sessionStartupRuntimeVersions.set(sessionId, startupRuntimeVersion)
+
+  const startup = (async () => {
+    const workDir = await resolveSessionWorkDir(sessionId)
+    lastResolvedStartupWorkDirs.set(sessionId, workDir)
+    const runtimeSettings = await getRuntimeSettings(sessionId)
+    const protocol = requestUrl.protocol === 'https:' ? 'wss:' : 'ws:'
+    const authority = requestUrl.hostname === '0.0.0.0'
+      ? `127.0.0.1${requestUrl.port ? `:${requestUrl.port}` : ''}`
+      : requestUrl.host
+    const sdkUrl = new URL(
+      `${protocol}//${authority}/sdk/${encodeURIComponent(sessionId)}`,
+    )
+    sdkUrl.searchParams.set('token', crypto.randomUUID())
+
+    console.log(`[WS] Starting CLI for ${sessionId} due to agent_message`)
+    await conversationService.startSession(
+      sessionId,
+      workDir,
+      sdkUrl.toString(),
+      { ...runtimeSettings, resumeInterruptedTurn: false },
+    )
+    runtimeExitStoppedSessions.delete(sessionId)
+  })()
+
+  sessionStartupPromises.set(sessionId, startup)
+  try {
+    await startup
+  } finally {
+    if (sessionStartupPromises.get(sessionId) === startup) {
+      sessionStartupPromises.delete(sessionId)
+      sessionStartupRuntimeVersions.delete(sessionId)
+    }
+  }
+}
+
 export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessage[] {
+  if (isAgentRunMessageFrame(cliMsg)) {
+    return translateAgentRunMessage(cliMsg, sessionId)
+  }
   const streamState = getStreamState(sessionId)
   switch (cliMsg.type) {
     case 'keep_alive':
@@ -4003,6 +4148,7 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
         // The same applies to independent non-Agent task lifecycle after Stop:
         // Activity still needs the event, but chat must remain idle.
         if (
+          cliMsg.owner_agent_id ||
           cliMsg.task_type === 'dream' ||
           sessionStopRequested.has(sessionId) ||
           agentStopRequestedSessions.has(sessionId) ||
@@ -4027,7 +4173,7 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
           message: cliMsg.message || cliMsg.summary || cliMsg.description || 'Task in progress',
           data: cliMsg,
         }
-        if (!hasLiveUserTurnForClient(sessionId)) return [notification]
+        if (cliMsg.owner_agent_id || !hasLiveUserTurnForClient(sessionId)) return [notification]
         return [
           notification,
           {
@@ -4039,6 +4185,11 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
         ]
       }
       if (subtype === 'agent_tool_activity') {
+        // Nested Agents belong to their immediate owning run. Their tool
+        // cards must not be flattened into the root session transcript.
+        if (typeof cliMsg.owner_agent_id === 'string' && cliMsg.owner_agent_id.trim()) {
+          return []
+        }
         // Tool activity streamed from a background (async) agent. Re-emit as a
         // normal tool_use_complete / tool_result carrying the parent Agent
         // tool_use_id, so the desktop groups it under the agent card exactly
@@ -4706,6 +4857,10 @@ function hasStoppedTurnBoundary(sessionId: string): boolean {
     activeUserTurns.get(sessionId)?.replacementAfterStop === true
 }
 
+function isAgentRunMessageFrame(cliMsg: any): boolean {
+  return cliMsg?.type === 'system' && cliMsg.subtype === 'agent_run_message'
+}
+
 function isAgentScopedPermissionRequest(cliMsg: any): boolean {
   return cliMsg?.type === 'control_request' &&
     cliMsg.request?.subtype === 'can_use_tool' &&
@@ -4725,6 +4880,9 @@ function shouldSuppressCliOutputDuringStop(
   taskLifecycle: CliBackgroundTaskLifecycle | null,
 ): boolean {
   if (taskLifecycle !== null) return false
+  if (isAgentRunMessageFrame(cliMsg)) {
+    return agentStopRequestedSessions.has(sessionId) && cliMsg.event_kind === 'message'
+  }
   if (cliMsg?.type === 'control_cancel_request' || cliMsg?.type === 'control_response') {
     return false
   }
@@ -5037,6 +5195,10 @@ async function getRuntimeSettings(sessionId?: string): Promise<RuntimeSettings> 
       effort = effort && grokEffort.supportedEfforts.includes(effort)
         ? effort
         : grokEffort.defaultEffort
+    } else if (runtimeOverride.providerId === null) {
+      runtimeOverride.modelId = await resolveClaudeOfficialRuntimeModel(
+        runtimeOverride.modelId,
+      ) ?? runtimeOverride.modelId
     }
 
     return {
@@ -5114,12 +5276,16 @@ async function getDefaultRuntimeSettings(): Promise<RuntimeSettings> {
       effort = (await getGrokReasoningEfforts(model)).defaultEffort
     }
   } else {
-    // No provider — pass model normally
+    // Claude Official is represented by a null provider id. Only a valid
+    // desktop-managed Claude OAuth token activates the subscription-aware
+    // resolver; API-key/PAYG and original third-party settings keep the old path.
     const baseModel =
       typeof userSettings.model === 'string' && userSettings.model.trim()
         ? userSettings.model
         : undefined
-    model = baseModel ? (modelContext ? `${baseModel}:${modelContext}` : baseModel) : undefined
+    const claudeOfficialModel = await resolveClaudeOfficialRuntimeModel(baseModel)
+    model = claudeOfficialModel
+      ?? (baseModel ? (modelContext ? `${baseModel}:${modelContext}` : baseModel) : undefined)
   }
 
   return {

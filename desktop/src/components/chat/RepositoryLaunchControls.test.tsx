@@ -1,6 +1,9 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { useState, type ComponentProps } from 'react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, useState, type ComponentProps } from 'react'
+import { flushSync } from 'react-dom'
+import { createRoot } from 'react-dom/client'
+import { create } from 'zustand'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import '@testing-library/jest-dom'
 
 const viewportMocks = vi.hoisted(() => ({
@@ -10,6 +13,11 @@ const viewportMocks = vi.hoisted(() => ({
 
 const apiMocks = vi.hoisted(() => ({
   getRepositoryContext: vi.fn(),
+  createRepositoryBranch: vi.fn(),
+}))
+
+const uiMocks = vi.hoisted(() => ({
+  addToast: vi.fn(),
 }))
 
 vi.mock('../../hooks/useMobileViewport', () => ({
@@ -24,7 +32,14 @@ vi.mock('../../lib/desktopRuntime', () => ({
 vi.mock('../../api/sessions', () => ({
   sessionsApi: {
     getRepositoryContext: apiMocks.getRepositoryContext,
+    createRepositoryBranch: apiMocks.createRepositoryBranch,
   },
+}))
+
+vi.mock('../../stores/uiStore', () => ({
+  useUIStore: (selector: (state: { addToast: typeof uiMocks.addToast }) => unknown) => (
+    selector({ addToast: uiMocks.addToast })
+  ),
 }))
 
 // Must match the component's own import specifier, or the mock silently does
@@ -41,7 +56,9 @@ vi.mock('@/components/composite/DirectoryPicker', () => ({
 }))
 
 vi.mock('../../i18n', () => ({
-  useTranslation: () => (key: string) => ({
+  useTranslation: () => (key: string, params?: Record<string, string | number>) => {
+    const text = {
+    'common.cancel': 'Cancel',
     'common.loading': 'Loading',
     'dirPicker.directory': 'Directory',
     'dirPicker.selectProject': 'Select a project',
@@ -55,6 +72,18 @@ vi.mock('../../i18n', () => ({
     'repoLaunch.launchLocation': 'Location',
     'repoLaunch.localBranch': 'Local branch',
     'repoLaunch.missingWorkdir': 'Missing working directory',
+    'repoLaunch.newBranch': 'Create branch…',
+    'repoLaunch.newBranchErrorNoCommits': 'This repository has no commits yet.',
+    'repoLaunch.newBranchErrorExists': 'A branch with this name already exists.',
+    'repoLaunch.newBranchErrorFailed': 'Could not create the branch.',
+    'repoLaunch.newBranchErrorInvalid': 'Git will not accept this branch name.',
+    'repoLaunch.newBranchFrom': 'Starts from {branch}',
+    'repoLaunch.newBranchNameLabel': 'Branch name',
+    'repoLaunch.newBranchPlaceholder': 'feature/my-change',
+    'repoLaunch.newBranchSubmit': 'Create',
+    'repoLaunch.newBranchSuccessCurrent': 'Created and selected “{branch}”. It will be checked out when the session starts.',
+    'repoLaunch.newBranchSuccessIsolated': 'Created and selected “{branch}”. An isolated worktree will be created from it when the session starts.',
+    'repoLaunch.newBranchTitle': 'New branch',
     'repoLaunch.noBranch': 'No branch',
     'repoLaunch.noBranchMatch': 'No matching branches',
     'repoLaunch.remoteBranch': 'Remote branch',
@@ -67,10 +96,21 @@ vi.mock('../../i18n', () => ({
     'repoLaunch.worktreeIsolated': 'Isolated worktree',
     'repoLaunch.worktreeIsolatedHint': 'New isolated copy',
     'tabs.close': 'Close',
-  }[key] ?? key),
+    }[key] ?? key
+    return params
+      ? Object.entries(params).reduce((acc, [name, value]) => acc.replaceAll(`{${name}}`, String(value)), text)
+      : text
+  },
 }))
 
 import { RepositoryLaunchControls } from './RepositoryLaunchControls'
+import {
+  captureProjectDisplayNameHydrationRevision,
+  hydrateProjectDisplayNames,
+} from '../../stores/projectDisplayNameStore'
+
+const HEAD_COMMIT = 'a'.repeat(40)
+const OTHER_COMMIT = 'b'.repeat(40)
 
 const okRepositoryContext = {
   state: 'ok' as const,
@@ -79,6 +119,7 @@ const okRepositoryContext = {
   repoName: 'cc-haha',
   currentBranch: 'main',
   defaultBranch: 'main',
+  headCommit: HEAD_COMMIT,
   dirty: false,
   worktrees: [],
   branches: [
@@ -90,6 +131,7 @@ const okRepositoryContext = {
       checkedOut: false,
       remoteRef: null,
       worktreePath: null,
+      commit: HEAD_COMMIT,
     },
     {
       name: 'feature/h5',
@@ -99,8 +141,32 @@ const okRepositoryContext = {
       checkedOut: false,
       remoteRef: null,
       worktreePath: null,
+      commit: OTHER_COMMIT,
     },
   ],
+}
+
+/** `okRepositoryContext` plus a branch created off `main`, so still at HEAD. */
+const contextWithCreatedBranch = {
+  ...okRepositoryContext,
+  branches: [
+    ...okRepositoryContext.branches,
+    {
+      name: 'feature/new',
+      current: false,
+      local: true,
+      remote: false,
+      checkedOut: false,
+      remoteRef: null,
+      worktreePath: null,
+      commit: HEAD_COMMIT,
+    },
+  ],
+}
+
+/** Rejection shaped like the API client's `ApiError`, which carries the body. */
+function apiError(code: string, message = 'boom') {
+  return Object.assign(new Error(message), { body: { error: code, message } })
 }
 
 function notGitContext(workDir: string) {
@@ -135,9 +201,16 @@ function renderControls(props: Partial<ComponentProps<typeof RepositoryLaunchCon
  * happens *after* a directory is picked needs the prop to actually come back
  * down changed.
  */
-function ControlledHarness({ initialWorkDir = '' }: { initialWorkDir?: string }) {
+function ControlledHarness({
+  initialWorkDir = '',
+  initialUseWorktree = false,
+}: {
+  initialWorkDir?: string
+  initialUseWorktree?: boolean
+}) {
   const [workDir, setWorkDir] = useState(initialWorkDir)
   const [branch, setBranch] = useState<string | null>(null)
+  const [useWorktree, setUseWorktree] = useState(initialUseWorktree)
 
   return (
     <RepositoryLaunchControls
@@ -145,8 +218,8 @@ function ControlledHarness({ initialWorkDir = '' }: { initialWorkDir?: string })
       onWorkDirChange={setWorkDir}
       branch={branch}
       onBranchChange={setBranch}
-      useWorktree={false}
-      onUseWorktreeChange={vi.fn()}
+      useWorktree={useWorktree}
+      onUseWorktreeChange={setUseWorktree}
     />
   )
 }
@@ -174,11 +247,27 @@ async function openBranchView() {
 
 describe('RepositoryLaunchControls', () => {
   beforeEach(() => {
+    act(() => {
+      hydrateProjectDisplayNames({}, Number.MAX_SAFE_INTEGER)
+    })
     viewportMocks.isMobile = false
     viewportMocks.isTauri = false
     apiMocks.getRepositoryContext.mockReset()
     apiMocks.getRepositoryContext.mockResolvedValue(okRepositoryContext)
+    apiMocks.createRepositoryBranch.mockReset()
+    uiMocks.addToast.mockReset()
+    apiMocks.createRepositoryBranch.mockResolvedValue({
+      branch: 'feature/new',
+      baseRef: 'main',
+      context: contextWithCreatedBranch,
+    })
     Element.prototype.scrollIntoView = vi.fn()
+  })
+
+  afterEach(() => {
+    act(() => {
+      hydrateProjectDisplayNames({}, Number.MAX_SAFE_INTEGER)
+    })
   })
 
   it('collapses directory, branch and worktree into a single pill', async () => {
@@ -192,6 +281,28 @@ describe('RepositoryLaunchControls', () => {
     // The three separate triggers are gone — that was the point of the change.
     expect(screen.queryByRole('button', { name: /Select branch:/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Select worktree mode:/ })).not.toBeInTheDocument()
+  })
+
+  it('uses the repository-root display name when repository context canonicalizes the requested path', async () => {
+    const workDir = '/repo/subdirectory'
+    apiMocks.getRepositoryContext.mockResolvedValue({
+      ...okRepositoryContext,
+      workDir: '/repo',
+      repoRoot: '/repo',
+    })
+    renderControls({ workDir })
+    await screen.findByRole('button', { name: 'Location: cc-haha / main' })
+
+    act(() => {
+      hydrateProjectDisplayNames(
+        { '/repo': 'Custom repository' },
+        captureProjectDisplayNameHydrationRevision(),
+      )
+    })
+
+    const pill = await screen.findByRole('button', { name: 'Location: Custom repository / main' })
+    expect(pill).toHaveAttribute('title', `${workDir}\nBranch: main`)
+    expect(within(pill).getByText('main')).toBeInTheDocument()
   })
 
   it('truncates the branch from the start so its tail survives', async () => {
@@ -428,6 +539,496 @@ describe('RepositoryLaunchControls', () => {
     // lone directory row — the menu opens on the directory list instead.
     expect(await screen.findByTestId('recent-projects-panel')).toBeInTheDocument()
     expect(screen.queryByRole('menu', { name: 'Location' })).not.toBeInTheDocument()
+  })
+
+  /**
+   * Switching branches has always been possible here; creating one meant
+   * leaving for a terminal (#1190). The entry lives at the foot of the branch
+   * list, and the branch it creates is selected but — like every other pick in
+   * this menu — only checked out when the session launches.
+   */
+  describe('new branch', () => {
+    async function openNewBranchForm() {
+      await openBranchView()
+      fireEvent.click(screen.getByRole('button', { name: 'Create branch…' }))
+      return screen.findByLabelText('Branch name')
+    }
+
+    it('offers the entry under the branch list without putting it in the listbox', async () => {
+      renderControls()
+      const listbox = await openBranchView()
+
+      const entry = screen.getByRole('button', { name: 'Create branch…' })
+      expect(entry).toBeInTheDocument()
+      // An action among the `option`s would be announced as a branch you could
+      // pick, and Enter on the search field could land on it.
+      expect(listbox).not.toContainElement(entry)
+      expect(within(listbox).queryByRole('option', { name: /New branch/ })).not.toBeInTheDocument()
+    })
+
+    it('seeds the name with whatever was typed into the branch filter', async () => {
+      renderControls()
+      await openBranchView()
+      fireEvent.change(await screen.findByPlaceholderText('Search branches'), {
+        target: { value: '  feature/new  ' },
+      })
+
+      fireEvent.click(screen.getByRole('button', { name: 'Create branch…' }))
+
+      expect(await screen.findByLabelText('Branch name')).toHaveValue('feature/new')
+    })
+
+    it('creates the branch from the selected one and adopts the returned context', async () => {
+      render(<ControlledHarness initialWorkDir="/repo" />)
+      const input = await openNewBranchForm()
+      expect(screen.getByText('Starts from main')).toBeInTheDocument()
+
+      fireEvent.change(input, { target: { value: 'feature/new' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+
+      await waitFor(() => {
+        expect(apiMocks.createRepositoryBranch).toHaveBeenCalledWith({
+          workDir: '/repo',
+          name: 'feature/new',
+          from: 'main',
+        })
+      })
+
+      // Success closes the menu so the selected branch is immediately visible
+      // on the pill instead of leaving the user inside an apparently unchanged
+      // menu. The returned list is adopted without a second request.
+      const pill = await screen.findByRole('button', { name: 'Location: cc-haha / feature/new' })
+      expect(screen.queryByRole('menu', { name: 'Location' })).not.toBeInTheDocument()
+      expect(apiMocks.getRepositoryContext).toHaveBeenCalledTimes(1)
+      expect(uiMocks.addToast).toHaveBeenCalledWith({
+        type: 'success',
+        message: 'Created and selected “feature/new”. It will be checked out when the session starts.',
+      })
+
+      fireEvent.click(pill)
+      fireEvent.click(await screen.findByRole('menuitem', { name: /Branch/ }))
+      const listbox = await screen.findByRole('listbox', { name: 'Select branch' })
+      expect(within(listbox).getByRole('option', { name: /feature\/new/ })).toBeInTheDocument()
+    })
+
+    it('keeps a created branch selected across the external launch-store boundary', async () => {
+      const launch = vi.fn()
+      const useLaunchTarget = create<{
+        branch: string | null
+        setBranch: (branch: string | null) => void
+      }>((set) => ({
+        branch: 'main',
+        setBranch: (branch) => set({ branch }),
+      }))
+      const setLaunchBranch = (branch: string | null) => {
+        if (branch === 'qa/launch-picker') {
+          // Production React publishes the external-store selection before
+          // this component's local context update. Vitest's development build
+          // batches them, so force that real ordering at the store boundary.
+          flushSync(() => useLaunchTarget.getState().setBranch(branch))
+          return
+        }
+        useLaunchTarget.getState().setBranch(branch)
+      }
+      const createdContext = {
+        ...contextWithCreatedBranch,
+        branches: contextWithCreatedBranch.branches.map((candidate) => (
+          candidate.name === 'feature/new'
+            ? { ...candidate, name: 'qa/launch-picker' }
+            : candidate
+        )),
+      }
+      apiMocks.createRepositoryBranch.mockImplementation(() => new Promise((resolve) => {
+        window.setTimeout(() => resolve({
+          branch: 'qa/launch-picker',
+          baseRef: 'main',
+          context: createdContext,
+        }), 0)
+      }))
+
+      function ExternalLaunchHarness() {
+        const branch = useLaunchTarget((state) => state.branch)
+        return (
+          <>
+            <RepositoryLaunchControls
+              workDir="/repo"
+              onWorkDirChange={vi.fn()}
+              branch={branch}
+              onBranchChange={setLaunchBranch}
+              useWorktree={false}
+              onUseWorktreeChange={vi.fn()}
+            />
+            <button
+              type="button"
+              onClick={() => launch({
+                workDir: '/repo',
+                repository: {
+                  branch: useLaunchTarget.getState().branch,
+                  worktree: false,
+                },
+              })}
+            >
+              Launch
+            </button>
+          </>
+        )
+      }
+
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      const testGlobals = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
+      const actEnvironment = testGlobals.IS_REACT_ACT_ENVIRONMENT
+      testGlobals.IS_REACT_ACT_ENVIRONMENT = false
+      async function eventually<T>(read: () => T): Promise<T> {
+        let lastError: unknown
+        for (let attempt = 0; attempt < 200; attempt++) {
+          try {
+            return read()
+          } catch (error) {
+            lastError = error
+            await new Promise((resolve) => window.setTimeout(resolve, 10))
+          }
+        }
+        throw lastError
+      }
+
+      try {
+        root.render(<ExternalLaunchHarness />)
+        const pill = await eventually(() => (
+          screen.getByRole('button', { name: 'Location: cc-haha / main' })
+        ))
+        pill.click()
+        const branchEntry = await eventually(() => screen.getByRole('menuitem', { name: /Branch/ }))
+        branchEntry.click()
+        const createEntry = await eventually(() => screen.getByRole('button', { name: 'Create branch…' }))
+        createEntry.click()
+
+        const input = await eventually(() => screen.getByLabelText('Branch name'))
+        const setInputValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+        setInputValue?.call(input, 'qa/launch-picker')
+        input.dispatchEvent(new window.Event('input', { bubbles: true }))
+        const createButton = await eventually(() => {
+          const button = screen.getByRole('button', { name: 'Create' }) as HTMLButtonElement
+          if (button.disabled) throw new Error('Create branch button is still disabled')
+          return button
+        })
+        createButton.click()
+
+        await eventually(() => (
+          screen.getByRole('button', { name: 'Location: cc-haha / qa/launch-picker' })
+        ))
+        await eventually(() => {
+          if (screen.queryByRole('menu', { name: 'Location' })) {
+            throw new Error('Location menu is still open')
+          }
+          return true
+        })
+
+        screen.getByRole('button', { name: 'Launch' }).click()
+
+        expect(launch).toHaveBeenCalledWith({
+          workDir: '/repo',
+          repository: { branch: 'qa/launch-picker', worktree: false },
+        })
+        expect(useLaunchTarget.getState().branch).toBe('qa/launch-picker')
+        expect(screen.getByRole('button', { name: 'Location: cc-haha / qa/launch-picker' }))
+          .toBeInTheDocument()
+        expect(screen.queryByRole('menu', { name: 'Location' })).not.toBeInTheDocument()
+      } finally {
+        root.unmount()
+        container.remove()
+        testGlobals.IS_REACT_ACT_ENVIRONMENT = actEnvironment
+      }
+    })
+
+    it('explains that an isolated worktree starts from the new branch', async () => {
+      render(<ControlledHarness initialWorkDir="/repo" initialUseWorktree />)
+      const input = await openNewBranchForm()
+
+      fireEvent.change(input, { target: { value: 'feature/new' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+
+      await waitFor(() => {
+        expect(uiMocks.addToast).toHaveBeenCalledWith({
+          type: 'success',
+          message: 'Created and selected “feature/new”. An isolated worktree will be created from it when the session starts.',
+        })
+      })
+      expect(await screen.findByRole('button', { name: 'Location: cc-haha / feature/new' }))
+        .toBeInTheDocument()
+      expect(screen.getByText('Isolated')).toBeInTheDocument()
+    })
+
+    // Creating off `main` is also what `from: context.currentBranch` would do,
+    // so the default-selection test cannot tell the two apart — it stayed green
+    // under exactly that mutation. This drives a non-default selection, which is
+    // the contract the "Starts from {branch}" hint advertises.
+    it('creates from the branch that is actually selected, not the current one', async () => {
+      render(<ControlledHarness initialWorkDir="/repo" />)
+      await openBranchView()
+      fireEvent.click(screen.getByRole('option', { name: /feature\/h5/ }))
+
+      fireEvent.click(await screen.findByRole('menuitem', { name: /Branch/ }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Create branch…' }))
+      expect(screen.getByText('Starts from feature/h5')).toBeInTheDocument()
+
+      fireEvent.change(await screen.findByLabelText('Branch name'), {
+        target: { value: 'feature/new' },
+      })
+      fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+
+      await waitFor(() => {
+        expect(apiMocks.createRepositoryBranch).toHaveBeenCalledWith(
+          expect.objectContaining({ from: 'feature/h5' }),
+        )
+      })
+    })
+
+    it('trims the typed name before sending it', async () => {
+      renderControls()
+      const input = await openNewBranchForm()
+
+      fireEvent.change(input, { target: { value: '  feature/new  ' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+
+      await waitFor(() => {
+        expect(apiMocks.createRepositoryBranch).toHaveBeenCalledWith(
+          expect.objectContaining({ name: 'feature/new' }),
+        )
+      })
+    })
+
+    it('translates a blank name without requesting branch creation', async () => {
+      renderControls()
+      const input = await openNewBranchForm()
+
+      fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+      expect(await screen.findByText('Git will not accept this branch name.')).toBeInTheDocument()
+
+      fireEvent.change(input, { target: { value: '   ' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+      expect(await screen.findByText('Git will not accept this branch name.')).toBeInTheDocument()
+      expect(apiMocks.createRepositoryBranch).not.toHaveBeenCalled()
+    })
+
+    it('translates a rejected name and keeps the form open', async () => {
+      apiMocks.createRepositoryBranch.mockRejectedValue(apiError('REPOSITORY_BRANCH_EXISTS'))
+      const onBranchChange = vi.fn()
+      renderControls({ onBranchChange })
+      const input = await openNewBranchForm()
+
+      fireEvent.change(input, { target: { value: 'feature/h5' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+
+      expect(await screen.findByText('A branch with this name already exists.')).toBeInTheDocument()
+      expect(screen.getByLabelText('Branch name')).toHaveValue('feature/h5')
+      expect(onBranchChange).not.toHaveBeenCalledWith('feature/h5')
+    })
+
+    it('translates an invalid git ref and keeps the form open', async () => {
+      apiMocks.createRepositoryBranch.mockRejectedValue(apiError('REPOSITORY_BRANCH_NAME_INVALID'))
+      renderControls()
+      const input = await openNewBranchForm()
+
+      fireEvent.change(input, { target: { value: 'qa invalid' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+
+      expect(await screen.findByText('Git will not accept this branch name.')).toBeInTheDocument()
+      expect(screen.getByLabelText('Branch name')).toHaveValue('qa invalid')
+    })
+
+    it('explains an empty repository in the user language', async () => {
+      apiMocks.createRepositoryBranch.mockRejectedValue(apiError('REPOSITORY_NO_COMMITS'))
+      renderControls()
+      const input = await openNewBranchForm()
+
+      fireEvent.change(input, { target: { value: 'first' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+
+      expect(await screen.findByText('This repository has no commits yet.')).toBeInTheDocument()
+    })
+
+    it('shows the raw git message alone for an unrecognized failure', async () => {
+      apiMocks.createRepositoryBranch.mockRejectedValue(
+        apiError('REPOSITORY_BRANCH_CREATE_FAILED', 'Failed to create branch: fatal: cannot lock ref'),
+      )
+      renderControls()
+      const input = await openNewBranchForm()
+
+      fireEvent.change(input, { target: { value: 'feature' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+
+      // A translated shrug would hide the one line that says what went wrong —
+      // but the server message already opens with "Failed to create branch:",
+      // so prefixing the generic line onto it said the same thing twice.
+      const alert = await screen.findByRole('alert')
+      expect(alert).toHaveTextContent('Failed to create branch: fatal: cannot lock ref')
+      expect(alert).not.toHaveTextContent('Could not create the branch.')
+    })
+
+    it('falls back to the generic line when the failure carries no message', async () => {
+      apiMocks.createRepositoryBranch.mockRejectedValue(new Error(''))
+      renderControls()
+      const input = await openNewBranchForm()
+
+      fireEvent.change(input, { target: { value: 'feature' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+
+      expect(await screen.findByText('Could not create the branch.')).toBeInTheDocument()
+    })
+
+    /**
+     * The pill is a per-tab control, so switching tabs swaps `workDir` under an
+     * in-flight create. Adopting that response would file one repo's branch list
+     * and selection under another repo's path.
+     */
+    it('discards a response that arrives after the directory changed', async () => {
+      let settle: (value: unknown) => void = () => {}
+      apiMocks.createRepositoryBranch.mockImplementation(() => new Promise((resolve) => {
+        settle = resolve
+      }))
+      apiMocks.getRepositoryContext.mockImplementation(async (dir: string) => (
+        dir === '/repo' ? okRepositoryContext : { ...okRepositoryContext, workDir: dir, repoName: 'other' }
+      ))
+
+      const { rerender } = render(
+        <RepositoryLaunchControls
+          workDir="/repo"
+          onWorkDirChange={vi.fn()}
+          branch="main"
+          onBranchChange={vi.fn()}
+          useWorktree={false}
+          onUseWorktreeChange={vi.fn()}
+        />,
+      )
+      const input = await openNewBranchForm()
+      fireEvent.change(input, { target: { value: 'feature/new' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+
+      const onBranchChange = vi.fn()
+      rerender(
+        <RepositoryLaunchControls
+          workDir="/other"
+          onWorkDirChange={vi.fn()}
+          branch="main"
+          onBranchChange={onBranchChange}
+          useWorktree={false}
+          onUseWorktreeChange={vi.fn()}
+        />,
+      )
+      settle({ branch: 'feature/new', baseRef: 'main', context: contextWithCreatedBranch })
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: /Location: other/ })).toBeInTheDocument()
+      })
+      expect(onBranchChange).not.toHaveBeenCalledWith('feature/new')
+    })
+
+    it('returns to the branch list on cancel without creating anything', async () => {
+      renderControls()
+      await openNewBranchForm()
+
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+      expect(await screen.findByRole('listbox', { name: 'Select branch' })).toBeInTheDocument()
+      expect(apiMocks.createRepositoryBranch).not.toHaveBeenCalled()
+    })
+
+    /**
+     * The sheet has no inner scroller of its own — `branchList` drops its
+     * `max-h`/`overflow-y-auto` on mobile — so rendering the entry as a sibling
+     * of the list in `children` lets it scroll off the bottom with the branches.
+     * `MobileBottomSheet`'s `footer` slot is `shrink-0` outside the scrolling
+     * body, which is the only place it stays reachable.
+     */
+    it('pins the entry to the sheet footer, outside the scrolling body, on mobile', async () => {
+      viewportMocks.isMobile = true
+      renderControls()
+      await openPill()
+      fireEvent.click(await screen.findByRole('menuitem', { name: /Branch/ }))
+
+      const entry = await screen.findByRole('button', { name: 'Create branch…' })
+      const scroller = screen.getByRole('listbox', { name: 'Select branch' }).parentElement
+      expect(scroller).toHaveClass('overflow-y-auto')
+      expect(scroller).not.toContainElement(entry)
+    })
+
+    it('reaches the create form from the mobile sheet and back again', async () => {
+      viewportMocks.isMobile = true
+      renderControls()
+      await openPill()
+      fireEvent.click(await screen.findByRole('menuitem', { name: /Branch/ }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Create branch…' }))
+
+      expect(await screen.findByLabelText('Branch name')).toBeInTheDocument()
+      expect(await screen.findByRole('dialog', { name: 'New branch' })).toBeInTheDocument()
+      // The footer belongs to the branch list, not the form under it.
+      expect(screen.queryByRole('button', { name: 'Create branch…' })).not.toBeInTheDocument()
+
+      fireEvent.click(screen.getByRole('button', { name: /Select branch/ }))
+      expect(await screen.findByRole('listbox', { name: 'Select branch' })).toBeInTheDocument()
+    })
+
+    /**
+     * Creating a branch off the one you are standing on is the whole point of
+     * doing it with work in progress, and that switch only moves the ref — git
+     * never blocks it. Warning there sent people to an isolated worktree they
+     * did not need. Driven through the real create rather than hand-built state,
+     * because that transition is the thing being claimed (AGENTS.md).
+     */
+    it('drops the dirty warning once a branch is created off the current one', async () => {
+      apiMocks.getRepositoryContext.mockResolvedValue({ ...okRepositoryContext, dirty: true })
+      apiMocks.createRepositoryBranch.mockResolvedValue({
+        branch: 'feature/new',
+        baseRef: 'main',
+        context: { ...contextWithCreatedBranch, dirty: true },
+      })
+
+      render(<ControlledHarness initialWorkDir="/repo" />)
+      const input = await openNewBranchForm()
+      fireEvent.change(input, { target: { value: 'feature/new' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+
+      await screen.findByRole('button', { name: 'Location: cc-haha / feature/new' })
+      expect(screen.queryByRole('status', { name: 'Dirty worktree' })).not.toBeInTheDocument()
+    })
+
+    it('does not warn about uncommitted changes for a branch already at HEAD', async () => {
+      apiMocks.getRepositoryContext.mockResolvedValue({
+        ...contextWithCreatedBranch,
+        dirty: true,
+      })
+
+      renderControls({ branch: 'feature/new' })
+
+      await screen.findByRole('button', { name: 'Location: cc-haha / feature/new' })
+      expect(screen.queryByRole('status', { name: 'Dirty worktree' })).not.toBeInTheDocument()
+    })
+
+    it('still warns when the selected branch would rewrite files', async () => {
+      apiMocks.getRepositoryContext.mockResolvedValue({
+        ...contextWithCreatedBranch,
+        dirty: true,
+      })
+
+      renderControls({ branch: 'feature/h5' })
+
+      expect(await screen.findByRole('status', { name: 'Dirty worktree' })).toBeInTheDocument()
+    })
+
+    it('keeps warning when the server reports no commits at all', async () => {
+      apiMocks.getRepositoryContext.mockResolvedValue({
+        ...okRepositoryContext,
+        dirty: true,
+        headCommit: undefined,
+        branches: okRepositoryContext.branches.map(({ commit: _commit, ...rest }) => rest),
+      })
+
+      renderControls({ branch: 'feature/h5' })
+
+      expect(await screen.findByRole('status', { name: 'Dirty worktree' })).toBeInTheDocument()
+    })
   })
 
   /**

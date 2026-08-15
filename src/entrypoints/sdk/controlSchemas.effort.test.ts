@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import { SDKControlGetSettingsResponseSchema } from './controlSchemas.js'
+import {
+  SDKControlGetSettingsResponseSchema,
+  SDKControlRequestSchema,
+} from './controlSchemas.js'
 
 describe('SDKControlGetSettingsResponseSchema effort', () => {
   test('accepts every runtime named effort level including xhigh', () => {
@@ -28,5 +31,31 @@ describe('SDKControlGetSettingsResponseSchema effort', () => {
         },
       }).success,
     ).toBe(false)
+  })
+})
+
+describe('SDKControlRequestSchema agent continuation', () => {
+  test('accepts a typed follow-up message for an existing subagent', () => {
+    expect(SDKControlRequestSchema().safeParse({
+      type: 'control_request',
+      request_id: 'continue-1',
+      request: {
+        subtype: 'send_agent_message',
+        agent_id: 'agent-123',
+        content: 'Continue reviewing the patch.',
+      },
+    }).success).toBe(true)
+  })
+
+  test('rejects an empty follow-up message', () => {
+    expect(SDKControlRequestSchema().safeParse({
+      type: 'control_request',
+      request_id: 'continue-2',
+      request: {
+        subtype: 'send_agent_message',
+        agent_id: 'agent-123',
+        content: '',
+      },
+    }).success).toBe(false)
   })
 })

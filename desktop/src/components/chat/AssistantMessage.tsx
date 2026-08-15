@@ -25,7 +25,6 @@ type Props = {
   isStreaming?: boolean
   branchAction?: MessageBranchAction
   sessionId?: string
-  timestamp?: number
   /** This turn's real changed files (absolute), used to anchor output chips onto
    *  files that were actually written instead of guessing from the prose. */
   turnChangedFiles?: string[]
@@ -35,7 +34,7 @@ type Props = {
 
 const MAX_CARDS = 3
 
-export const AssistantMessage = memo(function AssistantMessage({ content, isStreaming, branchAction, sessionId, timestamp, turnChangedFiles, turnCompletion }: Props) {
+export const AssistantMessage = memo(function AssistantMessage({ content, isStreaming, branchAction, sessionId, turnChangedFiles, turnCompletion }: Props) {
   const t = useTranslation()
   const workDir = useWorkspacePanelStore((s) => (sessionId ? s.statusBySession[sessionId]?.workDir : undefined))
   const activeProviderId = useProviderStore((s) => s.activeId)
@@ -123,21 +122,25 @@ export const AssistantMessage = memo(function AssistantMessage({ content, isStre
   const showTurnCompletion = !isStreaming && Boolean(turnCompletion)
 
   return (
-    <div className="mb-5 flex justify-start">
+    <div className="flex justify-start">
       <div
         data-message-shell="assistant"
         data-layout={documentLayout ? 'document' : 'bubble'}
-        className={`group flex min-w-0 flex-col items-start ${
-          documentLayout
-            ? 'w-full max-w-full'
-            : 'max-w-[88%] sm:max-w-[80%] lg:max-w-[720px]'
-        }`}
+        // Always the full column. A reply that hugs its text turns every short
+        // answer into a differently-shaped block, so a scrolled transcript reads
+        // as a ragged pile; one width makes the replies a single column the eye
+        // can run down. The user bubble stays hugged — that asymmetry is what
+        // says which side is speaking, so it does not need width to say it too.
+        className="group flex w-full min-w-0 max-w-full flex-col items-start"
       >
         <div
           onContextMenu={sessionId ? handleContextMenu : undefined}
-          className={`rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface)] px-5 py-4 text-[14.5px] text-[var(--color-text-primary)] shadow-[var(--shadow-card)] ${
-            documentLayout ? 'w-full' : 'max-w-full'
-          }`}
+          // No card. Left-aligned, full-column prose against the page is already
+          // unmistakably the reply — the hugged, tinted bubble on the right is
+          // what says who is speaking (see the note above), so a border here
+          // repeats that at the cost of ~50px per reply and makes prose look
+          // like the tool rows it sits between. The turn rail groups it now.
+          className="w-full text-[14.5px] text-[var(--color-text-primary)]"
         >
           <FakeToolUseNotice blocks={fakeBlocks} />
           <MarkdownRenderer
@@ -189,16 +192,25 @@ export const AssistantMessage = memo(function AssistantMessage({ content, isStre
           />
         )}
 
-        {showTurnCompletion ? <TurnCompletionStamp completion={turnCompletion!} /> : null}
-
-        <MessageActionBar
-          copyText={isStreaming ? undefined : cleanContent}
-          copyLabel={t('chat.copyReply')}          branchAction={branchAction}
-          align="start"
-          // The stamp above already carries this turn's end time; a hover chip
-          // repeating it a line below reads as two different times.
-          timestamp={showTurnCompletion ? undefined : timestamp}
-        />
+        {/* Only the reply that closes a turn gets an always-visible compact footer. */}
+        {showTurnCompletion ? (
+          <MessageActionBar
+            copyText={cleanContent}
+            copyLabel={t('chat.copyReply')}
+            branchAction={branchAction}
+            align="start"
+            alwaysVisible
+            metadata={<TurnCompletionStamp completion={turnCompletion!} />}
+          />
+        ) : (
+          <MessageActionBar
+            copyText={isStreaming ? undefined : cleanContent}
+            copyLabel={t('chat.copyReply')}
+            branchAction={branchAction}
+            align="start"
+            timestamp={timestamp}
+          />
+        )}
       </div>
     </div>
   )

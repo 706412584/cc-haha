@@ -325,6 +325,34 @@ describe('AttachmentGallery', () => {
     expect(view.queryByRole('button', { name: 'Open <h1>' })).not.toBeInTheDocument()
   })
 
+  it.each([2, 5])('keeps %i ordinary message images in a bounded thumbnail gallery and opens the selected image', async (imageCount) => {
+    const attachments = Array.from({ length: imageCount }, (_, index) => ({
+      id: `image-${index + 1}`,
+      type: 'image' as const,
+      name: `image-${index + 1}.png`,
+      data: `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="hsl(${index * 60} 60% 50%)"/></svg>`)}`,
+    }))
+    const view = render(
+      <AttachmentGallery
+        variant="message"
+        attachments={attachments}
+      />,
+    )
+
+    const imageButtons = attachments.map(({ name }) =>
+      view.getByRole('button', { name: `Open ${name}` }))
+    const gallery = imageButtons[0]?.parentElement?.parentElement
+
+    expect(gallery).toHaveClass('max-w-full', 'flex-wrap')
+    for (const button of imageButtons) {
+      expect(button.parentElement?.parentElement).toBe(gallery)
+      expect(button.querySelector('img')).toHaveClass('h-28', 'w-28')
+    }
+
+    fireEvent.click(imageButtons[imageCount - 1]!)
+    expect(await view.findByText(`${imageCount} / ${imageCount}`)).toBeInTheDocument()
+  })
+
   it('previews a path-only pasted image instead of a file chip', () => {
     const path = '/Users/nanmi/Desktop/6代码仓库.png'
     const view = render(

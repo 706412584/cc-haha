@@ -1,19 +1,23 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import {
   MessageList,
   buildRenderModel,
+  buildTurnRailPositions,
   buildVirtualItemOffsets,
+  estimateRenderItemHeight,
   getActiveConversationNavigationItemId,
   getConversationNavigationTargetScrollTop,
   isRenderItemFullyVisibleInChatScroller,
   resetSessionScrollSnapshotsForTests,
   shouldVirtualizeRenderItems,
+  trailingStreamingRailPosition,
 } from './MessageList'
 import type { ConversationNavigationItem } from './ConversationNavigator'
 import type { VirtualRenderItemMetric } from './virtualHeightCache'
 import { relativizeWorkspacePath } from './CurrentTurnChangeCard'
 import { sessionsApi } from '../../api/sessions'
+import { teamsApi } from '../../api/teams'
 import { useChatStore } from '../../stores/chatStore'
 import { useWorkspaceChatContextStore } from '../../stores/workspaceChatContextStore'
 import { useWorkspacePanelStore } from '../../stores/workspacePanelStore'
@@ -21,6 +25,7 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useUIStore } from '../../stores/uiStore'
+import { useTeamStore } from '../../stores/teamStore'
 import { formatExactMessageTimestamp, formatMessageHoverTime } from '../../lib/formatMessageTimestamp'
 import type { UIMessage } from '../../types/chat'
 import type { PerSessionState } from '../../stores/chatStore'
@@ -299,6 +304,7 @@ describe('MessageList nested tool calls', () => {
     useTabStore.setState({ activeTabId: ACTIVE_TAB, tabs: [{ sessionId: ACTIVE_TAB, title: 'Test', type: 'session' as const, status: 'idle' }] })
     useSessionStore.setState({ sessions: [], activeSessionId: null, isLoading: false, error: null })
     useChatStore.setState({ sessions: { [ACTIVE_TAB]: makeSessionState() } })
+    useTeamStore.getState().clearTeam()
     useWorkspaceChatContextStore.setState(useWorkspaceChatContextStore.getInitialState(), true)
     // The workspace panel store is a shared singleton; reset it so preview tabs opened by
     // one test (clicking a change-card row) don't dedupe/leak into the next test.
@@ -314,6 +320,10 @@ describe('MessageList nested tool calls', () => {
       isGitRepo: false,
       changedFiles: [],
     })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it('windows long transcripts instead of mounting every historical message at once', () => {
@@ -1265,7 +1275,10 @@ describe('MessageList nested tool calls', () => {
               task: {
                 taskId: 'shell-task-1',
                 toolUseId: 'shell-tool-1',
-                status: 'completed',
+                // `stopped`, not `completed`: a cleanly finished task is left to
+                // the activity panel now. What this asserts is duration
+                // formatting, which does not depend on which end state it is.
+                status: 'stopped',
                 taskType: 'local_bash',
                 summary: 'Running Playwright checks',
                 usage: {
@@ -1285,6 +1298,39 @@ describe('MessageList nested tool calls', () => {
     render(<MessageList />)
 
     expect(screen.getByTestId('background-task-event-card').textContent).toContain('1 分 5 秒')
+  })
+
+  it('leaves a completed background task to the activity panel, but keeps a failure', () => {
+    const task = (id: string, status: 'completed' | 'failed') => ({
+      id: `background-task-${id}`,
+      type: 'background_task' as const,
+      timestamp: 2,
+      task: {
+        taskId: id,
+        toolUseId: `${id}-tool`,
+        status,
+        taskType: 'local_bash',
+        summary: `Ran ${id}`,
+        startedAt: 1,
+        updatedAt: 2,
+      },
+    })
+
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({ messages: [task('done-1', 'completed'), task('broke-1', 'failed')] }),
+      },
+    })
+
+    render(<MessageList />)
+
+    // A team session emits dozens of "task completed" reports and the panel
+    // already lists every one of them; repeating each as a card buries the
+    // conversation. A failure still interrupts — it changes what the turn means,
+    // and the panel it would otherwise live in can be closed.
+    const cards = screen.getAllByTestId('background-task-event-card')
+    expect(cards).toHaveLength(1)
+    expect(cards[0]?.textContent).toContain('broke-1')
   })
 
   it('renders stopped non-agent background tasks as neutral transcript events', () => {
@@ -1341,7 +1387,9 @@ describe('MessageList nested tool calls', () => {
               timestamp: 3,
               task: {
                 taskId: 'unknown-task',
-                status: 'completed',
+                // See above: the label is what this asserts, and a cleanly
+                // finished task no longer draws a card to read it off.
+                status: 'stopped',
                 summary: 'Finished background work',
                 startedAt: 1,
                 updatedAt: 3,
@@ -1591,27 +1639,30 @@ describe('MessageList nested tool calls', () => {
   })
 
   it('splits large virtualization spacers into content-visibility chunks', async () => {
+    const messages: UIMessage[] = Array.from({ length: 240 }, (_, index) => ({
+      id: `assistant-${index}`,
+      type: 'assistant_text',
+      content: `assistant transcript line ${index}`,
+      timestamp: index,
+    }))
     useChatStore.setState({
-      sessions: {
-        [ACTIVE_TAB]: makeSessionState({
-          messages: Array.from({ length: 240 }, (_, index) => ({
-            id: `assistant-${index}`,
-            type: 'assistant_text',
-            content: `assistant transcript line ${index}`,
-            timestamp: index,
-          })),
-        }),
-      },
+      sessions: { [ACTIVE_TAB]: makeSessionState({ messages }) },
     })
+
+    // Derived from the estimator rather than a literal, so "the middle" keeps
+    // meaning the middle when item heights change. A hardcoded scrollTop silently
+    // becomes "past the end" the moment the transcript gets denser.
+    const estimatedContentHeight = buildRenderModel(messages).renderItems
+      .reduce((total, item) => total + estimateRenderItemHeight(item), 0)
 
     const { container } = render(<MessageList />)
     const scrollArea = container.querySelector('.chat-scroll-area') as HTMLElement
     Object.defineProperty(scrollArea, 'clientHeight', { configurable: true, value: 500 })
-    Object.defineProperty(scrollArea, 'scrollHeight', { configurable: true, value: 240 * 200 })
+    Object.defineProperty(scrollArea, 'scrollHeight', { configurable: true, value: estimatedContentHeight })
     await waitForProgrammaticScrollReset()
 
     // Scroll to middle so both top and bottom spacers are present
-    scrollArea.scrollTop = 20_000
+    scrollArea.scrollTop = Math.round(estimatedContentHeight / 2)
     await act(async () => {
       fireEvent.scroll(scrollArea)
     })
@@ -1675,6 +1726,15 @@ describe('MessageList nested tool calls', () => {
     expect(screen.queryByText(/Read .*example\.ts.*done/i)).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: /dispatched an agent/i }))
     expect(screen.getByText(/Read .*example\.ts.*done/i)).toBeTruthy()
+
+    const agentRow = container.querySelector('[data-agent-call-layout="row"]')
+    expect(agentRow).toBeTruthy()
+    expect(agentRow?.className).not.toMatch(/\b(?:border|rounded)-/)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand agent' }))
+    const nestedToolRow = container.querySelector('[data-tool-call-chrome="row"]')
+    expect(nestedToolRow).toBeTruthy()
+    expect(nestedToolRow?.textContent).toContain('Read')
     expect(container.textContent).toContain('Agent')
   })
 
@@ -1776,6 +1836,18 @@ describe('MessageList nested tool calls', () => {
     expect(screen.getByText('retry 2/10')).toBeTruthy()
     expect(screen.getByText('HTTP 503')).toBeTruthy()
     expect(screen.getByText(/waiting \d+s/)).toBeTruthy()
+  })
+
+  it('shows a thinking placeholder as soon as first-turn preparation begins', () => {
+    render(<MessageList />)
+
+    act(() => {
+      useChatStore.getState().setPreparingTurn(ACTIVE_TAB, true)
+    })
+
+    const status = screen.getByTestId('turn-status-indicator')
+    expect(status.getAttribute('role')).toBe('status')
+    expect(status.textContent).toContain('Thinking')
   })
 
   it('shows the non-streaming fallback notice in the active turn indicator', () => {
@@ -1884,13 +1956,14 @@ describe('MessageList nested tool calls', () => {
 
     render(<MessageList />)
 
-    const groupSummary = screen.getByText('TaskUpdate (1), ran a command')
-    const groupButton = groupSummary.closest('button')
-    expect(groupButton?.textContent).not.toContain('check_circle')
-    expect(screen.queryByText('local_bash')).toBeNull()
-
-    fireEvent.click(groupButton!)
-    expect(screen.getByText('local_bash')).toBeTruthy()
+    // Settled, so it opens as a summary; the nested call is part of the run's
+    // trajectory once opened, not a detail buried a further click down.
+    const group = screen.getByTestId('activity-group')
+    fireEvent.click(group.querySelector('[data-chat-disclosure="true"]')!)
+    expect(within(group).getByText('local_bash')).toBeTruthy()
+    expect(within(group).getByText('bun run dev')).toBeTruthy()
+    // Icon ligature names must never leak into the row text.
+    expect(group.textContent).not.toContain('check_circle')
   })
 
   it('does not render blank assistant bubbles for whitespace-only text', () => {
@@ -2088,6 +2161,227 @@ describe('MessageList nested tool calls', () => {
     expect(screen.getByText('bun test')).toBeTruthy()
   })
 
+  it('keeps thinking inside the surrounding activity run instead of splitting it', () => {
+    const messages: UIMessage[] = [
+      {
+        id: 'tool-read',
+        type: 'tool_use',
+        toolName: 'Read',
+        toolUseId: 'read-1',
+        input: { file_path: '/tmp/example.ts' },
+        timestamp: 1,
+      },
+      { id: 'think-1', type: 'thinking', content: 'The delay is unconditional here.', timestamp: 2 },
+      {
+        id: 'tool-bash',
+        type: 'tool_use',
+        toolName: 'Bash',
+        toolUseId: 'bash-1',
+        input: { command: 'bun test' },
+        timestamp: 3,
+      },
+    ]
+
+    const { renderItems } = buildRenderModel(messages)
+
+    expect(renderItems).toHaveLength(1)
+    const group = renderItems[0]
+    expect(group?.kind).toBe('tool_group')
+    if (group?.kind !== 'tool_group') throw new Error('expected a tool group')
+    expect(group.steps.map((step) => step.kind === 'tool' ? step.toolCall.toolUseId : step.message.id)).toEqual([
+      'read-1',
+      'think-1',
+      'bash-1',
+    ])
+    // The tools-only projection stays intact for the agent/image/memory paths.
+    expect(group.toolCalls.map((toolCall) => toolCall.toolUseId)).toEqual(['read-1', 'bash-1'])
+  })
+
+  it('keeps a completed tool group visibly live while post-tool thinking streams', () => {
+    render(<MessageList sessionId={ACTIVE_TAB} />)
+
+    const store = useChatStore.getState()
+    act(() => {
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'content_start',
+        blockType: 'tool_use',
+        toolName: 'Bash',
+        toolUseId: 'bash-live-1',
+      })
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'tool_use_complete',
+        toolName: 'Bash',
+        toolUseId: 'bash-live-1',
+        input: { command: 'git status --short' },
+      })
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'tool_result',
+        toolUseId: 'bash-live-1',
+        content: '',
+        isError: false,
+      })
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'thinking',
+        text: 'Now inspect the remaining UI paths.',
+      })
+    })
+
+    const group = screen.getByTestId('activity-group')
+    expect(group.getAttribute('data-running')).toBe('true')
+    // The tool finished but the run has not: feedback has to stay somewhere the
+    // reader can see (#d3ba73af3, which restored it after an earlier collapse
+    // dropped it). It now sits on the step that is actually still going — the
+    // streaming thinking row — rather than on a summary header above them all.
+    expect(group.querySelector('.thinking-dots')).not.toBeNull()
+
+    act(() => {
+      store.handleServerMessage(ACTIVE_TAB, { type: 'status', state: 'idle' })
+    })
+
+    expect(group.getAttribute('data-running')).toBe('false')
+    expect(group.querySelector('.thinking-dots')).toBeNull()
+  })
+
+  it('spaces turns without drawing a rail', () => {
+    const { container } = render(<MessageList sessionId={ACTIVE_TAB} />)
+    const store = useChatStore.getState()
+
+    act(() => {
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'content_start',
+        blockType: 'tool_use',
+        toolName: 'Bash',
+        toolUseId: 'bash-rail-1',
+      })
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'tool_use_complete',
+        toolName: 'Bash',
+        toolUseId: 'bash-rail-1',
+        input: { command: 'npx xo' },
+      })
+    })
+
+    // The wrapper survives because it still owns turn spacing and the block
+    // formatting context the virtualizer measures against...
+    expect(container.querySelectorAll('.chat-turn-rail').length).toBeGreaterThan(0)
+    // ...but it draws nothing. Tone separates prose from machinery now, and a
+    // line on top of that was a third way of saying what the turn gap and the
+    // right-aligned prompt already say.
+    expect(container.querySelectorAll('.chat-turn-rail--live')).toHaveLength(0)
+  })
+
+  it('draws a lone thinking block the same as one sitting in a run', () => {
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: [
+            { id: 'user-1', type: 'user_text', content: '看下 issue', timestamp: 1 },
+            // Opens the turn with reasoning and then narrates, so this one is
+            // flushed as a tool-less run — the case that used to get the bare
+            // label with no reasoning shown at all.
+            { id: 'think-lone', type: 'thinking', content: '先加载浏览器技能再读 issue。', timestamp: 2 },
+            { id: 'reply-1', type: 'assistant_text', content: '我先加载浏览器技能。', timestamp: 3 },
+            { id: 'think-in-run', type: 'thinking', content: 'gh issue 失败了,改用 REST API。', timestamp: 4 },
+            {
+              id: 'tool-1',
+              type: 'tool_use',
+              toolName: 'Bash',
+              toolUseId: 'bash-1',
+              input: { command: 'gh api', description: '取 issue 内容' },
+              timestamp: 5,
+            },
+          ],
+        }),
+      },
+    })
+
+    const { container } = render(<MessageList />)
+
+    // Open the settled run so both thinking rows are on screen at once.
+    fireEvent.click(
+      screen.getByTestId('activity-group').querySelector('[data-chat-disclosure="true"]')!,
+    )
+
+    // Whether a thought is followed by a tool call is a fact about the run, not
+    // about the thought, so it must not change how the thought is drawn — the
+    // lone one used to show its label and nothing else.
+    expect(screen.getByText('先加载浏览器技能再读 issue。')).toBeTruthy()
+    expect(screen.getByText('gh issue 失败了,改用 REST API。')).toBeTruthy()
+
+    const [lone, inRun] = Array.from(
+      container.querySelectorAll<HTMLElement>('[data-thinking-row="true"]'),
+    )
+    expect(lone).toBeTruthy()
+    expect(inRun).toBeTruthy()
+    expect(lone!.className).toBe(inRun!.className)
+  })
+
+  it('leaves a run of pure reasoning as standalone thinking blocks', () => {
+    const messages: UIMessage[] = [
+      { id: 'think-1', type: 'thinking', content: 'First consider the call sites.', timestamp: 1 },
+      { id: 'think-2', type: 'thinking', content: 'Then the retry path.', timestamp: 2 },
+    ]
+
+    const { renderItems } = buildRenderModel(messages)
+
+    expect(renderItems.map((item) => item.kind === 'message' ? item.message.id : item.id)).toEqual([
+      'think-1',
+      'think-2',
+    ])
+  })
+
+  it('keeps thinking out of an agent dispatch group', () => {
+    const messages: UIMessage[] = [
+      { id: 'think-1', type: 'thinking', content: 'Split the review by subsystem.', timestamp: 1 },
+      {
+        id: 'tool-agent',
+        type: 'tool_use',
+        toolName: 'Agent',
+        toolUseId: 'agent-1',
+        input: { description: 'Review desktop impact' },
+        timestamp: 2,
+      },
+    ]
+
+    const { renderItems } = buildRenderModel(messages)
+
+    expect(renderItems.map((item) => item.kind === 'message' ? `message:${item.message.id}` : `group:${item.id}`)).toEqual([
+      'message:think-1',
+      'group:group-tool-agent',
+    ])
+  })
+
+  it('ends an activity run at the assistant reply that narrates it', () => {
+    const messages: UIMessage[] = [
+      { id: 'think-1', type: 'thinking', content: 'Check the handler first.', timestamp: 1 },
+      {
+        id: 'tool-read',
+        type: 'tool_use',
+        toolName: 'Read',
+        toolUseId: 'read-1',
+        input: { file_path: '/tmp/example.ts' },
+        timestamp: 2,
+      },
+      { id: 'assistant-1', type: 'assistant_text', content: 'Found the unconditional delay.', timestamp: 3 },
+      {
+        id: 'tool-bash',
+        type: 'tool_use',
+        toolName: 'Bash',
+        toolUseId: 'bash-1',
+        input: { command: 'bun test' },
+        timestamp: 4,
+      },
+    ]
+
+    const { renderItems } = buildRenderModel(messages)
+
+    expect(renderItems.map((item) => item.kind === 'message' ? `message:${item.message.id}` : `group:${item.id}`)).toEqual([
+      'group:group-tool-read',
+      'message:assistant-1',
+      'group:group-tool-bash',
+    ])
+  })
+
   it('keeps root tool runs split when nested child tool calls appear between them', () => {
     const messages: UIMessage[] = [
       {
@@ -2274,7 +2568,7 @@ describe('MessageList nested tool calls', () => {
     expect(screen.queryByText('Review coverage')).toBeNull()
   })
 
-  it('honors a manual collapse of mixed tool groups when nested tool calls arrive', async () => {
+  it('keeps a row the reader opened open when nested tool calls arrive', async () => {
     const initialMessages: UIMessage[] = [
       {
         id: 'tool-task-update',
@@ -2305,12 +2599,13 @@ describe('MessageList nested tool calls', () => {
 
     render(<MessageList />)
 
-    const mixedGroupButton = screen.getByRole('button', { name: /TaskUpdate \(1\), ran a command/i })
-    expect(screen.queryByText('git status --short')).toBeNull()
-    fireEvent.click(mixedGroupButton)
-    expect(screen.getByText('git status --short')).toBeTruthy()
-    fireEvent.click(mixedGroupButton)
-    expect(screen.queryByText('git status --short')).toBeNull()
+    // Every step is on screen already; what the reader opts into is one row's
+    // detail. That choice is what has to survive the next server update — the
+    // regression here was expansion state resetting on every live refresh.
+    const group = screen.getByTestId('activity-group')
+    expect(group.querySelectorAll('[data-tool-call-details]')).toHaveLength(0)
+    fireEvent.click(within(group).getByText('git status --short'))
+    expect(group.querySelectorAll('[data-tool-call-details]')).toHaveLength(1)
 
     act(() => {
       useChatStore.setState({
@@ -2334,11 +2629,14 @@ describe('MessageList nested tool calls', () => {
       })
     })
 
+    // The newly dispatched child shows up...
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /TaskUpdate \(1\), ran a command/i })).toBeTruthy()
+      expect(screen.getByText('package.json')).toBeTruthy()
     })
-    expect(screen.queryByText('git status --short')).toBeNull()
-    expect(screen.queryByText('package.json')).toBeNull()
+    // ...and the row the reader opened is still open.
+    expect(
+      screen.getByTestId('activity-group').querySelectorAll('[data-tool-call-details]'),
+    ).toHaveLength(1)
   })
 
   it('honors a manual collapse of memory activity when regular tools join the group', async () => {
@@ -2447,7 +2745,9 @@ describe('MessageList nested tool calls', () => {
     const renderedKinds = renderItems.map((item) =>
       item.kind === 'tool_group'
         ? `tool:${item.toolCalls[0]?.toolUseId}`
-        : `message:${item.message.id}`,
+        : item.kind === 'team_card'
+          ? `team:${item.id}`
+          : `message:${item.message.id}`,
     )
 
     expect(renderedKinds).toEqual([
@@ -2900,26 +3200,66 @@ describe('MessageList nested tool calls', () => {
 
     expect(screen.getByRole('button', { name: 'Copy prompt' })).toBeTruthy()
 
-    fireEvent.click(screen.getAllByRole('button', { name: 'Copy reply' })[1]!)
+    // One copy per turn, on the reply that closes it. The intermediate reply
+    // ("先看 CLI 和服务端入口。") carries no action bar at all — nobody copies a
+    // step, and reserving its 36px on every one outweighed the text itself.
+    const replyCopies = screen.getAllByRole('button', { name: 'Copy reply' })
+    expect(replyCopies).toHaveLength(1)
+
+    fireEvent.click(replyCopies[0]!)
 
     await waitFor(() => {
       expect(writeText).toHaveBeenCalledWith('再看 desktop 前后端边界。')
     })
+    // Still that reply alone, never the turn's replies glued together.
     expect(writeText).not.toHaveBeenCalledWith(
       '先看 CLI 和服务端入口。\n再看 desktop 前后端边界。'
     )
+  })
+
+  it('leaves a mid-turn reply with no action bar to reserve space for', () => {
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          chatState: 'thinking',
+          messages: [
+            { id: 'user-1', type: 'user_text', content: '接着改', timestamp: 1 },
+            { id: 'assistant-1', type: 'assistant_text', content: '先看调用点。', timestamp: 2 },
+          ],
+        }),
+      },
+    })
+
+    const { container } = render(<MessageList />)
+
+    const assistantShell = container.querySelector('[data-message-shell="assistant"]')
+    expect(assistantShell).toBeTruthy()
+    // Absent, not hidden: a hover-gated bar still reserved its height whether or
+    // not anyone hovered, which is the cost this removes.
+    expect(assistantShell!.querySelector('[data-message-actions]')).toBeNull()
+    // The prompt keeps its own — reworking a question is what the bar is for.
+    expect(
+      container.querySelector('[data-message-shell="user"] [data-message-actions]'),
+    ).not.toBeNull()
   })
 
   it('releases pointer focus from message actions after clicking copy', () => {
     useChatStore.setState({
       sessions: {
         [ACTIVE_TAB]: makeSessionState({
+          // A closed turn: actions live on the reply that ends one.
           messages: [
+            {
+              id: 'user-1',
+              type: 'user_text',
+              content: '看一下操作条',
+              timestamp: 1,
+            },
             {
               id: 'assistant-1',
               type: 'assistant_text',
-              content: '离开 hover 后操作条应该恢复隐藏。',
-              timestamp: 1,
+              content: '点完复制后焦点不应该留在按钮上。',
+              timestamp: 2,
             },
           ],
         }),
@@ -3820,6 +4160,7 @@ describe('MessageList nested tool calls', () => {
     await waitFor(() => {
       expect(screen.getByText('streaming next token')).toBeTruthy()
     })
+    await waitForProgrammaticScrollReset()
     expect(scrollIntoView).not.toHaveBeenCalled()
     expect(scrollTop).toBe(600)
   })
@@ -4020,11 +4361,164 @@ describe('MessageList nested tool calls', () => {
     await waitFor(() => {
       expect(screen.getByText('app.vue')).toBeTruthy()
     })
+    await waitForProgrammaticScrollReset()
     expect(scrollIntoView).not.toHaveBeenCalled()
     expect(scrollTop).toBe(600)
   })
 
-  it('keeps auto-scrolling without reading scroll geometry synchronously', async () => {
+  // #1177: expanding a collapsed run is the reader rearranging their own view.
+  // The content-resize follow used to read that height jump as new output and
+  // slam the transcript to the bottom, throwing the just-clicked row off screen.
+  it('does not follow the height jump the reader causes by expanding a run, but still follows the next token', async () => {
+    let resizeCallback: ResizeObserverCallback | null = null
+    class TestResizeObserver {
+      observe = vi.fn()
+      unobserve = vi.fn()
+      disconnect = vi.fn()
+
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback
+      }
+    }
+    vi.stubGlobal('ResizeObserver', TestResizeObserver)
+
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          chatState: 'tool_executing',
+          messages: [
+            { id: 'user-1', type: 'user_text', content: 'latest prompt', timestamp: 1 },
+            {
+              id: 'tool-read',
+              type: 'tool_use',
+              toolName: 'Read',
+              toolUseId: 'read-1',
+              input: { file_path: '/repo/a.ts' },
+              timestamp: 2,
+            },
+            {
+              id: 'result-read',
+              type: 'tool_result',
+              toolUseId: 'read-1',
+              content: 'ok',
+              isError: false,
+              timestamp: 3,
+            },
+            {
+              id: 'tool-bash',
+              type: 'tool_use',
+              toolName: 'Bash',
+              toolUseId: 'bash-1',
+              input: { command: 'bun test' },
+              timestamp: 4,
+            },
+            {
+              id: 'result-bash',
+              type: 'tool_result',
+              toolUseId: 'bash-1',
+              content: 'done',
+              isError: false,
+              timestamp: 5,
+            },
+          ],
+          streamingText: 'seed',
+        }),
+      },
+    })
+
+    const { container } = render(<MessageList />)
+    const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement
+    let scrollTop = 600
+    let scrollHeight = 1000
+    let scrollTopWriteCount = 0
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, get: () => scrollHeight })
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 })
+    Object.defineProperty(scroller, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value) => {
+        scrollTopWriteCount += 1
+        scrollTop = value
+      },
+    })
+
+    await waitFor(() => expect(resizeCallback).not.toBeNull())
+    await waitForProgrammaticScrollReset()
+    scrollTopWriteCount = 0
+
+    const queuedFrames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      queuedFrames.push(callback)
+      return queuedFrames.length
+    }))
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+    const flushFrame = () => {
+      const callbacks = queuedFrames.splice(0)
+      act(() => {
+        for (const callback of callbacks) callback(performance.now())
+      })
+    }
+
+    // The reader opens the run; it grows by 500px.
+    const setStreamingText = (text: string) => {
+      useChatStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ACTIVE_TAB]: { ...state.sessions[ACTIVE_TAB]!, streamingText: text },
+        },
+      }))
+    }
+
+    const disclosure = container.querySelector('[data-chat-disclosure="true"]') as HTMLButtonElement
+    expect(disclosure).toBeTruthy()
+    scrollHeight = 1500
+    act(() => {
+      fireEvent.click(disclosure)
+      resizeCallback?.([{ contentRect: { height: 900 } } as ResizeObserverEntry], {} as ResizeObserver)
+    })
+    flushFrame()
+
+    expect(scrollTopWriteCount).toBe(0)
+    expect(scrollTop).toBe(600)
+
+    // Expanding pushed the container off the bottom, so following stops until
+    // the reader returns — same semantics as scrolling up by hand.
+    scrollHeight = 1520
+    act(() => {
+      setStreamingText('seed more')
+      resizeCallback?.([{ contentRect: { height: 920 } } as ResizeObserverEntry], {} as ResizeObserver)
+    })
+    flushFrame()
+    expect(scrollTop).toBe(600)
+
+    // Back at the bottom, streaming follows again — the guard suppresses the
+    // reader's own resize, never the model's output.
+    act(() => {
+      scrollTop = 1120
+      fireEvent.scroll(scroller)
+    })
+    scrollHeight = 1560
+    act(() => {
+      setStreamingText('seed more still')
+      resizeCallback?.([{ contentRect: { height: 960 } } as ResizeObserverEntry], {} as ResizeObserver)
+    })
+    flushFrame()
+    expect(scrollTop).toBe(1160)
+  })
+
+  it('coalesces real streaming transitions and ignores fractional bottom wobble', async () => {
+    let resizeCallback: ResizeObserverCallback | null = null
+    class TestResizeObserver {
+      observe = vi.fn()
+      unobserve = vi.fn()
+      disconnect = vi.fn()
+
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback
+      }
+    }
+    vi.stubGlobal('ResizeObserver', TestResizeObserver)
+
     useChatStore.setState({
       sessions: {
         [ACTIVE_TAB]: makeSessionState({
@@ -4037,63 +4531,84 @@ describe('MessageList nested tool calls', () => {
               timestamp: 1,
             },
           ],
-          streamingText: 'streaming',
+          streamingText: 'streaming seed',
         }),
       },
     })
 
     const { container } = render(<MessageList />)
     const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement
-    const readScrollHeight = vi.fn(() => {
-      throw new Error('scrollHeight should not be read while pinning to bottom')
-    })
-    const readClientHeight = vi.fn(() => {
-      throw new Error('clientHeight should not be read while pinning to bottom')
-    })
-    let scrollTop = 552
+    let scrollTop = 600
+    let scrollHeight = 1004
+    let scrollTopWriteCount = 0
     Object.defineProperty(scroller, 'scrollHeight', {
       configurable: true,
-      get: readScrollHeight,
+      get: () => scrollHeight,
     })
     Object.defineProperty(scroller, 'clientHeight', {
       configurable: true,
-      get: readClientHeight,
+      value: 400,
     })
     Object.defineProperty(scroller, 'scrollTop', {
       configurable: true,
       get: () => scrollTop,
       set: (value) => {
-        scrollTop = value >= 1_000_000_000 ? 600 : value
+        scrollTopWriteCount += 1
+        scrollTop = value
       },
     })
-    Object.defineProperty(scroller, 'scrollTo', {
-      configurable: true,
-      value: vi.fn((options: ScrollToOptions | number, y?: number) => {
-        scroller.scrollTop = typeof options === 'number' ? y ?? 0 : options.top ?? 0
-      }),
-    })
 
+    await waitFor(() => expect(resizeCallback).not.toBeNull())
     await waitForProgrammaticScrollReset()
+    scrollTopWriteCount = 0
+
+    const queuedFrames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      queuedFrames.push(callback)
+      return queuedFrames.length
+    }))
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+    const flushFrame = () => {
+      const callbacks = queuedFrames.splice(0)
+      act(() => {
+        for (const callback of callbacks) callback(performance.now())
+      })
+    }
+
     act(() => {
-      useChatStore.setState((state) => ({
-        sessions: {
-          ...state.sessions,
-          [ACTIVE_TAB]: {
-            ...state.sessions[ACTIVE_TAB]!,
-            streamingText: 'streaming next token',
-          },
-        },
-      }))
+      const store = useChatStore.getState()
+      store.handleServerMessage(ACTIVE_TAB, { type: 'content_delta', text: ' next' })
+      store.handleServerMessage(ACTIVE_TAB, { type: 'content_delta', text: ' token' })
+      resizeCallback?.([{
+        contentRect: { height: 404 },
+      } as ResizeObserverEntry], {} as ResizeObserver)
     })
 
     await waitFor(() => {
-      expect(screen.getByText('streaming next token')).toBeTruthy()
+      expect(screen.getByText('streaming seed next token')).toBeTruthy()
     })
-    await waitForProgrammaticScrollReset()
+    expect(queuedFrames.length).toBeGreaterThan(0)
+    flushFrame()
 
+    expect(scrollTopWriteCount).toBe(0)
     expect(scrollTop).toBe(600)
-    expect(readScrollHeight).not.toHaveBeenCalled()
-    expect(readClientHeight).not.toHaveBeenCalled()
+
+    scrollHeight = 1020
+    act(() => {
+      const store = useChatStore.getState()
+      store.handleServerMessage(ACTIVE_TAB, { type: 'content_delta', text: ' with' })
+      store.handleServerMessage(ACTIVE_TAB, { type: 'content_delta', text: ' growth' })
+      resizeCallback?.([{
+        contentRect: { height: 420 },
+      } as ResizeObserverEntry], {} as ResizeObserver)
+    })
+    await waitFor(() => {
+      expect(screen.getByText('streaming seed next token with growth')).toBeTruthy()
+    })
+    flushFrame()
+
+    expect(scrollTopWriteCount).toBe(1)
+    expect(scrollTop).toBe(620)
   })
 
   it('keeps mobile H5 streaming output pinned after the transcript height grows', async () => {
@@ -4158,10 +4673,10 @@ describe('MessageList nested tool calls', () => {
     await waitFor(() => {
       expect(screen.getByText('streaming next token after height change')).toBeTruthy()
     })
+    await waitForProgrammaticScrollReset()
     expect(scrollIntoView).not.toHaveBeenCalled()
     expect(scrollTop).toBe(1000)
 
-    await waitForProgrammaticScrollReset()
     fireEvent.scroll(scroller)
 
     expect(screen.queryByRole('button', { name: 'Latest' })).toBeNull()
@@ -4232,6 +4747,7 @@ describe('MessageList nested tool calls', () => {
     act(() => {
       resizeCallback?.([], {} as ResizeObserver)
     })
+    await waitForProgrammaticScrollReset()
 
     expect(scrollIntoView).not.toHaveBeenCalled()
     expect(scrollTop).toBe(1200)
@@ -4336,6 +4852,7 @@ describe('MessageList nested tool calls', () => {
         target: scrollContent,
       } as unknown as ResizeObserverEntry], {} as ResizeObserver)
     })
+    await waitForProgrammaticScrollReset()
 
     expect(scrollTop).toBe(15196)
     expect(screen.queryByRole('button', { name: 'Latest' })).toBeNull()
@@ -4617,10 +5134,11 @@ describe('MessageList nested tool calls', () => {
     act(() => {
       resizeCallback?.(makeResizeEntry(400), {} as ResizeObserver)
     })
+    await waitForProgrammaticScrollReset()
     expect(scrollTop).toBe(600)
 
     scrollTopWriteCount = 0
-    // WebView2 can reach the opposite edge of a 2px oscillation through
+    // Chromium can reach the opposite edge of a 2px oscillation through
     // adjacent 1px observations. The sticky follow baseline must not turn
     // either edge into a bottom-scroll correction.
     for (const height of [401, 402, 401, 400, 401, 402, 401, 400]) {
@@ -4636,6 +5154,7 @@ describe('MessageList nested tool calls', () => {
     act(() => {
       resizeCallback?.(makeResizeEntry(420), {} as ResizeObserver)
     })
+    await waitForProgrammaticScrollReset()
 
     expect(scrollTop).toBe(640)
   })
@@ -5300,8 +5819,8 @@ describe('MessageList nested tool calls', () => {
               content: '这条回复应该停在左侧。',
               timestamp: assistantTimestamp,
             },
-            // Keeps the reply mid-turn: a turn-closing reply swaps its hover
-            // timestamp for the always-on completion stamp (#1151).
+            // Keeps the first reply mid-turn, which now means it carries no
+            // action bar at all — only the reply that closes a turn does.
             {
               id: 'tool-1',
               type: 'tool_use',
@@ -5309,6 +5828,12 @@ describe('MessageList nested tool calls', () => {
               toolUseId: 'tool-use-1',
               input: { file_path: '/tmp/a.ts' },
               timestamp: assistantTimestamp + 1_000,
+            },
+            {
+              id: 'assistant-2',
+              type: 'assistant_text',
+              content: '这条收尾回复带操作条。',
+              timestamp: assistantTimestamp + 2_000,
             },
           ],
         }),
@@ -5319,10 +5844,16 @@ describe('MessageList nested tool calls', () => {
 
     const userShell = screen.getByText('请把这条 prompt 放在右侧').closest('[data-message-shell="user"]')
     const assistantShell = screen.getByText('这条回复应该停在左侧。').closest('[data-message-shell="assistant"]')
+    const closingShell = screen.getByText('这条收尾回复带操作条。').closest('[data-message-shell="assistant"]')
     const userActions = screen.getByRole('button', { name: 'Copy prompt' }).closest('[data-message-actions]')
     const assistantActions = screen.getByRole('button', { name: 'Copy reply' }).closest('[data-message-actions]')
     const userTime = within(userActions as HTMLElement).getByText(formatMessageHoverTime(userTimestamp, 'en'))
-    const assistantTime = within(assistantActions as HTMLElement).getByText(formatMessageHoverTime(assistantTimestamp, 'en'))
+
+    // The bar the assistant does get belongs to the closing reply, not the
+    // mid-turn one, and it is the only one on that side.
+    expect(assistantActions?.closest('[data-message-shell="assistant"]')).toBe(closingShell)
+    expect(assistantShell?.querySelector('[data-message-actions]')).toBeNull()
+    expect(screen.getAllByRole('button', { name: 'Copy reply' })).toHaveLength(1)
 
     expect(userShell).toBeTruthy()
     expect(userShell?.className).toContain('items-end')
@@ -5331,7 +5862,9 @@ describe('MessageList nested tool calls', () => {
     expect(assistantShell).toBeTruthy()
     expect(assistantShell?.className).toContain('items-start')
     expect(assistantShell?.className).toContain('group')
-    expect(assistantShell?.className).not.toContain('w-full')
+    // Replies take the full column even when they are one short line — only the
+    // user bubble hugs its text. Side is what distinguishes them, not width.
+    expect(assistantShell?.className).toContain('w-full')
     expect(assistantShell?.className).not.toContain('ml-10')
     expect(userActions?.getAttribute('data-align')).toBe('end')
     expect(assistantActions?.getAttribute('data-align')).toBe('start')
@@ -5341,10 +5874,13 @@ describe('MessageList nested tool calls', () => {
     expect(userActions?.className).not.toContain('group-hover:h-7')
     expect(userActions?.className).not.toContain('invisible')
     expect(userTime.getAttribute('title')).toBe(formatExactMessageTimestamp(userTimestamp, 'en'))
-    expect(assistantTime.getAttribute('title')).toBe(formatExactMessageTimestamp(assistantTimestamp, 'en'))
+    // The closing reply's bar is not hover-gated: it is rare and deliberate now,
+    // so hiding it until hover would only make a present affordance hard to find.
+    expect(assistantActions?.className).not.toContain('opacity-0')
+    expect(assistantActions?.className).not.toContain('pointer-events-none')
   })
 
-  describe('turn completion stamp (#1151)', () => {
+  describe('turn completion footer (#1151)', () => {
     const T0 = new Date('2026-07-30T07:08:22Z').getTime()
     const MINUTE = 60_000
 
@@ -5370,7 +5906,7 @@ describe('MessageList nested tool calls', () => {
       return shellFor(text)?.querySelector('[data-turn-completion]') as HTMLElement | null
     }
 
-    it('closes a finished turn with its end time and duration, without hovering', () => {
+    it('keeps actions, end time, and duration in one visible row', () => {
       useChatStore.setState({
         sessions: { [ACTIVE_TAB]: makeSessionState({ messages: turnMessages() }) },
       })
@@ -5378,12 +5914,15 @@ describe('MessageList nested tool calls', () => {
       render(<MessageList />)
 
       const stamp = stampFor('第二轮跑了很久才答完。')
-      expect(stamp?.textContent).toContain(`Done ${formatMessageHoverTime(T0 + 14 * MINUTE + 19_000, 'en')}`)
+      expect(stamp?.textContent).toContain(formatMessageHoverTime(T0 + 14 * MINUTE + 19_000, 'en'))
       expect(stamp?.textContent).toContain('took 12m 19s')
-      // The stamp is the one piece that must survive without a pointer: it sits
-      // outside the hover-gated action bar.
-      expect(stamp?.closest('[data-message-actions]')).toBeNull()
-      expect(stamp?.className).not.toContain('opacity-0')
+      const footer = stamp?.closest('[data-message-actions]')
+      expect(footer).toBe(
+        within(shellFor('第二轮跑了很久才答完。') as HTMLElement)
+          .getByRole('button', { name: 'Copy reply' })
+          .closest('[data-message-actions]'),
+      )
+      expect(footer?.className).not.toContain('opacity-0')
     })
 
     it('measures each turn from its own prompt', () => {
@@ -5396,7 +5935,7 @@ describe('MessageList nested tool calls', () => {
       expect(stampFor('先答第一轮。')?.textContent).toContain('took 30s')
     })
 
-    it('drops the hover timestamp on a stamped reply so the time is not printed twice', () => {
+    it('prints the completion time only once in the combined footer', () => {
       useChatStore.setState({
         sessions: { [ACTIVE_TAB]: makeSessionState({ messages: turnMessages() }) },
       })
@@ -5406,8 +5945,8 @@ describe('MessageList nested tool calls', () => {
       const closing = shellFor('第二轮跑了很久才答完。')
       expect(closing?.querySelector('[data-turn-completion]')).not.toBeNull()
       expect(
-        within(closing as HTMLElement).queryByText(formatMessageHoverTime(T0 + 14 * MINUTE + 19_000, 'en')),
-      ).toBeNull()
+        within(closing as HTMLElement).getAllByText(formatMessageHoverTime(T0 + 14 * MINUTE + 19_000, 'en')),
+      ).toHaveLength(1)
     })
 
     it('leaves prompts and mid-turn replies on the hover-only timestamp', () => {
@@ -5437,12 +5976,16 @@ describe('MessageList nested tool calls', () => {
       // stamp there rendered above the work it introduced.
       expect(stampFor('接下来把两处调用点都接上：')).toBeNull()
       expect(stampFor('接着改')).toBeNull()
-      // Both still carry their own timestamp inside the hover-gated bar.
-      for (const [text, timestamp] of [['接着改', T0], ['接下来把两处调用点都接上：', T0 + 10_000]] as const) {
-        const bar = shellFor(text)?.querySelector('[data-message-actions]')
-        expect(bar?.className).toContain('opacity-0')
-        expect(within(bar as HTMLElement).getByText(formatMessageHoverTime(timestamp, 'en'))).toBeTruthy()
-      }
+      // The prompt keeps its timestamp in the hover-gated bar.
+      const promptBar = shellFor('接着改')?.querySelector('[data-message-actions]')
+      expect(promptBar?.className).toContain('opacity-0')
+      expect(within(promptBar as HTMLElement).getByText(formatMessageHoverTime(T0, 'en'))).toBeTruthy()
+
+      // The mid-turn reply has no bar, so it has no per-reply timestamp either —
+      // a deliberate trade for the 36px the bar reserved on every reply. The
+      // turn is still locatable in time: the prompt above stamps its start and
+      // the closing reply stamps its end.
+      expect(shellFor('接下来把两处调用点都接上：')?.querySelector('[data-message-actions]')).toBeNull()
     })
 
     it('leaves the running turn unstamped while keeping earlier turns stamped', () => {
@@ -5455,7 +5998,9 @@ describe('MessageList nested tool calls', () => {
       render(<MessageList />)
 
       expect(stampFor('第二轮跑了很久才答完。')).toBeNull()
-      expect(stampFor('先答第一轮。')?.textContent).toContain('Done')
+      expect(stampFor('先答第一轮。')?.textContent).toContain(
+        formatMessageHoverTime(T0 + 30_000, 'en'),
+      )
     })
   })
 
@@ -6139,6 +6684,7 @@ describe('MessageList nested tool calls', () => {
         targetUserMessageId: 'transcript-user-1',
         userMessageIndex: 0,
         expectedContent: '实时这一轮',
+        mode: 'both',
       })
     })
   })
@@ -6347,6 +6893,42 @@ describe('MessageList nested tool calls', () => {
     expect(screen.queryByText('first.ts')).toBeNull()
   })
 
+  it('does not call parent-session checkpoint APIs for a completed SubAgent conversation', async () => {
+    const subagentTabId = '__subagent__parent-session__agent-tool-1'
+    const getTurnCheckpoints = vi.spyOn(sessionsApi, 'getTurnCheckpoints')
+      .mockRejectedValue(new Error(`Session not found: ${subagentTabId}`))
+    useTabStore.setState({
+      activeTabId: subagentTabId,
+      tabs: [{
+        sessionId: subagentTabId,
+        title: 'Completed reviewer',
+        type: 'subagent',
+        status: 'idle',
+        sourceSessionId: 'parent-session',
+        subagentToolUseId: 'agent-tool-1',
+      }],
+    })
+    useChatStore.setState({
+      sessions: {
+        [subagentTabId]: makeSessionState({
+          messages: [
+            { id: 'user-1', type: 'user_text', content: 'Review the patch', timestamp: 1 },
+            { id: 'assistant-1', type: 'assistant_text', content: 'Review complete', timestamp: 2 },
+          ],
+        }),
+      },
+    })
+
+    render(<MessageList sessionId={subagentTabId} />)
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(getTurnCheckpoints).not.toHaveBeenCalled()
+    expect(screen.queryByText(`Session not found: ${subagentTabId}`)).toBeNull()
+  })
+
   it('confirms before rewinding to an earlier turn from a historical change card', async () => {
     vi.spyOn(sessionsApi, 'getTurnCheckpoints').mockResolvedValue({
       checkpoints: [
@@ -6475,12 +7057,203 @@ describe('MessageList nested tool calls', () => {
         targetUserMessageId: 'user-1',
         userMessageIndex: 0,
         expectedContent: '做一个页面',
+        mode: 'both',
       })
     })
     expect(reloadHistory).toHaveBeenCalledWith(ACTIVE_TAB)
     expect(queueComposerPrefill).toHaveBeenCalledWith(ACTIVE_TAB, {
       text: '做一个页面',
       attachments: undefined,
+    })
+  })
+
+  it('offers a conversation-only rewind when the checkpoint cannot restore the files', async () => {
+    // Regression for #1192: an unrestorable checkpoint used to disable the undo
+    // outright, which also cost the user the conversation rollback. The files
+    // genuinely cannot be restored here, but backing out of the prompt can.
+    vi.spyOn(sessionsApi, 'getTurnCheckpoints').mockResolvedValue({
+      checkpoints: [
+        {
+          target: {
+            targetUserMessageId: 'user-1',
+            userMessageIndex: 0,
+            userMessageCount: 1,
+          },
+          code: {
+            available: true,
+            filesChanged: ['src/first.ts'],
+            insertions: 1,
+            deletions: 0,
+          },
+          restoreAvailable: false,
+        },
+      ],
+    })
+    const rewind = vi.spyOn(sessionsApi, 'rewind').mockResolvedValue({
+      target: { targetUserMessageId: 'user-1', userMessageIndex: 0, userMessageCount: 1 },
+      conversation: { messagesRemoved: 2, removedMessageIds: ['user-1', 'assistant-1'] },
+      code: { available: true, filesChanged: ['src/first.ts'], insertions: 1, deletions: 0 },
+      restoreAvailable: false,
+      mode: 'conversation',
+    })
+    const reloadHistory = vi.fn().mockResolvedValue(undefined)
+    const queueComposerPrefill = vi.fn()
+
+    useChatStore.setState({
+      reloadHistory,
+      queueComposerPrefill,
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: [
+            { id: 'user-1', type: 'user_text', content: '做一个页面', timestamp: 1 },
+            { id: 'assistant-1', type: 'assistant_text', content: 'first done', timestamp: 2 },
+          ],
+        }),
+      },
+    })
+
+    render(<MessageList />)
+
+    await screen.findByText('first.ts')
+    const undoButton = screen.getByRole('button', { name: 'Undo current turn changes' })
+    expect((undoButton as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(undoButton)
+
+    const dialog = await screen.findByRole('dialog', { name: 'Undo current turn?' })
+    expect(
+      within(dialog).getByText(/the files cannot be restored safely/i),
+    ).toBeTruthy()
+    // The code-restoring action must be gone — offering it would fail server-side.
+    expect(within(dialog).queryByRole('button', { name: 'Undo current turn' })).toBeNull()
+
+    fireEvent.click(
+      within(dialog).getByRole('button', { name: 'Roll back conversation only' }),
+    )
+
+    await waitFor(() => {
+      expect(rewind).toHaveBeenCalledWith(ACTIVE_TAB, {
+        targetUserMessageId: 'user-1',
+        userMessageIndex: 0,
+        expectedContent: '做一个页面',
+        mode: 'conversation',
+      })
+    })
+    expect(reloadHistory).toHaveBeenCalledWith(ACTIVE_TAB)
+  })
+
+  it('keeps Bash-only undo reachable when the completed turn has no checkpointed files', async () => {
+    vi.spyOn(sessionsApi, 'getTurnCheckpoints').mockResolvedValue({
+      checkpoints: [
+        {
+          target: {
+            targetUserMessageId: 'transcript-user-1',
+            userMessageIndex: 0,
+            userMessageCount: 1,
+          },
+          code: {
+            available: true,
+            filesChanged: [],
+            insertions: 0,
+            deletions: 0,
+          },
+          restoreAvailable: true,
+          unverifiedChangeSources: ['Bash'],
+        },
+      ],
+    })
+    const rewind = vi.spyOn(sessionsApi, 'rewind').mockResolvedValue({
+      target: {
+        targetUserMessageId: 'transcript-user-1',
+        userMessageIndex: 0,
+        userMessageCount: 1,
+      },
+      conversation: {
+        messagesRemoved: 4,
+        removedMessageIds: [
+          'transcript-user-1',
+          'transcript-tool-1',
+          'transcript-result-1',
+          'transcript-assistant-1',
+        ],
+      },
+      code: {
+        available: true,
+        filesChanged: [],
+        insertions: 0,
+        deletions: 0,
+      },
+      restoreAvailable: true,
+      unverifiedChangeSources: ['Bash'],
+      mode: 'both',
+    })
+    vi.spyOn(sessionsApi, 'getMessages').mockResolvedValue({ messages: [] })
+
+    render(<MessageList />)
+
+    // Drive the first turn through the same store actions and server events as
+    // a live Bash-only response. The bug sits at the transition from this
+    // completed turn to the checkpoint card, so assigning final messages would
+    // make the regression self-consistent by construction.
+    const store = useChatStore.getState()
+    act(() => {
+      store.sendMessage(ACTIVE_TAB, 'write only with Bash')
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'content_start',
+        blockType: 'tool_use',
+        toolName: 'Bash',
+        toolUseId: 'bash-only-1',
+      })
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'tool_use_complete',
+        toolName: 'Bash',
+        toolUseId: 'bash-only-1',
+        input: { command: "printf 'bash-only\\n' > qa/rewind-bash-only.txt" },
+      })
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'tool_result',
+        toolUseId: 'bash-only-1',
+        content: '',
+        isError: false,
+      })
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'content_start',
+        blockType: 'text',
+      })
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'content_delta',
+        text: 'BASH_ONLY_DONE',
+      })
+      store.handleServerMessage(ACTIVE_TAB, { type: 'status', state: 'idle' })
+    })
+
+    const undoButton = await screen.findByRole('button', { name: 'Undo current turn changes' })
+    expect((undoButton as HTMLButtonElement).disabled).toBe(false)
+    expect(screen.getByText(
+      'Undo restores the files above; changes from Bash were not checkpointed and will remain',
+    )).toBeTruthy()
+
+    fireEvent.click(undoButton)
+    const dialog = await screen.findByRole('dialog', { name: 'Undo current turn?' })
+    expect(within(dialog).getByText(
+      'Note: file changes made by Bash were not checkpointed, so undo will not revert them.',
+    )).toBeTruthy()
+    expect((
+      within(dialog).getByRole('button', { name: 'Roll back conversation only' }) as HTMLButtonElement
+    ).disabled).toBe(false)
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Undo current turn' }))
+
+    await waitFor(() => {
+      expect(rewind).toHaveBeenCalledWith(ACTIVE_TAB, {
+        targetUserMessageId: 'transcript-user-1',
+        userMessageIndex: 0,
+        expectedContent: 'write only with Bash',
+        mode: 'both',
+      })
+    })
+    expect(useUIStore.getState().toasts.at(-1)).toMatchObject({
+      type: 'warning',
+      message: 'Rewound 4 messages and restored the checkpointed files; changes from Bash were not checkpointed and remain on disk.',
     })
   })
 
@@ -6707,7 +7480,12 @@ describe('MessageList nested tool calls', () => {
     useChatStore.setState({
       sessions: {
         [ACTIVE_TAB]: makeSessionState({
-          messages: [{ id: 'assistant-origin', type: 'assistant_text', content: 'review result', timestamp: 1 }],
+          // A prompt closes the turn, which is what gives the reply the action
+          // bar this test borrows as its focus target.
+          messages: [
+            { id: 'user-origin', type: 'user_text', content: 'review please', timestamp: 0 },
+            { id: 'assistant-origin', type: 'assistant_text', content: 'review result', timestamp: 1 },
+          ],
         }),
       },
     })
@@ -6743,7 +7521,10 @@ describe('MessageList nested tool calls', () => {
     useChatStore.setState({
       sessions: {
         [ACTIVE_TAB]: makeSessionState({
-          messages: [{ id: 'assistant-clipped', type: 'assistant_text', content: 'review result', timestamp: 1 }],
+          messages: [
+            { id: 'user-clipped', type: 'user_text', content: 'review please', timestamp: 0 },
+            { id: 'assistant-clipped', type: 'assistant_text', content: 'review result', timestamp: 1 },
+          ],
         }),
       },
     })
@@ -6779,9 +7560,13 @@ describe('MessageList nested tool calls', () => {
     useChatStore.setState({
       sessions: {
         [ACTIVE_TAB]: makeSessionState({
+          // Prompts, because this test needs an action bar on an arbitrary item
+          // deep in the list as its focus target, and prompts keep theirs on
+          // every message. What is under test is the remount-then-focus path,
+          // which does not care which side the message came from.
           messages: Array.from({ length: 220 }, (_, index) => ({
             id: `virtual-origin-${index}`,
-            type: 'assistant_text' as const,
+            type: 'user_text' as const,
             content: `virtual transcript ${index}`,
             timestamp: index,
           })),
@@ -6817,7 +7602,7 @@ describe('MessageList nested tool calls', () => {
     })
     const restoredItem = container.querySelector<HTMLElement>('[data-chat-render-item-key="virtual-origin-0"]')
     expect(restoredItem).not.toBeNull()
-    const opener = restoredItem!.querySelector<HTMLButtonElement>('[aria-label="Copy reply"]')!
+    const opener = restoredItem!.querySelector<HTMLButtonElement>('[aria-label="Copy prompt"]')!
     opener.id = 'virtual-origin-opener'
 
     await act(async () => {
@@ -6834,7 +7619,10 @@ describe('MessageList nested tool calls', () => {
     useChatStore.setState({
       sessions: {
         [ACTIVE_TAB]: makeSessionState({
-          messages: [{ id: 'assistant-return', type: 'assistant_text', content: 'returned conversation', timestamp: 1 }],
+          messages: [
+            { id: 'user-return', type: 'user_text', content: 'review please', timestamp: 0 },
+            { id: 'assistant-return', type: 'assistant_text', content: 'returned conversation', timestamp: 1 },
+          ],
         }),
       },
     })
@@ -6988,5 +7776,900 @@ describe('workspace panel origin visibility', () => {
     vi.spyOn(item, 'getBoundingClientRect').mockReturnValue({ top: 80, bottom: 460, left: 60, right: 620 } as DOMRect)
 
     expect(isRenderItemFullyVisibleInChatScroller(item)).toBe(false)
+  })
+})
+
+describe('virtual height estimates', () => {
+  // jsdom has no layout, so the virtualizer's estimates are never exercised by
+  // the rendering tests — a stale constant here shows up only as a long real
+  // transcript jumping under the reader on scroll-up. These pin the ordering and
+  // the ceiling instead of exact pixels, so they survive retuning but not a
+  // constant left behind by a density change.
+  const itemFor = (message: UIMessage) => ({ kind: 'message' as const, message })
+
+  const oneLineReply = itemFor({
+    id: 'reply-1', type: 'assistant_text', content: 'Waiting on #10.', timestamp: 1,
+  })
+  const collapsedActivity = buildRenderModel([
+    { id: 'tool-1', type: 'tool_use', toolName: 'Bash', toolUseId: 'bash-1', input: { command: 'npx xo' }, timestamp: 1 },
+    { id: 'think-1', type: 'thinking', content: 'Check the lint spread.', timestamp: 2 },
+  ]).renderItems[0]!
+
+  it('orders a collapsed run under a one-line reply under a prompt with attachments', () => {
+    const promptWithAttachments = itemFor({
+      id: 'user-1',
+      type: 'user_text',
+      content: 'Look at this',
+      timestamp: 1,
+      attachments: [{ type: 'image', name: 'shot.png' }],
+    })
+
+    expect(estimateRenderItemHeight(collapsedActivity))
+      .toBeLessThan(estimateRenderItemHeight(oneLineReply))
+    expect(estimateRenderItemHeight(oneLineReply))
+      .toBeLessThan(estimateRenderItemHeight(promptWithAttachments))
+  })
+
+  it('keeps a one-line reply under 80px now that the card is gone', () => {
+    expect(estimateRenderItemHeight(oneLineReply)).toBeLessThan(80)
+  })
+
+  it('never estimates below the clamp that also floors measured heights', () => {
+    // VIRTUAL_MIN_ITEM_HEIGHT is applied to the ResizeObserver's reading too, so
+    // it has to stay under the shortest real item or that row is recorded too
+    // tall permanently.
+    expect(estimateRenderItemHeight(collapsedActivity)).toBeGreaterThan(24)
+  })
+})
+
+describe('turn rail positions', () => {
+  /** Rail positions for a transcript, driven through the real render model. */
+  const railFor = (messages: UIMessage[], hasTrailingStreamingItem = false) =>
+    buildTurnRailPositions(buildRenderModel(messages).renderItems, { hasTrailingStreamingItem })
+
+  it('runs one rail from the first response to the last, breaking at each prompt', () => {
+    const positions = railFor([
+      { id: 'user-1', type: 'user_text', content: 'Fix the lint', timestamp: 1 },
+      { id: 'think-1', type: 'thinking', content: 'Check the call sites.', timestamp: 2 },
+      { id: 'tool-1', type: 'tool_use', toolName: 'Bash', toolUseId: 'bash-1', input: { command: 'npx xo' }, timestamp: 3 },
+      { id: 'reply-1', type: 'assistant_text', content: 'Dispatched release-engineer.', timestamp: 4 },
+      { id: 'user-2', type: 'user_text', content: 'And the rest?', timestamp: 5 },
+      { id: 'reply-2', type: 'assistant_text', content: 'Only two files left.', timestamp: 6 },
+    ])
+
+    // The thinking + tool run collapses into one activity group, so the first
+    // turn renders as [group, reply] and the second as a lone reply.
+    expect(positions).toEqual(['none', 'start', 'end', 'none', 'solo'])
+  })
+
+  it('keeps a team card inside the turn that dispatched it', () => {
+    const positions = railFor([
+      { id: 'user-1', type: 'user_text', content: 'Build it with a team', timestamp: 1 },
+      {
+        id: 'tool-create',
+        type: 'tool_use',
+        toolName: 'TeamCreate',
+        toolUseId: 'team-1',
+        input: { name: 'pqueue-hardening' },
+        timestamp: 2,
+      },
+      { id: 'reply-1', type: 'assistant_text', content: 'Team is up.', timestamp: 3 },
+    ])
+
+    // `team_card` is the one render item that is neither a message nor a tool
+    // group, so it is the one that could silently fall out of the turn walk and
+    // take the spacing with it. It is a response like any other.
+    expect(positions).toEqual(['none', 'start', 'end'])
+  })
+
+  it('marks a turn that produced a single item as solo, not start', () => {
+    const positions = railFor([
+      { id: 'user-1', type: 'user_text', content: 'Status?', timestamp: 1 },
+      { id: 'reply-1', type: 'assistant_text', content: 'Still waiting on #10.', timestamp: 2 },
+    ])
+
+    expect(positions).toEqual(['none', 'solo'])
+  })
+
+  it('leaves the run open for the streaming reply to cap', () => {
+    const messages: UIMessage[] = [
+      { id: 'user-1', type: 'user_text', content: 'Fix the lint', timestamp: 1 },
+      { id: 'tool-1', type: 'tool_use', toolName: 'Bash', toolUseId: 'bash-1', input: { command: 'npx xo' }, timestamp: 2 },
+      { id: 'reply-1', type: 'assistant_text', content: 'One file left.', timestamp: 3 },
+    ]
+
+    // Settled: the last transcript item caps the rail itself.
+    expect(railFor(messages, false)).toEqual(['none', 'start', 'end'])
+    // Streaming: the live reply renders below the window and becomes the cap, so
+    // no transcript item may close the line or it breaks right where the reader
+    // is watching it grow.
+    expect(railFor(messages, true)).toEqual(['none', 'start', 'middle'])
+  })
+
+  it('breaks the rail at a pending prompt even though turn attribution does not', () => {
+    // A member session echoes the prompt with `pending: true`. The three turn
+    // walks skip those so a checkpoint keeps its owner, but it still renders as a
+    // right-aligned bubble — the line has to stop at a visible bubble.
+    const positions = railFor([
+      { id: 'user-1', type: 'user_text', content: 'Review the diff', timestamp: 1 },
+      { id: 'reply-1', type: 'assistant_text', content: 'On it.', timestamp: 2 },
+      { id: 'user-2', type: 'user_text', content: 'Review the diff', timestamp: 3, pending: true },
+      { id: 'reply-2', type: 'assistant_text', content: 'Two findings.', timestamp: 4 },
+    ])
+
+    expect(positions).toEqual(['none', 'solo', 'none', 'solo'])
+  })
+
+  it('rails a transcript that opens without a prompt', () => {
+    // Resumed history can start mid-turn; the response still deserves a line.
+    const positions = railFor([
+      { id: 'reply-1', type: 'assistant_text', content: 'Picking up where we left off.', timestamp: 1 },
+      { id: 'reply-2', type: 'assistant_text', content: 'Two files left.', timestamp: 2 },
+    ])
+
+    expect(positions).toEqual(['start', 'end'])
+  })
+
+  it('gives an empty transcript no rail and lets a streaming reply stand alone', () => {
+    expect(railFor([])).toEqual([])
+    expect(trailingStreamingRailPosition([])).toBe('solo')
+  })
+
+  it('caps an open run with the streaming reply and stands alone after a fresh prompt', () => {
+    expect(trailingStreamingRailPosition(['none', 'start', 'middle'])).toBe('end')
+    expect(trailingStreamingRailPosition(['none', 'start'])).toBe('end')
+    // The user just sent: nothing has landed under the new prompt yet.
+    expect(trailingStreamingRailPosition(['none', 'solo', 'none'])).toBe('solo')
+  })
+})
+
+describe('Agent Teams chat projection', () => {
+  function renderedToolUseIds(messages: UIMessage[], options?: Parameters<typeof buildRenderModel>[2]) {
+    return buildRenderModel(messages, null, options).renderItems.flatMap((item) => (
+      item.kind === 'tool_group' ? item.toolCalls.map((toolCall) => toolCall.toolUseId) : []
+    ))
+  }
+
+  function sendMessageRun(
+    id: string,
+    result: unknown,
+    isError = false,
+    input: unknown = { to: 'worker', message: 'Review task #2' },
+  ): UIMessage[] {
+    return [
+      {
+        id: `tool-${id}`,
+        type: 'tool_use',
+        toolName: 'SendMessage',
+        toolUseId: id,
+        input,
+        timestamp: 1,
+      },
+      {
+        id: `result-${id}`,
+        type: 'tool_result',
+        toolUseId: id,
+        content: result,
+        isError,
+        timestamp: 2,
+      },
+    ]
+  }
+
+  it('hides a successful routed teammate message only in a lead workbench session', () => {
+    const messages = sendMessageRun('team-message', {
+      routing: {
+        sender: 'team-lead',
+        target: 'worker',
+        content: 'Review task #2',
+      },
+    })
+
+    expect(buildRenderModel(messages).renderItems).toHaveLength(1)
+    const lead = buildRenderModel(messages, null, {
+      hideTeamCoordinationTools: true,
+      teamMemberNames: new Set(['worker']),
+      teamName: 'audit-team',
+    })
+    expect(lead.renderItems).toEqual([
+      expect.objectContaining({ kind: 'team_card', coordinationToolCalls: [messages[0]] }),
+    ])
+  })
+
+  it('hides successful team messages from their real input shape when the transport omits routing', () => {
+    const direct = sendMessageRun('direct', 'Message sent to worker inbox')
+    const broadcast = sendMessageRun('broadcast', 'Message broadcast to 4 teammates', false, {
+      to: '*',
+      message: 'Start the dependency graph',
+    })
+    const messages = [...direct, ...broadcast]
+
+    const lead = buildRenderModel(messages, null, {
+      hideTeamCoordinationTools: true,
+      teamMemberNames: new Set(['worker']),
+      teamName: 'audit-team',
+    })
+    expect(lead.renderItems).toEqual([
+      expect.objectContaining({ kind: 'team_card', coordinationToolCalls: [direct[0], broadcast[0]] }),
+    ])
+  })
+
+  it('keeps ordinary agent continuation and failed team SendMessage calls visible', () => {
+    const ordinary = sendMessageRun(
+      'ordinary',
+      'Message queued to async agent a1',
+      false,
+      { to: 'async-agent-a1', message: 'Continue' },
+    )
+    const failed = sendMessageRun('failed', {
+      routing: { sender: 'team-lead', target: 'missing-worker' },
+    }, true)
+
+    expect(buildRenderModel(ordinary, null, {
+      hideTeamCoordinationTools: true,
+      teamMemberNames: new Set(['worker']),
+    }).renderItems).toHaveLength(1)
+    expect(buildRenderModel(failed, null, {
+      hideTeamCoordinationTools: true,
+    }).renderItems).toHaveLength(1)
+  })
+
+  it('stops using a historical Team roster after delete when a same-name direct Agent is messaged', () => {
+    const messages: UIMessage[] = [
+      {
+        id: 'create-tool', type: 'tool_use', toolName: 'TeamCreate', toolUseId: 'create',
+        input: { team_name: 'audit-team' }, timestamp: 1,
+      },
+      {
+        id: 'create-result', type: 'tool_result', toolUseId: 'create',
+        content: { success: true, team_name: 'audit-team' }, isError: false, timestamp: 2,
+      },
+      {
+        id: 'team-message-tool', type: 'tool_use', toolName: 'SendMessage', toolUseId: 'team-message',
+        input: { to: 'reviewer', message: 'Finish the Team review' }, timestamp: 3,
+      },
+      {
+        id: 'team-message-result', type: 'tool_result', toolUseId: 'team-message',
+        content: 'Message sent to reviewer inbox', isError: false, timestamp: 4,
+      },
+      {
+        id: 'delete-tool', type: 'tool_use', toolName: 'TeamDelete', toolUseId: 'delete',
+        input: {}, timestamp: 5,
+      },
+      {
+        id: 'delete-result', type: 'tool_result', toolUseId: 'delete',
+        content: { success: true, team_name: 'audit-team' }, isError: false, timestamp: 6,
+      },
+      {
+        id: 'direct-agent-tool', type: 'tool_use', toolName: 'Agent', toolUseId: 'direct-agent',
+        input: { name: 'reviewer', description: 'Continue as an ordinary SubAgent' }, timestamp: 7,
+      },
+      {
+        id: 'direct-agent-result', type: 'tool_result', toolUseId: 'direct-agent',
+        content: { status: 'completed', agentId: 'direct-reviewer' }, isError: false, timestamp: 8,
+      },
+      {
+        id: 'direct-message-tool', type: 'tool_use', toolName: 'SendMessage', toolUseId: 'direct-message',
+        input: { to: 'reviewer', message: 'Continue the direct review' }, timestamp: 9,
+      },
+      {
+        id: 'direct-message-result', type: 'tool_result', toolUseId: 'direct-message',
+        content: 'Message queued for delivery to reviewer at its next tool round.',
+        isError: false,
+        timestamp: 10,
+      },
+    ]
+
+    const options = {
+      hideTeamCoordinationTools: true,
+      teamMemberNames: new Set(['reviewer']),
+      teamName: 'audit-team',
+    }
+    const model = buildRenderModel(messages, null, options)
+    const teamCards = model.renderItems.filter((item) => item.kind === 'team_card')
+
+    expect(teamCards).toHaveLength(1)
+    expect(teamCards[0]).toMatchObject({
+      teamName: 'audit-team',
+      endedAt: 5,
+      coordinationToolCalls: [
+        expect.objectContaining({ toolUseId: 'team-message' }),
+        expect.objectContaining({ toolUseId: 'delete' }),
+      ],
+    })
+    expect(renderedToolUseIds(messages, options)).toEqual([
+      'direct-agent',
+      'direct-message',
+    ])
+  })
+
+  it('replaces the TeamCreate call with a team card at the point the team was formed', () => {
+    const messages: UIMessage[] = [
+      { id: 'user-1', type: 'user_text', content: 'Audit the queue', timestamp: 1 },
+      {
+        id: 'tool-create',
+        type: 'tool_use',
+        toolName: 'TeamCreate',
+        toolUseId: 'create-1',
+        input: { team_name: 'audit-team' },
+        timestamp: 2,
+      },
+      {
+        id: 'result-create',
+        type: 'tool_result',
+        toolUseId: 'create-1',
+        content: '{"team_name":"audit-team","lead_agent_id":"team-lead@audit-team"}',
+        isError: false,
+        timestamp: 3,
+      },
+      { id: 'assistant-1', type: 'assistant_text', content: 'Team is up.', timestamp: 4 },
+    ]
+
+    const lead = buildRenderModel(messages, null, { hideTeamCoordinationTools: true })
+    expect(lead.renderItems.map((item) => item.kind))
+      .toEqual(['message', 'team_card', 'message'])
+    // The card sits where the call was, not appended at the end — scrolling
+    // back must still show that this turn handed work to a team.
+    expect(lead.renderItems[1]).toMatchObject({ kind: 'team_card', id: 'team-card-tool-create' })
+
+    // An ordinary session with no workbench keeps the raw tool call.
+    expect(buildRenderModel(messages).renderItems.map((item) => item.kind))
+      .toEqual(['message', 'tool_group', 'message'])
+  })
+
+  it('projects team orchestration into the team card without hiding ordinary tools', () => {
+    const tool = (
+      id: string,
+      toolName: string,
+      input: unknown,
+      timestamp: number,
+    ): UIMessage => ({
+      id: `tool-${id}`,
+      type: 'tool_use',
+      toolName,
+      toolUseId: id,
+      input,
+      timestamp,
+    })
+    const result = (
+      id: string,
+      content: unknown,
+      timestamp: number,
+      isError = false,
+    ): UIMessage => ({
+      id: `result-${id}`,
+      type: 'tool_result',
+      toolUseId: id,
+      content,
+      isError,
+      timestamp,
+    })
+    const messages: UIMessage[] = [
+      tool('pre-task', 'TaskCreate', { subject: 'Operator todo' }, 1),
+      result('pre-task', 'Task #1 created successfully', 2),
+      tool('create-team', 'TeamCreate', { team_name: 'audit-team' }, 3),
+      result('create-team', { team_name: 'audit-team' }, 4),
+      tool('team-task', 'TaskCreate', { subject: 'Review API' }, 5),
+      result('team-task', 'Task #1 created successfully', 6),
+      tool('team-update', 'TaskUpdate', { taskId: '1', owner: 'reviewer' }, 7),
+      result('team-update', 'Task #1 updated successfully', 8),
+      tool('team-agent', 'Agent', {
+        description: 'Review API',
+        name: 'reviewer',
+        team_name: 'audit-team',
+      }, 9),
+      result('team-agent', { status: 'teammate_spawned', name: 'reviewer', team_name: 'audit-team' }, 10),
+      tool('direct-agent', 'Agent', { description: 'Check an unrelated question' }, 11),
+      result('direct-agent', 'agentId: direct-1', 12),
+      tool('team-message', 'SendMessage', { to: 'reviewer', message: 'Start task #1' }, 13),
+      result('team-message', 'Message sent to reviewer inbox', 14),
+      tool('failed-update', 'TaskUpdate', { taskId: 'missing', status: 'completed' }, 15),
+      result('failed-update', 'Task missing not found', 16, true),
+      tool('failed-team-agent', 'Agent', {
+        description: 'Spawn missing teammate',
+        name: 'missing',
+        team_name: 'audit-team',
+      }, 17),
+      result('failed-team-agent', 'Agent spawn failed', 18, true),
+      tool('delete-team', 'TeamDelete', {}, 19),
+      result('delete-team', { success: true, team_name: 'audit-team' }, 20),
+      tool('post-task', 'TaskCreate', { subject: 'Operator follow-up' }, 21),
+      result('post-task', 'Task #2 created successfully', 22),
+      tool('post-agent', 'Agent', { description: 'Summarize the follow-up' }, 23),
+      result('post-agent', 'agentId: direct-2', 24),
+    ]
+
+    const model = buildRenderModel(messages, null, {
+      hideTeamCoordinationTools: true,
+      teamMemberNames: new Set(['reviewer']),
+    })
+
+    expect(renderedToolUseIds(messages, {
+      hideTeamCoordinationTools: true,
+      teamMemberNames: new Set(['reviewer']),
+    })).toEqual([
+      'pre-task',
+      'direct-agent',
+      'failed-update',
+      'failed-team-agent',
+      'post-task',
+      'post-agent',
+    ])
+    const teamCards = model.renderItems.filter((item) => item.kind === 'team_card')
+    expect(teamCards).toHaveLength(1)
+    expect(teamCards[0]).toMatchObject({
+      teamName: 'audit-team',
+      endedAt: 19,
+      coordinationToolCalls: [
+        expect.objectContaining({ toolUseId: 'team-task' }),
+        expect.objectContaining({ toolUseId: 'team-update' }),
+        expect.objectContaining({ toolUseId: 'team-agent' }),
+        expect.objectContaining({ toolUseId: 'team-message' }),
+        expect.objectContaining({ toolUseId: 'delete-team' }),
+      ],
+    })
+    // Projection removes duplicate UI only. The raw audit result remains
+    // available to the transcript/store and the workbench owns its presentation.
+    expect(model.toolResultMap.get('team-task')?.content).toBe('Task #1 created successfully')
+    expect(messages).toHaveLength(24)
+  })
+
+  it('does not enter Team scope when TeamCreate returns success false', () => {
+    const messages: UIMessage[] = [
+      {
+        id: 'create-tool', type: 'tool_use', toolName: 'TeamCreate', toolUseId: 'create',
+        input: { team_name: 'failed-team' }, timestamp: 1,
+      },
+      {
+        id: 'create-result', type: 'tool_result', toolUseId: 'create',
+        content: { success: false, error: 'already exists' }, isError: false, timestamp: 2,
+      },
+      {
+        id: 'task-tool', type: 'tool_use', toolName: 'TaskCreate', toolUseId: 'task',
+        input: { subject: 'Main-session task' }, timestamp: 3,
+      },
+    ]
+
+    expect(renderedToolUseIds(messages, {
+      hideTeamCoordinationTools: true,
+    })).toEqual(['create', 'task'])
+    expect(buildRenderModel(messages, null, {
+      hideTeamCoordinationTools: true,
+    }).renderItems.some(item => item.kind === 'team_card')).toBe(false)
+  })
+
+  it('keeps Team scope active when TeamDelete returns success false', () => {
+    const messages: UIMessage[] = [
+      {
+        id: 'create-tool', type: 'tool_use', toolName: 'TeamCreate', toolUseId: 'create',
+        input: { team_name: 'audit-team' }, timestamp: 1,
+      },
+      {
+        id: 'create-result', type: 'tool_result', toolUseId: 'create',
+        content: { success: true }, isError: false, timestamp: 2,
+      },
+      {
+        id: 'delete-tool', type: 'tool_use', toolName: 'TeamDelete', toolUseId: 'delete',
+        input: {}, timestamp: 3,
+      },
+      {
+        id: 'delete-result', type: 'tool_result', toolUseId: 'delete',
+        content: { success: false, team_name: 'audit-team', error: 'still running' }, isError: false, timestamp: 4,
+      },
+      {
+        id: 'task-tool', type: 'tool_use', toolName: 'TaskCreate', toolUseId: 'task',
+        input: { subject: 'Shared Team task' }, timestamp: 5,
+      },
+    ]
+
+    expect(renderedToolUseIds(messages, {
+      hideTeamCoordinationTools: true,
+    })).toEqual(['delete'])
+  })
+
+  it('never renders an identity-unknown pending Agent as a SubAgent during a team lifecycle', () => {
+    vi.useFakeTimers()
+    const sessionId = 'team-transcript-stream'
+    useChatStore.setState({
+      sessions: { [sessionId]: makeSessionState() },
+    })
+    const store = useChatStore.getState()
+    const renderedIds = () => renderedToolUseIds(
+      useChatStore.getState().sessions[sessionId]?.messages ?? [],
+      { hideTeamCoordinationTools: true },
+    )
+
+    store.handleServerMessage(sessionId, {
+      type: 'content_start', blockType: 'tool_use', toolName: 'TeamCreate', toolUseId: 'create-team',
+    })
+    store.handleServerMessage(sessionId, {
+      type: 'tool_use_complete',
+      toolName: 'TeamCreate',
+      toolUseId: 'create-team',
+      input: { team_name: 'audit-team' },
+    })
+    store.handleServerMessage(sessionId, {
+      type: 'tool_result',
+      toolUseId: 'create-team',
+      content: { team_name: 'audit-team' },
+      isError: false,
+    })
+
+    store.handleServerMessage(sessionId, {
+      type: 'content_start', blockType: 'tool_use', toolName: 'Agent', toolUseId: 'team-agent',
+    })
+    store.handleServerMessage(sessionId, {
+      type: 'content_delta', toolInput: '{"description":"Review API","name":',
+    })
+    vi.advanceTimersByTime(60)
+
+    expect(useChatStore.getState().sessions[sessionId]?.messages).toContainEqual(
+      expect.objectContaining({
+        type: 'tool_use',
+        toolUseId: 'team-agent',
+        input: { description: 'Review API' },
+        isPending: true,
+      }),
+    )
+    expect(renderedIds()).toEqual([])
+
+    store.handleServerMessage(sessionId, {
+      type: 'tool_use_complete',
+      toolName: 'Agent',
+      toolUseId: 'team-agent',
+      input: { description: 'Review API', name: 'reviewer', team_name: 'audit-team' },
+    })
+    store.handleServerMessage(sessionId, {
+      type: 'tool_result',
+      toolUseId: 'team-agent',
+      content: { status: 'teammate_spawned', name: 'reviewer', team_name: 'audit-team' },
+      isError: false,
+    })
+    expect(renderedIds()).toEqual([])
+
+    store.handleServerMessage(sessionId, {
+      type: 'content_start', blockType: 'tool_use', toolName: 'Agent', toolUseId: 'direct-agent',
+    })
+    store.handleServerMessage(sessionId, {
+      type: 'content_delta', toolInput: '{"description":"Check an unrelated question"',
+    })
+    vi.advanceTimersByTime(60)
+    expect(renderedIds()).toEqual([])
+
+    store.handleServerMessage(sessionId, {
+      type: 'tool_use_complete',
+      toolName: 'Agent',
+      toolUseId: 'direct-agent',
+      input: { description: 'Check an unrelated question' },
+    })
+    expect(renderedIds()).toEqual(['direct-agent'])
+
+    vi.runOnlyPendingTimers()
+    vi.useRealTimers()
+  })
+
+  it('uses a team lifecycle window only when compacted history omits TeamCreate', () => {
+    const messages: UIMessage[] = [
+      {
+        id: 'pre-task', type: 'tool_use', toolName: 'TaskCreate', toolUseId: 'pre-task',
+        input: { subject: 'Before team' }, timestamp: 90,
+      },
+      {
+        id: 'team-task', type: 'tool_use', toolName: 'TaskCreate', toolUseId: 'team-task',
+        input: { subject: 'Team task' }, timestamp: 150,
+      },
+      {
+        id: 'post-task', type: 'tool_use', toolName: 'TaskCreate', toolUseId: 'post-task',
+        input: { subject: 'After team' }, timestamp: 210,
+      },
+    ]
+
+    expect(renderedToolUseIds(messages, {
+      hideTeamCoordinationTools: true,
+      teamTaskWindows: [{ startedAt: 100, endedAt: 200 }],
+      teamName: 'audit-team',
+    })).toEqual(['pre-task', 'post-task'])
+    expect(renderedToolUseIds(messages)).toEqual(['pre-task', 'team-task', 'post-task'])
+  })
+
+  it('lets a durable end close an explicit TeamCreate when TeamDelete was compacted', () => {
+    const messages: UIMessage[] = [
+      {
+        id: 'create-tool', type: 'tool_use', toolName: 'TeamCreate', toolUseId: 'create',
+        input: { team_name: 'audit-team' }, timestamp: 100,
+      },
+      {
+        id: 'create-result', type: 'tool_result', toolUseId: 'create',
+        content: { success: true }, isError: false, timestamp: 101,
+      },
+      {
+        id: 'team-task', type: 'tool_use', toolName: 'TaskCreate', toolUseId: 'team-task',
+        input: { subject: 'Inside lifecycle' }, timestamp: 150,
+      },
+      {
+        id: 'post-task', type: 'tool_use', toolName: 'TaskCreate', toolUseId: 'post-task',
+        input: { subject: 'After lifecycle' }, timestamp: 250,
+      },
+    ]
+
+    expect(renderedToolUseIds(messages, {
+      hideTeamCoordinationTools: true,
+      teamTaskWindows: [{ startedAt: 100, endedAt: 200 }],
+      teamName: 'audit-team',
+    })).toEqual(['post-task'])
+  })
+
+  it('uses a newer durable Team window after an older explicit TeamDelete', () => {
+    const messages: UIMessage[] = [
+      {
+        id: 'old-delete', type: 'tool_use', toolName: 'TeamDelete', toolUseId: 'old-delete',
+        input: {}, timestamp: 90,
+      },
+      {
+        id: 'old-delete-result', type: 'tool_result', toolUseId: 'old-delete',
+        content: { success: true, team_name: 'old-team' }, isError: false, timestamp: 91,
+      },
+      {
+        id: 'team-task', type: 'tool_use', toolName: 'TaskCreate', toolUseId: 'team-task',
+        input: { subject: 'Compacted new Team task' }, timestamp: 150,
+      },
+      {
+        id: 'post-task', type: 'tool_use', toolName: 'TaskCreate', toolUseId: 'post-task',
+        input: { subject: 'After compacted Team' }, timestamp: 250,
+      },
+    ]
+
+    const options = {
+      hideTeamCoordinationTools: true,
+      teamTaskWindows: [{ startedAt: 100, endedAt: 200 }],
+      teamName: 'audit-team',
+      teamStartedAt: 100,
+    }
+    expect(renderedToolUseIds(messages, options)).toEqual(['post-task'])
+    expect(buildRenderModel(messages, null, options).renderItems.filter(
+      (item) => item.kind === 'team_card',
+    )).toEqual([
+      expect.objectContaining({
+        teamName: 'old-team',
+        endedAt: 90,
+        coordinationToolCalls: [expect.objectContaining({ toolUseId: 'old-delete' })],
+      }),
+      expect.objectContaining({
+        teamName: 'audit-team',
+        startedAt: 100,
+        coordinationToolCalls: [expect.objectContaining({ toolUseId: 'team-task' })],
+      }),
+    ])
+  })
+
+  it('starts a new audit card when a compacted Team lifecycle follows an explicit delete', () => {
+    const messages: UIMessage[] = [
+      {
+        id: 'old-create', type: 'tool_use', toolName: 'TeamCreate', toolUseId: 'old-create',
+        input: { team_name: 'old-team' }, timestamp: 10,
+      },
+      {
+        id: 'old-create-result', type: 'tool_result', toolUseId: 'old-create',
+        content: { success: true, team_name: 'old-team' }, isError: false, timestamp: 11,
+      },
+      {
+        id: 'old-delete', type: 'tool_use', toolName: 'TeamDelete', toolUseId: 'old-delete',
+        input: {}, timestamp: 20,
+      },
+      {
+        id: 'old-delete-result', type: 'tool_result', toolUseId: 'old-delete',
+        content: { success: true, team_name: 'old-team' }, isError: false, timestamp: 21,
+      },
+      {
+        id: 'new-team-task', type: 'tool_use', toolName: 'TaskCreate', toolUseId: 'new-team-task',
+        input: { subject: 'Task from compacted new Team' }, timestamp: 150,
+      },
+    ]
+
+    const model = buildRenderModel(messages, null, {
+      hideTeamCoordinationTools: true,
+      teamTaskWindows: [{ startedAt: 100, endedAt: 200 }],
+      teamName: 'new-team',
+      teamStartedAt: 100,
+    })
+    const cards = model.renderItems.filter((item) => item.kind === 'team_card')
+
+    expect(cards).toHaveLength(2)
+    expect(cards[0]).toMatchObject({
+      teamName: 'old-team',
+      startedAt: 10,
+      endedAt: 20,
+      coordinationToolCalls: [expect.objectContaining({ toolUseId: 'old-delete' })],
+    })
+    expect(cards[1]).toMatchObject({
+      teamName: 'new-team',
+      startedAt: 100,
+      coordinationToolCalls: [expect.objectContaining({ toolUseId: 'new-team-task' })],
+    })
+  })
+
+  it('uses the successful TeamCreate identity and never substitutes the current Team for an explicit old scope', () => {
+    const createMessages: UIMessage[] = [
+      {
+        id: 'create-tool', type: 'tool_use', toolName: 'TeamCreate', toolUseId: 'create',
+        input: { team_name: 'requested-name' }, timestamp: 10,
+      },
+      {
+        id: 'create-result', type: 'tool_result', toolUseId: 'create',
+        content: { success: true, team_name: 'requested-name-2' }, isError: false, timestamp: 11,
+      },
+    ]
+    const createdCard = buildRenderModel(createMessages, null, {
+      hideTeamCoordinationTools: true,
+    }).renderItems.find((item) => item.kind === 'team_card')
+    expect(createdCard).toMatchObject({
+      teamName: 'requested-name-2',
+      startedAt: 10,
+    })
+
+    const explicitOldScope = buildRenderModel([{
+      id: 'old-agent', type: 'tool_use', toolName: 'Agent', toolUseId: 'old-agent',
+      input: { name: 'reviewer', team_name: 'old-team', description: 'Review the old run' },
+      timestamp: 150,
+    }], null, {
+      hideTeamCoordinationTools: true,
+      teamName: 'new-team',
+      teamStartedAt: 200,
+    }).renderItems.find((item) => item.kind === 'team_card')
+    expect(explicitOldScope).toMatchObject({
+      teamName: 'old-team',
+      startedAt: 150,
+      coordinationToolCalls: [expect.objectContaining({ toolUseId: 'old-agent' })],
+    })
+  })
+
+  it('uses synchronous Team lifecycle ownership before the first workbench snapshot resolves', async () => {
+    let resolveWorkbench!: (snapshot: Awaited<ReturnType<typeof teamsApi.getWorkbench>>) => void
+    vi.spyOn(teamsApi, 'get').mockImplementation(() => new Promise(() => {}))
+    vi.spyOn(teamsApi, 'getWorkbench').mockImplementation(() => new Promise((resolve) => {
+      resolveWorkbench = resolve
+    }))
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: [
+            {
+              id: 'task-tool', type: 'tool_use', toolName: 'TaskCreate', toolUseId: 'team-task',
+              input: { subject: 'Never flash this Team task' }, timestamp: 102,
+            },
+            {
+              id: 'agent-tool', type: 'tool_use', toolName: 'Agent', toolUseId: 'team-agent',
+              input: { description: 'Never flash this teammate', name: 'reviewer' },
+              timestamp: 103, isPending: true,
+            },
+            {
+              id: 'message-tool', type: 'tool_use', toolName: 'SendMessage', toolUseId: 'team-message',
+              input: { to: 'reviewer', message: 'Never flash this Team message' },
+              timestamp: 104, isPending: false,
+            },
+          ],
+        }),
+      },
+    })
+
+    act(() => {
+      useTeamStore.getState().handleTeamCreated('audit-team', ACTIVE_TAB, { createdAt: 100 })
+    })
+    render(<MessageList sessionId={ACTIVE_TAB} />)
+
+    const pendingCard = screen.getByTestId('agent-teams-inline-card')
+    const audit = screen.getByTestId('agent-teams-coordination-audit')
+    expect((pendingCard as HTMLButtonElement).disabled).toBe(true)
+    expect(within(audit).getByText('Never flash this Team task')).toBeTruthy()
+    expect(within(audit).getByText(/Never flash this teammate/)).toBeTruthy()
+    expect(within(audit).getByText(/Never flash this Team message/)).toBeTruthy()
+    expect(screen.getAllByText('Never flash this Team task')).toHaveLength(1)
+    expect(screen.getAllByText(/Never flash this teammate/)).toHaveLength(1)
+    expect(screen.getAllByText(/Never flash this Team message/)).toHaveLength(1)
+    expect(useTeamStore.getState().workbenchesBySession[ACTIVE_TAB]).toBeUndefined()
+
+    await act(async () => {
+      resolveWorkbench({
+        version: 'snapshot-v1',
+        generatedAt: new Date(110).toISOString(),
+        team: {
+          name: 'audit-team',
+          leadSessionId: ACTIVE_TAB,
+          leadAgentId: 'team-lead@audit-team',
+          createdAt: '100',
+          members: [{
+            agentId: 'team-lead@audit-team', name: 'team-lead', role: 'lead', status: 'running',
+          }],
+        },
+        tasks: [],
+        messages: [],
+      })
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(
+      (screen.getByTestId('agent-teams-inline-card') as HTMLButtonElement).disabled,
+    ).toBe(false))
+    expect(screen.getAllByText('Never flash this Team task')).toHaveLength(1)
+    expect(screen.getAllByText(/Never flash this teammate/)).toHaveLength(1)
+    expect(screen.getAllByText(/Never flash this Team message/)).toHaveLength(1)
+  })
+
+  it('never binds an older TeamCreate card to a newer incarnation with the same name', async () => {
+    let resolveWorkbench!: (snapshot: Awaited<ReturnType<typeof teamsApi.getWorkbench>>) => void
+    vi.spyOn(teamsApi, 'get').mockImplementation(() => new Promise(() => {}))
+    vi.spyOn(teamsApi, 'getWorkbench').mockImplementation(() => new Promise((resolve) => {
+      resolveWorkbench = resolve
+    }))
+    const createRun = (id: string, timestamp: number): UIMessage[] => [
+      {
+        id: `${id}-tool`, type: 'tool_use', toolName: 'TeamCreate', toolUseId: id,
+        input: { team_name: 'reused-team' }, timestamp,
+      },
+      {
+        id: `${id}-result`, type: 'tool_result', toolUseId: id,
+        content: { success: true, team_name: 'reused-team' }, isError: false, timestamp: timestamp + 1,
+      },
+    ]
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: [
+            ...createRun('old-create', 100_000),
+            {
+              id: 'old-delete-tool', type: 'tool_use', toolName: 'TeamDelete', toolUseId: 'old-delete',
+              input: {}, timestamp: 101_000,
+            },
+            {
+              id: 'old-delete-result', type: 'tool_result', toolUseId: 'old-delete',
+              content: { success: true, team_name: 'reused-team' }, isError: false, timestamp: 101_001,
+            },
+            // The next incarnation starts within the transport-tolerance
+            // window of the first. Its snapshot must still never revive the
+            // already-ended historical card.
+            ...createRun('new-create', 102_000),
+          ],
+        }),
+      },
+    })
+
+    act(() => {
+      useTeamStore.getState().handleTeamCreated('reused-team', ACTIVE_TAB, { createdAt: 102_000 })
+    })
+    render(<MessageList sessionId={ACTIVE_TAB} />)
+
+    await act(async () => {
+      resolveWorkbench({
+        version: 'new-incarnation',
+        generatedAt: new Date(102_010).toISOString(),
+        team: {
+          name: 'reused-team',
+          leadSessionId: ACTIVE_TAB,
+          leadAgentId: 'team-lead@reused-team',
+          incarnationId: 'new-incarnation',
+          createdAt: '102000',
+          members: [{
+            agentId: 'team-lead@reused-team', name: 'team-lead', role: 'lead', status: 'running',
+          }],
+        },
+        tasks: [],
+        messages: [],
+      })
+      await Promise.resolve()
+    })
+
+    const cards = await screen.findAllByTestId('agent-teams-inline-card')
+    expect(cards).toHaveLength(2)
+    expect((cards[0] as HTMLButtonElement).disabled).toBe(true)
+    expect((cards[1] as HTMLButtonElement).disabled).toBe(false)
+    expect(within(cards[0]!).getByText('Completed')).toBeTruthy()
+    expect(within(cards[1]!).getByText('Forming team')).toBeTruthy()
+
+    fireEvent.click(cards[1]!)
+    expect(useTabStore.getState().tabs).toContainEqual(expect.objectContaining({
+      type: 'team',
+      title: 'reused-team',
+      teamLeadSessionId: ACTIVE_TAB,
+    }))
   })
 })

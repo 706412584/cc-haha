@@ -157,7 +157,10 @@ import {
 import { createAbortController } from 'src/utils/abortController.js'
 import { createCombinedAbortSignal } from 'src/utils/combinedAbortSignal.js'
 import { generateSessionTitle } from 'src/utils/sessionTitle.js'
-import { buildSideQuestionFallbackParams } from 'src/utils/queryContext.js'
+import {
+  buildSideQuestionFallbackParams,
+  resolveAgentMessageToolUseContext,
+} from 'src/utils/queryContext.js'
 import { runSideQuestion } from 'src/utils/sideQuestion.js'
 import {
   processSessionStartHooks,
@@ -195,6 +198,12 @@ import {
   type PromptVariant,
 } from 'src/services/PromptSuggestion/promptSuggestion.js'
 import { getLastCacheSafeParams } from 'src/utils/forkedAgent.js'
+import {
+  isLocalAgentTask,
+  queuePendingMessage,
+} from 'src/tasks/LocalAgentTask/LocalAgentTask.js'
+import { isMainSessionTask } from 'src/tasks/LocalMainSessionTask.js'
+import { resumeAgentBackground } from 'src/tools/AgentTool/resumeAgent.js'
 import { getAccountInformation } from 'src/utils/auth.js'
 import { OAuthService } from 'src/services/oauth/index.js'
 import { installOAuthTokens } from 'src/cli/handlers/auth.js'
@@ -360,7 +369,10 @@ import { unassignTeammateTasks } from '../utils/tasks.js'
 import { getRunningTasks } from '../utils/task/framework.js'
 import { isBackgroundTask } from '../tasks/types.js'
 import { stopTask } from '../tasks/stopTask.js'
-import { drainSdkEvents } from '../utils/sdkEventQueue.js'
+import {
+  drainSdkEvents,
+  setAgentRunMessageSink,
+} from '../utils/sdkEventQueue.js'
 import { initializeGrowthBook } from '../services/analytics/growthbook.js'
 import { errorMessage, toError } from '../utils/errors.js'
 import { sleep } from '../utils/sleep.js'
@@ -990,6 +1002,13 @@ export async function runHeadless(
   )
 }
 
+export function bindAgentRunMessageSink(structuredIO: StructuredIO): () => void {
+  if (!(structuredIO instanceof RemoteIO)) return () => undefined
+  return setAgentRunMessageSink(event => {
+    structuredIO.outbound.enqueue(event)
+  })
+}
+
 function runHeadlessStreaming(
   structuredIO: StructuredIO,
   mcpClients: MCPServerConnection[],
@@ -1039,6 +1058,7 @@ function runHeadlessStreaming(
   let abortController: AbortController | undefined
   // Same queue sendRequest() enqueues to — one FIFO for everything.
   const output = structuredIO.outbound
+  const removeAgentRunMessageSink = bindAgentRunMessageSink(structuredIO)
 
   // Ctrl+C in -p mode: abort the in-flight query, then shut down gracefully.
   // gracefulShutdown persists session state and flushes analytics, with a
@@ -2058,6 +2078,7 @@ function runHeadlessStreaming(
                 output_file: notification.outputFile,
                 summary: notification.summary,
                 result: notification.result,
+                workflow_run_id: notification.workflowRunId,
                 usage: notification.usage,
                 session_id: getSessionId(),
                 uuid: randomUUID(),
@@ -2678,6 +2699,7 @@ function runHeadlessStreaming(
         unsubscribeSkillChanges()
         unsubscribeAuthStatus?.()
         statusListeners.delete(rateLimitListener)
+        removeAgentRunMessageSink()
         output.done()
       }
     }
@@ -3799,6 +3821,62 @@ function runHeadlessStreaming(
           } catch (error) {
             sendControlResponseError(message, errorMessage(error))
           }
+        } else if (message.request.subtype === 'send_agent_message') {
+          const agentId = message.request.agent_id.trim()
+          const content = message.request.content.trim()
+          if (!agentId || !content) {
+            sendControlResponseError(message, 'Agent id and message content are required')
+            continue
+          }
+
+          try {
+            const task = getAppState().tasks[agentId]
+            if (
+              task?.status === 'running' &&
+              isLocalAgentTask(task) &&
+              !isMainSessionTask(task)
+            ) {
+              queuePendingMessage(agentId, content, setAppState)
+              sendControlResponseSuccess(message, {
+                agent_id: agentId,
+                delivery: 'queued',
+              })
+              continue
+            }
+
+            const toolUseContext = await resolveAgentMessageToolUseContext(
+              getLastCacheSafeParams(),
+              () => buildSideQuestionFallbackParams({
+                tools: buildAllTools(getAppState()),
+                commands: currentCommands,
+                mcpClients: [
+                  ...getAppState().mcp.clients,
+                  ...sdkClients,
+                  ...dynamicMcpState.clients,
+                ],
+                messages: mutableMessages,
+                readFileState,
+                getAppState,
+                setAppState,
+                customSystemPrompt: options.systemPrompt,
+                appendSystemPrompt: options.appendSystemPrompt,
+                thinkingConfig: options.thinkingConfig,
+                agents: currentAgents,
+              }),
+            )
+            await resumeAgentBackground({
+              agentId,
+              prompt: content,
+              toolUseContext,
+              canUseTool,
+            })
+            sendControlResponseSuccess(message, {
+              agent_id: agentId,
+              delivery: 'resumed',
+            })
+          } catch (error) {
+            sendControlResponseError(message, errorMessage(error))
+          }
         } else if (message.request.subtype === 'generate_session_title') {
           // Fire-and-forget so the Haiku call does not block the stdin loop
           // (which would delay processing of subsequent user messages /
@@ -4154,12 +4232,15 @@ function runHeadlessStreaming(
       unsubscribeSkillChanges()
       unsubscribeAuthStatus?.()
       statusListeners.delete(rateLimitListener)
+      removeAgentRunMessageSink()
       output.done()
     }
   })()
 
   return output
 }
+
+export { runHeadlessStreaming as __runHeadlessStreamingForTests }
 
 /**
  * Creates a CanUseToolFn that incorporates a custom permission prompt tool.

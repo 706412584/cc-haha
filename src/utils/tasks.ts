@@ -1,5 +1,6 @@
-import { mkdir, readdir, readFile, unlink, writeFile } from 'fs/promises'
-import { join } from 'path'
+import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'fs/promises'
+import { dirname, join } from 'path'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { z } from 'zod/v4'
 import { getIsNonInteractiveSession, getSessionId } from '../bootstrap/state.js'
 import { uniq } from './array.js'
@@ -16,6 +17,17 @@ import { getTeammateContext } from './teammateContext.js'
 
 // Listeners for task list updates (used for immediate UI refresh in same process)
 const tasksUpdated = createSignal()
+type TaskListLifecycleContext = {
+  held: ReadonlySet<string>
+  lease: { active: boolean }
+}
+const taskListLifecycleContext = new AsyncLocalStorage<TaskListLifecycleContext>()
+
+function isTaskListLifecycleLockHeld(taskListId: string): boolean {
+  const context = taskListLifecycleContext.getStore()
+  return context?.lease.active === true &&
+    context.held.has(sanitizePathComponent(taskListId))
+}
 
 /**
  * Team name set by the leader when creating a team.
@@ -88,8 +100,36 @@ export const TaskSchema = lazySchema(() =>
 )
 export type Task = z.infer<ReturnType<typeof TaskSchema>>
 
+export type TaskListTerminalIdentity = {
+  teamName: string
+  createdAt: number
+  leadSessionId?: string
+}
+
+export type TaskListLifecycleToken = {
+  generation: number
+  identity: TaskListTerminalIdentity
+}
+
+export type TaskListTerminalReceipt = TaskListSnapshot & {
+  frameId: string
+  generation: number
+  identity: TaskListTerminalIdentity
+}
+
+export type TaskListLifecycleState = {
+  schemaVersion: 1
+  generation: number
+  deleted: boolean
+  activeIdentity?: TaskListTerminalIdentity
+  terminals: TaskListTerminalReceipt[]
+  [key: string]: unknown
+}
+
 // High water mark file name - stores the maximum task ID ever assigned
 const HIGH_WATER_MARK_FILE = '.highwatermark'
+const TASK_LIST_REVISION_FILE = '.revision'
+const TASK_LIST_LIFECYCLE_STATE_SCHEMA_VERSION = 1
 
 // Lock options: retry with backoff so concurrent callers (multiple Claudes
 // in a swarm) wait for the lock instead of failing immediately. The sync
@@ -109,6 +149,34 @@ const LOCK_OPTIONS = {
 
 function getHighWaterMarkPath(taskListId: string): string {
   return join(getTasksDir(taskListId), HIGH_WATER_MARK_FILE)
+}
+
+function getTaskListRevisionPath(taskListId: string): string {
+  return join(getTasksDir(taskListId), TASK_LIST_REVISION_FILE)
+}
+
+async function readTaskListRevisionLocked(taskListId: string): Promise<number> {
+  try {
+    const content = (await readFile(getTaskListRevisionPath(taskListId), 'utf-8')).trim()
+    if (!content) {
+      throw new Error(`Invalid empty task-list revision for ${taskListId}`)
+    }
+    const revision = Number(content)
+    if (Number.isSafeInteger(revision) && revision >= 0) return revision
+    throw new Error(`Invalid task-list revision for ${taskListId}: ${content}`)
+  } catch (error) {
+    if (getErrnoCode(error) === 'ENOENT') return 0
+    throw error
+  }
+}
+
+async function bumpTaskListRevisionLocked(taskListId: string): Promise<number> {
+  const revision = await readTaskListRevisionLocked(taskListId) + 1
+  const revisionPath = getTaskListRevisionPath(taskListId)
+  const temporaryPath = `${revisionPath}.${process.pid}.tmp`
+  await writeFile(temporaryPath, String(revision))
+  await rename(temporaryPath, revisionPath)
+  return revision
 }
 
 async function readHighWaterMark(taskListId: string): Promise<number> {
@@ -299,23 +367,49 @@ export async function resetTaskListIfMatches(
 /**
  * Gets the task list ID based on the current context.
  * Priority:
- * 1. CLAUDE_CODE_TASK_LIST_ID - explicit task list ID
- * 2. In-process teammate: leader's team name (so teammates share the leader's task list)
- * 3. CLAUDE_CODE_TEAM_NAME - set when running as a process-based teammate
- * 4. Leader team name - set when the leader creates a team via TeamCreate
- * 5. Session ID - fallback for standalone sessions
+ * 1. In-process teammate: leader's canonical Team list
+ * 2. Team name from the active team context
+ * 3. Leader team name - set when the leader creates a team via TeamCreate
+ * 4. CLAUDE_CODE_TASK_LIST_ID - explicit standalone task list ID
+ * 5. Agent ID - a subagent keeps its own list instead of writing the session's
+ * 6. Session ID - fallback for standalone sessions
+ *
+ * A subagent runs in-process, so without step 5 every task it created landed
+ * in its parent's list and surfaced in the UI as if the assistant had planned
+ * it. Scoping by agent keeps the agent's own tracking — which is what lets it
+ * hold a goal across a long run — while keeping it out of the session's list.
+ * `TodoWriteTool` has always keyed on `context.agentId ?? getSessionId()`;
+ * this brings the task tools in line with it. Teammates are checked first and
+ * so keep sharing the leader's list, which is the point of a team.
  */
-export function getTaskListId(): string {
-  if (process.env.CLAUDE_CODE_TASK_LIST_ID) {
-    return process.env.CLAUDE_CODE_TASK_LIST_ID
-  }
+export function getTaskListId(agentId?: string): string {
   // In-process teammates use the leader's team name so they share the same
   // task list that tmux/iTerm2 teammates also resolve to.
   const teammateCtx = getTeammateContext()
   if (teammateCtx) {
-    return teammateCtx.teamName
+    return getTeamTaskListId(teammateCtx.teamName)
   }
-  return getTeamName() || leaderTeamName || getSessionId()
+  const teamName = getTeamName() || leaderTeamName
+  if (teamName) return getTeamTaskListId(teamName)
+  if (process.env.CLAUDE_CODE_TASK_LIST_ID) {
+    return process.env.CLAUDE_CODE_TASK_LIST_ID
+  }
+  return agentId || getSessionId()
+}
+
+/** Canonical task-list identity shared by the leader and every teammate backend. */
+export function getTeamTaskListId(teamName: string): string {
+  return getCanonicalTeamTaskListId(teamName)
+}
+
+/**
+ * Stable on-disk identity for a Team lifecycle. Unlike getTeamTaskListId(),
+ * this must never follow the process-wide standalone task-list override: Team
+ * cleanup and archive repair may otherwise delete or tombstone an unrelated
+ * list while leaving the Team's own directory behind.
+ */
+export function getCanonicalTeamTaskListId(teamName: string): string {
+  return sanitizeName(teamName)
 }
 
 /**
@@ -340,6 +434,15 @@ export function getTaskPath(taskListId: string, taskId: string): string {
 }
 
 export async function ensureTasksDir(taskListId: string): Promise<void> {
+  if (!isTaskListLifecycleLockHeld(taskListId)) {
+    return withActiveTaskListLifecycleLock(taskListId, () => (
+      ensureTasksDir(taskListId)
+    ))
+  }
+  const lifecycle = await readTaskListLifecycleState(taskListId)
+  if (lifecycle.deleted) {
+    throw new Error(`Task list ${taskListId} belongs to a deleted Team lifecycle`)
+  }
   const dir = getTasksDir(taskListId)
   try {
     await mkdir(dir, { recursive: true })
@@ -390,10 +493,22 @@ async function findHighestTaskId(taskListId: string): Promise<number> {
  * Uses file locking to prevent race conditions when multiple processes
  * create tasks concurrently.
  */
-export async function createTask(
+export type TaskCreationResult = {
+  taskId: string
+  committedAt: string
+  revision: number
+}
+
+export async function createTaskWithCommit(
   taskListId: string,
   taskData: Omit<Task, 'id'>,
-): Promise<string> {
+): Promise<TaskCreationResult> {
+  if (!isTaskListLifecycleLockHeld(taskListId)) {
+    return withActiveTaskListLifecycleLock(taskListId, () => (
+      createTaskWithCommit(taskListId, taskData)
+    ))
+  }
+  await assertTaskListLifecycleActive(taskListId)
   const lockPath = await ensureTaskListLockFile(taskListId)
 
   let release: (() => Promise<void>) | undefined
@@ -406,14 +521,22 @@ export async function createTask(
     const id = String(highestId + 1)
     const task: Task = { id, ...taskData }
     const path = getTaskPath(taskListId, id)
+    const revision = await bumpTaskListRevisionLocked(taskListId)
     await writeFile(path, jsonStringify(task, null, 2))
     notifyTasksUpdated()
-    return id
+    return { taskId: id, committedAt: new Date().toISOString(), revision }
   } finally {
     if (release) {
       await release()
     }
   }
+}
+
+export async function createTask(
+  taskListId: string,
+  taskData: Omit<Task, 'id'>,
+): Promise<string> {
+  return (await createTaskWithCommit(taskListId, taskData)).taskId
 }
 
 export async function getTask(
@@ -476,46 +599,207 @@ async function updateTaskUnsafe(
   return updated
 }
 
+/**
+ * Updates one task while the caller holds the task-list lock. Keeping the
+ * lock order list -> task makes owner/status transactions linearizable with
+ * create, reset, delete, and both claim paths.
+ */
+async function updateTaskWhileTaskListLocked(
+  taskListId: string,
+  taskId: string,
+  updates: Partial<Omit<Task, 'id'>>,
+): Promise<Task | null> {
+  const taskPath = getTaskPath(taskListId, taskId)
+  if (!await getTask(taskListId, taskId)) return null
+
+  let releaseTask: (() => Promise<void>) | undefined
+  try {
+    releaseTask = await lockfile.lock(taskPath, LOCK_OPTIONS)
+    return await updateTaskUnsafe(taskListId, taskId, updates)
+  } finally {
+    await releaseTask?.()
+  }
+}
+
+export type AtomicTaskUpdateResult = {
+  previous: Task
+  task: Task
+  updated: boolean
+  committedAt: string
+  revision: number
+}
+
+export type AtomicTaskUpdateOptions = {
+  addBlocks?: string[]
+  addBlockedBy?: string[]
+}
+
+/**
+ * Re-reads a task inside the shared list -> task lock transaction before
+ * deciding what to write. Callers use this for conditional ownership and
+ * metadata merges that must not overwrite a concurrent claim or deletion.
+ */
+export async function updateTaskAtomically(
+  taskListId: string,
+  taskId: string,
+  resolveUpdates: (
+    current: Readonly<Task>,
+  ) => Partial<Omit<Task, 'id'>> | undefined,
+  options: AtomicTaskUpdateOptions = {},
+): Promise<AtomicTaskUpdateResult | null> {
+  if (!isTaskListLifecycleLockHeld(taskListId)) {
+    return withActiveTaskListLifecycleLock(taskListId, () => (
+      updateTaskAtomically(taskListId, taskId, resolveUpdates, options)
+    ))
+  }
+  await assertTaskListLifecycleActive(taskListId)
+  const lockPath = await ensureTaskListLockFile(taskListId)
+  const taskPath = getTaskPath(taskListId, taskId)
+  let releaseList: (() => Promise<void>) | undefined
+  let releaseTask: (() => Promise<void>) | undefined
+  try {
+    releaseList = await lockfile.lock(lockPath, LOCK_OPTIONS)
+    if (!await getTask(taskListId, taskId)) return null
+    releaseTask = await lockfile.lock(taskPath, LOCK_OPTIONS)
+    const current = await getTask(taskListId, taskId)
+    if (!current) return null
+    const previous: Task = {
+      ...current,
+      blocks: [...current.blocks],
+      blockedBy: [...current.blockedBy],
+      ...(current.metadata ? { metadata: { ...current.metadata } } : {}),
+    }
+    const updates = { ...(resolveUpdates(previous) ?? {}) }
+    const nextBlocks = [...previous.blocks]
+    const nextBlockedBy = [...previous.blockedBy]
+    const relatedUpdates = new Map<
+      string,
+      { blocks?: string[]; blockedBy?: string[] }
+    >()
+
+    for (const blockedTaskId of uniq(options.addBlocks ?? [])) {
+      const blockedTask = blockedTaskId === taskId
+        ? previous
+        : await getTask(taskListId, blockedTaskId)
+      if (!blockedTask) continue
+      if (!nextBlocks.includes(blockedTaskId)) nextBlocks.push(blockedTaskId)
+      if (blockedTaskId === taskId) {
+        if (!nextBlockedBy.includes(taskId)) nextBlockedBy.push(taskId)
+        continue
+      }
+      if (!blockedTask.blockedBy.includes(taskId)) {
+        const related = relatedUpdates.get(blockedTaskId) ?? {}
+        related.blockedBy = [...blockedTask.blockedBy, taskId]
+        relatedUpdates.set(blockedTaskId, related)
+      }
+    }
+
+    for (const blockerTaskId of uniq(options.addBlockedBy ?? [])) {
+      const blockerTask = blockerTaskId === taskId
+        ? previous
+        : await getTask(taskListId, blockerTaskId)
+      if (!blockerTask) continue
+      if (!nextBlockedBy.includes(blockerTaskId)) nextBlockedBy.push(blockerTaskId)
+      if (blockerTaskId === taskId) {
+        if (!nextBlocks.includes(taskId)) nextBlocks.push(taskId)
+        continue
+      }
+      if (!blockerTask.blocks.includes(taskId)) {
+        const related = relatedUpdates.get(blockerTaskId) ?? {}
+        related.blocks = [...blockerTask.blocks, taskId]
+        relatedUpdates.set(blockerTaskId, related)
+      }
+    }
+
+    if (JSON.stringify(nextBlocks) !== JSON.stringify(previous.blocks)) {
+      updates.blocks = nextBlocks
+    }
+    if (JSON.stringify(nextBlockedBy) !== JSON.stringify(previous.blockedBy)) {
+      updates.blockedBy = nextBlockedBy
+    }
+
+    for (const key of Object.keys(updates) as Array<keyof Omit<Task, 'id'>>) {
+      if (JSON.stringify(updates[key]) === JSON.stringify(previous[key])) {
+        delete updates[key]
+      }
+    }
+
+    const targetChanged = Object.keys(updates).length > 0
+    const changed = targetChanged || relatedUpdates.size > 0
+    const revision = changed
+      ? await bumpTaskListRevisionLocked(taskListId)
+      : await readTaskListRevisionLocked(taskListId)
+    const updated = targetChanged
+      ? await updateTaskUnsafe(taskListId, taskId, updates)
+      : current
+    if (!updated) return null
+
+    // The list lock is the transaction boundary. Release the target file lock
+    // before touching reciprocal edge files, while still excluding every
+    // other list writer and watcher snapshot.
+    await releaseTask()
+    releaseTask = undefined
+    for (const [relatedTaskId, related] of relatedUpdates) {
+      const relatedTask = await getTask(taskListId, relatedTaskId)
+      if (!relatedTask) continue
+      const actualUpdates: Partial<Omit<Task, 'id'>> = {}
+      if (
+        related.blocks &&
+        JSON.stringify(related.blocks) !== JSON.stringify(relatedTask.blocks)
+      ) actualUpdates.blocks = related.blocks
+      if (
+        related.blockedBy &&
+        JSON.stringify(related.blockedBy) !== JSON.stringify(relatedTask.blockedBy)
+      ) actualUpdates.blockedBy = related.blockedBy
+      if (Object.keys(actualUpdates).length === 0) continue
+      await updateTaskWhileTaskListLocked(taskListId, relatedTaskId, actualUpdates)
+    }
+    return {
+      previous,
+      task: updated,
+      updated: changed,
+      committedAt: new Date().toISOString(),
+      revision,
+    }
+  } finally {
+    await releaseTask?.()
+    await releaseList?.()
+  }
+}
+
 export async function updateTask(
   taskListId: string,
   taskId: string,
   updates: Partial<Omit<Task, 'id'>>,
 ): Promise<Task | null> {
-  const path = getTaskPath(taskListId, taskId)
-
-  // Check existence before locking — proper-lockfile throws if the
-  // target file doesn't exist, and we want a clean null result.
-  const taskBeforeLock = await getTask(taskListId, taskId)
-  if (!taskBeforeLock) {
-    return null
-  }
-
-  let release: (() => Promise<void>) | undefined
-  try {
-    release = await lockfile.lock(path, LOCK_OPTIONS)
-    return await updateTaskUnsafe(taskListId, taskId, updates)
-  } finally {
-    await release?.()
-  }
+  return (await updateTaskAtomically(taskListId, taskId, () => updates))?.task ?? null
 }
 
-export async function deleteTask(
+export type TaskDeletionResult = {
+  deleted: boolean
+  committedAt?: string
+  revision?: number
+}
+
+export async function deleteTaskWithCommit(
   taskListId: string,
   taskId: string,
-): Promise<boolean> {
+): Promise<TaskDeletionResult> {
+  if (!isTaskListLifecycleLockHeld(taskListId)) {
+    return withActiveTaskListLifecycleLock(taskListId, () => (
+      deleteTaskWithCommit(taskListId, taskId)
+    ))
+  }
+  await assertTaskListLifecycleActive(taskListId)
   const path = getTaskPath(taskListId, taskId)
   const lockPath = await ensureTaskListLockFile(taskListId)
   let releaseList: (() => Promise<void>) | undefined
-  let releaseTask: (() => Promise<void>) | undefined
 
   try {
     releaseList = await lockfile.lock(lockPath, LOCK_OPTIONS)
-    try {
-      releaseTask = await lockfile.lock(path, LOCK_OPTIONS)
-    } catch (error) {
-      if (getErrnoCode(error) === 'ENOENT') return false
-      throw error
-    }
+    if (!await getTask(taskListId, taskId)) return { deleted: false }
+    const revision = await bumpTaskListRevisionLocked(taskListId)
+    // Update high water mark before deleting to prevent ID reuse
     const numericId = parseInt(taskId, 10)
     if (!isNaN(numericId)) {
       const currentMark = await readHighWaterMark(taskListId)
@@ -524,12 +808,8 @@ export async function deleteTask(
       }
     }
 
-    try {
-      await unlink(path)
-    } catch (e) {
-      if (getErrnoCode(e) === 'ENOENT') return false
-      throw e
-    }
+    // Delete the task file
+    await unlink(path)
 
     const allTasks = await listTasks(taskListId)
     for (const task of allTasks) {
@@ -539,7 +819,7 @@ export async function deleteTask(
         newBlocks.length !== task.blocks.length ||
         newBlockedBy.length !== task.blockedBy.length
       ) {
-        await updateTask(taskListId, task.id, {
+        await updateTaskWhileTaskListLocked(taskListId, task.id, {
           blocks: newBlocks,
           blockedBy: newBlockedBy,
         })
@@ -547,12 +827,21 @@ export async function deleteTask(
     }
 
     notifyTasksUpdated()
-    return true
-  } catch {
-    return false
+    return {
+      deleted: true,
+      committedAt: new Date().toISOString(),
+      revision,
+    }
   } finally {
-    await releaseTaskAndListLocks(releaseTask ? [releaseTask] : [], releaseList)
+    await releaseList?.()
   }
+}
+
+export async function deleteTask(
+  taskListId: string,
+  taskId: string,
+): Promise<boolean> {
+  return (await deleteTaskWithCommit(taskListId, taskId)).deleted
 }
 
 export async function listTasks(taskListId: string): Promise<Task[]> {
@@ -570,34 +859,108 @@ export async function listTasks(taskListId: string): Promise<Task[]> {
   return results.filter((t): t is Task => t !== null)
 }
 
+export type TaskListSnapshot = {
+  tasks: Task[]
+  capturedAt: string
+  revision: number
+}
+
+/**
+ * Reads one causally ordered task-list snapshot. The timestamp is captured
+ * after every task has been read while holding the same list lock used by all
+ * writers, so later transcript projections can distinguish a genuinely newer
+ * TaskList from a read that merely finished streaming after this snapshot.
+ */
+export async function readTaskListSnapshot(
+  taskListId: string,
+): Promise<TaskListSnapshot> {
+  if (!isTaskListLifecycleLockHeld(taskListId)) {
+    return withTaskListLifecycleLock(taskListId, () => (
+      readTaskListSnapshot(taskListId)
+    ))
+  }
+  const lifecycle = await readTaskListLifecycleState(taskListId)
+  if (lifecycle.deleted) {
+    const terminal = [...lifecycle.terminals].reverse().find(receipt => (
+      receipt.generation === lifecycle.generation &&
+      taskListLifecycleIdentityMatches(
+        receipt.identity,
+        lifecycle.activeIdentity,
+      )
+    ))
+    if (!terminal) {
+      throw new Error(`Task list ${taskListId} was deleted without a terminal frame`)
+    }
+    return {
+      tasks: terminal.tasks.map(task => ({
+        ...task,
+        blocks: [...task.blocks],
+        blockedBy: [...task.blockedBy],
+        ...(task.metadata ? { metadata: { ...task.metadata } } : {}),
+      })),
+      capturedAt: terminal.capturedAt,
+      revision: terminal.revision,
+    }
+  }
+  const lockPath = await ensureTaskListLockFile(taskListId)
+  let releaseList: (() => Promise<void>) | undefined
+  try {
+    releaseList = await lockfile.lock(lockPath, LOCK_OPTIONS)
+    const tasks = await listTasks(taskListId)
+    const revision = await readTaskListRevisionLocked(taskListId)
+    return {
+      tasks,
+      capturedAt: new Date().toISOString(),
+      revision,
+    }
+  } finally {
+    await releaseList?.()
+  }
+}
+
 export async function blockTask(
   taskListId: string,
   fromTaskId: string,
   toTaskId: string,
 ): Promise<boolean> {
-  const [fromTask, toTask] = await Promise.all([
-    getTask(taskListId, fromTaskId),
-    getTask(taskListId, toTaskId),
-  ])
-  if (!fromTask || !toTask) {
-    return false
+  if (!isTaskListLifecycleLockHeld(taskListId)) {
+    return withActiveTaskListLifecycleLock(taskListId, () => (
+      blockTask(taskListId, fromTaskId, toTaskId)
+    ))
   }
+  await assertTaskListLifecycleActive(taskListId)
+  const lockPath = await ensureTaskListLockFile(taskListId)
+  let releaseList: (() => Promise<void>) | undefined
+  try {
+    releaseList = await lockfile.lock(lockPath, LOCK_OPTIONS)
+    const [fromTask, toTask] = await Promise.all([
+      getTask(taskListId, fromTaskId),
+      getTask(taskListId, toTaskId),
+    ])
+    if (!fromTask || !toTask) return false
+    const addForward = !fromTask.blocks.includes(toTaskId)
+    const addReverse = !toTask.blockedBy.includes(fromTaskId)
+    if (addForward || addReverse) {
+      await bumpTaskListRevisionLocked(taskListId)
+    }
 
-  // Update source task: A blocks B
-  if (!fromTask.blocks.includes(toTaskId)) {
-    await updateTask(taskListId, fromTaskId, {
-      blocks: [...fromTask.blocks, toTaskId],
-    })
+    // Both sides of the edge are one list transaction. Concurrent calls that
+    // add A->B and A->C now re-read A after serialization instead of replacing
+    // each other's absolute blocks arrays.
+    if (addForward) {
+      await updateTaskWhileTaskListLocked(taskListId, fromTaskId, {
+        blocks: [...fromTask.blocks, toTaskId],
+      })
+    }
+    if (addReverse) {
+      await updateTaskWhileTaskListLocked(taskListId, toTaskId, {
+        blockedBy: [...toTask.blockedBy, fromTaskId],
+      })
+    }
+    return true
+  } finally {
+    await releaseList?.()
   }
-
-  // Update target task: B is blockedBy A
-  if (!toTask.blockedBy.includes(fromTaskId)) {
-    await updateTask(taskListId, toTaskId, {
-      blockedBy: [...toTask.blockedBy, fromTaskId],
-    })
-  }
-
-  return true
 }
 
 export type ClaimTaskResult = {
@@ -620,6 +983,203 @@ function getTaskListLockPath(taskListId: string): string {
   return join(getTasksDir(taskListId), '.lock')
 }
 
+function getTaskListLifecycleLockPath(taskListId: string): string {
+  return join(
+    getClaudeConfigHomeDir(),
+    'tasks',
+    '.lifecycle-locks',
+    `${sanitizePathComponent(taskListId)}.lock`,
+  )
+}
+
+function getTaskListLifecycleStatePath(taskListId: string): string {
+  return join(
+    getClaudeConfigHomeDir(),
+    'tasks',
+    '.lifecycle-locks',
+    `${sanitizePathComponent(taskListId)}.state.json`,
+  )
+}
+
+function emptyTaskListLifecycleState(): TaskListLifecycleState {
+  return {
+    schemaVersion: TASK_LIST_LIFECYCLE_STATE_SCHEMA_VERSION,
+    generation: 0,
+    deleted: false,
+    terminals: [],
+  }
+}
+
+function taskListLifecycleIdentityMatches(
+  left: TaskListTerminalIdentity | undefined,
+  right: TaskListTerminalIdentity | undefined,
+): boolean {
+  return left?.teamName === right?.teamName &&
+    left?.createdAt === right?.createdAt &&
+    left?.leadSessionId === right?.leadSessionId
+}
+
+export async function readTaskListLifecycleState(
+  taskListId: string,
+): Promise<TaskListLifecycleState> {
+  let raw: unknown
+  try {
+    raw = jsonParse(
+      await readFile(getTaskListLifecycleStatePath(taskListId), 'utf-8'),
+    )
+  } catch (error) {
+    if (getErrnoCode(error) === 'ENOENT') return emptyTaskListLifecycleState()
+    throw error
+  }
+
+  const parsed = z.object({
+    schemaVersion: z.literal(TASK_LIST_LIFECYCLE_STATE_SCHEMA_VERSION),
+    generation: z.number().int().nonnegative(),
+    deleted: z.boolean(),
+    activeIdentity: z.object({
+      teamName: z.string().min(1),
+      createdAt: z.number().finite(),
+      leadSessionId: z.string().optional(),
+    }).optional(),
+    terminals: z.array(z.object({
+      frameId: z.string().min(1),
+      generation: z.number().int().nonnegative(),
+      identity: z.object({
+        teamName: z.string().min(1),
+        createdAt: z.number().finite(),
+        leadSessionId: z.string().optional(),
+      }),
+      tasks: z.array(TaskSchema()),
+      capturedAt: z.string(),
+      revision: z.number().int().nonnegative(),
+    })).default([]),
+  }).passthrough().safeParse(raw)
+  if (!parsed.success) {
+    throw new Error(
+      `Invalid task-list lifecycle state for ${taskListId}: ${parsed.error.message}`,
+    )
+  }
+  return parsed.data
+}
+
+async function writeTaskListLifecycleStateLocked(
+  taskListId: string,
+  state: TaskListLifecycleState,
+): Promise<void> {
+  const statePath = getTaskListLifecycleStatePath(taskListId)
+  await mkdir(dirname(statePath), { recursive: true })
+  const temporaryPath = `${statePath}.${process.pid}.tmp`
+  try {
+    await writeFile(temporaryPath, jsonStringify(state, null, 2))
+    await rename(temporaryPath, statePath)
+  } catch (error) {
+    await unlink(temporaryPath).catch(() => {})
+    throw error
+  }
+}
+
+/** Starts a new Team incarnation and invalidates every queued old writer. */
+export async function beginTaskListLifecycle(
+  taskListId: string,
+  identity: TaskListTerminalIdentity,
+): Promise<TaskListLifecycleToken> {
+  return withTaskListLifecycleLock(taskListId, async () => {
+    const previous = await readTaskListLifecycleState(taskListId)
+    const generation = previous.generation + 1
+    await writeTaskListLifecycleStateLocked(taskListId, {
+      ...previous,
+      schemaVersion: TASK_LIST_LIFECYCLE_STATE_SCHEMA_VERSION,
+      generation,
+      deleted: false,
+      activeIdentity: identity,
+    })
+    return { generation, identity }
+  })
+}
+
+/**
+ * Commits the terminal DAG outside the task directory before cleanup removes
+ * it. The durable deleted bit prevents a queued TaskCreate from resurrecting
+ * an already-ended Team.
+ */
+export async function completeTaskListLifecycle(
+  taskListId: string,
+  snapshot: TaskListSnapshot,
+  expected: TaskListLifecycleToken,
+): Promise<TaskListTerminalReceipt> {
+  return withTaskListLifecycleLock(taskListId, async () => {
+    const previous = await readTaskListLifecycleState(taskListId)
+    if (
+      previous.generation !== expected.generation ||
+      (
+        previous.activeIdentity &&
+        !taskListLifecycleIdentityMatches(previous.activeIdentity, expected.identity)
+      )
+    ) {
+      throw new Error(
+        `Refusing stale cleanup for task list ${taskListId}: lifecycle identity changed`,
+      )
+    }
+    const existing = previous.terminals.find(receipt => (
+      receipt.generation === expected.generation &&
+      taskListLifecycleIdentityMatches(receipt.identity, expected.identity)
+    ))
+    if (previous.deleted && existing) return existing
+    const terminal: TaskListTerminalReceipt = {
+      ...snapshot,
+      frameId: `lifecycle:${expected.generation}:${snapshot.revision}:${snapshot.capturedAt}`,
+      generation: expected.generation,
+      identity: expected.identity,
+    }
+    await writeTaskListLifecycleStateLocked(taskListId, {
+      ...previous,
+      schemaVersion: TASK_LIST_LIFECYCLE_STATE_SCHEMA_VERSION,
+      generation: expected.generation,
+      deleted: true,
+      activeIdentity: expected.identity,
+      terminals: [
+        ...previous.terminals.filter(receipt => !(
+          receipt.generation === expected.generation &&
+          taskListLifecycleIdentityMatches(receipt.identity, expected.identity)
+        )),
+        terminal,
+      ].slice(-8),
+    })
+    return terminal
+  })
+}
+
+async function withActiveTaskListLifecycleLock<T>(
+  taskListId: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  const expected = await readTaskListLifecycleState(taskListId)
+  if (expected.deleted) {
+    throw new Error(`Task list ${taskListId} belongs to a deleted Team lifecycle`)
+  }
+  return withTaskListLifecycleLock(taskListId, async () => {
+    const current = await readTaskListLifecycleState(taskListId)
+    if (
+      current.deleted ||
+      current.generation !== expected.generation ||
+      !taskListLifecycleIdentityMatches(
+        current.activeIdentity,
+        expected.activeIdentity,
+      )
+    ) {
+      throw new Error(`Task list ${taskListId} lifecycle changed while waiting for the lock`)
+    }
+    return run()
+  })
+}
+
+async function assertTaskListLifecycleActive(taskListId: string): Promise<void> {
+  const lifecycle = await readTaskListLifecycleState(taskListId)
+  if (lifecycle.deleted) {
+    throw new Error(`Task list ${taskListId} belongs to a deleted Team lifecycle`)
+  }
+}
+
 /**
  * Ensures the lock file exists for a task list
  */
@@ -637,6 +1197,47 @@ async function ensureTaskListLockFile(taskListId: string): Promise<string> {
   return lockPath
 }
 
+async function ensureTaskListLifecycleLockFile(
+  taskListId: string,
+): Promise<string> {
+  const lockPath = getTaskListLifecycleLockPath(taskListId)
+  await mkdir(dirname(lockPath), { recursive: true })
+  try {
+    await writeFile(lockPath, '', { flag: 'wx' })
+  } catch {
+    // The durable lock target is shared across processes and Team deletion.
+  }
+  return lockPath
+}
+
+/**
+ * Serializes a joined Team snapshot with whole-directory cleanup. The normal
+ * task-list lock lives inside the directory it protects, so it cannot guard
+ * against TeamDelete removing that directory and recreating an unrelated lock
+ * inode while a watcher is reading it.
+ */
+export async function withTaskListLifecycleLock<T>(
+  taskListId: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  const identity = sanitizePathComponent(taskListId)
+  const held = taskListLifecycleContext.getStore()
+  if (held?.lease.active && held.held.has(identity)) return run()
+  const lockPath = await ensureTaskListLifecycleLockFile(taskListId)
+  let release: (() => Promise<void>) | undefined
+  const context: TaskListLifecycleContext = {
+    held: new Set([...(held?.held ?? []), identity]),
+    lease: { active: true },
+  }
+  try {
+    release = await lockfile.lock(lockPath, LOCK_OPTIONS)
+    return await taskListLifecycleContext.run(context, run)
+  } finally {
+    context.lease.active = false
+    await release?.()
+  }
+}
+
 export type ClaimTaskOptions = {
   /**
    * If true, checks whether the agent is already busy (owns other open tasks)
@@ -644,6 +1245,8 @@ export type ClaimTaskOptions = {
    * using a task-list-level lock to prevent TOCTOU race conditions.
    */
   checkAgentBusy?: boolean
+  /** Marks ownership and active status in the same lock transaction. */
+  markInProgress?: boolean
 }
 
 /**
@@ -659,6 +1262,12 @@ export async function claimTask(
   claimantAgentId: string,
   options: ClaimTaskOptions = {},
 ): Promise<ClaimTaskResult> {
+  if (!isTaskListLifecycleLockHeld(taskListId)) {
+    return withActiveTaskListLifecycleLock(taskListId, () => (
+      claimTask(taskListId, taskId, claimantAgentId, options)
+    ))
+  }
+  await assertTaskListLifecycleActive(taskListId)
   const taskPath = getTaskPath(taskListId, taskId)
 
   // Check existence before locking — proper-lockfile.lock throws if the
@@ -671,14 +1280,23 @@ export async function claimTask(
   // If we need to check agent busy status, use task-list-level lock
   // to prevent TOCTOU race conditions
   if (options.checkAgentBusy) {
-    return claimTaskWithBusyCheck(taskListId, taskId, claimantAgentId)
+    return claimTaskWithBusyCheck(
+      taskListId,
+      taskId,
+      claimantAgentId,
+      options,
+    )
   }
 
-  // Otherwise, use task-level lock (original behavior)
-  let release: (() => Promise<void>) | undefined
+  // All task mutations share the list lock; the nested task lock preserves
+  // compatibility with readers/writers that still coordinate per file.
+  const lockPath = await ensureTaskListLockFile(taskListId)
+  let releaseList: (() => Promise<void>) | undefined
+  let releaseTask: (() => Promise<void>) | undefined
   try {
+    releaseList = await lockfile.lock(lockPath, LOCK_OPTIONS)
     // Acquire exclusive lock on the task file
-    release = await lockfile.lock(taskPath, LOCK_OPTIONS)
+    releaseTask = await lockfile.lock(taskPath, LOCK_OPTIONS)
 
     // Read current task state
     const task = await getTask(taskListId, taskId)
@@ -709,9 +1327,16 @@ export async function claimTask(
     }
 
     // Claim the task (already holding taskPath lock — use unsafe variant)
-    const updated = await updateTaskUnsafe(taskListId, taskId, {
+    const claimUpdates: Partial<Omit<Task, 'id'>> = {
       owner: claimantAgentId,
-    })
+      ...(options.markInProgress ? { status: 'in_progress' as const } : {}),
+    }
+    const needsClaimMutation = task.owner !== claimantAgentId ||
+      (options.markInProgress && task.status !== 'in_progress')
+    if (needsClaimMutation) await bumpTaskListRevisionLocked(taskListId)
+    const updated = needsClaimMutation
+      ? await updateTaskUnsafe(taskListId, taskId, claimUpdates)
+      : task
     return { success: true, task: updated! }
   } catch (error) {
     logForDebugging(
@@ -720,9 +1345,8 @@ export async function claimTask(
     logError(error)
     return { success: false, reason: 'task_not_found' }
   } finally {
-    if (release) {
-      await release()
-    }
+    await releaseTask?.()
+    await releaseList?.()
   }
 }
 
@@ -734,6 +1358,7 @@ async function claimTaskWithBusyCheck(
   taskListId: string,
   taskId: string,
   claimantAgentId: string,
+  options: ClaimTaskOptions,
 ): Promise<ClaimTaskResult> {
   const lockPath = await ensureTaskListLockFile(taskListId)
 
@@ -788,11 +1413,20 @@ async function claimTaskWithBusyCheck(
       }
     }
 
-    // Claim the task
-    const updated = await updateTask(taskListId, taskId, {
+    // Claim the task inside the same list transaction used for the busy check.
+    const claimUpdates: Partial<Omit<Task, 'id'>> = {
       owner: claimantAgentId,
-    })
-    return { success: true, task: updated! }
+      ...(options.markInProgress ? { status: 'in_progress' as const } : {}),
+    }
+    const needsClaimMutation = task.owner !== claimantAgentId ||
+      (options.markInProgress && task.status !== 'in_progress')
+    if (needsClaimMutation) await bumpTaskListRevisionLocked(taskListId)
+    const updated = needsClaimMutation
+      ? await updateTaskWhileTaskListLocked(taskListId, taskId, claimUpdates)
+      : task
+    return updated
+      ? { success: true, task: updated }
+      : { success: false, reason: 'task_not_found' }
   } catch (error) {
     logForDebugging(
       `[Tasks] Failed to claim task ${taskId} with busy check: ${errorMessage(error)}`,
@@ -943,14 +1577,25 @@ export async function unassignTeammateTasks(
       (t.owner === teammateId || t.owner === teammateName),
   )
 
-  // Unassign each task and reset status to open
+  // Re-check ownership inside the task-list transaction so shutdown cleanup
+  // cannot erase a reassignment that another actor committed after this scan.
+  const unassignedTasks: Array<{ id: string; subject: string }> = []
   for (const task of unresolvedAssignedTasks) {
-    await updateTask(teamName, task.id, { owner: undefined, status: 'pending' })
+    const result = await updateTaskAtomically(teamName, task.id, (current) => {
+      if (
+        current.status === 'completed' ||
+        (current.owner !== teammateId && current.owner !== teammateName)
+      ) return undefined
+      return { owner: undefined, status: 'pending' }
+    })
+    if (result?.updated) {
+      unassignedTasks.push({ id: result.task.id, subject: result.task.subject })
+    }
   }
 
-  if (unresolvedAssignedTasks.length > 0) {
+  if (unassignedTasks.length > 0) {
     logForDebugging(
-      `[Tasks] Unassigned ${unresolvedAssignedTasks.length} task(s) from ${teammateName}`,
+      `[Tasks] Unassigned ${unassignedTasks.length} task(s) from ${teammateName}`,
     )
   }
 
@@ -958,18 +1603,15 @@ export async function unassignTeammateTasks(
   const actionVerb =
     reason === 'terminated' ? 'was terminated' : 'has shut down'
   let notificationMessage = `${teammateName} ${actionVerb}.`
-  if (unresolvedAssignedTasks.length > 0) {
-    const taskList = unresolvedAssignedTasks
+  if (unassignedTasks.length > 0) {
+    const taskList = unassignedTasks
       .map(t => `#${t.id} "${t.subject}"`)
       .join(', ')
-    notificationMessage += ` ${unresolvedAssignedTasks.length} task(s) were unassigned: ${taskList}. Use TaskList to check availability and TaskUpdate with owner to reassign them to idle teammates.`
+    notificationMessage += ` ${unassignedTasks.length} task(s) were unassigned: ${taskList}. Use TaskList to check availability and TaskUpdate with owner to reassign them to idle teammates.`
   }
 
   return {
-    unassignedTasks: unresolvedAssignedTasks.map(t => ({
-      id: t.id,
-      subject: t.subject,
-    })),
+    unassignedTasks,
     notificationMessage,
   }
 }

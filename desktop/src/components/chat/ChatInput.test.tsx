@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import '@testing-library/jest-dom'
-import { act } from 'react'
+import { act, StrictMode } from 'react'
 
 const viewportMocks = vi.hoisted(() => ({
   isMobile: false,
@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   getSlashCommands: vi.fn(),
   listAgents: vi.fn(),
   getRepositoryContext: vi.fn(),
+  createRepositoryBranch: vi.fn(),
   getRecentProjects: vi.fn(),
   search: vi.fn(),
   browse: vi.fn(),
@@ -38,6 +39,7 @@ vi.mock('../../api/sessions', () => ({
     getGitInfo: mocks.getGitInfo,
     getSlashCommands: mocks.getSlashCommands,
     getRepositoryContext: mocks.getRepositoryContext,
+    createRepositoryBranch: mocks.createRepositoryBranch,
     getRecentProjects: mocks.getRecentProjects,
   },
 }))
@@ -120,7 +122,14 @@ import { useSessionStore } from '../../stores/sessionStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useWorkspaceChatContextStore } from '../../stores/workspaceChatContextStore'
+import { useWorkflowStore } from '../../stores/workflowStore'
+import { workflowsApi } from '../../api/workflows'
 import { browserHost } from '../../lib/desktopHost/browserHost'
+import { settingsApi } from '../../api/settings'
+import {
+  captureProjectDisplayNameHydrationRevision,
+  hydrateProjectDisplayNames,
+} from '../../stores/projectDisplayNameStore'
 
 /**
  * Opens the run-location pill's menu. Directory, branch and worktree all live
@@ -204,6 +213,10 @@ describe('ChatInput file mentions', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    mocks.createRepositoryBranch.mockReset()
+    act(() => {
+      hydrateProjectDisplayNames({}, Number.MAX_SAFE_INTEGER)
+    })
     mocks.webviewDragHandlers.length = 0
     Reflect.deleteProperty(window, 'desktopHost')
     delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
@@ -214,6 +227,7 @@ describe('ChatInput file mentions', () => {
     useSessionStore.setState(initialSessionState, true)
     useTabStore.setState(initialTabState, true)
     useWorkspaceChatContextStore.setState(initialWorkspaceContextState, true)
+    useWorkflowStore.setState({ runs: {}, openRunId: null })
 
     useTabStore.setState({
       activeTabId: sessionId,
@@ -291,6 +305,10 @@ describe('ChatInput file mentions', () => {
   })
 
   afterEach(() => {
+    vi.restoreAllMocks()
+    act(() => {
+      hydrateProjectDisplayNames({}, Number.MAX_SAFE_INTEGER)
+    })
     vi.unstubAllGlobals()
     if (originalOffsetWidth) {
       Object.defineProperty(HTMLElement.prototype, 'offsetWidth', originalOffsetWidth)
@@ -897,6 +915,64 @@ describe('ChatInput file mentions', () => {
     expect(screen.queryByRole('button', { name: /^Location/ })).not.toBeInTheDocument()
   })
 
+  it('reactively uses the active session project root display name while retaining the active worktree path in context', async () => {
+    const worktreePath = '/repo/.claude/worktrees/desktop-main-12345678'
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'Project',
+        createdAt: '2026-05-01T00:00:00.000Z',
+        modifiedAt: '2026-05-01T00:00:00.000Z',
+        messageCount: 1,
+        projectPath: '/repo',
+        projectRoot: '/repo',
+        workDir: worktreePath,
+        workDirExists: true,
+      }],
+      activeSessionId: sessionId,
+    })
+    mocks.getGitInfo.mockResolvedValue({
+      branch: 'main',
+      repoName: 'repo',
+      workDir: worktreePath,
+      changedFiles: 0,
+      worktree: {
+        enabled: true,
+        path: worktreePath,
+        plannedPath: null,
+        sourceWorkDir: '/repo',
+        slug: 'desktop-main-12345678',
+        branch: 'main',
+      },
+    })
+
+    render(<ChatInput />)
+
+    const chip = await screen.findByTestId('run-location-readonly')
+    expect(chip).toHaveTextContent('repo')
+
+    act(() => {
+      hydrateProjectDisplayNames(
+        { '/repo': 'Personal repo' },
+        captureProjectDisplayNameHydrationRevision(),
+      )
+    })
+
+    expect(chip).toHaveTextContent('Personal repo')
+
+    // Once the alias takes over the label, the worktree details tooltip is the
+    // only place still naming the real project root and the active worktree
+    // path — the toolbar variant carries no `title` for a worktree.
+    expect(chip).not.toHaveAttribute('title')
+    fireEvent.mouseEnter(screen.getByTestId('worktree-details-trigger'))
+
+    const tooltip = await screen.findByRole('tooltip')
+    // Exact-text lookups: '/repo' is a prefix of the worktree path, so a
+    // substring assertion would pass even if the project root row went missing.
+    expect(within(tooltip).getByText('/repo')).toBeInTheDocument()
+    expect(within(tooltip).getByText(worktreePath)).toBeInTheDocument()
+  })
+
   // The narrow layouts never adopted the in-toolbar pill: there is no room for
   // it beside the model selector, so they keep the location on its own line
   // below the panel.
@@ -1129,7 +1205,10 @@ describe('ChatInput file mentions', () => {
   })
 
   it('starts an empty active session on the selected branch without an isolated worktree', async () => {
-    mocks.create.mockResolvedValueOnce({ sessionId: 'created-direct', workDir: '/repo' })
+    let resolveCreate!: (value: { sessionId: string; workDir: string }) => void
+    mocks.create.mockReturnValueOnce(new Promise((resolve) => {
+      resolveCreate = resolve
+    }))
     useSessionStore.setState({
       sessions: [{
         id: sessionId,
@@ -1180,10 +1259,124 @@ describe('ChatInput file mentions', () => {
         repository: { branch: 'feature/a', worktree: false },
       })
     })
+
+    // Session creation can take seconds. The click must cross the store
+    // boundary immediately so the transcript can replace its empty hero with
+    // a live placeholder before the new session id exists.
+    expect(useChatStore.getState().sessions[sessionId]?.isPreparingTurn).toBe(true)
+
+    resolveCreate({ sessionId: 'created-direct', workDir: '/repo' })
+
+    await waitFor(() => {
+      expect(mocks.wsSend).toHaveBeenCalledWith('created-direct', {
+        type: 'user_message',
+        content: 'run on feature branch',
+        attachments: [],
+      })
+    })
+    expect(useChatStore.getState().sessions['created-direct']?.isPreparingTurn).toBe(false)
     expect(mocks.delete).toHaveBeenCalledWith(sessionId)
-    expect(mocks.wsSend).toHaveBeenCalledWith('created-direct', {
+  })
+
+  it('launches on a branch created from the picker instead of falling back to the current branch', async () => {
+    const headCommit = 'a'.repeat(40)
+    const initialContext = {
+      ...okRepositoryContext(),
+      headCommit,
+      dirty: true,
+      branches: okRepositoryContext().branches.map((branch) => ({ ...branch, commit: headCommit })),
+    }
+    const createdContext = {
+      ...initialContext,
+      branches: [
+        ...initialContext.branches,
+        {
+          name: 'qa/launch-picker',
+          current: false,
+          local: true,
+          remote: false,
+          checkedOut: false,
+          commit: headCommit,
+        },
+      ],
+    }
+    mocks.getRepositoryContext.mockResolvedValue(initialContext)
+    mocks.createRepositoryBranch.mockImplementation(() => new Promise((resolve) => {
+      window.setTimeout(() => resolve({
+        branch: 'qa/launch-picker',
+        baseRef: 'main',
+        context: createdContext,
+      }), 0)
+    }))
+    mocks.create.mockResolvedValueOnce({ sessionId: 'created-picker-branch', workDir: '/repo' })
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'Project',
+        createdAt: '2026-05-01T00:00:00.000Z',
+        modifiedAt: '2026-05-01T00:00:00.000Z',
+        messageCount: 0,
+        projectPath: '/repo',
+        workDir: '/repo',
+        workDirExists: true,
+      }],
+      activeSessionId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          messages: [],
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    render(
+      <StrictMode>
+        <ChatInput variant="hero" />
+      </StrictMode>,
+    )
+
+    await openBranchList()
+    fireEvent.click(screen.getByRole('button', { name: 'Create branch…' }))
+    fireEvent.change(await screen.findByLabelText('Branch name'), {
+      target: { value: 'qa/launch-picker' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+
+    expect(await screen.findByRole('button', { name: 'Location: repo / qa/launch-picker' }))
+      .toBeInTheDocument()
+    expect(useChatStore.getState().sessions[sessionId]?.repositoryLaunchDraft?.branch)
+      .toBe('qa/launch-picker')
+    expect(screen.queryByRole('status', { name: /Uncommitted changes/ })).not.toBeInTheDocument()
+
+    setComposerText('show the current branch', 23)
+    fireEvent.keyDown(getComposerElement(), { key: 'Enter' })
+
+    await waitFor(() => {
+      expect(mocks.create).toHaveBeenCalledWith({
+        workDir: '/repo',
+        repository: { branch: 'qa/launch-picker', worktree: false },
+      })
+    })
+    expect(mocks.wsSend).toHaveBeenCalledWith('created-picker-branch', {
       type: 'user_message',
-      content: 'run on feature branch',
+      content: 'show the current branch',
       attachments: [],
     })
   })
@@ -2151,6 +2344,113 @@ describe('ChatInput file mentions', () => {
     expect(getComposerText()).toBe('')
   })
 
+  it('opens actionable /save-workflow help locally without creating a silent user turn', async () => {
+    useSettingsStore.setState({ chatSendBehavior: 'enter' })
+    render(<ChatInput />)
+
+    const beforeMessages = useChatStore.getState().sessions[sessionId]!.messages
+    setComposerText('/save-workflow', '/save-workflow'.length)
+    fireEvent.keyDown(getComposerElement(), { key: 'Enter' })
+
+    expect(mocks.wsSend).not.toHaveBeenCalled()
+    expect(await screen.findByText('Save workflow')).toBeInTheDocument()
+    expect(screen.getByText(/Complete a workflow in this session/)).toBeInTheDocument()
+    expect(useChatStore.getState().sessions[sessionId]!.messages).toBe(beforeMessages)
+    expect(getComposerText()).toBe('')
+  })
+
+  it('saves a completed runtime workflow through the composer command', async () => {
+    useSettingsStore.setState({ chatSendBehavior: 'enter' })
+    const runId = 'wf_save-flow-abc'
+    act(() => {
+      const handle = useChatStore.getState().handleServerMessage
+      handle(sessionId, {
+        type: 'system_notification',
+        subtype: 'task_started',
+        data: {
+          task_id: 'workflow-save-flow',
+          task_type: 'local_workflow',
+          workflow_name: 'generated-audit',
+          workflow_run_id: runId,
+        },
+      })
+      handle(sessionId, {
+        type: 'system_notification',
+        subtype: 'task_progress',
+        data: {
+          task_id: 'workflow-save-flow',
+          workflow_run_id: runId,
+          workflow_progress: [
+            { type: 'workflow_phase', index: 1, title: 'Scan' },
+            {
+              type: 'workflow_agent',
+              index: 1,
+              label: 'scan routes',
+              state: 'done',
+              phaseIndex: 1,
+              agentId: 'agent-save-flow',
+            },
+          ],
+        },
+      })
+      handle(sessionId, {
+        type: 'system_notification',
+        subtype: 'task_notification',
+        data: {
+          task_id: 'workflow-save-flow',
+          workflow_run_id: runId,
+          status: 'completed',
+        },
+      })
+    })
+
+    const script = [
+      "export const meta = { name: 'generated-audit', description: 'Audit routes' }",
+      "return await agent('scan routes')",
+    ].join('\n')
+    const getRun = vi.spyOn(workflowsApi, 'getRun').mockResolvedValue({
+      runId,
+      sessionId,
+      workflowName: 'generated-audit',
+      scriptPath: '/tmp/generated-audit.js',
+      startedAt: 1,
+      completedAgents: 1,
+      status: 'completed',
+      script,
+      agents: [],
+    })
+    const save = vi.spyOn(workflowsApi, 'save').mockResolvedValue({
+      ok: true,
+      name: 'release-audit',
+      filePath: '/repo/.claude/workflows/release-audit.js',
+    })
+
+    render(<ChatInput />)
+    setComposerText('/save-workflow', '/save-workflow'.length)
+    fireEvent.keyDown(getComposerElement(), { key: 'Enter' })
+
+    await waitFor(() => expect(getRun).toHaveBeenCalledWith(sessionId, runId))
+    fireEvent.change(
+      await screen.findByRole('textbox', { name: 'Command name' }),
+      { target: { value: 'release-audit' } },
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Save workflow' }))
+
+    await waitFor(() => {
+      expect(save).toHaveBeenCalledWith(
+        script,
+        'project',
+        '/repo',
+        'release-audit',
+      )
+    })
+    expect(await screen.findByText(/Start a new session and run \/release-audit/)).toBeInTheDocument()
+    expect(mocks.wsSend).not.toHaveBeenCalledWith(
+      sessionId,
+      expect.objectContaining({ type: 'user_message' }),
+    )
+  })
+
   it('prioritizes active-session slash commands by command name when filtering', async () => {
     useChatStore.setState({
       sessions: {
@@ -2327,5 +2627,66 @@ describe('ChatInput file mentions', () => {
       content: prompt,
       attachments: [],
     })
+  })
+
+  it('highlights only actionable ultracode tokens and follows the persisted setting in both directions', async () => {
+    const updateUser = vi.spyOn(settingsApi, 'updateUser').mockResolvedValue({ ok: true })
+
+    try {
+      render(<ChatInput />)
+
+      const highlightedKeywords = () =>
+        Array.from(document.querySelectorAll('[data-workflow-keyword="true"]'))
+          .map((element) => element.textContent)
+
+      const complexPrompt = 'ultracode：audit routes, error propagation, and missing tests with several agents'
+      setComposerText(complexPrompt, complexPrompt.length)
+      await waitFor(() => {
+        expect(highlightedKeywords()).toEqual(['ultracode'])
+      })
+
+      for (const literalPrompt of [
+        '```text\nultracode\n```',
+        'explain "ultracode" without running it',
+        'open docs/ultracode/readme.md',
+        'pass --ultracode to the CLI',
+        'inspect the ultracode-runner package',
+      ]) {
+        setComposerText(literalPrompt, literalPrompt.length)
+        await waitFor(() => {
+          expect(highlightedKeywords()).toEqual([])
+        })
+      }
+
+      setComposerText(complexPrompt, complexPrompt.length)
+      await waitFor(() => {
+        expect(highlightedKeywords()).toEqual(['ultracode'])
+      })
+
+      await act(async () => {
+        await useSettingsStore.getState().setWorkflowKeywordTriggerEnabled(false)
+      })
+      await waitFor(() => {
+        expect(highlightedKeywords()).toEqual([])
+      })
+
+      await act(async () => {
+        await useSettingsStore.getState().setWorkflowKeywordTriggerEnabled(true)
+      })
+      await waitFor(() => {
+        expect(highlightedKeywords()).toEqual(['ultracode'])
+      })
+
+      fireEvent.click(screen.getByRole('button', { name: 'Run' }))
+      expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, {
+        type: 'user_message',
+        content: complexPrompt,
+        attachments: [],
+      })
+      expect(updateUser).toHaveBeenNthCalledWith(1, { workflowKeywordTriggerEnabled: false })
+      expect(updateUser).toHaveBeenNthCalledWith(2, { workflowKeywordTriggerEnabled: true })
+    } finally {
+      updateUser.mockRestore()
+    }
   })
 })

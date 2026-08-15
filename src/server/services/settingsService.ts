@@ -219,6 +219,62 @@ export class SettingsService {
     }
   }
 
+  /**
+   * 合并单个内置 Agent 的 model/effort 覆盖。
+   *
+   * `patch` 为 null 时删除 model/effort；字段值为 null 时只删该字段。
+   * 条目清空后连同条目一起删除，`builtInAgentOverrides` 变空时删掉这个 key，
+   * 不在用户的 settings.json 里留下空壳。
+   *
+   * 不走 updateUserSettings：那是顶层浅合并，传一个 builtInAgentOverrides 会
+   * 整体替换 record。若在调用方先读再算差量，读改写就落在写锁之外，连点两个
+   * Agent 会丢掉一次更新。
+   */
+  async updateBuiltInAgentOverride(
+    agentType: string,
+    patch: {
+      model?: string | null
+      effort?: string | number | null
+    } | null,
+  ): Promise<void> {
+    const filePath = this.getUserSettingsPath()
+    await this.withWriteLock(filePath, async () => {
+      const current = await this.readJsonFile(filePath)
+      const overrides = { ...(normalizeJsonObject(current.builtInAgentOverrides) ?? {}) }
+
+      const entry = { ...(normalizeJsonObject(overrides[agentType]) ?? {}) }
+      if (patch === null) {
+        // Clear only the fields this API owns. The schema deliberately allows
+        // future per-agent fields, so reset must not erase data written by a
+        // newer client or another settings editor.
+        delete entry.model
+        delete entry.effort
+      } else {
+        for (const field of ['model', 'effort'] as const) {
+          if (!Object.hasOwn(patch, field)) continue
+          if (patch[field] === null) {
+            delete entry[field]
+          } else {
+            entry[field] = patch[field]
+          }
+        }
+      }
+      if (Object.keys(entry).length === 0) {
+        delete overrides[agentType]
+      } else {
+        overrides[agentType] = entry
+      }
+
+      const merged = Object.assign({}, current)
+      if (Object.keys(overrides).length === 0) {
+        delete merged.builtInAgentOverrides
+      } else {
+        merged.builtInAgentOverrides = overrides
+      }
+      await this.writeJsonFile(filePath, merged)
+    })
+  }
+
   // ---------------------------------------------------------------------------
   // 权限模式
   // ---------------------------------------------------------------------------

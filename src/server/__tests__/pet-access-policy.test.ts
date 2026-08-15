@@ -32,6 +32,7 @@ describe('pet access capability policy', () => {
     for (const [method, pathname] of [
       ['GET', '/api/providers'],
       ['GET', '/api/desktop-ui/preferences'],
+      ['PUT', '/api/desktop-ui/preferences/project-display-name'],
       ['GET', '/api/filesystem'],
       ['GET', '/api/computer-use/authorized-apps'],
       ['GET', '/api/settings/user'],

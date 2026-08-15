@@ -504,6 +504,16 @@ export const SDKControlStopTaskRequestSchema = lazySchema(() =>
     .describe('Stops a running task.'),
 )
 
+export const SDKControlSendAgentMessageRequestSchema = lazySchema(() =>
+  z
+    .object({
+      subtype: z.literal('send_agent_message'),
+      agent_id: z.string().min(1),
+      content: z.string().min(1),
+    })
+    .describe('Queues a follow-up message for an existing subagent, resuming it when necessary.'),
+)
+
 export const SDKControlApplyFlagSettingsRequestSchema = lazySchema(() =>
   z
     .object({
@@ -613,6 +623,7 @@ export const SDKControlRequestInnerSchema = lazySchema(() =>
     SDKControlMcpReconnectRequestSchema(),
     SDKControlMcpToggleRequestSchema(),
     SDKControlStopTaskRequestSchema(),
+    SDKControlSendAgentMessageRequestSchema(),
     SDKControlApplyFlagSettingsRequestSchema(),
     SDKControlGetSettingsRequestSchema(),
     SDKControlElicitationRequestSchema(),

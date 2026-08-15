@@ -245,7 +245,7 @@ export function AskUserQuestion({ sessionId, toolUseId, input, result }: Props) 
   if (!activeQuestion) return null
 
   return (
-    <div className={`mb-4 rounded-[var(--radius-lg)] border overflow-hidden ${
+    <div className={`rounded-[var(--radius-lg)] border overflow-hidden ${
       submitted
         ? 'border-[var(--color-border)] bg-[var(--color-surface-container-low)] opacity-70'
         : 'border-[var(--color-secondary)] bg-[var(--color-surface-container-lowest)]'

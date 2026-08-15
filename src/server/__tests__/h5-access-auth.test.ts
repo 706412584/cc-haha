@@ -608,6 +608,7 @@ describe('remote H5 auth and CORS integration', () => {
     for (const [method, pathName] of [
       ['GET', '/api/providers'],
       ['GET', '/api/desktop-ui/preferences'],
+      ['PUT', '/api/desktop-ui/preferences/project-display-name'],
       ['GET', '/api/filesystem'],
       ['GET', '/api/computer-use/authorized-apps'],
       ['GET', '/api/settings/user'],

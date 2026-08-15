@@ -307,6 +307,26 @@
     }
   },
   {
+    "id": "atlascloud",
+    "name": "Atlas Cloud",
+    "baseUrl": "https://api.atlascloud.ai",
+    "apiFormat": "openai_chat",
+    "defaultModels": {
+      "main": "deepseek-ai/deepseek-v4-pro",
+      "haiku": "deepseek-ai/deepseek-v4-pro",
+      "sonnet": "deepseek-ai/deepseek-v4-pro",
+      "opus": "deepseek-ai/deepseek-v4-pro"
+    },
+    "needsApiKey": true,
+    "websiteUrl": "https://www.atlascloud.ai",
+    "apiKeyUrl": "https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=cc-haha",
+    "featured": true,
+    "authStrategy": "api_key",
+    "modelContextWindows": {
+      "deepseek-ai/deepseek-v4-pro": 1000000
+    }
+  },
+  {
     "id": "lmstudio",
     "name": "LM Studio",
     "baseUrl": "http://localhost:1234",

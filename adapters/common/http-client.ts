@@ -214,9 +214,12 @@ export class AdapterHttpClient {
 
     const q = query.toLowerCase()
 
-    // Exact project name match
-    const exact = projects.find(p => p.projectName.toLowerCase() === q)
-    if (exact) return { project: exact }
+    // Exact project name match. Different roots can contain repositories with
+    // the same basename, so an exact name is still ambiguous when it identifies
+    // more than one canonical project.
+    const exact = projects.filter(p => p.projectName.toLowerCase() === q)
+    if (exact.length === 1) return { project: exact[0] }
+    if (exact.length > 1) return { ambiguous: exact }
 
     // Fuzzy: name or path contains query
     const matches = projects.filter(p =>

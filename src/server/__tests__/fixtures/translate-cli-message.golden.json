@@ -520,6 +520,23 @@
       ]
     }
   ],
+  "agent-run-stream": [
+    {
+      "in": "system/agent_run_message",
+      "out": [
+        {
+          "type": "agent_run_event",
+          "runAgentId": "agent_golden_physical",
+          "streamId": "agent_golden_invocation",
+          "targetAgentId": "agent_golden_target",
+          "event": {
+            "type": "status",
+            "state": "idle"
+          }
+        }
+      ]
+    }
+  ],
   "task-lifecycle": [
     {
       "in": "system/task_started",

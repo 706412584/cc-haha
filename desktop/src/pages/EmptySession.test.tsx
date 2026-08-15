@@ -192,6 +192,7 @@ import { useSettingsStore } from '../stores/settingsStore'
 import { useTabStore } from '../stores/tabStore'
 import { useUIStore } from '../stores/uiStore'
 import { usePluginStore } from '../stores/pluginStore'
+import { useWorkflowStore } from '../stores/workflowStore'
 import type { RepositoryContextResult } from '../api/sessions'
 import { browserHost } from '../lib/desktopHost/browserHost'
 import { getComposerElement, getComposerText, setComposerText } from '../components/chat/composerTestUtils'
@@ -267,6 +268,7 @@ describe('EmptySession', () => {
   const initialUiState = useUIStore.getInitialState()
   const initialPluginState = usePluginStore.getInitialState()
   const initialProviderState = useProviderStore.getInitialState()
+  const initialWorkflowState = useWorkflowStore.getInitialState()
 
   beforeEach(() => {
     vi.clearAllMocks()
@@ -281,6 +283,7 @@ describe('EmptySession', () => {
     useUIStore.setState(initialUiState, true)
     usePluginStore.setState(initialPluginState, true)
     useProviderStore.setState(initialProviderState, true)
+    useWorkflowStore.setState(initialWorkflowState, true)
 
     mocks.createSession.mockResolvedValue({ sessionId: 'draft-session' })
     mocks.getRepositoryContext.mockResolvedValue(okRepositoryContext())
@@ -325,6 +328,7 @@ describe('EmptySession', () => {
     useUIStore.setState(initialUiState, true)
     usePluginStore.setState(initialPluginState, true)
     useProviderStore.setState(initialProviderState, true)
+    useWorkflowStore.setState(initialWorkflowState, true)
   })
 
   it('uses compact composer controls on phone-sized H5 browsers', async () => {
@@ -509,6 +513,22 @@ describe('EmptySession', () => {
     expect(getComposerText()).toBe('')
   })
 
+  it('shows /save-workflow help without creating or sending a session', async () => {
+    useSettingsStore.setState({ chatSendBehavior: 'enter' })
+
+    render(<EmptySession />)
+
+    setComposerText('/save-workflow', '/save-workflow'.length)
+    fireEvent.keyDown(getComposerElement(), { key: 'Enter' })
+
+    expect(mocks.createSession).not.toHaveBeenCalled()
+    expect(mocks.getProviderAuthStatus).not.toHaveBeenCalled()
+    expect(mocks.wsSend).not.toHaveBeenCalled()
+    expect(await screen.findByText('Save workflow')).toBeInTheDocument()
+    expect(screen.getByText(/Complete a workflow in this session/)).toBeInTheDocument()
+    expect(getComposerText()).toBe('')
+  })
+
   it('selects a highlighted agent entry from /agent without creating a session', async () => {
     useSettingsStore.setState({
       chatSendBehavior: 'enter',
@@ -665,7 +685,7 @@ describe('EmptySession', () => {
     })
   })
 
-  it('materializes the active provider runtime before the first draft message', async () => {
+  it('materializes the active provider runtime and visible default effort before the first draft message', async () => {
     useProviderStore.setState({
       providers: [{
         id: 'provider-minimax',
@@ -768,6 +788,64 @@ describe('EmptySession', () => {
         providerId: 'grok-official',
         modelId: 'grok-4.5',
       },
+    ])
+  })
+
+  it('materializes the resolved Claude OAuth model before the first draft message', async () => {
+    mocks.getProviderAuthStatus.mockResolvedValue({
+      hasAuth: true,
+      source: 'claude-oauth',
+      activeProvider: 'Claude Official',
+    })
+    useSettingsStore.setState({
+      currentModel: {
+        id: 'claude-sonnet-5',
+        name: 'Sonnet 5',
+        description: 'Claude OAuth Pro default',
+        context: '1m',
+      },
+      effortLevel: 'high',
+      activeProviderName: null,
+    })
+    useProviderStore.setState({
+      providers: [],
+      activeId: null,
+      providerOrder: ['claude-official', 'openai-official', 'grok-official'],
+      hasLoadedProviders: true,
+    })
+
+    render(<EmptySession />)
+    setComposerText('Claude OAuth question', 21)
+    fireEvent.click(screen.getByRole('button', { name: /Run/i }))
+
+    await waitFor(() => {
+      expect(mocks.createSession).toHaveBeenCalledWith({ permissionMode: 'default' })
+    })
+
+    expect(useSessionRuntimeStore.getState().selections['draft-session']).toEqual({
+      providerId: null,
+      modelId: 'claude-sonnet-5',
+      effortLevel: 'high',
+    })
+    expect(mocks.wsSend.mock.calls.slice(0, 3)).toEqual([
+      [
+        'draft-session',
+        {
+          type: 'set_runtime_config',
+          providerId: null,
+          modelId: 'claude-sonnet-5',
+          effortLevel: 'high',
+        },
+      ],
+      ['draft-session', { type: 'prewarm_session' }],
+      [
+        'draft-session',
+        {
+          type: 'user_message',
+          content: 'Claude OAuth question',
+          attachments: [],
+        },
+      ],
     ])
   })
 

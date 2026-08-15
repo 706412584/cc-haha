@@ -112,6 +112,44 @@ describe('useTranslation', () => {
     }
   })
 
+  it('localizes the counted activity summary in every registered locale', () => {
+    for (const locale of ['en', 'zh', 'zh-TW', 'jp', 'kr'] as const) {
+      const label = translate(locale, 'toolGroup.thoughtMany', { count: 5 })
+      expect(label).not.toBe('toolGroup.thoughtMany')
+      // The count is what the folded run is showing; a locale that drops the
+      // placeholder would silently reduce it back to a bare "Thinking".
+      expect(label).toContain('5')
+    }
+  })
+
+  it('localizes built-in agent overrides and row actions in every registered locale', () => {
+    for (const locale of ['en', 'zh', 'zh-TW', 'jp', 'kr'] as const) {
+      for (const key of [
+        'settings.agents.override',
+        'settings.agents.overrideTitle',
+        'settings.agents.overrideHint',
+        'settings.agents.overrideScopeHint',
+        'settings.agents.overrideDefaultNone',
+        'settings.agents.overrideReset',
+        'settings.agents.overrideBadge',
+        'settings.agents.overrideSaveError',
+        'settings.agents.overrideResetError',
+      ] as const) {
+        expect(translate(locale, key), `${locale} is missing ${key}`).not.toBe(key)
+      }
+
+      // The parameterized ones have to actually substitute: a locale that drops
+      // the placeholder would render "Edit " with no agent name, leaving every
+      // row action with the same accessible name.
+      expect(translate(locale, 'settings.agents.rowEdit', { name: 'Explore' })).toContain('Explore')
+      expect(translate(locale, 'settings.agents.rowDelete', { name: 'Explore' })).toContain('Explore')
+      expect(translate(locale, 'settings.agents.rowOverride', { name: 'Explore' })).toContain('Explore')
+      expect(translate(locale, 'settings.agents.overrideDefault', { value: 'haiku' })).toContain('haiku')
+      expect(translate(locale, 'settings.agents.overrideManaged', { source: 'X' })).toContain('X')
+      expect(translate(locale, 'settings.agents.overrideShadowed', { source: 'X' })).toContain('X')
+    }
+  })
+
   it('describes exactly the standard ~/.claude mode and an external custom mode', () => {
     expect(translate('en', 'settings.general.storageSystemDescription')).toContain('~/.claude')
     expect(translate('zh', 'settings.general.storageSystemDescription')).toContain('~/.claude')

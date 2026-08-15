@@ -5,6 +5,7 @@ import * as path from 'node:path'
 import type { AppState } from '../../state/AppStateStore.js'
 import { handleAgentsApi } from '../api/agents.js'
 import { clearAgentDefinitionsCache } from '../../tools/AgentTool/loadAgentsDir.js'
+import { resetSettingsCache } from '../../utils/settings/settingsCache.js'
 import { findGitRoot } from '../../utils/git.js'
 import { refreshActivePlugins } from '../../utils/plugins/refresh.js'
 import { AgentService } from '../services/agentService.js'
@@ -36,6 +37,9 @@ beforeEach(async () => {
   process.env.CLAUDE_CONFIG_DIR = configDir
   process.env.CLAUDE_CODE_USE_NATIVE_FILE_SEARCH = '1'
   clearAgentDefinitionsCache()
+  // Built-in overrides are read from settings, which caches per source and per
+  // file path — without this each test would see the previous temp config dir.
+  resetSettingsCache()
   __resetWebSocketHandlerStateForTests()
   originalHasSession = conversationService.hasSession.bind(conversationService)
   originalRequestControl = conversationService.requestControl.bind(conversationService)
@@ -46,6 +50,7 @@ afterEach(async () => {
   conversationService.requestControl = originalRequestControl
   __resetWebSocketHandlerStateForTests()
   clearAgentDefinitionsCache()
+  resetSettingsCache()
   if (originalConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
   else process.env.CLAUDE_CONFIG_DIR = originalConfigDir
   if (originalNativeSearch === undefined) {
@@ -1541,6 +1546,357 @@ describe('Agents API Markdown CRUD', () => {
         userContext,
       ),
     ).rejects.toMatchObject({ statusCode: 400 })
+  })
+})
+
+describe('Agents API built-in overrides', () => {
+  async function readUserSettings(): Promise<Record<string, any>> {
+    try {
+      return JSON.parse(
+        await fs.readFile(path.join(configDir, 'settings.json'), 'utf-8'),
+      )
+    } catch {
+      return {}
+    }
+  }
+
+  async function writeUserSettings(settings: unknown): Promise<void> {
+    await fs.writeFile(
+      path.join(configDir, 'settings.json'),
+      JSON.stringify(settings),
+    )
+    resetSettingsCache()
+    clearAgentDefinitionsCache()
+  }
+
+  async function getAgent(name: string) {
+    const list = await api(
+      'GET',
+      `/api/agents?cwd=${encodeURIComponent(projectCwd)}`,
+    )
+    return list.data.allAgents.find((agent: any) => agent.agentType === name)
+  }
+
+  it('overrides a built-in model while the plain PUT route still refuses it', async () => {
+    // Both halves target the same agent, in one test, on purpose. Split apart,
+    // loosening assertMutableTarget would leave each of them green.
+    // `general-purpose` specifically: it is the only shape of built-in name the
+    // generic route can even address, since AGENT_SLUG_PATTERN rejects
+    // `Explore` with a 400 long before the read-only check runs.
+    const before = await getAgent('general-purpose')
+    expect(before.overridable).toBe(true)
+    expect(before.editable).toBe(false)
+    const shippedModel = before.defaults.model
+
+    const overridden = await api(
+      'PUT',
+      '/api/agents/general-purpose/override',
+      { cwd: projectCwd, model: 'sonnet', effort: 'low' },
+    )
+    expect(overridden.status).toBe(200)
+    expect(overridden.data.agent.model).toBe('sonnet')
+    expect(overridden.data.agent.modelDisplay).toBe('sonnet')
+    expect(overridden.data.agent.effort).toBe('low')
+    expect(overridden.data.agent.source).toBe('built-in')
+    // Narrow capability, not general write access.
+    expect(overridden.data.agent.editable).toBe(false)
+    expect(overridden.data.agent.overridable).toBe(true)
+    // The shipped default must survive so the UI can offer "reset".
+    expect(overridden.data.agent.defaults.model).toBe(shippedModel)
+    expect(overridden.data.agent.override).toEqual({
+      model: 'sonnet',
+      effort: 'low',
+      source: 'userSettings',
+    })
+
+    const readOnlyUpdate = await api('PUT', '/api/agents/general-purpose', {
+      scope: 'user',
+      cwd: projectCwd,
+      description: 'Attempt to rewrite a built-in through the generic route',
+    })
+    expect(readOnlyUpdate.status).toBe(403)
+    expect(readOnlyUpdate.data.error).toBe('READ_ONLY_AGENT')
+
+    const readOnlyDelete = await api(
+      'DELETE',
+      `/api/agents/general-purpose?scope=user&cwd=${encodeURIComponent(projectCwd)}`,
+    )
+    expect(readOnlyDelete.status).toBe(403)
+    expect(readOnlyDelete.data.error).toBe('READ_ONLY_AGENT')
+  })
+
+  it('writes only the requested field and leaves the rest of settings.json alone', async () => {
+    await writeUserSettings({
+      model: 'opus',
+      builtInAgentOverrides: { Plan: { model: 'haiku' } },
+    })
+
+    await api('PUT', '/api/agents/Explore/override', {
+      cwd: projectCwd,
+      model: 'sonnet',
+    })
+
+    const settings = await readUserSettings()
+    expect(settings.model).toBe('opus')
+    expect(settings.builtInAgentOverrides.Plan).toEqual({ model: 'haiku' })
+    expect(settings.builtInAgentOverrides.Explore).toEqual({ model: 'sonnet' })
+    // A field the request never mentioned must not materialize.
+    expect(settings.builtInAgentOverrides.Explore.effort).toBeUndefined()
+  })
+
+  it('clears one field while the sibling override survives', async () => {
+    await api('PUT', '/api/agents/Explore/override', {
+      cwd: projectCwd,
+      model: 'sonnet',
+      effort: 'high',
+    })
+    const cleared = await api('PUT', '/api/agents/Explore/override', {
+      cwd: projectCwd,
+      model: null,
+    })
+
+    expect(cleared.status).toBe(200)
+    expect(cleared.data.agent.effort).toBe('high')
+    expect(cleared.data.agent.model).toBe(cleared.data.agent.defaults.model)
+
+    const settings = await readUserSettings()
+    expect(settings.builtInAgentOverrides.Explore).toEqual({ effort: 'high' })
+  })
+
+  it('removes the key entirely once the last override is gone', async () => {
+    await writeUserSettings({ model: 'opus' })
+    await api('PUT', '/api/agents/Explore/override', {
+      cwd: projectCwd,
+      model: 'sonnet',
+    })
+    await api('PUT', '/api/agents/Explore/override', {
+      cwd: projectCwd,
+      model: null,
+    })
+
+    const settings = await readUserSettings()
+    expect(settings.model).toBe('opus')
+    // No empty husk left behind in the user's file.
+    expect('builtInAgentOverrides' in settings).toBe(false)
+  })
+
+  it('restores the shipped default on DELETE and stays idempotent', async () => {
+    const shipped = (await getAgent('Explore')).defaults
+
+    await api('PUT', '/api/agents/Explore/override', {
+      cwd: projectCwd,
+      model: 'sonnet',
+      effort: 'high',
+    })
+
+    const reset = await api(
+      'DELETE',
+      `/api/agents/Explore/override?cwd=${encodeURIComponent(projectCwd)}`,
+    )
+    expect(reset.status).toBe(200)
+    expect(reset.data.agent.model).toBe(shipped.model)
+    expect(reset.data.agent.effort).toBe(shipped.effort)
+    expect(reset.data.agent.override).toBeUndefined()
+    expect('builtInAgentOverrides' in (await readUserSettings())).toBe(false)
+
+    // Deleting something that is already absent is a no-op, not a 404 — the
+    // desktop fires "reset" without checking first.
+    const again = await api(
+      'DELETE',
+      `/api/agents/Explore/override?cwd=${encodeURIComponent(projectCwd)}`,
+    )
+    expect(again.status).toBe(200)
+    expect(again.data.agent.model).toBe(shipped.model)
+  })
+
+  it('accepts a mixed-case built-in name the create route could never allow', async () => {
+    // AGENT_SLUG_PATTERN is lowercase-only, so routing this through
+    // assertValidName would make Explore and Plan permanently unreachable.
+    const plan = await api('PUT', '/api/agents/Plan/override', {
+      cwd: projectCwd,
+      model: 'opus',
+    })
+    expect(plan.status).toBe(200)
+    expect(plan.data.agent.model).toBe('opus')
+  })
+
+  it('refuses non-built-in targets without touching settings.json', async () => {
+    await api('POST', '/api/agents', {
+      scope: 'user',
+      cwd: projectCwd,
+      name: 'custom-agent',
+      description: 'A user agent',
+      systemPrompt: 'Prompt.',
+    })
+    const settingsBefore = await fs
+      .readFile(path.join(configDir, 'settings.json'), 'utf-8')
+      .catch(() => null)
+
+    const custom = await api('PUT', '/api/agents/custom-agent/override', {
+      cwd: projectCwd,
+      model: 'sonnet',
+    })
+    expect(custom.status).toBe(403)
+    expect(custom.data.error).toBe('NOT_A_BUILT_IN_AGENT')
+
+    const missing = await api('PUT', '/api/agents/does-not-exist/override', {
+      cwd: projectCwd,
+      model: 'sonnet',
+    })
+    expect(missing.status).toBe(404)
+
+    const settingsAfter = await fs
+      .readFile(path.join(configDir, 'settings.json'), 'utf-8')
+      .catch(() => null)
+    expect(settingsAfter).toEqual(settingsBefore)
+  })
+
+  it('rejects an invalid effort and an unexpected field', async () => {
+    const badEffort = await api('PUT', '/api/agents/Explore/override', {
+      cwd: projectCwd,
+      effort: 'extreme',
+    })
+    expect(badEffort.status).toBe(400)
+    expect(badEffort.data.message).toBe(
+      'Agent effort must be a supported level or integer',
+    )
+
+    // `scope` is refused rather than ignored: overrides are user-level, and
+    // silently accepting a project scope would write somewhere else.
+    const withScope = await api('PUT', '/api/agents/Explore/override', {
+      cwd: projectCwd,
+      scope: 'project',
+      model: 'sonnet',
+    })
+    expect(withScope.status).toBe(400)
+    expect(withScope.data.message).toBe('Unexpected agent field: scope')
+
+    expect('builtInAgentOverrides' in (await readUserSettings())).toBe(false)
+  })
+
+  it('applies override and reset to the same running session across a failed reload retry', async () => {
+    const shipped = (await getAgent('Explore')).defaults
+    await writeUserSettings({
+      futureSetting: { keep: true },
+      builtInAgentOverrides: {
+        Plan: { model: 'opus', futurePlanField: 'keep-plan' },
+        Explore: { effort: 'high', futureAgentField: 'keep-explore' },
+      },
+    })
+
+    let appState = {
+      plugins: {
+        enabled: [],
+        disabled: [],
+        commands: [],
+        errors: [],
+        needsRefresh: true,
+      },
+      mcp: { pluginReconnectKey: 0 },
+      agentDefinitions: { activeAgents: [], allAgents: [] },
+    } as unknown as AppState
+    const controlRequests: Array<Record<string, unknown>> = []
+    let failNextReload = true
+    conversationService.hasSession = ((sessionId: string) =>
+      sessionId === 'session-override') as typeof conversationService.hasSession
+    conversationService.requestControl = (async (
+      _sessionId: string,
+      request: Record<string, unknown>,
+    ) => {
+      controlRequests.push(request)
+      if (failNextReload) {
+        failNextReload = false
+        throw new Error('CLI control channel closed')
+      }
+
+      const result = await refreshActivePlugins(updater => {
+        appState = updater(appState)
+      })
+      return {
+        commands: [],
+        agents: result.agentDefinitions.allAgents.map(agent => ({
+          name: agent.agentType,
+          model: agent.model === 'inherit' ? undefined : agent.model,
+        })),
+        plugins: [],
+        mcpServers: [],
+        error_count: result.error_count,
+      }
+    }) as typeof conversationService.requestControl
+
+    const saved = await api('PUT', '/api/agents/Explore/override', {
+      cwd: projectCwd,
+      model: 'deepseek-v4-pro',
+    })
+    expect(saved.status).toBe(200)
+    expect(saved.data.agent.model).toBe('deepseek-v4-pro')
+
+    const failedReload = await api(
+      'POST',
+      '/api/agents/reload?sessionId=session-override',
+    )
+    expect(failedReload.data.session).toMatchObject({
+      applied: false,
+      reason: 'failed',
+      error: 'CLI control channel closed',
+    })
+
+    const retriedReload = await api(
+      'POST',
+      '/api/agents/reload?sessionId=session-override',
+    )
+
+    expect(retriedReload.status).toBe(200)
+    expect(retriedReload.data.session.applied).toBe(true)
+    expect(
+      appState.agentDefinitions.activeAgents.find(
+        agent => agent.agentType === 'Explore',
+      ),
+    ).toMatchObject({ model: 'deepseek-v4-pro', effort: 'high' })
+    expect(await readUserSettings()).toMatchObject({
+      futureSetting: { keep: true },
+      builtInAgentOverrides: {
+        Plan: { model: 'opus', futurePlanField: 'keep-plan' },
+        Explore: {
+          model: 'deepseek-v4-pro',
+          effort: 'high',
+          futureAgentField: 'keep-explore',
+        },
+      },
+    })
+
+    const reset = await api(
+      'DELETE',
+      `/api/agents/Explore/override?cwd=${encodeURIComponent(projectCwd)}`,
+    )
+    expect(reset.status).toBe(200)
+    expect(reset.data.agent.model).toBe(shipped.model)
+    expect(reset.data.agent.effort).toBe(shipped.effort)
+
+    const resetReload = await api(
+      'POST',
+      '/api/agents/reload?sessionId=session-override',
+    )
+
+    expect(resetReload.data.session.applied).toBe(true)
+    const resetExplore = appState.agentDefinitions.activeAgents.find(
+      agent => agent.agentType === 'Explore',
+    )
+    expect(resetExplore?.model).toBe(shipped.model)
+    expect(resetExplore?.effort).toBe(shipped.effort)
+    expect(await readUserSettings()).toEqual({
+      futureSetting: { keep: true },
+      builtInAgentOverrides: {
+        Plan: { model: 'opus', futurePlanField: 'keep-plan' },
+        Explore: { futureAgentField: 'keep-explore' },
+      },
+    })
+
+    expect(controlRequests).toEqual([
+      { subtype: 'reload_plugins' },
+      { subtype: 'reload_plugins' },
+      { subtype: 'reload_plugins' },
+    ])
   })
 })
 

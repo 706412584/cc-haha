@@ -25,9 +25,12 @@ import {
 } from '../../utils/swarm/teamHelpers.js'
 import { assignTeammateColor } from '../../utils/swarm/teammateLayoutManager.js'
 import {
+  beginTaskListLifecycle,
   ensureTasksDir,
+  readTaskListLifecycleState,
   resetTaskList,
   setLeaderTeamName,
+  withTaskListLifecycleLock,
 } from '../../utils/tasks.js'
 import { generateWordSlug } from '../../utils/words.js'
 import { TEAM_CREATE_TOOL_NAME } from './constants.js'
@@ -56,20 +59,6 @@ export type Output = {
 }
 
 export type Input = z.infer<InputSchema>
-
-/**
- * Generates a unique team name by checking if the provided name already exists.
- * If the name already exists, generates a new word slug.
- */
-function generateUniqueTeamName(providedName: string): string {
-  // If the team doesn't exist, use the provided name
-  if (!readTeamFile(providedName)) {
-    return providedName
-  }
-
-  // Team exists, generate a new unique name
-  return generateWordSlug()
-}
 
 export const TeamCreateTool: Tool<InputSchema, Output> = buildTool({
   name: TEAM_CREATE_TOOL_NAME,
@@ -139,11 +128,6 @@ export const TeamCreateTool: Tool<InputSchema, Output> = buildTool({
       )
     }
 
-    // If team already exists, generate a unique name instead of failing
-    const finalTeamName = generateUniqueTeamName(team_name)
-
-    // Generate a deterministic agent ID for the team lead
-    const leadAgentId = formatAgentId(TEAM_LEAD_NAME, finalTeamName)
     const leadAgentType = agent_type || TEAM_LEAD_NAME
     // Get the team lead's current model from AppState (handles session model, settings, CLI override)
     const leadModel = parseUserSpecifiedModel(
@@ -152,38 +136,72 @@ export const TeamCreateTool: Tool<InputSchema, Output> = buildTool({
         getDefaultMainLoopModel(),
     )
 
-    const teamFilePath = getTeamFilePath(finalTeamName)
+    let candidateName = team_name
+    let created: {
+      finalTeamName: string
+      leadAgentId: string
+      teamFile: TeamFile
+    } | undefined
+    while (!created) {
+      const finalTeamName = candidateName
+      const taskListId = sanitizeName(finalTeamName)
+      created = await withTaskListLifecycleLock(taskListId, async () => {
+        // Name reservation and lifecycle creation are one cross-process
+        // transaction. A pre-lock existence check allowed two leaders to both
+        // create the same absent Team and overwrite each other's generation.
+        const lifecycleState = await readTaskListLifecycleState(taskListId)
+        if (
+          readTeamFile(finalTeamName) ||
+          (!lifecycleState.deleted && lifecycleState.activeIdentity)
+        ) return undefined
 
-    const teamFile: TeamFile = {
-      name: finalTeamName,
-      description: _description,
-      createdAt: Date.now(),
-      leadAgentId,
-      leadSessionId: getSessionId(), // Store actual session ID for team discovery
-      members: [
-        {
-          agentId: leadAgentId,
-          name: TEAM_LEAD_NAME,
-          agentType: leadAgentType,
-          model: leadModel,
-          joinedAt: Date.now(),
-          tmuxPaneId: '',
-          cwd: getCwd(),
-          subscriptions: [],
-        },
-      ],
+        const leadAgentId = formatAgentId(TEAM_LEAD_NAME, finalTeamName)
+        const createdAt = Date.now()
+        const teamFile: TeamFile = {
+          name: finalTeamName,
+          description: _description,
+          createdAt,
+          leadAgentId,
+          leadSessionId: getSessionId(), // Store actual session ID for team discovery
+          members: [
+            {
+              agentId: leadAgentId,
+              name: TEAM_LEAD_NAME,
+              agentType: leadAgentType,
+              model: leadModel,
+              joinedAt: createdAt,
+              tmuxPaneId: '',
+              cwd: getCwd(),
+              subscriptions: [],
+            },
+          ],
+        }
+
+        // The durable generation invalidates a writer or cleanup call queued
+        // by an older same-name Team before any new config/task state is exposed.
+        const lifecycle = await beginTaskListLifecycle(taskListId, {
+          teamName: finalTeamName,
+          createdAt: teamFile.createdAt,
+          ...(teamFile.leadSessionId
+            ? { leadSessionId: teamFile.leadSessionId }
+            : {}),
+        })
+        await writeTeamFileAsync(finalTeamName, teamFile)
+        // Track for session-end cleanup — teams were left on disk forever
+        // unless explicitly TeamDelete'd (gh-32730).
+        registerTeamForSessionCleanup(finalTeamName, lifecycle)
+
+        // Reset and create the corresponding task list directory (Team =
+        // Project = TaskList). This ensures task numbering starts fresh at 1.
+        await resetTaskList(taskListId)
+        await ensureTasksDir(taskListId)
+        return { finalTeamName, leadAgentId, teamFile }
+      })
+      if (!created) candidateName = generateWordSlug()
     }
 
-    await writeTeamFileAsync(finalTeamName, teamFile)
-    // Track for session-end cleanup — teams were left on disk forever
-    // unless explicitly TeamDelete'd (gh-32730).
-    registerTeamForSessionCleanup(finalTeamName)
-
-    // Reset and create the corresponding task list directory (Team = Project = TaskList)
-    // This ensures task numbering starts fresh at 1 for each new swarm
-    const taskListId = sanitizeName(finalTeamName)
-    await resetTaskList(taskListId)
-    await ensureTasksDir(taskListId)
+    const { finalTeamName, leadAgentId, teamFile } = created
+    const teamFilePath = getTeamFilePath(finalTeamName)
 
     // Register the team name so getTaskListId() returns it for the leader.
     // Without this, the leader falls through to getSessionId() and writes tasks

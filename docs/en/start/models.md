@@ -44,7 +44,7 @@ With an API key in hand, this is the fastest route. Click "Add Provider", pick s
 The built-in presets, as they appear in the dialog:
 
 - **DeepSeek** · **Zhipu GLM** · **Kimi** · **MiniMax** — major Chinese model vendors; the base URLs point at each one's Anthropic-compatible endpoint.
-- **TeamoRouter** · **XuanShu API** · **FennoAI** — routing services that give you access to official Claude models through their own gateways.
+- **XuanShu API** · **FennoAI** — routing services that give you access to official Claude models through their own gateways.
 - **Qiniu Cloud AI** — an aggregator MaaS platform: one key for DeepSeek, GLM, Kimi, Qwen, and more.
 - **LM Studio** · **Ollama** — local models; see the next section.
 - **Custom** — anything not listed above.

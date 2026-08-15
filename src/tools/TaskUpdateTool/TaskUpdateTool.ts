@@ -7,14 +7,15 @@ import {
 } from '../../utils/hooks.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import {
-  blockTask,
-  deleteTask,
+  deleteTaskWithCommit,
   getTask,
   getTaskListId,
   isTodoV2Enabled,
   type TaskStatus,
+  listTasks,
+  type Task,
   TaskStatusSchema,
-  updateTask,
+  updateTaskAtomically,
 } from '../../utils/tasks.js'
 import {
   getAgentId,
@@ -74,6 +75,9 @@ const outputSchema = lazySchema(() =>
         to: z.string(),
       })
       .optional(),
+    verificationNudgeNeeded: z.boolean().optional(),
+    taskListMutationAt: z.string().optional(),
+    taskListMutationRevision: z.number().int().nonnegative().optional(),
   }),
 )
 type OutputSchema = ReturnType<typeof outputSchema>
@@ -129,7 +133,7 @@ export const TaskUpdateTool = buildTool({
     },
     context,
   ) {
-    const taskListId = getTaskListId()
+    const taskListId = getTaskListId(context?.agentId)
 
     // Auto-expand task list when updating tasks
     context.setAppState(prev => {
@@ -151,63 +155,11 @@ export const TaskUpdateTool = buildTool({
     }
 
     const updatedFields: string[] = []
-
-    // Update basic fields if provided and different from current value
-    const updates: {
-      subject?: string
-      description?: string
-      activeForm?: string
-      status?: TaskStatus
-      owner?: string
-      metadata?: Record<string, unknown>
-    } = {}
-    if (subject !== undefined && subject !== existingTask.subject) {
-      updates.subject = subject
-      updatedFields.push('subject')
-    }
-    if (description !== undefined && description !== existingTask.description) {
-      updates.description = description
-      updatedFields.push('description')
-    }
-    if (activeForm !== undefined && activeForm !== existingTask.activeForm) {
-      updates.activeForm = activeForm
-      updatedFields.push('activeForm')
-    }
-    if (owner !== undefined && owner !== existingTask.owner) {
-      updates.owner = owner
-      updatedFields.push('owner')
-    }
-    // Auto-set owner when a teammate marks a task as in_progress without
-    // explicitly providing an owner. This ensures the task list can match
-    // todo items to teammates for showing activity status.
-    if (
-      isAgentSwarmsEnabled() &&
-      status === 'in_progress' &&
-      owner === undefined &&
-      !existingTask.owner
-    ) {
-      const agentName = getAgentName()
-      if (agentName) {
-        updates.owner = agentName
-        updatedFields.push('owner')
-      }
-    }
-    if (metadata !== undefined) {
-      const merged = { ...(existingTask.metadata ?? {}) }
-      for (const [key, value] of Object.entries(metadata)) {
-        if (value === null) {
-          delete merged[key]
-        } else {
-          merged[key] = value
-        }
-      }
-      updates.metadata = merged
-      updatedFields.push('metadata')
-    }
     if (status !== undefined) {
       // Handle deletion - delete the task file and return early
       if (status === 'deleted') {
-        const deleted = await deleteTask(taskListId, taskId)
+        const deletion = await deleteTaskWithCommit(taskListId, taskId)
+        const deleted = deletion.deleted
         return {
           data: {
             success: deleted,
@@ -217,11 +169,15 @@ export const TaskUpdateTool = buildTool({
             statusChange: deleted
               ? { from: existingTask.status, to: 'deleted' }
               : undefined,
+            taskListMutationAt: deletion.committedAt,
+            taskListMutationRevision: deletion.revision,
           },
         }
       }
 
-      // For regular status updates, validate and apply if different
+      // For regular status updates, run completion hooks before the atomic
+      // commit. The commit re-reads the task so stale ownership decisions are
+      // never carried across this asynchronous hook boundary.
       if (status !== existingTask.status) {
         // Run TaskCompleted hooks when marking a task as completed
         if (status === 'completed') {
@@ -259,29 +215,101 @@ export const TaskUpdateTool = buildTool({
           }
         }
 
-        updates.status = status
-        updatedFields.push('status')
       }
     }
 
-    if (Object.keys(updates).length > 0) {
-      await updateTask(taskListId, taskId, updates)
+    // A teammate that batches several small tasks closed at once never passes
+    // through `in_progress`, so those tasks used to finish with no owner at all
+    // and the workbench could only report them as done by nobody. `getAgentName`
+    // is undefined on the lead's main thread, so a lead closing out someone
+    // else's task still cannot take credit for it.
+    const automaticOwner = (
+      isAgentSwarmsEnabled() &&
+      (status === 'in_progress' || status === 'completed') &&
+      owner === undefined
+    ) ? getAgentName() : undefined
+    const mutation = await updateTaskAtomically(taskListId, taskId, (current) => {
+      const updates: Partial<Omit<Task, 'id'>> = {}
+      if (subject !== undefined && subject !== current.subject) updates.subject = subject
+      if (description !== undefined && description !== current.description) {
+        updates.description = description
+      }
+      if (activeForm !== undefined && activeForm !== current.activeForm) {
+        updates.activeForm = activeForm
+      }
+      if (owner !== undefined && owner !== current.owner) {
+        updates.owner = owner
+      } else if (owner === undefined && automaticOwner && !current.owner) {
+        updates.owner = automaticOwner
+      }
+      if (metadata !== undefined) {
+        const merged = { ...(current.metadata ?? {}) }
+        for (const [key, value] of Object.entries(metadata)) {
+          if (value === null) delete merged[key]
+          else merged[key] = value
+        }
+        updates.metadata = merged
+      }
+      if (status !== undefined && status !== 'deleted' && status !== current.status) {
+        updates.status = status
+      }
+      return updates
+    }, {
+      addBlocks,
+      addBlockedBy,
+    })
+    if (!mutation) {
+      return {
+        data: {
+          success: false,
+          taskId,
+          updatedFields: [],
+          error: 'Task not found',
+        },
+      }
     }
+    const committedTask = mutation.task
+    const previousTask = mutation.previous
+    if (previousTask.subject !== committedTask.subject) updatedFields.push('subject')
+    if (previousTask.description !== committedTask.description) updatedFields.push('description')
+    if (previousTask.activeForm !== committedTask.activeForm) updatedFields.push('activeForm')
+    if (previousTask.owner !== committedTask.owner) updatedFields.push('owner')
+    if (JSON.stringify(previousTask.metadata) !== JSON.stringify(committedTask.metadata)) {
+      updatedFields.push('metadata')
+    }
+    if (previousTask.status !== committedTask.status) updatedFields.push('status')
+    if (JSON.stringify(previousTask.blocks) !== JSON.stringify(committedTask.blocks)) {
+      updatedFields.push('blocks')
+    }
+    if (
+      JSON.stringify(previousTask.blockedBy) !==
+      JSON.stringify(committedTask.blockedBy)
+    ) updatedFields.push('blockedBy')
+    const statusChange = previousTask.status !== committedTask.status
+      ? { from: previousTask.status, to: committedTask.status }
+      : undefined
 
-    // Notify new owner via mailbox when ownership changes
-    if (updates.owner && isAgentSwarmsEnabled()) {
+    // Notify new owner via mailbox when ownership changes. Work that is already
+    // finished is excluded: "this is now yours" is not true of a completed task,
+    // and delivering it would wake an idle teammate for nothing.
+    if (
+      committedTask.owner &&
+      committedTask.owner !== previousTask.owner &&
+      committedTask.status !== 'completed' &&
+      isAgentSwarmsEnabled()
+    ) {
       const senderName = getAgentName() || 'team-lead'
       const senderColor = getTeammateColor()
       const assignmentMessage = JSON.stringify({
         type: 'task_assignment',
         taskId,
-        subject: existingTask.subject,
-        description: existingTask.description,
+        subject: committedTask.subject,
+        description: committedTask.description,
         assignedBy: senderName,
         timestamp: new Date().toISOString(),
       })
       await writeToMailbox(
-        updates.owner,
+        committedTask.owner,
         {
           from: senderName,
           text: assignmentMessage,
@@ -292,29 +320,28 @@ export const TaskUpdateTool = buildTool({
       )
     }
 
-    // Add blocks if provided and not already present
-    if (addBlocks && addBlocks.length > 0) {
-      const newBlocks = addBlocks.filter(
-        id => !existingTask.blocks.includes(id),
-      )
-      for (const blockId of newBlocks) {
-        await blockTask(taskListId, taskId, blockId)
-      }
-      if (newBlocks.length > 0) {
-        updatedFields.push('blocks')
-      }
-    }
-
-    // Add blockedBy if provided and not already present (reverse: the blocker blocks this task)
-    if (addBlockedBy && addBlockedBy.length > 0) {
-      const newBlockedBy = addBlockedBy.filter(
-        id => !existingTask.blockedBy.includes(id),
-      )
-      for (const blockerId of newBlockedBy) {
-        await blockTask(taskListId, blockerId, taskId)
-      }
-      if (newBlockedBy.length > 0) {
-        updatedFields.push('blockedBy')
+    // Structural verification nudge: if the main-thread agent just closed
+    // out a 3+ task list and none of those tasks was a verification step,
+    // append a reminder to the tool result. Fires at the loop-exit moment
+    // where skips happen ("when the last task closed, the loop exited").
+    // Mirrors the TodoWriteTool nudge for V1 sessions; this covers V2
+    // (interactive CLI). TaskUpdateToolOutput is @internal so this field
+    // does not touch the public SDK surface.
+    let verificationNudgeNeeded = false
+    if (
+      feature('VERIFICATION_AGENT') &&
+      getFeatureValue_CACHED_MAY_BE_STALE('tengu_hive_evidence', false) &&
+      !context.agentId &&
+      statusChange?.to === 'completed'
+    ) {
+      const allTasks = await listTasks(taskListId)
+      const allDone = allTasks.every(t => t.status === 'completed')
+      if (
+        allDone &&
+        allTasks.length >= 3 &&
+        !allTasks.some(t => /verif/i.test(t.subject))
+      ) {
+        verificationNudgeNeeded = true
       }
     }
 
@@ -323,10 +350,10 @@ export const TaskUpdateTool = buildTool({
         success: true,
         taskId,
         updatedFields,
-        statusChange:
-          updates.status !== undefined
-            ? { from: existingTask.status, to: updates.status }
-            : undefined,
+        statusChange,
+        verificationNudgeNeeded,
+        taskListMutationAt: mutation.committedAt,
+        taskListMutationRevision: mutation.revision,
       },
     }
   },

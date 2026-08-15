@@ -16,11 +16,13 @@
  * textarea handlers calling preventDefault).
  */
 import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react'
+import type { Node as PMNode } from 'prosemirror-model'
 import { EditorState, Plugin, PluginKey, TextSelection } from 'prosemirror-state'
-import { EditorView } from 'prosemirror-view'
+import { Decoration, DecorationSet, EditorView } from 'prosemirror-view'
 import { keymap } from 'prosemirror-keymap'
 import { history, redo, undo } from 'prosemirror-history'
 import { baseKeymap, splitBlock } from 'prosemirror-commands'
+import { findKeywordRanges } from '../../../../src/utils/workflows/keyword'
 import {
   buildComposerDoc,
   composerSchema,
@@ -33,6 +35,7 @@ import {
 } from './composerEditor'
 import type { ComposerMention } from '../../lib/composerMentions'
 import { mentionsEqual } from '../../lib/composerMentions'
+import { useSettingsStore } from '../../stores/settingsStore'
 
 export type MentionComposerHandle = {
   focus: () => void
@@ -72,6 +75,7 @@ export type MentionComposerProps = {
  * editable element (`[data-composer-editor]`).
  */
 const composerViewRegistry = new WeakMap<HTMLElement, EditorView>()
+const workflowKeywordPluginKey = new PluginKey('workflow-keyword-highlight')
 
 export function getComposerViewForTesting(element: HTMLElement | null): EditorView | undefined {
   return element ? composerViewRegistry.get(element) : undefined
@@ -91,6 +95,23 @@ function syncEmptyState(view: EditorView, placeholder?: string) {
   }
 }
 
+function workflowKeywordDecorations(doc: PMNode, enabled: boolean): DecorationSet {
+  if (!enabled) return DecorationSet.empty
+
+  const text = projectComposerDoc(doc).text
+  const decorations = findKeywordRanges(text).map((range) =>
+    Decoration.inline(
+      textOffsetToPmPos(doc, range.start),
+      textOffsetToPmPos(doc, range.end),
+      {
+        class: 'composer-workflow-keyword',
+        'data-workflow-keyword': 'true',
+      },
+    ),
+  )
+  return DecorationSet.create(doc, decorations)
+}
+
 export const MentionComposer = forwardRef<MentionComposerHandle, MentionComposerProps>(
   function MentionComposer(props, ref) {
     const {
@@ -107,6 +128,11 @@ export const MentionComposer = forwardRef<MentionComposerHandle, MentionComposer
 
     const containerRef = useRef<HTMLDivElement | null>(null)
     const viewRef = useRef<EditorView | null>(null)
+    const workflowKeywordTriggerEnabled = useSettingsStore(
+      (state) => state.workflowKeywordTriggerEnabled,
+    )
+    const workflowKeywordTriggerEnabledRef = useRef(workflowKeywordTriggerEnabled)
+    workflowKeywordTriggerEnabledRef.current = workflowKeywordTriggerEnabled
     const propsRef = useRef(props)
     propsRef.current = props
     const lastProjectedRef = useRef({ text: value, mentions })
@@ -132,6 +158,15 @@ export const MentionComposer = forwardRef<MentionComposerHandle, MentionComposer
                   // name) would insert that text alongside the attachment.
                   drop: () => true,
                 },
+              },
+            }),
+            new Plugin({
+              key: workflowKeywordPluginKey,
+              props: {
+                decorations: (state) => workflowKeywordDecorations(
+                  state.doc,
+                  workflowKeywordTriggerEnabledRef.current,
+                ),
               },
             }),
             history(),
@@ -202,6 +237,18 @@ export const MentionComposer = forwardRef<MentionComposerHandle, MentionComposer
       }))
       syncEmptyState(view, propsRef.current.placeholder)
     }, [value, mentions])
+
+    // The setting can change while the current draft stays untouched. An
+    // empty transaction makes ProseMirror recompute decorations immediately,
+    // so the visible opt-in warning and the persisted runtime gate stay joined.
+    useEffect(() => {
+      const view = viewRef.current
+      if (!view) return
+      view.dispatch(view.state.tr.setMeta(
+        workflowKeywordPluginKey,
+        workflowKeywordTriggerEnabled,
+      ))
+    }, [workflowKeywordTriggerEnabled])
 
     // Dynamic editor chrome: classes and aria attributes are not part of the
     // document, so they are applied straight to the editable element.

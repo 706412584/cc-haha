@@ -110,6 +110,14 @@ export function registerTask<T extends TaskState>(task: T, setAppState: SetAppSt
             messages: existing.messages,
             diskLoaded: existing.diskLoaded,
             pendingMessages: existing.pendingMessages,
+            ownerAgentId:
+              existing.type === 'local_agent' && task.type === 'local_agent'
+                ? task.ownerAgentId ?? existing.ownerAgentId
+                : 'ownerAgentId' in existing
+                  ? existing.ownerAgentId
+                : 'ownerAgentId' in task
+                  ? task.ownerAgentId
+                  : undefined,
           }
         : task
     registeredTask = merged as T
@@ -155,7 +163,16 @@ export function registerTask<T extends TaskState>(task: T, setAppState: SetAppSt
       'workflowName' in task
         ? (task.workflowName as string | undefined)
         : undefined,
+    workflow_run_id:
+      'workflowRunId' in task
+        ? (task.workflowRunId as string | undefined)
+        : undefined,
     prompt: 'prompt' in task ? (task.prompt as string) : undefined,
+    ...(task.type === 'in_process_teammate'
+      ? { owner_agent_id: task.identity.agentId }
+      : 'ownerAgentId' in task && task.ownerAgentId
+        ? { owner_agent_id: task.ownerAgentId as string }
+        : {}),
   })
   return registeredTask
 }
@@ -348,6 +365,8 @@ function getStatusText(status: TaskStatus): string {
       return 'was stopped'
     case 'running':
       return 'is running'
+    case 'paused':
+      return 'is paused'
     case 'pending':
       return 'is pending'
   }

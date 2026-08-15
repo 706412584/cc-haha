@@ -1161,11 +1161,42 @@ describe('openaiUsageToAnthropic', () => {
       cache_creation_input_tokens: 10,
     })
     expect(usage).toEqual({
-      input_tokens: 30,
+      input_tokens: 100,
       output_tokens: 5,
       cache_read_input_tokens: 60,
       cache_creation_input_tokens: 10,
     })
+  })
+
+  test('derives missing prompt and completion counts from total tokens', () => {
+    expect(openaiUsageToAnthropic({
+      total_tokens: 120,
+      completion_tokens: 20,
+    })).toEqual({ input_tokens: 100, output_tokens: 20 })
+
+    expect(openaiUsageToAnthropic({
+      total_tokens: 120,
+      prompt_tokens: 100,
+    })).toEqual({ input_tokens: 100, output_tokens: 20 })
+  })
+
+  test('uses total-only usage as a conservative context anchor', () => {
+    expect(openaiUsageToAnthropic({ total_tokens: 120 }))
+      .toEqual({ input_tokens: 120, output_tokens: 0 })
+  })
+
+  test('does not turn output-only usage into a false prompt anchor', () => {
+    expect(openaiUsageToAnthropic({ completion_tokens: 20 }))
+      .toEqual({ input_tokens: 0, output_tokens: 20 })
+  })
+
+  test('rejects strings, negative numbers, and non-finite usage values', () => {
+    expect(openaiUsageToAnthropic({
+      input_tokens: '100' as never,
+      output_tokens: -1,
+      total_tokens: Number.POSITIVE_INFINITY,
+      cache_read_input_tokens: Number.NaN,
+    })).toEqual({ input_tokens: 0, output_tokens: 0 })
   })
 
   test('leaves input untouched and omits cache fields without cache activity', () => {
@@ -1173,14 +1204,14 @@ describe('openaiUsageToAnthropic', () => {
       .toEqual({ input_tokens: 10, output_tokens: 5 })
   })
 
-  test('clamps input at zero when cached exceeds reported input', () => {
+  test('caps malformed nested cached tokens at the reported input', () => {
     const usage = openaiUsageToAnthropic({
       input_tokens: 50,
       output_tokens: 5,
       input_tokens_details: { cached_tokens: 80 },
     })
     expect(usage.input_tokens).toBe(0)
-    expect(usage.cache_read_input_tokens).toBe(80)
+    expect(usage.cache_read_input_tokens).toBe(50)
   })
 
   test('returns zeros for missing usage', () => {

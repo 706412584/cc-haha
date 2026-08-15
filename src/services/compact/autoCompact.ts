@@ -12,8 +12,14 @@ import { hasExactErrorMessage } from '../../utils/errors.js'
 import type { CacheSafeParams } from '../../utils/forkedAgent.js'
 import { logError } from '../../utils/log.js'
 import { getOpenAICodexContextWindowForModel } from '../../services/openaiAuth/models.js'
+import { roughTokenCountEstimation } from '../../services/tokenEstimation.js'
 import { getConfiguredOrBuiltInModelContextWindow } from '../../utils/model/modelContextWindows.js'
-import { tokenCountWithEstimation } from '../../utils/tokens.js'
+import { jsonStringify } from '../../utils/slowOperations.js'
+import {
+  hasUsableContextUsage,
+  tokenCountWithEstimation,
+} from '../../utils/tokens.js'
+import { zodToJsonSchema } from '../../utils/zodToJsonSchema.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../analytics/growthbook.js'
 import { getMaxOutputTokensForModel } from '../api/claude.js'
 import { notifyCompaction } from '../api/promptCacheBreakDetection.js'
@@ -30,13 +36,12 @@ import { trySessionMemoryCompaction } from './sessionMemoryCompact.js'
 // Reserve this many tokens for output during compaction
 // Based on p99.99 of compact summary output being 17,387 tokens.
 const MAX_OUTPUT_TOKENS_FOR_SUMMARY = 20_000
+// Small-window providers cannot afford the fixed 20K summary reservation.
+// Keep at least 75% of their advertised window available to the compact input.
+const MAX_SUMMARY_RESERVE_CONTEXT_FRACTION = 0.25
 
 // Returns the context window size minus the max output tokens for the model
 export function getEffectiveContextWindowSize(model: string): number {
-  const reservedTokensForSummary = Math.min(
-    getMaxOutputTokensForModel(model),
-    MAX_OUTPUT_TOKENS_FOR_SUMMARY,
-  )
   let contextWindow = getContextWindowForModel(model, getSdkBetas())
 
   const autoCompactWindow = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
@@ -58,6 +63,12 @@ export function getEffectiveContextWindowSize(model: string): number {
         : parsed
     }
   }
+
+  const reservedTokensForSummary = Math.min(
+    getMaxOutputTokensForModel(model),
+    MAX_OUTPUT_TOKENS_FOR_SUMMARY,
+    Math.floor(contextWindow * MAX_SUMMARY_RESERVE_CONTEXT_FRACTION),
+  )
 
   return contextWindow - reservedTokensForSummary
 }
@@ -93,8 +104,14 @@ const MIN_TURNS_BETWEEN_AUTO_COMPACT = 3
 export function getAutoCompactThreshold(model: string): number {
   const effectiveContextWindow = getEffectiveContextWindowSize(model)
 
-  const autocompactThreshold =
-    effectiveContextWindow - AUTOCOMPACT_BUFFER_TOKENS
+  // The fixed 13K buffer is larger than some supported context windows. Cap it
+  // at one third of the effective window so the threshold remains useful for
+  // 16K/32K providers while preserving the existing buffer for larger models.
+  const autoCompactBuffer = Math.min(
+    AUTOCOMPACT_BUFFER_TOKENS,
+    Math.floor(effectiveContextWindow / 3),
+  )
+  const autocompactThreshold = effectiveContextWindow - autoCompactBuffer
 
   // Override for easier testing of autocompact
   const envPercent = process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE
@@ -178,6 +195,27 @@ export function isAutoCompactEnabled(): boolean {
   return userConfig.autoCompactEnabled
 }
 
+/**
+ * Provider usage normally includes the system prompt, tools, skills, and
+ * request metadata. When a compatibility relay omits usable usage entirely,
+ * add a conservative local estimate for that fixed request prefix instead of
+ * comparing messages alone against the auto-compact threshold.
+ */
+export function estimateFallbackFixedContextTokens(
+  cacheSafeParams: CacheSafeParams,
+): number {
+  const tools = cacheSafeParams.toolUseContext.options.tools.map(tool => ({
+    name: tool.name,
+    input_schema: tool.inputJSONSchema ?? zodToJsonSchema(tool.inputSchema),
+  }))
+  return roughTokenCountEstimation(jsonStringify({
+    systemPrompt: cacheSafeParams.systemPrompt,
+    systemContext: cacheSafeParams.systemContext,
+    userContext: cacheSafeParams.userContext,
+    tools,
+  }))
+}
+
 export async function shouldAutoCompact(
   messages: Message[],
   model: string,
@@ -186,6 +224,7 @@ export async function shouldAutoCompact(
   // pre-snip context, so tokenCountWithEstimation can't see the savings.
   // Subtract the rough-delta that snip already computed.
   snipTokensFreed = 0,
+  fallbackFixedContextTokens = 0,
 ): Promise<boolean> {
   // Recursion guards. session_memory and compact are forked agents that
   // would deadlock.
@@ -243,12 +282,18 @@ export async function shouldAutoCompact(
     }
   }
 
-  const tokenCount = tokenCountWithEstimation(messages) - snipTokensFreed
+  const fixedContextTokens = hasUsableContextUsage(messages)
+    ? 0
+    : fallbackFixedContextTokens
+  const tokenCount =
+    tokenCountWithEstimation(messages) +
+    fixedContextTokens -
+    snipTokensFreed
   const threshold = getAutoCompactThreshold(model)
   const effectiveWindow = getEffectiveContextWindowSize(model)
 
   logForDebugging(
-    `autocompact: tokens=${tokenCount} threshold=${threshold} effectiveWindow=${effectiveWindow}${snipTokensFreed > 0 ? ` snipFreed=${snipTokensFreed}` : ''}`,
+    `autocompact: tokens=${tokenCount} threshold=${threshold} effectiveWindow=${effectiveWindow}${fixedContextTokens > 0 ? ` fallbackFixed=${fixedContextTokens}` : ''}${snipTokensFreed > 0 ? ` snipFreed=${snipTokensFreed}` : ''}`,
   )
 
   const { isAboveAutoCompactThreshold } = calculateTokenWarningState(
@@ -347,6 +392,7 @@ export async function autoCompactIfNeeded(
     model,
     querySource,
     snipTokensFreed,
+    estimateFallbackFixedContextTokens(cacheSafeParams),
   )
 
   if (!shouldCompact) {

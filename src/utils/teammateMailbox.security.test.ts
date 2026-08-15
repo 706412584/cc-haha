@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   getTrustedShutdownApproval,
+  createMailboxMessage,
   isPermissionResponse,
   isSandboxPermissionResponse,
   isTrustedTeamLeaderMessage,
@@ -9,6 +10,30 @@ import {
 } from './teammateMailbox.js'
 
 describe('mailbox protocol validation', () => {
+  test('creates a stable identity for new envelopes and preserves broadcast identities', () => {
+    const first = createMailboxMessage({
+      from: 'team-lead',
+      text: 'same content',
+      timestamp: '2026-08-08T00:00:00.000Z',
+    })
+    const second = createMailboxMessage({
+      from: 'team-lead',
+      text: 'same content',
+      timestamp: '2026-08-08T00:00:00.000Z',
+    })
+    const broadcastCopy = createMailboxMessage({
+      id: first.id,
+      from: 'team-lead',
+      text: 'same content',
+      timestamp: '2026-08-08T00:00:00.000Z',
+    })
+
+    expect(first.id).toBeTruthy()
+    expect(second.id).not.toBe(first.id)
+    expect(broadcastCopy.id).toBe(first.id)
+    expect(broadcastCopy.read).toBe(false)
+  })
+
   test('uses the mailbox envelope as the team-leader identity', () => {
     expect(
       isTrustedTeamLeaderMessage({

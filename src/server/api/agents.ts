@@ -22,6 +22,7 @@ import {
   type AgentMutationResult,
   type AgentScope,
 } from '../services/agentService.js'
+import { SettingsService } from '../services/settingsService.js'
 import { taskService } from '../services/taskService.js'
 import { ApiError, errorResponse } from '../middleware/errorHandler.js'
 import { resetTaskListIfMatches, TaskSchema } from '../../utils/tasks.js'
@@ -37,6 +38,16 @@ import {
 } from '../../tools/AgentTool/loadAgentsDir.js'
 import { getCwd } from '../../utils/cwd.js'
 import { AGENT_COLORS } from '../../tools/AgentTool/agentColorManager.js'
+import { getBuiltInAgentsWithoutOverrides } from '../../tools/AgentTool/builtInAgents.js'
+import {
+  resolveBuiltInAgentOverrides,
+  type ResolvedBuiltInAgentOverride,
+} from '../../tools/AgentTool/builtInAgentOverrides.js'
+import { isRestrictedToPluginOnly } from '../../utils/settings/pluginOnlyPolicy.js'
+import {
+  SETTING_SOURCES,
+  type SettingSource,
+} from '../../utils/settings/constants.js'
 import { parseEffortValue } from '../../utils/effort.js'
 import { reloadSessionComponents } from '../services/sessionComponentReloadService.js'
 import { getAllBaseTools } from '../../tools.js'
@@ -44,6 +55,7 @@ import { filterToolsForAgent } from '../../tools/AgentTool/agentToolUtils.js'
 
 const agentService = new AgentService()
 const TASK_RESET_MAX_BODY_BYTES = 512 * 1024
+const settingsService = new SettingsService()
 
 export async function handleAgentsApi(
   req: Request,
@@ -131,6 +143,43 @@ async function handleAgents(
       mutation,
     )
     return Response.json({ agent: visibleAgent }, { status: 201 })
+  }
+
+  // ── PUT|DELETE /api/agents/:name/override ────────────────────────────
+  // A deliberately narrow path for built-in agents, which stay read-only on
+  // the routes below. Placed ahead of them so the generic PUT/DELETE keep
+  // seeing only `/api/agents/:name` and their 403 contract is untouched.
+  if (segments[3] === 'override' && agentName) {
+    if (method === 'PUT') {
+      const body = await parseJsonBody(req)
+      assertAllowedFields(body, BUILT_IN_OVERRIDE_FIELDS)
+      const cwd = typeof body.cwd === 'string' ? body.cwd : getCwd()
+      await assertOverridableBuiltInAgent(agentName, cwd)
+      const patch = parseBuiltInOverridePatch(body)
+      await settingsService.updateBuiltInAgentOverride(agentName, patch)
+      clearAgentDefinitionsCache()
+      return Response.json({
+        agent: await loadBuiltInAgentAfterOverride(agentName, cwd),
+      })
+    }
+
+    if (method === 'DELETE') {
+      const cwd = url.searchParams.get('cwd') || getCwd()
+      await assertOverridableBuiltInAgent(agentName, cwd)
+      // Idempotent: clearing an agent that has no override is not an error,
+      // so the desktop can fire "reset to default" without checking first.
+      await settingsService.updateBuiltInAgentOverride(agentName, null)
+      clearAgentDefinitionsCache()
+      return Response.json({
+        agent: await loadBuiltInAgentAfterOverride(agentName, cwd),
+      })
+    }
+
+    throw new ApiError(
+      405,
+      `Method ${method} not allowed on /api/agents/${agentName}/override`,
+      'METHOD_NOT_ALLOWED',
+    )
   }
 
   // ── PUT /api/agents/:name ────────────────────────────────────────────
@@ -308,7 +357,22 @@ type ApiAgentDefinition = {
   baseDir?: string
   target?: string
   isActive: boolean
+  /**
+   * Whether the *file* backing this agent can be rewritten. Built-ins stay
+   * false — the generic PUT/DELETE still 403 them. Deliberately separate from
+   * `overridable` below, which is a much narrower capability.
+   */
   editable?: boolean
+  /** Built-in agents only: model/effort can be changed via /override. */
+  overridable?: boolean
+  /** Built-in agents only: what model/effort this build ships with. */
+  defaults?: { model?: string; effort?: SharedAgentDefinition['effort'] }
+  /** Built-in agents only: the override currently in effect, if any. */
+  override?: {
+    model?: string
+    effort?: SharedAgentDefinition['effort']
+    source: SettingSource
+  }
 }
 
 type ApiResolvedAgentDefinition = ApiAgentDefinition & {
@@ -342,6 +406,51 @@ function serializeActiveAgent(
     target,
     isActive,
     editable,
+    ...serializeBuiltInOverride(agent),
+  }
+}
+
+/**
+ * Built-in extras: what this build ships, and what the user changed.
+ *
+ * `model`/`effort`/`modelDisplay` above already carry the *effective* value —
+ * the override is applied at the loader — so these fields exist only so the UI
+ * can offer "reset to built-in default" and name the default. The default
+ * differs per agent and per build, so it can never be a client-side constant.
+ */
+function serializeBuiltInOverride(
+  agent: SharedAgentDefinition,
+): Partial<ApiAgentDefinition> {
+  if (agent.source !== 'built-in') return {}
+
+  const shipped = getBuiltInAgentsWithoutOverrides().find(
+    candidate => candidate.agentType === agent.agentType,
+  )
+  const override: ResolvedBuiltInAgentOverride | undefined =
+    resolveBuiltInAgentOverrides().get(agent.agentType)
+  const fields = [override?.model, override?.effort].filter(
+    field => field !== undefined,
+  )
+
+  return {
+    overridable: true,
+    defaults: { model: shipped?.model, effort: shipped?.effort },
+    ...(fields.length > 0
+      ? {
+          override: {
+            ...(override?.model ? { model: override.model.value } : {}),
+            ...(override?.effort ? { effort: override.effort.value } : {}),
+            // Fields can come from different files. Report the highest-priority
+            // one so the UI locks the control if any part is admin-managed.
+            source: fields.reduce((winner, field) =>
+              SETTING_SOURCES.indexOf(field.source) >
+              SETTING_SOURCES.indexOf(winner.source)
+                ? field
+                : winner,
+            ).source,
+          },
+        }
+      : {}),
   }
 }
 
@@ -358,6 +467,92 @@ const CREATE_AGENT_FIELDS = new Set([
 ])
 
 const UPDATE_AGENT_FIELDS = new Set([...CREATE_AGENT_FIELDS, 'target'])
+
+// No `scope`: built-in overrides are user-level by definition. Accepting and
+// ignoring one would silently write somewhere the caller did not ask for.
+const BUILT_IN_OVERRIDE_FIELDS = new Set(['model', 'effort', 'cwd'])
+
+/**
+ * Only the model and effort of an agent that is genuinely built-in right now.
+ *
+ * Membership, not `assertValidName`: AGENT_SLUG_PATTERN is lowercase-only and
+ * would reject `Explore` and `Plan` outright.
+ */
+async function assertOverridableBuiltInAgent(
+  name: string,
+  cwd: string,
+): Promise<void> {
+  if (isRestrictedToPluginOnly('agents')) {
+    throw new ApiError(
+      403,
+      'Agent customization is restricted to plugins by managed settings',
+      'AGENT_CUSTOMIZATION_LOCKED',
+    )
+  }
+
+  const { allAgents } = await getAgentDefinitionsWithOverrides(cwd)
+  const match = allAgents.find(agent => agent.agentType === name)
+  if (!match) {
+    throw ApiError.notFound(`Agent not found: ${name}`)
+  }
+  if (match.source !== 'built-in') {
+    // Distinct from READ_ONLY_AGENT so the desktop can tell "edit this through
+    // the agent editor" apart from "this source cannot be written at all".
+    throw new ApiError(
+      403,
+      `Agent is not built-in: ${name}`,
+      'NOT_A_BUILT_IN_AGENT',
+    )
+  }
+}
+
+function parseBuiltInOverridePatch(body: Record<string, unknown>): {
+  model?: string | null
+  effort?: string | number | null
+} {
+  const patch: { model?: string | null; effort?: string | number | null } = {}
+
+  if (Object.hasOwn(body, 'model')) {
+    patch.model =
+      body.model === null ? null : requireNonEmptyString(body.model, 'model')
+  }
+  if (Object.hasOwn(body, 'effort')) {
+    if (body.effort === null) {
+      patch.effort = null
+    } else {
+      const effort = parseEffortValue(body.effort)
+      if (effort === undefined) {
+        throw ApiError.badRequest(
+          'Agent effort must be a supported level or integer',
+        )
+      }
+      patch.effort = effort
+    }
+  }
+  return patch
+}
+
+/**
+ * Re-read a built-in agent after its override changed.
+ *
+ * loadMutatedAgent cannot serve this: it filters on the userSettings source and
+ * matches by realpath of baseDir/sourceFilePath, neither of which a built-in has.
+ */
+async function loadBuiltInAgentAfterOverride(
+  name: string,
+  cwd: string,
+): Promise<ApiAgentDefinition> {
+  const { activeAgents, allAgents } = await getAgentDefinitionsWithOverrides(cwd)
+  const agent = allAgents.find(
+    candidate => candidate.agentType === name && candidate.source === 'built-in',
+  )
+  if (!agent) {
+    throw ApiError.internal(
+      `Built-in agent disappeared after writing its override: ${name}`,
+    )
+  }
+  return serializeAgentForRequest(agent, activeAgents.includes(agent), cwd)
+}
 
 function decodeAgentName(segment: string): string {
   try {

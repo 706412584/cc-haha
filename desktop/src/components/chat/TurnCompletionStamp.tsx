@@ -9,10 +9,9 @@ type Props = {
 }
 
 /**
- * Closes out a finished turn under its last reply: when it ended and how long it
- * took. Unlike the hover-revealed per-message timestamp this one is always
- * visible — "how long did that take" is the question people ask after a long
- * turn, and a hover chip cannot answer it on a touch screen at all (#1151).
+ * Compact metadata for the last reply's action row: when the turn ended and how
+ * long it took. The parent action row keeps this visible on pointer and touch
+ * layouts alike (#1151).
  */
 export function TurnCompletionStamp({ completion }: Props) {
   const locale = useSettingsStore((state) => state.locale)
@@ -24,12 +23,12 @@ export function TurnCompletionStamp({ completion }: Props) {
   const duration = formatDurationMs(completion.durationMs, t)
 
   return (
-    <div
+    <span
       data-turn-completion
-      className="mt-2 flex items-center gap-1.5 text-[11px] font-medium tabular-nums text-[var(--color-text-tertiary)]"
+      className="inline-flex min-w-0 items-center gap-2 whitespace-nowrap text-[11px] font-medium tabular-nums text-[var(--color-text-tertiary)]"
     >
       <span title={formatExactMessageTimestamp(completion.completedAt, locale) || clockLabel}>
-        {t('chat.turnCompletedAt', { time: clockLabel })}
+        {clockLabel}
       </span>
       {duration ? (
         <>
@@ -37,6 +36,6 @@ export function TurnCompletionStamp({ completion }: Props) {
           <span data-turn-completion-duration>{t('chat.turnDuration', { duration })}</span>
         </>
       ) : null}
-    </div>
+    </span>
   )
 }

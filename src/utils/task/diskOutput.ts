@@ -303,6 +303,35 @@ export function appendTaskOutput(taskId: string, content: string): void {
 }
 
 /**
+ * Replace a task's owned output with one durable snapshot.
+ *
+ * Workflow tasks publish structured JSON only once they settle. Keep that
+ * write behind the same directory creation and no-symlink boundary as streamed
+ * task output so the first task in a clean session cannot lose its snapshot.
+ */
+export function writeTaskOutput(taskId: string, content: string): Promise<void> {
+  return track(
+    (async () => {
+      await ensureOutputDir()
+      const handle = await open(
+        getOwnedTaskOutputPath(taskId),
+        process.platform === 'win32'
+          ? 'w'
+          : fsConstants.O_WRONLY |
+              fsConstants.O_CREAT |
+              fsConstants.O_TRUNC |
+              O_NOFOLLOW,
+      )
+      try {
+        await handle.writeFile(content, 'utf8')
+      } finally {
+        await handle.close()
+      }
+    })(),
+  )
+}
+
+/**
  * Wait for all pending writes for a task to complete.
  * Useful before reading output to ensure all data is flushed.
  */

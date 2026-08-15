@@ -55,6 +55,9 @@ vi.mock('../../pages/SubagentRunPage', () => ({
   SubagentRunPage: ({ sourceSessionId, taskId, toolUseId, title }: { sourceSessionId: string; taskId?: string; toolUseId: string; title: string }) => (
     <div data-testid="subagent-run-page">{sourceSessionId}:{toolUseId}:{taskId}:{title}</div>
   ),
+  TeamMemberRunPage: ({ tabId, leadSessionId, agentId, title }: { tabId: string; leadSessionId: string; agentId: string; title: string }) => (
+    <div data-testid="team-member-run-page">{tabId}:{leadSessionId}:{agentId}:{title}</div>
+  ),
 }))
 
 vi.mock('../workbench/WorkbenchTab', () => ({
@@ -230,6 +233,29 @@ describe('ContentRouter tab surfaces', () => {
 
     expect(screen.getByTestId('empty-session')).toBeInTheDocument()
     expect(screen.queryByTestId('subagent-run-page')).not.toBeInTheDocument()
+  })
+
+  it('renders Agent Teams members through the shared agent run desktop route', () => {
+    useTabStore.setState({
+      tabs: [{
+        sessionId: 'team-member:reviewer@review-team',
+        title: 'Reviewer',
+        type: 'team-member',
+        status: 'idle',
+        sourceSessionId: 'lead-session',
+        teamLeadSessionId: 'lead-session',
+        teamMemberAgentId: 'reviewer@review-team',
+        returnTabId: '__team__lead-session',
+      }],
+      activeTabId: 'team-member:reviewer@review-team',
+    })
+
+    render(<ContentRouter />)
+
+    expect(screen.getByTestId('team-member-run-page')).toHaveTextContent(
+      'team-member:reviewer@review-team:lead-session:reviewer@review-team:Reviewer',
+    )
+    expect(screen.queryByTestId('active-session')).not.toBeInTheDocument()
   })
 
   it('renders the market tab without mounting the chat session surface', () => {

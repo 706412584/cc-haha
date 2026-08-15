@@ -30,6 +30,7 @@ export type DesktopUiPreferences = {
   sidebar: SidebarProjectPreferences
   profile: DesktopProfilePreferences
   pet: DesktopPetPreferences
+  projectDisplayNames: Record<string, string>
 }
 
 export type DesktopUiPreferencesResponse = {
@@ -46,6 +47,12 @@ export type DesktopPetPreferencesUpdateResponse =
   | { ok: true; preferences: DesktopUiPreferences }
   | { ok: true; pet: DesktopPetPreferences }
 
+export type ProjectDisplayNameUpdateResponse = {
+  ok: true
+  projectKey: string
+  displayName: string | null
+}
+
 export const desktopUiPreferencesApi = {
   getPreferences() {
     return api.get<DesktopUiPreferencesResponse>('/api/desktop-ui/preferences')
@@ -59,6 +66,13 @@ export const desktopUiPreferencesApi = {
     return api.put<{ ok: true; preferences: DesktopUiPreferences }>(
       '/api/desktop-ui/preferences/sidebar',
       sidebar,
+    )
+  },
+
+  updateProjectDisplayName(projectKey: string, displayName: string | null) {
+    return api.put<ProjectDisplayNameUpdateResponse>(
+      '/api/desktop-ui/preferences/project-display-name',
+      { projectKey, displayName },
     )
   },
 

@@ -6,7 +6,7 @@ import {
 } from '../../utils/hooks.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import {
-  createTask,
+  createTaskWithCommit,
   deleteTask,
   getTaskListId,
   isTodoV2Enabled,
@@ -39,6 +39,8 @@ const outputSchema = lazySchema(() =>
       id: z.string(),
       subject: z.string(),
     }),
+    taskListMutationAt: z.string().optional(),
+    taskListMutationRevision: z.number().int().nonnegative().optional(),
   }),
 )
 type OutputSchema = ReturnType<typeof outputSchema>
@@ -78,7 +80,7 @@ export const TaskCreateTool = buildTool({
     return null
   },
   async call({ subject, description, activeForm, metadata }, context) {
-    const taskId = await createTask(getTaskListId(), {
+    const creation = await createTaskWithCommit(getTaskListId(context?.agentId), {
       subject,
       description,
       activeForm,
@@ -88,6 +90,7 @@ export const TaskCreateTool = buildTool({
       blockedBy: [],
       metadata,
     })
+    const taskId = creation.taskId
 
     const blockingErrors: string[] = []
     const generator = executeTaskCreatedHooks(
@@ -108,7 +111,7 @@ export const TaskCreateTool = buildTool({
     }
 
     if (blockingErrors.length > 0) {
-      await deleteTask(getTaskListId(), taskId)
+      await deleteTask(getTaskListId(context?.agentId), taskId)
       throw new Error(blockingErrors.join('\n'))
     }
 
@@ -124,6 +127,8 @@ export const TaskCreateTool = buildTool({
           id: taskId,
           subject,
         },
+        taskListMutationAt: creation.committedAt,
+        taskListMutationRevision: creation.revision,
       },
     }
   },

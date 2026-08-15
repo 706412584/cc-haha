@@ -27,7 +27,7 @@ export const ToolResultBlock = memo(function ToolResultBlock({ content, isError,
   const hasMore = text.length > 200
 
   return (
-    <div className={`mb-2 overflow-hidden rounded-[var(--radius-lg)] border ${
+    <div className={`overflow-hidden rounded-[var(--radius-lg)] border ${
       isError
         ? 'border-[var(--color-error)]'
         : 'border-[var(--color-border)]'

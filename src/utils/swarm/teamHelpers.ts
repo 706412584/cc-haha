@@ -12,7 +12,17 @@ import { lazySchema } from '../lazySchema.js'
 import * as lockfile from '../lockfile.js'
 import type { PermissionMode } from '../permissions/PermissionMode.js'
 import { jsonParse, jsonStringify } from '../slowOperations.js'
-import { getTasksDir, notifyTasksUpdated } from '../tasks.js'
+import {
+  completeTaskListLifecycle,
+  getCanonicalTeamTaskListId,
+  getTasksDir,
+  notifyTasksUpdated,
+  readTaskListLifecycleState,
+  readTaskListSnapshot,
+  type TaskListLifecycleToken,
+  type TaskListTerminalReceipt,
+  withTaskListLifecycleLock,
+} from '../tasks.js'
 import { getAgentName, getTeamName, isTeammate } from '../teammate.js'
 import { type BackendType, isPaneBackend } from './backends/types.js'
 import { TEAM_LEAD_NAME } from './constants.js'
@@ -505,29 +515,38 @@ export async function setMemberActive(
   memberName: string,
   isActive: boolean,
 ): Promise<void> {
-  const teamFile = await readTeamFileAsync(teamName)
-  if (!teamFile) {
+  const existing = await readTeamFileAsync(teamName)
+  if (!existing) {
     logForDebugging(
       `[TeammateTool] Cannot set member active: team ${teamName} not found`,
     )
     return
   }
 
-  const member = teamFile.members.find(m => m.name === memberName)
-  if (!member) {
+  let memberFound = false
+  let didChange = false
+  await mutateTeamFileAsync(teamName, teamFile => {
+    const member = teamFile.members.find(m => m.name === memberName)
+    if (!member) return
+    memberFound = true
+    if (member.isActive === isActive) return
+    didChange = true
+    return {
+      ...teamFile,
+      members: teamFile.members.map(current =>
+        current.name === memberName ? { ...current, isActive } : current,
+      ),
+    }
+  })
+
+  if (!memberFound) {
     logForDebugging(
       `[TeammateTool] Cannot set member active: member ${memberName} not found in team ${teamName}`,
     )
     return
   }
+  if (!didChange) return
 
-  // Only write if the value is actually changing
-  if (member.isActive === isActive) {
-    return
-  }
-
-  member.isActive = isActive
-  await writeTeamFileAsync(teamName, teamFile)
   logForDebugging(
     `[TeammateTool] Set member ${memberName} in team ${teamName} to ${isActive ? 'active' : 'idle'}`,
   )
@@ -606,16 +625,39 @@ async function destroyWorktree(worktreePath: string): Promise<void> {
  * Backing Set lives in bootstrap/state.ts so resetStateForTests()
  * clears it between tests (avoids the PR #17615 cross-shard leak class).
  */
-export function registerTeamForSessionCleanup(teamName: string): void {
-  getSessionCreatedTeams().add(teamName)
+export function registerTeamForSessionCleanup(
+  teamName: string,
+  lifecycle: TaskListLifecycleToken,
+): void {
+  getSessionCreatedTeams().set(teamName, lifecycle)
+}
+
+export function getRegisteredTeamLifecycle(
+  teamName: string,
+): TaskListLifecycleToken | undefined {
+  return getSessionCreatedTeams().get(teamName)
 }
 
 /**
  * Remove a team from session cleanup tracking (e.g., after explicit
  * TeamDelete — already cleaned, don't try again on shutdown).
  */
-export function unregisterTeamForSessionCleanup(teamName: string): void {
-  getSessionCreatedTeams().delete(teamName)
+export function unregisterTeamForSessionCleanup(
+  teamName: string,
+  expected?: TaskListLifecycleToken,
+): void {
+  const teams = getSessionCreatedTeams()
+  const current = teams.get(teamName)
+  if (
+    expected &&
+    (
+      current?.generation !== expected.generation ||
+      current.identity.teamName !== expected.identity.teamName ||
+      current.identity.createdAt !== expected.identity.createdAt ||
+      current.identity.leadSessionId !== expected.identity.leadSessionId
+    )
+  ) return
+  teams.delete(teamName)
 }
 
 /**
@@ -625,17 +667,22 @@ export function unregisterTeamForSessionCleanup(teamName: string): void {
 export async function cleanupSessionTeams(): Promise<void> {
   const sessionCreatedTeams = getSessionCreatedTeams()
   if (sessionCreatedTeams.size === 0) return
-  const teams = Array.from(sessionCreatedTeams)
+  const teams = Array.from(sessionCreatedTeams.entries())
   logForDebugging(
-    `cleanupSessionTeams: removing ${teams.length} orphan team dir(s): ${teams.join(', ')}`,
+    `cleanupSessionTeams: removing ${teams.length} orphan team dir(s): ${teams.map(([name]) => name).join(', ')}`,
   )
-  // Kill panes first — on SIGINT the teammate processes are still running;
-  // deleting directories alone would orphan them in open tmux/iTerm2 panes.
-  // (TeamDeleteTool's path doesn't need this — by then teammates have
-  // gracefully exited and useInboxPoller has already closed their panes.)
-  await Promise.allSettled(teams.map(name => killOrphanedTeammatePanes(name)))
-  await Promise.allSettled(teams.map(name => cleanupTeamDirectories(name)))
-  sessionCreatedTeams.clear()
+  const results = await Promise.allSettled(
+    teams.map(([name, lifecycle]) => cleanupTeamDirectories(
+      name,
+      lifecycle,
+      { killOrphanedPanes: true },
+    )),
+  )
+  for (let index = 0; index < teams.length; index++) {
+    if (results[index]?.status !== 'fulfilled') continue
+    const [name, lifecycle] = teams[index]!
+    unregisterTeamForSessionCleanup(name, lifecycle)
+  }
 }
 
 /**
@@ -682,44 +729,14 @@ async function killOrphanedTeammatePanes(teamName: string): Promise<void> {
   )
 }
 
-/**
- * Cleans up team and task directories for a given team name.
- * Also cleans up git worktrees created for teammates.
- * Called when a swarm session is terminated.
- */
-export async function cleanupTeamDirectories(teamName: string): Promise<void> {
-  const sanitizedName = sanitizeName(teamName)
-
-  // Read team file to get worktree paths BEFORE deleting the team directory
-  const teamFile = readTeamFile(teamName)
-  const worktreePaths: string[] = []
-  if (teamFile) {
-    for (const member of teamFile.members) {
-      if (member.worktreePath) {
-        worktreePaths.push(member.worktreePath)
-      }
-    }
-  }
-
-  // Clean up worktrees first
-  for (const worktreePath of worktreePaths) {
-    await destroyWorktree(worktreePath)
-  }
-
-  // Clean up team directory (~/.claude/teams/{team-name}/)
-  const teamDir = getTeamDir(teamName)
-  try {
-    await rm(teamDir, { recursive: true, force: true })
-    logForDebugging(`[TeammateTool] Cleaned up team directory: ${teamDir}`)
-  } catch (error) {
-    logForDebugging(
-      `[TeammateTool] Failed to clean up team directory ${teamDir}: ${errorMessage(error)}`,
-    )
-  }
-
-  // Clean up tasks directory (~/.claude/tasks/{taskListId}/)
-  // The leader and teammates all store tasks under the sanitized team name.
-  const tasksDir = getTasksDir(sanitizedName)
+async function removeTeamLifecycleDirectories(
+  teamName: string,
+  taskListId: string,
+): Promise<void> {
+  // Remove the task directory first. If that fails, retaining the Team config
+  // leaves the public cleanup entry retryable instead of stranding an
+  // invisible, lifecycle-fenced task directory.
+  const tasksDir = getTasksDir(taskListId)
   try {
     await rm(tasksDir, { recursive: true, force: true })
     logForDebugging(`[TeammateTool] Cleaned up tasks directory: ${tasksDir}`)
@@ -728,5 +745,147 @@ export async function cleanupTeamDirectories(teamName: string): Promise<void> {
     logForDebugging(
       `[TeammateTool] Failed to clean up tasks directory ${tasksDir}: ${errorMessage(error)}`,
     )
+    throw new Error(
+      `Failed to clean up Team task directory ${tasksDir}: ${errorMessage(error)}`,
+    )
   }
+
+  const teamDir = getTeamDir(teamName)
+  try {
+    await rm(teamDir, { recursive: true, force: true })
+    logForDebugging(`[TeammateTool] Cleaned up team directory: ${teamDir}`)
+  } catch (error) {
+    logForDebugging(
+      `[TeammateTool] Failed to clean up team directory ${teamDir}: ${errorMessage(error)}`,
+    )
+    throw new Error(
+      `Failed to clean up Team directory ${teamDir}: ${errorMessage(error)}`,
+    )
+  }
+}
+
+async function cleanupTeamRuntimeResources(
+  teamName: string,
+  members: TeamFile['members'],
+  options: { killOrphanedPanes?: boolean },
+): Promise<void> {
+  if (options.killOrphanedPanes) {
+    await killOrphanedTeammatePanes(teamName)
+  }
+  for (const member of members) {
+    if (member.worktreePath) await destroyWorktree(member.worktreePath)
+  }
+}
+
+/**
+ * Cleans up team and task directories for a given team name.
+ * Also cleans up git worktrees created for teammates.
+ * Called when a swarm session is terminated.
+ */
+export async function cleanupTeamDirectories(
+  teamName: string,
+  expectedLifecycle?: TaskListLifecycleToken,
+  options: { killOrphanedPanes?: boolean } = {},
+): Promise<TaskListTerminalReceipt> {
+  const sanitizedName = getCanonicalTeamTaskListId(teamName)
+  const teamFile = readTeamFile(teamName)
+  const fallbackIdentity = {
+    teamName: teamFile?.name ?? teamName,
+    createdAt: teamFile?.createdAt ?? 0,
+    ...(teamFile?.leadSessionId ? { leadSessionId: teamFile.leadSessionId } : {}),
+  }
+  const observedLifecycle = await readTaskListLifecycleState(sanitizedName)
+  if (!expectedLifecycle && !teamFile && observedLifecycle.activeIdentity) {
+    throw new Error(
+      `Cannot infer which incarnation owns missing Team config ${teamName}`,
+    )
+  }
+  const lifecycle = expectedLifecycle ?? {
+    generation: observedLifecycle.generation,
+    identity: observedLifecycle.activeIdentity ?? fallbackIdentity,
+  }
+  if (
+    teamFile &&
+    (
+      lifecycle.identity.teamName !== teamFile.name ||
+      lifecycle.identity.createdAt !== teamFile.createdAt ||
+      lifecycle.identity.leadSessionId !== teamFile.leadSessionId
+    )
+  ) {
+    throw new Error(`Refusing cleanup after Team ${teamName} changed incarnation`)
+  }
+
+  return withTaskListLifecycleLock(sanitizedName, async () => {
+    const currentLifecycle = await readTaskListLifecycleState(sanitizedName)
+    const sameIdentity = currentLifecycle.activeIdentity?.teamName ===
+        lifecycle.identity.teamName &&
+      currentLifecycle.activeIdentity?.createdAt === lifecycle.identity.createdAt &&
+      currentLifecycle.activeIdentity?.leadSessionId ===
+        lifecycle.identity.leadSessionId
+    if (
+      currentLifecycle.generation !== lifecycle.generation ||
+      (currentLifecycle.activeIdentity && !sameIdentity)
+    ) {
+      throw new Error(
+        `Refusing stale cleanup for Team ${teamName}: task-list generation changed`,
+      )
+    }
+    const currentTeamFile = readTeamFile(teamName)
+    if (
+      currentTeamFile &&
+      (
+        currentTeamFile.name !== lifecycle.identity.teamName ||
+        currentTeamFile.createdAt !== lifecycle.identity.createdAt ||
+        currentTeamFile.leadSessionId !== lifecycle.identity.leadSessionId
+      )
+    ) {
+      throw new Error(`Refusing stale cleanup for a newer Team ${teamName}`)
+    }
+    if (currentLifecycle.deleted) {
+      const terminal = currentLifecycle.terminals.find(receipt => (
+        receipt.generation === lifecycle.generation &&
+        receipt.identity.teamName === lifecycle.identity.teamName &&
+        receipt.identity.createdAt === lifecycle.identity.createdAt &&
+        receipt.identity.leadSessionId === lifecycle.identity.leadSessionId
+      ))
+      if (terminal) {
+        await cleanupTeamRuntimeResources(
+          teamName,
+          currentTeamFile?.members ?? teamFile?.members ?? [],
+          options,
+        )
+        await removeTeamLifecycleDirectories(teamName, sanitizedName)
+        return terminal
+      }
+      throw new Error(`Team ${teamName} was deleted without a terminal task frame`)
+    }
+
+    // Capture the terminal DAG under the same durable lock that excludes
+    // watcher reads and whole-directory removal. TeamDelete persists this
+    // frame in its result so archive repair never has to infer mutations that
+    // happened after the watcher's last poll.
+    const finalTaskSnapshot = await readTaskListSnapshot(sanitizedName)
+    const terminalReceipt = await completeTaskListLifecycle(
+      sanitizedName,
+      finalTaskSnapshot,
+      lifecycle,
+    )
+
+    // Persist the terminal frame before potentially slow pane/worktree
+    // teardown. Graceful shutdown has a hard time budget; once the deleted
+    // receipt exists, retries can finish external and physical cleanup without
+    // losing the final DAG or allowing new task writers.
+    await cleanupTeamRuntimeResources(
+      teamName,
+      currentTeamFile?.members ?? teamFile?.members ?? [],
+      options,
+    )
+
+    // The terminal receipt is durable before physical deletion. A failed rm
+    // therefore rejects and remains retryable; a later call reuses the receipt
+    // without recreating or rereading the deleted task directory.
+    await removeTeamLifecycleDirectories(teamName, sanitizedName)
+
+    return terminalReceipt
+  })
 }

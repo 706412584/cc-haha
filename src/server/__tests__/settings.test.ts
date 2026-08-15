@@ -13,6 +13,7 @@ import { handleSettingsApi } from '../api/settings.js'
 import { handleModelsApi } from '../api/models.js'
 import { handleStatusApi, resetUsage, addUsage } from '../api/status.js'
 import { ProviderService } from '../services/providerService.js'
+import { hahaOAuthService } from '../services/hahaOAuthService.js'
 import {
   clearOpenAICodexModelCatalogCache,
 } from '../../services/openaiAuth/modelCatalog.js'
@@ -862,6 +863,85 @@ describe('Models API', () => {
     expect(body.model.id).toBe('claude-opus-4-8')
   })
 
+  it('GET /api/models/current should replace the legacy opus[1m] default with the Claude OAuth Pro default', async () => {
+    await hahaOAuthService.saveTokens({
+      accessToken: 'claude-pro-access',
+      refreshToken: 'claude-pro-refresh',
+      expiresAt: Date.now() + 60 * 60_000,
+      scopes: ['user:inference'],
+      subscriptionType: 'pro',
+    })
+    await new SettingsService().updateUserSettings({ model: 'opus[1m]' })
+    process.env.ANTHROPIC_MODEL = 'third-party-model-must-not-leak'
+
+    const currentRequest = makeRequest('GET', '/api/models/current')
+    const currentResponse = await handleModelsApi(
+      currentRequest.req,
+      currentRequest.url,
+      currentRequest.segments,
+    )
+    const currentBody = await currentResponse.json()
+
+    expect(currentBody.model).toMatchObject({
+      id: 'claude-sonnet-5',
+      name: 'Sonnet 5',
+    })
+
+    const listRequest = makeRequest('GET', '/api/models')
+    const listResponse = await handleModelsApi(
+      listRequest.req,
+      listRequest.url,
+      listRequest.segments,
+    )
+    const listBody = await listResponse.json()
+    expect(listBody.models.map((model: { id: string }) => model.id)).toEqual([
+      'claude-fable-5',
+      'claude-opus-4-8',
+      'claude-sonnet-5',
+      'claude-haiku-4-5',
+    ])
+  })
+
+  it('GET /api/models/current should use Opus for a Claude OAuth Max account without a full model selection', async () => {
+    await hahaOAuthService.saveTokens({
+      accessToken: 'claude-max-access',
+      refreshToken: 'claude-max-refresh',
+      expiresAt: Date.now() + 60 * 60_000,
+      scopes: ['user:inference'],
+      subscriptionType: 'max',
+    })
+    await new SettingsService().updateUserSettings({ model: 'opus[1m]' })
+
+    const { req, url, segments } = makeRequest('GET', '/api/models/current')
+    const response = await handleModelsApi(req, url, segments)
+    const body = await response.json()
+
+    expect(body.model).toMatchObject({
+      id: 'claude-opus-4-8',
+      name: 'Opus 4.8',
+    })
+  })
+
+  it('GET /api/models/current should preserve an explicit full Claude model selection across subscription defaults', async () => {
+    await hahaOAuthService.saveTokens({
+      accessToken: 'claude-pro-explicit-access',
+      refreshToken: 'claude-pro-explicit-refresh',
+      expiresAt: Date.now() + 60 * 60_000,
+      scopes: ['user:inference'],
+      subscriptionType: 'pro',
+    })
+    await new SettingsService().updateUserSettings({ model: 'claude-opus-4-8' })
+
+    const { req, url, segments } = makeRequest('GET', '/api/models/current')
+    const response = await handleModelsApi(req, url, segments)
+    const body = await response.json()
+
+    expect(body.model).toMatchObject({
+      id: 'claude-opus-4-8',
+      name: 'Opus 4.8',
+    })
+  })
+
   it('GET /api/models/current should respect env-configured default model when no provider is active', async () => {
     process.env.ANTHROPIC_MODEL = 'deepseek-v4-pro'
 
@@ -898,6 +978,13 @@ describe('Models API', () => {
   })
 
   it('GET /api/models/current should prefer cc-haha managed model over global user model when provider is active', async () => {
+    await hahaOAuthService.saveTokens({
+      accessToken: 'unrelated-claude-access',
+      refreshToken: 'unrelated-claude-refresh',
+      expiresAt: Date.now() + 60 * 60_000,
+      scopes: ['user:inference'],
+      subscriptionType: 'pro',
+    })
     const settingsSvc = new SettingsService()
     await settingsSvc.updateUserSettings({ model: 'kimi-k2.6' })
 
@@ -1037,9 +1124,11 @@ describe('Models API', () => {
     }
     expect(body.provider).toEqual({ id: 'grok-official', name: 'Grok Official' })
     expect(body.models.map((model) => model.id)).toEqual([
+      'grok-4.6',
       'grok-4.5',
       'grok-composer-2.5-fast',
     ])
+    expect(body.models.find((model) => model.id === 'grok-4.6')?.context).toBe('500000')
     expect(body.models.find((model) => model.id === 'grok-4.5')?.context).toBe('500000')
   })
 

@@ -4,6 +4,7 @@ import {
   type MessageUsage,
   type SessionTaskNotification,
 } from './sessionService.js'
+import { workflowService } from './workflowService.js'
 
 export type SubagentRunStatus = 'running' | 'completed' | 'failed' | 'stopped' | 'unknown'
 export type SubagentRunSource = 'subagent-jsonl' | 'session-history' | 'live-task' | 'none'
@@ -27,9 +28,22 @@ export type SubagentRunResponse = {
   outputFile?: string
   usage?: SubagentRunUsage
   messages: MessageEntry[]
+  /** Complete, untruncated transcript projection used to rebuild Activity. */
+  activityMessages: MessageEntry[]
+  taskNotifications: SessionTaskNotification[]
+  /** Notifications whose nested Agent ids match `activityMessages`. */
+  activityTaskNotifications: SessionTaskNotification[]
   truncated: boolean
   updatedAt?: string
   source: SubagentRunSource
+  /**
+   * Whether a follow-up message can still reach this agent. A one-shot
+   * subagent is dispatched, answers once, and is done — resuming it would
+   * spawn a detached background copy whose output has nowhere to land, so the
+   * client must not offer a composer for it. Named teammates and in-flight
+   * background agents are the two cases that do have a live inbox.
+   */
+  canSendMessage: boolean
 }
 
 export type SubagentRunResolution = {
@@ -72,6 +86,158 @@ type TruncateResult = {
   truncated: boolean
 }
 
+/**
+ * A resumed teammate rewrites its whole transcript each turn, so its fragments
+ * form a chain where each one repeats its predecessor's messages. Deduplicating
+ * by message id hides the repetition from the transcript, but activity scopes
+ * every tool id to its own fragment: the surviving `tool_use` would keep the
+ * first fragment's scope while a `tool_result` that only reached the rewrite
+ * keeps the later one, and the pair stops matching. Dropping the superseded
+ * fragments first keeps each call and its result inside one scope.
+ *
+ * Only a strict prefix counts as superseded, so independent resumes that reuse
+ * message ids for different work are all preserved.
+ */
+export function dropSupersededTeammateFragments<T extends { messages: MessageEntry[] }>(
+  fragments: T[],
+): T[] {
+  if (fragments.length < 2) return fragments
+  const identities = fragments.map(fragment => (
+    fragment.messages.map(message => JSON.stringify(message))
+  ))
+  return fragments.filter((_unused, index) => !identities.some((candidate, other) => (
+    other !== index &&
+    identities[index]!.length < candidate.length &&
+    identities[index]!.every((identity, position) => identity === candidate[position])
+  )))
+}
+
+export function mergeTeammateTranscriptFragments(
+  fragments: Array<{ messages: MessageEntry[] }>,
+): MessageEntry[] {
+  const seenMessageIds = new Set<string>()
+  const messages: MessageEntry[] = []
+
+  for (const message of fragments.flatMap((fragment) => fragment.messages)) {
+    if (seenMessageIds.has(message.id)) continue
+    seenMessageIds.add(message.id)
+    messages.push(message)
+  }
+
+  return messages.sort((left, right) => {
+    const leftTime = Date.parse(left.timestamp)
+    const rightTime = Date.parse(right.timestamp)
+    return (Number.isFinite(leftTime) ? leftTime : 0) -
+      (Number.isFinite(rightTime) ? rightTime : 0)
+  })
+}
+
+export function mergeTeammateTranscriptTaskNotifications(
+  fragments: Array<{ taskNotifications: SessionTaskNotification[] }>,
+): SessionTaskNotification[] {
+  const notifications = new Map<string, SessionTaskNotification>()
+  for (const notification of fragments.flatMap((fragment) => fragment.taskNotifications)) {
+    notifications.set(notification.toolUseId, notification)
+  }
+  return [...notifications.values()]
+}
+
+type ActivityProjection = {
+  messages: MessageEntry[]
+  taskNotifications: SessionTaskNotification[]
+}
+
+/**
+ * Preserve the physical transcript fragment that owns a nested Agent call.
+ *
+ * A named teammate can be resumed into several `agent-<uuid>.jsonl` files and
+ * Claude may reuse a leaf id such as `Agent:0` in every fragment. The desktop
+ * already appends the row's tool id to its canonical nested route. Nested
+ * Agent ids are always prefixed; when several resumed fragments are merged,
+ * every tool id is prefixed so reused Bash/Todo/Task ids cannot pair across
+ * fragments either.
+ */
+export function projectSubagentActivityFragment(
+  fragment: {
+    agentId: string
+    messages: MessageEntry[]
+    taskNotifications: SessionTaskNotification[]
+  },
+  options: { scopeAllToolIds?: boolean } = {},
+): ActivityProjection {
+  const scopedToolIds = new Map<string, string>()
+
+  for (const message of fragment.messages) {
+    for (const block of contentBlocks(message.content)) {
+      if (
+        block.type === 'tool_use' &&
+        (block.name === 'Agent' || options.scopeAllToolIds === true) &&
+        typeof block.id === 'string'
+      ) {
+        scopedToolIds.set(block.id, `${fragment.agentId}/${block.id}`)
+      }
+    }
+  }
+
+  if (scopedToolIds.size === 0) {
+    return {
+      messages: fragment.messages,
+      taskNotifications: fragment.taskNotifications,
+    }
+  }
+
+  const messages = fragment.messages.map((message) => {
+    if (!Array.isArray(message.content)) return message
+    let changed = false
+    const content = message.content.map((value) => {
+      if (!isRecord(value)) return value
+      if (
+        value.type === 'tool_use' &&
+        typeof value.id === 'string'
+      ) {
+        const scopedId = scopedToolIds.get(value.id)
+        if (scopedId) {
+          changed = true
+          return { ...value, id: scopedId }
+        }
+      }
+      if (value.type === 'tool_result' && typeof value.tool_use_id === 'string') {
+        const scopedId = scopedToolIds.get(value.tool_use_id)
+        if (scopedId) {
+          changed = true
+          return { ...value, tool_use_id: scopedId }
+        }
+      }
+      return value
+    })
+    return changed ? { ...message, content } : message
+  })
+
+  return {
+    messages,
+    taskNotifications: fragment.taskNotifications.map((notification) => {
+      const scopedId = scopedToolIds.get(notification.toolUseId)
+      return scopedId ? { ...notification, toolUseId: scopedId } : notification
+    }),
+  }
+}
+
+function mergeTeammateActivityFragments(
+  fragments: Array<{
+    agentId: string
+    messages: MessageEntry[]
+    taskNotifications: SessionTaskNotification[]
+  }>,
+): ActivityProjection {
+  const projected = dropSupersededTeammateFragments(fragments).map(fragment => (
+    projectSubagentActivityFragment(fragment, { scopeAllToolIds: true })
+  ))
+  return {
+    messages: mergeTeammateTranscriptFragments(projected),
+    taskNotifications: mergeTeammateTranscriptTaskNotifications(projected),
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }
@@ -102,12 +268,52 @@ function textFromContent(content: unknown): string {
 }
 
 function extractAgentId(text: string): string | null {
-  return text.match(/(?:^|\n)\s*agentId:\s*([A-Za-z0-9_-]+)/)?.[1] ?? null
+  return text.match(/(?:^|\n)\s*(?:agentId|agent_id):\s*([A-Za-z0-9_@.-]+)/)?.[1] ?? null
 }
 
 function normalizeAgentIdHint(value: string | undefined): string | undefined {
   if (!value || value.length > 256 || !/^[A-Za-z0-9_-]+$/.test(value)) return undefined
   return value
+}
+
+function normalizeToolUseIdHint(value: string | undefined): string | undefined {
+  if (!value || value.length > 256 || value.includes('/')) return undefined
+  return value
+}
+
+function normalizeCanonicalParentRef(value: string | undefined): string | undefined {
+  if (!value || value.length > 256 || value.includes('/') || value.includes('\0')) {
+    return undefined
+  }
+  return value
+}
+
+export type CanonicalNestedAgentToolRef = {
+  parentAgentId: string
+  leafToolUseId: string
+}
+
+/**
+ * A nested Agent tool keeps the canonical path already used by joined session
+ * history: `<parent tool ref>/<parent agent id>/<raw child tool id>`. When the
+ * parent is still running, its messages have not yet been joined into the root
+ * transcript, so the final two segments are the address needed to read that
+ * parent's transcript directly.
+ */
+export function parseCanonicalNestedAgentToolRef(
+  toolRef: string,
+): CanonicalNestedAgentToolRef | null {
+  const leafSeparator = toolRef.lastIndexOf('/')
+  if (leafSeparator <= 0 || leafSeparator === toolRef.length - 1) return null
+  const parentRef = toolRef.slice(0, leafSeparator)
+  const parentSeparator = parentRef.lastIndexOf('/')
+  if (parentSeparator <= 0 || parentSeparator === parentRef.length - 1) return null
+
+  const parentAgentId = normalizeCanonicalParentRef(parentRef.slice(parentSeparator + 1))
+  const leafToolUseId = normalizeToolUseIdHint(toolRef.slice(leafSeparator + 1))
+  return parentAgentId && leafToolUseId
+    ? { parentAgentId, leafToolUseId }
+    : null
 }
 
 function isAsyncAgentLaunchResult(text: string): boolean {
@@ -119,7 +325,7 @@ function cleanedAgentResultText(text: string): string | undefined {
   const cleaned = text
     .replace(/<usage>[\s\S]*?<\/usage>/gi, '')
     .split('\n')
-    .filter((line) => !/^\s*agentId:\s*[A-Za-z0-9_-]+/.test(line))
+    .filter((line) => !/^\s*(?:agentId|agent_id):\s*[A-Za-z0-9_@.-]+/.test(line))
     .join('\n')
     .trim()
 
@@ -300,16 +506,192 @@ function statusFromResolution(
 async function resolveTranscript(
   sessionId: string,
   candidates: Array<string | null | undefined>,
-): Promise<{ agentId: string | null; messages: MessageEntry[] }> {
+): Promise<{
+  agentId: string | null
+  messages: MessageEntry[]
+  taskNotifications: SessionTaskNotification[]
+}> {
   const seen = new Set<string>()
   for (const candidate of candidates) {
     const agentId = normalizeAgentIdHint(candidate ?? undefined)
     if (!agentId || seen.has(agentId)) continue
     seen.add(agentId)
-    const messages = await sessionService.getSubagentTranscriptMessages(sessionId, agentId)
-    if (messages.length > 0) return { agentId, messages }
+    const transcript = await sessionService.getSubagentTranscript(sessionId, agentId)
+    if (transcript.messages.length > 0 || transcript.taskNotifications.length > 0) {
+      return { agentId, ...transcript }
+    }
   }
-  return { agentId: null, messages: [] }
+  return { agentId: null, messages: [], taskNotifications: [] }
+}
+
+async function resolveRunFromToolRef(
+  sessionId: string,
+  rootMessages: MessageEntry[],
+  toolRef: string,
+): Promise<{
+  resolution: SubagentRunResolution
+  lookupToolUseId: string
+  expectedOwnerAgentId: string | null
+} | null> {
+  const exactResolution = resolveSubagentRunFromMessages(rootMessages, toolRef)
+  const nestedRef = parseCanonicalNestedAgentToolRef(toolRef)
+  if (!nestedRef) {
+    if (!exactResolution) return null
+    return {
+      resolution: exactResolution,
+      lookupToolUseId: toolRef,
+      expectedOwnerAgentId: null,
+    }
+  }
+
+  const strictParentAgentId = normalizeAgentIdHint(nestedRef.parentAgentId)
+  if (strictParentAgentId) {
+    if (exactResolution) {
+      return {
+        resolution: exactResolution,
+        lookupToolUseId: nestedRef.leafToolUseId,
+        expectedOwnerAgentId: strictParentAgentId,
+      }
+    }
+    const parentTranscript = await sessionService.getSubagentTranscript(
+      sessionId,
+      strictParentAgentId,
+    )
+    const nestedResolution = resolveSubagentRunFromMessages(
+      parentTranscript.messages,
+      nestedRef.leafToolUseId,
+    )
+    return nestedResolution
+      ? {
+          resolution: nestedResolution,
+          lookupToolUseId: nestedRef.leafToolUseId,
+          expectedOwnerAgentId: strictParentAgentId,
+        }
+      : null
+  }
+
+  // Team member refs (`name@team`) are logical inbox identities, not the UUID
+  // used for their transcript filename. Resolve the member name through the
+  // launch metadata and prefer the newest resumed fragment containing the
+  // addressed leaf Agent call.
+  const teamSeparator = nestedRef.parentAgentId.lastIndexOf('@')
+  if (teamSeparator <= 0 || teamSeparator === nestedRef.parentAgentId.length - 1) {
+    return null
+  }
+  const teammateName = nestedRef.parentAgentId.slice(0, teamSeparator)
+  const fragments = await sessionService.getSubagentTranscriptFragmentsByAgentType(
+    sessionId,
+    teammateName,
+  )
+  for (let index = fragments.length - 1; index >= 0; index -= 1) {
+    const fragment = fragments[index]!
+    const nestedResolution = resolveSubagentRunFromMessages(
+      fragment.messages,
+      nestedRef.leafToolUseId,
+    )
+    if (nestedResolution) {
+      return {
+        resolution: nestedResolution,
+        lookupToolUseId: nestedRef.leafToolUseId,
+        expectedOwnerAgentId: fragment.agentId,
+      }
+    }
+  }
+  return null
+}
+
+function notificationForToolRef(
+  notifications: SessionTaskNotification[],
+  toolUseId: string,
+  expectedOwnerAgentId: string | null,
+): SessionTaskNotification | undefined {
+  const candidates = notifications.filter(candidate => candidate.toolUseId === toolUseId)
+  const exact = candidates.filter(candidate => expectedOwnerAgentId === null
+    ? candidate.ownerAgentId === undefined
+    : candidate.ownerAgentId === expectedOwnerAgentId)
+  if (exact.length === 1) return exact[0]
+  if (exact.length > 1) return undefined
+
+  // Legacy task notifications did not persist ownerAgentId. They remain safe
+  // only when this raw leaf occurs once across every owner in the session.
+  if (
+    expectedOwnerAgentId !== null &&
+    candidates.length === 1 &&
+    candidates[0]!.ownerAgentId === undefined
+  ) {
+    return candidates[0]
+  }
+  return undefined
+}
+
+/**
+ * Read a subagent run straight from its transcript.
+ *
+ * {@link getSubagentRunByTool} starts from an `Agent` tool call in the parent
+ * conversation, which is how an agent the assistant dispatched is found. A
+ * workflow's agents are spawned by the workflow runtime instead, so no such
+ * tool call exists and that lookup can never resolve them — but they are
+ * ordinary subagents written by the same runner to the same place, so their
+ * `agent-<id>.jsonl` is all that is needed.
+ */
+export async function getSubagentRunByAgentId(
+  sessionId: string,
+  agentId: string,
+): Promise<SubagentRunResponse | null> {
+  const normalized = normalizeAgentIdHint(agentId)
+  if (!normalized) return null
+
+  const transcript = await resolveTranscript(sessionId, [normalized])
+  if (!transcript.agentId) return null
+
+  const messages = transcript.messages
+  const activity = projectSubagentActivityFragment({
+    agentId: transcript.agentId,
+    messages,
+    taskNotifications: transcript.taskNotifications,
+  })
+  const truncated = truncateSubagentMessages(activity.messages)
+  const usage = usageFromTranscriptMessages(messages)
+  const updatedAt = latestTimestamp(
+    ...messages.map(message =>
+      isRecord(message) && typeof message.timestamp === 'string'
+        ? message.timestamp
+        : undefined,
+    ),
+    ...transcript.taskNotifications.map(notification => notification.timestamp),
+  )
+  const workflowState = await workflowService
+    .getAgentRunState(sessionId, transcript.agentId)
+    .catch(() => null)
+  const status: SubagentRunStatus = workflowState
+    ? workflowState.agent.state === 'done'
+      ? 'completed'
+      : workflowState.run.status === 'stopped'
+        ? 'stopped'
+        : workflowState.agent.state === 'error' || workflowState.run.status === 'failed'
+          ? 'failed'
+          : 'running'
+    : 'completed'
+
+  return {
+    sessionId,
+    // The caller addressed this run by agent id; echoing it keeps the response
+    // self-describing without inventing a tool call that never happened.
+    toolUseId: normalized,
+    agentId: transcript.agentId,
+    status,
+    ...(usage ? { usage } : {}),
+    messages: truncated.messages,
+    activityMessages: activity.messages,
+    taskNotifications: transcript.taskNotifications,
+    activityTaskNotifications: activity.taskNotifications,
+    truncated: truncated.truncated,
+    ...(updatedAt ? { updatedAt } : {}),
+    source: 'subagent-jsonl',
+    // A workflow agent answers once into its script and is gone; there is no
+    // inbox a follow-up could reach.
+    canSendMessage: false,
+  }
 }
 
 export async function getSubagentRunByTool(
@@ -321,18 +703,70 @@ export async function getSubagentRunByTool(
     sessionService.getSessionMessages(sessionId),
     sessionService.getSessionTaskNotifications(sessionId),
   ])
-  const resolution = resolveSubagentRunFromMessages(parentMessages, toolUseId)
-  if (!resolution) return null
+  const resolvedToolRef = await resolveRunFromToolRef(sessionId, parentMessages, toolUseId)
+  if (!resolvedToolRef) return null
+  const { resolution, lookupToolUseId, expectedOwnerAgentId } = resolvedToolRef
 
-  const notification = taskNotifications.find((candidate) => candidate.toolUseId === toolUseId)
+  const notification = notificationForToolRef(
+    taskNotifications,
+    lookupToolUseId,
+    expectedOwnerAgentId,
+  )
   const safeLiveTaskId = normalizeAgentIdHint(liveTaskId)
-  const transcript = await resolveTranscript(sessionId, [
-    resolution.agentId,
-    safeLiveTaskId,
-    notification?.taskId,
-  ])
+  const teammateName = resolution.agentId?.includes('@')
+    ? resolution.agentId.split('@')[0]
+    : undefined
+  const teammateFragments = teammateName
+    ? await sessionService.getSubagentTranscriptFragmentsByAgentType(sessionId, teammateName)
+    : []
+  // Sidecar metadata is written before the agent starts, so it is the only
+  // hint that exists while the run is still streaming. The other candidates
+  // are all recovered from the completion result.
+  const metadataAgentId = normalizeAgentIdHint(
+    (await sessionService.findSubagentAgentIdByToolUseId(
+      sessionId,
+      lookupToolUseId,
+      expectedOwnerAgentId,
+    )) ?? undefined,
+  )
+  const transcript = teammateFragments.length > 0
+    ? {
+        agentId: teammateFragments[teammateFragments.length - 1]!.agentId,
+        messages: mergeTeammateTranscriptFragments(teammateFragments),
+        taskNotifications: mergeTeammateTranscriptTaskNotifications(teammateFragments),
+      }
+    : await resolveTranscript(sessionId, [
+        metadataAgentId,
+        resolution.agentId,
+        safeLiveTaskId,
+        notification?.taskId,
+      ])
+  const activity = teammateFragments.length > 0
+    ? mergeTeammateActivityFragments(teammateFragments)
+    : transcript.agentId
+      ? projectSubagentActivityFragment({
+          agentId: transcript.agentId,
+          messages: transcript.messages,
+          taskNotifications: transcript.taskNotifications,
+        })
+      : {
+          messages: transcript.messages,
+          taskNotifications: transcript.taskNotifications,
+        }
+  const status = statusFromResolution(resolution, notification)
+  const resolvedAgentId = transcript.agentId
+    ?? metadataAgentId
+    ?? normalizeAgentIdHint(resolution.agentId ?? undefined)
+    ?? null
+  // An async launch acknowledges immediately, so `isAsyncLaunch` is already
+  // true while that agent runs — which is exactly the window where queuing a
+  // follow-up works. A synchronous subagent only produces its tool_result at
+  // the very end, so it never qualifies.
+  const canSendMessage = Boolean(resolvedAgentId) && (
+    Boolean(teammateName) || (resolution.isAsyncLaunch && status === 'running')
+  )
   const transcriptMessages = transcript.messages
-  const truncated = truncateSubagentMessages(transcriptMessages)
+  const truncated = truncateSubagentMessages(activity.messages)
   const transcriptUsage = usageFromTranscriptMessages(transcriptMessages)
   const usage = mergeUsage(resolution.usage, transcriptUsage)
   const latestTranscriptTimestamp = latestTimestamp(
@@ -341,16 +775,17 @@ export async function getSubagentRunByTool(
         ? message.timestamp
         : undefined
     )),
+    ...transcript.taskNotifications.map(taskNotification => taskNotification.timestamp),
   )
 
   return {
     sessionId,
     toolUseId,
-    agentId: resolution.agentId ?? transcript.agentId,
+    agentId: resolvedAgentId,
     ...(notification?.taskId || safeLiveTaskId
       ? { taskId: notification?.taskId || safeLiveTaskId }
       : {}),
-    status: statusFromResolution(resolution, notification),
+    status,
     ...(resolution.description ? { description: resolution.description } : {}),
     ...(resolution.prompt ? { prompt: resolution.prompt } : {}),
     ...(notification?.summary ? { summary: notification.summary } : {}),
@@ -360,6 +795,9 @@ export async function getSubagentRunByTool(
     ...(notification?.outputFile ? { outputFile: notification.outputFile } : {}),
     ...(usage ? { usage } : {}),
     messages: truncated.messages,
+    activityMessages: activity.messages,
+    taskNotifications: transcript.taskNotifications,
+    activityTaskNotifications: activity.taskNotifications,
     truncated: truncated.truncated,
     ...(latestTimestamp(resolution.updatedAt, notification?.timestamp, latestTranscriptTimestamp)
       ? { updatedAt: latestTimestamp(resolution.updatedAt, notification?.timestamp, latestTranscriptTimestamp) }
@@ -369,5 +807,6 @@ export async function getSubagentRunByTool(
       : safeLiveTaskId
         ? 'live-task'
         : 'session-history',
+    canSendMessage,
   }
 }

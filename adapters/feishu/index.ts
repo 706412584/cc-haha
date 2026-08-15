@@ -13,7 +13,7 @@ import { WsBridge, type ServerMessage, type AttachmentRef } from '../common/ws-b
 import { MessageDedup } from '../common/message-dedup.js'
 import { StreamingCard } from './streaming-card.js'
 import { enqueue } from '../common/chat-queue.js'
-import { getConfiguredWorkDir, loadConfig } from '../common/config.js'
+import { loadConfig } from '../common/config.js'
 import {
   formatImHelp,
   formatImStatus,
@@ -26,7 +26,12 @@ import {
   type PermissionDecision,
 } from '../common/permission.js'
 import { SessionStore } from '../common/session-store.js'
-import { AdapterHttpClient, type RecentProject } from '../common/http-client.js'
+import { type RecentProject } from '../common/http-client.js'
+import { createAdapterClient } from '../common/adapter-client.js'
+import {
+  formatProjectSelectionOutcome,
+  ProjectSelectionController,
+} from '../common/project-selection-router.js'
 import { restoreStoredSessionBinding } from '../common/session-recovery.js'
 import { isAllowedUser, tryPair } from '../common/pairing.js'
 import { extractInboundPayload } from './extract-payload.js'
@@ -56,8 +61,7 @@ const larkClient = new Lark.Client({
 const bridge = new WsBridge(config.serverUrl, 'feishu')
 const dedup = new MessageDedup()
 const sessionStore = new SessionStore()
-const defaultWorkDir = getConfiguredWorkDir(config, config.feishu)
-const httpClient = new AdapterHttpClient(config.serverUrl, { allowedProjectRoots: [defaultWorkDir] })
+const { httpClient, defaultWorkDir } = createAdapterClient(config, config.feishu)
 
 // Attachment plumbing — shared by inbound (download) and outbound (upload) paths.
 const attachmentStore = new AttachmentStore()
@@ -68,7 +72,12 @@ attachmentStore.gc().catch((err) => {
 
 // One streaming card lifecycle per chatId (CardKit main + patch fallback).
 const streamingCards = new Map<string, StreamingCard>()
-const pendingProjectSelection = new Map<string, boolean>()
+const projectSelectionController = new ProjectSelectionController({
+  httpClient,
+  defaultWorkDir,
+  prepareNewSession,
+  createSession: createSessionForChat,
+})
 const runtimeStates = new Map<string, ChatRuntimeState>()
 const pendingPermissions = new Map<string, Set<string>>()
 
@@ -661,13 +670,12 @@ async function createSessionForChat(chatId: string, workDir: string): Promise<bo
 
 async function showProjectPicker(chatId: string): Promise<void> {
   try {
-    const projects = await httpClient.listRecentProjects()
+    const projects = await projectSelectionController.listProjects(chatId)
     if (projects.length === 0) {
       await sendText(chatId,
         `没有找到最近的项目。发送 /new 会使用默认工作目录：${defaultWorkDir}\n也可以发送 /new /path/to/project 指定项目。`)
       return
     }
-    pendingProjectSelection.set(chatId, true)
     const cardId = await sendCard(chatId, buildProjectPickerCard(projects))
     if (!cardId) {
       // Fallback to text picker if card delivery failed (permissions, etc.)
@@ -681,7 +689,7 @@ async function showProjectPicker(chatId: string): Promise<void> {
   }
 }
 
-async function startNewSession(chatId: string, query?: string): Promise<void> {
+function prepareNewSession(chatId: string): void {
   bridge.resetSession(chatId)
   sessionStore.delete(chatId)
   // Abort any in-flight streaming card for the previous session
@@ -692,41 +700,8 @@ async function startNewSession(chatId: string, query?: string): Promise<void> {
   }
   imageWatchers.delete(chatId)
   uploadedImageKeys.delete(chatId)
-  pendingProjectSelection.delete(chatId)
   pendingPermissions.delete(chatId)
   runtimeStates.delete(chatId)
-
-  if (query) {
-    try {
-      const { project, ambiguous } = await httpClient.matchProject(query)
-      if (project) {
-        const ok = await createSessionForChat(chatId, project.realPath)
-        if (ok) {
-          await sendText(chatId,
-            `✅ 已新建会话：**${project.projectName}**${project.branch ? ` (${project.branch})` : ''}`)
-        }
-        return
-      }
-      if (ambiguous) {
-        const list = ambiguous.map((p, i) => `${i + 1}. **${p.projectName}** — ${p.realPath}`).join('\n')
-        await sendText(chatId, `匹配到多个项目，请更精确：\n\n${list}`)
-        return
-      }
-      await sendText(chatId, `未找到匹配 "${query}" 的项目。发送 /projects 查看完整列表。`)
-    } catch (err) {
-      await sendText(chatId, `❌ ${err instanceof Error ? err.message : String(err)}`)
-    }
-  } else {
-    const workDir = defaultWorkDir
-    if (workDir) {
-      const ok = await createSessionForChat(chatId, workDir)
-      if (ok) {
-        await sendText(chatId, '✅ 已新建会话，可以开始对话了。')
-      }
-    } else {
-      await showProjectPicker(chatId)
-    }
-  }
 }
 
 // ---------- server message handler ----------
@@ -980,9 +955,12 @@ async function handleMessage(data: any): Promise<void> {
       return
     }
 
-    if (!hasAttachments && (msgText === '/new' || msgText === '新会话' || msgText.startsWith('/new '))) {
-      const arg = msgText.startsWith('/new ') ? msgText.slice(5).trim() : ''
-      await startNewSession(chatId, arg || undefined)
+    const projectOutcome = !hasAttachments
+      ? await projectSelectionController.handleInput(chatId, msgText)
+      : null
+    if (projectOutcome) {
+      const response = formatProjectSelectionOutcome(projectOutcome)
+      if (response) await sendText(chatId, response)
       return
     }
     if (!hasAttachments && (msgText === '/help' || msgText === '帮助')) {
@@ -1020,12 +998,6 @@ async function handleMessage(data: any): Promise<void> {
     }
     if (!hasAttachments && (msgText === '/projects' || msgText === '项目列表')) {
       await showProjectPicker(chatId)
-      return
-    }
-
-    // User is replying to a project picker prompt
-    if (!hasAttachments && pendingProjectSelection.has(chatId)) {
-      await startNewSession(chatId, msgText.trim())
       return
     }
 
@@ -1195,7 +1167,7 @@ async function handleCardAction(data: any): Promise<any> {
     const projectName = event.action?.value?.projectName ?? realPath ?? '(unknown)'
     if (!realPath) return
 
-    pendingProjectSelection.delete(chatId)
+    projectSelectionController.clear(chatId)
     // createSessionForChat handles its own error messaging on failure
     const ok = await createSessionForChat(chatId, realPath)
     if (ok) {

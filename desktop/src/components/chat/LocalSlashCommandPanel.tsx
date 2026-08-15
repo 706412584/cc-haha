@@ -10,7 +10,6 @@ import {
 import { Badge } from '@/components/ui/Badge'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { ErrorState } from '@/components/ui/ErrorState'
-import { IconButton } from '@/components/ui/IconButton'
 import { LoadingState } from '@/components/ui/LoadingState'
 import { mcpStatusTone } from '@/lib/mcpStatus'
 import { useTranslation, type TranslationKey } from '../../i18n'
@@ -21,8 +20,18 @@ import { useSkillStore } from '../../stores/skillStore'
 import type { McpServerRecord } from '../../types/mcp'
 import type { SkillMeta } from '../../types/skill'
 import type { SlashCommandOption } from './composerUtils'
+import { SlashCommandPanelShell as PanelShell } from './SlashCommandPanelShell'
+import { WorkflowSavePanel } from './WorkflowSavePanel'
 
-export type LocalSlashCommandName = 'mcp' | 'skills' | 'help' | 'status' | 'cost' | 'context' | 'model'
+export type LocalSlashCommandName =
+  | 'mcp'
+  | 'skills'
+  | 'help'
+  | 'status'
+  | 'cost'
+  | 'context'
+  | 'model'
+  | 'save-workflow'
 
 type Props = {
   command: LocalSlashCommandName
@@ -52,39 +61,6 @@ function projectBadge(path?: string, t?: ReturnType<typeof useTranslation>) {
   if (!path || !t) return null
   const label = path.replace(/\/$/, '').split('/').pop() || path
   return t('slash.mcp.projectBadge', { name: label })
-}
-
-function PanelShell({
-  title,
-  subtitle,
-  children,
-  onClose,
-}: {
-  title: string
-  subtitle: string
-  children: React.ReactNode
-  onClose: () => void
-}) {
-  const t = useTranslation()
-  return (
-    <div className="absolute bottom-full left-0 right-0 z-[var(--z-dropdown)] mb-3 overflow-hidden rounded-[var(--radius-2xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-overlay)]">
-      <div className="flex items-start justify-between gap-4 border-b border-[var(--color-border)] px-5 py-4">
-        <div>
-          <h3 className="text-lg font-semibold text-[var(--color-text-primary)]">{title}</h3>
-          <p className="mt-1 text-sm text-[var(--color-text-tertiary)]">{subtitle}</p>
-        </div>
-        <IconButton
-          icon="close"
-          label={t('tabs.close')}
-          size="lg"
-          tone="secondary"
-          shape="circle"
-          onClick={onClose}
-        />
-      </div>
-      <div className="max-h-[min(620px,72vh)] overflow-y-auto px-5 py-4">{children}</div>
-    </div>
-  )
 }
 
 function formatNumber(value: number | undefined) {
@@ -991,7 +967,7 @@ const COMMAND_GROUPS = [
   },
   {
     titleKey: 'slash.help.group.desktop',
-    names: ['mcp', 'skills', 'plugin', 'help'],
+    names: ['mcp', 'skills', 'save-workflow', 'plugin', 'help'],
   },
 ] satisfies Array<{ titleKey: TranslationKey; names: string[] }>
 
@@ -1076,6 +1052,16 @@ export function LocalSlashCommandPanel({ command, sessionId, cwd, commands, onCl
   if (command === 'mcp') return <McpPanel cwd={cwd} onClose={onClose} />
   if (command === 'skills') return <SkillsPanel cwd={cwd} onClose={onClose} />
   if (command === 'model') return null
+  if (command === 'save-workflow') {
+    return (
+      <WorkflowSavePanel
+        sessionId={sessionId}
+        cwd={cwd}
+        commands={commands}
+        onClose={onClose}
+      />
+    )
+  }
   if (command === 'status' || command === 'cost' || command === 'context') {
     return <SessionInspectorPanel command={command} sessionId={sessionId} commands={commands} onClose={onClose} />
   }

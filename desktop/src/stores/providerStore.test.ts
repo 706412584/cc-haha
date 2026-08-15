@@ -195,7 +195,7 @@ describe('providerStore runtime refresh', () => {
     const { useProviderStore } = await import('./providerStore')
     await useProviderStore.getState().activateProvider('grok-official')
 
-    expect(settingsSetModelMock).toHaveBeenCalledWith('grok-4.5')
+    expect(settingsSetModelMock).toHaveBeenCalledWith('grok-4.6')
     expect(settingsFetchAllMock).toHaveBeenCalled()
   })
 

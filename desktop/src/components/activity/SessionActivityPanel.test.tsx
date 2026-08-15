@@ -40,6 +40,7 @@ vi.mock('../../i18n', () => ({
       'session.activity.details.usage': 'Usage',
       'session.activity.section.tasks': 'Tasks',
       'session.activity.section.team': 'Team',
+      'session.activity.section.workflow': 'Workflow',
       'session.activity.section.backgroundTasks': 'Background Tasks',
       'session.activity.section.subagents': 'SubAgents',
       'session.activity.section.sources': 'Sources',
@@ -63,6 +64,7 @@ vi.mock('../../i18n', () => ({
       'session.activity.status.stopped': 'Stopped',
       'session.activity.status.idle': 'Idle',
       'session.activity.status.error': 'Error',
+      'workflows.agent.cached': 'Cached',
     }
 
     let text = translations[key] ?? key
@@ -82,6 +84,7 @@ function model(overrides: Partial<SessionActivityModel> = {}): SessionActivityMo
     sections: {
       output: { id: 'output', title: 'Output', emptyLabel: 'No output', rows: [] },
       queue: { id: 'queue', title: 'Queue', emptyLabel: 'No queued messages', rows: [] },
+      workflow: { id: 'workflow', title: 'Workflow', emptyLabel: 'No workflow running', rows: [] },
       tasks: {
         id: 'tasks',
         title: 'Tasks',
@@ -111,6 +114,42 @@ function model(overrides: Partial<SessionActivityModel> = {}): SessionActivityMo
 
 describe('SessionActivityPanel', () => {
   afterEach(cleanup)
+
+  it('tints the row icon tile by status so a one-line row still states what happened', () => {
+    render(
+      <SessionActivityPanel
+        model={model({
+          sections: {
+            ...model().sections,
+            backgroundTasks: {
+              id: 'backgroundTasks',
+              title: 'Background Tasks',
+              emptyLabel: 'No background tasks',
+              rows: [
+                { id: 'bg-run', section: 'backgroundTasks', label: 'Vite dev server', status: 'running', taskId: 'bg-run', openable: false },
+                { id: 'bg-fail', section: 'backgroundTasks', label: 'pytest -q', status: 'failed', taskId: 'bg-fail', openable: false },
+              ],
+            },
+          },
+        })}
+        open
+        onClose={vi.fn()}
+        onOpenSubagent={vi.fn()}
+      />,
+    )
+
+    const tiles = screen.getAllByTestId('activity-row-icon')
+    const running = tiles.find((tile) => tile.getAttribute('data-tone-status') === 'running')
+    const failed = tiles.find((tile) => tile.getAttribute('data-tone-status') === 'failed')
+
+    // 30px matches AgentMascot, so SubAgent and background rows share a text column.
+    expect(running?.className).toContain('h-[30px]')
+    expect(running?.className).toContain('bg-[var(--color-brand-soft)]')
+    // Paired tokens, never a raw accent on its own container (AGENTS.md 3.2).
+    expect(running?.className).toContain('text-[var(--color-on-brand-soft)]')
+    expect(failed?.className).toContain('bg-[var(--color-error-container)]')
+    expect(failed?.className).toContain('text-[var(--color-on-error-container)]')
+  })
 
   it('renders populated tasks section without empty visible section labels', () => {
     render(
@@ -179,7 +218,9 @@ describe('SessionActivityPanel', () => {
     expect(screen.getByLabelText('Task in progress')).toHaveClass('motion-reduce:animate-none')
     expect(screen.getByLabelText('Task in progress')).toHaveClass('rounded-full')
     expect(screen.getByLabelText('Task in progress').querySelector('svg')).toBeNull()
-    expect(screen.getByText('Active task').closest('button,div')).toHaveClass('py-2.5')
+    // Dense row rhythm: the panel is an index of what is happening, so a row is
+    // a line, not a card. Pinned because it is easy to lose to a stray `py-2.5`.
+    expect(screen.getByText('Active task').closest('button,div')).toHaveClass('py-1.5')
     expect(screen.getByText('Finished task')).toHaveClass('line-through')
     expect(screen.queryByText('Completed')).not.toBeInTheDocument()
     expect(screen.queryByText('Pending')).not.toBeInTheDocument()
@@ -217,6 +258,49 @@ describe('SessionActivityPanel', () => {
 
     expect(progress).toHaveAttribute('aria-valuenow', '50')
     expect(screen.getByText('2/4')).toBeInTheDocument()
+  })
+
+  it('keeps run-local rows visible without adding them to canonical team progress', () => {
+    render(
+      <SessionActivityPanel
+        model={model({
+          sections: {
+            ...model().sections,
+            tasks: {
+              id: 'tasks',
+              title: 'Tasks',
+              emptyLabel: 'No tasks',
+              rows: [
+                { id: 'local-a', section: 'tasks', label: 'Lead follow-up', status: 'stopped', openable: false },
+                {
+                  id: 'team:one',
+                  section: 'tasks',
+                  label: 'Team task one',
+                  status: 'completed',
+                  teamTaskListId: 'team-list',
+                  openable: false,
+                },
+                {
+                  id: 'team:two',
+                  section: 'tasks',
+                  label: 'Team task two',
+                  status: 'completed',
+                  teamTaskListId: 'team-list',
+                  openable: false,
+                },
+              ],
+            },
+          },
+        })}
+        open
+        onClose={vi.fn()}
+        onOpenSubagent={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByText('Lead follow-up')).toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: 'Task progress 2/2' })).toHaveAttribute('aria-valuenow', '100')
+    expect(screen.queryByText('2/3')).not.toBeInTheDocument()
   })
 
   it('leaves sections other than tasks without a progress rail', () => {
@@ -950,6 +1034,107 @@ describe('SessionActivityPanel', () => {
     expect(screen.queryByRole('button', { name: /open run local agent/i })).not.toBeInTheDocument()
     expect(screen.getByText('Local agent')).toBeInTheDocument()
     expect(onOpenSubagent).not.toHaveBeenCalled()
+  })
+
+  it('renders a workflow as phase headers with their agents, each opening the subagent page', () => {
+    const onOpenSubagent = vi.fn()
+    render(
+      <SessionActivityPanel
+        model={model({
+          sections: {
+            ...model().sections,
+            tasks: { id: 'tasks', title: 'Tasks', emptyLabel: 'No tasks', rows: [] },
+            workflow: {
+              id: 'workflow',
+              title: 'Workflow',
+              emptyLabel: 'No workflow running',
+              rows: [
+                {
+                  id: 'w1-phase-1',
+                  section: 'workflow',
+                  label: 'Survey',
+                  status: 'completed',
+                  groupProgress: { done: 2, total: 2 },
+                  openable: false,
+                },
+                {
+                  id: 'w1-agent-1',
+                  section: 'workflow',
+                  label: 'survey response.js',
+                  status: 'completed',
+                  group: 'Survey',
+                  toolUseId: 'agent:a11',
+                  openable: true,
+                },
+                {
+                  id: 'w1-agent-4',
+                  section: 'workflow',
+                  label: 'check response #2',
+                  status: 'pending',
+                  group: 'Cross-check',
+                  openable: false,
+                },
+              ],
+            },
+          },
+        })}
+        open
+        onClose={vi.fn()}
+        onOpenSubagent={onOpenSubagent}
+      />,
+    )
+
+    // The phase is a heading, not something you can open.
+    const header = screen.getByTestId('workflow-phase-header')
+    expect(header).toHaveTextContent('Survey')
+    expect(header).toHaveTextContent('2/2')
+
+    // Its agent opens the ordinary subagent page, addressed by agent id
+    // because a workflow agent has no parent Agent tool call.
+    fireEvent.click(screen.getByRole('button', { name: /open run survey response\.js/i }))
+    expect(onOpenSubagent).toHaveBeenCalledWith(
+      expect.objectContaining({ toolUseId: 'agent:a11', title: 'survey response.js' }),
+    )
+
+    // A queued agent has no transcript yet, so it must not offer to open one.
+    expect(
+      screen.queryByRole('button', { name: /open run check response #2/i }),
+    ).not.toBeInTheDocument()
+    expect(screen.getByText('check response #2')).toBeInTheDocument()
+  })
+
+  it('labels a cached workflow agent explicitly instead of calling it merely completed', () => {
+    render(
+      <SessionActivityPanel
+        model={model({
+          sections: {
+            ...model().sections,
+            tasks: { id: 'tasks', title: 'Tasks', emptyLabel: 'No tasks', rows: [] },
+            workflow: {
+              id: 'workflow',
+              title: 'Workflow',
+              emptyLabel: 'No workflow running',
+              rows: [{
+                id: 'cached-a',
+                section: 'workflow',
+                label: 'A',
+                status: 'completed',
+                group: 'Run',
+                cached: true,
+                toolUseId: 'agent:a1',
+                openable: true,
+              }],
+            },
+          },
+        })}
+        open
+        onClose={vi.fn()}
+        onOpenSubagent={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByText('Cached')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /open run a · cached/i })).toBeInTheDocument()
   })
 
   it('does not render when closed', () => {

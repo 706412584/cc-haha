@@ -5,6 +5,7 @@ import {
   GROK_MODEL_CATALOG,
   getGrokContextWindowForModel,
 } from '../../services/grokAuth/models.js'
+import { getGrokRuntimeModelCatalog } from '../../services/grokAuth/modelCatalog.js'
 import { GROK_OAUTH_FILE_ENV_KEY } from '../../services/grokAuth/storage.js'
 import { MODEL_CONTEXT_WINDOWS_ENV_KEY } from '../../utils/model/modelContextWindows.js'
 import {
@@ -52,13 +53,26 @@ export const GROK_OFFICIAL_PROVIDER: SavedProvider = {
 }
 
 export function buildGrokOfficialRuntimeEnv(): Record<string, string> {
+  const runtimeModelContextWindows = {
+    ...modelContextWindows,
+    ...Object.fromEntries(
+      getGrokRuntimeModelCatalog()
+        .flatMap((model) =>
+          typeof model.contextWindow === 'number' &&
+          Number.isFinite(model.contextWindow) &&
+          model.contextWindow > 0
+            ? [[model.value, model.contextWindow] as const]
+            : [],
+        ),
+    ),
+  }
   return {
     [GROK_OAUTH_PROVIDER_ENV_KEY]: '1',
     [GROK_OAUTH_FILE_ENV_KEY]: getHahaGrokOAuthFilePath(),
     [IMAGE_GENERATION_PROVIDER_KIND_ENV_KEY]: 'grok_oauth',
     [IMAGE_GENERATION_PROVIDER_ID_ENV_KEY]: GROK_OFFICIAL_PROVIDER_ID,
     [IMAGE_GENERATION_MODEL_ENV_KEY]: GROK_IMAGE_DEFAULT_MODEL,
-    [MODEL_CONTEXT_WINDOWS_ENV_KEY]: JSON.stringify(modelContextWindows),
+    [MODEL_CONTEXT_WINDOWS_ENV_KEY]: JSON.stringify(runtimeModelContextWindows),
     ANTHROPIC_MODEL: GROK_DEFAULT_MAIN_MODEL,
     ANTHROPIC_DEFAULT_HAIKU_MODEL: GROK_DEFAULT_HAIKU_MODEL,
     ANTHROPIC_DEFAULT_SONNET_MODEL: GROK_DEFAULT_SONNET_MODEL,

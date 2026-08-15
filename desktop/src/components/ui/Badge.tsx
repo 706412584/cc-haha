@@ -146,7 +146,9 @@ export type StatusDotProps = Omit<HTMLAttributes<HTMLSpanElement>, 'children'> &
    */
   label?: string
   className?: string
-}
+  // Passed through for the same reason as `Badge`: a dot a test cannot select
+  // pushes the caller back to a hand-rolled span.
+} & Omit<HTMLAttributes<HTMLSpanElement>, 'className' | 'role' | 'aria-label'>
 
 const DOT_SIZE = { sm: 'h-1.5 w-1.5', md: 'h-2 w-2', lg: 'h-2.5 w-2.5' } as const
 

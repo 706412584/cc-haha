@@ -45,11 +45,57 @@ function getAssistantMessageId(message: Message): string | undefined {
  */
 export function getTokenCountFromUsage(usage: Usage): number {
   return (
-    usage.input_tokens +
-    (usage.cache_creation_input_tokens ?? 0) +
-    (usage.cache_read_input_tokens ?? 0) +
-    usage.output_tokens
+    safeUsageTokenCount(usage.input_tokens) +
+    safeUsageTokenCount(usage.cache_creation_input_tokens) +
+    safeUsageTokenCount(usage.cache_read_input_tokens) +
+    safeUsageTokenCount(usage.output_tokens)
   )
+}
+
+function safeUsageTokenCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value
+    : 0
+}
+
+function hasValidUsageShape(usage: Usage): boolean {
+  return (
+    typeof usage.input_tokens === 'number' &&
+    Number.isFinite(usage.input_tokens) &&
+    usage.input_tokens >= 0 &&
+    typeof usage.output_tokens === 'number' &&
+    Number.isFinite(usage.output_tokens) &&
+    usage.output_tokens >= 0 &&
+    [usage.cache_creation_input_tokens, usage.cache_read_input_tokens].every(
+      value =>
+        value === undefined ||
+        (typeof value === 'number' && Number.isFinite(value) && value >= 0),
+    )
+  )
+}
+
+/**
+ * A response can anchor the whole context only when it reports a plausible
+ * prompt total. Output-only relay usage describes billing for one completion,
+ * not the context sent to the model, and must not discard an older anchor.
+ */
+export function isUsableContextUsage(usage: Usage): boolean {
+  return (
+    hasValidUsageShape(usage) &&
+    safeUsageTokenCount(usage.input_tokens) +
+      safeUsageTokenCount(usage.cache_creation_input_tokens) +
+      safeUsageTokenCount(usage.cache_read_input_tokens) >
+      0
+  )
+}
+
+export function hasUsableContextUsage(
+  messages: readonly Message[],
+): boolean {
+  return messages.some(message => {
+    const usage = getTokenUsage(message)
+    return usage !== undefined && isUsableContextUsage(usage)
+  })
 }
 
 /**
@@ -60,12 +106,7 @@ export function getTokenCountFromUsage(usage: Usage): number {
  * check on one makes a full context window look empty (#1162).
  */
 export function isPlaceholderZeroUsage(usage: Usage): boolean {
-  return (
-    usage.input_tokens === 0 &&
-    usage.output_tokens === 0 &&
-    (usage.cache_creation_input_tokens ?? 0) === 0 &&
-    (usage.cache_read_input_tokens ?? 0) === 0
-  )
+  return hasValidUsageShape(usage) && getTokenCountFromUsage(usage) === 0
 }
 
 export function tokenCountFromLastAPIResponse(messages: Message[]): number {
@@ -111,7 +152,10 @@ export function finalContextTokensFromLastResponse(
       ).iterations
       if (iterations && iterations.length > 0) {
         const last = iterations.at(-1)!
-        return last.input_tokens + last.output_tokens
+        return (
+          safeUsageTokenCount(last.input_tokens) +
+          safeUsageTokenCount(last.output_tokens)
+        )
       }
       // No iterations → no server tool loop → top-level usage IS the final
       // window. Match the iterations path's formula (input + output, no cache)
@@ -120,7 +164,10 @@ export function finalContextTokensFromLastResponse(
       // (renderer.py:292 calculate_context_tokens) counts cache the same way
       // is an open question; aligning with the iterations path keeps the two
       // branches consistent until that's resolved.
-      return usage.input_tokens + usage.output_tokens
+      return (
+        safeUsageTokenCount(usage.input_tokens) +
+        safeUsageTokenCount(usage.output_tokens)
+      )
     }
     i--
   }
@@ -144,7 +191,7 @@ export function messageTokenCountFromLastAPIResponse(
     const message = messages[i]
     const usage = message ? getTokenUsage(message) : undefined
     if (usage) {
-      return usage.output_tokens
+      return safeUsageTokenCount(usage.output_tokens)
     }
     i--
   }
@@ -161,15 +208,19 @@ export function getCurrentUsage(messages: Message[]): {
     const message = messages[i]
     const usage = message ? getTokenUsage(message) : undefined
     if (usage) {
-      if (isPlaceholderZeroUsage(usage)) {
+      if (!isUsableContextUsage(usage)) {
         continue
       }
 
       return {
-        input_tokens: usage.input_tokens,
-        output_tokens: usage.output_tokens,
-        cache_creation_input_tokens: usage.cache_creation_input_tokens ?? 0,
-        cache_read_input_tokens: usage.cache_read_input_tokens ?? 0,
+        input_tokens: safeUsageTokenCount(usage.input_tokens),
+        output_tokens: safeUsageTokenCount(usage.output_tokens),
+        cache_creation_input_tokens: safeUsageTokenCount(
+          usage.cache_creation_input_tokens,
+        ),
+        cache_read_input_tokens: safeUsageTokenCount(
+          usage.cache_read_input_tokens,
+        ),
       }
     }
   }
@@ -184,7 +235,9 @@ export function doesMostRecentAssistantMessageExceed200k(
   const lastAsst = messages.findLast(m => m.type === 'assistant')
   if (!lastAsst) return false
   const usage = getTokenUsage(lastAsst)
-  return usage ? getTokenCountFromUsage(usage) > THRESHOLD : false
+  return usage && hasValidUsageShape(usage)
+    ? getTokenCountFromUsage(usage) > THRESHOLD
+    : false
 }
 
 /**
@@ -252,11 +305,12 @@ export function tokenCountWithEstimation(messages: readonly Message[]): number {
     // the whole conversation as ~empty and auto-compact would never fire.
     // Skip it so the anchor falls back to an earlier real usage (the skipped
     // messages are then covered by the rough estimation slice below).
-    if (message && usage && !isPlaceholderZeroUsage(usage)) {
+    if (message && usage && isUsableContextUsage(usage)) {
       // Walk back past any earlier sibling records split from the same API
       // response (same message.id) so interleaved tool_results between them
       // are included in the estimation slice.
       const responseId = getAssistantMessageId(message)
+      let messagesAfterUsage: readonly Message[] = messages.slice(i + 1)
       if (responseId) {
         let j = i - 1
         while (j >= 0) {
@@ -273,10 +327,23 @@ export function tokenCountWithEstimation(messages: readonly Message[]): number {
           // possibly interleaved between splits — keep walking.
           j--
         }
+        messagesAfterUsage = messages
+          .slice(i + 1)
+          .filter(candidate => getAssistantMessageId(candidate) !== responseId)
       }
+      const unreportedOutputEstimate = usage.output_tokens === 0
+        ? roughTokenCountEstimationForMessages(
+            responseId
+              ? messages.filter(
+                  candidate => getAssistantMessageId(candidate) === responseId,
+                )
+              : [message],
+          )
+        : 0
       return (
         getTokenCountFromUsage(usage) +
-        roughTokenCountEstimationForMessages(messages.slice(i + 1))
+        unreportedOutputEstimate +
+        roughTokenCountEstimationForMessages(messagesAfterUsage)
       )
     }
     i--

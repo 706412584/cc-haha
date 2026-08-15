@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import '@testing-library/jest-dom'
 
@@ -18,15 +19,25 @@ import { DirectoryPicker } from './DirectoryPicker'
 import { sessionsApi } from '../../api/sessions'
 import { filesystemApi } from '../../api/filesystem'
 import { browserHost } from '../../lib/desktopHost/browserHost'
+import {
+  captureProjectDisplayNameHydrationRevision,
+  hydrateProjectDisplayNames,
+} from '../../stores/projectDisplayNameStore'
 
 describe('DirectoryPicker', () => {
   let originalInnerWidth: number
 
   beforeEach(() => {
     originalInnerWidth = window.innerWidth
+    act(() => {
+      hydrateProjectDisplayNames({}, Number.MAX_SAFE_INTEGER)
+    })
   })
 
   afterEach(() => {
+    act(() => {
+      hydrateProjectDisplayNames({}, Number.MAX_SAFE_INTEGER)
+    })
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalInnerWidth })
     Reflect.deleteProperty(window, 'desktopHost')
     vi.restoreAllMocks()
@@ -42,6 +53,56 @@ describe('DirectoryPicker', () => {
 
     expect(screen.getByRole('button')).toHaveTextContent('checkout')
     expect(screen.getByRole('button')).not.toHaveTextContent('desktop-feature-rail-12345678')
+  })
+
+  it('reactively updates an exact selected path to its custom display name while retaining its raw path tooltip', () => {
+    const projectPath = '/workspace/project'
+    render(<DirectoryPicker value={projectPath} onChange={vi.fn()} />)
+
+    const trigger = screen.getByRole('button')
+    expect(trigger).toHaveTextContent('project')
+
+    act(() => {
+      hydrateProjectDisplayNames(
+        { [projectPath]: 'Custom project' },
+        captureProjectDisplayNameHydrationRevision(),
+      )
+    })
+
+    expect(trigger).toHaveTextContent('Custom project')
+    expect(trigger).toHaveAttribute('title', projectPath)
+  })
+
+  it('uses a custom display name for an exact recent project while selecting its real path', async () => {
+    const projectPath = '/workspace/project'
+    vi.mocked(sessionsApi.getRecentProjects).mockResolvedValue({
+      projects: [{
+        projectPath,
+        realPath: projectPath,
+        projectName: 'project',
+        repoName: 'NanmiCoder/OpenCutSkill',
+        branch: 'main',
+        isGit: true,
+        modifiedAt: '2026-05-07T00:00:00.000Z',
+        sessionCount: 1,
+      }],
+    })
+    const onChange = vi.fn()
+
+    render(<DirectoryPicker value="" onChange={onChange} />)
+
+    fireEvent.click(screen.getByRole('button'))
+    await screen.findByText('NanmiCoder/OpenCutSkill')
+    act(() => {
+      hydrateProjectDisplayNames(
+        { [projectPath]: 'Custom project' },
+        captureProjectDisplayNameHydrationRevision(),
+      )
+    })
+    const label = await screen.findByText('Custom project')
+    fireEvent.click(label.closest('button')!)
+
+    expect(onChange).toHaveBeenCalledWith(projectPath)
   })
 
   it('does not duplicate the branch in the selected project chip', async () => {

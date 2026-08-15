@@ -11,6 +11,7 @@ import type { ProviderPreset } from '../types/providerPreset'
 import type { AppMode, ChatSendBehavior, PermissionMode, ThemeMode, UpdateProxySettings } from '../types/settings'
 import { browserHost } from '../lib/desktopHost/browserHost'
 import { h5AccessApi } from '../api/h5Access'
+import { settingsApi } from '../api/settings'
 
 const MOCK_DELETE_PROVIDER = vi.fn()
 const MOCK_GET_SETTINGS = vi.fn()
@@ -250,6 +251,7 @@ describe('Settings > General tab', () => {
       permissionMode: 'default',
       autoModeOptInAccepted: false,
       thinkingEnabled: true,
+      workflowKeywordTriggerEnabled: true,
       autoDreamEnabled: false,
       unifiedActivityPanelEnabled: false,
       skipWebFetchPreflight: true,
@@ -1019,6 +1021,33 @@ describe('Settings > General tab', () => {
     fireEvent.click(toggle)
 
     expect(useSettingsStore.getState().setThinkingEnabled).toHaveBeenCalledWith(false)
+  })
+
+  it('lets the user disable and restore the Ultracode keyword trigger', async () => {
+    const updateUser = vi.spyOn(settingsApi, 'updateUser').mockResolvedValue({ ok: true })
+
+    try {
+      render(<Settings />)
+
+      fireEvent.click(screen.getByText('General'))
+
+      const toggle = screen.getByRole('switch', { name: 'Enable Ultracode keyword trigger' })
+      expect(toggle).toBeChecked()
+
+      await act(async () => {
+        fireEvent.click(toggle)
+      })
+      expect(toggle).not.toBeChecked()
+      expect(updateUser).toHaveBeenLastCalledWith({ workflowKeywordTriggerEnabled: false })
+
+      await act(async () => {
+        fireEvent.click(toggle)
+      })
+      expect(toggle).toBeChecked()
+      expect(updateUser).toHaveBeenLastCalledWith({ workflowKeywordTriggerEnabled: true })
+    } finally {
+      updateUser.mockRestore()
+    }
   })
 
   it('lets the user choose a default permission mode for new sessions', async () => {

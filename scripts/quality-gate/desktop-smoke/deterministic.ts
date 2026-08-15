@@ -194,9 +194,12 @@ export async function executeDeterministicDesktopSmoke(
     await browserStep(['open', appUrl])
     await browserStep(['eval', buildDesktopUiSmokeBootstrap(session.sessionId)], { timeoutMs: 15_000 })
     await browserStep(['reload'])
-    await browserStep(['wait', 'textarea'])
+    // The composer is a ProseMirror contenteditable (MentionComposer), not a
+    // <textarea> — `[data-composer-editor]` is the attribute the editor sets on
+    // its editable node and the same hook composerTestUtils drives.
+    await browserStep(['wait', '[data-composer-editor]'])
 
-    await browserStep(['fill', 'textarea', prompt], { timeoutMs: 20_000 })
+    await browserStep(['fill', '[data-composer-editor]', prompt], { timeoutMs: 20_000 })
     await browserStep(['press', 'Enter'], { timeoutMs: 15_000 })
 
     // The permission dialog is the point of this lane: nothing may touch the

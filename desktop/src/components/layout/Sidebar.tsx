@@ -14,11 +14,23 @@ import { Spinner } from '@/components/ui/Spinner'
 import { useDismissable } from '@/hooks/useDismissable'
 import { GlobalSearchModal } from '../search/GlobalSearchModal'
 import { FindInPageModal } from '../search/FindInPageModal'
+import { ProjectEditorModal, type ProjectEditorSubmission } from './ProjectEditorModal'
+import { sessionsApi } from '../../api/sessions'
 import type { SessionListItem } from '../../types/session'
 import { useTabStore, SETTINGS_TAB_ID, SCHEDULED_TAB_ID, MARKET_TAB_ID } from '../../stores/tabStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useOpenTargetStore } from '../../stores/openTargetStore'
-import { desktopUiPreferencesApi, type SidebarProjectPreferences } from '../../api/desktopUiPreferences'
+import {
+  resetProjectDisplayName,
+  resolveProjectDisplayName,
+  setProjectDisplayName,
+  useProjectDisplayNameRevision,
+} from '../../stores/projectDisplayNameStore'
+import {
+  desktopUiPreferencesApi,
+  type DesktopUiPreferencesResponse,
+  type SidebarProjectPreferences,
+} from '../../api/desktopUiPreferences'
 import { projectsApi } from '../../api/projects'
 import { getDesktopHost } from '../../lib/desktopHost'
 import { hasRunningBackgroundTasks } from '../../lib/backgroundTasks'
@@ -32,7 +44,6 @@ void sidebarComponents
 
 const desktopHost = getDesktopHost()
 const isDesktopRuntime = desktopHost.isDesktop
-const canUseNativeDialogs = desktopHost.capabilities.dialogs
 const isWindows = typeof navigator !== 'undefined' && /Win/.test(navigator.platform)
 const SESSION_LIST_AUTO_REFRESH_MS = 30_000
 const SESSION_LIST_FOCUS_REFRESH_MIN_MS = 5_000
@@ -56,9 +67,23 @@ type ProjectGroup = {
   sessions: SessionListItem[]
 }
 
+type ProjectEditorState =
+  | {
+    mode: 'create'
+    sourceFolder: string
+    logicalRoot: string
+    suggestedName: string
+  }
+  | {
+    mode: 'edit'
+    logicalRoot: string
+  }
+
 type SidebarProps = {
   isMobile?: boolean
   onRequestClose?: () => void
+  desktopUiPreferencesRequest?: Promise<DesktopUiPreferencesResponse> | null
+  onDesktopUiPreferencesConsumed?: (request: Promise<DesktopUiPreferencesResponse>) => void
 }
 
 type SessionScrollAnchor = {
@@ -66,7 +91,12 @@ type SessionScrollAnchor = {
   topOffset: number
 }
 
-export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
+export function Sidebar({
+  isMobile = false,
+  onRequestClose,
+  desktopUiPreferencesRequest,
+  onDesktopUiPreferencesConsumed,
+}: SidebarProps) {
   const t = useTranslation()
   const sessions = useSessionStore((s) => s.sessions)
   const isLoading = useSessionStore((s) => s.isLoading)
@@ -119,6 +149,10 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
   const [projectSortBy, setProjectSortByState] = useState<SidebarProjectSortBy>(() => readStoredProjectSortBy())
   const [draggingProjectKey, setDraggingProjectKey] = useState<string | null>(null)
   const [projectDropTarget, setProjectDropTarget] = useState<{ key: string; position: 'before' | 'after' } | null>(null)
+  const [projectEditor, setProjectEditor] = useState<ProjectEditorState | null>(null)
+  const [projectEditorError, setProjectEditorError] = useState<string | null>(null)
+  const [projectEditorLoading, setProjectEditorLoading] = useState(false)
+  const projectDisplayNameRevision = useProjectDisplayNameRevision()
   const suppressProjectClickRef = useRef<string | null>(null)
   const sessionContextMenuRef = useRef<HTMLDivElement>(null)
   const projectContextMenuRef = useRef<HTMLDivElement>(null)
@@ -126,6 +160,11 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
   const projectHeaderSubmenuRef = useRef<HTMLDivElement>(null)
   const projectHeaderActionsRef = useRef<HTMLDivElement>(null)
   const sidebarPreferenceRevisionRef = useRef(0)
+  const projectRootLookupRevisionRef = useRef(0)
+  const projectRootLookupRef = useRef<{
+    sourceFolder: string
+    request: ReturnType<typeof sessionsApi.getRepositoryContext>
+  } | null>(null)
   const sessionScrollAreaRef = useRef<HTMLDivElement>(null)
   const pendingSessionScrollAnchorRef = useRef<SessionScrollAnchor | null>(null)
   useSessionListAutoRefresh(fetchSessions)
@@ -197,7 +236,10 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
     return sessions.filter((session) => session.title.toLocaleLowerCase().includes(query))
   }, [searchQuery, sessions])
 
-  const projectGroups = useMemo(() => groupByProject(filteredSessions, projectSortBy), [filteredSessions, projectSortBy])
+  const projectGroups = useMemo(
+    () => groupByProject(filteredSessions, projectSortBy, resolveProjectDisplayName),
+    [filteredSessions, projectDisplayNameRevision, projectSortBy],
+  )
   const orderedProjectGroups = useMemo(
     () => applyProjectOrder(projectGroups, projectOrder, pinnedProjectKeys, projectOrganization, projectSortBy),
     [projectGroups, projectOrder, pinnedProjectKeys, projectOrganization, projectSortBy],
@@ -257,8 +299,12 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
     const normalized = normalizeSidebarProjectPreferences(preferences)
     sidebarPreferenceRevisionRef.current += 1
     writeCachedSidebarProjectPreferences(normalized)
+    if (desktopUiPreferencesRequest) {
+      const request = desktopUiPreferencesRequest
+      queueMicrotask(() => onDesktopUiPreferencesConsumed?.(request))
+    }
     void desktopUiPreferencesApi.updateSidebarPreferences(normalized).catch(() => undefined)
-  }, [])
+  }, [desktopUiPreferencesRequest, onDesktopUiPreferencesConsumed])
 
   const restoreHiddenProjectForWorkDir = useCallback((workDir: string | null | undefined) => {
     if (!workDir) return
@@ -277,12 +323,16 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
   }, [persistSidebarProjectPreferences, pinnedProjectKeys, projectOrder, projectOrganization, projectSortBy])
 
   useEffect(() => {
+    if (!desktopUiPreferencesRequest) return
+
     let cancelled = false
+    const request = desktopUiPreferencesRequest
     const startRevision = sidebarPreferenceRevisionRef.current
 
-    void desktopUiPreferencesApi.getPreferences()
+    void request
       .then((response) => {
-        if (cancelled || startRevision !== sidebarPreferenceRevisionRef.current) return
+        if (cancelled) return
+        if (startRevision !== sidebarPreferenceRevisionRef.current) return
 
         const localPreferences = readCachedSidebarProjectPreferences()
         const serverPreferences = normalizeSidebarProjectPreferences(response.preferences.sidebar)
@@ -298,11 +348,14 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
       .catch(() => {
         // The sidebar remains usable with the local cache if the server is still booting.
       })
+      .finally(() => {
+        if (!cancelled) onDesktopUiPreferencesConsumed?.(request)
+      })
 
     return () => {
       cancelled = true
     }
-  }, [applySidebarProjectPreferences])
+  }, [applySidebarProjectPreferences, desktopUiPreferencesRequest, onDesktopUiPreferencesConsumed])
 
   const handleContextMenu = useCallback((e: React.MouseEvent, id: string) => {
     e.preventDefault()
@@ -434,32 +487,134 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
     ))
   }, [hiddenProjectKeys, persistSidebarProjectPreferences, pinnedProjectKeys, projectOrganization])
 
-  const createSessionFromExistingFolder = useCallback(async () => {
+  const closeProjectEditor = useCallback(() => {
+    projectRootLookupRevisionRef.current += 1
+    projectRootLookupRef.current = null
+    setProjectEditor(null)
+    setProjectEditorError(null)
+  }, [])
+
+  const openProjectCreator = useCallback(() => {
+    projectRootLookupRevisionRef.current += 1
+    projectRootLookupRef.current = null
     setProjectHeaderMenu(null)
     setProjectHeaderSubmenu(null)
-    if (!canUseNativeDialogs) {
-      addToast({
-        type: 'error',
-        message: t('sidebar.chooseProjectFolderUnavailable'),
-      })
+    setProjectEditorError(null)
+    setProjectEditor({
+      mode: 'create',
+      sourceFolder: '',
+      logicalRoot: '',
+      suggestedName: '',
+    })
+  }, [])
+
+  const updateProjectCreatorSourceFolder = useCallback((sourceFolder: string) => {
+    const lookupRevision = ++projectRootLookupRevisionRef.current
+    const fallbackSuggestedName = sourceFolder ? projectTitle(sourceFolder) : ''
+    setProjectEditor((current) => current?.mode === 'create'
+      ? {
+        ...current,
+        sourceFolder,
+        logicalRoot: sourceFolder,
+        suggestedName: fallbackSuggestedName,
+      }
+      : current)
+
+    if (!sourceFolder.trim()) {
+      projectRootLookupRef.current = null
       return
     }
-    try {
-      const selected = await getDesktopHost().dialogs.open({
-        directory: true,
-        multiple: false,
-        title: t('sidebar.useExistingFolder'),
+
+    const request = sessionsApi.getRepositoryContext(sourceFolder)
+    projectRootLookupRef.current = { sourceFolder, request }
+    void request
+      .then((context) => {
+        if (projectRootLookupRevisionRef.current !== lookupRevision) return
+        const logicalRoot = context.repoRoot || context.workDir || sourceFolder
+        setProjectEditor((current) => current?.mode === 'create' && current.sourceFolder === sourceFolder
+          ? {
+            ...current,
+            logicalRoot,
+            suggestedName: projectTitle(logicalRoot),
+          }
+          : current)
       })
-      if (typeof selected === 'string' && selected.trim()) {
-        await createSessionForWorkDir(selected)
+      .catch(() => {
+        if (projectRootLookupRef.current?.request === request) {
+          projectRootLookupRef.current = null
+        }
+      })
+  }, [])
+
+  const submitProjectCreation = useCallback(async ({ name, sourceFolder, logicalRoot }: ProjectEditorSubmission) => {
+    setProjectEditorLoading(true)
+    setProjectEditorError(null)
+    try {
+      const cachedLookup = projectRootLookupRef.current
+      const contextRequest = (cachedLookup?.sourceFolder === sourceFolder
+        ? cachedLookup.request
+        : sessionsApi.getRepositoryContext(sourceFolder))
+        .catch(() => null)
+      const sessionId = await useSessionStore.getState().createSession(sourceFolder)
+      restoreHiddenProjectForWorkDir(sourceFolder)
+
+      useTabStore.getState().openTab(sessionId, t('sidebar.newSession'))
+      useChatStore.getState().connectToSession(sessionId)
+      closeMobileDrawer()
+      closeProjectEditor()
+
+      const context = await contextRequest
+      const resolvedLogicalRoot = context?.repoRoot || context?.workDir || logicalRoot || sourceFolder
+      try {
+        await saveProjectDisplayName(resolvedLogicalRoot, name)
+      } catch (displayNameError) {
+        addToast({
+          type: 'error',
+          message: displayNameError instanceof Error
+            ? displayNameError.message
+            : t('sidebar.projectEditor.actionFailed'),
+        })
       }
     } catch (error) {
-      addToast({
-        type: 'error',
-        message: error instanceof Error ? error.message : t('sidebar.sessionListFailed'),
-      })
+      setProjectEditorError(error instanceof Error ? error.message : t('sidebar.sessionListFailed'))
+    } finally {
+      setProjectEditorLoading(false)
     }
-  }, [addToast, createSessionForWorkDir, t])
+  }, [addToast, closeMobileDrawer, closeProjectEditor, restoreHiddenProjectForWorkDir, t])
+
+  const openProjectEditor = useCallback((project: ProjectGroup) => {
+    if (project.key === 'unknown' || !project.workDir) return
+    projectRootLookupRevisionRef.current += 1
+    setProjectContextMenu(null)
+    setProjectEditorError(null)
+    setProjectEditor({ mode: 'edit', logicalRoot: project.key })
+  }, [])
+
+  const submitProjectEdit = useCallback(async ({ name, logicalRoot }: ProjectEditorSubmission) => {
+    setProjectEditorLoading(true)
+    setProjectEditorError(null)
+    try {
+      await saveProjectDisplayName(logicalRoot, name)
+      closeProjectEditor()
+    } catch (error) {
+      setProjectEditorError(error instanceof Error ? error.message : t('sidebar.sessionListFailed'))
+    } finally {
+      setProjectEditorLoading(false)
+    }
+  }, [closeProjectEditor, t])
+
+  const restoreProjectFolderName = useCallback(async (logicalRoot: string) => {
+    setProjectEditorLoading(true)
+    setProjectEditorError(null)
+    try {
+      await resetProjectDisplayName(logicalRoot)
+    } catch (error) {
+      setProjectEditorError(error instanceof Error ? error.message : t('sidebar.sessionListFailed'))
+      throw error
+    } finally {
+      setProjectEditorLoading(false)
+    }
+  }, [t])
 
   const togglePinnedProject = useCallback((projectKey: string) => {
     setProjectContextMenu(null)
@@ -562,6 +717,23 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
       setPendingClearProjectKey(null)
     }
   }, [addToast, closeTab, disconnectSession, fetchSessions, orderedProjectGroups, pendingClearProjectKey, t])
+
+  const hideProjectFromSidebar = useCallback((project: ProjectGroup) => {
+    setProjectContextMenu(null)
+    if (hiddenProjectKeys.has(project.key)) return
+
+    setHiddenProjectKeys((current) => {
+      if (current.has(project.key)) return current
+      const next = new Set(current)
+      next.add(project.key)
+      persistSidebarProjectPreferences(buildSidebarProjectPreferences(projectOrder, pinnedProjectKeys, next, projectOrganization, projectSortBy))
+      return next
+    })
+    addToast({
+      type: 'info',
+      message: t('sidebar.projectHidden', { project: project.title }),
+    })
+  }, [addToast, hiddenProjectKeys, persistSidebarProjectPreferences, pinnedProjectKeys, projectOrder, projectOrganization, projectSortBy, t])
 
   const openProjectInFinder = useCallback(async (project: ProjectGroup) => {
     setProjectContextMenu(null)
@@ -1169,7 +1341,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
                   <EmptyState variant="inline" title={t('sidebar.noSessions')} />
                 </div>
               )}
-              {!isMobile && orderedProjectGroups.length > 0 && (
+              {!showInitialLoading && !isMobile && orderedProjectGroups.length > 0 && (
                 <ProjectHeaderActions
                   title={t('sidebar.projects')}
                   menuLabel={t('sidebar.projectMenu')}
@@ -1503,6 +1675,14 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
             style={positionProjectMenu(projectContextMenu.x, projectContextMenu.y)}
             onClick={(event) => event.stopPropagation()}
           >
+            {project.key !== 'unknown' && project.workDir && (
+              <ProjectMenuItem
+                icon={<SquarePen size={18} aria-hidden="true" />}
+                onClick={() => openProjectEditor(project)}
+              >
+                {t('sidebar.projectEditor.editTitle')}
+              </ProjectMenuItem>
+            )}
             <ProjectMenuItem
               icon={pinned ? <PinOff size={18} aria-hidden="true" /> : <Pin size={18} aria-hidden="true" />}
               onClick={() => togglePinnedProject(project.key)}
@@ -1561,7 +1741,7 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
           onSetOrganization={updateProjectOrganization}
           onSetSortBy={updateProjectSortBy}
           onCreateBlank={() => void createSessionForWorkDir()}
-          onUseExistingFolder={() => void createSessionFromExistingFolder()}
+          onUseExistingFolder={openProjectCreator}
           onRestoreHiddenProjects={restoreAllHiddenProjects}
           hiddenProjectCount={hiddenProjectKeys.size}
           t={t}
@@ -1580,12 +1760,53 @@ export function Sidebar({ isMobile = false, onRequestClose }: SidebarProps) {
           onSetOrganization={updateProjectOrganization}
           onSetSortBy={updateProjectSortBy}
           onCreateBlank={() => void createSessionForWorkDir()}
-          onUseExistingFolder={() => void createSessionFromExistingFolder()}
+          onUseExistingFolder={openProjectCreator}
           onRestoreHiddenProjects={restoreAllHiddenProjects}
           hiddenProjectCount={hiddenProjectKeys.size}
           t={t}
         />
       )}
+
+      {projectEditor?.mode === 'create' && (
+        <ProjectEditorModal
+          open
+          mode="create"
+          sourceFolder={projectEditor.sourceFolder}
+          logicalRoot={projectEditor.logicalRoot}
+          suggestedName={projectEditor.suggestedName}
+          loading={projectEditorLoading}
+          error={projectEditorError}
+          onClose={closeProjectEditor}
+          onSourceFolderChange={updateProjectCreatorSourceFolder}
+          onSubmit={submitProjectCreation}
+        />
+      )}
+      {projectEditor?.mode === 'edit' && (() => {
+        const customDisplayName = resolveProjectDisplayName(projectEditor.logicalRoot)
+        const project = orderedProjectGroups.find((group) => group.key === projectEditor.logicalRoot)
+        return (
+          <ProjectEditorModal
+            open
+            mode="edit"
+            logicalRoot={projectEditor.logicalRoot}
+            initialName={customDisplayName ?? undefined}
+            suggestedName={projectTitle(projectEditor.logicalRoot)}
+            loading={projectEditorLoading}
+            error={projectEditorError}
+            onClose={closeProjectEditor}
+            onSubmit={submitProjectEdit}
+            onRestoreFolderName={customDisplayName
+              ? () => restoreProjectFolderName(projectEditor.logicalRoot)
+              : undefined}
+            onRemoveFromSidebar={project
+              ? () => {
+                hideProjectFromSidebar(project)
+                closeProjectEditor()
+              }
+              : undefined}
+          />
+        )
+      })()}
 
       <ConfirmDialog
         open={pendingDeleteSessionId !== null}
@@ -1848,7 +2069,7 @@ const ProjectHeaderMenu = forwardRef<HTMLDivElement, {
     return (
       <div ref={ref} role="menu" className={className} style={style} onClick={(event) => event.stopPropagation()}>
         <HeaderMenuItem icon={<SquarePen size={18} aria-hidden="true" />} onClick={onCreateBlank}>
-          {t('sidebar.newBlankProject')}
+          {t('sidebar.newBlankSession')}
         </HeaderMenuItem>
         <HeaderMenuItem icon={<FolderOpen size={18} aria-hidden="true" />} onClick={onUseExistingFolder}>
           {t('sidebar.useExistingFolder')}
@@ -1951,7 +2172,11 @@ function HeaderMenuItem({
   )
 }
 
-function groupByProject(sessions: SessionListItem[], sortBy: SidebarProjectSortBy): ProjectGroup[] {
+function groupByProject(
+  sessions: SessionListItem[],
+  sortBy: SidebarProjectSortBy,
+  displayNameForProject: (projectKey: string) => string | null,
+): ProjectGroup[] {
   const groupsByKey = new Map<string, SessionListItem[]>()
   for (const session of sessions) {
     const key = getSessionProjectKey(session)
@@ -1966,7 +2191,7 @@ function groupByProject(sessions: SessionListItem[], sortBy: SidebarProjectSortB
     const projectRoot = newest?.projectRoot || newest?.workDir || key
     return {
       key,
-      title: projectTitle(projectRoot),
+      title: displayNameForProject(key) || projectTitle(projectRoot),
       subtitle: projectSubtitle(projectRoot, key),
       workDir: projectRoot || newest?.workDir || undefined,
       sessions: sortedSessions,
@@ -1988,7 +2213,10 @@ function applyProjectOrder(
     const aPinned = pinnedProjectKeys.has(a.key)
     const bPinned = pinnedProjectKeys.has(b.key)
     if (aPinned !== bPinned) return aPinned ? -1 : 1
-    if (organization === 'project') return a.title.localeCompare(b.title)
+    if (organization === 'project') {
+      const titleOrder = a.title.localeCompare(b.title)
+      return titleOrder || a.key.localeCompare(b.key)
+    }
     const aIndex = orderIndex.get(a.key)
     const bIndex = orderIndex.get(b.key)
     if (aIndex !== undefined && bIndex !== undefined) return aIndex - bIndex
@@ -2237,6 +2465,16 @@ function projectTitle(pathLike: string | null | undefined): string {
   const last = segments[segments.length - 1]
   if (last) return last
   return normalized || 'Unknown project'
+}
+
+async function saveProjectDisplayName(projectKey: string, displayName: string): Promise<void> {
+  const defaultDisplayName = projectTitle(projectKey).trim().replace(/\s+/g, ' ')
+  if (displayName === defaultDisplayName) {
+    await resetProjectDisplayName(projectKey)
+    return
+  }
+  if (resolveProjectDisplayName(projectKey) === displayName) return
+  await setProjectDisplayName(projectKey, displayName)
 }
 
 function projectSubtitle(projectRoot: string | null | undefined, fallbackKey: string): string | null {

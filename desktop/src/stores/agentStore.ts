@@ -1,8 +1,9 @@
-import { create } from 'zustand'
+import { create, type StoreApi } from 'zustand'
 import {
   agentsApi,
   type AgentDefinition,
   type AgentMutationInput,
+  type AgentOverrideInput,
   type AgentScope,
   type AgentSource,
 } from '../api/agents'
@@ -39,6 +40,16 @@ type AgentStore = {
     target?: string,
     sessionId?: string,
   ) => Promise<void>
+  setAgentOverride: (
+    name: string,
+    input: AgentOverrideInput,
+    sessionId?: string,
+  ) => Promise<AgentDefinition>
+  clearAgentOverride: (
+    name: string,
+    cwd?: string,
+    sessionId?: string,
+  ) => Promise<AgentDefinition>
   selectAgent: (
     agent: AgentDefinition | null,
     returnTab?: AgentDetailReturnTab,
@@ -47,6 +58,14 @@ type AgentStore = {
 
 let latestFetchRequestId = 0
 let latestMutationRequestId = 0
+
+/**
+ * Spelled out rather than `typeof useAgentStore.setState`: helpers below are
+ * reached from the store's own action bodies, so referring back to the store
+ * makes its type self-referential and TypeScript falls back to `any` for the
+ * whole store — and for every component that reads it.
+ */
+type AgentStoreSetter = StoreApi<AgentStore>['setState']
 
 export const useAgentStore = create<AgentStore>((set, get) => ({
   activeAgents: [],
@@ -116,160 +135,84 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   createAgent: async (input, sessionId) => {
-    const requestId = ++latestMutationRequestId
-    const displayRequestId = ++latestFetchRequestId
-    set({
-      isMutating: true,
-      mutationError: null,
-      mutationWarning: null,
-      isLoading: false,
+    let createdTarget: string | undefined
+    return runAgentMutation({
+      mutate: async () => {
+        const { agent } = await agentsApi.create(input)
+        createdTarget = agent.target
+        return agent
+      },
+      locate: (agents) =>
+        findEditableAgent(
+          agents,
+          input.name,
+          input.scope,
+          createdTarget ?? input.target,
+        ),
+      cwd: input.cwd,
+      sessionId,
+      mutationErrorFallback: 'Failed to create agent',
+      refreshErrorFallback: 'Failed to refresh agents after creating the agent',
+      missingAfterRefreshMessage:
+        'Created agent was not returned by the refreshed list',
+      set,
     })
-    let createdAgent: AgentDefinition
-    try {
-      const mutationResponse = await agentsApi.create(input)
-      createdAgent = mutationResponse.agent
-    } catch (error) {
-      if (requestId === latestMutationRequestId) {
-        const message = getErrorMessage(error, 'Failed to create agent')
-        set({
-          isMutating: false,
-          ...(displayRequestId === latestFetchRequestId ? { mutationError: message } : {}),
-        })
-      }
-      throw error
-    }
-
-    startSessionReloadWarning(sessionId, requestId, displayRequestId, set)
-    try {
-      const response = await agentsApi.list(input.cwd)
-      const refreshedAgent = findEditableAgent(
-        response.allAgents,
-        input.name,
-        input.scope,
-        createdAgent.target ?? input.target,
-      )
-      if (!refreshedAgent) {
-        throw new Error('Created agent was not returned by the refreshed list')
-      }
-      if (requestId !== latestMutationRequestId) return refreshedAgent
-      if (displayRequestId !== latestFetchRequestId) {
-        set({ isMutating: false })
-        return refreshedAgent
-      }
-      const contextCwd = normalizeAgentCwd(input.cwd)
-      set({
-        ...response,
-        selectedAgent: refreshedAgent,
-        selectedAgentReturnTab: 'agents',
-        isMutating: false,
-        requestedCwd: contextCwd,
-        resolvedCwd: contextCwd,
-        isContextStale: false,
-      })
-      return refreshedAgent
-    } catch (refreshError) {
-      if (requestId === latestMutationRequestId && displayRequestId !== latestFetchRequestId) {
-        set({ isMutating: false })
-      } else if (requestId === latestMutationRequestId) {
-        const contextCwd = normalizeAgentCwd(input.cwd)
-        set((state) => ({
-          ...upsertMutationAgent(state, createdAgent),
-          selectedAgent: createdAgent,
-          selectedAgentReturnTab: 'agents',
-          isMutating: false,
-          requestedCwd: contextCwd,
-          resolvedCwd: contextCwd,
-          isContextStale: false,
-          mutationWarning: combineWarnings(
-            getErrorMessage(
-              refreshError,
-              'Failed to refresh agents after creating the agent',
-            ),
-            state.mutationWarning,
-          ),
-        }))
-      }
-      return createdAgent
-    }
   },
 
   updateAgent: async (name, input, sessionId) => {
-    const requestId = ++latestMutationRequestId
-    const displayRequestId = ++latestFetchRequestId
-    set({
-      isMutating: true,
-      mutationError: null,
-      mutationWarning: null,
-      isLoading: false,
+    let updatedTarget: string | undefined
+    return runAgentMutation({
+      mutate: async () => {
+        const { agent } = await agentsApi.update(name, input)
+        updatedTarget = agent.target
+        return agent
+      },
+      locate: (agents) =>
+        findEditableAgent(
+          agents,
+          input.name,
+          input.scope,
+          updatedTarget ?? input.target,
+        ),
+      cwd: input.cwd,
+      sessionId,
+      mutationErrorFallback: 'Failed to update agent',
+      refreshErrorFallback: 'Failed to refresh agents after updating the agent',
+      missingAfterRefreshMessage:
+        'Updated agent was not returned by the refreshed list',
+      set,
     })
-    let updatedAgent: AgentDefinition
-    try {
-      const mutationResponse = await agentsApi.update(name, input)
-      updatedAgent = mutationResponse.agent
-    } catch (error) {
-      if (requestId === latestMutationRequestId) {
-        const message = getErrorMessage(error, 'Failed to update agent')
-        set({
-          isMutating: false,
-          ...(displayRequestId === latestFetchRequestId ? { mutationError: message } : {}),
-        })
-      }
-      throw error
-    }
-
-    startSessionReloadWarning(sessionId, requestId, displayRequestId, set)
-    try {
-      const response = await agentsApi.list(input.cwd)
-      const refreshedAgent = findEditableAgent(
-        response.allAgents,
-        input.name,
-        input.scope,
-        updatedAgent.target ?? input.target,
-      )
-      if (!refreshedAgent) {
-        throw new Error('Updated agent was not returned by the refreshed list')
-      }
-      if (requestId !== latestMutationRequestId) return refreshedAgent
-      if (displayRequestId !== latestFetchRequestId) {
-        set({ isMutating: false })
-        return refreshedAgent
-      }
-      const contextCwd = normalizeAgentCwd(input.cwd)
-      set({
-        ...response,
-        selectedAgent: refreshedAgent,
-        selectedAgentReturnTab: 'agents',
-        isMutating: false,
-        requestedCwd: contextCwd,
-        resolvedCwd: contextCwd,
-        isContextStale: false,
-      })
-      return refreshedAgent
-    } catch (refreshError) {
-      if (requestId === latestMutationRequestId && displayRequestId !== latestFetchRequestId) {
-        set({ isMutating: false })
-      } else if (requestId === latestMutationRequestId) {
-        const contextCwd = normalizeAgentCwd(input.cwd)
-        set((state) => ({
-          ...upsertMutationAgent(state, updatedAgent),
-          selectedAgent: updatedAgent,
-          selectedAgentReturnTab: 'agents',
-          isMutating: false,
-          requestedCwd: contextCwd,
-          resolvedCwd: contextCwd,
-          isContextStale: false,
-          mutationWarning: combineWarnings(
-            getErrorMessage(
-              refreshError,
-              'Failed to refresh agents after updating the agent',
-            ),
-            state.mutationWarning,
-          ),
-        }))
-      }
-      return updatedAgent
-    }
   },
+
+  setAgentOverride: async (name, input, sessionId) =>
+    runAgentMutation({
+      mutate: async () => (await agentsApi.setOverride(name, input)).agent,
+      locate: (agents) => findBuiltInAgent(agents, name),
+      cwd: input.cwd,
+      sessionId,
+      mutationErrorFallback: 'Failed to save the built-in agent override',
+      refreshErrorFallback:
+        'Failed to refresh agents after saving the built-in agent override',
+      missingAfterRefreshMessage:
+        'Overridden agent was not returned by the refreshed list',
+      set,
+    }),
+
+  clearAgentOverride: async (name, cwd, sessionId) =>
+    runAgentMutation({
+      // The server decides what "built-in default" is — this build's default
+      // differs per agent, so the store must never reconstruct it locally.
+      mutate: async () => (await agentsApi.clearOverride(name, cwd)).agent,
+      locate: (agents) => findBuiltInAgent(agents, name),
+      cwd,
+      sessionId,
+      mutationErrorFallback: 'Failed to reset the built-in agent override',
+      refreshErrorFallback:
+        'Failed to refresh agents after resetting the built-in agent override',
+      missingAfterRefreshMessage:
+        'Reset agent was not returned by the refreshed list',
+      set,
+    }),
 
   deleteAgent: async (name, scope, cwd, target, sessionId) => {
     const requestId = ++latestMutationRequestId
@@ -358,6 +301,122 @@ function normalizeAgentCwd(cwd?: string): string | null {
   return cwd ?? null
 }
 
+/**
+ * Shared body for every mutation that ends with "reload the list and select the
+ * agent I just changed": create, update, and the built-in override routes.
+ *
+ * The out-of-order guards are the reason this is shared rather than copied. A
+ * mutation and a project switch race constantly here, and each of the two
+ * counters answers a different question — `latestMutationRequestId` whether
+ * this mutation is still the newest one, `latestFetchRequestId` whether the
+ * list on screen is still the one this mutation was started against. A third
+ * hand-written copy is how one of them goes missing.
+ *
+ * Delete is deliberately not routed through here: it clears the selection and
+ * removes rather than upserts.
+ */
+async function runAgentMutation({
+  mutate,
+  locate,
+  cwd,
+  sessionId,
+  mutationErrorFallback,
+  refreshErrorFallback,
+  missingAfterRefreshMessage,
+  set,
+}: {
+  mutate: () => Promise<AgentDefinition>
+  locate: (agents: AgentDefinition[]) => AgentDefinition | undefined
+  cwd: string | undefined
+  sessionId: string | undefined
+  mutationErrorFallback: string
+  refreshErrorFallback: string
+  missingAfterRefreshMessage: string
+  set: AgentStoreSetter
+}): Promise<AgentDefinition> {
+  const requestId = ++latestMutationRequestId
+  const displayRequestId = ++latestFetchRequestId
+  set({
+    isMutating: true,
+    mutationError: null,
+    mutationWarning: null,
+    isLoading: false,
+  })
+
+  let mutatedAgent: AgentDefinition
+  try {
+    mutatedAgent = await mutate()
+  } catch (error) {
+    if (requestId === latestMutationRequestId) {
+      const message = getErrorMessage(error, mutationErrorFallback)
+      set({
+        isMutating: false,
+        ...(displayRequestId === latestFetchRequestId ? { mutationError: message } : {}),
+      })
+    }
+    throw error
+  }
+
+  startSessionReloadWarning(sessionId, requestId, displayRequestId, set)
+  try {
+    // Refetch rather than trusting the mutation response: overrides and
+    // overriddenBy are computed across every source, so only a full list is
+    // consistent.
+    const response = await agentsApi.list(cwd)
+    const refreshedAgent = locate(response.allAgents)
+    if (!refreshedAgent) {
+      throw new Error(missingAfterRefreshMessage)
+    }
+    if (requestId !== latestMutationRequestId) return refreshedAgent
+    if (displayRequestId !== latestFetchRequestId) {
+      set({ isMutating: false })
+      return refreshedAgent
+    }
+    const contextCwd = normalizeAgentCwd(cwd)
+    set({
+      ...response,
+      selectedAgent: refreshedAgent,
+      selectedAgentReturnTab: 'agents',
+      isMutating: false,
+      requestedCwd: contextCwd,
+      resolvedCwd: contextCwd,
+      isContextStale: false,
+    })
+    return refreshedAgent
+  } catch (refreshError) {
+    if (requestId === latestMutationRequestId && displayRequestId !== latestFetchRequestId) {
+      set({ isMutating: false })
+    } else if (requestId === latestMutationRequestId) {
+      const contextCwd = normalizeAgentCwd(cwd)
+      set((state) => ({
+        ...upsertMutationAgent(state, mutatedAgent),
+        selectedAgent: mutatedAgent,
+        selectedAgentReturnTab: 'agents',
+        isMutating: false,
+        requestedCwd: contextCwd,
+        resolvedCwd: contextCwd,
+        isContextStale: false,
+        mutationWarning: combineWarnings(
+          getErrorMessage(refreshError, refreshErrorFallback),
+          state.mutationWarning,
+        ),
+      }))
+    }
+    return mutatedAgent
+  }
+}
+
+/**
+ * Built-in agents carry no scope or target — they are identified by name and
+ * source alone, so findEditableAgent (which filters on user/project sources)
+ * would never match one.
+ */
+function findBuiltInAgent(agents: AgentDefinition[], name: string) {
+  return agents.find(
+    (agent) => agent.agentType === name && agent.source === 'built-in',
+  )
+}
+
 function findEditableAgent(
   agents: AgentDefinition[],
   name: string,
@@ -434,7 +493,7 @@ function startSessionReloadWarning(
   sessionId: string | undefined,
   requestId: number,
   displayRequestId: number,
-  setState: typeof useAgentStore.setState,
+  setState: AgentStoreSetter,
 ) {
   void getSessionReloadWarning(sessionId).then((reloadWarning) => {
     if (
@@ -459,9 +518,10 @@ async function getSessionReloadWarning(
         ? 'The active CLI session is not running; the saved agent will load when the session starts again.'
         : 'Failed to reload agent definitions in the active CLI session')
     }
-    if (session.errors > 0) {
-      return `The active CLI session reloaded with ${session.errors} agent loading error${session.errors === 1 ? '' : 's'}.`
-    }
+    // `errors` belongs to the shared reload_plugins response and counts plugin
+    // and hook loading errors. A completed control request has already swapped
+    // the session's agent definitions, so those unrelated errors must not turn
+    // a successful Agent mutation into an apply failure.
     return null
   } catch (error) {
     return getErrorMessage(

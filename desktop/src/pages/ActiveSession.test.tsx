@@ -1,11 +1,36 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, createEvent, fireEvent, render, screen, within } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import '@testing-library/jest-dom'
 import { act } from 'react'
+import type { TeamWorkbenchSessionTimeline, TeamWorkbenchSnapshot } from '../types/team'
 
 const viewportMocks = vi.hoisted(() => ({
   isMobile: false,
 }))
+const sessionApiMocks = vi.hoisted(() => ({
+  getGitInfo: vi.fn(),
+}))
+const teamApiMocks = vi.hoisted(() => ({
+  getMemberTranscript: vi.fn(() => Promise.resolve({ messages: [] })),
+  getTeam: vi.fn(),
+  listTeams: vi.fn(),
+  getWorkbenchForSession: vi.fn(
+    (): Promise<TeamWorkbenchSessionTimeline> => Promise.reject(new Error('not a team session')),
+  ),
+  getWorkbench: vi.fn(),
+  sendMemberMessage: vi.fn(),
+}))
+
+vi.mock('../api/sessions', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../api/sessions')>()
+  return {
+    ...actual,
+    sessionsApi: {
+      ...actual.sessionsApi,
+      getGitInfo: sessionApiMocks.getGitInfo,
+    },
+  }
+})
 
 vi.mock('../hooks/useMobileViewport', () => ({
   useMobileViewport: () => viewportMocks.isMobile,
@@ -37,6 +62,16 @@ vi.mock('../components/workbench/WorkbenchPanel', () => ({
   ),
 }))
 
+vi.mock('../api/teams', () => ({
+  teamsApi: {
+    getMemberTranscript: teamApiMocks.getMemberTranscript,
+    get: teamApiMocks.getTeam,
+    list: teamApiMocks.listTeams,
+    getWorkbenchForSession: teamApiMocks.getWorkbenchForSession,
+    getWorkbench: teamApiMocks.getWorkbench,
+    sendMemberMessage: teamApiMocks.sendMemberMessage,
+  },
+}))
 vi.mock('./TerminalSettings', () => ({
   TerminalSettings: ({
     active,
@@ -70,7 +105,7 @@ vi.mock('./TerminalSettings', () => ({
 
 import { ActiveSession } from './ActiveSession'
 import { useActivityPanelStore } from '../stores/activityPanelStore'
-import { useChatStore } from '../stores/chatStore'
+import { createDefaultSessionState, useChatStore } from '../stores/chatStore'
 import { useCLITaskStore } from '../stores/cliTaskStore'
 import { useSessionRuntimeStore } from '../stores/sessionRuntimeStore'
 import { useSessionStore } from '../stores/sessionStore'
@@ -86,6 +121,25 @@ import {
   TERMINAL_PANEL_MIN_HEIGHT,
 } from '../stores/terminalPanelStore'
 
+beforeEach(() => {
+  sessionApiMocks.getGitInfo.mockReset()
+  sessionApiMocks.getGitInfo.mockResolvedValue({
+    branch: 'main',
+    repoName: 'project',
+    workDir: '/workspace/project',
+    changedFiles: 0,
+    worktree: null,
+  })
+  teamApiMocks.getMemberTranscript.mockReset()
+  teamApiMocks.getMemberTranscript.mockResolvedValue({ messages: [] })
+  teamApiMocks.getTeam.mockReset()
+  teamApiMocks.listTeams.mockReset()
+  teamApiMocks.getWorkbenchForSession.mockReset()
+  teamApiMocks.getWorkbenchForSession.mockRejectedValue(new Error('not a team session'))
+  teamApiMocks.getWorkbench.mockReset()
+  teamApiMocks.sendMemberMessage.mockReset()
+})
+
 afterEach(() => {
   cleanup()
   vi.useRealTimers()
@@ -96,7 +150,8 @@ afterEach(() => {
   useSettingsStore.setState({ locale: 'en', unifiedActivityPanelEnabled: false })
   useActivityPanelStore.setState(useActivityPanelStore.getInitialState(), true)
   useSessionRuntimeStore.setState({ coordinatorModes: {}, pipelineModes: {}, soloPipelineModes: {}, handoffInfo: {} })
-  useTeamStore.setState({ teams: [], activeTeam: null, memberColors: new Map(), error: null })
+  useTeamStore.getState().stopMemberPolling()
+  useTeamStore.setState(useTeamStore.getInitialState(), true)
   useWorkspacePanelStore.setState(useWorkspacePanelStore.getInitialState(), true)
   useTerminalPanelStore.setState(useTerminalPanelStore.getInitialState(), true)
 })
@@ -2255,6 +2310,1273 @@ describe('ActiveSession task polling', () => {
   })
 })
 
+  it('replaces the empty hero with the transcript as soon as first-turn preparation begins', () => {
+    const sessionId = 'preparing-first-turn-session'
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'New Session',
+        createdAt: '2026-08-07T00:00:00.000Z',
+        modifiedAt: '2026-08-07T00:00:00.000Z',
+        messageCount: 0,
+        projectPath: '/workspace/project',
+        workDir: '/workspace/project',
+        workDirExists: true,
+      }],
+      activeSessionId: sessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'New Session', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          ...useChatStore.getState().getSession(sessionId),
+          connectionState: 'connected',
+          historyStatus: 'ready',
+        },
+      },
+    })
+
+    render(<ActiveSession />)
+    expect(screen.getByTestId('empty-session-hero')).toBeInTheDocument()
+
+    act(() => {
+      useChatStore.getState().setPreparingTurn(sessionId, true)
+    })
+
+    expect(screen.queryByTestId('empty-session-hero')).not.toBeInTheDocument()
+    expect(screen.getByTestId('message-list')).toBeInTheDocument()
+    expect(screen.getByTestId('chat-input')).toHaveAttribute('data-variant', 'default')
+  })
+
+  it('shows the worktree name in the header and reveals its directory on focus', async () => {
+    const worktreeSessionId = 'worktree-header-session'
+    const regularSessionId = 'regular-header-session'
+    const worktreeName = 'desktop-feature-worktree-header'
+    const plannedPath = `/workspace/project/.claude/worktrees/${worktreeName}`
+
+    sessionApiMocks.getGitInfo.mockImplementation(async (sessionId: string) => ({
+      branch: 'feature/worktree-header',
+      repoName: 'project',
+      workDir: sessionId === worktreeSessionId ? plannedPath : '/workspace/project',
+      changedFiles: 0,
+      worktree: sessionId === worktreeSessionId ? {
+        enabled: true,
+        path: null,
+        plannedPath,
+        sourceWorkDir: '/workspace/project',
+        slug: worktreeName,
+        branch: 'worktree/feature-worktree-header',
+      } : null,
+    }))
+
+    useSessionStore.setState({
+      sessions: [
+        {
+          id: worktreeSessionId,
+          title: 'Worktree Header Session',
+          createdAt: '2026-08-07T00:00:00.000Z',
+          modifiedAt: '2026-08-07T00:00:00.000Z',
+          messageCount: 1,
+          projectPath: '/workspace/project',
+          workDir: plannedPath,
+          workDirExists: true,
+        },
+        {
+          id: regularSessionId,
+          title: 'Regular Header Session',
+          createdAt: '2026-08-07T00:00:00.000Z',
+          modifiedAt: '2026-08-07T00:00:00.000Z',
+          messageCount: 1,
+          projectPath: '/workspace/project',
+          workDir: '/workspace/project',
+          workDirExists: true,
+        },
+      ],
+      activeSessionId: worktreeSessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [
+        { sessionId: worktreeSessionId, title: 'Worktree Header Session', type: 'session', status: 'idle' },
+        { sessionId: regularSessionId, title: 'Regular Header Session', type: 'session', status: 'idle' },
+      ],
+      activeTabId: worktreeSessionId,
+    })
+    const idleSessionState = {
+      chatState: 'idle' as const,
+      connectionState: 'connected' as const,
+      streamingText: '',
+      streamingToolInput: '',
+      activeToolUseId: null,
+      activeToolName: null,
+      activeThinkingId: null,
+      pendingPermission: null,
+      pendingComputerUsePermission: null,
+      tokenUsage: { input_tokens: 0, output_tokens: 0 },
+      streamingResponseChars: 0,
+      elapsedSeconds: 0,
+      statusVerb: '',
+      slashCommands: [],
+      agentTaskNotifications: {},
+      elapsedTimer: null,
+    }
+    useChatStore.setState({
+      sessions: {
+        [worktreeSessionId]: {
+          ...idleSessionState,
+          messages: [{ id: 'worktree-message', type: 'assistant_text', content: 'ready', timestamp: 1 }],
+        },
+        [regularSessionId]: {
+          ...idleSessionState,
+          messages: [{ id: 'regular-message', type: 'assistant_text', content: 'ready', timestamp: 1 }],
+        },
+      },
+    })
+
+    render(<ActiveSession />)
+
+    const indicator = await screen.findByTestId('session-worktree-indicator')
+    expect(indicator).toHaveTextContent(worktreeName)
+    expect(screen.getByRole('heading', { name: 'Worktree Header Session' })).toBeInTheDocument()
+    expect(within(screen.getByTestId('session-header')).queryByText(plannedPath)).not.toBeInTheDocument()
+
+    fireEvent.focus(indicator)
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(plannedPath)
+
+    act(() => {
+      useTabStore.getState().setActiveTab(regularSessionId)
+    })
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('session-worktree-indicator')).not.toBeInTheDocument()
+    })
+    expect(screen.getByRole('heading', { name: 'Regular Header Session' })).toBeInTheDocument()
+  })
+
+  it('keeps persistent activity surfaces out of the composer area', () => {
+    const sessionId = 'activity-clean-composer-session'
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
+
+    useCLITaskStore.setState({
+      sessionId,
+      tasks: [{
+        id: 'task-1',
+        subject: 'Write tests',
+        description: '',
+        status: 'in_progress',
+        blocks: [],
+        blockedBy: [],
+        taskListId: sessionId,
+      }],
+      completedAndDismissed: false,
+    })
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'Activity Session',
+        createdAt: '2026-05-07T00:00:00.000Z',
+        modifiedAt: '2026-05-07T00:00:00.000Z',
+        messageCount: 1,
+        projectPath: '/workspace/project',
+        workDir: '/workspace/project',
+        workDirExists: true,
+      }],
+      activeSessionId: sessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Activity Session', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          messages: [],
+          backgroundAgentTasks: {
+            'agent-task-1': {
+              taskId: 'agent-task-1',
+              toolUseId: 'agent-tool-1',
+              status: 'running',
+              taskType: 'local_agent',
+              description: 'Explore code',
+              startedAt: 1,
+              updatedAt: 2,
+            },
+          },
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    render(<ActiveSession />)
+
+    const chatColumn = screen.getByTestId('active-session-chat-column')
+    expect(chatColumn).toContainElement(screen.getByTestId('chat-input'))
+    expect(chatColumn).toHaveClass('relative')
+    expect(screen.queryByTestId('session-task-bar')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('team-status-bar')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('background-tasks-bar')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('background-tasks-button')).not.toBeInTheDocument()
+  })
+
+  it('renders the activity panel as a rail and hides it when the workspace opens', async () => {
+    const sessionId = 'activity-panel-open-session'
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
+
+    useCLITaskStore.setState({
+      sessionId,
+      tasks: [{
+        id: 'task-1',
+        subject: 'Implement panel',
+        description: 'Move persistent rows',
+        status: 'in_progress',
+        blocks: [],
+        blockedBy: [],
+        taskListId: sessionId,
+      }],
+      completedAndDismissed: false,
+    })
+    useActivityPanelStore.getState().open(sessionId)
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'Activity Panel Session',
+        createdAt: '2026-05-07T00:00:00.000Z',
+        modifiedAt: '2026-05-07T00:00:00.000Z',
+        messageCount: 1,
+        projectPath: '/workspace/project',
+        workDir: '/workspace/project',
+        workDirExists: true,
+      }],
+      activeSessionId: sessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Activity Panel Session', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          messages: [
+            {
+              id: 'agent-tool-1',
+              type: 'tool_use',
+              toolName: 'Agent',
+              toolUseId: 'agent-tool-1',
+              input: { description: 'Explore repo' },
+              timestamp: 1,
+            },
+            {
+              id: 'agent-result-1',
+              type: 'tool_result',
+              toolUseId: 'agent-tool-1',
+              content: 'Done',
+              isError: false,
+              timestamp: 2,
+            },
+          ],
+          backgroundAgentTasks: {
+            'bash-task-1': {
+              taskId: 'bash-task-1',
+              toolUseId: 'bash-tool-1',
+              status: 'running',
+              taskType: 'local_bash',
+              description: 'Run smoke checks',
+              startedAt: 1,
+              updatedAt: 2,
+            },
+          },
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {
+            'agent-task-1': {
+              taskId: 'agent-task-1',
+              toolUseId: 'agent-tool-1',
+              status: 'completed',
+              summary: 'Explore repo',
+              timestamp: '2026-07-03T00:00:00.000Z',
+            },
+          },
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    render(<ActiveSession />)
+
+    const chatColumn = screen.getByTestId('active-session-chat-column')
+    const panel = screen.getByTestId('session-activity-panel')
+    expect(chatColumn).not.toContainElement(panel)
+    expect(panel).toHaveAttribute('data-placement', 'rail')
+    expect(panel).toHaveAttribute('role', 'dialog')
+    expect(within(panel).getByText('Implement panel')).toBeInTheDocument()
+    expect(within(panel).getAllByText('Run smoke checks')).not.toHaveLength(0)
+    expect(within(panel).getAllByText('Explore repo')).not.toHaveLength(0)
+    expect(chatColumn).toContainElement(screen.getByTestId('chat-input'))
+    expect(screen.queryByTestId('session-task-bar')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('background-tasks-button')).not.toBeInTheDocument()
+
+    act(() => {
+      useWorkspacePanelStore.getState().openPanel(sessionId)
+    })
+
+    expect(screen.getByTestId('workbench-panel')).toBeInTheDocument()
+    expect(screen.queryByTestId('session-activity-panel')).not.toBeInTheDocument()
+    await waitFor(() => {
+      expect(useActivityPanelStore.getState().isOpen(sessionId)).toBe(false)
+    })
+  })
+
+  it('does not render the activity panel when the store is open without visible activity', async () => {
+    const sessionId = 'activity-open-empty-session'
+
+    useActivityPanelStore.getState().open(sessionId)
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'Empty Activity Session',
+        createdAt: '2026-05-07T00:00:00.000Z',
+        modifiedAt: '2026-05-07T00:00:00.000Z',
+        messageCount: 1,
+        projectPath: '/workspace/project',
+        workDir: '/workspace/project',
+        workDirExists: true,
+      }],
+      activeSessionId: sessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Empty Activity Session', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          messages: [{ id: 'msg-1', type: 'assistant_text', content: 'hello', timestamp: 1 }],
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          backgroundAgentTasks: {},
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    render(<ActiveSession />)
+
+    expect(screen.queryByTestId('session-activity-panel')).not.toBeInTheDocument()
+    await waitFor(() => {
+      expect(useActivityPanelStore.getState().isOpen(sessionId)).toBe(false)
+    }, { timeout: 4000 })
+  })
+
+  it('auto-opens for current activity and seals unfinished tasks when the turn becomes idle', async () => {
+    const sessionId = 'activity-auto-open-session'
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
+    const fetchSessionTasks = vi.fn().mockResolvedValue(undefined)
+
+    useCLITaskStore.setState({ fetchSessionTasks })
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'Auto Open Activity Session',
+        createdAt: '2026-05-07T00:00:00.000Z',
+        modifiedAt: '2026-05-07T00:00:00.000Z',
+        messageCount: 1,
+        projectPath: '/workspace/project',
+        workDir: '/workspace/project',
+        workDirExists: true,
+      }],
+      activeSessionId: sessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Auto Open Activity Session', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          messages: [],
+          chatState: 'thinking',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          backgroundAgentTasks: {},
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    render(<ActiveSession />)
+
+    expect(screen.queryByTestId('session-activity-panel')).not.toBeInTheDocument()
+    expect(useActivityPanelStore.getState().isOpen(sessionId)).toBe(false)
+
+    act(() => {
+      useCLITaskStore.setState({
+        sessionId,
+        tasks: [{
+          id: 'task-1',
+          subject: 'Draft implementation plan',
+          description: 'Create the first activity row',
+          status: 'in_progress',
+          blocks: [],
+          blockedBy: [],
+          taskListId: sessionId,
+        }],
+        completedAndDismissed: false,
+      })
+    })
+
+    await waitFor(() => {
+      expect(useActivityPanelStore.getState().isOpen(sessionId)).toBe(true)
+    })
+    expect(screen.getByTestId('session-activity-panel')).toHaveAttribute('data-placement', 'rail')
+    expect(screen.getByText('Draft implementation plan')).toBeInTheDocument()
+    expect(within(screen.getByTestId('session-activity-panel')).getByLabelText('Task in progress')).toBeInTheDocument()
+
+    act(() => {
+      useChatStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [sessionId]: {
+            ...state.sessions[sessionId]!,
+            chatState: 'idle',
+          },
+        },
+      }))
+    })
+
+    expect(within(screen.getByTestId('session-activity-panel')).getByLabelText('Stopped')).toBeInTheDocument()
+    expect(within(screen.getByTestId('session-activity-panel')).queryByLabelText('Task in progress')).not.toBeInTheDocument()
+    expect(screen.queryByText(/session active|会话活跃中/)).not.toBeInTheDocument()
+  })
+
+  it('renders completed historical TodoWrite activity in the rail', () => {
+    const sessionId = 'activity-todowrite-history-session'
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
+
+    useActivityPanelStore.getState().open(sessionId)
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'TodoWrite History Session',
+        createdAt: '2026-05-07T00:00:00.000Z',
+        modifiedAt: '2026-05-07T00:00:00.000Z',
+        messageCount: 1,
+        projectPath: '/workspace/project',
+        workDir: '/workspace/project',
+        workDirExists: true,
+      }],
+      activeSessionId: sessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'TodoWrite History Session', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          messages: [{
+            id: 'todo-1',
+            type: 'tool_use',
+            toolName: 'TodoWrite',
+            toolUseId: 'todo-1',
+            input: {
+              todos: [
+                { content: 'Review historical implementation', status: 'completed' },
+              ],
+            },
+            timestamp: 1,
+          }],
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          backgroundAgentTasks: {},
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    render(<ActiveSession />)
+
+    const panel = screen.getByTestId('session-activity-panel')
+    expect(panel).toHaveAttribute('data-placement', 'rail')
+    expect(within(panel).getByText('Review historical implementation')).toBeInTheDocument()
+  })
+
+  it('isolates Agent Teams tasks before the first workbench snapshot while preserving lead activity', async () => {
+    const sessionId = 'team-task-ownership-session'
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
+    vi.useFakeTimers()
+
+    useActivityPanelStore.getState().open(sessionId)
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'Team Task Ownership',
+        createdAt: '2026-08-10T00:00:00.000Z',
+        modifiedAt: '2026-08-10T00:00:00.000Z',
+        messageCount: 1,
+        projectPath: '/workspace/project',
+        workDir: '/workspace/project',
+        workDirExists: true,
+      }],
+      activeSessionId: sessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Team Task Ownership', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: { [sessionId]: createDefaultSessionState() },
+    })
+    const handleServerMessage = useChatStore.getState().handleServerMessage
+    handleServerMessage(sessionId, {
+      type: 'team_created',
+      teamName: 'test-team',
+    })
+    expect(useTeamStore.getState().teamNameBySession[sessionId]).toBe('test-team')
+    expect(useTeamStore.getState().workbenchesBySession[sessionId]).toBeUndefined()
+    handleServerMessage(sessionId, {
+      type: 'tool_use_complete',
+      toolName: 'TaskCreate',
+      toolUseId: 'team-task-create',
+      input: { subject: 'Review shared auth task' },
+    })
+    handleServerMessage(sessionId, {
+      type: 'tool_use_complete',
+      toolName: 'TodoWrite',
+      toolUseId: 'lead-personal-todo',
+      input: {
+        todos: [{ content: 'Summarize team delivery', status: 'in_progress' }],
+      },
+    })
+    useCLITaskStore.setState({
+      sessionId,
+      tasks: [{
+        id: '1',
+        subject: 'Finish the lead release checklist',
+        description: 'Created before the team task list existed',
+        status: 'in_progress',
+        blocks: [],
+        blockedBy: [],
+        taskListId: sessionId,
+      }],
+      fetchSessionTasks: vi.fn().mockResolvedValue(undefined),
+    })
+
+    await act(async () => {
+      render(<ActiveSession />)
+      await Promise.resolve()
+    })
+
+    const panel = screen.getByTestId('session-activity-panel')
+    expect(within(panel).getByText('Finish the lead release checklist')).toBeInTheDocument()
+    expect(within(panel).getByText('Summarize team delivery')).toBeInTheDocument()
+    expect(within(panel).queryByText('Review shared auth task')).not.toBeInTheDocument()
+    vi.clearAllTimers()
+  })
+
+  it('ignores unrelated active team rows when deciding Activity visibility', async () => {
+    const sessionId = 'activity-unrelated-team-session'
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
+
+    useActivityPanelStore.getState().open(sessionId)
+    useTeamStore.setState({
+      teams: [],
+      activeTeam: {
+        name: 'other-team',
+        leadAgentId: 'team-lead@other-team',
+        leadSessionId: 'other-session',
+        members: [
+          {
+            agentId: 'security-reviewer@other-team',
+            role: 'security-reviewer',
+            status: 'running',
+            currentTask: 'Auditing another session',
+          },
+        ],
+      },
+      memberColors: new Map(),
+      error: null,
+    })
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'Unrelated Team Session',
+        createdAt: '2026-05-07T00:00:00.000Z',
+        modifiedAt: '2026-05-07T00:00:00.000Z',
+        messageCount: 1,
+        projectPath: '/workspace/project',
+        workDir: '/workspace/project',
+        workDirExists: true,
+      }],
+      activeSessionId: sessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Unrelated Team Session', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          messages: [{ id: 'msg-1', type: 'assistant_text', content: 'hello', timestamp: 1 }],
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          backgroundAgentTasks: {},
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    render(<ActiveSession />)
+
+    expect(screen.queryByText('security-reviewer')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('session-activity-panel')).not.toBeInTheDocument()
+    await waitFor(() => {
+      expect(useActivityPanelStore.getState().isOpen(sessionId)).toBe(false)
+    }, { timeout: 4000 })
+  })
+
+  it('opens the full team workbench directly from the header strip', () => {
+    const sessionId = 'team-activity-panel-session'
+
+    useActivityPanelStore.getState().open(sessionId)
+    useTeamStore.setState({
+      teams: [],
+      activeTeam: {
+        name: 'test-team',
+        leadAgentId: 'team-lead@test-team',
+        leadSessionId: sessionId,
+        members: [
+          {
+            agentId: 'team-lead@test-team',
+            role: 'team-lead',
+            status: 'running',
+          },
+          {
+            agentId: 'security-reviewer@test-team',
+            role: 'security-reviewer',
+            status: 'running',
+            currentTask: 'Auditing auth flow',
+          },
+        ],
+      },
+      memberColors: new Map(),
+      error: null,
+      workbenchesBySession: {
+        [sessionId]: {
+          teamName: 'test-team',
+          loading: false,
+          error: null,
+          snapshots: [{
+            version: 'v1',
+            generatedAt: '2026-08-08T00:00:00.000Z',
+            team: {
+              name: 'test-team',
+              leadAgentId: 'team-lead@test-team',
+              leadSessionId: sessionId,
+              members: [
+                { agentId: 'team-lead@test-team', role: 'team-lead', status: 'running' },
+                {
+                  agentId: 'security-reviewer@test-team',
+                  role: 'security-reviewer',
+                  status: 'running',
+                  currentTask: 'Auditing auth flow',
+                },
+              ],
+            },
+            tasks: [],
+            messages: [],
+          }],
+        },
+      },
+    })
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'Team Activity Session',
+        createdAt: '2026-05-07T00:00:00.000Z',
+        modifiedAt: '2026-05-07T00:00:00.000Z',
+        messageCount: 1,
+        projectPath: '/workspace/project',
+        workDir: '/workspace/project',
+        workDirExists: true,
+      }],
+      activeSessionId: sessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Team Activity Session', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          messages: [{ id: 'msg-1', type: 'assistant_text', content: 'hello', timestamp: 1 }],
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          backgroundAgentTasks: {},
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    render(<ActiveSession />)
+
+    // Discovering a team must not seize the right-hand slot or compact the
+    // transcript; the header strip is the whole of its main-session footprint.
+    const strip = screen.getByTestId('agent-teams-strip')
+    expect(screen.queryByTestId('agent-teams-workbench-panel')).not.toBeInTheDocument()
+    expect(screen.getByTestId('message-list')).toHaveAttribute('data-compact', 'false')
+
+    act(() => {
+      fireEvent.click(strip)
+    })
+
+    const teamTabId = `__team__${sessionId}`
+    expect(useTabStore.getState().activeTabId).toBe(teamTabId)
+    expect(useTabStore.getState().tabs.find((tab) => tab.sessionId === teamTabId)).toMatchObject({
+      type: 'team',
+      teamLeadSessionId: sessionId,
+      title: 'test-team',
+    })
+    expect(screen.queryByTestId('agent-teams-workbench-panel')).not.toBeInTheDocument()
+    expect(useTeamStore.getState().workbenchesBySession[sessionId]?.snapshots).toHaveLength(1)
+  })
+
+  it('updates the Team workbench without leaking its DAG, roster, or transcript spawns into main Activity', async () => {
+    const sessionId = 'team-activity-runtime-state-session'
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
+    const teamName = 'runtime-state-team'
+    const taskDefinitions = [
+      { id: 'A', subject: 'Map routes' },
+      { id: 'B', subject: 'Review security' },
+      { id: 'C', subject: 'Verify integration' },
+      { id: 'D', subject: 'Write report' },
+    ]
+    const snapshot = (
+      version: string,
+      statuses: Record<string, 'pending' | 'in_progress' | 'completed'>,
+    ): TeamWorkbenchSnapshot => ({
+      version,
+      generatedAt: `2026-08-10T00:00:0${version === 'v1' ? '1' : '2'}.000Z`,
+      team: {
+        name: teamName,
+        leadAgentId: `team-lead@${teamName}`,
+        leadSessionId: sessionId,
+        createdAt: '2026-08-10T00:00:00.000Z',
+        members: [
+          { agentId: `team-lead@${teamName}`, role: 'team-lead', status: 'running' },
+          { agentId: `route-mapper@${teamName}`, role: 'route-mapper', status: 'running' },
+          { agentId: `security-reviewer@${teamName}`, role: 'security-reviewer', status: 'running' },
+          { agentId: `integration-tester@${teamName}`, role: 'integration-tester', status: 'running' },
+        ],
+      },
+      tasks: taskDefinitions.map(({ id, subject }) => ({
+        id,
+        subject,
+        description: subject,
+        status: statuses[id] ?? 'pending',
+        blocks: [],
+        blockedBy: [],
+        taskListId: teamName,
+      })),
+      messages: version === 'v2'
+        ? [{
+            id: 'route-mapper-to-security-reviewer',
+            from: 'route-mapper',
+            to: 'security-reviewer',
+            recipients: ['security-reviewer'],
+            kind: 'direct',
+            text: '**Routes mapped.** Review the auth boundary.',
+            timestamp: '2026-08-10T00:00:02.000Z',
+          }]
+        : [],
+    })
+    const initialSnapshot = snapshot('v1', {
+      A: 'pending',
+      B: 'pending',
+      C: 'pending',
+      D: 'completed',
+    })
+    const completedSnapshot = snapshot('v2', {
+      A: 'completed',
+      B: 'completed',
+      C: 'completed',
+      D: 'completed',
+    })
+
+    teamApiMocks.getWorkbenchForSession.mockResolvedValue({
+      sessionId,
+      teamName,
+      source: 'live',
+      snapshots: [initialSnapshot],
+    })
+    teamApiMocks.getTeam.mockResolvedValue(completedSnapshot.team)
+    teamApiMocks.getWorkbench.mockResolvedValue(completedSnapshot)
+    useActivityPanelStore.getState().open(sessionId)
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'Runtime State Team',
+        createdAt: '2026-08-10T00:00:00.000Z',
+        modifiedAt: '2026-08-10T00:00:00.000Z',
+        messageCount: 1,
+        projectPath: '/workspace/project',
+        workDir: '/workspace/project',
+        workDirExists: true,
+      }],
+      activeSessionId: sessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Runtime State Team', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          messages: [],
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          backgroundAgentTasks: {},
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(sessionId, {
+      type: 'team_created',
+      teamName,
+    })
+    useChatStore.getState().sendMessage(sessionId, 'Coordinate the four-task team')
+    for (const { id, subject } of taskDefinitions) {
+      useChatStore.getState().handleServerMessage(sessionId, {
+        type: 'tool_use_complete',
+        toolName: 'TaskCreate',
+        toolUseId: `create-${id}`,
+        input: { subject },
+      })
+      useChatStore.getState().handleServerMessage(sessionId, {
+        type: 'tool_result',
+        toolUseId: `create-${id}`,
+        content: `Task #${id} created successfully: ${subject}`,
+        isError: false,
+      })
+    }
+    for (const id of ['A', 'B', 'C']) {
+      useChatStore.getState().handleServerMessage(sessionId, {
+        type: 'tool_use_complete',
+        toolName: 'TaskUpdate',
+        toolUseId: `failed-update-${id}`,
+        input: { taskId: id, status: 'completed' },
+      })
+      useChatStore.getState().handleServerMessage(sessionId, {
+        type: 'tool_result',
+        toolUseId: `failed-update-${id}`,
+        content: 'Task not found',
+        isError: false,
+      })
+    }
+    useChatStore.getState().handleServerMessage(sessionId, {
+      type: 'tool_use_complete',
+      toolName: 'TaskUpdate',
+      toolUseId: 'completed-update-D',
+      input: { taskId: 'D', status: 'completed' },
+    })
+    useChatStore.getState().handleServerMessage(sessionId, {
+      type: 'tool_result',
+      toolUseId: 'completed-update-D',
+      content: 'Updated task #D status',
+      isError: false,
+    })
+    useChatStore.getState().handleServerMessage(sessionId, {
+      type: 'tool_use_complete',
+      toolName: 'Agent',
+      toolUseId: 'spawn-late-reviewer',
+      input: {
+        team_name: teamName,
+        name: 'late-reviewer',
+        description: 'Review the shared Team DAG',
+      },
+    })
+    useChatStore.getState().handleServerMessage(sessionId, {
+      type: 'tool_result',
+      toolUseId: 'spawn-late-reviewer',
+      content: 'Agent launched successfully',
+      isError: false,
+    })
+    useChatStore.getState().handleServerMessage(sessionId, {
+      type: 'message_complete',
+      usage: { input_tokens: 1, output_tokens: 1 },
+    })
+
+    render(<ActiveSession />)
+
+    await waitFor(() => {
+      expect(within(screen.getByTestId('agent-teams-strip')).getByText(/1\/4/)).toBeInTheDocument()
+    })
+    // Opening a stale Activity preference must not give Team-only state a
+    // panel. The shared DAG, roster, and member launch all belong to the Team
+    // tab/workbench, not to the main agent's run.
+    expect(screen.queryByTestId('session-activity-panel')).not.toBeInTheDocument()
+    await waitFor(() => {
+      expect(useActivityPanelStore.getState().isOpen(sessionId)).toBe(false)
+    }, { timeout: 4000 })
+
+    act(() => {
+      useChatStore.getState().handleServerMessage(sessionId, {
+        type: 'team_workbench_updated',
+        teamName,
+      })
+    })
+
+    await waitFor(() => {
+      expect(within(screen.getByTestId('agent-teams-strip')).getByText(/4\/4/)).toBeInTheDocument()
+    })
+    expect(screen.queryByTestId('session-activity-panel')).not.toBeInTheDocument()
+    const timeline = useTeamStore.getState().workbenchesBySession[sessionId]
+    expect(timeline?.snapshots.map(current => current.version)).toEqual(['v1', 'v2'])
+    expect(timeline?.snapshots.at(-1)?.messages).toEqual([
+      expect.objectContaining({ id: 'route-mapper-to-security-reviewer' }),
+    ])
+
+    act(() => {
+      useChatStore.getState().handleServerMessage(sessionId, {
+        type: 'tool_use_complete',
+        toolName: 'Agent',
+        toolUseId: 'direct-main-subagent',
+        input: { description: 'Inspect a main-session seam' },
+      })
+    })
+
+    // Filtering is ownership-based, not a blanket Activity shutdown: a
+    // direct SubAgent spawned by the main session still opens the shared UI.
+    const panel = await screen.findByTestId('session-activity-panel')
+    expect(within(panel).getByText('Inspect a main-session seam')).toBeInTheDocument()
+  })
+
+  it('clears the last visible background task by closing Activity while preserving later runs', async () => {
+    const sessionId = 'activity-background-clear-session'
+    useSettingsStore.setState({ unifiedActivityPanelEnabled: true })
+    const otherSessionId = 'activity-background-other-session'
+
+    useActivityPanelStore.getState().open(sessionId)
+    useSessionStore.setState({
+      sessions: [
+        {
+          id: sessionId,
+          title: 'Background Clear Session',
+          createdAt: '2026-05-07T00:00:00.000Z',
+          modifiedAt: '2026-05-07T00:00:00.000Z',
+          messageCount: 1,
+          projectPath: '/workspace/project',
+          workDir: '/workspace/project',
+          workDirExists: true,
+        },
+        {
+          id: otherSessionId,
+          title: 'Other Session',
+          createdAt: '2026-05-07T00:00:00.000Z',
+          modifiedAt: '2026-05-07T00:00:00.000Z',
+          messageCount: 1,
+          projectPath: '/workspace/project',
+          workDir: '/workspace/project',
+          workDirExists: true,
+        },
+      ],
+      activeSessionId: sessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [
+        { sessionId, title: 'Background Clear Session', type: 'session', status: 'idle' },
+        { sessionId: otherSessionId, title: 'Other Session', type: 'session', status: 'idle' },
+      ],
+      activeTabId: sessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: {
+          messages: [{ id: 'msg-1', type: 'assistant_text', content: 'hello', timestamp: 1 }],
+          backgroundAgentTasks: {
+            'bash-task-1': {
+              taskId: 'bash-task-1',
+              toolUseId: 'bash-tool-1',
+              status: 'completed',
+              taskType: 'local_bash',
+              description: 'Finished smoke run',
+              startedAt: 1000,
+              updatedAt: 2000,
+            },
+          },
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+        [otherSessionId]: {
+          messages: [{ id: 'msg-2', type: 'assistant_text', content: 'other', timestamp: 2 }],
+          backgroundAgentTasks: {},
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    render(<ActiveSession />)
+
+    expect(screen.getByText('Finished smoke run')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /clear finished/i }))
+
+    expect(screen.queryByText('Finished smoke run')).not.toBeInTheDocument()
+    // The panel close is debounced so transient empty states cannot hide it.
+    await waitFor(() => {
+      expect(useActivityPanelStore.getState().isOpen(sessionId)).toBe(false)
+    }, { timeout: 4000 })
+    expect(screen.queryByTestId('session-activity-panel')).not.toBeInTheDocument()
+
+    act(() => {
+      useTabStore.getState().setActiveTab(otherSessionId)
+    })
+    act(() => {
+      useTabStore.getState().setActiveTab(sessionId)
+    })
+
+    expect(screen.queryByText('Finished smoke run')).not.toBeInTheDocument()
+
+    act(() => {
+      useChatStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [sessionId]: {
+            ...state.sessions[sessionId]!,
+            backgroundAgentTasks: {
+              'bash-task-1': {
+                taskId: 'bash-task-1',
+                toolUseId: 'bash-tool-2',
+                status: 'completed',
+                taskType: 'local_bash',
+                description: 'Finished smoke rerun',
+                startedAt: 3000,
+                updatedAt: 4000,
+              },
+            },
+          },
+        },
+      }))
+    })
+
+    expect(screen.queryByText('Finished smoke rerun')).not.toBeInTheDocument()
+
+    act(() => {
+      useActivityPanelStore.getState().open(sessionId)
+    })
+
+    expect(screen.getByText('Finished smoke rerun')).toBeInTheDocument()
+  })
+
+  it('does not render the workspace panel when closed', () => {
+    const regularSessionId = 'regular-session'
+
+    useSessionStore.setState({
+      sessions: [{
+        id: regularSessionId,
+        title: 'Regular Session',
+        createdAt: '2026-04-10T00:00:00.000Z',
+        modifiedAt: '2026-04-10T00:00:00.000Z',
+        messageCount: 0,
+        projectPath: '',
+        workDir: '/tmp/project',
+        workDirExists: true,
+      }],
+      activeSessionId: regularSessionId,
+      isLoading: false,
+      error: null,
+    })
+    useTabStore.setState({
+      tabs: [{ sessionId: regularSessionId, title: 'Regular Session', type: 'session', status: 'idle' }],
+      activeTabId: regularSessionId,
+    })
+    useChatStore.setState({
+      sessions: {
+        [regularSessionId]: {
+          messages: [],
+          chatState: 'idle',
+          connectionState: 'connected',
+          streamingText: '',
+          streamingToolInput: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeThinkingId: null,
+          pendingPermission: null,
+          pendingComputerUsePermission: null,
+          tokenUsage: { input_tokens: 0, output_tokens: 0 },
+          streamingResponseChars: 0,
+          elapsedSeconds: 0,
+          statusVerb: '',
+          slashCommands: [],
+          agentTaskNotifications: {},
+          elapsedTimer: null,
+        },
+      },
+    })
+
+    render(<ActiveSession />)
+    expect(screen.queryByTestId('workspace-panel')).not.toBeInTheDocument()
+  })
+
 describe('ActiveSession header', () => {
   // 回归锚点：标题曾经是 text-[22px] 且不截断，长标题会折成两行再加一行元数据，
   // 连同 pt-6/pb-4 把聊天区顶掉约 120px。标题必须单行截断，元数据留在它下面那行。
@@ -2327,6 +3649,10 @@ describe('ActiveSession header', () => {
 
     render(<ActiveSession />)
 
+    expect(screen.getByTestId('session-chat-surface')).toHaveAttribute(
+      'data-session-chat-kind',
+      'main',
+    )
     const header = screen.getByTestId('session-header')
     const heading = within(header).getByRole('heading', { level: 1 })
     const titleRow = heading.parentElement as HTMLElement

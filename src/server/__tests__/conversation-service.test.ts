@@ -610,6 +610,95 @@ describe('ConversationService', () => {
     expect(JSON.parse(sent[1]!).type).toBe('user')
   })
 
+  test('recovers a running official OAuth CLI token after the provider rejects it with 401', async () => {
+    const { hahaOAuthService } = await import('../services/hahaOAuthService.js')
+    await hahaOAuthService.saveTokens({
+      accessToken: 'rejected-running-token',
+      refreshToken: 'refresh-running-token',
+      expiresAt: Date.now() + 30 * 60_000,
+      scopes: ['user:inference'],
+      subscriptionType: 'pro',
+    })
+    hahaOAuthService.setRefreshFn(async () => ({
+      accessToken: 'recovered-running-token',
+      refreshToken: 'refresh-running-next',
+      expiresAt: Date.now() + 60 * 60_000,
+      scopes: ['user:inference'],
+      subscriptionType: 'pro',
+      rateLimitTier: null,
+    }))
+
+    const service = new ConversationService() as any
+    const sent: string[] = []
+    const session: any = {
+      outputCallbacks: [],
+      sdkMessages: [],
+      sdkMessageBytes: 0,
+      seenSdkMessageUuids: new Set<string>(),
+      sdkSocket: { send: (line: string) => sent.push(line) },
+      pendingOutbound: [],
+      initMessage: null,
+      pendingPermissionRequests: new Map(),
+      pendingControlRequests: new Map(),
+      usesOfficialOAuth: true,
+      officialOAuthToken: 'rejected-running-token',
+    }
+    service.sessions.set('official-401-session', session)
+
+    service.handleSdkPayload('official-401-session', JSON.stringify({
+      type: 'system',
+      subtype: 'api_retry',
+      error_status: 401,
+      retry_attempt: 1,
+      max_retries: 10,
+    }))
+    await session.officialOAuthRefreshPromise
+
+    expect(session.officialOAuthToken).toBe('recovered-running-token')
+    expect(sent).toHaveLength(1)
+    expect(JSON.parse(sent[0]!)).toEqual({
+      type: 'update_environment_variables',
+      variables: { CLAUDE_CODE_OAUTH_TOKEN: 'recovered-running-token' },
+    })
+  })
+
+  test('does not run Claude OAuth recovery for a third-party provider 401', async () => {
+    const { hahaOAuthService } = await import('../services/hahaOAuthService.js')
+    let refreshCalls = 0
+    hahaOAuthService.setRefreshFn(async () => {
+      refreshCalls += 1
+      throw new Error('Claude refresh must stay isolated')
+    })
+
+    const service = new ConversationService() as any
+    const sent: string[] = []
+    const session: any = {
+      outputCallbacks: [],
+      sdkMessages: [],
+      sdkMessageBytes: 0,
+      seenSdkMessageUuids: new Set<string>(),
+      sdkSocket: { send: (line: string) => sent.push(line) },
+      pendingOutbound: [],
+      initMessage: null,
+      pendingPermissionRequests: new Map(),
+      pendingControlRequests: new Map(),
+      usesOfficialOAuth: false,
+      officialOAuthToken: null,
+    }
+    service.sessions.set('custom-provider-401-session', session)
+
+    service.handleSdkPayload('custom-provider-401-session', JSON.stringify({
+      type: 'system',
+      subtype: 'api_retry',
+      error_status: 401,
+    }))
+    await Promise.resolve()
+
+    expect(session.officialOAuthRefreshPromise).toBeUndefined()
+    expect(refreshCalls).toBe(0)
+    expect(sent).toEqual([])
+  })
+
   test('sendMessage does not enqueue a user turn after its owner is cancelled', async () => {
     const service = new ConversationService() as any
     const sent: string[] = []

@@ -41,6 +41,20 @@ describe('task notification policy', () => {
     expect(shouldForwardTaskNotificationToModel(notification, { structuredOutput: true })).toBe(true)
   })
 
+  test('keeps the stable workflow run id on terminal notifications', () => {
+    const notification = parseTaskNotificationXml(`<task-notification>
+<task-id>workflow-task-1</task-id>
+<tool-use-id>workflow-tool-1</tool-use-id>
+<task-type>local_workflow</task-type>
+<workflow-run-id>wf_shared-run-1</workflow-run-id>
+<output-file>/tmp/workflow-task-1.out</output-file>
+<status>completed</status>
+<summary>Workflow completed</summary>
+</task-notification>`)
+
+    expect(notification.workflowRunId).toBe('wf_shared-run-1')
+  })
+
   test('combines deferred local agent completions into exactly one follow-up', () => {
     const batch = new TaskNotificationFollowUpBatch()
     const first = '<task-notification><task-id>agent-1</task-id></task-notification>'

@@ -1591,6 +1591,31 @@ export async function createPluginFromPath(
     plugin.outputStylesPath = outputStylesPath
   }
 
+  // Step 4c-2: Register dynamic workflows shipped by the plugin. Namespaced by
+  // plugin name at command-build time, so two plugins can both ship `review`.
+  const workflowsPath = join(pluginPath, 'workflows')
+  if (await pathExists(workflowsPath)) {
+    plugin.workflowsPath = workflowsPath
+  }
+  if (manifest.workflows) {
+    const declared = Array.isArray(manifest.workflows)
+      ? manifest.workflows
+      : [manifest.workflows]
+    const validPaths = await validatePluginPaths(
+      declared,
+      pluginPath,
+      manifest.name,
+      source,
+      'workflows',
+      'Workflow',
+      'specified in manifest but',
+      errors,
+    )
+    if (validPaths.length > 0) {
+      plugin.workflowsPaths = validPaths
+    }
+  }
+
   // Step 4e: Process additional output style paths from manifest
   if (manifest.outputStyles) {
     const outputStylePaths = Array.isArray(manifest.outputStyles)

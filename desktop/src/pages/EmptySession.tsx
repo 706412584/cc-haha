@@ -33,7 +33,10 @@ import {
 } from '../components/chat/SlashCommandMenu'
 import { useMobileViewport } from '../hooks/useMobileViewport'
 import { isDesktopRuntime } from '../lib/desktopRuntime'
-import { resolveActiveProviderRuntimeSelection } from '../lib/runtimeSelection'
+import {
+  normalizeRuntimeSelection,
+  resolveActiveProviderRuntimeSelection,
+} from '../lib/runtimeSelection'
 import {
   composerAttachmentToPayload,
   filesToComposerAttachments,
@@ -150,6 +153,7 @@ export function EmptySession() {
   const addToast = useUIStore((state) => state.addToast)
   const currentModel = useSettingsStore((state) => state.currentModel)
   const activeProviderName = useSettingsStore((state) => state.activeProviderName)
+  const effortLevel = useSettingsStore((state) => state.effortLevel)
   const chatSendBehavior = useSettingsStore((state) => state.chatSendBehavior)
   const defaultPermissionMode = useSettingsStore((state) => state.permissionMode)
   const providers = useProviderStore((state) => state.providers)
@@ -349,7 +353,28 @@ export function EmptySession() {
           currentModel,
           useSettingsStore.getState().effortLevel,
         )
-      const runtimeSelection = explicitDraftSelection ?? defaultActiveProviderSelection ?? undefined
+      const activeCustomProvider = defaultActiveProviderSelection
+        ? providers.find((provider) => provider.id === defaultActiveProviderSelection.providerId)
+        : undefined
+      const defaultRuntimeSelection = defaultActiveProviderSelection && activeCustomProvider
+        ? normalizeRuntimeSelection(
+          { ...defaultActiveProviderSelection, effortLevel },
+          activeCustomProvider.apiFormat,
+        )
+        : defaultActiveProviderSelection
+      const claudeOAuthRuntimeSelection = !explicitDraftSelection &&
+        authStatus.source === 'claude-oauth' &&
+        activeProviderId === null &&
+        currentModel?.id
+        ? {
+            providerId: null,
+            modelId: currentModel.id,
+            effortLevel,
+          }
+        : undefined
+      const runtimeSelection = explicitDraftSelection
+        ?? defaultRuntimeSelection
+        ?? claudeOAuthRuntimeSelection
       const sessionId = await createSession(
         workDir || undefined,
         {

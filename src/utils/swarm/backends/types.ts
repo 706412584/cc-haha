@@ -257,6 +257,8 @@ export type TeammateSpawnResult = {
  * Message to send to a teammate.
  */
 export type TeammateMessage = {
+  /** Stable envelope identity shared by every copy of a broadcast. */
+  id?: string
   /** Message content */
   text: string
   /** Sender agent ID */

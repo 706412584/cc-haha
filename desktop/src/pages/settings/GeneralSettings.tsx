@@ -57,6 +57,8 @@ export function GeneralSettings() {
     setThinkingEnabled,
     thinkingAutoCollapse,
     setThinkingAutoCollapse,
+    workflowKeywordTriggerEnabled,
+    setWorkflowKeywordTriggerEnabled,
     permissionMode,
     setPermissionMode,
     autoDreamEnabled,
@@ -942,6 +944,21 @@ export function GeneralSettings() {
           </div>
         </div>
       )}
+
+      <SettingsSection
+        className="mt-8"
+        title={t('settings.general.workflowKeywordTitle')}
+        description={t('settings.general.workflowKeywordDescription')}
+      >
+        <div className="rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-4 py-3">
+          <Switch
+            checked={workflowKeywordTriggerEnabled}
+            onChange={(enabled) => void setWorkflowKeywordTriggerEnabled(enabled)}
+            label={t('settings.general.workflowKeywordEnabled')}
+            description={t('settings.general.workflowKeywordHint')}
+          />
+        </div>
+      </SettingsSection>
 
       <div className="mt-8">
         <h2 className="text-[16.5px] font-semibold leading-tight text-[var(--color-text-primary)] mb-1" style={{ fontFamily: 'var(--font-headline)' }}>{t('settings.general.autoDreamTitle')}</h2>

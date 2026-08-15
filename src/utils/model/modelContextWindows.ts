@@ -10,6 +10,7 @@ const DIRECT_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   'claude-sonnet-4-6': 200_000,
   'claude-haiku-4-5': 200_000,
   'deepseek-v4-pro': 1_000_000,
+  'deepseek-ai/deepseek-v4-pro': 1_000_000,
   'deepseek-v4-flash': 1_000_000,
   'deepseek-chat': 1_000_000,
   'deepseek-reasoner': 1_000_000,

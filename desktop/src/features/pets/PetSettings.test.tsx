@@ -79,7 +79,8 @@ function preferencesResponse(pet: DesktopPetPreferences) {
   return {
     exists: true,
     preferences: {
-      schemaVersion: 4,
+      schemaVersion: 5,
+      projectDisplayNames: {},
       sidebar: {
         projectOrder: [],
         pinnedProjects: [],

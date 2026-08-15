@@ -6,6 +6,8 @@ import { describe, it, expect, beforeEach, afterEach, mock } from 'bun:test'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import * as os from 'node:os'
+import type { ServerMessage } from '../ws/events.js'
+import { teamIncarnationId } from '../services/teamService.js'
 
 // ============================================================================
 // Test helpers
@@ -40,6 +42,12 @@ async function writeTeamConfig(
   const configPath = path.join(teamDir, 'config.json')
   await fs.writeFile(configPath, JSON.stringify(config), 'utf-8')
   return configPath
+}
+
+async function writeJsonFile(relativePath: string, value: unknown): Promise<void> {
+  const filePath = path.join(tmpDir, relativePath)
+  await fs.mkdir(path.dirname(filePath), { recursive: true })
+  await fs.writeFile(filePath, JSON.stringify(value), 'utf8')
 }
 
 /** Create a standard team config for testing. */
@@ -126,14 +134,28 @@ describe('TeamWatcher.extractMemberStatuses', () => {
       agentId: 'agent-lead',
       role: 'Lead Agent',
       status: 'running',
+      activity: 'active',
       currentTask: undefined,
     })
     expect(statuses[1]).toEqual({
       agentId: 'agent-worker',
       role: 'Worker Agent',
       status: 'idle',
+      activity: 'idle',
       currentTask: undefined,
     })
+  })
+
+  it('reports no activity for a member whose runner never recorded a turn', () => {
+    const config = makeTeamConfig()
+    delete (config.members[0] as Record<string, unknown>).isActive
+
+    // `status` still defaults to running for backwards compatibility, but the
+    // watcher must not claim the member is mid-turn -- the last full team read,
+    // which can consult the transcript, stays authoritative.
+    const status = watcher.extractMemberStatuses(config)[0]!
+    expect(status.status).toBe('running')
+    expect(status.activity).toBeUndefined()
   })
 
   it('should return running status when isActive is undefined', () => {
@@ -217,7 +239,7 @@ describe('TeamWatcher polling', () => {
 
   it('should detect new team creation via checkNow()', async () => {
     // First poll: no teams
-    watcher.checkNow()
+    await watcher.checkNow()
 
     // Create a team
     await writeTeamConfig('new-team', makeTeamConfig({ name: 'new-team' }))
@@ -226,13 +248,13 @@ describe('TeamWatcher polling', () => {
     // Since sendToSession depends on active sessions, we test that the
     // internal snapshot state is updated correctly.
     // After checkNow, the watcher should have recorded the team.
-    watcher.checkNow()
+    await watcher.checkNow()
 
     // Now modify the team config and check again -- this proves the previous
     // checkNow() recorded the snapshot (otherwise it would emit team_created again)
     const updatedConfig = makeTeamConfig({ name: 'new-team', description: 'updated' })
     await writeTeamConfig('new-team', updatedConfig)
-    watcher.checkNow()
+    await watcher.checkNow()
 
     // If we got here without errors, the snapshot logic is working
   })
@@ -242,7 +264,7 @@ describe('TeamWatcher polling', () => {
     await writeTeamConfig('change-team', makeTeamConfig({ name: 'change-team' }))
 
     // First poll picks up the team
-    watcher.checkNow()
+    await watcher.checkNow()
 
     // Modify the config
     const updatedConfig = makeTeamConfig({
@@ -252,8 +274,254 @@ describe('TeamWatcher polling', () => {
     await writeTeamConfig('change-team', updatedConfig)
 
     // Second poll should detect the change
-    watcher.checkNow()
+    await watcher.checkNow()
     // No error means the diff detection worked
+  })
+
+  it('uses subagent identity metadata instead of tool names when projecting members', async () => {
+    const deliveries: Array<{ message: ServerMessage; sessionId?: string }> = []
+    watcher = new TeamWatcher(
+      (message, sessionId) => deliveries.push({ message, sessionId }),
+      {
+        getWorkbench: async () => ({}) as never,
+        markWorkbenchArchiveDeleted: async () => {},
+      },
+    )
+    const config = makeTeamConfig({
+      name: 'identity-team',
+      leadSessionId: 'lead-session-identity',
+    })
+    await writeTeamConfig('identity-team', config)
+    await writeJsonFile(
+      'projects/project/lead-session-identity/subagents/agent-reviewer.jsonl',
+      {
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'tool_use', id: 'tool-read', name: 'Read', input: {} },
+            { type: 'tool_use', id: 'tool-task-create', name: 'TaskCreate', input: {} },
+          ],
+        },
+      },
+    )
+    await writeJsonFile(
+      'projects/project/lead-session-identity/subagents/agent-reviewer.meta.json',
+      { agentType: 'real-reviewer' },
+    )
+
+    await watcher.checkNow()
+    deliveries.length = 0
+    await writeTeamConfig('identity-team', { ...config, description: 'updated' })
+    await watcher.checkNow()
+
+    const update = deliveries.find(({ message }) => message.type === 'team_update')
+    if (update?.message.type !== 'team_update') throw new Error('Expected team_update')
+    expect(update.message.members.find((member) => member.role === 'real-reviewer')).toMatchObject({
+      agentId: 'real-reviewer@identity-team',
+      role: 'real-reviewer',
+    })
+    const roles = update.message.members.map((member) => member.role)
+    expect(roles).not.toContain('Read')
+    expect(roles).not.toContain('TaskCreate')
+  })
+
+  it('only discovers structured top-level identities from subagent transcripts', async () => {
+    const deliveries: Array<{ message: ServerMessage; sessionId?: string }> = []
+    watcher = new TeamWatcher(
+      (message, sessionId) => deliveries.push({ message, sessionId }),
+      {
+        getWorkbench: async () => ({}) as never,
+        markWorkbenchArchiveDeleted: async () => {},
+      },
+    )
+    const config = makeTeamConfig({
+      name: 'structured-identity-team',
+      leadSessionId: 'lead-session-structured-identity',
+    })
+    await writeTeamConfig('structured-identity-team', config)
+    await writeJsonFile(
+      'projects/project/lead-session-structured-identity/subagents/agent-named.jsonl',
+      {
+        type: 'assistant',
+        agentName: 'named-worker',
+        message: {
+          content: [{ type: 'tool_use', id: 'tool-read', name: 'Read', input: {} }],
+        },
+      },
+    )
+    await writeJsonFile(
+      'projects/project/lead-session-structured-identity/subagents/agent-identified.jsonl',
+      {
+        type: 'assistant',
+        agentId: 'identified-worker@structured-identity-team',
+        message: {
+          content: [{ type: 'tool_use', id: 'tool-task-create', name: 'TaskCreate', input: {} }],
+        },
+      },
+    )
+    await writeJsonFile(
+      'projects/project/lead-session-structured-identity/subagents/agent-tool-only.jsonl',
+      {
+        type: 'assistant',
+        message: {
+          content: [{ type: 'tool_use', id: 'tool-only', name: 'TaskCreate', input: {} }],
+        },
+      },
+    )
+
+    await watcher.checkNow()
+    deliveries.length = 0
+    await writeTeamConfig('structured-identity-team', { ...config, description: 'updated' })
+    await watcher.checkNow()
+
+    const update = deliveries.find(({ message }) => message.type === 'team_update')
+    if (update?.message.type !== 'team_update') throw new Error('Expected team_update')
+    const roles = update.message.members.map((member) => member.role)
+    expect(roles).toContain('named-worker')
+    expect(roles).toContain('identified-worker')
+    expect(roles).not.toContain('Read')
+    expect(roles).not.toContain('TaskCreate')
+  })
+
+  it('invalidates the joined workbench when tasks or mailboxes change', async () => {
+    const deliveries: Array<{ message: ServerMessage; sessionId?: string }> = []
+    watcher = new TeamWatcher((message, sessionId) => deliveries.push({ message, sessionId }))
+    await writeTeamConfig('workbench-team', makeTeamConfig({
+      name: 'workbench-team',
+      leadSessionId: 'lead-session-workbench',
+    }))
+    await watcher.checkNow()
+    expect(deliveries).toEqual([{
+      message: expect.objectContaining({ type: 'team_created', teamName: 'workbench-team' }),
+      sessionId: 'lead-session-workbench',
+    }])
+    deliveries.length = 0
+
+    await writeJsonFile('tasks/workbench-team/1.json', {
+      id: '1',
+      subject: 'Map dependencies',
+      status: 'in_progress',
+      blocks: [],
+      blockedBy: [],
+    })
+    await watcher.checkNow()
+    expect(deliveries).toEqual([{
+      message: expect.objectContaining({
+        type: 'team_workbench_updated',
+        teamName: 'workbench-team',
+      }),
+      sessionId: 'lead-session-workbench',
+    }])
+
+    deliveries.length = 0
+    await writeJsonFile('teams/workbench-team/inboxes/worker.json', [{
+      from: 'team-lead',
+      text: 'Dependency map is ready',
+      timestamp: '2026-08-08T00:00:00.000Z',
+    }])
+    await watcher.checkNow()
+    expect(deliveries).toEqual([{
+      message: expect.objectContaining({
+        type: 'team_workbench_updated',
+        teamName: 'workbench-team',
+      }),
+      sessionId: 'lead-session-workbench',
+    }])
+
+    deliveries.length = 0
+    await watcher.checkNow()
+    expect(deliveries).toEqual([])
+  })
+
+  it('emits an exact delete/create transition when a name is recreated between polls', async () => {
+    const deliveries: Array<{ message: ServerMessage; sessionId?: string }> = []
+    const deleted: Array<[string, string | undefined, string | undefined]> = []
+    watcher = new TeamWatcher(
+      (message, sessionId) => deliveries.push({ message, sessionId }),
+      {
+        getWorkbench: async () => ({}) as never,
+        markWorkbenchArchiveDeleted: async (name, sessionId, incarnationId) => {
+          deleted.push([name, sessionId, incarnationId])
+        },
+      },
+    )
+    const oldConfig = makeTeamConfig({
+      name: 'aba-team',
+      createdAt: 1700000000000,
+      leadSessionId: 'old-lead',
+    })
+    await writeTeamConfig('aba-team', oldConfig)
+    await watcher.checkNow()
+    deliveries.length = 0
+
+    const newConfig = makeTeamConfig({
+      name: 'aba-team',
+      createdAt: 1800000000000,
+      leadSessionId: 'new-lead',
+    })
+    await writeTeamConfig('aba-team', newConfig)
+    await watcher.checkNow()
+
+    const oldIncarnationId = teamIncarnationId(oldConfig)
+    const newIncarnationId = teamIncarnationId(newConfig)
+    expect(deleted).toEqual([['aba-team', 'old-lead', oldIncarnationId]])
+    expect(deliveries).toEqual([{
+      message: {
+        type: 'team_deleted',
+        teamName: 'aba-team',
+        incarnationId: oldIncarnationId,
+        leadSessionId: 'old-lead',
+        createdAt: 1700000000000,
+      },
+      sessionId: 'old-lead',
+    }, {
+      message: {
+        type: 'team_created',
+        teamName: 'aba-team',
+        incarnationId: newIncarnationId,
+        leadSessionId: 'new-lead',
+        createdAt: 1800000000000,
+      },
+      sessionId: 'new-lead',
+    }])
+  })
+
+  it('uses the canonical config name when a sanitized Team directory is deleted', async () => {
+    const deliveries: Array<{ message: ServerMessage; sessionId?: string }> = []
+    const deleted: Array<[string, string | undefined, string | undefined]> = []
+    const workbenchNames: string[] = []
+    watcher = new TeamWatcher(
+      (message, sessionId) => deliveries.push({ message, sessionId }),
+      {
+        getWorkbench: async (name) => {
+          workbenchNames.push(name)
+          return {} as never
+        },
+        markWorkbenchArchiveDeleted: async (name, sessionId, incarnationId) => {
+          deleted.push([name, sessionId, incarnationId])
+        },
+      },
+    )
+    const config = makeTeamConfig({
+      name: 'My Team',
+      createdAt: 1900000000000,
+      leadSessionId: 'canonical-lead',
+    })
+    await writeTeamConfig('my-team', config)
+    await watcher.checkNow()
+    await fs.rm(path.join(tmpDir, 'teams', 'my-team'), { recursive: true, force: true })
+    await watcher.checkNow()
+
+    expect(workbenchNames).toEqual(['my-team'])
+    expect(deleted).toEqual([[
+      'My Team',
+      'canonical-lead',
+      teamIncarnationId(config),
+    ]])
+    expect(deliveries.map(delivery => delivery.message)).toEqual([
+      expect.objectContaining({ type: 'team_created', teamName: 'My Team' }),
+      expect.objectContaining({ type: 'team_deleted', teamName: 'My Team' }),
+    ])
   })
 
   it('should detect team deletion', async () => {
@@ -261,13 +529,13 @@ describe('TeamWatcher polling', () => {
     await writeTeamConfig('doomed-team', makeTeamConfig({ name: 'doomed-team' }))
 
     // First poll picks it up
-    watcher.checkNow()
+    await watcher.checkNow()
 
     // Delete the team directory
     await fs.rm(path.join(tmpDir, 'teams', 'doomed-team'), { recursive: true, force: true })
 
     // Next poll should detect deletion
-    watcher.checkNow()
+    await watcher.checkNow()
     // If no error, deletion detection worked
   })
 
@@ -276,7 +544,7 @@ describe('TeamWatcher polling', () => {
     await fs.rm(path.join(tmpDir, 'teams'), { recursive: true, force: true })
 
     // Should not throw
-    watcher.checkNow()
+    await watcher.checkNow()
   })
 
   it('should handle malformed config.json gracefully', async () => {
@@ -286,7 +554,7 @@ describe('TeamWatcher polling', () => {
     await fs.writeFile(path.join(teamDir, 'config.json'), 'not valid json', 'utf-8')
 
     // Should not throw
-    watcher.checkNow()
+    await watcher.checkNow()
   })
 
   it('should skip directories without config.json', async () => {
@@ -295,7 +563,7 @@ describe('TeamWatcher polling', () => {
     await fs.mkdir(teamDir, { recursive: true })
 
     // Should not throw
-    watcher.checkNow()
+    await watcher.checkNow()
   })
 
   it('should track multiple teams independently', async () => {
@@ -303,18 +571,18 @@ describe('TeamWatcher polling', () => {
     await writeTeamConfig('team-b', makeTeamConfig({ name: 'team-b' }))
 
     // Pick up both teams
-    watcher.checkNow()
+    await watcher.checkNow()
 
     // Modify only team-a
     await writeTeamConfig('team-a', makeTeamConfig({ name: 'team-a', description: 'changed' }))
 
     // Should detect change in team-a but not team-b
-    watcher.checkNow()
+    await watcher.checkNow()
 
     // Delete only team-b
     await fs.rm(path.join(tmpDir, 'teams', 'team-b'), { recursive: true, force: true })
 
-    watcher.checkNow()
+    await watcher.checkNow()
     // No errors means independent tracking works
   })
 
@@ -348,25 +616,25 @@ describe('TeamWatcher polling', () => {
     await fs.rm(path.join(tmpDir, 'teams'), { recursive: true, force: true })
 
     // First check -- no teams dir
-    watcher.checkNow()
+    await watcher.checkNow()
 
     // Create teams dir and a team
     await fs.mkdir(path.join(tmpDir, 'teams'), { recursive: true })
     await writeTeamConfig('late-team', makeTeamConfig({ name: 'late-team' }))
 
     // Second check should pick it up
-    watcher.checkNow()
+    await watcher.checkNow()
   })
 
   it('reset() should clear internal state', async () => {
     await writeTeamConfig('reset-team', makeTeamConfig({ name: 'reset-team' }))
 
     // Pick up the team
-    watcher.checkNow()
+    await watcher.checkNow()
 
     // Reset and check again -- should treat it as new
     watcher.reset()
-    watcher.checkNow()
+    await watcher.checkNow()
     // No error means reset worked
   })
 })
@@ -389,7 +657,7 @@ describe('TeamWatcher broadcast', () => {
 
     // With no active WebSocket sessions, checkNow should still succeed
     // (broadcast sends to zero sessions)
-    watcher.checkNow()
+    await watcher.checkNow()
 
     watcher.stop()
     watcher.reset()

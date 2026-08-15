@@ -1,10 +1,18 @@
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BookMarked, ChevronDown, ChevronRight, CircleCheck, Settings } from 'lucide-react'
-import { ImageBlockGallery, ToolCallBlock, type ImageBlock } from './ToolCallBlock'
+import { ToolCallBlock, type ToolCallChrome, ImageBlockGallery, type ImageBlock } from './ToolCallBlock'
+import { ActivityGroup } from './ActivityGroup'
+import { ThinkingBlock } from './ThinkingBlock'
+import {
+  activityStepToolCalls,
+  toActivitySteps,
+  toolCallDurationMs,
+  type ActivityStep,
+} from './activityGroupModel'
 import { ImageGenerationGroup, type ImageGenerationItem } from './ImageGenerationBlock'
 import { isImageGenerationToolName } from './imageGenerationTools'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
-import { Badge, StatusDot, type Tone } from '@/components/ui/Badge'
+import { Badge, type Tone } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { IconButton } from '@/components/ui/IconButton'
 import { Modal } from '@/components/ui/Modal'
@@ -32,20 +40,7 @@ type MemoryToolActivity = {
   files: MemoryToolFile[]
 }
 
-/**
- * Wall-clock gap between the tool_use and its tool_result, used for the "524ms"
- * badge (#1149). The CLI does not report a real execution duration over the wire
- * — BashProgress never leaves the ink renderer — so this is the transcript
- * timestamp delta and therefore includes any permission-approval wait.
- */
-export function toolCallDurationMs(
-  toolCall: Pick<ToolCall, 'timestamp'>,
-  result?: Pick<ToolResult, 'timestamp'>,
-): number | undefined {
-  if (!result) return undefined
-  const elapsed = result.timestamp - toolCall.timestamp
-  return Number.isFinite(elapsed) && elapsed >= 0 ? elapsed : undefined
-}
+export { toolCallDurationMs } from './activityGroupModel'
 
 
 function imageGenerationItems(
@@ -65,105 +60,58 @@ function imageGenerationItems(
 
 type Props = {
   sessionId?: string | null
+  onOpenAgentRun?: (payload: OpenAgentRunPayload) => void
   toolCalls: ToolCall[]
+  /**
+   * The run in transcript order, including any thinking blocks that happened
+   * between the tool calls. Optional: callers that only have tool calls (and
+   * every test predating the activity-group rollup) get an equivalent
+   * tools-only run derived from `toolCalls`.
+   */
+  steps?: ActivityStep[]
   resultMap: Map<string, ToolResult>
   childToolCallsByParent: Map<string, ToolCall[]>
   agentTaskNotifications: Record<string, AgentTaskNotification>
   agentTaskStatuses?: Record<string, BackgroundAgentTask['status']>
+  activeThinkingId?: string | null
   showOpenRun?: boolean
   /** When true, the last tool is still executing. */
   isStreaming?: boolean
+  /** This run is the tail of a turn that is still producing into it. */
+  isLive?: boolean
 }
 
-const TOOL_VERBS: Record<string, (count: number, t: (key: TranslationKey, params?: Record<string, string | number>) => string) => string> = {
-  Read: (n, t) => n === 1 ? t('toolGroup.readOne') : t('toolGroup.readMany', { count: n }),
-  Write: (n, t) => n === 1 ? t('toolGroup.createdOne') : t('toolGroup.createdMany', { count: n }),
-  Edit: (n, t) => n === 1 ? t('toolGroup.editedOne') : t('toolGroup.editedMany', { count: n }),
-  Bash: (n, t) => n === 1 ? t('toolGroup.ranOne') : t('toolGroup.ranMany', { count: n }),
-  Glob: (_n, t) => t('toolGroup.foundFiles'),
-  Grep: (n, t) => n === 1 ? t('toolGroup.searchedOne') : t('toolGroup.searchedMany', { count: n }),
-  Agent: (n, t) => n === 1 ? t('toolGroup.agentOne') : t('toolGroup.agentMany', { count: n }),
-  WebSearch: (_n, t) => t('toolGroup.searchedWeb'),
-  WebFetch: (n, t) => n === 1 ? t('toolGroup.fetchedOne') : t('toolGroup.fetchedMany', { count: n }),
-}
-
-function generateSummary(toolCalls: ToolCall[], t: (key: TranslationKey, params?: Record<string, string | number>) => string): string {
-  const counts = new Map<string, number>()
-  for (const tc of toolCalls) {
-    counts.set(tc.toolName, (counts.get(tc.toolName) ?? 0) + 1)
-  }
-
-  const parts: string[] = []
-  for (const [name, count] of counts) {
-    const verbFn = TOOL_VERBS[name]
-    parts.push(verbFn ? verbFn(count, t) : `${name} (${count})`)
-  }
-
-  return parts.join(', ')
-}
-
-function toolCallHasError(
-  toolCall: ToolCall,
-  resultMap: Map<string, ToolResult>,
-  childToolCallsByParent: Map<string, ToolCall[]>,
-): boolean {
-  const result = resultMap.get(toolCall.toolUseId)
-  if (result?.isError) return true
-
-  return (childToolCallsByParent.get(toolCall.toolUseId) ?? []).some((childToolCall) =>
-    toolCallHasError(childToolCall, resultMap, childToolCallsByParent),
-  )
-}
-
-function groupHasErrors(
-  toolCalls: ToolCall[],
-  resultMap: Map<string, ToolResult>,
-  childToolCallsByParent: Map<string, ToolCall[]>,
-): boolean {
-  return toolCalls.some((tc) => {
-    return toolCallHasError(tc, resultMap, childToolCallsByParent)
-  })
-}
-
-function isToolCallResolved(
-  toolCall: ToolCall,
-  resultMap: Map<string, ToolResult>,
-  childToolCallsByParent: Map<string, ToolCall[]>,
-): boolean {
-  if (toolCall.status === 'stopped') return true
-  if (!resultMap.has(toolCall.toolUseId)) return false
-
-  return (childToolCallsByParent.get(toolCall.toolUseId) ?? []).every((childToolCall) =>
-    isToolCallResolved(childToolCall, resultMap, childToolCallsByParent),
-  )
-}
-
-function hasUnresolvedToolCalls(
-  toolCalls: ToolCall[],
-  resultMap: Map<string, ToolResult>,
-  childToolCallsByParent: Map<string, ToolCall[]>,
-): boolean {
-  return toolCalls.some((toolCall) =>
-    !isToolCallResolved(toolCall, resultMap, childToolCallsByParent),
-  )
+export type OpenAgentRunPayload = {
+  sessionId: string
+  toolUseId: string
+  title: string
 }
 
 export const ToolCallGroup = memo(function ToolCallGroup({
   sessionId,
+  onOpenAgentRun,
   toolCalls,
+  steps,
   resultMap,
   childToolCallsByParent,
   agentTaskNotifications,
   agentTaskStatuses,
+  activeThinkingId,
   showOpenRun = true,
   isStreaming,
+  isLive = false,
 }: Props) {
+  const resolvedSteps = useMemo(() => steps ?? toActivitySteps(toolCalls), [steps, toolCalls])
   const memoryActivity = getMemoryToolActivity(toolCalls, resultMap)
   if (memoryActivity) {
     const memoryToolCalls = toolCalls.filter(isMemoryToolCall)
-    const regularToolCalls = toolCalls.filter((toolCall) => !isMemoryToolCall(toolCall))
+    // Thinking stays with the remainder: the memory card is a summary of files
+    // touched, not a place reasoning belongs.
+    const regularSteps = resolvedSteps.filter(
+      (step) => step.kind === 'thinking' || !isMemoryToolCall(step.toolCall),
+    )
     return (
-      <div className={regularToolCalls.length > 0 ? 'mb-2 space-y-2' : ''}>
+      <div className={regularSteps.length > 0 ? 'space-y-2' : ''}>
         <MemoryToolActivityGroup
           activity={memoryActivity}
           toolCalls={memoryToolCalls}
@@ -171,14 +119,16 @@ export const ToolCallGroup = memo(function ToolCallGroup({
           childToolCallsByParent={childToolCallsByParent}
           isStreaming={isStreaming}
         />
-        {regularToolCalls.length > 0 ? (
+        {regularSteps.length > 0 ? (
           <ToolCallGroupContent
             sessionId={sessionId}
-            toolCalls={regularToolCalls}
+            onOpenAgentRun={onOpenAgentRun}
+            steps={regularSteps}
             resultMap={resultMap}
             childToolCallsByParent={childToolCallsByParent}
             agentTaskNotifications={agentTaskNotifications}
             agentTaskStatuses={agentTaskStatuses}
+            activeThinkingId={activeThinkingId}
             showOpenRun={showOpenRun}
             isStreaming={isStreaming}
           />
@@ -190,39 +140,51 @@ export const ToolCallGroup = memo(function ToolCallGroup({
   return (
     <ToolCallGroupContent
       sessionId={sessionId}
-      toolCalls={toolCalls}
+      onOpenAgentRun={onOpenAgentRun}
+      steps={resolvedSteps}
       resultMap={resultMap}
       childToolCallsByParent={childToolCallsByParent}
       agentTaskNotifications={agentTaskNotifications}
       agentTaskStatuses={agentTaskStatuses}
+      activeThinkingId={activeThinkingId}
       showOpenRun={showOpenRun}
       isStreaming={isStreaming}
+      isLive={isLive}
     />
   )
 })
 
+type ContentProps = Omit<Props, 'toolCalls' | 'steps'> & { steps: ActivityStep[] }
+
 function ToolCallGroupContent({
   sessionId,
-  toolCalls,
+  onOpenAgentRun,
+  steps,
   resultMap,
   childToolCallsByParent,
   agentTaskNotifications,
   agentTaskStatuses,
+  activeThinkingId,
   showOpenRun = true,
   isStreaming,
-}: Props) {
+  isLive = false,
+}: ContentProps) {
+  const toolCalls = activityStepToolCalls(steps)
   const hasImageGeneration = toolCalls.some((toolCall) => isImageGenerationToolName(toolCall.toolName))
-  if (hasImageGeneration && !toolCalls.every((toolCall) => isImageGenerationToolName(toolCall.toolName))) {
+  const hasNonImageSteps = steps.some(
+    (step) => step.kind === 'thinking' || !isImageGenerationToolName(step.toolCall.toolName),
+  )
+  if (hasImageGeneration && hasNonImageSteps) {
     const segments: Array<
       | { kind: 'images'; toolCalls: ToolCall[] }
-      | { kind: 'regular'; toolCalls: ToolCall[] }
+      | { kind: 'regular'; steps: ActivityStep[] }
     > = []
-    let regularToolCalls: ToolCall[] = []
+    let regularSteps: ActivityStep[] = []
     let imageToolCalls: ToolCall[] = []
-    const flushRegularCalls = () => {
-      if (regularToolCalls.length === 0) return
-      segments.push({ kind: 'regular', toolCalls: regularToolCalls })
-      regularToolCalls = []
+    const flushRegularSteps = () => {
+      if (regularSteps.length === 0) return
+      segments.push({ kind: 'regular', steps: regularSteps })
+      regularSteps = []
     }
     const flushImageCalls = () => {
       if (imageToolCalls.length === 0) return
@@ -230,16 +192,16 @@ function ToolCallGroupContent({
       imageToolCalls = []
     }
 
-    for (const toolCall of toolCalls) {
-      if (isImageGenerationToolName(toolCall.toolName)) {
-        flushRegularCalls()
-        imageToolCalls.push(toolCall)
+    for (const step of steps) {
+      if (step.kind === 'tool' && isImageGenerationToolName(step.toolCall.toolName)) {
+        flushRegularSteps()
+        imageToolCalls.push(step.toolCall)
       } else {
         flushImageCalls()
-        regularToolCalls.push(toolCall)
+        regularSteps.push(step)
       }
     }
-    flushRegularCalls()
+    flushRegularSteps()
     flushImageCalls()
 
     return (
@@ -253,11 +215,13 @@ function ToolCallGroupContent({
           <ToolCallGroupContent
             key={`regular-${index}`}
             sessionId={sessionId}
-            toolCalls={segment.toolCalls}
+            onOpenAgentRun={onOpenAgentRun}
+            steps={segment.steps}
             resultMap={resultMap}
             childToolCallsByParent={childToolCallsByParent}
             agentTaskNotifications={agentTaskNotifications}
             agentTaskStatuses={agentTaskStatuses}
+            activeThinkingId={activeThinkingId}
             showOpenRun={showOpenRun}
             isStreaming={isStreaming}
           />
@@ -266,12 +230,27 @@ function ToolCallGroupContent({
     )
   }
 
-  const allAgents = toolCalls.every((toolCall) => toolCall.toolName === 'Agent')
+  if (toolCalls.length === 0) {
+    return (
+      <>
+        {steps.map((step) => step.kind === 'thinking' ? (
+          <ThinkingBlock
+            key={step.message.id}
+            content={step.message.content}
+            isActive={step.message.id === activeThinkingId}
+          />
+        ) : null)}
+      </>
+    )
+  }
+
+  const allAgents = toolCalls.length > 0 && toolCalls.every((toolCall) => toolCall.toolName === 'Agent')
 
   if (allAgents) {
     return (
       <AgentToolGroup
         sessionId={sessionId}
+        onOpenAgentRun={onOpenAgentRun}
         toolCalls={toolCalls}
         resultMap={resultMap}
         childToolCallsByParent={childToolCallsByParent}
@@ -289,25 +268,14 @@ function ToolCallGroupContent({
     )
   }
 
-  // Single tool call — render directly without group wrapper
-  if (toolCalls.length === 1) {
-    const tc = toolCalls[0]!
-    return (
-      <ToolCallTree
-        toolCall={tc}
-        resultMap={resultMap}
-        childToolCallsByParent={childToolCallsByParent}
-      />
-    )
-  }
-
   return (
-    <ToolCallGroupMulti
-      toolCalls={toolCalls}
+    <ActivityGroup
+      steps={steps}
       resultMap={resultMap}
       childToolCallsByParent={childToolCallsByParent}
-      agentTaskNotifications={agentTaskNotifications}
+      activeThinkingId={activeThinkingId}
       isStreaming={isStreaming}
+      isLive={isLive}
     />
   )
 }
@@ -359,13 +327,15 @@ function MemoryToolActivityGroup({
   const hiddenCount = Math.max(0, activity.files.length - visibleFiles.length)
 
   return (
-    <div className="mb-2">
+    <div>
       <div
         data-testid="memory-tool-activity-card"
         className="overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-memory-border)] bg-[var(--color-memory-surface)]"
       >
         <button
           type="button"
+          data-chat-disclosure="true"
+          aria-expanded={expanded}
           onClick={toggleExpanded}
           className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
         >
@@ -457,6 +427,7 @@ function MemoryToolActivityGroup({
 
 function AgentToolGroup({
   sessionId,
+  onOpenAgentRun,
   toolCalls,
   resultMap,
   childToolCallsByParent,
@@ -506,9 +477,11 @@ function AgentToolGroup({
     : ''
 
   return (
-    <div className="mb-2 overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)]">
+    <div className="overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)]">
       <button
         type="button"
+        data-chat-disclosure="true"
+        aria-expanded={expanded}
         onClick={toggleExpanded}
         className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
       >
@@ -545,9 +518,8 @@ function AgentToolGroup({
       </button>
 
       {expanded && (
-        <div className="relative border-t border-[var(--color-border)] py-3 pl-5 pr-3.5">
-          <div className="absolute bottom-6 left-[11px] top-4 w-px rounded-full bg-[var(--color-border)]" />
-          <div className="space-y-2">
+        <div className="px-3.5 pb-2.5 pt-0.5">
+          <div className="ml-1.5 flex flex-col border-l border-[var(--color-border)] pl-4">
             {toolCalls.map((toolCall) => (
               <div key={toolCall.id} className="relative pl-7">
                 <div className="absolute left-0 top-1/2 -translate-y-1/2">
@@ -556,6 +528,7 @@ function AgentToolGroup({
                 </div>
                 <AgentCallCard
                   sessionId={sessionId}
+                  onOpenAgentRun={onOpenAgentRun}
                   toolCall={toolCall}
                   resultMap={resultMap}
                   childToolCallsByParent={childToolCallsByParent}
@@ -608,25 +581,23 @@ function ToolCallGroupMulti({ toolCalls, resultMap, childToolCallsByParent, isSt
 
       {expanded && (
         <div className="flex flex-col gap-2.5 border-t border-[var(--color-border)] px-3.5 py-2.5">
-          {toolCalls.map((tc) => {
-            return (
-              <ToolCallTree
-                key={tc.id}
-                toolCall={tc}
-                resultMap={resultMap}
-                childToolCallsByParent={childToolCallsByParent}
-                compact
-              />
-            )
-          })}
+          {toolCalls.map((tc) => (
+            <ToolCallTree
+              key={tc.id}
+              toolCall={tc}
+              resultMap={resultMap}
+              childToolCallsByParent={childToolCallsByParent}
+              compact
+            />
+          ))}
         </div>
       )}
     </div>
   )
 }
-
 function AgentCallCard({
   sessionId,
+  onOpenAgentRun,
   toolCall,
   resultMap,
   childToolCallsByParent,
@@ -636,6 +607,7 @@ function AgentCallCard({
   isStreaming = false,
 }: {
   sessionId?: string | null
+  onOpenAgentRun?: (payload: OpenAgentRunPayload) => void
   toolCall: ToolCall
   resultMap: Map<string, ToolResult>
   childToolCallsByParent: Map<string, ToolCall[]>
@@ -687,8 +659,8 @@ function AgentCallCard({
   const canOpenRun = showOpenRun && !!sessionId && !!toolCall.toolUseId
 
   return (
-    <div className="overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)]">
-      <div className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-[var(--color-surface-hover)]">
+    <div data-agent-call-layout="row">
+      <div className="-mx-2 flex w-[calc(100%+1rem)] items-center gap-3 rounded-[var(--radius-md)] px-2 py-1.5 text-left transition-colors hover:bg-[var(--color-surface-hover)]">
         <span className="material-symbols-outlined text-[18px] text-[var(--color-outline)]">smart_toy</span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
@@ -742,6 +714,14 @@ function AgentCallCard({
             aria-label={t('toolGroup.openRunNamed', { title: openRunTitle })}
             onClick={(event) => {
               event.stopPropagation()
+              if (onOpenAgentRun) {
+                onOpenAgentRun({
+                  sessionId,
+                  toolUseId: toolCall.toolUseId,
+                  title: openRunTitle,
+                })
+                return
+              }
               useTabStore.getState().openSubagentTab(sessionId, toolCall.toolUseId, openRunTitle)
             }}
             className="shrink-0 border border-[var(--color-border)]"
@@ -774,14 +754,14 @@ function AgentCallCard({
       )}
 
       {expanded && (
-        <div className="border-t border-[var(--color-border)] px-3 py-3">
+        <div className="mb-2 ml-2 mt-1 border-l border-[var(--color-border)] py-1 pl-3">
           {errorText && (
-            <div className="mb-3 rounded-[var(--radius-lg)] border border-[var(--color-error)] bg-[var(--color-error-container)] px-3 py-2 text-[11px] text-[var(--color-on-error-container)]">
+            <div className="mb-2 bg-[var(--color-error-soft)] px-3 py-2 text-[11px] text-[var(--color-error)]">
               {errorText}
             </div>
           )}
           {childToolCalls.length > 0 ? (
-            <div className="space-y-1">
+            <div className="space-y-0.5">
               {childToolCalls.map((childToolCall) => (
                 <ToolCallTree
                   key={childToolCall.id}
@@ -789,15 +769,16 @@ function AgentCallCard({
                   resultMap={resultMap}
                   childToolCallsByParent={childToolCallsByParent}
                   compact
+                  chrome="row"
                 />
               ))}
             </div>
           ) : outputSummary ? (
-            <div className="text-[11px] text-[var(--color-text-tertiary)]">
+            <div className="px-2 py-1 text-[11px] text-[var(--color-text-tertiary)]">
               {t('agentStatus.noActivity')}
             </div>
           ) : (
-            <div className="text-[11px] text-[var(--color-text-tertiary)]">
+            <div className="px-2 py-1 text-[11px] text-[var(--color-text-tertiary)]">
               {status === 'starting' ? t('agentStatus.starting') : t('agentStatus.noActivity')}
             </div>
           )}
@@ -822,30 +803,40 @@ function ToolCallTree({
   resultMap,
   childToolCallsByParent,
   compact = false,
+  chrome = 'card',
 }: {
   toolCall: ToolCall
   resultMap: Map<string, ToolResult>
   childToolCallsByParent: Map<string, ToolCall[]>
   compact?: boolean
+  chrome?: ToolCallChrome
 }) {
   const result = resultMap.get(toolCall.toolUseId)
   const childToolCalls = childToolCallsByParent.get(toolCall.toolUseId) ?? []
+  const isRow = chrome === 'row'
 
   return (
-    <div className={compact ? 'space-y-1' : ''}>
+    <div className={!isRow && compact ? 'space-y-1' : ''}>
       <ToolCallBlock
         toolName={toolCall.toolName}
         input={toolCall.input}
         result={result ? { content: result.content, isError: result.isError } : null}
         compact={compact}
+        chrome={chrome}
         isPending={toolCall.isPending}
         status={toolCall.status}
         partialInput={toolCall.partialInput}
         durationMs={toolCallDurationMs(toolCall, result)}
       />
       {childToolCalls.length > 0 && (
-        <div className={compact ? 'ml-4 border-l border-[var(--color-border)] pl-3' : 'mb-2 ml-16 border-l border-[var(--color-border)] pl-3'}>
-          <div className="space-y-1">
+        <div className={
+          isRow
+            ? 'ml-2 border-l border-[var(--color-border)] pl-3'
+            : compact
+              ? 'ml-4 border-l border-[var(--color-border)] pl-3'
+              : 'mb-2 ml-16 border-l border-[var(--color-border)] pl-3'
+        }>
+          <div className={isRow ? 'space-y-0.5' : 'space-y-1'}>
             {childToolCalls.map((childToolCall) => (
               <ToolCallTree
                 key={childToolCall.id}
@@ -853,6 +844,7 @@ function ToolCallTree({
                 resultMap={resultMap}
                 childToolCallsByParent={childToolCallsByParent}
                 compact
+                chrome={chrome}
               />
             ))}
           </div>

@@ -455,9 +455,35 @@ describe('PermissionModeSelector', () => {
     expect(autoItem.querySelector('.material-symbols-outlined')).toHaveTextContent('autoplay')
     expect(autoItem.querySelector('.material-symbols-outlined')).not.toHaveTextContent('auto_awesome')
 
+    // The full trigger states the mode as a risk-coloured dot, not the glyph —
+    // the glyph identifies the mode in the menu, the colour ranks it on the
+    // toolbar. The compact trigger has no label, so it keeps the glyph.
     rerender(<PermissionModeSelector value="auto" onChange={vi.fn()} />)
+    const trigger = screen.getByRole('button', { name: 'Auto mode' })
+    expect(trigger).not.toHaveTextContent('autoplay')
+    expect(trigger.querySelector('[data-testid="permission-mode-dot"]')).toBeInTheDocument()
+
+    rerender(<PermissionModeSelector value="auto" onChange={vi.fn()} compact />)
     expect(screen.getByRole('button', { name: 'Auto mode' }))
       .toHaveTextContent('autoplay')
+  })
+
+  it('ranks permission modes by risk on the toolbar trigger', () => {
+    const { rerender } = render(<PermissionModeSelector value="default" onChange={vi.fn()} />)
+    const dotClass = () =>
+      screen
+        .getByRole('button')
+        .querySelector('[data-testid="permission-mode-dot"]')
+        ?.className ?? ''
+
+    expect(dotClass()).toContain('--color-text-tertiary')
+
+    rerender(<PermissionModeSelector value="acceptEdits" onChange={vi.fn()} />)
+    expect(dotClass()).toContain('--color-warning')
+
+    // Skipping permissions is the one mode that can do anything unattended.
+    rerender(<PermissionModeSelector value="bypassPermissions" onChange={vi.fn()} />)
+    expect(dotClass()).toContain('--color-error')
   })
 
   it('renders the visually larger Auto glyph at a reduced size', () => {

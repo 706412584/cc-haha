@@ -387,6 +387,15 @@ export type GlobalConfig = {
   // Terminal progress bar configuration (OSC 9;4)
   terminalProgressBarEnabled: boolean
 
+  // How many subagents Claude should aim for when writing a dynamic workflow.
+  // Set from /config; a settings-file value overrides it and hides the row.
+  workflowSizeGuideline?: 'unrestricted' | 'small' | 'medium' | 'large'
+
+  // Recorded the first time the user approves a workflow in auto permission
+  // mode. Auto mode is already "stop asking me about routine things", so the
+  // launch prompt asks once and then stays out of the way.
+  hasAcceptedWorkflowsInAutoMode?: boolean
+
   // Terminal tab status indicator (OSC 21337). When on, emits a colored
   // dot + status text to the tab sidebar and drops the spinner prefix
   // from the title (the dot makes it redundant).
@@ -663,6 +672,8 @@ export const GLOBAL_CONFIG_KEYS = [
   'autoInstallIdeExtension',
   'fileCheckpointingEnabled',
   'terminalProgressBarEnabled',
+  'workflowSizeGuideline',
+  'hasAcceptedWorkflowsInAutoMode',
   'showStatusInTerminalTab',
   'taskCompleteNotifEnabled',
   'inputNeededNotifEnabled',

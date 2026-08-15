@@ -2,7 +2,9 @@
  * Teams REST API
  *
  * GET    /api/teams                                — 列出所有团队
+ * GET    /api/teams/session/:id/workbench           — 获取主会话的实时或归档工作台
  * GET    /api/teams/:name                          — 获取团队详情
+ * GET    /api/teams/:name/workbench                — 获取协作工作台只读快照
  * GET    /api/teams/:name/members/:id/transcript   — 获取成员 transcript
  * POST   /api/teams/:name/members/:id/messages     — 给成员发送消息
  * DELETE /api/teams/:name                          — 删除团队
@@ -26,6 +28,28 @@ export async function handleTeamsApi(
       return Response.json({ teams })
     }
 
+    // ── GET /api/teams/session/:id/workbench ──────────────────────────────
+    if (
+      method === 'GET' &&
+      teamName === 'session' &&
+      segments[3] &&
+      segments[4] === 'workbench'
+    ) {
+      const sessionId = decodeURIComponent(segments[3])
+      const lookupUrl = new URL(req.url)
+      const rawAt = lookupUrl.searchParams.get('at')
+      const at = rawAt === null ? undefined : Number(rawAt)
+      const timeline = await teamService.getWorkbenchForSession(sessionId, {
+        teamName: lookupUrl.searchParams.get('teamName') || undefined,
+        incarnationId: lookupUrl.searchParams.get('incarnationId') || undefined,
+        ...(at !== undefined && Number.isFinite(at) ? { at } : {}),
+      })
+      if (!timeline) {
+        throw ApiError.notFound(`No Agent Teams workbench for session: ${sessionId}`)
+      }
+      return Response.json(timeline)
+    }
+
     // ── GET /api/teams/:name/members/:id/transcript ───────────────────────
     if (
       method === 'GET' &&
@@ -42,6 +66,8 @@ export async function handleTeamsApi(
           ? undefined
           : Number.parseInt(rawAfterOrdinal, 10)
         const page = await teamService.getMemberTranscriptPage(teamName, agentId, {
+          leadSessionId: url.searchParams.get('leadSessionId') || undefined,
+          incarnationId: url.searchParams.get('incarnationId') || undefined,
           signature: url.searchParams.get('signature') || undefined,
           cursor: url.searchParams.get('cursor') || undefined,
           afterOrdinal: parsedAfterOrdinal !== undefined && Number.isSafeInteger(parsedAfterOrdinal)
@@ -50,8 +76,22 @@ export async function handleTeamsApi(
         })
         return Response.json(page)
       }
-      const messages = await teamService.getMemberTranscript(teamName, agentId)
-      return Response.json({ messages })
+      const page = await teamService.getMemberTranscriptPage(teamName, agentId, {
+        leadSessionId: url.searchParams.get('leadSessionId') || undefined,
+        incarnationId: url.searchParams.get('incarnationId') || undefined,
+      })
+      return Response.json({
+        messages: page.messages,
+        ownerAgentIds: page.ownerAgentIds,
+        taskNotifications: page.taskNotifications,
+        taskAnchors: page.taskAnchors,
+      })
+    }
+
+    // ── GET /api/teams/:name/workbench ────────────────────────────────────
+    if (method === 'GET' && teamName && segments[3] === 'workbench') {
+      const snapshot = await teamService.getWorkbench(teamName)
+      return Response.json(snapshot)
     }
 
     // ── POST /api/teams/:name/members/:id/messages ─────────────────────────

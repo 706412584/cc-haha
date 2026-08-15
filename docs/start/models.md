@@ -44,7 +44,7 @@ Claude Code Haha 自己不带模型，它只是那个替你干活的壳。装完
 内置预设（按弹窗里的排列）：
 
 - **DeepSeek** · **Zhipu GLM** · **Kimi** · **MiniMax** — 国内主流模型厂商，接口地址是各家的 Anthropic 兼容端点。
-- **TeamoRouter** · **玄枢API** · **FennoAI** — 中转类服务商，用它们的通道调 Claude 官方模型。
+- **玄枢API** · **FennoAI** — 中转类服务商，用它们的通道调 Claude 官方模型。
 - **七牛云 AI** — 聚合类 MaaS 平台，一个密钥调 DeepSeek、GLM、Kimi、通义等多家模型。
 - **LM Studio** · **Ollama** — 本地模型，见下一节。
 - **Custom** — 上面都没有，自己填。

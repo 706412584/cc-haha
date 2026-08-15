@@ -50,6 +50,14 @@ describe('openai auth model resolution', () => {
     )
   })
 
+  test('keeps bundled catalog windows aligned with runtime resolution', () => {
+    for (const model of OPENAI_CODEX_MODEL_CATALOG) {
+      expect(getOpenAICodexContextWindowForModel(model.value)).toBe(
+        model.contextWindow,
+      )
+    }
+  })
+
   test('exposes GPT-5.6 family metadata and model-native reasoning defaults', () => {
     expect(OPENAI_CODEX_MODEL_CATALOG.slice(0, 3).map((model) => model.value)).toEqual([
       'gpt-5.6-sol',

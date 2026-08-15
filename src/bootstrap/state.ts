@@ -146,7 +146,7 @@ type State = {
   // persist on disk forever (gh-32730). TeamDelete removes entries to
   // avoid double-cleanup. Lives here (not teamHelpers.ts) so
   // resetStateForTests() clears it between tests.
-  sessionCreatedTeams: Set<string>
+  sessionCreatedTeams: Map<string, SessionCreatedTeamLifecycle>
   // Session-only trust flag for home directory (not persisted to disk)
   // When running from home dir, trust dialog is shown but not saved to disk.
   // This flag allows features requiring trust to work during the session.
@@ -362,7 +362,7 @@ function getInitialState(): State {
     // Scheduled tasks disabled until flag or dialog enables them
     scheduledTasksEnabled: false,
     sessionCronTasks: [],
-    sessionCreatedTeams: new Set(),
+    sessionCreatedTeams: new Map(),
     // Session-only trust flag (not persisted to disk)
     sessionTrustAccepted: false,
     // Session-only flag to disable session persistence to disk
@@ -1315,6 +1315,15 @@ export type SessionCronTask = {
   scheduledTime?: string
 }
 
+export type SessionCreatedTeamLifecycle = {
+  generation: number
+  identity: {
+    teamName: string
+    createdAt: number
+    leadSessionId?: string
+  }
+}
+
 export function getSessionCronTasks(): SessionCronTask[] {
   return STATE.sessionCronTasks
 }
@@ -1493,7 +1502,7 @@ export function getPlanSlugCache(): Map<string, string> {
   return STATE.planSlugCache
 }
 
-export function getSessionCreatedTeams(): Set<string> {
+export function getSessionCreatedTeams(): Map<string, SessionCreatedTeamLifecycle> {
   return STATE.sessionCreatedTeams
 }
 

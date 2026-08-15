@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import '@testing-library/jest-dom'
 import type { PerSessionState } from '../../stores/chatStore'
 import type { ChatState, UIMessage } from '../../types/chat'
+import type { TeamWorkbenchSessionTimeline, TeamWorkbenchTask, TeamWorkbenchTimeline } from '../../types/team'
+import type { WorkflowRun } from '../../types/workflow'
 import { browserHost } from '../../lib/desktopHost/browserHost'
 
 type ToolUseMessage = Extract<UIMessage, { type: 'tool_use' }>
@@ -21,6 +23,9 @@ const openProjectMenuMock = vi.hoisted(() => ({
 }))
 const sessionsApiMock = vi.hoisted(() => ({
   delete: vi.fn(() => Promise.resolve()),
+}))
+const teamsApiMock = vi.hoisted(() => ({
+  getWorkbenchForSession: vi.fn<() => Promise<TeamWorkbenchSessionTimeline>>(),
 }))
 
 // The strip re-reveals a clipped active tab from its ResizeObserver, so the
@@ -93,6 +98,33 @@ const completedTodoWriteMessage = (overrides: Partial<ToolUseMessage> = {}): UIM
   ...overrides,
 })
 
+function teamWorkbenchTimeline(
+  sessionId: string,
+  options: { leadSessionId?: string; tasks?: TeamWorkbenchTask[] } = {},
+): TeamWorkbenchTimeline {
+  return {
+    teamName: 'review-team',
+    loading: false,
+    error: null,
+    snapshots: [{
+      version: 'v1',
+      generatedAt: '2026-08-08T00:00:00.000Z',
+      team: {
+        name: 'review-team',
+        leadAgentId: 'lead',
+        leadSessionId: options.leadSessionId ?? sessionId,
+        createdAt: '2026-08-08T00:00:00.000Z',
+        members: [
+          { agentId: 'lead', role: 'Lead', status: 'running' },
+          { agentId: 'security', role: 'Security reviewer', status: 'running' },
+        ],
+      },
+      tasks: options.tasks ?? [],
+      messages: [],
+    }],
+  }
+}
+
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: getCurrentWindowMock,
 }))
@@ -130,6 +162,7 @@ vi.mock('../../i18n', () => ({
       'tabs.hideWorkspace': 'Hide Workspace',
       'tabs.showBrowser': 'Show Browser',
       'tabs.hideBrowser': 'Hide Browser',
+      'agentTeams.hideReport': 'Hide Agent Teams Run Report',
       'tabs.scrollLeft': 'Scroll tabs left',
       'tabs.scrollRight': 'Scroll tabs right',
       'tabs.closeTab': 'Close {title}',
@@ -154,6 +187,10 @@ vi.mock('../../i18n', () => ({
 
 vi.mock('../../api/sessions', () => ({
   sessionsApi: sessionsApiMock,
+}))
+
+vi.mock('../../api/teams', () => ({
+  teamsApi: teamsApiMock,
 }))
 
 vi.mock('./OpenProjectMenu', () => ({
@@ -226,6 +263,7 @@ describe('TabBar', () => {
     openProjectMenuMock.paths = []
     sessionsApiMock.delete.mockClear()
     sessionsApiMock.delete.mockResolvedValue(undefined)
+    teamsApiMock.getWorkbenchForSession.mockReset()
     windowControlsMock.show = true
     vi.resetModules()
   })
@@ -243,6 +281,7 @@ describe('TabBar', () => {
     const { useCLITaskStore } = await import('../../stores/cliTaskStore')
     const { useTeamStore } = await import('../../stores/teamStore')
     const { useSettingsStore } = await import('../../stores/settingsStore')
+    const { useWorkflowStore } = await import('../../stores/workflowStore')
 
     useTabStore.setState({ tabs: [], activeTabId: null })
     useChatStore.setState({
@@ -261,12 +300,8 @@ describe('TabBar', () => {
     useBrowserPanelStore.setState(useBrowserPanelStore.getInitialState(), true)
     useActivityPanelStore.setState(useActivityPanelStore.getInitialState(), true)
     useCLITaskStore.setState(useCLITaskStore.getInitialState(), true)
-    useTeamStore.setState({
-      teams: [],
-      activeTeam: null,
-      memberColors: new Map(),
-      error: null,
-    })
+    useTeamStore.setState(useTeamStore.getInitialState(), true)
+    useWorkflowStore.setState({ runs: {} })
     useSettingsStore.setState({ unifiedActivityPanelEnabled: false })
 
     Reflect.deleteProperty(window, 'desktopHost')
@@ -362,6 +397,190 @@ describe('TabBar', () => {
     })
 
     expect(screen.queryByRole('button', { name: /activity/i })).not.toBeInTheDocument()
+  })
+
+  it('keeps the activity button available for a persisted workflow-only run', async () => {
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useChatStore } = await import('../../stores/chatStore')
+    const { useSessionStore } = await import('../../stores/sessionStore')
+    const { useWorkflowStore } = await import('../../stores/workflowStore')
+    const sessionId = 'workflow-only-session'
+    const workflowRun: WorkflowRun = {
+      taskId: 'workflow-task',
+      sourceSessionId: sessionId,
+      sessionId,
+      workflowName: 'review-flow',
+      status: 'completed',
+      startedAt: 1000,
+      updatedAt: 2000,
+      agentCount: 1,
+      totalTokens: 42,
+      toolCalls: 1,
+      progress: [
+        { type: 'workflow_phase', index: 1, title: 'Review' },
+        {
+          type: 'workflow_agent',
+          index: 1,
+          label: 'Review the shared surface',
+          state: 'done',
+          phaseIndex: 1,
+          phaseTitle: 'Review',
+          agentId: 'workflow-agent-1',
+        },
+      ],
+    }
+
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Workflow session', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useSessionStore.setState({
+      sessions: [{ id: sessionId, title: 'Workflow session', workDir: '/tmp/project', workDirExists: true }],
+    } as Partial<ReturnType<typeof useSessionStore.getState>>)
+    useChatStore.setState({
+      sessions: { [sessionId]: makeChatSession('idle') },
+      disconnectSession: vi.fn(),
+    } as Partial<ReturnType<typeof useChatStore.getState>>)
+    useWorkflowStore.setState({ runs: { workflow: workflowRun } })
+
+    await act(async () => {
+      render(<TabBar />)
+    })
+
+    expect(screen.getByRole('button', { name: /activity/i })).toBeInTheDocument()
+  })
+
+  it('routes Agent Teams tasks to the workbench while keeping lead TodoWrite activity', async () => {
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useChatStore } = await import('../../stores/chatStore')
+    const { useSessionStore } = await import('../../stores/sessionStore')
+    const { useTeamStore } = await import('../../stores/teamStore')
+    const sessionId = 'team-task-ownership-session'
+
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Team lead', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useSessionStore.setState({
+      sessions: [{ id: sessionId, title: 'Team lead', workDir: '/tmp/project', workDirExists: true }],
+    } as Partial<ReturnType<typeof useSessionStore.getState>>)
+    useChatStore.setState({
+      sessions: { [sessionId]: makeChatSession('idle') },
+      disconnectSession: vi.fn(),
+    } as Partial<ReturnType<typeof useChatStore.getState>>)
+    useTeamStore.setState({
+      workbenchesBySession: {
+        [sessionId]: teamWorkbenchTimeline(sessionId),
+      },
+    } as Partial<ReturnType<typeof useTeamStore.getState>>)
+
+    const handleServerMessage = useChatStore.getState().handleServerMessage
+    handleServerMessage(sessionId, {
+      type: 'tool_use_complete',
+      toolName: 'TaskCreate',
+      toolUseId: 'team-task-create',
+      input: { subject: 'Review shared auth task' },
+    })
+
+    await act(async () => {
+      render(<TabBar />)
+    })
+
+    expect(screen.queryByRole('button', { name: /activity/i })).not.toBeInTheDocument()
+
+    act(() => {
+      handleServerMessage(sessionId, {
+        type: 'tool_use_complete',
+        toolName: 'TodoWrite',
+        toolUseId: 'lead-personal-todo',
+        input: {
+          todos: [{ content: 'Summarize team delivery', status: 'in_progress' }],
+        },
+      })
+    })
+
+    expect(screen.getByRole('button', { name: /activity/i })).toBeInTheDocument()
+  })
+
+  it('keeps an owned Team DAG, roster, and member spawn out of Activity while preserving a direct SubAgent', async () => {
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useChatStore } = await import('../../stores/chatStore')
+    const { useSessionStore } = await import('../../stores/sessionStore')
+    const { useTeamStore } = await import('../../stores/teamStore')
+    const sessionId = 'completed-team-activity-session'
+    const timeline = teamWorkbenchTimeline(sessionId, {
+      tasks: [{
+        id: 'A',
+        subject: 'Review shared surface',
+        description: '',
+        status: 'completed',
+        blocks: [],
+        blockedBy: [],
+        taskListId: 'review-team',
+      }],
+    })
+
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Team lead', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useSessionStore.setState({
+      sessions: [{ id: sessionId, title: 'Team lead', workDir: '/tmp/project', workDirExists: true }],
+    } as Partial<ReturnType<typeof useSessionStore.getState>>)
+    useChatStore.setState({
+      sessions: { [sessionId]: makeChatSession('idle') },
+      disconnectSession: vi.fn(),
+    } as Partial<ReturnType<typeof useChatStore.getState>>)
+    teamsApiMock.getWorkbenchForSession.mockResolvedValueOnce({
+      sessionId,
+      teamName: timeline.teamName,
+      snapshots: timeline.snapshots,
+      source: 'live',
+    })
+
+    await act(async () => {
+      await useTeamStore.getState().fetchTeamForSession(sessionId, { force: true })
+      const handleServerMessage = useChatStore.getState().handleServerMessage
+      handleServerMessage(sessionId, {
+        type: 'tool_use_complete',
+        toolName: 'Agent',
+        toolUseId: 'team-member-spawn',
+        input: {
+          team_name: timeline.teamName,
+          name: 'late-reviewer',
+          description: 'Review the shared Team DAG',
+        },
+      })
+      handleServerMessage(sessionId, {
+        type: 'tool_result',
+        toolUseId: 'team-member-spawn',
+        content: 'Agent launched successfully',
+        isError: false,
+      })
+    })
+
+    render(<TabBar />)
+
+    // All three inputs belong to the Agent Teams workbench, not the lead run:
+    // its canonical DAG, its member roster, and the transcript launch row.
+    expect(screen.queryByRole('button', { name: /activity/i })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('session-activity-badge')).not.toBeInTheDocument()
+
+    act(() => {
+      useChatStore.getState().handleServerMessage(sessionId, {
+        type: 'tool_use_complete',
+        toolName: 'Agent',
+        toolUseId: 'direct-subagent-spawn',
+        input: { description: 'Inspect a main-session seam' },
+      })
+    })
+
+    // This proves Team filtering did not disable Activity wholesale: a direct
+    // SubAgent spawned by the main session still owns a row there.
+    expect(screen.getByRole('button', { name: /activity/i })).toBeInTheDocument()
   })
 
   it('hides the activity button for output-only activity rows', async () => {
@@ -512,7 +731,7 @@ describe('TabBar', () => {
     expect(useActivityPanelStore.getState().isOpen(sessionId)).toBe(true)
   })
 
-  it('shows the activity button for team members associated with the active session', async () => {
+  it('leaves the team entry to the session-header strip', async () => {
     const { TabBar } = await import('./TabBar')
     const { useTabStore } = await import('../../stores/tabStore')
     const { useChatStore } = await import('../../stores/chatStore')
@@ -545,14 +764,57 @@ describe('TabBar', () => {
           { agentId: 'security', role: 'Security reviewer', status: 'running' },
         ],
       },
+      workbenchesBySession: {
+        [sessionId]: teamWorkbenchTimeline(sessionId),
+      },
     } as Partial<ReturnType<typeof useTeamStore.getState>>)
 
     await act(async () => {
       render(<TabBar />)
     })
 
-    expect(screen.getByRole('button', { name: /activity/i })).toBeInTheDocument()
-    expect(screen.queryByTestId('session-activity-badge')).not.toBeInTheDocument()
+    // The toolbar carries no team toggle of its own — AgentTeamsStrip in the
+    // session header owns that entry, under the very same condition.
+    expect(screen.queryByRole('button', { name: /Agent Teams/i })).not.toBeInTheDocument()
+    // A team existing is not a reason to take over the right-hand slot, so the
+    // workspace entry stays reachable.
+    expect(screen.getByRole('button', { name: 'Show Workspace' })).toBeInTheDocument()
+
+    expect(useTeamStore.getState().workbenchesBySession[sessionId]?.snapshots).toHaveLength(1)
+  })
+
+  it('opens the workspace panel without mutating the team workbench timeline', async () => {
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useChatStore } = await import('../../stores/chatStore')
+    const { useSessionStore } = await import('../../stores/sessionStore')
+    const { useTeamStore } = await import('../../stores/teamStore')
+    const { useWorkspacePanelStore } = await import('../../stores/workspacePanelStore')
+    const sessionId = 'session-team'
+
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'Team Chat', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useSessionStore.setState({
+      sessions: [{ id: sessionId, title: 'Team Chat', workDir: '/tmp/project', workDirExists: true }],
+    } as Partial<ReturnType<typeof useSessionStore.getState>>)
+    useChatStore.setState({
+      sessions: { [sessionId]: makeChatSession('idle') },
+      disconnectSession: vi.fn(),
+    } as Partial<ReturnType<typeof useChatStore.getState>>)
+    useTeamStore.setState({
+      workbenchesBySession: { [sessionId]: teamWorkbenchTimeline(sessionId) },
+    } as Partial<ReturnType<typeof useTeamStore.getState>>)
+
+    await act(async () => {
+      render(<TabBar />)
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show Workspace' }))
+
+    expect(useWorkspacePanelStore.getState().isPanelOpen(sessionId)).toBe(true)
+    expect(useTeamStore.getState().workbenchesBySession[sessionId]?.snapshots).toHaveLength(1)
   })
 
   it('hides the activity button for team member transcript sessions', async () => {
@@ -626,6 +888,20 @@ describe('TabBar', () => {
           { agentId: 'security', role: 'Security reviewer', status: 'running' },
         ],
       },
+      workbenchesBySession: {
+        [sessionId]: teamWorkbenchTimeline(sessionId, {
+          leadSessionId: 'other-session',
+          tasks: [{
+            id: 'other-task',
+            subject: 'Other lead task',
+            description: '',
+            status: 'completed',
+            blocks: [],
+            blockedBy: [],
+            taskListId: 'other-review-team',
+          }],
+        }),
+      },
     } as Partial<ReturnType<typeof useTeamStore.getState>>)
 
     await act(async () => {
@@ -636,7 +912,7 @@ describe('TabBar', () => {
     expect(screen.queryByTestId('session-activity-badge')).not.toBeInTheDocument()
   })
 
-  it('shows the activity button without a badge when team activity arrives after initial render', async () => {
+  it('keeps the activity rail absent when a workbench arrives after initial render', async () => {
     const { TabBar } = await import('./TabBar')
     const { useTabStore } = await import('../../stores/tabStore')
     const { useChatStore } = await import('../../stores/chatStore')
@@ -676,11 +952,18 @@ describe('TabBar', () => {
             { agentId: 'security', role: 'Security reviewer', status: 'error' },
           ],
         },
+        workbenchesBySession: {
+          [sessionId]: teamWorkbenchTimeline(sessionId),
+        },
       } as Partial<ReturnType<typeof useTeamStore.getState>>)
     })
 
-    expect(screen.getByRole('button', { name: /activity/i })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /activity/i })).not.toBeInTheDocument()
     expect(screen.queryByTestId('session-activity-badge')).not.toBeInTheDocument()
+    // The workspace entry survives a team arriving mid-session, and the
+    // toolbar gains nothing — the team entry lives in the session header.
+    expect(screen.getByRole('button', { name: 'Show Workspace' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Agent Teams/i })).not.toBeInTheDocument()
   })
 
   it('does not show the activity button for settings tabs', async () => {
@@ -2181,6 +2464,122 @@ describe('TabBar', () => {
     expect(disconnectSession).toHaveBeenCalledWith('tab-1')
     expect(useTabStore.getState().tabs.map((tab) => tab.sessionId)).toEqual(['tab-2'])
     expect(useTabStore.getState().activeTabId).toBe('tab-2')
+  })
+
+  it('does not delete a session when its list and history failed to load', async () => {
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useChatStore } = await import('../../stores/chatStore')
+    const { useSessionStore } = await import('../../stores/sessionStore')
+
+    useTabStore.setState({
+      tabs: [
+        { sessionId: 'recovered-session', title: 'Recovered Session', type: 'session', status: 'idle' },
+      ],
+      activeTabId: 'recovered-session',
+    })
+    useSessionStore.setState({
+      sessions: [],
+      isLoading: false,
+      error: 'Session list request timed out',
+    })
+    useChatStore.setState({
+      sessions: {},
+      disconnectSession: vi.fn(),
+    } as Partial<ReturnType<typeof useChatStore.getState>>)
+
+    await act(async () => {
+      render(<TabBar />)
+    })
+
+    fireEvent.click(screen.getByLabelText('Close Recovered Session'))
+
+    expect(sessionsApiMock.delete).not.toHaveBeenCalled()
+    expect(useTabStore.getState().tabs).toEqual([])
+  })
+
+  it('does not delete a session whose server metadata reports messages', async () => {
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useChatStore } = await import('../../stores/chatStore')
+    const { useSessionStore } = await import('../../stores/sessionStore')
+    const sessionId = 'persisted-session'
+
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'New Session', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'New Session',
+        createdAt: '2026-08-13T00:00:00.000Z',
+        modifiedAt: '2026-08-13T00:00:00.000Z',
+        messageCount: 2,
+        projectPath: '/repo',
+        workDir: '/repo',
+        workDirExists: true,
+      }],
+      isLoading: false,
+      error: null,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: { ...makeChatSession('idle'), historyStatus: 'ready' },
+      },
+      disconnectSession: vi.fn(),
+    } as Partial<ReturnType<typeof useChatStore.getState>>)
+
+    await act(async () => {
+      render(<TabBar />)
+    })
+
+    fireEvent.click(screen.getByLabelText('Close New Session'))
+
+    expect(sessionsApiMock.delete).not.toHaveBeenCalled()
+  })
+
+  it('deletes a confirmed empty placeholder session when closing its tab', async () => {
+    const { TabBar } = await import('./TabBar')
+    const { useTabStore } = await import('../../stores/tabStore')
+    const { useChatStore } = await import('../../stores/chatStore')
+    const { useSessionStore } = await import('../../stores/sessionStore')
+    const sessionId = 'empty-session'
+
+    useTabStore.setState({
+      tabs: [{ sessionId, title: 'New Session', type: 'session', status: 'idle' }],
+      activeTabId: sessionId,
+    })
+    useSessionStore.setState({
+      sessions: [{
+        id: sessionId,
+        title: 'New Session',
+        createdAt: '2026-08-13T00:00:00.000Z',
+        modifiedAt: '2026-08-13T00:00:00.000Z',
+        messageCount: 0,
+        projectPath: '/repo',
+        workDir: '/repo',
+        workDirExists: true,
+      }],
+      isLoading: false,
+      error: null,
+    })
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: { ...makeChatSession('idle'), historyStatus: 'ready' },
+      },
+      disconnectSession: vi.fn(),
+    } as Partial<ReturnType<typeof useChatStore.getState>>)
+
+    await act(async () => {
+      render(<TabBar />)
+    })
+
+    fireEvent.click(screen.getByLabelText('Close New Session'))
+
+    await waitFor(() => {
+      expect(sessionsApiMock.delete).toHaveBeenCalledWith(sessionId)
+    })
   })
 
   it('closes terminal tabs without disconnecting chat sessions', async () => {

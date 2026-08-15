@@ -2,8 +2,36 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 import '@testing-library/jest-dom'
 
-import { ThinkingBlock } from './ThinkingBlock'
+import { ThinkingBlock, thinkingPreview } from './ThinkingBlock'
 import { useSettingsStore } from '../../stores/settingsStore'
+
+describe('thinkingPreview', () => {
+  it('follows the tail while streaming so the row says what it is thinking now', () => {
+    const content = 'Diagnosis complete:\nlint is clean\nnow checking the retry path'
+    expect(thinkingPreview(content, { streaming: true })).toBe('now checking the retry path')
+  })
+
+  it('settles back onto the opening line once the block is done', () => {
+    const content = 'The user ran the lifecycle suite and hit real failures.\nSo I will reset #7.'
+    expect(thinkingPreview(content)).toBe('The user ran the lifecycle suite and hit real failures.')
+  })
+
+  it('skips an opening that is only a heading for what follows', () => {
+    // `Diagnosis complete:` is the one line in the block that carries nothing.
+    expect(thinkingPreview('Diagnosis complete:\nlint is clean, 2 files left')).toBe('lint is clean, 2 files left')
+  })
+
+  it('keeps a long opening that merely happens to end in a colon', () => {
+    const content = 'The user wants me to handle GitHub issue #498 about the new KS signature, specifically:\n1. read the issue'
+    expect(thinkingPreview(content)).toBe(
+      'The user wants me to handle GitHub issue #498 about the new KS signature, specifically:',
+    )
+  })
+
+  it('keeps a bare heading when it is all there is', () => {
+    expect(thinkingPreview('Diagnosis complete:')).toBe('Diagnosis complete:')
+  })
+})
 
 describe('ThinkingBlock', () => {
   beforeEach(() => {

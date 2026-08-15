@@ -8,7 +8,7 @@ vi.mock('./client', () => ({
   },
 }))
 
-import { subagentsApi } from './subagents'
+import { isAgentIdRef, subagentsApi } from './subagents'
 
 describe('subagentsApi', () => {
   afterEach(() => {
@@ -33,5 +33,12 @@ describe('subagentsApi', () => {
     expect(apiGetMock).toHaveBeenCalledWith(
       '/api/sessions/session-1/subagents/by-tool/tool-1?taskId=agent-one_2',
     )
+  })
+
+  it('does not mistake a nested canonical tool ref for a workflow agent id', () => {
+    expect(isAgentIdRef('agent:wf')).toBe(true)
+    expect(isAgentIdRef('agent:')).toBe(false)
+    expect(isAgentIdRef('agent:wf/wf/B')).toBe(false)
+    expect(isAgentIdRef('tool-1')).toBe(false)
   })
 })

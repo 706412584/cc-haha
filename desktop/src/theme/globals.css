@@ -410,6 +410,180 @@
   }
 }
 
+/* ─── Agent Teams Workbench ──────────────────────────────────────
+   Position changes create the walking motion. React updates one layout state
+   and CSS interpolates it without scheduling per-frame JS work. */
+.agent-teams-bot {
+  transition:
+    left 900ms cubic-bezier(0.55, 0, 0.25, 1),
+    top 900ms cubic-bezier(0.55, 0, 0.25, 1),
+    opacity 700ms ease;
+}
+
+.agent-teams-task {
+  animation: agent-teams-enter 350ms ease-out both;
+  transition:
+    transform 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.agent-teams-person {
+  transform-origin: 50% 84%;
+  transition: transform 180ms ease;
+}
+
+.agent-teams-person:hover {
+  transform: translateY(-2px) scale(1.035);
+}
+
+.agent-teams-person:active {
+  transform: translateY(0) scale(0.98);
+}
+
+.agent-teams-drawer {
+  animation: agent-teams-drawer-enter 250ms ease-out both;
+}
+
+.agent-teams-character {
+  transform-origin: 50% 84%;
+}
+
+.agent-teams-character-working {
+  animation: agent-teams-focus 2.4s ease-in-out infinite;
+}
+
+.agent-teams-character-idle {
+  animation: agent-teams-breathe 4.2s ease-in-out infinite;
+}
+
+.agent-teams-character-archived {
+  filter: saturate(0.84);
+  opacity: 0.96;
+}
+
+.agent-teams-character-message {
+  animation: agent-teams-message 720ms cubic-bezier(0.2, 0.9, 0.3, 1) both;
+}
+
+.agent-teams-zz {
+  animation: agent-teams-zz 2.2s ease-out infinite;
+}
+
+.agent-teams-flow {
+  animation: agent-teams-flow 700ms linear infinite;
+}
+
+/* The collaboration board uses motion only to explain state transitions:
+   a live signal, a dependency flow, a claim/message flight and indeterminate
+   work. None of these animations changes layout or carries the only copy of
+   the information. */
+.agent-teams-live-dot {
+  animation: agent-teams-pulse 1.1s ease-in-out infinite;
+}
+
+.agent-teams-member-ring {
+  animation: agent-teams-ring 1.1s ease-out infinite;
+}
+
+.agent-teams-unlocked {
+  animation: agent-teams-pulse 500ms ease-in-out infinite;
+}
+
+.agent-teams-flight {
+  offset-distance: 0%;
+  animation: agent-teams-flight 1.5s cubic-bezier(0.22, 0.72, 0.25, 1) both;
+}
+
+.agent-teams-task-running-fill {
+  width: 42%;
+  animation: agent-teams-task-running 1.5s ease-in-out infinite;
+}
+
+@keyframes agent-teams-enter {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes agent-teams-drawer-enter {
+  from { opacity: 0; transform: translateX(18px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes agent-teams-focus {
+  0%, 100% { transform: translateY(0) rotate(0); }
+  45% { transform: translateY(-2px) rotate(-1deg); }
+  70% { transform: translateY(-1px) rotate(1deg); }
+}
+
+@keyframes agent-teams-breathe {
+  0%, 100% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-1px) scale(1.015); }
+}
+
+@keyframes agent-teams-message {
+  0% { filter: drop-shadow(0 0 0 rgba(var(--cc-ac-rgb), 0)); transform: scale(1); }
+  45% { filter: drop-shadow(0 0 8px rgba(var(--cc-ac-rgb), 0.55)); transform: scale(1.1) translateY(-2px); }
+  100% { filter: drop-shadow(0 0 0 rgba(var(--cc-ac-rgb), 0)); transform: scale(1); }
+}
+
+@keyframes agent-teams-zz {
+  0% { opacity: 0; transform: translate(0, 2px); }
+  30% { opacity: 0.9; }
+  100% { opacity: 0; transform: translate(7px, -11px); }
+}
+
+@keyframes agent-teams-flow {
+  to { stroke-dashoffset: -18; }
+}
+
+@keyframes agent-teams-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+@keyframes agent-teams-ring {
+  0% { opacity: 0.55; transform: scale(0.6); }
+  100% { opacity: 0; transform: scale(1.5); }
+}
+
+@keyframes agent-teams-flight {
+  0% { opacity: 0; offset-distance: 0%; transform: scale(0.88); }
+  12% { opacity: 1; }
+  88% { opacity: 1; }
+  100% { opacity: 0; offset-distance: 100%; transform: scale(1); }
+}
+
+@keyframes agent-teams-task-running {
+  0% { transform: translateX(-115%); }
+  50% { transform: translateX(75%); }
+  100% { transform: translateX(240%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-teams-bot,
+  .agent-teams-person,
+  .agent-teams-task,
+  .agent-teams-drawer,
+  .agent-teams-character-working,
+  .agent-teams-character-idle,
+  .agent-teams-character-message,
+  .agent-teams-zz,
+  .agent-teams-flow,
+  .agent-teams-live-dot,
+  .agent-teams-member-ring,
+  .agent-teams-unlocked,
+  .agent-teams-flight,
+  .agent-teams-task-running-fill {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .agent-teams-task-running-fill {
+    opacity: 0;
+    transform: none !important;
+  }
+}
+
 /* ─── Terminal ANSI palette ───────────────────────────────────────
    The embedded terminal stays dark under all three themes (that is what
    the per-theme `--color-terminal-*` values encode — light/white/dark
@@ -1833,6 +2007,18 @@ button, input, textarea, select, a, [role="button"] {
   overflow-wrap: break-word;
 }
 
+/* The same conservative matcher that injects the runtime Workflow reminder
+   marks actionable Ultracode tokens before submit. */
+.composer-workflow-keyword {
+  color: var(--color-on-brand-soft);
+  background: var(--color-brand-soft);
+  border-radius: var(--radius-sm);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  padding: 0 2px;
+  font-weight: 600;
+}
+
 /* Floated zero-height placeholder: the empty paragraph keeps its own caret,
    the hint text just borrows its line. */
 .composer-pm[data-empty="true"]::before {
@@ -2539,7 +2725,44 @@ html[data-touch-h5] .app-shell--mobile .sidebar-panel {
    avoid the zero-height measurement regression in the virtualizer. */
 .chat-render-item--cv {
   content-visibility: auto;
-  contain-intrinsic-size: auto 300px;
+  /* Placeholder height for rows this path has not laid out yet. Tracks the
+     post-rail item size — leaving it at the pre-rail 300px would inflate
+     scrollHeight several-fold and skew the scrollbar against real content. */
+  contain-intrinsic-size: auto 160px;
+}
+
+/* Per-turn spacing for transcript items.
+ *
+ * It draws nothing. An earlier version ran a 1px line down the left of each turn
+ * to group it; that turned out to be a third way of saying what the turn gap and
+ * the right-aligned prompt already say, and once tool rows went quiet grey
+ * against near-black prose, tone separated the layers on its own — so the line
+ * was left competing with the content it was meant to organise. What survives is
+ * the spacing, which still needs a single owner, and the block formatting
+ * context, which the virtualizer depends on:
+ *
+ * virtualized items intentionally skip `--cv` (and with it layout containment),
+ * so a child's `margin-bottom` escapes the wrapper and the ResizeObserver's
+ * measurement misses it. `flow-root` keeps every child margin inside the
+ * measured box on both render paths. */
+.chat-turn-rail {
+  display: flow-root;
+  /* Owned here rather than on the message components, so a turn's internal
+     rhythm is retunable in one place — and so every surface that shows a
+     transcript inherits it. The shared agent run desktop renders MessageList
+     itself, so blocks carry no bottom margin of their own and nothing
+     downstream has to re-derive the spacing. */
+  padding-bottom: 8px;
+}
+
+/* The prompt opens a new exchange, so the turn gap belongs to it. 8px of the
+   32px already comes from the previous item's padding-bottom.
+
+   Padding rather than margin: the virtualizer measures border boxes, and a
+   margin would put the largest gap in the transcript somewhere it can never
+   see, so its offsets would run short by one gap per turn. */
+.chat-turn-rail--none {
+  padding-top: 24px;
 }
 
 @keyframes chat-navigation-target-pulse {
@@ -2651,6 +2874,14 @@ html[data-touch-h5] [data-message-actions] {
   width: 2.75rem;
 }
 
+/* Agent list rows reveal their edit / delete / override buttons on hover, which
+   never fires on a touchscreen — the controls would be unreachable there. */
+.app-shell--mobile [data-agent-row-actions],
+html[data-touch-h5] [data-agent-row-actions] {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 /* Kill the gray flash WKWebView paints over any tapped interactive element;
    components carry their own pressed/hover styling. */
 html[data-touch-h5],
@@ -2737,6 +2968,18 @@ html[data-window-kind='pet'] #root {
 
 .pet-window-stack[data-panel-placement='below'] .pet-mascot-wrap {
   order: 1;
+}
+
+/* At a side edge the fixed window follows the mascot partly off-screen. Keep
+   the wide card centred in the window and move only the mascot to the outer
+   side; the host moves the window back by the same amount, so the mascot stays
+   under the pointer while the card lands wholly inside the work area. */
+.pet-window-stack[data-panel-horizontal='left'] .pet-mascot-wrap {
+  align-self: flex-end;
+}
+
+.pet-window-stack[data-panel-horizontal='right'] .pet-mascot-wrap {
+  align-self: flex-start;
 }
 
 .pet-task-badge {

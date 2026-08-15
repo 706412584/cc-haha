@@ -6,6 +6,8 @@ import {
   MARKET_TAB_ID,
   OFFICE_TAB_PREFIX,
   SUBAGENT_TAB_PREFIX,
+  TEAM_MEMBER_TAB_PREFIX,
+  TEAM_TAB_PREFIX,
   TERMINAL_TAB_PREFIX,
   TRACE_LIST_TAB_ID,
   TRACE_TAB_PREFIX,
@@ -20,7 +22,7 @@ import { isPlaceholderSessionTitle } from '../../lib/sessionTitle'
 import { useWorkspacePanelStore } from '../../stores/workspacePanelStore'
 import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
 import { useCLITaskStore } from '../../stores/cliTaskStore'
-import { useTeamStore } from '../../stores/teamStore'
+import { teamTaskWindowsForSnapshot, useTeamStore } from '../../stores/teamStore'
 import { StatusDot } from '@/components/ui/Badge'
 import { IconButton } from '@/components/ui/IconButton'
 import { useDismissable } from '@/hooks/useDismissable'
@@ -33,10 +35,11 @@ import { Building2, Folder, FolderOpen, SquareTerminal } from 'lucide-react'
 import { ActionDialog } from '@/components/ui/ActionDialog'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useUIStore } from '../../stores/uiStore'
-import { buildSessionActivityModel, hasVisibleSessionActivity } from '../activity/sessionActivityModel'
+import { buildMainSessionActivityModel, hasVisibleSessionActivity } from '../activity/sessionActivityModel'
 import { SessionActivityButton } from '../activity/SessionActivityButton'
 import { useActivityPanelStore } from '../../stores/activityPanelStore'
 import { getSessionBrowsablePath } from '../../lib/sessionWorkspace'
+import { runsForSession, useWorkflowStore } from '../../stores/workflowStore'
 
 const DRAG_START_THRESHOLD = 4
 // Fraction of the visible strip a chevron press travels. Tabs size to their
@@ -69,6 +72,8 @@ const TAB_TYPE_ICON: Partial<Record<TabType, string>> = {
   traces: 'account_tree',
   workbench: 'view_sidebar',
   subagent: 'smart_toy',
+  team: 'account_tree',
+  'team-member': 'smart_toy',
 }
 const TAB_TYPE_ICON_FALLBACK = 'tab'
 const desktopHost = getDesktopHost()
@@ -98,7 +103,9 @@ function isSessionTabId(tabId: string | null) {
     !tabId.startsWith(TRACE_TAB_PREFIX) &&
     !tabId.startsWith(WORKBENCH_TAB_PREFIX) &&
     !tabId.startsWith(SUBAGENT_TAB_PREFIX) &&
-    !tabId.startsWith(OFFICE_TAB_PREFIX)
+    !tabId.startsWith(OFFICE_TAB_PREFIX) &&
+    !tabId.startsWith(TEAM_TAB_PREFIX) &&
+    !tabId.startsWith(TEAM_MEMBER_TAB_PREFIX)
 }
 
 export function TabBar() {
@@ -147,6 +154,19 @@ export function TabBar() {
   const cliTasks = useCLITaskStore((state) => state.tasks)
   const cliTasksSessionId = useCLITaskStore((state) => state.sessionId)
   const cliTasksCompletedAndDismissed = useCLITaskStore((state) => state.completedAndDismissed)
+  const agentTeamsSnapshot = useTeamStore((state) => activeTabId
+    ? state.workbenchesBySession[activeTabId]?.snapshots.at(-1)
+    : undefined)
+  const activeTeamStartedAt = useTeamStore((state) => activeTabId
+    ? state.activeTeamStartedAtBySession[activeTabId]
+    : undefined)
+  const allWorkflowRuns = useWorkflowStore((state) => state.runs)
+  const workflowRuns = useMemo(
+    () => activeTabId && isActiveSessionTab
+      ? runsForSession({ runs: allWorkflowRuns }, activeTabId)
+      : [],
+    [activeTabId, allWorkflowRuns, isActiveSessionTab],
+  )
   const dismissedBackgroundTaskKeyList = useActivityPanelStore((state) =>
     activeTabId
       ? state.dismissedBackgroundTaskKeysBySession[activeTabId] ?? EMPTY_DISMISSED_BACKGROUND_TASK_KEYS
@@ -156,32 +176,25 @@ export function TabBar() {
     () => new Set(dismissedBackgroundTaskKeyList),
     [dismissedBackgroundTaskKeyList],
   )
-  const activityTeamMembers = useTeamStore(useShallow((state) => {
-    const activeTeam = state.activeTeam
-    if (!activeTabId || !activeTeam || activeTeam.leadSessionId !== activeTabId) {
-      return []
-    }
-    return activeTeam.members.filter((member) =>
-      !activeTeam.leadAgentId || member.agentId !== activeTeam.leadAgentId
-    )
-  }))
   const activityState = useChatStore(useShallow((state) => {
     if (!activeTabId || !isActiveSessionTab) {
       return { hasVisibleActivity: false }
     }
     const sessionState = state.sessions[activeTabId]
     const includeCliTasks = cliTasksSessionId === activeTabId
+    const teamTaskWindows = teamTaskWindowsForSnapshot(agentTeamsSnapshot, activeTeamStartedAt)
 
-    const model = buildSessionActivityModel({
+    const model = buildMainSessionActivityModel({
       sessionId: activeTabId,
       messages: sessionState?.messages ?? [],
       tasks: includeCliTasks ? cliTasks : [],
+      teamTaskWindows,
       completedAndDismissed: includeCliTasks ? cliTasksCompletedAndDismissed : false,
       isForegroundTurnActive: Boolean(sessionState && sessionState.chatState !== 'idle'),
       backgroundTasks: Object.values(sessionState?.backgroundAgentTasks ?? {}),
       dismissedBackgroundTaskKeys,
       agentNotifications: Object.values(sessionState?.agentTaskNotifications ?? {}),
-      teamMembers: activityTeamMembers,
+      workflowRuns,
     })
     return {
       hasVisibleActivity: hasVisibleSessionActivity(model),
@@ -368,10 +381,17 @@ export function TabBar() {
           useChatStore.getState().stopGeneration(tab.sessionId)
         }
         if (!isRunning || stopRunning) {
-          // Auto-delete empty sessions (placeholder title, no messages sent)
+          // Auto-delete only when both server metadata and the loaded transcript
+          // confirm this is an empty placeholder. Missing state can mean a timed-out
+          // recovery load, so treating it as empty risks deleting a real session.
           const sessionEntry = useSessionStore.getState().sessions.find((s) => s.id === tab.sessionId)
           const chatEntry = useChatStore.getState().sessions[tab.sessionId]
-          if (isPlaceholderSessionTitle(sessionEntry?.title) && (!chatEntry || chatEntry.messages.length === 0)) {
+          if (
+            sessionEntry?.messageCount === 0 &&
+            isPlaceholderSessionTitle(sessionEntry.title) &&
+            chatEntry?.historyStatus === 'ready' &&
+            chatEntry.messages.length === 0
+          ) {
             void useSessionStore.getState().deleteSession(tab.sessionId)
           }
           disconnectSession(tab.sessionId)
@@ -638,6 +658,7 @@ export function TabBar() {
         {isDesktopRuntime && isActiveSessionTab && (
           <OpenProjectMenu path={openProjectPath} />
         )}
+        {/* AgentTeamsStrip in the session header opens the full workbench. */}
         <IconButton
           icon={<SquareTerminal size={17} strokeWidth={1.9} />}
           label={t('tabs.openTerminal')}

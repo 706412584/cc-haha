@@ -97,9 +97,13 @@ export function normalizeRuntimeSelection(
 
   if (selection.providerId === GROK_OFFICIAL_PROVIDER_ID) {
     const model = GROK_OFFICIAL_MODELS.find((entry) => entry.id === selection.modelId)
-    const effortLevel = model?.supportedReasoningEfforts?.includes(selection.effortLevel)
+    // Models only known from the live catalog (e.g. grok-4.6) are absent from
+    // the bundled desktop list. Keep their effort untouched and let the server
+    // validate it against the live catalog instead of silently dropping it.
+    if (!model) return selection
+    const effortLevel = model.supportedReasoningEfforts?.includes(selection.effortLevel)
       ? selection.effortLevel
-      : model?.defaultReasoningEffort ?? model?.supportedReasoningEfforts?.[0]
+      : model.defaultReasoningEffort ?? model.supportedReasoningEfforts?.[0]
     const { effortLevel: _unsupportedEffort, ...runtime } = selection
     return effortLevel ? { ...runtime, effortLevel } : runtime
   }

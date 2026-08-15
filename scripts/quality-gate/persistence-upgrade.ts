@@ -13,6 +13,16 @@ const checks: Check[] = [
     command: ['bun', 'test', './src/server/__tests__/persistence-upgrade.test.ts'],
   },
   {
+    title: 'Desktop UI preference migrations',
+    command: [
+      'bun',
+      'test',
+      './src/server/__tests__/desktop-ui-preferences.test.ts',
+      '--test-name-pattern',
+      'normalizes old schema files',
+    ],
+  },
+  {
     title: 'Desktop localStorage migrations',
     command: ['bun', 'run', 'test', '--', '--run', 'src/lib/persistenceMigrations.test.ts'],
     cwd: 'desktop',

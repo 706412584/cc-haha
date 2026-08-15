@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type HTMLAttributes } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type HTMLAttributes } from 'react'
 import { Sidebar } from './Sidebar'
 import { ContentRouter } from './ContentRouter'
 import { ToastContainer } from '@/components/layout/Toast'
@@ -17,7 +17,14 @@ import {
   isH5ConnectionRequiredError,
 } from '../../lib/desktopRuntime'
 import { getDesktopHost } from '../../lib/desktopHost'
-import { desktopUiPreferencesApi } from '../../api/desktopUiPreferences'
+import {
+  desktopUiPreferencesApi,
+  type DesktopUiPreferencesResponse,
+} from '../../api/desktopUiPreferences'
+import {
+  captureProjectDisplayNameHydrationRevision,
+  hydrateProjectDisplayNames,
+} from '../../stores/projectDisplayNameStore'
 import { openDesktopNotificationTarget } from '../../lib/desktopNotificationNavigation'
 import { TabBar } from './TabBar'
 import { StartupErrorView } from './StartupErrorView'
@@ -49,6 +56,12 @@ export function AppShell() {
   const [h5StartupError, setH5StartupError] = useState<H5ConnectionRequiredError | null>(null)
   const [bootstrapNonce, setBootstrapNonce] = useState(0)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
+  const [desktopUiPreferencesRequest, setDesktopUiPreferencesRequest] = useState<
+    Promise<DesktopUiPreferencesResponse> | null
+  >(null)
+  const consumeDesktopUiPreferencesRequest = useCallback((request: Promise<DesktopUiPreferencesResponse>) => {
+    setDesktopUiPreferencesRequest((current) => current === request ? null : current)
+  }, [])
   const t = useTranslation()
   const traceLaunch = useMemo(() => getTraceLaunchRequest(), [])
   const desktopRuntime = isDesktopRuntime()
@@ -116,23 +129,33 @@ export function AppShell() {
         setReady(false)
         setStartupError(null)
         setH5StartupError(null)
+        setDesktopUiPreferencesRequest(null)
       }
 
       try {
         await initializeDesktopServerUrl()
         await fetchSettings()
+        if (cancelled) return
 
-        if (!cancelled) {
-          setReady(true)
-        }
-
-        if (desktopRuntime && !traceLaunch.windowMode) {
-          void desktopUiPreferencesApi.getPreferences()
+        if (!traceLaunch.windowMode) {
+          const displayNameHydrationRevision = captureProjectDisplayNameHydrationRevision()
+          const preferencesRequest = desktopUiPreferencesApi.getPreferences()
+          setDesktopUiPreferencesRequest(preferencesRequest)
+          void preferencesRequest
             .then(({ preferences }) => {
-              if (preferences.pet.enabled) return getDesktopHost().pets.show()
+              if (cancelled) return
+              hydrateProjectDisplayNames(
+                preferences.projectDisplayNames ?? {},
+                displayNameHydrationRevision,
+              )
+              if (desktopRuntime && preferences.pet.enabled) {
+                return getDesktopHost().pets.show()
+              }
             })
             .catch(() => undefined)
         }
+
+        setReady(true)
 
         void (async () => {
           if (traceLaunch.windowMode) return
@@ -330,7 +353,12 @@ export function AppShell() {
         {...sidebarHiddenProps}
       >
         {!isMobileShell || effectiveSidebarOpen ? (
-          <Sidebar isMobile={isMobileShell} onRequestClose={() => setEffectiveSidebarOpen(false)} />
+          <Sidebar
+            isMobile={isMobileShell}
+            onRequestClose={() => setEffectiveSidebarOpen(false)}
+            desktopUiPreferencesRequest={desktopUiPreferencesRequest}
+            onDesktopUiPreferencesConsumed={consumeDesktopUiPreferencesRequest}
+          />
         ) : null}
         {!isMobileShell ? (
           <div

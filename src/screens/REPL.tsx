@@ -569,6 +569,8 @@ export type Props = {
   sshSession?: SSHSession;
   // Thinking configuration to use when thinking is enabled
   thinkingConfig: ThinkingConfig;
+  // When true, an explicit CLI --effort is authoritative over session env.
+  effortValueOverridesEnv?: boolean;
 };
 export type Screen = 'prompt' | 'transcript';
 export function REPL({
@@ -596,7 +598,8 @@ export function REPL({
   remoteSessionConfig,
   directConnectConfig,
   sshSession,
-  thinkingConfig
+  thinkingConfig,
+  effortValueOverridesEnv
 }: Props): React.ReactNode {
   const isRemoteSession = !!remoteSessionConfig;
 
@@ -2444,6 +2447,7 @@ export function REPL({
         } : s.agentDefinitions,
         customSystemPrompt,
         appendSystemPrompt,
+        effortValueOverridesEnv,
         refreshTools: computeTools
       },
       getAppState: () => store.getState(),

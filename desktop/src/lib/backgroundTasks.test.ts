@@ -5,6 +5,7 @@ import {
   formatDurationSeconds,
   hasRunningBackgroundTasks,
   hasRunningSubagentTasks,
+  isVisibleSessionBackgroundTask,
 } from './backgroundTasks'
 import { translate } from '../i18n'
 
@@ -33,6 +34,13 @@ describe('hasRunningBackgroundTasks', () => {
       shell: task('shell', { taskType: 'local_bash' }),
       dream: task('dream', { taskType: 'dream' }),
     })).toBe(true)
+  })
+
+  it('does not keep a session busy for teammate runtime containers', () => {
+    const teammate = task('teammate', { taskType: 'in_process_teammate' })
+    expect(isVisibleSessionBackgroundTask(teammate)).toBe(false)
+    expect(hasRunningBackgroundTasks({ teammate })).toBe(false)
+    expect(hasRunningSubagentTasks({ teammate })).toBe(false)
   })
 })
 

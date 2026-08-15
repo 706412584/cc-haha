@@ -16,6 +16,7 @@ import {
   getTaskOutputSize,
   initTaskOutput,
   initTaskOutputAsSymlink,
+  writeTaskOutput,
 } from './diskOutput.js'
 
 const TRANSCRIPT_BODY =
@@ -39,6 +40,17 @@ afterEach(async () => {
   mock.restore()
   rmSync(join(getTaskOutputDir(), '..'), { recursive: true, force: true })
   _resetTaskOutputDirForTest()
+})
+
+describe('writeTaskOutput', () => {
+  test('creates a missing session output directory for the first task', async () => {
+    const taskId = 'workflow-first-output'
+    rmSync(getTaskOutputDir(), { recursive: true, force: true })
+
+    await writeTaskOutput(taskId, '{"cached":true}')
+
+    expect(readFileSync(getTaskOutputPath(taskId), 'utf8')).toBe('{"cached":true}')
+  })
 })
 
 describe('initTaskOutputAsSymlink', () => {

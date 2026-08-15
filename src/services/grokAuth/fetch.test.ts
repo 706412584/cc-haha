@@ -105,6 +105,33 @@ describe('Grok Responses fetch adapter', () => {
     expect(upstreamBody?.reasoning).toBeUndefined()
   })
 
+  test('routes remotely discovered model IDs without silently replacing them', async () => {
+    let upstreamBody: Record<string, unknown> | undefined
+    let upstreamHeaders: Headers | undefined
+    const fetchOverride: typeof fetch = async (_input, init) => {
+      upstreamBody = JSON.parse(String(init?.body))
+      upstreamHeaders = new Headers(init?.headers)
+      return new Response([
+        'event: response.completed',
+        'data: {"response":{"id":"resp_remote","object":"response","created_at":1,"model":"grok-next-preview","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}',
+        '',
+      ].join('\n'), { headers: { 'Content-Type': 'text/event-stream' } })
+    }
+
+    const response = await buildGrokFetch(fetchOverride, 'test')(
+      'https://api.anthropic.com/v1/messages',
+      { method: 'POST', body: JSON.stringify({
+        model: 'grok-next-preview',
+        max_tokens: 64,
+        messages: [{ role: 'user', content: 'hello' }],
+      }) },
+    )
+
+    expect(response.status).toBe(200)
+    expect(upstreamBody?.model).toBe('grok-next-preview')
+    expect(upstreamHeaders?.get('x-grok-model-override')).toBe('grok-next-preview')
+  })
+
   test('translates subscription SSE back to Anthropic streaming events', async () => {
     const fetchOverride: typeof fetch = async () => new Response([
       'event: response.created',

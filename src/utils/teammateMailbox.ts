@@ -9,6 +9,7 @@
 
 import { mkdir, readFile, writeFile } from 'fs/promises'
 import { join } from 'path'
+import { randomUUID } from 'node:crypto'
 import { z } from 'zod/v4'
 import { TEAMMATE_MESSAGE_TAG } from '../constants/xml.js'
 import { PermissionModeSchema } from '../entrypoints/sdk/coreSchemas.js'
@@ -53,12 +54,28 @@ const LOCK_OPTIONS = {
 }
 
 export type TeammateMessage = {
+  /** Stable envelope identity. Older mailbox records may not have one. */
+  id?: string
   from: string
   text: string
   timestamp: string
   read: boolean
   color?: string // Sender's assigned color (e.g., 'red', 'blue', 'green')
   summary?: string // 5-10 word summary shown as preview in the UI
+}
+
+export function createMailboxMessageId(): string {
+  return `mailbox-${randomUUID()}`
+}
+
+export function createMailboxMessage(
+  message: Omit<TeammateMessage, 'read'>,
+): TeammateMessage {
+  return {
+    ...message,
+    id: message.id ?? createMailboxMessageId(),
+    read: false,
+  }
 }
 
 export function isTrustedTeamLeaderMessage(
@@ -188,10 +205,7 @@ export async function writeToMailbox(
     // Re-read messages after acquiring lock to get the latest state
     const messages = await readMailbox(recipientName, teamName)
 
-    const newMessage: TeammateMessage = {
-      ...message,
-      read: false,
-    }
+    const newMessage = createMailboxMessage(message)
 
     messages.push(newMessage)
 

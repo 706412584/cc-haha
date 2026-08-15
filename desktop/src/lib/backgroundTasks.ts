@@ -3,17 +3,27 @@ import type { TranslationKey } from '../i18n'
 
 type Translator = (key: TranslationKey, params?: Record<string, string | number>) => string
 
+/** A teammate runtime is the member container, not a user-facing activity row. */
+export function isVisibleSessionBackgroundTask(
+  task: Pick<BackgroundAgentTask, 'taskType'>,
+): boolean {
+  return task.taskType !== 'in_process_teammate'
+}
+
 export function hasRunningBackgroundTasks(tasks?: Record<string, BackgroundAgentTask>): boolean {
   // AutoDream is detached maintenance work: it remains visible and stoppable
   // in Activity, but must not keep the foreground conversation marked busy.
   return Object.values(tasks ?? {}).some(
-    (task) => task.status === 'running' && task.taskType !== 'dream',
+    (task) => isVisibleSessionBackgroundTask(task) &&
+      task.status === 'running' &&
+      task.taskType !== 'dream',
   )
 }
 
 export function hasRunningSubagentTasks(tasks?: Record<string, BackgroundAgentTask>): boolean {
   return Object.values(tasks ?? {}).some(
-    (task) => task.status === 'running' &&
+    (task) => isVisibleSessionBackgroundTask(task) &&
+      task.status === 'running' &&
       (task.taskType === 'local_agent' || task.taskType === 'remote_agent'),
   )
 }

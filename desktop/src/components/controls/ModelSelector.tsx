@@ -49,6 +49,14 @@ type ProviderChoice = {
 type Props = {
   value?: string
   onChange?: (modelId: string) => void
+  /**
+   * Overrides the settings-store catalog for controlled pickers. This keeps
+   * the shared search, portal, and viewport positioning while allowing a
+   * feature to prepend semantic choices such as an inherited model.
+   */
+  models?: ModelInfo[]
+  ariaLabel?: string
+  appearance?: 'toolbar' | 'field'
   runtimeSelection?: RuntimeSelection
   onRuntimeSelectionChange?: (selection: RuntimeSelection) => void
   runtimeKey?: string
@@ -219,6 +227,9 @@ function buildProviderChoices(
 export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function ModelSelector({
   value,
   onChange,
+  models,
+  ariaLabel,
+  appearance = 'toolbar',
   runtimeSelection: controlledRuntimeSelection,
   onRuntimeSelectionChange,
   runtimeKey,
@@ -389,9 +400,10 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
     ),
     [activeId, availableModels, providers, roleLabels, t, claudeOAuthStatus, grokOAuthStatus, openAIOAuthStatus],
   )
+  const selectableModels = isControlled && models ? models : availableModels
 
   const selectedModel = isControlled
-    ? availableModels.find((model) => model.id === value) || null
+    ? selectableModels.find((model) => model.id === value) || null
     : storeModel
 
   const requestedRuntimeSelection = isRuntimeScoped
@@ -806,7 +818,7 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
   return (
     <div
       data-testid="model-selector-shell"
-      className={`relative min-w-0 ${fluid ? 'flex-1' : 'shrink-0'}`}
+      className={`relative min-w-0 ${fluid || appearance === 'field' ? 'flex-1' : 'shrink-0'}`}
     >
       {/* No fill at rest: on the composer row the model name is type, not a
           control chip — the handoff reserves filled pills for the permission
@@ -815,8 +827,16 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
           bottom sheet, so both halves stretch to the same 44px touch target
           `PermissionModeSelector` uses; `compact` alone would also shrink the
           desktop composer, which narrows for the right panel, not for touch. */}
-      <div ref={ref} className={`flex min-w-0 items-stretch rounded-[var(--radius-md)] transition-colors hover:bg-[var(--color-surface-hover)] ${isMobileBrowser ? 'min-h-11' : ''} ${fluid ? 'w-full' : ''} ${disabled ? 'opacity-50' : ''}`}>
+      <div
+        ref={ref}
+        className={`flex min-w-0 items-stretch rounded-[var(--radius-md)] transition-colors ${
+          appearance === 'field'
+            ? 'h-10 w-full border border-[var(--color-border)] bg-[var(--color-surface)] hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-container-low)]'
+            : 'hover:bg-[var(--color-surface-hover)]'
+        } ${isMobileBrowser ? 'min-h-11' : ''} ${fluid ? 'w-full' : ''} ${disabled ? 'opacity-50' : ''}`}
+      >
         <button
+          type="button"
           onClick={() => {
             if (disabled) return
             if (open) {
@@ -826,17 +846,19 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
             openSelector()
           }}
           disabled={disabled}
-          aria-label={buttonProviderLabel ? `${buttonModelLabel}, ${buttonProviderLabel}` : buttonModelLabel}
+          aria-label={ariaLabel ?? (buttonProviderLabel ? `${buttonModelLabel}, ${buttonProviderLabel}` : buttonModelLabel)}
           title={buttonProviderLabel ? `${buttonProviderLabel} · ${buttonModelLabel}` : buttonModelLabel}
           // `focus-visible:rounded-*` restores the other pair of corners while
           // focused. The ring traces `border-radius`, so on the half-rounded
           // halves of this segmented control it otherwise drew a box that was
           // rounded down one side and square down the other.
-          className={`flex min-w-0 items-center gap-2 rounded-l-[var(--radius-md)] text-xs font-medium text-[var(--color-text-secondary)] outline-none transition-colors focus-visible:rounded-[var(--radius-md)] focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] disabled:cursor-not-allowed ${
-            compact ? `${fluid ? 'flex-1' : ''} max-w-[112px] py-1.5 pl-2.5 pr-1` : 'max-w-[220px] py-2 pl-2.5 pr-1'
+          className={`flex min-w-0 items-center gap-2 text-xs font-medium text-[var(--color-text-secondary)] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] disabled:cursor-not-allowed ${
+            appearance === 'field'
+              ? 'h-full w-full rounded-[var(--radius-md)] px-3 text-left'
+              : `rounded-l-[var(--radius-md)] focus-visible:rounded-[var(--radius-md)] ${compact ? `${fluid ? 'flex-1' : ''} max-w-[112px] py-1.5 pl-2.5 pr-1` : 'max-w-[220px] py-2 pl-2.5 pr-1'}`
           }`}
         >
-          <span className={`${compact ? 'text-xs' : 'text-[15px]'} min-w-0 flex-1 truncate font-semibold text-[var(--color-text-primary)]`}>
+          <span className={`${appearance === 'field' ? 'text-sm font-normal' : compact ? 'text-xs font-semibold' : 'text-[15px] font-semibold'} min-w-0 flex-1 truncate text-[var(--color-text-primary)]`}>
             {buttonModelLabel}
           </span>
           {!canEditRuntimeEffort && !compact && buttonProviderLabel && (
@@ -844,7 +866,7 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
               {buttonProviderLabel}
             </span>
           )}
-          <span className="material-symbols-outlined flex-shrink-0 text-[12px] text-[var(--color-text-tertiary)]">
+          <span className={`material-symbols-outlined flex-shrink-0 text-[var(--color-text-tertiary)] ${appearance === 'field' ? 'text-[16px]' : 'text-[12px]'}`}>
             {needsProviderConfiguration ? 'arrow_forward' : 'expand_more'}
           </span>
         </button>

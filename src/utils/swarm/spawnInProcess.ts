@@ -312,6 +312,7 @@ export function killInProcessTeammate(
     emitTaskTerminatedSdk(taskId, 'stopped', {
       toolUseId,
       summary: description,
+      ownerAgentId: agentId ?? undefined,
     })
     setTimeout(
       evictTerminalTask.bind(null, taskId, setAppState),

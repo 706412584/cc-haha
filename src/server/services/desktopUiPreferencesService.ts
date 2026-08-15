@@ -6,8 +6,11 @@ import { ApiError } from '../middleware/errorHandler.js'
 import { readRecoverableJsonFile } from './recoverableJsonFile.js'
 import { ensurePersistentStorageUpgraded } from './persistentStorageMigrations.js'
 
-const CURRENT_DESKTOP_UI_PREFERENCES_SCHEMA_VERSION = 4
+const CURRENT_DESKTOP_UI_PREFERENCES_SCHEMA_VERSION = 5
 const MAX_PROJECT_PREFERENCE_ENTRIES = 2_000
+const MAX_PROJECT_DISPLAY_NAME_ENTRIES = 2_000
+const MAX_PROJECT_DISPLAY_NAME_KEY_LENGTH = 4_096
+const MAX_PROJECT_DISPLAY_NAME_LENGTH = 80
 const MAX_PROFILE_DISPLAY_NAME_LENGTH = 80
 const MAX_PROFILE_SUBTITLE_LENGTH = 160
 const MAX_PROFILE_AVATAR_BYTES = 2_000_000
@@ -50,11 +53,14 @@ export type DesktopPetPreferences = {
   lastSessionId: string | null
 }
 
+export type ProjectDisplayNames = Record<string, string>
+
 export type DesktopUiPreferences = {
   schemaVersion: number
   sidebar: SidebarProjectPreferences
   profile: DesktopProfilePreferences
   pet: DesktopPetPreferences
+  projectDisplayNames: ProjectDisplayNames
   [key: string]: unknown
 }
 
@@ -88,12 +94,17 @@ const DEFAULT_PET_PREFERENCES: DesktopPetPreferences = {
   lastSessionId: null,
 }
 
+function createProjectDisplayNames(): ProjectDisplayNames {
+  return Object.fromEntries([]) as ProjectDisplayNames
+}
+
 function defaultPreferences(): DesktopUiPreferences {
   return {
     schemaVersion: CURRENT_DESKTOP_UI_PREFERENCES_SCHEMA_VERSION,
     sidebar: { ...DEFAULT_SIDEBAR_PROJECT_PREFERENCES },
     profile: { ...DEFAULT_PROFILE_PREFERENCES },
     pet: { ...DEFAULT_PET_PREFERENCES },
+    projectDisplayNames: createProjectDisplayNames(),
   }
 }
 
@@ -110,6 +121,81 @@ function normalizeStringArray(value: unknown): string[] {
   }
 
   return normalized
+}
+
+function isValidProjectDisplayNameKey(value: unknown): value is string {
+  return typeof value === 'string' &&
+    value.length > 0 &&
+    value.trim().length > 0 &&
+    value.length <= MAX_PROJECT_DISPLAY_NAME_KEY_LENGTH
+}
+
+function normalizeProjectDisplayName(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const normalized = value.trim().replace(/\s+/g, ' ')
+  if (normalized.length === 0 || normalized.length > MAX_PROJECT_DISPLAY_NAME_LENGTH) {
+    return null
+  }
+  return normalized
+}
+
+function setProjectDisplayName(
+  projectDisplayNames: ProjectDisplayNames,
+  projectKey: string,
+  displayName: string,
+): void {
+  Object.defineProperty(projectDisplayNames, projectKey, {
+    value: displayName,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  })
+}
+
+export function normalizeProjectDisplayNames(value: unknown): ProjectDisplayNames {
+  const normalized = createProjectDisplayNames()
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return normalized
+
+  let entryCount = 0
+  for (const [projectKey, displayName] of Object.entries(value)) {
+    if (!isValidProjectDisplayNameKey(projectKey)) continue
+    const normalizedDisplayName = normalizeProjectDisplayName(displayName)
+    if (!normalizedDisplayName) continue
+
+    setProjectDisplayName(normalized, projectKey, normalizedDisplayName)
+    entryCount += 1
+    if (entryCount >= MAX_PROJECT_DISPLAY_NAME_ENTRIES) break
+  }
+
+  return normalized
+}
+
+function validateProjectDisplayNameUpdate(value: unknown): {
+  projectKey: string
+  displayName: string | null
+} {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw ApiError.badRequest('Project display name update must be an object')
+  }
+
+  const patch = value as Record<string, unknown>
+  if (!isValidProjectDisplayNameKey(patch.projectKey)) {
+    throw ApiError.badRequest(
+      `projectKey must be a non-empty string up to ${MAX_PROJECT_DISPLAY_NAME_KEY_LENGTH} characters`,
+    )
+  }
+  if (patch.displayName === null) {
+    return { projectKey: patch.projectKey, displayName: null }
+  }
+
+  const displayName = normalizeProjectDisplayName(patch.displayName)
+  if (!displayName) {
+    throw ApiError.badRequest(
+      `displayName must be a non-empty string up to ${MAX_PROJECT_DISPLAY_NAME_LENGTH} characters`,
+    )
+  }
+
+  return { projectKey: patch.projectKey, displayName }
 }
 
 export function normalizeSidebarProjectPreferences(value: unknown): SidebarProjectPreferences {
@@ -256,6 +342,7 @@ function normalizeDesktopUiPreferences(value: unknown): DesktopUiPreferences | n
     sidebar: normalizeSidebarProjectPreferences(record.sidebar),
     profile: normalizeProfilePreferences(record.profile),
     pet: normalizeDesktopPetPreferences(record.pet),
+    projectDisplayNames: normalizeProjectDisplayNames(record.projectDisplayNames),
   }
 }
 
@@ -368,6 +455,7 @@ export class DesktopUiPreferencesService {
         }),
         profile: normalizeProfilePreferences(preferences.profile),
         pet: normalizeDesktopPetPreferences(preferences.pet),
+        projectDisplayNames: normalizeProjectDisplayNames(preferences.projectDisplayNames),
       }
 
       await this.writePreferences(nextPreferences)
@@ -400,10 +488,48 @@ export class DesktopUiPreferencesService {
           avatarUpdatedAt: currentProfile.avatarUpdatedAt,
         },
         pet: normalizeDesktopPetPreferences(preferences.pet),
+        projectDisplayNames: normalizeProjectDisplayNames(preferences.projectDisplayNames),
       }
 
       await this.writePreferences(nextPreferences)
       return nextPreferences
+    })
+  }
+
+  async updateProjectDisplayName(value: unknown): Promise<{
+    projectKey: string
+    displayName: string | null
+  }> {
+    const update = validateProjectDisplayNameUpdate(value)
+    const filePath = this.getPreferencesPath()
+    return this.withWriteLock(filePath, async () => {
+      const { preferences } = await this.readPreferences()
+      const projectDisplayNames = normalizeProjectDisplayNames(preferences.projectDisplayNames)
+      if (update.displayName === null) {
+        delete projectDisplayNames[update.projectKey]
+      } else {
+        if (
+          !Object.hasOwn(projectDisplayNames, update.projectKey) &&
+          Object.keys(projectDisplayNames).length >= MAX_PROJECT_DISPLAY_NAME_ENTRIES
+        ) {
+          throw ApiError.badRequest(
+            `Project display names cannot exceed ${MAX_PROJECT_DISPLAY_NAME_ENTRIES} entries`,
+          )
+        }
+        setProjectDisplayName(projectDisplayNames, update.projectKey, update.displayName)
+      }
+
+      const nextPreferences: DesktopUiPreferences = {
+        ...preferences,
+        schemaVersion: preferences.schemaVersion,
+        sidebar: normalizeSidebarProjectPreferences(preferences.sidebar),
+        profile: normalizeProfilePreferences(preferences.profile),
+        pet: normalizeDesktopPetPreferences(preferences.pet),
+        projectDisplayNames,
+      }
+
+      await this.writePreferences(nextPreferences)
+      return update
     })
   }
 
@@ -424,6 +550,7 @@ export class DesktopUiPreferencesService {
           ...currentPet,
           ...patch,
         }),
+        projectDisplayNames: normalizeProjectDisplayNames(preferences.projectDisplayNames),
       }
 
       await this.writePreferences(nextPreferences)
@@ -474,6 +601,7 @@ export class DesktopUiPreferencesService {
           avatarUpdatedAt: new Date().toISOString(),
         },
         pet: normalizeDesktopPetPreferences(preferences.pet),
+        projectDisplayNames: normalizeProjectDisplayNames(preferences.projectDisplayNames),
       }
 
       await this.writePreferences(nextPreferences)
@@ -500,6 +628,7 @@ export class DesktopUiPreferencesService {
           avatarUpdatedAt: null,
         },
         pet: normalizeDesktopPetPreferences(preferences.pet),
+        projectDisplayNames: normalizeProjectDisplayNames(preferences.projectDisplayNames),
       }
 
       await this.writePreferences(nextPreferences)

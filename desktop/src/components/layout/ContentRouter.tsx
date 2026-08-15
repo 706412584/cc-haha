@@ -8,9 +8,10 @@ import { Settings } from '../../pages/Settings'
 import { TerminalSettings } from '../../pages/TerminalSettings'
 import { TraceList } from '../../pages/TraceList'
 import { TraceSession } from '../../pages/TraceSession'
-import { SubagentRunPage } from '../../pages/SubagentRunPage'
+import { SubagentRunPage, TeamMemberRunPage } from '../../pages/SubagentRunPage'
 import { WorkbenchTab } from '../workbench/WorkbenchTab'
 import { AgentOfficePage } from '../../pages/AgentOffice'
+import { AgentTeamsWorkbenchTab } from '../agentTeams/AgentTeamsWorkbenchTab'
 import { previewBridge } from '../../lib/previewBridge'
 import { returnToTraceList } from '../../lib/traceNavigation'
 
@@ -54,6 +55,18 @@ export function ContentRouter() {
         />
       )
       : <EmptySession />
+  } else if (activeTabType === 'team-member') {
+    const memberTab = tabs.find((tab) => tab.sessionId === activeTabId)
+    page = memberTab?.teamLeadSessionId && memberTab.teamMemberAgentId
+      ? (
+        <TeamMemberRunPage
+          tabId={activeTabId}
+          leadSessionId={memberTab.teamLeadSessionId}
+          agentId={memberTab.teamMemberAgentId}
+          title={memberTab.title}
+        />
+      )
+      : <EmptySession />
   } else if (activeTabType === 'workbench') {
     const workbenchTab = tabs.find((t) => t.sessionId === activeTabId)
     page = workbenchTab?.workbenchSessionId
@@ -63,6 +76,11 @@ export function ContentRouter() {
     const officeTab = tabs.find((t) => t.sessionId === activeTabId)
     page = officeTab?.sourceSessionId
       ? <AgentOfficePage tabId={activeTabId} sessionId={officeTab.sourceSessionId} />
+      : <EmptySession />
+  } else if (activeTabType === 'team') {
+    const teamTab = tabs.find((t) => t.sessionId === activeTabId)
+    page = teamTab?.teamLeadSessionId
+      ? <AgentTeamsWorkbenchTab tabId={activeTabId} leadSessionId={teamTab.teamLeadSessionId} />
       : <EmptySession />
   } else if (activeTabType !== 'terminal') {
     page = <ActiveSession />

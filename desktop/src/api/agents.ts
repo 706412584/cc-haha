@@ -23,7 +23,24 @@ export type AgentDefinition = {
   target?: string
   overriddenBy?: AgentSource
   isActive: boolean
+  /** The backing file can be rewritten. Never true for built-in agents. */
   editable?: boolean
+  /** Built-in agents only: model and effort can be changed via setOverride. */
+  overridable?: boolean
+  /**
+   * Built-in agents only: what this build ships with, so the UI can name and
+   * restore the default. Never hardcode it — it varies per agent and per build.
+   */
+  defaults?: { model?: string; effort?: string | number }
+  /** Built-in agents only: the override currently in effect, if any. */
+  override?: { model?: string; effort?: string | number; source: AgentSource }
+}
+
+/** `null` clears that field; an omitted field is left unchanged. */
+export type AgentOverrideInput = {
+  cwd?: string
+  model?: string | null
+  effort?: string | number | null
 }
 
 export type AgentScope = 'user' | 'project'
@@ -81,6 +98,19 @@ export const agentsApi = {
     if (cwd) query.set('cwd', cwd)
     if (target) query.set('target', target)
     return api.delete<void>(`/api/agents/${encodeURIComponent(name)}?${query.toString()}`)
+  },
+  setOverride: (name: string, input: AgentOverrideInput) =>
+    api.put<AgentMutationResponse>(
+      `/api/agents/${encodeURIComponent(name)}/override`,
+      input,
+    ),
+  clearOverride: (name: string, cwd?: string) => {
+    const query = new URLSearchParams()
+    if (cwd) query.set('cwd', cwd)
+    const suffix = query.toString() ? `?${query.toString()}` : ''
+    return api.delete<AgentMutationResponse>(
+      `/api/agents/${encodeURIComponent(name)}/override${suffix}`,
+    )
   },
   reload: (sessionId: string) =>
     api.post<AgentReloadResponse>(

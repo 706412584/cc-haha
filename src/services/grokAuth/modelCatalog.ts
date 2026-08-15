@@ -5,7 +5,6 @@ import {
 import { createModelCatalogCache } from '../modelCatalogCache.js'
 import { ensureFreshGrokTokens } from './refresh.js'
 import {
-  GROK_DEFAULT_CONTEXT_WINDOW,
   GROK_MODEL_CATALOG,
   type GrokModelCatalogEntry,
 } from './models.js'
@@ -17,6 +16,7 @@ const catalogCache = createModelCatalogCache<GrokModelCatalogEntry[]>({
   ttlMs: MODEL_CATALOG_TTL_MS,
   failureBackoffMs: MODEL_CATALOG_FAILURE_BACKOFF_MS,
 })
+let runtimeCatalog: readonly GrokModelCatalogEntry[] = GROK_MODEL_CATALOG
 
 export async function fetchGrokModelCatalog(
   fetchOverride: typeof fetch = globalThis.fetch,
@@ -38,6 +38,7 @@ export async function fetchGrokModelCatalog(
     .map(normalizeRemoteModel)
     .filter((model): model is GrokModelCatalogEntry => model !== null)
   if (!models.length) throw new Error('Grok models endpoint returned no models')
+  runtimeCatalog = models
   return models
 }
 
@@ -48,16 +49,23 @@ export async function getGrokModelCatalog(options?: {
   accountKey?: string
 }): Promise<GrokModelCatalogEntry[]> {
   const accountKey = options?.accountKey ?? (options?.accessToken ? 'authenticated' : 'default')
-  return catalogCache.resolve({
+  const models = await catalogCache.resolve({
     accountKey,
     fetchCatalog: () => fetchGrokModelCatalog(options?.fetchOverride, options?.accessToken),
     fallback: GROK_MODEL_CATALOG,
     ...(options?.forceRefresh ? { forceRefresh: true } : {}),
   })
+  runtimeCatalog = models
+  return models
+}
+
+export function getGrokRuntimeModelCatalog(): readonly GrokModelCatalogEntry[] {
+  return runtimeCatalog
 }
 
 export function clearGrokModelCatalogCache(): void {
   catalogCache.clear()
+  runtimeCatalog = GROK_MODEL_CATALOG
 }
 
 function extractModelRows(body: unknown): unknown[] {
@@ -96,7 +104,7 @@ function normalizeRemoteModel(value: unknown): GrokModelCatalogEntry | null {
     record.total_context_tokens,
     record.context_window,
     record.contextWindow,
-  ) ?? fallback?.contextWindow ?? GROK_DEFAULT_CONTEXT_WINDOW
+  ) ?? fallback?.contextWindow
   const supportsReasoningEffort = firstBoolean(
     record.supportsReasoningEffort,
     record.supports_reasoning_effort,
@@ -113,7 +121,7 @@ function normalizeRemoteModel(value: unknown): GrokModelCatalogEntry | null {
     value: id,
     label,
     description,
-    contextWindow,
+    ...(contextWindow !== undefined && { contextWindow }),
     source: fallback?.source ?? 'official',
     ...(supportsReasoningEffort !== undefined && { supportsReasoningEffort }),
     ...(reasoningEffort && { reasoningEffort }),

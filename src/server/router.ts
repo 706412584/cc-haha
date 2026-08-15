@@ -31,6 +31,7 @@ import { handleDesktopUiApi } from './api/desktop-ui.js'
 import { handleProjectsApi } from './api/projects.js'
 import { handleTracesApi } from './api/traces.js'
 import { handleProjectRulesApi } from './api/project-rules.js'
+import { handleWorkflowsApi } from './api/workflows.js'
 
 export async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   const path = url.pathname
@@ -77,6 +78,9 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
 
     case 'teams':
       return handleTeamsApi(req, url, segments)
+
+    case 'workflows':
+      return handleWorkflowsApi(req, url, segments)
 
     case 'providers':
       return handleProvidersApi(req, url, segments)

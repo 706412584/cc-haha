@@ -66,7 +66,7 @@ describe('DesktopUiPreferencesService', () => {
 
     expect(result.exists).toBe(false)
     expect(result.preferences).toEqual({
-      schemaVersion: 4,
+      schemaVersion: 5,
       profile: {
         displayName: 'cc-haha',
         subtitle: 'github.com/NanmiCoder/cc-haha',
@@ -74,6 +74,7 @@ describe('DesktopUiPreferencesService', () => {
         avatarUpdatedAt: null,
       },
       pet: DEFAULT_PET_PREFERENCES,
+      projectDisplayNames: {},
       sidebar: {
         projectOrder: [],
         pinnedProjects: [],
@@ -89,12 +90,21 @@ describe('DesktopUiPreferencesService', () => {
     await fs.writeFile(
       path.join(tmpDir, 'cc-haha', 'desktop-ui.json'),
       JSON.stringify({
-        schemaVersion: 2,
+        schemaVersion: 4,
         futureField: { keep: true },
         sidebar: {
           projectOrder: ['/workspace/alpha', 42, '/workspace/alpha', '/workspace/beta'],
           pinnedProjects: ['/workspace/beta'],
           hiddenProjects: [null, '/workspace/gamma'],
+        },
+        projectDisplayNames: {
+          '/workspace/alpha': '  Alpha project  ',
+          '/workspace/beta': 42,
+          '': 'Missing key',
+          '   ': 'Whitespace key',
+          '/workspace/blank': '   ',
+          '/workspace/too-long-name': 'n'.repeat(81),
+          ['x'.repeat(4_097)]: 'Overlong key',
         },
       }),
       'utf-8',
@@ -110,7 +120,7 @@ describe('DesktopUiPreferencesService', () => {
 
     expect(before.exists).toBe(true)
     expect(before.preferences).toEqual({
-      schemaVersion: 4,
+      schemaVersion: 5,
       futureField: { keep: true },
       profile: {
         displayName: 'cc-haha',
@@ -119,6 +129,9 @@ describe('DesktopUiPreferencesService', () => {
         avatarUpdatedAt: null,
       },
       pet: DEFAULT_PET_PREFERENCES,
+      projectDisplayNames: {
+        '/workspace/alpha': 'Alpha project',
+      },
       sidebar: {
         projectOrder: ['/workspace/alpha', '/workspace/beta'],
         pinnedProjects: ['/workspace/beta'],
@@ -128,7 +141,7 @@ describe('DesktopUiPreferencesService', () => {
       },
     })
     expect(after).toEqual({
-      schemaVersion: 4,
+      schemaVersion: 5,
       futureField: { keep: true },
       profile: {
         displayName: 'cc-haha',
@@ -137,6 +150,9 @@ describe('DesktopUiPreferencesService', () => {
         avatarUpdatedAt: null,
       },
       pet: DEFAULT_PET_PREFERENCES,
+      projectDisplayNames: {
+        '/workspace/alpha': 'Alpha project',
+      },
       sidebar: {
         projectOrder: ['/workspace/gamma'],
         pinnedProjects: [],
@@ -160,7 +176,77 @@ describe('DesktopUiPreferencesService', () => {
     expect(result.preferences.sidebar.hiddenProjects).toEqual([])
     expect(result.preferences.profile.displayName).toBe('cc-haha')
     expect(result.preferences.pet).toEqual(DEFAULT_PET_PREFERENCES)
+    expect(result.preferences.projectDisplayNames).toEqual({})
     expect(files.some((name) => name.startsWith('desktop-ui.json.invalid-'))).toBe(true)
+  })
+
+  test('sets and resets exact project display name keys without prototype pollution', async () => {
+    const service = new DesktopUiPreferencesService()
+    const projectKey = '  /workspace/alpha  '
+
+    await expect(service.updateProjectDisplayName({
+      projectKey,
+      displayName: '  Alpha   project  ',
+    })).resolves.toEqual({
+      projectKey,
+      displayName: 'Alpha project',
+    })
+    await service.updateProjectDisplayName({ projectKey: '__proto__', displayName: 'Prototype project' })
+    await service.updateProjectDisplayName({ projectKey: 'constructor', displayName: 'Constructor project' })
+
+    const { preferences } = await service.readPreferences()
+    expect(Object.getPrototypeOf(preferences.projectDisplayNames)).toBe(Object.prototype)
+    expect(Object.entries(preferences.projectDisplayNames)).toEqual([
+      [projectKey, 'Alpha project'],
+      ['__proto__', 'Prototype project'],
+      ['constructor', 'Constructor project'],
+    ])
+    expect(Object.hasOwn(preferences.projectDisplayNames, '__proto__')).toBe(true)
+
+    await expect(service.updateProjectDisplayName({ projectKey, displayName: null })).resolves.toEqual({
+      projectKey,
+      displayName: null,
+    })
+    expect(Object.entries((await service.readPreferences()).preferences.projectDisplayNames)).toEqual([
+      ['__proto__', 'Prototype project'],
+      ['constructor', 'Constructor project'],
+    ])
+  })
+
+  test('merges concurrent project display name changes for different keys', async () => {
+    const firstRenderer = new DesktopUiPreferencesService()
+    const secondRenderer = new DesktopUiPreferencesService()
+
+    await Promise.all([
+      firstRenderer.updateProjectDisplayName({
+        projectKey: '/workspace/alpha',
+        displayName: 'Alpha',
+      }),
+      secondRenderer.updateProjectDisplayName({
+        projectKey: '/workspace/beta',
+        displayName: 'Beta',
+      }),
+    ])
+
+    expect((await firstRenderer.readPreferences()).preferences.projectDisplayNames).toEqual({
+      '/workspace/alpha': 'Alpha',
+      '/workspace/beta': 'Beta',
+    })
+  })
+
+  test('preserves project display names when updating sidebar, profile, and pet preferences', async () => {
+    const service = new DesktopUiPreferencesService()
+    await service.updateProjectDisplayName({
+      projectKey: '/workspace/alpha',
+      displayName: 'Alpha',
+    })
+    await service.updateSidebarPreferences({ projectOrder: ['/workspace/alpha'] })
+    await service.updateProfilePreferences({ displayName: 'Local Operator' })
+    await service.updatePetPreferences({ collapsed: true })
+
+    expect((await service.readPreferences()).preferences.projectDisplayNames).toEqual({
+      '/workspace/alpha': 'Alpha',
+    })
   })
 
   test('normalizes invalid pet preferences while preserving unrelated fields', async () => {
@@ -221,7 +307,7 @@ describe('DesktopUiPreferencesService', () => {
     })
 
     expect(after).toMatchObject({
-      schemaVersion: 4,
+      schemaVersion: 5,
       futureField: { keep: true },
       profile: {
         displayName: 'Local Operator',
@@ -300,7 +386,7 @@ describe('DesktopUiPreferencesService', () => {
     const after = await new DesktopUiPreferencesService().updatePetPreferences({ enabled: true })
 
     expect(after).toMatchObject({
-      schemaVersion: 4,
+      schemaVersion: 5,
       futureField: { keep: true },
       pet: {
         futurePetField: { keep: 'pet-too' },
@@ -343,6 +429,9 @@ describe('DesktopUiPreferencesService', () => {
           ...DEFAULT_PET_PREFERENCES,
           futurePet: { keep: 'pet' },
         },
+        projectDisplayNames: {
+          '/workspace/future': 'Future project',
+        },
       }),
       'utf-8',
     )
@@ -357,6 +446,9 @@ describe('DesktopUiPreferencesService', () => {
       pet: {
         enabled: true,
         futurePet: { keep: 'pet' },
+      },
+      projectDisplayNames: {
+        '/workspace/future': 'Future project',
       },
     })
     expect(await readDesktopUiFile()).toEqual(after)
@@ -376,6 +468,7 @@ describe('DesktopUiPreferencesService', () => {
       },
       profile: { futureProfile: { keep: 'profile' } },
       pet: { futurePet: { keep: 'pet' } },
+      projectDisplayNames: { '/workspace/future': 'Future project' },
     })
   })
 
@@ -389,7 +482,7 @@ describe('DesktopUiPreferencesService', () => {
     })
 
     expect(after).toEqual({
-      schemaVersion: 4,
+      schemaVersion: 5,
       profile: {
         displayName: 'Claude Captain',
         subtitle: 'local.example/profile',
@@ -397,6 +490,7 @@ describe('DesktopUiPreferencesService', () => {
         avatarUpdatedAt: null,
       },
       pet: DEFAULT_PET_PREFERENCES,
+      projectDisplayNames: {},
       sidebar: {
         projectOrder: [],
         pinnedProjects: [],
@@ -481,7 +575,7 @@ describe('desktop UI preferences API', () => {
     expect(putBody).toEqual({
       ok: true,
       preferences: {
-        schemaVersion: 4,
+        schemaVersion: 5,
         profile: {
           displayName: 'cc-haha',
           subtitle: 'github.com/NanmiCoder/cc-haha',
@@ -489,6 +583,7 @@ describe('desktop UI preferences API', () => {
           avatarUpdatedAt: null,
         },
         pet: DEFAULT_PET_PREFERENCES,
+        projectDisplayNames: {},
         sidebar: {
           projectOrder: ['/workspace/beta', '/workspace/alpha'],
           pinnedProjects: ['/workspace/beta'],
@@ -507,7 +602,7 @@ describe('desktop UI preferences API', () => {
     expect(getBody).toEqual({
       exists: true,
       preferences: {
-        schemaVersion: 4,
+        schemaVersion: 5,
         profile: {
           displayName: 'cc-haha',
           subtitle: 'github.com/NanmiCoder/cc-haha',
@@ -515,6 +610,7 @@ describe('desktop UI preferences API', () => {
           avatarUpdatedAt: null,
         },
         pet: DEFAULT_PET_PREFERENCES,
+        projectDisplayNames: {},
         sidebar: {
           projectOrder: ['/workspace/beta', '/workspace/alpha'],
           pinnedProjects: ['/workspace/beta'],
@@ -523,6 +619,67 @@ describe('desktop UI preferences API', () => {
           projectSortBy: 'createdAt',
         },
       },
+    })
+  })
+
+  test('sets and resets a project display name through the API without canonicalizing its key', async () => {
+    const projectKey = '  /workspace/alpha  '
+    const setReq = makeRequest('PUT', '/api/desktop-ui/preferences/project-display-name', {
+      projectKey,
+      displayName: '  Alpha   project  ',
+    })
+
+    const setRes = await handleDesktopUiApi(setReq.req, setReq.url, setReq.segments)
+    expect(setRes.status).toBe(200)
+    await expect(setRes.json()).resolves.toEqual({
+      ok: true,
+      projectKey,
+      displayName: 'Alpha project',
+    })
+    expect((await new DesktopUiPreferencesService().readPreferences()).preferences.projectDisplayNames).toEqual({
+      [projectKey]: 'Alpha project',
+    })
+
+    const resetReq = makeRequest('PUT', '/api/desktop-ui/preferences/project-display-name', {
+      projectKey,
+      displayName: null,
+    })
+    const resetRes = await handleDesktopUiApi(resetReq.req, resetReq.url, resetReq.segments)
+    expect(resetRes.status).toBe(200)
+    await expect(resetRes.json()).resolves.toEqual({
+      ok: true,
+      projectKey,
+      displayName: null,
+    })
+    expect((await new DesktopUiPreferencesService().readPreferences()).preferences.projectDisplayNames).toEqual({})
+  })
+
+  test('rejects invalid project display name updates without overwriting stored names', async () => {
+    const validReq = makeRequest('PUT', '/api/desktop-ui/preferences/project-display-name', {
+      projectKey: '/workspace/alpha',
+      displayName: 'Alpha',
+    })
+    expect((await handleDesktopUiApi(validReq.req, validReq.url, validReq.segments)).status).toBe(200)
+
+    for (const [body, message] of [
+      [{ projectKey: '', displayName: 'Replacement' }, 'projectKey must be a non-empty string up to 4096 characters'],
+      [{ projectKey: '   ', displayName: 'Replacement' }, 'projectKey must be a non-empty string up to 4096 characters'],
+      [{ projectKey: '/workspace/alpha', displayName: '   ' }, 'displayName must be a non-empty string up to 80 characters'],
+      [{ projectKey: '/workspace/alpha', displayName: 42 }, 'displayName must be a non-empty string up to 80 characters'],
+      [{ projectKey: '/workspace/alpha', displayName: 'n'.repeat(81) }, 'displayName must be a non-empty string up to 80 characters'],
+      [{ projectKey: 'x'.repeat(4_097), displayName: 'Replacement' }, 'projectKey must be a non-empty string up to 4096 characters'],
+    ] as const) {
+      const invalidReq = makeRequest('PUT', '/api/desktop-ui/preferences/project-display-name', body)
+      const invalidRes = await handleDesktopUiApi(invalidReq.req, invalidReq.url, invalidReq.segments)
+      expect(invalidRes.status).toBe(400)
+      await expect(invalidRes.json()).resolves.toMatchObject({
+        error: 'BAD_REQUEST',
+        message,
+      })
+    }
+
+    expect((await new DesktopUiPreferencesService().readPreferences()).preferences.projectDisplayNames).toEqual({
+      '/workspace/alpha': 'Alpha',
     })
   })
 
@@ -543,7 +700,7 @@ describe('desktop UI preferences API', () => {
     await expect(putRes.json()).resolves.toMatchObject({
       ok: true,
       preferences: {
-        schemaVersion: 4,
+        schemaVersion: 5,
         pet: {
           enabled: true,
           selectedPetId: 'seedy',

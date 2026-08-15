@@ -70,7 +70,7 @@ import type { SettingSource } from './settings/constants.js'
 import { jsonStringify } from './slowOperations.js'
 import { buildEffectiveSystemPrompt } from './systemPrompt.js'
 import type { Theme } from './theme.js'
-import { getCurrentUsage } from './tokens.js'
+import { getCurrentUsage, tokenCountWithEstimation } from './tokens.js'
 
 const RESERVED_CATEGORY_NAME = 'Autocompact buffer'
 const MANUAL_COMPACT_BUFFER_NAME = 'Compact buffer'
@@ -887,8 +887,11 @@ function processAttachment(
 async function approximateMessageTokens(
   messages: Message[],
   estimateOnly = false,
+  alreadyMicrocompacted = false,
 ): Promise<MessageBreakdown> {
-  const microcompactResult = await microcompactMessages(messages)
+  const effectiveMessages = alreadyMicrocompacted
+    ? messages
+    : (await microcompactMessages(messages)).messages
 
   // Initialize tracking
   const breakdown: MessageBreakdown = {
@@ -905,7 +908,7 @@ async function approximateMessageTokens(
 
   // Build a map of tool_use_id to tool_name for easier lookup
   const toolUseIdToName = new Map<string, string>()
-  for (const msg of microcompactResult.messages) {
+  for (const msg of effectiveMessages) {
     if (msg.type === 'assistant') {
       for (const block of msg.message.content) {
         if ('type' in block && block.type === 'tool_use') {
@@ -921,7 +924,7 @@ async function approximateMessageTokens(
   }
 
   // Process each message for detailed breakdown
-  for (const msg of microcompactResult.messages) {
+  for (const msg of effectiveMessages) {
     if (msg.type === 'assistant') {
       processAssistantMessage(msg, breakdown)
     } else if (msg.type === 'user') {
@@ -933,7 +936,7 @@ async function approximateMessageTokens(
 
   // Calculate total tokens using the API for accuracy
   const approximateMessageTokens = await countTokensWithFallback(
-    normalizeMessagesForAPI(microcompactResult.messages).map(_ => {
+    normalizeMessagesForAPI(effectiveMessages).map(_ => {
       if (_.type === 'assistant') {
         return {
           // Important: strip out fields like id, etc. -- the counting API errors if they're present
@@ -962,7 +965,10 @@ export async function analyzeContextUsage(
   mainThreadAgentDefinition?: AgentDefinition,
   /** Original messages before microcompact, used to extract API usage */
   originalMessages?: Message[],
-  analysisOptions?: { estimateOnly?: boolean },
+  analysisOptions?: {
+    estimateOnly?: boolean
+    messagesAlreadyMicrocompacted?: boolean
+  },
 ): Promise<ContextData> {
   const estimateOnly = analysisOptions?.estimateOnly ?? false
   const runtimeModel = getRuntimeMainLoopModel({
@@ -1024,7 +1030,11 @@ export async function analyzeContextUsage(
       agentDefinitions,
       estimateOnly,
     ),
-    approximateMessageTokens(messages, estimateOnly),
+    approximateMessageTokens(
+      messages,
+      estimateOnly,
+      analysisOptions?.messagesAlreadyMicrocompacted,
+    ),
   ])
 
   // Count skills separately with error isolation
@@ -1141,8 +1151,51 @@ export async function analyzeContextUsage(
     })
   }
 
-  // Calculate actual content usage (before adding reserved buffers)
-  // Exclude deferred categories from the usage calculation
+  // Structural category estimates provide the detailed breakdown, while the
+  // canonical counter anchors the total to the latest provider usage and only
+  // estimates messages added after that response.
+  const estimatedUsage = cats.reduce(
+    (sum, cat) => sum + (cat.isDeferred ? 0 : cat.tokens),
+    0,
+  )
+
+  const usageMessages = originalMessages ?? messages
+  const apiUsage = getCurrentUsage(usageMessages)
+  const finalTotalTokens = calculateCurrentContextTokenTotal(
+    estimatedUsage,
+    apiUsage,
+    contextWindow,
+    {
+      hasMediaInput: hasMediaInput(usageMessages),
+      usageTrust: getProviderUsageTrust({
+        isFirstPartyAnthropic: isFirstPartyAnthropicBaseUrl(),
+      }),
+      canonicalTokens: apiUsage
+        ? tokenCountWithEstimation(usageMessages)
+        : undefined,
+    },
+  )
+
+  // Provider usage covers system prompt, tools, skills, and messages as one
+  // number. Reconcile the Messages category to the canonical total so the
+  // breakdown, free space, and grid cannot disagree with the headline meter.
+  const fixedUsage = cats.reduce(
+    (sum, cat) =>
+      sum + (cat.isDeferred || cat.name === 'Messages' ? 0 : cat.tokens),
+    0,
+  )
+  const reconciledMessageTokens = Math.max(0, finalTotalTokens - fixedUsage)
+  const messagesCategory = cats.find(cat => cat.name === 'Messages')
+  if (messagesCategory) {
+    messagesCategory.tokens = reconciledMessageTokens
+  } else if (reconciledMessageTokens > 0) {
+    cats.push({
+      name: 'Messages',
+      tokens: reconciledMessageTokens,
+      color: 'purple_FOR_SUBAGENTS_ONLY',
+    })
+  }
+
   const actualUsage = cats.reduce(
     (sum, cat) => sum + (cat.isDeferred ? 0 : cat.tokens),
     0,
@@ -1176,7 +1229,10 @@ export async function analyzeContextUsage(
     // doesn't need a visible reservation in the grid.
   } else if (isAutoCompact && autoCompactThreshold !== undefined) {
     // Autocompact buffer (from effective context)
-    reservedTokens = contextWindow - autoCompactThreshold
+    reservedTokens = Math.min(
+      contextWindow - autoCompactThreshold,
+      Math.max(0, contextWindow - actualUsage),
+    )
     cats.push({
       name: RESERVED_CATEGORY_NAME,
       tokens: reservedTokens,
@@ -1184,7 +1240,10 @@ export async function analyzeContextUsage(
     })
   } else if (!isAutoCompact) {
     // Compact buffer reserve (3k from actual context limit)
-    reservedTokens = MANUAL_COMPACT_BUFFER_TOKENS
+    reservedTokens = Math.min(
+      MANUAL_COMPACT_BUFFER_TOKENS,
+      Math.max(0, contextWindow - actualUsage),
+    )
     cats.push({
       name: MANUAL_COMPACT_BUFFER_NAME,
       tokens: reservedTokens,
@@ -1200,30 +1259,6 @@ export async function analyzeContextUsage(
     tokens: freeTokens,
     color: 'promptBorder',
   })
-
-  // Total for display (everything except free space)
-  const totalIncludingReserved = actualUsage
-
-  // Extract API usage from original messages (if provided) to anchor the
-  // estimate to the latest provider-reported request size.
-  const apiUsage = getCurrentUsage(originalMessages ?? messages)
-
-  // Use the larger of the local estimate and the latest API-reported context.
-  // This keeps the context meter from dropping when a response completes and
-  // the output tokens become part of the next turn's context.
-  // Clamp to contextWindow so providers whose input_tokens already approach the
-  // limit (e.g. DeepSeek with 1M context) don't push the display over 100%.
-  const finalTotalTokens = calculateCurrentContextTokenTotal(
-    totalIncludingReserved,
-    apiUsage,
-    contextWindow,
-    {
-      hasMediaInput: hasMediaInput(originalMessages ?? messages),
-      usageTrust: getProviderUsageTrust({
-        isFirstPartyAnthropic: isFirstPartyAnthropicBaseUrl(),
-      }),
-    },
-  )
 
   // Pre-calculate grid based on model context window and terminal width
   // For narrow screens (< 80 cols), use 5x5 for 200k models, 5x10 for 1M+ models

@@ -28,6 +28,7 @@ import { escapeXml } from '../../utils/xml.js';
 import { evictTaskOutput, getTaskOutputPath, initTaskOutputAsSymlink } from '../../utils/task/diskOutput.js';
 import { PANEL_GRACE_MS, registerTask, updateTaskState } from '../../utils/task/framework.js';
 import { emitTaskProgress } from '../../utils/task/sdkProgress.js';
+import { emitTaskTerminatedSdk } from '../../utils/sdkEventQueue.js';
 import type { TaskState } from '../types.js';
 export type ToolActivity = {
   toolName: string;
@@ -192,6 +193,8 @@ export function createActivityDescriptionResolver(tools: Tools): ActivityDescrip
 }
 export type LocalAgentTaskState = TaskStateBase & {
   type: 'local_agent';
+  /** Parent agent that owns this task. Undefined means the root session. */
+  ownerAgentId?: string;
   agentId: string;
   /** Monotonic execution generation. Terminal events must match this epoch. */
   epoch: number;
@@ -1084,6 +1087,7 @@ export function updateAgentSummary(taskId: string, summary: string, setAppState:
     toolUseCount: number;
     startTime: number;
     toolUseId: string | undefined;
+    ownerAgentId: string | undefined;
   } | null = null;
   updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => {
     if (task.status !== 'running') {
@@ -1093,7 +1097,8 @@ export function updateAgentSummary(taskId: string, summary: string, setAppState:
       tokenCount: task.progress?.tokenCount ?? 0,
       toolUseCount: task.progress?.toolUseCount ?? 0,
       startTime: task.startTime,
-      toolUseId: task.toolUseId
+      toolUseId: task.toolUseId,
+      ownerAgentId: task.ownerAgentId
     };
     return {
       ...task,
@@ -1114,7 +1119,8 @@ export function updateAgentSummary(taskId: string, summary: string, setAppState:
       tokenCount,
       toolUseCount,
       startTime,
-      toolUseId
+      toolUseId,
+      ownerAgentId
     } = captured;
     emitTaskProgress({
       taskId,
@@ -1123,7 +1129,8 @@ export function updateAgentSummary(taskId: string, summary: string, setAppState:
       startTime,
       totalTokens: tokenCount,
       toolUses: toolUseCount,
-      summary
+      summary,
+      ownerAgentId
     });
   }
 }
@@ -1245,7 +1252,8 @@ export function registerAsyncAgent({
   selectedAgent,
   setAppState,
   parentAbortController,
-  toolUseId
+  toolUseId,
+  ownerAgentId
 }: {
   agentId: string;
   description: string;
@@ -1254,6 +1262,7 @@ export function registerAsyncAgent({
   setAppState: SetAppState;
   parentAbortController?: AbortController;
   toolUseId?: string;
+  ownerAgentId?: string;
 }): LocalAgentTaskState {
   if (!ensureAgentRegistryCapacity(agentId, setAppState)) {
     throw new Error(`Agent registry is full (${MAX_AGENT_REGISTRY_SIZE} tasks are running, retained, or awaiting completion delivery); retry after a task is notified and released`);
@@ -1266,6 +1275,7 @@ export function registerAsyncAgent({
     ...createTaskStateBase(agentId, 'local_agent', description, toolUseId),
     type: 'local_agent',
     status: 'running',
+    ownerAgentId,
     agentId,
     epoch: 1,
     prompt,
@@ -1307,7 +1317,8 @@ export function registerAgentForeground({
   selectedAgent,
   setAppState,
   autoBackgroundMs,
-  toolUseId
+  toolUseId,
+  ownerAgentId
 }: {
   agentId: string;
   description: string;
@@ -1316,6 +1327,7 @@ export function registerAgentForeground({
   setAppState: SetAppState;
   autoBackgroundMs?: number;
   toolUseId?: string;
+  ownerAgentId?: string;
 }): {
   taskId: string;
   backgroundSignal: Promise<void>;
@@ -1333,6 +1345,7 @@ export function registerAgentForeground({
     ...createTaskStateBase(agentId, 'local_agent', description, toolUseId),
     type: 'local_agent',
     status: 'running',
+    ownerAgentId,
     agentId,
     epoch: 1,
     prompt,

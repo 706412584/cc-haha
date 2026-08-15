@@ -523,6 +523,29 @@ const PluginManifestOutputStylesSchema = lazySchema(() =>
   }),
 )
 
+/**
+ * Schema for additional dynamic-workflow paths in a plugin manifest.
+ *
+ * Plugins ship workflows in `workflows/` at the plugin root; this field points
+ * at extra directories or files, matching how commands/agents/skills work.
+ */
+const PluginManifestWorkflowsSchema = lazySchema(() =>
+  z.object({
+    workflows: z.union([
+      RelativePath().describe(
+        'Path to additional workflows directory or file (in addition to those in the workflows/ directory, if it exists), relative to the plugin root',
+      ),
+      z
+        .array(
+          RelativePath().describe(
+            'Path to additional workflows directory or file, relative to the plugin root',
+          ),
+        )
+        .describe('List of paths to additional workflows directories or files'),
+    ]),
+  }),
+)
+
 // Helper validators for LSP config
 const nonEmptyString = lazySchema(() => z.string().min(1))
 const fileExtension = lazySchema(() =>
@@ -897,6 +920,7 @@ export const PluginManifestSchema = lazySchema(() =>
     ...PluginManifestAgentsSchema().partial().shape,
     ...PluginManifestSkillsSchema().partial().shape,
     ...PluginManifestOutputStylesSchema().partial().shape,
+    ...PluginManifestWorkflowsSchema().partial().shape,
     ...PluginManifestChannelsSchema().partial().shape,
     ...PluginManifestMcpServerSchema().partial().shape,
     ...PluginManifestLspServerSchema().partial().shape,

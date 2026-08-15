@@ -52,6 +52,7 @@ describe('background task notification persistence', () => {
       taskId: 'agent-task-1',
       toolUseId: 'agent-tool-1',
       status: 'completed',
+      workflowRunId: 'wf_persisted-run',
       summary: 'Agent completed after the foreground Skill output',
       result: 'Background verification passed',
       timestamp: '2026-07-18T00:01:00.000Z',
@@ -61,6 +62,7 @@ describe('background task notification persistence', () => {
       taskId: 'agent-task-1',
       toolUseId: 'agent-tool-1',
       status: 'completed',
+      workflowRunId: 'wf_persisted-run',
       summary: 'Agent completed after the foreground Skill output',
       result: 'Background verification passed',
       timestamp: '2026-07-18T00:01:00.000Z',
@@ -201,6 +203,121 @@ describe('background task notification persistence', () => {
     }])
   })
 
+  it('restores workflow run identity from task-notification transcript turns', async () => {
+    const sessionId = crypto.randomUUID()
+    const projectDir = path.join(configDir, 'projects', '-tmp-workflow-notification')
+    const transcriptPath = path.join(projectDir, `${sessionId}.jsonl`)
+    await fs.mkdir(projectDir, { recursive: true })
+    await fs.writeFile(transcriptPath, `${JSON.stringify({
+      type: 'user',
+      uuid: crypto.randomUUID(),
+      timestamp: '2026-07-17T00:00:00.000Z',
+      message: {
+        role: 'user',
+        content: '<task-notification>\n<task-id>workflow-task</task-id>\n<tool-use-id>workflow-tool</tool-use-id>\n<workflow-run-id>wf_transcript-run</workflow-run-id>\n<status>completed</status>\n<summary>Workflow completed</summary>\n</task-notification>',
+      },
+    })}\n`, 'utf8')
+
+    const service = new SessionService()
+    expect(await service.getSessionTaskNotifications(sessionId)).toEqual([{
+      taskId: 'workflow-task',
+      toolUseId: 'workflow-tool',
+      status: 'completed',
+      workflowRunId: 'wf_transcript-run',
+      summary: 'Workflow completed',
+      timestamp: '2026-07-17T00:00:00.000Z',
+    }])
+  })
+
+  it('keeps root and multiple child terminals with the same leaf tool id distinct', async () => {
+    const sessionId = crypto.randomUUID()
+    const projectDir = path.join(configDir, 'projects', '-tmp-owned-terminals')
+    await fs.mkdir(projectDir, { recursive: true })
+    await fs.writeFile(
+      path.join(projectDir, `${sessionId}.jsonl`),
+      `${JSON.stringify({
+        type: 'session-meta',
+        isMeta: true,
+        workDir: '/tmp/owned-terminals',
+        timestamp: '2026-08-10T00:00:00.000Z',
+      })}\n`,
+      'utf8',
+    )
+    const service = new SessionService()
+
+    await service.appendSessionTaskNotification(sessionId, {
+      taskId: 'root-task',
+      toolUseId: 'Agent:0',
+      status: 'completed',
+      timestamp: '2026-08-10T00:00:01.000Z',
+    })
+    await service.appendSessionTaskNotification(sessionId, {
+      taskId: 'child-a-task',
+      toolUseId: 'Agent:0',
+      ownerAgentId: 'child-a',
+      status: 'failed',
+      timestamp: '2026-08-10T00:00:02.000Z',
+    })
+    await service.appendSessionTaskNotification(sessionId, {
+      taskId: 'child-b-task',
+      toolUseId: 'Agent:0',
+      ownerAgentId: 'child-b',
+      status: 'stopped',
+      timestamp: '2026-08-10T00:00:03.000Z',
+    })
+
+    expect(await service.getSessionTaskNotifications(sessionId)).toEqual([
+      expect.objectContaining({
+        taskId: 'root-task',
+        toolUseId: 'Agent:0',
+        status: 'completed',
+      }),
+      expect.objectContaining({
+        taskId: 'child-a-task',
+        toolUseId: 'Agent:0',
+        ownerAgentId: 'child-a',
+        status: 'failed',
+      }),
+      expect.objectContaining({
+        taskId: 'child-b-task',
+        toolUseId: 'Agent:0',
+        ownerAgentId: 'child-b',
+        status: 'stopped',
+      }),
+    ])
+  })
+
+  it('restores an owned synthetic stop without degrading it to root scope', async () => {
+    const sessionId = crypto.randomUUID()
+    const projectDir = path.join(configDir, 'projects', '-tmp-owned-synthetic-stop')
+    const transcriptPath = path.join(projectDir, `${sessionId}.jsonl`)
+    await fs.mkdir(projectDir, { recursive: true })
+    await fs.writeFile(transcriptPath, `${JSON.stringify({
+      type: 'session-meta',
+      isMeta: true,
+      workDir: '/tmp/owned-synthetic-stop',
+      timestamp: '2026-07-18T00:00:00.000Z',
+    })}\n`, 'utf8')
+
+    const service = new SessionService()
+    await service.appendSessionTaskNotification(sessionId, {
+      taskId: 'provider-analyzer-teammate',
+      toolUseId: 'provider-analyzer-teammate-tool',
+      ownerAgentId: 'provider-analyzer',
+      status: 'stopped',
+      summary: 'Provider analyzer teammate stopped because the runtime exited',
+    })
+
+    expect(await service.getSessionTaskNotifications(sessionId)).toEqual([
+      expect.objectContaining({
+        taskId: 'provider-analyzer-teammate',
+        toolUseId: 'provider-analyzer-teammate-tool',
+        ownerAgentId: 'provider-analyzer',
+        status: 'stopped',
+      }),
+    ])
+  })
+
   it('normalizes and persists one terminal SDK event for multiple observers', async () => {
     const append = spyOn(sessionService, 'appendSessionTaskNotification').mockResolvedValue()
     const sdkEvent = {
@@ -210,9 +327,11 @@ describe('background task notification persistence', () => {
       task_id: 'agent-task-1',
       tool_use_id: 'agent-tool-1',
       status: 'completed',
+      workflow_run_id: 'wf_sdk-run',
       summary: 'Agent completed',
       result: 'All checks passed',
       output_file: '/tmp/agent-task-1.output',
+      owner_agent_id: 'parent-agent',
       timestamp: '2026-07-18T00:01:00.000Z',
     }
 
@@ -227,9 +346,11 @@ describe('background task notification persistence', () => {
       taskId: 'agent-task-1',
       toolUseId: 'agent-tool-1',
       status: 'completed',
+      workflowRunId: 'wf_sdk-run',
       summary: 'Agent completed',
       result: 'All checks passed',
       outputFile: '/tmp/agent-task-1.output',
+      ownerAgentId: 'parent-agent',
       timestamp: '2026-07-18T00:01:00.000Z',
     })
   })

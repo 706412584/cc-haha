@@ -205,7 +205,7 @@ export function AttachmentGallery({ attachments, variant = 'message', onRemove, 
           })}
         </div>
       ) : (
-      <div className={isComposer ? 'flex flex-wrap items-center gap-2' : 'flex flex-wrap justify-end gap-2'}>
+      <div className={isComposer ? 'flex flex-wrap items-center gap-2' : 'flex max-w-full flex-wrap justify-end gap-2'}>
         {attachments.map((attachment, index) => {
           const imageSrc = attachment.type === 'image' ? attachmentImageSource(attachment) : undefined
 
@@ -235,7 +235,7 @@ export function AttachmentGallery({ attachments, variant = 'message', onRemove, 
                     className={
                       isComposer
                         ? 'h-16 w-16 object-cover'
-                        : 'max-h-[340px] w-full max-w-[360px] object-cover'
+                        : 'h-28 w-28 object-cover'
                     }
                   />
                 </button>

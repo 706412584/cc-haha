@@ -15,6 +15,9 @@ export type TaskType =
 export type TaskStatus =
   | 'pending'
   | 'running'
+  // Only dynamic workflows pause: the run is stopped but its journal is intact,
+  // so resuming replays completed agents instead of re-running them.
+  | 'paused'
   | 'completed'
   | 'failed'
   | 'killed'

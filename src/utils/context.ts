@@ -206,19 +206,34 @@ export function calculateCurrentContextTokenTotal(
     cache_read_input_tokens: number
   } | null,
   contextWindow?: number,
-  options?: { hasMediaInput?: boolean; usageTrust?: ProviderUsageTrust },
+  options?: {
+    hasMediaInput?: boolean
+    usageTrust?: ProviderUsageTrust
+    canonicalTokens?: number
+  },
 ): number {
   const hasMediaInput = options?.hasMediaInput ?? false
   const usageTrust = options?.usageTrust ?? 'high'
 
   if (contextWindow !== undefined) {
-    return calculateContextBudget({
+    const budget = calculateContextBudget({
       estimatedTokens,
       contextWindow,
       currentUsage,
       usageTrust,
       hasMediaInput,
-    }).usedTokens
+    })
+    if (
+      budget.ignoredUsageReason ||
+      !currentUsage ||
+      options?.canonicalTokens === undefined
+    ) {
+      return budget.usedTokens
+    }
+    return Math.min(
+      Math.max(budget.usedTokens, options.canonicalTokens),
+      contextWindow,
+    )
   }
 
   if (!currentUsage) return estimatedTokens

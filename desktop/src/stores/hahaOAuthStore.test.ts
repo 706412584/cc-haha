@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { startMock, statusMock, logoutMock } = vi.hoisted(() => ({
+const { startMock, statusMock, logoutMock, settingsFetchAllMock } = vi.hoisted(() => ({
   startMock: vi.fn(),
   statusMock: vi.fn(),
   logoutMock: vi.fn(),
+  settingsFetchAllMock: vi.fn(),
 }))
 
 vi.mock('../api/hahaOAuth', () => ({
@@ -11,6 +12,12 @@ vi.mock('../api/hahaOAuth', () => ({
     start: startMock,
     status: statusMock,
     logout: logoutMock,
+  },
+}))
+
+vi.mock('./settingsStore', () => ({
+  useSettingsStore: {
+    getState: () => ({ fetchAll: settingsFetchAllMock }),
   },
 }))
 
@@ -24,6 +31,8 @@ describe('hahaOAuthStore', () => {
     startMock.mockReset()
     statusMock.mockReset()
     logoutMock.mockReset()
+    settingsFetchAllMock.mockReset()
+    settingsFetchAllMock.mockResolvedValue(undefined)
     useHahaOAuthStore.setState({
       ...initialState,
       status: null,
@@ -73,5 +82,14 @@ describe('hahaOAuthStore', () => {
       subscriptionType: 'max',
     })
     expect(useHahaOAuthStore.getState().isPolling).toBe(false)
+    expect(settingsFetchAllMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not refresh model settings for a logged-out status check', async () => {
+    statusMock.mockResolvedValue({ loggedIn: false })
+
+    await useHahaOAuthStore.getState().fetchStatus()
+
+    expect(settingsFetchAllMock).not.toHaveBeenCalled()
   })
 })

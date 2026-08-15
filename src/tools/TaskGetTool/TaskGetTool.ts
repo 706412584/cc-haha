@@ -70,8 +70,8 @@ export const TaskGetTool = buildTool({
   renderToolUseMessage() {
     return null
   },
-  async call({ taskId }) {
-    const taskListId = getTaskListId()
+  async call({ taskId }, context) {
+    const taskListId = getTaskListId(context?.agentId)
 
     const task = await getTask(taskListId, taskId)
 

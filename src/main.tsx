@@ -52,6 +52,7 @@ import { getSubscriptionType, isClaudeAISubscriber, prefetchAwsCredentialsAndBed
 import { checkHasTrustDialogAccepted, getGlobalConfig, getRemoteControlAtStartup, isAutoUpdaterDisabled, saveGlobalConfig } from './utils/config.js';
 import { seedEarlyInput, stopCapturingEarlyInput } from './utils/earlyInput.js';
 import { getInitialEffortSetting, parseEffortValue } from './utils/effort.js';
+import { ULTRACODE_EFFORT_ARG, ULTRACODE_EFFORT_LEVEL } from './utils/workflows/ultracode.js';
 import { getInitialFastModeSetting, isFastModeEnabled, prefetchFastModeStatus, resolveFastModeStatusFromCache } from './utils/fastMode.js';
 import { applyConfigEnvironmentVariables } from './utils/managedEnv.js';
 import { createSystemMessage, createUserMessage } from './utils/messages.js';
@@ -991,10 +992,16 @@ async function run(): Promise<CommanderCommand> {
     return Number.isFinite(n) ? n : undefined;
   }).hideHelp()).option('--from-pr [value]', 'Resume a session linked to a PR by PR number/URL, or open interactive picker with optional search term', value => value || true).option('--no-session-persistence', 'Disable session persistence - sessions will not be saved to disk and cannot be resumed (only works with --print)').addOption(new Option('--resume-session-at <message id>', 'When resuming, only messages up to and including the assistant message with <message.id> (use with --resume in print mode)').argParser(String).hideHelp()).addOption(new Option('--rewind-files <user-message-id>', 'Restore files to state at the specified user message and exit (requires --resume)').hideHelp())
   // @[MODEL LAUNCH]: Update the example model ID in the --model help text.
-  .option('--model <model>', `Model for the current session. Provide an alias for the latest model (e.g. 'sonnet' or 'opus') or a model's full name (e.g. 'claude-sonnet-4-6').`).addOption(new Option('--effort <level>', `Effort level for the current session (low, medium, high, xhigh, max, or an integer)`).argParser((rawValue: string) => {
+  .option('--model <model>', `Model for the current session. Provide an alias for the latest model (e.g. 'sonnet' or 'opus') or a model's full name (e.g. 'claude-sonnet-4-6').`).addOption(new Option('--effort <level>', `Effort level for the current session (low, medium, high, xhigh, max, ultracode, or an integer)`).argParser((rawValue: string) => {
+    // `ultracode` is passed through as-is: it is not an effort level but a
+    // request for xhigh plus standing workflow orchestration, resolved later
+    // where the session's model and workflow availability are known.
+    if (rawValue.toLowerCase() === ULTRACODE_EFFORT_ARG) {
+      return ULTRACODE_EFFORT_ARG;
+    }
     const value = parseEffortValue(rawValue);
     if (value === undefined) {
-      throw new InvalidArgumentError('It must be one of: low, medium, high, xhigh, max, or an integer');
+      throw new InvalidArgumentError('It must be one of: low, medium, high, xhigh, max, ultracode, or an integer');
     }
     return value;
   })).option('--agent <agent>', `Agent for the current session. Overrides the 'agent' setting.`).option('--betas <betas...>', 'Beta headers to include in API requests (API key users only)').option('--fallback-model <model>', 'Enable automatic fallback to specified model when default model is overloaded (only works with --print)').addOption(new Option('--workload <tag>', 'Workload tag for billing-header attribution (cc_workload). Process-scoped; set by SDK daemon callers that spawn subprocesses for cron work. (only works with --print)').hideHelp()).option('--settings <file-or-json>', 'Path to a settings JSON file or a JSON string to load additional settings from').option('--add-dir <directories...>', 'Additional directories to allow tool access to').option('--ide', 'Automatically connect to IDE on startup if exactly one valid IDE is available', () => true).option('--strict-mcp-config', 'Only use MCP servers from --mcp-config, ignoring all other MCP configurations', () => true).option('--session-id <uuid>', 'Use a specific session ID for the conversation (must be a valid UUID)').option('-n, --name <name>', 'Set a display name for this session (shown in /resume and terminal title)').option('--agents <json>', 'JSON object defining custom agents (e.g. \'{"reviewer": {"description": "Reviews code", "prompt": "You are a code reviewer"}}\')').option('--setting-sources <sources>', 'Comma-separated list of setting sources to load (user, project, local).')
@@ -2132,7 +2139,11 @@ async function run(): Promise<CommanderCommand> {
     // An explicit CLI effort remains authoritative. Otherwise a selected
     // main-thread agent may provide its own effort before falling back to the
     // session setting.
-    const effectiveEffort = parseEffortValue(options.effort) ?? mainThreadAgentDefinition?.effort ?? getInitialEffortSetting();
+    // `--effort ultracode` is not a sixth level: it resolves to xhigh and
+    // raises a separate session flag, so every model-capability check keeps
+    // reasoning about the five real levels.
+    const ultracodeRequested = String(options.effort ?? '').toLowerCase() === ULTRACODE_EFFORT_ARG;
+    const effectiveEffort = ultracodeRequested ? ULTRACODE_EFFORT_LEVEL : parseEffortValue(options.effort) ?? mainThreadAgentDefinition?.effort ?? getInitialEffortSetting();
 
     // Compute resolved model for hooks (use user-specified model at launch)
     setInitialMainLoopModel(getUserSpecifiedModelSetting() || null);
@@ -2655,6 +2666,7 @@ async function run(): Promise<CommanderCommand> {
         },
         toolPermissionContext,
         effortValue: effectiveEffort,
+        ultracode: ultracodeRequested,
         ...(isFastModeEnabled() && {
           fastMode: getInitialFastModeSetting(effectiveModel ?? null)
         }),
@@ -3083,6 +3095,7 @@ async function run(): Promise<CommanderCommand> {
         })
       } : null,
       effortValue: effectiveEffort,
+      ultracode: ultracodeRequested,
       activeOverlays: new Set<string>(),
       fastMode: getInitialFastModeSetting(resolvedInitialModel),
       ...(isAdvisorEnabled() && advisorModel && {
@@ -3143,6 +3156,9 @@ async function run(): Promise<CommanderCommand> {
       appendSystemPrompt,
       taskListId,
       thinkingConfig,
+      // An explicit --effort flag is authoritative over CLAUDE_CODE_EFFORT_LEVEL
+      // env (resolveAppliedEffort), matching the effectiveEffort precedence.
+      effortValueOverridesEnv: options.effort !== undefined,
       ...(uploaderReady && {
         onTurnComplete: (messages: MessageType[]) => {
           void uploaderReady.then(uploader => uploader?.(messages));

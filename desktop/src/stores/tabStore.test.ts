@@ -114,6 +114,30 @@ describe('tabStore', () => {
     expect(useTabStore.getState().tabs.map((tab) => tab.sessionId)).toEqual(['session-a', 'session-b'])
   })
 
+  it('returns a nested subagent to the agent tab that opened it', () => {
+    useTabStore.getState().openTab('session-root', 'Root session')
+    const parentTabId = useTabStore.getState().openSubagentTab(
+      'session-root',
+      'agent-a',
+      'Agent A',
+    )
+    const nestedTabId = useTabStore.getState().openSubagentTab(
+      'session-root',
+      'agent-a/worker-a/agent-b',
+      'Agent B',
+      undefined,
+      parentTabId,
+    )
+
+    useTabStore.getState().returnFromSubagent(nestedTabId)
+
+    expect(useTabStore.getState().activeTabId).toBe(parentTabId)
+    expect(useTabStore.getState().tabs.map((tab) => tab.sessionId)).toEqual([
+      'session-root',
+      parentTabId,
+    ])
+  })
+
   it('closes a subagent tab even when its source session is gone', () => {
     useTabStore.getState().openTab('session-a', 'Session A')
     const tabId = useTabStore.getState().openSubagentTab('session-missing', 'tool-1', 'SubAgent run')
@@ -237,6 +261,57 @@ describe('tabStore', () => {
       openTabs: [],
       activeTabId: null,
     }))
+  })
+
+  it('returns an ephemeral Agent Teams member to its workbench tab', () => {
+    useTabStore.getState().openTab('session-1', 'Lead session')
+    const workbenchTabId = useTabStore.getState().openTeamWorkbenchTab('session-1', 'Review team')
+    const memberTabId = useTabStore.getState().openTeamMemberTab(
+      'session-1',
+      'reviewer@review-team',
+      'Reviewer',
+      workbenchTabId,
+    )
+
+    expect(useTabStore.getState().tabs.find((tab) => tab.sessionId === memberTabId)).toMatchObject({
+      type: 'team-member',
+      sourceSessionId: 'session-1',
+      teamLeadSessionId: 'session-1',
+      teamMemberAgentId: 'reviewer@review-team',
+      returnTabId: workbenchTabId,
+    })
+    expect(localStorage.getItem('cc-haha-open-tabs')).toBe(JSON.stringify({
+      openTabs: [{ sessionId: 'session-1', title: 'Lead session', type: 'session' }],
+      activeTabId: 'session-1',
+    }))
+
+    useTabStore.getState().returnFromTeamMember(memberTabId)
+
+    expect(useTabStore.getState().activeTabId).toBe(workbenchTabId)
+    expect(useTabStore.getState().tabs.some((tab) => tab.sessionId === memberTabId)).toBe(false)
+  })
+
+  it('isolates the same member id across Team incarnations', () => {
+    const oldTabId = useTabStore.getState().openTeamMemberTab(
+      'shared-lead',
+      'reviewer@same-name',
+      'Old reviewer',
+      undefined,
+      'old-incarnation',
+    )
+    const newTabId = useTabStore.getState().openTeamMemberTab(
+      'shared-lead',
+      'reviewer@same-name',
+      'New reviewer',
+      undefined,
+      'new-incarnation',
+    )
+
+    expect(newTabId).not.toBe(oldTabId)
+    expect(useTabStore.getState().tabs.filter((tab) => tab.type === 'team-member')).toEqual([
+      expect.objectContaining({ sessionId: oldTabId, teamIncarnationId: 'old-incarnation' }),
+      expect.objectContaining({ sessionId: newTabId, teamIncarnationId: 'new-incarnation' }),
+    ])
   })
 
   it('does not let async tab restore overwrite tabs opened while restore is in flight', async () => {

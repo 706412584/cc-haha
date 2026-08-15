@@ -16,6 +16,8 @@ import { companionReservedColumns } from '../../buddy/CompanionSprite.js';
 import { findBuddyTriggerPositions, useBuddyNotification } from '../../buddy/useBuddyNotification.js';
 import { FastModePicker } from '../../commands/fast/fast.js';
 import { isUltrareviewEnabled } from '../../commands/review/ultrareviewEnabled.js';
+import { isWorkflowKeywordTriggerEnabled } from '../../utils/workflows/enabled.js';
+import { findKeywordRanges } from '../../utils/workflows/keyword.js';
 import { getNativeCSIuTerminalDisplayName } from '../../commands/terminalSetup/terminalSetup.js';
 import { type Command, hasCommand } from '../../commands.js';
 import { useIsModalOverlayActive } from '../../context/overlayContext.js';
@@ -518,6 +520,24 @@ function PromptInput({
   const ultraplanLaunching = useAppState(s => s.ultraplanLaunching);
   const ultraplanTriggers = useMemo(() => feature('ULTRAPLAN') && !ultraplanSessionUrl && !ultraplanLaunching ? findUltraplanTriggerPositions(displayedValue) : [], [displayedValue, ultraplanSessionUrl, ultraplanLaunching]);
   const ultrareviewTriggers = useMemo(() => isUltrareviewEnabled() ? findUltrareviewTriggerPositions(displayedValue) : [], [displayedValue]);
+  // `ultracode` opts this turn into multi-agent orchestration. The highlight is
+  // the only warning the user gets before a one-line prompt becomes a run that
+  // spawns dozens of agents, so it must be visible before submit.
+  const [ultracodeKeywordDismissed, setUltracodeKeywordDismissed] = useState(false);
+  const ultracodeTriggers = useMemo(() => isWorkflowKeywordTriggerEnabled() && !ultracodeKeywordDismissed ? findKeywordRanges(displayedValue) : [], [displayedValue, ultracodeKeywordDismissed]);
+  const hasUltracodeKeyword = useMemo(() => isWorkflowKeywordTriggerEnabled() ? findKeywordRanges(displayedValue).length > 0 : false, [displayedValue]);
+  // A fresh prompt is opted in again — the dismissal is per-prompt, not sticky.
+  // The AppState mirror is what actually suppresses the reminder; the local
+  // flag only drives the highlight, so both have to move together.
+  useEffect(() => {
+    if (!hasUltracodeKeyword && ultracodeKeywordDismissed) {
+      setUltracodeKeywordDismissed(false);
+      setAppState(prev => prev.suppressWorkflowKeyword ? {
+        ...prev,
+        suppressWorkflowKeyword: false
+      } : prev);
+    }
+  }, [hasUltracodeKeyword, ultracodeKeywordDismissed, setAppState]);
   const btwTriggers = useMemo(() => findBtwTriggerPositions(displayedValue), [displayedValue]);
   const buddyTriggers = useMemo(() => findBuddyTriggerPositions(displayedValue), [displayedValue]);
   const slashCommandTriggers = useMemo(() => {
@@ -722,6 +742,19 @@ function PromptInput({
       }
     }
 
+    // Same rainbow treatment for the ultracode keyword
+    for (const trigger of ultracodeTriggers) {
+      for (let i = trigger.start; i < trigger.end; i++) {
+        highlights.push({
+          start: i,
+          end: i + 1,
+          color: getRainbowColor(i - trigger.start),
+          shimmerColor: getRainbowColor(i - trigger.start, true),
+          priority: 10
+        });
+      }
+    }
+
     // Rainbow for /buddy
     for (const trigger of buddyTriggers) {
       for (let i = trigger.start; i < trigger.end; i++) {
@@ -735,7 +768,7 @@ function PromptInput({
       }
     }
     return highlights;
-  }, [isSearchingHistory, historyQuery, historyMatch, historyFailedMatch, cursorOffset, btwTriggers, imageRefPositions, memberMentionHighlights, slashCommandTriggers, tokenBudgetTriggers, slackChannelTriggers, displayedValue, voiceInterimRange, thinkTriggers, ultraplanTriggers, ultrareviewTriggers, buddyTriggers]);
+  }, [isSearchingHistory, historyQuery, historyMatch, historyFailedMatch, cursorOffset, btwTriggers, imageRefPositions, memberMentionHighlights, slashCommandTriggers, tokenBudgetTriggers, slackChannelTriggers, displayedValue, voiceInterimRange, thinkTriggers, ultraplanTriggers, ultrareviewTriggers, ultracodeTriggers, buddyTriggers]);
   const {
     addNotification,
     removeNotification
@@ -766,6 +799,41 @@ function PromptInput({
       removeNotification('ultraplan-active');
     }
   }, [addNotification, removeNotification, ultraplanTriggers.length]);
+  useEffect(() => {
+    if (ultracodeTriggers.length) {
+      addNotification({
+        key: 'ultracode-active',
+        text: 'Ultracode: this prompt runs as a workflow · opt+w to undo',
+        priority: 'immediate',
+        timeoutMs: 5000
+      });
+    } else {
+      removeNotification('ultracode-active');
+    }
+  }, [addNotification, removeNotification, ultracodeTriggers.length]);
+  useKeybinding('chat:workflowKeywordToggle', () => {
+    if (!hasUltracodeKeyword) return;
+    setUltracodeKeywordDismissed(prev => {
+      const next = !prev;
+      setAppState(state => ({
+        ...state,
+        suppressWorkflowKeyword: next
+      }));
+      if (next) {
+        addNotification({
+          key: 'workflow-keyword-ignored',
+          text: 'Ultracode keyword ignored for this prompt · opt+w to undo',
+          priority: 'immediate',
+          timeoutMs: 5000
+        });
+      } else {
+        removeNotification('workflow-keyword-ignored');
+      }
+      return next;
+    });
+  }, {
+    context: 'Chat'
+  });
   useEffect(() => {
     if (isUltrareviewEnabled() && ultrareviewTriggers.length) {
       addNotification({

@@ -1,10 +1,12 @@
 import { describe, expect, test, beforeEach, afterEach } from 'bun:test'
 
 import {
+  estimateFallbackFixedContextTokens,
   getAutoCompactThreshold,
   getEffectiveContextWindowSize,
   isContextExhausted,
   isIneffectiveCompaction,
+  shouldAutoCompact,
   shouldThrottleAutoCompact,
   type AutoCompactTrackingState,
 } from './autoCompact.js'
@@ -14,12 +16,18 @@ import { MODEL_CONTEXT_WINDOWS_ENV_KEY } from '../../utils/model/modelContextWin
 
 let originalAutoCompactWindow: string | undefined
 let originalContextWindows: string | undefined
+let originalDisableCompact: string | undefined
+let originalDisableAutoCompact: string | undefined
 
 beforeEach(() => {
   originalAutoCompactWindow = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
   originalContextWindows = process.env[MODEL_CONTEXT_WINDOWS_ENV_KEY]
+  originalDisableCompact = process.env.DISABLE_COMPACT
+  originalDisableAutoCompact = process.env.DISABLE_AUTO_COMPACT
   delete process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
   delete process.env[MODEL_CONTEXT_WINDOWS_ENV_KEY]
+  delete process.env.DISABLE_COMPACT
+  delete process.env.DISABLE_AUTO_COMPACT
 })
 
 afterEach(() => {
@@ -32,6 +40,16 @@ afterEach(() => {
     delete process.env[MODEL_CONTEXT_WINDOWS_ENV_KEY]
   } else {
     process.env[MODEL_CONTEXT_WINDOWS_ENV_KEY] = originalContextWindows
+  }
+  if (originalDisableCompact === undefined) {
+    delete process.env.DISABLE_COMPACT
+  } else {
+    process.env.DISABLE_COMPACT = originalDisableCompact
+  }
+  if (originalDisableAutoCompact === undefined) {
+    delete process.env.DISABLE_AUTO_COMPACT
+  } else {
+    process.env.DISABLE_AUTO_COMPACT = originalDisableAutoCompact
   }
 })
 
@@ -119,6 +137,127 @@ describe('model context window resolution', () => {
     expect(getAutoCompactThreshold('glm-4.5-air')).toBe(95_000)
     expect(getAutoCompactThreshold('kimi-k2.6')).toBe(229_144)
     expect(getAutoCompactThreshold('MiniMax-M2.7')).toBe(171_800)
+    expect(getAutoCompactThreshold('gpt-5.6-terra')).toBe(320_400)
+  })
+
+  test('scales compaction headroom for small context windows', async () => {
+    process.env[MODEL_CONTEXT_WINDOWS_ENV_KEY] = JSON.stringify({
+      'custom-16k': 16_000,
+      'custom-32k': 32_000,
+      'custom-33k': 33_000,
+      'custom-64k': 64_000,
+      'custom-80k': 80_000,
+    })
+
+    expect(getEffectiveContextWindowSize('custom-16k')).toBe(12_000)
+    expect(getEffectiveContextWindowSize('custom-32k')).toBe(24_000)
+    expect(getEffectiveContextWindowSize('custom-33k')).toBe(24_750)
+    expect(getEffectiveContextWindowSize('custom-64k')).toBe(48_000)
+
+    expect(getAutoCompactThreshold('custom-16k')).toBe(8_000)
+    expect(getAutoCompactThreshold('custom-32k')).toBe(16_000)
+    expect(getAutoCompactThreshold('custom-33k')).toBe(16_500)
+    expect(getAutoCompactThreshold('custom-64k')).toBe(35_000)
+    // Once the fixed reserves fit, retain the existing large-window behavior.
+    expect(getAutoCompactThreshold('custom-80k')).toBe(47_000)
+
+    for (const model of [
+      'custom-16k',
+      'custom-32k',
+      'custom-33k',
+      'custom-64k',
+    ]) {
+      expect(await shouldAutoCompact([], model)).toBe(false)
+    }
+
+    const messagesAt = (tokens: number) => [{
+      type: 'assistant',
+      message: {
+        model: 'custom-16k',
+        content: [{ type: 'text', text: 'done' }],
+        usage: {
+          input_tokens: tokens - 1,
+          output_tokens: 1,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        },
+      },
+    }] as never
+    expect(await shouldAutoCompact(messagesAt(7_999), 'custom-16k'))
+      .toBe(false)
+    expect(await shouldAutoCompact(messagesAt(8_000), 'custom-16k'))
+      .toBe(true)
+  })
+
+  test('includes fixed request context when a relay omits usable usage', async () => {
+    process.env[MODEL_CONTEXT_WINDOWS_ENV_KEY] = JSON.stringify({
+      'custom-16k': 16_000,
+    })
+    const messages = [{
+      type: 'user',
+      message: { content: 'm'.repeat(28_000) },
+    }] as never
+    const fixedTokens = estimateFallbackFixedContextTokens({
+      systemPrompt: ['s'.repeat(8_000)],
+      systemContext: {},
+      userContext: {},
+      toolUseContext: { options: { tools: [] } },
+    } as never)
+
+    expect(fixedTokens).toBeGreaterThanOrEqual(2_000)
+    expect(await shouldAutoCompact(messages, 'custom-16k')).toBe(false)
+    expect(await shouldAutoCompact(
+      messages,
+      'custom-16k',
+      undefined,
+      0,
+      fixedTokens,
+    )).toBe(true)
+  })
+
+  test('crosses the GPT-5.6 threshold without recounting encrypted siblings', async () => {
+    const responseId = 'msg_threshold'
+    const messagesAt = (tokens: number) => [
+      {
+        type: 'assistant',
+        message: {
+          id: responseId,
+          model: 'gpt-5.6-terra',
+          content: [{
+            type: 'redacted_thinking',
+            data: `cc-haha:openai-reasoning:v1:${JSON.stringify({
+              summary: [],
+              encrypted_content: 'x'.repeat(400_000),
+            })}`,
+          }],
+          usage: {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+          },
+        },
+      },
+      {
+        type: 'assistant',
+        message: {
+          id: responseId,
+          model: 'gpt-5.6-terra',
+          content: [{ type: 'text', text: 'done' }],
+          usage: {
+            input_tokens: tokens - 1,
+            output_tokens: 1,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+          },
+        },
+      },
+    ] as never
+
+    expect(await shouldAutoCompact(messagesAt(320_399), 'gpt-5.6-terra'))
+      .toBe(false)
+    expect(await shouldAutoCompact(messagesAt(320_400), 'gpt-5.6-terra'))
+      .toBe(true)
   })
 })
 

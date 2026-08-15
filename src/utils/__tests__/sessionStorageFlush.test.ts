@@ -8,11 +8,13 @@ import {
   flushSessionStorage,
   getTranscriptPathForSession,
   loadTranscriptFile,
+  readAgentMetadata,
   recordTranscript,
   resetProjectForTesting,
+  writeAgentMetadata,
 } from '../sessionStorage.js'
 import { switchSession } from '../../bootstrap/state.js'
-import type { SessionId } from '../../types/ids.js'
+import { asAgentId, type SessionId } from '../../types/ids.js'
 import type { CustomTitleMessage } from '../../types/logs.js'
 
 const originalConfigDir = process.env.CLAUDE_CONFIG_DIR
@@ -69,6 +71,24 @@ describe('sessionStorage flush', () => {
       process.env.USER_TYPE = originalUserType
     }
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
+  })
+
+  it('round-trips a nested Agent lifecycle owner through its sidecar', async () => {
+    switchSession('11111111-2222-4333-8444-555555555555' as SessionId)
+    resetProjectForTesting()
+    const agentId = asAgentId('cold-resume-agent')
+
+    await writeAgentMetadata(agentId, {
+      agentType: 'general-purpose',
+      toolUseId: 'toolu_nested_agent',
+      ownerAgentId: 'parent-agent',
+    })
+
+    expect(await readAgentMetadata(agentId)).toEqual({
+      agentType: 'general-purpose',
+      toolUseId: 'toolu_nested_agent',
+      ownerAgentId: 'parent-agent',
+    })
   })
 
   it('records the desktop transcript entrypoint without changing the runtime entrypoint', async () => {

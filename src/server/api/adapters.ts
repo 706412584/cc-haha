@@ -29,7 +29,7 @@ import {
 } from '../../../adapters/whatsapp/protocol.js'
 import { loadConfig } from '../../../adapters/common/config.js'
 
-const ALLOWED_TOP_KEYS = new Set(['serverUrl', 'defaultProjectDir', 'telegram', 'feishu', 'wechat', 'dingtalk', 'whatsapp', 'pairing'])
+const ALLOWED_TOP_KEYS = new Set(['serverUrl', 'defaultProjectDir', 'allowedProjectRoots', 'telegram', 'feishu', 'wechat', 'dingtalk', 'whatsapp', 'pairing'])
 const MAX_TEXT_LENGTH = 16_384
 const MAX_PATH_LENGTH = 4_096
 const MAX_LIST_LENGTH = 1_000
@@ -207,6 +207,9 @@ function parseAdapterConfigPatch(value: unknown): Partial<AdapterFileConfig> {
   if ('defaultProjectDir' in body) {
     patch.defaultProjectDir = readString(body.defaultProjectDir, 'defaultProjectDir', MAX_PATH_LENGTH)
   }
+  if ('allowedProjectRoots' in body) {
+    patch.allowedProjectRoots = readStringList(body.allowedProjectRoots, 'allowedProjectRoots')
+  }
 
   if ('pairing' in body) {
     const source = requireRecord(body.pairing, 'pairing')
@@ -231,12 +234,13 @@ function parseAdapterConfigPatch(value: unknown): Partial<AdapterFileConfig> {
 
   if ('telegram' in body) {
     const source = requireRecord(body.telegram, 'telegram')
-    assertKnownKeys(source, ['botToken', 'allowedUsers', 'pairedUsers', 'defaultWorkDir'], 'telegram')
+    assertKnownKeys(source, ['botToken', 'allowedUsers', 'pairedUsers', 'defaultWorkDir', 'allowedProjectRoots'], 'telegram')
     const telegram: NonNullable<AdapterFileConfig['telegram']> = {}
     readOptionalStringField(source, telegram, 'botToken', 'telegram.botToken')
     if ('allowedUsers' in source) telegram.allowedUsers = readTelegramUsers(source.allowedUsers)
     if ('pairedUsers' in source) telegram.pairedUsers = readPairedUsers(source.pairedUsers, 'telegram.pairedUsers')
     readOptionalStringField(source, telegram, 'defaultWorkDir', 'telegram.defaultWorkDir', MAX_PATH_LENGTH)
+    readOptionalStringListField(source, telegram, 'allowedProjectRoots', 'telegram.allowedProjectRoots')
     patch.telegram = telegram
   }
 
@@ -244,7 +248,7 @@ function parseAdapterConfigPatch(value: unknown): Partial<AdapterFileConfig> {
     const source = requireRecord(body.feishu, 'feishu')
     assertKnownKeys(
       source,
-      ['appId', 'appSecret', 'encryptKey', 'verificationToken', 'allowedUsers', 'pairedUsers', 'defaultWorkDir', 'streamingCard'],
+      ['appId', 'appSecret', 'encryptKey', 'verificationToken', 'allowedUsers', 'pairedUsers', 'defaultWorkDir', 'streamingCard', 'allowedProjectRoots'],
       'feishu',
     )
     const feishu: NonNullable<AdapterFileConfig['feishu']> = {}
@@ -254,6 +258,7 @@ function parseAdapterConfigPatch(value: unknown): Partial<AdapterFileConfig> {
     readOptionalStringListField(source, feishu, 'allowedUsers', 'feishu.allowedUsers')
     if ('pairedUsers' in source) feishu.pairedUsers = readPairedUsers(source.pairedUsers, 'feishu.pairedUsers')
     readOptionalStringField(source, feishu, 'defaultWorkDir', 'feishu.defaultWorkDir', MAX_PATH_LENGTH)
+    readOptionalStringListField(source, feishu, 'allowedProjectRoots', 'feishu.allowedProjectRoots')
     if ('streamingCard' in source) {
       if (typeof source.streamingCard !== 'boolean') throw ApiError.badRequest('feishu.streamingCard must be a boolean')
       feishu.streamingCard = source.streamingCard
@@ -263,11 +268,12 @@ function parseAdapterConfigPatch(value: unknown): Partial<AdapterFileConfig> {
 
   if ('wechat' in body) {
     const source = requireRecord(body.wechat, 'wechat')
-    assertKnownKeys(source, ['allowedUsers', 'pairedUsers', 'defaultWorkDir'], 'wechat')
+    assertKnownKeys(source, ['allowedUsers', 'pairedUsers', 'defaultWorkDir', 'allowedProjectRoots'], 'wechat')
     const wechat: NonNullable<AdapterFileConfig['wechat']> = {}
     readOptionalStringListField(source, wechat, 'allowedUsers', 'wechat.allowedUsers')
     if ('pairedUsers' in source) wechat.pairedUsers = readPairedUsers(source.pairedUsers, 'wechat.pairedUsers')
     readOptionalStringField(source, wechat, 'defaultWorkDir', 'wechat.defaultWorkDir', MAX_PATH_LENGTH)
+    readOptionalStringListField(source, wechat, 'allowedProjectRoots', 'wechat.allowedProjectRoots')
     patch.wechat = wechat
   }
 
@@ -275,7 +281,7 @@ function parseAdapterConfigPatch(value: unknown): Partial<AdapterFileConfig> {
     const source = requireRecord(body.dingtalk, 'dingtalk')
     assertKnownKeys(
       source,
-      ['clientId', 'clientSecret', 'allowedUsers', 'pairedUsers', 'defaultWorkDir', 'endpoint', 'permissionCardTemplateId'],
+      ['clientId', 'clientSecret', 'allowedUsers', 'pairedUsers', 'defaultWorkDir', 'endpoint', 'permissionCardTemplateId', 'allowedProjectRoots'],
       'dingtalk',
     )
     const dingtalk: NonNullable<AdapterFileConfig['dingtalk']> = {}
@@ -285,16 +291,18 @@ function parseAdapterConfigPatch(value: unknown): Partial<AdapterFileConfig> {
     readOptionalStringListField(source, dingtalk, 'allowedUsers', 'dingtalk.allowedUsers')
     if ('pairedUsers' in source) dingtalk.pairedUsers = readPairedUsers(source.pairedUsers, 'dingtalk.pairedUsers')
     readOptionalStringField(source, dingtalk, 'defaultWorkDir', 'dingtalk.defaultWorkDir', MAX_PATH_LENGTH)
+    readOptionalStringListField(source, dingtalk, 'allowedProjectRoots', 'dingtalk.allowedProjectRoots')
     patch.dingtalk = dingtalk
   }
 
   if ('whatsapp' in body) {
     const source = requireRecord(body.whatsapp, 'whatsapp')
-    assertKnownKeys(source, ['allowedUsers', 'pairedUsers', 'defaultWorkDir'], 'whatsapp')
+    assertKnownKeys(source, ['allowedUsers', 'pairedUsers', 'defaultWorkDir', 'allowedProjectRoots'], 'whatsapp')
     const whatsapp: NonNullable<AdapterFileConfig['whatsapp']> = {}
     readOptionalStringListField(source, whatsapp, 'allowedUsers', 'whatsapp.allowedUsers')
     if ('pairedUsers' in source) whatsapp.pairedUsers = readPairedUsers(source.pairedUsers, 'whatsapp.pairedUsers')
     readOptionalStringField(source, whatsapp, 'defaultWorkDir', 'whatsapp.defaultWorkDir', MAX_PATH_LENGTH)
+    readOptionalStringListField(source, whatsapp, 'allowedProjectRoots', 'whatsapp.allowedProjectRoots')
     patch.whatsapp = whatsapp
   }
 

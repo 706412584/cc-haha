@@ -91,4 +91,28 @@ describe('normalizeRuntimeSelection', () => {
       modelId: 'grok-composer-2.5-fast',
     })
   })
+
+  it('keeps xhigh for grok-4.6 which supports it', () => {
+    expect(normalizeRuntimeSelection({
+      providerId: 'grok-official',
+      modelId: 'grok-4.6',
+      effortLevel: 'xhigh',
+    })).toEqual({
+      providerId: 'grok-official',
+      modelId: 'grok-4.6',
+      effortLevel: 'xhigh',
+    })
+  })
+
+  it('keeps effort for Grok models only known from the live catalog', () => {
+    expect(normalizeRuntimeSelection({
+      providerId: 'grok-official',
+      modelId: 'grok-next-preview',
+      effortLevel: 'medium',
+    })).toEqual({
+      providerId: 'grok-official',
+      modelId: 'grok-next-preview',
+      effortLevel: 'medium',
+    })
+  })
 })

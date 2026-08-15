@@ -5,6 +5,7 @@ import {
   filterSlashCommands,
   findSlashToken,
   getLocalizedFallbackCommands,
+  getSlashCommandNameConflict,
   groupSlashCommands,
   insertSlashTrigger,
   mergeSlashCommands,
@@ -210,6 +211,30 @@ describe('composerUtils', () => {
     expect(resolveSlashUiAction('cost')).toEqual({ type: 'panel', command: 'cost' })
     expect(resolveSlashUiAction('context')).toEqual({ type: 'panel', command: 'context' })
     expect(resolveSlashUiAction('status')).toEqual({ type: 'panel', command: 'status' })
+  })
+
+  it('routes /save-workflow to a desktop panel instead of the model', () => {
+    expect(resolveSlashUiAction('save-workflow')).toEqual({
+      type: 'panel',
+      command: 'save-workflow',
+    })
+    expect(mergeSlashCommands([])).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        name: 'save-workflow',
+      }),
+    ]))
+  })
+
+  it('protects desktop-owned and existing slash command names from workflow saves', () => {
+    for (const name of ['save-workflow', 'help', 'status', 'config', 'model', 'SETTINGS']) {
+      expect(getSlashCommandNameConflict(name)).toBe('reserved')
+    }
+    expect(
+      getSlashCommandNameConflict('Release-Audit', [
+        { name: 'release-audit' },
+      ]),
+    ).toBe('existing')
+    expect(getSlashCommandNameConflict('new-audit', [{ name: 'review' }])).toBeNull()
   })
 
   it('routes /model to the local model selector action', () => {
