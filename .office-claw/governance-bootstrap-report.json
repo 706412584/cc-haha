@@ -1,0 +1,38 @@
+{
+  "projectPath": "C:\\Users\\70641\\cc-haha",
+  "timestamp": 1786201320603,
+  "packVersion": "2.0.0",
+  "actions": [
+    {
+      "file": "BACKLOG.md",
+      "action": "skipped",
+      "reason": "file already exists"
+    },
+    {
+      "file": "docs/SOP.md",
+      "action": "skipped",
+      "reason": "file already exists"
+    },
+    {
+      "file": "docs/features/.gitkeep",
+      "action": "skipped",
+      "reason": "file already exists"
+    },
+    {
+      "file": "docs/decisions/.gitkeep",
+      "action": "skipped",
+      "reason": "file already exists"
+    },
+    {
+      "file": "docs/discussions/.gitkeep",
+      "action": "skipped",
+      "reason": "file already exists"
+    },
+    {
+      "file": "docs/features/TEMPLATE.md",
+      "action": "skipped",
+      "reason": "file already exists"
+    }
+  ],
+  "dryRun": false
+}
