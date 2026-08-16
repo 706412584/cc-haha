@@ -4269,7 +4269,24 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         update((session) => {
           const stoppingBackgroundTaskIds = { ...session.stoppingBackgroundTaskIds }
           delete stoppingBackgroundTaskIds[msg.taskId]
-          return { stoppingBackgroundTaskIds }
+          // The server confirmed the task stopped — the CLI process is gone.
+          // Mark the task as stopped immediately; don't wait for a CLI terminal
+          // notification that will never arrive when the CLI is already dead.
+          const existing = session.backgroundAgentTasks?.[msg.taskId]
+          const backgroundAgentTasks =
+            existing?.status === 'running'
+              ? upsertBackgroundAgentTask(
+                  session.backgroundAgentTasks ?? {},
+                  { taskId: msg.taskId, status: 'stopped' },
+                  Date.now(),
+                )
+              : session.backgroundAgentTasks
+          return {
+            stoppingBackgroundTaskIds,
+            ...(backgroundAgentTasks !== session.backgroundAgentTasks
+              ? { backgroundAgentTasks }
+              : {}),
+          }
         })
         break
       }
