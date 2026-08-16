@@ -5476,8 +5476,6 @@ export function mergeBackgroundAgentTaskRecords(
   current: Record<string, BackgroundAgentTask>,
   restored: Record<string, BackgroundAgentTask>,
 ): Record<string, BackgroundAgentTask> {
-  const now = Date.now()
-  const STALE_RUNNING_TASK_MS = 24 * 60 * 60 * 1000 // 24 hours
   return Object.values(restored).reduce(
     (tasks, task) => {
       const existing =
@@ -5503,18 +5501,11 @@ export function mergeBackgroundAgentTaskRecords(
       ) {
         return tasks
       }
-      // Terminal states always win over running — a killed/completed/failed
-      // task must never stay stuck as running just because the terminal event
-      // timestamp happens to be older than the start timestamp.
       if (
         existing?.status === 'running' &&
         task.status !== 'running' &&
         task.updatedAt < existing.startedAt
       ) {
-        if (task.status === 'killed' || task.status === 'completed' || task.status === 'failed') {
-          delete tasks[task.taskId]
-          return upsertBackgroundAgentTask(tasks, task, task.updatedAt)
-        }
         return tasks
       }
       if (
@@ -5532,24 +5523,6 @@ export function mergeBackgroundAgentTaskRecords(
     },
     current,
   )
-
-  // Auto-kill running tasks that are older than 24 hours — the process
-  // is definitely dead and the user has no way to stop it.
-  for (const [taskId, existing] of Object.entries(merged)) {
-    if (
-      existing.status === 'running' &&
-      existing.startedAt > 0 &&
-      now - existing.startedAt > STALE_RUNNING_TASK_MS
-    ) {
-      merged[taskId] = {
-        ...existing,
-        status: 'killed',
-        summary: existing.summary + ' (killed: stale)',
-        updatedAt: now,
-      }
-    }
-  }
-  return merged
 }
 
 function mergeAgentTaskNotificationRecords(
