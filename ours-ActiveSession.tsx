@@ -1,0 +1,1022 @@
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { ReactElement, RefObject } from 'react'
+import { Target } from 'lucide-react'
+import {
+  SCHEDULED_TAB_ID,
+  SETTINGS_TAB_ID,
+  TERMINAL_TAB_PREFIX,
+  TRACE_TAB_PREFIX,
+  WORKBENCH_TAB_PREFIX,
+  useTabStore,
+  type TabType,
+} from '../stores/tabStore'
+import { useSessionStore } from '../stores/sessionStore'
+import { useChatStore } from '../stores/chatStore'
+import { useSessionRuntimeStore } from '../stores/sessionRuntimeStore'
+import { projectsApi } from '../api/projects'
+import { wsManager } from '../api/websocket'
+import { useCLITaskStore } from '../stores/cliTaskStore'
+import { useTeamStore } from '../stores/teamStore'
+import { useWorkspacePanelStore } from '../stores/workspacePanelStore'
+import {
+  TERMINAL_PANEL_DEFAULT_HEIGHT,
+  TERMINAL_PANEL_MAX_HEIGHT,
+  TERMINAL_PANEL_MIN_HEIGHT,
+  useTerminalPanelStore,
+} from '../stores/terminalPanelStore'
+import { useTranslation } from '../i18n'
+import { Button } from '@/components/ui/Button'
+import { LoadingState } from '@/components/ui/LoadingState'
+import { BrandSeal } from '@/components/composite/BrandSeal'
+import { MessageList } from '../components/chat/MessageList'
+import { ChatInput } from '../components/chat/ChatInput'
+import { ComputerUsePermissionModal } from '../components/chat/ComputerUsePermissionModal'
+import { Modal } from '@/components/ui/Modal'
+import { SessionTaskBar } from '../components/chat/SessionTaskBar'
+import { SoloCouncilPanel } from '../components/chat/SoloCouncilPanel'
+import { BackgroundTasksBar } from '../components/chat/BackgroundTasksBar'
+import { SessionActivityButton } from '../components/activity/SessionActivityButton'
+import { SessionActivityPanel } from '../components/activity/SessionActivityPanel'
+import { hasVisibleSessionActivity } from '../components/activity/sessionActivityModel'
+import { useSessionActivityModel } from '../components/activity/useSessionActivityModel'
+import { WorkbenchPanel } from '../components/workbench/WorkbenchPanel'
+import { TeamStatusBar } from '../components/teams/TeamStatusBar'
+import { TerminalSettings } from './TerminalSettings'
+import type { SessionListItem } from '../types/session'
+import type { ActiveGoalState, TokenUsage } from '../types/chat'
+import type { TeamMember } from '../types/team'
+import { useMobileViewport } from '../hooks/useMobileViewport'
+import { isDesktopRuntime } from '../lib/desktopRuntime'
+import { formatTokenCount } from '../lib/formatTokenCount'
+import {
+  COMPOSER_PREFILL_EVENT,
+  WelcomeTaskCards,
+  type ComposerPrefillDetail,
+  type WelcomeTaskCard,
+} from '../components/welcome/WelcomeTaskCards'
+import { RecentActivityCard } from '../components/welcome/RecentActivityCard'
+import {
+  createBackgroundTaskDismissKey,
+  hasRunningBackgroundTasks as hasAnyRunningBackgroundTasks,
+} from '../lib/backgroundTasks'
+import { useActivityPanelStore } from '../stores/activityPanelStore'
+import { useSettingsStore } from '../stores/settingsStore'
+import { getSessionBrowsablePath, getSessionWorkspaceState } from '../lib/sessionWorkspace'
+import type { UIMessage } from '../types/chat'
+
+/**
+ * Stable fallbacks for optional session state. A `?? []` / `?? {}` literal allocates a
+ * fresh value on every render, and both of these feed the `activityModel` dependency
+ * array below — so an idle session with no messages or no agent notifications rebuilt
+ * the whole activity model on every render. 29586ce38 fixed exactly this in
+ * MessageList.tsx; the same pattern was still here.
+ */
+const EMPTY_MESSAGES: UIMessage[] = []
+
+const TASK_POLL_INTERVAL_MS = 1000
+const ACTIVITY_AUTOCLOSE_GRACE_MS = 2000
+const WORKSPACE_RESIZE_STEP = 32
+const TERMINAL_RESIZE_STEP = 24
+const CHAT_COLUMN_WITH_WORKSPACE_CLASS =
+  'min-w-[320px] flex-1 border-r border-[var(--color-border)] bg-[var(--color-surface)]'
+const EMPTY_DISMISSED_BACKGROUND_TASK_KEYS = new Set<string>()
+
+function isSessionTabState(activeTabId: string | null, activeTabType: TabType | null | undefined) {
+  if (!activeTabId) return false
+  if (activeTabType === 'session') return true
+  if (activeTabType) return false
+  return activeTabId !== SETTINGS_TAB_ID &&
+    activeTabId !== SCHEDULED_TAB_ID &&
+    !activeTabId.startsWith(TERMINAL_TAB_PREFIX) &&
+    !activeTabId.startsWith(TRACE_TAB_PREFIX) &&
+    !activeTabId.startsWith(WORKBENCH_TAB_PREFIX)
+}
+
+function getTokenUsageTotal(usage: TokenUsage): number {
+  return (
+    usage.input_tokens +
+    usage.output_tokens +
+    (usage.cache_read_tokens ?? 0) +
+    (usage.cache_creation_tokens ?? 0)
+  )
+}
+
+function getSessionTerminalCwd(session: SessionListItem | undefined) {
+  return getSessionBrowsablePath(session)
+}
+
+function ActiveGoalStrip({
+  goal,
+  isRunning,
+  compact,
+}: {
+  goal: ActiveGoalState | null | undefined
+  isRunning: boolean
+  compact: boolean
+}) {
+  const t = useTranslation()
+  if (!goal || goal.action === 'completed') return null
+
+  const objective = goal.objective ?? goal.message
+  if (!objective) return null
+
+  const statusLabel = isRunning
+    ? t('chat.activeGoal.running')
+    : goal.status === 'paused'
+      ? t('chat.activeGoal.paused')
+      : t('chat.activeGoal.active')
+  const meta = [
+    goal.budget ? t('chat.activeGoal.budget', { value: goal.budget }) : null,
+    goal.elapsed ? t('chat.activeGoal.elapsed', { value: goal.elapsed }) : null,
+    goal.continuations ? t('chat.activeGoal.continuations', { value: goal.continuations }) : null,
+  ].filter((value): value is string => value !== null)
+
+  return (
+    <div
+      data-testid="active-goal-strip"
+      className={[
+        'mt-2 flex max-w-full items-center gap-2 rounded-[var(--radius-sm)] border border-[var(--color-memory-border)] bg-[var(--color-memory-surface)] px-2.5 py-1.5',
+        compact ? 'text-[11px]' : 'text-[12px]',
+      ].join(' ')}
+    >
+      <Target size={compact ? 13 : 14} className="shrink-0 text-[var(--color-memory-accent)]" strokeWidth={2.25} aria-hidden="true" />
+      <span className="shrink-0 font-semibold text-[var(--color-text-primary)]">
+        {t('chat.activeGoal.title')}
+      </span>
+      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--color-memory-accent)]" aria-hidden="true" />
+      <span className="shrink-0 text-[var(--color-text-tertiary)]">{statusLabel}</span>
+      <span className="min-w-0 flex-1 truncate font-medium text-[var(--color-text-primary)]" title={objective}>
+        {objective}
+      </span>
+      {meta.length > 0 ? (
+        <span className="hidden shrink-0 items-center gap-1.5 text-[11px] text-[var(--color-text-tertiary)] lg:flex">
+          {meta.map((item) => (
+            <span key={item} className="max-w-[140px] truncate">{item}</span>
+          ))}
+        </span>
+      ) : null}
+    </div>
+  )
+}
+
+function getRenderedWorkspacePanelWidth(panelRef: RefObject<HTMLElement>, fallbackWidth: number) {
+  const renderedWidth = panelRef.current?.getBoundingClientRect().width ?? 0
+  return Number.isFinite(renderedWidth) && renderedWidth > 0
+    ? renderedWidth
+    : fallbackWidth
+}
+
+function WorkspaceResizeHandle({ panelRef }: { panelRef: RefObject<HTMLElement> }) {
+  const t = useTranslation()
+  const width = useWorkspacePanelStore((state) => state.width)
+  const setWidth = useWorkspacePanelStore((state) => state.setWidth)
+  const [dragState, setDragState] = useState<{ startX: number; startWidth: number } | null>(null)
+  const dragStateRef = useRef(dragState)
+
+  useEffect(() => {
+    dragStateRef.current = dragState
+  }, [dragState])
+
+  useEffect(() => {
+    if (!dragState) return
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const current = dragStateRef.current
+      if (!current) return
+      setWidth(current.startWidth + current.startX - event.clientX)
+    }
+
+    const handlePointerUp = () => {
+      setDragState(null)
+    }
+
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', handlePointerUp)
+    window.addEventListener('pointercancel', handlePointerUp)
+
+    return () => {
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', handlePointerUp)
+      window.removeEventListener('pointercancel', handlePointerUp)
+    }
+  }, [dragState, setWidth])
+
+  return (
+    <div
+      role="separator"
+      aria-label={t('workspace.resizePanel')}
+      aria-orientation="vertical"
+      aria-valuenow={width}
+      tabIndex={0}
+      data-testid="workspace-resize-handle"
+      onPointerDown={(event) => {
+        if (event.button !== 0) return
+        event.preventDefault()
+        setDragState({ startX: event.clientX, startWidth: getRenderedWorkspacePanelWidth(panelRef, width) })
+      }}
+      onKeyDown={(event) => {
+        const renderedWidth = getRenderedWorkspacePanelWidth(panelRef, width)
+        if (event.key === 'ArrowLeft') {
+          event.preventDefault()
+          setWidth(renderedWidth + WORKSPACE_RESIZE_STEP)
+        }
+        if (event.key === 'ArrowRight') {
+          event.preventDefault()
+          setWidth(renderedWidth - WORKSPACE_RESIZE_STEP)
+        }
+      }}
+      className="relative z-10 w-px shrink-0 cursor-col-resize bg-[var(--color-border)] outline-none transition-colors hover:bg-[var(--color-border-focus)] focus-visible:bg-[var(--color-border-focus)]"
+    >
+      <div aria-hidden="true" className="absolute -inset-x-1 inset-y-0" />
+    </div>
+  )
+}
+
+function TerminalResizeHandle() {
+  const t = useTranslation()
+  const height = useTerminalPanelStore((state) => state.height)
+  const setHeight = useTerminalPanelStore((state) => state.setHeight)
+  const [dragState, setDragState] = useState<{ startY: number; startHeight: number } | null>(null)
+  const dragStateRef = useRef(dragState)
+
+  useEffect(() => {
+    dragStateRef.current = dragState
+  }, [dragState])
+
+  useEffect(() => {
+    if (!dragState) return
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const current = dragStateRef.current
+      if (!current) return
+      setHeight(current.startHeight + current.startY - event.clientY)
+    }
+
+    const handlePointerUp = () => {
+      setDragState(null)
+    }
+
+    document.body.style.cursor = 'row-resize'
+    document.body.style.userSelect = 'none'
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', handlePointerUp)
+    window.addEventListener('pointercancel', handlePointerUp)
+
+    return () => {
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', handlePointerUp)
+      window.removeEventListener('pointercancel', handlePointerUp)
+    }
+  }, [dragState, setHeight])
+
+  return (
+    <div
+      role="separator"
+      aria-label={t('terminal.resizePanel')}
+      aria-orientation="horizontal"
+      aria-valuemin={TERMINAL_PANEL_MIN_HEIGHT}
+      aria-valuemax={TERMINAL_PANEL_MAX_HEIGHT}
+      aria-valuenow={height}
+      tabIndex={0}
+      data-testid="terminal-resize-handle"
+      onPointerDown={(event) => {
+        if (event.button !== 0) return
+        event.preventDefault()
+        setDragState({ startY: event.clientY, startHeight: height })
+      }}
+      onKeyDown={(event) => {
+        if (event.key === 'ArrowUp') {
+          event.preventDefault()
+          setHeight(height + TERMINAL_RESIZE_STEP)
+        }
+        if (event.key === 'ArrowDown') {
+          event.preventDefault()
+          setHeight(height - TERMINAL_RESIZE_STEP)
+        }
+        if (event.key === 'Home') {
+          event.preventDefault()
+          setHeight(TERMINAL_PANEL_MIN_HEIGHT)
+        }
+        if (event.key === 'End') {
+          event.preventDefault()
+          setHeight(TERMINAL_PANEL_MAX_HEIGHT)
+        }
+      }}
+      onDoubleClick={() => setHeight(TERMINAL_PANEL_DEFAULT_HEIGHT)}
+      className="group flex h-2.5 shrink-0 cursor-row-resize items-center bg-[var(--color-surface)] outline-none focus-visible:bg-[var(--color-surface-container)]"
+    >
+      <div className="mx-3 h-px flex-1 rounded-full bg-[var(--color-border)] transition-colors group-hover:bg-[var(--color-border-focus)] group-focus-visible:bg-[var(--color-border-focus)]" />
+    </div>
+  )
+}
+
+export function ActiveSession() {
+  const isMobileLayout = useMobileViewport() && !isDesktopRuntime()
+  const workbenchPanelRef = useRef<HTMLElement>(null)
+  const activeTabId = useTabStore((s) => s.activeTabId)
+  const [dismissedBackgroundTaskKeysBySession, setDismissedBackgroundTaskKeysBySession] = useState<Record<string, Set<string>>>({})
+  const activeTabType = useTabStore((s) => s.tabs.find((tab) => tab.sessionId === s.activeTabId)?.type ?? null)
+  const sessions = useSessionStore((s) => s.sessions)
+  const connectToSession = useChatStore((s) => s.connectToSession)
+  const stopBackgroundTask = useChatStore((s) => s.stopBackgroundTask)
+  const sessionState = useChatStore((s) => activeTabId ? s.sessions[activeTabId] : undefined)
+  // Hand-off context attached to this session (if any). Drives a small chip
+  // in the header so the user remembers the AI started with summarized
+  // prior context. Set by the "Continue from here" flow on success.
+  const handoffInfoForActive = useSessionRuntimeStore((s) =>
+    activeTabId ? s.handoffInfo[activeTabId] : undefined,
+  )
+  // Live mode flags drive the always-visible status chip in the chat header
+  // so the user can see at a glance which session-level mode is active. The
+  // `+`-menu toggle in ChatInput is the entry point but only surfaces the
+  // current state inside that menu — the chip is the persistent affordance
+  // that the steering contract calls "明示当前模式" (must be explicit).
+  const coordinatorModeForActive = useSessionRuntimeStore((s) =>
+    activeTabId ? s.coordinatorModes[activeTabId] ?? false : false,
+  )
+  const pipelineModeForActive = useSessionRuntimeStore((s) =>
+    activeTabId ? s.pipelineModes[activeTabId] ?? 'normal' : 'normal',
+  )
+  const soloPipelineModeForActive = pipelineModeForActive === 'solo'
+  const rePipelineModeForActive = pipelineModeForActive === 're'
+  const pendingComputerUsePermission = sessionState?.pendingComputerUsePermission ?? null
+  const pendingProviderTransition = sessionState?.pendingProviderTransition ?? null
+  const runtimeConfigError = sessionState?.runtimeConfigError ?? null
+  const fetchSessionTasks = useCLITaskStore((s) => s.fetchSessionTasks)
+  const trackedTaskSessionId = useCLITaskStore((s) => s.sessionId)
+  const cliTasks = useCLITaskStore((s) => s.tasks)
+  const hasIncompleteTasks = cliTasks.some((task) => task.status !== 'completed')
+  const hasRunningTasks = cliTasks.some((task) => task.status === 'in_progress')
+  const unifiedActivityPanelEnabled = useSettingsStore((state) => state.unifiedActivityPanelEnabled)
+  const isActivityPanelOpen = useActivityPanelStore((state) => activeTabId ? state.isOpen(activeTabId) : false)
+  const closeActivityPanel = useActivityPanelStore((state) => state.close)
+  const dismissActivityBackgroundTaskKeys = useActivityPanelStore((state) => state.dismissBackgroundTaskKeys)
+  const pruneActivityBackgroundTaskKeys = useActivityPanelStore((state) => state.pruneDismissedBackgroundTaskKeys)
+  const chatState = sessionState?.chatState ?? 'idle'
+  const tokenUsage = sessionState?.tokenUsage ?? { input_tokens: 0, output_tokens: 0 }
+  const hasRunningBackgroundTasks = hasAnyRunningBackgroundTasks(sessionState?.backgroundAgentTasks)
+  const stoppingBackgroundTaskIds = sessionState?.stoppingBackgroundTaskIds
+
+  const session = sessions.find((s) => s.id === activeTabId)
+  const memberInfo = useTeamStore((s) => activeTabId ? s.getMemberBySessionId(activeTabId) : null)
+  const activeTeam = useTeamStore((s) => s.activeTeam)
+  const isMemberSession = !!memberInfo
+  const showWorkbench = useWorkspacePanelStore((state) =>
+    activeTabId && isSessionTabState(activeTabId, activeTabType) && !isMemberSession && !isMobileLayout
+      ? state.isPanelOpen(activeTabId)
+      : false,
+  )
+  const showRightPanel = showWorkbench
+  const rightPanelWidth = useWorkspacePanelStore((state) => state.width)
+  const showTerminalPanel = useTerminalPanelStore((state) =>
+    activeTabId && isSessionTabState(activeTabId, activeTabType) && !isMemberSession && !isMobileLayout
+      ? state.isPanelOpen(activeTabId)
+      : false,
+  )
+  const terminalPanelRuntimeId = useTerminalPanelStore((state) =>
+    activeTabId && isSessionTabState(activeTabId, activeTabType) && !isMemberSession && !isMobileLayout
+      ? state.panelBySession[activeTabId]?.runtimeId
+      : undefined,
+  )
+  const terminalPanelHeight = useTerminalPanelStore((state) => state.height)
+
+  useEffect(() => {
+    if (activeTabId && !isMemberSession) {
+      connectToSession(activeTabId)
+    }
+  }, [activeTabId, isMemberSession, connectToSession])
+
+  useEffect(() => {
+    if (!activeTabId || isMemberSession) return
+
+    const shouldPollTasks =
+      chatState !== 'idle' ||
+      (trackedTaskSessionId === activeTabId && hasIncompleteTasks)
+
+    if (!shouldPollTasks) return
+
+    void fetchSessionTasks(activeTabId)
+
+    const timer = setInterval(() => {
+      void fetchSessionTasks(activeTabId)
+    }, TASK_POLL_INTERVAL_MS)
+
+    return () => clearInterval(timer)
+  }, [
+    activeTabId,
+    isMemberSession,
+    chatState,
+    trackedTaskSessionId,
+    hasIncompleteTasks,
+    fetchSessionTasks,
+  ])
+
+  const t = useTranslation()
+  const messages = sessionState?.messages ?? EMPTY_MESSAGES
+  const streamingText = sessionState?.streamingText ?? ''
+  const backgroundTasks = useMemo(
+    () => Object.values(sessionState?.backgroundAgentTasks ?? {}),
+    [sessionState?.backgroundAgentTasks],
+  )
+  const dismissedBackgroundTaskKeys = activeTabId
+    ? dismissedBackgroundTaskKeysBySession[activeTabId] ?? EMPTY_DISMISSED_BACKGROUND_TASK_KEYS
+    : EMPTY_DISMISSED_BACKGROUND_TASK_KEYS
+  const activeGoal = sessionState?.activeGoal ?? null
+  const isEmpty = messages.length === 0 && !streamingText && (session?.messageCount ?? 0) === 0
+  const compactEmptyHero = isEmpty && showTerminalPanel
+  const isHistoryLoading =
+    !isMemberSession &&
+    (session?.messageCount ?? 0) > 0 &&
+    messages.length === 0 &&
+    sessionState?.historyStatus === 'loading'
+  const historyError =
+    !isMemberSession &&
+    (session?.messageCount ?? 0) > 0 &&
+    messages.length === 0 &&
+    sessionState?.historyStatus === 'error'
+      ? sessionState.historyError || t('session.historyLoadFailed')
+      : null
+  const visibleMessageCount = messages.length > 0 ? messages.length : session?.messageCount ?? 0
+  const headerTitle = session?.title || t('session.untitled')
+
+  const isActive = chatState !== 'idle' ||
+    (trackedTaskSessionId === activeTabId && hasRunningTasks) ||
+    hasRunningBackgroundTasks
+  const totalTokens = getTokenUsageTotal(tokenUsage)
+  const cachedTokens = (tokenUsage.cache_read_tokens ?? 0) +
+    (tokenUsage.cache_creation_tokens ?? 0)
+
+  useEffect(() => {
+    if (!unifiedActivityPanelEnabled || !activeTabId) return
+    pruneActivityBackgroundTaskKeys(
+      activeTabId,
+      backgroundTasks.map((task) => createBackgroundTaskDismissKey(task)),
+    )
+  }, [activeTabId, backgroundTasks, pruneActivityBackgroundTaskKeys, unifiedActivityPanelEnabled])
+
+  const sharedActivity = useSessionActivityModel(activeTabId, unifiedActivityPanelEnabled)
+  const activityModel = unifiedActivityPanelEnabled && activeTabId
+    ? sharedActivity.model
+    : null
+  const hasVisibleActivity = activityModel ? hasVisibleSessionActivity(activityModel) : false
+
+  useEffect(() => {
+    if (!activeTabId || !isActivityPanelOpen || hasVisibleActivity) return
+    // Activity rows derive from volatile caches that are briefly empty during
+    // history loads, cli-task refetches and reconnect reloads. Closing the
+    // panel on the first empty beat made that flicker permanent (auto-open
+    // does not re-fire after a remount), so only close once the empty state
+    // survives a full history-ready grace period.
+    if (sessionState?.historyStatus === 'loading') return
+    const timer = setTimeout(() => {
+      const current = useChatStore.getState().sessions[activeTabId]
+      if (current?.historyStatus === 'loading') return
+      closeActivityPanel(activeTabId)
+    }, ACTIVITY_AUTOCLOSE_GRACE_MS)
+    return () => clearTimeout(timer)
+  }, [activeTabId, closeActivityPanel, hasVisibleActivity, isActivityPanelOpen, sessionState?.historyStatus])
+
+  // Workspace exclusivity is render-time only: keep the activity open state so
+  // closing the workbench restores the Activity rail without re-opening it.
+
+  const handleOpenSubagentRun = useCallback((payload: { sessionId: string; taskId?: string; toolUseId: string; title: string }) => {
+    useTabStore.getState().openSubagentTab(payload.sessionId, payload.toolUseId, payload.title, payload.taskId)
+  }, [])
+  const handleOpenTeamMember = useCallback((member: TeamMember) => {
+    useTeamStore.getState().openMemberSession(member)
+  }, [])
+  const handleClearActivityBackgroundTasks = useCallback((taskKeys: string[]) => {
+    if (!activeTabId || taskKeys.length === 0) return
+    dismissActivityBackgroundTaskKeys(activeTabId, taskKeys)
+  }, [activeTabId, dismissActivityBackgroundTaskKeys])
+  const handleStopActivityBackgroundTask = useCallback((taskId: string) => {
+    if (!activeTabId) return
+    stopBackgroundTask(activeTabId, taskId)
+  }, [activeTabId, stopBackgroundTask])
+
+  const lastUpdated = useMemo(() => {
+    if (!session?.modifiedAt) return ''
+    const diff = Date.now() - new Date(session.modifiedAt).getTime()
+    if (diff < 60000) return t('session.timeJustNow')
+    if (diff < 3600000) return t('session.timeMinutes', { n: Math.floor(diff / 60000) })
+    if (diff < 86400000) return t('session.timeHours', { n: Math.floor(diff / 3600000) })
+    return t('session.timeDays', { n: Math.floor(diff / 86400000) })
+  }, [session?.modifiedAt, t])
+
+  useEffect(() => {
+    if (!activeTabId || dismissedBackgroundTaskKeys.size === 0) return
+    const currentTaskKeys = new Set(backgroundTasks.map(createBackgroundTaskDismissKey))
+    const nextDismissed = new Set([...dismissedBackgroundTaskKeys].filter((taskKey) => currentTaskKeys.has(taskKey)))
+    if (nextDismissed.size === dismissedBackgroundTaskKeys.size) return
+
+    setDismissedBackgroundTaskKeysBySession((current) => {
+      const next = { ...current }
+      if (nextDismissed.size === 0) {
+        delete next[activeTabId]
+      } else {
+        next[activeTabId] = nextDismissed
+      }
+      return next
+    })
+  }, [activeTabId, backgroundTasks, dismissedBackgroundTaskKeys])
+
+  if (!activeTabId) return null
+
+  // The activity rail is an absolutely positioned overlay, so it no longer
+  // squeezes the column by itself — the column yields with padding instead.
+  const showActivityRail = Boolean(activityModel) &&
+    hasVisibleActivity &&
+    !showWorkbench &&
+    !isMobileLayout &&
+    !isMemberSession &&
+    isSessionTabState(activeTabId, activeTabType)
+  const isActivityRailOpen = showActivityRail && isActivityPanelOpen
+
+  return (
+    <div className="flex-1 flex relative overflow-hidden bg-background text-on-surface">
+      <div data-testid="active-session-content-row" className="flex min-h-0 min-w-0 flex-1">
+        <div
+          data-testid="active-session-chat-column"
+          className={[
+            'relative flex min-h-0 min-w-0 flex-col overflow-hidden',
+            'transition-[padding] duration-200 ease-out motion-reduce:transition-none',
+            // 340px panel + 20px right inset leaves the 8px gap the handoff draws.
+            isActivityRailOpen ? 'pr-[352px]' : '',
+            showRightPanel ? CHAT_COLUMN_WITH_WORKSPACE_CLASS : isMobileLayout ? 'flex-1' : 'min-w-[360px] flex-1',
+          ].filter(Boolean).join(' ')}        >
+          {isMemberSession && (
+            <div className="shrink-0 border-b border-[var(--color-border)] bg-[var(--color-surface-container)]">
+              <div className="mx-auto max-w-[900px] flex items-center justify-between gap-4 px-8 py-2">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-3">
+                    {memberInfo?.status === 'running' && (
+                      <span className="flex h-2 w-2 rounded-full bg-[var(--color-warning)] animate-pulse-dot" />
+                    )}
+                    {memberInfo?.status === 'completed' && (
+                      <span className="material-symbols-outlined text-[14px] text-[var(--color-success)]" style={{ fontVariationSettings: "'FILL' 1" }}>check_circle</span>
+                    )}
+                    <span className="material-symbols-outlined text-[14px] text-[var(--color-text-tertiary)]">smart_toy</span>
+                    <span className="text-sm font-semibold text-[var(--color-text-primary)]">
+                      {memberInfo?.role}
+                    </span>
+                    {activeTeam && (
+                      <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                        @ {activeTeam.name}
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-1 text-[11px] text-[var(--color-text-tertiary)]">
+                    {t('teams.memberSessionHint')}
+                  </p>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="shrink-0"
+                  onClick={() => {
+                    if (activeTeam?.leadSessionId) {
+                      useTabStore.getState().openTab(
+                        activeTeam.leadSessionId,
+                        t('teams.leader'),
+                        'session',
+                      )
+                    }
+                  }}
+                  disabled={!activeTeam?.leadSessionId}
+                  icon={<span className="material-symbols-outlined text-[14px]">arrow_back</span>}
+                >
+                  {t('teams.backToLeader')}
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {isEmpty ? (
+            <div
+              data-testid="empty-session-hero"
+              className={[
+                'brand-seal-glow flex min-h-0 flex-1 flex-col items-center justify-center overflow-hidden px-8 pt-8',
+                compactEmptyHero ? 'pb-6' : 'pb-32',
+              ].join(' ')}            >
+              <div className="flex max-w-[420px] flex-col items-center gap-[13px] text-center">
+                {isMemberSession ? (
+                  <>
+                    <span className={`material-symbols-outlined text-[var(--color-text-tertiary)] ${compactEmptyHero ? 'text-[36px]' : 'text-[48px]'}`}>smart_toy</span>
+                    <p className="text-[var(--color-text-secondary)]">
+                      {memberInfo?.status === 'running'
+                        ? `${memberInfo.role} ${t('teams.working')}`
+                        : t('teams.noMessages')}
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <BrandSeal size={compactEmptyHero ? 'lg' : 'xl'} />
+                    <h1
+                      className={`${compactEmptyHero ? 'text-2xl' : 'text-[27px]'} font-bold tracking-tight text-[var(--color-text-primary)]`}
+                      style={{ fontFamily: 'var(--font-headline)' }}
+                    >
+                      {t('empty.title')}
+                    </h1>
+                    <p
+                      className={`mx-auto -mt-1 text-[var(--color-text-secondary)] ${compactEmptyHero ? 'max-w-[280px] text-sm leading-6' : 'text-[15px] leading-[1.7]'}`}
+                      style={{ fontFamily: 'var(--font-body)' }}
+                    >
+                      {t('empty.subtitle')}
+                    </p>
+                  </>
+                )}
+              </div>
+              {!isMemberSession && !isMobileLayout && activeTabId && session?.workDir && (
+                <RecentActivityCard
+                  workDir={session.workDir}
+                  excludeSessionId={activeTabId}
+                  hideContinueSessionButton
+                  onContinueSession={(sessionId) => {
+                    useTabStore.getState().openTab(sessionId, 'New Session')
+                    connectToSession(sessionId)
+                  }}
+                  onAutoHandoff={async (previousSessionId, previousSessionTitle, fallbackText, setStage, options) => {
+                    // 1. Resolve summary (cached → generated → null). Any
+                    //    failure degrades silently to the zero-token
+                    //    textarea-prefill path.
+                    setStage('reading-cache')
+                    let summary = null
+                    try {
+                      const cached = await projectsApi.getSessionSummary(previousSessionId)
+                      summary = cached.summary
+                    } catch {
+                      // GET error → fall through to generation path below.
+                    }
+                    if (!summary) {
+                      setStage('generating-summary')
+                      try {
+                        const fresh = await projectsApi.generateSessionSummary(previousSessionId)
+                        summary = fresh.summary
+                      } catch {
+                        summary = null
+                      }
+                    }
+
+                    if (!summary) {
+                      // Zero-token fallback: write the static hand-off
+                      // paragraph into the composer via the existing
+                      // composer-prefill event.
+                      const detail: ComposerPrefillDetail = {
+                        sessionId: activeTabId,
+                        text: fallbackText,
+                      }
+                      window.dispatchEvent(
+                        new CustomEvent(COMPOSER_PREFILL_EVENT, { detail }),
+                      )
+                      return
+                    }
+
+                    setStage('starting-session')
+
+                    // Stash hand-off info on the active session so the
+                    // chat header can render a "↗ continued from..." chip.
+                    useSessionRuntimeStore.getState().setHandoffInfo(activeTabId, {
+                      previousSessionId,
+                      previousSessionTitle,
+                      approxTokens: Math.ceil(
+                        (summary.main.length + summary.recent.length) / 4,
+                      ),
+                      generatedAt: summary.generatedAt,
+                    })
+
+                    // 2. Stage hand-off on the live session and auto-send a
+                    //    short trigger message. Server reads cached summary
+                    //    via WS message, restarts CLI with --append-system-
+                    //    prompt, and the next user_message kicks off the AI
+                    //    turn with full context already in system prompt.
+                    wsManager.send(activeTabId, {
+                      type: 'set_handoff_summary',
+                      previousSessionId,
+                      ...(options?.deep ? { deep: true } : {}),
+                    })
+                    useChatStore.getState().sendMessage(
+                      activeTabId,
+                      t('empty.recentActivity.continueTriggerMessage'),
+                    )
+                  }}
+                />
+              )}
+              {!isMemberSession && !isMobileLayout && activeTabId && (
+                <WelcomeTaskCards
+                  workDir={session?.workDir || undefined}
+                  excludeSessionId={activeTabId}
+                  onApplyTask={(card: WelcomeTaskCard, promptText: string) => {
+                    // Push the starter prompt into ChatInput's draft via a
+                    // window event — ChatInput listens for this and sets its
+                    // textarea state when the sessionId matches the active tab.
+                    const detail: ComposerPrefillDetail = {
+                      sessionId: activeTabId,
+                      text: promptText,
+                    }
+                    window.dispatchEvent(new CustomEvent(COMPOSER_PREFILL_EVENT, { detail }))
+                    if (card.orchestrate) {
+                      // Session already exists here (we're in ActiveSession),
+                      // so this immediately persists the preference and
+                      // pushes the WS message if connected. Won't disable an
+                      // existing toggle — non-orchestration cards leave it.
+                      useChatStore.getState().setSessionCoordinatorMode(activeTabId, true)
+                    }
+                  }}
+                />
+              )}
+            </div>
+          ) : (
+            <>
+              {!isMemberSession && !isMobileLayout && (
+                <div
+                  data-testid="session-header"
+                  className={
+                    showRightPanel
+                      ? 'flex w-full items-center border-b border-[var(--color-border)] px-4 py-2.5'
+                      : 'w-full border-b border-[var(--color-border)] px-9 py-3'
+                  }
+                >
+                  <div className={showRightPanel ? 'min-w-0 flex-1' : 'mx-auto w-full max-w-[900px] min-w-0'}>
+                    <div className="flex min-w-0 items-center gap-3">
+                      <h1
+                        className={`min-w-0 flex-1 truncate font-bold leading-tight tracking-[-0.2px] text-[var(--color-text-primary)] ${
+                          showRightPanel ? 'text-[15px]' : 'text-[17px]'
+                        }`}
+                        style={{ fontFamily: 'var(--font-headline)' }}
+                        title={headerTitle}
+                      >
+                        {headerTitle}
+                      </h1>
+                    </div>
+                    <div className="mt-1 flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap text-[11px] text-[var(--color-text-tertiary)]">
+                      {[
+                        isActive && (
+                          <span key="active" className="flex shrink-0 items-center gap-1.5 text-[var(--color-text-secondary)]">
+                            <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-success)] animate-pulse-dot" />
+                            {t('session.active')}
+                          </span>
+                        ),
+                        totalTokens > 0 && (
+                          <span
+                            key="tokens"
+                            className="shrink-0"
+                            title={t('session.apiTokenBreakdown', {
+                              total: totalTokens.toLocaleString(),
+                              input: tokenUsage.input_tokens.toLocaleString(),
+                              output: tokenUsage.output_tokens.toLocaleString(),
+                              cache: cachedTokens.toLocaleString(),
+                            })}
+                          >
+                            {t('session.apiTokens', { count: formatTokenCount(totalTokens) })}
+                          </span>
+                        ),
+                        lastUpdated && (
+                          <span key="updated" className="truncate">{t('session.lastUpdated', { time: lastUpdated })}</span>
+                        ),
+                        !showRightPanel && visibleMessageCount > 0 && (
+                          <span key="messages" className="shrink-0">{t('session.messages', { count: visibleMessageCount })}</span>
+                        ),
+                        handoffInfoForActive && (
+                          <span
+                            key="handoff"
+                            data-testid="session-handoff-chip"
+                            title={t('session.handoffChipTooltip', {
+                              title: handoffInfoForActive.previousSessionTitle,
+                              tokens: handoffInfoForActive.approxTokens,
+                            })}
+                            className="inline-flex shrink-0 items-center gap-0.5 cursor-help text-[var(--color-primary)]"
+                          >
+                            {t('session.handoffChip', { tokens: handoffInfoForActive.approxTokens })}
+                          </span>
+                        ),
+                        coordinatorModeForActive && (
+                          <span key="coordinator" data-testid="session-coordinator-chip" title={t('session.coordinatorChipTooltip')} className="inline-flex shrink-0 items-center gap-1 cursor-help text-[var(--color-primary)]">
+                            <span className="material-symbols-outlined text-[12px]" aria-hidden="true">hub</span>
+                            {t('session.coordinatorChip')}
+                          </span>
+                        ),
+                        soloPipelineModeForActive && (
+                          <span key="solo" data-testid="session-solo-chip" title={t('session.soloPipelineChipTooltip')} className="inline-flex shrink-0 items-center gap-1 cursor-help text-[var(--color-primary)]">
+                            <span className="material-symbols-outlined text-[12px]" aria-hidden="true">linear_scale</span>
+                            {t('session.soloPipelineChip')}
+                          </span>
+                        ),
+                        rePipelineModeForActive && (
+                          <span key="re" data-testid="session-re-chip" title={t('session.rePipelineChipTooltip')} className="inline-flex shrink-0 items-center gap-1 cursor-help text-[var(--color-primary)]">
+                            <span className="material-symbols-outlined text-[12px]" aria-hidden="true">troubleshoot</span>
+                            {t('session.rePipelineChip')}
+                          </span>
+                        ),
+                      ]
+                        .filter((part): part is ReactElement => Boolean(part))
+                        .map((part, index) => (
+                          <Fragment key={part.key}>
+                            {index > 0 && <span aria-hidden="true" className="shrink-0">·</span>}
+                            {part}
+                          </Fragment>
+                        ))}
+                    </div>
+                    {session && getSessionWorkspaceState(session) !== 'available' && (
+                      <div className={`mt-2 inline-flex max-w-full items-center gap-2 rounded-[var(--radius-md)] border px-3 py-1.5 text-[11px] ${
+                        getSessionWorkspaceState(session) === 'worktree_removed'
+                          ? 'border-[var(--color-border)] bg-[var(--color-surface-container)] text-[var(--color-text-secondary)]'
+                          : 'border-[var(--color-error)] bg-[var(--color-error-container)] text-[var(--color-on-error-container)]'
+                      }`}>
+                        <span className="material-symbols-outlined text-[14px]">
+                          {getSessionWorkspaceState(session) === 'worktree_removed' ? 'history' : 'warning'}
+                        </span>
+                        <span className="truncate">
+                          {getSessionWorkspaceState(session) === 'worktree_removed'
+                            ? t('session.worktreeRemoved', { dir: session.projectRoot || '' })
+                            : t('session.workspaceUnavailable', { dir: session.workDir || 'directory no longer exists' })}
+                        </span>
+                      </div>
+                    )}
+                    <ActiveGoalStrip
+                      goal={activeGoal}
+                      isRunning={isActive}
+                      compact={showRightPanel}
+                    />
+                    {soloPipelineModeForActive && activeTabId && (
+                      <SoloCouncilPanel
+                        sessionId={activeTabId}
+                        compact={showRightPanel}
+                      />
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {isHistoryLoading ? (
+                <div className="flex flex-1 items-center justify-center p-8">
+                  <LoadingState label={t('common.loading')} variant="inline" size="md" />
+                </div>
+              ) : historyError ? (
+                <div role="alert" className="flex flex-1 items-center justify-center p-8 text-sm text-[var(--color-error)]">
+                  {historyError}
+                </div>
+              ) : (
+                <MessageList compact={showRightPanel} mobileLayout={isMobileLayout} />
+              )}
+            </>
+          )}
+
+          {!unifiedActivityPanelEnabled && !isMemberSession && <SessionTaskBar />}
+
+          {!unifiedActivityPanelEnabled && <TeamStatusBar />}
+
+          {!unifiedActivityPanelEnabled && !isMemberSession && (
+            <BackgroundTasksBar
+              key={activeTabId}
+              tasks={backgroundTasks}
+              compact={showRightPanel}
+              dismissedFinishedTaskKeys={dismissedBackgroundTaskKeys}
+              onClearFinished={(taskKeys) => {
+                if (!activeTabId || taskKeys.length === 0) return
+                setDismissedBackgroundTaskKeysBySession((current) => ({
+                  ...current,
+                  [activeTabId]: new Set([
+                    ...(current[activeTabId] ?? EMPTY_DISMISSED_BACKGROUND_TASK_KEYS),
+                    ...taskKeys,
+                  ]),
+                }))
+              }}
+              onStopTask={(taskId) => stopBackgroundTask(activeTabId, taskId)}
+            />
+          )}
+
+          {activityModel && hasVisibleActivity && isMobileLayout && !isMemberSession && isSessionTabState(activeTabId, activeTabType) ? (
+            <>
+              <div className="absolute right-3 top-3 z-30">
+                <SessionActivityButton sessionId={activeTabId} />
+              </div>
+              <SessionActivityPanel
+                model={activityModel}
+                open={isActivityPanelOpen}
+                onClose={() => closeActivityPanel(activeTabId)}
+                onOpenSubagent={handleOpenSubagentRun}
+                onClearFinishedBackgroundTasks={handleClearActivityBackgroundTasks}
+                onOpenMember={handleOpenTeamMember}
+                onStopBackgroundTask={handleStopActivityBackgroundTask}
+                stoppingBackgroundTaskIds={stoppingBackgroundTaskIds}
+                placement="overlay"
+              />
+            </>
+          ) : null}
+
+          <ChatInput
+            variant={isEmpty && !isMemberSession && !showRightPanel ? 'hero' : 'default'}
+            compact={showRightPanel}
+          />
+
+          {terminalPanelRuntimeId && activeTabId ? (
+            <div
+              data-testid="session-terminal-panel"
+              className={[
+                'flex min-h-0 shrink-0 flex-col border-t border-[var(--color-border)] bg-[var(--color-surface-container-lowest)]',
+                showTerminalPanel ? '' : 'hidden',
+              ].join(' ')}
+              style={{ height: showTerminalPanel ? terminalPanelHeight : 0 }}
+            >
+              {showTerminalPanel && <TerminalResizeHandle />}
+              <TerminalSettings
+                active={showTerminalPanel}
+                docked
+                cwd={getSessionTerminalCwd(session)}
+                runtimeId={terminalPanelRuntimeId}
+                preserveOnUnmount
+                testId={`session-terminal-host-${activeTabId}`}
+                onOpenInTab={() => {
+                  useTerminalPanelStore.getState().closePanel(activeTabId)
+                  useTabStore.getState().openTerminalTab(getSessionTerminalCwd(session), terminalPanelRuntimeId)
+                  useTerminalPanelStore.getState().detachRuntime(activeTabId)
+                }}
+                onClose={() => useTerminalPanelStore.getState().closePanel(activeTabId)}
+              />
+            </div>
+          ) : null}
+        </div>
+
+        {activityModel && showActivityRail ? (
+          <SessionActivityPanel
+            model={activityModel}
+            open={isActivityPanelOpen}
+            onClose={() => closeActivityPanel(activeTabId)}
+            onOpenSubagent={handleOpenSubagentRun}
+            onClearFinishedBackgroundTasks={handleClearActivityBackgroundTasks}
+            onOpenMember={handleOpenTeamMember}
+            onStopBackgroundTask={handleStopActivityBackgroundTask}
+            stoppingBackgroundTaskIds={stoppingBackgroundTaskIds}
+            placement="rail"
+          />
+        ) : null}
+
+        {showWorkbench ? (
+          <>
+            <WorkspaceResizeHandle panelRef={workbenchPanelRef} />
+            <aside
+              ref={workbenchPanelRef}
+              data-testid="workbench-panel"
+              className="flex h-full shrink-0 flex-col bg-[var(--color-surface)]"
+              style={{ width: rightPanelWidth, maxWidth: '62%', minWidth: 'min(420px, 54%)' }}
+            >
+              <WorkbenchPanel sessionId={activeTabId} />
+            </aside>
+          </>
+        ) : null}
+      </div>
+
+      {!isMemberSession && activeTabId ? (
+        <ComputerUsePermissionModal
+          sessionId={activeTabId}
+          request={pendingComputerUsePermission?.request ?? null}
+        />
+      ) : null}
+
+      {!isMemberSession && activeTabId && pendingProviderTransition ? (
+        <Modal
+          open
+          onClose={() => useChatStore.getState().cancelProviderTransition(activeTabId)}
+          title={t('chat.providerTransitionTitle')}
+          footer={(
+            <>
+              <button
+                type="button"
+                onClick={() => useChatStore.getState().cancelProviderTransition(activeTabId)}
+                className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]"
+              >
+                {t('chat.providerTransitionCancel')}
+              </button>
+              <button
+                type="button"
+                onClick={() => void useChatStore.getState().confirmProviderTransition(activeTabId)}
+                className="rounded-lg bg-[var(--color-brand)] px-4 py-2 text-sm font-semibold text-white"
+              >
+                {t('chat.providerTransitionConfirm')}
+              </button>
+            </>
+          )}
+        >
+          <p className="text-sm text-[var(--color-text-secondary)]">
+            {t('chat.providerTransitionBody', { count: pendingProviderTransition.messageCount })}
+          </p>
+        </Modal>
+      ) : null}
+
+      {!isMemberSession && runtimeConfigError ? (
+        <div
+          role="alert"
+          className="absolute bottom-20 left-1/2 z-40 max-w-[min(520px,calc(100vw-32px))] -translate-x-1/2 rounded-lg border border-[var(--color-error)]/30 bg-[var(--color-surface-container-lowest)] px-4 py-3 text-sm text-[var(--color-error)] shadow-lg"
+        >
+          {runtimeConfigError.message}
+        </div>
+      ) : null}
+    </div>
+  )
+}
