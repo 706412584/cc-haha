@@ -2803,10 +2803,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           historyApplied = true
           if (session.messages.length > 0) {
             return { sessions: updateSessionIn(state.sessions, sessionId, (s) => {
-              const backgroundAgentTasks = mergeBackgroundAgentTaskRecords(
+              const backgroundAgentTasks = killStaleRunningTasks(mergeBackgroundAgentTaskRecords(
                 s.backgroundAgentTasks ?? {},
                 restoredBackgroundTasks,
-              )
+              ))
               const messages = mergeRestoredHistoryIntoLiveMessages(
                 mergeBackgroundTaskMessages(s.messages, backgroundAgentTasks),
                 uiMessages,
@@ -2831,10 +2831,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             }) }
           }
           return { sessions: updateSessionIn(state.sessions, sessionId, (s) => {
-            const backgroundAgentTasks = mergeBackgroundAgentTaskRecords(
+            const backgroundAgentTasks = killStaleRunningTasks(mergeBackgroundAgentTaskRecords(
               s.backgroundAgentTasks ?? {},
               restoredBackgroundTasks,
-            )
+            ))
             const messages = mergeBackgroundTaskMessages(uiMessages, backgroundAgentTasks)
             return {
               historyStatus: 'ready',
@@ -2951,10 +2951,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         const session = state.sessions[sessionId]
         if (!session) return state
         if (session.elapsedTimer) clearInterval(session.elapsedTimer)
-        const backgroundAgentTasks = mergeBackgroundAgentTaskRecords(
+        const backgroundAgentTasks = killStaleRunningTasks(mergeBackgroundAgentTaskRecords(
           session.backgroundAgentTasks ?? {},
           restoredBackgroundTasks,
-        )
+        ))
         const messages = mergeBackgroundTaskMessages(uiMessages, backgroundAgentTasks)
         historyApplied = true
         return {
@@ -5493,7 +5493,7 @@ export function mergeBackgroundAgentTaskRecords(
   current: Record<string, BackgroundAgentTask>,
   restored: Record<string, BackgroundAgentTask>,
 ): Record<string, BackgroundAgentTask> {
-  return Object.values(restored).reduce(
+  const merged = Object.values(restored).reduce(
     (tasks, task) => {
       const existing =
         tasks[task.taskId] ??
@@ -5523,6 +5523,14 @@ export function mergeBackgroundAgentTaskRecords(
         task.status !== 'running' &&
         task.updatedAt < existing.startedAt
       ) {
+        // Terminal states always win over running — a killed/completed/failed
+        // task must never stay stuck as running just because the terminal event
+        // timestamp happens to be older than the start timestamp.
+        if (task.status === 'killed' || task.status === 'completed' || task.status === 'failed') {
+          const next = { ...tasks }
+          delete next[task.taskId]
+          return upsertBackgroundAgentTask(next, task, task.updatedAt)
+        }
         return tasks
       }
       if (
@@ -5540,6 +5548,32 @@ export function mergeBackgroundAgentTaskRecords(
     },
     current,
   )
+  return merged
+}
+
+// Auto-kill running tasks older than 24 hours — the process is definitely
+// dead (sidecar or CLI crash) and the user has no way to stop it otherwise.
+// Call this only at session-restore boundaries (loadHistory / reloadHistory),
+// not on every merge — transcript timestamps can be arbitrarily old.
+function killStaleRunningTasks(
+  tasks: Record<string, BackgroundAgentTask>,
+): Record<string, BackgroundAgentTask> {
+  const now = Date.now()
+  const STALE_MS = 24 * 60 * 60 * 1000
+  let changed = false
+  const result: Record<string, BackgroundAgentTask> = { ...tasks }
+  for (const [taskId, task] of Object.entries(result)) {
+    if (task.status === 'running' && task.startedAt > 0 && now - task.startedAt > STALE_MS) {
+      result[taskId] = {
+        ...task,
+        status: 'killed',
+        summary: task.summary ? task.summary + ' (killed: stale)' : '(killed: stale)',
+        updatedAt: now,
+      }
+      changed = true
+    }
+  }
+  return changed ? result : tasks
 }
 
 function mergeAgentTaskNotificationRecords(

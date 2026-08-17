@@ -6110,8 +6110,8 @@ describe('chatStore history mapping', () => {
               toolUseId: 'agent-tool-cold-reconnect',
               taskType: 'remote_agent',
               status: 'running',
-              startedAt: 1,
-              updatedAt: 2,
+              startedAt: Date.now(),
+              updatedAt: Date.now(),
             },
           },
         },
@@ -6876,8 +6876,8 @@ describe('chatStore history mapping', () => {
               status: 'running',
               taskType: 'local_agent',
               description: 'Still reviewing screenshots',
-              startedAt: 1,
-              updatedAt: 2,
+              startedAt: Date.now(),
+              updatedAt: Date.now(),
             },
           },
         }),
@@ -6913,7 +6913,7 @@ describe('chatStore history mapping', () => {
         },
       ],
     })
-    const newLifecycleStartedAt = new Date('2026-07-11T00:00:00.000Z').getTime()
+    const newLifecycleStartedAt = Date.now()
     useChatStore.setState({
       sessions: {
         [TEST_SESSION_ID]: makeSession({
@@ -9966,12 +9966,13 @@ describe('chatStore wake replay of a finished thinking turn', () => {
 // derived from volatile client caches, so the reset/reload/abort paths below
 // must not drain background task state.
 describe('chatStore activity state survival across reload paths', () => {
+  const runningTaskStartedAt = Date.parse('2026-08-01T00:00:00.000Z')
   const runningTask = {
     taskId: 'agent-task-1',
     taskType: 'agent',
     status: 'running' as const,
-    startedAt: 10,
-    updatedAt: 10,
+    startedAt: runningTaskStartedAt,
+    updatedAt: runningTaskStartedAt,
   }
 
   beforeEach(() => {
@@ -10000,12 +10001,13 @@ describe('chatStore activity state survival across reload paths', () => {
   })
 
   it('reloadHistory keeps running background tasks that are not in the transcript yet', async () => {
+    const freshTask = { ...runningTask, startedAt: Date.now(), updatedAt: Date.now() }
     useChatStore.setState({
       sessions: {
         [TEST_SESSION_ID]: makeSession({
           chatState: 'idle',
           messages: [{ id: 'm1', type: 'assistant_text', content: 'old', timestamp: 1 }],
-          backgroundAgentTasks: { 'agent-task-1': runningTask },
+          backgroundAgentTasks: { 'agent-task-1': freshTask },
         }),
       },
     })

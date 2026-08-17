@@ -299,6 +299,8 @@ function getTaskStatusLabel(
       return t('chat.backgroundAgents.status.failed')
     case 'stopped':
       return t('chat.backgroundAgents.status.stopped')
+    case 'killed':
+      return t('chat.backgroundAgents.status.killed')
   }
 }
 

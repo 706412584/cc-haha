@@ -344,7 +344,7 @@ export type BackgroundAgentTaskUsage = {
 export type BackgroundAgentTask = {
   taskId: string
   toolUseId?: string
-  status: 'running' | 'completed' | 'failed' | 'stopped'
+  status: 'running' | 'completed' | 'failed' | 'stopped' | 'killed'
   description?: string
   taskType?: string
   workflowName?: string

@@ -2642,6 +2642,16 @@ export function MessageList({
 
   useLayoutEffect(() => {
     if (lastSessionIdRef.current !== resolvedSessionId) {
+      // Synchronously snapshot the outgoing session's scroll position before
+      // any async scroll event can race with a re-render-triggered scrollHeight
+      // change. Without this, a background-task status update that lands just
+      // before the switch can cause isNearScrollBottom to return false (old
+      // scrollTop vs. new scrollHeight), recording wasAtBottom=false and then
+      // jumping to the top when switching back.
+      const prevSessionId = lastSessionIdRef.current
+      if (prevSessionId && scrollContainerRef.current) {
+        rememberSessionScroll(prevSessionId, scrollContainerRef.current)
+      }
       if (lightReviewResumeTimerRef.current !== null) {
         clearTimeout(lightReviewResumeTimerRef.current)
         lightReviewResumeTimerRef.current = null
