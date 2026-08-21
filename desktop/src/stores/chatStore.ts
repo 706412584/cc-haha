@@ -3785,6 +3785,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           }
           const lastIndex = findStreamMergeTargetIndex(base)
           const last = lastIndex >= 0 ? base[lastIndex] : undefined
+          // 真实的 thinking 增量证明上一次请求已经成功恢复。推理模型重试恢复后
+          // 先输出思考块（没有 content_start 前导），如果只靠 content_start 的
+          // text/tool_use 分支清 apiRetry，横幅会在整个思考阶段一直显示"正在重试"。
           if (last && last.type === 'thinking') {
             const updated = [...base]
             updated[lastIndex] = {
@@ -3795,6 +3798,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               messages: updated,
               chatState: 'thinking',
               activeThinkingId: last.id,
+              apiRetry: null,
+              streamingFallback: null,
               streamingText: '',
               streamingResponseChars: s.streamingResponseChars + msg.text.length,
             }
@@ -3804,6 +3809,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             messages: [...base, { id, type: 'thinking', content: msg.text, timestamp: Date.now() }],
             chatState: 'thinking',
             activeThinkingId: id,
+            apiRetry: null,
+            streamingFallback: null,
             streamingText: '',
             streamingResponseChars: s.streamingResponseChars + msg.text.length,
           }

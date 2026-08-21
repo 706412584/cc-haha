@@ -126,7 +126,8 @@
           "output_tokens": 0
         },
         "statusVerb": "",
-        "apiRetry": null
+        "apiRetry": null,
+        "streamingFallback": null
       }
     },
     {
