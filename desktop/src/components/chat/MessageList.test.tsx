@@ -1557,6 +1557,252 @@ describe('MessageList nested tool calls', () => {
     })
   })
 
+  it('keeps bottom follow armed after switching to a taller session and back', async () => {
+    // Regression: the switch commit swaps the DOM to the incoming session
+    // before the outgoing session's scroll snapshot is taken, so measuring
+    // isNearScrollBottom against the incoming content misrecorded
+    // wasAtBottom=false for a session the user left at the bottom, disabling
+    // follow until they manually scrolled down again.
+    const otherSession = 'session-b'
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: [
+            { id: 'a1', type: 'user_text', content: 'question a', timestamp: 1 },
+            { id: 'a2', type: 'assistant_text', content: 'answer a', timestamp: 2 },
+          ],
+        }),
+        [otherSession]: makeSessionState({
+          messages: [
+            { id: 'b1', type: 'user_text', content: 'question b', timestamp: 1 },
+            { id: 'b2', type: 'assistant_text', content: 'answer b', timestamp: 2 },
+          ],
+        }),
+      },
+    })
+    useTabStore.setState({
+      activeTabId: ACTIVE_TAB,
+      tabs: [
+        { sessionId: ACTIVE_TAB, title: 'A', type: 'session' as const, status: 'idle' },
+        { sessionId: otherSession, title: 'B', type: 'session' as const, status: 'idle' },
+      ],
+    })
+
+    const { container, rerender } = render(<MessageList />)
+    const scroller = container.querySelector('.chat-scroll-area') as HTMLElement
+    let scrollHeight = 1000
+    let scrollTop = 0
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 500 })
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, get: () => scrollHeight })
+    Object.defineProperty(scroller, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => { scrollTop = value },
+    })
+    // User sits at the bottom of A (1000px content, 500px viewport).
+    scrollTop = 500
+    await waitForProgrammaticScrollReset()
+
+    // Switch to B, whose transcript is taller.
+    scrollHeight = 1600
+    await act(async () => {
+      useTabStore.setState({ activeTabId: otherSession })
+      rerender(<MessageList />)
+    })
+    await waitForProgrammaticScrollReset()
+    expect(scrollTop).toBe(1100)
+
+    // Switch back to A and stream one more message: content grows to 1300px.
+    scrollHeight = 1000
+    await act(async () => {
+      useTabStore.setState({ activeTabId: ACTIVE_TAB })
+      rerender(<MessageList />)
+    })
+    await waitForProgrammaticScrollReset()
+    expect(scrollTop).toBe(500)
+    expect(screen.queryByRole('button', { name: 'Latest' })).toBeNull()
+
+    scrollHeight = 1300
+    await act(async () => {
+      useChatStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ACTIVE_TAB]: {
+            ...state.sessions[ACTIVE_TAB]!,
+            chatState: 'streaming',
+            messages: [
+              ...state.sessions[ACTIVE_TAB]!.messages,
+              { id: 'a3', type: 'assistant_text', content: 'new tail after switch-back', timestamp: 3 },
+            ],
+          },
+        },
+      }))
+      rerender(<MessageList />)
+    })
+    await waitForProgrammaticScrollReset()
+
+    // Follow must resume: the new bottom is 1300-500=800.
+    expect(scrollTop).toBe(800)
+    expect(screen.queryByRole('button', { name: 'Latest' })).toBeNull()
+  })
+
+  it('follows the first new message after switching back to an idle session', async () => {
+    // Regression: the follow-coalescing record was shared across sessions, so
+    // right after a switch-back it still named the previous session and the
+    // first live update of the returned-to session was dropped.
+    const otherSession = 'session-b'
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: [
+            { id: 'a1', type: 'user_text', content: 'question a', timestamp: 1 },
+            { id: 'a2', type: 'assistant_text', content: 'answer a', timestamp: 2 },
+          ],
+        }),
+        [otherSession]: makeSessionState({
+          messages: [
+            { id: 'b1', type: 'user_text', content: 'question b', timestamp: 1 },
+          ],
+        }),
+      },
+    })
+    useTabStore.setState({
+      activeTabId: ACTIVE_TAB,
+      tabs: [
+        { sessionId: ACTIVE_TAB, title: 'A', type: 'session' as const, status: 'idle' },
+        { sessionId: otherSession, title: 'B', type: 'session' as const, status: 'idle' },
+      ],
+    })
+
+    const { container, rerender } = render(<MessageList />)
+    const scroller = container.querySelector('.chat-scroll-area') as HTMLElement
+    let scrollHeight = 1000
+    let scrollTop = 0
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 500 })
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, get: () => scrollHeight })
+    Object.defineProperty(scroller, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => { scrollTop = value },
+    })
+    scrollTop = 500
+    await waitForProgrammaticScrollReset()
+
+    // Switch to B (same height) and straight back to A.
+    await act(async () => {
+      useTabStore.setState({ activeTabId: otherSession })
+      rerender(<MessageList />)
+    })
+    await waitForProgrammaticScrollReset()
+    await act(async () => {
+      useTabStore.setState({ activeTabId: ACTIVE_TAB })
+      rerender(<MessageList />)
+    })
+    await waitForProgrammaticScrollReset()
+
+    // The very first new message after the switch-back must follow the bottom.
+    scrollHeight = 1300
+    await act(async () => {
+      useChatStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ACTIVE_TAB]: {
+            ...state.sessions[ACTIVE_TAB]!,
+            chatState: 'streaming',
+            messages: [
+              ...state.sessions[ACTIVE_TAB]!.messages,
+              { id: 'a3', type: 'assistant_text', content: 'first new tail after return', timestamp: 3 },
+            ],
+          },
+        },
+      }))
+      rerender(<MessageList />)
+    })
+    await waitForProgrammaticScrollReset()
+
+    expect(scrollTop).toBe(800)
+  })
+
+  it('still restores the reading position of a session left scrolled-up', async () => {
+    const otherSession = 'session-b'
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: [
+            { id: 'a1', type: 'user_text', content: 'question a', timestamp: 1 },
+            { id: 'a2', type: 'assistant_text', content: 'answer a', timestamp: 2 },
+          ],
+        }),
+        [otherSession]: makeSessionState({
+          messages: [
+            { id: 'b1', type: 'user_text', content: 'question b', timestamp: 1 },
+          ],
+        }),
+      },
+    })
+    useTabStore.setState({
+      activeTabId: ACTIVE_TAB,
+      tabs: [
+        { sessionId: ACTIVE_TAB, title: 'A', type: 'session' as const, status: 'idle' },
+        { sessionId: otherSession, title: 'B', type: 'session' as const, status: 'idle' },
+      ],
+    })
+
+    const { container, rerender } = render(<MessageList />)
+    const scroller = container.querySelector('.chat-scroll-area') as HTMLElement
+    let scrollHeight = 1000
+    let scrollTop = 0
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 500 })
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, get: () => scrollHeight })
+    Object.defineProperty(scroller, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => { scrollTop = value },
+    })
+    // Establish the at-bottom baseline, then deliberately scroll up to read.
+    scrollTop = 500
+    fireEvent.scroll(scroller)
+    scrollTop = 100
+    fireEvent.scroll(scroller)
+    expect(screen.getByRole('button', { name: 'Latest' })).toBeTruthy()
+
+    await act(async () => {
+      useTabStore.setState({ activeTabId: otherSession })
+      rerender(<MessageList />)
+    })
+    await waitForProgrammaticScrollReset()
+    await act(async () => {
+      useTabStore.setState({ activeTabId: ACTIVE_TAB })
+      rerender(<MessageList />)
+    })
+    await waitForProgrammaticScrollReset()
+
+    // The reading position is restored and follow stays disarmed for new output.
+    expect(scrollTop).toBe(100)
+    expect(screen.getByRole('button', { name: 'Latest' })).toBeTruthy()
+
+    scrollHeight = 1300
+    await act(async () => {
+      useChatStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ACTIVE_TAB]: {
+            ...state.sessions[ACTIVE_TAB]!,
+            chatState: 'streaming',
+            messages: [
+              ...state.sessions[ACTIVE_TAB]!.messages,
+              { id: 'a3', type: 'assistant_text', content: 'tail the reader did not follow', timestamp: 3 },
+            ],
+          },
+        },
+      }))
+      rerender(<MessageList />)
+    })
+    await waitForProgrammaticScrollReset()
+
+    expect(scrollTop).toBe(100)
+  })
+
   it('renders the historical window when scrolling away from latest', async () => {
     useChatStore.setState({
       sessions: {
