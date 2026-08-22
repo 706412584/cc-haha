@@ -48,10 +48,10 @@ export function recordStoppedBackgroundTask(sessionId: string, taskId: string, s
   )
   records.push({ taskId, stoppedAt })
   while (records.length > MAX_RECORDS_PER_SESSION) {
-    const oldestIndex = records.reduce(
-      (oldest, record, index) => (record.stoppedAt < records[oldest].stoppedAt ? index : oldest),
-      0,
-    )
+    let oldestIndex = 0
+    for (let i = 1; i < records.length; i++) {
+      if (records[i]!.stoppedAt < records[oldestIndex]!.stoppedAt) oldestIndex = i
+    }
     records.splice(oldestIndex, 1)
   }
   bucket[sessionId] = records
