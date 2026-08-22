@@ -1609,7 +1609,7 @@ function isNearScrollBottom(element: HTMLElement) {
   )
 }
 
-function rememberSessionScroll(sessionId: string, element: HTMLElement) {
+function rememberSessionScroll(sessionId: string, element: HTMLElement, wasAtBottom = isNearScrollBottom(element)) {
   if (sessionScrollSnapshots.size >= MAX_SCROLL_SNAPSHOTS && !sessionScrollSnapshots.has(sessionId)) {
     const oldestSessionId = sessionScrollSnapshots.keys().next().value
     if (oldestSessionId) {
@@ -1619,7 +1619,7 @@ function rememberSessionScroll(sessionId: string, element: HTMLElement) {
 
   sessionScrollSnapshots.set(sessionId, {
     scrollTop: element.scrollTop,
-    wasAtBottom: isNearScrollBottom(element),
+    wasAtBottom,
   })
 }
 
@@ -2294,13 +2294,17 @@ export function MessageList({
   const lastSessionIdRef = useRef<string | null | undefined>(undefined)
   const lastTailMessageIdBySessionRef = useRef(new Map<string, string | null>())
   const lastAutoScrollMessageCountBySessionRef = useRef(new Map<string, number>())
-  const lastLiveFollowInputRef = useRef({
-    sessionId: resolvedSessionId,
-    messageCount: messages.length,
-    streamingText,
-    streamingToolInput,
-    tailMessageMetricSignature: null as string | null,
-  })
+  // Follow-scroll coalescing must be keyed per session: a single shared record
+  // still names the previous session right after a switch-back (this effect
+  // often skips that commit entirely when the message count is unchanged), and
+  // the session-mismatch guard would then drop the first live update of the
+  // session the user just returned to.
+  const lastLiveFollowInputBySessionRef = useRef(new Map<string, {
+    messageCount: number
+    streamingText: string
+    streamingToolInput: string
+    tailMessageMetricSignature: string | null
+  }>())
   const t = useTranslation()
   const [turnChangeCards, setTurnChangeCards] = useState<TurnChangeCardModel[]>([])
   const [turnChangeLoadError, setTurnChangeLoadError] = useState<string | null>(null)
@@ -2643,14 +2647,17 @@ export function MessageList({
   useLayoutEffect(() => {
     if (lastSessionIdRef.current !== resolvedSessionId) {
       // Synchronously snapshot the outgoing session's scroll position before
-      // any async scroll event can race with a re-render-triggered scrollHeight
-      // change. Without this, a background-task status update that lands just
-      // before the switch can cause isNearScrollBottom to return false (old
-      // scrollTop vs. new scrollHeight), recording wasAtBottom=false and then
-      // jumping to the top when switching back.
+      // any async scroll event can race with this commit. The DOM in this
+      // commit already belongs to the incoming session, so measuring
+      // isNearScrollBottom here would compare the outgoing session's scrollTop
+      // against the incoming session's scrollHeight — switching to a longer
+      // conversation would misrecord wasAtBottom=false and disable bottom
+      // follow on switch-back. Whether follow was armed is the outgoing
+      // session's own at-bottom signal, and scrollTop (read before any
+      // layout-forcing metric) still holds the pre-swap value.
       const prevSessionId = lastSessionIdRef.current
       if (prevSessionId && scrollContainerRef.current) {
-        rememberSessionScroll(prevSessionId, scrollContainerRef.current)
+        rememberSessionScroll(prevSessionId, scrollContainerRef.current, shouldAutoScrollRef.current)
       }
       if (lightReviewResumeTimerRef.current !== null) {
         clearTimeout(lightReviewResumeTimerRef.current)
@@ -2744,18 +2751,17 @@ export function MessageList({
     const messageCountChanged = previousMessageCount === undefined || previousMessageCount !== messages.length
     if (!isSessionRunning && !messageCountChanged) return
 
-    const previousInput = lastLiveFollowInputRef.current
-    lastLiveFollowInputRef.current = {
-      sessionId: resolvedSessionId,
+    const previousInput = lastLiveFollowInputBySessionRef.current.get(resolvedSessionId)
+    lastLiveFollowInputBySessionRef.current.set(resolvedSessionId, {
       messageCount: messages.length,
       streamingText,
       streamingToolInput,
       tailMessageMetricSignature,
-    }
-    // Session restoration already owns the initial/switch scroll. Only live
-    // transitions within the same session enter the coalesced follow path.
+    })
+    // The first observation of a session only records the baseline; session
+    // restoration owns the initial/switch scroll.
     if (
-      previousInput.sessionId !== resolvedSessionId ||
+      !previousInput ||
       (
         previousInput.messageCount === messages.length &&
         previousInput.streamingText === streamingText &&

@@ -8114,6 +8114,74 @@ describe('chatStore history mapping', () => {
     expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.streamingFallback).toBeNull()
   })
 
+  it('clears the API retry banner when recovered output begins with thinking deltas', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          messages: [],
+          chatState: 'thinking',
+        }),
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'api_retry',
+      attempt: 1,
+      maxRetries: 10,
+      retryDelayMs: 3000,
+      errorStatus: 429,
+      errorType: 'rate_limit',
+    })
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.apiRetry).not.toBeNull()
+
+    // Reasoning models recover into a thinking block first — there is no
+    // content_start ahead of it, so the banner must clear on the thinking
+    // path itself, not only on the first text/tool_use block.
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'thinking',
+      text: 'Recovered from the rate limit. ',
+    })
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'thinking',
+      text: 'Planning the fix.',
+    })
+
+    const session = useChatStore.getState().sessions[TEST_SESSION_ID]
+    expect(session?.apiRetry).toBeNull()
+    expect(session?.streamingFallback).toBeNull()
+    expect(session?.chatState).toBe('thinking')
+    const thinkingMessages = session?.messages.filter((message) => message.type === 'thinking') ?? []
+    expect(thinkingMessages).toHaveLength(1)
+    expect(thinkingMessages[0]).toMatchObject({
+      content: 'Recovered from the rate limit. Planning the fix.',
+    })
+  })
+
+  it('clears the streaming fallback notice when thinking output arrives', () => {
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          messages: [],
+          chatState: 'thinking',
+        }),
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'streaming_fallback',
+      cause: 'watchdog',
+    })
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.streamingFallback).not.toBeNull()
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'thinking',
+      text: 'The non-streaming response is flowing.',
+    })
+
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.streamingFallback).toBeNull()
+    expect(useChatStore.getState().sessions[TEST_SESSION_ID]?.apiRetry).toBeNull()
+  })
+
   it('discards only the failed stream attempt before a safe retry', () => {
     const completedTool = {
       id: 'completed-tool',
