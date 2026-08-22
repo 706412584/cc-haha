@@ -22,6 +22,7 @@ const FOLLOW_SYSTEM_THEME_STORAGE_KEY = 'cc-haha-follow-system-theme'
 const LIGHT_THEME_STORAGE_KEY = 'cc-haha-light-theme'
 const DARK_THEME_STORAGE_KEY = 'cc-haha-dark-theme'
 const LOCALE_STORAGE_KEY = 'cc-haha-locale'
+const STOPPED_BACKGROUND_TASKS_STORAGE_KEY = 'cc-haha-stopped-background-tasks'
 const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max']
 const PERSISTED_SPECIAL_TAB_TYPES = ['settings', 'scheduled', 'market', 'traces'] as const
 const PERSISTED_SPECIAL_TAB_IDS: Record<(typeof PERSISTED_SPECIAL_TAB_TYPES)[number], string> = {
@@ -141,6 +142,43 @@ function migrateSessionRuntime(storage: StorageLike, report: DesktopMigrationRep
   }
 }
 
+function migrateStoppedBackgroundTasks(storage: StorageLike, report: DesktopMigrationReport): void {
+  const raw = storage.getItem(STOPPED_BACKGROUND_TASKS_STORAGE_KEY)
+  if (!raw) return
+
+  try {
+    const parsed = readJson(storage, STOPPED_BACKGROUND_TASKS_STORAGE_KEY)
+    if (!isRecord(parsed)) {
+      storage.removeItem(STOPPED_BACKGROUND_TASKS_STORAGE_KEY)
+      report.migratedKeys.push(STOPPED_BACKGROUND_TASKS_STORAGE_KEY)
+      return
+    }
+
+    const next = Object.fromEntries(
+      Object.entries(parsed).filter(([, records]) => (
+        Array.isArray(records) && records.every((record) => (
+          isRecord(record) &&
+          typeof record.taskId === 'string' &&
+          Number.isFinite(record.stoppedAt)
+        ))
+      )),
+    )
+
+    if (Object.keys(next).length === 0) {
+      storage.removeItem(STOPPED_BACKGROUND_TASKS_STORAGE_KEY)
+    } else {
+      writeJson(storage, STOPPED_BACKGROUND_TASKS_STORAGE_KEY, next)
+    }
+
+    if (JSON.stringify(next) !== JSON.stringify(parsed)) {
+      report.migratedKeys.push(STOPPED_BACKGROUND_TASKS_STORAGE_KEY)
+    }
+  } catch {
+    storage.removeItem(STOPPED_BACKGROUND_TASKS_STORAGE_KEY)
+    report.migratedKeys.push(STOPPED_BACKGROUND_TASKS_STORAGE_KEY)
+  }
+}
+
 /**
  * The 「纸 · 墨 · 印」 redesign replaced three theme keys with six.
  *
@@ -233,6 +271,7 @@ export function runDesktopPersistenceMigrations(storage: StorageLike | null = ge
 
   runMigrationStep(report, TAB_STORAGE_KEY, () => migrateTabs(storage, report))
   runMigrationStep(report, SESSION_RUNTIME_STORAGE_KEY, () => migrateSessionRuntime(storage, report))
+  runMigrationStep(report, STOPPED_BACKGROUND_TASKS_STORAGE_KEY, () => migrateStoppedBackgroundTasks(storage, report))
   runMigrationStep(report, THEME_STORAGE_KEY, () =>
     migrateThemeKey(storage, THEME_STORAGE_KEY, THEME_MODES, report))
   // A junk value here would otherwise be read as "never chosen", which is what

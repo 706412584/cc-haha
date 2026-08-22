@@ -6,6 +6,7 @@ import {
   hasVisibleSessionActivity,
 } from '../components/activity/sessionActivityModel'
 import { useSessionRuntimeStore } from './sessionRuntimeStore'
+import { readStoppedBackgroundTasks, recordStoppedBackgroundTask } from '../lib/stoppedBackgroundTasks'
 
 const {
   sendMock,
@@ -6857,6 +6858,82 @@ describe('chatStore history mapping', () => {
     })
     expect(sessionsApi.getMessages).toHaveBeenCalledWith(TEST_SESSION_ID)
     expect(updateTabStatusMock).toHaveBeenLastCalledWith(TEST_SESSION_ID, 'idle')
+  })
+
+  it('persists a server stop confirmation so a restore keeps the task stopped', async () => {
+    localStorage.clear()
+    const startedAt = Date.now() - 60_000
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          backgroundAgentTasks: {
+            'agent-task-1': {
+              taskId: 'agent-task-1',
+              toolUseId: 'agent-tool-1',
+              status: 'running',
+              taskType: 'local_bash',
+              description: 'Long build',
+              startedAt,
+              updatedAt: startedAt,
+            },
+          },
+        }),
+      },
+    })
+
+    useChatStore.getState().handleServerMessage(TEST_SESSION_ID, {
+      type: 'background_task_stopped',
+      taskId: 'agent-task-1',
+    })
+
+    // The confirmation was persisted for future restores.
+    const persisted = readStoppedBackgroundTasks(TEST_SESSION_ID)
+    expect(persisted.some((r) => r.taskId === 'agent-task-1')).toBe(true)
+
+    // A later restore (transcript has no terminal event) keeps it stopped.
+    vi.mocked(sessionsApi.getMessages).mockResolvedValueOnce({
+      messages: [],
+      taskNotifications: [],
+    })
+    await useChatStore.getState().loadHistory(TEST_SESSION_ID)
+    expect(
+      useChatStore.getState().sessions[TEST_SESSION_ID]
+        ?.backgroundAgentTasks?.['agent-task-1']?.status,
+    ).toBe('stopped')
+  })
+
+  it('does not resurrect a new lifecycle sharing a stopped task id', async () => {
+    localStorage.clear()
+    const stoppedAt = Date.now() - 60_000
+    recordStoppedBackgroundTask(TEST_SESSION_ID, 'agent-task-1', stoppedAt)
+    const restartedAt = stoppedAt + 30_000
+    useChatStore.setState({
+      sessions: {
+        [TEST_SESSION_ID]: makeSession({
+          backgroundAgentTasks: {
+            'agent-task-1': {
+              taskId: 'agent-task-1',
+              toolUseId: 'agent-tool-1',
+              status: 'running',
+              taskType: 'local_bash',
+              description: 'Restarted run',
+              startedAt: restartedAt,
+              updatedAt: restartedAt,
+            },
+          },
+        }),
+      },
+    })
+
+    vi.mocked(sessionsApi.getMessages).mockResolvedValueOnce({
+      messages: [],
+      taskNotifications: [],
+    })
+    await useChatStore.getState().loadHistory(TEST_SESSION_ID)
+    expect(
+      useChatStore.getState().sessions[TEST_SESSION_ID]
+        ?.backgroundAgentTasks?.['agent-task-1']?.status,
+    ).toBe('running')
   })
 
   it('keeps a genuinely running SubAgent when idle reconnect history has no terminal event', async () => {

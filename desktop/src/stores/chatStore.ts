@@ -19,6 +19,7 @@ import {
   VISUAL_SELECTION_PROMPT_FOOTER,
 } from '../lib/selectionComposer'
 import { hasRunningBackgroundTasks, hasRunningSubagentTasks } from '../lib/backgroundTasks'
+import { readStoppedBackgroundTasks, recordStoppedBackgroundTask } from '../lib/stoppedBackgroundTasks'
 import { AGENT_LIFECYCLE_TYPES } from '../types/team'
 import type { ComposerAttachment } from '../lib/composerAttachments'
 import type { ComposerMention } from '../lib/composerMentions'
@@ -2803,10 +2804,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           historyApplied = true
           if (session.messages.length > 0) {
             return { sessions: updateSessionIn(state.sessions, sessionId, (s) => {
-              const backgroundAgentTasks = killStaleRunningTasks(mergeBackgroundAgentTaskRecords(
+              const backgroundAgentTasks = applyKnownStoppedTasks(killStaleRunningTasks(mergeBackgroundAgentTaskRecords(
                 s.backgroundAgentTasks ?? {},
                 restoredBackgroundTasks,
-              ))
+              )), sessionId)
               const messages = mergeRestoredHistoryIntoLiveMessages(
                 mergeBackgroundTaskMessages(s.messages, backgroundAgentTasks),
                 uiMessages,
@@ -2831,10 +2832,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             }) }
           }
           return { sessions: updateSessionIn(state.sessions, sessionId, (s) => {
-            const backgroundAgentTasks = killStaleRunningTasks(mergeBackgroundAgentTaskRecords(
+            const backgroundAgentTasks = applyKnownStoppedTasks(killStaleRunningTasks(mergeBackgroundAgentTaskRecords(
               s.backgroundAgentTasks ?? {},
               restoredBackgroundTasks,
-            ))
+            )), sessionId)
             const messages = mergeBackgroundTaskMessages(uiMessages, backgroundAgentTasks)
             return {
               historyStatus: 'ready',
@@ -2951,10 +2952,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         const session = state.sessions[sessionId]
         if (!session) return state
         if (session.elapsedTimer) clearInterval(session.elapsedTimer)
-        const backgroundAgentTasks = killStaleRunningTasks(mergeBackgroundAgentTaskRecords(
+        const backgroundAgentTasks = applyKnownStoppedTasks(killStaleRunningTasks(mergeBackgroundAgentTaskRecords(
           session.backgroundAgentTasks ?? {},
           restoredBackgroundTasks,
-        ))
+        )), sessionId)
         const messages = mergeBackgroundTaskMessages(uiMessages, backgroundAgentTasks)
         historyApplied = true
         return {
@@ -4280,19 +4281,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           // Mark the task as stopped immediately; don't wait for a CLI terminal
           // notification that will never arrive when the CLI is already dead.
           const existing = session.backgroundAgentTasks?.[msg.taskId]
-          const backgroundAgentTasks =
-            existing?.status === 'running'
-              ? upsertBackgroundAgentTask(
-                  session.backgroundAgentTasks ?? {},
-                  { taskId: msg.taskId, status: 'stopped' },
-                  Date.now(),
-                )
-              : session.backgroundAgentTasks
+          if (existing?.status === 'running') {
+            const stoppedAt = Date.now()
+            recordStoppedBackgroundTask(sessionId, msg.taskId, stoppedAt)
+            return {
+              stoppingBackgroundTaskIds,
+              backgroundAgentTasks: upsertBackgroundAgentTask(
+                session.backgroundAgentTasks ?? {},
+                { taskId: msg.taskId, status: 'stopped' },
+                stoppedAt,
+              ),
+            }
+          }
           return {
             stoppingBackgroundTaskIds,
-            ...(backgroundAgentTasks !== session.backgroundAgentTasks
-              ? { backgroundAgentTasks }
-              : {}),
           }
         })
         break
@@ -5579,6 +5581,32 @@ function killStaleRunningTasks(
       }
       changed = true
     }
+  }
+  return changed ? result : tasks
+}
+
+// Re-apply stop confirmations persisted from a previous app run. The transcript
+// has no terminal notification for these tasks (the CLI died before writing
+// one), so without this a restore would resurrect them as running. Tasks that
+// started after the recorded stop are a new lifecycle with the same ID and are
+// left alone.
+function applyKnownStoppedTasks(
+  tasks: Record<string, BackgroundAgentTask>,
+  sessionId: string,
+): Record<string, BackgroundAgentTask> {
+  const records = readStoppedBackgroundTasks(sessionId)
+  if (records.length === 0) return tasks
+  let changed = false
+  const result: Record<string, BackgroundAgentTask> = { ...tasks }
+  for (const { taskId, stoppedAt } of records) {
+    const task = result[taskId]
+    if (!task || task.status !== 'running' || task.startedAt > stoppedAt) continue
+    result[taskId] = {
+      ...task,
+      status: 'stopped',
+      updatedAt: Math.max(task.updatedAt, stoppedAt),
+    }
+    changed = true
   }
   return changed ? result : tasks
 }
