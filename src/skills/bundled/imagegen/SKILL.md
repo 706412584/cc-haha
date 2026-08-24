@@ -14,7 +14,7 @@ Use the built-in `ImageGen` and `ImageEdit` tools. Provider authentication, mode
 - Treat a request that preserves, combines, or changes an existing visual as an edit and call `ImageEdit`.
 - One distinct prompt equals one tool call.
 - Use `count` only for multiple variations of the same prompt. For different concepts, make separate calls.
-- `ImageEdit` requires `referenced_image_paths`: populate it with ordered, exact paths surfaced by `[Image source: ...]` in a user attachment or returned by an earlier `ImageGen` call. Never invent, search for, or substitute another filesystem path. The first image is the primary canvas unless the user says otherwise.
+- `ImageEdit` requires `referenced_image_paths`: populate it with ordered, exact paths to images the user supplied in this conversation — a path surfaced by `[Image source: ...]`, a file the user attached with `@`, or a path returned by an earlier `ImageGen` call. Never invent, search for, or substitute another filesystem path, and never read an image off disk yourself to use it as an input; if the user means an image you have no path for, ask them to attach it. The first image is the primary canvas unless the user says otherwise.
 - For multi-turn editing, use the latest selected output as the next turn's `edit_target`. Repeat all identity, layout, text, and unchanged-region constraints on every turn so edits do not drift.
 - To edit several images independently, make one call per image. Put multiple images in one call only when the user wants them combined or used together as references. A single call accepts at most three source images.
 - Prefer a useful default composition when the user leaves details open. Do not invent branding, logos, or people they did not request.

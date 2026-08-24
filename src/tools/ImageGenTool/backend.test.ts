@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { mkdtemp, readFile, rm, writeFile } from 'fs/promises'
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
+import { getSessionId } from '../../bootstrap/state.js'
+import {
+  clearUserProvidedImages,
+  registerUserProvidedImage,
+} from '../../utils/userProvidedImages.js'
 import { OPENAI_CODEX_OAUTH_FILE_ENV_KEY } from '../../services/openaiAuth/storage.js'
 import type { ImageGenerationRuntimeConfig } from '../../services/imageGeneration/config.js'
 import {
@@ -35,6 +40,9 @@ let outputDir: string | undefined
 afterEach(async () => {
   if (outputDir) await rm(outputDir, { recursive: true, force: true })
   outputDir = undefined
+  // The registry is module-level session state; leaking it between tests would
+  // silently authorize paths a later test expects to be rejected.
+  clearUserProvidedImages()
 })
 
 describe('ImageGen backend', () => {
@@ -299,7 +307,7 @@ describe('ImageGen backend', () => {
     }
   })
 
-  test('rejects edit paths outside the session upload and generated-image roots', async () => {
+  test('rejects edit paths the user never provided, wherever they point', async () => {
     outputDir = await mkdtemp(join(tmpdir(), 'imagegen-edit-root-'))
     const outsideDir = await mkdtemp(join(tmpdir(), 'imagegen-edit-outside-'))
     const outsidePath = join(outsideDir, 'private.png')
@@ -313,9 +321,114 @@ describe('ImageGen backend', () => {
         outputDir,
         inputRootDirs: [outputDir],
         fetchImpl: async () => Response.json({ data: [] }),
-      })).rejects.toThrow('not a staged upload or a generated image from this session')
+      })).rejects.toThrow('was not provided by the user in this session')
     } finally {
       await rm(outsideDir, { recursive: true, force: true })
+    }
+  })
+
+  test('accepts an image the user attached with @, wherever it lives on disk', async () => {
+    // Regression: an @-mentioned file keeps its original path, so the session
+    // root dirs can never contain it. Before the registry existed this threw
+    // and the model told the user to re-attach a file they had just attached.
+    outputDir = await mkdtemp(join(tmpdir(), 'imagegen-at-mention-'))
+    const desktopDir = await mkdtemp(join(tmpdir(), 'imagegen-user-desktop-'))
+    const attachedPath = join(desktopDir, 'portrait.png')
+    await writeFile(attachedPath, PNG_BYTES)
+    try {
+      await registerUserProvidedImage(attachedPath)
+      const forms: FormData[] = []
+      const fetchImpl = async (
+        _input: string | URL | Request,
+        init?: RequestInit,
+      ) => {
+        forms.push(init?.body as FormData)
+        return Response.json({ data: [{ b64_json: PNG_BYTES.toString('base64') }] })
+      }
+
+      const result = await generateImages({
+        prompt: 'Swap in this portrait; keep the rest of the poster unchanged',
+        count: 1,
+        referenced_image_paths: [attachedPath],
+      }, customConfig, {
+        fetchImpl,
+        outputDir,
+        // Deliberately excludes the attached file's directory: the registry is
+        // the only thing that can let it through.
+        inputRootDirs: [outputDir],
+      })
+
+      expect(result.operation).toBe('edit')
+      expect(result.inputImageCount).toBe(1)
+      expect(forms[0]?.getAll('image[]')).toHaveLength(1)
+    } finally {
+      await rm(desktopDir, { recursive: true, force: true })
+    }
+  })
+
+  test('recognizes an attached image through a symlink', async () => {
+    outputDir = await mkdtemp(join(tmpdir(), 'imagegen-symlink-'))
+    const realDir = await mkdtemp(join(tmpdir(), 'imagegen-symlink-real-'))
+    const linkDir = await mkdtemp(join(tmpdir(), 'imagegen-symlink-link-'))
+    const realPath = join(realDir, 'portrait.png')
+    const linkPath = join(linkDir, 'portrait.png')
+    await writeFile(realPath, PNG_BYTES)
+    await symlink(realPath, linkPath)
+    try {
+      // The user attached the link; the tool resolves to the real file. Both
+      // sides realpath(), so the two must still line up.
+      await registerUserProvidedImage(linkPath)
+
+      const result = await generateImages({
+        prompt: 'Edit the attached portrait',
+        count: 1,
+        referenced_image_paths: [linkPath],
+      }, customConfig, {
+        fetchImpl: async () =>
+          Response.json({ data: [{ b64_json: PNG_BYTES.toString('base64') }] }),
+        outputDir,
+        inputRootDirs: [outputDir],
+      })
+
+      expect(result.inputImageCount).toBe(1)
+    } finally {
+      await rm(realDir, { recursive: true, force: true })
+      await rm(linkDir, { recursive: true, force: true })
+    }
+  })
+
+  test('accepts an image pasted into the chat this session', async () => {
+    // Pasted and dropped images land in ~/.claude/image-cache/<sessionId>/,
+    // which is a distinct root from the bridge upload dir.
+    outputDir = await mkdtemp(join(tmpdir(), 'imagegen-pasted-'))
+    const configDir = await mkdtemp(join(tmpdir(), 'imagegen-config-'))
+    const previousConfigDir = process.env.CLAUDE_CONFIG_DIR
+    process.env.CLAUDE_CONFIG_DIR = configDir
+    try {
+      const pastedDir = join(configDir, 'image-cache', getSessionId())
+      await mkdir(pastedDir, { recursive: true })
+      const pastedPath = join(pastedDir, '1.png')
+      await writeFile(pastedPath, PNG_BYTES)
+
+      const result = await generateImages({
+        prompt: 'Edit the pasted screenshot',
+        count: 1,
+        referenced_image_paths: [pastedPath],
+      }, customConfig, {
+        fetchImpl: async () =>
+          Response.json({ data: [{ b64_json: PNG_BYTES.toString('base64') }] }),
+        outputDir,
+        // No inputRootDirs override: this exercises defaultInputRootDirs().
+      })
+
+      expect(result.inputImageCount).toBe(1)
+    } finally {
+      if (previousConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = previousConfigDir
+      }
+      await rm(configDir, { recursive: true, force: true })
     }
   })
 

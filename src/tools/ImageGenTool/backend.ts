@@ -21,7 +21,9 @@ import type {
 } from '../../services/imageGeneration/config.js'
 import { createCombinedAbortSignal } from '../../utils/combinedAbortSignal.js'
 import { getCcHahaDir, getClaudeConfigHomeDir } from '../../utils/envUtils.js'
+import { getImageStoreDir } from '../../utils/imageStore.js'
 import { getProxyFetchOptions } from '../../utils/proxy.js'
+import { isUserProvidedImage } from '../../utils/userProvidedImages.js'
 
 export type ImageGenerationInput = {
   prompt: string
@@ -616,12 +618,22 @@ async function prepareInputImages(
 
   return Promise.all(requested.map(async (inputPath) => {
     const resolvedPath = await realpath(inputPath).catch(() => null)
+    // Two ways an image earns the right to be uploaded to the image provider:
+    // it sits in a per-session directory we own (pasted, staged, or generated),
+    // or the user named it explicitly with @. Anything else — a path the model
+    // globbed, scraped out of a file, or guessed — is refused.
     if (
       !resolvedPath ||
-      !resolvedRoots.some((rootDir) => isPathInside(rootDir, resolvedPath))
+      !(
+        resolvedRoots.some((rootDir) => isPathInside(rootDir, resolvedPath)) ||
+        isUserProvidedImage(resolvedPath)
+      )
     ) {
       throw new Error(
-        `Image edit input is not a staged upload or a generated image from this session: ${inputPath}`,
+        `Image edit input was not provided by the user in this session: ${inputPath}. ` +
+        'Usable inputs are images the user pasted or dropped into the chat, ' +
+        'attached with @, or images returned by an earlier ImageGen call. ' +
+        'Ask the user to attach the image instead of reading it from disk.',
       )
     }
 
@@ -659,7 +671,12 @@ async function prepareInputImages(
 function defaultInputRootDirs(): string[] {
   const sessionId = safeSessionId()
   return [
+    // Bridge/desktop uploads.
     join(getClaudeConfigHomeDir(), 'uploads', sessionId),
+    // Images pasted or dropped into the chat. getImageStoreDir() keys off the
+    // raw session id, which is what actually got written to disk — rebuilding
+    // the path from safeSessionId() here would miss it.
+    getImageStoreDir(),
     join(getCcHahaDir(), 'generated-images', sessionId),
   ]
 }

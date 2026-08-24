@@ -1308,6 +1308,41 @@ function buildChangedFilesByRenderIndex(
 }
 
 /**
+ * Pick one assistant message per checkpointed turn to own generated-artifact
+ * fallback cards. Every assistant message still receives changedFiles for path
+ * reconciliation; only the last visible reply may append files absent from its
+ * prose, otherwise each progress update repeats the same turn-wide artifacts.
+ */
+function buildTurnOutputOwnerIndexes(
+  renderItems: RenderItem[],
+  turnChangeCards: TurnChangeCardModel[],
+): Set<number> {
+  const checkpointTurnIds = new Set(
+    turnChangeCards.map((card) => card.target.messageId),
+  )
+  if (checkpointTurnIds.size === 0) return new Set()
+
+  const lastAssistantIndexByTurnId = new Map<string, number>()
+  let activeTurnId: string | null = null
+  renderItems.forEach((item, index) => {
+    if (item.kind === 'message' && item.message.type === 'user_text' && !item.message.pending) {
+      activeTurnId = item.message.id
+      return
+    }
+    if (
+      activeTurnId &&
+      checkpointTurnIds.has(activeTurnId) &&
+      item.kind === 'message' &&
+      item.message.type === 'assistant_text'
+    ) {
+      lastAssistantIndexByTurnId.set(activeTurnId, index)
+    }
+  })
+
+  return new Set(lastAssistantIndexByTurnId.values())
+}
+
+/**
  * Where a render item sits inside its turn, which is what decides its spacing.
  *
  * `none` is the user bubble: it opens an exchange, so it carries the large gap
@@ -1321,10 +1356,11 @@ export type TurnRailPosition = 'none' | 'start' | 'middle' | 'end' | 'solo'
 /**
  * Rail position for every render item, indexed alongside `renderItems`.
  *
- * Deliberately breaks on EVERY `user_text`, unlike the three turn walks above
+ * Deliberately breaks on EVERY `user_text`, unlike the turn-attribution walks above
  * (`buildTurnCardInsertionMap`, `buildChangedFilesByRenderIndex`,
- * `getBranchableMessageTargets`) which skip `pending` ones. Those answer "which
- * turn owns this checkpoint", and a member session's pending echo must not steal
+ * `buildTurnOutputOwnerIndexes`, `getBranchableMessageTargets`) which skip
+ * `pending` ones. Those answer "which turn owns this checkpoint", and a member
+ * session's pending echo must not steal
  * ownership. This answers "where does the line stop", and a pending message still
  * renders as a visible right-aligned bubble (see the `user_text` case in
  * `MessageBlock`) — a bubble mid-column is a break whatever it means for
@@ -1499,9 +1535,10 @@ const VIRTUAL_DEFAULT_VIEWPORT_HEIGHT = 720
  *  ResizeObserver's reading too, so no amount of measuring corrects it. */
 const VIRTUAL_MIN_ITEM_HEIGHT = 24
 const VIRTUAL_MAX_ITEM_HEIGHT = 24_000
-// Chromium on Windows can report up to 2px oscillations for live chat content;
-// don't convert those into bottom-scroll corrections.
-const CONTENT_RESIZE_FOLLOW_JITTER_MAX_DELTA_PX = 2
+// Chromium on Windows can report up to 2px ResizeObserver oscillations at
+// fractional DPI. Keep the last accepted value as the baseline so cumulative
+// real growth still crosses the band; only the back-and-forth noise is dropped.
+const RESIZE_OBSERVER_JITTER_MAX_DELTA_PX = 2
 // Native scroll anchoring and fractional DPI can leave the WebView a few CSS
 // pixels shy of its computed bottom. Rewriting that correction on every live
 // delta makes the two owners fight and turns the rounding into visible bounce.
@@ -2149,7 +2186,12 @@ const MeasuredRenderItem = memo(function MeasuredRenderItem({
       // environments that stub ResizeObserver with `contentRect` alone.
       const height = entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height
       if (Number.isFinite(height) && height > 0) {
-        onHeightChange(itemKey, Math.ceil(height))
+        // Keep the layout engine's fractional CSS-pixel measurement. Rounding
+        // each sample upward creates a discontinuity at every integer boundary:
+        // at fractional Windows DPI a stable row reported as 117.99/118.01px
+        // then becomes 118/119px, bypasses the sub-pixel guard below, and makes
+        // the virtual window repaint forever (#1223).
+        onHeightChange(itemKey, height)
       }
     })
     observer.observe(node)
@@ -2469,7 +2511,10 @@ export function MessageList({
   const handleVirtualItemHeightChange = useCallback((itemKey: string, height: number) => {
     const measuredHeight = clampNumber(height, VIRTUAL_MIN_ITEM_HEIGHT, VIRTUAL_MAX_ITEM_HEIGHT)
     const previousHeight = virtualItemHeightsRef.current.get(itemKey)
-    if (previousHeight !== undefined && Math.abs(previousHeight - measuredHeight) < 1) return
+    if (
+      previousHeight !== undefined &&
+      Math.abs(previousHeight - measuredHeight) <= RESIZE_OBSERVER_JITTER_MAX_DELTA_PX
+    ) return
 
     virtualItemHeightsRef.current.set(itemKey, measuredHeight)
     if (hasPendingPermissionCard && shouldAutoScrollRef.current) {
@@ -2804,7 +2849,7 @@ export function MessageList({
         const previousFollowHeight = lastContentResizeFollowHeightRef.current
         if (
           previousFollowHeight !== null &&
-          Math.abs(nextHeight - previousFollowHeight) <= CONTENT_RESIZE_FOLLOW_JITTER_MAX_DELTA_PX
+          Math.abs(nextHeight - previousFollowHeight) <= RESIZE_OBSERVER_JITTER_MAX_DELTA_PX
         ) {
           return
         }
@@ -2888,6 +2933,10 @@ export function MessageList({
   )
   const changedFilesByRenderIndex = useMemo(
     () => buildChangedFilesByRenderIndex(renderItems, turnChangeCards),
+    [renderItems, turnChangeCards],
+  )
+  const turnOutputOwnerIndexes = useMemo(
+    () => buildTurnOutputOwnerIndexes(renderItems, turnChangeCards),
     [renderItems, turnChangeCards],
   )
   const hasTrailingStreamingItem = streamingText.trim().length > 0
@@ -3052,11 +3101,12 @@ export function MessageList({
     }
 
     let cancelled = false
+    const controller = new AbortController()
     setIsLoadingTurnChangeCards(true)
     setTurnChangeLoadError(null)
 
     Promise.all([
-      sessionsApi.getTurnCheckpoints(resolvedSessionId),
+      sessionsApi.getTurnCheckpoints(resolvedSessionId, { signal: controller.signal }),
       sessionsApi.getWorkspaceStatus(resolvedSessionId).catch(() => null),
     ])
       .then(([checkpointResponse, workspaceStatus]) => {
@@ -3098,6 +3148,7 @@ export function MessageList({
 
     return () => {
       cancelled = true
+      controller.abort()
     }
   }, [chatState, completedTurnTargets, hasRunningBackgroundTasks, historyMutationEpoch, isDirectAgentSession, latestCompletedTurnId, resolvedSessionId])
 
@@ -3551,6 +3602,7 @@ export function MessageList({
             }
             branchAction={branchActionByMessageId.get(item.message.id)}
             turnChangedFiles={changedFilesByRenderIndex.get(index)}
+            isTurnOutputOwner={turnOutputOwnerIndexes.has(index)}
             turnCompletion={turnCompletionByMessageId.get(item.message.id)}
           />
         )}
@@ -3725,6 +3777,7 @@ export const MessageBlock = memo(function MessageBlock({
   toolResult,
   branchAction,
   turnChangedFiles,
+  isTurnOutputOwner,
   turnCompletion,
 }: {
   sessionId?: string | null
@@ -3739,6 +3792,7 @@ export const MessageBlock = memo(function MessageBlock({
     onBranch: () => void
   }
   turnChangedFiles?: string[]
+  isTurnOutputOwner?: boolean
   turnCompletion?: TurnCompletion
 }) {
   const t = useTranslation()
@@ -3790,6 +3844,7 @@ export const MessageBlock = memo(function MessageBlock({
             branchAction={branchAction}
             sessionId={sessionId ?? undefined}
             turnChangedFiles={turnChangedFiles}
+            isTurnOutputOwner={isTurnOutputOwner}
             turnCompletion={turnCompletion}
           />
         </SelectableChatMessage>

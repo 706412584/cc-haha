@@ -14,8 +14,12 @@ const storedImagePaths = new Map<number, string>()
 
 /**
  * Get the image store directory for the current session.
+ *
+ * Exported because ImageEdit trusts this directory as a source of edit inputs:
+ * everything in it was pasted or dropped into the chat by the user this
+ * session.
  */
-function getImageStoreDir(): string {
+export function getImageStoreDir(): string {
   return join(getClaudeConfigHomeDir(), IMAGE_STORE_DIR, getSessionId())
 }
 

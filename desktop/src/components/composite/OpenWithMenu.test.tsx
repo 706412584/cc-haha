@@ -83,6 +83,32 @@ describe('OpenWithMenu', () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
+  it('scrolling the menu itself does not call onClose', () => {
+    // The menu carries its own scrollbar once the list outgrows the window, and
+    // the dismiss listener runs on capture — so without an origin check, reaching
+    // for that scrollbar closes the menu.
+    const onClose = vi.fn()
+    render(<OpenWithMenu items={makeItems()} anchor={anchor} onClose={onClose} />)
+
+    fireEvent.scroll(screen.getByRole('menu'))
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('caps its height at the viewport so a long list scrolls instead of running off screen', () => {
+    Object.defineProperty(window, 'innerHeight', { value: 600, configurable: true })
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      height: 1400, width: 260, top: 0, left: 0, right: 0, bottom: 0, x: 0, y: 0, toJSON: () => ({}),
+    } as DOMRect)
+
+    render(<OpenWithMenu items={makeItems()} anchor={anchor} onClose={vi.fn()} />)
+
+    const menu = screen.getByRole('menu')
+    const maxHeight = Number.parseFloat(menu.style.maxHeight)
+    expect(maxHeight).toBeGreaterThan(0)
+    expect(maxHeight).toBeLessThanOrEqual(600)
+    expect(menu).toHaveClass('overflow-y-auto')
+  })
+
   it('aligns its right edge with the anchor to avoid a right-side native preview', () => {
     Object.defineProperty(window, 'innerWidth', { value: 1200, configurable: true })
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({

@@ -75,7 +75,6 @@ import { errorMessage } from "../../utils/errors.js";
 import { computeFingerprintFromMessages } from "../../utils/fingerprint.js";
 import { captureAPIRequest, logError } from "../../utils/log.js";
 import {
-  createAssistantAPIErrorMessage,
   createSystemStreamingFallbackMessage,
   createUserMessage,
   ensureToolResultPairing,
@@ -234,6 +233,11 @@ import {
 } from "./streamFallback.js";
 import { StreamAssistantCommitBuffer } from "./streamAssistantCommitBuffer.js";
 import {
+  commitOutputLimitResponse,
+  createOutputLimitErrorMessage,
+} from "./streamResponseBoundary.js";
+import { StreamToolInputDurationGuard } from "./streamToolInputDurationGuard.js";
+import {
   StreamWatchdogTimeoutError,
   createStreamWatchdogState,
 } from "./streamWatchdog.js";
@@ -260,7 +264,6 @@ import { withStreamingVCR, withVCR } from "../vcr.js";
 import { requestAzureOpenAI } from "./azureOpenAI.js";
 import { CLIENT_REQUEST_ID_HEADER, getAnthropicClient } from "./client.js";
 import {
-  API_ERROR_MESSAGE_PREFIX,
   CUSTOM_OFF_SWITCH_MESSAGE,
   getAssistantMessageFromError,
   getErrorMessageIfRefusal,
@@ -2081,7 +2084,11 @@ async function* queryModel(
   }
 
   const newMessages: AssistantMessage[] = [];
-  const assistantCommitBuffer = new StreamAssistantCommitBuffer<AssistantMessage>();
+  const assistantCommitBuffer = new StreamAssistantCommitBuffer<AssistantMessage>({
+    // content_block_stop precedes message_delta, which carries stop_reason.
+    // Keep local tools buffered until we know the response was not truncated.
+    deferToolUseCommit: true,
+  });
   let ttftMs = 0;
   let partialMessage: BetaMessage | undefined = undefined;
   const contentBlocks: (BetaContentBlock | ConnectorTextBlock)[] = [];
@@ -2230,9 +2237,18 @@ async function* queryModel(
     // 0 disables it (terminal CLI default); the desktop injects a value.
     const STREAM_MAX_DURATION_MS =
       parseInt(process.env.CLAUDE_STREAM_MAX_DURATION_MS || "", 10) || 0;
+    const STREAM_TOOL_INPUT_MAX_DURATION_MS =
+      parseInt(
+        process.env.CLAUDE_STREAM_TOOL_INPUT_MAX_DURATION_MS || "",
+        10,
+      ) || 0;
     let streamIdleAborted = false;
     // Which watchdog tripped, so the thrown error message is accurate.
-    let streamAbortReason: "idle" | "max_duration" | null = null;
+    let streamAbortReason:
+      | "idle"
+      | "max_duration"
+      | "tool_input_duration"
+      | null = null;
     const streamWatchdogState = createStreamWatchdogState();
     let streamWatchdogTimeoutError: StreamWatchdogTimeoutError | null = null;
     // performance.now() snapshot when watchdog fires, for measuring abort propagation delay
@@ -2240,6 +2256,20 @@ async function* queryModel(
     let streamIdleWarningTimer: ReturnType<typeof setTimeout> | null = null;
     let streamIdleTimer: ReturnType<typeof setTimeout> | null = null;
     let streamMaxDurationTimer: ReturnType<typeof setTimeout> | null = null;
+    const toolInputDurationGuard = new StreamToolInputDurationGuard({
+      enabled: streamWatchdogEnabled,
+      timeoutMs: STREAM_TOOL_INPUT_MAX_DURATION_MS,
+      onTimeout: () => {
+        streamIdleAborted = true;
+        streamAbortReason = "tool_input_duration";
+        streamWatchdogFiredAt = performance.now();
+        streamWatchdogTimeoutError = streamWatchdogState.createTimeoutError(
+          "tool_input_duration",
+          STREAM_TOOL_INPUT_MAX_DURATION_MS,
+        );
+        releaseStreamResources();
+      },
+    });
     function clearStreamIdleTimers(): void {
       if (streamIdleWarningTimer !== null) {
         clearTimeout(streamIdleWarningTimer);
@@ -2432,6 +2462,7 @@ async function* queryModel(
                   ...part.content_block,
                   input: "",
                 };
+                toolInputDurationGuard.start(part.index);
                 break;
               case "server_tool_use":
                 contentBlocks[part.index] = {
@@ -2602,6 +2633,7 @@ async function* queryModel(
             break;
           }
           case "content_block_stop": {
+            toolInputDurationGuard.stop(part.index);
             const contentBlock = contentBlocks[part.index];
             if (!contentBlock) {
               logEvent("tengu_streaming_error", {
@@ -2688,11 +2720,12 @@ async function* queryModel(
             // Max-token recovery needs the completed assistant blocks before
             // its synthetic error so query.ts still sees the error as the
             // terminal message and can continue from the partial response.
-            if (
-              stopReason === "max_tokens" ||
-              stopReason === "model_context_window_exceeded"
-            ) {
-              for (const committedMessage of assistantCommitBuffer.flush()) {
+            const outputLimitCommit = commitOutputLimitResponse(
+              assistantCommitBuffer,
+              stopReason,
+            );
+            if (outputLimitCommit) {
+              for (const committedMessage of outputLimitCommit.messages) {
                 yield committedMessage;
               }
             }
@@ -2720,12 +2753,10 @@ async function* queryModel(
               logEvent("tengu_max_tokens_reached", {
                 max_tokens: maxOutputTokens,
               });
-              yield createAssistantAPIErrorMessage({
-                content: `${API_ERROR_MESSAGE_PREFIX}: Claude's response exceeded the ${
-                  maxOutputTokens
-                } output token maximum. To configure this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable.`,
-                apiError: "max_output_tokens",
-                error: "max_output_tokens",
+              yield createOutputLimitErrorMessage({
+                stopReason,
+                maxOutputTokens,
+                truncatedToolUse: outputLimitCommit?.truncatedToolUse ?? false,
               });
             }
 
@@ -2737,10 +2768,10 @@ async function* queryModel(
               // Reuse the max_output_tokens recovery path — from the model's
               // perspective, both mean "response was cut off, continue from
               // where you left off."
-              yield createAssistantAPIErrorMessage({
-                content: `${API_ERROR_MESSAGE_PREFIX}: The model has reached its context window limit.`,
-                apiError: "max_output_tokens",
-                error: "max_output_tokens",
+              yield createOutputLimitErrorMessage({
+                stopReason,
+                maxOutputTokens,
+                truncatedToolUse: outputLimitCommit?.truncatedToolUse ?? false,
               });
             }
             break;
@@ -2757,6 +2788,7 @@ async function* queryModel(
       }
       // Clear the idle timeout watchdog now that the stream loop has exited
       clearStreamIdleTimers();
+      toolInputDurationGuard.clear();
       if (streamMaxDurationTimer !== null) {
         clearTimeout(streamMaxDurationTimer);
         streamMaxDurationTimer = null;
@@ -2793,7 +2825,9 @@ async function* queryModel(
             streamAbortReason ?? "idle",
             streamAbortReason === "max_duration"
               ? STREAM_MAX_DURATION_MS
-              : currentStreamIdleTimeoutMs,
+              : streamAbortReason === "tool_input_duration"
+                ? STREAM_TOOL_INPUT_MAX_DURATION_MS
+                : currentStreamIdleTimeoutMs,
           );
       }
 
@@ -2885,6 +2919,7 @@ async function* queryModel(
     } catch (streamingError) {
       // Clear the idle timeout watchdog on error path too
       clearStreamIdleTimers();
+      toolInputDurationGuard.clear();
       if (streamMaxDurationTimer !== null) {
         clearTimeout(streamMaxDurationTimer);
         streamMaxDurationTimer = null;

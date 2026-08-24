@@ -1,4 +1,6 @@
 import { trimTrailingPunctuation } from './urlBoundary'
+import { isLinkableFilePath, splitTextByFilePaths } from './filePathBoundary'
+import { isGeneratedArtifactFile, isOutputResourceFile, isShellProducedDeliverable } from './fileCapabilities'
 
 export type AssistantOutputTargetKind =
   | 'local-html'
@@ -6,11 +8,13 @@ export type AssistantOutputTargetKind =
   | 'image'
   | 'video'
   | 'markdown'
+  | 'file'
 
 export type AssistantOutputTargetSource =
   | 'markdown-link'
   | 'plain-url'
   | 'plain-path'
+  | 'changed-file'
 
 export type AssistantOutputTarget = {
   id: string
@@ -30,12 +34,19 @@ export type ExtractAssistantOutputTargetOptions = {
    * The turn's REAL changed files (absolute paths from the turn checkpoint). When
    * provided, file chips are reconciled against this ground truth: a mentioned
    * file is corrected to the actual changed path (so `index.html` resolves to the
-   * `todo-app/index.html` that was really written), and a mentioned file that the
-   * turn never changed is dropped instead of pointing at a non-existent path.
+   * `todo-app/index.html` that was really written), and a mentioned source file
+   * that the turn never changed is dropped instead of pointing at a non-existent
+   * path. A mentioned *document deliverable* survives an unmatched lookup, because
+   * the checkpoint cannot see files a shell command wrote.
    * Localhost URLs are unaffected. Omitted → fall back to text-only behavior;
    * an empty array confirms the turn changed no files, so file targets are dropped.
    */
   changedFiles?: string[]
+  /**
+   * Whether generated artifacts from changedFiles may be appended when the prose
+   * did not mention them. Reconciliation still runs when false. Defaults to true.
+   */
+  includeChangedFileFallback?: boolean
 }
 
 type FileTargetMatch = {
@@ -58,6 +69,7 @@ type CandidateTarget = {
 type MarkdownLinkMatch = {
   title: string
   href: string
+  isImage: boolean
   start: number
   end: number
 }
@@ -79,8 +91,6 @@ type DirectoryTreeFileMatch = {
 // shared trimTrailingPunctuation, which knows the full CJK terminator set.
 const localhostUrlPattern =
   /https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/[^\s`"'<>，。；、）\])}]*)?/gi
-const previewablePathPattern =
-  /(^|[\s("'`[])((?:\.{1,2}\/)?(?:[\w.-]+\/)*[\w.-]+\.(?:html?|md|markdown|png|jpe?g|gif|webp|svg|mp4|webm|mov|m4v))(?![\w/-])/gi
 
 export function extractAssistantOutputTargets(
   content: string,
@@ -106,7 +116,7 @@ export function extractAssistantOutputTargets(
   }
 
   for (const match of markdownLinks) {
-    const title = match.title
+    const authoredTitle = match.title
     const href = match.href
     const localhostTarget = toLocalhostTarget(href)
     const fileTarget = toWorkspaceFileTarget(href, workDir)
@@ -115,7 +125,7 @@ export function extractAssistantOutputTargets(
       continue
     }
 
-    if (!title) {
+    if (!authoredTitle && !(match.isImage && fileTarget?.kind === 'image')) {
       continue
     }
 
@@ -123,7 +133,7 @@ export function extractAssistantOutputTargets(
       queueTarget({
         id: createId(localhostTarget.kind, localhostTarget.href),
         kind: localhostTarget.kind,
-        title,
+        title: authoredTitle,
         href: localhostTarget.href,
         confidence: 'high',
         source: 'markdown-link',
@@ -134,6 +144,8 @@ export function extractAssistantOutputTargets(
     if (!fileTarget) {
       continue
     }
+
+    const title = authoredTitle || getBasename(fileTarget.normalizedPath)
 
     queueTarget({
       id: createId(fileTarget.kind, fileTarget.normalizedPath),
@@ -193,8 +205,14 @@ export function extractAssistantOutputTargets(
     }, createFileKey(fileTarget), treeMatch.position)
   }
 
-  for (const match of content.matchAll(previewablePathPattern)) {
-    const position = match.index ?? 0
+  let plainTextPosition = 0
+  for (const segment of splitTextByFilePaths(content)) {
+    const position = plainTextPosition
+    plainTextPosition += segment.value.length
+
+    if (segment.type !== 'path') {
+      continue
+    }
 
     if (isInMarkdownLink(position, markdownLinks)) {
       continue
@@ -204,7 +222,7 @@ export function extractAssistantOutputTargets(
       continue
     }
 
-    const href = trimTrailingPunctuation(match[2] ?? '')
+    const href = segment.ref.path
     const fileTarget = toWorkspaceFileTarget(href, workDir)
 
     if (!fileTarget) {
@@ -244,24 +262,67 @@ export function extractAssistantOutputTargets(
   }
 
   if (options.changedFiles !== undefined) {
-    return reconcileTargetsWithChangedFiles(results, options.changedFiles, workDir, limit)
+    return reconcileTargetsWithChangedFiles(
+      results,
+      options.changedFiles,
+      workDir,
+      limit,
+      options.includeChangedFileFallback !== false,
+    )
   }
 
   return results
 }
 
 /**
+ * Place a bare filename in the directory this turn actually wrote into.
+ *
+ * A deliverable is usually named without one — the prose says where the batch
+ * went once ("都在 /private/tmp/three_docs/") and then lists basenames in a
+ * table. Resolved against the work dir instead, every one of those points at a
+ * file that is not there, and the card is dead on arrival.
+ *
+ * The changed files are the evidence: whatever the shell command wrote, it wrote
+ * next to the script the turn also created. Only used when every changed file
+ * agrees on one directory — with the turn spread across several there is nothing
+ * to infer, and guessing would produce the same dead card less predictably.
+ */
+function anchorToChangedDirectory(mentioned: string, changedFiles: string[]): string {
+  if (/[\\/]/.test(mentioned)) return mentioned
+
+  const directories = new Set(changedFiles.map((file) => {
+    const posix = toPosixPath(file)
+    const cut = posix.lastIndexOf('/')
+    return cut === -1 ? '' : posix.slice(0, cut)
+  }))
+  if (directories.size !== 1) return mentioned
+
+  const [directory] = [...directories]
+  return directory ? `${directory}/${mentioned}` : mentioned
+}
+
+/** Express a changed file relative to the work dir, when it lives inside one. */
+function correctedChangedFilePath(changedFile: string, workDir: string | null): string {
+  const resolved = resolveFilePath(changedFile)
+  return workDir && isWithinWorkDir(resolved, workDir)
+    ? relativeFilePath(workDir, resolved)
+    : toPosixPath(changedFile)
+}
+
+/**
  * Re-anchor file chips onto the turn's real changed files. A mentioned file that
  * matches a changed file (by exact relative-path suffix, else by basename) is
- * rewritten to that real path; a mentioned file with no match is dropped so we
- * never render a chip that opens "file does not exist". Localhost URLs pass
- * through untouched.
+ * rewritten to that real path; a mentioned source file with no match is dropped
+ * so we never render a chip that opens "file does not exist". A document
+ * deliverable is the documented exception — see the comment at the drop.
+ * Localhost URLs pass through untouched.
  */
 function reconcileTargetsWithChangedFiles(
   targets: AssistantOutputTarget[],
   changedFiles: string[],
   workDir: string | null,
   limit: number,
+  includeChangedFileFallback: boolean,
 ): AssistantOutputTarget[] {
   if (limit <= 0) return []
 
@@ -277,14 +338,27 @@ function reconcileTargetsWithChangedFiles(
 
     const mentioned = target.normalizedPath ?? target.href
     const match = matchChangedFile(mentioned, changedFiles)
-    if (!match) {
+    // A deliverable produced by a shell command is never in `changedFiles` — the
+    // checkpoint only records the file-editing tools. When the turn *also* edited
+    // a tracked file, that list is non-empty and every unmatched mention was being
+    // dropped, so `Write plan.md` plus `python make_report.py` lost the report.
+    //
+    // Two things keep this from resurrecting the mentions reconciliation exists to
+    // drop. It needs a non-empty list, which is this function's documented "the
+    // turn changed nothing" signal; and it needs a format nothing reads as source,
+    // so "I'm about to look at notes.md" stays a mention rather than becoming a
+    // deliverable.
+    //
+    // The trade: an unmatched path cannot be corrected, so such a card may point
+    // at a file that is not there. Bounded to a closed set of document formats.
+    // Source files keep the old behavior, which is what this was written for.
+    if (!match && !(changedFiles.length > 0 && isShellProducedDeliverable(mentioned))) {
       continue
     }
 
-    const resolvedMatch = resolveFilePath(match)
-    const corrected = workDir && isWithinWorkDir(resolvedMatch, workDir)
-      ? relativeFilePath(workDir, resolvedMatch)
-      : toPosixPath(match)
+    const corrected = match
+      ? correctedChangedFilePath(match, workDir)
+      : correctedChangedFilePath(anchorToChangedDirectory(mentioned, changedFiles), workDir)
 
     const key = `${target.kind}:${corrected}`
     if (seen.has(key)) {
@@ -299,6 +373,33 @@ function reconcileTargetsWithChangedFiles(
       subtitle: corrected,
     })
     if (out.length >= limit) break
+  }
+
+  if (!includeChangedFileFallback) return out
+
+  // A generated document is still a deliverable when the assistant forgets to
+  // repeat its path in the final prose. The checkpoint is upstream identity:
+  // unlike text extraction, it tells us which path this turn actually wrote.
+  for (const changedFile of changedFiles) {
+    if (out.length >= limit) break
+    if (!isGeneratedArtifactFile(changedFile)) continue
+
+    const corrected = correctedChangedFilePath(changedFile, workDir)
+    const kind = classifyFileTarget(corrected) ?? 'file'
+    const key = `${kind}:${corrected}`
+    if (seen.has(key)) continue
+    seen.add(key)
+
+    out.push({
+      id: createId(kind, corrected),
+      kind,
+      title: getBasename(corrected),
+      subtitle: corrected,
+      href: corrected,
+      normalizedPath: corrected,
+      confidence: 'high',
+      source: 'changed-file',
+    })
   }
 
   return out
@@ -406,6 +507,10 @@ function classifyFileTarget(candidate: string): FileTargetMatch['kind'] | null {
     return 'video'
   }
 
+  if (isLinkableFilePath(candidate) && isOutputResourceFile(candidate)) {
+    return 'file'
+  }
+
   return null
 }
 
@@ -462,11 +567,13 @@ function extractMarkdownLinks(content: string): MarkdownLinkMatch[] {
     const title = content.slice(index + 1, labelEnd).trim()
     const rawDestination = content.slice(labelEnd + 2, destinationEnd)
     const href = normalizeMarkdownDestination(rawDestination)
+    const isImage = content[index - 1] === '!'
 
     matches.push({
       title,
       href,
-      start: index,
+      isImage,
+      start: isImage ? index - 1 : index,
       end: destinationEnd + 1,
     })
 
@@ -502,6 +609,12 @@ function findMarkdownDestinationEnd(content: string, start: number): number {
 
 function normalizeMarkdownDestination(destination: string): string {
   let normalized = destination.trim()
+  const titleMatch = normalized.match(
+    /^(.*\S)\s+(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\((?:[^)\\]|\\.)*\))\s*$/,
+  )
+  if (titleMatch?.[1]) {
+    normalized = titleMatch[1].trim()
+  }
 
   if (normalized.startsWith('<') && normalized.endsWith('>')) {
     normalized = normalized.slice(1, -1).trim()

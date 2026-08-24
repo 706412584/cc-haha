@@ -20,6 +20,15 @@ export type UseAnchoredPositionOptions = AnchorSource & {
   flip?: boolean
   /** Slide along the cross axis to stay inside the viewport. */
   shift?: boolean
+  /**
+   * Cap the overlay's height at the space available on the resolved side, so a
+   * list too long for the viewport scrolls instead of running off the screen.
+   *
+   * Opt-in: an overlay that is always short (a tooltip) gains nothing from a
+   * `max-height`, and one whose content is meant to size the box would be
+   * silently clipped by it.
+   */
+  clampHeight?: boolean
 }
 
 export type AnchoredPosition = {
@@ -54,10 +63,15 @@ export function useAnchoredPosition({
   viewportMargin = DEFAULT_MARGIN,
   flip = true,
   shift = true,
+  clampHeight = false,
 }: UseAnchoredPositionOptions): AnchoredPosition {
-  const [state, setState] = useState<{ top: number; left: number; placement: AnchoredPlacement; ready: boolean }>(
-    () => ({ top: 0, left: 0, placement, ready: false }),
-  )
+  const [state, setState] = useState<{
+    top: number
+    left: number
+    maxHeight: number | null
+    placement: AnchoredPlacement
+    ready: boolean
+  }>(() => ({ top: 0, left: 0, maxHeight: null, placement, ready: false }))
 
   const measure = useCallback(() => {
     const anchorBox = anchorRect ?? anchorRef?.current?.getBoundingClientRect()
@@ -102,7 +116,13 @@ export function useAnchoredPosition({
       left = Math.max(viewportMargin, Math.min(left, viewportWidth - width - viewportMargin))
     }
 
-    setState({ top, left, placement: resolved, ready: true })
+    // Measured from where the overlay actually ended up, so a flip or an
+    // edge-clamp is already accounted for.
+    const maxHeight = clampHeight
+      ? Math.max(0, viewportHeight - viewportMargin - top)
+      : null
+
+    setState({ top, left, maxHeight, placement: resolved, ready: true })
   }, [
     anchorRect?.top,
     anchorRect?.right,
@@ -115,6 +135,7 @@ export function useAnchoredPosition({
     viewportMargin,
     flip,
     shift,
+    clampHeight,
   ])
 
   useLayoutEffect(() => {
@@ -130,6 +151,7 @@ export function useAnchoredPosition({
       position: 'fixed',
       top: state.top,
       left: state.left,
+      ...(state.maxHeight == null ? {} : { maxHeight: state.maxHeight }),
       visibility: state.ready ? 'visible' : 'hidden',
     },
     placement: state.placement,

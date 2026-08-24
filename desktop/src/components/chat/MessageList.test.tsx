@@ -14,7 +14,11 @@ import {
   trailingStreamingRailPosition,
 } from './MessageList'
 import type { ConversationNavigationItem } from './ConversationNavigator'
-import type { VirtualRenderItemMetric } from './virtualHeightCache'
+import {
+  dropSession,
+  getHeightsForSession,
+  type VirtualRenderItemMetric,
+} from './virtualHeightCache'
 import { relativizeWorkspacePath } from './CurrentTurnChangeCard'
 import { sessionsApi } from '../../api/sessions'
 import { teamsApi } from '../../api/teams'
@@ -360,6 +364,141 @@ describe('MessageList nested tool calls', () => {
     for (const item of container.querySelectorAll('[data-virtual-message-item]')) {
       expect((item as HTMLElement).className).not.toContain('chat-render-item--cv')
     }
+  })
+
+  it('renders a single optimistic image attachment at readable size through the real send transition', () => {
+    render(<MessageList sessionId={ACTIVE_TAB} />)
+
+    act(() => {
+      useChatStore.getState().sendMessage(ACTIVE_TAB, '', [{
+        type: 'image',
+        name: 'single.png',
+        data: 'data:image/png;base64,AAAA',
+        mimeType: 'image/png',
+      }])
+    })
+
+    const className = screen.getByRole('img', { name: 'single.png' }).className
+    expect(className).toContain('max-h-[340px]')
+    expect(className).toContain('max-w-[360px]')
+  })
+
+  it('keeps the ImageGen result as the only image owner when final Markdown repeats its managed path', () => {
+    const generatedPath = '/Users/me/.claude/cc-haha/generated-images/session/result.png'
+    render(<MessageList sessionId={ACTIVE_TAB} />)
+    const store = useChatStore.getState()
+
+    act(() => {
+      store.sendMessage(ACTIVE_TAB, 'Generate an image')
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'content_start',
+        blockType: 'tool_use',
+        toolName: 'ImageGen',
+        toolUseId: 'imagegen-1',
+      })
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'tool_use_complete',
+        toolName: 'ImageGen',
+        toolUseId: 'imagegen-1',
+        input: { prompt: 'A paper-cut fox', count: 1 },
+      })
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'tool_result',
+        toolUseId: 'imagegen-1',
+        content: JSON.stringify({
+          type: 'image_generation_result',
+          operation: 'generate',
+          inputImageCount: 0,
+          providerId: 'openai-official',
+          providerKind: 'openai_oauth',
+          model: 'gpt-image-2',
+          prompt: 'A paper-cut fox',
+          images: [{ path: generatedPath, mimeType: 'image/png' }],
+          durationMs: 1200,
+        }),
+        isError: false,
+      })
+      store.handleServerMessage(ACTIVE_TAB, { type: 'content_start', blockType: 'text' })
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'content_delta',
+        text: `Created ![result](${generatedPath})`,
+      })
+      store.handleServerMessage(ACTIVE_TAB, { type: 'status', state: 'idle' })
+    })
+
+    const images = screen.getAllByRole('img')
+    expect(images).toHaveLength(1)
+    expect(images[0]?.getAttribute('src')).toContain(encodeURIComponent(generatedPath))
+    expect(document.querySelector('img:not([src])')).toBeNull()
+  })
+
+  it('keeps fractional border-box jitter from invalidating a settled virtual row', async () => {
+    const sessionId = 'virtual-row-measurement-jitter'
+    const observers: Array<{
+      callback: ResizeObserverCallback
+      targets: Element[]
+    }> = []
+    class TestResizeObserver {
+      targets: Element[] = []
+      observe = vi.fn((target: Element) => {
+        this.targets.push(target)
+      })
+      unobserve = vi.fn()
+      disconnect = vi.fn()
+
+      constructor(callback: ResizeObserverCallback) {
+        observers.push({ callback, targets: this.targets })
+      }
+    }
+    vi.stubGlobal('ResizeObserver', TestResizeObserver)
+    dropSession(sessionId)
+    useChatStore.setState({
+      sessions: {
+        [sessionId]: makeSessionState({
+          messages: Array.from({ length: 220 }, (_, index) => ({
+            id: `fractional-assistant-${index}`,
+            type: 'assistant_text' as const,
+            content: `fractional transcript line ${index}`,
+            timestamp: index,
+          })),
+        }),
+      },
+    })
+
+    const { container } = render(<MessageList sessionId={sessionId} />)
+    const item = container.querySelector<HTMLElement>('[data-virtual-message-item]')
+    expect(item).toBeTruthy()
+    const itemKey = item!.dataset.virtualMessageItem!
+    const itemObserver = observers.find(({ targets }) => targets.includes(item!))
+    expect(itemObserver).toBeTruthy()
+
+    const reportHeight = async (height: number) => {
+      act(() => {
+        itemObserver?.callback([{
+          target: item!,
+          borderBoxSize: [{ blockSize: height, inlineSize: 800 }],
+          contentRect: { height: height - 8 },
+        } as unknown as ResizeObserverEntry], {} as ResizeObserver)
+      })
+      await waitForProgrammaticScrollReset()
+    }
+
+    // Windows fractional DPI can place a stable border box on opposite sides
+    // of an integer boundary. Ceil turned this sub-pixel noise into an endless
+    // 1px cache update and MessageList repaint (#1223).
+    await reportHeight(117.99)
+    expect(getHeightsForSession(sessionId).get(itemKey)).toBeCloseTo(117.99)
+
+    await reportHeight(118.01)
+    expect(getHeightsForSession(sessionId).get(itemKey)).toBeCloseTo(117.99)
+
+    await reportHeight(119.99)
+    expect(getHeightsForSession(sessionId).get(itemKey)).toBeCloseTo(117.99)
+
+    // A real layout change still has to update the virtual offsets.
+    await reportHeight(121.25)
+    expect(getHeightsForSession(sessionId).get(itemKey)).toBeCloseTo(121.25)
+    dropSession(sessionId)
   })
 
   it('finds, mounts, navigates, and highlights matches outside a 120-item virtual window', async () => {
@@ -6869,6 +7008,41 @@ describe('MessageList nested tool calls', () => {
     expect(getTurnCheckpoints).toHaveBeenCalledTimes(2)
   })
 
+  it('aborts the stale turn checkpoint request when the viewed session changes', async () => {
+    const requests: Array<{ sessionId: string; signal?: AbortSignal }> = []
+    vi.mocked(sessionsApi.getTurnCheckpoints).mockImplementation((sessionId, options) => {
+      requests.push({ sessionId, signal: options?.signal })
+      return new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => {
+          reject(options.signal?.reason ?? new DOMException('The operation was aborted', 'AbortError'))
+        }, { once: true })
+      })
+    })
+
+    const completedMessages: UIMessage[] = [
+      { id: 'user-1', type: 'user_text', content: 'Generate a file', timestamp: 1 },
+      { id: 'assistant-1', type: 'assistant_text', content: 'Done', timestamp: 2 },
+    ]
+    useChatStore.setState({
+      sessions: {
+        'session-one': makeSessionState({ messages: completedMessages }),
+        'session-two': makeSessionState({ messages: completedMessages }),
+      },
+    })
+
+    const { rerender } = render(<MessageList sessionId="session-one" />)
+    await waitFor(() => expect(requests).toHaveLength(1))
+    expect(requests[0]).toMatchObject({ sessionId: 'session-one' })
+    expect(requests[0]?.signal?.aborted).toBe(false)
+
+    rerender(<MessageList sessionId="session-two" />)
+
+    await waitFor(() => expect(requests).toHaveLength(2))
+    expect(requests[0]?.signal?.aborted).toBe(true)
+    expect(requests[1]).toMatchObject({ sessionId: 'session-two' })
+    expect(requests[1]?.signal?.aborted).toBe(false)
+  })
+
   it('rewinds a live turn with the authoritative checkpoint id when the local UI id differs', async () => {
     vi.spyOn(sessionsApi, 'getTurnCheckpoints').mockResolvedValue({
       checkpoints: [
@@ -7584,6 +7758,161 @@ describe('MessageList nested tool calls', () => {
     expect(screen.queryByText('second.ts')).toBeNull()
     await waitFor(() => {
       expect(screen.queryByText('Markdown')).toBeNull()
+    })
+  })
+
+  it('assigns changed-file output fallback to only the final assistant text in a turn', async () => {
+    const generatedPath = '/private/tmp/ink-survey-philosophy.md'
+    vi.spyOn(sessionsApi, 'getTurnCheckpoints').mockResolvedValue({
+      checkpoints: [
+        {
+          target: {
+            targetUserMessageId: 'transcript-user-1',
+            userMessageIndex: 0,
+            userMessageCount: 1,
+          },
+          workDir: '/private/tmp',
+          code: {
+            available: true,
+            filesChanged: [generatedPath],
+            insertions: 15,
+            deletions: 0,
+          },
+        },
+      ],
+    })
+
+    render(<MessageList sessionId={ACTIVE_TAB} />)
+    const store = useChatStore.getState()
+
+    act(() => {
+      store.sendMessage(ACTIVE_TAB, 'Create one Markdown document')
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'content_start',
+        blockType: 'tool_use',
+        toolName: 'Skill',
+        toolUseId: 'skill-1',
+      })
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'tool_use_complete',
+        toolName: 'Skill',
+        toolUseId: 'skill-1',
+        input: { skill: 'imagegen' },
+      })
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'tool_result',
+        toolUseId: 'skill-1',
+        content: 'Launching skill: imagegen',
+        isError: false,
+      })
+      store.handleServerMessage(ACTIVE_TAB, { type: 'content_start', blockType: 'text' })
+      store.handleServerMessage(ACTIVE_TAB, { type: 'content_delta', text: 'SKILL_PROGRESS' })
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'content_start',
+        blockType: 'tool_use',
+        toolName: 'ToolSearch',
+        toolUseId: 'search-1',
+      })
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'tool_use_complete',
+        toolName: 'ToolSearch',
+        toolUseId: 'search-1',
+        input: { query: 'select:ImageGen' },
+      })
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'tool_result',
+        toolUseId: 'search-1',
+        content: 'ImageGen',
+        isError: false,
+      })
+      store.handleServerMessage(ACTIVE_TAB, { type: 'content_start', blockType: 'text' })
+      store.handleServerMessage(ACTIVE_TAB, { type: 'content_delta', text: 'TOOLSEARCH_PROGRESS' })
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'content_start',
+        blockType: 'tool_use',
+        toolName: 'Write',
+        toolUseId: 'write-1',
+      })
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'tool_use_complete',
+        toolName: 'Write',
+        toolUseId: 'write-1',
+        input: { file_path: generatedPath, content: '# 墨痕测绘' },
+      })
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'tool_result',
+        toolUseId: 'write-1',
+        content: `File created successfully at: ${generatedPath}`,
+        isError: false,
+      })
+      store.handleServerMessage(ACTIVE_TAB, { type: 'content_start', blockType: 'text' })
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'content_delta',
+        text: `FINAL_DELIVERY\n\n\`${generatedPath}\``,
+      })
+      store.handleServerMessage(ACTIVE_TAB, { type: 'status', state: 'idle' })
+    })
+
+    const turnCard = await screen.findByLabelText('Turn changed files')
+    await waitFor(() => {
+      expect(screen.getAllByRole('button', { name: 'Open' })).toHaveLength(1)
+    })
+
+    const firstProgressItem = screen.getByText('SKILL_PROGRESS').closest('[data-chat-render-item-key]')
+    const secondProgressItem = screen.getByText('TOOLSEARCH_PROGRESS').closest('[data-chat-render-item-key]')
+    const finalItem = screen.getByText('FINAL_DELIVERY').closest('[data-chat-render-item-key]')
+    expect(firstProgressItem).not.toBeNull()
+    expect(secondProgressItem).not.toBeNull()
+    expect(finalItem).not.toBeNull()
+    expect(within(firstProgressItem as HTMLElement).queryByRole('button', { name: 'Open' })).toBeNull()
+    expect(within(secondProgressItem as HTMLElement).queryByRole('button', { name: 'Open' })).toBeNull()
+    expect(within(finalItem as HTMLElement).getByRole('button', { name: 'Open' })).toBeTruthy()
+    expect(within(turnCard).getByText('ink-survey-philosophy.md')).toBeTruthy()
+  })
+
+  it('keeps one output card per turn when separate turns generate the same path', async () => {
+    const generatedPath = '/private/tmp/repeated-report.md'
+    vi.spyOn(sessionsApi, 'getTurnCheckpoints').mockResolvedValue({
+      checkpoints: [0, 1].map((userMessageIndex) => ({
+        target: {
+          targetUserMessageId: `transcript-user-${userMessageIndex + 1}`,
+          userMessageIndex,
+          userMessageCount: 2,
+        },
+        workDir: '/private/tmp',
+        code: {
+          available: true,
+          filesChanged: [generatedPath],
+          insertions: 1,
+          deletions: 0,
+        },
+      })),
+    })
+
+    render(<MessageList sessionId={ACTIVE_TAB} />)
+    const store = useChatStore.getState()
+
+    act(() => {
+      store.sendMessage(ACTIVE_TAB, 'Generate the first report')
+      store.handleServerMessage(ACTIVE_TAB, { type: 'content_start', blockType: 'text' })
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'content_delta',
+        text: 'FIRST_REPORT',
+      })
+      store.handleServerMessage(ACTIVE_TAB, { type: 'status', state: 'idle' })
+
+      store.sendMessage(ACTIVE_TAB, 'Update the same report again')
+      store.handleServerMessage(ACTIVE_TAB, { type: 'content_start', blockType: 'text' })
+      store.handleServerMessage(ACTIVE_TAB, {
+        type: 'content_delta',
+        text: 'SECOND_REPORT',
+      })
+      store.handleServerMessage(ACTIVE_TAB, { type: 'status', state: 'idle' })
+    })
+
+    expect(await screen.findAllByLabelText('Turn changed files')).toHaveLength(2)
+    await waitFor(() => {
+      expect(screen.getAllByRole('button', { name: 'Open' })).toHaveLength(2)
     })
   })
 

@@ -6553,6 +6553,97 @@ describe('WebSocket Chat Integration', () => {
     })
   })
 
+  it('should reconcile an idle turn that completed while the client was disconnected', async () => {
+    await withMockStreamDelay(75, async () => {
+      const sessionId = `chat-reconnect-completed-${crypto.randomUUID()}`
+      const firstMessages: any[] = []
+      const reconnectMessages: any[] = []
+      let firstSocket: WebSocket | null = null
+      let reconnectSocket: WebSocket | null = null
+
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            reject(new Error(`Timed out waiting for disconnected completion for session ${sessionId}`))
+          }, 10_000)
+
+          const fail = (error: unknown) => {
+            clearTimeout(timeout)
+            reject(error instanceof Error ? error : new Error(String(error)))
+          }
+
+          firstSocket = new WebSocket(`${wsUrl}/ws/${sessionId}`)
+          firstSocket.onmessage = (event) => {
+            const message = JSON.parse(event.data as string)
+            firstMessages.push(message)
+            if (message.type === 'connected') {
+              firstSocket?.send(JSON.stringify({
+                type: 'user_message',
+                content: 'finish while disconnected',
+              }))
+              return
+            }
+            if (message.type !== 'thinking') return
+
+            firstSocket?.close()
+            void (async () => {
+              const deadline = Date.now() + 5_000
+              while (
+                Date.now() < deadline &&
+                !conversationService.getRecentSdkMessages(sessionId).some(
+                  (entry) => entry?.type === 'result',
+                )
+              ) {
+                await new Promise((pollResolve) => setTimeout(pollResolve, 25))
+              }
+              if (!conversationService.getRecentSdkMessages(sessionId).some(
+                (entry) => entry?.type === 'result',
+              )) {
+                fail(new Error(`CLI did not finish while disconnected for session ${sessionId}`))
+                return
+              }
+
+              reconnectSocket = new WebSocket(`${wsUrl}/ws/${sessionId}`)
+              reconnectSocket.onmessage = (reconnectEvent) => {
+                const reconnectMessage = JSON.parse(reconnectEvent.data as string)
+                reconnectMessages.push(reconnectMessage)
+                if (reconnectMessage.type === 'connected') {
+                  reconnectSocket?.send(JSON.stringify({ type: 'sync_state' }))
+                  return
+                }
+                if (
+                  reconnectMessage.type === 'session_state' &&
+                  reconnectMessage.turnState === 'idle'
+                ) {
+                  clearTimeout(timeout)
+                  resolve()
+                }
+              }
+              reconnectSocket.onerror = () => fail(
+                new Error(`Reconnect WebSocket error for session ${sessionId}`),
+              )
+            })().catch(fail)
+          }
+          firstSocket.onerror = () => fail(
+            new Error(`Initial WebSocket error for session ${sessionId}`),
+          )
+        })
+
+        expect(firstMessages.some((message) => message.type === 'thinking')).toBe(true)
+        expect(reconnectMessages).toContainEqual({
+          type: 'session_state',
+          turnState: 'idle',
+          activeBackgroundTaskIds: [],
+        })
+        expect(reconnectMessages.some((message) => message.type === 'message_complete')).toBe(false)
+      } finally {
+        firstSocket?.close()
+        reconnectSocket?.close()
+        conversationService.stopSession(sessionId)
+      }
+    })
+  })
+
   it('should stream one active turn to multiple connected clients', async () => {
     await withMockStreamDelay(150, async () => {
       const sessionId = `chat-multi-client-${crypto.randomUUID()}`

@@ -10,6 +10,7 @@ import {
   mergeActiveProviderManagedEnv,
   readActiveProviderManagedEnv,
 } from '../services/providerRuntimeEnv.js'
+import { PROVIDER_TOOL_SEARCH_OPT_IN_SCHEMA_VERSION } from '../types/provider.js'
 import { get3PModelCapabilityOverride } from '../../utils/model/modelSupportOverrides.js'
 
 let tmpDir: string
@@ -170,6 +171,7 @@ describe('providerRuntimeEnv', () => {
       ANTHROPIC_BASE_URL: 'https://api.example.com/anthropic',
       ANTHROPIC_API_KEY: '',
       ANTHROPIC_AUTH_TOKEN: 'sk-active',
+      ENABLE_TOOL_SEARCH: 'false',
       ANTHROPIC_MODEL: 'active-main',
       ANTHROPIC_DEFAULT_FABLE_MODEL: 'active-fable',
       ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES:
@@ -407,6 +409,7 @@ describe('providerRuntimeEnv', () => {
 
   test('injects CLAUDE_CODE_DISABLE_THINKING when the provider is flagged thinkingIncompatible', async () => {
     await writeJson(path.join(tmpDir, 'cc-haha', 'providers.json'), {
+      schemaVersion: PROVIDER_TOOL_SEARCH_OPT_IN_SCHEMA_VERSION,
       activeId: 'provider-1',
       providers: [
         {
@@ -431,6 +434,34 @@ describe('providerRuntimeEnv', () => {
 
     const env = readActiveProviderManagedEnv(tmpDir)
     expect(env?.CLAUDE_CODE_DISABLE_THINKING).toBe('1')
+  })
+
+  test('honors explicitly enabled tool search for native Anthropic providers', async () => {
+    await writeJson(path.join(tmpDir, 'cc-haha', 'providers.json'), {
+      schemaVersion: PROVIDER_TOOL_SEARCH_OPT_IN_SCHEMA_VERSION,
+      activeId: 'provider-1',
+      providers: [
+        {
+          id: 'provider-1',
+          presetId: 'custom',
+          name: 'Tool Search On',
+          apiKey: 'sk-active',
+          authStrategy: 'auth_token',
+          baseUrl: 'https://bedrock-proxy.example.com',
+          apiFormat: 'anthropic',
+          toolSearchEnabled: true,
+          models: {
+            main: 'active-main',
+            haiku: 'active-haiku',
+            sonnet: 'active-sonnet',
+            opus: 'active-opus',
+          },
+        },
+      ],
+    })
+
+    const env = readActiveProviderManagedEnv(tmpDir)
+    expect(env.ENABLE_TOOL_SEARCH).toBe('true')
   })
 
   test('honors disabled experimental betas for active providers', async () => {

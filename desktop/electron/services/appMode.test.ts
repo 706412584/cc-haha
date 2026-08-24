@@ -288,4 +288,37 @@ describe('Electron app mode service', () => {
     })
     expect(fs.readdirSync(fakeApp.getPath('userData'))).toEqual(['app-mode.json'])
   })
+
+  it('migrates a legacy install-adjacent portable record into userData on startup', () => {
+    const fakeApp = app()
+    const legacyDir = path.join(path.dirname(fakeApp.getPath('exe')), 'CLAUDE_CONFIG_DIR')
+    const customDir = path.join(fakeApp.root, 'custom-data')
+    // Pre-v0.5.4 builds persisted the portable record only in the install-
+    // adjacent config dir; userData has no record yet.
+    fs.mkdirSync(legacyDir, { recursive: true })
+    fs.writeFileSync(path.join(legacyDir, 'app-mode.json'), JSON.stringify({ mode: 'portable', portable_dir: customDir }))
+    expect(fs.existsSync(path.join(fakeApp.getPath('userData'), 'app-mode.json'))).toBe(false)
+
+    const env: NodeJS.ProcessEnv = {}
+    expect(determineStartupPortableDir(fakeApp, env)).toBe(customDir)
+    // The legacy record is copied forward so later restarts read userData directly.
+    expect(JSON.parse(fs.readFileSync(path.join(fakeApp.getPath('userData'), 'app-mode.json'), 'utf8'))).toEqual({
+      mode: 'portable',
+      portable_dir: customDir,
+    })
+    expect(applyStartupPortableMode(fakeApp, env)).toBe(customDir)
+    expect(getAppMode(fakeApp, env)).toMatchObject({ mode: 'portable', activeConfigDir: customDir })
+  })
+
+  it('prefers the userData record over a stale legacy install-adjacent record', () => {
+    const fakeApp = app()
+    const legacyDir = path.join(path.dirname(fakeApp.getPath('exe')), 'CLAUDE_CONFIG_DIR')
+    const staleDir = path.join(fakeApp.root, 'stale-custom')
+    const currentDir = path.join(fakeApp.root, 'current-custom')
+    fs.mkdirSync(legacyDir, { recursive: true })
+    fs.writeFileSync(path.join(legacyDir, 'app-mode.json'), JSON.stringify({ mode: 'portable', portable_dir: staleDir }))
+    writeMode(fakeApp, { mode: 'portable', portable_dir: currentDir })
+
+    expect(determineStartupPortableDir(fakeApp, {})).toBe(currentDir)
+  })
 })

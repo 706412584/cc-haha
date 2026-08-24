@@ -84,7 +84,17 @@ export function useDismissable({
       onDismiss('escape')
     }
 
-    const handleScroll = () => onDismiss('scroll')
+    // Scrolling *the overlay* is not a viewport change. The listener is on
+    // capture (nested scroll containers do not bubble), so without this an
+    // overlay tall enough to need its own scrollbar closes the instant the user
+    // reaches for it — the scrollbar renders, and is unusable.
+    const handleScroll = (nativeEvent: Event) => {
+      // A page scroll targets `document` or `window`, neither of which is a Node,
+      // so the containment check has to be guarded rather than cast into place.
+      const target = nativeEvent.target
+      if (target instanceof Node && refs.some((ref) => ref.current?.contains(target))) return
+      onDismiss('scroll')
+    }
     const handleResize = () => onDismiss('resize')
 
     document.addEventListener(event, handlePointer, capture)

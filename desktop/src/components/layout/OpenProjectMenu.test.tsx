@@ -95,10 +95,13 @@ describe('OpenProjectMenu', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Open project' }))
     })
     expect(screen.getByRole('menu')).toBeInTheDocument()
+    // Never a direct `<img src>` at the endpoint: that is a cross-origin no-cors
+    // subresource, it carries no Authorization header, and the server answers 401.
+    // TargetIcon fetches the bytes and hands the DOM a blob URL instead.
     expect([
       ...Array.from(container.querySelectorAll('img')),
       ...Array.from(document.body.querySelectorAll('[role="menu"] img')),
-    ].map((img) => img.getAttribute('src'))).toContain('/api/open-targets/icons/vscode')
+    ].map((img) => img.getAttribute('src'))).not.toContain('/api/open-targets/icons/vscode')
     await act(async () => {
       fireEvent.click(screen.getByRole('menuitem', { name: 'Finder' }))
     })

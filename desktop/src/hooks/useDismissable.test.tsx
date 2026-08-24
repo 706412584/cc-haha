@@ -149,6 +149,22 @@ describe('useDismissable', () => {
     expect(onDismiss).toHaveBeenCalledWith('resize')
   })
 
+  it('does not treat scrolling inside the overlay as a viewport change', () => {
+    // The scroll listener is on capture, so a scroll container *inside* the
+    // overlay reaches it too. Closing there makes an overlay that has its own
+    // scrollbar impossible to scroll.
+    const onDismiss = vi.fn()
+    render(<Harness onDismiss={onDismiss} closeOnViewportChange />)
+
+    fireEvent.scroll(screen.getByTestId('panel'))
+    expect(onDismiss).not.toHaveBeenCalled()
+
+    // ...while a scroll anywhere else still closes it, which is the whole point
+    // of watching for viewport changes: the anchor has moved.
+    fireEvent.scroll(screen.getByTestId('outside'))
+    expect(onDismiss).toHaveBeenCalledWith('scroll')
+  })
+
   it('ignores viewport changes by default', () => {
     const onDismiss = vi.fn()
     render(<Harness onDismiss={onDismiss} />)
