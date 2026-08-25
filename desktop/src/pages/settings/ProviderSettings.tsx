@@ -1697,10 +1697,11 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
           </div>
         )}
 
-        {/* ToolSearch toggle hidden: third-party providers don't support
-            the beta header and forcing it causes tool_use format degradation.
-            CLI auto-detects first-party hosts via toolSearch.ts. */}
-        {false && <label
+        {/* Tool Search toggle. Off by default. Only usable for Anthropic
+            Messages providers whose final upstream supports tool_reference;
+            incompatible third-party hosts may return HTTP 400, so enabling it
+            requires an explicit confirmation. */}
+        <label
           className={`relative flex items-start gap-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-3 transition-colors ${
             toolSearchUnsupported
               ? 'cursor-not-allowed opacity-70'
@@ -1724,7 +1725,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
               {toolSearchDescription}
             </div>
           </div>
-        </label>}
+        </label>
 
         <label className="relative flex cursor-pointer items-start gap-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-3 transition-colors hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)]">
           <input

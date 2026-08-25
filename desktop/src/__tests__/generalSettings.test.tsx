@@ -2511,7 +2511,7 @@ describe('Settings > Providers tab', () => {
     })
   })
 
-  it('defaults Tool Search off and requires confirmation before persisting an explicit enable', async () => {
+  it('defaults Tool Search off with a visible toggle', async () => {
     MOCK_GET_SETTINGS.mockResolvedValue({ env: { EXISTING_ENV: '1' } })
     providerStoreState.createProvider = vi.fn().mockResolvedValue({
       id: 'provider-new',
@@ -2550,16 +2550,70 @@ describe('Settings > Providers tab', () => {
     fireEvent.click(screen.getByRole('button', { name: /Add Provider/i }))
     const dialog = screen.getByRole('dialog')
 
-    // Toggle is hidden — it must not be reachable from the provider form.
-    expect(within(dialog).queryByRole('checkbox', { name: 'Enable Tool Search' })).toBeNull()
+    // Toggle is visible and defaults to unchecked.
+    const toolSearchToggle = within(dialog).getByRole('checkbox', { name: 'Enable Tool Search' })
+    expect(toolSearchToggle).not.toBeChecked()
 
     fireEvent.change(within(dialog).getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } })
     fireEvent.click(within(dialog).getByRole('button', { name: /Save|Add/i }))
 
     await waitFor(() => {
-      // Toggle does not exist in this build — Tool Search stays defaulted off.
+      // Untouched toggle keeps Tool Search off.
       expect(providerStoreState.createProvider).toHaveBeenCalledWith(expect.objectContaining({
         toolSearchEnabled: false,
+      }))
+    })
+  })
+
+  it('requires confirmation before persisting an explicit Tool Search enable', async () => {
+    MOCK_GET_SETTINGS.mockResolvedValue({ env: { EXISTING_ENV: '1' } })
+    providerStoreState.createProvider = vi.fn().mockResolvedValue({
+      id: 'provider-new',
+      presetId: 'custom',
+      name: 'Custom',
+      apiKey: 'sk-test',
+      baseUrl: 'https://api.example.com/anthropic',
+      apiFormat: 'anthropic',
+      toolSearchEnabled: true,
+      models: {
+        main: 'custom-main',
+        haiku: 'custom-main',
+        sonnet: 'custom-main',
+        opus: 'custom-main',
+      },
+    })
+    providerStoreState.presets = [
+      {
+        id: 'custom',
+        name: 'Custom',
+        baseUrl: 'https://api.example.com/anthropic',
+        apiFormat: 'anthropic',
+        defaultModels: {
+          main: 'custom-main',
+          haiku: '',
+          sonnet: '',
+          opus: '',
+        },
+        needsApiKey: true,
+        websiteUrl: '',
+      },
+    ]
+
+    render(<Settings />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Add Provider/i }))
+    const dialog = screen.getByRole('dialog')
+
+    // Enabling opens a confirmation dialog before the toggle flips on.
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Enable Tool Search' }))
+    fireEvent.click(await screen.findByRole('button', { name: /Enable anyway/i }))
+
+    fireEvent.change(within(dialog).getByPlaceholderText('sk-...'), { target: { value: 'sk-test' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: /Save|Add/i }))
+
+    await waitFor(() => {
+      expect(providerStoreState.createProvider).toHaveBeenCalledWith(expect.objectContaining({
+        toolSearchEnabled: true,
       }))
     })
   })
