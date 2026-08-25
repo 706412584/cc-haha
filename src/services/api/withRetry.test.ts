@@ -493,6 +493,35 @@ describe('isRetryableStreamError', () => {
     expect(isRetryableStreamError(err)).toBe(true)
   })
 
+  test('matches a statusless stream_read_error (upstream EOF)', () => {
+    const err = apiErrorWithBody({
+      type: 'error',
+      error: {
+        type: 'stream_read_error',
+        message: 'upstream stream disconnected: unexpected EOF',
+      },
+    })
+    expect(isRetryableStreamError(err)).toBe(true)
+  })
+
+  test('matches an upstream EOF serialized as a plain API Error message', () => {
+    const err = new Error(
+      'API Error: {"error":{"message":"upstream stream disconnected: unexpected EOF","type":"stream_read_error"},"type":"error"}',
+    )
+    expect(isRetryableStreamError(err)).toBe(true)
+  })
+
+  test('does not retry an explicit 4xx stream_read_error', () => {
+    const err = apiErrorWithBody(
+      {
+        type: 'error',
+        error: { type: 'stream_read_error', message: 'bad request' },
+      },
+      400,
+    )
+    expect(isRetryableStreamError(err)).toBe(false)
+  })
+
   test('does not match a client invalid_request_error', () => {
     const err = apiErrorWithBody(
       {

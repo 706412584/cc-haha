@@ -246,12 +246,14 @@ export class RetriableStreamError extends Error {
 /**
  * Detect transient, server-side errors that the SDK surfaces *during streaming*
  * without a usable HTTP status. The upstream sends them inside a 200 SSE body as
- *   {"type":"error","error":{"type":"api_error"|"overloaded_error"|"upstream_error",...}}
+ *   {"type":"error","error":{"type":"api_error"|"overloaded_error"|"upstream_error"|"stream_read_error",...}}
  * so `error.status` is undefined and every status-based check in shouldRetry()
  * falls through to `return false`. These errors are retryable: `api_error` =
- * unexpected server failure, `overloaded_error` = capacity, and
- * `upstream_error` = a temporary dependency/provider failure. Local/proxy
- * providers (e.g. LM Studio) also wrap transient
+ * unexpected server failure, `overloaded_error` = capacity, `upstream_error` =
+ * a temporary dependency/provider failure, and `stream_read_error` = the
+ * upstream stream disconnected mid-body (e.g. "upstream stream disconnected:
+ * unexpected EOF"), which a fresh re-send clears the same way a socket reset
+ * does. Local/proxy providers (e.g. LM Studio) also wrap transient
  * generation failures — such as a malformed tool_call the runtime rejects
  * mid-stream — as `api_error`, which a fresh attempt almost always clears.
  *
@@ -269,12 +271,22 @@ export function isRetryableStreamError(error: unknown): boolean {
     'api_error',
     'overloaded_error',
     'upstream_error',
+    'stream_read_error',
     'get_channel_failed',
   )) return true
 
   const message = error instanceof Error ? error.message : String(error)
-  return message.includes('OpenAI messages stream disconnected before completion') &&
+  // Some providers surface a mid-stream disconnect as a plain Error carrying
+  // the serialized body rather than a parsed APIError (so hasAPIErrorType
+  // misses it). Match the two transient shapes seen in the wild: Grok's
+  // "OpenAI messages stream disconnected before completion" (api_error) and an
+  // upstream EOF reported as stream_read_error. Both are safe to re-send
+  // because this matcher only runs before the side-effect boundary.
+  if (
+    message.includes('OpenAI messages stream disconnected before completion') &&
     /["']type["']\s*:\s*["']api_error["']/.test(message)
+  ) return true
+  return /["']type["']\s*:\s*["']stream_read_error["']/.test(message)
 }
 
 /**
