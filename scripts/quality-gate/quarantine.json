@@ -1,3 +1,20 @@
 {
-  "quarantined": []
+  "quarantined": [
+    {
+      "id": "local-agent-inbox-ownership",
+      "path": "src/tasks/LocalAgentTask/LocalAgentTask.test.ts",
+      "reason": "Asserts the upstream command-queue completion path; the fork uses the agentCompletionInbox architecture, so these ownership assertions have been red since the inbox refactor (predates any single upstream merge). See docs/known-pre-existing-test-failures.md root cause A.",
+      "owner": "706412584",
+      "reviewAfter": "2026-11-30",
+      "exitCriteria": "Rewrite the ownership assertions against agentCompletionInbox/drain semantics, then remove this entry."
+    },
+    {
+      "id": "no-key-value-nudges-edit-task-counts",
+      "path": "src/utils/noKeyValueNudges.test.ts",
+      "reason": "Verification-reminder nudge behavior diverges from the fork's runtime; red on a clean pre-merge baseline. See docs/known-pre-existing-test-failures.md root cause A.",
+      "owner": "706412584",
+      "reviewAfter": "2026-11-30",
+      "exitCriteria": "Reconcile the nudge assertions with the fork's current nudge injection logic, then remove this entry."
+    }
+  ]
 }
