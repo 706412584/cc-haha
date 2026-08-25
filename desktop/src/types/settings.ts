@@ -2,8 +2,8 @@
 
 export type PermissionMode = 'default' | 'acceptEdits' | 'auto' | 'plan' | 'bypassPermissions' | 'dontAsk'
 
-export type EffortLevel = 'low' | 'medium' | 'high' | 'max'
-export type ReasoningEffortLevel = EffortLevel | 'xhigh'
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+export type ReasoningEffortLevel = EffortLevel
 /**
  * The current 「纸 · 墨 · 印」 palettes followed by the four restored classic
  * palettes. Each name matches a `[data-theme]` block in theme/globals.css.

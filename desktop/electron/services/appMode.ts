@@ -19,6 +19,13 @@ export function systemClaudeConfigDir(app: AppModeAppLike): string {
   return path.join(app.getPath('home'), '.claude')
 }
 
+// Legacy install-adjacent config dir used by pre-v0.5.4 builds. Kept only as a
+// read-only migration source: those builds persisted the portable record here
+// (and under a differently-named userData folder). It is never written to.
+function legacyInstallConfigDir(app: AppModeAppLike): string {
+  return path.join(path.dirname(app.getPath('exe')), 'CLAUDE_CONFIG_DIR')
+}
+
 function readAppModeConfig(configDir: string): PersistedAppModeConfig | null {
   try {
     const parsed = JSON.parse(fs.readFileSync(path.join(configDir, APP_MODE_FILE), 'utf8')) as PersistedAppModeConfig
@@ -105,17 +112,42 @@ export function clearAppManagedPortableEnv(env: NodeJS.ProcessEnv = process.env)
   delete env.WEBVIEW2_USER_DATA_FOLDER
 }
 
+// Read a persisted portable custom dir from the current userData record, or —
+// if that record is missing/non-portable — fall back to a legacy install-
+// adjacent record written by pre-v0.5.4 builds and migrate it forward into the
+// current userData so subsequent restarts read it directly (#storage-location).
+function readPersistedPortableDir(app: AppModeAppLike): string | null {
+  const fromUserData = portableDirFromConfig(readAppModeConfig(app.getPath('userData')))
+  if (fromUserData) return fromUserData
+
+  const legacyConfig = readAppModeConfig(legacyInstallConfigDir(app))
+  const fromLegacy = portableDirFromConfig(legacyConfig)
+  if (!fromLegacy) return null
+
+  try {
+    writeAppModeConfig(app.getPath('userData'), { mode: 'portable', portable_dir: fromLegacy })
+  } catch {
+    // Migration write is best-effort; the returned dir is still usable this run.
+  }
+  return fromLegacy
+}
+
+function portableDirFromConfig(config: PersistedAppModeConfig | null): string | null {
+  if (config?.mode !== 'portable' || !config.portable_dir || !path.isAbsolute(config.portable_dir)) return null
+  return config.portable_dir
+}
+
 export function determineStartupPortableDir(
   app: AppModeAppLike,
   env: NodeJS.ProcessEnv = process.env,
 ): string | null {
   if (env.CLAUDE_CONFIG_DIR) return null
 
-  const config = readAppModeConfig(app.getPath('userData'))
-  if (config?.mode !== 'portable' || !config.portable_dir || !path.isAbsolute(config.portable_dir)) return null
+  const persistedDir = readPersistedPortableDir(app)
+  if (!persistedDir) return null
 
   try {
-    return normalizedCustomDir(app, config.portable_dir)
+    return normalizedCustomDir(app, persistedDir)
   } catch {
     return null
   }

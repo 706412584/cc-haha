@@ -1,4 +1,4 @@
-import { api } from './client'
+import { api, type ApiRequestOptions } from './client'
 import type { SlashCommandOption } from '../types/slashCommand'
 import type { AgentTaskNotification } from '../types/chat'
 import type { LocalIndexStatus, SessionListItem, MessageEntry } from '../types/session'
@@ -581,8 +581,11 @@ export const sessionsApi = {
     return api.post<{ state: WorkspaceLspState }>(`/api/sessions/${sessionId}/lsp/restart`, input)
   },
 
-  getTurnCheckpoints(sessionId: string) {
-    return api.get<SessionTurnCheckpointsResponse>(`/api/sessions/${sessionId}/turn-checkpoints`)
+  getTurnCheckpoints(sessionId: string, options?: ApiRequestOptions) {
+    return api.get<SessionTurnCheckpointsResponse>(
+      `/api/sessions/${sessionId}/turn-checkpoints`,
+      options,
+    )
   },
 
   getTurnCheckpointDiff(

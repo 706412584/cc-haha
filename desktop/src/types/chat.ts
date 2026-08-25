@@ -123,7 +123,11 @@ export type ProviderTransitionRequired = Extract<
 export type ServerMessage =
   | RuntimeConfigResult
   | { type: 'connected'; sessionId: string }
-  | { type: 'session_state'; turnState: 'running' | 'idle' }
+  | {
+      type: 'session_state'
+      turnState: 'running' | 'idle'
+      activeBackgroundTaskIds?: string[]
+    }
   | {
       type: 'agent_run_event'
       runAgentId: string

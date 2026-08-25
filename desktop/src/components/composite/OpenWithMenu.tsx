@@ -1,5 +1,5 @@
 import { createPortal } from 'react-dom'
-import { useCallback, useRef } from 'react'
+import { Fragment, useCallback, useRef } from 'react'
 import { Globe, ExternalLink, FileText, Copy } from 'lucide-react'
 import { useAnchoredPosition } from '@/hooks/useAnchoredPosition'
 import { useDismissable } from '@/hooks/useDismissable'
@@ -17,7 +17,7 @@ type Props = {
 }
 
 function ItemIcon({ item }: { item: OpenWithItem }) {
-  if ((item.icon === 'ide' || item.icon === 'file-manager') && item.target) return <TargetIcon target={item.target} size={20} />
+  if (item.target) return <TargetIcon target={item.target} size={20} />
   if (item.icon === 'in-app-browser') return <Globe size={18} strokeWidth={1.9} />
   if (item.icon === 'preview') return <FileText size={18} strokeWidth={1.9} />
   if (item.icon === 'copy') return <Copy size={18} strokeWidth={1.9} />
@@ -31,6 +31,9 @@ export function OpenWithMenu({ items, anchor, onClose, triggerEl }: Props) {
     anchorRect: anchor,
     floatingRef: ref,
     placement: 'bottom-end',
+    // The list is bounded, but not tightly: a document type with several
+    // associated applications still runs past a short window.
+    clampHeight: true,
   })
 
   // The hook takes a ref; this component is handed the raw trigger element by
@@ -58,20 +61,24 @@ export function OpenWithMenu({ items, anchor, onClose, triggerEl }: Props) {
     <div
       ref={ref}
       role="menu"
-      className="min-w-[min(220px,calc(100vw-16px))] max-w-[min(300px,calc(100vw-16px))] overflow-hidden rounded-[12px] border border-[var(--color-border)] bg-[var(--color-surface)] py-1 shadow-[var(--shadow-dropdown)]"
+      className="min-w-[min(220px,calc(100vw-16px))] max-w-[min(300px,calc(100vw-16px))] overflow-y-auto overscroll-contain rounded-[12px] border border-[var(--color-border)] bg-[var(--color-surface)] py-1 shadow-[var(--shadow-dropdown)]"
       style={{ ...positionStyle, zIndex: 'var(--z-dropdown)' }}
     >
       {items.map((item) => (
-        <button
-          key={item.id}
-          type="button"
-          role="menuitem"
-          onClick={() => { item.onSelect(); onClose() }}
-          className="flex w-full items-center gap-3 px-3 py-2.5 text-left text-sm font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)]"
-        >
-          <span className="flex h-6 w-6 items-center justify-center text-[var(--color-text-secondary)]"><ItemIcon item={item} /></span>
-          <span className="min-w-0 truncate">{item.label}</span>
-        </button>
+        <Fragment key={item.id}>
+          {item.separatorBefore && (
+            <div className="my-1 border-t border-[var(--color-border)]" role="separator" />
+          )}
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => { item.onSelect(); onClose() }}
+            className="flex w-full items-center gap-3 px-3 py-2.5 text-left text-sm font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)]"
+          >
+            <span className="flex h-6 w-6 items-center justify-center text-[var(--color-text-secondary)]"><ItemIcon item={item} /></span>
+            <span className="min-w-0 truncate">{item.label}</span>
+          </button>
+        </Fragment>
       ))}
     </div>,
     document.body,

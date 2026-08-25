@@ -1,3 +1,4 @@
+import { isEditorOpenableFile } from './fileCapabilities'
 import type { OpenTarget } from '../stores/openTargetStore'
 
 // ─── File-type description ────────────────────────────────────────────────────
@@ -36,8 +37,7 @@ const PREVIEWABLE_CHANGED_FILE_RE = /\.(md|markdown|html?|png|jpe?g|gif|webp|svg
 /**
  * True only for changed-file types with a meaningful *rendered* preview
  * (markdown / html / image). Source files (.ts/.json/.css …) return false.
- * Used to decide which change-card rows get the "open with" affordance —
- * we don't want an open-with pill on every file when a turn touches many.
+ * Used only to sort rich-preview files ahead of generic source/document rows.
  */
 export function isPreviewableChangedFile(path: string): boolean {
   return PREVIEWABLE_CHANGED_FILE_RE.test(path)
@@ -45,13 +45,15 @@ export function isPreviewableChangedFile(path: string): boolean {
 
 // ─── Open-with items ──────────────────────────────────────────────────────────
 
-export type OpenWithIcon = 'in-app-browser' | 'system' | 'ide' | 'file-manager' | 'preview' | 'copy'
+export type OpenWithIcon = 'in-app-browser' | 'system' | 'application' | 'ide' | 'file-manager' | 'preview' | 'copy'
 
 export type OpenWithItem = {
   id: string
   label: string
   icon: OpenWithIcon
-  target?: OpenTarget          // present for ide/file-manager items (to render its favicon)
+  target?: OpenTarget          // present for native app / IDE / file-manager items
+  /** Start a new group here. Set by the builder, which is what knows the sections. */
+  separatorBefore?: boolean
   onSelect: () => void
 }
 
@@ -63,12 +65,50 @@ export type OpenWithDeps = {
   /** Omit to leave the copy entries out (a URL context has nothing to copy). */
   copyPath?: (absolutePath: string) => void
   copyFileContent?: (path: string) => void
+  /**
+   * Which editor gets the single top-level slot. Falls back to the first one
+   * detected — the point is that the slot is predictable, so it must not be
+   * derived from whatever the user happened to open last.
+   */
+  preferredEditorTargetId?: string
   t: (key: string, vars?: Record<string, string>) => string
 }
 
 export type OpenWithContext =
   | { kind: 'url'; url: string }
   | { kind: 'file'; absolutePath: string; relPath?: string; previewable?: boolean; inAppBrowserUrl?: string }
+
+/**
+ * How many rows the "open in…" group may hold — the default application, the
+ * preferred editor, the associated applications, and whatever editors still fit.
+ * Six keeps the whole menu inside a short window without a scrollbar.
+ */
+export const MAX_OPEN_WITH_ROWS = 6
+
+/**
+ * The file manager is named, not interpolated.
+ *
+ * The server's label is a plain identifier ("Finder", "Explorer", "File Manager")
+ * with no locale behind it, so `Reveal in {target}` produced "在 Explorer 中显示"
+ * — an English name inside a Chinese sentence, and not even the name Windows uses
+ * for it. Same platform-keyed shape the sidebar settled on in #1236.
+ */
+function revealKeyForPlatform(platform: string): string {
+  switch (platform) {
+    case 'darwin': return 'openWith.revealIn.darwin'
+    case 'win32': return 'openWith.revealIn.win32'
+    case 'linux': return 'openWith.revealIn.linux'
+    default: return 'openWith.revealIn.default'
+  }
+}
+
+/** Mark the first entry of a group, so the menu can rule a line above it. */
+function pushGroup(items: OpenWithItem[], group: OpenWithItem[]): void {
+  const [first, ...rest] = group
+  if (!first) return
+  items.push(items.length > 0 ? { ...first, separatorBefore: true } : first)
+  items.push(...rest)
+}
 
 export function buildOpenWithItems(ctx: OpenWithContext, targets: OpenTarget[], deps: OpenWithDeps): OpenWithItem[] {
   const items: OpenWithItem[] = []
@@ -77,30 +117,92 @@ export function buildOpenWithItems(ctx: OpenWithContext, targets: OpenTarget[], 
     items.push({ id: 'system', label: deps.t('openWith.systemBrowser'), icon: 'system', onSelect: () => deps.openSystem(ctx.url) })
     return items
   }
+
+  const inApp: OpenWithItem[] = []
   if (ctx.previewable && ctx.relPath != null) {
     const relPath = ctx.relPath
-    items.push({ id: 'preview', label: deps.t('openWith.workspacePreview'), icon: 'preview', onSelect: () => deps.openWorkspacePreview(relPath) })
+    inApp.push({ id: 'preview', label: deps.t('openWith.workspacePreview'), icon: 'preview', onSelect: () => deps.openWorkspacePreview(relPath) })
   }
   if (ctx.inAppBrowserUrl) {
     const url = ctx.inAppBrowserUrl
-    items.push({ id: 'in-app', label: deps.t('openWith.inAppBrowser'), icon: 'in-app-browser', onSelect: () => deps.openInAppBrowser(url) })
+    inApp.push({ id: 'in-app', label: deps.t('openWith.inAppBrowser'), icon: 'in-app-browser', onSelect: () => deps.openInAppBrowser(url) })
   }
-  for (const target of targets.filter((x) => x.kind === 'ide')) {
-    items.push({ id: `ide:${target.id}`, label: deps.t('openWith.openInTarget', { target: target.label }), icon: 'ide', target, onSelect: () => deps.openTarget(target.id, ctx.absolutePath) })
+  pushGroup(items, inApp)
+
+  const applications = targets.filter((target) => target.kind === 'application')
+  const defaultApplication = applications.find((target) => target.isDefault)
+  const systemTarget = targets.find((target) => target.kind === 'system_default')
+
+  // "System default" named after the application it will actually open. The row
+  // still launches through the system-default target, not through that
+  // application: only that path carries the guard that refuses to hand an
+  // executable to the shell. So this is a label and an icon, nothing more.
+  const systemItem: OpenWithItem = {
+    id: 'system',
+    label: defaultApplication
+      ? deps.t('openWith.openInDefaultTarget', { target: defaultApplication.label })
+      : deps.t('openWith.systemDefault'),
+    icon: 'system',
+    ...(defaultApplication ? { target: defaultApplication } : systemTarget ? { target: systemTarget } : {}),
+    onSelect: systemTarget
+      ? () => deps.openTarget(systemTarget.id, ctx.absolutePath)
+      : () => deps.openSystem(ctx.absolutePath),
   }
+
+  const editors = isEditorOpenableFile(ctx.absolutePath)
+    ? targets.filter((target) => target.kind === 'ide')
+    : []
+  const preferredEditor = editors.find((target) => target.id === deps.preferredEditorTargetId) ?? editors[0]
+
+  const openInItem = (target: OpenTarget, icon: 'ide' | 'application'): OpenWithItem => ({
+    id: `${icon === 'ide' ? 'ide' : 'app'}:${target.id}`,
+    label: deps.t('openWith.openInTarget', { target: target.label }),
+    icon,
+    target,
+    onSelect: () => deps.openTarget(target.id, ctx.absolutePath),
+  })
+
+  const openWith: OpenWithItem[] = [systemItem]
+  if (preferredEditor) openWith.push(openInItem(preferredEditor, 'ide'))
+  for (const target of applications) {
+    // The named row above already covers the default application.
+    if (target !== defaultApplication) openWith.push(openInItem(target, 'application'))
+  }
+  // Only one editor gets a guaranteed slot, because on macOS the rest of this
+  // group is a list of associated applications competing for the same space.
+  // Where that list does not exist — Windows and Linux have no LaunchServices
+  // equivalent, so the server returns none — the space is free, and dropping the
+  // other installed editors would cost the user something and buy nothing.
+  for (const target of editors) {
+    if (openWith.length >= MAX_OPEN_WITH_ROWS) break
+    if (target === preferredEditor) continue
+    openWith.push(openInItem(target, 'ide'))
+  }
+  pushGroup(items, openWith)
+
   // Copy entries sit between "open in…" and "reveal in…", matching the order the
   // platform file managers use.
+  const clipboard: OpenWithItem[] = []
   if (deps.copyPath) {
     const copyPath = deps.copyPath
-    items.push({ id: 'copy-path', label: deps.t('openWith.copyPath'), icon: 'copy', onSelect: () => copyPath(ctx.absolutePath) })
+    clipboard.push({ id: 'copy-path', label: deps.t('openWith.copyPath'), icon: 'copy', onSelect: () => copyPath(ctx.absolutePath) })
   }
   if (deps.copyFileContent) {
     const copyFileContent = deps.copyFileContent
     const readPath = ctx.relPath ?? ctx.absolutePath
-    items.push({ id: 'copy-content', label: deps.t('openWith.copyFileContent'), icon: 'copy', onSelect: () => copyFileContent(readPath) })
+    clipboard.push({ id: 'copy-content', label: deps.t('openWith.copyFileContent'), icon: 'copy', onSelect: () => copyFileContent(readPath) })
   }
-  for (const target of targets.filter((x) => x.kind === 'file_manager')) {
-    items.push({ id: `fm:${target.id}`, label: deps.t('openWith.revealInTarget', { target: target.label }), icon: 'file-manager', target, onSelect: () => deps.openTarget(target.id, ctx.absolutePath) })
-  }
+  pushGroup(items, clipboard)
+
+  pushGroup(items, targets
+    .filter((target) => target.kind === 'file_manager')
+    .map((target) => ({
+      id: `fm:${target.id}`,
+      label: deps.t(revealKeyForPlatform(target.platform)),
+      icon: 'file-manager' as const,
+      target,
+      onSelect: () => deps.openTarget(target.id, ctx.absolutePath),
+    })))
+
   return items
 }

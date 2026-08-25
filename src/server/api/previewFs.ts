@@ -24,6 +24,10 @@ const CONTENT_TYPES: Record<string, string> = {
   woff2: 'font/woff2',
   txt: 'text/plain; charset=utf-8',
   md: 'text/plain; charset=utf-8',
+  // Reached today only by a PDF linked from a previewed HTML page — a PDF the
+  // user opens directly goes to the system viewer, which is where it belongs.
+  // Correct anyway, and the alternative (application/octet-stream) is a download.
+  pdf: 'application/pdf',
   // Video — served inline via <video> with HTTP byte-range streaming.
   mp4: 'video/mp4',
   webm: 'video/webm',

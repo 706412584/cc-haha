@@ -26,6 +26,7 @@ function renderAnchored(options: {
   flip?: boolean
   shift?: boolean
   offset?: number
+  clampHeight?: boolean
 }) {
   const captured: { current: Result | null } = { current: null }
 
@@ -41,6 +42,7 @@ function renderAnchored(options: {
       flip: options.flip,
       shift: options.shift,
       offset: options.offset,
+      clampHeight: options.clampHeight,
     })
 
     // Stub through a ref callback: those run synchronously as the DOM is
@@ -86,6 +88,40 @@ describe('useAnchoredPosition', () => {
     expect(result.style.top).toBe(136)
     expect(result.style.left).toBe(200)
     expect(result.placement).toBe('bottom-start')
+  })
+
+  it('leaves the height alone unless clamping was asked for', () => {
+    const result = renderAnchored({
+      anchor: { top: 100, bottom: 130, left: 200, right: 300 },
+      floating: { width: 180, height: 2000 },
+    })
+
+    expect(result.style.maxHeight).toBeUndefined()
+  })
+
+  it('caps the overlay at the space left below it when clamping', () => {
+    // Taller than the viewport on both sides, so it is pinned to the top margin
+    // and the cap is everything from there to the bottom margin.
+    const result = renderAnchored({
+      anchor: { top: 400, bottom: 430, left: 200, right: 300 },
+      floating: { width: 180, height: 2000 },
+      clampHeight: true,
+    })
+
+    expect(result.style.top).toBe(8)
+    expect(result.style.maxHeight).toBe(800 - 8 - 8)
+  })
+
+  it('measures the cap from where the overlay ended up after flipping', () => {
+    const result = renderAnchored({
+      anchor: { top: 600, bottom: 630, left: 200, right: 300 },
+      floating: { width: 180, height: 400 },
+      clampHeight: true,
+    })
+
+    expect(result.placement).toBe('top-start')
+    expect(result.style.top).toBe(600 - 400 - 6)
+    expect(result.style.maxHeight).toBe(800 - 8 - (600 - 400 - 6))
   })
 
   it('aligns to the anchor right edge for an -end placement', () => {

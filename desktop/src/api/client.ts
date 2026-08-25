@@ -1,3 +1,5 @@
+import { getDesktopHost } from '../lib/desktopHost'
+
 const ENV_BASE_URL =
   typeof import.meta !== 'undefined' &&
   typeof import.meta.env?.VITE_DESKTOP_SERVER_URL === 'string' &&
@@ -9,6 +11,7 @@ const DEFAULT_BASE_URL = ENV_BASE_URL || 'http://127.0.0.1:3456'
 
 let baseUrl = DEFAULT_BASE_URL
 let authToken: string | null = null
+let desktopServerRecovery: Promise<string> | null = null
 const DIAGNOSTICS_PATH = '/api/diagnostics/events'
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000
 const DIAGNOSTICS_REQUEST_TIMEOUT_MS = 5_000
@@ -75,7 +78,6 @@ export type ApiRequestOptions = {
 }
 
 async function request<T>(method: string, path: string, body?: unknown, options?: ApiRequestOptions): Promise<T> {
-  const url = `${baseUrl}${path}`
   const headers = buildHeaders()
 
   const controller = new AbortController()
@@ -89,12 +91,27 @@ async function request<T>(method: string, path: string, body?: unknown, options?
   if (options?.signal?.aborted) abortFromCaller()
   else options?.signal?.addEventListener('abort', abortFromCaller, { once: true })
   try {
-    const res = await fetch(url, {
+    const fetchOnce = () => fetch(`${baseUrl}${path}`, {
       method,
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
       signal: controller.signal,
     })
+    let res: Response
+    try {
+      res = await fetchOnce()
+    } catch (error) {
+      if (
+        method !== 'GET' ||
+        timedOut ||
+        options?.signal?.aborted ||
+        !(error instanceof TypeError) ||
+        !await recoverDesktopServerUrl()
+      ) {
+        throw error
+      }
+      res = await fetchOnce()
+    }
     if (!res.ok) {
       const errorBody = await res.json().catch(() => res.text())
       throw new ApiError(res.status, errorBody)
@@ -119,6 +136,25 @@ async function request<T>(method: string, path: string, body?: unknown, options?
     clearTimeout(timeout)
     options?.signal?.removeEventListener('abort', abortFromCaller)
   }
+}
+
+async function recoverDesktopServerUrl(): Promise<boolean> {
+  const host = getDesktopHost()
+  if (!host.isDesktop) return false
+
+  if (!desktopServerRecovery) {
+    const recovery = host.runtime.getServerUrl().then((serverUrl) => {
+      setBaseUrl(serverUrl)
+      return serverUrl
+    })
+    const trackedRecovery = recovery.finally(() => {
+      if (desktopServerRecovery === trackedRecovery) desktopServerRecovery = null
+    })
+    desktopServerRecovery = trackedRecovery
+  }
+
+  await desktopServerRecovery
+  return true
 }
 
 function reportApiFailure(method: string, path: string, error: unknown) {
@@ -175,6 +211,45 @@ function buildHeaders(): Record<string, string> {
   }
 
   return headers
+}
+
+/**
+ * Read binary content through the same authenticated channel as `api.get`.
+ *
+ * Pointing an `<img src>` straight at an API endpoint does not work. The image is
+ * a cross-origin subresource, so it carries neither the Authorization header nor
+ * a trusted Origin, and the server's fetch-metadata policy refuses that shape:
+ * the browser gets a 401 with a JSON body and Chrome drops it as
+ * `ERR_BLOCKED_BY_ORB`. The same URL returns 200 from a terminal, which is what
+ * makes this look fine until it is opened in a real page.
+ *
+ * Fetching the bytes here and handing the DOM a blob URL uses the credential path
+ * every other call already takes (the CSP allows `blob:`).
+ */
+export async function apiGetBlob(path: string, options?: ApiRequestOptions): Promise<Blob> {
+  const controller = new AbortController()
+  const timeoutMs = options?.timeout ?? DEFAULT_REQUEST_TIMEOUT_MS
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  const abortFromCaller = () => controller.abort(options?.signal?.reason)
+  if (options?.signal?.aborted) abortFromCaller()
+  else options?.signal?.addEventListener('abort', abortFromCaller, { once: true })
+  try {
+    const headers: Record<string, string> = {}
+    if (authToken) headers.Authorization = `Bearer ${authToken}`
+    const res = await fetch(`${baseUrl}${path}`, {
+      method: 'GET',
+      headers,
+      signal: controller.signal,
+    })
+    if (!res.ok) {
+      const errorBody = await res.text().catch(() => '')
+      throw new ApiError(res.status, errorBody)
+    }
+    return await res.blob()
+  } finally {
+    clearTimeout(timeout)
+    options?.signal?.removeEventListener('abort', abortFromCaller)
+  }
 }
 
 function sanitizeDiagnosticValue(value: unknown): unknown {

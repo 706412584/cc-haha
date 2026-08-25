@@ -74,7 +74,7 @@ const editInputSchema = lazySchema(() =>
       .array(z
         .string()
         .min(1)
-        .describe('Exact absolute path from an [Image source: ...] attachment or a prior ImageGen result'))
+        .describe('Exact absolute path to an image the user provided this session: an [Image source: ...] attachment, a file the user attached with @, or a prior ImageGen result'))
       .min(1)
       .max(3)
       .describe('Ordered source images to edit or use as visual references'),
@@ -176,10 +176,10 @@ export const ImageEditTool = buildTool({
   strict: false,
   shouldDefer: true,
   async description() {
-    return 'Edit images using exact source paths from user attachments or earlier ImageGen results.'
+    return 'Edit images the user attached in this conversation — pasted, dropped, or attached with @ — or images returned by an earlier ImageGen call, using their exact source paths.'
   },
   async prompt() {
-    return 'Use this tool only when the user wants to edit, combine, or visually reference existing images. referenced_image_paths is required and may contain only exact paths surfaced by [Image source: ...] in the current conversation or returned by a prior ImageGen call; never invent, search for, or substitute a path. Preserve the full relevant user specification and repeat preservation constraints in every edit prompt. Provider and image model selection come from the current desktop session and are not tool arguments. One call represents one distinct prompt; use count only for variations of that same edit. If a provider call fails, do not retry ImageEdit automatically; explain the error and wait for the user to decide.'
+    return 'Use this tool only when the user wants to edit, combine, or visually reference existing images. referenced_image_paths is required and may contain only images the user supplied in this conversation: a path surfaced by [Image source: ...], a file the user attached with @, or a path returned by a prior ImageGen call. Never invent, search for, or substitute a path, and never open an image off disk yourself to feed it here — if the user means an image you have no path for, ask them to attach it. Preserve the full relevant user specification and repeat preservation constraints in every edit prompt. Provider and image model selection come from the current desktop session and are not tool arguments. One call represents one distinct prompt; use count only for variations of that same edit. If a provider call fails, do not retry ImageEdit automatically; explain the error and wait for the user to decide.'
   },
   get inputSchema(): EditInputSchema {
     return editInputSchema()

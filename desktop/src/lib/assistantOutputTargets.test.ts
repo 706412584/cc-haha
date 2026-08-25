@@ -21,6 +21,28 @@ describe('extractAssistantOutputTargets', () => {
     ])
   })
 
+  it('extracts Markdown images with empty alt text or a destination title', () => {
+    const targets = extractAssistantOutputTargets(
+      '![](outputs/empty-alt.png) ![preview](outputs/titled.png "Rendered preview")',
+      { workDir },
+    )
+
+    expect(targets).toMatchObject([
+      {
+        kind: 'image',
+        title: 'empty-alt.png',
+        href: 'outputs/empty-alt.png',
+        normalizedPath: 'outputs/empty-alt.png',
+      },
+      {
+        kind: 'image',
+        title: 'preview',
+        href: 'outputs/titled.png',
+        normalizedPath: 'outputs/titled.png',
+      },
+    ])
+  })
+
   it('detects a naked relative video path as a video target', () => {
     const targets = extractAssistantOutputTargets('渲染完成，见 outputs/clip.mp4 。', { workDir })
 
@@ -45,6 +67,18 @@ describe('extractAssistantOutputTargets', () => {
         source: 'markdown-link',
       },
     ])
+  })
+
+  it('extracts office documents as resources while source references stay inline', () => {
+    const targets = extractAssistantOutputTargets(
+      '交付物见 [合同](reports/brief.docx)，实现位于 src/main.ts。',
+      { workDir },
+    )
+
+    expect(targets).toMatchObject([
+      { kind: 'file', href: 'reports/brief.docx', normalizedPath: 'reports/brief.docx' },
+    ])
+    expect(targets.some((target) => target.normalizedPath === 'src/main.ts')).toBe(false)
   })
 
   it('rejects a video path outside the active workspace (sandbox)', () => {
@@ -233,13 +267,15 @@ describe('extractAssistantOutputTargets', () => {
     ])
   })
 
-  it('limits the result set to high-confidence preview targets', () => {
+  it('keeps explicit generated document paths while ignoring remote and file URLs', () => {
     const targets = extractAssistantOutputTargets(
       'Read https://example.com and maybe file:///etc/passwd, but use report.pdf only externally.',
       { workDir },
     )
 
-    expect(targets).toEqual([])
+    expect(targets).toMatchObject([
+      { kind: 'file', href: 'report.pdf', normalizedPath: 'report.pdf' },
+    ])
   })
 
   it('caps results at 6 by default', () => {
@@ -277,6 +313,40 @@ describe('extractAssistantOutputTargets', () => {
 })
 
 describe('extractAssistantOutputTargets with changedFiles reconciliation', () => {
+  it('surfaces a generated office artifact even when the assistant forgot to name it', () => {
+    const targets = extractAssistantOutputTargets('已经生成完成。', {
+      workDir: '/work',
+      changedFiles: ['/work/reports/brief.docx', '/work/src/main.ts'],
+    })
+
+    expect(targets).toMatchObject([
+      {
+        kind: 'file',
+        href: 'reports/brief.docx',
+        normalizedPath: 'reports/brief.docx',
+        source: 'changed-file',
+      },
+    ])
+    expect(targets.some((target) => target.normalizedPath === 'src/main.ts')).toBe(false)
+  })
+
+  it('reconciles mentioned paths without sweeping unmentioned artifacts for a non-owner reply', () => {
+    const targets = extractAssistantOutputTargets('正在处理 `index.html`。', {
+      workDir: '/work',
+      changedFiles: ['/work/app/index.html', '/work/reports/brief.docx'],
+      includeChangedFileFallback: false,
+    })
+
+    expect(targets).toMatchObject([
+      {
+        kind: 'local-html',
+        href: 'app/index.html',
+        normalizedPath: 'app/index.html',
+      },
+    ])
+    expect(targets.some((target) => target.normalizedPath === 'reports/brief.docx')).toBe(false)
+  })
+
   it('corrects a bare mention to the real changed path in a subfolder', () => {
     // The reported bug: the model writes /private/tmp/todo-app/index.html but the
     // prose only says `index.html`, so the chip used to point at the (missing)
@@ -343,6 +413,86 @@ describe('extractAssistantOutputTargets with changedFiles reconciliation', () =>
       href: 'D:/workspace/demo/todo.html',
       normalizedPath: 'D:/workspace/demo/todo.html',
     })
+  })
+
+  it('keeps a generated document the turn wrote through a shell command', () => {
+    // `Write plan.md` plus `python make_report.py`: the checkpoint records only
+    // the first, so reconciling the mention of the second against it used to drop
+    // the actual deliverable.
+    const targets = extractAssistantOutputTargets(
+      '计划见 plan.md，报告已生成：out/report.docx',
+      { workDir: '/w', changedFiles: ['/w/plan.md'] },
+    )
+
+    expect(targets.map((target) => target.normalizedPath))
+      .toEqual(['plan.md', 'out/report.docx'])
+  })
+
+  it('places a bare deliverable name in the directory the turn actually wrote into', () => {
+    // The real shape of a "generate three documents" turn: the prose gives the
+    // directory once and then lists basenames. Resolved against the work dir those
+    // point nowhere, and the card renders but cannot be opened.
+    const targets = extractAssistantOutputTargets(
+      '三个文档已完成，都在 /private/tmp/three_docs/：`sales_data.xlsx`、`sales_report.docx`',
+      {
+        workDir: '/private/tmp',
+        changedFiles: ['/private/tmp/three_docs/make_xlsx.py', '/private/tmp/three_docs/make_docx.js'],
+      },
+    )
+
+    expect(targets.map((target) => target.normalizedPath))
+      .toEqual(['three_docs/sales_data.xlsx', 'three_docs/sales_report.docx'])
+  })
+
+  it('leaves a bare name alone when the turn wrote into more than one directory', () => {
+    // Two candidate directories is no evidence at all, and picking one would give
+    // the same dead card less predictably.
+    const targets = extractAssistantOutputTargets(
+      '产出：`report.docx`',
+      { workDir: '/w', changedFiles: ['/w/a/make.py', '/w/b/other.py'] },
+    )
+
+    expect(targets.map((target) => target.normalizedPath)).toEqual(['report.docx'])
+  })
+
+  it('does not re-anchor a deliverable that already carries a directory', () => {
+    const targets = extractAssistantOutputTargets(
+      '产出：`out/report.docx`',
+      { workDir: '/w', changedFiles: ['/w/scripts/make.py'] },
+    )
+
+    expect(targets.map((target) => target.normalizedPath)).toEqual(['out/report.docx'])
+  })
+
+  it('still drops an unmatched markdown mention, which is as often a file being read', () => {
+    // Markdown is a deliverable *and* the format this product reads all day, so a
+    // mention of one carries no evidence that the turn produced it.
+    const targets = extractAssistantOutputTargets(
+      '我正准备查看 test123.md',
+      { workDir: '/w', changedFiles: ['/w/src/first.ts'] },
+    )
+
+    expect(targets).toEqual([])
+  })
+
+  it('still drops an unmatched source file, so reconciliation keeps doing its job', () => {
+    const targets = extractAssistantOutputTargets(
+      '改了 plan.md，也看了 src/helper.ts',
+      { workDir: '/w', changedFiles: ['/w/plan.md'] },
+    )
+
+    expect(targets.map((target) => target.normalizedPath)).toEqual(['plan.md'])
+  })
+
+  it('does not list a generated document twice when it is also a changed file', () => {
+    // The mention and the changed-file sweep must share one seen-set, or the
+    // document gets a card from each.
+    const targets = extractAssistantOutputTargets(
+      '报告已生成：report.docx',
+      { workDir: '/w', changedFiles: ['/w/report.docx'] },
+    )
+
+    expect(targets.map((target) => target.normalizedPath)).toEqual(['report.docx'])
   })
 
   it('drops file mentions when changedFiles explicitly confirms no files changed', () => {

@@ -5,15 +5,17 @@ import type { SessionTurnCheckpoint } from '../../api/sessions'
 import { useTranslation, type TranslationKey } from '../../i18n'
 import { Button } from '@/components/ui/Button'
 import { OpenWithMenu } from '@/components/composite/OpenWithMenu'
-import { buildOpenWithItems, describeFileType, isPreviewableChangedFile, type OpenWithItem } from '../../lib/openWithItems'
+import { describeFileType, isPreviewableChangedFile, type OpenWithItem } from '../../lib/openWithItems'
+import { buildOpenWithMenuItems } from '../../lib/openWithMenuItems'
 import { openWithContextForWorkspaceFile } from '../../lib/openWithContextForHref'
 import { isAbsoluteLocalPath, localFileUrl } from '../../lib/handlePreviewLink'
 import { shouldOfferStaticHtmlPreview } from '../../lib/htmlPreviewPolicy'
 import { getServerBaseUrl } from '../../lib/desktopRuntime'
-import { getDesktopHost } from '../../lib/desktopHost'
 import { useOpenTargetStore } from '../../stores/openTargetStore'
 import { useBrowserPanelStore } from '../../stores/browserPanelStore'
 import { useWorkspacePanelStore } from '../../stores/workspacePanelStore'
+import { isWorkspacePreviewableFile } from '../../lib/fileCapabilities'
+import { openLocalFileWithSystem, reportOpenFailure } from '../../lib/systemFileOpen'
 
 type CurrentTurnChangeCardProps = {
   sessionId: string
@@ -72,6 +74,10 @@ export function CurrentTurnChangeCard({
       sourceTurnKey: renderItem?.dataset.chatRenderItemKey ?? checkpoint.target.targetUserMessageId,
       sourceElementId: event.currentTarget.id,
     }
+    if (!isWorkspacePreviewableFile(fileEntry.displayPath)) {
+      void openLocalFileWithSystem(fileEntry.apiPath).catch(() => reportOpenFailure(fileEntry.apiPath))
+      return
+    }
     // A changed file outside the workdir (absolute displayPath — e.g. another
     // drive) has no checkpoint baseline, so a diff is meaningless. Render html in
     // the in-app browser and everything else as a file preview (served by its
@@ -102,18 +108,17 @@ export function CurrentTurnChangeCard({
     const triggerEl = event.currentTarget
     const rect = triggerEl.getBoundingClientRect()
     void (async () => {
-      await useOpenTargetStore.getState().ensureTargets()
-      const targets = useOpenTargetStore.getState().targets
+      const targets = await useOpenTargetStore.getState().getTargetsForPath(fileEntry.apiPath)
       const ctx = openWithContextForWorkspaceFile(fileEntry.displayPath, fileEntry.apiPath, {
         sessionId,
         serverBaseUrl: getServerBaseUrl(),
         siblingFiles: files.map((entry) => entry.displayPath),
       })
-      const items = buildOpenWithItems(ctx, targets, {
-        openInAppBrowser: (url) => useBrowserPanelStore.getState().open(sessionId, url),
-        openSystem: (p) => { void getDesktopHost().shell.openPath(p).catch(() => {}) },
-        openWorkspacePreview: (rel) => { void useWorkspacePanelStore.getState().openPreview(sessionId, rel, 'file') },
-        openTarget: (id, abs) => { void useOpenTargetStore.getState().openTarget(id, abs) },
+      // The shared dependency factory, not a fourth hand-copied set: this call
+      // site was the one that never adopted it, which is why the changed-file
+      // menu was missing the copy entries every other surface has.
+      const items = buildOpenWithMenuItems(ctx, targets, {
+        sessionId,
         t: (k, v) => t(k as TranslationKey, v),
       })
       setOpenWith({ items, anchor: rect, triggerEl })
@@ -190,7 +195,7 @@ export function CurrentTurnChangeCard({
         {visibleFiles.map((fileEntry) => {
           const fileName = fileEntry.displayPath.split('/').pop() || fileEntry.displayPath
           const typeInfo = describeFileType(fileEntry.displayPath)
-          const previewable = isPreviewableChangedFile(fileEntry.displayPath)
+          const workspacePreviewable = isWorkspacePreviewableFile(fileEntry.displayPath)
           return (
             <div key={fileEntry.apiPath} className="flex items-center gap-2">
               <button
@@ -198,7 +203,12 @@ export function CurrentTurnChangeCard({
                 id={`turn-change-opener-${checkpoint.target.targetUserMessageId}-${encodeURIComponent(fileEntry.apiPath)}`}
                 data-source-turn-key={checkpoint.target.targetUserMessageId}
                 onClick={(event) => openChangedFile(event, fileEntry)}
-                aria-label={t('chat.turnChangesOpenInWorkspaceAria', { path: fileEntry.displayPath })}
+                aria-label={t(
+                  workspacePreviewable
+                    ? 'chat.turnChangesOpenInWorkspaceAria'
+                    : 'chat.turnChangesOpenFileAria',
+                  { path: fileEntry.displayPath },
+                )}
                 title={fileEntry.displayPath}
                 className="flex min-h-[52px] min-w-0 flex-1 items-center gap-3 rounded-[var(--radius-md)] px-4 text-left transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)]"
               >
@@ -209,19 +219,17 @@ export function CurrentTurnChangeCard({
                 </span>
                 <ChevronRight size={17} strokeWidth={1.9} aria-hidden="true" className="shrink-0 text-[var(--color-text-tertiary)]" />
               </button>
-              {previewable && (
-                <Button
-                  variant="secondary"
-                  size="base"
-                  aria-label={t('openWith.title')}
-                  onClick={(event) => handleOpenWith(event, fileEntry)}
-                  className="mr-2 shrink-0"
-                  icon={<ChevronDown size={14} strokeWidth={1.9} aria-hidden="true" />}
-                  iconPosition="end"
-                >
-                  {t('openWith.title')}
-                </Button>
-              )}
+              <Button
+                variant="secondary"
+                size="base"
+                aria-label={t('openWith.title')}
+                onClick={(event) => handleOpenWith(event, fileEntry)}
+                className="mr-2 shrink-0"
+                icon={<ChevronDown size={14} strokeWidth={1.9} aria-hidden="true" />}
+                iconPosition="end"
+              >
+                {t('openWith.title')}
+              </Button>
             </div>
           )
         })}

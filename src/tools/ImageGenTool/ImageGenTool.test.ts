@@ -151,7 +151,7 @@ describe('ImageGenTool', () => {
       durationMs: 42,
     }
 
-    expect(await ImageEditTool.description()).toContain('Edit images using exact source paths')
+    expect(await ImageEditTool.description()).toContain('attached with @')
     expect(ImageEditTool.outputSchema.parse(output)).toEqual(output)
     expect(ImageEditTool.isEnabled()).toBe(true)
     expect(ImageEditTool.isConcurrencySafe()).toBe(true)
@@ -194,7 +194,18 @@ describe('ImageGenTool', () => {
 
     const editPrompt = await ImageEditTool.prompt()
     expect(editPrompt).toContain('referenced_image_paths is required')
-    expect(editPrompt).toContain('never invent, search for, or substitute a path')
+    expect(editPrompt).toContain('Never invent, search for, or substitute a path')
     expect(editPrompt).toContain('do not retry ImageEdit automatically')
+    // The three sources the backend actually accepts. Listing fewer sends the
+    // model to ask the user to re-attach a file they already attached.
+    expect(editPrompt).toContain('[Image source: ...]')
+    expect(editPrompt).toContain('attached with @')
+    expect(editPrompt).toContain('prior ImageGen call')
+    // ...and the one it must not do: read an image off disk to feed it here.
+    expect(editPrompt).toContain('never open an image off disk')
+
+    const editPathDescription = ImageEditTool.inputSchema.shape
+      .referenced_image_paths.element.description
+    expect(editPathDescription).toContain('attached with @')
   })
 })

@@ -10,7 +10,7 @@ const DEFAULT_TTL_MS = 30_000
 
 export type OpenTargetPlatform = NodeJS.Platform
 
-export type OpenTargetKind = 'ide' | 'file_manager'
+export type OpenTargetKind = 'application' | 'system_default' | 'ide' | 'file_manager'
 
 export type OpenTarget = {
   id: string
@@ -19,6 +19,9 @@ export type OpenTarget = {
   icon: string
   iconUrl?: string
   platform: OpenTargetPlatform
+  appPath?: string
+  bundleId?: string | null
+  isDefault?: boolean
 }
 
 export type OpenTargetList = {
@@ -40,6 +43,30 @@ export type OpenTargetIconResult = {
   data: Uint8Array
 }
 
+export type NativeApplication = {
+  appPath: string
+  bundleId: string | null
+  displayName: string
+  isDefault: boolean
+  /**
+   * Spotlight's launch counter for this bundle. Copies that live in caches are
+   * exec'd directly rather than through LaunchServices, so they never accumulate
+   * one — which is what separates `/Applications/Warp.app` (thousands of launches)
+   * from the autoupdate staging copy of the same bundle (null).
+   */
+  useCount: number | null
+  /**
+   * The copy LaunchServices itself would start for this bundle id, when it names
+   * one. Authoritative tie-breaker when the same bundle is installed several times.
+   */
+  canonicalPath?: string | null
+}
+
+export type NativeApplicationList = {
+  defaultApplicationPath: string | null
+  applications: NativeApplication[]
+}
+
 type Runtime = {
   platform: OpenTargetPlatform
   ttlMs: number
@@ -54,6 +81,7 @@ type Runtime = {
   readTextFile: (targetPath: string) => Promise<string | null>
   readPlistValue: (plistPath: string, key: string) => Promise<string | null>
   convertIconToPng: (iconPath: string, size: number) => Promise<Uint8Array>
+  listApplicationsForFile: (targetPath: string) => Promise<NativeApplicationList>
 }
 
 type LaunchPlan = {
@@ -64,6 +92,7 @@ type LaunchPlan = {
 type ResolvedOpenPath = {
   path: string
   isDirectory: boolean
+  isExecutable: boolean
 }
 
 type TargetDefinition = {
@@ -233,6 +262,46 @@ const TARGET_DEFINITIONS: TargetDefinition[] = [
     fallback: true,
   },
 ]
+
+const SYSTEM_DEFAULT_TARGET_ID = 'system-default'
+const APPLICATION_TARGET_PREFIX = 'application:'
+const BLOCKED_SYSTEM_OPEN_EXTENSIONS = new Set([
+  '.app', '.bat', '.cmd', '.com', '.exe', '.msi', '.ps1', '.scr', '.sh',
+])
+
+const DARWIN_APPLICATION_QUERY_SCRIPT = `
+ObjC.import('AppKit')
+const args = $.NSProcessInfo.processInfo.arguments
+const filePath = ObjC.unwrap(args.objectAtIndex(args.count - 1))
+const fileURL = $.NSURL.fileURLWithPath(filePath)
+const workspace = $.NSWorkspace.sharedWorkspace
+const fileManager = $.NSFileManager.defaultManager
+const defaultURL = workspace.URLForApplicationToOpenURL(fileURL)
+const applicationURLs = workspace.URLsForApplicationsToOpenURL(fileURL)
+const defaultApplicationPath = defaultURL ? ObjC.unwrap(defaultURL.path) : null
+const applications = []
+for (let index = 0; index < applicationURLs.count; index += 1) {
+  const applicationURL = applicationURLs.objectAtIndex(index)
+  const appPath = ObjC.unwrap(applicationURL.path)
+  const bundle = $.NSBundle.bundleWithURL(applicationURL)
+  const bundleId = bundle ? ObjC.unwrap(bundle.bundleIdentifier) : null
+  const metadata = $.NSMetadataItem.alloc.initWithURL(applicationURL)
+  const useCount = metadata ? ObjC.unwrap(metadata.valueForAttribute('kMDItemUseCount')) : null
+  const canonicalURL = bundleId ? workspace.URLForApplicationWithBundleIdentifier(bundleId) : null
+  applications.push({
+    appPath,
+    bundleId,
+    // Finder's own name for the bundle: localized, and it follows a rename on
+    // disk. CFBundleDisplayName would read "TextEdit" where the menu should say
+    // the same thing Finder's own Open With says.
+    displayName: ObjC.unwrap(fileManager.displayNameAtPath(appPath)),
+    isDefault: appPath === defaultApplicationPath,
+    useCount: typeof useCount === 'number' ? useCount : null,
+    canonicalPath: canonicalURL ? ObjC.unwrap(canonicalURL.path) : null,
+  })
+}
+JSON.stringify({ defaultApplicationPath, applications })
+`
 
 const LINUX_APPLICATION_DIRS = [
   '/usr/share/applications',
@@ -480,6 +549,62 @@ async function defaultReadPlistValue(plistPath: string, key: string): Promise<st
   }
 }
 
+export function parseDarwinApplicationListOutput(output: string): NativeApplicationList {
+  try {
+    const parsed = JSON.parse(output) as Partial<NativeApplicationList>
+    const applications = Array.isArray(parsed.applications)
+      ? parsed.applications
+        .filter((application): application is NativeApplication => (
+          Boolean(application)
+          && typeof application.appPath === 'string'
+          && application.appPath.startsWith('/')
+          && typeof application.displayName === 'string'
+          && (application.bundleId === null || typeof application.bundleId === 'string')
+          && typeof application.isDefault === 'boolean'
+        ))
+        // `useCount` and `canonicalPath` are ranking hints, not identity: a machine
+        // with Spotlight disabled reports neither, and every caller has to keep
+        // working there. Normalize rather than reject.
+        .map((application) => ({
+          ...application,
+          useCount: typeof application.useCount === 'number' ? application.useCount : null,
+          canonicalPath: typeof application.canonicalPath === 'string' ? application.canonicalPath : null,
+        }))
+      : []
+    return {
+      defaultApplicationPath: typeof parsed.defaultApplicationPath === 'string'
+        ? parsed.defaultApplicationPath
+        : null,
+      applications,
+    }
+  } catch {
+    return { defaultApplicationPath: null, applications: [] }
+  }
+}
+
+async function defaultListApplicationsForFile(targetPath: string): Promise<NativeApplicationList> {
+  if (process.platform !== 'darwin') {
+    return { defaultApplicationPath: null, applications: [] }
+  }
+
+  try {
+    const { stdout } = await execFile('/usr/bin/osascript', [
+      '-l',
+      'JavaScript',
+      '-e',
+      DARWIN_APPLICATION_QUERY_SCRIPT,
+      targetPath,
+    ], {
+      timeout: 5_000,
+      windowsHide: true,
+      maxBuffer: 1024 * 1024,
+    })
+    return parseDarwinApplicationListOutput(String(stdout ?? ''))
+  } catch {
+    return { defaultApplicationPath: null, applications: [] }
+  }
+}
+
 async function defaultConvertIconToPng(iconPath: string, size: number): Promise<Uint8Array> {
   const extension = extname(iconPath).toLowerCase()
   if (extension === '.png') {
@@ -597,6 +722,245 @@ function buildOpenTarget(definition: TargetDefinition, platform: OpenTargetPlatf
     iconUrl: `/api/open-targets/icons/${encodeURIComponent(definition.id)}`,
     platform,
   }
+}
+
+function nativeApplicationTargetId(application: NativeApplication): string {
+  const identity = application.bundleId || application.appPath
+  return `${APPLICATION_TARGET_PREFIX}${Buffer.from(identity).toString('base64url')}`
+}
+
+function buildNativeApplicationTarget(
+  application: NativeApplication,
+  platform: OpenTargetPlatform,
+): OpenTarget {
+  const id = nativeApplicationTargetId(application)
+  return {
+    id,
+    kind: 'application',
+    label: application.displayName,
+    icon: 'application',
+    // The bundle's own icon, rasterized on demand. Without it every discovered
+    // application renders as the same generic window glyph, which is how a menu
+    // of them becomes unreadable.
+    iconUrl: `/api/open-targets/icons/${encodeURIComponent(id)}`,
+    platform,
+    appPath: application.appPath,
+    bundleId: application.bundleId,
+    isDefault: application.isDefault,
+  }
+}
+
+function buildSystemDefaultTarget(platform: OpenTargetPlatform): OpenTarget {
+  return {
+    id: SYSTEM_DEFAULT_TARGET_ID,
+    kind: 'system_default',
+    label: 'System default',
+    icon: 'system',
+    platform,
+  }
+}
+
+function canOpenWithSystemDefault(runtime: Runtime): Promise<boolean> | boolean {
+  if (runtime.platform === 'linux') return runtime.commandExists('xdg-open')
+  return runtime.platform === 'darwin' || runtime.platform === 'win32'
+}
+
+function buildSystemDefaultLaunchPlan(
+  target: ResolvedOpenPath,
+  platform: OpenTargetPlatform,
+): LaunchPlan | null {
+  switch (platform) {
+    case 'darwin':
+      return { command: 'open', args: [target.path] }
+    case 'win32':
+      return { command: 'explorer.exe', args: [target.path] }
+    case 'linux':
+      return { command: 'xdg-open', args: [target.path] }
+    default:
+      return null
+  }
+}
+
+function assertSafeSystemOpen(target: ResolvedOpenPath): void {
+  const extension = extname(target.path).toLowerCase()
+  if (BLOCKED_SYSTEM_OPEN_EXTENSIONS.has(extension) || (!target.isDirectory && target.isExecutable)) {
+    throw openTargetError(
+      400,
+      `System-default opening is blocked for executable paths: ${target.path}`,
+      'OPEN_TARGET_PATH_EXECUTABLE',
+    )
+  }
+}
+
+/**
+ * Hidden for reasons that hold on every machine, so they filter rather than rank.
+ *
+ * The nested-bundle rule is Apple's own layout: anything under `Contents/` of
+ * another bundle is an embedded helper the outer app ships (Xcode vends
+ * `Instruments.app` that way), not something the user installed. Matching
+ * `.app/Contents/` rather than `.app/` keeps a plain directory that merely ends
+ * in `.app` from being swept up with it.
+ */
+function isHiddenApplication(application: NativeApplication): boolean {
+  if (application.bundleId === 'com.claude-code-haha.desktop') return true
+  return `${application.appPath}/`.includes('.app/Contents/')
+}
+
+/**
+ * Where macOS puts applications a person installed. Matched as recursive
+ * prefixes, not as parent directories: real installs nest (`/Applications/Utilities`,
+ * `/Applications/Setapp`, `~/Applications/JetBrains Toolbox`).
+ *
+ * Safari is the reason this is a list and not the obvious three entries — it
+ * really lives at `/System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app`,
+ * so the obvious whitelist would silently drop the default browser for HTML.
+ */
+const USER_APPLICATION_ROOTS = [
+  '/Applications',
+  '/System/Applications',
+  '/System/Library/CoreServices',
+  '/System/Volumes/Preboot/Cryptexes/App/System/Applications',
+  '/System/Cryptexes/App/System/Applications',
+  posixPath.join(homedir(), 'Applications'),
+]
+
+const EXTERNAL_VOLUME_APPLICATION_RE = /^\/Volumes\/[^/]+\/(?:System\/)?Applications\//
+
+const CACHE_LIKE_PATH_SEGMENTS = new Set([
+  'Caches', 'Application Support', 'Library', 'node_modules',
+])
+
+function hasCacheLikePathSegment(appPath: string): boolean {
+  return appPath.split('/').some((segment) => (
+    segment.startsWith('.') || CACHE_LIKE_PATH_SEGMENTS.has(segment)
+  ))
+}
+
+/**
+ * How much this location looks like a real install. **Ranking only** — every tier
+ * still ships, so a misjudged app sorts lower instead of disappearing. That
+ * asymmetry is the whole point: a filter's failure mode is a real application the
+ * user can neither see nor recover.
+ */
+export function applicationLocationTier(appPath: string): 0 | 1 | 2 {
+  const withSlash = `${appPath}/`
+  if (USER_APPLICATION_ROOTS.some((root) => withSlash.startsWith(`${root}/`))) return 0
+  if (EXTERNAL_VOLUME_APPLICATION_RE.test(withSlash)) return 0
+  if (hasCacheLikePathSegment(appPath)) return 2
+  return 1
+}
+
+/**
+ * The application a person means for this file type, when the list happens to
+ * hold it. LaunchServices returns everything that *can* open a file in an order
+ * it does not define, so a `.pdf` lands on whatever browser registered last as
+ * readily as on Preview.
+ */
+const PREFERRED_BUNDLE_IDS_BY_EXTENSION: Record<string, string[]> = {
+  pdf: ['com.apple.Preview'],
+  png: ['com.apple.Preview'], jpg: ['com.apple.Preview'], jpeg: ['com.apple.Preview'],
+  gif: ['com.apple.Preview'], bmp: ['com.apple.Preview'], tiff: ['com.apple.Preview'],
+  webp: ['com.apple.Preview'], ico: ['com.apple.Preview'],
+  doc: ['com.microsoft.Word', 'com.apple.iWork.Pages'],
+  docx: ['com.microsoft.Word', 'com.apple.iWork.Pages'],
+  pages: ['com.apple.iWork.Pages'],
+  xls: ['com.microsoft.Excel', 'com.apple.iWork.Numbers'],
+  xlsx: ['com.microsoft.Excel', 'com.apple.iWork.Numbers'],
+  xlsm: ['com.microsoft.Excel', 'com.apple.iWork.Numbers'],
+  csv: ['com.microsoft.Excel', 'com.apple.iWork.Numbers'],
+  numbers: ['com.apple.iWork.Numbers'],
+  ppt: ['com.microsoft.Powerpoint', 'com.apple.iWork.Keynote'],
+  pptx: ['com.microsoft.Powerpoint', 'com.apple.iWork.Keynote'],
+  key: ['com.apple.iWork.Keynote'],
+  zip: ['com.apple.archiveutility'], tar: ['com.apple.archiveutility'],
+  gz: ['com.apple.archiveutility'], bz2: ['com.apple.archiveutility'],
+  xz: ['com.apple.archiveutility'], '7z': ['com.apple.archiveutility'],
+  rar: ['com.apple.archiveutility'],
+  mov: ['com.apple.QuickTimePlayerX'], mp4: ['com.apple.QuickTimePlayerX'],
+  m4v: ['com.apple.QuickTimePlayerX'], mp3: ['com.apple.QuickTimePlayerX'],
+  wav: ['com.apple.QuickTimePlayerX'], m4a: ['com.apple.QuickTimePlayerX'],
+  flac: ['com.apple.QuickTimePlayerX'],
+}
+
+/**
+ * How many entries the menu offers. Named so the cap is assertable, and so a
+ * report of "my application is missing" can be answered by widening one constant
+ * rather than reverting the ranking.
+ */
+export const MAX_NATIVE_APPLICATIONS = 5
+
+/** Bounds on the per-service caches, so a long session cannot grow them forever. */
+const MAX_CACHED_APPLICATION_PATHS = 64
+const MAX_REGISTERED_APPLICATIONS = 256
+
+function preferredBundleIdRank(application: NativeApplication, targetPath: string): number {
+  const extension = extname(targetPath).replace(/^\./, '').toLowerCase()
+  const preferred = PREFERRED_BUNDLE_IDS_BY_EXTENSION[extension]
+  if (!preferred || !application.bundleId) return preferred?.length ?? Number.MAX_SAFE_INTEGER
+  const index = preferred.indexOf(application.bundleId)
+  return index === -1 ? preferred.length : index
+}
+
+/**
+ * Pick which copy of a bundle survives. Every step is deterministic, because the
+ * one thing we must not do is let the enumeration order decide: the id is derived
+ * from the bundle id, so two copies collapse to a single menu entry, and whichever
+ * `appPath` wins here is the one that entry launches.
+ */
+function preferredApplicationCopy(left: NativeApplication, right: NativeApplication): NativeApplication {
+  const canonical = left.canonicalPath ?? right.canonicalPath ?? null
+  if (canonical) {
+    if (left.appPath === canonical) return left
+    if (right.appPath === canonical) return right
+  }
+  if (left.isDefault !== right.isDefault) return left.isDefault ? left : right
+  const tierDelta = applicationLocationTier(left.appPath) - applicationLocationTier(right.appPath)
+  if (tierDelta !== 0) return tierDelta < 0 ? left : right
+  const depthDelta = left.appPath.split('/').length - right.appPath.split('/').length
+  if (depthDelta !== 0) return depthDelta < 0 ? left : right
+  return left.appPath <= right.appPath ? left : right
+}
+
+async function discoverNativeApplications(
+  target: ResolvedOpenPath,
+  runtime: Runtime,
+): Promise<NativeApplication[]> {
+  if (runtime.platform !== 'darwin' || target.isDirectory) return []
+
+  const result = await runtime.listApplicationsForFile(target.path)
+  const staticAppPaths = new Set(
+    TARGET_DEFINITIONS.flatMap((definition) => definition.appPaths?.darwin ?? []),
+  )
+
+  // Keyed by the target id rather than by `appPath`. The two used to disagree —
+  // dedupe by path, identify by bundle id — so several copies of one bundle each
+  // survived and then collapsed onto a single id: duplicate React keys, and a
+  // click on the second copy launching the first.
+  const byTargetId = new Map<string, NativeApplication>()
+  for (const application of result.applications) {
+    const resolved = {
+      ...application,
+      isDefault: application.isDefault || application.appPath === result.defaultApplicationPath,
+    }
+    if (isHiddenApplication(resolved)) continue
+    if (staticAppPaths.has(resolved.appPath)) continue
+    const id = nativeApplicationTargetId(resolved)
+    const existing = byTargetId.get(id)
+    byTargetId.set(id, existing ? preferredApplicationCopy(existing, resolved) : resolved)
+  }
+
+  return [...byTargetId.values()]
+    .sort((left, right) => (
+      Number(right.isDefault) - Number(left.isDefault)
+      || preferredBundleIdRank(left, target.path) - preferredBundleIdRank(right, target.path)
+      || applicationLocationTier(left.appPath) - applicationLocationTier(right.appPath)
+      // Spotlight's launch counter, last among the discriminators because plenty
+      // of genuine applications have never been launched through LaunchServices
+      // and report nothing at all.
+      || (right.useCount ?? -1) - (left.useCount ?? -1)
+      || left.displayName.localeCompare(right.displayName)
+    ))
+    .slice(0, MAX_NATIVE_APPLICATIONS)
 }
 
 function isSupportedOnPlatform(definition: TargetDefinition, platform: OpenTargetPlatform): boolean {
@@ -739,7 +1103,14 @@ async function validateOpenPath(
   return {
     path: resolvedPath,
     isDirectory: entry.isDirectory(),
+    isExecutable: runtimePlatformSupportsExecutableBits(platform)
+      ? (entry.mode & 0o111) !== 0
+      : false,
   }
+}
+
+function runtimePlatformSupportsExecutableBits(platform: OpenTargetPlatform): boolean {
+  return platform !== 'win32'
 }
 
 function normalizeIconFileName(iconFile: string): string {
@@ -748,9 +1119,18 @@ function normalizeIconFileName(iconFile: string): string {
   return extname(trimmed) ? trimmed : `${trimmed}.icns`
 }
 
+/**
+ * Locate a bundle's icon file.
+ *
+ * `nameCandidates` are extra file names to try when `Info.plist` does not name
+ * one. A statically defined target passes its label and icon key; an application
+ * discovered through LaunchServices passes its display name. Everything else about
+ * the search is identical, which is why the two paths share this function rather
+ * than growing a second copy that reads a bundle slightly differently.
+ */
 async function findDarwinBundleIconPath(
   appPath: string,
-  definition: TargetDefinition,
+  nameCandidates: string[],
   runtime: Runtime,
 ): Promise<string | null> {
   const resourcesPath = posixPath.join(appPath, 'Contents', 'Resources')
@@ -759,8 +1139,7 @@ async function findDarwinBundleIconPath(
 
   const candidates = [
     plistIcon ? normalizeIconFileName(plistIcon) : null,
-    `${definition.label}.icns`,
-    `${definition.icon}.icns`,
+    ...nameCandidates.map((name) => `${name}.icns`),
   ].filter((value): value is string => Boolean(value))
 
   for (const fileName of candidates) {
@@ -788,7 +1167,7 @@ async function resolveDarwinIconPath(
 
   for (const appPath of definition.appPaths?.darwin ?? []) {
     if (!(await runtime.pathExists(appPath))) continue
-    const iconPath = await findDarwinBundleIconPath(appPath, definition, runtime)
+    const iconPath = await findDarwinBundleIconPath(appPath, [definition.label, definition.icon], runtime)
     if (iconPath) return iconPath
   }
 
@@ -1041,10 +1420,61 @@ export function createOpenTargetService(overrides: Partial<Runtime> = {}) {
     readTextFile: overrides.readTextFile ?? defaultReadTextFile,
     readPlistValue: overrides.readPlistValue ?? defaultReadPlistValue,
     convertIconToPng: overrides.convertIconToPng ?? defaultConvertIconToPng,
+    listApplicationsForFile: overrides.listApplicationsForFile ?? defaultListApplicationsForFile,
   }
 
   let cache: OpenTargetList | null = null
   const iconCache = new Map<string, OpenTargetIconResult>()
+  const applicationsByPath = new Map<string, { applications: NativeApplication[]; cachedAt: number }>()
+  /**
+   * Every application this service has handed out a target for, keyed by that
+   * target's id.
+   *
+   * This is what lets the icon route resolve an `application:` id back to a
+   * bundle without trusting the caller for a path. `/api/open-targets/icons/:id`
+   * is unauthenticated, so encoding the path in the id would turn it into a
+   * directory-probe and file-read primitive; the id names a bundle, and only a
+   * bundle LaunchServices already offered us can be named.
+   */
+  const applicationRegistry = new Map<string, NativeApplication>()
+
+  function rememberApplications(applications: NativeApplication[]): void {
+    for (const application of applications) {
+      const id = nativeApplicationTargetId(application)
+      // Re-insert so the map's insertion order stays least-recently-seen first.
+      applicationRegistry.delete(id)
+      applicationRegistry.set(id, application)
+    }
+    while (applicationRegistry.size > MAX_REGISTERED_APPLICATIONS) {
+      const oldest = applicationRegistry.keys().next()
+      if (oldest.done) break
+      applicationRegistry.delete(oldest.value)
+    }
+  }
+
+  /**
+   * Discover once per path, then reuse.
+   *
+   * Listing and opening used to run the query independently, so the record a
+   * click resolved against was not necessarily the one the menu was built from —
+   * anything that changed LaunchServices in between (an install, a rename) turned
+   * a click into "unavailable". The icon lookup needs the same records anyway.
+   */
+  async function applicationsForPath(target: ResolvedOpenPath): Promise<NativeApplication[]> {
+    const cached = applicationsByPath.get(target.path)
+    if (cached && runtime.now() - cached.cachedAt < runtime.ttlMs) return cached.applications
+
+    const applications = await discoverNativeApplications(target, runtime)
+    applicationsByPath.delete(target.path)
+    applicationsByPath.set(target.path, { applications, cachedAt: runtime.now() })
+    while (applicationsByPath.size > MAX_CACHED_APPLICATION_PATHS) {
+      const oldest = applicationsByPath.keys().next()
+      if (oldest.done) break
+      applicationsByPath.delete(oldest.value)
+    }
+    rememberApplications(applications)
+    return applications
+  }
 
   async function listTargets(forceRefresh = false): Promise<OpenTargetList> {
     if (!forceRefresh && cache && runtime.now() - cache.cachedAt < runtime.ttlMs) {
@@ -1069,9 +1499,38 @@ export function createOpenTargetService(overrides: Partial<Runtime> = {}) {
     return cache
   }
 
+  async function listTargetsForPath(targetPath: string): Promise<OpenTargetList> {
+    const resolvedPath = await validateOpenPath(targetPath, runtime.platform)
+    const globalTargets = await listTargets()
+    const nativeApplications = await applicationsForPath(resolvedPath)
+    const applicationTargets = nativeApplications.map((application) => (
+      buildNativeApplicationTarget(application, runtime.platform)
+    ))
+    const systemTargets = await canOpenWithSystemDefault(runtime)
+      ? [buildSystemDefaultTarget(runtime.platform)]
+      : []
+    const targets = [
+      ...applicationTargets,
+      ...systemTargets,
+      ...globalTargets.targets.filter((target) => target.kind === 'ide'),
+      ...globalTargets.targets.filter((target) => target.kind === 'file_manager'),
+    ]
+    const defaultApplication = applicationTargets.find((target) => target.isDefault)
+
+    return {
+      platform: runtime.platform,
+      targets,
+      primaryTargetId: defaultApplication?.id ?? systemTargets[0]?.id ?? targets[0]?.id ?? null,
+      cachedAt: runtime.now(),
+      ttlMs: runtime.ttlMs,
+    }
+  }
+
   async function openTarget(input: { targetId: string; path: string }) {
     const definition = TARGET_DEFINITIONS.find((candidate) => candidate.id === input.targetId)
-    if (!definition) {
+    const isSystemDefault = input.targetId === SYSTEM_DEFAULT_TARGET_ID
+    const isNativeApplication = input.targetId.startsWith(APPLICATION_TARGET_PREFIX)
+    if (!definition && !isSystemDefault && !isNativeApplication) {
       throw openTargetError(
         400,
         `Unknown open target: ${input.targetId}`,
@@ -1079,8 +1538,32 @@ export function createOpenTargetService(overrides: Partial<Runtime> = {}) {
       )
     }
 
-    const targets = await listTargets()
-    const target = targets.targets.find((candidate) => candidate.id === input.targetId)
+    const resolvedPath = await validateOpenPath(input.path, runtime.platform)
+    let target: OpenTarget | undefined
+    let launchPlan: LaunchPlan | null = null
+
+    if (isSystemDefault) {
+      if (!(await canOpenWithSystemDefault(runtime))) {
+        throw openTargetError(400, 'System-default opening is unavailable', 'OPEN_TARGET_UNAVAILABLE')
+      }
+      assertSafeSystemOpen(resolvedPath)
+      target = buildSystemDefaultTarget(runtime.platform)
+      launchPlan = buildSystemDefaultLaunchPlan(resolvedPath, runtime.platform)
+    } else if (isNativeApplication) {
+      const applications = await applicationsForPath(resolvedPath)
+      const application = applications.find((candidate) => (
+        nativeApplicationTargetId(candidate) === input.targetId
+      ))
+      if (application) {
+        target = buildNativeApplicationTarget(application, runtime.platform)
+        launchPlan = { command: 'open', args: ['-a', application.appPath, resolvedPath.path] }
+      }
+    } else if (definition) {
+      const targets = await listTargets()
+      target = targets.targets.find((candidate) => candidate.id === input.targetId)
+      if (target) launchPlan = await resolveLaunchPlan(definition, runtime, resolvedPath)
+    }
+
     if (!target) {
       throw openTargetError(
         400,
@@ -1088,9 +1571,6 @@ export function createOpenTargetService(overrides: Partial<Runtime> = {}) {
         'OPEN_TARGET_UNAVAILABLE',
       )
     }
-
-    const resolvedPath = await validateOpenPath(input.path, runtime.platform)
-    const launchPlan = await resolveLaunchPlan(definition, runtime, resolvedPath)
     if (!launchPlan) {
       throw openTargetError(
         400,
@@ -1116,15 +1596,38 @@ export function createOpenTargetService(overrides: Partial<Runtime> = {}) {
   }
 
   async function getTargetIcon(targetId: string, size = 64): Promise<OpenTargetIconResult> {
-    const definition = TARGET_DEFINITIONS.find((candidate) => candidate.id === targetId)
-    if (!definition) {
-      throw openTargetError(404, `Unknown open target icon: ${targetId}`, 'OPEN_TARGET_ICON_UNKNOWN')
-    }
-
     const normalizedSize = Number.isFinite(size) ? Math.min(256, Math.max(16, Math.round(size))) : 64
     const cacheKey = `${runtime.platform}:${targetId}:${normalizedSize}`
     const cachedIcon = iconCache.get(cacheKey)
     if (cachedIcon) return cachedIcon
+
+    if (targetId.startsWith(APPLICATION_TARGET_PREFIX)) {
+      // Resolved through the registry, never from the id: an id we did not issue
+      // names nothing, and the miss must not fall through to reading a path off
+      // the wire. The client renders a fallback glyph on a 404.
+      const application = applicationRegistry.get(targetId)
+      const iconPath = application
+        ? await findDarwinBundleIconPath(application.appPath, [application.displayName], runtime)
+        : null
+      if (!iconPath) {
+        throw openTargetError(
+          404,
+          `Open target icon is not available on ${runtime.platform}: ${targetId}`,
+          'OPEN_TARGET_ICON_UNAVAILABLE',
+        )
+      }
+      const applicationIcon = {
+        contentType: 'image/png' as const,
+        data: await runtime.convertIconToPng(iconPath, normalizedSize),
+      }
+      iconCache.set(cacheKey, applicationIcon)
+      return applicationIcon
+    }
+
+    const definition = TARGET_DEFINITIONS.find((candidate) => candidate.id === targetId)
+    if (!definition) {
+      throw openTargetError(404, `Unknown open target icon: ${targetId}`, 'OPEN_TARGET_ICON_UNKNOWN')
+    }
 
     const targets = await listTargets()
     if (!targets.targets.some((target) => target.id === targetId)) {
@@ -1154,6 +1657,7 @@ export function createOpenTargetService(overrides: Partial<Runtime> = {}) {
 
   return {
     listTargets,
+    listTargetsForPath,
     openTarget,
     getTargetIcon,
   }

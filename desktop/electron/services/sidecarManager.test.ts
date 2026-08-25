@@ -700,6 +700,8 @@ describe('Electron sidecar manager', () => {
     expect(plan.args).toEqual([
       'tunnel',
       '--no-autoupdate',
+      '--protocol',
+      'http2',
       '--url',
       'http://127.0.0.1:28670',
     ])
@@ -716,6 +718,8 @@ describe('Electron sidecar manager', () => {
     expect(plan.args).toEqual([
       'tunnel',
       '--no-autoupdate',
+      '--protocol',
+      'http2',
       'run',
       '--token',
       'cf-token-123',

@@ -2,7 +2,11 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
-import { createOpenTargetService } from '../services/openTargetService.js'
+import {
+  createOpenTargetService,
+  MAX_NATIVE_APPLICATIONS,
+  parseDarwinApplicationListOutput,
+} from '../services/openTargetService.js'
 
 async function makeDir(prefix = 'cc-haha-open-target-') {
   return mkdtemp(join(tmpdir(), prefix))
@@ -21,6 +25,17 @@ function createService(
     iconData?: Uint8Array
     ttlMs?: number
     now?: { value: number }
+    nativeApplications?: {
+      defaultApplicationPath: string | null
+      applications: Array<{
+        appPath: string
+        bundleId: string | null
+        displayName: string
+        isDefault: boolean
+        useCount?: number | null
+        canonicalPath?: string | null
+      }>
+    }
   } = {},
 ) {
   const launched: Array<{ command: string; args: string[] }> = []
@@ -62,6 +77,10 @@ function createService(
       convertedIcons.push({ iconPath, size })
       return options.iconData ?? new Uint8Array([1, 2, 3])
     },
+    listApplicationsForFile: async () => options.nativeApplications ?? {
+      defaultApplicationPath: null,
+      applications: [],
+    },
   })
 
   return {
@@ -79,6 +98,43 @@ function createService(
 }
 
 describe('openTargetService', () => {
+  it('parses only valid macOS application records from the native query', () => {
+    expect(parseDarwinApplicationListOutput(JSON.stringify({
+      defaultApplicationPath: '/Applications/Pages.app',
+      applications: [
+        { appPath: '/Applications/Pages.app', bundleId: 'com.apple.iWork.Pages', displayName: 'Pages', isDefault: true, useCount: 12, canonicalPath: '/Applications/Pages.app' },
+        { appPath: 'relative/Word.app', bundleId: 'com.microsoft.Word', displayName: 'Word', isDefault: false },
+        { appPath: '/Applications/Broken.app', bundleId: 42, displayName: 'Broken', isDefault: false },
+        null,
+      ],
+    }))).toEqual({
+      defaultApplicationPath: '/Applications/Pages.app',
+      applications: [
+        { appPath: '/Applications/Pages.app', bundleId: 'com.apple.iWork.Pages', displayName: 'Pages', isDefault: true, useCount: 12, canonicalPath: '/Applications/Pages.app' },
+      ],
+    })
+    expect(parseDarwinApplicationListOutput('not json')).toEqual({
+      defaultApplicationPath: null,
+      applications: [],
+    })
+  })
+
+  it('normalizes missing ranking hints instead of rejecting the record', () => {
+    // Spotlight can be disabled, and a bundle with no id has no canonical copy to
+    // name. Neither says anything about whether the application can open the file,
+    // so a record without those hints has to survive with them nulled out.
+    expect(parseDarwinApplicationListOutput(JSON.stringify({
+      defaultApplicationPath: null,
+      applications: [
+        { appPath: '/Applications/Kiro.app', bundleId: 'dev.kiro.desktop', displayName: 'Kiro', isDefault: false },
+        { appPath: '/Applications/Odd.app', bundleId: null, displayName: 'Odd', isDefault: false, useCount: 'many', canonicalPath: 7 },
+      ],
+    })).applications).toEqual([
+      { appPath: '/Applications/Kiro.app', bundleId: 'dev.kiro.desktop', displayName: 'Kiro', isDefault: false, useCount: null, canonicalPath: null },
+      { appPath: '/Applications/Odd.app', bundleId: null, displayName: 'Odd', isDefault: false, useCount: null, canonicalPath: null },
+    ])
+  })
+
   it('returns only detected IDE targets plus Finder on macOS', async () => {
     const { service } = createService('darwin', {
       paths: {
@@ -218,6 +274,431 @@ describe('openTargetService', () => {
     now.value = 5_000
     await state.service.listTargets()
     expect(state.commandProbes).toBeGreaterThan(initialProbes)
+  })
+
+  it('discovers native macOS applications for the concrete document path', async () => {
+    const dir = await makeDir()
+    const file = join(dir, 'brief.docx')
+    await writeFile(file, 'document')
+    const { service } = createService('darwin', {
+      nativeApplications: {
+        defaultApplicationPath: '/Applications/Pages.app',
+        applications: [
+          { appPath: '/Applications/Pages.app', bundleId: 'com.apple.iWork.Pages', displayName: 'Pages', isDefault: true },
+          { appPath: '/Applications/Word.app', bundleId: 'com.microsoft.Word', displayName: 'Word', isDefault: false },
+        ],
+      },
+    })
+
+    try {
+      const result = await service.listTargetsForPath(file)
+
+      expect(result.targets.map((target) => target.kind)).toEqual([
+        'application',
+        'application',
+        'system_default',
+        'file_manager',
+      ])
+      expect(result.targets[0]).toMatchObject({ label: 'Pages', isDefault: true })
+      expect(result.primaryTargetId).toBe(result.targets[0]!.id)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('filters this desktop app and static IDE duplicates from the native list', async () => {
+    const dir = await makeDir()
+    const file = join(dir, 'brief.docx')
+    await writeFile(file, 'document')
+    const { service } = createService('darwin', {
+      nativeApplications: {
+        defaultApplicationPath: '/Applications/Word.app',
+        applications: [
+          { appPath: '/Applications/Chat Haha.app', bundleId: 'com.claude-code-haha.desktop', displayName: 'Chat Haha', isDefault: false },
+          { appPath: '/Applications/Visual Studio Code.app', bundleId: 'com.microsoft.VSCode', displayName: 'Visual Studio Code', isDefault: false },
+          { appPath: '/Applications/Word.app', bundleId: 'com.microsoft.Word', displayName: 'Word', isDefault: false },
+        ],
+      },
+    })
+
+    try {
+      const result = await service.listTargetsForPath(file)
+      expect(result.targets.filter((target) => target.kind === 'application')).toEqual([
+        expect.objectContaining({ label: 'Word', isDefault: true }),
+      ])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('collapses copies of one bundle onto the copy that is actually installed', async () => {
+    // The shape LaunchServices really returns: a bundle staged in a cache or an
+    // autoupdate directory is registered alongside the installed copy and shares
+    // its bundle id. Deduping by path kept all of them, and because the target id
+    // comes from the bundle id they then collided on a single id.
+    const dir = await makeDir()
+    const file = join(dir, 'notes.md')
+    await writeFile(file, 'notes')
+    const { service } = createService('darwin', {
+      nativeApplications: {
+        defaultApplicationPath: null,
+        applications: [
+          { appPath: '/Users/me/Library/Caches/ms-playwright/chromium-1228/Chrome for Testing.app', bundleId: 'com.google.chrome.for.testing', displayName: 'Chrome for Testing', isDefault: false },
+          { appPath: '/Users/me/.agent-browser/browsers/chrome-148/Chrome for Testing.app', bundleId: 'com.google.chrome.for.testing', displayName: 'Chrome for Testing', isDefault: false },
+          { appPath: '/Users/me/Library/Application Support/dev.warp.Warp-Stable/autoupdate/xY/Warp(v0.2026.08.19).app', bundleId: 'dev.warp.Warp-Stable', displayName: 'Warp(v0.2026.08.19)', isDefault: false },
+          { appPath: '/Applications/Warp.app', bundleId: 'dev.warp.Warp-Stable', displayName: 'Warp', isDefault: false },
+        ],
+      },
+    })
+
+    try {
+      const applications = (await service.listTargetsForPath(file))
+        .targets.filter((target) => target.kind === 'application')
+      const ids = applications.map((target) => target.id)
+
+      expect(new Set(ids).size).toBe(ids.length)
+      expect(applications).toHaveLength(2)
+      // The installed copy wins, so the version-stamped directory name never
+      // reaches the menu either.
+      expect(applications.find((target) => target.bundleId === 'dev.warp.Warp-Stable')).toMatchObject({
+        label: 'Warp',
+        appPath: '/Applications/Warp.app',
+      })
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps distinct bundles apart while collapsing copies of one', async () => {
+    const dir = await makeDir()
+    const file = join(dir, 'notes.md')
+    await writeFile(file, 'notes')
+    const { service } = createService('darwin', {
+      nativeApplications: {
+        defaultApplicationPath: null,
+        applications: [
+          { appPath: '/Applications/Warp.app', bundleId: 'dev.warp.Warp-Stable', displayName: 'Warp', isDefault: false },
+          { appPath: '/Applications/Kiro.app', bundleId: 'dev.kiro.desktop', displayName: 'Kiro', isDefault: false },
+        ],
+      },
+    })
+
+    try {
+      const labels = (await service.listTargetsForPath(file))
+        .targets.filter((target) => target.kind === 'application')
+        .map((target) => target.label)
+      expect(labels.sort()).toEqual(['Kiro', 'Warp'])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('launches the installed copy when a bundle is registered several times', async () => {
+    // The user-visible half of the id collision: the menu showed one row per copy,
+    // and whichever was clicked, the lookup returned the first record and opened it.
+    const dir = await makeDir()
+    const file = join(dir, 'notes.md')
+    await writeFile(file, 'notes')
+    const state = createService('darwin', {
+      nativeApplications: {
+        defaultApplicationPath: null,
+        applications: [
+          { appPath: '/Users/me/Library/Application Support/dev.warp.Warp-Stable/autoupdate/xY/Warp(v0.2026.08.19).app', bundleId: 'dev.warp.Warp-Stable', displayName: 'Warp(v0.2026.08.19)', isDefault: false },
+          { appPath: '/Applications/Warp.app', bundleId: 'dev.warp.Warp-Stable', displayName: 'Warp', isDefault: false },
+        ],
+      },
+    })
+
+    try {
+      const listed = await state.service.listTargetsForPath(file)
+      const warp = listed.targets.find((target) => target.kind === 'application')!
+      await state.service.openTarget({ targetId: warp.id, path: file })
+
+      expect(state.launched).toEqual([{ command: 'open', args: ['-a', '/Applications/Warp.app', file] }])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps applications that live outside the obvious install directories', async () => {
+    // Location ranks, it never filters. Safari really lives in a Cryptex, installers
+    // nest under /Applications, and an application can ship on another volume — a
+    // whitelist built from the obvious three roots drops every one of these silently.
+    const dir = await makeDir()
+    const file = join(dir, 'page.html')
+    await writeFile(file, '<html></html>')
+    const { service } = createService('darwin', {
+      nativeApplications: {
+        defaultApplicationPath: null,
+        applications: [
+          { appPath: '/System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app', bundleId: 'com.apple.Safari', displayName: 'Safari', isDefault: false },
+          { appPath: '/Applications/Utilities/Terminal.app', bundleId: 'com.apple.Terminal', displayName: 'Terminal', isDefault: false },
+          { appPath: '/Users/me/Applications/JetBrains Toolbox/GoLand.app', bundleId: 'com.jetbrains.goland', displayName: 'GoLand', isDefault: false },
+          { appPath: '/Volumes/Ext/Applications/Sideloaded.app', bundleId: 'com.example.sideloaded', displayName: 'Sideloaded', isDefault: false },
+        ],
+      },
+    })
+
+    try {
+      const labels = (await service.listTargetsForPath(file))
+        .targets.filter((target) => target.kind === 'application')
+        .map((target) => target.label)
+      expect(labels.sort()).toEqual(['GoLand', 'Safari', 'Sideloaded', 'Terminal'])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('ranks a cache copy last but still offers it when nothing else can open the file', async () => {
+    // The other direction of the same rule: ranking must not become a filter, or a
+    // machine whose only viewer sits in a cache directory gets an empty menu.
+    const dir = await makeDir()
+    const file = join(dir, 'notes.md')
+    await writeFile(file, 'notes')
+    const { service } = createService('darwin', {
+      nativeApplications: {
+        defaultApplicationPath: null,
+        applications: [
+          { appPath: '/Users/me/Library/Caches/ms-playwright/chromium-1124/Chromium.app', bundleId: 'org.chromium.Chromium', displayName: 'Chromium', isDefault: false },
+        ],
+      },
+    })
+
+    try {
+      const labels = (await service.listTargetsForPath(file))
+        .targets.filter((target) => target.kind === 'application')
+        .map((target) => target.label)
+      expect(labels).toEqual(['Chromium'])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('drops helper applications embedded inside another bundle', async () => {
+    const dir = await makeDir()
+    const file = join(dir, 'notes.md')
+    await writeFile(file, 'notes')
+    const { service } = createService('darwin', {
+      nativeApplications: {
+        defaultApplicationPath: null,
+        applications: [
+          { appPath: '/Applications/Xcode.app/Contents/Applications/Instruments.app', bundleId: 'com.apple.dt.Instruments', displayName: 'Instruments', isDefault: false },
+          { appPath: '/Applications/Notes.app', bundleId: 'com.apple.Notes', displayName: 'Notes', isDefault: false },
+        ],
+      },
+    })
+
+    try {
+      const labels = (await service.listTargetsForPath(file))
+        .targets.filter((target) => target.kind === 'application')
+        .map((target) => target.label)
+      expect(labels).toEqual(['Notes'])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('caps the native list, and leaves a shorter list whole', async () => {
+    const dir = await makeDir()
+    const file = join(dir, 'notes.md')
+    await writeFile(file, 'notes')
+    const build = (count: number) => Array.from({ length: count }, (_unused, index) => ({
+      appPath: `/Applications/App${index}.app`,
+      bundleId: `com.example.app${index}`,
+      displayName: `App${index}`,
+      isDefault: false,
+    }))
+    const many = createService('darwin', {
+      nativeApplications: { defaultApplicationPath: null, applications: build(8) },
+    })
+    const few = createService('darwin', {
+      nativeApplications: { defaultApplicationPath: null, applications: build(3) },
+    })
+    const countApplications = async (service: ReturnType<typeof createService>['service']) => (
+      (await service.listTargetsForPath(file)).targets.filter((target) => target.kind === 'application').length
+    )
+
+    try {
+      expect(await countApplications(many.service)).toBe(MAX_NATIVE_APPLICATIONS)
+      expect(await countApplications(few.service)).toBe(3)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('ranks the application a file type belongs to above a more-launched general one', async () => {
+    const dir = await makeDir()
+    const file = join(dir, 'paper.pdf')
+    await writeFile(file, '%PDF-1.4')
+    const { service } = createService('darwin', {
+      nativeApplications: {
+        defaultApplicationPath: null,
+        applications: [
+          { appPath: '/Applications/Google Chrome.app', bundleId: 'com.google.Chrome', displayName: 'Google Chrome', isDefault: false, useCount: 27821 },
+          { appPath: '/System/Applications/Preview.app', bundleId: 'com.apple.Preview', displayName: 'Preview', isDefault: false, useCount: 3 },
+        ],
+      },
+    })
+
+    try {
+      const labels = (await service.listTargetsForPath(file))
+        .targets.filter((target) => target.kind === 'application')
+        .map((target) => target.label)
+      expect(labels).toEqual(['Preview', 'Google Chrome'])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('falls back to launch frequency when neither file type nor location separates two applications', async () => {
+    const dir = await makeDir()
+    const file = join(dir, 'notes.md')
+    await writeFile(file, 'notes')
+    const { service } = createService('darwin', {
+      nativeApplications: {
+        defaultApplicationPath: null,
+        applications: [
+          { appPath: '/Applications/Rare.app', bundleId: 'com.example.rare', displayName: 'Rare', isDefault: false, useCount: 2 },
+          { appPath: '/Applications/Daily.app', bundleId: 'com.example.daily', displayName: 'Daily', isDefault: false, useCount: 900 },
+        ],
+      },
+    })
+
+    try {
+      const labels = (await service.listTargetsForPath(file))
+        .targets.filter((target) => target.kind === 'application')
+        .map((target) => target.label)
+      expect(labels).toEqual(['Daily', 'Rare'])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('leaves the Windows and Linux path free of discovered applications', async () => {
+    // Every ranking, deduplication and cap rule added for the menu lives behind the
+    // darwin branch of `discoverNativeApplications`. This is the guard that they
+    // stay there: off macOS the list is still system default + IDEs + file manager,
+    // and it must not start reporting applications or reordering itself.
+    const dir = await makeDir()
+    const file = join(dir, 'brief.docx')
+    await writeFile(file, 'document')
+    const nativeApplications = {
+      defaultApplicationPath: '/Applications/Word.app',
+      applications: [
+        { appPath: '/Applications/Word.app', bundleId: 'com.microsoft.Word', displayName: 'Word', isDefault: true },
+      ],
+    }
+    const windows = createService('win32', { nativeApplications })
+    const linux = createService('linux', { commands: { 'xdg-open': true }, nativeApplications })
+
+    try {
+      const windowsTargets = (await windows.service.listTargetsForPath(file)).targets
+      expect(windowsTargets.map((target) => target.kind)).toEqual(['system_default', 'file_manager'])
+      expect(windowsTargets.some((target) => target.kind === 'application')).toBe(false)
+      expect(windowsTargets.find((target) => target.kind === 'file_manager')).toMatchObject({
+        id: 'explorer',
+        platform: 'win32',
+      })
+
+      const linuxTargets = (await linux.service.listTargetsForPath(file)).targets
+      expect(linuxTargets.map((target) => target.kind)).toEqual(['system_default', 'file_manager'])
+      expect(linuxTargets.find((target) => target.kind === 'file_manager')).toMatchObject({
+        id: 'file-manager',
+        platform: 'linux',
+      })
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('opens a discovered native application only after rediscovering it for that file', async () => {
+    const dir = await makeDir()
+    const file = join(dir, 'brief.docx')
+    await writeFile(file, 'document')
+    const state = createService('darwin', {
+      nativeApplications: {
+        defaultApplicationPath: '/Applications/Pages.app',
+        applications: [
+          { appPath: '/Applications/Pages.app', bundleId: 'com.apple.iWork.Pages', displayName: 'Pages', isDefault: true },
+        ],
+      },
+    })
+
+    try {
+      const listed = await state.service.listTargetsForPath(file)
+      const app = listed.targets.find((target) => target.kind === 'application')!
+      await state.service.openTarget({ targetId: app.id, path: file })
+
+      expect(state.launched).toEqual([{ command: 'open', args: ['-a', '/Applications/Pages.app', file] }])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('opens a regular document with the system default application', async () => {
+    const dir = await makeDir()
+    const file = join(dir, 'brief.docx')
+    await writeFile(file, 'document')
+    const state = createService('darwin')
+
+    try {
+      await state.service.openTarget({ targetId: 'system-default', path: file })
+      expect(state.launched).toEqual([{ command: 'open', args: [file] }])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('uses the platform system-default opener on Windows and Linux', async () => {
+    const dir = await makeDir()
+    const file = join(dir, 'brief.docx')
+    await writeFile(file, 'document')
+    const windows = createService('win32')
+    const linux = createService('linux', { commands: { 'xdg-open': true } })
+
+    try {
+      await windows.service.openTarget({ targetId: 'system-default', path: file })
+      await linux.service.openTarget({ targetId: 'system-default', path: file })
+
+      expect(windows.launched).toEqual([{ command: 'explorer.exe', args: [file] }])
+      expect(linux.launched).toEqual([{ command: 'xdg-open', args: [file] }])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects an unavailable system opener and a stale native application target', async () => {
+    const dir = await makeDir()
+    const file = join(dir, 'brief.docx')
+    await writeFile(file, 'document')
+    const linux = createService('linux')
+    const mac = createService('darwin')
+
+    try {
+      await expect(linux.service.openTarget({ targetId: 'system-default', path: file }))
+        .rejects.toMatchObject({ code: 'OPEN_TARGET_UNAVAILABLE' })
+      await expect(mac.service.openTarget({ targetId: 'application:c3RhbGU', path: file }))
+        .rejects.toMatchObject({ code: 'OPEN_TARGET_UNAVAILABLE' })
+      expect(linux.launched).toEqual([])
+      expect(mac.launched).toEqual([])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('blocks executable scripts from the system-default target', async () => {
+    const dir = await makeDir()
+    const file = join(dir, 'run.sh')
+    await writeFile(file, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    const state = createService('darwin')
+
+    try {
+      await expect(state.service.openTarget({ targetId: 'system-default', path: file }))
+        .rejects.toMatchObject({ code: 'OPEN_TARGET_PATH_EXECUTABLE' })
+      expect(state.launched).toEqual([])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 
   it('rejects unknown targets', async () => {
@@ -435,6 +916,53 @@ describe('openTargetService', () => {
 
     await state.service.getTargetIcon('vscode')
     expect(state.convertedIcons).toHaveLength(1)
+  })
+
+  it('serves a discovered application its own bundle icon', async () => {
+    const dir = await makeDir()
+    const file = join(dir, 'notes.md')
+    await writeFile(file, 'notes')
+    const iconPath = '/Applications/Warp.app/Contents/Resources/AppIcon.icns'
+    const state = createService('darwin', {
+      paths: { [iconPath]: true },
+      plistValues: { '/Applications/Warp.app/Contents/Info.plist': 'AppIcon.icns' },
+      iconData: new Uint8Array([4, 5, 6]),
+      nativeApplications: {
+        defaultApplicationPath: null,
+        applications: [
+          { appPath: '/Applications/Warp.app', bundleId: 'dev.warp.Warp-Stable', displayName: 'Warp', isDefault: false },
+        ],
+      },
+    })
+
+    try {
+      const listed = await state.service.listTargetsForPath(file)
+      const warp = listed.targets.find((target) => target.kind === 'application')!
+      expect(warp.iconUrl).toBe(`/api/open-targets/icons/${encodeURIComponent(warp.id)}`)
+
+      const icon = await state.service.getTargetIcon(warp.id)
+
+      expect(icon.contentType).toBe('image/png')
+      expect(Array.from(icon.data)).toEqual([4, 5, 6])
+      expect(state.convertedIcons).toEqual([{ iconPath, size: 64 }])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses an application icon id it never issued, without touching the filesystem', async () => {
+    // The icon route is unauthenticated, so the id must not be able to name a path.
+    // An id for a bundle this service never discovered resolves to nothing at all —
+    // no plist read, no directory listing, no conversion.
+    const forged = `application:${Buffer.from('/Users/me/private/Secret.app').toString('base64url')}`
+    const state = createService('darwin', {
+      paths: { '/Users/me/private/Secret.app/Contents/Resources/AppIcon.icns': true },
+      plistValues: { '/Users/me/private/Secret.app/Contents/Info.plist': 'AppIcon.icns' },
+    })
+
+    await expect(state.service.getTargetIcon(forged)).rejects.toThrow(/not available/)
+    expect(state.convertedIcons).toEqual([])
+    expect(state.pathProbes).toBe(0)
   })
 
   it('uses Finder system icon for the macOS file-manager fallback', async () => {

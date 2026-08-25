@@ -1,14 +1,18 @@
-import { api, getApiUrl } from './client'
+import { api } from './client'
 
-export type OpenTargetKind = 'ide' | 'file_manager'
+export type OpenTargetKind = 'application' | 'system_default' | 'ide' | 'file_manager'
 
 export type OpenTarget = {
   id: string
   kind: OpenTargetKind
   label: string
   icon: string
+  /** Server-relative path. Load it through {@link loadTargetIconUrl}, not an `<img src>`. */
   iconUrl?: string
   platform: string
+  appPath?: string
+  bundleId?: string | null
+  isDefault?: boolean
 }
 
 export type OpenTargetList = {
@@ -25,19 +29,12 @@ export type OpenTargetOpenResponse = {
   path: string
 }
 
-function normalizeOpenTargetList(result: OpenTargetList): OpenTargetList {
-  return {
-    ...result,
-    targets: result.targets.map((target) => ({
-      ...target,
-      iconUrl: target.iconUrl ? getApiUrl(target.iconUrl) : undefined,
-    })),
-  }
-}
-
 export const openTargetsApi = {
   async list() {
-    return normalizeOpenTargetList(await api.get<OpenTargetList>('/api/open-targets'))
+    return api.get<OpenTargetList>('/api/open-targets')
+  },
+  async listForPath(path: string) {
+    return api.get<OpenTargetList>(`/api/open-targets?path=${encodeURIComponent(path)}`)
   },
   open(targetId: string, path: string) {
     return api.post<OpenTargetOpenResponse>('/api/open-targets/open', { targetId, path })

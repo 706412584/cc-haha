@@ -769,14 +769,17 @@ export function createTunnelPlan({
     }
     return {
       command: cloudflaredPath,
-      args: ['tunnel', '--no-autoupdate', 'run', '--token', token],
+      args: ['tunnel', '--no-autoupdate', '--protocol', 'http2', 'run', '--token', token],
       env,
     }
   }
 
   return {
     command: cloudflaredPath,
-    args: ['tunnel', '--no-autoupdate', '--url', `http://${controlHost}:${port}`],
+    // http2 instead of the default quic: QUIC (UDP) breaks behind TUN-mode
+    // proxies like FlClash/Clash ("failed to dial to edge with quic: timeout"),
+    // while TCP-based http2 survives them.
+    args: ['tunnel', '--no-autoupdate', '--protocol', 'http2', '--url', `http://${controlHost}:${port}`],
     env,
   }
 }

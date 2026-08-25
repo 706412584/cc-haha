@@ -13,6 +13,7 @@ import type { OpenTarget } from '../stores/openTargetStore'
 import { useBrowserPanelStore } from '../stores/browserPanelStore'
 import { useOpenTargetStore } from '../stores/openTargetStore'
 import { useWorkspacePanelStore } from '../stores/workspacePanelStore'
+import { reportOpenFailure } from './systemFileOpen'
 
 type Translate = (key: string, vars?: Record<string, string>) => string
 
@@ -54,6 +55,12 @@ export function openWithMenuDeps(
     openTarget: (id, absolutePath) => {
       void useOpenTargetStore.getState().openTarget(id, absolutePath)
     },
+    // Read at build time rather than passed down: every caller would otherwise
+    // have to remember to thread it, and the one that forgot would silently show
+    // a different editor than the settings page promises.
+    ...(useOpenTargetStore.getState().editorTargetId
+      ? { preferredEditorTargetId: useOpenTargetStore.getState().editorTargetId ?? undefined }
+      : {}),
     // A URL context has no path and no readable contents, so the copy entries are
     // left out entirely rather than shown disabled.
     ...(ctx.kind === 'file'
@@ -102,6 +109,18 @@ export async function buildOpenWithMenuItemsForHref(
   })
   if (!ctx) return []
 
-  await useOpenTargetStore.getState().ensureTargets()
-  return buildOpenWithMenuItems(ctx, useOpenTargetStore.getState().targets, opts)
+  if (ctx.kind !== 'file') return buildOpenWithMenuItems(ctx, [], opts)
+
+  let targets: OpenTarget[]
+  try {
+    targets = await useOpenTargetStore.getState().getTargetsForPath(ctx.absolutePath)
+  } catch {
+    // The server refuses a path that is not there, and this used to reject into a
+    // floating promise: the menu simply never opened, with nothing said. A
+    // reference the assistant wrote can outlive the file, so say which one and why
+    // rather than leaving the click looking broken.
+    reportOpenFailure(ctx.absolutePath)
+    return []
+  }
+  return buildOpenWithMenuItems(ctx, targets, opts)
 }

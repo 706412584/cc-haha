@@ -69,6 +69,7 @@ import type {
   Base64ImageSource,
 } from '@anthropic-ai/sdk/resources/messages.mjs'
 import { maybeResizeAndDownsampleImageBlock } from './imageResizer.js'
+import { registerUserProvidedImage } from './userProvidedImages.js'
 import type { PastedContent } from './config.js'
 import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js'
 import { getSkillToolCommands, getMcpSkillCommands } from '../commands.js'
@@ -1559,6 +1560,8 @@ function getWorkflowSizeGuidelineAttachment(
  * the tests on the real functions instead of a re-implementation.
  */
 export const getAttachmentsForTesting = {
+  atMentionedFiles: (input: string, toolUseContext: ToolUseContext) =>
+    processAtMentionedFiles(input, toolUseContext),
   workflowKeyword: (input: string | null, opts: { suppressed: boolean }) =>
     getWorkflowKeywordAttachment(input, opts.suppressed),
   ultracodeEffort: (messages: Message[] | undefined, ultracodeActive: boolean) =>
@@ -2068,7 +2071,7 @@ async function processAtMentionedFiles(
           // If stat fails, continue with file logic
         }
 
-        return await generateFileAttachment(
+        const attachment = await generateFileAttachment(
           absoluteFilename,
           toolUseContext,
           'tengu_at_mention_extracting_filename_success',
@@ -2079,6 +2082,13 @@ async function processAtMentionedFiles(
             limit: lineEnd && lineStart ? lineEnd - lineStart + 1 : undefined,
           },
         )
+        // Naming an image with @ is what authorizes ImageEdit to upload it to
+        // the image provider. A path the model found on its own stays
+        // off-limits — see utils/userProvidedImages.ts.
+        if (attachment?.type === 'file' && attachment.content.type === 'image') {
+          await registerUserProvidedImage(absoluteFilename)
+        }
+        return attachment
       } catch {
         logEvent('tengu_at_mention_extracting_filename_error', {})
       }

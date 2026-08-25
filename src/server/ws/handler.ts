@@ -98,6 +98,7 @@ import {
   scopedToolUseId,
   extractAssistantText,
   normalizeAskUserQuestionToolResult,
+  classifyRuntimeErrorCode,
   toApiRetryServerMessage,
   toStreamingFallbackServerMessage,
   extractLocalCommandOutput,
@@ -886,6 +887,9 @@ export const handleWebSocket = {
             turnState: hasLiveUserTurnForClient(ws.data.sessionId)
               ? 'running'
               : 'idle',
+            activeBackgroundTaskIds: [
+              ...(activeBackgroundTaskIds.get(ws.data.sessionId) ?? []),
+            ],
           })
           break
 
@@ -3610,11 +3614,7 @@ export function translateCliMessage(cliMsg: any, sessionId: string): ServerMessa
         }
         const message = extractAssistantText(cliMsg) || cliMsg.error || 'Unknown API error'
         const rawCode = typeof cliMsg.error === 'string' ? cliMsg.error : 'API_ERROR'
-        const code = /Provider stream stalled after partial response/i.test(message)
-          ? 'STREAM_IDLE_TIMEOUT'
-          : /Stream max duration exceeded/i.test(message)
-            ? 'STREAM_MAX_DURATION'
-            : rawCode
+        const code = classifyRuntimeErrorCode(message, rawCode)
         streamState.lastApiError = { message, code }
         return [{
           type: 'error',

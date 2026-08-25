@@ -24,6 +24,11 @@ describe('AttachmentGallery', () => {
       fetchedAt: Date.now(),
       loading: false,
       error: null,
+      getTargetsForPath: vi.fn().mockResolvedValue([
+        { id: 'code', kind: 'ide', label: 'VS Code', icon: 'vscode', platform: 'darwin' },
+        { id: 'system-default', kind: 'system_default', label: 'System default', icon: 'system', platform: 'darwin' },
+        { id: 'finder', kind: 'file_manager', label: 'Finder', icon: 'finder', platform: 'darwin' },
+      ]),
     })
     window.desktopHost = {
       ...browserHost,
@@ -200,6 +205,25 @@ describe('AttachmentGallery', () => {
       <AttachmentGallery
         attachments={[{
           type: 'file',
+          name: 'notes.md',
+          path: '/Users/example/Desktop/notes.md',
+        }]}
+      />,
+    )
+
+    fireEvent.click(view.getByRole('button', { name: 'Open with' }))
+
+    expect(await view.findByText('Open in VS Code')).toBeInTheDocument()
+    expect(view.getByText('Default application')).toBeInTheDocument()
+    expect(view.getByText('Reveal in Finder')).toBeInTheDocument()
+    expect(openPath).not.toHaveBeenCalled()
+  })
+
+  it('leaves the editor out for an attachment no editor can open', async () => {
+    const view = render(
+      <AttachmentGallery
+        attachments={[{
+          type: 'file',
           name: 'report.pdf',
           path: '/Users/example/Desktop/report.pdf',
         }]}
@@ -208,9 +232,8 @@ describe('AttachmentGallery', () => {
 
     fireEvent.click(view.getByRole('button', { name: 'Open with' }))
 
-    expect(await view.findByText('Open in VS Code')).toBeInTheDocument()
-    expect(view.getByText('Reveal in Finder')).toBeInTheDocument()
-    expect(openPath).not.toHaveBeenCalled()
+    expect(await view.findByText('Default application')).toBeInTheDocument()
+    expect(view.queryByText('Open in VS Code')).not.toBeInTheDocument()
   })
 
   it('removes a quoted workspace attachment by id', () => {
@@ -325,6 +348,28 @@ describe('AttachmentGallery', () => {
     expect(view.queryByRole('button', { name: 'Open <h1>' })).not.toBeInTheDocument()
   })
 
+  it('keeps one ordinary message image readable at its natural aspect ratio and opens it', async () => {
+    const view = render(
+      <AttachmentGallery
+        variant="message"
+        attachments={[{
+          id: 'image-1',
+          type: 'image',
+          name: 'single.png',
+          data: 'data:image/png;base64,AAAA',
+        }]}
+      />,
+    )
+
+    const button = view.getByRole('button', { name: 'Open single.png' })
+    const image = button.querySelector('img')
+    expect(image).toHaveClass('max-h-[340px]', 'w-full', 'max-w-[360px]')
+    expect(image).not.toHaveClass('h-28', 'w-28')
+
+    fireEvent.click(button)
+    expect(await view.findByText('1 / 1')).toBeInTheDocument()
+  })
+
   it.each([2, 5])('keeps %i ordinary message images in a bounded thumbnail gallery and opens the selected image', async (imageCount) => {
     const attachments = Array.from({ length: imageCount }, (_, index) => ({
       id: `image-${index + 1}`,
@@ -353,6 +398,22 @@ describe('AttachmentGallery', () => {
     expect(await view.findByText(`${imageCount} / ${imageCount}`)).toBeInTheDocument()
   })
 
+  it('keeps the surviving image compact when another image in the original multi-image set fails', () => {
+    const view = render(
+      <AttachmentGallery
+        variant="message"
+        attachments={[
+          { id: 'image-1', type: 'image', name: 'missing.png', data: 'data:image/png;base64,AAAA' },
+          { id: 'image-2', type: 'image', name: 'kept.png', data: 'data:image/png;base64,BBBB' },
+        ]}
+      />,
+    )
+
+    fireEvent.error(view.getByRole('img', { name: 'missing.png' }))
+
+    expect(view.getByRole('img', { name: 'kept.png' })).toHaveClass('h-28', 'w-28')
+  })
+
   it('previews a path-only pasted image instead of a file chip', () => {
     const path = '/Users/nanmi/Desktop/6代码仓库.png'
     const view = render(
@@ -378,7 +439,9 @@ describe('AttachmentGallery', () => {
       />,
     )
 
-    fireEvent.click(view.getByRole('button', { name: 'Open shot.png' }))
+    const button = view.getByRole('button', { name: 'Open shot.png' })
+    expect(button.querySelector('img')).toHaveClass('h-16', 'w-16')
+    fireEvent.click(button)
 
     expect(await view.findByText('1 / 1')).toBeInTheDocument()
   })

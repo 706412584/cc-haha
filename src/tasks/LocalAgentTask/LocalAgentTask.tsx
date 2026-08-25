@@ -599,6 +599,7 @@ export function enqueueAgentNotification({
 <${SUMMARY_TAG}>${summary}</${SUMMARY_TAG}>${resultSection}${usageSection}${outcomeSection}${worktreeSection}
 </${TASK_NOTIFICATION_TAG}>`;
   let enqueued = false;
+  let ownerAgentIdForSdk: string | undefined;
   const sessionId = getSessionId();
   setAppState(prev => {
     const task = prev.tasks[taskId];
@@ -606,6 +607,7 @@ export function enqueueAgentNotification({
     if (!isLocalAgentTask(task) || task.status !== expectedTaskStatus || task.notified || epoch !== undefined && task.epoch !== epoch) {
       return prev;
     }
+    ownerAgentIdForSdk = task.ownerAgentId;
     const sequence = Number.isSafeInteger(prev.nextAgentCompletionSequence) && prev.nextAgentCompletionSequence > 0 ? prev.nextAgentCompletionSequence : 1;
     const currentInbox = Array.isArray(prev.agentCompletionInbox) ? prev.agentCompletionInbox : [];
     if (currentInbox.length >= MAX_AGENT_COMPLETION_INBOX) {
@@ -642,6 +644,26 @@ export function enqueueAgentNotification({
     // between-turn boundary.
     abortSpeculation(setAppState);
     wakeAgentCompletionConsumers(getSessionId());
+    // Root notifications reach SDK consumers when print.ts drains the queued
+    // inbox command. Agent-owned terminals are consumed inside the parent agent
+    // loop and never pass through that drain, so emit their SDK bookend here
+    // with explicit ownership — otherwise the owning agent never sees the
+    // nested task_notification.
+    if (ownerAgentIdForSdk) {
+      emitTaskTerminatedSdk(taskId, status === 'killed' ? 'stopped' : status, {
+        toolUseId,
+        summary,
+        outputFile: notificationOutputPath,
+        usage: usage
+          ? {
+              total_tokens: usage.totalTokens,
+              tool_uses: usage.toolUses,
+              duration_ms: usage.durationMs,
+            }
+          : undefined,
+        ownerAgentId: ownerAgentIdForSdk,
+      });
+    }
   }
   return enqueued;
 }
