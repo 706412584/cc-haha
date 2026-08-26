@@ -637,7 +637,7 @@ function ShellOutput({ content, isError, toolName }: { content: unknown; isError
     <div className="border-t border-[var(--color-terminal-border)]">
       {/* Commands that emit image paths (screenshots, plots) still get a gallery,
           as the generic result box used to provide on the error path. */}
-      <InlineImageGallery text={output.full} />
+      <InlineImageGallery text={output.full} allowRemoteImages />
       <div className="flex items-center justify-between px-3 py-1.5">
         <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--color-terminal-muted)]">
           {isError ? t('tool.errorOutput') : t('tool.toolOutput')}
@@ -810,7 +810,7 @@ function renderResultOutput(
     return (
       <>
         {imageBlocks.length > 0 && <ImageBlockGallery imageBlocks={imageBlocks} />}
-        <InlineImageGallery text={text} />
+        <InlineImageGallery text={text} allowRemoteImages />
         {result.isError ? (
           <div data-tool-detail-surface="embedded" className="overflow-hidden bg-[var(--color-error-soft)]">
             <div className="flex items-center justify-between border-b border-[var(--color-error-soft-hover)] px-3 py-2 text-[10px] uppercase tracking-[0.18em] text-[var(--color-error)]">
@@ -835,7 +835,7 @@ function renderResultOutput(
       {imageBlocks.length > 0 && (
         <ImageBlockGallery imageBlocks={imageBlocks} />
       )}
-      <InlineImageGallery text={text} />
+      <InlineImageGallery text={text} allowRemoteImages />
       <div
         data-tool-detail-surface="card"
         className={`overflow-hidden rounded-[var(--radius-lg)] border ${

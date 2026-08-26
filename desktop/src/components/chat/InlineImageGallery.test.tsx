@@ -172,8 +172,58 @@ describe('InlineImageGallery', () => {
     expect(imgSrcs()).toEqual(['http://127.0.0.1:4321/preview-fs/s1/outputs/a/frame.png'])
   })
 
-  it('renders both absolute and relative images together', () => {
+  it('renders a remote https image URL directly', () => {
     render(
+      <InlineImageGallery
+        text={'preview at https://cdn.example.com/img/result.png ok'}
+        allowRemoteImages
+      />,
+    )
+
+    const srcs = imgSrcs()
+    expect(srcs).toHaveLength(1)
+    expect(srcs[0]).toBe('https://cdn.example.com/img/result.png')
+  })
+
+  it('ignores remote image URLs unless allowRemoteImages is set (untrusted prose)', () => {
+    render(
+      <InlineImageGallery
+        text={'preview at https://cdn.example.com/img/result.png ok'}
+      />,
+    )
+    expect(screen.queryAllByRole('img')).toHaveLength(0)
+  })
+
+  it('renders a remote image URL that carries a query string, using a clean name', () => {
+    render(
+      <InlineImageGallery
+        text={'{"previewUrl":"https://cdn.example.com/a/b.png?token=abc&x=1"}'}
+        allowRemoteImages
+      />,
+    )
+
+    expect(imgSrcs()).toEqual(['https://cdn.example.com/a/b.png?token=abc&x=1'])
+    expect(screen.getByRole('button', { name: /b\.png/i })).toBeInTheDocument()
+  })
+
+  it('prefers the remote previewUrl over a sandboxed local absolutePath (MCP result shape)', () => {
+    // Regression: an MCP image tool returns a remote previewUrl AND a local
+    // absolutePath that usually 403s through the filesystem sandbox. Both render,
+    // remote first — so a preview always shows even when the local path is blocked.
+    render(
+      <InlineImageGallery
+        text={'{"previewUrl":"https://tap.example.com/x.png","absolutePath":"/Users/me/out/x.png"}'}
+        allowRemoteImages
+      />,
+    )
+
+    expect(imgSrcs()).toEqual([
+      'https://tap.example.com/x.png',
+      'http://127.0.0.1:3456/api/filesystem/file?path=' + encodeURIComponent('/Users/me/out/x.png'),
+    ])
+  })
+
+  it('renders both absolute and relative images together', () => {    render(
       <InlineImageGallery
         text={'abs /Users/me/pics/photo.png and rel outputs/b/chart.png'}
         sessionId="s1"

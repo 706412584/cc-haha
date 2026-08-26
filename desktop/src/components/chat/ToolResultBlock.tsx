@@ -58,7 +58,7 @@ export const ToolResultBlock = memo(function ToolResultBlock({ content, isError,
       </button>
 
       {/* Inline image gallery from detected paths */}
-      <InlineImageGallery text={text} />
+      <InlineImageGallery text={text} allowRemoteImages />
 
       {/* Content */}
       {expanded ? (
