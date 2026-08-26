@@ -476,7 +476,15 @@ function renderPreview(
   const shellCommand = isShellTool(toolName) && typeof obj.command === 'string' ? obj.command : null
   const echoesInTerminal = shellCommand !== null
   const resultText = getVisibleResultText(toolName, result, echoesInTerminal)
-  const resultOutput = result && resultText ? renderResultOutput(result, resultText, t, embedded) : null
+  // An MCP tool can return ONLY image blocks (e.g. layout-editor-mcp's
+  // layout_get_preview_image screenshot), with no text at all. Gating the
+  // output box on resultText alone would drop that preview, so image-only
+  // results still open renderResultOutput — which renders the gallery and
+  // skips the empty text box.
+  const resultImageBlocks = result ? extractImageBlocks(result.content) : []
+  const resultOutput = result && (resultText || resultImageBlocks.length > 0)
+    ? renderResultOutput(result, resultText ?? '', t, embedded)
+    : null
 
   if (toolName === 'Edit' && typeof obj.old_string === 'string' && typeof obj.new_string === 'string') {
     return (
@@ -811,7 +819,7 @@ function renderResultOutput(
       <>
         {imageBlocks.length > 0 && <ImageBlockGallery imageBlocks={imageBlocks} />}
         <InlineImageGallery text={text} allowRemoteImages />
-        {result.isError ? (
+        {text && (result.isError ? (
           <div data-tool-detail-surface="embedded" className="overflow-hidden bg-[var(--color-error-soft)]">
             <div className="flex items-center justify-between border-b border-[var(--color-error-soft-hover)] px-3 py-2 text-[10px] uppercase tracking-[0.18em] text-[var(--color-error)]">
               <span>{label}</span>
@@ -826,7 +834,7 @@ function renderResultOutput(
           </div>
         ) : (
           <CodeViewer code={text} language="plaintext" maxLines={18} chrome="embedded" label={label} />
-        )}
+        ))}
       </>
     )
   }
@@ -836,6 +844,7 @@ function renderResultOutput(
         <ImageBlockGallery imageBlocks={imageBlocks} />
       )}
       <InlineImageGallery text={text} allowRemoteImages />
+      {text && (
       <div
         data-tool-detail-surface="card"
         className={`overflow-hidden rounded-[var(--radius-lg)] border ${
@@ -859,6 +868,7 @@ function renderResultOutput(
           <CodeViewer code={text} language="plaintext" maxLines={18} />
         )}
       </div>
+      )}
     </>
   )
 }
@@ -1221,6 +1231,20 @@ function extractImageBlocks(content: unknown): ImageBlock[] {
     if (typed.type === 'image' && typeof typed.data === 'string') {
       const mime = typeof typed.mimeType === 'string' ? typed.mimeType : 'image/png'
       images.push({ src: `data:${mime};base64,${typed.data}`, mimeType: mime })
+    }
+    // Anthropic-standard image block: the payload is nested under `source`
+    // ({type:'base64', data, media_type} or {type:'url', url}). MCP tools that
+    // return a screenshot — e.g. layout-editor-mcp's layout_get_preview_image —
+    // use this shape, so without it their preview never renders inline.
+    if (typed.type === 'image' && typed.source && typeof typed.source === 'object') {
+      const source = typed.source as Record<string, unknown>
+      if (typeof source.data === 'string') {
+        const mime = typeof source.media_type === 'string' ? source.media_type : 'image/png'
+        const src = `data:${mime};base64,${source.data}`
+        if (!seen.has(src)) { seen.add(src); images.push({ src, mimeType: mime }) }
+      } else if (typeof source.url === 'string' && /^(https?:|data:)/i.test(source.url)) {
+        if (!seen.has(source.url)) { seen.add(source.url); images.push({ src: source.url, mimeType: 'image/png' }) }
+      }
     }
     // Handle OpenAI-style image_url blocks (from MCP proxy transforms)
     if (typed.type === 'image_url' && typed.image_url && typeof typed.image_url === 'object') {
