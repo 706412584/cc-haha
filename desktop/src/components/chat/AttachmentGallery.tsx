@@ -53,6 +53,17 @@ function fileIconAccent(icon: string): string {
   return FILE_ICON_ACCENTS[icon] ?? FILE_ICON_ACCENTS.insert_drive_file!
 }
 
+// Module-level cache of decoded image aspect ratios, keyed by src. The
+// transcript virtualizes: an image item unmounts when it scrolls out of the
+// overscan window and remounts when it returns. Without a stable reserved
+// height, each remount re-decodes the image and its box height jumps 0 → N,
+// which retriggers the virtual list's ResizeObserver → offset recompute →
+// scroll shift → the item re-enters/exits the window → the measurement loops
+// and the transcript visibly flickers at that scroll position. Caching the
+// aspect ratio lets a remounted image reserve its final height via CSS before
+// decode, so the box size no longer depends on load and the loop is broken.
+const imageAspectRatioCache = new Map<string, number>()
+
 type Props = {
   attachments: AttachmentPreview[]
   variant?: 'composer' | 'message'
@@ -241,6 +252,17 @@ export function AttachmentGallery({ attachments, variant = 'message', onRemove, 
                     src={src}
                     alt={attachment.name}
                     onError={() => markImageUnloadable(src)}
+                    onLoad={(event) => {
+                      const img = event.currentTarget
+                      if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+                        imageAspectRatioCache.set(src, img.naturalWidth / img.naturalHeight)
+                      }
+                    }}
+                    style={
+                      isComposer || previewableImageCount !== 1
+                        ? undefined
+                        : { aspectRatio: imageAspectRatioCache.get(src) ?? '16 / 10' }
+                    }
                     className={
                       isComposer
                         ? 'h-16 w-16 object-cover'
