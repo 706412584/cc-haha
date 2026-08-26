@@ -206,10 +206,11 @@ describe('InlineImageGallery', () => {
     expect(screen.getByRole('button', { name: /b\.png/i })).toBeInTheDocument()
   })
 
-  it('prefers the remote previewUrl over a sandboxed local absolutePath (MCP result shape)', () => {
-    // Regression: an MCP image tool returns a remote previewUrl AND a local
-    // absolutePath that usually 403s through the filesystem sandbox. Both render,
-    // remote first — so a preview always shows even when the local path is blocked.
+  it('drops the local sibling of a remote previewUrl (MCP result shape)', () => {
+    // Regression: an MCP image tool returns ONE logical image as both a remote
+    // previewUrl and a local absolutePath (the on-disk copy) that usually 403s
+    // through the filesystem sandbox. Only the remote URL should render — the
+    // sibling would otherwise show as a second, broken duplicate tile.
     render(
       <InlineImageGallery
         text={'{"previewUrl":"https://tap.example.com/x.png","absolutePath":"/Users/me/out/x.png"}'}
@@ -217,9 +218,33 @@ describe('InlineImageGallery', () => {
       />,
     )
 
+    expect(imgSrcs()).toEqual(['https://tap.example.com/x.png'])
+  })
+
+  it('drops a Windows-style local sibling path of a remote previewUrl', () => {
+    render(
+      <InlineImageGallery
+        text={'{"previewUrl":"https://tap.example.com/x.png","absolutePath":"D:\\\\MarkerAnim\\\\assets\\\\image\\\\facility_library.png"}'}
+        allowRemoteImages
+      />,
+    )
+
+    expect(imgSrcs()).toEqual(['https://tap.example.com/x.png'])
+  })
+
+  it('keeps an unrelated local image alongside a remote previewUrl', () => {
+    // Only the previewUrl's own sibling (absolutePath/localPath) is dropped; an
+    // independently-mentioned local image must still render.
+    render(
+      <InlineImageGallery
+        text={'{"previewUrl":"https://tap.example.com/x.png","absolutePath":"/Users/me/out/x.png"} also /Users/me/other/y.png'}
+        allowRemoteImages
+      />,
+    )
+
     expect(imgSrcs()).toEqual([
       'https://tap.example.com/x.png',
-      'http://127.0.0.1:3456/api/filesystem/file?path=' + encodeURIComponent('/Users/me/out/x.png'),
+      'http://127.0.0.1:3456/api/filesystem/file?path=' + encodeURIComponent('/Users/me/other/y.png'),
     ])
   })
 

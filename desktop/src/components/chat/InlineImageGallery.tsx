@@ -35,6 +35,27 @@ export function extractRemoteImageUrls(text: string): string[] {
 }
 
 /**
+ * Extracts local image paths that are the download sibling of a remote
+ * `previewUrl` within an MCP image-tool result.
+ *
+ * Tools like taptap-maker return one logical image as BOTH a remote
+ * `previewUrl` and a local `absolutePath`/`localPath` (the on-disk copy). The
+ * local copy usually sits outside the filesystem sandbox and 403s, so if it is
+ * also surfaced as a gallery source the user sees a second, broken duplicate.
+ * These keys explicitly mark a path as that sibling, so their values are
+ * excluded from the local-path sources whenever the remote URL is rendered.
+ */
+export function extractSiblingLocalPaths(text: string): Set<string> {
+  const regex = /"(?:absolutePath|localPath)"\s*:\s*"([^"]+)"/gi
+  const paths = new Set<string>()
+  let match: RegExpExecArray | null
+  while ((match = regex.exec(text)) !== null) {
+    paths.add(match[1]!.trim())
+  }
+  return paths
+}
+
+/**
  * Extracts absolute image file paths from text content.
  * Matches paths like /Users/.../image.png, /tmp/output.jpg, etc.
  */
@@ -116,6 +137,14 @@ export function InlineImageGallery({ text, sessionId, workDir, changedFiles, sup
     [allowRemoteImages, text],
   )
 
+  // When a remote previewUrl is rendered, its on-disk sibling (absolutePath /
+  // localPath) is the SAME image — dropping it avoids a second, sandbox-403
+  // duplicate tile. Only meaningful once remote URLs are actually surfaced.
+  const siblingLocalPaths = useMemo(
+    () => (remoteUrls.length > 0 ? extractSiblingLocalPaths(text) : new Set<string>()),
+    [remoteUrls.length, text],
+  )
+
   // An empty changedFiles only means "no TRACKED file changed" (Bash writes are
   // invisible to the checkpoint), so it is treated as "no evidence" and falls
   // back to text-only extraction instead of filtering every mention away.
@@ -129,6 +158,7 @@ export function InlineImageGallery({ text, sessionId, workDir, changedFiles, sup
     const seenSrc = new Set(remote.map((img) => img.src))
     const absolute: GalleryImage[] = []
     for (const p of imagePaths) {
+      if (siblingLocalPaths.has(p)) continue
       const src = localImageFileUrl(p)
       if (seenSrc.has(src)) continue
       seenSrc.add(src)
@@ -170,7 +200,7 @@ export function InlineImageGallery({ text, sessionId, workDir, changedFiles, sup
     }
 
     return [...remote, ...absolute, ...relative]
-  }, [changedFileEvidence, imagePaths, remoteUrls, sessionId, text, workDir])
+  }, [changedFileEvidence, imagePaths, remoteUrls, sessionId, siblingLocalPaths, text, workDir])
 
   if (images.length === 0) return null
 
