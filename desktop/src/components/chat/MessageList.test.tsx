@@ -1696,6 +1696,168 @@ describe('MessageList nested tool calls', () => {
     })
   })
 
+  it('re-pins to the bottom as measurements land after switching to an idle session', async () => {
+    // Regression: the switch commit writes the bottom from the scrollHeight of
+    // ESTIMATED item heights. Real measurements then move the true bottom, but
+    // the new-content effect needs a running session / message-count change and
+    // the content-resize observer needs shouldFollowContentResize — so an idle
+    // session was left parked on the stale estimated bottom, mid-transcript.
+    let resizeCallback: ResizeObserverCallback | null = null
+    class TestResizeObserver {
+      observe = vi.fn()
+      unobserve = vi.fn()
+      disconnect = vi.fn()
+
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback
+      }
+    }
+    vi.stubGlobal('ResizeObserver', TestResizeObserver)
+
+    const otherSession = 'session-b'
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: [
+            { id: 'a1', type: 'user_text', content: 'question a', timestamp: 1 },
+          ],
+        }),
+        [otherSession]: makeSessionState({
+          chatState: 'idle',
+          messages: [
+            { id: 'b1', type: 'user_text', content: 'question b', timestamp: 1 },
+            { id: 'b2', type: 'assistant_text', content: 'answer b', timestamp: 2 },
+          ],
+        }),
+      },
+    })
+    useTabStore.setState({
+      activeTabId: ACTIVE_TAB,
+      tabs: [
+        { sessionId: ACTIVE_TAB, title: 'A', type: 'session' as const, status: 'idle' },
+        { sessionId: otherSession, title: 'B', type: 'session' as const, status: 'idle' },
+      ],
+    })
+
+    const { container, rerender } = render(<MessageList />)
+    const scroller = container.querySelector('.chat-scroll-area') as HTMLElement
+    let scrollHeight = 1000
+    let scrollTop = 0
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 500 })
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, get: () => scrollHeight })
+    Object.defineProperty(scroller, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => { scrollTop = value },
+    })
+    await waitForProgrammaticScrollReset()
+
+    // Switch to the idle session B. At commit time its content measures 1000px,
+    // so the bottom is 500.
+    await act(async () => {
+      useTabStore.setState({ activeTabId: otherSession })
+      rerender(<MessageList />)
+    })
+    await waitForProgrammaticScrollReset()
+    expect(scrollTop).toBe(500)
+
+    // Real measurements land: content is actually 2000px tall, so the true
+    // bottom moved to 1500. The idle session must follow it.
+    scrollHeight = 2000
+    act(() => {
+      resizeCallback?.([{ contentRect: { height: 2000 } } as ResizeObserverEntry], {} as ResizeObserver)
+    })
+    await waitForProgrammaticScrollReset()
+
+    expect(scrollTop).toBe(1500)
+    expect(screen.queryByRole('button', { name: 'Latest' })).toBeNull()
+  })
+
+  it('does not re-pin after switching to a session the user had scrolled up in', async () => {
+    // The settle window only exists to correct an at-bottom switch against
+    // estimated heights. A restored mid-transcript position must stay put.
+    let resizeCallback: ResizeObserverCallback | null = null
+    class TestResizeObserver {
+      observe = vi.fn()
+      unobserve = vi.fn()
+      disconnect = vi.fn()
+
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback
+      }
+    }
+    vi.stubGlobal('ResizeObserver', TestResizeObserver)
+
+    const otherSession = 'session-b'
+    useChatStore.setState({
+      sessions: {
+        [ACTIVE_TAB]: makeSessionState({
+          messages: [
+            { id: 'a1', type: 'user_text', content: 'question a', timestamp: 1 },
+          ],
+        }),
+        [otherSession]: makeSessionState({
+          chatState: 'idle',
+          messages: [
+            { id: 'b1', type: 'user_text', content: 'question b', timestamp: 1 },
+            { id: 'b2', type: 'assistant_text', content: 'answer b', timestamp: 2 },
+          ],
+        }),
+      },
+    })
+    useTabStore.setState({
+      activeTabId: ACTIVE_TAB,
+      tabs: [
+        { sessionId: ACTIVE_TAB, title: 'A', type: 'session' as const, status: 'idle' },
+        { sessionId: otherSession, title: 'B', type: 'session' as const, status: 'idle' },
+      ],
+    })
+
+    const { container, rerender } = render(<MessageList />)
+    const scroller = container.querySelector('.chat-scroll-area') as HTMLElement
+    let scrollHeight = 1000
+    let scrollTop = 0
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 500 })
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, get: () => scrollHeight })
+    Object.defineProperty(scroller, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => { scrollTop = value },
+    })
+    await waitForProgrammaticScrollReset()
+
+    // Enter B, scroll up inside it, then leave and come back.
+    await act(async () => {
+      useTabStore.setState({ activeTabId: otherSession })
+      rerender(<MessageList />)
+    })
+    await waitForProgrammaticScrollReset()
+    scrollTop = 500
+    fireEvent.scroll(scroller)
+    scrollTop = 120
+    fireEvent.scroll(scroller)
+
+    await act(async () => {
+      useTabStore.setState({ activeTabId: ACTIVE_TAB })
+      rerender(<MessageList />)
+    })
+    await waitForProgrammaticScrollReset()
+    await act(async () => {
+      useTabStore.setState({ activeTabId: otherSession })
+      rerender(<MessageList />)
+    })
+    await waitForProgrammaticScrollReset()
+    expect(scrollTop).toBe(120)
+
+    scrollHeight = 2000
+    act(() => {
+      resizeCallback?.([{ contentRect: { height: 2000 } } as ResizeObserverEntry], {} as ResizeObserver)
+    })
+    await waitForProgrammaticScrollReset()
+
+    expect(scrollTop).toBe(120)
+  })
+
   it('keeps bottom follow armed after switching to a taller session and back', async () => {
     // Regression: the switch commit swaps the DOM to the incoming session
     // before the outgoing session's scroll snapshot is taken, so measuring
