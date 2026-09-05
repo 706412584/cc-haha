@@ -3576,8 +3576,11 @@ describe('SessionService', () => {
       }
     })
 
-    it('T5: skips caching files larger than the per-file byte limit', async () => {
-      // Build a transcript exceeding readCacheMaxFileBytes (16 MiB).
+    it('T5: caches a large file under the full-read ceiling so it is not re-read', async () => {
+      // A transcript well over the old 16 MiB per-file cache cap but under the
+      // 50 MiB full-read ceiling. These active, frequently-polled transcripts
+      // used to be excluded from the cache, forcing a full re-parse on every
+      // read (sidebar refresh / workbench poll) — the UI-stutter root cause.
       const filler = 'x'.repeat(200_000)
       const entries: Record<string, unknown>[] = [
         makeSnapshotEntry(),
@@ -3589,14 +3592,15 @@ describe('SessionService', () => {
       const filePath = await writeSessionFile('-tmp-project', sessionId, entries)
       const stat = await fs.stat(filePath)
       expect(stat.size).toBeGreaterThan(16 * 1024 * 1024)
+      expect(stat.size).toBeLessThan(50 * 1024 * 1024)
 
       const readSpy = spyOn(fs, 'readFile')
       try {
         await service.getSessionWorkDir(sessionId)
         const callsAfterFirst = readSpy.mock.calls.length
         await service.getSessionWorkDir(sessionId)
-        // Oversized file is never cached, so the second call re-reads from disk.
-        expect(readSpy.mock.calls.length).toBeGreaterThan(callsAfterFirst)
+        // Now cached: the second call is served from memory, no extra read.
+        expect(readSpy.mock.calls.length).toBe(callsAfterFirst)
       } finally {
         readSpy.mockRestore()
       }
