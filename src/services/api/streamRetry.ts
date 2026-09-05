@@ -17,6 +17,7 @@ import {
 import { getAssistantMessageFromError } from "./errors.js";
 import {
   getMaxStreamTransientRetries,
+  getStreamTransientRetryBudgetMs,
   getRetryDelay,
   RetriableStreamError,
 } from "./withRetry.js";
@@ -54,6 +55,8 @@ export async function* withStreamRetry(
   signal?: AbortSignal,
 ): AsyncGenerator<StreamQueryMessage, void> {
   const maxRetries = getMaxStreamTransientRetries();
+  const budgetMs = getStreamTransientRetryBudgetMs();
+  const startedAt = Date.now();
   for (let i = 0; ; i++) {
     try {
       yield* attempt();
@@ -63,13 +66,21 @@ export async function* withStreamRetry(
         throw error;
       }
       if (signal?.aborted) throw new APIUserAbortError();
-      if (i >= maxRetries) {
+      // Stop when the retry count is spent OR the wall-clock budget is used up.
+      // The count alone can't bound a slow-failing upstream: an empty stream
+      // that takes ~30s to arrive turns 4 retries into minutes of silent UI.
+      // The budget caps total elapsed so the error surfaces in bounded time.
+      const elapsedMs = Date.now() - startedAt;
+      const overBudget = budgetMs > 0 && elapsedMs >= budgetMs;
+      if (i >= maxRetries || overBudget) {
         // Retries exhausted — surface the original error as an assistant
         // message, matching queryModel's normal terminal-error behavior.
         logForDebugging(
-          `Transient mid-stream error: retries exhausted after ${maxRetries} attempt(s): ${errorMessage(
-            error.originalError,
-          )}`,
+          `Transient mid-stream error: ${
+            overBudget
+              ? `retry budget ${budgetMs}ms exhausted after ${i + 1} attempt(s), ${elapsedMs}ms elapsed`
+              : `retries exhausted after ${maxRetries} attempt(s)`
+          }: ${errorMessage(error.originalError)}`,
           { level: "error" },
         );
         logEvent("tengu_stream_transient_retry_exhausted", {
@@ -103,7 +114,14 @@ export async function* withStreamRetry(
         { level: "warn" },
       );
       const attempt = i + 1
-      const retryDelayMs = Math.round(getRetryDelay(attempt))
+      let retryDelayMs = Math.round(getRetryDelay(attempt))
+      // Don't sleep past the wall-clock budget: a full backoff here would just
+      // burn the remaining time on a wait whose next attempt we'd immediately
+      // abandon at the top of the loop. Clamp so the final attempt still runs.
+      if (budgetMs > 0) {
+        const remainingMs = budgetMs - (Date.now() - startedAt);
+        retryDelayMs = Math.max(0, Math.min(retryDelayMs, remainingMs));
+      }
       logEvent("tengu_stream_transient_retry", {
         attempt,
         model: model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,

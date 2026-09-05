@@ -363,6 +363,24 @@ export function getMaxStreamTransientRetries(): number {
   return Number.isFinite(raw) && raw >= 0 ? raw : 4
 }
 
+/**
+ * Wall-clock ceiling for the whole withStreamRetry() loop. The retry *count*
+ * bounds fast-failing transients well (a socket reset recovers in 1–2 near-
+ * instant re-sends), but a provider that accepts the request then hangs ~30s
+ * before returning an empty stream turns "4 retries" into 2m40s of dead-silent
+ * UI. This caps total elapsed time across attempts+backoff so a slow-failing
+ * upstream surfaces its error in bounded time instead of stacking full-length
+ * hangs. Defaults to 60s; 0 disables the budget (count-only, legacy behavior).
+ * Override with CLAUDE_STREAM_TRANSIENT_RETRY_BUDGET_MS.
+ */
+export function getStreamTransientRetryBudgetMs(): number {
+  const raw = parseInt(
+    process.env.CLAUDE_STREAM_TRANSIENT_RETRY_BUDGET_MS || '',
+    10,
+  )
+  return Number.isFinite(raw) && raw >= 0 ? raw : 60_000
+}
+
 export async function* withRetry<T>(
   getClient: () => Promise<Anthropic>,
   operation: (
