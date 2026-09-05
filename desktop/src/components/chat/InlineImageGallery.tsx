@@ -10,6 +10,52 @@ import { getServerBaseUrl } from '../../lib/desktopRuntime'
 const IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|webp|svg|bmp|avif|ico)$/i
 
 /**
+ * Extracts remote http(s) image URLs from text content.
+ *
+ * MCP image tools (e.g. taptap-maker) return a `previewUrl` served over https
+ * alongside a local `absolutePath` that often sits outside the filesystem
+ * sandbox and 403s. The remote URL is directly loadable (CSP `img-src`
+ * allows `https:`), so it is surfaced as its own gallery source.
+ */
+export function extractRemoteImageUrls(text: string): string[] {
+  const regex = /(?:^|[\s`"'(])(https?:\/\/[^\s`"')<>]+?\.(?:png|jpe?g|gif|webp|svg|bmp|avif|ico)(?:\?[^\s`"')<>]*)?)/gi
+  const urls: string[] = []
+  const seen = new Set<string>()
+
+  let match: RegExpExecArray | null
+  while ((match = regex.exec(text)) !== null) {
+    const u = match[1]!.trim()
+    if (!seen.has(u)) {
+      seen.add(u)
+      urls.push(u)
+    }
+  }
+
+  return urls
+}
+
+/**
+ * Extracts local image paths that are the download sibling of a remote
+ * `previewUrl` within an MCP image-tool result.
+ *
+ * Tools like taptap-maker return one logical image as BOTH a remote
+ * `previewUrl` and a local `absolutePath`/`localPath` (the on-disk copy). The
+ * local copy usually sits outside the filesystem sandbox and 403s, so if it is
+ * also surfaced as a gallery source the user sees a second, broken duplicate.
+ * These keys explicitly mark a path as that sibling, so their values are
+ * excluded from the local-path sources whenever the remote URL is rendered.
+ */
+export function extractSiblingLocalPaths(text: string): Set<string> {
+  const regex = /"(?:absolutePath|localPath)"\s*:\s*"([^"]+)"/gi
+  const paths = new Set<string>()
+  let match: RegExpExecArray | null
+  while ((match = regex.exec(text)) !== null) {
+    paths.add(match[1]!.trim())
+  }
+  return paths
+}
+
+/**
  * Extracts absolute image file paths from text content.
  * Matches paths like /Users/.../image.png, /tmp/output.jpg, etc.
  */
@@ -33,7 +79,9 @@ export function extractImagePaths(text: string): string[] {
 }
 
 function fileName(filePath: string): string {
-  return filePath.split('/').pop() || filePath
+  const name = filePath.split('/').pop() || filePath
+  // Remote URLs can carry a query/hash after the extension (e.g. ?token=…).
+  return name.split(/[?#]/)[0] || name
 }
 
 type GalleryImage = {
@@ -53,9 +101,18 @@ type Props = {
   changedFiles?: string[]
   /** ImageGen outputs already have a dedicated placeholder/result card. */
   suppressManagedGeneratedImages?: boolean
+  /**
+   * Render remote http(s) image URLs (e.g. an MCP tool's `previewUrl`) found in
+   * the text. Off by default: assistant prose is untrusted, and auto-loading
+   * arbitrary remote images there would reintroduce the tracking-pixel/loopback
+   * probe risk that {@link createWorkspaceMarkdownImageResolver} deliberately
+   * avoids. Tool-output surfaces opt in because that is where MCP tools return a
+   * loadable preview URL alongside a sandboxed local path that often 403s.
+   */
+  allowRemoteImages?: boolean
 }
 
-export function InlineImageGallery({ text, sessionId, workDir, changedFiles, suppressManagedGeneratedImages = false }: Props) {
+export function InlineImageGallery({ text, sessionId, workDir, changedFiles, suppressManagedGeneratedImages = false, allowRemoteImages = false }: Props) {
   const [activeIndex, setActiveIndex] = useState<number | null>(null)
   const [annotationTarget, setAnnotationTarget] = useState<GalleryImage | null>(null)
 
@@ -71,17 +128,45 @@ export function InlineImageGallery({ text, sessionId, workDir, changedFiles, sup
     [suppressManagedGeneratedImages, text],
   )
 
+  // Remote http(s) image URLs (e.g. an MCP tool's `previewUrl`) load directly —
+  // they don't touch the filesystem sandbox that a sibling local `absolutePath`
+  // usually 403s on — so they are surfaced as their own gallery sources. Gated
+  // behind allowRemoteImages so untrusted assistant prose can't auto-load them.
+  const remoteUrls = useMemo(
+    () => (allowRemoteImages ? extractRemoteImageUrls(text) : []),
+    [allowRemoteImages, text],
+  )
+
+  // When a remote previewUrl is rendered, its on-disk sibling (absolutePath /
+  // localPath) is the SAME image — dropping it avoids a second, sandbox-403
+  // duplicate tile. Only meaningful once remote URLs are actually surfaced.
+  const siblingLocalPaths = useMemo(
+    () => (remoteUrls.length > 0 ? extractSiblingLocalPaths(text) : new Set<string>()),
+    [remoteUrls.length, text],
+  )
+
   // An empty changedFiles only means "no TRACKED file changed" (Bash writes are
   // invisible to the checkpoint), so it is treated as "no evidence" and falls
   // back to text-only extraction instead of filtering every mention away.
   const changedFileEvidence = changedFiles !== undefined && changedFiles.length === 0 ? undefined : changedFiles
 
   const images = useMemo<GalleryImage[]>(() => {
+    // 0. Remote URLs (rendered first) — most reliable, no sandbox involved.
+    const remote: GalleryImage[] = remoteUrls.map((u) => ({ src: u, name: fileName(u) }))
+
     // 1. Absolute paths (legacy behavior) — served via /api/filesystem/file.
-    const absolute: GalleryImage[] = imagePaths.map((p) => ({ src: localImageFileUrl(p), name: fileName(p) }))
+    const seenSrc = new Set(remote.map((img) => img.src))
+    const absolute: GalleryImage[] = []
+    for (const p of imagePaths) {
+      if (siblingLocalPaths.has(p)) continue
+      const src = localImageFileUrl(p)
+      if (seenSrc.has(src)) continue
+      seenSrc.add(src)
+      absolute.push({ src, name: fileName(p) })
+    }
 
     if (!sessionId) {
-      return absolute
+      return [...remote, ...absolute]
     }
 
     // 2. Relative workspace images — only when a sessionId is available so we can
@@ -96,7 +181,6 @@ export function InlineImageGallery({ text, sessionId, workDir, changedFiles, sup
     // Skip a relative target whose basename already appears among the absolute
     // images, and also collapse duplicate relative targets by resolved src.
     const absoluteNames = new Set(absolute.map((img) => img.name))
-    const seenSrc = new Set(absolute.map((img) => img.src))
     const relative: GalleryImage[] = []
 
     for (const target of relativeTargets) {
@@ -115,8 +199,8 @@ export function InlineImageGallery({ text, sessionId, workDir, changedFiles, sup
       relative.push({ src, name })
     }
 
-    return [...absolute, ...relative]
-  }, [changedFileEvidence, imagePaths, sessionId, text, workDir])
+    return [...remote, ...absolute, ...relative]
+  }, [changedFileEvidence, imagePaths, remoteUrls, sessionId, siblingLocalPaths, text, workDir])
 
   if (images.length === 0) return null
 

@@ -1545,6 +1545,19 @@ const RESIZE_OBSERVER_JITTER_MAX_DELTA_PX = 2
 const LIVE_FOLLOW_BOTTOM_GAP_TOLERANCE_PX = 4
 const USER_SCROLL_INTENT_WINDOW_MS = 500
 /**
+ * How long after a session switch the transcript keeps re-pinning itself to the
+ * bottom as item measurements land.
+ *
+ * The switch commit writes the bottom from the scrollHeight it can see at that
+ * moment, which for a long transcript is built from *estimated* item heights.
+ * Real heights arrive over the next few frames and move the true bottom, but
+ * neither of the two re-pin paths covers an idle session: the new-content effect
+ * needs `isSessionRunning` or a message-count change, and the content-resize
+ * observer needs `shouldFollowContentResize`. Without this window, switching to
+ * a long finished session lands mid-transcript on the stale estimated bottom.
+ */
+const SWITCH_BOTTOM_PIN_SETTLE_MS = 1200
+/**
  * Backstop for the disclosure suppression window. The window normally ends at
  * the next animation frame (see `handleDisclosureToggle`); this only bounds it
  * if that frame never runs, so a dropped rAF cannot leave follow off forever.
@@ -2334,6 +2347,12 @@ export function MessageList({
   const userScrollIntentUntilRef = useRef(0)
   const disclosureLayoutUntilRef = useRef(0)
   const lastSessionIdRef = useRef<string | null | undefined>(undefined)
+  /**
+   * Deadline until which measurement-driven height changes still re-pin the
+   * transcript to the bottom after a session switch. See
+   * SWITCH_BOTTOM_PIN_SETTLE_MS.
+   */
+  const switchBottomPinUntilRef = useRef(0)
   const lastTailMessageIdBySessionRef = useRef(new Map<string, string | null>())
   const lastAutoScrollMessageCountBySessionRef = useRef(new Map<string, number>())
   // Follow-scroll coalescing must be keyed per session: a single shared record
@@ -2518,6 +2537,13 @@ export function MessageList({
 
     virtualItemHeightsRef.current.set(itemKey, measuredHeight)
     if (hasPendingPermissionCard && shouldAutoScrollRef.current) {
+      requestLiveFollow()
+    }
+    // A switch that landed at the bottom did so against estimated heights. This
+    // measurement moves the real bottom, so follow it — the running-state gates
+    // on the other two re-pin paths would otherwise leave an idle session parked
+    // on the stale estimate.
+    if (shouldAutoScrollRef.current && performance.now() < switchBottomPinUntilRef.current) {
       requestLiveFollow()
     }
 
@@ -2733,6 +2759,7 @@ export function MessageList({
 
       const container = scrollContainerRef.current
       if (container && snapshot && !snapshot.wasAtBottom) {
+        switchBottomPinUntilRef.current = 0
         ignoreProgrammaticScrollUntilRef.current = performance.now() + 250
         ignoreProgrammaticScrollTopRef.current = snapshot.scrollTop
         setScrollTopWithoutLayoutRead(container, snapshot.scrollTop)
@@ -2750,6 +2777,9 @@ export function MessageList({
         ignoreProgrammaticScrollTopRef.current = null
         lastAutoScrollAtRef.current = performance.now()
         shouldAutoScrollRef.current = true
+        // The bottom written below comes from the scrollHeight of estimated item
+        // heights; keep re-pinning while real measurements land.
+        switchBottomPinUntilRef.current = performance.now() + SWITCH_BOTTOM_PIN_SETTLE_MS
         setScrollToBottomWithoutLayoutRead(container)
         lastObservedScrollTopRef.current = container.scrollTop
         setVirtualViewport((current) => ({
@@ -2855,7 +2885,7 @@ export function MessageList({
         }
         lastContentResizeFollowHeightRef.current = nextHeight
       }
-      if (!shouldFollowContentResize) return
+      if (!shouldFollowContentResize && performance.now() >= switchBottomPinUntilRef.current) return
       if (!shouldAutoScrollRef.current) return
       // The reader just opened something: the growth is theirs, not the model's.
       if (performance.now() < disclosureLayoutUntilRef.current) return

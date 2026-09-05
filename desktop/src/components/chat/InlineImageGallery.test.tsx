@@ -172,8 +172,83 @@ describe('InlineImageGallery', () => {
     expect(imgSrcs()).toEqual(['http://127.0.0.1:4321/preview-fs/s1/outputs/a/frame.png'])
   })
 
-  it('renders both absolute and relative images together', () => {
+  it('renders a remote https image URL directly', () => {
     render(
+      <InlineImageGallery
+        text={'preview at https://cdn.example.com/img/result.png ok'}
+        allowRemoteImages
+      />,
+    )
+
+    const srcs = imgSrcs()
+    expect(srcs).toHaveLength(1)
+    expect(srcs[0]).toBe('https://cdn.example.com/img/result.png')
+  })
+
+  it('ignores remote image URLs unless allowRemoteImages is set (untrusted prose)', () => {
+    render(
+      <InlineImageGallery
+        text={'preview at https://cdn.example.com/img/result.png ok'}
+      />,
+    )
+    expect(screen.queryAllByRole('img')).toHaveLength(0)
+  })
+
+  it('renders a remote image URL that carries a query string, using a clean name', () => {
+    render(
+      <InlineImageGallery
+        text={'{"previewUrl":"https://cdn.example.com/a/b.png?token=abc&x=1"}'}
+        allowRemoteImages
+      />,
+    )
+
+    expect(imgSrcs()).toEqual(['https://cdn.example.com/a/b.png?token=abc&x=1'])
+    expect(screen.getByRole('button', { name: /b\.png/i })).toBeInTheDocument()
+  })
+
+  it('drops the local sibling of a remote previewUrl (MCP result shape)', () => {
+    // Regression: an MCP image tool returns ONE logical image as both a remote
+    // previewUrl and a local absolutePath (the on-disk copy) that usually 403s
+    // through the filesystem sandbox. Only the remote URL should render — the
+    // sibling would otherwise show as a second, broken duplicate tile.
+    render(
+      <InlineImageGallery
+        text={'{"previewUrl":"https://tap.example.com/x.png","absolutePath":"/Users/me/out/x.png"}'}
+        allowRemoteImages
+      />,
+    )
+
+    expect(imgSrcs()).toEqual(['https://tap.example.com/x.png'])
+  })
+
+  it('drops a Windows-style local sibling path of a remote previewUrl', () => {
+    render(
+      <InlineImageGallery
+        text={'{"previewUrl":"https://tap.example.com/x.png","absolutePath":"D:\\\\MarkerAnim\\\\assets\\\\image\\\\facility_library.png"}'}
+        allowRemoteImages
+      />,
+    )
+
+    expect(imgSrcs()).toEqual(['https://tap.example.com/x.png'])
+  })
+
+  it('keeps an unrelated local image alongside a remote previewUrl', () => {
+    // Only the previewUrl's own sibling (absolutePath/localPath) is dropped; an
+    // independently-mentioned local image must still render.
+    render(
+      <InlineImageGallery
+        text={'{"previewUrl":"https://tap.example.com/x.png","absolutePath":"/Users/me/out/x.png"} also /Users/me/other/y.png'}
+        allowRemoteImages
+      />,
+    )
+
+    expect(imgSrcs()).toEqual([
+      'https://tap.example.com/x.png',
+      'http://127.0.0.1:3456/api/filesystem/file?path=' + encodeURIComponent('/Users/me/other/y.png'),
+    ])
+  })
+
+  it('renders both absolute and relative images together', () => {    render(
       <InlineImageGallery
         text={'abs /Users/me/pics/photo.png and rel outputs/b/chart.png'}
         sessionId="s1"

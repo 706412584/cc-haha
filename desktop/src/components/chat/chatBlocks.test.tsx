@@ -613,6 +613,26 @@ describe('chat blocks', () => {
     expect(container.textContent).not.toContain('No output')
   })
 
+  it('renders an image-only MCP result (source-nested base64) inline with no empty text box', () => {
+    render(
+      <ToolCallBlock
+        toolName="mcp__layout-editor-mcp__layout_get_preview_image"
+        input={{ documentId: 'doc_1' }}
+        result={{
+          content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } }],
+          isError: false,
+        }}
+        defaultExpanded
+      />,
+    )
+
+    const images = screen.getAllByRole('img')
+    expect(images).toHaveLength(1)
+    expect(images[0]?.getAttribute('src')).toBe('data:image/png;base64,AAAA')
+    // Image-only result: no empty "Tool Output" text box should render.
+    expect(screen.queryByText('Tool Output')).toBeNull()
+  })
+
   it('keeps rendering the error body for a shell call whose input lacks a command', () => {
     const { container } = render(
       <ToolCallBlock

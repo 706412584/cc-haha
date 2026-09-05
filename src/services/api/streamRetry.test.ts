@@ -8,6 +8,7 @@ import {
 } from './withRetry.js'
 
 const RETRY_ENV = 'CLAUDE_STREAM_TRANSIENT_RETRY_MAX'
+const BUDGET_ENV = 'CLAUDE_STREAM_TRANSIENT_RETRY_BUDGET_MS'
 
 // getAssistantMessageFromError() (invoked when retries are exhausted) consults
 // isClaudeAISubscriber(), which throws if no auth is configured. We only assert
@@ -514,6 +515,53 @@ describe('withStreamRetry', () => {
     expect(partials.map(message => message.uuid)).toEqual(['partial-2'])
     expect(out.at(-1)?.isApiErrorMessage).toBe(true)
     delete process.env[RETRY_ENV]
+  })
+
+  test('stops retrying once the wall-clock budget is exhausted, before maxRetries', async () => {
+    // High retry count, but each attempt "hangs" ~40ms before failing and the
+    // budget is 50ms — so the loop must give up on time, not on count. This is
+    // the empty-stream-that-takes-30s scenario in miniature.
+    process.env[RETRY_ENV] = '10'
+    process.env[BUDGET_ENV] = '50'
+    let calls = 0
+    const attempt = () =>
+      // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
+      (async function* (): AsyncGenerator<any, void> {
+        calls++
+        await new Promise((resolve) => setTimeout(resolve, 40))
+        throw retriableError()
+      })()
+
+    const out = await collect(withStreamRetry(attempt, 'test-model', []))
+
+    // Would be 11 attempts on count alone; the budget cuts it far shorter.
+    expect(calls).toBeLessThan(11)
+    expect(calls).toBeGreaterThanOrEqual(1)
+    expect(out.at(-1)?.type).toBe('assistant')
+    expect(out.at(-1)?.isApiErrorMessage).toBe(true)
+    delete process.env[RETRY_ENV]
+    delete process.env[BUDGET_ENV]
+  })
+
+  test('budget=0 disables the wall-clock cap (count-only, legacy behavior)', async () => {
+    process.env[RETRY_ENV] = '2'
+    process.env[BUDGET_ENV] = '0'
+    let calls = 0
+    const attempt = () =>
+      // biome-ignore lint/suspicious/noExplicitAny: mock stream messages
+      (async function* (): AsyncGenerator<any, void> {
+        calls++
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        throw retriableError()
+      })()
+
+    const out = await collect(withStreamRetry(attempt, 'test-model', []))
+
+    // 1 initial + 2 retries: the elapsed time never terminates the loop.
+    expect(calls).toBe(3)
+    expect(out.at(-1)?.isApiErrorMessage).toBe(true)
+    delete process.env[RETRY_ENV]
+    delete process.env[BUDGET_ENV]
   })
 
   test('passes through a clean attempt without retrying', async () => {

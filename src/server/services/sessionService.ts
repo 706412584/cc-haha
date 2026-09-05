@@ -729,7 +729,6 @@ export class SessionService {
   private readonly sessionListSummaryCache = new Map<string, SessionListSummaryCacheEntry>()
   private readonly sessionListSummaryRequests = new Map<string, Promise<SessionListSummary>>()
   private activeSessionListCacheScope: string | null = null
-  private readonly readCacheMaxFileBytes = 16 * 1024 * 1024
   private readonly readCacheMaxTotalBytes = 64 * 1024 * 1024
   // Matches CLI MAX_TRANSCRIPT_READ_BYTES (50 MiB) — never whole-load multi-GB transcripts.
   private readonly maxFullJsonlReadBytes: number
@@ -1289,12 +1288,14 @@ export class SessionService {
     }
 
     const { entries, parseComplete } = this.parseJsonlContent(content)
-    const cachedAfterRead = stat.size <= this.readCacheMaxFileBytes
-    if (cachedAfterRead) {
-      this.storeReadCache(filePath, stat.mtimeMs, stat.size, entries, parseComplete)
-    } else {
-      this.invalidateReadCache(filePath)
-    }
+    // Any file that reaches here was fully read (the >maxFullJsonlReadBytes
+    // tail path returned earlier and is the only non-cacheable case), so it is
+    // always cacheable. The readCacheMaxTotalBytes budget + LRU eviction in
+    // storeReadCache bounds memory. A per-file cap here used to exclude exactly
+    // the largest, most-frequently-polled active transcripts from the cache,
+    // forcing a full re-parse on every sidebar refresh / workbench poll.
+    const cachedAfterRead = true
+    this.storeReadCache(filePath, stat.mtimeMs, stat.size, entries, parseComplete)
     this.emitJsonlParseMetric({
       cacheHit: false,
       mode: 'full',
