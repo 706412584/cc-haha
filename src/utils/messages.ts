@@ -3763,6 +3763,18 @@ Read the team config to discover your teammates' names. Check the task list peri
             createToolResultMessage(FileReadTool, fileContent),
           ])
         }
+        case 'generated_image_ref': {
+          // A generated image referenced by path (base64 intentionally omitted,
+          // see FileReadTool). Route through the mapper like the other variants
+          // so the model gets the text reference instead of an unknown-attachment
+          // error + dropped context.
+          return wrapMessagesInSystemReminder([
+            createToolUseMessage(FileReadTool.name, {
+              file_path: attachment.filename,
+            }),
+            createToolResultMessage(FileReadTool, fileContent),
+          ])
+        }
         case 'pdf': {
           // PDFs are handled via supplementalContent in the tool result
           return wrapMessagesInSystemReminder([

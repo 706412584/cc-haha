@@ -34,6 +34,7 @@ import { crc32 } from '../../utils/crc32.js'
 import { getCwd } from '../../utils/cwd.js'
 import { getClaudeConfigHomeDir, isEnvTruthy } from '../../utils/envUtils.js'
 import { getErrnoCode, isENOENT } from '../../utils/errors.js'
+import { isGeneratedImagePath } from '../../utils/generatedImages.js'
 import {
   addLineNumbers,
   FILE_NOT_FOUND_CWD_NOTE,
@@ -602,6 +603,14 @@ const outputSchema = lazySchema(() => {
       }),
     }),
     z.object({
+      type: z.literal('generated_image_ref'),
+      file: z.object({
+        filePath: z
+          .string()
+          .describe('Path to an AI-generated image, referenced without embedding its pixels'),
+      }),
+    }),
+    z.object({
       type: z.literal('pdf'),
       file: z.object({
         filePath: z.string().describe('The path to the PDF file'),
@@ -971,6 +980,15 @@ export const FileReadTool = buildTool({
       }
       case 'notebook':
         return mapNotebookCellsToToolResult(data.file.cells, toolUseID)
+      case 'generated_image_ref':
+        // Text-only reference to an AI-generated image (see the image branch in
+        // callInner). Keeps the multi-MB base64 out of the conversation so it is
+        // not re-sent every turn; the image is already shown to the user inline.
+        return {
+          tool_use_id: toolUseID,
+          type: 'tool_result',
+          content: `Generated image at ${data.file.filePath} is already displayed to the user inline. Its pixels were not re-embedded into the conversation to conserve context. Read it again only if you must inspect the raw pixels.`,
+        }
       case 'pdf':
         // Return PDF metadata only - the actual content is sent as a supplemental DocumentBlockParam
         return {
@@ -1178,6 +1196,29 @@ async function callInner(
 
   // --- Image (single read, no double-read) ---
   if (IMAGE_EXTENSIONS.has(ext)) {
+    // AI-generated images (ImageGen/ImageEdit output under generated-images/)
+    // are already displayed to the user inline via their on-disk path. Reading
+    // one back embeds a multi-MB base64 block into the tool_result that is then
+    // re-sent on every subsequent turn, which blows small-context providers
+    // (observed: 1.6M tokens > 512K limit → deterministic 400, no retry). Return
+    // a text reference instead so the pixels never enter the model context. The
+    // file and its inline display are untouched. Escape hatch:
+    // CLAUDE_READ_EMBED_GENERATED_IMAGES=1 restores the base64 read.
+    if (
+      isGeneratedImagePath(resolvedFilePath) &&
+      !isEnvTruthy(process.env.CLAUDE_READ_EMBED_GENERATED_IMAGES)
+    ) {
+      context.nestedMemoryAttachmentTriggers?.add(fullFilePath)
+      logFileOperation({
+        operation: 'read',
+        tool: 'FileReadTool',
+        filePath: fullFilePath,
+        content: `[generated image reference: ${file_path}]`,
+      })
+      return {
+        data: { type: 'generated_image_ref' as const, file: { filePath: file_path } },
+      }
+    }
     // Images have their own size limits (token budget + compression) —
     // don't apply the text maxSizeBytes cap.
     const data = await readImageWithTokenBudget(resolvedFilePath, maxTokens)

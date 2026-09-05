@@ -139,6 +139,12 @@ export function renderToolResultMessage(output: Output): React.ReactNode {
           <Text dimColor>Unchanged since last read</Text>
         </MessageResponse>;
       }
+    case 'generated_image_ref':
+      {
+        return <MessageResponse height={1}>
+          <Text dimColor>Referenced generated image (not re-embedded)</Text>
+        </MessageResponse>;
+      }
   }
 }
 export function renderToolUseErrorMessage(result: ToolResultBlockParam['content'], {
