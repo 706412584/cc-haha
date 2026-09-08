@@ -70,9 +70,18 @@ jobs:
           [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] || missing+=("APPLE_APP_SPECIFIC_PASSWORD")
           [ -n "$APPLE_TEAM_ID" ] || missing+=("APPLE_TEAM_ID")
           if [ "${#missing[@]}" -gt 0 ]; then
-            printf '::error::Missing macOS signing/notarization secrets (%s): refusing to build a macOS release whose Computer Use runtime cannot pass client attestation.\n' "${missing[*]}"
-            echo "macos_signed=false" >> "$GITHUB_OUTPUT"
-            exit 1
+            # Fork policy: manual draft releases may ship unsigned macOS
+            # artifacts (no signing secrets configured); the build matrix has
+            # an unsigned lane and the smoke step warns instead of gating.
+            # Tag pushes and non-draft releases keep the hard requirement.
+            if [ "$RELEASE_DRAFT" = "true" ]; then
+              printf '::warning::Missing macOS signing/notarization secrets (%s): building an UNSIGNED macOS draft. Computer Use client attestation will not pass; ship install-macos-unsigned.sh with the DMG.\n' "${missing[*]}"
+              echo "macos_signed=false" >> "$GITHUB_OUTPUT"
+            else
+              printf '::error::Missing macOS signing/notarization secrets (%s): refusing to build a macOS release whose Computer Use runtime cannot pass client attestation.\n' "${missing[*]}"
+              echo "macos_signed=false" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
           else
             echo "macos_signed=true" >> "$GITHUB_OUTPUT"
           fi
