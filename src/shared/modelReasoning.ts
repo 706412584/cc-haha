@@ -143,7 +143,10 @@ const MODEL_REASONING_CAPABILITY_REGISTRY: readonly ModelReasoningCapabilityEntr
     // normalizeReasoningModelId() rewrites version dots to dashes
     // (preset alias matching), so compare against the normalized ids —
     // 'glm-5.3' as written never reaches this predicate unchanged.
-    matches: modelId => modelId === 'glm-5-3' || modelId === 'glm-5-3-flash',
+    // Prefix form so gateway variants (glm-5.3-free, glm-5.3-air, …) inherit
+    // the GLM 5.3 effort contract instead of falling to the generic profile,
+    // whose full effort list includes levels the real backends reject.
+    matches: modelId => modelId === 'glm-5-3' || modelId.startsWith('glm-5-3-'),
   },
   {
     family: 'glm-5.2',
